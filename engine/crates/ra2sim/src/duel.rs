@@ -96,10 +96,10 @@ impl Duel {
         std::env::set_var("RA2_OBSTACLE", "none");
         let arena = scene::load_arena(arena_path)?;
         std::env::remove_var("RA2_OBSTACLE");
-        let prop_defs = scene::load_props(arena_path, &obstacle)?;
+        let mut prop_defs = scene::load_props(arena_path, &obstacle)?;
+        prop_defs.extend(scene::load_havok_props(arena_path)?);
 
-        let mut physics: Box<dyn PhysicsBackend> =
-            Box::new(JoltBackend::new(Vec3::new(0.0, -9.81, 0.0))?);
+        let mut physics: Box<dyn PhysicsBackend> = Box::new(JoltBackend::new(arena.gravity)?);
         let (verts, indices) = arena.triangle_soup();
         physics.create_body(
             &BodyDesc::new(
@@ -109,8 +109,8 @@ impl Duel {
                     indices,
                 },
             )
-            .with_friction(0.9)
-            .with_restitution(0.05)
+            .with_friction(arena.friction)
+            .with_restitution(arena.restitution)
             .with_user_data(USER_ARENA),
         )?;
 

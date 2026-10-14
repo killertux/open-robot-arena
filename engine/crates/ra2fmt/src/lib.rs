@@ -8,16 +8,18 @@
 //! `*_txt.gmf` (GMA ASCII) meshes.
 
 pub mod arena;
+pub mod armor;
 pub mod bot;
 pub mod cfl;
 pub mod component;
 pub mod gmi;
 
 pub use arena::ArenaScript;
-pub use bot::{Bot, BotMesh, Chassis, Component};
+pub use armor::ArmourDef;
+pub use bot::{Armour, Bot, BotMesh, Chassis, Component};
 pub use cfl::Cfl;
 pub use component::ComponentDef;
-pub use gmi::{GmiScene, Material, Mesh, RigidBody, SceneObject, Texture};
+pub use gmi::{GmiScene, Material, Mesh, RigidBody, SceneObject, SimulationObject, Texture};
 
 /// Error type shared by all format parsers.
 #[derive(Debug, Clone, PartialEq, Eq)]

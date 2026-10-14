@@ -321,6 +321,53 @@ multi-material):
   therefore uses Jolt's `WereBodiesInContact` for the contact and attributes the
   damage to the nearest destructible part.
 
+## 9d. Physics ground truth (validation pass)
+
+Two sources make the original's physics fully readable, and both are now the
+engine's reference:
+
+- **`*_txt.gmf`** — the ASCII export of every stock arena's `.gmf`, in
+  `local/game/Arenas/*/**_txt.gmf` (25 files, including `octagon_txt.gmf` and
+  `practice_arena_txt.gmf`). They list the whole Havok model in text:
+  `GMID_HAVOK_SIMOBJECT` (gravity, `WORLDSCALE`, `SIMTOLERANCE`, `RESOLVER`,
+  drag, deactivator, `SHORTFREQ`/`LONGFREQ`, `USE_FAST_SUBSPACE`,
+  `UPDATES_PER_TIMESTEP`), `GMID_HAVOK_RBCOLLECTION` → `RIGIDBODY` per body
+  (mass, elasticity, friction, optimization level, unyielding, simulation
+  geometry, geometry/display proxy, disable collisions, inactive, node TM).
+- **`Armor_Definitions.txt`** — inside `RA2.cfz`; the armour table.
+
+Recovered facts:
+
+- **Gravity lives in the arena file, per arena.** Stock is `-9.80998`; the
+  practice arena is `-12.752974` (1.3 g).
+- **`WORLDSCALE 39.37`** (inches per unit) everywhere — a Havok conditioning
+  scale, not a gameplay unit. The game unit is ~1 m.
+- **Fixed collision geometry is a mass-0 rigid body.** Triggers are marked
+  `DISABLE_COLLISIONS 1` and must be skipped. Naming is `*_collision` /
+  `h_*` (`h_box`, `h_floor`), and the exporter readme says plainly: "Most maps
+  have a `h_floor` or similar name object. This defines the actual collision
+  bounding box and without it robots will fall through a map."
+- **Arena friction/elasticity are per body** and are real values, not defaults:
+  octagon floor 0.80, hilltop 0.90, practice 0.50; elasticity 0.10–0.30.
+- **Movable arena bodies are mass>0 rigid bodies**: crates 40 kg (fric 0.50,
+  elas 0.30), octagon start blocks 200 kg, hammers/hellraisers 100 kg, box
+  spikes 40 kg, floorsaw 100 kg.
+- **`SIMULATION_GEOMETRY` / `GMID_COLLISION_*`** describe box / cylinder / mesh /
+  object / plane / sphere shapes. Values observed in stock arenas: 2, 3, 5, 6.
+- **The chassis carries its own armour**: the `.bot` armour row is
+  `<type> <weight> <unused> <hardness> <unused>`, and **chassis mass = armour
+  weight per square unit × chassis mesh surface area** ("a 3d face with an area
+  of 1 square unit using steel armouring, weighs 20 Kg").
+- **Buckling is chassis deformation**: the game subdivides the chassis faces and
+  shifts "buckle points" down/in on each hit; it is separate from parts falling
+  off.
+- **Motors are exported as Havok constraints** ("Motors should now decompile and
+  recompile properly. Was due to a small bug in Constraint Handlers
+  compilation" — GMF compiler readme), and the runtime exposes `ApplyTorque`,
+  `*ANGULAR_SPEED` and `GetMotorAngle`.
+
+Engine: **Havok Hardcore 1.7.1**, statically linked (build path `hk171`).
+
 ## 10. Open questions for Stage 1/2
 
 1. Direct3D 8 usage specifics: vertex/pixel shader model, fixed-function pipeline,
@@ -329,5 +376,7 @@ multi-material):
    API (method names, not just C++ signatures).
 3. `.bot` "Skin" and `.gib` full grammar; `.cfz` index layout (verify vs `uncfl`).
 4. Arena scripting beyond `Practice.py` (mods add more: check Total Conversions).
-5. Havok version + parameters to match simulation feel.
+5. ~~Havok version + parameters to match simulation feel.~~ **Answered** —
+   Havok Hardcore 1.7.1; every parameter is readable from the arena `.gmf` and
+   mirrored by the engine. See `docs/05-validation-report.md`.
 6. Copy protection: base 1.20 build appears unprotected (no SafeDisc/SecuROM import).

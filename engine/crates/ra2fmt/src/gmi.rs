@@ -13,6 +13,8 @@ const MAGIC: &[u8; 3] = b"GMI";
 pub struct GmiScene {
     pub materials: Vec<Material>,
     pub objects: Vec<SceneObject>,
+    /// The Havok world settings baked into the file (one per scene).
+    pub simulation: Option<SimulationObject>,
 }
 
 impl GmiScene {
@@ -26,6 +28,83 @@ impl GmiScene {
         self.objects
             .iter()
             .filter(|o| o.kind == ObjectKind::Attachment)
+    }
+
+    /// Every rigid body in every `RBCollection`, in file order (children follow
+    /// their parent, depth first).
+    pub fn rigid_bodies(&self) -> Vec<&RigidBody> {
+        fn walk<'a>(body: &'a RigidBody, out: &mut Vec<&'a RigidBody>) {
+            out.push(body);
+            for child in &body.children {
+                walk(child, out);
+            }
+        }
+        let mut out = Vec::new();
+        for o in &self.objects {
+            if o.kind != ObjectKind::RigidBodies {
+                continue;
+            }
+            for rb in &o.rigid_bodies {
+                walk(rb, &mut out);
+            }
+        }
+        out
+    }
+
+    /// A geometry object by name (case-insensitive, `(null)` is never a match).
+    pub fn find_object(&self, name: &str) -> Option<&SceneObject> {
+        let want = name.trim();
+        if want.is_empty() || want.eq_ignore_ascii_case("(null)") {
+            return None;
+        }
+        self.objects
+            .iter()
+            .find(|o| o.name.eq_ignore_ascii_case(want))
+    }
+}
+
+/// The Havok world settings (`GMID_HAVOK_SIMOBJECT`) serialised into a `.gmf`.
+///
+/// RA2 authors each arena's physics in 3ds Max; the values below are what the
+/// game hands to Havok 1.7.1 at load. `gravity` is the one the simulation must
+/// honour — 19 of the 20 shipped arenas use `-9.80998`, the practice arena uses
+/// `-12.752974` (1.3 g).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimulationObject {
+    pub name: String,
+    pub gravity: [f32; 3],
+    pub world_scale: f32,
+    pub tolerance: f32,
+    pub resolver: i32,
+    pub include_drag: bool,
+    pub linear_drag: f32,
+    pub angular_drag: f32,
+    pub include_deactivator: bool,
+    pub short_freq: f32,
+    pub long_freq: f32,
+    pub fast_subspace: bool,
+    pub updates_per_timestep: f32,
+    pub collision_pairs: i32,
+}
+
+impl Default for SimulationObject {
+    fn default() -> Self {
+        SimulationObject {
+            name: String::new(),
+            gravity: [0.0, -9.809_98, 0.0],
+            world_scale: 39.37,
+            tolerance: 0.1,
+            resolver: 3,
+            include_drag: false,
+            linear_drag: 0.0,
+            angular_drag: 0.0,
+            include_deactivator: true,
+            short_freq: 5.0,
+            long_freq: 0.1,
+            fast_subspace: true,
+            updates_per_timestep: 1.0,
+            collision_pairs: 0,
+        }
     }
 }
 
@@ -122,8 +201,56 @@ pub struct RigidBody {
     pub mass: f32,
     pub elasticity: f32,
     pub friction: f32,
+    /// Collision-quality hint (`OPTIMIZATION_LEVEL`), 0.5 stock.
+    pub optimization_level: f32,
+    /// 1 means the body never budges (static / infinite mass).
+    pub unyielding: i32,
+    /// Which geometry the simulation uses (1 convex, 2 concave, 3 proxy
+    /// concave, 4 proxy convex; 5/6 also occur in shipped data).
+    pub simulation_geometry: i32,
+    /// Optional mesh used for simulation (`GEOMETRY_PROXY_NAME`), `(null)` when
+    /// the body simulates its own geometry.
+    pub geometry_proxy: String,
+    pub use_display_proxy: bool,
+    pub disable_collisions: bool,
+    pub inactive: bool,
+    /// Object drawn in place of the collision geometry (`DISPLAY_PROXY_NAME`).
+    pub display_proxy: String,
+    /// Placement of the body (`NODE_TM`); equal to the display object's own.
+    pub transform: [[f32; 3]; 4],
     pub geo_type: i32,
     pub children: Vec<RigidBody>,
+}
+
+impl RigidBody {
+    /// The geometry object this body simulates: the proxy when set, else the
+    /// body's own name.
+    pub fn collision_object(&self) -> &str {
+        if self.geometry_proxy.trim().is_empty()
+            || self.geometry_proxy.eq_ignore_ascii_case("(null)")
+        {
+            &self.name
+        } else {
+            &self.geometry_proxy
+        }
+    }
+
+    /// The object to draw: the display proxy when requested, else the body name.
+    pub fn display_object(&self) -> &str {
+        if self.use_display_proxy
+            && !self.display_proxy.trim().is_empty()
+            && !self.display_proxy.eq_ignore_ascii_case("(null)")
+        {
+            &self.display_proxy
+        } else {
+            &self.name
+        }
+    }
+
+    /// A body with no mass (or an explicit `UNYIELDING`) never moves.
+    pub fn is_static(&self) -> bool {
+        self.unyielding != 0 || self.mass <= 0.0
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -351,7 +478,15 @@ impl<'a> Parser<'a> {
                 5 => scene.objects.push(self.read_light()?),
                 4 => scene.objects.push(self.read_camera()?),
                 31 => scene.objects.push(self.read_rigidbody_collection(flags)?),
-                30 => scene.objects.push(self.read_simulation()?),
+                30 => {
+                    let sim = self.read_simulation()?;
+                    scene.objects.push(SceneObject {
+                        kind: ObjectKind::Simulation,
+                        name: sim.name.clone(),
+                        ..Default::default()
+                    });
+                    scene.simulation = Some(sim);
+                }
                 42 => scene.objects.push(self.read_constraint_solver()?),
                 49 => scene.objects.push(self.read_angular_dashpot()?),
                 other => scene.objects.push(SceneObject {
@@ -515,25 +650,27 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn read_simulation(&mut self) -> Result<SceneObject, Error> {
+    fn read_simulation(&mut self) -> Result<SimulationObject, Error> {
         let name = self.r.string()?;
-        let _ = self.r.vec3()?; // gravity
-        self.r.f32()?; // world scale
-        self.r.f32()?; // sim tolerance
-        self.r.i32()?; // resolver
-        self.r.u8()?;
-        self.r.f32()?;
-        self.r.f32()?;
-        self.r.u8()?;
-        self.r.f32()?;
-        self.r.f32()?;
-        self.r.u8()?;
-        self.r.f32()?;
-        self.r.i32()?;
-        Ok(SceneObject {
-            kind: ObjectKind::Simulation,
+        let mut g = [0.0f32; 3];
+        for v in g.iter_mut() {
+            *v = self.r.f32()?;
+        }
+        Ok(SimulationObject {
             name,
-            ..Default::default()
+            gravity: g,
+            world_scale: self.r.f32()?,
+            tolerance: self.r.f32()?,
+            resolver: self.r.i32()?,
+            include_drag: self.r.u8()? != 0,
+            linear_drag: self.r.f32()?,
+            angular_drag: self.r.f32()?,
+            include_deactivator: self.r.u8()? != 0,
+            short_freq: self.r.f32()?,
+            long_freq: self.r.f32()?,
+            fast_subspace: self.r.u8()? != 0,
+            updates_per_timestep: self.r.f32()?,
+            collision_pairs: self.r.i32()?,
         })
     }
 
@@ -570,15 +707,15 @@ impl<'a> Parser<'a> {
         let mass = self.r.f32()?;
         let elasticity = self.r.f32()?;
         let friction = self.r.f32()?;
-        self.r.f32()?; // optimization level
-        self.r.i32()?; // unyielding
-        self.r.i32()?; // simulation geometry
-        self.r.string()?; // geometry proxy name
-        self.r.u8()?; // use display proxy
-        self.r.u8()?; // disable collisions
-        self.r.u8()?; // inactive
-        self.r.string()?; // display proxy name
-        let _tm = self.read_tm_node()?;
+        let optimization_level = self.r.f32()?;
+        let unyielding = self.r.i32()?;
+        let simulation_geometry = self.r.i32()?;
+        let geometry_proxy = self.r.string()?;
+        let use_display_proxy = self.r.u8()? != 0;
+        let disable_collisions = self.r.u8()? != 0;
+        let inactive = self.r.u8()? != 0;
+        let display_proxy = self.r.string()?;
+        let transform = self.read_tm_node()?;
         let geo_type = self.r.i32()?;
         let childcount = self.r.i32()?;
         let mut children = Vec::new();
@@ -590,6 +727,15 @@ impl<'a> Parser<'a> {
             mass,
             elasticity,
             friction,
+            optimization_level,
+            unyielding,
+            simulation_geometry,
+            geometry_proxy,
+            use_display_proxy,
+            disable_collisions,
+            inactive,
+            display_proxy,
+            transform,
             geo_type,
             children,
         })

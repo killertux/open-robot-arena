@@ -263,13 +263,14 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
         // Chassis geometry is embedded in the `.bot`; everything else comes from
         // a `.gmf`.
         let (items, hull_points, rotor_items, def, base, name, mass) = if i == 0 {
-            let points = bot
-                .components
-                .first()
-                .and_then(|c| c.chassis.as_ref())
+            let chassis = bot.components.first().and_then(|c| c.chassis.as_ref());
+            let points = chassis
                 .and_then(|ch| ch.mesh.as_ref())
                 .map(|m| m.points.iter().map(|p| Vec3::from(*p)).collect::<Vec<_>>())
                 .unwrap_or_default();
+            // The chassis is not a `.gmf`: its mass is the armour weight per
+            // square unit times the chassis mesh's surface area, exactly as the
+            // bot format defines it.
             (
                 ra2_render::chassis_items(&bot, Mat4::IDENTITY),
                 points,
@@ -277,7 +278,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 None,
                 "Chassis".to_string(),
                 "Chassis".to_string(),
-                45.0,
+                chassis.map(|ch| ch.mass()).unwrap_or(0.0).max(5.0),
             )
         } else if let Some(lc) = loaded.get(i).and_then(|l| l.as_ref()) {
             let items = ra2_render::scene_items(&lc.scene, Mat4::IDENTITY, &lc.dir, &lc.label);
@@ -334,10 +335,22 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             max = Vec3::ZERO;
         }
 
-        let hitpoints = def
-            .as_ref()
-            .and_then(|d| num(d, "hitpoints"))
-            .unwrap_or_else(|| role.default_hitpoints());
+        // Chassis hitpoints are the armour hardness the bot file records; other
+        // components only declare `hitpoints` when they differ from stock.
+        let chassis_armour = bot
+            .components
+            .first()
+            .and_then(|c| c.chassis.as_ref())
+            .and_then(|c| c.armour);
+        let hitpoints = if i == 0 {
+            chassis_armour
+                .map(|a| a.hardness)
+                .unwrap_or_else(|| role.default_hitpoints())
+        } else {
+            def.as_ref()
+                .and_then(|d| num(d, "hitpoints"))
+                .unwrap_or_else(|| role.default_hitpoints())
+        };
         let damageable = def
             .as_ref()
             .map(|d| !flag_false(d, "damageable"))

@@ -68,10 +68,11 @@ impl Robot {
         )
         .at(position)
         .with_rotation(rotation)
-        .with_friction(0.15)
-        .with_restitution(0.15)
+        // Stock RA2 component physics: friction 0.30, elasticity 0.30, and no
+        // drag at all (Havok 1.x drag is a world setting that RA2 leaves at 0).
+        .with_friction(0.30)
+        .with_restitution(0.30)
         .with_mass(mass)
-        .with_damping(0.05, 0.6)
         // Driven every step: never let the backend park it.
         .with_sleeping(false)
         .with_user_data(USER_BOT);
@@ -133,10 +134,9 @@ impl Robot {
         )
         .at(position)
         .with_rotation(rotation)
-        .with_friction(0.15)
-        .with_restitution(0.15)
+        .with_friction(0.30)
+        .with_restitution(0.30)
         .with_mass(self.remaining_mass().max(1.0))
-        .with_damping(0.05, 0.6)
         // Driven every step: never let the backend park it.
         .with_sleeping(false)
         .with_user_data(USER_BOT);

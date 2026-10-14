@@ -44,6 +44,14 @@ ra2-duel "local/game/Arenas/octagon.py" \
   Motors turn their attached subtree (spinners spin, wheels roll), weapons deal
   damage on contact, and parts whose hitpoints run out are torn off as flying
   debris — a fight between two AI-driven robots ends when a chassis is destroyed.
+- **Validated against the original** (`docs/05-validation-report.md`). The game
+  statically links **Havok Hardcore 1.7.1**, and its own data files state the
+  physics outright: each arena carries its gravity (stock `-9.81`, the practice
+  arena `1.3 g`), its fixed collision geometry as mass-0 rigid bodies (triggers
+  flagged `DISABLE_COLLISIONS`), its per-body friction/elasticity, and its
+  movable props. The engine now reads all of that instead of guessing, and the
+  chassis takes its **mass from armour weight × chassis surface area** and its
+  **hitpoints from the armour hardness** in the `.bot`.
 
 Working today:
 - `ra2fmt::gmi` — GMI `.gmf` parser (181/181 meshes), materials (incl.
@@ -69,9 +77,13 @@ Working today:
 Remaining caveats: chassis *face-group* texture decals can appear
 rotated/mirrored; exact BurstMotor rest poses are approximated; a robot's
 collider is a single convex hull rebaked when parts are lost (components are not
-yet individually jointed bodies, so buckling is "parts come off" rather than
-"mounts bend"); damage attribution picks the nearest part rather than solving
-per-part contacts; the drive controller is arcade-style rather than torque-driven.
+yet individually jointed bodies, so buckling is "parts come off" rather than the
+original's chassis deformation); damage attribution picks the nearest part rather
+than solving per-part contacts; the drive controller is arcade-style rather than
+the original's **torque-driven motors** with per-wheel traction (`contact` /
+`grip`); and Jolt combines friction as `sqrt(µ₁·µ₂)` where Havok 1.x used
+`√(µ₁²+µ₂²)`, which we cannot change through the safe binding. Each of these is
+detailed in `docs/05-validation-report.md` §4, with the fix path.
 
 Next: M4 — the script layer (reproduce the `plus`/`AI`/`Arenas` API so the stock
 AI strategies and arena scripts run). See `docs/01-project-plan.md` and

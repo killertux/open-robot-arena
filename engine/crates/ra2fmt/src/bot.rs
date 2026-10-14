@@ -41,6 +41,55 @@ pub struct Chassis {
     pub top: Vec<[i32; 2]>,
     /// Raw 256×256 uncompressed TGA bytes (chassis skin), if present.
     pub texture_tga: Option<Vec<u8>>,
+    /// Armour type/weight/hardness from the bot's armour row.
+    pub armour: Option<Armour>,
+}
+
+/// Chassis armour, exactly as the bot file records it (see
+/// `Armor_Definitions.txt`: type, weight per square unit, hardness).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Armour {
+    /// 0 plastic, 1 aluminium, 2 steel, 3 titanium.
+    pub type_id: i32,
+    /// Weight per square unit of chassis surface.
+    pub weight: f32,
+    /// Hardness — the chassis' hitpoints. Stock bots store 2× the value the
+    /// bot editor writes (e.g. steel 175 in the editor, 350 on AI bots).
+    pub hardness: f32,
+}
+
+impl Default for Armour {
+    fn default() -> Self {
+        // Plastic: the lightest stock armour.
+        Armour {
+            type_id: 0,
+            weight: 8.0,
+            hardness: 80.0,
+        }
+    }
+}
+
+impl Armour {
+    /// Stock name for this armour type.
+    pub fn name(&self) -> &'static str {
+        match self.type_id {
+            0 => "Plastic",
+            1 => "Aluminium",
+            2 => "Steel",
+            3 => "Titanium",
+            _ => "Unknown",
+        }
+    }
+}
+
+impl Chassis {
+    /// Chassis mass in kg: armour weight per square unit × chassis surface area.
+    /// (The bot format document states the rule: "a 3d face with an area of 1
+    /// square unit using steel armouring, weighs 20 Kg".)
+    pub fn mass(&self) -> f32 {
+        let area = self.mesh.as_ref().map(|m| m.surface_area()).unwrap_or(0.0);
+        area * self.armour.unwrap_or_default().weight
+    }
 }
 
 /// A mesh embedded directly in a `.bot` (chassis shape).
@@ -50,6 +99,29 @@ pub struct BotMesh {
     pub uvs: Vec<[f32; 2]>,
     /// Triangle indices.
     pub indices: Vec<u32>,
+}
+
+impl BotMesh {
+    /// Sum of the triangle areas (the unit the armour weight is quoted in).
+    pub fn surface_area(&self) -> f32 {
+        let mut area = 0.0;
+        for tri in self.indices.as_chunks::<3>().0 {
+            let (i, j, k) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            if i >= self.points.len() || j >= self.points.len() || k >= self.points.len() {
+                continue;
+            }
+            let (a, b, c) = (self.points[i], self.points[j], self.points[k]);
+            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            area += 0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        }
+        area
+    }
 }
 
 /// Parse `.bot` bytes; only the header and component list are required.
@@ -210,7 +282,18 @@ fn parse_chassis(lines: &mut Lines, ver: (i32, i32)) -> Result<Chassis, Error> {
         }
     }
     // Armour: a type row, plus an extra row when a 3D model is present.
-    lines.line(); // armour row
+    //
+    //   <type> <weight per square unit> 0 <hardness> 0
+    //
+    // The extra row is cosmetic (texture scale/shininess).
+    let armour_row = lines.floats()?;
+    if armour_row.len() >= 4 {
+        ch.armour = Some(Armour {
+            type_id: armour_row[0] as i32,
+            weight: armour_row[1],
+            hardness: armour_row[3],
+        });
+    }
     if has_model {
         lines.line(); // armour extra row
     }

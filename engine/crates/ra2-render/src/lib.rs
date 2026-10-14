@@ -599,6 +599,167 @@ pub fn scene_collision_triangles(scene: &gmi::GmiScene, world: Mat4) -> Vec<[Vec
     out
 }
 
+/// One rigid body declared by an arena's Havok data.
+#[derive(Clone)]
+pub struct HavokBody {
+    /// Rigid body name (the object the game simulates).
+    pub name: String,
+    /// kg; 0 means the body is fixed.
+    pub mass: f32,
+    pub friction: f32,
+    pub elasticity: f32,
+    pub unyielding: bool,
+    pub simulation_geometry: i32,
+    /// The body is a trigger zone: it has no collision response.
+    pub disable_collisions: bool,
+    /// Placement of the body (its `NODE_TM`).
+    pub transform: Mat4,
+    /// Collision geometry in body-local space.
+    pub points: Vec<Vec3>,
+    /// The geometry object used for simulation.
+    pub collision_object: String,
+    /// The geometry object to draw.
+    pub display_object: String,
+    /// Visual batches in body-local space.
+    pub items: Vec<DrawItem>,
+}
+
+impl HavokBody {
+    /// A body with zero mass (or `unyielding`) never moves.
+    pub fn is_static(&self) -> bool {
+        self.unyielding || self.mass <= 0.0
+    }
+
+    /// Trigger zones (`DISABLE_COLLISIONS`) must not become colliders.
+    pub fn collides(&self) -> bool {
+        !self.disable_collisions
+    }
+}
+
+/// Everything an arena's `.gmf` says about its physics.
+#[derive(Clone, Default)]
+pub struct HavokArena {
+    /// World gravity the file asks Havok for (`[0, -9.80998, 0]` stock).
+    pub gravity: Option<Vec3>,
+    /// Triangles of the fixed collision geometry, in world space.
+    pub static_triangles: Vec<[Vec3; 3]>,
+    /// Every rigid body in the file (static and movable).
+    pub bodies: Vec<HavokBody>,
+}
+
+impl HavokArena {
+    /// Fixed collision triangles belonging to a single static body.
+    pub fn static_triangles_of(&self, name: &str) -> Vec<[Vec3; 3]> {
+        let mut out = Vec::new();
+        for b in self
+            .bodies
+            .iter()
+            .filter(|b| b.is_static() && b.name == name)
+        {
+            let w = b.transform;
+            for tri in b.points.as_chunks::<3>().0 {
+                if tri.len() == 3 {
+                    out.push([
+                        w.transform_point3(tri[0]),
+                        w.transform_point3(tri[1]),
+                        w.transform_point3(tri[2]),
+                    ]);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Resolve the mesh an arena path stands for (the `.gmf` for a `.gmf`, the
+/// script's main model for a `.py`).
+pub fn arena_model_path(input: &str) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    if input.to_ascii_lowercase().ends_with(".py") {
+        let script = ra2fmt::arena::parse_path(Path::new(input))?;
+        let Some(root) = find_game_root(Path::new(input)) else {
+            return Ok(None);
+        };
+        Ok(script.model.as_deref().and_then(|m| resolve_ci(&root, m)))
+    } else {
+        Ok(Some(PathBuf::from(input)))
+    }
+}
+
+/// Read an arena's Havok simulation data: gravity, the fixed collision geometry
+/// the game actually collides against, and the movable rigid bodies it spawns.
+///
+/// Returns `None` when the file has no `RBCollection` (some arenas rely on the
+/// visible geometry instead, and the practice arena's props come from its
+/// script).
+pub fn collect_havok(input: &str) -> Result<Option<HavokArena>, Box<dyn std::error::Error>> {
+    let Some(path) = arena_model_path(input)? else {
+        return Ok(None);
+    };
+    let data = std::fs::read(&path)?;
+    let scene = gmi::parse(&data)?;
+    if scene.objects.iter().all(|o| o.rigid_bodies.is_empty()) {
+        return Ok(None);
+    }
+    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+
+    let mut arena = HavokArena {
+        gravity: scene.simulation.as_ref().map(|s| Vec3::from(s.gravity)),
+        ..Default::default()
+    };
+
+    for rb in scene.rigid_bodies() {
+        let collision = scene.find_object(rb.collision_object());
+        let display = scene.find_object(rb.display_object());
+        // Collision geometry is a triangle soup built from the mesh's faces (a
+        // mesh's vertex list is not a triangle list).
+        let mut points = Vec::new();
+        for name in rb.collision_object().split(',') {
+            let Some(obj) = scene.find_object(name) else {
+                continue;
+            };
+            let Some(mesh) = &obj.mesh else { continue };
+            for f in &mesh.faces {
+                let (a, b, c) = (f.v[0] as usize, f.v[1] as usize, f.v[2] as usize);
+                if a < mesh.points.len() && b < mesh.points.len() && c < mesh.points.len() {
+                    points.push(Vec3::from(mesh.points[a]));
+                    points.push(Vec3::from(mesh.points[b]));
+                    points.push(Vec3::from(mesh.points[c]));
+                }
+            }
+        }
+        let items = display
+            .map(|o| object_items(&scene, &o.name, &dir))
+            .unwrap_or_default();
+        let body = HavokBody {
+            name: rb.name.clone(),
+            mass: rb.mass,
+            friction: rb.friction,
+            elasticity: rb.elasticity,
+            unyielding: rb.unyielding != 0,
+            simulation_geometry: rb.simulation_geometry,
+            disable_collisions: rb.disable_collisions,
+            transform: tm_mat4(&rb.transform),
+            points,
+            collision_object: collision.map(|o| o.name.clone()).unwrap_or_default(),
+            display_object: display.map(|o| o.name.clone()).unwrap_or_default(),
+            items,
+        };
+        if body.is_static() && body.collides() {
+            for tri in body.points.as_chunks::<3>().0 {
+                if tri.len() == 3 {
+                    arena.static_triangles.push([
+                        body.transform.transform_point3(tri[0]),
+                        body.transform.transform_point3(tri[1]),
+                        body.transform.transform_point3(tri[2]),
+                    ]);
+                }
+            }
+        }
+        arena.bodies.push(body);
+    }
+    Ok(Some(arena))
+}
+
 pub fn collect_items(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>> {
     let lower = input.to_ascii_lowercase();
     if lower.ends_with(".bot") {

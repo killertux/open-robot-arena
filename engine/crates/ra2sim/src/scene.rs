@@ -18,7 +18,16 @@ pub struct ArenaScene {
     pub center: Vec3,
     pub min: Vec3,
     pub max: Vec3,
+    /// World gravity the arena's `.gmf` asks Havok for.
+    pub gravity: Vec3,
+    /// Collision friction of the arena's fixed geometry (its rigid bodies).
+    pub friction: f32,
+    /// Restitution of the arena's fixed geometry.
+    pub restitution: f32,
 }
+
+/// Gravity every shipped arena but the practice arena declares.
+pub const STOCK_GRAVITY: Vec3 = Vec3::new(0.0, -9.809_98, 0.0);
 
 impl ArenaScene {
     /// Non-indexed triangle soup for a mesh collider.
@@ -69,10 +78,12 @@ fn has_floor(triangles: &[[Vec3; 3]], x: f32, z: f32, top: f32) -> bool {
 
 /// Load an arena (`.py` script or `.gmf`) into visuals + collision triangles.
 ///
-/// Colliders come from the arena's own physics proxies when it has them (clean,
-/// no decoration), otherwise from the visible geometry. A proxy set that does
-/// not actually cover the floor is rejected. Override with
-/// `RA2_COLLISION=proxy|visible`.
+/// The collider prefers the arena's **own Havok rigid bodies** (the geometry the
+/// game actually simulates, identified by a zero mass and an enabled
+/// `DISABLE_COLLISIONS`), then the `*collision*`-named proxy meshes, then the
+/// visible geometry. A candidate set that does not cover the arena centre is
+/// rejected so robots can never drop through the world. Override with
+/// `RA2_COLLISION=rb|proxy|visible`.
 pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> {
     let items = ra2_render::collect_items(path)?;
     let (min, max) = ra2_render::bounds(&items);
@@ -92,27 +103,76 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
         t
     };
 
+    let havok = ra2_render::collect_havok(path)?;
+    let gravity = havok
+        .as_ref()
+        .and_then(|h| h.gravity)
+        .unwrap_or(STOCK_GRAVITY);
+    // The game gives each fixed body its own friction; a single merged mesh
+    // collider can only carry one, so take the strongest (the floor's).
+    let strongest = |pick: fn(&ra2_render::HavokBody) -> f32| {
+        havok
+            .as_ref()
+            .map(|h| {
+                h.bodies
+                    .iter()
+                    .filter(|b| b.is_static() && b.collides())
+                    .map(pick)
+                    .fold(0.0f32, f32::max)
+            })
+            .unwrap_or(0.0)
+    };
+    let friction = {
+        let f = strongest(|b| b.friction);
+        if f > 0.0 {
+            f
+        } else {
+            0.9
+        }
+    };
+    let restitution = {
+        let e = strongest(|b| b.elasticity);
+        if e > 0.0 {
+            e
+        } else {
+            0.05
+        }
+    };
+
     let mode = std::env::var("RA2_COLLISION").unwrap_or_else(|_| "auto".into());
+    let mode = mode.to_ascii_lowercase();
     let mut source = "visible";
     let mut raw = visible.clone();
-    if !mode.eq_ignore_ascii_case("visible") {
-        let proxy = ra2_render::collect_collision(path)?;
-        // Some arenas ship a proxy set that misses the floor entirely; if the
-        // centre has nothing under it we would drop robots through the world,
-        // so fall back rather than trust it.
-        let usable = proxy
-            .as_ref()
-            .map(|t| has_floor(t, centre.x, centre.z, min.y))
-            .unwrap_or(false);
-        match proxy {
-            Some(t) if usable => {
-                source = "proxy";
-                raw = t;
+    if mode != "visible" {
+        let mut taken = false;
+        if mode == "auto" || mode == "rb" {
+            if let Some(h) = &havok {
+                if !h.static_triangles.is_empty()
+                    && has_floor(&h.static_triangles, centre.x, centre.z, min.y)
+                {
+                    source = "rigid bodies";
+                    raw = h.static_triangles.clone();
+                    taken = true;
+                } else if !h.static_triangles.is_empty() {
+                    eprintln!("  rigid-body collider does not cover the floor");
+                }
             }
-            Some(_) => {
-                eprintln!("  proxy collider does not cover the floor; using visible geometry")
+        }
+        if !taken && mode != "rb" {
+            let proxy = ra2_render::collect_collision(path)?;
+            // Some arenas ship a proxy set that misses the floor entirely; if the
+            // centre has nothing under it we would drop robots through the world,
+            // so fall back rather than trust it.
+            match proxy {
+                Some(t) if has_floor(&t, centre.x, centre.z, min.y) => {
+                    source = "proxy";
+                    raw = t;
+                }
+                Some(_) => {
+                    eprintln!("  proxy collider does not cover the floor; using visible geometry")
+                }
+                None => {}
             }
-            None => {}
         }
     }
 
@@ -129,8 +189,12 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
     }
 
     println!(
-        "arena collider: {source} geometry, {} triangles",
-        triangles.len()
+        "arena collider: {source} geometry, {} triangles, gravity ({:.3}, {:.3}, {:.3}), friction {:.2}",
+        triangles.len(),
+        gravity.x,
+        gravity.y,
+        gravity.z,
+        friction
     );
     Ok(ArenaScene {
         items,
@@ -138,6 +202,9 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
         center: centre,
         min,
         max,
+        gravity,
+        friction,
+        restitution,
     })
 }
 
@@ -272,4 +339,31 @@ pub fn load_props(
         }
     }
     Ok(props)
+}
+
+/// Movable bodies the arena's **own `.gmf`** declares (ovals' start blocks,
+/// hammers, floor saws, crates). Trigger zones (`DISABLE_COLLISIONS`) and fixed
+/// bodies are skipped — the latter go into the static collider instead.
+pub fn load_havok_props(path: &str) -> Result<Vec<Prop>, Box<dyn std::error::Error>> {
+    let Some(havok) = ra2_render::collect_havok(path)? else {
+        return Ok(Vec::new());
+    };
+    Ok(havok
+        .bodies
+        .iter()
+        .filter(|b| !b.is_static() && b.collides() && !b.points.is_empty() && !b.items.is_empty())
+        .map(|b| {
+            let (_, rotation, position) = b.transform.to_scale_rotation_translation();
+            Prop {
+                name: b.name.clone(),
+                hull_points: b.points.clone(),
+                position,
+                rotation,
+                mass: b.mass,
+                friction: b.friction.max(0.05),
+                restitution: b.elasticity.clamp(0.0, 1.0),
+                items: b.items.clone(),
+            }
+        })
+        .collect())
 }
