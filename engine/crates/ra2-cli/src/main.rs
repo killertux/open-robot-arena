@@ -23,20 +23,59 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["cfz", file, "list"] => match cfz_list(file) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        ["cfz", file, "cat", name] => match cfz_cat(file, name) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
         _ => {
             eprintln!("usage:");
             eprintln!("  ra2 info <file.gmf> [...]");
             eprintln!("  ra2 obj  <file.gmf> <out.obj>");
+            eprintln!("  ra2 cfz  <file.cfz> list");
+            eprintln!("  ra2 cfz  <file.cfz> cat <entry>");
             ExitCode::FAILURE
         }
     }
+}
+
+fn cfz_list(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let cfl = ra2fmt::Cfl::open_path(std::path::Path::new(path))?;
+    println!("{path}: {} entries", cfl.entries().len());
+    for e in cfl.entries() {
+        println!("  {:>9}  c{:x}  {}", e.unpacked_size, e.compression, e.name);
+    }
+    Ok(())
+}
+
+fn cfz_cat(path: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let cfl = ra2fmt::Cfl::open_path(std::path::Path::new(path))?;
+    let data = cfl
+        .get(name)
+        .ok_or_else(|| format!("entry {name:?} not found"))?;
+    use std::io::Write;
+    std::io::stdout().write_all(&data)?;
+    Ok(())
 }
 
 fn info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read(path)?;
     println!("\n=== {path} ({} bytes) ===", data.len());
     let scene = gmi::parse(&data)?;
-    println!("  materials: {}  objects: {}", scene.materials.len(), scene.objects.len());
+    println!(
+        "  materials: {}  objects: {}",
+        scene.materials.len(),
+        scene.objects.len()
+    );
     for m in &scene.materials {
         let tex: Vec<&str> = m
             .textures
@@ -62,7 +101,11 @@ fn info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                         mesh.faces.len(),
                         mesh.texcoords.len(),
                         mesh.material_ref,
-                        if mesh.is_collision() { " [collision]" } else { "" }
+                        if mesh.is_collision() {
+                            " [collision]"
+                        } else {
+                            ""
+                        }
                     );
                 }
             }
@@ -71,7 +114,11 @@ fn info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 println!("    attach {:?} data={:?}", o.name, d.trim());
             }
             ObjectKind::RigidBodies => {
-                println!("    rigidbodies {:?}: {} bodies", o.name, o.rigid_bodies.len());
+                println!(
+                    "    rigidbodies {:?}: {} bodies",
+                    o.name,
+                    o.rigid_bodies.len()
+                );
                 for rb in &o.rigid_bodies {
                     println!(
                         "        rb {:?} mass={:.3} geo_type={}",
@@ -103,7 +150,11 @@ fn obj(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         n_meshes += 1;
-        let name = if o.name.is_empty() { format!("mesh{i}") } else { sanitize(&o.name) };
+        let name = if o.name.is_empty() {
+            format!("mesh{i}")
+        } else {
+            sanitize(&o.name)
+        };
         out.push_str(&format!("o {name}\n"));
         for p in &mesh.points {
             out.push_str(&format!("v {:.6} {:.6} {:.6}\n", p[0], p[1], p[2]));
@@ -118,9 +169,12 @@ fn obj(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
                 let tf = mesh.texfaces[idx];
                 out.push_str(&format!(
                     "f {}/{} {}/{} {}/{}\n",
-                    vbase + a + 1, tf[0] + 1,
-                    vbase + b + 1, tf[1] + 1,
-                    vbase + c + 1, tf[2] + 1
+                    vbase + a + 1,
+                    tf[0] + 1,
+                    vbase + b + 1,
+                    tf[1] + 1,
+                    vbase + c + 1,
+                    tf[2] + 1
                 ));
             } else {
                 out.push_str(&format!(
@@ -140,7 +194,13 @@ fn obj(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || "._-".contains(c) { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

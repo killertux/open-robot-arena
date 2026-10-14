@@ -66,7 +66,7 @@ def parse_3d_data(cur: Cur):
     return models
 
 
-def parse_chassis(cur: Cur):
+def parse_chassis(cur: Cur, version=(1, 12)):
     bpc = int(cur.line())
     bottom = [cur.ints() for _ in range(bpc)]
     tpc = int(cur.line())
@@ -81,9 +81,10 @@ def parse_chassis(cur: Cur):
         has_tex = cur.line().strip() == b"true"
         if has_tex:
             cur.skip_tga((256, 256))
-        has_unk = cur.line().strip() == b"true"
-        if has_unk:
-            raise ValueError("unknown chassis section present")
+        if version > (1, 7):
+            unknown = cur.line().strip()
+            if unknown == b"true":
+                raise ValueError("unknown chassis section present")
         # face groups
         ng = int(cur.line())
         for _ in range(ng):
@@ -99,16 +100,18 @@ def parse_chassis(cur: Cur):
         nce = int(cur.line())
         for _ in range(nce):
             cur.line()
-    # armour (always two lines: type row + constants row)
+    # armour: type row, plus an extra row when a 3D model is present
     cur.line()                     # armour row
-    cur.line()                     # armour constants row
-    # buckling points
-    bpn = int(cur.line())
-    for _ in range(bpn):
-        cur.line()                 # x y z
-        ic = int(cur.line())
-        for _ in range(ic):
-            cur.line()
+    if has_model:
+        cur.line()                 # unknown/armour row
+    # buckling points (1.11+; absent in 1.08)
+    if version > (1, 8):
+        bpn = int(cur.line())
+        for _ in range(bpn):
+            cur.line()             # x y z
+            ic = int(cur.line())
+            for _ in range(ic):
+                cur.line()
     return dict(bottom=bottom, top=top, height=height, faces=nfaces, models=models)
 
 
@@ -117,6 +120,11 @@ def parse_bot(path: str):
     ver = cur.line().decode("latin1")
     name = cur.line().decode("latin1")
     cls = cur.line().decode("latin1")
+    try:
+        major, minor = (int(x) for x in ver.split("."))
+    except ValueError:
+        major, minor = (1, 12)
+    version = (major, minor)
     # The "default texture" int line exists only in newer botfiles; older ones
     # (1.07/1.08) put the snapshot flag here directly.
     x = cur.line().strip()
@@ -140,15 +148,19 @@ def parse_bot(path: str):
         cfile = cur.line().decode("latin1")
         extra = None
         if cclass == "Chassis":
-            extra = parse_chassis(cur)
-        elif cclass in ("BurstMotor", "SmartZone"):
+            extra = parse_chassis(cur, version)
+        elif cclass == "BurstMotor":
+            extra = cur.floats()
+        elif cclass == "SmartZone":
             cur.line()
         comps.append(dict(parent=parent, mpc=mpc, mp=mp, tr=tr, rot=rot, ah=ah,
                           cls=cclass, file=cfile, extra=extra))
-    # buckle model
-    if cur.line().strip() == b"true":
-        parse_3d_data(cur)
-    heading = float(cur.line())
+    # buckle model + heading (1.11+; absent in 1.07/1.08)
+    heading = 0.0
+    if version > (1, 8):
+        if cur.line().strip() == b"true":
+            parse_3d_data(cur)
+        heading = float(cur.line())
     # controllers
     nctrl = int(cur.line())
     for _ in range(nctrl):

@@ -27,6 +27,8 @@ pub struct Component {
     pub class: String,
     pub file: String,
     pub chassis: Option<Chassis>,
+    /// `BurstMotor` start/stop axle angles (radians), when present.
+    pub burst_angles: Option<[f32; 2]>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -62,7 +64,13 @@ pub fn parse(data: &[u8]) -> Result<Bot, Error> {
         .unwrap_or("0")
         .parse::<i32>()
         .unwrap_or(0);
-    let mut bot = Bot { version, name, class, ..Default::default() };
+    let ver = parse_version(&version);
+    let mut bot = Bot {
+        version,
+        name,
+        class,
+        ..Default::default()
+    };
     // optional default-texture flag (absent in older formats)
     let x = lines.line();
     let snap = match x {
@@ -90,8 +98,15 @@ pub fn parse(data: &[u8]) -> Result<Bot, Error> {
         c.class = lines.str_line();
         c.file = lines.str_line();
         match c.class.as_str() {
-            "Chassis" => c.chassis = Some(parse_chassis(&mut lines)?),
-            "BurstMotor" | "SmartZone" => {
+            "Chassis" => c.chassis = Some(parse_chassis(&mut lines, ver)?),
+            "BurstMotor" => {
+                let a = lines.floats().unwrap_or_default();
+                c.burst_angles = Some([
+                    a.first().copied().unwrap_or(0.0),
+                    a.get(1).copied().unwrap_or(0.0),
+                ]);
+            }
+            "SmartZone" => {
                 lines.line();
             }
             _ => {}
@@ -120,7 +135,10 @@ fn parse_3d_data(lines: &mut Lines) -> Result<BotMesh, Error> {
         }
         for _ in 0..ptc {
             let uv = lines.floats()?;
-            mesh.uvs.push([uv.first().copied().unwrap_or(0.0), uv.get(1).copied().unwrap_or(0.0)]);
+            mesh.uvs.push([
+                uv.first().copied().unwrap_or(0.0),
+                uv.get(1).copied().unwrap_or(0.0),
+            ]);
         }
         for _ in 0..ptc {
             mesh.points.push(lines.vec3()?);
@@ -132,18 +150,24 @@ fn parse_3d_data(lines: &mut Lines) -> Result<BotMesh, Error> {
     Ok(mesh)
 }
 
-fn parse_chassis(lines: &mut Lines) -> Result<Chassis, Error> {
+fn parse_chassis(lines: &mut Lines, ver: (i32, i32)) -> Result<Chassis, Error> {
     let bpc = lines.i32()?;
     let mut bottom = Vec::new();
     for _ in 0..bpc {
         let v = lines.ints()?;
-        bottom.push([v.first().copied().unwrap_or(0), v.get(1).copied().unwrap_or(0)]);
+        bottom.push([
+            v.first().copied().unwrap_or(0),
+            v.get(1).copied().unwrap_or(0),
+        ]);
     }
     let tpc = lines.i32()?;
     let mut top = Vec::new();
     for _ in 0..tpc {
         let v = lines.ints()?;
-        top.push([v.first().copied().unwrap_or(0), v.get(1).copied().unwrap_or(0)]);
+        top.push([
+            v.first().copied().unwrap_or(0),
+            v.get(1).copied().unwrap_or(0),
+        ]);
     }
     let hf = lines.floats()?;
     let mut ch = Chassis {
@@ -159,8 +183,11 @@ fn parse_chassis(lines: &mut Lines) -> Result<Chassis, Error> {
         if lines.line() == b"true" {
             ch.texture_tga = Some(lines.take_tga(Some((256, 256)))?.to_vec());
         }
-        if lines.line() == b"true" {
-            return Err(Error::Structure("unknown chassis sub-section present".into()));
+        // The "unknown section" flag exists from 1.08 onward (absent in 1.07).
+        if ver > (1, 7) && lines.line() == b"true" {
+            return Err(Error::Structure(
+                "unknown chassis sub-section present".into(),
+            ));
         }
         let ng = lines.i32()?;
         for _ in 0..ng {
@@ -182,17 +209,35 @@ fn parse_chassis(lines: &mut Lines) -> Result<Chassis, Error> {
             lines.line();
         }
     }
+    // Armour: a type row, plus an extra row when a 3D model is present.
     lines.line(); // armour row
-    lines.line(); // armour constants row
-    let bpn = lines.i32()?;
-    for _ in 0..bpn {
-        lines.line();
-        let ic = lines.i32()?;
-        for _ in 0..ic {
+    if has_model {
+        lines.line(); // armour extra row
+    }
+    // Buckling points exist from 1.11 onward (absent in 1.07/1.08).
+    if ver > (1, 8) {
+        let bpn = lines.i32()?;
+        for _ in 0..bpn {
             lines.line();
+            let ic = lines.i32()?;
+            for _ in 0..ic {
+                lines.line();
+            }
         }
     }
     Ok(ch)
+}
+
+/// Parse a `major.minor` version string; defaults to 1.12 when unparseable.
+fn parse_version(s: &str) -> (i32, i32) {
+    let mut it = s.trim().split('.');
+    match (it.next(), it.next()) {
+        (Some(a), Some(b)) => (
+            a.trim().parse().unwrap_or(1),
+            b.trim().parse().unwrap_or(12),
+        ),
+        _ => (1, 12),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +268,10 @@ impl<'a> Lines<'a> {
 
     fn i32(&mut self) -> Result<i32, Error> {
         let l = self.line();
-        let tok = l.split(|b| *b == b' ').find(|s| !s.is_empty()).unwrap_or(b"0");
+        let tok = l
+            .split(|b| *b == b' ')
+            .find(|s| !s.is_empty())
+            .unwrap_or(b"0");
         let s = std::str::from_utf8(tok).map_err(|_| Error::Structure("bad int token".into()))?;
         s.parse::<f32>()
             .map(|f| f as i32)
@@ -236,7 +284,9 @@ impl<'a> Lines<'a> {
             .filter(|s| !s.is_empty())
             .map(|tok| {
                 let s = std::str::from_utf8(tok).unwrap_or("0");
-                s.parse::<f32>().map(|f| f as i32).map_err(|e| Error::Structure(format!("bad int {s:?}: {e}")))
+                s.parse::<f32>()
+                    .map(|f| f as i32)
+                    .map_err(|e| Error::Structure(format!("bad int {s:?}: {e}")))
             })
             .collect()
     }
@@ -247,14 +297,19 @@ impl<'a> Lines<'a> {
             .filter(|s| !s.is_empty())
             .map(|tok| {
                 let s = std::str::from_utf8(tok).unwrap_or("0");
-                s.parse::<f32>().map_err(|e| Error::Structure(format!("bad float {s:?}: {e}")))
+                s.parse::<f32>()
+                    .map_err(|e| Error::Structure(format!("bad float {s:?}: {e}")))
             })
             .collect()
     }
 
     fn vec3(&mut self) -> Result<[f32; 3], Error> {
         let v = self.floats()?;
-        Ok([v.first().copied().unwrap_or(0.0), v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0)])
+        Ok([
+            v.first().copied().unwrap_or(0.0),
+            v.get(1).copied().unwrap_or(0.0),
+            v.get(2).copied().unwrap_or(0.0),
+        ])
     }
 
     fn vec4(&mut self) -> Result<[f32; 4], Error> {
@@ -272,7 +327,10 @@ impl<'a> Lines<'a> {
         let h = self
             .d
             .get(self.p..self.p + 18)
-            .ok_or(Error::UnexpectedEof { at: self.p, wanted: 18 })?;
+            .ok_or(Error::UnexpectedEof {
+                at: self.p,
+                wanted: 18,
+            })?;
         let idlen = h[0] as usize;
         let itype = h[2];
         let w = u16::from_le_bytes([h[12], h[13]]);
@@ -290,7 +348,10 @@ impl<'a> Lines<'a> {
         let bytes = self
             .d
             .get(self.p..self.p + size)
-            .ok_or(Error::UnexpectedEof { at: self.p, wanted: size })?;
+            .ok_or(Error::UnexpectedEof {
+                at: self.p,
+                wanted: size,
+            })?;
         self.p += size;
         Ok(bytes)
     }

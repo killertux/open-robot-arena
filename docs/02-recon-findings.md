@@ -107,11 +107,12 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
 - Weight classes: Light <250, Medium 250–400, Heavy >400 kg.
 - 3D block: `'274' totalpoints totalindices totalfaces`; `indexcount facecount
   pointcount '0'`; `'RAW'`; normals, texcoords, points, face indices (CCW).
-  Left-handed coords: +X left, +Y away, +Z up.
+  **Model space is Y-up** (see §7); rotation quaternions are stored `(x, y, z, w)`.
 
 ### `.cfz` — **CFL3** containers (Jari Komppa "Compressed File Library 3")
-- Magic `CFL3`; header ints then zlib streams (`78 9c`). Holds component defs etc.
-- Tools: `uncfl.exe`, `makecfl.exe`; format is simple enough to parse natively.
+- Magic `CFL3`; index offset/size, then zlib streams (`78 9c`). Holds component
+  defs etc. **`ra2fmt::cfl` reads these natively** (`ra2 cfz <f> list|cat`); no
+  external `uncfl.exe` needed.
 
 ### `.gib` — GUI layout scripts
 - **Plain text** (`T 1.05`, `[Window]`, `ReportedPos …`, `Draggable`, `Align …`).
@@ -157,40 +158,68 @@ the original scripts) or provide a native reimplementation of the same API.
 
 ## 7. Robot assembly (`.bot`) — findings
 
-`.bot` files are line-based text with two embedded uncompressed TGA blobs.
-Handled by `ra2fmt::bot` (v1.09+; 1.07/1.08 differ and are TODO).
+`.bot` files are line-based text with two embedded uncompressed TGA blobs
+(a 128×128 snapshot and, for the chassis, a 256×256 skin). Handled by
+`ra2fmt::bot`; all three shipped formats (1.07, 1.08, 1.11, 1.12) now parse.
 
-- Header: version, `Name:`, `Class:`, [default-texture int — absent in 1.07/1.08],
-  snapshot flag, then a 128×128 TGA (size taken from its own header).
-- Components: `count`, then per component:
-  `parent_id`, two mount ids, translation (3f), rotation quaternion (4f),
-  angle+height (2f), class, definition path (`Components\name.txt`).
-  Classes with extra lines: `BurstMotor`, `SmartZone`. `Chassis` carries a large
-  inline block (outline geometry, a 3D model in normalized units, a 256×256 TGA
-  skin, face groups, armour, buckling points).
-- Trailing: buckle model, forward heading, controllers, controller↔component bindings.
+**Coordinate system.** RA2 *model/mesh* space is **Y-up** (not Z-up as the
+community doc claims): the chassis mesh's two plates are separated along Y
+(its Y extent equals the stored chassis height) and the component `.gmf`
+meshes agree — the mini-wheel is thin in Z (upright, axle horizontal), the
+caster and control board are thin in Y (flat). The whole renderer works in
+Y-up space.
+
+**Quaternion order.** The stored rotation quaternion is **(x, y, z, w)** — not
+`(w x y z)` as the doc says. Confirmed by PyRA2's `quatToAxisAndAngle` (which
+reads element 3 as the scalar) and by the chassis rotation `0 0 0 1`, which is
+identity only under `(x,y,z,w)`.
+
+**Component placement.** There is **no mount-point alignment**: a component's
+world transform is simply chained from its parent as
+`T(translation) · R(quaternion) · Ry(angle) · T(0, height, 0)`
+(`angle` yaws and `height` offsets along the up axis). A `BurstMotor` also
+poses its children at its start (rest) axle angle — approximated as a Z-axis
+rotation of the children.
+
+**Chassis geometry.** The chassis mesh is embedded in the bot in **normalized
+units** that are consistently ~2.2× the world units used by the component
+translations, and its footprint maps onto the outline points (`outline/1000`
+≈ world). The outline is editor metadata; the mesh needs no rescale once
+placed at the same scale as the components (components correctly end up
+*inside* the chassis and wheels stick out past its sides, matching the game's
+own snapshots). Chassis skin is Y-up like everything else.
+
+**Version table** (empirically derived from the 57 shipped bots):
+
+| Feature | 1.07 | 1.08 | 1.11 | 1.12 |
+|---|---|---|---|---|
+| Default-texture int in header | no | no | yes | yes |
+| Chassis "unknown section" flag | no | yes | yes | yes |
+| Chassis buckling points | no | no | yes | yes |
+| Buckle model + forward heading | no | no | yes | yes |
 
 **Component definitions** (`.txt`) live inside `Components.cfz` — a **CFL3**
-archive (Jari Komppa "Compressed File Library"; source: github.com/jarikomppa/cfl).
-They are `key = value`; `dir` + `model` resolve to `Components/<dir>/<model>`.
-`base` is the component class. Extracted with the bundled `uncfl.exe` (via Wine);
-a native CFL3 reader is planned.
+archive (Jari Komppa "Compressed File Library 3", zlib license). Now read
+natively by `ra2fmt::cfl` (no `uncfl.exe`/Wine needed); `ra2 cfz <f> list|cat`
+exposes it. Format: `CFL3` + index offset + index size; at the index a
+compression id + a length-prefixed resource holding the directory; then
+sequential entries (`unpacked_size`, `offset`, `compression`, `name_len`,
+`name`). Resources are zlib streams prefixed with the uncompressed size and
+(missing) trailing adler32.
 
-**Assembly model** (implemented): a component's world transform is
-`world[parent] · A_parent(mount_on_component) · inverse(A_child(mount_on_parent)) · local`,
-where `A_*` are the `.gmf` attachment-point transforms (attachment ids come from
-each point's user data, `ID = n`) and `local` = `T(translation)·R(quat)·Rz(angle)·T(0,0,height)`.
-The chassis mesh is in normalized units and is mapped onto its footprint from the
-outline points (0..1000 = 0..1 world units), bottom at Z=0.
-Known gaps: exact handedness/orientation and the embedded chassis skin TGA still
-need work; older bot formats (1.07/1.08) unsupported.
+**Still approximate / open:** the chassis *face-group* texture decals (a
+"painter" feature) can appear with rotated/mirrored orientation because the
+mesh's own UVs are used; and exact BurstMotor weapon rest poses need the full
+axle/attachment solver.
 
 ## 8. Tooling we now have (engine)
 
 - `ra2fmt::gmi` — `.gmf` meshes (181/181), materials, textures, attachments, Havok bodies.
-- `ra2fmt::bot` — `.bot` header + components + chassis mesh/outline.
+- `ra2fmt::bot` — `.bot` header + components + chassis mesh/outline (all versions).
 - `ra2fmt::component` — component `.txt` definitions.
-- `ra2-render` — headless wgpu renderer (`.gmf` or assembled `.bot` → PNG).
+- `ra2fmt::cfl` — native CFL3 (`.cfz`) archive reader.
+- `ra2-cli` — `ra2 info`, `ra2 obj`, `ra2 cfz`.
+- `ra2-render` — headless wgpu renderer (`.gmf` or assembled `.bot` → PNG); all 57 bots render with no skipped components.
 
 ## 9. Open questions for Stage 1/2
 

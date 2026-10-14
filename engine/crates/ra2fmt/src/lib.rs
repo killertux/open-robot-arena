@@ -8,10 +8,12 @@
 //! `*_txt.gmf` (GMA ASCII) meshes.
 
 pub mod bot;
+pub mod cfl;
 pub mod component;
 pub mod gmi;
 
 pub use bot::{Bot, BotMesh, Chassis, Component};
+pub use cfl::Cfl;
 pub use component::ComponentDef;
 pub use gmi::{GmiScene, Material, Mesh, RigidBody, SceneObject, Texture};
 
@@ -30,7 +32,10 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::UnexpectedEof { at, wanted } => {
-                write!(f, "unexpected end of data at offset {at} (wanted {wanted} bytes)")
+                write!(
+                    f,
+                    "unexpected end of data at offset {at} (wanted {wanted} bytes)"
+                )
             }
             Error::BadMagic(m) => write!(f, "bad magic/header: {m}"),
             Error::Structure(m) => write!(f, "structure error: {m}"),

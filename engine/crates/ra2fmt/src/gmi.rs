@@ -23,7 +23,9 @@ impl GmiScene {
 
     /// Attachment points (`Point01`, `Base_F`, ...).
     pub fn attachments(&self) -> impl Iterator<Item = &SceneObject> {
-        self.objects.iter().filter(|o| o.kind == ObjectKind::Attachment)
+        self.objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::Attachment)
     }
 }
 
@@ -113,7 +115,10 @@ pub struct SceneObject {
 
 /// Parse the bytes of a `.gmf` file.
 pub fn parse(data: &[u8]) -> Result<GmiScene, Error> {
-    Parser { r: Reader::new(data) }.parse()
+    Parser {
+        r: Reader::new(data),
+    }
+    .parse()
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +136,10 @@ impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
         let end = self.p + n;
         if end > self.d.len() {
-            return Err(Error::UnexpectedEof { at: self.p, wanted: n });
+            return Err(Error::UnexpectedEof {
+                at: self.p,
+                wanted: n,
+            });
         }
         let s = &self.d[self.p..end];
         self.p = end;
@@ -165,7 +173,11 @@ impl<'a> Reader<'a> {
 
     fn color(&mut self) -> Result<[f32; 3], Error> {
         let b = self.take(4)?;
-        Ok([b[0] as f32 / 255.0, b[1] as f32 / 255.0, b[2] as f32 / 255.0])
+        Ok([
+            b[0] as f32 / 255.0,
+            b[1] as f32 / 255.0,
+            b[2] as f32 / 255.0,
+        ])
     }
 
     fn vec3(&mut self) -> Result<[f32; 3], Error> {
@@ -330,7 +342,10 @@ impl<'a> Parser<'a> {
         if flags != 4 {
             return Err(Error::Structure(format!("geometric flags {flags}")));
         }
-        let mut o = SceneObject { kind: ObjectKind::Geometric, ..Default::default() };
+        let mut o = SceneObject {
+            kind: ObjectKind::Geometric,
+            ..Default::default()
+        };
         o.name = self.r.string()?;
         o.parent = self.r.string()?;
         let _shade_verts = self.r.u8()?;
@@ -359,7 +374,10 @@ impl<'a> Parser<'a> {
         for _ in 0..fcount {
             let (a, b, c) = self.r.triplet()?;
             let mat = self.r.i32()?;
-            m.faces.push(Face { v: [a as u32, b as u32, c as u32], material: mat });
+            m.faces.push(Face {
+                v: [a as u32, b as u32, c as u32],
+                material: mat,
+            });
         }
         for _ in 0..tcount {
             m.texcoords.push(self.r.vec3()?);
@@ -446,7 +464,12 @@ impl<'a> Parser<'a> {
         self.r.f32()?;
         self.r.u8()?;
         self.r.take(3)?;
-        Ok(SceneObject { kind: ObjectKind::Light, name, transform, ..Default::default() })
+        Ok(SceneObject {
+            kind: ObjectKind::Light,
+            name,
+            transform,
+            ..Default::default()
+        })
     }
 
     fn read_camera(&mut self) -> Result<SceneObject, Error> {
@@ -459,7 +482,12 @@ impl<'a> Parser<'a> {
         for _ in 0..6 {
             self.r.f32()?;
         }
-        Ok(SceneObject { kind: ObjectKind::Camera, name, transform, ..Default::default() })
+        Ok(SceneObject {
+            kind: ObjectKind::Camera,
+            name,
+            transform,
+            ..Default::default()
+        })
     }
 
     fn read_simulation(&mut self) -> Result<SceneObject, Error> {
@@ -477,12 +505,18 @@ impl<'a> Parser<'a> {
         self.r.u8()?;
         self.r.f32()?;
         self.r.i32()?;
-        Ok(SceneObject { kind: ObjectKind::Simulation, name, ..Default::default() })
+        Ok(SceneObject {
+            kind: ObjectKind::Simulation,
+            name,
+            ..Default::default()
+        })
     }
 
     fn read_rigidbody_collection(&mut self, flags: i32) -> Result<SceneObject, Error> {
         if flags != 4 {
-            return Err(Error::Structure(format!("rigid body collection flags {flags}")));
+            return Err(Error::Structure(format!(
+                "rigid body collection flags {flags}"
+            )));
         }
         let name = self.r.string()?;
         let paircount = self.r.i32()?;
@@ -526,7 +560,14 @@ impl<'a> Parser<'a> {
         if childcount != 0 {
             children = self.read_rigidbody_list()?;
         }
-        Ok(RigidBody { name, mass, elasticity, friction, geo_type, children })
+        Ok(RigidBody {
+            name,
+            mass,
+            elasticity,
+            friction,
+            geo_type,
+            children,
+        })
     }
 
     fn read_disabled_pairs(&mut self) -> Result<(), Error> {
@@ -548,7 +589,11 @@ impl<'a> Parser<'a> {
             // List is documented but not needed for the first milestones; skip by structure.
             self.read_constraint_list()?;
         }
-        Ok(SceneObject { kind: ObjectKind::Constraints, name, ..Default::default() })
+        Ok(SceneObject {
+            kind: ObjectKind::Constraints,
+            name,
+            ..Default::default()
+        })
     }
 
     fn read_constraint_list(&mut self) -> Result<(), Error> {
@@ -607,6 +652,10 @@ impl<'a> Parser<'a> {
         for _ in 0..4 {
             self.r.f32()?;
         }
-        Ok(SceneObject { kind: ObjectKind::Dashpot, name, ..Default::default() })
+        Ok(SceneObject {
+            kind: ObjectKind::Dashpot,
+            name,
+            ..Default::default()
+        })
     }
 }

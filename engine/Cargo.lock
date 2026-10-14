@@ -751,6 +751,9 @@ dependencies = [
 [[package]]
 name = "ra2fmt"
 version = "0.1.0"
+dependencies = [
+ "flate2",
+]
 
 [[package]]
 name = "range-alloc"

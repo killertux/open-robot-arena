@@ -9,7 +9,6 @@
 //! Env: RA2_NO_CHASSIS=1  skip the chassis mesh
 //!      RA2_DEBUG=1       print per-part bounds
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -92,7 +91,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(input: &str, output: &str, w: u32, h: u32) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+fn run(
+    input: &str,
+    output: &str,
+    w: u32,
+    h: u32,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
     let items = collect_items(input)?;
     if items.is_empty() {
         return Err("no renderable geometry found".into());
@@ -109,7 +113,16 @@ fn run(input: &str, output: &str, w: u32, h: u32) -> Result<(usize, usize), Box<
             }
             eprintln!(
                 "  part {:26} verts={:5} bbox=({:.3},{:.3},{:.3})..({:.3},{:.3},{:.3}) tex={}x{}",
-                it.label, it.vertices.len(), a.x, a.y, a.z, b.x, b.y, b.z, it.tw, it.th
+                it.label,
+                it.vertices.len(),
+                a.x,
+                a.y,
+                a.z,
+                b.x,
+                b.y,
+                b.z,
+                it.tw,
+                it.th
             );
         }
     }
@@ -260,7 +273,11 @@ fn run(input: &str, output: &str, w: u32, h: u32) -> Result<(usize, usize), Box<
             &queue,
             &wgpu::TextureDescriptor {
                 label: Some("albedo"),
-                size: wgpu::Extent3d { width: it.tw, height: it.th, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: it.tw,
+                    height: it.th,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -276,17 +293,34 @@ fn run(input: &str, output: &str, w: u32, h: u32) -> Result<(usize, usize), Box<
             label: None,
             layout: &bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ubuf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
             ],
         });
-        gpu_items.push(Gpu { vbuf, bg, count: it.vertices.len() as u32 });
+        gpu_items.push(Gpu {
+            vbuf,
+            bg,
+            count: it.vertices.len() as u32,
+        });
     }
 
     let color = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("color"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -297,7 +331,11 @@ fn run(input: &str, output: &str, w: u32, h: u32) -> Result<(usize, usize), Box<
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
     let depth = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -307,7 +345,8 @@ fn run(input: &str, output: &str, w: u32, h: u32) -> Result<(usize, usize), Box<
     });
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     {
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("main"),
@@ -316,7 +355,12 @@ fn run(input: &str, output: &str, w: u32, h: u32) -> Result<(usize, usize), Box<
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.06, g: 0.07, b: 0.09, a: 1.0 }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.06,
+                        g: 0.07,
+                        b: 0.09,
+                        a: 1.0,
+                    }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -364,7 +408,11 @@ fn run(input: &str, output: &str, w: u32, h: u32) -> Result<(usize, usize), Box<
                 rows_per_image: Some(h),
             },
         },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit(Some(encoder.finish()));
 
@@ -408,25 +456,38 @@ struct LoadedComp {
     label: String,
     scene: gmi::GmiScene,
     dir: PathBuf,
-    attachments: HashMap<i32, Mat4>,
 }
 
 fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>> {
     let data = std::fs::read(input)?;
     let bot = botfmt::parse(&data)?;
-    let root = find_game_root(Path::new(input)).ok_or("could not locate game root (Components dir)")?;
-    println!("bot {} v{}: {} components (root={})", bot.name, bot.version, bot.components.len(), root.display());
+    let root =
+        find_game_root(Path::new(input)).ok_or("could not locate game root (Components dir)")?;
+    println!(
+        "bot {} v{}: {} components (root={})",
+        bot.name,
+        bot.version,
+        bot.components.len(),
+        root.display()
+    );
 
-    // load component scenes + attachment maps
+    // Component definitions live in `Components.cfz`; prefer the archive and
+    // fall back to loose extracted `.txt` files when present.
+    let cfl = ra2fmt::Cfl::open_path(&root.join("Components.cfz")).ok();
+
+    // Load every attached component's mesh (+ its texture).
     let mut loaded: Vec<Option<LoadedComp>> = Vec::with_capacity(bot.components.len());
     for (i, c) in bot.components.iter().enumerate() {
         if i == 0 || c.class == "SmartZone" || c.file.is_empty() {
             loaded.push(None);
             continue;
         }
-        let txt = root.join(c.file.replace('\\', "/"));
-        let Ok(text) = std::fs::read_to_string(&txt) else {
-            eprintln!("  skip {:?}: no definition {}", c.class, txt.display());
+        let text = cfl
+            .as_ref()
+            .and_then(|cf| cf.get_text(&c.file))
+            .or_else(|| std::fs::read_to_string(root.join(c.file.replace('\\', "/"))).ok());
+        let Some(text) = text else {
+            eprintln!("  skip {:?}: no definition {}", c.class, c.file);
             loaded.push(None);
             continue;
         };
@@ -435,41 +496,41 @@ fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>>
         match std::fs::read(&mesh_path).ok().map(|b| gmi::parse(&b)) {
             Some(Ok(scene)) => {
                 let dir = mesh_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-                let attachments = attach_map(&scene);
                 loaded.push(Some(LoadedComp {
                     label: format!("{}({})", c.class, def.name),
                     scene,
                     dir,
-                    attachments,
                 }));
             }
             other => {
-                eprintln!("  skip {:?}: {} ({:?})", c.class, mesh_path.display(), other.map(|r| r.err()));
+                eprintln!(
+                    "  skip {:?}: {} ({:?})",
+                    c.class,
+                    mesh_path.display(),
+                    other.map(|r| r.err())
+                );
                 loaded.push(None);
             }
         }
     }
 
-    // world transform per component:
-    //   world[i] = world[parent] * A_parent(mount_on_component) * inv(A_i(mount_on_parent)) * local(i)
+    // Component world transforms, chained through parents. RA2 places a component
+    // by its stored translation + quaternion, then a mount yaw (`angle`) and a
+    // vertical offset (`height`) about/along the model up axis (Y).
     let mut world: Vec<Mat4> = vec![Mat4::IDENTITY; bot.components.len()];
     for (i, c) in bot.components.iter().enumerate() {
         let local = component_local(c);
-        let parent = c.parent.max(0) as usize;
-        let parent_mount = if i == 0 {
-            Mat4::IDENTITY
-        } else if parent == 0 {
-            Mat4::IDENTITY // chassis mounts are implicit
+        if i > 0 && c.parent >= 0 && (c.parent as usize) < i {
+            let parent = c.parent as usize;
+            // A BurstMotor poses its children at its start (rest) axle angle.
+            let rest = match bot.components[parent].burst_angles {
+                Some([start, _]) => Mat4::from_rotation_z(start),
+                None => Mat4::IDENTITY,
+            };
+            world[i] = world[parent] * rest * local;
         } else {
-            loaded.get(parent).and_then(|o| o.as_ref())
-                .map(|lc| attach_of(&lc.attachments, c.mount_on_component))
-                .unwrap_or(Mat4::IDENTITY)
-        };
-        let child_mount = loaded.get(i).and_then(|o| o.as_ref())
-            .map(|lc| attach_of(&lc.attachments, c.mount_on_parent))
-            .unwrap_or(Mat4::IDENTITY);
-        let base = if i == 0 || c.parent < 0 { Mat4::IDENTITY } else { world[parent] };
-        world[i] = base * parent_mount * child_mount.inverse() * local;
+            world[i] = local;
+        }
     }
 
     let mut items = Vec::new();
@@ -478,14 +539,30 @@ fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>>
     if std::env::var("RA2_NO_CHASSIS").is_err() {
         if let Some(ch) = bot.components.first().and_then(|c| c.chassis.as_ref()) {
             if let Some(mesh) = &ch.mesh {
-                let xform = world[0] * chassis_transform(ch, mesh);
-                let verts = bot_mesh_vertices(mesh, xform);
+                if std::env::var("RA2_DEBUG").is_ok() {
+                    let ymin = mesh.points.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+                    let ymax = mesh.points.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+                    eprintln!(
+                        "  raw chassis mesh: {} pts, y={:.3}..{:.3}",
+                        mesh.points.len(),
+                        ymin,
+                        ymax
+                    );
+                }
+                let verts = bot_mesh_vertices(mesh, world[0]);
                 let (tex, tw, th) = match &ch.texture_tga {
-                    Some(tga) => decode_image(tga).unwrap_or_else(|| (solid([120, 120, 125, 255], 4, 4), 4, 4)),
+                    Some(tga) => decode_image(tga)
+                        .unwrap_or_else(|| (solid([120, 120, 125, 255], 4, 4), 4, 4)),
                     None => (solid([120, 120, 125, 255], 4, 4), 4, 4),
                 };
                 if !verts.is_empty() {
-                    items.push(DrawItem { vertices: verts, tex, tw, th, label: "chassis".into() });
+                    items.push(DrawItem {
+                        vertices: verts,
+                        tex,
+                        tw,
+                        th,
+                        label: "chassis".into(),
+                    });
                 }
             }
         }
@@ -498,91 +575,40 @@ fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>>
             .unwrap_or_else(|| (solid([170, 170, 175, 255], 4, 4), 4, 4));
         let verts = scene_vertices(&lc.scene, world[i]);
         if !verts.is_empty() {
-            items.push(DrawItem { vertices: verts, tex, tw, th, label: lc.label.clone() });
+            items.push(DrawItem {
+                vertices: verts,
+                tex,
+                tw,
+                th,
+                label: lc.label.clone(),
+            });
         }
     }
     Ok(items)
 }
 
-fn attach_map(scene: &gmi::GmiScene) -> HashMap<i32, Mat4> {
-    let mut m = HashMap::new();
-    for o in &scene.objects {
-        if o.kind != gmi::ObjectKind::Attachment {
-            continue;
-        }
-        if let Some(id) = parse_attach_id(&o.data) {
-            m.insert(id, tm_mat4(&o.transform));
-        }
-    }
-    m
-}
-
-fn attach_of(m: &HashMap<i32, Mat4>, id: i32) -> Mat4 {
-    m.get(&id).copied().unwrap_or(Mat4::IDENTITY)
-}
-
-fn parse_attach_id(data: &str) -> Option<i32> {
-    let lower = data.to_ascii_lowercase();
-    let idx = lower.find("id")?;
-    let rest = &data[idx + 2..];
-    let eq = rest.find('=')?;
-    let num: String = rest[eq + 1..]
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '-')
-        .collect();
-    num.parse().ok()
-}
-
 fn component_local(c: &ra2fmt::bot::Component) -> Mat4 {
+    // RA2 model space is Y-up: `translation` + `rotation` place the component,
+    // then the mount `angle` yaws it about +Y and `height` offsets it along +Y.
+    // The stored quaternion is (x, y, z, w) — confirmed against PyRA2's
+    // quatToAxisAndAngle (element 3 is the scalar) and a chassis whose rotation
+    // is exactly [0, 0, 0, 1].
     let t = Vec3::from(c.translation);
-    let q = Quat::from_xyzw(c.rotation[1], c.rotation[2], c.rotation[3], c.rotation[0]).normalize();
+    let q = Quat::from_xyzw(c.rotation[0], c.rotation[1], c.rotation[2], c.rotation[3]).normalize();
     Mat4::from_translation(t)
         * Mat4::from_quat(q)
-        * Mat4::from_rotation_z(c.angle)
-        * Mat4::from_translation(Vec3::new(0.0, 0.0, c.height))
-}
-
-/// Map the chassis mesh (normalized units) onto the chassis footprint given by
-/// the outline points (0..1000 = 0..1 world units): centered in X/Y, bottom at Z=0.
-fn chassis_transform(ch: &ra2fmt::bot::Chassis, mesh: &ra2fmt::bot::BotMesh) -> Mat4 {
-    let mut omin = [f32::MAX; 2];
-    let mut omax = [f32::MIN; 2];
-    for p in ch.bottom.iter().chain(ch.top.iter()) {
-        for k in 0..2 {
-            let v = p[k] as f32 / 1000.0;
-            omin[k] = omin[k].min(v);
-            omax[k] = omax[k].max(v);
-        }
-    }
-    let osx = (omax[0] - omin[0]).max(1e-4);
-    let osy = (omax[1] - omin[1]).max(1e-4);
-
-    let mut mmin = [f32::MAX; 3];
-    let mut mmax = [f32::MIN; 3];
-    for p in &mesh.points {
-        for k in 0..3 {
-            mmin[k] = mmin[k].min(p[k]);
-            mmax[k] = mmax[k].max(p[k]);
-        }
-    }
-    let mcx = (mmin[0] + mmax[0]) * 0.5;
-    let mcy = (mmin[1] + mmax[1]) * 0.5;
-    let sx = osx / (mmax[0] - mmin[0]).max(1e-4);
-    let sy = osy / (mmax[1] - mmin[1]).max(1e-4);
-    let sz = ch.height.max(1e-4) / (mmax[2] - mmin[2]).max(1e-4);
-    Mat4::from_cols(
-        glam::Vec4::new(sx, 0.0, 0.0, 0.0),
-        glam::Vec4::new(0.0, sy, 0.0, 0.0),
-        glam::Vec4::new(0.0, 0.0, sz, 0.0),
-        glam::Vec4::new(-mcx * sx, -mcy * sy, -mmin[2] * sz, 1.0),
-    )
+        * Mat4::from_rotation_y(c.angle)
+        * Mat4::from_translation(Vec3::new(0.0, c.height, 0.0))
 }
 
 fn bot_mesh_vertices(mesh: &ra2fmt::bot::BotMesh, world: Mat4) -> Vec<Vertex> {
     let mut out = Vec::new();
-    let pts: Vec<Vec3> = mesh.points.iter().map(|p| world.transform_point3(Vec3::from(*p))).collect();
-    for tri in mesh.indices.chunks_exact(3) {
+    let pts: Vec<Vec3> = mesh
+        .points
+        .iter()
+        .map(|p| world.transform_point3(Vec3::from(*p)))
+        .collect();
+    for tri in mesh.indices.as_chunks::<3>().0 {
         let (a, b, cc) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
         if a >= pts.len() || b >= pts.len() || cc >= pts.len() {
             continue;
@@ -590,9 +616,21 @@ fn bot_mesh_vertices(mesh: &ra2fmt::bot::BotMesh, world: Mat4) -> Vec<Vertex> {
         let (pa, pb, pc) = (pts[a], pts[b], pts[cc]);
         let n = (pb - pa).cross(pc - pa).normalize_or_zero();
         let uv = |idx: usize| mesh.uvs.get(idx).copied().unwrap_or([0.0, 0.0]);
-        out.push(Vertex { pos: pa.into(), nrm: n.into(), uv: uv(a) });
-        out.push(Vertex { pos: pb.into(), nrm: n.into(), uv: uv(b) });
-        out.push(Vertex { pos: pc.into(), nrm: n.into(), uv: uv(cc) });
+        out.push(Vertex {
+            pos: pa.into(),
+            nrm: n.into(),
+            uv: uv(a),
+        });
+        out.push(Vertex {
+            pos: pb.into(),
+            nrm: n.into(),
+            uv: uv(b),
+        });
+        out.push(Vertex {
+            pos: pc.into(),
+            nrm: n.into(),
+            uv: uv(cc),
+        });
     }
     out
 }
@@ -605,7 +643,11 @@ fn scene_vertices(scene: &gmi::GmiScene, world: Mat4) -> Vec<Vertex> {
             continue;
         }
         let obj_world = world * tm_mat4(&o.transform);
-        let pts: Vec<Vec3> = mesh.points.iter().map(|p| obj_world.transform_point3(Vec3::from(*p))).collect();
+        let pts: Vec<Vec3> = mesh
+            .points
+            .iter()
+            .map(|p| obj_world.transform_point3(Vec3::from(*p)))
+            .collect();
         for (fi, f) in mesh.faces.iter().enumerate() {
             let (ia, ib, ic) = (f.v[0] as usize, f.v[1] as usize, f.v[2] as usize);
             if ia >= pts.len() || ib >= pts.len() || ic >= pts.len() {
@@ -614,7 +656,10 @@ fn scene_vertices(scene: &gmi::GmiScene, world: Mat4) -> Vec<Vertex> {
             let (pa, pb, pc) = (pts[ia], pts[ib], pts[ic]);
             let n = (pb - pa).cross(pc - pa).normalize_or_zero();
             let uv = |idx: usize| -> [f32; 2] {
-                if !mesh.texfaces.is_empty() && fi < mesh.texfaces.len() && !mesh.texcoords.is_empty() {
+                if !mesh.texfaces.is_empty()
+                    && fi < mesh.texfaces.len()
+                    && !mesh.texcoords.is_empty()
+                {
                     let ti = mesh.texfaces[fi][idx] as usize;
                     if ti < mesh.texcoords.len() {
                         return [mesh.texcoords[ti][0], mesh.texcoords[ti][1]];
@@ -622,22 +667,45 @@ fn scene_vertices(scene: &gmi::GmiScene, world: Mat4) -> Vec<Vertex> {
                 }
                 [0.0, 0.0]
             };
-            verts.push(Vertex { pos: pa.into(), nrm: n.into(), uv: uv(0) });
-            verts.push(Vertex { pos: pb.into(), nrm: n.into(), uv: uv(1) });
-            verts.push(Vertex { pos: pc.into(), nrm: n.into(), uv: uv(2) });
+            verts.push(Vertex {
+                pos: pa.into(),
+                nrm: n.into(),
+                uv: uv(0),
+            });
+            verts.push(Vertex {
+                pos: pb.into(),
+                nrm: n.into(),
+                uv: uv(1),
+            });
+            verts.push(Vertex {
+                pos: pc.into(),
+                nrm: n.into(),
+                uv: uv(2),
+            });
         }
     }
     verts
 }
 
-fn add_gmi(path: &Path, world: Mat4, items: &mut Vec<DrawItem>) -> Result<(), Box<dyn std::error::Error>> {
+fn add_gmi(
+    path: &Path,
+    world: Mat4,
+    items: &mut Vec<DrawItem>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read(path)?;
     let scene = gmi::parse(&data)?;
     let dir = path.parent().unwrap_or(Path::new("."));
-    let (tex, tw, th) = load_texture(&scene, dir).unwrap_or_else(|| (solid([180, 180, 185, 255], 4, 4), 4, 4));
+    let (tex, tw, th) =
+        load_texture(&scene, dir).unwrap_or_else(|| (solid([180, 180, 185, 255], 4, 4), 4, 4));
     let verts = scene_vertices(&scene, world);
     if !verts.is_empty() {
-        items.push(DrawItem { vertices: verts, tex, tw, th, label: path.display().to_string() });
+        items.push(DrawItem {
+            vertices: verts,
+            tex,
+            tw,
+            th,
+            label: path.display().to_string(),
+        });
     }
     Ok(())
 }
@@ -666,7 +734,12 @@ fn find_game_root(start: &Path) -> Option<PathBuf> {
 }
 
 fn decode_image(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    // TGA has no magic bytes, so the image crate cannot guess it; fall back to
+    // an explicit TGA decode (the chassis skin and many textures are TGA).
+    let img = image::load_from_memory(bytes)
+        .or_else(|_| image::load_from_memory_with_format(bytes, image::ImageFormat::Tga))
+        .ok()?
+        .to_rgba8();
     let (w, h) = (img.width(), img.height());
     Some((img.into_raw(), w, h))
 }
@@ -697,7 +770,11 @@ fn texture_path(scene: &gmi::GmiScene, dir: &Path) -> Option<PathBuf> {
 }
 
 fn solid(rgb: [u8; 4], w: u32, h: u32) -> Vec<u8> {
-    rgb.iter().cycle().take((w * h * 4) as usize).copied().collect()
+    rgb.iter()
+        .cycle()
+        .take((w * h * 4) as usize)
+        .copied()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -705,8 +782,10 @@ fn solid(rgb: [u8; 4], w: u32, h: u32) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 fn mvp_matrix(center: Vec3, radius: f32, w: u32, h: u32) -> Mat4 {
-    let eye = center + Vec3::new(0.0, -2.4, 1.6).normalize() * (radius * 3.0);
-    let view = look_at_rh(eye, center, Vec3::Z);
+    // RA2 assets are Y-up. Frame a three-quarter view from above/front/right.
+    let dir = Vec3::new(0.75, 0.95, -1.0).normalize();
+    let eye = center + dir * (radius * 3.0);
+    let view = look_at_rh(eye, center, Vec3::Y);
     let aspect = w as f32 / h as f32;
     let proj = perspective_rh(45f32.to_radians(), aspect, radius * 0.01, radius * 100.0);
     proj * view

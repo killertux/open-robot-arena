@@ -10,25 +10,37 @@ by the user.
 
 ## Status
 
-**Milestone M1 core reached: native rendering of real game assets.**
+**Milestone M1 complete: native rendering of real game assets, including fully
+assembled robots.**
 
-The engine (Rust) parses the original `.gmf` meshes and renders them with their
-textures via `wgpu` — no Windows, no Wine in the loop:
+The engine (Rust) parses the original `.gmf` meshes and `.bot` robot files and
+renders them with their textures via `wgpu` — no Windows, no Wine in the loop:
 
 ```
 ra2-render local/game/Components/mower_blade/mower_blade1.gmf out.png
 ra2-render "local/game/Arenas/practice arena/practice_arena.gmf" arena.png
+ra2-render "local/game/AI/Team0/Bot0.bot" scout.png      # assembled robot
 ```
 
-Working today:
-- `ra2fmt` — GMI `.gmf` parser (181/181 binary meshes), materials, textures,
-  attachment points, embedded Havok rigid bodies.
-- `ra2-render` — headless wgpu renderer (offscreen → PNG); loads meshes +
-  textures and renders them.
+All 57 shipped `.bot` robots (formats 1.07/1.08/1.11/1.12) render with every
+component resolved and placed.
 
-In progress / next: `.bot` robots, `.cfz` archives, arenas assembled from
-scripts, physics and gameplay. See `docs/01-project-plan.md` and
-`docs/03-engine-design.md`.
+Working today:
+- `ra2fmt::gmi` — GMI `.gmf` parser (181/181 binary meshes), materials, textures,
+  attachment points, embedded Havok rigid bodies.
+- `ra2fmt::bot` — `.bot` parser: components, mount transforms, inline chassis mesh
+  + outline + skin, all version variants.
+- `ra2fmt::component` / `ra2fmt::cfl` — component definitions and a native
+  **CFL3** (`.cfz`) archive reader (no external tools).
+- `ra2-cli` — `ra2 info`, `ra2 obj`, `ra2 cfz`.
+- `ra2-render` — headless wgpu renderer (offscreen → PNG) for `.gmf` and assembled
+  `.bot` robots.
+
+Remaining M1 caveats: chassis *face-group* texture decals can appear
+rotated/mirrored, and exact BurstMotor weapon rest poses are approximated.
+
+Next: arenas assembled from their Python scripts, then physics and gameplay.
+See `docs/01-project-plan.md` and `docs/03-engine-design.md`.
 
 ## Layout
 

@@ -41,7 +41,9 @@ pub fn parse(text: &str) -> ComponentDef {
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
             continue;
         }
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         let (k, v) = (k.trim().to_ascii_lowercase(), v.trim().to_string());
         match k.as_str() {
             "name" => d.name = v.clone(),

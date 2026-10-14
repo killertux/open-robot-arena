@@ -6,3 +6,4 @@ license.workspace = true
 description = "Parsers for Robot Arena 2 data formats (GMI/.gmf, BOT, CFL3/.cfz, GIB, GMA)."
 
 [dependencies]
+flate2 = "1"

@@ -20,3 +20,10 @@ This project builds on community reverse-engineering work. We do not claim it.
 - Dummy's GMF Compiler, Dummy's .BOTedit, Lu-Tze CFZ Compiler,
   MakeCFL/UnCFL (Jari Komppa), Component Exporter — present in `local/game/#Tools/`,
   used only as behavioural references.
+
+## CFL3 archive format (`.cfz`)
+- Author: Jari Komppa ("Compressed File Library 3").
+- Source: https://github.com/jarikomppa/cfl — License: **zlib** (permissive).
+- We do **not** bundle or link his C++ code; `engine/crates/ra2fmt/src/cfl.rs` is
+  an independent Rust reimplementation written from the documented on-disk format.
+- Acknowledgment: the `.cfz` container format and its zlib filter are his design.
