@@ -18,11 +18,9 @@ pub use backend::{
     StepInfo,
 };
 pub use combat::{CombatConfig, Impact};
-pub use duel::{BotSetup, Debris, Duel, DuelCamera, PropEntity};
+pub use duel::{BotSetup, Debris, Duel, DuelCamera};
 pub use jolt::JoltBackend;
 pub use rig::{Component, MotorStats, RobotRig, Role, WeaponStats};
 pub use robot::Robot;
-pub use scene::{load_arena, load_bot, ArenaScene, BotRig, USER_ARENA, USER_BOT};
-pub use sim::{
-    apply_drive, CameraMode, DriveInput, DriveScript, DriveTuning, Sandbox, BOT_FORWARD,
-};
+pub use scene::{load_arena, ArenaScene, USER_ARENA, USER_BOT};
+pub use sim::{CameraMode, DriveInput, DriveScript, DriveTuning, PropEntity, Sandbox, BOT_FORWARD};

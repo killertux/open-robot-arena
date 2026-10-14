@@ -14,18 +14,13 @@ use crate::backend::{
 };
 use crate::rig::{JointInfo, JointUse, RobotRig, Role};
 use crate::scene::USER_BOT;
-use crate::sim::{apply_drive, DriveInput, DriveTuning, BOT_FORWARD};
-use std::collections::HashSet;
+use crate::sim::{DriveInput, DriveTuning};
 
 /// Stock component friction/restitution (see the validation report).
 const STOCK_FRICTION: f32 = 0.30;
 const STOCK_RESTITUTION: f32 = 0.30;
 /// Friction of a wheel's declared traction surface (`contact = *_traction`).
 const TRACTION_FRICTION: f32 = 1.0;
-/// Ground friction of the single sliding hull. The arcade controller models tyre
-/// grip itself, so a grippy hull would just fight the velocity it commands (the
-/// drive force and the friction limit are the same order of magnitude).
-const ARCADE_FRICTION: f32 = 0.15;
 
 /// Live state of one assembled body.
 pub struct PartState {
@@ -52,57 +47,6 @@ pub struct Robot {
     pub destroyed: bool,
     /// Torque cap for wheel motors (N·m).
     pub wheel_torque: f32,
-    /// `true` when the robot is one rigid body driven by the arcade controller
-    /// (`RA2_ASSEMBLY=hull`, the default) rather than the jointed assembly.
-    pub arcade: bool,
-}
-
-/// Whether to build the jointed assembly (`RA2_ASSEMBLY=parts`) or the single
-/// hull with the arcade drive (the default, and the M3 behaviour).
-///
-/// The jointed path is the faithful one but needs F1 (attachment-frame
-/// alignment) before it is the default — see `docs/06-deferred-fidelity.md`.
-fn jointed_assembly() -> bool {
-    use std::sync::OnceLock;
-    static PARTS: OnceLock<bool> = OnceLock::new();
-    *PARTS.get_or_init(|| {
-        std::env::var("RA2_ASSEMBLY")
-            .map(|v| v.eq_ignore_ascii_case("parts"))
-            .unwrap_or(false)
-    })
-}
-
-/// Collapse every component into one body (the M3 collider).
-fn collapse_to_single_body(rig: &mut RobotRig) {
-    let n = rig.components.len();
-    rig.parts = vec![crate::rig::Part {
-        root: 0,
-        members: (0..n).collect(),
-        parent: None,
-        joint: None,
-    }];
-    rig.part_of = vec![0; n];
-    let root = rig.components[0].local;
-    rig.part_local = (0..n)
-        .map(|i| root.inverse() * rig.components[i].local)
-        .collect();
-}
-
-/// Collapse a point cloud onto a ~2 cm grid (keeps hull construction fast).
-fn thin(points: &[Vec3]) -> Vec<Vec3> {
-    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
-    let mut out = Vec::new();
-    for p in points {
-        let key = (
-            (p.x * 50.0).round() as i32,
-            (p.y * 50.0).round() as i32,
-            (p.z * 50.0).round() as i32,
-        );
-        if seen.insert(key) {
-            out.push(*p);
-        }
-    }
-    out
 }
 
 impl Robot {
@@ -112,16 +56,12 @@ impl Robot {
     /// bodies to exist).
     pub fn spawn(
         physics: &mut dyn PhysicsBackend,
-        mut rig: RobotRig,
+        rig: RobotRig,
         team: usize,
         position: Vec3,
         rotation: Quat,
         mass_scale: f32,
     ) -> Result<Self, BackendError> {
-        let arcade = !jointed_assembly();
-        if arcade {
-            collapse_to_single_body(&mut rig);
-        }
         let bot = Mat4::from_rotation_translation(rotation, position);
         let n = rig.components.len();
         let wheel_torque = wheel_torque_default();
@@ -130,11 +70,7 @@ impl Robot {
         for part in &rig.parts {
             let world = bot * rig.components[part.root].local;
             let (_, rot, pos) = world.to_scale_rotation_translation();
-            let shape = if arcade {
-                Self::hull_shape(&rig)
-            } else {
-                Self::part_shape(&rig, &part.members)
-            };
+            let shape = Self::part_shape(&rig, &part.members);
             let mass = (part
                 .members
                 .iter()
@@ -142,11 +78,7 @@ impl Robot {
                 .sum::<f32>()
                 * mass_scale)
                 .max(0.2);
-            let friction = if arcade {
-                ARCADE_FRICTION
-            } else {
-                Self::part_friction(&rig, part.members.iter().copied())
-            };
+            let friction = Self::part_friction(&rig, part.members.iter().copied());
             let desc = BodyDesc::new(MotionType::Dynamic, shape)
                 .at(pos)
                 .with_rotation(rot)
@@ -181,7 +113,6 @@ impl Robot {
             mass_scale,
             destroyed: false,
             wheel_torque,
-            arcade,
             team,
             rig,
         })
@@ -216,19 +147,6 @@ impl Robot {
         }
     }
 
-    /// One convex hull over every component's geometry (the M3 collider).
-    fn hull_shape(rig: &RobotRig) -> ShapeDesc {
-        let mut points = Vec::new();
-        for (i, c) in rig.components.iter().enumerate() {
-            for p in &c.hull_points {
-                points.push(rig.part_local[i].transform_point3(*p));
-            }
-        }
-        ShapeDesc::ConvexHull {
-            points: thin(&points),
-        }
-    }
-
     /// Friction of a body: a wheel gets its traction surface, everything else
     /// the stock component value.
     fn part_friction(rig: &RobotRig, members: impl Iterator<Item = usize>) -> f32 {
@@ -253,11 +171,10 @@ impl Robot {
         info: JointInfo,
         wheel_torque: f32,
     ) -> Result<JointHandle, BackendError> {
-        // The motor's rest frame fixes both the pivot and the axis; both bodies
-        // express them in their own space (they coincide in the rest pose).
-        let motor = rig.components[info.motor].local;
-        let pivot_bot = motor.transform_point3(Vec3::ZERO);
-        let axis_bot = motor.transform_vector3(Vec3::Z).normalize_or_zero();
+        // The joint's pivot and axis are the parent's mount point, in bot space;
+        // both bodies express them in their own space (they coincide in the rest
+        // pose, which is where the hinge is created).
+        let (pivot_bot, axis_bot) = (info.pivot, info.axis);
         let frame_a = rig.components[rig.parts[parent].root].local;
         let frame_b = rig.components[rig.parts[p].root].local;
 
@@ -332,18 +249,14 @@ impl Robot {
     ///
     /// `input.throttle` is a target forward speed and `input.steer` a target yaw
     /// rate; each wheel's target is its contact velocity along its own rolling
-    /// direction, so the hub torque does the pushing (no arcade velocity set).
+    /// direction, so the hub torque does the pushing — no velocity is ever set
+    /// directly.
     pub fn drive(
         &mut self,
         physics: &mut dyn PhysicsBackend,
         input: DriveInput,
         tuning: &DriveTuning,
-        dt: f32,
     ) {
-        if self.arcade {
-            apply_drive(physics, self.parts[0].body, BOT_FORWARD, input, tuning, dt);
-            return;
-        }
         let v = input.throttle.clamp(-1.0, 1.0) * tuning.max_speed;
         let yaw = -input.steer.clamp(-1.0, 1.0) * tuning.max_yaw_rate;
         let forward = Vec3::new(0.0, 0.0, -1.0);
@@ -362,12 +275,8 @@ impl Robot {
                 JointUse::Wheel => {
                     let root = self.rig.parts[p].root;
                     let c = &self.rig.components[root];
-                    // The wheel rolls perpendicular to its (motor) axle.
-                    let axle = self.rig.components[info.motor]
-                        .local
-                        .transform_vector3(Vec3::Z)
-                        .normalize_or_zero();
-                    let roll = axle.cross(Vec3::Y).normalize_or_zero();
+                    // The wheel rolls perpendicular to the joint axis.
+                    let roll = info.axis.cross(Vec3::Y).normalize_or_zero();
                     if roll == Vec3::ZERO {
                         continue;
                     }

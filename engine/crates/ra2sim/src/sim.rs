@@ -1,11 +1,22 @@
-//! The M2 physics sandbox: an arena, a robot, and an arcade drive controller.
+//! The headless robot sandbox: one jointed robot in an arena, scripted input.
+//!
+//! The robot is assembled exactly the way `ra2-duel` assembles one: `rig::load`
+//! splits the `.bot` into one rigid body per rigidly-mounted group, every motor
+//! becomes a hinge, and the wheels are driven through those hinges. There is no
+//! arcade velocity controller any more — see F2 in
+//! `docs/06-deferred-fidelity.md`.
 
 use glam::{Mat4, Quat, Vec3};
 use ra2_render::{RenderGroup, Renderer};
 
 use crate::backend::{BodyDesc, BodyHandle, MotionType, PhysicsBackend, ShapeDesc};
 use crate::jolt::JoltBackend;
-use crate::scene::{self, ArenaScene, BotRig, USER_ARENA, USER_BOT, USER_PROP};
+use crate::rig::{self, RobotRig};
+use crate::robot::Robot;
+use crate::scene::{self, ArenaScene, Prop, USER_ARENA, USER_PROP};
+
+/// Forward is -Z in RA2 model space.
+pub const BOT_FORWARD: Vec3 = Vec3::new(0.0, 0.0, -1.0);
 
 /// Driver input for one instant, each in `[-1, 1]`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -73,28 +84,19 @@ impl DriveScript {
     }
 }
 
-/// Tuning for the arcade controller.
+/// Tuning for the drive: what the wheel motors are asked to do.
 #[derive(Clone, Copy, Debug)]
 pub struct DriveTuning {
-    /// Forward acceleration at full throttle (m/s²).
-    pub accel: f32,
-    /// Speed the controller stops accelerating past (m/s).
+    /// Forward speed the wheels aim for at full throttle (m/s).
     pub max_speed: f32,
-    /// Lateral velocity cancelled per step (0..1).
-    pub grip: f32,
-    /// Yaw acceleration at full steer (rad/s²).
-    pub turn_accel: f32,
-    /// Cap on yaw rate (rad/s).
+    /// Yaw rate at full steer (rad/s).
     pub max_yaw_rate: f32,
 }
 
 impl Default for DriveTuning {
     fn default() -> Self {
         DriveTuning {
-            accel: 7.0,
             max_speed: 7.0,
-            grip: 0.35,
-            turn_accel: 9.0,
             max_yaw_rate: 2.2,
         }
     }
@@ -103,25 +105,18 @@ impl Default for DriveTuning {
 /// A movable prop (crate, barrel, ...) placed in the world.
 pub struct PropEntity {
     pub body: BodyHandle,
-    pub prop: scene::Prop,
+    pub prop: Prop,
 }
 
-/// A live sandbox: physics world, arena, robot, and controller.
+/// A live sandbox: physics world, arena, props and one jointed robot.
 pub struct Sandbox {
     pub physics: Box<dyn PhysicsBackend>,
     pub arena: ArenaScene,
-    pub bot: BotRig,
-    pub bot_body: BodyHandle,
     pub props: Vec<PropEntity>,
+    pub robot: Robot,
     pub tuning: DriveTuning,
-    pub mass: f32,
     pub time: f32,
-    /// Robot-local "forward" axis (RA2 robots face -Z).
-    pub forward: Vec3,
 }
-
-/// Forward is -Z in RA2 model space.
-pub const BOT_FORWARD: Vec3 = Vec3::new(0.0, 0.0, -1.0);
 
 impl Sandbox {
     /// Assemble the world: static arena collider, then the robot above the floor.
@@ -136,11 +131,10 @@ impl Sandbox {
         // The arena's own rigid bodies are movable props too (start blocks,
         // hammers, floor saws); they use the game's own mass/friction/elasticity.
         prop_defs.extend(scene::load_havok_props(arena_path)?);
-        let mass = std::env::var("RA2_MASS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(120.0);
-        let bot = scene::load_bot(bot_path, mass)?;
+
+        let rig = rig::load(bot_path)?;
+        let mass_scale = mass_scale(rig.mass);
+        let (components, parts) = (rig.components.len(), rig.parts.len());
 
         let mut physics: Box<dyn PhysicsBackend> = Box::new(JoltBackend::new(arena.gravity)?);
 
@@ -158,27 +152,21 @@ impl Sandbox {
         .with_user_data(USER_ARENA);
         physics.create_body(&arena_desc)?;
 
-        // Spawn the robot just above the floor under the arena centre.
-        let spawn = Self::find_spawn(&*physics, &arena, &bot);
+        // Spawn the robot with its lowest point just above the floor.
+        let spawn = Self::find_spawn(&*physics, &arena, &rig);
         // Optional spawn heading (degrees about +Y), e.g. to face a prop.
         let yaw = std::env::var("RA2_YAW")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(0.0);
-        let hull = ShapeDesc::ConvexHull {
-            points: bot.hull_points.clone(),
-        };
-        let bot_desc = BodyDesc::new(MotionType::Dynamic, hull)
-            .at(spawn)
-            .with_rotation(Quat::from_rotation_y(yaw.to_radians()))
-            // Low ground friction: the arcade controller models tyre grip
-            // explicitly (a sliding hull would otherwise be pinned by friction).
-            .with_friction(0.15)
-            .with_restitution(0.15)
-            .with_mass(mass)
-            .with_damping(0.05, 0.6)
-            .with_user_data(USER_BOT);
-        let bot_body = physics.create_body(&bot_desc)?;
+        let robot = Robot::spawn(
+            &mut *physics,
+            rig,
+            0,
+            spawn,
+            Quat::from_rotation_y(yaw.to_radians()),
+            mass_scale,
+        )?;
 
         // Movable props (arena obstacles with embedded rigid bodies).
         let mut props = Vec::new();
@@ -202,12 +190,13 @@ impl Sandbox {
         }
 
         println!(
-            "sandbox: backend={} arena_tris={} props={} bot_hull_pts={} mass={}kg spawn={:.2},{:.2},{:.2}",
+            "sandbox: backend={} arena_tris={} props={} components={} parts={} mass={:.0}kg spawn={:.2},{:.2},{:.2}",
             physics.name(),
             arena.triangles.len(),
             props.len(),
-            bot.hull_points.len(),
-            mass,
+            components,
+            parts,
+            robot.mass,
             spawn.x,
             spawn.y,
             spawn.z,
@@ -216,18 +205,15 @@ impl Sandbox {
         Ok(Sandbox {
             physics,
             arena,
-            bot,
-            bot_body,
             props,
+            robot,
             tuning: DriveTuning::default(),
-            mass,
             time: 0.0,
-            forward: BOT_FORWARD,
         })
     }
 
     /// Highest floor point under a few candidate spawn locations.
-    fn find_spawn(physics: &dyn PhysicsBackend, arena: &ArenaScene, bot: &BotRig) -> Vec3 {
+    fn find_spawn(physics: &dyn PhysicsBackend, arena: &ArenaScene, rig: &RobotRig) -> Vec3 {
         let c = arena.center;
         // Start the probe at the arena's mid-height first (rooms have a roof
         // above; an open arena has nothing up there), then try from the top.
@@ -278,13 +264,14 @@ impl Sandbox {
             }
         }
         let floor = floor.unwrap_or(arena.min.y);
-        // Place the hull bottom 5 cm above the floor.
-        Vec3::new(chosen.0, floor + 0.05 - bot.min.y, chosen.1)
+        // Place the robot's lowest point 6 cm above the floor, so it settles
+        // onto its wheels rather than starting in contact.
+        Vec3::new(chosen.0, floor + 0.06 - rig.min.y, chosen.1)
     }
 
     /// Apply one step of scripted input, then advance the world.
     pub fn step(&mut self, input: DriveInput, dt: f32) {
-        self.apply_drive(input, dt);
+        self.robot.drive(&mut *self.physics, input, &self.tuning);
         let info = self.physics.step(dt);
         if !info.complete {
             eprintln!("ra2sim: step at t={:.2}s dropped contacts", self.time);
@@ -292,40 +279,22 @@ impl Sandbox {
         self.time += dt;
     }
 
-    /// Arcade controller: drive the horizontal velocity toward the target and
-    /// set the yaw rate. Modelled as a velocity controller rather than wheel
-    /// torque, so it stays predictable while the collider is a single hull.
-    fn apply_drive(&mut self, input: DriveInput, dt: f32) {
-        apply_drive(
-            &mut *self.physics,
-            self.bot_body,
-            self.forward,
-            input,
-            &self.tuning,
-            dt,
-        );
-    }
-
     /// World-space transform of the robot.
     pub fn bot_transform(&self) -> Mat4 {
-        match self.physics.state(self.bot_body) {
-            Some(st) => Mat4::from_rotation_translation(st.rotation, st.position),
-            None => Mat4::IDENTITY,
-        }
+        self.robot.transform(&*self.physics)
     }
 
     pub fn bot_position(&self) -> Vec3 {
-        self.physics
-            .state(self.bot_body)
-            .map(|s| s.position)
-            .unwrap_or(Vec3::ZERO)
+        self.robot.position(&*self.physics)
     }
 
     pub fn bot_speed(&self) -> f32 {
-        self.physics
-            .state(self.bot_body)
-            .map(|s| s.linear_velocity.length())
-            .unwrap_or(0.0)
+        self.robot.velocity(&*self.physics).length()
+    }
+
+    /// Bounding radius of the robot in its rest pose, for framing the camera.
+    pub fn bot_size(&self) -> f32 {
+        ((self.robot.rig.max - self.robot.rig.min) * 0.5).length()
     }
 
     /// Render the current frame with the given camera.
@@ -338,10 +307,9 @@ impl Sandbox {
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let target = self.bot_position();
         let fwd = self
-            .physics
-            .state(self.bot_body)
-            .map(|s| (s.rotation * self.forward).normalize_or_zero())
-            .unwrap_or(self.forward);
+            .bot_transform()
+            .transform_vector3(BOT_FORWARD)
+            .normalize_or_zero();
 
         let (eye, aim) = match *camera {
             // Follow behind the robot's heading, so it stays in frame even when
@@ -373,55 +341,22 @@ impl Sandbox {
                 model,
             });
         }
-        groups.push(RenderGroup {
-            items: &self.bot.items,
-            model: self.bot_transform(),
-        });
+        // The robot's parts come from the same source the duel renders them
+        // from: each component's own batches at its simulated world transform.
+        if self.robot.parts[0].alive {
+            let worlds = self.robot.component_worlds(&*self.physics);
+            for (i, c) in self.robot.rig.components.iter().enumerate() {
+                if !self.robot.attached[i] || c.items.is_empty() {
+                    continue;
+                }
+                groups.push(RenderGroup {
+                    items: &c.items,
+                    model: worlds[i],
+                });
+            }
+        }
         renderer.render_groups(&groups, view_proj, w, h)
     }
-}
-
-/// Shared arcade velocity controller: drive the horizontal velocity toward the
-/// throttle target, bleed off sideways velocity, and set the yaw rate. Used by
-/// both the single-robot sandbox and the duel.
-pub fn apply_drive(
-    physics: &mut dyn PhysicsBackend,
-    body: BodyHandle,
-    forward: Vec3,
-    input: DriveInput,
-    tuning: &DriveTuning,
-    dt: f32,
-) {
-    let Some(st) = physics.state(body) else {
-        return;
-    };
-    let rot = st.rotation;
-    let fwd = (rot * forward).normalize_or_zero();
-    let right = (rot * Vec3::X).normalize_or_zero();
-    let up = (rot * Vec3::Y).normalize_or_zero();
-
-    let v = st.linear_velocity;
-    let (v_forward, v_lateral, v_vertical) = (v.dot(fwd), v.dot(right), v.dot(up));
-
-    // Forward speed moves toward the throttle target at a bounded rate.
-    let throttle = input.throttle.clamp(-1.0, 1.0);
-    let target = throttle * tuning.max_speed;
-    let step = tuning.accel * dt;
-    let new_forward = v_forward + (target - v_forward).clamp(-step, step);
-    // Grip bleeds off sideways velocity.
-    let new_lateral = v_lateral * (1.0 - tuning.grip).clamp(0.0, 1.0);
-
-    let linear = fwd * new_forward + right * new_lateral + up * v_vertical;
-
-    // Steering: replace the yaw component, keeping the rest of the spin.
-    let steer = input.steer.clamp(-1.0, 1.0);
-    let speed_ratio = (v_forward.abs() / tuning.max_speed).clamp(0.0, 1.0);
-    let authority = (0.35 + 0.65 * speed_ratio).min(1.0);
-    let yaw = -steer * tuning.max_yaw_rate * authority;
-    let spin = st.angular_velocity;
-    let angular = spin - up * spin.dot(up) + up * yaw;
-
-    physics.set_velocity(body, linear, angular);
 }
 
 /// How the sandbox frames the robot.
@@ -444,4 +379,26 @@ impl CameraMode {
             height: s * 1.9 + 0.5,
         }
     }
+}
+
+/// How far to scale the robot's natural mass.
+///
+/// `RA2_MASS_SCALE` multiplies it (the same knob `ra2-duel` uses); the older
+/// absolute `RA2_MASS=<kg>` is still honoured by turning it back into a scale.
+fn mass_scale(natural: f32) -> f32 {
+    if let Some(s) = std::env::var("RA2_MASS_SCALE")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        return s;
+    }
+    if let Some(kg) = std::env::var("RA2_MASS")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        if natural > 0.0 {
+            return kg / natural;
+        }
+    }
+    1.0
 }

@@ -8,14 +8,8 @@ use crate::combat::{self, CombatConfig};
 use crate::jolt::JoltBackend;
 use crate::rig;
 use crate::robot::Robot;
-use crate::scene::{self, ArenaScene, Prop, USER_ARENA, USER_PROP};
-use crate::sim::{DriveInput, DriveTuning, BOT_FORWARD};
-
-/// A movable arena prop (crate, barrel, ...).
-pub struct PropEntity {
-    pub body: BodyHandle,
-    pub prop: Prop,
-}
+use crate::scene::{self, ArenaScene, USER_ARENA, USER_PROP};
+use crate::sim::{DriveInput, DriveTuning, PropEntity, BOT_FORWARD};
 
 /// A part that has been knocked off a robot.
 pub struct Debris {
@@ -228,7 +222,7 @@ impl Duel {
             let input = self.ai_input(i, opponent, dt, contact);
             // Drive through the motors: the wheel hinges push the robot.
             let tuning = self.tuning;
-            self.robots[i].drive(&mut *self.physics, input, &tuning, dt);
+            self.robots[i].drive(&mut *self.physics, input, &tuning);
         }
 
         let info = self.physics.step(dt);

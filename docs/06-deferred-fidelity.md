@@ -340,7 +340,15 @@ One more trap worth remembering: **a component may legitimately share the
 chassis' origin** (a SmartZone, for instance), so "no two components sit at the
 same point" is *not* an invariant. It looked like one until a stock bot broke it.
 
-**What still keeps `RA2_ASSEMBLY=parts` opt-in** is now F2 and the rest, not F1.
+**One loose end in the burst term.** The snap test cannot see it: the rotation is
+about the mount point's Z through its own origin, so a burst child's named point
+lands on the parent's for *any* start angle — including none at all. Its only
+evidence is therefore the placement itself, and the placement's orientation is
+not settled: `AI/Team0/Bot0`'s DDT burst motor mounts a `generic_f` child point
+on `Point03` (`Generic_M`), the ordinary male-into-female pair, and the arm's
+visual mesh extends well past its collider, so an arm that looks out of place in
+a 128² preview may be a viewing artefact. Settle it from a higher-resolution
+render before trusting the start angle.
 
 **Superseded by the above**: the earlier claim in this document that "chassis
 children are reproduced from the stored transform alone … and it is why the
@@ -425,26 +433,53 @@ no attach/mount/matrix identifier at all.
 
 ---
 
-## F2 — Flip the assembled-bodies path to the default
+## F2 — The assembled-bodies path is the default — **landed**
 
 `ra2sim::rig::assemble` splits a robot into one body per rigidly-mounted group
 with a hinge per motor; `ra2sim::robot` drives the wheels through those hinges
 and reshapes a body in place (`PhysicsBackend::set_body_shape`) when a part comes
-off, instead of rebuilding the world. It works — bodies are stable, wheels turn
-at the commanded rate, damage lands and fights run to a decision.
+off, instead of rebuilding the world. **It is now the only robot path.** The
+arcade velocity controller is gone from the tree — `apply_drive`, the single-hull
+collapse (`collapse_to_single_body`, `hull_shape`, `ARCADE_FRICTION`), the
+`RA2_ASSEMBLY` switch and the hull-only loader (`scene::BotRig` / `load_bot`)
+with it — and `ra2-sim`, the M2 sandbox, was rebuilt on `Robot` so that both
+runners drive the same assembly.
 
-The reason it was off by default — F1, whose wrong mount rule could hang a rotor
-low, so a robot rested on a weapon instead of its wheels — **is gone**: the rule
-has landed and the geometry is the game's. What remains is to flip it:
+Two bugs had to be fixed for the flip to hold, both found by it:
 
-| `RA2_ASSEMBLY` | Behaviour |
-|---|---|
-| `hull` (default) | one convex-hull body, arcade velocity drive — the M3 behaviour |
-| `parts` | the jointed assembly: per-group bodies, hinge motors, torque/velocity drive |
+- **Burst-motor hinges crashed Jolt.** `rig.rs` passed the axle's absolute
+  `[start, end]` through as the hinge limits, and Jolt requires those to straddle
+  zero (`min ∈ [-π, 0]`, `max ∈ [0, π]`). The constraint is created in the rest
+  pose, which the mount rule leaves at the axle's start, so the limits are the
+  travel from there: `[(end-start).min(0), (end-start).max(0)]`, clamped to ±π.
+  `AI/Team0/Bot0`'s DDT burst motor is the case that crashed.
+- **The hinge axis and pivot were the motor's frame, not the mount point's.** F1
+  established that a mount point's Z is the axis a child turns about, and its
+  origin the pivot; the hinge still used the motor component's own origin and Z.
+  For an `axle_M` mount the two differ only by a sign, but the DDT burst motor's
+  child mounts on a `Generic_M` point whose Z is *perpendicular* to the motor's,
+  so the arm turned about the wrong axis. `JointInfo` now carries the pivot and
+  axis, and both the hinge and the wheel drive's rolling direction take them from
+  there.
 
-Making `parts` the default and deleting the arcade controller is the next step;
-the work is the F3/F4 items (torque-driven motors, the wheel's `contact`
-surface) rather than anything structural.
+**What the flip revealed, and what it hands off.** The arcade controller drove
+each robot by *setting its velocity*, which is why it could paper over geometry
+the wheels cannot use. Driving the wheels honestly is harder, and a third of the
+stock set does not manage it yet. Running every `AI/Team*` bot for 3 s at full
+throttle in the box arena: **25 of 45 travel 2 m or more, 9 creep under 2 m, and
+11 barely move at all** (`Team2/Bot1`, `Team2/Bot2`, `Team13/Bot1`, `Team8/Bot0`,
+`Team0/Bot0` and friends). Their *lowest* hull points are their wheels, so it is
+not a robot resting on its belly — it is the wheel model, the friction
+combination law and the collision shapes: F3/F4 (a hinge-velocity motor with a
+guessed torque scale, and a wheel `contact`/`grip`/`resistance` only partly
+used), F6 and F5. The arcade path used to hide all three.
+
+The duel runs end to end on the jointed assembly — the robots close, trade hits
+and take damage — but it is gentler. The same 30 s bout (`AI/Team0/Bot0` vs
+`AI/Team6/Bot2`) that knocked five parts off on the arcade path now produces
+none, because one of the two cannot drive on the jointed path at all; a bout
+between two that *can* (`AI/Team1/Bot0` vs `AI/Team6/Bot2`) closes and lands
+damage but breaks nothing off. That is the same wheel and damage-scale gap.
 
 ---
 

@@ -40,13 +40,13 @@ ra2-duel "local/game/Arenas/octagon.py" \
   collides with walls and with movable props, and the run renders to a frame
   strip. The physics engine sits behind a `PhysicsBackend` trait so it can be
   swapped.
-- **Assembly:** a robot can be built as its real **jointed bodies** — one body
-  per rigidly-mounted group, a hinge per motor, wheels driven through those
-  hinges (`RA2_ASSEMBLY=parts`). It is opt-in for now: building it exposed that
-  the original also aligns *attachment frames*, which we do not yet, so weapon
-  rotors can come out rotated 90°. See
-  `docs/06-deferred-fidelity.md` (F1) for that and the rest of the tracked
-  backlog.
+- **Assembly:** a robot is built as its real **jointed bodies** — one body per
+  rigidly-mounted group, a hinge per motor, wheels driven through those hinges.
+  `ra2-sim` and `ra2-duel` both drive it; there is no arcade velocity controller
+  left in the tree. Mount-point alignment (F1) is settled and is the default.
+  What the honest drive still cannot do — a third of the stock bots will not get
+  traction on their wheels — is tracked as F3/F4/F5 in
+  `docs/06-deferred-fidelity.md`.
 - **M3:** a robot is a *component tree* rebuildable from the game's own parts.
   Motors turn their attached subtree (spinners spin, wheels roll), weapons deal
   damage on contact, and parts whose hitpoints run out are torn off as flying
@@ -74,7 +74,7 @@ Working today:
 - `ra2sim::combat` / `ra2sim::duel` — contact-driven damage and the two-robot
   world (arena, props, debris, driving AI).
 - `ra2sim` — backend-neutral physics types + the Jolt backend, arena/robot/prop
-  scene assembly, and an arcade drive controller.
+  scene assembly, and the jointed wheel drive (a hinge per motor).
 - `ra2-cli` — `ra2 info`, `ra2 obj`, `ra2 cfz`, `ra2 arena`.
 - `ra2-render` — headless wgpu renderer (offscreen → PNG) for `.gmf`, assembled
   `.bot` robots, and arena `.py` scenes.
@@ -82,17 +82,19 @@ Working today:
 - `ra2-duel` — headless two-robot fight.
 
 Remaining caveats: chassis *face-group* texture decals can appear
-rotated/mirrored; exact BurstMotor rest poses are approximated; a robot's
-collider is a single convex hull rebaked when parts are lost (components are not
-yet individually jointed bodies, so buckling is "parts come off" rather than the
-original's chassis deformation); damage attribution picks the nearest part rather
-than solving per-part contacts; the drive controller is arcade-style rather than
-the original's **torque-driven motors** with per-wheel traction (`contact` /
-`grip`); and Jolt combines friction as `sqrt(µ₁·µ₂)` where Havok 1.x used
-`√(µ₁²+µ₂²)`, which we cannot change through the safe binding. **Attachment-frame
-alignment is not implemented**, so component orientations can be off by 90° even
-though positions and wheels are right. Each item is tracked with its evidence and
-fix path in `docs/05-validation-report.md` §4 and `docs/06-deferred-fidelity.md`.
+rotated/mirrored; exact BurstMotor rest poses are approximated; on the jointed
+assembly a third of the stock bots cannot yet get traction and simply will not
+move (so a fight between two of them produces no hits at all) and fights are
+correspondingly gentler; damage attribution picks the nearest part rather than
+solving per-part contacts, and a chassis that loses a part is *reshaped* rather
+than deforming the way the original's buckled chassis does; wheels and weapons
+are driven by a hinge-velocity
+motor with a guessed torque scale rather than the original's **torque-driven
+motors** with per-wheel traction (`contact` / `grip` / `resistance`); and Jolt
+combines friction as `sqrt(µ₁·µ₂)` where Havok 1.x used `√(µ₁²+µ₂²)`, which we
+cannot change through the safe binding. Each item is tracked with its evidence
+and fix path in `docs/05-validation-report.md` §4 and
+`docs/06-deferred-fidelity.md`.
 
 Next: M4 — the script layer (reproduce the `plus`/`AI`/`Arenas` API so the stock
 AI strategies and arena scripts run). See `docs/01-project-plan.md` and

@@ -69,6 +69,24 @@ fn main() {
         worlds.iter().all(|m| m.is_finite())
     );
 
+    // Where the robot actually touches the ground: bot-space lowest hull point
+    // per component (the chassis' visual shell versus the wheels matters).
+    let mut lowest: Vec<(f32, usize, String)> = Vec::new();
+    for c in &r.components {
+        let mut lo = f32::MAX;
+        for q in &c.hull_points {
+            lo = lo.min(c.local.transform_point3(*q).y);
+        }
+        if lo < f32::MAX {
+            lowest.push((lo, c.index, c.name.clone()));
+        }
+    }
+    lowest.sort_by(|a, b| a.0.total_cmp(&b.0));
+    println!("  lowest points (bot y):");
+    for (y, i, name) in lowest.iter().take(5) {
+        println!("    {y:7.3}  #{i:<2} {name}");
+    }
+
     // Which components are turned by a motor somewhere up the tree?
     let mut powered = 0;
     for c in &r.components {
@@ -99,8 +117,19 @@ fn main() {
             .joint
             .map(|j| {
                 format!(
-                    " <- motor #{} rate={:.0} torque={:.0} {:?} limits=({:.2},{:.2})",
-                    j.motor, j.rate, j.max_torque, j.use_kind, j.limits[0], j.limits[1]
+                    " <- motor #{} rate={:.0} torque={:.0} {:?} limits=({:.2},{:.2}) axis=({:.2},{:.2},{:.2}) pivot=({:.2},{:.2},{:.2})",
+                    j.motor,
+                    j.rate,
+                    j.max_torque,
+                    j.use_kind,
+                    j.limits[0],
+                    j.limits[1],
+                    j.axis.x,
+                    j.axis.y,
+                    j.axis.z,
+                    j.pivot.x,
+                    j.pivot.y,
+                    j.pivot.z,
                 )
             })
             .unwrap_or_default();
@@ -111,5 +140,20 @@ fn main() {
             part.members.len(),
             names.join(", ")
         );
+        if let Some(j) = part.joint {
+            let child = &r.components[part.root];
+            let motor = &r.components[j.motor];
+            let att = motor.attachments.get(&child.parent_mount);
+            println!(
+                "       mount on #{:<2} id={:<2} ({} points on the motor) -> {:?}",
+                j.motor,
+                child.parent_mount,
+                motor.attachments.len(),
+                att.map(|a| format!(
+                    "{} z=({:.2},{:.2},{:.2})",
+                    a.name, a.transform[2][0], a.transform[2][1], a.transform[2][2]
+                )),
+            );
+        }
     }
 }

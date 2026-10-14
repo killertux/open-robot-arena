@@ -1,6 +1,5 @@
 //! Scene assembly: turn RA2 assets into physics shapes + visual geometry.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use glam::{Quat, Vec3};
@@ -205,57 +204,6 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
         gravity,
         friction,
         restitution,
-    })
-}
-
-/// A loaded robot: visual batches (bot-local) plus a hull of its geometry.
-pub struct BotRig {
-    pub items: Vec<DrawItem>,
-    /// Bot-local points fed to the convex-hull collider.
-    pub hull_points: Vec<Vec3>,
-    pub min: Vec3,
-    pub max: Vec3,
-    pub mass: f32,
-}
-
-impl BotRig {
-    /// Half-extents of the robot's bounding box.
-    pub fn half_extent(&self) -> Vec3 {
-        (self.max - self.min) * 0.5
-    }
-}
-
-/// Load a `.bot` into visuals + a collider hull. `mass` is in kg.
-pub fn load_bot(path: &str, mass: f32) -> Result<BotRig, Box<dyn std::error::Error>> {
-    let items = ra2_render::collect_items(path)?;
-    if items.is_empty() {
-        return Err("robot has no renderable geometry".into());
-    }
-
-    // Convex-hull input: every vertex, thinned on a ~1 cm grid.
-    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
-    let mut hull_points = Vec::new();
-    for it in &items {
-        for v in &it.vertices {
-            let p = Vec3::from(v.pos);
-            let key = (
-                (p.x * 100.0).round() as i32,
-                (p.y * 100.0).round() as i32,
-                (p.z * 100.0).round() as i32,
-            );
-            if seen.insert(key) {
-                hull_points.push(p);
-            }
-        }
-    }
-
-    let (min, max) = ra2_render::bounds(&items);
-    Ok(BotRig {
-        items,
-        hull_points,
-        min,
-        max,
-        mass,
     })
 }
 

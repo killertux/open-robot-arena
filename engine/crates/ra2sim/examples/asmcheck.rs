@@ -77,7 +77,7 @@ fn main() {
             "    childZ=({:5.2},{:5.2},{:5.2}) childO=({:5.2},{:5.2},{:5.2}) motorO=({:5.2},{:5.2},{:5.2})",
             child_z.x, child_z.y, child_z.z, child_o.x, child_o.y, child_o.z, motor_o.x, motor_o.y, motor_o.z
         );
-        let axle = motor.local.transform_vector3(Vec3::Z).normalize_or_zero();
+        let axle = info.axis;
         let roll = axle.cross(Vec3::Y).normalize_or_zero();
         let hub = c.local.transform_point3(Vec3::ZERO);
         let v_hub = forward * v;
@@ -120,7 +120,6 @@ fn main() {
                     steer: 0.0,
                 },
                 &tuning,
-                dt,
             );
             physics.step(dt);
         }

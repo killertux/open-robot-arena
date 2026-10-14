@@ -182,8 +182,14 @@ pub struct JointInfo {
     pub rate: f32,
     /// Peak motor torque (N·m).
     pub max_torque: f32,
-    /// Angle limits in radians (`[-PI, PI]` = free).
+    /// Angle limits in radians, measured from the rest pose (`[-PI, PI]` =
+    /// free).
     pub limits: [f32; 2],
+    /// The joint's pivot in bot space: the parent's mount point.
+    pub pivot: Vec3,
+    /// The joint's rotation axis in bot space: the mount point's Z — the same
+    /// axis the placement rule turns a child about (F1).
+    pub axis: Vec3,
     pub use_kind: JointUse,
 }
 
@@ -366,16 +372,45 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             continue;
         };
         let is_wheel = part.members.iter().any(|&i| comps[i].role == Role::Wheel);
-        // A burst motor is a limited hinge; everything else swings freely.
-        let limits = m
-            .burst
-            .map(|b| [b[0].min(b[1]), b[0].max(b[1])])
-            .unwrap_or([-std::f32::consts::PI, std::f32::consts::PI]);
+        // The joint turns about the parent's mount point — the same frame the
+        // placement rule turns a child about (F1): its Z is the axis and its
+        // origin the pivot. The motor's own frame is the fallback, for a point
+        // no mesh carries.
+        let parent_local = comps[parent].local;
+        let mount = comps[parent]
+            .attachments
+            .get(&comps[root].parent_mount)
+            .filter(|a| a.transform[2] != [0.0; 3]);
+        let pivot = match mount {
+            Some(a) => parent_local.transform_point3(Vec3::from(a.transform[3])),
+            None => parent_local.transform_point3(Vec3::ZERO),
+        };
+        let axis = match mount {
+            Some(a) => parent_local.transform_vector3(Vec3::from(a.transform[2])),
+            None => parent_local.transform_vector3(Vec3::Z),
+        }
+        .normalize_or_zero();
+        let axis = if axis == Vec3::ZERO { Vec3::Z } else { axis };
+        // A burst motor is a limited hinge; everything else swings freely. Its
+        // `[start, end]` are the axle's absolute angles, and the rest pose
+        // leaves the axle at `start`, so the constraint has to allow the travel
+        // from there to `end`. Jolt measures the hinge angle from the pose the
+        // constraint is created in and requires the range to straddle zero, so
+        // the limits are that travel, split about zero.
+        let limits = match m.burst {
+            Some([start, end]) => {
+                let d = (end - start).clamp(-std::f32::consts::PI, std::f32::consts::PI);
+                [d.min(0.0), d.max(0.0)]
+            }
+            None => [-std::f32::consts::PI, std::f32::consts::PI],
+        };
         part.joint = Some(JointInfo {
             motor: parent,
             rate: m.rate,
             max_torque: m.torque,
             limits,
+            pivot,
+            axis,
             use_kind: if is_wheel {
                 JointUse::Wheel
             } else {

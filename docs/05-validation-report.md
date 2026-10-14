@@ -196,14 +196,15 @@ Known, documented, not yet fixed:
 8. **Friction combination law** (§3) — differs; Jolt exposes no hook.
 9. **Motors are torque-driven in the original.** The binary exposes
    `ApplyTorque`, `*ANGULAR_SPEED`, `GetMotorAngle`, and the exporter notes that
-   motors round-trip through *Havok constraints*. Our drive is a velocity
-   controller over a single hull. **[OPEN]** — the planned M3 refinement
-   (per-wheel jointed bodies + motor torque) is what closes this.
+   motors round-trip through *Havok constraints*. Our drive is a hinge-velocity
+   motor with a guessed torque scale. The per-wheel jointed bodies landed with
+   F1/F2; motor **torque** is still the open half. **[OPEN]** (F3).
 10. **Wheels have declared traction geometry.** Component defs carry
     `contact = wheel_traction` (the high-friction surface), `passthru =
-    wheel_collision`, plus `grip` and `resistance`. We merge everything into one
-    hull and compensate with a low hull friction (0.15 in the sandbox). **[OPEN]**
-    — also closed by per-wheel bodies.
+    wheel_collision`, plus `grip` and `resistance`. The per-wheel bodies now
+    exist, but only `contact` is honoured (as a friction value); `grip` and
+    `resistance` are still unused, and the wheels are what a third of the stock
+    bots cannot yet drive on (see F2). **[OPEN]** (F4).
 11. **Collision shape kinds are not decoded.** `SIMULATION_GEOMETRY` /
     `GMID_COLLISION_BOX|SPHERE|CYLINDER|PLANE|MESH|OBJECT` describe real shapes;
     we approximate with tri-meshes and convex hulls. **[OPEN]**
@@ -272,28 +273,31 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 |---|---|
 | All 57 stock bots render | 57/57 |
 | All 12 arena scripts assemble | 12/12 |
-| `ra2-sim` drives on practice / octagon / hilltop / box | OK |
-| `ra2-duel` on the octagon | OK — runs 40 s, damage and detachable parts land. No KO in 40 s since the mount rule was fixed (F1): the components now sit where the game puts them, so the two bots engage differently. The earlier "KO in ~11 s" was measured with the whole chain collapsed onto its root. |
-| Jointed assembly (`RA2_ASSEMBLY=parts`) | Stable, wheels turn at the commanded rate, damage lands; still not the default because F2 and the rest of the backlog remain, not because of the mount rule (F1 landed — see `06-deferred-fidelity.md`) |
-| `cargo fmt --check`, `clippy`, tests | clean, 10 tests |
+| `ra2-sim` drives on practice / octagon / hilltop / box | OK — one jointed robot, scripted drive, frames written. The sandbox is no longer arcade-driven: it drives the same assembly the duel does |
+| Stock bots that drive on the jointed assembly | **25/45** travel ≥ 2 m in 3 s, 9 creep under 2 m, 11 barely move (`AI/Team*`, full throttle, box arena) — the wheel model, not the mount rule; see F2 |
+| `ra2-duel` on the octagon | Runs to a decision and damage lands, but no parts come off in 30 s. `AI/Team1/Bot0` vs `AI/Team6/Bot2` (both of which drive) close and trade hits; `AI/Team0/Bot0` vs `AI/Team6/Bot2` produces nothing, because the first is one of the stallers and never engages. F3/F4/F5 are what close this |
+| `cargo fmt --check`, `clippy`, tests | clean, 12 tests |
 
 ## 7. Recommended order of work
 
-The per-component bodies now exist (`ra2sim::rig` groups the components into
-welded bodies, `ra2sim::robot` hinges every motor and drives the wheels through
-them, and damage reshapes a body in place). The blocker they surfaced — item
-**F1** in [`06-deferred-fidelity.md`](06-deferred-fidelity.md), mount-point
-alignment — **has landed**: the placement rule is settled and is the default, so
-the assembly is available on equal footing and the arcade path is no longer
-needed to compensate for it. It stays opt-in (`RA2_ASSEMBLY=parts`) only until
-F2 is done.
+The per-component bodies exist (`ra2sim::rig` groups the components into welded
+bodies, `ra2sim::robot` hinges every motor and drives the wheels through them,
+and damage reshapes a body in place), and **both F1 (mount-point alignment) and F2
+(the flip) have landed**: the jointed assembly is now the only robot path, the
+arcade velocity controller is deleted, and `ra2-sim` was rebuilt on `Robot`.
+
+Flipping it made the next blocker visible rather than removing it. The arcade
+controller drove each robot by *setting its velocity*, so it could paper over
+geometry the wheels cannot use; driving the wheels honestly leaves a third of the
+stock bots unable to move at all (F2 has the survey). That is the item to attack
+next.
 
 Suggested sequence:
 
-1. **F2 — flip the default** to the jointed assembly and delete the arcade
-   controller.
-2. F3/F4 — torque-driven motors with the wheel's `contact` surface, `grip` and
-   `resistance`.
-3. F5 — decode `SIMULATION_GEOMETRY` / `GMID_COLLISION_*` into real shapes.
-4. F7 — the damage model, against `GetLastDamageReceived`'s five-tuple.
-5. F9 — chassis buckling as a visual layer.
+1. **F3/F4 — the wheel.** Torque-driven motors (the original's model) with the
+   wheel's `contact` surface, `grip` and `resistance`. A stalled third of the
+   stock set is the direct cost of the guessed torque scale and the unused
+   wheel fields; this is also what the duel's missing damage rides on.
+2. F5 — decode `SIMULATION_GEOMETRY` / `GMID_COLLISION_*` into real shapes.
+3. F7 — the damage model, against `GetLastDamageReceived`'s five-tuple.
+4. F9 — chassis buckling as a visual layer.

@@ -256,7 +256,8 @@ multi-material):
 - `ra2fmt::arena` — arena scripts → scene (model, props, shadow, cameras).
 - `ra2fmt::component` — component `.txt` definitions; `ra2fmt::cfl` — native CFL3 archive reader.
 - `ra2sim` — physics: backend-neutral `PhysicsBackend` trait, Jolt backend, arena
-  colliders, robot hull, movable props from script rigid bodies, arcade controller.
+  colliders, jointed robot bodies with a hinge per motor, movable props from
+  script rigid bodies.
 - `ra2-cli` — `ra2 info`, `ra2 obj`, `ra2 cfz`, `ra2 arena`.
 - `ra2-render` — headless wgpu renderer for `.gmf`, assembled `.bot` robots, and
   arena `.py` scenes (all 57 bots and 12 arenas render).

@@ -1,14 +1,14 @@
-//! `ra2-sim` — headless M2 physics sandbox.
+//! `ra2-sim` — headless physics sandbox.
 //!
-//! Drops a robot into an arena, drives it with a scripted input timeline,
-//! steps the physics world, and renders a frame sequence (plus a montage) so
-//! the motion can be verified without a display.
+//! Drops a jointed robot into an arena, drives it with a scripted input
+//! timeline, steps the physics world, and renders a frame sequence (plus a
+//! montage) so the motion can be verified without a display.
 //!
 //! Usage:
 //!   ra2-sim <arena.py|arena.gmf> <bot> <out_dir> [seconds] [shots] [drive]
 //!
 //! drive: "<start>-<end>:<throttle>,<steer>; ..."  e.g. "0-2:1,0;2-4:1,1;4-6:-1,0"
-//! Env:   RA2_OBSTACLE=crates ... (arena props), RA2_MASS=<kg>
+//! Env:   RA2_OBSTACLE=crates ... (arena props), RA2_MASS_SCALE=1.0
 //!
 //! Writes <out_dir>/frame_000.png ... and <out_dir>/strip.png.
 
@@ -17,14 +17,14 @@ use std::process::ExitCode;
 
 use glam::Vec3;
 use ra2_render::Renderer;
-use ra2sim::{CameraMode, DriveScript, Sandbox};
+use ra2sim::{montage, CameraMode, DriveScript, Sandbox};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 {
         eprintln!("usage: ra2-sim <arena.py|arena.gmf> <bot> <out_dir> [seconds] [shots] [drive]");
         eprintln!("  drive: \"0-2:1,0;2-4:1,1;4-6:-1,0\"  (start-end:throttle,steer)");
-        eprintln!("  env:   RA2_OBSTACLE=crates  RA2_MASS=<kg>  RA2_YAW=<deg>");
+        eprintln!("  env:   RA2_OBSTACLE=crates  RA2_MASS_SCALE=1.0  RA2_YAW=<deg>");
         eprintln!("         RA2_SPAWN=<x,z>  RA2_CHASE=<dx,dy,dz>");
         return ExitCode::FAILURE;
     }
@@ -77,10 +77,10 @@ fn run(
             if v.len() >= 3 {
                 CameraMode::Fixed(Vec3::new(v[0], v[1], v[2]))
             } else {
-                CameraMode::chase_for(sandbox.bot.half_extent().length())
+                CameraMode::chase_for(sandbox.bot_size())
             }
         }
-        Err(_) => CameraMode::chase_for(sandbox.bot.half_extent().length()),
+        Err(_) => CameraMode::chase_for(sandbox.bot_size()),
     };
 
     let mut frames: Vec<PathBuf> = Vec::new();
@@ -110,31 +110,7 @@ fn run(
     }
 
     let strip = out.join("strip.png");
-    montage(&frames, &strip)?;
+    montage::montage(&frames, &strip, 4, 2)?;
     println!("wrote {} frames + {}", frames.len(), strip.display());
-    Ok(())
-}
-
-/// Tile the frames into a single image for quick inspection.
-fn montage(frames: &[PathBuf], out: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if frames.is_empty() {
-        return Ok(());
-    }
-    let first = image::open(&frames[0])?.to_rgba8();
-    let (tw, th) = (first.width() / 2, first.height() / 2);
-    let cols = 4usize;
-    let rows = frames.len().div_ceil(cols);
-    let mut canvas = image::RgbaImage::from_pixel(
-        tw * cols as u32,
-        th * rows as u32,
-        image::Rgba([18, 18, 22, 255]),
-    );
-    for (i, f) in frames.iter().enumerate() {
-        let img = image::open(f)?.to_rgba8();
-        let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
-        let (x, y) = ((i % cols) as u32 * tw, (i / cols) as u32 * th);
-        image::imageops::overlay(&mut canvas, &small, x as i64, y as i64);
-    }
-    canvas.save(out)?;
     Ok(())
 }
