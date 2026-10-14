@@ -195,9 +195,26 @@ in a table at `0x6a69d4..0x6a69f4` in `.rdata`, and the reader gates on them.
 | `FUN_00416360` | the per-component loop: for each component runs `FUN_004dd090` then `FUN_004dca90` |
 | `FUN_004dca90` | **the mount/connection wiring.** Dispatches on the component's class name and `dynamic_cast`s: `SpinMotor` → `FUN_004dca70`, `AxleMount` → `FUN_004dca60`, `Steering` → a loop over `FUN_004f6d00`/`FUN_004f6d10`; each then calls `FUN_00508040` |
 
-**`FUN_004dca60`, `FUN_004dca70` and `FUN_00508040` are the per-class mount handlers
-and are the most likely home of the placement rule.** That is the next thing to
-read (three small functions, one `batch_decompile` call).
+Those three per-class handlers turned out to be **not** the placement:
+`FUN_004dca60` and `FUN_004dca70` are field accessors (`return this[0x280]` /
+`this[0x2b8]`), and `FUN_00508040` merely resets fields at `+0x28c..+0x298`. So
+`FUN_004dca90` only *links and clears* per-class state (which motor drives which
+mount) — it does not compose transforms.
+
+**Where that leaves it.** The per-component setup loop only wires, so the
+placement is *not* computed at load time; it must be composed where a component's
+world transform is needed, i.e. on the sim/draw path. Next candidates, in order:
+
+1. walk the users of the class RTTI with `find_xrefs_to_name` on
+   `Chassis::RTTI_Type_Descriptor` / `Component::RTTI_Type_Descriptor` — cheap now
+   that Ghidra names them — and look for a pass that reads *both* a child's and a
+   parent's mount data;
+2. `Component` virtual method `FUN_0045ebd0` (works with 64-byte, i.e. 4x4,
+   buffers) and its neighbours in `0x45cd50..0x45f2b0`;
+3. `FUN_004dbf40` (907 bytes) which also references the `Component` TD.
+
+**Also worth modelling**: `AxleMount` and `Steering` are real connection classes in
+the game's model that we have no equivalent for.
 
 **The real component class model** (class-name strings, then RTTI):
 
