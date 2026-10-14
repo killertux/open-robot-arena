@@ -150,7 +150,100 @@ the chassis plane.
 
 Exposed as `RA2_CHASSIS_PLANE` (default 0) so the sweep can be re-run.
 
+### What the frame rule actually produces
+
+Measured, not eyeballed: under `A_parent · M · A_own⁻¹` the rotor's own `+Z` — its
+face normal, since `disc5`'s mesh is a plate in its XY plane — comes out
+`(0.707, 0.707, 0)`. That is a **vertical** plate turned 45° in azimuth (the
+`anchor3` wedge's 45°). A rendered top-down view confirms it: from directly above
+the rotor is a thin edge, not a disc.
+
+Whether that is *right* is a separate question, and the honest answer is that
+**the snapshot cannot say**. Scoring the whole silhouette by bounding-box IoU
+against the game's 128² preview, with the camera fitted *per hypothesis*, three
+times over:
+
+| rule | plane | best IoU |
+|---|---|---|
+| stored | 0 | 0.410 |
+| stored | 0.374 | 0.423 |
+| frames | 0 | 0.419 |
+| frames | 0.374 | 0.387 |
+| frames-flip | 0 | 0.402 |
+| frames-flip | 0.374 | 0.347 |
+
+Every difference is inside the noise of a 48×48 normalised mask over a coarse
+camera grid. **Do not read the snapshot again for this** — it has now produced a
+"refuted", its reversal, and a third near-conclusion in one session, each time
+from a metric too coarse to carry the claim. The preview is a sanity check.
+
+(The same caution applies to the height estimate of ~0.375 m: it is the value
+that makes the wheels' reach the ground *and* the rotor clear the chassis' top,
+but with the rule unsettled it stays an unverified estimate.)
+
 ### Decompile progress
+
+The `AttachDetails` hunt is a **dead end, and a useful one**: it is a *UI* class,
+not a geometry one. Its constructor (`FUN_0042b380`, in the botlab's `0x42xxxx`
+range) zeroes a payload, calls `FUN_006084a0` and constructs an **MFC `CRect`** at
+`+0x24` before installing its vtable; its copy constructor (`FUN_00461920`) copies
+14 dwords. A `CRect` means it is the on-screen **green attachment-point box** the
+UI strings talk about, not the mount maths.
+
+The vtable walk that got there, for the next pass:
+
+| Step | Value |
+|---|---|
+| `AttachDetails` TypeDescriptor | `0x6f0480` (name at `+8`; shared `type_info` vftable `0x006b1e44`) |
+| CompleteObjectLocator | `0x6bc53c` (`+12` = TD) |
+| vtable | `0x6a5ecc` — **one** entry, `0x45c860` (a destructor) |
+| writers of that vtable | `0x42b3b8`, `0x461988` → `FUN_0042b380` (ctor), `FUN_00461920` (copy ctor) |
+| `Component` TypeDescriptor | `0x6ee8f0`; its only nested types are `AttachDetails` and `Adjuster` |
+
+Other landings: `FUN_00470ff0` enumerates `Robot Designs\*.bot`; `FUN_0042c850` is
+botlab placement *UI* (compares a class to `Chassis`, prints "Robots cannot exceed
+a maximum size", drives the attachment-point boxes); `FUN_00437770` is 7.3 KB and
+references `Chassis` but contains no attach/mount/matrix identifier at all.
+
+**Where the maths must be.** Since `AttachDetails` is UI and the botlab's *draw*
+path places every component, the placement has to be reachable from it — but the
+botlab classes are large and full of virtual dispatch. Two sharper routes for a
+next pass:
+
+1. find the **`.bot` reader** (it reads all eight component fields together, and a
+   loader often computes the world transforms as it goes); it must compare a class
+   string to `Chassis` (`0x6f0664`) and handle `SmartZone` (`0x6ee918`), and it is
+   *not* any of the functions checked so far;
+2. find the code that **consumes the 12-float attachment frames** — the gmf
+   attachment reader lives at `0x5c38b0`, which Ghidra does not recognise as a
+   procedure entry, so reach it by file offset and walk forward from the nearest
+   prologue.
+
+### Decompile progress
+
+The `AttachDetails` hunt is a **dead end, and a useful one**: it is a *UI* class,
+not a geometry one. Its constructor (`FUN_0042b380`, in the botlab's `0x42xxxx`
+range) zeroes a payload, calls `FUN_006084a0` and constructs an **MFC `CRect`** at
+`+0x24` before installing its vtable; its copy constructor (`FUN_00461920`) copies
+14 dwords. A `CRect` means it is the on-screen **green attachment-point box** the
+UI strings talk about, not the mount maths.
+
+The vtable walk that got there, for the next pass:
+
+| Step | Value |
+|---|---|
+| `AttachDetails` TypeDescriptor | `0x6f0480` (name at `+8`; shared `type_info` vftable `0x006b1e44`) |
+| CompleteObjectLocator | `0x6bc53c` (`+12` = TD) |
+| vtable | `0x6a5ecc` — **one** entry, `0x45c860` (a destructor) |
+| writers of the vtable | `0x42b3b8`, `0x461988` → `FUN_0042b380` (ctor), `FUN_00461920` (copy ctor) |
+| `Component` TypeDescriptor | `0x6ee8f0`; its only nested types are `AttachDetails` and `Adjuster` |
+
+Other landings from this pass: `FUN_00470ff0` enumerates `Robot Designs\*.bot`;
+`FUN_0042c850` is botlab placement *UI* (compares a class to `Chassis`, prints
+"Robots cannot exceed a maximum size", drives the attachment-point boxes);
+`FUN_00437770` is 7.3 KB and references `Chassis` but contains no
+attach/mount/matrix identifier at all.
+
 
 REA's MCP surface is what unlocked this: `resolve_containing_procedure` resolves
 interior addresses that the CLI's `decompile` rejects, and `read_bytes` /
