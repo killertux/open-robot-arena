@@ -18,10 +18,20 @@ pub struct Bot {
 #[derive(Debug, Clone, Default)]
 pub struct Component {
     pub parent: i32,
-    pub mount_on_component: i32,
-    pub mount_on_parent: i32,
+    /// Attachment point **on the parent component** this one mounts to (`mP`).
+    ///
+    /// The file stores this *before* `own_mount`; the labels in the community
+    /// bot-format document are the other way round, which is wrong — verified
+    /// against PyRA2's reader and against bots whose components name it: a stock
+    /// wheel declares `4` here and a stock angle motor has exactly one point 4,
+    /// its `axle_M`, which mates with the wheel's own `axle_F`.
+    pub parent_mount: i32,
+    /// Attachment point **on this component** used for the mount (`mC`).
+    pub own_mount: i32,
     pub translation: [f32; 3],
-    pub rotation: [f32; 4], // w x y z
+    /// Stored as `(x, y, z, w)` — PyRA2's `quatToAxisAndAngle` treats element 3
+    /// as the scalar, and a chassis is exactly `[0, 0, 0, 1]`.
+    pub rotation: [f32; 4],
     pub angle: f32,
     pub height: f32,
     pub class: String,
@@ -158,8 +168,8 @@ pub fn parse(data: &[u8]) -> Result<Bot, Error> {
     for _ in 0..n {
         let mut c = Component {
             parent: lines.i32()?,
-            mount_on_component: lines.i32()?,
-            mount_on_parent: lines.i32()?,
+            parent_mount: lines.i32()?,
+            own_mount: lines.i32()?,
             translation: lines.vec3()?,
             rotation: lines.vec4()?,
             ..Default::default()

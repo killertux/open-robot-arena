@@ -9,7 +9,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 
 | Ref | Item | Status |
 |---|---|---|
-| F1 | Mount-point (attachment frame) alignment | **open — top priority** |
+| F1 | Mount-point (attachment frame) alignment | data done, algorithm **open — top priority** |
 | F2 | Assembled-bodies path opt-in until F1 lands | open |
 | F3 | Motors are velocity motors, not torque motors | open |
 | F4 | Wheel `contact` / `grip` / `resistance` partly used | open |
@@ -24,52 +24,73 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 
 ## F1 — Mount-point (attachment frame) alignment — top priority
 
-**What is missing.** A mounted component is placed only by its own translation,
-quaternion, mount `angle` and `height`. The original also aligns the child's
-attachment point to the parent's, which rotates the child. The `.bot` records
-exactly which points are used:
+**Status: the data side is done and verified; the placement algorithm is still
+open.** Without it some weapon rotors land in the wrong plane — `AI/Team14/Bot2`
+("Backyard Ripper") renders its disc vertical where the game's own embedded
+snapshot shows it flat.
 
-```text
-<int> mount point on the component      (mC)
-<int> mount point on the parent         (mP)
-```
+### In the code now
 
-and a `.gmf` attachment carries a full transform (`Point03: Type = Attach
-ID = 4  Attach = Axle_M  Host = Axle ...` plus a `*NODE_TM`). The game's
-placement is therefore
+- `ra2fmt::bot::Component` exposes **`parent_mount`** (the point on the parent)
+  and **`own_mount`** (the point on this component). The file stores
+  `parent_mount` first. The community bot-format document has these two labels
+  the other way round, and we did too. Verified three ways: PyRA2's reader reads
+  `parentMount` then `attachmentPoint`; a stock wheel declares `4` on its parent
+  and a stock angle motor has exactly one point 4 (`axle_M`); and that point
+  mates with the wheel's own `axle_F`.
+- `ra2fmt::gmi::Attachment` parses an attachment payload into `id`, `types`
+  (`base` / `generic` / `axle`, each `_F`/`_M`), `host` (`Host = Axle`) and its
+  frame, with `GmiScene::attachment_table()` keyed by the id a `.bot` names and
+  `Attachment::accepts()` for the female/male mate test.
+- `ra2sim::rig::Component` carries `parent_mount`, `own_mount` and the
+  component's `attachments`; `ra2 info` prints each point's frame and
+  `examples/botdump` prints the whole mount graph.
 
-```text
-local_child = local_parent * frame(parent, mP) * inverse(frame(child, mC))
-```
+### Established about mounts
 
-which `ra2_render::component_local` omits (M1 recorded "no mount-point
-alignment" as a deliberate simplification).
+- Attachments are real frames, not tags: an `axle_M` point is hosted by the
+  rotor (`Host = Axle`), which is why a wheel's `axle_F` hangs off a motor
+  rather than the chassis.
+- The chassis has a **single** mount point — every chassis child in every stock
+  bot names `0` — and chassis children are reproduced from the **stored
+  transform alone** (`translation * quaternion * yaw * height`). That is what
+  `ra2_render::component_local` already does, and it is why the wheels come out
+  right.
+- So only *component-to-component* links (motor→wheel, anchor→motor→disc) can
+  involve a mount frame.
 
-**Evidence that it matters.** `AI/Team14/Bot2.bot` ("Backyard Ripper") has a
-Z-Tek motor on a baseplate anchor carrying a `disc5` rotor. The game's own
-embedded 128×128 snapshot shows the rotor **flat on top** of the robot with four
-axe heads horizontal; our render puts it **vertical**. The anchor and the motor
-store the same rotation (`(0.707, 0, 0, 0.707)` — 90° about X) and differ only in
-`angle` (90° vs 270°), so no reordering of `translation * quaternion * yaw *
-height` fixes both the rotor *and* the wheels. The attachment frames are the
-missing input.
+### Ruled out
 
-**Consequences today.**
+Test: the rotor's mesh `+Z` must end up vertical in bot space; the wheels' `+Z`
+must stay horizontal (they are the control — the snapshot fixes them).
 
-- Rotor/weapon assemblies can come out rotated 90°, so they hang below the
-  wheels and drag on the floor.
-- `05-validation-report.md` says all 57 bots are "placed correctly". That holds
-  for position and for wheels, but is **approximate for orientations** and should
-  be restated once F1 lands.
-- Some bots' wheels come out with a vertical axle (e.g. `AI/Team13/Bot1.bot`, a
-  1.07 drum bot), which get no drive torque on the assembly path.
+| Rule | Result |
+|---|---|
+| `A_parent * S * A_own⁻¹` for any fixed 90°/180°/45° `S`, chassis links included | wheels and rotor always share one plane — both vertical or both flat |
+| same, applied only to component-to-component links | best fit still leaves the rotor **45°** out |
+| brute force over ordered products of `{A_p, A_p⁻¹, A_c, A_c⁻¹, M, M⁻¹}` ± a 180° mate flip | same 45° residual |
+| reading the quaternion as `(w,x,y,z)` | fixes the rotor, breaks the wheels |
+| swapping the `yaw × quaternion` multiplication order | the same trade-off, exactly inverted |
+| transposing the attachment frame | a no-op for every point that matters (all diagonal) |
 
-**Plan.** Parse the attachment transforms from each component `.gmf` (we already
-expose `SceneObject.transform` for attachments), work out the chassis' own
-attachment points (they are not in the `.bot`), resolve `mC`/`mP` per component
-and build the mount chain properly. PyRA2's `AttachmentPoint` model
-(`tools/vendor/PyRA2/PyRA2-0.1.1/lib/PyRA2/GMIModel/Objects.py`) is the field
-reference.
+The residual is exactly **45°**, and it comes from `anchor3.gmf`'s `Point02`
+(`Generic_M`): `X=(-0.707,0.707,0)  Y=(0,0,1)  Z=(0.707,0.707,0)` — a 45° plug.
+No rigid, shared treatment of the chassis mount turns that diagonal into a
+vertical axis, so the game is not simply aligning the child's frame to the
+parent's. Either the mate rolls about the frame's own Z instead of aligning the
+full frame, or the point's axes carry a different meaning (PyRA2's own VRML
+export of attachment points — `lib/PyRA2/GMIModel/VRMLExport.py` — wraps mounted
+children in an extra `rotation 1 0 0 3.14159`, a 180° mate flip, which is a
+strong hint that a flip *and* a roll convention are involved).
+
+### Next step
+
+Decompile the botlab's attach routine and read the formula. Leads already
+located in `Robot Arena 2.exe`: RTTI `.?AVAttachDetails@Component@@`
+(`0x6f0488`), the component-definition key strings `attach` (`0x6f23e8`) and
+`attaching` (`0x6f2530`), the UI strings at `0x6f07f4`/`0x6f0828` ("Click the
+Attach button…", "Click a green box to change the component's attachment
+point…"), and the `GMID_ATTACHMENTPT` node-type entry around `0x6f0ba4`.
 
 ---
 

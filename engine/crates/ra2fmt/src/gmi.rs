@@ -6,6 +6,8 @@
 
 use crate::Error;
 
+use std::collections::BTreeMap;
+
 const MAGIC: &[u8; 3] = b"GMI";
 
 /// A parsed `.gmf` scene.
@@ -28,6 +30,14 @@ impl GmiScene {
         self.objects
             .iter()
             .filter(|o| o.kind == ObjectKind::Attachment)
+    }
+
+    /// Attachment points keyed by the `ID` a `.bot` refers to.
+    pub fn attachment_table(&self) -> BTreeMap<i32, Attachment> {
+        self.attachments()
+            .filter_map(Attachment::from_object)
+            .map(|a| (a.id, a))
+            .collect()
     }
 
     /// Every rigid body in every `RBCollection`, in file order (children follow
@@ -263,6 +273,129 @@ pub struct SceneObject {
     pub data: String,
     pub mesh: Option<Mesh>,
     pub rigid_bodies: Vec<RigidBody>,
+}
+
+/// One attachment point on a component mesh.
+///
+/// A `.bot` refers to these by `ID`, so that is the key; the object name
+/// (`Point01`, `Base_F`, ...) is arbitrary and must not be trusted for ordering.
+///
+/// `types` are the mount classes the point offers. The names seen across the
+/// stock components are `base`, `generic` and `axle`, each suffixed `_F` or
+/// `_M` (female/male) — a mount pairs the child's point with the parent's. A
+/// motor's axle point (`axle_M`, and `Host = Axle`) sits on the rotor, which is
+/// why a wheel's `axle_F` mates with the motor rather than the chassis.
+///
+/// `has_body` marks the points whose payload also declares rigid-body fields
+/// (`Mass`, `Friction`, `Simulation_Geometry`, ...) — those are the Havok
+/// attachment bodies, i.e. the points that rotate or translate.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Attachment {
+    /// The `ID` a `.bot` names.
+    pub id: i32,
+    pub name: String,
+    /// Mount classes, lower-cased (`["base_f", "generic_f"]`).
+    pub types: Vec<String>,
+    /// Mesh object hosting the point (`Host = Axle`), lower-cased.
+    pub host: Option<String>,
+    /// The payload declares rigid-body fields.
+    pub has_body: bool,
+    /// Point frame in component space (rows are axes, last is the origin).
+    pub transform: [[f32; 3]; 4],
+}
+
+impl Attachment {
+    /// Parse an attachment object's `data` payload.
+    ///
+    /// The payload is `Key = Value` chunks separated by runs of two or more
+    /// spaces; a value may contain commas (`Attach = Base_F, Generic_F`), so the
+    /// split cannot be on single whitespace. Keys are not case-consistent across
+    /// the shipped files (`Type`/`type`, `ID`/`id`).
+    pub fn from_object(o: &SceneObject) -> Option<Attachment> {
+        let mut a = Attachment {
+            transform: o.transform,
+            name: o.name.clone(),
+            ..Default::default()
+        };
+        let mut seen_id = false;
+        for chunk in split_attach_fields(&o.data) {
+            let Some((key, value)) = chunk.split_once('=') else {
+                continue;
+            };
+            let (key, value) = (key.trim().to_ascii_lowercase(), value.trim());
+            match key.as_str() {
+                "id" => {
+                    a.id = value.parse().ok()?;
+                    seen_id = true;
+                }
+                "attach" => {
+                    a.types = value
+                        .split(',')
+                        .map(|t| t.trim().to_ascii_lowercase())
+                        .filter(|t| !t.is_empty())
+                        .collect();
+                }
+                "host" => {
+                    let host = value.trim().to_ascii_lowercase();
+                    if !host.is_empty() && host != "<none>" {
+                        a.host = Some(host);
+                    }
+                }
+                "mass" | "simulation_geometry" => a.has_body = true,
+                _ => {}
+            }
+        }
+        seen_id.then_some(a)
+    }
+
+    /// Whether the child's point class mates with this point's class.
+    ///
+    /// Classes pair across gender: `generic_f` accepts `generic_m`. `base` is
+    /// the same family as `generic` (both are flat mounting faces).
+    pub fn accepts(&self, other: &str) -> bool {
+        fn family(t: &str) -> Option<&str> {
+            t.strip_suffix("_f").or_else(|| t.strip_suffix("_m"))
+        }
+        fn gender(t: &str) -> &str {
+            t.rsplit('_').next().unwrap_or("")
+        }
+        let other = other.to_ascii_lowercase();
+        self.types
+            .iter()
+            .any(|mine| family(mine) == family(&other) && gender(mine) != gender(&other))
+    }
+}
+
+/// Split a `.gmf` attachment payload into `Key = Value` chunks.
+fn split_attach_fields(data: &str) -> Vec<&str> {
+    let bytes = data.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            // A single space stays inside the value; a run ends a field.
+            if j - i >= 2 {
+                let chunk = data[start..i].trim();
+                if !chunk.is_empty() {
+                    out.push(chunk);
+                }
+                start = j;
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    let tail = data[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    out
 }
 
 /// Parse the bytes of a `.gmf` file.
@@ -828,5 +961,62 @@ impl<'a> Parser<'a> {
             name,
             ..Default::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attachment(name: &str, data: &str) -> Attachment {
+        let o = SceneObject {
+            kind: ObjectKind::Attachment,
+            name: name.to_string(),
+            data: data.to_string(),
+            ..Default::default()
+        };
+        Attachment::from_object(&o).expect("id present")
+    }
+
+    #[test]
+    fn attachment_payload_fields_split_on_wide_gaps() {
+        // CRLF, mixed case keys, and an `Attach` list containing commas.
+        let data = "Type = Attach\r\nID = 4\r\nAttach = Axle_M\r\nHost = Axle\r\n\r\nMass = 0.000000\r\nUnyielding = 0";
+        let a = attachment("Point03", data);
+        assert_eq!(a.id, 4);
+        assert_eq!(a.types, ["axle_m"]);
+        assert_eq!(a.host.as_deref(), Some("axle"));
+        assert!(a.has_body);
+    }
+
+    #[test]
+    fn attachment_keeps_multi_class_points_and_ignores_none_hosts() {
+        let a = attachment(
+            "Point01",
+            "Type = Attach  ID = 1  Attach = Base_F, Generic_F",
+        );
+        assert_eq!(a.id, 1);
+        assert_eq!(a.types, ["base_f", "generic_f"]);
+        assert_eq!(a.host, None);
+        assert!(!a.has_body);
+        let b = attachment(
+            "Point03",
+            "type = attach  id = 3  attach = axle_m  host = <none>",
+        );
+        assert_eq!(b.host, None);
+    }
+
+    #[test]
+    fn mount_classes_pair_across_gender_in_the_same_family() {
+        let axle_f = attachment("Point01", "Type = Attach  ID = 1  Attach = Axle_F");
+        assert!(axle_f.accepts("axle_m"));
+        assert!(!axle_f.accepts("axle_f"));
+        assert!(!axle_f.accepts("generic_m"));
+        let base_f = attachment(
+            "Point01",
+            "Type = Attach  ID = 1  Attach = Base_F, Generic_F",
+        );
+        assert!(base_f.accepts("base_m"));
+        assert!(base_f.accepts("generic_m"));
     }
 }

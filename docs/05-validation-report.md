@@ -221,7 +221,8 @@ Known, documented, not yet fixed:
     that shift down/in on every hit. Our M3 model detaches whole parts. **[OPEN]**
 
 15. **Mount-point (attachment frame) alignment is missing — found while building
-    the jointed assembly.** A component is placed by its own translation,
+    the jointed assembly.** The mount *data* is now parsed and the field labels
+    corrected (see F1); the *placement algorithm* is still open. A component is placed by its own translation,
     quaternion, mount `angle` and `height` only. The original also aligns the
     child's attachment point (`mC` in the `.bot`) to the parent's (`mP`), and a
     `.gmf` attachment carries a full transform, so the real placement is

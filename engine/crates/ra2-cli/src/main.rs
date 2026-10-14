@@ -186,7 +186,24 @@ fn info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
             }
             ObjectKind::Attachment => {
                 let d = o.data.replace(['\r', '\n'], " ");
-                println!("    attach {:?} data={:?}", o.name, d.trim());
+                let t = &o.transform;
+                println!(
+                    "    attach {:?} pos=({:7.4},{:7.4},{:7.4}) x=({:6.3},{:6.3},{:6.3}) y=({:6.3},{:6.3},{:6.3}) z=({:6.3},{:6.3},{:6.3}) data={:?}",
+                    o.name,
+                    t[3][0],
+                    t[3][1],
+                    t[3][2],
+                    t[0][0],
+                    t[0][1],
+                    t[0][2],
+                    t[1][0],
+                    t[1][1],
+                    t[1][2],
+                    t[2][0],
+                    t[2][1],
+                    t[2][2],
+                    d.trim()
+                );
             }
             ObjectKind::RigidBodies => {
                 println!(

@@ -294,10 +294,16 @@ multi-material):
   (usually identical) and the behaviour fields.
 - **Mounts are a tree.** A component's parent is an index into the component
   list, and `component_local` chains translation + quaternion + mount `angle`
-  (yaw about +Y) + `height` (offset along +Y). **Caveat:** the `.bot` also stores
-  `mC`/`mP` attachment *ids* and the original aligns the child's attachment frame
-  to the parent's; we do not (see `docs/06-deferred-fidelity.md`, F1). Position
-  and wheels come out right, orientations can be off by 90°.
+  (yaw about +Y) + `height` (offset along +Y). The quaternion is stored
+  `(x, y, z, w)`. **Caveat:** each component also names a mount point on its
+  parent and one on itself (`ra2fmt::bot::Component::parent_mount` /
+  `own_mount`; the format document has those two labels swapped), and a `.gmf`
+  attachment point carries a full frame (`ra2fmt::gmi::Attachment`). The original
+  aligns the child's attachment frame to the parent's, which we do not — see
+  `docs/06-deferred-fidelity.md` F1. Chassis children are placed by the stored
+  transform alone (that is why the wheels come out right); only
+  component-to-component mounts are affected, and there orientations can be off
+  by 90°.
 - **Motors are defined by attachments, not a field.** The definition's
   `attaching = axle` names the attachment type its children use, and the mesh's
   attachment point with `Attach = Axle_M` carries `Host = Axle` — the *rotating

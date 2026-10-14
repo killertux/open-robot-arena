@@ -4,8 +4,11 @@
 //! motor, weapon, structure), its own geometry, and the stats the game derives
 //! from the component definitions (mass, hitpoints, weapon damage, motor power).
 
+use std::collections::BTreeMap;
+
 use glam::{Mat4, Vec3};
 use ra2_render::DrawItem;
+use ra2fmt::gmi::Attachment;
 
 /// What a component does, derived from the `.bot` class string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +105,17 @@ pub struct MotorStats {
 pub struct Component {
     pub index: usize,
     pub parent: Option<usize>,
+    /// Attachment point **on the parent** this component mounts to (`mP`).
+    pub parent_mount: i32,
+    /// Attachment point **on this component** used for the mount (`mC`).
+    pub own_mount: i32,
+    /// This component's own attachment points, keyed by the `.bot`'s ids.
+    ///
+    /// Not used for placement yet — the original also aligns the child's
+    /// attachment frame to the parent's, which is still open (F1 in
+    /// `docs/06-deferred-fidelity.md`). They are exposed so the joint/mount work
+    /// has them.
+    pub attachments: BTreeMap<i32, Attachment>,
     /// `.bot` class string (`SpinMotor`, `Wheel`, ...).
     pub class: String,
     /// Component definition `base` class (`Weapon`, `SpinMotor`, ...).
@@ -250,50 +264,25 @@ impl RobotRig {
     }
 }
 
-/// Split a `.gmf` attachment payload into key/value pairs. Fields are one
-/// `Key = Value` per line (CRLF), e.g.
-/// `Type = Attach\r\nID = 4\r\nAttach = Axle_M\r\nHost = Axle\r\n...`.
-fn attach_fields(data: &str) -> Vec<(String, String)> {
-    data.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let (k, v) = line.split_once('=')?;
-            Some((k.trim().to_ascii_lowercase(), v.trim().to_string()))
-        })
-        .collect()
-}
-
-fn attach_host(scene: &ra2fmt::gmi::GmiScene, attaching: &str) -> Option<String> {
+/// The mesh object that hosts a component's `attaching` point — a motor's rotor
+/// hub (`attaching = axle` on every stock motor). Falls back to the first
+/// attachment that declares a host.
+fn attach_host(atts: &BTreeMap<i32, Attachment>, attaching: &str) -> Option<String> {
     let want = attaching.trim().to_ascii_lowercase();
     let mut fallback = None;
-    for a in scene.attachments() {
-        let fields = attach_fields(&a.data);
-        let get = |k: &str| {
-            fields
-                .iter()
-                .find(|(key, _)| key == k)
-                .map(|(_, v)| v.as_str())
-        };
-        let host = match get("host") {
-            Some(h) if !h.is_empty() => h.to_string(),
-            _ => continue,
-        };
+    for a in atts.values() {
+        let Some(host) = &a.host else { continue };
         if fallback.is_none() {
             fallback = Some(host.clone());
         }
         if want.is_empty() {
             continue;
         }
-        let types = get("attach").unwrap_or("").to_ascii_lowercase();
-        if types
-            .split(',')
-            .map(|t| t.trim())
-            .any(|t| !t.is_empty() && (t.starts_with(&want) || want.starts_with(t)))
+        if a.types
+            .iter()
+            .any(|t| t.starts_with(&want) || want.starts_with(t.as_str()))
         {
-            return Some(host);
+            return Some(host.clone());
         }
     }
     fallback
@@ -442,7 +431,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
 
         // Chassis geometry is embedded in the `.bot`; everything else comes from
         // a `.gmf`.
-        let (items, hull_points, rotor_items, def, base, name, mass) = if i == 0 {
+        let (items, hull_points, rotor_items, def, base, name, mass, attachments) = if i == 0 {
             let chassis = bot.components.first().and_then(|c| c.chassis.as_ref());
             let points = chassis
                 .and_then(|ch| ch.mesh.as_ref())
@@ -459,11 +448,13 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 "Chassis".to_string(),
                 "Chassis".to_string(),
                 chassis.map(|ch| ch.mass()).unwrap_or(0.0).max(5.0),
+                BTreeMap::new(),
             )
         } else if let Some(lc) = loaded.get(i).and_then(|l| l.as_ref()) {
             let items = ra2_render::scene_items(&lc.scene, Mat4::IDENTITY, &lc.dir, &lc.label);
             let points = ra2_render::scene_points(&lc.scene, true);
-            let rotor = attach_host(&lc.scene, lc.def.get("attaching").unwrap_or(""))
+            let attachments = lc.scene.attachment_table();
+            let rotor = attach_host(&attachments, lc.def.get("attaching").unwrap_or(""))
                 .map(|host| ra2_render::object_scene_items(&lc.scene, &host, &lc.dir))
                 .unwrap_or_default();
             let mass = if let Some(m) = num(&lc.def, "mass") {
@@ -490,6 +481,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 lc.def.class.clone(),
                 lc.def.name.clone(),
                 mass,
+                attachments,
             )
         } else {
             (
@@ -500,6 +492,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 String::new(),
                 c.class.clone(),
                 0.0,
+                BTreeMap::new(),
             )
         };
 
@@ -563,6 +556,9 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
         components.push(Component {
             index: i,
             parent,
+            parent_mount: c.parent_mount,
+            own_mount: c.own_mount,
+            attachments,
             class: c.class.clone(),
             base,
             name,
@@ -633,26 +629,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_crlf_attachment_fields() {
-        let data = "Type = Attach\r\nID = 4\r\nAttach = Axle_M\r\nHost = Axle\r\n\r\nMass = 0.000000\r\nUnyielding = 0";
-        let f = attach_fields(data);
-        let get = |k: &str| f.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
-        assert_eq!(get("type"), Some("Attach"));
-        assert_eq!(get("id"), Some("4"));
-        assert_eq!(get("attach"), Some("Axle_M"));
-        assert_eq!(get("host"), Some("Axle"));
-        assert_eq!(get("unyielding"), Some("0"));
-        assert_eq!(f.len(), 6);
-    }
-
-    #[test]
-    fn attachment_without_host_is_ignored() {
-        let data = "Type = Attach\r\nID = 1\r\nAttach = Base_F, Generic_F";
-        let f = attach_fields(data);
-        assert!(f.iter().all(|(k, _)| k != "host"));
-    }
-
-    #[test]
     fn roles_come_from_the_bot_class_then_the_definition_base() {
         assert_eq!(Role::of("Chassis", "Chassis"), Role::Chassis);
         assert_eq!(Role::of("Wheel", "Wheel"), Role::Wheel);
@@ -670,6 +646,9 @@ mod tests {
         Component {
             index,
             parent,
+            parent_mount: 0,
+            own_mount: 0,
+            attachments: BTreeMap::new(),
             class: String::new(),
             base: String::new(),
             name: String::new(),
