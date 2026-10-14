@@ -1647,3 +1647,104 @@ pub fn perspective_rh(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
         glam::Vec4::new(0.0, 0.0, near * far / (near - far), 0.0),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every stock `.bot`, when the (uncommitted) game data is present.
+    fn stock_bots() -> Vec<std::path::PathBuf> {
+        let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let game = loop {
+            let candidate = dir.join("local/game");
+            if candidate.is_dir() {
+                break candidate;
+            }
+            if !dir.pop() {
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        let mut stack = vec![game];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "bot") {
+                    out.push(p);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// F1: the shipped rule must actually *snap* each chain link.
+    ///
+    /// A `.bot` names a point on the child and the point it mates with on the
+    /// parent; the placement has to bring those two points together. The test
+    /// also proves it has teeth: under `stored` the same links miss badly.
+    ///
+    /// Burst-motor parents are skipped: their children are posed at the start
+    /// angle, and `component_worlds_mounted` applies that rotation *before* the
+    /// parent's mount frame rather than about the axle, so the points do not
+    /// meet (a separate, still-open ordering issue).
+    #[test]
+    fn chain_links_snap_onto_the_parent_point() {
+        let bots = stock_bots();
+        if bots.is_empty() {
+            return; // game data not available
+        }
+        let mut checked = 0usize;
+        let mut stored_misses = 0usize;
+        for path in &bots {
+            let (bot, _root, loaded) = load_bot_components(path.to_str().unwrap()).unwrap();
+            let shipped = component_worlds_mounted(&bot, &loaded, MountMode::FramesFlipped);
+            let stored = component_worlds_mounted(&bot, &loaded, MountMode::Stored);
+            for (i, lc) in loaded.iter().enumerate() {
+                let Some(lc) = lc else { continue };
+                let c = &bot.components[i];
+                let parent = c.parent.max(0) as usize;
+                if parent == 0 || parent >= i || bot.components[parent].burst_angles.is_some() {
+                    continue; // the chassis has no `.gmf`; see the note above
+                }
+                let Some(parent_scene) = loaded.get(parent).and_then(|p| p.as_ref()) else {
+                    continue;
+                };
+                let own = lc.scene.attachment_table();
+                let on_parent = parent_scene.scene.attachment_table();
+                let (Some(own), Some(on_parent)) =
+                    (own.get(&c.own_mount), on_parent.get(&c.parent_mount))
+                else {
+                    continue;
+                };
+                let gap = |world: &[Mat4]| {
+                    let child = (world[i] * tm_mat4(&own.transform)).transform_point3(Vec3::ZERO);
+                    let par = (world[parent] * tm_mat4(&on_parent.transform))
+                        .transform_point3(Vec3::ZERO);
+                    (child - par).length()
+                };
+                let g = gap(&shipped);
+                assert!(
+                    g < 1e-3,
+                    "{}: component {i} ({}) misses its parent point by {g}",
+                    path.display(),
+                    lc.label
+                );
+                if gap(&stored) > 0.05 {
+                    stored_misses += 1;
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "only checked {checked} links");
+        assert!(
+            stored_misses > 100,
+            "the test has no teeth: only {stored_misses} links miss under `stored`"
+        );
+    }
+}

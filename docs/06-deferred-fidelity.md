@@ -306,6 +306,19 @@ it. The per-mesh bounds from `examples/mountdump` and from the renderer's
 `RA2_DEBUG=1` output agree to three decimals for every component, so the two
 paths compose identically.
 
+**Two smaller things the new test surfaced.**
+
+1. **Burst-motor children do not meet their parent's point.** `component_worlds_mounted`
+   applies a burst motor's start angle as `world[parent] * rest * link`, i.e.
+   a rotation about the *motor's origin*, but a burst motor swings its axle, so
+   the rotation belongs *inside* the link (`A_parent · R_z(start) · …`) — about
+   the axle, which passes through `A_parent`'s origin. The new test skips
+   burst-motor parents for this reason; it should not have to.
+2. **A component may legitimately share the chassis' origin** (a SmartZone, for
+   instance), so "no two components sit at the same point" is *not* an invariant
+   — it looked like one until a stock bot broke it. Worth remembering before
+   using overlap as a heuristic again.
+
 **Still missing: the free-spin `angle` on chain links.** `mount_link` applies
 `A_parent`, the flip and `A_own⁻¹`, but not `angle` — the SHIFT-rotate the player
 used when placing the part. Chassis children get theirs (it is inside the stored
