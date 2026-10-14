@@ -1005,7 +1005,9 @@ pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Err
     Ok(items)
 }
 
-/// Chained bot-local transform for every component (parents before children).
+/// Chained bot-local transform for every component using the stored transforms
+/// alone (no `.gmf` mount frames). Prefer [`component_worlds_mounted`] with the
+/// loaded components, which is what the renderer and the sim both do.
 pub fn component_worlds(bot: &botfmt::Bot) -> Vec<Mat4> {
     component_worlds_mounted(bot, &[], MountMode::Stored)
 }
@@ -1014,32 +1016,36 @@ pub fn component_worlds(bot: &botfmt::Bot) -> Vec<Mat4> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MountMode {
     /// The stored transform alone — `translation * quaternion * yaw * height`.
-    /// This is what reproduces the game's own layout for *chassis-mounted*
-    /// parts, so it stays the default.
+    /// Kept because it is what reproduces the game's layout for *chassis*
+    /// children, but it cannot place a chain: every component-to-component link
+    /// in every stock bot stores an identity transform, so the whole chain
+    /// collapses onto its root (see F1 in docs/06-deferred-fidelity.md).
     Stored,
     /// At a component-to-component mount, align the child's attachment frame to
     /// the parent's: `A_parent * A_own⁻¹`.
     Frames,
     /// The same, with a 180° rotation about X between the frames — a male plug
-    /// into a female socket.
+    /// into a female socket. **The default**: it is the only rule that both
+    /// keeps every wheel's axle horizontal and lifts a rotor clear of the
+    /// chassis, and it reproduces the game's own botlab preview.
     FramesFlipped,
     /// The stored transform, resolved *through* the child's own mount frame:
-    /// `M * A_own⁻¹`. The stored offset is where the child's named point goes.
+    /// `M * A_own⁻¹`.
     StoredOwn,
     /// Frames *and* the stored transform: `A_parent * M * A_own⁻¹`.
     FramesStored,
 }
 
 impl MountMode {
-    /// `RA2_MOUNT=stored` (default) | `frames` | `frames-flip` | `stored-own`
+    /// `RA2_MOUNT=frames-flip` (default) | `stored` | `frames` | `stored-own`
     /// | `frames-stored`.
     pub fn from_env() -> MountMode {
         match std::env::var("RA2_MOUNT").unwrap_or_default().as_str() {
+            "stored" => MountMode::Stored,
             "frames" => MountMode::Frames,
-            "frames-flip" => MountMode::FramesFlipped,
             "stored-own" => MountMode::StoredOwn,
             "frames-stored" => MountMode::FramesStored,
-            _ => MountMode::Stored,
+            _ => MountMode::FramesFlipped,
         }
     }
 }
@@ -1130,7 +1136,10 @@ fn mount_link(
     }
     let c = &bot.components[i];
     let local = component_local(c);
-    let (parent_frame, own_inv) = mount_frames(bot, loaded, i).unwrap_or((None, Mat4::IDENTITY));
+    let Some((parent_frame, own_inv)) = mount_frames(bot, loaded, i) else {
+        // The child's named point is not in its mesh: keep the stored transform.
+        return None;
+    };
     if matches!(mode, MountMode::Frames | MountMode::FramesFlipped) && parent_frame.is_none() {
         // Nothing on the parent to align to (the chassis, whose only mount is
         // the baseplate): keep the stored transform.

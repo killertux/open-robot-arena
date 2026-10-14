@@ -419,7 +419,8 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
 /// Load a `.bot` into a component tree (no physics yet).
 pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
     let (bot, _root, loaded) = ra2_render::load_bot_components(path)?;
-    let rest = ra2_render::component_worlds(&bot);
+    let rest =
+        ra2_render::component_worlds_mounted(&bot, &loaded, ra2_render::MountMode::from_env());
     let mut components: Vec<Component> = Vec::with_capacity(bot.components.len());
 
     for (i, c) in bot.components.iter().enumerate() {

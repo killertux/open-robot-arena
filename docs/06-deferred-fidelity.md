@@ -24,11 +24,13 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 
 ## F1 — Mount-point (attachment frame) alignment — top priority
 
-**Status: the mount model is now understood from the game's own tools and data;
-the link rule is narrowed to one candidate, `frames-flip`.** Without it the chain
-of a component-to-component assembly collapses (see "The mount model", below),
-which is why the jointed `RA2_ASSEMBLY=parts` path stays opt-in. The 128²
-embedded snapshot is a sanity check only, never an oracle.
+**Status: the link rule is `A_parent · R_x(π) · A_own⁻¹` and it is now the
+default** (`RA2_MOUNT=frames-flip`). It is the only rule that keeps every wheel's
+axle horizontal *and* lifts a rotor clear of the chassis, and its output matches
+the game's own botlab preview. One term is still missing — the free-spin `angle`
+is not applied to chain links — which is what keeps the jointed
+`RA2_ASSEMBLY=parts` path opt-in for now. The 128² embedded snapshot is a sanity
+check only, never an oracle.
 
 ### In the code now
 
@@ -150,6 +152,11 @@ where a per-link frame rule acts. The disagreement is in the link rule, not in
 the chassis plane.
 
 Exposed as `RA2_CHASSIS_PLANE` (default 0) so the sweep can be re-run.
+
+**Resolved:** there is no height to find. The rotor was low because the motor was
+placed *axle-down*; the male-plug-into-female-socket flip
+(`A_parent · R_x(π) · A_own⁻¹`) turns it *axle-up*, which lifts the disc 0.33 m
+and puts it over the chassis. Chassis-mounted parts never move, so nothing floats.
 
 ### What the frame rule actually produces
 
@@ -287,6 +294,29 @@ that offset — not the link rule.
 **Exposed as** `RA2_MOUNT=stored` (default) `| frames | frames-flip | stored-own |
 frames-stored`, and `examples/mountdump <bot> [index …]` prints every component's
 world origin and world axes under all five, which is how the table above was made.
+
+**(10) The rule is now the default, and the preview confirms it.** `frames-flip`
+is `RA2_MOUNT`'s default and the sim reads it too (`rig::load` places the parts
+with the same rule, so the render and the physics agree). Re-rendered with the
+rule in place, `AI/Team14/Bot2` shows a big 45°-tilted disc over the middle of the
+chassis with its four claws on the rim — the same reading as the game's own
+preview. Checked across the stock set, `frames-flip` is also what makes the wheels
+and rotors of most bots appear *outside* the chassis instead of collapsed inside
+it. The per-mesh bounds from `examples/mountdump` and from the renderer's
+`RA2_DEBUG=1` output agree to three decimals for every component, so the two
+paths compose identically.
+
+**Still missing: the free-spin `angle` on chain links.** `mount_link` applies
+`A_parent`, the flip and `A_own⁻¹`, but not `angle` — the SHIFT-rotate the player
+used when placing the part. Chassis children get theirs (it is inside the stored
+transform), so the gap is limited to chain-mounted parts; in the stock bots only
+the four disc anglers use it (0/90/180/270°). That, plus the F2 items, is what
+still keeps `RA2_ASSEMBLY=parts` opt-in.
+
+**Superseded by the above**: the earlier claim in this document that "chassis
+children are reproduced from the stored transform alone … and it is why the
+wheels come out right" is only half true — it is why the *chassis children* come
+out right, but the same rule collapses the chain.
 
 ### Decompile progress — the bot object model is mapped
 

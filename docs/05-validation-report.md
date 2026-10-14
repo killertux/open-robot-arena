@@ -272,9 +272,9 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | All 57 stock bots render | 57/57 |
 | All 12 arena scripts assemble | 12/12 |
 | `ra2-sim` drives on practice / octagon / hilltop / box | OK |
-| `ra2-duel` reaches a KO | OK (octagon, ~11 s) |
-| Jointed assembly (`RA2_ASSEMBLY=parts`) | Stable, wheels turn at the commanded rate, damage lands; not the default because of F1 (see §4 item 15) |
-| `cargo fmt --check`, `clippy`, tests | clean, 9 tests |
+| `ra2-duel` on the octagon | OK — runs 40 s, damage and detachable parts land. No KO in 40 s since the mount rule was fixed (F1): the components now sit where the game puts them, so the two bots engage differently. The earlier "KO in ~11 s" was measured with the whole chain collapsed onto its root. |
+| Jointed assembly (`RA2_ASSEMBLY=parts`) | Stable, wheels turn at the commanded rate, damage lands; still not the default — F1's link rule is identified but its free-spin term (`angle`) is not applied to chain links yet, and F2 covers the rest |
+| `cargo fmt --check`, `clippy`, tests | clean, 10 tests |
 
 ## 7. Recommended order of work
 

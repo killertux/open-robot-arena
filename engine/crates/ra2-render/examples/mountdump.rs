@@ -6,7 +6,7 @@
 //! placement rule produces, so rules can be compared without rendering.
 
 use glam::Vec3;
-use ra2_render::{component_worlds_mounted, load_bot_components, MountMode};
+use ra2_render::{component_worlds_mounted, load_bot_components, tm_mat4, MountMode};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -57,6 +57,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ax(Vec3::Z),
                 file
             );
+            // Per-mesh-object bounds, composed exactly as the renderer does.
+            if let Some(Some(lc)) = loaded.get(i) {
+                for obj in &lc.scene.objects {
+                    let Some(mesh) = &obj.mesh else { continue };
+                    let mw = m * tm_mat4(&obj.transform);
+                    let mut a = Vec3::splat(f32::MAX);
+                    let mut b = Vec3::splat(f32::MIN);
+                    for p in &mesh.points {
+                        let w = mw.transform_point3(Vec3::from(*p));
+                        a = a.min(w);
+                        b = b.max(w);
+                    }
+                    if a.x > b.x {
+                        continue;
+                    }
+                    println!(
+                        "       obj {:<18} bbox=({:.3},{:.3},{:.3})..({:.3},{:.3},{:.3})",
+                        obj.name, a.x, a.y, a.z, b.x, b.y, b.z
+                    );
+                }
+            }
         }
         println!("  --> lowest component origin y = {below:.3}");
     }
