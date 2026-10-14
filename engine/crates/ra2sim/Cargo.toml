@@ -1,0 +1,17 @@
+[package]
+name = "ra2sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Physics simulation (Jolt) for Robot Arena 2 — the M2 sandbox."
+
+[[bin]]
+name = "ra2-sim"
+path = "src/main.rs"
+
+[dependencies]
+glam = "0.34.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+oxijolt = "1.1.0"
+ra2fmt = { path = "../ra2fmt" }
+ra2-render = { path = "../ra2-render" }

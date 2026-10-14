@@ -62,6 +62,12 @@ pub struct DrawItem {
     pub blend: bool,
 }
 
+/// A set of items sharing one model transform within a frame.
+pub struct RenderGroup<'a> {
+    pub items: &'a [DrawItem],
+    pub model: Mat4,
+}
+
 const SHADER: &str = r#"
 struct Uniforms { mvp: mat4x4<f32>, light: vec4<f32>, };
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -246,8 +252,7 @@ impl Renderer {
         })
     }
 
-    /// Render `items` with the given view-projection matrix into a tightly
-    /// packed RGBA8 buffer of `w` x `h` pixels.
+    /// Render a single group of items with an explicit view-projection matrix.
     pub fn render(
         &self,
         items: &[DrawItem],
@@ -255,77 +260,102 @@ impl Renderer {
         w: u32,
         h: u32,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let uniforms = Uniforms {
-            mvp: mvp.to_cols_array_2d(),
-            light: [0.4, -0.7, 0.6, 0.0],
-        };
-        let ubuf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("uniforms"),
-                contents: bytemuck::bytes_of(&uniforms),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+        self.render_groups(
+            &[RenderGroup {
+                items,
+                model: Mat4::IDENTITY,
+            }],
+            mvp,
+            w,
+            h,
+        )
+    }
 
+    /// Render several groups of items, each with its own model transform, under
+    /// one shared view-projection matrix. Lets the sandbox draw a static arena
+    /// and a moving robot without re-uploading the arena's textures per frame.
+    pub fn render_groups(
+        &self,
+        groups: &[RenderGroup<'_>],
+        view_proj: Mat4,
+        w: u32,
+        h: u32,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         struct Gpu {
             vbuf: wgpu::Buffer,
             bg: wgpu::BindGroup,
             count: u32,
             blend: bool,
         }
-        let mut gpu_items = Vec::new();
-        for it in items {
-            let vbuf = self
+        let mut gpu_items: Vec<Gpu> = Vec::new();
+        for group in groups {
+            if group.items.is_empty() {
+                continue;
+            }
+            let uniforms = Uniforms {
+                mvp: (view_proj * group.model).to_cols_array_2d(),
+                light: [0.4, -0.7, 0.6, 0.0],
+            };
+            let ubuf = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&it.label),
-                    contents: bytemuck::cast_slice(&it.vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
+                    label: Some("uniforms"),
+                    contents: bytemuck::bytes_of(&uniforms),
+                    usage: wgpu::BufferUsages::UNIFORM,
                 });
-            let tex = self.device.create_texture_with_data(
-                &self.queue,
-                &wgpu::TextureDescriptor {
-                    label: Some("albedo"),
-                    size: wgpu::Extent3d {
-                        width: it.tw,
-                        height: it.th,
-                        depth_or_array_layers: 1,
+            for it in group.items {
+                let vbuf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(&it.label),
+                        contents: bytemuck::cast_slice(&it.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                let tex = self.device.create_texture_with_data(
+                    &self.queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some("albedo"),
+                        size: wgpu::Extent3d {
+                            width: it.tw,
+                            height: it.th,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
                     },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                },
-                wgpu::util::TextureDataOrder::LayerMajor,
-                &it.tex,
-            );
-            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: ubuf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-            });
-            gpu_items.push(Gpu {
-                vbuf,
-                bg,
-                count: it.vertices.len() as u32,
-                blend: it.blend,
-            });
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    &it.tex,
+                );
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &self.bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: ubuf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                });
+                gpu_items.push(Gpu {
+                    vbuf,
+                    bg,
+                    count: it.vertices.len() as u32,
+                    blend: it.blend,
+                });
+            }
         }
 
         let color = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -677,21 +707,7 @@ pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Err
     // Component world transforms, chained through parents. RA2 places a component
     // by its stored translation + quaternion, then a mount yaw (`angle`) and a
     // vertical offset (`height`) about/along the model up axis (Y).
-    let mut world: Vec<Mat4> = vec![Mat4::IDENTITY; bot.components.len()];
-    for (i, c) in bot.components.iter().enumerate() {
-        let local = component_local(c);
-        if i > 0 && c.parent >= 0 && (c.parent as usize) < i {
-            let parent = c.parent as usize;
-            // A BurstMotor poses its children at its start (rest) axle angle.
-            let rest = match bot.components[parent].burst_angles {
-                Some([start, _]) => Mat4::from_rotation_z(start),
-                None => Mat4::IDENTITY,
-            };
-            world[i] = world[parent] * rest * local;
-        } else {
-            world[i] = local;
-        }
-    }
+    let world = component_worlds(&bot);
 
     let mut items = Vec::new();
 
@@ -737,7 +753,27 @@ pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Err
     Ok(items)
 }
 
-fn component_local(c: &ra2fmt::bot::Component) -> Mat4 {
+/// Chained bot-local transform for every component (parents before children).
+pub fn component_worlds(bot: &botfmt::Bot) -> Vec<Mat4> {
+    let mut world = vec![Mat4::IDENTITY; bot.components.len()];
+    for (i, c) in bot.components.iter().enumerate() {
+        let local = component_local(c);
+        if i > 0 && c.parent >= 0 && (c.parent as usize) < i {
+            let parent = c.parent as usize;
+            // A BurstMotor poses its children at its start (rest) axle angle.
+            let rest = match bot.components[parent].burst_angles {
+                Some([start, _]) => Mat4::from_rotation_z(start),
+                None => Mat4::IDENTITY,
+            };
+            world[i] = world[parent] * rest * local;
+        } else {
+            world[i] = local;
+        }
+    }
+    world
+}
+
+pub fn component_local(c: &ra2fmt::bot::Component) -> Mat4 {
     // RA2 model space is Y-up: `translation` + `rotation` place the component,
     // then the mount `angle` yaws it about +Y and `height` offsets it along +Y.
     // The stored quaternion is (x, y, z, w) — confirmed against PyRA2's
@@ -796,10 +832,27 @@ fn scene_material_groups(
     world: Mat4,
     dir: &Path,
 ) -> Vec<(Option<PathBuf>, [f32; 4], Vec<Vertex>)> {
+    scene_material_groups_opts(scene, world, dir, None, false)
+}
+
+/// Like [`scene_material_groups`] but optionally limited to one object and/or
+/// emitted in object-local space (for props that move independently).
+fn scene_material_groups_opts(
+    scene: &gmi::GmiScene,
+    world: Mat4,
+    dir: &Path,
+    only_object: Option<&str>,
+    object_local: bool,
+) -> Vec<(Option<PathBuf>, [f32; 4], Vec<Vertex>)> {
     let mut index: HashMap<u64, usize> = HashMap::new();
     let mut groups: Vec<(Option<PathBuf>, [f32; 4], Vec<Vertex>)> = Vec::new();
     for o in &scene.objects {
         let Some(mesh) = &o.mesh else { continue };
+        if let Some(name) = only_object {
+            if !o.name.eq_ignore_ascii_case(name) {
+                continue;
+            }
+        }
         if mesh.is_collision() || is_hidden(&o.name) || is_collision_name(&o.name) {
             continue;
         }
@@ -812,7 +865,11 @@ fn scene_material_groups(
         {
             continue;
         }
-        let obj_world = world * tm_mat4(&o.transform);
+        let obj_world = if object_local {
+            world
+        } else {
+            world * tm_mat4(&o.transform)
+        };
         let pts: Vec<Vec3> = mesh
             .points
             .iter()
@@ -958,6 +1015,61 @@ fn push_scene(
     }
 }
 
+/// Visual batches for one geometry object, in object-local space, so a physics
+/// body's transform can place it (used for movable arena props).
+pub fn object_items(scene: &gmi::GmiScene, object_name: &str, dir: &Path) -> Vec<DrawItem> {
+    let mut items = Vec::new();
+    for (tex, color, verts) in
+        scene_material_groups_opts(scene, Mat4::IDENTITY, dir, Some(object_name), true)
+    {
+        if verts.is_empty() {
+            continue;
+        }
+        let rgb = [
+            (color[0] * 255.0) as u8,
+            (color[1] * 255.0) as u8,
+            (color[2] * 255.0) as u8,
+            255,
+        ];
+        let (tex, tw, th) = tex
+            .as_deref()
+            .and_then(|p| decode_image(&std::fs::read(p).ok()?))
+            .unwrap_or_else(|| (solid(rgb, 4, 4), 4, 4));
+        items.push(DrawItem {
+            vertices: verts,
+            tex,
+            tw,
+            th,
+            label: object_name.to_string(),
+            blend: color[3] < 0.999,
+        });
+    }
+    items
+}
+
+/// Object-local `(name, points)` for every geometry object with a mesh.
+pub fn object_points(scene: &gmi::GmiScene) -> Vec<(String, Vec<Vec3>)> {
+    scene
+        .objects
+        .iter()
+        .filter_map(|o| {
+            let m = o.mesh.as_ref()?;
+            if m.points.is_empty() {
+                return None;
+            }
+            Some((
+                o.name.clone(),
+                m.points.iter().map(|p| Vec3::from(*p)).collect(),
+            ))
+        })
+        .collect()
+}
+
+/// The transform of a geometry object within its `.gmf`.
+pub fn object_transform(object: &gmi::SceneObject) -> Mat4 {
+    tm_mat4(&object.transform)
+}
+
 fn add_gmi(
     path: &Path,
     world: Mat4,
@@ -970,7 +1082,7 @@ fn add_gmi(
     Ok(())
 }
 
-fn tm_mat4(tm: &[[f32; 3]; 4]) -> Mat4 {
+pub fn tm_mat4(tm: &[[f32; 3]; 4]) -> Mat4 {
     if tm == &[[0.0; 3]; 4] {
         return Mat4::IDENTITY;
     }
@@ -1089,7 +1201,7 @@ fn up_for(dir: Vec3) -> Vec3 {
     }
 }
 
-fn look_at_rh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
+pub fn look_at_rh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
     let f = (center - eye).normalize();
     let s = f.cross(up).normalize();
     let u = s.cross(f);
@@ -1101,7 +1213,7 @@ fn look_at_rh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
     )
 }
 
-fn perspective_rh(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+pub fn perspective_rh(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
     let f = 1.0 / (fov_y * 0.5).tan();
     Mat4::from_cols(
         glam::Vec4::new(f / aspect, 0.0, 0.0, 0.0),
