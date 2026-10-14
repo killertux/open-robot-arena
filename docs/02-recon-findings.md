@@ -155,7 +155,44 @@ __init__`.
 `AI` / `Arenas` / `Gooey` object model and either embed a Python runtime (to run
 the original scripts) or provide a native reimplementation of the same API.
 
-## 7. Open questions for Stage 1/2
+## 7. Robot assembly (`.bot`) — findings
+
+`.bot` files are line-based text with two embedded uncompressed TGA blobs.
+Handled by `ra2fmt::bot` (v1.09+; 1.07/1.08 differ and are TODO).
+
+- Header: version, `Name:`, `Class:`, [default-texture int — absent in 1.07/1.08],
+  snapshot flag, then a 128×128 TGA (size taken from its own header).
+- Components: `count`, then per component:
+  `parent_id`, two mount ids, translation (3f), rotation quaternion (4f),
+  angle+height (2f), class, definition path (`Components\name.txt`).
+  Classes with extra lines: `BurstMotor`, `SmartZone`. `Chassis` carries a large
+  inline block (outline geometry, a 3D model in normalized units, a 256×256 TGA
+  skin, face groups, armour, buckling points).
+- Trailing: buckle model, forward heading, controllers, controller↔component bindings.
+
+**Component definitions** (`.txt`) live inside `Components.cfz` — a **CFL3**
+archive (Jari Komppa "Compressed File Library"; source: github.com/jarikomppa/cfl).
+They are `key = value`; `dir` + `model` resolve to `Components/<dir>/<model>`.
+`base` is the component class. Extracted with the bundled `uncfl.exe` (via Wine);
+a native CFL3 reader is planned.
+
+**Assembly model** (implemented): a component's world transform is
+`world[parent] · A_parent(mount_on_component) · inverse(A_child(mount_on_parent)) · local`,
+where `A_*` are the `.gmf` attachment-point transforms (attachment ids come from
+each point's user data, `ID = n`) and `local` = `T(translation)·R(quat)·Rz(angle)·T(0,0,height)`.
+The chassis mesh is in normalized units and is mapped onto its footprint from the
+outline points (0..1000 = 0..1 world units), bottom at Z=0.
+Known gaps: exact handedness/orientation and the embedded chassis skin TGA still
+need work; older bot formats (1.07/1.08) unsupported.
+
+## 8. Tooling we now have (engine)
+
+- `ra2fmt::gmi` — `.gmf` meshes (181/181), materials, textures, attachments, Havok bodies.
+- `ra2fmt::bot` — `.bot` header + components + chassis mesh/outline.
+- `ra2fmt::component` — component `.txt` definitions.
+- `ra2-render` — headless wgpu renderer (`.gmf` or assembled `.bot` → PNG).
+
+## 9. Open questions for Stage 1/2
 
 1. Direct3D 8 usage specifics: vertex/pixel shader model, fixed-function pipeline,
    render state set — from PE imports + Ghidra disassembly.

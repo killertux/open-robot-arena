@@ -7,8 +7,12 @@
 //! Planned: `.bot` robots, `.cfz` (CFL3) archives, `.gib` GUI layouts,
 //! `*_txt.gmf` (GMA ASCII) meshes.
 
+pub mod bot;
+pub mod component;
 pub mod gmi;
 
+pub use bot::{Bot, BotMesh, Chassis, Component};
+pub use component::ComponentDef;
 pub use gmi::{GmiScene, Material, Mesh, RigidBody, SceneObject, Texture};
 
 /// Error type shared by all format parsers.

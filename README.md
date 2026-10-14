@@ -34,8 +34,8 @@ scripts, physics and gameplay. See `docs/01-project-plan.md` and
 
 ```
 docs/      Design notes, reverse-engineering findings, format specs
-tools/     Our own analysis/extraction/build scripts
-engine/    The native engine implementation (later phases)
+tools/     Our own analysis/extraction/build scripts (Python)
+engine/    The native engine (Rust workspace: ra2fmt, ra2-cli, ra2-render)
 local/     (git-ignored) original game files and extracted data
 ```
 
