@@ -184,6 +184,13 @@ pub struct Component {
     pub wheel: Option<WheelStats>,
     /// Linear stats when this component is a piston (F8).
     pub piston: Option<PistonStats>,
+    /// The chassis' buckle model (F9): the positions the bot file marks as
+    /// movable, which the original shifts "down and in" as the chassis is hit.
+    /// Only the chassis has one.
+    pub buckle: Vec<Vec3>,
+    /// How far the chassis has already buckled (0 pristine, 1 at its last
+    /// hitpoint).
+    pub buckle_fraction: f32,
     /// Children component indices (motor-driven subtree).
     pub children: Vec<usize>,
 }
@@ -635,6 +642,14 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
         ra2_render::component_worlds_mounted(&bot, &loaded, ra2_render::MountMode::from_env());
     let mut components: Vec<Component> = Vec::with_capacity(bot.components.len());
 
+    // The chassis' crush cage (F9) is the bot's, not a component definition's.
+    let chassis_buckle: Vec<Vec3> = bot
+        .components
+        .first()
+        .and_then(|c| c.chassis.as_ref())
+        .map(|ch| ch.buckling.iter().map(|b| Vec3::from(b.position)).collect())
+        .unwrap_or_default();
+
     for (i, c) in bot.components.iter().enumerate() {
         let parent = if i > 0 && c.parent >= 0 && (c.parent as usize) < i {
             Some(c.parent as usize)
@@ -815,6 +830,14 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             motor,
             wheel,
             piston,
+            // The chassis' crush cage (F9). Its points name the chassis mesh's
+            // own space, which for component 0 is bot space.
+            buckle: if i == 0 {
+                chassis_buckle.clone()
+            } else {
+                Vec::new()
+            },
+            buckle_fraction: 0.0,
             children: Vec::new(),
         });
     }
@@ -997,6 +1020,8 @@ mod tests {
             }),
             wheel: None,
             piston: None,
+            buckle: Vec::new(),
+            buckle_fraction: 0.0,
             children: Vec::new(),
         }
     }

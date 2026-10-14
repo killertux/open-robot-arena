@@ -339,8 +339,17 @@ impl Duel {
             self.damage_taken[imp.target] += imp.damage;
             if self.robots[imp.target].damage(imp.component, imp.damage) {
                 self.break_off(imp.target, imp.component, imp.point);
+            } else if imp.component == 0 {
+                // A hurt chassis caves in before it dies (F9).
+                self.buckle_chassis(imp.target);
             }
         }
+    }
+
+    /// Deform a robot's chassis to match its damage, and rebake its collider.
+    fn buckle_chassis(&mut self, robot: usize) {
+        let physics = &mut *self.physics;
+        self.robots[robot].buckle(physics);
     }
 
     /// A component died: detach its subtree as flying debris and rebuild the
@@ -716,6 +725,100 @@ mod tests {
             after < blow * 0.25,
             "resting contact added {after} damage after a {blow} blow"
         );
+    }
+
+    /// F9: a hurt chassis caves in — its drawn shape *and* its collider shrink —
+    /// instead of only ever dying whole.
+    ///
+    /// The bot file marks which points may move ("down and in"); the floor plate
+    /// is pinned by the lowest of them, and the motion grows with height above
+    /// it. All 57 stock bots ship uncrushed, so this is a change we make, not one
+    /// we read back.
+    #[test]
+    fn a_hurt_chassis_buckles() {
+        let Some(game) = game_dir() else { return };
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string();
+        let setups = [BotSetup {
+            path: bot,
+            yaw_deg: None,
+        }];
+        let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        assert!(
+            !duel.robots[0].rig.components[0].buckle.is_empty(),
+            "the bot carries a buckle model"
+        );
+
+        // What the chassis looks like from outside, over the region the file
+        // marks as movable: the floor plate is pinned and the sides above it
+        // cave, so the measures that can move are the movable footprint and the
+        // top.
+        let floor = duel.robots[0].rig.components[0]
+            .buckle
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::MAX, f32::min);
+        // `(movable footprint, top, lowest point)` over the region above the
+        // buckle floor.
+        let extent_of = |points: &[Vec3]| {
+            let mut above = (0.0f32, f32::MIN);
+            let mut planted = f32::MAX;
+            for p in points {
+                planted = planted.min(p.y);
+                if p.y > floor + 1e-3 {
+                    above.0 = above.0.max(p.x.abs()).max(p.z.abs());
+                    above.1 = above.1.max(p.y);
+                }
+            }
+            (above.0, above.1, planted)
+        };
+        let hull_of = |d: &Duel| d.robots[0].rig.components[0].hull_points.clone();
+        let draw_of = |d: &Duel| -> Vec<Vec3> {
+            d.robots[0].rig.components[0]
+                .items
+                .iter()
+                .flat_map(|i| i.vertices.iter())
+                .map(|v| Vec3::from(v.pos))
+                .collect()
+        };
+        let (draw0, hull0) = (extent_of(&draw_of(&duel)), extent_of(&hull_of(&duel)));
+
+        // Halfway to a destroyed chassis.
+        duel.robots[0].health[0] *= 0.5;
+        duel.robots[0].buckle(&mut *duel.physics);
+        let (draw1, hull1) = (extent_of(&draw_of(&duel)), extent_of(&hull_of(&duel)));
+
+        assert!(
+            (duel.robots[0].rig.components[0].buckle_fraction - 0.5).abs() < 0.01,
+            "buckled to {:?}",
+            duel.robots[0].rig.components[0].buckle_fraction
+        );
+        for (name, before, after) in [("drawn", draw0, draw1), ("collider", hull0, hull1)] {
+            assert!(
+                after.0 < before.0 - 1e-3,
+                "{name} footprint did not shrink: {} -> {}",
+                before.0,
+                after.0
+            );
+            assert!(
+                after.1 < before.1 - 1e-3,
+                "{name} top did not come down: {} -> {}",
+                before.1,
+                after.1
+            );
+            assert!(
+                (after.2 - before.2).abs() < 1e-3,
+                "{name} floor moved: {} -> {}",
+                before.2,
+                after.2
+            );
+        }
+        // And it is monotone: more damage, more crush.
+        let before = duel.robots[0].rig.components[0].items[0].vertices[0].pos;
+        duel.robots[0].health[0] *= 0.5;
+        duel.robots[0].buckle(&mut *duel.physics);
+        let after = duel.robots[0].rig.components[0].items[0].vertices[0].pos;
+        assert!(after[1] <= before[1], "the crush must not reverse");
     }
 
     /// F7: contact is tested between every pair of the robots' bodies, not just

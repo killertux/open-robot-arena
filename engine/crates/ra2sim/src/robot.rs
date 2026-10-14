@@ -330,6 +330,74 @@ impl Robot {
         }
     }
 
+    /// Cave the chassis in as it takes damage (F9).
+    ///
+    /// The bot file marks which points of the chassis model the game may move:
+    /// it subdivides the sides and top, and "every hit then will shift these
+    /// 'buckling' points down and in, causing the sides of the robot to buckle"
+    /// (`tools/vendor/PyRA2/.../Bot file format analysis.txt` §"3D model of bot
+    /// with buckling points"). Until now a chassis only ever died whole.
+    ///
+    /// Both the drawn chassis and its collider follow, so a hurt robot is
+    /// crushed *and* smaller to hit. The movable region is the file's own: the
+    /// lowest buckle point pins the floor plate (the Octagon-sized robots keep
+    /// everything below the mid-height rigid), and the motion grows with height
+    /// above it, so the top caves in furthest.
+    ///
+    /// The direction is the file's ("down and in"); the *rate* is ours — linear
+    /// in the damage the chassis has taken, reaching half its height and half
+    /// its footprint as the last hitpoint goes. Nothing in the shipped bots (all
+    /// 57 are uncrushed: their mesh footprint equals the bottom plate) or in the
+    /// binary's strings gives the original's curve.
+    pub fn buckle(&mut self, physics: &mut dyn PhysicsBackend) {
+        const DOWN: f32 = 0.5;
+        const IN: f32 = 0.5;
+        if self.health.is_empty() || self.rig.components[0].buckle.is_empty() {
+            return;
+        }
+        let max_hp = self.rig.components[0].hitpoints.max(1.0);
+        let fraction = (1.0 - self.health[0] / max_hp).clamp(0.0, 1.0);
+        let c = &mut self.rig.components[0];
+        let step = fraction - c.buckle_fraction;
+        if step <= 1e-4 {
+            return;
+        }
+        c.buckle_fraction = fraction;
+
+        let height = (c.max.y - c.min.y).max(1e-3);
+        let floor = c
+            .buckle
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::MAX, f32::min)
+            .min(c.max.y);
+        let span = (c.max.y - floor).max(1e-3);
+        let crush = |p: &mut Vec3| {
+            let w = ((p.y - floor) / span).clamp(0.0, 1.0);
+            if w <= 0.0 {
+                return;
+            }
+            p.y -= step * DOWN * height * w;
+            // "In": toward the chassis' own centre line, which in component
+            // space is the origin's XZ.
+            let shrink = 1.0 - step * IN * w;
+            p.x *= shrink;
+            p.z *= shrink;
+        };
+
+        for item in c.items.iter_mut() {
+            for v in item.vertices.iter_mut() {
+                let mut p = Vec3::from(v.pos);
+                crush(&mut p);
+                v.pos = p.into();
+            }
+        }
+        for p in c.hull_points.iter_mut() {
+            crush(p);
+        }
+        self.rebuild_part(physics, 0);
+    }
+
     /// Apply damage to a component; returns `true` if it just broke off.
     pub fn damage(&mut self, index: usize, amount: f32) -> bool {
         if index >= self.health.len() || !self.attached[index] {

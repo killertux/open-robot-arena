@@ -242,9 +242,14 @@ Known, documented, not yet fixed:
     `AI/Team8/Bot2`'s rod slide vertically and stall it. Parked pistons hold at
     the definition's force; nothing drives one yet (M4). The 45-bot survey holds
     at **27/45**. **[LANDED]**
-15. **Buckling is chassis deformation, not just detachment.** The format doc
-    describes the game subdividing the chassis faces and holding "buckle points"
-    that shift down/in on every hit. Our M3 model detaches whole parts. **[OPEN]**
+15. **The chassis buckles — landed.** A chassis carries a crush model in the
+    `.bot` (buckle points, plus the top plate's corner quads) that was being read
+    and discarded. As the chassis takes damage the points the file marks as
+    movable shift **down and in** — the floor plate pinned by the lowest of them —
+    and both the drawn chassis and its collider follow. The plate-unit scale is
+    2.2 mm and all 57 stock bots are uncrushed, so the *rate* is ours (linear to
+    half height and half footprint at death) while the direction is the format's.
+    The 45-bot survey is unchanged, bit for bit. **[LANDED]**
 
 16. **Mount-point (attachment frame) alignment — resolved.** The mount *data* was
     already parsed and its field labels corrected; the *placement* rule is now
@@ -336,8 +341,9 @@ The remaining blocker is *behaviour*, not the parts' parameters or the arenas:
    recovered; component `hitpoints` are defaults for 122 of 131 stock parts; and
    `fracture` (a per-hit reduction, on the reading that fits the control board's
    41 and the hazard's 25) and `material` are unparsed.
-3. **F9 — buckling.** The last structural gap in the robot model: the original
-   deforms the chassis rather than detaching whole parts.
+3. **F9's remainder and M4.** Buckling exists but its *rate* is inferred and its
+   silhouette is smooth rather than the game's subdivided crush mesh. The control
+   layer is still what decides fights.
 4. **F6 — the friction combination law**, if the drive survey needs it.
 5. **F4's `contact` surface** as a separate collider, once the `contact` and
    `passthru` object sets can be separated safely.

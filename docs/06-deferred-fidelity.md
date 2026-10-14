@@ -17,7 +17,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F6 | Friction combination law differs from Havok 1.x | blocked on the binding |
 | F7 | Damage model: an event, not a per-step integral | shape landed; numbers half-sourced |
 | F8 | Pistons slide their children (prismatic) | **landed** (nothing drives them yet) |
-| F9 | Buckling is chassis deformation in the original | open |
+| F9 | The chassis buckles (crush points from the `.bot`) | **landed** (rate inferred) |
 | F10 | Chassis skin decals; 16 %-light weight gap | open |
 | F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
 
@@ -743,11 +743,53 @@ first number is metres per second here (a burst piston's `60` would be 60 m/s,
 which is not a piston), so the linear scale is a guess pending the same binary
 work F3 did for the wheel.
 
-## F9 — Buckling is chassis deformation in the original
+## F9 — The chassis buckles — **landed**
 
-The bot-format document describes the game subdividing the chassis faces and
-storing "buckle points" that shift down and in on every hit. Our model only
-detaches whole parts.
+The bot file's chassis carries a crush model, and it was being read and thrown
+away: `bucklePoint`s (a position plus the mesh vertices that meet there) and the
+"top corners" (index quads around the top plate). Both are parsed now, and the
+chassis deforms as it takes damage:
+
+- **What the file says.** The game subdivides the chassis' sides and top, and
+  "every hit then will shift these 'buckling' points down and in, causing the
+  sides of the robot to buckle" (`docs/.../Bot file format analysis.txt` §"3D
+  model of bot with buckling points"); it even saves the crushed model back to
+  the bot file when it can.
+- **What the data gives.** The buckle positions are in the chassis mesh's own
+  space — the plate-point count of them (8 for the Octagon-sized `AI/Team1/Bot0`,
+  6 for `AI/Team8/Bot2`) match mesh vertices exactly, and the rest are points the
+  game adds. The plate outlines scale at **1 unit = 2.2 mm** (verified on two
+  bots with different footprints).
+- **What it does not give.** The vertex *indices* point into the model the game
+  builds at runtime, which is not the one in the file, and the crush's magnitude
+  is nowhere in the data: **all 57 stock bots are uncrushed** (their mesh
+  footprint equals the bottom plate), and the binary has no `buckle`/`crush`
+  string to anchor a constant. So the rule implemented is:
+
+  - the movable region is the file's own — the lowest buckle point pins the floor
+    plate, and the motion grows with height above it, so the top caves in
+    furthest (matching the file: `AI/Team1/Bot0`'s buckle points sit at half
+    height and at the top, none at the floor);
+  - **down and in**, linear in the damage the chassis has taken, reaching half
+    its height and half its footprint as its last hitpoint goes.
+
+  The direction is the format's; the *rate* is ours and marked as such.
+
+Both the drawn chassis and **its collider** follow (the chassis body's shape is
+re-baked), so a hurt robot is visibly crushed *and* smaller to hit — before this
+a chassis only ever died whole. Only the chassis has a buckle model; parts still
+detach.
+
+Verified: a test pins that the movable region's footprint and top shrink while
+the floor plate stays put, and that the crush is monotone; `RA2_BUCKLE=<0..1>` on
+`ra2-duel` renders a chassis crushed to any fraction — two otherwise-identical
+`AI/Team1/Bot0` at 0.0 and 0.8 side by side show only the chassis change (wheels
+and floor plate untouched); and the 45-bot survey is **bit-for-bit unchanged**,
+because an undamaged robot never buckles.
+
+Still open: the crush is smooth rather than faceted (the game's subdivided model
+is what would give it the original's silhouette), and the game *writes the
+crushed model back* on save, which we do not.
 
 ## F10 — Chassis skin decals and the 16 %-light weight gap
 

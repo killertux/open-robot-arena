@@ -117,7 +117,12 @@ local/           # (git-ignored) game files + converted cache
   converts impact speed to points and is calibrated to the game's own numbers:
   its hazards apply a flat 25, and its AI scripts treat `amount > 10` as a good
   hit.
-- **Buckling.** When a part's hitpoints reach zero the whole subtree detaches:
+- **The chassis buckles.** A chassis carries a crush model in the `.bot`
+  (buckle points and the top plate's corners). As it takes damage the points the
+  file marks as movable shift **down and in** — the floor plate stays, the sides
+  cave — and both the drawn chassis and its collider follow (the chassis body's
+  shape is re-baked). Before this a chassis only ever died whole. See F9.
+- **Parts detach.** When a part's hitpoints reach zero the whole subtree detaches:
   each part becomes an independent rigid body at its current world transform,
   gets an outward impulse, and the robot's collider is rebaked from the parts it
   still has. Destroying the chassis ends the fight (the rest scatters).

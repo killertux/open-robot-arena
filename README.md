@@ -107,9 +107,11 @@ wheel's declared `contact` surface is parsed but not yet used as the collider �
 using it makes some robots unable to move. Damage attribution picks the nearest
 part rather than solving per-part contacts, the impact-to-damage conversion is
 calibrated rather than recovered, most components fall back to invented
-`hitpoints`, and the `.txt`'s `fracture` and `material` fields are unparsed. A
-chassis that loses a part is *reshaped* rather than deforming the way the
-original's buckled chassis does; and Jolt combines friction as `sqrt(µ₁·µ₂)`
+`hitpoints`, and the `.txt`'s `fracture` and `material` fields are unparsed. The
+chassis *buckles* as it is hurt — the crush points the bot file marks shift down
+and in, taking the drawn shape and its collider with them — but at an inferred
+rate, and a chassis that loses a *part* is still *reshaped* rather than deforming
+the way the original's does; and Jolt combines friction as `sqrt(µ₁·µ₂)`
 where Havok 1.x used `√(µ₁²+µ₂²)`, which we cannot change through the safe
 binding. Each item is tracked with its evidence and fix path in
 `docs/05-validation-report.md` §4 and `docs/06-deferred-fidelity.md`.

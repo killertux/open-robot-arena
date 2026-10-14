@@ -115,6 +115,18 @@ fn run(
 
     let mut frames: Vec<PathBuf> = Vec::new();
     let mut log_at = 0usize;
+    // Diagnostic: render the chassis crushed to a given fraction (F9), so the
+    // deformation can be looked at without fighting a bout into it.
+    if let Ok(v) = std::env::var("RA2_BUCKLE") {
+        if let Ok(f) = v.parse::<f32>() {
+            for i in 0..duel.robots.len() {
+                let hp = duel.robots[i].rig.components[0].hitpoints;
+                duel.robots[i].health[0] = hp * (1.0 - f.clamp(0.0, 1.0));
+                duel.robots[i].buckle(&mut *duel.physics);
+            }
+            println!("  buckle: chassis crushed to {f:.2}");
+        }
+    }
     // `RA2_DUEL_DRIVE=ram` drives every robot straight ahead instead of running
     // the AI, turning the bout into a deterministic head-on collision. That is
     // how the damage model is observed and tested: with the AI's own approach

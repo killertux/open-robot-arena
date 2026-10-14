@@ -53,8 +53,27 @@ pub struct Chassis {
     pub texture_tga: Option<Vec<u8>>,
     /// Armour type/weight/hardness from the bot's armour row.
     pub armour: Option<Armour>,
+    /// Crush corners of the top plate: `(index, a, b, c)` rows. They are the
+    /// points the game adds to the model, which is why the buckle points'
+    /// vertex indices run past the mesh's own point list.
+    pub top_corners: Vec<[i32; 4]>,
+    /// The chassis' buckle points, from 1.11 onward (F9).
+    ///
+    /// The game subdivides the chassis' faces so its sides can cave in: each of
+    /// these points is a vertex that appears several times in the mesh (once per
+    /// face meeting at it), and a hit shifts them "down and in". `indices` are
+    /// the duplicated vertices that have to move together.
+    pub buckling: Vec<BucklePoint>,
 }
 
+/// One movable point of the chassis' buckle model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BucklePoint {
+    /// Starting coordinates, as the file records them.
+    pub position: [f32; 3],
+    /// Vertices of the chassis mesh that meet at this point.
+    pub indices: Vec<u32>,
+}
 /// Chassis armour, exactly as the bot file records it (see
 /// `Armor_Definitions.txt`: type, weight per square unit, hardness).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -288,7 +307,14 @@ fn parse_chassis(lines: &mut Lines, ver: (i32, i32)) -> Result<Chassis, Error> {
         }
         let nce = lines.i32()?;
         for _ in 0..nce {
-            lines.line();
+            // `index 3 a b c` — the top plate's crush corners.
+            let v = lines.ints()?;
+            ch.top_corners.push([
+                v.first().copied().unwrap_or(0),
+                v.get(2).copied().unwrap_or(0),
+                v.get(3).copied().unwrap_or(0),
+                v.get(4).copied().unwrap_or(0),
+            ]);
         }
     }
     // Armour: a type row, plus an extra row when a 3D model is present.
@@ -307,15 +333,18 @@ fn parse_chassis(lines: &mut Lines, ver: (i32, i32)) -> Result<Chassis, Error> {
     if has_model {
         lines.line(); // armour extra row
     }
-    // Buckling points exist from 1.11 onward (absent in 1.07/1.08).
+    // Buckling points exist from 1.11 onward (absent in 1.07/1.08). Each is a
+    // position plus the mesh vertices that meet there (F9).
     if ver > (1, 8) {
         let bpn = lines.i32()?;
         for _ in 0..bpn {
-            lines.line();
+            let position = lines.vec3()?;
             let ic = lines.i32()?;
+            let mut indices = Vec::new();
             for _ in 0..ic {
-                lines.line();
+                indices.push(lines.i32()? as u32);
             }
+            ch.buckling.push(BucklePoint { position, indices });
         }
     }
     Ok(ch)
