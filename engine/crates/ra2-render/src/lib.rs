@@ -1023,14 +1023,22 @@ pub enum MountMode {
     /// The same, with a 180° rotation about X between the frames — a male plug
     /// into a female socket.
     FramesFlipped,
+    /// The stored transform, resolved *through* the child's own mount frame:
+    /// `M * A_own⁻¹`. The stored offset is where the child's named point goes.
+    StoredOwn,
+    /// Frames *and* the stored transform: `A_parent * M * A_own⁻¹`.
+    FramesStored,
 }
 
 impl MountMode {
-    /// `RA2_MOUNT=stored` (default) | `frames` | `frames-flip`.
+    /// `RA2_MOUNT=stored` (default) | `frames` | `frames-flip` | `stored-own`
+    /// | `frames-stored`.
     pub fn from_env() -> MountMode {
         match std::env::var("RA2_MOUNT").unwrap_or_default().as_str() {
             "frames" => MountMode::Frames,
             "frames-flip" => MountMode::FramesFlipped,
+            "stored-own" => MountMode::StoredOwn,
+            "frames-stored" => MountMode::FramesStored,
             _ => MountMode::Stored,
         }
     }
@@ -1073,6 +1081,31 @@ pub fn component_worlds_mounted(
     world
 }
 
+/// The mount frames of component `i`: the parent-side frame (absent when the
+/// parent has no such point, i.e. the chassis whose only mount is the
+/// baseplate, named `0`) and the inverse of the child's own named point.
+fn mount_frames(
+    bot: &botfmt::Bot,
+    loaded: &[Option<BotComponent>],
+    i: usize,
+) -> Option<(Option<Mat4>, Mat4)> {
+    let c = &bot.components[i];
+    let own = loaded.get(i)?.as_ref()?.scene.attachment_table();
+    let own = own.get(&c.own_mount)?;
+    let own_inv = tm_mat4(&own.transform).inverse();
+    let parent_frame = match loaded
+        .get(c.parent.max(0) as usize)
+        .and_then(|p| p.as_ref())
+    {
+        Some(p) => {
+            let table = p.scene.attachment_table();
+            table.get(&c.parent_mount).map(|a| tm_mat4(&a.transform))
+        }
+        None => None,
+    };
+    Some((parent_frame, own_inv))
+}
+
 /// Height of the chassis' mounting plane, from `RA2_CHASSIS_PLANE` (default 0).
 fn chassis_plane() -> f32 {
     std::env::var("RA2_CHASSIS_PLANE")
@@ -1081,9 +1114,11 @@ fn chassis_plane() -> f32 {
         .unwrap_or(0.0)
 }
 
-/// The relative transform of component `i` on its parent, when a mount frame
-/// applies. Only component-to-component mounts qualify: the chassis has no
-/// `.gmf`, and chassis children are reproduced by the stored transform.
+/// The relative transform of component `i` on its parent for `mode`.
+///
+/// `Stored` returns `None` (use the stored transform alone). Every other mode
+/// folds in the child's own attach frame, and `Frames`/`FramesStored` also the
+/// parent's, so the child's named point is snapped onto the parent's.
 fn mount_link(
     bot: &botfmt::Bot,
     loaded: &[Option<BotComponent>],
@@ -1094,17 +1129,26 @@ fn mount_link(
         return None;
     }
     let c = &bot.components[i];
-    let child = loaded.get(i)?.as_ref()?;
-    let parent = loaded.get(c.parent.max(0) as usize)?.as_ref()?;
-    let own = child.scene.attachment_table();
-    let on_parent = parent.scene.attachment_table();
-    let own = own.get(&c.own_mount)?;
-    let on_parent = on_parent.get(&c.parent_mount)?;
-    let mate = match mode {
-        MountMode::FramesFlipped => Mat4::from_rotation_x(std::f32::consts::PI),
-        _ => Mat4::IDENTITY,
-    };
-    Some(tm_mat4(&on_parent.transform) * mate * tm_mat4(&own.transform).inverse())
+    let local = component_local(c);
+    let (parent_frame, own_inv) = mount_frames(bot, loaded, i).unwrap_or((None, Mat4::IDENTITY));
+    if matches!(mode, MountMode::Frames | MountMode::FramesFlipped) && parent_frame.is_none() {
+        // Nothing on the parent to align to (the chassis, whose only mount is
+        // the baseplate): keep the stored transform.
+        return None;
+    }
+    let parent_frame = parent_frame.unwrap_or(Mat4::IDENTITY);
+    Some(match mode {
+        MountMode::Stored => unreachable!(),
+        MountMode::StoredOwn => local * own_inv,
+        MountMode::Frames | MountMode::FramesFlipped => {
+            let mate = match mode {
+                MountMode::FramesFlipped => Mat4::from_rotation_x(std::f32::consts::PI),
+                _ => Mat4::IDENTITY,
+            };
+            parent_frame * mate * own_inv
+        }
+        MountMode::FramesStored => parent_frame * local * own_inv,
+    })
 }
 
 pub fn component_local(c: &ra2fmt::bot::Component) -> Mat4 {

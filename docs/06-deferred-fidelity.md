@@ -24,10 +24,11 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 
 ## F1 — Mount-point (attachment frame) alignment — top priority
 
-**Status: the data side is done and verified; the placement algorithm is still
-open.** Without it some weapon rotors land in the wrong plane — `AI/Team14/Bot2`
-("Backyard Ripper") renders its disc vertical where the game's own embedded
-snapshot shows it flat.
+**Status: the mount model is now understood from the game's own tools and data;
+the link rule is narrowed to one candidate, `frames-flip`.** Without it the chain
+of a component-to-component assembly collapses (see "The mount model", below),
+which is why the jointed `RA2_ASSEMBLY=parts` path stays opt-in. The 128²
+embedded snapshot is a sanity check only, never an oracle.
 
 ### In the code now
 
@@ -180,6 +181,112 @@ from a metric too coarse to carry the claim. The preview is a sanity check.
 (The same caution applies to the height estimate of ~0.375 m: it is the value
 that makes the wheels' reach the ground *and* the rotor clear the chassis' top,
 but with the rule unsettled it stays an unverified estimate.)
+
+### The mount model, from the shipped tools and the bots' own numbers
+
+This pass went back to the **shipped artifacts** and settled most of the model. The
+decisive sources are the official mod tools that ship with the game.
+
+**(1) A component declares *which* of its mesh objects is its mount point.**
+`#Tools/Component Exporter v1.2 - By Tim/Component Exporter/*.txt` are the
+per-class templates the game's own exporter writes:
+
+| template | the line that matters |
+|---|---|
+| `spinmotor.txt` | `master = motor_master`, `passthru = motor_Axle`, **`attaching = motor_Axle`** |
+| `piston.txt` | **`attaching = piston`**, `prismatic = body, shaft, 0, 0, 1, 0, -.5, 0.4` |
+| `wheel.txt` | `contact = wheel_traction`, `passthru = wheel_collision` |
+| `cutting.txt` | `normal = false -1 0 0`, `decal = single_slash.tga …` |
+
+`attaching` names a **mesh object inside the component's `.gmf`** — exactly the
+objects that carry the `ID`/`Attach`/`Host` payloads we already parse. So a mount
+point is not a tag in a table: it is a mesh object of the model, and its frame is
+the point's frame. That is why `A_own` and `A_parent` are real 4x3 frames.
+
+**(2) The botlab places a component by *snapping its chosen point onto the
+parent's*.** `Tutorials/Mechanics_Tutorial.htm`, verbatim: rotate the preview so
+you can see "the **green attachment point** on the back of the motor. Click it to
+select it. **This means you will be placing the component based on that point.**
+In this case, it will let us place the motor so that the axle faces up from the
+baseplate." And for the next part: "we will use the **green attachment boxes** in
+the preview window to select **one of the side attachment points** instead of the
+default end point". Also: **CTRL raises** a component ("raise the motor up towards
+the top of the chassis so that the axle sticks out") and **SHIFT rotates** it
+("SHIFT rotate the extender when placing it if you would rather its starting
+position be another direction"). That is `parent_mount`/`own_mount` (the two
+named points), `height` (the CTRL lift) and `angle` (the SHIFT spin).
+
+**(3) The `Attach` vocabulary is a mating scheme.** `Base_F`, `Axle_F` (wheels),
+`Axle_M` (`Host = Axle`, motors), `Generic_F`/`Generic_M`. Every chassis child in
+every stock bot uses `own_mount = 1`, which is its **`Base_F`** point, and
+`parent_mount = 0` — the *baseplate*, not an attachment id. The `anchor3` whose
+plug drives this bot carries `Base_F` (id 1) *and* `Generic_M` (id 2); the Z-Tek
+motor carries `base_F, generic_F` (id 2) and `axle_M` (id 3). So the chain
+`chassis → anchor → motor → disc` is `Base_F`-on-baseplate, then
+`Generic_F`-into-`Generic_M`, then `Axle_F`-onto-`Axle_M` — all three mate
+male-to-female.
+
+**(4) The stored quaternion is a *constant per class of link*, not an
+orientation.** `examples/mountdump` prints the raw fields:
+
+- every **chassis child** — all four angle motors, the anchor, the four batteries
+  and the control board — stores `q = (0.707, 0, 0, 0.707)` (90° about X), the
+  *same* value regardless of the component, while the chassis itself stores the
+  identity. So for a chassis child `q` is the **baseplate frame's orientation**.
+- every **component-to-component child** — the four wheels, the Z-Tek motor, the
+  disc, the four anglers and the four axe heads — stores `t = (0, 0, 0)` and
+  `q = identity`. **The stored transform says nothing whatsoever about those
+  links; they are determined entirely by the attachment frames** (plus `angle`).
+
+**(5) Therefore the current default is provably wrong for chains.**
+`RA2_MOUNT=stored` collapses anchor → motor → disc → anglers → axes onto the
+anchor's origin, because every one of those links stores `t = 0, q = 0`. The
+wheels only look right under `stored` because they are the *first* child of a
+motor and their own point sits near their origin. The doc's earlier claim that
+"chassis children are reproduced from the stored transform alone … and it is why
+the wheels come out right" was true but misleading: it is not true of the chain.
+
+**(6) A rule discriminator that needs no snapshot: the wheels must stay upright.**
+Under `StoredOwn` (`M · A_own⁻¹`) every wheel's axle comes out
+`(0, 1, 0)` — a wheel lying flat on its side, physically impossible — which
+**refutes** that rule outright. `Frames` and `FramesFlipped` both keep the axles
+horizontal.
+
+**(7) `frames-flip` is the leading candidate.** It is the only mode that both
+keeps the wheels upright *and* lifts the rotor above the chassis:
+
+| mode | disc origin | axe-head reach | wheels |
+|---|---|---|---|
+| `stored` | collapses onto the anchor | — | upright |
+| `frames` | `y = −0.219` (below the base) | `y = −0.73` | upright |
+| `frames-stored` | `y = +0.219` | `y = −0.34` | upright |
+| `stored-own` | `y = 0` | `y = −0.10` | **flat — refuted** |
+| **`frames-flip`** | **`y = +0.446`** | **`y ≈ +1.0`** | upright |
+
+`frames-flip` is `A_parent · R_x(π) · A_own⁻¹`: a male plug into a female socket
+turns 180° between the frames, which is exactly the mate the payloads describe.
+
+**(8) The snapshot agrees qualitatively — and gives a target.** Viewed (not
+scored) the game's own 128² preview of `AI/Team14/Bot2` shows a large silver disc
+**over the middle of the chassis**, seen face-on, with four claws on its rim. A
+free camera cannot pin a plate's azimuth, so this is a sanity check rather than a
+proof: the correct rule must put a *big* disc *above* the chassis with its normal
+strongly tilted. `frames-flip` does that; the earlier "vertical plate" reading
+came from scoring a silhouette, which cannot carry the claim.
+
+**(9) The disc's geometry, measured from the mesh, not the preview.** `disc5`'s
+plate is radius **0.795 m**, thickness 0.11, centred on its own origin (exported
+with `ra2 obj` to be sure). Its four rim points sit at radius 0.62–0.71 and, under
+the frame rules, the four anglers land **exactly** on them — a good check that the
+rim links are being composed correctly. From the preview the plate's centre wants
+to be at about `(0, 0.8–1.0, 0)` with normal ≈ `(0, 0.71, 0.71)`, i.e. the 45°
+tilt of the `anchor3` wedge. Under `frames-flip` the disc's *origin* is where it
+should be but the *plate* still renders about 0.45 low, so what remains open is
+that offset — not the link rule.
+
+**Exposed as** `RA2_MOUNT=stored` (default) `| frames | frames-flip | stored-own |
+frames-stored`, and `examples/mountdump <bot> [index …]` prints every component's
+world origin and world axes under all five, which is how the table above was made.
 
 ### Decompile progress — the bot object model is mapped
 
