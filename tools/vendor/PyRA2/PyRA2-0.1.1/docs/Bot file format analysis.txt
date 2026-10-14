@@ -1,0 +1,407 @@
+Robot Arena 2 bot file format.
+
+This document describes the contents of a Robot Arena 2 bot save file. The 
+format described is based on examination of files included with RA2, and of 
+export files created with RA2. The format should be correct for file format
+versions 1.07 and 1.12. Note files saved form RA 1.07 don't include several 
+sections, parsers should take this into account when reading.
+
+File consists of newline (0xA0) seperated data entries, with some binary data 
+for the images inserted.
+
+- Data types:
+
+<int>     Integer value
+<float>   Floating point
+<bool>    either 'true; or 'false'
+<str>     ASCII string
+'Text'    String literal
+<binary>  Binary data of fixed length. Read full length, then continue reading 
+          by line; a binary field is nut terminated with a newline.
+
+In this specification, an entry starting with a '+' is a line description. 
+Entries starting with '*' are optional lines, only present when a certain 
+condition is met. If a '~' is appended, the entry consists of 1 or more lines
+(0 or more for optional entries). For clarity, some optional sections have been 
+indented under their condition line, and their lines are marked with '+'; often
+because they contain conditional lines themselves.
+
+Line descriptions consist of a line specification, followed by a ; and a 
+description.
+
+- File layout:
+
+  Every bot file contains the following sections, all described below. These 
+  sections are not explicetly delimited, sections start directly following
+  the last datum of the preceding section.
+
+  - Header
+  - Components
+  - 3D model of bot with buckling points
+  - Forward heading
+  - Controllers
+  - Controller-Component Bindings
+  
+  - Header:
+
+    + <str>; Botfile export version number, formated as major.minor
+    + 'Name:' <str>; Name of bot
+    + 'Class:' <int>; Weight class (0: light, 1: medium, 2: heavy)
+    + <int>; wether or not to apply a default texture when choosing armour 
+             (0/1 instead of a boolean..) *WARNING* Not present in 1.07!
+    + <bool>; snapshot present.
+    * <binary>; Uncompressed Targa32 format snapshot, 128x128 (if previous 
+                line is 'true'). Length: 18 + 4 * 128 * 128 bytes. *NOTE*: 
+                Alpha channel is all set to 0. When exporting, set all alpha 
+                to 255.
+
+  - Components:
+
+    + <int>; Number of components for this bot
+
+    Components are what makes the bot. The first component is the 'Chassis', 
+    the body of the bot. When loading, components should be numbered in the 
+    order they are read starting at 0; any entry that refers to specific 
+    components uses this number. The chassis is thus number 0.
+    
+    All other components are defined in .gmf files, which contain a complete
+    3D model with attachment points defined (to mount other components *on* 
+    or where you attach this component onto the parent component).
+    
+    Note that there is are translation and a rotation lines on the one hand, 
+    and a angle and height line on the other. These positions are stacked, 
+    first the component is rotated, then translated, then it is rotated by the
+    specified angle around the Z axis, and then it is translated along the Z
+    axis by height.
+
+    For every component, there are the following entries:
+
+      + <int>; Id of parent component this item is mounted on (-1 for no 
+      	       mounting)
+      + <int>; Mount point on component
+      + <int>; Mount point on parent component
+      + <float> <float> <float>; translation (x y z)
+      + <float> <float> <float> <float>; rotation of component (w x y z) 
+                                         (quaternion)
+      + <float> <float>; angle (radians) and height, both for the Z axis.
+      + <str>; Component class
+      + <str>; Component datafile path (defaults are in Components.cfz)
+      *~ 0 or more lines component configuration; dependant on component 
+         class, see section on particular component class below.
+
+  - 3D model of bot with 'buckling' points
+
+    In RA2 you destroy bots; the game does this by dividing the triangular 
+    faces that make up the sides and top of the 3D model of the bot into 
+    many more, adding points to construct the vertices and faces. Every
+    hit then will shift these 'buckling' points down and in, causing the sides
+    of the robot to buckle.
+    
+    Calculating the placements of these points, randomizing their place so the
+    crushed model doesn't look too symetrical, and the subsequent 
+    recalculations on every hit must be somewhat timeconsuming for RA2, so it
+    saves a copy of this (partly) crushed model when it can, back to the bot 
+    file. 
+    
+    Another reason RA2 could be saving this data is to remember how badly 
+    banged up your bot was if the player decided to quit the game while still 
+    in the middle of a tournament; this will enable RA2 to pick up where it 
+    had left off when the player continues the tournament.
+    
+    This section holds that model; it starts with a boolean flag indicating if 
+    the model is present.
+    
+    + <bool>; buckle model present *WARNING* Not in version 1.07!
+    *~ 3D model data (only of flag is 'true'). See section on 3D data below 
+       for a full description.
+
+  - Forward Heading
+
+    + <float>; Forward heading of robot, in radians. *WARNING* Not present in 
+               1.07!
+
+  - Controllers
+
+    Remote control setup.
+
+    + <int>; number of controllers.
+
+    For every controller, there are the following entries:
+
+    | + 'Name:' <str>; Name of control
+    | + <int> <int> <int>; Position (x y) on remote and type of controller.
+    |                      x and y are 0-2, type is one of:
+    |                      1: Analog;  2: Switch;  3: ??;  4: Button
+    | + <int>; Number of keyboard/joystick bindings.
+    |
+    | Keyboard/joystick bindings should be numbered starting at 0.
+    | For for each keybinding:
+    |
+    |   + <int> <int> <int> <int>; keyboard/joystick codes, 3th is scancode.
+    |                              (unsure) *WARNING*: 1.07 has only 3 fields!
+    |                              Either 1st or 2nd field is not there.
+
+  - Controller-Component Bindings
+
+    + <int>; number of bindings.
+
+    | For each binding:
+    |
+    | + <int>; Component number
+    |
+    | + <str>; Action component should take ('Spin Clockwise', etc). This 
+    |          depends on what the component supports.
+    |
+    | + <int> <int> <int>; Controller position (x y) and keyboard binding 
+    |                      number.
+
+- Components
+
+  Bots are constructed from various components, beginning with the chassis. 
+  Each component category can have optional configuration data, usually 1 line
+  The exception is the chassis configuration, which includes the full 3D model, 
+  and a texture map, plus assorted data points about the chassis. This section 
+  describes the various component classes and their options.
+  
+  - Chassis component
+  
+    The chassis is the main body of the bot, and it's data section is by far 
+    the largest part in the file. It consists of a number of sections itself:
+    
+    - Base and top outline geometry, and height.
+    - 3D model and textures
+    - Bot armouring data
+    - Buckling points
+    
+    Following are descriptions of these sections.
+    
+    - Geometry
+    
+      + <int>; bottom plate pointcount (ranges from 0 to 15).
+      +~ <int> <int>; pointcount bottom plate points (x y), values range from
+                      0-1000
+      + <int>; top pointcount (either 0 or equal to bottom pointcount).
+      +~ <int> <int>; pointcount top points (x y).
+      + <float> <int>; height of chassis and face count. Height ranges from 
+                       about 0.44 to 1.32.
+                       
+    - 3D model and textures
+    
+      This section, if it's first line is 'true', contains a full 3D model of 
+      the chassis, and texture data.
+      
+      + <bool>; model and textures present.
+      
+      If 'true':
+      
+      | +~ 3D model data (see the '3D data' section below).
+      | + <bool>; Texture map included (next entry)
+      | * <binary>; Uncompressed Targa32 format texturemap, 256x256.
+      |             Length: 18 + 4 * 256 * 256 bytes. *NOTE*: Alpha channel 
+      |             is all set to 0. When exporting, set all alpha to 255.
+      | + <bool>; Flag for unknown section. If set to true, RA expects to be 
+      |           able to read another section here. *WARNING* This flag is
+      |           *not* present in version 1.07 of the file format!
+      | *~ Unknown section, present when previous flag is true. No botfiles 
+      |    included with RA2 use this flag. (Maybe a bumpmap?)
+      |    
+      | The following lines describe what portions of the texture map are 
+      | being used to 'dress' the 3D model; these values presumably are used
+      | by the painter module of the RA2 bot editor.
+      | 
+      | + <int>; number of face groups (made up of multiple 3D triangles, one 
+      |          face group for each robot side, includes top and bottom)
+      | 
+      |   For every face group:
+      |   
+      |   + <int>; number of points
+      |   +~ <float> <float>; (x y) coordinates on the texture map, all points 
+      |                       together make a precise indication of what 
+      |                       portion of the image is being used for this 
+      |                       group.
+      |                       
+      | Face groups are numbered, starting at 0, later entries refer to these 
+      | numbers.
+      |                       
+      | + <int>; number of groups again
+      | +~ <int> <int> <int> <int> <int>; For each group: group index, x1 y1,
+      |                                   x2 y2. These are bounding boxes,
+      |                                   squares on the texture map that fit
+      |                                   completely around each texture map
+      |                                   area described above.
+      |                                   
+      | + <int>; number of face entries
+      | +~ <int> <int> <int> <int>; groupindex and 3 pointindexes; specifies 
+      |                             what faces (formed by the indicated 
+      |                             points) form a given group.
+      |
+      | The following lines specify what points form the top corners of the 
+      | bot; this data is used to track what points to move in unison when
+      | receiving damage. Every corner has always 3 points associated with it,
+      | each for one of the faces that join there.
+      | 
+      | + <int>; Number of corner entries.
+      | +~ <int> '3' <int> <int> <int>; corner number, number of points (3), 
+      |                                 then that number of point indexes 
+      |                                 (from the model data specified earlier).
+
+    - Bot armour data
+    
+      The next set of lines tell RA what kind of armour is used, how hard the 
+      armour is and how heavy that is (see also the 'Robot weight' section).
+      
+      Note that Robots created with the RA bot editor, use the following table 
+      for material harness, but that the computer-controlled bots often have a 
+      higher armour hardness specified.
+      
+                Armour type     Weight  Hardness
+                0 (Plastic)     8       80
+                1 (Aluminium)   12      100
+                2 (Steel)       20      175
+                3 (Titanium)    16      150
+      
+      + <int> <int> '0' <int> '0'; Armour type, weight per square unit surface
+                                   area, a zero (unused field?), armour 
+                                   hardness, another zero (unused field?).
+                                   
+      The following line holds numbers that seem to directly relate to the
+      armour type; they are constant for a given armour type when creating a
+      bot in the RA2 bot workshop; the values can be picked from the following
+      table:
+      
+                Type    Line values
+                0       0.2669 0.2669 0.19975 0.85 80
+                1       0.19975 0.19975 0.19975 0.85 20
+                2       0.3332 0.30005 0.30005 0.85 10
+                3       0.40035 0.4998 0.63325 0.85 60
+                
+      Computer controlled bots however, often have different values. One 
+      guess is how well the different types of armour can withstand different 
+      types of damage; weapons have both piercing and concussion capabilities
+      for example. Another possibility is that these values specify material 
+      properties such as shininess and specular highlight color.
+      
+      * <float> <float> <float> <float> <int>; Armour data (unsure). This line 
+                                               is only present when the 3D 
+                                               model is present in the file.
+
+  - Buckling points
+  
+    As described in the '3D model of bot with buckling points' section, RA2
+    adds points to the faces of the bot model to allow those faces to buckle
+    under damage. This section specifies where those points are, with starting
+    coordinates and point indexes (every point occurs multiple times as part 
+    of multiple faces coming together at that point). This data can then be 
+    used to move these points in unison when damage occurs.
+    
+    *WARNING* This section is not present in version 1.07!
+    
+    + <int>; pointcount
+    
+      For every point:
+      
+      + <float> <float> <float>; Starting coordinates of point.
+      + <int>; indexcount
+      +~ <int>; indexcount number of lines with index of buckling point in
+                new 3D model with these points added.
+
+  - Other component classes
+
+    - BurstMotor
+  
+      BurstMotors are motors that quickly rotate from their start to their end 
+      angle when triggered, then rotate back again. The BurstMotor class takes 
+      one extra configuration line:
+    
+      + <float> <float>; start and stop angles (radians)
+      
+      The stop angle is relative to the start angle. Note: the start angle is 
+      dependant on what mountpoint is being used; mounting a burst motor on 
+      it's head attachmentpoint will give you a different starting angle. The 
+      axis is kept level, so if an attachmentpoint will rotate the motor by 
+      1/4 turn, the axis starting point is moved 1/4 turn back.
+      
+    - SmartZone
+    
+      This is a hidden component (not available for custom bot builds) that
+      define a zone for the computer AI to receive events for. The component
+      takes 1 extra line of configuration:
+      
+      + <string>; smartzone name
+      
+    All other component classes do not expect extra parameters.
+
+- 3D data
+
+  Some sections include 3d model data. Model data consists of a header line 
+  specifying total data points, a line specifying the number of models in the 
+  section, and for each model, a line giving quantities of data for that model, 
+  a line with the text 'RAW', and the model data itself, which consists of 
+  points information and indexes used to create faces.
+  
+  Point information consists of normal vectors (x, y and z), texture indices
+  (a, b) and the points themselves (x, y and z values); all values are 
+  floating point numbers. Vector and point coordinates range from 0 to 1.1.
+  Texture indices range from 0.0 to 1.0, tying points to coordinates on a
+  texture map. A left-handed coordinate system is used; +X is left, +Y is 
+  away from the camera, and +Z is up.
+  
+  First all the normals are specified, then all the texture coordinates, then 
+  all the points. When reading, group the first normal with the first texture 
+  coordinate and point, and store these under index 0. Keep grouping normal 
+  vectors, texture coordinates and points and incrementing the index, until all
+  points have been read.
+  
+  Then read all index values, and use every three to make a face from the
+  points indicated by the index values. So if the first three index lines 
+  read (2, 1, 3), use points 2, 1, and 3 to make a 3D face, making sure to 
+  use the included normal vector for each point to ensure smooth surfaces 
+  where needed, and the texture coordinates to apply a texture map to the 
+  model. Faces are specified in a counter-clockwise direction.
+  
+  + '274' <int> <int> <int>; total pointcount, total indexcount, total
+                             facecount. (unsure if the value '274' could
+                             ever be anything else.)
+  + '1'; Number of models (always one)
+  
+  Per model in this section:
+  
+    + <int> <int> <int> '0'; indexcount facecount pointcount, and a 0; 
+                             (unsure, all models so far seen have the 0, 
+                             possibly color vertice count?)
+    + 'RAW'; Marker for the raw model data
+    +~ <float> <float> <float>; pointount lines with normal vectors (x y z)
+    +~ <float> <float>; pointcount lines with texture coordinate (x y).
+    +~ <float> <float> <float>; pointcount lines with points (x y z)
+    +~ <int>; indexcount lines with each a face index.
+
+- Robot weight
+
+  Robots are divided into classes by weight according to the following table:
+  
+        Class           Kg
+        Lightweight     < 250
+        Medium          250-400
+        Heavy           > 400
+        
+  Weight is the total sum of all component weights, plus the weight of the 
+  chassis. Chassis weight is calculated with a simple formula based on the 
+  surface area of the 3d model faces times the armour weight per square 
+  'unit'. The unit choosen is the same as the 3D unit size; a 3d face 
+  with an area of 1 square unit using steel armouring, weighs 20 Kg.
+  
+  Armour weight is listed in the bot file, and varies with the armour type 
+  choosen. Here is the table:
+  
+        Type ID Armour type     Kg per sq. unit
+        0       Plastic         8
+        1       Aluminium       12
+        2       Steel           20
+        3       Titatium        16
+
+  Note that some of the AI robots have had their classification manually 
+  adjusted downwards; 'Mud Runner', for example weighs 418.6 Kg, but is still
+  listed in the Medium class. 5 other bots also had their class adjusted, 
+  although none exceed their class as much as Mud Runner does.
+  
+Copyright (C) 2003  Martijn Pieters <pyra2@zopatista.com>

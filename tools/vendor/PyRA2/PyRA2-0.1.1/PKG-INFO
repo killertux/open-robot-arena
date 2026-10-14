@@ -1,0 +1,40 @@
+Metadata-Version: 1.0
+Name: PyRA2
+Version: 0.1.1
+Summary: Python support for Robot Arena 2 file formats.
+Home-page: http://sf.net/projects/pyra2
+Author: Martijn Pieters
+Author-email: pyra2@zopatista.com
+License: http://www.gnu.org/licenses/lgpl.txt
+Download-URL: http://sf.net/project/showfiles.php?group_id=81504
+Description: PyRA2 is a set of Python packages (libraries) and documentation providing access
+        to the file formats of Robot Arena 2 (tm) (RA2), a game by Gabriel Interactive
+        (published by Infogrames). RA2 allows a player to design new robots (consisting
+        of a chassis and a set of components), and use these robots to fight
+        computer-controlled robots and, in a multi-player setting, the robot designs of
+        other players. For more information about this game, see
+        http://www.robotarena.com/.
+        
+        Goals of PyRA2 are:
+        
+        - Enabling a robot design exchange website for the player community, with VRML
+        previews of available robots.
+        
+        - Modification and creation of robot designs outside of RA2.
+        
+        - Modification and creation of new components and arenas.
+        
+Platform: any
+Classifier: Development Status :: 2 - Pre-Alpha
+Classifier: Environment :: Console
+Classifier: Environment :: Other Environment
+Classifier: Environment :: Web Environment
+Classifier: Environment :: Win32 (MS Windows)
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: GNU Library or Lesser General Public License (LGPL)
+Classifier: Natural Language :: English
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python
+Classifier: Topic :: Internet :: WWW/HTTP :: Dynamic Content
+Classifier: Topic :: Games/Entertainment
+Classifier: Topic :: Multimedia :: Graphics

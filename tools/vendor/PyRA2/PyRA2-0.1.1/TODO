@@ -1,0 +1,19 @@
+General
+
+  - Factor out RO-list
+
+GMIModel
+
+  - VRML export
+  
+    - Two sided isn't tested (or even fleshed out yet).
+
+  - More accessors
+
+  - GMI Export? Would need setters as well as getters.
+
+RA2Bot
+
+  - More accessors
+  
+  - Bot export? Would need setters as well as getters.

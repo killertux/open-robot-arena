@@ -1,0 +1,19 @@
+# Game data is archived abandonware and is NOT redistributed by this project.
+# Keep all original/shared game files local and out of version control.
+/local/
+/downloads/
+/out/
+
+# Build artifacts
+/target/
+/build/
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.exe
+
+# Editor / OS cruft
+.DS_Store
+*.swp

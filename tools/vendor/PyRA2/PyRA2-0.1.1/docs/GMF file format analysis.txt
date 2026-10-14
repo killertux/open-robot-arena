@@ -1,0 +1,32 @@
+GMF file format analysis
+
+This is a binary version of the 3D Studio Max ASCII export format (.ase), 
+plus additional information needed for the RA2 bot workshop (attachment points)
+
+Online sources on the format:
+
+- http://astronomy.swin.edu.au/~pbourke/geomformats/ase/
+- http://nate.scuzzy.net/docs/ase/
+- http://www.solosnake.fsnet.co.uk/main/ase.htm
+- ASE loading code: http://www.demogl.com/files/demogl_utils_lib.zip
+- Official SDK and other materials: http://sparks.discreet.com/downloads/
+
+An actual text equivalent of a GMF file can be found in
+Components/cannon_txt.gmf; there are several others as well in the Arenas area
+too (search for *_txt.gmf)
+
+To read: First 19 bytes is preamble. Type info I expect (starts with the magic
+'GMI').
+
+Then read each chunk (12 bytes intro, unpack('iii') for type numbers and
+lenght). If not interesting, seek ahead to next section. Some sections have the
+wrong length count, or no length count at all! Clearly, RA2 ignores these for
+its purposes.
+
+Type numbers: section identifier and a 2 or 4. What does the 2 and 4 mean? A
+section always has a 2 or a 4, consistently across all files; you'll never see
+the same section type with a 2 in one place and a 4 in another. Maybe 2 is
+'container' while 4 means 'leaf node', although this doesn't quite fit with the
+purpose of some nodes.
+
+Copyright (C) 2003  Martijn Pieters <pyra2@zopatista.com>

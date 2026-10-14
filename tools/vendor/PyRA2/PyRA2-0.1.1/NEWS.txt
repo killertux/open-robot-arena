@@ -1,0 +1,23 @@
+News
+====
+
+0.1.1 (2003-11-24)
+------------------
+
+New features:
+
+- *bot2vrml.py*: Make component link base configurable through the -c command 
+  line switch, as the default (``..\Components\``) doesn't make much sense.
+
+Bug fixes:
+
+- *RA2Bot*: Fix component link generation in bot VRML exports (missing .wrl 
+  extension)
+  
+- *bot2vrml.py*: Save snapshots in the same directory as the export.
+
+
+0.1.0 (2003-11-18)
+------------------
+
+Initial release to the public.
