@@ -1,0 +1,1 @@
+/home/bruno/Projects/open-robot-arena/engine/target/release/libra2fmt.rlib: /home/bruno/Projects/open-robot-arena/engine/crates/ra2fmt/src/gmi.rs /home/bruno/Projects/open-robot-arena/engine/crates/ra2fmt/src/lib.rs

@@ -128,6 +128,33 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   BOT Editor (TGA extract/import), CFZ Compiler, MakeCFL/UnCFL, Component Exporter.
 - `tools/extract_sfx.py` — stream-zip extractor (superseded by Wine install).
 
+## 6b. Full script API inventory (from shipped `.py`)
+
+The game ships readable Python under `AI/` and `Arenas/`, which together with
+`Scripts/` document the engine bindings:
+
+**AI layer** (`AI/*.py`): `AI/Bindings.py, Chopper, Flipper, Poker, Pusher,
+Rammer, SimpleWeapon, Spinner, Whipper, Tactics, Other, nobrain, __init__`.
+- Base class `AI.SuperAI` with `Activate(active)`, `Tick()`, `Input(trigger, x, y)`,
+  `RegisterSmartZone(name, n)`, `CanDriveUpsideDown(bot)`; attrs `sensors`,
+  `weapons`, `tactics`, class attr `debugging`.
+- Modules imported by scripts: `plus`, `AI`, `Arenas`, `Gooey`, `Tactics`, and
+  `AI.vector3` (a 3-vector type exposed from C++).
+- `plus` functions seen: `plus.isDefeated(bot)`, `plus.isUpsideDown(bot)`,
+  plus earlier `plus.Arena.Tick`, `plus.addWindow/addText`.
+
+**Arena layer** (`Arenas/*.py`): `box, Bridge, clawtop, compressor, electric,
+event_results, flextop, half, Hazards, hilltop, king, octagon, parkinglot, Skull,
+__init__`.
+- Base class `Arenas.SuperArena` (+ `Arenas.register(cls)`), with
+  `SetShadowSource`, `AddShadowTriangle`, `AddXtra`, `AddXtraSound`, `RemoveXtra`,
+  `Tick`, and arena class attrs `name`, `preview`, `in_list`.
+
+**Implication for the port:** bot AI, arena hazards, and a lot of match logic are
+*Python data*, not compiled code. A native engine needs to reproduce the `plus` /
+`AI` / `Arenas` / `Gooey` object model and either embed a Python runtime (to run
+the original scripts) or provide a native reimplementation of the same API.
+
 ## 7. Open questions for Stage 1/2
 
 1. Direct3D 8 usage specifics: vertex/pixel shader model, fixed-function pipeline,

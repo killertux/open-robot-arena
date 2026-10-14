@@ -1,0 +1,149 @@
+//! `ra2` — command line probe/converter for Robot Arena 2 data files.
+
+use std::process::ExitCode;
+
+use ra2fmt::gmi::{self, GmiScene, ObjectKind};
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match args.as_slice() {
+        ["info", files @ ..] if !files.is_empty() => {
+            for f in files {
+                if let Err(e) = info(f) {
+                    eprintln!("{f}: ERROR: {e}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        ["obj", input, output] => match obj(input, output) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        _ => {
+            eprintln!("usage:");
+            eprintln!("  ra2 info <file.gmf> [...]");
+            eprintln!("  ra2 obj  <file.gmf> <out.obj>");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let data = std::fs::read(path)?;
+    println!("\n=== {path} ({} bytes) ===", data.len());
+    let scene = gmi::parse(&data)?;
+    println!("  materials: {}  objects: {}", scene.materials.len(), scene.objects.len());
+    for m in &scene.materials {
+        let tex: Vec<&str> = m
+            .textures
+            .iter()
+            .map(|t| t.bitmap.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+        println!(
+            "    mat {:?} class={:?} tex=[{}]",
+            m.name,
+            m.class,
+            tex.join(", ")
+        );
+    }
+    for o in &scene.objects {
+        match &o.kind {
+            ObjectKind::Geometric => {
+                if let Some(mesh) = &o.mesh {
+                    println!(
+                        "    mesh {:?} verts={} faces={} uv={} mat={}{}",
+                        o.name,
+                        mesh.points.len(),
+                        mesh.faces.len(),
+                        mesh.texcoords.len(),
+                        mesh.material_ref,
+                        if mesh.is_collision() { " [collision]" } else { "" }
+                    );
+                }
+            }
+            ObjectKind::Attachment => {
+                let d = o.data.replace(['\r', '\n'], " ");
+                println!("    attach {:?} data={:?}", o.name, d.trim());
+            }
+            ObjectKind::RigidBodies => {
+                println!("    rigidbodies {:?}: {} bodies", o.name, o.rigid_bodies.len());
+                for rb in &o.rigid_bodies {
+                    println!(
+                        "        rb {:?} mass={:.3} geo_type={}",
+                        rb.name, rb.mass, rb.geo_type
+                    );
+                }
+            }
+            ObjectKind::Constraints => println!("    constraints {:?}", o.name),
+            ObjectKind::Simulation => {}
+            ObjectKind::Light => println!("    light {:?}", o.name),
+            ObjectKind::Camera => println!("    camera {:?}", o.name),
+            ObjectKind::Dashpot => println!("    dashpot {:?}", o.name),
+            ObjectKind::Unknown(id) => println!("    unknown node id={id}"),
+        }
+    }
+    Ok(())
+}
+
+fn obj(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let data = std::fs::read(input)?;
+    let scene = gmi::parse(&data)?;
+    let mut out = String::new();
+    out.push_str("# exported from Robot Arena 2 .gmf\n");
+    let mut vbase = 0usize;
+    let mut n_meshes = 0;
+    for (i, o) in scene.objects.iter().enumerate() {
+        let Some(mesh) = &o.mesh else { continue };
+        if mesh.is_collision() {
+            continue;
+        }
+        n_meshes += 1;
+        let name = if o.name.is_empty() { format!("mesh{i}") } else { sanitize(&o.name) };
+        out.push_str(&format!("o {name}\n"));
+        for p in &mesh.points {
+            out.push_str(&format!("v {:.6} {:.6} {:.6}\n", p[0], p[1], p[2]));
+        }
+        for t in &mesh.texcoords {
+            out.push_str(&format!("vt {:.6} {:.6}\n", t[0], 1.0 - t[1]));
+        }
+        let has_uv = !mesh.texfaces.is_empty() && mesh.texfaces.len() == mesh.faces.len();
+        for (idx, f) in mesh.faces.iter().enumerate() {
+            let (a, b, c) = (f.v[0] as usize, f.v[1] as usize, f.v[2] as usize);
+            if has_uv && !mesh.texcoords.is_empty() {
+                let tf = mesh.texfaces[idx];
+                out.push_str(&format!(
+                    "f {}/{} {}/{} {}/{}\n",
+                    vbase + a + 1, tf[0] + 1,
+                    vbase + b + 1, tf[1] + 1,
+                    vbase + c + 1, tf[2] + 1
+                ));
+            } else {
+                out.push_str(&format!(
+                    "f {} {} {}\n",
+                    vbase + a + 1,
+                    vbase + b + 1,
+                    vbase + c + 1
+                ));
+            }
+        }
+        vbase += mesh.points.len();
+    }
+    std::fs::write(output, out)?;
+    println!("wrote {output}: {n_meshes} meshes");
+    Ok(())
+}
+
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_alphanumeric() || "._-".contains(c) { c } else { '_' })
+        .collect()
+}
+
+// Keep the (unused-for-now) type import honest.
+#[allow(dead_code)]
+fn _assert_scene(_: &GmiScene) {}
