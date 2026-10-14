@@ -1068,12 +1068,16 @@ pub fn component_worlds_mounted(
             continue;
         }
         let parent = c.parent as usize;
-        // A BurstMotor poses its children at its start (rest) axle angle.
+        // A BurstMotor swings its axle about the axle's own axis, so its
+        // children ride along. When a mount frame is available the rotation goes
+        // *inside* the link (about the point's Z, through the point's origin);
+        // see `mount_link`. Only the stored-transform fallback needs it here,
+        // where the only pivot available is the parent's origin.
         let rest = match bot.components[parent].burst_angles {
             Some([start, _]) => Mat4::from_rotation_z(start),
             None => Mat4::IDENTITY,
         };
-        let link = mount_link(bot, loaded, i, mode).unwrap_or(local);
+        let link = mount_link(bot, loaded, i, mode);
         // Height of the chassis' mounting plane. The stored translation's Y is
         // always 0 in every stock bot, so the height of a chassis-mounted part
         // has to come from the chassis' own mount frame.
@@ -1082,7 +1086,10 @@ pub fn component_worlds_mounted(
         } else {
             Mat4::IDENTITY
         };
-        world[i] = world[parent] * base * rest * link;
+        world[i] = match link {
+            Some(link) => world[parent] * base * link,
+            None => world[parent] * base * rest * local,
+        };
     }
     world
 }
@@ -1154,10 +1161,42 @@ fn mount_link(
                 MountMode::FramesFlipped => Mat4::from_rotation_x(std::f32::consts::PI),
                 _ => Mat4::IDENTITY,
             };
-            parent_frame * mate * own_inv
+            // Two rotations turn the child about the mount axis, and each sits
+            // in the frame it belongs to:
+            //
+            // - `angle` is the free spin the player dialled in with SHIFT. It is
+            //   a property of the *placement*, so like a chassis child's `angle`
+            //   (which sits inside the stored transform) it is applied in the
+            //   child's own point's frame.
+            // - a burst motor's start angle is the *axle* turning, so it is
+            //   applied on the parent's side.
+            //
+            // Both axes pass through the child's named point, so neither moves
+            // it: the snap survives.
+            //
+            // The axis is the mount normal, i.e. the point's Z: in AI/Team14/Bot2
+            // the four rim angles of disc5's points 2..5 — at +Y, +X, -Y and -X
+            // in the disc's plane — are exactly 0, pi/2, pi, 3pi/2, which only a
+            // spin about that axis explains. Which way it winds is settled by
+            // AI/Team6/Bot2's own preview: see F1.
+            let axle = Mat4::from_rotation_z(burst_start(bot, c.parent));
+            let aim = Mat4::from_rotation_z(c.angle);
+            parent_frame * axle * mate * aim * own_inv
         }
         MountMode::FramesStored => parent_frame * local * own_inv,
     })
+}
+
+/// The start (rest) angle of `parent`'s axle, when it is a burst motor.
+fn burst_start(bot: &botfmt::Bot, parent: i32) -> f32 {
+    match bot
+        .components
+        .get(parent.max(0) as usize)
+        .and_then(|p| p.burst_angles)
+    {
+        Some([start, _]) => start,
+        None => 0.0,
+    }
 }
 
 pub fn component_local(c: &ra2fmt::bot::Component) -> Mat4 {
@@ -1686,13 +1725,10 @@ mod tests {
     /// F1: the shipped rule must actually *snap* each chain link.
     ///
     /// A `.bot` names a point on the child and the point it mates with on the
-    /// parent; the placement has to bring those two points together. The test
-    /// also proves it has teeth: under `stored` the same links miss badly.
-    ///
-    /// Burst-motor parents are skipped: their children are posed at the start
-    /// angle, and `component_worlds_mounted` applies that rotation *before* the
-    /// parent's mount frame rather than about the axle, so the points do not
-    /// meet (a separate, still-open ordering issue).
+    /// parent; the placement has to bring those two points together, which also
+    /// constrains how `angle` and a burst motor's start angle may be applied:
+    /// both must turn about the parent point's Z, through its origin. The test
+    /// also proves it has teeth — under `stored` the same links miss badly.
     #[test]
     fn chain_links_snap_onto_the_parent_point() {
         let bots = stock_bots();
@@ -1709,8 +1745,8 @@ mod tests {
                 let Some(lc) = lc else { continue };
                 let c = &bot.components[i];
                 let parent = c.parent.max(0) as usize;
-                if parent == 0 || parent >= i || bot.components[parent].burst_angles.is_some() {
-                    continue; // the chassis has no `.gmf`; see the note above
+                if parent == 0 || parent >= i {
+                    continue; // the chassis has no `.gmf`: nothing to snap to
                 }
                 let Some(parent_scene) = loaded.get(parent).and_then(|p| p.as_ref()) else {
                     continue;
@@ -1745,6 +1781,103 @@ mod tests {
         assert!(
             stored_misses > 100,
             "the test has no teeth: only {stored_misses} links miss under `stored`"
+        );
+    }
+
+    /// F1: `angle` must turn each chain link about the **mount axis**.
+    ///
+    /// `AI/Team14/Bot2` is the clean case: four identical anglers hang on the
+    /// disc's four rim points, which are 90° apart but share their axes, and
+    /// their `angle` values are exactly the rim azimuths (0, pi/2, pi, 3pi/2).
+    /// Undoing the spin by that angle — one way round or the other — must make
+    /// all four arms coincide. That is what proves the rotation is about the
+    /// mount normal rather than the point's Y or a world axis; a wrong axis
+    /// leaves the four arms scattered either way.
+    ///
+    /// Exactly one winding may work. Which one is a convention, settled by the
+    /// bots' own previews (see F1), so it is deliberately *not* asserted here.
+    #[test]
+    fn the_mount_spin_turns_about_the_mount_axis() {
+        let path = {
+            let bots = stock_bots();
+            match bots
+                .iter()
+                .find(|p| p.ends_with("Team14/Bot2.bot") || p.ends_with("Team14\\Bot2.bot"))
+            {
+                Some(p) => p.clone(),
+                None => return, // game data not available
+            }
+        };
+        let (bot, _root, loaded) = load_bot_components(path.to_str().unwrap()).unwrap();
+        let world = component_worlds_mounted(&bot, &loaded, MountMode::FramesFlipped);
+        let label = |i: usize| {
+            loaded
+                .get(i)
+                .and_then(|l| l.as_ref())
+                .map(|l| l.label.clone())
+                .unwrap_or_default()
+        };
+        let disc = world
+            .iter()
+            .enumerate()
+            .find(|(i, _)| label(*i).contains("Disc"))
+            .map(|(i, m)| (i, m.transform_point3(Vec3::ZERO)))
+            .expect("no disc in Bot2");
+        let m = world[disc.0];
+        let axes = [
+            m.transform_vector3(Vec3::X).normalize(),
+            m.transform_vector3(Vec3::Y).normalize(),
+            m.transform_vector3(Vec3::Z).normalize(),
+        ];
+        let to_disc = |v: Vec3| Vec3::new(v.dot(axes[0]), v.dot(axes[1]), v.dot(axes[2]));
+        let spin_z = |v: Vec3, t: f32| {
+            Vec3::new(
+                v.x * t.cos() - v.y * t.sin(),
+                v.x * t.sin() + v.y * t.cos(),
+                v.z,
+            )
+        };
+
+        // (angle, arm in the disc's frame) for each angler.
+        let mut links: Vec<(f32, Vec3)> = Vec::new();
+        for (i, m) in world.iter().enumerate() {
+            if !label(i).contains("Angle Connector") {
+                continue;
+            }
+            let parent = bot.components[i].parent.max(0) as usize;
+            if parent != disc.0 {
+                continue;
+            }
+            let angler = m.transform_point3(Vec3::ZERO);
+            let Some((_, claw_world)) = world
+                .iter()
+                .enumerate()
+                .find(|(j, _)| bot.components[*j].parent == i as i32)
+            else {
+                continue;
+            };
+            let claw = claw_world.transform_point3(Vec3::ZERO);
+            links.push((bot.components[i].angle, to_disc(claw - angler).normalize()));
+        }
+        assert_eq!(links.len(), 4, "expected four anglers, saw {}", links.len());
+
+        let spread = |winding: f32| {
+            let v: Vec<Vec3> = links
+                .iter()
+                .map(|(a, arm)| spin_z(*arm, winding * a))
+                .collect();
+            let mut worst = 0.0f32;
+            for i in 0..v.len() {
+                for j in (i + 1)..v.len() {
+                    worst = worst.max((v[i] - v[j]).length());
+                }
+            }
+            worst
+        };
+        let (plus, minus) = (spread(1.0), spread(-1.0));
+        assert!(
+            (plus < 1e-2) ^ (minus < 1e-2),
+            "expected exactly one winding to line the arms up, got +1:{plus} -1:{minus}"
         );
     }
 }

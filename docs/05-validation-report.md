@@ -220,17 +220,18 @@ Known, documented, not yet fixed:
     describes the game subdividing the chassis faces and holding "buckle points"
     that shift down/in on every hit. Our M3 model detaches whole parts. **[OPEN]**
 
-15. **Mount-point (attachment frame) alignment is missing — found while building
-    the jointed assembly.** The mount *data* is now parsed and the field labels
-    corrected (see F1); the *placement algorithm* is still open. A component is placed by its own translation,
-    quaternion, mount `angle` and `height` only. The original also aligns the
-    child's attachment point (`mC` in the `.bot`) to the parent's (`mP`), and a
-    `.gmf` attachment carries a full transform, so the real placement is
-    `local_parent * frame(parent, mP) * inverse(frame(child, mC))`. The game's own
-    snapshot of `AI/Team14/Bot2.bot` shows its rotor lying **flat on top**, while
-    we render it **vertical**. **This means the M1 claim "all 57 bots are placed
-    correctly" holds for position and wheels but is approximate for
-    orientations.** **[OPEN — top priority]**
+15. **Mount-point (attachment frame) alignment — resolved.** The mount *data* was
+    already parsed and its field labels corrected; the *placement* rule is now
+    settled and is the default: a component is placed by
+    `A_parent · R_z(start) · R_x(π) · R_z(angle) · A_own⁻¹` — the parent's mount
+    frame, a male plug turned 180° into a female socket, the player's free spin and
+    the child's own point. It is the only rule that keeps every wheel's axle
+    horizontal *and* lifts a rotor clear of the chassis, and it reproduces the
+    stock bots' own previews. Note the claim in the original entry — that the game's
+    snapshot shows the rotor "flat on top" while we render it vertical — was a
+    misreading of a 128² preview; the rule was fixed from the attachment data and
+    the mod tools instead. See F1 in
+    [`06-deferred-fidelity.md`](06-deferred-fidelity.md).
 
 Each of these is tracked with its evidence and fix path in
 [`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F10).
@@ -273,27 +274,26 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | All 12 arena scripts assemble | 12/12 |
 | `ra2-sim` drives on practice / octagon / hilltop / box | OK |
 | `ra2-duel` on the octagon | OK — runs 40 s, damage and detachable parts land. No KO in 40 s since the mount rule was fixed (F1): the components now sit where the game puts them, so the two bots engage differently. The earlier "KO in ~11 s" was measured with the whole chain collapsed onto its root. |
-| Jointed assembly (`RA2_ASSEMBLY=parts`) | Stable, wheels turn at the commanded rate, damage lands; still not the default — F1's link rule is identified but its free-spin term (`angle`) is not applied to chain links yet, and F2 covers the rest |
+| Jointed assembly (`RA2_ASSEMBLY=parts`) | Stable, wheels turn at the commanded rate, damage lands; still not the default because F2 and the rest of the backlog remain, not because of the mount rule (F1 landed — see `06-deferred-fidelity.md`) |
 | `cargo fmt --check`, `clippy`, tests | clean, 10 tests |
 
 ## 7. Recommended order of work
 
 The per-component bodies now exist (`ra2sim::rig` groups the components into
 welded bodies, `ra2sim::robot` hinges every motor and drives the wheels through
-them, and damage reshapes a body in place). Building it surfaced the real
-blocker, which is now item **F1** in [`06-deferred-fidelity.md`](06-deferred-fidelity.md):
-**mount-point alignment**. Until that lands, the assembly is available but
-opt-in (`RA2_ASSEMBLY=parts`) and the single-hull arcade path stays the default.
+them, and damage reshapes a body in place). The blocker they surfaced — item
+**F1** in [`06-deferred-fidelity.md`](06-deferred-fidelity.md), mount-point
+alignment — **has landed**: the placement rule is settled and is the default, so
+the assembly is available on equal footing and the arcade path is no longer
+needed to compensate for it. It stays opt-in (`RA2_ASSEMBLY=parts`) only until
+F2 is done.
 
 Suggested sequence:
 
-1. **F1 — attachment-frame alignment.** No reordering of the current transform
-   chain can make both a rotor and a wheel come out right; the attachment frames
-   are the missing input. Everything else depends on the geometry being right.
-2. **F2 — flip the default** to the jointed assembly and delete the arcade
+1. **F2 — flip the default** to the jointed assembly and delete the arcade
    controller.
-3. F3/F4 — torque-driven motors with the wheel's `contact` surface, `grip` and
+2. F3/F4 — torque-driven motors with the wheel's `contact` surface, `grip` and
    `resistance`.
-4. F5 — decode `SIMULATION_GEOMETRY` / `GMID_COLLISION_*` into real shapes.
-5. F7 — the damage model, against `GetLastDamageReceived`'s five-tuple.
-6. F9 — chassis buckling as a visual layer.
+3. F5 — decode `SIMULATION_GEOMETRY` / `GMID_COLLISION_*` into real shapes.
+4. F7 — the damage model, against `GetLastDamageReceived`'s five-tuple.
+5. F9 — chassis buckling as a visual layer.

@@ -24,12 +24,12 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 
 ## F1 — Mount-point (attachment frame) alignment — top priority
 
-**Status: the link rule is `A_parent · R_x(π) · A_own⁻¹` and it is now the
-default** (`RA2_MOUNT=frames-flip`). It is the only rule that keeps every wheel's
-axle horizontal *and* lifts a rotor clear of the chassis, and its output matches
-the game's own botlab preview. One term is still missing — the free-spin `angle`
-is not applied to chain links — which is what keeps the jointed
-`RA2_ASSEMBLY=parts` path opt-in for now. The 128² embedded snapshot is a sanity
+**Status: landed.** The link rule is
+`A_parent · R_z(start) · R_x(π) · R_z(angle) · A_own⁻¹` — the parent's mount
+frame, a male plug turned 180° into a female socket, the player's free spin, and
+the child's own point — and it is the default. It is the only rule that keeps
+every wheel's axle horizontal and lifts a rotor clear of the chassis, and its
+output matches the bots' own previews. The 128² embedded snapshot is a sanity
 check only, never an oracle.
 
 ### In the code now
@@ -306,25 +306,41 @@ it. The per-mesh bounds from `examples/mountdump` and from the renderer's
 `RA2_DEBUG=1` output agree to three decimals for every component, so the two
 paths compose identically.
 
-**Two smaller things the new test surfaced.**
+**Fixed: the free-spin `angle` on chain links, and a burst motor's start angle.**
 
-1. **Burst-motor children do not meet their parent's point.** `component_worlds_mounted`
-   applies a burst motor's start angle as `world[parent] * rest * link`, i.e.
-   a rotation about the *motor's origin*, but a burst motor swings its axle, so
-   the rotation belongs *inside* the link (`A_parent · R_z(start) · …`) — about
-   the axle, which passes through `A_parent`'s origin. The new test skips
-   burst-motor parents for this reason; it should not have to.
-2. **A component may legitimately share the chassis' origin** (a SmartZone, for
-   instance), so "no two components sit at the same point" is *not* an invariant
-   — it looked like one until a stock bot broke it. Worth remembering before
-   using overlap as a heuristic again.
+`angle` is the rotation the player dialled in with SHIFT, and it is heavily used:
+in the stock bots, chain links carry values like 1.571, 2.094, 3.491, 4.014 — the
+odd ones are aimed weapons and extenders, not accidents. Two things had to be
+settled, and the data settled the first on its own:
 
-**Still missing: the free-spin `angle` on chain links.** `mount_link` applies
-`A_parent`, the flip and `A_own⁻¹`, but not `angle` — the SHIFT-rotate the player
-used when placing the part. Chassis children get theirs (it is inside the stored
-transform), so the gap is limited to chain-mounted parts; in the stock bots only
-the four disc anglers use it (0/90/180/270°). That, plus the F2 items, is what
-still keeps `RA2_ASSEMBLY=parts` opt-in.
+- **The axis is the mount normal, i.e. the point's Z.** `AI/Team14/Bot2` hangs
+  four identical anglers on disc5's four rim points. Those points are 90° apart
+  but share their axes, and their `angle` values are exactly the rim azimuths:
+  points 2..5 sit at +Y, +X, −Y and −X in the disc's plane with angles 0, π/2, π
+  and 3π/2. Only a spin about the point's Z explains that. The test
+  `the_mount_spin_turns_about_the_mount_axis` checks it without hard-coding a
+  sign: undo each angler's spin by its own `angle`, one way round or the other,
+  and exactly one winding lines all four arms up.
+- **The winding is settled by a bot preview.** Both windings give a
+  self-consistent arrangement (all four claws folded one way, or a pinwheel), so
+  the data cannot choose. `AI/Team6/Bot2`'s own preview does: rendered from the
+  same camera, one winding splays its two arm-mounted maces **down and out**,
+  exactly as the preview shows, and the other puts them up behind the chassis.
+  The spin therefore lives in the *child's* frame — the same place a chassis
+  child's `angle` sits — which is `A_parent · R_x(π) · R_z(angle) · A_own⁻¹`.
+
+A burst motor's start angle is the *axle* turning, so it belongs on the parent's
+side: `A_parent · R_z(start) · R_x(π) · …`. The old code applied it as
+`world[parent] · R_z(start) · link`, a rotation about the motor's *origin*, which
+both mis-placed and mis-oriented the child. With it inside, every link in every
+stock bot lands its named point on the parent's — including burst-motor parents,
+which the snap test no longer has to skip.
+
+One more trap worth remembering: **a component may legitimately share the
+chassis' origin** (a SmartZone, for instance), so "no two components sit at the
+same point" is *not* an invariant. It looked like one until a stock bot broke it.
+
+**What still keeps `RA2_ASSEMBLY=parts` opt-in** is now F2 and the rest, not F1.
 
 **Superseded by the above**: the earlier claim in this document that "chassis
 children are reproduced from the stored transform alone … and it is why the
@@ -409,25 +425,26 @@ no attach/mount/matrix identifier at all.
 
 ---
 
-## F2 — The assembled-bodies path is opt-in until F1 lands
+## F2 — Flip the assembled-bodies path to the default
 
 `ra2sim::rig::assemble` splits a robot into one body per rigidly-mounted group
 with a hinge per motor; `ra2sim::robot` drives the wheels through those hinges
 and reshapes a body in place (`PhysicsBackend::set_body_shape`) when a part comes
 off, instead of rebuilding the world. It works — bodies are stable, wheels turn
-at the commanded rate, damage lands and fights reach a KO — but because of F1 the
-rotor can hang low, so a robot tends to rest on a weapon instead of its wheels
-and loses traction.
+at the commanded rate, damage lands and fights run to a decision.
 
-So it is off by default:
+The reason it was off by default — F1, whose wrong mount rule could hang a rotor
+low, so a robot rested on a weapon instead of its wheels — **is gone**: the rule
+has landed and the geometry is the game's. What remains is to flip it:
 
 | `RA2_ASSEMBLY` | Behaviour |
 |---|---|
 | `hull` (default) | one convex-hull body, arcade velocity drive — the M3 behaviour |
 | `parts` | the jointed assembly: per-group bodies, hinge motors, torque/velocity drive |
 
-Once F1 is fixed the parts path should become the default and the arcade
-controller deleted.
+Making `parts` the default and deleting the arcade controller is the next step;
+the work is the F3/F4 items (torque-driven motors, the wheel's `contact`
+surface) rather than anything structural.
 
 ---
 
