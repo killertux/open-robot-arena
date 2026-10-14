@@ -116,6 +116,60 @@ to be answered from the binary. `tools/mount_compare.py` is the harness (camera
 by search, flood-fill foreground); it is worth keeping, but not worth trusting to
 a few IoU points.
 
+### A third pass: the stored transform is *not* the placement
+
+**`translation.y` is exactly 0 in every component of every stock bot.** Across
+all 57 bots and 882 components, min = max = mean = 0.0000, while x spans
+-1.22..1.29 and z -1.00..2.52. The `height` field, by contrast, is really used:
+94 components carry a non-zero height in 0.05 m steps up to 0.4.
+
+So a `.bot` does **not** store a full local placement. It stores a two-dimensional
+offset in the mounting plane, a rotation, a mount-plane yaw (`angle`) and a
+height along the mount axis. The format document's "these positions are stacked:
+rotate, translate, rotate by angle, translate by height" is incomplete — the
+plane the offset lives in, and that plane's height, come from the mount frames.
+This is why our renderer draws every component *at* the mount plane.
+
+Every chassis-mounted part — all four angle motors, the anchor, the batteries,
+the control board — names `parent_mount = 0`, so they all share one chassis
+plane, and a raised plane lifts the motors as much as the anchor. Rendered a
+sweep on `AI/Team14/Bot2` (`RA2_MOUNT=frames`, 3/4 camera at 45°):
+
+| chassis plane | what the render shows |
+|---|---|
+| 0.00 | rotor buried inside the chassis; wheels hang nicely below it |
+| 0.32 | rotor's wedge just emerging over the top; wheels at the chassis' lower middle |
+| 0.50 | rotor a large wedge on top, but the batteries begin floating above the chassis' rim |
+| ≥ 0.65 | batteries, control board and motor bodies sit on top of the chassis like a town |
+
+Nothing in 0..0.75 puts the rotor on top *and* keeps the parts inside the
+chassis *and* keeps the wheels on the ground. So a raised chassis plane is
+refuted as the answer: the remaining freedom is the **chain**, which is exactly
+where a per-link frame rule acts. The disagreement is in the link rule, not in
+the chassis plane.
+
+Exposed as `RA2_CHASSIS_PLANE` (default 0) so the sweep can be re-run.
+
+### Decompile progress
+
+REA's MCP surface is what unlocked this: `resolve_containing_procedure` resolves
+interior addresses that the CLI's `decompile` rejects, and `read_bytes` /
+`search_bytes` make the RTTI walk possible.
+
+| Found | What it is |
+|---|---|
+| `FUN_00470ff0` | the bot file enumerator (references `Robot Designs\*.bot`) |
+| `FUN_0042c850` | botlab component-placement *UI*: compares a class to `Chassis`, prints "Robots cannot exceed a maximum size", drives the attachment-point boxes — not the maths |
+| `FUN_00437770` | 7.3 KB and references `Chassis`, but contains no attach/mount/matrix identifier at all |
+| `0x6ee8f0` | `Component` RTTI TypeDescriptor |
+| `0x6f0480` | `AttachDetails` TD (nested in `Component`), name at `+8`; shared `type_info` vftable `0x006b1e44` |
+| `0x6bc50c`, `0x6bc548` | reference the `AttachDetails` TD — CompleteObjectLocator candidates |
+
+`Component` has exactly two nested types: **`AttachDetails`** and `Adjuster`.
+`AttachDetails` owns the mounting data, so its vtable is the way in. Next step:
+finish the COL → `pVftable` walk from `0x6bc50c`, list the class's methods and
+decompile them (`batch_decompile` can take several at once).
+
 ### Ruled out
 
 Test: the rotor's mesh `+Z` should end up along the anchor's plug direction; the

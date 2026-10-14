@@ -1060,9 +1060,25 @@ pub fn component_worlds_mounted(
             None => Mat4::IDENTITY,
         };
         let link = mount_link(bot, loaded, i, mode).unwrap_or(local);
-        world[i] = world[parent] * rest * link;
+        // Height of the chassis' mounting plane. The stored translation's Y is
+        // always 0 in every stock bot, so the height of a chassis-mounted part
+        // has to come from the chassis' own mount frame.
+        let base = if parent == 0 {
+            Mat4::from_translation(Vec3::new(0.0, chassis_plane(), 0.0))
+        } else {
+            Mat4::IDENTITY
+        };
+        world[i] = world[parent] * base * rest * link;
     }
     world
+}
+
+/// Height of the chassis' mounting plane, from `RA2_CHASSIS_PLANE` (default 0).
+fn chassis_plane() -> f32 {
+    std::env::var("RA2_CHASSIS_PLANE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0)
 }
 
 /// The relative transform of component `i` on its parent, when a mount frame
