@@ -10,9 +10,25 @@ by the user.
 
 ## Status
 
-Phase 0 — reconnaissance and asset/format reverse engineering.
+**Milestone M1 core reached: native rendering of real game assets.**
 
-See `docs/01-project-plan.md` for the staged plan and milestones.
+The engine (Rust) parses the original `.gmf` meshes and renders them with their
+textures via `wgpu` — no Windows, no Wine in the loop:
+
+```
+ra2-render local/game/Components/mower_blade/mower_blade1.gmf out.png
+ra2-render "local/game/Arenas/practice arena/practice_arena.gmf" arena.png
+```
+
+Working today:
+- `ra2fmt` — GMI `.gmf` parser (181/181 binary meshes), materials, textures,
+  attachment points, embedded Havok rigid bodies.
+- `ra2-render` — headless wgpu renderer (offscreen → PNG); loads meshes +
+  textures and renders them.
+
+In progress / next: `.bot` robots, `.cfz` archives, arenas assembled from
+scripts, physics and gameplay. See `docs/01-project-plan.md` and
+`docs/03-engine-design.md`.
 
 ## Layout
 

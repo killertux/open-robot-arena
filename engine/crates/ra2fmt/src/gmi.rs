@@ -278,7 +278,7 @@ impl<'a> Parser<'a> {
 
     fn read_texture(&mut self) -> Result<Texture, Error> {
         self.expect_node(15, 4, "texture")?;
-        let mut t = Texture {
+        let t = Texture {
             name: self.r.string()?,
             class: self.r.string()?,
             bitmap: self.r.string()?,

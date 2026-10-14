@@ -1,0 +1,18 @@
+[package]
+name = "ra2-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Offscreen wgpu renderer for Robot Arena 2 meshes (M1 asset viewer core)."
+
+[[bin]]
+name = "ra2-render"
+path = "src/main.rs"
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+glam = "0.34.1"
+image = { version = "0.25.10", default-features = false, features = ["png", "bmp", "tga", "jpeg"] }
+pollster = "1.0.1"
+ra2fmt = { path = "../ra2fmt" }
+wgpu = "30.0.1"

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ra2fmt",
     "crates/ra2-cli",
+    "crates/ra2-render",
 ]
 
 [workspace.package]
