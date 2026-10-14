@@ -61,7 +61,32 @@ pub struct Material {
     pub name: String,
     pub class: String,
     pub diffuse: [f32; 3],
+    /// Transparency (0 = opaque).
+    pub transparency: f32,
     pub textures: Vec<Texture>,
+    /// Sub-materials of a `Multi/Sub-Object` material. A face's `material` index
+    /// selects one of these (falling back to the parent material).
+    pub sub_materials: Vec<Material>,
+}
+
+impl Material {
+    /// Resolve the effective material for a face within this (top-level) slot.
+    pub fn resolve_face(&self, face_material: i32) -> &Material {
+        if !self.sub_materials.is_empty() {
+            if let Some(m) = self.sub_materials.get(face_material.max(0) as usize) {
+                return m;
+            }
+        }
+        self
+    }
+
+    /// First referenced bitmap file name, if any.
+    pub fn first_bitmap(&self) -> Option<&str> {
+        self.textures
+            .iter()
+            .map(|t| t.bitmap.as_str())
+            .find(|b| !b.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -264,7 +289,7 @@ impl<'a> Parser<'a> {
         self.r.color()?; // specular
         self.r.f32()?; // shine
         self.r.f32()?; // shine strength
-        self.r.f32()?; // transparency
+        m.transparency = self.r.f32()?;
         self.r.f32()?; // wire size
         self.r.i32()?; // shading type
         self.r.f32()?; // xp falloff
@@ -277,7 +302,7 @@ impl<'a> Parser<'a> {
         }
         let subcount = self.r.i32()?;
         if subcount != 0 {
-            let _ = self.read_material_list()?;
+            m.sub_materials = self.read_material_list()?;
         }
         Ok(m)
     }

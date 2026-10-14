@@ -37,15 +37,75 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["arena", file] => match arena(file) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
         _ => {
             eprintln!("usage:");
             eprintln!("  ra2 info <file.gmf> [...]");
             eprintln!("  ra2 obj  <file.gmf> <out.obj>");
             eprintln!("  ra2 cfz  <file.cfz> list");
             eprintln!("  ra2 cfz  <file.cfz> cat <entry>");
+            eprintln!("  ra2 arena <script.py>");
             ExitCode::FAILURE
         }
     }
+}
+
+fn arena(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let a = ra2fmt::arena::parse_path(std::path::Path::new(path))?;
+    println!("=== {path} ===");
+    println!(
+        "  name:  {}",
+        if a.name.is_empty() {
+            "(unnamed)"
+        } else {
+            &a.name
+        }
+    );
+    println!("  model: {}", a.model.as_deref().unwrap_or("(none)"));
+    match a.extent {
+        Some(e) => println!("  extent: ({}, {}, {}, {})", e[0], e[1], e[2], e[3]),
+        None => println!("  extent: (default)"),
+    }
+    match a.shadow_source {
+        Some(s) => println!(
+            "  shadow source: ({}, {}, {})  triangles: {}",
+            s[0],
+            s[1],
+            s[2],
+            a.shadow_triangles.len()
+        ),
+        None => println!(
+            "  shadow source: (none)  triangles: {}",
+            a.shadow_triangles.len()
+        ),
+    }
+    println!("  xtras: {}", a.xtras.len());
+    for x in &a.xtras {
+        println!(
+            "    {:?} gmf={:?} material={:?}{}",
+            x.name,
+            x.gmf,
+            x.material,
+            x.sound
+                .as_deref()
+                .map(|s| format!(" sound={s:?}"))
+                .unwrap_or_default()
+        );
+    }
+    println!("  static cameras: {}", a.static_cameras.len());
+    for c in &a.static_cameras {
+        println!(
+            "    {:?} at ({}, {}, {})",
+            c.name, c.position[0], c.position[1], c.position[2]
+        );
+    }
+    Ok(())
 }
 
 fn cfz_list(path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -84,11 +144,26 @@ fn info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
             .filter(|s| !s.is_empty())
             .collect();
         println!(
-            "    mat {:?} class={:?} tex=[{}]",
+            "    mat {:?} class={:?} trans={:.2} tex=[{}]",
             m.name,
             m.class,
+            m.transparency,
             tex.join(", ")
         );
+        for sm in &m.sub_materials {
+            let stex: Vec<&str> = sm
+                .textures
+                .iter()
+                .map(|t| t.bitmap.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            println!(
+                "      sub {:?} trans={:.2} tex=[{}]",
+                sm.name,
+                sm.transparency,
+                stex.join(", ")
+            );
+        }
     }
     for o in &scene.objects {
         match &o.kind {

@@ -7,11 +7,13 @@
 //! Planned: `.bot` robots, `.cfz` (CFL3) archives, `.gib` GUI layouts,
 //! `*_txt.gmf` (GMA ASCII) meshes.
 
+pub mod arena;
 pub mod bot;
 pub mod cfl;
 pub mod component;
 pub mod gmi;
 
+pub use arena::ArenaScript;
 pub use bot::{Bot, BotMesh, Chassis, Component};
 pub use cfl::Cfl;
 pub use component::ComponentDef;

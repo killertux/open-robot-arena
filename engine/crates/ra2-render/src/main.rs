@@ -9,6 +9,7 @@
 //! Env: RA2_NO_CHASSIS=1  skip the chassis mesh
 //!      RA2_DEBUG=1       print per-part bounds
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -23,6 +24,8 @@ struct Vertex {
     pos: [f32; 3],
     nrm: [f32; 3],
     uv: [f32; 2],
+    /// Tint + alpha (material transparency); `[1,1,1,1]` for opaque geometry.
+    color: [f32; 4],
 }
 
 #[repr(C)]
@@ -38,6 +41,8 @@ struct DrawItem {
     tw: u32,
     th: u32,
     label: String,
+    /// Draw with alpha blending (transparent material).
+    blend: bool,
 }
 
 const SHADER: &str = r#"
@@ -46,8 +51,8 @@ struct Uniforms { mvp: mat4x4<f32>, light: vec4<f32>, };
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
 
-struct VsIn { @location(0) pos: vec3<f32>, @location(1) nrm: vec3<f32>, @location(2) uv: vec2<f32> };
-struct VsOut { @builtin(position) clip: vec4<f32>, @location(0) nrm: vec3<f32>, @location(1) uv: vec2<f32> };
+struct VsIn { @location(0) pos: vec3<f32>, @location(1) nrm: vec3<f32>, @location(2) uv: vec2<f32>, @location(3) color: vec4<f32> };
+struct VsOut { @builtin(position) clip: vec4<f32>, @location(0) nrm: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) color: vec4<f32> };
 
 @vertex
 fn vs_main(i: VsIn) -> VsOut {
@@ -55,6 +60,7 @@ fn vs_main(i: VsIn) -> VsOut {
     o.clip = u.mvp * vec4<f32>(i.pos, 1.0);
     o.nrm = i.nrm;
     o.uv = i.uv;
+    o.color = i.color;
     return o;
 }
 
@@ -64,14 +70,17 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(i.nrm);
     let l = max(dot(n, normalize(u.light.xyz)), 0.0);
     let shade = 0.35 + 0.65 * l;
-    return vec4<f32>(c.rgb * shade, c.a);
+    return vec4<f32>(c.rgb * shade * i.color.rgb, i.color.a);
 }
 "#;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
-        eprintln!("usage: ra2-render <file.gmf|file.bot> <out.png> [width] [height]");
+        eprintln!("usage: ra2-render <file.gmf|file.bot|arena.py> <out.png> [width] [height]");
+        eprintln!(
+            "  env: RA2_OBSTACLE=<name|all|none>  RA2_HIDE=<name,...>  RA2_CAM=<ex,ey,ez,tx,ty,tz>"
+        );
         return ExitCode::FAILURE;
     }
     let input = &args[0];
@@ -166,7 +175,7 @@ fn run(
     });
 
     let uniforms = Uniforms {
-        mvp: mvp_matrix(center, radius, w, h).to_cols_array_2d(),
+        mvp: mvp_matrix(center, radius, w, h, camera_override(input)).to_cols_array_2d(),
         light: [0.4, -0.7, 0.6, 0.0],
     };
     let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -213,41 +222,58 @@ fn run(
         immediate_size: 0,
     });
 
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("mesh-pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
-            })],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(color_format.into())],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: depth_format,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    });
+    let attrs =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
+    let cull = match std::env::var("RA2_CULL").as_deref() {
+        Ok("back") => Some(wgpu::Face::Back),
+        Ok("front") => Some(wgpu::Face::Front),
+        _ => None,
+    };
+    let make_pipeline = |label: &str, blend: bool, depth_write: bool| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &attrs,
+                })],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // RA2/D3D8 geometry is wound clockwise when viewed from outside.
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: cull,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format,
+                depth_write_enabled: Some(depth_write),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+    let pipeline_opaque = make_pipeline("opaque", false, true);
+    let pipeline_blend = make_pipeline("blend", true, false);
 
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         address_mode_u: wgpu::AddressMode::Repeat,
@@ -261,6 +287,7 @@ fn run(
         vbuf: wgpu::Buffer,
         bg: wgpu::BindGroup,
         count: u32,
+        blend: bool,
     }
     let mut gpu_items = Vec::new();
     for it in &items {
@@ -311,6 +338,7 @@ fn run(
             vbuf,
             bg,
             count: it.vertices.len() as u32,
+            blend: it.blend,
         });
     }
 
@@ -376,8 +404,15 @@ fn run(
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        rp.set_pipeline(&pipeline);
-        for g in &gpu_items {
+        // Opaque geometry first, then blended (transparent) geometry.
+        rp.set_pipeline(&pipeline_opaque);
+        for g in gpu_items.iter().filter(|g| !g.blend) {
+            rp.set_bind_group(0, &g.bg, &[]);
+            rp.set_vertex_buffer(0, g.vbuf.slice(..));
+            rp.draw(0..g.count, 0..1);
+        }
+        rp.set_pipeline(&pipeline_blend);
+        for g in gpu_items.iter().filter(|g| g.blend) {
             rp.set_bind_group(0, &g.bg, &[]);
             rp.set_vertex_buffer(0, g.vbuf.slice(..));
             rp.draw(0..g.count, 0..1);
@@ -442,13 +477,106 @@ fn run(
 // ---------------------------------------------------------------------------
 
 fn collect_items(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>> {
-    if input.to_ascii_lowercase().ends_with(".bot") {
+    let lower = input.to_ascii_lowercase();
+    if lower.ends_with(".bot") {
         collect_bot(input)
+    } else if lower.ends_with(".py") {
+        collect_arena(input)
     } else {
         let mut items = Vec::new();
         add_gmi(Path::new(input), Mat4::IDENTITY, &mut items)?;
         Ok(items)
     }
+}
+
+/// Assemble an arena scene from its Python script: the main `.gmf` model plus
+/// the script's extra props. Select props with `RA2_OBSTACLE=<name|all|none>`.
+fn collect_arena(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>> {
+    let script = ra2fmt::arena::parse_path(Path::new(input))?;
+    let root = find_game_root(Path::new(input))
+        .ok_or("could not locate game root (Arenas/Components dir)")?;
+    let obstacle = std::env::var("RA2_OBSTACLE").unwrap_or_else(|_| "none".into());
+    println!(
+        "arena {:?}: model={:?} xtras={} (obstacle filter: {obstacle:?})",
+        script.name,
+        script.model.as_deref().unwrap_or("(none)"),
+        script.xtras.len()
+    );
+
+    let mut items = Vec::new();
+    if let Some(m) = &script.model {
+        match resolve_ci(&root, m) {
+            Some(p) => add_gmi(&p, Mat4::IDENTITY, &mut items)?,
+            None => eprintln!("  model not found: {m}"),
+        }
+    }
+    for x in script.xtras_matching(&obstacle) {
+        match resolve_ci(&root, &x.gmf) {
+            Some(p) => {
+                let before = items.len();
+                add_gmi(&p, Mat4::IDENTITY, &mut items)?;
+                if items.len() > before {
+                    println!("  xtra {:?} ({}) -> {}", x.name, x.material, p.display());
+                }
+            }
+            None => eprintln!("  xtra not found: {}", x.gmf),
+        }
+    }
+    Ok(items)
+}
+
+/// Resolve a script-relative path under `root`, case-insensitively.
+fn resolve_ci(root: &Path, rel: &str) -> Option<PathBuf> {
+    let rel = rel.replace('\\', "/");
+    let mut cur = root.to_path_buf();
+    for part in rel.split('/').filter(|p| !p.is_empty() && *p != ".") {
+        if part == ".." {
+            cur.pop();
+            continue;
+        }
+        let direct = cur.join(part);
+        if direct.exists() {
+            cur = direct;
+            continue;
+        }
+        let want = part.to_ascii_lowercase();
+        let found = std::fs::read_dir(&cur)
+            .ok()?
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().to_ascii_lowercase() == want)?;
+        cur = found.path();
+    }
+    cur.exists().then_some(cur)
+}
+
+/// Objects whose name contains any `RA2_HIDE` substring are skipped.
+fn is_hidden(name: &str) -> bool {
+    use std::sync::OnceLock;
+    static HIDE: OnceLock<Vec<String>> = OnceLock::new();
+    let list = HIDE.get_or_init(|| {
+        std::env::var("RA2_HIDE")
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_ascii_lowercase())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    if list.is_empty() {
+        return false;
+    }
+    let n = name.to_ascii_lowercase();
+    list.iter().any(|h| n.contains(h))
+}
+
+/// RA2 marks physics proxies with `-1` material refs, names like `*Collision*`
+/// or `*traction*` (the component def's `contact`/`passthru` objects), or
+/// materials named `havok` / `collision` / `collision proxy`. These are not
+/// meant to be drawn.
+fn is_collision_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("havok") || n.contains("collision") || n.contains("proxy") || n.contains("traction")
 }
 
 /// Per-component loaded data used for assembly.
@@ -562,6 +690,7 @@ fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>>
                         tw,
                         th,
                         label: "chassis".into(),
+                        blend: false,
                     });
                 }
             }
@@ -571,18 +700,7 @@ fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>>
     // attached components
     for (i, lc) in loaded.iter().enumerate().skip(1) {
         let Some(lc) = lc else { continue };
-        let (tex, tw, th) = load_texture(&lc.scene, &lc.dir)
-            .unwrap_or_else(|| (solid([170, 170, 175, 255], 4, 4), 4, 4));
-        let verts = scene_vertices(&lc.scene, world[i]);
-        if !verts.is_empty() {
-            items.push(DrawItem {
-                vertices: verts,
-                tex,
-                tw,
-                th,
-                label: lc.label.clone(),
-            });
-        }
+        push_scene(&lc.scene, world[i], &lc.dir, &lc.label, &mut items);
     }
     Ok(items)
 }
@@ -620,26 +738,46 @@ fn bot_mesh_vertices(mesh: &ra2fmt::bot::BotMesh, world: Mat4) -> Vec<Vertex> {
             pos: pa.into(),
             nrm: n.into(),
             uv: uv(a),
+            color: [1.0, 1.0, 1.0, 1.0],
         });
         out.push(Vertex {
             pos: pb.into(),
             nrm: n.into(),
             uv: uv(b),
+            color: [1.0, 1.0, 1.0, 1.0],
         });
         out.push(Vertex {
             pos: pc.into(),
             nrm: n.into(),
             uv: uv(cc),
+            color: [1.0, 1.0, 1.0, 1.0],
         });
     }
     out
 }
 
-fn scene_vertices(scene: &gmi::GmiScene, world: Mat4) -> Vec<Vertex> {
-    let mut verts = Vec::new();
+/// Build render vertices for a `.gmf` scene, grouped by resolved material so
+/// each group can use the correct texture (needed for `Multi/Sub-Object` arenas
+/// where each face selects a sub-material).
+fn scene_material_groups(
+    scene: &gmi::GmiScene,
+    world: Mat4,
+    dir: &Path,
+) -> Vec<(Option<PathBuf>, [f32; 4], Vec<Vertex>)> {
+    let mut index: HashMap<u64, usize> = HashMap::new();
+    let mut groups: Vec<(Option<PathBuf>, [f32; 4], Vec<Vertex>)> = Vec::new();
     for o in &scene.objects {
         let Some(mesh) = &o.mesh else { continue };
-        if mesh.is_collision() {
+        if mesh.is_collision() || is_hidden(&o.name) || is_collision_name(&o.name) {
+            continue;
+        }
+        // Skip collision-proxy meshes whose material is tagged "havok"/"collision".
+        if scene
+            .materials
+            .get(mesh.material_ref.max(0) as usize)
+            .map(|m| is_collision_name(&m.name))
+            .unwrap_or(false)
+        {
             continue;
         }
         let obj_world = world * tm_mat4(&o.transform);
@@ -653,8 +791,33 @@ fn scene_vertices(scene: &gmi::GmiScene, world: Mat4) -> Vec<Vertex> {
             if ia >= pts.len() || ib >= pts.len() || ic >= pts.len() {
                 continue;
             }
+            // A face may select a collision sub-material.
+            if scene
+                .materials
+                .get(mesh.material_ref.max(0) as usize)
+                .map(|m| is_collision_name(&m.resolve_face(f.material).name))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            // Strongly-transparent materials are invisible volumes / hazard zones.
+            if scene
+                .materials
+                .get(mesh.material_ref.max(0) as usize)
+                .map(|m| m.resolve_face(f.material).transparency >= 0.5)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let key = ((mesh.material_ref as i64 as u64) << 32) | (f.material as u32 as u64);
+            let gi = *index.entry(key).or_insert_with(|| {
+                let (tex, color) = material_slot(scene, mesh.material_ref, f.material, dir);
+                groups.push((tex, color, Vec::new()));
+                groups.len() - 1
+            });
             let (pa, pb, pc) = (pts[ia], pts[ib], pts[ic]);
             let n = (pb - pa).cross(pc - pa).normalize_or_zero();
+            let color = groups[gi].1;
             let uv = |idx: usize| -> [f32; 2] {
                 if !mesh.texfaces.is_empty()
                     && fi < mesh.texfaces.len()
@@ -667,24 +830,100 @@ fn scene_vertices(scene: &gmi::GmiScene, world: Mat4) -> Vec<Vertex> {
                 }
                 [0.0, 0.0]
             };
-            verts.push(Vertex {
+            let g = &mut groups[gi].2;
+            g.push(Vertex {
                 pos: pa.into(),
                 nrm: n.into(),
                 uv: uv(0),
+                color,
             });
-            verts.push(Vertex {
+            g.push(Vertex {
                 pos: pb.into(),
                 nrm: n.into(),
                 uv: uv(1),
+                color,
             });
-            verts.push(Vertex {
+            g.push(Vertex {
                 pos: pc.into(),
                 nrm: n.into(),
                 uv: uv(2),
+                color,
             });
         }
     }
-    verts
+    groups
+}
+
+/// Resolve the texture path + tint/alpha for a (material slot, face) pair.
+fn material_slot(
+    scene: &gmi::GmiScene,
+    material_ref: i32,
+    face_material: i32,
+    dir: &Path,
+) -> (Option<PathBuf>, [f32; 4]) {
+    let eff = scene
+        .materials
+        .get(material_ref.max(0) as usize)
+        .map(|m| m.resolve_face(face_material));
+    let color = eff
+        .map(|m| {
+            [
+                m.diffuse[0].clamp(0.0, 1.0),
+                m.diffuse[1].clamp(0.0, 1.0),
+                m.diffuse[2].clamp(0.0, 1.0),
+                (1.0 - m.transparency).clamp(0.0, 1.0),
+            ]
+        })
+        .unwrap_or([0.6, 0.6, 0.62, 1.0]);
+    let tex = eff
+        .and_then(|m| m.first_bitmap())
+        .and_then(|b| resolve_bitmap(dir, b));
+    (tex, color)
+}
+
+/// Locate a bitmap referenced by a material, under `dir` or `dir/maps`.
+fn resolve_bitmap(dir: &Path, bitmap: &str) -> Option<PathBuf> {
+    [
+        dir.join(bitmap),
+        dir.join("maps").join(bitmap),
+        dir.join("maps").join(bitmap.to_lowercase()),
+        dir.join(bitmap.replace('\\', "/")),
+    ]
+    .into_iter()
+    .find(|c| c.exists())
+}
+
+/// Push one [`DrawItem`] per material group.
+fn push_scene(
+    scene: &gmi::GmiScene,
+    world: Mat4,
+    dir: &Path,
+    label: &str,
+    items: &mut Vec<DrawItem>,
+) {
+    for (tex, color, verts) in scene_material_groups(scene, world, dir) {
+        if verts.is_empty() {
+            continue;
+        }
+        let rgb = [
+            (color[0] * 255.0) as u8,
+            (color[1] * 255.0) as u8,
+            (color[2] * 255.0) as u8,
+            255,
+        ];
+        let (tex, tw, th) = tex
+            .as_deref()
+            .and_then(|p| decode_image(&std::fs::read(p).ok()?))
+            .unwrap_or_else(|| (solid(rgb, 4, 4), 4, 4));
+        items.push(DrawItem {
+            vertices: verts,
+            tex,
+            tw,
+            th,
+            label: label.to_string(),
+            blend: color[3] < 0.999,
+        });
+    }
 }
 
 fn add_gmi(
@@ -695,18 +934,7 @@ fn add_gmi(
     let data = std::fs::read(path)?;
     let scene = gmi::parse(&data)?;
     let dir = path.parent().unwrap_or(Path::new("."));
-    let (tex, tw, th) =
-        load_texture(&scene, dir).unwrap_or_else(|| (solid([180, 180, 185, 255], 4, 4), 4, 4));
-    let verts = scene_vertices(&scene, world);
-    if !verts.is_empty() {
-        items.push(DrawItem {
-            vertices: verts,
-            tex,
-            tw,
-            th,
-            label: path.display().to_string(),
-        });
-    }
+    push_scene(&scene, world, dir, &path.display().to_string(), items);
     Ok(())
 }
 
@@ -744,31 +972,6 @@ fn decode_image(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     Some((img.into_raw(), w, h))
 }
 
-fn load_texture(scene: &gmi::GmiScene, dir: &Path) -> Option<(Vec<u8>, u32, u32)> {
-    let p = texture_path(scene, dir)?;
-    decode_image(&std::fs::read(p).ok()?)
-}
-
-fn texture_path(scene: &gmi::GmiScene, dir: &Path) -> Option<PathBuf> {
-    for m in &scene.materials {
-        for t in &m.textures {
-            if t.bitmap.is_empty() {
-                continue;
-            }
-            for cand in [
-                dir.join(&t.bitmap),
-                dir.join("maps").join(&t.bitmap),
-                dir.join("maps").join(t.bitmap.to_lowercase()),
-            ] {
-                if cand.exists() {
-                    return Some(cand);
-                }
-            }
-        }
-    }
-    None
-}
-
 fn solid(rgb: [u8; 4], w: u32, h: u32) -> Vec<u8> {
     rgb.iter()
         .cycle()
@@ -781,14 +984,77 @@ fn solid(rgb: [u8; 4], w: u32, h: u32) -> Vec<u8> {
 // camera
 // ---------------------------------------------------------------------------
 
-fn mvp_matrix(center: Vec3, radius: f32, w: u32, h: u32) -> Mat4 {
+/// A camera override resolved from `RA2_CAM`.
+struct CamOverride {
+    eye: Vec3,
+    target: Option<Vec3>,
+}
+
+/// Parse `RA2_CAM`: either `ex,ey,ez,tx,ty,tz`, or `@<n>` / `@<name>` to use a
+/// static camera declared in an arena script (aimed at the scene centre).
+fn camera_override(input: &str) -> Option<CamOverride> {
+    let spec = std::env::var("RA2_CAM").ok()?;
+    let spec = spec.trim();
+    if let Some(rest) = spec.strip_prefix('@') {
+        let script = ra2fmt::arena::parse_path(Path::new(input)).ok()?;
+        let cam = rest
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| script.static_cameras.get(i))
+            .or_else(|| {
+                script
+                    .static_cameras
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(rest))
+            })?;
+        return Some(CamOverride {
+            eye: Vec3::from(cam.position),
+            target: None,
+        });
+    }
+    let f: Vec<f32> = spec
+        .split(',')
+        .filter_map(|x| x.trim().parse().ok())
+        .collect();
+    if f.len() >= 6 {
+        Some(CamOverride {
+            eye: Vec3::new(f[0], f[1], f[2]),
+            target: Some(Vec3::new(f[3], f[4], f[5])),
+        })
+    } else {
+        None
+    }
+}
+
+fn mvp_matrix(center: Vec3, radius: f32, w: u32, h: u32, cam: Option<CamOverride>) -> Mat4 {
+    let aspect = w as f32 / h as f32;
+    if let Some(cam) = cam {
+        let target = cam.target.unwrap_or(center);
+        let dist = (cam.eye - target).length().max(0.001);
+        let view = look_at_rh(cam.eye, target, up_for(cam.eye - target));
+        let proj = perspective_rh(
+            50f32.to_radians(),
+            aspect,
+            (dist * 0.01).max(0.01),
+            dist * 100.0,
+        );
+        return proj * view;
+    }
     // RA2 assets are Y-up. Frame a three-quarter view from above/front/right.
     let dir = Vec3::new(0.75, 0.95, -1.0).normalize();
     let eye = center + dir * (radius * 3.0);
     let view = look_at_rh(eye, center, Vec3::Y);
-    let aspect = w as f32 / h as f32;
     let proj = perspective_rh(45f32.to_radians(), aspect, radius * 0.01, radius * 100.0);
     proj * view
+}
+
+/// Choose an up vector that is not parallel to the view direction.
+fn up_for(dir: Vec3) -> Vec3 {
+    if dir.normalize_or_zero().dot(Vec3::Y).abs() > 0.999 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    }
 }
 
 fn look_at_rh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {

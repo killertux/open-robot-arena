@@ -212,16 +212,54 @@ sequential entries (`unpacked_size`, `offset`, `compression`, `name_len`,
 mesh's own UVs are used; and exact BurstMotor weapon rest poses need the full
 axle/attachment solver.
 
-## 8. Tooling we now have (engine)
+## 8. Arena scenes (from the Python scripts)
 
-- `ra2fmt::gmi` — `.gmf` meshes (181/181), materials, textures, attachments, Havok bodies.
+Arena *behaviour* is Python, but the scene it describes is data. `ra2fmt::arena`
+does a static scan of `Scripts/*.py` and `Arenas/*.py` to recover:
+
+- the **main model** — first quoted string in an `__init__(self, "…")` call;
+- **extra props** — `AddXtra(name, gmf, material)` and
+  `AddXtraSound(name, gmf, material, wav)` (e.g. the practice arena's obstacle:
+  crates / cinderblocks / barrels / cones / ramps);
+- the **shadow light** (`SetShadowSource`) and flat shadow-receiver triangles
+  (`AddShadowTriangle`);
+- the play-field `extent` and the script's **static cameras**
+  (`AddStaticCamera`).
+
+The renderer assembles a scene (`.py` input → main model + selected props) via
+`ra2-render <arena.py> <out.png>` with:
+`RA2_OBSTACLE=<name|all|none>`, `RA2_HIDE=<name,...>` (e.g. hide `cieling`/`h_box`
+to see indoors), `RA2_CAM=<ex,ey,ez,tx,ty,tz>` or `@<n|name>` (a script camera),
+`RA2_CULL=back|front`. `ra2 arena <script.py>` prints the recovered scene.
+
+**Material handling discovered here** (matters for arenas, which are
+multi-material):
+
+- Materials are `Standard` or **`Multi/Sub-Object`**; a `Multi/Sub-Object`
+  carries **sub-materials** and each face's material index selects one. These
+  are now parsed (`Material::sub_materials`) and the renderer batches geometry
+  **per resolved material** so each gets its own texture.
+- **Collision/physics proxies are marked by name**: objects named `*collision*`,
+  `*traction*` (the component def's `contact` object), `*proxy*`, or meshes whose
+  material is named `havok` / `collision` / `collision proxy` are not drawn.
+- Materials carry a **transparency** value; strongly-transparent ones
+  (≥ 0.5, e.g. `12 - Default` room volumes, hazard `zone`s) are invisible
+  volumes and are skipped, while mildly-transparent ones are alpha-blended
+  (the box arena's glass cube). Geometry is wound **clockwise** (D3D8).
+- All 12 shipped arena scripts render; the practice arena's interior renders
+  correctly once `cieling`/`h_box` are hidden and an obstacle is selected.
+
+## 9. Tooling we now have (engine)
+
+- `ra2fmt::gmi` — `.gmf` meshes (181/181), materials (+ sub-materials, transparency), textures, attachments, Havok bodies.
 - `ra2fmt::bot` — `.bot` header + components + chassis mesh/outline (all versions).
-- `ra2fmt::component` — component `.txt` definitions.
-- `ra2fmt::cfl` — native CFL3 (`.cfz`) archive reader.
-- `ra2-cli` — `ra2 info`, `ra2 obj`, `ra2 cfz`.
-- `ra2-render` — headless wgpu renderer (`.gmf` or assembled `.bot` → PNG); all 57 bots render with no skipped components.
+- `ra2fmt::arena` — arena scripts → scene (model, props, shadow, cameras).
+- `ra2fmt::component` — component `.txt` definitions; `ra2fmt::cfl` — native CFL3 archive reader.
+- `ra2-cli` — `ra2 info`, `ra2 obj`, `ra2 cfz`, `ra2 arena`.
+- `ra2-render` — headless wgpu renderer for `.gmf`, assembled `.bot` robots, and
+  arena `.py` scenes (all 57 bots and 12 arenas render).
 
-## 9. Open questions for Stage 1/2
+## 10. Open questions for Stage 1/2
 
 1. Direct3D 8 usage specifics: vertex/pixel shader model, fixed-function pipeline,
    render state set — from PE imports + Ghidra disassembly.
