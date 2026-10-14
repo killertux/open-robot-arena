@@ -52,6 +52,7 @@ struct Uniforms {
 }
 
 /// One drawable batch: triangles sharing a texture, plus how to blend them.
+#[derive(Clone)]
 pub struct DrawItem {
     pub vertices: Vec<Vertex>,
     pub tex: Vec<u8>,
@@ -538,6 +539,66 @@ pub fn debug_print_items(items: &[DrawItem]) {
     }
 }
 
+/// Physics-proxy triangles of an arena (`.gmf` or `.py`), if it has any.
+///
+/// RA2 marks its collision proxies with a negative material reference or names
+/// like `*Collision*` / `*havok*`; those are the shapes the game actually
+/// collides against, and they exclude the decorative geometry a robot would
+/// otherwise high-centre on. Arenas that ship none (the practice arena, for
+/// instance) return `None` so callers can fall back to the visible geometry.
+pub fn collect_collision(
+    input: &str,
+) -> Result<Option<Vec<[Vec3; 3]>>, Box<dyn std::error::Error>> {
+    let lower = input.to_ascii_lowercase();
+    let mut out = Vec::new();
+    if lower.ends_with(".py") {
+        let script = ra2fmt::arena::parse_path(Path::new(input))?;
+        if let Some(root) = find_game_root(Path::new(input)) {
+            if let Some(m) = &script.model {
+                if let Some(p) = resolve_ci(&root, m) {
+                    let data = std::fs::read(&p)?;
+                    let scene = gmi::parse(&data)?;
+                    out.extend(scene_collision_triangles(&scene, Mat4::IDENTITY));
+                }
+            }
+        }
+    } else {
+        let data = std::fs::read(input)?;
+        let scene = gmi::parse(&data)?;
+        out.extend(scene_collision_triangles(&scene, Mat4::IDENTITY));
+    }
+    if out.len() < 4 {
+        Ok(None)
+    } else {
+        Ok(Some(out))
+    }
+}
+
+/// Triangles of a scene's physics-proxy objects, in `world` space.
+pub fn scene_collision_triangles(scene: &gmi::GmiScene, world: Mat4) -> Vec<[Vec3; 3]> {
+    let mut out = Vec::new();
+    for o in &scene.objects {
+        let Some(mesh) = &o.mesh else { continue };
+        if mesh.points.is_empty() || !(mesh.is_collision() || is_collision_name(&o.name)) {
+            continue;
+        }
+        let obj = world * tm_mat4(&o.transform);
+        let pts: Vec<Vec3> = mesh
+            .points
+            .iter()
+            .map(|p| obj.transform_point3(Vec3::from(*p)))
+            .collect();
+        for f in &mesh.faces {
+            let (a, b, c) = (f.v[0] as usize, f.v[1] as usize, f.v[2] as usize);
+            if a >= pts.len() || b >= pts.len() || c >= pts.len() {
+                continue;
+            }
+            out.push([pts[a], pts[b], pts[c]]);
+        }
+    }
+    out
+}
+
 pub fn collect_items(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>> {
     let lower = input.to_ascii_lowercase();
     if lower.ends_with(".bot") {
@@ -641,32 +702,33 @@ fn is_collision_name(name: &str) -> bool {
     n.contains("havok") || n.contains("collision") || n.contains("proxy") || n.contains("traction")
 }
 
-/// Per-component loaded data used for assembly.
-struct LoadedComp {
-    label: String,
-    scene: gmi::GmiScene,
-    dir: PathBuf,
+/// A component's parsed definition plus its loaded `.gmf` mesh.
+pub struct BotComponent {
+    pub label: String,
+    pub def: compfmt::ComponentDef,
+    pub scene: gmi::GmiScene,
+    /// Directory holding the component's mesh (for resolving its textures).
+    pub dir: PathBuf,
 }
 
-pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>> {
+/// A parsed robot plus its per-component definitions and meshes.
+pub type LoadedBot = (botfmt::Bot, PathBuf, Vec<Option<BotComponent>>);
+
+/// Parse a `.bot` and load the definition + mesh of every attached component.
+///
+/// Index `0` (the chassis) is always `None`: the chassis mesh is embedded in the
+/// `.bot` itself, see [`chassis_items`].
+pub fn load_bot_components(input: &str) -> Result<LoadedBot, Box<dyn std::error::Error>> {
     let data = std::fs::read(input)?;
     let bot = botfmt::parse(&data)?;
     let root =
         find_game_root(Path::new(input)).ok_or("could not locate game root (Components dir)")?;
-    println!(
-        "bot {} v{}: {} components (root={})",
-        bot.name,
-        bot.version,
-        bot.components.len(),
-        root.display()
-    );
 
     // Component definitions live in `Components.cfz`; prefer the archive and
     // fall back to loose extracted `.txt` files when present.
     let cfl = ra2fmt::Cfl::open_path(&root.join("Components.cfz")).ok();
 
-    // Load every attached component's mesh (+ its texture).
-    let mut loaded: Vec<Option<LoadedComp>> = Vec::with_capacity(bot.components.len());
+    let mut loaded: Vec<Option<BotComponent>> = Vec::with_capacity(bot.components.len());
     for (i, c) in bot.components.iter().enumerate() {
         if i == 0 || c.class == "SmartZone" || c.file.is_empty() {
             loaded.push(None);
@@ -686,8 +748,9 @@ pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Err
         match std::fs::read(&mesh_path).ok().map(|b| gmi::parse(&b)) {
             Some(Ok(scene)) => {
                 let dir = mesh_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-                loaded.push(Some(LoadedComp {
+                loaded.push(Some(BotComponent {
                     label: format!("{}({})", c.class, def.name),
+                    def,
                     scene,
                     dir,
                 }));
@@ -703,6 +766,61 @@ pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Err
             }
         }
     }
+    Ok((bot, root, loaded))
+}
+
+/// Visual batches for a scene in `world` space (skipping collision proxies).
+pub fn scene_items(scene: &gmi::GmiScene, world: Mat4, dir: &Path, label: &str) -> Vec<DrawItem> {
+    let mut items = Vec::new();
+    push_scene(scene, world, dir, label, &mut items);
+    items
+}
+
+/// Visual batches for the chassis mesh embedded in a `.bot`, placed by `world`.
+pub fn chassis_items(bot: &botfmt::Bot, world: Mat4) -> Vec<DrawItem> {
+    let Some(ch) = bot.components.first().and_then(|c| c.chassis.as_ref()) else {
+        return Vec::new();
+    };
+    let Some(mesh) = &ch.mesh else {
+        return Vec::new();
+    };
+    if std::env::var("RA2_DEBUG").is_ok() {
+        let ymin = mesh.points.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+        let ymax = mesh.points.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+        eprintln!(
+            "  raw chassis mesh: {} pts, y={:.3}..{:.3}",
+            mesh.points.len(),
+            ymin,
+            ymax
+        );
+    }
+    let verts = bot_mesh_vertices(mesh, world);
+    if verts.is_empty() {
+        return Vec::new();
+    }
+    let (tex, tw, th) = match &ch.texture_tga {
+        Some(tga) => decode_image(tga).unwrap_or_else(|| (solid([120, 120, 125, 255], 4, 4), 4, 4)),
+        None => (solid([120, 120, 125, 255], 4, 4), 4, 4),
+    };
+    vec![DrawItem {
+        vertices: verts,
+        tex,
+        tw,
+        th,
+        label: "chassis".into(),
+        blend: false,
+    }]
+}
+
+pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>> {
+    let (bot, root, loaded) = load_bot_components(input)?;
+    println!(
+        "bot {} v{}: {} components (root={})",
+        bot.name,
+        bot.version,
+        bot.components.len(),
+        root.display()
+    );
 
     // Component world transforms, chained through parents. RA2 places a component
     // by its stored translation + quaternion, then a mount yaw (`angle`) and a
@@ -713,36 +831,7 @@ pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Err
 
     // chassis (mesh embedded in the bot file)
     if std::env::var("RA2_NO_CHASSIS").is_err() {
-        if let Some(ch) = bot.components.first().and_then(|c| c.chassis.as_ref()) {
-            if let Some(mesh) = &ch.mesh {
-                if std::env::var("RA2_DEBUG").is_ok() {
-                    let ymin = mesh.points.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
-                    let ymax = mesh.points.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
-                    eprintln!(
-                        "  raw chassis mesh: {} pts, y={:.3}..{:.3}",
-                        mesh.points.len(),
-                        ymin,
-                        ymax
-                    );
-                }
-                let verts = bot_mesh_vertices(mesh, world[0]);
-                let (tex, tw, th) = match &ch.texture_tga {
-                    Some(tga) => decode_image(tga)
-                        .unwrap_or_else(|| (solid([120, 120, 125, 255], 4, 4), 4, 4)),
-                    None => (solid([120, 120, 125, 255], 4, 4), 4, 4),
-                };
-                if !verts.is_empty() {
-                    items.push(DrawItem {
-                        vertices: verts,
-                        tex,
-                        tw,
-                        th,
-                        label: "chassis".into(),
-                        blend: false,
-                    });
-                }
-            }
-        }
+        items.extend(chassis_items(&bot, world[0]));
     }
 
     // attached components
@@ -1018,9 +1107,23 @@ fn push_scene(
 /// Visual batches for one geometry object, in object-local space, so a physics
 /// body's transform can place it (used for movable arena props).
 pub fn object_items(scene: &gmi::GmiScene, object_name: &str, dir: &Path) -> Vec<DrawItem> {
+    object_items_opts(scene, object_name, dir, true)
+}
+
+/// Visual batches for one geometry object, in `.gmf`/scene space.
+pub fn object_scene_items(scene: &gmi::GmiScene, object_name: &str, dir: &Path) -> Vec<DrawItem> {
+    object_items_opts(scene, object_name, dir, false)
+}
+
+fn object_items_opts(
+    scene: &gmi::GmiScene,
+    object_name: &str,
+    dir: &Path,
+    object_local: bool,
+) -> Vec<DrawItem> {
     let mut items = Vec::new();
     for (tex, color, verts) in
-        scene_material_groups_opts(scene, Mat4::IDENTITY, dir, Some(object_name), true)
+        scene_material_groups_opts(scene, Mat4::IDENTITY, dir, Some(object_name), object_local)
     {
         if verts.is_empty() {
             continue;
@@ -1045,6 +1148,30 @@ pub fn object_items(scene: &gmi::GmiScene, object_name: &str, dir: &Path) -> Vec
         });
     }
     items
+}
+
+/// Every mesh point of a scene in scene space (object transforms applied).
+/// `include_collision` keeps the invisible physics proxies (for colliders).
+pub fn scene_points(scene: &gmi::GmiScene, include_collision: bool) -> Vec<Vec3> {
+    let mut out = Vec::new();
+    for o in &scene.objects {
+        let Some(mesh) = &o.mesh else { continue };
+        if mesh.points.is_empty() {
+            continue;
+        }
+        if !include_collision
+            && (mesh.is_collision() || is_hidden(&o.name) || is_collision_name(&o.name))
+        {
+            continue;
+        }
+        let world = tm_mat4(&o.transform);
+        out.extend(
+            mesh.points
+                .iter()
+                .map(|p| world.transform_point3(Vec3::from(*p))),
+        );
+    }
+    out
 }
 
 /// Object-local `(name, points)` for every geometry object with a mesh.

@@ -294,36 +294,14 @@ impl Sandbox {
     /// set the yaw rate. Modelled as a velocity controller rather than wheel
     /// torque, so it stays predictable while the collider is a single hull.
     fn apply_drive(&mut self, input: DriveInput, dt: f32) {
-        let Some(st) = self.physics.state(self.bot_body) else {
-            return;
-        };
-        let rot = st.rotation;
-        let fwd = (rot * self.forward).normalize_or_zero();
-        let right = (rot * Vec3::X).normalize_or_zero();
-        let up = (rot * Vec3::Y).normalize_or_zero();
-
-        let v = st.linear_velocity;
-        let (v_forward, v_lateral, v_vertical) = (v.dot(fwd), v.dot(right), v.dot(up));
-
-        // Forward speed moves toward the throttle target at a bounded rate.
-        let throttle = input.throttle.clamp(-1.0, 1.0);
-        let target = throttle * self.tuning.max_speed;
-        let step = self.tuning.accel * dt;
-        let new_forward = v_forward + (target - v_forward).clamp(-step, step);
-        // Grip bleeds off sideways velocity.
-        let new_lateral = v_lateral * (1.0 - self.tuning.grip).clamp(0.0, 1.0);
-
-        let linear = fwd * new_forward + right * new_lateral + up * v_vertical;
-
-        // Steering: replace the yaw component, keeping the rest of the spin.
-        let steer = input.steer.clamp(-1.0, 1.0);
-        let speed_ratio = (v_forward.abs() / self.tuning.max_speed).clamp(0.0, 1.0);
-        let authority = (0.35 + 0.65 * speed_ratio).min(1.0);
-        let yaw = -steer * self.tuning.max_yaw_rate * authority;
-        let spin = st.angular_velocity;
-        let angular = spin - up * spin.dot(up) + up * yaw;
-
-        self.physics.set_velocity(self.bot_body, linear, angular);
+        apply_drive(
+            &mut *self.physics,
+            self.bot_body,
+            self.forward,
+            input,
+            &self.tuning,
+            dt,
+        );
     }
 
     /// World-space transform of the robot.
@@ -399,6 +377,49 @@ impl Sandbox {
         });
         renderer.render_groups(&groups, view_proj, w, h)
     }
+}
+
+/// Shared arcade velocity controller: drive the horizontal velocity toward the
+/// throttle target, bleed off sideways velocity, and set the yaw rate. Used by
+/// both the single-robot sandbox and the duel.
+pub fn apply_drive(
+    physics: &mut dyn PhysicsBackend,
+    body: BodyHandle,
+    forward: Vec3,
+    input: DriveInput,
+    tuning: &DriveTuning,
+    dt: f32,
+) {
+    let Some(st) = physics.state(body) else {
+        return;
+    };
+    let rot = st.rotation;
+    let fwd = (rot * forward).normalize_or_zero();
+    let right = (rot * Vec3::X).normalize_or_zero();
+    let up = (rot * Vec3::Y).normalize_or_zero();
+
+    let v = st.linear_velocity;
+    let (v_forward, v_lateral, v_vertical) = (v.dot(fwd), v.dot(right), v.dot(up));
+
+    // Forward speed moves toward the throttle target at a bounded rate.
+    let throttle = input.throttle.clamp(-1.0, 1.0);
+    let target = throttle * tuning.max_speed;
+    let step = tuning.accel * dt;
+    let new_forward = v_forward + (target - v_forward).clamp(-step, step);
+    // Grip bleeds off sideways velocity.
+    let new_lateral = v_lateral * (1.0 - tuning.grip).clamp(0.0, 1.0);
+
+    let linear = fwd * new_forward + right * new_lateral + up * v_vertical;
+
+    // Steering: replace the yaw component, keeping the rest of the spin.
+    let steer = input.steer.clamp(-1.0, 1.0);
+    let speed_ratio = (v_forward.abs() / tuning.max_speed).clamp(0.0, 1.0);
+    let authority = (0.35 + 0.65 * speed_ratio).min(1.0);
+    let yaw = -steer * tuning.max_yaw_rate * authority;
+    let spin = st.angular_velocity;
+    let angular = spin - up * spin.dot(up) + up * yaw;
+
+    physics.set_velocity(body, linear, angular);
 }
 
 /// How the sandbox frames the robot.

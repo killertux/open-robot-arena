@@ -118,6 +118,7 @@ impl PhysicsBackend for JoltBackend {
         .restitution(desc.restitution)
         .linear_damping(desc.linear_damping)
         .angular_damping(desc.angular_damping)
+        .allow_sleeping(desc.allow_sleeping)
         .user_data(desc.user_data);
         if let Some(mass) = desc.mass {
             settings = settings.mass(mass);
@@ -194,6 +195,8 @@ impl PhysicsBackend for JoltBackend {
     fn set_velocity(&mut self, handle: BodyHandle, linear: Vec3, angular: Vec3) {
         if let Some(id) = self.id(handle) {
             if let Ok(mut body) = self.world.body_mut(id) {
+                // A sleeping body ignores velocity changes, so wake it first.
+                body.activate();
                 let _ = body.set_linear_velocity(Self::v(linear));
                 let _ = body.set_angular_velocity(Self::v(angular));
             }
@@ -213,6 +216,13 @@ impl PhysicsBackend for JoltBackend {
                 eprintln!("ra2sim: step failed: {e:?}");
                 StepInfo { complete: false }
             }
+        }
+    }
+
+    fn in_contact(&self, a: BodyHandle, b: BodyHandle) -> bool {
+        match (self.id(a), self.id(b)) {
+            (Some(ia), Some(ib)) => self.world.were_bodies_in_contact(ia, ib).unwrap_or(false),
+            _ => false,
         }
     }
 

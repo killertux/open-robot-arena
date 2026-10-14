@@ -58,6 +58,8 @@ pub struct BodyDesc {
     pub mass: Option<f32>,
     pub linear_damping: f32,
     pub angular_damping: f32,
+    /// Whether the backend may put this body to sleep when it settles.
+    pub allow_sleeping: bool,
     /// Free-form tag (used to tell arena from robot bodies).
     pub user_data: u64,
 }
@@ -74,6 +76,7 @@ impl BodyDesc {
             mass: None,
             linear_damping: 0.05,
             angular_damping: 0.2,
+            allow_sleeping: true,
             user_data: 0,
         }
     }
@@ -106,6 +109,13 @@ impl BodyDesc {
     pub fn with_damping(mut self, linear: f32, angular: f32) -> Self {
         self.linear_damping = linear;
         self.angular_damping = angular;
+        self
+    }
+
+    /// Bodies the game drives must never sleep, or they ignore later velocity
+    /// changes (Jolt leaves a sleeping body untouched until something wakes it).
+    pub fn with_sleeping(mut self, allow: bool) -> Self {
+        self.allow_sleeping = allow;
         self
     }
 
@@ -178,5 +188,10 @@ pub trait PhysicsBackend {
 
     fn gravity(&self) -> Vec3;
     fn step(&mut self, dt: f32) -> StepInfo;
+    /// Whether two bodies touched during the last step (a default `false` lets
+    /// simpler backends skip contact reporting).
+    fn in_contact(&self, _a: BodyHandle, _b: BodyHandle) -> bool {
+        false
+    }
     fn ray_cast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<RayHit>;
 }
