@@ -21,6 +21,14 @@ This project builds on community reverse-engineering work. We do not claim it.
   MakeCFL/UnCFL (Jari Komppa), Component Exporter — present in `local/game/#Tools/`,
   used only as behavioural references.
 
+## Jolt Physics
+- Author: Jorrit Rouwe. Source: https://github.com/jrouwe/JoltPhysics
+- License: **MIT**.
+- Used as the Havok substitute for the engine's rigid-body simulation. We link
+  it through the safe Rust bindings **`oxijolt`** (MIT OR Apache-2.0), which
+  wraps the `joltc` C API. Neither Jolt's source nor its binaries are vendored
+  into this repository; they are pulled in as ordinary Cargo dependencies.
+
 ## CFL3 archive format (`.cfz`)
 - Author: Jari Komppa ("Compressed File Library 3").
 - Source: https://github.com/jarikomppa/cfl — License: **zlib** (permissive).

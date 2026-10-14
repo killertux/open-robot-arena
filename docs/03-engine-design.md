@@ -21,7 +21,7 @@ that runs *Robot Arena 2* using the player's own game data.
 | Graphics | **wgpu** (Vulkan/Metal/D3D12) | The original is fixed-function D3D8; we emulate its look with modern shaders. |
 | Window/input | `winit` | Cross-platform. |
 | Audio | `rodio` / `kira` | Plays the original `.wav`/`.mp3`. |
-| Physics | **Jolt** (via `jolt-rs`) or Rapier | Substitute for licensed Havok; map `.gmf` rigid bodies/constraints onto it. |
+| Physics | **Jolt** (via the safe `oxijolt` bindings) | Havok-style engine, closest to RA2's original feel. Hidden behind `ra2sim`'s `PhysicsBackend` trait so it can be swapped (e.g. Rapier) without touching the sandbox. |
 | Math | `glam` | |
 | Format parsing | our own crates | GMI, BOT, CFL3, GIB, TGA/BMP. |
 
@@ -31,27 +31,52 @@ that runs *Robot Arena 2* using the player's own game data.
 engine/
   crates/
     ra2fmt/      # pure data: GMI(.gmf), GMA(ascii), BOT, CFL3(.cfz), GIB, textures
-    ra2sim/      # physics world, component tree, damage/buckling model
-    ra2script/   # native reimplementation of plus/AI/Arenas/Gooey object model
-    ra2render/   # wgpu renderer + scene graph
-    ra2app/      # winit app: menus, workshop, matches
+    ra2sim/      # physics (Jolt behind a PhysicsBackend trait), scene assembly, sim
+    ra2script/   # native reimplementation of plus/AI/Arenas/Gooey object model   (planned)
+    ra2-render/  # wgpu renderer + scene graph (lib + `ra2-render` CLI)
+    ra2app/      # winit app: menus, workshop, matches                            (planned)
 tools/           # python tooling (format probing, conversion, diffs)
 local/           # (git-ignored) game files + converted cache
 ```
 
 ## Milestones (each independently demoable)
 
-- **M1 — Asset viewer.** Load a stock `.bot` + its components' `.gmf` + textures
-  and render the assembled robot; load an arena `.gmf` and render it.
-  *This is the first real "we did it" moment.*
-- **M2 — Physics sandbox.** Drop a bot into an arena with Jolt; drive it; collide
-  with hazards.
+- **M1 — Asset viewer.** ✅ Load a stock `.bot` + its components' `.gmf` +
+  textures and render the assembled robot; load an arena `.gmf` and render it;
+  assemble arena scenes from their `.py` scripts.
+- **M2 — Physics sandbox.** ✅ Drop a bot into an arena with Jolt; drive it;
+  collide with walls and movable props. *(Implemented as `ra2sim` + `ra2-sim`,
+  verified headlessly by rendering a frame strip.)*
 - **M3 — Two robots fight.** Weapons/motors via the component/controller model;
-  damage + buckling.
+  damage + buckling. **(next)**
 - **M4 — Script layer.** Reproduce the `plus`/`AI`/`Arenas` API and run the stock
   AI strategies and arena scripts.
 - **M5 — Game shell.** Workshop (build a robot), tournaments, menus.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
+
+## M2 design notes
+
+- **Swappable physics.** `ra2sim::backend` defines neutral `BodyDesc`/`ShapeDesc`
+  /`BodyState` and a `PhysicsBackend` trait (create/remove body, impulses,
+  velocities, step, ray cast). `ra2sim::jolt` is the only module that knows about
+  Jolt.
+- **Bodies from game data.** The arena becomes a static triangle-mesh collider
+  built from its rendered geometry; the robot becomes a convex hull of its mesh
+  vertices; the arena script's `AddXtra` obstacles become *movable* props from
+  their embedded `RBCollection` (crates 40 kg, barrels 1500 kg) using the game's
+  own mass/friction/elasticity.
+- **Two conventions that bit us** (recorded so they are not re-learned):
+  1. Jolt's mesh collider is **one-sided**: the counter-clockwise side is solid.
+     RA2 geometry is clockwise as seen from outside, so its winding must be
+     reversed for Jolt.
+  2. The collider is a single sliding hull, so ordinary friction pins it; the
+     controller models tyre grip explicitly and the hull keeps low ground
+     friction.
+- **Controller.** Arcade `throttle`/`steer` → target forward speed + yaw rate,
+  with lateral grip. Per-wheel jointed bodies + motor torque is M3 work.
+- **Verification.** `ra2-sim` runs the timeline headlessly and writes
+  `frame_NNN.png` plus a `strip.png` montage, so driving and collisions can be
+  checked without a display.
 
 ## Key design decisions to settle
 

@@ -24,7 +24,8 @@ fn main() -> ExitCode {
     if args.len() < 3 {
         eprintln!("usage: ra2-sim <arena.py|arena.gmf> <bot> <out_dir> [seconds] [shots] [drive]");
         eprintln!("  drive: \"0-2:1,0;2-4:1,1;4-6:-1,0\"  (start-end:throttle,steer)");
-        eprintln!("  env:   RA2_OBSTACLE=crates  RA2_MASS=<kg>");
+        eprintln!("  env:   RA2_OBSTACLE=crates  RA2_MASS=<kg>  RA2_YAW=<deg>");
+        eprintln!("         RA2_SPAWN=<x,z>  RA2_CHASE=<dx,dy,dz>");
         return ExitCode::FAILURE;
     }
     let arena = &args[0];

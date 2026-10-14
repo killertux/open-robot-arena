@@ -255,9 +255,35 @@ multi-material):
 - `ra2fmt::bot` — `.bot` header + components + chassis mesh/outline (all versions).
 - `ra2fmt::arena` — arena scripts → scene (model, props, shadow, cameras).
 - `ra2fmt::component` — component `.txt` definitions; `ra2fmt::cfl` — native CFL3 archive reader.
+- `ra2sim` — physics: backend-neutral `PhysicsBackend` trait, Jolt backend, arena
+  colliders, robot hull, movable props from script rigid bodies, arcade controller.
 - `ra2-cli` — `ra2 info`, `ra2 obj`, `ra2 cfz`, `ra2 arena`.
 - `ra2-render` — headless wgpu renderer for `.gmf`, assembled `.bot` robots, and
   arena `.py` scenes (all 57 bots and 12 arenas render).
+- `ra2-sim` — headless physics sandbox: drive a robot in an arena, write frames.
+
+## 9b. Physics data in the assets (M2 findings)
+
+- **Arena obstacles are real rigid bodies.** `Arenas/<prop>/<prop>.gmf` (crates,
+  barrels, cinderblocks, cones, ramps) carry a `RigidBodyCollection` whose body
+  names match the mesh object names, with mass/friction/elasticity. E.g. crates
+  are 40 kg (friction 0.50, elasticity 0.30); barrels 1500 kg (friction 0.10).
+  So the props can be simulated with the game's own parameters.
+- **Arena collision geometry.** Some arenas ship explicit collision meshes
+  (octagon `main_collision`/`outerfloor_collision`, hilltop `Collision Box`, ...)
+  tagged with a `havok` material; others (practice arena) have none and rely on
+  their visible geometry. Using the rendered geometry as the collider works
+  everywhere.
+- **Wheels.** `.bot` components include class `Wheel` (e.g. `Wheel(Mini wheel)`);
+  the component `.txt` gives `grip` and `resistance` and names its `contact`
+  (traction) and `passthru` (collision) objects — the data needed for a
+  per-wheel physics model in M3.
+- **Jolt collider conventions.** Jolt's triangle-mesh collider is one-sided (the
+  counter-clockwise side is solid), the opposite of RA2's clockwise-outward
+  winding, so triangles are rewound when building the static arena collider.
+- **Scale.** RA2 units map cleanly to metres (a small robot is ~1.3 x 1.8 x 1.05);
+  the robot's origin sits at the chassis bottom with the wheels reaching ~0.3
+  below it.
 
 ## 10. Open questions for Stage 1/2
 
