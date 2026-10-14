@@ -164,7 +164,7 @@ Jolt is a deliberate substitution (see `03-engine-design.md`), hidden behind the
 | Integration | selectable ODE integrators incl. Euler; `UPDATES_PER_TIMESTEP 1`, `USE_FAST_SUBSPACE 1` | semi-implicit Euler, fixed dt | Equivalent class; RA2's *resolver/fast-subspace* choice has no Jolt analogue. |
 | Step rate | game fixed-step | our `1/60 s` | Plausible; the original's rate is **[OPEN]**. |
 | World scale | `39.37` (inches per unit) — a numerical-conditioning scale | n/a | Our unit is 1 m; unaffected. |
-| Shapes | `SIMULATION_GEOMETRY` selects box / convex / concave / proxy (values 2, 3, 5, 6 observed) | tri-mesh + convex hull | **Partial** — we use the referenced geometry but do not decode the shape kind (see §4). |
+| Shapes | `SIMULATION_GEOMETRY` picks the geometry source (1/2 own mesh, 3/4 proxy, 5/6 display proxy) and `HAVOK_GEO_TYPE` the kind (`Standard` mesh or `Plane` primitive) | arena: static tri-mesh (all fixed bodies merged) + a quad per plane; components: convex hull or tri-mesh | **Landed (F5)** — every shipped value is decoded. Merging the fixed bodies into one mesh still loses per-body friction (see the friction rows). |
 
 ---
 
@@ -208,9 +208,12 @@ Known, documented, not yet fixed:
     `resistance` the joint's rolling-resistance friction torque. Making the
     `contact` object the collider *hurts* (the traction meshes are not always big
     enough to hold a robot up) so `contact` is parsed but unused for now.
-11. **Collision shape kinds are not decoded.** `SIMULATION_GEOMETRY` /
-    `GMID_COLLISION_BOX|SPHERE|CYLINDER|PLANE|MESH|OBJECT` describe real shapes;
-    we approximate with tri-meshes and convex hulls. **[OPEN]**
+11. **Collision shape kinds.** `SIMULATION_GEOMETRY` (1 convex, 2 concave, 3/4
+    proxy convex/concave, **5/6 display proxy**) and `HAVOK_GEO_TYPE`
+    (`Standard`, `Plane`) are decoded; arena colliders are assembled per body and
+    plane primitives synthesised. **Landed (F5).** What remains is that we merge
+    each body's geometry into one static mesh and lose its individual
+    friction — see the table above.
 12. **Damage model.** The original exposes `GetLastDamageDone/Received` returning
     `(component, amount, time, by player, by component)` — **[CONFIRMED]** from
     the shipped `AI/Spinner.py` — and weapons carry `concussion` + `piercing`,
@@ -277,8 +280,8 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | All 57 stock bots render | 57/57 |
 | All 12 arena scripts assemble | 12/12 |
 | `ra2-sim` drives on practice / octagon / hilltop / box | OK — one jointed robot, scripted drive, frames written. The sandbox is no longer arcade-driven: it drives the same assembly the duel does |
-| Stock bots that drive on the jointed assembly | **26/45** travel ≥ 2 m in 3 s, 7 creep under 2 m, 12 barely move (`AI/Team*`, full throttle, box arena). The motor law is now the game's own (F3), so the remaining stalls are geometry: mount placement, the unmodelled trigger/control layer, and the arena collider (F11) |
-| `ra2-duel` on the octagon | **Regressed, and diagnosed.** Under F2 `AI/Team1/Bot0` vs `AI/Team6/Bot2` closed and traded damage; with F3's honest motor speeds the same bout ends with both robots stopped and no damage. Three causes at once: the octagon's collider drops one of them three metres (`RA2_COLLISION=visible` keeps it on the floor), robots now cross an arena in a couple of seconds, and this AI jams in a corner — the box arena, whose collider is sound, ends the same bout with the two robots pressed into opposite walls |
+| Stock bots that drive on the jointed assembly | **27/45** travel ≥ 2 m in 3 s (`AI/Team*`, full throttle, box arena). The motor law is the game's own (F3) and the arenas now collide the geometry they draw (F5), so what is left is geometry *placement*: mount residuals and the unmodelled trigger/control layer |
+| `ra2-duel` on the octagon | **Engages again.** With F3's honest speeds the bout had ended with both robots parked in open floor; the cause was spawn placement, not a collider hole (F11): the duel invented a spread that landed on the rim of the Octagon's 3.7 m drop. It now spawns on the arena's own four `startpoint` attachments. `AI/Team1/Bot0` vs `AI/Team6/Bot2` closes to contact by t = 12 s and stays engaged for the full 30 s. Damage is still zero — the model only fires on impacts (F7) |
 | `cargo fmt --check`, `clippy`, tests | clean, 13 tests |
 
 ## 7. Recommended order of work
@@ -291,15 +294,18 @@ arcade velocity controller is deleted, and `ra2-sim` was rebuilt on `Robot`.
 
 Flipping it made the next blocker visible rather than removing it, and **F3/F4
 have since landed** — the motor and wheel models now come from the game's own
-data (the `power` pair, `grip`, `resistance`) rather than from guessed scales.
-The remaining blocker is *geometry and collision*, not the parts' parameters:
+data (the `power` pair, `grip`, `resistance`) rather than from guessed scales —
+as has **F5**, which decodes `SIMULATION_GEOMETRY` (1/2 own mesh, 3/4 proxy,
+5/6 display proxy) and `HAVOK_GEO_TYPE` (`Standard`, `Plane`), and fixes the
+arena-coverage probe that had been silently rejecting every arena dug deeper
+than 10 m. The remaining blocker is geometry *placement* and behaviour, not the
+parts' parameters:
 
-1. **F11 — fix the arena colliders.** Some arenas' rigid-body sets have holes
-   (the octagon drops a robot three metres), which is now what stops the headline
-   duel from engaging at all. F5's shape work is the same family.
-2. **F5 — decode `SIMULATION_GEOMETRY` / `GMID_COLLISION_*` into real shapes.**
-3. **Mount placement's residuals and the trigger/control layer (M4).** A spun
+1. **Mount placement's residuals and the trigger/control layer (M4).** A spun
    weapon whose arm reaches the floor presses with its full torque and lifts the
    robot; the original only spins one when it is told to.
-4. **F6 — the friction combination law**, if F5 does not resolve the surveys.
-5. **F7 — the damage model**, against `GetLastDamageReceived`'s five-tuple.
+2. **F7 — the damage model**, against `GetLastDamageReceived`'s five-tuple. The
+   duel engages again (F11) but nothing comes off.
+3. **F6 — the friction combination law**, if the drive survey needs it.
+4. **F4's `contact` surface** as a separate collider, once the `contact` and
+   `passthru` object sets can be separated safely.

@@ -205,6 +205,11 @@ impl Mesh {
     }
 }
 
+/// `HAVOK_GEO_TYPE`: a triangle mesh (the default).
+pub const GEO_TYPE_STANDARD: i32 = 0;
+/// `HAVOK_GEO_TYPE`: an infinite plane primitive.
+pub const GEO_TYPE_PLANE: i32 = 1;
+
 #[derive(Debug, Clone, Default)]
 pub struct RigidBody {
     pub name: String,
@@ -216,7 +221,9 @@ pub struct RigidBody {
     /// 1 means the body never budges (static / infinite mass).
     pub unyielding: i32,
     /// Which geometry the simulation uses (1 convex, 2 concave, 3 proxy
-    /// concave, 4 proxy convex; 5/6 also occur in shipped data).
+    /// concave, 4 proxy convex, 5 display-proxy concave, 6 display-proxy
+    /// convex). 5 is what every stock arena's main collider declares; see
+    /// [`RigidBody::simulation_objects`].
     pub simulation_geometry: i32,
     /// Optional mesh used for simulation (`GEOMETRY_PROXY_NAME`), `(null)` when
     /// the body simulates its own geometry.
@@ -243,6 +250,50 @@ impl RigidBody {
         } else {
             &self.geometry_proxy
         }
+    }
+
+    /// `HAVOK_GEO_TYPE = 1` is an **infinite plane primitive**: the body has no
+    /// mesh at all and its `NODE_TM` gives the plane's point and normal (the
+    /// matrix's Y row).
+    ///
+    /// The shipped data uses it three times and never anything else besides
+    /// `Standard` (0): `Clawtop` and `FlexTop` declare their arena *floor* this
+    /// way (normal up) and the Octagon its *ceiling* — `topplane_collision`,
+    /// normal down, 15.6 m up. So a static body with no triangles is not
+    /// necessarily a mistake.
+    pub fn is_plane(&self) -> bool {
+        self.geo_type == GEO_TYPE_PLANE
+    }
+
+    /// The geometry objects this body simulates, by `SIMULATION_GEOMETRY`.
+    ///
+    /// 1/2 (convex, concave) is the body's own object; 3/4 (proxy
+    /// concave/convex) is `GEOMETRY_PROXY_NAME`; **5/6 are the display-proxy
+    /// forms**: `DISPLAY_PROXY_NAME` — the mesh the body is *shown* as, which
+    /// is normally a group node whose children are the real geometry.
+    ///
+    /// The Octagon is what settles 5. Its `main_collision` declares `geom 5`
+    /// with display proxy `main_display`, and its own 65-vertex mesh is an
+    /// octagonal slab that stops 3.3 m short of the visible rim on the
+    /// diagonals: taking that mesh as the collider drops a robot that drives
+    /// there four metres into the slab's underside. The `main_display` group
+    /// contains the rim.
+    pub fn simulation_objects(&self) -> Vec<&str> {
+        let source = match self.simulation_geometry {
+            3 | 4 => self.geometry_proxy.as_str(),
+            5 | 6 => self.display_proxy.as_str(),
+            _ => self.name.as_str(),
+        };
+        let source = if source.trim().is_empty() || source.eq_ignore_ascii_case("(null)") {
+            self.name.as_str()
+        } else {
+            source
+        };
+        source
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("(null)"))
+            .collect()
     }
 
     /// The object to draw: the display proxy when requested, else the body name.
@@ -976,6 +1027,43 @@ mod tests {
             ..Default::default()
         };
         Attachment::from_object(&o).expect("id present")
+    }
+
+    /// `SIMULATION_GEOMETRY` picks the geometry source, and `HAVOK_GEO_TYPE`
+    /// tells a plane primitive apart from a mesh.
+    ///
+    /// 5/6 are the display-proxy forms: every stock arena's main collider uses
+    /// 5 and names a group node (`main_display` and friends), while components
+    /// use 3 with a real proxy mesh.
+    #[test]
+    fn simulation_geometry_names_the_geometry_source() {
+        let mut rb = RigidBody {
+            name: "body".into(),
+            ..Default::default()
+        };
+        rb.simulation_geometry = 2;
+        assert_eq!(rb.simulation_objects(), ["body"]);
+
+        rb.simulation_geometry = 3;
+        rb.geometry_proxy = "body_sim".into();
+        assert_eq!(rb.simulation_objects(), ["body_sim"]);
+
+        // 5 is the display proxy, not the body's own mesh — the decode that
+        // matters for arenas.
+        rb.simulation_geometry = 5;
+        rb.display_proxy = "main_display".into();
+        assert_eq!(rb.simulation_objects(), ["main_display"]);
+
+        // A missing or `(null)` name falls back to the body's own object.
+        rb.display_proxy = "(null)".into();
+        assert_eq!(rb.simulation_objects(), ["body"]);
+        rb.simulation_geometry = 4;
+        rb.geometry_proxy = " a , b ,(null)".into();
+        assert_eq!(rb.simulation_objects(), ["a", "b"]);
+
+        assert!(!rb.is_plane());
+        rb.geo_type = GEO_TYPE_PLANE;
+        assert!(rb.is_plane());
     }
 
     #[test]

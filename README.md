@@ -88,14 +88,16 @@ rotated/mirrored; exact BurstMotor rest poses are approximated; a motor's
 its parts (a definition's `power = <speed> <torque>` is the pair the scripts set
 through `SetPowerSettings`, whose implementation scales the torque by 40) — but
 on the jointed assembly a quarter of the stock bots still cannot get traction and
-simply will not move. Those causes are geometry, not parameters: mount placement,
-the unmodelled trigger/control layer, and arenas whose rigid-body colliders have
-holes (the octagon's drops a robot three metres), which is also why the headline
-duel currently fails to engage. A wheel's declared `contact` surface is parsed
-but not yet used as the collider — using it makes some robots unable to move.
-Damage attribution picks the nearest part rather than solving per-part contacts,
-and a chassis that loses a part is *reshaped* rather than deforming the way the
-original's buckled chassis does; and Jolt combines friction as `sqrt(µ₁·µ₂)`
+simply will not move. That is mount *placement* and the unmodelled trigger/control
+layer, not the parts' parameters: arenas now collide the geometry they draw
+(`SIMULATION_GEOMETRY` 5/6 is the display proxy, plane primitives are synthesised)
+and a duel starts on the arena's own `startpoint` attachments, so the Octagon bout
+engages again — but nothing comes off it, because the damage model only fires on
+impacts. A wheel's declared `contact` surface is parsed but not yet used as the
+collider — using it makes some robots unable to move. Damage attribution picks the
+nearest part rather than solving per-part contacts, and a chassis that loses a
+part is *reshaped* rather than deforming the way the original's buckled chassis
+does; and Jolt combines friction as `sqrt(µ₁·µ₂)`
 where Havok 1.x used `√(µ₁²+µ₂²)`, which we cannot change through the safe
 binding. Each item is tracked with its evidence and fix path in
 `docs/05-validation-report.md` §4 and `docs/06-deferred-fidelity.md`.

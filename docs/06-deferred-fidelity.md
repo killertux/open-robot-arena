@@ -9,16 +9,17 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 
 | Ref | Item | Status |
 |---|---|---|
-| F1 | Mount-point (attachment frame) alignment | data done, rule identified (`A_parent·A_own⁻¹`); the spinner's height source is open — top priority |
-| F2 | Assembled-bodies path opt-in until F1 lands | open |
-| F3 | Motors are velocity motors, not torque motors | open |
-| F4 | Wheel `contact` / `grip` / `resistance` partly used | open |
-| F5 | Collision shape kinds not decoded | open |
+| F1 | Mount-point (attachment frame) alignment | data done, rule identified (`A_parent·A_own⁻¹`); the spinner's height source is open |
+| F2 | Assembled-bodies path is the only robot path | **landed** |
+| F3 | The motor law, from the game's own data | **landed** |
+| F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` as a collider still open) |
+| F5 | Collision shape kinds (`SIMULATION_GEOMETRY`, `HAVOK_GEO_TYPE`) | **landed** |
 | F6 | Friction combination law differs from Havok 1.x | blocked on the binding |
 | F7 | Damage model structurally aligned, numerically unsourced | open |
 | F8 | Pistons are welded | open |
 | F9 | Buckling is chassis deformation in the original | open |
 | F10 | Chassis skin decals; 16 %-light weight gap | open |
+| F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
 
 ---
 
@@ -537,7 +538,7 @@ from stationary to driving) and 21 get worse. The dominant mechanism is visible:
 `AI/Team7/Bot1`'s blade ends up lying on the floor, propping the robot off its
 wheels, and a spun weapon motor then presses with its full torque — more torque
 makes that worse. That is mount placement and the unmodelled trigger/control
-layer, not the motor. See F11 for the other, larger cause.
+layer, not the motor. F5's collider work lifted the survey again, to 27/45.
 
 ## F4 — Wheel `contact` / `grip` / `resistance` — **landed, with a caveat**
 
@@ -561,33 +562,84 @@ because the shipped traction meshes are not always large enough to hold the robo
 up. Until the `contact` and `passthru` object sets are separated and validated,
 the whole scene hull is the collider and `contact` is parsed but unused.
 
-## F11 — Some arenas' rigid-body colliders have holes
+## F5 — Collision shape kinds, decoded — **landed**
 
-**Newly exposed by F3**, not new: the arena collider defaults to the arena's own
-Havok rigid bodies when they cover the arena centre, and for the octagon that set
-covers the centre but *not* the whole floor. The result is a pit a robot can
-drive into and fall three metres. `RA2_COLLISION=visible` puts the same robot, in
-the same run, on the same floor without incident, so the geometry is there and
-the *choice* is what fails.
+`SIMULATION_GEOMETRY` says which geometry a body simulates and `HAVOK_GEO_TYPE`
+which kind it is. Both are honoured now.
 
-It matters now because F3's honest motor speeds let robots reach the edges — and
-then struggle to come back. The 30 s `AI/Team1/Bot0` vs `AI/Team6/Bot2` duel that
-closed and traded damage under F2 now ends with both robots stopped and no damage
-at all: on the octagon one is at `(-12.7, 4.8)`, outside the ring. The arena is
-only half of it — on the *box* arena, whose collider is sound, the same bout also
-ends without contact, with the two robots pressed into opposite walls at
-`(-11.8, 2.5)` and `(4.9, 11.5)`. Robots that cross an arena in a couple of
-seconds and jam in a corner are not recovered by this AI, which only drives at
-the opponent. So the gap is three things at once: are the speeds right (F3's
-inference), can the geometry hold a robot (this item), and what happens when it
-cannot (the control layer, M4).
+**`HAVOK_GEO_TYPE` is `Standard` (0, a triangle mesh) or `Plane` (1)** — only
+those two occur anywhere in the shipped data (166 `Standard`, 3 `Plane`). A plane
+body owns no mesh at all: its `NODE_TM` gives a point and a normal (the matrix's
+Y row). All three are planes you can name — `Clawtop`'s `Plane06` and `FlexTop`'s
+`Plane01` are *floors* (normal up, 7.5 m and 9.9 m down) and the Octagon's
+`topplane_collision` is a **ceiling** (normal down, 15.6 m up). We synthesise a
+200 m quad for them; before, they produced zero triangles and the arenas fell
+back to their visible meshes.
 
-## F5 — Collision shape kinds are not decoded
+**`SIMULATION_GEOMETRY`**: 1 (convex) and 2 (concave) name the body's own object,
+3/4 (proxy convex/concave) name `GEOMETRY_PROXY_NAME`, and **5/6 are the
+display-proxy forms**, naming `DISPLAY_PROXY_NAME`. That last one is the decode
+that mattered, and the shipped files are unanimous:
 
-`SIMULATION_GEOMETRY` and the `GMID_COLLISION_BOX|SPHERE|CYLINDER|PLANE|MESH|
-OBJECT` objects describe real shapes; we approximate with convex hulls
-(components) and a triangle mesh (arenas). Values seen in the stock arenas:
-2, 3, 5, 6.
+- Every arena's main collider declares `geom 5` — the Octagon's `main_collision`,
+  the box's `arena_collision`, Hilltop's `Collision Box`, FlexTop's
+  `floor_collision`, the Octagon's `outerfloor_collision` — and every one of them
+  sets `USE_DISPLAY_PROXY` and names a *group* node (`main_display`,
+  `arena_display`, `Arena`, `floor_display`). Components never do: they use
+  `geom 3` with a real proxy mesh (`anglemotor_collision`). That is why 5 and 6
+  were missing from the enum while 1-4 were documented.
+- The named group has no vertices of its own — the Octagon's `main_display` is 57
+  child objects — so its children are the geometry.
+- Taking the body's *own* mesh instead drops whatever the artist put in the
+  group. For the Octagon that is the floor of the apron 3.7 m below the play
+  platform.
+
+**A bug this exposed.** The collider is only taken from the rigid bodies when a
+downward ray at the arena centre lands within 10 m of the lowest *visible*
+geometry — but that test compared the ray's **distance** against that **height**.
+Near y = 0 the two are close enough to pass; every arena dug deeper than 10 m
+failed and silently fell back to the visible mesh. So `Hilltop` (-20 m),
+`Clawtop` (-7.5), `FlexTop` (-9.9) and `Electric` never used their own rigid
+bodies. Fixed. (The test itself is still one centre probe; the ring probe below
+is what would make it honest.)
+
+Resulting collider sizes: Octagon 328 → 1056 triangles, box 396, Bridge 1424,
+Clawtop 1796, compressor 916, Electric 1904, half 1014, Hilltop 60 → 892, king
+648, parkinglot 1024, Skull 922. `FlexTop` is 4 — correctly, because its floor
+*is* the plane primitive and its play surface is a 400 kg movable body.
+
+## F11 — The Octagon's "hole" was a start block
+
+**Not a collider bug.** F3 recorded this as a hole: a robot at `(8.04, -9.87)`
+fell from y 0.22 to -2.97, while `RA2_COLLISION=visible` kept it on the floor.
+Chasing it with `arenadump` (a new height-map/profile tool) shows what actually
+happens. The Octagon's play surface is a raised platform (top at -0.26) whose
+extent stops at r = 10.2 along the diagonals, and the floor is 3.7 m below it
+beyond that. The surface the robot was standing on is one of **four 200 kg
+`startblock` bodies** the arena declares — `geom 2`, movable, rotated 45° and
+straddling the platform's diagonal corners. Under `RA2_COLLISION=visible` those
+blocks are frozen static meshes; that is the entire difference.
+
+Two real defects came out of chasing it:
+
+1. **Spawns ignored the arena's own start points.** Every stock arena declares
+   four `type = startpoint` attachments in its model, and they sit on the play
+   surface (the Octagon's are 8 m out, on the platform; the box arena's are at
+   ±9.8). The duel invented a spread of `(max-min)*0.12`, up to 9 m — which for
+   the Octagon lands on the rim of the 3.7 m drop. `ra2-render::start_points`
+   reads them and the duel spawns on them, facing along the point's Z axis (which
+   always looks at the arena centre). The 30 s `AI/Team1/Bot0` vs
+   `AI/Team6/Bot2` bout that ended with both robots parked in open floor now
+   closes to contact by t = 12 s and stays engaged.
+2. The collider a robot is dropped onto must include every surface the arena
+   draws — that is F5's display-proxy decode, and it is why the apron floor now
+   exists as collision.
+
+What is left is behaviour, not geometry, and it belongs to other items: the two
+robots eventually grind hull to hull with **no damage**, because the damage model
+only fires on impacts (F7), and on the box arena they still end pressed into
+opposite walls. Deciding *when* to engage is what the original's control layer
+does (M4); this AI only ever drives at the opponent.
 
 ## F6 — Friction combination law differs (blocked on the binding)
 

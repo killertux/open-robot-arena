@@ -183,12 +183,12 @@ NUMBER_OF_CHILDREN
 | `FRICTION` | friction coefficient | [CONFIRMED] (Xtra `hkRigidBody.friction`) |
 | `OPTIMIZATION_LEVEL` | exporter/collision-quality hint (0.5 in all stock parts) | [CONFIRMED] field exists; semantics [LIKELY] "collision tolerance / LOD" |
 | `UNYIELDING` | 0 movable, 1 immovable/static | [CONFIRMED] (beetlebros: "0 means movable, 1 means it won't budge no matter what") |
-| `SIMULATION_GEOMETRY` | which mesh is the collider: 1 convex, 2 concave, 3 proxy concave, 4 proxy convex | [CONFIRMED] (RA2Wiki GMF) |
+| `SIMULATION_GEOMETRY` | which mesh is the collider: 1 convex, 2 concave, 3 proxy concave, 4 proxy convex, **5/6 display-proxy concave/convex** (5 in every stock arena's main collider) | [CONFIRMED] (RA2Wiki GMF; 5/6 inferred from the data — see below) |
 | `GEOMETRY_PROXY_NAME` | collision-mesh object, used when SIM_GEOM is 3/4 | [CONFIRMED] |
-| `USE_DISPLAY_PROXY` / `DISPLAY_PROXY_NAME` | reverse mapping (body named after the collider) | [CONFIRMED] field; semantics [LIKELY] |
+| `USE_DISPLAY_PROXY` / `DISPLAY_PROXY_NAME` | the mesh the body is *shown* as; 5/6 simulate it too | [CONFIRMED] field; 5/6 semantics [LIKELY] |
 | `DISABLE_COLLISIONS` | 0 collides, 1 passes through | [CONFIRMED] |
 | `INACTIVE` | starts deactivated | [CONFIRMED] field |
-| `HAVOK_GEO_TYPE` | `Standard`/etc. | [CONFIRMED] field |
+| `HAVOK_GEO_TYPE` | `Standard` (mesh) or `Plane` (an infinite plane primitive placed by `NODE_TM`) — the only two in the shipped data (166 / 3) | [CONFIRMED] |
 
 **Directly documented 1.x rigid-body properties** (Havok Xtra Lingo Reference,
 ©2000/2001 — the `hkrb` object maps onto `hkRigidBody`):

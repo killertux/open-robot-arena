@@ -65,12 +65,19 @@ fn ray_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f3
     (dist > 1e-4).then_some(dist)
 }
 
-/// Does a downward ray at `(x, z)` hit these triangles?
+/// Does a downward ray at `(x, z)` land on something within 10 m below `top`?
+///
+/// `top` is the lowest point of the *visible* geometry, so an arena that sits
+/// well below the origin still probes its own floor. (The distance a ray reports
+/// is not a height; comparing the two — as this used to — only worked for
+/// arenas near y = 0 and rejected every arena dug deeper than 10 m, which is
+/// why `Hilltop`, `Clawtop`, `Electric` and `FlexTop` never used their own
+/// rigid-body collider.)
 fn has_floor(triangles: &[[Vec3; 3]], x: f32, z: f32, top: f32) -> bool {
     let origin = Vec3::new(x, top + 5.0, z);
     triangles.iter().any(|t| {
         ray_triangle(origin, Vec3::NEG_Y, t[0], t[1], t[2])
-            .map(|d| d < top + 10.0)
+            .map(|d| origin.y - d > top - 10.0)
             .unwrap_or(false)
     })
 }

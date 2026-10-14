@@ -132,7 +132,15 @@ impl Duel {
             .and_then(|s| s.parse().ok())
             .unwrap_or(1.0);
 
-        // Spawn positions: spread along X around the arena centre.
+        // Spawn on the arena's own start points when it declares them — the game
+        // puts a robot on one, and they sit on the play surface. The Octagon's
+        // are the case that matters: an invented spread lands on its rim, from
+        // which a robot drives off a 3.7 m drop and cannot return. Otherwise
+        // spread around the arena centre.
+        let starts = ra2_render::start_points(arena_path).unwrap_or_default();
+        if !starts.is_empty() {
+            println!("  arena start points: {}", starts.len());
+        }
         let centre = arena.center;
         let spread = ((arena.max - arena.min).length() * 0.12).clamp(2.0, 9.0);
         let n = bots.len().max(1);
@@ -140,16 +148,25 @@ impl Duel {
         for (i, setup) in bots.iter().enumerate() {
             let rig = rig::load(&setup.path)?;
             let angle = i as f32 * std::f32::consts::TAU / n as f32;
-            let (x, z) = (
-                centre.x + angle.cos() * spread,
-                centre.z + angle.sin() * spread,
-            );
+            let (x, z, spawn_facing) = match starts.get(i) {
+                Some((p, f)) => (p.x, p.z, Some(*f)),
+                None => (
+                    centre.x + angle.cos() * spread,
+                    centre.z + angle.sin() * spread,
+                    None,
+                ),
+            };
             let floor = Self::floor_at(&*physics, &arena, x, z);
             let position = Vec3::new(x, floor + 0.06 - rig.min.y, z);
 
-            // Face the centre of the arena.
+            // Face where the start point says, else the centre of the arena.
             let to_centre = Vec3::new(centre.x - x, 0.0, centre.z - z);
-            let dir = to_centre.normalize_or_zero();
+            let mut dir = to_centre.normalize_or_zero();
+            if let Some(f) = spawn_facing {
+                if f.length_squared() > 0.5 {
+                    dir = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+                }
+            }
             let yaw = setup
                 .yaw_deg
                 .map(f32::to_radians)

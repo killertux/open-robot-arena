@@ -610,6 +610,11 @@ pub struct HavokBody {
     pub elasticity: f32,
     pub unyielding: bool,
     pub simulation_geometry: i32,
+    /// `USE_DISPLAY_PROXY`: the geometry object named by `display_object` is
+    /// what this body simulates (the exporter's display/collision decoupling).
+    pub use_display_proxy: bool,
+    /// `HAVOK_GEO_TYPE` (0 `Standard`, 1 `Sphere`/`Box` in shipped arenas).
+    pub geo_type: i32,
     /// The body is a trigger zone: it has no collision response.
     pub disable_collisions: bool,
     /// Placement of the body (its `NODE_TM`).
@@ -633,6 +638,12 @@ impl HavokBody {
     /// Trigger zones (`DISABLE_COLLISIONS`) must not become colliders.
     pub fn collides(&self) -> bool {
         !self.disable_collisions
+    }
+
+    /// A body whose simulation geometry is an endless plane rather than a mesh
+    /// (see [`gmi::RigidBody::is_plane`]).
+    pub fn is_plane(&self) -> bool {
+        self.geo_type == gmi::GEO_TYPE_PLANE
     }
 }
 
@@ -671,6 +682,40 @@ impl HavokArena {
     }
 }
 
+/// An arena's declared spawn points, in `ID` order: `(position, facing)`.
+///
+/// Arenas carry these as `type = startpoint` attachment objects in their model
+/// (four in every stock arena). The game drops a robot at one, and they are
+/// where the fight actually starts — the Octagon's are 8 m out on the *play
+/// surface*, not out at the 3.7 m drop around it, which is where an invented
+/// spread puts them. The facing is the point's Z axis, which always looks at the
+/// arena centre (Point01 at `(-5.94, 1.87, 5.69)` has `(0.707, 0, -0.707)`).
+pub fn start_points(input: &str) -> Result<Vec<(Vec3, Vec3)>, Box<dyn std::error::Error>> {
+    let Some(path) = arena_model_path(input)? else {
+        return Ok(Vec::new());
+    };
+    let scene = gmi::parse(&std::fs::read(&path)?)?;
+    let mut found: Vec<(i32, (Vec3, Vec3))> = Vec::new();
+    for o in scene.attachments() {
+        if !o.data.to_ascii_lowercase().contains("startpoint") {
+            continue;
+        }
+        let Some(a) = gmi::Attachment::from_object(o) else {
+            continue;
+        };
+        let tm = tm_mat4(&a.transform);
+        found.push((
+            a.id,
+            (
+                tm.transform_point3(Vec3::ZERO),
+                tm.transform_vector3(Vec3::Z).normalize_or_zero(),
+            ),
+        ));
+    }
+    found.sort_by_key(|(id, _)| *id);
+    Ok(found.into_iter().map(|(_, v)| v).collect())
+}
+
 /// Resolve the mesh an arena path stands for (the `.gmf` for a `.gmf`, the
 /// script's main model for a `.py`).
 pub fn arena_model_path(input: &str) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
@@ -685,9 +730,69 @@ pub fn arena_model_path(input: &str) -> Result<Option<PathBuf>, Box<dyn std::err
     }
 }
 
+/// Does `name` name one of `roots`, or sit underneath one? Group nodes carry
+/// no geometry of their own, so their children have to be walked in.
+fn under_any(
+    ancestry: &std::collections::HashMap<String, String>,
+    name: &str,
+    roots: &[&str],
+) -> bool {
+    let mut current = name.to_ascii_lowercase();
+    let mut guard = 0;
+    loop {
+        if roots.iter().any(|r| r.eq_ignore_ascii_case(&current)) {
+            return true;
+        }
+        match ancestry.get(&current) {
+            Some(parent) if !parent.is_empty() && guard < 64 => {
+                current = parent.clone();
+                guard += 1;
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// The geometry objects a body simulates (see
+/// [`gmi::RigidBody::simulation_objects`]), plus the children of any group node
+/// among them.
+fn simulation_objects<'a>(
+    scene: &'a gmi::GmiScene,
+    rb: &gmi::RigidBody,
+    ancestry: &std::collections::HashMap<String, String>,
+) -> Vec<&'a gmi::SceneObject> {
+    let roots = rb.simulation_objects();
+    scene
+        .objects
+        .iter()
+        .filter(|o| under_any(ancestry, &o.name, &roots))
+        .collect()
+}
+
+/// Half-width of the quad a plane body becomes. Shipped arenas are ~50 m
+/// across, so this is comfortably beyond any edge.
+const PLANE_HALF: f32 = 200.0;
+
+/// Two triangles covering an infinite plane placed by `transform`, whose normal
+/// is the matrix's Y row.
+fn plane_triangles(transform: &Mat4) -> [[Vec3; 3]; 2] {
+    let at = transform.transform_point3(Vec3::ZERO);
+    let x = transform.transform_vector3(Vec3::X).normalize_or_zero();
+    let z = transform.transform_vector3(Vec3::Z).normalize_or_zero();
+    let (x, z) = if x == Vec3::ZERO || z == Vec3::ZERO {
+        (Vec3::X, Vec3::Z)
+    } else {
+        (x, z)
+    };
+    let (a, b) = (x * PLANE_HALF, z * PLANE_HALF);
+    [
+        [at - a - b, at + a - b, at + a + b],
+        [at - a - b, at + a + b, at - a + b],
+    ]
+}
+
 /// Read an arena's Havok simulation data: gravity, the fixed collision geometry
 /// the game actually collides against, and the movable rigid bodies it spawns.
-///
 /// Returns `None` when the file has no `RBCollection` (some arenas rely on the
 /// visible geometry instead, and the practice arena's props come from its
 /// script).
@@ -707,29 +812,59 @@ pub fn collect_havok(input: &str) -> Result<Option<HavokArena>, Box<dyn std::err
         ..Default::default()
     };
 
+    let ancestry: std::collections::HashMap<String, String> = scene
+        .objects
+        .iter()
+        .map(|o| (o.name.to_ascii_lowercase(), o.parent.to_ascii_lowercase()))
+        .collect();
+
     for rb in scene.rigid_bodies() {
         let collision = scene.find_object(rb.collision_object());
         let display = scene.find_object(rb.display_object());
+        let transform = tm_mat4(&rb.transform);
+        let to_body = transform.inverse();
         // Collision geometry is a triangle soup built from the mesh's faces (a
-        // mesh's vertex list is not a triangle list).
+        // mesh's vertex list is not a triangle list). Which objects that comes
+        // from is `SIMULATION_GEOMETRY`'s job, and a display-proxy body names a
+        // *group* node whose children hold the real geometry — the Octagon's
+        // `main_collision` names `main_display`, which is 57 child objects.
+        // Each object carries its own placement, and the result is kept in
+        // body-local space so the body transform still places it.
         let mut points = Vec::new();
-        for name in rb.collision_object().split(',') {
-            let Some(obj) = scene.find_object(name) else {
-                continue;
-            };
+        for obj in simulation_objects(&scene, rb, &ancestry) {
             let Some(mesh) = &obj.mesh else { continue };
+            let place = to_body * tm_mat4(&obj.transform);
             for f in &mesh.faces {
                 let (a, b, c) = (f.v[0] as usize, f.v[1] as usize, f.v[2] as usize);
                 if a < mesh.points.len() && b < mesh.points.len() && c < mesh.points.len() {
-                    points.push(Vec3::from(mesh.points[a]));
-                    points.push(Vec3::from(mesh.points[b]));
-                    points.push(Vec3::from(mesh.points[c]));
+                    points.push(place.transform_point3(Vec3::from(mesh.points[a])));
+                    points.push(place.transform_point3(Vec3::from(mesh.points[b])));
+                    points.push(place.transform_point3(Vec3::from(mesh.points[c])));
                 }
             }
         }
-        let items = display
-            .map(|o| object_items(&scene, &o.name, &dir))
-            .unwrap_or_default();
+        // A plane body has no mesh; the transform places an infinite plane
+        // whose normal is the matrix's Y row. Emit it as two large triangles
+        // (both windings are added to the collider below).
+        if rb.is_plane() {
+            for tri in plane_triangles(&transform) {
+                for v in tri {
+                    points.push(to_body.transform_point3(v));
+                }
+            }
+        }
+        // The body is *drawn* as its display proxy, which is normally a group
+        // node, so its children are the real batches (`main_display`,
+        // `floor_display`, `Arena`).
+        let mut items = Vec::new();
+        if let Some(disp) = display {
+            let roots = [disp.name.as_str()];
+            for o in &scene.objects {
+                if under_any(&ancestry, &o.name, &roots) && o.mesh.is_some() {
+                    items.extend(object_items(&scene, &o.name, &dir));
+                }
+            }
+        }
         let body = HavokBody {
             name: rb.name.clone(),
             mass: rb.mass,
@@ -737,6 +872,8 @@ pub fn collect_havok(input: &str) -> Result<Option<HavokArena>, Box<dyn std::err
             elasticity: rb.elasticity,
             unyielding: rb.unyielding != 0,
             simulation_geometry: rb.simulation_geometry,
+            use_display_proxy: rb.use_display_proxy,
+            geo_type: rb.geo_type,
             disable_collisions: rb.disable_collisions,
             transform: tm_mat4(&rb.transform),
             points,
@@ -1720,6 +1857,75 @@ mod tests {
         }
         out.sort();
         out
+    }
+
+    /// The (uncommitted) game directory, when present.
+    fn game_root() -> Option<std::path::PathBuf> {
+        stock_bots()
+            .first()
+            .and_then(|p| p.ancestors().find(|a| a.ends_with("game")).map(Into::into))
+    }
+
+    /// F5: an arena's main collider simulates its *display proxy*.
+    ///
+    /// The Octagon's `main_collision` has a 65-vertex mesh of its own and
+    /// declares `SIMULATION_GEOMETRY 5` with display proxy `main_display` — a
+    /// group of 57 child objects. Taking the body's own mesh instead throws most
+    /// of the arena away.
+    #[test]
+    fn arena_collider_follows_the_display_proxy() {
+        let Some(game) = game_root() else { return };
+        let path = game.join("Arenas/octagon.py");
+        let Some(havok) = collect_havok(&path.to_string_lossy()).unwrap() else {
+            return;
+        };
+        let main = havok
+            .bodies
+            .iter()
+            .find(|b| b.name == "main_collision")
+            .expect("the Octagon declares main_collision");
+        assert_eq!(main.simulation_geometry, 5);
+        assert!(main.use_display_proxy);
+        assert_eq!(main.display_object, "main_display");
+        // Its own mesh is 108 triangles; the group it names is far bigger.
+        assert!(
+            main.points.len() / 3 > 350,
+            "only {} triangles from the display proxy",
+            main.points.len() / 3
+        );
+
+        // `topplane_collision` is a plane primitive: no mesh in the file, and
+        // its transform puts a downward-facing plane 15.6 m up.
+        let plane = havok
+            .bodies
+            .iter()
+            .find(|b| b.name == "topplane_collision")
+            .expect("the Octagon declares topplane_collision");
+        assert!(plane.is_plane());
+        assert_eq!(plane.points.len() / 3, 2);
+        assert!(plane.transform.transform_point3(Vec3::ZERO).y > 15.0);
+        assert!(plane.transform.transform_vector3(Vec3::Y).y < -0.99);
+    }
+
+    /// F11: arenas declare their own spawn points, and they look at the centre.
+    ///
+    /// The duel used to invent a spread at `(max-min)*0.12`, which for the
+    /// Octagon lands on the rim of the 3.7 m drop around its play platform.
+    #[test]
+    fn start_points_sit_on_the_play_surface() {
+        let Some(game) = game_root() else { return };
+        let path = game.join("Arenas/octagon.py");
+        let starts = start_points(&path.to_string_lossy()).unwrap();
+        assert_eq!(starts.len(), 4);
+        for (pos, facing) in &starts {
+            let radius = pos.x.hypot(pos.z);
+            assert!((radius - 8.0).abs() < 0.6, "at {pos:?}, r = {radius}");
+            let to_centre = Vec3::new(-pos.x, 0.0, -pos.z).normalize_or_zero();
+            assert!(
+                facing.dot(to_centre) > 0.99,
+                "{facing:?} does not face {to_centre:?}"
+            );
+        }
     }
 
     /// F1: the shipped rule must actually *snap* each chain link.

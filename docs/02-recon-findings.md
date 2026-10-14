@@ -362,8 +362,11 @@ Recovered facts:
 - **Movable arena bodies are mass>0 rigid bodies**: crates 40 kg (fric 0.50,
   elas 0.30), octagon start blocks 200 kg, hammers/hellraisers 100 kg, box
   spikes 40 kg, floorsaw 100 kg.
-- **`SIMULATION_GEOMETRY` / `GMID_COLLISION_*`** describe box / cylinder / mesh /
-  object / plane / sphere shapes. Values observed in stock arenas: 2, 3, 5, 6.
+- **`SIMULATION_GEOMETRY` / `GMID_COLLISION_*`** describe mesh / proxy / plane
+  shapes. Values observed in stock arenas: 2, 3, 5, 6; 5/6 are the **display
+  proxy** (every arena's main collider uses 5 and names its visual group node),
+  and `HAVOK_GEO_TYPE` is only ever `Standard` (a mesh) or `Plane` (an endless
+  plane primitive placed by the body's `NODE_TM`). Decoded in F5.
 - **The chassis carries its own armour**: the `.bot` armour row is
   `<type> <weight> <unused> <hardness> <unused>`, and **chassis mass = armour
   weight per square unit × chassis mesh surface area** ("a 3d face with an area
