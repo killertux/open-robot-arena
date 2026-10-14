@@ -115,12 +115,13 @@ local/           # (git-ignored) game files + converted cache
 rigidly-mounted group**, with a hinge wherever a motor sits between parent and
 child — the structure the `.gmf` motor constraints describe. `ra2sim::robot`
 builds each body as a compound shape of its members' geometry, drives the wheel
-hinges from the input and spins the weapon hinges at their rated speed, and
-reshapes a body in place (`PhysicsBackend::set_body_shape`) when a part is shot
-off. It is **the only robot path** (`ra2-sim` and `ra2-duel` both drive it); the
-arcade single-hull controller it once replaced is gone. What the honest drive
-still cannot do — a third of the stock bots will not move on their wheels — is
-F3/F4/F5 in `docs/06-deferred-fidelity.md`.
+hinges at the speed and torque their own component definitions declare, spins the
+weapon hinges at their rated speed, and reshapes a body in place
+(`PhysicsBackend::set_body_shape`) when a part is shot off. It is **the only robot
+path** (`ra2-sim` and `ra2-duel` both drive it); the arcade single-hull controller
+it once replaced is gone. What the honest drive still cannot do — a quarter of the
+stock bots will not get traction — is geometry and collision rather than drive
+parameters: F11/F5 in `docs/06-deferred-fidelity.md`.
 
 ### Physics gotchas worth remembering (all hit during M3)
 

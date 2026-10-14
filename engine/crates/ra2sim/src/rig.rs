@@ -91,14 +91,27 @@ pub struct WeaponStats {
 /// Motor behaviour from the component definition.
 #[derive(Clone, Copy, Debug)]
 pub struct MotorStats {
-    /// Peak `power` from the definition.
-    pub power: f32,
-    /// Rotor rate at full power (rad/s).
-    pub rate: f32,
-    /// Peak motor torque (N·m), derived from `power`.
+    /// Rotor rate at full direction, rad/s: the first number of the definition's
+    /// `power = <speed> <torque>` line.
+    pub speed: f32,
+    /// Peak motor torque in N·m: the second number, scaled by [`torque_unit`].
     pub torque: f32,
     /// Burst motor travel, radians (`start`, `end`).
     pub burst: Option<[f32; 2]>,
+}
+
+/// Wheel behaviour from the component definition.
+#[derive(Clone, Debug, Default)]
+pub struct WheelStats {
+    /// `contact` — the geometry object the wheel's traction surface is built
+    /// from. It is a second copy of the wheel with a different material, so this
+    /// is the surface that actually meets the ground.
+    pub contact: Option<String>,
+    /// `grip` — friction of that surface.
+    pub grip: f32,
+    /// `resistance` — rolling resistance, in torque units; becomes the joint's
+    /// friction torque.
+    pub resistance: f32,
 }
 
 /// One part of a robot.
@@ -141,6 +154,7 @@ pub struct Component {
     pub role: Role,
     pub weapon: Option<WeaponStats>,
     pub motor: Option<MotorStats>,
+    pub wheel: Option<WheelStats>,
     /// Children component indices (motor-driven subtree).
     pub children: Vec<usize>,
 }
@@ -169,6 +183,15 @@ pub enum JointUse {
     Wheel,
     /// An actively spun assembly (a spinner, a flail).
     Spun,
+    /// A burst motor: parked at its start angle until something triggers it.
+    ///
+    /// "A Burst Motor is like a spring-loaded device that slowly, but powerfully
+    /// cocks the axle in a starting position and waits to be triggered" —
+    /// `Tutorials/Mechanics_Tutorial.htm`. The scripts park one with `Lock(True)`
+    /// — the joint's friction — and fire it with `SetPowerSettings` plus
+    /// `SetDirection`. Nothing triggers one yet (that is the control wiring), so
+    /// it stays parked, held by the same friction.
+    Burst,
     /// A free hinge with no motor.
     Passive,
 }
@@ -190,6 +213,9 @@ pub struct JointInfo {
     /// The joint's rotation axis in bot space: the mount point's Z — the same
     /// axis the placement rule turns a child about (F1).
     pub axis: Vec3,
+    /// Rolling resistance: torque in N·m the joint's friction may resist an
+    /// undriven rotation with (a wheel's `resistance`).
+    pub friction_torque: f32,
     pub use_kind: JointUse,
 }
 
@@ -294,19 +320,40 @@ fn attach_host(atts: &BTreeMap<i32, Attachment>, attaching: &str) -> Option<Stri
     fallback
 }
 
-/// How many newton-metres one unit of a component's `power` is worth.
+/// How many newton-metres one unit of a component's `power`/`resistance` is
+/// worth.
 ///
-/// The original's units are not recovered (see the validation report); this is
-/// the tuning knob, overridable with `RA2_MOTOR_TORQUE`.
-fn motor_torque_scale() -> f32 {
+/// A definition's `power` line is `power = <speed> <torque>`, the same pair the
+/// scripts set with `hinge.SetPowerSettings(speed, torque)` — the shipped arenas
+/// use it directly (`Arenas/Hazards.py`: `SetPowerSettings(95, 15000)` to smash,
+/// `SetPowerSettings(12, 700)` to retract). Its implementation multiplies only
+/// the torque, by 40, before storing it (`0x4810e0`: `this->torque = t` and
+/// `this->max_torque = t * 40`), while the speed is stored as given. So the
+/// speed is already rad/s and the torque needs this factor to become N·m.
+///
+/// The check that it is right: `Z-Tek Motor (HP)` declares `36 48`, i.e. 1920
+/// N·m, and the guess this replaces — which was the only reason a wheeled robot
+/// could move at all — was 1600 N·m.
+///
+/// Overridable with `RA2_TORQUE_UNIT`.
+fn torque_unit() -> f32 {
     use std::sync::OnceLock;
     static SCALE: OnceLock<f32> = OnceLock::new();
     *SCALE.get_or_init(|| {
-        std::env::var("RA2_MOTOR_TORQUE")
+        std::env::var("RA2_TORQUE_UNIT")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(14.0)
+            .unwrap_or(40.0)
     })
+}
+
+/// The two numbers of a definition's `power = <speed> <torque>` line.
+fn power_pair(def: &ra2fmt::component::ComponentDef) -> (Option<f32>, Option<f32>) {
+    let Some(v) = def.get("power") else {
+        return (None, None);
+    };
+    let mut it = v.split_whitespace().filter_map(|t| t.parse::<f32>().ok());
+    (it.next(), it.next())
 }
 
 fn num(def: &ra2fmt::component::ComponentDef, key: &str) -> Option<f32> {
@@ -404,18 +451,36 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             }
             None => [-std::f32::consts::PI, std::f32::consts::PI],
         };
+        // A wheel's `resistance` is rolling resistance: the torque the joint's
+        // friction may oppose an undriven rotation with. A parked burst motor is
+        // held by the same friction at its own torque — the scripts' `Lock(True)`.
+        let friction_torque = if is_wheel {
+            comps[root]
+                .wheel
+                .as_ref()
+                .map(|w| w.resistance * torque_unit())
+                .unwrap_or(0.0)
+        } else if m.burst.is_some() {
+            m.torque
+        } else {
+            0.0
+        };
+        let use_kind = if is_wheel {
+            JointUse::Wheel
+        } else if m.burst.is_some() {
+            JointUse::Burst
+        } else {
+            JointUse::Spun
+        };
         part.joint = Some(JointInfo {
             motor: parent,
-            rate: m.rate,
+            rate: m.speed,
             max_torque: m.torque,
+            friction_torque,
             limits,
             pivot,
             axis,
-            use_kind: if is_wheel {
-                JointUse::Wheel
-            } else {
-                JointUse::Spun
-            },
+            use_kind,
         });
     }
 
@@ -532,6 +597,15 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             )
         };
 
+        // NOTE: a wheel's `contact` names the geometry object carrying the
+        // traction material, and `passthru` names the one excluded from
+        // collision, so the game does not collide the visible hub. Making the
+        // collider that `contact` object instead measurably *hurts*: the shipped
+        // traction meshes are not always big enough to hold the robot up, and
+        // `AI/Team10/Bot2` goes from driving 5.5 m to not moving at all. Until
+        // the two object sets are separated properly (F4), the whole scene hull
+        // is used.
+
         let role = Role::of(&c.class, &base);
         let mut min = Vec3::splat(f32::MAX);
         let mut max = Vec3::splat(f32::MIN);
@@ -579,13 +653,25 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
         });
 
         let motor = (role == Role::Motor).then(|| {
-            let power = def.as_ref().and_then(|d| num(d, "power")).unwrap_or(20.0);
-            let burst = bot.components[i].burst_angles;
+            // `power = <speed> <torque>`, the pair the scripts set through
+            // `SetPowerSettings`. The speed is rad/s as shipped; the torque is in
+            // torque units and becomes N·m through `torque_unit`.
+            let (speed, torque) = def.as_ref().map(power_pair).unwrap_or((None, None));
             MotorStats {
-                power,
-                rate: power.clamp(4.0, 60.0),
-                torque: power * motor_torque_scale(),
-                burst,
+                speed: speed.unwrap_or(20.0),
+                torque: torque.unwrap_or(20.0) * torque_unit(),
+                burst: bot.components[i].burst_angles,
+            }
+        });
+
+        let wheel = (role == Role::Wheel).then(|| {
+            let d = def.as_ref();
+            WheelStats {
+                contact: d
+                    .and_then(|d| d.get("contact"))
+                    .map(|s| s.trim().to_string()),
+                grip: d.and_then(|d| num(d, "grip")).unwrap_or(1.0),
+                resistance: d.and_then(|d| num(d, "resistance")).unwrap_or(0.0),
             }
         });
 
@@ -610,6 +696,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             role,
             weapon,
             motor,
+            wheel,
             children: Vec::new(),
         });
     }
@@ -678,6 +765,29 @@ mod tests {
         assert_eq!(Role::of("ControlBoard", "ControlBoard"), Role::Control);
     }
 
+    /// A definition's `power` line is `<speed> <torque>`, and the torque needs
+    /// the factor the hinge's own `SetPowerSettings` applies.
+    ///
+    /// The shipped numbers come from the real definitions: `Z-Tek Motor (HP)`
+    /// declares `36 48`, which is 36 rad/s and 1920 N·m — within 20% of the 1600
+    /// N·m guess it replaces, which is why the old code could move a robot at all.
+    #[test]
+    fn motor_power_is_a_speed_and_a_torque() {
+        let def = ra2fmt::component::parse("base = SpinMotor\npower = 36 48\n");
+        let (speed, torque) = power_pair(&def);
+        assert_eq!(speed, Some(36.0));
+        assert_eq!(torque, Some(48.0));
+        assert_eq!(torque.unwrap() * torque_unit(), 1920.0);
+
+        // A definition with no `power` line (or a single number) cannot panic.
+        assert_eq!(
+            power_pair(&ra2fmt::component::parse("base = Wheel\n")),
+            (None, None)
+        );
+        let (s, t) = power_pair(&ra2fmt::component::parse("power = 14\n"));
+        assert_eq!((s, t), (Some(14.0), None));
+    }
+
     fn part(index: usize, parent: Option<usize>, local: Mat4, motor: bool) -> Component {
         Component {
             index,
@@ -700,11 +810,11 @@ mod tests {
             role: if motor { Role::Motor } else { Role::Structure },
             weapon: None,
             motor: motor.then_some(MotorStats {
-                power: 10.0,
-                rate: 10.0,
-                torque: 100.0,
+                speed: 10.0,
+                torque: 400.0,
                 burst: None,
             }),
+            wheel: None,
             children: Vec::new(),
         }
     }

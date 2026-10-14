@@ -299,7 +299,11 @@ impl PhysicsBackend for JoltBackend {
         let mut settings =
             HingeConstraintSettings::new(Self::rv(point_a), Self::v(axis_a), normal_of(axis_a))
                 .frame2(Self::rv(point_b), Self::v(axis_b), normal_of(axis_b))
-                .limits(desc.limits[0], desc.limits[1]);
+                .limits(desc.limits[0], desc.limits[1])
+                // Jolt resists rotation with this only while the motor is off —
+                // which is exactly where a wheel's rolling resistance belongs: a
+                // driven wheel is governed by its motor's torque instead.
+                .max_friction_torque(desc.friction_torque.max(0.0));
         if desc.max_torque > 0.0 {
             settings = settings
                 .motor(MotorSettings::default().torque_limits(-desc.max_torque, desc.max_torque));

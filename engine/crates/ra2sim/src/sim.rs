@@ -84,21 +84,20 @@ impl DriveScript {
     }
 }
 
-/// Tuning for the drive: what the wheel motors are asked to do.
+/// Tuning for the drive that is not a property of the parts themselves.
 #[derive(Clone, Copy, Debug)]
 pub struct DriveTuning {
-    /// Forward speed the wheels aim for at full throttle (m/s).
-    pub max_speed: f32,
-    /// Yaw rate at full steer (rad/s).
+    /// Yaw rate the steering input asks for (rad/s).
+    ///
+    /// A robot's top speed is its own motors' (`power` in the component
+    /// definitions), so only steering is left here: the original steers through
+    /// its `Steering` components and the control wiring, which is not modelled.
     pub max_yaw_rate: f32,
 }
 
 impl Default for DriveTuning {
     fn default() -> Self {
-        DriveTuning {
-            max_speed: 7.0,
-            max_yaw_rate: 2.2,
-        }
+        DriveTuning { max_yaw_rate: 2.2 }
     }
 }
 

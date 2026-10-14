@@ -147,13 +147,19 @@ fn run(
                         .sum();
                     let p = r.position(&*duel.physics);
                     let v = r.velocity(&*duel.physics).length();
+                    let spin = duel
+                        .physics
+                        .state(r.body())
+                        .map(|s| s.angular_velocity.y)
+                        .unwrap_or(0.0);
                     format!(
-                        "{}{} p=({:.1},{:.1}) v={:.1} hp={}",
+                        "{}{} p=({:.1},{:.1}) v={:.1} w={:.1} hp={}",
                         r.rig.name,
                         if r.is_alive() { "" } else { " KO" },
                         p.x,
                         p.z,
                         v,
+                        spin,
                         hp as i32
                     )
                 })

@@ -483,24 +483,104 @@ damage but breaks nothing off. That is the same wheel and damage-scale gap.
 
 ---
 
-## F3 — Motors are velocity motors; the original applies torque
+## F3 — The motor law, from the game's own data — **landed**
 
-The binary exposes `ApplyTorque`, `*ANGULAR_SPEED` and `GetMotorAngle`, and the
-exporter notes motors round-trip as Havok constraints. The assembly uses a hinge
-**velocity** motor whose target comes from the component's `power`
-(`RA2_MOTOR_TORQUE`, 14 N·m per power unit) and `RA2_WHEEL_TORQUE` (1600 N·m).
-Both scales are guesses: the original's `power` units were not recovered. A
-torque-driven wheel model with the motor's own acceleration curve is the faithful
-version.
+A component definition's `power` line is two numbers and they are a **speed and a
+torque**. The shipped set shows it: `Servo Motor 302/502/702` declares `3 26`
+(slow, strong), its sibling `4 40`; `Z-Tek Motor` declares `36 24` and `Z-Tek
+Motor (HP)` `36 48` — the same speed with twice the torque. The old code read
+only the first number, used it for both, and guessed the rest (`power × 14`, plus
+a flat 1600 N·m cap on wheels); this is the item that called both scales guesses.
 
-## F4 — Wheel `contact` / `grip` / `resistance` are only partly used
+The scripts pin the units down. The arena scripts drive their hinges through the
+same pair — `Arenas/Hazards.py`: `SetPowerSettings(95, 15000)` to smash,
+`SetPowerSettings(12, 700)` to retract, with `SetDirection(100)` for direction
+and `Lock(True)` to park — and the implementation of `SetPowerSettings`
+(`0x4810e0`) stores the *speed* unchanged and the *torque* **times 40**:
 
-Component definitions declare `contact = wheel_traction` (a separate
-high-friction surface), `passthru = wheel_collision` (excluded from
-self-collision), `grip` and `resistance`. A wheel body currently gets a flat
-friction of 1.0; `resistance` (which should become a rolling-resistance friction
-torque — Jolt's `max_friction_torque` on the hinge) and the separate traction
-surface are not built.
+```c
+this->speed = speed;  this->torque = torque;
+this->speed2 = speed; this->max_torque = torque * 40.0;
+```
+
+So it is a velocity motor at the definition's speed with a torque cap of the
+definition's torque × 40. The check that the factor is right: `Z-Tek Motor (HP)`'s
+`48` becomes 1920 N·m, within 20% of the 1600 N·m the old guess needed to be for a
+wheeled robot to move at all.
+
+Implemented: `MotorStats` carries `speed` (rad/s) and `torque` (N·m), the hinge
+uses them directly, and a wheel's top speed is therefore `its motor's speed × its
+own radius`. A robot's speed is now a property of its parts — a servo-motor bot
+crawls and a Z-Tek one does not — rather than the old global. Steering still adds
+a yaw rate to the desired hub velocity (a tank differential); the original steers
+through its `Steering` components and the control wiring, which is M4's.
+
+**Burst motors park instead of spinning.** The tutorial is explicit — a burst
+motor "slowly, but powerfully cocks the axle in a starting position and waits to
+be triggered" — and the scripts park one with `Lock(True)`, which is the joint's
+friction. `JointUse::Burst` does the same: motor off, friction torque set to the
+motor's own torque, nothing triggering it yet. Driving one continuously made its
+arm fight the floor and lift the robot off its wheels.
+
+**Where the speed's unit is the weaker inference.** The speed is stored
+unscaled — rad/s if the engine's angular unit is, which Havok 1.x's and the
+game's metric masses and gravity say it is. The arena hazards' `95` reads high
+for a press, but they are violent by design and the scripts give them a separate
+`HingeController` binding, so the two are not necessarily the same scale.
+`RA2_TORQUE_UNIT` allows the torque factor to be re-measured; there is no
+equivalent for the speed because nothing suggested one.
+
+**What it fixes and what it does not.** On the same 45-bot survey the count goes
+from 25 to 26 — a wash — but the per-bot swings are large, and the reasons are
+*not* the motor law: 10 bots improve (several stallers wake up; `Team5/Bot2` goes
+from stationary to driving) and 21 get worse. The dominant mechanism is visible:
+`AI/Team7/Bot1`'s blade ends up lying on the floor, propping the robot off its
+wheels, and a spun weapon motor then presses with its full torque — more torque
+makes that worse. That is mount placement and the unmodelled trigger/control
+layer, not the motor. See F11 for the other, larger cause.
+
+## F4 — Wheel `contact` / `grip` / `resistance` — **landed, with a caveat**
+
+A wheel's definition declares `contact = <object>` (the geometry carrying the
+traction material — a second copy of the wheel, marked transparent: `miniwheel`
+and `wheel_traction` have identical topology), `passthru = <object>` (excluded
+from collision, so the visible hub does not collide), `grip` (1 for every stock
+wheel) and `resistance` (0.1, 0.12 or 0.2).
+
+Now used: `grip` is the wheel body's friction (it was hardcoded to 1.0 — the same
+number, now from the data), and `resistance` becomes the joint's friction torque
+— Jolt's `max_friction_torque`, which it applies *only while the motor is off*,
+which is exactly where rolling resistance belongs. It never binds while a wheel
+is driven, which is why it makes no difference to the survey; it matters when a
+robot coasts. The hinge format carries the same idea (`FRICTION` in the exported
+hinge fields).
+
+The caveat is the `contact` surface itself. *Making it the collider* measurably
+hurts: with it, `AI/Team10/Bot2` goes from driving 5.5 m to not moving at all,
+because the shipped traction meshes are not always large enough to hold the robot
+up. Until the `contact` and `passthru` object sets are separated and validated,
+the whole scene hull is the collider and `contact` is parsed but unused.
+
+## F11 — Some arenas' rigid-body colliders have holes
+
+**Newly exposed by F3**, not new: the arena collider defaults to the arena's own
+Havok rigid bodies when they cover the arena centre, and for the octagon that set
+covers the centre but *not* the whole floor. The result is a pit a robot can
+drive into and fall three metres. `RA2_COLLISION=visible` puts the same robot, in
+the same run, on the same floor without incident, so the geometry is there and
+the *choice* is what fails.
+
+It matters now because F3's honest motor speeds let robots reach the edges — and
+then struggle to come back. The 30 s `AI/Team1/Bot0` vs `AI/Team6/Bot2` duel that
+closed and traded damage under F2 now ends with both robots stopped and no damage
+at all: on the octagon one is at `(-12.7, 4.8)`, outside the ring. The arena is
+only half of it — on the *box* arena, whose collider is sound, the same bout also
+ends without contact, with the two robots pressed into opposite walls at
+`(-11.8, 2.5)` and `(4.9, 11.5)`. Robots that cross an arena in a couple of
+seconds and jam in a corner are not recovered by this AI, which only drives at
+the opponent. So the gap is three things at once: are the speeds right (F3's
+inference), can the geometry hold a robot (this item), and what happens when it
+cannot (the control layer, M4).
 
 ## F5 — Collision shape kinds are not decoded
 

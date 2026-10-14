@@ -32,7 +32,19 @@ fn main() {
             ),
             Role::Motor => {
                 let m = c.motor.unwrap();
-                format!("motor power={:.0} rate={:.0} rad/s", m.power, m.rate)
+                format!(
+                    "motor speed={:.0} rad/s torque={:.0} N.m",
+                    m.speed, m.torque
+                )
+            }
+            Role::Wheel => {
+                let w = c.wheel.clone().unwrap_or_default();
+                format!(
+                    "wheel grip={:.2} resistance={:.2} contact={}",
+                    w.grip,
+                    w.resistance,
+                    w.contact.unwrap_or_else(|| "-".into())
+                )
             }
             _ => String::new(),
         };

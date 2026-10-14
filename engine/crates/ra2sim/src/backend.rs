@@ -179,6 +179,10 @@ pub struct HingeDesc {
     pub limits: [f32; 2],
     /// Peak motor torque in N·m; `0` creates the joint without a motor.
     pub max_torque: f32,
+    /// Torque the joint's friction can resist rotation with (N·m); `0` is
+    /// frictionless. A wheel's rolling resistance is this — the game's `SetLimits`
+    /// pair for a hinge, and the wheel definitions' `resistance`.
+    pub friction_torque: f32,
 }
 
 impl HingeDesc {
@@ -193,6 +197,7 @@ impl HingeDesc {
             axis_b: axis,
             limits: [-std::f32::consts::PI, std::f32::consts::PI],
             max_torque: 0.0,
+            friction_torque: 0.0,
         }
     }
 

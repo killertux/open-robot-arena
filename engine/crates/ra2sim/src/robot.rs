@@ -12,15 +12,13 @@ use crate::backend::{
     BackendError, BodyDesc, BodyHandle, CompoundChild, HingeDesc, JointHandle, MotionType,
     PhysicsBackend, ShapeDesc,
 };
-use crate::rig::{JointInfo, JointUse, RobotRig, Role};
+use crate::rig::{JointInfo, JointUse, RobotRig};
 use crate::scene::USER_BOT;
 use crate::sim::{DriveInput, DriveTuning};
 
 /// Stock component friction/restitution (see the validation report).
 const STOCK_FRICTION: f32 = 0.30;
 const STOCK_RESTITUTION: f32 = 0.30;
-/// Friction of a wheel's declared traction surface (`contact = *_traction`).
-const TRACTION_FRICTION: f32 = 1.0;
 
 /// Live state of one assembled body.
 pub struct PartState {
@@ -45,8 +43,6 @@ pub struct Robot {
     pub mass_scale: f32,
     /// The chassis body is gone: the robot is out of the fight.
     pub destroyed: bool,
-    /// Torque cap for wheel motors (N·m).
-    pub wheel_torque: f32,
 }
 
 impl Robot {
@@ -64,7 +60,6 @@ impl Robot {
     ) -> Result<Self, BackendError> {
         let bot = Mat4::from_rotation_translation(rotation, position);
         let n = rig.components.len();
-        let wheel_torque = wheel_torque_default();
 
         let mut parts = Vec::with_capacity(rig.parts.len());
         for part in &rig.parts {
@@ -101,7 +96,7 @@ impl Robot {
             let (Some(parent), Some(info)) = (rig.parts[p].parent, rig.parts[p].joint) else {
                 continue;
             };
-            let joint = Self::make_hinge(physics, &rig, &parts, parent, p, info, wheel_torque)?;
+            let joint = Self::make_hinge(physics, &rig, &parts, parent, p, info)?;
             parts[p].joint = Some(joint);
         }
 
@@ -112,7 +107,6 @@ impl Robot {
             mass: rig.mass * mass_scale,
             mass_scale,
             destroyed: false,
-            wheel_torque,
             team,
             rig,
         })
@@ -147,18 +141,16 @@ impl Robot {
         }
     }
 
-    /// Friction of a body: a wheel gets its traction surface, everything else
-    /// the stock component value.
+    /// Friction of a body: a wheel gets the `grip` its definition declares for the
+    /// `contact` surface it rolls on, everything else the stock component value.
     fn part_friction(rig: &RobotRig, members: impl Iterator<Item = usize>) -> f32 {
         let members: Vec<usize> = members.collect();
-        if members
+        members
             .iter()
-            .any(|&i| rig.components[i].role == Role::Wheel)
-        {
-            TRACTION_FRICTION
-        } else {
-            STOCK_FRICTION
-        }
+            .filter_map(|&i| rig.components[i].wheel.as_ref())
+            .map(|w| w.grip)
+            .next()
+            .unwrap_or(STOCK_FRICTION)
     }
 
     /// Build the hinge for part `p` on `parent`.
@@ -169,7 +161,6 @@ impl Robot {
         parent: usize,
         p: usize,
         info: JointInfo,
-        wheel_torque: f32,
     ) -> Result<JointHandle, BackendError> {
         // The joint's pivot and axis are the parent's mount point, in bot space;
         // both bodies express them in their own space (they coincide in the rest
@@ -179,9 +170,8 @@ impl Robot {
         let frame_b = rig.components[rig.parts[p].root].local;
 
         let max_torque = match info.use_kind {
-            JointUse::Wheel => wheel_torque.max(info.max_torque),
-            JointUse::Spun => info.max_torque,
             JointUse::Passive => 0.0,
+            _ => info.max_torque,
         };
         let desc = HingeDesc {
             body_a: parts[parent].body,
@@ -192,6 +182,7 @@ impl Robot {
             axis_b: frame_b.inverse().transform_vector3(axis_bot),
             limits: info.limits,
             max_torque,
+            friction_torque: info.friction_torque,
         };
         physics.create_hinge(&desc)
     }
@@ -247,17 +238,20 @@ impl Robot {
 
     /// Drive the motors: wheels from the input, spinners at their rated speed.
     ///
-    /// `input.throttle` is a target forward speed and `input.steer` a target yaw
-    /// rate; each wheel's target is its contact velocity along its own rolling
-    /// direction, so the hub torque does the pushing — no velocity is ever set
-    /// directly.
+    /// `input.throttle` is a signed fraction of the *motor's* speed: each wheel's
+    /// target is its own motor's rated angular velocity (the definition's `power`
+    /// speed, in rad/s), so a robot's top speed is a property of its parts, not a
+    /// global. `input.steer` adds a yaw rate to the desired hub velocity, which
+    /// makes the two sides differ — a tank-style differential. The original
+    /// steers through its own `Steering` components and the control wiring, which
+    /// is not modelled yet.
     pub fn drive(
         &mut self,
         physics: &mut dyn PhysicsBackend,
         input: DriveInput,
         tuning: &DriveTuning,
     ) {
-        let v = input.throttle.clamp(-1.0, 1.0) * tuning.max_speed;
+        let throttle = input.throttle.clamp(-1.0, 1.0);
         let yaw = -input.steer.clamp(-1.0, 1.0) * tuning.max_yaw_rate;
         let forward = Vec3::new(0.0, 0.0, -1.0);
         let yaw_axis = Vec3::Y;
@@ -271,7 +265,9 @@ impl Robot {
             };
             let target = match info.use_kind {
                 JointUse::Spun => info.rate,
-                JointUse::Passive => continue,
+                // Parked until something triggers it (see `JointUse::Burst`);
+                // its hold is the joint's friction, not a motor.
+                JointUse::Burst | JointUse::Passive => continue,
                 JointUse::Wheel => {
                     let root = self.rig.parts[p].root;
                     let c = &self.rig.components[root];
@@ -280,6 +276,9 @@ impl Robot {
                     if roll == Vec3::ZERO {
                         continue;
                     }
+                    // The front of the vehicle moves at whatever the wheel's own
+                    // motor can spin it to.
+                    let v = throttle * info.rate * c.wheel_radius();
                     let hub = c.local.transform_point3(Vec3::ZERO);
                     let v_hub = forward * v + yaw_axis.cross(hub) * yaw;
                     v_hub.dot(roll) / c.wheel_radius().max(0.05)
@@ -432,16 +431,4 @@ impl Robot {
         let c = &self.rig.components[index];
         (worlds[index].transform_point3(c.center()), c.radius())
     }
-}
-
-/// Torque cap for wheel motors (N·m); `RA2_WHEEL_TORQUE` overrides it.
-fn wheel_torque_default() -> f32 {
-    use std::sync::OnceLock;
-    static TORQUE: OnceLock<f32> = OnceLock::new();
-    *TORQUE.get_or_init(|| {
-        std::env::var("RA2_WHEEL_TORQUE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1600.0)
-    })
 }

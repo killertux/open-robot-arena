@@ -70,7 +70,7 @@ fn offense(r: &Robot, worlds: &[Mat4], index: usize, cfg: &CombatConfig) -> Opti
         if let Some(m) = r.rig.components[pi].motor {
             let mc = &r.rig.components[pi];
             let mw = worlds[pi].transform_point3(mc.center());
-            tip = m.rate * (here - mw).length();
+            tip = m.speed * (here - mw).length();
             break;
         }
         p = r.rig.components[pi].parent;

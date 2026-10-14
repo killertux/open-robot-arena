@@ -196,15 +196,18 @@ Known, documented, not yet fixed:
 8. **Friction combination law** (§3) — differs; Jolt exposes no hook.
 9. **Motors are torque-driven in the original.** The binary exposes
    `ApplyTorque`, `*ANGULAR_SPEED`, `GetMotorAngle`, and the exporter notes that
-   motors round-trip through *Havok constraints*. Our drive is a hinge-velocity
-   motor with a guessed torque scale. The per-wheel jointed bodies landed with
-   F1/F2; motor **torque** is still the open half. **[OPEN]** (F3).
+   motors round-trip through *Havok constraints*. **Landed (F3):** a definition's
+   `power = <speed> <torque>` is exactly the pair the scripts set with
+   `SetPowerSettings(speed, torque)`, and its implementation multiplies the
+   torque by 40 before storing it. The hinge is a velocity motor at the
+   definition's speed with the definition's torque as the cap. The *speed's* unit
+   is the weaker inference; see F3.
 10. **Wheels have declared traction geometry.** Component defs carry
-    `contact = wheel_traction` (the high-friction surface), `passthru =
-    wheel_collision`, plus `grip` and `resistance`. The per-wheel bodies now
-    exist, but only `contact` is honoured (as a friction value); `grip` and
-    `resistance` are still unused, and the wheels are what a third of the stock
-    bots cannot yet drive on (see F2). **[OPEN]** (F4).
+    `contact = wheel_traction`, `passthru = wheel_collision`, `grip` and
+    `resistance`. **Partly landed (F4):** `grip` is the wheel body's friction and
+    `resistance` the joint's rolling-resistance friction torque. Making the
+    `contact` object the collider *hurts* (the traction meshes are not always big
+    enough to hold a robot up) so `contact` is parsed but unused for now.
 11. **Collision shape kinds are not decoded.** `SIMULATION_GEOMETRY` /
     `GMID_COLLISION_BOX|SPHERE|CYLINDER|PLANE|MESH|OBJECT` describe real shapes;
     we approximate with tri-meshes and convex hulls. **[OPEN]**
@@ -274,9 +277,9 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | All 57 stock bots render | 57/57 |
 | All 12 arena scripts assemble | 12/12 |
 | `ra2-sim` drives on practice / octagon / hilltop / box | OK — one jointed robot, scripted drive, frames written. The sandbox is no longer arcade-driven: it drives the same assembly the duel does |
-| Stock bots that drive on the jointed assembly | **25/45** travel ≥ 2 m in 3 s, 9 creep under 2 m, 11 barely move (`AI/Team*`, full throttle, box arena) — the wheel model, not the mount rule; see F2 |
-| `ra2-duel` on the octagon | Runs to a decision and damage lands, but no parts come off in 30 s. `AI/Team1/Bot0` vs `AI/Team6/Bot2` (both of which drive) close and trade hits; `AI/Team0/Bot0` vs `AI/Team6/Bot2` produces nothing, because the first is one of the stallers and never engages. F3/F4/F5 are what close this |
-| `cargo fmt --check`, `clippy`, tests | clean, 12 tests |
+| Stock bots that drive on the jointed assembly | **26/45** travel ≥ 2 m in 3 s, 7 creep under 2 m, 12 barely move (`AI/Team*`, full throttle, box arena). The motor law is now the game's own (F3), so the remaining stalls are geometry: mount placement, the unmodelled trigger/control layer, and the arena collider (F11) |
+| `ra2-duel` on the octagon | **Regressed, and diagnosed.** Under F2 `AI/Team1/Bot0` vs `AI/Team6/Bot2` closed and traded damage; with F3's honest motor speeds the same bout ends with both robots stopped and no damage. Three causes at once: the octagon's collider drops one of them three metres (`RA2_COLLISION=visible` keeps it on the floor), robots now cross an arena in a couple of seconds, and this AI jams in a corner — the box arena, whose collider is sound, ends the same bout with the two robots pressed into opposite walls |
+| `cargo fmt --check`, `clippy`, tests | clean, 13 tests |
 
 ## 7. Recommended order of work
 
@@ -286,18 +289,17 @@ and damage reshapes a body in place), and **both F1 (mount-point alignment) and 
 (the flip) have landed**: the jointed assembly is now the only robot path, the
 arcade velocity controller is deleted, and `ra2-sim` was rebuilt on `Robot`.
 
-Flipping it made the next blocker visible rather than removing it. The arcade
-controller drove each robot by *setting its velocity*, so it could paper over
-geometry the wheels cannot use; driving the wheels honestly leaves a third of the
-stock bots unable to move at all (F2 has the survey). That is the item to attack
-next.
+Flipping it made the next blocker visible rather than removing it, and **F3/F4
+have since landed** — the motor and wheel models now come from the game's own
+data (the `power` pair, `grip`, `resistance`) rather than from guessed scales.
+The remaining blocker is *geometry and collision*, not the parts' parameters:
 
-Suggested sequence:
-
-1. **F3/F4 — the wheel.** Torque-driven motors (the original's model) with the
-   wheel's `contact` surface, `grip` and `resistance`. A stalled third of the
-   stock set is the direct cost of the guessed torque scale and the unused
-   wheel fields; this is also what the duel's missing damage rides on.
-2. F5 — decode `SIMULATION_GEOMETRY` / `GMID_COLLISION_*` into real shapes.
-3. F7 — the damage model, against `GetLastDamageReceived`'s five-tuple.
-4. F9 — chassis buckling as a visual layer.
+1. **F11 — fix the arena colliders.** Some arenas' rigid-body sets have holes
+   (the octagon drops a robot three metres), which is now what stops the headline
+   duel from engaging at all. F5's shape work is the same family.
+2. **F5 — decode `SIMULATION_GEOMETRY` / `GMID_COLLISION_*` into real shapes.**
+3. **Mount placement's residuals and the trigger/control layer (M4).** A spun
+   weapon whose arm reaches the floor presses with its full torque and lifts the
+   robot; the original only spins one when it is told to.
+4. **F6 — the friction combination law**, if F5 does not resolve the surveys.
+5. **F7 — the damage model**, against `GetLastDamageReceived`'s five-tuple.

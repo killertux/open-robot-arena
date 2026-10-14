@@ -41,12 +41,13 @@ ra2-duel "local/game/Arenas/octagon.py" \
   strip. The physics engine sits behind a `PhysicsBackend` trait so it can be
   swapped.
 - **Assembly:** a robot is built as its real **jointed bodies** — one body per
-  rigidly-mounted group, a hinge per motor, wheels driven through those hinges.
-  `ra2-sim` and `ra2-duel` both drive it; there is no arcade velocity controller
-  left in the tree. Mount-point alignment (F1) is settled and is the default.
-  What the honest drive still cannot do — a third of the stock bots will not get
-  traction on their wheels — is tracked as F3/F4/F5 in
-  `docs/06-deferred-fidelity.md`.
+  rigidly-mounted group, a hinge per motor, wheels driven through those hinges at
+  the speed and torque their own definitions declare. `ra2-sim` and `ra2-duel`
+  both drive it; there is no arcade velocity controller left in the tree.
+  Mount-point alignment (F1) is settled and is the default. What the honest drive
+  still cannot do — a quarter of the stock bots will not get traction on their
+  wheels — is geometry: mount placement, the trigger/control layer and the arena
+  colliders. Tracked as F11/F5 in `docs/06-deferred-fidelity.md`.
 - **M3:** a robot is a *component tree* rebuildable from the game's own parts.
   Motors turn their attached subtree (spinners spin, wheels roll), weapons deal
   damage on contact, and parts whose hitpoints run out are torn off as flying
@@ -82,19 +83,22 @@ Working today:
 - `ra2-duel` — headless two-robot fight.
 
 Remaining caveats: chassis *face-group* texture decals can appear
-rotated/mirrored; exact BurstMotor rest poses are approximated; on the jointed
-assembly a third of the stock bots cannot yet get traction and simply will not
-move (so a fight between two of them produces no hits at all) and fights are
-correspondingly gentler; damage attribution picks the nearest part rather than
-solving per-part contacts, and a chassis that loses a part is *reshaped* rather
-than deforming the way the original's buckled chassis does; wheels and weapons
-are driven by a hinge-velocity
-motor with a guessed torque scale rather than the original's **torque-driven
-motors** with per-wheel traction (`contact` / `grip` / `resistance`); and Jolt
-combines friction as `sqrt(µ₁·µ₂)` where Havok 1.x used `√(µ₁²+µ₂²)`, which we
-cannot change through the safe binding. Each item is tracked with its evidence
-and fix path in `docs/05-validation-report.md` §4 and
-`docs/06-deferred-fidelity.md`.
+rotated/mirrored; exact BurstMotor rest poses are approximated; a motor's
+`speed × its radius` sets a wheel's top speed, so a robot's pace is a property of
+its parts (a definition's `power = <speed> <torque>` is the pair the scripts set
+through `SetPowerSettings`, whose implementation scales the torque by 40) — but
+on the jointed assembly a quarter of the stock bots still cannot get traction and
+simply will not move. Those causes are geometry, not parameters: mount placement,
+the unmodelled trigger/control layer, and arenas whose rigid-body colliders have
+holes (the octagon's drops a robot three metres), which is also why the headline
+duel currently fails to engage. A wheel's declared `contact` surface is parsed
+but not yet used as the collider — using it makes some robots unable to move.
+Damage attribution picks the nearest part rather than solving per-part contacts,
+and a chassis that loses a part is *reshaped* rather than deforming the way the
+original's buckled chassis does; and Jolt combines friction as `sqrt(µ₁·µ₂)`
+where Havok 1.x used `√(µ₁²+µ₂²)`, which we cannot change through the safe
+binding. Each item is tracked with its evidence and fix path in
+`docs/05-validation-report.md` §4 and `docs/06-deferred-fidelity.md`.
 
 Next: M4 — the script layer (reproduce the `plus`/`AI`/`Arenas` API so the stock
 AI strategies and arena scripts run). See `docs/01-project-plan.md` and

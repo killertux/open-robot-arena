@@ -55,12 +55,11 @@ fn main() {
 
     let tuning = DriveTuning::default();
     println!(
-        "tuning: max_speed={:.1} max_yaw={:.1}",
-        tuning.max_speed, tuning.max_yaw_rate
+        "tuning: max_yaw={:.1} rad/s (top speed comes from each motor's `power`)",
+        tuning.max_yaw_rate
     );
 
     // Drive maths, once.
-    let v = tuning.max_speed;
     let forward = Vec3::new(0.0, 0.0, -1.0);
     println!("\npart  use    rate torque | axle(bot)              roll(bot)              r     target_w  lowest_y");
     for (p, part) in rig.parts.iter().enumerate() {
@@ -80,6 +79,8 @@ fn main() {
         let axle = info.axis;
         let roll = axle.cross(Vec3::Y).normalize_or_zero();
         let hub = c.local.transform_point3(Vec3::ZERO);
+        // The wheel's top speed: its own motor's rate, at its own radius.
+        let v = info.rate * c.wheel_radius();
         let v_hub = forward * v;
         let target = v_hub.dot(roll) / c.wheel_radius().max(0.05);
         let mut lowest = f32::MAX;
