@@ -29,10 +29,10 @@ pub enum Role {
 impl Role {
     /// A component whose children hang off a joint the engine drives.
     ///
-    /// Pistons are *not* included yet: their rod stays welded to the body (see
-    /// `docs/06-deferred-fidelity.md`, F8).
+    /// A motor turns its subtree about the mount axis; a piston *slides* it along
+    /// that axis (F8). Both split the child off into its own body.
     pub fn drives(self) -> bool {
-        self == Role::Motor
+        matches!(self, Role::Motor | Role::Piston)
     }
 
     pub fn of(class: &str, base: &str) -> Role {
@@ -114,6 +114,33 @@ pub struct WheelStats {
     pub resistance: f32,
 }
 
+/// Piston behaviour from the component definition (F8).
+///
+/// A piston is a *prismatic* joint: the rod slides along the mount axis instead
+/// of turning about it. The definition carries the travel —
+/// `prismatic = <housing>, <rod>, ax, ay, az, neutral, lower, upper` — whose last
+/// two numbers are already Jolt-shaped (`lower <= 0 <= upper`, measured from
+/// where the two frame points coincide, which is the rest pose). Every stock
+/// piston declares the axis `0, 0, 1`: the same local +Z every other RA2 axle
+/// uses, which is what the mount point's Z gives us.
+#[derive(Clone, Copy, Debug)]
+pub struct PistonStats {
+    /// Slide axis in the piston's own component space. Every stock piston says
+    /// `0, 0, 1` — the same local +Z every other RA2 axle uses — but the axis is
+    /// declared here, not taken from the mount point a child hangs off.
+    pub axis: Vec3,
+    /// Travel limits in metres, from the rest pose.
+    pub limits: [f32; 2],
+    /// Peak rod speed at full power (m/s): the first number of the definition's
+    /// `power` pair.
+    pub speed: f32,
+    /// Peak rod force (N): the second number, scaled by [`torque_unit`].
+    pub force: f32,
+    /// A burst piston (`base = BurstPiston`): parked until something fires it,
+    /// like a burst motor — see [`JointUse::Burst`].
+    pub burst: bool,
+}
+
 /// One part of a robot.
 pub struct Component {
     pub index: usize,
@@ -155,6 +182,8 @@ pub struct Component {
     pub weapon: Option<WeaponStats>,
     pub motor: Option<MotorStats>,
     pub wheel: Option<WheelStats>,
+    /// Linear stats when this component is a piston (F8).
+    pub piston: Option<PistonStats>,
     /// Children component indices (motor-driven subtree).
     pub children: Vec<usize>,
 }
@@ -194,6 +223,9 @@ pub enum JointUse {
     Burst,
     /// A free hinge with no motor.
     Passive,
+    /// A linear joint at rest: a servo piston holds its rod where it is, by the
+    /// definition's force, until the control layer moves it.
+    Piston,
 }
 
 /// The motor connecting a part to its parent.
@@ -216,6 +248,9 @@ pub struct JointInfo {
     /// Rolling resistance: torque in N·m the joint's friction may resist an
     /// undriven rotation with (a wheel's `resistance`).
     pub friction_torque: f32,
+    /// A prismatic joint (a piston's rod) rather than a revolute one. Its
+    /// `limits` are metres of travel, `rate` is m/s and the torques are forces.
+    pub slider: bool,
     pub use_kind: JointUse,
 }
 
@@ -348,6 +383,48 @@ fn torque_unit() -> f32 {
 }
 
 /// The two numbers of a definition's `power = <speed> <torque>` line.
+/// A piston's travel and power, from its definition (F8).
+///
+/// `prismatic = <housing>, <rod>, ax, ay, az, neutral, lower, upper` — the two
+/// object names are not numeric, so a plain number scan lands on the axis
+/// `[0..3]` first, then the neutral point and the two travel limits. The names
+/// are real objects in the component mesh: `burstpiston1.gmf` carries
+/// `rb "body"` (14 kg) and `rb "shaft"` (8 kg), and the children mount on
+/// `Host = shaft`, so the rod is the moving half.
+///
+/// `lower <= 0 <= upper` is already the shape a Jolt slider wants, measured from
+/// the rest pose.
+fn piston_stats(def: &ra2fmt::component::ComponentDef, burst: bool) -> PistonStats {
+    let nums: Vec<f32> = def
+        .get("prismatic")
+        .map(|v| {
+            v.split(',')
+                .filter_map(|t| t.trim().parse::<f32>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let axis = if nums.len() >= 3 {
+        Vec3::new(nums[0], nums[1], nums[2])
+    } else {
+        Vec3::Z
+    };
+    let limits = if nums.len() >= 6 {
+        [nums[4], nums[5]]
+    } else {
+        // No usable travel: a barely-moving rod still beats a weld, and keeps
+        // the rod a body of its own.
+        [-0.05, 0.05]
+    };
+    let (speed, force) = power_pair(def);
+    PistonStats {
+        axis: if axis == Vec3::ZERO { Vec3::Z } else { axis },
+        limits,
+        speed: speed.unwrap_or(0.0),
+        force: force.unwrap_or(0.0) * torque_unit(),
+        burst,
+    }
+}
+
 fn power_pair(def: &ra2fmt::component::ComponentDef) -> (Option<f32>, Option<f32>) {
     let Some(v) = def.get("power") else {
         return (None, None);
@@ -412,9 +489,13 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
         let parent_part = part_of[parent];
         part.parent = Some(parent_part);
 
-        let Some(m) = comps[parent].motor else {
-            // The split came from a piston, whose rod we do not joint yet: weld
-            // it back onto the parent so nothing floats free.
+        // A joint belongs to the parent: a motor turns its subtree about the
+        // mount axis, a piston slides it along that axis (F8).
+        let piston = comps[parent].piston;
+        let motor = comps[parent].motor;
+        if motor.is_none() && piston.is_none() {
+            // A split that carries no joint data of its own: weld the child group
+            // back on rather than leave it floating.
             part.parent = None;
             continue;
         };
@@ -438,53 +519,84 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
         }
         .normalize_or_zero();
         let axis = if axis == Vec3::ZERO { Vec3::Z } else { axis };
+        // A piston declares its own slide axis in component space — the mount
+        // point's Z is where a child hangs off, not where the rod travels (F8).
+        let axis = match piston {
+            Some(p) => parent_local.transform_vector3(p.axis).normalize_or_zero(),
+            None => axis,
+        };
+        let axis = if axis == Vec3::ZERO { Vec3::Z } else { axis };
         // A burst motor is a limited hinge; everything else swings freely. Its
         // `[start, end]` are the axle's absolute angles, and the rest pose
         // leaves the axle at `start`, so the constraint has to allow the travel
         // from there to `end`. Jolt measures the hinge angle from the pose the
         // constraint is created in and requires the range to straddle zero, so
         // the limits are that travel, split about zero.
-        let limits = match m.burst {
-            Some([start, end]) => {
-                let d = (end - start).clamp(-std::f32::consts::PI, std::f32::consts::PI);
-                [d.min(0.0), d.max(0.0)]
-            }
-            None => [-std::f32::consts::PI, std::f32::consts::PI],
-        };
-        // A wheel's `resistance` is rolling resistance: the torque the joint's
-        // friction may oppose an undriven rotation with. A parked burst motor is
-        // held by the same friction at its own torque — the scripts' `Lock(True)`.
-        let friction_torque = if is_wheel {
-            comps[root]
-                .wheel
-                .as_ref()
-                .map(|w| w.resistance * torque_unit())
-                .unwrap_or(0.0)
-        } else if m.burst.is_some() {
-            m.torque
+        //
+        // A piston's travel comes straight from its definition, already in that
+        // shape (metres either side of the rest pose).
+        let (rate, max_torque, limits, friction_torque, use_kind) = if let Some(p) = piston {
+            (
+                p.speed,
+                p.force,
+                p.limits,
+                // Parked, like a burst motor: the definition's force is what
+                // holds the rod against a load until the control layer moves it.
+                p.force,
+                if p.burst {
+                    JointUse::Burst
+                } else {
+                    JointUse::Piston
+                },
+            )
         } else {
-            0.0
-        };
-        let use_kind = if is_wheel {
-            JointUse::Wheel
-        } else if m.burst.is_some() {
-            JointUse::Burst
-        } else {
-            JointUse::Spun
+            let m = motor.expect("checked above");
+            let limits = match m.burst {
+                Some([start, end]) => {
+                    let d = (end - start).clamp(-std::f32::consts::PI, std::f32::consts::PI);
+                    [d.min(0.0), d.max(0.0)]
+                }
+                None => [-std::f32::consts::PI, std::f32::consts::PI],
+            };
+            // A wheel's `resistance` is rolling resistance: the torque the
+            // joint's friction may oppose an undriven rotation with. A parked
+            // burst motor is held by the same friction at its own torque — the
+            // scripts' `Lock(True)`.
+            let friction_torque = if is_wheel {
+                comps[root]
+                    .wheel
+                    .as_ref()
+                    .map(|w| w.resistance * torque_unit())
+                    .unwrap_or(0.0)
+            } else if m.burst.is_some() {
+                m.torque
+            } else {
+                0.0
+            };
+            let use_kind = if is_wheel {
+                JointUse::Wheel
+            } else if m.burst.is_some() {
+                JointUse::Burst
+            } else {
+                JointUse::Spun
+            };
+            (m.speed, m.torque, limits, friction_torque, use_kind)
         };
         part.joint = Some(JointInfo {
             motor: parent,
-            rate: m.speed,
-            max_torque: m.torque,
+            rate,
+            max_torque,
             friction_torque,
             limits,
             pivot,
             axis,
+            slider: piston.is_some(),
             use_kind,
         });
     }
 
-    // A piston-split part has no joint, so re-weld its members into the parent.
+    // Any part still without a joint had no motor and no piston behind it, so
+    // re-weld its members into the parent rather than leave them floating.
     for _ in 0..parts.len() {
         for p in 0..parts.len() {
             if parts[p].root == 0 || parts[p].parent.is_some() || parts[p].members.is_empty() {
@@ -638,7 +750,12 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             .as_ref()
             .map(|d| !flag_false(d, "damageable"))
             .unwrap_or(true);
-
+        let piston = (role == Role::Piston).then(|| {
+            piston_stats(
+                def.as_ref().expect("a piston has a definition"),
+                base.eq_ignore_ascii_case("BurstPiston"),
+            )
+        });
         let weapon = (role == Role::Weapon).then(|| WeaponStats {
             concussion: def
                 .as_ref()
@@ -697,6 +814,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             weapon,
             motor,
             wheel,
+            piston,
             children: Vec::new(),
         });
     }
@@ -765,6 +883,69 @@ mod tests {
         assert_eq!(Role::of("ControlBoard", "ControlBoard"), Role::Control);
     }
 
+    /// F8: a piston's child hangs off a prismatic joint, not the parent's body.
+    ///
+    /// The definition's `prismatic` line carries the travel, and the axis is in
+    /// the piston's own space — `burstpiston1.txt` says
+    /// `body, shaft, 0, 0, 1, 0.0, -0.60, .8`, which is a rod that slides along
+    /// its local +Z from 0.60 back to 0.80 out.
+    #[test]
+    fn piston_travel_comes_from_the_prismatic_line() {
+        let d = ra2fmt::component::parse(
+            "prismatic = body, shaft, 0, 0, 1, 0.0, -0.60, .8\npower = 60 100\n",
+        );
+        let p = piston_stats(&d, true);
+        assert_eq!(p.axis, Vec3::Z);
+        assert_eq!(p.limits, [-0.60, 0.8]);
+        assert_eq!(p.speed, 60.0);
+        assert_eq!(p.force, 100.0 * torque_unit());
+        assert!(p.burst);
+
+        // No usable line at all still yields a joint, and one that moves.
+        let p = piston_stats(&ra2fmt::component::parse("name = piston\n"), false);
+        assert_eq!(p.axis, Vec3::Z);
+        assert!(p.limits[0] < 0.0 && p.limits[1] > 0.0);
+        assert!(!p.burst);
+    }
+
+    /// The assembled robot splits the rod off into a body of its own, and the
+    /// joint carries the definition's limits rather than a hinge's ±π.
+    #[test]
+    fn a_piston_slides_its_child_instead_of_welding_it() {
+        // chassis → piston → rod.
+        let mut piston = part(1, Some(0), Mat4::IDENTITY, false);
+        piston.role = Role::Piston;
+        piston.piston = Some(PistonStats {
+            axis: Vec3::Z,
+            limits: [-0.73, 0.2],
+            speed: 1.0,
+            force: 1200.0,
+            burst: false,
+        });
+        let components = vec![
+            part(0, None, Mat4::IDENTITY, false),
+            piston,
+            part(2, Some(1), Mat4::IDENTITY, false),
+        ];
+        let (parts, part_of, _) = assemble(&components);
+
+        assert_eq!(parts.len(), 2, "the rod is a body of its own");
+        assert_eq!(part_of[1], part_of[0], "the housing stays on the chassis");
+        assert_eq!(part_of[2], 1, "the rod is that body");
+        let joint = parts[1].joint.expect("the rod is jointed");
+        assert!(joint.slider, "the joint is prismatic");
+        assert_eq!(parts[1].parent, Some(0));
+        assert_eq!(joint.limits, [-0.73, 0.2]);
+        assert_eq!(joint.rate, 1.0, "speed is the power pair's first number");
+        assert_eq!(joint.max_torque, 1200.0);
+        assert_eq!(
+            joint.friction_torque, 1200.0,
+            "parked: its own force holds it"
+        );
+        assert_eq!(joint.use_kind, JointUse::Piston);
+        assert!(parts[0].joint.is_none(), "the chassis has no joint");
+    }
+
     /// A definition's `power` line is `<speed> <torque>`, and the torque needs
     /// the factor the hinge's own `SetPowerSettings` applies.
     ///
@@ -815,6 +996,7 @@ mod tests {
                 burst: None,
             }),
             wheel: None,
+            piston: None,
             children: Vec::new(),
         }
     }

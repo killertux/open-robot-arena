@@ -10,7 +10,7 @@ use glam::{Mat4, Quat, Vec3};
 
 use crate::backend::{
     BackendError, BodyDesc, BodyHandle, CompoundChild, HingeDesc, JointHandle, MotionType,
-    PhysicsBackend, ShapeDesc,
+    PhysicsBackend, ShapeDesc, SliderDesc,
 };
 use crate::rig::{JointInfo, JointUse, RobotRig};
 use crate::scene::USER_BOT;
@@ -96,7 +96,11 @@ impl Robot {
             let (Some(parent), Some(info)) = (rig.parts[p].parent, rig.parts[p].joint) else {
                 continue;
             };
-            let joint = Self::make_hinge(physics, &rig, &parts, parent, p, info)?;
+            let joint = if info.slider {
+                Self::make_slider(physics, &rig, &parts, parent, p, info)?
+            } else {
+                Self::make_hinge(physics, &rig, &parts, parent, p, info)?
+            };
             parts[p].joint = Some(joint);
         }
 
@@ -187,6 +191,39 @@ impl Robot {
         physics.create_hinge(&desc)
     }
 
+    /// The same placement rule as a hinge, on a prismatic joint (F8): a piston's
+    /// rod slides along the axis its mount point gives, with the travel its
+    /// definition asks for. The motor's "torque" is a force here.
+    fn make_slider(
+        physics: &mut dyn PhysicsBackend,
+        rig: &RobotRig,
+        parts: &[PartState],
+        parent: usize,
+        p: usize,
+        info: JointInfo,
+    ) -> Result<JointHandle, BackendError> {
+        let (pivot_bot, axis_bot) = (info.pivot, info.axis);
+        let frame_a = rig.components[rig.parts[parent].root].local;
+        let frame_b = rig.components[rig.parts[p].root].local;
+
+        let max_force = match info.use_kind {
+            JointUse::Passive => 0.0,
+            _ => info.max_torque,
+        };
+        let desc = SliderDesc {
+            body_a: parts[parent].body,
+            body_b: parts[p].body,
+            anchor_a: frame_a.inverse().transform_point3(pivot_bot),
+            anchor_b: frame_b.inverse().transform_point3(pivot_bot),
+            axis_a: frame_a.inverse().transform_vector3(axis_bot),
+            axis_b: frame_b.inverse().transform_vector3(axis_bot),
+            limits: info.limits,
+            max_force,
+            friction_force: info.friction_torque,
+        };
+        physics.create_slider(&desc)
+    }
+
     /// The bot's world frame (derived from the chassis body).
     pub fn transform(&self, physics: &dyn PhysicsBackend) -> Mat4 {
         let root = self.rig.components[self.rig.parts[0].root].local;
@@ -266,8 +303,9 @@ impl Robot {
             let target = match info.use_kind {
                 JointUse::Spun => info.rate,
                 // Parked until something triggers it (see `JointUse::Burst`);
-                // its hold is the joint's friction, not a motor.
-                JointUse::Burst | JointUse::Passive => continue,
+                // its hold is the joint's friction, not a motor. A servo piston
+                // is parked the same way until the control layer moves it (F8).
+                JointUse::Burst | JointUse::Passive | JointUse::Piston => continue,
                 JointUse::Wheel => {
                     let root = self.rig.parts[p].root;
                     let c = &self.rig.components[root];
@@ -284,7 +322,11 @@ impl Robot {
                     v_hub.dot(roll) / c.wheel_radius().max(0.05)
                 }
             };
-            physics.drive_hinge(joint, target);
+            if info.slider {
+                physics.drive_slider(joint, target);
+            } else {
+                physics.drive_hinge(joint, target);
+            }
         }
     }
 

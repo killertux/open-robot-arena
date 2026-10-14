@@ -91,6 +91,13 @@ local/           # (git-ignored) game files + converted cache
   wheel meshes: discs lie in XY). `RobotRig::worlds` re-walks the tree with the
   current rotor angles, so a spinner's disc, arms and weapons all sweep together
   and wheels turn.
+- **Pistons slide their subtree.** A `Role::Piston` component splits its child
+  group onto a prismatic joint along the axis its definition declares
+  (`prismatic = <housing>, <rod>, ax, ay, az, neutral, lower, upper`), with that
+  travel as the joint's limits. The mesh ships the housing and the rod as two
+  rigid bodies (`burstpiston1.gmf`: `body` 14 kg, `shaft` 8 kg) and the children
+  mount on `Host = shaft`, so the rod is the moving half. A parked piston holds
+  its rod at the definition's force rather than being welded (F8).
 - **Damage is contact-driven, per body.** Jolt's `WereBodiesInContact` tells us
   *whether* two bodies are engaged, but not which parts touched; guessing from
   bounding volumes was unreliable (a robot's parts are spread across its body, so

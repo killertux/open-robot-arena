@@ -13,11 +13,12 @@ use oxijolt::prelude::{
 };
 use oxijolt::{
     AnyConstraintId, HingeConstraint, HingeConstraintSettings, MotorSettings, MotorState,
+    SliderConstraint, SliderConstraintSettings,
 };
 
 use crate::backend::{
     BackendError, BodyDesc, BodyHandle, BodyState, HingeDesc, JointHandle, MotionType,
-    PhysicsBackend, RayHit, ShapeDesc, StepInfo,
+    PhysicsBackend, RayHit, ShapeDesc, SliderDesc, StepInfo,
 };
 
 /// A physics world backed by Jolt 5.
@@ -315,6 +316,81 @@ impl PhysicsBackend for JoltBackend {
         let handle = self.joints.len() as JointHandle;
         self.joints.push(Some(AnyConstraintId::from(id)));
         Ok(handle)
+    }
+
+    fn create_slider(&mut self, desc: &SliderDesc) -> Result<JointHandle, BackendError> {
+        let (Some(ia), Some(ib)) = (self.id(desc.body_a), self.id(desc.body_b)) else {
+            return Err(BackendError::Body("slider on a missing body".into()));
+        };
+        let (Some(sa), Some(sb)) = (self.state(desc.body_a), self.state(desc.body_b)) else {
+            return Err(BackendError::Body("slider on a body with no state".into()));
+        };
+        // As for a hinge: the frames are created coincident in world space.
+        let point_a = sa.position + sa.rotation * desc.anchor_a;
+        let point_b = sb.position + sb.rotation * desc.anchor_b;
+        let axis_a = (sa.rotation * desc.axis_a).normalize_or_zero();
+        let axis_b = (sb.rotation * desc.axis_b).normalize_or_zero();
+        let axis_a = if axis_a == Vec3::ZERO {
+            Vec3::Z
+        } else {
+            axis_a
+        };
+        let axis_b = if axis_b == Vec3::ZERO {
+            Vec3::Z
+        } else {
+            axis_b
+        };
+
+        let mut settings =
+            SliderConstraintSettings::new(Self::rv(point_a), Self::v(axis_a), normal_of(axis_a))
+                .frame2(Self::rv(point_b), Self::v(axis_b), normal_of(axis_b))
+                .limits(desc.limits[0], desc.limits[1])
+                // Jolt applies this only while the motor is off, which is where a parked
+                // piston's hold belongs: a driven rod is governed by its motor's force.
+                .max_friction_force(desc.friction_force.max(0.0));
+        if desc.max_force > 0.0 {
+            settings = settings
+                .motor(MotorSettings::default().torque_limits(-desc.max_force, desc.max_force));
+        }
+        let id = self
+            .world
+            .create_constraint(ia, ib, &settings)
+            .map_err(|e| BackendError::Body(format!("slider: {e:?}")))?;
+        let handle = self.joints.len() as JointHandle;
+        self.joints.push(Some(AnyConstraintId::from(id)));
+        Ok(handle)
+    }
+
+    fn drive_slider(&mut self, handle: JointHandle, target_velocity: f32) {
+        let Some(Some(any)) = self.joints.get(handle as usize).copied() else {
+            return;
+        };
+        let Some(id) = any.downcast::<SliderConstraint>() else {
+            return;
+        };
+        let Ok(mut c) = self.world.constraint_mut(id) else {
+            return;
+        };
+        if target_velocity.abs() < 1e-4 {
+            // Parked: the joint's friction holds the rod where it is.
+            c.set_motor_state(MotorState::Off);
+        } else {
+            c.set_motor_state(MotorState::Velocity);
+            let _ = c.set_target_velocity(target_velocity);
+        }
+    }
+
+    fn slider_offset(&self, handle: JointHandle) -> f32 {
+        let Some(Some(any)) = self.joints.get(handle as usize).copied() else {
+            return 0.0;
+        };
+        let Some(id) = any.downcast::<SliderConstraint>() else {
+            return 0.0;
+        };
+        self.world
+            .constraint(id)
+            .map(|c| c.current_position())
+            .unwrap_or(0.0)
     }
 
     fn remove_joint(&mut self, handle: JointHandle) {

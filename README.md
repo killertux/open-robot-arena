@@ -91,7 +91,11 @@ on the jointed assembly a quarter of the stock bots still cannot get traction an
 simply will not move. That is mount *placement* and the unmodelled trigger/control
 layer, not the parts' parameters: arenas now collide the geometry they draw
 (`SIMULATION_GEOMETRY` 5/6 is the display proxy, plane primitives are synthesised)
-and a duel starts on the arena's own `startpoint` attachments. Damage is an event
+and a duel starts on the arena's own `startpoint` attachments. Pistons are
+prismatic joints too — a rod that slides with the travel its definition declares,
+held at the definition's force — but nothing *drives* one yet: a servo piston
+should follow a control-board output and a burst piston fire on a trigger, which
+is the script layer again. Damage is an event
 now — a blow priced by the speed the robots arrive with, a spinner's rotor tip
 speed as a rate, contact tested across every body of both robots rather than their
 two roots — which a deterministic ram (`RA2_DUEL_DRIVE=ram`) puts in the range the

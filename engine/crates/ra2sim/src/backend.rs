@@ -159,6 +159,51 @@ pub struct RayHit {
 /// Opaque handle to a joint (constraint) within a backend.
 pub type JointHandle = u32;
 
+/// A prismatic (slider) joint between two bodies — a piston's rod (F8).
+///
+/// The anchors and axes are in each body's own local space and must name the
+/// same world point/axis when the joint is created (which is how the mount
+/// transform places them). The motor is a velocity motor along the axis, and its
+/// "torque" is a force: the definition's `power` pair, the same field a motor
+/// takes its speed and torque from.
+#[derive(Clone, Copy, Debug)]
+pub struct SliderDesc {
+    pub body_a: BodyHandle,
+    pub body_b: BodyHandle,
+    /// The point both bodies share, in each body's local space.
+    pub anchor_a: Vec3,
+    pub anchor_b: Vec3,
+    /// Slide axis in each body's local space.
+    pub axis_a: Vec3,
+    pub axis_b: Vec3,
+    /// Travel limits in metres, measured from where the two frame points
+    /// coincide (the rest pose). Jolt requires `min <= 0 <= max`, which is the
+    /// shape of the definition's `prismatic = …, [-x, +y]` pair.
+    pub limits: [f32; 2],
+    /// Peak motor force in N; `0` creates the joint without a motor.
+    pub max_force: f32,
+    /// Force the joint's friction can resist sliding with (N); `0` is
+    /// frictionless. A parked piston is held by this.
+    pub friction_force: f32,
+}
+
+impl SliderDesc {
+    /// A free-sliding joint at `anchor` along `axis`, both body-local.
+    pub fn new(body_a: BodyHandle, body_b: BodyHandle, anchor: Vec3, axis: Vec3) -> Self {
+        SliderDesc {
+            body_a,
+            body_b,
+            anchor_a: anchor,
+            anchor_b: anchor,
+            axis_a: axis,
+            axis_b: axis,
+            limits: [-0.5, 0.5],
+            max_force: 0.0,
+            friction_force: 0.0,
+        }
+    }
+}
+
 /// A revolute joint between two bodies — the engine's motor.
 ///
 /// The anchors and axes are given in each body's own local space and must name
@@ -269,6 +314,22 @@ pub trait PhysicsBackend {
         Err(BackendError::Body(
             "joints unsupported by this backend".into(),
         ))
+    }
+
+    /// Create a prismatic joint. Backends without sliders may reject this.
+    fn create_slider(&mut self, _desc: &SliderDesc) -> Result<JointHandle, BackendError> {
+        Err(BackendError::Body(
+            "sliders unsupported by this backend".into(),
+        ))
+    }
+
+    /// Drive a prismatic joint's rod at `target_velocity` m/s; `0` parks it (the
+    /// motor goes off and the joint's friction holds the rod).
+    fn drive_slider(&mut self, _handle: JointHandle, _target_velocity: f32) {}
+
+    /// The rod's offset along the slide axis in metres (`0.0` if unknown).
+    fn slider_offset(&self, _handle: JointHandle) -> f32 {
+        0.0
     }
 
     fn remove_joint(&mut self, _handle: JointHandle) {}

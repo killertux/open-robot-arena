@@ -233,11 +233,20 @@ Known, documented, not yet fixed:
     components declare `hitpoints`, so our per-role defaults are the model's
     biggest invented number. `fracture` (8 components) and `material = metal(.4)`
     / `rubber(0)` (5) are unparsed. **[OPEN]**
-14. **Buckling is chassis deformation, not just detachment.** The format doc
+14. **Pistons are prismatic joints — landed.** A `Role::Piston` splits its child
+    group onto a slider instead of welding it (see F8). The component mesh ships
+    the rod and housing as two rigid bodies and the children mount on
+    `Host = shaft`; the definition's `prismatic` line gives the axis (in the
+    piston's own space) and the travel, which is already Jolt-shaped. Getting the
+    axis from the *mount point* instead — the rule a hinge follows — made
+    `AI/Team8/Bot2`'s rod slide vertically and stall it. Parked pistons hold at
+    the definition's force; nothing drives one yet (M4). The 45-bot survey holds
+    at **27/45**. **[LANDED]**
+15. **Buckling is chassis deformation, not just detachment.** The format doc
     describes the game subdividing the chassis faces and holding "buckle points"
     that shift down/in on every hit. Our M3 model detaches whole parts. **[OPEN]**
 
-15. **Mount-point (attachment frame) alignment — resolved.** The mount *data* was
+16. **Mount-point (attachment frame) alignment — resolved.** The mount *data* was
     already parsed and its field labels corrected; the *placement* rule is now
     settled and is the default: a component is placed by
     `A_parent · R_z(start) · R_x(π) · R_z(angle) · A_own⁻¹` — the parent's mount
@@ -290,7 +299,7 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | All 57 stock bots render | 57/57 |
 | All 12 arena scripts assemble | 12/12 |
 | `ra2-sim` drives on practice / octagon / hilltop / box | OK — one jointed robot, scripted drive, frames written. The sandbox is no longer arcade-driven: it drives the same assembly the duel does |
-| Stock bots that drive on the jointed assembly | **27/45** travel ≥ 2 m in 3 s (`AI/Team*`, full throttle, box arena). The motor law is the game's own (F3) and the arenas now collide the geometry they draw (F5), so what is left is geometry *placement*: mount residuals and the unmodelled trigger/control layer |
+| Stock bots that drive on the jointed assembly | **27/45** travel ≥ 2 m in 3 s (`AI/Team*`, full throttle, box arena). The motor law is the game's own (F3) and the arenas now collide the geometry they draw (F5), so what is left is geometry *placement*: mount residuals and the unmodelled trigger/control layer. The four stock bots that use pistons are the only ones F8 moves: `AI/Team8/Bot2` 2.09 → 3.58 m and `AI/Team13/Bot0` 1.59 → 1.66, against `AI/Team5/Bot1` 7.49 → 6.29 and `AI/Team0/Bot1` 0.69 → 0.53 |
 | `ra2-duel` on the octagon | **Engages again.** With F3's honest speeds the bout had ended with both robots parked in open floor; the cause was spawn placement, not a collider hole (F11): the duel invented a spread that landed on the rim of the Octagon's 3.7 m drop. It now spawns on the arena's own four `startpoint` attachments |
 | `ra2-duel` damage model (F7) | **Validated on a deterministic ram.** `RA2_DUEL_DRIVE=ram` with two identical `AI/Team1/Bot0` on the box arena: contact at t≈5 s, an opening blow of **34** points, then ~1 point/s while the two rest against each other. Both ends of that match what the original's scripts say — hazards apply 25, `AI/__init__.py` calls `amount > 10` a "good solid hit" — after two real defects were fixed (contact was tested only between root bodies; a blow was a per-step *integral* of speed, so a fast impact weighed almost nothing) |
 | `ra2-duel` with the AI | **Does not engage.** 30 s of `AI/Team1/Bot0` vs `AI/Team6/Bot2` on the box arena: the pair closes to ~7.7 m, then one robot pins itself against a wall (at `(-11.8, -7.3)` from t = 15 s on, reversing included) and neither touches the other all bout. This is the control layer (M4), not the damage model: the AI is a stand-in that only ever drives at the opponent |
@@ -327,6 +336,8 @@ The remaining blocker is *behaviour*, not the parts' parameters or the arenas:
    recovered; component `hitpoints` are defaults for 122 of 131 stock parts; and
    `fracture` (a per-hit reduction, on the reading that fits the control board's
    41 and the hazard's 25) and `material` are unparsed.
-3. **F6 — the friction combination law**, if the drive survey needs it.
-4. **F4's `contact` surface** as a separate collider, once the `contact` and
+3. **F9 — buckling.** The last structural gap in the robot model: the original
+   deforms the chassis rather than detaching whole parts.
+4. **F6 — the friction combination law**, if the drive survey needs it.
+5. **F4's `contact` surface** as a separate collider, once the `contact` and
    `passthru` object sets can be separated safely.

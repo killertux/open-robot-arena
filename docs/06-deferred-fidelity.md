@@ -16,7 +16,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F5 | Collision shape kinds (`SIMULATION_GEOMETRY`, `HAVOK_GEO_TYPE`) | **landed** |
 | F6 | Friction combination law differs from Havok 1.x | blocked on the binding |
 | F7 | Damage model: an event, not a per-step integral | shape landed; numbers half-sourced |
-| F8 | Pistons are welded | open |
+| F8 | Pistons slide their children (prismatic) | **landed** (nothing drives them yet) |
 | F9 | Buckling is chassis deformation in the original | open |
 | F10 | Chassis skin decals; 16 %-light weight gap | open |
 | F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
@@ -703,11 +703,45 @@ about 43 % less grip. Only raw FFI or a custom combine would close it.
   `(component, amount, time, by player, by component)`. The pieces are in
   `Impact`; the script layer is what will need it.
 
-## F8 — Pistons are welded
+## F8 — Pistons are prismatic joints — **landed**
 
-`Role::Piston` components do not create a joint yet, so a piston's rod stays
-welded to its body. The definition carries the axis and limits (`prismatic =
-body, shaft, 0, 0, 1, 0, -.5, 0.4`), which maps onto a Jolt slider constraint.
+A `Role::Piston` component now splits its child group onto a **slider** joint
+instead of welding it, exactly as a motor splits its rotor onto a hinge. The
+component mesh settles how: `burstpiston1.gmf` ships the piston as **two rigid
+bodies** — `rb "body"` (14 kg, the housing) and `rb "shaft"` (8 kg, the rod) —
+and the definition's `attaching = shaft` with `Host = shaft` on the mount point
+is what hangs the children off the rod.
+
+`prismatic = body, shaft, ax, ay, az, neutral, lower, upper` gives the travel.
+Two details cost a debugging pass:
+
+- **The axis is in the piston's own component space**, not the mount point's
+  frame. Taking the mount's Z (the rule a hinge follows, F1) makes
+  `AI/Team8/Bot2`'s rod slide *vertically*: its piston is mounted pointing
+  forward, so the rod sank onto the floor and took the weight off the wheels
+  (2.09 m → 0.24 m travelled). The declared axis is `(0, 0, 1)` on every stock
+  piston — the same local +Z as every other RA2 axle — and transforming *that*
+  by the piston's rest transform gives the real direction.
+- **The limits are already Jolt-shaped.** `lower <= 0 <= upper`, metres from
+  where the two frame points coincide, which is the rest pose. `burstpiston1`'s
+  `-0.60, .8` becomes `limits(-0.60, 0.8)` directly.
+
+A parked piston holds its rod with `friction_force` = the definition's `power`
+force (× [`torque_unit`], the same inference F3 makes for torque), and the motor
+is left off — the same treatment F3 gave burst motors. So a piston is a *stiff*
+joint rather than a weld: it carries load until the load beats its force, and it
+can never travel past its stops.
+
+Verified: `AI/Team8/Bot2` 2.09 → **3.58 m**, `AI/Team5/Bot1` 7.49 → 6.29,
+`AI/Team13/Bot0` 1.59 → 1.66, and the 45-bot survey holds at **27/45**. `oxijolt`
+does expose `SliderConstraint`, so unlike F6 this needed no unsafe binding.
+
+**Still open:** nothing *drives* a piston. A servo piston should follow its
+control-board output and a burst piston should fire on a trigger; both need the
+control layer (M4), so they park. The speed unit is also unverified: `power`'s
+first number is metres per second here (a burst piston's `60` would be 60 m/s,
+which is not a piston), so the linear scale is a guess pending the same binary
+work F3 did for the wheel.
 
 ## F9 — Buckling is chassis deformation in the original
 
