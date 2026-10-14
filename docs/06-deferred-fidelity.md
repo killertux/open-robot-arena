@@ -181,119 +181,64 @@ from a metric too coarse to carry the claim. The preview is a sanity check.
 that makes the wheels' reach the ground *and* the rotor clear the chassis' top,
 but with the rule unsettled it stays an unverified estimate.)
 
-### Decompile progress
+### Decompile progress — the bot object model is mapped
 
-The `AttachDetails` hunt is a **dead end, and a useful one**: it is a *UI* class,
-not a geometry one. Its constructor (`FUN_0042b380`, in the botlab's `0x42xxxx`
-range) zeroes a payload, calls `FUN_006084a0` and constructs an **MFC `CRect`** at
-`+0x24` before installing its vtable; its copy constructor (`FUN_00461920`) copies
-14 dwords. A `CRect` means it is the on-screen **green attachment-point box** the
-UI strings talk about, not the mount maths.
+This pass broke the structural question open. The `.bot` versions are stored as a
+**float** (no version strings exist in the binary); the thresholds 1.04–1.12 sit
+in a table at `0x6a69d4..0x6a69f4` in `.rdata`, and the reader gates on them.
 
-The vtable walk that got there, for the next pass:
+**The per-component setup pipeline:**
 
-| Step | Value |
+| Address | Role |
 |---|---|
-| `AttachDetails` TypeDescriptor | `0x6f0480` (name at `+8`; shared `type_info` vftable `0x006b1e44`) |
-| CompleteObjectLocator | `0x6bc53c` (`+12` = TD) |
-| vtable | `0x6a5ecc` — **one** entry, `0x45c860` (a destructor) |
-| writers of that vtable | `0x42b3b8`, `0x461988` → `FUN_0042b380` (ctor), `FUN_00461920` (copy ctor) |
-| `Component` TypeDescriptor | `0x6ee8f0`; its only nested types are `AttachDetails` and `Adjuster` |
+| `FUN_004dde50` | bot-object load/setup: reads the version float, then `if (1.06 <= v)` and `if (1.12 <= v)` |
+| `FUN_00416360` | the per-component loop: for each component runs `FUN_004dd090` then `FUN_004dca90` |
+| `FUN_004dca90` | **the mount/connection wiring.** Dispatches on the component's class name and `dynamic_cast`s: `SpinMotor` → `FUN_004dca70`, `AxleMount` → `FUN_004dca60`, `Steering` → a loop over `FUN_004f6d00`/`FUN_004f6d10`; each then calls `FUN_00508040` |
+
+**`FUN_004dca60`, `FUN_004dca70` and `FUN_00508040` are the per-class mount handlers
+and are the most likely home of the placement rule.** That is the next thing to
+read (three small functions, one `batch_decompile` call).
+
+**The real component class model** (class-name strings, then RTTI):
+
+| Class | Name string | Notes |
+|---|---|---|
+| `Component` | — | base class; TD `0x6ee8e8`, COL `0x6bd118`, **vtable `0x6a6aa4` (22 methods)** in `0x45cd50..0x45f2b0`; nested types are `AttachDetails` (UI, an MFC `CRect`) and `Adjuster` |
+| `Chassis` | `0x6f0664` | |
+| `AxleMount` | `0x6f4314` | a *connection* class we do not model; RTTI `.?AVAxleMount@@` at `0x6f4344` |
+| `Wheel` | `0x6f4334` | |
+| `Battery` | `0x6f5a3c` | |
+| `Steering` | `0x6fd760` | another connection class we do not model |
+| `SpinMotor` | `0x6fd76c` | |
+| `Weapon` | `0x6ff4f0` | |
+
+Controller classes live in a `Bot` namespace: `Bot::Input` (`0x6ef904`),
+`Bot::Command` (`0x6f1e54`), `Bot::Output` (`0x6f243c`), plus templates
+`Bot::Button<SpinMotor>`, `Bot::Switch<SpinMotor>`, `Bot::Analog<SpinMotor>`
+(`0x6feb54`…), and the binding action strings `Spin Clockwise` (`0x6fe7e4`),
+`Spin Counter-clockwise` (`0x6fe7cc`), `On/Off Clockwise` (`0x6feb20`).
+
+**Ghidra names the RTTI symbols** — the decompiler emits
+`&Component::RTTI_Type_Descriptor`, `&SpinMotor::RTTI_Type_Descriptor`,
+`&AxleMount::RTTI_Type_Descriptor`, `&Steering::RTTI_Type_Descriptor`. So from here
+`find_xrefs_to_name` can walk a class's usage directly, which is much cheaper than
+the byte-level RTTI walk used to get here.
+
+Also noted: `Component` virtual method `FUN_0045ebd0` works with 64-byte buffers
+(a 4×4 matrix), so matrix-carrying methods do exist on the class.
+
+### Superseded: the byte-level RTTI walk
+
+Kept because it is reproducible and was needed before the named symbols were
+found: `AttachDetails` TD `0x6f0480` (name at `+8`, shared `type_info` vftable
+`0x006b1e44`), COL `0x6bc53c`, vtable `0x6a5ecc` — one entry, the destructor
+`0x45c860`; vtable writers `0x42b3b8` → `FUN_0042b380` (ctor, builds an MFC
+`CRect` at `+0x24`) and `0x461988` → `FUN_00461920` (copy ctor, 14 dwords). This
+is what proved `AttachDetails` is a UI class rather than the geometry one.
 
 Other landings: `FUN_00470ff0` enumerates `Robot Designs\*.bot`; `FUN_0042c850` is
-botlab placement *UI* (compares a class to `Chassis`, prints "Robots cannot exceed
-a maximum size", drives the attachment-point boxes); `FUN_00437770` is 7.3 KB and
-references `Chassis` but contains no attach/mount/matrix identifier at all.
-
-**Where the maths must be.** Since `AttachDetails` is UI and the botlab's *draw*
-path places every component, the placement has to be reachable from it — but the
-botlab classes are large and full of virtual dispatch. Two sharper routes for a
-next pass:
-
-1. find the **`.bot` reader** (it reads all eight component fields together, and a
-   loader often computes the world transforms as it goes); it must compare a class
-   string to `Chassis` (`0x6f0664`) and handle `SmartZone` (`0x6ee918`), and it is
-   *not* any of the functions checked so far;
-2. find the code that **consumes the 12-float attachment frames** — the gmf
-   attachment reader lives at `0x5c38b0`, which Ghidra does not recognise as a
-   procedure entry, so reach it by file offset and walk forward from the nearest
-   prologue.
-
-### Decompile progress
-
-The `AttachDetails` hunt is a **dead end, and a useful one**: it is a *UI* class,
-not a geometry one. Its constructor (`FUN_0042b380`, in the botlab's `0x42xxxx`
-range) zeroes a payload, calls `FUN_006084a0` and constructs an **MFC `CRect`** at
-`+0x24` before installing its vtable; its copy constructor (`FUN_00461920`) copies
-14 dwords. A `CRect` means it is the on-screen **green attachment-point box** the
-UI strings talk about, not the mount maths.
-
-The vtable walk that got there, for the next pass:
-
-| Step | Value |
-|---|---|
-| `AttachDetails` TypeDescriptor | `0x6f0480` (name at `+8`; shared `type_info` vftable `0x006b1e44`) |
-| CompleteObjectLocator | `0x6bc53c` (`+12` = TD) |
-| vtable | `0x6a5ecc` — **one** entry, `0x45c860` (a destructor) |
-| writers of the vtable | `0x42b3b8`, `0x461988` → `FUN_0042b380` (ctor), `FUN_00461920` (copy ctor) |
-| `Component` TypeDescriptor | `0x6ee8f0`; its only nested types are `AttachDetails` and `Adjuster` |
-
-Other landings from this pass: `FUN_00470ff0` enumerates `Robot Designs\*.bot`;
-`FUN_0042c850` is botlab placement *UI* (compares a class to `Chassis`, prints
-"Robots cannot exceed a maximum size", drives the attachment-point boxes);
-`FUN_00437770` is 7.3 KB and references `Chassis` but contains no
-attach/mount/matrix identifier at all.
-
-
-REA's MCP surface is what unlocked this: `resolve_containing_procedure` resolves
-interior addresses that the CLI's `decompile` rejects, and `read_bytes` /
-`search_bytes` make the RTTI walk possible.
-
-| Found | What it is |
-|---|---|
-| `FUN_00470ff0` | the bot file enumerator (references `Robot Designs\*.bot`) |
-| `FUN_0042c850` | botlab component-placement *UI*: compares a class to `Chassis`, prints "Robots cannot exceed a maximum size", drives the attachment-point boxes — not the maths |
-| `FUN_00437770` | 7.3 KB and references `Chassis`, but contains no attach/mount/matrix identifier at all |
-| `0x6ee8f0` | `Component` RTTI TypeDescriptor |
-| `0x6f0480` | `AttachDetails` TD (nested in `Component`), name at `+8`; shared `type_info` vftable `0x006b1e44` |
-| `0x6bc50c`, `0x6bc548` | reference the `AttachDetails` TD — CompleteObjectLocator candidates |
-
-`Component` has exactly two nested types: **`AttachDetails`** and `Adjuster`.
-`AttachDetails` owns the mounting data, so its vtable is the way in. Next step:
-finish the COL → `pVftable` walk from `0x6bc50c`, list the class's methods and
-decompile them (`batch_decompile` can take several at once).
-
-### Ruled out
-
-Test: the rotor's mesh `+Z` should end up along the anchor's plug direction; the
-wheels' `+Z` must stay horizontal (they are the control).
-
-| Rule | Result |
-|---|---|
-| `A_parent * S * A_own⁻¹` for any fixed 90°/180°/45° `S`, chassis links included | moves the wheels off the position the snapshot fixes |
-| reading the quaternion as `(w,x,y,z)` | breaks the wheels |
-| swapping the `yaw × quaternion` multiplication order | the same trade-off, exactly inverted |
-| transposing the attachment frame | wrong for meshes, so wrong for attachments (finding 3) |
-| a fixed `S` chosen to make the rotor flat | a 45° residual throughout — the target was wrong (finding 1) |
-| brute force over ordered products of `{A_p, A_p⁻¹, A_c, A_c⁻¹, M, M⁻¹}` ± a 180° mate flip, against the flat-rotor target | same, for the same reason |
-
-### The decompile
-
-Started, not finished. Leads ruled out and confirmed:
-
-- `0x5c38b0`, which references `Error Reading GM_AttachmentPt Data`, is not a
-  procedure entry Ghidra recognises — reach it by file offset
-  (`decompile --file-offset`) instead.
-- the binary has no RTTI-derived procedure names: searching procedures for
-  `Attach` and `Component` returns nothing, so the `AttachDetails` class has to be
-  found through its vtable/RTTI rather than by name.
-- the botlab attach UI at `0x42e8fe` only manages attachment-point *selection*
-  ("Click a green box…", `UI_BotLab_AP_box_*`) — it is not where the placement is
-  computed; that is a sibling function it calls.
-- still the best entry points: `.?AVAttachDetails@Component@@` (`0x6f0488`), the
-  `attach`/`attaching` definition keys (`0x6f23e8`, `0x6f2530`), the
-  `GMID_ATTACHMENTPT` node-type table around `0x6f0ba4`, and the attachment reader
-  at `0x5c38b0`.
+botlab placement *UI*; `FUN_00437770` is 7.3 KB, references `Chassis`, and contains
+no attach/mount/matrix identifier at all.
 
 ---
 
