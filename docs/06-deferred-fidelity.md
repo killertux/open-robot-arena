@@ -15,7 +15,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` as a collider still open) |
 | F5 | Collision shape kinds (`SIMULATION_GEOMETRY`, `HAVOK_GEO_TYPE`) | **landed** |
 | F6 | Friction combination law differs from Havok 1.x | blocked on the binding |
-| F7 | Damage model structurally aligned, numerically unsourced | open |
+| F7 | Damage model: an event, not a per-step integral | shape landed; numbers half-sourced |
 | F8 | Pistons are welded | open |
 | F9 | Buckling is chassis deformation in the original | open |
 | F10 | Chassis skin decals; 16 %-light weight gap | open |
@@ -648,14 +648,60 @@ combines as `sqrt(µ₁ · µ₂)`, and the safe `oxijolt` API exposes no combin
 hook. On the octagon (floor 0.80) with a 0.30 robot that is 0.854 vs 0.490 —
 about 43 % less grip. Only raw FFI or a custom combine would close it.
 
-## F7 — Damage model is structurally aligned, numerically unsourced
+## F7 — Damage is an event; its numbers are half-sourced
 
-Weapons carry `concussion` and `piercing`; the script API exposes
-`GetLastDamageReceived()` returning `(component, amount, time, by player, by
-component)` (confirmed in the shipped `AI/Spinner.py`), and the community reports
-piercing weighing more against the chassis. Our model applies `(concussion +
-piercing) × impact speed` to the nearest destructible part. The original's formula
-and the component `hitpoints` defaults were not recovered from the binary.
+**Landed** (this round): the *shape* of the model, and two real defects.
+
+- **Contact spans every body, not the roots.** A robot is several hinged bodies
+  (a chassis group plus a body per motor), and the model tested only the two
+  robots' root bodies — `Robot::body()` is `parts[0]`. A spinner arm or a wheel
+  meeting the opponent is a different body pair, and those contacts silently did
+  no damage. `combat::contacting_parts` now returns which bodies on each side
+  touched, and both the attacker and the target are chosen among those.
+- **A blow is an event; a grind is a rate.** The game reports damage in amounts
+  *per hit*; hazards apply a flat **25** (`Arenas/Hazards.py`:
+  `plus.damage(bot, 0, 25, ...)` — the flame and the electric zone both), and the
+  shipped AI treats `amount > 10` as "a good solid hit"
+  (`AI/__init__.py`: `if weapon == damage[0] and damage[1] > 10.0: # min damage
+  = 10`). Our model *integrated* an instantaneous speed over every step a contact
+  lasted, so a fast impact contributed almost nothing (a 5.6 m/s head-on ram:
+  3 points) while two motionless robots eroded each other. Now the closing speed
+  the robots arrive with is dealt **once**, when contact begins, and a spinning
+  weapon's rotor tip speed is applied as a rate while it works the same joint.
+  A constant term (`speed_floor`) that made resting contact damage is gone.
+- Measured on a deterministic head-on ram (`RA2_DUEL_DRIVE=ram`, two identical
+  `AI/Team1/Bot0` on the box arena): the opening blow is **34** points, then
+  resting contact adds ~1 point a second. That is the range the original's own
+  scripts describe — above the AI's 10-point "good hit" line and around the
+  hazard's flat 25. `damage_scale` is 6.0 for that (it was 22.0, tuned to the old
+  per-step integral).
+
+**Still open**, and now precisely scoped:
+
+- The formula's numeric core. `concussion + piercing` is read from the component
+  `.txt` (zero to 1.3 across the stock weapons) and shot through `impact speed ×
+  6`, which is calibrated to the anchors above, not *recovered*. The original's
+  own function was not found: the binary is symbol-free, its damage arrives as a
+  `giBotDamageMessage` (no vtable xrefs) and the arena's script `damage` simply
+  posts one, so there is no straight line from `GetLastDamageReceived`'s thunk to
+  the computation. Community measurement is `D = 183.9·P + 100·C` for a reference
+  setup ([CONFIRMED, empirical], `docs/04` §5.2) — useful as a cross-check, not a
+  source.
+- **Component hitpoints are mostly defaults.** Only **9 of 131** stock components
+  declare `hitpoints =` (ramplate 1000, flipper 600, discs/rotator-bar/razor tip
+  500); everything else takes our invented `Role::default_hitpoints`. The
+  defaults are the biggest remaining number in the model.
+- **`fracture` and `material` are unparsed.** `fracture` is declared by 8
+  components (discs and the flipper 20, the ramplate 40) and `material = metal(.4)`
+  / `rubber(0)` by 5. The community note that a chassis `fracture` of **41** is
+  "how much you have to deal to the control board" fits a reading where
+  `fracture` is a per-hit *reduction*: hazard hits are 25, so they can never
+  dent a ramplate (40) or reach the control board behind a chassis (41) — which
+  matches how those parts behave in play. That reading is [LIKELY], not decoded,
+  and it needs the per-hit event shape above to be expressible at all.
+- Damage is still reported as a running total, not as the five-tuple
+  `(component, amount, time, by player, by component)`. The pieces are in
+  `Impact`; the script layer is what will need it.
 
 ## F8 — Pistons are welded
 

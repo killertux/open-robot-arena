@@ -91,14 +91,25 @@ local/           # (git-ignored) game files + converted cache
   wheel meshes: discs lie in XY). `RobotRig::worlds` re-walks the tree with the
   current rotor angles, so a spinner's disc, arms and weapons all sweep together
   and wheels turn.
-- **Damage is contact-driven.** Jolt's `WereBodiesInContact` tells us *whether*
-  two hulls are engaged, but not which parts touched; guessing from bounding
-  volumes was unreliable (a robot's parts are spread across its body, so its own
-  hull surface often touches where no single part's box does). `ra2sim::combat`
-  therefore attributes the hit: the attacker contributes its best weapon
-  (`concussion + piercing` times its rotor tip speed) and the damage lands on the
-  opponent's nearest *destructible* part. Indestructible fittings (`damageable =
-  false`) are skipped so they cannot soak a fight forever.
+- **Damage is contact-driven, per body.** Jolt's `WereBodiesInContact` tells us
+  *whether* two bodies are engaged, but not which parts touched; guessing from
+  bounding volumes was unreliable (a robot's parts are spread across its body, so
+  its own hull surface often touches where no single part's box does). A robot is
+  several hinged bodies, so `ra2sim::combat` asks which bodies of each side met
+  and attributes through those: the attacker contributes its best weapon
+  (`concussion + piercing`) among the bodies that are touching, and the damage
+  lands on the opponent's nearest *destructible* part on the other side of the
+  contact. Indestructible fittings (`damageable = false`) are skipped so they
+  cannot soak a fight forever.
+- **A blow is an event, a grind is a rate.** The relative speed the robots
+  *arrive* with (measured before the step, since the collision absorbs it) is
+  dealt once when contact begins — that is the game's `amount` per hit — while a
+  spinning weapon's rotor tip speed is applied every step, because it works the
+  same joint repeatedly. Motionless contact therefore does nothing, two rammers
+  trade blows, and a stationary spinner still chews. `CombatConfig.damage_scale`
+  converts impact speed to points and is calibrated to the game's own numbers:
+  its hazards apply a flat 25, and its AI scripts treat `amount > 10` as a good
+  hit.
 - **Buckling.** When a part's hitpoints reach zero the whole subtree detaches:
   each part becomes an independent rigid body at its current world transform,
   gets an outward impulse, and the robot's collider is rebaked from the parts it
@@ -107,7 +118,11 @@ local/           # (git-ignored) game files + converted cache
   then reverses for ~0.8 s so the fight keeps moving; `press` (`RA2_AI=press`)
   never disengages. The trigger is the real physics contact, not an estimate.
 - **Verification.** `ra2-duel` writes a frame strip plus a log of breakage
-  (`t=… Name: part knocked off`, `… chassis destroyed`).
+  (`t=… Name: part knocked off`, `… chassis destroyed`). `RA2_DUEL_DRIVE=ram`
+  drives every robot straight ahead instead of running the AI, which turns a bout
+  into a deterministic head-on collision — the only reliable way to observe the
+  damage model, since a driver's own pursuit frequently never closes to contact
+  (F7).
 
 ### The assembled robot (rigid bodies per component group)
 

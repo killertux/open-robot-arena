@@ -91,13 +91,21 @@ on the jointed assembly a quarter of the stock bots still cannot get traction an
 simply will not move. That is mount *placement* and the unmodelled trigger/control
 layer, not the parts' parameters: arenas now collide the geometry they draw
 (`SIMULATION_GEOMETRY` 5/6 is the display proxy, plane primitives are synthesised)
-and a duel starts on the arena's own `startpoint` attachments, so the Octagon bout
-engages again — but nothing comes off it, because the damage model only fires on
-impacts. A wheel's declared `contact` surface is parsed but not yet used as the
-collider — using it makes some robots unable to move. Damage attribution picks the
-nearest part rather than solving per-part contacts, and a chassis that loses a
-part is *reshaped* rather than deforming the way the original's buckled chassis
-does; and Jolt combines friction as `sqrt(µ₁·µ₂)`
+and a duel starts on the arena's own `startpoint` attachments. Damage is an event
+now — a blow priced by the speed the robots arrive with, a spinner's rotor tip
+speed as a rate, contact tested across every body of both robots rather than their
+two roots — which a deterministic ram (`RA2_DUEL_DRIVE=ram`) puts in the range the
+game's own scripts describe (hazards do 25; its AI calls `amount > 10` a good
+hit). The *driver*, though, is a stand-in: it only ever drives at the opponent, so
+the headline duel orbits and pins itself against a wall instead of trading blows.
+The game's own answer is the shipped Python AI, which needs the script layer. A
+wheel's declared `contact` surface is parsed but not yet used as the collider —
+using it makes some robots unable to move. Damage attribution picks the nearest
+part rather than solving per-part contacts, the impact-to-damage conversion is
+calibrated rather than recovered, most components fall back to invented
+`hitpoints`, and the `.txt`'s `fracture` and `material` fields are unparsed. A
+chassis that loses a part is *reshaped* rather than deforming the way the
+original's buckled chassis does; and Jolt combines friction as `sqrt(µ₁·µ₂)`
 where Havok 1.x used `√(µ₁²+µ₂²)`, which we cannot change through the safe
 binding. Each item is tracked with its evidence and fix path in
 `docs/05-validation-report.md` §4 and `docs/06-deferred-fidelity.md`.

@@ -216,13 +216,23 @@ Known, documented, not yet fixed:
     friction — see the table above.
 12. **Damage model.** The original exposes `GetLastDamageDone/Received` returning
     `(component, amount, time, by player, by component)` — **[CONFIRMED]** from
-    the shipped `AI/Spinner.py` — and weapons carry `concussion` + `piercing`,
-    with piercing weighing more against the chassis. We use a contact-driven
-    model with `concussion + piercing` × tip speed and "nearest destructible
-    part" attribution. Structurally aligned, numerically unsourced. **[OPEN]**
+    the shipped `AI/Spinner.py` — and weapons carry `concussion` + `piercing`.
+    **[Landed, F7]**: contact is tested across *every* pair of the robots' bodies
+    (it used to be the two root bodies only, so a spinner arm or a wheel meeting
+    the opponent did nothing), a blow is dealt once when contact *begins* and is
+    sized by the relative speed the robots arrive with, and a spinning weapon's
+    tip speed grinds as a rate while it works the joint. Resting contact no
+    longer damages anything. Calibrated to the game's own anchors: hazards apply
+    a flat 25 and `AI/__init__.py` calls `amount > 10` "a good solid hit"; a
+    deterministic head-on ram lands 34. The *numeric core* is still calibrated
+    rather than recovered — community measurement is `D = 183.9·P + 100·C` for a
+    reference setup — and the 34 comes from `impact × 6`. **[OPEN]**
 13. **Component hitpoints defaults** were not recovered: the parse site stores
-    the field at a fixed offset but the constructor's default was not located.
-    Stock bots mostly omit it, so our per-role defaults stand. **[OPEN]**
+    the field at a fixed offset (`+0x98` in the definition object, `FUN_004622f0`)
+    but the constructor's default was not located. Only **9 of 131** stock
+    components declare `hitpoints`, so our per-role defaults are the model's
+    biggest invented number. `fracture` (8 components) and `material = metal(.4)`
+    / `rubber(0)` (5) are unparsed. **[OPEN]**
 14. **Buckling is chassis deformation, not just detachment.** The format doc
     describes the game subdividing the chassis faces and holding "buckle points"
     that shift down/in on every hit. Our M3 model detaches whole parts. **[OPEN]**
@@ -281,7 +291,9 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | All 12 arena scripts assemble | 12/12 |
 | `ra2-sim` drives on practice / octagon / hilltop / box | OK — one jointed robot, scripted drive, frames written. The sandbox is no longer arcade-driven: it drives the same assembly the duel does |
 | Stock bots that drive on the jointed assembly | **27/45** travel ≥ 2 m in 3 s (`AI/Team*`, full throttle, box arena). The motor law is the game's own (F3) and the arenas now collide the geometry they draw (F5), so what is left is geometry *placement*: mount residuals and the unmodelled trigger/control layer |
-| `ra2-duel` on the octagon | **Engages again.** With F3's honest speeds the bout had ended with both robots parked in open floor; the cause was spawn placement, not a collider hole (F11): the duel invented a spread that landed on the rim of the Octagon's 3.7 m drop. It now spawns on the arena's own four `startpoint` attachments. `AI/Team1/Bot0` vs `AI/Team6/Bot2` closes to contact by t = 12 s and stays engaged for the full 30 s. Damage is still zero — the model only fires on impacts (F7) |
+| `ra2-duel` on the octagon | **Engages again.** With F3's honest speeds the bout had ended with both robots parked in open floor; the cause was spawn placement, not a collider hole (F11): the duel invented a spread that landed on the rim of the Octagon's 3.7 m drop. It now spawns on the arena's own four `startpoint` attachments |
+| `ra2-duel` damage model (F7) | **Validated on a deterministic ram.** `RA2_DUEL_DRIVE=ram` with two identical `AI/Team1/Bot0` on the box arena: contact at t≈5 s, an opening blow of **34** points, then ~1 point/s while the two rest against each other. Both ends of that match what the original's scripts say — hazards apply 25, `AI/__init__.py` calls `amount > 10` a "good solid hit" — after two real defects were fixed (contact was tested only between root bodies; a blow was a per-step *integral* of speed, so a fast impact weighed almost nothing) |
+| `ra2-duel` with the AI | **Does not engage.** 30 s of `AI/Team1/Bot0` vs `AI/Team6/Bot2` on the box arena: the pair closes to ~7.7 m, then one robot pins itself against a wall (at `(-11.8, -7.3)` from t = 15 s on, reversing included) and neither touches the other all bout. This is the control layer (M4), not the damage model: the AI is a stand-in that only ever drives at the opponent |
 | `cargo fmt --check`, `clippy`, tests | clean, 13 tests |
 
 ## 7. Recommended order of work
@@ -298,14 +310,23 @@ data (the `power` pair, `grip`, `resistance`) rather than from guessed scales �
 as has **F5**, which decodes `SIMULATION_GEOMETRY` (1/2 own mesh, 3/4 proxy,
 5/6 display proxy) and `HAVOK_GEO_TYPE` (`Standard`, `Plane`), and fixes the
 arena-coverage probe that had been silently rejecting every arena dug deeper
-than 10 m. The remaining blocker is geometry *placement* and behaviour, not the
-parts' parameters:
+than 10 m. **F7's shape has landed too**: damage is an event (a blow priced by
+the speed the robots arrive with, a spinner's tip speed as a rate), contact is
+tested across every pair of bodies rather than the two roots, and a
+deterministic ram puts the numbers in the range the game's own scripts describe.
+The remaining blocker is *behaviour*, not the parts' parameters or the arenas:
 
-1. **Mount placement's residuals and the trigger/control layer (M4).** A spun
-   weapon whose arm reaches the floor presses with its full torque and lifts the
-   robot; the original only spins one when it is told to.
-2. **F7 — the damage model**, against `GetLastDamageReceived`'s five-tuple. The
-   duel engages again (F11) but nothing comes off.
+1. **The control layer (M4) and mount placement's residuals.** This is now the
+   thing that stops the headline duel: `AI/Team1/Bot0` vs `AI/Team6/Bot2` never
+   touch over 30 s on the box arena, because the stand-in driver pure-pursues
+   into a mutual orbit and pins itself against a wall. A spun weapon whose arm
+   reaches the floor also presses with its full torque and lifts the robot; the
+   original only spins one when it is told to. The game's own answer is the
+   shipped Python AI, which needs the script layer.
+2. **F7's numbers.** The impact-to-damage conversion is calibrated, not
+   recovered; component `hitpoints` are defaults for 122 of 131 stock parts; and
+   `fracture` (a per-hit reduction, on the reading that fits the control board's
+   41 and the hazard's 25) and `material` are unparsed.
 3. **F6 — the friction combination law**, if the drive survey needs it.
 4. **F4's `contact` surface** as a separate collider, once the `contact` and
    `passthru` object sets can be separated safely.

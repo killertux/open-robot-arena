@@ -45,6 +45,9 @@ pub struct Duel {
     pub log: Vec<String>,
     /// Last damage dealt, per robot (for reporting).
     pub damage_taken: Vec<f32>,
+    /// Which robot pairs were touching at the end of the last step, so a blow is
+    /// dealt when contact *begins* instead of every step it lasts.
+    contact_pairs: Vec<bool>,
     /// Per-robot AI state.
     ai: Vec<AiState>,
 }
@@ -194,6 +197,7 @@ impl Duel {
         }
 
         let damage_taken = vec![0.0; robots.len()];
+        let contact_pairs = vec![false; robots.len() * robots.len()];
         Ok(Duel {
             physics,
             arena,
@@ -206,6 +210,7 @@ impl Duel {
             mass_scale,
             log: Vec::new(),
             damage_taken,
+            contact_pairs,
             ai: bots.iter().map(|_| AiState::new()).collect(),
         })
     }
@@ -225,6 +230,21 @@ impl Duel {
         arena.min.y
     }
 
+    /// Whether any body of robot `a` touches any body of robot `b`.
+    ///
+    /// A robot is several hinged bodies, so the two root bodies are not enough:
+    /// a spinner arm or a wheel can be the thing that meets the opponent.
+    pub fn robots_touching(&self, a: usize, b: usize) -> bool {
+        let (ra, rb) = (&self.robots[a], &self.robots[b]);
+        ra.parts.iter().any(|pa| {
+            pa.alive
+                && rb
+                    .parts
+                    .iter()
+                    .any(|pb| pb.alive && self.physics.in_contact(pa.body, pb.body))
+        })
+    }
+
     /// Advance one step: motors, AI, physics, then combat.
     pub fn step(&mut self, dt: f32) {
         // Motors and AI.
@@ -233,40 +253,88 @@ impl Duel {
                 continue;
             }
             let opponent = (i + 1) % self.robots.len();
-            let contact = self
-                .physics
-                .in_contact(self.robots[i].body(), self.robots[opponent].body());
+            let contact = self.robots_touching(i, opponent);
             let input = self.ai_input(i, opponent, dt, contact);
             // Drive through the motors: the wheel hinges push the robot.
             let tuning = self.tuning;
             self.robots[i].drive(&mut *self.physics, input, &tuning);
         }
 
+        self.advance(dt);
+    }
+
+    /// Advance one step driving `inputs` (one per robot) instead of the AI.
+    ///
+    /// Deterministic driving, for validation and tests: the duel binary uses it
+    /// for a head-on ram, which is the only way to *observe* the damage model
+    /// reliably — the stock bot's own approach seldom closes to contact at all.
+    pub fn step_direct(&mut self, inputs: &[DriveInput], dt: f32) {
+        for (i, input) in inputs.iter().enumerate() {
+            if i >= self.robots.len() || !self.robots[i].is_alive() {
+                continue;
+            }
+            let tuning = self.tuning;
+            self.robots[i].drive(&mut *self.physics, *input, &tuning);
+        }
+
+        self.advance(dt);
+    }
+
+    /// Step the world and resolve combat; the driving is already done.
+    fn advance(&mut self, dt: f32) {
+        // The velocities the robots *arrive* with. After the step the collision
+        // has already absorbed them, so a blow has to be measured before it
+        // lands, and it is the *relative* velocity that sets its size.
+        let approach: Vec<Vec3> = (0..self.robots.len())
+            .map(|i| self.robots[i].velocity(&*self.physics))
+            .collect();
+
         let info = self.physics.step(dt);
         if !info.complete {
             eprintln!("ra2sim: step at t={:.2}s dropped contacts", self.time);
         }
 
-        self.resolve_combat(dt);
+        self.resolve_combat(dt, &approach);
         self.time += dt;
     }
 
     /// Test every robot against every other and apply the resulting damage.
-    fn resolve_combat(&mut self, dt: f32) {
+    ///
+    /// `approach` holds each robot's velocity before the step, so a blow is
+    /// priced by the relative speed it arrived with.
+    fn resolve_combat(&mut self, dt: f32, approach: &[Vec3]) {
         let n = self.robots.len();
         let mut impacts = Vec::new();
+        let mut touching = vec![false; n * n];
         for a in 0..n {
             for b in 0..n {
                 if a == b || !self.robots[a].is_alive() || !self.robots[b].is_alive() {
                     continue;
                 }
-                if let Some(imp) =
-                    combat::detect(&*self.physics, &self.robots, a, b, dt, &self.combat)
-                {
+                let approaching = (approach[a] - approach[b]).length();
+                let first = !self.contact_pairs[a * n + b];
+                if let Some(imp) = combat::detect(
+                    &*self.physics,
+                    &self.robots,
+                    a,
+                    b,
+                    dt,
+                    combat::Contact {
+                        approach: approaching,
+                        first,
+                    },
+                    &self.combat,
+                ) {
+                    touching[a * n + b] = true;
                     impacts.push(imp);
+                } else if combat::contacting_parts(&*self.physics, &self.robots[a], &self.robots[b])
+                    .is_some()
+                {
+                    touching[a * n + b] = true;
                 }
             }
         }
+        self.contact_pairs = touching;
         for imp in &impacts {
             self.damage_taken[imp.target] += imp.damage;
             if self.robots[imp.target].damage(imp.component, imp.damage) {
@@ -571,5 +639,120 @@ impl Duel {
         );
         self.ai[i] = state;
         input
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The (uncommitted) game directory, when present.
+    fn game_dir() -> Option<std::path::PathBuf> {
+        let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            let candidate = dir.join("local/game");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                return None;
+            }
+        }
+    }
+
+    /// F7: a ram is an *event*, sized by the speed the robots arrive with.
+    ///
+    /// Two identical bots are driven straight ahead from the arena's own start
+    /// points, which face the centre, so they meet head-on. The blow has to land
+    /// in the range the original's own scripts show — its hazards apply a flat
+    /// 25 and its AI calls anything over 10 "a good solid hit" — and then, once
+    /// the two are resting against each other, contact must stop doing damage
+    /// (integrating the arrival speed over the contact, as the model used to,
+    /// erodes both robots from a standstill).
+    #[test]
+    fn a_ram_is_a_blow_and_resting_contact_does_nothing() {
+        let Some(game) = game_dir() else { return };
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string();
+        let setups = [
+            BotSetup {
+                path: bot.clone(),
+                yaw_deg: None,
+            },
+            BotSetup {
+                path: bot,
+                yaw_deg: None,
+            },
+        ];
+        let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        let dt = 1.0 / 60.0;
+
+        // Run at each other until they touch.
+        let ram = vec![
+            DriveInput {
+                throttle: 1.0,
+                steer: 0.0,
+            };
+            2
+        ];
+        let mut blow = 0.0;
+        for _ in 0..(6.0 / dt) as usize {
+            duel.step_direct(&ram, dt);
+            if blow == 0.0 && duel.damage_taken[0] > 0.0 {
+                blow = duel.damage_taken[0];
+            }
+        }
+        assert!(blow > 10.0, "the opening ram was only {blow} damage");
+        assert!(blow < 400.0, "the opening ram was {blow} damage");
+
+        // Now stand still on each other for two seconds.
+        let rest = vec![DriveInput::default(); 2];
+        let settled = duel.damage_taken[0];
+        for _ in 0..(2.0 / dt) as usize {
+            duel.step_direct(&rest, dt);
+        }
+        let after = duel.damage_taken[0] - settled;
+        assert!(
+            after < blow * 0.25,
+            "resting contact added {after} damage after a {blow} blow"
+        );
+    }
+
+    /// F7: contact is tested between every pair of the robots' bodies, not just
+    /// their root bodies.
+    #[test]
+    fn contact_spans_a_robots_own_bodies() {
+        let Some(game) = game_dir() else { return };
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string();
+        let setups = [
+            BotSetup {
+                path: bot.clone(),
+                yaw_deg: None,
+            },
+            BotSetup {
+                path: bot,
+                yaw_deg: None,
+            },
+        ];
+        let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        assert!(!duel.robots_touching(0, 1), "start points are apart");
+        let ram = vec![
+            DriveInput {
+                throttle: 1.0,
+                steer: 0.0,
+            };
+            2
+        ];
+        let dt = 1.0 / 60.0;
+        let mut touched = false;
+        for _ in 0..(8.0 / dt) as usize {
+            duel.step_direct(&ram, dt);
+            if duel.robots_touching(0, 1) {
+                touched = true;
+                break;
+            }
+        }
+        assert!(touched, "a head-on ram never registered contact");
     }
 }

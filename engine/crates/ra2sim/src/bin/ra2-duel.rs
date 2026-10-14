@@ -115,9 +115,31 @@ fn run(
 
     let mut frames: Vec<PathBuf> = Vec::new();
     let mut log_at = 0usize;
+    // `RA2_DUEL_DRIVE=ram` drives every robot straight ahead instead of running
+    // the AI, turning the bout into a deterministic head-on collision. That is
+    // how the damage model is observed and tested: with the AI's own approach
+    // two stock bots frequently never touch at all.
+    let direct: Vec<ra2sim::DriveInput> = if std::env::var("RA2_DUEL_DRIVE")
+        .map(|v| v.eq_ignore_ascii_case("ram"))
+        .unwrap_or(false)
+    {
+        println!("  drive: ram (straight ahead, AI off)");
+        (0..duel.robots.len())
+            .map(|_| ra2sim::DriveInput {
+                throttle: 1.0,
+                steer: 0.0,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     for step in 0..=total {
         if step > 0 {
-            duel.step(dt);
+            if direct.is_empty() {
+                duel.step(dt);
+            } else {
+                duel.step_direct(&direct, dt);
+            }
         }
         // Report new breakage.
         while log_at < duel.log.len() {
@@ -130,6 +152,24 @@ fn run(
                 {
                     println!("    {row}");
                 }
+                // Which bodies of A actually touch which of B? The damage model
+                // asks about the two robots' *root* bodies only, and a robot is
+                // several hinged parts, so this is the check that matters.
+                let (a, b) = (&duel.robots[0], &duel.robots[1]);
+                let mut hits = Vec::new();
+                for (i, pa) in a.parts.iter().enumerate() {
+                    for (j, pb) in b.parts.iter().enumerate() {
+                        if duel.physics.in_contact(pa.body, pb.body) {
+                            hits.push(format!("{i}x{j}"));
+                        }
+                    }
+                }
+                println!(
+                    "    parts: a={} b={} touching: [{}]",
+                    a.parts.len(),
+                    b.parts.len(),
+                    hits.join(" ")
+                );
             }
             let png = duel.render(&renderer, &cam, w, h)?;
             let path = out.join(format!("frame_{:03}.png", frames.len()));
