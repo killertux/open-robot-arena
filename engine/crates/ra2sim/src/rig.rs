@@ -24,6 +24,14 @@ pub enum Role {
 }
 
 impl Role {
+    /// A component whose children hang off a joint the engine drives.
+    ///
+    /// Pistons are *not* included yet: their rod stays welded to the body (see
+    /// `docs/06-deferred-fidelity.md`, F8).
+    pub fn drives(self) -> bool {
+        self == Role::Motor
+    }
+
     pub fn of(class: &str, base: &str) -> Role {
         match class {
             "Chassis" => Role::Chassis,
@@ -84,6 +92,8 @@ pub struct MotorStats {
     pub power: f32,
     /// Rotor rate at full power (rad/s).
     pub rate: f32,
+    /// Peak motor torque (N·m), derived from `power`.
+    pub torque: f32,
     /// Burst motor travel, radians (`start`, `end`).
     pub burst: Option<[f32; 2]>,
 }
@@ -130,6 +140,52 @@ impl Component {
     pub fn center(&self) -> Vec3 {
         (self.min + self.max) * 0.5
     }
+
+    /// Rolling radius of a wheel: half its extent across the axle (a wheel mesh
+    /// is a disc in the component's XY plane, so the axle is Z).
+    pub fn wheel_radius(&self) -> f32 {
+        ((self.max.x - self.min.x).max(self.max.y - self.min.y)).abs() * 0.5
+    }
+}
+
+/// How a joint's motor is used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JointUse {
+    /// A wheel: driven from the drive input.
+    Wheel,
+    /// An actively spun assembly (a spinner, a flail).
+    Spun,
+    /// A free hinge with no motor.
+    Passive,
+}
+
+/// The motor connecting a part to its parent.
+#[derive(Clone, Copy, Debug)]
+pub struct JointInfo {
+    /// The motor component that owns the joint.
+    pub motor: usize,
+    /// Angular rate at full power (rad/s).
+    pub rate: f32,
+    /// Peak motor torque (N·m).
+    pub max_torque: f32,
+    /// Angle limits in radians (`[-PI, PI]` = free).
+    pub limits: [f32; 2],
+    pub use_kind: JointUse,
+}
+
+/// One rigid body of the assembled robot: components welded together. A motor
+/// between two components splits them into separate bodies joined by a hinge —
+/// which is how the original builds its robots (the `.gmf` ships the motor as a
+/// Havok constraint).
+pub struct Part {
+    /// The component whose frame is the body's origin.
+    pub root: usize,
+    /// Components welded into this body (`root` first).
+    pub members: Vec<usize>,
+    /// Parent part index; `None` for the chassis body.
+    pub parent: Option<usize>,
+    /// The joint to the parent, when a motor sits between them.
+    pub joint: Option<JointInfo>,
 }
 
 /// A whole robot: the ordered component list plus its bounds.
@@ -140,6 +196,12 @@ pub struct RobotRig {
     pub max: Vec3,
     /// Natural total mass (before any `RA2_MASS` scaling).
     pub mass: f32,
+    /// The assembled rigid bodies (chassis first).
+    pub parts: Vec<Part>,
+    /// Component index → part index.
+    pub part_of: Vec<usize>,
+    /// Component index → transform within its part.
+    pub part_local: Vec<Mat4>,
 }
 
 impl RobotRig {
@@ -237,6 +299,21 @@ fn attach_host(scene: &ra2fmt::gmi::GmiScene, attaching: &str) -> Option<String>
     fallback
 }
 
+/// How many newton-metres one unit of a component's `power` is worth.
+///
+/// The original's units are not recovered (see the validation report); this is
+/// the tuning knob, overridable with `RA2_MOTOR_TORQUE`.
+fn motor_torque_scale() -> f32 {
+    use std::sync::OnceLock;
+    static SCALE: OnceLock<f32> = OnceLock::new();
+    *SCALE.get_or_init(|| {
+        std::env::var("RA2_MOTOR_TORQUE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(14.0)
+    })
+}
+
 fn num(def: &ra2fmt::component::ComponentDef, key: &str) -> Option<f32> {
     def.get(key)?.split_whitespace().next()?.parse().ok()
 }
@@ -245,6 +322,109 @@ fn flag_false(def: &ra2fmt::component::ComponentDef, key: &str) -> bool {
     def.get(key)
         .map(|v| v.trim().eq_ignore_ascii_case("false"))
         .unwrap_or(false)
+}
+
+/// Group the components into welded bodies and work out the joints between them.
+///
+/// A component is welded into its parent's body unless the parent is a motor, in
+/// which case it starts a new body joined by a hinge — the structure the `.gmf`
+/// motor constraints describe.
+fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
+    let n = comps.len();
+
+    // The body that owns component `i`: walk up until the parent is a motor or
+    // there is no parent.
+    let root_of = |mut i: usize| -> usize {
+        loop {
+            match comps[i].parent {
+                None => return i,
+                Some(p) if comps[p].role.drives() => return i,
+                Some(p) => i = p,
+            }
+        }
+    };
+
+    let mut part_of = vec![usize::MAX; n];
+    let mut parts: Vec<Part> = Vec::new();
+    for i in 0..n {
+        let r = root_of(i);
+        if part_of[r] == usize::MAX {
+            part_of[r] = parts.len();
+            parts.push(Part {
+                root: r,
+                members: Vec::new(),
+                parent: None,
+                joint: None,
+            });
+        }
+        let p = part_of[r];
+        part_of[i] = p;
+        parts[p].members.push(i);
+    }
+
+    for part in parts.iter_mut() {
+        let root = part.root;
+        let Some(parent) = comps[root].parent else {
+            continue;
+        };
+        let parent_part = part_of[parent];
+        part.parent = Some(parent_part);
+
+        let Some(m) = comps[parent].motor else {
+            // The split came from a piston, whose rod we do not joint yet: weld
+            // it back onto the parent so nothing floats free.
+            part.parent = None;
+            continue;
+        };
+        let is_wheel = part.members.iter().any(|&i| comps[i].role == Role::Wheel);
+        // A burst motor is a limited hinge; everything else swings freely.
+        let limits = m
+            .burst
+            .map(|b| [b[0].min(b[1]), b[0].max(b[1])])
+            .unwrap_or([-std::f32::consts::PI, std::f32::consts::PI]);
+        part.joint = Some(JointInfo {
+            motor: parent,
+            rate: m.rate,
+            max_torque: m.torque,
+            limits,
+            use_kind: if is_wheel {
+                JointUse::Wheel
+            } else {
+                JointUse::Spun
+            },
+        });
+    }
+
+    // A piston-split part has no joint, so re-weld its members into the parent.
+    for _ in 0..parts.len() {
+        for p in 0..parts.len() {
+            if parts[p].root == 0 || parts[p].parent.is_some() || parts[p].members.is_empty() {
+                continue;
+            }
+            let root = parts[p].root;
+            let Some(parent) = comps[root].parent else {
+                continue;
+            };
+            let into = part_of[parent];
+            if into == p {
+                continue;
+            }
+            let moved = std::mem::take(&mut parts[p].members);
+            for i in moved {
+                part_of[i] = into;
+                parts[into].members.push(i);
+            }
+        }
+    }
+
+    let part_local = (0..n)
+        .map(|i| {
+            let r = parts[part_of[i]].root;
+            comps[r].local.inverse() * comps[i].local
+        })
+        .collect();
+
+    (parts, part_of, part_local)
 }
 
 /// Load a `.bot` into a component tree (no physics yet).
@@ -375,6 +555,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             MotorStats {
                 power,
                 rate: power.clamp(4.0, 60.0),
+                torque: power * motor_torque_scale(),
                 burst,
             }
         });
@@ -433,12 +614,17 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
         max = Vec3::ZERO;
     }
 
+    let (parts, part_of, part_local) = assemble(&components);
+
     Ok(RobotRig {
         name: bot.name.clone(),
         components,
         min,
         max,
         mass: mass.max(1.0),
+        parts,
+        part_of,
+        part_local,
     })
 }
 
@@ -501,6 +687,7 @@ mod tests {
             motor: motor.then_some(MotorStats {
                 power: 10.0,
                 rate: 10.0,
+                torque: 100.0,
                 burst: None,
             }),
             children: Vec::new(),
@@ -510,21 +697,26 @@ mod tests {
     #[test]
     fn a_motor_turns_its_children_but_not_itself() {
         // chassis → motor → child, with the child 1 m along +X of the motor.
+        let components = vec![
+            part(0, None, Mat4::IDENTITY, false),
+            part(1, Some(0), Mat4::IDENTITY, true),
+            part(
+                2,
+                Some(1),
+                Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                false,
+            ),
+        ];
+        let (parts, part_of, part_local) = assemble(&components);
         let mut rig = RobotRig {
             name: "t".into(),
-            components: vec![
-                part(0, None, Mat4::IDENTITY, false),
-                part(1, Some(0), Mat4::IDENTITY, true),
-                part(
-                    2,
-                    Some(1),
-                    Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)),
-                    false,
-                ),
-            ],
+            components,
             min: Vec3::ZERO,
             max: Vec3::ZERO,
             mass: 1.0,
+            parts,
+            part_of,
+            part_local,
         };
         rig.components[1].children = vec![2];
 

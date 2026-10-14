@@ -220,6 +220,20 @@ Known, documented, not yet fixed:
     describes the game subdividing the chassis faces and holding "buckle points"
     that shift down/in on every hit. Our M3 model detaches whole parts. **[OPEN]**
 
+15. **Mount-point (attachment frame) alignment is missing — found while building
+    the jointed assembly.** A component is placed by its own translation,
+    quaternion, mount `angle` and `height` only. The original also aligns the
+    child's attachment point (`mC` in the `.bot`) to the parent's (`mP`), and a
+    `.gmf` attachment carries a full transform, so the real placement is
+    `local_parent * frame(parent, mP) * inverse(frame(child, mC))`. The game's own
+    snapshot of `AI/Team14/Bot2.bot` shows its rotor lying **flat on top**, while
+    we render it **vertical**. **This means the M1 claim "all 57 bots are placed
+    correctly" holds for position and wheels but is approximate for
+    orientations.** **[OPEN — top priority]**
+
+Each of these is tracked with its evidence and fix path in
+[`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F10).
+
 ---
 
 ## 5. Verification commands
@@ -258,19 +272,27 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | All 12 arena scripts assemble | 12/12 |
 | `ra2-sim` drives on practice / octagon / hilltop / box | OK |
 | `ra2-duel` reaches a KO | OK (octagon, ~11 s) |
+| Jointed assembly (`RA2_ASSEMBLY=parts`) | Stable, wheels turn at the commanded rate, damage lands; not the default because of F1 (see §4 item 15) |
 | `cargo fmt --check`, `clippy`, tests | clean, 9 tests |
 
 ## 7. Recommended order of work
 
-The remaining physics divergences cluster into one job: **give components their
-own bodies**. Doing it resolves #9, #10, #11 and #17 in one go and is the natural
-opening move for M4 (the script layer needs `ApplyTorque`-style motor control
-anyway). Suggested sequence:
+The per-component bodies now exist (`ra2sim::rig` groups the components into
+welded bodies, `ra2sim::robot` hinges every motor and drives the wheels through
+them, and damage reshapes a body in place). Building it surfaced the real
+blocker, which is now item **F1** in [`06-deferred-fidelity.md`](06-deferred-fidelity.md):
+**mount-point alignment**. Until that lands, the assembly is available but
+opt-in (`RA2_ASSEMBLY=parts`) and the single-hull arcade path stays the default.
 
-1. Per-component rigid bodies joined by fixed constraints taken from the `.gmf`
-   mount data, with the chassis hull as the root.
-2. Decode `SIMULATION_GEOMETRY` / `GMID_COLLISION_*` into box / sphere /
-   cylinder / plane / mesh shapes.
-3. Wheels: use `contact` geometry with `grip`; drive with torque at `power`.
-4. Then the damage model, against `GetLastDamageReceived`'s five-tuple.
-5. Then chassis buckling (surface subdivision) as a visual layer.
+Suggested sequence:
+
+1. **F1 — attachment-frame alignment.** No reordering of the current transform
+   chain can make both a rotor and a wheel come out right; the attachment frames
+   are the missing input. Everything else depends on the geometry being right.
+2. **F2 — flip the default** to the jointed assembly and delete the arcade
+   controller.
+3. F3/F4 — torque-driven motors with the wheel's `contact` surface, `grip` and
+   `resistance`.
+4. F5 — decode `SIMULATION_GEOMETRY` / `GMID_COLLISION_*` into real shapes.
+5. F7 — the damage model, against `GetLastDamageReceived`'s five-tuple.
+6. F9 — chassis buckling as a visual layer.

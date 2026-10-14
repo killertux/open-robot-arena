@@ -9,7 +9,7 @@ use crate::jolt::JoltBackend;
 use crate::rig;
 use crate::robot::Robot;
 use crate::scene::{self, ArenaScene, Prop, USER_ARENA, USER_PROP};
-use crate::sim::{apply_drive, DriveInput, DriveTuning, BOT_FORWARD};
+use crate::sim::{DriveInput, DriveTuning, BOT_FORWARD};
 
 /// A movable arena prop (crate, barrel, ...).
 pub struct PropEntity {
@@ -221,20 +221,14 @@ impl Duel {
             if !self.robots[i].is_alive() {
                 continue;
             }
-            self.robots[i].advance_motors(dt);
             let opponent = (i + 1) % self.robots.len();
             let contact = self
                 .physics
-                .in_contact(self.robots[i].body, self.robots[opponent].body);
+                .in_contact(self.robots[i].body(), self.robots[opponent].body());
             let input = self.ai_input(i, opponent, dt, contact);
-            apply_drive(
-                &mut *self.physics,
-                self.robots[i].body,
-                BOT_FORWARD,
-                input,
-                &self.tuning,
-                dt,
-            );
+            // Drive through the motors: the wheel hinges push the robot.
+            let tuning = self.tuning;
+            self.robots[i].drive(&mut *self.physics, input, &tuning, dt);
         }
 
         let info = self.physics.step(dt);
@@ -273,23 +267,21 @@ impl Duel {
     /// A component died: detach its subtree as flying debris and rebuild the
     /// robot without it. The chassis ends the fight instead.
     fn break_off(&mut self, robot: usize, component: usize, point: Vec3) {
-        let is_chassis = component == 0;
-        if is_chassis {
+        if component == 0 {
             self.robots[robot].destroyed = true;
         }
-        let parts = self.robots[robot].detach(component);
-
-        let body_world = self.robots[robot].transform(&*self.physics);
-        let worlds = self.robots[robot].worlds();
         let velocity = self.robots[robot].velocity(&*self.physics);
+        let removed = {
+            let physics = &mut *self.physics;
+            self.robots[robot].detach(physics, component)
+        };
 
         let mut created = Vec::new();
-        for &i in &parts {
+        for (i, world) in removed {
             let c = &self.robots[robot].rig.components[i];
             if c.hull_points.is_empty() || c.items.is_empty() {
                 continue;
             }
-            let world = body_world * worlds[i];
             let (_, rotation, position) = world.to_scale_rotation_translation();
             let desc = BodyDesc::new(
                 MotionType::Dynamic,
@@ -320,18 +312,12 @@ impl Duel {
 
         let name = self.robots[robot].rig.name.clone();
         let part = self.robots[robot].rig.components[component].name.clone();
-        if is_chassis {
+        if component == 0 {
             self.log
                 .push(format!("t={:.1}s  {name} chassis destroyed", self.time));
         } else {
             self.log
                 .push(format!("t={:.1}s  {name}: {part} knocked off", self.time));
-        }
-
-        if is_chassis {
-            self.physics.remove_body(self.robots[robot].body);
-        } else if let Err(e) = self.robots[robot].rebuild(&mut *self.physics) {
-            eprintln!("ra2sim: rebuild failed: {e}");
         }
     }
 
@@ -341,19 +327,19 @@ impl Duel {
             return f32::MAX;
         }
         let (a, b) = (&self.robots[0], &self.robots[1]);
-        let (wa, wb) = (a.worlds(), b.worlds());
-        let (ta, tb) = (a.transform(&*self.physics), b.transform(&*self.physics));
+        let wa = a.component_worlds(&*self.physics);
+        let wb = b.component_worlds(&*self.physics);
         let mut best = f32::MAX;
         for (i, ca) in a.rig.components.iter().enumerate() {
             if !a.attached[i] || ca.hull_points.is_empty() {
                 continue;
             }
-            let pa = (ta * wa[i]).transform_point3(ca.center());
+            let pa = wa[i].transform_point3(ca.center());
             for (j, cb) in b.rig.components.iter().enumerate() {
                 if !b.attached[j] || cb.hull_points.is_empty() {
                     continue;
                 }
-                let pb = (tb * wb[j]).transform_point3(cb.center());
+                let pb = wb[j].transform_point3(cb.center());
                 let gap = (pa - pb).length() - ca.radius() - cb.radius();
                 if gap < best {
                     best = gap;
@@ -408,24 +394,16 @@ impl Duel {
             });
         }
         for r in &self.robots {
-            if r.attached[0] {
-                let body = r.transform(&*self.physics);
-                let worlds = r.worlds();
+            if r.parts[0].alive {
+                let worlds = r.component_worlds(&*self.physics);
                 for (i, c) in r.rig.components.iter().enumerate() {
                     if !r.attached[i] || c.items.is_empty() {
                         continue;
                     }
                     groups.push(RenderGroup {
                         items: &c.items,
-                        model: body * worlds[i],
+                        model: worlds[i],
                     });
-                    if !c.rotor_items.is_empty() && c.motor.is_some() {
-                        let rotor = r.rig.rotor_world(&worlds, i, r.thetas[i]);
-                        groups.push(RenderGroup {
-                            items: &c.rotor_items,
-                            model: body * rotor,
-                        });
-                    }
                 }
             }
         }
@@ -467,7 +445,7 @@ impl Duel {
                 let target = r.position(&*self.physics);
                 let fwd = self
                     .physics
-                    .state(r.body)
+                    .state(r.body())
                     .map(|s| (s.rotation * BOT_FORWARD).normalize_or_zero())
                     .unwrap_or(BOT_FORWARD);
                 (
@@ -519,7 +497,7 @@ fn ai_drive(
     let _distance = delta.length();
 
     let rot = physics
-        .state(me.body)
+        .state(me.body())
         .map(|s| s.rotation)
         .unwrap_or(Quat::IDENTITY);
     let fwd = (rot * BOT_FORWARD).normalize_or_zero();

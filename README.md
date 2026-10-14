@@ -40,6 +40,13 @@ ra2-duel "local/game/Arenas/octagon.py" \
   collides with walls and with movable props, and the run renders to a frame
   strip. The physics engine sits behind a `PhysicsBackend` trait so it can be
   swapped.
+- **Assembly:** a robot can be built as its real **jointed bodies** — one body
+  per rigidly-mounted group, a hinge per motor, wheels driven through those
+  hinges (`RA2_ASSEMBLY=parts`). It is opt-in for now: building it exposed that
+  the original also aligns *attachment frames*, which we do not yet, so weapon
+  rotors can come out rotated 90°. See
+  `docs/06-deferred-fidelity.md` (F1) for that and the rest of the tracked
+  backlog.
 - **M3:** a robot is a *component tree* rebuildable from the game's own parts.
   Motors turn their attached subtree (spinners spin, wheels roll), weapons deal
   damage on contact, and parts whose hitpoints run out are torn off as flying
@@ -82,8 +89,10 @@ original's chassis deformation); damage attribution picks the nearest part rathe
 than solving per-part contacts; the drive controller is arcade-style rather than
 the original's **torque-driven motors** with per-wheel traction (`contact` /
 `grip`); and Jolt combines friction as `sqrt(µ₁·µ₂)` where Havok 1.x used
-`√(µ₁²+µ₂²)`, which we cannot change through the safe binding. Each of these is
-detailed in `docs/05-validation-report.md` §4, with the fix path.
+`√(µ₁²+µ₂²)`, which we cannot change through the safe binding. **Attachment-frame
+alignment is not implemented**, so component orientations can be off by 90° even
+though positions and wheels are right. Each item is tracked with its evidence and
+fix path in `docs/05-validation-report.md` §4 and `docs/06-deferred-fidelity.md`.
 
 Next: M4 — the script layer (reproduce the `plus`/`AI`/`Arenas` API so the stock
 AI strategies and arena scripts run). See `docs/01-project-plan.md` and

@@ -36,8 +36,16 @@ fn main() {
             }
             _ => String::new(),
         };
+        let pos = c.local.w_axis.truncate();
+        let mut bmin = glam::Vec3::splat(f32::MAX);
+        let mut bmax = glam::Vec3::splat(f32::MIN);
+        for q in &c.hull_points {
+            let w = c.local.transform_point3(*q);
+            bmin = bmin.min(w);
+            bmax = bmax.max(w);
+        }
         println!(
-            "  {i:2} p={parent:2} {role:9} {class:12} {name:22} m={mass:5.1} hp={hp:5.0}{damageable} rot={rot} {extra}",
+            "  {i:2} p={parent:2} {role:9} {class:12} {name:18} m={mass:5.1} hp={hp:4.0}{damageable} pos=({px:5.2},{py:5.2},{pz:5.2}) ext=({ex:5.2},{ey:5.2},{ez:5.2}) {extra}",
             i = c.index,
             role = format!("{:?}", c.role),
             class = c.class,
@@ -45,7 +53,12 @@ fn main() {
             mass = c.mass,
             hp = c.hitpoints,
             damageable = if c.damageable { "" } else { " (indestructible)" },
-            rot = c.rotor_items.len(),
+            px = pos.x,
+            py = pos.y,
+            pz = pos.z,
+            ex = bmax.x - bmin.x,
+            ey = bmax.y - bmin.y,
+            ez = bmax.z - bmin.z,
         );
     }
     let thetas = vec![0.0; r.components.len()];
@@ -74,4 +87,29 @@ fn main() {
         }
     }
     println!("driven components: {powered}");
+
+    println!("assembled bodies: {}", r.parts.len());
+    for (p, part) in r.parts.iter().enumerate() {
+        let names: Vec<String> = part
+            .members
+            .iter()
+            .map(|&i| format!("{}#{}", r.components[i].name, i))
+            .collect();
+        let joint = part
+            .joint
+            .map(|j| {
+                format!(
+                    " <- motor #{} rate={:.0} torque={:.0} {:?} limits=({:.2},{:.2})",
+                    j.motor, j.rate, j.max_torque, j.use_kind, j.limits[0], j.limits[1]
+                )
+            })
+            .unwrap_or_default();
+        println!(
+            "  part {p:2} root=#{:2} parent={:?} members={} {}{joint}",
+            part.root,
+            part.parent,
+            part.members.len(),
+            names.join(", ")
+        );
+    }
 }

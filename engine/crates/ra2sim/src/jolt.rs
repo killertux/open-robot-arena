@@ -8,12 +8,16 @@ use std::collections::HashMap;
 use glam::{Quat, Vec3};
 use oxijolt::prelude::math as m;
 use oxijolt::prelude::{
-    Activation, BodyId, BodySettings, PhysicsWorld, QueryFilter, RayCast, Shape, WorldSettings,
+    Activation, BodyId, BodySettings, CompoundChild as JoltCompoundChild, PhysicsWorld,
+    QueryFilter, RayCast, Shape, WorldSettings,
+};
+use oxijolt::{
+    AnyConstraintId, HingeConstraint, HingeConstraintSettings, MotorSettings, MotorState,
 };
 
 use crate::backend::{
-    BackendError, BodyDesc, BodyHandle, BodyState, MotionType, PhysicsBackend, RayHit, ShapeDesc,
-    StepInfo,
+    BackendError, BodyDesc, BodyHandle, BodyState, HingeDesc, JointHandle, MotionType,
+    PhysicsBackend, RayHit, ShapeDesc, StepInfo,
 };
 
 /// A physics world backed by Jolt 5.
@@ -25,6 +29,8 @@ pub struct JoltBackend {
     shapes: Vec<Shape>,
     /// Jolt body id (raw) → our handle, for ray-hit attribution.
     lookup: HashMap<u32, BodyHandle>,
+    /// handle → Jolt constraint id (indexed by `JointHandle`).
+    joints: Vec<Option<AnyConstraintId>>,
 }
 
 impl JoltBackend {
@@ -38,6 +44,7 @@ impl JoltBackend {
             ids: Vec::new(),
             shapes: Vec::new(),
             lookup: HashMap::new(),
+            joints: Vec::new(),
         })
     }
 
@@ -69,6 +76,24 @@ impl JoltBackend {
     }
 
     fn build_shape(shape: &ShapeDesc) -> Result<Shape, BackendError> {
+        // Compounds recurse, so they are handled before the leaf closure.
+        if let ShapeDesc::Compound(children) = shape {
+            let built: Vec<Shape> = children
+                .iter()
+                .map(|c| Self::build_shape(&c.shape))
+                .collect::<Result<_, BackendError>>()?;
+            let refs: Vec<JoltCompoundChild> = children
+                .iter()
+                .zip(&built)
+                .map(|(c, s)| JoltCompoundChild {
+                    shape: s,
+                    position: Self::v(c.local_position),
+                    rotation: Self::q(c.local_rotation),
+                    user_data: c.tag,
+                })
+                .collect();
+            return Shape::new_compound(&refs).map_err(|e| BackendError::Shape(format!("{e:?}")));
+        }
         let build = || -> Result<Shape, oxijolt::prelude::ShapeError> {
             Ok(match shape {
                 ShapeDesc::Box { half_extents } => Shape::new_box(Self::v(*half_extents))?,
@@ -90,6 +115,8 @@ impl JoltBackend {
                     let (mesh, _dropped) = Shape::new_mesh(&verts, indices)?;
                     mesh
                 }
+                // Handled above; a compound never reaches this closure.
+                ShapeDesc::Compound(_) => unreachable!("compound handled before this closure"),
             })
         };
         build().map_err(|e| BackendError::Shape(format!("{e:?}")))
@@ -244,4 +271,118 @@ impl PhysicsBackend for JoltBackend {
             normal: Self::un_v(hit.normal),
         })
     }
+
+    fn create_hinge(&mut self, desc: &HingeDesc) -> Result<JointHandle, BackendError> {
+        let (Some(ia), Some(ib)) = (self.id(desc.body_a), self.id(desc.body_b)) else {
+            return Err(BackendError::Body("hinge on a missing body".into()));
+        };
+        let (Some(sa), Some(sb)) = (self.state(desc.body_a), self.state(desc.body_b)) else {
+            return Err(BackendError::Body("hinge on a body with no state".into()));
+        };
+        // Jolt takes the frames in world space at creation; the caller gives them
+        // in body space, so bring them over (both sides end up coincident).
+        let point_a = sa.position + sa.rotation * desc.anchor_a;
+        let point_b = sb.position + sb.rotation * desc.anchor_b;
+        let axis_a = (sa.rotation * desc.axis_a).normalize_or_zero();
+        let axis_b = (sb.rotation * desc.axis_b).normalize_or_zero();
+        let axis_a = if axis_a == Vec3::ZERO {
+            Vec3::Z
+        } else {
+            axis_a
+        };
+        let axis_b = if axis_b == Vec3::ZERO {
+            Vec3::Z
+        } else {
+            axis_b
+        };
+
+        let mut settings =
+            HingeConstraintSettings::new(Self::rv(point_a), Self::v(axis_a), normal_of(axis_a))
+                .frame2(Self::rv(point_b), Self::v(axis_b), normal_of(axis_b))
+                .limits(desc.limits[0], desc.limits[1]);
+        if desc.max_torque > 0.0 {
+            settings = settings
+                .motor(MotorSettings::default().torque_limits(-desc.max_torque, desc.max_torque));
+        }
+        let id = self
+            .world
+            .create_constraint(ia, ib, &settings)
+            .map_err(|e| BackendError::Body(format!("hinge: {e:?}")))?;
+        let handle = self.joints.len() as JointHandle;
+        self.joints.push(Some(AnyConstraintId::from(id)));
+        Ok(handle)
+    }
+
+    fn remove_joint(&mut self, handle: JointHandle) {
+        if let Some(Some(id)) = self.joints.get(handle as usize).copied() {
+            let _ = self.world.remove_constraint(id);
+        }
+        if let Some(slot) = self.joints.get_mut(handle as usize) {
+            *slot = None;
+        }
+    }
+
+    fn drive_hinge(&mut self, handle: JointHandle, target_velocity: f32) {
+        let Some(Some(any)) = self.joints.get(handle as usize).copied() else {
+            return;
+        };
+        let Some(id) = any.downcast::<HingeConstraint>() else {
+            return;
+        };
+        let Ok(mut c) = self.world.constraint_mut(id) else {
+            return;
+        };
+        if target_velocity.abs() < 1e-4 {
+            // Free: let the joint swing (the original's motors idle here too).
+            c.set_motor_state(MotorState::Off);
+        } else {
+            c.set_motor_state(MotorState::Velocity);
+            let _ = c.set_target_angular_velocity(target_velocity);
+        }
+    }
+
+    fn hinge_angle(&self, handle: JointHandle) -> f32 {
+        let Some(Some(any)) = self.joints.get(handle as usize).copied() else {
+            return 0.0;
+        };
+        let Some(id) = any.downcast::<HingeConstraint>() else {
+            return 0.0;
+        };
+        self.world
+            .constraint(id)
+            .map(|c| c.current_angle())
+            .unwrap_or(0.0)
+    }
+
+    fn set_body_shape(
+        &mut self,
+        handle: BodyHandle,
+        shape: &ShapeDesc,
+        mass: Option<f32>,
+    ) -> Result<(), BackendError> {
+        let Some(id) = self.id(handle) else {
+            return Err(BackendError::Body("set_shape on a missing body".into()));
+        };
+        let built = Self::build_shape(shape)?;
+        {
+            let mut body = self
+                .world
+                .body_mut(id)
+                .map_err(|e| BackendError::Body(format!("set_shape: {e:?}")))?;
+            body.set_shape(&built, mass, Activation::Activate)
+                .map_err(|e| BackendError::Body(format!("set_shape: {e:?}")))?;
+        }
+        // Jolt keeps its own reference to the shape, but we own the published one
+        // for the lifetime of the world.
+        self.shapes.push(built);
+        Ok(())
+    }
+}
+
+/// A unit vector perpendicular to `axis`, for Jolt's hinge frame.
+fn normal_of(axis: Vec3) -> m::Vec3 {
+    let helper = if axis.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
+    let n = axis.cross(helper).normalize_or_zero();
+    let n = if n == Vec3::ZERO { Vec3::X } else { n };
+    m::Vec3::new(n.x, n.y, n.z)
 }

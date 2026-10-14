@@ -294,7 +294,10 @@ multi-material):
   (usually identical) and the behaviour fields.
 - **Mounts are a tree.** A component's parent is an index into the component
   list, and `component_local` chains translation + quaternion + mount `angle`
-  (yaw about +Y) + `height` (offset along +Y).
+  (yaw about +Y) + `height` (offset along +Y). **Caveat:** the `.bot` also stores
+  `mC`/`mP` attachment *ids* and the original aligns the child's attachment frame
+  to the parent's; we do not (see `docs/06-deferred-fidelity.md`, F1). Position
+  and wheels come out right, orientations can be off by 90°.
 - **Motors are defined by attachments, not a field.** The definition's
   `attaching = axle` names the attachment type its children use, and the mesh's
   attachment point with `Attach = Axle_M` carries `Host = Axle` — the *rotating

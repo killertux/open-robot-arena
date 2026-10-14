@@ -17,6 +17,16 @@ pub enum MotionType {
     Kinematic,
 }
 
+/// One child of a compound shape, placed in the body's own space.
+#[derive(Clone, Debug)]
+pub struct CompoundChild {
+    pub local_position: Vec3,
+    pub local_rotation: Quat,
+    pub shape: ShapeDesc,
+    /// Caller tag, reported back on hits (we store the component index).
+    pub tag: u32,
+}
+
 /// A collision shape.
 #[derive(Clone, Debug)]
 pub enum ShapeDesc {
@@ -43,6 +53,9 @@ pub enum ShapeDesc {
         vertices: Vec<Vec3>,
         indices: Vec<[u32; 3]>,
     },
+    /// Several shapes in one body, each with its own pose — how a body made of
+    /// separately-positioned parts (a robot's welded components) is built.
+    Compound(Vec<CompoundChild>),
 }
 
 /// Everything needed to create one body.
@@ -143,6 +156,57 @@ pub struct RayHit {
     pub normal: Vec3,
 }
 
+/// Opaque handle to a joint (constraint) within a backend.
+pub type JointHandle = u32;
+
+/// A revolute joint between two bodies — the engine's motor.
+///
+/// The anchors and axes are given in each body's own local space and must name
+/// the same world point/axis when the joint is created (which is how the mount
+/// transform places them). The motor is a velocity motor: the game sets a target
+/// angular velocity and the joint supplies torque up to `max_torque`.
+#[derive(Clone, Copy, Debug)]
+pub struct HingeDesc {
+    pub body_a: BodyHandle,
+    pub body_b: BodyHandle,
+    /// Pivot in each body's local space.
+    pub anchor_a: Vec3,
+    pub anchor_b: Vec3,
+    /// Rotation axis in each body's local space.
+    pub axis_a: Vec3,
+    pub axis_b: Vec3,
+    /// Angle limits in radians (`[-PI, PI]`; both `PI` means free).
+    pub limits: [f32; 2],
+    /// Peak motor torque in N·m; `0` creates the joint without a motor.
+    pub max_torque: f32,
+}
+
+impl HingeDesc {
+    /// A free-swinging hinge at `anchor` about `axis`, both body-local.
+    pub fn new(body_a: BodyHandle, body_b: BodyHandle, anchor: Vec3, axis: Vec3) -> Self {
+        HingeDesc {
+            body_a,
+            body_b,
+            anchor_a: anchor,
+            anchor_b: anchor,
+            axis_a: axis,
+            axis_b: axis,
+            limits: [-std::f32::consts::PI, std::f32::consts::PI],
+            max_torque: 0.0,
+        }
+    }
+
+    pub fn with_limits(mut self, min: f32, max: f32) -> Self {
+        self.limits = [min, max];
+        self
+    }
+
+    pub fn with_motor(mut self, max_torque: f32) -> Self {
+        self.max_torque = max_torque;
+        self
+    }
+}
+
 /// What a step did.
 #[derive(Clone, Copy, Debug)]
 pub struct StepInfo {
@@ -194,4 +258,36 @@ pub trait PhysicsBackend {
         false
     }
     fn ray_cast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<RayHit>;
+
+    /// Create a revolute joint. Backends without joints may reject this.
+    fn create_hinge(&mut self, _desc: &HingeDesc) -> Result<JointHandle, BackendError> {
+        Err(BackendError::Body(
+            "joints unsupported by this backend".into(),
+        ))
+    }
+
+    fn remove_joint(&mut self, _handle: JointHandle) {}
+
+    /// Drive a hinge's motor: target angular velocity in rad/s. A target of zero
+    /// stops the motor and lets the joint swing freely.
+    fn drive_hinge(&mut self, _handle: JointHandle, _target_velocity: f32) {}
+
+    /// The hinge's current angle in radians (`0.0` if unknown).
+    fn hinge_angle(&self, _handle: JointHandle) -> f32 {
+        0.0
+    }
+
+    /// Replace a body's collision shape in place, optionally with a new mass.
+    /// Used to rebuild a robot's body after a part comes off: the body keeps its
+    /// id, pose and joints.
+    fn set_body_shape(
+        &mut self,
+        _handle: BodyHandle,
+        _shape: &ShapeDesc,
+        _mass: Option<f32>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Body(
+            "set_shape unsupported by this backend".into(),
+        ))
+    }
 }

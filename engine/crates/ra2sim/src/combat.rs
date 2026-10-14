@@ -47,14 +47,9 @@ pub struct Impact {
     pub point: Vec3,
 }
 
-/// Damage factor and rotor tip speed for one attacking component.
-fn offense(
-    r: &Robot,
-    worlds: &[Mat4],
-    body: Mat4,
-    index: usize,
-    cfg: &CombatConfig,
-) -> Option<(f32, f32)> {
+/// Damage factor and rotor tip speed for one attacking component. `worlds` are
+/// component world transforms (the rig's bodies already place them).
+fn offense(r: &Robot, worlds: &[Mat4], index: usize, cfg: &CombatConfig) -> Option<(f32, f32)> {
     let c = &r.rig.components[index];
     let factor = match c.role {
         Role::Weapon => c.weapon.map(|w| w.concussion + w.piercing).unwrap_or(0.5),
@@ -68,13 +63,13 @@ fn offense(
     }
 
     // Tip speed of the nearest motor turning this part.
-    let here = (body * worlds[index]).transform_point3(c.center());
+    let here = worlds[index].transform_point3(c.center());
     let mut tip = 0.0;
     let mut p = c.parent;
     while let Some(pi) = p {
         if let Some(m) = r.rig.components[pi].motor {
             let mc = &r.rig.components[pi];
-            let mw = (body * worlds[pi]).transform_point3(mc.center());
+            let mw = worlds[pi].transform_point3(mc.center());
             tip = m.rate * (here - mw).length();
             break;
         }
@@ -87,7 +82,6 @@ fn offense(
 fn best_attack(
     r: &Robot,
     worlds: &[Mat4],
-    body: Mat4,
     closing: f32,
     cfg: &CombatConfig,
 ) -> Option<(usize, f32, f32, Vec3)> {
@@ -96,11 +90,11 @@ fn best_attack(
         if !r.attached[i] || c.hull_points.is_empty() {
             continue;
         }
-        let Some((factor, tip)) = offense(r, worlds, body, i, cfg) else {
+        let Some((factor, tip)) = offense(r, worlds, i, cfg) else {
             continue;
         };
         let impact = cfg.speed_floor + closing + tip;
-        let point = (body * worlds[i]).transform_point3(c.center());
+        let point = worlds[i].transform_point3(c.center());
         let better = best
             .map(|(_, f, im, _)| factor * impact > f * im)
             .unwrap_or(true);
@@ -121,14 +115,13 @@ pub fn detect(
     cfg: &CombatConfig,
 ) -> Option<Impact> {
     let (ra, rb) = (&robots[a], &robots[b]);
-    if !physics.in_contact(ra.body, rb.body) {
+    if !physics.in_contact(ra.body(), rb.body()) {
         return None;
     }
-    let (wa, wb) = (ra.worlds(), rb.worlds());
-    let (ta, tb) = (ra.transform(physics), rb.transform(physics));
+    let (wa, wb) = (ra.component_worlds(physics), rb.component_worlds(physics));
     let closing = (ra.velocity(physics) - rb.velocity(physics)).length();
 
-    let (by, factor, impact, at) = best_attack(ra, &wa, ta, closing, cfg)?;
+    let (by, factor, impact, at) = best_attack(ra, &wa, closing, cfg)?;
 
     // Land the hit on the opponent's part nearest the strike, skipping
     // indestructible fittings (control boards, anchors) that would otherwise
@@ -139,7 +132,7 @@ pub fn detect(
         if !rb.attached[j] || c.hull_points.is_empty() || !c.damageable {
             continue;
         }
-        let d = ((tb * wb[j]).transform_point3(c.center()) - at).length();
+        let d = (wb[j].transform_point3(c.center()) - at).length();
         if d < best_d {
             best_d = d;
             target = Some(j);
@@ -166,17 +159,16 @@ pub fn report(
     cfg: &CombatConfig,
 ) -> Vec<String> {
     let (ra, rb) = (&robots[a], &robots[b]);
-    let (wa, wb) = (ra.worlds(), rb.worlds());
-    let (ta, tb) = (ra.transform(physics), rb.transform(physics));
+    let wa = ra.component_worlds(physics);
     let closing = (ra.velocity(physics) - rb.velocity(physics)).length();
-    let contact = physics.in_contact(ra.body, rb.body);
+    let contact = physics.in_contact(ra.body(), rb.body());
 
     let mut rows = vec![format!("contact={contact} closing={closing:.2} m/s")];
     for (i, c) in ra.rig.components.iter().enumerate() {
         if !ra.attached[i] {
             continue;
         }
-        let (factor, tip) = offense(ra, &wa, ta, i, cfg).unwrap_or((0.0, 0.0));
+        let (factor, tip) = offense(ra, &wa, i, cfg).unwrap_or((0.0, 0.0));
         if factor > cfg.ram_factor {
             rows.push(format!(
                 "  attacker {:2} {:24} factor={:.2} tip={:5.1} m/s",
@@ -184,12 +176,12 @@ pub fn report(
             ));
         }
     }
-    if let Some((_, factor, impact, _)) = best_attack(ra, &wa, ta, closing, cfg) {
+    if let Some((_, factor, impact, _)) = best_attack(ra, &wa, closing, cfg) {
         rows.push(format!(
             "  best: factor={factor:.2} impact={impact:.1} dps={:.0}",
             cfg.damage_scale * factor * impact
         ));
     }
-    let _ = (ra, rb, wa, wb, ta, tb);
+    let _ = (ra, rb, wa);
     rows
 }
