@@ -9,7 +9,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 
 | Ref | Item | Status |
 |---|---|---|
-| F1 | Mount-point (attachment frame) alignment | data done, algorithm **open — top priority** |
+| F1 | Mount-point (attachment frame) alignment | data done, rule identified (`A_parent·A_own⁻¹`); the spinner's height source is open — top priority |
 | F2 | Assembled-bodies path opt-in until F1 lands | open |
 | F3 | Motors are velocity motors, not torque motors | open |
 | F4 | Wheel `contact` / `grip` / `resistance` partly used | open |
@@ -59,38 +59,94 @@ snapshot shows it flat.
 - So only *component-to-component* links (motor→wheel, anchor→motor→disc) can
   involve a mount frame.
 
+### A second pass changed the model
+
+**(1) The anchors are a tilted *family*.** `anchor1`..`anchor5` are
+0°/22.5°/45°/67.5°/90° wedges: the Z axis of their `Point02` plug runs from
+`(0,1,0)` (vertical) to `(1,0,0)` (horizontal). Stock bots use `anchor5` for the
+majority of mounts, `anchor3`/`anchor4` for several, `anchor1` rarely. So a
+spinner built on `anchor3` is a **45° spinner** — the earlier assumption that a
+spinner has to come out flat was wrong, and it was the target the searches below
+were (mis)fitting. It is also the strongest evidence yet that the child's
+orientation really does come from the attachment frame.
+
+**(2) Frame alignment is the rule for component-to-component mounts.**
+`A_parent · A_own⁻¹` leaves the wheel's plane *and* position essentially
+unchanged — the motor's `axle_M` and the wheel's `axle_F` are near-symmetric
+frames there, so the two rules agree on the one placement the snapshot pins down
+— while the rotor lands on the anchor's plug direction, i.e. the 45° tilt the
+snapshot shows. That is the behaviour this item wants.
+
+**(3) No transpose is at play.** 63 of 323 mesh objects carry a non-identity
+transform and those render correctly, so a stored triple is an axis row (PyRA2's
+`TransformMatrix` transposes the same way). Attachment points use the same
+reader, so their frames are read correctly too — which matters, because 50 of
+them are asymmetric and a transpose would flip all five anchors' plugs.
+
+### What is left: where the spinner's height comes from
+
+Whichever rule is used, the rotor assembly ends up **inside** the chassis (its
+top reaches y ≈ 0.34 against the chassis' 0.748), while the game's snapshot shows
+the disc covering the chassis' *top* face. The anchor's stored height is 0 and so
+is each motor's; they name the same chassis mount (`0`) and the same own-mount
+index, and their own mount frames differ by ~0.1 — so **no shared chassis frame
+can lift the anchor without lifting the motors**, and a chassis frame carrying a
+rotation would tilt the wheels. The lift has to come from a frame that is not the
+`(parent point, own point)` pair.
+
+The obvious candidate is a raised *chassis* mount plane. It was tested by
+rendering with the chassis children lifted, scored by bounding-box-normalised
+silhouette IoU against the embedded snapshot with the camera fitted **per**
+hypothesis:
+
+| hypothesis | best IoU |
+|---|---|
+| no lift | 0.399 |
+| lift 0.374 m | 0.398 |
+| lift 0.560 m | 0.404 |
+| lift 0.748 m | 0.434 |
+| lift 0.374 m + frames | 0.427 |
+| lift 0.560 m + frames | 0.416 |
+
+Nothing separates them. **Swings I first read into these numbers — a refutation,
+then its reversal — were both noise**: the first pass compared renders through a
+fixed colour threshold that mistook the snapshot's background gradient for
+geometry. The 128² preview is a sanity check, not an oracle, so this question has
+to be answered from the binary. `tools/mount_compare.py` is the harness (camera
+by search, flood-fill foreground); it is worth keeping, but not worth trusting to
+a few IoU points.
+
 ### Ruled out
 
-Test: the rotor's mesh `+Z` must end up vertical in bot space; the wheels' `+Z`
-must stay horizontal (they are the control — the snapshot fixes them).
+Test: the rotor's mesh `+Z` should end up along the anchor's plug direction; the
+wheels' `+Z` must stay horizontal (they are the control).
 
 | Rule | Result |
 |---|---|
-| `A_parent * S * A_own⁻¹` for any fixed 90°/180°/45° `S`, chassis links included | wheels and rotor always share one plane — both vertical or both flat |
-| same, applied only to component-to-component links | best fit still leaves the rotor **45°** out |
-| brute force over ordered products of `{A_p, A_p⁻¹, A_c, A_c⁻¹, M, M⁻¹}` ± a 180° mate flip | same 45° residual |
-| reading the quaternion as `(w,x,y,z)` | fixes the rotor, breaks the wheels |
+| `A_parent * S * A_own⁻¹` for any fixed 90°/180°/45° `S`, chassis links included | moves the wheels off the position the snapshot fixes |
+| reading the quaternion as `(w,x,y,z)` | breaks the wheels |
 | swapping the `yaw × quaternion` multiplication order | the same trade-off, exactly inverted |
-| transposing the attachment frame | a no-op for every point that matters (all diagonal) |
+| transposing the attachment frame | wrong for meshes, so wrong for attachments (finding 3) |
+| a fixed `S` chosen to make the rotor flat | a 45° residual throughout — the target was wrong (finding 1) |
+| brute force over ordered products of `{A_p, A_p⁻¹, A_c, A_c⁻¹, M, M⁻¹}` ± a 180° mate flip, against the flat-rotor target | same, for the same reason |
 
-The residual is exactly **45°**, and it comes from `anchor3.gmf`'s `Point02`
-(`Generic_M`): `X=(-0.707,0.707,0)  Y=(0,0,1)  Z=(0.707,0.707,0)` — a 45° plug.
-No rigid, shared treatment of the chassis mount turns that diagonal into a
-vertical axis, so the game is not simply aligning the child's frame to the
-parent's. Either the mate rolls about the frame's own Z instead of aligning the
-full frame, or the point's axes carry a different meaning (PyRA2's own VRML
-export of attachment points — `lib/PyRA2/GMIModel/VRMLExport.py` — wraps mounted
-children in an extra `rotation 1 0 0 3.14159`, a 180° mate flip, which is a
-strong hint that a flip *and* a roll convention are involved).
+### The decompile
 
-### Next step
+Started, not finished. Leads ruled out and confirmed:
 
-Decompile the botlab's attach routine and read the formula. Leads already
-located in `Robot Arena 2.exe`: RTTI `.?AVAttachDetails@Component@@`
-(`0x6f0488`), the component-definition key strings `attach` (`0x6f23e8`) and
-`attaching` (`0x6f2530`), the UI strings at `0x6f07f4`/`0x6f0828` ("Click the
-Attach button…", "Click a green box to change the component's attachment
-point…"), and the `GMID_ATTACHMENTPT` node-type entry around `0x6f0ba4`.
+- `0x5c38b0`, which references `Error Reading GM_AttachmentPt Data`, is not a
+  procedure entry Ghidra recognises — reach it by file offset
+  (`decompile --file-offset`) instead.
+- the binary has no RTTI-derived procedure names: searching procedures for
+  `Attach` and `Component` returns nothing, so the `AttachDetails` class has to be
+  found through its vtable/RTTI rather than by name.
+- the botlab attach UI at `0x42e8fe` only manages attachment-point *selection*
+  ("Click a green box…", `UI_BotLab_AP_box_*`) — it is not where the placement is
+  computed; that is a sibling function it calls.
+- still the best entry points: `.?AVAttachDetails@Component@@` (`0x6f0488`), the
+  `attach`/`attaching` definition keys (`0x6f23e8`, `0x6f2530`), the
+  `GMID_ATTACHMENTPT` node-type table around `0x6f0ba4`, and the attachment reader
+  at `0x5c38b0`.
 
 ---
 

@@ -985,8 +985,10 @@ pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Err
 
     // Component world transforms, chained through parents. RA2 places a component
     // by its stored translation + quaternion, then a mount yaw (`angle`) and a
-    // vertical offset (`height`) about/along the model up axis (Y).
-    let world = component_worlds(&bot);
+    // vertical offset (`height`) about/along the model up axis (Y); at a
+    // component-to-component mount it can instead align the attachment frames
+    // (see `MountMode` and `docs/06-deferred-fidelity.md` F1).
+    let world = component_worlds_mounted(&bot, &loaded, MountMode::from_env());
 
     let mut items = Vec::new();
 
@@ -1005,22 +1007,88 @@ pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Err
 
 /// Chained bot-local transform for every component (parents before children).
 pub fn component_worlds(bot: &botfmt::Bot) -> Vec<Mat4> {
+    component_worlds_mounted(bot, &[], MountMode::Stored)
+}
+
+/// How a component is placed on its parent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MountMode {
+    /// The stored transform alone — `translation * quaternion * yaw * height`.
+    /// This is what reproduces the game's own layout for *chassis-mounted*
+    /// parts, so it stays the default.
+    Stored,
+    /// At a component-to-component mount, align the child's attachment frame to
+    /// the parent's: `A_parent * A_own⁻¹`.
+    Frames,
+    /// The same, with a 180° rotation about X between the frames — a male plug
+    /// into a female socket.
+    FramesFlipped,
+}
+
+impl MountMode {
+    /// `RA2_MOUNT=stored` (default) | `frames` | `frames-flip`.
+    pub fn from_env() -> MountMode {
+        match std::env::var("RA2_MOUNT").unwrap_or_default().as_str() {
+            "frames" => MountMode::Frames,
+            "frames-flip" => MountMode::FramesFlipped,
+            _ => MountMode::Stored,
+        }
+    }
+}
+
+/// Chained bot-local transform for every component (parents before children).
+///
+/// `loaded` supplies the components' `.gmf` scenes, which is where the mount
+/// frames live; with it, `mode` can place component-to-component mounts by
+/// aligning attachment frames instead of by the stored transform alone.
+pub fn component_worlds_mounted(
+    bot: &botfmt::Bot,
+    loaded: &[Option<BotComponent>],
+    mode: MountMode,
+) -> Vec<Mat4> {
     let mut world = vec![Mat4::IDENTITY; bot.components.len()];
     for (i, c) in bot.components.iter().enumerate() {
         let local = component_local(c);
-        if i > 0 && c.parent >= 0 && (c.parent as usize) < i {
-            let parent = c.parent as usize;
-            // A BurstMotor poses its children at its start (rest) axle angle.
-            let rest = match bot.components[parent].burst_angles {
-                Some([start, _]) => Mat4::from_rotation_z(start),
-                None => Mat4::IDENTITY,
-            };
-            world[i] = world[parent] * rest * local;
-        } else {
+        if i == 0 || c.parent < 0 || c.parent as usize >= i {
             world[i] = local;
+            continue;
         }
+        let parent = c.parent as usize;
+        // A BurstMotor poses its children at its start (rest) axle angle.
+        let rest = match bot.components[parent].burst_angles {
+            Some([start, _]) => Mat4::from_rotation_z(start),
+            None => Mat4::IDENTITY,
+        };
+        let link = mount_link(bot, loaded, i, mode).unwrap_or(local);
+        world[i] = world[parent] * rest * link;
     }
     world
+}
+
+/// The relative transform of component `i` on its parent, when a mount frame
+/// applies. Only component-to-component mounts qualify: the chassis has no
+/// `.gmf`, and chassis children are reproduced by the stored transform.
+fn mount_link(
+    bot: &botfmt::Bot,
+    loaded: &[Option<BotComponent>],
+    i: usize,
+    mode: MountMode,
+) -> Option<Mat4> {
+    if mode == MountMode::Stored {
+        return None;
+    }
+    let c = &bot.components[i];
+    let child = loaded.get(i)?.as_ref()?;
+    let parent = loaded.get(c.parent.max(0) as usize)?.as_ref()?;
+    let own = child.scene.attachment_table();
+    let on_parent = parent.scene.attachment_table();
+    let own = own.get(&c.own_mount)?;
+    let on_parent = on_parent.get(&c.parent_mount)?;
+    let mate = match mode {
+        MountMode::FramesFlipped => Mat4::from_rotation_x(std::f32::consts::PI),
+        _ => Mat4::IDENTITY,
+    };
+    Some(tm_mat4(&on_parent.transform) * mate * tm_mat4(&own.transform).inverse())
 }
 
 pub fn component_local(c: &ra2fmt::bot::Component) -> Mat4 {
