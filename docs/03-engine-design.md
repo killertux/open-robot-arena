@@ -47,15 +47,15 @@ local/           # (git-ignored) game files + converted cache
 - **M2 — Physics sandbox.** ✅ Drop a bot into an arena with Jolt; drive it;
   collide with walls and movable props. *(Implemented as `ra2sim` + `ra2-sim`,
   verified headlessly by rendering a frame strip.)*
-- **M3 — Two robots fight.** Weapons/motors via the component/controller model;
-  damage + buckling. **(next)**
+- **M3 — Two robots fight.** ✅ Weapons/motors via the component/controller model;
+  damage + buckling *(implemented as `ra2sim::rig`/`robot`/`combat`/`duel` plus the
+  `ra2-duel` runner)*.
 - **M4 — Script layer.** Reproduce the `plus`/`AI`/`Arenas` API and run the stock
-  AI strategies and arena scripts.
+  AI strategies and arena scripts. **(next)**
 - **M5 — Game shell.** Workshop (build a robot), tournaments, menus.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
 
 ## M2 design notes
-
 - **Swappable physics.** `ra2sim::backend` defines neutral `BodyDesc`/`ShapeDesc`
   /`BodyState` and a `PhysicsBackend` trait (create/remove body, impulses,
   velocities, step, ray cast). `ra2sim::jolt` is the only module that knows about
@@ -77,6 +77,52 @@ local/           # (git-ignored) game files + converted cache
 - **Verification.** `ra2-sim` runs the timeline headlessly and writes
   `frame_NNN.png` plus a `strip.png` montage, so driving and collisions can be
   checked without a display.
+
+## M3 design notes
+
+- **A robot is a component tree.** `ra2sim::rig` rebuilds the `.bot`'s parts as
+  nodes with a role (chassis / wheel / motor / weapon / piston / structure), a
+  mount transform, geometry, and stats read from the component definitions:
+  mass from the mesh's `RBCollection`, `hitpoints`/`damageable`/`concussion`/
+  `piercing`/`power` from the `.txt`. `ra2sim::robot` binds that tree to one
+  physics body and tracks per-part health.
+- **Motors turn their subtree.** A motor rotates its attached parts about the
+  component-local +Z axis (RA2's axle direction, confirmed by the saw blade and
+  wheel meshes: discs lie in XY). `RobotRig::worlds` re-walks the tree with the
+  current rotor angles, so a spinner's disc, arms and weapons all sweep together
+  and wheels turn.
+- **Damage is contact-driven.** Jolt's `WereBodiesInContact` tells us *whether*
+  two hulls are engaged, but not which parts touched; guessing from bounding
+  volumes was unreliable (a robot's parts are spread across its body, so its own
+  hull surface often touches where no single part's box does). `ra2sim::combat`
+  therefore attributes the hit: the attacker contributes its best weapon
+  (`concussion + piercing` times its rotor tip speed) and the damage lands on the
+  opponent's nearest *destructible* part. Indestructible fittings (`damageable =
+  false`) are skipped so they cannot soak a fight forever.
+- **Buckling.** When a part's hitpoints reach zero the whole subtree detaches:
+  each part becomes an independent rigid body at its current world transform,
+  gets an outward impulse, and the robot's collider is rebaked from the parts it
+  still has. Destroying the chassis ends the fight (the rest scatters).
+- **AI.** Two behaviours share one driver: `cycle` (the default) grinds for ~1.6 s
+  then reverses for ~0.8 s so the fight keeps moving; `press` (`RA2_AI=press`)
+  never disengages. The trigger is the real physics contact, not an estimate.
+- **Verification.** `ra2-duel` writes a frame strip plus a log of breakage
+  (`t=… Name: part knocked off`, `… chassis destroyed`).
+
+### Physics gotchas worth remembering (all hit during M3)
+
+1. **Sleeping bodies ignore velocity commands.** A body that settles is parked
+   by Jolt and later `set_linear_velocity` calls do nothing, so a robot would
+   freeze mid-fight. The backend now activates before setting velocity, and
+   game-driven bodies opt out of sleeping entirely.
+2. **Jolt mesh colliders are one-sided.** Arena proxies in the wild are not wound
+   consistently, so the collider is emitted double-sided (both windings). A
+   single-sided proxy had robots being ejected from the box arena at 40 m/s.
+3. **Arenas ship both display and proxy geometry.** The proxies are the intended
+   physics, but some arenas ship none (the practice arena) and some ship a proxy
+   that misses the floor. `load_arena` prefers the proxy, verifies with a ray
+   cast that something is under the arena centre, and otherwise falls back to the
+   visible geometry; `RA2_COLLISION=proxy|visible` forces either.
 
 ## Key design decisions to settle
 

@@ -285,6 +285,42 @@ multi-material):
   the robot's origin sits at the chassis bottom with the wheels reaching ~0.3
   below it.
 
+## 9c. Component model & combat data (M3 findings)
+
+- **Base classes** across the 57 shipped robots: `Chassis`, `Wheel`, `SpinMotor`,
+  `ServoMotor`, `BurstMotor`, `BurstPiston`, `ServoPiston`, `Weapon`, `Battery`,
+  `AirTank`, `ControlBoard`, `SmartZone`, `AxleMount`, `Steering`, `Component`.
+  The `.bot` stores that class per component; the definition `.txt` adds a `base`
+  (usually identical) and the behaviour fields.
+- **Mounts are a tree.** A component's parent is an index into the component
+  list, and `component_local` chains translation + quaternion + mount `angle`
+  (yaw about +Y) + `height` (offset along +Y).
+- **Motors are defined by attachments, not a field.** The definition's
+  `attaching = axle` names the attachment type its children use, and the mesh's
+  attachment point with `Attach = Axle_M` carries `Host = Axle` — the *rotating
+  hub object*. So `master` is the body object and the hub comes from the
+  attachment payload. Attachment payloads are CRLF-separated `Key = Value` lines
+  (not space-separated, as it looks once whitespace is collapsed).
+- **Everything spins about local +Z.** Saw blades and wheels are discs lying in
+  XY (`saw_display` x/y ±0.327, z −0.056..0.028; `miniwheel` x/y ±0.197,
+  z −0.131..0.004), so +Z is the axle in component space for both motors and
+  wheels.
+- **Weapon and durability stats live in the `.txt`**: `concussion`/`piercing`
+  (damage mix), `frequency`, `hitpoints` (only some parts declare it),
+  `damageable = false` (14 parts, e.g. control boards, anchors, casters and axle
+  mounts — indestructible), `fracture`, `mass`, `material = metal(.4)`.
+- **Part mass comes from the mesh**: each component `.gmf` has an `RBCollection`
+  whose body masses sum to the component's mass (angle motor 6 + 10 = 16 kg,
+  Z-Tek 25 kg, saw blade 16 kg).
+- **A `.bot` also stores control wiring** at the end of the file (`Spin Clockwise`
+  / `Spin Counter-clockwise` with control-board output ids), which is the natural
+  hook for M4's script layer.
+- **Damage attribution cannot be solved from geometry alone.** A hull contact
+  does not imply that any *single* component's bounding box overlaps the
+  opponent's, because a hull face can span several components; the engine
+  therefore uses Jolt's `WereBodiesInContact` for the contact and attributes the
+  damage to the nearest destructible part.
+
 ## 10. Open questions for Stage 1/2
 
 1. Direct3D 8 usage specifics: vertex/pixel shader model, fixed-function pipeline,

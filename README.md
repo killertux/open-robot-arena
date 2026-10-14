@@ -10,10 +10,10 @@ by the user.
 
 ## Status
 
-**M1 (asset rendering) complete; M2 physics sandbox working.** The engine (Rust)
-parses the original `.gmf` meshes, `.bot` robots, and arena `.py` scripts, renders
-them with their textures via `wgpu`, and simulates them with **Jolt Physics** —
-no Windows, no Wine in the loop:
+**M1 (asset rendering), M2 (physics sandbox) and M3 (robot fights) are working.**
+The engine (Rust) parses the original `.gmf` meshes, `.bot` robots, and arena
+`.py` scripts, renders them with their textures via `wgpu`, and simulates them
+with **Jolt Physics** — no Windows, no Wine in the loop:
 
 ```
 # Render
@@ -21,10 +21,14 @@ ra2-render local/game/Components/mower_blade/mower_blade1.gmf out.png
 ra2-render "local/game/AI/Team0/Bot0.bot" scout.png                 # assembled robot
 ra2-render "local/game/Arenas/octagon.py" octagon.png              # arena scene
 
-# Simulate: drop a robot into an arena and drive it, headless, to PNG frames
+# Drive one robot around (M2)
 ra2-sim "local/game/Arenas/octagon.py" "local/game/AI/Team1/Bot0.bot" out/ 6 10
 RA2_OBSTACLE=crates RA2_YAW=180 RA2_SPAWN=0,3.5 \
   ra2-sim "local/game/Scripts/Practice.py" "local/game/AI/Team0/Bot0.bot" out/ 6 10
+
+# Two robots fight to the death (M3)
+ra2-duel "local/game/Arenas/octagon.py" \
+  "local/game/AI/Team14/Bot2.bot" "local/game/AI/Team13/Bot1.bot" out/ 20 12
 ```
 
 - All **57 shipped robots** (formats 1.07/1.08/1.11/1.12) render with every
@@ -36,6 +40,10 @@ RA2_OBSTACLE=crates RA2_YAW=180 RA2_SPAWN=0,3.5 \
   collides with walls and with movable props, and the run renders to a frame
   strip. The physics engine sits behind a `PhysicsBackend` trait so it can be
   swapped.
+- **M3:** a robot is a *component tree* rebuildable from the game's own parts.
+  Motors turn their attached subtree (spinners spin, wheels roll), weapons deal
+  damage on contact, and parts whose hitpoints run out are torn off as flying
+  debris — a fight between two AI-driven robots ends when a chassis is destroyed.
 
 Working today:
 - `ra2fmt::gmi` — GMI `.gmf` parser (181/181 meshes), materials (incl.
@@ -46,20 +54,28 @@ Working today:
 - `ra2fmt::arena` — arena scripts → scene (model, props, shadow, cameras).
 - `ra2fmt::component` / `ra2fmt::cfl` — component definitions and a native
   **CFL3** (`.cfz`) archive reader (no external tools).
+- `ra2sim::rig` / `ra2sim::robot` — the component tree and a live robot with
+  motor animation, per-part health and detachable parts.
+- `ra2sim::combat` / `ra2sim::duel` — contact-driven damage and the two-robot
+  world (arena, props, debris, driving AI).
 - `ra2sim` — backend-neutral physics types + the Jolt backend, arena/robot/prop
   scene assembly, and an arcade drive controller.
 - `ra2-cli` — `ra2 info`, `ra2 obj`, `ra2 cfz`, `ra2 arena`.
 - `ra2-render` — headless wgpu renderer (offscreen → PNG) for `.gmf`, assembled
   `.bot` robots, and arena `.py` scenes.
-- `ra2-sim` — headless physics sandbox driving a robot around an arena.
+- `ra2-sim` — headless physics sandbox driving one robot around an arena.
+- `ra2-duel` — headless two-robot fight.
 
 Remaining caveats: chassis *face-group* texture decals can appear
-rotated/mirrored; exact BurstMotor weapon rest poses are approximated; the robot
-collider is a single convex hull (wheels are not yet separate jointed bodies), so
-the controller is arcade-style rather than torque-driven.
+rotated/mirrored; exact BurstMotor rest poses are approximated; a robot's
+collider is a single convex hull rebaked when parts are lost (components are not
+yet individually jointed bodies, so buckling is "parts come off" rather than
+"mounts bend"); damage attribution picks the nearest part rather than solving
+per-part contacts; the drive controller is arcade-style rather than torque-driven.
 
-Next: M3 — two robots fight (weapons/motors, damage, buckling). See
-`docs/01-project-plan.md` and `docs/03-engine-design.md`.
+Next: M4 — the script layer (reproduce the `plus`/`AI`/`Arenas` API so the stock
+AI strategies and arena scripts run). See `docs/01-project-plan.md` and
+`docs/03-engine-design.md`.
 
 ## Layout
 
