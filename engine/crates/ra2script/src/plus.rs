@@ -12,8 +12,10 @@
 //!   accepted, given handles where the scripts expect them, and recorded so a
 //!   run reports exactly what it dropped rather than silently ignoring it.
 
+use std::collections::BTreeMap;
+
 use pyo3::prelude::*;
-use pyo3::types::{PyTuple, PyType};
+use pyo3::types::{PyDict, PyTuple};
 
 use glam::Vec3;
 
@@ -149,72 +151,106 @@ fn enum_arena(_detail: &Bound<'_, ArenaDetail>) -> bool {
     true
 }
 
-fn with_match<R>(f: impl FnOnce(&mut dyn crate::MatchApi) -> R) -> Option<R> {
-    let mut st = crate::state();
-    let api = st.physics.as_mut()?;
-    Some(f(api.as_mut()))
+fn with_bot<R>(bot: i32, f: impl FnOnce(&crate::BotSnapshot) -> R) -> Option<R> {
+    let st = crate::state();
+    st.bot(bot).map(f)
 }
 
 #[pyfunction]
 #[pyo3(name = "getLocation")]
 fn get_location(bot: i32) -> (f32, f32, f32) {
-    match with_match(|m| m.location(bot)) {
-        Some(p) => (p.x, p.y, p.z),
-        None => (0.0, 0.0, 0.0),
-    }
+    with_bot(bot, |b| (b.location.x, b.location.y, b.location.z)).unwrap_or((0.0, 0.0, 0.0))
 }
 
 #[pyfunction]
 #[pyo3(name = "getWeight")]
 fn get_weight(bot: i32) -> f32 {
-    with_match(|m| m.weight(bot)).unwrap_or(0.0)
+    with_bot(bot, |b| b.mass).unwrap_or(0.0)
 }
 
 #[pyfunction]
 #[pyo3(name = "isUpsideDown")]
 fn is_upside_down(bot: i32) -> bool {
-    with_match(|m| m.upside_down(bot)).unwrap_or(false)
+    with_bot(bot, |b| b.upside_down).unwrap_or(false)
 }
 
 #[pyfunction]
 #[pyo3(name = "damage")]
 fn damage(bot: i32, component: i32, amount: f32, point: (f32, f32, f32)) {
-    let p = Vec3::new(point.0, point.1, point.2);
-    with_match(|m| m.damage(bot, component, amount, p));
+    crate::state().requests.push(crate::Request::Damage {
+        bot,
+        component,
+        amount,
+        point: Vec3::new(point.0, point.1, point.2),
+    });
 }
 
 #[pyfunction]
 #[pyo3(name = "force")]
 fn force(bot: i32, x: f32, y: f32, z: f32) {
-    let v = Vec3::new(x, y, z);
-    with_match(|m| m.force(bot, v));
+    crate::state().requests.push(crate::Request::Force {
+        bot,
+        impulse: Vec3::new(x, y, z),
+    });
 }
 
+/// `rayTest(from, to)` -> `(bot, component, x, y, z)`, or `(-1, -1, ...)`.
+///
+/// Tested against the per-component spheres the engine publishes rather than the
+/// full hulls: it is the flame hazard's "did the jet reach a component" test, and
+/// a sphere per part is what the snapshot carries. See F13.
 #[pyfunction]
 #[pyo3(name = "rayTest")]
 fn ray_test(from: (f32, f32, f32), to: (f32, f32, f32)) -> (i32, i32, f32, f32, f32) {
     let a = Vec3::new(from.0, from.1, from.2);
     let b = Vec3::new(to.0, to.1, to.2);
-    match with_match(|m| m.ray_test(a, b)) {
-        Some((bot, comp, p)) => (bot, comp, p.x, p.y, p.z),
-        None => (-1, -1, 0.0, 0.0, 0.0),
+    let d = b - a;
+    let len = d.length();
+    if len <= 1e-6 {
+        return (-1, -1, a.x, a.y, a.z);
+    }
+    let u = d / len;
+    let st = crate::state();
+    let mut best = f32::INFINITY;
+    let mut hit = (-1, -1);
+    for (bi, bot) in st.bots.iter().enumerate() {
+        for (ci, (c, r)) in bot.spheres.iter().enumerate() {
+            let oc = a - *c;
+            let bq = oc.dot(u);
+            let disc = bq * bq - (oc.dot(oc) - r * r);
+            if disc < 0.0 {
+                continue;
+            }
+            let t = -bq - disc.sqrt();
+            if t > 0.0 && t < best && t <= len {
+                best = t;
+                hit = (bi as i32, ci as i32);
+            }
+        }
+    }
+    if best.is_finite() {
+        let p = a + u * best;
+        (hit.0, hit.1, p.x, p.y, p.z)
+    } else {
+        (-1, -1, a.x, a.y, a.z)
     }
 }
 
 #[pyfunction]
 #[pyo3(name = "zap")]
 fn zap(bot: i32, amount: f32, radius: f32) {
-    let _ = (bot, amount, radius);
+    crate::state().requests.push(crate::Request::Zap {
+        bot,
+        amount,
+        radius,
+    });
     defer("zap visual (M5)");
 }
 
 #[pyfunction]
 #[pyo3(name = "isDefeated")]
 fn is_defeated(bot: i32) -> bool {
-    match with_match(|m| m.alive()) {
-        Some(alive) => !alive.get(bot.max(0) as usize).copied().unwrap_or(false),
-        None => false,
-    }
+    with_bot(bot, |b| !b.alive).unwrap_or(false)
 }
 
 #[pyfunction]
@@ -232,8 +268,9 @@ fn is_human(_bot: i32) -> bool {
 #[pyfunction]
 #[pyo3(name = "eliminatePlayer")]
 fn eliminate_player(bot: i32) {
-    let _ = bot;
-    defer("elimination flow (M5)");
+    crate::state()
+        .requests
+        .push(crate::Request::Eliminate { bot });
 }
 
 // ---------------------------------------------------------------------------
@@ -392,32 +429,118 @@ fn add_points(_args: &Bound<'_, PyTuple>) -> i32 {
     0
 }
 
+/// The `Forward`/`LeftRight` channels a brain has set, as `(throttle, steer)`
+/// in `[-1, 1]` — what `Robot::drive` takes.
+///
+/// `SuperAI.Turn` sets `LeftRight` 0 and 1 opposite (`-turning` and `turning`),
+/// so the steer is their difference; `Throttle` sets `Forward` 0.
+///
+/// The scripts' `Turn` is positive for a *positive* heading error (`AimToHeading`
+/// turns by `dir = sign(heading)`), while `Robot::drive` applies
+/// `yaw = -steer * rate` — the stand-in driver compensates by negating the error,
+/// and so does this.
+pub fn read_drive(brain: &Py<PyAny>, py: Python<'_>) -> Option<(f32, f32)> {
+    let obj = brain.bind(py);
+    let ai = obj.downcast::<Ai>().ok()?;
+    let ai = ai.borrow();
+    let channel = |name: &str, index: i32| {
+        ai.inputs
+            .get(&(name.to_string(), index))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    let forward = channel("Forward", 0);
+    let left = channel("LeftRight", 0);
+    let right = channel("LeftRight", 1);
+    Some((
+        (forward / 100.0).clamp(-1.0, 1.0),
+        ((left - right) / 200.0).clamp(-1.0, 1.0),
+    ))
+}
+
+/// The zones a brain asked to be told about.
+pub fn registered_zones(brain: &Py<PyAny>, py: Python<'_>) -> Vec<(String, i32)> {
+    let obj = brain.bind(py);
+    match obj.downcast::<Ai>() {
+        Ok(ai) => ai.borrow().zones.clone(),
+        Err(_) => Vec::new(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // plus.AI
 // ---------------------------------------------------------------------------
 
 /// `plus.AI` — the C++ side of every AI script (`AI.SuperAI` subclasses it).
 ///
-/// The queries the strategies drive themselves with (`GetLocation`, `Input`,
-/// `GetEnemies`, ...) are the next slice; the shape is here so the shipped
-/// `AI/` package imports and subclasses exactly as it does in the game.
+/// The strategies ask the engine where they are, which way they are facing, how
+/// fast they are going, who the enemies are and what they last hit; they tell it
+/// what to do through `Input`. Every question is answered from the robot
+/// snapshot the simulator publishes, and every action is either an input (held
+/// here, read back by the simulator) or a queued request.
 #[pyclass(subclass, name = "AI", module = "plus")]
 #[derive(Default)]
 pub struct Ai {
-    /// Which robot this brain drives.
+    /// Which robot this brain drives; the engine binds it after construction.
     pub bot: i32,
     /// Whether `Activate(True)` has been seen.
     pub active: bool,
+    /// The control board's inputs, `(name, index) -> value`.
+    pub inputs: BTreeMap<(String, i32), f32>,
+    /// SmartZones this brain asked to be told about, `(name, id)`.
+    pub zones: Vec<(String, i32)>,
+}
+
+impl Ai {
+    /// The heading whose `(sin, cos)` is the robot's facing — the convention the
+    /// scripts use when they build a direction with `vector3(angle)`.
+    fn heading_of(dir: Vec3) -> f32 {
+        f32::atan2(dir.x, dir.z)
+    }
+
+    fn own_heading(&self, reverse: bool) -> f32 {
+        with_bot(self.bot, |b| {
+            let d = if reverse { -b.direction } else { b.direction };
+            Ai::heading_of(d)
+        })
+        .unwrap_or(0.0)
+    }
+
+    fn heading_to(&self, target: Vec3, reverse: bool) -> f32 {
+        let own = self.own_heading(reverse);
+        let st = crate::state();
+        let Some(b) = st.bot(self.bot) else {
+            return 0.0;
+        };
+        let d = target - b.location;
+        let mut e = Ai::heading_of(d) - own;
+        while e > std::f32::consts::PI {
+            e -= 2.0 * std::f32::consts::PI;
+        }
+        while e < -std::f32::consts::PI {
+            e += 2.0 * std::f32::consts::PI;
+        }
+        e
+    }
 }
 
 #[pymethods]
 impl Ai {
+    /// A subclass is constructed with the script's own constructor arguments
+    /// (`Rammer(topspeed=8.0, turnspeed=1.75)`), which Python passes to `__new__`
+    /// as well as `__init__`; `AI.SuperAI.__init__` is where they are read.
     #[new]
-    fn new() -> Self {
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
         Ai::default()
     }
 
     fn __init__(&self) {}
+
+    /// The engine's hand-off: which robot this brain drives.
+    fn __ra2_bind__(&mut self, bot: i32) {
+        self.bot = bot;
+    }
 
     fn Activate(&mut self, active: bool) -> bool {
         self.active = active;
@@ -430,40 +553,150 @@ impl Ai {
 
     fn ImmobilityWarning(&self, _id: i32, _on: bool) {}
 
+    /// The engine's tick period, in seconds — `AimToHeading` scales its turning
+    /// rate by it.
+    #[getter]
+    fn tickInterval(&self) -> f32 {
+        crate::AI_TICK_INTERVAL
+    }
+
     fn GetID(&self) -> i32 {
         self.bot
     }
 
+    /// `Input(name, index, value)` — a control-board channel.
+    ///
+    /// `Forward` and `LeftRight` are the drive; anything else (a `Spin` or a paw
+    /// trigger the bot's own AI names) is read back by those scripts.
+    fn Input(&mut self, name: &str, index: i32, value: f32) {
+        self.inputs.insert((name.to_string(), index), value);
+    }
+
+    fn GetInputStatus(&self, name: &str, index: i32) -> f32 {
+        self.inputs
+            .get(&(name.to_string(), index))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    fn GetLocation(&self) -> (f32, f32, f32) {
+        with_bot(self.bot, |b| (b.location.x, b.location.y, b.location.z))
+            .unwrap_or((0.0, 0.0, 0.0))
+    }
+
+    fn GetDirection(&self) -> (f32, f32, f32) {
+        with_bot(self.bot, |b| (b.direction.x, b.direction.y, b.direction.z))
+            .unwrap_or((0.0, 0.0, 1.0))
+    }
+
+    fn GetSpeed(&self) -> f32 {
+        with_bot(self.bot, |b| b.speed).unwrap_or(0.0)
+    }
+
+    fn GetTurning(&self) -> f32 {
+        with_bot(self.bot, |b| b.turning).unwrap_or(0.0)
+    }
+
+    fn IsUpsideDown(&self) -> bool {
+        with_bot(self.bot, |b| b.upside_down).unwrap_or(false)
+    }
+
+    /// The original's hook for robots that can fight on their back; a bot's own
+    /// script overrides it (`AI/Flipper.py`).
+    fn CanDriveUpsideDown(&self, _bot: i32) -> bool {
+        false
+    }
+
+    /// Everyone still in the fight except us.
+    fn GetEnemies(&self) -> Vec<i32> {
+        let st = crate::state();
+        st.bots
+            .iter()
+            .enumerate()
+            .filter(|(i, b)| b.alive && *i as i32 != self.bot)
+            .map(|(i, _)| i as i32)
+            .collect()
+    }
+
+    fn GetDistanceTo(&self, target: (f32, f32, f32)) -> f32 {
+        with_bot(self.bot, |b| {
+            (Vec3::new(target.0, target.1, target.2) - b.location).length()
+        })
+        .unwrap_or(0.0)
+    }
+
+    fn GetDistanceToID(&self, id: i32) -> f32 {
+        let st = crate::state();
+        let (Some(a), Some(b)) = (st.bot(self.bot), st.bot(id)) else {
+            return 0.0;
+        };
+        (b.location - a.location).length()
+    }
+
+    fn GetHeading(&self, reverse: bool) -> f32 {
+        self.own_heading(reverse)
+    }
+
+    fn GetHeadingTo(&self, target: (f32, f32, f32), reverse: bool) -> f32 {
+        self.heading_to(Vec3::new(target.0, target.1, target.2), reverse)
+    }
+
+    fn GetHeadingToID(&self, id: i32, reverse: bool) -> f32 {
+        let target = crate::state().bot(id).map(|b| b.location);
+        match target {
+            Some(t) => self.heading_to(t, reverse),
+            None => 0.0,
+        }
+    }
+
     fn GetNumComponents(&self) -> i32 {
-        0
+        with_bot(self.bot, |b| b.components.len() as i32).unwrap_or(0)
     }
 
-    fn GetComponentType(&self, _i: i32) -> String {
-        String::new()
+    fn GetComponentType(&self, index: i32) -> String {
+        with_bot(self.bot, |b| {
+            b.components
+                .get(index.max(0) as usize)
+                .map(|(c, _)| c.clone())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
     }
 
-    fn GetComponentHealth(&self, _i: i32) -> f32 {
-        0.0
+    fn GetComponentHealth(&self, index: i32) -> f32 {
+        with_bot(self.bot, |b| {
+            b.components
+                .get(index.max(0) as usize)
+                .map(|(_, h)| *h)
+                .unwrap_or(0.0)
+        })
+        .unwrap_or(0.0)
     }
 
-    fn ResetComponents(&self) {}
-
-    fn GetZoneContents(&self, _zone: &str) -> Vec<(i32, bool)> {
-        Vec::new()
-    }
-
+    /// `(component, amount, time)` of the last hit we landed.
     fn GetLastDamageDone(&self) -> (i32, f32, f32) {
-        (0, 0.0, 0.0)
+        with_bot(self.bot, |b| b.last_damage_done).unwrap_or((0, 0.0, 0.0))
     }
 
     fn GetLastDamageReceived(&self) -> (i32, f32, f32) {
-        (0, 0.0, 0.0)
+        with_bot(self.bot, |b| b.last_damage_received).unwrap_or((0, 0.0, 0.0))
     }
-}
 
-/// `plus.AI` subclasses are declared by the scripts; keep the type name usable
-/// for `isinstance` checks from Rust when the AI slice lands.
-#[allow(dead_code)]
-pub fn is_ai(ty: &Bound<'_, PyType>) -> bool {
-    ty.name().map(|n| n == "AI").unwrap_or(false)
+    /// `RegisterSmartZone(name, id)` — "tell me when a robot enters this zone".
+    fn RegisterSmartZone(&mut self, name: &str, id: i32) {
+        if !self.zones.iter().any(|(n, _)| n == name) {
+            self.zones.push((name.to_string(), id));
+        }
+    }
+
+    /// The robots inside a named zone, as `(robot, chassis)` readings.
+    fn GetZoneContents(&self, zone: &str) -> Vec<(i32, bool)> {
+        crate::state()
+            .zone_contents
+            .get(zone)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn ResetComponents(&self) {}
 }

@@ -21,7 +21,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F10 | Chassis skin decals; 16 %-light weight gap | **landed** (weight: see F12) |
 | F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
 | F12 | Component mass when the `.gmf` stores zero | identified (wheels); rule open |
-| F13 | The script layer (M4) | arena half **landed**; AI binding and hazard drive next |
+| F13 | The script layer (M4) | arenas and the shipped AI **landed**; hazard drive next |
 
 ---
 
@@ -951,17 +951,40 @@ paraphrasing them:
   `AddCollisionLine` walls it around each hazard — the mechanism the scripts use
   to keep the AI off the spikes.
 
+**Landed: the AI half, and it changes the game.** `AI.SuperAI` + `AI/Tactics` +
+`Bindings.py` + the per-bot brains all run, and the robots now close to contact
+and trade blows where the stand-in driver only orbited and pinned itself against
+a wall. Eleven brains register and the table picks them by the robot's own
+`Name:` line (`Mud Runner` → `Chopper`, `Tornado` → `Spinner`, `CatFish` →
+`Rammer`); a bot with no entry keeps the stand-in.
+
+Three things had to be got right, and each was a real bug first:
+
+- **The brains run on the game's cadence.** `AI.SuperAI.Tick` refreshes its
+  sensors after 8 of its own ticks "once per second", and `AimToHeading` scales a
+  turning rate by `self.tickInterval` — so a brain tick is **0.125 s** (and
+  `Hazards.Flame`'s four-quarter counting puts the arena's `Tick` at **0.25 s**).
+  Physics steps between them and the controls hold. Running the brains every
+  physics step instead changes the strategies, because `countdownToEvaluation`
+  counts ticks.
+- **The heading convention.** The scripts build a direction from an angle with
+  `vector3(a) = (sin a, 0, cos a)`, so `GetHeading` is `atan2(x, z)` of the
+  facing, `GetHeadingTo` is the *error* (`AimToHeading` takes it directly), and
+  `GetHeading(reverse)` is the same for the reversed facing.
+- **The steer sign.** `Turn(t)` is positive for a positive heading error, while
+  `Robot::drive` applies `yaw = -steer * rate`; the drive has to negate. Getting
+  it wrong makes the robots drive *away* from each other.
+
+Two Python-2 constructs surfaced here that the first survey missed and the
+translator now handles: `xs.sort(cmpfn)` (Python 2's positional comparison
+function, rewritten to `sort(key=cmp_to_key(cmpfn))` with `cmp_to_key` shimmed
+into builtins) and the `tickInterval` attribute the engine owes a brain.
+`AI/*.py`'s `import Gooey` is served by a stub, because the shipped
+`Scripts/Gooey.py` reaches the engine's UI module `giScript`, which is M5.
+
 **Still open, in order:**
 
-1. **The AI half.** `plus.AI` currently exposes the shape (`Activate`, `Tick`,
-   `GetNumComponents`, …) so `AI/` imports and subclasses, but not the queries the
-   strategies drive themselves with — `Input`, `GetLocation`, `GetSpeed`,
-   `GetTurning`, `GetEnemies`, `GetDistanceTo(ID)`, `GetHeading(To(ID))`,
-   `GetLastDamageDone`, `GetZoneContents`, `IsStraightPathClear`. That, plus
-   `AI/Tactics.py`'s strategy set, is what replaces the stand-in driver in
-   `ra2sim::duel`. Note `AI/*.py` also `import Gooey`, which pulls the engine's UI
-   module `giScript`; a stub is needed for the import to succeed.
-2. **Hazards do not move yet.** `AddPrismatic`/`GetHinge` return the right
+1. **Hazards do not move yet.** `AddPrismatic`/`GetHinge` return the right
    controller objects with the right settings (`SetPowerSettings`,
    `Lock`, `SetDirection`, `ApplyForce`, `ApplyTorque`, `SetAutoLock(s)`), but the
    joints are not yet created on the arena's own rigid bodies and `ZoneEvent` is
@@ -974,7 +997,11 @@ paraphrasing them:
 4. **Presentation** — audio, camera motion, particles and the Gooey UI — is
    accepted and *recorded* (a run reports what it dropped) and belongs to M5.
 
-**Verified:** all fourteen stock arenas register from their own modules;
+**Verified:** the shipped AI closes the fight — the test drives Roly Poly against
+Little Metal Friend in the Combat Arena for 20 s at the engine's own 1/60 step and
+requires the closest gap to go under a metre and damage to land (it reaches contact
+by t≈8.5 s and both take hits); all fourteen stock arenas register from their own
+modules;
 `Arenas/box.py`'s configuration arrives intact — 3 cameras, `Some([0.653, 6.894,
 -0.418])` and 10 shadow triangles, a 30×30 grid at 1 m with 207 walls and 24
 hazard cells, and after `HazardsOn(True)` the saw and two spike zones with ids 1,

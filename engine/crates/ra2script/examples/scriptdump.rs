@@ -9,6 +9,8 @@
 
 use std::path::PathBuf;
 
+use pyo3::prelude::*;
+
 use ra2script::ScriptHost;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -75,6 +77,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !d.deferred.is_empty() {
                 println!("   deferred to a later milestone: {:?}", d.deferred);
             }
+        }
+
+        // The AI half: the shipped strategies, and one brain built by name.
+        match host.load_ai(py) {
+            Ok(brains) => {
+                println!("\n{} AI scripts registered: {brains:?}", brains.len());
+                for name in ["Mud Runner", "Tornado", "CatFish"] {
+                    match host.create_ai(py, name, 0) {
+                        Some(brain) => {
+                            let ty = brain.bind(py).get_type().name().unwrap().to_string();
+                            let module = brain
+                                .bind(py)
+                                .get_type()
+                                .module()
+                                .map(|m| m.to_string())
+                                .unwrap_or_default();
+                            println!("   {name:16} -> {module}.{ty}");
+                            let _ = brain.bind(py).call_method1("Activate", (true,));
+                            let _ = brain.bind(py).call_method1("Tick", ());
+                        }
+                        None => println!("   {name:16} -> (no binding)"),
+                    }
+                }
+            }
+            Err(e) => println!("\nAI did not load: {e}"),
         }
         Ok(())
     })

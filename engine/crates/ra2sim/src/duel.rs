@@ -9,6 +9,7 @@ use crate::jolt::JoltBackend;
 use crate::rig;
 use crate::robot::Robot;
 use crate::scene::{self, ArenaScene, USER_ARENA, USER_PROP};
+use crate::scriptai::ScriptAi;
 use crate::sim::{DriveInput, DriveTuning, PropEntity, BOT_FORWARD};
 
 /// A part that has been knocked off a robot.
@@ -48,8 +49,17 @@ pub struct Duel {
     /// Which robot pairs were touching at the end of the last step, so a blow is
     /// dealt when contact *begins* instead of every step it lasts.
     contact_pairs: Vec<bool>,
-    /// Per-robot AI state.
+    /// Per-robot AI state (the stand-in driver).
     ai: Vec<AiState>,
+    /// The game's own AI, when its scripts loaded and the bots are known to it.
+    script_ai: Option<ScriptAi>,
+    /// `(component, amount, time)` of the last blow each robot landed, which is
+    /// what its brain reads back with `GetLastDamageDone` to spot a good hit.
+    last_done: Vec<(i32, f32, f32)>,
+    /// …and the last it took.
+    last_received: Vec<(i32, f32, f32)>,
+    /// Seconds until the brains are run again.
+    brain_timer: f32,
 }
 
 /// What the AI is doing right now.
@@ -81,6 +91,34 @@ impl AiState {
             press: std::env::var("RA2_AI")
                 .map(|v| v.eq_ignore_ascii_case("press"))
                 .unwrap_or(false),
+        }
+    }
+}
+
+/// The shipped AI for these robots, when the game's scripts sit next to the
+/// arena. `None` (with a line on stderr) when they do not load, so a run still
+/// works on a machine without the game data.
+fn script_ai_for(arena_path: &str, robots: &[Robot]) -> Option<ScriptAi> {
+    let path = std::path::Path::new(arena_path);
+    let root = ra2_render::find_game_root(path)?;
+    let script = arena_path.ends_with(".py").then_some(path);
+    let names: Vec<String> = robots
+        .iter()
+        .map(|r| crate::scriptai::bot_name(&r.rig))
+        .collect();
+    match ScriptAi::new(&root, script, &names) {
+        Ok(ai) => {
+            println!(
+                "  shipped AI: {} of {} robots ({} brains)",
+                ai.driven(),
+                names.len(),
+                names.join(", ")
+            );
+            Some(ai)
+        }
+        Err(e) => {
+            eprintln!("ra2sim: shipped AI unavailable ({e}); using the stand-in driver");
+            None
         }
     }
 }
@@ -196,6 +234,11 @@ impl Duel {
             robots.push(robot);
         }
 
+        // The game's own AI, when its scripts are next to the arena and the
+        // robots are in `Bindings.py`. Without it the stand-in driver runs.
+        let script_ai = script_ai_for(arena_path, &robots);
+        let n = robots.len();
+
         let damage_taken = vec![0.0; robots.len()];
         let contact_pairs = vec![false; robots.len() * robots.len()];
         Ok(Duel {
@@ -212,6 +255,10 @@ impl Duel {
             damage_taken,
             contact_pairs,
             ai: bots.iter().map(|_| AiState::new()).collect(),
+            script_ai,
+            last_done: vec![(0, 0.0, 0.0); n],
+            last_received: vec![(0, 0.0, 0.0); n],
+            brain_timer: 0.0,
         })
     }
 
@@ -247,20 +294,104 @@ impl Duel {
 
     /// Advance one step: motors, AI, physics, then combat.
     pub fn step(&mut self, dt: f32) {
-        // Motors and AI.
+        // The game's own AI drives when it loaded; a robot the binding table
+        // does not cover, or a run without the script layer, keeps the stand-in.
+        // Brains run on the game's own cadence — an eighth of a second per tick
+        // (`AI.SuperAI.Tick` refreshes its sensors after eight of them "once per
+        // second") — while the physics runs every step between them.
+        self.brain_timer -= dt;
+        let tick_brains = self.brain_timer <= 0.0;
+        if tick_brains {
+            self.brain_timer = ra2script::AI_TICK_INTERVAL;
+        }
+        let mut drives = self.run_brains(dt, tick_brains);
         for i in 0..self.robots.len() {
             if !self.robots[i].is_alive() {
                 continue;
             }
             let opponent = (i + 1) % self.robots.len();
             let contact = self.robots_touching(i, opponent);
-            let input = self.ai_input(i, opponent, dt, contact);
+            let input = drives
+                .get_mut(i)
+                .and_then(Option::take)
+                .unwrap_or_else(|| self.ai_input(i, opponent, dt, contact));
             // Drive through the motors: the wheel hinges push the robot.
             let tuning = self.tuning;
             self.robots[i].drive(&mut *self.physics, input, &tuning);
         }
 
         self.advance(dt);
+        self.service_requests();
+    }
+
+    /// Publish what the brains can see, then let every brain run a tick.
+    ///
+    /// The engine publishes before the drive is applied and the physics steps,
+    /// so a brain sees the world as it was when the tick began — the same order
+    /// the original's frame loop used.
+    fn run_brains(&mut self, dt: f32, tick: bool) -> Vec<Option<DriveInput>> {
+        if self.script_ai.is_none() {
+            return Vec::new();
+        }
+        let snapshots: Vec<ra2script::BotSnapshot> = (0..self.robots.len())
+            .map(|i| {
+                let mut s = crate::scriptai::snapshot(&*self.physics, &self.robots[i]);
+                s.last_damage_done = self.last_done[i];
+                s.last_damage_received = self.last_received[i];
+                s
+            })
+            .collect();
+        ra2script::publish(snapshots.clone(), self.time, dt);
+        let n = snapshots.len();
+        match self.script_ai.as_ref() {
+            Some(ai) if tick => ai.tick(n),
+            Some(ai) => ai.drives(n),
+            None => Vec::new(),
+        }
+    }
+
+    /// Apply what the scripts asked for during the last tick.
+    ///
+    /// The `plus` free functions run inside Python, so `plus.damage`,
+    /// `plus.force`, `plus.zap` and `plus.eliminatePlayer` queue instead of
+    /// re-entering the simulator; this drains the queue.
+    fn service_requests(&mut self) {
+        for req in ra2script::take_requests() {
+            match req {
+                ra2script::Request::Damage {
+                    bot,
+                    component,
+                    amount,
+                    point,
+                } => {
+                    let (Ok(bot), Ok(component)) =
+                        (usize::try_from(bot), usize::try_from(component))
+                    else {
+                        continue;
+                    };
+                    if bot >= self.robots.len() || component >= self.robots[bot].health.len() {
+                        continue;
+                    }
+                    self.damage_taken[bot] += amount;
+                    if self.robots[bot].damage(component, amount) {
+                        self.break_off(bot, component, point);
+                    } else if component == 0 {
+                        self.buckle_chassis(bot);
+                    }
+                }
+                ra2script::Request::Force { bot, impulse } => {
+                    if let Ok(bot) = usize::try_from(bot) {
+                        if bot < self.robots.len() {
+                            let body = self.robots[bot].body();
+                            self.physics.apply_impulse(body, impulse);
+                        }
+                    }
+                }
+                // `zap` is a presentation effect and `eliminatePlayer` needs the
+                // tournament layer; both are M5.
+                ra2script::Request::Zap { .. } | ra2script::Request::Eliminate { .. } => {}
+            }
+        }
     }
 
     /// Advance one step driving `inputs` (one per robot) instead of the AI.
@@ -337,6 +468,10 @@ impl Duel {
         self.contact_pairs = touching;
         for imp in &impacts {
             self.damage_taken[imp.target] += imp.damage;
+            // The brains spot a "good hit" by matching the component id against
+            // their own weapon list (`AI/__init__.py:CheckForWeaponHits`).
+            self.last_done[imp.attacker] = (imp.by as i32, imp.damage, self.time);
+            self.last_received[imp.target] = (imp.component as i32, imp.damage, self.time);
             if self.robots[imp.target].damage(imp.component, imp.damage) {
                 self.break_off(imp.target, imp.component, imp.point);
             } else if imp.component == 0 {
@@ -681,6 +816,7 @@ mod tests {
     #[test]
     fn a_ram_is_a_blow_and_resting_contact_does_nothing() {
         let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
         let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
         let bot = game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string();
         let setups = [
@@ -734,9 +870,56 @@ mod tests {
     /// is pinned by the lowest of them, and the motion grows with height above
     /// it. All 57 stock bots ship uncrushed, so this is a change we make, not one
     /// we read back.
+    /// M4/F13: the game's own AI closes the fight.
+    ///
+    /// This is the item the whole script layer was for. The stand-in driver only
+    /// ever charges the opponent, so the headline duel orbits and pins itself
+    /// against a wall from about 15 s and the robots never touch. The shipped
+    /// `AI/Rammer.py` and `AI/Whipper.py` brains — reached through
+    /// `AI/Bindings.py` by the bots' own names — drive to the enemy and press:
+    /// the gap goes negative (they are in contact) and both take damage.
+    #[test]
+    fn the_shipped_ai_closes_to_contact() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        assert!(
+            duel.script_ai.is_some(),
+            "the shipped AI did not load; this test is about it"
+        );
+
+        // The engine's own step, as `ra2-duel` runs it. The drive is
+        // dt-sensitive — a coarser step loses the wheel contact a marginal robot
+        // needs (F11) — and the AI is not: it runs on its own eighth-of-a-second
+        // cadence whatever the physics does.
+        let dt = 1.0 / 60.0;
+        let mut closest = f32::MAX;
+        let mut hits = 0.0f32;
+        for _ in 0..(20.0 / dt) as usize {
+            duel.step(dt);
+            closest = closest.min(duel.closest_gap());
+            hits = duel.damage_taken.iter().sum();
+        }
+        assert!(
+            closest < 1.0,
+            "the robots never met; closest gap {closest:.2} m"
+        );
+        assert!(hits > 0.0, "they met but nobody was hit");
+    }
+
     #[test]
     fn a_hurt_chassis_buckles() {
         let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
         let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
         let bot = game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string();
         let setups = [BotSetup {
@@ -829,6 +1012,7 @@ mod tests {
     #[test]
     fn chassis_uvs_come_from_its_face_groups() {
         let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
         let mut paths: Vec<std::path::PathBuf> = Vec::new();
         for team in std::fs::read_dir(game.join("AI"))
             .into_iter()
@@ -935,6 +1119,7 @@ mod tests {
     #[test]
     fn contact_spans_a_robots_own_bodies() {
         let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
         let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
         let bot = game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string();
         let setups = [

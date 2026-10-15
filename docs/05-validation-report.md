@@ -313,8 +313,11 @@ Known, documented, not yet fixed:
     including the navigation map — which comes from the `.map` files the arenas
     ship — so `GetPath` and the hazard-avoidance collision lines are the game's
     own. All fourteen arenas register; `Arenas/box.py`'s cameras, shadow
-    receivers, grid and hazard zones all arrive. The AI half and the hazards
-    actually moving are the next slice. **[LANDED, PARTIAL]**
+    receivers, grid and hazard zones all arrive. The shipped AI is landed too:
+    `AI/Bindings.py` picks each robot's brain by its `Name:`, and the headline
+    duel now closes to contact and trades blows where the stand-in driver orbited
+    and pinned itself against a wall. The hazards actually moving are the next
+    slice. **[LANDED, PARTIAL]**
 
 Each of these is tracked with its evidence and fix path in
 [`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F13).
@@ -361,7 +364,7 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | `ra2-duel` damage model (F7) | **Validated on a deterministic ram.** `RA2_DUEL_DRIVE=ram` with two identical `AI/Team1/Bot0` on the box arena: contact at t≈5 s, an opening blow of **34** points, then ~1 point/s while the two rest against each other. Both ends of that match what the original's scripts say — hazards apply 25, `AI/__init__.py` calls `amount > 10` a "good solid hit" — after two real defects were fixed (contact was tested only between root bodies; a blow was a per-step *integral* of speed, so a fast impact weighed almost nothing) |
 | `ra2-duel` with the AI | **Does not engage.** 30 s of `AI/Team1/Bot0` vs `AI/Team6/Bot2` on the box arena: the pair closes to ~7.7 m, then one robot pins itself against a wall (at `(-11.8, -7.3)` from t = 15 s on, reversing included) and neither touches the other all bout. This is the control layer (M4), not the damage model: the AI is a stand-in that only ever drives at the opponent |
 | 45-bot drive survey | **Bit-identical** to F9 after F10 | the chassis is now dressed from the file's face groups, but only the *skin coordinates* changed, and the survey never looks at a texture |
-| `cargo fmt --check`, `clippy`, tests | clean, 27 tests |
+| `cargo fmt --check`, `clippy`, tests | clean, 28 tests |
 
 ## 7. Recommended order of work
 

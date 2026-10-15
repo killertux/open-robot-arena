@@ -102,9 +102,11 @@ now — a blow priced by the speed the robots arrive with, a spinner's rotor tip
 speed as a rate, contact tested across every body of both robots rather than their
 two roots — which a deterministic ram (`RA2_DUEL_DRIVE=ram`) puts in the range the
 game's own scripts describe (hazards do 25; its AI calls `amount > 10` a good
-hit). The *driver*, though, is a stand-in: it only ever drives at the opponent, so
-the headline duel orbits and pins itself against a wall instead of trading blows.
-The game's own answer is the shipped Python AI, which needs the script layer. A
+hit). The *driver* is now the game's own. `ra2script` runs the shipped Python AI —
+`AI/Bindings.py` picks each robot's brain by its `Name:`, and `AI/SuperAI` plus
+`AI/Tactics` do the rest — so the headline duel closes to contact and trades
+blows, where the stand-in driver it replaced only orbited and pinned itself
+against a wall. A robot the table does not cover keeps that stand-in. A
 wheel's declared `contact` surface is parsed but not yet used as the collider —
 using it makes some robots unable to move. Damage attribution picks the nearest
 part rather than solving per-part contacts, the impact-to-damage conversion is
@@ -121,14 +123,16 @@ where Havok 1.x used `√(µ₁²+µ₂²)`, which we cannot change through the 
 binding. Each item is tracked with its evidence and fix path in
 `docs/05-validation-report.md` §4 and `docs/06-deferred-fidelity.md`.
 
-**M4 — the script layer — is under way.** The game's own arena scripts run
-unmodified: `ra2script` embeds a CPython 3.12, exposes the engine to Python as the
-`plus` module the scripts expect, and translates the shipped Python 2.2 sources as
-they load (including their implicit relative imports). All fourteen stock arenas
-register and configure themselves — cameras, shadow receivers, the navigation map
-read from the `.map` files the arenas ship, the hazard zones and the collision
-lines that keep the AI off them. The AI binding and the hazards actually moving
-are next. See `docs/06-deferred-fidelity.md` F13 for the surface and what is left.
+**M4 — the script layer — is under way.** The game's own scripts run unmodified:
+`ra2script` embeds a CPython 3.12, exposes the engine to Python as the `plus`
+module the scripts expect, and translates the shipped Python 2.2 sources as they
+load (including their implicit relative imports and `list.sort(cmp)`). All
+fourteen stock arenas register and configure themselves — cameras, shadow
+receivers, the navigation map read from the `.map` files the arenas ship, the
+hazard zones and the collision lines that keep the AI off them — and the shipped
+AI drives the duel on the game's own eighth-of-a-second cadence. What is left is
+the arena's `Tick` and the hazard joints: the spikes, saws and hammers are set up
+but do not move yet. See `docs/06-deferred-fidelity.md` F13.
 
 ## Layout
 

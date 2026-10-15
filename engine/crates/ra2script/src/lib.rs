@@ -31,38 +31,80 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use glam::Vec3;
 
 pub mod arena;
+pub mod gooey;
 pub mod host;
 pub mod plus;
 
 pub use arena::{Arena, ArenaData, ArenaDetail, Drive, HingeController, PrismaticController};
 pub use host::ScriptHost;
+pub use plus::Ai;
 
-/// The physics side of the free functions, installed by the engine.
+/// One robot, as the scripts see it.
 ///
-/// The `plus` functions are called *from* Python but operate on the live match:
-/// `plus.getLocation(bot)`, `plus.damage(...)`, `plus.force(...)`,
-/// `plus.rayTest(...)`, `plus.getWeight(bot)`. Rather than have this crate
-/// depend on the simulator, the simulator implements this and installs it.
-pub trait MatchApi: Send {
-    /// World position of a robot's chassis.
-    fn location(&self, bot: i32) -> Vec3;
-    /// Total mass in kg.
-    fn weight(&self, bot: i32) -> f32;
-    /// Whether the robot is on its back.
-    fn upside_down(&self, bot: i32) -> bool;
-    /// Apply `amount` points of damage to one component, from a point.
-    fn damage(&mut self, bot: i32, component: i32, amount: f32, point: Vec3);
-    /// Apply an impulse to a robot.
-    fn force(&mut self, bot: i32, impulse: Vec3);
-    /// Ray test against robots: `(bot, component, point)`, `bot = -1` for none.
-    fn ray_test(&self, from: Vec3, to: Vec3) -> (i32, i32, Vec3);
-    /// Robots currently inside a named SmartZone.
-    fn robots_in_zone(&self, zone: &str) -> Vec<(i32, bool)>;
-    /// Robots that exist and are still in the fight.
-    fn alive(&self) -> Vec<bool>;
-    /// Match clock, in seconds.
-    fn time(&self) -> f32;
+/// The AI asks the engine these questions every tick — where am I, which way am
+/// I facing, how fast, who is the enemy, what did I last hit — so the simulator
+/// publishes a snapshot per robot and the script layer answers from it. Keeping
+/// it data (rather than a trait the simulator implements) means the two sides
+/// never hold each other's locks: the simulator writes snapshots, the scripts
+/// read them, and anything the scripts want to *do* goes on [`Request`].
+#[derive(Clone, Debug, Default)]
+pub struct BotSnapshot {
+    pub alive: bool,
+    /// Chassis position.
+    pub location: Vec3,
+    /// Unit vector the robot faces.
+    pub direction: Vec3,
+    /// Forward speed in m/s (`GetSpeed`).
+    pub speed: f32,
+    /// Yaw rate in rad/s (`GetTurning`).
+    pub turning: f32,
+    pub upside_down: bool,
+    pub mass: f32,
+    /// `(class, health)` per component, in the rig's order.
+    pub components: Vec<(String, f32)>,
+    /// World-space sphere of each component, for `plus.rayTest`.
+    pub spheres: Vec<(Vec3, f32)>,
+    /// `(component, amount, time)` of the last blow this robot landed.
+    pub last_damage_done: (i32, f32, f32),
+    /// …and the last one it took.
+    pub last_damage_received: (i32, f32, f32),
 }
+
+/// Something a script asked the engine to do.
+///
+/// The `plus` functions run inside Python, so they queue; the simulator drains
+/// the queue at the top of the next step.
+#[derive(Clone, Copy, Debug)]
+pub enum Request {
+    /// `plus.damage(bot, component, amount, point)`.
+    Damage {
+        bot: i32,
+        component: i32,
+        amount: f32,
+        point: Vec3,
+    },
+    /// `plus.force(bot, x, y, z)` — an impulse, in N·s.
+    Force { bot: i32, impulse: Vec3 },
+    /// `plus.zap(bot, amount, radius)`.
+    Zap { bot: i32, amount: f32, radius: f32 },
+    /// `plus.eliminatePlayer(bot)`.
+    Eliminate { bot: i32 },
+}
+
+/// How often the game ran its AI scripts, in seconds.
+///
+/// Not a guess: `AI.SuperAI.Tick` refreshes its sensors when its own counter
+/// reaches 8, and its comment says "once per second", and `AimToHeading` scales
+/// a turning rate by `self.tickInterval`. So a brain tick is an eighth of a
+/// second and `tickInterval` is what the strategies multiply time by.
+pub const AI_TICK_INTERVAL: f32 = 0.125;
+
+/// How often the game ran an arena's `Tick`, in seconds.
+///
+/// `Hazards.Flame.Tick` counts by 0.25 and its comment says the flames last "the
+/// end of 1 second" after four of them; `Hazards.Electricity` counts a 5 s
+/// charge down by 0.25, i.e. twenty ticks.
+pub const ARENA_TICK_INTERVAL: f32 = 0.25;
 
 /// The live match: what the free functions and `plus.Arena` refer to.
 pub struct State {
@@ -71,9 +113,14 @@ pub struct State {
     pub arena: Option<Arc<Mutex<ArenaData>>>,
     /// The Python arena instance (the subclass), so the engine can call `Tick`.
     pub arena_object: Option<pyo3::Py<pyo3::PyAny>>,
-    /// The running AI instances.
+    /// The running AI instances, one per robot.
     pub ai: Vec<pyo3::Py<pyo3::PyAny>>,
-    pub physics: Option<Box<dyn MatchApi>>,
+    /// What the scripts can see of each robot.
+    pub bots: Vec<BotSnapshot>,
+    /// What the scripts asked the engine to do.
+    pub requests: Vec<Request>,
+    /// Which robots the engine currently reports inside each registered zone.
+    pub zone_contents: BTreeMap<String, Vec<(i32, bool)>>,
     pub time: f32,
     pub dt: f32,
     pub paused: bool,
@@ -95,7 +142,9 @@ impl State {
             arena: None,
             arena_object: None,
             ai: Vec::new(),
-            physics: None,
+            bots: Vec::new(),
+            requests: Vec::new(),
+            zone_contents: BTreeMap::new(),
             time: 0.0,
             dt: 1.0 / 30.0,
             paused: false,
@@ -114,15 +163,49 @@ impl State {
             self.deferred.push(what.to_string());
         }
     }
+
+    /// The snapshot for a robot, if the engine has published one.
+    pub fn bot(&self, bot: i32) -> Option<&BotSnapshot> {
+        if bot < 0 {
+            return None;
+        }
+        self.bots.get(bot as usize)
+    }
 }
 
 static STATE: Mutex<State> = Mutex::new(State::new());
+
+/// The script layer is process-global — `plus` is a module and the game's own
+/// `Arenas.currentArena` is a module global — so the live match is shared.
+/// Anything that drives a scripted match (a test, a tool) takes this first.
+static SCRIPT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Take the whole script layer for this thread.
+pub fn lock() -> MutexGuard<'static, ()> {
+    SCRIPT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Lock the live match state.
 ///
 /// Keep the guard short: never call back into Python while holding it.
 pub fn state() -> MutexGuard<'static, State> {
     STATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Publish what the scripts can see of the live match, and advance its clock.
+///
+/// The simulator calls this at the top of every step, after it has run the
+/// brains (which read the previous snapshot) and before it applies the drive.
+pub fn publish(bots: Vec<BotSnapshot>, time: f32, dt: f32) {
+    let mut st = state();
+    st.bots = bots;
+    st.time = time;
+    st.dt = dt;
+}
+
+/// Take the requests the scripts queued during the last tick.
+pub fn take_requests() -> Vec<Request> {
+    std::mem::take(&mut state().requests)
 }
 
 /// Point the script layer at a game installation.
@@ -142,11 +225,6 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::MutexGuard;
 
-    /// The script layer is process-global (`plus` is a module, and the game's
-    /// own `Arenas.currentArena` is a module global), so the tests share one
-    /// interpreter and run one at a time.
-    static LOCK: Mutex<()> = Mutex::new(());
-
     /// The (uncommitted) game directory, when present.
     fn game_dir() -> Option<PathBuf> {
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -162,7 +240,7 @@ mod tests {
     }
 
     fn boot() -> Option<(ScriptHost, MutexGuard<'static, ()>)> {
-        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = super::lock();
         let host = ScriptHost::boot(game_dir()?).ok()?;
         Some((host, guard))
     }

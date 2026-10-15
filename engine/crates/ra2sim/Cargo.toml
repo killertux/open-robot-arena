@@ -19,3 +19,4 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 oxijolt = "1.1.0"
 ra2fmt = { path = "../ra2fmt" }
 ra2-render = { path = "../ra2-render" }
+ra2script = { path = "../ra2script" }

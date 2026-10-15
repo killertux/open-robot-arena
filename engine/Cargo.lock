@@ -973,6 +973,7 @@ dependencies = [
  "oxijolt",
  "ra2-render",
  "ra2fmt",
+ "ra2script",
 ]
 
 [[package]]

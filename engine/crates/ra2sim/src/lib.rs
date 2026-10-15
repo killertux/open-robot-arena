@@ -11,6 +11,7 @@ pub mod montage;
 pub mod rig;
 pub mod robot;
 pub mod scene;
+pub mod scriptai;
 pub mod sim;
 
 pub use backend::{

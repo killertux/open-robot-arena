@@ -64,6 +64,9 @@ pub fn load_arena_model(path: &Path) -> Result<BuiltArena, Box<dyn std::error::E
 /// The embedded interpreter and the game scripts loaded into it.
 pub struct ScriptHost {
     root: PathBuf,
+    /// The live brains, `(robot, object)`. Kept here so the Python handles never
+    /// leave this crate.
+    brains: Vec<(usize, Py<PyAny>)>,
 }
 
 impl ScriptHost {
@@ -72,7 +75,13 @@ impl ScriptHost {
     /// `root` is the directory holding `Arenas/`, `AI/`, `Components` and the
     /// rest — the equivalent of the original's working directory.
     pub fn boot(root: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
-        let root = root.as_ref().to_path_buf();
+        // Absolute from here on: the scripts are addressed relative to this
+        // directory and every path in them is relative too, so the interpreter's
+        // `sys.path` entry and the process working directory have to agree.
+        let root = root
+            .as_ref()
+            .canonicalize()
+            .unwrap_or_else(|_| root.as_ref().to_path_buf());
         if !root.join("Arenas").is_dir() {
             return Err(format!(
                 "{} does not look like a Robot Arena 2 install (no Arenas/)",
@@ -97,7 +106,10 @@ impl ScriptHost {
             Ok(())
         })?;
 
-        Ok(ScriptHost { root })
+        Ok(ScriptHost {
+            root,
+            brains: Vec::new(),
+        })
     }
 
     /// The game installation the scripts are running from.
@@ -169,6 +181,185 @@ impl ScriptHost {
         Ok(obj)
     }
 
+    /// Import `AI` and every AI script, which registers them.
+    ///
+    /// `AI/__init__.py` pulls in `Bindings` (the bot→brain table) and, at the
+    /// bottom, calls `Bindings.load`; each per-bot module calls `AI.register` at
+    /// the bottom, so importing them all is what fills the registry — exactly as
+    /// `Scripts/Main.py` does in the game.
+    pub fn load_ai(&self, py: Python<'_>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        crate::gooey::install(py)?;
+        let ai = self.import(py, "AI")?;
+        let dir = self.root.join("AI");
+        let mut modules = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".py") {
+                continue;
+            }
+            let stem = name.trim_end_matches(".py");
+            // `__init__` is already in; `Bindings` and `Tactics` are imported by
+            // it; everything else defines and registers a brain.
+            if matches!(stem, "__init__" | "Bindings" | "Tactics") {
+                continue;
+            }
+            modules.push(format!("AI.{stem}"));
+        }
+        modules.sort();
+        for m in &modules {
+            self.import(py, m)?;
+        }
+        let list = ai.getattr("ai_list")?;
+        let mut names = Vec::new();
+        for item in list.try_iter()? {
+            names.push(item?.getattr("name")?.extract::<String>()?);
+        }
+        Ok(names)
+    }
+
+    /// Create the brain for a robot name, or `None` when the bot has no binding.
+    ///
+    /// `AI.createAIForRobot` looks the name up in `Bindings.py`'s table and
+    /// raises when there is no entry — a custom robot, or a stock one the table
+    /// does not cover — which is a fallback case for the caller, not an error.
+    pub fn create_ai(&self, py: Python<'_>, bot_name: &str, bot: i32) -> Option<Py<PyAny>> {
+        let ai = self.import(py, "AI").ok()?;
+        let obj = match ai.call_method1("createAIForRobot", (bot_name,)) {
+            Ok(o) => o,
+            Err(e) => {
+                e.restore(py);
+                let _ = PyErr::fetch(py);
+                crate::state()
+                    .log
+                    .push(format!("no AI binding for {bot_name:?}"));
+                return None;
+            }
+        };
+        if obj.is_none() {
+            return None;
+        }
+        obj.call_method1("__ra2_bind__", (bot,)).ok()?;
+        Some(obj.unbind())
+    }
+
+    /// Boot, then load the game's arenas and its shipped AI.
+    ///
+    /// The order matters: `AI/__init__.py` reads `Arenas`, and a brain asks
+    /// `Arenas.currentArena` for its navigation map, so the arenas come first and
+    /// `arena_script` (when the match was given one) is instantiated before any
+    /// brain is built.
+    pub fn boot_with_scripts(
+        root: impl AsRef<Path>,
+        arena_script: Option<&Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let host = ScriptHost::boot(root)?;
+        Python::with_gil(|py| -> Result<(), Box<dyn std::error::Error>> {
+            host.load_arenas(py)?;
+            if let Some(script) = arena_script {
+                if let Err(e) = host.create_arena_for_script(py, script) {
+                    eprintln!("ra2script: {}: {e}", script.display());
+                }
+            }
+            host.load_ai(py)?;
+            Ok(())
+        })?;
+        Ok(host)
+    }
+
+    /// Build and keep a brain for a robot, if `Bindings.py` knows the name.
+    pub fn add_brain(&mut self, bot_name: &str, bot: i32) {
+        Python::with_gil(|py| {
+            let Some(brain) = self.create_ai(py, bot_name, bot) else {
+                return;
+            };
+            if let Err(e) = brain.bind(py).call_method1("Activate", (true,)) {
+                eprintln!("ra2script: activating the {bot_name} brain: {e}");
+            }
+            self.brains.push((bot.max(0) as usize, brain));
+        });
+    }
+
+    /// How many robots the shipped AI is driving.
+    pub fn brain_count(&self) -> usize {
+        self.brains.len()
+    }
+
+    /// Run every brain one tick and read back its drive, `(robot, (throttle,
+    /// steer))`.
+    pub fn tick_brains(&self) -> Vec<(usize, (f32, f32))> {
+        Python::with_gil(|py| {
+            self.brains
+                .iter()
+                .filter_map(|(i, brain)| {
+                    if let Err(e) = brain.bind(py).call_method0("Tick") {
+                        report_once(&format!("brain {i} Tick failed: {e}"));
+                        return None;
+                    }
+                    let d = ra2script_read_drive(brain, py);
+                    if d.is_none() {
+                        report_once(&format!("brain {i} is not a plus.AI"));
+                    }
+                    d.map(|d| (*i, d))
+                })
+                .collect()
+        })
+    }
+
+    /// Read the channels each brain last set, without running one.
+    ///
+    /// A brain is designed for an eighth of a second per tick (see
+    /// [`crate::AI_TICK_INTERVAL`]), while the physics runs many times per tick;
+    /// in between, the controls simply hold.
+    pub fn read_drives(&self) -> Vec<(usize, (f32, f32))> {
+        Python::with_gil(|py| {
+            self.brains
+                .iter()
+                .filter_map(|(i, brain)| ra2script_read_drive(brain, py).map(|d| (*i, d)))
+                .collect()
+        })
+    }
+
+    /// `Arenas.<script>`'s arena class, instantiated and made current.
+    ///
+    /// The arena scripts are addressed by file (`Arenas/box.py`), the game by
+    /// name (`"Combat Arena"`); the class's `__module__` is the bridge, and the
+    /// class then goes through the same `plus.setArena` path the game's picker
+    /// uses, so `Arenas.currentArena` — which the AI reads for its pathfinding —
+    /// is the scripted one.
+    pub fn create_arena_for_script(
+        &self,
+        py: Python<'_>,
+        script: &Path,
+    ) -> Result<Option<Py<PyAny>>, Box<dyn std::error::Error>> {
+        let stem = match script.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let module = format!("Arenas.{stem}");
+        let arenas = self.import(py, "Arenas")?;
+        let classes = arenas.getattr("arenas")?;
+        let mut chosen: Option<Bound<'_, PyAny>> = None;
+        for item in classes.try_iter()? {
+            let item = item?;
+            let name: String = item.getattr("__module__")?.extract()?;
+            if name == module {
+                chosen = Some(item);
+                break;
+            }
+        }
+        let Some(class) = chosen else {
+            return Ok(None);
+        };
+        let instance = class.call0()?;
+        let plus = self.import(py, "plus")?;
+        plus.call_method1("setArena", (instance.clone(),))?;
+        arenas.setattr("currentArena", instance.clone())?;
+        crate::state().arena_object = Some(instance.clone().unbind());
+        instance.call_method0("AddShadowReceivers")?;
+        Ok(Some(instance.unbind()))
+    }
+
     /// Enable the live arena's hazards (`HazardsOn(True)`).
     pub fn hazards_on(&self, py: Python<'_>, on: bool) -> PyResult<bool> {
         let arena = crate::state()
@@ -221,6 +412,20 @@ impl ScriptHost {
     }
 }
 
+fn ra2script_read_drive(brain: &Py<PyAny>, py: Python<'_>) -> Option<(f32, f32)> {
+    crate::plus::read_drive(brain, py)
+}
+
+/// Report a script fault once. A broken brain fails every tick, and a duel runs
+/// hundreds of them.
+fn report_once(message: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if !REPORTED.swap(true, Ordering::Relaxed) {
+        eprintln!("ra2script: {message}");
+    }
+}
+
 /// Install the translating loader for the game's Python-2 sources.
 fn install_legacy(py: Python<'_>, root: &Path) -> PyResult<()> {
     let module = PyModule::from_code(
@@ -229,7 +434,9 @@ fn install_legacy(py: Python<'_>, root: &Path) -> PyResult<()> {
         c_str!("ra2_legacy.py"),
         c_str!("ra2_legacy"),
     )?;
-    let roots: Vec<String> = ["Arenas", "AI"]
+    // `Scripts/Lib` is the shipped Python 2.2 standard library and is excluded:
+    // the host's own is used instead, behind `legacy.py`'s shim.
+    let roots: Vec<String> = ["Arenas", "AI", "Scripts"]
         .iter()
         .map(|d| root.join(d).to_string_lossy().to_string())
         .collect();

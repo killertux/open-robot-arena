@@ -52,8 +52,9 @@ local/           # (git-ignored) game files + converted cache
   `ra2-duel` runner)*.
 - **M4 — Script layer.** 🚧 The engine side of the `plus`/`Arenas`/`AI` object
   model, on an embedded CPython 3, running the game's own Python 2 sources
-  unmodified *(implemented as `ra2script`; the arena surface has landed, the AI
-  binding is next — see F13)*.
+  unmodified. The arena surface and the shipped AI have landed — with the AI in
+  place the headline duel closes and trades blows — and the hazards actually
+  firing are next *(implemented as `ra2script`; see F13)*.
 - **M5 — Game shell.** Workshop (build a robot), tournaments, menus.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
 
@@ -91,6 +92,33 @@ local/           # (git-ignored) game files + converted cache
 - **The engine calls back in.** `Arena.Tick` each frame, `Arena.ZoneEvent` when a
   robot enters one of the registered SmartZones, `AddShadowReceivers` once after
   construction — the same sequence the original drives.
+- **The AI is the game's own, and it is what makes a fight a fight.** The
+  stand-in driver in `ra2sim::duel` only ever charges, so the headline duel
+  orbited and pinned itself against a wall. With `AI.SuperAI` + `AI.Tactics` +
+  the per-bot brain `Bindings.py` picks by the robot's own `Name:` line, the
+  robots close to contact and trade blows: the gap goes negative and both take
+  damage. A bot the table does not cover keeps the stand-in.
+- **The brains run on the game's cadence, not the physics'.** `AI.SuperAI.Tick`
+  refreshes its sensors when its own counter reaches 8 and its comment says
+  "once per second", and `AimToHeading` multiplies a turning rate by
+  `self.tickInterval` — so a brain tick is an eighth of a second and the physics
+  steps many times between them, with the controls held. (`Hazards.Flame` and
+  `Hazards.Electricity` count the same way and put the arena's own `Tick` at a
+  quarter second.) Getting this wrong changes the AI's behaviour, because its
+  `countdownToEvaluation` counts ticks.
+- **Two conventions had to be read off the scripts, not guessed.** The scripts
+  build a direction from an angle with `vector3(a) = (sin a, 0, cos a)`, so
+  `GetHeading` is `atan2(x, z)` of the facing and `GetHeadingTo` is the *error*
+  (`AimToHeading` receives it directly). And `Turn(t)` is positive for a
+  *positive* heading error while `Robot::drive` applies `yaw = -steer * rate`, so
+  the drive negates — the stand-in does the same, and getting it wrong sends the
+  robots away from each other.
+- **The engine answers, the scripts act.** The simulator publishes a
+  [`ra2script::BotSnapshot`] per robot each step (position, facing, speed, yaw
+  rate, mass, per-component class and health, component spheres for `rayTest`)
+  and drains a queue of [`ra2script::Request`]s afterwards (`plus.damage`,
+  `plus.force`, `plus.zap`). Keeping it data rather than a callback trait means
+  neither side holds the other's lock while Python runs.
 - **Verification.** `ra2script`'s tests assert that all fourteen stock arenas
   register, that `Arenas/box.py`'s configuration arrives intact (3 cameras, 10
   shadow triangles, the 30×30 map with its 207 walls and 24 hazard cells, and the

@@ -283,10 +283,52 @@ def _rewrite_relative(src, siblings):
     return "".join(out)
 
 
+def _rewrite_sort(src):
+    """`xs.sort(cmpfn)` -> `xs.sort(key=cmp_to_key(cmpfn))`.
+
+    Python 2's `sort` took a comparison function positionally; Python 3 takes a
+    key. `AI/SuperAI.Evaluate` and `Arenas.enumAvailable` both rely on the old
+    form, and no runtime shim can reach a built-in method, so it is source-level.
+    """
+    spans = _spans(src)
+
+    def blocked(a, b):
+        return any(a < e and b > s for s, e in spans)
+
+    needle = ".sort("
+    out, last, i = [], 0, 0
+    while True:
+        i = src.find(needle, i)
+        if i < 0:
+            break
+        start = i + len(needle)
+        j, depth = start, 1
+        while j < len(src) and depth:
+            if src[j] == "(":
+                depth += 1
+            elif src[j] == ")":
+                depth -= 1
+            j += 1
+        inner = src[start:j - 1]
+        head = inner.split("(", 1)[0]
+        if inner.strip() and "=" not in head and not blocked(i, j):
+            out.append(src[last:start])
+            out.append("key=cmp_to_key(")
+            out.append(inner)
+            out.append(")")
+            last = j - 1
+        i = j
+    if not out:
+        return src
+    out.append(src[last:])
+    return "".join(out)
+
+
 def translate(src, siblings=None):
     """Rewrite the Python-2 constructs in `src`. Returns new source."""
     out = _rewrite_code(src, _RULES)
     out = _rewrite_relative(out, siblings)
+    out = _rewrite_sort(out)
     out = out.replace("<>", "!=")
     return _apply(out, _statement_edits(out))
 
@@ -350,6 +392,8 @@ def _install_shim():
     bind(builtins, "reduce", functools.reduce)
     bind(builtins, "apply", lambda f, a=(), kw=None: f(*a, **(kw or {})))
     bind(builtins, "StandardError", Exception)
+    # `list.sort(cmp)` becomes `sort(key=cmp_to_key(cmp))` in the translation.
+    bind(builtins, "cmp_to_key", functools.cmp_to_key)
     if not hasattr(sys, "maxint"):
         sys.maxint = sys.maxsize
 
