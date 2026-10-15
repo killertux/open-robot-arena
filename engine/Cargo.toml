@@ -6,6 +6,7 @@ members = [
     "crates/ra2-render",
     "crates/ra2sim",
     "crates/ra2script",
+    "crates/ra2ui",
 ]
 
 [workspace.package]

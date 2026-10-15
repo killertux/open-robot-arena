@@ -356,8 +356,32 @@ Known, documented, not yet fixed:
     assumed away: three bot-lab screens carry `0 0 1.#INF 1.#INF` as an image's
     texture rect — the Microsoft runtime's spelling of infinity, written into the
     layout by the game's own editor — and one `Position` flag slot holds
-    `1242948`. **[IN PROGRESS]** — the layout resolver, the renderer, the fonts
-    and the `giScript`/`Gooey` Python surface are the rest of M5.
+    `1242948`.
+
+    The layout *model* has landed too (`ra2ui`), and it is measured rather than
+    assumed. `Position`/`Size` are two axes each of an amount and a
+    fraction-or-pixels flag — the two states the binary's own field table names
+    `To Self` and `To Parent` — and `Alignment` is a 3×3 anchor (`1`/`2`/`4`
+    left/centre/right, `8`/`16`/`32` top/middle/bottom) saying which point of the
+    widget goes at that position. Every one of the 841 `Alignment` values in the
+    shipped corpus is one of those nine combinations and nothing else, and the
+    worked cases agree three ways in `mainmenu.gib`: the window is left|top at
+    `0 0` and covers the screen, `logo grp` is centre|top at `0.5 0.07` and lands
+    512×76 at x=384, y=70, `sawback grp` is centre|middle at `0.5 0.5` and lands
+    centred, and `common buts` is centre|bottom at `0.5 1` and lands flush with
+    the screen's bottom edge — as does a button, in pixels, inside the centred
+    backdrop group. Split frames hand their children two panes
+    (`Horizontal`/`Master`/`MasterSize`, corroborated by the screens' own child
+    names: `"LR split"` holding `"left slot"`, `"Left TB split"` holding
+    `"UL slot"`). All 3590 widgets resolve to finite frames and 71 of the 116
+    files place entirely on screen; the 101 that do not are *fragments* (files a
+    slot loads, like `botlab/control_cell.gib`, which are not meant to be placed
+    against the screen) and children whose declared `Size` is taller than the
+    pane they sit in, which the game clips where this resolver does not yet.
+    **[IN PROGRESS]** — what remains is text metrics from the `fg_*.giff` fonts,
+    clip modes, the self-laying-out containers (`ListBox`, `Grid`,
+    `OptionGroup`), the 2D renderer, the `giScript`/`Gooey` Python surface and
+    the workshop.
 
 Each of these is tracked with its evidence and fix path in
 [`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F13).

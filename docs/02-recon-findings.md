@@ -162,6 +162,40 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   and `"player icon img"` are in the binary, matching `Name` fields in
   `UI/multiplayer/*.gib`.
 
+### What the numbers mean (the layout model)
+
+- **`Position x xf y yf` / `Size w wf h hf`**, each axis an amount and a flag. The
+  flag is `0` (pixels) or `1` (a fraction of the parent's extent along that axis);
+  the binary names the two states `To Self` and `To Parent` right where its field
+  table sits. An amount with the flag set is ≤ 1 in every shipped file. The one
+  exception is a flag slot holding `1242948` in `hq_league.gib` — a typo in the
+  data.
+- **`Alignment` is a 3×3 anchor** on the widget itself: `1`/`2`/`4` are
+  left/centre/right and `8`/`16`/`32` are top/middle/bottom, or-ed together. It
+  says which point of the widget is put at the resolved `Position`. Across all
+  116 files every one of the 841 widgets that carries the field uses one of the
+  nine combinations and nothing else — the measurement that pins it. The worked
+  cases that confirm the reading are all in `mainmenu.gib`: the `Window` is
+  `9` (left|top) at `0 0` with `Size 1 1` and covers the screen; `logo grp` is
+  `10` (centre|top) at `0.5 0.07` and lands 512×76 at x=384, y=70; `sawback grp`
+  is `18` (centre|middle) at `0.5 0.5` and lands 640×480 centred; `common buts` is
+  `34` (centre|bottom) at `0.5 1` and lands flush with the screen's bottom edge.
+- **A screen file is a forest, not a tree.** The `Window` in `mainmenu.gib` holds
+  only its first four children; the buttons and the button strip after it are
+  *top-level siblings*, placed against the screen. The `Notes` on `armor.gib`'s
+  split frame — *"load this into content slot"* — is the other half of the same
+  idea: a file can also be a fragment that a slot loads, and those are not
+  placed against the screen at all.
+- **`SplitFrame`** hands its two children panes: `Horizontal true` puts slot 0 on
+  the left and slot 1 on the right, `false` puts slot 0 on top; `Master` names
+  the slot that `MasterSize` sizes (a fraction of the frame along the split
+  axis) and the other takes the remainder. The screens' own names are the check —
+  `"LR split"` is horizontal with `"left slot"` first, `"Left TB split"` is
+  vertical with `"UL slot"` first, and `botlabwin.gib`'s vertical split has a
+  67-pixel-tall `"Slot0"` bar on top.
+- A zero `Size` is the editor's *automatic* size: a `Text` is zero-sized and takes
+  its extent from its font (the `fg_*.giff` metrics, not decoded yet).
+
 ### Other
 - Textures: BMP / TGA / JPG (mostly 256²/128²); many uncompressed TGA.
 - Audio: WAV (273) + MP3 (3).

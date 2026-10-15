@@ -33,6 +33,7 @@ engine/
     ra2fmt/      # pure data: GMI(.gmf), GMA(ascii), BOT, CFL3(.cfz), GIB, textures
     ra2sim/      # physics (Jolt behind a PhysicsBackend trait), scene assembly, sim
     ra2script/   # the plus/Arenas/AI object model on an embedded CPython 3
+    ra2ui/       # the shell's layout model: .gib widget trees -> rectangles
     ra2-render/  # wgpu renderer + scene graph (lib + `ra2-render` CLI)
     ra2app/      # winit app: menus, workshop, matches                            (planned)
 tools/           # python tooling (format probing, conversion, diffs)
@@ -56,13 +57,38 @@ local/           # (git-ignored) game files + converted cache
   with the AI in place the headline duel closes and trades blows, and standing on
   a registered SmartZone fires the arena's own spikes *(implemented as
   `ra2script` + `ra2sim::hazards`; see F13)*.
-- **M5 — Game shell.** 🚧 Under way. The shell's *layout model* is recovered: a
-  `.gib` reader (`ra2fmt::gib`) parses all 116 shipped screens — the main menu,
-  team HQ, the bot lab, the HUD, every dialog — into widget trees, with the
-  geometry flags, attachments and file references resolved. Still to come: the
-  layout resolver (turning `Position`/`Size`/`Alignment` into rectangles), the 2D
-  renderer and fonts, the `giScript`/`Gooey` Python surface, and the workshop.
+- **M5 — Game shell.** 🚧 Under way, and the layout now places. A `.gib` reader
+  (`ra2fmt::gib`) parses all 116 shipped screens — the main menu, team HQ, the
+  bot lab, the HUD, every dialog — into widget trees, and `ra2ui` resolves those
+  trees into rectangles: `Position`/`Size` with their fraction-or-pixels flags,
+  `Alignment` as the 3×3 anchor, split frames into their two panes. All 3590
+  widgets place with finite frames, 71 of the 116 files entirely on screen, and
+  the main menu's logo, backdrop and button strip land where its own art says
+  they should. Still to come: text metrics from the `fg_*.giff` fonts, clip
+  modes, the containers that lay their own children out (`ListBox`, `Grid`,
+  `OptionGroup`), the 2D renderer, the `giScript`/`Gooey` Python surface, and the
+  workshop.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
+
+## M5 design notes
+
+- **The screens are data, so the screens are what run.** As with the arenas and
+  the AI, the shell's screens are not re-authored: every menu, the whole bot lab,
+  the team HQ and the in-match HUD are the game's own `.gib` files, parsed and
+  placed. What is ours is the reader (`ra2fmt::gib`) and the layout model
+  (`ra2ui`), and both are pinned by the corpus rather than by example — the
+  reader by parsing all 116 files into a closed vocabulary, the layout by
+  resolving all 3590 widgets and checking that 71 files place entirely on screen
+  and that the main menu's own art lands where it says it should.
+- **Rules are measured, and the measurement is kept.** `Alignment` is a 3×3
+  anchor because every one of the 841 values in the corpus is one of those nine
+  combinations, and that check is a test rather than a comment. Where a rule is
+  only *inferred* — the split frame's slot order, the anchor's y-down frame —
+  the evidence that supports it is written down next to it.
+- **What is not resolved is not guessed.** Zero `Size` (the editor's automatic
+  size, which needs font metrics), `ClipMode`, and the containers that lay their
+  own children out are named as unresolved rather than approximated, and the
+  corpus test records how many widgets that affects.
 
 ## M4 design notes
 

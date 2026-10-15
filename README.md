@@ -151,7 +151,18 @@ anything:
 cargo run -q -p ra2-cli -- gib local/game/UI/mainmenu/mainmenu.gib
 ```
 
-What remains of M5 is the layout resolver, the 2D renderer and fonts, the
+`ra2ui` then *places* them: `Position` and `Size` carry a per-axis flag for
+fraction-of-parent versus pixels, `Alignment` is a 3×3 anchor, and a split frame
+hands its two children panes. Every one of the 3590 widgets resolves to a frame,
+71 of the 116 files place entirely on screen, and the main menu's logo, backdrop
+and button strip land exactly where its own artwork says they should:
+
+```bash
+cargo run -q -p ra2ui --example uidump -- local/game/UI/mainmenu/mainmenu.gib
+```
+
+What remains of M5 is text metrics from the `fg_*.giff` fonts, clip modes, the
+containers that lay out their own children, the 2D renderer, the
 `giScript`/`Gooey` Python surface the shell's own scripts call, and the workshop
 itself.
 
@@ -161,7 +172,8 @@ itself.
 docs/      Design notes, reverse-engineering findings, format specs
 tools/     Our own analysis/extraction/build scripts (Python)
 engine/    The native engine (Rust workspace: ra2fmt, ra2-cli, ra2-render,
-           ra2sim, ra2script — the script layer on an embedded CPython)
+           ra2sim, ra2script — the script layer on an embedded CPython — and
+           ra2ui, the shell's layout model)
 local/     (git-ignored) original game files and extracted data
 ```
 

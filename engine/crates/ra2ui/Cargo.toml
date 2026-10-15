@@ -1,0 +1,9 @@
+[package]
+name = "ra2ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robot Arena 2's shell: the layout model of its .gib screens"
+
+[dependencies]
+ra2fmt = { path = "../ra2fmt" }
