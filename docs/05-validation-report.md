@@ -342,6 +342,23 @@ Known, documented, not yet fixed:
     own `Activate` now, without which those floors never moved at all. What is left
     is presentation (M5). **[LANDED]**
 
+21. **The shell's layout model — started (M5).** The first piece of the game shell
+    is the thing every screen is written in: `.gib`, the game's own GUI layout
+    language. `ra2fmt::gib` reads it and `ra2 gib <screen>` prints the tree, so a
+    screen's structure, its art references and its button notes are readable
+    without the game. All 116 shipped screens parse — 3590 widgets — with a closed
+    vocabulary of nineteen widget kinds and five attachments, and the corpus test
+    pins that vocabulary, the counts, and the two things that are easy to get
+    wrong: that a block is a *widget* exactly when it carries `NumChildren` (which
+    is also what decides that an attachment is not one of its children), and that
+    `Position`/`Size` carry a per-axis flag saying whether the amount is a fraction
+    of the parent or a pixel count. Two data quirks are handled rather than
+    assumed away: three bot-lab screens carry `0 0 1.#INF 1.#INF` as an image's
+    texture rect — the Microsoft runtime's spelling of infinity, written into the
+    layout by the game's own editor — and one `Position` flag slot holds
+    `1242948`. **[IN PROGRESS]** — the layout resolver, the renderer, the fonts
+    and the `giScript`/`Gooey` Python surface are the rest of M5.
+
 Each of these is tracked with its evidence and fix path in
 [`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F13).
 

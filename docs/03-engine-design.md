@@ -56,7 +56,12 @@ local/           # (git-ignored) game files + converted cache
   with the AI in place the headline duel closes and trades blows, and standing on
   a registered SmartZone fires the arena's own spikes *(implemented as
   `ra2script` + `ra2sim::hazards`; see F13)*.
-- **M5 — Game shell.** Workshop (build a robot), tournaments, menus.
+- **M5 — Game shell.** 🚧 Under way. The shell's *layout model* is recovered: a
+  `.gib` reader (`ra2fmt::gib`) parses all 116 shipped screens — the main menu,
+  team HQ, the bot lab, the HUD, every dialog — into widget trees, with the
+  geometry flags, attachments and file references resolved. Still to come: the
+  layout resolver (turning `Position`/`Size`/`Alignment` into rectangles), the 2D
+  renderer and fonts, the `giScript`/`Gooey` Python surface, and the workshop.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
 
 ## M4 design notes

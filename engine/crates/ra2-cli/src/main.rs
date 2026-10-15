@@ -44,6 +44,13 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["gib", file] => match gib(file) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
         _ => {
             eprintln!("usage:");
             eprintln!("  ra2 info <file.gmf> [...]");
@@ -51,9 +58,83 @@ fn main() -> ExitCode {
             eprintln!("  ra2 cfz  <file.cfz> list");
             eprintln!("  ra2 cfz  <file.cfz> cat <entry>");
             eprintln!("  ra2 arena <script.py>");
+            eprintln!("  ra2 gib  <layout.gib>");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Print a `.gib` screen's widget tree, one widget a line, indented.
+fn gib(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(path)?;
+    let gib = ra2fmt::gib::parse(&text)?;
+    println!(
+        "T {} — {} top-level block(s)",
+        gib.version,
+        gib.blocks.len()
+    );
+    fn show(w: &ra2fmt::gib::Widget, depth: usize) {
+        use std::fmt::Write;
+        let mut line = String::new();
+        for _ in 0..depth {
+            line.push_str("  ");
+        }
+        let _ = write!(line, "{}", w.kind.name());
+        if !w.name().is_empty() {
+            let _ = write!(line, " {:?}", w.name());
+        }
+        if let Some(image) = w.filename() {
+            let _ = write!(line, " [{image}]");
+        }
+        if let Some(text) = w.text() {
+            if !text.is_empty() {
+                let _ = write!(line, " \"{text}\"");
+            }
+        }
+        if let Some(uv) = w.uv() {
+            let _ = write!(line, " uv={uv:?}");
+        }
+        if let Some(rect) = w.size() {
+            let _ = write!(
+                line,
+                " size=[{} {}]",
+                show_len(rect.first),
+                show_len(rect.second)
+            );
+        }
+        if !w.visible() {
+            line.push_str(" hidden");
+        }
+        if w.id() >= 0 {
+            let _ = write!(line, " id={}", w.id());
+        }
+        for a in &w.attachments {
+            let _ = write!(line, " +{}", a.kind.name());
+        }
+        if !w.notes().is_empty() {
+            let _ = write!(line, "  // {}", w.notes());
+        }
+        println!("{line}");
+        for c in &w.children {
+            show(c, depth + 1);
+        }
+    }
+    fn show_len(l: ra2fmt::gib::Length) -> String {
+        if l.fraction {
+            format!("{:.3}·", l.amount)
+        } else {
+            format!("{}px", l.amount)
+        }
+    }
+    for block in &gib.blocks {
+        match block {
+            ra2fmt::gib::Block::Widget(w) => show(w, 0),
+            ra2fmt::gib::Block::Attachment(a) => {
+                println!("+{} (fragment)", a.kind.name());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn arena(path: &str) -> Result<(), Box<dyn std::error::Error>> {

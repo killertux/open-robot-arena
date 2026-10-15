@@ -139,6 +139,22 @@ settings), and standing in a registered SmartZone reaches the script's own
 `ZoneEvent` — the spikes fire, and they hurt. What is left of M4 is presentation.
 See `docs/06-deferred-fidelity.md` F13.
 
+**M5 — the game shell — has started.** Every screen in the shell is written in
+the game's own GUI layout language, `.gib`: the main menu, the team HQ, the whole
+bot lab, the in-match HUD. `ra2fmt::gib` reads all 116 of them into widget trees —
+nineteen widget kinds, five kinds of attachment, and the geometry flags that say
+whether an offset is a fraction of its parent or a pixel count — so a screen's
+structure, art references and button notes can be printed without launching
+anything:
+
+```bash
+cargo run -q -p ra2-cli -- gib local/game/UI/mainmenu/mainmenu.gib
+```
+
+What remains of M5 is the layout resolver, the 2D renderer and fonts, the
+`giScript`/`Gooey` Python surface the shell's own scripts call, and the workshop
+itself.
+
 ## Layout
 
 ```

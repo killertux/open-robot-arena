@@ -3,15 +3,18 @@
 //! Currently implemented:
 //! - [`gmi`] — `.gmf` binary meshes (GMI): geometry, materials, attachment
 //!   points and embedded Havok physics metadata.
+//! - [`gib`] — `.gib` GUI layouts: the shell's widget trees, as the game's own
+//!   editor wrote them.
 //!
-//! Planned: `.bot` robots, `.cfz` (CFL3) archives, `.gib` GUI layouts,
-//! `*_txt.gmf` (GMA ASCII) meshes.
+//! Planned: `.bot` robots, `.cfz` (CFL3) archives, `*_txt.gmf` (GMA ASCII)
+//! meshes.
 
 pub mod arena;
 pub mod armor;
 pub mod bot;
 pub mod cfl;
 pub mod component;
+pub mod gib;
 pub mod gmi;
 
 pub use arena::ArenaScript;
@@ -19,6 +22,7 @@ pub use armor::ArmourDef;
 pub use bot::{Armour, Bot, BotMesh, Chassis, Component};
 pub use cfl::Cfl;
 pub use component::ComponentDef;
+pub use gib::{Axes, Block, Field, Gib, Length, Widget, WidgetKind};
 pub use gmi::{GmiScene, Material, Mesh, RigidBody, SceneObject, SimulationObject, Texture};
 
 /// Error type shared by all format parsers.

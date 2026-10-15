@@ -114,8 +114,38 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   defs etc. **`ra2fmt::cfl` reads these natively** (`ra2 cfz <f> list|cat`); no
   external `uncfl.exe` needed.
 
-### `.gib` — GUI layout scripts
-- **Plain text** (`T 1.05`, `[Window]`, `ReportedPos …`, `Draggable`, `Align …`).
+### `.gib` — GUI layouts (the shell's screens)
+- **Plain text, CRLF.** `T 1.09` then a sequence of `[Kind]` blocks. Every
+  screen in the shell is one: main menu, team HQ, the whole bot lab, the
+  in-match HUD, the dialogs — 116 files, 3590 widgets.
+- A block is `[Kind]` + field lines. A field line is a label, a space, and a
+  value **to end of line**, so values may contain spaces (`Name New [Image]`) or
+  be empty (`Notes `). Two blocks carry one **unlabelled** value: an `Image`'s
+  texture rect (four numbers, after `_Position`) and a `Glyph`'s (one, after
+  `Compositor`) — 1539 and 40 of each, one per widget of that kind.
+- **A block is a widget exactly when it carries `NumChildren`**; the five that
+  never do — `Background`, `Border`, `Caption`, `DisplayBox`, `Scroller` — attach
+  to the widget before them instead of being counted among its children. Nothing
+  may depend on field order (`NumChildren` can be last or come before
+  `Name`/`ID`/…); what holds in all 116 files is that a widget's own fields all
+  come before its children, and that no child block is followed by a field.
+- 19 widget kinds: `Window`, `Group`, `SplitFrame`, `Image`, `Text`, `TextBox`,
+  `Button`, `CheckBox`, `Rectangle`, `Lines`, `Slider`, `ScrollBar`, `ListBox`,
+  `Grid`, `OptionGroup`, `DropDown`, `Placeholder`, `Proxy`, `Glyph`.
+- `Position x x_is_fraction y y_is_fraction` and `Size w w_is_fraction
+  h h_is_fraction`: **the flag slot says whether the amount is a fraction of the
+  parent or a pixel count** (`Position 237 0 191 0` is pixels,
+  `ReportedPos 0.5 1 0.07 1` is anchored).
+- `Button`/`CheckBox` carry `OnClick`, `RepeatRate`, `RepeatDelay` and up to four
+  `StateImage` lines (index, enabled, image); a button's four `Image` children are
+  its states, and the caption is a sibling `Text`.
+- `_Filename` is relative to `UI/`; the leading `\` or `.\` is noise
+  (`\mainmenu\ra2_logo.tga`, `.\botlab\blueprint.bmp`).
+- Data quirks worth knowing: `1.#INF` (and `1.#IND`) appear as *numbers* in three
+  bot-lab screens — the Microsoft runtime's spelling, written into a texture
+  rect; and one `Position` flag slot holds `1242948` in `hq_league.gib`.
+- Fonts are `fg_*.giff` inside `RA2.cfz` (nine of them, referenced by `_Font`),
+  not loose files.
 
 ### Other
 - Textures: BMP / TGA / JPG (mostly 256²/128²); many uncompressed TGA.
