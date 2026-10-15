@@ -524,6 +524,23 @@ impl Robot {
         }
     }
 
+    /// The mass the chassis body itself carries.
+    ///
+    /// The original is one rigid body per robot, so a force on the robot is a
+    /// force on all of it; ours is a body per component, and the chassis is the
+    /// one the fight revolves around. Anything that pushes the *robot* has to go
+    /// through this ratio to accelerate it as one thing.
+    pub fn chassis_mass(&self) -> f32 {
+        // The same sum `new` gives the body: a part's own mass is its members'.
+        (self.rig.parts[0]
+            .members
+            .iter()
+            .map(|&i| self.rig.components[i].mass)
+            .sum::<f32>()
+            * self.mass_scale)
+            .max(0.2)
+    }
+
     /// Mass of the components still attached.
     pub fn remaining_mass(&self) -> f32 {
         self.rig

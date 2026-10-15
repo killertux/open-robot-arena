@@ -169,6 +169,8 @@ pub struct LiveJoint {
     /// script's changes reach the motor only when it actually changes its mind.
     pub strength: f32,
     pub friction: f32,
+    /// The joint's own travel, for `SetAutoLock`'s "has it arrived" test.
+    pub limits: [f32; 2],
 }
 
 #[cfg(test)]

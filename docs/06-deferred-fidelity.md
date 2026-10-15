@@ -1025,6 +1025,28 @@ in place.
   sign selector it is (`PitSlider` passes `1`, `Hammer` `±100`); and
   `ApplyForce`/`ApplyTorque` are one-shot impulses along the joint's own axis,
   which is what `Spikes.FireTeeth`'s single `ApplyForce(40000)` is.
+- **`plus.force` is a force, and it is the *same* operation as a joint's
+  `ApplyForce`.** The engine adds the vector into the body's force accumulator
+  (`FUN_0045e940`, reached through `FUN_004b0950`), and the joint's `ApplyForce`
+  calls that very function with `axis * power` — so the two are one call, one
+  unit. That settles the reading that had been a guess: the impulse a step is
+  `force * dt`, which is what makes `Hazards.Electricity`'s `115 * getWeight(bot)`
+  sane — 115 N per kilogram is ~11.7 g held for one step, about 1.9 m/s of lift
+  per zap, where an impulse reading gave it 115 m/s. The impulse lands on the
+  chassis, and the original's robot is a *single* rigid body, so it is scaled by
+  the chassis's share of the robot's mass to leave the robot's own acceleration
+  alone.
+- **`SetAutoLock` holds a joint the script has not set moving.** Recovered from
+  the joint's own per-step update: it locks the joint when its motor is stopped
+  (`direction == 0`) and again when the joint arrives at the stop it is driving
+  toward. `SetAutoLock(x)` on a slider is one flag covering both; a hinge's
+  `SetAutoLocks(at_stops, when_idle)` is those two halves separately — the
+  Compressor's smash arms grip at whichever stop they reach (`True, False`) while
+  the Clawtop claws only hold once their motor stops (`False, True`). The shipped
+  scripts already set it explicitly wherever it matters, and the joint is *free*
+  by default: the Octagon's start blocks are `PitSlider`s whose floors would
+  otherwise drop out from under four robots at the bell, and `SetAutoLock(True)` is
+  the one thing `PitSlider.__init__` asks for before anything else.
 - **The strength is re-stated, not fixed at build time.** A hazard asks for its
   power whenever it likes: `Hammer.__init__` parks its arm with `Lock(True)` and
   *no* power settings at all, and the 1200 N·m only arrives in `Smash`, when a
@@ -1047,7 +1069,7 @@ in place.
   is rarely a ball, and a flame half a metre off a spinner's blades should not set
   them alight.
 
-Five real bugs came out of this, and all five were in the engine rather than the
+Six real bugs came out of this, and all six were in the engine rather than the
 scripts:
 
 - **A shared collision proxy was being re-placed per body.** The Combat Arena has
@@ -1063,6 +1085,17 @@ scripts:
   span the frames' meeting point, and the models do not state theirs that way: the
   Octagon's hellraiser arms are `[1°, 70°]`, so the constraint was refused and both
   arms were simply not there.
+- **The arena was never told the match had begun.** `Arena.Activate(on)` is the
+  arenas' own start-of-match hook and the engine is what calls it; it was an empty
+  stub. That is not cosmetic: the Octagon and the Skull only open their trap floors
+  from `PitSlider.setactive(True)` inside `Activate`, so those floors never moved
+  at all. King of the Hill reads the game type there, and the base class retires
+  its intro generator.
+- **The scripts' requests were serviced on one code path only.** `plus.damage`,
+  `plus.force`, `plus.zap` and `eliminatePlayer` were drained in `Duel::step`,
+  which the game's own AI drives — so a hazard that hurt a robot reached it in a
+  match but not when a test drove the robots directly. Servicing belongs to the
+  step itself and now happens inside `advance`.
 - **A drive speed past the solver's limit was silently dropped.** The Half Circle
   Arena's hammer asks for 95 rad/s; the constraint refused it and the arm did not
   move at all.
@@ -1074,17 +1107,6 @@ scripts:
    accepted and *recorded* (a run reports what it dropped) and belongs to M5.
    `plus.zap`'s visual is the same. `AddHazard`'s locations feed the AI's hazard
    avoidance through the Python base class, so nothing is owed there.
-2. **`plus.force`'s unit is a reading, not a recovery.** It is applied as an
-   impulse in N·s, which is what `force(bot, x, y, z)` most plainly means, but its
-   one caller — `Hazards.Electricity`'s `115 * getWeight(bot)` lift — comes out a
-   hundred times too strong for a 200 kg robot at that reading. Either `getWeight`
-   is not in kilograms or the original scales the argument; the Electric Arena is
-   the only place that could settle it, so its zap is the single hazard figure
-   that is unverified. Everything else a hazard does is a number the script states
-   itself.
-3. **`SetAutoLock` is accepted and has no separate effect.** It says whether a
-   joint locks itself at its stop; Jolt's limits stop it either way, and the
-   scripts' own `Lock`/`SetDirection` do the rest, so both settings behave alike.
 
 **Verified:** the hazards are pinned end to end. Standing a robot in
 `spike_zone2` fires the hazard: the zone event reaches `BoxArena.ZoneEvent`, the
@@ -1094,8 +1116,12 @@ of the floor with the robot standing on it (0.8 m, its whole travel, when nothin
 is — `a_slider_lets_its_body_rise`). The Compressor Arena's four smash arms swing
 under `Hazards.Smasher`'s own `SetPowerSettings`/`SetDirection`
 (`the_models_own_hinges_are_driven_by_the_script`; all four Octagon hinges build
-too), the Half Circle Arena's hammer
-swings on the power it only asks for once a robot is in its zone
+too), the Octagon's four trap floors stay shut under the robots and only let go
+ninety arena ticks later (`the_engine_tells_the_arena_the_match_has_begun`,
+`a_pit_floor_is_held_until_its_script_opens_it`), a `plus.force` of 115 N/kg lifts
+a robot 1.9 m/s in one step (`plus_force_is_a_force_and_not_an_impulse`), the Half
+Circle Arena's hammer swings on the power it only asks for once a robot is in its
+zone
 (`a_hammer_that_asks_for_power_late_still_swings`), and a Parking Lot cinder block
 leaves the world, is pinned mid-air and drops when unpinned
 (`the_arena_can_hide_a_body_and_pin_one`). The box arena's three joints (two spikes

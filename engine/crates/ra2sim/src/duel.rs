@@ -415,7 +415,7 @@ impl Duel {
         }
 
         self.advance(dt);
-        self.service_requests();
+        self.service_requests(dt);
     }
 
     /// Build the joints the arena scripts have asked for since the last step.
@@ -491,6 +491,7 @@ impl Duel {
                             drive: req.drive.clone(),
                             strength: cap,
                             friction: cap,
+                            limits,
                         });
                     }
                     Err(e) => self.log.push(format!("hazard joint {:?}: {e}", req.child)),
@@ -521,6 +522,11 @@ impl Duel {
                 let Some(anchor) = self.anchor_body(pivot) else {
                     continue;
                 };
+                let limits = hazards::hinge_limits(
+                    hinge
+                        .limits
+                        .unwrap_or([-std::f32::consts::PI, std::f32::consts::PI]),
+                );
                 let desc = HingeDesc {
                     body_a: anchor,
                     body_b: moving,
@@ -531,11 +537,7 @@ impl Duel {
                     // The model's own angle limits: the compressor's smash arms
                     // are allowed 0.27 rad, which is what makes them arms rather
                     // than windmills.
-                    limits: hazards::hinge_limits(
-                        hinge
-                            .limits
-                            .unwrap_or([-std::f32::consts::PI, std::f32::consts::PI]),
-                    ),
+                    limits,
                     max_torque: cap,
                     friction_torque: hinge.friction,
                 };
@@ -551,6 +553,7 @@ impl Duel {
                             drive: req.drive.clone(),
                             strength: cap,
                             friction: hinge.friction,
+                            limits,
                         });
                     }
                     Err(e) => self.log.push(format!("hazard hinge {:?}: {e}", req.child)),
@@ -726,21 +729,40 @@ impl Duel {
     /// one-shot impulses applied along the joint's own axis or about it.
     fn drive_joints(&mut self, dt: f32) {
         for j in &mut self.joints {
+            // How far along its own travel the joint is, for the auto-lock test.
+            // Read through the physics (a disjoint field) so the mutable borrow
+            // of `self.joints` this loop holds is untouched.
+            let pos = if j.slider {
+                self.physics.slider_offset(j.handle)
+            } else {
+                self.physics.hinge_angle(j.handle)
+            };
             let (target, force, torque, strength, friction) = {
                 let mut d = j.drive.lock().unwrap_or_else(|e| e.into_inner());
                 // The script's torque is the *limit* on the drive, and it can
                 // change at any time — a hammer parked with `Lock(True)` only
                 // asks for its 1200 when a robot walks in.
                 let strength = (d.torque.abs() * 40.0).max(1.0);
-                // While it is locked the joint holds where it is, on friction.
-                let friction = if d.locked { strength } else { 0.0 };
-                (
-                    d.target_velocity(),
-                    d.take_force(),
-                    d.take_torque(),
-                    strength,
-                    friction,
-                )
+                // `Lock(True)` parks the joint, and so does the engine's own
+                // `SetAutoLock`: with no motor it holds where it is, on friction,
+                // the way a parked piston does (F8). The original does exactly
+                // this in the joint's own update — it locks when the motor is
+                // stopped, and again when the joint arrives at the end of its
+                // travel, which is why the Octagon's pit floors stay up under the
+                // robots until their script gives them a direction.
+                let arrived = if d.direction > 0.0 {
+                    (pos - j.limits[1]).abs() < 0.05
+                } else if d.direction < 0.0 {
+                    (pos - j.limits[0]).abs() < 0.05
+                } else {
+                    false
+                };
+                let held = d.locked
+                    || (arrived && d.auto_lock_stops)
+                    || (d.direction == 0.0 && d.auto_lock_idle);
+                let target = if held { 0.0 } else { d.target_velocity() };
+                let friction = if held { strength } else { 0.0 };
+                (target, d.take_force(), d.take_torque(), strength, friction)
             };
             if (j.strength - strength).abs() > 1e-3 || (j.friction - friction).abs() > 1e-3 {
                 self.physics
@@ -754,20 +776,7 @@ impl Duel {
                 self.physics.drive_hinge(j.handle, target);
             }
             if force != 0.0 {
-                eprintln!(
-                    "  [impulse] {force} along {:?} before {:?}",
-                    j.axis,
-                    self.physics
-                        .state(j.body)
-                        .map(|s| (s.position, s.linear_velocity))
-                );
                 self.physics.apply_impulse(j.body, j.axis * force * dt);
-                eprintln!(
-                    "  [impulse] after {:?}",
-                    self.physics
-                        .state(j.body)
-                        .map(|s| (s.position, s.linear_velocity))
-                );
             }
             if torque != 0.0 {
                 self.physics
@@ -807,7 +816,12 @@ impl Duel {
     /// The `plus` free functions run inside Python, so `plus.damage`,
     /// `plus.force`, `plus.zap` and `plus.eliminatePlayer` queue instead of
     /// re-entering the simulator; this drains the queue.
-    fn service_requests(&mut self) {
+    /// Drain what the scripts asked for, at the top of the next step.
+    ///
+    /// `dt` is what `plus.force` needs: the original accumulates the vector into
+    /// the body's *force* (F13), not its velocity, so the step it lands in turns
+    /// it into `force * dt` of impulse.
+    fn service_requests(&mut self, dt: f32) {
         for req in ra2script::take_requests() {
             match req {
                 ra2script::Request::Damage {
@@ -831,11 +845,20 @@ impl Duel {
                         self.buckle_chassis(bot);
                     }
                 }
-                ra2script::Request::Force { bot, impulse } => {
+                ra2script::Request::Force { bot, momentum } => {
                     if let Ok(bot) = usize::try_from(bot) {
                         if bot < self.robots.len() {
-                            let body = self.robots[bot].body();
-                            self.physics.apply_impulse(body, impulse);
+                            let robot = &self.robots[bot];
+                            let body = robot.body();
+                            // The script asked for a force on the *robot*, and
+                            // the original's robot is one rigid body — so it
+                            // accelerates as `force / robot mass`. Ours is a body
+                            // per component, and this impulse lands on the
+                            // chassis alone, so it is scaled by the chassis's
+                            // share of the robot to leave the robot's own
+                            // acceleration untouched.
+                            let share = robot.chassis_mass() / robot.remaining_mass().max(0.2);
+                            self.physics.apply_impulse(body, momentum * dt * share);
                         }
                     }
                 }
@@ -889,6 +912,11 @@ impl Duel {
 
         self.resolve_combat(dt, &approach);
         self.time += dt;
+        // What the scripts asked for, at the top of the step after the one they
+        // asked in — `plus.damage`, `plus.force`, `plus.zap` and the tournament's
+        // `eliminatePlayer`. It belongs to the step, not to whichever driver ran
+        // it, so an arena hazard reaches the robots however the robots are driven.
+        self.service_requests(dt);
     }
 
     /// Test every robot against every other and apply the resulting damage.
@@ -1540,6 +1568,116 @@ mod tests {
             before.iter().zip(&after).any(|(a, b)| (b - a).abs() > 0.05),
             "no smash arm moved: {before:?} -> {after:?}"
         );
+    }
+
+    /// M4/F13: `plus.force` is a force, so one step of it is `force * dt`.
+    ///
+    /// Recovered from the binary: the engine adds the vector into the body's
+    /// *force* accumulator, and the joints' `ApplyForce` calls that same function
+    /// with `axis * power`, so the two are one operation. `Hazards.Electricity`
+    /// asks for `115 * getWeight(bot)` — 115 N per kilogram, an acceleration of
+    /// about 11.7 g held for one step, and a kick of 115/60 ≈ 1.9 m/s. Read as an
+    /// impulse it would be 115 m/s, and the zap would launch the robot.
+    #[test]
+    fn plus_force_is_a_force_and_not_an_impulse() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str, spawn: Option<[f32; 2]>| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn,
+        };
+        // Placed clear of the zones, so nothing but the force touches it.
+        let mut duel = Duel::new(
+            &arena,
+            &[
+                bot("AI/Team1/Bot0.bot", Some([0.0, 0.0])),
+                bot("AI/Team6/Bot2.bot", Some([6.0, 6.0])),
+            ],
+        )
+        .expect("a duel");
+
+        let idle = [DriveInput::default(), DriveInput::default()];
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            duel.step_direct(&idle, dt);
+        }
+        let chassis = duel.robots[0].body();
+        let before = duel
+            .physics
+            .state(chassis)
+            .expect("the chassis")
+            .linear_velocity
+            .y;
+
+        // Exactly what `Hazards.Electricity` asks for.
+        let mass = duel.robots[0].remaining_mass();
+        ra2script::state().requests.push(ra2script::Request::Force {
+            bot: 0,
+            momentum: Vec3::new(0.0, 115.0 * mass, 0.0),
+        });
+        duel.step_direct(&idle, dt);
+
+        let after = duel
+            .physics
+            .state(chassis)
+            .expect("the chassis")
+            .linear_velocity
+            .y;
+        let lift = after - before;
+        assert!(
+            (1.0..4.0).contains(&lift),
+            "115 N/kg should lift a robot ~1.9 m/s in one step, got {lift}"
+        );
+    }
+
+    /// M4/F13: `SetAutoLock(True)` holds a joint whose motor has not started.
+    ///
+    /// The Octagon's start blocks are `PitSlider`s: each is a prismatic with
+    /// 3.8 m of travel and no motor of its own until `Activate` calls
+    /// `setactive(True)` some eleven seconds in. What keeps four robots standing
+    /// on four trapdoors until then is `SetAutoLock(True)` — the original's joint
+    /// update locks such a joint while its motor is stopped. Without it the floors
+    /// drop out from under the robots at the bell.
+    #[test]
+    fn a_pit_floor_is_held_until_its_script_opens_it() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/octagon.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+
+        let idle = [DriveInput::default(), DriveInput::default()];
+        let dt = 1.0 / 60.0;
+        duel.step_direct(&idle, dt);
+        let floors: Vec<crate::backend::JointHandle> = duel
+            .joints
+            .iter()
+            .filter(|j| j.slider)
+            .map(|j| j.handle)
+            .collect();
+        assert_eq!(floors.len(), 4, "the Octagon ships four pit floors");
+
+        for _ in 0..(2.0 / dt) as usize {
+            duel.step_direct(&idle, dt);
+        }
+        for h in &floors {
+            let off = duel.physics.slider_offset(*h);
+            assert!(
+                off > -0.5,
+                "a pit floor sank out from under the robots: {off} ({:?})",
+                duel.log
+            );
+        }
     }
 
     /// M4/F13: a hazard that only asks for power when it fires still gets it.

@@ -87,8 +87,9 @@ pub enum Request {
         amount: f32,
         point: Vec3,
     },
-    /// `plus.force(bot, x, y, z)` — an impulse, in N·s.
-    Force { bot: i32, impulse: Vec3 },
+    /// `plus.force(bot, x, y, z)` — a force in N at the robot's body, for the
+    /// step it lands in. The engine turns it into `force * dt` of impulse.
+    Force { bot: i32, momentum: Vec3 },
     /// `plus.zap(bot, amount, radius)`.
     Zap { bot: i32, amount: f32, radius: f32 },
     /// `plus.eliminatePlayer(bot)`.
@@ -362,6 +363,55 @@ mod tests {
             let src = "s = \"a.iteritems() and print x\"\n";
             let out: String = translate.call1((src,)).unwrap().extract().unwrap();
             assert_eq!(out, src);
+        });
+    }
+
+    /// M4/F13: the engine tells the arena the match has begun, and the arena's
+    /// own hazards take it from there.
+    ///
+    /// `Arena.Activate` is the arenas' start-of-match hook and the game calls it.
+    /// Some of them cannot work without it: the Octagon only opens its four trap
+    /// floors from `Pit1.setactive(True)` inside `Activate` (King of the Hill
+    /// reads the game type there). The floors then open on their *own* script's
+    /// clock — `Hazards.PitSlider.Tick` counts halves of a second and its delay is
+    /// 45, so it lets go on the ninetieth arena tick — which is what the engine's
+    /// `Tick` loop is for.
+    #[test]
+    fn the_engine_tells_the_arena_the_match_has_begun() {
+        let Some(game) = game_dir() else { return };
+        let _guard = super::lock();
+        let script = game.join("Arenas/octagon.py");
+        let host = match ScriptHost::boot_with_scripts(&game, Some(&script)) {
+            Ok(h) => h,
+            Err(e) => panic!("booting the Octagon: {e}"),
+        };
+        let pits = ["Pit1", "Pit2", "Pit3", "Pit4"];
+        with_py(|py| {
+            let arena = state()
+                .arena_object
+                .as_ref()
+                .expect("the arena is live")
+                .clone_ref(py);
+            let a = arena.bind(py);
+            let flag = |pit: &str, name: &str| -> bool {
+                a.getattr(pit)
+                    .unwrap_or_else(|e| panic!("{pit}: {e}"))
+                    .getattr(name)
+                    .unwrap()
+                    .extract()
+                    .unwrap()
+            };
+            // Only `octagon.py`'s `Activate(True)` arms them.
+            for pit in pits {
+                assert!(flag(pit, "active"), "{pit} was never told to open");
+            }
+            // And ninety of the arena's quarter-seconds later they let go.
+            for _ in 0..90 {
+                host.tick_arena(py, 0.25).unwrap();
+            }
+            for pit in pits {
+                assert!(flag(pit, "sliding"), "{pit} never started sliding");
+            }
         });
     }
 

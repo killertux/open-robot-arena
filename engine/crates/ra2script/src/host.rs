@@ -272,6 +272,8 @@ impl ScriptHost {
                 });
             }
             host.load_ai(py)?;
+            // The match begins: the arenas' own `Activate`.
+            host.activate_arena(py, true)?;
             Ok(())
         })?;
         Ok(host)
@@ -379,6 +381,26 @@ impl ScriptHost {
         match arena {
             Some(a) => a.bind(py).call_method1("HazardsOn", (on,))?.extract(),
             None => Ok(false),
+        }
+    }
+
+    /// Tell the arena the match has begun, or that it is over (`Activate`).
+    ///
+    /// The arenas do their start-of-match work here, and some of it matters:
+    /// the Octagon and the Skull only open their trap floors from
+    /// `PitSlider.setactive(True)` in `Activate`, King of the Hill reads the game
+    /// type, and the base class retires its intro generator.
+    pub fn activate_arena(&self, py: Python<'_>, on: bool) -> PyResult<()> {
+        let arena = crate::state()
+            .arena_object
+            .as_ref()
+            .map(|a| a.clone_ref(py));
+        match arena {
+            Some(a) => {
+                a.bind(py).call_method1("Activate", (on,))?;
+                Ok(())
+            }
+            None => Ok(()),
         }
     }
 

@@ -185,20 +185,24 @@ fn damage(bot: i32, component: i32, amount: f32, point: (f32, f32, f32)) {
     });
 }
 
-/// `force(bot, x, y, z)` — an impulse on the robot, in N·s.
+/// `force(bot, x, y, z)` — a **force** in N on the robot's body, for one step.
 ///
-/// The unit is our reading rather than a recovered one. The single caller is
-/// `Hazards.Electricity`, which lifts a zapped robot by `115 * getWeight(bot)`;
-/// taken as N·s on a 200 kg robot that is a hundred times what a zap should do,
-/// so either `getWeight` is not in kilograms or the original scales the argument.
-/// The Electric Arena is the only place that could settle it, and it is the one
-/// hazard whose strength is unverified. See F13.
+/// Recovered from the binary rather than guessed (F13). The engine adds the
+/// vector into the body's force accumulator (`FUN_0045e940`, via `FUN_004b0950`)
+/// — and the *joints'* `ApplyForce` calls that very same function with `axis *
+/// power`, so `plus.force` and a hazard's `ApplyForce` are one operation. A force
+/// integrated over one step is `force * dt` of impulse, which is what the
+/// simulator applies.
+///
+/// It is the reading that makes `Hazards.Electricity` sane: its single caller
+/// lifts a zapped robot by `115 * getWeight(bot)`, i.e. 115 N per kilogram, an
+/// acceleration of ~11.7 g held for a step — about 1.9 m/s of kick per zap.
 #[pyfunction]
 #[pyo3(name = "force")]
 fn force(bot: i32, x: f32, y: f32, z: f32) {
     crate::state().requests.push(crate::Request::Force {
         bot,
-        impulse: Vec3::new(x, y, z),
+        momentum: Vec3::new(x, y, z),
     });
 }
 

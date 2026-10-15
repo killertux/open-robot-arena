@@ -903,7 +903,18 @@ pub struct Drive {
     pub direction: f32,
     /// `Lock(True)` parks it: no motor, held by the joint's friction.
     pub locked: bool,
-    pub auto_lock: bool,
+    /// `SetAutoLock(x)` — hold the joint at the end of its travel.
+    ///
+    /// A hinge's `SetAutoLocks(a, b)` sets the two halves separately: `a` is
+    /// this one and `b` is [`auto_lock_idle`](Self::auto_lock_idle). The engine
+    /// keeps them apart because the scripts use them for different things — the
+    /// Compressor's smash arms grip at whichever stop they arrive at, while the
+    /// Clawtop claws only hold once their motor stops.
+    pub auto_lock_stops: bool,
+    /// `SetAutoLock(x)` / `SetAutoLocks(_, b)` — hold the joint where it is
+    /// while its motor is stopped, so a floor does not sag under the robots
+    /// standing on it before its script sets a direction.
+    pub auto_lock_idle: bool,
     pub pinned: bool,
     pub limits: Option<(f32, f32)>,
     /// A one-shot `ApplyForce` (N·s at the joint's axis), cleared once applied.
@@ -1022,7 +1033,9 @@ impl PrismaticController {
     }
 
     fn SetAutoLock(&self, on: bool) {
-        self.d().auto_lock = on;
+        let mut d = self.d();
+        d.auto_lock_stops = on;
+        d.auto_lock_idle = on;
     }
 
     fn SetLimits(&self, lower: f32, upper: f32) {
@@ -1076,11 +1089,16 @@ impl HingeController {
     }
 
     fn SetAutoLock(&self, on: bool) {
-        self.d().auto_lock = on;
+        let mut d = self.d();
+        d.auto_lock_stops = on;
+        d.auto_lock_idle = on;
     }
 
-    fn SetAutoLocks(&self, a: bool, b: bool) {
-        self.d().auto_lock = a || b;
+    /// `SetAutoLocks(at_stops, when_idle)` — the hinge's two halves separately.
+    fn SetAutoLocks(&self, at_stops: bool, when_idle: bool) {
+        let mut d = self.d();
+        d.auto_lock_stops = at_stops;
+        d.auto_lock_idle = when_idle;
     }
 
     fn SetLimits(&self, lower: f32, upper: f32) {
