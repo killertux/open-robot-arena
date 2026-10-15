@@ -107,10 +107,18 @@ format doc warns about exactly this ("computer-controlled bots often have a high
 armour hardness specified"), so the value must be read from the file, not looked
 up from the table.
 
-**Open [OPEN]:** our component masses come from the `.gmf` `RBCollection`, but
-Mud Runner totals 360.6 kg against the documented 418.6 kg — about 16 % light.
-Not yet explained; a candidate is that the chassis surface area should be taken
-over a collision mesh rather than the display mesh.
+**Resolved — the rule is the engine's own.** The script binding `getWeight` is a
+stub that tail-calls `FUN_004df0b0`, the same function the editor's "Total mass of
+robot must not exceed 800" check calls; it accumulates, per component,
+`FUN_0045a4f0` — a read of the stored float at `component + 0x128`. So the game's
+weight is the **sum of stored per-component masses**, with the chassis' being
+area × armour weight: exactly the rule implemented here. The `Class:` field
+cannot corroborate it (each AI team ships one bot per class, and no single scale
+factor reconciles the classes with any weight), and Mud Runner's own row is
+self-consistent (type 1 aluminium, weight 12, hardness 200 = 2× the editor's 100,
+the AI-bot convention). The documented 418.6 kg needs **steel** on the same
+chassis (421 kg, within 0.6 %), so the doc's copy most likely carried different
+armour. **[INFERRED]** — see F10.
 
 ---
 
@@ -264,8 +272,24 @@ Known, documented, not yet fixed:
     the mod tools instead. See F1 in
     [`06-deferred-fidelity.md`](06-deferred-fidelity.md).
 
+17. **The chassis is dressed from its face groups — landed.** Every chassis side's
+    skin region is described in the bot file (a polygon, its rectangle, and the
+    side's triangles); the coordinates are the skin coordinates of the group's
+    vertices **in ascending index order** — verified on all 45 stock bots, whose
+    every group coordinate lands inside its own rectangle. We had been dressing
+    the chassis from the model's **per-point** UV table, which cannot express a
+    seam: a point shared by two sides carries one coordinate, so one side samples
+    the wrong patch. `AI/Team13/Bot1` had only 48 of 138 face-vertex coordinates
+    right, and its round top carried a stray square decal that is now the rim the
+    file describes. The 45-bot survey is bit-identical. **[LANDED]**
+
+18. **The 16 %-light weight — explained.** The engine's own `getWeight` binding
+    tail-calls the editor's mass function, which sums a stored per-component mass
+    — the rule we implement. Mud Runner's row is self-consistent aluminium and the
+    documented 418.6 kg would need steel on the same chassis (421 kg). **[INFERRED]**
+
 Each of these is tracked with its evidence and fix path in
-[`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F10).
+[`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F11).
 
 ---
 
@@ -308,7 +332,8 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | `ra2-duel` on the octagon | **Engages again.** With F3's honest speeds the bout had ended with both robots parked in open floor; the cause was spawn placement, not a collider hole (F11): the duel invented a spread that landed on the rim of the Octagon's 3.7 m drop. It now spawns on the arena's own four `startpoint` attachments |
 | `ra2-duel` damage model (F7) | **Validated on a deterministic ram.** `RA2_DUEL_DRIVE=ram` with two identical `AI/Team1/Bot0` on the box arena: contact at t≈5 s, an opening blow of **34** points, then ~1 point/s while the two rest against each other. Both ends of that match what the original's scripts say — hazards apply 25, `AI/__init__.py` calls `amount > 10` a "good solid hit" — after two real defects were fixed (contact was tested only between root bodies; a blow was a per-step *integral* of speed, so a fast impact weighed almost nothing) |
 | `ra2-duel` with the AI | **Does not engage.** 30 s of `AI/Team1/Bot0` vs `AI/Team6/Bot2` on the box arena: the pair closes to ~7.7 m, then one robot pins itself against a wall (at `(-11.8, -7.3)` from t = 15 s on, reversing included) and neither touches the other all bout. This is the control layer (M4), not the damage model: the AI is a stand-in that only ever drives at the opponent |
-| `cargo fmt --check`, `clippy`, tests | clean, 13 tests |
+| 45-bot drive survey | **Bit-identical** to F9 after F10 | the chassis is now dressed from the file's face groups, but only the *skin coordinates* changed, and the survey never looks at a texture |
+| `cargo fmt --check`, `clippy`, tests | clean, 22 tests |
 
 ## 7. Recommended order of work
 
@@ -341,9 +366,8 @@ The remaining blocker is *behaviour*, not the parts' parameters or the arenas:
    recovered; component `hitpoints` are defaults for 122 of 131 stock parts; and
    `fracture` (a per-hit reduction, on the reading that fits the control board's
    41 and the hazard's 25) and `material` are unparsed.
-3. **F9's remainder and M4.** Buckling exists but its *rate* is inferred and its
-   silhouette is smooth rather than the game's subdivided crush mesh. The control
-   layer is still what decides fights.
+3. **F9's remainder.** Buckling exists but its *rate* is inferred and its
+   silhouette is smooth rather than the game's subdivided crush mesh.
 4. **F6 — the friction combination law**, if the drive survey needs it.
 5. **F4's `contact` surface** as a separate collider, once the `contact` and
    `passthru` object sets can be separated safely.

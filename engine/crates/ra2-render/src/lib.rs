@@ -1092,7 +1092,7 @@ pub fn chassis_items(bot: &botfmt::Bot, world: Mat4) -> Vec<DrawItem> {
             ymax
         );
     }
-    let verts = bot_mesh_vertices(mesh, world);
+    let verts = chassis_mesh_vertices(ch, world);
     if verts.is_empty() {
         return Vec::new();
     }
@@ -1350,7 +1350,43 @@ pub fn component_local(c: &ra2fmt::bot::Component) -> Mat4 {
         * Mat4::from_translation(Vec3::new(0.0, c.height, 0.0))
 }
 
-fn bot_mesh_vertices(mesh: &ra2fmt::bot::BotMesh, world: Mat4) -> Vec<Vertex> {
+/// Build the chassis' render vertices from the file's **face groups** (F10).
+///
+/// The bot file dresses each side of the chassis from its own patch of the
+/// 256×256 skin: a group lists the triangles of that side and, for its vertices
+/// in ascending index order, the skin coordinate each one uses. That ordering is
+/// the rule the stock bots agree on — every group's coordinates land inside the
+/// group's own rectangle, and they reproduce the model's own per-point UV table
+/// exactly on a chassis whose sides do not share vertices.
+///
+/// Using the model's per-point table instead is what makes a chassis decal come
+/// out rotated and mirrored: a mesh point shared by two sides can only carry one
+/// coordinate there, so one of the two sides samples the wrong patch of skin.
+fn chassis_mesh_vertices(ch: &ra2fmt::bot::Chassis, world: Mat4) -> Vec<Vertex> {
+    let Some(mesh) = ch.mesh.as_ref() else {
+        return Vec::new();
+    };
+    // `(group, vertex) -> skin coordinate`.
+    let groups: Vec<std::collections::HashMap<u32, [f32; 2]>> = ch
+        .face_groups
+        .iter()
+        .map(|fg| {
+            let mut seen: Vec<u32> = Vec::new();
+            for f in &fg.faces {
+                for &i in f {
+                    if !seen.contains(&i) {
+                        seen.push(i);
+                    }
+                }
+            }
+            seen.sort_unstable();
+            seen.iter()
+                .zip(fg.coords.iter())
+                .map(|(&i, c)| (i, [c[0] / 256.0, c[1] / 256.0]))
+                .collect()
+        })
+        .collect();
+
     let mut out = Vec::new();
     let pts: Vec<Vec3> = mesh
         .points
@@ -1364,25 +1400,29 @@ fn bot_mesh_vertices(mesh: &ra2fmt::bot::BotMesh, world: Mat4) -> Vec<Vertex> {
         }
         let (pa, pb, pc) = (pts[a], pts[b], pts[cc]);
         let n = (pb - pa).cross(pc - pa).normalize_or_zero();
-        let uv = |idx: usize| mesh.uvs.get(idx).copied().unwrap_or([0.0, 0.0]);
-        out.push(Vertex {
-            pos: pa.into(),
-            nrm: n.into(),
-            uv: uv(a),
-            color: [1.0, 1.0, 1.0, 1.0],
-        });
-        out.push(Vertex {
-            pos: pb.into(),
-            nrm: n.into(),
-            uv: uv(b),
-            color: [1.0, 1.0, 1.0, 1.0],
-        });
-        out.push(Vertex {
-            pos: pc.into(),
-            nrm: n.into(),
-            uv: uv(cc),
-            color: [1.0, 1.0, 1.0, 1.0],
-        });
+        // The first group that owns all three vertices dresses this triangle.
+        let group_uv = groups
+            .iter()
+            .find_map(|g| {
+                Some([
+                    *g.get(&(a as u32))?,
+                    *g.get(&(b as u32))?,
+                    *g.get(&(cc as u32))?,
+                ])
+            })
+            .unwrap_or([
+                mesh.uvs.get(a).copied().unwrap_or([0.0, 0.0]),
+                mesh.uvs.get(b).copied().unwrap_or([0.0, 0.0]),
+                mesh.uvs.get(cc).copied().unwrap_or([0.0, 0.0]),
+            ]);
+        for (pos, uv) in [(pa, group_uv[0]), (pb, group_uv[1]), (pc, group_uv[2])] {
+            out.push(Vertex {
+                pos: pos.into(),
+                nrm: n.into(),
+                uv,
+                color: [1.0, 1.0, 1.0, 1.0],
+            });
+        }
     }
     out
 }

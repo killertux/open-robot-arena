@@ -821,6 +821,115 @@ mod tests {
         assert!(after[1] <= before[1], "the crush must not reverse");
     }
 
+    /// F10: the chassis is dressed from the file's **face groups**, so every
+    /// triangle's skin coordinates land inside the patch the file allocates for
+    /// its side. The model's own per-point table cannot manage that — a mesh
+    /// point shared by two sides carries a single coordinate — which is exactly
+    /// what made chassis decals come out rotated and mirrored.
+    #[test]
+    fn chassis_uvs_come_from_its_face_groups() {
+        let Some(game) = game_dir() else { return };
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        for team in std::fs::read_dir(game.join("AI"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            for b in std::fs::read_dir(team.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if b.path().extension().is_some_and(|e| e == "bot") {
+                    paths.push(b.path());
+                }
+            }
+        }
+        assert!(paths.len() > 40, "found only {} stock bots", paths.len());
+        let (mut affected, mut checked) = (0usize, 0usize);
+        for path in &paths {
+            let name = path.display().to_string();
+            let data = std::fs::read(path).expect("stock bot reads");
+            let bot = ra2fmt::bot::parse(&data).expect("stock bot parses");
+            let ch = bot.components[0].chassis.as_ref().expect("has a chassis");
+            assert!(!ch.face_groups.is_empty(), "{name}: no face groups");
+            checked += 1;
+            let inside = |uv: [f32; 2]| {
+                ch.face_groups.iter().any(|fg| {
+                    let (x0, y0, x1, y1) = (
+                        fg.bounds[0] as f32,
+                        fg.bounds[1] as f32,
+                        fg.bounds[2] as f32,
+                        fg.bounds[3] as f32,
+                    );
+                    let (u, v) = (uv[0] * 256.0, uv[1] * 256.0);
+                    u >= x0.min(x1) - 2.0
+                        && u <= x0.max(x1) + 2.0
+                        && v >= y0.min(y1) - 2.0
+                        && v <= y0.max(y1) + 2.0
+                })
+            };
+            let items = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
+            let (mut ok, mut n) = (0usize, 0usize);
+            for it in &items {
+                for v in &it.vertices {
+                    n += 1;
+                    if inside(v.uv) {
+                        ok += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                ok, n,
+                "{name}: only {ok}/{n} chassis vertices sit in a patch"
+            );
+            // The model's per-point table is what we used to dress the chassis;
+            // where the two disagree is exactly where a decal came out wrong.
+            let mesh = ch.mesh.as_ref().unwrap();
+            let groups: Vec<std::collections::HashMap<u32, [f32; 2]>> =
+                ch.face_groups.iter().map(group_table).collect();
+            let (mut raw_ok, mut raw_n) = (0usize, 0usize);
+            for tri in mesh.indices.as_chunks::<3>().0 {
+                let t = [tri[0], tri[1], tri[2]];
+                let Some(g) = groups.iter().find(|g| t.iter().all(|i| g.contains_key(i))) else {
+                    continue;
+                };
+                for &i in &t {
+                    raw_n += 1;
+                    let raw = mesh.uvs.get(i as usize).copied().unwrap_or([0.0, 0.0]);
+                    if (raw[0] - g[&i][0]).abs() < 1e-4 && (raw[1] - g[&i][1]).abs() < 1e-4 {
+                        raw_ok += 1;
+                    }
+                }
+            }
+            if raw_ok < raw_n {
+                affected += 1;
+            }
+        }
+        println!(
+            "chassis UVs: {checked} stock bots checked, {affected} dressed differently from before"
+        );
+        assert!(affected > 0, "no stock bot was affected — nothing changed");
+    }
+
+    /// A face group's `vertex -> skin coordinate` table: the file lists the
+    /// coordinates for the group's vertices in ascending index order (F10).
+    fn group_table(fg: &ra2fmt::bot::FaceGroup) -> std::collections::HashMap<u32, [f32; 2]> {
+        let mut seen: Vec<u32> = Vec::new();
+        for f in &fg.faces {
+            for &i in f {
+                if !seen.contains(&i) {
+                    seen.push(i);
+                }
+            }
+        }
+        seen.sort_unstable();
+        seen.iter()
+            .zip(fg.coords.iter())
+            .map(|(&i, c)| (i, [c[0] / 256.0, c[1] / 256.0]))
+            .collect()
+    }
+
     /// F7: contact is tested between every pair of the robots' bodies, not just
     /// their root bodies.
     #[test]

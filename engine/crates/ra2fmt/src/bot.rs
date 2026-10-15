@@ -57,6 +57,8 @@ pub struct Chassis {
     /// points the game adds to the model, which is why the buckle points'
     /// vertex indices run past the mesh's own point list.
     pub top_corners: Vec<[i32; 4]>,
+    /// The face groups that dress the chassis model (F10).
+    pub face_groups: Vec<FaceGroup>,
     /// The chassis' buckle points, from 1.11 onward (F9).
     ///
     /// The game subdivides the chassis' faces so its sides can cave in: each of
@@ -64,6 +66,26 @@ pub struct Chassis {
     /// face meeting at it), and a hit shifts them "down and in". `indices` are
     /// the duplicated vertices that have to move together.
     pub buckling: Vec<BucklePoint>,
+}
+
+/// One "face group" of the chassis: a patch of the chassis model together with
+/// the part of the 256×256 skin that dresses it.
+///
+/// The bot file describes each side of the chassis (its sides, top and bottom)
+/// as a group: a polygon on the texture map, a rectangle bounding that polygon,
+/// and the triangles that belong to it (`docs`' "face groups"). Crucially the
+/// group's texture coordinates are **per face vertex** (three per triangle),
+/// not per mesh point: a mesh point shared by two groups needs a different
+/// texture coordinate in each, and using the model's shared per-point UVs is
+/// what makes a chassis skin come out rotated and mirrored (F10).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FaceGroup {
+    /// `(u, v)` on the 256×256 skin, three per triangle of `faces`.
+    pub coords: Vec<[f32; 2]>,
+    /// `(x1, y1, x2, y2)` rectangle on the skin that bounds `coords`.
+    pub bounds: [i32; 4],
+    /// The group's triangles, as mesh point indices, in winding order.
+    pub faces: Vec<[u32; 3]>,
 }
 
 /// One movable point of the chassis' buckle model.
@@ -293,17 +315,53 @@ fn parse_chassis(lines: &mut Lines, ver: (i32, i32)) -> Result<Chassis, Error> {
         let ng = lines.i32()?;
         for _ in 0..ng {
             let npts = lines.i32()?;
+            let mut coords = Vec::new();
             for _ in 0..npts {
-                lines.line();
+                let uv = lines.floats()?;
+                coords.push([
+                    uv.first().copied().unwrap_or(0.0),
+                    uv.get(1).copied().unwrap_or(0.0),
+                ]);
             }
+            ch.face_groups.push(FaceGroup {
+                coords,
+                ..Default::default()
+            });
         }
         let ng2 = lines.i32()?;
-        for _ in 0..ng2 {
-            lines.line();
+        for i in 0..ng2 {
+            // `group index, x1 y1, x2 y2` — the group's rectangle on the skin.
+            let v = lines.ints()?;
+            let group = v.first().copied().unwrap_or(i);
+            let bounds = [
+                v.get(1).copied().unwrap_or(0),
+                v.get(2).copied().unwrap_or(0),
+                v.get(3).copied().unwrap_or(0),
+                v.get(4).copied().unwrap_or(0),
+            ];
+            if let Some(fg) = usize::try_from(group)
+                .ok()
+                .and_then(|g| ch.face_groups.get_mut(g))
+            {
+                fg.bounds = bounds;
+            }
         }
         let nfe = lines.i32()?;
         for _ in 0..nfe {
-            lines.line();
+            // `group index, then 3 point indices` — the group's triangles.
+            let v = lines.ints()?;
+            let group = v.first().copied().unwrap_or(0);
+            let tri = [
+                v.get(1).copied().unwrap_or(0) as u32,
+                v.get(2).copied().unwrap_or(0) as u32,
+                v.get(3).copied().unwrap_or(0) as u32,
+            ];
+            if let Some(fg) = usize::try_from(group)
+                .ok()
+                .and_then(|g| ch.face_groups.get_mut(g))
+            {
+                fg.faces.push(tri);
+            }
         }
         let nce = lines.i32()?;
         for _ in 0..nce {

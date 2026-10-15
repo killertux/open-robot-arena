@@ -66,7 +66,8 @@ Working today:
   `Multi/Sub-Object` sub-materials and transparency), textures, attachment points,
   embedded Havok rigid bodies.
 - `ra2fmt::bot` — `.bot` parser: components, mount transforms, inline chassis mesh
-  + outline + skin, all version variants.
+  + outline + skin, the chassis' **face groups** (each side's patch of the skin),
+  its crush model and the top plate's corners, all version variants.
 - `ra2fmt::arena` — arena scripts → scene (model, props, shadow, cameras).
 - `ra2fmt::component` / `ra2fmt::cfl` — component definitions and a native
   **CFL3** (`.cfz`) archive reader (no external tools).
@@ -82,8 +83,9 @@ Working today:
 - `ra2-sim` — headless physics sandbox driving one robot around an arena.
 - `ra2-duel` — headless two-robot fight.
 
-Remaining caveats: chassis *face-group* texture decals can appear
-rotated/mirrored; exact BurstMotor rest poses are approximated; a motor's
+Remaining caveats: a chassis is dressed from the **face groups** its `.bot` records
+for each side (that is what fixes decals coming out rotated or mirrored); exact
+BurstMotor rest poses are approximated; a motor's
 `speed × its radius` sets a wheel's top speed, so a robot's pace is a property of
 its parts (a definition's `power = <speed> <torque>` is the pair the scripts set
 through `SetPowerSettings`, whose implementation scales the torque by 40) — but

@@ -104,6 +104,81 @@ fn main() {
         ch.buckling.len(),
     );
     let Some(mesh) = mesh else { return };
+    // F10: the chassis is dressed from these groups. Each lists the skin polygon
+    // of one side of the hull; its coordinates are the skin coordinates of the
+    // side's vertices in ascending index order.
+    let uv_of = |i: u32| mesh.uvs.get(i as usize).copied().unwrap_or([0.0, 0.0]);
+    let mut total_faces = 0usize;
+    let mut matched = 0usize;
+    let mut group_uvs = 0usize;
+    let mut group_total = 0usize;
+    let mut in_own_rect = 0usize;
+    for (g, fg) in ch.face_groups.iter().enumerate() {
+        total_faces += fg.faces.len();
+        let mut seen: Vec<u32> = Vec::new();
+        for f in &fg.faces {
+            for &i in f {
+                if !seen.contains(&i) {
+                    seen.push(i);
+                }
+            }
+        }
+        seen.sort_unstable();
+        let mesh_tris: std::collections::HashSet<[u32; 3]> = mesh
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|t| {
+                let mut k = [t[0], t[1], t[2]];
+                k.sort_unstable();
+                k
+            })
+            .collect();
+        matched += fg
+            .faces
+            .iter()
+            .filter(|f| {
+                let mut k = **f;
+                k.sort_unstable();
+                mesh_tris.contains(&k)
+            })
+            .count();
+        let (x0, y0, x1, y1) = (
+            fg.bounds[0] as f32,
+            fg.bounds[1] as f32,
+            fg.bounds[2] as f32,
+            fg.bounds[3] as f32,
+        );
+        if fg.coords.iter().all(|c| {
+            c[0] >= x0.min(x1) - 2.0
+                && c[0] <= x0.max(x1) + 2.0
+                && c[1] >= y0.min(y1) - 2.0
+                && c[1] <= y0.max(y1) + 2.0
+        }) {
+            in_own_rect += 1;
+        }
+        for (k, &i) in seen.iter().enumerate() {
+            let Some(c) = fg.coords.get(k) else { continue };
+            let uv = uv_of(i);
+            group_total += 1;
+            if (c[0] / 256.0 - uv[0]).abs() < 1e-3 && (c[1] / 256.0 - uv[1]).abs() < 1e-3 {
+                group_uvs += 1;
+            }
+        }
+        if g < 3 {
+            println!(
+                "  group {g}: {} faces, {} coords, bounds {:?}",
+                fg.faces.len(),
+                fg.coords.len(),
+                fg.bounds
+            );
+        }
+    }
+    println!(
+        "  face groups: {} groups, {total_faces} faces ({matched} match a mesh triangle), {in_own_rect} wholly inside their own rectangle; coords/256 == model uv for {group_uvs}/{group_total} vertices",
+        ch.face_groups.len()
+    );
     println!(
         "  top corners ({}): {:?}",
         ch.top_corners.len(),

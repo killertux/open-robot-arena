@@ -18,7 +18,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F7 | Damage model: an event, not a per-step integral | shape landed; numbers half-sourced |
 | F8 | Pistons slide their children (prismatic) | **landed** (nothing drives them yet) |
 | F9 | The chassis buckles (crush points from the `.bot`) | **landed** (rate inferred) |
-| F10 | Chassis skin decals; 16 %-light weight gap | open |
+| F10 | Chassis skin decals; 16 %-light weight gap | **landed** (weight: explained) |
 | F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
 
 ---
@@ -791,9 +791,60 @@ Still open: the crush is smooth rather than faceted (the game's subdivided model
 is what would give it the original's silhouette), and the game *writes the
 crushed model back* on save, which we do not.
 
-## F10 — Chassis skin decals and the 16 %-light weight gap
+## F10 — Chassis skin decals — **landed**; the 16 % weight gap — **explained**
 
-Chassis face-group decals can render rotated/mirrored. Separately, our computed
-Mud Runner is 360.6 kg against the 418.6 kg the bot-format document records for
-it (about 16 % light) — the chassis surface-area rule may need the collision mesh
-rather than the display mesh.
+### The decals
+
+The chassis is dressed from the **face groups** in the bot file, and we were
+reading them and throwing them away. Each group is one side of the chassis (a
+side, the top, the bottom): a polygon on the 256×256 skin, a rectangle bounding
+that polygon, and the triangles that make it up.
+
+- **The rule** (verified, not guessed): a group's coordinates are the skin
+  coordinates of **its vertices in ascending index order**. Every group's
+  coordinates land inside the group's own rectangle on **all 45 stock bots**, and
+  the rule reproduces the model's own per-point UV table exactly on the chassis
+  whose sides do not share vertices (`AI/Team1/Bot0` 48/48, `AI/Team8/Bot2`
+  36/36, `AI/Team5/Bot2` 84/84).
+- **The bug**: we dressed the chassis from the model's **per-point** UV table. A
+  mesh point shared by two sides can only carry one coordinate there, so one of
+  the two samples the wrong patch of skin — a decal rotated or mirrored. On
+  `AI/Team13/Bot1` only **48 of 138** face-vertex coordinates came from the right
+  patch; the fix corrects the other 90.
+- **The evidence**: `AI/Team13/Bot1` ("Tornado") is the bot it shows on — its
+  round top used to carry a stray green **square** decal; it now carries the
+  green **rim** the file describes, and the tread pattern runs continuously. The
+  other 44 stock bots are dressed exactly as before (their tables already
+  agreed), so the change is surgical.
+
+The file's own data was the oracle throughout: nothing here was tuned by eye.
+
+### The 16 % weight gap
+
+Retired as a formula error. The engine's own chain says the weight is what we
+compute:
+
+- the script binding `getWeight` (at `0x6fca00`, registered at `0x4cd74e`) is a
+  two-instruction stub that tail-calls `FUN_004df0b0` (`0x4df0b0`), which is also
+  what the bot editor's "Total mass of robot must not exceed 800" check
+  (`FUN_0043ca70`) calls;
+- `FUN_004df0b0` sums, over the robot's parts, `FUN_004e23f0`, which sums
+  `FUN_004e24f0`, which accumulates `FUN_0045a4f0` — a plain read of the float at
+  `component + 0x128`. So the game's weight is **Σ per-component stored masses**,
+  with the chassis' being area × armour weight, exactly the rule we implement.
+
+The `Class:` field cannot corroborate it: each AI team ships one light, one
+medium and one heavy bot, and no single scale factor makes the classes follow from
+any weight (fixing the eight "heavy" bots that weigh under 400 kg needs a factor
+of ≥ 1.23, which would in turn misclassify 23 others). The six editor-saved bots
+in `Robot Designs/` all match our class, but all six sit far enough inside their
+class to prove little.
+
+For Mud Runner itself the file stores `1 12 … 200`: **aluminium**, weight 12,
+hardness 200 — which is 2× the editor's 100, precisely the AI-bot convention, so
+the row is self-consistent. Our 7.55 m² chassis at 12 kg/m² gives 90.6 kg and
+360.6 kg total; the doc's 418.6 kg would need **steel** (20 kg/m²) on the same
+chassis, giving 421 kg — inside 0.6 % of the doc's figure. The likeliest reading
+is therefore that the doc's Mud Runner carried steel, i.e. a different revision of
+a bot whose shipped copy is hand-edited. **[INFERRED]** — kept in the open list
+only as this note; nothing in our rule is outstanding.

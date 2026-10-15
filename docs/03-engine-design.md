@@ -117,6 +117,12 @@ local/           # (git-ignored) game files + converted cache
   converts impact speed to points and is calibrated to the game's own numbers:
   its hazards apply a flat 25, and its AI scripts treat `amount > 10` as a good
   hit.
+- **The chassis is dressed from its face groups.** Each side of a chassis gets
+  its skin from its own face group in the `.bot` — a polygon on the 256×256 skin
+  and the skin coordinate of each of the side's vertices, listed in ascending
+  index order. The model's own per-point UV table cannot express a seam (a point
+  shared by two sides carries one coordinate), which is what made a decal come
+  out rotated or mirrored. See F10.
 - **The chassis buckles.** A chassis carries a crush model in the `.bot`
   (buckle points and the top plate's corners). As it takes damage the points the
   file marks as movable shift **down and in** — the floor plate stays, the sides
