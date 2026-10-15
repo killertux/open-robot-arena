@@ -142,6 +142,12 @@ fn script_ai_for(arena_path: &str, robots: &[Robot]) -> Option<ScriptAi> {
 impl Duel {
     /// Build the world and spawn the robots facing each other.
     pub fn new(arena_path: &str, bots: &[BotSetup]) -> Result<Self, Box<dyn std::error::Error>> {
+        // Absolute from the outset: the script layer changes the process's
+        // working directory to the game root, after which a relative arena path
+        // no longer resolves.
+        let arena_path = &std::fs::canonicalize(arena_path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| arena_path.to_string());
         let obstacle = std::env::var("RA2_OBSTACLE").unwrap_or_else(|_| "none".to_string());
         // Static arena geometry only: script props become movable bodies below.
         std::env::set_var("RA2_OBSTACLE", "none");

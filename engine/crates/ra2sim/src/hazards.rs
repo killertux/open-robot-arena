@@ -92,7 +92,14 @@ pub struct ModelHinge {
 /// The model's own hinges, by name (`GetHinge`).
 pub fn hinges(arena_path: &str) -> BTreeMap<String, ModelHinge> {
     let mut out = BTreeMap::new();
-    if let Ok(bytes) = std::fs::read(arena_path) {
+    // The caller hands us whatever the match was given, which is normally the
+    // arena's *script*; the hinges are in the model it names.
+    let model = ra2_render::arena_model_path(arena_path)
+        .ok()
+        .flatten()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| arena_path.to_string());
+    if let Ok(bytes) = std::fs::read(&model) {
         if let Ok(scene) = ra2fmt::gmi::parse(&bytes) {
             for h in &scene.hinges {
                 out.insert(
