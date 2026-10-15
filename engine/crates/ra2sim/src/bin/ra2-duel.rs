@@ -37,10 +37,12 @@ fn main() -> ExitCode {
         BotSetup {
             path: args[1].clone(),
             yaw_deg: None,
+            spawn: None,
         },
         BotSetup {
             path: args[2].clone(),
             yaw_deg: None,
+            spawn: None,
         },
     ];
 

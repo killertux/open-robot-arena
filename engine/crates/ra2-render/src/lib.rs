@@ -828,12 +828,32 @@ pub fn collect_havok(input: &str) -> Result<Option<HavokArena>, Box<dyn std::err
         // from is `SIMULATION_GEOMETRY`'s job, and a display-proxy body names a
         // *group* node whose children hold the real geometry — the Octagon's
         // `main_collision` names `main_display`, which is 57 child objects.
-        // Each object carries its own placement, and the result is kept in
-        // body-local space so the body transform still places it.
+        //
+        // A *standalone* proxy is a shape the body reuses: one shared object,
+        // named by every body that wants it, and the exporters leave it sitting
+        // wherever the first user was. The Combat Arena has a single
+        // `spike_collision` at spikes1's position, named by *both* spike bodies,
+        // so placing it absolutely puts spikes2's collider 8.6 m away at
+        // spikes1's. Such a proxy's mesh is already the shape in the body's own
+        // frame, so it is used as written. A proxy that names a *group* (the
+        // Octagon's `main_collision` names `main_display`) keeps the object
+        // placements its children carry.
+        let standalone = rb.simulation_objects().into_iter().find(|name| {
+            !name.eq_ignore_ascii_case(&rb.name)
+                && !name.eq_ignore_ascii_case("(null)")
+                && scene
+                    .find_object(name)
+                    .map(|o| o.mesh.is_some())
+                    .unwrap_or(false)
+                && !ancestry.values().any(|p| p.eq_ignore_ascii_case(name))
+        });
         let mut points = Vec::new();
         for obj in simulation_objects(&scene, rb, &ancestry) {
             let Some(mesh) = &obj.mesh else { continue };
-            let place = to_body * tm_mat4(&obj.transform);
+            let place = match &standalone {
+                Some(name) if name.eq_ignore_ascii_case(&obj.name) => Mat4::IDENTITY,
+                _ => to_body * tm_mat4(&obj.transform),
+            };
             for f in &mesh.faces {
                 let (a, b, c) = (f.v[0] as usize, f.v[1] as usize, f.v[2] as usize);
                 if a < mesh.points.len() && b < mesh.points.len() && c < mesh.points.len() {

@@ -147,6 +147,7 @@ impl PhysicsBackend for JoltBackend {
         .linear_damping(desc.linear_damping)
         .angular_damping(desc.angular_damping)
         .allow_sleeping(desc.allow_sleeping)
+        .sensor(desc.is_sensor)
         .user_data(desc.user_data);
         if let Some(mass) = desc.mass {
             settings = settings.mass(mass);
@@ -199,6 +200,10 @@ impl PhysicsBackend for JoltBackend {
     fn apply_impulse(&mut self, handle: BodyHandle, impulse: Vec3) {
         if let Some(id) = self.id(handle) {
             if let Ok(mut body) = self.world.body_mut(id) {
+                // A sleeping body ignores impulses too, so wake it first — the
+                // same gotcha `set_velocity` has. A hazard pushes a part that
+                // has been sitting still since the match began.
+                body.activate();
                 let _ = body.add_impulse(Self::v(impulse));
             }
         }
@@ -215,6 +220,7 @@ impl PhysicsBackend for JoltBackend {
     fn apply_angular_impulse(&mut self, handle: BodyHandle, torque_impulse: Vec3) {
         if let Some(id) = self.id(handle) {
             if let Ok(mut body) = self.world.body_mut(id) {
+                body.activate();
                 let _ = body.add_angular_impulse(Self::v(torque_impulse));
             }
         }

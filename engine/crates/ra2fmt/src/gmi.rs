@@ -17,6 +17,32 @@ pub struct GmiScene {
     pub objects: Vec<SceneObject>,
     /// The Havok world settings baked into the file (one per scene).
     pub simulation: Option<SimulationObject>,
+    /// The hinges the file's constraint solver declares.
+    pub hinges: Vec<HingeJoint>,
+}
+
+/// A hinge declared by a model's Havok constraint solver.
+///
+/// Arenas use these for their own moving hazards — the compressor's smash arms
+/// and the ClawTop's claws are hinges in the file, which is why the scripts only
+/// have to ask for them by name (`plus.Arena.GetHinge("Hinge01")`) and then
+/// drive them. The pivot and axis are already in world space.
+#[derive(Clone, Debug, Default)]
+pub struct HingeJoint {
+    /// The name the arena scripts use (`Hinge01`).
+    pub name: String,
+    /// The two objects the hinge joins; the first is usually part of the fixed
+    /// scenery.
+    pub body_a: String,
+    pub body_b: String,
+    /// The pin's position and axis, both already in world space.
+    pub pivot: [f32; 3],
+    pub axis: [f32; 3],
+    /// `*IS_LIMITED`: whether the hinge stops at its angle limits.
+    pub limited: bool,
+    pub friction: f32,
+    /// `*ANGLE_LIMITS`, in radians.
+    pub limits: [f32; 2],
 }
 
 impl GmiScene {
@@ -453,6 +479,7 @@ fn split_attach_fields(data: &str) -> Vec<&str> {
 pub fn parse(data: &[u8]) -> Result<GmiScene, Error> {
     Parser {
         r: Reader::new(data),
+        pending_hinges: Vec::new(),
     }
     .parse()
 }
@@ -535,6 +562,8 @@ impl<'a> Reader<'a> {
 
 struct Parser<'a> {
     r: Reader<'a>,
+    /// Hinges read from the constraint list now being parsed.
+    pending_hinges: Vec<HingeJoint>,
 }
 
 impl<'a> Parser<'a> {
@@ -671,7 +700,11 @@ impl<'a> Parser<'a> {
                     });
                     scene.simulation = Some(sim);
                 }
-                42 => scene.objects.push(self.read_constraint_solver()?),
+                42 => {
+                    let solver = self.read_constraint_solver()?;
+                    scene.objects.push(solver);
+                    scene.hinges.append(&mut self.pending_hinges);
+                }
                 49 => scene.objects.push(self.read_angular_dashpot()?),
                 other => scene.objects.push(SceneObject {
                     kind: ObjectKind::Unknown(other),
@@ -936,6 +969,7 @@ impl<'a> Parser<'a> {
     }
 
     fn read_constraint_solver(&mut self) -> Result<SceneObject, Error> {
+        self.pending_hinges.clear();
         let name = self.r.string()?;
         self.r.f32()?; // threshold
         self.r.string()?; // rigid body collection name
@@ -958,6 +992,8 @@ impl<'a> Parser<'a> {
             let (cid, _cflags, _) = self.r.node()?;
             match cid {
                 46 => {
+                    // A constraint with eight trailing floats. No stock arena
+                    // uses one; skipped by structure.
                     let _ = self.r.string()?;
                     let _ = self.read_tm_node()?;
                     let _ = self.r.string()?;
@@ -969,16 +1005,40 @@ impl<'a> Parser<'a> {
                     }
                 }
                 47 => {
-                    let _ = self.r.string()?;
-                    let _ = self.read_tm_node()?;
-                    let _ = self.r.string()?;
-                    let _ = self.r.string()?;
-                    let _ = self.r.vec3()?;
-                    let _ = self.r.vec3()?;
-                    self.r.u8()?;
-                    self.r.f32()?;
-                    self.r.f32()?;
-                    self.r.f32()?;
+                    // A hinge: its name, its frame, the two bodies it joins and
+                    // its limits, in the same order the exported `.gmf` writes
+                    // (`*BODY1`, `*BODY2`, `*POINT`, `*SPIN_AXIS`, `*IS_LIMITED`,
+                    // `*FRICTION`, `*ANGLE_LIMITS`).
+                    let name = self.r.string()?;
+                    let transform = self.read_tm_node()?;
+                    let body_a = self.r.string()?;
+                    let body_b = self.r.string()?;
+                    let _point = self.r.vec3()?;
+                    let _axis = self.r.vec3()?;
+                    let limited = self.r.u8()? != 0;
+                    let friction = self.r.f32()?;
+                    let limit_min = self.r.f32()?;
+                    let limit_max = self.r.f32()?;
+                    // The node's transform *is* the hinge's frame: `TM_ROW3` is
+                    // the pivot and `TM_ROW1` the spin axis.
+                    let pivot = transform[3];
+                    let a = transform[1];
+                    let len = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+                    let axis = if len > 1e-9 {
+                        [a[0] / len, a[1] / len, a[2] / len]
+                    } else {
+                        [0.0, 1.0, 0.0]
+                    };
+                    self.pending_hinges.push(HingeJoint {
+                        name,
+                        body_a,
+                        body_b,
+                        pivot,
+                        axis,
+                        limited,
+                        friction,
+                        limits: [limit_min, limit_max],
+                    });
                 }
                 53 => {
                     let _ = self.r.string()?;

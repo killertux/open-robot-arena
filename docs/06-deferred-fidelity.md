@@ -21,7 +21,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F10 | Chassis skin decals; 16 %-light weight gap | **landed** (weight: see F12) |
 | F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
 | F12 | Component mass when the `.gmf` stores zero | identified (wheels); rule open |
-| F13 | The script layer (M4) | arenas and the shipped AI **landed**; hazard drive next |
+| F13 | The script layer (M4) | arenas, the shipped AI and the hazard joints **landed**; driving their bodies is next |
 
 ---
 
@@ -997,7 +997,11 @@ into builtins) and the `tickInterval` attribute the engine owes a brain.
 4. **Presentation** — audio, camera motion, particles and the Gooey UI — is
    accepted and *recorded* (a run reports what it dropped) and belongs to M5.
 
-**Verified:** the shipped AI closes the fight — the test drives Roly Poly against
+**Verified:** standing a robot in `spike_zone2` fires the hazard — the zone
+event reaches `Spikes.ZoneEvent`, the arena's `Tick` counts its two quarter
+seconds, and `FireTeeth` unlocks the prismatic the script created — and the box
+arena's three joints (two spikes and the saw) are all built with the script's own
+travel. The shipped AI closes the fight — the test drives Roly Poly against
 Little Metal Friend in the Combat Arena for 20 s at the engine's own 1/60 step and
 requires the closest gap to go under a metre and damage to land (it reaches contact
 by t≈8.5 s and both take hits); all fourteen stock arenas register from their own

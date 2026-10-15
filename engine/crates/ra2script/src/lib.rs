@@ -119,6 +119,9 @@ pub struct State {
     pub bots: Vec<BotSnapshot>,
     /// What the scripts asked the engine to do.
     pub requests: Vec<Request>,
+    /// Joints the arena scripts created (`AddPrismatic`, `GetHinge`), waiting
+    /// for the simulator to build them.
+    pub joints: Vec<arena::JointRequest>,
     /// Which robots the engine currently reports inside each registered zone.
     pub zone_contents: BTreeMap<String, Vec<(i32, bool)>>,
     pub time: f32,
@@ -144,6 +147,7 @@ impl State {
             ai: Vec::new(),
             bots: Vec::new(),
             requests: Vec::new(),
+            joints: Vec::new(),
             zone_contents: BTreeMap::new(),
             time: 0.0,
             dt: 1.0 / 30.0,
@@ -206,6 +210,11 @@ pub fn publish(bots: Vec<BotSnapshot>, time: f32, dt: f32) {
 /// Take the requests the scripts queued during the last tick.
 pub fn take_requests() -> Vec<Request> {
     std::mem::take(&mut state().requests)
+}
+
+/// Take the joints the arena scripts have asked for since the last call.
+pub fn take_joint_requests() -> Vec<arena::JointRequest> {
+    std::mem::take(&mut state().joints)
 }
 
 /// Point the script layer at a game installation.

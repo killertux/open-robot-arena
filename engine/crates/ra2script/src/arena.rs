@@ -479,12 +479,28 @@ impl Arena {
         lower: f32,
         upper: f32,
     ) -> PrismaticController {
-        PrismaticController::new(host, child, [ax, ay, az], neutral, lower, upper, false)
+        let drive = register_joint(true, host, child, [ax, ay, az], neutral, lower, upper);
+        PrismaticController {
+            host: host.to_string(),
+            child: child.to_string(),
+            axis: [ax, ay, az],
+            neutral,
+            lower,
+            upper,
+            drive,
+        }
     }
 
-    /// `GetHinge(name)` — the hinge the model already carries.
+    /// `GetHinge(name)` — a hinge the model already carries.
+    ///
+    /// The name is the model's own constraint (`clawtop.py` asks for
+    /// `Hinge01`); the engine finds it in the arena's solver.
     fn GetHinge(&self, name: &str) -> HingeController {
-        HingeController::new(name)
+        let drive = register_joint(false, "", name, [0.0, 1.0, 0.0], 0.0, 0.0, 0.0);
+        HingeController {
+            name: name.to_string(),
+            drive,
+        }
     }
 
     fn SetSubMaterial(&self, name: &str, material: &str, volume: f32) {
@@ -863,26 +879,110 @@ fn ray_triangle(origin: Vec3, dir: Vec3, tri: &[Vec3; 3]) -> Option<f32> {
 // controllers
 // ---------------------------------------------------------------------------
 
-/// The settings a hazard applies to a joint.
+/// The settings a hazard applies to a joint, live.
 ///
-/// These are the values the engine drives the joint with. `SetPowerSettings`
-/// scales the torque by **40**, which the binary does itself
-/// (`docs/06`, F3), so the script's number is stored as written and the engine
-/// applies the scale.
+/// A script mutates this through the controller object and the engine reads it
+/// every step, so the two share one `Arc<Mutex<..>>` rather than passing copies.
+///
+/// The numbers are the script's own. `SetPowerSettings` scales the torque by
+/// **40** in the engine (`docs/06`, F3), so the scale is applied where the joint
+/// is built, not here.
 #[derive(Clone, Debug, Default)]
 pub struct Drive {
+    /// Target speed — rad/s for a hinge, m/s for a slider.
     pub speed: f32,
+    /// The script's torque, before the engine's ×40.
     pub torque: f32,
+    /// `SetDirection`: a sign selector (`1`, `-1` or the scripts' `±100`).
     pub direction: f32,
+    /// `Lock(True)` parks it: no motor, held by the joint's friction.
     pub locked: bool,
     pub auto_lock: bool,
     pub pinned: bool,
     pub limits: Option<(f32, f32)>,
+    /// A one-shot `ApplyForce` (N·s at the joint's axis), cleared once applied.
+    pub pending_force: f32,
+    /// A one-shot `ApplyTorque`, cleared once applied.
+    pub pending_torque: f32,
+}
+
+impl Drive {
+    /// The target velocity the engine should hold, or `0` for "motor off".
+    ///
+    /// `SetDirection` is a sign selector (`PitSlider` passes `1`, `Hammer`
+    /// passes `±100`), so only its sign matters; with no direction the joint is
+    /// left free, which is what the hazards' `Shutdown` asks for.
+    pub fn target_velocity(&self) -> f32 {
+        if self.locked || self.direction == 0.0 {
+            return 0.0;
+        }
+        self.speed * self.direction.signum()
+    }
+
+    /// Take the pending one-shot impulse, if any.
+    pub fn take_force(&mut self) -> f32 {
+        std::mem::take(&mut self.pending_force)
+    }
+
+    pub fn take_torque(&mut self) -> f32 {
+        std::mem::take(&mut self.pending_torque)
+    }
+}
+
+/// A joint a script asked the engine for.
+///
+/// `AddPrismatic` and `GetHinge` only *record* the request: the engine builds
+/// the joint at the top of the next step, by which time every hazard's
+/// `__init__` has run and its power settings are in place.
+#[derive(Clone)]
+pub struct JointRequest {
+    /// A slider (`AddPrismatic`) or a hinge (`AddHinge`/`GetHinge`).
+    pub slider: bool,
+    /// Slider: the object the joint is anchored to. Hinge: unused.
+    pub host: String,
+    /// Slider: the object that moves. Hinge: the model's constraint name.
+    pub child: String,
+    /// The slide axis, in the host's space (`AddPrismatic`'s `ax, ay, az`).
+    pub axis: [f32; 3],
+    pub neutral: f32,
+    /// Travel limits. The scripts pass them unordered — `box.py` asks for
+    /// `(0, .8, 0)`, which is `neutral`, then `0.8`, then `0` — so the engine
+    /// takes the min and the max.
+    pub lower: f32,
+    pub upper: f32,
+    pub drive: Arc<Mutex<Drive>>,
+}
+
+/// Record a joint request and hand back the settings the script will drive.
+fn register_joint(
+    slider: bool,
+    host: &str,
+    child: &str,
+    axis: [f32; 3],
+    neutral: f32,
+    lower: f32,
+    upper: f32,
+) -> Arc<Mutex<Drive>> {
+    let drive = Arc::new(Mutex::new(Drive {
+        locked: true,
+        ..Drive::default()
+    }));
+    crate::state().joints.push(JointRequest {
+        slider,
+        host: host.to_string(),
+        child: child.to_string(),
+        axis,
+        neutral,
+        lower,
+        upper,
+        drive: Arc::clone(&drive),
+    });
+    drive
 }
 
 /// `plus.PrismaticController` — a slider the arena script created.
 #[pyclass(name = "PrismaticController", module = "plus")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PrismaticController {
     pub host: String,
     pub child: String,
@@ -890,127 +990,111 @@ pub struct PrismaticController {
     pub neutral: f32,
     pub lower: f32,
     pub upper: f32,
-    pub drive: Drive,
+    pub drive: Arc<Mutex<Drive>>,
 }
 
 impl PrismaticController {
-    pub fn new(
-        host: &str,
-        child: &str,
-        axis: [f32; 3],
-        neutral: f32,
-        lower: f32,
-        upper: f32,
-        auto_lock: bool,
-    ) -> Self {
-        PrismaticController {
-            host: host.to_string(),
-            child: child.to_string(),
-            axis,
-            neutral,
-            lower,
-            upper,
-            drive: Drive {
-                auto_lock,
-                locked: true,
-                ..Drive::default()
-            },
-        }
+    fn d(&self) -> std::sync::MutexGuard<'_, Drive> {
+        self.drive.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
 #[pymethods]
 impl PrismaticController {
-    fn SetPowerSettings(&mut self, speed: f32, torque: f32) {
-        self.drive.speed = speed;
-        self.drive.torque = torque;
+    fn SetPowerSettings(&self, speed: f32, torque: f32) {
+        let mut d = self.d();
+        d.speed = speed;
+        d.torque = torque;
     }
 
-    fn SetDirection(&mut self, direction: f32) {
-        self.drive.direction = direction;
+    fn SetDirection(&self, direction: f32) {
+        self.d().direction = direction;
     }
 
-    fn Lock(&mut self, on: bool) {
-        self.drive.locked = on;
+    fn Lock(&self, on: bool) {
+        self.d().locked = on;
     }
 
-    fn SetAutoLock(&mut self, on: bool) {
-        self.drive.auto_lock = on;
+    fn SetAutoLock(&self, on: bool) {
+        self.d().auto_lock = on;
     }
 
-    fn SetLimits(&mut self, lower: f32, upper: f32) {
-        self.drive.limits = Some((lower, upper));
+    fn SetLimits(&self, lower: f32, upper: f32) {
+        self.d().limits = Some((lower, upper));
     }
 
-    fn ApplyForce(&mut self, force: f32) {
-        self.drive.speed = self.drive.speed.max(0.0);
-        self.drive.torque = force;
+    /// `ApplyForce(f)` — one shot, along the joint's own axis.
+    fn ApplyForce(&self, force: f32) {
+        let mut d = self.d();
+        d.pending_force += force;
+        d.locked = false;
     }
 
-    fn SetPinned(&mut self, on: bool) {
-        self.drive.pinned = on;
+    fn SetPinned(&self, on: bool) {
+        let mut d = self.d();
+        d.pinned = on;
+        d.locked = on;
     }
 
-    fn SetActive(&mut self, _on: bool) {}
+    fn SetActive(&self, _on: bool) {}
 }
 
-/// `plus.HingeController` — a hinge already in the arena model.
+/// `plus.HingeController` — a hinge the arena model already carries.
 #[pyclass(name = "HingeController", module = "plus")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HingeController {
     pub name: String,
-    pub drive: Drive,
+    pub drive: Arc<Mutex<Drive>>,
 }
 
 impl HingeController {
-    pub fn new(name: &str) -> Self {
-        HingeController {
-            name: name.to_string(),
-            drive: Drive {
-                locked: true,
-                ..Drive::default()
-            },
-        }
+    fn d(&self) -> std::sync::MutexGuard<'_, Drive> {
+        self.drive.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
 #[pymethods]
 impl HingeController {
-    fn SetPowerSettings(&mut self, speed: f32, torque: f32) {
-        self.drive.speed = speed;
-        self.drive.torque = torque;
+    fn SetPowerSettings(&self, speed: f32, torque: f32) {
+        let mut d = self.d();
+        d.speed = speed;
+        d.torque = torque;
     }
 
-    fn SetDirection(&mut self, direction: f32) {
-        self.drive.direction = direction;
+    fn SetDirection(&self, direction: f32) {
+        self.d().direction = direction;
     }
 
-    fn Lock(&mut self, on: bool) {
-        self.drive.locked = on;
+    fn Lock(&self, on: bool) {
+        self.d().locked = on;
     }
 
-    fn SetAutoLock(&mut self, on: bool) {
-        self.drive.auto_lock = on;
+    fn SetAutoLock(&self, on: bool) {
+        self.d().auto_lock = on;
     }
 
-    fn SetAutoLocks(&mut self, a: bool, b: bool) {
-        self.drive.auto_lock = a || b;
+    fn SetAutoLocks(&self, a: bool, b: bool) {
+        self.d().auto_lock = a || b;
     }
 
-    fn SetLimits(&mut self, lower: f32, upper: f32) {
-        self.drive.limits = Some((lower, upper));
+    fn SetLimits(&self, lower: f32, upper: f32) {
+        self.d().limits = Some((lower, upper));
     }
 
-    fn ApplyTorque(&mut self, torque: f32) {
-        self.drive.torque = torque;
-        self.drive.locked = false;
+    /// `ApplyTorque(t)` — one shot, about the hinge's axis.
+    fn ApplyTorque(&self, torque: f32) {
+        let mut d = self.d();
+        d.pending_torque += torque;
+        d.locked = false;
     }
 
-    fn SetPinned(&mut self, on: bool) {
-        self.drive.pinned = on;
+    fn SetPinned(&self, on: bool) {
+        let mut d = self.d();
+        d.pinned = on;
+        d.locked = on;
     }
 
-    fn SetActive(&mut self, _on: bool) {}
+    fn SetActive(&self, _on: bool) {}
 }
 
 /// `plus.ArenaDetail` — the record `Arenas.enumAvailable` hands back.

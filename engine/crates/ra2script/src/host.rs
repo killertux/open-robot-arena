@@ -261,6 +261,16 @@ impl ScriptHost {
                     eprintln!("ra2script: {}: {e}", script.display());
                 }
             }
+            // Hazards are a match option in the game, and on by default here;
+            // `RA2_HAZARDS=0` runs the arena without them.
+            let hazards = std::env::var("RA2_HAZARDS")
+                .map(|v| v != "0")
+                .unwrap_or(true);
+            if hazards && arena_script.is_some() {
+                Python::with_gil(|py| {
+                    let _ = host.hazards_on(py, true);
+                });
+            }
             host.load_ai(py)?;
             Ok(())
         })?;
@@ -372,13 +382,23 @@ impl ScriptHost {
         }
     }
 
-    /// Call the arena's `Tick`, which the engine does once per frame.
-    pub fn tick_arena(&self, py: Python<'_>, dt: f32) -> PyResult<bool> {
-        {
-            let mut st = crate::state();
-            st.time += dt;
-            st.dt = dt;
-        }
+    /// Call the arena's `Tick` (GIL handled here, so callers need no `pyo3`).
+    /// The clock is [`crate::publish`]'s.
+    pub fn run_arena_tick(&self, dt: f32) -> bool {
+        Python::with_gil(|py| self.tick_arena(py, dt).unwrap_or(true))
+    }
+
+    /// Tell the arena a robot entered or left one of its zones, without the
+    /// caller needing the GIL.
+    pub fn send_zone_event(&self, direction: i32, zone: i32, robot: i32, chassis: bool) -> bool {
+        Python::with_gil(|py| {
+            self.zone_event(py, direction, zone, robot, chassis)
+                .unwrap_or(true)
+        })
+    }
+
+    /// Call the arena's `Tick`. The clock is [`crate::publish`]'s.
+    pub fn tick_arena(&self, py: Python<'_>, _dt: f32) -> PyResult<bool> {
         let arena = crate::state()
             .arena_object
             .as_ref()

@@ -6,6 +6,7 @@
 pub mod backend;
 pub mod combat;
 pub mod duel;
+pub mod hazards;
 pub mod jolt;
 pub mod montage;
 pub mod rig;

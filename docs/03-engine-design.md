@@ -52,9 +52,10 @@ local/           # (git-ignored) game files + converted cache
   `ra2-duel` runner)*.
 - **M4 — Script layer.** 🚧 The engine side of the `plus`/`Arenas`/`AI` object
   model, on an embedded CPython 3, running the game's own Python 2 sources
-  unmodified. The arena surface and the shipped AI have landed — with the AI in
-  place the headline duel closes and trades blows — and the hazards actually
-  firing are next *(implemented as `ra2script`; see F13)*.
+  unmodified. The arena surface, the shipped AI and the hazards' joints and zones
+  have landed — with the AI in place the headline duel closes and trades blows,
+  and the spikes are wired to the zones their script registered *(implemented as
+  `ra2script` + `ra2sim::hazards`; see F13)*.
 - **M5 — Game shell.** Workshop (build a robot), tournaments, menus.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
 

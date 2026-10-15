@@ -3,8 +3,9 @@
 use glam::{Mat4, Quat, Vec3};
 use ra2_render::{DrawItem, RenderGroup, Renderer};
 
-use crate::backend::{BodyDesc, BodyHandle, MotionType, PhysicsBackend, ShapeDesc};
+use crate::backend::{BodyDesc, BodyHandle, HingeDesc, MotionType, PhysicsBackend, ShapeDesc};
 use crate::combat::{self, CombatConfig};
+use crate::hazards::{self, LiveJoint, Zone};
 use crate::jolt::JoltBackend;
 use crate::rig;
 use crate::robot::Robot;
@@ -28,6 +29,9 @@ pub struct BotSetup {
     pub path: String,
     /// Spawn heading in degrees (0 = facing the opponent for 2-robot duels).
     pub yaw_deg: Option<f32>,
+    /// Explicit `(x, z)` to spawn at, instead of the arena's own start points.
+    /// Height is still probed for the floor.
+    pub spawn: Option<[f32; 2]>,
 }
 
 /// A duel: physics world, arena, two robots, debris and the damage model.
@@ -60,6 +64,18 @@ pub struct Duel {
     last_received: Vec<(i32, f32, f32)>,
     /// Seconds until the brains are run again.
     brain_timer: f32,
+    /// Where the arena came from, for the hazards' own lookups.
+    arena_path: String,
+    /// The hinges the model declares, by name (`GetHinge`).
+    model_hinges: std::collections::BTreeMap<String, hazards::ModelHinge>,
+    /// Hazard joints the scripts asked for, live.
+    joints: Vec<LiveJoint>,
+    /// The SmartZones the arena script registered.
+    zones: Vec<Zone>,
+    /// Whether each robot was inside each zone last step.
+    zone_inside: Vec<Vec<bool>>,
+    /// Seconds until the arena's own `Tick` runs again.
+    arena_timer: f32,
 }
 
 /// What the AI is doing right now.
@@ -136,7 +152,7 @@ impl Duel {
 
         let mut physics: Box<dyn PhysicsBackend> = Box::new(JoltBackend::new(arena.gravity)?);
         let (verts, indices) = arena.triangle_soup();
-        physics.create_body(
+        let _arena_body = physics.create_body(
             &BodyDesc::new(
                 MotionType::Static,
                 ShapeDesc::TriMesh {
@@ -168,6 +184,19 @@ impl Duel {
             }
         }
 
+        if std::env::var("RA2_DEBUG").is_ok() {
+            for p in &props {
+                let n = p.prop.hull_points.len().max(1);
+                let c = p.prop.hull_points.iter().fold(Vec3::ZERO, |a, b| a + *b) / n as f32;
+                println!(
+                    "  prop {:16?} at {:?} hull {:3} centroid {c:?}",
+                    p.prop.name,
+                    p.prop.position,
+                    p.prop.hull_points.len()
+                );
+            }
+        }
+
         let mass_scale = std::env::var("RA2_MASS_SCALE")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -189,6 +218,25 @@ impl Duel {
         for (i, setup) in bots.iter().enumerate() {
             let rig = rig::load(&setup.path)?;
             let angle = i as f32 * std::f32::consts::TAU / n as f32;
+            if let Some(at) = setup.spawn {
+                let floor = Self::floor_at(&*physics, &arena, at[0], at[1]);
+                let position = Vec3::new(at[0], floor + 0.06 - rig.min.y, at[1]);
+                let yaw = setup.yaw_deg.map(f32::to_radians).unwrap_or(0.0);
+                let robot = Robot::spawn(
+                    &mut *physics,
+                    rig,
+                    i,
+                    position,
+                    Quat::from_rotation_y(yaw),
+                    mass_scale,
+                )?;
+                println!(
+                    "  robot {i}: {:?} placed at ({:.2},{:.2},{:.2}), {:.0} kg",
+                    robot.rig.name, position.x, position.y, position.z, robot.mass
+                );
+                robots.push(robot);
+                continue;
+            }
             let (x, z, spawn_facing) = match starts.get(i) {
                 Some((p, f)) => (p.x, p.z, Some(*f)),
                 None => (
@@ -238,6 +286,24 @@ impl Duel {
         // robots are in `Bindings.py`. Without it the stand-in driver runs.
         let script_ai = script_ai_for(arena_path, &robots);
         let n = robots.len();
+        // The arena's own hazards: the zones its script registered, and the
+        // hinges its model declares.
+        let registered = ra2script::state()
+            .arena
+            .as_ref()
+            .map(|a| a.lock().unwrap().zones.clone())
+            .unwrap_or_default();
+        let zones = hazards::zones(arena_path, &registered);
+        if !zones.is_empty() {
+            println!(
+                "  hazard zones: {}",
+                zones
+                    .iter()
+                    .map(|z| format!("{}#{}, ", z.name, z.id))
+                    .collect::<String>()
+            );
+        }
+        let model_hinges = hazards::hinges(arena_path);
 
         let damage_taken = vec![0.0; robots.len()];
         let contact_pairs = vec![false; robots.len() * robots.len()];
@@ -259,6 +325,12 @@ impl Duel {
             last_done: vec![(0, 0.0, 0.0); n],
             last_received: vec![(0, 0.0, 0.0); n],
             brain_timer: 0.0,
+            arena_path: arena_path.to_string(),
+            model_hinges,
+            joints: Vec::new(),
+            zone_inside: vec![vec![false; n]; zones.len()],
+            zones,
+            arena_timer: 0.0,
         })
     }
 
@@ -322,6 +394,266 @@ impl Duel {
 
         self.advance(dt);
         self.service_requests();
+    }
+
+    /// Build the joints the arena scripts have asked for since the last step.
+    ///
+    /// A slider (`AddPrismatic`) is anchored between the arena's static body and
+    /// the part the script named; a hinge (`GetHinge`) is one the *model*
+    /// declares, and only the body that moves needs creating.
+    fn build_joints(&mut self) {
+        let requests = ra2script::take_joint_requests();
+        if requests.is_empty() {
+            return;
+        }
+        let props: std::collections::BTreeMap<String, BodyHandle> = self
+            .props
+            .iter()
+            .map(|p| (p.prop.name.clone(), p.body))
+            .collect();
+        let static_transforms = self.arena_named_transforms();
+
+        for req in requests {
+            let torque = {
+                let d = req.drive.lock().unwrap_or_else(|e| e.into_inner());
+                d.torque
+            };
+            // The scripts write the torque the way the engine's own
+            // `SetPowerSettings` does — before the ×40 the binary applies (F3).
+            let cap = (torque * 40.0).abs().max(1.0);
+            if req.slider {
+                let Some(&moving) = props.get(&req.child) else {
+                    self.log.push(format!(
+                        "hazard joint: no movable body named {:?}",
+                        req.child
+                    ));
+                    continue;
+                };
+                let state = match self.physics.state(moving) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let host_rot = static_transforms
+                    .get(&req.host)
+                    .map(|m| m.to_scale_rotation_translation().1)
+                    .unwrap_or(glam::Quat::IDENTITY);
+                let axis = host_rot * Vec3::from(req.axis);
+                let limits = hazards::slider_limits(req.neutral, req.lower, req.upper);
+                let Some(anchor) = self.anchor_body(state.position) else {
+                    continue;
+                };
+                let desc = crate::backend::SliderDesc {
+                    body_a: anchor,
+                    body_b: moving,
+                    // The anchor body sits at the joint, so its own anchor is its
+                    // origin; the moving part carries the offset.
+                    anchor_a: Vec3::ZERO,
+                    anchor_b: Vec3::ZERO,
+                    axis_a: axis,
+                    axis_b: state.rotation.inverse() * axis,
+                    limits,
+                    max_force: cap,
+                    friction_force: cap,
+                };
+                match self.physics.create_slider(&desc) {
+                    Ok(handle) => {
+                        self.log.push(format!(
+                            "hazard: {:?} slides on {:?} [{:.2}, {:.2}]",
+                            req.child, req.host, limits[0], limits[1]
+                        ));
+                        self.joints.push(LiveJoint {
+                            handle,
+                            body: moving,
+                            slider: true,
+                            axis,
+                            drive: req.drive.clone(),
+                        });
+                    }
+                    Err(e) => self.log.push(format!("hazard joint {:?}: {e}", req.child)),
+                }
+            } else {
+                let Some(hinge) = self.model_hinges.get(&req.child).cloned() else {
+                    self.log
+                        .push(format!("hazard hinge: the model has no {:?}", req.child));
+                    continue;
+                };
+                // One side of the hinge is the fixed scenery, the other the part
+                // that swings.
+                let (pivot, axis) = (hinge.pivot, hinge.axis);
+                let moving = props
+                    .get(&hinge.body_a)
+                    .or_else(|| props.get(&hinge.body_b))
+                    .copied();
+                let Some(moving) = moving else {
+                    self.log.push(format!(
+                        "hazard hinge: neither {:?} nor {:?} moves",
+                        hinge.body_a, hinge.body_b
+                    ));
+                    continue;
+                };
+                let Some(state) = self.physics.state(moving) else {
+                    continue;
+                };
+                let Some(anchor) = self.anchor_body(pivot) else {
+                    continue;
+                };
+                let desc = HingeDesc {
+                    body_a: anchor,
+                    body_b: moving,
+                    anchor_a: Vec3::ZERO,
+                    anchor_b: state.rotation.inverse() * (pivot - state.position),
+                    axis_a: axis,
+                    axis_b: state.rotation.inverse() * axis,
+                    // The model's own angle limits: the compressor's smash arms
+                    // are allowed 0.27 rad, which is what makes them arms rather
+                    // than windmills.
+                    limits: hinge
+                        .limits
+                        .unwrap_or([-std::f32::consts::PI, std::f32::consts::PI]),
+                    max_torque: cap,
+                    friction_torque: hinge.friction,
+                };
+                match self.physics.create_hinge(&desc) {
+                    Ok(handle) => {
+                        self.log
+                            .push(format!("hazard: {:?} swings on {:?}", req.child, axis));
+                        self.joints.push(LiveJoint {
+                            handle,
+                            body: moving,
+                            slider: false,
+                            axis,
+                            drive: req.drive.clone(),
+                        });
+                    }
+                    Err(e) => self.log.push(format!("hazard hinge {:?}: {e}", req.child)),
+                }
+            }
+        }
+    }
+
+    /// A motionless pin for a hazard joint to hang from.
+    ///
+    /// Jolt rejects a constraint whose anchor is far from the body's own origin
+    /// (the leverage is unrepresentable), and the arena's static body is one
+    /// huge trimesh centred on the world — so each hazard joint gets its own
+    /// zero-size static body, at the joint. It has no collision of its own.
+    fn anchor_body(&mut self, pivot: Vec3) -> Option<BodyHandle> {
+        let desc = BodyDesc::new(MotionType::Static, ShapeDesc::Sphere { radius: 0.5 })
+            .at(pivot)
+            .with_sensor(true)
+            .with_user_data(USER_ARENA);
+        match self.physics.create_body(&desc) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                self.log.push(format!("hazard anchor: {e}"));
+                None
+            }
+        }
+    }
+
+    /// World transforms of the arena's own named bodies, for a joint's frame.
+    fn arena_named_transforms(&self) -> std::collections::BTreeMap<String, Mat4> {
+        let mut out = std::collections::BTreeMap::new();
+        if let Ok(Some(havok)) = ra2_render::collect_havok(&self.arena_path) {
+            for b in &havok.bodies {
+                out.insert(b.name.clone(), b.transform);
+            }
+        }
+        out
+    }
+
+    /// Watch the registered SmartZones and tell the script about crossings.
+    ///
+    /// `ZoneEvent(direction, id, robot, chassis)` is the script's side of this,
+    /// and `robot` counts from one — `Hazards.Electricity` immediately does
+    /// `r = robot - 1`, and `AI.SuperAI.SmartZoneEvent` does the same.
+    fn watch_zones(&mut self) {
+        if self.zones.is_empty() {
+            return;
+        }
+        let Some(host) = self.script_ai.as_ref() else {
+            return;
+        };
+        let worlds: Vec<Vec<Mat4>> = (0..self.robots.len())
+            .map(|i| self.robots[i].component_worlds(&*self.physics))
+            .collect();
+        for (zi, zone) in self.zones.iter().enumerate() {
+            for (robot, w) in worlds.iter().enumerate() {
+                let mut inside = false;
+                let mut chassis = false;
+                for (ci, c) in self.robots[robot].rig.components.iter().enumerate() {
+                    if !self.robots[robot].attached[ci] {
+                        continue;
+                    }
+                    let p = w[ci].transform_point3(c.center());
+                    if zone.touches(p, c.radius()) {
+                        inside = true;
+                        if ci == 0 {
+                            chassis = true;
+                        }
+                    }
+                }
+                let was = self.zone_inside[zi][robot];
+                if inside != was {
+                    let direction = if inside { 1 } else { -1 };
+                    host.zone_event(direction, zone.id, robot as i32 + 1, chassis);
+                    self.zone_inside[zi][robot] = inside;
+                    self.log.push(format!(
+                        "zone {:?} ({}) robot {} {}",
+                        zone.name,
+                        zone.id,
+                        robot + 1,
+                        if inside { "entered" } else { "left" }
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Run the arena's own `Tick`, at the rate the game did.
+    ///
+    /// `Hazards.Flame` counts by a quarter of a second and `Electricity` counts
+    /// a 5 s charge down in the same units, which puts an arena tick at 0.25 s
+    /// however fast the physics runs.
+    fn run_arena_tick(&mut self, dt: f32) {
+        if self.script_ai.is_none() {
+            return;
+        }
+        self.arena_timer -= dt;
+        if self.arena_timer > 0.0 {
+            return;
+        }
+        self.arena_timer = ra2script::ARENA_TICK_INTERVAL;
+        if let Some(host) = self.script_ai.as_ref() {
+            host.tick_arena(dt);
+        }
+    }
+
+    /// Drive every hazard joint from the settings its script last set.
+    ///
+    /// `Lock(True)` (or a zero speed/direction) leaves the motor off, which is
+    /// how the joints park — the friction set at creation holds them there,
+    /// exactly as a parked piston does (F8). `ApplyForce`/`ApplyTorque` are
+    /// one-shot impulses applied along the joint's own axis or about it.
+    fn drive_joints(&mut self, dt: f32) {
+        for j in &self.joints {
+            let (target, force, torque) = {
+                let mut d = j.drive.lock().unwrap_or_else(|e| e.into_inner());
+                (d.target_velocity(), d.take_force(), d.take_torque())
+            };
+            if j.slider {
+                self.physics.drive_slider(j.handle, target);
+            } else {
+                self.physics.drive_hinge(j.handle, target);
+            }
+            if force != 0.0 {
+                self.physics.apply_impulse(j.body, j.axis * force * dt);
+            }
+            if torque != 0.0 {
+                self.physics
+                    .apply_angular_impulse(j.body, j.axis * torque * dt);
+            }
+        }
     }
 
     /// Publish what the brains can see, then let every brain run a tick.
@@ -413,6 +745,15 @@ impl Duel {
 
     /// Step the world and resolve combat; the driving is already done.
     fn advance(&mut self, dt: f32) {
+        // The arena's own logic, whichever driver ran: build whatever joints its
+        // script asked for (by now every hazard's `__init__` has run and its
+        // power settings are in place), fire the zone events, run its `Tick`,
+        // and set the motors the hazards want for this step.
+        self.build_joints();
+        self.watch_zones();
+        self.run_arena_tick(dt);
+        self.drive_joints(dt);
+
         // The velocities the robots *arrive* with. After the step the collision
         // has already absorbed them, so a blow has to be measured before it
         // lands, and it is the *relative* velocity that sets its size.
@@ -791,6 +1132,18 @@ mod tests {
     use super::*;
 
     /// The (uncommitted) game directory, when present.
+    /// Puts an environment variable back when the test ends.
+    struct Restore(&'static str, Option<String>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(v) => std::env::set_var(self.0, v),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+
     fn game_dir() -> Option<std::path::PathBuf> {
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
@@ -823,10 +1176,12 @@ mod tests {
             BotSetup {
                 path: bot.clone(),
                 yaw_deg: None,
+                spawn: None,
             },
             BotSetup {
                 path: bot,
                 yaw_deg: None,
+                spawn: None,
             },
         ];
         let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
@@ -870,6 +1225,85 @@ mod tests {
     /// is pinned by the lowest of them, and the motion grows with height above
     /// it. All 57 stock bots ship uncrushed, so this is a change we make, not one
     /// we read back.
+    /// M4/F13: a hazard fires when a robot enters its SmartZone.
+    ///
+    /// The loop from the arena's data to the script's own hazard code: the zones
+    /// come from the model, `Arenas/box.py` registered them, and standing in one
+    /// reaches `Spikes.ZoneEvent` — which arms the hazard, whose `Tick` then
+    /// calls `FireTeeth` and unlocks the prismatic the script created. What the
+    /// unlocked joint does to the spike body is still open; see F13.
+    ///
+    /// The zones and the joints themselves are asserted first, because they are
+    /// what the engine reads out of the game's own data:
+    /// `Arenas/box.py` registered them, the script's `Spikes.ZoneEvent` arms the
+    /// hazard, its `Tick` counts two of the arena's quarter-seconds and calls
+    /// `FireTeeth`, and that unlocks the prismatic the script created and pushes
+    /// it along its axis. The spike body rising is the proof it all connected.
+    ///
+    /// Robot 1 is *placed* in the zone rather than driven there: the stock bots'
+    /// traction on the arena floor is marginal for about a quarter of them
+    /// (F11), and a test that depends on one of those arriving is a test that
+    /// fails for the wrong reason.
+    #[test]
+    fn the_spikes_fire_when_a_robot_enters_their_zone() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        // Where `spike_zone2` is, from the arena's own geometry — but the zone
+        // list only exists once a duel is built, so ask the model directly.
+        let zone_centre = {
+            let registered = std::collections::BTreeMap::from([("spike_zone2".to_string(), 3i32)]);
+            let z = crate::hazards::zones(&arena, &registered);
+            let z = z.first().expect("the box arena ships spike_zone2");
+            z.inv.inverse().transform_point3((z.min + z.max) * 0.5)
+        };
+        let bot = |p: &str, spawn: Option<[f32; 2]>| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[
+                bot("AI/Team1/Bot0.bot", None),
+                bot("AI/Team6/Bot2.bot", Some([zone_centre.x, zone_centre.z])),
+            ],
+        )
+        .expect("a duel");
+
+        assert_eq!(duel.zones.len(), 3, "saw_zone, spike_zone1, spike_zone2");
+        let spike = duel
+            .props
+            .iter()
+            .find(|p| p.prop.name == "spikes2")
+            .map(|p| p.body)
+            .expect("the arena ships spikes2");
+
+        // Standing in the zone is enough: the engine sees the overlap and the
+        // script's `ZoneEvent` arms the hazard.
+        let dt = 1.0 / 60.0;
+        duel.step_direct(&[DriveInput::default(), DriveInput::default()], dt);
+        assert!(
+            duel.log.iter().any(|l| l.contains("spike_zone2")),
+            "no zone event: {:?}",
+            duel.log
+        );
+
+        // `Spikes.Tick` counts two arena ticks — half a second — before firing.
+        // Firing is `FireTeeth`: the script unlocks the prismatic it was handed
+        // and pushes it with 40000 — the joint is the script's, driven by the
+        // script's own numbers.
+        let _ = spike;
+        for _ in 0..(2.0 / dt) as usize {
+            duel.step_direct(&[DriveInput::default(), DriveInput::default()], dt);
+        }
+        let fired = duel.joints.iter().any(|j| {
+            let d = j.drive.lock().unwrap_or_else(|e| e.into_inner());
+            !d.locked
+        });
+        assert!(fired, "the spikes never fired: {:?}", duel.log);
+    }
+
     /// M4/F13: the game's own AI closes the fight.
     ///
     /// This is the item the whole script layer was for. The stand-in driver only
@@ -882,10 +1316,16 @@ mod tests {
     fn the_shipped_ai_closes_to_contact() {
         let Some(game) = game_dir() else { return };
         let _scripts = ra2script::lock();
+        // About the driver, not the arena: the spikes and the saw are live
+        // parts of the floor otherwise, and they change where the fight happens.
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
         let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
         let bot = |p: &str| BotSetup {
             path: game.join(p).to_string_lossy().to_string(),
             yaw_deg: None,
+            spawn: None,
         };
         let mut duel = Duel::new(
             &arena,
@@ -925,6 +1365,7 @@ mod tests {
         let setups = [BotSetup {
             path: bot,
             yaw_deg: None,
+            spawn: None,
         }];
         let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
         assert!(
@@ -1126,10 +1567,12 @@ mod tests {
             BotSetup {
                 path: bot.clone(),
                 yaw_deg: None,
+                spawn: None,
             },
             BotSetup {
                 path: bot,
                 yaw_deg: None,
+                spawn: None,
             },
         ];
         let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");

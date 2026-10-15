@@ -112,6 +112,16 @@ impl ScriptAi {
         Self::collect(count, self.host.tick_brains())
     }
 
+    /// Tell the arena script that a robot entered or left one of its zones.
+    pub fn zone_event(&self, direction: i32, zone: i32, robot: i32, chassis: bool) -> bool {
+        self.host.send_zone_event(direction, zone, robot, chassis)
+    }
+
+    /// Run the arena's own `Tick`, which the game did four times a second.
+    pub fn tick_arena(&self, dt: f32) -> bool {
+        self.host.run_arena_tick(dt)
+    }
+
     /// The controls each brain last set, without running one.
     pub fn drives(&self, count: usize) -> Vec<Option<DriveInput>> {
         Self::collect(count, self.host.read_drives())

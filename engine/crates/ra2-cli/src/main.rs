@@ -132,10 +132,18 @@ fn info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== {path} ({} bytes) ===", data.len());
     let scene = gmi::parse(&data)?;
     println!(
-        "  materials: {}  objects: {}",
+        "  materials: {}  objects: {}  hinges: {}",
         scene.materials.len(),
-        scene.objects.len()
+        scene.objects.len(),
+        scene.hinges.len()
     );
+    for h in &scene.hinges {
+        println!(
+            "    hinge {:?} {} -> {} pivot ({:.3},{:.3},{:.3}) axis ({:.2},{:.2},{:.2}) limited {} friction {:.3} limits {:?}",
+            h.name, h.body_a, h.body_b, h.pivot[0], h.pivot[1], h.pivot[2], h.axis[0], h.axis[1], h.axis[2],
+            h.limited, h.friction, h.limits
+        );
+    }
     for m in &scene.materials {
         let tex: Vec<&str> = m
             .textures

@@ -73,6 +73,11 @@ pub struct BodyDesc {
     pub angular_damping: f32,
     /// Whether the backend may put this body to sleep when it settles.
     pub allow_sleeping: bool,
+    /// A sensor detects other bodies without any collision response — the shape
+    /// is a volume, not an obstacle. The engine's own joints hang from one, so
+    /// their pin can be big enough for Jolt's constraint maths without becoming
+    /// something a robot can drive into.
+    pub is_sensor: bool,
     /// Free-form tag (used to tell arena from robot bodies).
     pub user_data: u64,
 }
@@ -90,6 +95,7 @@ impl BodyDesc {
             linear_damping: 0.05,
             angular_damping: 0.2,
             allow_sleeping: true,
+            is_sensor: false,
             user_data: 0,
         }
     }
@@ -129,6 +135,12 @@ impl BodyDesc {
     /// changes (Jolt leaves a sleeping body untouched until something wakes it).
     pub fn with_sleeping(mut self, allow: bool) -> Self {
         self.allow_sleeping = allow;
+        self
+    }
+
+    /// A volume that detects bodies without colliding with them.
+    pub fn with_sensor(mut self, is_sensor: bool) -> Self {
+        self.is_sensor = is_sensor;
         self
     }
 

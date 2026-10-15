@@ -130,9 +130,12 @@ load (including their implicit relative imports and `list.sort(cmp)`). All
 fourteen stock arenas register and configure themselves — cameras, shadow
 receivers, the navigation map read from the `.map` files the arenas ship, the
 hazard zones and the collision lines that keep the AI off them — and the shipped
-AI drives the duel on the game's own eighth-of-a-second cadence. What is left is
-the arena's `Tick` and the hazard joints: the spikes, saws and hammers are set up
-but do not move yet. See `docs/06-deferred-fidelity.md` F13.
+AI drives the duel on the game's own eighth-of-a-second cadence. The hazards are
+wired to the physics as well: the box arena's spikes and saw become real
+prismatic joints with the script's own travel, the hinges the models declare are
+parsed and handed to `GetHinge`, and standing in a registered SmartZone reaches
+the script's own `ZoneEvent`. Moving the bodies those joints hold is the last
+piece. See `docs/06-deferred-fidelity.md` F13.
 
 ## Layout
 
