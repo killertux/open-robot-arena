@@ -185,6 +185,14 @@ fn damage(bot: i32, component: i32, amount: f32, point: (f32, f32, f32)) {
     });
 }
 
+/// `force(bot, x, y, z)` — an impulse on the robot, in N·s.
+///
+/// The unit is our reading rather than a recovered one. The single caller is
+/// `Hazards.Electricity`, which lifts a zapped robot by `115 * getWeight(bot)`;
+/// taken as N·s on a 200 kg robot that is a hundred times what a zap should do,
+/// so either `getWeight` is not in kilograms or the original scales the argument.
+/// The Electric Arena is the only place that could settle it, and it is the one
+/// hazard whose strength is unverified. See F13.
 #[pyfunction]
 #[pyo3(name = "force")]
 fn force(bot: i32, x: f32, y: f32, z: f32) {

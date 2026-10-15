@@ -1074,6 +1074,17 @@ scripts:
    accepted and *recorded* (a run reports what it dropped) and belongs to M5.
    `plus.zap`'s visual is the same. `AddHazard`'s locations feed the AI's hazard
    avoidance through the Python base class, so nothing is owed there.
+2. **`plus.force`'s unit is a reading, not a recovery.** It is applied as an
+   impulse in N·s, which is what `force(bot, x, y, z)` most plainly means, but its
+   one caller — `Hazards.Electricity`'s `115 * getWeight(bot)` lift — comes out a
+   hundred times too strong for a 200 kg robot at that reading. Either `getWeight`
+   is not in kilograms or the original scales the argument; the Electric Arena is
+   the only place that could settle it, so its zap is the single hazard figure
+   that is unverified. Everything else a hazard does is a number the script states
+   itself.
+3. **`SetAutoLock` is accepted and has no separate effect.** It says whether a
+   joint locks itself at its stop; Jolt's limits stop it either way, and the
+   scripts' own `Lock`/`SetDirection` do the rest, so both settings behave alike.
 
 **Verified:** the hazards are pinned end to end. Standing a robot in
 `spike_zone2` fires the hazard: the zone event reaches `BoxArena.ZoneEvent`, the
