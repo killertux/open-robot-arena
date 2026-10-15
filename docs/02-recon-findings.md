@@ -215,6 +215,41 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   the file puts them in the corner. The `Name`s are the handle the code holds
   them by.
 
+### `fg_*.giff` — the shell's bitmap fonts (inside `RA2.cfz`)
+- Nine of them, named by every label's `_Font`: `fg_d18/20/24/26`,
+  `fg_dcn14/16`, `fg_mcn12/14/16` (plain, condensed, and the `d`/`m` pair).
+- Fixed layout, and the arithmetic is exact on all nine files:
+  `68` bytes of header, then `95` records of `28` bytes (three `i32`s and four
+  `f32`s), then the page — `256×256×2` for the small faces
+  (`68 + 95*28 + 256*256*2 = 133800`) and `512×512×2` for `d24`/`d26`
+  (`= 527016`).
+- The header is `ascent`, `descent` (negative), a third metric, `1.0f`, and the
+  page size. A record is an advance, a bearing and a third value, then the
+  glyph's rect **in the page, as a fraction**.
+- The page is **16-bit**, and its two bytes are two pictures of the same glyphs:
+  the high byte is the antialiased coverage and the low byte a hard 1-bit mask.
+- **The loader is `FUN_005cd560`** (reached from the string *"Failed to load
+  font"*). It rasterises from character `0x20` upwards with a counter of `0x5f`
+  (95) — one record per character — and it picks the page size from the face:
+  256 for anything under 21, 512 under 41, else 1024. The metrics it copies are
+  GDI's, scaled out of 26.6 fixed point with `>> 6`. The page is written row-major
+  from the top, and the whole thing is a **cache in the user's AppData**
+  (`SHGetSpecialFolderLocation(CSIDL_APPDATA)`), which is why the shipped files
+  are prebuilt. There is a `[Begin Font Config]` / `[End Font Config]` section
+  and a `glyph_name` field for it, which the game writes and the shipped
+  `ra2.cfg` does not carry.
+- `ra2 font <RA2.cfz> <name> [--page out.pgm]` prints a face's metrics per glyph
+  and writes the page out.
+- **Open: which record is which character.** The rects are not in doubt — every
+  cell lies inside the page, is contiguous with its neighbour and is 13 pixels
+  tall at most for the 14-pixel face — but composing text with record `c - 32`
+  reads shifted by about three characters however the glyph rows are sampled (a
+  `0` comes out as a `3`). Three records of lead-in would explain it, and the
+  file cannot tell the two apart (`68 + 95*28 = 152 + 92*28`), but then the
+  space would have no cell, which no font does. The shipped table also holds only
+  **94** distinct cells, with the last record's advance a nonsense `1040` — so it
+  is one short of the loader's 95 either way. Text is parsed; it is not yet drawn.
+
 ### Other
 - Textures: BMP / TGA / JPG (mostly 256²/128²); many uncompressed TGA.
 - Audio: WAV (273) + MP3 (3).

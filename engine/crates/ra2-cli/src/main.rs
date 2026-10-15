@@ -51,6 +51,13 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["font", cfz, name, rest @ ..] => match font(cfz, name, rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
         _ => {
             eprintln!("usage:");
             eprintln!("  ra2 info <file.gmf> [...]");
@@ -59,9 +66,48 @@ fn main() -> ExitCode {
             eprintln!("  ra2 cfz  <file.cfz> cat <entry>");
             eprintln!("  ra2 arena <script.py>");
             eprintln!("  ra2 gib  <layout.gib>");
+            eprintln!("  ra2 font <RA2.cfz> <fg_name> [--page out.pgm]");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Print a font's metrics, one glyph a line, and optionally its page as a PGM.
+fn font(cfz: &str, name: &str, rest: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fmt::Write;
+    let cfl = ra2fmt::cfl::Cfl::open_path(std::path::Path::new(cfz))?;
+    let entry = format!("{name}.giff");
+    let data = cfl
+        .get(&entry)
+        .ok_or_else(|| format!("{cfz} has no {entry}"))?;
+    let font = ra2fmt::giff::parse(&data)?;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "font {name}");
+    let _ = writeln!(out, "ascent {}", font.ascent);
+    let _ = writeln!(out, "descent {}", font.descent);
+    let _ = writeln!(out, "leading {}", font.leading);
+    let _ = writeln!(out, "line {}", font.line_height());
+    let _ = writeln!(out, "page {} {}", font.page_width, font.page_height);
+    for (i, g) in font.glyphs.iter().enumerate() {
+        let c = char::from_u32(32 + i as u32).unwrap_or('?');
+        let _ = writeln!(
+            out,
+            "glyph {} {} {} {} {} {} {} {}",
+            c as u32, g.advance, g.bearing, g.third, g.u0, g.v0, g.u1, g.v1
+        );
+    }
+    print!("{out}");
+
+    if let Some(at) = rest.iter().position(|a| *a == "--page") {
+        let path = rest.get(at + 1).ok_or("--page wants a filename")?;
+        let (w, h) = (font.page_width as usize, font.page_height as usize);
+        let mut pgm = format!("P5\n{w} {h}\n255\n").into_bytes();
+        pgm.extend_from_slice(&font.page);
+        std::fs::write(path, &pgm)?;
+        eprintln!("wrote {path} ({w}x{h} coverage)");
+    }
+    Ok(())
 }
 
 /// Print a `.gib` screen's widget tree, one widget a line, indented.

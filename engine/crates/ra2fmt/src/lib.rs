@@ -15,6 +15,7 @@ pub mod bot;
 pub mod cfl;
 pub mod component;
 pub mod gib;
+pub mod giff;
 pub mod gmi;
 
 pub use arena::ArenaScript;
@@ -23,6 +24,7 @@ pub use bot::{Armour, Bot, BotMesh, Chassis, Component};
 pub use cfl::Cfl;
 pub use component::ComponentDef;
 pub use gib::{Axes, Block, Field, Gib, Length, Widget, WidgetKind};
+pub use giff::Font;
 pub use gmi::{GmiScene, Material, Mesh, RigidBody, SceneObject, SimulationObject, Texture};
 
 /// Error type shared by all format parsers.

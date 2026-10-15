@@ -166,10 +166,12 @@ That second command is the check that matters: it composites the screen from the
 engine's own rectangles and the game's own art, and the main menu comes out as
 the main menu.
 
-What remains of M5 is text metrics from the `fg_*.giff` fonts, clip modes, the
-containers that lay out their own children, the 2D renderer, the
-`giScript`/`Gooey` Python surface the shell's own scripts call, and the workshop
-itself.
+The `fg_*.giff` fonts are parsed too (`ra2fmt::giff`; `ra2 font <RA2.cfz>
+<name>` prints one's metrics and dumps its page), though which record belongs to
+which character is not settled yet, so nothing is drawn in text. What remains of
+M5 is that, clip modes, the containers that lay out their own children, the 2D
+renderer, the `giScript`/`Gooey` Python surface the shell's own scripts call, and
+the workshop itself.
 
 ## Layout
 

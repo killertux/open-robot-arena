@@ -390,9 +390,23 @@ Known, documented, not yet fixed:
     *page*, with the shipped files already cropped to their cell — and 25 rects
     that instead run past the page are *tiles* (`metaldots_pattern.bmp`), which
     is why a renderer draws a cell whole and repeats a tile. **[IN PROGRESS]** —
-    what remains is text metrics from the `fg_*.giff` fonts, clip modes, tiles,
-    the self-laying-out containers (`ListBox`, `Grid`, `OptionGroup`), the real
-    2D renderer, the `giScript`/`Gooey` Python surface and the workshop.
+    what remains is text, clip modes, tiles, the self-laying-out containers
+    (`ListBox`, `Grid`, `OptionGroup`), the real 2D renderer, the
+    `giScript`/`Gooey` Python surface and the workshop.
+
+    Text turned out to be one step short. The font container is pinned —
+    `68 + 95*28 + 256*256*2 = 133800` on every small face, `527016` on the two
+    large ones — and the loader is decoded (`FUN_005cd560`: rasterise from
+    character `0x20` for 95 characters, page size from the face, GDI metrics out
+    of 26.6, cached in AppData). The glyph rectangles land on the page's ink. But
+    *composing* text with record `c - 32` reads shifted by about three
+    characters, consistently, whichever way the glyph rows are sampled: a `0`
+    comes out as a `3`. Three records of lead-in would explain it, and the file
+    cannot distinguish `68 + 95*28` from `152 + 92*28` — but that leaves the space
+    without a cell, and the shipped table holds only 94 distinct cells with a
+    nonsense advance on the last, so it is one short of the loader's count either
+    way. Labels are therefore still extentless and undrawn, and that is the state
+    the next pass inherits.
 
 Each of these is tracked with its evidence and fix path in
 [`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F13).
