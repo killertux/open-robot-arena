@@ -202,6 +202,18 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   whole page, where the file is simply the whole image). The 25 that differ are
   *tiles* — `common/metaldots_pattern.bmp` is a 64×64 texture whose rects run up
   to 9.7 pages — so a renderer draws a cell whole and repeats a tile.
+- **An `Image` also states `_Size`**, the size its art is *drawn* at when that
+  differs from the box the layout gave the widget. A scroll bar's thumb is
+  `Size 1 1 1 1` — its track — and `_Size 16 0 30 0`, and drawing it at the box
+  stretches a 16×30 ribbed thumb down nine hundred pixels. Where the two agree,
+  as they do for the full-screen cement background (`_Size 1280 0 1005 0`), it
+  changes nothing.
+- **Some of the shell's art is drawn by the game's code, not by the data.** Every
+  `Button` in `mainmenu.gib` carries four state images with a *blank*
+  `_Filename`, and `RA2.cfz` holds `Selection.tga` and the `UI_Scroll*` family
+  (four arrows, the sliders and the trough) but no button art at all — so the
+  buttons and the selection bars are the C++'s, with only those names to go on.
+  What the engine draws for a button today is therefore nothing.
 - **And the file is sampled 0..1, not at the rect.** Because the shipped file is
   already cropped to its cell, `u` and `v` are positions inside a 1024² *page*
   and not offsets into the file: `mainmenu/ra2_logo.tga` is 512×76 and its rect
@@ -209,13 +221,18 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   512-wide logo. Drawing the file across the whole frame — which is what the
   rect being a cell already means — is what puts the logo on the main menu. The
   rect's only jobs are telling a cell from a tile and a whole-page image.
-- **`ChildOrder` is the draw order, ascending**, ties broken by file order. It is
-  what makes the main menu visible at all: the cement background is 1, the saw
-  backdrop 2, the logo group 3 and the bottom bar's decorations 5–7, so drawing
-  the file's own order (logo first) would paint the background over everything. A
-  button is −1 and the `Text` beside it is 0, which is what puts a label on top
-  of its button; a button's four state images are 0–3 with only the first
-  visible, so the same rule puts the label above the art.
+- **`ChildOrder` is the draw order, ascending — among siblings.** Within
+  `mainmenu.gib`'s window the cement background is 1, the saw backdrop 2 and the
+  logo group 3, in file order too, so drawing the file's order there would paint
+  the background over the logo. A button is −1 and the `Text` beside it is 0,
+  which is what puts a label on top of its button, and a button's four state
+  images are 0–3 with only the first visible. **The top level is not sorted**:
+  the same file's blocks are the window (3), then the `Multiplayer button` (−1)
+  and its `Multiplayer` label (0), then the bottom bar (4) and its decorations
+  (5–7). Sorted by `ChildOrder`, the button and its label would be drawn *before*
+  the window and the window's full-screen cement would cover both; in file order
+  they land on top of it. The engine draws the screens this way and the composite
+  matches it.
 - **Some widgets are placed at run time by the C++.** The two rounded corners of
   the main menu's bottom bar (`common/rounded_rectL/R.tga`) sit at `0 0` in the
   layout and only get moved when the screen is built, so a static composite of
@@ -317,13 +334,18 @@ Four kinds do not place their children from the children's own `Position`:
   95*28 = 2728` fits either way, and what settles it is the runtime object the
   loader fills — its glyph array is `0x600` bytes of four floats, which is 96
   glyphs of 16 bytes, and its integer array is 96 of 12.
-- **Verified, and there is no slip.** Drawn *spaced*, at four times size, the
-  face reads `A B C D E F G …` and `O P Q R S T …` with every letter its own; all
-  96 rects are distinct, so even `Q` has its own cell. Two earlier readings that
-  said otherwise were both the *reading*, not the data: the compositor's text
-  blend was adding `v/255` instead of blending by coverage, and at the font's own
-  tight advances neighbouring glyphs touch, so a dense line reads merged at small
-  scale. The extent helper (`Font::extent`) is founded now too.
+- **Verified, and there is no slip.** Drawn out, the label reads
+  `MULTIPLAYER TEAM HQ 0123456789` exactly; all 96 rects are distinct, so even
+  `Q` has its own cell. Three earlier readings that said otherwise were all the
+  *reading*, not the data: the compositor's text blend added `v/255` instead of
+  blending by coverage; the compositor sampled each glyph's rows **turned
+  over**, which is why an `M` came out as the `V`-ish shape that made
+  `MULTIPLAYER` read as `VELAIIPLOA ER`; and the offset was then re-measured
+  with the turn removed, which is the reading above. `Font::page` and
+  `Glyph::rect` already agree — the ink sits at the rows the rect names, first
+  row first — and only the *uv* in a record is measured from the bottom. The
+  extent helper uses the **median** advance for a character the table has no cell
+  for, which is the space.
 
 ### Other
 - Textures: BMP / TGA / JPG (mostly 256²/128²); many uncompressed TGA.

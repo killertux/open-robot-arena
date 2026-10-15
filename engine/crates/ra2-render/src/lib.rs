@@ -22,6 +22,8 @@ use glam::{Mat4, Quat, Vec3};
 use ra2fmt::{bot as botfmt, component as compfmt, gmi};
 use wgpu::util::DeviceExt;
 
+pub mod ui;
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct Vertex {
@@ -113,6 +115,16 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// The device, so another renderer (the shell's 2D one) can share it rather
+    /// than open a second adapter.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
     /// Initialise the GPU (first available adapter).
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         // --- wgpu ---------------------------------------------------------
@@ -1766,7 +1778,7 @@ pub fn find_game_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-fn decode_image(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+pub(crate) fn decode_image(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     // TGA has no magic bytes, so the image crate cannot guess it; fall back to
     // an explicit TGA decode (the chassis skin and many textures are TGA).
     let img = image::load_from_memory(bytes)

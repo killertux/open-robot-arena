@@ -34,7 +34,7 @@ engine/
     ra2sim/      # physics (Jolt behind a PhysicsBackend trait), scene assembly, sim
     ra2script/   # the plus/Arenas/AI object model on an embedded CPython 3
     ra2ui/       # the shell's layout model: .gib widget trees -> rectangles
-    ra2-render/  # wgpu renderer + scene graph (lib + `ra2-render` CLI)
+    ra2-render/  # wgpu renderer: meshes, and the shell's 2D screens (`ui`)
     ra2app/      # winit app: menus, workshop, matches                            (planned)
 tools/           # python tooling (format probing, conversion, diffs)
 local/           # (git-ignored) game files + converted cache
@@ -73,9 +73,12 @@ local/           # (git-ignored) game files + converted cache
   label from its own text, and the containers place their own children:
   `ClipMode` 0/1/2 into a clip rectangle, a `Grid`/`ListBox`'s cells from
   `Rows`/`Columns`/`RowHeight`/`ColWidths`, and a `ScrollBar`'s three parts at
-  its two ends and between. Still to come: the cells' *content* (a `LoadCell`
-  field the game's own reader consumes), tiles, the 2D renderer, the
-  `giScript`/`Gooey` Python surface, and the workshop.
+  its two ends and between. The screens are *drawn*: `ra2-render`'s 2D path
+  (`ui`) turns a placed screen into textured quads — art, fills and glyph runs,
+  each carrying the clip `ClipMode` worked out — and draws them headlessly, so
+  `uishot <screen.gib> <out.png>` renders any of the 116 shipped screens. Still
+  to come: the cells' *content* (a `LoadCell` field the game's own reader
+  consumes), tiles, the `giScript`/`Gooey` Python surface, and the workshop.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
 
 ## M5 design notes
@@ -103,6 +106,40 @@ local/           # (git-ignored) game files + converted cache
   was *not* obvious from the data — that `ChildOrder` is the draw order
   ascending, not the file's order — was found by looking at a wrong picture
   first.
+- **The renderer is checked against a second renderer, written the other way
+  round.** `tools/ui_compose.py` rasterises a screen on the CPU, in Python, from
+  the resolver's own rectangles; `ra2-render`'s `ui` path draws the same screen
+  with wgpu. They share no code and no algorithm — one blends bytes, the other
+  rasterises triangles over a scissor — so when they agree, the *model* is what
+  agrees, not an implementation detail. On `mainmenu.gib` the mean per-channel
+  difference is 0.42 of 255 and on `hq_league.gib` 0.24, with what is left
+  confined to glyph and art edges. It is the noisiest and most useful check in
+  the project, and it earned its keep immediately: it found that the composite
+  drew `Rectangle` fills not at all, and that *both* of them had a rule wrong.
+- **A wrong picture is data too.** The composite turned every glyph's rows over,
+  which turned the `M` of `MULTIPLAYER` into something `V`-ish; that single
+  wrong pixel rule had already been read as "the font's own tight advances" and
+  written into the recon notes as a property of the *font*. It was the
+  renderer's, and with it fixed the label reads exactly. The same pass corrected
+  the draw order: `ChildOrder` orders *siblings*, and the top level of a file
+  keeps its own order, which is why the menu's buttons and labels sit on top of
+  the cement rather than under it.
+- **The renderer is checked against a second renderer, written the other way
+  round.** `tools/ui_compose.py` rasterises a screen on the CPU, in Python, from
+  the resolver's own rectangles; `ra2-render`'s `ui` path draws the same screen
+  with wgpu. They share no code and no algorithm — one blends bytes, the other
+  rasterises triangles over a scissor — so when they agree it is the *model* that
+  agrees. On `mainmenu.gib` the mean per-channel difference is 0.42 of 255 and on
+  `hq_league.gib` 0.24, with the rest at glyph and art edges. It earned its keep
+  at once: it found that the composite drew `Rectangle` fills not at all, and
+  that *both* of them had a rule wrong.
+- **A wrong picture is data too.** The composite turned every glyph's rows over,
+  which turned the `M` of `MULTIPLAYER` into something `V`-ish; that one wrong
+  rule had already been read as "the font's own tight advances" and written into
+  the recon notes as a property of the *font*. It was the renderer's, and with it
+  fixed the label reads exactly. The same pass corrected the draw order:
+  `ChildOrder` orders *siblings*, and the top level of a file keeps its own
+  order.
 - **What is not resolved is not guessed.** Zero `Size` (the editor's automatic
   size, which needs font metrics), `ClipMode`, and the containers that lay their
   own children out were each named as unresolved rather than approximated, and

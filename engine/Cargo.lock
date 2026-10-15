@@ -944,6 +944,7 @@ dependencies = [
  "image",
  "pollster",
  "ra2fmt",
+ "ra2ui",
  "wgpu",
 ]
 

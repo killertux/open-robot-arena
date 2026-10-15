@@ -401,6 +401,25 @@ Known, documented, not yet fixed:
     *content* (a `LoadCell` field the game's own reader consumes), tiles, the
     real 2D renderer, the `giScript`/`Gooey` Python surface and the workshop.
 
+    The renderer is in. `ra2-render`'s `ui` module turns a placed screen into
+    textured quads — art (sampled 0..1, since the file is already cropped to its
+    cell, and at the `_Size` an image states for itself), filled rectangles, and
+    glyph runs off the face pages — each carrying the clip `ClipMode` worked out,
+    and draws them headlessly: `uishot <screen.gib> <out.png>` renders any
+    shipped screen. It is checked against the composite, which shares no code
+    with it: mean per-channel difference 0.42 of 255 on `mainmenu.gib`, 0.24 on
+    `hq_league.gib`, the rest at glyph and art edges. Writing it corrected three
+    things, two of them in the *check*: the composite drew no `Rectangle` fills,
+    and it sampled every glyph's rows turned over — the `V`-ish `M` that had been
+    read as a property of the font — and the engine's own draw order was wrong
+    at the top level, where `ChildOrder` does not apply: the menu's buttons and
+    labels sit on top of the cement, which sorting the file's top-level blocks
+    put under it. What the shell still does not draw is named: tiles (repeats),
+    `Lines` borders, `Glyph` widgets, `Proxy` and `Placeholder`, and the chrome
+    the game draws from its own code — every `Button`'s four state images ship
+    with a blank `_Filename`, and only `Selection.tga` and the `UI_Scroll*`
+    family are in `RA2.cfz` to go on.
+
     Placing the containers also caught a bug in the *check*, not the engine: the
     compositor sampled an image at its page rect, so every art cell whose rect did
     not start at the page's origin was drawn from the wrong part of its file —
@@ -427,7 +446,8 @@ Known, documented, not yet fixed:
     four times size the face reads `A B C D E F G …` and `O P Q R S T …` with
     every letter its own, and all 96 rects are distinct — two earlier readings
     that said otherwise were the *reading*: a blend bug in the harness, and the
-    font's own tight advances making a dense line look merged. `ra2ui::Fonts`
+    compositor sampling every glyph's rows turned over — which is the `V`-ish `M`
+    that made `MULTIPLAYER` read as `VELAIIPLOA ER`. `ra2ui::Fonts`
     loads the nine faces from `RA2.cfz` and `resolve_with` sizes a zero-`Size`
     label from its text, which is what `Size 0 0 0 0` means on every label in
     every screen. `tools/ui_compose.py` draws those labels with the game's own

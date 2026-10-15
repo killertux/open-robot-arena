@@ -15,4 +15,5 @@ glam = "0.34.1"
 image = { version = "0.25.10", default-features = false, features = ["png", "bmp", "tga", "jpeg"] }
 pollster = "1.0.1"
 ra2fmt = { path = "../ra2fmt" }
+ra2ui = { path = "../ra2ui" }
 wgpu = "30.0.1"

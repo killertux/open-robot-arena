@@ -92,6 +92,29 @@ fn main() {
             if !p.widget.visible() {
                 return;
             }
+            // A filled rectangle is a solid quad; the compositor draws it with
+            // the fill colour rather than the (absent) art.
+            if p.widget.kind == ra2fmt::gib::WidgetKind::Rectangle {
+                let filled = p
+                    .widget
+                    .field("Filled")
+                    .and_then(|f| f.flag())
+                    .unwrap_or(false);
+                if filled {
+                    let c = p
+                        .widget
+                        .field("FillColor")
+                        .and_then(|f| f.four())
+                        .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                    let (cx, cy, cw, ch) = clip_fields(p);
+                    println!(
+                        "{:.2} {:.2} {:.2} {:.2} 1 {:.3} {:.3} {:.3} 0 0 1 1 {} {} {} {} fill:{:.3} {:.3} {:.3} {:.3}",
+                        p.frame.x, p.frame.y, p.frame.w, p.frame.h, c[0], c[1], c[2], cx, cy, cw, ch,
+                        c[0], c[1], c[2], c[3]
+                    );
+                    return;
+                }
+            }
             // A label is a text command: the compositor draws it with the face
             // and colour the widget names.
             if let (Some(text), Some(font)) = (p.widget.text(), p.widget.font()) {
@@ -119,12 +142,20 @@ fn main() {
                 .unwrap_or(true);
             let c = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
             let (cx, cy, cw, ch) = clip_fields(p);
+            // An `Image` states its own `_Size`: the size the art is *drawn* at
+            // when it differs from the box the layout gave the widget.
+            let (w, h) = match p.widget.field("_Size").and_then(ra2fmt::gib::Axes::parse) {
+                Some(axes) if !axes.first.fraction && !axes.second.fraction => {
+                    (axes.first.amount, axes.second.amount)
+                }
+                _ => (p.frame.w, p.frame.h),
+            };
             println!(
                 "{:.2} {:.2} {:.2} {:.2} {} {:.3} {:.3} {:.3} {:.6} {:.6} {:.6} {:.6} {} {} {} {} {}",
                 p.frame.x,
                 p.frame.y,
-                p.frame.w,
-                p.frame.h,
+                w,
+                h,
                 u8::from(alpha),
                 c[0],
                 c[1],

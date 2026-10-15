@@ -444,6 +444,37 @@ impl ScrollBar {
     }
 }
 
+/// One glyph of a laid-out string.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlacedGlyph {
+    /// The cell in the face's page, `x y w h`, top-down.
+    pub cell: [i32; 4],
+    /// Where that cell goes on screen.
+    pub rect: Frame,
+}
+
+/// Lay a string out the way the game's own labels are written: the baseline
+/// sits one `ascent` below the frame's top, each glyph's cell hangs from its own
+/// third above that line, and the pen advances by each glyph's advance. A
+/// character the face has no cell for — a space — advances without drawing.
+pub fn text_run(font: &ra2fmt::Font, frame: Frame, text: &str) -> Vec<PlacedGlyph> {
+    let baseline = frame.y + font.ascent as f32;
+    let mut pen = frame.x;
+    let mut out = Vec::new();
+    for c in text.chars() {
+        if font.has_glyph(c) {
+            let glyph = font.glyph(c);
+            let (x, y, w, h) = glyph.rect(font.page_width, font.page_height);
+            out.push(PlacedGlyph {
+                cell: [x, y, w, h],
+                rect: Frame::new(pen, baseline - glyph.third as f32, w as f32, h as f32),
+            });
+        }
+        pen += font.advance(c) as f32;
+    }
+    out
+}
+
 /// A widget with its resolved rectangle and its placed children.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Placement<'a> {
@@ -528,14 +559,22 @@ impl<'a, 'b> Iterator for PlacementWalk<'a, 'b> {
 
 /// The widgets to draw, back to front.
 ///
-/// A parent is drawn before its children, and siblings by `ChildOrder`
-/// **ascending**, ties broken by file order. That is the rule that puts
-/// `mainmenu.gib`'s full-screen cement background *behind* the rest: it is the
-/// lowest in its window (1), with the saw backdrop at 2, the logo group at 3 and
-/// the bottom bar's decorations at 5–7 after it. A label follows its button —
-/// the button's `ChildOrder` is -1 and the `Text` beside it is 0 — and the four
-/// state images of a button share 0..3 with the first visible, so the label
-/// lands on top of the art.
+/// A parent is drawn before its children and its children by `ChildOrder`
+/// **ascending**, ties broken by file order — but the *top level* is drawn in
+/// file order. Both halves are measured:
+///
+/// * Inside `mainmenu.gib`'s window the cement background is 1, the saw backdrop
+///   2 and the logo group 3, so drawing the file's own order would paint the
+///   background over the logo. A label follows its button (the button is -1 and
+///   the `Text` beside it 0), and a button's four state images are 0..3 with
+///   only the first visible, which is what puts a label over its art.
+/// * The top level is *not* sorted. `mainmenu.gib`'s blocks are the window (3),
+///   then the `Multiplayer button` (-1) and its `Multiplayer` label (0), then
+///   the bottom bar (4) and its decorations (5–7); sorting them would draw the
+///   button and its label *before* the window, and the window's full-screen
+///   cement background would then cover both of them. Drawn in file order the
+///   buttons and labels land on top of the background, which is what the game
+///   shows.
 pub fn draw_order<'a>(roots: &'a [Placement<'a>]) -> Vec<&'a Placement<'a>> {
     fn visit<'a>(p: &'a Placement<'a>, out: &mut Vec<&'a Placement<'a>>) {
         out.push(p);
@@ -546,8 +585,6 @@ pub fn draw_order<'a>(roots: &'a [Placement<'a>]) -> Vec<&'a Placement<'a>> {
         }
     }
     let mut out = Vec::new();
-    let mut roots: Vec<&Placement> = roots.iter().collect();
-    roots.sort_by_key(|p| p.widget.child_order());
     for r in roots {
         visit(r, &mut out);
     }
@@ -1298,5 +1335,56 @@ mod tests {
         ] {
             assert!(background < at(later), "{later} is behind the background");
         }
+    }
+}
+
+#[cfg(test)]
+mod text_run_tests {
+    use super::*;
+
+    fn game_dir() -> Option<std::path::PathBuf> {
+        let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            let candidate = dir.join("local/game");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                return None;
+            }
+        }
+    }
+
+    /// A run advances by each glyph's advance, hangs its cells from one
+    /// baseline, and covers the same width the extent measures.
+    #[test]
+    fn a_run_is_as_wide_as_the_extent() {
+        let Some(game) = game_dir() else { return };
+        let fonts = Fonts::load(&game.join("RA2.cfz")).unwrap();
+        let font = fonts.get("fg_d20").expect("fg_d20");
+        let frame = Frame::new(10.0, 20.0, 0.0, 0.0);
+        let run = text_run(font, frame, "MULTIPLAYER");
+        assert_eq!(
+            run.len(),
+            11,
+            "one cell per letter, and no cell for a space"
+        );
+        assert_eq!(run[0].rect.x, 10.0, "the run starts at the frame");
+        // Each cell starts where the pen had reached.
+        let mut pen = frame.x;
+        for (glyph, placed) in "MULTIPLAYER".chars().zip(&run) {
+            assert_eq!(placed.rect.x, pen, "{glyph}");
+            pen += font.advance(glyph) as f32;
+        }
+        let (width, height) = font.extent("MULTIPLAYER");
+        assert_eq!(pen - frame.x, width as f32, "the pen ends at the extent");
+        assert_eq!(height, font.line_height());
+        // A space has no cell but does advance.
+        let spaced = text_run(font, frame, "A B");
+        assert_eq!(spaced.len(), 2);
+        assert_eq!(
+            spaced[1].rect.x,
+            frame.x + font.advance('A') as f32 + font.space_advance() as f32
+        );
     }
 }

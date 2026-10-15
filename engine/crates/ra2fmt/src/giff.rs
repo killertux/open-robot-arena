@@ -68,8 +68,10 @@ pub struct Font {
     pub leading: i32,
     pub page_width: u32,
     pub page_height: u32,
-    /// The glyph page's coverage, 0..=255, `page_width * page_height`, top row
-    /// first.
+    /// The glyph page's coverage, 0..=255, `page_width * page_height`, first row
+    /// first — the same rows [`Glyph::rect`] names, so a renderer samples it
+    /// straight. (The *uv* in a record is measured from the bottom, which is
+    /// what `rect` turns over.)
     pub page: Vec<u8>,
     /// The 1-bit mask that ships alongside the coverage, same layout.
     pub mask: Vec<u8>,
@@ -118,9 +120,36 @@ impl Font {
         }
     }
 
+    /// Whether the table has a cell for this character at all. The first two
+    /// printable characters do not — the records start at
+    /// [`FIRST_CHAR`](const@FIRST_CHAR) — so a space has an advance but no ink.
+    pub fn has_glyph(&self, c: char) -> bool {
+        let code = c as u32;
+        code >= FIRST_CHAR && (code - FIRST_CHAR) < self.glyphs.len() as u32
+    }
+
+    /// The advance of a character the table does not carry — which in practice
+    /// is the space, and the exclamation mark. The median of the advances the
+    /// face does carry is what a space looks like; the first record, which is
+    /// what [`glyph`](Self::glyph) falls back to, is nothing like it.
+    pub fn space_advance(&self) -> i32 {
+        let mut widths: Vec<i32> = self
+            .glyphs
+            .iter()
+            .map(|g| g.advance)
+            .filter(|a| *a > 0)
+            .collect();
+        widths.sort_unstable();
+        widths.get(widths.len() / 2).copied().unwrap_or(0)
+    }
+
     /// The advance width of a character.
     pub fn advance(&self, c: char) -> i32 {
-        self.glyph(c).advance
+        if self.has_glyph(c) {
+            self.glyph(c).advance
+        } else {
+            self.space_advance()
+        }
     }
 
     /// The line height: `ascent - descent`.
@@ -129,7 +158,8 @@ impl Font {
     }
 
     /// How much room a string takes: `(width, height)` in pixels. The width is
-    /// the sum of the advances, so a trailing character's ink may overhang it.
+    /// the sum of the advances, so a trailing character's ink may overhang it,
+    /// and a character with no cell — a space — takes the median advance.
     pub fn extent(&self, text: &str) -> (i32, i32) {
         let width: i32 = text.chars().map(|c| self.advance(c)).sum();
         (width, self.line_height())

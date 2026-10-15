@@ -203,7 +203,9 @@ class Font:
             adv, third, gx, gy, w, h = self._rect(g)
             top = y + 0 - third          # the caller passes the baseline
             for yy in range(h):
-                row = self.page[(gy + (h - 1 - yy)) * self.width + gx : (gy + (h - 1 - yy)) * self.width + gx + w]
+                # `gy` is the cell's first row and the page's rows run the same
+                # way: sampling it turned over draws an `M` as an `M` mirrored.
+                row = self.page[(gy + yy) * self.width + gx : (gy + yy) * self.width + gx + w]
                 for xx, v in enumerate(row):
                     if not v:
                         continue
@@ -282,11 +284,30 @@ class Images:
         return load_bmp(data) if name.lower().endswith(".bmp") else load_tga(data)
 
 
+def draw_fill(canvas, width, height, x, y, w, h, colour, clip):
+    """A solid rectangle: the quad the engine draws for a filled `Rectangle`."""
+    r, g, b, a = colour
+    for py in range(int(round(h))):
+        ty = y + py + 0.5
+        if ty < 0 or ty >= height:
+            continue
+        for px in range(int(round(w))):
+            tx = x + px + 0.5
+            if tx < 0 or tx >= width:
+                continue
+            if clip is not None and not (clip[0] <= tx < clip[0] + clip[2] and clip[1] <= ty < clip[1] + clip[3]):
+                continue
+            q = (int(ty) * width + int(tx)) * 3
+            for c, want in enumerate((r, g, b)):
+                canvas[q + c] = int(canvas[q + c] + (want * 255.0 - canvas[q + c]) * a)
+
+
 def composite(lines, images, width, height, game, args):
     canvas = bytearray(width * height * 3)  # black, opaque
     drawn = 0
     fonts = {}
     texts = []
+    fills = []
     skipped_tiles = []
     for line in lines:
         parts = line.split()
@@ -302,6 +323,12 @@ def composite(lines, images, width, height, game, args):
         # cropped by it.
         clip = None if cw <= 0.0 or ch <= 0.0 else (cx, cy, cw, ch)
         relative = " ".join(parts[16:])
+        if relative.startswith("fill:"):
+            # `fill:<r> <g> <b> <a>` — a filled rectangle, drawn in order.
+            r, g, b, a = (float(v) for v in relative[5:].split())
+            draw_fill(canvas, width, height, x, y, w, h, (r, g, b, a), clip)
+            drawn += 1
+            continue
         if relative.startswith("text:"):
             # `text:<font>:<r> <g> <b>:<the string>` — drawn after the images.
             _, font_name, colour, body = relative.split(":", 3)
