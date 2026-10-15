@@ -235,12 +235,15 @@ Known, documented, not yet fixed:
     deterministic head-on ram lands 34. The *numeric core* is still calibrated
     rather than recovered — community measurement is `D = 183.9·P + 100·C` for a
     reference setup — and the 34 comes from `impact × 6`. **[OPEN]**
-13. **Component hitpoints defaults** were not recovered: the parse site stores
-    the field at a fixed offset (`+0x98` in the definition object, `FUN_004622f0`)
-    but the constructor's default was not located. Only **9 of 131** stock
-    components declare `hitpoints`, so our per-role defaults are the model's
-    biggest invented number. `fracture` (8 components) and `material = metal(.4)`
-    / `rubber(0)` (5) are unparsed. **[OPEN]**
+13. **Component hitpoints — recovered.** The factory `FUN_0045cf40` switches on
+    the definition's `type` (the `+0x24` field the `.txt` parser `FUN_004622f0`
+    fills, read back by `FUN_0049aa30`) and stores the per-category maximum at
+    `component + 0xe8`: power 400, extenders 100, mechanics 400, mobility 400,
+    weapons 1000, extras 1000. A `hitpoints =` line overrides it, and only 9 of
+    131 stock parts declare one. Current hitpoints live at `+0xec`, and
+    `FUN_0044f370` applies damage as a plain subtraction, so the sim now uses the
+    original's numbers. `fracture` and `material` are parsed into the rig; their
+    gameplay effect is still unconfirmed (see F7). **[LANDED]**
 14. **Pistons are prismatic joints — landed.** A `Role::Piston` splits its child
     group onto a slider instead of welding it (see F8). The component mesh ships
     the rod and housing as two rigid bodies and the children mount on
@@ -333,7 +336,7 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | `ra2-duel` damage model (F7) | **Validated on a deterministic ram.** `RA2_DUEL_DRIVE=ram` with two identical `AI/Team1/Bot0` on the box arena: contact at t≈5 s, an opening blow of **34** points, then ~1 point/s while the two rest against each other. Both ends of that match what the original's scripts say — hazards apply 25, `AI/__init__.py` calls `amount > 10` a "good solid hit" — after two real defects were fixed (contact was tested only between root bodies; a blow was a per-step *integral* of speed, so a fast impact weighed almost nothing) |
 | `ra2-duel` with the AI | **Does not engage.** 30 s of `AI/Team1/Bot0` vs `AI/Team6/Bot2` on the box arena: the pair closes to ~7.7 m, then one robot pins itself against a wall (at `(-11.8, -7.3)` from t = 15 s on, reversing included) and neither touches the other all bout. This is the control layer (M4), not the damage model: the AI is a stand-in that only ever drives at the opponent |
 | 45-bot drive survey | **Bit-identical** to F9 after F10 | the chassis is now dressed from the file's face groups, but only the *skin coordinates* changed, and the survey never looks at a texture |
-| `cargo fmt --check`, `clippy`, tests | clean, 22 tests |
+| `cargo fmt --check`, `clippy`, tests | clean, 23 tests |
 
 ## 7. Recommended order of work
 

@@ -108,8 +108,11 @@ The game's own answer is the shipped Python AI, which needs the script layer. A
 wheel's declared `contact` surface is parsed but not yet used as the collider —
 using it makes some robots unable to move. Damage attribution picks the nearest
 part rather than solving per-part contacts, the impact-to-damage conversion is
-calibrated rather than recovered, most components fall back to invented
-`hitpoints`, and the `.txt`'s `fracture` and `material` fields are unparsed. The
+calibrated rather than recovered, and the `.txt`'s `fracture` and `material`
+fields are parsed but their gameplay effect is unconfirmed. Component hitpoints
+are no longer invented: they come from the engine's own per-category table
+(power 400, extenders 100, mechanics/mobility 400, weapons/extras 1000) with a
+declared `hitpoints =` overriding it. The
 chassis *buckles* as it is hurt — the crush points the bot file marks shift down
 and in, taking the drawn shape and its collider with them — but at an inferred
 rate, and a chassis that loses a *part* is still *reshaped* rather than deforming

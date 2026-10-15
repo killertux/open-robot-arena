@@ -687,10 +687,17 @@ about 43 % less grip. Only raw FFI or a custom combine would close it.
   the computation. Community measurement is `D = 183.9·P + 100·C` for a reference
   setup ([CONFIRMED, empirical], `docs/04` §5.2) — useful as a cross-check, not a
   source.
-- **Component hitpoints are mostly defaults.** Only **9 of 131** stock components
-  declare `hitpoints =` (ramplate 1000, flipper 600, discs/rotator-bar/razor tip
-  500); everything else takes our invented `Role::default_hitpoints`. The
-  defaults are the biggest remaining number in the model.
+- **Component hitpoints — recovered.** The component definitions declare
+  `hitpoints =` for only 9 of 131 parts; every other part's maximum comes from the
+  engine's own table, which the component factory (`FUN_0045cf40`) applies by
+  switching on the definition's **`type`** category — power **400**, extenders
+  **100**, mechanics **400**, mobility **400**, weapons **1000**, extras **1000** —
+  after which a declared `hitpoints =` overrides it. The accessors are
+  `component + 0xe8` (maximum) and `+0xec` (current); damage is a plain
+  subtraction (`FUN_0044f370`), so the model is now on the original's numbers
+  instead of our invented 250/300/350/600. The `.txt` parser that reads the keys
+  is `FUN_004622f0` (`hitpoints` → `+0x98` on the *definition*, `type` → `+0x24`),
+  and `FUN_0049aa30` reads the category back.
 - **`fracture` and `material` are unparsed.** `fracture` is declared by 8
   components (discs and the flipper 20, the ramplate 40) and `material = metal(.4)`
   / `rubber(0)` by 5. The community note that a chassis `fracture` of **41** is

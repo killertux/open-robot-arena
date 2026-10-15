@@ -176,6 +176,10 @@ pub struct Component {
     pub mass: f32,
     /// Structural hitpoints.
     pub hitpoints: f32,
+    /// `fracture` from the component definition (or its category default).
+    pub fracture: f32,
+    /// `material` from the component definition (`metal`, `rubber`, …).
+    pub material: Option<String>,
     /// `false` when the definition says `damageable = false`.
     pub damageable: bool,
     pub role: Role,
@@ -442,6 +446,46 @@ fn power_pair(def: &ra2fmt::component::ComponentDef) -> (Option<f32>, Option<f32
 
 fn num(def: &ra2fmt::component::ComponentDef, key: &str) -> Option<f32> {
     def.get(key)?.split_whitespace().next()?.parse().ok()
+}
+
+/// The definition's `type` category, lower-cased.
+fn category(def: Option<&ra2fmt::component::ComponentDef>) -> Option<String> {
+    def.and_then(|d| d.get("type")).map(|s| {
+        s.split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    })
+}
+
+/// The maximum hitpoints the component factory gives a category when the
+/// definition does not declare them.
+///
+/// Recovered from the binary: `FUN_0045cf40` switches on the definition's `type`
+/// (the field the `.txt` parser fills from the `type = ` key, read back by
+/// `FUN_0049aa30`) and stores 400 / 100 / 400 / 400 / 1000 / 1000 into the
+/// component's maximum, after which a `hitpoints = ` line overrides it.
+fn type_hitpoints(def: Option<&ra2fmt::component::ComponentDef>, role: Role) -> f32 {
+    match category(def).as_deref() {
+        Some("power") => 400.0,
+        Some("extenders") => 100.0,
+        Some("mechanics") => 400.0,
+        Some("mobility") => 400.0,
+        Some("weapons") => 1000.0,
+        Some("extras") => 1000.0,
+        // Unknown category: the factory sets nothing, so fall back to the role.
+        _ => role.default_hitpoints(),
+    }
+}
+
+/// The `fracture` default the same factory sets per category.
+fn type_fracture(def: Option<&ra2fmt::component::ComponentDef>) -> f32 {
+    match category(def).as_deref() {
+        Some("extenders") => 15.0,
+        Some("mechanics") | Some("mobility") | Some("weapons") => 20.0,
+        Some("extras") => 60.0,
+        _ => 0.0,
+    }
 }
 
 fn flag_false(def: &ra2fmt::component::ComponentDef, key: &str) -> bool {
@@ -745,8 +789,12 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             max = Vec3::ZERO;
         }
 
-        // Chassis hitpoints are the armour hardness the bot file records; other
-        // components only declare `hitpoints` when they differ from stock.
+        // Chassis hitpoints are the armour hardness the bot file records. Every
+        // other component's come from the game's own rule: the component factory
+        // (`FUN_0045cf40`) switches on the definition's `type` and stores a
+        // default maximum, then a `hitpoints =` line in the definition overrides
+        // it. Recovered from the binary: power 400, extenders 100, mechanics 400,
+        // mobility 400, weapons 1000, extras 1000 — see F7.
         let chassis_armour = bot
             .components
             .first()
@@ -759,8 +807,18 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
         } else {
             def.as_ref()
                 .and_then(|d| num(d, "hitpoints"))
-                .unwrap_or_else(|| role.default_hitpoints())
+                .unwrap_or_else(|| type_hitpoints(def.as_ref(), role))
         };
+        // `fracture` is a per-category default too (extenders 15, mechanics and
+        // mobility 20, weapons 20, extras 60) overridden by the definition.
+        let fracture = def
+            .as_ref()
+            .and_then(|d| num(d, "fracture"))
+            .unwrap_or_else(|| type_fracture(def.as_ref()));
+        let material = def
+            .as_ref()
+            .and_then(|d| d.get("material"))
+            .map(|s| s.to_ascii_lowercase());
         let damageable = def
             .as_ref()
             .map(|d| !flag_false(d, "damageable"))
@@ -824,6 +882,8 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             max,
             mass,
             hitpoints,
+            fracture,
+            material,
             damageable,
             role,
             weapon,
@@ -904,6 +964,46 @@ mod tests {
         assert_eq!(Role::of("Custom", "Weapon"), Role::Weapon);
         assert_eq!(Role::of("Component", "Component"), Role::Structure);
         assert_eq!(Role::of("ControlBoard", "ControlBoard"), Role::Control);
+    }
+
+    /// F7: component hitpoints come from the game's own rule, not from a guess.
+    ///
+    /// The component factory (`FUN_0045cf40`) switches on the definition's `type`
+    /// and stores a default maximum; a `hitpoints =` line then overrides it.
+    /// Recovered from the binary, so the table below is the original's.
+    #[test]
+    fn hitpoints_follow_the_factorys_category_table() {
+        let hp = |text: &str| {
+            let d = ra2fmt::component::parse(text);
+            d.get("hitpoints")
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .unwrap_or_else(|| type_hitpoints(Some(&d), Role::Structure))
+        };
+        assert_eq!(hp("type = power\n"), 400.0);
+        assert_eq!(hp("type = extenders\n"), 100.0);
+        assert_eq!(hp("type = mechanics\n"), 400.0);
+        assert_eq!(hp("type = mobility\n"), 400.0);
+        assert_eq!(hp("type = weapons\n"), 1000.0);
+        assert_eq!(hp("type = extras\n"), 1000.0);
+        // A declared value wins (the ramplate declares 1000, a disc 500).
+        assert_eq!(hp("type = weapons\nhitpoints = 500\n"), 500.0);
+        // `fracture` has category defaults of its own.
+        assert_eq!(
+            type_fracture(Some(&ra2fmt::component::parse("type = extenders\n"))),
+            15.0
+        );
+        assert_eq!(
+            type_fracture(Some(&ra2fmt::component::parse("type = weapons\n"))),
+            20.0
+        );
+        assert_eq!(
+            type_fracture(Some(&ra2fmt::component::parse("type = extras\n"))),
+            60.0
+        );
+        assert_eq!(
+            type_fracture(Some(&ra2fmt::component::parse("type = power\n"))),
+            0.0
+        );
     }
 
     /// F8: a piston's child hangs off a prismatic joint, not the parent's body.
@@ -1010,6 +1110,8 @@ mod tests {
             max: Vec3::ZERO,
             mass: 1.0,
             hitpoints: 1.0,
+            fracture: 0.0,
+            material: None,
             damageable: true,
             role: if motor { Role::Motor } else { Role::Structure },
             weapon: None,
