@@ -399,6 +399,16 @@ impl Robot {
     }
 
     /// Apply damage to a component; returns `true` if it just broke off.
+    /// Apply `amount` to one component; `true` if the part comes away.
+    ///
+    /// There are two ways it does, and the second is the engine's own rule
+    /// (`FUN_0045f2b0`): the part's hitpoints reach zero, **or a single blow is
+    /// larger than the part's `fracture`**, in which case it is taken off
+    /// outright whatever is left of its hitpoints. `fracture` is a per-hit
+    /// threshold, not a reduction — which is why a hazard's flat 25 can never
+    /// dent a ramplate (40) or reach the control board behind a chassis (41),
+    /// and why one solid spinner pass shears a part off rather than grinding it
+    /// down. Components that declare no `fracture` (0) never break this way.
     pub fn damage(&mut self, index: usize, amount: f32) -> bool {
         if index >= self.health.len() || !self.attached[index] {
             return false;
@@ -407,8 +417,9 @@ impl Robot {
             return false;
         }
         self.health[index] -= amount;
-        if self.health[index] <= 0.0 {
-            self.health[index] = 0.0;
+        let fracture = self.rig.components[index].fracture;
+        if self.health[index] <= 0.0 || (fracture > 0.0 && amount > fracture) {
+            self.health[index] = self.health[index].max(0.0);
             return true;
         }
         false

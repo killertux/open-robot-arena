@@ -35,24 +35,63 @@ use crate::rig::Role;
 use crate::robot::Robot;
 
 /// Tuning for the damage model.
+///
+/// The engine's own hit formula was recovered from the binary
+/// (`FUN_00489470`, called from the collision handler `FUN_00503c30`):
+///
+/// ```text
+/// damage = (piercing * contact_speed * 10 + concussion * magnitude) * scale
+/// ```
+///
+/// It is **linear and additive** in the two parameters the component declares,
+/// with coefficients **10** and **1**, which is the shape the community's own
+/// measurements fit (`D = 183.9·P + 100·C`). `magnitude` is the collision's
+/// *impulse*: the engine's magnitude function (`FUN_0045a5a0`) works from the
+/// contrast of the two bodies and returns `0.5 · μ · v` for the reduced mass and
+/// closing speed, halving it at the end. `scale` is the contact material's own
+/// damage factor — the one term still out of reach (the per-material table lives
+/// in the engine's `MaterialObject` classes, which this build does not expose),
+/// so it is the single calibrated number here, set by the anchors the game's own
+/// scripts give: a hazard hit is a flat 25, and ramming two stock robots at a
+/// few metres per second has to land in the same low tens.
+///
+/// A non-weapon part declares neither parameter, so its whole factor is the
+/// impulse's coefficient — a chassis ram is priced by the collision itself,
+/// which is also why there is no per-role weighting: the engine has none.
 #[derive(Clone, Copy, Debug)]
 pub struct CombatConfig {
-    /// Global damage multiplier: converts an impact speed (m/s) into damage
-    /// points. A "good solid hit" is `amount > 10` in the original's own AI
-    /// scripts, and its hazards do 25, so a ram at a few m/s should land in the
-    /// same range.
-    pub damage_scale: f32,
-    /// Damage factor for parts that are not weapons (ramming).
-    pub ram_factor: f32,
+    /// See the type: the contact material's damage scale. Calibrated.
+    pub material_scale: f32,
+    /// `piercing`'s coefficient — **10**, recovered.
+    pub piercing_weight: f32,
+    /// `concussion`'s coefficient — **1**, recovered; it multiplies the
+    /// collision's impulse.
+    pub concussion_weight: f32,
 }
 
 impl Default for CombatConfig {
     fn default() -> Self {
         CombatConfig {
-            damage_scale: 6.0,
-            ram_factor: 0.25,
+            material_scale: 0.125,
+            piercing_weight: 10.0,
+            concussion_weight: 1.0,
         }
     }
+}
+
+/// The engine's own gate: a blow smaller than this is discarded.
+///
+/// `FUN_00503c30` only applies its hit when the amount comes out above `0.5`, so
+/// two robots leaning on each other at rest do nothing at all.
+pub const MIN_BLOW: f32 = 0.5;
+
+/// The reduced mass of a pair of robots, `m1·m2/(m1+m2)`.
+///
+/// Half of it is the coefficient of the collision's impulse in the hit formula,
+/// so two heavy robots hurt each other more than a heavy one hurts a light one.
+pub fn reduced_mass(a: &Robot, b: &Robot) -> f32 {
+    let (ma, mb) = (a.remaining_mass().max(0.2), b.remaining_mass().max(0.2));
+    ma * mb / (ma + mb)
 }
 
 /// One part hitting another in a single step.
@@ -83,16 +122,30 @@ struct Strike {
     point: Vec3,
 }
 
-/// Damage factor and rotor tip speed for one attacking component. `worlds` are
-/// component world transforms (the rig's bodies already place them).
-fn offense(r: &Robot, worlds: &[Mat4], index: usize, cfg: &CombatConfig) -> Option<(f32, f32)> {
+/// Damage factor per m/s and rotor tip speed for one attacking component, plus
+/// that tip speed. `worlds` are component world transforms (the rig's bodies
+/// already place them) and `impulse` is half the reduced mass of the two robots
+/// — the engine's collision magnitude without its speed term.
+fn offense(
+    r: &Robot,
+    worlds: &[Mat4],
+    index: usize,
+    impulse: f32,
+    cfg: &CombatConfig,
+) -> Option<(f32, f32)> {
     let c = &r.rig.components[index];
+    // The collision itself, plus — for a weapon — the two parameters its own
+    // definition declares. A part that declares none contributes the collision
+    // alone, which is how the engine prices a bare ram.
     let factor = match c.role {
-        Role::Weapon => c.weapon.map(|w| w.concussion + w.piercing).unwrap_or(0.5),
-        Role::Chassis => cfg.ram_factor,
-        Role::Motor | Role::Piston => cfg.ram_factor * 0.75,
-        Role::Wheel => cfg.ram_factor * 0.5,
-        _ => cfg.ram_factor,
+        Role::Weapon => {
+            let (piercing, concussion) = c
+                .weapon
+                .map(|w| (w.piercing, w.concussion))
+                .unwrap_or((0.0, 0.0));
+            cfg.piercing_weight * piercing + cfg.concussion_weight * impulse * concussion
+        }
+        _ => impulse,
     };
     if factor <= 0.0 {
         return None;
@@ -124,6 +177,7 @@ fn best_strike(
     r: &Robot,
     worlds: &[Mat4],
     blow: f32,
+    impulse: f32,
     dt: f32,
     on_parts: &[bool],
     cfg: &CombatConfig,
@@ -136,10 +190,10 @@ fn best_strike(
         if !on_parts.get(r.rig.part_of[i]).copied().unwrap_or(false) {
             continue;
         }
-        let Some((factor, tip)) = offense(r, worlds, i, cfg) else {
+        let Some((factor, tip)) = offense(r, worlds, i, impulse, cfg) else {
             continue;
         };
-        let damage = cfg.damage_scale * factor * (blow + tip * dt);
+        let damage = cfg.material_scale * factor * (blow + tip * dt);
         if damage <= 0.0 {
             continue;
         }
@@ -215,7 +269,16 @@ pub fn detect(
     let (wa, wb) = (ra.component_worlds(physics), rb.component_worlds(physics));
     let blow = if contact.first { contact.approach } else { 0.0 };
 
-    let strike = best_strike(ra, &wa, blow, dt, &a_parts, cfg)?;
+    // The collision's own magnitude, without its speed: half the reduced mass.
+    let impulse = 0.5 * reduced_mass(ra, rb);
+    let strike = best_strike(ra, &wa, blow, impulse, dt, &a_parts, cfg)?;
+
+    // A blow the engine would discard: it only applies a hit above `0.5`. The
+    // gate is on the *blow*, not the grind — a spinner's rotor works the joint
+    // as a rate, and each pass of a blade is a hit of its own.
+    if contact.first && strike.damage <= MIN_BLOW {
+        return None;
+    }
 
     // Land the hit on the opponent's part nearest the strike, among the bodies
     // that are actually touching, and skipping indestructible fittings (control
@@ -260,6 +323,7 @@ pub fn report(
     let closing = (ra.velocity(physics) - _rb.velocity(physics)).length();
     let contacts = contacting_parts(physics, ra, _rb);
 
+    let impulse = 0.5 * reduced_mass(ra, _rb);
     let mut rows = vec![match &contacts {
         Some((ap, bp)) => format!(
             "contact=true closing={closing:.2} m/s parts a=[{}] b=[{}]",
@@ -273,8 +337,8 @@ pub fn report(
             if !ra.attached[i] {
                 continue;
             }
-            let (factor, tip) = offense(ra, &wa, i, cfg).unwrap_or((0.0, 0.0));
-            if factor > cfg.ram_factor {
+            let (factor, tip) = offense(ra, &wa, i, impulse, cfg).unwrap_or((0.0, 0.0));
+            if ra.rig.components[i].role == Role::Weapon {
                 let touching = on_parts.get(ra.rig.part_of[i]).copied().unwrap_or(false);
                 rows.push(format!(
                     "  attacker {:2} {:24} factor={:.2} tip={:5.1} m/s{}",
@@ -287,13 +351,13 @@ pub fn report(
             }
         }
         // What a blow would do, and what the grind does per second.
-        if let Some(s) = best_strike(ra, &wa, closing, 1.0, on_parts, cfg) {
+        if let Some(s) = best_strike(ra, &wa, closing, impulse, 1.0, on_parts, cfg) {
             rows.push(format!(
                 "  blow: factor={:.2} impact={:.1} m/s amount={:.0}",
                 s.factor, s.impact, s.damage
             ));
         }
-        if let Some(s) = best_strike(ra, &wa, 0.0, 1.0, on_parts, cfg) {
+        if let Some(s) = best_strike(ra, &wa, 0.0, impulse, 1.0, on_parts, cfg) {
             rows.push(format!("  grind: dps={:.0}", s.damage));
         }
     }

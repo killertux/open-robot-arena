@@ -1680,6 +1680,80 @@ mod tests {
         }
     }
 
+    /// F7: `fracture` is a per-hit threshold, not a reduction.
+    ///
+    /// The engine's rule (`FUN_0045f2b0`) is a single comparison: if the part is
+    /// attached, has hitpoints left, and its `fracture` is positive but *smaller
+    /// than the blow*, the part comes away outright — whatever its hitpoints
+    /// said. That is what makes a hazard's flat 25 a scratch against a ramplate
+    /// (40) or the control board behind a chassis (41) while one solid pass of a
+    /// spinner shears a weapon off, and it is the reading the community's own
+    /// notes describe ("41 is how much you have to deal to the control board").
+    #[test]
+    fn fracture_is_a_per_hit_threshold() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+
+        let robot = &mut duel.robots[0];
+        // The factory's default per category is 15 for extenders and 20 for
+        // mechanics, mobility and weapons, so a stock bot carries both.
+        let (index, fracture) = robot
+            .rig
+            .components
+            .iter()
+            .enumerate()
+            .find(|(i, c)| {
+                robot.attached[*i] && c.fracture > 0.0 && robot.health[*i] > c.fracture + 2.0
+            })
+            .map(|(i, c)| (i, c.fracture))
+            .expect("the bot has a part with a fracture value and hitpoints to spare");
+        assert!(fracture >= 15.0, "unexpected fracture {fracture}");
+
+        // A blow just under it: taken, but the part stays on.
+        assert!(
+            !robot.damage(index, fracture - 0.5),
+            "a sub-fracture blow took the part off"
+        );
+        assert!(robot.attached[index]);
+        assert!(robot.health[index] > 0.0);
+
+        // Just over it: off it comes, with hitpoints still showing.
+        assert!(
+            robot.health[index] > 1.0,
+            "the part should have hitpoints left: {}",
+            robot.health[index]
+        );
+        assert!(
+            robot.damage(index, fracture + 0.5),
+            "a blow past the fracture did not take the part off"
+        );
+
+        // A chassis declares no `fracture`, so it is only ever worn down.
+        let chassis = robot
+            .rig
+            .components
+            .iter()
+            .position(|c| c.role == crate::rig::Role::Chassis)
+            .expect("a chassis");
+        assert_eq!(robot.rig.components[chassis].fracture, 0.0);
+        robot.health[chassis] = 1000.0;
+        assert!(
+            !robot.damage(chassis, 500.0),
+            "a chassis should never shear off on one blow"
+        );
+    }
+
     /// M4/F13: a hazard that only asks for power when it fires still gets it.
     ///
     /// The Half Circle Arena's hammer is a hinge in the model that

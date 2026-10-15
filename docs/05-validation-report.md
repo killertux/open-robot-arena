@@ -235,11 +235,20 @@ Known, documented, not yet fixed:
     the opponent did nothing), a blow is dealt once when contact *begins* and is
     sized by the relative speed the robots arrive with, and a spinning weapon's
     tip speed grinds as a rate while it works the joint. Resting contact no
-    longer damages anything. Calibrated to the game's own anchors: hazards apply
-    a flat 25 and `AI/__init__.py` calls `amount > 10` "a good solid hit"; a
-    deterministic head-on ram lands 34. The *numeric core* is still calibrated
-    rather than recovered — community measurement is `D = 183.9·P + 100·C` for a
-    reference setup — and the 34 comes from `impact × 6`. **[OPEN]**
+    longer damages anything. **The formula is recovered**: the engine's hit
+    (`FUN_00489470`, from the collision handler `FUN_00503c30`) is
+    `(piercing · contact_speed · 10 + concussion · magnitude) · material_scale`,
+    where `magnitude` is the collision's impulse (`0.5 · μ · v`, from
+    `FUN_0045a5a0`) and the coefficients 10 and 1 are the engine's own — the same
+    linear shape the community's measurements fit (`D = 183.9·P + 100·C`). A blow
+    under `0.5` is discarded, as the handler does. **`fracture` is the engine's
+    per-hit threshold** (`FUN_0045f2b0`): a single blow past it takes the part
+    off whatever its hitpoints, so a hazard's flat 25 never dents a ramplate (40)
+    or the control board behind a chassis (41) while a spinner shears parts away.
+    Stock weapons declare both parameters (inside `Components.cfz`) and a chassis
+    declares neither, so a bare ram is priced by the collision itself — our parser
+    had been inventing `0.5` for both. A deterministic head-on ram lands 36. Only
+    the contact material's own scale is calibrated (see F7). **[LANDED]**
 13. **Component hitpoints — recovered.** The factory `FUN_0045cf40` switches on
     the definition's `type` (the `+0x24` field the `.txt` parser `FUN_004622f0`
     fills, read back by `FUN_0049aa30`) and stores the per-category maximum at
@@ -247,8 +256,10 @@ Known, documented, not yet fixed:
     weapons 1000, extras 1000. A `hitpoints =` line overrides it, and only 9 of
     131 stock parts declare one. Current hitpoints live at `+0xec`, and
     `FUN_0044f370` applies damage as a plain subtraction, so the sim now uses the
-    original's numbers. `fracture` and `material` are parsed into the rig; their
-    gameplay effect is still unconfirmed (see F7). **[LANDED]**
+    original's numbers. `fracture` is now the engine's per-hit threshold (see
+    F7); `material` is parsed into the rig and is the tag the damage scale hangs
+    off, but the per-material table itself is unreachable in this build.
+    **[LANDED]**
 14. **Pistons are prismatic joints — landed.** A `Role::Piston` splits its child
     group onto a slider instead of welding it (see F8). The component mesh ships
     the rod and housing as two rigid bodies and the children mount on
@@ -376,7 +387,7 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | `ra2-duel` damage model (F7) | **Validated on a deterministic ram.** `RA2_DUEL_DRIVE=ram` with two identical `AI/Team1/Bot0` on the box arena: contact at t≈5 s, an opening blow of **34** points, then ~1 point/s while the two rest against each other. Both ends of that match what the original's scripts say — hazards apply 25, `AI/__init__.py` calls `amount > 10` a "good solid hit" — after two real defects were fixed (contact was tested only between root bodies; a blow was a per-step *integral* of speed, so a fast impact weighed almost nothing) |
 | `ra2-duel` with the AI | **Does not engage.** 30 s of `AI/Team1/Bot0` vs `AI/Team6/Bot2` on the box arena: the pair closes to ~7.7 m, then one robot pins itself against a wall (at `(-11.8, -7.3)` from t = 15 s on, reversing included) and neither touches the other all bout. This is the control layer (M4), not the damage model: the AI is a stand-in that only ever drives at the opponent |
 | 45-bot drive survey | **Bit-identical** to F9 after F10 | the chassis is now dressed from the file's face groups, but only the *skin coordinates* changed, and the survey never looks at a texture |
-| `cargo fmt --check`, `clippy`, tests | clean, 38 tests |
+| `cargo fmt --check`, `clippy`, tests | clean, 39 tests |
 
 ## 7. Recommended order of work
 
@@ -405,10 +416,12 @@ The remaining blocker is *behaviour*, not the parts' parameters or the arenas:
    reaches the floor also presses with its full torque and lifts the robot; the
    original only spins one when it is told to. The game's own answer is the
    shipped Python AI, which needs the script layer.
-2. **F7's numbers.** The impact-to-damage conversion is still calibrated rather
-   than recovered, and `fracture`/`material` are parsed but their gameplay effect
-   is unconfirmed. Hitpoints are no longer on the list: they are the engine's own
-   per-category table (see §4.13).
+2. **F7's remaining constant.** The formula, its coefficients and `fracture`
+   are the engine's own; what is still calibrated is the contact **material's**
+   damage scale — the per-material table lives in `MaterialObject` subclasses this
+   build exposes only as RTTI, so the scale is set by the scripts' own anchors.
+   Hitpoints are no longer on the list: they are the engine's per-category table
+   (see §4.13).
 3. **F9's remainder.** Buckling exists but its *rate* is inferred and its
    silhouette is smooth rather than the game's subdivided crush mesh.
 4. **F12 — the mass a zero-mass rigid body gets** (F10's residual). Every wheel

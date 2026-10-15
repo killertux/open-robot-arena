@@ -839,11 +839,18 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             )
         });
         let weapon = (role == Role::Weapon).then(|| WeaponStats {
+            // Neither parameter has a default. The engine's factory leaves both
+            // at zero unless the definition declares them, and **every stock
+            // weapon does** (`Components.cfz`: the blade is `concussion = .8`,
+            // `piercing = .3`, the sawblade `.9`/`.1`) while a chassis declares
+            // neither — which is exactly what makes a spinner bite and a bare
+            // chassis only ram. Inventing 0.5 here as this used to would price
+            // every part as a half-decent weapon.
             concussion: def
                 .as_ref()
                 .and_then(|d| num(d, "concussion"))
-                .unwrap_or(0.5),
-            piercing: def.as_ref().and_then(|d| num(d, "piercing")).unwrap_or(0.5),
+                .unwrap_or(0.0),
+            piercing: def.as_ref().and_then(|d| num(d, "piercing")).unwrap_or(0.0),
             frequency: def
                 .as_ref()
                 .and_then(|d| num(d, "frequency"))

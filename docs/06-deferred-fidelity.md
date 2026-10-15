@@ -15,7 +15,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` is the material tag, not a collider) |
 | F5 | Collision shape kinds (`SIMULATION_GEOMETRY`, `HAVOK_GEO_TYPE`) | **landed** |
 | F6 | Friction combination law differs from Havok 1.x | blocked on the binding |
-| F7 | Damage model: an event, not a per-step integral | shape and hitpoints landed; the impact formula is still calibrated |
+| F7 | Damage model: an event, not a per-step integral | **landed**: the engine's own formula (`10·piercing·v + concussion·μ·v/2` × material scale) and `fracture` as a per-hit threshold |
 | F8 | Pistons slide their children (prismatic) | **landed** (nothing drives them yet) |
 | F9 | The chassis buckles (crush points from the `.bot`) | **landed** (rate inferred) |
 | F10 | Chassis skin decals; 16 %-light weight gap | **landed** (weight: see F12) |
@@ -671,7 +671,7 @@ about 43 % less grip. Only raw FFI or a custom combine would close it.
 
 ## F7 — Damage is an event; its numbers are half-sourced
 
-**Landed** (this round): the *shape* of the model, and two real defects.
+**Landed.** The *shape* of the model, the *formula*, and `fracture`.
 
 - **Contact spans every body, not the roots.** A robot is several hinged bodies
   (a chassis group plus a body per motor), and the model tested only the two
@@ -683,31 +683,44 @@ about 43 % less grip. Only raw FFI or a custom combine would close it.
   *per hit*; hazards apply a flat **25** (`Arenas/Hazards.py`:
   `plus.damage(bot, 0, 25, ...)` — the flame and the electric zone both), and the
   shipped AI treats `amount > 10` as "a good solid hit"
-  (`AI/__init__.py`: `if weapon == damage[0] and damage[1] > 10.0: # min damage
-  = 10`). Our model *integrated* an instantaneous speed over every step a contact
-  lasted, so a fast impact contributed almost nothing (a 5.6 m/s head-on ram:
-  3 points) while two motionless robots eroded each other. Now the closing speed
-  the robots arrive with is dealt **once**, when contact begins, and a spinning
-  weapon's rotor tip speed is applied as a rate while it works the same joint.
-  A constant term (`speed_floor`) that made resting contact damage is gone.
-- Measured on a deterministic head-on ram (`RA2_DUEL_DRIVE=ram`, two identical
-  `AI/Team1/Bot0` on the box arena): the opening blow is **34** points, then
-  resting contact adds ~1 point a second. That is the range the original's own
-  scripts describe — above the AI's 10-point "good hit" line and around the
-  hazard's flat 25. `damage_scale` is 6.0 for that (it was 22.0, tuned to the old
-  per-step integral).
+  (`AI/__init__.py`). Our model *integrated* an instantaneous speed over every
+  step a contact lasted, so a fast impact contributed almost nothing while two
+  motionless robots eroded each other. Now the closing speed the robots arrive
+  with is dealt **once**, when contact begins, and a spinning weapon's rotor tip
+  speed is applied as a rate while it works the same joint.
+- **The formula is the engine's own.** The hit (`FUN_00489470`, reached from the
+  collision handler `FUN_00503c30`) is
 
-**Still open**, and now precisely scoped:
+  ```text
+  damage = (piercing * contact_speed * 10 + concussion * magnitude) * scale
+  ```
 
-- The formula's numeric core. `concussion + piercing` is read from the component
-  `.txt` (zero to 1.3 across the stock weapons) and shot through `impact speed ×
-  6`, which is calibrated to the anchors above, not *recovered*. The original's
-  own function was not found: the binary is symbol-free, its damage arrives as a
-  `giBotDamageMessage` (no vtable xrefs) and the arena's script `damage` simply
-  posts one, so there is no straight line from `GetLastDamageReceived`'s thunk to
-  the computation. Community measurement is `D = 183.9·P + 100·C` for a reference
-  setup ([CONFIRMED, empirical], `docs/04` §5.2) — useful as a cross-check, not a
-  source.
+  — linear and additive in the two parameters a component declares, with
+  coefficients **10** and **1**. That is the shape the community's own
+  measurements fit (`D = 183.9·P + 100·C`, `docs/04` §5.2), which is the cross-check
+  that says the reading is right. `magnitude` is the collision's *impulse*: the
+  engine's magnitude function (`FUN_0045a5a0`) works from the contrast of the two
+  bodies — their masses against their damping/resistance terms — and returns
+  `0.5 · μ · v`, halving it at the last step. `scale` is a float on the contact
+  material, `*(record + 0x64) + 4`.
+- **Every stock weapon declares its two parameters**, and they are inside
+  `Components.cfz` rather than in loose files: the blade is `concussion = .8`,
+  `piercing = .3`, the sawblade `.9`/`.1`. A **chassis declares neither**, so its
+  whole factor is the collision's own — which is what makes a spinner bite and a
+  bare ram only shove. Our parser had been inventing `0.5` for both, pricing every
+  part as half a weapon; they default to zero now, as the factory leaves them.
+- **`fracture` is a per-hit threshold.** `FUN_0045f2b0` applies damage as a float
+  subtraction clamped to what is left, and takes the part off outright when a
+  *single* blow is **larger than** its `fracture` — extenders **15**,
+  mechanics/mobility/weapons **20**, extras **60**, and anything with no category
+  (a chassis) **0**, which is the factory's own table. So a hazard's flat 25 can
+  never dent a ramplate (40) and never reaches the control board behind a chassis
+  (41), while one solid pass shears a weapon off rather than grinding it down —
+  the reading the community's notes describe, now with the comparison behind it.
+- **A blow under `0.5` is discarded** — the handler's own gate. That is what stops
+  two robots leaning on each other from eroding one another.
+- **The per-role weights are gone.** They were ours and the engine has none: a
+  non-weapon hit is priced by the collision alone, whatever part it lands on.
 - **Component hitpoints — recovered.** The component definitions declare
   `hitpoints =` for only 9 of 131 parts; every other part's maximum comes from the
   engine's own table, which the component factory (`FUN_0045cf40`) applies by
@@ -715,18 +728,23 @@ about 43 % less grip. Only raw FFI or a custom combine would close it.
   **100**, mechanics **400**, mobility **400**, weapons **1000**, extras **1000** —
   after which a declared `hitpoints =` overrides it. The accessors are
   `component + 0xe8` (maximum) and `+0xec` (current); damage is a plain
-  subtraction (`FUN_0044f370`), so the model is now on the original's numbers
-  instead of our invented 250/300/350/600. The `.txt` parser that reads the keys
-  is `FUN_004622f0` (`hitpoints` → `+0x98` on the *definition*, `type` → `+0x24`),
-  and `FUN_0049aa30` reads the category back.
-- **`fracture` and `material` are unparsed.** `fracture` is declared by 8
-  components (discs and the flipper 20, the ramplate 40) and `material = metal(.4)`
-  / `rubber(0)` by 5. The community note that a chassis `fracture` of **41** is
-  "how much you have to deal to the control board" fits a reading where
-  `fracture` is a per-hit *reduction*: hazard hits are 25, so they can never
-  dent a ramplate (40) or reach the control board behind a chassis (41) — which
-  matches how those parts behave in play. That reading is [LIKELY], not decoded,
-  and it needs the per-hit event shape above to be expressible at all.
+  subtraction (`FUN_0044f370`). The `.txt` parser that reads the keys is
+  `FUN_004622f0` (`hitpoints` → `+0x98` on the *definition*, `type` → `+0x24`), and
+  `FUN_0049aa30` reads the category back.
+
+Measured on the deterministic head-on ram (`RA2_DUEL_DRIVE=ram`, two identical
+`AI/Team1/Bot0` on the box arena): the opening blow is **36**, and a six-second
+grind shears two parts off. That is the range the game's own scripts describe —
+above the AI's 10-point "good hit" line, around the hazard's flat 25.
+
+**Still open:**
+
+- **The contact material's `scale`.** It is the one number in the formula that is
+  calibrated rather than recovered. The material is the `.txt`'s `contact =` tag
+  (F4), and this build's material classes (`Metal`, `Rubber`, … as
+  `MaterialObject` subclasses) are present as RTTI only — the per-material table is
+  not reachable by the cheap routes, so `material_scale` is set by the anchors the
+  scripts give (hazards 25, the AI's 10-point line) rather than read out.
 - Damage is still reported as a running total, not as the five-tuple
   `(component, amount, time, by player, by component)`. The pieces are in
   `Impact`; the script layer is what will need it.

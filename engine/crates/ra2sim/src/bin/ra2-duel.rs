@@ -66,15 +66,15 @@ fn run(
     let mut duel = Duel::new(arena, &bots)?;
     if let Ok(scale) = std::env::var("RA2_DAMAGE") {
         if let Ok(v) = scale.parse() {
-            duel.combat.damage_scale = v;
+            duel.combat.material_scale = v;
         }
     }
     println!(
-        "duel: {} robots, arena_tris={} props={} damage_scale={:.1}",
+        "duel: {} robots, arena_tris={} props={} material_scale={:.3}",
         duel.robots.len(),
         duel.arena.triangles.len(),
         duel.props.len(),
-        duel.combat.damage_scale
+        duel.combat.material_scale
     );
 
     let cam = match camera {
