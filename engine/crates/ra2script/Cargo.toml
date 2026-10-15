@@ -1,0 +1,12 @@
+[package]
+name = "ra2script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The RA2 script layer: the plus/Arenas/AI object model on an embedded CPython 3."
+
+[dependencies]
+glam = "0.34.1"
+pyo3 = { version = "0.23.5", features = ["auto-initialize"] }
+ra2fmt = { path = "../ra2fmt" }
+ra2-render = { path = "../ra2-render" }

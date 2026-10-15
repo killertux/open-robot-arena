@@ -29,6 +29,20 @@ This project builds on community reverse-engineering work. We do not claim it.
   wraps the `joltc` C API. Neither Jolt's source nor its binaries are vendored
   into this repository; they are pulled in as ordinary Cargo dependencies.
 
+## CPython, and `pyo3`
+- CPython: © the Python Software Foundation. License: **PSF License v2**
+  (GPL-compatible, permissive).
+- `pyo3`: https://github.com/PyO3/pyo3 — License: **MIT OR Apache-2.0**.
+- `ra2script` embeds a CPython 3 interpreter to run the game's own Python
+  scripts and exposes the engine to them as the `plus` module. The interpreter is
+  the *user's* system CPython; neither it nor its standard library is vendored or
+  redistributed here. The game's shipped Python code (`Arenas/`, `AI/`,
+  `Scripts/`) is **the game's**, lives in `local/` (git-ignored), and is executed
+  as data by the player's own installation — we do not redistribute it either.
+- `build.rs` creates a `libpythonX.Y.so` symlink inside the build directory when a
+  distribution ships only the versioned soname (Ubuntu's `libpython3.12t64`
+  without `python3.12-dev`); nothing is written outside `target/`.
+
 ## CFL3 archive format (`.cfz`)
 - Author: Jari Komppa ("Compressed File Library 3").
 - Source: https://github.com/jarikomppa/cfl — License: **zlib** (permissive).

@@ -121,16 +121,22 @@ where Havok 1.x used `√(µ₁²+µ₂²)`, which we cannot change through the 
 binding. Each item is tracked with its evidence and fix path in
 `docs/05-validation-report.md` §4 and `docs/06-deferred-fidelity.md`.
 
-Next: M4 — the script layer (reproduce the `plus`/`AI`/`Arenas` API so the stock
-AI strategies and arena scripts run). See `docs/01-project-plan.md` and
-`docs/03-engine-design.md`.
+**M4 — the script layer — is under way.** The game's own arena scripts run
+unmodified: `ra2script` embeds a CPython 3.12, exposes the engine to Python as the
+`plus` module the scripts expect, and translates the shipped Python 2.2 sources as
+they load (including their implicit relative imports). All fourteen stock arenas
+register and configure themselves — cameras, shadow receivers, the navigation map
+read from the `.map` files the arenas ship, the hazard zones and the collision
+lines that keep the AI off them. The AI binding and the hazards actually moving
+are next. See `docs/06-deferred-fidelity.md` F13 for the surface and what is left.
 
 ## Layout
 
 ```
 docs/      Design notes, reverse-engineering findings, format specs
 tools/     Our own analysis/extraction/build scripts (Python)
-engine/    The native engine (Rust workspace: ra2fmt, ra2-cli, ra2-render, ra2sim)
+engine/    The native engine (Rust workspace: ra2fmt, ra2-cli, ra2-render,
+           ra2sim, ra2script — the script layer on an embedded CPython)
 local/     (git-ignored) original game files and extracted data
 ```
 

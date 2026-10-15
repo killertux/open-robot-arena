@@ -21,6 +21,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F10 | Chassis skin decals; 16 %-light weight gap | **landed** (weight: see F12) |
 | F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
 | F12 | Component mass when the `.gmf` stores zero | identified (wheels); rule open |
+| F13 | The script layer (M4) | arena half **landed**; AI binding and hazard drive next |
 
 ---
 
@@ -901,3 +902,82 @@ collision geometry (`volume × density`, Havok's idiom for a zero-mass body) or 
 value from the definition — the factory `FUN_0045cf40` does read one definition
 number into `*(component + 0x64) + 4`, but no shipped definition or exporter
 template declares `mass` for a wheel, so that field is 0 there. **[OPEN]**
+
+---
+
+## F13 — The script layer (M4)
+
+**Landed: the arena half.** The game's own `Arenas/` package runs, unmodified, on
+an embedded CPython 3.12.
+
+*Robot Arena 2*'s game logic is Python 2.2 talking to a C++ engine through a
+module called `plus`. Almost every behaviour still missing — hazards that fire,
+pistons that stroke, the AI that actually fights — lives in *those* scripts, so
+`ra2script` boots a real interpreter and runs them as written rather than
+paraphrasing them:
+
+- **The interpreter is the host's CPython 3**, exposed to Rust through `pyo3`
+  (`build.rs` supplies the `libpythonX.Y.so` symlink several distributions omit,
+  so no `-dev` package is required).
+- **The Python-2 sources are translated on load** by `legacy.py`: `print`
+  statements, `raise E, msg`, `except E, e`, `<>`, `.iteritems()`/`.next()`,
+  `file()`, `xrange()` — and Python 2's *implicit relative imports*, which the
+  game relies on (`import Hazards` inside `Arenas` means `Arenas.Hazards`; without
+  this, every arena fails to import). It also reinstates the 2.2 library functions
+  the scripts call (`string.split`, `string.replace`, `types.TupleType`, …). Only
+  the game's own directories are translated; the shipped `Scripts/Lib` is a copy
+  of the Python 2.2 standard library and is deliberately ignored in favour of the
+  host's. The one semantic *not* translated is `/` on two ints (truncating in 2.x,
+  exact in 3.x); the shipped scripts were surveyed and none depends on it.
+- **The engine side is `plus.Arena`**, with exactly the method surface the
+  scripts call (surveyed, not guessed): the navigation map
+  (`SetMapSize`/`SetMapResolution`/`SetMapAltitude`/`SetMapHeight`/`SetMapWall`/
+  `SetMapHazard`/`SetMapExtent` and the `Get`/`Is`/`ToGrid`/`FromGrid`,
+  `GetPath`, `IsStraightPathClear`, `SetSearchRadius`, `DistanceToEdge`,
+  `HeadingAwayFromEdge`), the geometry (`RayTest`, `GetStartPointLocation`,
+  `AddShadowTriangle`, `SetShadowSource`), the hazards (`AddPrismatic`,
+  `GetHinge`, `RegisterZone`, `AddCollisionLine`, `AddPOV`, `SetSubMaterial*`,
+  `SetActive`, `SetPinned`) and lightning.
+- **`AddShadowReceivers` is the engine's call**, not the script's — each arena
+  fills in a hook and the shadow source and receiver triangles only reach the
+  engine when we call it. **`AddStaticCamera`, `AddWatchCamera` and `AddHazard`
+  are the Python base class's**, not ours: `Arenas.SuperArena` keeps the cameras
+  in `self.StaticCams` and the hazards in `self.hazards` and drives them through
+  the free functions, so binding them in Rust would shadow the game's own
+  behaviour.
+- **The navigation map is the game's own data.** Arenas ship a baked `.map`
+  beside their model and `SuperArena.LoadMap` reads it; `GetPath` is A* over that
+  grid (8-connected, no corner cutting, `SetSearchRadius` as clearance) and
+  `AddCollisionLine` walls it around each hazard — the mechanism the scripts use
+  to keep the AI off the spikes.
+
+**Still open, in order:**
+
+1. **The AI half.** `plus.AI` currently exposes the shape (`Activate`, `Tick`,
+   `GetNumComponents`, …) so `AI/` imports and subclasses, but not the queries the
+   strategies drive themselves with — `Input`, `GetLocation`, `GetSpeed`,
+   `GetTurning`, `GetEnemies`, `GetDistanceTo(ID)`, `GetHeading(To(ID))`,
+   `GetLastDamageDone`, `GetZoneContents`, `IsStraightPathClear`. That, plus
+   `AI/Tactics.py`'s strategy set, is what replaces the stand-in driver in
+   `ra2sim::duel`. Note `AI/*.py` also `import Gooey`, which pulls the engine's UI
+   module `giScript`; a stub is needed for the import to succeed.
+2. **Hazards do not move yet.** `AddPrismatic`/`GetHinge` return the right
+   controller objects with the right settings (`SetPowerSettings`,
+   `Lock`, `SetDirection`, `ApplyForce`, `ApplyTorque`, `SetAutoLock(s)`), but the
+   joints are not yet created on the arena's own rigid bodies and `ZoneEvent` is
+   not yet dispatched when a robot crosses a registered SmartZone. That is the
+   next slice, and it is what makes the spikes, saws, hammers and pit sliders fire.
+3. **The match layer.** `plus.damage`/`force`/`zap`/`getLocation`/`getWeight`/
+   `rayTest`/`isDefeated` are wired to a `MatchApi` seam the simulator implements;
+   installing it, and driving the arena's `Tick` and the AIs from the duel loop,
+   is the last piece.
+4. **Presentation** — audio, camera motion, particles and the Gooey UI — is
+   accepted and *recorded* (a run reports what it dropped) and belongs to M5.
+
+**Verified:** all fourteen stock arenas register from their own modules;
+`Arenas/box.py`'s configuration arrives intact — 3 cameras, `Some([0.653, 6.894,
+-0.418])` and 10 shadow triangles, a 30×30 grid at 1 m with 207 walls and 24
+hazard cells, and after `HazardsOn(True)` the saw and two spike zones with ids 1,
+2 and 3; `RayTest` finds the floor under start point 0 and `GetPath` routes from
+it to the arena centre; and the translation is pinned against the constructs the
+survey found, including that text inside a string is left alone.

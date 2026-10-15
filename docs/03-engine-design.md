@@ -32,7 +32,7 @@ engine/
   crates/
     ra2fmt/      # pure data: GMI(.gmf), GMA(ascii), BOT, CFL3(.cfz), GIB, textures
     ra2sim/      # physics (Jolt behind a PhysicsBackend trait), scene assembly, sim
-    ra2script/   # native reimplementation of plus/AI/Arenas/Gooey object model   (planned)
+    ra2script/   # the plus/Arenas/AI object model on an embedded CPython 3
     ra2-render/  # wgpu renderer + scene graph (lib + `ra2-render` CLI)
     ra2app/      # winit app: menus, workshop, matches                            (planned)
 tools/           # python tooling (format probing, conversion, diffs)
@@ -50,10 +50,56 @@ local/           # (git-ignored) game files + converted cache
 - **M3 — Two robots fight.** ✅ Weapons/motors via the component/controller model;
   damage + buckling *(implemented as `ra2sim::rig`/`robot`/`combat`/`duel` plus the
   `ra2-duel` runner)*.
-- **M4 — Script layer.** Reproduce the `plus`/`AI`/`Arenas` API and run the stock
-  AI strategies and arena scripts. **(next)**
+- **M4 — Script layer.** 🚧 The engine side of the `plus`/`Arenas`/`AI` object
+  model, on an embedded CPython 3, running the game's own Python 2 sources
+  unmodified *(implemented as `ra2script`; the arena surface has landed, the AI
+  binding is next — see F13)*.
 - **M5 — Game shell.** Workshop (build a robot), tournaments, menus.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
+
+## M4 design notes
+
+- **The scripts are the specification, so the scripts are what runs.** Every
+  arena and every AI in the game is a subclass of an engine class, and the
+  behaviour we want is in *their* bodies, not in ours. `ra2script` therefore boots
+  a real CPython, puts the game's own `Arenas/`, `AI/` and `Scripts/` on
+  `sys.path`, and runs them as written. Nothing in the repository paraphrases a
+  strategy or a hazard.
+- **They are Python 2.2.** Rather than rewrite them, a translating import hook
+  (`legacy.py`) rewrites the constructs Python 3 will not parse — `print`
+  statements, `raise E, msg`, `except E, e`, `<>`, `d.iteritems()`, `it.next()`,
+  `file()`, `xrange()` — plus Python 2's *implicit relative imports* (`import
+  Hazards` inside package `Arenas` means `Arenas.Hazards`), and reinstates the 2.2
+  library functions the scripts import (`string.split`, `types.TupleType`, …).
+  Only the game's own directories are translated; the shipped `Scripts/Lib` is the
+  Python 2.2 standard library and is deliberately *not* used — the host CPython 3
+  one is, behind the same shim. One semantic is not translated: `/` on two ints
+  truncates in 2.x; the shipped scripts were checked and none relies on it.
+- **What is ours is only the engine side.** `plus.Arena` answers the questions the
+  scripts ask the world — `RayTest`, `GetStartPointLocation`, the navigation map
+  (`SetMapSize`/`SetMapHeight`/`SetMapWall`/`GetPath`/`FromGrid`), the hazard
+  joints (`AddPrismatic`, `GetHinge`) and the SmartZone ids (`RegisterZone`) —
+  plus the geometry `AddShadowTriangle`/`SetShadowSource` feed. Camera, audio,
+  particle and Gooey calls are accepted and *recorded*, so a run reports exactly
+  what it dropped instead of ignoring it.
+- **The navigation map is the game's own.** Arenas ship a baked `arena.map`
+  beside their model, and `Arenas.SuperArena.LoadMap` reads it; `CreateMap` is the
+  fallback for arenas that ship none, and it bakes the grid with `RayTest` against
+  the model. The AI paths over that grid (`GetPath` is A* on it), and
+  `AddCollisionLine` walls it around each hazard — which is how the scripts keep
+  the AI off the spikes.
+- **The engine calls back in.** `Arena.Tick` each frame, `Arena.ZoneEvent` when a
+  robot enters one of the registered SmartZones, `AddShadowReceivers` once after
+  construction — the same sequence the original drives.
+- **Verification.** `ra2script`'s tests assert that all fourteen stock arenas
+  register, that `Arenas/box.py`'s configuration arrives intact (3 cameras, 10
+  shadow triangles, the 30×30 map with its 207 walls and 24 hazard cells, and the
+  saw plus two spike zones with their ids), that `RayTest` finds the floor under a
+  start point and `GetPath` routes across the arena, and that the translation
+  rewrites the constructs the survey found and nothing else. `scriptdump`
+  (`cargo run -p ra2script --example scriptdump -- local/game`) prints what every
+  arena configures.
+
 
 ## M2 design notes
 - **Swappable physics.** `ra2sim::backend` defines neutral `BodyDesc`/`ShapeDesc`
