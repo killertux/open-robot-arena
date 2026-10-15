@@ -11,8 +11,8 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 |---|---|---|
 | F1 | Mount-point (attachment frame) alignment | data done, rule identified (`A_parent·A_own⁻¹`); the spinner's height source is open |
 | F2 | Assembled-bodies path is the only robot path | **landed** |
-| F3 | The motor law, from the game's own data | **landed** |
-| F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` as a collider still open) |
+| F3 | The motor law, from the game's own data | **landed** (speed is rad/s, torque x40 — both from the binary) |
+| F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` is the material tag, not a collider) |
 | F5 | Collision shape kinds (`SIMULATION_GEOMETRY`, `HAVOK_GEO_TYPE`) | **landed** |
 | F6 | Friction combination law differs from Havok 1.x | blocked on the binding |
 | F7 | Damage model: an event, not a per-step integral | shape landed; numbers half-sourced |
@@ -523,13 +523,16 @@ friction. `JointUse::Burst` does the same: motor off, friction torque set to the
 motor's own torque, nothing triggering it yet. Driving one continuously made its
 arm fight the floor and lift the robot off its wheels.
 
-**Where the speed's unit is the weaker inference.** The speed is stored
-unscaled — rad/s if the engine's angular unit is, which Havok 1.x's and the
-game's metric masses and gravity say it is. The arena hazards' `95` reads high
-for a press, but they are violent by design and the scripts give them a separate
-`HingeController` binding, so the two are not necessarily the same scale.
-`RA2_TORQUE_UNIT` allows the torque factor to be re-measured; there is no
-equivalent for the speed because nothing suggested one.
+**The speed's unit is rad/s.** `SetPowerSettings` (`0x4810d9`, reached from the
+script binding registered at `0x4bc7e0`) stores its first argument *unscaled* into
+the controller (`+0xb0`, and again at `+0xbc`) while its second argument is
+multiplied by the constant at `0x6a69f8` — which is exactly **40.0** — and stored
+at `+0xb8`. So only the torque is rescaled, `RA2_TORQUE_UNIT`'s default of 40 is
+the engine's own number, and the speed the scripts pass is the speed the hinge
+motor is given: rad/s, since Havok 1.x's angular unit is. The motor data agrees —
+`Z-Tek`'s `36 24` is 5.7 rev/s on a stock wheel, which is a robot's pace, while a
+degrees reading would be 0.12 m/s. The hazards' `95` is simply a violent press,
+bound to its own `HingeController` in the script.
 
 **What it fixes and what it does not.** On the same 45-bot survey the count goes
 from 25 to 26 — a wash — but the per-bot swings are large, and the reasons are
@@ -557,10 +560,26 @@ robot coasts. The hinge format carries the same idea (`FRICTION` in the exported
 hinge fields).
 
 The caveat is the `contact` surface itself. *Making it the collider* measurably
-hurts: with it, `AI/Team10/Bot2` goes from driving 5.5 m to not moving at all,
-because the shipped traction meshes are not always large enough to hold the robot
-up. Until the `contact` and `passthru` object sets are separated and validated,
-the whole scene hull is the collider and `contact` is parsed but unused.
+hurts: with it, `AI/Team10/Bot2` goes from driving 5.5 m to not moving at all.
+
+**Retired, with a measurement.** The shipped objects say what `contact` is.
+`Components/mudtire/mudtire.gmf` carries three overlapping meshes:
+
+| object | vertices | radius (XZ) | thickness (Z) |
+|---|---|---|---|
+| `mud_tire` (the visible tyre) | 26 | 0.415 | ±0.170 |
+| `wheel_traction` (the `contact` object) | 18 | **0.473** | ±0.130 |
+| `h_wheel2` (the `passthru` object) | 26 | 0.349 | ±0.160 |
+
+So the traction mesh is *bigger* than the tyre, not smaller: it is the wheel's
+actual contact ring, and the hub named by `passthru` sits **inside** both, which
+is why excluding it cannot matter to a convex hull. Our whole-scene hull already
+contains the traction ring, so the wheel already rolls on the game's contact
+radius; making the collider the *ring alone* is what stalls a robot, because the
+ring is 4 cm narrower than the tyre it replaces and the robot loses its lateral
+footprint. `contact` is therefore a **material tag**, not a collider — which is
+exactly the role it plays in the model (`grip` is the friction). The caveat is
+closed with no code change.
 
 ## F5 — Collision shape kinds, decoded — **landed**
 

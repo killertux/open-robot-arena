@@ -208,14 +208,19 @@ Known, documented, not yet fixed:
    `power = <speed> <torque>` is exactly the pair the scripts set with
    `SetPowerSettings(speed, torque)`, and its implementation multiplies the
    torque by 40 before storing it. The hinge is a velocity motor at the
-   definition's speed with the definition's torque as the cap. The *speed's* unit
-   is the weaker inference; see F3.
+   definition's speed with the definition's torque as the cap. Both units are now
+   the binary's own: the speed is stored **unscaled** (`0x4810d9` writes it to
+   `+0xb0`/`+0xbc` untouched) and the torque is multiplied by the constant at
+   `0x6a69f8`, which is exactly 40.0. **[LANDED]**
 10. **Wheels have declared traction geometry.** Component defs carry
     `contact = wheel_traction`, `passthru = wheel_collision`, `grip` and
-    `resistance`. **Partly landed (F4):** `grip` is the wheel body's friction and
-    `resistance` the joint's rolling-resistance friction torque. Making the
-    `contact` object the collider *hurts* (the traction meshes are not always big
-    enough to hold a robot up) so `contact` is parsed but unused for now.
+    `resistance`. `grip` is the wheel body's friction and `resistance` the joint's
+    rolling-resistance friction torque. `contact` is a **material tag, not a
+    collider**, and that is now measured rather than assumed: the traction ring is
+    *larger* than the visible tyre (0.473 m against 0.415 m) and the `passthru`
+    hub sits inside both, so the whole-scene hull already rolls on the game's
+    contact radius — using the ring alone is what stalls a robot, by costing it
+    its tyre's footprint. **[LANDED]**
 11. **Collision shape kinds.** `SIMULATION_GEOMETRY` (1 convex, 2 concave, 3/4
     proxy convex/concave, **5/6 display proxy**) and `HAVOK_GEO_TYPE`
     (`Standard`, `Plane`) are decoded; arena colliders are assembled per body and
