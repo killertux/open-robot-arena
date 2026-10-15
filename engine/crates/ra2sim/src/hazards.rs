@@ -147,4 +147,8 @@ pub struct LiveJoint {
     /// The joint's axis in world space, for those forces.
     pub axis: Vec3,
     pub drive: SharedDrive,
+    /// The drive strength and friction the joint currently carries, so the
+    /// script's changes reach the motor only when it actually changes its mind.
+    pub strength: f32,
+    pub friction: f32,
 }

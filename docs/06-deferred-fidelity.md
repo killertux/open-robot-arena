@@ -1021,6 +1021,17 @@ in place.
   sign selector it is (`PitSlider` passes `1`, `Hammer` `±100`); and
   `ApplyForce`/`ApplyTorque` are one-shot impulses along the joint's own axis,
   which is what `Spikes.FireTeeth`'s single `ApplyForce(40000)` is.
+- **The strength is re-stated, not fixed at build time.** A hazard asks for its
+  power whenever it likes: `Hammer.__init__` parks its arm with `Lock(True)` and
+  *no* power settings at all, and the 1200 N·m only arrives in `Smash`, when a
+  robot walks into the zone. The engine therefore pushes the script's torque (and
+  the friction that holds a parked joint) to the constraint whenever it changes,
+  not only when the joint is built. The scripts also ask for drive speeds past
+  what a solver can express — `SetPowerSettings(95, 1200)` is 15 turns a second —
+  and the backend *refuses* such a target rather than clamping it, which silently
+  left the hammer standing still; the target is clamped to the solver's limit
+  instead. Every hinge that asks for that speed has angle limits a few degrees
+  wide, so the arm reaches its stop within a step either way.
 - **`Arena.SetActive`/`SetPinned`** are the arena's own switches, and the scripts
   state a *want* rather than an event (`parkinglot.py` hides all 25 cinder blocks
   on the way in and drops them in when a trap door opens; `flextop.py` pins its
@@ -1032,7 +1043,7 @@ in place.
   is rarely a ball, and a flame half a metre off a spinner's blades should not set
   them alight.
 
-Three real bugs came out of this, and all three were in the engine rather than the
+Four real bugs came out of this, and all four were in the engine rather than the
 scripts:
 
 - **A shared collision proxy was being re-placed per body.** The Combat Arena has
@@ -1044,6 +1055,9 @@ scripts:
 - **Impulses were ignored on sleeping bodies.** Jolt parks a settled body and drops
   an impulse into one — the same gotcha `set_velocity` already had. A hazard pushes
   a part that has not moved since the match began.
+- **A drive speed past the solver's limit was silently dropped.** The Half Circle
+  Arena's hammer asks for 95 rad/s; the constraint refused it and the arm did not
+  move at all.
 - **The arena path went stale after the script layer's `chdir`** (above).
 
 **Still open, in order:**
@@ -1060,8 +1074,10 @@ prismatic the script created, and the spike body shoots a fifth of a metre up ou
 of the floor with the robot standing on it (0.8 m, its whole travel, when nothing
 is — `a_slider_lets_its_body_rise`). The Compressor Arena's four smash arms swing
 under `Hazards.Smasher`'s own `SetPowerSettings`/`SetDirection`
-(`the_models_own_hinges_are_driven_by_the_script`), and a Parking Lot cinder block
-leaves the world and comes back when the script asks
+(`the_models_own_hinges_are_driven_by_the_script`), the Half Circle Arena's hammer
+swings on the power it only asks for once a robot is in its zone
+(`a_hammer_that_asks_for_power_late_still_swings`), and a Parking Lot cinder block
+leaves the world, is pinned mid-air and drops when unpinned
 (`the_arena_can_hide_a_body_and_pin_one`). The box arena's three joints (two spikes
 and the saw) all build with the script's own travel. The shipped AI closes the
 fight — the test drives Roly Poly against

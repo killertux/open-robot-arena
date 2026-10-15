@@ -382,7 +382,8 @@ impl PhysicsBackend for JoltBackend {
             c.set_motor_state(MotorState::Off);
         } else {
             c.set_motor_state(MotorState::Velocity);
-            let _ = c.set_target_velocity(target_velocity);
+            // Clamped to what a solver can express; see `drive_hinge`.
+            let _ = c.set_target_velocity(clamp_speed(target_velocity, MAX_LINEAR_SPEED));
         }
     }
 
@@ -423,7 +424,7 @@ impl PhysicsBackend for JoltBackend {
             c.set_motor_state(MotorState::Off);
         } else {
             c.set_motor_state(MotorState::Velocity);
-            let _ = c.set_target_angular_velocity(target_velocity);
+            let _ = c.set_target_angular_velocity(clamp_speed(target_velocity, MAX_ANGULAR_SPEED));
         }
     }
 
@@ -438,6 +439,29 @@ impl PhysicsBackend for JoltBackend {
             .constraint(id)
             .map(|c| c.current_angle())
             .unwrap_or(0.0)
+    }
+
+    fn set_joint_strength(&mut self, handle: JointHandle, strength: f32, friction: f32) {
+        let Some(Some(any)) = self.joints.get(handle as usize).copied() else {
+            return;
+        };
+        let strength = strength.max(0.0);
+        let friction = friction.max(0.0);
+        if let Some(id) = any.downcast::<SliderConstraint>() {
+            if let Ok(mut c) = self.world.constraint_mut(id) {
+                let _ = c.set_motor_settings(
+                    MotorSettings::default().torque_limits(-strength, strength),
+                );
+                let _ = c.set_max_friction_force(friction);
+            }
+        } else if let Some(id) = any.downcast::<HingeConstraint>() {
+            if let Ok(mut c) = self.world.constraint_mut(id) {
+                let _ = c.set_motor_settings(
+                    MotorSettings::default().torque_limits(-strength, strength),
+                );
+                let _ = c.set_max_friction_torque(friction);
+            }
+        }
     }
 
     fn set_motion_type(
@@ -487,6 +511,27 @@ impl PhysicsBackend for JoltBackend {
 }
 
 /// A unit vector perpendicular to `axis`, for Jolt's hinge frame.
+/// The fastest a joint's motor may be driven, in rad/s.
+///
+/// The game's own hazards ask for more than this — the Half Circle Arena's
+/// `Hammer` smashes at `SetPowerSettings(95, 1200)`, i.e. 15 turns a second, and
+/// `Smasher` at 95 — and the solver refuses a target past the limit rather than
+/// clamping it, which leaves the arm standing still. Clamping is what the drive
+/// means here anyway: every one of those hinges has angle limits a few degrees
+/// wide, so the arm reaches its stop within a step either way.
+const MAX_ANGULAR_SPEED: f32 = oxijolt::limits::MAX_ANGULAR_VELOCITY;
+
+/// The fastest a slider's motor may be driven, in m/s.
+const MAX_LINEAR_SPEED: f32 = oxijolt::limits::MAX_LINEAR_VELOCITY;
+
+fn clamp_speed(target: f32, limit: f32) -> f32 {
+    if target.is_finite() {
+        target.clamp(-limit, limit)
+    } else {
+        0.0
+    }
+}
+
 fn normal_of(axis: Vec3) -> m::Vec3 {
     let helper = if axis.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
     let n = axis.cross(helper).normalize_or_zero();

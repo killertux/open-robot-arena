@@ -489,6 +489,8 @@ impl Duel {
                             slider: true,
                             axis,
                             drive: req.drive.clone(),
+                            strength: cap,
+                            friction: cap,
                         });
                     }
                     Err(e) => self.log.push(format!("hazard joint {:?}: {e}", req.child)),
@@ -545,6 +547,8 @@ impl Duel {
                             slider: false,
                             axis,
                             drive: req.drive.clone(),
+                            strength: cap,
+                            friction: hinge.friction,
                         });
                     }
                     Err(e) => self.log.push(format!("hazard hinge {:?}: {e}", req.child)),
@@ -719,11 +723,29 @@ impl Duel {
     /// exactly as a parked piston does (F8). `ApplyForce`/`ApplyTorque` are
     /// one-shot impulses applied along the joint's own axis or about it.
     fn drive_joints(&mut self, dt: f32) {
-        for j in &self.joints {
-            let (target, force, torque) = {
+        for j in &mut self.joints {
+            let (target, force, torque, strength, friction) = {
                 let mut d = j.drive.lock().unwrap_or_else(|e| e.into_inner());
-                (d.target_velocity(), d.take_force(), d.take_torque())
+                // The script's torque is the *limit* on the drive, and it can
+                // change at any time — a hammer parked with `Lock(True)` only
+                // asks for its 1200 when a robot walks in.
+                let strength = (d.torque.abs() * 40.0).max(1.0);
+                // While it is locked the joint holds where it is, on friction.
+                let friction = if d.locked { strength } else { 0.0 };
+                (
+                    d.target_velocity(),
+                    d.take_force(),
+                    d.take_torque(),
+                    strength,
+                    friction,
+                )
             };
+            if (j.strength - strength).abs() > 1e-3 || (j.friction - friction).abs() > 1e-3 {
+                self.physics
+                    .set_joint_strength(j.handle, strength, friction);
+                j.strength = strength;
+                j.friction = friction;
+            }
             if j.slider {
                 self.physics.drive_slider(j.handle, target);
             } else {
@@ -1515,6 +1537,69 @@ mod tests {
         assert!(
             before.iter().zip(&after).any(|(a, b)| (b - a).abs() > 0.05),
             "no smash arm moved: {before:?} -> {after:?}"
+        );
+    }
+
+    /// M4/F13: a hazard that only asks for power when it fires still gets it.
+    ///
+    /// The Half Circle Arena's hammer is a hinge in the model that
+    /// `Hazards.Hammer.__init__` parks with `Lock(True)` and *no* power settings
+    /// at all — the 1200 N·m only arrives in `Smash`, when a robot walks into the
+    /// zone. A joint therefore has to be able to take a new drive strength after
+    /// it is built, or the hammer swings as if it weighed nothing.
+    #[test]
+    fn a_hammer_that_asks_for_power_late_still_swings() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/half.py").to_string_lossy().to_string();
+        let zone_centre = {
+            let registered = std::collections::BTreeMap::from([("Hammer Zone".to_string(), 1i32)]);
+            let z = crate::hazards::zones(&arena, &registered);
+            let z = z.first().expect("the Half Circle Arena ships a hammer");
+            z.inv.inverse().transform_point3((z.min + z.max) * 0.5)
+        };
+        let bot = |p: &str, spawn: Option<[f32; 2]>| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[
+                bot("AI/Team1/Bot0.bot", None),
+                bot("AI/Team6/Bot2.bot", Some([zone_centre.x, zone_centre.z])),
+            ],
+        )
+        .expect("a duel");
+
+        let idle = [DriveInput::default(), DriveInput::default()];
+        let dt = 1.0 / 60.0;
+        duel.step_direct(&idle, dt);
+        assert!(
+            duel.log.iter().any(|l| l.contains("Hammer Zone")),
+            "the robot never reached the hammer's zone: {:?}",
+            duel.log
+        );
+        let hammer = duel
+            .joints
+            .iter()
+            .find(|j| !j.slider)
+            .map(|j| j.handle)
+            .expect("the hammer's hinge was built");
+
+        // `Hammer.Tick` smashes, retracts and smashes again over ~2.5 s each way.
+        let mut swing: f32 = 0.0;
+        let mut last = duel.physics.hinge_angle(hammer);
+        for _ in 0..(4.0 / dt) as usize {
+            duel.step_direct(&idle, dt);
+            let now = duel.physics.hinge_angle(hammer);
+            swing = swing.max((now - last).abs());
+            last = now;
+        }
+        assert!(
+            swing > 0.05,
+            "the hammer never moved (largest step {swing}): {:?}",
+            duel.log
         );
     }
 

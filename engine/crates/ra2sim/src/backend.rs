@@ -369,6 +369,17 @@ pub trait PhysicsBackend {
         ))
     }
 
+    /// Set a joint's drive strength and the friction that holds it while its
+    /// motor is off — both in the joint's own units (N for a slider, N·m for a
+    /// hinge).
+    ///
+    /// A hazard states these at any time, not only when it is built: `Hammer`
+    /// parks its arm with `Lock(True)` and only reaches for `SetPowerSettings`
+    /// when a robot steps into its zone, and `HellRaiser` throttles itself down
+    /// again on the way back up. A parked joint is held by the friction, the way
+    /// a parked piston is (F8).
+    fn set_joint_strength(&mut self, _handle: JointHandle, _strength: f32, _friction: f32) {}
+
     /// Replace a body's collision shape in place, optionally with a new mass.
     /// Used to rebuild a robot's body after a part comes off: the body keeps its
     /// id, pose and joints.
