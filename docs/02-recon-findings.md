@@ -202,6 +202,13 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   whole page, where the file is simply the whole image). The 25 that differ are
   *tiles* — `common/metaldots_pattern.bmp` is a 64×64 texture whose rects run up
   to 9.7 pages — so a renderer draws a cell whole and repeats a tile.
+- **And the file is sampled 0..1, not at the rect.** Because the shipped file is
+  already cropped to its cell, `u` and `v` are positions inside a 1024² *page*
+  and not offsets into the file: `mainmenu/ra2_logo.tga` is 512×76 and its rect
+  starts at `u0 = 0.15625`, so sampling at `u × 512` draws the *middle* of a
+  512-wide logo. Drawing the file across the whole frame — which is what the
+  rect being a cell already means — is what puts the logo on the main menu. The
+  rect's only jobs are telling a cell from a tile and a whole-page image.
 - **`ChildOrder` is the draw order, ascending**, ties broken by file order. It is
   what makes the main menu visible at all: the cement background is 1, the saw
   backdrop 2, the logo group 3 and the bottom bar's decorations 5–7, so drawing
@@ -214,6 +221,65 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   layout and only get moved when the screen is built, so a static composite of
   the file puts them in the corner. The `Name`s are the handle the code holds
   them by.
+
+#### Containers: the widgets that place their own children
+
+Four kinds do not place their children from the children's own `Position`:
+
+- **`ClipMode` is `0`, `1` or `2`** — the base widget's byte at `+0x78`, right
+  after `Visible` at `+0x74`, written by the `.gib` writer from there. Across the
+  3590 widgets of the corpus it is only ever 0 (2288), 1 (1287) or 2 (15).
+  `1` clips the widget's own drawing *and its children* to the widget's frame;
+  every container by nature is a 1 (`Window` 42, `Group` 460, `SplitFrame` 40,
+  `ListBox` 23, `Grid` 12, `OptionGroup` 20, `ScrollBar` 30, `Slider` 41,
+  `TextBox` 331, `Button` 193, `CheckBox` 69, `DropDown` 12, `Placeholder` 12),
+  and only two `Image`s in the whole game bother. `2` clips to the *parent's*
+  frame instead: **eleven of the fifteen** are placed so that they stick out of
+  the parent, where a self-clip would do nothing — the two `robots grid`s
+  anchored at the parent's bottom edge, the bot lab's five `selected label`
+  textboxes, `botlabwin.gib`'s `wires grp` at `x = -1.0`, and
+  `event_bracket.gib`'s heading textbox at `y = -20` with a height of 24. The
+  four that are inside at authoring time are chrome that moves afterwards: the
+  two selection bars, which the grid repositions down its rows, and two of
+  `comp_properties.gib`'s tabs.
+- **`Grid`/`ListBox` cells**: `Rows`, `Columns`, `RowHeight` and `ColWidths`
+  give the cell rectangles. `ColWidths` is **two numbers per column** and the
+  first is the width — the x of a cell is the widths before it, its y is
+  `row × RowHeight`. The binary's own hit test walks a row the same way, adding
+  each column's width to x. The second number is `17` in **every one of the 36
+  shipped grids and lists**, so it is recorded and not interpreted.
+- **`Selection` and `Highlight` name children by `ID`** (100 and 101 in all 36,
+  and the writer round-trips the child *pointer* it keeps by writing the child's
+  ID). `RowSelect` decides the span: `true` covers the whole row (the sum of the
+  column widths), `false` one cell. The shipped files have done that arithmetic
+  themselves, and the corpus checks it: all **37** bars hang from the row they
+  name at the row height, at the summed x of the column they name, and 31 of the
+  37 are as wide as the columns they span. The six widths that differ are the
+  authors' own numbers, not a second rule: `arena.gib` 159 where the columns sum
+  to 300 and `prematch.gib` 187 where they sum to 136 are both the *container's*
+  width, and the three `wiring_connection_*.gib` fragments want 161 where their
+  column sums to 177 — 161 is the *slot* they are loaded into, in a screen the
+  fragment does not name.
+- **`ScrollBar`** names three of its children by **index** — `Less true 0`,
+  `More true 1`, `Slider true 2` — and in all 30 shipped bars the index, the
+  child's own `Name` (`Less`, `Down`) and its kind (`Slider`) agree, which is
+  what pins it. `Orientation` is `1` for vertical (29) and `2` for horizontal
+  (1). The less button opens the bar, the more one closes it, and the third
+  child (a `Slider`) is the track between them. A `Slider` in turn names its
+  `Thumb` child by index and travels `From`..`To`: its `To` is the track less the
+  thumb — 68→38, 160→130, 48→18, each with a 30-pixel thumb — so the thumb's
+  resting place is state, and the file records the authoring-time value.
+- **`OptionGroup`** names its selected child by **`Name`** (`Selection video
+  tab`), not by index or id, and its children keep their own rectangles: it is
+  selection state, not layout. **`DropDown`**'s parts are authored: its button at
+  the right edge, its textbox across the left, its list below — all three agree
+  with the container's own box in every shipped dropdown.
+- **A tile is a repeat, and the trough is one.** `UI_ScrollBack.bmp` — the
+  scroll bar's trough — is drawn at uv `(0, 0, 1, 17.94)`, nearly eighteen pages
+  of screen, so it is a pattern to be repeated, like `metaldots_pattern.bmp`'s
+  9.7 pages. A `uv` that runs past one page means *tile*; one that does not but
+  still fails the cell test is a whole-page image whose file is bigger than a
+  page (the 1280-wide cement background), and drawing it whole is right.
 
 ### `fg_*.giff` — the shell's bitmap fonts (inside `RA2.cfz`)
 - Nine of them, named by every label's `_Font`: `fg_d18/20/24/26`,

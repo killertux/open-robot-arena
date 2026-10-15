@@ -16,8 +16,12 @@
 //! compositor to rasterise (see `tools/ui_compose.py`):
 //!
 //! ```text
-//! <x> <y> <w> <h> <alpha> <r> <g> <b> <u0> <v0> <u1> <v1> <filename>
+//! <x> <y> <w> <h> <alpha> <r> <g> <b> <u0> <v0> <u1> <v1> <cx> <cy> <cw> <ch> <filename>
 //! ```
+//!
+//! `<cx> <cy> <cw> <ch>` is the rectangle the widget draws inside — the `clip`
+//! the resolver worked out from the `ClipMode`s above it — and `0 0 0 0` when
+//! nothing clips it.
 
 use ra2ui::{draw_order, resolve_with, Fonts, Frame, Placement, DESIGN_SCREEN};
 
@@ -39,7 +43,7 @@ impl Dump {
         }
         if self.all || !p.children.is_empty() || !inside {
             println!(
-                "{:indent$}{:<12} {:<22} {:>8.1},{:>8.1} {:>7.1}x{:<7.1}{}",
+                "{:indent$}{:<12} {:<22} {:>8.1},{:>8.1} {:>7.1}x{:<7.1}{}{}",
                 "",
                 p.widget.kind.name(),
                 truncate(p.widget.name(), 22),
@@ -48,6 +52,7 @@ impl Dump {
                 p.frame.w,
                 p.frame.h,
                 if inside { "" } else { "   <- off screen" },
+                clip_note(p),
                 indent = depth * 2
             );
         }
@@ -92,9 +97,10 @@ fn main() {
             if let (Some(text), Some(font)) = (p.widget.text(), p.widget.font()) {
                 if !text.is_empty() {
                     let c = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                    let (cx, cy, cw, ch) = clip_fields(p);
                     println!(
-                        "{:.2} {:.2} {:.2} {:.2} 1 1.000 1.000 1.000 0 0 1 1 text:{}:{:.3} {:.3} {:.3}:{}",
-                        p.frame.x, p.frame.y, p.frame.w, p.frame.h, font, c[0], c[1], c[2], text
+                        "{:.2} {:.2} {:.2} {:.2} 1 1.000 1.000 1.000 0 0 1 1 {} {} {} {} text:{}:{:.3} {:.3} {:.3}:{}",
+                        p.frame.x, p.frame.y, p.frame.w, p.frame.h, cx, cy, cw, ch, font, c[0], c[1], c[2], text
                     );
                     return;
                 }
@@ -112,8 +118,9 @@ fn main() {
                 .and_then(|f| f.flag())
                 .unwrap_or(true);
             let c = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            let (cx, cy, cw, ch) = clip_fields(p);
             println!(
-                "{:.2} {:.2} {:.2} {:.2} {} {:.3} {:.3} {:.3} {:.6} {:.6} {:.6} {:.6} {}",
+                "{:.2} {:.2} {:.2} {:.2} {} {:.3} {:.3} {:.3} {:.6} {:.6} {:.6} {:.6} {} {} {} {} {}",
                 p.frame.x,
                 p.frame.y,
                 p.frame.w,
@@ -126,6 +133,10 @@ fn main() {
                 uv[1],
                 uv[2],
                 uv[3],
+                cx,
+                cy,
+                cw,
+                ch,
                 file.replace('\\', "/")
             );
         };
@@ -169,6 +180,25 @@ fn main() {
             f.h
         );
     }
+}
+
+/// The clip rectangle a rects line carries: `0 0 0 0` for "nothing clips me".
+fn clip_fields(p: &Placement) -> (f32, f32, f32, f32) {
+    match p.clip {
+        Some(c) => (c.x, c.y, c.w, c.h),
+        None => (0.0, 0.0, 0.0, 0.0),
+    }
+}
+
+/// A suffix saying how a widget is clipped, when that is not its own frame.
+fn clip_note(p: &Placement) -> String {
+    let Some(c) = p.clip else {
+        return String::new();
+    };
+    if (c.x, c.y, c.w, c.h) == (p.frame.x, p.frame.y, p.frame.w, p.frame.h) {
+        return String::new();
+    }
+    format!("  clip {:.0},{:.0} {:.0}x{:.0}", c.x, c.y, c.w, c.h)
 }
 
 fn truncate(s: &str, n: usize) -> String {

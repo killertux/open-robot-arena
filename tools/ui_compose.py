@@ -190,9 +190,10 @@ class Font:
             pen += g[0] if g else space
         return pen
 
-    def draw(self, canvas, width, height, x, y, text, tint):
+    def draw(self, canvas, width, height, x, y, text, tint, clip=None):
         """Draw with the widget's top-left at `(x, y)`; each glyph's cell hangs
-        from its own `third` above the baseline."""
+        from its own `third` above the baseline. `clip` crops what the label may
+        cover, which is what its container's `ClipMode` says."""
         pen = x
         for ch in text:
             g = self.glyph(ch)
@@ -207,19 +208,41 @@ class Font:
                     if not v:
                         continue
                     X, Y = int(pen + xx), int(top + yy)
-                    if 0 <= X < width and 0 <= Y < height:
-                        q = (Y * width + X) * 3
-                        # `v` is coverage, so blend towards the tint rather than
-                        # adding a fraction: white ink over dark cement.
-                        for c in range(3):
-                            want = tint[c] * 255.0
-                            canvas[q + c] = max(0, min(255, int(canvas[q + c] + (want - canvas[q + c]) * v / 255.0)))
+                    if not (0 <= X < width and 0 <= Y < height):
+                        continue
+                    if clip is not None and not (
+                        clip[0] <= pen + xx < clip[0] + clip[2]
+                        and clip[1] <= top + yy < clip[1] + clip[3]
+                    ):
+                        continue
+                    q = (Y * width + X) * 3
+                    # `v` is coverage, so blend towards the tint rather than
+                    # adding a fraction: white ink over dark cement.
+                    for c in range(3):
+                        want = tint[c] * 255.0
+                        canvas[q + c] = max(0, min(255, int(canvas[q + c] + (want - canvas[q + c]) * v / 255.0)))
             pen += adv
 
 
+def ra2_tool():
+    """The engine CLI, which is what reads the archives and the faces. The debug
+    build first: it is the one a working tree has just rebuilt."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for profile in ("debug", "release"):
+        path = os.path.join(root, "engine", "target", profile, "ra2")
+        if os.path.exists(path):
+            return path
+    return None
+
+
 class Images:
-    def __init__(self, root):
+    def __init__(self, root, ra2=None):
         self.root = root
+        # `ra2 cfz <archive> cat <entry>` — the shell's own art lives in
+        # `RA2.cfz` as often as it does loose, and a scroll bar's arrows only
+        # ever live there.
+        self.ra2 = ra2
+        self.archive = os.path.join(root, "RA2.cfz")
         self.cache = {}
         self.missing = []
         self.unsupported = []
@@ -230,19 +253,33 @@ class Images:
             return self.cache[relative]
         path = os.path.join(self.root, "UI", relative)
         image = None
+        stem = os.path.basename(relative)
+        if not os.path.exists(path) and self.ra2 and os.path.exists(self.archive):
+            try:
+                data = subprocess.run(
+                    [self.ra2, "cfz", self.archive, "cat", stem],
+                    check=True, capture_output=True,
+                ).stdout
+                image = self.decode(stem, data)
+            except Exception:
+                image = None
+            if image is not None:
+                self.cache[relative] = image
+                return image
         if not os.path.exists(path):
             self.missing.append(relative)
         else:
             data = open(path, "rb").read()
             try:
-                if relative.lower().endswith(".bmp"):
-                    image = load_bmp(data)
-                else:
-                    image = load_tga(data)
+                image = self.decode(relative, data)
             except ValueError as e:
                 self.unsupported.append((relative, str(e)))
         self.cache[relative] = image
         return image
+
+    @staticmethod
+    def decode(name, data):
+        return load_bmp(data) if name.lower().endswith(".bmp") else load_tga(data)
 
 
 def composite(lines, images, width, height, game, args):
@@ -250,6 +287,7 @@ def composite(lines, images, width, height, game, args):
     drawn = 0
     fonts = {}
     texts = []
+    skipped_tiles = []
     for line in lines:
         parts = line.split()
         if len(parts) < 13:
@@ -258,38 +296,51 @@ def composite(lines, images, width, height, game, args):
         alpha_flag = parts[4] == "1"
         tint = tuple(float(v) for v in parts[5:8])
         u0, v0, u1, v1 = (float(v) for v in parts[8:12])
-        relative = " ".join(parts[12:])
+        cx, cy, cw, ch = (float(v) for v in parts[12:16])
+        # The resolver's clip: nothing clips when the rectangle is empty. It is
+        # what `ClipMode` means, and a widget that overflows its container is
+        # cropped by it.
+        clip = None if cw <= 0.0 or ch <= 0.0 else (cx, cy, cw, ch)
+        relative = " ".join(parts[16:])
         if relative.startswith("text:"):
             # `text:<font>:<r> <g> <b>:<the string>` — drawn after the images.
             _, font_name, colour, body = relative.split(":", 3)
-            texts.append((x, y, font_name, tuple(float(c) for c in colour.split()), body))
+            texts.append((x, y, font_name, tuple(float(c) for c in colour.split()), body, clip))
             continue
         image = images.get(relative)
         if image is None:
             continue
         sw, sh, src = image
-        # The four numbers are the image's rect in a 1024x1024 *page*, and a
-        # shipped file is already cropped to its own rect — `(u1-u0)*1024` equals
-        # the file's width for every *cell* in the corpus (130 of the 155 rects
-        # that lie inside a page; another 104 are the whole page, where the file
-        # is the whole image). The 25 that differ are *tiles*: their rect runs
-        # past the page (`metaldots_pattern.bmp`, a 64x64 texture with rects up
-        # to 9.7 pages) and the repeats are not drawn here yet.
+        # The four numbers are the image's rect in a 1024x1024 *page*. A rect
+        # that runs *past* the page is a **tile** — a pattern to be repeated
+        # (`UI_ScrollBack.bmp` covers 17.9 pages of the screen; `metaldots_pattern`
+        # goes to 9.7) — and repeating is not drawn here yet, so it is left out
+        # rather than stretched, which would be a lie about what it looks like.
+        # Anything else whose rect does not match the file is a whole-page image
+        # (the file is bigger than a page: the cement background is 1280 wide),
+        # and drawing it whole is exactly right.
+        if u1 > 1.0001 or v1 > 1.0001 or u0 < -0.0001 or v0 < -0.0001:
+            skipped_tiles.append((relative, (u0, v0, u1, v1)))
+            continue
         if abs((u1 - u0) * 1024.0 - sw) > 1.0 or abs((v1 - v0) * 1024.0 - sh) > 1.0:
             u0, v0, u1, v1 = 0.0, 0.0, 1.0, 1.0
+        # The rect is in the 1024² *page*, and a cell's shipped file is already
+        # cropped to that cell — so the file is sampled 0..1, which is the frame's
+        # own fraction. The rect is only used to tell a cell from a *tile* (a
+        # repeat, left out rather than stretched) and from a whole-page image.
         drawn += 1
         for py in range(int(round(h))):
             ty = y + py + 0.5
             if ty < 0 or ty >= height:
                 continue
-            v = v0 + (v1 - v0) * ((py + 0.5) / max(h, 1e-6))
-            sy = min(sh - 1, max(0, int(v * sh)))
+            sy = min(sh - 1, max(0, int((py + 0.5) / max(h, 1e-6) * sh)))
             for px in range(int(round(w))):
                 tx = x + px + 0.5
                 if tx < 0 or tx >= width:
                     continue
-                u = u0 + (u1 - u0) * ((px + 0.5) / max(w, 1e-6))
-                sx = min(sw - 1, max(0, int(u * sw)))
+                if clip is not None and not (clip[0] <= tx < clip[0] + clip[2] and clip[1] <= ty < clip[1] + clip[3]):
+                    continue
+                sx = min(sw - 1, max(0, int((px + 0.5) / max(w, 1e-6) * sw)))
                 o = (sy * sw + sx) * 4
                 r, g, b, a = src[o], src[o + 1], src[o + 2], src[o + 3]
                 if not alpha_flag:
@@ -308,16 +359,9 @@ def composite(lines, images, width, height, game, args):
                     canvas[q] = (r * a + canvas[q] * inv) // 255
                     canvas[q + 1] = (g * a + canvas[q + 1] * inv) // 255
                     canvas[q + 2] = (b * a + canvas[q + 2] * inv) // 255
-    engine = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "engine")
-    # Prefer the debug build: it is the one a working tree has just rebuilt.
-    for a in (os.path.join(engine, "target", "debug"), os.path.join(engine, "target", "release")):
-        if os.path.exists(os.path.join(a, "examples", "uidump")):
-            engine = os.path.join(a, "examples")
-            break
     cfz = os.path.join(game, "RA2.cfz")
-    # `engine` is .../<profile>/examples; the CLI sits beside it.
-    tool = os.path.join(os.path.dirname(engine), "ra2")
-    for x, y, font_name, colour, body in texts:
+    tool = ra2_tool()
+    for x, y, font_name, colour, body, clip in texts:
         font = fonts.get(font_name)
         if font is None:
             try:
@@ -330,11 +374,11 @@ def composite(lines, images, width, height, game, args):
             continue
         # The caller passes the box's top; the baseline is one ascent down it.
         before = sum(canvas)
-        font.draw(canvas, width, height, x, y + font.ascent, body, colour)
+        font.draw(canvas, width, height, x, y + font.ascent, body, colour, clip)
         after = sum(canvas)
         if os.environ.get("UI_DEBUG"):
             print(f"   text {body!r} at ({x},{y}) with {font_name}: {after - before} px")
-    return canvas, drawn, len(texts)
+    return canvas, drawn, len(texts), skipped_tiles
 
 
 def main():
@@ -374,14 +418,18 @@ def main():
         text = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
 
     lines = [ln for ln in text.splitlines() if ln.strip()]
-    images = Images(game)
-    canvas, drawn, texts = composite(lines, images, args.width, args.height, game, args)
+    images = Images(game, ra2=ra2_tool())
+    canvas, drawn, texts, tiles = composite(lines, images, args.width, args.height, game, args)
     write_png(args.out, args.width, args.height, canvas)
     print(f"wrote {args.out} ({args.width}x{args.height}), {drawn} of {len(lines)} drawables")
     if images.missing:
         print(f"  {len(images.missing)} referenced images are not in the tree:")
         for m in images.missing[:6]:
             print(f"     {m}")
+    if tiles:
+        print(f"  {len(tiles)} tiles are not drawn (a pattern repeat, not a stretch):")
+        for name, rect in tiles[:4]:
+            print(f"     {name} at {rect}")
     if images.unsupported:
         print(f"  {len(images.unsupported)} images this loader cannot read:")
         for m, why in images.unsupported[:6]:

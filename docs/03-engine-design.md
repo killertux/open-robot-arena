@@ -66,13 +66,16 @@ local/           # (git-ignored) game files + converted cache
   the main menu's logo, backdrop and button strip land where its own art says
   they should — which is checked by *looking*: `tools/ui_compose.py` rasterises a
   screen from the engine's own rectangles and the game's own art, and the main
-  menu comes out as the main menu. Still to come: text metrics from the `fg_*.giff` fonts, clip
-  modes, the containers that lay their own children out (`ListBox`, `Grid`,
-  `OptionGroup`), the 2D renderer, the `giScript`/`Gooey` Python surface, and the
-  workshop. The `fg_*.giff` faces are parsed and *drawn* (`ra2fmt::giff`, `ra2
-  font`, and `tools/ui_compose.py` renders a screen's labels with the game's own
-  faces and colours — the main menu's `MULTIPLAYER TEAM HQ` reads as itself), and
-  a resolver given those faces sizes a zero-`Size` label from its own text.
+  menu comes out as the main menu. The `fg_*.giff` faces are parsed and *drawn*
+  (`ra2fmt::giff`, `ra2 font`, and `tools/ui_compose.py` renders a screen's
+  labels with the game's own faces and colours — the main menu's `MULTIPLAYER
+  TEAM HQ` reads as itself), a resolver given those faces sizes a zero-`Size`
+  label from its own text, and the containers place their own children:
+  `ClipMode` 0/1/2 into a clip rectangle, a `Grid`/`ListBox`'s cells from
+  `Rows`/`Columns`/`RowHeight`/`ColWidths`, and a `ScrollBar`'s three parts at
+  its two ends and between. Still to come: the cells' *content* (a `LoadCell`
+  field the game's own reader consumes), tiles, the 2D renderer, the
+  `giScript`/`Gooey` Python surface, and the workshop.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
 
 ## M5 design notes
@@ -102,8 +105,16 @@ local/           # (git-ignored) game files + converted cache
   first.
 - **What is not resolved is not guessed.** Zero `Size` (the editor's automatic
   size, which needs font metrics), `ClipMode`, and the containers that lay their
-  own children out are named as unresolved rather than approximated, and the
-  corpus test records how many widgets that affects.
+  own children out were each named as unresolved rather than approximated, and
+  the corpus test records how many widgets that affects. As each fell, the
+  measurement that fell it came with it: the 3590 widgets' `ClipMode`s are
+  2288/1287/15 and eleven of the fifteen parent-clipped ones stick out of their
+  parents; the 37 selection bars all hang from the row they name at the row
+  height, and 31 of the 37 span their columns; the 30 scroll bars' three part
+  indices agree with the children's names and kinds. Each of those is a test,
+  and where the data does something else — six authored widths, four rows in a
+  one-row list — the exception is *listed*, not smoothed into a formula that
+  would fit it.
 
 ## M4 design notes
 

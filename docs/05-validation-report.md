@@ -390,9 +390,30 @@ Known, documented, not yet fixed:
     *page*, with the shipped files already cropped to their cell — and 25 rects
     that instead run past the page are *tiles* (`metaldots_pattern.bmp`), which
     is why a renderer draws a cell whole and repeats a tile. **[IN PROGRESS]** —
-    what remains is text, clip modes, tiles, the self-laying-out containers
-    (`ListBox`, `Grid`, `OptionGroup`), the real 2D renderer, the
-    `giScript`/`Gooey` Python surface and the workshop.
+    and the containers followed: `ClipMode` is 0/1/2 (2288/1287/15 widgets) into
+    a clip rectangle, with the parent-clip reading pinned by eleven of the
+    fifteen sticking out of their parents; a `Grid`/`ListBox`'s cells come from
+    `Rows`/`Columns`/`RowHeight`/`ColWidths`, which reproduces the authors' own
+    selection bars in 31 of 37 and names the six that are their own numbers; and
+    a `ScrollBar`'s less button, more button and track land at its two ends and
+    between, which the render shows as an up arrow at the top, a trough and a
+    down arrow at the bottom of `hq_league.gib`. What remains is the cells'
+    *content* (a `LoadCell` field the game's own reader consumes), tiles, the
+    real 2D renderer, the `giScript`/`Gooey` Python surface and the workshop.
+
+    Placing the containers also caught a bug in the *check*, not the engine: the
+    compositor sampled an image at its page rect, so every art cell whose rect did
+    not start at the page's origin was drawn from the wrong part of its file —
+    `ra2_logo.tga`'s 512×76 rect starts at `u0 = 0.15625`, so the middle of the
+    logo was stretched across the logo's own frame. The file is already cropped to
+    its cell, so the file is sampled 0..1 and the rect only says whether the thing
+    is a cell, a tile or a whole-page image. With that corrected the main menu
+    comes out as the main menu — the `ROBOT 2 ARENA` logo legible, the saw plate's
+    teeth above and below the plate, the rails, the cord and the battery — and the
+    options panel's radio buttons come out checked and unchecked rather than as
+    two plain circles. Several earlier "recognisable" pictures were drawn wrong
+    for this reason, which is the argument for reading the render rather than
+    nodding at it.
 
     Text landed. The font container is pinned — `68 + 95*28 + 256*256*2 =
     133800` on every small face (`40 + 96*28` is the same sum, and the loader's

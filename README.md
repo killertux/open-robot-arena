@@ -170,8 +170,10 @@ The `fg_*.giff` fonts are parsed too (`ra2fmt::giff`; `ra2 font <RA2.cfz>
 <name>` prints one's metrics and dumps its page), and `tools/ui_compose.py` draws
 a screen's labels with the game's own faces and fore-colours — the main menu's
 `MULTIPLAYER` reads as `MULTIPLAYER` — and a resolver given those faces sizes a
-zero-`Size` label from its own text. What remains of M5 is clip modes, the
-containers that lay out their own children, the real 2D renderer, the
+zero-`Size` label from its own text. The containers place their own children too
+— `ClipMode` into a clip rectangle, a grid's cells from its rows and columns, a
+scroll bar's parts at its two ends. What remains of M5 is the cells' content
+(which is game data at run time), tiles, the real 2D renderer, the
 `giScript`/`Gooey` Python surface the shell's own scripts call, and the workshop
 itself.
 

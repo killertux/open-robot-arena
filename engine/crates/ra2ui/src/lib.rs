@@ -41,11 +41,66 @@
 //! first, and `botlabwin.gib`'s vertical split has a 67 px-tall `"Slot0"` bar on
 //! top.
 //!
+//! ## `ClipMode` is 0, 1 or 2, and the binary's own byte says which
+//!
+//! Every widget the corpus holds carries a `ClipMode`, and it is only ever
+//! **0** (2288 of 3590), **1** (1287) or **2** (15). The binary keeps it at
+//! `+0x78` of the base widget, between `Visible` (`+0x74`) and the class fields,
+//! and the `.gib` writer emits it from there.
+//!
+//! * **0** — draw without clipping. The leaf decorators are all zeros: every
+//!   `Text`, `Glyph`, `Lines`, `Rectangle` that is not a container's chrome, and
+//!   almost every `Image`.
+//! * **1** — the widget's own drawing *and its children* are clipped to its own
+//!   frame. Every widget that is a container by nature is a 1 — `Window` 42,
+//!   `Group` 460, `SplitFrame` 40, `ListBox` 23, `Grid` 12, `OptionGroup` 20,
+//!   `ScrollBar` 30, `Slider` 41, `TextBox` 331, `Button` 193, `CheckBox` 69,
+//!   `DropDown` 12, `Placeholder` 12 — and only two `Image`s in the whole game
+//!   bother.
+//! * **2** — clipped to the *parent's* frame instead. There are fifteen, and
+//!   **eleven of them are placed so that they stick out of the parent**: the two
+//!   `robots grid`s (anchored at the parent's *bottom* edge), the five bot-lab
+//!   `selected label`s, `botlabwin.gib`'s `wires grp` at `x = -1.0`, and
+//!   `event_bracket.gib`'s heading textbox at `y = -20` with a height of 24. A
+//!   self-clip would leave those where they are; only a clip by the parent
+//!   explains the author wanting one. The four that are inside at authoring time
+//!   are chrome that *moves*: the two selection bars, which the container
+//!   repositions down its rows, and two of `comp_properties.gib`'s tabs.
+//!
+//! [`Placement::clip`] carries the result: the rectangle the widget draws
+//! inside, already intersected with everything above it.
+//!
+//! ## `Grid` and `ListBox` lay their cells out themselves
+//!
+//! `Rows`, `Columns`, `RowHeight` and `ColWidths` are the grid, and the cell
+//! rectangles follow from them: `ColWidths` is **two numbers per column**, and
+//! the first is the width; the x of a cell is the sum of the widths before it
+//! and its y is `row × RowHeight`. The binary's own hit test says the same
+//! thing — it walks one row's cells adding each column's width to x — and the
+//! *second* number is 17 in **every one of the 36 shipped grids and lists**, so
+//! this reader leaves it unnamed rather than invent one.
+//!
+//! The container's chrome is the two children the file names: `Selection` and
+//! `Highlight` are child **`ID`s** (100 and 101 in all 36), and the
+//! `RowSelect` flag decides how much they cover — `true` spans the whole row,
+//! `false` one cell. [`Grid::cell`] reproduces the authors' own arithmetic
+//! rather than replacing it, and the corpus checks it: all 37 shipped bars hang
+//! from the row they name at the row height, at the summed x of the column they
+//! name, and 31 of the 37 are as wide as the columns they span. `armor.gib`'s
+//! bar sits at `y = 252` with `RowHeight 84` — row 3 — and `wiring.gib`'s at
+//! `x = 62`, the first column's width — column 1. The six widths that differ are
+//! the authors' own numbers, and are pinned in the test rather than smoothed
+//! into a formula that would fit them.
+//!
+//! `OptionGroup` is not a layout: its `Selection` names a child by **`Name`**
+//! (`video tab`), and its children carry their own rectangles. `DropDown`'s
+//! parts are authored too. A `ScrollBar`'s are not — see [`ScrollBar`].
+//!
 //! ## What is not resolved yet
 //!
-//! Containers that lay their children out themselves — `ListBox`, `Grid`,
-//! `OptionGroup`, and a `ScrollBar`'s or `Slider`'s parts — are treated as
-//! ordinary frames; their cells are not placed yet, and neither is `ClipMode`.
+//! The *content* of a cell — a `LoadCell` field exists that the game's own
+//! reader consumes — comes from game data at run time, and a `Slider`'s thumb
+//! sits at its value. Both are state, not layout, and neither is here.
 //!
 //! A `Size` of zero is the editor's *automatic* size. With a [`Fonts`] in hand a
 //! resolver sizes such a widget from its own text ([`resolve_with`]); without
@@ -181,11 +236,222 @@ impl Anchor {
     }
 }
 
+/// How a widget clips what it draws — the file's `ClipMode`, at `+0x78` of the
+/// base widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipMode {
+    /// `0` — no clipping.
+    None,
+    /// `1` — the widget's own drawing and its descendants are clipped to the
+    /// widget's frame.
+    SelfFrame,
+    /// `2` — ... to the *parent's* frame.
+    ParentFrame,
+}
+
+impl ClipMode {
+    pub fn from_value(value: i32) -> ClipMode {
+        match value {
+            1 => ClipMode::SelfFrame,
+            2 => ClipMode::ParentFrame,
+            _ => ClipMode::None,
+        }
+    }
+}
+
+/// The parts a container lays out itself, rather than from each child's own
+/// `Position`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Parts {
+    Grid(Grid),
+    ScrollBar(ScrollBar),
+}
+
+/// A `Grid` or a `ListBox`: `Rows` × `Columns` cells of `RowHeight` each.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Grid {
+    pub rows: i32,
+    pub columns: i32,
+    pub row_height: f32,
+    /// One width per column — the first of the two numbers `ColWidths` writes
+    /// per column. The second is 17 in every shipped file, so it is left alone.
+    pub col_widths: Vec<f32>,
+    /// `RowSelect`: whether the selection covers a whole row or one cell.
+    pub row_select: bool,
+    pub buffer_width: f32,
+    pub border_width: f32,
+    /// The `ID` of the child that is the selection bar, and of the highlight
+    /// bar. The game stores these as child pointers and round-trips them as IDs.
+    pub selection: Option<i32>,
+    pub highlight: Option<i32>,
+}
+
+impl Grid {
+    /// Read a `Grid`/`ListBox`, or nothing when it states no dimensions.
+    pub fn from_widget(widget: &Widget) -> Option<Grid> {
+        let number = |name: &str| widget.field(name).and_then(|f| f.number());
+        let col_widths = widget
+            .field("ColWidths")
+            .map(|f| {
+                f.numbers()
+                    .chunks(2)
+                    .filter_map(|pair| pair.first().copied())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Grid {
+            rows: number("Rows")? as i32,
+            columns: number("Columns")? as i32,
+            row_height: number("RowHeight").unwrap_or(0.0),
+            col_widths,
+            row_select: widget
+                .field("RowSelect")
+                .and_then(|f| f.flag())
+                .unwrap_or(false),
+            buffer_width: number("BufferWidth").unwrap_or(0.0),
+            border_width: number("BorderWidth").unwrap_or(0.0),
+            selection: number("Selection").map(|n| n as i32),
+            highlight: number("Highlight").map(|n| n as i32),
+        })
+    }
+
+    /// The x of a column inside the container: the widths of the columns before
+    /// it. The binary's hit test walks a row the same way.
+    pub fn column_x(&self, column: i32) -> f32 {
+        self.col_widths.iter().take(column.max(0) as usize).sum()
+    }
+
+    /// The width of every column, which is what a row-spanning selection covers.
+    pub fn row_width(&self) -> f32 {
+        self.col_widths.iter().sum()
+    }
+
+    /// The rectangle of one cell. It is *not* clamped to the container: a cell
+    /// that reaches past the frame is what the container's `ClipMode` is for.
+    pub fn cell(&self, frame: Frame, row: i32, column: i32) -> Frame {
+        let x = self.column_x(column);
+        let w = self
+            .col_widths
+            .get(column.max(0) as usize)
+            .copied()
+            .unwrap_or(0.0);
+        Frame::new(
+            frame.x + x,
+            frame.y + row as f32 * self.row_height,
+            w,
+            self.row_height,
+        )
+    }
+
+    /// The rectangle the selection covers at a cell: the whole row when
+    /// `RowSelect`, one cell otherwise.
+    pub fn select(&self, frame: Frame, row: i32, column: i32) -> Frame {
+        if self.row_select {
+            Frame::new(
+                frame.x,
+                frame.y + row as f32 * self.row_height,
+                self.row_width(),
+                self.row_height,
+            )
+        } else {
+            self.cell(frame, row, column)
+        }
+    }
+
+    /// Which cell a selection bar's own rectangle names — the authors' own
+    /// answer, which is what the shipped files store.
+    pub fn selected(&self, frame: Frame, bar: Frame) -> (i32, i32) {
+        let row = if self.row_height > 0.0 {
+            ((bar.y - frame.y) / self.row_height).round() as i32
+        } else {
+            0
+        };
+        let mut x = 0.0;
+        let mut column = 0;
+        while column < self.col_widths.len() as i32 && (x + frame.x - bar.x).abs() > 0.01 {
+            x += self.col_widths[column as usize];
+            column += 1;
+        }
+        (row, column)
+    }
+}
+
+/// A `ScrollBar`: a less button, a more button, and the track between them.
+///
+/// The three parts are the children the fields name, and they are *indices* —
+/// `Less true 0` is the first child. In every one of the 30 shipped bars the
+/// index, the child's own `Name` and its kind agree (`Less`, `Down` and a
+/// `Slider`), which is what pins it. The buttons are drawn where they are put:
+/// their authored `Position` is `0 0` for the less button and nonsense for the
+/// more one (`y = 64` under a full-height bar), because the bar sizes itself
+/// from its parent at run time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScrollBar {
+    /// `Orientation`: 1 is vertical (29 of the 30) and 2 horizontal (1).
+    pub vertical: bool,
+    pub less: usize,
+    pub more: usize,
+    pub slider: usize,
+}
+
+impl ScrollBar {
+    pub fn from_widget(widget: &Widget) -> ScrollBar {
+        let index = |name: &str| {
+            widget
+                .field(name)
+                .map(|f| f.numbers().first().copied().unwrap_or(0.0) as usize)
+                .unwrap_or(0)
+        };
+        ScrollBar {
+            vertical: widget
+                .field("Orientation")
+                .and_then(|f| f.number())
+                .map(|n| n != 2.0)
+                .unwrap_or(true),
+            less: index("Less"),
+            more: index("More"),
+            slider: index("Slider"),
+        }
+    }
+
+    /// The three part rectangles: the less button, the more button and the
+    /// track. The buttons keep the size the file gives them; the track takes
+    /// what is left between.
+    pub fn parts(&self, frame: Frame, less: Frame, more: Frame) -> [Frame; 3] {
+        if self.vertical {
+            [
+                Frame::new(frame.x, frame.y, less.w, less.h),
+                Frame::new(frame.x, frame.bottom() - more.h, more.w, more.h),
+                Frame::new(
+                    frame.x,
+                    frame.y + less.h,
+                    frame.w,
+                    (frame.h - less.h - more.h).max(0.0),
+                ),
+            ]
+        } else {
+            [
+                Frame::new(frame.x, frame.y, less.w, less.h),
+                Frame::new(frame.right() - more.w, frame.y, more.w, more.h),
+                Frame::new(
+                    frame.x + less.w,
+                    frame.y,
+                    (frame.w - less.w - more.w).max(0.0),
+                    frame.h,
+                ),
+            ]
+        }
+    }
+}
+
 /// A widget with its resolved rectangle and its placed children.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Placement<'a> {
     pub widget: &'a Widget,
     pub frame: Frame,
+    /// The rectangle this widget draws inside, already intersected with every
+    /// clip above it. `None` when nothing above it clips.
+    pub clip: Option<Frame>,
     pub children: Vec<Placement<'a>>,
 }
 
@@ -203,6 +469,46 @@ impl<'a> Placement<'a> {
     /// Whether this widget and everything under it is inside `frame`.
     pub fn fits(&self, frame: &Frame) -> bool {
         frame.contains(&self.frame) && self.children.iter().all(|c| c.fits(frame))
+    }
+
+    /// The container parts this widget lays out itself, if it is one.
+    pub fn parts(&self) -> Option<Parts> {
+        match self.widget.kind {
+            WidgetKind::Grid | WidgetKind::ListBox => {
+                Grid::from_widget(self.widget).map(Parts::Grid)
+            }
+            WidgetKind::ScrollBar => Some(Parts::ScrollBar(ScrollBar::from_widget(self.widget))),
+            _ => None,
+        }
+    }
+
+    pub fn grid(&self) -> Option<Grid> {
+        Grid::from_widget(self.widget)
+    }
+
+    pub fn scroll_bar(&self) -> Option<ScrollBar> {
+        (self.widget.kind == WidgetKind::ScrollBar).then(|| ScrollBar::from_widget(self.widget))
+    }
+
+    /// The rectangle of a cell of this container, in screen pixels.
+    pub fn cell(&self, row: i32, column: i32) -> Option<Frame> {
+        self.grid().map(|g| g.cell(self.frame, row, column))
+    }
+
+    /// The rectangle the selection covers at a cell of this container.
+    pub fn select(&self, row: i32, column: i32) -> Option<Frame> {
+        self.grid().map(|g| g.select(self.frame, row, column))
+    }
+
+    /// Which cell a child's box names, for a selection or highlight bar.
+    pub fn selected(&self, bar: &Placement<'_>) -> Option<(i32, i32)> {
+        self.grid().map(|g| g.selected(self.frame, bar.frame))
+    }
+
+    /// The first child with this `ID`, which is how a container names the
+    /// children it drives.
+    pub fn child_with_id(&self, id: i32) -> Option<&Placement<'a>> {
+        self.children.iter().find(|c| c.widget.id() == id)
     }
 }
 
@@ -278,21 +584,135 @@ pub fn place(widget: &Widget, parent: Frame) -> Placement<'_> {
 
 /// Place one widget inside `parent`, sizing an unmeasured label from its text.
 pub fn place_with<'a>(widget: &'a Widget, parent: Frame, fonts: Option<&Fonts>) -> Placement<'a> {
+    place_at(widget, parent, None, fonts)
+}
+
+/// Place one widget, carrying down the clip its ancestors impose.
+fn place_at<'a>(
+    widget: &'a Widget,
+    parent: Frame,
+    inherited: Option<Frame>,
+    fonts: Option<&Fonts>,
+) -> Placement<'a> {
     let frame = sized(widget, parent, widget.size(), fonts);
+    let clip = match ClipMode::from_value(widget.clip_mode()) {
+        ClipMode::None => inherited,
+        ClipMode::SelfFrame => Some(intersect(inherited, frame)),
+        // A clip by a parent that is larger than the widget has nothing to do;
+        // a clip by a parent that is smaller is the whole point of the mode.
+        ClipMode::ParentFrame => Some(intersect(inherited, parent)),
+    };
     let children = match widget.kind {
         // A split frame hands its children panes rather than its own rectangle.
-        WidgetKind::SplitFrame => split_children(widget, frame, fonts),
+        WidgetKind::SplitFrame => split_children(widget, frame, clip, fonts),
+        // A scroll bar puts its parts at its two ends and between them.
+        WidgetKind::ScrollBar => scroll_children(widget, frame, clip, fonts),
         _ => widget
             .children
             .iter()
-            .map(|c| place_with(c, frame, fonts))
+            .map(|c| place_at(c, frame, clip, fonts))
             .collect::<Vec<_>>(),
     };
     Placement {
         widget,
         frame,
+        clip,
         children,
     }
+}
+
+/// The overlap of two clips, or of a clip and a new rectangle.
+fn intersect(clip: Option<Frame>, with: Frame) -> Frame {
+    match clip {
+        None => with,
+        Some(c) => {
+            let x = c.x.max(with.x);
+            let y = c.y.max(with.y);
+            Frame::new(
+                x,
+                y,
+                (c.right().min(with.right()) - x).max(0.0),
+                (c.bottom().min(with.bottom()) - y).max(0.0),
+            )
+        }
+    }
+}
+
+/// Move a placed subtree. The frames only: the clips are recomputed from
+/// scratch once the whole move is done, because a part that also *resizes* —
+/// a scroll bar's track — would otherwise leave its descendants clipped to the
+/// box it used to have.
+fn shift(placement: &mut Placement<'_>, dx: f32, dy: f32) {
+    if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    placement.frame.x += dx;
+    placement.frame.y += dy;
+    for child in placement.children.iter_mut() {
+        shift(child, dx, dy);
+    }
+}
+
+/// Work out again what a placed subtree is clipped to, `parent` being the frame
+/// of the thing that holds it.
+fn reclip(placement: &mut Placement<'_>, parent: Frame, inherited: Option<Frame>) {
+    placement.clip = match ClipMode::from_value(placement.widget.clip_mode()) {
+        ClipMode::None => inherited,
+        ClipMode::SelfFrame => Some(intersect(inherited, placement.frame)),
+        ClipMode::ParentFrame => Some(intersect(inherited, parent)),
+    };
+    let (frame, clip) = (placement.frame, placement.clip);
+    for child in placement.children.iter_mut() {
+        reclip(child, frame, clip);
+    }
+}
+
+/// A `ScrollBar`'s children: the parts the fields name are moved to the two
+/// ends and into the track between them, and the rest are left where they are.
+fn scroll_children<'a>(
+    widget: &'a Widget,
+    frame: Frame,
+    clip: Option<Frame>,
+    fonts: Option<&Fonts>,
+) -> Vec<Placement<'a>> {
+    let bar = ScrollBar::from_widget(widget);
+    let mut placed: Vec<Placement<'a>> = widget
+        .children
+        .iter()
+        .map(|c| place_at(c, frame, clip, fonts))
+        .collect();
+    let zero = Frame::new(frame.x, frame.y, 0.0, 0.0);
+    let less = placed.get(bar.less).map(|p| p.frame).unwrap_or(zero);
+    let more = placed.get(bar.more).map(|p| p.frame).unwrap_or(zero);
+    let parts = bar.parts(frame, less, more);
+    for (index, target) in [
+        (bar.less, parts[0]),
+        (bar.more, parts[1]),
+        (bar.slider, parts[2]),
+    ] {
+        let Some(placement) = placed.get_mut(index) else {
+            continue;
+        };
+        shift(
+            placement,
+            target.x - placement.frame.x,
+            target.y - placement.frame.y,
+        );
+        placement.frame.w = target.w;
+        placement.frame.h = target.h;
+    }
+    // The track is not the height the file gave it, so every clip in the three
+    // parts is worked out again rather than moved.
+    for (index, target) in [
+        (bar.less, parts[0]),
+        (bar.more, parts[1]),
+        (bar.slider, parts[2]),
+    ] {
+        if let Some(placement) = placed.get_mut(index) {
+            reclip(placement, target, clip);
+        }
+    }
+    placed
 }
 
 /// The extent a label takes from its own font, when the layout left it at zero.
@@ -366,6 +786,7 @@ fn axis(length: Length, parent: f32) -> f32 {
 fn split_children<'a>(
     widget: &'a Widget,
     frame: Frame,
+    clip: Option<Frame>,
     fonts: Option<&Fonts>,
 ) -> Vec<Placement<'a>> {
     let horizontal = widget
@@ -411,7 +832,7 @@ fn split_children<'a>(
         .children
         .iter()
         .enumerate()
-        .map(|(i, c)| place_with(c, panes[i.min(1)], fonts))
+        .map(|(i, c)| place_at(c, panes[i.min(1)], clip, fonts))
         .collect()
 }
 
@@ -500,6 +921,212 @@ mod tests {
                 out.push(path);
             }
         }
+    }
+
+    /// Every `ClipMode` the corpus carries, and how many of each. The three
+    /// values are the whole vocabulary, so a fourth would be a new field.
+    #[test]
+    fn every_shipped_clip_mode_is_zero_one_or_two() {
+        let Some(game) = game_dir() else { return };
+        let mut files = Vec::new();
+        collect_gib(&game.join("UI"), &mut files);
+        let mut counts = std::collections::BTreeMap::new();
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let gib = ra2fmt::gib::parse(&text).unwrap();
+            for w in gib.walk() {
+                *counts.entry(w.clip_mode()).or_insert(0) += 1;
+            }
+        }
+        assert_eq!(
+            counts.into_iter().collect::<Vec<_>>(),
+            vec![(0, 2288), (1, 1287), (2, 15)],
+            "every shipped ClipMode"
+        );
+    }
+
+    /// The `Grid`/`ListBox` rule, checked against the authors' own arithmetic:
+    /// for every shipped container, the box the file gives the `Selection` (or
+    /// `Highlight`) child is the cell that child names — the row from its y,
+    /// the column from its x — with the span `RowSelect` asks for.
+    ///
+    /// Every bar names its row and hangs from it at the row height — all 37 of
+    /// them, no exceptions. The *x* is the sum of the columns before it. The
+    /// *width* is that sum in 31 of the 37; in the other six it is a number the
+    /// author made their own, and they are pinned below rather than smoothed
+    /// over: `arena.gib` 159 where the columns sum to 300 and `prematch.gib`
+    /// 187 where they sum to 136 — both times the container's own width — and
+    /// the three `wiring_connection_*.gib` fragments wanting 161 where their
+    /// column sums to 177, which is the *slot* they are loaded into, in a screen
+    /// the fragment does not name.
+    #[test]
+    fn the_selection_bar_sits_on_the_cell_the_file_names() {
+        let Some(game) = game_dir() else { return };
+        let mut files = Vec::new();
+        collect_gib(&game.join("UI"), &mut files);
+        let mut checked = 0;
+        let mut offenders = std::collections::BTreeSet::new();
+        let mut out_of_range = std::collections::BTreeSet::new();
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let gib = ra2fmt::gib::parse(&text).unwrap();
+            for root in resolve(&gib, DESIGN_SCREEN) {
+                for p in root.walk() {
+                    let Some(grid) = p.grid() else { continue };
+                    assert_eq!(grid.col_widths.len(), grid.columns.max(0) as usize);
+                    for id in [grid.selection, grid.highlight].into_iter().flatten() {
+                        let Some(bar) = p.child_with_id(id) else {
+                            panic!("{}: no child with ID {id}", path.display());
+                        };
+                        checked += 1;
+                        let (row, column) = grid.selected(p.frame, bar.frame);
+                        // The bar hangs from the row it names: its height is the
+                        // row height and its y is that row's.
+                        assert!(row >= 0 && column >= 0, "{}", path.display());
+                        if row >= grid.rows {
+                            out_of_range
+                                .insert(path.file_name().unwrap().to_string_lossy().to_string());
+                        }
+                        assert_eq!(bar.frame.h, grid.row_height, "{}", path.display());
+                        assert_eq!(
+                            bar.frame.y,
+                            p.frame.y + row as f32 * grid.row_height,
+                            "{}",
+                            path.display()
+                        );
+                        let expected = grid.select(p.frame, row, column);
+                        if (expected.w - bar.frame.w).abs() > 0.01 {
+                            offenders
+                                .insert(path.file_name().unwrap().to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked >= 30, "a corpus of containers, not one");
+        // Four single-row lists name a row that does not exist. It is the
+        // author's other leftover, like the widths below, and the bar still
+        // hangs from `row x RowHeight`, which is what the assertion above is.
+        assert_eq!(
+            out_of_range.into_iter().collect::<Vec<_>>(),
+            vec![
+                "prematch.gib",
+                "wiring_connection_analog.gib",
+                "wiring_connection_button.gib",
+                "wiring_connection_switch.gib",
+            ],
+            "the four rows that are out of range"
+        );
+        assert_eq!(
+            offenders.into_iter().collect::<Vec<_>>(),
+            vec![
+                "arena.gib",
+                "gametype.gib",
+                "prematch.gib",
+                "wiring_connection_analog.gib",
+                "wiring_connection_button.gib",
+                "wiring_connection_switch.gib",
+            ],
+            "the six widths the authors made their own"
+        );
+    }
+
+    /// A `ScrollBar` puts its parts at its two ends: the less button at the
+    /// start, the more button at the far end, and the track between. The
+    /// fields name the children by index, and in all 30 shipped bars the index,
+    /// the child's `Name` and its kind agree.
+    #[test]
+    fn a_scroll_bar_stacks_its_parts() {
+        let Some(game) = game_dir() else { return };
+        let mut files = Vec::new();
+        collect_gib(&game.join("UI"), &mut files);
+        let mut seen = 0;
+        let mut horizontal = 0;
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let gib = ra2fmt::gib::parse(&text).unwrap();
+            for root in resolve(&gib, DESIGN_SCREEN) {
+                for p in root.walk() {
+                    let Some(bar) = p.scroll_bar() else { continue };
+                    seen += 1;
+                    if !bar.vertical {
+                        horizontal += 1;
+                    }
+                    let less = &p.children[bar.less];
+                    let more = &p.children[bar.more];
+                    let slider = &p.children[bar.slider];
+                    // The index, the name and the kind agree.
+                    assert_eq!(less.widget.name(), "Less", "{}", path.display());
+                    assert_eq!(more.widget.name(), "Down", "{}", path.display());
+                    assert_eq!(slider.widget.kind.name(), "Slider", "{}", path.display());
+                    // The less button opens the bar and the more one closes
+                    // it, whatever the bar's own size turns out to be.
+                    assert_eq!((less.frame.x, less.frame.y), (p.frame.x, p.frame.y));
+                    if bar.vertical {
+                        assert_eq!(more.frame.x, p.frame.x, "{}", path.display());
+                        assert!((more.frame.bottom() - p.frame.bottom()).abs() < 0.01);
+                        assert!((slider.frame.y - less.frame.bottom()).abs() < 0.01);
+                        assert!((slider.frame.bottom() - more.frame.y).abs() < 0.01);
+                        assert!(more.frame.y > less.frame.y);
+                    } else {
+                        assert_eq!(more.frame.y, p.frame.y, "{}", path.display());
+                        assert!((more.frame.right() - p.frame.right()).abs() < 0.01);
+                        assert!((slider.frame.x - less.frame.right()).abs() < 0.01);
+                        assert!((slider.frame.right() - more.frame.x).abs() < 0.01);
+                        assert!(more.frame.x > less.frame.x);
+                    }
+                }
+            }
+        }
+        assert_eq!(seen, 30, "thirty shipped scroll bars");
+        assert_eq!(horizontal, 1, "one of them horizontal");
+    }
+
+    /// What makes `ClipMode 2` readable as a clip *by the parent*: of the
+    /// fifteen widgets that carry it, eleven are placed so that they stick out
+    /// of the parent, where a self-clip would do nothing at all — and the other
+    /// four are chrome that moves afterwards, the two selection bars and two of
+    /// `comp_properties.gib`'s tabs. Every one of them clips inside the parent.
+    #[test]
+    fn a_clip_mode_two_widget_is_clipped_by_its_parent() {
+        let Some(game) = game_dir() else { return };
+        let mut files = Vec::new();
+        collect_gib(&game.join("UI"), &mut files);
+        let mut seen = 0;
+        let mut outside = 0;
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let gib = ra2fmt::gib::parse(&text).unwrap();
+            for root in resolve(&gib, DESIGN_SCREEN) {
+                walk_clip_two(&root, &mut seen, &mut outside);
+            }
+        }
+        assert_eq!(seen, 15, "fifteen ClipMode 2 widgets shipped");
+        assert_eq!(outside, 11, "eleven of them stick out of the parent");
+    }
+
+    fn walk_clip_two(placement: &Placement<'_>, seen: &mut usize, outside: &mut usize) {
+        for child in &placement.children {
+            if child.widget.clip_mode() == 2 {
+                *seen += 1;
+                let clip = child.clip.expect("a clipped widget has a clip");
+                assert!(
+                    placement.frame.contains(&clip) || placement.clip.is_some(),
+                    "the clip of {} is {}, which is not inside its parent {}",
+                    child.widget.kind.name(),
+                    format_frame(&clip),
+                    format_frame(&placement.frame),
+                );
+                if !placement.frame.contains(&child.frame) {
+                    *outside += 1;
+                }
+            }
+            walk_clip_two(child, seen, outside);
+        }
+    }
+
+    fn format_frame(f: &Frame) -> String {
+        format!("{:.0},{:.0} {:.0}x{:.0}", f.x, f.y, f.w, f.h)
     }
 
     /// The measured path: with the screen's faces, a label the editor left at
