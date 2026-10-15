@@ -503,6 +503,56 @@ fn flag_false(def: &ra2fmt::component::ComponentDef, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The mass a `.gmf` rigid body with `mass = 0` is given, from the room it takes
+/// up (F12).
+///
+/// Every stock wheel's rigid body stores `mass = 0` — `fatboy_wheel1`,
+/// `miniwheel`, `mudtire`, `shinywheel1`, `wheel1`, `wheel2`, `wheel3`,
+/// `wheel_slim` — as do `slipperbottom` and `cannon_txt`. The engine's own rule
+/// for filling them is not reachable: the body's reader takes the file's zero at
+/// face value (`FUN_005c6820` reads the mass straight into the Havok body at
+/// `+0x20`), so whatever fills it does so where the body enters the simulation.
+/// This is therefore **our** rule, but it is size-aware rather than a flat
+/// number, which is the part that matters: a mudtire and a mini wheel no longer
+/// weigh the same. A part gets its own volume times [`ZERO_MASS_DENSITY`].
+///
+/// **The density cannot satisfy both anchors, which is a finding in itself.**
+///
+/// The one stock wheel whose weight is documented is the mudtire at **22.5 kg**
+/// (the figure that closes Mud Runner's total: `360.6 + 4×22.5 − 4×8 = 418.6`,
+/// the documented weight). Its bounding box is 0.947 × 0.947 × 0.340 m, so that
+/// wants a density of **74 kg/m³** — which would make a mini wheel (the wheel
+/// every stock AI bot runs, 0.652 × 0.652 × 0.135 m) **4.2 kg**, where the rest
+/// of the simulation is calibrated against 8.  A density of **139** keeps the
+/// mini wheel at exactly 8 (so nothing the bots do changes) and puts the mudtire
+/// at 42 kg, which overshoots the documented total badly.
+///
+/// No single density does both, so either the engine's fill is not
+/// volume-proportional at all, or one of the two anchors is wrong. What this
+/// rule buys is the *shape*: a zero-mass body is priced by its size instead of
+/// every one of them weighing the same, which is what made a 0.30 m³ mudtire and
+/// a 0.06 m³ mini wheel both come out at 8 kg. The density is the one that
+/// leaves the wheels the stock bots use exactly where they are.
+const ZERO_MASS_DENSITY: f32 = 139.0;
+
+fn zero_mass_fill(points: &[Vec3]) -> f32 {
+    if points.is_empty() {
+        return 7.0;
+    }
+    let (mut mn, mut mx) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for p in points {
+        mn = mn.min(*p);
+        mx = mx.max(*p);
+    }
+    let e = (mx - mn).max(Vec3::ZERO);
+    let volume = e.x * e.y * e.z;
+    let density = std::env::var("RA2_ZERO_MASS_DENSITY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(ZERO_MASS_DENSITY);
+    (volume * density).max(1.0)
+}
+
 /// Group the components into welded bodies and work out the joints between them.
 ///
 /// A component is welded into its parent's body unless the parent is a motor, in
@@ -751,7 +801,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 if sum > 0.0 {
                     sum
                 } else {
-                    8.0
+                    zero_mass_fill(&points)
                 }
             };
             (
@@ -967,6 +1017,27 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F12: a `.gmf` body with `mass = 0` is priced by the room it takes up.
+    ///
+    /// Every stock wheel stores `mass = 0`, and a flat fallback made a 0.30 m³
+    /// mudtire and a 0.06 m³ mini wheel weigh the same. The engine's own fill is
+    /// not reachable — its `.gmf` reader takes the zero at face value
+    /// (`FUN_005c6820` reads the mass straight into the body at `+0x20`) — so the
+    /// rule is ours, but it is now size-aware, and the mini wheel lands on the
+    /// 8 kg the rest of the simulation was calibrated against.
+    #[test]
+    fn a_zero_mass_body_is_priced_by_its_size() {
+        let mudtire = zero_mass_fill(&[Vec3::ZERO, Vec3::new(0.947, 0.947, 0.340)]);
+        let mini = zero_mass_fill(&[Vec3::ZERO, Vec3::new(0.652, 0.652, 0.135)]);
+        assert!(
+            (mini - 8.0).abs() < 0.4,
+            "the mini wheel should stay at 8 kg, got {mini}"
+        );
+        assert!(mudtire > 4.0 * mini, "{mudtire} vs {mini}");
+        // A part with no geometry at all still gets something.
+        assert!(zero_mass_fill(&[]) >= 1.0);
+    }
 
     #[test]
     fn roles_come_from_the_bot_class_then_the_definition_base() {

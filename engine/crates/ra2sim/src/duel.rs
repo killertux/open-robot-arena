@@ -1321,16 +1321,20 @@ mod tests {
         let _scripts = ra2script::lock();
         let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
         let bot = game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string();
+        // Placed head-on and close, rather than at the arena's own start points
+        // 25 m apart: a long approach is a chaotic trajectory, and this test is
+        // about the *blow*, not about who happens to reach whom. A head-on ram
+        // has to be a head-on ram whatever the masses are.
         let setups = [
             BotSetup {
                 path: bot.clone(),
-                yaw_deg: None,
-                spawn: None,
+                yaw_deg: Some(270.0),
+                spawn: Some([-3.0, 0.0]),
             },
             BotSetup {
                 path: bot,
-                yaw_deg: None,
-                spawn: None,
+                yaw_deg: Some(90.0),
+                spawn: Some([3.0, 0.0]),
             },
         ];
         let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
@@ -2171,16 +2175,18 @@ mod tests {
         let _scripts = ra2script::lock();
         let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
         let bot = game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string();
+        // Head-on and close: what this test is about is which *bodies* meet, not
+        // whether a 25 m approach happens to connect.
         let setups = [
             BotSetup {
                 path: bot.clone(),
-                yaw_deg: None,
-                spawn: None,
+                yaw_deg: Some(270.0),
+                spawn: Some([-3.0, 0.0]),
             },
             BotSetup {
                 path: bot,
-                yaw_deg: None,
-                spawn: None,
+                yaw_deg: Some(90.0),
+                spawn: Some([3.0, 0.0]),
             },
         ];
         let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");

@@ -20,7 +20,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F9 | The chassis buckles (crush points from the `.bot`) | **landed** (rate inferred) |
 | F10 | Chassis skin decals; 16 %-light weight gap | **landed** (weight: see F12) |
 | F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
-| F12 | Component mass when the `.gmf` stores zero | identified (wheels); rule open |
+| F12 | Component mass when the `.gmf` stores zero | **landed** as our rule — size-based, density pinned to local evidence; the two anchors conflict |
 | F13 | The script layer (M4) | **landed**: arenas, the shipped AI, the hazards and their zones all run the game's own code |
 
 ---
@@ -899,27 +899,50 @@ effect a 16 % gap should have.
 
 ## F12 — Component mass when the `.gmf` stores zero
 
-**Discovered while closing F7's hitpoints; it very likely explains F10's 16 %.**
+**Landed as our rule, with the conflict it exposes written down.**
 
 Every stock wheel's rigid body stores `mass = 0` — `fatboy_wheel1`, `miniwheel`,
 `mudtire`, `shinywheel1`, `wheel1`, `wheel2`, `wheel3`, `wheel_slim` — as do
-`slipperbottom` and `cannon_txt`. PyRA2's own note is that "a body with no mass
-(or an explicit `UNYIELDING`) never moves", so the engine has to be giving these
-their mass somewhere. **Ours does not:** `ra2sim::rig` sums the scene's rigid-body
-masses and falls back to an invented **8.0 kg** when the sum is zero.
+`slipperbottom` and `cannon_txt`. The engine's own fill is **not reachable**: the
+body's reader takes the file's zero at face value (`FUN_005c6820`, the vtable
+entry the packfile reader calls, reads the mass straight into the Havok body at
+`+0x20`), so whatever gives those bodies their mass does so later, where the body
+enters the simulation — and this build's material classes (`Metal`, `Rubber`, …)
+are present as RTTI only. What we had was worse than a guess in one way that
+mattered: a **flat 8 kg**, which made a 0.30 m³ mudtire and a 0.06 m³ mini wheel
+weigh the same.
 
-That is a better explanation of F10's weight gap than the armour reading was. Mud
-Runner carries four `mudtire` wheels; at 8 kg each they are 32 kg of its 360.6 kg,
-and the documented 418.6 kg wants **58 kg more — exactly 22.5 kg per wheel**,
-where the "different armour" reading (steel) overshot by 2.4 kg. Wheels are also
-the only stock family with a zero mass, which is the kind of single-cause effect
-a 16 % gap should have.
+Now a zero-mass part is priced by the room it takes up: `bounding volume × 139`.
+The density is the one that leaves the wheels the *stock bots* actually run (the
+mini wheel, 0.652 × 0.652 × 0.135 m) exactly where they were, so nothing else in
+the simulation moved — the drive survey's 27/45 baseline is unchanged.
 
-What is missing is the rule itself. The candidates are a mass computed from the
-collision geometry (`volume × density`, Havok's idiom for a zero-mass body) or a
-value from the definition — the factory `FUN_0045cf40` does read one definition
-number into `*(component + 0x64) + 4`, but no shipped definition or exporter
-template declares `mass` for a wheel, so that field is 0 there. **[OPEN]**
+**The two anchors cannot both be satisfied, which is the finding.** The one stock
+wheel whose weight is documented is the mudtire at **22.5 kg** — the figure that
+closes Mud Runner's own total (`360.6 + 4×22.5 − 4×8 = 418.6`, the documented
+weight, and it is the reading F10's 16 % gap wants). Its bounding box is 0.947 ×
+0.947 × 0.340 m, so that wants a density of **74** — which would make the mini
+wheel **4.2 kg**. A density of **139** keeps the mini wheel at 8 and puts the
+mudtire at 42 kg, badly overshooting the documented total. No single density does
+both, so either the engine's fill is not volume-proportional at all, or one of
+the two anchors is wrong. The rule now has the right *shape*; the constant is
+pinned to the local, shipped evidence (the bots' own behaviour) rather than to the
+community figure that contradicts it.
+
+**The bots' weight class is the only oracle that ships with the game**, and it is
+too coarse to settle it: each `.bot` declares `Class:` (light **< 250 kg**, medium
+**250–400**, heavy **> 400**), and **35–37 of the 45 stock bots are inside their
+declared class at any density between 0 and 139** — so it neither confirms nor
+refutes a value, but it does say the masses are in the right country.
+
+**A side-finding, and a test fix that came with it.** Two tests
+(`a_ram_is_a_blow_and_resting_contact_does_nothing`, `contact_spans_a_robots_own_bodies`)
+drove two bots at each other from the arena's own start points **25 m apart**, and
+a 0.05 % change in total mass — 200.1 kg to 200.0 — was enough to make the
+trajectories miss entirely: they drove fine (2.7 m/s) and passed each other 2.3 m
+wide. A long head-on approach is a chaotic trajectory, so those tests were
+measuring luck. They now spawn 6 m apart facing each other (`BotSetup.spawn`),
+which is what they were actually about, and hold whatever the masses are.
 
 ---
 
