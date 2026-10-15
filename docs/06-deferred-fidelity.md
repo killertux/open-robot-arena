@@ -845,9 +845,39 @@ the floor plate stays put, and that the crush is monotone; `RA2_BUCKLE=<0..1>` o
 and floor plate untouched); and the 45-bot survey is **bit-for-bit unchanged**,
 because an undamaged robot never buckles.
 
-Still open: the crush is smooth rather than faceted (the game's subdivided model
-is what would give it the original's silhouette), and the game *writes the
-crushed model back* on save, which we do not.
+Still open: the crush is smooth rather than faceted — the game's subdivided model
+is what gives it the original's silhouette — and the game *writes the crushed
+model back* on save, which we do not.
+
+**The subdivided model, measured (and one attempt that did not earn its keep).**
+The engine builds that mesh before anything can buckle: it "divides the triangular
+faces that make up the sides and top of the 3D model of the bot into many more,
+adding points to construct the vertices and faces", and the bot file shows the
+result exactly. `AI/Team1/Bot0`'s chassis is **48 points and 28 triangles** in the
+file (a welded, indexed mesh, indices up to 47), while its **36 buckle points
+address an unwelded array that runs to index 115** — a **117-slot, 39-triangle**
+mesh — and take **87 of those slots** (about 2.4 per point). The telling number is
+this one: **28 of the 36 points are not vertices of the file's mesh at all**. They
+are points the game added *to* it. That is why the subdivision exists, and why our
+crush has to bend the surface through a weight function: a point that is not a
+vertex cannot be moved.
+
+I implemented exactly that — insert each buckle point into the faces it lies on,
+fan those faces open, and move only the points the file names. It works
+mechanically (the points become vertices, nothing else moves, and tests pinned
+both), but it is not the game's mesh: a 28-triangle chassis came out at **192
+triangles** with **481 of its 576 vertices marked movable**, against the game's 39
+and 87. A mesh where 83 % of the vertices may move still bends nearly everywhere,
+so the silhouette would not have improved — it would only have cost seven times
+the triangles. Backed out rather than shipped.
+
+Why it ran away, for whoever picks it up: the file's points sit on *shared* edges
+and on the plate corners, so one point belongs to several faces at once, and a
+per-triangle fan duplicates every insertion into each of them. The engine instead
+retriangulates the movable region as a **shared-vertex mesh** — its 2.4 slots per
+point is a handful of faces meeting at one vertex, not a copy per face. That is
+the shape the fix has to take: a constrained retriangulation of the sides and top
+with the file's points as single shared vertices, not a soup fan.
 
 ## F10 — Chassis skin decals — **landed**; the 16 % weight gap — **explained**
 
