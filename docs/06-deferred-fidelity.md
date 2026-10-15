@@ -17,7 +17,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F6 | Friction combination law differs from Havok 1.x | blocked on the binding |
 | F7 | Damage model: an event, not a per-step integral | **landed**: the engine's own formula (`10·piercing·v + concussion·μ·v/2` × material scale) and `fracture` as a per-hit threshold |
 | F8 | Pistons slide their children (prismatic) | **landed** (nothing drives them yet) |
-| F9 | The chassis buckles (crush points from the `.bot`) | **landed** (rate inferred) |
+| F9 | The chassis buckles (crush points from the `.bot`) | **landed**; the travel is the file's own movable region (verified across all 43 stock bots that carry one), the curve and the subdivided silhouette are ours |
 | F10 | Chassis skin decals; 16 %-light weight gap | **landed** (weight: see F12) |
 | F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
 | F12 | Component mass when the `.gmf` stores zero | **landed** as our rule — size-based, density pinned to local evidence; the two anchors conflict |
@@ -816,10 +816,22 @@ chassis deforms as it takes damage:
     plate, and the motion grows with height above it, so the top caves in
     furthest (matching the file: `AI/Team1/Bot0`'s buckle points sit at half
     height and at the top, none at the floor);
-  - **down and in**, linear in the damage the chassis has taken, reaching half
-    its height and half its footprint as its last hitpoint goes.
+  - **down and in**, linear in the damage the chassis has taken.
 
-  The direction is the format's; the *rate* is ours and marked as such.
+  **How far it moves is now the file's own limit, not a figure of ours.** The
+  buckle points are a ring at mid-height and a ring at the top, and it holds for
+  *every* stock bot that carries a buckle model — **43 of the 57** (the other 14
+  are from before the format had the section, and ship with no movable points at
+  all) — so the movable region is the top half of the chassis and a full crush
+  lands the top ring exactly on the mid ring, which is as far as it can go before
+  the model turns inside out. `Robot::buckle` reads that region out of the file
+  and moves through it, and `a_buckle_model_is_the_top_half_of_the_chassis` holds
+  the invariant across the stock AI bots. What is still ours is the *curve*
+  between the two ends (linear in the damage taken) and how far the sides come
+  *in* — the footprint halves over the same sweep (`AI/Team1/Bot0`'s movable ring
+  is 36 points: three level with each other at mid-height, three at the top, and
+  the rest randomized in place, which is the format's own "randomizing their place
+  so the crushed model doesn't look too symmetrical").
 
 Both the drawn chassis and **its collider** follow (the chassis body's shape is
 re-baked), so a hurt robot is visibly crushed *and* smaller to hit — before this

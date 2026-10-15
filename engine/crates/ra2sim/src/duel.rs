@@ -1684,6 +1684,56 @@ mod tests {
         }
     }
 
+    /// F9: the crush moves through the file's own movable region.
+    ///
+    /// Every stock bot that carries a buckle model — 43 of the 57; the other 14
+    /// are from before the format had the section — keeps its points as a ring at
+    /// mid-height and a ring at the top. So the movable region *is* the top half of
+    /// the chassis, and a full crush lands the top ring exactly on the mid ring:
+    /// as far as it can go before the model turns inside out. That is where the
+    /// crush's *down* rate comes from now, read out of the file instead of
+    /// assumed, and this is the invariant it rests on.
+    #[test]
+    fn a_buckle_model_is_the_top_half_of_the_chassis() {
+        let Some(game) = game_dir() else { return };
+        let mut seen = 0;
+        for team in std::fs::read_dir(game.join("AI"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            for bot in std::fs::read_dir(team.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if bot.path().extension().map(|e| e != "bot").unwrap_or(true) {
+                    continue;
+                }
+                let Ok(r) = crate::rig::load(&bot.path().to_string_lossy()) else {
+                    continue;
+                };
+                let c = &r.components[0];
+                if c.buckle.is_empty() {
+                    continue;
+                }
+                seen += 1;
+                let floor = c.buckle.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+                let height = c.max.y - c.min.y;
+                let span = c.max.y - floor;
+                assert!(
+                    (span - height * 0.5).abs() < 0.02,
+                    "{:?}: the movable span {span} is not the top half of {height}",
+                    r.name
+                );
+            }
+        }
+        assert!(
+            seen >= 10,
+            "expected buckle models in the stock AI bots, saw {seen}"
+        );
+    }
+
     /// F7: `fracture` is a per-hit threshold, not a reduction.
     ///
     /// The engine's rule (`FUN_0045f2b0`) is a single comparison: if the part is

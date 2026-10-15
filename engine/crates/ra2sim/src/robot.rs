@@ -344,13 +344,21 @@ impl Robot {
     /// everything below the mid-height rigid), and the motion grows with height
     /// above it, so the top caves in furthest.
     ///
-    /// The direction is the file's ("down and in"); the *rate* is ours — linear
-    /// in the damage the chassis has taken, reaching half its height and half
-    /// its footprint as the last hitpoint goes. Nothing in the shipped bots (all
-    /// 57 are uncrushed: their mesh footprint equals the bottom plate) or in the
-    /// binary's strings gives the original's curve.
+    /// **How far it moves is the file's own limit.** The buckle points are a ring
+    /// at mid-height and a ring at the top, and the movable region is the top
+    /// half of the chassis — verified across all 43 stock bots that carry a
+    /// buckle model (the other 14 ship without one, from before the format had
+    /// it). So a full crush takes the top ring down onto the mid ring, which is
+    /// as far as it can go before the model turns itself inside out; the code
+    /// reads that region out of the file rather than assuming the half, and
+    /// clamps to it. What is still ours is the *curve* between the two ends
+    /// (linear in the damage taken) and how far the sides come *in* — the
+    /// footprint halves over the same sweep — plus the game's subdivided crush
+    /// mesh, which is built at runtime from indices that point into a mesh the
+    /// file does not contain.
     pub fn buckle(&mut self, physics: &mut dyn PhysicsBackend) {
-        const DOWN: f32 = 0.5;
+        /// How far the top plate comes *in* over the whole crush: the footprint
+        /// halves. The engine's own figure is not reachable.
         const IN: f32 = 0.5;
         if self.health.is_empty() || self.rig.components[0].buckle.is_empty() {
             return;
@@ -364,7 +372,9 @@ impl Robot {
         }
         c.buckle_fraction = fraction;
 
-        let height = (c.max.y - c.min.y).max(1e-3);
+        // The file's own movable region: the lowest buckle point pins the floor
+        // of it, and the top of the chassis is its ceiling. A full crush takes
+        // the top exactly onto that floor.
         let floor = c
             .buckle
             .iter()
@@ -377,7 +387,7 @@ impl Robot {
             if w <= 0.0 {
                 return;
             }
-            p.y -= step * DOWN * height * w;
+            p.y -= step * span * w;
             // "In": toward the chassis' own centre line, which in component
             // space is the origin's XZ.
             let shrink = 1.0 - step * IN * w;

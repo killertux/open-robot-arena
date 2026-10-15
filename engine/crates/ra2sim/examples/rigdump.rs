@@ -21,6 +21,24 @@ fn main() {
         r.min,
         r.max
     );
+    {
+        // F9: the chassis' movable region against the chassis' own height — the
+        // "down" a full crush takes has to fit inside the file's region.
+        let c = &r.components[0];
+        let height = c.max.y - c.min.y;
+        let floor = c.buckle.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+        let span = c.max.y - floor;
+        println!(
+            "  buckle: {} points, chassis height {:.3}, movable span {:.3} ({:.0}% of height), \
+             full-crush down 0.5*h = {:.3} vs span {:.3}",
+            c.buckle.len(),
+            height,
+            span,
+            100.0 * span / height.max(1e-3),
+            0.5 * height,
+            span
+        );
+    }
     for c in &r.components {
         let parent = c.parent.map(|p| p as i32).unwrap_or(-1);
         let extra = match c.role {

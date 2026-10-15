@@ -387,7 +387,7 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | `ra2-duel` damage model (F7) | **Validated on a deterministic ram.** `RA2_DUEL_DRIVE=ram` with two identical `AI/Team1/Bot0` on the box arena: contact at t≈5 s, an opening blow of **34** points, then ~1 point/s while the two rest against each other. Both ends of that match what the original's scripts say — hazards apply 25, `AI/__init__.py` calls `amount > 10` a "good solid hit" — after two real defects were fixed (contact was tested only between root bodies; a blow was a per-step *integral* of speed, so a fast impact weighed almost nothing) |
 | `ra2-duel` with the AI | **Does not engage.** 30 s of `AI/Team1/Bot0` vs `AI/Team6/Bot2` on the box arena: the pair closes to ~7.7 m, then one robot pins itself against a wall (at `(-11.8, -7.3)` from t = 15 s on, reversing included) and neither touches the other all bout. This is the control layer (M4), not the damage model: the AI is a stand-in that only ever drives at the opponent |
 | 45-bot drive survey | **Bit-identical** to F9 after F10 | the chassis is now dressed from the file's face groups, but only the *skin coordinates* changed, and the survey never looks at a texture |
-| `cargo fmt --check`, `clippy`, tests | clean, 40 tests |
+| `cargo fmt --check`, `clippy`, tests | clean, 41 tests |
 
 ## 7. Recommended order of work
 
@@ -422,8 +422,12 @@ The remaining blocker is *behaviour*, not the parts' parameters or the arenas:
    build exposes only as RTTI, so the scale is set by the scripts' own anchors.
    Hitpoints are no longer on the list: they are the engine's per-category table
    (see §4.13).
-3. **F9's remainder.** Buckling exists but its *rate* is inferred and its
-   silhouette is smooth rather than the game's subdivided crush mesh.
+3. **F9's remainder.** Buckling exists, and its *travel* is now the file's own
+   movable region — the top half of the chassis, verified across all 43 stock
+   bots that carry a buckle model. What is left is the *curve* between the ends,
+   the "in" rate (ours: the footprint halves) and the silhouette, which is smooth
+   where the game builds a subdivided crush mesh at runtime from indices that
+   point into a mesh the file does not contain.
 4. **F12 — the mass a zero-mass rigid body gets** (F10's residual). Every wheel
    stores `mass = 0`, so it, not the armour, is the likely source of the 16 %.
    Landed as a size-based rule, and that landing exposes a conflict: the documented
