@@ -119,6 +119,24 @@ pub fn hinges(arena_path: &str) -> BTreeMap<String, ModelHinge> {
     out
 }
 
+/// The travel a hinge is given, from the model's own `*ANGLE_LIMITS`.
+///
+/// Jolt measures a hinge's angle from where the two frames coincide and insists
+/// on `-π ≤ min ≤ 0 ≤ max ≤ π`. The models state theirs in their own frame, with
+/// the two sides exported at the hinge's *lower stop* — the Octagon's hellraiser
+/// arms ship `[1°, 70°]`, which Jolt refuses outright — so the travel is taken
+/// from that stop: `[0, max - min]`. The Compressor's smash arms already say
+/// `[0, 0.27]` and are unchanged. A range a full turn wide is Jolt's "no limits".
+pub fn hinge_limits(model: [f32; 2]) -> [f32; 2] {
+    use std::f32::consts::PI;
+    let (lo, hi) = (model[0].min(model[1]), model[0].max(model[1]));
+    if hi - lo >= 2.0 * PI {
+        return [-PI, PI];
+    }
+    let (lo, hi) = if lo > 0.0 { (0.0, hi - lo) } else { (lo, hi) };
+    [lo.clamp(-PI, 0.0), hi.clamp(0.0, PI)]
+}
+
 /// The travel a slider is given, in the rest-pose-relative form Jolt wants.
 ///
 /// The scripts write the limits unordered — `box.py` asks for `(neutral, 0.8,
@@ -151,4 +169,31 @@ pub struct LiveJoint {
     /// script's changes reach the motor only when it actually changes its mind.
     pub strength: f32,
     pub friction: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::PI;
+
+    /// The models state their hinge travel in their own frame and Jolt insists on
+    /// a range containing zero, so the travel is taken from the model's lower
+    /// stop. The Octagon's hellraiser arms ship `[1°, 70°]`, which Jolt refuses
+    /// outright; the Compressor's smash arms already say `[0, 0.27]`.
+    #[test]
+    fn hinge_travel_is_taken_from_the_models_lower_stop() {
+        assert_eq!(hinge_limits([0.0, 0.27052602]), [0.0, 0.27052602]);
+
+        let hellraiser = hinge_limits([1.0f32.to_radians(), 70.0f32.to_radians()]);
+        assert_eq!(hellraiser[0], 0.0);
+        assert!(
+            (hellraiser[1] - 69.0f32.to_radians()).abs() < 1e-5,
+            "{hellraiser:?}"
+        );
+
+        // A full turn is Jolt's "no limits", and nothing can express more.
+        assert_eq!(hinge_limits([-PI, PI]), [-PI, PI]);
+        assert_eq!(hinge_limits([-4.0, 4.0]), [-PI, PI]);
+        assert_eq!(hinge_limits([-PI, 5.0]), [-PI, PI]);
+    }
 }

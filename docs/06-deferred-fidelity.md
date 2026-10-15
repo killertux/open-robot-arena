@@ -1001,7 +1001,11 @@ in place.
   `TM_ROW3` and the axis from `TM_ROW1`, which is exactly how the exported `.gmf`
   spells out `*POINT`/`*SPIN_AXIS`. `GetHinge('Hinge01')` is now a real hinge, and
   the Compressor Arena's four smash arms come back on the model's own axes, limited
-  to the model's own `0.00 .. 0.27 rad`. (The script layer changes the process's
+  to the model's own `0.00 .. 0.27 rad`. The *travel* is read from the model's own
+  lower stop, because Jolt measures a hinge from where its frames coincide and
+  insists on `-π ≤ min ≤ 0 ≤ max ≤ π` while the models state their limits in their
+  own frame with the two sides exported at that stop — the Octagon's hellraiser
+  arms ship `[1°, 70°]`, which Jolt refuses outright. (The script layer changes the process's
   working directory to the game root, so the arena path is made absolute at the top
   of `Duel::new` — otherwise the *model* the script names can no longer be found
   from the relative path the runner was given, and every `GetHinge` silently
@@ -1043,7 +1047,7 @@ in place.
   is rarely a ball, and a flame half a metre off a spinner's blades should not set
   them alight.
 
-Four real bugs came out of this, and all four were in the engine rather than the
+Five real bugs came out of this, and all five were in the engine rather than the
 scripts:
 
 - **A shared collision proxy was being re-placed per body.** The Combat Arena has
@@ -1055,6 +1059,10 @@ scripts:
 - **Impulses were ignored on sleeping bodies.** Jolt parks a settled body and drops
   an impulse into one — the same gotcha `set_velocity` already had. A hazard pushes
   a part that has not moved since the match began.
+- **A hinge's angle limits did not contain zero.** Jolt requires the range to
+  span the frames' meeting point, and the models do not state theirs that way: the
+  Octagon's hellraiser arms are `[1°, 70°]`, so the constraint was refused and both
+  arms were simply not there.
 - **A drive speed past the solver's limit was silently dropped.** The Half Circle
   Arena's hammer asks for 95 rad/s; the constraint refused it and the arm did not
   move at all.
@@ -1074,7 +1082,8 @@ prismatic the script created, and the spike body shoots a fifth of a metre up ou
 of the floor with the robot standing on it (0.8 m, its whole travel, when nothing
 is — `a_slider_lets_its_body_rise`). The Compressor Arena's four smash arms swing
 under `Hazards.Smasher`'s own `SetPowerSettings`/`SetDirection`
-(`the_models_own_hinges_are_driven_by_the_script`), the Half Circle Arena's hammer
+(`the_models_own_hinges_are_driven_by_the_script`; all four Octagon hinges build
+too), the Half Circle Arena's hammer
 swings on the power it only asks for once a robot is in its zone
 (`a_hammer_that_asks_for_power_late_still_swings`), and a Parking Lot cinder block
 leaves the world, is pinned mid-air and drops when unpinned

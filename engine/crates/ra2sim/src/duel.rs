@@ -531,9 +531,11 @@ impl Duel {
                     // The model's own angle limits: the compressor's smash arms
                     // are allowed 0.27 rad, which is what makes them arms rather
                     // than windmills.
-                    limits: hinge
-                        .limits
-                        .unwrap_or([-std::f32::consts::PI, std::f32::consts::PI]),
+                    limits: hazards::hinge_limits(
+                        hinge
+                            .limits
+                            .unwrap_or([-std::f32::consts::PI, std::f32::consts::PI]),
+                    ),
                     max_torque: cap,
                     friction_torque: hinge.friction,
                 };
