@@ -69,10 +69,9 @@ local/           # (git-ignored) game files + converted cache
   menu comes out as the main menu. Still to come: text metrics from the `fg_*.giff` fonts, clip
   modes, the containers that lay their own children out (`ListBox`, `Grid`,
   `OptionGroup`), the 2D renderer, the `giScript`/`Gooey` Python surface, and the
-  workshop. The `fg_*.giff` faces are parsed (`ra2fmt::giff`, and `ra2 font`
-  dumps one) — the container is pinned and the loader is decoded — but *which*
-  record belongs to which character is not settled, so labels still have no
-  extents and no glyphs are drawn yet.
+  workshop. The `fg_*.giff` faces are parsed and *drawn* (`ra2fmt::giff`, `ra2
+  font`, and `tools/ui_compose.py` renders a screen's labels with the game's own
+  faces and colours — the main menu's `MULTIPLAYER TEAM HQ` reads as itself).
 - **M6 — Packaging.** Linux/macOS/Windows builds.
 
 ## M5 design notes

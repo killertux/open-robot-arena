@@ -79,6 +79,18 @@ fn main() {
             if !p.widget.visible() {
                 return;
             }
+            // A label is a text command: the compositor draws it with the face
+            // and colour the widget names.
+            if let (Some(text), Some(font)) = (p.widget.text(), p.widget.font()) {
+                if !text.is_empty() {
+                    let c = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                    println!(
+                        "{:.2} {:.2} {:.2} {:.2} 1 1.000 1.000 1.000 0 0 1 1 text:{}:{:.3} {:.3} {:.3}:{}",
+                        p.frame.x, p.frame.y, p.frame.w, p.frame.h, font, c[0], c[1], c[2], text
+                    );
+                    return;
+                }
+            }
             let Some(file) = p.widget.filename() else {
                 return;
             };

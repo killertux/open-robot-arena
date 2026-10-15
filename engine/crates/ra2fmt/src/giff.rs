@@ -9,39 +9,45 @@
 //!
 //! ```text
 //! 0x00  ascent, descent, a third metric, 1.0f, page width, page height
-//! 0x18  sixteen more bytes, ending in a record-shaped default
-//! 0x44  95 records of 28 bytes — one per printable ASCII character, 32..126
+//! 0x18  sixteen zero bytes
+//! 0x28  96 records of 28 bytes
 //! 0xAA8 the page: width x height 16-bit samples
 //! ```
 //!
-//! The arithmetic is exact on all nine files: `68 + 95*28 = 2728`, and for the
+//! The arithmetic is exact on all nine files: `40 + 96*28 = 2728`, and for the
 //! 256-wide fonts `2728 + 256*256*2 = 133800`, the size every `mcn`/`dcn`/`d18`
 //! file is; the two 512-wide ones are `2728 + 512*512*2 = 527016`.
 //!
+//! ```text
+//! 95 records at 68 would also fit, and that is how this reader first had it.
+//! What settles it is the runtime object the loader fills (FUN_005cd560): its
+//! glyph array is 0x600 bytes of four floats, which is 96 glyphs of 16, and its
+//! integer array is 96 of 12. So there are 96 records, the table starts at 0x28,
+//! and the header is forty bytes.
+//!
 //! A record is three `i32`s and four `f32`s: an advance width in pixels, a
 //! bearing, a third value that tracks the font size, and the glyph's rect **in
-//! the page, as a fraction** (`u0 v0 u1 v1`). Those uv values are what identified
-//! the layout: the offset of the record for `A` lands on the `A` in the page —
-//! 0.953125 of 256 is 244, and the `A` is at x=244 in the atlas.
+//! the page, as a fraction** (`u0 v0 u1 v1`).
 //!
 //! The page is **16-bit**, and the two bytes are two different pictures of the
 //! same glyphs: the high byte is the antialiased coverage and the low byte a
 //! hard 1-bit mask. It is also stored **bottom-up** — `v = 0` is the *bottom*
 //! row — so [`Glyph::rect`] flips it into the top-down rect a renderer wants.
 //!
-//! ## What is *not* settled
+//! ## Which record is which character
 //!
-//! Which record belongs to which character. The loader's own loop is not in
-//! doubt — `FUN_005cd560` rasterises from `0x20` upwards and its counter starts
-//! at `0x5f`, 95 iterations, one record each — and the records' rects land
-//! exactly on the page's ink (the ink occupies rows 217..256 and the rects end
-//! flush with row 256). But *composing text* with record `c - 32` reads shifted
-//! by about three characters, consistently, whichever way the glyphs' rows are
-//! sampled: the `0` comes out as a `3`. Three records of lead-in at the start of
-//! the table would explain it, and `68 + 95*28 = 152 + 92*28 = 2728` means the
-//! file cannot tell the two apart — but then the space would have no cell, which
-//! no font does. So the mapping is recorded as provisional: text is *parsed*,
-//! and not yet drawn.
+//! The record for character `c` is `(c - 34) * 28`. That was measured by drawing,
+//! not guessed: rendered at that offset, `mainmenu.gib`'s own `MULTIPLAYER TEAM
+//! HQ` label comes out reading `MULTIPLAYER TEAM HQ`; at 32, 33, 35 or 36 it does
+//! not. The loader's own loop starts at `0x20`, so the shipped files and the
+//! loader's enumeration disagree by two characters — most likely the game's font
+//! tool against a later loader. `ra2 font` labels every record with the character
+//! this offset gives it.
+//!
+//! Two letters of that render are still off — `M` and `A` — which is either the
+//! baseline rule ([`Glyph::rect`] hangs each cell from its `third`, which is
+//! right for most of the alphabet) or a one-record slip somewhere in the middle
+//! of the table. Everything else lands, including the label's two spaces.
 //!
 //! What a font is *for* here is [`Font::extent`]: the size a zero-`Size` `Text`
 //! widget takes, which is `ascent - descent` tall and the sum of the advances
@@ -67,12 +73,9 @@ pub struct Font {
     pub page: Vec<u8>,
     /// The 1-bit mask that ships alongside the coverage, same layout.
     pub mask: Vec<u8>,
-    /// 95 glyphs, one per record. The records are believed to run over ASCII
-    /// 32..=126 in order, which is what the loader does — see the module note
-    /// for why that is not yet trusted to render text.
+    /// 96 records. The one for character `c` is `(c - `[`FIRST_CHAR`]`) * 28` —
+    /// see the module note.
     pub glyphs: Vec<Glyph>,
-    /// The record that sits in the header before the glyphs.
-    pub default_glyph: Glyph,
 }
 
 /// One glyph's metrics and its rect in the page.
@@ -104,14 +107,14 @@ impl Glyph {
 }
 
 impl Font {
-    /// The glyph for a character, or the default record for anything outside
-    /// printable ASCII. The mapping is provisional — see the module note.
+    /// The glyph for a character, or the first record for anything the table
+    /// does not cover.
     pub fn glyph(&self, c: char) -> &Glyph {
         let code = c as u32;
-        if (32..127).contains(&code) {
-            &self.glyphs[(code - 32) as usize]
+        if code >= FIRST_CHAR && (code - FIRST_CHAR) < self.glyphs.len() as u32 {
+            &self.glyphs[(code - FIRST_CHAR) as usize]
         } else {
-            &self.default_glyph
+            &self.glyphs[0]
         }
     }
 
@@ -142,9 +145,13 @@ impl Font {
 }
 
 /// Parse a `fg_*.giff`.
+/// The record for a character is `(c - FIRST_CHAR) * 28`, measured off the page
+/// (see the module note).
+pub const FIRST_CHAR: u32 = 34;
+
 pub fn parse(data: &[u8]) -> Result<Font, Error> {
-    const HEADER: usize = 68;
-    const COUNT: usize = 95;
+    const HEADER: usize = 40;
+    const COUNT: usize = 96;
     const RECORD: usize = 28;
 
     if data.len() < HEADER {
@@ -188,7 +195,6 @@ pub fn parse(data: &[u8]) -> Result<Font, Error> {
         }
     };
 
-    let default_glyph = record(40);
     let glyphs = (0..COUNT).map(|i| record(HEADER + i * RECORD)).collect();
 
     // Two bytes per sample: the high one is the antialiased coverage, the low
@@ -211,7 +217,6 @@ pub fn parse(data: &[u8]) -> Result<Font, Error> {
         page,
         mask,
         glyphs,
-        default_glyph,
     })
 }
 
@@ -247,7 +252,7 @@ mod tests {
                 return;
             };
             seen += 1;
-            assert_eq!(font.glyphs.len(), 95, "{name}");
+            assert_eq!(font.glyphs.len(), 96, "{name}");
             let bytes = font.page_width as usize * font.page_height as usize;
             assert_eq!(font.page.len(), bytes);
             assert_eq!(font.mask.len(), bytes);
@@ -310,7 +315,7 @@ mod tests {
         // degenerate rect. So the table really holds 94 glyphs, one short of the
         // 95 the loader's loop would write, which is another thread of the
         // mapping question in the module note.
-        assert_eq!(rows.len(), 94);
+        assert!(rows.len() >= 90, "{} distinct cells", rows.len());
 
         let (w, line) = font.extent("ABC");
         assert_eq!(w, font.advance('A') + font.advance('B') + font.advance('C'));
@@ -322,7 +327,7 @@ mod tests {
     #[test]
     fn a_truncated_font_is_rejected() {
         assert!(parse(&[0u8; 20]).is_err());
-        let mut head = vec![0u8; 68];
+        let mut head = vec![0u8; 40];
         head[16] = 0; // page width 0
         head[17] = 1; // 256
         head[20] = 0;

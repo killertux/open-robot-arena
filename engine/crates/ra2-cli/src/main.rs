@@ -90,7 +90,9 @@ fn font(cfz: &str, name: &str, rest: &[&str]) -> Result<(), Box<dyn std::error::
     let _ = writeln!(out, "line {}", font.line_height());
     let _ = writeln!(out, "page {} {}", font.page_width, font.page_height);
     for (i, g) in font.glyphs.iter().enumerate() {
-        let c = char::from_u32(32 + i as u32).unwrap_or('?');
+        // The record for a character is `(c - FIRST_CHAR) * 28`, so label each
+        // record with the character it belongs to rather than its index.
+        let c = char::from_u32(ra2fmt::giff::FIRST_CHAR + i as u32).unwrap_or('?');
         let _ = writeln!(
             out,
             "glyph {} {} {} {} {} {} {} {}",

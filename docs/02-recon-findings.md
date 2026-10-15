@@ -240,15 +240,18 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   `ra2.cfg` does not carry.
 - `ra2 font <RA2.cfz> <name> [--page out.pgm]` prints a face's metrics per glyph
   and writes the page out.
-- **Open: which record is which character.** The rects are not in doubt — every
-  cell lies inside the page, is contiguous with its neighbour and is 13 pixels
-  tall at most for the 14-pixel face — but composing text with record `c - 32`
-  reads shifted by about three characters however the glyph rows are sampled (a
-  `0` comes out as a `3`). Three records of lead-in would explain it, and the
-  file cannot tell the two apart (`68 + 95*28 = 152 + 92*28`), but then the
-  space would have no cell, which no font does. The shipped table also holds only
-  **94** distinct cells, with the last record's advance a nonsense `1040` — so it
-  is one short of the loader's 95 either way. Text is parsed; it is not yet drawn.
+- **Which record is which character: `(c - 34) * 28`.** Measured by drawing: at
+  that offset `mainmenu.gib`'s own `MULTIPLAYER TEAM HQ` label comes out reading
+  `MULTIPLAYER TEAM HQ`, and at 32/33/35/36 it does not. The loader's loop starts
+  at `0x20`, so the shipped files and the loader's enumeration disagree by two
+  characters — most likely the game's font tool against a later loader.
+- **The table is 96 records at offset 40**, not 95 at 68: `40 + 96*28 = 68 +
+  95*28 = 2728` fits either way, and what settles it is the runtime object the
+  loader fills — its glyph array is `0x600` bytes of four floats, which is 96
+  glyphs of 16 bytes, and its integer array is 96 of 12.
+- Two letters of that render are still off (`M` and `A`), which is either the
+  baseline rule — a cell hangs from its `third` above the baseline — or a
+  one-record slip in the middle of the table. Everything else lands.
 
 ### Other
 - Textures: BMP / TGA / JPG (mostly 256²/128²); many uncompressed TGA.

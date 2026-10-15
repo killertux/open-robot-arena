@@ -24,6 +24,7 @@ import os
 import struct
 import subprocess
 import sys
+import tempfile
 import zlib
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -135,6 +136,87 @@ def load_bmp(data):
     return w, h, out
 
 
+class Font:
+    """A `fg_*.giff`, dumped by `ra2 font` so that this stays a picture-maker."""
+
+    FIRST_CHAR = 34  # see `ra2fmt::giff`
+
+    def __init__(self, ra2_binary, cfz, name, tmpdir):
+        self.name = name
+        pgm = os.path.join(tmpdir, f"{name}.pgm")
+        out = subprocess.run(
+            [ra2_binary, "font", cfz, name, "--page", pgm],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.glyphs = {}
+        self.ascent = 0
+        for line in out.splitlines():
+            parts = line.split()
+            if parts[0] == "glyph":
+                self.glyphs[int(parts[1])] = (
+                    int(parts[2]), int(parts[3]), int(parts[4]),
+                    *(float(v) for v in parts[5:9]),
+                )
+            elif parts[0] == "ascent":
+                self.ascent = int(parts[1])
+        self.glyphs_only = [g for _, g in sorted(self.glyphs.items())]
+        raw = open(pgm, "rb").read().split(b"\n", 3)[3]
+        head = open(pgm, "rb").read().split(b"\n", 3)[1].split()
+        self.width, self.height = int(head[0]), int(head[1])
+        self.page = raw
+
+    def glyph(self, ch):
+        i = ord(ch) - self.FIRST_CHAR
+        if 0 <= i < len(self.glyphs_only):
+            return self.glyphs_only[i]
+        return None
+
+    def _rect(self, g):
+        adv, bear, third, u0, v0, u1, v1 = g
+        x0, x1 = round(u0 * self.width), round(u1 * self.width)
+        y0, y1 = self.height - round(v1 * self.height), self.height - round(v0 * self.height)
+        return adv, third, x0, y0, x1 - x0, y1 - y0
+
+    def space_advance(self):
+        """The table starts at `"` — the space and the bang are not in it — so a
+        space is given the median advance, which is what it looks like."""
+        advances = sorted(g[0] for g in self.glyphs_only if g[0] > 0)
+        return advances[len(advances) // 2]
+
+    def measure(self, text):
+        pen, space = 0, self.space_advance()
+        for ch in text:
+            g = self.glyph(ch)
+            pen += g[0] if g else space
+        return pen
+
+    def draw(self, canvas, width, height, x, y, text, tint):
+        """Draw with the widget's top-left at `(x, y)`; each glyph's cell hangs
+        from its own `third` above the baseline."""
+        pen = x
+        for ch in text:
+            g = self.glyph(ch)
+            if g is None:
+                pen += self.space_advance()
+                continue
+            adv, third, gx, gy, w, h = self._rect(g)
+            top = y + 0 - third          # the caller passes the baseline
+            for yy in range(h):
+                row = self.page[(gy + (h - 1 - yy)) * self.width + gx : (gy + (h - 1 - yy)) * self.width + gx + w]
+                for xx, v in enumerate(row):
+                    if not v:
+                        continue
+                    X, Y = int(pen + xx), int(top + yy)
+                    if 0 <= X < width and 0 <= Y < height:
+                        q = (Y * width + X) * 3
+                        # `v` is coverage, so blend towards the tint rather than
+                        # adding a fraction: white ink over dark cement.
+                        for c in range(3):
+                            want = tint[c] * 255.0
+                            canvas[q + c] = max(0, min(255, int(canvas[q + c] + (want - canvas[q + c]) * v / 255.0)))
+            pen += adv
+
+
 class Images:
     def __init__(self, root):
         self.root = root
@@ -163,9 +245,11 @@ class Images:
         return image
 
 
-def composite(lines, images, width, height):
+def composite(lines, images, width, height, game, args):
     canvas = bytearray(width * height * 3)  # black, opaque
     drawn = 0
+    fonts = {}
+    texts = []
     for line in lines:
         parts = line.split()
         if len(parts) < 13:
@@ -175,6 +259,11 @@ def composite(lines, images, width, height):
         tint = tuple(float(v) for v in parts[5:8])
         u0, v0, u1, v1 = (float(v) for v in parts[8:12])
         relative = " ".join(parts[12:])
+        if relative.startswith("text:"):
+            # `text:<font>:<r> <g> <b>:<the string>` — drawn after the images.
+            _, font_name, colour, body = relative.split(":", 3)
+            texts.append((x, y, font_name, tuple(float(c) for c in colour.split()), body))
+            continue
         image = images.get(relative)
         if image is None:
             continue
@@ -219,7 +308,33 @@ def composite(lines, images, width, height):
                     canvas[q] = (r * a + canvas[q] * inv) // 255
                     canvas[q + 1] = (g * a + canvas[q + 1] * inv) // 255
                     canvas[q + 2] = (b * a + canvas[q + 2] * inv) // 255
-    return canvas, drawn
+    engine = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "engine")
+    # Prefer the debug build: it is the one a working tree has just rebuilt.
+    for a in (os.path.join(engine, "target", "debug"), os.path.join(engine, "target", "release")):
+        if os.path.exists(os.path.join(a, "examples", "uidump")):
+            engine = os.path.join(a, "examples")
+            break
+    cfz = os.path.join(game, "RA2.cfz")
+    # `engine` is .../<profile>/examples; the CLI sits beside it.
+    tool = os.path.join(os.path.dirname(engine), "ra2")
+    for x, y, font_name, colour, body in texts:
+        font = fonts.get(font_name)
+        if font is None:
+            try:
+                font = Font(tool, cfz, font_name, tempfile.gettempdir())
+            except Exception as e:  # a missing face is not a failed composite
+                print(f"   could not load font {font_name}: {e}")
+                font = False
+            fonts[font_name] = font
+        if font is False:
+            continue
+        # The caller passes the box's top; the baseline is one ascent down it.
+        before = sum(canvas)
+        font.draw(canvas, width, height, x, y + font.ascent, body, colour)
+        after = sum(canvas)
+        if os.environ.get("UI_DEBUG"):
+            print(f"   text {body!r} at ({x},{y}) with {font_name}: {after - before} px")
+    return canvas, drawn, len(texts)
 
 
 def main():
@@ -255,7 +370,7 @@ def main():
 
     lines = [ln for ln in text.splitlines() if ln.strip()]
     images = Images(game)
-    canvas, drawn = composite(lines, images, args.width, args.height)
+    canvas, drawn, texts = composite(lines, images, args.width, args.height, game, args)
     write_png(args.out, args.width, args.height, canvas)
     print(f"wrote {args.out} ({args.width}x{args.height}), {drawn} of {len(lines)} drawables")
     if images.missing:

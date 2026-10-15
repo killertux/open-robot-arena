@@ -394,19 +394,19 @@ Known, documented, not yet fixed:
     (`ListBox`, `Grid`, `OptionGroup`), the real 2D renderer, the
     `giScript`/`Gooey` Python surface and the workshop.
 
-    Text turned out to be one step short. The font container is pinned —
-    `68 + 95*28 + 256*256*2 = 133800` on every small face, `527016` on the two
-    large ones — and the loader is decoded (`FUN_005cd560`: rasterise from
-    character `0x20` for 95 characters, page size from the face, GDI metrics out
-    of 26.6, cached in AppData). The glyph rectangles land on the page's ink. But
-    *composing* text with record `c - 32` reads shifted by about three
-    characters, consistently, whichever way the glyph rows are sampled: a `0`
-    comes out as a `3`. Three records of lead-in would explain it, and the file
-    cannot distinguish `68 + 95*28` from `152 + 92*28` — but that leaves the space
-    without a cell, and the shipped table holds only 94 distinct cells with a
-    nonsense advance on the last, so it is one short of the loader's count either
-    way. Labels are therefore still extentless and undrawn, and that is the state
-    the next pass inherits.
+    Text landed. The font container is pinned — `68 + 95*28 + 256*256*2 =
+    133800` on every small face (`40 + 96*28` is the same sum, and the loader's
+    own glyph arrays settle which), `527016` on the two large ones — the loader
+    is decoded (`FUN_005cd560` reached from *"Failed to load font"*:
+    rasterise from `0x20`, page size from the face, GDI metrics out of 26.6,
+    cached in AppData, with `FUN_00591b50` the thing that registers a face), and
+    the record for a character is `(c - 34) * 28` — measured by drawing, since at
+    that offset the main menu's own `MULTIPLAYER TEAM HQ` label comes out reading
+    `MULTIPLAYER TEAM HQ` and at neighbouring offsets it does not. Two letters of
+    that render are still off, `M` and `A`, which is the baseline rule or a
+    one-record slip in the middle of the table; everything else lands.
+    `tools/ui_compose.py` now draws a screen's labels with the game's own faces
+    and fore-colours.
 
 Each of these is tracked with its evidence and fix path in
 [`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F13).

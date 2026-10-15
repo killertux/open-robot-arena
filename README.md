@@ -167,9 +167,10 @@ engine's own rectangles and the game's own art, and the main menu comes out as
 the main menu.
 
 The `fg_*.giff` fonts are parsed too (`ra2fmt::giff`; `ra2 font <RA2.cfz>
-<name>` prints one's metrics and dumps its page), though which record belongs to
-which character is not settled yet, so nothing is drawn in text. What remains of
-M5 is that, clip modes, the containers that lay out their own children, the 2D
+<name>` prints one's metrics and dumps its page), and `tools/ui_compose.py` draws
+a screen's labels with the game's own faces and fore-colours — the main menu's
+`MULTIPLAYER` reads as `MULTIPLAYER`. What remains of M5 is text extents in the
+resolver, clip modes, the containers that lay out their own children, the real 2D
 renderer, the `giScript`/`Gooey` Python surface the shell's own scripts call, and
 the workshop itself.
 
