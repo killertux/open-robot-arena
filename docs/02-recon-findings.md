@@ -146,6 +146,21 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   rect; and one `Position` flag slot holds `1242948` in `hq_league.gib`.
 - Fonts are `fg_*.giff` inside `RA2.cfz` (nine of them, referenced by `_Font`),
   not loose files.
+- **The binary carries the same table.** The reader's field names sit in one
+  block of `.rdata` (about `0x708900`–`0x709400`), each field appearing twice:
+  bare, as the key the code looks up, and with the trailing space the writer
+  actually emits (`Name`/`Name `, `NumChildren`/`NumChildren `, `_Filename`/
+  `_Filename `). The block patterns are there too (`[Image]`, `[Text]`, `[Lines]`,
+  `?[Group]`, `?[SplitFrame]`, …). It is arranged by class inheritance, and it
+  settles the one thing a reader could get wrong: `[Widget]` owns
+  `NumChildren `, while `[Decorator]` — the base of `Background`/`Border`/
+  `Caption` — owns `Widget ` and no `NumChildren`. So "a block is a widget iff it
+  carries `NumChildren`" is the game's own rule, not an inference from the corpus.
+  `NumChildren ` is referenced from `0x5e7e04`.
+- **Screens are addressed by name from the C++**, so the names in the layouts are
+  the interface: literals like `"Multiplayer button"`, `"computer player button"`
+  and `"player icon img"` are in the binary, matching `Name` fields in
+  `UI/multiplayer/*.gib`.
 
 ### Other
 - Textures: BMP / TGA / JPG (mostly 256²/128²); many uncompressed TGA.
