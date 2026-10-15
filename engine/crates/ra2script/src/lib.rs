@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 pub mod arena;
 pub mod gooey;
@@ -64,6 +64,10 @@ pub struct BotSnapshot {
     pub components: Vec<(String, f32)>,
     /// World-space sphere of each component, for `plus.rayTest`.
     pub spheres: Vec<(Vec3, f32)>,
+    /// World-space oriented box of each component — `(centre, half-extents,
+    /// rotation)` — which is what `plus.rayTest` answers against: a part is
+    /// rarely a ball, and the flame jet is supposed to touch what it hits.
+    pub boxes: Vec<(Vec3, Vec3, Quat)>,
     /// `(component, amount, time)` of the last blow this robot landed.
     pub last_damage_done: (i32, f32, f32),
     /// …and the last one it took.

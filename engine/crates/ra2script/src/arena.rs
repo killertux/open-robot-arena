@@ -518,12 +518,18 @@ impl Arena {
         ));
     }
 
-    /// `SetActive(name, on)` — the cinderblock arenas hide and show props.
+    /// `SetActive(name, on)` — the cinderblock arenas hide and show props:
+    /// not there at all until a trap door opens over the pit.
+    ///
+    /// The simulator reads these as the *wanted* state and reconciles the
+    /// world against them every step, so the call is idempotent.
     #[pyo3(signature = (name, on))]
     fn SetActive(&self, name: &str, on: bool) {
         self.d().active.insert(name.to_string(), on);
     }
 
+    /// `SetPinned(name, on)` — the part stops moving where it is.
+    /// `flextop.py` pins its flexing floor when the hazards are off.
     #[pyo3(signature = (name, on))]
     fn SetPinned(&self, name: &str, on: bool) {
         self.d().pinned.insert(name.to_string(), on);

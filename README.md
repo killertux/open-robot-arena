@@ -131,11 +131,12 @@ fourteen stock arenas register and configure themselves — cameras, shadow
 receivers, the navigation map read from the `.map` files the arenas ship, the
 hazard zones and the collision lines that keep the AI off them — and the shipped
 AI drives the duel on the game's own eighth-of-a-second cadence. The hazards are
-wired to the physics as well: the box arena's spikes and saw become real
-prismatic joints with the script's own travel, the hinges the models declare are
-parsed and handed to `GetHinge`, and standing in a registered SmartZone reaches
-the script's own `ZoneEvent`. Moving the bodies those joints hold is the last
-piece. See `docs/06-deferred-fidelity.md` F13.
+landed too: the box arena's spikes and saw become real prismatic joints with the
+script's own travel, the hinges the models declare are parsed and handed to
+`GetHinge` (the Compressor's smash arms swing under the script's own power
+settings), and standing in a registered SmartZone reaches the script's own
+`ZoneEvent` — the spikes fire, and they hurt. What is left of M4 is presentation.
+See `docs/06-deferred-fidelity.md` F13.
 
 ## Layout
 

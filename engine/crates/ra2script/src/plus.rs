@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::arena::{Arena, ArenaDetail, HingeController, ParticleEmitter, PrismaticController};
 
@@ -196,9 +196,11 @@ fn force(bot: i32, x: f32, y: f32, z: f32) {
 
 /// `rayTest(from, to)` -> `(bot, component, x, y, z)`, or `(-1, -1, ...)`.
 ///
-/// Tested against the per-component spheres the engine publishes rather than the
-/// full hulls: it is the flame hazard's "did the jet reach a component" test, and
-/// a sphere per part is what the snapshot carries. See F13.
+/// The flame hazards are the callers: `Hazards.Flame.Tick` fires a ray down the
+/// jet and damages the first component it reaches. It is answered against the
+/// components' own oriented boxes rather than the spheres around them — a part
+/// is rarely a ball, and a flame that misses a spinner's blades by half a metre
+/// should not set them alight.
 #[pyfunction]
 #[pyo3(name = "rayTest")]
 fn ray_test(from: (f32, f32, f32), to: (f32, f32, f32)) -> (i32, i32, f32, f32, f32) {
@@ -214,17 +216,24 @@ fn ray_test(from: (f32, f32, f32), to: (f32, f32, f32)) -> (i32, i32, f32, f32, 
     let mut best = f32::INFINITY;
     let mut hit = (-1, -1);
     for (bi, bot) in st.bots.iter().enumerate() {
-        for (ci, (c, r)) in bot.spheres.iter().enumerate() {
-            let oc = a - *c;
-            let bq = oc.dot(u);
-            let disc = bq * bq - (oc.dot(oc) - r * r);
-            if disc < 0.0 {
-                continue;
+        if bot.boxes.is_empty() {
+            // No box for this part: the sphere around it, as before.
+            for (ci, (c, r)) in bot.spheres.iter().enumerate() {
+                if let Some(t) = ray_sphere(a, u, len, *c, *r) {
+                    if t < best {
+                        best = t;
+                        hit = (bi as i32, ci as i32);
+                    }
+                }
             }
-            let t = -bq - disc.sqrt();
-            if t > 0.0 && t < best && t <= len {
-                best = t;
-                hit = (bi as i32, ci as i32);
+            continue;
+        }
+        for (ci, (centre, half, rotation)) in bot.boxes.iter().enumerate() {
+            if let Some(t) = ray_box(a, u, len, *centre, *half, *rotation) {
+                if t < best {
+                    best = t;
+                    hit = (bi as i32, ci as i32);
+                }
             }
         }
     }
@@ -234,6 +243,60 @@ fn ray_test(from: (f32, f32, f32), to: (f32, f32, f32)) -> (i32, i32, f32, f32, 
     } else {
         (-1, -1, a.x, a.y, a.z)
     }
+}
+
+/// How far along `u` a ray enters a sphere, if it does.
+fn ray_sphere(origin: Vec3, u: Vec3, len: f32, centre: Vec3, radius: f32) -> Option<f32> {
+    let oc = origin - centre;
+    let bq = oc.dot(u);
+    let disc = bq * bq - (oc.dot(oc) - radius * radius);
+    if disc < 0.0 {
+        return None;
+    }
+    let t = -bq - disc.sqrt();
+    if t > 0.0 && t <= len {
+        Some(t)
+    } else {
+        None
+    }
+}
+
+/// How far along `u` a ray enters an oriented box, if it does.
+///
+/// The box is a component's own extents carried by its world rotation, so the
+/// ray is moved into the box's frame and clipped against its three slabs. Where
+/// the ray starts inside, the entry distance is zero.
+fn ray_box(
+    origin: Vec3,
+    u: Vec3,
+    len: f32,
+    centre: Vec3,
+    half: Vec3,
+    rotation: Quat,
+) -> Option<f32> {
+    let inv = rotation.conjugate();
+    let o = inv * (origin - centre);
+    let d = inv * u;
+    let mut enter = 0.0f32;
+    let mut exit = len;
+    for axis in 0..3 {
+        let (o, d, h) = (o[axis], d[axis], half[axis]);
+        if d.abs() < 1e-9 {
+            if o.abs() > h {
+                return None;
+            }
+            continue;
+        }
+        let t1 = (-h - o) / d;
+        let t2 = (h - o) / d;
+        let (near, far) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+        enter = enter.max(near);
+        exit = exit.min(far);
+        if enter > exit {
+            return None;
+        }
+    }
+    Some(enter)
 }
 
 #[pyfunction]
@@ -699,4 +762,51 @@ impl Ai {
     }
 
     fn ResetComponents(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BotSnapshot, Vec3};
+
+    /// A blade: long in Y, thin in X and Z. Its bounding sphere is 2 m across,
+    /// so it is the shape that tells the two tests apart.
+    fn a_blade() -> BotSnapshot {
+        BotSnapshot {
+            alive: true,
+            spheres: vec![(Vec3::ZERO, 2.0)],
+            boxes: vec![(Vec3::ZERO, Vec3::new(0.05, 2.0, 0.05), Quat::IDENTITY)],
+            ..BotSnapshot::default()
+        }
+    }
+
+    /// `rayTest` answers against the parts, not the balls around them.
+    ///
+    /// The flame jet is a short ray and it damages what it reaches, so a ray
+    /// that passes a hand's width to the side of a blade must not set it alight
+    /// — which is exactly what the bounding sphere would do.
+    #[test]
+    fn a_ray_tests_parts_not_their_bounding_balls() {
+        let _guard = crate::lock();
+        crate::state().bots = vec![a_blade()];
+
+        // Broadside: straight through the blade's thin axis.
+        let (bot, component, x, _, _) = ray_test((-3.0, 0.0, 0.0), (3.0, 0.0, 0.0));
+        assert_eq!((bot, component), (0, 0), "the ray should hit the blade");
+        assert!((x + 0.05).abs() < 1e-3, "hit point x = {x}");
+
+        // A metre to the side, still inside the bounding sphere but clear of
+        // the blade itself.
+        let missed = ray_test((-3.0, 0.0, 1.0), (3.0, 0.0, 1.0));
+        assert_eq!(missed.0, -1, "the ray should miss the blade: {missed:?}");
+
+        // Without a box for the part, the sphere is what is left.
+        crate::state().bots[0].boxes.clear();
+        let crude = ray_test((-3.0, 0.0, 1.0), (3.0, 0.0, 1.0));
+        assert_eq!(
+            crude.0, 0,
+            "the sphere fallback should still hit: {crude:?}"
+        );
+        crate::state().bots.clear();
+    }
 }

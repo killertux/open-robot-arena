@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use ra2script::{BotSnapshot, ScriptHost};
 
 use crate::backend::PhysicsBackend;
@@ -56,8 +56,18 @@ pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
             )
         })
         .collect();
-    let spheres = (0..robot.rig.components.len())
+    let spheres: Vec<(Vec3, f32)> = (0..robot.rig.components.len())
         .map(|i| robot.component_sphere(&worlds, i))
+        .collect();
+    // The same parts as oriented boxes: the components' own local extents,
+    // carried by their world rotation. Exact for a box-shaped part, and far
+    // tighter than the sphere around it for anything long or flat.
+    let boxes: Vec<(Vec3, Vec3, Quat)> = (0..robot.rig.components.len())
+        .map(|i| {
+            let c = &robot.rig.components[i];
+            let (_, rotation, _) = worlds[i].to_scale_rotation_translation();
+            (spheres[i].0, c.half_extents(), rotation)
+        })
         .collect();
 
     BotSnapshot {
@@ -74,6 +84,7 @@ pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
         mass: robot.remaining_mass(),
         components,
         spheres,
+        boxes,
         last_damage_done: (0, 0.0, 0.0),
         last_damage_received: (0, 0.0, 0.0),
     }

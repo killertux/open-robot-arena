@@ -440,6 +440,27 @@ impl PhysicsBackend for JoltBackend {
             .unwrap_or(0.0)
     }
 
+    fn set_motion_type(
+        &mut self,
+        handle: BodyHandle,
+        motion: MotionType,
+    ) -> Result<(), BackendError> {
+        let Some(id) = self.id(handle) else {
+            return Err(BackendError::Body("motion type on a missing body".into()));
+        };
+        let mut body = self
+            .world
+            .body_mut(id)
+            .map_err(|e| BackendError::Body(format!("motion type: {e:?}")))?;
+        let oxi = match motion {
+            MotionType::Static => oxijolt::MotionType::Static,
+            MotionType::Dynamic => oxijolt::MotionType::Dynamic,
+            MotionType::Kinematic => oxijolt::MotionType::Kinematic,
+        };
+        body.set_motion_type(oxi, Activation::Activate)
+            .map_err(|e| BackendError::Body(format!("motion type: {e:?}")))
+    }
+
     fn set_body_shape(
         &mut self,
         handle: BodyHandle,

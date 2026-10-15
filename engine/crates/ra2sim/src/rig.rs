@@ -209,6 +209,15 @@ impl Component {
         (self.min + self.max) * 0.5
     }
 
+    /// Half the component's own axis-aligned extent, in its local frame.
+    ///
+    /// The oriented box the script layer tests `plus.rayTest` against: a part is
+    /// rarely a ball (a spinner's blades least of all), and this is the shape the
+    /// component actually occupies.
+    pub fn half_extents(&self) -> Vec3 {
+        (self.max - self.min) * 0.5
+    }
+
     /// Rolling radius of a wheel: half its extent across the axle (a wheel mesh
     /// is a disc in the component's XY plane, so the axle is Z).
     pub fn wheel_radius(&self) -> f32 {

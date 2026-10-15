@@ -355,6 +355,20 @@ pub trait PhysicsBackend {
         0.0
     }
 
+    /// Make a body static, dynamic or kinematic in place.
+    ///
+    /// The arena scripts' `SetPinned(name, True)` wants exactly this: the named
+    /// part stops moving, wherever it happens to be.
+    fn set_motion_type(
+        &mut self,
+        _handle: BodyHandle,
+        _motion: MotionType,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Body(
+            "set_motion_type unsupported by this backend".into(),
+        ))
+    }
+
     /// Replace a body's collision shape in place, optionally with a new mass.
     /// Used to rebuild a robot's body after a part comes off: the body keeps its
     /// id, pose and joints.

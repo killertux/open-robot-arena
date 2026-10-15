@@ -21,7 +21,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F10 | Chassis skin decals; 16 %-light weight gap | **landed** (weight: see F12) |
 | F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
 | F12 | Component mass when the `.gmf` stores zero | identified (wheels); rule open |
-| F13 | The script layer (M4) | arenas, the shipped AI and the hazard joints **landed**; driving their bodies is next |
+| F13 | The script layer (M4) | **landed**: arenas, the shipped AI, the hazards and their zones all run the game's own code |
 
 ---
 
@@ -982,26 +982,89 @@ into builtins) and the `tickInterval` attribute the engine owes a brain.
 `AI/*.py`'s `import Gooey` is served by a stub, because the shipped
 `Scripts/Gooey.py` reaches the engine's UI module `giScript`, which is M5.
 
+**Landed: the hazards half, and the spikes fire.** The scripts' hazards now
+reach the world. The seam is *data*, as everywhere else: a script asks for a
+joint, the engine records the request with the live settings object the script
+will go on driving, and the simulator builds the joint at the top of the next
+step — by which time every hazard's `__init__` has run and its power settings are
+in place.
+
+- **The joints are the scripts' own.** `AddPrismatic('arena_collision',
+  'spikes1', 0, 1, 0, 0, .8, 0)` becomes a real prismatic joint with the script's
+  travel. The scripts write the limits *unordered* (`0.8` then `0` — `neutral`
+  first), so the engine takes the min and the max relative to the neutral pose:
+  the spikes get `[0, 0.80]` and the saw `[0, 0.56]`, both exactly what
+  `Arenas/box.py` asks for.
+- **The model's hinges** were being thrown away: `gmi` skipped the solver's
+  constraint list entirely. It now reads it — name, both bodies, pivot, axis,
+  `IS_LIMITED`, `FRICTION`, `ANGLE_LIMITS` — taking the pivot from the node's
+  `TM_ROW3` and the axis from `TM_ROW1`, which is exactly how the exported `.gmf`
+  spells out `*POINT`/`*SPIN_AXIS`. `GetHinge('Hinge01')` is now a real hinge, and
+  the Compressor Arena's four smash arms come back on the model's own axes, limited
+  to the model's own `0.00 .. 0.27 rad`. (The script layer changes the process's
+  working directory to the game root, so the arena path is made absolute at the top
+  of `Duel::new` — otherwise the *model* the script names can no longer be found
+  from the relative path the runner was given, and every `GetHinge` silently
+  failed.)
+- **The zones** are the model's own trigger volumes, resolved by name against the
+  arena's geometry. Each step the engine tests every robot's components against
+  them and calls `ZoneEvent(direction, id, robot, chassis)` on entry and exit —
+  `robot` counting from one, the way `Hazards.Electricity` and `AI.SuperAI` both
+  immediately do `robot - 1`.
+- **The arena's `Tick`** runs at its own quarter-second cadence, so the hazards'
+  timers advance. Ticking the hazards themselves is the *scripts'* job and needs
+  nothing from us: `BoxArena.Tick` calls `self.spikes1.Tick()`.
+- **The drive is the script's own numbers.** `Lock(True)` leaves the motor off,
+  which is how a joint parks — its friction holds it, the way a parked piston does
+  (F8); `SetPowerSettings` + `SetDirection` drive at the script's speed, with
+  twice the script's torque (×40, F3) as the cap; `SetDirection` is read as the
+  sign selector it is (`PitSlider` passes `1`, `Hammer` `±100`); and
+  `ApplyForce`/`ApplyTorque` are one-shot impulses along the joint's own axis,
+  which is what `Spikes.FireTeeth`'s single `ApplyForce(40000)` is.
+- **`Arena.SetActive`/`SetPinned`** are the arena's own switches, and the scripts
+  state a *want* rather than an event (`parkinglot.py` hides all 25 cinder blocks
+  on the way in and drops them in when a trap door opens; `flextop.py` pins its
+  flexing floor). The engine reads those wishes every step and reconciles the
+  world against them: a hidden prop's body is removed and rebuilt from its own
+  `.gmf` definition when asked for, and a pinned one is made static where it is.
+- **`plus.rayTest`** — the flame's "did the jet reach a part" — now answers
+  against each component's oriented box rather than the sphere around it. A part
+  is rarely a ball, and a flame half a metre off a spinner's blades should not set
+  them alight.
+
+Three real bugs came out of this, and all three were in the engine rather than the
+scripts:
+
+- **A shared collision proxy was being re-placed per body.** The Combat Arena has
+  one `spike_collision` object, sitting at spikes1's position, named as the
+  collision proxy by *both* spike bodies — so placing it absolutely put spikes2's
+  collider 8.6 m away at spikes1's, and Jolt rejected any joint on it. Geometry is
+  now placed relative to the proxy it hangs under, which is what a reused proxy
+  means.
+- **Impulses were ignored on sleeping bodies.** Jolt parks a settled body and drops
+  an impulse into one — the same gotcha `set_velocity` already had. A hazard pushes
+  a part that has not moved since the match began.
+- **The arena path went stale after the script layer's `chdir`** (above).
+
 **Still open, in order:**
 
-1. **Hazards do not move yet.** `AddPrismatic`/`GetHinge` return the right
-   controller objects with the right settings (`SetPowerSettings`,
-   `Lock`, `SetDirection`, `ApplyForce`, `ApplyTorque`, `SetAutoLock(s)`), but the
-   joints are not yet created on the arena's own rigid bodies and `ZoneEvent` is
-   not yet dispatched when a robot crosses a registered SmartZone. That is the
-   next slice, and it is what makes the spikes, saws, hammers and pit sliders fire.
-3. **The match layer.** `plus.damage`/`force`/`zap`/`getLocation`/`getWeight`/
-   `rayTest`/`isDefeated` are wired to a `MatchApi` seam the simulator implements;
-   installing it, and driving the arena's `Tick` and the AIs from the duel loop,
-   is the last piece.
-4. **Presentation** — audio, camera motion, particles and the Gooey UI — is
+1. **Presentation** — audio, camera motion, particles and the Gooey UI — is
    accepted and *recorded* (a run reports what it dropped) and belongs to M5.
+   `plus.zap`'s visual is the same. `AddHazard`'s locations feed the AI's hazard
+   avoidance through the Python base class, so nothing is owed there.
 
-**Verified:** standing a robot in `spike_zone2` fires the hazard — the zone
-event reaches `Spikes.ZoneEvent`, the arena's `Tick` counts its two quarter
-seconds, and `FireTeeth` unlocks the prismatic the script created — and the box
-arena's three joints (two spikes and the saw) are all built with the script's own
-travel. The shipped AI closes the fight — the test drives Roly Poly against
+**Verified:** the hazards are pinned end to end. Standing a robot in
+`spike_zone2` fires the hazard: the zone event reaches `BoxArena.ZoneEvent`, the
+script's own `Tick` counts its two quarter-seconds, `Spikes.FireTeeth` unlocks the
+prismatic the script created, and the spike body shoots a fifth of a metre up out
+of the floor with the robot standing on it (0.8 m, its whole travel, when nothing
+is — `a_slider_lets_its_body_rise`). The Compressor Arena's four smash arms swing
+under `Hazards.Smasher`'s own `SetPowerSettings`/`SetDirection`
+(`the_models_own_hinges_are_driven_by_the_script`), and a Parking Lot cinder block
+leaves the world and comes back when the script asks
+(`the_arena_can_hide_a_body_and_pin_one`). The box arena's three joints (two spikes
+and the saw) all build with the script's own travel. The shipped AI closes the
+fight — the test drives Roly Poly against
 Little Metal Friend in the Combat Arena for 20 s at the engine's own 1/60 step and
 requires the closest gap to go under a metre and damage to land (it reaches contact
 by t≈8.5 s and both take hits); all fourteen stock arenas register from their own

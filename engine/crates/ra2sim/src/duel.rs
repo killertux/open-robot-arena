@@ -34,6 +34,30 @@ pub struct BotSetup {
     pub spawn: Option<[f32; 2]>,
 }
 
+/// The handle a hidden prop's slot carries while its body is gone.
+///
+/// A body handle is a `u32`, so the top value is free. `Arena.SetActive(name,
+/// False)` removes the body and leaves this behind; `True` builds a fresh one
+/// from the prop's own definition.
+const HIDDEN_PROP: BodyHandle = u32::MAX;
+
+/// Build one arena prop's body from its `.gmf` rigid body definition.
+fn spawn_prop(physics: &mut dyn PhysicsBackend, p: &crate::scene::Prop) -> Option<BodyHandle> {
+    let desc = BodyDesc::new(
+        MotionType::Dynamic,
+        ShapeDesc::ConvexHull {
+            points: p.hull_points.clone(),
+        },
+    )
+    .at(p.position)
+    .with_rotation(p.rotation)
+    .with_friction(p.friction)
+    .with_restitution(p.restitution)
+    .with_mass(p.mass)
+    .with_user_data(USER_PROP);
+    physics.create_body(&desc).ok()
+}
+
 /// A duel: physics world, arena, two robots, debris and the damage model.
 pub struct Duel {
     pub physics: Box<dyn PhysicsBackend>,
@@ -76,6 +100,9 @@ pub struct Duel {
     zone_inside: Vec<Vec<bool>>,
     /// Seconds until the arena's own `Tick` runs again.
     arena_timer: f32,
+    /// The `SetPinned` wishes already applied, so the reconciliation below only
+    /// talks to the physics when the script actually changed its mind.
+    applied_pinned: std::collections::BTreeMap<String, bool>,
 }
 
 /// What the AI is doing right now.
@@ -173,19 +200,7 @@ impl Duel {
 
         let mut props = Vec::new();
         for p in prop_defs {
-            let desc = BodyDesc::new(
-                MotionType::Dynamic,
-                ShapeDesc::ConvexHull {
-                    points: p.hull_points.clone(),
-                },
-            )
-            .at(p.position)
-            .with_rotation(p.rotation)
-            .with_friction(p.friction)
-            .with_restitution(p.restitution)
-            .with_mass(p.mass)
-            .with_user_data(USER_PROP);
-            if let Ok(body) = physics.create_body(&desc) {
+            if let Some(body) = spawn_prop(&mut *physics, &p) {
                 props.push(PropEntity { body, prop: p });
             }
         }
@@ -337,6 +352,7 @@ impl Duel {
             zone_inside: vec![vec![false; n]; zones.len()],
             zones,
             arena_timer: 0.0,
+            applied_pinned: std::collections::BTreeMap::new(),
         })
     }
 
@@ -635,6 +651,67 @@ impl Duel {
         }
     }
 
+    /// Reconcile the arena's own `SetPinned`/`SetActive` wishes.
+    ///
+    /// The scripts state what they *want* and the engine makes the world match:
+    /// `flextop.py` pins its flexing floor when the hazards are off, and
+    /// `parkinglot.py` keeps all 25 cinder blocks out of the world until a trap
+    /// door opens over the pit and drops them in. Both calls are therefore
+    /// idempotent, and both are read from the arena script's own records every
+    /// step, so a hazard that flips them mid-match is picked up.
+    fn apply_arena_flags(&mut self) {
+        let (pinned, active) = {
+            let st = ra2script::state();
+            let Some(arena) = st.arena.as_ref() else {
+                return;
+            };
+            let d = arena.lock().unwrap_or_else(|e| e.into_inner());
+            if d.pinned.is_empty() && d.active.is_empty() {
+                return;
+            }
+            (d.pinned.clone(), d.active.clone())
+        };
+
+        for (name, on) in &pinned {
+            if self.applied_pinned.get(name) == Some(on) {
+                continue;
+            }
+            let target = if *on {
+                MotionType::Static
+            } else {
+                MotionType::Dynamic
+            };
+            let Some(p) = self.props.iter().find(|p| &p.prop.name == name) else {
+                continue;
+            };
+            if p.body == HIDDEN_PROP {
+                continue;
+            }
+            match self.physics.set_motion_type(p.body, target) {
+                Ok(()) => {
+                    self.applied_pinned.insert(name.clone(), *on);
+                }
+                Err(e) => self.log.push(format!("SetPinned({name:?}): {e}")),
+            }
+        }
+
+        for (name, on) in &active {
+            let Some(i) = self.props.iter().position(|p| &p.prop.name == name) else {
+                continue;
+            };
+            let hidden = self.props[i].body == HIDDEN_PROP;
+            if *on && hidden {
+                match spawn_prop(&mut *self.physics, &self.props[i].prop) {
+                    Some(body) => self.props[i].body = body,
+                    None => self.log.push(format!("SetActive({name:?}): body failed")),
+                }
+            } else if !*on && !hidden {
+                self.physics.remove_body(self.props[i].body);
+                self.props[i].body = HIDDEN_PROP;
+            }
+        }
+    }
+
     /// Drive every hazard joint from the settings its script last set.
     ///
     /// `Lock(True)` (or a zero speed/direction) leaves the motor off, which is
@@ -653,7 +730,20 @@ impl Duel {
                 self.physics.drive_hinge(j.handle, target);
             }
             if force != 0.0 {
+                eprintln!(
+                    "  [impulse] {force} along {:?} before {:?}",
+                    j.axis,
+                    self.physics
+                        .state(j.body)
+                        .map(|s| (s.position, s.linear_velocity))
+                );
                 self.physics.apply_impulse(j.body, j.axis * force * dt);
+                eprintln!(
+                    "  [impulse] after {:?}",
+                    self.physics
+                        .state(j.body)
+                        .map(|s| (s.position, s.linear_velocity))
+                );
             }
             if torque != 0.0 {
                 self.physics
@@ -756,6 +846,7 @@ impl Duel {
         // power settings are in place), fire the zone events, run its `Tick`,
         // and set the motors the hazards want for this step.
         self.build_joints();
+        self.apply_arena_flags();
         self.watch_zones();
         self.run_arena_tick(dt);
         self.drive_joints(dt);
@@ -1231,20 +1322,66 @@ mod tests {
     /// is pinned by the lowest of them, and the motion grows with height above
     /// it. All 57 stock bots ship uncrushed, so this is a change we make, not one
     /// we read back.
-    /// M4/F13: a hazard fires when a robot enters its SmartZone.
+    /// A spike slider, built the way the engine builds the arena's own.
     ///
-    /// The loop from the arena's data to the script's own hazard code: the zones
-    /// come from the model, `Arenas/box.py` registered them, and standing in one
-    /// reaches `Spikes.ZoneEvent` — which arms the hazard, whose `Tick` then
-    /// calls `FireTeeth` and unlocks the prismatic the script created. What the
-    /// unlocked joint does to the spike body is still open; see F13.
+    /// Isolates the physics from the script layer: a static pin, a 40 kg body
+    /// (the Combat Arena's spikes weigh exactly that), the script's own travel
+    /// and the script's own 40000 push. `FireTeeth` is one push over one step,
+    /// so the spike shoots up its whole travel and then falls back under
+    /// gravity until the next punch — which is why this measures the peak.
+    #[test]
+    fn a_slider_lets_its_body_rise() {
+        let mut physics: Box<dyn PhysicsBackend> =
+            Box::new(crate::jolt::JoltBackend::new(Vec3::new(0.0, -9.81, 0.0)).unwrap());
+        let anchor = physics
+            .create_body(
+                &BodyDesc::new(MotionType::Static, ShapeDesc::Sphere { radius: 0.5 })
+                    .with_sensor(true),
+            )
+            .unwrap();
+        let body = physics
+            .create_body(
+                &BodyDesc::new(MotionType::Dynamic, ShapeDesc::Sphere { radius: 0.3 })
+                    .with_mass(40.0),
+            )
+            .unwrap();
+        let desc = crate::backend::SliderDesc {
+            body_a: anchor,
+            body_b: body,
+            anchor_a: Vec3::ZERO,
+            anchor_b: Vec3::ZERO,
+            axis_a: Vec3::Y,
+            axis_b: Vec3::Y,
+            limits: hazards::slider_limits(0.0, 0.8, 0.0),
+            max_force: 1.0,
+            friction_force: 1.0,
+        };
+        let joint = physics.create_slider(&desc).expect("the slider");
+        physics.drive_slider(joint, 0.0);
+        // `ApplyForce(40000)` over one 60 Hz step, the way the hazard pushes.
+        physics.apply_impulse(body, Vec3::Y * 40000.0 * (1.0 / 60.0));
+        let mut peak = 0.0f32;
+        for _ in 0..30 {
+            physics.step(1.0 / 60.0);
+            peak = peak.max(physics.state(body).unwrap().position.y);
+        }
+        let travel = hazards::slider_limits(0.0, 0.8, 0.0)[1];
+        assert!(
+            peak > travel - 0.05,
+            "the body never reached its travel: peak {peak}, travel {travel}"
+        );
+    }
+
+    /// M4/F13: the arena's spikes fire when a robot enters their SmartZone.
     ///
-    /// The zones and the joints themselves are asserted first, because they are
-    /// what the engine reads out of the game's own data:
-    /// `Arenas/box.py` registered them, the script's `Spikes.ZoneEvent` arms the
-    /// hazard, its `Tick` counts two of the arena's quarter-seconds and calls
-    /// `FireTeeth`, and that unlocks the prismatic the script created and pushes
-    /// it along its axis. The spike body rising is the proof it all connected.
+    /// The whole loop, from the arena's own data to the game's own hazard code:
+    /// the zones come from the model (`saw_zone`, `spike_zone1`, `spike_zone2`),
+    /// `Arenas/box.py` registered them, and the engine tells the script when a
+    /// robot crosses one. `BoxArena.ZoneEvent` arms the right hazard,
+    /// `BoxArena.Tick` — the game's own Python, running at the arena's quarter
+    /// second — ticks it, and after two ticks `Spikes.FireTeeth` unlocks the
+    /// prismatic the script created and punches it with 40000. The spike body
+    /// shooting up its travel is the proof the whole chain connected.
     ///
     /// Robot 1 is *placed* in the zone rather than driven there: the stock bots'
     /// traction on the arena floor is marginal for about a quarter of them
@@ -1295,19 +1432,185 @@ mod tests {
             duel.log
         );
 
-        // `Spikes.Tick` counts two arena ticks — half a second — before firing.
-        // Firing is `FireTeeth`: the script unlocks the prismatic it was handed
-        // and pushes it with 40000 — the joint is the script's, driven by the
-        // script's own numbers.
-        let _ = spike;
+        // `Spikes.Tick` counts two arena ticks — half a second — before firing,
+        // and `FireTeeth` is one push over one step, so the spike shoots up and
+        // falls back until the next punch. Watch the peak, not the end state.
+        let rest = duel.physics.state(spike).map(|s| s.position.y).unwrap();
+        let mut peak = rest;
         for _ in 0..(2.0 / dt) as usize {
             duel.step_direct(&[DriveInput::default(), DriveInput::default()], dt);
+            peak = peak.max(duel.physics.state(spike).map(|s| s.position.y).unwrap());
         }
         let fired = duel.joints.iter().any(|j| {
             let d = j.drive.lock().unwrap_or_else(|e| e.into_inner());
             !d.locked
         });
         assert!(fired, "the spikes never fired: {:?}", duel.log);
+        // The spike shoots up its travel only when nothing is in the way; the
+        // robot is standing on this one (it spawned in the zone), so the punch
+        // is stopped early. A fifth of a metre is still the punch landing.
+        assert!(
+            peak > rest + 0.15,
+            "the spikes never punched: {rest} -> {peak} ({:?})",
+            duel.log
+        );
+    }
+
+    /// M4/F13: a hinge the *model* declares is driven by the script.
+    ///
+    /// The Compressor Arena's four smash arms are hinges in the `.gmf`, and
+    /// `Hazards.Smasher.__init__` starts retracting them the moment the arena is
+    /// set up — `SetPowerSettings(12, 700)` then `SetDirection(-100)`. Nothing in
+    /// the script moves a body: it names a hinge and states a speed, which is the
+    /// whole of the hazard drive.
+    #[test]
+    fn the_models_own_hinges_are_driven_by_the_script() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game
+            .join("Arenas/compressor.py")
+            .to_string_lossy()
+            .to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+
+        let idle = [DriveInput::default(), DriveInput::default()];
+        let dt = 1.0 / 60.0;
+        // The joints are built at the top of the first step.
+        duel.step_direct(&idle, dt);
+        let swings: Vec<crate::backend::JointHandle> = duel
+            .joints
+            .iter()
+            .filter(|j| !j.slider)
+            .map(|j| j.handle)
+            .collect();
+        assert_eq!(
+            swings.len(),
+            4,
+            "the compressor declares four smash arms: {:?}",
+            duel.log
+        );
+        for _ in 0..30 {
+            duel.step_direct(&idle, dt);
+        }
+        let before: Vec<f32> = swings
+            .iter()
+            .map(|h| duel.physics.hinge_angle(*h))
+            .collect();
+        for _ in 0..120 {
+            duel.step_direct(&idle, dt);
+        }
+        let after: Vec<f32> = swings
+            .iter()
+            .map(|h| duel.physics.hinge_angle(*h))
+            .collect();
+        assert!(
+            before.iter().zip(&after).any(|(a, b)| (b - a).abs() > 0.05),
+            "no smash arm moved: {before:?} -> {after:?}"
+        );
+    }
+
+    /// M4/F13: `Arena.SetActive` and `Arena.SetPinned` really change the world.
+    ///
+    /// The Parking Lot's cinder blocks are not scenery until a trap door opens
+    /// over the pit: `parkinglot.py` calls `SetActive("cinderblockN", False)` for
+    /// all of them on the way in, and `True` for the ones above a door that has
+    /// just dropped. `SetPinned` is its counterpart (`flextop.py` pins its
+    /// flexing floor when the hazards are off). The engine reads both as the
+    /// *wanted* state and reconciles the world against them.
+    #[test]
+    fn the_arena_can_hide_a_body_and_pin_one() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game
+            .join("Arenas/parkinglot.py")
+            .to_string_lossy()
+            .to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        assert!(
+            duel.props.iter().any(|p| p.prop.name == "cinderblock1"),
+            "the Parking Lot ships cinder blocks"
+        );
+
+        let body_of = |d: &Duel, name: &str| {
+            d.props
+                .iter()
+                .find(|p| p.prop.name == name)
+                .map(|p| p.body)
+                .expect("the named prop")
+        };
+        // The script hid them while the arena was being set up.
+        let dt = 1.0 / 60.0;
+        let idle = [DriveInput::default(), DriveInput::default()];
+        duel.step_direct(&idle, dt);
+        assert_eq!(
+            body_of(&duel, "cinderblock1"),
+            HIDDEN_PROP,
+            "the block should be out of the world"
+        );
+
+        // A trap door opens over the pit, and the block is pinned where it
+        // spawns — 6 m up, so a body that is not pinned would be falling.
+        {
+            let st = ra2script::state();
+            let a = st.arena.as_ref().expect("a scripted arena");
+            let mut d = a.lock().unwrap();
+            d.active.insert("cinderblock1".to_string(), true);
+            d.pinned.insert("cinderblock1".to_string(), true);
+        }
+        for _ in 0..30 {
+            duel.step_direct(&idle, dt);
+        }
+        let live = body_of(&duel, "cinderblock1");
+        assert_ne!(live, HIDDEN_PROP, "the block never came back");
+        let held = duel.physics.state(live).expect("the block is in the world");
+        for _ in 0..30 {
+            duel.step_direct(&idle, dt);
+        }
+        let still = duel.physics.state(live).expect("the block is in the world");
+        assert!(
+            (still.position.y - held.position.y).abs() < 0.05,
+            "a pinned body moved: {} -> {}",
+            held.position.y,
+            still.position.y
+        );
+
+        // And unpinning it lets it drop the six metres to the floor.
+        {
+            let st = ra2script::state();
+            let a = st.arena.as_ref().expect("a scripted arena");
+            a.lock()
+                .unwrap()
+                .pinned
+                .insert("cinderblock1".to_string(), false);
+        }
+        for _ in 0..30 {
+            duel.step_direct(&idle, dt);
+        }
+        let fallen = duel.physics.state(live).expect("the block is in the world");
+        assert!(
+            fallen.position.y < held.position.y - 0.5,
+            "an unpinned body did not fall: {} -> {}",
+            held.position.y,
+            fallen.position.y
+        );
     }
 
     /// M4/F13: the game's own AI closes the fight.
