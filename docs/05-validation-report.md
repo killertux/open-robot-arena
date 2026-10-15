@@ -296,8 +296,17 @@ Known, documented, not yet fixed:
     — the rule we implement. Mud Runner's row is self-consistent aluminium and the
     documented 418.6 kg would need steel on the same chassis (421 kg). **[INFERRED]**
 
+19. **Component mass where the `.gmf` stores zero — identified (F12).** Every
+    stock wheel's rigid body stores `mass = 0` (eight wheel meshes, plus
+    `slipperbottom` and `cannon_txt`), and PyRA2 notes a zero-mass body never
+    moves, so the engine supplies the mass somewhere. We do not: `ra2sim::rig`
+    falls back to an invented 8 kg. Four `mudtire` wheels at 8 kg are 32 kg of
+    Mud Runner's 360.6 kg, and the documented 418.6 kg wants 58 kg more — exactly
+    22.5 kg per wheel — which supersedes the armour reading in F10. The rule
+    itself (volume-derived or a definition value) is still open. **[OPEN]**
+
 Each of these is tracked with its evidence and fix path in
-[`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F11).
+[`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F12).
 
 ---
 
@@ -370,12 +379,14 @@ The remaining blocker is *behaviour*, not the parts' parameters or the arenas:
    reaches the floor also presses with its full torque and lifts the robot; the
    original only spins one when it is told to. The game's own answer is the
    shipped Python AI, which needs the script layer.
-2. **F7's numbers.** The impact-to-damage conversion is calibrated, not
-   recovered; component `hitpoints` are defaults for 122 of 131 stock parts; and
-   `fracture` (a per-hit reduction, on the reading that fits the control board's
-   41 and the hazard's 25) and `material` are unparsed.
+2. **F7's numbers.** The impact-to-damage conversion is still calibrated rather
+   than recovered, and `fracture`/`material` are parsed but their gameplay effect
+   is unconfirmed. Hitpoints are no longer on the list: they are the engine's own
+   per-category table (see §4.13).
 3. **F9's remainder.** Buckling exists but its *rate* is inferred and its
    silhouette is smooth rather than the game's subdivided crush mesh.
-4. **F6 — the friction combination law**, if the drive survey needs it.
-5. **F4's `contact` surface** as a separate collider, once the `contact` and
-   `passthru` object sets can be separated safely.
+4. **F12 — the mass a zero-mass rigid body gets** (F10's residual). Every wheel
+   stores `mass = 0`, so it, not the armour, is the likely source of the 16 %.
+5. **F6 — the friction combination law**, if the drive survey needs it.
+6. **F1's residual** — where the spinner's height comes from, which the preview
+   cannot settle.

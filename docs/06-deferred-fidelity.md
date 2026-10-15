@@ -15,11 +15,12 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` is the material tag, not a collider) |
 | F5 | Collision shape kinds (`SIMULATION_GEOMETRY`, `HAVOK_GEO_TYPE`) | **landed** |
 | F6 | Friction combination law differs from Havok 1.x | blocked on the binding |
-| F7 | Damage model: an event, not a per-step integral | shape landed; numbers half-sourced |
+| F7 | Damage model: an event, not a per-step integral | shape and hitpoints landed; the impact formula is still calibrated |
 | F8 | Pistons slide their children (prismatic) | **landed** (nothing drives them yet) |
 | F9 | The chassis buckles (crush points from the `.bot`) | **landed** (rate inferred) |
-| F10 | Chassis skin decals; 16 %-light weight gap | **landed** (weight: explained) |
+| F10 | Chassis skin decals; 16 %-light weight gap | **landed** (weight: see F12) |
 | F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
+| F12 | Component mass when the `.gmf` stores zero | identified (wheels); rule open |
 
 ---
 
@@ -869,8 +870,34 @@ class to prove little.
 For Mud Runner itself the file stores `1 12 … 200`: **aluminium**, weight 12,
 hardness 200 — which is 2× the editor's 100, precisely the AI-bot convention, so
 the row is self-consistent. Our 7.55 m² chassis at 12 kg/m² gives 90.6 kg and
-360.6 kg total; the doc's 418.6 kg would need **steel** (20 kg/m²) on the same
-chassis, giving 421 kg — inside 0.6 % of the doc's figure. The likeliest reading
-is therefore that the doc's Mud Runner carried steel, i.e. a different revision of
-a bot whose shipped copy is hand-edited. **[INFERRED]** — kept in the open list
-only as this note; nothing in our rule is outstanding.
+360.6 kg total. Two readings fit the doc's 418.6 kg: **steel** armour on the same
+chassis gives 421 kg (0.6 % over), while the wheels' missing mass (F12) accounts
+for the 58 kg exactly. **F12 supersedes this paragraph** — the wheels are the only
+stock family whose rigid bodies store no mass at all, which is the single-cause
+effect a 16 % gap should have.
+
+---
+
+## F12 — Component mass when the `.gmf` stores zero
+
+**Discovered while closing F7's hitpoints; it very likely explains F10's 16 %.**
+
+Every stock wheel's rigid body stores `mass = 0` — `fatboy_wheel1`, `miniwheel`,
+`mudtire`, `shinywheel1`, `wheel1`, `wheel2`, `wheel3`, `wheel_slim` — as do
+`slipperbottom` and `cannon_txt`. PyRA2's own note is that "a body with no mass
+(or an explicit `UNYIELDING`) never moves", so the engine has to be giving these
+their mass somewhere. **Ours does not:** `ra2sim::rig` sums the scene's rigid-body
+masses and falls back to an invented **8.0 kg** when the sum is zero.
+
+That is a better explanation of F10's weight gap than the armour reading was. Mud
+Runner carries four `mudtire` wheels; at 8 kg each they are 32 kg of its 360.6 kg,
+and the documented 418.6 kg wants **58 kg more — exactly 22.5 kg per wheel**,
+where the "different armour" reading (steel) overshot by 2.4 kg. Wheels are also
+the only stock family with a zero mass, which is the kind of single-cause effect
+a 16 % gap should have.
+
+What is missing is the rule itself. The candidates are a mass computed from the
+collision geometry (`volume × density`, Havok's idiom for a zero-mass body) or a
+value from the definition — the factory `FUN_0045cf40` does read one definition
+number into `*(component + 0x64) + 4`, but no shipped definition or exporter
+template declares `mass` for a wheel, so that field is 0 there. **[OPEN]**
