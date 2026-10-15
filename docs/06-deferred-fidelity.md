@@ -9,7 +9,7 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 
 | Ref | Item | Status |
 |---|---|---|
-| F1 | Mount-point (attachment frame) alignment | data done, rule identified (`A_parent·A_own⁻¹`); the spinner's height source is open |
+| F1 | Mount-point (attachment frame) alignment | **landed** — `A_parent·R_z(start)·R_x(π)·R_z(angle)·A_own⁻¹`; the "spinner's height" was a motor mounted axle-down, not a missing offset |
 | F2 | Assembled-bodies path is the only robot path | **landed** |
 | F3 | The motor law, from the game's own data | **landed** (speed is rad/s, torque x40 — both from the binary) |
 | F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` is the material tag, not a collider) |
@@ -89,7 +89,7 @@ transform and those render correctly, so a stored triple is an axis row (PyRA2's
 reader, so their frames are read correctly too — which matters, because 50 of
 them are asymmetric and a transpose would flip all five anchors' plugs.
 
-### What is left: where the spinner's height comes from
+### The height that seemed to be missing — and why there was none to find
 
 Whichever rule is used, the rotor assembly ends up **inside** the chassis (its
 top reaches y ≈ 0.34 against the chassis' 0.748), while the game's snapshot shows
@@ -160,6 +160,39 @@ Exposed as `RA2_CHASSIS_PLANE` (default 0) so the sweep can be re-run.
 placed *axle-down*; the male-plug-into-female-socket flip
 (`A_parent · R_x(π) · A_own⁻¹`) turns it *axle-up*, which lifts the disc 0.33 m
 and puts it over the chassis. Chassis-mounted parts never move, so nothing floats.
+
+**Verified** (the rule is `mount_link`'s `FramesFlipped` arm, and the default:
+`parent_frame · R_z(start) · R_x(π) · R_z(angle) · A_own⁻¹`, which is the rule
+above, in that order). `AI/Team6/Bot2` rendered both ways at 1024×768
+(`ra2-render` with `RA2_CAM=1.6,1.4,2.6,0,0.35,0`) is the check, because the
+difference is unmistakable by eye rather than a matter of IoU points:
+
+- `RA2_MOUNT=frames` (no flip): the two Z-Tek motors' rotors are **buried in the
+  chassis** — one black disc hangs low at the right, the hammer arms are inside
+  the hull and simply not drawn;
+- the default (flipped): both motors sit **up on the chassis** with their arms and
+  hammers clear of it.
+
+The game's *own* view of the same bot agrees with the second: the 128² snapshot in
+the file (an uncompressed TGA) shows the motor housings on the sides and **both
+hammer arms out and clear**. Both are reproducible:
+
+```bash
+# the game's own render, straight out of the bot file
+tools/bot_preview.py local/game/AI/Team6/Bot2.bot /tmp/preview.png
+# ours, with and without the flip
+RA2_CAM="1.6,1.4,2.6,0,0.35,0" ./engine/target/release/ra2-render local/game/AI/Team6/Bot2.bot /tmp/flipped.png
+RA2_MOUNT=frames RA2_CAM="1.6,1.4,2.6,0,0.35,0" ./engine/target/release/ra2-render local/game/AI/Team6/Bot2.bot /tmp/stored.png
+```
+
+**A leftover the verification turned up, not part of the mount rule:** in the
+game's snapshot the two hammer arms hang **down and out**, while ours lie
+**level**, as if spun a quarter turn on. The arms' *plane* and their *rest phase*
+are properties of the spin motor, not of the link — a spinner's axle is the mount
+normal, so an arm that should hang means either the axle is not where we think or
+the start angle is. `RA2_MOUNT=frames` versus the default make it easy to see;
+worth its own pass, and not evidence against the rule (the *no-flip* render is
+wrong in a much bigger way: buried rotors).
 
 ### What the frame rule actually produces
 

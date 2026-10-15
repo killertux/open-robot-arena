@@ -44,10 +44,11 @@ ra2-duel "local/game/Arenas/octagon.py" \
   rigidly-mounted group, a hinge per motor, wheels driven through those hinges at
   the speed and torque their own definitions declare. `ra2-sim` and `ra2-duel`
   both drive it; there is no arcade velocity controller left in the tree.
-  Mount-point alignment (F1) is settled and is the default. What the honest drive
-  still cannot do — a quarter of the stock bots will not get traction on their
-  wheels — is geometry: mount placement, the trigger/control layer and the arena
-  colliders. Tracked as F11/F5 in `docs/06-deferred-fidelity.md`.
+  Mount-point alignment (F1) is settled — the male-plug-into-female-socket flip is
+  the default — and rendering a bot with and without it is a one-command check.
+  What the honest drive still cannot do — a quarter of the stock bots will not get
+  traction on their wheels — is the wheel/contact model and the arena colliders;
+  tracked as F4/F11/F5 in `docs/06-deferred-fidelity.md`.
 - **M3:** a robot is a *component tree* rebuildable from the game's own parts.
   Motors turn their attached subtree (spinners spin, wheels roll), weapons deal
   damage on contact, and parts whose hitpoints run out are torn off as flying

@@ -439,5 +439,7 @@ The remaining blocker is *behaviour*, not the parts' parameters or the arenas:
    takes the zero at face value (`FUN_005c6820`), and the material classes are
    RTTI-only in this build.
 5. **F6 — the friction combination law**, if the drive survey needs it.
-6. **F1's residual** — where the spinner's height comes from, which the preview
-   cannot settle.
+6. **A spin motor's arm pose** — found while verifying F1, and separate from it:
+   the game's own snapshot draws a hammer arm hanging down where ours lies level.
+   The axle is the mount normal, so this is the spin motor's rest phase or its
+   plane, not the link rule (see F1).
