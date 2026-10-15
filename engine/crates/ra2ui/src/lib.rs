@@ -43,13 +43,66 @@
 //!
 //! ## What is not resolved yet
 //!
-//! A `Size` of zero is the editor's *automatic* size — a `Text` is zero-sized
-//! and takes its extent from its font, which needs the `.giff` metrics. Those
-//! widgets come back as zero-sized frames, and so do their children. Containers
-//! that lay their children out themselves — `ListBox`, `Grid`, `OptionGroup` —
-//! are treated as ordinary frames; their cells are not placed yet.
+//! Containers that lay their children out themselves — `ListBox`, `Grid`,
+//! `OptionGroup`, and a `ScrollBar`'s or `Slider`'s parts — are treated as
+//! ordinary frames; their cells are not placed yet, and neither is `ClipMode`.
+//!
+//! A `Size` of zero is the editor's *automatic* size. With a [`Fonts`] in hand a
+//! resolver sizes such a widget from its own text ([`resolve_with`]); without
+//! one, it comes back zero-sized, and so do its children.
+
+use std::collections::BTreeMap;
+use std::path::Path;
 
 use ra2fmt::gib::{Block, Gib, Length, Widget, WidgetKind};
+
+/// The faces a screen's labels name, loaded from a game installation's
+/// `RA2.cfz`. A resolver given these can size the widgets the editor left at
+/// zero — a label's extent is the sum of its glyph advances wide and the face's
+/// line height tall.
+#[derive(Debug, Default, Clone)]
+pub struct Fonts {
+    faces: BTreeMap<String, ra2fmt::Font>,
+}
+
+impl Fonts {
+    /// Load every `fg_*.giff` in a `RA2.cfz`.
+    pub fn load(archive: &Path) -> Result<Fonts, ra2fmt::Error> {
+        let cfl = ra2fmt::cfl::Cfl::open_path(archive)?;
+        let mut faces = BTreeMap::new();
+        for entry in cfl.entries() {
+            let name = entry.name.clone();
+            let Some(stem) = name.strip_suffix(".giff") else {
+                continue;
+            };
+            if let Some(data) = cfl.get(&name) {
+                if let Ok(font) = ra2fmt::giff::parse(&data) {
+                    faces.insert(stem.to_string(), font);
+                }
+            }
+        }
+        Ok(Fonts { faces })
+    }
+
+    pub fn get(&self, name: &str) -> Option<&ra2fmt::Font> {
+        self.faces.get(name)
+    }
+
+    pub fn len(&self) -> usize {
+        self.faces.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.faces.is_empty()
+    }
+
+    /// The size of a string in a named face, in pixels.
+    pub fn measure(&self, face: &str, text: &str) -> Option<(f32, f32)> {
+        let font = self.get(face)?;
+        let (w, h) = font.extent(text);
+        Some((w as f32, h as f32))
+    }
+}
 
 /// The screen the layouts were authored against. A 1280³-1024 window with a
 /// 19-pixel title bar, which is what the full-screen background image in
@@ -197,11 +250,21 @@ pub fn draw_order<'a>(roots: &'a [Placement<'a>]) -> Vec<&'a Placement<'a>> {
 
 /// Resolve every top-level block of a document against the screen.
 pub fn resolve(gib: &Gib, screen: [f32; 2]) -> Vec<Placement<'_>> {
+    resolve_with(gib, screen, None)
+}
+
+/// Resolve with the screen's faces, so that a widget the editor left at zero
+/// size is sized by its own text.
+pub fn resolve_with<'a>(
+    gib: &'a Gib,
+    screen: [f32; 2],
+    fonts: Option<&Fonts>,
+) -> Vec<Placement<'a>> {
     let screen_frame = Frame::new(0.0, 0.0, screen[0], screen[1]);
     gib.blocks
         .iter()
         .filter_map(|b| match b {
-            Block::Widget(w) => Some(place(w, screen_frame)),
+            Block::Widget(w) => Some(place_with(w, screen_frame, fonts)),
             // A fragment has no frame of its own until a slot loads it.
             Block::Attachment(_) => None,
         })
@@ -210,15 +273,19 @@ pub fn resolve(gib: &Gib, screen: [f32; 2]) -> Vec<Placement<'_>> {
 
 /// Place one widget inside `parent`.
 pub fn place(widget: &Widget, parent: Frame) -> Placement<'_> {
-    let size = widget.size();
-    let frame = sized(widget, parent, size);
+    place_with(widget, parent, None)
+}
+
+/// Place one widget inside `parent`, sizing an unmeasured label from its text.
+pub fn place_with<'a>(widget: &'a Widget, parent: Frame, fonts: Option<&Fonts>) -> Placement<'a> {
+    let frame = sized(widget, parent, widget.size(), fonts);
     let children = match widget.kind {
         // A split frame hands its children panes rather than its own rectangle.
-        WidgetKind::SplitFrame => split_children(widget, frame),
+        WidgetKind::SplitFrame => split_children(widget, frame, fonts),
         _ => widget
             .children
             .iter()
-            .map(|c| place(c, frame))
+            .map(|c| place_with(c, frame, fonts))
             .collect::<Vec<_>>(),
     };
     Placement {
@@ -228,11 +295,40 @@ pub fn place(widget: &Widget, parent: Frame) -> Placement<'_> {
     }
 }
 
+/// The extent a label takes from its own font, when the layout left it at zero.
+fn measured(widget: &Widget, fonts: Option<&Fonts>) -> Option<(f32, f32)> {
+    let fonts = fonts?;
+    let (text, face) = (widget.text()?, widget.font()?);
+    if text.is_empty() {
+        return None;
+    }
+    fonts.measure(face, text)
+}
+
 /// A widget's own rectangle: its `Size` against the parent's extent, with its
 /// anchor point at its `Position`.
-fn sized(widget: &Widget, parent: Frame, size: Option<ra2fmt::gib::Axes>) -> Frame {
-    let w = size.map(|s| axis(s.first, parent.w)).unwrap_or(parent.w);
-    let h = size.map(|s| axis(s.second, parent.h)).unwrap_or(parent.h);
+fn sized(
+    widget: &Widget,
+    parent: Frame,
+    size: Option<ra2fmt::gib::Axes>,
+    fonts: Option<&Fonts>,
+) -> Frame {
+    // A zero is the editor's automatic size. For a label that is its text's
+    // extent, which is what the game does too — a `Text` in every shipped screen
+    // is written `Size 0 0 0 0`.
+    let fit = measured(widget, fonts);
+    let dim = |given: Option<Length>, parent: f32, fallback: f32| match given {
+        Some(l) if l.amount != 0.0 || l.fraction => axis(l, parent),
+        _ => fallback,
+    };
+    let w = match size {
+        Some(s) => dim(Some(s.first), parent.w, fit.map(|f| f.0).unwrap_or(0.0)),
+        None => parent.w,
+    };
+    let h = match size {
+        Some(s) => dim(Some(s.second), parent.h, fit.map(|f| f.1).unwrap_or(0.0)),
+        None => parent.h,
+    };
     let position = widget.position();
     let (px, py) = match position {
         Some(p) => (axis(p.first, parent.w), axis(p.second, parent.h)),
@@ -267,7 +363,11 @@ fn axis(length: Length, parent: f32) -> f32 {
 }
 
 /// The two panes of a split frame, and the children placed in them.
-fn split_children(widget: &Widget, frame: Frame) -> Vec<Placement<'_>> {
+fn split_children<'a>(
+    widget: &'a Widget,
+    frame: Frame,
+    fonts: Option<&Fonts>,
+) -> Vec<Placement<'a>> {
     let horizontal = widget
         .field("Horizontal")
         .and_then(|f| f.flag())
@@ -311,7 +411,7 @@ fn split_children(widget: &Widget, frame: Frame) -> Vec<Placement<'_>> {
         .children
         .iter()
         .enumerate()
-        .map(|(i, c)| place(c, panes[i.min(1)]))
+        .map(|(i, c)| place_with(c, panes[i.min(1)], fonts))
         .collect()
 }
 
@@ -400,6 +500,47 @@ mod tests {
                 out.push(path);
             }
         }
+    }
+
+    /// The measured path: with the screen's faces, a label the editor left at
+    /// zero size takes its own text's extent — which is what `Size 0 0 0 0`
+    /// means on every `Text` in every shipped screen.
+    #[test]
+    fn a_zero_sized_label_is_sized_by_its_text() {
+        let Some(game) = game_dir() else { return };
+        let fonts = Fonts::load(&game.join("RA2.cfz")).expect("the shipped faces");
+        assert_eq!(fonts.len(), 9, "nine fg_* faces");
+
+        let text = std::fs::read_to_string(game.join("UI/mainmenu/mainmenu.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+
+        let unmeasured = resolve(&gib, DESIGN_SCREEN);
+        let label = unmeasured
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.text() == Some("MULTIPLAYER"))
+            .expect("the multiplayer label");
+        assert_eq!(label.frame.w, 0.0, "the editor left it at zero");
+
+        let measured = resolve_with(&gib, DESIGN_SCREEN, Some(&fonts));
+        let label = measured
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.text() == Some("MULTIPLAYER"))
+            .expect("the multiplayer label");
+        let (w, h) = fonts.measure("fg_d20", "MULTIPLAYER").unwrap();
+        assert!(w > 40.0 && w < 300.0, "MULTIPLAYER is {w} px wide");
+        assert_eq!(label.frame.w, w);
+        assert_eq!(label.frame.h, h);
+        assert_eq!(
+            h, 40.0,
+            "fg_d20's line height is its ascent less its descent"
+        );
+
+        // Its siblings' boxes do not move: only sizes that were zero change.
+        let before = unmeasured[0].frame;
+        let after = measured[0].frame;
+        assert_eq!(before, after, "the window itself is not resized");
     }
 
     /// The worked case: `mainmenu.gib`, placed against the design screen.

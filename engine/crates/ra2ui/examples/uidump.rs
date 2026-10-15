@@ -1,8 +1,11 @@
 //! Resolve a `.gib` screen and print where everything lands.
 //!
 //! ```text
-//! cargo run -q -p ra2ui --example uidump -- <screen.gib> [w h] [--all|--rects]
+//! cargo run -q -p ra2ui --example uidump -- <screen.gib> [w h] [--all|--rects] [--fonts RA2.cfz]
 //! ```
+//!
+//! `--fonts` sizes the labels the editor left at zero, which is what the game
+//! does — measurements from the shipped `fg_*.giff` faces.
 //!
 //! Without `--all` only the widgets that place children — the windows, groups
 //! and split frames — are shown, plus whatever falls outside the screen. The
@@ -16,7 +19,7 @@
 //! <x> <y> <w> <h> <alpha> <r> <g> <b> <u0> <v0> <u1> <v1> <filename>
 //! ```
 
-use ra2ui::{draw_order, resolve, Frame, Placement, DESIGN_SCREEN};
+use ra2ui::{draw_order, resolve_with, Fonts, Frame, Placement, DESIGN_SCREEN};
 
 struct Dump {
     screen: Frame,
@@ -67,10 +70,15 @@ fn main() {
     let h = number(2, DESIGN_SCREEN[1]);
     let all = args.iter().any(|a| a == "--all");
     let rects = args.iter().any(|a| a == "--rects");
+    let fonts = args
+        .iter()
+        .position(|a| a == "--fonts")
+        .and_then(|i| args.get(i + 1))
+        .map(|cfz| Fonts::load(std::path::Path::new(cfz)).expect("load the faces"));
 
     let text = std::fs::read_to_string(&path).expect("read the layout");
     let gib = ra2fmt::gib::parse(&text).expect("parse the layout");
-    let placed = resolve(&gib, [w, h]);
+    let placed = resolve_with(&gib, [w, h], fonts.as_ref());
 
     if rects {
         // Draw order is tree order; hidden widgets are skipped, which is what

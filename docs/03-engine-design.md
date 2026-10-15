@@ -71,7 +71,8 @@ local/           # (git-ignored) game files + converted cache
   `OptionGroup`), the 2D renderer, the `giScript`/`Gooey` Python surface, and the
   workshop. The `fg_*.giff` faces are parsed and *drawn* (`ra2fmt::giff`, `ra2
   font`, and `tools/ui_compose.py` renders a screen's labels with the game's own
-  faces and colours — the main menu's `MULTIPLAYER TEAM HQ` reads as itself).
+  faces and colours — the main menu's `MULTIPLAYER TEAM HQ` reads as itself), and
+  a resolver given those faces sizes a zero-`Size` label from its own text.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
 
 ## M5 design notes

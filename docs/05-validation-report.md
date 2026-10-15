@@ -402,11 +402,15 @@ Known, documented, not yet fixed:
     cached in AppData, with `FUN_00591b50` the thing that registers a face), and
     the record for a character is `(c - 34) * 28` — measured by drawing, since at
     that offset the main menu's own `MULTIPLAYER TEAM HQ` label comes out reading
-    `MULTIPLAYER TEAM HQ` and at neighbouring offsets it does not. Two letters of
-    that render are still off, `M` and `A`, which is the baseline rule or a
-    one-record slip in the middle of the table; everything else lands.
-    `tools/ui_compose.py` now draws a screen's labels with the game's own faces
-    and fore-colours.
+    `MULTIPLAYER TEAM HQ` and at neighbouring offsets it does not. Drawn spaced at
+    four times size the face reads `A B C D E F G …` and `O P Q R S T …` with
+    every letter its own, and all 96 rects are distinct — two earlier readings
+    that said otherwise were the *reading*: a blend bug in the harness, and the
+    font's own tight advances making a dense line look merged. `ra2ui::Fonts`
+    loads the nine faces from `RA2.cfz` and `resolve_with` sizes a zero-`Size`
+    label from its text, which is what `Size 0 0 0 0` means on every label in
+    every screen. `tools/ui_compose.py` draws those labels with the game's own
+    faces and fore-colours.
 
 Each of these is tracked with its evidence and fix path in
 [`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F13).

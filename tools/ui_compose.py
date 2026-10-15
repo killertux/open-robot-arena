@@ -365,7 +365,12 @@ def main():
         )
         if not os.path.exists(engine):
             engine = engine.replace("/debug/", "/release/")
+        cfz = os.path.join(game, "RA2.cfz")
         cmd = [engine, args.screen, str(args.width), str(args.height), "--rects"]
+        if os.path.exists(cfz):
+            # Let the resolver size the labels from their own fonts, the way the
+            # game does.
+            cmd += ["--fonts", cfz]
         text = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
 
     lines = [ln for ln in text.splitlines() if ln.strip()]

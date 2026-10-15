@@ -239,7 +239,9 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   and a `glyph_name` field for it, which the game writes and the shipped
   `ra2.cfg` does not carry.
 - `ra2 font <RA2.cfz> <name> [--page out.pgm]` prints a face's metrics per glyph
-  and writes the page out.
+  and writes the page out; `ra2ui`'s `Fonts` loads all nine from a `RA2.cfz` so a
+  resolver can size the labels the editor left at zero (`Size 0 0 0 0`), which is
+  what every `Text` in every shipped screen is written as.
 - **Which record is which character: `(c - 34) * 28`.** Measured by drawing: at
   that offset `mainmenu.gib`'s own `MULTIPLAYER TEAM HQ` label comes out reading
   `MULTIPLAYER TEAM HQ`, and at 32/33/35/36 it does not. The loader's loop starts
@@ -249,9 +251,13 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   95*28 = 2728` fits either way, and what settles it is the runtime object the
   loader fills — its glyph array is `0x600` bytes of four floats, which is 96
   glyphs of 16 bytes, and its integer array is 96 of 12.
-- Two letters of that render are still off (`M` and `A`), which is either the
-  baseline rule — a cell hangs from its `third` above the baseline — or a
-  one-record slip in the middle of the table. Everything else lands.
+- **Verified, and there is no slip.** Drawn *spaced*, at four times size, the
+  face reads `A B C D E F G …` and `O P Q R S T …` with every letter its own; all
+  96 rects are distinct, so even `Q` has its own cell. Two earlier readings that
+  said otherwise were both the *reading*, not the data: the compositor's text
+  blend was adding `v/255` instead of blending by coverage, and at the font's own
+  tight advances neighbouring glyphs touch, so a dense line reads merged at small
+  scale. The extent helper (`Font::extent`) is founded now too.
 
 ### Other
 - Textures: BMP / TGA / JPG (mostly 256²/128²); many uncompressed TGA.
