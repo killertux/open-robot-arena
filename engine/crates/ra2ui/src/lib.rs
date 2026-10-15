@@ -167,6 +167,34 @@ impl<'a, 'b> Iterator for PlacementWalk<'a, 'b> {
     }
 }
 
+/// The widgets to draw, back to front.
+///
+/// A parent is drawn before its children, and siblings by `ChildOrder`
+/// **ascending**, ties broken by file order. That is the rule that puts
+/// `mainmenu.gib`'s full-screen cement background *behind* the rest: it is the
+/// lowest in its window (1), with the saw backdrop at 2, the logo group at 3 and
+/// the bottom bar's decorations at 5–7 after it. A label follows its button —
+/// the button's `ChildOrder` is -1 and the `Text` beside it is 0 — and the four
+/// state images of a button share 0..3 with the first visible, so the label
+/// lands on top of the art.
+pub fn draw_order<'a>(roots: &'a [Placement<'a>]) -> Vec<&'a Placement<'a>> {
+    fn visit<'a>(p: &'a Placement<'a>, out: &mut Vec<&'a Placement<'a>>) {
+        out.push(p);
+        let mut children: Vec<&Placement> = p.children.iter().collect();
+        children.sort_by_key(|p| p.widget.child_order());
+        for c in children {
+            visit(c, out);
+        }
+    }
+    let mut out = Vec::new();
+    let mut roots: Vec<&Placement> = roots.iter().collect();
+    roots.sort_by_key(|p| p.widget.child_order());
+    for r in roots {
+        visit(r, &mut out);
+    }
+    out
+}
+
 /// Resolve every top-level block of a document against the screen.
 pub fn resolve(gib: &Gib, screen: [f32; 2]) -> Vec<Placement<'_>> {
     let screen_frame = Frame::new(0.0, 0.0, screen[0], screen[1]);
@@ -471,5 +499,36 @@ mod tests {
         assert_eq!(perfect, 71);
         // The worst offender is a fragment, not a screen.
         assert!(worst.1.ends_with("botlab/control_cell.gib"), "{}", worst.1);
+    }
+
+    /// Draw order is `ChildOrder` ascending, ties by file order — which is what
+    /// puts the full-screen background first and the logo after it, and what
+    /// puts a button's label (0) after the button itself (-1).
+    #[test]
+    fn the_background_is_drawn_before_the_logo() {
+        let Some(game) = game_dir() else { return };
+        let text = std::fs::read_to_string(game.join("UI/mainmenu/mainmenu.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+        let placed = resolve(&gib, DESIGN_SCREEN);
+        let order = draw_order(&placed);
+        let at = |name: &str| {
+            order
+                .iter()
+                .position(|p| {
+                    p.widget
+                        .filename()
+                        .is_some_and(|f| f.replace('\\', "/").ends_with(name))
+                })
+                .unwrap_or_else(|| panic!("{name} is not drawn"))
+        };
+        let background = at("cement_background.bmp");
+        for later in [
+            "main_backdrop.tga",
+            "ra2_logo.tga",
+            "little_gear.tga",
+            "rounded_rectL.tga",
+        ] {
+            assert!(background < at(later), "{later} is behind the background");
+        }
     }
 }

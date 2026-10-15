@@ -64,7 +64,9 @@ local/           # (git-ignored) game files + converted cache
   `Alignment` as the 3×3 anchor, split frames into their two panes. All 3590
   widgets place with finite frames, 71 of the 116 files entirely on screen, and
   the main menu's logo, backdrop and button strip land where its own art says
-  they should. Still to come: text metrics from the `fg_*.giff` fonts, clip
+  they should — which is checked by *looking*: `tools/ui_compose.py` rasterises a
+  screen from the engine's own rectangles and the game's own art, and the main
+  menu comes out as the main menu. Still to come: text metrics from the `fg_*.giff` fonts, clip
   modes, the containers that lay their own children out (`ListBox`, `Grid`,
   `OptionGroup`), the 2D renderer, the `giScript`/`Gooey` Python surface, and the
   workshop.
@@ -85,6 +87,16 @@ local/           # (git-ignored) game files + converted cache
   combinations, and that check is a test rather than a comment. Where a rule is
   only *inferred* — the split frame's slot order, the anchor's y-down frame —
   the evidence that supports it is written down next to it.
+- **The check is a picture, as everywhere else in this project.** The geometry
+  rules were read out of the corpus and confirmed three ways by numbers, but the
+  thing that settles a layout is the eye: `tools/ui_compose.py` takes
+  `uidump --rects` — the resolver's own output — and the game's own `.tga`/`.bmp`
+  files, and composites a screen. The main menu's cement background, centred saw
+  plate with its blade teeth, `ROBOT 2 ARENA` logo at the top centre and the two
+  gears along the bottom are all recognisable at a glance, and the one thing that
+  was *not* obvious from the data — that `ChildOrder` is the draw order
+  ascending, not the file's order — was found by looking at a wrong picture
+  first.
 - **What is not resolved is not guessed.** Zero `Size` (the editor's automatic
   size, which needs font metrics), `ClipMode`, and the containers that lay their
   own children out are named as unresolved rather than approximated, and the

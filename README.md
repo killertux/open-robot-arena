@@ -159,7 +159,12 @@ and button strip land exactly where its own artwork says they should:
 
 ```bash
 cargo run -q -p ra2ui --example uidump -- local/game/UI/mainmenu/mainmenu.gib
+python3 tools/ui_compose.py local/game/UI/mainmenu/mainmenu.gib /tmp/mainmenu.png
 ```
+
+That second command is the check that matters: it composites the screen from the
+engine's own rectangles and the game's own art, and the main menu comes out as
+the main menu.
 
 What remains of M5 is text metrics from the `fg_*.giff` fonts, clip modes, the
 containers that lay out their own children, the 2D renderer, the

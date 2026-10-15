@@ -195,6 +195,25 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   67-pixel-tall `"Slot0"` bar on top.
 - A zero `Size` is the editor's *automatic* size: a `Text` is zero-sized and takes
   its extent from its font (the `fg_*.giff` metrics, not decoded yet).
+- **An `Image`'s four unlabelled numbers are its rect in a 1024×1024 texture
+  *page*, not a rect inside the file it names.** The shipped files are already
+  cropped to their own rect: `(u1-u0)×1024` equals the file's width for every
+  *cell* (130 of the 155 rects that lie inside a page; another 104 rects are the
+  whole page, where the file is simply the whole image). The 25 that differ are
+  *tiles* — `common/metaldots_pattern.bmp` is a 64×64 texture whose rects run up
+  to 9.7 pages — so a renderer draws a cell whole and repeats a tile.
+- **`ChildOrder` is the draw order, ascending**, ties broken by file order. It is
+  what makes the main menu visible at all: the cement background is 1, the saw
+  backdrop 2, the logo group 3 and the bottom bar's decorations 5–7, so drawing
+  the file's own order (logo first) would paint the background over everything. A
+  button is −1 and the `Text` beside it is 0, which is what puts a label on top
+  of its button; a button's four state images are 0–3 with only the first
+  visible, so the same rule puts the label above the art.
+- **Some widgets are placed at run time by the C++.** The two rounded corners of
+  the main menu's bottom bar (`common/rounded_rectL/R.tga`) sit at `0 0` in the
+  layout and only get moved when the screen is built, so a static composite of
+  the file puts them in the corner. The `Name`s are the handle the code holds
+  them by.
 
 ### Other
 - Textures: BMP / TGA / JPG (mostly 256²/128²); many uncompressed TGA.

@@ -1,15 +1,22 @@
 //! Resolve a `.gib` screen and print where everything lands.
 //!
 //! ```text
-//! cargo run -q -p ra2ui --example uidump -- <screen.gib> [w h] [--all]
+//! cargo run -q -p ra2ui --example uidump -- <screen.gib> [w h] [--all|--rects]
 //! ```
 //!
 //! Without `--all` only the widgets that place children — the windows, groups
 //! and split frames — are shown, plus whatever falls outside the screen. The
 //! off-screen count is the quickest way to see whether the anchor reading is
 //! holding up across the whole corpus.
+//!
+//! `--rects` instead writes one line per *drawable* widget, in draw order, for a
+//! compositor to rasterise (see `tools/ui_compose.py`):
+//!
+//! ```text
+//! <x> <y> <w> <h> <alpha> <r> <g> <b> <u0> <v0> <u1> <v1> <filename>
+//! ```
 
-use ra2ui::{resolve, Frame, Placement, DESIGN_SCREEN};
+use ra2ui::{draw_order, resolve, Frame, Placement, DESIGN_SCREEN};
 
 struct Dump {
     screen: Frame,
@@ -50,7 +57,7 @@ impl Dump {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(path) = args.first().cloned() else {
-        eprintln!("usage: uidump <screen.gib> [w h] [--all]");
+        eprintln!("usage: uidump <screen.gib> [w h] [--all|--rects]");
         std::process::exit(2);
     };
     let number = |i: usize, fallback: f32| -> f32 {
@@ -59,10 +66,54 @@ fn main() {
     let w = number(1, DESIGN_SCREEN[0]);
     let h = number(2, DESIGN_SCREEN[1]);
     let all = args.iter().any(|a| a == "--all");
+    let rects = args.iter().any(|a| a == "--rects");
 
     let text = std::fs::read_to_string(&path).expect("read the layout");
     let gib = ra2fmt::gib::parse(&text).expect("parse the layout");
     let placed = resolve(&gib, [w, h]);
+
+    if rects {
+        // Draw order is tree order; hidden widgets are skipped, which is what
+        // leaves a button showing only the first of its four state images.
+        let line = |p: &Placement| {
+            if !p.widget.visible() {
+                return;
+            }
+            let Some(file) = p.widget.filename() else {
+                return;
+            };
+            if file.is_empty() {
+                return;
+            }
+            let uv = p.widget.uv().unwrap_or([0.0, 0.0, 1.0, 1.0]);
+            let alpha = p
+                .widget
+                .field("_Alpha")
+                .and_then(|f| f.flag())
+                .unwrap_or(true);
+            let c = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            println!(
+                "{:.2} {:.2} {:.2} {:.2} {} {:.3} {:.3} {:.3} {:.6} {:.6} {:.6} {:.6} {}",
+                p.frame.x,
+                p.frame.y,
+                p.frame.w,
+                p.frame.h,
+                u8::from(alpha),
+                c[0],
+                c[1],
+                c[2],
+                uv[0],
+                uv[1],
+                uv[2],
+                uv[3],
+                file.replace('\\', "/")
+            );
+        };
+        for p in draw_order(&placed) {
+            line(p);
+        }
+        return;
+    }
 
     println!(
         "{path} — T {}, {} top-level blocks, screen {w}x{h}",

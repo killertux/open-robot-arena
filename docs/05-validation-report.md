@@ -378,10 +378,21 @@ Known, documented, not yet fixed:
     slot loads, like `botlab/control_cell.gib`, which are not meant to be placed
     against the screen) and children whose declared `Size` is taller than the
     pane they sit in, which the game clips where this resolver does not yet.
-    **[IN PROGRESS]** — what remains is text metrics from the `fg_*.giff` fonts,
-    clip modes, the self-laying-out containers (`ListBox`, `Grid`,
-    `OptionGroup`), the 2D renderer, the `giScript`/`Gooey` Python surface and
-    the workshop.
+    The check that settles it is a picture, as everywhere in this project:
+    `tools/ui_compose.py` composites a screen from the resolver's own output
+    (`uidump --rects`) and the game's own art, and `mainmenu.gib` comes out as
+    the main menu — the cement background, the centred saw plate with its blade
+    teeth, the `ROBOT 2 ARENA` logo at the top centre and the two gears along the
+    bottom. Drawing it wrong first is what found the last rule: `ChildOrder` is
+    the draw order *ascending* (the background is 1 and the logo group 3), so
+    tree order paints the background over the whole screen. The same pass
+    settled what an `Image`'s four unlabelled numbers are: a rect in a 1024²
+    *page*, with the shipped files already cropped to their cell — and 25 rects
+    that instead run past the page are *tiles* (`metaldots_pattern.bmp`), which
+    is why a renderer draws a cell whole and repeats a tile. **[IN PROGRESS]** —
+    what remains is text metrics from the `fg_*.giff` fonts, clip modes, tiles,
+    the self-laying-out containers (`ListBox`, `Grid`, `OptionGroup`), the real
+    2D renderer, the `giScript`/`Gooey` Python surface and the workshop.
 
 Each of these is tracked with its evidence and fix path in
 [`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F13).
