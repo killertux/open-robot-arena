@@ -111,6 +111,7 @@ use std::path::Path;
 
 use ra2fmt::gib::{Block, Gib, Length, Widget, WidgetKind};
 
+pub mod input;
 pub mod workshop;
 
 /// The faces a screen's labels name, loaded from a game installation's

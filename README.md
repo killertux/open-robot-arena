@@ -187,10 +187,12 @@ containers place their own children too
 scroll bar's parts at its two ends. The robot workshop composes from the same
 data: `botlabwin.gib` plus the tab's own screen, loaded into the group that
 screen's own `Notes` names, with the tab table taken from the toolbar's notes on
-its six buttons (`cargo run -p ra2-render --example workshop` renders all six).
-What remains of M5 is the cells' content (which is game data at run time) and the
-workshop's *interaction* — its screens are in, and the steps a tab offers are the
-game's C++.
+its six buttons (`cargo run -p ra2-render --example workshop` clicks all six and
+renders each). And it is live: a click is hit-tested against the placed tree and
+changes the toolbar's state images and the screen, by the rule the corpus states
+with no exceptions. What remains of M5 is the cells' content (game data at run
+time) and the rest of the workshop's interaction — a tab's own steps, and the
+list and paint tools, which are the game's C++.
 
 ## Layout
 

@@ -138,6 +138,17 @@ impl Widget {
         self.fields.iter().find(|f| f.name.as_deref() == Some(name))
     }
 
+    /// A field's value, to write it.
+    ///
+    /// The same lookup as [`Widget::field`], and it exists because the shell's
+    /// input changes a *record*: clicking a tab writes `Checked` and the state
+    /// images' `Visible`, and that is where the renderer reads them.
+    pub fn field_mut(&mut self, name: &str) -> Option<&mut Field> {
+        self.fields
+            .iter_mut()
+            .find(|f| f.name.as_deref() == Some(name))
+    }
+
     /// Every field with this label, in file order (`Point`, `StateImage`, ...).
     pub fn fields_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Field> {
         self.fields

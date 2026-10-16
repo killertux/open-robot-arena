@@ -124,6 +124,17 @@ local/           # (git-ignored) game files + converted cache
   `cargo run -p ra2-render --example gooeyshot` is the whole loop in one command.
   That is the workshop's machinery; the workshop is layout and interaction on
   top of it, and nothing about the seam is left to build.
+- **The shell has input, and the workshop's tabs are live.** `ra2ui::input`
+  hit-tests a point against the placed tree the way it is drawn — in reverse, so
+  the last thing drawn is the first thing hit, and children before their parent
+  so a click on a tab's icon still finds the tab. What a click *changes* is the
+  data's own: the state images' `Visible` and the `Checked` field, by the rule
+  the corpus states with no exceptions (see the recon notes). `workshop::BotLab`
+  is that state kept live — clicking a tab flips the toolbar's images and swaps
+  the screen in `content slot`, and it deliberately does **not** rebuild the
+  screen from disk, which would put the file's baked selection back. The demo is
+  a sequence of real clicks, each hit-tested against where the layout put the
+  button (`cargo run -p ra2-render --example workshop`).
 - **The workshop is data too, and it composes.** `ra2ui::workshop` turns
   `botlabwin.gib` plus a tab's fragment into the screen the game shows: the
   fragment goes into the group its own `Notes` names (`content slot`), the info

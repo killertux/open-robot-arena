@@ -295,6 +295,27 @@ both names are the data's:
   component-properties panel that the game fills at run time. That is the
   *interaction* layer, and it is the C++'s, not the data's.
 
+### Input: what a click lands on, and what it changes
+
+- **`PassMouse` distinguishes nothing.** It is `true` on all 1,298 widgets in the
+  corpus that carry it, and only the *container* classes carry it at all —
+  `Window`, `Group`, `Button`, `CheckBox`, `OptionGroup`, `TextBox`, … — while
+  `[Image]` records never do. So it is a base-class field the writer always
+  emits, not a flag the screens vary, and a hit test cannot use it.
+- **The state images are a table, and the corpus fills it in with no
+  exceptions.** A `CheckBox` carries up to four `Image` children — the states —
+  and exactly one is `Visible`: the group's `Selection` shows image **2** when it
+  has four and image **1** when it has three, and every other member shows image
+  **0**. The binary names the four states in one schema entry — `Normal`,
+  `Rollover`, `Clicked`, `Disabled` — so the first image is the unselected look
+  and the **second-to-last** is the selected one, the last being disabled. That
+  is the whole rule for showing a selection.
+- **An `OptionGroup` names its selection by `Name`.** `botlabwin.gib`'s
+  `blab option group` says `Selection overview button`, and that member is the
+  one with `Checked true` ✓; every other member is `Checked false`. So a click on
+  a tab is: set the group's `Selection`, set the clicked member's `Checked` and
+  image, clear the others'.
+
 ### What the numbers mean (the layout model)
 
 - **`Position x xf y yf` / `Size w wf h hf`**, each axis an amount and a flag. The

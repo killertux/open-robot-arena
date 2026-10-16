@@ -476,6 +476,25 @@ Known, documented, not yet fixed:
     it from x 630, so what to look at next is the face's coverage and the
     toolbar's own draw order).
 
+    The workshop is live. `ra2ui::input` hit-tests a click against the placed
+    tree in draw order reversed — the last thing drawn is the first thing hit,
+    and a child before its parent, so a click on a tab's icon still selects the
+    tab — and `workshop::BotLab` keeps the composed screen as state: clicking a
+    tab sets the toolbar's group `Selection`, flips the two members' state images
+    and loads that tab's fragment into `content slot`, without rebuilding from
+    disk (which would put the file's baked selection back). The rule for the
+    images is measured off the corpus and has no exceptions: the selected member
+    shows image 2 of four or 1 of three, every other member image 0. `PassMouse`
+    is *not* consulted — it is `true` on all 1,298 widgets that carry it, so it
+    distinguishes nothing. `cargo run -p ra2-render --example workshop` clicks
+    each of the six tabs at the centre of where the layout put its button and
+    renders the result: six different screens, and the toolbar shows the clicked
+    tab in its own selected art with the rest normal. The chassis tab's own steps
+    are the next layer, and its buttons name them — `structure design button`
+    goes to chassis step 1, and `armor button` loads a screen into `'right
+    content slot'`, naming `ch_armor.gib`, which the game does not ship: the file
+    is `armor.gib`.
+
     The last case the count cannot express turned out not to need one. An
     uncounted record joins the nearest record that still has a slot free — the
     caption holders duplicate their button's `Position`, so they are the button's

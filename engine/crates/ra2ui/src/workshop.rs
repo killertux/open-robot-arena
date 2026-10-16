@@ -41,9 +41,11 @@
 //! tools — are the game's C++, not its data, and they are what the next slice
 //! is for. What this gives them is the composed screen they act on.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ra2fmt::gib::{Block, Gib, Widget};
+
+use crate::{input, Fonts, Placement};
 
 /// The bot lab window.
 pub const SCREEN: &str = "botlab/botlabwin.gib";
@@ -166,6 +168,152 @@ pub fn compose(ui_root: &Path, tab: &Tab) -> Result<Gib, String> {
 /// The tab a button selects, by the button's `Name`.
 pub fn tab(button: &str) -> Option<&'static Tab> {
     TABS.iter().find(|t| t.button == button)
+}
+
+/// The toolbar's option group, whose children are the six tabs.
+pub const TAB_GROUP: &str = "blab option group";
+
+/// The workshop, as a piece of live state.
+///
+/// The screen is the game's own file and stays composed: a click changes the
+/// group's selection and the content slot's screen, and changes nothing else. It
+/// is deliberately *not* rebuilt from disk on a click — that would throw away the
+/// selection the click just made and put the file's baked one back.
+pub struct BotLab {
+    ui_root: PathBuf,
+    /// The composed document: the window, its info bar, its proxies, and the
+    /// selected tab's screen.
+    pub document: Gib,
+    /// The button of the tab on screen.
+    pub tab: &'static str,
+    /// How many children `content slot` has of its own, before a tab is loaded
+    /// into it — the file's `white backdrop img`, and any it ever gains.
+    slot_own: usize,
+}
+
+impl BotLab {
+    /// Open the workshop on the tab the file itself has selected.
+    pub fn open(ui_root: &Path) -> Result<BotLab, String> {
+        let document = compose(ui_root, TABS.first().expect("six tabs"))?;
+        let mut lab = BotLab {
+            ui_root: ui_root.to_path_buf(),
+            document,
+            tab: TABS[0].button,
+            slot_own: 0,
+        };
+        // `compose` has already loaded the first tab; count what the slot holds
+        // of its own by loading that same tab again over it.
+        let fragment = load(ui_root, TABS[0].fragment)?;
+        let tab_children = fragment.widgets().count();
+        let total = lab.slot_children();
+        lab.slot_own = total.saturating_sub(tab_children);
+        Ok(lab)
+    }
+
+    /// How many children `content slot` currently has.
+    fn slot_children(&self) -> usize {
+        for block in &self.document.blocks {
+            if let Block::Widget(w) = block {
+                if let Some(slot) = find(w, CONTENT_SLOT) {
+                    return slot.children.len();
+                }
+            }
+        }
+        0
+    }
+
+    /// Put a tab's screen into `content slot`, leaving the slot's own children
+    /// alone.
+    pub fn set_tab(&mut self, button: &str) -> Result<bool, String> {
+        let Some(tab) = tab(button) else {
+            return Ok(false);
+        };
+        let fragment = load(&self.ui_root, tab.fragment)?;
+        let mut done = false;
+        for block in self.document.blocks.iter_mut() {
+            let Block::Widget(w) = block else { continue };
+            let Some(slot) = find_mut(w, CONTENT_SLOT) else {
+                continue;
+            };
+            slot.children.truncate(self.slot_own);
+            slot.children.extend(fragment.widgets().cloned());
+            done = true;
+            break;
+        }
+        if !done {
+            return Err(format!("{SCREEN} has no {CONTENT_SLOT}"));
+        }
+        self.tab = tab.button;
+        Ok(true)
+    }
+
+    /// Select a tab: the toolbar's group, then the screen it shows.
+    pub fn select(&mut self, button: &str) -> Result<bool, String> {
+        if tab(button).is_none() {
+            return Ok(false);
+        }
+        for block in self.document.blocks.iter_mut() {
+            let Block::Widget(w) = block else { continue };
+            input::select_option(w, TAB_GROUP, button);
+        }
+        self.set_tab(button)
+    }
+
+    /// The tab's own screen inside `content slot`: the first record the tab
+    /// loaded, after the slot's own children. A fragment's *other* root records
+    /// — `overview.gib` has two more, headerless `Widget`s — follow it, exactly
+    /// as they do when a fragment is placed on its own.
+    pub fn content_root(&self) -> Option<&Widget> {
+        for block in &self.document.blocks {
+            if let Block::Widget(w) = block {
+                if let Some(slot) = find(w, CONTENT_SLOT) {
+                    return slot.children.get(self.slot_own);
+                }
+            }
+        }
+        None
+    }
+
+    /// Place the current document.
+    pub fn placements(&self, screen: [f32; 2], fonts: Option<&Fonts>) -> Vec<Placement<'_>> {
+        crate::resolve_with(&self.document, screen, fonts)
+    }
+
+    /// Click at a point. Returns the tab that was selected, if a tab was hit.
+    ///
+    /// The hit is the innermost widget under the point; walking back up the path
+    /// finds the tab button that holds it, which is how a click on a tab's icon
+    /// still selects the tab.
+    pub fn click(
+        &mut self,
+        x: f32,
+        y: f32,
+        screen: [f32; 2],
+        fonts: Option<&Fonts>,
+    ) -> Result<Option<&'static Tab>, String> {
+        let button = {
+            let placed = self.placements(screen, fonts);
+            input::hit(&placed, x, y).and_then(|path| tab_along(&placed, &path).map(|t| t.button))
+        };
+        let Some(button) = button else {
+            return Ok(None);
+        };
+        self.select(button)?;
+        Ok(tab(button))
+    }
+}
+
+/// The innermost tab button the hit path passes through.
+fn tab_along<'a>(roots: &'a [Placement<'a>], path: &[usize]) -> Option<&'static Tab> {
+    let mut placement = roots.get(*path.first()?)?;
+    let mut found = tab(placement.widget.name());
+    for step in &path[1..] {
+        placement = placement.children.get(*step)?;
+        if let Some(t) = tab(placement.widget.name()) {
+            found = Some(t);
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -316,6 +464,100 @@ mod tests {
         let bar = at("common buts");
         assert_eq!(bar.w, 256.0);
         assert!(bar.y > at(CONTENT_SLOT).y);
+    }
+
+    /// Clicking a tab selects it: the toolbar's state images flip, the tab's
+    /// name is the group's `Selection`, and the content slot holds a different
+    /// screen. The click is hit-tested against the placed tree, not looked up.
+    #[test]
+    fn clicking_a_tab_swaps_the_screen() {
+        let Some(ui) = ui_root() else { return };
+        let mut lab = BotLab::open(&ui).unwrap();
+        assert_eq!(lab.tab, "overview button");
+        let root_name = |lab: &BotLab| {
+            lab.content_root()
+                .map(|w| w.name().to_string())
+                .unwrap_or_default()
+        };
+        assert_eq!(root_name(&lab), "overview split");
+
+        // The chassis tab's frame is 431,37 100x24 in `botlabwin.gib`.
+        let hit = lab.click(437.0, 45.0, DESIGN_SCREEN, None).unwrap();
+        assert_eq!(hit.map(|t| t.button), Some("chassis button"));
+        assert_eq!(lab.tab, "chassis button");
+        assert_eq!(root_name(&lab), "chassis intro split");
+
+        // The group's selection and the two tabs' state images both moved, in
+        // the document the renderer reads.
+        let root = lab
+            .document
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Widget(w) => Some(w),
+                _ => None,
+            })
+            .unwrap();
+        let group = find(root, TAB_GROUP).unwrap();
+        assert_eq!(
+            group.field("Selection").map(|f| f.text()),
+            Some("chassis button")
+        );
+        let selected_image = |name: &str| {
+            let button = find(root, name).unwrap();
+            button
+                .children
+                .iter()
+                .filter(|c| c.kind == ra2fmt::gib::WidgetKind::Image)
+                .position(|c| c.visible())
+                .unwrap()
+        };
+        assert_eq!(selected_image("chassis button"), 2);
+        assert_eq!(selected_image("overview button"), 0);
+
+        // A click on a tab that is already selected changes nothing.
+        assert_eq!(
+            lab.click(437.0, 45.0, DESIGN_SCREEN, None)
+                .unwrap()
+                .map(|t| t.button),
+            Some("chassis button")
+        );
+        assert_eq!(lab.tab, "chassis button");
+        // A click on the screen away from the toolbar is not a tab.
+        assert!(lab
+            .click(20.0, 900.0, DESIGN_SCREEN, None)
+            .unwrap()
+            .is_none());
+        assert_eq!(lab.tab, "chassis button");
+    }
+
+    /// The chassis tab composes further, and its own buttons' `Notes` say so:
+    /// `structure design button` goes to chassis step 1, and `armor button`
+    /// loads a screen into `'right content slot'` — naming `ch_armor.gib`, which
+    /// the game does not ship: the file is `armor.gib`.
+    #[test]
+    fn the_chassis_tab_names_its_own_steps() {
+        let Some(ui) = ui_root() else { return };
+        let chassis = load(&ui, "botlab/chassis.gib").unwrap();
+        let root = chassis.widgets().next().unwrap();
+        let structure = find(root, "structure design button").expect("the step 1 button");
+        assert!(
+            structure.notes().contains("chassis step 1"),
+            "{}",
+            structure.notes()
+        );
+        let armor = find(root, "armor button").expect("the armor button");
+        assert!(
+            armor.notes().contains("right content slot"),
+            "{}",
+            armor.notes()
+        );
+        // The note's own file name is stale; the shipped one is `armor.gib`.
+        assert!(armor.notes().contains("ch_armor.gib"));
+        assert!(ra2fmt::find_ci(&ui, "botlab/ch_armor.gib").is_none());
+        assert!(ra2fmt::find_ci(&ui, "botlab/armor.gib").is_some());
+        // And the container has the slot the note names.
+        assert!(find(root, "right content slot").is_some());
     }
 
     /// The binary pairs `paintshop button` with `appearance.gib`, whose own
