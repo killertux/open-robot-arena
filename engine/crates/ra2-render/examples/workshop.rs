@@ -71,6 +71,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tab.button
         );
 
+        // The palette's grid says what fills it — *"fill with components in the
+        // current category"* — and the categories are the game's own component
+        // definitions, so fill it before drawing.
+        if tab.button == "components button" {
+            let filled = fill_components_grid(&mut lab, &game)?;
+            println!("  filled the components grid with {filled} cells from Components.cfz");
+        }
+
         let mut assets = UiAssets::open(&game)?;
         let placed = lab.placements(screen, Some(assets.faces()));
         let placed = placed.into_iter().collect::<Vec<_>>();
@@ -129,6 +137,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lab.select("chassis button")?;
     }
     Ok(())
+}
+
+/// Fill `components.gib`'s palette grid with the components of one category, from
+/// the game's own `Components.cfz`.
+fn fill_components_grid(
+    lab: &mut BotLab,
+    game: &std::path::Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let all = ra2ui::components::all(game)?;
+    let (category, _) = ra2ui::components::CATEGORIES[0];
+    let shown = ra2ui::components::in_category(&all, category);
+    for block in lab.document.blocks.iter_mut() {
+        let Block::Widget(root) = block else { continue };
+        let Some(grid) = ra2ui::workshop::find_mut(root, "components grid") else {
+            continue;
+        };
+        return Ok(ra2ui::components::fill_grid(grid, game, &shown));
+    }
+    Ok(0)
 }
 
 /// Fill `armor.gib`'s grid with one cell per armour type and render it.

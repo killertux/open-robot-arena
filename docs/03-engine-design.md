@@ -133,6 +133,17 @@ local/           # (git-ignored) game files + converted cache
   both, and it has to *find* the click point rather than take the button's centre:
   `chassis.gib`'s `structure note` label is drawn over its buttons, so a click on
   one's middle lands on the label, which is what a label in front should do.
+- **A screen's own note is a specification, and the data behind it is shipped.**
+  The component palette's grid says *"fill with components in the current
+  category"*, and everything that sentence needs is in the game: the categories
+  are the option group's buttons, the category is the definition's `type` — the
+  same field the sim's component factory switches on, so the shell and the sim
+  cannot disagree about what a component is — and the definitions and their art
+  ship in `Components.cfz` and `Components/`. The armour grid and this one are the
+  same shape: a screen that states its own content, and game data that is exactly
+  that content. What is left of the shell's lists are the ones whose content is
+  *runtime* rather than shipped — the team HQ's standings, the match results — and
+  those want the same rule with a live source.
 - **The shell is checked against its own index, not only against itself.** The
   game ships the UI editor's project document, and it is a second witness to
   every screen: the name and class of each file's root, and the 489 widgets the

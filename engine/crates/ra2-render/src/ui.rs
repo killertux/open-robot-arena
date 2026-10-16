@@ -85,6 +85,9 @@ pub struct UiScene {
 
 /// A screen's art and faces, and the textures they have been loaded into.
 pub struct UiAssets {
+    /// The game's own root, where a component's preview art lives — the
+    /// definitions name it `Components\ztek\ztek_preview.bmp`, not under `UI`.
+    game_root: PathBuf,
     ui_root: PathBuf,
     archive: Option<ra2fmt::cfl::Cfl>,
     faces: ra2ui::Fonts,
@@ -99,10 +102,12 @@ impl UiAssets {
     /// Load a game's faces and prepare to resolve its art.
     pub fn open(game: &Path) -> Result<UiAssets, Box<dyn std::error::Error>> {
         let ui_root = game.join("UI");
+        let game_root = game.to_path_buf();
         let archive = ra2fmt::cfl::Cfl::open_path(&game.join("RA2.cfz")).ok();
         let faces = ra2ui::Fonts::load(&game.join("RA2.cfz"))?;
         let mut assets = UiAssets {
             ui_root,
+            game_root,
             archive,
             faces,
             textures: vec![UiTexture {
@@ -373,6 +378,11 @@ impl UiAssets {
             return *found;
         }
         let mut data = resolve_ci(&self.ui_root, &key).and_then(|p| std::fs::read(p).ok());
+        if data.is_none() {
+            // Not under `UI`: a component's preview is named from the game's own
+            // root (`Components\ztek\ztek_preview.bmp`) and lives there.
+            data = resolve_ci(&self.game_root, &key).and_then(|p| std::fs::read(p).ok());
+        }
         if data.is_none() {
             let stem = key.rsplit('/').next().unwrap_or(&key);
             data = self.archive.as_ref().and_then(|c| c.get(stem));

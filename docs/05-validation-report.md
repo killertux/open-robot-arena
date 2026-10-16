@@ -509,6 +509,22 @@ Known, documented, not yet fixed:
     `chassis.gib`'s `structure note` label is drawn over its own buttons: a click
     on one's middle lands on the label.
 
+    The component palette is filled from the game's own definitions. Its grid
+    says what fills it — *"fill with components in the current category"* — and
+    the six categories are the option group's buttons, whose notes name the
+    definition's `type` field, the same field the component factory switches on.
+    `ra2ui::components` reads `Components.cfz`: **131 components over 73 mesh
+    directories**, partitioned by category into **power 9, extenders 38, mechanics
+    30, mobility 13, weapons 31, extras 10**. A cell is the preview art at its own
+    size, centred on the grid's cell — every one of the 131 previews is 96×72 with
+    its icon inset eight pixels, so the 80 columns of content land in the
+    78-pixel cell and the 72-pixel height on the 72-pixel row exactly. The render
+    shows the palette's first four cells: two *Smart Zone* and one *BIG VOLT*
+    battery, with the grid's selection bar on the first — and the words on that
+    art read correctly, left to right, which also settles the earlier suspicion
+    that the shell's art might be mirrored: it is not, and neither is the text
+    drawn from the glyph page.
+
     The chassis structure screens now carry the layer that the game pins over
     them. `ch_stepbuttons.gib` is the snap checkbox, the finished button and the
     two step buttons, and its own fields place it: `Alignment 36` (right + bottom)
