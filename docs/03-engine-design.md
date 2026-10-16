@@ -124,6 +124,15 @@ local/           # (git-ignored) game files + converted cache
   `cargo run -p ra2-render --example gooeyshot` is the whole loop in one command.
   That is the workshop's machinery; the workshop is layout and interaction on
   top of it, and nothing about the seam is left to build.
+- **A tab can have steps, and the workshop walks them.** The chassis tab's intro
+  offers two, and `workshop::STEPS` is the table: `structure design button` and
+  `armor button`, each putting a screen into the tab's own `content slot` and
+  leaving the tab selected. Where the button's note and the screen's disagree the
+  screen wins, and the recon notes carry both — `armor button`'s note names a file
+  the game does not ship and a slot the binary does not contain. The demo walks
+  both, and it has to *find* the click point rather than take the button's centre:
+  `chassis.gib`'s `structure note` label is drawn over its buttons, so a click on
+  one's middle lands on the label, which is what a label in front should do.
 - **The shell has input, and the workshop's tabs are live.** `ra2ui::input`
   hit-tests a point against the placed tree the way it is drawn — in reverse, so
   the last thing drawn is the first thing hit, and children before their parent

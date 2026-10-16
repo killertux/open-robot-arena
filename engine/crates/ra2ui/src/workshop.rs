@@ -95,6 +95,49 @@ pub const TABS: [Tab; 6] = [
     },
 ];
 
+/// A **step** of a tab: a button that replaces the tab's own screen with another
+/// one, in the same `content slot`.
+///
+/// The chassis tab has two, and both the button's note and its screen's note say
+/// which screen: `structure design button` says *"click to go to chassis step
+/// 1"*, and `chassis_structure1.gib` opens with `Notes step 1 of the chassis
+/// creation process`. `armor button` says *"click to load ch_armor.gib into
+/// 'right content slot'"* — **stale in both respects**: the game ships
+/// `armor.gib`, not `ch_armor.gib`, and `armor.gib`'s own root record says `Notes
+/// load this into content slot`. The screens are the evidence that outranks the
+/// button's note, and they agree with each other: each is a full-content screen
+/// — `armor.gib` is a 50/50 split whose left pane is 400 pixels, wider than the
+/// 320-pixel `right content slot` the note names — and each carries the root
+/// note the others do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Step {
+    /// The tab the button belongs to.
+    pub tab: &'static str,
+    /// The button's `Name` in that tab's screen.
+    pub button: &'static str,
+    /// The screen it puts in [`CONTENT_SLOT`].
+    pub fragment: &'static str,
+}
+
+/// The steps the shipped screens offer, and the button that starts each.
+pub const STEPS: [Step; 2] = [
+    Step {
+        tab: "chassis button",
+        button: "structure design button",
+        fragment: "botlab/chassis_structure1.gib",
+    },
+    Step {
+        tab: "chassis button",
+        button: "armor button",
+        fragment: "botlab/armor.gib",
+    },
+];
+
+/// The step a button starts, by the button's `Name`.
+pub fn step(button: &str) -> Option<&'static Step> {
+    STEPS.iter().find(|s| s.button == button)
+}
+
 /// Read and parse one `.gib` under a game's `UI` directory.
 pub fn load(ui_root: &Path, relative: &str) -> Result<Gib, String> {
     let path = ra2fmt::find_ci(ui_root, relative)
@@ -186,6 +229,9 @@ pub struct BotLab {
     pub document: Gib,
     /// The button of the tab on screen.
     pub tab: &'static str,
+    /// The step started on it, if any: its screen is in `content slot` instead
+    /// of the tab's own.
+    pub step: Option<&'static str>,
     /// How many children `content slot` has of its own, before a tab is loaded
     /// into it — the file's `white backdrop img`, and any it ever gains.
     slot_own: usize,
@@ -199,6 +245,7 @@ impl BotLab {
             ui_root: ui_root.to_path_buf(),
             document,
             tab: TABS[0].button,
+            step: None,
             slot_own: 0,
         };
         // `compose` has already loaded the first tab; count what the slot holds
@@ -222,13 +269,9 @@ impl BotLab {
         0
     }
 
-    /// Put a tab's screen into `content slot`, leaving the slot's own children
-    /// alone.
-    pub fn set_tab(&mut self, button: &str) -> Result<bool, String> {
-        let Some(tab) = tab(button) else {
-            return Ok(false);
-        };
-        let fragment = load(&self.ui_root, tab.fragment)?;
+    /// Put a screen into `content slot`, leaving the slot's own children alone.
+    fn set_screen(&mut self, relative: &str) -> Result<(), String> {
+        let fragment = load(&self.ui_root, relative)?;
         let mut done = false;
         for block in self.document.blocks.iter_mut() {
             let Block::Widget(w) = block else { continue };
@@ -243,7 +286,17 @@ impl BotLab {
         if !done {
             return Err(format!("{SCREEN} has no {CONTENT_SLOT}"));
         }
+        Ok(())
+    }
+
+    /// Put a tab's own screen into `content slot`.
+    pub fn set_tab(&mut self, button: &str) -> Result<bool, String> {
+        let Some(tab) = tab(button) else {
+            return Ok(false);
+        };
+        self.set_screen(tab.fragment)?;
         self.tab = tab.button;
+        self.step = None;
         Ok(true)
     }
 
@@ -291,29 +344,52 @@ impl BotLab {
         screen: [f32; 2],
         fonts: Option<&Fonts>,
     ) -> Result<Option<&'static Tab>, String> {
-        let button = {
+        // The innermost tab button under the point, and the innermost *step*
+        // button, if either is there.
+        let (tab_button, step_button) = {
             let placed = self.placements(screen, fonts);
-            input::hit(&placed, x, y).and_then(|path| tab_along(&placed, &path).map(|t| t.button))
+            let Some(path) = input::hit(&placed, x, y) else {
+                return Ok(None);
+            };
+            let mut placement = &placed[path[0]];
+            let mut found_tab = tab(placement.widget.name()).map(|t| t.button);
+            let mut found_step = step(placement.widget.name()).map(|s| s.button);
+            for index in &path[1..] {
+                placement = &placement.children[*index];
+                if let Some(t) = tab(placement.widget.name()) {
+                    found_tab = Some(t.button);
+                }
+                if let Some(s) = step(placement.widget.name()) {
+                    found_step = Some(s.button);
+                }
+            }
+            (found_tab, found_step)
         };
-        let Some(button) = button else {
+        if let Some(button) = step_button {
+            // A step replaces the tab's screen; the tab stays selected.
+            return self.start_step(button).map(|_| None);
+        }
+        let Some(button) = tab_button else {
             return Ok(None);
         };
         self.select(button)?;
         Ok(tab(button))
     }
-}
 
-/// The innermost tab button the hit path passes through.
-fn tab_along<'a>(roots: &'a [Placement<'a>], path: &[usize]) -> Option<&'static Tab> {
-    let mut placement = roots.get(*path.first()?)?;
-    let mut found = tab(placement.widget.name());
-    for step in &path[1..] {
-        placement = placement.children.get(*step)?;
-        if let Some(t) = tab(placement.widget.name()) {
-            found = Some(t);
+    /// Start a step: its screen replaces the tab's own, in the same slot, and
+    /// the tab's button stays selected.
+    pub fn start_step(&mut self, button: &str) -> Result<bool, String> {
+        let Some(step) = step(button) else {
+            return Ok(false);
+        };
+        if self.tab != step.tab {
+            // A step's button is only on its own tab's screen.
+            return Ok(false);
         }
+        self.set_screen(step.fragment)?;
+        self.step = Some(step.button);
+        Ok(true)
     }
-    found
 }
 
 #[cfg(test)]
@@ -558,6 +634,110 @@ mod tests {
         assert!(ra2fmt::find_ci(&ui, "botlab/armor.gib").is_some());
         // And the container has the slot the note names.
         assert!(find(root, "right content slot").is_some());
+    }
+
+    /// The chassis intro's two buttons are steps, and clicking one puts its
+    /// screen in the tab's own `content slot` — the tab stays selected.
+    #[test]
+    fn clicking_a_chassis_step_replaces_the_tabs_screen() {
+        let Some(ui) = ui_root() else { return };
+        let mut lab = BotLab::open(&ui).unwrap();
+        lab.select("chassis button").unwrap();
+        assert_eq!(
+            lab.content_root().map(|w| w.name()),
+            Some("chassis intro split")
+        );
+
+        // The two buttons are placed in `chassis.gib`'s `right content slot`;
+        // click each at the centre of where the layout put it.
+        for (button, root) in [
+            ("structure design button", "chassis split"),
+            ("armor button", "armor split"),
+        ] {
+            let (x, y) = reachable_point(&lab, button);
+            assert!(lab.click(x, y, DESIGN_SCREEN, None).unwrap().is_none());
+            assert_eq!(lab.step, Some(button));
+            assert_eq!(lab.content_root().map(|w| w.name()), Some(root));
+            assert_eq!(lab.tab, "chassis button", "the tab stays selected");
+            lab.select("chassis button").unwrap();
+            assert_eq!(lab.step, None, "re-selecting the tab clears the step");
+        }
+
+        // A step button belongs to its tab: starting one from another tab is
+        // refused rather than obeyed.
+        lab.select("overview button").unwrap();
+        assert!(!lab.start_step("armor button").unwrap());
+        assert_eq!(lab.content_root().map(|w| w.name()), Some("overview split"));
+    }
+
+    /// A point inside `name` that a click actually *reaches* it at.
+    ///
+    /// Not the same as its centre, and that is the shipped layout's doing:
+    /// `chassis.gib`'s `structure note` label is drawn over its two buttons — a
+    /// click on one's middle lands on the note, which is what a label in front
+    /// should do. So the point is found by hit-testing a few of them and taking
+    /// the first whose path goes through the widget.
+    fn reachable_point(lab: &BotLab, name: &str) -> (f32, f32) {
+        let placed = lab.placements(DESIGN_SCREEN, None);
+        let frame = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == name)
+            .unwrap_or_else(|| panic!("no widget called {name}"))
+            .frame;
+        let passes_through = |path: &[usize]| {
+            let mut placement = &placed[path[0]];
+            let mut found = placement.widget.name() == name;
+            for index in &path[1..] {
+                placement = &placement.children[*index];
+                found |= placement.widget.name() == name;
+            }
+            found
+        };
+        for iy in 1..7 {
+            for ix in 1..9 {
+                let x = frame.x + frame.w * ix as f32 / 9.0;
+                let y = frame.y + frame.h * iy as f32 / 7.0;
+                if let Some(path) = input::hit(&placed, x, y) {
+                    if passes_through(&path) {
+                        return (x, y);
+                    }
+                }
+            }
+        }
+        panic!("no click reaches {name}");
+    }
+
+    /// Every step's screen says it goes in `content slot`, and the button that
+    /// starts it is on that tab's screen — which is what makes the button's own
+    /// note about `'right content slot'` stale rather than a second rule.
+    #[test]
+    fn every_step_screen_names_the_content_slot() {
+        let Some(ui) = ui_root() else { return };
+        for step in &STEPS {
+            let fragment = load(&ui, step.fragment).unwrap();
+            // `armor.gib` names the slot outright; the two chassis-structure
+            // screens name their *step* instead ("step 1 of the chassis creation
+            // process"), which is what their button's note says ("go to chassis
+            // step 1"). Both are the data's own words for the pairing.
+            assert!(
+                fragment
+                    .widgets()
+                    .any(|w| w.notes().contains(CONTENT_SLOT)
+                        || w.notes().contains("chassis creation")),
+                "{} says neither where it goes nor which step it is",
+                step.fragment
+            );
+            let tab = tab(step.tab).expect("a tab");
+            let screen = load(&ui, tab.fragment).unwrap();
+            let root = screen.widgets().next().unwrap();
+            assert!(
+                find(root, step.button).is_some(),
+                "{}'s screen has no {}",
+                step.tab,
+                step.button
+            );
+        }
     }
 
     /// The binary pairs `paintshop button` with `appearance.gib`, whose own

@@ -316,6 +316,36 @@ both names are the data's:
   a tab is: set the group's `Selection`, set the clicked member's `Checked` and
   image, clear the others'.
 
+### The workshop's steps, and a stale note
+
+The chassis tab is not one screen. `chassis.gib` is its **intro** — the 3D view
+on the left and a `right content slot` on the right holding the `chassis choices
+grp`: the word "Chassis", a note, and two buttons — and each button starts a
+*step* by putting another screen into the tab's own `content slot`:
+
+| button | note | screen | its own root note |
+|---|---|---|---|
+| `structure design button` | *"click to go to chassis step 1 (…)"* | `botlab/chassis_structure1.gib` | *"step 1 of the chassis creation process"* |
+| `armor button` | *"click to load ch_armor.gib into 'right content slot'"* | `botlab/armor.gib` | *"load this into content slot"* |
+
+**The `armor button`'s note is stale in both respects**, and the screen is what
+says so: the game ships `armor.gib`, not `ch_armor.gib`, and `armor.gib`'s own
+root record names `content slot`, not `right content slot`. The geometry agrees
+with the screen — `armor.gib` is a 50/50 split whose left pane is **400 pixels**,
+wider than the 320-pixel `right content slot` the note names — and so does the
+binary: `right content slot` is **not in it at all**, while `content slot`
+(`0x6f0f74`) is. The two `chassis_structure*.gib` screens are full-content shaped
+the same way (`chassis split`, `Size 1 1 1 1`) and name their step, which is the
+half of the button's note that is *live* ("go to chassis step 1").
+
+Under the structure screens is one more layer the C++ loads: `ch_stepbuttons.gib`
+— `steps and snap group` with the `snap checkbox` (*"click to set snap on or
+off"*), a "Snap to grid" label, and a `step button grp` holding `step 1 button`,
+`step 2 button` (*"click to complete chassis shape"* → `finished button`). No
+shipped `.gib` names that file, so which slot it fills is the C++'s (the loader
+caches the target widget in a member — `+0x188`, `+0x1cc` — rather than looking a
+name up), and `chassis_structure1.gib`'s labels are laid out to expect it.
+
 ### What the numbers mean (the layout model)
 
 - **`Position x xf y yf` / `Size w wf h hf`**, each axis an amount and a flag. The

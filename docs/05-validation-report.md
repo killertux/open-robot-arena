@@ -495,6 +495,30 @@ Known, documented, not yet fixed:
     content slot'`, naming `ch_armor.gib`, which the game does not ship: the file
     is `armor.gib`.
 
+    A tab can have steps, and the chassis one does. Its intro offers two buttons,
+    and each puts a screen into the tab's own `content slot` with the tab still
+    selected: `structure design button` -> `chassis_structure1.gib` (*"step 1 of
+    the chassis creation process"*) and `armor button` -> `armor.gib`. The
+    button's own note for the second is **stale in both respects** and the screen
+    is what says so: it names `ch_armor.gib`, which the game does not ship, and
+    `'right content slot'`, which is not a string in the binary at all — while
+    `armor.gib`'s own root record says `load this into content slot`, and its
+    left pane is 400 pixels, wider than the 320-pixel slot the note names. The
+    demo walks both steps and renders them, and it finds each click point by
+    hit-testing rather than by taking the button's centre, because
+    `chassis.gib`'s `structure note` label is drawn over its own buttons: a click
+    on one's middle lands on the label.
+
+    One thing to look at next, named rather than half-fixed: labels using
+    **`fg_mcn16`** come out wrong in the render (`chassis_structure1.gib`'s
+    "Draw Freeform", "Circle", "Rectangle"), while `fg_mcn14` ones read — and the
+    toolbar's `title txt` is invisible — and the latter uses `fg_d20`. The glyph
+    *rect* mapping was pinned by drawing on `fg_mcn14` alone, and the pages of
+    `fg_mcn14` and `fg_mcn16` do not look alike in the ink's position, so the
+    guess to test next is that a face's `v` values are stored the other way up on
+    the wider faces. It is a font-table question, and the same method that settled
+    the record mapping will settle it.
+
     The last case the count cannot express turned out not to need one. An
     uncounted record joins the nearest record that still has a slot free — the
     caption holders duplicate their button's `Position`, so they are the button's
