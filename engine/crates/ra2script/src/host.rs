@@ -97,6 +97,7 @@ impl ScriptHost {
 
         Python::with_gil(|py| -> PyResult<()> {
             crate::plus::register(py)?;
+            crate::giscript::register(py)?;
             install_legacy(py, &root)?;
             let sys = py.import("sys")?;
             let path: Bound<'_, PyList> = sys.getattr("path")?.downcast_into()?;
@@ -120,6 +121,21 @@ impl ScriptHost {
     /// Import a module from the game (translating it if it is Python 2).
     pub fn import<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyModule>> {
         PyModule::import(py, name)
+    }
+
+    /// Run the shell's own entry point, `Scripts/Main.py`, the way the game
+    /// does.
+    ///
+    /// That file is the boot sequence rather than a convenience: it hooks
+    /// `sys.stdout` and `sys.stderr` into `giScript`, imports `Arenas` and `AI`
+    /// — every arena and brain in the game registering itself as it loads — and
+    /// hands the engine `dispatchEvent` to call back. `boot` has already put
+    /// `plus` and `giScript` in place and `Scripts/` on `sys.path`, so this is
+    /// the import the engine does at startup, and it is the shipped file that
+    /// runs.
+    pub fn boot_shell(&self, py: Python<'_>) -> Result<(), Box<dyn std::error::Error>> {
+        self.import(py, "Main")?;
+        Ok(())
     }
 
     /// Import `Arenas` and every arena script, which registers them.

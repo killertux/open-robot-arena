@@ -78,7 +78,7 @@ local/           # (git-ignored) game files + converted cache
   each carrying the clip `ClipMode` worked out — and draws them headlessly, so
   `uishot <screen.gib> <out.png>` renders any of the 116 shipped screens. Still
   to come: the cells' *content* (a `LoadCell` field the game's own reader
-  consumes), the `giScript`/`Gooey` Python surface, and the workshop. The visual
+  consumes) and the workshop. The visual
   pass is done: tiles repeat at their texture's own size, the selection bars draw
   `Point Selection.tga` (the game's own art, named by no screen), captions are
   found by their `Caption` attachment and centred in their buttons, and the
@@ -111,6 +111,19 @@ local/           # (git-ignored) game files + converted cache
   was *not* obvious from the data — that `ChildOrder` is the draw order
   ascending, not the file's order — was found by looking at a wrong picture
   first.
+- **The shell's own Python runs, and what it builds is a widget tree.** `plus`
+  is the engine's face to the scripts and `giScript` is the engine's side of the
+  shell's own `Scripts/Main.py`: the shipped boot file runs as written, hooks the
+  interpreter's output into `giScript`, imports every arena and brain, and hands
+  the engine `dispatchEvent`. `Gooey.Plain` — the *shipped* wrapper, not a
+  paraphrase — then builds its debug windows through `plus.addWindow`/`addText`,
+  and what those build is the same `ra2fmt::gib::Widget` a `.gib` screen is made
+  of: a `Window` at its `Position`/`Size` with a `Text` per line carrying
+  `_Font`/`_Text`/`_ForeColor`. So `ra2ui` places a script's window and
+  `ra2-render` draws it by exactly the code path a screen takes —
+  `cargo run -p ra2-render --example gooeyshot` is the whole loop in one command.
+  That is the workshop's machinery; the workshop is layout and interaction on
+  top of it, and nothing about the seam is left to build.
 - **The renderer is checked against a second renderer, written the other way
   round.** `tools/ui_compose.py` rasterises a screen on the CPU, in Python, from
   the resolver's own rectangles; `ra2-render`'s `ui` path draws the same screen

@@ -40,6 +40,8 @@ pub fn register(py: Python<'_>) -> PyResult<()> {
     m.add_class::<HingeController>()?;
     m.add_class::<ParticleEmitter>()?;
     m.add_class::<Ai>()?;
+    m.add_class::<crate::ui::Window>()?;
+    m.add_class::<crate::ui::Text>()?;
 
     m.add_function(wrap_pyfunction!(get_game_type, &m)?)?;
     m.add_function(wrap_pyfunction!(is_debug_mode, &m)?)?;
@@ -480,20 +482,45 @@ fn add_particle_emitter(
     }
 }
 
+/// `plus.addWindow(name, x, y, w, h)` — a window a script is building.
+///
+/// The shipped `Scripts/Gooey.py` wraps this, and every AI's debug window comes
+/// through it. What it returns is a handle onto a real
+/// [`ra2fmt::gib::Widget`] tree — see [`crate::ui`] — so a script's window is
+/// placed and drawn by the same code a `.gib` screen is.
 #[pyfunction]
-#[pyo3(signature = (*_args))]
 #[pyo3(name = "addWindow")]
-fn add_window(_args: &Bound<'_, PyTuple>) -> i32 {
-    defer("Gooey UI (M5)");
-    0
+fn add_window(
+    py: Python<'_>,
+    name: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> PyResult<Py<crate::ui::Window>> {
+    let id = crate::ui::add_window(name, x, y, w, h);
+    Py::new(py, crate::ui::Window { id })
 }
 
+/// `plus.addText(window, x, y, w, h)` — one line inside that window. The name
+/// is the wrapper's, not the engine's: the shipped `Gooey.Plain` keeps it as the
+/// key of its own dictionary and passes only the geometry on.
 #[pyfunction]
-#[pyo3(signature = (*_args))]
 #[pyo3(name = "addText")]
-fn add_text(_args: &Bound<'_, PyTuple>) -> i32 {
-    defer("Gooey UI (M5)");
-    0
+fn add_text(
+    py: Python<'_>,
+    window: &Bound<'_, PyAny>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> PyResult<Py<crate::ui::Text>> {
+    let parent = window
+        .extract::<PyRef<'_, crate::ui::Window>>()
+        .map(|w| w.id)
+        .unwrap_or(0);
+    let id = crate::ui::add_text(parent, x, y, w, h);
+    Py::new(py, crate::ui::Text { id })
 }
 
 #[pyfunction]

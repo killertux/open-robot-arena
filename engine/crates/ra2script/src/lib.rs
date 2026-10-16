@@ -31,9 +31,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use glam::{Quat, Vec3};
 
 pub mod arena;
+pub mod giscript;
 pub mod gooey;
 pub mod host;
 pub mod plus;
+pub mod ui;
 
 pub use arena::{Arena, ArenaData, ArenaDetail, Drive, HingeController, PrismaticController};
 pub use host::ScriptHost;
@@ -543,5 +545,139 @@ mod tests {
                 .unwrap();
             assert!(back.0.abs() <= 1.0 && back.2.abs() <= 1.0, "{back:?}");
         });
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+    use pyo3::prelude::*;
+
+    fn game_dir() -> Option<PathBuf> {
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            let candidate = dir.join("local/game");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                return None;
+            }
+        }
+    }
+
+    fn boot() -> Option<(ScriptHost, std::sync::MutexGuard<'static, ()>)> {
+        let guard = super::lock();
+        super::giscript::clear();
+        super::ui::clear();
+        // The interpreter outlives a test, so `Main` would be a no-op the second
+        // time. Drop it so each boot really runs the shell's file.
+        with_py(|py| {
+            if let Ok(modules) = py.import("sys").and_then(|s| s.getattr("modules")) {
+                let _ = modules.del_item("Main");
+            }
+        });
+        let host = ScriptHost::boot(game_dir()?).ok()?;
+        Some((host, guard))
+    }
+
+    fn with_py<R>(f: impl FnOnce(Python<'_>) -> R) -> R {
+        Python::with_gil(f)
+    }
+
+    /// The shell's own `Scripts/Main.py` runs: it hooks the interpreter's output
+    /// into `giScript`, imports every arena and brain, and hands the engine its
+    /// event callback. This is the game's boot sequence, not a stand-in for it.
+    #[test]
+    fn the_shell_boots_its_own_main_py() {
+        let Some((host, _guard)) = boot() else { return };
+        with_py(|py| host.boot_shell(py)).expect("Main.py runs");
+
+        let said = super::giscript::output();
+        assert!(
+            said.contains("Main module loaded"),
+            "the shell printed: {said:?}"
+        );
+        // `print` went through the hook Main.py installed rather than to the
+        // interpreter's own stdout, which is the point of the first lines.
+        assert!(
+            super::giscript::has_callback(),
+            "dispatchEvent was registered"
+        );
+    }
+
+    /// A script's debug window is a real widget tree: the shipped `Gooey.py`
+    /// builds it through `plus.addWindow`/`addText`, and the result is the same
+    /// `Widget` a `.gib` screen is made of, so the layout resolver places it.
+    #[test]
+    fn a_scripts_debug_window_is_a_widget_tree() {
+        let Some((host, _guard)) = boot() else { return };
+        with_py(|py| -> PyResult<()> {
+            let gooey = host.import(py, "Gooey")?;
+            let window = gooey.call_method1("Plain", ("watch", 0.0, 75.0, 100.0, 75.0))?;
+            let text = window.call_method1("addText", ("line0", 0.0, 0.0, 100.0, 15.0))?;
+            text.call_method1("setText", ("Throttle",))?;
+            let same = window.call_method1("get", ("line0",))?;
+            assert_eq!(
+                same.call_method0("GetText")?.extract::<String>()?,
+                "Throttle",
+                "the shipped Gooey.Plain hands back the same handle"
+            );
+            Ok(())
+        })
+        .expect("the shipped Gooey builds a window");
+
+        let windows = super::ui::windows();
+        assert_eq!(windows.len(), 1, "one window");
+        let window = &windows[0];
+        assert_eq!(window.kind, ra2fmt::gib::WidgetKind::Window);
+        assert_eq!(window.name(), "watch");
+        assert_eq!(window.children.len(), 1);
+        let line = &window.children[0];
+        assert_eq!(line.kind, ra2fmt::gib::WidgetKind::Text);
+        assert_eq!(line.text(), Some("Throttle"));
+        assert_eq!(line.font(), Some("fg_mcn14"), "the shell's debug face");
+        // `Size 100 0 15 0` at `Position 0 0`, inside the window's 100x75.
+        let frame = ra2ui::place(window, ra2ui::Frame::new(0.0, 0.0, 1280.0, 1005.0));
+        assert_eq!((frame.frame.x, frame.frame.y), (0.0, 75.0));
+        assert_eq!((frame.frame.w, frame.frame.h), (100.0, 75.0));
+        let line = &frame.children[0];
+        assert_eq!((line.frame.x, line.frame.y), (0.0, 75.0));
+        assert_eq!((line.frame.w, line.frame.h), (100.0, 15.0));
+    }
+
+    /// `setColor` reaches the widget the renderer reads, and `Remove` takes the
+    /// window out of the tree.
+    #[test]
+    fn a_line_takes_the_colour_it_is_given() {
+        let Some((host, _guard)) = boot() else { return };
+        with_py(|py| -> PyResult<()> {
+            let gooey = host.import(py, "Gooey")?;
+            let window = gooey.call_method1("Plain", ("watch", 0.0, 0.0, 50.0, 50.0))?;
+            let text = window.call_method1("addText", ("line0", 0.0, 0.0, 50.0, 10.0))?;
+            text.call_method1("setColor", (1.0, 0.5, 0.0))?;
+            Ok(())
+        })
+        .expect("build");
+        let windows = super::ui::windows();
+        let line = &windows[0].children[0];
+        assert_eq!(
+            line.field("_ForeColor").map(|f| f.text()),
+            Some("1 0.5 0 1")
+        );
+    }
+
+    /// The engine can call back into the shell: `dispatchEvent` is registered by
+    /// `Main.py` and reached by name, which is how the game's C++ does it.
+    #[test]
+    fn dispatch_event_reaches_the_shell() {
+        let Some((host, _guard)) = boot() else { return };
+        with_py(|py| host.boot_shell(py)).expect("Main.py runs");
+        with_py(|py| {
+            let data = py.None().into_bound(py);
+            let _ = data;
+            super::giscript::dispatch_event(py, "anything", &py.None().into_bound(py))
+        })
+        .expect("the shell's dispatchEvent is called");
     }
 }

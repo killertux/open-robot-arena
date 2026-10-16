@@ -944,6 +944,7 @@ dependencies = [
  "image",
  "pollster",
  "ra2fmt",
+ "ra2script",
  "ra2ui",
  "wgpu",
 ]
@@ -963,6 +964,7 @@ dependencies = [
  "pyo3",
  "ra2-render",
  "ra2fmt",
+ "ra2ui",
 ]
 
 [[package]]

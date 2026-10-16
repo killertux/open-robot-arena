@@ -17,3 +17,6 @@ pollster = "1.0.1"
 ra2fmt = { path = "../ra2fmt" }
 ra2ui = { path = "../ra2ui" }
 wgpu = "30.0.1"
+
+[dev-dependencies]
+ra2script = { path = "../ra2script" }

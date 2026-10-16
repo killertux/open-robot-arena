@@ -73,11 +73,17 @@ impl TextBox {
     fn setColor(&self, _r: i32, _g: i32, _b: i32) {}
 }
 
-/// Install the stub, unless the real module is already present.
+/// Install the stub, unless the real module is already present — which, on a
+/// real install, it is: `Scripts/Gooey.py` ships with the game and `Scripts/` is
+/// on `sys.path`, so this only fires when the file is missing. The shipped file
+/// is what runs; nothing here is a paraphrase of it.
 pub fn install(py: Python<'_>) -> PyResult<()> {
     let sys = py.import("sys")?;
     let modules = sys.getattr("modules")?;
     if modules.contains("Gooey")? {
+        return Ok(());
+    }
+    if PyModule::import(py, "Gooey").is_ok() {
         return Ok(());
     }
     let m = PyModule::new(py, "Gooey")?;

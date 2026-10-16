@@ -62,9 +62,21 @@ Python modules exposed to game scripts:
   `AddShadowTriangle(a,b,c)`, `AddXtra(name, gmf, material)`,
   `AddXtraSound(name, gmf, material, wav)`, `RemoveXtra(name)`, `Tick()`.
 - **`AI`** — bot AI module.
-- **`Gooey`** — UI helper over `plus.addWindow/addText` (`Plain` class).
+- **`Gooey`** — UI helper over `plus.addWindow/addText` (`Plain` class). Note the
+  wrapper's own signature against the engine's: `Plain.addText(self, name, x, y,
+  w, h)` keeps `name` as its dictionary key and calls `plus.addText(self.window,
+  x, y, w, h)` — five arguments, no name. This is the shipped file's call, and it
+  is what a `plus` implementation has to accept.
 - **`giScript`** — host glue: `giScript.register_function(fn)`,
-  `giScript.debug_stdout(s)`, `giScript.debug_stderr(s)`.
+  `giScript.debug_stdout(s)`, `giScript.debug_stderr(s)`. `Main.py` hooks
+  `sys.stdout`/`sys.stderr` into the two and hands `dispatchEvent` to the third,
+  which is how the engine calls back into the shell's Python.
+- **The engine's own text markup.** The binary carries strings like
+  `<text font fg_mcn14 color 0 0 0 1>` and `<image filename "UI\botlab\
+  tip.bmp"><text font fg_mcn14 color .5 .6 1 1 align 2> `, so a `Text` widget's
+  content can be marked up — font, colour and alignment, and an image beside it.
+  What parses it is not found yet, and nothing here renders it: a screen's
+  labels are plain strings in the same face these name.
 
 C++ classes exposed via Boost.Python (from mangled symbols):
 

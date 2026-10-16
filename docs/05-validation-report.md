@@ -435,6 +435,20 @@ Known, documented, not yet fixed:
     to the file, and wrong for the same reason a fragment is: it has no slot
     until a screen loads it.
 
+    The shell's own Python runs. `plus` now answers `addWindow`/`addText` for
+    real and `giScript` is a module the shipped `Scripts/Main.py` can hook
+    itself into: the boot file runs as written — its `print` reaches `giScript`,
+    it imports every arena and brain, and it registers `dispatchEvent`, which the
+    engine reaches by name — and `Gooey.Plain`, the shipped wrapper, builds its
+    debug windows through it. What it builds is a real `ra2fmt::gib::Widget`
+    tree, so `ra2ui` places it and the UI renderer draws it by the same path a
+    screen takes; `ra2-render --example gooeyshot` boots the shell, has the
+    game's Python build a three-line debug window, and writes the PNG. Four new
+    tests cover the boot, the window, the colour and the callback. What a script
+    window does *not* yet have is the engine's own chrome — the grey panel the
+    game draws behind a debug window — because that is the C++'s and nothing in
+    the data says what it is.
+
     Placing the containers also caught a bug in the *check*, not the engine: the
     compositor sampled an image at its page rect, so every art cell whose rect did
     not start at the page's origin was drawn from the wrong part of its file —
