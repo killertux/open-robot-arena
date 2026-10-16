@@ -336,6 +336,14 @@ that, so *there* the earlier record should be the front one. What settles it is
 the game's own hit test — because whichever way the tie goes, the buttons have to
 be reachable — and that is the next thing to read.
 
+One route to it is already closed, so that it is not tried twice: the binary's
+imports carry **no names** in this analysis. `find_xrefs_to_name` comes back
+`name_not_found` for `PtInRect`, `GetCursorPos` and `ScreenToClient`, even though
+their name strings are in the file (`PtInRect` at `0x6ed774`), and the strings
+themselves have no xrefs. So the mouse path has to be reached from the thunk
+addresses or from the class vtables — the class registry `FUN_00589860` gives each
+class its descriptor — rather than by name.
+
 ### The event list, and the two places the shipped file is not regular### The event list, and the two places the shipped file is not regular
 
 `hq_events.gib`'s grid says what fills it — *"fill with this season's events
@@ -437,6 +445,29 @@ record is the **base `Widget`**, the writer's abstract class, whose only fields 
 its note and `PassMouse` — it has no class behaviour to run, so it cannot be a
 control, and a hit has to fall through it to what is behind. `ra2ui::input::hit`
 does that, and the three overlays above are what requires it.
+
+### What the shell's screens name, and the two things the game does not ship
+
+Every art name a shipped screen states — an `Image`'s `_Filename`, a `Glyph`'s
+`_Font` — resolved the way the renderer resolves it (the loose tree under `UI`,
+then the game's own root, then `RA2.cfz` by stem) gives the shell's inventory:
+**1,303 names across the 116 screens, and nine that do not resolve.** Seven of the
+nine are `_Font System`, and those are not gaps: every widget that asks for it
+carries an empty `_Text` as well, and `System` is nowhere in the game — no
+`.giff` of that name in either archive and no such file on disk — so it is the
+editor's default for a widget with neither a face nor words. There is nothing to
+draw in those seven, and nothing in `RA2.cfz` for it to draw with.
+
+The other two are art the game **names and does not ship**:
+
+- `teamhq/xout.tga`, the event cell's overlay — the one that marks an event not
+  entered. Hiding it in a render changes nothing, because there is nothing to
+  hide.
+- `teamhq/event_bba.tga`, the BBA event's winner art.
+
+So the shell is complete but for two files the shipped build left out, and the
+test keeps the inventory — the count of names, the seven `System` screens and the
+two missing files — as the baseline.
 
 ### A letter that does not draw: `fg_d20`'s `O`
 

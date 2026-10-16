@@ -642,6 +642,16 @@ Known, documented, not yet fixed:
     geometry, the bindings and the markup. That is the last of the shell's
     *content*: the rest of M5's lists want the same rule with a different table.
 
+    The shell's art can be counted, and that is worth having before M6: resolving
+    every name a shipped screen states the way the renderer does gives **1,303
+    names across the 116 screens and nine that do not resolve**. Seven are
+    `_Font System`, which is the editor's default on widgets that carry an empty
+    `_Text` too — `System` is nowhere in the game, so there is nothing to draw and
+    nothing to draw it with. The other two are art the game *names and does not
+    ship*: `teamhq/xout.tga` (the event cell's overlay — which is why hiding it
+    changes nothing) and `teamhq/event_bba.tga`. Beyond those two files, every
+    screen's art is present.
+
     One label the notes have carried as "drawn but does not paint" for a while is
     `botlabwin.gib`'s `title txt`, and it is a *font* artifact rather than a
     layout one. The face is `fg_d20` — the shell's biggest, ascent 26 and descent

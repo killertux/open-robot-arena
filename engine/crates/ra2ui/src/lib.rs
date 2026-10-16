@@ -1598,6 +1598,105 @@ mod tests {
     /// `a_file_does_not_always_nest_to_one_root`), which are placed against the
     /// screen because nothing claims them. Fifty-six of the 116 files place
     /// entirely on screen.
+    /// Every piece of art a shipped screen names, resolved the way the renderer
+    /// resolves it — the loose tree under `UI`, then the game's own root (a
+    /// component's preview lives there), then `RA2.cfz` by stem — and the ones
+    /// that do not resolve, which are the game's own gaps rather than ours.
+    #[test]
+    fn every_art_a_screen_names_ships() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let archive = ra2fmt::cfl::Cfl::open_path(&game.join("RA2.cfz")).ok();
+        let mut files = Vec::new();
+        collect_gib(&ui, &mut files);
+
+        let mut unresolved: Vec<(String, String)> = Vec::new();
+        let mut named = 0;
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let gib = ra2fmt::gib::parse(&text).unwrap();
+            let screen = path
+                .strip_prefix(&ui)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            for widget in gib.walk() {
+                // The art a widget names, and the face it asks for: a `Glyph`'s
+                // art is a font page, so the two are the same question.
+                let mut names: Vec<(String, bool)> = Vec::new();
+                if let Some(art) = widget.filename().filter(|f| !f.is_empty()) {
+                    names.push((art.to_string(), false));
+                }
+                for field in &widget.fields {
+                    if field.name.as_deref() == Some("_Font") {
+                        let face = field.text();
+                        if !face.is_empty() {
+                            names.push((format!("{face}.giff"), true));
+                        }
+                    }
+                }
+                for (art, face) in names {
+                    named += 1;
+                    let key = art.replace('\\', "/");
+                    let key = key.trim_start_matches("./").trim_start_matches('/');
+                    let loose = ra2fmt::find_ci(&ui, key).is_some()
+                        || ra2fmt::find_ci(&game, key).is_some();
+                    let stem = key.rsplit('/').next().unwrap_or(key);
+                    let archived = archive.as_ref().is_some_and(|a| a.entry(stem).is_some());
+                    if !(loose || archived) {
+                        unresolved.push((
+                            screen.clone(),
+                            if face { format!("face {art}") } else { art },
+                        ));
+                    }
+                }
+            }
+        }
+        // The shell's own inventory: 1,303 names and nine that do not resolve.
+        assert_eq!(named, 1303, "art names across the shipped screens");
+        assert_eq!(unresolved.len(), 9, "{unresolved:?}");
+
+        // Seven of the nine are `_Font System`, which is not a gap at all: those
+        // widgets carry **no text either** (`_Text` is empty on every one), and
+        // `System` is nowhere in the game — no `.giff` by that name in either
+        // archive and no such file — so it is the editor's default for a widget
+        // that has neither a face nor words. There is nothing to draw there.
+        let mut faces: Vec<&String> = unresolved
+            .iter()
+            .filter(|(_, what)| what == "face System.giff")
+            .map(|(screen, _)| screen)
+            .collect();
+        faces.sort();
+        assert_eq!(
+            faces,
+            [
+                "botlab/import_texture.gib",
+                "botlab/importbot.gib",
+                "botlab/info_display.gib",
+                "botlab/surfacelayer.gib",
+                "common/credits.gib",
+                "teamhq/editteam.gib",
+                "teamhq/repairs.gib"
+            ],
+            "the screens that ask for the system font"
+        );
+
+        // And two are art the game does **not ship**: `teamhq/xout.tga`, the
+        // event cell's overlay, and `teamhq/event_bba.tga`, the BBA event's
+        // winner art. So those two draw nothing, in the game and here.
+        let mut missing: Vec<&String> = unresolved
+            .iter()
+            .filter(|(_, what)| what.ends_with(".tga"))
+            .map(|(_, what)| what)
+            .collect();
+        missing.sort();
+        assert_eq!(
+            missing,
+            ["teamhq\\event_bba.tga", "teamhq\\xout.tga"],
+            "art the game names and does not ship"
+        );
+    }
+
     #[test]
     fn every_shipped_file_places_and_the_frames_are_finite() {
         let Some(game) = game_dir() else { return };
