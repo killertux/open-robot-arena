@@ -31,8 +31,24 @@
 //!
 //! The page is **16-bit**, and the two bytes are two different pictures of the
 //! same glyphs: the high byte is the antialiased coverage and the low byte a
-//! hard 1-bit mask. It is also stored **bottom-up** — `v = 0` is the *bottom*
-//! row — so [`Glyph::rect`] flips it into the top-down rect a renderer wants.
+//! hard 1-bit mask. It is also stored **bottom-up**, so a renderer must read it
+//! that way round: the engine's own path swaps the two `v`s of a glyph's quad,
+//! and reading the page in byte order draws every label in the shell upside-down
+//! — a capital `T` with its bar at the bottom and an `L` with its foot at the
+//! top. That was measured through the whole pipeline, and the check is now a
+//! test (`the_page_is_stored_bottom_up`): inside the rows its own rect names,
+//! `T`'s ink sits *higher* than `L`'s, which is only true if the page runs
+//! bottom-up.
+//!
+//! **One axis is still open.** The page also looks horizontally mirrored — a
+//! capital `L`'s stem, which should be on the left, comes out to the right of its
+//! cell in `fg_mcn14` (mean column 4.4 of 8) and `fg_d26` (7.0 of 16), and `J`'s
+//! hook the other way. The same check on a *column* is not decisive at these
+//! sizes (`L`'s foot is as wide as the cell and its stem one pixel), and the two
+//! implementations — this and `tools/ui_compose.py` — share the rule, so their
+//! agreeing does not settle it. What would: a glyph whose horizontal asymmetry
+//! cannot be explained by the number of pixels, or the loader's own rasteriser
+//! (`FUN_005cd560`) read for the row/column order it writes.
 //!
 //! ## Which record is which character
 //!
@@ -354,6 +370,49 @@ mod tests {
 
     /// A page that is the wrong size for its header is rejected rather than
     /// read past the end.
+    /// The page is stored **bottom-up**, and this is the measurement that says
+    /// so: `T` carries its bar at the top and `L` its foot at the bottom, so
+    /// inside the rows its own rect names, `T`'s ink must sit higher than `L`'s.
+    /// It does — in every face — which is why the renderer swaps the two `v`s of
+    /// a glyph's uv: reading the page in byte order draws every label
+    /// upside-down.
+    ///
+    /// The same check with a *column* is not decisive at these sizes (`L`'s foot
+    /// is as wide as the cell and its stem one pixel, so the mean column barely
+    /// moves), and the horizontal axis is the one thing here still open — see
+    /// the recon notes.
+    #[test]
+    fn the_page_is_stored_bottom_up() {
+        // The three faces the asymmetry was measured on. `fg_mcn12` is
+        // ambiguous at 12 pixels — its `L` is 8 wide with a one-pixel stem — and
+        // is not claimed.
+        for face in ["fg_mcn14", "fg_mcn16", "fg_d20"] {
+            let Some(font) = shipped(face) else { return };
+            let (w, h) = (font.page_width as usize, font.page_height as usize);
+            let mean_row = |c: usize| -> f64 {
+                let g = &font.glyphs[c - 34];
+                let (x0, y0, gw, gh) = g.rect(font.page_width, font.page_height);
+                let (x0, y0) = (x0.max(0) as usize, y0.max(0) as usize);
+                let (mut sum, mut count) = (0usize, 0usize);
+                for y in y0..(y0 + gh as usize).min(h) {
+                    for x in x0..(x0 + gw as usize).min(w) {
+                        if font.page[y * w + x] > 40 {
+                            sum += y - y0;
+                            count += 1;
+                        }
+                    }
+                }
+                sum as f64 / count.max(1) as f64
+            };
+            let (t, l) = (mean_row(84), mean_row(76));
+            assert!(
+                l < t,
+                "{face}: `L`'s foot ({l:.1}) must sit above `T`'s bar ({t:.1}) \
+                 for the page to be bottom-up"
+            );
+        }
+    }
+
     #[test]
     fn a_truncated_font_is_rejected() {
         assert!(parse(&[0u8; 20]).is_err());

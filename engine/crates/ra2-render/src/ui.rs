@@ -264,11 +264,16 @@ impl UiAssets {
             out.push(UiQuad {
                 rect: glyph.rect,
                 corners: None,
+                // The face's page is stored **bottom-up**, so the two `v`s are
+                // swapped: the cell's lower byte row is the one the eye sees at
+                // the top of the quad. Measured, not assumed — drawn `T` and `L`
+                // through the whole pipeline come out with `T`'s bar at the
+                // bottom of its box and `L`'s foot at the top until this is done.
                 uv: [
                     glyph.cell[0] as f32 / pw,
-                    glyph.cell[1] as f32 / ph,
-                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
                     (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
+                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                    glyph.cell[1] as f32 / ph,
                 ],
                 color,
                 texture,
@@ -313,11 +318,16 @@ impl UiAssets {
             out.push(UiQuad {
                 rect: glyph.rect,
                 corners: None,
+                // The face's page is stored **bottom-up**, so the two `v`s are
+                // swapped: the cell's lower byte row is the one the eye sees at
+                // the top of the quad. Measured, not assumed — drawn `T` and `L`
+                // through the whole pipeline come out with `T`'s bar at the
+                // bottom of its box and `L`'s foot at the top until this is done.
                 uv: [
                     glyph.cell[0] as f32 / pw,
-                    glyph.cell[1] as f32 / ph,
-                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
                     (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
+                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                    glyph.cell[1] as f32 / ph,
                 ],
                 color,
                 texture,

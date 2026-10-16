@@ -203,9 +203,12 @@ class Font:
             adv, third, gx, gy, w, h = self._rect(g)
             top = y + 0 - third          # the caller passes the baseline
             for yy in range(h):
-                # `gy` is the cell's first row and the page's rows run the same
-                # way: sampling it turned over draws an `M` as an `M` mirrored.
-                row = self.page[(gy + yy) * self.width + gx : (gy + yy) * self.width + gx + w]
+                # The page is stored **bottom-up**, so the cell's *last* byte row
+                # is the one the eye sees first. Sampling it in byte order draws
+                # every glyph upside-down: a capital `T` comes out with its bar at
+                # the bottom. The engine's own renderer does the same swap.
+                sy = gy + h - 1 - yy
+                row = self.page[sy * self.width + gx : sy * self.width + gx + w]
                 for xx, v in enumerate(row):
                     if not v:
                         continue
