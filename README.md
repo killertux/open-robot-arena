@@ -184,10 +184,13 @@ turns a placed screen into quads and renders it headlessly, and the result is
 checked against the Python composite, which shares no code with it. The
 containers place their own children too
 — `ClipMode` into a clip rectangle, a grid's cells from its rows and columns, a
-scroll bar's parts at its two ends. What remains of M5 is the cells' content
-(which is game data at run time), tiles, the real 2D renderer, the
-workshop itself — the shell's `giScript`/`Gooey` surface is in, and the workshop
-is layout and interaction on top of it.
+scroll bar's parts at its two ends. The robot workshop composes from the same
+data: `botlabwin.gib` plus the tab's own screen, loaded into the group that
+screen's own `Notes` names, with the tab table taken from the toolbar's notes on
+its six buttons (`cargo run -p ra2-render --example workshop` renders all six).
+What remains of M5 is the cells' content (which is game data at run time) and the
+workshop's *interaction* — its screens are in, and the steps a tab offers are the
+game's C++.
 
 ## Layout
 

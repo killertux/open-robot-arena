@@ -256,6 +256,45 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   and `"player icon img"` are in the binary, matching `Name` fields in
   `UI/multiplayer/*.gib`.
 
+### The workshop's own composition
+
+The bot lab — the workshop — is `UI/botlab/botlabwin.gib`: a toolbar of six tabs,
+a content area, a 49-pixel strip carrying the shell's navigation bar (through a
+`Proxy`), and an info bar. A *tab* is a fragment loaded into a **named slot**, and
+both names are the data's:
+
+- **The slot is `content slot`.** Every tab fragment's root record says so:
+  `overview.gib`, `chassis.gib`, `components.gib`, `wiring.gib`,
+  `appearance.gib` and `armor.gib` all open with `Notes load this into content
+  slot`. `testarena.gib` is the exception — its root is `Group "test arena main
+  group"` with no note, and the file names the slot further in, on the placeholder
+  the arena fills (`Notes load the test arena here (put placeholder into content
+  slot)`). The binary looks the string `content slot` up by name (`0x6f0f74`,
+  referenced from `0x437d4d`, just before it loads `botlab\overview.gib` at
+  `0x6f0f60`).
+- **The second slot is `lowersplit`**: `botlab\info_display.gib` (`0x6f0c88`) is
+  looked up as `lowersplit` (`0x6f0ca0`) and loaded there (`0x438fdd`). It is a
+  `Widget "Info Display"` at 80% width and 18 pixels tall, which lands on the
+  pane above the content area and under the nav strip.
+- **The tab table is the toolbar's own `Notes`.** Five of the six `CheckBox`es in
+  `botlabwin.gib`'s `blab option group` name the screen they show —
+  `overview button` says *"click to show 3dview.gib and overview.gib"*, and
+  `chassis`, `components` and `wiring` say the same with their own file;
+  `test robot button` says *"click to show testarena.gib"*. The sixth,
+  `paintshop button`, says *"go to chassis appearance effects"*, which is
+  `botlab/appearance.gib` — the file the binary pairs with the string `Appearance`
+  (`0x6efda0`, referenced from `0x423099`).
+- **The tab's own title is not set.** `title txt` holds `ROBOT WORKSHOP` in the
+  file and the binary's per-tab strings (`Overview`, `Chassis 1`, `Chassis 2`,
+  `Armor`, `Appearance`, `Test Robot`, …) are the **help** pages — they match
+  `UI/help/help_ws_*.gib`, one per workshop area, which is what the shell shows
+  when help is asked for. So the toolbar keeps its title and the screen changes.
+- **A tab can compose further.** `chassis.gib` is itself a container with its own
+  sub-slots (`ch_armor.gib` `into 'right content slot'`, the `Chassis 1`/`Chassis
+  2` step screens, `ch_stepbuttons.gib`), and `components.gib` holds a list and a
+  component-properties panel that the game fills at run time. That is the
+  *interaction* layer, and it is the C++'s, not the data's.
+
 ### What the numbers mean (the layout model)
 
 - **`Position x xf y yf` / `Size w wf h hf`**, each axis an amount and a flag. The

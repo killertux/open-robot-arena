@@ -78,7 +78,7 @@ local/           # (git-ignored) game files + converted cache
   each carrying the clip `ClipMode` worked out — and draws them headlessly, so
   `uishot <screen.gib> <out.png>` renders any of the 116 shipped screens. Still
   to come: the cells' *content* (a `LoadCell` field the game's own reader
-  consumes) and the workshop. The visual
+  consumes). The visual
   pass is done: tiles repeat at their texture's own size, the selection bars draw
   `Point Selection.tga` (the game's own art, named by no screen), captions are
   found by their `Caption` attachment and centred in their buttons, and the
@@ -124,6 +124,17 @@ local/           # (git-ignored) game files + converted cache
   `cargo run -p ra2-render --example gooeyshot` is the whole loop in one command.
   That is the workshop's machinery; the workshop is layout and interaction on
   top of it, and nothing about the seam is left to build.
+- **The workshop is data too, and it composes.** `ra2ui::workshop` turns
+  `botlabwin.gib` plus a tab's fragment into the screen the game shows: the
+  fragment goes into the group its own `Notes` names (`content slot`), the info
+  bar into `lowersplit`, and the nav bar arrives through the window's `Proxy`.
+  The table of which button shows which screen is the toolbar's own `Notes` —
+  five of six name their file outright — and the test re-reads those notes from
+  the shipped screen so the table cannot drift from the data it came from.
+  `cargo run -p ra2-render --example workshop` renders all six tabs. What the
+  workshop still lacks is the *interaction*: a tab's own steps (the chassis
+  tab's `Chassis 1`/`Chassis 2`/`Armor`), the component list's contents and the
+  paint tools are the game's C++, and they are the next slice.
 - **A screen is composed of fragments, and the data says which.** A `Proxy`
   names another `.gib` — nine shipped screens name the bottom navigation bar —
   and the fragment is placed inside the proxy's own rectangle, so

@@ -456,6 +456,26 @@ Known, documented, not yet fixed:
     `teamhq.gib`, `credits.gib` and the main menu now each nest to their
     `Window`, and 49 of the 116 files do.
 
+    The workshop composes. `ra2ui::workshop` loads `botlabwin.gib`, the info bar
+    into `lowersplit` and a tab's fragment into the group the fragment itself
+    names — `content slot`, on the root record of five of the six — and the tab
+    table is the toolbar's own `Notes`: `overview button` says *"click to show
+    3dview.gib and overview.gib"* and `chassis`, `components`, `wiring` and
+    `test robot` say the same with their own file; `paintshop button` says *"go to
+    chassis appearance effects"* and the binary is what pairs that with
+    `appearance.gib`. `cargo run -p ra2-render --example workshop` renders all
+    six, and looking at them shows the thing working: the same window with its
+    six tabs (the selected one in its own state, which is the file's `Checked`),
+    the crossing-wires chrome, the instructions panel, the info bar and the shell's
+    nav bar through the window's proxy — and a different screen in the content
+    area on the paintshop tab. The binary's per-tab title strings turned out to be
+    the *help* pages (`help_ws_*.gib`), so the toolbar's own `ROBOT WORKSHOP`
+    stays put; it does not draw in the render, which is a toolbar detail and not
+    the composition (it is absent with `botlabwin.gib` rendered alone too — it is
+    in the draw list at `557.5,23.34` off `fg_d20`, and the toolbar's wires cover
+    it from x 630, so what to look at next is the face's coverage and the
+    toolbar's own draw order).
+
     The last case the count cannot express turned out not to need one. An
     uncounted record joins the nearest record that still has a slot free — the
     caption holders duplicate their button's `Position`, so they are the button's

@@ -111,6 +111,8 @@ use std::path::Path;
 
 use ra2fmt::gib::{Block, Gib, Length, Widget, WidgetKind};
 
+pub mod workshop;
+
 /// The faces a screen's labels name, loaded from a game installation's
 /// `RA2.cfz`. A resolver given these can size the widgets the editor left at
 /// zero — a label's extent is the sum of its glyph advances wide and the face's
