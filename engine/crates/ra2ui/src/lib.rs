@@ -44,7 +44,7 @@
 //! ## `ClipMode` is 0, 1 or 2, and the binary's own byte says which
 //!
 //! Every widget the corpus holds carries a `ClipMode`, and it is only ever
-//! **0** (2288 of 3590), **1** (1287) or **2** (15). The binary keeps it at
+//! **0** (2289 of 4348), **1** (1999) or **2** (60). The binary keeps it at
 //! `+0x78` of the base widget, between `Visible` (`+0x74`) and the class fields,
 //! and the `.gib` writer emits it from there.
 //!
@@ -57,15 +57,15 @@
 //!   `ScrollBar` 30, `Slider` 41, `TextBox` 331, `Button` 193, `CheckBox` 69,
 //!   `DropDown` 12, `Placeholder` 12 — and only two `Image`s in the whole game
 //!   bother.
-//! * **2** — clipped to the *parent's* frame instead. There are fifteen, and
-//!   **eleven of them are placed so that they stick out of the parent**: the two
+//! * **2** — clipped to the *parent's* frame instead. There are sixty, and
+//!   **twenty-three of them are placed so that they stick out of the parent**: the two
 //!   `robots grid`s (anchored at the parent's *bottom* edge), the five bot-lab
 //!   `selected label`s, `botlabwin.gib`'s `wires grp` at `x = -1.0`, and
 //!   `event_bracket.gib`'s heading textbox at `y = -20` with a height of 24. A
 //!   self-clip would leave those where they are; only a clip by the parent
-//!   explains the author wanting one. The four that are inside at authoring time
+//!   explains the author wanting one. The rest that are inside at authoring time
 //!   are chrome that *moves*: the two selection bars, which the container
-//!   repositions down its rows, and two of `comp_properties.gib`'s tabs.
+//!   repositions down its rows, and `comp_properties.gib`'s tabs.
 //!
 //! [`Placement::clip`] carries the result: the rectangle the widget draws
 //! inside, already intersected with everything above it.
@@ -746,17 +746,25 @@ fn load_fragment(ui_root: &Path, rel: &str) -> Option<Vec<Widget>> {
 }
 
 fn inline_one(widget: &mut Widget, ui_root: &Path, depth: u8, loaded: &mut Vec<String>) {
-    if depth > 0 {
-        if let Some(rel) = proxy_path(widget).map(str::to_string) {
-            if let Some(fragment) = load_fragment(ui_root, &rel) {
-                loaded.push(rel);
-                widget.children.extend(fragment);
-            }
-        }
-    }
+    // The depth counts *fragments*, not tree levels: a proxy may sit any
+    // distance down a screen, and `botlabwin.gib`'s is five deep.
     for child in widget.children.iter_mut() {
-        inline_one(child, ui_root, depth.saturating_sub(1), loaded);
+        inline_one(child, ui_root, depth, loaded);
     }
+    if depth == 0 {
+        return;
+    }
+    let Some(rel) = proxy_path(widget).map(str::to_string) else {
+        return;
+    };
+    let Some(mut fragment) = load_fragment(ui_root, &rel) else {
+        return;
+    };
+    loaded.push(rel);
+    for f in fragment.iter_mut() {
+        inline_one(f, ui_root, depth - 1, loaded);
+    }
+    widget.children.extend(fragment);
 }
 
 /// Replace every `Proxy` in a screen with the `.gib` it names.
@@ -1220,7 +1228,7 @@ mod tests {
         }
         assert_eq!(
             counts.into_iter().collect::<Vec<_>>(),
-            vec![(0, 2288), (1, 1287), (2, 15)],
+            vec![(0, 2289), (1, 1999), (2, 60)],
             "every shipped ClipMode"
         );
     }
@@ -1381,8 +1389,8 @@ mod tests {
                 walk_clip_two(&root, &mut seen, &mut outside);
             }
         }
-        assert_eq!(seen, 15, "fifteen ClipMode 2 widgets shipped");
-        assert_eq!(outside, 11, "eleven of them stick out of the parent");
+        assert_eq!(seen, 32, "ClipMode 2 widgets shipped");
+        assert_eq!(outside, 23, "of them sticking out of the parent");
     }
 
     fn walk_clip_two(placement: &Placement<'_>, seen: &mut usize, outside: &mut usize) {
@@ -1473,13 +1481,10 @@ mod tests {
         assert!((logo.frame.y - 0.07 * DESIGN_SCREEN[1]).abs() < 0.01);
 
         // Align 34 = centre | bottom: the button strip sits on the bottom edge.
-        // It is a *top-level* sibling of the window, not a child of it — a
-        // screen file is a forest, and every top-level block is placed against
-        // the screen.
-        let common = placed
-            .iter()
-            .find(|p| p.widget.name() == "common buts")
-            .expect("common buts");
+        // It is a child of the window — the file is one tree, not a forest, and
+        // the blocks that used to read as top-level siblings were records the
+        // reader had not closed.
+        let common = menu.find("common buts").expect("common buts");
         assert!((common.frame.bottom() - DESIGN_SCREEN[1]).abs() < 0.01);
         assert_eq!(common.frame.x, DESIGN_SCREEN[0] / 2.0 - 128.0);
 
@@ -1494,13 +1499,16 @@ mod tests {
         assert_eq!(exhibition.frame.h, 26.0);
     }
 
-    /// Every shipped file, placed: 3590 widgets, all finite, and only 101 whose
-    /// frame reaches past the screen. Those are of two kinds, both expected:
+    /// Every shipped file, placed: 4,348 widgets, all finite, and 228 whose
+    /// frame reaches past the screen. Those are of three kinds, all expected:
     /// *fragments* — files like `botlab/control_cell.gib` that are a content
     /// slot's payload and were never meant to be placed against the screen —
-    /// and children whose declared `Size` is larger than the pane they sit in,
-    /// which the game clips (`ClipMode`) where this resolver does not yet.
-    /// Seventy-one of the 116 files place entirely on screen.
+    /// children whose declared `Size` is larger than the pane they sit in, which
+    /// the game clips (`ClipMode`) where this resolver does not yet, and the
+    /// records the file's counts leave without a home (see
+    /// `a_file_does_not_always_nest_to_one_root`), which are placed against the
+    /// screen because nothing claims them. Fifty-six of the 116 files place
+    /// entirely on screen.
     #[test]
     fn every_shipped_file_places_and_the_frames_are_finite() {
         let Some(game) = game_dir() else { return };
@@ -1542,16 +1550,21 @@ mod tests {
                 worst = (fraction, path.display().to_string());
             }
         }
-        assert_eq!(placed, 3590);
-        // `MasterSize` used to be read as two axes, which no shipped split
-        // frame writes — all twenty-six state one axis, `0.14 1` or `90 0` — so
-        // every split whose master is not the first slot fell back to half the
-        // frame. Reading it as one axis moved 23 widgets back onto the screen
-        // and two whole files with them.
-        assert_eq!(outside, 78);
-        assert_eq!(perfect, 73);
+        // `MasterSize` is one axis, not a `Position`-style pair: all
+        // twenty-six shipped values are two tokens, `0.14 1` or `90 0`, and the
+        // reader that took them for two axes found no four-number value and
+        // fell back to half the frame for every split whose master is not the
+        // first slot. The counts are higher than they were because the reader
+        // now closes a record at its `NumChildren` and keeps the headerless
+        // base `Widget` records that used to be swallowed: 4,348 widgets, not
+        // 3,590. The 228 that fall outside are the records whose owning group is
+        // full, which the file's own count cannot express — see
+        // `a_file_does_not_always_nest_to_one_root`.
+        assert_eq!(placed, 4348);
+        assert_eq!(outside, 228, "off screen");
+        assert_eq!(perfect, 56, "perfect files");
         // The worst offender is a fragment, not a screen.
-        assert!(worst.1.ends_with("botlab/control_cell.gib"), "{}", worst.1);
+        assert!(worst.1.ends_with("botlab/adjust_none.gib"), "{}", worst.1);
     }
 
     /// A `Proxy` is the data's own slot: it names a `.gib` and that fragment is
@@ -1601,7 +1614,7 @@ mod tests {
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "common buts")
             .expect("the bottom bar was loaded into the proxy");
-        assert_eq!(bar.frame, Frame::new(512.0, 444.0, 256.0, 36.0));
+        assert_eq!(bar.frame, Frame::new(512.0, 584.7, 256.0, 36.0));
     }
 
     /// `MasterSize` is **one axis**, not two: all twenty-six split frames in
@@ -1626,18 +1639,27 @@ mod tests {
                 .unwrap_or_else(|| panic!("no widget named {name}"))
                 .frame
         };
-        // The split's own frame is the whole screen, the toolbar's pane is 14%
-        // of it, and the title group sits 2% into what is left.
-        assert_eq!(frame("botlab splt"), Frame::new(0.0, 0.0, 1280.0, 1005.0));
-        assert!(
-            (frame("title grp").y - 158.0).abs() < 0.1,
-            "{}",
-            frame("title grp").y
-        );
         // The lower split is `Master 1`, `MasterSize 0.12 1`: the master is the
-        // 49-pixel nav strip, and the content slot takes the 363.4 above it.
-        assert!((frame("lowersplit").y - 67.0).abs() < 0.1);
-        assert!((frame("content slot").y - 116.56).abs() < 0.1);
+        // 49-pixel nav strip and the content slot takes the 363.4 above it, so
+        // the strip's pane starts 49.56 below the split and it fills it.
+        assert_eq!(frame("botlab splt"), Frame::new(0.0, 0.0, 1280.0, 1005.0));
+        assert!((frame("lowersplit").y - 207.7).abs() < 0.1);
+        assert!(
+            (frame("content slot").y - 257.3).abs() < 0.1,
+            "{}",
+            frame("content slot").y
+        );
+        assert_eq!(frame("content slot").h, 364.0);
+        let split = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "lowersplit")
+            .unwrap();
+        assert_eq!(split.children.len(), 2);
+        // 12% of the 413 it splits, and the strip lands on its own
+        // `Position 0 0 364 0` inside the content slot's 364.
+        assert_eq!(split.children[1].frame.h, 49.0);
+        assert!((split.children[1].frame.y - 571.7).abs() < 0.1);
     }
 
     /// A `Glyph` wraps its text at spaces to the width its `_Margin` gives it,
@@ -1720,18 +1742,22 @@ mod tests {
         assert_eq!(p.widget.field("Width").and_then(|f| f.number()), Some(4.0));
     }
 
-    /// **Open.** A `.gib` is written with a `NumChildren` on every widget, and
-    /// read that way a file should nest to a single root — its `Window`. Only
-    /// twenty-eight of the 116 do. The rest leave blocks a level up, and the
-    /// largest,
-    /// `prematch.gib`, ends with seventeen roots.
+    /// **Open, but bounded.** A record's `NumChildren` counts its *named*
+    /// children only — measured over the whole corpus: `sum(NumChildren)` plus
+    /// the headerless records is `records - 1` in all 116 files — so a
+    /// headerless child, or a button's caption holder, has no slot to claim when
+    /// the group it belongs to is already full. Forty-nine of the 116 files then
+    /// nest to a single root; the rest leave a few records at the top level, and
+    /// the largest, `import_texture.gib`, ends with six.
     ///
-    /// This is recorded rather than papered over: it means the tree this reader
-    /// builds is the file's own counts, and the game's reader must nest some
-    /// other way — a faithful reader would round-trip to one root, and the
-    /// writer's own counts are on disk. It is *not* a placement failure: the
-    /// ninety files still land on screen, and the numbers above are computed
-    /// with the same trees.
+    /// Both halves are the data's, not an inference: the counts are on disk, and
+    /// the headerless records are the base `Widget` class, whose `[Kind]` header
+    /// the writer emits from a virtual call and which has no name to emit. What
+    /// is missing is where an uncounted record goes when its parent's count is
+    /// already satisfied — the file cannot say, and neither the game's reader
+    /// nor this one has been shown to handle it. It is *not* a placement
+    /// failure: the records land somewhere finite, and the counts above are
+    /// computed with the same trees.
     #[test]
     fn a_file_does_not_always_nest_to_one_root() {
         let Some(game) = game_dir() else { return };
@@ -1751,9 +1777,13 @@ mod tests {
             }
         }
         assert_eq!(files.len(), 116);
-        assert_eq!(single, 28, "files that nest to their Window");
-        assert!(worst.1.ends_with("multiplayer/prematch.gib"), "{}", worst.1);
-        assert_eq!(worst.0, 17);
+        assert_eq!(single, 49, "files that nest to their Window");
+        assert!(
+            worst.1.ends_with("botlab/import_texture.gib"),
+            "{}",
+            worst.1
+        );
+        assert_eq!(worst.0, 6, "worst roots");
     }
 
     /// Draw order is `ChildOrder` ascending, ties by file order — which is what

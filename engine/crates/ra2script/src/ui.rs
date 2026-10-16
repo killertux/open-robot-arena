@@ -82,6 +82,7 @@ fn field(name: &str, raw: impl Into<String>) -> Field {
 pub fn add_window(name: &str, x: f32, y: f32, w: f32, h: f32) -> usize {
     let widget = Widget {
         kind: WidgetKind::Window,
+        implicit: false,
         fields: vec![
             field("Name", name),
             field("Position", format!("{x} 0 {y} 0")),
@@ -102,6 +103,7 @@ pub fn add_window(name: &str, x: f32, y: f32, w: f32, h: f32) -> usize {
 pub fn add_text(window: usize, x: f32, y: f32, w: f32, h: f32) -> usize {
     let widget = Widget {
         kind: WidgetKind::Text,
+        implicit: false,
         fields: vec![
             field("_Font", DEBUG_FACE),
             field("_Text", ""),

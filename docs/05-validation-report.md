@@ -435,17 +435,33 @@ Known, documented, not yet fixed:
     to the file, and wrong for the same reason a fragment is: it has no slot
     until a screen loads it.
 
-    One thing is *named* rather than closed. A `.gib` widget carries
-    `NumChildren`, written by the editor from its real tree, so reading a file
-    should give back a single root — its `Window`. Only **28 of the 116** do; the
-    rest leave blocks a level up, `multiplayer/prematch.gib` worst at 17 roots.
-    It is not cosmetic: `credits.gib`'s screen-background `metaldots_pattern`
-    tile is written after the dialog, so as a root it paints over everything the
-    dialog draws, and `selectbot_computer.gib` does the same. The placement
-    numbers above are computed with those same trees, and the proxies, clips and
-    selection bars are read from wherever a block lands, so nothing depends on
-    the nesting being right — but the game's reader nests by something other than
-    the count, and finding that rule is open. `ui_compose.py` draws the art, the
+    The reader's own rule turned out to be **the record boundary**, and finding
+    it changed a fifth of every screen. A record ends at its `NumChildren`, not
+    at the next `[Kind]` — and `[Kind]` itself is *optional*: the base `Widget`
+    class is the one kind the writer leaves headerless, which the binary's own
+    schema says (`[Widget]` is the single entry in the field table whose class
+    fields are just `Notes ` and `PassMouse `, `0x708c6c`), and 758 records in
+    the corpus are like that. Read as trailing fields of the record before them,
+    they made the corpus look like 3,590 widgets when it holds **4,348**, and
+    they made 88 files read as a forest instead of one tree: the main menu's
+    buttons and their caption holders were top-level blocks. The counts agree
+    once the records are cut correctly — `sum(NumChildren)` plus the headerless
+    records is `records - 1` in all 116 files, with no exceptions — so the count
+    names only the children that carry a kind, and the writer gates its child
+    loop on `0 < NumChildren`. The picture is what settled the last question:
+    with a headerless child absorbed by the record before it, `mainmenu.gib`'s
+    `exhibition button` swallowed its own caption holder, whose `Position` is the
+    button's own and which therefore belongs beside the button in `sawback grp`
+    — the render showed the caption clipped to nothing. `botlabwin.gib`,
+    `teamhq.gib`, `credits.gib` and the main menu now each nest to their
+    `Window`, and 49 of the 116 files do.
+
+    What is *named* rather than closed is the last case the count cannot
+    express: an uncounted record — a headerless child, or a button's caption
+    holder — whose group has already taken all its named children. 67 files
+    leave one or two such records at the top level (`import_texture.gib` six),
+    and they are placed against the screen because nothing claims them. The
+    placement numbers above are computed with those same trees. `ui_compose.py` draws the art, the
     labels and the new `Lines`/`Glyph` quads; it does not yet inline proxies, so
     the composite of a proxied screen is that screen without its nav bar.
 

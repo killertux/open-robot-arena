@@ -119,6 +119,13 @@ pub enum Block {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Widget {
     pub kind: WidgetKind,
+    /// True when the file wrote **no `[Kind]` header** for this record. The base
+    /// class `Widget` is the only kind the writer leaves nameless — its header
+    /// comes from a virtual call that returns nothing for it — and such a child
+    /// does **not** count against its parent's `NumChildren`. Measured over the
+    /// whole corpus: `sum(NumChildren)` plus the number of headerless records is
+    /// `records - 1` in all 116 files.
+    pub implicit: bool,
     pub fields: Vec<Field>,
     /// `Background`/`Border`/`Caption`/... blocks that follow this widget.
     pub attachments: Vec<Attachment>,
@@ -392,6 +399,11 @@ impl Length {
 /// The kind of a widget block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WidgetKind {
+    /// The base class, and the one kind whose `[Kind]` header the writer leaves
+    /// out — a bare container that carries no class fields of its own beyond
+    /// `Notes` and `PassMouse`. A block that starts with a field line rather
+    /// than a header is one of these.
+    Widget,
     Window,
     Group,
     SplitFrame,
@@ -420,6 +432,7 @@ impl WidgetKind {
     fn parse(name: &str) -> WidgetKind {
         use WidgetKind::*;
         match name {
+            "Widget" => Widget,
             "Window" => Window,
             "Group" => Group,
             "SplitFrame" => SplitFrame,
@@ -453,6 +466,7 @@ impl WidgetKind {
     fn static_name(&self) -> &'static str {
         use WidgetKind::*;
         match self {
+            Widget => "Widget",
             Window => "Window",
             Group => "Group",
             SplitFrame => "SplitFrame",
@@ -601,11 +615,36 @@ impl<'a> Parser<'a> {
         Some(kind)
     }
 
-    /// Read the fields of the block the cursor is on, stopping at the next
-    /// header. Leaves the cursor on that header.
-    fn fields(&mut self) -> Result<Vec<Field>, Error> {
-        // Step over the header itself.
-        self.at += 1;
+    /// One record: an optional `[Kind]` header and then its fields, ending at
+    /// the record's own `NumChildren` — which is the last field of every record
+    /// in the corpus, checked over all 116 files and 3,590 widgets.
+    ///
+    /// The header is **optional** and that is not a quirk of the reader: the
+    /// base class `Widget` is the one kind whose header the writer leaves out,
+    /// which the binary's own schema says — `[Widget]` is the only entry in the
+    /// field table whose class fields are just `Notes ` and `PassMouse `, and a
+    /// headerless record carries exactly those. Twenty records in `repairs.gib`
+    /// are like this, and reading each as part of the one before it is what left
+    /// blocks a level up. The writer emits the header from a virtual call, so
+    /// the base class's is empty.
+    ///
+    /// An *attachment*'s record has no `NumChildren` at all, so its fields run
+    /// to the next header instead; that is the only place a record's end is not
+    /// its own `NumChildren`.
+    fn record(&mut self) -> Result<Option<(String, Vec<Field>, bool)>, Error> {
+        self.skip_blank();
+        if self.at >= self.lines.len() {
+            return Ok(None);
+        }
+        let (kind, named) = match self.header() {
+            Some(kind) => {
+                let kind = kind.to_string();
+                self.at += 1;
+                (kind, true)
+            }
+            // No header: the base class, whose name the writer omits.
+            None => ("Widget".to_string(), false),
+        };
         let mut out = Vec::new();
         while let Some(line) = self.lines.get(self.at) {
             if line.trim().is_empty() {
@@ -619,28 +658,27 @@ impl<'a> Parser<'a> {
                 Some((name, value)) if is_label(name) => (Some(name.to_string()), value),
                 _ => (None, line.trim()),
             };
+            let count = name.as_deref() == Some("NumChildren");
             out.push(Field {
                 name,
                 raw: raw.trim_end().to_string(),
             });
             self.at += 1;
+            if count {
+                break;
+            }
         }
-        Ok(out)
+        Ok(Some((kind, out, named)))
     }
 
     fn block(&mut self) -> Result<Block, Error> {
         let at = self.at;
-        let kind = self
-            .header()
-            .ok_or_else(|| {
-                Error::Structure(format!(
-                    "line {}: expected a [Kind] block, found {:?}",
-                    at + 1,
-                    self.lines.get(at).unwrap_or(&"<eof>")
-                ))
-            })?
-            .to_string();
-        let fields = self.fields()?;
+        let Some((kind, fields, named)) = self.record()? else {
+            return Err(Error::Structure(format!(
+                "line {}: expected a record or a [Kind] block, found end of file",
+                at + 1,
+            )));
+        };
         let Some(count) = fields
             .iter()
             .find(|f| f.name.as_deref() == Some("NumChildren"))
@@ -664,24 +702,43 @@ impl<'a> Parser<'a> {
         let count = count as usize;
         let mut children = Vec::new();
         let attachments = std::mem::take(&mut self.pending);
-        // The children are the next `count` widget blocks. An attachment among
-        // them dresses the child that follows it and has already been taken by
-        // that child's own `block` call.
-        while children.len() < count {
-            self.skip_blank();
-            if self.header().is_none() {
-                return Err(Error::UnexpectedEof {
-                    at: self.at,
-                    wanted: count - children.len(),
-                });
-            }
-            match self.block()? {
-                Block::Widget(w) => children.push(w),
-                Block::Attachment(_) => unreachable!("an attachment came back mid-run"),
+        // The children are the next `count` **named** widget blocks. Two things
+        // in between do not count: an attachment, which dresses the child that
+        // follows (and has already been taken by that child's own `block` call),
+        // and a headerless record, which is a child all the same — it is just not
+        // one the count names. Both are read and both are kept in place.
+        // A count of zero means the record has no children *at all*: the writer
+        // gates its whole child loop on `0 < NumChildren` (`FUN_005e7ca0`), so
+        // even a headerless child — which the count does not name — is absent.
+        if count > 0 {
+            let mut counted = 0usize;
+            while counted < count {
+                self.skip_blank();
+                if self.at >= self.lines.len() {
+                    return Err(Error::UnexpectedEof {
+                        at: self.at,
+                        wanted: count - counted,
+                    });
+                }
+                let child = match self.block()? {
+                    Block::Widget(w) => w,
+                    Block::Attachment(_) => unreachable!("an attachment came back mid-run"),
+                };
+                // Only a *named* child fills a slot; an unnamed one is a sibling
+                // of the child before it, which is what the buttons' caption
+                // holders are: `mainmenu.gib`'s `exhibition button` is followed
+                // by a headerless `Widget` of the button's own size, and it lands
+                // in the group the button is in — the same frame the button's own
+                // `Position` was measured against.
+                if !child.implicit {
+                    counted += 1;
+                }
+                children.push(child);
             }
         }
         Ok(Block::Widget(Widget {
             kind: WidgetKind::parse(&kind),
+            implicit: !named,
             fields,
             attachments,
             children,
@@ -904,8 +961,9 @@ NumChildren 0\n";
     }
 
     /// Every screen the game ships, parsed. This is the shape of the claim the
-    /// parser makes: 116 files, one closed vocabulary of nineteen widget kinds
-    /// and five attachments, and no field this reader could not name.
+    /// parser makes: 116 files, one closed vocabulary of nineteen *named* widget
+    /// kinds plus the headerless base `Widget`, five attachments, and no field
+    /// this reader could not name.
     #[test]
     fn every_shipped_screen_parses_to_the_same_closed_vocabulary() {
         let Some(ui) = game_dir() else { return };
@@ -992,6 +1050,8 @@ NumChildren 0\n";
         }
 
         let expected_kinds: std::collections::BTreeSet<String> = [
+            // The base class, and the only kind the writer leaves *headerless*.
+            "Widget",
             "Window",
             "Group",
             "SplitFrame",
@@ -1033,7 +1093,7 @@ NumChildren 0\n";
             "an unlabelled value appeared on some other kind"
         );
         // The shipped screens, counted.
-        assert_eq!(widgets, 3590);
+        assert_eq!(widgets, 4348);
         assert_eq!(attachment_count, 758);
     }
 }

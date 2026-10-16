@@ -130,6 +130,20 @@ local/           # (git-ignored) game files + converted cache
   `ra2ui::inline_proxies_in` turns a screen plus its fragments into one widget
   tree before anything is placed. That is the workshop's own mechanism, and it
   is the reason `botlabwin.gib` shows the shell's nav bar without a line of C++.
+- **A record's boundary is its own `NumChildren`, and the `[Kind]` header is
+  optional.** The parser used to read a block's fields until the next header,
+  which is right for the five attachments and wrong for everything else: the
+  base `Widget` class is written *without* a header (the writer's `FUN_005e7c20`
+  emits it from a virtual call that returns nothing for the base), so a
+  headerless record's fields were read as trailing fields of the one before it.
+  758 of them — a fifth of every screen. A record now ends at its `NumChildren`
+  (checked: no field of a record ever follows it, in all 116 files), a headerless
+  record is a `Widget`, and — measured with no exceptions — `sum(NumChildren)`
+  plus the headerless records is `records - 1`, so the count names only the
+  children that carry a kind. The corpus is 4,348 widgets, not 3,590, and the
+  main menu is one tree instead of thirteen roots. What is left over is named:
+  an uncounted record whose group is already full has nowhere to go, and 67
+  files leave a few at the top level.
 - **A rule that is only *half* right shows up as a wrong picture, and the
   workshop is what found the last one.** `MasterSize` is one axis — all
   twenty-six values in the corpus say so — and the resolver had read it as a

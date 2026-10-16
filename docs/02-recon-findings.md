@@ -193,17 +193,40 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   `MasterSize 0.12 1`) is the worked case, and `repairs.gib`'s `main split`
   (`Master 1`, `MasterSize 48 0`) puts its children at y 48 and y 552, the
   second exactly 48 tall.
-- **Open: `NumChildren` does not always nest a file to one root.** A widget's
-  count is written by the editor and read here as its child count, so a file
-  should come back as a single `Window`. Twenty-eight of the 116 do; the other
-  88 leave blocks a level up, and `multiplayer/prematch.gib` ends with
-  seventeen roots. It has a visible cost: `credits.gib`'s screen-background
-  `metaldots_pattern` tile, written *after* the dialog, becomes the last root and
-  paints over everything the dialog draws — as does `selectbot_computer.gib`'s.
-  The counts are on disk and the writer wrote them from a real tree, so the
-  game's reader must nest by something else (the writer's own code is the place
-  to look). Nothing here depends on the nesting being right: placement, clips,
-  the selection bars and the proxies are all read from wherever a block lands.
+- **A record ends at its own `NumChildren`, and `[Kind]` is optional.** Both
+  are what the writer's own code says. `FUN_005e7ca0` (the base writer) emits
+  `Name`, `ID`, `Position`, `Size`, `Visible`, `ChildOrder`, `ClipMode`,
+  `NumChildren`, and then its children — so a record ends at its count, and no
+  field of a record follows it. Checked over all 116 files and every record: a
+  `NumChildren` line is followed only by a new record, never by more of its own.
+  (The earlier note that a field could follow `NumChildren` was an artifact of
+  the headerless records below being read as trailing fields.)
+- **A headerless block is the base `Widget` class.** The kind comes from the
+  writer's `FUN_005e7c20`, which emits the header from a virtual call — and the
+  base class has no name to emit — so the header is simply absent. The binary's
+  own schema says which class that is: `[Widget]` is the one entry in the field
+  table whose class fields are just `Notes ` and `PassMouse ` (at
+  `0x708c6c`), and a headerless record carries exactly those and nothing else.
+  There are 758 of them; read as trailing fields of the record before, they made
+  a fifth of every file disappear, and the corpus is 4,348 widgets, not 3,590.
+- **`NumChildren` counts *named* children only.** Measured over the whole
+  corpus, with no exceptions: `sum(NumChildren)` + the number of headerless
+  records = `records - 1` in all 116 files. So a headerless child — and a
+  button's caption holder, which is headerless too — does not fill a slot, and
+  the writer's whole child loop is gated on `0 < NumChildren`, so a record with
+  a count of zero has no children in the file at all. `bg group` of
+  `credits.gib` is the worked case: its count is 13, its named children are 13,
+  and its four headerless ones carry `ChildOrder` 3, 8 and 9 — exactly the gap
+  the thirteen leave in 0..12.
+- **Still open: where an uncounted record goes when its parent is full.** The
+  count cannot say, so 67 of the 116 files leave a few records at the top level
+  (`botlab/import_texture.gib` six, `importbot.gib` six). The caption holders
+  are the clearest case: `mainmenu.gib`'s `exhibition button` is followed by a
+  headerless `Widget` of the button's own size whose `Position` is the button's
+  own — it is a *sibling* of the button, and it lands in `sawback grp` because
+  that group still has a slot free. When a group's last button's caption comes
+  after the group is full there is nothing left to claim it, and neither the
+  game's reader nor this one has been shown to handle that.
 - Fonts are `fg_*.giff` inside `RA2.cfz` (nine of them, referenced by `_Font`),
   not loose files.
 - **The binary carries the same table.** The reader's field names sit in one
@@ -722,8 +745,9 @@ Engine: **Havok Hardcore 1.7.1**, statically linked (build path `hk171`).
    Havok Hardcore 1.7.1; every parameter is readable from the arena `.gmf` and
    mirrored by the engine. See `docs/05-validation-report.md`.
 6. Copy protection: base 1.20 build appears unprotected (no SafeDisc/SecuROM import).
-7. **How the game's `.gib` reader nests a file.** The writer's `NumChildren` is
-   on disk, but read that way only 28 of the 116 screens nest to one root, and
-   the leftover blocks land on top of the dialog they belong behind
-   (`credits.gib`'s background tile). The reader — not the writer — is where the
-   rule is; `FUN_005e7ca0` is the writer.
+7. **Where an uncounted `.gib` record goes when its parent's count is full.**
+   The count, the headerless base `Widget` class and the record boundary are all
+   settled (see `.gib` above); what is not is an uncounted child of a group that
+   has already taken its named children. 67 of the 116 screens leave such a
+   record at the top level. The game's reader is where the answer is;
+   `FUN_005e7ca0` is the writer.
