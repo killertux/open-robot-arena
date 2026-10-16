@@ -475,6 +475,93 @@ mod tests {
         assert_eq!(mcn.glyphs.len(), d20.glyphs.len(), "both tables are 96");
     }
 
+    /// The ink a record's rect holds, and how many columns of it carry any.
+    fn glyph_ink(font: &Font, record: usize) -> (usize, usize) {
+        let w = font.page_width as usize;
+        let h = font.page_height as usize;
+        let (x0, y0, gw, gh) = font.glyphs[record].rect(font.page_width, font.page_height);
+        let (mut ink, mut columns) = (0, 0);
+        for x in x0.max(0)..(x0 + gw).min(w as i32) {
+            let mut any = false;
+            for y in y0.max(0)..(y0 + gh).min(h as i32) {
+                if font.page[(y as usize) * w + x as usize] > 40 {
+                    ink += 1;
+                    any = true;
+                }
+            }
+            if any {
+                columns += 1;
+            }
+        }
+        (ink, columns)
+    }
+
+    fn every_face() -> Vec<(String, Font)> {
+        let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cfz = loop {
+            let c = dir.join("local/game/RA2.cfz");
+            if c.is_file() {
+                break c;
+            }
+            if !dir.pop() {
+                return Vec::new();
+            }
+        };
+        let Ok(cfl) = crate::cfl::Cfl::open_path(&cfz) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = cfl
+            .entries()
+            .iter()
+            .filter(|e| e.name.to_ascii_lowercase().ends_with(".giff"))
+            .map(|e| e.name.clone())
+            .collect();
+        names.sort();
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let font = parse(&cfl.get(&name)?).ok()?;
+                (font.glyphs.len() > 45).then_some((name, font))
+            })
+            .collect()
+    }
+
+    /// **Two faces have no `O`.** Every face ships a 96-record table, and record
+    /// 45 is the character `O` in all of them — but in `fg_d20` its rect holds 21
+    /// pixels across 3 of its 11 columns and in `fg_mcn12` 12 pixels across 2 of
+    /// 8, where every other face draws a whole letter (40 pixels and up, over six
+    /// columns or more). The advances are intact, so the letter is *skipped*
+    /// rather than misplaced, and the game reads the same pages.
+    #[test]
+    fn two_faces_have_no_o() {
+        let faces = every_face();
+        if faces.is_empty() {
+            return;
+        }
+        assert_eq!(faces.len(), 9, "the shipped faces");
+        let mut broken = Vec::new();
+        for (name, font) in &faces {
+            let (ink, columns) = glyph_ink(font, 45);
+            assert!(font.glyphs[45].advance > 0, "{name}: no advance");
+            if columns <= 3 {
+                broken.push((name.trim_end_matches(".giff").to_string(), ink, columns));
+            } else {
+                assert!(
+                    ink >= 40 && columns >= 6,
+                    "{name}: a whole O is {ink} px over {columns} columns"
+                );
+            }
+        }
+        assert_eq!(
+            broken,
+            [
+                ("fg_d20".to_string(), 21, 3),
+                ("fg_mcn12".to_string(), 12, 2)
+            ],
+            "the faces whose O is a fragment"
+        );
+    }
+
     #[test]
     fn a_truncated_font_is_rejected() {
         assert!(parse(&[0u8; 20]).is_err());

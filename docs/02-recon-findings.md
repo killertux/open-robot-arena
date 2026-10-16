@@ -474,7 +474,16 @@ them. Its metrics are right (the glyph run's baseline is one ascent below the
 box's top, and `fg_d20`'s line height has a test beside it), and the face does
 draw — but **not every letter**. A probe of `ROBOT WORKSHOP D20` in `fg_d20` comes
 out `R BT W RKSH P D2`, with **every `O` missing**: the four in `ROBOT` and
-`WORKSHOP` all draw nothing, while the surrounding letters are correct. The cause is now measured, and it is the *font file*, not the reader. `fg_d20`
+`WORKSHOP` all draw nothing, while the surrounding letters are correct. **Two faces have no `O`, not one.** Measured across all nine: every face ships a
+96-record table and record 45 is the character `O` in all of them, but `fg_d20`'s
+rect holds 21 pixels across 3 of its 11 columns and `fg_mcn12`'s 12 pixels across 2
+of 8, where the other seven draw a whole letter (40 pixels and up, over six columns
+or more). The advances are intact (17 and 9 against their neighbours' 10 and 5), so
+the letter is *skipped* rather than drawn in the wrong place — which is what
+`teamhq/select_team.gib`'s title shows, reading `SELECT Y UR R B TI CS TEAM` at 12
+pixels, and what `botlab/botlabwin.gib`'s `title txt` shows at 20.
+
+The cause is now measured, and it is the *font file*, not the reader. `fg_d20`
 page is 256×256 and its record 45 — the character `O` — is a full 11×14 rect whose
 ink sits in its last three columns: **21 pixels of a letter**, where the record's
 neighbours each hold a whole one. The **same record in `fg_mcn14` draws a whole
