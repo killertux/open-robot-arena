@@ -637,6 +637,17 @@ Known, documented, not yet fixed:
     geometry, the bindings and the markup. That is the last of the shell's
     *content*: the rest of M5's lists want the same rule with a different table.
 
+    One label the notes have carried as "drawn but does not paint" for a while is
+    `botlabwin.gib`'s `title txt`, and it is a *font* artifact rather than a
+    layout one. The face is `fg_d20` — the shell's biggest, ascent 26 and descent
+    −14, used by 15 widgets in 5 files — and a probe of `ROBOT WORKSHOP D20` in it
+    comes out `R BT W RKSH P D2`: **every `O` draws nothing**, the four in `ROBOT`
+    and `WORKSHOP` among them, while the letters around them are correct. So the
+    title is drawn and its `O`s are not, which is why the word is easy to miss
+    against the toolbar art. The metrics are not the cause (the baseline rule has
+    a test, and `fg_d20`'s line height has one), so it is the glyph table — the
+    same class of gap the font notes already record for `M` and `A`.
+
     The labels that looked wrong were not a face's problem but every face's: the
     glyph page is stored **bottom-up** and neither renderer swapped the `v`s of a
     glyph's quad, so every label in the shell was drawn upside-down. It was found

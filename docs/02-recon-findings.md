@@ -462,6 +462,23 @@ its note and `PassMouse` — it has no class behaviour to run, so it cannot be a
 control, and a hit has to fall through it to what is behind. `ra2ui::input::hit`
 does that, and the three overlays above are what requires it.
 
+### A letter that does not draw: `fg_d20`'s `O`
+
+The shell's biggest face is `fg_d20` — ascent 26, descent −14, so a 40-pixel line —
+and **15 widgets in 5 files** use it, `botlab/botlabwin.gib`'s `title txt` among
+them. Its metrics are right (the glyph run's baseline is one ascent below the
+box's top, and `fg_d20`'s line height has a test beside it), and the face does
+draw — but **not every letter**. A probe of `ROBOT WORKSHOP D20` in `fg_d20` comes
+out `R BT W RKSH P D2`, with **every `O` missing**: the four in `ROBOT` and
+`WORKSHOP` all draw nothing, while the surrounding letters are correct. So it is
+the glyph *table*, not the metrics or the layout — the same class of gap the
+table's notes already carry for `M` and `A`, now with a reproduction and a letter.
+
+That is what `botlabwin.gib`'s `title txt` actually is: a label whose text cannot
+be spelled in its own face. It is in the draw list and it *is* drawn — the word
+just loses its `O`s, and with the `O`s gone the remainder is easy to miss
+altogether against the toolbar art.
+
 ### The UI project document: the shell's own index of itself, and a check on it
 
 `local/game/UI/Project Header.html` ships with the game and is the UI editor's
