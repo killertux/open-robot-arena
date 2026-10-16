@@ -40,15 +40,16 @@
 //! `T`'s ink sits *higher* than `L`'s, which is only true if the page runs
 //! bottom-up.
 //!
-//! **One axis is still open.** The page also looks horizontally mirrored — a
-//! capital `L`'s stem, which should be on the left, comes out to the right of its
-//! cell in `fg_mcn14` (mean column 4.4 of 8) and `fg_d26` (7.0 of 16), and `J`'s
-//! hook the other way. The same check on a *column* is not decisive at these
-//! sizes (`L`'s foot is as wide as the cell and its stem one pixel), and the two
-//! implementations — this and `tools/ui_compose.py` — share the rule, so their
-//! agreeing does not settle it. What would: a glyph whose horizontal asymmetry
-//! cannot be explained by the number of pixels, or the loader's own rasteriser
-//! (`FUN_005cd560`) read for the row/column order it writes.
+//! The horizontal axis is **not** flipped, and the drawing is what settles it: a
+//! label reading `LOCAL FJORD 12345` in `fg_d26` and again in `fg_mcn16` comes
+//! out reading `LOCAL FJORD 12345`, with every asymmetric letter the right way
+//! round. The check that *suggested* otherwise was the same one applied to a
+//! glyph's *columns*, and it is the wrong tool: a cell's window can catch a
+//! neighbour's ink (record 36, `F`, profiles with its stem on the right), so a
+//! column mean is not a measurement of a glyph. Rows are — `T` and `L` are wide
+//! apart in shape and their own cells bracket them — which is why the vertical
+//! claim is the one that stands. Two readings of a low-zoom render as "mirrored"
+//! were wrong for the same reason a column profile was: not enough to read.
 //!
 //! ## Which record is which character
 //!

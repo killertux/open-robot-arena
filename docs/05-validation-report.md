@@ -509,15 +509,21 @@ Known, documented, not yet fixed:
     `chassis.gib`'s `structure note` label is drawn over its own buttons: a click
     on one's middle lands on the label.
 
-    One thing to look at next, named rather than half-fixed: labels using
-    **`fg_mcn16`** come out wrong in the render (`chassis_structure1.gib`'s
-    "Draw Freeform", "Circle", "Rectangle"), while `fg_mcn14` ones read — and the
-    toolbar's `title txt` is invisible — and the latter uses `fg_d20`. The glyph
-    *rect* mapping was pinned by drawing on `fg_mcn14` alone, and the pages of
-    `fg_mcn14` and `fg_mcn16` do not look alike in the ink's position, so the
-    guess to test next is that a face's `v` values are stored the other way up on
-    the wider faces. It is a font-table question, and the same method that settled
-    the record mapping will settle it.
+    The labels that looked wrong were not a face's problem but every face's: the
+    glyph page is stored **bottom-up** and neither renderer swapped the `v`s of a
+    glyph's quad, so every label in the shell was drawn upside-down. It was found
+    by measuring a shape rather than reading one — a capital `T` carries its bar
+    at the top and an `L` its foot at the bottom, so in a right-way-up drawing
+    `T`'s ink is top-heavy; it came out bottom-heavy, and the same asymmetry
+    inside the page's own byte rows said why. The fix is the swap, in the
+    engine and in `tools/ui_compose.py`, and the proof is a picture with words in
+    it: the workshop's toolbar now reads `Overview Chassis Components Wiring
+    Paint Shop Test Robot`. That both renderers agreed while both were wrong is
+    the one thing the second renderer cannot catch, and it is now written down as
+    such. The horizontal axis was checked and is **not** flipped — `LOCAL FJORD
+    12345` draws as itself in `fg_d26` and `fg_mcn16` — after a column-based check
+    had suggested otherwise: that check measured a window that can catch a
+    neighbouring glyph's ink, and the drawing is what settled it.
 
     The last case the count cannot express turned out not to need one. An
     uncounted record joins the nearest record that still has a slot free — the

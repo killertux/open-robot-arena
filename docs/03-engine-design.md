@@ -175,6 +175,19 @@ local/           # (git-ignored) game files + converted cache
   main menu is one tree instead of thirteen roots. What is left over is named:
   an uncounted record whose group is already full has nowhere to go, and 67
   files leave a few at the top level.
+- **A shared rule is not a checked rule, and a picture has to be legible.** The
+  two renderers agreed on every glyph and were both upside-down: the face's page
+  is stored bottom-up and neither swapped the `v`s of a glyph's quad, so the
+  agreement the second renderer exists to provide said nothing about it. What
+  found it was a *measurement of a shape* — draw a `T` and an `L` and the ink's
+  own distribution says which way up they are — and what confirmed it was a
+  picture legible enough to *read words in*: the workshop's toolbar now reads
+  `Overview Chassis Components Wiring Paint Shop Test Robot`. Two readings of a
+  low-zoom render as "mirrored" were wrong along the way, which is why the
+  method asks for a word rather than an impression. The same lesson closed the
+  horizontal question: the drawing of `LOCAL FJORD 12345` reads, and the
+  *column* profile that had suggested otherwise was measuring a window that can
+  catch a neighbouring glyph's ink.
 - **A rule that is only *half* right shows up as a wrong picture, and the
   workshop is what found the last one.** `MasterSize` is one axis — all
   twenty-six values in the corpus say so — and the resolver had read it as a
