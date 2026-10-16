@@ -218,15 +218,26 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   `credits.gib` is the worked case: its count is 13, its named children are 13,
   and its four headerless ones carry `ChildOrder` 3, 8 and 9 — exactly the gap
   the thirteen leave in 0..12.
-- **Still open: where an uncounted record goes when its parent is full.** The
-  count cannot say, so 67 of the 116 files leave a few records at the top level
-  (`botlab/import_texture.gib` six, `importbot.gib` six). The caption holders
-  are the clearest case: `mainmenu.gib`'s `exhibition button` is followed by a
-  headerless `Widget` of the button's own size whose `Position` is the button's
-  own — it is a *sibling* of the button, and it lands in `sawback grp` because
-  that group still has a slot free. When a group's last button's caption comes
-  after the group is full there is nothing left to claim it, and neither the
-  game's reader nor this one has been shown to handle that.
+- **An uncounted record joins the nearest record that still has a slot free, and
+  when none has one it is a record of the file's top level — which is the same
+  rule, because the top level is a sibling set too.** The count names only named
+  children, so an uncounted record is *extra* by construction and the file does
+  not say where it goes; the geometry and the `ChildOrder` do. `mainmenu.gib`'s
+  caption holders duplicate their button's `Position`, which makes them the
+  button's *siblings* — they land in `sawback grp` because that group still has
+  a slot free, and the render shows the caption over its button. When nothing
+  has a slot, what is left is chrome: 165 records across the corpus, 150 of them
+  with no art at all, and the 15 that carry a panel are authored against a
+  full-screen ancestor or are fragments, so their frames come out the same
+  either way (`colorfill.gib`'s `instructions` at `0.05 0.2 0.5 0.65` is the
+  same frame against the screen as against the full-screen split it sits under).
+  The draw order then settles it: those records carry the `ChildOrder` that puts
+  them *behind* what they belong to — `import_texture.gib`'s 1282x1007 panel at
+  `(-1,-1)` (the screen plus one pixel on each side, i.e. authored against the
+  screen) is `-1` against the `Window`'s `3` — so the top level sorts by
+  `ChildOrder` exactly as a widget's children do. That is what makes
+  `credits.gib`'s "infamous" window visible at all: its `metaldots_pattern`
+  panel is drawn behind the dialog rather than over it.
 - Fonts are `fg_*.giff` inside `RA2.cfz` (nine of them, referenced by `_Font`),
   not loose files.
 - **The binary carries the same table.** The reader's field names sit in one
@@ -745,9 +756,8 @@ Engine: **Havok Hardcore 1.7.1**, statically linked (build path `hk171`).
    Havok Hardcore 1.7.1; every parameter is readable from the arena `.gmf` and
    mirrored by the engine. See `docs/05-validation-report.md`.
 6. Copy protection: base 1.20 build appears unprotected (no SafeDisc/SecuROM import).
-7. **Where an uncounted `.gib` record goes when its parent's count is full.**
-   The count, the headerless base `Widget` class and the record boundary are all
-   settled (see `.gib` above); what is not is an uncounted child of a group that
-   has already taken its named children. 67 of the 116 screens leave such a
-   record at the top level. The game's reader is where the answer is;
-   `FUN_005e7ca0` is the writer.
+7. ~~Where an uncounted `.gib` record goes when its parent's count is full.~~
+   **Answered** — the nearest record with a slot, else the file's top level,
+   which sorts by `ChildOrder` like any other sibling set. See `.gib` above; the
+   residue is the data's own ambiguity and is harmless (chromeless, and ordered
+   behind).

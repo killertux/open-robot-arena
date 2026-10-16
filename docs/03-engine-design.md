@@ -153,6 +153,15 @@ local/           # (git-ignored) game files + converted cache
   are: `botlabwin.gib`'s `0.14 1` and `repairs.gib`'s `48 0` are what broke the
   tie, and reading it as one axis moved 23 widgets back onto the screen and two
   whole files with them.
+- **The top level is a sibling set, and two special cases died when the records
+  were cut right.** A file's own records are ordered by `ChildOrder` exactly as
+  a widget's children are, so the resolver sorts them and nothing else: a modal
+  backdrop (`child order -1`) sorts behind the window it belongs to (`3`). The
+  old rule — "the top level keeps its own order" — was read off a main menu that
+  was in fact a thirteen-root forest, and the resolver's other special case,
+  three bar-chrome images re-parented onto the bar written before them, was
+  compensating for records the reader had failed to close. Both are gone, and
+  `credits.gib`'s window is visible over its own backdrop for the first time.
 - **What the shell still does not draw is named, and so is what it cannot yet
   read.** `ra2-render`'s `ui` path draws a `Glyph` (a wrapped paragraph in its
   `_Margin` box, with the writer's `\n` line breaks) and a `Lines` polyline (its

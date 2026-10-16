@@ -456,12 +456,23 @@ Known, documented, not yet fixed:
     `teamhq.gib`, `credits.gib` and the main menu now each nest to their
     `Window`, and 49 of the 116 files do.
 
-    What is *named* rather than closed is the last case the count cannot
-    express: an uncounted record — a headerless child, or a button's caption
-    holder — whose group has already taken all its named children. 67 files
-    leave one or two such records at the top level (`import_texture.gib` six),
-    and they are placed against the screen because nothing claims them. The
-    placement numbers above are computed with those same trees. `ui_compose.py` draws the art, the
+    The last case the count cannot express turned out not to need one. An
+    uncounted record joins the nearest record that still has a slot free — the
+    caption holders duplicate their button's `Position`, so they are the button's
+    siblings, and `mainmenu.gib`'s land in `sawback grp` and draw over their
+    buttons. When nothing has a slot the record is a record of the file's top
+    level, which is the same rule applied to the screen: 165 such records across
+    the corpus, 150 of them chromeless, and the 15 that carry a panel are
+    authored against a full-screen ancestor or are fragments, so their frames are
+    the same either way. Their `ChildOrder` then places them: the top level sorts
+    like any other sibling set, which is what draws `import_texture.gib`'s
+    screen-plus-one-pixel backdrop behind its dialog and makes `credits.gib`'s
+    "infamous" window visible over its own `metaldots_pattern` panel for the
+    first time. That sort retires two special cases — the "the top level keeps
+    its own order" rule, read off a main menu that was a thirteen-root forest, and
+    the resolver's re-parenting of three bar-chrome images onto the bar written
+    before them. Placement is unchanged by it (the corpus counts above are the
+    same before and after) and the pictures are right. `ui_compose.py` draws the art, the
     labels and the new `Lines`/`Glyph` quads; it does not yet inline proxies, so
     the composite of a proxied screen is that screen without its nav bar.
 

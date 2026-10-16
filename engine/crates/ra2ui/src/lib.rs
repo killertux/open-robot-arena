@@ -658,35 +658,23 @@ pub fn resolve_with<'a>(
 ) -> Vec<Placement<'a>> {
     let screen_frame = Frame::new(0.0, 0.0, screen[0], screen[1]);
     let mut placed = Vec::new();
-    // The bottom bar's own chrome: `round left`, `round right` and `gray block`
-    // are written at the top level right after the bar they belong to, with
-    // positions measured against *it*. `mainmenu.gib` is the worked case — `0 0`
-    // and `224 0` with 32-pixel corners in a 256-pixel bar, and `gray block` 25
-    // to 231 of it — and `bottomnav.gib` and `bottomnav_main.gib` carry the same
-    // three names at the same positions. The .gib's own `NumChildren` says the
-    // bar has one child, so the count is what is wrong, not the geometry.
-    let mut bar: Option<Frame> = None;
     for block in &gib.blocks {
         let Block::Widget(w) = block else {
             // A fragment has no frame of its own until a slot loads it.
             continue;
         };
-        let parent = match bar {
-            Some(frame) if w.kind == WidgetKind::Image && BAR_CHROME.contains(&w.name()) => frame,
-            _ => screen_frame,
-        };
-        let placement = place_with(w, parent, fonts);
-        if w.kind == WidgetKind::Group {
-            bar = Some(placement.frame);
-        }
-        placed.push(placement);
+        // Every top-level record is placed against the screen, which is what
+        // their own `Position`s are measured against — including the ones a
+        // record's `NumChildren` leaves without a parent, like `import_texture
+        // .gib`'s 1282x1007 panel at (-1,-1), a modal backdrop one pixel wider
+        // than the screen on each side. Nothing special-cases them: the top
+        // level is a sibling set like any other, ordered by `ChildOrder` in
+        // `draw_order_parented`, so a backdrop sorts behind the `Window` that
+        // asks for it (`co -1` against the window's `3`).
+        placed.push(place_with(w, screen_frame, fonts));
     }
     placed
 }
-
-/// The three pieces of the bottom bar's chrome that the `.gib` lists after the
-/// bar rather than inside it.
-const BAR_CHROME: [&str; 3] = ["round left", "round right", "gray block"];
 
 /// The art a widget draws.
 ///
@@ -819,8 +807,14 @@ pub fn draw_order_parented<'a>(
             visit(c, Some(p), out);
         }
     }
+    // The top level is a sibling set too: a file's own records are ordered by
+    // `ChildOrder` exactly as a widget's children are, which is what puts a
+    // modal backdrop (child order -1) behind the window it belongs to (3) when
+    // the reader could not give the backdrop a parent.
+    let mut top: Vec<&Placement> = roots.iter().collect();
+    top.sort_by_key(|p| p.widget.child_order());
     let mut out = Vec::new();
-    for r in roots {
+    for r in top {
         visit(r, None, &mut out);
     }
     out
