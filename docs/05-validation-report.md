@@ -663,6 +663,32 @@ Known, documented, not yet fixed:
     geometry, the bindings and the markup. That is the last of the shell's
     *content*: the rest of M5's lists want the same rule with a different table.
 
+    The arena list is filled from the game's own picker. `exhibition/arena.gib`'s
+    listbox says *"populate with arena names"*, and `Arenas/__init__.py` says
+    exactly which arenas that is:
+
+    ```python
+    list = [x for x in arenas if x.in_list and type in x.game_types]
+    list.sort(sortByName)
+    ```
+
+    so an arena is a script that registers one and does not set `in_list = False`,
+    sorted by name, with the name and `preview` the picker hands the C++ beside
+    each. That is **12** — `__init__.py`, `Hazards.py` and the prize scene
+    `event_results.py` are out — and the list fills with a row each at the 18
+    pixels its own `Sel Bar` states. The rows' *text*, though, is where the open
+    item below shows.
+
+    And one long-standing thing is now named, found while checking those rows: a
+    glyph's quad draws its cell **and a slice of its neighbour**. One `Text`
+    holding a single `A`, `M`, `O` or `N` renders as two shapes; a string renders
+    as its letters with extra strokes over them; a `Text` written exactly as the
+    corpus writes one smears the same; and `fg_mcn14`, `fg_mcn16` and `fg_mcn12`
+    all do it. It is the renderer — the quad's uv or the page texture it comes
+    from — and it means readings this report made from *rendered words* were less
+    reliable than readings made from *ink counts in a page*. The `O` measurements
+    above are the latter kind.
+
     The shell's art can be counted, and that is worth having before M6: resolving
     every name a shipped screen states the way the renderer does gives **1,303
     names across the 116 screens and nine that do not resolve**. Seven are

@@ -140,8 +140,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // The palette's six categories, each a click and a refill.
     render_categories(&mut lab, &game, &out, screen)?;
-    // And a screen outside the workshop, to the same two rules.
+    // And screens outside the workshop, to the same two rules.
     render_events(&game.join("UI"), &game, &out)?;
+    render_arenas(&game.join("UI"), &game, &out)?;
     Ok(())
 }
 
@@ -183,6 +184,44 @@ fn render_events(
         .save(&path)?;
     println!(
         "  filled the event grid with {filled} events and rendered {}",
+        path.display()
+    );
+    Ok(filled)
+}
+
+/// Compose `exhibition/arena.gib`, fill its listbox with the game's own arena
+/// names, and render it.
+fn render_arenas(
+    ui: &std::path::Path,
+    game: &std::path::Path,
+    out: &std::path::Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut gib = ra2ui::workshop::load(ui, "exhibition/arena.gib")?;
+    ra2ui::inline_proxies_in(&mut gib, ui);
+    let arenas = ra2ui::arenas::all(game)?;
+    let mut filled = 0;
+    for block in gib.blocks.iter_mut() {
+        let Block::Widget(root) = block else { continue };
+        let Some(list) = ra2ui::workshop::find_mut(root, ra2ui::arenas::LIST) else {
+            continue;
+        };
+        filled = ra2ui::arenas::fill_list(list, &arenas);
+        break;
+    }
+
+    let mut assets = UiAssets::open(game)?;
+    let placed = ra2ui::resolve_with(&gib, [1280.0, 1005.0], Some(assets.faces()));
+    let placed = placed.into_iter().collect::<Vec<_>>();
+    let scene = assets.scene(&placed, [1280, 1005]);
+    let renderer = Renderer::new()?;
+    let ui_renderer = UiRenderer::new(renderer.device());
+    let pixels = ui_renderer.render(renderer.device(), renderer.queue(), &scene)?;
+    let path = out.join("arena_list.png");
+    image::RgbaImage::from_raw(1280, 1005, pixels)
+        .ok_or("readback")?
+        .save(&path)?;
+    println!(
+        "  filled the arena list with {filled} names and rendered {}",
         path.display()
     );
     Ok(filled)

@@ -10,6 +10,16 @@
 #[derive(Debug, Clone, Default)]
 pub struct ArenaScript {
     pub name: String,
+    /// `preview = "box/box_preview.bmp"` — the art the arena picker hands the C++
+    /// beside the name (`plus.ArenaDetail().preview`).
+    pub preview: Option<String>,
+    /// `in_list` — whether the picker offers it. `Arenas.SuperArena` sets it true
+    /// and only the prize scene turns it off, so a script that says nothing is
+    /// offered.
+    pub in_list: bool,
+    /// Whether the script registers an arena (`Arenas.register(SomeArena)`), which
+    /// is what makes it one rather than the package or a helper.
+    pub registered: bool,
     /// Main arena model path, as written in the script.
     pub model: Option<String>,
     /// `extent = (x0, z0, x1, z1)` — the play field in the horizontal plane.
@@ -60,7 +70,11 @@ impl ArenaScript {
 
 /// Parse an arena script's text.
 pub fn parse_script(text: &str) -> ArenaScript {
-    let mut a = ArenaScript::default();
+    // The base class offers an arena, so a script that says nothing is offered.
+    let mut a = ArenaScript {
+        in_list: true,
+        ..ArenaScript::default()
+    };
 
     // `name = "..."` (first assignment wins).
     if let Some(line) = text.lines().find(|l| l.trim_start().starts_with("name")) {
@@ -68,6 +82,21 @@ pub fn parse_script(text: &str) -> ArenaScript {
             a.name = s;
         }
     }
+
+    // `preview = "box/box_preview.bmp"`.
+    if let Some(line) = text.lines().find(|l| l.trim_start().starts_with("preview")) {
+        if let Some(s) = str_lits(line).into_iter().next() {
+            a.preview = Some(s);
+        }
+    }
+
+    // `in_list = False` — what the prize scene says and the arenas do not.
+    if let Some(line) = text.lines().find(|l| l.trim_start().starts_with("in_list")) {
+        a.in_list = !line.contains("False");
+    }
+
+    // `Arenas.register(BoxArena)` — the game's own way of declaring an arena.
+    a.registered = text.contains("Arenas.register");
 
     // Main model: the first quoted string inside an `__init__(self, "...")` call.
     for args in call_args(text, "__init__") {

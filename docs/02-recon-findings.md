@@ -443,6 +443,26 @@ its note and `PassMouse` — it has no class behaviour to run, so it cannot be a
 control, and a hit has to fall through it to what is behind. `ra2ui::input::hit`
 does that, and the three overlays above are what requires it.
 
+### Open: a glyph's quad draws its cell and a slice of its neighbour
+
+Found while checking the arena list's rows by eye, and it is the renderer rather
+than the list. **A single character in a `Text` draws two shapes**: one `Text`
+holding `A`, `M`, `O` or `N` each renders as its own glyph *and* a second shape
+beside it, and a longer string renders as its letters with extra strokes
+overlapping them. It is not the widget's construction — a `Text` written exactly
+as `botlab/ch_stepbuttons.gib` writes its own (`_Position 0 0 22 0`, a zero `Size`)
+smears the same way — and it is not one face: `fg_mcn14`, `fg_mcn16` and `fg_mcn12`
+all do it.
+
+So a glyph quad's uv, or the page texture it is taken from, is off by something
+that repeats per cell. What to read next: `glyph_page` against the quad `text_run`
+builds — the uv is `rect / (page_width, page_height)`, so a page uploaded at a
+different size than the rects were computed against would do exactly this.
+
+This is why the readings in this document that came from *ink in a page* stand
+(the `O` measurements are pixel counts, not pictures) while readings that came from
+*looking at rendered words* had to be re-checked each time.
+
 ### What the shell's screens name, and the two things the game does not ship
 
 Every art name a shipped screen states — an `Image`'s `_Filename`, a `Glyph`'s
