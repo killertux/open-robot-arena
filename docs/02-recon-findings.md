@@ -443,6 +443,59 @@ its note and `PassMouse` — it has no class behaviour to run, so it cannot be a
 control, and a hit has to fall through it to what is behind. `ra2ui::input::hit`
 does that, and the three overlays above are what requires it.
 
+### Open: the glyph records do not bracket the glyphs
+
+The page is fine and the records are not. The font's page — dumped with
+`ra2 font RA2.cfz fg_mcn14 --page` — holds all 96 glyphs correctly formed and
+packed in rows. But the **rect a record states does not frame its glyph**, and the
+three below are pixel maps of the page read through the records' own rects, so
+they are measurements rather than impressions:
+
+```text
+A  record 31  rect (217, 245, 9, 11)      T  record 50  rect (123, 232, 7, 11)
+   .........                                 .......
+   ...##..##                                 ....###
+   ...##..##                                 ....##.
+   ####...##                                 ....##.
+   ####...##                                 ....##.
+   #.##...##                                 ....##.
+   #.##...##                                 ....##.
+   ###....##                                 ....##.
+   ###....##                                 ....##.
+   ###....##                                 ##..##.
+   .#.....##                                 #...#..
+
+K  record 41  rect (46, 232, 5, 11)
+   .....
+   ...##
+   ...##
+   ...##
+   ...##
+   ...##
+   ...##
+   ...##
+   ...##
+```
+
+`A`'s window holds the tail of one glyph and the stem of the next, `K`'s holds a
+bare stem, `T`'s holds a stem with a bottom hook. So the page's glyphs sit a few
+columns left of where the records point, and each record's window covers the wrong
+few pixels — which is why **a single character renders as two shapes**: the glyph
+itself and a stroke of its neighbour. (`A` in a `Text` came out as an `A`-shaped
+blob beside a vertical bar, in `fg_mcn14`, `fg_mcn16` and `fg_mcn12`, and a `Text`
+written exactly as `botlab/ch_stepbuttons.gib` writes its own does the same, so it
+is the font reader and not the widget.)
+
+It is **not a uniform shift**, which is the next thing to pin down: the row at
+y 233 is exact — records 35..44 (`E`..`N`) state `0..7, 9..15, 17..23, 25..32,
+34..40, 42..44, 46..50, 52..59, 61..66, 68..77` and the page's ink runs sit in
+exactly those columns — while the row at y 245 scatters: its records are 3, 4, 5,
+7, 8, 14, 15, 18, 20, 21, 23, 24, 31, 34, and the ink there is a full row of
+letters. So what to read next is **the page's ink runs per row against the records'
+`u0..u1` as a table**, row by row, to see whether a row's records are offset, or
+assigned to a different row, or the page's rows are not in the order the records
+assume.
+
 ### Open: a glyph's quad draws its cell and a slice of its neighbour
 
 Found while checking the arena list's rows by eye, and it is the renderer rather

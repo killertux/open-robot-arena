@@ -679,8 +679,18 @@ Known, documented, not yet fixed:
     pixels its own `Sel Bar` states. The rows' *text*, though, is where the open
     item below shows.
 
-    And one long-standing thing is now named, found while checking those rows: a
-    glyph's quad draws its cell **and a slice of its neighbour**. One `Text`
+    And one long-standing thing is now named, and narrowed, found while checking
+    those rows: **the font's records do not bracket its glyphs.** The page itself
+    is fine — dumped with `ra2 font RA2.cfz fg_mcn14 --page` it holds every glyph
+    correctly formed — but the rect a record states frames the wrong few pixels:
+    record 31 (`A`) is `(217, 245, 9, 11)` and that window holds the tail of one
+    glyph and the stem of the next, `K`'s holds a bare stem, `T`'s a stem with a
+    bottom hook. Read as pixel maps, not impressions. So a single character
+    renders as two shapes, in `fg_mcn14`, `fg_mcn16` and `fg_mcn12`, and a `Text`
+    written exactly as `ch_stepbuttons.gib` writes one does the same: it is the
+    font reader, not the widget. It is *not* a uniform shift — the row at y 233
+    matches its records exactly while the row at y 245 scatters — so the next read
+    is the page's ink runs per row against the records' `u0..u1` as a table. One `Text`
     holding a single `A`, `M`, `O` or `N` renders as two shapes; a string renders
     as its letters with extra strokes over them; a `Text` written exactly as the
     corpus writes one smears the same; and `fg_mcn14`, `fg_mcn16` and `fg_mcn12`

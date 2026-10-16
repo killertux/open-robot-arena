@@ -263,6 +263,16 @@ impl UiAssets {
             if glyph.cell[2] <= 0 || glyph.cell[3] <= 0 {
                 continue;
             }
+            if text.len() < 8 {
+                eprintln!(
+                    "DEBUG glyph {:?} cell {:?} rect {:?} page {:?} widget {:?}",
+                    text,
+                    glyph.cell,
+                    glyph.rect,
+                    (pw, ph),
+                    p.frame
+                );
+            }
             out.push(UiQuad {
                 rect: glyph.rect,
                 corners: None,
