@@ -542,12 +542,17 @@ Known, documented, not yet fixed:
     and pistons"* — so the words in the data describe what actually appears.
 
     A click inside a category button reaches the grid instead of the button, and
-    that is now understood rather than worked around. The ordering half is *not*
-    the problem: `ChildOrder` ties are broken by the file, the later record in
-    front, and the corpus states that in **328** places — siblings with the same
-    `ChildOrder` whose frames overlap, dominated by a named control followed by
-    the label that draws over it (`bottomnav.gib`'s three nav buttons, the
-    `ch_stepbuttons.gib` numerals, `credits.gib`'s close button). The overlap
+    that is now understood rather than worked around. One thing that looked settled
+    is not: there are **328** sibling pairs in the corpus whose `ChildOrder` ties
+    and whose frames overlap, and their dominant shape is a named control followed
+    by the label that names it — but that shape reads the same either way round,
+    because a button with a `Caption` attachment draws its caption itself from a
+    `Text` such as that one. Only 6 of the 328 put art over a sibling with a
+    `Background`, and an overlay over a list is as plausible over as under. So
+    which sibling is in front stays **open**, and the one argument points *against*
+    what we do: in `components.gib` the grid shares the category bar's
+    `ChildOrder`, is later in the file, and so is drawn over the buttons the
+    palette needs clicked. The hit test is what settles it. The overlap
     itself is the data's, and the editor had it too: `comp upper grp` reports
     `ReportedPos 0 0 33 0` against a `Position 0 0 0.07 1` of a ~460-pixel parent,
     and the grid is `Position 0 0 0 0` with `Size 1 1 74 0`. The designer saw an

@@ -1500,16 +1500,30 @@ mod tests {
         assert_eq!(exhibition.frame.h, 26.0);
     }
 
-    /// The cases where file order alone decides which sibling is in front: pairs
-    /// with the **same `ChildOrder`** whose frames overlap. There are **328** of
-    /// them, and the shell's own convention is legible in them — a named control
-    /// followed by the label that draws over it:
-    /// `common/bottomnav.gib`'s `Options`/`MainMenu`/`Help` buttons are each
-    /// followed by the `Widget` that holds their text, `ch_stepbuttons.gib`'s step
-    /// buttons by their numerals, `common/credits.gib`'s `close button` and
-    /// `common/okcancel.gib`'s `cancel button` likewise. So a tie is broken the
-    /// way the file is written: **the later record is in front**, which is what
-    /// `draw_order` and `input::hit` already do.
+    /// The places where two siblings share a `ChildOrder` **and** their frames
+    /// overlap: **328 pairs**, which is where the tie-break matters at all, and
+    /// they are kept as a baseline.
+    ///
+    /// What they do *not* do is decide which way the tie goes. Their dominant
+    /// shape is a named control followed by an unnamed `Widget` holding the same
+    /// text — `common/bottomnav.gib`'s `Options button` then a label reading
+    /// `Options`, `botlab/ch_stepbuttons.gib`'s step buttons then their numerals
+    /// — and that pair reads the same either way round, because a `Button` with a
+    /// `Caption` attachment draws its own caption from a `Text` such as that one:
+    /// the text is in front of the button's art whichever of the two draws it.
+    /// Only **6** pairs in the whole corpus put art over a sibling that has a
+    /// `Background` (`exhibition/arena.gib`'s overlay over its `ListBox`,
+    /// `teamhq/select_team.gib`'s over its grid, three in `teamhq/repairs.gib`),
+    /// and an overlay drawn over a list is as plausible over as under.
+    ///
+    /// So the tie's direction stays **open**, with one argument pointing away
+    /// from what `draw_order` and `input::hit` do today: in
+    /// `botlab/components.gib` the palette's grid shares a `ChildOrder` with the
+    /// category bar, comes later in the file, and is drawn over the buttons that
+    /// the palette needs clicked — which the game must not do, so *there* the
+    /// earlier record would be the front one. What settles it is the game's own
+    /// hit test, since with a grid in front the buttons still have to be
+    /// reachable.
     #[test]
     fn a_child_order_tie_is_broken_by_the_file() {
         let Some(game) = game_dir() else { return };
@@ -1554,7 +1568,6 @@ mod tests {
             328,
             "equal-ChildOrder overlapping sibling pairs"
         );
-
         // The convention, named: each of the nav bar's three buttons is followed
         // by the label that draws its text, and the step buttons by their
         // numerals.

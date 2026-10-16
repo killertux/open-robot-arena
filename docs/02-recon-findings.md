@@ -307,60 +307,36 @@ them. Drawing a 140×80 event logo at the canvas stretches it across the screen,
 the value is read as unset and the art is drawn in its own box. Anything else is a
 real size: `88 0 72 0` for an armour icon, `20 0 12 0` for a weight icon.
 
-### How a `ChildOrder` tie is broken, and the 328 places it matters
+### Where a `ChildOrder` tie matters, and why it is still open
 
-`ChildOrder` orders a parent's children, and where two share it the **file
-decides: the later record is in front**. The corpus says so, and it says it in a
-shape that is easy to read — **328 pairs of siblings with the same `ChildOrder`
-whose frames overlap**, and the dominant shape among them is a named control
-followed by the label that draws over it:
+`ChildOrder` orders a parent's children, and **328 pairs of siblings** in the
+corpus share one *and* have overlapping frames — the places where the tie-break
+decides anything at all. Their dominant shape is a named control followed by an
+unnamed `Widget` holding the same text: `common/bottomnav.gib`'s `Options`/
+`MainMenu`/`Help` buttons, each followed by a label reading `Options` and
+`Main Menu`; `botlab/ch_stepbuttons.gib`'s step buttons, followed by their
+numerals; `common/credits.gib`'s `close button` and `common/okcancel.gib`'s
+`cancel button`, likewise.
 
-- `common/bottomnav.gib`'s `Options`/`MainMenu`/`Help` buttons are each followed
-  by the `Widget` holding their text (`Text "Options"`, `Text "Main Menu"`, …).
-- `botlab/ch_stepbuttons.gib`'s `step 1 button` and `step 2 button` by their
-  numerals, `common/credits.gib`'s `close button` and `common/okcancel.gib`'s
-  `cancel button` by theirs, `common/video_options.gib`'s `resolution txt` over
-  its box, `common/matchresults.gib`'s four result slots by their frames.
+**That shape does not decide which is in front**, which is worth being explicit
+about because it looks like it should: a `Button` carries a `Caption` attachment
+and draws its caption *itself*, from a `Text` such as the one beside it — so the
+word sits in front of the button's own art whichever of the two draws it, and the
+pair reads the same either way round. Of the 328, only **6** put art over a
+sibling that has a `Background` — `exhibition/arena.gib`'s overlay over its
+`ListBox`, `botlab/colorfill.gib`'s over its `Slider`, three in
+`teamhq/repairs.gib`, and `teamhq/select_team.gib`'s over its grid — and an
+overlay drawn over a list is as plausible over as under.
 
-For a label to read, it has to be over the control it names — so the later record
-is the front one, which is what the shell's `draw_order` and `input::hit` already
-do. [`a_child_order_tie_is_broken_by_the_file`] keeps the count and the named
-pairs as the baseline.
+So the direction stays **open**, with one argument pointing against what
+`draw_order` and `input::hit` do today: in `botlab/components.gib` the palette's
+grid shares a `ChildOrder` with the category bar, is later in the file, and is
+therefore drawn over the buttons the palette needs clicked. The game must not do
+that, so *there* the earlier record should be the front one. What settles it is
+the game's own hit test — because whichever way the tie goes, the buttons have to
+be reachable — and that is the next thing to read.
 
-That closes the *ordering* half of the `components.gib` question: the palette's
-grid really is in front of the option group's row, once the grid holds cells. The
-overlap itself is the **data's**, and the editor had it too:
-`comp upper grp` reports `ReportedPos 0 0 33 0` while its `Position 0 0 0.07 1`
-is 7% of a parent that was about 460 pixels tall there, and the grid is `Position
-0 0 0 0` with `Size 1 1 74 0` — the same overlap. What the designer saw was an
-*empty* grid (only the game fills it), so the overlap is invisible until the C++
-puts cells in it. What the shell should therefore do — whether the game moves the
-grid, hides it, or brings the buttons forward when the palette is shown — is the
-binary's business, and `FUN_00437770` caches both widgets in members (`+0x15c` and
-its neighbours) rather than looking them up by name, which is where to read it.
-
-### What the game does when the components tab opens
-
-`FUN_0042c0c0` is the components tab's own set-up, and it says the palette's
-selection in the binary's words: it looks `category optiongroup` up by name,
-constructs its handler, then looks `power button` up and **sets its state**
-(`FUN_005f9fe0(…, 1)`), and calls `FUN_0042d310(0)` — which stores `0` in the
-tab's own category field and, when the state is non-zero, calls
-`FUN_0042f440(2, category)`. So the tab opens on the power category, which is what
-the file's own `Checked true` on `power button` says too, and what
-[`ra2ui::components::selected_category`] reads. `FUN_0042c280`, called just after,
-clears the tab's cached pointers and flags, and `FUN_0042d8a0` is the **filler**:
-it walks the components (`FUN_0042dfa0()` is how many there are) and calls
-`FUN_005ff890(index, 0x60)` for each — `0x60` is 96, which is the preview art's own
-width, though what that call does with it is not pinned yet.
-
-What that path does **not** do is move, resize or re-order the grid: nothing in
-the tab's set-up touches its position. So if the game resolves the palette's
-overlap — the grid drawn over the option group's row — it does it somewhere else,
-and the filler is where to read next, because it is what decides where a cell
-goes.
-
-### The event list, and the two places the shipped file is not regular
+### The event list, and the two places the shipped file is not regular### The event list, and the two places the shipped file is not regular
 
 `hq_events.gib`'s grid says what fills it — *"fill with this season's events
 (event_cell.gib)"* — and `event_cell.gib` says what a cell is: one `Image` and an
