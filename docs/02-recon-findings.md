@@ -295,6 +295,50 @@ both names are the data's:
   component-properties panel that the game fills at run time. That is the
   *interaction* layer, and it is the C++'s, not the data's.
 
+### Lists and grids: cells are made, and the data says what each row binds
+
+A `Grid`/`ListBox` in a screen is not a list of children in the file — it is a
+**template repeated per row**, and the screen's own `Notes` name both the template
+and what goes in it:
+
+| screen | its note | template |
+|---|---|---|
+| `botlab/armor.gib` | *"load this grid with the four armor cells"* | `armor_cell.gib` |
+| `teamhq/hq_league.gib` | *"fill with league_cell.gib with the teams in order of rank"* | `league_cell.gib` |
+| `teamhq/hq_events.gib` | *"fill with this season's events (event_cell.gib)"* | `event_cell.gib` |
+| `teamhq/hq_robots.gib` | *"fill grid with team robots (robot_cell.gib)"* | `robot_cell.gib` |
+| `teamhq/select_team.gib` | *"load team_cell.gib's into these grid cells for each team"* | `team_cell.gib` |
+| `teamhq/season_results.gib` | *"fill with sresults_cell.gib just like league standings"* | `sresults_cell.gib` |
+| `common/matchresults.gib` | *"load result_cell.gib into this slot with appropriate data"* (×4) | `result_cell.gib` — four *slots*, not a list |
+
+The cell's geometry comes from the list's own `Rows`/`Columns`/`RowHeight`/
+`ColWidths`: `armor.gib` is `Rows 4`, `Columns 1`, `RowHeight 84`,
+`ColWidths 300 17`, so its cells are 300×84 at y = 0, 84, 168, 252. A template's
+root is `Size 1 1 1 1` — it is written to be *placed*, not to know where it goes —
+so the *filler* writes each instance's `Position`/`Size`. The list's own children
+in the file are only its two selection bars (`Selection 100`/`Highlight 101`).
+
+**A template names its binding points in its own `Notes`**, and they are its
+children's names:
+
+- `armor_cell.gib`: *"'armor img' child should be the preview for each armor
+  type"*, *"armor description displayed here"*, *"show weight value here"* →
+  `armor img`, the description, `weight value`.
+- `bot_cell.gib`: *"load bot image into 'bot snapshot img' child of this group"*,
+  *"robot name here"*, *"'Lightweight' or 'Heavyweight' here"*.
+- `result_cell.gib`: *"set 'team logo' and 'bot preview' images"*, *"display the
+  bot's total points here"*.
+
+Prose is the one thing not named: the template's own `Glyph` *is* the prose, and
+it carries the text **twice** — as `_Text` and inside its `DisplayBox`'s markup,
+`Display <text font fg_mcn14 color .8 .8 .8 1>Plastic armor is …</text>` — so a
+binding writes both and leaves the markup's font and colour as the file has them.
+
+The content itself is shipped: `Armor_Definitions.txt` inside `RA2.cfz` holds the
+four armour types as name, description, texture and the numbers
+(`0 8 0 0 80` = type 0, weight 8, …, hardness 80), which is exactly the three
+things `armor_cell.gib` binds.
+
 ### Input: what a click lands on, and what it changes
 
 - **`PassMouse` distinguishes nothing.** It is `true` on all 1,298 widgets in the

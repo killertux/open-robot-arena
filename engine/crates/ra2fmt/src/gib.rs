@@ -288,6 +288,14 @@ impl Attachment {
     pub fn four(&self, name: &str) -> Option<[f32; 4]> {
         self.field(name).and_then(|f| f.four())
     }
+
+    /// A field's value, to write it — the `DisplayBox`'s markup is where a
+    /// cell's prose lives as well as in its `Glyph`.
+    pub fn field_mut(&mut self, name: &str) -> Option<&mut Field> {
+        self.fields
+            .iter_mut()
+            .find(|f| f.name.as_deref() == Some(name))
+    }
 }
 
 /// A field line: a label and the rest of the line, or an unlabelled value.

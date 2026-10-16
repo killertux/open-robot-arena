@@ -190,7 +190,8 @@ screen's own `Notes` names, with the tab table taken from the toolbar's notes on
 its six buttons (`cargo run -p ra2-render --example workshop` clicks all six and
 renders each). And it is live: a click is hit-tested against the placed tree and
 changes the toolbar's state images and the screen, by the rule the corpus states
-with no exceptions. What remains of M5 is the cells' content (game data at run
+with no exceptions — and its lists are filled from the game's own data, the
+armour grid's four cells being the four rows of `Armor_Definitions.txt`. What remains of M5 is the cells' content (game data at run
 time) and the rest of the workshop's interaction — a tab's own steps, and the
 list and paint tools, which are the game's C++.
 

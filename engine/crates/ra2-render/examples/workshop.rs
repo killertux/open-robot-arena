@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use ra2_render::ui::{UiAssets, UiRenderer};
 use ra2_render::Renderer;
+use ra2fmt::gib::Block;
 use ra2ui::workshop::{BotLab, STEPS, TABS};
 
 fn game_root() -> Option<PathBuf> {
@@ -119,9 +120,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             lab.content_root().map(|w| w.name()).unwrap_or(""),
             path.display()
         );
+        // The armour grid's own `Notes` say to fill it with four armour cells,
+        // and the four armour types are in the game's `Armor_Definitions.txt`.
+        if step.button == "armor button" {
+            let filled = fill_armour_grid(&mut lab, &game.join("UI"), &out)?;
+            println!("  filled the armour grid with {filled} cells from Armor_Definitions.txt");
+        }
         lab.select("chassis button")?;
     }
     Ok(())
+}
+
+/// Fill `armor.gib`'s grid with one cell per armour type and render it.
+fn fill_armour_grid(
+    lab: &mut BotLab,
+    ui: &std::path::Path,
+    out: &std::path::Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let game = ui.parent().expect("the game root");
+    let cfl = ra2fmt::cfl::Cfl::open_path(&game.join("RA2.cfz"))?;
+    let text = cfl.get("Armor_Definitions.txt").ok_or("the armour table")?;
+    let armour = ra2fmt::armor::parse(std::str::from_utf8(&text)?);
+    let template = ra2ui::cells::template(ui, "botlab/armor_cell.gib")?;
+
+    for block in lab.document.blocks.iter_mut() {
+        let Block::Widget(root) = block else { continue };
+        let Some(grid) = ra2ui::workshop::find_mut(root, "armor grid") else {
+            continue;
+        };
+        let rows = ra2ui::cells::fill(grid, &template, armour.len());
+        let bars = grid.children.len() - armour.len();
+        for (cell, def) in grid.children[bars..].iter_mut().zip(&armour) {
+            ra2ui::cells::bind_art(cell, "armor img", &def.texture);
+            ra2ui::cells::bind_prose(cell, &def.description);
+            ra2ui::cells::bind_value(cell, "weight value", &format!("{}", def.weight as i32));
+        }
+        let path = out.join("armor_filled.png");
+        let mut assets = UiAssets::open(game)?;
+        let placed = lab
+            .placements([1280.0, 1005.0], Some(assets.faces()))
+            .into_iter()
+            .collect::<Vec<_>>();
+        let scene = assets.scene(&placed, [1280, 1005]);
+        let renderer = Renderer::new()?;
+        let ui_renderer = UiRenderer::new(renderer.device());
+        let pixels = ui_renderer.render(renderer.device(), renderer.queue(), &scene)?;
+        image::RgbaImage::from_raw(1280, 1005, pixels)
+            .ok_or("readback")?
+            .save(&path)?;
+        println!("  wrote {}", path.display());
+        return Ok(rows);
+    }
+    Ok(0)
 }
 
 /// A point inside `name` that a click reaches it at — found by hit-testing,

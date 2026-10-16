@@ -154,7 +154,8 @@ pub fn find<'a>(widget: &'a Widget, name: &str) -> Option<&'a Widget> {
     widget.children.iter().find_map(|c| find(c, name))
 }
 
-fn find_mut<'a>(widget: &'a mut Widget, name: &str) -> Option<&'a mut Widget> {
+/// The first widget called `name`, to write it.
+pub fn find_mut<'a>(widget: &'a mut Widget, name: &str) -> Option<&'a mut Widget> {
     if widget.name() == name {
         return Some(widget);
     }

@@ -509,6 +509,20 @@ Known, documented, not yet fixed:
     `chassis.gib`'s `structure note` label is drawn over its own buttons: a click
     on one's middle lands on the label.
 
+    The shell has *content* now, and it is the game's. A grid or list is a
+    template repeated per row, and the screen's own `Notes` name both: `armor.gib`
+    says *"load this grid with the four armor cells"*, and `armor_cell.gib`'s own
+    notes name what a row binds — *"'armor img' child should be the preview for
+    each armor type"*, *"armor description displayed here"*, *"show weight value
+    here"*. So the armour grid is filled from `Armor_Definitions.txt` inside
+    `RA2.cfz`: four cells at `RowHeight 84` and `ColWidths 300`, each carrying its
+    own armour type's texture, description and weight — the prose taken from the
+    cell's `Glyph` *and* the `DisplayBox` markup that holds it a second time, with
+    the markup's font and colour left as the file wrote them. The render shows the
+    four real previews, plastic through titanium, and the test asserts the
+    geometry, the bindings and the markup. That is the last of the shell's
+    *content*: the rest of M5's lists want the same rule with a different table.
+
     The labels that looked wrong were not a face's problem but every face's: the
     glyph page is stored **bottom-up** and neither renderer swapped the `v`s of a
     glyph's quad, so every label in the shell was drawn upside-down. It was found

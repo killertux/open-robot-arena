@@ -133,6 +133,15 @@ local/           # (git-ignored) game files + converted cache
   both, and it has to *find* the click point rather than take the button's centre:
   `chassis.gib`'s `structure note` label is drawn over its buttons, so a click on
   one's middle lands on the label, which is what a label in front should do.
+- **A list is a template repeated, and what fills it is game data.** `ra2ui::cells`
+  makes a cell per row at the geometry the list itself states and binds a row's
+  values into the children the template's own `Notes` name — and where the data
+  and the code disagree the data wins, because there is nothing to re-author: the
+  armour grid's four cells are the four `Armor_Definitions.txt` rows, with their
+  own textures, descriptions and weights, and `cargo run -p ra2-render --example
+  workshop` renders them. The same machinery is what the team HQ's lists and the
+  match results' slots need; `cells` carries the rule and the notes, so the rest
+  is a table.
 - **The shell has input, and the workshop's tabs are live.** `ra2ui::input`
   hit-tests a point against the placed tree the way it is drawn — in reverse, so
   the last thing drawn is the first thing hit, and children before their parent
