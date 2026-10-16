@@ -554,7 +554,17 @@ Known, documented, not yet fixed:
     are even informative. The shell's own composition follows the same rule now:
     the chassis step layer is inserted *before* the screen it rides over, since it
     is the one that has to be clickable. A test drives each of the six category
-    buttons with the palette filled and watches the selection move. Earlier: there are **328** sibling pairs in the corpus whose `ChildOrder` ties
+    buttons with the palette filled and watches the selection move.
+
+    How far that was *checked by eye* is worth stating, because it is bounded: of
+    the six pairs in the corpus where art overlaps a sibling with a `Background`,
+    the render says nothing for five — `exhibition/arena.gib` and the three in
+    `teamhq/repairs.gib` and `teamhq/select_team.gib` all overlap a `ListBox` or a
+    `Grid` that is **empty**, so the panel has nothing to cover and the picture is
+    the same either way. The palette is the one where the grid can be filled, and
+    there the flip is what made its category bar appear over the cells and take a
+    click. So the change's evidence is the palette's own note plus its render, and
+    the rest of the corpus's ties are unobservable rather than unexamined. Earlier: there are **328** sibling pairs in the corpus whose `ChildOrder` ties
     and whose frames overlap, and their dominant shape is a named control followed
     by the label that names it — but that shape reads the same either way round,
     because a button with a `Caption` attachment draws its caption itself from a
