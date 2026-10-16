@@ -113,6 +113,7 @@ use ra2fmt::gib::{Block, Gib, Length, Widget, WidgetKind};
 
 pub mod cells;
 pub mod input;
+pub mod project;
 pub mod workshop;
 
 /// The faces a screen's labels name, loaded from a game installation's

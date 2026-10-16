@@ -295,6 +295,60 @@ both names are the data's:
   component-properties panel that the game fills at run time. That is the
   *interaction* layer, and it is the C++'s, not the data's.
 
+### The UI project document: the shell's own index of itself, and a check on it
+
+`local/game/UI/Project Header.html` ships with the game and is the UI editor's
+project summary — a tree of the project's seven directories and the 115 `.gib`
+files in them, each with **the name and class of its root widget** and a list of
+the widgets the designer tagged, with the note attached to each. It is the same
+kind of document as a screen's own `Notes`, one level up: not the game's
+definition of a screen — the `.gib` is that — but the designer's index of all of
+them.
+
+That makes it a *second* statement of what each file holds, and a check on the
+reader. For the 113 entries that both ship and are indexed: the root is the name
+and class the document states, and **every one of its 489 tagged widgets** is
+present in the class it states. The check inlines a screen's `Proxy`s first — the
+document tags what a screen *shows*, so `botlabwin.gib` is tagged with
+`Options button` and `MainMenu button`, which live in `common/bottomnav.gib` and
+reach `botlabwin.gib` through its nav `Proxy`. Its class vocabulary is exactly
+the reader's: the 4 root classes and 13 tagged child classes are all
+`WidgetKind`s or the 5 `AttachmentKind`s, and `Background` is the one that is an
+attachment rather than a widget.
+
+Two things the document says that the files do not:
+
+- **A file's "root" is its first record.** Nine entries are rooted at an unnamed
+  `[Background]` — and in all nine that is the root's own *attachment*, which the
+  writer put before the root's header: `hq_league.gib` opens `[Background]` and
+  then `[SplitFrame]`. Our reader dresses the following widget with it, so those
+  roots are the widgets the attachment belongs to (8 of the 9 ship; the ninth is
+  the editor's scratch file).
+- **Attachment names.** The document names nine `DisplayBox`es (`chat displaybox`,
+  `component description`, `description`, …) and **not one attachment in the
+  corpus carries a `Name` field — 0 of 758**. The editor's project keeps names the
+  `.gib` writer does not serialize, so those nine are checked by class.
+
+And it is a **snapshot**, which is why it cannot be the specification: two files
+it names are not shipped (`common/skipintro.gib`, `testfile.gib` — the editor's
+own scratch document) and three screens ship that it does not index
+(`botlab/comp_properties.gib`, `botlab/info_display.gib`, `help/help_blank.gib`).
+The third of those is the reason the binary's own table has to exist:
+`info_display.gib` is the info bar the C++ loads into `lowersplit`, and it is in
+no document.
+
+The notes also state the shell's *links*, and three of them are of the load form
+— `options.gib`'s *"click to load video_options.gib into 'options content
+group'"* and *"…audio_options.gib…"*, and `chassis.gib`'s *"click to load
+ch_armor.gib into 'right content slot'"*. The last names a file that is **not
+shipped**, and the shipped screen's own `Notes` names it too — so the staleness is
+the data's, not a misreading, and the document is the second witness to it. The
+document also shows what became of the 3D view: the tabs' notes say *"click to
+show 3dview.gib and overview.gib"*, `3dview.gib` ships in no directory and in no
+archive, and what the shipped screens have instead is a [`Placeholder`] —
+*"common 3d view for various areas of botlab"* — so `Placeholder` is the widget
+kind the native 3D view left behind when it stopped being a screen.
+
 ### Lists and grids: cells are made, and the data says what each row binds
 
 A `Grid`/`ListBox` in a screen is not a list of children in the file — it is a

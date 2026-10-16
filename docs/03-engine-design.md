@@ -133,6 +133,17 @@ local/           # (git-ignored) game files + converted cache
   both, and it has to *find* the click point rather than take the button's centre:
   `chassis.gib`'s `structure note` label is drawn over its buttons, so a click on
   one's middle lands on the label, which is what a label in front should do.
+- **The shell is checked against its own index, not only against itself.** The
+  game ships the UI editor's project document, and it is a second witness to
+  every screen: the name and class of each file's root, and the 489 widgets the
+  designer tagged. Reading it (`ra2ui::project`) is cheap and it is a *check* —
+  113 files, every root, every tagged widget, in the class stated, with the
+  screen's `Proxy`s inlined first because that is what the document describes and
+  what the shell draws. Where a file and the document disagree the file wins, and
+  the test names the difference: the document is a snapshot, so two files it names
+  are gone and three screens are newer than it. That is the same shape as every
+  other rule here — a measurement against the corpus that is kept as a test —
+  with the corpus being the game's own index of itself.
 - **A list is a template repeated, and what fills it is game data.** `ra2ui::cells`
   makes a cell per row at the geometry the list itself states and binds a row's
   values into the children the template's own `Notes` name — and where the data

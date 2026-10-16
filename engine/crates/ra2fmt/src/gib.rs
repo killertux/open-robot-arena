@@ -482,6 +482,13 @@ impl WidgetKind {
         }
     }
 
+    /// The kind a class name is — a `[Kind]` header, or the class a document
+    /// names a widget by. An unmodelled class comes back as
+    /// [`WidgetKind::Other`], so a reader can tell.
+    pub fn from_name(name: &str) -> WidgetKind {
+        Self::parse(name)
+    }
+
     fn static_name(&self) -> &'static str {
         use WidgetKind::*;
         match self {
@@ -532,6 +539,12 @@ impl AttachmentKind {
             "Scroller" => Scroller,
             other => Other(other.to_string()),
         }
+    }
+
+    /// The attachment kind a class name is. An unmodelled class comes back as
+    /// [`AttachmentKind::Other`], so a reader can tell.
+    pub fn from_name(name: &str) -> AttachmentKind {
+        Self::parse(name)
     }
 
     pub fn name(&self) -> &str {
@@ -1053,6 +1066,18 @@ NumChildren 0\n";
                     assert!(
                         a.field("NumChildren").is_none(),
                         "{}: an attached {} with NumChildren",
+                        path.display(),
+                        a.kind.name()
+                    );
+                    // And it is *anonymous*: the writer gives an attachment no
+                    // `Name` at all. The UI project document names nine
+                    // `DisplayBox`es (`chat displaybox`, `component description`,
+                    // …) and not one of those names is in a file — the editor's
+                    // project keeps them and the `.gib` export does not, which is
+                    // why `ra2ui::project` checks those nine by class.
+                    assert!(
+                        a.field("Name").is_none(),
+                        "{}: an attached {} with a Name",
                         path.display(),
                         a.kind.name()
                     );

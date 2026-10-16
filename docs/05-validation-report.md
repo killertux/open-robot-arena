@@ -509,6 +509,29 @@ Known, documented, not yet fixed:
     `chassis.gib`'s `structure note` label is drawn over its own buttons: a click
     on one's middle lands on the label.
 
+    The shell is now checked against a document it ships that was not being
+    read: `UI/Project Header.html`, the UI editor's index of the whole project —
+    115 files, each with the name and class of its root widget, and the 489
+    widgets the designer tagged with their notes. For the 113 entries that both
+    ship and are indexed, the root is the name and class it states, and every
+    tagged widget is present in the class it states; the check inlines each
+    screen's `Proxy`s first, since the document tags what a screen *shows*
+    (`botlabwin.gib` is tagged with the buttons of the `common/bottomnav.gib` it
+    proxies). Its class vocabulary is exactly the reader's — 4 root classes and 13
+    child classes, all `WidgetKind`s or the 5 `AttachmentKind`s.
+
+    It also measured three asymmetries worth keeping. The document calls a file's
+    *first record* its "root", and nine entries are rooted at an unnamed
+    `[Background]` — the root's own attachment, written before the header
+    (`hq_league.gib` opens `[Background]` then `[SplitFrame]`). It names nine
+    `DisplayBox`es, and **no attachment in the corpus carries a `Name` at all: 0
+    of 758** — the editor keeps names the writer does not serialize. And it is a
+    snapshot: two files it names are not shipped (`common/skipintro.gib`,
+    `testfile.gib`) and three screens are newer than it
+    (`botlab/comp_properties.gib`, `botlab/info_display.gib`,
+    `help/help_blank.gib`) — the last being the info bar the binary loads into
+    `lowersplit`, which is why the binary's table had to be read at all.
+
     The shell has *content* now, and it is the game's. A grid or list is a
     template repeated per row, and the screen's own `Notes` name both: `armor.gib`
     says *"load this grid with the four armor cells"*, and `armor_cell.gib`'s own
