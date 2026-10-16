@@ -509,6 +509,29 @@ Known, documented, not yet fixed:
     `chassis.gib`'s `structure note` label is drawn over its own buttons: a click
     on one's middle lands on the label.
 
+    The palette now follows the screen's own category and can be walked. Which
+    category is current is the group's selected member — `Checked true` on
+    `power button`, with the `co_power_s.bmp` state image showing — and a click on
+    a member selects it in its group, the group being found from the hit path
+    itself (the last `OptionGroup` above the `CheckBox` that was hit) rather than
+    from a table. All six categories fill and render, and the counts are the
+    archive's: **9, 38, 30, 13, 31, 10**. The mechanics palette draws a motor and
+    then pistons — which is what that button's own note says it shows, *"motors
+    and pistons"* — so the words in the data describe what actually appears.
+
+    One thing is open, and it is measured rather than worked around: a click
+    inside a category button reaches the grid's own `Sel Bar` instead of the
+    button, filled *or not*. The grid and the option group's group are siblings
+    with the same `ChildOrder -1` and the grid is later in the file, so the draw
+    order puts it in front; it spans y 257.3 to 331.3 and the buttons' row is at
+    298.8 to 327.0 inside it, and its `Sel Bar` is `Visible true` across the
+    first cell. So this screen's category is set by the screen's own `Checked`
+    member rather than by a click, and the click rule is tested where it *is*
+    reachable — `chassis_structure1.gib`'s `drawstyle optiongroup`, whose labels
+    are base `Widget`s and so fall through. What is unresolved is that pair of
+    positions or the tie's direction, not the rule; the notes say what would
+    settle it.
+
     The component palette is filled from the game's own definitions. Its grid
     says what fills it — *"fill with components in the current category"* — and
     the six categories are the option group's buttons, whose notes name the

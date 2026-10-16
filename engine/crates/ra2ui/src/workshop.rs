@@ -410,29 +410,51 @@ impl BotLab {
     ) -> Result<Option<&'static Tab>, String> {
         // The innermost tab button under the point, and the innermost *step*
         // button, if either is there.
-        let (tab_button, step_button, structure) = {
+        let (tab_button, step_button, structure, option) = {
             let placed = self.placements(screen, fonts);
             let Some(path) = input::hit(&placed, x, y) else {
                 return Ok(None);
             };
-            let mut placement = &placed[path[0]];
-            let mut found_tab = tab(placement.widget.name()).map(|t| t.button);
-            let mut found_step = step(placement.widget.name()).map(|s| s.button);
-            let mut found_structure = structure_step(placement.widget.name());
+            // The path is the widgets from the root down to the one that was
+            // hit, so the option group a checkbox is in is the last
+            // `OptionGroup` above it — which is how a click on a category button
+            // knows its group without a table of pairs.
+            let mut chain: Vec<&Placement> = vec![&placed[path[0]]];
             for index in &path[1..] {
-                placement = &placement.children[*index];
-                if let Some(t) = tab(placement.widget.name()) {
+                let next = &chain[chain.len() - 1].children[*index];
+                chain.push(next);
+            }
+            let mut group: Option<String> = None;
+            let mut found_tab = None;
+            let mut found_step = None;
+            let mut found_structure = None;
+            let mut found_option: Option<(String, String)> = None;
+            for placement in &chain {
+                let name = placement.widget.name();
+                if placement.widget.kind == ra2fmt::gib::WidgetKind::OptionGroup {
+                    group = Some(name.to_string());
+                }
+                if placement.widget.kind == ra2fmt::gib::WidgetKind::CheckBox {
+                    if let Some(group) = &group {
+                        found_option = Some((group.clone(), name.to_string()));
+                    }
+                }
+                if let Some(t) = tab(name) {
                     found_tab = Some(t.button);
                 }
-                if let Some(s) = step(placement.widget.name()) {
+                if let Some(s) = step(name) {
                     found_step = Some(s.button);
                 }
-                if let Some(s) = structure_step(placement.widget.name()) {
+                if let Some(s) = structure_step(name) {
                     found_structure = Some(s);
                 }
             }
-            (found_tab, found_step, found_structure)
+            (found_tab, found_step, found_structure, found_option)
         };
+        if let Some((group, child)) = option {
+            // A click on an option group's member selects it in its group.
+            self.select_option_member(&group, &child);
+        }
         if let Some(next) = structure {
             // One of the layer's two step buttons: it swaps the content area's
             // screen. The layer stays — it is what the click was on.
@@ -448,6 +470,19 @@ impl BotLab {
         };
         self.select(button)?;
         Ok(tab(button))
+    }
+
+    /// Select an option group's member in the composed document — the group by
+    /// name, the member by name, which is how the screen itself names them.
+    fn select_option_member(&mut self, group: &str, child: &str) -> bool {
+        for block in self.document.blocks.iter_mut() {
+            let Block::Widget(root) = block else { continue };
+            if find(root, group).is_some() {
+                input::select_option(root, group, child);
+                return true;
+            }
+        }
+        false
     }
 
     /// Start a step: its screen replaces the tab's own, in the same slot, and
@@ -743,6 +778,34 @@ mod tests {
         lab.select("overview button").unwrap();
         assert!(!lab.start_step("armor button").unwrap());
         assert_eq!(lab.content_root().map(|w| w.name()), Some("overview split"));
+    }
+
+    /// A click on an option group's member selects it in its group and changes
+    /// nothing else — the group being found from the hit path (the last
+    /// `OptionGroup` above the `CheckBox` that was hit), not from a table.
+    ///
+    /// The case is `chassis_structure1.gib`'s `drawstyle optiongroup`, the
+    /// freeform / circle / rectangle tools. The component palette's own option
+    /// group is *not* the case here: its grid is drawn over it (see
+    /// `docs/05-validation-report.md`), so a click lands on the grid's selection
+    /// bar instead of a button, and the palette's category is set by
+    /// `ra2ui::components::selected_category` reading the screen.
+    #[test]
+    fn clicking_an_option_groups_member_selects_it() {
+        let Some(ui) = ui_root() else { return };
+        let mut lab = BotLab::open(&ui).unwrap();
+        lab.select("chassis button").unwrap();
+        lab.start_step("structure design button").unwrap();
+        for member in ["circle checkbox", "rectangle checkbox", "freeform checkbox"] {
+            let (x, y) = reachable_point(&lab, member);
+            assert!(lab.click(x, y, DESIGN_SCREEN, None).unwrap().is_none());
+            let group = find(lab.content_root().unwrap(), "drawstyle optiongroup").unwrap();
+            assert_eq!(
+                input::field_of(group, "Selection"),
+                Some(member),
+                "the group moved to {member}"
+            );
+        }
     }
 
     /// The structure step's layer rides in `content slot` with the screen, and

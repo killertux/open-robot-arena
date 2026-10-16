@@ -295,6 +295,42 @@ both names are the data's:
   component-properties panel that the game fills at run time. That is the
   *interaction* layer, and it is the C++'s, not the data's.
 
+### Which category is current, and a click on an option group
+
+The palette's category is the `category optiongroup`'s selected member, and the
+screen states it the way a `CheckBox` states its own state: **`Checked true`** on
+`power button`, with the checkbox showing its `len - 2` state image (for these six
+that is the `co_*_s.bmp` art — `co_power_s.bmp` visible while every other button
+shows `co_*_n.bmp`). A click on a member selects it in its group: the shell finds
+the `OptionGroup` the checkbox is under **from the hit path itself** — the last
+`OptionGroup` above the `CheckBox` that was hit — sets the group's `Selection` to
+the member's name and puts every member into its selected or unselected state
+(`ra2ui::input::select_option`). No table of button-to-group pairs is needed, and
+the palette then refills for whatever the screen now says.
+
+**One overlap is open, and it is measured.** `botlab/components.gib` puts the
+grid and the option group's row in each other's way once the grid has cells:
+
+| widget | `Position` | `Size` | `ChildOrder` | line |
+|---|---|---|---|---|
+| `comp upper grp` (holds the option group) | `0 0 0.07 1` = 7% down | `1 1 0.12 1` | `-1` | 479 |
+| `components grid` | `0 0 0 0` | `1 1 74 0` | `-1` | 1417 |
+| `Sel Bar` (the grid's) | `0 0 0 0` | `78 0 72 0`, `Visible true` | `0` | 1439 |
+| `High Bar` (the grid's) | `78 0 0 0` | `78 0 72 0`, `Visible false` | `1` | 1493 |
+
+The two are siblings with the *same* `ChildOrder`, so the file order decides, and
+the grid is later — which by the draw order puts it in front. The grid spans
+y 257.3 to 331.3 and the option group's row sits at 298.8 to 327.0 inside it, so
+with cells in the grid a click inside a category button reaches the grid's own
+`Sel Bar` instead. An *empty* grid is fine — the rule above is exercised by
+clicking all six buttons on the screen as it loads — so what is unresolved is the
+pair, not the rule: either the tie goes the other way for this pair, or one of the
+two positions was authored against a different parent. What the game shows is the
+buttons on top of a filled palette, so something in our reading of the pair is
+off. Settling it wants the game's own hit test read for `Grid` and `Rectangle`
+(the class-behaviour question, one level down from the base `Widget`), or a second
+screen where two equal-`ChildOrder` siblings overlap and the front one is known.
+
 ### The chassis steps: a layer, and the class that a hit does not stop at
 
 `botlab/ch_stepbuttons.gib` is the snap checkbox, the finished button and the two

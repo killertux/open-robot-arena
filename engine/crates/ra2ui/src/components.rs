@@ -42,6 +42,11 @@ pub struct Component {
     pub art: String,
 }
 
+/// The grid the palette fills, by name.
+pub const GRID: &str = "components grid";
+/// The option group whose selected member is the current category.
+pub const GROUP: &str = "category optiongroup";
+
 /// The palette's six categories, and the `category optiongroup` button that
 /// selects each in `botlab/components.gib`.
 pub const CATEGORIES: [(&str, &str); 6] = [
@@ -110,6 +115,42 @@ pub fn bmp_size(path: &Path) -> Option<[f32; 2]> {
     Some([number(18)?, number(22)?])
 }
 
+/// The category the screen has selected: the `category optiongroup`'s own
+/// `CheckBox` whose `Checked` is true.
+///
+/// The file bakes one, and a click on a button moves it ([`crate::input`]'s
+/// `set_state` writes `Checked` and shows the checkbox's `len - 2` state image,
+/// which for these six is the `co_*_s.bmp` art).
+pub fn selected_category(root: &ra2fmt::gib::Widget) -> Option<(&'static str, &'static str)> {
+    let group = crate::workshop::find(root, GROUP)?;
+    CATEGORIES.iter().copied().find(|(_, button)| {
+        crate::workshop::find(group, button)
+            .and_then(|w| crate::input::field_of(w, "Checked"))
+            .is_some_and(|checked| checked.eq_ignore_ascii_case("true"))
+    })
+}
+
+/// Fill the palette for the category the screen has selected, and say which one
+/// that was and how many cells it took.
+///
+/// This is the whole of the grid's own instruction — *"fill with components in
+/// the current category"* — in one call: the screen says which category it is in
+/// the option group, the definitions say which components are in it, and the grid
+/// says where the cells go.
+pub fn fill_selected(
+    root: &mut ra2fmt::gib::Widget,
+    game: &Path,
+    all: &[Component],
+) -> Option<(&'static str, usize)> {
+    // Read the selection before borrowing the tree to write it: the option group
+    // is the *same* widget tree the grid is in.
+    let (category, _) = selected_category(root)?;
+    let shown = in_category(all, category);
+    let grid = crate::workshop::find_mut(root, GRID)?;
+    let filled = fill_grid(grid, game, &shown);
+    Some((category, filled))
+}
+
 /// Fill a palette grid with one cell per component.
 ///
 /// The cell is the preview art at its own size, centred on the grid's cell, and
@@ -122,6 +163,12 @@ pub fn fill_grid(grid: &mut Widget, game: &Path, components: &[&Component]) -> u
     let Some(geometry) = Grid::from_widget(grid) else {
         return 0;
     };
+    // A refill replaces the cells: they are the grid's children that are images
+    // of a component's art, which is what leaves the file's own two selection
+    // bars alone.
+    grid.children.retain(|c| {
+        !(c.kind == WidgetKind::Image && c.filename().is_some_and(|f| f.starts_with("Components")))
+    });
     let columns = geometry.columns.max(1);
     let cell_width = geometry.col_widths.first().copied().unwrap_or(0.0);
     let mut made = 0;
@@ -234,6 +281,52 @@ mod tests {
             assert!(tagged.iter().any(|n| n == button), "{button} is tagged");
         }
         assert_eq!(total, all.len(), "the six parts are the whole");
+    }
+
+    /// The screen bakes its own category — `power button`'s `Checked` is true —
+    /// and a click moves it, after which the palette is the other category's.
+    #[test]
+    fn the_palette_follows_the_screens_own_selection() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let all = all(&game).unwrap();
+        let mut gib = crate::workshop::load(&ui, "botlab/components.gib").unwrap();
+        let root = gib
+            .blocks
+            .iter_mut()
+            .find_map(|b| match b {
+                Block::Widget(w) => Some(w),
+                _ => None,
+            })
+            .unwrap();
+
+        // The file's own selection, and the count it fills.
+        assert_eq!(
+            selected_category(root),
+            Some(("power", "power button")),
+            "the screen loads with power selected"
+        );
+        let (category, filled) = fill_selected(root, &game, &all).unwrap();
+        assert_eq!(category, "power");
+        assert_eq!(filled, in_category(&all, "power").len());
+        let bars = crate::workshop::find(root, GRID).unwrap().children.len() - filled;
+        assert_eq!(bars, 2, "the grid's own two selection bars");
+
+        // A click on another category moves the selection, and a refill is that
+        // category's — with the old cells gone, not added to.
+        crate::input::select_option(root, GROUP, "mechanics button");
+        assert_eq!(
+            selected_category(root),
+            Some(("mechanics", "mechanics button"))
+        );
+        let (category, filled) = fill_selected(root, &game, &all).unwrap();
+        assert_eq!(category, "mechanics");
+        assert_eq!(filled, 30, "mechanics is the motors and pistons");
+        assert_eq!(
+            crate::workshop::find(root, GRID).unwrap().children.len(),
+            bars + filled,
+            "a refill replaces the cells"
+        );
     }
 
     /// Filling `botlab/components.gib`'s own grid puts a cell per component at

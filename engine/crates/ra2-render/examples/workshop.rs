@@ -75,8 +75,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // current category"* — and the categories are the game's own component
         // definitions, so fill it before drawing.
         if tab.button == "components button" {
-            let filled = fill_components_grid(&mut lab, &game)?;
-            println!("  filled the components grid with {filled} cells from Components.cfz");
+            let (category, filled) = fill_components_grid(&mut lab, &game)?.unwrap_or(("", 0));
+            println!(
+                "  filled the components grid with {filled} {category} cells from Components.cfz"
+            );
         }
 
         let mut assets = UiAssets::open(&game)?;
@@ -136,6 +138,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         lab.select("chassis button")?;
     }
+    // The palette's six categories, each a click and a refill.
+    render_categories(&mut lab, &game, &out, screen)?;
     Ok(())
 }
 
@@ -144,18 +148,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn fill_components_grid(
     lab: &mut BotLab,
     game: &std::path::Path,
-) -> Result<usize, Box<dyn std::error::Error>> {
+) -> Result<Option<(&'static str, usize)>, Box<dyn std::error::Error>> {
     let all = ra2ui::components::all(game)?;
-    let (category, _) = ra2ui::components::CATEGORIES[0];
-    let shown = ra2ui::components::in_category(&all, category);
+    // `fill_selected` reads the category the screen itself has selected, so this
+    // is the whole of the grid's instruction in one call.
     for block in lab.document.blocks.iter_mut() {
         let Block::Widget(root) = block else { continue };
-        let Some(grid) = ra2ui::workshop::find_mut(root, "components grid") else {
-            continue;
-        };
-        return Ok(ra2ui::components::fill_grid(grid, game, &shown));
+        return Ok(ra2ui::components::fill_selected(root, game, &all));
     }
-    Ok(0)
+    Ok(None)
+}
+
+/// Walk the palette's six category buttons: a click selects one in its group, the
+/// grid fills for it, and the screen renders.
+fn render_categories(
+    lab: &mut BotLab,
+    game: &std::path::Path,
+    out: &std::path::Path,
+    screen: [f32; 2],
+) -> Result<(), Box<dyn std::error::Error>> {
+    lab.select("components button")?;
+    for (category, button) in ra2ui::components::CATEGORIES {
+        // Selected the way a click on it would be — the same `select_option` the
+        // click path calls — and not by clicking, because of what filling the
+        // grid does to the buttons: see the note on `ra2ui::components`'s grid
+        // and `docs/05`. Once the palette holds cells, the grid's own `Sel Bar`
+        // covers the option group's row (`Sel Bar` is visible and 78×72 at the
+        // grid's origin; the grid is later in the file than `comp upper grp` with
+        // the same `ChildOrder -1`), so a click reaches the bar instead.
+        for block in lab.document.blocks.iter_mut() {
+            let Block::Widget(root) = block else { continue };
+            ra2ui::input::select_option(root, ra2ui::components::GROUP, button);
+            break;
+        }
+        let (shown, filled) = fill_components_grid(lab, game)?.unwrap_or(("", 0));
+        assert_eq!(shown, category);
+
+        let mut assets = UiAssets::open(game)?;
+        let placed = lab.placements(screen, Some(assets.faces()));
+        let placed = placed.into_iter().collect::<Vec<_>>();
+        let scene = assets.scene(&placed, [1280, 1005]);
+        let renderer = Renderer::new()?;
+        let ui = UiRenderer::new(renderer.device());
+        let pixels = ui.render(renderer.device(), renderer.queue(), &scene)?;
+        let path = out.join(format!("components_{category}.png"));
+        image::RgbaImage::from_raw(1280, 1005, pixels)
+            .ok_or("readback")?
+            .save(&path)?;
+        println!(
+            "  filled the palette with {filled:2} {category} and rendered {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Fill `armor.gib`'s grid with one cell per armour type and render it.
