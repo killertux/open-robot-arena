@@ -541,18 +541,22 @@ Known, documented, not yet fixed:
     then pistons — which is what that button's own note says it shows, *"motors
     and pistons"* — so the words in the data describe what actually appears.
 
-    One thing is open, and it is measured rather than worked around: a click
-    inside a category button reaches the grid's own `Sel Bar` instead of the
-    button, filled *or not*. The grid and the option group's group are siblings
-    with the same `ChildOrder -1` and the grid is later in the file, so the draw
-    order puts it in front; it spans y 257.3 to 331.3 and the buttons' row is at
-    298.8 to 327.0 inside it, and its `Sel Bar` is `Visible true` across the
-    first cell. So this screen's category is set by the screen's own `Checked`
-    member rather than by a click, and the click rule is tested where it *is*
-    reachable — `chassis_structure1.gib`'s `drawstyle optiongroup`, whose labels
-    are base `Widget`s and so fall through. What is unresolved is that pair of
-    positions or the tie's direction, not the rule; the notes say what would
-    settle it.
+    A click inside a category button reaches the grid instead of the button, and
+    that is now understood rather than worked around. The ordering half is *not*
+    the problem: `ChildOrder` ties are broken by the file, the later record in
+    front, and the corpus states that in **328** places — siblings with the same
+    `ChildOrder` whose frames overlap, dominated by a named control followed by
+    the label that draws over it (`bottomnav.gib`'s three nav buttons, the
+    `ch_stepbuttons.gib` numerals, `credits.gib`'s close button). The overlap
+    itself is the data's, and the editor had it too: `comp upper grp` reports
+    `ReportedPos 0 0 33 0` against a `Position 0 0 0.07 1` of a ~460-pixel parent,
+    and the grid is `Position 0 0 0 0` with `Size 1 1 74 0`. The designer saw an
+    *empty* grid there — only the game fills it — so the overlap only appears once
+    the C++ puts cells in. How the shell should compose it is the binary's
+    business, and `FUN_00437770` caches both widgets in members. So this screen's
+    category is set from its own `Checked` member, and the click rule is tested
+    where it *is* reachable — `chassis_structure1.gib`'s `drawstyle optiongroup`,
+    whose labels are base `Widget`s and so fall through.
 
     The component palette is filled from the game's own definitions. Its grid
     says what fills it — *"fill with components in the current category"* — and

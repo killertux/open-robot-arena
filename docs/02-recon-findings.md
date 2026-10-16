@@ -307,6 +307,38 @@ them. Drawing a 140×80 event logo at the canvas stretches it across the screen,
 the value is read as unset and the art is drawn in its own box. Anything else is a
 real size: `88 0 72 0` for an armour icon, `20 0 12 0` for a weight icon.
 
+### How a `ChildOrder` tie is broken, and the 328 places it matters
+
+`ChildOrder` orders a parent's children, and where two share it the **file
+decides: the later record is in front**. The corpus says so, and it says it in a
+shape that is easy to read — **328 pairs of siblings with the same `ChildOrder`
+whose frames overlap**, and the dominant shape among them is a named control
+followed by the label that draws over it:
+
+- `common/bottomnav.gib`'s `Options`/`MainMenu`/`Help` buttons are each followed
+  by the `Widget` holding their text (`Text "Options"`, `Text "Main Menu"`, …).
+- `botlab/ch_stepbuttons.gib`'s `step 1 button` and `step 2 button` by their
+  numerals, `common/credits.gib`'s `close button` and `common/okcancel.gib`'s
+  `cancel button` by theirs, `common/video_options.gib`'s `resolution txt` over
+  its box, `common/matchresults.gib`'s four result slots by their frames.
+
+For a label to read, it has to be over the control it names — so the later record
+is the front one, which is what the shell's `draw_order` and `input::hit` already
+do. [`a_child_order_tie_is_broken_by_the_file`] keeps the count and the named
+pairs as the baseline.
+
+That closes the *ordering* half of the `components.gib` question: the palette's
+grid really is in front of the option group's row, once the grid holds cells. The
+overlap itself is the **data's**, and the editor had it too:
+`comp upper grp` reports `ReportedPos 0 0 33 0` while its `Position 0 0 0.07 1`
+is 7% of a parent that was about 460 pixels tall there, and the grid is `Position
+0 0 0 0` with `Size 1 1 74 0` — the same overlap. What the designer saw was an
+*empty* grid (only the game fills it), so the overlap is invisible until the C++
+puts cells in it. What the shell should therefore do — whether the game moves the
+grid, hides it, or brings the buttons forward when the palette is shown — is the
+binary's business, and `FUN_00437770` caches both widgets in members (`+0x15c` and
+its neighbours) rather than looking them up by name, which is where to read it.
+
 ### The event list, and the two places the shipped file is not regular
 
 `hq_events.gib`'s grid says what fills it — *"fill with this season's events

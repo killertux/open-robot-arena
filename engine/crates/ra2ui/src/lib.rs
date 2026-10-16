@@ -1500,6 +1500,81 @@ mod tests {
         assert_eq!(exhibition.frame.h, 26.0);
     }
 
+    /// The cases where file order alone decides which sibling is in front: pairs
+    /// with the **same `ChildOrder`** whose frames overlap. There are **328** of
+    /// them, and the shell's own convention is legible in them — a named control
+    /// followed by the label that draws over it:
+    /// `common/bottomnav.gib`'s `Options`/`MainMenu`/`Help` buttons are each
+    /// followed by the `Widget` that holds their text, `ch_stepbuttons.gib`'s step
+    /// buttons by their numerals, `common/credits.gib`'s `close button` and
+    /// `common/okcancel.gib`'s `cancel button` likewise. So a tie is broken the
+    /// way the file is written: **the later record is in front**, which is what
+    /// `draw_order` and `input::hit` already do.
+    #[test]
+    fn a_child_order_tie_is_broken_by_the_file() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let mut files = Vec::new();
+        collect_gib(&ui, &mut files);
+        let mut pairs: Vec<(String, String, String, String, f32)> = Vec::new();
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let gib = ra2fmt::gib::parse(&text).unwrap();
+            let placed = resolve(&gib, DESIGN_SCREEN);
+            let name = path
+                .strip_prefix(&ui)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            for parent in placed.iter().flat_map(|p| p.walk()) {
+                for (i, a) in parent.children.iter().enumerate() {
+                    for b in parent.children.iter().skip(i + 1) {
+                        if a.widget.child_order() != b.widget.child_order() {
+                            continue;
+                        }
+                        let w = (a.frame.x + a.frame.w).min(b.frame.x + b.frame.w)
+                            - a.frame.x.max(b.frame.x);
+                        let h = (a.frame.y + a.frame.h).min(b.frame.y + b.frame.h)
+                            - a.frame.y.max(b.frame.y);
+                        if w > 4.0 && h > 4.0 {
+                            pairs.push((
+                                name.clone(),
+                                format!("{} [{}]", a.widget.name(), a.widget.kind.name()),
+                                format!("{} [{}]", b.widget.name(), b.widget.kind.name()),
+                                parent.widget.name().to_string(),
+                                w * h,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            pairs.len(),
+            328,
+            "equal-ChildOrder overlapping sibling pairs"
+        );
+
+        // The convention, named: each of the nav bar's three buttons is followed
+        // by the label that draws its text, and the step buttons by their
+        // numerals.
+        for button in ["Options button", "MainMenu button", "Help button"] {
+            assert!(
+                pairs.iter().any(|p| p.0 == "common/bottomnav.gib"
+                    && p.1.starts_with(button)
+                    && p.2.starts_with(' ')
+                    && p.3 == "gray grp"),
+                "bottomnav: {button} is followed by its label"
+            );
+        }
+        assert!(pairs
+            .iter()
+            .any(|p| p.0 == "botlab/ch_stepbuttons.gib" && p.1.starts_with("step 1 button")));
+        assert!(pairs
+            .iter()
+            .any(|p| p.0 == "botlab/components.gib" && p.1.starts_with("comp upper grp")));
+    }
+
     /// Every shipped file, placed: 4,348 widgets, all finite, and 228 whose
     /// frame reaches past the screen. Those are of three kinds, all expected:
     /// *fragments* — files like `botlab/control_cell.gib` that are a content
