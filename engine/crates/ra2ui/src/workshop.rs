@@ -36,10 +36,13 @@
 //!
 //! ## What is *not* here
 //!
-//! The interaction. A tab's own buttons — the chassis tab's `Chassis 1` /
-//! `Chassis 2` / `Armor` steps, the component list's selection, the drawing
-//! tools — are the game's C++, not its data, and they are what the next slice
-//! is for. What this gives them is the composed screen they act on.
+//! The interaction. A tab's own buttons — the component list's selection, the
+//! chassis *drawing* tools, the snap checkbox's effect on a point — are the
+//! game's C++, not its data, and they are what the next slice is for. What this
+//! gives them is the composed screen they act on. Two of them are here because
+//! the data states them completely: the steps a tab offers ([`STEPS`]), and the
+//! layer that rides over the structure screens ([`STEP_LAYER`]) with the two
+//! buttons that swap between them.
 
 use std::path::{Path, PathBuf};
 
@@ -117,6 +120,8 @@ pub struct Step {
     pub button: &'static str,
     /// The screen it puts in [`CONTENT_SLOT`].
     pub fragment: &'static str,
+    /// A second screen it puts in the slot *with* the first, if it has one.
+    pub layer: Option<&'static str>,
 }
 
 /// The steps the shipped screens offer, and the button that starts each.
@@ -125,13 +130,58 @@ pub const STEPS: [Step; 2] = [
         tab: "chassis button",
         button: "structure design button",
         fragment: "botlab/chassis_structure1.gib",
+        layer: Some(STEP_LAYER),
     },
     Step {
         tab: "chassis button",
         button: "armor button",
         fragment: "botlab/armor.gib",
+        layer: None,
     },
 ];
+
+/// The layer that rides over the chassis *structure* screens: the snap checkbox,
+/// the finished button and the two step buttons.
+///
+/// ## Why it is a sibling in [`CONTENT_SLOT`], and not a part of the screens
+///
+/// `ch_stepbuttons.gib`'s root is `steps and snap group`, and its own position
+/// says where it goes without anyone having to be told: `Alignment 36` is
+/// *right + bottom* and `Position 1 1 1 1` is both axes at 100%, so it is
+/// anchored to the **bottom-right corner of whoever holds it**. No chassis screen
+/// has a slot for it — `chassis_structure1.gib` and `chassis_structure2.gib` are
+/// both `chassis split`, `Slot0` the blueprint and `Slot1` the tools, and neither
+/// names anything a 70-pixel group could go in — and both screens' own root
+/// records say `Notes load this into content slot`. So the layer is the screens'
+/// *sibling* in that same slot, added after them: the C++ loads it the way it
+/// loads every screen (`FUN_00437770`, which caches it in a member and inserts a
+/// loaded screen into a slot it looks up by name) and its own anchor then puts it
+/// in the corner of the content area.
+///
+/// ## Its buttons are the two chassis *structure* screens
+///
+/// The layer is the only place the two steps live: `step 1 button` is noted
+/// *"step 1 of chassis outline"* and `step 2 button` *"step 2 (extrude, top
+/// outline)"*, their captions are literally `1` and `2`, and the binary loads
+/// `botlab\chassis_structure1.gib` and `botlab\chassis_structure2.gib` from the
+/// same table with the labels `Chassis 1` and `Chassis 2`. So a click on one
+/// swaps the content area's screen and nothing else — the layer stays, because it
+/// is what the click is on.
+pub const STEP_LAYER: &str = "botlab/ch_stepbuttons.gib";
+
+/// The layer's two step buttons and the screen each shows.
+pub const STRUCTURE_STEPS: [(&str, &str); 2] = [
+    ("step 1 button", "botlab/chassis_structure1.gib"),
+    ("step 2 button", "botlab/chassis_structure2.gib"),
+];
+
+/// The screen a click on a layer step button shows.
+pub fn structure_step(button: &str) -> Option<&'static str> {
+    STRUCTURE_STEPS
+        .iter()
+        .find(|(name, _)| *name == button)
+        .map(|(_, screen)| *screen)
+}
 
 /// The step a button starts, by the button's `Name`.
 pub fn step(button: &str) -> Option<&'static Step> {
@@ -233,6 +283,9 @@ pub struct BotLab {
     /// The step started on it, if any: its screen is in `content slot` instead
     /// of the tab's own.
     pub step: Option<&'static str>,
+    /// The layer the current step rides over its screen, if any — reloaded on
+    /// every screen change so it survives one.
+    layer: Option<&'static str>,
     /// How many children `content slot` has of its own, before a tab is loaded
     /// into it — the file's `white backdrop img`, and any it ever gains.
     slot_own: usize,
@@ -247,6 +300,7 @@ impl BotLab {
             document,
             tab: TABS[0].button,
             step: None,
+            layer: None,
             slot_own: 0,
         };
         // `compose` has already loaded the first tab; count what the slot holds
@@ -270,9 +324,14 @@ impl BotLab {
         0
     }
 
-    /// Put a screen into `content slot`, leaving the slot's own children alone.
+    /// Put a screen into `content slot`, leaving the slot's own children alone —
+    /// and the step's layer after it, if one is riding there.
     fn set_screen(&mut self, relative: &str) -> Result<(), String> {
         let fragment = load(&self.ui_root, relative)?;
+        let layer = match self.layer {
+            Some(path) => Some(load(&self.ui_root, path)?),
+            None => None,
+        };
         let mut done = false;
         for block in self.document.blocks.iter_mut() {
             let Block::Widget(w) = block else { continue };
@@ -281,6 +340,9 @@ impl BotLab {
             };
             slot.children.truncate(self.slot_own);
             slot.children.extend(fragment.widgets().cloned());
+            if let Some(layer) = &layer {
+                slot.children.extend(layer.widgets().cloned());
+            }
             done = true;
             break;
         }
@@ -295,6 +357,7 @@ impl BotLab {
         let Some(tab) = tab(button) else {
             return Ok(false);
         };
+        self.layer = None;
         self.set_screen(tab.fragment)?;
         self.tab = tab.button;
         self.step = None;
@@ -347,7 +410,7 @@ impl BotLab {
     ) -> Result<Option<&'static Tab>, String> {
         // The innermost tab button under the point, and the innermost *step*
         // button, if either is there.
-        let (tab_button, step_button) = {
+        let (tab_button, step_button, structure) = {
             let placed = self.placements(screen, fonts);
             let Some(path) = input::hit(&placed, x, y) else {
                 return Ok(None);
@@ -355,6 +418,7 @@ impl BotLab {
             let mut placement = &placed[path[0]];
             let mut found_tab = tab(placement.widget.name()).map(|t| t.button);
             let mut found_step = step(placement.widget.name()).map(|s| s.button);
+            let mut found_structure = structure_step(placement.widget.name());
             for index in &path[1..] {
                 placement = &placement.children[*index];
                 if let Some(t) = tab(placement.widget.name()) {
@@ -363,9 +427,18 @@ impl BotLab {
                 if let Some(s) = step(placement.widget.name()) {
                     found_step = Some(s.button);
                 }
+                if let Some(s) = structure_step(placement.widget.name()) {
+                    found_structure = Some(s);
+                }
             }
-            (found_tab, found_step)
+            (found_tab, found_step, found_structure)
         };
+        if let Some(next) = structure {
+            // One of the layer's two step buttons: it swaps the content area's
+            // screen. The layer stays — it is what the click was on.
+            self.set_screen(next)?;
+            return Ok(None);
+        }
         if let Some(button) = step_button {
             // A step replaces the tab's screen; the tab stays selected.
             return self.start_step(button).map(|_| None);
@@ -387,6 +460,7 @@ impl BotLab {
             // A step's button is only on its own tab's screen.
             return Ok(false);
         }
+        self.layer = step.layer;
         self.set_screen(step.fragment)?;
         self.step = Some(step.button);
         Ok(true)
@@ -669,6 +743,89 @@ mod tests {
         lab.select("overview button").unwrap();
         assert!(!lab.start_step("armor button").unwrap());
         assert_eq!(lab.content_root().map(|w| w.name()), Some("overview split"));
+    }
+
+    /// The structure step's layer rides in `content slot` with the screen, and
+    /// the layer's own anchor puts it in the slot's bottom-right corner — which
+    /// is where the game's snap and step controls sit.
+    #[test]
+    fn the_step_layer_rides_the_content_slots_bottom_right() {
+        let Some(ui) = ui_root() else { return };
+        let mut lab = BotLab::open(&ui).unwrap();
+        lab.select("chassis button").unwrap();
+        assert!(lab.start_step("structure design button").unwrap());
+
+        // The screen is still the slot's first, and the layer follows it.
+        assert_eq!(lab.content_root().map(|w| w.name()), Some("chassis split"));
+        let placed = lab.placements(DESIGN_SCREEN, None);
+        let frame_of = |name: &str| {
+            placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == name)
+                .unwrap_or_else(|| panic!("no widget called {name}"))
+                .frame
+        };
+        let slot = frame_of("content slot");
+        let layer = frame_of("steps and snap group");
+        // `Alignment 36` = right + bottom, `Position 1 1 1 1` = both axes at
+        // 100%, `Size 0.46 1 70 0` = 46% wide and 70 pixels tall.
+        assert!(
+            (layer.x + layer.w - (slot.x + slot.w)).abs() < 0.5,
+            "{layer:?}"
+        );
+        assert!(
+            (layer.y + layer.h - (slot.y + slot.h)).abs() < 0.5,
+            "{layer:?}"
+        );
+        assert!((layer.w - slot.w * 0.46).abs() < 0.5, "{layer:?}");
+        assert_eq!(layer.h, 70.0, "{layer:?}");
+
+        // The armor step has none: its screen fills the slot on its own.
+        lab.select("chassis button").unwrap();
+        assert!(lab.start_step("armor button").unwrap());
+        let placed = lab.placements(DESIGN_SCREEN, None);
+        assert!(
+            !placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .any(|p| p.widget.name() == "steps and snap group"),
+            "the armor step carries no layer"
+        );
+    }
+
+    /// The layer's own two buttons are the two chassis structure screens: a click
+    /// on one swaps the content area's screen and leaves the layer where it is.
+    #[test]
+    fn the_layers_buttons_swap_the_two_structure_screens() {
+        let Some(ui) = ui_root() else { return };
+        let mut lab = BotLab::open(&ui).unwrap();
+        lab.select("chassis button").unwrap();
+        lab.start_step("structure design button").unwrap();
+
+        // Step 1's blueprint is labelled the baseplate; step 2's the topplate.
+        let blueprint = |lab: &BotLab| {
+            lab.content_root()
+                .and_then(|root| find(root, "label img"))
+                .and_then(|img| img.filename().map(str::to_string))
+                .unwrap()
+        };
+        assert_eq!(blueprint(&lab), "botlab\\baseplate_label.bmp");
+
+        let (x, y) = reachable_point(&lab, "step 2 button");
+        assert!(lab.click(x, y, DESIGN_SCREEN, None).unwrap().is_none());
+        assert_eq!(blueprint(&lab), "botlab\\topplate_label.bmp");
+        assert_eq!(lab.step, Some("structure design button"), "same step");
+        assert_eq!(lab.tab, "chassis button");
+        // And it is still there to click back.
+        assert!(lab
+            .placements(DESIGN_SCREEN, None)
+            .iter()
+            .flat_map(|p| p.walk())
+            .any(|p| p.widget.name() == "steps and snap group"));
+        let (x, y) = reachable_point(&lab, "step 1 button");
+        lab.click(x, y, DESIGN_SCREEN, None).unwrap();
+        assert_eq!(blueprint(&lab), "botlab\\baseplate_label.bmp");
     }
 
     /// A point inside `name` that a click actually *reaches* it at.

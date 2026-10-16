@@ -82,7 +82,17 @@ fn hit_at(p: &Placement<'_>, x: f32, y: f32, path: &mut Vec<usize>) -> Option<Ve
         path.pop();
     }
     let inside = p.frame.contains_point(x, y) && p.clip.is_none_or(|c| c.contains_point(x, y));
-    (p.widget.visible() && inside).then(|| path.clone())
+    // A hit does not stop at the base `Widget`. It is the *abstract* class — the
+    // one kind the writer leaves headerless, whose only fields are its note and
+    // `PassMouse` — so a record of it is a container, with no class behaviour to
+    // run. The data draws them over controls on purpose: `ch_stepbuttons.gib`'s
+    // `step 1 button`, `step 2 button` and `snap checkbox` each have a nameless
+    // `Widget` a pixel larger drawn over them, holding the `1` and the `2`, and
+    // `chassis.gib` draws its two notes over its two buttons. Refusing to stop at
+    // one lets the search fall through to what is behind it, which is what makes
+    // those controls clickable at all.
+    let control = !matches!(p.widget.kind, WidgetKind::Widget);
+    (p.widget.visible() && inside && control).then(|| path.clone())
 }
 
 /// The widget a [`hit`] path names, whose first element indexes the `roots`

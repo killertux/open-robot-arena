@@ -295,6 +295,42 @@ both names are the data's:
   component-properties panel that the game fills at run time. That is the
   *interaction* layer, and it is the C++'s, not the data's.
 
+### The chassis steps: a layer, and the class that a hit does not stop at
+
+`botlab/ch_stepbuttons.gib` is the snap checkbox, the finished button and the two
+step buttons, and it is a **layer over the chassis structure screens** rather than
+part of them. Its own fields say where it goes: its root `steps and snap group` is
+`Alignment 36` — *right + bottom* — with `Position 1 1 1 1` (both axes at 100%) and
+`Size 0.46 1 70 0`, so it is pinned to the **bottom-right corner of whoever holds
+it**. Neither structure screen has a slot for it (`chassis_structure1.gib` and
+`chassis_structure2.gib` are `chassis split` — `Slot0` the blueprint, `Slot1` the
+tools — and name nothing a 70-pixel group could go in), and both screens' own root
+records say `Notes load this into content slot`. So the layer is the screens'
+**sibling in that slot**, added after them, and the anchor then puts it in the
+content area's corner. The C++ agrees in kind: `FUN_00437770` loads
+`botlab\ch_stepbuttons.gib` (`0x6f0d7c`) the way it loads every screen, caching it
+in a member and inserting a loaded screen into a slot it looks up by name.
+
+The layer is the only place the two steps live: `step 1 button` is noted *"step 1
+of chassis outline"*, `step 2 button` *"step 2 (extrude, top outline)"*, their
+labels are literally `1` and `2`, and the binary loads
+`botlab\chassis_structure1.gib` and `botlab\chassis_structure2.gib` from the same
+table with the labels `Chassis 1` and `Chassis 2`. A click on one swaps the
+content area's screen and nothing else.
+
+### A hit does not stop at the base `Widget`
+
+`ch_stepbuttons.gib`'s `step 1 button`, `step 2 button` and `snap checkbox` each
+have a **nameless `Widget` one pixel larger drawn over them** — a 26×24 record over
+a 24×22 `CheckBox`, holding the `1` and the `2`, at the same `ChildOrder` and *after*
+it in the file, so by the draw order it is on top. `chassis.gib` does the same with
+its two notes over its two buttons. A design like that only works if the overlay
+does not take the click, and the class explains why it does not: the headerless
+record is the **base `Widget`**, the writer's abstract class, whose only fields are
+its note and `PassMouse` — it has no class behaviour to run, so it cannot be a
+control, and a hit has to fall through it to what is behind. `ra2ui::input::hit`
+does that, and the three overlays above are what requires it.
+
 ### The UI project document: the shell's own index of itself, and a check on it
 
 `local/game/UI/Project Header.html` ships with the game and is the UI editor's

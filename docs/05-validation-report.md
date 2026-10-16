@@ -509,6 +509,27 @@ Known, documented, not yet fixed:
     `chassis.gib`'s `structure note` label is drawn over its own buttons: a click
     on one's middle lands on the label.
 
+    The chassis structure screens now carry the layer that the game pins over
+    them. `ch_stepbuttons.gib` is the snap checkbox, the finished button and the
+    two step buttons, and its own fields place it: `Alignment 36` (right + bottom)
+    with `Position 1 1 1 1` and `Size 0.46 1 70 0`. No structure screen has a slot
+    for it and both say *"load this into content slot"*, so it is their *sibling*
+    in that slot — and the test measures the consequence: the placed layer's frame
+    is the content slot's bottom-right corner within half a pixel, 46% of its width
+    and 70 tall, and the armor step (which has no layer) has none. Its own two
+    buttons swap the two structure screens and leave the layer where it is, which
+    a click test drives end to end.
+
+    Getting that click to land found a second rule. `step 1 button`, `step 2
+    button` and `snap checkbox` each have a **nameless `Widget` drawn one pixel
+    larger over them** — a 26×24 record over a 24×22 `CheckBox` — at the same
+    `ChildOrder` and *after* it in the file, so it is on top in the draw order; the
+    click was landing on the label. The record is a **base `Widget`**, the
+    abstract class the writer leaves headerless, so it has no behaviour to run and
+    cannot be a control: a hit now falls through it to what is behind, which is
+    what makes those three controls clickable at all. `chassis.gib` draws its two
+    notes over its two buttons the same way.
+
     The shell is now checked against a document it ships that was not being
     read: `UI/Project Header.html`, the UI editor's index of the whole project —
     115 files, each with the name and class of its root widget, and the 489
