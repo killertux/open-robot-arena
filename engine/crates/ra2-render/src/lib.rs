@@ -980,26 +980,7 @@ fn collect_arena(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error
 
 /// Resolve a script-relative path under `root`, case-insensitively.
 pub fn resolve_ci(root: &Path, rel: &str) -> Option<PathBuf> {
-    let rel = rel.replace('\\', "/");
-    let mut cur = root.to_path_buf();
-    for part in rel.split('/').filter(|p| !p.is_empty() && *p != ".") {
-        if part == ".." {
-            cur.pop();
-            continue;
-        }
-        let direct = cur.join(part);
-        if direct.exists() {
-            cur = direct;
-            continue;
-        }
-        let want = part.to_ascii_lowercase();
-        let found = std::fs::read_dir(&cur)
-            .ok()?
-            .flatten()
-            .find(|e| e.file_name().to_string_lossy().to_ascii_lowercase() == want)?;
-        cur = found.path();
-    }
-    cur.exists().then_some(cur)
+    ra2fmt::find_ci(root, rel)
 }
 
 /// Objects whose name contains any `RA2_HIDE` substring are skipped.

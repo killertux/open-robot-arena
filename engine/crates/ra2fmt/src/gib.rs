@@ -365,6 +365,20 @@ impl Length {
         }
     }
 
+    /// Read the single-axis form `amount is_fraction`, or nothing if the field
+    /// does not hold exactly two numbers.
+    ///
+    /// A `SplitFrame`'s `MasterSize` is written this way — `0.14 1`, `90 0` — in
+    /// all twenty-six of the corpus's split frames, and it is one axis, not two:
+    /// the other two numbers an `Axes` needs are not there.
+    pub fn parse(field: &Field) -> Option<Length> {
+        let v = field.numbers();
+        if v.len() != 2 {
+            return None;
+        }
+        Some(Length::new(v[0], v[1]))
+    }
+
     /// The amount in the parent's units (pixels, given the parent's extent).
     pub fn resolve(&self, parent: f32) -> f32 {
         if self.fraction {

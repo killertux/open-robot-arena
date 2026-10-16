@@ -23,7 +23,7 @@
 //! the resolver worked out from the `ClipMode`s above it — and `0 0 0 0` when
 //! nothing clips it.
 
-use ra2ui::{draw_order, resolve_with, Fonts, Frame, Placement, DESIGN_SCREEN};
+use ra2ui::{draw_order, inline_proxies_in, resolve_with, Fonts, Frame, Placement, DESIGN_SCREEN};
 
 struct Dump {
     screen: Frame,
@@ -82,7 +82,30 @@ fn main() {
         .map(|cfz| Fonts::load(std::path::Path::new(cfz)).expect("load the faces"));
 
     let text = std::fs::read_to_string(&path).expect("read the layout");
-    let gib = ra2fmt::gib::parse(&text).expect("parse the layout");
+    let mut gib = ra2fmt::gib::parse(&text).expect("parse the layout");
+    // `--proxies` composes the screen the way the game does: a `Proxy` names
+    // another `.gib` and that fragment is drawn in the proxy's rectangle.
+    if args.iter().any(|a| a == "--proxies") {
+        let game = std::path::Path::new(&path)
+            .canonicalize()
+            .ok()
+            .and_then(|p| {
+                let mut dir = p.parent()?.to_path_buf();
+                loop {
+                    if dir.file_name().is_some_and(|n| n == "UI") {
+                        return dir.parent().map(|d| d.to_path_buf());
+                    }
+                    dir = dir.parent()?.to_path_buf();
+                }
+            })
+            .expect("the game root above UI");
+        let loaded = inline_proxies_in(&mut gib, &game.join("UI"));
+        eprintln!(
+            "loaded {} proxy target(s): {}",
+            loaded.len(),
+            loaded.join(", ")
+        );
+    }
     let placed = resolve_with(&gib, [w, h], fonts.as_ref());
 
     if rects {

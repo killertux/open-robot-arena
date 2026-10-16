@@ -56,6 +56,10 @@ pub struct UiTexture {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiQuad {
     pub rect: Frame,
+    /// The four corners — top-left, top-right, bottom-right, bottom-left — when
+    /// the quad is not axis-aligned. A `Lines` segment is the one thing that
+    /// needs them; everything else leaves this `None` and draws `rect`.
+    pub corners: Option<[[f32; 2]; 4]>,
     /// The source rect in its texture, normalised.
     pub uv: [f32; 4],
     pub color: [f32; 4],
@@ -139,6 +143,14 @@ impl UiAssets {
                 self.text_quads(p, clip, &mut quads);
                 continue;
             }
+            if p.widget.kind == ra2fmt::gib::WidgetKind::Glyph {
+                self.glyph_quads(p, clip, &mut quads);
+                continue;
+            }
+            if p.widget.kind == ra2fmt::gib::WidgetKind::Lines {
+                lines_quads(p, parent, clip, &mut quads);
+                continue;
+            }
             if p.widget.kind == ra2fmt::gib::WidgetKind::Rectangle {
                 if let Some(fill) = rectangle_quad(p, clip) {
                     quads.push(fill);
@@ -184,6 +196,7 @@ impl UiAssets {
             );
             return Some(UiQuad {
                 rect: p.frame,
+                corners: None,
                 uv: [0.0, 0.0, p.frame.w / tw, p.frame.h / th],
                 color: p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]),
                 texture,
@@ -219,6 +232,7 @@ impl UiAssets {
         };
         Some(UiQuad {
             rect,
+            corners: None,
             uv: [0.0, 0.0, 1.0, 1.0],
             color,
             texture,
@@ -249,6 +263,56 @@ impl UiAssets {
             }
             out.push(UiQuad {
                 rect: glyph.rect,
+                corners: None,
+                uv: [
+                    glyph.cell[0] as f32 / pw,
+                    glyph.cell[1] as f32 / ph,
+                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
+                ],
+                color,
+                texture,
+                alpha: true,
+                clip,
+            });
+        }
+    }
+
+    /// The quads a `Glyph` draws: a paragraph in the box its `_Margin` states.
+    ///
+    /// A `Glyph` is the shell's paragraph widget — the bot lab's help text, the
+    /// credits, an arena's description — and the binary's own writer is what
+    /// says so: its `Glyph` serialiser emits `Compositor`, the box's own
+    /// `_Size 1` and then one `_Margin x w h` per entry, which the shipped files
+    /// write on one line as `Margins _Size 1`. The widget's layout box is
+    /// `Position 0 0 0 0` `Size 0 0 0 0` in all forty — the paragraph is placed
+    /// by its margin against whatever holds it — so the box is `_Margin` at the
+    /// widget's own frame origin.
+    fn glyph_quads(&mut self, p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
+        let (Some(text), Some(face)) = (p.widget.text(), p.widget.font()) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let Some(box_) = glyph_box(p) else {
+            return;
+        };
+        let Some(font) = self.faces.get(face).cloned() else {
+            return;
+        };
+        let Some(texture) = self.glyph_page(face, &font) else {
+            return;
+        };
+        let color = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
+        let (pw, ph) = (font.page_width as f32, font.page_height as f32);
+        for glyph in ra2ui::paragraph_run(&font, box_, text, box_.w) {
+            if glyph.cell[2] <= 0 || glyph.cell[3] <= 0 {
+                continue;
+            }
+            out.push(UiQuad {
+                rect: glyph.rect,
+                corners: None,
                 uv: [
                     glyph.cell[0] as f32 / pw,
                     glyph.cell[1] as f32 / ph,
@@ -322,6 +386,114 @@ impl UiAssets {
     }
 }
 
+/// A `Glyph`'s paragraph box: the `_Margin` triple `x w h`, hung from the
+/// widget's own frame origin.
+fn glyph_box(p: &Placement<'_>) -> Option<Frame> {
+    let m = p.widget.field("_Margin")?.numbers();
+    if m.len() < 3 {
+        return None;
+    }
+    Some(Frame::new(p.frame.x + m[0], p.frame.y, m[1], m[2]))
+}
+
+/// The quads a `Lines` widget draws.
+///
+/// `Points n` followed by `Point x xf y yf` twice per segment — the pairs are
+/// the segments, which is what the corpus settles: `controls_reminder.gib`
+/// repeats `(62,0)` and `(62,70)` so that the four pairs are the four sides of
+/// a rectangle, and `selectbot_computer.gib`'s visible one insets the box by
+/// two pixels at a `Width` of four, which only reads as a rectangle when the
+/// list is cut into pairs. A `xf`/`yf` of 1 makes the amount a fraction of the
+/// frame the polyline sits in — the widget's own `Size` is `0 0 0 0` on all 77
+/// of them, and the four that state a fraction (`wiring.gib`'s `1 1 0 1`) are
+/// the borders of the area around them.
+fn lines_quads(
+    p: &Placement<'_>,
+    parent: Option<&Placement<'_>>,
+    clip: Option<Frame>,
+    out: &mut Vec<UiQuad>,
+) {
+    let frame = p.frame;
+    let outer = parent.map(|q| q.frame).unwrap_or(frame);
+    let points: Vec<[f32; 2]> = p
+        .widget
+        .fields_named("Point")
+        .filter_map(|f| {
+            let n = f.numbers();
+            if n.len() < 4 {
+                return None;
+            }
+            let x = if n[1] != 0.0 {
+                frame.x + n[0] * outer.w
+            } else {
+                frame.x + n[0]
+            };
+            let y = if n[3] != 0.0 {
+                frame.y + n[2] * outer.h
+            } else {
+                frame.y + n[2]
+            };
+            Some([x, y])
+        })
+        .collect();
+    if points.len() < 2 {
+        return;
+    }
+    // `Width 0` is the thinnest line the widget has, which is one pixel.
+    let width = p
+        .widget
+        .field("Width")
+        .and_then(|f| f.number())
+        .unwrap_or(0.0)
+        .max(1.0);
+    let color = p
+        .widget
+        .field("Color")
+        .and_then(|f| f.four())
+        .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+    if color[3] <= 0.0 {
+        return;
+    }
+    for [a, b] in points.as_chunks::<2>().0 {
+        let (a, b) = (*a, *b);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= 0.0 {
+            continue;
+        }
+        let (nx, ny) = (-dy / len * width / 2.0, dx / len * width / 2.0);
+        let corners = [
+            [a[0] + nx, a[1] + ny],
+            [b[0] + nx, b[1] + ny],
+            [b[0] - nx, b[1] - ny],
+            [a[0] - nx, a[1] - ny],
+        ];
+        let rect = Frame::new(
+            corners.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min),
+            corners.iter().map(|c| c[1]).fold(f32::INFINITY, f32::min),
+            corners
+                .iter()
+                .map(|c| c[0])
+                .fold(f32::NEG_INFINITY, f32::max)
+                - corners.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min),
+            corners
+                .iter()
+                .map(|c| c[1])
+                .fold(f32::NEG_INFINITY, f32::max)
+                - corners.iter().map(|c| c[1]).fold(f32::INFINITY, f32::min),
+        );
+        out.push(UiQuad {
+            rect,
+            corners: Some(corners),
+            uv: [0.0, 0.0, 1.0, 1.0],
+            color,
+            texture: 0, // white
+            alpha: true,
+            clip,
+        });
+    }
+}
+
 /// A `Rectangle`'s fill, when it is filled and not transparent.
 fn rectangle_quad(p: &Placement<'_>, clip: Option<Frame>) -> Option<UiQuad> {
     let filled = p
@@ -342,6 +514,7 @@ fn rectangle_quad(p: &Placement<'_>, clip: Option<Frame>) -> Option<UiQuad> {
     }
     Some(UiQuad {
         rect: p.frame,
+        corners: None,
         uv: [0.0, 0.0, 1.0, 1.0],
         color,
         texture: 0, // white
@@ -694,8 +867,6 @@ fn bind_texture(
 /// The four corners of a quad, in clip space, with its source rect.
 fn quad_vertices(quad: &UiQuad, width: u32, height: u32) -> [UiVertex; 6] {
     let to_clip = |x: f32, y: f32| [x / width as f32 * 2.0 - 1.0, 1.0 - y / height as f32 * 2.0];
-    let (x0, y0) = (quad.rect.x, quad.rect.y);
-    let (x1, y1) = (quad.rect.right(), quad.rect.bottom());
     let [u0, v0, u1, v1] = quad.uv;
     let use_alpha = f32::from(u8::from(quad.alpha));
     let vertex = |x: f32, y: f32, u: f32, v: f32| UiVertex {
@@ -704,13 +875,19 @@ fn quad_vertices(quad: &UiQuad, width: u32, height: u32) -> [UiVertex; 6] {
         color: quad.color,
         use_alpha,
     };
+    let [tl, tr, br, bl] = quad.corners.unwrap_or([
+        [quad.rect.x, quad.rect.y],
+        [quad.rect.right(), quad.rect.y],
+        [quad.rect.right(), quad.rect.bottom()],
+        [quad.rect.x, quad.rect.bottom()],
+    ]);
     [
-        vertex(x0, y0, u0, v0),
-        vertex(x1, y0, u1, v0),
-        vertex(x1, y1, u1, v1),
-        vertex(x0, y0, u0, v0),
-        vertex(x1, y1, u1, v1),
-        vertex(x0, y1, u0, v1),
+        vertex(tl[0], tl[1], u0, v0),
+        vertex(tr[0], tr[1], u1, v0),
+        vertex(br[0], br[1], u1, v1),
+        vertex(tl[0], tl[1], u0, v0),
+        vertex(br[0], br[1], u1, v1),
+        vertex(bl[0], bl[1], u0, v1),
     ]
 }
 
@@ -811,6 +988,48 @@ mod tests {
 
     /// A screen whose art lives in the archive still resolves it, and a repeated
     /// pattern is named rather than stretched across the screen.
+    /// A `Glyph` draws a wrapped paragraph, and a `Lines` widget draws its
+    /// point pairs as segments.
+    ///
+    /// Neither is visible in the picture on the screens they ship in — the
+    /// corpus's own tree leaves their background tiles as later roots, so the
+    /// tile paints over them (see `ra2ui`'s note on `NumChildren`) — so the
+    /// check is on the draw list: `credits.gib`'s two glyphs put glyph quads of
+    /// the `fg_mcn14` page into the scene, and `selectbot_computer.gib`'s one
+    /// visible `Lines` puts four segments, each carrying its own corners.
+    #[test]
+    fn a_glyph_draws_a_paragraph_and_a_lines_draws_segments() {
+        let Some(game) = game_dir() else { return };
+
+        let scene = scene_of(&game, "common/credits.gib");
+        let face = scene
+            .textures
+            .iter()
+            .position(|t| t.label == "#fg_mcn14")
+            .expect("the paragraph face's page");
+        let from_paragraph = scene
+            .quads
+            .iter()
+            .filter(|q| q.texture == face && q.rect.h > 0.0)
+            .count();
+        assert!(
+            from_paragraph > 200,
+            "two glyphs' worth of lines: {from_paragraph}"
+        );
+
+        let scene = scene_of(&game, "exhibition/selectbot_computer.gib");
+        let segments: Vec<_> = scene.quads.iter().filter(|q| q.corners.is_some()).collect();
+        assert_eq!(
+            segments.len(),
+            4,
+            "one visible Lines, eight points, four segments"
+        );
+        for s in &segments {
+            assert!(s.uv == [0.0, 0.0, 1.0, 1.0], "a segment is a white fill");
+            assert_eq!(s.color, [0.4, 0.3, 0.8, 1.0], "the file's own colour");
+        }
+    }
+
     #[test]
     fn a_tile_is_drawn_at_its_own_size() {
         let Some(game) = game_dir() else { return };

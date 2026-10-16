@@ -43,7 +43,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let game = game_root(&screen_path)
         .ok_or("could not find the game root (no UI directory above the screen)")?;
     let text = std::fs::read_to_string(&screen_path)?;
-    let gib = ra2fmt::gib::parse(&text)?;
+    let mut gib = ra2fmt::gib::parse(&text)?;
+    // A `Proxy` names another `.gib` to draw in its own rectangle — nine
+    // shipped screens name `common\bottomnav.gib`, the bottom navigation bar —
+    // so the screen is composed before it is placed.
+    let fragments = ra2ui::inline_proxies_in(&mut gib, &game.join("UI"));
 
     let mut assets = UiAssets::open(&game)?;
     let placed = ra2ui::resolve_with(&gib, [width, height], Some(assets.faces()))
@@ -87,6 +91,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|s| s.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
+        );
+    }
+    if !fragments.is_empty() {
+        println!(
+            "  {} proxies loaded: {}",
+            fragments.len(),
+            fragments.join(", ")
         );
     }
     Ok(())

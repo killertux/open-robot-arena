@@ -170,7 +170,10 @@ The `fg_*.giff` fonts are parsed too (`ra2fmt::giff`; `ra2 font <RA2.cfz>
 <name>` prints one's metrics and dumps its page), and `tools/ui_compose.py` draws
 a screen's labels with the game's own faces and fore-colours — the main menu's
 `MULTIPLAYER` reads as `MULTIPLAYER` — and a resolver given those faces sizes a
-zero-`Size` label from its own text. The shell's own Python runs too: `plus` and
+zero-`Size` label from its own text. A screen is composed of fragments the data names: a `Proxy` loads another
+`.gib` into its own rectangle (nine shipped screens load the bottom navigation
+bar), a `Glyph` is a wrapped paragraph in its `_Margin` box, and a `Lines` is a
+polyline in point pairs. The shell's own Python runs too: `plus` and
 `giScript` are the engine's face to the scripts, the shipped `Scripts/Main.py`
 boots the interpreter, and a `Gooey` window a script builds is a widget tree the
 same renderer draws. Screens *draw*: `ra2-render`'s 2D path

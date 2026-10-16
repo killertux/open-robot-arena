@@ -27,6 +27,36 @@ pub use gib::{Axes, Block, Field, Gib, Length, Widget, WidgetKind};
 pub use giff::Font;
 pub use gmi::{GmiScene, Material, Mesh, RigidBody, SceneObject, SimulationObject, Texture};
 
+/// Resolve a path the game's own data writes under a root, case-insensitively.
+///
+/// The data writes Windows paths — `\common\bottomnav.gib`, `.\botlab\
+/// blueprint.bmp`, `UI\help\helpframe.gib` — and the shipped files are named
+/// lower case. Each component is tried as written and then matched against the
+/// directory's entries ignoring case, so a `Proxy`'s `Filename` finds its file
+/// on a case-sensitive filesystem.
+pub fn find_ci(root: &std::path::Path, rel: &str) -> Option<std::path::PathBuf> {
+    let rel = rel.replace('\\', "/");
+    let mut cur = root.to_path_buf();
+    for part in rel.split('/').filter(|p| !p.is_empty() && *p != ".") {
+        if part == ".." {
+            cur.pop();
+            continue;
+        }
+        let direct = cur.join(part);
+        if direct.exists() {
+            cur = direct;
+            continue;
+        }
+        let want = part.to_ascii_lowercase();
+        let found = std::fs::read_dir(&cur)
+            .ok()?
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().to_ascii_lowercase() == want)?;
+        cur = found.path();
+    }
+    cur.exists().then_some(cur)
+}
+
 /// Error type shared by all format parsers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {

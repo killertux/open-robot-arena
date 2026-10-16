@@ -156,6 +156,54 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
 - Data quirks worth knowing: `1.#INF` (and `1.#IND`) appear as *numbers* in three
   bot-lab screens — the Microsoft runtime's spelling, written into a texture
   rect; and one `Position` flag slot holds `1242948` in `hq_league.gib`.
+- **`Proxy` is the data's own slot.** It carries `Filename`, a `.gib` path, and
+  the fragment is drawn inside the proxy's own rectangle — so nine shipped
+  screens compose without any C++: `botlab/botlabwin.gib`, `teamhq/teamhq.gib`,
+  the two `select_team`/`repairs`/`event_bracket` screens and four of the
+  multiplayer ones all name `common\bottomnav.gib`, the bottom navigation bar,
+  and nothing nests a proxy inside a proxy. The binary's `[Proxy]` entry lists
+  exactly one field, `Filename ` (its writer sits with the other per-class
+  tables at `~0x709200`).
+- **`Glyph` is the shell's paragraph.** It carries `_Font`, `_Text`,
+  `_ForeColor` and — on its `Decorator` base — `_Margin`, plus the `Scrollable`
+  set `Params`/`Margins`/`ParamLimit`/`Compositor` and the one unlabelled value
+  a glyph has. `_Margin` is **three numbers, `x w h`**, the box the paragraph is
+  laid out in; the widget's own `Position`/`Size` are `0 0 0 0` in all forty.
+  The binary's glyph writer (`FUN_00608c20`, called from the per-widget writer
+  at `0x616f00`) emits `_Size <flag>` and then one `_Margin a b c` **per entry in
+  a list**, and the label it writes first has no newline after it — which is why
+  the file line reads `Margins _Size 1`, two fields glued together by the
+  writer's own `fprintf`-style call. The `_Text` of a glyph writes its line
+  breaks as the **two characters `\n`**, not as a newline.
+- **`Lines` is a polyline in point *pairs*.** `Points n` then `Point x xf y yf`
+  per point: the eight points of every `Lines` in the corpus are four segments —
+  `controls_reminder.gib` repeats `(62,0)` and `(62,70)` so that the pairs are
+  the four sides of a rectangle, and `selectbot_computer.gib`'s visible one
+  insets its box by two pixels at a `Width` of four, which only reads as a
+  rectangle when the list is cut into pairs. A `xf`/`yf` of 1 makes the amount a
+  fraction of the frame the polyline sits in — the widget's own `Size` is
+  `0 0 0 0` on all 77 of them. Ten are `Visible true`; the other 67 are the
+  editor's own guides.
+- **`MasterSize` is one axis, `amount is_fraction`.** All twenty-six values in
+  the corpus are two tokens — `0.14 1`, `0.5 1`, `90 0`, `24 0` — and the reader
+  that took them for a two-axis `Position`-style field found no four-number
+  value and fell back to *half the frame* for every split whose master is not
+  the first slot. The master keeps its own end of the axis and the other child
+  takes the rest: `botlabwin.gib`'s lower split (`Master 1`,
+  `MasterSize 0.12 1`) is the worked case, and `repairs.gib`'s `main split`
+  (`Master 1`, `MasterSize 48 0`) puts its children at y 48 and y 552, the
+  second exactly 48 tall.
+- **Open: `NumChildren` does not always nest a file to one root.** A widget's
+  count is written by the editor and read here as its child count, so a file
+  should come back as a single `Window`. Twenty-eight of the 116 do; the other
+  88 leave blocks a level up, and `multiplayer/prematch.gib` ends with
+  seventeen roots. It has a visible cost: `credits.gib`'s screen-background
+  `metaldots_pattern` tile, written *after* the dialog, becomes the last root and
+  paints over everything the dialog draws — as does `selectbot_computer.gib`'s.
+  The counts are on disk and the writer wrote them from a real tree, so the
+  game's reader must nest by something else (the writer's own code is the place
+  to look). Nothing here depends on the nesting being right: placement, clips,
+  the selection bars and the proxies are all read from wherever a block lands.
 - Fonts are `fg_*.giff` inside `RA2.cfz` (nine of them, referenced by `_Font`),
   not loose files.
 - **The binary carries the same table.** The reader's field names sit in one
@@ -200,8 +248,11 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   placed against the screen at all.
 - **`SplitFrame`** hands its two children panes: `Horizontal true` puts slot 0 on
   the left and slot 1 on the right, `false` puts slot 0 on top; `Master` names
-  the slot that `MasterSize` sizes (a fraction of the frame along the split
-  axis) and the other takes the remainder. The screens' own names are the check —
+  the slot that `MasterSize` sizes — **one axis, `amount is_fraction`**, not a
+  `Position`-style pair — and the other takes the remainder. The master keeps
+  its own end: with `Master 0` its pane is at the start and the other follows
+  it, and with `Master 1` the pane is where the master's own child order puts
+  it, the other child taking the rest. The screens' own names are the check —
   `"LR split"` is horizontal with `"left slot"` first, `"Left TB split"` is
   vertical with `"UL slot"` first, and `botlabwin.gib`'s vertical split has a
   67-pixel-tall `"Slot0"` bar on top.
@@ -671,3 +722,8 @@ Engine: **Havok Hardcore 1.7.1**, statically linked (build path `hk171`).
    Havok Hardcore 1.7.1; every parameter is readable from the arena `.gmf` and
    mirrored by the engine. See `docs/05-validation-report.md`.
 6. Copy protection: base 1.20 build appears unprotected (no SafeDisc/SecuROM import).
+7. **How the game's `.gib` reader nests a file.** The writer's `NumChildren` is
+   on disk, but read that way only 28 of the 116 screens nest to one root, and
+   the leftover blocks land on top of the dialog they belong behind
+   (`credits.gib`'s background tile). The reader — not the writer — is where the
+   rule is; `FUN_005e7ca0` is the writer.

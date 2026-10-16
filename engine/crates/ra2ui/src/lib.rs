@@ -475,6 +475,68 @@ pub fn text_run(font: &ra2fmt::Font, frame: Frame, text: &str) -> Vec<PlacedGlyp
     out
 }
 
+/// The lines a `Glyph`'s text wraps to inside `width`.
+///
+/// A `Glyph` is the shell's *paragraph*: `_Text` holds a body of prose, with
+/// `\n` for the breaks the author typed, and it wraps at spaces to the width
+/// its `_Margin` gives it. A word longer than the line is left long rather than
+/// broken — the corpus has none, and splitting one is a hyphenation rule the
+/// data does not state.
+pub fn wrap_lines(font: &ra2fmt::Font, text: &str, width: f32) -> Vec<String> {
+    let mut out = Vec::new();
+    for hard in text.split('\n') {
+        if width <= 0.0 {
+            out.push(hard.to_string());
+            continue;
+        }
+        let space = font.advance(' ') as f32;
+        let mut line = String::new();
+        let mut pen = 0.0f32;
+        for word in hard.split(' ') {
+            let w = font.extent(word).0 as f32;
+            if line.is_empty() {
+                line.push_str(word);
+                pen = w;
+            } else if pen + space + w <= width {
+                line.push(' ');
+                line.push_str(word);
+                pen += space + w;
+            } else {
+                out.push(std::mem::take(&mut line));
+                line.push_str(word);
+                pen = w;
+            }
+        }
+        out.push(line);
+    }
+    out
+}
+
+/// The glyphs a paragraph draws: each wrapped line down the face's own line
+/// height, the first baseline one `ascent` below the box's top.
+pub fn paragraph_run(
+    font: &ra2fmt::Font,
+    frame: Frame,
+    text: &str,
+    width: f32,
+) -> Vec<PlacedGlyph> {
+    let line_height = font.line_height() as f32;
+    let mut out = Vec::new();
+    for (i, line) in wrap_lines(font, text, width).into_iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let line_frame = Frame::new(
+            frame.x,
+            frame.y + i as f32 * line_height,
+            width,
+            line_height,
+        );
+        out.extend(text_run(font, line_frame, &line));
+    }
+    out
+}
+
 /// A widget with its resolved rectangle and its placed children.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Placement<'a> {
@@ -647,6 +709,90 @@ pub fn art_for<'a>(
         && matches!(parent.id(), 100 | 101)
         && widget.kind == WidgetKind::Image;
     bar.then_some("Point Selection.tga")
+}
+
+/// The `.gib` a `Proxy` names, when it names one.
+pub fn proxy_path(widget: &Widget) -> Option<&str> {
+    if widget.kind != WidgetKind::Proxy {
+        return None;
+    }
+    widget
+        .field("Filename")
+        .map(|f| f.text())
+        .filter(|p| !p.is_empty())
+}
+
+/// How deep a chain of proxies may go before it is left as it is. None of the
+/// shipped screens nests one at all — nine name `common\bottomnav.gib` and that
+/// file holds no proxy of its own — so this only bounds a malformed tree.
+const MAX_PROXY_DEPTH: u8 = 4;
+
+/// Load the `.gib` a `Proxy` names, as the widgets to draw inside it.
+fn load_fragment(ui_root: &Path, rel: &str) -> Option<Vec<Widget>> {
+    let path = ra2fmt::find_ci(ui_root, rel)?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let gib = ra2fmt::gib::parse(&text).ok()?;
+    Some(
+        gib.blocks
+            .into_iter()
+            .filter_map(|b| match b {
+                Block::Widget(w) => Some(w),
+                // A fragment that is a lone attachment is chrome with no widget
+                // to hang it on; there is nowhere to put it inside a proxy.
+                Block::Attachment(_) => None,
+            })
+            .collect(),
+    )
+}
+
+fn inline_one(widget: &mut Widget, ui_root: &Path, depth: u8, loaded: &mut Vec<String>) {
+    if depth > 0 {
+        if let Some(rel) = proxy_path(widget).map(str::to_string) {
+            if let Some(fragment) = load_fragment(ui_root, &rel) {
+                loaded.push(rel);
+                widget.children.extend(fragment);
+            }
+        }
+    }
+    for child in widget.children.iter_mut() {
+        inline_one(child, ui_root, depth.saturating_sub(1), loaded);
+    }
+}
+
+/// Replace every `Proxy` in a screen with the `.gib` it names.
+///
+/// A `Proxy` is the data's own slot: it carries a `Filename`, a `.gib` path
+/// under `UI`, and the fragment is drawn inside the proxy's own rectangle —
+/// the proxy becomes the fragment's parent, so its `Position`/`Size` are the
+/// fragment's frame. Nine shipped screens name `common\bottomnav.gib`, which is
+/// the bottom navigation bar, and `botlabwin.gib`, `teamhq.gib` and the
+/// multiplayer screens are among them.
+///
+/// Returns the paths that were loaded, in order, so a caller can report what it
+/// pulled in and what it could not find.
+pub fn inline_proxies_in(gib: &mut Gib, ui_root: &Path) -> Vec<String> {
+    let mut loaded = Vec::new();
+    for block in gib.blocks.iter_mut() {
+        if let Block::Widget(w) = block {
+            inline_one(w, ui_root, MAX_PROXY_DEPTH, &mut loaded);
+        }
+    }
+    loaded
+}
+
+/// Every `.gib` a screen's `Proxy` widgets name, in file order.
+pub fn proxies(widget: &Widget) -> Vec<String> {
+    let mut out = Vec::new();
+    fn visit(w: &Widget, out: &mut Vec<String>) {
+        if let Some(path) = proxy_path(w) {
+            out.push(path.to_string());
+        }
+        for c in &w.children {
+            visit(c, out);
+        }
+    }
+    visit(widget, &mut out);
+    out
 }
 
 /// The widgets to draw, back to front, each with the widget that holds it.
@@ -933,8 +1079,8 @@ fn split_children<'a>(
         .unwrap_or(0.0) as i32;
     let master_size = widget
         .field("MasterSize")
-        .and_then(ra2fmt::gib::Axes::parse)
-        .map(|a| axis(a.first, if horizontal { frame.w } else { frame.h }))
+        .and_then(Length::parse)
+        .map(|l| l.resolve(if horizontal { frame.w } else { frame.h }))
         .unwrap_or(if horizontal { frame.w } else { frame.h } / 2.0);
     let master_size = master_size.clamp(0.0, if horizontal { frame.w } else { frame.h });
 
@@ -1397,10 +1543,217 @@ mod tests {
             }
         }
         assert_eq!(placed, 3590);
-        assert_eq!(outside, 101);
-        assert_eq!(perfect, 71);
+        // `MasterSize` used to be read as two axes, which no shipped split
+        // frame writes — all twenty-six state one axis, `0.14 1` or `90 0` — so
+        // every split whose master is not the first slot fell back to half the
+        // frame. Reading it as one axis moved 23 widgets back onto the screen
+        // and two whole files with them.
+        assert_eq!(outside, 78);
+        assert_eq!(perfect, 73);
         // The worst offender is a fragment, not a screen.
         assert!(worst.1.ends_with("botlab/control_cell.gib"), "{}", worst.1);
+    }
+
+    /// A `Proxy` is the data's own slot: it names a `.gib` and that fragment is
+    /// drawn inside the proxy's rectangle. Nine shipped screens name
+    /// `common\bottomnav.gib`, and inlining puts its root — `common buts`, the
+    /// bottom navigation bar — at the frame the proxy gives it.
+    #[test]
+    fn a_proxy_loads_the_screen_it_names() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let mut files = Vec::new();
+        collect_gib(&ui, &mut files);
+        let mut named = Vec::new();
+        let mut missing = Vec::new();
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let gib = ra2fmt::gib::parse(&text).unwrap();
+            for block in &gib.blocks {
+                let Block::Widget(w) = block else { continue };
+                for p in proxies(w) {
+                    named.push(p.clone());
+                    if ra2fmt::find_ci(&ui, &p).is_none() {
+                        missing.push(format!("{}: {p}", path.display()));
+                    }
+                }
+            }
+        }
+        assert_eq!(named.len(), 9, "nine shipped screens proxy another file");
+        assert!(missing.is_empty(), "proxies with no file: {missing:?}");
+        assert!(
+            named
+                .iter()
+                .all(|p| p.to_ascii_lowercase().contains("bottomnav.gib")),
+            "every one of them is the bottom bar: {named:?}"
+        );
+
+        // `botlabwin.gib`'s proxy sits in the 49-pixel strip at the bottom of its
+        // own content area, so the bar lands there rather than on the screen's
+        // bottom edge — the file's geometry, not a guess.
+        let text = std::fs::read_to_string(ui.join("botlab/botlabwin.gib")).unwrap();
+        let mut gib = ra2fmt::gib::parse(&text).unwrap();
+        let loaded = inline_proxies_in(&mut gib, &ui);
+        assert_eq!(loaded, vec!["common\\bottomnav.gib".to_string()]);
+        let placed = resolve(&gib, DESIGN_SCREEN);
+        let bar = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "common buts")
+            .expect("the bottom bar was loaded into the proxy");
+        assert_eq!(bar.frame, Frame::new(512.0, 444.0, 256.0, 36.0));
+    }
+
+    /// `MasterSize` is **one axis**, not two: all twenty-six split frames in
+    /// the corpus write `amount is_fraction` — `0.14 1`, `90 0` — and the reader
+    /// that took them for two axes fell back to half the frame for every split
+    /// whose master is not the first slot. `botlabwin.gib` is the worked case:
+    /// its toolbar split is `Master 0`, `MasterSize 0.14 1`, so the toolbar's
+    /// pane is 0.14 × 1005 = 140.7 and the content below it starts there, which
+    /// puts the title group at 2% of the 864.3 that is left — 158.0 — rather
+    /// than at the 512.5 a half-frame reading gave it.
+    #[test]
+    fn the_master_size_is_one_axis() {
+        let Some(game) = game_dir() else { return };
+        let text = std::fs::read_to_string(game.join("UI/botlab/botlabwin.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+        let placed = resolve(&gib, DESIGN_SCREEN);
+        let frame = |name: &str| {
+            placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == name)
+                .unwrap_or_else(|| panic!("no widget named {name}"))
+                .frame
+        };
+        // The split's own frame is the whole screen, the toolbar's pane is 14%
+        // of it, and the title group sits 2% into what is left.
+        assert_eq!(frame("botlab splt"), Frame::new(0.0, 0.0, 1280.0, 1005.0));
+        assert!(
+            (frame("title grp").y - 158.0).abs() < 0.1,
+            "{}",
+            frame("title grp").y
+        );
+        // The lower split is `Master 1`, `MasterSize 0.12 1`: the master is the
+        // 49-pixel nav strip, and the content slot takes the 363.4 above it.
+        assert!((frame("lowersplit").y - 67.0).abs() < 0.1);
+        assert!((frame("content slot").y - 116.56).abs() < 0.1);
+    }
+
+    /// A `Glyph` wraps its text at spaces to the width its `_Margin` gives it,
+    /// and honours the `\n`s the author typed.
+    #[test]
+    fn a_glyph_wraps_to_its_margin() {
+        let Some(game) = game_dir() else { return };
+        let fonts = Fonts::load(&game.join("RA2.cfz")).unwrap();
+        let font = fonts.get("fg_mcn14").expect("the debug face");
+
+        // `\n` are the author's own breaks, and a line after one starts fresh.
+        let lines = wrap_lines(font, "one\ntwo three", 10000.0);
+        assert_eq!(lines, vec!["one".to_string(), "two three".to_string()]);
+
+        // Narrow enough for one word a line, and no word is broken.
+        let one = font.extent("chassis").0 as f32;
+        let lines = wrap_lines(font, "chassis chassis", one + 1.0);
+        assert_eq!(lines, vec!["chassis".to_string(), "chassis".to_string()]);
+
+        // A paragraph's first line hangs from the box's top the same way a
+        // label does, and a wrapped second line sits one line height lower.
+        let width = font.extent("chassis").0 as f32 + 1.0;
+        let two = paragraph_run(
+            font,
+            Frame::new(0.0, 0.0, width, 40.0),
+            "chassis chassis",
+            width,
+        );
+        let first = two[0].rect.y;
+        assert!(
+            first >= 0.0 && first < font.line_height() as f32,
+            "the first line hangs from the top: {first}"
+        );
+        assert_eq!(
+            two.last().unwrap().rect.y - first,
+            font.line_height() as f32,
+            "the second line is one line height below the first"
+        );
+    }
+
+    /// A `Lines` widget is a polyline in point *pairs*, and the corpus is what
+    /// settles it: `selectbot_computer.gib`'s only visible one insets a box by
+    /// two pixels at a `Width` of four, which reads as a rectangle only when
+    /// the eight points are cut into four segments.
+    #[test]
+    fn a_lines_widget_is_read_in_point_pairs() {
+        let Some(game) = game_dir() else { return };
+        let text =
+            std::fs::read_to_string(game.join("UI/exhibition/selectbot_computer.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+        let placed = resolve(&gib, DESIGN_SCREEN);
+        let lines: Vec<_> = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .filter(|p| p.widget.kind == WidgetKind::Lines && p.widget.visible())
+            .collect();
+        assert_eq!(lines.len(), 1, "one visible Lines");
+        let p = lines[0];
+        let points: Vec<[f32; 2]> = p
+            .widget
+            .fields_named("Point")
+            .map(|f| {
+                let n = f.numbers();
+                [n[0], n[2]]
+            })
+            .collect();
+        assert_eq!(
+            points,
+            vec![
+                [0.0, 0.0],
+                [90.0, 0.0],
+                [88.0, 0.0],
+                [88.0, 90.0],
+                [90.0, 90.0],
+                [0.0, 90.0],
+                [2.0, 90.0],
+                [2.0, 0.0]
+            ]
+        );
+        assert_eq!(p.widget.field("Width").and_then(|f| f.number()), Some(4.0));
+    }
+
+    /// **Open.** A `.gib` is written with a `NumChildren` on every widget, and
+    /// read that way a file should nest to a single root — its `Window`. Only
+    /// twenty-eight of the 116 do. The rest leave blocks a level up, and the
+    /// largest,
+    /// `prematch.gib`, ends with seventeen roots.
+    ///
+    /// This is recorded rather than papered over: it means the tree this reader
+    /// builds is the file's own counts, and the game's reader must nest some
+    /// other way — a faithful reader would round-trip to one root, and the
+    /// writer's own counts are on disk. It is *not* a placement failure: the
+    /// ninety files still land on screen, and the numbers above are computed
+    /// with the same trees.
+    #[test]
+    fn a_file_does_not_always_nest_to_one_root() {
+        let Some(game) = game_dir() else { return };
+        let mut files = Vec::new();
+        collect_gib(&game.join("UI"), &mut files);
+        let mut single = 0;
+        let mut worst = (0usize, String::new());
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let gib = ra2fmt::gib::parse(&text).unwrap();
+            let roots = gib.widgets().count();
+            if roots == 1 {
+                single += 1;
+            }
+            if roots > worst.0 {
+                worst = (roots, path.display().to_string());
+            }
+        }
+        assert_eq!(files.len(), 116);
+        assert_eq!(single, 28, "files that nest to their Window");
+        assert!(worst.1.ends_with("multiplayer/prematch.gib"), "{}", worst.1);
+        assert_eq!(worst.0, 17);
     }
 
     /// Draw order is `ChildOrder` ascending, ties by file order — which is what

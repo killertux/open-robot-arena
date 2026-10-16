@@ -124,6 +124,31 @@ local/           # (git-ignored) game files + converted cache
   `cargo run -p ra2-render --example gooeyshot` is the whole loop in one command.
   That is the workshop's machinery; the workshop is layout and interaction on
   top of it, and nothing about the seam is left to build.
+- **A screen is composed of fragments, and the data says which.** A `Proxy`
+  names another `.gib` — nine shipped screens name the bottom navigation bar —
+  and the fragment is placed inside the proxy's own rectangle, so
+  `ra2ui::inline_proxies_in` turns a screen plus its fragments into one widget
+  tree before anything is placed. That is the workshop's own mechanism, and it
+  is the reason `botlabwin.gib` shows the shell's nav bar without a line of C++.
+- **A rule that is only *half* right shows up as a wrong picture, and the
+  workshop is what found the last one.** `MasterSize` is one axis — all
+  twenty-six values in the corpus say so — and the resolver had read it as a
+  two-axis pair, found no four-number value, and fallen back to *half the
+  frame* for every split whose master is not the first slot. Nothing caught it
+  because the fallback is exact when `MasterSize` is `0.5 1`, which most of them
+  are: `botlabwin.gib`'s `0.14 1` and `repairs.gib`'s `48 0` are what broke the
+  tie, and reading it as one axis moved 23 widgets back onto the screen and two
+  whole files with them.
+- **What the shell still does not draw is named, and so is what it cannot yet
+  read.** `ra2-render`'s `ui` path draws a `Glyph` (a wrapped paragraph in its
+  `_Margin` box, with the writer's `\n` line breaks) and a `Lines` polyline (its
+  point pairs), so the four undrawn kinds are down to the `Placeholder` — the
+  rectangle the 3D view fills, which is not the shell's to draw at all. What is
+  *unread* is the nesting: a `.gib`'s `NumChildren` does not always close a
+  file to one root (28 of 116 do), so 88 screens leave blocks a level up, and on
+  two of them the background tile lands on top of the dialog. That is recorded,
+  measured, and in the open questions rather than smoothed over — the game's own
+  reader is where the rule is.
 - **The renderer is checked against a second renderer, written the other way
   round.** `tools/ui_compose.py` rasterises a screen on the CPU, in Python, from
   the resolver's own rectangles; `ra2-render`'s `ui` path draws the same screen

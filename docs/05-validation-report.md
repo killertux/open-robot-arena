@@ -435,6 +435,20 @@ Known, documented, not yet fixed:
     to the file, and wrong for the same reason a fragment is: it has no slot
     until a screen loads it.
 
+    One thing is *named* rather than closed. A `.gib` widget carries
+    `NumChildren`, written by the editor from its real tree, so reading a file
+    should give back a single root — its `Window`. Only **28 of the 116** do; the
+    rest leave blocks a level up, `multiplayer/prematch.gib` worst at 17 roots.
+    It is not cosmetic: `credits.gib`'s screen-background `metaldots_pattern`
+    tile is written after the dialog, so as a root it paints over everything the
+    dialog draws, and `selectbot_computer.gib` does the same. The placement
+    numbers above are computed with those same trees, and the proxies, clips and
+    selection bars are read from wherever a block lands, so nothing depends on
+    the nesting being right — but the game's reader nests by something other than
+    the count, and finding that rule is open. `ui_compose.py` draws the art, the
+    labels and the new `Lines`/`Glyph` quads; it does not yet inline proxies, so
+    the composite of a proxied screen is that screen without its nav bar.
+
     The shell's own Python runs. `plus` now answers `addWindow`/`addText` for
     real and `giScript` is a module the shipped `Scripts/Main.py` can hook
     itself into: the boot file runs as written — its `print` reaches `giScript`,
@@ -448,6 +462,31 @@ Known, documented, not yet fixed:
     window does *not* yet have is the engine's own chrome — the grey panel the
     game draws behind a debug window — because that is the C++'s and nothing in
     the data says what it is.
+
+    The last of the corpus's widget kinds are drawn, and the fragments compose.
+    A `Proxy` names another `.gib` and nine shipped screens name
+    `common\bottomnav.gib` — the bottom navigation bar — so a screen is composed
+    before it is placed and `botlabwin.gib`'s own 49-pixel strip at the bottom of
+    its content area carries the bar at `512,444` rather than the file being
+    re-authored. A `Glyph` is a paragraph: `_Margin 0 w h` is the box, `_Text`'s
+    breaks are the two characters `\n`, and the binary's own glyph writer is what
+    says so — it emits `_Size <flag>` and one `_Margin a b c` per list entry, and
+    the label it writes first carries no newline, which is why the file line is
+    `Margins _Size 1`. A `Lines` is a polyline in point *pairs*: four segments,
+    and the ten that are visible are the focused list's box. `Placeholder` is the
+    one kind left, and it is the rectangle the 3D view fills — not the shell's.
+
+    Writing them found a resolver bug with a picture's worth of consequence.
+    `MasterSize` is **one axis** — all twenty-six in the corpus are two tokens,
+    `0.14 1`, `90 0` — and the resolver read it as a two-axis pair, failed to
+    find four numbers, and fell back to *half the frame*. The fallback is exact
+    whenever `MasterSize` is `0.5 1`, which most of them are, so nothing had
+    caught it; `botlabwin.gib`'s `0.14 1` is what did. With the axis read
+    properly, `botlabwin.gib`'s title group lands at y 158 rather than 512.5, and
+    across the corpus 23 fewer widgets fall outside the screen and two more
+    files place entirely: **78 off-screen widgets in 116 files, 73 of them
+    entirely on screen** (was 101 and 71). The corpus test carries the new
+    numbers and the reason.
 
     Placing the containers also caught a bug in the *check*, not the engine: the
     compositor sampled an image at its page rect, so every art cell whose rect did
