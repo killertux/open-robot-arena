@@ -644,9 +644,16 @@ Known, documented, not yet fixed:
     comes out `R BT W RKSH P D2`: **every `O` draws nothing**, the four in `ROBOT`
     and `WORKSHOP` among them, while the letters around them are correct. So the
     title is drawn and its `O`s are not, which is why the word is easy to miss
-    against the toolbar art. The metrics are not the cause (the baseline rule has
-    a test, and `fg_d20`'s line height has one), so it is the glyph table — the
-    same class of gap the font notes already record for `M` and `A`.
+    against the toolbar art. The cause is measured and it is the *font file*: `fg_d20`'s
+    record 45 for `O` is a full 11×14 rect whose ink sits in its last three
+    columns (21 pixels), while the **same record in `fg_mcn14` draws a whole `O`**
+    (45 pixels over eight columns), and the rects around it are a packed row. So
+    the record mapping and the rects are right and the page is blank where that
+    `O` should be; its advance is intact, which is why the letter is *skipped*
+    rather than misplaced. The game reads the same file, so this render is
+    faithful to the data — and the old suspicion of "a one-record slip" in the
+    glyph table is refuted, since the same index gives the right letter in
+    another face.
 
     The labels that looked wrong were not a face's problem but every face's: the
     glyph page is stored **bottom-up** and neither renderer swapped the `v`s of a

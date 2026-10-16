@@ -470,9 +470,22 @@ them. Its metrics are right (the glyph run's baseline is one ascent below the
 box's top, and `fg_d20`'s line height has a test beside it), and the face does
 draw — but **not every letter**. A probe of `ROBOT WORKSHOP D20` in `fg_d20` comes
 out `R BT W RKSH P D2`, with **every `O` missing**: the four in `ROBOT` and
-`WORKSHOP` all draw nothing, while the surrounding letters are correct. So it is
-the glyph *table*, not the metrics or the layout — the same class of gap the
-table's notes already carry for `M` and `A`, now with a reproduction and a letter.
+`WORKSHOP` all draw nothing, while the surrounding letters are correct. The cause is now measured, and it is the *font file*, not the reader. `fg_d20`
+page is 256×256 and its record 45 — the character `O` — is a full 11×14 rect whose
+ink sits in its last three columns: **21 pixels of a letter**, where the record's
+neighbours each hold a whole one. The **same record in `fg_mcn14` draws a whole
+`O`** (45 pixels over eight columns), and the rects around it are a packed row —
+each beginning one to three columns after the last one ended — so the record
+mapping and the rects are right and the *page* is simply blank where that `O`
+should be. Its advance is intact (17 against a neighbour's 10), which is why the
+letter is **skipped** rather than drawn in the wrong place: `ROBOT WORKSHOP D20`
+becomes `R BT W RKSH P D2` with nothing out of position.
+
+Two things follow. The game reads the same file, so the game's `fg_d20` text has
+no `O` either — this render is faithful to the data. And the old suspicion that
+the glyph table might carry "a one-record slip somewhere in the middle" is
+**refuted**: the same index gives the right letter in another face, which a slip
+would not.
 
 That is what `botlabwin.gib`'s `title txt` actually is: a label whose text cannot
 be spelled in its own face. It is in the draw list and it *is* drawn — the word

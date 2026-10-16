@@ -414,6 +414,67 @@ mod tests {
         }
     }
 
+    /// How much ink a record's own rect holds, and over how many columns.
+    fn ink_of(font: &Font, record: usize) -> (usize, usize, usize) {
+        let w = font.page_width as usize;
+        let h = font.page_height as usize;
+        let (x0, y0, gw, gh) = font.glyphs[record].rect(font.page_width, font.page_height);
+        let (mut ink, mut min, mut max) = (0, usize::MAX, 0);
+        for y in y0.max(0)..(y0 + gh).min(h as i32) {
+            for x in x0.max(0)..(x0 + gw).min(w as i32) {
+                if font.page[(y as usize) * w + x as usize] > 40 {
+                    ink += 1;
+                    min = min.min(x as usize);
+                    max = max.max(x as usize);
+                }
+            }
+        }
+        (ink, min, max)
+    }
+
+    /// The glyph table is a **packed row**: a record's rect begins one column
+    /// after the last one's ended, so the records are where the reader thinks
+    /// they are. Which is what makes the one thing that *is* missing legible as
+    /// the file's own: **`fg_d20` has no `O`**. Its record 45 — the character
+    /// `O` — is a full 11×14 rect whose ink sits in its last three columns, 21
+    /// pixels of it, while **`fg_mcn14`'s record 45, the same character, draws a
+    /// whole letter** (45 pixels over eight columns). Same index, same kind of
+    /// rect, one face with a letter and one without — so the record mapping is
+    /// right and the *page* is blank there. The advance is intact (17 against a
+    /// neighbour's 10), which is why the letter is skipped rather than drawn
+    /// somewhere wrong, and why `botlabwin.gib`'s `title txt` reads `R BT W RKSH
+    /// P` instead of `ROBOT WORKSHOP`: the game reads the same file, so this is
+    /// the data's, and the renderer is faithful to it.
+    #[test]
+    fn one_face_has_no_o() {
+        let Some(d20) = shipped("fg_d20") else { return };
+        let Some(mcn) = shipped("fg_mcn14") else {
+            return;
+        };
+
+        // The row is packed: every rect around the O follows the one before it
+        // with a one- to three-column gap, so the records are where the rects
+        // say they are.
+        for i in 40..45 {
+            let (x0, _, gw, _) = d20.glyphs[i].rect(d20.page_width, d20.page_height);
+            let (next_x, _, next_w, _) = d20.glyphs[i + 1].rect(d20.page_width, d20.page_height);
+            let gap = next_x - (x0 + gw);
+            assert!((0..=3).contains(&gap), "record {i}: gap {gap} ({next_w})");
+        }
+
+        // The O: a rect with room, and almost no ink in it.
+        let (_, _, gw, gh) = d20.glyphs[45].rect(d20.page_width, d20.page_height);
+        assert!(gw >= 10 && gh >= 10, "the O's rect is {gw}x{gh}");
+        let (ink, min, max) = ink_of(&d20, 45);
+        assert_eq!((ink, max - min + 1), (21, 3), "fg_d20's O");
+        assert_eq!(d20.glyphs[45].advance, 17, "and its advance, intact");
+
+        // The same character in another face is a letter.
+        let (ink, min, max) = ink_of(&mcn, 45);
+        assert!(ink > 40 && max - min + 1 >= 8, "fg_mcn14's O: {ink}");
+        assert_eq!(mcn.glyphs.len(), d20.glyphs.len(), "both tables are 96");
+    }
+
     #[test]
     fn a_truncated_font_is_rejected() {
         assert!(parse(&[0u8; 20]).is_err());
