@@ -509,6 +509,26 @@ Known, documented, not yet fixed:
     `chassis.gib`'s `structure note` label is drawn over its own buttons: a click
     on one's middle lands on the label.
 
+    A second list, on a screen outside the workshop, to the same two rules. The
+    event list's grid says *"fill with this season's events (event_cell.gib)"* and
+    the template says what a cell is, so `ra2ui::events` fills it from the game's
+    own `Events.txt` — 25 events, whose tier counts are 2 in eleven and 4 in
+    fourteen, and whose file has two defects worth naming: `Robo-Depot`'s second
+    tier names the prizes directory and no model in it, and the last record closes
+    with three numbers instead of four because the file ends there. The file is
+    Windows-1252 with exactly one high byte, an apostrophe.
+
+    One thing is open there, and it is a *renderer* question rather than a data
+    one. The cells fill and land exactly where the grid says (`Rows 3, Columns 3,
+    RowHeight 64, ColWidths 114`), and each cell carries its own event's art — the
+    nine colours differ per event and match each logo's own background — but only
+    a blurred fraction of each logo shows, as if a small window of the art were
+    magnified across the cell. Hiding the cells' `xout` overlay changes nothing,
+    and the same code path draws the component palette's cells sharply, so the
+    difference is in this art path: a 140×80 `.bmp` bound into a 114×64 cell.
+    What would settle it is one line in `art_quad` printing the uv and the
+    texture's dimensions for a cell's quad, which is the next thing to read.
+
     The palette now follows the screen's own category and can be walked. Which
     category is current is the group's selected member — `Checked true` on
     `power button`, with the `co_power_s.bmp` state image showing — and a click on

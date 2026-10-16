@@ -295,6 +295,36 @@ both names are the data's:
   component-properties panel that the game fills at run time. That is the
   *interaction* layer, and it is the C++'s, not the data's.
 
+### The event list, and the two places the shipped file is not regular
+
+`hq_events.gib`'s grid says what fills it — *"fill with this season's events
+(event_cell.gib)"* — and `event_cell.gib` says what a cell is: one `Image` and an
+overlay, with its only note on the first of them, *"'preview img' child is the
+event preview image"*. So a cell is one event's art, and the events are the game's
+`Events.txt`.
+
+That file is line-based and every record is the same shape — a name, the
+description as `DisplayBox` markup, a count of losing tiers, two lines per tier
+(the prize model and its message), the trophy's model, its winning message and its
+art, the event's art, the arena and its preview, and four numbers. A record is
+therefore `3 + 2 × tiers + 8` lines, and reading it strictly (the file has to be
+consumed exactly, or the reader is wrong) gives **25 events**, with the tier count
+**2 in eleven of them and 4 in fourteen**.
+
+Two things in the file are defects rather than shape, and both are named rather
+than smoothed over:
+
+- **`Robo-Depot`'s second tier names the prizes directory** —
+  `Arenas\event_results\prizes\` — and no model in it. It is the only tier whose
+  model is not a `.gmf`.
+- **The last record is one number short**: every event before it closes with four
+  numbers and *Father-Daughter Brunch and Robotic Combat* closes with three,
+  because the file ends there.
+
+The file is also **Windows-1252, not UTF-8 or Latin-1**: it carries exactly one
+high byte in all 481 lines, `0x92`, the apostrophe in *Hot Dog Harry’s Downtown
+Rumble*. Read as Latin-1 that becomes `U+0092`, which no font can draw.
+
 ### Which category is current, and a click on an option group
 
 The palette's category is the `category optiongroup`'s selected member, and the

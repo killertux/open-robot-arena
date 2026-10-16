@@ -43,19 +43,24 @@ pub fn template(ui_root: &std::path::Path, relative: &str) -> Result<Gib, String
     crate::workshop::load(ui_root, relative)
 }
 
-/// Fill a grid or list with `rows` copies of a template, one per row, at the
-/// geometry the list's own `Grid` states.
+/// Fill a grid or list with `cells` copies of a template, one per cell of the
+/// list's own `Grid`, in row-major order.
 ///
-/// Returns how many rows were filled — nothing when the list states no
+/// The geometry is the list's: `Columns` decides how many go in a row — the
+/// armour grid is `Columns 1` and so is one per row, the event grid is
+/// `Columns 3` — and `RowHeight` with `ColWidths` is the cell's own size.
+/// Returns how many cells were filled, nothing when the list states no
 /// dimensions.
-pub fn fill(list: &mut Widget, template: &Gib, rows: usize) -> usize {
+pub fn fill(list: &mut Widget, template: &Gib, cells: usize) -> usize {
     let Some(grid) = Grid::from_widget(list) else {
         return 0;
     };
+    let columns = grid.columns.max(1) as usize;
     let width = grid.col_widths.first().copied().unwrap_or(0.0);
     let roots: Vec<Widget> = template.widgets().cloned().collect();
-    for row in 0..rows {
-        let x = grid.column_x(0);
+    for index in 0..cells {
+        let (row, column) = ((index / columns) as i32, (index % columns) as i32);
+        let x = grid.column_x(column);
         let y = grid.row_height * row as f32;
         for root in &roots {
             let mut cell = root.clone();
@@ -68,7 +73,7 @@ pub fn fill(list: &mut Widget, template: &Gib, rows: usize) -> usize {
             list.children.push(cell);
         }
     }
-    rows
+    cells
 }
 
 /// Write a row's art file into the child the template names.

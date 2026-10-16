@@ -113,6 +113,7 @@ use ra2fmt::gib::{Block, Gib, Length, Widget, WidgetKind};
 
 pub mod cells;
 pub mod components;
+pub mod events;
 pub mod input;
 pub mod project;
 pub mod workshop;

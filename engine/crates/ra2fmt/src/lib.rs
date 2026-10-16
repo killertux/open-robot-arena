@@ -14,6 +14,7 @@ pub mod armor;
 pub mod bot;
 pub mod cfl;
 pub mod component;
+pub mod event;
 pub mod gib;
 pub mod giff;
 pub mod gmi;

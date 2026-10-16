@@ -140,7 +140,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // The palette's six categories, each a click and a refill.
     render_categories(&mut lab, &game, &out, screen)?;
+    // And a screen outside the workshop, to the same two rules.
+    render_events(&game.join("UI"), &game, &out)?;
     Ok(())
+}
+
+/// Compose `hq_events.gib`, fill its own grid with the game's own events, and
+/// render it.
+///
+/// A screen outside the workshop, to show that the same two rules hold there: the
+/// grid's `Notes` name the cell template (*"fill with this season's events
+/// (event_cell.gib)"*), and the events are `Events.txt`.
+fn render_events(
+    ui: &std::path::Path,
+    game: &std::path::Path,
+    out: &std::path::Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut gib = ra2ui::workshop::load(ui, "teamhq/hq_events.gib")?;
+    ra2ui::inline_proxies_in(&mut gib, ui);
+    let template = ra2ui::workshop::load(ui, ra2ui::events::TEMPLATE)?;
+    let events = ra2ui::events::all(game)?;
+    let mut filled = 0;
+    for block in gib.blocks.iter_mut() {
+        let Block::Widget(root) = block else { continue };
+        let Some(grid) = ra2ui::workshop::find_mut(root, ra2ui::events::GRID) else {
+            continue;
+        };
+        filled = ra2ui::events::fill_grid(grid, game, &template, &events);
+        break;
+    }
+
+    let mut assets = UiAssets::open(game)?;
+    let placed = ra2ui::resolve_with(&gib, [1280.0, 1005.0], Some(assets.faces()));
+    let placed = placed.into_iter().collect::<Vec<_>>();
+    let scene = assets.scene(&placed, [1280, 1005]);
+    let renderer = Renderer::new()?;
+    let ui_renderer = UiRenderer::new(renderer.device());
+    let pixels = ui_renderer.render(renderer.device(), renderer.queue(), &scene)?;
+    let path = out.join("hq_events.png");
+    image::RgbaImage::from_raw(1280, 1005, pixels)
+        .ok_or("readback")?
+        .save(&path)?;
+    println!(
+        "  filled the event grid with {filled} events and rendered {}",
+        path.display()
+    );
+    Ok(filled)
 }
 
 /// Fill `components.gib`'s palette grid with the components of one category, from
