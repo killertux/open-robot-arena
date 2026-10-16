@@ -478,7 +478,22 @@ K  record 41  rect (46, 232, 5, 11)
 ```
 
 `A`'s window holds the tail of one glyph and the stem of the next, `K`'s holds a
-bare stem, `T`'s holds a stem with a bottom hook. So the page's glyphs sit a few
+bare stem, `T`'s holds a stem with a bottom hook.
+
+And it is nearly every record, not a few. A rect that frames its glyph leaves the
+columns at `u0 - 1` and `u1` blank, and of the 96 records in `fg_mcn14` only
+**five** do — **87 have ink just outside** on one side or both. `fg_mcn16` is 86
+and `fg_d20` 78. The test `almost_no_record_brackets_its_glyph` keeps those three
+numbers, and it is deliberately a **baseline of a defect**: the day the alignment
+is fixed it will say so.
+
+What the alignment *is* is the next thing to read, and the raw record words for a
+known glyph are where: whether the word we take as `u0` is the ink's left edge or
+the **pen origin** (with the ink starting before it), and whether `u1 - u0` is the
+glyph's width or its advance. The advances and the row structure look coherent —
+records 35..44 (`E`..`N`) state 0..7, 9..15, 17..23, 25..32, 34..40, 42..44, 46..50,
+52..59, 61..66, 68..77 in ascending order — so the fault is in the rect's edges
+rather than in which record belongs to which glyph. So the page's glyphs sit a few
 columns left of where the records point, and each record's window covers the wrong
 few pixels — which is why **a single character renders as two shapes**: the glyph
 itself and a stroke of its neighbour. (`A` in a `Text` came out as an `A`-shaped

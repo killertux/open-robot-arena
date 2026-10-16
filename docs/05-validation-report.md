@@ -688,9 +688,13 @@ Known, documented, not yet fixed:
     bottom hook. Read as pixel maps, not impressions. So a single character
     renders as two shapes, in `fg_mcn14`, `fg_mcn16` and `fg_mcn12`, and a `Text`
     written exactly as `ch_stepbuttons.gib` writes one does the same: it is the
-    font reader, not the widget. It is *not* a uniform shift — the row at y 233
-    matches its records exactly while the row at y 245 scatters — so the next read
-    is the page's ink runs per row against the records' `u0..u1` as a table. One `Text`
+    font reader, not the widget. And it is nearly every
+    record: of the 96 in `fg_mcn14`, **87 have ink just outside their rect** (86 in
+    `fg_mcn16`, 78 in `fg_d20`), so almost none brackets its glyph — kept as a
+    baseline of the defect. It is not a uniform shift (the row at y 233's records
+    are ascending and tight), so the next read is the **raw record words for a
+    known glyph**: whether the word taken as `u0` is the ink's left edge or the pen
+    origin, and whether `u1 - u0` is the glyph's width or its advance. One `Text`
     holding a single `A`, `M`, `O` or `N` renders as two shapes; a string renders
     as its letters with extra strokes over them; a `Text` written exactly as the
     corpus writes one smears the same; and `fg_mcn14`, `fg_mcn16` and `fg_mcn12`

@@ -562,6 +562,46 @@ mod tests {
         );
     }
 
+    /// **Almost no record brackets its glyph.** A rect that frames a glyph leaves
+    /// the columns at `u0 - 1` and `u1` blank, and of the 96 records in
+    /// `fg_mcn14` only **five** do: 87 have ink just outside on one side or both,
+    /// 86 in `fg_mcn16` and 78 in `fg_d20`. The page itself is fine — dumped with
+    /// `ra2 font RA2.cfz <face> --page` it holds every glyph correctly formed — so
+    /// the rects are where the fault is, and a glyph drawn through one comes out
+    /// as its own shape plus a stroke of its neighbour.
+    ///
+    /// This is a **baseline of a defect**, not a rule: the numbers are kept so the
+    /// day the alignment is fixed the test says so.
+    #[test]
+    fn almost_no_record_brackets_its_glyph() {
+        let mut counts = Vec::new();
+        for face in ["fg_mcn14", "fg_mcn16", "fg_d20"] {
+            let Some(font) = shipped(face) else { return };
+            let w = font.page_width as usize;
+            let h = font.page_height as usize;
+            let mut cut = 0;
+            for i in 0..font.glyphs.len() {
+                let (x0, y0, gw, gh) = font.glyphs[i].rect(font.page_width, font.page_height);
+                if gw <= 0 || x0 <= 0 || (x0 + gw) as usize >= w {
+                    continue;
+                }
+                let ink_in = |x: i32| {
+                    (y0.max(0)..(y0 + gh).min(h as i32))
+                        .any(|y| font.page[(y as usize) * w + x as usize] > 40)
+                };
+                if ink_in(x0 - 1) || ink_in(x0 + gw) {
+                    cut += 1;
+                }
+            }
+            counts.push((face, cut));
+        }
+        assert_eq!(
+            counts,
+            [("fg_mcn14", 87), ("fg_mcn16", 86), ("fg_d20", 78)],
+            "records whose rect cuts a neighbour"
+        );
+    }
+
     #[test]
     fn a_truncated_font_is_rejected() {
         assert!(parse(&[0u8; 20]).is_err());
