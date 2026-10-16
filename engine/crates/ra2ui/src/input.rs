@@ -69,8 +69,10 @@ pub fn hit(roots: &[Placement<'_>], x: f32, y: f32) -> Option<Vec<usize>> {
 /// ties keep file order, so reversing it gives what is drawn last first.
 fn front_to_back(orders: impl Iterator<Item = i32>) -> Vec<usize> {
     let mut order: Vec<(i32, usize)> = orders.enumerate().map(|(i, o)| (o, i)).collect();
-    order.sort_by_key(|(o, i)| (*o, *i));
-    order.into_iter().rev().map(|(_, i)| i).collect()
+    // Higher `ChildOrder` is drawn later and so is in front; where two share it,
+    // the **earlier** record is in front — see `draw_order_parented`.
+    order.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    order.into_iter().map(|(_, i)| i).collect()
 }
 
 fn hit_at(p: &Placement<'_>, x: f32, y: f32, path: &mut Vec<usize>) -> Option<Vec<usize>> {
@@ -91,8 +93,18 @@ fn hit_at(p: &Placement<'_>, x: f32, y: f32, path: &mut Vec<usize>) -> Option<Ve
     // `chassis.gib` draws its two notes over its two buttons. Refusing to stop at
     // one lets the search fall through to what is behind it, which is what makes
     // those controls clickable at all.
-    let control = !matches!(p.widget.kind, WidgetKind::Widget);
-    (p.widget.visible() && inside && control).then(|| path.clone())
+    (p.widget.visible() && inside && can_take_a_click(&p.widget.kind)).then(|| path.clone())
+}
+
+/// Whether a class can be what a click *lands on*.
+///
+/// A layout container cannot: it has no behaviour of its own, so a hit passes
+/// through it to whatever is behind. The **measured** case is the base `Widget`,
+/// the class the writer leaves headerless — `botlab/ch_stepbuttons.gib` draws a
+/// nameless one over each of its step buttons, `chassis.gib` draws its notes over
+/// its two — and a hit that stopped there would make those controls unclickable.
+fn can_take_a_click(kind: &WidgetKind) -> bool {
+    !matches!(kind, WidgetKind::Widget)
 }
 
 /// The widget a [`hit`] path names, whose first element indexes the `roots`

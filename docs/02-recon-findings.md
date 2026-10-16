@@ -307,44 +307,41 @@ them. Drawing a 140×80 event logo at the canvas stretches it across the screen,
 the value is read as unset and the art is drawn in its own box. Anything else is a
 real size: `88 0 72 0` for an armour icon, `20 0 12 0` for a weight icon.
 
-### Where a `ChildOrder` tie matters, and why it is still open
+### How a `ChildOrder` tie is broken, and the screen that decides it
 
-`ChildOrder` orders a parent's children, and **328 pairs of siblings** in the
-corpus share one *and* have overlapping frames — the places where the tie-break
-decides anything at all. Their dominant shape is a named control followed by an
-unnamed `Widget` holding the same text: `common/bottomnav.gib`'s `Options`/
-`MainMenu`/`Help` buttons, each followed by a label reading `Options` and
-`Main Menu`; `botlab/ch_stepbuttons.gib`'s step buttons, followed by their
-numerals; `common/credits.gib`'s `close button` and `common/okcancel.gib`'s
-`cancel button`, likewise.
+`ChildOrder` orders a parent's children and higher is nearer the front. Where two
+children **share** one, the **earlier record is in front** — the tie is broken by
+the file with the first of the pair nearest the viewer.
 
-**That shape does not decide which is in front**, which is worth being explicit
-about because it looks like it should: a `Button` carries a `Caption` attachment
-and draws its caption *itself*, from a `Text` such as the one beside it — so the
-word sits in front of the button's own art whichever of the two draws it, and the
-pair reads the same either way round. Of the 328, only **6** put art over a
-sibling that has a `Background` — `exhibition/arena.gib`'s overlay over its
-`ListBox`, `botlab/colorfill.gib`'s over its `Slider`, three in
-`teamhq/repairs.gib`, and `teamhq/select_team.gib`'s over its grid — and an
-overlay drawn over a list is as plausible over as under.
+That direction is not what the corpus's shape suggests, and the way it was settled
+is worth keeping. There are **328 pairs of siblings** in the shell that share an
+order *and* overlap, and their dominant shape is a named control followed by the
+label that names it — `common/bottomnav.gib`'s `Options`/`MainMenu`/`Help`
+buttons, `botlab/ch_stepbuttons.gib`'s step buttons and their numerals. That shape
+looks like evidence and is not: those 122 buttons carry blank state art, so they
+draw nothing for the label to be in front *of*, and the pair reads the same either
+way round. Of the 328, only **6** put art over a sibling with a `Background` —
+`exhibition/arena.gib`'s overlay over its `ListBox`, `teamhq/select_team.gib`'s
+over its grid, three in `teamhq/repairs.gib` — and an overlay drawn over a list is
+as plausible over as under.
 
-So the direction stays **open**, with one argument pointing against what
-`draw_order` and `input::hit` do today: in `botlab/components.gib` the palette's
-grid shares a `ChildOrder` with the category bar, is later in the file, and is
-therefore drawn over the buttons the palette needs clicked. The game must not do
-that, so *there* the earlier record should be the front one. What settles it is
-the game's own hit test — because whichever way the tie goes, the buttons have to
-be reachable — and that is the next thing to read.
+What decides it is a screen whose own note requires a control to be **clickable**.
+`botlab/components.gib`'s `components grid` and its `category optiongroup` are
+children of `component main group` with the same `ChildOrder -1`, the grid later in
+the file; the grid is `Position 0 0 0 0` with `Size 1 1 74 0` and the option group's
+row sits at 7% of the parent with a 12% height, so the two overlap. The grid's own
+note says *"fill with components in the current category, click to show preview"*
+and the option group's says *"grid is filtered based on the category selected in
+this optiongroup"* — so those six buttons are what the player clicks to change the
+grid, and they cannot be behind the grid's cells. The editor had the same overlap
+and never saw it, because only the game fills the grid.
 
-One route to it is already closed, so that it is not tried twice: the binary's
-imports carry **no names** in this analysis. `find_xrefs_to_name` comes back
-`name_not_found` for `PtInRect`, `GetCursorPos` and `ScreenToClient`, even though
-their name strings are in the file (`PtInRect` at `0x6ed774`), and the strings
-themselves have no xrefs. So the mouse path has to be reached from the thunk
-addresses or from the class vtables — the class registry `FUN_00589860` gives each
-class its descriptor — rather than by name.
+So: **the earlier record is in front**, and the shell's own composition follows the
+same rule — the chassis step layer, which is added at run time rather than written
+in a file, is inserted *before* the screen it rides over, because it is the one
+that has to be clickable.
 
-### The event list, and the two places the shipped file is not regular### The event list, and the two places the shipped file is not regular
+### The event list, and the two places the shipped file is not regular### The event list, and the two places the shipped file is not regular### The event list, and the two places the shipped file is not regular
 
 `hq_events.gib`'s grid says what fills it — *"fill with this season's events
 (event_cell.gib)"* — and `event_cell.gib` says what a cell is: one `Image` and an

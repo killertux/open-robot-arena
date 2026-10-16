@@ -133,6 +133,14 @@ local/           # (git-ignored) game files + converted cache
   both, and it has to *find* the click point rather than take the button's centre:
   `chassis.gib`'s `structure note` label is drawn over its buttons, so a click on
   one's middle lands on the label, which is what a label in front should do.
+- **A shape that looks like evidence may not be, and a *note* can be the witness.**
+  The shell has 328 pairs of overlapping siblings sharing a `ChildOrder`, and their
+  dominant shape — a control followed by the label that names it — reads as proof
+  that the later one is in front. It is not proof: those buttons draw no art, so
+  the label is in front of nothing either way. What settled the direction was a
+  screen whose own *note* requires a control to work: the palette's category
+  buttons filter its grid, so they cannot be behind it. When the corpus's shape is
+  ambiguous, a screen that says what it does is the better witness.
 - **A value can mean *nothing*, and that has to be read off the corpus.** The
   headerless record is the base class, `Position` with both halves fractional is a
   percentage, and a `_Size` of `1280 0 1005 0` is the editor saying *no size* —

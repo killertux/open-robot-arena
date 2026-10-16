@@ -542,8 +542,19 @@ Known, documented, not yet fixed:
     and pistons"* — so the words in the data describe what actually appears.
 
     A click inside a category button reaches the grid instead of the button, and
-    that is now understood rather than worked around. One thing that looked settled
-    is not: there are **328** sibling pairs in the corpus whose `ChildOrder` ties
+    that is now understood rather than worked around. This turn settled it. `ChildOrder`'s tie is broken with the
+    **earlier record in front**, and the witness is a screen's own note rather than
+    the corpus's shape: `components.gib`'s palette grid shares the category bar's
+    order and is later in the file, and that screen's notes (*"grid is filtered
+    based on the category selected in this optiongroup"*, *"click to show
+    preview"*) require the buttons to be clickable, which they cannot be behind the
+    grid's cells. The 328-pair survey could not decide it — the dominant shape is a
+    control followed by the label naming it, and those 122 buttons carry blank
+    state art, so the label is in front of nothing either way — and only 6 pairs
+    are even informative. The shell's own composition follows the same rule now:
+    the chassis step layer is inserted *before* the screen it rides over, since it
+    is the one that has to be clickable. A test drives each of the six category
+    buttons with the palette filled and watches the selection move. Earlier: there are **328** sibling pairs in the corpus whose `ChildOrder` ties
     and whose frames overlap, and their dominant shape is a named control followed
     by the label that names it — but that shape reads the same either way round,
     because a button with a `Caption` attachment draws its caption itself from a

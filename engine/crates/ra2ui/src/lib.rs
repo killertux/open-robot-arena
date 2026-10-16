@@ -808,7 +808,15 @@ pub fn draw_order_parented<'a>(
         out: &mut Vec<(&'a Placement<'a>, Option<&'a Placement<'a>>)>,
     ) {
         out.push((p, parent));
-        let mut children: Vec<&Placement> = p.children.iter().collect();
+        // Higher `ChildOrder` is drawn later, and so is in front. Where two
+        // children share one, the **earlier record is in front**: the read is
+        // taken backwards and the sort is stable. That is the direction
+        // `botlab/components.gib` forces — its palette grid shares the category
+        // bar's order and comes later in the file, and the screen's own note
+        // (*"grid is filtered based on the category selected in this
+        // optiongroup"*) says those buttons are what the player clicks, so they
+        // have to be the ones in front of the cells.
+        let mut children: Vec<&Placement> = p.children.iter().rev().collect();
         children.sort_by_key(|p| p.widget.child_order());
         for c in children {
             visit(c, Some(p), out);
@@ -818,7 +826,7 @@ pub fn draw_order_parented<'a>(
     // `ChildOrder` exactly as a widget's children are, which is what puts a
     // modal backdrop (child order -1) behind the window it belongs to (3) when
     // the reader could not give the backdrop a parent.
-    let mut top: Vec<&Placement> = roots.iter().collect();
+    let mut top: Vec<&Placement> = roots.iter().rev().collect();
     top.sort_by_key(|p| p.widget.child_order());
     let mut out = Vec::new();
     for r in top {

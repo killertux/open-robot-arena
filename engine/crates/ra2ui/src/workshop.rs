@@ -286,6 +286,9 @@ pub struct BotLab {
     /// The layer the current step rides over its screen, if any — reloaded on
     /// every screen change so it survives one.
     layer: Option<&'static str>,
+    /// Where the screen's own first record sits in `content slot`: the slot's own
+    /// children, then the layer's, then the screen's.
+    screen_at: usize,
     /// How many children `content slot` has of its own, before a tab is loaded
     /// into it — the file's `white backdrop img`, and any it ever gains.
     slot_own: usize,
@@ -301,6 +304,7 @@ impl BotLab {
             tab: TABS[0].button,
             step: None,
             layer: None,
+            screen_at: 0,
             slot_own: 0,
         };
         // `compose` has already loaded the first tab; count what the slot holds
@@ -309,6 +313,9 @@ impl BotLab {
         let tab_children = fragment.widgets().count();
         let total = lab.slot_children();
         lab.slot_own = total.saturating_sub(tab_children);
+        // The composed screen is the slot's own children and then the first tab,
+        // with no layer yet.
+        lab.screen_at = lab.slot_own;
         Ok(lab)
     }
 
@@ -339,10 +346,16 @@ impl BotLab {
                 continue;
             };
             slot.children.truncate(self.slot_own);
-            slot.children.extend(fragment.widgets().cloned());
+            // The layer goes in **before** the screen, because a tie in
+            // `ChildOrder` is broken by the file with the earlier record in
+            // front: the layer is what must be clickable, so it is the earlier
+            // one. (The shipped screens' own pairs are the same shape — see
+            // `draw_order_parented`.)
             if let Some(layer) = &layer {
                 slot.children.extend(layer.widgets().cloned());
             }
+            self.screen_at = slot.children.len();
+            slot.children.extend(fragment.widgets().cloned());
             done = true;
             break;
         }
@@ -384,7 +397,8 @@ impl BotLab {
         for block in &self.document.blocks {
             if let Block::Widget(w) = block {
                 if let Some(slot) = find(w, CONTENT_SLOT) {
-                    return slot.children.get(self.slot_own);
+                    // The screen's first record, which the layer sits in front of.
+                    return slot.children.get(self.screen_at);
                 }
             }
         }
@@ -805,6 +819,42 @@ mod tests {
                 Some(member),
                 "the group moved to {member}"
             );
+        }
+    }
+
+    /// The palette's category buttons are clickable **with the palette filled**,
+    /// which is the case that was not: the grid shares the category bar's
+    /// `ChildOrder` and comes later in the file, so it is drawn over the buttons,
+    /// and the grid's own frame must not swallow the click. Its cells still are
+    /// targets — the grid's note says to click them — and the option group's
+    /// buttons are what the note says filters it.
+    #[test]
+    fn the_palette_is_clickable_once_it_holds_cells() {
+        let Some(ui) = ui_root() else { return };
+        let mut lab = BotLab::open(&ui).unwrap();
+        lab.select("components button").unwrap();
+        // Fill it, which is what put the grid over the buttons before.
+        let game = ui.parent().unwrap();
+        let all = crate::components::all(game).unwrap();
+        for block in lab.document.blocks.iter_mut() {
+            let Block::Widget(root) = block else { continue };
+            crate::components::fill_selected(root, game, &all);
+            break;
+        }
+        assert_eq!(
+            crate::components::selected_category(lab.content_root().unwrap()),
+            Some(("power", "power button"))
+        );
+
+        for (category, button) in crate::components::CATEGORIES {
+            let (x, y) = reachable_point(&lab, button);
+            assert!(lab.click(x, y, DESIGN_SCREEN, None).unwrap().is_none());
+            assert_eq!(
+                crate::components::selected_category(lab.content_root().unwrap()),
+                Some((category, button)),
+                "a click on {button} reaches it with cells in the grid"
+            );
+            assert_eq!(lab.tab, "components button", "the tab stays");
         }
     }
 
