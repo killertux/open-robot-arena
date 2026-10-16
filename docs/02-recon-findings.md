@@ -339,6 +339,27 @@ grid, hides it, or brings the buttons forward when the palette is shown — is t
 binary's business, and `FUN_00437770` caches both widgets in members (`+0x15c` and
 its neighbours) rather than looking them up by name, which is where to read it.
 
+### What the game does when the components tab opens
+
+`FUN_0042c0c0` is the components tab's own set-up, and it says the palette's
+selection in the binary's words: it looks `category optiongroup` up by name,
+constructs its handler, then looks `power button` up and **sets its state**
+(`FUN_005f9fe0(…, 1)`), and calls `FUN_0042d310(0)` — which stores `0` in the
+tab's own category field and, when the state is non-zero, calls
+`FUN_0042f440(2, category)`. So the tab opens on the power category, which is what
+the file's own `Checked true` on `power button` says too, and what
+[`ra2ui::components::selected_category`] reads. `FUN_0042c280`, called just after,
+clears the tab's cached pointers and flags, and `FUN_0042d8a0` is the **filler**:
+it walks the components (`FUN_0042dfa0()` is how many there are) and calls
+`FUN_005ff890(index, 0x60)` for each — `0x60` is 96, which is the preview art's own
+width, though what that call does with it is not pinned yet.
+
+What that path does **not** do is move, resize or re-order the grid: nothing in
+the tab's set-up touches its position. So if the game resolves the palette's
+overlap — the grid drawn over the option group's row — it does it somewhere else,
+and the filler is where to read next, because it is what decides where a cell
+goes.
+
 ### The event list, and the two places the shipped file is not regular
 
 `hq_events.gib`'s grid says what fills it — *"fill with this season's events

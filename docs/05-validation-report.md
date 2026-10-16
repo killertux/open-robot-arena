@@ -553,7 +553,12 @@ Known, documented, not yet fixed:
     and the grid is `Position 0 0 0 0` with `Size 1 1 74 0`. The designer saw an
     *empty* grid there — only the game fills it — so the overlap only appears once
     the C++ puts cells in. How the shell should compose it is the binary's
-    business, and `FUN_00437770` caches both widgets in members. So this screen's
+    business: `FUN_00437770` caches both widgets in members, and the tab's own
+    set-up (`FUN_0042c0c0`) looks up the option group, sets `power button`'s state
+    and selects category 0 — the file's own baked state, read the same way — but
+    never moves, resizes or re-orders the grid. The filler it calls
+    (`FUN_0042d8a0`) is what decides where a cell goes, and is the next thing to
+    read. So this screen's
     category is set from its own `Checked` member, and the click rule is tested
     where it *is* reachable — `chassis_structure1.gib`'s `drawstyle optiongroup`,
     whose labels are base `Widget`s and so fall through.
