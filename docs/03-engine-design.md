@@ -133,6 +133,12 @@ local/           # (git-ignored) game files + converted cache
   both, and it has to *find* the click point rather than take the button's centre:
   `chassis.gib`'s `structure note` label is drawn over its buttons, so a click on
   one's middle lands on the label, which is what a label in front should do.
+- **A value can mean *nothing*, and that has to be read off the corpus.** The
+  headerless record is the base class, `Position` with both halves fractional is a
+  percentage, and a `_Size` of `1280 0 1005 0` is the editor saying *no size* —
+  three shapes in the format that are not values but the *absence* of one. Each
+  was found by measuring what the corpus does with it (0 `[Widget]` headers in 116
+  files, 18 canvas-sized `_Size` fields in 14) rather than by assuming a sentinel.
 - **A screen's own note is a specification, and the data behind it is shipped.**
   The component palette's grid says *"fill with components in the current
   category"*, and everything that sentence needs is in the game: the categories

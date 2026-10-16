@@ -295,6 +295,18 @@ both names are the data's:
   component-properties panel that the game fills at run time. That is the
   *interaction* layer, and it is the C++'s, not the data's.
 
+### `_Size`, and the value that means *unset*
+
+An `Image` states the size its art is drawn at in an unlabelled `_Size` field, and
+that size overrides the box the layout gave the widget — a scroll bar's thumb is
+`Size 1 1 1 1` inside its track and `_Size 16 0 30 0`. **But one value of it means
+nothing at all: the design canvas, `1280 0 1005 0`.** It is what the editor writes
+when the designer never gave the art a size, and **eighteen fields in fourteen
+files carry it** — `teamhq/event_cell.gib` and the three `eventcell_*.gib` among
+them. Drawing a 140×80 event logo at the canvas stretches it across the screen, so
+the value is read as unset and the art is drawn in its own box. Anything else is a
+real size: `88 0 72 0` for an armour icon, `20 0 12 0` for a weight icon.
+
 ### The event list, and the two places the shipped file is not regular
 
 `hq_events.gib`'s grid says what fills it — *"fill with this season's events

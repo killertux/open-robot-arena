@@ -228,12 +228,9 @@ impl UiAssets {
         // *drawn* at when it differs from the box the layout gave the widget:
         // a scroll bar's thumb is `Size 1 1 1 1` inside its track and `_Size
         // 16 0 30 0`. (A tile ignores it: a pattern fills its frame.)
-        let draught = p.widget.field("_Size").and_then(ra2fmt::gib::Axes::parse);
-        let rect = match draught {
-            Some(axes) if !axes.first.fraction && !axes.second.fraction => {
-                Frame::new(p.frame.x, p.frame.y, axes.first.amount, axes.second.amount)
-            }
-            _ => p.frame,
+        let rect = match stated_size(p.widget.field("_Size")) {
+            Some((w, h)) => Frame::new(p.frame.x, p.frame.y, w, h),
+            None => p.frame,
         };
         Some(UiQuad {
             rect,
@@ -544,6 +541,28 @@ fn rectangle_quad(p: &Placement<'_>, clip: Option<Frame>) -> Option<UiQuad> {
 }
 
 /// Decode art. A `.bmp` or `.tga` the image crate can read, or nothing.
+/// The `_Size` the editor writes when the designer never gave a piece of art a
+/// size: the design canvas itself, 1280×1005. **Eighteen fields in fourteen
+/// files** carry it — `teamhq/event_cell.gib` and the three `eventcell_*.gib`
+/// among them — and a 140×80 event logo drawn at the canvas would be stretched
+/// across the screen. The game draws such art in the box the layout gave it, so
+/// the canvas value is read as *unset*.
+///
+/// Anything else is a real size and overrides the box: a scroll thumb's
+/// `16 0 30 0` inside a 973-pixel track, an armour icon's `88 0 72 0`.
+const UNSET_SIZE: [f32; 2] = [1280.0, 1005.0];
+
+/// The size a widget's `_Size` states, or nothing when it states the editor's
+/// unset.
+fn stated_size(field: Option<&ra2fmt::gib::Field>) -> Option<(f32, f32)> {
+    let axes = field.and_then(ra2fmt::gib::Axes::parse)?;
+    if axes.first.fraction || axes.second.fraction {
+        return None;
+    }
+    let size = (axes.first.amount, axes.second.amount);
+    (size != (UNSET_SIZE[0], UNSET_SIZE[1])).then_some(size)
+}
+
 fn decode_art(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     crate::decode_image(bytes)
 }
@@ -929,6 +948,27 @@ fn scissor_of(clip: Option<Frame>, width: u32, height: u32) -> Option<[u32; 4]> 
 
 #[cfg(test)]
 mod tests {
+    use ra2fmt::gib::Field;
+
+    fn size(raw: &str) -> Option<(f32, f32)> {
+        stated_size(Some(&Field {
+            name: Some("_Size".into()),
+            raw: raw.to_string(),
+        }))
+    }
+
+    /// A `_Size` is the art's own size, and the canvas value is the editor's
+    /// unset rather than a size.
+    #[test]
+    fn the_canvas_size_is_not_a_size() {
+        assert_eq!(size("16 0 30 0"), Some((16.0, 30.0)));
+        assert_eq!(size("88 0 72 0"), Some((88.0, 72.0)));
+        assert_eq!(size("1280 0 1005 0"), None);
+        // A fractional axis is not a pixel size either.
+        assert_eq!(size("1 1 1 1"), None);
+        assert_eq!(stated_size(None), None);
+    }
+
     use super::*;
 
     fn game_dir() -> Option<PathBuf> {

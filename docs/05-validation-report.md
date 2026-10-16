@@ -518,16 +518,18 @@ Known, documented, not yet fixed:
     with three numbers instead of four because the file ends there. The file is
     Windows-1252 with exactly one high byte, an apostrophe.
 
-    One thing is open there, and it is a *renderer* question rather than a data
-    one. The cells fill and land exactly where the grid says (`Rows 3, Columns 3,
-    RowHeight 64, ColWidths 114`), and each cell carries its own event's art — the
-    nine colours differ per event and match each logo's own background — but only
-    a blurred fraction of each logo shows, as if a small window of the art were
-    magnified across the cell. Hiding the cells' `xout` overlay changes nothing,
-    and the same code path draws the component palette's cells sharply, so the
-    difference is in this art path: a 140×80 `.bmp` bound into a 114×64 cell.
-    What would settle it is one line in `art_quad` printing the uv and the
-    texture's dimensions for a cell's quad, which is the next thing to read.
+    Those cells did not draw at first, and what they drew was the *record* of a
+    renderer rule: each cell showed only a blurred wash of its logo's background.
+    The cells were in the right places and carried the right art — the nine
+    colours differed per event — so the question was what size the art was drawn
+    at, and one line in `art_quad` answered it: the quad's rect was **1280×1005**,
+    the design canvas, because `event_cell.gib`'s images carry
+    `_Size 1280 0 1005 0`. That is the editor's *unset* — **eighteen fields in
+    fourteen files** hold it — and drawing a 140×80 logo at the canvas stretches it
+    across the screen. Read as unset, the cells draw their logos: *F.O.R.C.E.
+    Tournament*, *Robot Magazine Combat Event*, *RoboDepot*, *Remote Xplosion*,
+    *Powerbolt*. A real `_Size` is untouched by it — the armour grid's `88 0 72 0`
+    still draws exactly as it did.
 
     The palette now follows the screen's own category and can be walked. Which
     category is current is the group's selected member — `Checked true` on
