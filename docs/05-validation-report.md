@@ -670,7 +670,11 @@ Known, documented, not yet fixed:
     comes out `R BT W RKSH P D2`: **every `O` draws nothing**, the four in `ROBOT`
     and `WORKSHOP` among them, while the letters around them are correct. So the
     title is drawn and its `O`s are not, which is why the word is easy to miss
-    against the toolbar art. The cause is measured and it is the *font file*: `fg_d20`'s
+    against the toolbar art. Measured across all nine faces it is **two** of them, not
+    one: `fg_d20`'s `O` holds 21 pixels over 3 of its 11 columns and `fg_mcn12`'s 12
+    over 2 of 8, where the other seven draw a whole letter. `teamhq/select_team.gib`'s
+    title is the second face's — it reads `SELECT Y UR R B TI CS TEAM` at 12 pixels.
+    The cause is the *font file*: `fg_d20`'s
     record 45 for `O` is a full 11×14 rect whose ink sits in its last three
     columns (21 pixels), while the **same record in `fg_mcn14` draws a whole `O`**
     (45 pixels over eight columns), and the rects around it are a packed row. So
