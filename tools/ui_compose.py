@@ -308,7 +308,7 @@ def composite(lines, images, width, height, game, args):
     fonts = {}
     texts = []
     fills = []
-    skipped_tiles = []
+    tiles_drawn = 0
     for line in lines:
         parts = line.split()
         if len(parts) < 13:
@@ -339,35 +339,46 @@ def composite(lines, images, width, height, game, args):
             continue
         sw, sh, src = image
         # The four numbers are the image's rect in a 1024x1024 *page*. A rect
-        # that runs *past* the page is a **tile** — a pattern to be repeated
-        # (`UI_ScrollBack.bmp` covers 17.9 pages of the screen; `metaldots_pattern`
-        # goes to 9.7) — and repeating is not drawn here yet, so it is left out
-        # rather than stretched, which would be a lie about what it looks like.
-        # Anything else whose rect does not match the file is a whole-page image
-        # (the file is bigger than a page: the cement background is 1280 wide),
-        # and drawing it whole is exactly right.
+        # that runs *past* the page is a **tile**: a pattern repeated at its own
+        # natural size to fill the frame (`metaldots_pattern`'s 341-pixel box is
+        # 5.32813 x 64). Anything else whose rect does not match the file is a
+        # whole-page image — the file is bigger than a page, the cement
+        # background is 1280 wide — and drawing it whole is exactly right.
         if u1 > 1.0001 or v1 > 1.0001 or u0 < -0.0001 or v0 < -0.0001:
-            skipped_tiles.append((relative, (u0, v0, u1, v1)))
-            continue
-        if abs((u1 - u0) * 1024.0 - sw) > 1.0 or abs((v1 - v0) * 1024.0 - sh) > 1.0:
+            tiled = True
+        elif abs((u1 - u0) * 1024.0 - sw) > 1.0 or abs((v1 - v0) * 1024.0 - sh) > 1.0:
+            tiled = False
             u0, v0, u1, v1 = 0.0, 0.0, 1.0, 1.0
+        else:
+            tiled = False
         # The rect is in the 1024² *page*, and a cell's shipped file is already
         # cropped to that cell — so the file is sampled 0..1, which is the frame's
         # own fraction. The rect is only used to tell a cell from a *tile* (a
         # repeat, left out rather than stretched) and from a whole-page image.
         drawn += 1
+        if tiled:
+            tiles_drawn += 1
         for py in range(int(round(h))):
             ty = y + py + 0.5
             if ty < 0 or ty >= height:
                 continue
-            sy = min(sh - 1, max(0, int((py + 0.5) / max(h, 1e-6) * sh)))
+            if tiled:
+                # A pattern repeats at its own size: the source pixel is the
+                # destination one, wrapped — which is the same mapping the
+                # engine gets by asking a repeating sampler for `frame/texture`.
+                sy = min(sh - 1, max(0, int(py) % sh))
+            else:
+                sy = min(sh - 1, max(0, int((py + 0.5) / max(h, 1e-6) * sh)))
             for px in range(int(round(w))):
                 tx = x + px + 0.5
                 if tx < 0 or tx >= width:
                     continue
                 if clip is not None and not (clip[0] <= tx < clip[0] + clip[2] and clip[1] <= ty < clip[1] + clip[3]):
                     continue
-                sx = min(sw - 1, max(0, int((px + 0.5) / max(w, 1e-6) * sw)))
+                if tiled:
+                    sx = min(sw - 1, max(0, int(px) % sw))
+                else:
+                    sx = min(sw - 1, max(0, int((px + 0.5) / max(w, 1e-6) * sw)))
                 o = (sy * sw + sx) * 4
                 r, g, b, a = src[o], src[o + 1], src[o + 2], src[o + 3]
                 if not alpha_flag:
@@ -405,7 +416,7 @@ def composite(lines, images, width, height, game, args):
         after = sum(canvas)
         if os.environ.get("UI_DEBUG"):
             print(f"   text {body!r} at ({x},{y}) with {font_name}: {after - before} px")
-    return canvas, drawn, len(texts), skipped_tiles
+    return canvas, drawn, len(texts), tiles_drawn
 
 
 def main():
@@ -454,9 +465,7 @@ def main():
         for m in images.missing[:6]:
             print(f"     {m}")
     if tiles:
-        print(f"  {len(tiles)} tiles are not drawn (a pattern repeat, not a stretch):")
-        for name, rect in tiles[:4]:
-            print(f"     {name} at {rect}")
+        print(f"  {tiles} tiles drawn as repeats")
     if images.unsupported:
         print(f"  {len(images.unsupported)} images this loader cannot read:")
         for m, why in images.unsupported[:6]:

@@ -576,19 +576,10 @@ impl<'a, 'b> Iterator for PlacementWalk<'a, 'b> {
 ///   buttons and labels land on top of the background, which is what the game
 ///   shows.
 pub fn draw_order<'a>(roots: &'a [Placement<'a>]) -> Vec<&'a Placement<'a>> {
-    fn visit<'a>(p: &'a Placement<'a>, out: &mut Vec<&'a Placement<'a>>) {
-        out.push(p);
-        let mut children: Vec<&Placement> = p.children.iter().collect();
-        children.sort_by_key(|p| p.widget.child_order());
-        for c in children {
-            visit(c, out);
-        }
-    }
-    let mut out = Vec::new();
-    for r in roots {
-        visit(r, &mut out);
-    }
-    out
+    draw_order_parented(roots)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect()
 }
 
 /// Resolve every top-level block of a document against the screen.
@@ -604,14 +595,81 @@ pub fn resolve_with<'a>(
     fonts: Option<&Fonts>,
 ) -> Vec<Placement<'a>> {
     let screen_frame = Frame::new(0.0, 0.0, screen[0], screen[1]);
-    gib.blocks
-        .iter()
-        .filter_map(|b| match b {
-            Block::Widget(w) => Some(place_with(w, screen_frame, fonts)),
+    let mut placed = Vec::new();
+    // The bottom bar's own chrome: `round left`, `round right` and `gray block`
+    // are written at the top level right after the bar they belong to, with
+    // positions measured against *it*. `mainmenu.gib` is the worked case — `0 0`
+    // and `224 0` with 32-pixel corners in a 256-pixel bar, and `gray block` 25
+    // to 231 of it — and `bottomnav.gib` and `bottomnav_main.gib` carry the same
+    // three names at the same positions. The .gib's own `NumChildren` says the
+    // bar has one child, so the count is what is wrong, not the geometry.
+    let mut bar: Option<Frame> = None;
+    for block in &gib.blocks {
+        let Block::Widget(w) = block else {
             // A fragment has no frame of its own until a slot loads it.
-            Block::Attachment(_) => None,
-        })
-        .collect()
+            continue;
+        };
+        let parent = match bar {
+            Some(frame) if w.kind == WidgetKind::Image && BAR_CHROME.contains(&w.name()) => frame,
+            _ => screen_frame,
+        };
+        let placement = place_with(w, parent, fonts);
+        if w.kind == WidgetKind::Group {
+            bar = Some(placement.frame);
+        }
+        placed.push(placement);
+    }
+    placed
+}
+
+/// The three pieces of the bottom bar's chrome that the `.gib` lists after the
+/// bar rather than inside it.
+const BAR_CHROME: [&str; 3] = ["round left", "round right", "gray block"];
+
+/// The art a widget draws.
+///
+/// Usually its own `_Filename`. An `Image` inside a container's selection or
+/// highlight bar has none at all: those bars are the one place the shell draws
+/// art the `.gib` cannot name, and the art is `Selection.tga`, which ships in
+/// `RA2.cfz` and which no shipped screen mentions. All 36 bars are a `Rectangle`
+/// with `ID` 100 or 101 holding an image with a blank name, and 100/101 are what
+/// their containers' own `Selection` and `Highlight` say.
+pub fn art_for<'a>(
+    widget: &'a ra2fmt::gib::Widget,
+    parent: Option<&ra2fmt::gib::Widget>,
+) -> Option<&'a str> {
+    let file = widget.filename()?;
+    if !file.is_empty() {
+        return Some(file);
+    }
+    let parent = parent?;
+    let bar = parent.kind == WidgetKind::Rectangle
+        && matches!(parent.id(), 100 | 101)
+        && widget.kind == WidgetKind::Image;
+    bar.then_some("Point Selection.tga")
+}
+
+/// The widgets to draw, back to front, each with the widget that holds it.
+pub fn draw_order_parented<'a>(
+    roots: &'a [Placement<'a>],
+) -> Vec<(&'a Placement<'a>, Option<&'a Placement<'a>>)> {
+    fn visit<'a>(
+        p: &'a Placement<'a>,
+        parent: Option<&'a Placement<'a>>,
+        out: &mut Vec<(&'a Placement<'a>, Option<&'a Placement<'a>>)>,
+    ) {
+        out.push((p, parent));
+        let mut children: Vec<&Placement> = p.children.iter().collect();
+        children.sort_by_key(|p| p.widget.child_order());
+        for c in children {
+            visit(c, Some(p), out);
+        }
+    }
+    let mut out = Vec::new();
+    for r in roots {
+        visit(r, None, &mut out);
+    }
+    out
 }
 
 /// Place one widget inside `parent`.
@@ -644,17 +702,56 @@ fn place_at<'a>(
         WidgetKind::SplitFrame => split_children(widget, frame, clip, fonts),
         // A scroll bar puts its parts at its two ends and between them.
         WidgetKind::ScrollBar => scroll_children(widget, frame, clip, fonts),
-        _ => widget
-            .children
-            .iter()
-            .map(|c| place_at(c, frame, clip, fonts))
-            .collect::<Vec<_>>(),
+        _ => {
+            let mut placed: Vec<Placement> = widget
+                .children
+                .iter()
+                .map(|c| place_at(c, frame, clip, fonts))
+                .collect();
+            centre_captions(&mut placed);
+            placed
+        }
     };
     Placement {
         widget,
         frame,
         clip,
         children,
+    }
+}
+
+/// A button that carries a `Caption` attachment takes the `Text` after it as its
+/// caption, and the caption is drawn centred in the button.
+///
+/// Both halves are measured. There are exactly **122** `Caption` attachments in
+/// the corpus and exactly **122** buttons and check boxes whose four state images
+/// all have a blank `_Filename` — the ones with no art of their own — and each of
+/// the 122 is followed by its `Text` (`mainmenu.gib`'s bar is a gear, a gear, and
+/// then `Button "Options button"`, `Text "Options"`, `Button "credits button"`,
+/// `Text "Credits"`, …). What settles the centring is that the captions' own
+/// positions make no sense against their parent: the three bar captions are at
+/// x = 14, 18 and 9 while their buttons are at x = 32, 105 and 183, so taken as
+/// the group's they would all pile up at the left — which is what a composite
+/// does before this rule. Inside their buttons 14 of 67, 18 of 72 and 9 of 40 are
+/// each roughly centred, which is where the game puts them.
+fn centre_captions(children: &mut [Placement<'_>]) {
+    for i in 0..children.len() {
+        let captioned = matches!(
+            children[i].widget.kind,
+            WidgetKind::Button | WidgetKind::CheckBox
+        ) && children[i].widget.attachment("Caption").is_some();
+        if !captioned || i + 1 >= children.len() || children[i + 1].widget.kind != WidgetKind::Text
+        {
+            continue;
+        }
+        let button = children[i].frame;
+        let caption = children[i + 1].frame;
+        children[i + 1].frame = Frame::new(
+            button.x + (button.w - caption.w) / 2.0,
+            button.y + (button.h - caption.h) / 2.0,
+            caption.w,
+            caption.h,
+        );
     }
 }
 

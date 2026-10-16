@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         named.sort();
         named.dedup();
         println!(
-            "  {} tiles are not drawn (a pattern repeat): {}",
+            "  {} tiles drawn as repeats: {}",
             scene.tiles.len(),
             named
                 .iter()

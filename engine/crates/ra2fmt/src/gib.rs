@@ -535,7 +535,11 @@ pub fn parse(text: &str) -> Result<Gib, Error> {
         .split('\n')
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .collect();
-    let mut p = Parser { lines, at: 0 };
+    let mut p = Parser {
+        lines,
+        at: 0,
+        pending: Vec::new(),
+    };
 
     p.skip_blank();
     let header = p.lines.get(p.at).copied().unwrap_or("");
@@ -560,6 +564,12 @@ pub fn parse(text: &str) -> Result<Gib, Error> {
 struct Parser<'a> {
     lines: Vec<&'a str>,
     at: usize,
+    /// Attachments read but not yet hung on a widget. The shipped writer puts a
+    /// widget's attachments *before* it — every `[Background]` in the corpus is
+    /// followed by a widget, and the head of `armor.gib` shows a `Background`
+    /// and a `Border` between a group and the group they dress — so they are
+    /// carried forward and taken by the next widget block.
+    pending: Vec<Attachment>,
 }
 
 impl<'a> Parser<'a> {
@@ -604,30 +614,6 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    /// Whether the block at the cursor is a widget rather than an attachment:
-    /// what makes it one is that its fields carry `NumChildren`. Scanning the
-    /// block's own field lines is cheap and has no side effects, which is what
-    /// lets the caller look ahead without parsing (and re-parsing) a subtree.
-    fn block_is_widget(&self) -> bool {
-        let mut i = self.at + 1;
-        while let Some(line) = self.lines.get(i) {
-            if line.trim().is_empty() {
-                i += 1;
-                continue;
-            }
-            if line.starts_with('[') {
-                return false;
-            }
-            if let Some((name, _)) = line.split_once(' ') {
-                if name == "NumChildren" {
-                    return true;
-                }
-            }
-            i += 1;
-        }
-        false
-    }
-
     fn block(&mut self) -> Result<Block, Error> {
         let at = self.at;
         let kind = self
@@ -646,18 +632,27 @@ impl<'a> Parser<'a> {
             .find(|f| f.name.as_deref() == Some("NumChildren"))
             .and_then(|f| f.number())
         else {
-            return Ok(Block::Attachment(Attachment {
+            // An attachment: it dresses the widget that comes *next*, so it is
+            // held and that widget takes it. On its own at the end of a file it
+            // is a *fragment* — a slot's worth of chrome with no widget of its
+            // own — and comes back as itself.
+            let attachment = Attachment {
                 kind: AttachmentKind::parse(&kind),
                 fields,
-            }));
+            };
+            self.pending.push(attachment.clone());
+            self.skip_blank();
+            if self.at >= self.lines.len() {
+                return Ok(Block::Attachment(attachment));
+            }
+            return self.block();
         };
         let count = count as usize;
         let mut children = Vec::new();
-        let mut attachments = Vec::new();
-        // The children are the next `count` *widget* blocks; attachments among
-        // them hang off this widget. The writer puts them first in every shipped
-        // file, but nothing in the format says it has to, so they are collected
-        // wherever they fall in the run.
+        let attachments = std::mem::take(&mut self.pending);
+        // The children are the next `count` widget blocks. An attachment among
+        // them dresses the child that follows it and has already been taken by
+        // that child's own `block` call.
         while children.len() < count {
             self.skip_blank();
             if self.header().is_none() {
@@ -668,19 +663,7 @@ impl<'a> Parser<'a> {
             }
             match self.block()? {
                 Block::Widget(w) => children.push(w),
-                Block::Attachment(a) => attachments.push(a),
-            }
-        }
-        // Attachments can also trail the last child. Anything else belongs to
-        // the parent and is left where it is.
-        loop {
-            self.skip_blank();
-            if self.header().is_none() || self.block_is_widget() {
-                break;
-            }
-            match self.block()? {
-                Block::Attachment(a) => attachments.push(a),
-                Block::Widget(_) => unreachable!("block_is_widget agreed"),
+                Block::Attachment(_) => unreachable!("an attachment came back mid-run"),
             }
         }
         Ok(Block::Widget(Widget {
@@ -764,27 +747,29 @@ NumChildren 0\r\n";
         assert_eq!(split.kind, WidgetKind::SplitFrame);
         assert_eq!(split.name(), "armor split");
         assert_eq!(split.children.len(), 2);
-        // The Background and Border are the *left* group's, not the split's.
+        // The Background and Border dress the *next* widget in the run — the
+        // group that holds the 3D view — which is what the shipped writer means
+        // by putting an attachment before its widget.
         assert!(split.attachments.is_empty());
         let left = &split.children[0];
         assert_eq!(left.name(), "left");
         assert_eq!(left.children.len(), 1);
-        assert_eq!(left.attachments.len(), 2);
-        assert_eq!(left.attachments[0].kind, AttachmentKind::Background);
-        assert_eq!(left.attachments[1].kind, AttachmentKind::Border);
-        assert_eq!(
-            left.attachment("Border").unwrap().number("Width"),
-            Some(1.0)
-        );
-        assert_eq!(
-            left.attachment("Border").unwrap().four("Outer"),
-            Some([0.6, 0.6, 0.6, 1.0])
-        );
-
+        assert!(left.attachments.is_empty());
         let view = &left.children[0];
         assert_eq!(view.name(), "3d grp");
         assert_eq!(view.alignment(), 10);
         assert_eq!(view.children.len(), 0);
+        assert_eq!(view.attachments.len(), 2);
+        assert_eq!(view.attachments[0].kind, AttachmentKind::Background);
+        assert_eq!(view.attachments[1].kind, AttachmentKind::Border);
+        assert_eq!(
+            view.attachment("Border").unwrap().number("Width"),
+            Some(1.0)
+        );
+        assert_eq!(
+            view.attachment("Border").unwrap().four("Outer"),
+            Some([0.6, 0.6, 0.6, 1.0])
+        );
         // The split's second slot is the right pane, not a grandchild of the
         // left one: the two are siblings.
         assert_eq!(split.children[1].name(), "right");

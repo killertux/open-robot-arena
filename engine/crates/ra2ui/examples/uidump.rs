@@ -143,9 +143,10 @@ fn main() {
             let c = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
             let (cx, cy, cw, ch) = clip_fields(p);
             // An `Image` states its own `_Size`: the size the art is *drawn* at
-            // when it differs from the box the layout gave the widget.
+            // when it differs from the box the layout gave the widget. A *tile*
+            // is the exception — a pattern fills its frame, at its own scale.
             let (w, h) = match p.widget.field("_Size").and_then(ra2fmt::gib::Axes::parse) {
-                Some(axes) if !axes.first.fraction && !axes.second.fraction => {
+                Some(axes) if !axes.first.fraction && !axes.second.fraction && !is_tile(uv) => {
                     (axes.first.amount, axes.second.amount)
                 }
                 _ => (p.frame.w, p.frame.h),
@@ -211,6 +212,12 @@ fn main() {
             f.h
         );
     }
+}
+
+/// Whether an image's rect runs past its page, which is what makes it a pattern
+/// to repeat rather than a cell to draw once.
+fn is_tile(uv: [f32; 4]) -> bool {
+    uv[2] > 1.0001 || uv[3] > 1.0001 || uv[0] < -0.0001 || uv[1] < -0.0001
 }
 
 /// The clip rectangle a rects line carries: `0 0 0 0` for "nothing clips me".

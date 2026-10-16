@@ -202,6 +202,42 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   whole page, where the file is simply the whole image). The 25 that differ are
   *tiles* — `common/metaldots_pattern.bmp` is a 64×64 texture whose rects run up
   to 9.7 pages — so a renderer draws a cell whole and repeats a tile.
+- **An attachment dresses the widget that comes *next*.** The shipped writer
+  puts a widget's `[Background]`/`[Border]`/`[Caption]` *before* it — every
+  attachment in the corpus is followed by a widget, and `armor.gib` has a
+  `Background` and a `Border` between one group and the group they dress — so
+  the reader carries them forward; a file that is nothing but an attachment is a
+  *fragment*, a slot's worth of chrome with no widget of its own. This reader had
+  them one widget early, which put every caption in the game on the wrong side
+  of its button.
+- **A tile repeats at its own size.** `metaldots_pattern.bmp` is 64×64 and its
+  box is 341×201; its rect is `0 0 5.32813 3.14063`, and `5.32813 x 64 = 341`
+  exactly — in **every one of the 26 tiles in the corpus** the rect is the
+  authoring size over the texture's size. So the pattern's period is the
+  texture's own size and the widget's frame says how much of it to draw: a
+  scroll trough is a 16×16 texture over a 16×973 track, sixty-odd repeats of it.
+- **A caption is a `Caption` attachment plus the `Text` after the button.** There
+  are exactly **122** `Caption` attachments in the corpus and exactly **122**
+  buttons and check boxes whose four state images all have a blank `_Filename` —
+  the ones with no art — and each is followed by its text. The game centres it:
+  `mainmenu.gib`'s three bar captions are at x = 14, 18 and 9 in a group whose
+  buttons are at 32, 105 and 183, so read against the group they pile up at the
+  left, while against their buttons (67, 72 and 40 wide) each is roughly centred.
+- **The bottom bar's chrome is written after the bar, not in it.** `round left`,
+  `round right` and `gray block` carry positions measured against the bar —
+  `0 0` and `224 0` with 32-pixel corners in a 256-pixel bar, `gray block` 25 to
+  231 — and the same three names at the same positions are in `bottomnav.gib` and
+  `bottomnav_main.gib`. The bar's own `NumChildren` says 1, so it is the count
+  that is wrong, not the geometry.
+- **The selection bars' art is the game's, and it is named oddly.** Every one of
+  the 36 `Grid`/`ListBox` selection bars is a `Rectangle` with `ID` 100 or 101
+  holding an `Image` with a blank `_Filename`; the art is in `RA2.cfz` as
+  **`Point Selection.tga`** — a `.cfz` entry with a space in it — and no shipped
+  screen mentions it.
+- **And a button has no art at all.** 122 of the corpus's 265 buttons and check
+  boxes have four blank state images, and `RA2.cfz` holds `Point Selection.tga`
+  and the `UI_Scroll*` family but no button art: what a button draws is its
+  caption and nothing else.
 - **An `Image` also states `_Size`**, the size its art is *drawn* at when that
   differs from the box the layout gave the widget. A scroll bar's thumb is
   `Size 1 1 1 1` — its track — and `_Size 16 0 30 0`, and drawing it at the box

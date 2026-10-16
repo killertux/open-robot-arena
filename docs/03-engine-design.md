@@ -78,7 +78,12 @@ local/           # (git-ignored) game files + converted cache
   each carrying the clip `ClipMode` worked out — and draws them headlessly, so
   `uishot <screen.gib> <out.png>` renders any of the 116 shipped screens. Still
   to come: the cells' *content* (a `LoadCell` field the game's own reader
-  consumes), tiles, the `giScript`/`Gooey` Python surface, and the workshop.
+  consumes), the `giScript`/`Gooey` Python surface, and the workshop. The visual
+  pass is done: tiles repeat at their texture's own size, the selection bars draw
+  `Point Selection.tga` (the game's own art, named by no screen), captions are
+  found by their `Caption` attachment and centred in their buttons, and the
+  bottom bar's chrome — written after the bar rather than in it — lands in the
+  bar.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
 
 ## M5 design notes

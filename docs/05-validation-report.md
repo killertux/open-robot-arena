@@ -417,8 +417,23 @@ Known, documented, not yet fixed:
     put under it. What the shell still does not draw is named: tiles (repeats),
     `Lines` borders, `Glyph` widgets, `Proxy` and `Placeholder`, and the chrome
     the game draws from its own code — every `Button`'s four state images ship
-    with a blank `_Filename`, and only `Selection.tga` and the `UI_Scroll*`
-    family are in `RA2.cfz` to go on.
+    with a blank `_Filename`, and only `Point Selection.tga` and the `UI_Scroll*`
+    family are in `RA2.cfz` to go on, so a button draws its caption and nothing
+    else.
+
+    The visual pass then closed the rest: tiles repeat at their texture's own
+    size (the rect is the authoring size over the texture, exactly, in all 26),
+    the 36 selection bars draw that `Point Selection.tga`, captions are found by
+    the `Caption` attachment they carry — 122 attachments, 122 artwork-less
+    buttons — and centred in their buttons, and the bottom bar's three chrome
+    images are placed in the bar whose geometry their positions fit to the pixel
+    even though its `NumChildren` denies them. It also turned up a reader bug
+    worth its own line: attachments dress the widget that *follows* them, and
+    this reader had hung them on the one before, which is why captions were on
+    the wrong side of their buttons. `armor.gib` and `hq_league.gib` are
+    fragments, so their own stray scroll trough now fills the screen — faithful
+    to the file, and wrong for the same reason a fragment is: it has no slot
+    until a screen loads it.
 
     Placing the containers also caught a bug in the *check*, not the engine: the
     compositor sampled an image at its page rect, so every art cell whose rect did

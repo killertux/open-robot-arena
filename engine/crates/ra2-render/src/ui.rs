@@ -26,17 +26,19 @@
 //!
 //! ## What is not drawn yet
 //!
-//! Tiles (a repeated pattern — the scroll trough, `metaldots_pattern`), `Lines`
-//! borders, `Glyph` (a face character drawn as a widget of its own), `Proxy` (a
-//! file drawn in place of the widget) and `Placeholder` (a slot for a screen).
-//! Each is a hole with a name, not a silence.
+//! `Lines` borders, `Glyph` (a face character drawn as a widget of its own),
+//! `Proxy` (a file drawn in place of the widget) and `Placeholder` (a slot for a
+//! screen). The shell's own chrome — every `Button`'s art — is not in the data
+//! at all: its four state images carry a blank `_Filename` and only
+//! `Selection.tga` and the `UI_Scroll*` family are in `RA2.cfz` to go on, so a
+//! button draws its caption and nothing else. Each is a hole with a name.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bytemuck::{Pod, Zeroable};
 use ra2fmt::giff::Font;
-use ra2ui::{draw_order, Frame, Placement};
+use ra2ui::{Frame, Placement};
 
 use crate::resolve_ci;
 
@@ -125,7 +127,7 @@ impl UiAssets {
     /// Build the draw list for a placed screen.
     pub fn scene(&mut self, roots: &[Placement<'_>], screen: [u32; 2]) -> UiScene {
         let mut quads = Vec::new();
-        for p in draw_order(roots) {
+        for (p, parent) in ra2ui::draw_order_parented(roots) {
             if !p.widget.visible() {
                 continue;
             }
@@ -142,7 +144,7 @@ impl UiAssets {
                     quads.push(fill);
                 }
             }
-            if let Some(quad) = self.art_quad(p, clip) {
+            if let Some(quad) = self.art_quad(p, parent, clip) {
                 quads.push(quad);
             }
         }
@@ -157,19 +159,42 @@ impl UiAssets {
 
     /// The quad a widget's `_Filename` draws, if it names art this build can
     /// load and is not a repeated pattern.
-    fn art_quad(&mut self, p: &Placement<'_>, clip: Option<Frame>) -> Option<UiQuad> {
-        let file = p.widget.filename()?;
-        if file.is_empty() {
-            return None;
-        }
+    fn art_quad(
+        &mut self,
+        p: &Placement<'_>,
+        parent: Option<&Placement<'_>>,
+        clip: Option<Frame>,
+    ) -> Option<UiQuad> {
+        let file = ra2ui::art_for(p.widget, parent.map(|q| q.widget))?;
         let uv = p.widget.uv().unwrap_or([0.0, 0.0, 1.0, 1.0]);
-        // A rect that runs past one page is a *tile*: a pattern to repeat. Not
-        // drawn yet, and left out rather than stretched.
-        if uv[2] > 1.0001 || uv[3] > 1.0001 || uv[0] < -0.0001 || uv[1] < -0.0001 {
-            self.tiles.push(file.to_string());
-            return None;
-        }
+        // A rect that runs past one page is a *tile*: a pattern to repeat. The
+        // rect is the authoring size over the texture — `metaldots_pattern`'s
+        // 341-pixel box is 5.32813 x 64 — so the pattern's period is the
+        // texture's own size and the frame says how much of it to draw. (Where
+        // the runtime has resized the widget since — a scroll trough whose track
+        // is 973 pixels and whose rect says 4.25 pages of a 16-pixel pattern —
+        // the natural size is the reading that looks like a trough.)
+        let tiled = uv[2] > 1.0001 || uv[3] > 1.0001 || uv[0] < -0.0001 || uv[1] < -0.0001;
         let texture = self.texture(file)?;
+        if tiled {
+            self.tiles.push(file.to_string());
+            let (tw, th) = (
+                self.textures[texture].width.max(1) as f32,
+                self.textures[texture].height.max(1) as f32,
+            );
+            return Some(UiQuad {
+                rect: p.frame,
+                uv: [0.0, 0.0, p.frame.w / tw, p.frame.h / th],
+                color: p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]),
+                texture,
+                alpha: p
+                    .widget
+                    .field("_Alpha")
+                    .and_then(|f| f.flag())
+                    .unwrap_or(true),
+                clip,
+            });
+        }
         let alpha = p
             .widget
             .field("_Alpha")
@@ -184,7 +209,7 @@ impl UiAssets {
         // An `Image` also states its own `_Size`, which is the size the art is
         // *drawn* at when it differs from the box the layout gave the widget:
         // a scroll bar's thumb is `Size 1 1 1 1` inside its track and `_Size
-        // 16 0 30 0`.
+        // 16 0 30 0`. (A tile ignores it: a pattern fills its frame.)
         let draught = p.widget.field("_Size").and_then(ra2fmt::gib::Axes::parse);
         let rect = match draught {
             Some(axes) if !axes.first.fraction && !axes.second.fraction => {
@@ -453,12 +478,14 @@ impl UiRenderer {
             cache: None,
         });
         // Nearest: the composite picks one source pixel per destination pixel,
-        // and a filtering sampler would blur the picture away from it.
+        // and a filtering sampler would blur the picture away from it. Repeating,
+        // because that is what a tile's uv asks for; every cell and every glyph
+        // has a uv inside 0..1, so nothing else notices.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("ui-sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
@@ -785,7 +812,7 @@ mod tests {
     /// A screen whose art lives in the archive still resolves it, and a repeated
     /// pattern is named rather than stretched across the screen.
     #[test]
-    fn a_tile_is_named_and_not_drawn() {
+    fn a_tile_is_drawn_at_its_own_size() {
         let Some(game) = game_dir() else { return };
         let scene = scene_of(&game, "teamhq/hq_league.gib");
         assert!(
@@ -793,15 +820,24 @@ mod tests {
             "the trough is a tile: {:?}",
             scene.tiles
         );
-        // Nothing is drawn from a rect that runs past its page: that is what a
-        // tile is, and stretching one would be a lie about what it looks like.
+        // A pattern repeats at its own size — a 16-pixel trough texture over a
+        // 973-pixel track asks for about sixty copies — rather than being
+        // stretched over the frame, which is a lie about what it looks like.
+        let mut checked = 0;
         for quad in &scene.quads {
-            let [_, _, u1, v1] = quad.uv;
-            assert!(
-                u1 <= 1.0001 && v1 <= 1.0001,
-                "{:?}",
-                scene.textures[quad.texture].label
+            let label = scene.textures[quad.texture].label.clone();
+            if !scene.tiles.iter().any(|t| label.contains(t.as_str())) {
+                continue;
+            }
+            checked += 1;
+            let (tw, th) = (
+                scene.textures[quad.texture].width as f32,
+                scene.textures[quad.texture].height as f32,
             );
+            assert!((quad.uv[2] - quad.rect.w / tw).abs() < 0.01, "{label}");
+            assert!((quad.uv[3] - quad.rect.h / th).abs() < 0.01, "{label}");
+            assert!(quad.uv[2] > 1.0 || quad.uv[3] > 1.0, "{label} repeats");
         }
+        assert!(checked > 0, "the trough was drawn");
     }
 }
