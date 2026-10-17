@@ -29,16 +29,18 @@
 //! bearing, a third value that tracks the font size, and the glyph's rect **in
 //! the page, as a fraction** (`u0 v0 u1 v1`).
 //!
-//! The page is **16-bit**, and the two bytes are two different pictures of the
-//! same glyphs: the high byte is the antialiased coverage and the low byte a
-//! hard 1-bit mask. It is also stored **bottom-up**, so a renderer must read it
-//! that way round: the engine's own path swaps the two `v`s of a glyph's quad,
-//! and reading the page in byte order draws every label in the shell upside-down
-//! — a capital `T` with its bar at the bottom and an `L` with its foot at the
-//! top. That was measured through the whole pipeline, and the check is now a
-//! test (`the_page_is_stored_bottom_up`): inside the rows its own rect names,
-//! `T`'s ink sits *higher* than `L`'s, which is only true if the page runs
-//! bottom-up.
+//! The page is **16-bit**, and the high byte is the antialiased coverage. The
+//! low byte is **not** the glyph mask this note once called it: dumped, more
+//! than 90% of it is `0xFF` (the colour/alpha channel, and what the page builder
+//! `FUN_005cd560` writes with `(coverage << 8) | 0xfff`), so only the high byte
+//! is a picture of the glyphs. The page is also stored **bottom-up**, so a
+//! renderer must read it that way round: the engine's own path swaps the two `v`s
+//! of a glyph's quad, and reading the page in byte order draws every label in the
+//! shell upside-down — a capital `T` with its bar at the bottom and an `L` with
+//! its foot at the top. That was measured through the whole pipeline, and the
+//! check is now a test (`the_page_is_stored_bottom_up`): inside the rows its own
+//! rect names, `T`'s ink sits *higher* than `L`'s, which is only true if the page
+//! runs bottom-up.
 //!
 //! The horizontal axis is **not** flipped, and the drawing is what settles it: a
 //! label reading `LOCAL FJORD 12345` in `fg_d26` and again in `fg_mcn16` comes
@@ -71,31 +73,41 @@
 //! The record's four floats are settled: the loader that *builds* a runtime page
 //! (`FUN_005cd560`) writes `u0 = x/W`, `v0 = y/H`, `u1 = (x + width)/W`,
 //! `v1 = (y + height)/H`, so the order is `u0 v0 u1 v1` and `v` is measured from
-//! the page's bottom (which [`Glyph::rect`] turns over). But the stored page's
-//! glyphs do **not** sit in the rects the records name, and the mismatch is not
-//! one of the cheap candidates:
+//! the page's bottom (which [`Glyph::rect`] turns over). The page's picture is the
+//! **high byte**; the low byte is colour, not a mask (above).
 //!
-//! * the field order, the `v` flip and the rounding rule are settled by that
-//!   loader and by the ink sitting in the page's bottom rows;
-//! * the sample pairing does not settle it either: reading the page as the low
-//!   byte, as one of two planes, big-endian, at `512x128`, `128x512`, `512x256`
-//!   or `256x512`, or as half-rows repeated, all leave ~85 of the ~92 scored
-//!   rects with ink in the one-pixel gap column they share with the next glyph;
-//! * every rect *does* hold ink — the rects are *near* their glyphs — and no
-//!   constant shift of a packed row (every `d` in `-10..=10`) brings the count
-//!   near zero: the best is 17 of 20 for `fg_d20` and 18 of 33 for `fg_mcn14`.
+//! **The "ink just outside the rect" count is confounded and is only a
+//! baseline.** A rect that frames its glyph would leave `u0 - 1` and `u1` blank,
+//! but consecutive rects are contiguous with a one-pixel gap, so the two checks
+//! land on the *same shared gap column*, and a packer whose glyphs touch (or
+//! whose coverage bleeds) puts ink there for almost every record. The lesson came
+//! from trying to read the shell: the labels that looked clean in the workshop
+//! toolbar are **baked into the button `.bmp` art**, not drawn by this reader, so
+//! they were never evidence about a face.
 //!
-//! So the records and the page describe **different packings**: the page's glyph
-//! blocks sit a few columns left of the rects, at a slightly different per-glyph
-//! pitch. `almost_no_record_brackets_its_glyph` keeps the exact counts — ink
-//! inside, ink in the shared gap, and the best shift per packed row — so the day
-//! the mapping is read right the test says so. The next read is the `.giff` →
-//! runtime-font conversion: `FUN_005ce100` opens the file by name and
-//! `FUN_005ce320` deserialises it, but reads **four floats then three ints** per
-//! glyph, where the stored record is **three ints then four floats**. A
-//! conversion layer (or a second, unshipped file) sits between them, and that is
-//! where a record's `u0` — or the page the records point into — may be
-//! re-derived.
+//! A probe of all nine faces (`[Text] HAMBURGEFONTSIV`, rendered by `uishot` and
+//! by `tools/ui_compose.py`, which agree pixel for pixel) shows **every face
+//! smears**, worst the small condensed ones (`fg_mcn12`, `fg_mcn14`,
+//! `fg_mcn16`), least the large `fg_d*`. There is no per-face split to exploit.
+//!
+//! The diagnostic measurement is the fit. Segmenting each packed row's coverage
+//! into ink runs (blank columns are the cell boundaries) and pairing each rect
+//! with its run gives, per face, `cell_start = a·x0 + b` with **a ≈ 1.00,
+//! b ≈ 0, residual ≈ 3 px** (and no drift with the record index: the best-shift
+//! test leaves 17/20 for `fg_d20` and 18/33 for `fg_mcn14`). So it is not a field
+//! order, a flip, a rounding rule, a sample pairing, a uniform shift, a scale or
+//! a pitch: each glyph is a few columns off in its own right. At the right end of
+//! a row the error is largest — `fg_mcn16`'s record 31 (`A`) is the rect
+//! `(236,244,10,12)`, whose window holds blank plus one bar, while `A`'s ink run
+//! is `244..250`, eight columns right — which is why `A`, `M`, `W` and the small
+//! faces smear most.
+//!
+//! The next read is the **`.giff` → runtime-font conversion**: `FUN_005ce100`
+//! opens the file by name and `FUN_005ce320` deserialises it, but reads **four
+//! floats then three ints** per glyph, where the stored record is **three ints
+//! then four floats**. A conversion layer (or a second, unshipped file) sits
+//! between them, and that is where a record's `x`/`y` — or the page the records
+//! point into — may be re-derived.
 //!
 //! What a font is *for* here is [`Font::extent`]: the size a zero-`Size` `Text`
 //! widget takes, which is `ascent - descent` tall and the sum of the advances
@@ -121,7 +133,9 @@ pub struct Font {
     /// straight. (The *uv* in a record is measured from the bottom, which is
     /// what `rect` turns over.)
     pub page: Vec<u8>,
-    /// The 1-bit mask that ships alongside the coverage, same layout.
+    /// The other byte of each 16-bit sample, same layout. It is **not** a glyph
+    /// mask: more than 90% of it is `0xFF`, the colour/alpha channel the page
+    /// builder writes (`(coverage << 8) | 0xfff`), so it carries no picture.
     pub mask: Vec<u8>,
     /// 96 records. The one for character `c` is `(c - `[`FIRST_CHAR`]`) * 28` —
     /// see the module note.
@@ -276,7 +290,7 @@ pub fn parse(data: &[u8]) -> Result<Font, Error> {
     let glyphs = (0..COUNT).map(|i| record(HEADER + i * RECORD)).collect();
 
     // Two bytes per sample: the high one is the antialiased coverage, the low
-    // one the 1-bit mask.
+    // one the colour/alpha channel (mostly 0xFF), not a glyph mask.
     let mut page = Vec::with_capacity(page_samples);
     let mut mask = Vec::with_capacity(page_samples);
     for i in 0..page_samples {
@@ -594,29 +608,45 @@ mod tests {
         );
     }
 
-    /// **Almost no record brackets its glyph.** A rect that frames a glyph leaves
-    /// the columns at `u0 - 1` and `u1` blank, and of the 96 records in
-    /// `fg_mcn14` only **five** do: 87 have ink just outside on one side or both,
-    /// 86 in `fg_mcn16` and 78 in `fg_d20`. The page itself is fine — dumped with
-    /// `ra2 font RA2.cfz <face> --page` it holds every glyph correctly formed — so
-    /// the rects are where the fault is, and a glyph drawn through one comes out
-    /// as its own shape plus a stroke of its neighbour.
+    /// **The "ink just outside the rect" count is confounded — keep it only as a
+    /// baseline.** A rect that frames a glyph would leave `u0 - 1` and `u1` blank,
+    /// but consecutive rects are contiguous with a one-pixel gap, so both checks
+    /// land on the *same shared gap column*; a packer whose glyphs touch (or whose
+    /// coverage bleeds) puts ink there for almost every record. So of the 96
+    /// records in `fg_mcn14`, 87 "cut a neighbour" even though every rect holds
+    /// ink — and the workshop toolbar that *looks* clean is baked `.bmp` art, not
+    /// this reader. The number is kept so the day the alignment is fixed the test
+    /// says so.
     ///
-    /// This is a **baseline of a defect**, not a rule: the numbers are kept so the
-    /// day the alignment is fixed the test says so. The test also asserts the
-    /// **measurement that localises the fault**: the cells do hold ink (so the
-    /// rects are near their glyphs), and *no* constant shift of a packed row's
-    /// rects — every `d` in `-10..=10` is tried — brings the cut near zero. The
-    /// fault is therefore not a field order, a flip, a rounding rule, a sample
-    /// pairing or a uniform offset: the records describe a **different packing**
-    /// than the page. See the module note.
+    /// The test also asserts the measurements that localise it: the low byte is
+    /// colour, not a glyph mask (more than 90% is `0xFF`); the cells do hold ink;
+    /// and *no* constant shift of a packed row (`d` in `-10..=10`) comes close. A
+    /// fit of the page's own ink runs against the rects gives `a ≈ 1.00, b ≈ 0`
+    /// with a ~3 px per-glyph residual on **both** faces — not a field order, a
+    /// flip, a rounding rule, a sample pairing, a uniform offset, a scale or a
+    /// pitch, but a per-glyph scatter (largest at a row's right end: `fg_mcn16`'s
+    /// `A` rect is `(236,244,10,12)` while `A`'s ink run is `244..250`). See the
+    /// module note.
     #[test]
     fn almost_no_record_brackets_its_glyph() {
         let mut inside = Vec::new();
         let mut cut = Vec::new();
         let mut best = Vec::new();
+        let mut colour = Vec::new();
         for face in ["fg_mcn14", "fg_mcn16", "fg_d20"] {
             let Some(font) = shipped(face) else { return };
+            // Where the coverage has glyph ink, the second byte is >99% `0xFF`:
+            // it is the colour/alpha channel, not a glyph picture.
+            let (mut inked, mut white) = (0usize, 0usize);
+            for i in 0..font.page.len() {
+                if font.page[i] > 40 {
+                    inked += 1;
+                    if font.mask[i] >= 200 {
+                        white += 1;
+                    }
+                }
+            }
+            colour.push((face, white * 20 > inked * 19));
             let w = font.page_width as usize;
             let h = font.page_height as usize;
             let ink = |x: i32, y: i32| -> bool {
@@ -712,6 +742,12 @@ mod tests {
                 ),
             ],
             "the best constant shift of each packed row (d, cut, scored)"
+        );
+        // The low byte is colour, not a glyph plane: >90% of it is 0xFF.
+        assert_eq!(
+            colour,
+            [("fg_mcn14", true), ("fg_mcn16", true), ("fg_d20", true)],
+            "faces whose second byte is mostly 0xFF"
         );
     }
 

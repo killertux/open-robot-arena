@@ -480,48 +480,47 @@ K  record 41  rect (46, 232, 5, 11)
 `A`'s window holds the tail of one glyph and the stem of the next, `K`'s holds a
 bare stem, `T`'s holds a stem with a bottom hook.
 
-And it is nearly every record, not a few. A rect that frames its glyph leaves the
-columns at `u0 - 1` and `u1` blank, and of the 96 records in `fg_mcn14` only
-**five** do — **87 have ink just outside** on one side or both. `fg_mcn16` is 86
-and `fg_d20` 78. The test `almost_no_record_brackets_its_glyph` keeps those three
-numbers **and the two that localise the fault**: every one of the 89 scored rects
-in each face **does hold ink** (the rects are *near* their glyphs), and no constant
-shift of a packed row — every `d` in `-10..=10` — comes close (the best still cuts
-**17 of 20** for `fg_d20` and **18 of 33** for `fg_mcn14`). So the rects and the
-page describe **different packings**, and the day the mapping is read right the
-test will say so.
+**The "ink just outside the rect" count is confounded and is only a baseline.**
+A rect that frames its glyph would leave `u0 - 1` and `u1` blank, but consecutive
+rects are contiguous with a one-pixel gap, so the two checks land on the *same
+shared gap column*; a packer whose glyphs touch (or whose coverage bleeds) puts ink
+there for almost every record. So of the 96 records in `fg_mcn14`, 87 "cut a
+neighbour", 86 in `fg_mcn16` and 78 in `fg_d20` — even though every one of the 89
+scored rects **does hold ink**. The lesson came from trying to read the shell: the
+workshop toolbar that *looks* clean is **baked into the button `.bmp` art**, not
+drawn by this reader, so it was never evidence about a face.
 
-The record's four floats are **not** the open question any more. The loader that
-*builds* a runtime page (`FUN_005cd560`) writes `u0 = x/W`, `v0 = y/H`,
-`u1 = (x + width)/W`, `v1 = (y + height)/H`, so the order is `u0 v0 u1 v1` and `v`
-is measured from the page's bottom — which is what `Glyph::rect` turns over. And
-the cheap candidates are exhausted: reading the page as the **low** byte, as **one
-of two planes**, **big-endian**, at **`512x128`**, **`128x512`**, **`512x256`**,
-**`256x512`**, or as half-rows repeated, all leave ~85 of the ~92 scored rects with
-ink in the one-pixel gap column they share with the next glyph, and none of the 384
-field-order × flip × rounding × sample-pairing combinations brackets and keeps ink
-inside at the same time.
+A probe of all nine faces (`[Text] HAMBURGEFONTSIV`, rendered by `uishot` and by
+`tools/ui_compose.py`, which agree pixel for pixel) shows **every face smears**,
+worst the small condensed ones (`fg_mcn12`, `fg_mcn14`, `fg_mcn16`), least the large
+`fg_d*`. There is no per-face split to exploit.
 
-So the page's glyph blocks sit a few columns left of the rects and at a slightly
-different per-glyph pitch, which is why **a single character renders as two
-shapes**: the glyph itself and a stroke of its neighbour. (`A` in a `Text` came out
-as an `A`-shaped blob beside a vertical bar, in `fg_mcn14`, `fg_mcn16` and
-`fg_mcn12`, and a `Text` written exactly as `botlab/ch_stepbuttons.gib` writes its
-own does the same, so it is the font reader and not the widget. The page itself is
-not the question either: drawn through the rects it is the smeared thing, dumped
-raw with `ra2 font … --page` it is every glyph clean.)
+The record's four floats are **not** the open question. The loader that *builds* a
+runtime page (`FUN_005cd560`) writes `u0 = x/W`, `v0 = y/H`, `u1 = (x + width)/W`,
+`v1 = (y + height)/H`, so the order is `u0 v0 u1 v1` and `v` is measured from the
+page's bottom — which is what `Glyph::rect` turns over. The page's picture is the
+**high byte**; the low byte is **not** a glyph mask but the colour/alpha channel
+(more than 99% of it is `0xFF` where the high byte has ink, and the builder writes
+`(coverage << 8) | 0xfff`).
+
+The diagnostic is the fit. Segmenting each packed row's coverage into ink runs
+(blank columns are the cell boundaries) and pairing each rect with its run gives,
+per face, `cell_start = a·x0 + b` with **a ≈ 1.00, b ≈ 0 and a residual of ≈ 3 px**
+— and no drift with the record index (the best constant shift still leaves 17/20
+for `fg_d20` and 18/33 for `fg_mcn14`). So it is not a field order, a flip, a
+rounding rule, a sample pairing, a uniform shift, a scale or a pitch: each glyph is
+a few columns off in its own right, worst at a row's right end. There `fg_mcn16`'s
+record 31 (`A`) is the rect `(236,244,10,12)`, whose window holds blank plus one
+bar, while `A`'s ink run is `244..250` — eight columns right. That is why `A`, `M`,
+`W` and the small faces smear most.
 
 The next read is the **`.giff` → runtime-font conversion**. `FUN_005ce100` opens
 the file by name and `FUN_005ce320` deserialises it, but `FUN_005ce320` reads
 **four floats then three ints** per glyph, where the stored record is **three ints
 then four floats**: a conversion layer — or a second, unshipped file format — sits
-between them, and that is where a record's `u0`, or the page the records point
+between them, and that is where a record's `x`/`y`, or the page the records point
 into, may be re-derived. `almost_no_record_brackets_its_glyph` carries the exact
-inside/cut/best-shift numbers to check it against.
-
-Also settled on the way: the row at y 233 is *not* exact (an earlier reading said
-so) — its records are the same `0..7, 9..15, 17..23 …` and the ink runs sit a few
-columns left of them, like every other row.
+inside/cut/best-shift numbers (and the colour-byte check) to test it against.
 
 ### Open: a glyph's quad draws its cell and a slice of its neighbour
 

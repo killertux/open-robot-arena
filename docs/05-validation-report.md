@@ -685,35 +685,42 @@ Known, documented, not yet fixed:
     holds every glyph correctly formed — but the rect a record states frames the
     wrong few pixels: record 31 (`A`) is `(217, 245, 9, 11)` and that window holds
     the tail of one glyph and the stem of the next, `K`'s holds a bare stem,
-    `T`'s a stem with a bottom hook. Read as pixel maps, not impressions. So a
-    single character renders as two shapes, in `fg_mcn14`, `fg_mcn16` and
-    `fg_mcn12`, and a `Text` written exactly as `ch_stepbuttons.gib` writes one
-    does the same: it is the font reader, not the widget. And it is nearly every
-    record: of the 96 in `fg_mcn14`, **87 have ink just outside their rect** (86 in
-    `fg_mcn16`, 78 in `fg_d20`), so almost none brackets its glyph — kept as a
-    baseline of the defect.
+    `T`'s a stem with a bottom hook. Read as pixel maps, not impressions.
 
-    What the test now *also* keeps is what rules the cheap answers out. Every one
-    of the 89 scored rects in each face **holds ink**, so the rects are *near*
-    their glyphs; and **no constant shift** of a packed row — every `d` in
-    `-10..=10` — comes close (the best still cuts **17 of 20** for `fg_d20` and
-    **18 of 33** for `fg_mcn14`). The field order and the `v` flip are settled by
-    the loader that *builds* a page (`FUN_005cd560`: `u0 = x/W`, `v0 = y/H`,
-    `u1 = (x + width)/W`, `v1 = (y + height)/H`, `v` from the page's bottom). And
-    the sample pairing is spent: the low byte, one of two planes, big-endian,
-    `512x128`, `128x512`, `512x256`, `256x512`, half-rows repeated — every reading
-    still leaves ~85 of the ~92 scored rects with ink in the one-pixel gap they
-    share with the next glyph, and no field-order × flip × rounding × pairing
-    combination brackets and keeps ink inside. So the records and the page
-    describe **different packings** (the page's blocks sit a few columns left of
-    the rects, at a slightly different per-glyph pitch), and the next read is the
-    **`.giff` → runtime-font conversion**: `FUN_005ce100` opens the file by name
-    and `FUN_005ce320` deserialises it, but reads **four floats then three ints**
-    per glyph where the stored record is **three ints then four floats** — a
-    conversion layer, or a second unshipped file, sits between them. It is the
-    record↔page mapping, not the quad's uv and not the page texture; readings this
-    report made from *rendered words* stay less reliable than readings made from
-    *ink counts in a page*, and the `O` measurements above are the latter kind.
+    Two things had to be unlearned before it could be measured. First, **the "ink
+    just outside the rect" count is confounded**: consecutive rects are contiguous
+    with a one-pixel gap, so `u0 - 1` and `u1` check the *same shared gap column*,
+    and a packer whose glyphs touch (or whose coverage bleeds) puts ink there for
+    almost every record — 87/86/78 of 92/92/90 in `fg_mcn14`/`fg_mcn16`/`fg_d20`,
+    even though every one of the 89 scored rects **holds ink**. The number is kept
+    only as a baseline. Second, the workshop toolbar that reads
+    `Overview Chassis … Test Robot` cleanly is **baked into the button `.bmp`
+    art**, not drawn by the font reader, so it was never evidence about a face. A
+    probe of all nine faces (`[Text] HAMBURGEFONTSIV`, rendered by `uishot` and by
+    `tools/ui_compose.py`, which agree pixel for pixel) shows **every face
+    smears**, worst the small condensed ones (`fg_mcn12`, `fg_mcn14`, `fg_mcn16`),
+    least the large `fg_d*`.
+
+    The diagnostic is the fit. Segmenting each packed row's coverage into ink runs
+    (blank columns are the cell boundaries) and pairing each rect with its run
+    gives, per face, `cell_start = a·x0 + b` with **a ≈ 1.00, b ≈ 0 and a residual
+    of ≈ 3 px** — and no drift with the record index (the best constant shift still
+    leaves 17/20 for `fg_d20` and 18/33 for `fg_mcn14`). So it is not a field
+    order, a flip, a rounding rule, a sample pairing, a uniform shift, a scale or a
+    pitch: each glyph is a few columns off in its own right, worst at a row's right
+    end. There `fg_mcn16`'s record 31 (`A`) is the rect `(236,244,10,12)`, whose
+    window holds blank plus one bar, while `A`'s ink run is `244..250` — eight
+    columns right. The field order and the `v` flip are settled by the loader that
+    *builds* a page (`FUN_005cd560`: `u0 = x/W`, `v0 = y/H`, `u1 = (x + width)/W`,
+    `v1 = (y + height)/H`, `v` from the page's bottom), and the page's picture is
+    the **high byte**; the low byte is colour, not a mask (more than 99% of it is
+    `0xFF` where the high byte has ink). The next read is the **`.giff` →
+    runtime-font conversion**: `FUN_005ce100` opens the file by name and
+    `FUN_005ce320` deserialises it, but reads **four floats then three ints** per
+    glyph where the stored record is **three ints then four floats** — a conversion
+    layer, or a second unshipped file, sits between them. Readings this report made
+    from *rendered words* stay less reliable than readings made from *ink counts in
+    a page*, and the `O` measurements above are the latter kind.
 
     The shell's art can be counted, and that is worth having before M6: resolving
     every name a shipped screen states the way the renderer does gives **1,303
