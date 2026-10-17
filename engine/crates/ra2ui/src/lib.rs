@@ -117,6 +117,7 @@ pub mod components;
 pub mod events;
 pub mod input;
 pub mod project;
+pub mod standings;
 pub mod workshop;
 
 /// The faces a screen's labels name, loaded from a game installation's
