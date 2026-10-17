@@ -1698,9 +1698,11 @@ dependencies = [
  "glam",
  "image",
  "oxijolt",
+ "pyo3",
  "ra2-render",
  "ra2fmt",
  "ra2script",
+ "ra2ui",
 ]
 
 [[package]]

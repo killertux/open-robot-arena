@@ -372,3 +372,57 @@ each int means and the copy into `Team+0x5c`; next reads are `0x5024e0`,
   binary; the results are announced by `match results window` / `in game popup
   win` (`0x6ef60c`, `0x6ef5f8`). The camera vocabulary is `watch`, `static`,
   `orbit`; if the roadmap keeps "chase/top", they are our labels.
+
+## 7. Implemented in M8.2–M8.6
+
+**Script state (`ra2script`).** `game_type`, `players`, `paused`, `over` and a
+per-robot score store are now written by the match and read by the scripts:
+`getGameType`, `isMatchOver`, `isMatchPaused`, `getPlayers`, `getPoints`.
+`plus.addPoints` adds to the `+0x20` store (it does not replace; the binary's
+write is `fild [robot+0x20]; fadd`). `plus.Arena.tickInterval` is exposed as
+the engine's 0.25 s arena tick. The simulator publishes every registered
+SmartZone's contents each step, and `GetRobotsInPhantom` reads the model's own
+phantom objects (`King_Zone`, `kingzone`) — `king.py`'s zone is not a registered
+SmartZone, so the volume comes from the `.gmf` object. Eliminations now reach
+`Robot`'s state 3 and `plus.isEliminated`/`isDefeated` distinguish it from a
+knocked-out robot; `plus.zap` records the electric visual deadline (the shipped
+hazard applies its own damage). A Python error from `Arena.Tick` is returned
+with its traceback and logged once, not turned into `true`.
+
+**The match (`ra2sim::r#match`).** `MatchConfig` (arena, game type, robot
+entries, `EventNumBots` through `event_num_bots`: only 2 or 4, anything else 4,
+explicit duration/results delay/step) builds the state machine
+`Setup → Countdown → Fight → Over → Results`. The countdown is 4.0 s; the
+fight steps the existing `Duel` at 1/60 s, with its AI cadence and the arena
+`Tick` at 0.25 s. Spawns are the arena's own start points in model order and
+facing (four for `BATTLE ROYAL`). Win conditions are last robot, `TEAM MATCH`
+team totals, and a points finish when the explicit duration runs out; KOTH is
+not an end condition. `MatchReport` carries the winners, per-robot points,
+damage dealt/taken, fight duration and the `ra2ui::results::MatchResult` rows
+(team logo/name from `AI/Teams.txt`, bot name, points, winner flag).
+
+**Observed tests.** Box + two shipped AI brains + `DEATHMATCH` reaches `Over`
+with a winner after the real fight (then the tabletop elimination path decides
+it). Hilltop + `KING OF THE HILL` with a chassis parked in `King_Zone` scores
+10 points at the first 0.5 s boundary and 80 more over the next 4.0 s; the score
+is the `plus.addPoints` store and the script's own `scoringPlayer` is set. A
+`BATTLE ROYAL` with `EventNumBots=4` spawns four distinct model start points.
+
+**Still unproven / deliberate gaps.**
+
+- Non-KOTH damage→points and the KOTH damage award (`FUN_004175b0`,
+  `FUN_00489620`): not implemented; the score is zero in a non-KOTH match.
+- The time dropdown's values (`0x4733f0`), `FUN_00412fc0`'s end-of-match timer
+  and the results handoff's two ids (`FUN_0047a220(0/1)`): not read. Match
+  length and the 3.5 s results delay are explicit config, not hidden constants;
+  a zero-point time-out is reported as a draw.
+- The clock's displayed value may include the countdown (`0x4759c0` "starts the
+  clock"); `MatchReport.duration` is fight time only.
+- Which robots "immobilized text" covers, and the bot preview image the result
+  cell expects, are not established; the preview is empty and the text hidden.
+- The `EventNumBots` spawn loop (above the four start points) was not traced;
+  the port uses the model's start points in ID order.
+- `plus.zap`'s own damage: not established, and it awards none.
+- The hilltop model's *visible* hill is not in the static collider this port
+  builds (the collider is the backdrop box), so the KOTH test parks a chassis
+  in `King_Zone`; the script/zone/score path it exercises is the real one.

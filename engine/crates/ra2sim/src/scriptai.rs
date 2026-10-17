@@ -87,6 +87,7 @@ pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
         boxes,
         last_damage_done: (0, 0.0, 0.0),
         last_damage_received: (0, 0.0, 0.0),
+        eliminated: robot.eliminated,
     }
 }
 
@@ -129,7 +130,10 @@ impl ScriptAi {
     }
 
     /// Run the arena's own `Tick`, which the game did four times a second.
-    pub fn tick_arena(&self, dt: f32) -> bool {
+    ///
+    /// An error is returned, not turned into `true`: the duel logs the first
+    /// one with the arena's script and the Python traceback.
+    pub fn tick_arena(&self, dt: f32) -> Result<bool, String> {
         self.host.run_arena_tick(dt)
     }
 

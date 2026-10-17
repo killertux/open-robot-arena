@@ -177,11 +177,11 @@ in the game's own script.
 | # | Work item | Lands in |
 |---|---|---|
 | M8.1 | **done** — **W5 recon**: the match object, countdown, HUD writes, end handoff, per-type scoring, KO rules, the `plus` gap table | `docs/11-match-rules.md` |
-| M8.2 | `Match` state machine: `Setup → Spawn → Countdown → Fight → Over → Results`, driven by data (`ra2.cfg`'s `EventNumBots`, the arena's start points, the event's numbers) | new `ra2sim::match` |
-| M8.3 | Grow `plus` and the arena host to what the match needs: write `game_type`/`players`/`paused`/`over` (currently inert), add `Arena.tickInterval`, populate zone contents (`GetZoneContents`, `GetRobotsInPhantom`), implement `addPoints`/`getPoints`, `eliminatePlayer`, `zap`, and the sounds | `ra2script::{plus,arena}`, `ra2sim` |
-| M8.4 | The C++ win conditions, reproduced from the recon: last robot (`FUN_00418040`), team totals (`FUN_00418770`), the `+0x20` score, damage→points (`FUN_004175b0`), the 4.0 s countdown and the clock | `ra2sim::match` |
-| M8.5 | Spawn: the teams' robots on the arena's start points, with the original's order and facing; `EventNumBots` (2 or 4, anything else rewritten to 4) for Battle Royal | `ra2sim::match` |
-| M8.6 | The match loop: fixed-step physics, the arena `Tick`, the AI cadence, damage events, defeated/KO, the countdown and the clock | `ra2sim::match` |
+| M8.2 | **done** — `Match` state machine (`Setup → Countdown → Fight → Over → Results`) in `ra2sim::r#match`, driven by `MatchConfig` (game type, robot entries, `EventNumBots`, explicit duration/step) | new `ra2sim::match` |
+| M8.3 | **done (state)** — `game_type`/`players`/`paused`/`over`/scores written; `Arena.tickInterval`; zone + phantom contents; `addPoints`/`getPoints`; `eliminatePlayer` state 3; `zap` visual state; `Arena.Tick` errors surfaced. Audio remains M5 | `ra2script::{plus,arena}`, `ra2sim` |
+| M8.4 | **done (rules)** — last robot (`FUN_00418040`), last team and team totals (`FUN_00418770`), the `+0x20` score, 4.0 s countdown, match clock. Damage→points (`FUN_004175b0`) remains unproven and is not invented | `ra2sim::match` |
+| M8.5 | **done** — spawn on the arena's start points in ID order with the model's facing; `EventNumBots` (2 or 4, anything else 4) for Battle Royal, four distinct spawns | `ra2sim::match` |
+| M8.6 | **done** — the match loop: fixed-step physics, the arena `Tick` at 0.25 s, the AI cadence, damage events, defeated/KO and elimination, the countdown and the clock | `ra2sim::match` |
 | M8.7 | HUD: the shipped HUD `.gib` screens placed and driven by live state (health bars, points, clock, names, messages) | `ra2ui` + `ra2-app` |
 | M8.8 | Camera: `watch`/`static`/`orbit` (the binary's own vocabulary, not chase/top) and the arena's `AddCamera`, with the shipped bounds | `ra2-app` |
 | M8.9 | Results: the `common/matchresults.gib` slots filled from the match (`ra2ui::results` already binds them), then the return to the menu | `ra2ui::results`, `ra2-app` |

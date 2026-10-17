@@ -138,6 +138,32 @@ pub struct WatchCamera {
     pub range: [f32; 4],
 }
 
+/// A phantom volume the model carries (`GetRobotsInPhantom`).
+///
+/// The KOTH scoring zone is a `.gmf` `GEOMOBJECT` named `King_Zone` (hilltop)
+/// or `kingzone` (LumaZone); it is not a registered SmartZone — `king.py:85`
+/// leaves its `RegisterZone` commented out — so the engine answers the script's
+/// phantom query from the model's own object geometry. The volume is the
+/// object's mesh bounding box in its own frame; the transform places it.
+#[derive(Clone, Debug)]
+pub struct PhantomVolume {
+    pub inv: glam::Mat4,
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl PhantomVolume {
+    /// Whether a sphere of `radius` around `centre` touches the volume.
+    ///
+    /// The same test the registered SmartZones use: the stock phantom objects
+    /// are eight-vertex boxes, for which this is exact.
+    pub fn touches(&self, centre: Vec3, radius: f32) -> bool {
+        let p = self.inv.transform_point3(centre);
+        let r = Vec3::splat(radius);
+        (p.cmpge(self.min - r) & p.cmple(self.max + r)).all()
+    }
+}
+
 /// A 2D wall segment the script adds to the navigation map.
 #[derive(Clone, Copy, Debug)]
 pub struct CollisionLine {
@@ -172,6 +198,9 @@ pub struct ArenaData {
     pub watch_cameras: Vec<WatchCamera>,
     /// `RegisterZone(name, id)` — the SmartZone names and their ids.
     pub zones: BTreeMap<String, i32>,
+    /// The model's phantom volumes, keyed lower-case for the case-insensitive
+    /// lookup `GetRobotsInPhantom` does (`King_Zone` vs `kingzone`).
+    pub phantoms: BTreeMap<String, PhantomVolume>,
     pub hazards: Vec<HazardRef>,
     pub collision_lines: Vec<CollisionLine>,
     pub povs: Vec<Pov>,
@@ -784,14 +813,37 @@ impl Arena {
 
     /// `GetRobotsInPhantom(name)` — who is standing in a named phantom zone.
     ///
-    /// Bound to the live match; returns nothing until the engine is stepping.
-    fn GetRobotsInPhantom(&self, _name: &str) -> Vec<i32> {
-        Vec::new()
+    /// `king.py:56` is the caller: the scoring zone, reported as **1-based**
+    /// robot ids (line 57 subtracts one). The simulator publishes the contents
+    /// every step; a name the arena's model does not carry is empty.
+    fn GetRobotsInPhantom(&self, name: &str) -> Vec<i32> {
+        let st = crate::state();
+        match st.zone_contents.get(name) {
+            Some(v) => v.iter().map(|(robot, _)| *robot).collect(),
+            None => st
+                .zone_contents
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.iter().map(|(robot, _)| *robot).collect())
+                .unwrap_or_default(),
+        }
     }
 
     /// `GetZoneContents(zone)` — `(robot, chassis)` readings for a SmartZone.
-    fn GetZoneContents(&self, _zone: &str) -> Vec<(i32, bool)> {
-        Vec::new()
+    ///
+    /// The ids are 1-based, as `AI.SuperAI.SmartZoneEvent` expects
+    /// (`AI/__init__.py:417` does `r = robot - 1`).
+    fn GetZoneContents(&self, zone: &str) -> Vec<(i32, bool)> {
+        let st = crate::state();
+        match st.zone_contents.get(zone) {
+            Some(v) => v.clone(),
+            None => st
+                .zone_contents
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(zone))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default(),
+        }
     }
 
     /// `HazardsOn(on)` — the Python layer re-implements this; the base records it.
@@ -812,6 +864,17 @@ impl Arena {
 
     fn Tick(&self) -> bool {
         true
+    }
+
+    /// The engine's arena tick period, in seconds.
+    ///
+    /// Every arena reads `self.tickInterval` (`Arenas/__init__.py:94`,
+    /// `king.py:40,47`). It is the **0.25 s** the hazards already count in:
+    /// `Hazards.Flame` adds 0.25 four times for a one-second flame and
+    /// `Hazards.Electricity` counts a 5 s charge down by 0.25.
+    #[getter]
+    fn tickInterval(&self) -> f32 {
+        crate::ARENA_TICK_INTERVAL
     }
 
     fn DoIntro(&self, _on: bool) {}
@@ -850,6 +913,7 @@ impl Arena {
         d.start_points = built.start_points;
         d.object_names = built.object_names;
         d.triangles = built.triangles;
+        d.phantoms = built.phantoms;
         if d.extent == [0.0; 4] {
             d.extent = built.extent;
             d.map.extent = built.extent;

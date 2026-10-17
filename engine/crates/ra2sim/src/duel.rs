@@ -74,6 +74,9 @@ pub struct Duel {
     pub log: Vec<String>,
     /// Last damage dealt, per robot (for reporting).
     pub damage_taken: Vec<f32>,
+    /// Damage each robot has landed on another, summed over the match. Arena
+    /// hazards' damage has no attacker and is only in `damage_taken`.
+    pub damage_dealt: Vec<f32>,
     /// Which robot pairs were touching at the end of the last step, so a blow is
     /// dealt when contact *begins* instead of every step it lasts.
     contact_pairs: Vec<bool>,
@@ -96,6 +99,12 @@ pub struct Duel {
     joints: Vec<LiveJoint>,
     /// The SmartZones the arena script registered.
     zones: Vec<Zone>,
+    /// The model's phantom volumes (`GetRobotsInPhantom`): the KOTH scoring
+    /// zone is one, and it is not a registered SmartZone.
+    phantoms: Vec<(String, ra2script::arena::PhantomVolume)>,
+    /// The first `Tick` failure, kept so a broken arena is reported once but
+    /// remains visible in the match report's log.
+    pub arena_tick_error: Option<String>,
     /// Whether each robot was inside each zone last step.
     zone_inside: Vec<Vec<bool>>,
     /// Seconds until the arena's own `Tick` runs again.
@@ -315,6 +324,19 @@ impl Duel {
             .map(|a| a.lock().unwrap().zones.clone())
             .unwrap_or_default();
         let zones = hazards::zones(arena_path, &registered);
+        // The model's phantom volumes. `GetRobotsInPhantom` asks by name and
+        // the KOTH scripts' scoring zone lives here rather than in `zones`.
+        let phantoms: Vec<(String, ra2script::arena::PhantomVolume)> = ra2script::state()
+            .arena
+            .as_ref()
+            .map(|a| {
+                let d = a.lock().unwrap_or_else(|e| e.into_inner());
+                d.phantoms
+                    .iter()
+                    .map(|(name, volume)| (name.clone(), volume.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         if !zones.is_empty() {
             println!(
                 "  hazard zones: {}",
@@ -340,6 +362,7 @@ impl Duel {
             mass_scale,
             log: Vec::new(),
             damage_taken,
+            damage_dealt: vec![0.0; n],
             contact_pairs,
             ai: bots.iter().map(|_| AiState::new()).collect(),
             script_ai,
@@ -351,9 +374,16 @@ impl Duel {
             joints: Vec::new(),
             zone_inside: vec![vec![false; n]; zones.len()],
             zones,
+            phantoms,
+            arena_tick_error: None,
             arena_timer: 0.0,
             applied_pinned: std::collections::BTreeMap::new(),
         })
+    }
+
+    /// Whether the game's own AI layer loaded for this duel.
+    pub fn has_shipped_ai(&self) -> bool {
+        self.script_ai.is_some()
     }
 
     /// Highest floor point under `(x, z)`.
@@ -369,6 +399,18 @@ impl Duel {
             }
         }
         arena.min.y
+    }
+
+    /// The closest living opponent, or `None` when this robot is the last one.
+    fn nearest_opponent(&self, me: usize) -> Option<usize> {
+        let here = self.robots[me].position(&*self.physics);
+        (0..self.robots.len())
+            .filter(|&i| i != me && self.robots[i].is_alive())
+            .min_by(|&a, &b| {
+                let da = (self.robots[a].position(&*self.physics) - here).length_squared();
+                let db = (self.robots[b].position(&*self.physics) - here).length_squared();
+                da.total_cmp(&db)
+            })
     }
 
     /// Whether any body of robot `a` touches any body of robot `b`.
@@ -403,12 +445,22 @@ impl Duel {
             if !self.robots[i].is_alive() {
                 continue;
             }
-            let opponent = (i + 1) % self.robots.len();
-            let contact = self.robots_touching(i, opponent);
-            let input = drives
-                .get_mut(i)
-                .and_then(Option::take)
-                .unwrap_or_else(|| self.ai_input(i, opponent, dt, contact));
+            // Two robots face each other; in a four-robot match the stand-in
+            // driver goes for the nearest survivor. The game's own AI chooses
+            // its own target through `GetEnemies`, so this only affects the
+            // fallback driver.
+            let opponent = self.nearest_opponent(i);
+            let contact = opponent
+                .map(|o| self.robots_touching(i, o))
+                .unwrap_or(false);
+            let input =
+                drives
+                    .get_mut(i)
+                    .and_then(Option::take)
+                    .unwrap_or_else(|| match opponent {
+                        Some(o) => self.ai_input(i, o, dt, contact),
+                        None => DriveInput::default(),
+                    });
             // Drive through the motors: the wheel hinges push the robot.
             let tuning = self.tuning;
             self.robots[i].drive(&mut *self.physics, input, &tuning);
@@ -599,16 +651,20 @@ impl Duel {
     /// and `robot` counts from one — `Hazards.Electricity` immediately does
     /// `r = robot - 1`, and `AI.SuperAI.SmartZoneEvent` does the same.
     fn watch_zones(&mut self) {
-        if self.zones.is_empty() {
+        if self.zones.is_empty() && self.phantoms.is_empty() {
             return;
         }
-        let Some(host) = self.script_ai.as_ref() else {
-            return;
-        };
         let worlds: Vec<Vec<Mat4>> = (0..self.robots.len())
             .map(|i| self.robots[i].component_worlds(&*self.physics))
             .collect();
+
+        // What is in every registered zone, published for both `Arena.
+        // GetZoneContents` (the AI's `CheckSensors`) and the crossing events
+        // below. The values are the original's 1-based robot ids.
+        let mut contents: std::collections::BTreeMap<String, Vec<(i32, bool)>> =
+            std::collections::BTreeMap::new();
         for (zi, zone) in self.zones.iter().enumerate() {
+            let mut inside_robots: Vec<(i32, bool)> = Vec::new();
             for (robot, w) in worlds.iter().enumerate() {
                 let mut inside = false;
                 let mut chassis = false;
@@ -624,10 +680,15 @@ impl Duel {
                         }
                     }
                 }
+                if inside {
+                    inside_robots.push((robot as i32 + 1, chassis));
+                }
                 let was = self.zone_inside[zi][robot];
                 if inside != was {
                     let direction = if inside { 1 } else { -1 };
-                    host.zone_event(direction, zone.id, robot as i32 + 1, chassis);
+                    if let Some(host) = self.script_ai.as_ref() {
+                        host.zone_event(direction, zone.id, robot as i32 + 1, chassis);
+                    }
                     self.zone_inside[zi][robot] = inside;
                     self.log.push(format!(
                         "zone {:?} ({}) robot {} {}",
@@ -638,7 +699,42 @@ impl Duel {
                     ));
                 }
             }
+            contents.insert(zone.name.clone(), inside_robots);
         }
+
+        // The phantoms are queried by name and answered from the chassis: a
+        // `GetRobotsInPhantom` asks who is *standing* in the volume. (The
+        // registered zones above keep the per-part test because a hazard wants
+        // to fire when a blade enters, not only the hull.)
+        if !self.phantoms.is_empty() {
+            for (name, volume) in &self.phantoms {
+                let mut inside_robots: Vec<(i32, bool)> = Vec::new();
+                for (robot, w) in worlds.iter().enumerate() {
+                    let Some(chassis) = self.robots[robot].rig.components.first() else {
+                        continue;
+                    };
+                    if !self.robots[robot]
+                        .attached
+                        .first()
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let p = w[0].transform_point3(chassis.center());
+                    if volume.touches(p, chassis.radius()) {
+                        inside_robots.push((robot as i32 + 1, true));
+                    }
+                }
+                // A registered SmartZone of the same name wins: that one keeps
+                // the per-part reading the hazard events use. (The stock arenas
+                // name both the trigger body and its display object, so the
+                // collision is real.)
+                contents.entry(name.clone()).or_insert(inside_robots);
+            }
+        }
+
+        ra2script::publish_zone_contents(contents);
     }
 
     /// Run the arena's own `Tick`, at the rate the game did.
@@ -654,9 +750,24 @@ impl Duel {
         if self.arena_timer > 0.0 {
             return;
         }
-        self.arena_timer = ra2script::ARENA_TICK_INTERVAL;
+        // Carry the remainder instead of resetting to the interval. A 60 Hz
+        // step is 1/60 s and an arena tick is 0.25 s; resetting loses the
+        // fraction every tick, which drifts the arena clock against the match
+        // clock (19 ticks in 5 s instead of 20).
+        self.arena_timer += ra2script::ARENA_TICK_INTERVAL;
         if let Some(host) = self.script_ai.as_ref() {
-            host.tick_arena(dt);
+            if let Err(e) = host.tick_arena(dt) {
+                // Report the first failure once: a broken arena fails every
+                // quarter second, and a flood would bury the first traceback.
+                // The message names the script path and carries the Python
+                // traceback from `describe_python_error`.
+                if self.arena_tick_error.is_none() {
+                    let message = format!("arena Tick failed ({}): {e}", self.arena_path);
+                    eprintln!("ra2sim: {message}");
+                    self.log.push(message.clone());
+                    self.arena_tick_error = Some(message);
+                }
+            }
         }
     }
 
@@ -794,6 +905,21 @@ impl Duel {
         if self.script_ai.is_none() {
             return Vec::new();
         }
+        self.publish_snapshots(dt);
+        let n = self.robots.len();
+        match self.script_ai.as_ref() {
+            Some(ai) if tick => ai.tick(n),
+            Some(ai) => ai.drives(n),
+            None => Vec::new(),
+        }
+    }
+
+    /// Publish what the scripts can see of each robot.
+    ///
+    /// The match's countdown steps the world without running a brain, but the
+    /// arena's `Tick` and the hazards still read robot state, so the snapshot
+    /// is published on every path that advances the world.
+    fn publish_snapshots(&self, dt: f32) {
         let snapshots: Vec<ra2script::BotSnapshot> = (0..self.robots.len())
             .map(|i| {
                 let mut s = crate::scriptai::snapshot(&*self.physics, &self.robots[i]);
@@ -802,13 +928,7 @@ impl Duel {
                 s
             })
             .collect();
-        ra2script::publish(snapshots.clone(), self.time, dt);
-        let n = snapshots.len();
-        match self.script_ai.as_ref() {
-            Some(ai) if tick => ai.tick(n),
-            Some(ai) => ai.drives(n),
-            None => Vec::new(),
-        }
+        ra2script::publish(snapshots, self.time, dt);
     }
 
     /// Apply what the scripts asked for during the last tick.
@@ -862,9 +982,38 @@ impl Duel {
                         }
                     }
                 }
-                // `zap` is a presentation effect and `eliminatePlayer` needs the
-                // tournament layer; both are M5.
-                ra2script::Request::Zap { .. } | ra2script::Request::Eliminate { .. } => {}
+                ra2script::Request::Zap {
+                    bot,
+                    amount,
+                    radius,
+                } => {
+                    // The shipped `Hazards.Electricity` applies its own 25
+                    // damage and 115 N/kg lift through `plus.damage`/`plus.force`
+                    // on the same tick. What `zap` adds is the visible shock,
+                    // and the recon did not establish that it deals damage of
+                    // its own, so this records it (`zapped_until`, with the
+                    // script's amount/radius) and leaves the spark to M5.
+                    let _ = (amount, radius);
+                    if let Ok(bot) = usize::try_from(bot) {
+                        if bot < self.robots.len() {
+                            self.robots[bot].zapped_until = self.time + 0.25;
+                        }
+                    }
+                }
+                ra2script::Request::Eliminate { bot } => {
+                    // The original's robot state 3 (`0x4b9c70`): out of the
+                    // match, still in the world. Tabletop's fall-out
+                    // (`flextop.py:188`, `clawtop.py:249`), the Skull pit and
+                    // the Octagon all reach this through `plus.eliminatePlayer`.
+                    if let Ok(bot) = usize::try_from(bot) {
+                        if bot < self.robots.len() && !self.robots[bot].eliminated {
+                            self.robots[bot].eliminated = true;
+                            let name = self.robots[bot].rig.name.clone();
+                            self.log
+                                .push(format!("t={:.1}s  {name} eliminated", self.time));
+                        }
+                    }
+                }
             }
         }
     }
@@ -875,6 +1024,7 @@ impl Duel {
     /// for a head-on ram, which is the only way to *observe* the damage model
     /// reliably — the stock bot's own approach seldom closes to contact at all.
     pub fn step_direct(&mut self, inputs: &[DriveInput], dt: f32) {
+        self.publish_snapshots(dt);
         for (i, input) in inputs.iter().enumerate() {
             if i >= self.robots.len() || !self.robots[i].is_alive() {
                 continue;
@@ -958,6 +1108,7 @@ impl Duel {
         self.contact_pairs = touching;
         for imp in &impacts {
             self.damage_taken[imp.target] += imp.damage;
+            self.damage_dealt[imp.attacker] += imp.damage;
             // The brains spot a "good hit" by matching the component id against
             // their own weapon list (`AI/__init__.py:CheckForWeaponHits`).
             self.last_done[imp.attacker] = (imp.by as i32, imp.damage, self.time);
@@ -1369,6 +1520,57 @@ mod tests {
             after < blow * 0.25,
             "resting contact added {after} damage after a {blow} blow"
         );
+    }
+
+    /// M8.3: the two requests the duel used to drop now change the match.
+    ///
+    /// `plus.eliminatePlayer` is the original's robot state 3 — Tabletop's
+    /// fall-out, the Skull pit and the Octagon's pit all call it. `plus.zap`
+    /// is the electric hazard's shock: the hazard itself applies the damage,
+    /// so the engine records the visual deadline (the recon did not establish
+    /// that the zap deals damage of its own).
+    #[test]
+    fn zap_and_eliminate_requests_take_effect() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        let dt = 1.0 / 60.0;
+        let idle = [DriveInput::default(), DriveInput::default()];
+
+        ra2script::state().requests.push(ra2script::Request::Zap {
+            bot: 0,
+            amount: 10.0,
+            radius: 3.0,
+        });
+        ra2script::state()
+            .requests
+            .push(ra2script::Request::Eliminate { bot: 1 });
+        duel.step_direct(&idle, dt);
+        assert!(
+            duel.robots[0].zapped_until > duel.time - dt * 2.0,
+            "the zap was dropped"
+        );
+        assert!(duel.robots[1].eliminated, "the elimination was dropped");
+        assert!(!duel.robots[1].is_alive(), "state 3 is not alive");
+        assert!(
+            duel.log.iter().any(|l| l.contains("eliminated")),
+            "{:?}",
+            duel.log
+        );
+        let snapshot = crate::scriptai::snapshot(&*duel.physics, &duel.robots[1]);
+        assert!(snapshot.eliminated && !snapshot.alive);
+        let other = crate::scriptai::snapshot(&*duel.physics, &duel.robots[0]);
+        assert!(!other.eliminated && other.alive);
     }
 
     /// F9: a hurt chassis caves in — its drawn shape *and* its collider shrink —

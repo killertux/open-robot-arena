@@ -5,9 +5,10 @@
 //! repository: the point of the layer is that the behaviour under test is the
 //! game's, not our paraphrase of it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use pyo3::ffi::c_str;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule, PyTuple};
@@ -19,6 +20,8 @@ pub struct BuiltArena {
     pub object_names: Vec<String>,
     pub triangles: Vec<[Vec3; 3]>,
     pub extent: [f32; 4],
+    /// Phantom volumes for `GetRobotsInPhantom`, keyed lower-case.
+    pub phantoms: BTreeMap<String, crate::arena::PhantomVolume>,
 }
 
 /// Read an arena `.gmf`: its named objects, its collidable triangles and its
@@ -45,11 +48,39 @@ pub fn load_arena_model(path: &Path) -> Result<BuiltArena, Box<dyn std::error::E
             }
         }
     }
-    if out.triangles.is_empty() {
-        // No proxies: fall back to everything the scene draws.
-        if let Ok(bytes) = std::fs::read(path) {
-            if let Ok(scene) = ra2fmt::gmi::parse(&bytes) {
-                out.triangles = ra2_render::scene_collision_triangles(&scene, glam::Mat4::IDENTITY);
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(scene) = ra2fmt::gmi::parse(&bytes) {
+            // The phantoms (`King_Zone`, `kingzone`) are ordinary `.gmf` mesh
+            // objects; the KOTH scripts look them up by name, not through
+            // `RegisterZone`, so the volume comes from the model itself. An
+            // object's `NODE_TM` is used as its frame, the same way the start
+            // points' is; the stock phantom objects are top-level, so there is
+            // no parent chain to compose.
+            for o in &scene.objects {
+                let Some(mesh) = &o.mesh else { continue };
+                if mesh.points.is_empty() {
+                    continue;
+                }
+                let mut min = Vec3::splat(f32::MAX);
+                let mut max = Vec3::splat(f32::MIN);
+                for p in &mesh.points {
+                    let p = Vec3::from(*p);
+                    min = min.min(p);
+                    max = max.max(p);
+                }
+                let transform = ra2_render::tm_mat4(&o.transform);
+                out.phantoms.insert(
+                    o.name.to_ascii_lowercase(),
+                    crate::arena::PhantomVolume {
+                        inv: transform.inverse(),
+                        min,
+                        max,
+                    },
+                );
+            }
+            if out.triangles.is_empty() {
+                // No proxies: fall back to everything the scene draws.
+                out.triangles = ra2_render::scene_collision_triangles(&scene, Mat4::IDENTITY);
                 for o in &scene.objects {
                     out.object_names.push(o.name.clone());
                 }
@@ -422,8 +453,16 @@ impl ScriptHost {
 
     /// Call the arena's `Tick` (GIL handled here, so callers need no `pyo3`).
     /// The clock is [`crate::publish`]'s.
-    pub fn run_arena_tick(&self, dt: f32) -> bool {
-        Python::with_gil(|py| self.tick_arena(py, dt).unwrap_or(true))
+    ///
+    /// A Python error is returned, with its traceback, rather than swallowed:
+    /// an arena whose `Tick` raises is a fault that must be visible. The
+    /// simulator logs the first one and keeps stepping the physics, but does
+    /// not pretend the tick succeeded.
+    pub fn run_arena_tick(&self, dt: f32) -> Result<bool, String> {
+        Python::with_gil(|py| {
+            self.tick_arena(py, dt)
+                .map_err(|e| describe_python_error(py, e))
+        })
     }
 
     /// Tell the arena a robot entered or left one of its zones, without the
@@ -472,6 +511,27 @@ impl ScriptHost {
 
 fn ra2script_read_drive(brain: &Py<PyAny>, py: Python<'_>) -> Option<(f32, f32)> {
     crate::plus::read_drive(brain, py)
+}
+
+/// A Python exception rendered with its traceback.
+///
+/// `PyErr`'s `Display` is only `Type: message`; the script and line come from
+/// `traceback.format_exception`, which is what the operator needs when an
+/// arena's `Tick` is the thing that broke.
+fn describe_python_error(py: Python<'_>, e: PyErr) -> String {
+    let formatted = py.import("traceback").and_then(|tb| {
+        tb.call_method1(
+            "format_exception",
+            (e.get_type(py), e.value(py), e.traceback(py)),
+        )
+    });
+    match formatted {
+        Ok(lines) => match lines.extract::<Vec<String>>() {
+            Ok(lines) => lines.concat(),
+            Err(_) => e.to_string(),
+        },
+        Err(_) => e.to_string(),
+    }
 }
 
 /// Report a script fault once. A broken brain fails every tick, and a duel runs

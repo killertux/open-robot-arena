@@ -1,0 +1,1023 @@
+//! The headless match: spawn, countdown, fight, win conditions.
+//!
+//! The match shell in the original is C++ (`docs/11-match-rules.md` §3). This
+//! module is the same shell driven by the recon's addresses, on top of the
+//! existing [`crate::duel::Duel`] physics loop rather than a second one:
+//!
+//! * the fixed physics step and the shipped AI's cadence are the duel's;
+//! * the arena's own `Tick` runs at [`ra2script::ARENA_TICK_INTERVAL`];
+//! * the countdown is the 4.0 s `0x4759c0` writes;
+//! * the end conditions are `FUN_00418040` (last robot / last team) and
+//!   `FUN_00418770` (points);
+//! * the score is the script layer's `+0x20` store, so King of the Hill's
+//!   `plus.addPoints` is the same number the results screen reads.
+//!
+//! ## What is deliberately explicit
+//!
+//! The time dropdown in `0x4733f0` and the end-of-match timer in `0x412fc0`
+//! were not read, so neither the match length nor the results delay is a
+//! hidden constant: both are [`MatchConfig`] fields ([`MatchConfig::duration`]
+//! is `None` for "No limit", a string the setup window does contain).
+//!
+//! ## What is not a win condition
+//!
+//! King of the Hill does **not** end on the zone score. Its score is the
+//! script's (`king.py:30-53`); the match still ends on the C++ rule — the last
+//! robot, or points when an explicit duration runs out.
+
+use std::path::Path;
+
+use crate::duel::{BotSetup, Duel};
+use crate::sim::DriveInput;
+
+/// The pre-fight countdown, in seconds (`0x4759c0` writes the timer `+0x1dc`
+/// to exactly 4.0; `0x477480` decrements it to zero and begins the fight).
+pub const COUNTDOWN_SECONDS: f32 = 4.0;
+
+/// The physics step the existing duel tests use.
+///
+/// The original's *game* update is 50 ms (`ra2.cfg:26 UpdateInterval`); the
+/// game's physics step is not established here, and the duel has always been
+/// stepped at 60 Hz, so this is the match's default and an explicit field.
+pub const DEFAULT_STEP: f32 = 1.0 / 60.0;
+
+/// How long the result screen waits after `Over`, in seconds.
+///
+/// The roadmap names 3.5 s but the recon did not read `0x412fc0`'s end-of-match
+/// timer, so it is **explicit config** with this as the default — not a hidden
+/// rule.
+pub const DEFAULT_RESULTS_DELAY: f32 = 3.5;
+
+/// The five game types the original compares against (§1 of the recon).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GameType {
+    Deathmatch,
+    BattleRoyal,
+    TeamMatch,
+    Tabletop,
+    KingOfTheHill,
+}
+
+impl GameType {
+    /// The exact string the scripts and the C++ compare against.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GameType::Deathmatch => "DEATHMATCH",
+            GameType::BattleRoyal => "BATTLE ROYAL",
+            GameType::TeamMatch => "TEAM MATCH",
+            GameType::Tabletop => "TABLETOP",
+            GameType::KingOfTheHill => "KING OF THE HILL",
+        }
+    }
+
+    /// Parse a script/config string. The comparison is case-insensitive here
+    /// (the file spelling is not always all-caps) but the stored string is the
+    /// original's spelling.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "DEATHMATCH" => Some(GameType::Deathmatch),
+            "BATTLE ROYAL" => Some(GameType::BattleRoyal),
+            "TEAM MATCH" => Some(GameType::TeamMatch),
+            "TABLETOP" => Some(GameType::Tabletop),
+            "KING OF THE HILL" => Some(GameType::KingOfTheHill),
+            _ => None,
+        }
+    }
+}
+
+/// `EventNumBots`: the reader at `0x4e52dc` accepts only 2 or 4 and rewrites
+/// anything else to 4 (`0x4e530e`–`0x4e531d`).
+pub fn event_num_bots(raw: usize) -> usize {
+    if raw == 2 {
+        2
+    } else {
+        4
+    }
+}
+
+/// Who drives a robot. The match is headless, so AI is the only controller now;
+/// the original's other case is the local player.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Controller {
+    Ai,
+}
+
+/// One entry in the event's robot list.
+#[derive(Clone, Debug)]
+pub struct RobotEntry {
+    /// The event's team slot (`Team+0x30` on the robot in the original).
+    pub team: usize,
+    /// The `.bot` file.
+    pub bot_path: String,
+    pub controller: Controller,
+}
+
+impl RobotEntry {
+    pub fn ai(team: usize, bot_path: impl Into<String>) -> Self {
+        RobotEntry {
+            team,
+            bot_path: bot_path.into(),
+            controller: Controller::Ai,
+        }
+    }
+}
+
+/// Everything the match needs from the event.
+#[derive(Clone, Debug)]
+pub struct MatchConfig {
+    /// The arena script (`.py`) or model (`.gmf`), as the duel takes it.
+    pub arena: String,
+    pub game_type: GameType,
+    pub robots: Vec<RobotEntry>,
+    /// `EventNumBots`, already through [`event_num_bots`]. Battle Royal spawns
+    /// this many robots; the other types use the entries as given.
+    pub bot_count: usize,
+    /// Match length. `None` is the setup window's "No limit". The dropdown's
+    /// actual values were not recovered, so callers state one explicitly.
+    pub duration: Option<f32>,
+    /// Seconds of countdown, defaulting to the recovered 4.0.
+    pub countdown: f32,
+    /// Seconds between `Over` and `Results`.
+    pub results_delay: f32,
+    /// Physics step.
+    pub dt: f32,
+}
+
+impl MatchConfig {
+    pub fn new(arena: impl Into<String>, game_type: GameType, robots: Vec<RobotEntry>) -> Self {
+        let bot_count = match_event_num_bots_from_entries(robots.len());
+        MatchConfig {
+            arena: arena.into(),
+            game_type,
+            robots,
+            bot_count,
+            duration: None,
+            countdown: COUNTDOWN_SECONDS,
+            results_delay: DEFAULT_RESULTS_DELAY,
+            dt: DEFAULT_STEP,
+        }
+    }
+
+    /// Apply the config file's `EventNumBots` with the original's clamp.
+    pub fn with_event_num_bots(mut self, raw: usize) -> Self {
+        self.bot_count = event_num_bots(raw);
+        self
+    }
+
+    /// Set the explicit match length in seconds (`None` = no limit).
+    pub fn with_duration(mut self, seconds: Option<f32>) -> Self {
+        self.duration = seconds;
+        self
+    }
+
+    pub fn with_results_delay(mut self, seconds: f32) -> Self {
+        self.results_delay = seconds;
+        self
+    }
+}
+
+/// The state machine. `Setup` is construction: the world is built and the
+/// robots are on their start points before the first `step`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatchState {
+    Setup,
+    Countdown,
+    Fight,
+    Over,
+    Results,
+}
+
+/// Why the match ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WinReason {
+    /// `FUN_00418040`: one robot left (King of the Hill ends here too).
+    LastRobot,
+    /// `FUN_00418040`'s `TEAM MATCH` branch: one team left.
+    LastTeam,
+    /// The explicit duration ran out; `FUN_00418770` settles it on points.
+    Timeout,
+}
+
+/// One robot's row in the result screen's data.
+#[derive(Clone, Debug)]
+pub struct RobotReport {
+    /// 0-based robot id, which is also the result slot's index.
+    pub slot: usize,
+    pub team: usize,
+    pub bot_name: String,
+    pub team_name: String,
+    pub team_logo: String,
+    /// The bot's picture. The original renders one from the live model; this
+    /// port has no renderer in the match, so it is empty. **Unproven:** the
+    /// exact image the screen expects is not in the recon.
+    pub bot_preview: String,
+    pub points: i32,
+    pub damage_dealt: f32,
+    pub damage_taken: f32,
+    /// `plus.isDefeated` — state != 0, which includes eliminated.
+    pub defeated: bool,
+    /// `plus.isEliminated` — state 3 only.
+    pub eliminated: bool,
+    /// The result screen's `winner text`.
+    pub winner: bool,
+    /// The result screen's `immobilized text`. The condition is not
+    /// established for our damage model; it stays hidden rather than guessing.
+    pub immobilized: bool,
+}
+
+/// The match's result: the shape `ra2ui::results` fills its four slots from.
+#[derive(Clone, Debug)]
+pub struct MatchReport {
+    pub game_type: &'static str,
+    pub arena: String,
+    pub state: MatchState,
+    pub reason: Option<WinReason>,
+    /// 0-based ids of the winner(s). Empty is a draw (for example a zero-point
+    /// time-out), which the original's two-id handoff does not resolve here.
+    pub winners: Vec<usize>,
+    /// Fight time in seconds, excluding the countdown.
+    pub duration: f32,
+    pub robots: Vec<RobotReport>,
+    /// The duel's human-readable event log (KO, parts, eliminations, a broken
+    /// arena `Tick`). Damage is in the per-robot numbers, not repeated here.
+    pub log: Vec<String>,
+}
+
+impl MatchReport {
+    /// The screen's four rows, in robot order. `ra2ui::results::fill` places
+    /// the first four and leaves slots with no bot as the file has them.
+    pub fn results(&self) -> Vec<ra2ui::results::MatchResult> {
+        self.robots
+            .iter()
+            .map(|r| ra2ui::results::MatchResult {
+                team_logo: r.team_logo.clone(),
+                bot_preview: r.bot_preview.clone(),
+                points: r.points,
+                bot_name: r.bot_name.clone(),
+                team_name: r.team_name.clone(),
+                immobilized: r.immobilized,
+                winner: r.winner,
+            })
+            .collect()
+    }
+}
+
+/// A live match.
+pub struct Match {
+    pub config: MatchConfig,
+    pub duel: Duel,
+    state: MatchState,
+    countdown_left: f32,
+    /// Fight time only; the original starts its clock with the countdown
+    /// (`0x4759c0`), but the recon does not establish whether the displayed
+    /// time includes it, so the report is explicit about this being fight time.
+    clock: f32,
+    over_left: f32,
+    reason: Option<WinReason>,
+    winners: Vec<usize>,
+    teams: Vec<ra2fmt::team::Team>,
+}
+
+impl Match {
+    /// Build the world and put every robot on an arena start point.
+    ///
+    /// The robots take the start points in order and face the direction the
+    /// model declares (`ra2_render::start_points`, the same call the duel
+    /// uses). Battle Royal's four spawns are the model's four start points.
+    pub fn new(config: MatchConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let spawn_count = match config.game_type {
+            GameType::BattleRoyal => config.bot_count,
+            _ => config.robots.len(),
+        };
+        if !(2..=4).contains(&spawn_count) {
+            return Err(
+                format!("a match needs 2 to 4 robots, the event asks for {spawn_count}").into(),
+            );
+        }
+        if config.robots.len() != spawn_count {
+            return Err(format!(
+                "{} spawns but {} robot entries",
+                spawn_count,
+                config.robots.len()
+            )
+            .into());
+        }
+        if config.dt <= 0.0 {
+            return Err("the match step must be positive".into());
+        }
+
+        // The script state must be real *before* the arena script is built:
+        // `king.py:26` reads the game type in `Activate`, and the intro cameras
+        // read the player list.
+        ra2script::prepare_match(
+            config.game_type.as_str(),
+            (0..spawn_count).map(|i| i as i32).collect(),
+        );
+
+        let setups: Vec<BotSetup> = config
+            .robots
+            .iter()
+            .map(|r| BotSetup {
+                path: r.bot_path.clone(),
+                // `None` = the start point's own facing, which is the model's.
+                yaw_deg: None,
+                spawn: None,
+            })
+            .collect();
+        let mut duel = Duel::new(&config.arena, &setups)?;
+        for (robot, entry) in duel.robots.iter_mut().zip(&config.robots) {
+            robot.team = entry.team;
+        }
+
+        let teams = team_table(&config.arena);
+        Ok(Match {
+            countdown_left: config.countdown,
+            config,
+            duel,
+            state: MatchState::Countdown,
+            clock: 0.0,
+            over_left: 0.0,
+            reason: None,
+            winners: Vec::new(),
+            teams,
+        })
+    }
+
+    pub fn state(&self) -> MatchState {
+        self.state
+    }
+
+    /// Whether the game's own AI is driving every robot (false means the duel's
+    /// stand-in driver is filling in for a robot `Bindings.py` does not cover).
+    pub fn has_shipped_ai(&self) -> bool {
+        self.duel.has_shipped_ai()
+    }
+
+    /// Fight time so far, in seconds.
+    pub fn clock(&self) -> f32 {
+        self.clock
+    }
+
+    /// Advance one fixed step (`MatchConfig::dt`, the existing duel's step).
+    pub fn step(&mut self) {
+        let dt = self.config.dt;
+        match self.state {
+            MatchState::Setup => self.state = MatchState::Countdown,
+            MatchState::Countdown => {
+                // The countdown holds the robots still: the physics and the
+                // arena still tick, but no brain drives. The original plays the
+                // countdown in the match window and begins the fight at zero
+                // (`0x477480` → `0x416360`).
+                let idle = vec![DriveInput::default(); self.duel.robots.len()];
+                self.duel.step_direct(&idle, dt);
+                self.countdown_left -= dt;
+                if self.countdown_left <= 0.0 {
+                    self.countdown_left = 0.0;
+                    self.state = MatchState::Fight;
+                }
+            }
+            MatchState::Fight => {
+                self.duel.step(dt);
+                self.clock += dt;
+                if let Some(reason) = self.end_reason() {
+                    self.finish(reason);
+                }
+            }
+            MatchState::Over => {
+                self.over_left -= dt;
+                if self.over_left <= 0.0 {
+                    self.state = MatchState::Results;
+                }
+            }
+            MatchState::Results => {}
+        }
+    }
+
+    /// End the match now, through `plus.eliminatePlayer`'s own request queue.
+    ///
+    /// The tabletop arenas use this for a robot that fell off the table
+    /// (`flextop.py:188`); it is also the way a test drives the last-robot rule
+    /// without waiting for a chassis to be ground down.
+    pub fn eliminate(&mut self, bot: usize) {
+        ra2script::state()
+            .requests
+            .push(ra2script::Request::Eliminate { bot: bot as i32 });
+    }
+
+    /// The match's current result. Valid in every state; the numbers are live.
+    pub fn report(&self) -> MatchReport {
+        let robots = self
+            .duel
+            .robots
+            .iter()
+            .enumerate()
+            .map(|(i, robot)| {
+                let team = &self.teams.get(robot.team);
+                RobotReport {
+                    slot: i,
+                    team: robot.team,
+                    bot_name: crate::scriptai::bot_name(&robot.rig),
+                    team_name: team
+                        .map(|t| t.name.clone())
+                        .unwrap_or_else(|| format!("Team {}", robot.team + 1)),
+                    team_logo: team.map(|t| t.logo.clone()).unwrap_or_default(),
+                    bot_preview: String::new(),
+                    points: ra2script::points(i as i32),
+                    damage_dealt: self.duel.damage_dealt.get(i).copied().unwrap_or(0.0),
+                    damage_taken: self.duel.damage_taken.get(i).copied().unwrap_or(0.0),
+                    defeated: !robot.is_alive(),
+                    eliminated: robot.eliminated,
+                    winner: self.winners.contains(&i),
+                    immobilized: false,
+                }
+            })
+            .collect();
+        MatchReport {
+            game_type: self.config.game_type.as_str(),
+            arena: self.config.arena.clone(),
+            state: self.state,
+            reason: self.reason,
+            winners: self.winners.clone(),
+            duration: self.clock,
+            robots,
+            log: self.duel.log.clone(),
+        }
+    }
+
+    /// The C++ end conditions, in the order the original checks them.
+    fn end_reason(&self) -> Option<WinReason> {
+        let alive: Vec<usize> = (0..self.duel.robots.len())
+            .filter(|&i| self.duel.robots[i].is_alive())
+            .collect();
+        let timed_out = self
+            .config
+            .duration
+            .map(|limit| self.clock >= limit)
+            .unwrap_or(false);
+
+        if self.config.game_type == GameType::TeamMatch {
+            let mut teams: Vec<usize> = alive.iter().map(|&i| self.duel.robots[i].team).collect();
+            teams.sort_unstable();
+            teams.dedup();
+            if teams.len() <= 1 {
+                return Some(WinReason::LastTeam);
+            }
+            if timed_out {
+                return Some(WinReason::Timeout);
+            }
+            return None;
+        }
+
+        if alive.len() <= 1 {
+            return Some(WinReason::LastRobot);
+        }
+        if timed_out {
+            return Some(WinReason::Timeout);
+        }
+        None
+    }
+
+    fn finish(&mut self, reason: WinReason) {
+        self.reason = Some(reason);
+        self.winners = self.decide_winners(reason);
+        self.state = MatchState::Over;
+        self.over_left = self.config.results_delay;
+        // `0x416450`: the isMatchOver byte. The scripts check it every tick
+        // (`Hazards.py:312,325`, `king.py:36`), so it has to be set here.
+        ra2script::set_over(true);
+    }
+
+    /// `FUN_00418040` gives the last robot / last team; `FUN_00418770` settles a
+    /// finish on points.
+    ///
+    /// Ties at zero and the exact order `FUN_0047a220(0/1)` returns were not
+    /// established by the recon. A zero-point time-out is therefore reported as
+    /// a draw (no winners) rather than inventing a tie-breaker; a shared top
+    /// score reports every robot at that score (every robot on the tied teams
+    /// for `TEAM MATCH`).
+    fn decide_winners(&self, reason: WinReason) -> Vec<usize> {
+        if self.config.game_type == GameType::TeamMatch {
+            let mut totals: std::collections::BTreeMap<usize, i32> =
+                std::collections::BTreeMap::new();
+            for (i, robot) in self.duel.robots.iter().enumerate() {
+                *totals.entry(robot.team).or_insert(0) += ra2script::points(i as i32);
+            }
+            let best = totals.values().copied().max().unwrap_or(0);
+            if best > 0 {
+                let top: Vec<usize> = totals
+                    .iter()
+                    .filter(|(_, p)| **p == best)
+                    .map(|(t, _)| *t)
+                    .collect();
+                return (0..self.duel.robots.len())
+                    .filter(|&i| top.contains(&self.duel.robots[i].team))
+                    .collect();
+            }
+            if reason == WinReason::LastTeam {
+                // No points on the board: the side still standing is the
+                // winner. (The recon leaves the all-zero case open.)
+                if let Some(i) =
+                    (0..self.duel.robots.len()).find(|&i| self.duel.robots[i].is_alive())
+                {
+                    let team = self.duel.robots[i].team;
+                    return (0..self.duel.robots.len())
+                        .filter(|&j| self.duel.robots[j].team == team)
+                        .collect();
+                }
+            }
+            return Vec::new();
+        }
+
+        if reason == WinReason::LastRobot {
+            return (0..self.duel.robots.len())
+                .filter(|&i| self.duel.robots[i].is_alive())
+                .collect();
+        }
+
+        let points: Vec<i32> = (0..self.duel.robots.len())
+            .map(|i| ra2script::points(i as i32))
+            .collect();
+        let best = points.iter().copied().max().unwrap_or(0);
+        if best <= 0 {
+            return Vec::new();
+        }
+        points
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p == best)
+            .map(|(i, _)| i)
+            .collect()
+    }
+}
+
+/// `EventNumBots` from a robot list: the original accepts only 2 or 4.
+fn match_event_num_bots_from_entries(n: usize) -> usize {
+    event_num_bots(n)
+}
+
+/// The AI teams' names and logos, for the result cells.
+///
+/// The event's team slot is the index into `AI/Teams.txt`; that is the table
+/// the shipped AI team folders (`AI/Team1` …) line up with in their own order.
+fn team_table(arena: &str) -> Vec<ra2fmt::team::Team> {
+    let Some(root) = ra2_render::find_game_root(Path::new(arena)) else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(root.join("AI").join("Teams.txt"))
+        .map(|text| ra2fmt::team::parse(&text))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec3;
+    use pyo3::prelude::*;
+
+    struct Restore(&'static str, Option<String>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(v) => std::env::set_var(self.0, v),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+
+    fn game_dir() -> Option<std::path::PathBuf> {
+        let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            let candidate = dir.join("local/game");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                return None;
+            }
+        }
+    }
+
+    fn path(game: &Path, p: &str) -> String {
+        game.join(p).to_string_lossy().to_string()
+    }
+
+    fn countdown_over(m: &mut Match) {
+        for _ in 0..10_000 {
+            if m.state() != MatchState::Countdown {
+                return;
+            }
+            m.step();
+        }
+        panic!("the countdown never ended");
+    }
+
+    /// M8.2/M8.4/M8.6: a real DEATHMATCH reaches `Over` with a winner.
+    ///
+    /// Two shipped AI brains fight on the box arena. The match is then ended
+    /// through `plus.eliminatePlayer`'s request — the same state-3 path the
+    /// tabletop arenas use when a robot falls off (`flextop.py:188`) — so the
+    /// last-robot rule is exercised without waiting several minutes for a
+    /// chassis to be ground down. Everything printed is the run's own number.
+    #[test]
+    fn a_deathmatch_reaches_over_with_a_winner() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        // The hazards change where the box fight happens; the shipped AI test
+        // turns them off for the same reason.
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+
+        let config = MatchConfig::new(
+            path(&game, "Arenas/box.py"),
+            GameType::Deathmatch,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team6/Bot2.bot")),
+            ],
+        )
+        .with_results_delay(0.0);
+        let mut m = Match::new(config).expect("the match builds");
+        assert_eq!(m.state(), MatchState::Countdown);
+        assert!(m.has_shipped_ai(), "the shipped AI did not load");
+
+        // The countdown is the recovered 4.0 s: still counting at 3.9 s.
+        let dt = m.config.dt;
+        for _ in 0..(3.9 / dt) as usize {
+            m.step();
+        }
+        assert_eq!(m.state(), MatchState::Countdown, "the countdown is 4.0 s");
+        countdown_over(&mut m);
+        assert_eq!(m.state(), MatchState::Fight);
+
+        // Let the real fight run long enough to land blows.
+        for _ in 0..(30.0 / dt) as usize {
+            m.step();
+            if m.state() != MatchState::Fight {
+                break;
+            }
+        }
+        let before = m.report();
+        println!(
+            "deathmatch before the decision: t={:.2}s damage dealt={:?} taken={:?} hp={:?}",
+            before.duration,
+            before
+                .robots
+                .iter()
+                .map(|r| r.damage_dealt)
+                .collect::<Vec<_>>(),
+            before
+                .robots
+                .iter()
+                .map(|r| r.damage_taken)
+                .collect::<Vec<_>>(),
+            m.duel
+                .robots
+                .iter()
+                .map(|r| (r.is_alive(), r.health[0]))
+                .collect::<Vec<_>>()
+        );
+
+        // The tabletop path: eliminate robot 0 and let the next step apply it.
+        m.eliminate(0);
+        m.step();
+        assert_eq!(
+            m.state(),
+            MatchState::Over,
+            "the last-robot rule did not fire"
+        );
+        let report = m.report();
+        println!(
+            "deathmatch over: winner={:?} at {:.2}s, points={:?}, damage taken={:?}",
+            report.winners,
+            report.duration,
+            report.robots.iter().map(|r| r.points).collect::<Vec<_>>(),
+            report
+                .robots
+                .iter()
+                .map(|r| r.damage_taken)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(report.winners, vec![1], "the surviving robot wins");
+        assert!(report.robots[0].defeated && report.robots[0].eliminated);
+        assert!(report.robots[1].winner);
+        assert!(report.duration > 25.0, "fight time {}", report.duration);
+        assert!(
+            report.log.iter().any(|l| l.contains("eliminated")),
+            "no elimination in the log: {:?}",
+            report.log
+        );
+        // The report is the results screen's data, four slots' worth.
+        let rows = report.results();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].winner);
+        assert!(!rows[0].winner);
+
+        // Over → Results after the configured delay (0 here).
+        m.step();
+        assert_eq!(m.state(), MatchState::Results);
+    }
+
+    /// M8.3: King of the Hill's own `Tick` scores 10 points every 0.5 s.
+    ///
+    /// The constants are `king.py`'s: `initial_delay = 0` (line 32),
+    /// `scoring_delay = .5` (line 33), `points = 10` (line 34). The score is
+    /// read from the same `+0x20` store `plus.addPoints` writes; nothing else
+    /// in this test writes it. `scoringPlayer` on the script is set on the same
+    /// two lines as the `addPoints` call, so both are checked.
+    #[test]
+    fn king_of_the_hill_scores_ten_every_half_second() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+
+        // `Activate` reads the game type, so it must be set before the arena is
+        // instantiated (which `Duel::new` does).
+        ra2script::prepare_match("KING OF THE HILL", vec![0, 1]);
+        let bot = |p: &str, spawn: Option<[f32; 2]>| BotSetup {
+            path: path(&game, p),
+            yaw_deg: None,
+            spawn,
+        };
+        let mut duel = Duel::new(
+            &path(&game, "Arenas/hilltop.py"),
+            &[
+                // The hill's top / the King_Zone centre is (0, 0).
+                bot("AI/Team1/Bot0.bot", Some([0.0, 0.0])),
+                // Parked on an outer start point, nowhere near the zone.
+                bot("AI/Team6/Bot2.bot", Some([12.0, 0.0])),
+            ],
+        )
+        .expect("the hilltop arena builds a duel");
+        assert!(duel.has_shipped_ai(), "the shipped scripts did not load");
+
+        // The hilltop's *visual* hill is not part of the collider this port
+        // builds (the static body is the backdrop box), so a robot spawned at
+        // the hill's (0, 0) falls to the box floor. For a scoring test the
+        // robot is parked in the zone instead: its chassis is placed at the
+        // zone's centre every step, which is the same world position the
+        // script's phantom query is answered in. The AI is not driving it.
+        let chassis = duel.robots[0].body();
+        let rotation = duel
+            .physics
+            .state(chassis)
+            .expect("the chassis body")
+            .rotation;
+        let park = |duel: &mut Duel| {
+            duel.physics
+                .set_transform(chassis, Vec3::new(0.0, 2.2, 0.0), rotation);
+            duel.physics.set_velocity(chassis, Vec3::ZERO, Vec3::ZERO);
+        };
+
+        let dt = 1.0 / 60.0;
+        let idle = [DriveInput::default(), DriveInput::default()];
+        park(&mut duel);
+        duel.step_direct(&idle, dt);
+        assert_eq!(ra2script::points(0), 0, "the score starts at zero");
+
+        // The phantom is populated from the model and asked by the script's
+        // own name.
+        let in_zone = ra2script::state()
+            .zone_contents
+            .get("king_zone")
+            .cloned()
+            .unwrap_or_default();
+        println!("king_zone contents: {in_zone:?}");
+        assert_eq!(in_zone.len(), 1, "one robot is on the hill: {in_zone:?}");
+        assert_eq!(in_zone[0].0, 1, "robot ids are 1-based");
+
+        // First score: the arena tick is 0.25 s, so the first `> 0.5` arrives
+        // on the third tick, about 0.5 s after the bell.
+        let mut first = None;
+        for _ in 0..(2.0 / dt) as usize {
+            park(&mut duel);
+            duel.step_direct(&idle, dt);
+            if ra2script::points(0) > 0 {
+                first = Some(duel.time);
+                break;
+            }
+        }
+        let first = first.expect("the hill never scored");
+        let first_points = ra2script::points(0);
+        println!("first score {first_points} at {first:.3}s");
+        assert_eq!(first_points, 10);
+        assert!(
+            (0.4..0.7).contains(&first),
+            "first score at {first}, expected 0.5 s of script time (zero initial delay)"
+        );
+
+        // Measure the rate directly, away from boundaries: 4.2 s later the
+        // script's `while self.scoring_delay > .5` has fired eight more times.
+        let mut delta = 0;
+        while duel.time < first + 4.2 {
+            park(&mut duel);
+            duel.step_direct(&idle, dt);
+            delta = ra2script::points(0) - 10;
+        }
+        println!("score after {:.2}s from the first: +{delta}", 4.2);
+        assert_eq!(delta, 80, "10 points per 0.5 s is 8 scores in 4.0 s");
+
+        // Run to 5.0 s of arena time. Twenty 0.25 s ticks have run; nine of
+        // them crossed the 0.5 s accumulator and scored (the tenth is exactly
+        // 0.5, and `while > 0.5` does not fire).
+        while duel.time < 5.0 {
+            park(&mut duel);
+            duel.step_direct(&idle, dt);
+        }
+        let score = ra2script::points(0);
+        let script: (i32, i32) = pyo3::Python::with_gil(|py| {
+            let arena = ra2script::state()
+                .arena_object
+                .as_ref()
+                .expect("the arena is live")
+                .clone_ref(py);
+            let obj = arena.bind(py);
+            (
+                obj.getattr("scoringPlayer")
+                    .unwrap()
+                    .extract()
+                    .unwrap_or(-1),
+                obj.getattr("scoring_delay")
+                    .unwrap()
+                    .extract::<f32>()
+                    .map(|v| (v * 100.0) as i32)
+                    .unwrap_or(-1),
+            )
+        });
+        println!(
+            "t={:.2}s score={score} scoringPlayer={} scoring_delay={}",
+            duel.time,
+            script.0,
+            script.1 as f32 / 100.0
+        );
+        assert_eq!(score, 90, "9 scores of 10 in 5 s");
+        assert_eq!(script.0, 0, "the script's own scoringPlayer is robot 0");
+        assert_eq!(
+            ra2script::points(1),
+            0,
+            "the robot off the hill never scores"
+        );
+    }
+
+    /// M8.5: `EventNumBots=4` spawns four robots on four distinct start points.
+    #[test]
+    fn battle_royal_spawns_four_distinct_start_points() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        assert_eq!(event_num_bots(4), 4);
+        assert_eq!(event_num_bots(2), 2);
+        assert_eq!(event_num_bots(3), 4, "anything but 2 is rewritten to 4");
+        assert_eq!(event_num_bots(1), 4);
+
+        let arena = path(&game, "Arenas/box.py");
+        let config = MatchConfig::new(
+            arena.clone(),
+            GameType::BattleRoyal,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team3/Bot2.bot")),
+                RobotEntry::ai(2, path(&game, "AI/Team6/Bot2.bot")),
+                RobotEntry::ai(3, path(&game, "AI/Team9/Bot1.bot")),
+            ],
+        )
+        .with_event_num_bots(4);
+        assert_eq!(config.bot_count, 4);
+        let m = Match::new(config).expect("a Battle Royal builds");
+        assert_eq!(m.duel.robots.len(), 4);
+        assert_eq!(ra2script::state().players, vec![0, 1, 2, 3]);
+
+        let starts = ra2_render::start_points(&arena).expect("the box model has start points");
+        assert_eq!(starts.len(), 4, "the box arena declares four spawns");
+        let mut positions = Vec::new();
+        for (i, robot) in m.duel.robots.iter().enumerate() {
+            let p = robot.position(&*m.duel.physics);
+            println!(
+                "battle royal robot {i}: ({:.2}, {:.2}, {:.2})",
+                p.x, p.y, p.z
+            );
+            let nearest = starts
+                .iter()
+                .map(|(s, _)| (Vec3::new(s.x, p.y, s.z) - p).length())
+                .fold(f32::MAX, f32::min);
+            assert!(
+                nearest < 0.6,
+                "robot {i} at {p:?} is {nearest:.2} m from a start point"
+            );
+            positions.push((p.x, p.z));
+        }
+        for a in 0..positions.len() {
+            for b in a + 1..positions.len() {
+                let d = ((positions[a].0 - positions[b].0).powi(2)
+                    + (positions[a].1 - positions[b].1).powi(2))
+                .sqrt();
+                assert!(d > 2.0, "robots {a} and {b} spawned {d:.2} m apart");
+            }
+        }
+        assert!(m.has_shipped_ai());
+    }
+
+    /// M8.5: the two-event-bot configuration still spawns two.
+    #[test]
+    fn a_two_robot_match_uses_two_start_points() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let config = MatchConfig::new(
+            path(&game, "Arenas/box.py"),
+            GameType::Deathmatch,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team6/Bot2.bot")),
+            ],
+        );
+        assert_eq!(config.bot_count, 2);
+        let m = Match::new(config).expect("a duel match builds");
+        assert_eq!(m.duel.robots.len(), 2);
+        assert_eq!(ra2script::state().players, vec![0, 1]);
+    }
+
+    /// M8.3: a failing arena `Tick` reaches the match log, not a silent `true`.
+    ///
+    /// The host returns the Python error with its traceback; the duel records
+    /// the first one once. This is the end-to-end version of the host test, in
+    /// the match's own log (which the report carries).
+    #[test]
+    fn a_raising_arena_tick_reaches_the_match_log() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let config = MatchConfig::new(
+            path(&game, "Arenas/box.py"),
+            GameType::Deathmatch,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team6/Bot2.bot")),
+            ],
+        );
+        let mut m = Match::new(config).expect("the match builds");
+        Python::with_gil(|py| {
+            let arena = ra2script::state()
+                .arena_object
+                .as_ref()
+                .expect("the arena is live")
+                .clone_ref(py);
+            let broken = py
+                .eval(
+                    c"lambda: (_ for _ in ()).throw(RuntimeError('tick exploded'))",
+                    None,
+                    None,
+                )
+                .unwrap();
+            arena.bind(py).setattr("Tick", broken).unwrap();
+        });
+        // A countdown step still ticks the arena.
+        m.step();
+        let report = m.report();
+        let line = report
+            .log
+            .iter()
+            .find(|line| line.contains("tick exploded"))
+            .unwrap_or_else(|| panic!("the failure was swallowed: {:?}", report.log));
+        println!("arena tick failure reported as: {line}");
+        assert!(line.contains("arena Tick failed"), "{line}");
+        assert!(line.contains("box.py"), "the script is named: {line}");
+        assert!(
+            line.contains("Traceback") || line.contains("RuntimeError"),
+            "the traceback is carried: {line}"
+        );
+    }
+
+    /// M8.4: a zero-point time-out is a draw, not an invented tie-break.
+    #[test]
+    fn a_pointless_timeout_reports_a_draw() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+        let config = MatchConfig::new(
+            path(&game, "Arenas/box.py"),
+            GameType::Deathmatch,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team6/Bot2.bot")),
+            ],
+        )
+        .with_duration(Some(0.2))
+        .with_results_delay(0.0);
+        let mut m = Match::new(config).expect("the match builds");
+        countdown_over(&mut m);
+        while m.state() == MatchState::Fight {
+            m.step();
+        }
+        let report = m.report();
+        println!(
+            "timeout: state={:?} reason={:?} winners={:?} at {:.2}s",
+            report.state, report.reason, report.winners, report.duration
+        );
+        assert_eq!(report.reason, Some(WinReason::Timeout));
+        assert!(report.winners.is_empty(), "0-0 has no winner to name");
+        assert!(report.duration >= 0.2 && report.duration < 0.3);
+    }
+}

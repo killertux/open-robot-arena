@@ -74,6 +74,10 @@ pub struct BotSnapshot {
     pub last_damage_done: (i32, f32, f32),
     /// …and the last one it took.
     pub last_damage_received: (i32, f32, f32),
+    /// `plus.isEliminated` — the original's robot state 3, which is a *different*
+    /// state from a defeated robot: a robot taken out by falling off a tabletop
+    /// is eliminated, while a robot whose chassis is gone is defeated.
+    pub eliminated: bool,
 }
 
 /// Something a script asked the engine to do.
@@ -137,6 +141,10 @@ pub struct State {
     pub over: bool,
     pub players: Vec<i32>,
     pub game_type: String,
+    /// The C++ robot's `+0x20` score, one entry per player. `plus.addPoints`
+    /// *adds* to it (`fild [robot+0x20]; fadd amount`); the match shell zeroes
+    /// it at the start of a match (`0x415a75`).
+    pub scores: Vec<i32>,
     pub next_handle: u64,
     pub sounds: BTreeMap<u64, String>,
     /// What the script layer asked for that a later milestone owns.
@@ -162,6 +170,7 @@ impl State {
             over: false,
             players: Vec::new(),
             game_type: String::new(),
+            scores: Vec::new(),
             next_handle: 1,
             sounds: BTreeMap::new(),
             deferred: Vec::new(),
@@ -181,6 +190,25 @@ impl State {
             return None;
         }
         self.bots.get(bot as usize)
+    }
+
+    /// The score of a player, or `0` for an id the match does not have.
+    pub fn points(&self, bot: i32) -> i32 {
+        if bot < 0 {
+            return 0;
+        }
+        self.scores.get(bot as usize).copied().unwrap_or(0)
+    }
+
+    /// `plus.addPoints` — the write at `0x417918`: take what is there and add.
+    pub fn add_points(&mut self, bot: i32, amount: i32) {
+        let Ok(bot) = usize::try_from(bot) else {
+            return;
+        };
+        if bot >= self.scores.len() {
+            self.scores.resize(bot + 1, 0);
+        }
+        self.scores[bot] += amount;
     }
 }
 
@@ -212,6 +240,64 @@ pub fn publish(bots: Vec<BotSnapshot>, time: f32, dt: f32) {
     st.bots = bots;
     st.time = time;
     st.dt = dt;
+}
+
+/// Put the match state the scripts read into place, before their arena is
+/// built.
+///
+/// `game_type` is one of the five strings the original compares against
+/// (`DEATHMATCH`, `BATTLE ROYAL`, `TEAM MATCH`, `TABLETOP`, `KING OF THE HILL`);
+/// `players` are the 0-based ids `plus.getPlayers()` reports (`box.py:158-181`
+/// uses them for the intro cameras, and King of the Hill's `Activate` reads the
+/// type at `king.py:26`). Scores start at zero, as `0x415a75` zeroes them.
+pub fn prepare_match(game_type: &str, players: Vec<i32>) {
+    let mut st = state();
+    st.game_type = game_type.to_string();
+    st.players = players;
+    st.scores.clear();
+    st.paused = false;
+    st.over = false;
+    st.zone_contents.clear();
+}
+
+/// Set the game-type string the scripts read (`plus.getGameType`).
+pub fn set_game_type(game_type: &str) {
+    state().game_type = game_type.to_string();
+}
+
+/// Set the 0-based player ids `plus.getPlayers` reports.
+pub fn set_players(players: Vec<i32>) {
+    state().players = players;
+}
+
+/// The pause flag `plus.isMatchPaused` reads.
+pub fn set_paused(paused: bool) {
+    state().paused = paused;
+}
+
+/// The end flag `plus.isMatchOver` reads (`GameWindow+0x8f`, `0x416450`).
+pub fn set_over(over: bool) {
+    state().over = over;
+}
+
+/// Publish this step's zone contents, keyed by zone name, values `(1-based
+/// robot, chassis)`.
+///
+/// The simulator fills both the registered SmartZones (`RegisterZone`) and the
+/// model's phantom volumes (`GetRobotsInPhantom`).
+pub fn publish_zone_contents(contents: BTreeMap<String, Vec<(i32, bool)>>) {
+    state().zone_contents = contents;
+}
+
+/// A player's score, for the match's win conditions.
+pub fn points(bot: i32) -> i32 {
+    state().points(bot)
+}
+
+/// Add to a player's score. `plus.addPoints` and the KOTH script's own read
+/// both go through here — there is no "set".
+pub fn add_points(bot: i32, amount: i32) {
+    state().add_points(bot, amount);
 }
 
 /// Take the requests the scripts queued during the last tick.
@@ -415,6 +501,113 @@ mod tests {
                 assert!(flag(pit, "sliding"), "{pit} never started sliding");
             }
         });
+    }
+
+    /// M8.3: the match state the scripts read is real, and `addPoints` adds.
+    ///
+    /// `king.py` is why each of these matters: its `Activate` reads the game
+    /// type (`king.py:26`), its `Tick` reads `tickInterval` (lines 40,47) and
+    /// calls `addPoints` (line 44), and the tabletop arenas eliminate players
+    /// through the same queue. A setter is not involved: the binary's write is
+    /// `fild [robot+0x20]; fadd amount`, so two calls must leave the sum.
+    #[test]
+    fn plus_writes_the_match_state_the_scripts_read() {
+        let Some((host, _guard)) = boot() else { return };
+        crate::prepare_match("KING OF THE HILL", vec![0, 1]);
+        with_py(|py| {
+            let plus = host.import(py, "plus").unwrap();
+            plus.call_method1("addPoints", (0, 10)).unwrap();
+            plus.call_method1("addPoints", (0, 5)).unwrap();
+            assert_eq!(
+                plus.call_method1("getPoints", (0,))
+                    .unwrap()
+                    .extract::<i32>()
+                    .unwrap(),
+                15,
+                "addPoints must add, not replace"
+            );
+            assert_eq!(
+                plus.call_method1("getGameType", ())
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "KING OF THE HILL",
+                "the script compares the exact string"
+            );
+            assert_eq!(
+                plus.call_method1("getPlayers", ())
+                    .unwrap()
+                    .extract::<Vec<i32>>()
+                    .unwrap(),
+                vec![0, 1]
+            );
+            assert!(!plus
+                .call_method1("isMatchOver", ())
+                .unwrap()
+                .extract::<bool>()
+                .unwrap());
+            assert!(!plus
+                .call_method1("isMatchPaused", ())
+                .unwrap()
+                .extract::<bool>()
+                .unwrap());
+            crate::set_over(true);
+            crate::set_paused(true);
+            assert!(plus
+                .call_method1("isMatchOver", ())
+                .unwrap()
+                .extract::<bool>()
+                .unwrap());
+            assert!(plus
+                .call_method1("isMatchPaused", ())
+                .unwrap()
+                .extract::<bool>()
+                .unwrap());
+
+            // Every arena reads `self.tickInterval`; it is the game's 0.25 s
+            // arena tick, the value the hazards already count in.
+            host.load_arenas(py).unwrap();
+            let arena = host.create_arena(py, "Combat Arena").unwrap();
+            let interval: f32 = arena
+                .bind(py)
+                .getattr("tickInterval")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(interval, crate::ARENA_TICK_INTERVAL);
+            assert_eq!(interval, 0.25);
+        });
+        crate::prepare_match("", Vec::new());
+    }
+
+    /// M8.3: a raising arena `Tick` is returned with its Python traceback.
+    ///
+    /// The old host turned the error into `true`, so a `Tick` that never ran
+    /// looked like a tick that succeeded — which is how KOTH's missing
+    /// `tickInterval` stayed invisible. This test makes the failure the whole
+    /// point.
+    #[test]
+    fn a_raising_arena_tick_is_reported() {
+        let Some((host, _guard)) = boot() else { return };
+        with_py(|py| {
+            py.run(
+                c"class BrokenArena(object):\n    def Tick(self):\n        raise ValueError('tick exploded')\n",
+                None,
+                None,
+            )
+            .unwrap();
+            let object = py.eval(c"BrokenArena()", None, None).unwrap();
+            crate::state().arena_object = Some(object.unbind());
+        });
+        let error = host
+            .run_arena_tick(0.25)
+            .expect_err("a raising Tick must not report success");
+        assert!(error.contains("tick exploded"), "{error}");
+        assert!(
+            error.contains("Traceback") || error.contains("ValueError"),
+            "the traceback should be in the message: {error}"
+        );
+        crate::state().arena_object = None;
     }
 
     /// M4: `Arenas/box.py` drives the engine through `plus.Arena` — cameras,

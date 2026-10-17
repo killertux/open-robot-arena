@@ -86,6 +86,7 @@ pub fn register(py: Python<'_>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(add_window, &m)?)?;
     m.add_function(wrap_pyfunction!(add_text, &m)?)?;
     m.add_function(wrap_pyfunction!(add_points, &m)?)?;
+    m.add_function(wrap_pyfunction!(get_points, &m)?)?;
 
     modules.set_item("plus", &m)?;
     Ok(())
@@ -313,6 +314,13 @@ fn ray_box(
     Some(enter)
 }
 
+/// `plus.zap(bot, amount, radius)` — the electric hazard's shock.
+///
+/// The original's zap is a presentation event around the robot (`Hazards.
+/// Electricity` then applies its own damage and lift in `Tick`). The exact
+/// damage the zap itself deals is **not established**, so this records the
+/// observable effect (`Robot::zapped_until`) and leaves the visual to M5; the
+/// shipped hazard's `plus.damage` is what actually hurts the robot.
 #[pyfunction]
 #[pyo3(name = "zap")]
 fn zap(bot: i32, amount: f32, radius: f32) {
@@ -324,16 +332,23 @@ fn zap(bot: i32, amount: f32, radius: f32) {
     defer("zap visual (M5)");
 }
 
+/// `isDefeated` — the original's robot state is *not* 0 (`0x4b9ca0`).
+///
+/// A robot that fell off a tabletop is state 3, which is also non-zero, so it
+/// is defeated as well as eliminated.
 #[pyfunction]
 #[pyo3(name = "isDefeated")]
 fn is_defeated(bot: i32) -> bool {
-    with_bot(bot, |b| !b.alive).unwrap_or(false)
+    with_bot(bot, |b| !b.alive || b.eliminated).unwrap_or(false)
 }
 
+/// `isEliminated` — exactly the original's state 3 (`0x4b9c70`), not the
+/// broader "defeated". The tabletop arenas check this before eliminating a
+/// robot that has already fallen out.
 #[pyfunction]
 #[pyo3(name = "isEliminated")]
 fn is_eliminated(bot: i32) -> bool {
-    is_defeated(bot)
+    with_bot(bot, |b| b.eliminated).unwrap_or(false)
 }
 
 #[pyfunction]
@@ -523,12 +538,23 @@ fn add_text(
     Py::new(py, crate::ui::Text { id })
 }
 
+/// `plus.addPoints(player, amount)` — the robot's `+0x20` score.
+///
+/// Recovered from the binary: the bound function (`0x4b9d80`) resolves the
+/// player and calls `FUN_004177e0` → `FUN_004178a0`, whose write is
+/// `fild [robot+0x20]` / `fadd amount` (`0x417918`–`0x417928`). It therefore
+/// **adds**; it is not a setter. `king.py:44` is the only shipped caller.
 #[pyfunction]
-#[pyo3(signature = (*_args))]
 #[pyo3(name = "addPoints")]
-fn add_points(_args: &Bound<'_, PyTuple>) -> i32 {
-    defer("Gooey UI (M5)");
-    0
+fn add_points(bot: i32, amount: i32) {
+    crate::add_points(bot, amount);
+}
+
+/// `plus.getPoints(player)` — the getter behind the score (`0x494f50`).
+#[pyfunction]
+#[pyo3(name = "getPoints")]
+fn get_points(bot: i32) -> i32 {
+    crate::points(bot)
 }
 
 /// The `Forward`/`LeftRight` channels a brain has set, as `(throttle, steer)`

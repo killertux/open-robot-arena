@@ -43,6 +43,12 @@ pub struct Robot {
     pub mass_scale: f32,
     /// The chassis body is gone: the robot is out of the fight.
     pub destroyed: bool,
+    /// `plus.eliminatePlayer` — the original's robot state 3. The robot stays in
+    /// the world (it may still be falling), but it is out of the match.
+    pub eliminated: bool,
+    /// The electric hazard's `plus.zap` visual, as a deadline on the match
+    /// clock. The shipped `Electricity` hazard applies the damage itself.
+    pub zapped_until: f32,
 }
 
 impl Robot {
@@ -111,6 +117,8 @@ impl Robot {
             mass: rig.mass * mass_scale,
             mass_scale,
             destroyed: false,
+            eliminated: false,
+            zapped_until: -1.0,
             team,
             rig,
         })
@@ -269,8 +277,12 @@ impl Robot {
     }
 
     /// Whether the robot can still fight.
+    ///
+    /// An eliminated robot (state 3) has lost; so has one whose chassis is
+    /// gone. `plus.isDefeated` is the original's "state != 0", so both report
+    /// defeated, while `plus.isEliminated` only reports the eliminated state.
     pub fn is_alive(&self) -> bool {
-        self.parts[0].alive && !self.destroyed
+        self.parts[0].alive && !self.destroyed && !self.eliminated
     }
 
     /// Drive the motors: wheels from the input, spinners at their rated speed.
