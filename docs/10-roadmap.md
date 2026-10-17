@@ -113,10 +113,10 @@ These are not milestones; they are threads several milestones pull on.
 
 | # | Workstream | What it is | Needed by |
 |---|---|---|---|
-| **W1** | **Writers** | `ra2fmt` only reads. Add `bot::write` (target 1.12, round-trip every format), `team::write` (the three identity lines + the 15-int season line + money), `cfg::read/write` for `ra2.cfg`. | M9 (save a bot), M10 (career), W3 |
-| **W2** | **Audio** | Decode the shipped `.mp3` (three tracks, one per screen group) and `.wav` (component, weapon, motor loop, crowd, announcer, UI); play 2D and 3D-positional; music per screen; the `ra2.cfg` volumes. `plus.createSound`/`playSound` become real. | M7, M8 |
-| **W3** | **Settings** | `ra2.cfg` in the game's own keys (`FullScreen`, `FSDisplayWidth`, `DefaultCamera=watch`, `SoundVolume=-600`, `MusicMuted`, `ArenaIntros`, `EventNumBots`, `UpdateInterval`). Same file, same semantics. | M7 |
-| **W4** | **The oracle** | There is **no Wine on this machine** (`which wine` is empty), so there is no A/B against the original's own pixels. Either install Wine and drive it, or capture reference frames/screens on a machine that has it, and keep them as fixtures. | M8, M11 |
+| **W1** | ✅ **Writers** | `bot::write` (1.12; 57/57 byte-identical), `team::write` (both tables byte-identical), `cfg::read/write` (byte-identical). See `docs/13-audio-and-writers.md`. | M9 (save a bot), M10 (career), W3 |
+| **W2** | ◐ **Audio** | `ra2-audio` decodes and levels all three MP3s and the WAV set, plays 2D/3D, and maps music to the three screen groups. Not yet wired into `ra2-app` or `plus.createSound`/`playSound`. | M7, M8 |
+| **W3** | ◐ **Settings** | `ra2fmt::cfg` reads/writes `ra2.cfg` byte-identically with typed access to every client key. The options screen and startup use are not wired. | M7 |
+| **W4** | ✅ **The oracle** | The original runs under the installed flatpak Wine 9.0; the main menu is captured at 1024×768 and 1280×1024, and the harness measures **1.439/255** MAE (pointer-masked) against our render. `docs/12-oracle.md`, `tools/oracle/`. | M8, M11 |
 | **W5** | **Match-rule recon** | The C++ match shell: the match object, spawn order, countdown, camera modes (`watch`/`chase`/`top`), HUD field updates, end-of-match handoff, points for damage/KO/zone. Read it from the binary (REA) and from `ReadMe.txt` + the scripts. | M8 |
 | **W6** | **Pacing and performance** | A fixed 50 ms update (`ra2.cfg`) with the physics at a fixed step; frame pacing; the UI at display resolution; no per-frame allocation in the hot path. | M8, M11, M12 |
 
@@ -143,8 +143,8 @@ menu music and button sounds; quit and relaunch with the window where you left i
 | M7.2 | ✅ Input: mouse position (the shell's `PtInRect`/hover/click order), keyboard (Esc, arrows/Tab for focus), a bindings table; hit-testing already exists in `ra2ui::input` *(mouse mapping and Esc are in; arrows/Tab and the bindings table remain)* | `ra2-app`, `ra2ui::input` |
 | M7.3 | ✅ The loop: fixed 50 ms update, present at vsync, resize, DPI, fullscreen/windowed *(the fixed tick, Fifo present, resize and DPI are in; a fullscreen toggle remains)* | `ra2-app` |
 | M7.4 | ◐ Screen stack: move `ra2-shell`'s `nav` into a `Flow` the app drives; keep the scripted route runner as the headless entry *(the app and the headless path now drive one shared frame loop; `nav` has not yet moved into a `Flow`)* | `ra2-shell::nav` → shared |
-| M7.5 | Audio: `rodio`/`cpal` (MP3 + WAV), 2D/3D, music per screen group, volumes from `ra2.cfg`; `plus.createSound`/`playSound` real | new `ra2-audio`, `ra2script::plus` |
-| M7.6 | Settings: read/write `ra2.cfg`; a settings dialog drawn from the shipped `.gib` (options screen) | `ra2fmt::cfg`, `ra2-app` |
+| M7.5 | ◐ Audio: `ra2-audio` decodes/plays MP3+WAV, 2D/3D, maps music to the three screen groups and applies the `ra2.cfg` volume law *(library done; app wiring and `plus` sounds remain)* | `ra2-audio`, `ra2script::plus` |
+| M7.6 | ◐ Settings: `ra2.cfg` read/write is done and byte-exact *(the options screen and startup use remain)* | `ra2fmt::cfg`, `ra2-app` |
 | M7.7 | Text entry where the shell needs it (team name), the OS clipboard for import/export paths | `ra2-app` |
 | M7.8 | Cursor: the shipped cursor art, hover/click states per the corpus | `ra2-render`, `ra2ui` |
 
@@ -213,7 +213,7 @@ the library, decals) → save → reload it → `Test Robot` in an arena.
 
 | # | Work item | Lands in |
 |---|---|---|
-| M9.1 | **W1 `bot::write`**: write 1.12, round-trip **every** shipped `.bot` (byte-identical where the original is canonical, semantically identical otherwise) | `ra2fmt::bot` |
+| M9.1 | ✅ **W1 `bot::write`**: 1.12, **57/57** semantic and byte-identical, measured over `Robot Designs/`, `AI/` and `Teams/` | `ra2fmt::bot` |
 | M9.2 | Component placement: attach at a mount point with the F1 rule (already the renderer's), remove, undo; the palette's filtering and selection already exist | `ra2ui::workshop` |
 | M9.3 | Wiring: the control board's buttons and the wiring canvas (`control grid`), the game's own control-board model (.gib + the `.bot`'s wiring data) | `ra2ui`, `ra2fmt::bot` |
 | M9.4 | Paint: the texture library and custom textures lists, decals/surface layer, the chassis face groups (F10) as the paint target | `ra2ui`, `ra2fmt::bot` |
