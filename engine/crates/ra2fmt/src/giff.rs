@@ -55,9 +55,11 @@
 //! ## The rects are not the page's cells (S8)
 //!
 //! The record's four rect floats and the page are **two different packings**.
-//! The page lays the glyphs out in packed rows (bottom-up, in record order) and
-//! carries each row's last glyph to the end of the row above; the records' rects
-//! are a cumulative layout that drifts from those runs. Drawing the rects
+//! The page lays the glyphs out in packed rows (bottom-up, in record order), with
+//! a right slot holding the records that did not fit at the end of the previous
+//! row (one or two of them); the row is its record block rotated left by that
+//! many records. The records' rects are a cumulative layout that drifts from
+//! those runs. Drawing the rects
 //! therefore samples the neighbours — `fg_d20`'s `EXHIBITION` read
 //! `E/XIUBITIU !N`, and its `O` looked absent because the rect pointed at the
 //! row below the page's `O`. `Font::repack_from_page` now derives every cell
@@ -334,7 +336,7 @@ impl Font {
 /// (see the module note).
 pub const FIRST_CHAR: u32 = 34;
 
-pub fn parse(data: &[u8]) -> Result<Font, Error> {
+fn read(data: &[u8]) -> Result<Font, Error> {
     const HEADER: usize = 40;
     const COUNT: usize = 96;
     const RECORD: usize = 28;
@@ -393,7 +395,7 @@ pub fn parse(data: &[u8]) -> Result<Font, Error> {
         page.push(hi);
     }
 
-    let mut font = Font {
+    let font = Font {
         ascent,
         descent,
         leading,
@@ -403,8 +405,21 @@ pub fn parse(data: &[u8]) -> Result<Font, Error> {
         mask,
         glyphs,
     };
+    Ok(font)
+}
+
+/// Parse a `fg_*.giff` and re-pack its page cells from the page's ink.
+pub fn parse(data: &[u8]) -> Result<Font, Error> {
+    let mut font = read(data)?;
     font.repack_from_page();
     Ok(font)
+}
+
+/// Parse a `fg_*.giff` without re-packing its page cells. Tests use this to see
+/// the file's two packings; the renderer always goes through [`parse`].
+#[cfg(test)]
+fn parse_raw(data: &[u8]) -> Result<Font, Error> {
+    read(data)
 }
 
 impl Font {
@@ -422,98 +437,38 @@ impl Font {
     ///
     /// The page's rows are packed **bottom-up**, in the same order as the record
     /// rows (`v0` ascending). Each row is a run of glyphs separated by blank
-    /// columns. The last glyph of a row is carried to the **end of the row above**
-    /// — the page's `A..N` row ends with the `9` from the row below, its `P..c`
-    /// row ends with the `O`, and so on — so the first `n-1` records of a row take
-    /// that row's first `n-1` glyphs, and the row's next glyph belongs to the last
-    /// record of the row below. That is the cascade this function applies.
+    /// columns, plus a **right slot** (the last ~13 columns) where the packer
+    /// puts the records that did not fit at the end of the previous row. The
+    /// page is therefore the row's own records **rotated left by the number of
+    /// right-slot records**: on `fg_mcn14` the first row reads
+    /// `# ... C "`, the second `E ... c D`, and the third `f ... ~ d e` — one,
+    /// one and two records moved to the slot. `fg_mcn16`'s first row has a blank
+    /// quote, so its slot holds only the `A` that its next row also carries.
+    /// A width/advance alignment (below) finds that rotation and the blank
+    /// records without hard-coding a face, a character or a string.
     ///
-    /// A glyph's cell becomes the page run it occupies: `u0..u1` from the run's
-    /// columns, `v0..v1` from the row band, and `third` the band's top relative
-    /// to the baseline (one pixel above the band's bottom). The advance is **not**
-    /// touched: it belongs to the advance table, which is read two records on
-    /// (see [`Font::advance`]). Nothing here hard-codes a face, a character or a
-    /// string.
+    /// The left/right widths are the **next record's** raw cell width: the file's
+    /// rects are one record ahead of the page's runs (the same packing
+    /// disagreement), which is the measured prior the alignment scores against.
+    /// The advance is **not** touched: it belongs to the advance table, read two
+    /// records on (see [`Font::advance`]).
     fn repack_from_page(&mut self) {
-        use std::collections::BTreeMap;
-
-        let (w, h) = (self.page_width as i32, self.page_height as i32);
-        if w <= 0 || h <= 0 {
-            return;
-        }
-        // The records that describe a real cell: a positive advance and a
-        // non-degenerate rect. The last record in every face is a sentinel
-        // (`advance 1040`, an empty rect) and must not join a row.
-        let mut rows: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
-        for (i, g) in self.glyphs.iter().enumerate() {
-            if g.advance <= 0 || g.advance > 200 {
-                continue;
+        let rows = page_rows(self);
+        let mut mapped = vec![false; self.glyphs.len()];
+        for row in rows {
+            for &(record, run) in &row.matches {
+                let (x0, x1) = row.runs[run];
+                self.set_cell(record, x0, x1, row.top, row.bottom);
+                mapped[record] = true;
             }
-            let (_, _, gw, gh) = g.rect(self.page_width, self.page_height);
-            if gw <= 0 || gh <= 0 {
-                continue;
-            }
-            rows.entry((g.v0 * h as f32).round() as i32)
-                .or_default()
-                .push(i);
-        }
-
-        let mut previous_last: Option<usize> = None;
-        for records in rows.values() {
-            let top = records
-                .iter()
-                .map(|&i| ((1.0 - self.glyphs[i].v1) * h as f32).round() as i32)
-                .min()
-                .unwrap_or(0)
-                .clamp(0, h);
-            let bottom = records
-                .iter()
-                .map(|&i| ((1.0 - self.glyphs[i].v0) * h as f32).round() as i32)
-                .max()
-                .unwrap_or(h)
-                .clamp(0, h);
-            if bottom <= top {
-                previous_last = records.last().copied();
-                continue;
-            }
-
-            // One packed run per blank column gap. A one-to-four-pixel sliver
-            // touching the page's right edge is the next row's first glyph
-            // bleeding in, not a glyph of this row.
-            let mut ink = vec![false; w as usize];
-            for (x, any) in ink.iter_mut().enumerate() {
-                *any = (top..bottom).any(|y| self.page[(y as usize) * w as usize + x] > 30);
-            }
-            let mut runs: Vec<(i32, i32)> = Vec::new();
-            let mut start = None;
-            for x in 0..=w {
-                let lit = x < w && ink[x as usize];
-                match (lit, start) {
-                    (true, None) => start = Some(x),
-                    (false, Some(a)) => {
-                        runs.push((a, x - 1));
-                        start = None;
-                    }
-                    _ => {}
+            // A record in the block with no run is blank in this face (the quote
+            // in `fg_mcn16`, a `DEL`, the leading space-like records). Give it an
+            // empty cell unless another row already supplied it.
+            for &record in &row.block {
+                if !mapped[record] {
+                    self.clear_cell(record);
                 }
             }
-            runs.retain(|&(a, b)| !(b >= w - 2 && b - a < 4));
-
-            // The row's own records are all but its last; the last is drawn at
-            // the end of the next row up. The run after the row's own glyphs is
-            // therefore the last record of the row below.
-            let regular = records.len().saturating_sub(1);
-            for (i, &record) in records.iter().take(regular).enumerate() {
-                if let Some(&(a, b)) = runs.get(i) {
-                    self.set_cell(record, a, b, top, bottom);
-                }
-            }
-            if let Some(record) = previous_last {
-                if let Some(&(a, b)) = runs.get(regular) {
-                    self.set_cell(record, a, b, top, bottom);
-                }
-            }
-            previous_last = records.last().copied();
         }
     }
 
@@ -534,6 +489,271 @@ impl Font {
         // table (see `Font::advance`), and the packed pitch is only the glyph's
         // width, not its spacing.
     }
+
+    /// An empty cell: a record the page has no glyph for in this face.
+    fn clear_cell(&mut self, record: usize) {
+        let glyph = &mut self.glyphs[record];
+        glyph.u0 = 0.0;
+        glyph.u1 = 0.0;
+        glyph.v0 = 0.0;
+        glyph.v1 = 0.0;
+        glyph.third = 0;
+    }
+}
+
+/// One page row's run/record alignment, as measured from the raw file.
+#[derive(Debug, Clone)]
+struct RowAlignment {
+    top: i32,
+    bottom: i32,
+    /// The page's ink runs in visual order (regular flow then right slot).
+    runs: Vec<(i32, i32)>,
+    /// The row's record block: `previous row's last` + this row's records but
+    /// its last.
+    block: Vec<usize>,
+    /// The chosen left rotation: the page's first run is `block[k]`.
+    #[allow(dead_code)]
+    k: usize,
+    #[allow(dead_code)]
+    cost: i32,
+    /// `(record, run)` pairs, in run order.
+    matches: Vec<(usize, usize)>,
+}
+
+/// Measure every packed page row: its band, ink runs, record block and the
+/// rotation/blank alignment that best matches the run widths to the records'
+/// raw cell widths. This is the rule `repack_from_page` applies.
+fn page_rows(font: &Font) -> Vec<RowAlignment> {
+    use std::collections::BTreeMap;
+
+    let (w, h) = (font.page_width as i32, font.page_height as i32);
+    if w <= 0 || h <= 0 {
+        return Vec::new();
+    }
+    let raw_width: Vec<i32> = font
+        .glyphs
+        .iter()
+        .map(|g| ((g.u1 - g.u0) * w as f32).round() as i32)
+        .collect();
+    let raw_top: Vec<i32> = font
+        .glyphs
+        .iter()
+        .map(|g| ((1.0 - g.v1) * h as f32).round() as i32)
+        .collect();
+    let raw_bottom: Vec<i32> = font
+        .glyphs
+        .iter()
+        .map(|g| ((1.0 - g.v0) * h as f32).round() as i32)
+        .collect();
+
+    // The records that describe a real cell: a positive advance and a
+    // non-degenerate rect. The last record in every face is a sentinel
+    // (`advance 1040`, an empty rect) and must not join a row.
+    let mut rows: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+    for (i, g) in font.glyphs.iter().enumerate() {
+        if g.advance <= 0 || g.advance > 200 {
+            continue;
+        }
+        let (_, _, gw, gh) = g.rect(font.page_width, font.page_height);
+        if gw <= 0 || gh <= 0 {
+            continue;
+        }
+        rows.entry((g.v0 * h as f32).round() as i32)
+            .or_default()
+            .push(i);
+    }
+
+    let mut out = Vec::new();
+    let mut previous_last: Option<usize> = None;
+    for records in rows.values() {
+        let top = records
+            .iter()
+            .map(|&i| raw_top[i])
+            .min()
+            .unwrap_or(0)
+            .clamp(0, h);
+        let bottom = records
+            .iter()
+            .map(|&i| raw_bottom[i])
+            .max()
+            .unwrap_or(h)
+            .clamp(0, h);
+        if bottom <= top {
+            previous_last = records.last().copied();
+            continue;
+        }
+
+        // One packed run per blank column gap. A truncated duplicate at the
+        // page's right edge (the row's first glyph copied into the slot and cut
+        // by the edge) is dropped when a real slot run is already there.
+        let mut ink = vec![false; w as usize];
+        for (x, any) in ink.iter_mut().enumerate() {
+            *any = (top..bottom).any(|y| font.page[(y as usize) * w as usize + x] > 30);
+        }
+        let mut runs: Vec<(i32, i32)> = Vec::new();
+        let mut start = None;
+        for x in 0..=w {
+            let lit = x < w && ink[x as usize];
+            match (lit, start) {
+                (true, None) => start = Some(x),
+                (false, Some(a)) => {
+                    runs.push((a, x - 1));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        let mut kept: Vec<(i32, i32)> = Vec::new();
+        for (a, b) in runs {
+            // A 1-px run at either page edge whose ink is only a row or two
+            // tall is bleed, not a glyph; a real 1-px bracket at the edge spans
+            // the band. A truncated duplicate at the right edge is the next
+            // row's first glyph copied there.
+            let height = (top..bottom)
+                .filter(|&y| {
+                    (a..=b).any(|x| font.page[(y as usize) * w as usize + x as usize] > 30)
+                })
+                .count();
+            let edge_speck =
+                b == a && (a == 0 || b >= w - 1) && height * 2 < (bottom - top) as usize;
+            let truncated = b >= w - 1 && b - a < 4 && kept.iter().any(|&(x, _)| x >= w - 13);
+            if !edge_speck && !truncated {
+                kept.push((a, b));
+            }
+        }
+        let mut runs = kept;
+
+        let mut block: Vec<usize> = Vec::with_capacity(records.len());
+        if let Some(last) = previous_last {
+            block.push(last);
+        }
+        block.extend_from_slice(&records[..records.len().saturating_sub(1)]);
+
+        // The slot holds only the records the block still needs. Extra runs at
+        // the page edge are the next row's first glyph copied there (truncated),
+        // or a speck; they are not glyphs of this row. `fg_d26`'s first row had
+        // 36 block records, 36 regular runs and a 37th duplicate `E` at the
+        // edge; keeping it mapped the real `E` onto the duplicate.
+        let regular = runs.iter().filter(|(a, _)| *a < w - 13).count();
+        let wanted = block.len().saturating_sub(regular);
+        if runs.len() > regular + wanted {
+            runs.truncate(regular + wanted);
+        }
+
+        let (cost, k, matches) = match best_alignment(&block, &runs, &raw_width) {
+            Some((cost, k, matches)) => (cost, k, matches),
+            None => (0, 0, Vec::new()),
+        };
+        out.push(RowAlignment {
+            top,
+            bottom,
+            runs,
+            block,
+            k,
+            cost,
+            matches,
+        });
+        previous_last = records.last().copied();
+    }
+    out
+}
+
+/// The best row rotation for a page row: the block rotated left by `k`, with
+/// blank records skipped. Costs are in pixels; a skipped block record is a blank
+/// glyph (`BLANK`) and a skipped run is a duplicate or speck (`SKIP_RUN`).
+const BLANK: i32 = 10;
+const SKIP_RUN: i32 = 15;
+
+type Match = (usize, usize);
+type Alignment = (i32, usize, Vec<Match>);
+
+fn best_alignment(block: &[usize], runs: &[(i32, i32)], raw_width: &[i32]) -> Option<Alignment> {
+    let n = block.len();
+    let r = runs.len();
+    if n == 0 || r == 0 {
+        return None;
+    }
+    let mut best: Option<Alignment> = None;
+    for k in 0..=r.min(3) {
+        if let Some((cost, matches)) = align(block, runs, raw_width, k) {
+            let better = match &best {
+                None => true,
+                Some((best_cost, _, _)) => cost < *best_cost,
+            };
+            if better {
+                best = Some((cost, k, matches));
+            }
+        }
+    }
+    best
+}
+
+/// Align the page's runs to `block` rotated left by `k`, in order, allowing
+/// blank block records and extra runs. Returns the cost and `(record, run)`.
+fn align(
+    block: &[usize],
+    runs: &[(i32, i32)],
+    raw_width: &[i32],
+    k: usize,
+) -> Option<(i32, Vec<Match>)> {
+    let n = block.len();
+    let r = runs.len();
+    let inf = i32::MAX / 4;
+    let mut dp = vec![vec![inf; n + 1]; r + 1];
+    // 0 = unchecked, 1 = blank block record, 2 = skip run, 3 = match.
+    let mut par = vec![vec![0u8; n + 1]; r + 1];
+    dp[0][0] = 0;
+    for i in 0..=r {
+        for j in 0..=n {
+            let cur = dp[i][j];
+            if cur >= inf {
+                continue;
+            }
+            if j < n {
+                let c = cur + BLANK;
+                if c < dp[i][j + 1] {
+                    dp[i][j + 1] = c;
+                    par[i][j + 1] = 1;
+                }
+            }
+            if i < r {
+                let c = cur + SKIP_RUN;
+                if c < dp[i + 1][j] {
+                    dp[i + 1][j] = c;
+                    par[i + 1][j] = 2;
+                }
+                if j < n {
+                    let next = (j + k + 1) % n;
+                    let width = runs[i].1 - runs[i].0 + 1;
+                    let c = cur + (width - raw_width[block[next]]).abs();
+                    if c < dp[i + 1][j + 1] {
+                        dp[i + 1][j + 1] = c;
+                        par[i + 1][j + 1] = 3;
+                    }
+                }
+            }
+        }
+    }
+    if dp[r][n] >= inf {
+        return None;
+    }
+    let mut i = r;
+    let mut j = n;
+    let mut matches = Vec::new();
+    while i > 0 || j > 0 {
+        match par[i][j] {
+            1 => j -= 1,
+            2 => i -= 1,
+            3 => {
+                matches.push((block[(j - 1 + k) % n], i - 1));
+                i -= 1;
+                j -= 1;
+            }
+            _ => return None,
+        }
+    }
+    matches.sort_unstable_by_key(|&(_, run)| run);
+    Some((dp[r][n], matches))
 }
 
 #[cfg(test)]
@@ -765,10 +985,109 @@ mod tests {
             .collect()
     }
 
+    /// **The page rows are measured, and the last record of a row is carried
+    /// into the next.** Each row is a record block (`previous row's last` + this
+    /// row's records but its last) drawn as the page's runs rotated left by the
+    /// number of records in the right slot. The table below is the measurement:
+    /// `(block records, ink runs, rotation k, matched runs, cost)`. `fg_mcn14`
+    /// is the face the help screen uses; its second row is `E..c` then `D` and
+    /// its third `f..~` then `d`, `e` — the one-glyph shift the old order-only
+    /// mapping produced. `fg_mcn16` is the working face beside it.
+    #[test]
+    fn the_page_rows_are_measured_and_rotated() {
+        type RowSummary = (usize, usize, usize, usize, i32);
+        let expected: &[(&str, &[RowSummary])] = &[
+            (
+                "fg_mcn14",
+                &[(34, 34, 1, 34, 23), (32, 32, 1, 32, 11), (27, 27, 2, 27, 8)],
+            ),
+            (
+                "fg_mcn16",
+                &[
+                    (31, 31, 1, 31, 23),
+                    (29, 29, 1, 29, 21),
+                    (33, 33, 1, 33, 25),
+                ],
+            ),
+            (
+                "fg_d20",
+                &[
+                    (23, 23, 1, 23, 18),
+                    (22, 22, 1, 22, 4),
+                    (21, 21, 1, 21, 6),
+                    (26, 26, 1, 26, 10),
+                    (1, 1, 0, 1, 4),
+                ],
+            ),
+        ];
+        for (face, table) in expected {
+            let Some(data) = shipped_bytes(face) else {
+                return;
+            };
+            let raw = parse_raw(&data).expect("a raw font");
+            let rows = page_rows(&raw);
+            let summary: Vec<RowSummary> = rows
+                .iter()
+                .map(|r| (r.block.len(), r.runs.len(), r.k, r.matches.len(), r.cost))
+                .collect();
+            assert_eq!(&summary, table, "{face}: (block, runs, k, matches, cost)");
+        }
+
+        // The run-width sequences are the other half of the measurement: they
+        // are what the alignment matches against `next record's cell width`.
+        let widths = |face: &str, row: usize| -> Vec<i32> {
+            let data = shipped_bytes(face).unwrap();
+            let raw = parse_raw(&data).unwrap();
+            page_rows(&raw)[row]
+                .runs
+                .iter()
+                .map(|(a, b)| b - a + 1)
+                .collect()
+        };
+        assert_eq!(
+            widths("fg_mcn14", 1),
+            [
+                3, 7, 8, 7, 3, 5, 8, 6, 10, 7, 8, 7, 8, 7, 7, 7, 7, 7, 10, 7, 7, 6, 3, 7, 3, 7, 7,
+                4, 6, 7, 6, 8
+            ]
+        );
+        assert_eq!(
+            widths("fg_mcn16", 1),
+            [
+                4, 8, 8, 7, 6, 9, 7, 2, 5, 8, 6, 10, 7, 9, 7, 9, 7, 8, 8, 7, 8, 11, 8, 8, 7, 3, 8,
+                3, 8
+            ]
+        );
+
+        // The rotation carries the record the page puts in the right slot: the
+        // second row of `fg_mcn14` starts at `E` and ends with the previous
+        // row's `D`; its third starts at `f` and ends `d`, `e`.
+        let rows_of = |face: &str| {
+            let data = shipped_bytes(face).unwrap();
+            let raw = parse_raw(&data).unwrap();
+            page_rows(&raw)
+        };
+        let first_last = |rows: &[RowAlignment], row: usize| -> (u32, u32) {
+            let r = &rows[row];
+            (
+                r.matches.first().unwrap().0 as u32 + FIRST_CHAR,
+                r.matches.last().unwrap().0 as u32 + FIRST_CHAR,
+            )
+        };
+        let m14 = rows_of("fg_mcn14");
+        assert_eq!(first_last(&m14, 0), (35, 34), "fg_mcn14 row 0");
+        assert_eq!(first_last(&m14, 1), (69, 68), "fg_mcn14 row 1");
+        assert_eq!(first_last(&m14, 2), (102, 101), "fg_mcn14 row 2");
+        let m16 = rows_of("fg_mcn16");
+        assert_eq!(first_last(&m16, 0).0, 35, "fg_mcn16 row 0 starts at #");
+        assert_eq!(first_last(&m16, 1), (66, 65), "fg_mcn16 row 1");
+        assert_eq!(first_last(&m16, 2), (95, 94), "fg_mcn16 row 2");
+    }
+
     /// Every face's forty-odd packed records are mapped onto real page runs:
     /// **94 cells** per face, all but a sentinel or two holding ink. This is the
-    /// cross-face check that the row cascade (the last glyph of a row lives at
-    /// the end of the row above) is not specific to `fg_d20`.
+    /// cross-face check that the right-slot rotation (a row's first records live
+    /// at the end of the previous row's slot) is not specific to one face.
     #[test]
     fn every_face_maps_its_page_runs() {
         let faces = every_face();
@@ -822,14 +1141,49 @@ mod tests {
         }
     }
 
-    /// **The advance table is two records ahead of the page table.** It is the
-    /// measurement that settles the caption spacing: `fg_mcn16`'s glyph record
-    /// for `i` carries 7 and its `n` carries 3, so a run spaced by the glyph
-    /// table reads `Opti o is`; two records on, `i` carries 3 and `m` 11, `n` 7
-    /// and `o` 7 — the page's own widths. The loader's loop starting at `0x20`
-    /// is the same two-record shift the module note records.
+    /// **The advance table is two records ahead of the glyph table in every
+    /// face**, not a side effect of the page's two leading characters. The
+    /// numbers: the glyph record for `i` carries 9/11/13/14/6/7/6/6/7 across the
+    /// nine faces (`fg_d18`…`fg_mcn16`), while the record two on carries
+    /// 4/5/6/6/3/3/3/3/3 — the page's `i` is 3–6 columns. `m` is the mirror
+    /// (glyph 5–14, two on 9–21); `n` and `o` likewise. The page's first visible
+    /// run is `#` (the quote is in the right slot) and the two characters before
+    /// record 34 are space-like and have no run; that is the **page** layout, and
+    /// it is not what shifts the advances. The glyph table stays at `c - 34`;
+    /// only the advance is read at `c - 32`.
     #[test]
     fn the_advance_table_is_two_records_ahead_of_the_page() {
+        for face in [
+            "fg_d18", "fg_d20", "fg_d24", "fg_d26", "fg_dcn14", "fg_dcn16", "fg_mcn12", "fg_mcn14",
+            "fg_mcn16",
+        ] {
+            let Some(font) = shipped(face) else { return };
+            assert!(
+                font.advance('i') <= 6 && font.advance('i') < font.glyph('i').advance,
+                "{face}: i is {}/{} (effective/glyph)",
+                font.advance('i'),
+                font.glyph('i').advance
+            );
+            assert!(
+                font.advance('m') > font.glyph('m').advance,
+                "{face}: m is {}/{} (effective/glyph)",
+                font.advance('m'),
+                font.glyph('m').advance
+            );
+            assert!(
+                font.advance('n') > font.glyph('n').advance,
+                "{face}: n is {}/{} (effective/glyph)",
+                font.advance('n'),
+                font.glyph('n').advance
+            );
+            assert!(
+                font.advance('o') < font.glyph('o').advance,
+                "{face}: o is {}/{} (effective/glyph)",
+                font.advance('o'),
+                font.glyph('o').advance
+            );
+        }
+
         let Some(font) = shipped("fg_mcn16") else {
             return;
         };
