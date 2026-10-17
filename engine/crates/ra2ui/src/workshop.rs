@@ -50,6 +50,12 @@ use ra2fmt::gib::{Block, Gib, Widget};
 
 use crate::{input, Fonts, Placement};
 
+pub mod build;
+pub mod library;
+pub mod paint;
+pub mod stats;
+pub mod wiring;
+
 /// The bot lab window.
 pub const SCREEN: &str = "botlab/botlabwin.gib";
 /// The group a tab's screen is loaded into — the name the fragments' own `Notes`
