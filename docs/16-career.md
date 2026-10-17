@@ -149,24 +149,75 @@ explicit behaviour rather than pretending to reproduce an unread path.
 
 ---
 
+## 3a. The event bracket (M10.3/M10.4 depth)
+
+The bracket is the game's real structure, not one match dressed as an event.
+The evidence below is from `Robot Arena 2.exe` (same SHA-256 as above) and
+`Events.txt`; the model is [`ra2sim::career::EventBracket`].
+
+| rule | evidence | status |
+|---|---|---|
+| **16 entrants per event** | `FUN_004695a0` loads `[0x6a7280]` = `0x41308000` (`16.0`) and compares it with `[0x6a5600]` = `0x3f800000` (`1.0`) at `0x4695c9`/`0x4695d5`; the loop stops when the field reaches 1 | established |
+| **The tier count is the round count** | `Events.txt`'s line 4 is the losing-tier count; the results messages run “didn't win”, “won one”, … , “won the event”. Every 4-tier event has 4 losing tiers plus the trophy; every 2-tier event 2 plus the trophy. `FUN_0046c240` prints `"Final Match"` when the round index equals the bracket's `+0x8` minus one (`0x46c27e`–`0x46c295`), so `+0x8` is the number of rounds. The shipped split is 14 × 4-round, 11 × 2-round events. | established |
+| **Bots per match** | `Events.txt`'s first trailing setting is `2` for every 4-round event and `4` for every 2-round event (all 25). `FUN_004695a0` divides the 16 entrants by the bracket config's `+0x10c` to get the first round's match count (`0x4695fc`–`0x469616`) and creates each match with `+0x10c` slots (`0x46968e`–`0x469697`); `16 / bots ^ rounds == 1`. `FUN_00468f50` stores the same value at a round's `+4`. This is the data's consistent reading; the model uses `settings[0]` when it satisfies `bots ^ rounds == 16`, otherwise derives it from the tier count. | measured correlation |
+| **One winner per match (single elimination)** | `FUN_00468f50`'s second parameter is `+0x110`; `FUN_004695a0` scales the field by `+0x110 / +0x10c` (`0x4697a8`–`0x4697d2`), i.e. 1/2 or 1/4, and `FUN_004698f0` special-cases a two-winner match. The shipped flow is one advancing entrant. | established for the shipped path |
+| **The player is match 0, slot 0** | `FUN_004695a0` skips the random draw exactly when `match == 0 && slot == 0` (`0x4696bf`–`0x4696cd`); `FUN_0046c830` writes the player back into the first slot when a round is won (`0x46c937`–`0x46c94c`, `FUN_0046cde0` with the zero flag). | established |
+| **Opponents are drawn from the 15 AI teams** | every other slot calls `FUN_00419190(0xf)` (`0x4696d1`) and retries until the index names a valid AI record; the draw is per round and per slot. There is **no de-duplication within a match** in this loop, so a 4-bot melee can contain the same AI twice; the model mirrors that. | established |
+| **Win advances; the next field is redrawn** | `FUN_0046ce50` calls `FUN_0046c830(win, robot)` first. When `round < rounds-1`, `FUN_0046c830` calls `FUN_004faaf0` (which increments `Team+0x110`) and fills the next round's slots with fresh draws (`0x46c8d4`–`0x46c9cf`); it returns 0 (the event continues) and `FUN_0046ce50` then awards the round with `FUN_0046c400`. | established |
+| **A loss ends the event, not the season** | `FUN_0046ce50`'s event-continues branch calls `FUN_0046ca90(0,0)` when the match was lost (`0x46cf35`–`0x46cf45`). `FUN_0046ca90(0,…)` simulates the remaining rounds with `FUN_0046c830(-1,0)`/`FUN_0046c400(-1,0)` (AI-only points), picks a finalist as the event winner, folds the player's points into the season and clears the event. The HQ's schedule is still open; only the event is over. | established |
+| **The trophy is stored only for the final win** | `FUN_0046c830` calls `FUN_0046ca90(1, robot)` at the final; only the `param_1 != 0` branch calls `FUN_0046cd30(1)` and `FUN_004fab50` (the trophy). A loss takes the `0` branch, which stores no trophy. | established |
+| **The round heading** | `FUN_0046c240` (`0x46c240`–`0x46c37d`): round == rounds−1 → `"Final Match"` (`0x6f2ae4`), otherwise `"Round "` (`0x6f2adc`) + round+1. | established |
+| **The bracket screen** | `event_bracket.gib`'s `bracket group` note is “build the event bracket inside this group”. `FUN_0046ad60` lays out one column per round (`FUN_00406d20()+1` loop) and puts `UI\teamhq\questionmark.bmp` (`0x6f2a58`) in the cells of rounds not reached. The play button's enabled state is `round != rounds` (`0x46ac6c`–`0x46ac99`, `FUN_005ec4e0`). | established shape; the generated columns in this port are a readable list |
+
+### The points correction
+
+The earlier note said “`160 / robots`”. The divisor loaded at `0x46c454`
+(`FUN_0046c400`, player bonus) and `0x46c52d` (the per-participant loop) is
+`FUN_00406d20()` on the bracket object, i.e. `bracket+0x8` — and `FUN_0046c240`
+is the proof that `+0x8` is the **round count**, not the match size. A 2-round
+event therefore pays `160/2 = 80` participation, a 4-round event `160/4 = 40`,
+for every round; the player also gets `robot_points / 200`. Over a whole event
+the player's total is `rounds × (160/rounds + robot_points/200)`, and every AI
+slot in every match of the round gets `160/rounds` (`0x46c4f0`–`0x46c545`).
+The model keeps the old `160 / report.robots` only on the legacy path with no
+bracket. This does not change the 15-int league line or the save format; it
+corrects the per-round amount the earlier fixture (a 2-bot, 2-round event) could
+not distinguish from `160 / robots`.
+
+### How the model draws it
+
+`EventBracket::new(event, data, seed)` uses the event's tier count and
+`settings[0]`/the 16-entrant constant, then `draw_round` fills match 0 slot 0
+with `Entrant::Player` and every other slot with a deterministic
+`Ai(u32 % 15)`. `Career::play_round` awards the round, advances on a win (and
+draws the next round), ends the event on a loss (simulating the remaining
+rounds for AI points), and calls `finish_event` only at that point. The RNG
+algorithm and seed were not recovered; the seed is explicit
+(`Career::seed`, sidecar `seed`), and the same seed, event and round always
+draw the same field.
+
+---
+
 ## 4. Points, prizes and money
 
 ### Points
 
 * `Team+0x54` — the current event's points; `Team+0x58` — the season's.
-* A match adds `entered robot points / 200 + 160 / robots` for the player and
-  `160 / robots` for each other participant (`FUN_0046c400`; see §1). The
-  entered robot's `points` are its `+0x20` score: King of the Hill's script
-  score (`plus.addPoints`) or, in every other type, accumulated effective
-  damage (`FUN_004175b0`'s not-KOTH branch;
-  `docs/11-match-rules.md` §4.1 and `docs/19-match-fidelity.md` §1).
+* A match adds `entered robot points / 200 + 160 / rounds` for the player and
+  `160 / rounds` for each other participant (`FUN_0046c400`; the divisor is the
+  bracket's round count, see §3a). The entered robot's `points` are its `+0x20`
+  score: King of the Hill's script score (`plus.addPoints`) or, in every other
+  type, accumulated effective damage (`FUN_004175b0`'s not-KOTH branch;
+  `docs/11-match-rules.md` §4.1 and `docs/19-match-fidelity.md` §1). It is
+  awarded after **every** round, not once per event.
 * `Team+0x50` accumulates the number of defeated robots (the call site passes
   the count from `FUN_004164a0`'s `FUN_00413810` loop). Its UI label was not
   recovered.
 * **Teammates do not score.** The 1.20 ReadMe's `hitting teammates no longer
-  adds points` is encoded in `Career::award_match`: only the entered robot's
-  points are added; a robot on the same report team is skipped. (The original's
-  per-participant loop is over the bracket, where a career team has one entry.)
+  adds points` is encoded in `Career::play_round`/`Career::award_match`: only
+  the entered robot's points are added; a robot on the same report team is
+  skipped. (The original's per-participant loop is over the bracket, where a
+  career team has one entry.)
 
 ### Prizes
 
@@ -249,6 +300,19 @@ zero by default**; nothing in the game's files is written from it.
    record anyway.
 10. The tier prize is **displayed** but whether it is ever stored was not
     observed; only the trophy and the golden sawblade are stored.
+11. The **exact `Events.txt` → bracket-config writer**: `FUN_004f9a90` reads
+    six ints from the team record and builds the 16-entrant field from them,
+    but the code that copies the first trailing setting into those ints was
+    not traced end-to-end. The correlation (2 ↔ 4 rounds, 4 ↔ 2 rounds, all 25
+    events) is total; the model uses it and has an explicit fallback.
+12. The **two-winner variant**: `FUN_004698f0` has a case for two advancing
+    entrants, and `FUN_00468f50` stores `+0x110` as a parameter. The shipped
+    events use one winner, and the model implements single elimination.
+13. The **bracket screen's full geometry**: `FUN_0046ad60` draws one column per
+    round with logos and `questionmark.bmp`, but the custom control it builds
+    (`FUN_005f6010`) was not decoded. The port renders the rounds, results and
+    next opponent as a list inside the shipped `bracket group`; the state and
+    labels are the model's, the frame is the game's.
 
 ---
 
@@ -258,11 +322,16 @@ zero by default**; nothing in the game's files is written from it.
 
 * `Career` — the player's `TeamTable`, the AI `TeamTable`, `Events.txt`, the
   nine-event schedule, the phase (`Schedule` / `InEvent` / `Complete`), prizes,
-  pending repairs, per-event history and the explicit money counter.
+  pending repairs, per-event history, the bracket in progress and the explicit
+  money counter.
 * `Career::new(game, seed)` reads the tables and draws a schedule if the record
-  has none; `Career::set_schedule(ids)` takes an exact one.
-* `Career::enter_event`, `award_match(&MatchReport, entered_robot)`,
-  `finish_event(won)`, `next_season(seed)`.
+  has none; `Career::set_schedule(ids)` takes an exact one. The seed is kept on
+  the career and in the sidecar.
+* `Career::enter_event` (creates the 16-entrant bracket),
+  `play_round(&MatchReport, entered_robot)` (the real event flow),
+  `award_match`/`finish_event` (the legacy single-report path),
+  `next_season(seed)`.
+* `EventBracket`, `EventState` (in `ra2ui::hq`), `RoundResult`, `Entrant`.
 * `Career::repairs_from_report`, `apply_repair`, `apply_repairs`.
 * `Career::load(game)` / `save(game)`.
 
@@ -274,7 +343,7 @@ zero by default**; nothing in the game's files is written from it.
 | league line (`+0x5c`…`+0x94`), player points (`+0x58`), event points (`+0x54`), defeated (`+0x50`) | `Teams/Teams.txt` |
 | eight history ints (`+0x98`…`+0xb4`), fastest win (`+0xb8`), event id (`+0xbc`) | `Teams/Teams.txt` |
 | schedule (`+0xe4`), prize models (`+0x100`), the nine `+0xf4` history ints | `Teams/Teams.txt` (the original's own lines) |
-| season phase, explicit money, pending repair list, full event history (event id, rounds, points, won), prize descriptions/art | **`Teams/career.dat`** (versioned sidecar) |
+| season phase, explicit money, pending repair list, full event history (event id, rounds, points, won), prize descriptions/art, the bracket (event, shape, round, status, seed, champion, current opponents, per-round results) | **`Teams/career.dat`** (versioned sidecar) |
 
 `Teams/Teams.txt` is written with `ra2fmt::team::TeamTable::write`; the AI table
 is written back unchanged. The sidecar is a fixed-order, versioned text file
@@ -307,25 +376,38 @@ shipped game; the game-dependent ones skip when it is absent):
    game-file home.
 2. `the_event_list_is_the_shipped_twenty_five` — 25 events, 11 with two tiers
    and 14 with four.
-3. `nine_events_complete_the_season_and_the_next_one_resets_it` — nine wins,
-   `81` points each (2 + 80), 729 season points (the model's fixture uses
-   `200/200 + 160/2`), `Complete`, ten prizes (nine trophies + the golden
-   sawblade), then `next_season` resets the league and keeps the lifetime
-   total-events count.
-4. `the_shipped_team_tables_round_trip_after_a_no_op_career` — the corpus
+3. `nine_events_complete_the_season_and_the_next_one_resets_it` — the real
+   bracket flow for nine events: every round is played, every event ends in a
+   final win, the champion/points/prizes are asserted, then `next_season`
+   resets the league and keeps the lifetime total-events count. The expected
+   points are `9 × 160 + 10 × total_rounds` (each round pays
+   `160/rounds + 2000/200`).
+4. `every_shipped_event_is_a_sixteen_entrant_bracket` — all 25 events have
+   `tiers == rounds`, `settings[0] == bots`, and `bots ^ rounds == 16`.
+5. `a_loss_eliminates_from_the_event_but_not_from_the_season` — a first-round
+   loss ends the event (no trophy), records `0/1`, folds the round's points
+   into the season, and leaves the schedule open.
+6. `a_final_loss_crowns_an_ai_and_stores_no_trophy` — the final loss still
+   picks an AI champion and stores no trophy; the record is `1/1`.
+7. `replaying_the_same_seed_reproduces_the_bracket` — two careers with the same
+   seed draw the same field and the same opponents round after round.
+8. `save_reload_mid_season_restores_the_bracket_and_opponents` — a save after a
+   won round restores the seed, phase, bracket, round and next opponents.
+9. `the_shipped_team_tables_round_trip_after_a_no_op_career` — the corpus
    test: both tables byte-identical after load/save.
-5. `the_career_sidecar_is_byte_stable` — save, load, save; identical sidecar.
-6. `the_sidecar_round_trips_every_text_field` — tabs and backslashes in a robot
-   name survive.
-7. `a_damaging_match_leaves_a_repair_the_clock_completes_and_saves` — a
-   damaged report leaves one entry (cost 0), 12 s of 30 s elapsed round-trips
-   through the sidecar, the 18 s tick completes it, the save reloads empty and
-   no money was charged.
-7. `engine/crates/ra2fmt/src/team.rs`'s
-   `career_fields_are_typed_and_list_lines_round_trip` — the league line,
-   prize/schedule list lines and the nine history lines parse and write
-   byte-for-byte.
+10. `the_career_sidecar_is_byte_stable` — save, load, save; identical sidecar.
+11. `the_sidecar_round_trips_every_text_field` — tabs and backslashes in a robot
+    name survive.
+12. `a_damaging_match_leaves_a_repair_the_clock_completes_and_saves` — a
+    damaged report leaves one entry (cost 0), 12 s of 30 s elapsed round-trips
+    through the sidecar, the 18 s tick completes it, the save reloads empty and
+    no money was charged.
+13. `engine/crates/ra2fmt/src/team.rs`'s
+    `career_fields_are_typed_and_list_lines_round_trip` — the league line,
+    prize/schedule list lines and the nine history lines parse and write
+    byte-for-byte.
 
 The career tests use a synthetic `MatchReport`; a real two-AI `Match` on the
-box arena is exercised by `ra2sim::r#match`'s own tests and takes seconds per
-round, which is why this suite drives the report directly (the task allows it).
+box arena is exercised by `ra2sim::r#match`'s own tests and by
+`ra2-app::hq_mode`'s season run (below), which is where the bracket meets the
+shipped brains.

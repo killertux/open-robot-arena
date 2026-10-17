@@ -256,8 +256,8 @@ record.
 |---|---|---|
 | M10.1 | ✅ **Season state**: the 15 ints are the fifteen AI teams' league points; the record's other career fields are named in `docs/16-career.md`, with the unproven ones listed | `docs/16-career.md` |
 | M10.2 | ✅ `career` model: teams, roster, points, money, events entered, prizes, repairs, season phase; `W1` writes it where the game does | new `ra2sim::career` (or `ra2game`) |
-| M10.3 | ✅ Team HQ flows: the shipped `teamhq.gib` and its four tabs, robot inventory (`hq_robots` — `bot_cell.gib`, not the `robot_cell.gib` its note names), league/season grids from the career's points (S2's fills), history/prizes (`hq_history`), event schedule (`hq_events`); `--hq` opens it, headless and windowed | `ra2ui::hq` + `ra2-app::hq_mode` |
-| M10.4 | ✅ Events: `Events.txt` → the event's arena, its arena script's own game type, one match through M8's `Match`, `common/matchresults.gib`, the award screen (`event_winner.gib`) and the career's points/prize, then the HQ's league and history; `--hq --simulate-event N` is the headless run | `ra2fmt::event`, `ra2ui::hq`, `ra2-app::hq_mode` |
+| M10.3 | ✅ Team HQ flows: the shipped `teamhq.gib` and its four tabs, robot inventory (`hq_robots` — `bot_cell.gib`, not the `robot_cell.gib` its note names), league/season grids from the career's points (S2's fills), history/prizes (`hq_history`), event schedule (`hq_events`, with the completed/in-progress/disabled cells and the bracket state) | `ra2ui::hq` + `ra2-app::hq_mode` |
+| M10.4 | ✅ Events: `Events.txt` → the event's arena, its arena script's own game type, the **16-entrant bracket** (tiers = rounds, first setting = bots per match, 1 winner; player match 0 slot 0; deterministic drawn opponents), each round through M8's `Match`, `common/matchresults.gib`, the next-round screen, the award (`event_winner.gib`) only when the event ends, the career's per-round points and the final-win trophy; `--hq --simulate-event N` and `--hq --simulate-season` are the headless runs | `ra2fmt::event`, `ra2sim::career`, `ra2ui::hq`, `ra2-app::hq_mode` |
 | M10.5 | ✅ Repairs: `teamhq/repairs.gib` lists the career's damaged robots/components and the repair clock; `repair button` advances `Repair::elapsed` (`Career::advance_repair`, six-second UI tick) and a full bar clears the entry and saves the career. No cost is charged (0). The component-level `Team+0x12c` list and the `damage.tga` fractured icon remain unproven; the `--report-damage` knob is the evidence/test input because the shipped match reports zero damage here | `ra2ui::repairs`, `ra2sim::career`, `ra2-app::hq_mode` |
 | M10.6 | ◐ Money/points: the per-type scoring (damage, KO, zone) and what it is worth outside the match; teammates do not score (the 1.20 rule) | `ra2sim::match`, `ra2sim::career` |
 | M10.7 | ✅ The career save/load, versioned, with a "your game directory" location | `W1`, `ra2-app` |
@@ -267,12 +267,18 @@ rounds, collect a prize, repair, save, restart, and the table/prizes/roster are
 identical. The event list comes from `Events.txt` (25 events, the shipped
 tiers); a save round-trips.
 
-Landed: `--hq` boots the shipped HQ and plays one event through the award;
-`teamhq/repairs.gib` then lists the damaged robot, its 30-second clock and the
-shipped repair button, and a full bar clears the entry and saves. The evidence
-run is **80 points, rank 1, one prize, one repair → 0:00**, with the report's
-damage an explicit `--report-damage` input because the shipped match reports
-none here. Commands, frames and the unproven items are in `docs/18-hq-ui.md`.
+Landed: `--hq` boots the shipped HQ; `--simulate-event N` plays an event's
+**whole bracket** (2 or 4 rounds, 2 or 4 bots per match, deterministic
+opponents) and `--simulate-season` plays all nine events. A win advances and
+redraws the field, a loss ends the event but not the season, and the trophy is
+stored only on the final win. The evidence run is **1400 points, rank 1, nine
+prizes (eight trophies + the golden sawblade), one lost event**, with
+`season.png`, `bracket.png`, `round.png`, `champion.png` and `season-final.png`.
+`teamhq/repairs.gib` lists the damaged robot, its 30-second clock and the
+shipped repair button, and a full bar clears the entry and saves. The
+`--report-damage` knob remains an explicit input because the shipped match
+reports no damage here. Commands, frames, the bracket addresses and the
+unproven items are in `docs/16-career.md` §3a and `docs/18-hq-ui.md`.
 
 **Risks.** The season save format is partly unread (M10.1) — if the original's
 format cannot be recovered, store the career in a documented sidecar and say so;
