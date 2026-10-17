@@ -58,6 +58,27 @@ pub enum ShapeDesc {
     Compound(Vec<CompoundChild>),
 }
 
+/// A body's membership in a robot's self-collision group.
+///
+/// A robot is several rigid bodies joined by motors. In the original those
+/// bodies are one assembly: a wheel does not collide with the chassis it is
+/// bolted to, nor a spinner arm with its own hull. Jolt collides two bodies
+/// joined by a constraint unless a group filter says otherwise (the default
+/// `ConstraintSettings` does not disable it), which is why a wheel embedded in
+/// its chassis' hull stalls the whole robot. This is the neutral description of
+/// that filter: every body of one robot shares `group` (unique per robot) and a
+/// distinct `sub_group`, and the backend builds a table for the group in which
+/// no two sub groups collide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollisionGroupDesc {
+    /// Unique per robot. Bodies with different group ids always collide.
+    pub group: u32,
+    /// This body's index within the robot (`0..sub_groups`).
+    pub sub_group: u32,
+    /// How many bodies the robot has (the table's size).
+    pub sub_groups: u32,
+}
+
 /// Everything needed to create one body.
 #[derive(Clone, Debug)]
 pub struct BodyDesc {
@@ -78,6 +99,9 @@ pub struct BodyDesc {
     /// their pin can be big enough for Jolt's constraint maths without becoming
     /// something a robot can drive into.
     pub is_sensor: bool,
+    /// Which robot's parts this body must not collide with (see
+    /// [`CollisionGroupDesc`]). `None` collides with everything its layer allows.
+    pub collision_group: Option<CollisionGroupDesc>,
     /// Free-form tag (used to tell arena from robot bodies).
     pub user_data: u64,
 }
@@ -96,6 +120,7 @@ impl BodyDesc {
             angular_damping: 0.2,
             allow_sleeping: true,
             is_sensor: false,
+            collision_group: None,
             user_data: 0,
         }
     }
@@ -141,6 +166,13 @@ impl BodyDesc {
     /// A volume that detects bodies without colliding with them.
     pub fn with_sensor(mut self, is_sensor: bool) -> Self {
         self.is_sensor = is_sensor;
+        self
+    }
+
+    /// Put this body in a robot's self-collision group; no two bodies of the
+    /// same robot collide. See [`CollisionGroupDesc`].
+    pub fn with_collision_group(mut self, group: CollisionGroupDesc) -> Self {
+        self.collision_group = Some(group);
         self
     }
 

@@ -9,16 +9,27 @@
 use glam::{Mat4, Quat, Vec3};
 
 use crate::backend::{
-    BackendError, BodyDesc, BodyHandle, CompoundChild, HingeDesc, JointHandle, MotionType,
-    PhysicsBackend, ShapeDesc, SliderDesc,
+    BackendError, BodyDesc, BodyHandle, CollisionGroupDesc, CompoundChild, HingeDesc, JointHandle,
+    MotionType, PhysicsBackend, ShapeDesc, SliderDesc,
 };
-use crate::rig::{JointInfo, JointUse, RobotRig};
+use crate::rig::{JointInfo, JointUse, RobotRig, Role};
 use crate::scene::USER_BOT;
 use crate::sim::{DriveInput, DriveTuning};
 
 /// Stock component friction/restitution (see the validation report).
 const STOCK_FRICTION: f32 = 0.30;
 const STOCK_RESTITUTION: f32 = 0.30;
+
+/// A fresh collision-group id for one robot's assembly. Bodies of the same
+/// robot share the id and never collide with one another; different robots
+/// always have different ids, so they do. Zero is skipped because Jolt's group
+/// filter treats it as a valid id but a table's first entry is the natural
+/// "unset" one in our own code.
+fn next_robot_group() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Live state of one assembled body.
 pub struct PartState {
@@ -66,9 +77,11 @@ impl Robot {
     ) -> Result<Self, BackendError> {
         let bot = Mat4::from_rotation_translation(rotation, position);
         let n = rig.components.len();
+        let group = next_robot_group();
+        let sub_groups = rig.parts.len() as u32;
 
         let mut parts = Vec::with_capacity(rig.parts.len());
-        for part in &rig.parts {
+        for (p, part) in rig.parts.iter().enumerate() {
             let world = bot * rig.components[part.root].local;
             let (_, rot, pos) = world.to_scale_rotation_translation();
             let shape = Self::part_shape(&rig, &part.members);
@@ -88,6 +101,14 @@ impl Robot {
                 .with_mass(mass)
                 // Driven / hit every step: never let the backend park a body.
                 .with_sleeping(false)
+                // A robot's own parts never collide with each other (F4): the
+                // wheel sits inside the chassis' hull, and without this it is
+                // pinched there and the motor cannot turn it.
+                .with_collision_group(CollisionGroupDesc {
+                    group,
+                    sub_group: p as u32,
+                    sub_groups,
+                })
                 .with_user_data(USER_BOT);
             let body = physics.create_body(&desc)?;
             parts.push(PartState {
@@ -128,7 +149,13 @@ impl Robot {
     fn part_shape(rig: &RobotRig, members: &[usize]) -> ShapeDesc {
         let children: Vec<CompoundChild> = members
             .iter()
-            .filter(|&&i| !rig.components[i].hull_points.is_empty())
+            .filter(|&&i| {
+                let c = &rig.components[i];
+                // A fitting the definitions call non-physical (a control board)
+                // is not an obstacle in the original's single robot body, and a
+                // power cell sits inside the chassis: neither adds a hull.
+                !c.hull_points.is_empty() && c.role.is_physical() && c.role != Role::Power
+            })
             .map(|&i| {
                 let m = rig.part_local[i];
                 let (_, local_rotation, local_position) = m.to_scale_rotation_translation();
@@ -350,11 +377,16 @@ impl Robot {
     /// (`tools/vendor/PyRA2/.../Bot file format analysis.txt` §"3D model of bot
     /// with buckling points"). Until now a chassis only ever died whole.
     ///
-    /// Both the drawn chassis and its collider follow, so a hurt robot is
-    /// crushed *and* smaller to hit. The movable region is the file's own: the
-    /// lowest buckle point pins the floor plate (the Octagon-sized robots keep
-    /// everything below the mid-height rigid), and the motion grows with height
-    /// above it, so the top caves in furthest.
+    /// Both the drawn chassis and (when the body is free) its collider follow,
+    /// so a hurt robot is visibly crushed. **The collider re-bake is refused by
+    /// Jolt while a hinge uses the chassis body** (`set_shape:
+    /// UsedByConstraint`), which is every motorized stock robot: the drawn
+    /// chassis crushes but the collider stays the pristine shape. That is F9's
+    /// measured residual; removing and recreating the chassis' hinges around
+    /// `set_body_shape` is the next step. The movable region is the file's own:
+    /// the lowest buckle point pins the floor plate (the Octagon-sized robots
+    /// keep everything below the mid-height rigid), and the motion grows with
+    /// height above it, so the top caves in furthest.
     ///
     /// **How far it moves is the file's own limit.** The buckle points are a ring
     /// at mid-height and a ring at the top, and the movable region is the top
@@ -378,8 +410,10 @@ impl Robot {
         let max_hp = self.rig.components[0].hitpoints.max(1.0);
         let fraction = (1.0 - self.health[0] / max_hp).clamp(0.0, 1.0);
         let c = &mut self.rig.components[0];
-        let step = fraction - c.buckle_fraction;
-        if step <= 1e-4 {
+        if fraction <= 1e-4 || (fraction - c.buckle_fraction).abs() <= 1e-4 {
+            return;
+        }
+        if c.rest_hull.len() != c.hull_points.len() || c.rest_items.len() != c.items.len() {
             return;
         }
         c.buckle_fraction = fraction;
@@ -394,28 +428,32 @@ impl Robot {
             .fold(f32::MAX, f32::min)
             .min(c.max.y);
         let span = (c.max.y - floor).max(1e-3);
-        let crush = |p: &mut Vec3| {
-            let w = ((p.y - floor) / span).clamp(0.0, 1.0);
+        // Applied **from the pristine mesh**, not from the last crushed one.
+        // The displacement is then linear in the damage fraction: at f = 1 the
+        // top ring lands on `floor` exactly. Compounding a relative step on the
+        // current height instead is asymptotic (measured: 0.2536 m of the
+        // 0.3709 m span at f = 1, 68 %), so a full crush never reached the
+        // file's own limit.
+        let crush = |orig: Vec3| {
+            let w = ((orig.y - floor) / span).clamp(0.0, 1.0);
             if w <= 0.0 {
-                return;
+                return orig;
             }
-            p.y -= step * span * w;
-            // "In": toward the chassis' own centre line, which in component
-            // space is the origin's XZ.
-            let shrink = 1.0 - step * IN * w;
-            p.x *= shrink;
-            p.z *= shrink;
+            let shrink = 1.0 - fraction * IN * w;
+            Vec3::new(
+                orig.x * shrink,
+                orig.y - fraction * span * w,
+                orig.z * shrink,
+            )
         };
 
-        for item in c.items.iter_mut() {
-            for v in item.vertices.iter_mut() {
-                let mut p = Vec3::from(v.pos);
-                crush(&mut p);
-                v.pos = p.into();
+        for (item, rest) in c.items.iter_mut().zip(&c.rest_items) {
+            for (v, orig) in item.vertices.iter_mut().zip(rest) {
+                v.pos = crush(*orig).into();
             }
         }
-        for p in c.hull_points.iter_mut() {
-            crush(p);
+        for (p, orig) in c.hull_points.iter_mut().zip(&c.rest_hull) {
+            *p = crush(*orig);
         }
         self.rebuild_part(physics, 0);
     }

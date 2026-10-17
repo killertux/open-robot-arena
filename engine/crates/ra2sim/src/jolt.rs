@@ -12,8 +12,8 @@ use oxijolt::prelude::{
     QueryFilter, RayCast, Shape, WorldSettings,
 };
 use oxijolt::{
-    AnyConstraintId, HingeConstraint, HingeConstraintSettings, MotorSettings, MotorState,
-    SliderConstraint, SliderConstraintSettings,
+    AnyConstraintId, CollisionGroup, GroupFilterTable, GroupFilterTableBuilder, HingeConstraint,
+    HingeConstraintSettings, MotorSettings, MotorState, SliderConstraint, SliderConstraintSettings,
 };
 
 use crate::backend::{
@@ -32,6 +32,9 @@ pub struct JoltBackend {
     lookup: HashMap<u32, BodyHandle>,
     /// handle → Jolt constraint id (indexed by `JointHandle`).
     joints: Vec<Option<AnyConstraintId>>,
+    /// A robot's self-collision table, by group id. Built once, when its first
+    /// body is created, and never changes.
+    collision_tables: HashMap<u32, GroupFilterTable>,
 }
 
 impl JoltBackend {
@@ -46,6 +49,7 @@ impl JoltBackend {
             shapes: Vec::new(),
             lookup: HashMap::new(),
             joints: Vec::new(),
+            collision_tables: HashMap::new(),
         })
     }
 
@@ -151,6 +155,32 @@ impl PhysicsBackend for JoltBackend {
         .user_data(desc.user_data);
         if let Some(mass) = desc.mass {
             settings = settings.mass(mass);
+        }
+        // A robot's bodies share one filter table in which no two sub groups
+        // collide, so its wheel does not jam inside its own chassis and its
+        // rotor does not fight its hull. Different robots have different group
+        // ids, so they still collide with each other.
+        if let Some(g) = desc.collision_group {
+            let table = match self.collision_tables.get(&g.group) {
+                Some(t) => t.clone(),
+                None => {
+                    let mut b = GroupFilterTableBuilder::new(g.sub_groups)
+                        .map_err(|e| BackendError::Body(format!("collision group: {e:?}")))?;
+                    for a in 0..g.sub_groups {
+                        for c in (a + 1)..g.sub_groups {
+                            b.disable_collision(a, c).map_err(|e| {
+                                BackendError::Body(format!("collision group: {e:?}"))
+                            })?;
+                        }
+                    }
+                    let t = b.build();
+                    self.collision_tables.insert(g.group, t.clone());
+                    t
+                }
+            };
+            let group = CollisionGroup::new(&table, g.group, g.sub_group)
+                .map_err(|e| BackendError::Body(format!("collision group: {e:?}")))?;
+            settings = settings.collision_group(group);
         }
 
         let id = self
@@ -537,4 +567,65 @@ fn normal_of(axis: Vec3) -> m::Vec3 {
     let n = axis.cross(helper).normalize_or_zero();
     let n = if n == Vec3::ZERO { Vec3::X } else { n };
     m::Vec3::new(n.x, n.y, n.z)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{CollisionGroupDesc, MotionType, ShapeDesc};
+
+    fn box_body(group: Option<CollisionGroupDesc>) -> BodyDesc {
+        let mut d = BodyDesc::new(
+            MotionType::Dynamic,
+            ShapeDesc::Box {
+                half_extents: Vec3::splat(0.5),
+            },
+        )
+        .at(Vec3::ZERO)
+        .with_mass(10.0)
+        // Keep both bodies awake so `in_contact` is asked of a live pair.
+        .with_sleeping(false);
+        if let Some(g) = group {
+            d = d.with_collision_group(g);
+        }
+        d
+    }
+
+    /// F4: Jolt collides two bodies joined by a constraint unless a group filter
+    /// says otherwise. Every stock robot's wheel sits *inside* its chassis'
+    /// hull, so without this the hinge motor turns a wheel that the chassis has
+    /// pinched and the robot never moves. Two bodies of one robot share a group
+    /// id and never touch; a second robot (another id) still does.
+    #[test]
+    fn parts_of_one_robot_do_not_collide_but_two_robots_do() {
+        let mut backend = JoltBackend::new(Vec3::ZERO).unwrap();
+        let mine = CollisionGroupDesc {
+            group: 1,
+            sub_group: 0,
+            sub_groups: 2,
+        };
+        let sibling = CollisionGroupDesc {
+            group: 1,
+            sub_group: 1,
+            sub_groups: 2,
+        };
+        let other = CollisionGroupDesc {
+            group: 2,
+            sub_group: 0,
+            sub_groups: 1,
+        };
+        let a = backend.create_body(&box_body(Some(mine))).unwrap();
+        let b = backend.create_body(&box_body(Some(sibling))).unwrap();
+        let c = backend.create_body(&box_body(Some(other))).unwrap();
+
+        backend.step(1.0 / 60.0);
+        assert!(
+            !backend.in_contact(a, b),
+            "two parts of the same robot must not collide"
+        );
+        assert!(
+            backend.in_contact(a, c),
+            "parts of different robots must still collide"
+        );
+    }
 }
