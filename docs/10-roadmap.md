@@ -254,8 +254,8 @@ record.
 |---|---|---|
 | M10.1 | ✅ **Season state**: the 15 ints are the fifteen AI teams' league points; the record's other career fields are named in `docs/16-career.md`, with the unproven ones listed | `docs/16-career.md` |
 | M10.2 | ✅ `career` model: teams, roster, points, money, events entered, prizes, repairs, season phase; `W1` writes it where the game does | new `ra2sim::career` (or `ra2game`) |
-| M10.3 | Team HQ flows: select/create team, robot inventory (`hq_robots` — `bot_cell.gib`, not the `robot_cell.gib` its note names), league/season grids (S2's fills), history/prizes (`hq_history`), event schedule (`hq_events`) | `ra2ui` + `ra2-app` |
-| M10.4 | Events: `Events.txt` → entry rules, tiers, prize list (`golden_sawblade`/`event_results` scene), the prize screen at the end of an event | `ra2fmt::event`, `ra2-app` |
+| M10.3 | ✅ Team HQ flows: the shipped `teamhq.gib` and its four tabs, robot inventory (`hq_robots` — `bot_cell.gib`, not the `robot_cell.gib` its note names), league/season grids from the career's points (S2's fills), history/prizes (`hq_history`), event schedule (`hq_events`); `--hq` opens it, headless and windowed | `ra2ui::hq` + `ra2-app::hq_mode` |
+| M10.4 | ✅ Events: `Events.txt` → the event's arena, its arena script's own game type, one match through M8's `Match`, `common/matchresults.gib`, the award screen (`event_winner.gib`) and the career's points/prize, then the HQ's league and history; `--hq --simulate-event N` is the headless run | `ra2fmt::event`, `ra2ui::hq`, `ra2-app::hq_mode` |
 | M10.5 | ◐ Repairs *(model done; the `repairs.gib` screen remains)*: the damage a match leaves on components, the repair list (`repairs.gib`), cost and time, the `ReadMe`'s "graphic for fractured items" | `ra2ui`, `ra2sim` |
 | M10.6 | ◐ Money/points: the per-type scoring (damage, KO, zone) and what it is worth outside the match; teammates do not score (the 1.20 rule) | `ra2sim::match`, `ra2sim::career` |
 | M10.7 | ✅ The career save/load, versioned, with a "your game directory" location | `W1`, `ra2-app` |

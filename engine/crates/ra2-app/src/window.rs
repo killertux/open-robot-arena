@@ -58,6 +58,31 @@ pub fn run(game: &Path, size: [u32; 2]) -> Result<(), String> {
 /// Open the match in a window: the same composition the offscreen runner uses,
 /// one frame per loop. `Esc` pauses, `C` cycles watch/static/orbit, and the
 /// pause dialog's resume/quit buttons are hit-tested through the layout.
+/// Open the Team HQ in a window. The same session the headless run uses: the
+/// shipped `teamhq.gib` and its tabs, `event_bracket.gib` when an event is
+/// entered, and M8's match presentation for the event's match.
+pub fn run_hq(options: crate::hq_mode::Options) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Err(
+            "no display (DISPLAY and WAYLAND_DISPLAY are both unset); the windowed client \
+             needs one — use --hq --out DIR for the headless path"
+                .into(),
+        );
+    }
+    let event_loop = EventLoop::new()
+        .map_err(|e| format!("cannot open a window: {e}; use --hq --out DIR for the HQ"))?;
+    let mut app = App::new_hq(options)?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| format!("the window loop failed: {e}"))?;
+    match app.error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 pub fn run_match(options: crate::match_mode::Options) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
@@ -234,6 +259,8 @@ struct App {
     session: Option<crate::match_mode::Session>,
     /// `Some` when `--build` is open: the workshop model and its preview.
     builder: Option<crate::build_mode::Builder>,
+    /// `Some` when `--hq` is open: the shipped HQ and its event flow.
+    hq: Option<crate::hq_mode::Session>,
     /// The modifiers currently held, for Ctrl+Z / Ctrl+Y.
     modifiers: ModifiersState,
     window: Option<Arc<Window>>,
@@ -267,6 +294,14 @@ impl App {
         Ok(app)
     }
 
+    fn new_hq(options: crate::hq_mode::Options) -> Result<App, String> {
+        let mut hq = crate::hq_mode::Session::open(&options.game)?;
+        hq.set_event_seconds(options.seconds);
+        let mut app = App::with_session(&options.game, options.size, None)?;
+        app.hq = Some(hq);
+        Ok(app)
+    }
+
     fn with_session(
         game: &Path,
         requested: [u32; 2],
@@ -289,6 +324,7 @@ impl App {
             frames,
             session,
             builder: None,
+            hq: None,
             modifiers: ModifiersState::empty(),
             window: None,
             gpu: None,
@@ -348,6 +384,52 @@ impl App {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let format = gpu.config.format;
+        if let Some(hq) = &mut self.hq {
+            let (scene, three_d) = match hq.scene() {
+                Ok(scene) => scene,
+                Err(error) => {
+                    self.error = Some(format!("could not build the HQ frame: {error}"));
+                    event_loop.exit();
+                    return;
+                }
+            };
+            if three_d {
+                if let Err(error) =
+                    hq.render_3d(&gpu.mesh, &view, &gpu.depth_view, format, size[0], size[1])
+                {
+                    self.error = Some(format!("could not draw the event match: {error}"));
+                    event_loop.exit();
+                    return;
+                }
+                if let Err(error) = gpu.ui.render_over_to(
+                    &gpu.device,
+                    &gpu.queue,
+                    &scene,
+                    &view,
+                    format,
+                    size[0],
+                    size[1],
+                ) {
+                    self.error = Some(format!("could not draw the HQ match screen: {error}"));
+                    event_loop.exit();
+                    return;
+                }
+            } else if let Err(error) = gpu.ui.render_to(
+                &gpu.device,
+                &gpu.queue,
+                &scene,
+                &view,
+                format,
+                size[0],
+                size[1],
+            ) {
+                self.error = Some(format!("could not draw the HQ: {error}"));
+                event_loop.exit();
+                return;
+            }
+            gpu.queue.present(current);
+            return;
+        }
         if let Some(session) = &mut self.session {
             let scene = match session.scene() {
                 Ok(scene) => scene,
@@ -518,6 +600,10 @@ impl ApplicationHandler for App {
                 }
                 match event.physical_key {
                     PhysicalKey::Code(KeyCode::Escape) => {
+                        if self.hq.is_some() {
+                            event_loop.exit();
+                            return;
+                        }
                         let mut quit = false;
                         if let Some(session) = &mut self.session {
                             if session.matched.state() == MatchState::Results {
@@ -576,6 +662,17 @@ impl ApplicationHandler for App {
                     // A click in a bar is no click at all.
                     return;
                 };
+                if let Some(hq) = &mut self.hq {
+                    match hq.click(point) {
+                        Ok(_) => {
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
+                        }
+                        Err(error) => self.fail(event_loop, error),
+                    }
+                    return;
+                }
                 let mut quit = false;
                 if let Some(session) = &mut self.session {
                     if session.matched.state() == MatchState::Results {
@@ -680,6 +777,9 @@ impl ApplicationHandler for App {
             self.next_update = now + UPDATE;
             if let Some(session) = &mut self.session {
                 session.advance(UPDATE.as_secs_f32());
+            }
+            if let Some(hq) = &mut self.hq {
+                hq.advance(UPDATE.as_secs_f32());
             }
             if let Some(window) = &self.window {
                 window.request_redraw();

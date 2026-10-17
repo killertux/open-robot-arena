@@ -18,6 +18,7 @@ pub mod build_mode;
 pub mod cli;
 pub mod frame;
 pub mod headless;
+pub mod hq_mode;
 pub mod hud;
 pub mod match_mode;
 pub mod viewport;
@@ -53,6 +54,19 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         return match options.out {
             Some(_) => build_mode::run_headless(&options),
             None => window::run_build(options),
+        };
+    }
+    if args.hq {
+        let options = hq_mode::Options::new(
+            &game,
+            args.simulate_event,
+            args.out.clone(),
+            args.size,
+            args.seconds,
+        )?;
+        return match options.out {
+            Some(_) => hq_mode::run_headless(options),
+            None => window::run_hq(options),
         };
     }
     if args.match_mode {
