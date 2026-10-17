@@ -106,8 +106,39 @@ money, the closing lines and the line ending.
 
 ## 5. What is not wired yet
 
-- `ra2-app` does not play music or sounds, and `plus.createSound` /
-  `plus.playSound` still do not reach `ra2-audio`.
+- `ra2-app` does not play music or sounds. The script layer's sounds are now
+  real, though: `plus.createSound` keeps a `SoundId` handle table and
+  `playSound`/`loopSound`/`stopSound`/`removeSound` append ordered
+  `SoundRequest`s to `ra2script::SoundQueue`. `SoundQueue::apply(&mut Audio)`
+  resolves each script path against the game directory (case-insensitively,
+  backslashes or slashes) and drives `ra2-audio`; no device is required and the
+  tests exercise it with `Audio::without_device()`. The app still has to call
+  it once per frame.
 - The options screen does not edit `ra2.cfg`.
 - The workshop does not yet call the `.bot` writer; that is M9's UI work.
 - Nothing in this batch is exercised through a real audio device.
+- `plus.fadeInToLoop`, `plus.fadeOutLoop` and `plus.setVolume` are still
+  recorded rather than performed, so the intro's crowd fades do not reach the
+  mixer.
+
+## 6. plus sound semantics (measured from the scripts)
+
+The five calls across `Arenas/`, `AI/` and `Scripts/` are 91 `createSound`,
+56 `playSound`, 18 `loopSound`, 16 `removeSound` and 6 `stopSound`.
+
+- `createSound(path, loop, position)` stores the **raw** path and position and
+  returns a handle starting at 1. `loop` is read truthily, because the scripts
+  pass both `True` and `1`. `loop=False` still creates: the arenas create
+  intro music with `False` and loop it later.
+- `playSound(handle)` queues a play with the sound's current loop flag; an
+  unknown or removed handle is a `ValueError` naming the handle.
+- `loopSound(handle)` sets the handle's loop flag and queues `Loop`; the
+  scripts use it to start the intro music and the trapdoor/compressor loops.
+- `stopSound(handle)` queues a stop and keeps the handle; unknown is a warning.
+- `removeSound(handle)` frees the handle and queues a stop. The arenas call it
+  from `__del__` and again from `DoIntro`, so a second removal is tolerated
+  with a named warning in `State::log`, not an exception.
+- `playOnce(handle)` queues a non-looping play; the end-of-match announcer is
+  its only shipped caller.
+- Paths are resolved at drain time, not at `createSound`; a missing file is
+  reported in `apply`'s problem list and skipped.

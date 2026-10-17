@@ -40,6 +40,9 @@ pub mod ui;
 pub use arena::{Arena, ArenaData, ArenaDetail, Drive, HingeController, PrismaticController};
 pub use host::ScriptHost;
 pub use plus::Ai;
+/// The audio backend, re-exported so a caller draining [`SoundQueue`] does not
+/// need a direct dependency on `ra2-audio`.
+pub use ra2_audio;
 
 /// One robot, as the scripts see it.
 ///
@@ -102,6 +105,304 @@ pub enum Request {
     Eliminate { bot: i32 },
 }
 
+/// A stable handle to a sound a script created with `plus.createSound`.
+///
+/// The number is the value the scripts keep in their own attributes (they do
+/// not inspect it), starts at 1 and is never reused, so a stale handle can be
+/// told apart from a live one. `removeSound` frees the live entry; the number
+/// itself remains a valid *name* for "the handle that used to be this sound".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SoundId(pub u64);
+
+impl std::fmt::Display for SoundId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A sound a script created, before it is played.
+///
+/// The **path is stored exactly as the script wrote it** — game-relative,
+/// usually with backslashes (`Sounds\intro_music\smell_glue.wav`) — and is
+/// resolved against the game installation only when the queue is drained (see
+/// [`SoundQueue::apply`]). Creating a sound therefore never touches the disk,
+/// which is what lets an arena script set up its sounds before a device (or a
+/// game directory) exists.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sound {
+    pub id: SoundId,
+    /// The script's own path spelling.
+    pub path: String,
+    /// `createSound`'s second argument, changed by `plus.loopSound`.
+    pub looping: bool,
+    /// `createSound`'s third argument, the emitter position.
+    pub position: [f32; 3],
+}
+
+/// What a script asked the audio system to do, in call order.
+///
+/// `Play` carries the sound's path and position so a drained request is
+/// self-contained; `Stop` and `Loop` name the handle, and [`SoundQueue::apply`]
+/// looks the path up in the queue's table (including sounds removed after the
+/// request was queued).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SoundRequest {
+    /// `plus.playSound(handle)` (or `playOnce`, with `looping: false`).
+    Play {
+        id: SoundId,
+        /// The script's raw path; resolve at drain time.
+        path: String,
+        looping: bool,
+        position: [f32; 3],
+    },
+    /// `plus.stopSound(handle)` and the stop half of `plus.removeSound`.
+    Stop { id: SoundId },
+    /// `plus.loopSound(handle)`: play it as a loop, or switch a sounding one
+    /// to looping.
+    Loop { id: SoundId },
+}
+
+/// The script host's sound handles and the requests they produced.
+///
+/// The scripts address sounds by handle only; this is the table that makes a
+/// handle mean something, and the ordered queue a caller drains into
+/// [`ra2_audio::Audio`]. It is data, not a device: constructing sounds and
+/// queueing plays works headless, and [`SoundQueue::apply`] is the only part
+/// that needs an audio system.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SoundQueue {
+    next_id: u64,
+    sounds: BTreeMap<SoundId, Sound>,
+    /// Sounds `removeSound` took out of `sounds` since the last drain. They are
+    /// kept here so a `Loop` queued before the removal can still find its path
+    /// when the queue is applied; [`SoundQueue::apply`] clears the map once the
+    /// pending requests are served.
+    retired: BTreeMap<SoundId, Sound>,
+    requests: Vec<SoundRequest>,
+}
+
+impl Default for SoundQueue {
+    fn default() -> SoundQueue {
+        SoundQueue::new()
+    }
+}
+
+impl SoundQueue {
+    /// An empty queue; handles start at 1.
+    pub const fn new() -> SoundQueue {
+        SoundQueue {
+            next_id: 1,
+            sounds: BTreeMap::new(),
+            retired: BTreeMap::new(),
+            requests: Vec::new(),
+        }
+    }
+
+    /// `plus.createSound(path, looping, position)` — make a handle.
+    ///
+    /// `loop=false` still creates: the arena scripts create the intro music
+    /// once and call `loopSound` on it later, while `Spikes` creates its fire
+    /// sound with `loop=true` and plays it with `playSound`.
+    pub fn create(
+        &mut self,
+        path: impl Into<String>,
+        looping: bool,
+        position: [f32; 3],
+    ) -> SoundId {
+        let id = SoundId(self.next_id);
+        self.next_id += 1;
+        self.sounds.insert(
+            id,
+            Sound {
+                id,
+                path: path.into(),
+                looping,
+                position,
+            },
+        );
+        id
+    }
+
+    /// The live sound behind a handle, if it has not been removed.
+    pub fn get(&self, id: SoundId) -> Option<&Sound> {
+        self.sounds.get(&id)
+    }
+
+    /// The live handles and their sounds, in handle order.
+    pub fn iter(&self) -> impl Iterator<Item = &Sound> {
+        self.sounds.values()
+    }
+
+    /// `plus.playSound(handle)` — queue a play. Unknown handles are an error
+    /// that names the handle, never a silent no-op.
+    pub fn play(&mut self, id: SoundId) -> Result<(), String> {
+        let Some(sound) = self.sounds.get(&id) else {
+            return Err(unknown("playSound", id));
+        };
+        let request = SoundRequest::Play {
+            id,
+            path: sound.path.clone(),
+            looping: sound.looping,
+            position: sound.position,
+        };
+        self.requests.push(request);
+        Ok(())
+    }
+
+    /// `plus.playOnce(handle)` — the same as [`SoundQueue::play`], forced
+    /// non-looping. The shipped caller is the end-of-match announcer, which is
+    /// a one-shot even if the handle were created looping.
+    pub fn play_once(&mut self, id: SoundId) -> Result<(), String> {
+        let Some(sound) = self.sounds.get(&id) else {
+            return Err(unknown("playOnce", id));
+        };
+        let request = SoundRequest::Play {
+            id,
+            path: sound.path.clone(),
+            looping: false,
+            position: sound.position,
+        };
+        self.requests.push(request);
+        Ok(())
+    }
+
+    /// `plus.loopSound(handle)` — mark it looping and queue that.
+    pub fn loop_sound(&mut self, id: SoundId) -> Result<(), String> {
+        let Some(sound) = self.sounds.get_mut(&id) else {
+            return Err(unknown("loopSound", id));
+        };
+        sound.looping = true;
+        self.requests.push(SoundRequest::Loop { id });
+        Ok(())
+    }
+
+    /// `plus.stopSound(handle)` — queue a stop without freeing the handle, so
+    /// the script can play it again. Returns whether the handle was live.
+    pub fn stop(&mut self, id: SoundId) -> bool {
+        if !self.sounds.contains_key(&id) {
+            return false;
+        }
+        self.requests.push(SoundRequest::Stop { id });
+        true
+    }
+
+    /// `plus.removeSound(handle)` — free the handle and stop it if it is
+    /// sounding. Returns whether the handle was live; the caller turns `false`
+    /// into the named warning an arena's `__del__` needs.
+    pub fn remove(&mut self, id: SoundId) -> bool {
+        let Some(sound) = self.sounds.remove(&id) else {
+            return false;
+        };
+        self.retired.insert(id, sound);
+        self.requests.push(SoundRequest::Stop { id });
+        true
+    }
+
+    /// The queued requests, in call order.
+    pub fn requests(&self) -> &[SoundRequest] {
+        &self.requests
+    }
+
+    /// Take the queued requests, leaving the handle table intact.
+    pub fn take_requests(&mut self) -> Vec<SoundRequest> {
+        std::mem::take(&mut self.requests)
+    }
+
+    /// Drain the queue into an audio system.
+    ///
+    /// Paths are resolved here, against `game_root`, with
+    /// [`ra2_audio::resolve_game_path`] — the first moment the script layer
+    /// touches the disk. `Play` starts (or restarts) the sound at its handle,
+    /// `Loop` restarts it with the looping decoder, and `Stop` stops it.
+    ///
+    /// Returns one message per request that could not be applied (a path that
+    /// is not in the game, or the backend's own decode error). The requests are
+    /// consumed either way; a missing file is not a reason to fail a match.
+    pub fn apply(
+        &mut self,
+        game_root: &std::path::Path,
+        listener: ra2_audio::Listener,
+        audio: &mut ra2_audio::Audio,
+    ) -> Vec<String> {
+        let requests = std::mem::take(&mut self.requests);
+        let mut problems = Vec::new();
+        for request in requests {
+            match request {
+                SoundRequest::Play {
+                    id,
+                    path,
+                    looping,
+                    position,
+                } => play_one(
+                    id,
+                    &path,
+                    looping,
+                    position,
+                    game_root,
+                    listener,
+                    audio,
+                    &mut problems,
+                ),
+                SoundRequest::Loop { id } => {
+                    let sound = self.sounds.get(&id).or_else(|| self.retired.get(&id));
+                    let Some(sound) = sound else {
+                        problems.push(format!("plus.loopSound: sound {id} is gone"));
+                        continue;
+                    };
+                    let (path, position) = (sound.path.clone(), sound.position);
+                    play_one(
+                        id,
+                        &path,
+                        true,
+                        position,
+                        game_root,
+                        listener,
+                        audio,
+                        &mut problems,
+                    );
+                }
+                SoundRequest::Stop { id } => {
+                    audio.stop_script(id.0);
+                    self.retired.remove(&id);
+                }
+            }
+        }
+        // Only a `Loop` needs a removed sound's path, and `loopSound` cannot be
+        // called on a removed handle, so every pending use has been served.
+        self.retired.clear();
+        problems
+    }
+}
+
+fn unknown(action: &str, id: SoundId) -> String {
+    format!("plus.{action}: unknown sound handle {id}")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn play_one(
+    id: SoundId,
+    path: &str,
+    looping: bool,
+    position: [f32; 3],
+    game_root: &std::path::Path,
+    listener: ra2_audio::Listener,
+    audio: &mut ra2_audio::Audio,
+    problems: &mut Vec<String>,
+) {
+    match ra2_audio::resolve_game_path(game_root, path) {
+        Some(resolved) => {
+            if let Err(error) = audio.play_script(id.0, &resolved, looping, position, listener, 1.0)
+            {
+                problems.push(format!("plus.playSound: sound {id}: {error}"));
+            }
+        }
+        None => problems.push(format!(
+            "plus.playSound: sound {id}: {path} is not in {}",
+            game_root.display()
+        )),
+    }
+}
+
 /// How often the game ran its AI scripts, in seconds.
 ///
 /// Not a guess: `AI.SuperAI.Tick` refreshes its sensors when its own counter
@@ -145,8 +446,9 @@ pub struct State {
     /// *adds* to it (`fild [robot+0x20]; fadd amount`); the match shell zeroes
     /// it at the start of a match (`0x415a75`).
     pub scores: Vec<i32>,
-    pub next_handle: u64,
-    pub sounds: BTreeMap<u64, String>,
+    /// The script layer's sound handles and the play/stop/loop requests they
+    /// produced, in call order.
+    pub sounds: SoundQueue,
     /// What the script layer asked for that a later milestone owns.
     pub deferred: Vec<String>,
     /// Anything the script layer wants to say to the operator.
@@ -171,8 +473,7 @@ impl State {
             players: Vec::new(),
             game_type: String::new(),
             scores: Vec::new(),
-            next_handle: 1,
-            sounds: BTreeMap::new(),
+            sounds: SoundQueue::new(),
             deferred: Vec::new(),
             log: Vec::new(),
         }
@@ -303,6 +604,14 @@ pub fn add_points(bot: i32, amount: i32) {
 /// Take the requests the scripts queued during the last tick.
 pub fn take_requests() -> Vec<Request> {
     std::mem::take(&mut state().requests)
+}
+
+/// Take the sound requests the scripts queued since the last call.
+///
+/// This leaves the handle table intact, so the caller can inspect the queue
+/// without an audio system. To play them, use [`SoundQueue::apply`] instead.
+pub fn take_sound_requests() -> Vec<SoundRequest> {
+    state().sounds.take_requests()
 }
 
 /// Take the joints the arena scripts have asked for since the last call.
@@ -738,6 +1047,73 @@ mod tests {
                 .unwrap();
             assert!(back.0.abs() <= 1.0 && back.2.abs() <= 1.0, "{back:?}");
         });
+    }
+
+    /// The queue drains into a real `ra2_audio::Audio` with no device: the
+    /// script's paths resolve case-insensitively, the plays reach the play log
+    /// with their positions, and a missing file is reported, not fatal.
+    ///
+    /// This is the seam `ra2-app` will use; nothing here touches the app.
+    #[test]
+    fn the_sound_queue_drains_into_a_silent_audio() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("ra2script-sounds-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(root.join("Sounds/Intro_Music")).unwrap();
+        std::fs::create_dir_all(root.join("Sounds/Crowd")).unwrap();
+        std::fs::write(root.join("Sounds/Intro_Music/Smell_Glue.wav"), b"wav").unwrap();
+        std::fs::write(root.join("Sounds/Crowd/LoudCheer_Loop.wav"), b"wav").unwrap();
+
+        let mut queue = SoundQueue::new();
+        let intro = queue.create(r"Sounds\intro_music\smell_glue.wav", false, [1.0, 2.0, 3.0]);
+        let crowd = queue.create("Sounds/crowd/LoudCheer_Loop.wav", false, [4.0, 5.0, 6.0]);
+        queue.play(intro).unwrap();
+        queue.play(intro).unwrap();
+        queue.loop_sound(crowd).unwrap();
+        assert!(queue.stop(intro));
+        // Removing the crowd sound after queueing its loop must not lose the
+        // path the `Loop` still needs at drain time.
+        assert!(queue.remove(crowd));
+
+        let mut audio = ra2_audio::Audio::without_device();
+        let problems = queue.apply(
+            &root,
+            ra2_audio::Listener::looking_forward([0.0; 3]),
+            &mut audio,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+
+        let entries = audio.play_log().entries();
+        assert_eq!(entries.len(), 3, "two plays and the loop");
+        assert_eq!(
+            entries[0].path,
+            root.join("Sounds/Intro_Music/Smell_Glue.wav")
+        );
+        assert_eq!(entries[0].position, Some([1.0, 2.0, 3.0]));
+        assert_eq!(entries[1].position, Some([1.0, 2.0, 3.0]));
+        assert_eq!(
+            entries[2].path,
+            root.join("Sounds/Crowd/LoudCheer_Loop.wav"),
+            "the loop resolves too, even though removeSound retired the handle"
+        );
+        assert_eq!(entries[2].position, Some([4.0, 5.0, 6.0]));
+        assert!(queue.requests().is_empty(), "the drain consumes the queue");
+
+        // A path that is not in the game is reported by name and skipped.
+        let missing = queue.create("Sounds/not_shipped.wav", false, [0.0; 3]);
+        queue.play(missing).unwrap();
+        let problems = queue.apply(
+            &root,
+            ra2_audio::Listener::looking_forward([0.0; 3]),
+            &mut audio,
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("not_shipped.wav"), "{problems:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

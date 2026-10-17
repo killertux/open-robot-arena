@@ -51,6 +51,7 @@
 //! system is positional only. The log records the emitter position, not the
 //! ears.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -84,6 +85,46 @@ pub fn hundredths_db_to_gain(value: i32) -> f32 {
         return 1.0;
     }
     10f32.powf(value as f32 / 100.0 / 20.0)
+}
+
+/// Resolve a path as the game's scripts write it against an installation.
+///
+/// The scripts name assets relative to the game directory and usually with
+/// backslashes (`Sounds\intro_music\smell_glue.wav`); some use forward slashes
+/// (`Sounds/crowd/LoudCheer_Loop.wav`). Candidate names are matched
+/// **case-insensitively** at every component, because the scripts' spelling
+/// does not always follow the on-disk case (`Sounds/crowd/...` and
+/// `Sounds/Crowd/...` are the same directory). The returned path uses the
+/// on-disk spelling and the host's separator.
+///
+/// `..` is rejected rather than followed: a script path is relative to the
+/// game, and nothing shipped reaches outside it. A missing component returns
+/// `None`, and the final component must be a file.
+pub fn resolve_game_path(root: &Path, script_path: &str) -> Option<PathBuf> {
+    let mut current = root.to_path_buf();
+    for part in script_path.split(['\\', '/']) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return None;
+        }
+        let exact = current.join(part);
+        if exact.exists() {
+            current = exact;
+            continue;
+        }
+        let found = std::fs::read_dir(&current).ok()?.find_map(|entry| {
+            let entry = entry.ok()?;
+            entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(part)
+                .then(|| entry.path())
+        })?;
+        current = found;
+    }
+    current.is_file().then_some(current)
 }
 
 /// What a play call was: a 2D sound, a positional sound, or music.
@@ -222,11 +263,14 @@ fn normalize_or(value: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
 }
 
 /// The audio system: one output device (or none), one music player, a set of
-/// one-shot sound players, and the play log.
+/// one-shot sound players, the script sounds keyed by their handles, and the
+/// play log.
 pub struct Audio {
     device: Option<MixerDeviceSink>,
     music: Option<Player>,
     sfx: Vec<Player>,
+    /// Sounds the script layer started by handle; `Stop` removes one.
+    scripts: BTreeMap<u64, Player>,
     log: PlayLog,
     sfx_gain: f32,
     music_gain: f32,
@@ -263,6 +307,7 @@ impl Audio {
             device,
             music: None,
             sfx: Vec::new(),
+            scripts: BTreeMap::new(),
             log: PlayLog::default(),
             sfx_gain: 1.0,
             music_gain: 1.0,
@@ -421,6 +466,67 @@ impl Audio {
         Ok(())
     }
 
+    /// Play a script sound under its `plus.createSound` handle.
+    ///
+    /// This is the script layer's entry point: the handle is the stable id the
+    /// script got, `looping` selects a looping decoder, and `position` is the
+    /// emitter for the same positional model as [`Audio::play_3d`]. Playing an
+    /// id that is already sounding restarts it, which is what a second
+    /// `plus.playSound(handle)` asks for. A later [`Audio::stop_script`] with
+    /// the same id stops it.
+    ///
+    /// Without a device the call is a successful no-op recorded in the log (the
+    /// path is not opened), exactly like [`Audio::play_3d`].
+    pub fn play_script(
+        &mut self,
+        id: u64,
+        path: impl AsRef<Path>,
+        looping: bool,
+        position: [f32; 3],
+        listener: Listener,
+        gain: f32,
+    ) -> Result<(), String> {
+        let path = path.as_ref().to_path_buf();
+        let gain = linear(gain);
+        self.log.push(PlayEntry {
+            path: path.clone(),
+            kind: PlayKind::Sound3d,
+            gain: gain * self.output_sfx_gain(),
+            position: Some(position),
+        });
+        // A play on a sounding handle restarts it rather than layering a second
+        // copy: the scripts use `playSound` as "start this cue".
+        self.stop_script(id);
+        let Some(device) = &self.device else {
+            return Ok(());
+        };
+        let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let reader = BufReader::new(file);
+        let (left, right) = listener.ears();
+        let player = Player::connect_new(device.mixer());
+        if looping {
+            let decoder =
+                Decoder::new_looped(reader).map_err(|e| format!("{}: {e}", path.display()))?;
+            player.append(Spatial::new(decoder, position, left, right).amplify(gain));
+        } else {
+            let decoder = Decoder::new(reader).map_err(|e| format!("{}: {e}", path.display()))?;
+            player.append(Spatial::new(decoder, position, left, right).amplify(gain));
+        }
+        player.set_volume(self.output_sfx_gain());
+        self.sfx.retain(|player| !player.empty());
+        self.scripts.retain(|_, player| !player.empty());
+        self.scripts.insert(id, player);
+        Ok(())
+    }
+
+    /// Stop the script sound with this handle; an unknown or finished handle is
+    /// a no-op.
+    pub fn stop_script(&mut self, id: u64) {
+        if let Some(player) = self.scripts.remove(&id) {
+            player.stop();
+        }
+    }
+
     /// Start the music track at `path`, optionally looping it.
     ///
     /// Any previous track is stopped first. The track is played at
@@ -469,6 +575,9 @@ impl Audio {
             music.set_volume(self.output_music_gain());
         }
         for player in &self.sfx {
+            player.set_volume(self.output_sfx_gain());
+        }
+        for player in self.scripts.values() {
             player.set_volume(self.output_sfx_gain());
         }
     }
@@ -541,6 +650,22 @@ mod tests {
         }
     }
 
+    /// A throwaway tree with the two spellings the scripts use, so the
+    /// resolver is tested without the (uncommitted) game data.
+    fn temp_game_dir() -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("ra2-audio-resolve-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(root.join("Sounds/Intro_Music")).unwrap();
+        std::fs::create_dir_all(root.join("Sounds/Crowd")).unwrap();
+        std::fs::write(root.join("Sounds/Intro_Music/Smell_Glue.wav"), b"wav").unwrap();
+        std::fs::write(root.join("Sounds/Crowd/LoudCheer_Loop.wav"), b"wav").unwrap();
+        root
+    }
+
     #[test]
     fn hundredths_of_a_decibel_convert_to_directsound_gain() {
         assert_eq!(hundredths_db_to_gain(0), 1.0);
@@ -584,6 +709,65 @@ mod tests {
         assert_eq!(log.entries()[1].kind, PlayKind::Sound3d);
         assert_eq!(log.entries()[1].position, Some([1.0, 2.0, 3.0]));
         assert_eq!(log.entries()[2].kind, PlayKind::Music);
+    }
+
+    /// A `plus` handle is a stable key: a second play restarts it, and a stop
+    /// removes it. With no device only the log is observable, which is enough
+    /// to pin the entry point, the position and the handle plumbing.
+    #[test]
+    fn script_sounds_play_by_handle_and_stop() {
+        let mut audio = Audio::without_device();
+        audio
+            .play_script(
+                7,
+                "missing.wav",
+                false,
+                [1.0, 2.0, 3.0],
+                Listener::looking_forward([0.0; 3]),
+                1.0,
+            )
+            .unwrap();
+        audio
+            .play_script(
+                7,
+                "missing.wav",
+                true,
+                [4.0, 5.0, 6.0],
+                Listener::looking_forward([0.0; 3]),
+                0.5,
+            )
+            .unwrap();
+        audio.stop_script(7);
+        audio.stop_script(7);
+
+        let log = audio.play_log();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log.entries()[0].kind, PlayKind::Sound3d);
+        assert_eq!(log.entries()[0].position, Some([1.0, 2.0, 3.0]));
+        assert_eq!(log.entries()[1].position, Some([4.0, 5.0, 6.0]));
+        assert_close(log.entries()[1].gain, 0.5);
+        assert!(audio.scripts.is_empty(), "the stop removed the player");
+    }
+
+    /// The scripts' backslashes and inconsistent case resolve to the real file,
+    /// and a missing component is refused rather than guessed.
+    #[test]
+    fn script_paths_resolve_case_insensitively_against_the_game_dir() {
+        let root = temp_game_dir();
+        let resolved = resolve_game_path(&root, r"Sounds\INTRO_MUSIC\Smell_Glue.WAV")
+            .expect("the backslash path resolves");
+        assert_eq!(resolved, root.join("Sounds/Intro_Music/Smell_Glue.wav"));
+        assert_eq!(
+            resolve_game_path(&root, "SOUNDS/crowd/loudcheer_loop.wav"),
+            Some(root.join("Sounds/Crowd/LoudCheer_Loop.wav")),
+            "forward slashes resolve too"
+        );
+        assert_eq!(resolve_game_path(&root, "Sounds/missing.wav"), None);
+        assert_eq!(
+            resolve_game_path(&root, r"..\Sounds\Intro_Music\Smell_Glue.wav"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -8,6 +8,7 @@ description = "The RA2 script layer: the plus/Arenas/AI object model on an embed
 [dependencies]
 glam = "0.34.1"
 pyo3 = { version = "0.23.5", features = ["auto-initialize"] }
+ra2-audio = { path = "../ra2-audio" }
 ra2fmt = { path = "../ra2fmt" }
 ra2-render = { path = "../ra2-render" }
 ra2ui = { version = "0.1.0", path = "../ra2ui" }
