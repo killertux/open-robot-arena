@@ -58,7 +58,7 @@ pub const RANK: &str = "rank";
 pub const LOGO: &str = "league team logo";
 
 /// One row of the standings: a team, its points and the rank it holds.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Standing {
     /// 1 is the top of the table. The screen's own note is *"in order of rank"*,
     /// and the game labels the i-th live row `i + 1`.
@@ -217,16 +217,19 @@ mod tests {
                 name: "A".into(),
                 motto: String::new(),
                 logo: "a.bmp".into(),
+                ..Team::default()
             },
             Team {
                 name: "B".into(),
                 motto: String::new(),
                 logo: "b.bmp".into(),
+                ..Team::default()
             },
             Team {
                 name: "C".into(),
                 motto: String::new(),
                 logo: "c.bmp".into(),
+                ..Team::default()
             },
         ];
         let rows = table(&teams, &[5, 9, 5]);
