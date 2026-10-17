@@ -89,6 +89,21 @@ pub const RESULTS_GRID: &str = "results grid";
 /// The event schedule's grid.
 pub const EVENT_GRID: &str = "event grid";
 pub const EVENT_TEMPLATE: &str = "teamhq/event_cell.gib";
+/// The three state cells `FUN_004ffcc0` loads into the same grid: completed
+/// (`0x6ff21c`), in progress (`0x6ff1fc`) and disabled (`0x6ff1c4`).
+pub const EVENT_COMPLETED: &str = "teamhq/eventcell_completed.gib";
+pub const EVENT_IN_PROGRESS: &str = "teamhq/eventcell_inprogress.gib";
+pub const EVENT_DISABLED: &str = "teamhq/eventcell_disabled.gib";
+
+/// The bracket screen's generated group (`event_bracket.gib`'s note: "build the
+/// event bracket inside this group").
+pub const BRACKET_GROUP: &str = "bracket group";
+pub const BRACKET_HEADING: &str = "round heading textbox";
+pub const BRACKET_EVENT_TITLE: &str = "event title";
+pub const BRACKET_EVENT_DESCRIPTION: &str = "event description";
+pub const BRACKET_PLAY_BUTTON: &str = "play button";
+pub const BRACKET_LATER_BUTTON: &str = "later button";
+pub const BRACKET_FORFEIT_BUTTON: &str = "forfeit button";
 
 /// The history screen's prize grid.
 pub const HISTORY_SCREEN: &str = "teamhq/hq_history.gib";
@@ -111,11 +126,75 @@ pub struct RobotRow {
     pub preview: String,
 }
 
-/// One event on the season schedule: its `Events.txt` index and record.
+/// One event on the season schedule: its `Events.txt` index, record and the
+/// state `FUN_004ffcc0` gives its cell.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EventRow {
     pub id: usize,
     pub event: Event,
+    pub state: EventState,
+}
+
+/// Which cell a scheduled event shows. The three special cells are the binary's
+/// own (`FUN_004ffcc0` at `0x4ffe…`): a completed event, the event in progress,
+/// and every other event while one is in progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventState {
+    /// No event is in progress: the normal cell.
+    Available,
+    /// This event is the one in progress.
+    InProgress,
+    /// The event is in the career's history.
+    Completed,
+    /// Another event is in progress; this cell is disabled.
+    Disabled,
+}
+
+/// One bot in a bracket match.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BracketSlot {
+    pub name: String,
+    pub player: bool,
+}
+
+/// One match of a round, as `event_bracket.gib`'s generated bracket shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BracketMatchView {
+    pub slots: Vec<BracketSlot>,
+    /// True for the match the player is in.
+    pub player_match: bool,
+    /// The result when this match is one the player played.
+    pub won: Option<bool>,
+}
+
+/// One round column.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BracketRoundView {
+    /// `"Round 1"` … `"Final Match"`.
+    pub label: String,
+    pub matches: Vec<BracketMatchView>,
+    /// The round the player is in.
+    pub current: bool,
+    /// The round has been played.
+    pub played: bool,
+}
+
+/// The bracket state the event screen and the season tab draw.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BracketView {
+    pub event: usize,
+    pub rounds: Vec<BracketRoundView>,
+    /// The zero-based current round.
+    pub round: usize,
+    /// `"Round 2"` or `"Final Match"`.
+    pub round_label: String,
+    /// `"Round 2 of 4 — next: Red Zone"` / `"Eliminated in round 2"` /
+    /// `"Event champion"`.
+    pub status: String,
+    /// The first opponent of the current round, if one is left.
+    pub next_opponent: Option<String>,
+    /// Whether the `play button` should start the next round.
+    pub can_play: bool,
 }
 
 /// One prize the career stores, as the history grid draws it.
@@ -156,6 +235,10 @@ pub struct View {
     /// Most recently won first, as the grid's note asks.
     pub prizes: Vec<PrizeRow>,
     pub stats: Stats,
+    /// The bracket in progress, when the career is in an event.
+    pub bracket: Option<BracketView>,
+    /// Finished events on this season's schedule: `(event id, won)`.
+    pub completed: Vec<(usize, bool)>,
 }
 
 impl View {
@@ -472,25 +555,100 @@ impl Hq {
     }
 
     fn fill_events(&mut self) -> Result<(), String> {
-        let template = crate::cells::template(&self.ui_root, EVENT_TEMPLATE)?;
-        let events: Vec<Event> = self
-            .view
-            .events
-            .iter()
-            .map(|row| row.event.clone())
-            .collect();
+        let rows = self.view.events.clone();
+        let ui_root = self.ui_root.clone();
         let Some(grid) = find_mut_in(&mut self.document, EVENT_GRID) else {
             return Ok(());
         };
-        crate::events::fill_grid(grid, &self.ui_root, &template, &events);
-        // The schedule's own title states the season; the level word is not in
-        // the career model, so the file's own "Event Schedule - Season 3" is
-        // replaced only in the part the model carries.
+        let Some(geometry) = Grid::from_widget(grid) else {
+            return Ok(());
+        };
+        let columns = geometry.columns.max(1) as usize;
+        let width = geometry.col_widths.first().copied().unwrap_or(0.0);
+        grid.children.retain(|c| c.name() != "event cell group");
+        for (index, row) in rows.iter().enumerate() {
+            let relative = match row.state {
+                EventState::Completed => EVENT_COMPLETED,
+                EventState::InProgress => EVENT_IN_PROGRESS,
+                EventState::Disabled => EVENT_DISABLED,
+                EventState::Available => EVENT_TEMPLATE,
+            };
+            let template = load(&ui_root, relative)?;
+            let Some(root) = template.widgets().next().cloned() else {
+                continue;
+            };
+            let (r, c) = ((index / columns) as i32, (index % columns) as i32);
+            let x = geometry.column_x(c);
+            let y = geometry.row_height * r as f32;
+            let mut cell = root;
+            crate::input::set_field(&mut cell, "Position", &format!("{x} 0 {y} 0"));
+            crate::input::set_field(
+                &mut cell,
+                "Size",
+                &format!("{width} 0 {} 0", geometry.row_height),
+            );
+            crate::cells::bind_art(&mut cell, "preview img", &row.event.art);
+            let (label, color) = match row.state {
+                EventState::Completed => {
+                    let won = self
+                        .view
+                        .completed
+                        .iter()
+                        .find(|(id, _)| *id == row.id)
+                        .is_some_and(|(_, won)| *won);
+                    if won {
+                        ("CHAMPION".to_string(), "0.3 1 0.5 1")
+                    } else {
+                        ("PLAYED".to_string(), "0.8 0.8 0.8 1")
+                    }
+                }
+                EventState::InProgress => {
+                    if let Some(bracket) = &self.view.bracket {
+                        (
+                            format!("{}/{}", bracket.round + 1, bracket.rounds.len()),
+                            "0.4 0.9 1 1",
+                        )
+                    } else {
+                        ("IN EVENT".to_string(), "0.4 0.9 1 1")
+                    }
+                }
+                EventState::Disabled => ("OUT".to_string(), "0.6 0.6 0.6 1"),
+                EventState::Available => ("".to_string(), "1 1 1 1"),
+            };
+            if !label.is_empty() {
+                cell.children.push(text_widget(
+                    "event state",
+                    &label,
+                    [3.0, 14.0, width - 6.0, 14.0],
+                    "fg_mcn12",
+                    color,
+                ));
+                let children = cell.children.len().to_string();
+                crate::input::set_field(&mut cell, "NumChildren", &children);
+            }
+            grid.children.push(cell);
+        }
+        // The schedule's own title states the season; the bracket state is the
+        // short `E<n>/9 R<n>` suffix, which fits the title box's one line.
         if let Some(title) = find_mut_in(&mut self.document, "schedule title") {
+            let bracket = match &self.view.bracket {
+                Some(bracket) => {
+                    let stage = if bracket.round + 1 >= bracket.rounds.len() {
+                        "FINAL".to_string()
+                    } else {
+                        format!("R{}", bracket.round + 1)
+                    };
+                    format!(" · E{}/9 {stage}", self.view.completed.len() + 1)
+                }
+                None => String::new(),
+            };
             set_value(
                 title,
-                &format!("Event Schedule - Season {}", self.view.season + 1),
+                &format!("Event Schedule - S{}{bracket}", self.view.season + 1),
             );
+            title
+                .children
+                .retain(|child| child.name() != "bracket status");
         }
         Ok(())
     }
@@ -716,6 +874,142 @@ fn image_widget(name: &str, file: &str, x: f32, y: f32, w: f32, h: f32) -> Widge
     }
 }
 
+/// A `Text` record: the leaf `event_cell`/bracket labels are built from, with
+/// the shipped faces' field names.
+fn text_widget(name: &str, text: &str, rect: [f32; 4], font: &str, color: &str) -> Widget {
+    text_widget_with(name, text, rect, font, color, false)
+}
+
+/// The same `Text` record with fractional coordinates: the bracket group is a
+/// fraction of the screen, so its generated columns are too.
+fn text_widget_frac(name: &str, text: &str, rect: [f32; 4], font: &str, color: &str) -> Widget {
+    text_widget_with(name, text, rect, font, color, true)
+}
+
+fn text_widget_with(
+    name: &str,
+    text: &str,
+    rect: [f32; 4],
+    font: &str,
+    color: &str,
+    fractional: bool,
+) -> Widget {
+    let field = |name: &str, raw: &str| Field {
+        name: Some(name.to_string()),
+        raw: raw.to_string(),
+    };
+    let flag = if fractional { 1 } else { 0 };
+    let [x, y, w, h] = rect;
+    Widget {
+        kind: WidgetKind::Text,
+        implicit: false,
+        fields: vec![
+            field("_Font", font),
+            field("_Text", text),
+            field("_ForeColor", color),
+            field("_Name", ""),
+            field("_Position", "0 0 0 0"),
+            field("Name", name),
+            field("ID", "-1"),
+            field("Position", &format!("{x} {flag} {y} {flag}")),
+            field("Size", &format!("{w} {flag} {h} {flag}")),
+            field("Visible", "true"),
+            field("ChildOrder", "10"),
+            field("ClipMode", "1"),
+            field("NumChildren", "0"),
+        ],
+        attachments: Vec::new(),
+        children: Vec::new(),
+    }
+}
+
+/// Fill `event_bracket.gib`'s `bracket group` from the career's bracket.
+///
+/// The binary builds a column per round (`FUN_0046ad60`'s
+/// `FUN_00406d20() + 1` loop), draws the first round's `16 / bots` matches and
+/// puts `UI\teamhq\questionmark.bmp` in the rounds that have not been reached
+/// (`0x46adf…`). This composes the same columns from plain `Text` records; the
+/// player's match and the next opponents are the visible part.
+pub fn fill_bracket(gib: &mut Gib, bracket: &BracketView) {
+    let Some(group) = find_mut_in(gib, BRACKET_GROUP) else {
+        return;
+    };
+    group.children.clear();
+    group.children.push(text_widget_frac(
+        "bracket status",
+        &bracket.status,
+        [0.02, 0.055, 0.96, 0.10],
+        "fg_mcn14",
+        if bracket.can_play {
+            "0.4 1 0.6 1"
+        } else {
+            "0.85 0.85 0.85 1"
+        },
+    ));
+    for (index, round) in bracket.rounds.iter().enumerate() {
+        let y = 0.13 + 0.17 * index as f32;
+        let player = round
+            .matches
+            .iter()
+            .find(|matched| matched.player_match)
+            .cloned()
+            .unwrap_or(BracketMatchView {
+                slots: Vec::new(),
+                player_match: true,
+                won: None,
+            });
+        let opponents = player
+            .slots
+            .iter()
+            .filter(|slot| !slot.player)
+            .map(|slot| {
+                if slot.name.is_empty() {
+                    "?".to_string()
+                } else {
+                    slot.name.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let opposition = if opponents.is_empty() || opponents.iter().all(|name| name == "?") {
+            "?".to_string()
+        } else {
+            opponents.join(", ")
+        };
+        let result = if round.played {
+            match player.won {
+                Some(true) => " — WON",
+                Some(false) => " — LOST",
+                None => "",
+            }
+        } else if round.current {
+            " — NEXT"
+        } else {
+            " — not drawn"
+        };
+        let line = format!("{}: You vs {}{}", round.label, opposition, result);
+        let color = if round.current {
+            "1 0.95 0.55 1"
+        } else if round.played {
+            if player.won == Some(true) {
+                "0.6 1 0.6 1"
+            } else {
+                "1 0.6 0.6 1"
+            }
+        } else {
+            "0.65 0.65 0.65 1"
+        };
+        group.children.push(text_widget_frac(
+            &format!("round {index} line"),
+            &line,
+            [0.03, y, 0.94, 0.13],
+            "fg_mcn16",
+            color,
+        ));
+    }
+    let children = group.children.len().to_string();
+    crate::input::set_field(group, "NumChildren", &children);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,6 +1074,8 @@ mod tests {
                 highest_score: 248,
                 fastest_win: 42.0,
             },
+            bracket: None,
+            completed: Vec::new(),
         }
     }
 
@@ -936,14 +1232,17 @@ mod tests {
             EventRow {
                 id: 4,
                 event: events[4].clone(),
+                state: EventState::Available,
             },
             EventRow {
                 id: 9,
                 event: events[9].clone(),
+                state: EventState::Available,
             },
             EventRow {
                 id: 12,
                 event: events[12].clone(),
+                state: EventState::Available,
             },
         ];
         let mut hq = Hq::open_on(&ui, hq_view, "events button").unwrap();
@@ -1028,6 +1327,86 @@ mod tests {
         let ui = game.join("UI");
         assert!(ra2fmt::find_ci(&ui, ROBOT_TEMPLATE).is_some());
         assert!(ra2fmt::find_ci(&ui, "teamhq/robot_cell.gib").is_none());
+    }
+
+    /// The bracket group takes the shipped screen's generated `Text`s: the
+    /// status line, a column per round and the player's next opponent.
+    #[test]
+    fn the_bracket_group_is_filled_from_the_view() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let mut gib = load(&ui, "teamhq/event_bracket.gib").unwrap();
+        let view = BracketView {
+            event: 0,
+            round: 1,
+            rounds: vec![
+                BracketRoundView {
+                    label: "Round 1".into(),
+                    current: false,
+                    played: true,
+                    matches: vec![BracketMatchView {
+                        slots: vec![
+                            BracketSlot {
+                                name: "The Rookies".into(),
+                                player: true,
+                            },
+                            BracketSlot {
+                                name: "Red Zone".into(),
+                                player: false,
+                            },
+                        ],
+                        player_match: true,
+                        won: Some(true),
+                    }],
+                },
+                BracketRoundView {
+                    label: "Final Match".into(),
+                    current: true,
+                    played: false,
+                    matches: vec![BracketMatchView {
+                        slots: vec![
+                            BracketSlot {
+                                name: "The Rookies".into(),
+                                player: true,
+                            },
+                            BracketSlot {
+                                name: "Blue Fury".into(),
+                                player: false,
+                            },
+                        ],
+                        player_match: true,
+                        won: None,
+                    }],
+                },
+            ],
+            round_label: "Final Match".into(),
+            status: "2 of 2 — next: Blue Fury".into(),
+            next_opponent: Some("Blue Fury".into()),
+            can_play: true,
+        };
+        fill_bracket(&mut gib, &view);
+        let root = gib.widgets().next().unwrap();
+        let group = find(root, BRACKET_GROUP).expect("the bracket group");
+        assert!(group.children.len() >= 3, "status + one line per round");
+        assert!(group.children.iter().any(|c| c.name() == "bracket status"));
+        let first = group
+            .children
+            .iter()
+            .find(|c| c.name() == "round 0 line")
+            .unwrap();
+        assert_eq!(
+            first.field("_Text").map(|f| f.text()),
+            Some("Round 1: You vs Red Zone — WON")
+        );
+        let player = group
+            .children
+            .iter()
+            .find(|c| c.name() == "round 1 line")
+            .unwrap();
+        assert_eq!(
+            player.field("_Text").map(|f| f.text()),
+            Some("Final Match: You vs Blue Fury — NEXT")
+        );
     }
 
     #[test]
