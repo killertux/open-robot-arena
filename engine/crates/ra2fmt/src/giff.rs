@@ -932,6 +932,19 @@ mod tests {
             ink >= 40 && columns >= 6,
             "fg_mcn16's O is {ink} px over {columns} columns"
         );
+
+        // The face the old reading called the second O-less one: the row
+        // rotation gives it a whole 5x10 O (30 px over 5 columns).
+        let Some(m12) = shipped("fg_mcn12") else {
+            return;
+        };
+        let (x, y, w, h) = m12.glyphs[45].rect(m12.page_width, m12.page_height);
+        let (ink, columns) = glyph_ink(&m12, 45);
+        assert_eq!((w, h), (5, 10), "fg_mcn12's O cell at {x},{y}");
+        assert!(
+            ink >= 25 && columns >= 5,
+            "fg_mcn12's O is {ink} px over {columns} columns"
+        );
     }
 
     /// The ink a record's rect holds, and how many columns of it carry any.

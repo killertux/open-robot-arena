@@ -82,8 +82,8 @@ per-channel difference of **0.42/255** on `mainmenu.gib` and **0.24/255** on
 `ra2fmt` derives each glyph cell from the page's own ink runs, rotates each row
 by its right-slot records and reads the advance table two records on (S8 in
 [`docs/07-m5-m6-checklist.md`](docs/07-m5-m6-checklist.md)); the remaining font
-residue is `fg_mcn12`'s partial `O`, and titles whose authored box is narrower
-than the shifted advance table clip as the data says. The workshop's **list and
+residue is only titles whose authored box is narrower than the shifted advance
+table, which clip as the data says. The workshop's **list and
 paint tools** are the game's C++ and are named/deferred (S4). There is no
 window or input loop.
 
@@ -126,9 +126,9 @@ Measured, not aspirational.
 * Some fidelity residues: a share of stock robots still lacks wheel traction,
   the damage scale is calibrated, and Jolt's friction law differs from Havok's
   (F6/F7/F9/F11 in [`docs/06-deferred-fidelity.md`](docs/06-deferred-fidelity.md)).
-* `fg_mcn12`'s partial `O` (its page row has no row above to carry the glyph
-  into), and title boxes authored narrower than the shifted advance table, which
-  clip as the data says. The other faces' glyph cells are the page's own runs.
+* Title boxes authored narrower than the shifted advance table, which clip as
+  the data says. The other faces' glyph cells are the page's own runs; both
+  former O fragments are whole.
 * macOS and Windows builds — documented, unverified. arm64, musl, static
   linking, Flatpak and AppImage are not built.
 * Game data, mod support, network play, an update feed and signing/CI.

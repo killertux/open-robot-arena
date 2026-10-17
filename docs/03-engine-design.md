@@ -91,10 +91,9 @@ local/           # (git-ignored) game files + converted cache
   bar. Every `+Background` draws what its own body says: a colour fill or a
   texture, behind its widget. `ra2-shell` boots the shipped `Scripts/Main.py`,
   opens the data's main menu and walks the menu → bot lab and menu → arena-picker
-  routes by hit-tested clicks (S6). **Named residues:** `fg_mcn12`'s `O` cell is
-  a two-column fragment (its page row has no row above to carry the glyph into),
-  and some title boxes are narrower than the shifted advance table's extent, so
-  they clip as the data says; S4's workshop list and paint tools are the game's
+  routes by hit-tested clicks (S6). **Named residues:** some title
+  boxes are narrower than the shifted advance table's extent, so they clip as
+  the data says; S4's workshop list and paint tools are the game's
   C++ and are named/deferred rather than approximated. The font's rect/page
   packing is settled (S8): cells are the page's own glyph runs, each row is
   rotated by its right-slot records and the advance table is read two records

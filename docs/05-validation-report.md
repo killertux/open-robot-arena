@@ -785,7 +785,8 @@ Known, documented, not yet fixed:
     another face. **S8 later corrected this**: the page does hold a whole `O` at
     243..255 on the row above; the record's rect was looking at the row below.
     The parser now derives the cells from the page's runs, rotates each row by
-    its right-slot records, and `ROBOT WORKSHOP` reads.
+    its right-slot records, and `ROBOT WORKSHOP` reads — `fg_mcn12`'s O is a
+    whole 5×10 cell now, not a fragment.
 
     The labels that looked wrong were not a face's problem but every face's: the
     glyph page is stored **bottom-up** and neither renderer swapped the `v`s of a

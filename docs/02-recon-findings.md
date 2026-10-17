@@ -676,9 +676,9 @@ workshop.`. The working face beside it, `fg_mcn16`: `#..@` + `A` (k=1), `B..]`
 The `O` is the clearest rect/page disagreement: record 45's rect is 235..246 on
 the row at y 223 and holds **21 pixels over 3 of its 11 columns**, which an
 earlier reading called "no `O` in `fg_d20`"; the page's `O` is at **243..255 on
-the `P..c` row (y 205)**, **116 pixels over 12 columns**. `fg_mcn12`'s record 45
-is still a fragment: its page row has no row above to carry into, so that one
-face reads a partial `O`.
+the `P..c` row (y 205)**, **116 pixels over 12 columns**. `fg_mcn12`'s record 45 was the second
+fragment under the old rect; the rotation gives it a whole 5×10 `O` (30 px over
+5 columns) too.
 
 **The advance table is two records ahead in every face, not the page's two
 leading characters.** The glyph table's `i` carries 9/11/13/14/6/7/6/6/7 across
