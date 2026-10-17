@@ -4,6 +4,7 @@
 //! bodies from the game's own `.gmf`/`.bot`/arena-script data.
 
 pub mod backend;
+pub mod career;
 pub mod combat;
 pub mod duel;
 pub mod hazards;
@@ -19,6 +20,9 @@ pub mod sim;
 pub use backend::{
     BackendError, BodyDesc, BodyHandle, BodyState, MotionType, PhysicsBackend, RayHit, ShapeDesc,
     StepInfo,
+};
+pub use career::{
+    Career, CareerPolicy, EventRecord, MatchAward, Prize, Repair, SeasonPhase, SIDECAR_NAME,
 };
 pub use combat::{CombatConfig, Impact};
 pub use duel::{BotSetup, Debris, Duel, DuelCamera};
