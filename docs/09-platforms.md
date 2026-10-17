@@ -19,7 +19,7 @@ platform code was added.
 | **State** | **verified** (145 tests; tarball smoke) | not built | not built | not built |
 | Rust target | `x86_64-unknown-linux-gnu` | `aarch64-apple-darwin` | `x86_64-apple-darwin` | `x86_64-pc-windows-msvc` |
 | Toolchain | rustc/cargo 1.98.1 (measured) | stable + Xcode CLT | stable + Xcode CLT | stable MSVC + VS Build Tools |
-| Jolt C++ (`oxijolt-sys` 1.1.0 + Jolt 5.6.0) | prebuilt archive used here; CMake path available | **no archive for macOS in `prebuilt.txt` → CMake + vendored Jolt** | same | archive listed (MSVC 14.44, `MultiThreadedDLL`); CMake fallback |
+| Jolt C++ (`oxijolt-sys` 1.1.0 + Jolt 5.6.0) | both paths run here: P2's build used the prebuilt archive, `check.sh` the vendored CMake build | **no archive for macOS in `prebuilt.txt` → CMake + vendored Jolt** | same | archive listed (MSVC 14.44, `MultiThreadedDLL`); CMake fallback |
 | wgpu 30 backend | Vulkan (Mesa) | Metal | Metal | DX12 (Vulkan only if present) |
 | Python 3.12 runtime | `libpython3.12.so.1.0` + stdlib | `libpython3.12.dylib` + stdlib | same | `python3.12.dll` + `python312.lib` + `Lib\` |
 | Point `pyo3` at it | auto (`sysconfig`) | `PYO3_PYTHON` | `PYO3_PYTHON` | `PYO3_PYTHON` |
@@ -40,11 +40,11 @@ Common to all three:
   is the build.
 * **CMake and a C++17 compiler** whenever `oxijolt-sys` does not use a prebuilt
   archive. It builds the vendored Jolt 5.6.0 through `vendor/joltc`'s
-  `CMakeLists.txt`. Both paths have run on this Linux host: the P2 tarball used
-  the prebuilt archive, and `tools/check.sh` (which exports
-  `CARGO_NET_OFFLINE=true`) built the vendored Jolt from source and passed the
-  145 tests. That is Linux evidence for the CMake path, not macOS or Windows
-  evidence. One AI assertion was re-windowed from 20 s to 30 s because the
+  `CMakeLists.txt`. Both paths have run on this Linux host: the original P2
+  build used the prebuilt archive, and `tools/check.sh` (which exports
+  `CARGO_NET_OFFLINE=true`) rebuilds the tarball from the vendored Jolt and
+  passed the 145 tests and the smoke. That is Linux evidence for the CMake
+  path, not macOS or Windows evidence. One AI assertion was re-windowed from 20 s to 30 s because the
   source build lands its first hit at 20.23 s; see `docs/08` §9.
 * **A wgpu adapter, even offscreen.** `Renderer::new` asks for
   `Backends::all()` with no surface and `HighPerformance`. There is no window:
