@@ -31,6 +31,21 @@ impl ComponentDef {
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }
+
+    /// The first number of a `key = <n> ...` field.
+    pub fn number(&self, key: &str) -> Option<f32> {
+        self.get(key)?.split_whitespace().next()?.parse().ok()
+    }
+
+    /// The `type` category (the component factory's switch), lower-cased.
+    pub fn category(&self) -> Option<String> {
+        self.get("type").map(|s| {
+            s.split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        })
+    }
 }
 
 /// Parse a `key = value` component definition (text).
@@ -57,4 +72,76 @@ pub fn parse(text: &str) -> ComponentDef {
         d.fields.push((k, v));
     }
     d
+}
+
+/// The maximum hitpoints the component factory gives a category when the
+/// definition does not declare them.
+///
+/// Recovered from the binary: `FUN_0045cf40` switches on the definition's `type`
+/// (the field the `.txt` parser fills from the `type = ` key, read back by
+/// `FUN_0049aa30`) and stores 400 / 100 / 400 / 400 / 1000 / 1000 into the
+/// component's maximum, after which a `hitpoints = ` line overrides it.
+pub fn category_hitpoints(def: Option<&ComponentDef>) -> Option<f32> {
+    match def.and_then(ComponentDef::category).as_deref() {
+        Some("power") => Some(400.0),
+        Some("extenders") => Some(100.0),
+        Some("mechanics") => Some(400.0),
+        Some("mobility") => Some(400.0),
+        Some("weapons") => Some(1000.0),
+        Some("extras") => Some(1000.0),
+        _ => None,
+    }
+}
+
+/// The `fracture` default the same factory sets per category.
+pub fn category_fracture(def: Option<&ComponentDef>) -> Option<f32> {
+    match def.and_then(ComponentDef::category).as_deref() {
+        Some("extenders") => Some(15.0),
+        Some("mechanics") | Some("mobility") | Some("weapons") => Some(20.0),
+        Some("extras") => Some(60.0),
+        _ => None,
+    }
+}
+
+/// `damageable = false` (the factory's own field).
+pub fn flag_false(def: &ComponentDef, key: &str) -> bool {
+    def.get(key)
+        .map(|v| v.trim().eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+}
+
+/// The density our zero-mass fill uses. See [`zero_mass_fill`].
+///
+/// A density of **139** keeps the mini wheel (the wheel every stock AI bot runs,
+/// 0.652 × 0.652 × 0.135 m) at exactly 8 kg, which is the mass the rest of the
+/// simulation is calibrated against. The one documented stock wheel weight (the
+/// mudtire at 22.5 kg, from the figure that closes Mud Runner's total) wants
+/// 74 kg/m³ instead, which would make that same mini wheel 4.2 kg, while the
+/// 139 that keeps the mini wheel at 8 puts the mudtire at 42 kg — badly over the
+/// documented total. No single density does both, so either the engine's fill
+/// is not volume-proportional or one anchor is wrong; that conflict is F12 in
+/// `docs/06-deferred-fidelity.md`. The rule's shape — a zero-mass body is priced
+/// by the room it takes up — is what matters, and the constant keeps the stock
+/// bots where they are.
+pub const ZERO_MASS_DENSITY: f32 = 139.0;
+
+/// The mass a `.gmf` body with `mass = 0` is given, from the room it takes up.
+///
+/// Every stock wheel's rigid body stores `mass = 0`. The engine's own fill is not
+/// reachable (its `.gmf` reader takes the zero at face value), so this is **our**
+/// rule: the bounding-box volume times [`ZERO_MASS_DENSITY`], floored at 1 kg.
+/// A part with no geometry at all is given 7 kg by its caller before this is
+/// reached (see `ra2sim::rig::zero_mass_fill`).
+pub fn zero_mass_fill(min: [f32; 3], max: [f32; 3]) -> f32 {
+    let e = [
+        (max[0] - min[0]).max(0.0),
+        (max[1] - min[1]).max(0.0),
+        (max[2] - min[2]).max(0.0),
+    ];
+    let volume = e[0] * e[1] * e[2];
+    let density = std::env::var("RA2_ZERO_MASS_DENSITY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(ZERO_MASS_DENSITY);
+    (volume * density).max(1.0)
 }

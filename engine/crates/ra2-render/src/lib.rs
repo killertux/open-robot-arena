@@ -18,9 +18,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Quat, Vec3};
-use ra2fmt::{bot as botfmt, component as compfmt, gmi};
+use glam::{Mat4, Vec3};
+use ra2fmt::{bot as botfmt, component as compfmt, gmi, mount};
 use wgpu::util::DeviceExt;
+
+pub use ra2fmt::mount::{component_local, tm_mat4, MountMode};
 
 pub mod ui;
 
@@ -1159,114 +1161,14 @@ pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Err
 /// alone (no `.gmf` mount frames). Prefer [`component_worlds_mounted`] with the
 /// loaded components, which is what the renderer and the sim both do.
 pub fn component_worlds(bot: &botfmt::Bot) -> Vec<Mat4> {
-    component_worlds_mounted(bot, &[], MountMode::Stored)
-}
-
-/// How a component is placed on its parent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MountMode {
-    /// The stored transform alone — `translation * quaternion * yaw * height`.
-    /// Kept because it is what reproduces the game's layout for *chassis*
-    /// children, but it cannot place a chain: every component-to-component link
-    /// in every stock bot stores an identity transform, so the whole chain
-    /// collapses onto its root (see F1 in docs/06-deferred-fidelity.md).
-    Stored,
-    /// At a component-to-component mount, align the child's attachment frame to
-    /// the parent's: `A_parent * A_own⁻¹`.
-    Frames,
-    /// The same, with a 180° rotation about X between the frames — a male plug
-    /// into a female socket. **The default**: it is the only rule that both
-    /// keeps every wheel's axle horizontal and lifts a rotor clear of the
-    /// chassis, and it reproduces the game's own botlab preview.
-    FramesFlipped,
-    /// The stored transform, resolved *through* the child's own mount frame:
-    /// `M * A_own⁻¹`.
-    StoredOwn,
-    /// Frames *and* the stored transform: `A_parent * M * A_own⁻¹`.
-    FramesStored,
-}
-
-impl MountMode {
-    /// `RA2_MOUNT=frames-flip` (default) | `stored` | `frames` | `stored-own`
-    /// | `frames-stored`.
-    pub fn from_env() -> MountMode {
-        match std::env::var("RA2_MOUNT").unwrap_or_default().as_str() {
-            "stored" => MountMode::Stored,
-            "frames" => MountMode::Frames,
-            "stored-own" => MountMode::StoredOwn,
-            "frames-stored" => MountMode::FramesStored,
-            _ => MountMode::FramesFlipped,
-        }
-    }
-}
-
-/// Chained bot-local transform for every component (parents before children).
-///
-/// `loaded` supplies the components' `.gmf` scenes, which is where the mount
-/// frames live; with it, `mode` can place component-to-component mounts by
-/// aligning attachment frames instead of by the stored transform alone.
-pub fn component_worlds_mounted(
-    bot: &botfmt::Bot,
-    loaded: &[Option<BotComponent>],
-    mode: MountMode,
-) -> Vec<Mat4> {
-    let mut world = vec![Mat4::IDENTITY; bot.components.len()];
-    for (i, c) in bot.components.iter().enumerate() {
-        let local = component_local(c);
-        if i == 0 || c.parent < 0 || c.parent as usize >= i {
-            world[i] = local;
-            continue;
-        }
-        let parent = c.parent as usize;
-        // A BurstMotor swings its axle about the axle's own axis, so its
-        // children ride along. When a mount frame is available the rotation goes
-        // *inside* the link (about the point's Z, through the point's origin);
-        // see `mount_link`. Only the stored-transform fallback needs it here,
-        // where the only pivot available is the parent's origin.
-        let rest = match bot.components[parent].burst_angles {
-            Some([start, _]) => Mat4::from_rotation_z(start),
-            None => Mat4::IDENTITY,
-        };
-        let link = mount_link(bot, loaded, i, mode);
-        // Height of the chassis' mounting plane. The stored translation's Y is
-        // always 0 in every stock bot, so the height of a chassis-mounted part
-        // has to come from the chassis' own mount frame.
-        let base = if parent == 0 {
-            Mat4::from_translation(Vec3::new(0.0, chassis_plane(), 0.0))
-        } else {
-            Mat4::IDENTITY
-        };
-        world[i] = match link {
-            Some(link) => world[parent] * base * link,
-            None => world[parent] * base * rest * local,
-        };
-    }
-    world
-}
-
-/// The mount frames of component `i`: the parent-side frame (absent when the
-/// parent has no such point, i.e. the chassis whose only mount is the
-/// baseplate, named `0`) and the inverse of the child's own named point.
-fn mount_frames(
-    bot: &botfmt::Bot,
-    loaded: &[Option<BotComponent>],
-    i: usize,
-) -> Option<(Option<Mat4>, Mat4)> {
-    let c = &bot.components[i];
-    let own = loaded.get(i)?.as_ref()?.scene.attachment_table();
-    let own = own.get(&c.own_mount)?;
-    let own_inv = tm_mat4(&own.transform).inverse();
-    let parent_frame = match loaded
-        .get(c.parent.max(0) as usize)
-        .and_then(|p| p.as_ref())
-    {
-        Some(p) => {
-            let table = p.scene.attachment_table();
-            table.get(&c.parent_mount).map(|a| tm_mat4(&a.transform))
-        }
-        None => None,
-    };
-    Some((parent_frame, own_inv))
+    mount::worlds(
+        bot,
+        &mount::MountFrames::empty(bot.components.len()),
+        mount::MountOptions {
+            mode: MountMode::Stored,
+            chassis_plane: 0.0,
+        },
+    )
 }
 
 /// Height of the chassis' mounting plane, from `RA2_CHASSIS_PLANE` (default 0).
@@ -1277,90 +1179,29 @@ fn chassis_plane() -> f32 {
         .unwrap_or(0.0)
 }
 
-/// The relative transform of component `i` on its parent for `mode`.
+/// Chained bot-local transform for every component (parents before children).
 ///
-/// `Stored` returns `None` (use the stored transform alone). Every other mode
-/// folds in the child's own attach frame, and `Frames`/`FramesStored` also the
-/// parent's, so the child's named point is snapped onto the parent's.
-fn mount_link(
+/// `loaded` supplies the components' `.gmf` scenes, which is where the mount
+/// frames live; with it, `mode` can place component-to-component mounts by
+/// aligning attachment frames instead of by the stored transform alone. The
+/// rule itself lives in [`ra2fmt::mount`] and is shared with the workshop.
+pub fn component_worlds_mounted(
     bot: &botfmt::Bot,
     loaded: &[Option<BotComponent>],
-    i: usize,
     mode: MountMode,
-) -> Option<Mat4> {
-    if mode == MountMode::Stored {
-        return None;
-    }
-    let c = &bot.components[i];
-    let local = component_local(c);
-    let Some((parent_frame, own_inv)) = mount_frames(bot, loaded, i) else {
-        // The child's named point is not in its mesh: keep the stored transform.
-        return None;
-    };
-    if matches!(mode, MountMode::Frames | MountMode::FramesFlipped) && parent_frame.is_none() {
-        // Nothing on the parent to align to (the chassis, whose only mount is
-        // the baseplate): keep the stored transform.
-        return None;
-    }
-    let parent_frame = parent_frame.unwrap_or(Mat4::IDENTITY);
-    Some(match mode {
-        MountMode::Stored => unreachable!(),
-        MountMode::StoredOwn => local * own_inv,
-        MountMode::Frames | MountMode::FramesFlipped => {
-            let mate = match mode {
-                MountMode::FramesFlipped => Mat4::from_rotation_x(std::f32::consts::PI),
-                _ => Mat4::IDENTITY,
-            };
-            // Two rotations turn the child about the mount axis, and each sits
-            // in the frame it belongs to:
-            //
-            // - `angle` is the free spin the player dialled in with SHIFT. It is
-            //   a property of the *placement*, so like a chassis child's `angle`
-            //   (which sits inside the stored transform) it is applied in the
-            //   child's own point's frame.
-            // - a burst motor's start angle is the *axle* turning, so it is
-            //   applied on the parent's side.
-            //
-            // Both axes pass through the child's named point, so neither moves
-            // it: the snap survives.
-            //
-            // The axis is the mount normal, i.e. the point's Z: in AI/Team14/Bot2
-            // the four rim angles of disc5's points 2..5 — at +Y, +X, -Y and -X
-            // in the disc's plane — are exactly 0, pi/2, pi, 3pi/2, which only a
-            // spin about that axis explains. Which way it winds is settled by
-            // AI/Team6/Bot2's own preview: see F1.
-            let axle = Mat4::from_rotation_z(burst_start(bot, c.parent));
-            let aim = Mat4::from_rotation_z(c.angle);
-            parent_frame * axle * mate * aim * own_inv
-        }
-        MountMode::FramesStored => parent_frame * local * own_inv,
-    })
-}
-
-/// The start (rest) angle of `parent`'s axle, when it is a burst motor.
-fn burst_start(bot: &botfmt::Bot, parent: i32) -> f32 {
-    match bot
-        .components
-        .get(parent.max(0) as usize)
-        .and_then(|p| p.burst_angles)
-    {
-        Some([start, _]) => start,
-        None => 0.0,
-    }
-}
-
-pub fn component_local(c: &ra2fmt::bot::Component) -> Mat4 {
-    // RA2 model space is Y-up: `translation` + `rotation` place the component,
-    // then the mount `angle` yaws it about +Y and `height` offsets it along +Y.
-    // The stored quaternion is (x, y, z, w) — confirmed against PyRA2's
-    // quatToAxisAndAngle (element 3 is the scalar) and a chassis whose rotation
-    // is exactly [0, 0, 0, 1].
-    let t = Vec3::from(c.translation);
-    let q = Quat::from_xyzw(c.rotation[0], c.rotation[1], c.rotation[2], c.rotation[3]).normalize();
-    Mat4::from_translation(t)
-        * Mat4::from_quat(q)
-        * Mat4::from_rotation_y(c.angle)
-        * Mat4::from_translation(Vec3::new(0.0, c.height, 0.0))
+) -> Vec<Mat4> {
+    let tables: Vec<Option<std::collections::BTreeMap<i32, gmi::Attachment>>> = loaded
+        .iter()
+        .map(|lc| lc.as_ref().map(|lc| lc.scene.attachment_table()))
+        .collect();
+    mount::worlds(
+        bot,
+        &mount::MountFrames::from_tables(&tables),
+        mount::MountOptions {
+            mode,
+            chassis_plane: chassis_plane(),
+        },
+    )
 }
 
 /// Build the chassis' render vertices from the file's **face groups** (F10).
@@ -1737,19 +1578,16 @@ fn add_gmi(
     Ok(())
 }
 
-pub fn tm_mat4(tm: &[[f32; 3]; 4]) -> Mat4 {
-    if tm == &[[0.0; 3]; 4] {
-        return Mat4::IDENTITY;
-    }
-    Mat4::from_cols(
-        glam::Vec4::new(tm[0][0], tm[0][1], tm[0][2], 0.0),
-        glam::Vec4::new(tm[1][0], tm[1][1], tm[1][2], 0.0),
-        glam::Vec4::new(tm[2][0], tm[2][1], tm[2][2], 0.0),
-        glam::Vec4::new(tm[3][0], tm[3][1], tm[3][2], 1.0),
-    )
-}
-
 pub fn find_game_root(start: &Path) -> Option<PathBuf> {
+    // The same override the tests and the workshop library use: point the
+    // engine at a game directory from anywhere, including a saved bot in a
+    // temporary folder.
+    if let Some(root) = std::env::var_os("RA2_GAME") {
+        let root = PathBuf::from(root);
+        if root.join("Components").is_dir() {
+            return Some(root);
+        }
+    }
     let mut dir = start.parent()?.to_path_buf();
     for _ in 0..6 {
         if dir.join("Components").is_dir() {
@@ -1884,6 +1722,12 @@ mod tests {
 
     /// Every stock `.bot`, when the (uncommitted) game data is present.
     fn stock_bots() -> Vec<std::path::PathBuf> {
+        if let Some(root) = std::env::var_os("RA2_GAME") {
+            let root = std::path::PathBuf::from(root);
+            if root.join("Components").is_dir() {
+                return bots_under(&root);
+            }
+        }
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let game = loop {
             let candidate = dir.join("local/game");
@@ -1894,8 +1738,12 @@ mod tests {
                 return Vec::new();
             }
         };
+        bots_under(&game)
+    }
+
+    fn bots_under(game: &std::path::Path) -> Vec<std::path::PathBuf> {
         let mut out = Vec::new();
-        let mut stack = vec![game];
+        let mut stack = vec![game.to_path_buf()];
         while let Some(d) = stack.pop() {
             let Ok(rd) = std::fs::read_dir(&d) else {
                 continue;
