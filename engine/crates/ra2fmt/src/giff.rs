@@ -52,6 +52,20 @@
 //! `WATƎЯ` — so both renderers swap `v` only. The workshop toolbar is not
 //! evidence either way: its words are baked into the button `.bmp`.
 //!
+//! ## The rects are not the page's cells (S8)
+//!
+//! The record's four rect floats and the page are **two different packings**.
+//! The page lays the glyphs out in packed rows (bottom-up, in record order) and
+//! carries each row's last glyph to the end of the row above; the records' rects
+//! are a cumulative layout that drifts from those runs. Drawing the rects
+//! therefore samples the neighbours — `fg_d20`'s `EXHIBITION` read
+//! `E/XIUBITIU !N`, and its `O` looked absent because the rect pointed at the
+//! row below the page's `O`. `Font::repack_from_page` now derives every cell
+//! from the page's ink runs at parse time, and [`Font::advance`] reads the
+//! advance table two records on (the loader starts its loop at `0x20`). The
+//! measurement below is what led there; where it says a renderer must stay
+//! faithful to the record's rect, read "to the page's own runs".
+//!
 //! ## Which record is which character
 //!
 //! The record for character `c` is `(c - 34) * 28`. That was measured by drawing,
@@ -62,12 +76,12 @@
 //! tool against a later loader. `ra2 font` labels every record with the character
 //! this offset gives it.
 //!
-//! Two letters of that render are still off — `M` and `A` — which is either the
-//! baseline rule ([`Glyph::rect`] hangs each cell from its `third`, which is
-//! right for most of the alphabet) or a one-record slip somewhere in the middle
-//! of the table. Everything else lands, including the label's two spaces.
+//! Under the record rects two letters of that render were still off — `M` and
+//! `A` — and S8 showed why: the rects are a different packing from the page
+//! (below). With the page's runs the whole label reads, including the two
+//! spaces.
 //!
-//! ## The cells clip the page's glyphs (a separate, measured item)
+//! ## Why the rects looked like clipped cells (the measurement S8 settled)
 //!
 //! With the vertical flip in place the labels are upright, but some glyphs are
 //! still struck through — worst on the small condensed faces. The cause is
@@ -143,12 +157,11 @@
 //! 133800 bytes admit — records at `0x28`/`0x44`/`0x68`, 95 records, a 95-record
 //! page at 2700, `512x128`, `128x512` — the best strict-bracket count is **9 of
 //! 92** (`512x128`), against 92 for a correct file. So the file's rects and page
-//! describe different packings, and the renderer stays faithful to the shipped
-//! data rather than inventing a correction.
-//! `the_font_file_is_internally_inconsistent` keeps the border-on-ink counts
-//! (all nine faces) and the header checks; it replaces the old
-//! `almost_no_record_brackets_its_glyph`, whose premise — that a cell which
-//! brackets its glyph is the normal case — is wrong.
+//! describe different packings. S8 settles it by reading the **page's runs**
+//! (`repack_from_page`), which is the shipped data, not by re-authoring a glyph.
+//! `the_cells_are_the_pages_glyph_runs`, `every_face_maps_its_page_runs` and
+//! `the_font_page_supplies_the_o_the_records_misplace` keep the reconciled
+//! state measurable; the header is checked by `the_font_header_is_invariant`.
 //!
 //! What the binary says. `FUN_00591b50` (the `.giff` → runtime path) constructs
 //! the font object, loads the resource by name, deserialises it with
@@ -271,12 +284,26 @@ impl Font {
         widths.get(widths.len() / 2).copied().unwrap_or(0)
     }
 
-    /// The advance width of a character, exactly as the record stores it.
+    /// The advance width of a character.
+    ///
+    /// The advance table is **two records ahead of the page table**: the record
+    /// for the glyph `A` is `65 - 34`, but the advance that belongs with it is
+    /// `65 - 32` (the loader's own loop starts at `0x20`, see the module note).
+    /// The shift is visible in the metrics — `fg_mcn16`'s `i` (record 71) carries
+    /// 7 where its `m` carries 11, but record 73 carries 3 and record 77 carries
+    /// 11, which are `i`'s and `m`'s; `n` at record 76 carries 3 where 78 carries
+    /// 7. Spacing a run by the glyph table's advances makes `Options` read
+    /// `Opti o is`; by this table it reads `Options`. The cells are still taken
+    /// from the page (see `repack_from_page`), so the two tables are read
+    /// where each is right.
     pub fn advance(&self, c: char) -> i32 {
-        if self.has_glyph(c) {
-            self.glyph(c).advance
-        } else {
-            self.space_advance()
+        if !self.has_glyph(c) {
+            return self.space_advance();
+        }
+        let shifted = self.glyphs.get(c as usize - 32);
+        match shifted {
+            Some(g) if g.advance > 0 && g.advance <= 200 => g.advance,
+            _ => self.glyph(c).advance,
         }
     }
 
@@ -366,7 +393,7 @@ pub fn parse(data: &[u8]) -> Result<Font, Error> {
         page.push(hi);
     }
 
-    Ok(Font {
+    let mut font = Font {
         ascent,
         descent,
         leading,
@@ -375,7 +402,138 @@ pub fn parse(data: &[u8]) -> Result<Font, Error> {
         page,
         mask,
         glyphs,
-    })
+    };
+    font.repack_from_page();
+    Ok(font)
+}
+
+impl Font {
+    /// Re-derive every glyph's cell from the page's own ink.
+    ///
+    /// The records' `u0..v1` and the page are **two different packings** (the
+    /// module note has the measurement): the page lays the glyphs out in reading
+    /// order, one packed row per `v0`, while the records' rects are a cumulative
+    /// layout whose cells drift from the glyphs they name. Drawing the record's
+    /// rect therefore samples a slice of its neighbours — `fg_d20`'s
+    /// `EXHIBITION` reads `E/XIUBITIU !N`, and its `O` is a three-column piece of
+    /// the `9` that follows it. The game does not use the file's rects either: its
+    /// loader cuts the glyphs out and re-packs them (`FUN_005cd560`, see the module
+    /// note), so the page's ink is the authority here too.
+    ///
+    /// The page's rows are packed **bottom-up**, in the same order as the record
+    /// rows (`v0` ascending). Each row is a run of glyphs separated by blank
+    /// columns. The last glyph of a row is carried to the **end of the row above**
+    /// — the page's `A..N` row ends with the `9` from the row below, its `P..c`
+    /// row ends with the `O`, and so on — so the first `n-1` records of a row take
+    /// that row's first `n-1` glyphs, and the row's next glyph belongs to the last
+    /// record of the row below. That is the cascade this function applies.
+    ///
+    /// A glyph's cell becomes the page run it occupies: `u0..u1` from the run's
+    /// columns, `v0..v1` from the row band, and `third` the band's top relative
+    /// to the baseline (one pixel above the band's bottom). The advance is **not**
+    /// touched: it belongs to the advance table, which is read two records on
+    /// (see [`Font::advance`]). Nothing here hard-codes a face, a character or a
+    /// string.
+    fn repack_from_page(&mut self) {
+        use std::collections::BTreeMap;
+
+        let (w, h) = (self.page_width as i32, self.page_height as i32);
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        // The records that describe a real cell: a positive advance and a
+        // non-degenerate rect. The last record in every face is a sentinel
+        // (`advance 1040`, an empty rect) and must not join a row.
+        let mut rows: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+        for (i, g) in self.glyphs.iter().enumerate() {
+            if g.advance <= 0 || g.advance > 200 {
+                continue;
+            }
+            let (_, _, gw, gh) = g.rect(self.page_width, self.page_height);
+            if gw <= 0 || gh <= 0 {
+                continue;
+            }
+            rows.entry((g.v0 * h as f32).round() as i32)
+                .or_default()
+                .push(i);
+        }
+
+        let mut previous_last: Option<usize> = None;
+        for records in rows.values() {
+            let top = records
+                .iter()
+                .map(|&i| ((1.0 - self.glyphs[i].v1) * h as f32).round() as i32)
+                .min()
+                .unwrap_or(0)
+                .clamp(0, h);
+            let bottom = records
+                .iter()
+                .map(|&i| ((1.0 - self.glyphs[i].v0) * h as f32).round() as i32)
+                .max()
+                .unwrap_or(h)
+                .clamp(0, h);
+            if bottom <= top {
+                previous_last = records.last().copied();
+                continue;
+            }
+
+            // One packed run per blank column gap. A one-to-four-pixel sliver
+            // touching the page's right edge is the next row's first glyph
+            // bleeding in, not a glyph of this row.
+            let mut ink = vec![false; w as usize];
+            for (x, any) in ink.iter_mut().enumerate() {
+                *any = (top..bottom).any(|y| self.page[(y as usize) * w as usize + x] > 30);
+            }
+            let mut runs: Vec<(i32, i32)> = Vec::new();
+            let mut start = None;
+            for x in 0..=w {
+                let lit = x < w && ink[x as usize];
+                match (lit, start) {
+                    (true, None) => start = Some(x),
+                    (false, Some(a)) => {
+                        runs.push((a, x - 1));
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+            runs.retain(|&(a, b)| !(b >= w - 2 && b - a < 4));
+
+            // The row's own records are all but its last; the last is drawn at
+            // the end of the next row up. The run after the row's own glyphs is
+            // therefore the last record of the row below.
+            let regular = records.len().saturating_sub(1);
+            for (i, &record) in records.iter().take(regular).enumerate() {
+                if let Some(&(a, b)) = runs.get(i) {
+                    self.set_cell(record, a, b, top, bottom);
+                }
+            }
+            if let Some(record) = previous_last {
+                if let Some(&(a, b)) = runs.get(regular) {
+                    self.set_cell(record, a, b, top, bottom);
+                }
+            }
+            previous_last = records.last().copied();
+        }
+    }
+
+    /// Point one record at a page run: the horizontal cell is the run and the
+    /// vertical cell the packed row.
+    fn set_cell(&mut self, record: usize, x0: i32, x1: i32, top: i32, bottom: i32) {
+        let (w, h) = (self.page_width as f32, self.page_height as f32);
+        let height = (bottom - top).max(1);
+        let glyph = &mut self.glyphs[record];
+        glyph.u0 = x0 as f32 / w;
+        glyph.u1 = (x1 + 1) as f32 / w;
+        glyph.v0 = 1.0 - bottom as f32 / h;
+        glyph.v1 = 1.0 - top as f32 / h;
+        // The baseline sits one pixel above the packed row's bottom, so the
+        // cell's top is `height - 1` above it.
+        glyph.third = height - 1;
+        // The advance is **not** rewritten: it belongs to the shifted advance
+        // table (see `Font::advance`), and the packed pitch is only the glyph's
+        // width, not its spacing.
+    }
 }
 
 #[cfg(test)]
@@ -435,54 +593,53 @@ mod tests {
         assert_eq!(seen, 9);
     }
 
-    /// The rectangles tile the page: every cell lies inside it, consecutive
-    /// records are contiguous in x within their packing row, and the rows
-    /// themselves are few — the packer lays glyphs out left to right and wraps,
-    /// so `v0` takes only a handful of values across the 95 records. The rects
-    /// tile *each other*; whether they bracket the page's glyphs is a separate
-    /// question, and they do not (see the module note and
-    /// `the_font_file_is_internally_inconsistent`).
+    /// The cells are the page's own glyph runs: every cell lies inside the page,
+    /// cells that share a packed row are ordered and **do not overlap**, and a
+    /// cell is never wider or taller than the packed row's pitch. This replaces
+    /// the older `the_rects_tile_the_page`: the file's records do not tile the
+    /// page (their packing is a different one), but the cells the parser derives
+    /// from the page now do.
     #[test]
-    fn the_rects_tile_the_page() {
-        let Some(font) = shipped("fg_mcn14") else {
-            return;
-        };
-        assert_eq!((font.page_width, font.page_height), (256, 256));
-        let mut previous: Option<(i32, i32, i32)> = None;
-        let mut tallest = 0;
-        let mut rows = std::collections::BTreeSet::new();
-        for (i, g) in font.glyphs.iter().enumerate() {
-            let (x, y, w, h) = g.rect(font.page_width, font.page_height);
-            assert!(
-                x >= 0 && y >= 0 && x + w <= 256 && y + h <= 256,
-                "record {i}"
-            );
-            assert!(w <= 32 && h <= 40, "record {i} is {w}x{h}");
-            tallest = tallest.max(h);
-            rows.insert((x, y));
-            if let Some((px, py, pw)) = previous {
-                if py == y {
-                    // Same packed row: contiguous, to within a pixel of padding.
+    fn the_cells_are_the_pages_glyph_runs() {
+        for face in ["fg_d20", "fg_mcn14", "fg_mcn16"] {
+            let Some(font) = shipped(face) else {
+                return;
+            };
+            let (w, h) = (font.page_width as i32, font.page_height as i32);
+            let mut rows: std::collections::BTreeMap<i32, Vec<(i32, i32)>> = Default::default();
+            let mut cells = 0;
+            for (i, g) in font.glyphs.iter().enumerate() {
+                let (x, y, gw, gh) = g.rect(font.page_width, font.page_height);
+                assert!(
+                    x >= 0 && y >= 0 && x + gw <= w && y + gh <= h,
+                    "{face} record {i}"
+                );
+                if g.advance <= 0 || g.advance > 200 || gw <= 0 || gh <= 0 {
+                    continue;
+                }
+                cells += 1;
+                assert!(gw <= 32 && gh <= 24, "{face} record {i} is {gw}x{gh}");
+                rows.entry(y).or_default().push((x, x + gw));
+            }
+            assert!(cells >= 90, "{face}: only {cells} cells");
+            for (y, mut runs) in rows {
+                runs.sort_unstable();
+                for pair in runs.windows(2) {
                     assert!(
-                        x >= px && x <= px + pw + 2,
-                        "record {i} is at {x}, after {px}..{} on row {y}",
-                        px + pw
+                        pair[0].1 <= pair[1].0,
+                        "{face}: cells {}..{} and {}..{} overlap on row {y}",
+                        pair[0].0,
+                        pair[0].1,
+                        pair[1].0,
+                        pair[1].1
                     );
                 }
             }
-            previous = Some((x, y, w));
-        }
-        assert!((8..=20).contains(&tallest), "tallest cell {tallest}");
-        // The 95 records share exactly one cell between them: 94 distinct
-        // rectangles, the last record carrying a nonsense advance (1040) and a
-        // degenerate rect. So the table really holds 94 glyphs, one short of the
-        // 95 the loader's loop would write, which is another thread of the
-        // mapping question in the module note.
-        assert!(rows.len() >= 90, "{} distinct cells", rows.len());
 
-        let (w, line) = font.extent("ABC");
-        assert_eq!(w, font.advance('A') + font.advance('B') + font.advance('C'));
-        assert_eq!(line, 28);
+            let (w, line) = font.extent("ABC");
+            assert_eq!(w, font.advance('A') + font.advance('B') + font.advance('C'));
+            assert_eq!(line, font.line_height());
+        }
     }
 
     /// A page that is the wrong size for its header is rejected rather than
@@ -530,65 +687,31 @@ mod tests {
         }
     }
 
-    /// How much ink a record's own rect holds, and over how many columns.
-    fn ink_of(font: &Font, record: usize) -> (usize, usize, usize) {
-        let w = font.page_width as usize;
-        let h = font.page_height as usize;
-        let (x0, y0, gw, gh) = font.glyphs[record].rect(font.page_width, font.page_height);
-        let (mut ink, mut min, mut max) = (0, usize::MAX, 0);
-        for y in y0.max(0)..(y0 + gh).min(h as i32) {
-            for x in x0.max(0)..(x0 + gw).min(w as i32) {
-                if font.page[(y as usize) * w + x as usize] > 40 {
-                    ink += 1;
-                    min = min.min(x as usize);
-                    max = max.max(x as usize);
-                }
-            }
-        }
-        (ink, min, max)
-    }
-
-    /// The glyph table is a **packed row**: a record's rect begins one column
-    /// after the last one's ended, so the records are where the reader thinks
-    /// they are. Which is what makes the one thing that *is* missing legible as
-    /// the file's own: **`fg_d20` has no `O`**. Its record 45 — the character
-    /// `O` — is a full 11×14 rect whose ink sits in its last three columns, 21
-    /// pixels of it, while **`fg_mcn14`'s record 45, the same character, draws a
-    /// whole letter** (45 pixels over eight columns). Same index, same kind of
-    /// rect, one face with a letter and one without — so the record mapping is
-    /// right and the *page* is blank there. The advance is intact (17 against a
-    /// neighbour's 10), which is why the letter is skipped rather than drawn
-    /// somewhere wrong, and why `botlabwin.gib`'s `title txt` reads `R BT W RKSH
-    /// P` instead of `ROBOT WORKSHOP`: the game reads the same file, so this is
-    /// the data's, and the renderer is faithful to it.
+    /// **The page holds the `O`; the record's rect was looking at its
+    /// neighbour.** Under the file's rects `fg_d20`'s `O` held 21 pixels over 3
+    /// columns — the old reading called the letter absent — because the rect
+    /// spans 235..246 on the row *below* the page's `O`. Repacked from the page,
+    /// the same record is the whole `O` at 243..255 on the `P..c` row: 116 pixels
+    /// over 12 columns, and `EXHIBITION` reads. `fg_mcn16`'s `O` is whole too.
     #[test]
-    fn one_face_has_no_o() {
+    fn the_font_page_supplies_the_o_the_records_misplace() {
         let Some(d20) = shipped("fg_d20") else { return };
-        let Some(mcn) = shipped("fg_mcn14") else {
+        let (x, y, w, h) = d20.glyphs[45].rect(d20.page_width, d20.page_height);
+        let (ink, columns) = glyph_ink(&d20, 45);
+        assert_eq!((x, y, w, h), (243, 205, 13, 18), "fg_d20's O cell");
+        assert!(
+            ink >= 60 && columns >= 8,
+            "fg_d20's O is {ink} px over {columns} columns"
+        );
+
+        let Some(mcn) = shipped("fg_mcn16") else {
             return;
         };
-
-        // The row is packed: every rect around the O follows the one before it
-        // with a one- to three-column gap, so the records are where the rects
-        // say they are.
-        for i in 40..45 {
-            let (x0, _, gw, _) = d20.glyphs[i].rect(d20.page_width, d20.page_height);
-            let (next_x, _, next_w, _) = d20.glyphs[i + 1].rect(d20.page_width, d20.page_height);
-            let gap = next_x - (x0 + gw);
-            assert!((0..=3).contains(&gap), "record {i}: gap {gap} ({next_w})");
-        }
-
-        // The O: a rect with room, and almost no ink in it.
-        let (_, _, gw, gh) = d20.glyphs[45].rect(d20.page_width, d20.page_height);
-        assert!(gw >= 10 && gh >= 10, "the O's rect is {gw}x{gh}");
-        let (ink, min, max) = ink_of(&d20, 45);
-        assert_eq!((ink, max - min + 1), (21, 3), "fg_d20's O");
-        assert_eq!(d20.glyphs[45].advance, 17, "and its advance, intact");
-
-        // The same character in another face is a letter.
-        let (ink, min, max) = ink_of(&mcn, 45);
-        assert!(ink > 40 && max - min + 1 >= 8, "fg_mcn14's O: {ink}");
-        assert_eq!(mcn.glyphs.len(), d20.glyphs.len(), "both tables are 96");
+        let (ink, columns) = glyph_ink(&mcn, 45);
+        assert!(
+            ink >= 40 && columns >= 6,
+            "fg_mcn16's O is {ink} px over {columns} columns"
+        );
     }
 
     /// The ink a record's rect holds, and how many columns of it carry any.
@@ -642,66 +765,44 @@ mod tests {
             .collect()
     }
 
-    /// **Two faces have no `O`.** Every face ships a 96-record table, and record
-    /// 45 is the character `O` in all of them — but in `fg_d20` its rect holds 21
-    /// pixels across 3 of its 11 columns and in `fg_mcn12` 12 pixels across 2 of
-    /// 8, where every other face draws a whole letter (40 pixels and up, over six
-    /// columns or more). The advances are intact, so the letter is *skipped*
-    /// rather than misplaced, and the game reads the same pages.
+    /// Every face's forty-odd packed records are mapped onto real page runs:
+    /// **94 cells** per face, all but a sentinel or two holding ink. This is the
+    /// cross-face check that the row cascade (the last glyph of a row lives at
+    /// the end of the row above) is not specific to `fg_d20`.
     #[test]
-    fn two_faces_have_no_o() {
+    fn every_face_maps_its_page_runs() {
         let faces = every_face();
         if faces.is_empty() {
             return;
         }
         assert_eq!(faces.len(), 9, "the shipped faces");
-        let mut broken = Vec::new();
         for (name, font) in &faces {
-            let (ink, columns) = glyph_ink(font, 45);
-            assert!(font.glyphs[45].advance > 0, "{name}: no advance");
-            if columns <= 3 {
-                broken.push((name.trim_end_matches(".giff").to_string(), ink, columns));
-            } else {
-                assert!(
-                    ink >= 40 && columns >= 6,
-                    "{name}: a whole O is {ink} px over {columns} columns"
-                );
+            let mut mapped = 0;
+            let mut with_ink = 0;
+            for (i, g) in font.glyphs.iter().enumerate() {
+                if g.advance <= 0 || g.advance > 200 {
+                    continue;
+                }
+                let (_, _, w, h) = g.rect(font.page_width, font.page_height);
+                if w <= 0 || h <= 0 {
+                    continue;
+                }
+                mapped += 1;
+                if glyph_ink(font, i).0 > 0 {
+                    with_ink += 1;
+                }
             }
+            assert_eq!(mapped, 94, "{name}: mapped cells");
+            assert!(with_ink >= 92, "{name}: only {with_ink} cells hold ink");
         }
-        assert_eq!(
-            broken,
-            [
-                ("fg_d20".to_string(), 21, 3),
-                ("fg_mcn12".to_string(), 12, 2)
-            ],
-            "the faces whose O is a fragment"
-        );
     }
 
-    /// **The shipped `.giff`'s advance cells clip its own page's glyphs.** With
-    /// the vertical flip right and the `u` swap removed, the cells still land a
-    /// few columns off their glyph in the condensed faces and the glyph overhangs
-    /// every advance-sized cell: overlay the rects on the page and the borders
-    /// cut the glyphs (58–82
-    /// of 94 left borders and 58–77 right borders land on ink; 0–5 cells bracket a
-    /// blank-separated glyph). The shift grows along each row — a small pitch
-    /// excess of the page over the rects, not a uniform off-by-N and not a slip —
-    /// so the small condensed faces look worst. The renderer samples exactly the
-    /// rect (the rendered ink count equals the cell's), so it is faithful; it is
-    /// the file's rect that clips. This replaces `almost_no_record_brackets_its_glyph`,
-    /// whose premise — that a cell which brackets its glyph is the normal case —
-    /// is wrong.
-    ///
-    /// The file cannot be rescued by another layout: the header is invariant
-    /// (word `0x0C` is exactly `1.0f`, the sixteen bytes at `0x18` are zero, and
-    /// `leading` is 4–7, never the records' `third`), and of the layouts the
-    /// 133800 bytes admit — records at `0x28`/`0x44`/`0x68`, 95 records, a
-    /// 95-record page at 2700, `512x128`, `128x512` — the best strict-bracket
-    /// count is **9 of 92** (`512x128`), against 92 for a correct file. The game
-    /// re-packs the glyphs at load (`FUN_005cd560`), so the runtime's page is a
-    /// rebuild; how it locates the cut is the open read (module note).
+    /// The header is invariant across all nine faces: word `0x0C` is exactly
+    /// `1.0f` and the sixteen bytes at `0x18` are zero. The glyph table and the
+    /// page are reconciled by `repack_from_page`; the header is what
+    /// says the file has not been re-laid-out underneath the reader.
     #[test]
-    fn the_font_file_is_internally_inconsistent() {
+    fn the_font_header_is_invariant() {
         for face in [
             "fg_d18", "fg_d20", "fg_d24", "fg_d26", "fg_dcn14", "fg_dcn16", "fg_mcn12", "fg_mcn14",
             "fg_mcn16",
@@ -719,120 +820,38 @@ mod tests {
                 "{face}: the sixteen bytes at 0x18 are not zero"
             );
         }
-
-        let mut border = Vec::new();
-        for face in [
-            "fg_d18", "fg_d20", "fg_d24", "fg_d26", "fg_dcn14", "fg_dcn16", "fg_mcn12", "fg_mcn14",
-            "fg_mcn16",
-        ] {
-            let Some(font) = shipped(face) else {
-                return;
-            };
-            let w = font.page_width as usize;
-            let h = font.page_height as usize;
-            let mut bands: std::collections::BTreeMap<i64, Vec<usize>> = Default::default();
-            for (i, g) in font.glyphs.iter().enumerate().take(94) {
-                bands
-                    .entry((g.v0 as f64 * 1.0e6).round() as i64)
-                    .or_default()
-                    .push(i);
-            }
-            let (mut left, mut right, mut scored) = (0usize, 0usize, 0usize);
-            for idxs in bands.values() {
-                let rects: Vec<_> = idxs
-                    .iter()
-                    .map(|&i| font.glyphs[i].rect(font.page_width, font.page_height))
-                    .collect();
-                let y0 = rects.iter().map(|r| r.1).min().unwrap().max(0);
-                let y1 = rects.iter().map(|r| r.1 + r.3).max().unwrap().min(h as i32);
-                let blank: Vec<bool> = (0..w)
-                    .map(|x| (y0..y1).all(|y| font.page[(y as usize) * w + x] <= 128))
-                    .collect();
-                for &(x0, _, gw, _) in &rects {
-                    let x1 = x0 + gw;
-                    if x0 < 0 || x1 <= 0 || x1 as usize >= w {
-                        continue;
-                    }
-                    scored += 1;
-                    if !blank[x0 as usize] {
-                        left += 1;
-                    }
-                    if !blank[x1 as usize] {
-                        right += 1;
-                    }
-                }
-            }
-            border.push((face, left, right, scored));
-        }
-        assert_eq!(
-            border,
-            [
-                ("fg_d18", 82, 77, 94),
-                ("fg_d20", 71, 58, 94),
-                ("fg_d24", 58, 63, 94),
-                ("fg_d26", 60, 74, 94),
-                ("fg_dcn14", 67, 66, 94),
-                ("fg_dcn16", 68, 76, 94),
-                ("fg_mcn12", 68, 72, 94),
-                ("fg_mcn14", 69, 66, 94),
-                ("fg_mcn16", 74, 69, 94),
-            ],
-            "rect borders that land on ink (left, right, scored)"
-        );
     }
 
-    /// **The page is not advance-packed.** The hypothesis that each record's
-    /// page cell is `Σ advance` along its packed row was measured and refuted:
-    /// `fg_mcn14`'s row at y 233 holds 32 records whose advances total **197**
-    /// pixels, while the row's page ink reaches the page's right edge (**255**) and its rects span
-    /// **250**. A renderer that placed those records at the advance positions
-    /// would draw a row more than fifty pixels too short and the probe `WATER MOW EfGbDqp`
-    /// would not read (it does under the record rects). The page runs at
-    /// roughly the rect pitch; the condensed faces' rects are still a few
-    /// columns off their glyphs, which is the residue the module note names.
+    /// **The advance table is two records ahead of the page table.** It is the
+    /// measurement that settles the caption spacing: `fg_mcn16`'s glyph record
+    /// for `i` carries 7 and its `n` carries 3, so a run spaced by the glyph
+    /// table reads `Opti o is`; two records on, `i` carries 3 and `m` 11, `n` 7
+    /// and `o` 7 — the page's own widths. The loader's loop starting at `0x20`
+    /// is the same two-record shift the module note records.
     #[test]
-    fn the_page_is_not_advance_packed() {
-        let Some(font) = shipped("fg_mcn14") else {
+    fn the_advance_table_is_two_records_ahead_of_the_page() {
+        let Some(font) = shipped("fg_mcn16") else {
             return;
         };
-        // The row whose records are E..d: v0 = 13/256.
-        let row: Vec<usize> = font
-            .glyphs
-            .iter()
-            .take(94)
-            .enumerate()
-            .filter(|(_, g)| (g.v0 * 256.0).round() as i64 == 13)
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(row.len(), 32, "the row at y 233");
-        let advance: i32 = row.iter().map(|&i| font.glyphs[i].advance).sum();
-        assert_eq!(advance, 197, "the row's advances");
-        let rects: Vec<_> = row
-            .iter()
-            .map(|&i| font.glyphs[i].rect(font.page_width, font.page_height))
-            .collect();
-        let rect_span = rects.iter().map(|r| r.0 + r.2).max().unwrap() - rects[0].0;
-        assert_eq!(rect_span, 250, "the row's rects");
-        // The page's ink in the row's vertical band. The far-right ink is the
-        // wrapped `d e` pair; it is still the same page row.
-        let y0 = rects.iter().map(|r| r.1).min().unwrap();
-        let y1 = rects.iter().map(|r| r.1 + r.3).max().unwrap();
-        let mut last_ink = 0;
-        for x in 0..font.page_width as i32 {
-            if (y0..y1).any(|y| font.coverage(x, y) > 40) {
-                last_ink = x;
-            }
-        }
-        assert!(
-            last_ink >= 250,
-            "the page's row reaches {last_ink}, not the advance sum {advance}"
-        );
-        assert!(
-            last_ink > advance + 40,
-            "the page's row reaches {last_ink}, far beyond the advance sum {advance}"
-        );
+        assert_eq!(font.advance('i'), 3, "i's true advance");
+        assert_eq!(font.advance('m'), 11, "m's true advance");
+        assert_eq!(font.advance('n'), 7, "n's true advance");
+        assert_eq!(font.advance('o'), 7, "o's true advance");
+        // The glyph record still carries the old values, which is why the shift
+        // is visible at all.
+        assert_eq!(font.glyph('i').advance, 7);
+        assert_eq!(font.glyph('n').advance, 3);
+        // The cell is the page's `i`: three columns, not the advance.
+        let (_, _, w, _) = font.glyph('i').rect(font.page_width, font.page_height);
+        assert_eq!(w, 3);
+
+        // A run's width is exactly the sum of its advances.
+        let sum: i32 = "Options".chars().map(|c| font.advance(c)).sum();
+        assert_eq!(font.extent("Options"), (sum, font.line_height()));
     }
 
+    /// A page that is the wrong size for its header is rejected rather than
+    /// read past the end.
     #[test]
     fn a_truncated_font_is_rejected() {
         assert!(parse(&[0u8; 20]).is_err());

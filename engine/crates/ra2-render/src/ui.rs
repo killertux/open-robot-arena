@@ -1045,13 +1045,11 @@ mod tests {
         assets.scene(&placed, [1280, 1005])
     }
 
-    /// The long-label smear is the shipped cell, not the length. A character's
+    /// The long-label smear was the shipped cell, not the length. A character's
     /// cell is the same in a two-character label as in the 44-character help
-    /// line, and the face's lower-case trigger letters have cells **wider than
-    /// their advance** — the shipped rect catches the neighbouring cell's tail,
-    /// which is the strike-through. The renderer samples exactly that cell, so
-    /// there is no length-dependent cell or uv to fix; the tests keep the
-    /// measured state instead of inventing a correction.
+    /// line: the parser now derives the cell from the page's own glyph run, so
+    /// the cell is the glyph (its packed width) and not a slice of a different
+    /// packing. A long label is not a different font or a different measurement.
     #[test]
     fn a_glyphs_cell_does_not_depend_on_the_label_length() {
         use ra2ui::Frame;
@@ -1071,15 +1069,15 @@ mod tests {
         assert_eq!(short[1].cell, long[1].cell, "the 't' cell");
         assert_eq!(short[0].rect.x, long[0].rect.x);
         assert_eq!(short[1].rect.x, long[1].rect.x);
-        // The cell is the face's rect, and the lower-case trigger letters' cells
-        // are wider than the advance: the cell-clipping residue, measured.
+        // The cell is the page's glyph run: a real width inside the page, and
+        // the same for both labels. It may be wider or narrower than the
+        // advance — the page's ink is not the advance table.
         for c in ['A', 't', 'h', 'n'] {
             let glyph = font.glyph(c);
             let (_, _, w, _) = glyph.rect(font.page_width, font.page_height);
             assert!(
-                w > font.advance(c),
-                "{c:?}: cell {w} is wider than advance {}",
-                font.advance(c)
+                w > 0 && w <= font.page_width as i32,
+                "{c:?}: cell width {w}"
             );
         }
     }
