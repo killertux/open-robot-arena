@@ -143,12 +143,20 @@ pub struct Prize {
 /// One pending repair. `component` is the damaged robot rather than a single
 /// component: a [`MatchReport`] carries per-robot damage and defeat only, and
 /// the game's component-level damage list (`Team+0x12c`) is not parsed here.
+///
+/// `elapsed` is the repair clock's progress. The original repairs window is a
+/// progress bar over time (`FUN_004d6e10`, full at `FUN_0058b470`), not a
+/// purchase; [`Career::advance_repair`] moves this clock and completes the
+/// entry. `cost` is kept explicit and is **0**: no repair cost string or
+/// subtraction path was recovered.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Repair {
     pub robot: String,
     pub component: String,
     pub cost: i64,
     pub seconds: f32,
+    /// Seconds of repair time already served.
+    pub elapsed: f32,
 }
 
 /// One finished event, as the history screen counts it.
@@ -564,11 +572,65 @@ impl Career {
                 component: robot.bot_name.clone(),
                 cost: self.policy.repair_cost,
                 seconds: self.policy.repair_seconds,
+                elapsed: 0.0,
             })
             .collect()
     }
 
-    /// Pay for and complete one pending repair.
+    /// The repair clock's progress in `0.0..=1.0`, as the window's progress bar
+    /// computes it (`(max - current) / max`, `FUN_004d6480`).
+    pub fn repair_progress(&self, index: usize) -> Option<f32> {
+        let repair = self.repairs.get(index)?;
+        if repair.seconds <= 0.0 {
+            return Some(1.0);
+        }
+        Some((repair.elapsed / repair.seconds).clamp(0.0, 1.0))
+    }
+
+    /// Advance one repair by `seconds` of the repair clock. When the bar fills,
+    /// the entry is completed and removed from the pending list — the original
+    /// calls `FUN_004d7010`/`FUN_005ff530` at that moment. Nothing is charged:
+    /// `repair_cost` is an explicit zero with no recovered cost path.
+    pub fn advance_repair(&mut self, index: usize, seconds: f32) -> Result<Option<Repair>, String> {
+        if !(seconds.is_finite() && seconds >= 0.0) {
+            return Err(format!("repair time {} is not a duration", seconds));
+        }
+        let repair = self
+            .repairs
+            .get_mut(index)
+            .ok_or_else(|| format!("there is no repair {index}"))?;
+        repair.elapsed += seconds;
+        if repair.seconds <= 0.0 || repair.elapsed >= repair.seconds {
+            let done = self.repairs.remove(index);
+            return Ok(Some(done));
+        }
+        Ok(None)
+    }
+
+    /// Advance every pending repair by `seconds`; the completed ones are
+    /// returned in list order. This is the screen's clock over a headless run.
+    pub fn advance_repairs(&mut self, seconds: f32) -> Result<Vec<Repair>, String> {
+        if !(seconds.is_finite() && seconds >= 0.0) {
+            return Err(format!("repair time {} is not a duration", seconds));
+        }
+        let mut done = Vec::new();
+        let mut index = 0;
+        while index < self.repairs.len() {
+            self.repairs[index].elapsed += seconds;
+            if self.repairs[index].seconds <= 0.0
+                || self.repairs[index].elapsed >= self.repairs[index].seconds
+            {
+                done.push(self.repairs.remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        Ok(done)
+    }
+
+    /// Pay for and complete one pending repair. This is kept for callers that
+    /// want the entry gone at once; the repairs screen uses
+    /// [`Career::advance_repair`] so the bar is the interaction.
     pub fn apply_repair(&mut self, index: usize) -> Result<Repair, String> {
         let repair = self
             .repairs
@@ -827,11 +889,12 @@ impl Career {
         out.push_str(&format!("repairs {}\n", self.repairs.len()));
         for repair in &self.repairs {
             out.push_str(&format!(
-                "repair {}\t{}\t{}\t{}\n",
+                "repair {}\t{}\t{}\t{}\t{}\n",
                 escape(&repair.robot),
                 escape(&repair.component),
                 repair.cost,
-                repair.seconds
+                repair.seconds,
+                repair.elapsed
             ));
         }
         out.push_str(&format!("history {}\n", self.history.len()));
@@ -968,11 +1031,18 @@ impl Career {
                             .next()
                             .and_then(|v| v.parse::<f32>().ok())
                             .ok_or("bad repair seconds")?;
+                        // A sidecar written before the clock existed has no
+                        // fifth field; it starts at zero.
+                        let elapsed = fields
+                            .next()
+                            .and_then(|v| v.parse::<f32>().ok())
+                            .unwrap_or(0.0);
                         list.push(Repair {
                             robot,
                             component,
                             cost,
                             seconds,
+                            elapsed,
                         });
                     }
                     repairs = Some(list);
@@ -1425,6 +1495,53 @@ mod tests {
         let back = Career::load(dir.path()).unwrap();
         assert!(back.repairs.is_empty(), "the repaired list round-trips");
         assert_eq!(back.player().season_points(), 164);
+    }
+
+    /// A match that damages a robot leaves one repair entry; the screen's
+    /// clock (not a purchase) completes it, and the empty list is what the
+    /// career save reads back.
+    #[test]
+    fn a_damaging_match_leaves_a_repair_the_clock_completes_and_saves() {
+        let Some(dir) = copy_game("repairs") else {
+            eprintln!("skipping repair test: no local/game (set RA2_GAME to run it)");
+            return;
+        };
+        let mut career = Career::new(dir.path(), 7).unwrap();
+        let event = career.schedule[0];
+        career.enter_event(event).unwrap();
+        let player = robot(0, 0, "Damaged Bot", 100, 42.0, false);
+        let opponent = robot(1, 1, "Red Zone", 200, 0.0, true);
+        career
+            .award_match(&report("DEATHMATCH", vec![player, opponent], vec![0]), 0)
+            .unwrap();
+        assert_eq!(career.repairs.len(), 1);
+        assert_eq!(career.repairs[0].robot, "Damaged Bot");
+        assert_eq!(career.repairs[0].component, "Damaged Bot");
+        assert_eq!(career.repairs[0].cost, 0, "the original charges nothing");
+        assert_eq!(career.repairs[0].elapsed, 0.0);
+        assert_eq!(career.repair_progress(0), Some(0.0));
+
+        // 12 of the repair's 30 seconds served: the bar is 40% full.
+        assert_eq!(career.advance_repair(0, 12.0).unwrap(), None);
+        let progress = career.repair_progress(0).unwrap();
+        assert!((progress - 0.4).abs() < 1e-6, "{progress}");
+
+        career.save(dir.path()).unwrap();
+        let mut loaded = Career::load(dir.path()).unwrap();
+        assert_eq!(loaded.repairs.len(), 1);
+        assert!((loaded.repairs[0].elapsed - 12.0).abs() < 1e-6);
+
+        // The clock that fills the bar completes the entry; nothing is charged.
+        let done = loaded.advance_repair(0, 18.0).unwrap().unwrap();
+        assert_eq!(done.robot, "Damaged Bot");
+        assert!(loaded.repairs.is_empty(), "the damage is cleared");
+        assert_eq!(loaded.money, 0, "a repair does not charge");
+        loaded.save(dir.path()).unwrap();
+        let reread = Career::load(dir.path()).unwrap();
+        assert!(
+            reread.repairs.is_empty(),
+            "the repaired state is what the save reads back"
+        );
     }
 
     /// The event list is the shipped file: 25 events, tiers two or four.

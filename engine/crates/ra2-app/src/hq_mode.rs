@@ -30,7 +30,8 @@
 //!
 //! `--hq --simulate-event N --out DIR` writes `hq.png` (the roster), `event.png`
 //! (the bracket), `match.png` (the HUD), `results.png`
-//! (`common/matchresults.gib`), `award.png` (`event_winner.gib`), and the
+//! (`common/matchresults.gib`), `award.png` (`event_winner.gib`),
+//! `repairs-list.png` and `repairs-done.png` (`teamhq/repairs.gib`), and the
 //! after-run evidence `hq-after.png` (league) and `hq-history.png` (prizes).
 
 use std::path::{Path, PathBuf};
@@ -43,12 +44,21 @@ use ra2sim::career::{Career, CareerPolicy, EventRecord, MatchAward};
 use ra2sim::r#match::{Match, MatchConfig, MatchReport, MatchState, RobotEntry};
 use ra2sim::GameType;
 
+use ra2ui::repairs::{self, Click as RepairClick, Repairs, Row as RepairRow};
+
 use crate::match_mode;
 use crate::SHELL_SIZE;
 
 /// The schedule seed for a fresh career. The original's RNG was not recovered
 /// (`docs/16-career.md` §3), so the schedule is explicit; the value is ours.
 pub const SEED: u64 = 7;
+
+/// One click of the repairs screen's clock. The original advances a progress
+/// bar over time (`FUN_004d6e10`) and passes `0x1e` (30) to the widget, but the
+/// unit was not established; the model's policy default is 30 seconds and this
+/// headless/UI tick is six of them. The value is ours, the model's `seconds`
+/// is the explicit repair time.
+pub const REPAIR_TICK_SECONDS: f32 = 6.0;
 
 /// What `--hq` was asked to do.
 #[derive(Clone, Debug)]
@@ -59,6 +69,9 @@ pub struct Options {
     pub out: Option<PathBuf>,
     pub size: [u32; 2],
     pub seconds: f32,
+    /// Evidence/test knob: damage added to the player's match report before the
+    /// career award. Zero by default; see `cli::Args::report_damage`.
+    pub report_damage: f32,
 }
 
 impl Options {
@@ -68,10 +81,17 @@ impl Options {
         out: Option<PathBuf>,
         size: [u32; 2],
         seconds: Option<f32>,
+        report_damage: Option<f32>,
     ) -> Result<Options, String> {
         let seconds = seconds.unwrap_or(match_mode::DEFAULT_SECONDS);
         if !(seconds.is_finite() && seconds > 0.0) {
             return Err(format!("--seconds must be positive, got {seconds}"));
+        }
+        let report_damage = report_damage.unwrap_or(0.0);
+        if !(report_damage.is_finite() && report_damage >= 0.0) {
+            return Err(format!(
+                "--report-damage must be non-negative, got {report_damage}"
+            ));
         }
         Ok(Options {
             game: game.to_path_buf(),
@@ -79,6 +99,7 @@ impl Options {
             out,
             size,
             seconds,
+            report_damage,
         })
     }
 }
@@ -156,9 +177,15 @@ impl Outcome {
 /// The current screen of the flow.
 enum Screen {
     Hq(Box<ra2ui::hq::Hq>),
-    Event { gib: Gib },
+    Event {
+        gib: Gib,
+    },
     Match(Box<match_mode::Session>),
-    Award { gib: Gib },
+    Award {
+        gib: Gib,
+    },
+    /// `teamhq/repairs.gib`: the between-rounds repair bench.
+    Repairs(Box<Repairs>),
 }
 
 /// The HQ and the event flow as live state.
@@ -175,6 +202,8 @@ pub struct Session {
     last_award: Option<MatchAward>,
     last_record: Option<EventRecord>,
     last_report: Option<MatchReport>,
+    /// Evidence/test damage added to the player's report before the award.
+    report_damage: f32,
 }
 
 impl Session {
@@ -194,7 +223,17 @@ impl Session {
             last_award: None,
             last_record: None,
             last_report: None,
+            report_damage: 0.0,
         })
+    }
+
+    /// Add `damage` to the player's match report before the career award. This
+    /// is an evidence/test knob (`--report-damage`), not a game rule: the
+    /// shipped match in this environment reports zero damage.
+    pub fn set_report_damage(&mut self, damage: f32) {
+        if damage.is_finite() && damage >= 0.0 {
+            self.report_damage = damage;
+        }
     }
 
     /// The match length this session uses for an event.
@@ -232,6 +271,107 @@ impl Session {
             return Err(format!("no HQ tab called {button:?}"));
         }
         Ok(())
+    }
+
+    /// The rows the shipped `repairs list` draws, from the career's pending
+    /// repairs and their clock. No cost is shown because the model has none.
+    pub fn repair_rows(&self) -> Vec<RepairRow> {
+        self.career
+            .repairs
+            .iter()
+            .enumerate()
+            .map(|(index, repair)| {
+                let progress = self.career.repair_progress(index).unwrap_or(1.0);
+                let remaining = (repair.seconds - repair.elapsed).max(0.0);
+                RepairRow::new(
+                    repair.component.clone(),
+                    format!(
+                        "{} / {} ({}%)",
+                        repairs::format_time(remaining),
+                        repairs::format_time(repair.seconds),
+                        (progress * 100.0).round() as i32
+                    ),
+                    progress,
+                )
+            })
+            .collect()
+    }
+
+    /// The clock the screen shows: the longest repair still running.
+    fn repair_clock(&self) -> String {
+        let remaining = self
+            .career
+            .repairs
+            .iter()
+            .map(|repair| (repair.seconds - repair.elapsed).max(0.0))
+            .fold(0.0f32, f32::max);
+        repairs::format_time(remaining)
+    }
+
+    /// Open `teamhq/repairs.gib` from the career's current pending list. A
+    /// healthy roster opens the screen's own empty state (no rows, `0:00`).
+    pub fn open_repairs(&mut self) -> Result<(), String> {
+        let selected = self
+            .repairs()
+            .map(|screen| screen.selected())
+            .unwrap_or_default();
+        let rows = self.repair_rows();
+        let clock = self.repair_clock();
+        let mut screen = Repairs::open(&self.game.join("UI"), "Round 1 Repairs", rows, &clock)?;
+        screen.set_selected(selected);
+        self.screen = Screen::Repairs(Box::new(screen));
+        Ok(())
+    }
+
+    pub fn repairs(&self) -> Option<&Repairs> {
+        match &self.screen {
+            Screen::Repairs(screen) => Some(screen.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Rebuild the repairs screen from the model, keeping the selection.
+    pub fn refresh_repairs(&mut self) -> Result<(), String> {
+        let Some(current) = self.repairs() else {
+            return Err("the repairs screen is not on screen".to_string());
+        };
+        let selected = current.selected();
+        let rows = self.repair_rows();
+        let clock = self.repair_clock();
+        let Some(screen) = self.repairs_mut() else {
+            return Err("the repairs screen is not on screen".to_string());
+        };
+        screen.set_rows(rows);
+        screen.set_selected(selected);
+        screen.set_time(&clock);
+        screen.refresh()
+    }
+
+    fn repairs_mut(&mut self) -> Option<&mut Repairs> {
+        match &mut self.screen {
+            Screen::Repairs(screen) => Some(screen.as_mut()),
+            _ => None,
+        }
+    }
+
+    /// The repair button's action: advance the selected repair's clock by one
+    /// UI tick. The model completes the entry when the bar fills; completing
+    /// saves the career, which is what makes the cleared damage persist.
+    pub fn repair_tick(&mut self) -> Result<Option<String>, String> {
+        if self.career.repairs.is_empty() {
+            return Ok(None);
+        }
+        let index = self
+            .repairs()
+            .map(|screen| screen.selected())
+            .unwrap_or_default()
+            .min(self.career.repairs.len() - 1);
+        let done = self.career.advance_repair(index, REPAIR_TICK_SECONDS)?;
+        if done.is_some() {
+            self.career.save(&self.game)?;
+        }
+        self.refresh_repairs()?;
+        Ok(done.map(|repair| repair.component))
     }
 
     /// The point at an event row's centre on the events tab.
@@ -294,10 +434,56 @@ impl Session {
             Screen::Award { .. } => {
                 let names = self.names_at(point);
                 if names.iter().any(|n| n == "continue button") {
-                    self.return_to_hq()?;
+                    // The between-rounds bench is the next screen when the
+                    // match left something to repair; a healthy roster goes
+                    // straight back to the HQ.
+                    if self.career.repairs.is_empty() {
+                        self.return_to_hq()?;
+                    } else {
+                        self.open_repairs()?;
+                    }
                     return Ok(true);
                 }
                 Ok(false)
+            }
+            Screen::Repairs(_) => {
+                let clicked = {
+                    let Session { assets, screen, .. } = self;
+                    let Screen::Repairs(screen) = screen else {
+                        unreachable!()
+                    };
+                    screen.click(point, SHELL_SIZE, Some(assets.faces()))
+                };
+                match clicked {
+                    Some(RepairClick::Row(index)) => {
+                        if let Some(screen) = self.repairs_mut() {
+                            screen.set_selected(index);
+                        }
+                        Ok(true)
+                    }
+                    Some(RepairClick::Repair) => {
+                        match self.repair_tick()? {
+                            Some(component) => println!("  repair complete: {component}"),
+                            None if self.career.repairs.is_empty() => {
+                                println!("  repair list is empty")
+                            }
+                            None => {
+                                let row = self
+                                    .repairs()
+                                    .and_then(|s| s.rows().first())
+                                    .map(|r| r.time.clone())
+                                    .unwrap_or_default();
+                                println!("  repair clock {row}");
+                            }
+                        }
+                        Ok(true)
+                    }
+                    Some(RepairClick::Finished) => {
+                        self.return_to_hq()?;
+                        Ok(true)
+                    }
+                    None => Ok(false),
+                }
             }
         }
     }
@@ -352,7 +538,7 @@ impl Session {
 
     /// Award the match, close the event, save, and show `event_winner.gib`.
     pub fn finish_match(&mut self) -> Result<(), String> {
-        let (report, event_id) = {
+        let (mut report, event_id) = {
             let screen = match &self.screen {
                 Screen::Match(session) => session,
                 _ => return Err("no match is on screen".to_string()),
@@ -366,6 +552,17 @@ impl Session {
                     .ok_or_else(|| "no event is in progress".to_string())?,
             )
         };
+        if self.report_damage > 0.0 {
+            if let Some(player) = report.robots.first_mut() {
+                player.damage_taken += self.report_damage;
+                println!(
+                    "report damage: +{:.0} on {:?} (evidence knob; the match dealt {:.0})",
+                    self.report_damage,
+                    player.bot_name,
+                    player.damage_taken - self.report_damage
+                );
+            }
+        }
         let award = self.career.award_match(&report, 0)?;
         let record = self.career.finish_event(award.won)?;
         self.career.save(&self.game)?;
@@ -477,6 +674,10 @@ impl Session {
             }
             Screen::Event { gib, .. } | Screen::Award { gib, .. } => {
                 let placed = ra2ui::resolve_with(gib, SHELL_SIZE, Some(assets.faces()));
+                Ok((assets.scene(&placed, size), false))
+            }
+            Screen::Repairs(screen) => {
+                let placed = screen.placements(SHELL_SIZE, Some(assets.faces()));
                 Ok((assets.scene(&placed, size), false))
             }
             Screen::Match(session) => Ok((session.scene()?, true)),
@@ -641,6 +842,41 @@ impl Session {
         self.finish_match()?;
         capture(self, "award.png")?;
 
+        // The between-rounds bench: the match's damage is the career's pending
+        // repair list. The screen is the shipped `teamhq/repairs.gib`; the
+        // repair button advances the bar, and each bar-full is saved.
+        self.open_repairs()?;
+        println!(
+            "  repairs: {} entr{} ({}), clock {}",
+            self.career.repairs.len(),
+            if self.career.repairs.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            self.career
+                .repairs
+                .iter()
+                .map(|r| r.component.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.repair_clock()
+        );
+        capture(self, "repairs-list.png")?;
+        let mut clicks = 0usize;
+        while !self.career.repairs.is_empty() {
+            let done = self.repair_tick()?;
+            if let Some(component) = done {
+                println!("  repair complete: {component}");
+            }
+            clicks += 1;
+            if clicks > 10_000 {
+                return Err("the repair clock did not fill".into());
+            }
+        }
+        println!("  repairs done after {clicks} clock tick(s)");
+        capture(self, "repairs-done.png")?;
+
         let award = self.last_award.clone().expect("an award");
         let record = self.last_record.clone().expect("an event record");
         let config = match_config(
@@ -661,6 +897,10 @@ impl Session {
         };
 
         self.return_to_hq()?;
+        println!(
+            "  repair bench after reload: {} pending repair(s)",
+            self.career.repairs.len()
+        );
         self.select_tab("league button")?;
         capture(self, "hq-after.png")?;
         self.select_tab("history button")?;
@@ -1220,6 +1460,7 @@ pub fn run_headless(options: Options) -> Result<(), String> {
 
     let mut session = Session::open(&options.game)?;
     session.set_event_seconds(options.seconds);
+    session.set_report_damage(options.report_damage);
     println!(
         "HQ: {:?}, season {} (zero-based), {} points, rank {}, {} prizes",
         session.career.team_name(),
@@ -1479,6 +1720,78 @@ mod tests {
         read_bot(&path).map(|bot| bot.name)
     }
 
+    /// A damaged report becomes a repairs-screen row; the repair button's clock
+    /// clears it, the save reads back empty, and a fresh career opens the
+    /// screen's own empty state.
+    #[test]
+    fn damage_appears_on_the_repairs_screen_and_completing_it_persists() {
+        use ra2sim::r#match::RobotReport;
+        let Some(game) = TestGame::new("repairs") else {
+            return;
+        };
+        let mut session = Session::open(game.path()).unwrap();
+
+        // Healthy: the screen's own empty list.
+        session.open_repairs().unwrap();
+        assert!(session.repairs().unwrap().rows().is_empty());
+        assert_eq!(session.repair_clock(), "0:00");
+
+        let robot = |team: usize, name: &str, damage: f32| RobotReport {
+            slot: team,
+            team,
+            bot_name: name.to_string(),
+            team_name: format!("Team {team}"),
+            team_logo: String::new(),
+            bot_preview: String::new(),
+            points: 0,
+            damage_dealt: 0.0,
+            damage_taken: damage,
+            battery: 1.0,
+            air: 1.0,
+            armor: 1.0,
+            defeated: false,
+            eliminated: false,
+            winner: false,
+            immobilized: false,
+        };
+        let report = MatchReport {
+            game_type: "DEATHMATCH",
+            arena: "Arenas/box/box.gmf".to_string(),
+            state: MatchState::Results,
+            reason: None,
+            winners: vec![0],
+            duration: 3.0,
+            duration_limit: None,
+            robots: vec![robot(0, "My Robot", 42.0), robot(1, "Red Zone", 0.0)],
+            log: Vec::new(),
+        };
+        session.career.award_match(&report, 0).unwrap();
+        session.open_repairs().unwrap();
+        let rows = session.repairs().unwrap().rows().to_vec();
+        assert_eq!(rows.len(), 1, "one entry per damaged robot: {rows:?}");
+        assert_eq!(rows[0].component, "My Robot");
+        assert!(rows[0].time.contains("0:30"), "{}", rows[0].time);
+        assert_eq!(session.repair_clock(), "0:30");
+
+        // Five six-second ticks fill the 30-second bar; the fifth completes it.
+        for _ in 0..4 {
+            assert_eq!(session.repair_tick().unwrap(), None);
+        }
+        assert_eq!(session.career.repairs.len(), 1);
+        assert_eq!(session.repair_tick().unwrap().as_deref(), Some("My Robot"));
+        assert!(session.career.repairs.is_empty());
+        assert!(session.repairs().unwrap().rows().is_empty());
+        assert_eq!(session.career.money, 0, "no repair cost exists");
+
+        // The cleared damage is what the next app run reads.
+        drop(session);
+        let second = Session::open(game.path()).unwrap();
+        assert!(second.career.repairs.is_empty());
+        let mut second = second;
+        second.open_repairs().unwrap();
+        assert!(second.repairs().unwrap().rows().is_empty());
+    }
+
     /// The headless command writes the five named frames (and the after-run
     /// evidence) at the requested size.
     #[test]
@@ -1494,6 +1807,7 @@ mod tests {
             Some(dir.clone()),
             [640, 502],
             Some(0.3),
+            Some(40.0),
         )
         .unwrap();
         run_headless(options).expect("the headless HQ run completes");
@@ -1503,6 +1817,8 @@ mod tests {
             "match.png",
             "results.png",
             "award.png",
+            "repairs-list.png",
+            "repairs-done.png",
             "hq-after.png",
             "hq-history.png",
         ] {

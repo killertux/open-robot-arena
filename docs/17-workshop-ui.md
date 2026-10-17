@@ -36,6 +36,9 @@ quits (and in a `Test Robot` match it pauses, as `--match` does).
 | attach it | the same click attaches at the panel's selected mount | `Build::attach` (the F1 rule) |
 | choose the parent mount | a click on a mount row in the panel (`chassis baseplate 0:0`, or `component N mount M (axle_m)`) | `Build::attach`'s parent/own mounts |
 | remove | the shipped `remove button` (removes the selected part and its subtree) | `Build::remove` |
+| add a control | the shipped `new analog` / `new switch` / `new button` button, then a free `control grid` cell | `ControlBoard::add` |
+| select / delete a control | a click on its `control grid` cell; the shipped `delete button` | `ControlBoard::remove` |
+| bind a control | select the control cell, then the component row and an action row in the panel | `Build::bind_action` (`ControlBoard::bind_checked`) |
 | undo / redo placement | `Ctrl+Z` / `Ctrl+Y` or the panel row | `Build::undo` / `redo` |
 | paint a face group | select a `Texture Library/` row (or a `Custom Textures/` row), then a face row | `Paint::fill_group` |
 | undo paint | `Ctrl+Z` on the Paint Shop tab | `Paint::undo` |
@@ -99,26 +102,49 @@ The rendered RGBA is pushed into the `UiScene` as a `UiTexture` and a clipped
 `UiRenderer` they use for the shell. The preview is cached by the model's
 revision counter and rebuilt after an edit.
 
-## 4. Wiring: read-only this pass
+## 4. Wiring: click-to-place, click-to-bind
 
-The Wiring tab displays the model's whole `ControlBoard`:
+The shipped `control grid` is the editor's surface (`Rows 3, Columns 4`,
+`RowHeight 70`), filled with `control_cell.gib` cells, one per control, at the
+control's own cell (`cell[0]`, `cell[1]`), with the kind's
+`ctrl_analog`/`ctrl_switch`/`ctrl_button` art, the player's name and the key
+label (`W / S`, `A / D`, `Space`). The panel row for a control is the same
+selection, and the saved rows are the board's own.
 
-- the shipped `control grid` is filled with `control_cell.gib` cells, one per
-  control, at the control's own cell (`cell[0]`, `cell[1]`), with the kind's
-  `ctrl_analog`/`ctrl_switch`/`ctrl_button` art, the player's name and the key
-  label (`W / S`, `A / D`, `Space`);
-- the panel lists every control and every binding (`#4 Spin Clockwise <- Forward @ 1,0 slot 0`).
+The flow is **click-to-place, then click-to-bind** — no mouse drag:
 
-Adding a control (`new analog`/`new switch`/`new button`), dragging it onto a
-cell and choosing an action from the shipped template list is **not** wired.
-The button notes and the cell template are there; the interaction is the next
-slice. `Test Robot` drives both robots with the shipped AI, not with the
-player's board, so a read-only board does not block the match.
+1. click the shipped `new analog`, `new switch` or `new button`. The panel says
+   `placing Analog: click a free cell`; the control's corpus name is
+   `New Analog`, `Flip` or `New Button`.
+2. click a free cell of the `control grid`. `ControlBoard::add` refuses an
+   occupied cell (`CellTaken` names the control already there) and the grid's
+   `Rows`/`Columns` bound the click. The cell is now selected.
+3. click a component row in the panel. Only components whose class has an
+   action for this control kind are listed (a weapon, wheel, battery or chassis
+   has none — a weapon is driven through its motor).
+4. click an action row: `slot 0: Spin Clockwise`, `slot 1: Spin
+   Counter-clockwise` for an analog, one slot for a switch/button. The action
+   list is `ControlBoard::actions_for(kind, class, slot)` — the binary's RTTI
+   matrix, not a UI copy. The bind goes through `Build::bind_action` →
+   `ControlBoard::bind_checked`, so an action the kind cannot give is refused
+   with the list it *can* give; the raw `bind` stays the file round-trip writer.
+5. the shipped `delete button` removes the selected control and every binding
+   that named its cell (`ControlBoard::remove`).
+
+A cell holds one control. A new binding replaces the row in the same
+`(component, control, slot)` (the panel unbinds first), so a repeated click
+does not grow the board. Placement/board edits are not in the placement undo
+history (that history is `Build`'s component tree, not the board); the file is
+the source of truth and a save/re-read is identical.
 
 A new build uses `ControlBoard::default_board` (Forward/LeftRight/Fire/Spin on
 W/S, A/D, Space, Q) and therefore has controls but **no bindings** until a part
 is wired; `--start` a stock bot to see the model's full board (the corpus has
-707 binding rows).
+707 binding rows). `Test Robot` still drives both robots with the shipped AI,
+not with the player's board.
+
+The panel's action rows are limited to what fits the placeholder; the board
+itself is not.
 
 ## 5. Paint
 
@@ -181,8 +207,11 @@ damage lives in the match's rig, not in a `.bot`).
 start: 1 parts, 56.1 kg, 160 hp
   chassis step: Some("structure design button") (chassis split)
   attached: 0 Chassis -> -1@0, 1 SpinMotor -> 0@0, 2 Wheel -> 1@3
+  wiring: added New Analog at cell 3,1
+  wiring: bound component 1 to "Spin Clockwise" on Some("New Analog") slot 0
   paint: 10 group(s), changed true
   saved .../Robot Designs/M9 Demo.bot
+  wiring reloaded: 5 control(s), 1 binding(s)
   reloaded: 3 parts, 89.1 kg, 960 hp (rig: 3 parts, 89.1 kg, 960 hp)
 ```
 
@@ -195,6 +224,8 @@ scene's prints in `--out` are:
 | `build-chassis.png` | the chassis tab on the shipped `structure design` step, the preview of the stock chassis |
 | `build-parts.png` | the Components tab: the palette, the attached Z-Tek motor + mini wheel, the part list and mount rows |
 | `build-wiring.png` | the Wiring tab: the shipped `control grid` with one `control_cell.gib` per control, and the binding rows |
+| `wiring-add.png` | after `new analog` + a click on the free cell 3,1: five cells and the `New Analog` selection (unbound) |
+| `wiring-bound.png` | after the component and action clicks: `SpinMotor <- Spin Clockwise @ 3,1 slot 0` in the panel, the same row the save writes |
 | `build-paint.png` | the Paint Shop: the texture list, the 10 face groups, and the preview with group 0 filled |
 | `build-test.png` | M8's HUD + 3D frame of the test match (the first fight frame) |
 
@@ -203,7 +234,11 @@ The test's own frames are 640×502; the manual evidence run above is
 
 ## 9. What is read-only, out of scope, or unproven
 
-- **Wiring editing** — display only; no add/drag/bind.
+- **Wiring drag** — the shipped `control grid` note says *"controls can be
+  dragged and dropped here"*; this slice uses click-to-place instead (the
+  `new …` buttons plus a cell). A drag would be a second gesture over the same
+  `add` call.
+- **Wiring undo** — the board is not part of `Build`'s undo history.
 - **The shipped armour grid** — filled and drawn, but its rows sit under the
   shell's bottom bar; plate selection is the panel's row.
 - **Decals, surface layers, texture-entire** — model-only.
@@ -236,7 +271,9 @@ The test's own frames are 640×502; the manual evidence run above is
 |---|---|
 | `build_mode::tests::a_palette_click_attaches_one_component_and_undo_reverses_it` | one palette row click = one `Build::attach`; undo removes exactly that component |
 | `build_mode::tests::an_armour_cell_sets_the_chassis_plate` | a plate row sets the `.bot` armour (steel 20 kg/350 hp, twice the editor's hardness) and is undoable |
-| `build_mode::tests::the_scripted_build_saves_reloads_and_matches_the_rig` | the scripted run writes `Robot Designs/<name>.bot`, reloads it, compares model == reloaded == rig, and writes the five frames |
+| `build_mode::tests::the_scripted_build_saves_reloads_and_matches_the_rig` | the scripted run writes `Robot Designs/<name>.bot`, reloads it, compares components, stats, board and skin, compares model == reloaded == rig, and writes the seven frames |
+| `build_mode::tests::adding_a_control_binding_it_and_saving_round_trips_the_same_board` | `new analog` + free cell 3,1, bind the motor's `Spin Clockwise`, save/re-read the same board; an invalid action (`On/Off Clockwise` on an analog) is refused; a second control in Forward's cell is refused |
+| `ra2ui::workshop::wiring::tests::bind_checked_refuses_an_action_the_kind_and_class_do_not_allow` | the model's refusal and its `allowed` list (`Spin Clockwise`, `Spin Counter-clockwise`) |
 | `cli::tests::the_build_flags_parse` | `--build`, `--start`, `--save-as`, `--seconds`, `--out` |
 | the model's own tests | `docs/15-workshop-model.md` |
 

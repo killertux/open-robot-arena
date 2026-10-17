@@ -297,6 +297,7 @@ impl App {
     fn new_hq(options: crate::hq_mode::Options) -> Result<App, String> {
         let mut hq = crate::hq_mode::Session::open(&options.game)?;
         hq.set_event_seconds(options.seconds);
+        hq.set_report_damage(options.report_damage);
         let mut app = App::with_session(&options.game, options.size, None)?;
         app.hq = Some(hq);
         Ok(app)

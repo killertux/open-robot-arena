@@ -215,7 +215,7 @@ the library, decals) → save → reload it → `Test Robot` in an arena.
 |---|---|---|
 | M9.1 | ✅ **W1 `bot::write`**: 1.12, **57/57** semantic and byte-identical, measured over `Robot Designs/`, `AI/` and `Teams/` | `ra2fmt::bot` |
 | M9.2 | ✅ Component placement: attach at a mount point with the F1 rule (already the renderer's), remove, undo; the palette's filtering and selection already exist, and `--build` wires a palette click to `Build::attach` *(the baseplate drag placement tool remains; see `docs/17-workshop-ui.md`)* | `ra2ui::workshop`, `ra2-app` |
-| M9.3 | ◐ Wiring *(model + read-only display done)*: the shipped `control grid` is filled with `control_cell.gib` cells and the board/bindings are listed; adding a control, dragging it and choosing an action remains | `ra2ui`, `ra2-app` |
+| M9.3 | ✅ Wiring: the shipped `control grid` is filled with `control_cell.gib`; `new analog`/`new switch`/`new button` + a free cell adds a control (`ControlBoard::add`), `delete button` removes it, and a component + an action from the model's matrix binds it (`Build::bind_action`, `bind_checked`). Saving and re-reading the board is identical; a wrong action for the kind is refused. Click-to-place then click-to-bind (no drag) | `ra2ui`, `ra2-app` |
 | M9.4 | ✅ Paint: the texture library and custom textures lists, `Paint::fill_group` on a face group, live preview, save/reload; decals/surface layers/texture-entire stay model-only | `ra2ui`, `ra2-app` |
 | M9.5 | ✅ `Test Robot`: `--build` saves the bot and starts M8's `Match` on the box arena against a shipped AI bot, shows it with M8's presentation and reports the damage (reported, not applied) | `ra2-app` |
 | M9.6 | ✅ The workshop's own state: `Save As` to `Robot Designs/`, `Open`, `Import`/`Export` of bots and custom textures, the name box and the round-trip | `ra2-app` |
@@ -230,9 +230,11 @@ Landed: `ra2-app --build` drives the shipped bot lab and a live `Build` —
 palette click → `Build::attach`, remove/undo, armour plate, texture + face group
 → `Paint::fill_group`, Save As/Open to `Robot Designs/`, `Test Robot` through
 M8's `Match`. The scripted build's manual run is **3 parts, 89.1 kg, 960 hp**
-in the model, the reload and `ra2sim::rig` alike. Wiring is displayed read-only.
-The commands, frames, editable/read-only split and what is unproven are in
-`docs/17-workshop-ui.md`.
+in the model, the reload and `ra2sim::rig` alike. Wiring is editable in the
+shipped `control grid` (click-to-place, click-to-bind); the saved board is
+identical on re-read. The commands, frames, editable/read-only split and what is
+unproven are in `docs/17-workshop-ui.md`. The repair bench and its clock are in
+`docs/18-hq-ui.md`.
 
 **Risks.** The `.bot` writer's version quirks (mitigate: round-trip first, then
 write); the wiring model is the least-read part of the format (M9.3 is where it
@@ -256,7 +258,7 @@ record.
 | M10.2 | ✅ `career` model: teams, roster, points, money, events entered, prizes, repairs, season phase; `W1` writes it where the game does | new `ra2sim::career` (or `ra2game`) |
 | M10.3 | ✅ Team HQ flows: the shipped `teamhq.gib` and its four tabs, robot inventory (`hq_robots` — `bot_cell.gib`, not the `robot_cell.gib` its note names), league/season grids from the career's points (S2's fills), history/prizes (`hq_history`), event schedule (`hq_events`); `--hq` opens it, headless and windowed | `ra2ui::hq` + `ra2-app::hq_mode` |
 | M10.4 | ✅ Events: `Events.txt` → the event's arena, its arena script's own game type, one match through M8's `Match`, `common/matchresults.gib`, the award screen (`event_winner.gib`) and the career's points/prize, then the HQ's league and history; `--hq --simulate-event N` is the headless run | `ra2fmt::event`, `ra2ui::hq`, `ra2-app::hq_mode` |
-| M10.5 | ◐ Repairs *(model done; the `repairs.gib` screen remains)*: the damage a match leaves on components, the repair list (`repairs.gib`), cost and time, the `ReadMe`'s "graphic for fractured items" | `ra2ui`, `ra2sim` |
+| M10.5 | ✅ Repairs: `teamhq/repairs.gib` lists the career's damaged robots/components and the repair clock; `repair button` advances `Repair::elapsed` (`Career::advance_repair`, six-second UI tick) and a full bar clears the entry and saves the career. No cost is charged (0). The component-level `Team+0x12c` list and the `damage.tga` fractured icon remain unproven; the `--report-damage` knob is the evidence/test input because the shipped match reports zero damage here | `ra2ui::repairs`, `ra2sim::career`, `ra2-app::hq_mode` |
 | M10.6 | ◐ Money/points: the per-type scoring (damage, KO, zone) and what it is worth outside the match; teammates do not score (the 1.20 rule) | `ra2sim::match`, `ra2sim::career` |
 | M10.7 | ✅ The career save/load, versioned, with a "your game directory" location | `W1`, `ra2-app` |
 
@@ -264,6 +266,13 @@ record.
 rounds, collect a prize, repair, save, restart, and the table/prizes/roster are
 identical. The event list comes from `Events.txt` (25 events, the shipped
 tiers); a save round-trips.
+
+Landed: `--hq` boots the shipped HQ and plays one event through the award;
+`teamhq/repairs.gib` then lists the damaged robot, its 30-second clock and the
+shipped repair button, and a full bar clears the entry and saves. The evidence
+run is **80 points, rank 1, one prize, one repair → 0:00**, with the report's
+damage an explicit `--report-damage` input because the shipped match reports
+none here. Commands, frames and the unproven items are in `docs/18-hq-ui.md`.
 
 **Risks.** The season save format is partly unread (M10.1) — if the original's
 format cannot be recovered, store the career in a documented sidecar and say so;
