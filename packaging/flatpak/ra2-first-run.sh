@@ -184,7 +184,8 @@ if [ -z "$game" ]; then
         echo "Pick it again, or supply it on the command line:"
         echo "  flatpak run --env=RA2_GAME_DIR=\"/path/to/Robot Arena 2\" $APP_ID"
         echo
-        echo "A folder outside \$HOME must also be granted to the sandbox once:"
+        echo "A folder outside \$HOME needs one override if you are not using"
+        echo "the portal picker:"
         echo "  flatpak override --user --filesystem=\"/path/to/Robot Arena 2:ro\" \\"
         echo "      org.openrobotarena.OpenRobotArena"
     } >&2
