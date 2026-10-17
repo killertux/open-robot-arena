@@ -1,0 +1,189 @@
+Open Robot Arena @VERSION@ — Linux x86_64
+Built @DATE@
+
+A native, headless Rust engine for Robot Arena 2: Design & Destroy (Gabriel
+Interactive / Infogrames, 2003). It reads the original game's data files
+directly: no Windows, no Wine, no emulator.
+
+This package does NOT include the game. Robot Arena 2 is not sold or supported
+any more, but it is still its owners' work: you must supply your own copy.
+None of its files are copied into this package, the installation, or its
+frames.
+
+------------------------------------------------------------------------------
+1. What you need
+
+  * Linux x86_64.
+  * A working Vulkan driver (Mesa's lavapipe/llvmpipe software driver also
+    works). The 2D and 3D renderers are headless wgpu; nothing opens a window.
+  * CPython 3.12 with its shared library. See section 3.
+  * Your Robot Arena 2 installation. For the shell it needs at least:
+
+        RA2.cfz
+        UI/
+        Scripts/
+
+    The other tools also use Components/, Arenas/, AI/, Teams/ and the .cfz
+    archives, so point them at the complete install.
+
+------------------------------------------------------------------------------
+2. Unpack and run
+
+    tar xzf ra2-open-robot-arena-@VERSION@-linux-x86_64.tar.gz
+    cd ra2-open-robot-arena-@VERSION@-linux-x86_64
+    ./run.sh --game "/path/to/Robot Arena 2"
+
+With no options the launcher runs the "botlab" route and writes the frames to
+
+    ~/.local/state/ra2-open-robot-arena/frames
+
+It prints each screen, click and file it writes. Other routes and input
+scripts are passed straight to bin/ra2-shell:
+
+    ./run.sh --game "/path/to/Robot Arena 2" --route exhibition
+    ./run.sh --game "/path/to/Robot Arena 2" --script my-input.txt --out /tmp/shots
+
+A click script is one command per line: `click x y`, `click "Widget Name"`,
+`wait n`, `shot name.png`. The shipped routes are:
+
+    botlab      main menu -> team picker -> team HQ -> robots -> bot lab ->
+                chassis tool -> structure step 1      (7 frames)
+    exhibition  main menu -> exhibition setup -> arena picker  (3 frames)
+
+The launcher looks for the game in this order: --game, $RA2_GAME_DIR,
+$XDG_DATA_HOME/ra2-open-robot-arena/game, game/ beside the launcher (or ../game
+when installed), ./local/game upwards from the current directory, then
+/usr/local/share/ra2-open-robot-arena/game, /usr/share/ra2-open-robot-arena/game
+and /opt/ra2/game. If none is found it prints the three required names and
+every path it tried.
+
+The shell is headless: it does not open a window and there is no mouse input.
+"Works" below means "renders the original screen data and walks its routes".
+
+------------------------------------------------------------------------------
+3. CPython 3.12 is required (and is not bundled)
+
+ra2-shell, ra2-sim and ra2-duel embed the game's Python through pyo3, and the
+binaries are dynamically linked against libpython3.12.so.1.0. The dynamic
+loader needs that shared library before main() runs, so `--no-python` does not
+remove the dependency. This package does not ship Python; it uses yours.
+
+Check it:
+
+    python3.12 --version
+    ldd bin/ra2-shell | grep libpython3.12
+
+Expected: Python 3.12.x, and a line resolving to a real path such as
+/lib/x86_64-linux-gnu/libpython3.12.so.1.0. "not found" means the runtime is
+missing. The standard library for 3.12 must be installed too.
+
+Install the runtime (examples; this build is tied to the 3.12 ABI):
+
+    Debian/Ubuntu  sudo apt install python3.12 libpython3.12
+    Fedora         sudo dnf install python3.12
+    Arch           the rolling python is usually newer than 3.12; install a
+                   3.12 build and set both:
+                     LD_LIBRARY_PATH=/path/to/3.12/lib
+                     PYTHONHOME=/path/to/3.12
+
+The launcher checks the library and the 3.12 standard library before running.
+`./run.sh --check-python` prints what it found. A binary built against a
+different Python minor version needs a matching runtime; this release is
+3.12-only by construction, not by choice of a flag.
+
+------------------------------------------------------------------------------
+4. Other tools in bin/
+
+  ra2-shell   the shell entry point (boots the main menu, walks routes)
+  ra2         data inspector: ra2 info, ra2 obj, ra2 cfz, ra2 arena, ra2 gib,
+              ra2 font. Useful for support and for checking an install.
+  ra2-render  offscreen renderer: a .gmf part, an assembled .bot robot, or an
+              arena .py scene -> PNG.
+  ra2-sim     drive one robot around an arena; writes a frame strip.
+  ra2-duel    two AI-driven robots fight; writes a frame strip.
+
+Examples (paths are inside your game directory):
+
+    bin/ra2 info "/path/to/Robot Arena 2/Components/mower_blade/mower_blade1.gmf"
+    bin/ra2-render "/path/to/Robot Arena 2/AI/Team0/Bot0.bot" scout.png
+    bin/ra2-sim "/path/to/Robot Arena 2/Arenas/octagon.py" \
+                "/path/to/Robot Arena 2/AI/Team1/Bot0.bot" out/ 6 10
+    bin/ra2-duel "/path/to/Robot Arena 2/Arenas/octagon.py" \
+                 "/path/to/Robot Arena 2/AI/Team14/Bot2.bot" \
+                 "/path/to/Robot Arena 2/AI/Team13/Bot1.bot" out/ 20 12
+
+The 3D tools read the game's own meshes, materials and textures. The script
+layer runs the shipped Python 2.2 arenas and AI unmodified on the embedded
+interpreter.
+
+------------------------------------------------------------------------------
+5. What works, and what does not
+
+Works:
+  * Reading all shipped .gmf meshes, .bot robots, .cfz archives, .gib screens,
+    .giff fonts, team files and arena scripts.
+  * The shell's main menu, team picker, team HQ, robot inventory, bot lab and
+    chassis steps, walked by the screens' own notes (headless frames).
+  * The exhibition setup and the arena picker, with the 12 arena names.
+  * Offscreen rendering of every shipped robot and arena scene.
+  * The physics sandbox and two-robot duels, with the shipped Python AI.
+  * Booting Scripts/Main.py, the game's own entry point.
+
+Does not work yet:
+  * There is no interactive window, mouse or keyboard loop. Frames are PNGs.
+  * The actual match (driving, damage, scoring) is the original C++ and is not
+    playable through the shell; it stops at the arena picker. ra2-sim and
+    ra2-duel are the playable physics paths, headless.
+  * Audio, music and video playback are not implemented.
+  * The Microsoft/in-game codecs, installers and D3D wrappers in the original
+    install (D3D8.dll, dgVoodoo, .exe) are not used.
+  * Some fidelity caveats remain (a quarter of stock robots cannot find wheel
+    traction, BurstMotor rest poses are approximate, per-part damage is
+    calibrated). README.md and docs/06-deferred-fidelity.md in the source tree
+    name each one.
+  * No game data, mod support, network play or update check.
+
+An honest summary: this is an engine and a verification harness, not a
+finished game client. It renders the original data and simulates the original
+physics; it does not yet give you the original's window.
+
+------------------------------------------------------------------------------
+6. Desktop integration (optional)
+
+    ./install.sh              install for the current user
+    ./install.sh --system     install under /usr/local (with sudo)
+    ./install.sh --prefix DIR install under DIR
+    ./install.sh --uninstall  remove it again
+
+The desktop entry launches the headless runner in a terminal and is installed
+into $XDG_DATA_HOME/applications (or /usr/local/share/applications). The game
+directory is never copied; pass --game or set RA2_GAME_DIR. The default
+$XDG_DATA_HOME/ra2-open-robot-arena/game location is checked automatically.
+
+------------------------------------------------------------------------------
+7. Troubleshooting
+
+  "no Robot Arena 2 installation found": the launcher lists every path it
+  tried. Pass --game with the directory that directly contains RA2.cfz, UI/
+  and Scripts/ (not its parent).
+
+  "libpython3.12.so.1.0: missing": install the CPython 3.12 runtime; see
+  section 3. `ldd bin/ra2-shell | grep libpython` shows the resolution.
+
+  "Unable to find a GPU" / wgpu adapter error: install a Vulkan driver
+  (mesa-vulkan-drivers) or set the software fallback your Mesa provides. The
+  renderers are offscreen but still need an adapter.
+
+  Missing textures or screens: check that the game directory is the complete
+  install, not only the UI directory.
+
+------------------------------------------------------------------------------
+8. Licence and credits
+
+Our code is licensed MIT OR Apache-2.0 (see LICENSE-MIT, LICENSE-APACHE and
+NOTICE). The CPython runtime, Jolt Physics and the Rust crates keep their own
+licences; THIRD_PARTY.md lists them. Robot Arena 2 and all of its data remain
+the property of their respective owners; this package redistributes none of it.
+
+Source, measurements and the full design notes:
+  https://github.com/ (the Open Robot Arena repository this package came from)

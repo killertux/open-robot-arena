@@ -1,0 +1,35 @@
+Open Robot Arena
+Copyright (c) 2026 The Open Robot Arena contributors
+
+This project is dual-licensed under either of
+
+  * the Apache License, Version 2.0 (see LICENSE-APACHE), or
+  * the MIT License (see LICENSE-MIT)
+
+at your option. You may choose either licence for your use of this software.
+
+Robot Arena 2: Design & Destroy (Gabriel Interactive / Infogrames, 2003) is
+NOT part of this project and is NOT distributed here. No original game assets,
+executables or scripts are included in this package. The user supplies their own
+game installation; those files remain the property of their respective owners.
+
+This software links against, or is built with, the following third parties:
+
+  * CPython 3.12 (PSF License v2) — the user's system Python shared library,
+    dynamically linked by ra2-shell, ra2-sim and ra2-duel. Not redistributed.
+  * pyo3 (MIT OR Apache-2.0) — Rust bindings to CPython.
+  * wgpu, winit, image, glam, flate2 and other Rust crates (MIT OR
+    Apache-2.0) — see engine/Cargo.lock and docs/THIRD_PARTY.md in the source
+    repository for the full dependency set.
+  * Jolt Physics (MIT), through the oxijolt Rust bindings (MIT OR
+    Apache-2.0) — not redistributed; compiled into the binaries as a Cargo
+    dependency.
+  * PyRA2 (LGPL-2.1-or-later) — vendored only as reference documentation under
+    tools/vendor/PyRA2/ in the source repository. No PyRA2 code is linked into
+    these binaries.
+
+The font, icon and .desktop file under share/ are our own work and carry the
+project licence above. The game's artwork is never copied into this package.
+
+See THIRD_PARTY.md (shipped in share/doc/ra2-open-robot-arena/) for details and
+the source URLs.

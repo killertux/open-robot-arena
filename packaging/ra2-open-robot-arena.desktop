@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Open Robot Arena
+GenericName=Robot combat sandbox
+Comment=Headless native engine for Robot Arena 2 (supply your own game files)
+Exec=ra2-open-robot-arena
+TryExec=ra2-open-robot-arena
+Icon=ra2-open-robot-arena
+Terminal=true
+Categories=Game;Simulation;
+Keywords=robot;arena;ra2;battle;
+StartupNotify=false

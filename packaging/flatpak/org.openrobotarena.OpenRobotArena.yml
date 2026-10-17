@@ -1,0 +1,63 @@
+# NOT BUILT HERE — documented Flatpak recipe.
+#
+# Why it is not an artifact: this machine has no flatpak-builder, no
+# org.freedesktop.Sdk 24.08 runtime, and no network to fetch either; cargo in
+# this repository runs with --offline and a Flatpak sandbox would start with an
+# empty cargo cache. See packaging/NOT_BUILT.md. Do not treat this file as a
+# tested manifest.
+#
+# To try it where the tools and network exist:
+#   flatpak-builder --force-clean build-dir packaging/flatpak/org.openrobotarena.OpenRobotArena.yml
+#   flatpak-builder --user --install --force-clean build-dir packaging/flatpak/org.openrobotarena.OpenRobotArena.yml
+#
+# runtime 24.08 is chosen because it carries CPython 3.12, the ABI the binaries
+# are built against. If the runtime moves to a newer Python, ra2script's pyo3
+# link will fail or the shell will demand a different libpython: rebuild the
+# wheel... binary against the runtime's Python and update this file.
+app-id: org.openrobotarena.OpenRobotArena
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: ra2-open-robot-arena
+
+finish-args:
+  # The renderers are offscreen wgpu: they need a GPU adapter, not a display.
+  - --device=dri
+  - --share=ipc
+  # The player's game directory is read in place. Flatpak has no default
+  # location for abandonware, so grant the home directory read-only and let the
+  # launcher find it, or pass --filesystem=/path/to/game:ro.
+  - --filesystem=home:ro
+  - --env=RA2_GAME_DIR= # set at run time, e.g.
+                        # flatpak run --env=RA2_GAME_DIR=/games/RA2 org.openrobotarena.OpenRobotArena
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/ra2-open-robot-arena/cargo
+
+modules:
+  - name: ra2-open-robot-arena
+    buildsystem: simple
+    build-commands:
+      # The source must be vendored for an offline Flatpak build:
+      #   cargo vendor --manifest-path engine/Cargo.toml vendor
+      # and .cargo/config.toml must point at it. This is the step that could
+      # not be done here (network).
+      - install -d /app/lib/ra2-open-robot-arena/bin /app/bin
+      - install -m755 engine/target/release/ra2-shell /app/lib/ra2-open-robot-arena/bin/ra2-shell
+      - install -m755 engine/target/release/ra2 /app/lib/ra2-open-robot-arena/bin/ra2
+      - install -m755 engine/target/release/ra2-render /app/lib/ra2-open-robot-arena/bin/ra2-render
+      - install -m755 engine/target/release/ra2-sim /app/lib/ra2-open-robot-arena/bin/ra2-sim
+      - install -m755 engine/target/release/ra2-duel /app/lib/ra2-open-robot-arena/bin/ra2-duel
+      - install -m755 packaging/run.sh /app/lib/ra2-open-robot-arena/run.sh
+      - ln -s /app/lib/ra2-open-robot-arena/run.sh /app/bin/ra2-open-robot-arena
+      - install -Dm644 packaging/ra2-open-robot-arena.desktop
+        /app/share/applications/org.openrobotarena.OpenRobotArena.desktop
+      - install -Dm644 packaging/ra2-open-robot-arena.svg
+        /app/share/icons/hicolor/scalable/apps/ra2-open-robot-arena.svg
+    sources:
+      - type: dir
+        path: ../..
