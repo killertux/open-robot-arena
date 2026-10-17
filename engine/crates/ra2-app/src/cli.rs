@@ -12,6 +12,10 @@ pub struct Args {
     pub help: bool,
     /// `--match`: play a `ra2sim::match::Match` instead of the shell.
     pub match_mode: bool,
+    /// `--hq`: boot the Team HQ and its career.
+    pub hq: bool,
+    /// `--hq --simulate-event N`: play schedule row N headlessly.
+    pub simulate_event: Option<usize>,
     /// `--match --out DIR`: the offscreen evidence run.
     pub out: Option<PathBuf>,
     /// Fight seconds before the evidence script's decision (and the HUD clock's
@@ -34,6 +38,8 @@ impl Default for Args {
             clicks: Vec::new(),
             help: false,
             match_mode: false,
+            hq: false,
+            simulate_event: None,
             out: None,
             seconds: None,
             quit_at: None,
@@ -47,6 +53,7 @@ pub fn usage() -> &'static str {
     "usage: ra2-app [--game DIR] [--offscreen PNG] [--size WxH] [--clicks \"x,y;x,y;...\"]\n\
      \x20      ra2-app --match [--seconds N] [--out DIR] [--quit-at N]\n\
      \x20                [--bots A.bot,B.bot] [--arena PATH]\n\
+     \x20      ra2-app --hq [--simulate-event N] [--seconds N] [--out DIR]\n\
      \n\
      With no --offscreen the shell opens in a window. With it, the same loop runs\n\
      headlessly: boot, apply the click script in the shell's 1280x1005 coordinates,\n\
@@ -83,6 +90,15 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--size" => parsed.size = parse_size(&next(&mut args, "--size")?)?,
             "--clicks" => parsed.clicks = parse_clicks(&next(&mut args, "--clicks")?)?,
             "--match" => parsed.match_mode = true,
+            "--hq" => parsed.hq = true,
+            "--simulate-event" => {
+                let value = next(&mut args, "--simulate-event")?;
+                parsed.simulate_event = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--simulate-event is not a number: {value:?}"))?,
+                );
+            }
             "--out" => parsed.out = Some(PathBuf::from(next(&mut args, "--out")?)),
             "--seconds" => {
                 let value = next(&mut args, "--seconds")?;
@@ -172,6 +188,8 @@ mod tests {
         assert_eq!(args.size, [1280, 1005]);
         assert!(args.clicks.is_empty());
         assert!(args.offscreen.is_none());
+        assert!(!args.hq);
+        assert!(args.simulate_event.is_none());
     }
 
     #[test]
@@ -214,6 +232,29 @@ mod tests {
         assert_eq!(args.offscreen, Some(PathBuf::from("out.png")));
         assert_eq!(args.size, [1920, 1080]);
         assert_eq!(args.clicks, vec![[1.0, 2.0], [3.0, 4.0]]);
+    }
+
+    #[test]
+    fn the_hq_flags_parse() {
+        let args = parse(
+            [
+                "--hq",
+                "--simulate-event",
+                "2",
+                "--seconds",
+                "3",
+                "--out",
+                "frames",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert!(args.hq);
+        assert_eq!(args.simulate_event, Some(2));
+        assert_eq!(args.seconds, Some(3.0));
+        assert_eq!(args.out, Some(PathBuf::from("frames")));
+        assert!(parse(["--simulate-event".into(), "x".into()]).is_err());
     }
 
     #[test]

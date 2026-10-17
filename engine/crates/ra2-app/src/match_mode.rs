@@ -235,18 +235,37 @@ impl Presentation {
 impl Session {
     pub fn new(options: &Options) -> Result<Session, String> {
         // The shipped hazards move the box fight around; the duel's own tests
-        // turn them off for the deterministic presentation run as well.
+        // turn them off for the deterministic presentation run as well. The
+        // environment is read while the world is built, so this must come
+        // before `Match::new`.
         std::env::set_var("RA2_HAZARDS", "0");
         let matched = Match::new(options.match_config()).map_err(|e| e.to_string())?;
-        let camera = camera_from_cfg(&options.game)?;
-        let presentation = Presentation::open(&options.game)?;
-        let dialog = ra2ui::workshop::load(&options.game.join("UI"), "common/ingame_dialog.gib")?;
+        Session::with_match(&options.game, matched)
+    }
+
+    /// A live match and its shipped screens from an already-built [`Match`].
+    /// This is the same presentation the `--match` path uses; the Team HQ's
+    /// event flow supplies a match whose arena and game type come from
+    /// `Events.txt` and the arena's own `game_types` instead of the fixed
+    /// `--match` defaults.
+    pub fn with_match(game: &Path, matched: Match) -> Result<Session, String> {
+        // The shipped hazards move the box fight around; the duel's own tests
+        // turn them off for the deterministic presentation run as well.
+        std::env::set_var("RA2_HAZARDS", "0");
+        let camera = camera_from_cfg(game)?;
+        let presentation = Presentation::open(game)?;
+        let dialog = ra2ui::workshop::load(&game.join("UI"), "common/ingame_dialog.gib")?;
+        let report = matched.report();
         println!(
-            "match: {} — {} vs {}, {:.0}s, camera {}",
+            "match: {} — {}, {:.0}s, camera {}",
             matched.config.arena,
-            matched.report().robots[0].bot_name,
-            matched.report().robots[1].bot_name,
-            options.seconds,
+            report
+                .robots
+                .iter()
+                .map(|r| r.bot_name.as_str())
+                .collect::<Vec<_>>()
+                .join(" vs "),
+            matched.config.duration.unwrap_or(0.0),
             camera.name()
         );
         Ok(Session {

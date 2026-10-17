@@ -1,0 +1,166 @@
+# 18 — The Team HQ and the event flow (M10.3 + M10.4)
+
+This is the screen half of M10: the career model (`engine/crates/ra2sim/src/career.rs`,
+`docs/16-career.md`) drawn on the game's own Team HQ screens, and one event played
+from entry to prize. The screens are composed by `ra2ui::hq` (the tabs, the grids
+and their cell templates) and driven by `ra2-app::hq_mode`. No career value is
+computed in the UI: the league points, the rank, the history counters, the roster
+and the prize list all come from `Career`.
+
+## Commands
+
+```text
+# the HQ in a window
+cargo run -q --release -p ra2-app -- --game "$RA2_GAME" --hq
+
+# headless: the roster, the league/events/history tabs, no event
+cargo run -q --release -p ra2-app -- --game "$RA2_GAME" --hq --out /tmp/hq
+
+# headless: enter schedule row N, play one match, award, save, reload
+cargo run -q --release -p ra2-app -- --game "$RA2_GAME" \
+    --hq --simulate-event 1 --out /tmp/hq --seconds 3
+```
+
+`N` is a **zero-based row of the nine-event season schedule**, not an
+`Events.txt` id; the run prints both. The game directory is the usual one
+(`--game`, `RA2_GAME`, or `local/game`); a career save writes
+`Teams/Teams.txt`, `AI/Teams.txt` and `Teams/career.dat`, so a test or an
+experiment should point `--game` at a copy. The repository's own tests make a
+temporary root whose writable files are copies and whose UI/arenas/robots are
+symlinks to the install.
+
+## The flow on screen
+
+| step | shipped screen | what fills it | career call |
+|---|---|---|---|
+| boot | `teamhq/teamhq.gib` | the team name, motto and logo; `robots button`'s fragment in `hq content group` | `Career::team_name`, `Career::player` |
+| roster | `teamhq/hq_robots.gib` + `bot_cell.gib` | one cell per player `Robots:` slot: the `.bot`'s name and class | the player's `Team::robots` |
+| league | `teamhq/hq_league.gib` + `league_cell.gib` | sixteen rows in rank order; `Season N`, `Events remaining: N` | `season_points`, `opponent_points`, `rank` |
+| season results | `teamhq/season_results.gib` + `sresults_cell.gib` | the same standings, its own cell | the same |
+| history | `teamhq/hq_history.gib` | the eight counters, the fastest win, the prize grid (most recent first) | the player's state fields, `Career::prizes` |
+| events | `teamhq/hq_events.gib` + `event_cell.gib` | one art cell per event on the nine-event schedule | `Career::schedule` |
+| event entry | `teamhq/event_bracket.gib` | event art, title, description, `ROUND 1`, `Play Next Round!` | `Career::enter_event` |
+| match | `gamewindow.gib` / `statusmeters.gib` over the 3D duel | M8's HUD | `ra2sim::match::Match` |
+| results | `common/matchresults.gib` + `result_cell.gib` | the two bots, their points, the winner text | `MatchReport::results` |
+| award | `teamhq/event_winner.gib` | team, robot, `1/1` rounds, event points, the prize text; the arena preview is composited behind the window | `Career::award_match`, `Career::finish_event` |
+| back | `teamhq/teamhq.gib` | the league and history, from the **reloaded** career | `Career::load` |
+
+The event's arena is `Events.txt`'s `arena` line (matched against
+`ra2ui::arenas::all`, the scripts' own `name`). Its game type is the arena
+script's `game_types` list — `Combat Arena` → `DEATHMATCH`, `LumaZone` →
+`KING OF THE HILL`, `FlexTop` → `TABLETOP` — not a number in `Events.txt`.
+The player enters their first roster robot against the first AI team's first
+robot.
+
+## Frames
+
+`--hq --simulate-event N --out DIR` writes:
+
+| frame | what it shows |
+|---|---|
+| `hq.png` | the HQ on the robots tab, the team's six robots by name and class |
+| `hq-events.png` | the schedule, nine event art cells |
+| `event.png` | the bracket for the entered event, with the arena preview behind it |
+| `match.png` | the live HUD at the fight's midpoint |
+| `results.png` | `common/matchresults.gib` filled from the match report |
+| `award.png` | `event_winner.gib`: team, robot, rounds, points and the prize text |
+| `hq-after.png` | the league after the award, read back from the save |
+| `hq-history.png` | the history after the award, with the stored trophy art |
+
+Without `--simulate-event`, `--hq --out DIR` writes `hq.png`, `hq-league.png`,
+`hq-events.png` and `hq-history.png`.
+
+### The evidence run (row 1, `--seconds 3`)
+
+```text
+event: schedule row 1 -> Events.txt #6 "Strategic Engineering Robot Games"
+arena: .../Arenas/box.py (DEATHMATCH)
+points: 0 -> 80 (event 80 = participation 80 + bonus 0)
+rank: 1 -> 1 (career.rank())
+result: won true, rounds 1/1
+prize: Arenas\event_results\prizes\Square_Plaque\square_plaque.gmf — You took
+       FIRST PLACE in this event! You won this plaque with your robot's name
+       engraved! (art UI\teamhq\events\trophies\Square Plaque.tga)
+reloaded: 80 points, rank 1, 1 prize(s)
+```
+
+The points are the model's: `award_match` adds `160 / robots` participation and
+`robot points / 200`; `finish_event` folds the event total into the season and
+stores the event's trophy. The print's `rank` is `Career::rank` (the number of AI
+teams strictly ahead, plus one), not a UI table.
+
+## Tests
+
+- `ra2ui::hq::tests::the_tabs_are_the_screens_their_notes_name` — re-reads the
+  four buttons' notes.
+- `the_robots_tab_is_filled_from_the_roster` — `bot_cell.gib` into `robot grid`.
+- `the_league_grid_is_the_careers_standings` — the 16 rows, the player's 42
+  points, `Season 3`, `Events remaining: 7`, and the content area is not clipped
+  to one row.
+- `an_event_cell_click_is_the_event_on_the_schedule` — cell geometry → event id.
+- `the_history_tab_shows_the_counters_and_the_prizes` — rank/wins/events won,
+  the `N/A` fastest win, and the two prize arts in most-recent-first order.
+- `the_season_results_screen_is_the_same_standings`.
+- `ra2-app::hq_mode::tests::a_click_on_the_event_row_enters_that_event` — the
+  app-level click and `Career::enter_event` agree with the schedule row.
+- `a_simulated_event_saves_and_the_next_app_run_reads_the_same_record` — a real
+  `Match` through the flow, the save, a second `Session::open`, the points,
+  prize, roster and the game's own `Teams.txt`.
+- `a_headless_hq_run_writes_the_named_frames` — the eight PNGs at the requested
+  size.
+- `the_event_arena_and_game_type_come_from_the_data` — Combat Arena →
+  Deathmatch, FlexTop → Tabletop, LumaZone → King of the Hill.
+
+## What is not proven
+
+1. **Brackets and rounds.** The career model exposes `rounds_won`,
+   `rounds_lost`, `finish_event(won)` and the tier list, but no bracket, round
+   count or opponents (`docs/16-career.md` §6). The flow therefore plays **one
+   match** and prints that fact; the award's `1/1` is the model's count, not a
+   bracket. `Events.txt`'s first setting (2 or 4) is not applied to the robot
+   count: its meaning was not established.
+2. **Opponents.** The career model has no event participants or pairings. The
+   port takes the first AI team's first robot; a real season's opponents are
+   not recoverable from the files read so far.
+3. **The event's game type.** `Events.txt` does not name one. The port reads the
+   arena script's `game_types` and picks Deathmatch first when the arena offers
+   several; the original's event setup may have carried a different selection.
+4. **The match length.** The event setup window's time dropdown was not read; the
+   length is the explicit `--seconds` (30 by default), and the evidence run
+   prints its own decision at that limit. That decision is the `--match`
+   evidence script (`plus.eliminatePlayer`, the tabletop path), not a rule.
+5. **Robot snapshots.** A `.bot` stores a raw 128×128 TGA blob, not a file name
+   the UI can resolve. The inventory draws the shipped `teamhq/nobot.bmp`
+   silhouette in the `bot snapshot img` cell; the robot's own picture is unshown.
+   This is a screen whose source has no model field.
+6. **Prize art and the trophy scene.** The stored prize's `art` is a `.tga`
+   (`UI\teamhq\events\trophies\…`) and is drawn in the history grid; the trophy
+   `model` is a `.gmf` in `Arenas\event_results`, and the `event_results`
+   3D scene (`Arenas/event_results.py`) is not composed. The award is the
+   shipped `event_winner.gib` over the event arena's preview.
+7. **The league's competition level.** `hq_league.gib`'s `competition level`
+   note names `AMATEUR`/`SEMI-PROFESSIONAL`/`PROFESSIONAL`, but the career model
+   has no level field; the screen keeps its own `LEAGUE STANDINGS` label.
+8. **Rank on a fresh season.** `Career::rank()` counts AI teams strictly ahead;
+   with all points zero every team ties and the player is rank 1, while the
+   shipped team record carries `16`. The screens show the model's rank; the
+   shipped 16 is not recomputed.
+9. **The schedule draw.** The original's RNG and seed were not recovered
+   (`docs/16-career.md` §3). The career uses seed 7 (`hq_mode::SEED`); the
+   schedule is the nine distinct events that seed draws.
+10. **`hq_history`'s prize grid has no cell template.** The grid's note says
+    "prize bitmaps … fixed at 80×80", but no `.gib` cell ships. The port adds an
+    `Image` per prize at the grid's own 82×82 cell geometry. The note also says
+    "only show last 32"; the career's `max_prizes` is 20 and the grid's visible
+    area is 4×5, so the model's list is what is drawn.
+11. **The award's prize text clips.** The `prize description` `DisplayBox` is
+    authored at a 211×64 margin. Long tournament messages wrap past it and the
+    screen shows the visible part; the complete description is in the run's
+    print and in the history's stored prize.
+12. **The event description clips.** `event_bracket.gib`'s description
+    `DisplayBox` is authored at 400×50; long `Events.txt` descriptions wrap past
+    it. The full text is in `Events.txt`.
+13. **The windowed `--hq` loop is not exercised here.** This environment has no
+    display, so `run_hq` shares the same `Session` and frame composition as the
+    headless run but was not opened in a window; the PNGs are the evidence. The
+    `--simulate-event` flow is the headless path and requires `--out`.
