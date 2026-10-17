@@ -115,6 +115,15 @@
 //! in `fg_d20`, against the `L`'s 0.57/0.48/0.59 — because the cell keeps the
 //! `F`'s stem and clips a bar. The rendered ink count equals the cell's ink count
 //! exactly, so the renderer is faithful and it is the file's rect that clips.
+//! A long label is not a different case: a character's cell and pen are the same
+//! in a two-character label and in the 44-character help line
+//! (`ra2-render`'s `a_glyphs_cell_does_not_depend_on_the_label_length`), the two
+//! renderers agree pixel for pixel, and the alphabet maps in order. The lower-case
+//! help body reads worse only because the same tail is a larger fraction of a
+//! 5–9 px cell. Three rescues were tried and rejected — widening the pen to the
+//! cell, squeezing the cell onto the advance, and trimming to the ink bbox — all
+//! because the tail is *inside* the shipped cell. The faithful rescue is the
+//! game's own re-pack, whose cut is the open read above.
 //!
 //! The file cannot be rescued by another layout. The header is invariant across
 //! all nine faces: word `0x0C` is exactly `1.0f`, the sixteen bytes at `0x18` are
@@ -252,7 +261,7 @@ impl Font {
         widths.get(widths.len() / 2).copied().unwrap_or(0)
     }
 
-    /// The advance width of a character.
+    /// The advance width of a character, exactly as the record stores it.
     pub fn advance(&self, c: char) -> i32 {
         if self.has_glyph(c) {
             self.glyph(c).advance

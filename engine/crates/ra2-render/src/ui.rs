@@ -994,6 +994,45 @@ mod tests {
         assets.scene(&placed, [1280, 1005])
     }
 
+    /// The long-label smear is the shipped cell, not the length. A character's
+    /// cell is the same in a two-character label as in the 44-character help
+    /// line, and the face's lower-case trigger letters have cells **wider than
+    /// their advance** — the shipped rect catches the neighbouring cell's tail,
+    /// which is the strike-through. The renderer samples exactly that cell, so
+    /// there is no length-dependent cell or uv to fix; the tests keep the
+    /// measured state instead of inventing a correction.
+    #[test]
+    fn a_glyphs_cell_does_not_depend_on_the_label_length() {
+        use ra2ui::Frame;
+        let Some(game) = game_dir() else { return };
+        let assets = UiAssets::open(&game).unwrap();
+        let Some(font) = assets.faces().get("fg_mcn14") else {
+            return;
+        };
+        let frame = Frame::new(40.0, 40.0, 0.0, 28.0);
+        let short = ra2ui::text_run(font, frame, "At");
+        let long = ra2ui::text_run(font, frame, "At the top of your screen there are buttons.");
+        assert_eq!(short.len(), 2);
+        assert!(long.len() > 30);
+        // The same two characters, at the same pen, with the same cells. A long
+        // label is not a different font or a different measurement.
+        assert_eq!(short[0].cell, long[0].cell, "the 'A' cell");
+        assert_eq!(short[1].cell, long[1].cell, "the 't' cell");
+        assert_eq!(short[0].rect.x, long[0].rect.x);
+        assert_eq!(short[1].rect.x, long[1].rect.x);
+        // The cell is the face's rect, and the lower-case trigger letters' cells
+        // are wider than the advance: the cell-clipping residue, measured.
+        for c in ['A', 't', 'h', 'n'] {
+            let glyph = font.glyph(c);
+            let (_, _, w, _) = glyph.rect(font.page_width, font.page_height);
+            assert!(
+                w > font.advance(c),
+                "{c:?}: cell {w} is wider than advance {}",
+                font.advance(c)
+            );
+        }
+    }
+
     /// The draw list a screen makes: an image's file is sampled whole, the
     /// cement is drawn before the logo, the labels are in the list, every quad
     /// is inside its clip, and every image the layout names resolves.

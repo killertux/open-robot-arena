@@ -725,6 +725,20 @@ Known, documented, not yet fixed:
     readings made from *ink counts in a page*, and the `O` measurements above are
     the latter kind.
 
+    A follow-up probe asked whether the **long** label's cells or uv were wrong,
+    since the help body reads worse than a short label. They are not. A character's
+    `cell` and its pen are **identical in "At" and in the 44-character help line**
+    (`a_glyphs_cell_does_not_depend_on_the_label_length`, `ra2-render`), `uishot` and
+    `tools/ui_compose.py` are **pixel for pixel identical** on the whole sentence, and
+    the upper-case alphabet renders in order. The help body is lower-case, and
+    `fg_mcn14`'s lower-case cells are 5–9 px, so the **same cell-clipping tail** is a
+    much larger fraction of the cell and the glyph and its neighbour merge; upper-case
+    labels and the large `fg_d*` faces read. Three renderer-side rescues were tried and
+    all fail because the tail is *inside* the shipped cell: advancing by the cell width
+    (or `max(advance, cell)`) only widens the line; squeezing the cell onto the advance
+    distorts it; trimming to the ink bbox keeps the tail (it is ink). The faithful
+    rescue is the game's own re-pack (`FUN_005cd560`), whose cut is still open.
+
     The shell's art can be counted, and that is worth having before M6: resolving
     every name a shipped screen states the way the renderer does gives **1,303
     names across the 116 screens and nine that do not resolve**. Seven are

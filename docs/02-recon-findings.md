@@ -495,6 +495,30 @@ which brackets its glyph is the normal case) is wrong.
 `the_font_file_is_internally_inconsistent` keeps the border-on-ink counts for all
 nine faces and the header checks.
 
+### The long-label probe: the same cell clipping, not a length bug
+
+A probe of the help body reported that a **long** label is unreadable while a
+**short** one reads, and that the cells/uv must therefore be wrong for the long
+string. Measured, they are not. Instrumenting the quads and diffing the renders:
+
+- A character's `cell` and its pen are **the same in "At" and in the 44-character
+  help line** (`a_glyphs_cell_does_not_depend_on_the_label_length`); they are a
+  function of the character and the face, never of the length.
+- `uishot` and `tools/ui_compose.py` are **pixel for pixel identical** on the whole
+  sentence, and the upper-case alphabet renders in order, so the record→character
+  mapping and the `u`/`v` swap are right.
+- The difference is the **character mix and the size**. The help line is lower-case,
+  and `fg_mcn14`'s lower-case cells are 5–9 px; the same cell-clipping tail (a few
+  columns of the neighbour) is a much larger fraction of a lower-case cell, so the
+  glyph and the tail merge. Upper-case labels and the large `fg_d*` faces read.
+
+Three renderer-side rescues were tried and all fail, because the tail is **inside
+the shipped cell**: advancing the pen by the cell width (or `max(advance, cell)`)
+only widens the line and leaves the tail; squeezing the cell onto the advance
+distorts it; trimming to the ink bbox keeps the tail (it is ink). The faithful
+rescue is the game's own re-pack (`FUN_005cd560`), named above; **how it locates
+the cut is still open**, so the renderer stays faithful to the shipped cell.
+
 ### Fixed: a glyph's quad drew its cell mirrored
 
 The "two shapes per character" reading was the page's `u` mirror, fixed above: the
