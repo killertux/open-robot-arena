@@ -228,14 +228,61 @@ class), and a control's own `Notes` say what it loads or which purpose it links
 to. The match after the arena picker is the game's C++, so the route stops at the
 picker.
 
+## Run it on Linux
+
+P2 ships a **portable tarball**, built and smoke-tested here; Flatpak and
+AppImage are documented recipes only (`packaging/NOT_BUILT.md`). The game is
+never in the package — you supply your own install.
+
+```bash
+# Build the package (offline): release binaries + launcher + desktop file + icon
+tools/package.sh                 # add --check for fmt/clippy/tests first
+
+# Then, as a player:
+tar xzf dist/ra2-open-robot-arena-0.1.0-linux-x86_64.tar.gz
+cd ra2-open-robot-arena-0.1.0-linux-x86_64
+./run.sh --game "/path/to/Robot Arena 2"
+```
+
+With no route, the launcher runs the botlab route and writes seven 1280×1005
+frames to `~/.local/state/ra2-open-robot-arena/frames`; `--route exhibition`
+writes three. `run.sh` finds the game through `--game`, then `RA2_GAME_DIR`,
+then `$XDG_DATA_HOME/ra2-open-robot-arena/game`, a `game/` directory beside the
+launcher, `./local/game` upwards from the checkout, and the usual
+`/usr/local/share`, `/usr/share` and `/opt` places. It requires `RA2.cfz`,
+`UI/` and `Scripts/`, and its error lists all three and every path it tried.
+
+**CPython 3.12 is required and is not bundled.** `ra2-shell`, `ra2-sim` and
+`ra2-duel` link `libpython3.12.so.1.0` (`ldd`/`readelf -d`), so the dynamic
+loader needs the system 3.12 runtime and stdlib before `main()` runs;
+`--no-python` skips `Scripts/Main.py` but not the dependency. Check with
+`ldd bin/ra2-shell | grep libpython`; on Debian/Ubuntu install
+`python3.12 libpython3.12`. The launcher performs this check itself and
+`run.sh --check-python` prints it. `./install.sh` adds a user (or system)
+launcher, `.desktop` entry and icon; `--uninstall` removes them and keeps your
+game.
+
+The package ships `ra2-shell` (the entry point), `ra2` (data inspector/support),
+`ra2-render` (asset/scene PNGs), and the two playable headless paths `ra2-sim`
+and `ra2-duel`. The shell has no window or input loop; the in-match game is the
+original C++, so the shell stops at the arena picker. What works and what does
+not is in the tarball's `README.txt` and `docs/08-packaging.md`.
+
+`tools/smoke_package.sh` is the acceptance test: it unpacks the tarball into a
+temp directory, runs the botlab route headlessly, asserts the seven frames,
+compares the boot frame byte-for-byte with an independent render of
+`mainmenu/mainmenu.gib`, and exercises the missing-game error and Python check.
+
 ## Layout
 
 ```
 docs/      Design notes, reverse-engineering findings, format specs
-tools/     Our own analysis/extraction/build scripts (Python)
+tools/     Our own analysis/extraction/build scripts (Python and shell)
+packaging/ Launcher, installer, .desktop, icon, and unbuilt Flatpak/AppImage recipes
 engine/    The native engine (Rust workspace: ra2fmt, ra2-cli, ra2-render,
            ra2sim, ra2script — the script layer on an embedded CPython —,
            ra2ui, the shell's layout model, and ra2-shell, its entry point)
+dist/      (git-ignored) portable tarballs built by tools/package.sh
 local/     (git-ignored) original game files and extracted data
 ```
 
