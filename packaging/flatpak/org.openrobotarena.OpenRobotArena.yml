@@ -1,19 +1,17 @@
-# NOT BUILT HERE — documented Flatpak recipe.
+# Flatpak manifest for Open Robot Arena — WRITTEN AND STATICALLY CHECKED,
+# NOT BUILT HERE (no flatpak-builder and no org.freedesktop.Sdk 24.08 on this
+# host).  See packaging/flatpak/README.md and docs/08-packaging.md §6.
 #
-# Why it is not an artifact: this machine has no flatpak-builder, no
-# org.freedesktop.Sdk 24.08 runtime, and no network to fetch either; cargo in
-# this repository runs with --offline and a Flatpak sandbox would start with an
-# empty cargo cache. See packaging/NOT_BUILT.md. Do not treat this file as a
-# tested manifest.
-#
-# To try it where the tools and network exist:
 #   flatpak-builder --force-clean build-dir packaging/flatpak/org.openrobotarena.OpenRobotArena.yml
 #   flatpak-builder --user --install --force-clean build-dir packaging/flatpak/org.openrobotarena.OpenRobotArena.yml
+#   flatpak run org.openrobotarena.OpenRobotArena
 #
-# runtime 24.08 is chosen because it carries CPython 3.12, the ABI the binaries
-# are built against. If the runtime moves to a newer Python, ra2script's pyo3
-# link will fail or the shell will demand a different libpython: rebuild the
-# wheel... binary against the runtime's Python and update this file.
+# Runtime choice: freedesktop-sdk 24.08 ships CPython 3.12 (24.08.21 updated
+# python3 to 3.12.11-0).  That is the ABI the binaries link against:
+# libpython3.12.so.1.0, as a DT_NEEDED entry resolved before main().  The
+# installed 23.08 runtime on this host was checked and has Python 3.11.13, so
+# 23.08 is the wrong runtime; the SDK 24.08 was not installed here to run.
+# The SDK also supplies the Python 3.12 headers and python3.pc that pyo3 needs.
 app-id: org.openrobotarena.OpenRobotArena
 runtime: org.freedesktop.Platform
 runtime-version: '24.08'
@@ -23,41 +21,104 @@ sdk-extensions:
 command: ra2-open-robot-arena
 
 finish-args:
-  # The renderers are offscreen wgpu: they need a GPU adapter, not a display.
-  - --device=dri
+  # Windowed client: Wayland and X11, plus the shared-memory transport X11
+  # needs.  This does not grant a display to the headless tools; they are run
+  # with `flatpak run --command=...`.
+  - --socket=wayland
+  - --socket=fallback-x11
   - --share=ipc
-  # The player's game directory is read in place. Flatpak has no default
-  # location for abandonware, so grant the home directory read-only and let the
-  # launcher find it, or pass --filesystem=/path/to/game:ro.
+  # ra2-audio is linked into ra2-app (rodio).  No microphone is used.
+  - --socket=pulseaudio
+  # wgpu (Vulkan) needs a render node; no display device is used offscreen.
+  - --device=dri
+  # v1.0 has no network play, no update check and no telemetry.
+  # (Deliberately no --share=network.)
+  #
+  # The game is supplied by the player and read in place.  `home:ro` is the
+  # blunt grant: it covers the documented default
+  # ~/.local/share/ra2-open-robot-arena/game and any install under $HOME,
+  # without giving write access to the player's files.  A directory outside
+  # $HOME needs a user override once:
+  #   flatpak override --user --filesystem="/path/to/game:ro" \
+  #       org.openrobotarena.OpenRobotArena
+  # The first-run picker (packaging/flatpak/ra2-first-run.sh) uses zenity,
+  # which talks to the XDG desktop portal inside the sandbox; a directory
+  # chosen that way is exported in the document portal and is readable while
+  # the export lives.  If its /run/user/.../doc path goes stale, the picker
+  # asks again.  The recipe uses `home:ro` + the portal chooser, not a
+  # read-write home and not a static per-path grant.
   - --filesystem=home:ro
-  - --env=RA2_GAME_DIR= # set at run time, e.g.
-                        # flatpak run --env=RA2_GAME_DIR=/games/RA2 org.openrobotarena.OpenRobotArena
+  - --env=GTK_USE_PORTAL=1
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
+    # cargo-sources.json extracts every crate under cargo/vendor/ and writes
+    # cargo/config, so Cargo never needs the network.  This is what makes
+    # `cargo build --release --offline` work in the sandbox's empty cache.
     CARGO_HOME: /run/build/ra2-open-robot-arena/cargo
+    CARGO_NET_OFFLINE: 'true'
 
 modules:
   - name: ra2-open-robot-arena
     buildsystem: simple
     build-commands:
-      # The source must be vendored for an offline Flatpak build:
-      #   cargo vendor --manifest-path engine/Cargo.toml vendor
-      # and .cargo/config.toml must point at it. This is the step that could
-      # not be done here (network).
-      - install -d /app/lib/ra2-open-robot-arena/bin /app/bin
+      # Build the same workspace members tools/package.sh builds.  Jolt comes
+      # from oxijolt-sys's vendored sources: CARGO_NET_OFFLINE also stops that
+      # crate's build script from fetching its optional prebuilt archive.
+      - cargo build --release --offline --manifest-path engine/Cargo.toml
+        -p ra2-app -p ra2-shell -p ra2-cli -p ra2-render -p ra2sim
+
+      - install -d /app/lib/ra2-open-robot-arena/bin
+      - install -d /app/bin
+      - install -d /app/share/applications
+      - install -d /app/share/metainfo
+      - install -d /app/share/icons/hicolor/256x256/apps
+      - install -d /app/share/icons/hicolor/scalable/apps
+
+      - install -m755 engine/target/release/ra2-app /app/lib/ra2-open-robot-arena/bin/ra2-app
       - install -m755 engine/target/release/ra2-shell /app/lib/ra2-open-robot-arena/bin/ra2-shell
       - install -m755 engine/target/release/ra2 /app/lib/ra2-open-robot-arena/bin/ra2
       - install -m755 engine/target/release/ra2-render /app/lib/ra2-open-robot-arena/bin/ra2-render
       - install -m755 engine/target/release/ra2-sim /app/lib/ra2-open-robot-arena/bin/ra2-sim
       - install -m755 engine/target/release/ra2-duel /app/lib/ra2-open-robot-arena/bin/ra2-duel
+      # Make the tools reachable through `flatpak run --command=NAME`.  The
+      # desktop command is still the first-run wrapper below.
+      - for bin in ra2-app ra2-shell ra2 ra2-render ra2-sim ra2-duel; do
+        ln -s /app/lib/ra2-open-robot-arena/bin/$bin /app/bin/$bin; done
+
+      # run.sh finds the game and performs the CPython 3.12 check; the
+      # first-run wrapper asks for the directory (portal chooser or terminal)
+      # and passes it as --game, then persists the choice in
+      # $XDG_CONFIG_HOME/ra2-open-robot-arena/game-dir (per-app, so
+      # ~/.var/app/org.openrobotarena.OpenRobotArena/config/... on the host).
       - install -m755 packaging/run.sh /app/lib/ra2-open-robot-arena/run.sh
-      - ln -s /app/lib/ra2-open-robot-arena/run.sh /app/bin/ra2-open-robot-arena
+      - install -m755 packaging/flatpak/ra2-first-run.sh
+        /app/lib/ra2-open-robot-arena/ra2-first-run.sh
+      - ln -s /app/lib/ra2-open-robot-arena/ra2-first-run.sh
+        /app/bin/ra2-open-robot-arena
+
       - install -Dm644 packaging/ra2-open-robot-arena.desktop
         /app/share/applications/org.openrobotarena.OpenRobotArena.desktop
       - install -Dm644 packaging/ra2-open-robot-arena.svg
         /app/share/icons/hicolor/scalable/apps/ra2-open-robot-arena.svg
+      - python3 tools/make_icon.py
+        /app/share/icons/hicolor/256x256/apps/ra2-open-robot-arena.png
+      - install -Dm644
+        packaging/flatpak/org.openrobotarena.OpenRobotArena.metainfo.xml
+        /app/share/metainfo/org.openrobotarena.OpenRobotArena.metainfo.xml
+
     sources:
       - type: dir
         path: ../..
+        # Never copy the player's game, build output or git metadata into the
+        # sandbox.  engine/target is rebuilt from source inside the sandbox.
+        skip:
+          - .git
+          - local
+          - dist
+          - downloads
+          - engine/target
+      # Generated from engine/Cargo.lock by gen-cargo-sources.py.  A JSON
+      # array of flatpak-builder sources is accepted as a single entry here.
+      - cargo-sources.json

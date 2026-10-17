@@ -1,9 +1,10 @@
 # 08 — Packaging (Linux, P2)
 
 P2's acceptance is a **portable tarball that unpacks and runs**, built and
-smoke-tested on this machine. Flatpak and AppImage were **not** built: the
-recipes are in `packaging/` and are marked `NOT BUILT HERE` with the reason
-(no network, no toolchain). macOS and Windows are P3: they are documented in
+smoke-tested on this machine. Flatpak and AppImage were **not** built: their
+recipes are now complete and statically checked under `packaging/`, and are
+marked `NOT BUILT HERE` with the exact missing tools (section 6). macOS and
+Windows are P3: they are documented in
 [`09-platforms.md`](09-platforms.md) and are **not built or tested**.
 
 Since P2 the shell gained its application (`ra2-app`, M7), so M12 repackaged
@@ -178,6 +179,11 @@ distro whose system Python is newer) is documented as:
 LD_LIBRARY_PATH=/path/to/3.12/lib PYTHONHOME=/path/to/3.12 ./run.sh ...
 ```
 
+`--check-python` prints the same report as the smoke test; when the check
+fails it also prints the install guidance above (so an AppImage's `AppRun`,
+which calls this, shows the launcher's own message rather than a second copy
+that could drift).
+
 Measured: on this host the launcher prints
 
 ```
@@ -304,29 +310,161 @@ UI pipeline changed since; equality, not the value, is the assertion.
 `tools/check.sh`, which reuses this smoke test rather than duplicating it; see
 §9.
 
-## 6. Flatpak and AppImage: NOT built here
+## 6. Flatpak and AppImage: recipes checked, NOT built here
 
-Both are recipes under `packaging/`, header-marked `NOT BUILT HERE`, plus
-`packaging/NOT_BUILT.md` with the reason. Short version:
+Both recipes now exist in full and were statically checked. **Neither was
+built, installed or run.** The release is still the tarball.
 
-* no network: Flatpak needs the `org.freedesktop.Sdk` 24.08 runtime (~1 GB)
-  and the Rust SDK extension; AppImage downloads its runtime and needs
-  `appimagetool`/FUSE;
-* neither `flatpak-builder` nor `appimagetool` is installed on this machine;
-* Cargo is offline. A Flatpak sandbox starts with an empty cargo cache, so the
-  manifest additionally needs `cargo vendor` — a network fetch that was not
-  available.
+| | Flatpak | AppImage |
+|---|---|---|
+| Recipe | `packaging/flatpak/org.openrobotarena.OpenRobotArena.yml` | `packaging/appimage/build-appimage.sh` |
+| Entry | `packaging/flatpak/ra2-first-run.sh` → `run.sh` | `packaging/appimage/AppRun` → `run.sh` |
+| Metadata | `.desktop`, PNG/SVG icon, `…metainfo.xml` | `.desktop`, PNG/SVG icon, same metainfo |
+| Python | runtime `24.08` supplies CPython 3.12 | host CPython 3.12 required, not bundled |
+| State | **not built** | **not built** |
+| Missing here | `flatpak-builder`; the 24.08 SDK + Rust extension; network | `appimagetool`; optional `linuxdeploy`; AppImage runtime/FUSE; network |
 
-The Flatpak manifest (`packaging/flatpak/org.openrobotarena.OpenRobotArena.yml`)
-targets runtime 24.08 because it carries CPython 3.12, grants `--device=dri`
-and read-only home access to the game, and installs the runner under
-`/app/lib/ra2-open-robot-arena` with a symlink in `/app/bin`. The AppImage
-recipe (`packaging/appimage/build-appimage.sh`) appimages the tarball and would
-still link the host's libpython unless CPython 3.12 is bundled — a decision
-that was not measured and is called out in the script.
+### 6.1 Flatpak
 
-Neither is evidence of anything until it is built and the smoke test is run
-against the resulting artifact.
+The manifest uses `org.freedesktop.Platform`/`org.freedesktop.Sdk` **24.08**
+plus `org.freedesktop.Sdk.Extension.rust-stable`. 24.08 is the right runtime
+because it carries CPython 3.12 (freedesktop-sdk 24.08.21 updated python3 to
+3.12.11-0), the ABI the binaries link against. The **23.08** runtime installed
+on this host was checked and has **Python 3.11.13**, which cannot satisfy the
+`libpython3.12.so.1.0` dependency; the SDK half of 24.08 supplies the 3.12
+headers and `python3.pc` that `pyo3` needs at build time. 24.08 itself was not
+installed here, so that is a fact from the runtime's release notes, not a run.
+
+The module builds the same workspace members `tools/package.sh` does:
+
+```
+cargo build --release --offline --manifest-path engine/Cargo.toml \
+    -p ra2-app -p ra2-shell -p ra2-cli -p ra2-render -p ra2sim
+```
+
+and installs `ra2-app` plus the five tools under
+`/app/lib/ra2-open-robot-arena/bin`, with symlinks for all six in `/app/bin`
+(so `flatpak run --command=ra2-shell` etc. work), `run.sh` and the first-run
+wrapper beside them, a symlink `/app/bin/ra2-open-robot-arena` as the default
+command, the `.desktop` entry under the app id, the hicolor PNG/SVG, and the
+AppStream metainfo under `/app/share/metainfo`. `local/`, `dist/`,
+`downloads/`, `engine/target` and `.git` are skipped, so the player's game and
+old build output never enter the sandbox.
+
+`finish-args` are: Wayland and X11 (`--socket=wayland`,
+`--socket=fallback-x11`, `--share=ipc`), PulseAudio, `--device=dri`,
+`--filesystem=home:ro`, and `--env=GTK_USE_PORTAL=1`. There is deliberately
+no `--share=network`: v1.0 has no network play, update check or telemetry.
+
+**Game directory.** The game is never bundled. `home:ro` is the blunt grant:
+read-only access to the whole home directory, which covers the documented
+`~/.local/share/ra2-open-robot-arena/game` default and any install under
+`$HOME`. It is not `--filesystem=home` (read-write) and not a static
+per-path grant, because the player's path is unknown at build time. On first
+run `ra2-first-run.sh` opens a directory chooser through `zenity` and the XDG
+desktop portal; the chosen directory is exported by the document portal and
+its path is passed to `run.sh` as `--game`, then remembered in
+`$XDG_CONFIG_HOME/ra2-open-robot-arena/game-dir` (on the host, under
+`~/.var/app/org.openrobotarena.OpenRobotArena/config/`). Document-portal paths
+can go stale across sessions, so the wrapper validates the saved path every
+run and asks again. A game outside `$HOME` is most durable with one override:
+
+```
+flatpak override --user --filesystem="/path/to/Robot Arena 2:ro" \
+    org.openrobotarena.OpenRobotArena
+```
+
+**Offline Cargo.** A Flatpak sandbox starts with an empty `CARGO_HOME`, so
+`--offline` alone cannot work. `packaging/flatpak/gen-cargo-sources.py` reads
+`engine/Cargo.lock` and writes `cargo-sources.json` (320 crates.io archives,
+320 inline `.cargo-checksum.json` files and a `cargo/config` pointing at
+`cargo/vendor`). flatpak-builder extracts them; the manifest sets
+`CARGO_HOME=/run/build/ra2-open-robot-arena/cargo` and
+`CARGO_NET_OFFLINE=true`, which also stops `oxijolt-sys`'s build script from
+fetching its optional prebuilt Jolt archive, so Jolt 5.6.0 is built from the
+vendored CMake sources. Regenerate with `gen-cargo-sources.py` (and check with
+`--check`) after a lockfile change.
+
+Commands where the tools and network exist:
+
+```
+flatpak install flathub org.freedesktop.Sdk//24.08 \
+    org.freedesktop.Sdk.Extension.rust-stable//24.08
+flatpak-builder --force-clean build-dir \
+    packaging/flatpak/org.openrobotarena.OpenRobotArena.yml
+flatpak-builder --user --install --force-clean build-dir \
+    packaging/flatpak/org.openrobotarena.OpenRobotArena.yml
+flatpak run org.openrobotarena.OpenRobotArena
+flatpak run --command=ra2-shell org.openrobotarena.OpenRobotArena \
+    --game "/path/to/Robot Arena 2" --route botlab --out /tmp/shots
+```
+
+### 6.2 AppImage
+
+`packaging/appimage/build-appimage.sh [tarball]` extracts the portable tarball
+under `AppDir/usr`, installs `AppRun` and the root `.desktop`/icon/metainfo,
+and calls `appimagetool` (`linuxdeploy` too, if present). With linuxdeploy the
+script passes `--exclude-library 'libpython3.12.so*'` and fails if a libpython
+still lands in the AppDir, then reinstalls its own `AppRun` so linuxdeploy
+cannot replace it.
+
+**Decision: require the host's CPython 3.12; do not bundle it.** The binaries
+carry `DT_NEEDED libpython3.12.so.1.0`, so the loader resolves it before
+`main()`. Bundling would mean a second interpreter tree (libpython + stdlib),
+`LD_LIBRARY_PATH`/`PYTHONHOME` wiring, choosing whose build to trust, and
+tracking its security updates — the same reasons the tarball does not bundle
+it. `AppRun` runs the portable launcher's `--check-python` before starting the
+client and prints exactly the launcher's message on failure. Flatpak differs
+because its 24.08 *runtime* already supplies 3.12; that is not a bundle the
+project maintains.
+
+Commands (two steps, on a host with `appimagetool`):
+
+```
+./tools/package.sh --no-smoke
+./packaging/appimage/build-appimage.sh
+chmod +x dist/ra2-open-robot-arena-0.1.0-x86_64.AppImage
+./dist/ra2-open-robot-arena-0.1.0-x86_64.AppImage --game "/path/to/Robot Arena 2"
+```
+
+### 6.3 What was actually checked
+
+This is the evidence behind the recipes, and it is not a build:
+
+* `flatpak-builder --version` → **command not found**. `flatpak --version` is
+  1.14.6; `flatpak list --runtime` has `org.freedesktop.Platform` 23.08 only
+  (its `python3 --version` is 3.11.13). No `org.freedesktop.Sdk` 24.08, no
+  rust-stable extension, and no network to install them.
+* `command -v appimagetool` and `command -v linuxdeploy` → **nothing**;
+  `build-appimage.sh` exits 2 with `NOT BUILT HERE` before staging. The
+  AppImage runtime/FUSE is also fetched on first use.
+* The manifest parses with PyYAML 6.0.1; `sh -n` passes on `run.sh`,
+  `ra2-first-run.sh`, `AppRun` and `build-appimage.sh`.
+  `desktop-file-validate` passes on the `.desktop` file. `appstreamcli
+  validate --no-net` reports one warning (no homepage URL — the tree records
+  no canonical project URL) and no errors.
+* `gen-cargo-sources.py --check` matches `engine/Cargo.lock`: 320 registry
+  packages, every checksum 64 hex digits, no duplicate destinations, no
+  missing/extra crate, and the generated `cargo/config` points at
+  `cargo/vendor`.
+* The build's file list was checked against the tarball produced by
+  `tools/package.sh --no-smoke` (22 MiB compressed, 62 MiB unpacked):
+  `bin/{ra2-app,ra2-shell,ra2,ra2-render,ra2-sim,ra2-duel}`, `run.sh`, the
+  `.desktop`, the 256 PNG and the SVG are all present, and there is no
+  `RA2.cfz`, `.gmf`, `.bot`, `.gib` or `UI/`. The packaged `run.sh` is
+  byte-identical to `packaging/run.sh`, and its `--check-python` prints
+  `3.12.3`, `libpython3.12.so.1.0: found`, `CPython 3.12 stdlib: found`.
+* The first-run wrapper was exercised against a fake root with a stub
+  `run.sh`: explicit `--game`, the remembered path, `--check-python`
+  passthrough and the no-game/no-tty error (exit 2, with the override and
+  `RA2_GAME_DIR` commands). `AppRun` was exercised against a fake AppDir with
+  stub `usr/run.sh` for the success and Python-failure paths. These are host
+  shell tests, not Flatpak/AppImage runs.
+
+Neither recipe is evidence of anything until it is built and the tarball's
+smoke assertions can be repeated against the artifact (boot frame equality,
+missing-game error, `--check-python`). Until then the tarball remains the
+release.
 
 ## 7. Release checklist
 
@@ -441,7 +579,8 @@ not read as more than it is.
 
 ## 10. What this round does not cover
 
-* **Flatpak and AppImage** — recipes only; unbuilt and unverified (section 6).
+* **Flatpak and AppImage** — full recipes, statically checked; still unbuilt
+  and unverified (section 6).
 * **macOS and Windows** — documented path only (section 8, docs/09); no
   build, no artifact, no test run.
 * **A window on a real display.** `ra2-app` has a winit/wgpu window, but this

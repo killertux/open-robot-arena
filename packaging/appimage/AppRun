@@ -1,0 +1,43 @@
+#!/bin/sh
+# AppRun for the Open Robot Arena AppImage.
+#
+# The AppDir layout is the portable tarball under usr/:
+#
+#   AppRun
+#   ra2-open-robot-arena.desktop
+#   ra2-open-robot-arena.png
+#   ra2-open-robot-arena.svg
+#   usr/bin/ra2-app, ra2-shell, ra2, ra2-render, ra2-sim, ra2-duel
+#   usr/run.sh
+#   usr/share/...
+#
+# CPython decision: this AppImage does NOT bundle an interpreter.  The
+# binaries have DT_NEEDED libpython3.12.so.1.0, and the loader resolves it
+# before main(), so --no-python cannot remove it.  Rather than ship a second
+# interpreter tree (and its security updates and PYTHONHOME wiring), AppRun
+# requires the host's CPython 3.12 and checks it with the portable launcher's
+# own check.  A host with only 3.13 will refuse, with the launcher's message.
+set -eu
+
+APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)}
+APP=ra2-open-robot-arena
+
+if [ ! -x "$APPDIR/usr/bin/ra2-app" ]; then
+    echo "$APP: $APPDIR/usr/bin/ra2-app is missing; the AppImage is incomplete." >&2
+    exit 2
+fi
+if [ ! -x "$APPDIR/usr/run.sh" ]; then
+    echo "$APP: $APPDIR/usr/run.sh is missing; the AppImage is incomplete." >&2
+    exit 2
+fi
+
+# run.sh --check-python prints the launcher's report and, on failure, its
+# guidance ("this build embeds CPython 3.12 and needs the system runtime",
+# the missing piece, and the distro commands).  Run it quietly first, then let
+# it print only when it fails, so a normal launch is not noisy.
+if ! "$APPDIR/usr/run.sh" --check-python >/dev/null 2>&1; then
+    "$APPDIR/usr/run.sh" --check-python >&2 || true
+    exit 2
+fi
+
+exec "$APPDIR/usr/run.sh" "$@"

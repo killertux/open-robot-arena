@@ -31,6 +31,13 @@ Measured host for the verified column: Linux Mint 22.3 (Ubuntu 24.04 base),
 x86_64, rustc 1.98.1, CPython 3.12.3, Mesa Vulkan. See
 [`08-packaging.md`](08-packaging.md) §3 and §5.
 
+Linux **package formats** beyond the tarball are recipes, not artifacts:
+`packaging/flatpak/` (runtime 24.08, which carries CPython 3.12) and
+`packaging/appimage/` (host CPython 3.12 required, not bundled). Both were
+statically checked and neither was built — `flatpak-builder`,
+`appimagetool`/`linuxdeploy` and the 24.08 SDK/runtime are absent here. See
+[`08-packaging.md`](08-packaging.md) §6 for the exact gaps and commands.
+
 ## 2. What a build needs on each platform
 
 Common to all three:
@@ -202,6 +209,8 @@ For each platform, the same acceptance the Linux tarball has (docs/08 §5):
 | The Python link is discoverable | `otool -L` (macOS) / `dumpbin /dependents` (Windows) shows the 3.12 library, and the 3.12 stdlib is found at runtime |
 | The game search and its error | run with `--game` pointing at a directory without `RA2.cfz`, `UI/` and `Scripts/`; the error must name all three |
 | The packaged artifact runs from a clean tree | unpack the `.app`/`.zip` on a machine with no Rust toolchain and no game inside; run the same commands |
+| A Linux Flatpak runs | `flatpak-builder --user --install`, then `flatpak run --command=ra2-app org.openrobotarena.OpenRobotArena --game "$GAME" --offscreen out.png` on a host without the Rust toolchain; the first-run portal picker must return a readable path |
+| A Linux AppImage runs | `packaging/appimage/build-appimage.sh`, then the resulting file with `--offscreen` on a clean host, with and without CPython 3.12 installed (the latter must print the launcher's message and exit non-zero) |
 | Signing, notarisation, installer | `codesign --verify --deep --strict` + `spctl -a -vv` + `xcrun stapler validate`; or an installed MSI that launches |
 | arm64 Windows, universal macOS, aarch64 Linux | one build/test/smoke run per target; none exists |
 
@@ -238,6 +247,11 @@ layout and a README, not a tested application: the macOS script does not copy
 or repair the dylib, build an `.icns`, sign or notarise, and the Windows
 script does not write `run.cmd`/`run.ps1`. Their output must not be published
 as a release until the table above passes on that platform.
+
+The Linux Flatpak and AppImage recipes (M12.3) are in the same state: written,
+statically checked, never built. They are described in
+[`08-packaging.md`](08-packaging.md) §6; the missing tools are
+`flatpak-builder`, the 24.08 SDK/runtime and `appimagetool`/`linuxdeploy`.
 
 The honest summary: **the platform table is a plan with one verified row.**
 Linux is the artifact this repository ships today. macOS and Windows have a
