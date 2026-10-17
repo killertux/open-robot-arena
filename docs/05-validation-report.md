@@ -408,7 +408,10 @@ Known, documented, not yet fixed:
     and draws them headlessly: `uishot <screen.gib> <out.png>` renders any
     shipped screen. It is checked against the composite, which shares no code
     with it: mean per-channel difference 0.42 of 255 on `mainmenu.gib`, 0.24 on
-    `hq_league.gib`, the rest at glyph and art edges. Writing it corrected three
+    `hq_league.gib`, the rest at glyph and art edges. (Those numbers came from
+    the composite reading the resolver's rectangles; after the `TextBox`/
+    baseline rule the composite lays the screen out itself, and the current
+    numbers are in §4.22.) Writing it corrected three
     things, two of them in the *check*: the composite drew no `Rectangle` fills,
     and it sampled every glyph's rows turned over — the `V`-ish `M` that had been
     read as a property of the font — and the engine's own draw order was wrong
@@ -896,6 +899,115 @@ Known, documented, not yet fixed:
     every screen. `tools/ui_compose.py` draws those labels with the game's own
     faces and fore-colours.
 
+22. **The two-renderer check after the `TextBox`/baseline rule — [LANDED
+    2026-10-17].** The layout model corrected three rules from the shipped data
+    (commit `403947d`): a `TextBox`'s `Alignment` is the alignment of the text
+    inside it, so the box keeps its authored `Position` (reading it as a box
+    anchor moved `matchresults.gib`'s title half a box up and its own `ClipMode`
+    then erased it); a `Text` that is a direct child of a `TextBox` or a `Group`
+    has a **baseline** in `_Position.y`, so its frame is shifted up by the face's
+    ascent (`statusmeters.gib`'s name is at y 8 in a 12-pixel box); and a hidden
+    widget takes its whole subtree with it, because a hidden group's children
+    are still `Visible true` in the file (`gamewindow.gib`'s countdown text,
+    `result_cell.gib`'s `Spectator`). The corpus moved from 204 to 155 frames
+    reaching past the screen and from 57 to 77 files placing entirely on it.
+
+    The cross-check had silently stopped checking that. `tools/ui_compose.py`
+    took its rectangles from `uidump --rects`, so it never implemented the layout
+    itself; when the resolver changed, a `uidump` built before the change kept
+    producing the old rectangles beside a current `uishot`, and the composite
+    drew the match-results title where the old anchor put it — clipped away. The
+    fix is structural: **the composite now reads the `.gib` and resolves it
+    itself** (`Position`/`Size`, the 3×3 anchor, the `TextBox` exception, the
+    baseline for `TextBox`/`Group` children, hidden subtrees, `ClipMode`,
+    `ChildOrder`, `SplitFrame`, `ScrollBar`, `Grid`/`ListBox`, attachments, and
+    `Proxy` inlining), while keeping the existing bottom-up glyph-page sampling,
+    clipping and blending. It shares the game's art and faces with `uishot`, not
+    the layout. The old saved-rects path remains as `--dump` for diffing the two
+    resolvers, and is not used by the parity tool.
+
+    The layout halves agree exactly. On all **116** shipped screens the Python
+    resolver's text frames and the Rust resolver's (`uidump --rects`) are equal
+    to the printed 0.01 px on all **593** labels — the same x, the same y, the
+    same face and the same string (44 of those labels are on the ten screens
+    below). The pictures differ only where rasterisation differs:
+
+    | screen | `uishot` quads | blocks > 1/255 | blocks > 8/255 | MAE |
+    |---|---|---:|---:|---:|
+    | `UI/mainmenu/mainmenu.gib` | 66 | 304 | 105 | **0.4529** |
+    | `UI/common/matchresults.gib` | 39 | 280 | 59 | **0.2352** |
+    | `UI/common/statusmeters.gib` | 22 | 0 | 0 | **0.0001** |
+    | `UI/botlab/botlabwin.gib` | 60 | 115 | 18 | **0.2559** |
+    | `UI/teamhq/hq_league.gib` | 52 | 259 | 107 | **0.5250** |
+    | `UI/exhibition/exhib_setup.gib` | 83 | 53 | 38 | **0.2158** |
+    | `UI/common/gamewindow.gib` | 10 | 4 | 4 | **0.0236** |
+    | `UI/common/result_cell.gib` | 71 | 19 | 1 | **0.0154** |
+    | `UI/teamhq/season_results.gib` | 118 | 118 | 3 | **0.1014** |
+    | `UI/teamhq/event_bracket.gib` | 176 | 353 | 34 | **0.3504** |
+
+    (`botlab/botlab.gib` does not exist in the shipped trees; the workshop's
+    screen is `botlabwin.gib`. One block is 16×16 pixels. "Differing" is a block
+    mean above **1.0/255**, the tightest reading that noise does not hide; the
+    `> 8` column is the visibly different blocks.)
+
+    The non-zero regions are these, and none of them is a layout difference:
+
+    * **Glyph runs at fractional coordinates** account for nearly all of it.
+      `uishot` rasterises each glyph as a quad whose edges sit at fractional
+      pixel positions (`text_run` puts the baseline at `frame.y + ascent` and
+      each cell at `baseline - third`); the GPU covers whichever pixel centres
+      fall inside. The composite blits each cell at `floor(x), floor(y)`. The
+      same glyph therefore lands on a pixel boundary, or half a pixel off it,
+      differently in the two paths. The top blocks are exactly the labels:
+      `matchresults`' title `(576–656, 288)` at 13.9–24.4, `hq_league`'s
+      `LEAGUE STANDINGS` / `Season 3` at `(48–160, 96)` and `(1072–1104, 96)` at
+      28.5–37.1, `event_bracket`'s `THE POWERBOLT CHAMPIONSHIP` at
+      `(688–720, 16)` at 44.8–53.6, `exhib_setup`'s `EXHIBITION MATCH` at
+      `(672–720, 160)` at 46.9–65.4, `gamewindow`'s `Skip Intro` at
+      `(608–656, 960)` at 21.4–36.9. `statusmeters` is the limiting case: two
+      labels, every glyph on an integer boundary, **0** differing blocks and
+      MAE 0.0001.
+    * **Hard horizontal art edges at fractional y.** The main menu's backdrop
+      pipes and `hq_league`'s panel divider are one-pixel lines inside larger
+      images drawn at half-pixel positions. Nearest sampling of the same texture
+      at `floor(y)` versus the GPU's pixel-centre coverage moves that one row;
+      the heat map shows it as a long, thin streak (the pipe rows in
+      `mainmenu`, the divider in `hq_league`). It is the same class of residual
+      as the glyphs, not a different rectangle.
+    * **`Lines` segments.** The composite tests pixel centres against the
+      segment's quad and paints whole pixels; the GPU rasterises the same quad
+      with its own coverage rule. `hq_league`'s and `season_results`' dividers
+      are one pixel wide and contribute a few blocks at `(176–320, 272)` and
+      the panel edge; their position is identical in both pictures.
+    * **`result_cell`'s one block above 8** is the team logo's alpha edge
+      `(32, 48)`; the logo, its glow and the cell text match elsewhere. Its MAE
+      is 0.0154.
+
+    Two real divergences were found and fixed while building the check, not
+    papered over: the composite read 24-bit TGA pixels as RGB while its 32-bit
+    path (and the spec, PIL and the Rust `image` crate) read BGR, which turned
+    `event_powerbolt.tga`'s blue bar orange on `event_bracket` (0.4154 → 0.3504
+    when fixed); and image tints were multiplied into RGB but not into alpha, so
+    the bottom bar's translucent rounded ends covered the gear art (main menu
+    0.5264 → 0.4529, workshop 0.4612 → 0.2559). No chosen screen has an unknown
+    ascent: all the faces the ten screens name load from `RA2.cfz`, so the
+    baseline rule is expressible on every one. Seven other screens
+    (`common/credits`, `botlab/surfacelayer`, `botlab/info_display`,
+    `botlab/import_texture`, `botlab/importbot`, `teamhq/editteam` and
+    `teamhq/repairs`) name `_Font System`, which is not in the game; both
+    renderers report it and draw no label there rather than guess a face, and
+    the parity tool leaves such a screen's measurement in place.
+
+    Reproduce with `tools/ui_parity.sh`; images and `report.json` land in
+    `local/parity/`. `tools/ui_parity.sh --check` fails above 0.75/255, but the
+    check is **not** wired into `tools/check.sh`: every screen is under that
+    ceiling, yet the residual is rasterisation, so a ceiling loose enough to
+    pass 0.525 would still pass the *old* `matchresults` layout (0.338) and
+    would not catch a small text-only regression. The table above is a review
+    artifact with the pictures beside it, not a gate; `--check` is there for
+    whoever wants one. Without `local/game` the tool prints one line and exits
+    0, so a game-less CI checkout skips it cleanly.
+
 Each of these is tracked with its evidence and fix path in
 [`06-deferred-fidelity.md`](06-deferred-fidelity.md) (F1–F13).
 
@@ -921,6 +1033,11 @@ engine/target/release/ra2 info "local/game/Arenas/octagon/octagon.gmf"
 engine/target/release/examples/rigdump "local/game/AI/Team2/Bot1.bot"   # chassis mass/hp
 engine/target/release/ra2-sim "local/game/Arenas/octagon.py" \
     "local/game/AI/Team1/Bot0.bot" /tmp/check 2 2                     # collider source + gravity
+
+# The two independent shell renderers, ten screens, pictures in local/parity/
+tools/ui_parity.sh
+tools/ui_parity.sh --check              # exit 1 above 0.75/255
+python3 tools/ui_compose.py --self-test # the three rules, no game data
 ```
 
 Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
