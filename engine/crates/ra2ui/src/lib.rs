@@ -1673,6 +1673,184 @@ mod tests {
         assert_eq!(exhibition.frame.h, 26.0);
     }
 
+    /// **The corpus's captions are all one `Text` body.** 122 `Caption`
+    /// attachments in 53 of the 116 files (the 758 attachments also hold 295
+    /// `Background`s), and each caption is a body with exactly one non-empty
+    /// `Text` — the shape `centre_captions` reads. The same page/advance model
+    /// that fixed the main menu is what every one of them is drawn with; there
+    /// is no face- or screen-specific caption path.
+    #[test]
+    fn every_caption_in_the_corpus_is_one_text_body() {
+        let Some(game) = game_dir() else { return };
+        let mut files = Vec::new();
+        collect_gib(&game.join("UI"), &mut files);
+        assert_eq!(files.len(), 116, "the shipped screens");
+
+        let (mut captions, mut backgrounds, mut attachments, mut files_with) = (0, 0, 0, 0);
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let gib = ra2fmt::gib::parse(&text).unwrap();
+            let mut here = 0;
+            for widget in gib.walk() {
+                attachments += widget.attachments.len();
+                for attachment in &widget.attachments {
+                    match attachment.kind {
+                        AttachmentKind::Caption => {
+                            here += 1;
+                            captions += 1;
+                            let body = attachment.body.as_deref().expect("a caption body");
+                            assert_eq!(
+                                body.children.len(),
+                                1,
+                                "{}: a caption body with {} children",
+                                path.display(),
+                                body.children.len()
+                            );
+                            let child = &body.children[0];
+                            assert_eq!(child.kind, WidgetKind::Text, "{}", path.display());
+                            assert!(
+                                child.text().is_some_and(|t| !t.is_empty()),
+                                "{}: an empty caption",
+                                path.display()
+                            );
+                        }
+                        AttachmentKind::Background => backgrounds += 1,
+                        _ => {}
+                    }
+                }
+            }
+            if here > 0 {
+                files_with += 1;
+            }
+        }
+        assert_eq!(
+            (captions, backgrounds, attachments, files_with),
+            (122, 295, 758, 53),
+            "the corpus's caption/background/attachment counts"
+        );
+    }
+
+    /// **Each caption is drawn once, at the frame the data gives.** A button's
+    /// `Caption` attachment carries a body with one `Text`; the body is placed
+    /// against the button's parent and the text is centred in the **button's**
+    /// frame. The draw order must contain that text exactly once. The run is
+    /// spaced by the face's advances, its width is their sum, and every glyph
+    /// samples a page cell with ink — the three properties the old readings got
+    /// wrong when a caption looked like two overlapping runs.
+    #[test]
+    fn each_caption_is_drawn_once_at_its_buttons_frame() {
+        let Some(game) = game_dir() else { return };
+        let fonts = Fonts::load(&game.join("RA2.cfz")).expect("the shipped faces");
+        let text = std::fs::read_to_string(game.join("UI/mainmenu/mainmenu.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+        let placed = resolve_with(&gib, DESIGN_SCREEN, Some(&fonts));
+
+        for (button_name, caption, face) in [
+            ("exhibition button", "EXHIBITION", "fg_d20"),
+            ("Team HQ button", "TEAM HQ", "fg_d20"),
+            ("Multiplayer button", "MULTIPLAYER", "fg_d20"),
+            ("Options button", "Options", "fg_mcn16"),
+            ("credits button", "Credits", "fg_mcn16"),
+            ("Quit button", "Quit", "fg_mcn16"),
+        ] {
+            let button = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == button_name)
+                .unwrap_or_else(|| panic!("{button_name}"));
+            let placed_caption = button
+                .attachments
+                .iter()
+                .find(|a| a.attachment.kind == AttachmentKind::Caption)
+                .unwrap_or_else(|| panic!("{button_name}: Caption"));
+            let texts: Vec<&Placement> = placed_caption
+                .body
+                .walk()
+                .filter(|p| p.widget.kind == WidgetKind::Text)
+                .collect();
+            assert_eq!(texts.len(), 1, "{button_name}: one caption Text");
+            let caption_text = texts[0].widget.text().expect("the caption's text");
+            assert_eq!(caption_text, caption, "{button_name}");
+
+            // Drawn exactly once in the whole screen's draw order.
+            let draws: Vec<&Placement> = draw_order_parented(&placed)
+                .into_iter()
+                .filter(|(p, _)| p.widget.text() == Some(caption))
+                .map(|(p, _)| p)
+                .collect();
+            assert_eq!(draws.len(), 1, "{button_name}: drawn once");
+
+            // Centred in the button's own frame, not in the group's.
+            let t = texts[0].frame;
+            assert!(
+                (t.x - (button.frame.x + (button.frame.w - t.w) / 2.0)).abs() < 0.01,
+                "{button_name}: x {} vs {}",
+                t.x,
+                button.frame.x + (button.frame.w - t.w) / 2.0
+            );
+            assert!(
+                (t.y - (button.frame.y + (button.frame.h - t.h) / 2.0)).abs() < 0.01,
+                "{button_name}: y {} vs {}",
+                t.y,
+                button.frame.y + (button.frame.h - t.h) / 2.0
+            );
+
+            // The run's width is the sum of the advances, and its cells are the
+            // page's own runs: every one has ink, and no two overlap.
+            let font = fonts.get(face).expect("the caption's face");
+            let sum: i32 = caption.chars().map(|c| font.advance(c)).sum();
+            assert_eq!(t.w, sum as f32, "{button_name}: run width");
+            let run = text_run(font, t, caption);
+            assert_eq!(
+                run.len(),
+                caption.chars().filter(|c| *c != ' ').count(),
+                "{button_name}: one glyph per non-space character"
+            );
+            let mut cells: Vec<(i32, i32, i32)> = Vec::new();
+            for glyph in &run {
+                assert!(
+                    glyph.cell[2] > 0 && glyph.cell[3] > 0,
+                    "{button_name}: a cell"
+                );
+                let (w, h) = (font.page_width as i32, font.page_height as i32);
+                let ink = (glyph.cell[1]..glyph.cell[1] + glyph.cell[3])
+                    .flat_map(|y| {
+                        (glyph.cell[0]..glyph.cell[0] + glyph.cell[2])
+                            .map(move |x| font.coverage(x, y))
+                    })
+                    .filter(|&v| v > 40)
+                    .count();
+                assert!(ink > 0, "{button_name}: a cell with no ink {glyph:?}");
+                assert!(
+                    glyph.cell[0] + glyph.cell[2] <= w && glyph.cell[1] + glyph.cell[3] <= h,
+                    "{button_name}: a cell outside the page"
+                );
+                cells.push((glyph.cell[1], glyph.cell[0], glyph.cell[0] + glyph.cell[2]));
+            }
+            cells.sort_unstable();
+            cells.dedup();
+            for pair in cells.windows(2) {
+                if pair[0].0 == pair[1].0 {
+                    assert!(
+                        pair[0].2 <= pair[1].1 || pair[1].2 <= pair[0].1,
+                        "{button_name}: two glyphs sample overlapping page cells"
+                    );
+                }
+            }
+            // The drawn quads advance in pen order and only touch by the ink's
+            // one- or two-pixel overhang: no glyph is drawn twice and no run is
+            // laid out at two different x's.
+            for pair in run.windows(2) {
+                let overlap = pair[0].rect.x + pair[0].rect.w - pair[1].rect.x;
+                assert!(
+                    overlap <= 2.0,
+                    "{button_name}: quads overlap by {overlap} px at {:?}",
+                    pair[0].rect
+                );
+            }
+        }
+    }
+
     /// The places where two siblings share a `ChildOrder` **and** their frames
     /// overlap: **13 pairs**, which is where the tie-break matters at all, and
     /// they are kept as a baseline. The older count of 328 was mostly a control
