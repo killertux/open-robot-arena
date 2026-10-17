@@ -503,24 +503,42 @@ page's bottom — which is what `Glyph::rect` turns over. The page's picture is 
 (more than 99% of it is `0xFF` where the high byte has ink, and the builder writes
 `(coverage << 8) | 0xfff`).
 
-The diagnostic is the fit. Segmenting each packed row's coverage into ink runs
-(blank columns are the cell boundaries) and pairing each rect with its run gives,
-per face, `cell_start = a·x0 + b` with **a ≈ 1.00, b ≈ 0 and a residual of ≈ 3 px**
-— and no drift with the record index (the best constant shift still leaves 17/20
-for `fg_d20` and 18/33 for `fg_mcn14`). So it is not a field order, a flip, a
-rounding rule, a sample pairing, a uniform shift, a scale or a pitch: each glyph is
-a few columns off in its own right, worst at a row's right end. There `fg_mcn16`'s
-record 31 (`A`) is the rect `(236,244,10,12)`, whose window holds blank plus one
-bar, while `A`'s ink run is `244..250` — eight columns right. That is why `A`, `M`,
-`W` and the small faces smear most.
+The diagnostic is a **picture with the rects drawn on the page**. Overlaying every
+rect border on `fg_mcn14`'s page at 4× shows the borders landing **0–6 columns from
+the nearest blank cell boundary** — not a uniform off-by-N, not a drift along the
+row, not a slip: **jitter**, with the rect generally a few columns left of its
+glyph. Of the 94 scored rects, **69** (`fg_mcn14`), **74** (`fg_mcn16`) and **71**
+(`fg_d20`) have their **left border on ink** (a blank cell boundary would leave it
+blank), 66/69/58 their right border, and only ~5 bracket a blank-separated cell at
+all. The fit `cell_start = a·x0 + b` is `a ≈ 1.00, b ≈ 0` with a ~3 px residual on
+both faces, and no constant shift (17/20 left for `fg_d20`, 18/33 for `fg_mcn14`),
+scale or pitch fixes it.
 
-The next read is the **`.giff` → runtime-font conversion**. `FUN_005ce100` opens
-the file by name and `FUN_005ce320` deserialises it, but `FUN_005ce320` reads
-**four floats then three ints** per glyph, where the stored record is **three ints
-then four floats**: a conversion layer — or a second, unshipped file format — sits
-between them, and that is where a record's `x`/`y`, or the page the records point
-into, may be re-derived. `almost_no_record_brackets_its_glyph` carries the exact
-inside/cut/best-shift numbers (and the colour-byte check) to test it against.
+The file cannot be rescued by another layout. The header is invariant across all
+nine faces: word `0x0C` is exactly `1.0f`, the sixteen bytes at `0x18` are zero,
+and `leading` is 4–7, never the records' `third`. Of the layouts the 133800 bytes
+admit — records at `0x28`/`0x44`/`0x68`, 95 records, a 95-record page at 2700,
+`512x128`, `128x512` — the best strict-bracket count is **9 of 92** (`512x128`),
+against 92 for a correct file.
+
+What is **not** settled is whether the game draws this file directly. Its page
+*builder* (`FUN_005cd560`) creates a D3D texture, blits per-glyph bitmaps from a
+sprite/glyph array (stride `0x54`, data `0x58`) and computes the u/v above — so a
+rebuild exists at least on the fallback path. But the deserialiser
+`FUN_005ce100`/`FUN_005ce320` reads **four floats then three ints** per glyph where
+this file stores **three ints then four floats**; a conversion (or a second,
+unshipped file) sits between them, and the `.giff` parser and the text-draw routine
+were not located in a bounded search. The exact next reads are: (a) `FUN_00591b50`'s
+stack arguments at its call site `0x4e3805` (it is passed both `fg_mcn14.giff` and
+`fg_mcn14`); (b) the conversion from `[3 ints][4 floats]` to `[4 floats][3 ints]`;
+(c) the routine that consumes `font+0x38` (four floats) and `font+0x638` (three
+ints) to build the quad, and whether it samples this page or the rebuilt one.
+
+So the honest landing is that the shipped `.giff` is **internally inconsistent** —
+the rects and the page describe different packings — and the renderer stays faithful
+to the shipped data rather than inventing a correction. `the_font_file_is_internally_inconsistent`
+keeps the border-on-ink counts and the header checks; `almost_no_record_brackets_its_glyph`
+keeps the inside/cut/best-shift and colour-byte numbers.
 
 ### Open: a glyph's quad draws its cell and a slice of its neighbour
 

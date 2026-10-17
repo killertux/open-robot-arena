@@ -70,44 +70,61 @@
 //!
 //! ## The rects do not bracket the page's glyphs
 //!
-//! The record's four floats are settled: the loader that *builds* a runtime page
-//! (`FUN_005cd560`) writes `u0 = x/W`, `v0 = y/H`, `u1 = (x + width)/W`,
-//! `v1 = (y + height)/H`, so the order is `u0 v0 u1 v1` and `v` is measured from
-//! the page's bottom (which [`Glyph::rect`] turns over). The page's picture is the
-//! **high byte**; the low byte is colour, not a mask (above).
+//! **The shipped `.giff` is internally inconsistent, and the fault is the file's,
+//! not this reader's.** The record's four floats are settled: the loader that
+//! *builds* a runtime page (`FUN_005cd560`) writes `u0 = x/W`, `v0 = y/H`,
+//! `u1 = (x + width)/W`, `v1 = (y + height)/H`, so the order is `u0 v0 u1 v1` and
+//! `v` is measured from the page's bottom (which [`Glyph::rect`] turns over). The
+//! page's picture is the **high byte**; the low byte is colour, not a mask (more
+//! than 99% of it is `0xFF` where the high byte has ink, and the builder writes
+//! `(coverage << 8) | 0xfff`).
 //!
 //! **The "ink just outside the rect" count is confounded and is only a
-//! baseline.** A rect that frames its glyph would leave `u0 - 1` and `u1` blank,
-//! but consecutive rects are contiguous with a one-pixel gap, so the two checks
-//! land on the *same shared gap column*, and a packer whose glyphs touch (or
-//! whose coverage bleeds) puts ink there for almost every record. The lesson came
-//! from trying to read the shell: the labels that looked clean in the workshop
-//! toolbar are **baked into the button `.bmp` art**, not drawn by this reader, so
-//! they were never evidence about a face.
+//! baseline.** Consecutive rects are contiguous with a one-pixel gap, so `u0 - 1`
+//! and `u1` land on the *same shared gap column*; a packer whose glyphs touch (or
+//! whose coverage bleeds) puts ink there for almost every record. The workshop
+//! toolbar that *looks* clean is **baked into the button `.bmp` art**, not drawn
+//! by this reader. A probe of all nine faces (`[Text] HAMBURGEFONTSIV`, rendered
+//! by `uishot` and `tools/ui_compose.py`, which agree pixel for pixel) shows
+//! **every face smears**, worst the small condensed ones (`fg_mcn12`, `fg_mcn14`,
+//! `fg_mcn16`), least the large `fg_d*`.
 //!
-//! A probe of all nine faces (`[Text] HAMBURGEFONTSIV`, rendered by `uishot` and
-//! by `tools/ui_compose.py`, which agree pixel for pixel) shows **every face
-//! smears**, worst the small condensed ones (`fg_mcn12`, `fg_mcn14`,
-//! `fg_mcn16`), least the large `fg_d*`. There is no per-face split to exploit.
+//! What the page says, measured. Drawing every rect border over the `fg_mcn14`
+//! page at 4× shows the borders landing **0–6 columns from the nearest blank cell
+//! boundary** — not a uniform off-by-N, not a drift along the row, not a slip:
+//! **jitter**, with the rect generally a few columns left of its glyph. Of the 94
+//! scored rects, **69** (`fg_mcn14`), **74** (`fg_mcn16`) and **71** (`fg_d20`)
+//! have their **left border on ink**, 66/69/58 their right border, and only ~5
+//! bracket a blank-separated cell at all. No constant shift (`d` in `-10..=10`
+//! leaves 17/20 for `fg_d20`, 18/33 for `fg_mcn14`), scale or pitch fixes it; the
+//! fit `cell_start = a·x0 + b` is `a ≈ 1.00, b ≈ 0` with a ~3 px residual on both
+//! `fg_mcn14` and `fg_mcn16`.
 //!
-//! The diagnostic measurement is the fit. Segmenting each packed row's coverage
-//! into ink runs (blank columns are the cell boundaries) and pairing each rect
-//! with its run gives, per face, `cell_start = a·x0 + b` with **a ≈ 1.00,
-//! b ≈ 0, residual ≈ 3 px** (and no drift with the record index: the best-shift
-//! test leaves 17/20 for `fg_d20` and 18/33 for `fg_mcn14`). So it is not a field
-//! order, a flip, a rounding rule, a sample pairing, a uniform shift, a scale or
-//! a pitch: each glyph is a few columns off in its own right. At the right end of
-//! a row the error is largest — `fg_mcn16`'s record 31 (`A`) is the rect
-//! `(236,244,10,12)`, whose window holds blank plus one bar, while `A`'s ink run
-//! is `244..250`, eight columns right — which is why `A`, `M`, `W` and the small
-//! faces smear most.
+//! The file cannot be rescued by another layout. The header is invariant across
+//! all nine faces: word `0x0C` is exactly `1.0f`, the sixteen bytes at `0x18` are
+//! zero, and `leading` is 4–7, never the records' `third`. Of the layouts the
+//! 133800 bytes admit — records at `0x28`/`0x44`/`0x68`, 95 records, a 95-record
+//! page at 2700, `512x128`, `128x512` — the best strict-bracket count is **9 of
+//! 92** (`512x128`), against 92 for a correct file. So the file is broken as
+//! shipped: the rects and the page describe different packings, and the renderer
+//! stays faithful to the shipped data rather than inventing a correction.
+//! `the_font_file_is_internally_inconsistent` keeps the border-on-ink counts and
+//! the header checks.
 //!
-//! The next read is the **`.giff` → runtime-font conversion**: `FUN_005ce100`
-//! opens the file by name and `FUN_005ce320` deserialises it, but reads **four
-//! floats then three ints** per glyph, where the stored record is **three ints
-//! then four floats**. A conversion layer (or a second, unshipped file) sits
-//! between them, and that is where a record's `x`/`y` — or the page the records
-//! point into — may be re-derived.
+//! What is **not** settled is whether the game draws this file directly. Its page
+//! *builder* (`FUN_005cd560`) creates a D3D texture, blits per-glyph bitmaps from
+//! a sprite/glyph array (stride `0x54`, data `0x58`) and computes the u/v above —
+//! so a rebuild exists at least on the fallback path. But the deserialiser
+//! `FUN_005ce100`/`FUN_005ce320` reads **four floats then three ints** per glyph
+//! where this file stores **three ints then four floats**, so a conversion (or a
+//! second, unshipped file) sits between them; and the `.giff` parser and the
+//! text-draw routine were not located in a bounded search. The exact next reads
+//! are: (a) `FUN_00591b50`'s stack arguments at its call site `0x4e3805`
+//! (it is passed both `fg_mcn14.giff` and `fg_mcn14`); (b) the function that
+//! converts `[3 ints][4 floats]` records to `[4 floats][3 ints]`; (c) the routine
+//! that consumes the glyph array at `font+0x38` (four floats) and `font+0x638`
+//! (three ints) to build the quad, and whether it samples this page or the rebuilt
+//! one.
 //!
 //! What a font is *for* here is [`Font::extent`]: the size a zero-`Size` `Text`
 //! widget takes, which is `ascent - descent` tall and the sum of the advances
@@ -317,13 +334,17 @@ mod tests {
     use super::*;
 
     fn shipped(name: &str) -> Option<Font> {
+        shipped_bytes(name).and_then(|d| parse(&d).ok())
+    }
+
+    /// The raw `.giff` bytes from `RA2.cfz`, for the header checks.
+    fn shipped_bytes(name: &str) -> Option<Vec<u8>> {
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let cfz = dir.join("local/game/RA2.cfz");
             if cfz.is_file() {
                 let cfl = crate::cfl::Cfl::open_path(&cfz).ok()?;
-                let data = cfl.get(&format!("{name}.giff"))?;
-                return parse(&data).ok();
+                return cfl.get(&format!("{name}.giff"));
             }
             if !dir.pop() {
                 return None;
@@ -748,6 +769,97 @@ mod tests {
             colour,
             [("fg_mcn14", true), ("fg_mcn16", true), ("fg_d20", true)],
             "faces whose second byte is mostly 0xFF"
+        );
+    }
+
+    /// **The shipped `.giff` is internally inconsistent: its rects do not frame
+    /// its own page.** The overlay of `fg_mcn14`'s page (4×, every rect drawn)
+    /// shows each rect's borders landing **0–6 columns from the nearest blank cell
+    /// boundary** — not a uniform off-by-N, not a drift along the row, not a slip:
+    /// jitter, with the rect generally a few columns left of its glyph. Of the 94
+    /// scored rects, **69** (`fg_mcn14`), **74** (`fg_mcn16`) and **71** (`fg_d20`)
+    /// have their **left border on ink** (a blank cell boundary would leave it
+    /// blank), and 66/69/58 their right border; only ~5 bracket a blank-separated
+    /// cell at all.
+    ///
+    /// The file cannot be rescued by another layout: the header is invariant
+    /// (word `0x0C` is exactly `1.0f`, the sixteen bytes at `0x18` are zero, and
+    /// `leading` is 4–7, never the records' `third`), and of the layouts the
+    /// 133800 bytes admit — records at `0x28`/`0x44`/`0x68`, 95 records, a
+    /// 95-record page at 2700, `512x128`, `128x512` — the best strict-bracket
+    /// count is **9 of 92** (`512x128`), against 92 for a correct file. So the
+    /// fault is in the font file, not in this reader; and the game's own draw path
+    /// was not located (see the module note), so the renderer stays faithful to
+    /// the shipped data rather than inventing a correction.
+    #[test]
+    fn the_font_file_is_internally_inconsistent() {
+        for face in [
+            "fg_d18", "fg_d20", "fg_d24", "fg_d26", "fg_dcn14", "fg_dcn16", "fg_mcn12", "fg_mcn14",
+            "fg_mcn16",
+        ] {
+            let Some(data) = shipped_bytes(face) else {
+                return;
+            };
+            assert_eq!(
+                u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
+                0x3f80_0000,
+                "{face}: word 0x0C is not 1.0f"
+            );
+            assert!(
+                data[0x18..0x28].iter().all(|&b| b == 0),
+                "{face}: the sixteen bytes at 0x18 are not zero"
+            );
+        }
+
+        let mut border = Vec::new();
+        for face in ["fg_mcn14", "fg_mcn16", "fg_d20"] {
+            let Some(font) = shipped(face) else {
+                return;
+            };
+            let w = font.page_width as usize;
+            let h = font.page_height as usize;
+            let mut bands: std::collections::BTreeMap<i64, Vec<usize>> = Default::default();
+            for (i, g) in font.glyphs.iter().enumerate().take(94) {
+                bands
+                    .entry((g.v0 as f64 * 1.0e6).round() as i64)
+                    .or_default()
+                    .push(i);
+            }
+            let (mut left, mut right, mut scored) = (0usize, 0usize, 0usize);
+            for idxs in bands.values() {
+                let rects: Vec<_> = idxs
+                    .iter()
+                    .map(|&i| font.glyphs[i].rect(font.page_width, font.page_height))
+                    .collect();
+                let y0 = rects.iter().map(|r| r.1).min().unwrap().max(0);
+                let y1 = rects.iter().map(|r| r.1 + r.3).max().unwrap().min(h as i32);
+                let blank: Vec<bool> = (0..w)
+                    .map(|x| (y0..y1).all(|y| font.page[(y as usize) * w + x] <= 128))
+                    .collect();
+                for &(x0, _, gw, _) in &rects {
+                    let x1 = x0 + gw;
+                    if x0 < 0 || x1 <= 0 || x1 as usize >= w {
+                        continue;
+                    }
+                    scored += 1;
+                    if !blank[x0 as usize] {
+                        left += 1;
+                    }
+                    if !blank[x1 as usize] {
+                        right += 1;
+                    }
+                }
+            }
+            border.push((face, left, right, scored));
+        }
+        assert_eq!(
+            border,
+            [
+                ("fg_mcn14", 69, 66, 94),
+                ("fg_mcn16", 74, 69, 94),
+                ("fg_d20", 71, 58, 94),
+            ],
+            "rect borders that land on ink (left, right, scored)"
         );
     }
 
