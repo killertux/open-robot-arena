@@ -2,9 +2,9 @@
 # Open Robot Arena — portable launcher (Linux).
 #
 # Finds the game installation, checks the CPython 3.12 runtime the binaries
-# link against, and runs bin/ra2-shell. `--game DIR` wins; otherwise
+# link against, and runs bin/ra2-app (the client). `--game DIR` wins; otherwise
 # RA2_GAME_DIR and a documented search are used. The game is NOT part of this
-# package: only the files the shell boots from are checked here (RA2.cfz, UI/,
+# package: only the files the client boots from are checked here (RA2.cfz, UI/,
 # Scripts/), and a missing install is reported with those names.
 #
 # This file is also the installed launcher: install.sh symlinks it as
@@ -29,7 +29,7 @@ resolve_root() {
 }
 
 ROOT=$(resolve_root)
-BIN=$ROOT/bin/ra2-shell
+BIN=$ROOT/bin/ra2-app
 
 if [ ! -x "$BIN" ]; then
     echo "$APP: $BIN is missing or not executable; unpack the package again." >&2
@@ -40,10 +40,11 @@ usage() {
     cat <<EOF
 Open Robot Arena launcher
 
-  ./run.sh [options]                     run the shell (botlab route by default)
-  ./run.sh --game DIR --route exhibition run another shipped route
+  ./run.sh [options]                     open the client in a window
+  ./run.sh --game DIR --offscreen PNG    the headless client path (no window)
+  ./run.sh --game DIR --match --out DIR  play a headless match (also --build/--hq)
   ./run.sh --check-python                report the CPython 3.12 runtime check
-  ./run.sh --help                        this text and ra2-shell's options
+  ./run.sh --help                        this text and ra2-app's options
 
 Game directory, in order:
   1. --game DIR
@@ -54,12 +55,12 @@ Game directory, in order:
   6. /usr/local/share/$APP/game, /usr/share/$APP/game, /opt/ra2/game
 
 A game directory contains RA2.cfz, UI/ and Scripts/; the game is not
-included in this package and must be supplied by the player. The other
-shipped binaries (ra2, ra2-render, ra2-sim, ra2-duel) are in bin/.
+included in this package and must be supplied by the player.
 
-Without --route or --script, the launcher runs the botlab route and writes
-its frames to:
-  \$XDG_STATE_HOME/$APP/frames  (default \$HOME/.local/state/$APP/frames)
+The client is ra2-app. With no --offscreen/--out it needs a display
+(\$DISPLAY or \$WAYLAND_DISPLAY); headless use takes --offscreen PNG (the main
+menu) or --match/--build/--hq with --out DIR. The headless route runner and
+the other tools are in bin/ (ra2-shell, ra2, ra2-render, ra2-sim, ra2-duel).
 EOF
 }
 
@@ -144,12 +145,14 @@ print_python_check() {
     fi
 }
 
-# Arguments we inspect; everything else is the shell's.
+# Arguments we inspect; everything else goes to ra2-app unchanged.
 game_arg=
 out_arg=
-has_route=0
 want_help=0
 want_check=0
+offscreen=0
+mode_out=0
+mode_flag=0
 prev=
 for arg in "$@"; do
     case $prev in
@@ -158,12 +161,16 @@ for arg in "$@"; do
     esac
     case $arg in
         --game | --out) ;;
-        --route | --script) has_route=1 ;;
+        --offscreen) offscreen=1 ;;
+        --match | --build | --hq) mode_flag=1 ;;
         -h | --help) want_help=1 ;;
         --check-python) want_check=1 ;;
     esac
     prev=$arg
 done
+if [ -n "$out_arg" ] && [ "$mode_flag" -eq 1 ]; then
+    mode_out=1
+fi
 
 if [ "$want_check" -eq 1 ]; then
     print_python_check
@@ -199,7 +206,6 @@ try_game() {
 }
 
 data=${XDG_DATA_HOME:-${HOME:-/nonexistent}/.local/share}
-state=${XDG_STATE_HOME:-${HOME:-/nonexistent}/.local/state}
 
 GAME=
 if [ -n "$game_arg" ]; then
@@ -266,20 +272,21 @@ fi
 
 check_python
 
-OUT=${out_arg:-$state/$APP/frames}
+# The windowed client needs a display. `--offscreen` and `--match/--build/--hq
+# --out` are the headless paths and must work over SSH and in CI. The wording
+# matches ra2-app's own message.
+if [ "$offscreen" -eq 0 ] && [ "$mode_out" -eq 0 ] &&
+    [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    {
+        echo "$APP: no display (DISPLAY and WAYLAND_DISPLAY are both unset); the windowed client needs one — use --offscreen PNG for the headless path"
+        echo "  headless: $APP --game \"$GAME\" --offscreen frame.png"
+        echo "  or:       $APP --game \"$GAME\" --match --out DIR"
+    } >&2
+    exit 2
+fi
+
 if [ "$want_help" -eq 0 ]; then
     echo "$APP: game directory: $GAME"
 fi
-if [ "$has_route" -eq 0 ] && [ "$want_help" -eq 0 ]; then
-    echo "$APP: no --route or --script, running the botlab route; frames go to $OUT"
-fi
 
-if [ -z "$out_arg" ] && [ "$has_route" -eq 0 ]; then
-    exec "$BIN" --game "$GAME" --out "$OUT" --route botlab "$@"
-elif [ -z "$out_arg" ]; then
-    exec "$BIN" --game "$GAME" --out "$OUT" "$@"
-elif [ "$has_route" -eq 0 ]; then
-    exec "$BIN" --game "$GAME" --route botlab "$@"
-else
-    exec "$BIN" --game "$GAME" "$@"
-fi
+exec "$BIN" --game "$GAME" "$@"

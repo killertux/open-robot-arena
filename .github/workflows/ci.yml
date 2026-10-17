@@ -1,0 +1,147 @@
+name: CI
+
+# Linux is the platform this project verifies. macOS and Windows are build-only
+# probes: they are marked `continue-on-error` because neither platform has been
+# run here, and a red macOS/Windows job is a known risk (Jolt's C++ build,
+# CPython 3.12 linkage, wgpu's Metal/DX12 backend), not a regression claim.
+#
+# tools/check.sh cannot run in CI: it exits 2 without game data (the corpus
+# tests skip, and the package smoke needs local/game or RA2_GAME_DIR). The game
+# is never in the repository, so this workflow runs the same steps check.sh
+# runs, minus the unpacked-tarball smoke, and packages with --no-smoke.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux x86_64 (fmt, clippy, tests, package)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust stable (workspace edition 2021)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - name: System dependencies (Jolt C++ build, CPython 3.12, Vulkan, audio)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config \
+            python3.12-dev libasound2-dev \
+            libvulkan1 mesa-vulkan-drivers
+
+      # CI has network; the project's own scripts stay offline. Fetch once so
+      # every later cargo command can keep --offline (as tools/check.sh does).
+      - name: Populate the cargo registry
+        working-directory: engine
+        run: cargo fetch --locked
+
+      - name: Format
+        working-directory: engine
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        working-directory: engine
+        run: cargo clippy --offline --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        working-directory: engine
+        run: cargo test --release --offline --workspace
+
+      - name: Build
+        working-directory: engine
+        run: cargo build --release --offline
+
+      # No game in CI: package the binaries and launcher only. The smoke test
+      # is the local `tools/check.sh` job (it needs the player's game data).
+      - name: Package (no smoke)
+        run: tools/package.sh --no-smoke
+
+      - name: Upload the Linux tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: ra2-open-robot-arena-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64 (build only, advisory)
+    # NOT VERIFIED: no macOS artifact has been built or run. See docs/09.
+    continue-on-error: true
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - name: System dependencies (CMake for Jolt; CPython 3.12 for pyo3)
+        run: |
+          brew install cmake python@3.12
+          echo "PYO3_PYTHON=$(brew --prefix python@3.12)/bin/python3.12" >> "$GITHUB_ENV"
+
+      - name: Populate the cargo registry
+        working-directory: engine
+        run: cargo fetch --locked
+
+      # Risks on this platform: oxijolt-sys has no macOS prebuilt archive
+      # (vendored Jolt via CMake), pyo3 must find libpython3.12.dylib, and
+      # wgpu needs Metal. None of that is verified by this job passing.
+      - name: Build ra2-app and ra2
+        working-directory: engine
+        run: cargo build --release --offline -p ra2-app -p ra2-cli
+
+  windows:
+    name: Windows x86_64 MSVC (build only, advisory)
+    # NOT VERIFIED: no Windows artifact has been built or run. See docs/09.
+    continue-on-error: true
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust stable MSVC
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - name: CPython 3.12 x86_64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Populate the cargo registry
+        working-directory: engine
+        run: cargo fetch --locked
+
+      # Risks: the MSVC Jolt prebuilt archive (or its CMake fallback), pyo3's
+      # python312.lib link, and wgpu's DX12 backend. Advisory only.
+      - name: Build ra2-app and ra2
+        working-directory: engine
+        shell: pwsh
+        run: |
+          $env:PYO3_PYTHON = (Get-Command python).Source
+          cargo build --release --offline -p ra2-app -p ra2-cli

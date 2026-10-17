@@ -39,7 +39,7 @@ for arg in "$@"; do
         --check) mode=check ;;
         --no-smoke) smoke=0 ;;
         -h | --help)
-            sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -66,9 +66,10 @@ fi
 
 echo "== build $NAME"
 cargo build --release --offline --manifest-path engine/Cargo.toml \
-    -p ra2-shell -p ra2-cli -p ra2-render -p ra2sim
+    -p ra2-app -p ra2-shell -p ra2-cli -p ra2-render -p ra2sim
 
-for bin in ra2-shell ra2 ra2-render ra2-sim ra2-duel; do
+# ra2-app is the client; ra2-shell stays as the headless route runner/CLI.
+for bin in ra2-app ra2-shell ra2 ra2-render ra2-sim ra2-duel; do
     [ -x "engine/target/release/$bin" ] || {
         echo "package.sh: engine/target/release/$bin is missing" >&2
         exit 1
@@ -82,7 +83,7 @@ mkdir -p "$STAGE/bin" \
     "$STAGE/share/icons/hicolor/256x256/apps" \
     "$STAGE/share/icons/hicolor/scalable/apps"
 
-for bin in ra2-shell ra2 ra2-render ra2-sim ra2-duel; do
+for bin in ra2-app ra2-shell ra2 ra2-render ra2-sim ra2-duel; do
     cp "engine/target/release/$bin" "$STAGE/bin/$bin"
     chmod 755 "$STAGE/bin/$bin"
 done
@@ -112,6 +113,7 @@ tar --sort=name --format=gnu --owner=0 --group=0 --numeric-owner \
 
 echo
 echo "package: $TARBALL"
+echo "size:    $(du -h "$TARBALL" | cut -f1) compressed, $(du -sh "$STAGE" | cut -f1) unpacked"
 cat "$TARBALL.sha256"
 
 if [ "$smoke" -eq 1 ]; then

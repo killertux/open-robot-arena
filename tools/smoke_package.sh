@@ -6,14 +6,17 @@
 #
 # It asserts:
 #   * the archive unpacks to one directory with the expected layout, no game files;
-#   * bin/ra2-shell --route botlab --out DIR --game local/game is headless and
-#     writes the seven frames;
-#   * the boot frame is the main menu, byte for byte the same PNG that an
-#     independent render of UI/mainmenu/mainmenu.gib produces;
+#   * the packaged client, bin/ra2-app --offscreen PNG --game local/game, boots
+#     the main menu and writes that frame;
+#   * that frame is byte for byte the same PNG an independent render of
+#     UI/mainmenu/mainmenu.gib produces (the uishot example, not the app);
+#   * the CLI path still works: bin/ra2-shell --route botlab writes its seven
+#     frames and logs the boot and finish screens;
 #   * the missing-game error names RA2.cfz, UI and Scripts (direct and launcher);
-#   * run.sh finds the game through RA2_GAME_DIR and its CPython 3.12 check
-#     reports the library and stdlib it needs;
-#   * the launcher's exhibition route writes its three frames.
+#   * run.sh finds the game through RA2_GAME_DIR, runs the client headlessly and
+#     its CPython 3.12 check reports the library and stdlib it needs;
+#   * the launcher refuses a windowed run with no display and points at
+#     --offscreen.
 #
 # The game is read from local/game (or $RA2_GAME_DIR); the repo ships none, so
 # this test cannot fake one. Set RA2_GAME_DIR to run it on another machine.
@@ -70,15 +73,20 @@ echo "smoke: tarball $TARBALL"
 tar -xzf "$TARBALL" -C "$TMP"
 PKG=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -1)
 [ -n "$PKG" ] || die "the archive has no top-level directory"
-[ -x "$PKG/bin/ra2-shell" ] || die "bin/ra2-shell is missing"
+[ -x "$PKG/bin/ra2-app" ] || die "bin/ra2-app is missing"
 
 for file in run.sh install.sh README.txt LICENSE-MIT LICENSE-APACHE NOTICE THIRD_PARTY.md \
     share/applications/ra2-open-robot-arena.desktop \
     share/icons/hicolor/256x256/apps/ra2-open-robot-arena.png \
     share/icons/hicolor/scalable/apps/ra2-open-robot-arena.svg \
-    bin/ra2 bin/ra2-render bin/ra2-sim bin/ra2-duel; do
+    bin/ra2-shell bin/ra2 bin/ra2-render bin/ra2-sim bin/ra2-duel; do
     [ -e "$PKG/$file" ] || die "the package is missing $file"
 done
+
+# The launcher and the desktop entry must start the client, not the old shell.
+grep -q 'bin/ra2-app' "$PKG/run.sh" || die "run.sh does not run bin/ra2-app"
+grep -q '^Exec=ra2-open-robot-arena$' "$PKG/share/applications/ra2-open-robot-arena.desktop" ||
+    die "the desktop entry does not run the launcher"
 
 # A package must never contain the game.
 if find "$PKG" \( -iname 'RA2.cfz' -o -iname '*.gmf' -o -iname '*.bot' -o -iname '*.gib' \) | grep -q .; then
@@ -98,33 +106,33 @@ print(w, h)
 PY
 }
 
+check_png() {
+    [ -s "$1" ] || die "missing frame $1"
+    size=$(png_size "$1")
+    [ "$size" = "1280 1005" ] || die "$1 is $size, expected 1280 1005"
+}
+
 check_frames() {
     out=$1
     shift
     for frame in "$@"; do
-        [ -s "$out/$frame" ] || die "missing frame $out/$frame"
-        size=$(png_size "$out/$frame")
-        [ "$size" = "1280 1005" ] || die "$frame is $size, expected 1280 1005"
+        check_png "$out/$frame"
     done
 }
 
-echo "== shell binary, botlab route, game at $GAME_ARG"
+echo "== ra2-app, offscreen main menu, game at $GAME_ARG"
 (
     cd "$RUN_CWD"
-    "$PKG/bin/ra2-shell" --route botlab --out "$TMP/frames" --game "$GAME_ARG"
-) >"$TMP/botlab.log" 2>&1 || {
-    cat "$TMP/botlab.log" >&2
-    die "bin/ra2-shell --route botlab failed"
+    env -u DISPLAY -u WAYLAND_DISPLAY \
+        "$PKG/bin/ra2-app" --game "$GAME_ARG" --offscreen "$TMP/app-mainmenu.png"
+) >"$TMP/app.log" 2>&1 || {
+    cat "$TMP/app.log" >&2
+    die "bin/ra2-app --offscreen failed"
 }
-cat "$TMP/botlab.log"
-grep -q 'booted mainmenu/mainmenu.gib' "$TMP/botlab.log" || die "the boot screen is not the main menu"
-grep -q 'finished on botlab/botlabwin.gib' "$TMP/botlab.log" || die "the botlab route did not finish in the workshop"
-
-check_frames "$TMP/frames" \
-    00-mainmenu.png 01-select-team.png 02-team-hq.png 03-robot-inventory.png \
-    04-botlab-overview.png 05-botlab-chassis.png 06-chassis-step1.png
-cmp -s "$TMP/frames/00-mainmenu.png" "$TMP/frames/01-select-team.png" &&
-    die "the first click did not change the screen"
+cat "$TMP/app.log"
+grep -q 'booted mainmenu/mainmenu.gib' "$TMP/app.log" || die "the client did not boot the main menu"
+grep -q 'finished on mainmenu/mainmenu.gib' "$TMP/app.log" || die "the client did not finish on the main menu"
+check_png "$TMP/app-mainmenu.png"
 
 echo "== independent main-menu render"
 (
@@ -136,34 +144,68 @@ echo "== independent main-menu render"
     die "could not render the reference main menu"
 }
 cat "$TMP/reference.log"
-cmp "$TMP/mainmenu-reference.png" "$TMP/frames/00-mainmenu.png" ||
-    die "the boot frame is not the independently rendered main menu"
-echo "smoke: boot frame == mainmenu.gib (sha256 $(sha256sum "$TMP/frames/00-mainmenu.png" | cut -d' ' -f1))"
+cmp "$TMP/mainmenu-reference.png" "$TMP/app-mainmenu.png" ||
+    die "the app's boot frame is not the independently rendered main menu"
+echo "smoke: app boot frame == mainmenu.gib (sha256 $(sha256sum "$TMP/app-mainmenu.png" | cut -d' ' -f1))"
 
-echo "== missing game, direct binary"
+echo "== ra2-shell CLI, botlab route, game at $GAME_ARG"
+(
+    cd "$RUN_CWD"
+    "$PKG/bin/ra2-shell" --route botlab --out "$TMP/frames" --game "$GAME_ARG"
+) >"$TMP/botlab.log" 2>&1 || {
+    cat "$TMP/botlab.log" >&2
+    die "bin/ra2-shell --route botlab failed"
+}
+cat "$TMP/botlab.log"
+grep -q 'booted mainmenu/mainmenu.gib' "$TMP/botlab.log" || die "the shell did not boot the main menu"
+grep -q 'finished on botlab/botlabwin.gib' "$TMP/botlab.log" || die "the botlab route did not finish in the workshop"
+
+check_frames "$TMP/frames" \
+    00-mainmenu.png 01-select-team.png 02-team-hq.png 03-robot-inventory.png \
+    04-botlab-overview.png 05-botlab-chassis.png 06-chassis-step1.png
+cmp -s "$TMP/frames/00-mainmenu.png" "$TMP/frames/01-select-team.png" &&
+    die "the first click did not change the screen"
+
+echo "== missing game, direct client"
 set +e
 (
     cd "$RUN_CWD"
-    "$PKG/bin/ra2-shell" --route botlab --out "$TMP/missing-out" --game "$TMP/not-a-game"
+    env -u DISPLAY -u WAYLAND_DISPLAY \
+        "$PKG/bin/ra2-app" --game "$TMP/not-a-game" --offscreen "$TMP/missing-out.png"
 ) >"$TMP/missing.log" 2>&1
 rc=$?
 set -e
-[ "$rc" -ne 0 ] || die "the binary accepted a missing game"
+[ "$rc" -ne 0 ] || die "the client accepted a missing game"
 grep -q 'RA2.cfz' "$TMP/missing.log" || die "the missing-game error does not name RA2.cfz"
 grep -q 'UI' "$TMP/missing.log" || die "the missing-game error does not name UI"
 grep -q 'Scripts' "$TMP/missing.log" || die "the missing-game error does not name Scripts"
 cat "$TMP/missing.log"
 
-echo "== launcher, RA2_GAME_DIR, exhibition route"
-RA2_GAME_DIR="$GAME" "$PKG/run.sh" --route exhibition --out "$TMP/launcher-frames" \
+echo "== launcher, no display, windowed run"
+set +e
+env -u DISPLAY -u WAYLAND_DISPLAY RA2_GAME_DIR="$GAME" \
+    "$PKG/run.sh" >"$TMP/no-display.log" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || die "the launcher tried to open a window without a display"
+grep -q 'DISPLAY and WAYLAND_DISPLAY are both unset' "$TMP/no-display.log" ||
+    die "the launcher's no-display message is missing"
+grep -q -- '--offscreen' "$TMP/no-display.log" ||
+    die "the launcher's no-display message does not mention --offscreen"
+cat "$TMP/no-display.log"
+
+echo "== launcher, RA2_GAME_DIR, offscreen client"
+env -u DISPLAY -u WAYLAND_DISPLAY RA2_GAME_DIR="$GAME" \
+    "$PKG/run.sh" --offscreen "$TMP/launcher-mainmenu.png" \
     >"$TMP/launcher.log" 2>&1 || {
     cat "$TMP/launcher.log" >&2
-    die "run.sh --route exhibition failed"
+    die "run.sh --offscreen failed"
 }
 cat "$TMP/launcher.log"
 grep -q 'booted mainmenu/mainmenu.gib' "$TMP/launcher.log" || die "run.sh did not boot the main menu"
-check_frames "$TMP/launcher-frames" \
-    00-mainmenu.png 01-exhibition-setup.png 02-arena-picker.png
+check_png "$TMP/launcher-mainmenu.png"
+cmp "$TMP/mainmenu-reference.png" "$TMP/launcher-mainmenu.png" ||
+    die "the launcher's frame is not the independently rendered main menu"
 
 echo "== launcher, CPython 3.12 check"
 "$PKG/run.sh" --check-python >"$TMP/python.log" 2>&1 || {
@@ -180,8 +222,8 @@ grep -Eq 'python3\.12 [0-9]+\.[0-9]+\.[0-9]+' "$TMP/python.log" ||
 
 echo "== launcher, missing game"
 set +e
-env -u RA2_GAME_DIR "$PKG/run.sh" --game "$TMP/not-a-game" --route botlab \
-    --out "$TMP/launcher-missing" >"$TMP/launcher-missing.log" 2>&1
+env -u RA2_GAME_DIR "$PKG/run.sh" --game "$TMP/not-a-game" \
+    --offscreen "$TMP/launcher-missing.png" >"$TMP/launcher-missing.log" 2>&1
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || die "the launcher accepted a missing game"
@@ -191,4 +233,4 @@ grep -q 'Scripts' "$TMP/launcher-missing.log" || die "the launcher error does no
 cat "$TMP/launcher-missing.log"
 
 echo
-echo "smoke: PASS — 7 botlab frames, 3 exhibition frames, boot frame is the main menu"
+echo "smoke: PASS — ra2-app boot frame is the main menu; 7 botlab frames; launcher ok"

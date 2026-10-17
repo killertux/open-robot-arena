@@ -85,8 +85,8 @@ if [ "$action" = uninstall ]; then
     exit 0
 fi
 
-if [ ! -f "$here/bin/ra2-shell" ]; then
-    echo "install.sh: run this from the unpacked package (bin/ra2-shell not found)" >&2
+if [ ! -f "$here/bin/ra2-app" ]; then
+    echo "install.sh: run this from the unpacked package (bin/ra2-app not found)" >&2
     exit 2
 fi
 

@@ -51,7 +51,7 @@ What the plan can rely on, and where it is written down:
   robot with motors/pistons/detach/buckle, contact damage, 14 arenas, the
   shipped AI, SmartZone hazards, the nav map, `ra2-sim`/`ra2-duel`.
 - **Packaging** — the Linux tarball, launcher, installer, `tools/check.sh`.
-- **151 tests**, fmt/clippy clean, `tools/check.sh` PASS.
+- **267 tests**, fmt/clippy clean, `tools/check.sh` PASS.
 
 ### Where the match rules actually live (corrected by M8.1)
 
@@ -306,16 +306,24 @@ deterministic ram is the tripwire.
 
 | # | Work item | Lands in |
 |---|---|---|
-| M12.1 | macOS: `.app` bundle, `libpython3.12.dylib`/Jolt, Metal, notarisation notes, arm64 | `packaging/`, `docs/09` |
-| M12.2 | Windows: MSVC build, `python3.12.dll`, DX12, portable zip + launcher (or MSI) | `packaging/`, `docs/09` |
-| M12.3 | Linux: Flatpak and/or AppImage built and smoke-tested (network permitting), else the tarball stays the release | `packaging/` |
-| M12.4 | CI: `tools/check.sh` on Linux; build jobs for macOS/Windows; artifact upload | `.github/` |
+| M12.1 | ◐ macOS: `.app` bundle, `libpython3.12.dylib`/Jolt, Metal, notarisation notes, arm64 — `packaging/macos/bundle.sh` and the notes exist; **the script was never run and no macOS artifact exists** | `packaging/`, `docs/09` |
+| M12.2 | ◐ Windows: MSVC build, `python3.12.dll`, DX12, portable zip + launcher (or MSI) — `packaging/windows/zip.sh` writes the layout; **never run, no `.exe`, no zip, no `run.cmd`** | `packaging/`, `docs/09` |
+| M12.3 | Linux: Flatpak and/or AppImage built and smoke-tested (network permitting), else the tarball stays the release — **not built; the tarball remains the release** | `packaging/` |
+| M12.4 | ◐ CI: `.github/workflows/ci.yml` on Linux (fmt, clippy `-D warnings`, tests, build, `package.sh --no-smoke`, artifact upload), plus advisory macOS/Windows builds (`continue-on-error`). **Not yet run on GitHub**; `check.sh` itself cannot run without the game, so the workflow uses the individual steps | `.github/` |
 | M12.5 | Versioning, changelog, release notes, a `--version`, and the "supply your own game" first-run flow | `ra2-app` |
 | M12.6 | Docs: the player guide, the troubleshooting page (Python, drivers, game files), the fidelity statement | `docs/` |
 
 **Acceptance.** `tools/check.sh` green on Linux; the tarball unpacks and runs;
 macOS/Windows artifacts exist **and** were run by a human or CI on that platform
 (otherwise they are marked unverified, as `docs/09` does now).
+
+**State after M12.1–M12.4 (this round).** The Linux tarball now ships
+`ra2-app` (with `ra2-audio` and `ra2script` linked in), the launcher and
+`.desktop` start it, and the smoke checks the client's main-menu frame against
+an independent `uishot` render while keeping one `ra2-shell` route run. That is
+the only platform claim in this table with a measurement behind it. The macOS
+and Windows scripts and CI build jobs are marked but unverified; a green
+advisory build would still not be a packaged, run artifact.
 
 **Size.** 3–5 blocks (plus whatever the untested platforms cost).
 

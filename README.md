@@ -86,16 +86,19 @@ by its right-slot records and reads the advance table two records on (S8 in
 [`docs/07-m5-m6-checklist.md`](docs/07-m5-m6-checklist.md)); the remaining font
 residue is only titles whose authored box is narrower than the shifted advance
 table, which clip as the data says. The workshop's **list and
-paint tools** are the game's C++ and are named/deferred (S4). There is no
-window or input loop.
+paint tools** are the game's C++ and are named/deferred (S4). The window and
+input loop arrived with M7 (`ra2-app`).
 
 ### M6 — packaging
 
-Linux x86_64 ships as a portable tarball with a launcher, installer, `.desktop`
-entry and icon, built offline and unpack-and-run smoke-tested
+Linux x86_64 ships as a portable tarball with the `ra2-app` client, a
+launcher, installer, `.desktop` entry and icon, built offline and
+unpack-and-run smoke-tested
 ([`docs/08-packaging.md`](docs/08-packaging.md)). macOS and Windows are a
 documented, **unverified** path: no build, test or artifact exists on either
-([`docs/09-platforms.md`](docs/09-platforms.md)).
+([`docs/09-platforms.md`](docs/09-platforms.md)). CI (`.github/workflows/ci.yml`)
+runs the Linux verification steps without the game, plus advisory macOS and
+Windows builds.
 
 ### M7 — the interactive shell
 
@@ -125,7 +128,8 @@ Measured, not aspirational.
   AI and the hazard zones.
 * The physics sandbox and two-robot duels, headless; 27/45 stock bots reach
   2 m on the survey.
-* The Linux tarball, its launcher and its unpack-and-run smoke test.
+* The Linux tarball with the `ra2-app` client, its launcher, and its
+  unpack-and-run smoke test.
 
 **Does not work yet**
 
@@ -158,11 +162,12 @@ tools at the directory that directly contains `RA2.cfz`, `UI/` and `Scripts/`
 export RA2_GAME_DIR="/path/to/Robot Arena 2"
 ```
 
-`RA2_GAME_DIR` wins; `ra2-shell` otherwise looks for `local/game` above the
-working directory and the crate, and the packaged launcher adds the XDG data
-directory, `game/` beside itself, `/usr/local/share`, `/usr/share` and `/opt`.
-A candidate is accepted only when all three names are present, and the error
-lists the names and every path tried.
+`RA2_GAME_DIR` wins; `ra2-app` otherwise looks for `RA2_GAME`/`RA2_GAME_DIR`,
+then `local/game` above the working directory and the crate, and the packaged
+launcher adds the XDG data directory, `game/` beside itself,
+`/usr/local/share`, `/usr/share` and `/opt`. A candidate is accepted only when
+all three names are present, and the error lists the names and every path
+tried.
 
 ### One command, offline
 
@@ -172,13 +177,20 @@ tools/check.sh
 
 It runs fmt, clippy (`-D warnings`), the release test suite, a release build,
 the packaging step and the unpacked-tarball smoke test, in that order, and stops
-at the first failure. The smoke is the picture check: 7 botlab frames and 3
-exhibition frames, the boot frame byte-identical to an independent `uishot`
-render of `mainmenu.gib`, both missing-game errors, and the CPython 3.12 check.
-It needs the game (corpus tests skip without it) and prints one summary line;
-what it does *not* cover is listed in [`docs/08-packaging.md`](docs/08-packaging.md) §9.
+at the first failure. The smoke is the picture check: the packaged `ra2-app
+--offscreen` must render the main menu byte-identically to an independent
+`uishot` render of `mainmenu.gib`, one `ra2-shell` botlab route must still
+write its 7 frames, the launcher must run headlessly through `RA2_GAME_DIR`,
+and both missing-game errors and the CPython 3.12 check are asserted. It needs
+the game (corpus tests skip without it) and prints one summary line; what it
+does *not* cover is listed in [`docs/08-packaging.md`](docs/08-packaging.md) §9.
+CI cannot run it for the same reason (no game in a checkout); the workflow
+runs the individual steps instead.
 
-### The shell
+### The headless route runner (CLI)
+
+`ra2-shell` is still the scripted route runner; the client below is the normal
+way to play.
 
 ```bash
 cd engine
@@ -248,22 +260,31 @@ cd ra2-open-robot-arena-0.1.0-linux-x86_64
 ./run.sh --game "/path/to/Robot Arena 2"
 ```
 
-With no route, the launcher runs the botlab route and writes seven 1280×1005
-frames to `~/.local/state/ra2-open-robot-arena/frames`; `--route exhibition`
-writes three. `./install.sh` adds a user (or system) launcher, `.desktop` entry
-and icon; `--uninstall` removes them and keeps your game.
+That opens the client. The launcher also takes the headless forms:
 
-**CPython 3.12 is required and is not bundled.** `ra2-shell`, `ra2-sim` and
-`ra2-duel` link `libpython3.12.so.1.0` (`ldd`/`readelf -d`), so the loader needs
-the system 3.12 runtime and stdlib before `main()` runs. Check with
-`ldd bin/ra2-shell | grep libpython`; on Debian/Ubuntu install
+```bash
+./run.sh --game "/path/to/Robot Arena 2" --offscreen mainmenu.png
+./run.sh --game "/path/to/Robot Arena 2" --match --out frames
+```
+
+The desktop entry's `Exec` is the same launcher (`Terminal=false`; the client
+opens its own window). With no display, the launcher says so and points at
+`--offscreen`. `./install.sh` adds a user (or system) launcher, `.desktop`
+entry and icon; `--uninstall` removes them and keeps your game.
+
+**CPython 3.12 is required and is not bundled.** `ra2-app`, `ra2-shell`,
+`ra2-sim` and `ra2-duel` link `libpython3.12.so.1.0` (`ldd`/`readelf -d`), so
+the loader needs the system 3.12 runtime and stdlib before `main()` runs. Check
+with `ldd bin/ra2-app | grep libpython`; on Debian/Ubuntu install
 `python3.12 libpython3.12`. The launcher performs this check itself, and
 `run.sh --check-python` prints it.
 
-The package ships `ra2-shell` (the entry point), `ra2` (data inspector/support),
-`ra2-render` (asset/scene PNGs), and the two playable headless paths `ra2-sim`
-and `ra2-duel`. The game is never in the package. The tarball's `README.txt`
-has the player step-by-step; `tools/smoke_package.sh` is its acceptance test.
+The package ships `ra2-app` (the client), `ra2-shell` (the headless route
+runner and script CLI), `ra2` (data inspector/support), `ra2-render`
+(asset/scene PNGs), and the two playable headless paths `ra2-sim` and
+`ra2-duel`. The game is never in the package, and the tarball is reproducible
+when `SOURCE_DATE_EPOCH` is set. The tarball's `README.txt` has the player
+step-by-step; `tools/smoke_package.sh` is its acceptance test.
 
 ### The other tools
 
@@ -296,11 +317,13 @@ would verify it. It is not a claim that those builds exist.
 ```
 docs/      Design notes, reverse-engineering findings, format specs
 tools/     Our own analysis/extraction/build scripts + tools/check.sh
-packaging/ Launcher, installer, .desktop, icon, and unbuilt Flatpak/AppImage recipes
+packaging/ Launcher, installer, .desktop, icon, platform scripts (unverified),
+           and unbuilt Flatpak/AppImage recipes
 engine/    The native engine (Rust workspace: ra2fmt, ra2-cli, ra2-render,
            ra2sim, ra2script — the script layer on an embedded CPython —,
-           ra2ui, the shell's layout model, ra2-shell, its headless entry point,
-           and ra2-app, the interactive client)
+           ra2-audio, ra2ui, the shell's layout model, ra2-shell, its headless
+           route runner, and ra2-app, the interactive client)
+.github/   CI: Linux fmt/clippy/tests/build/package; advisory macOS/Windows builds
 dist/      (git-ignored) portable tarballs built by tools/package.sh
 local/     (git-ignored) original game files and extracted data
 ```

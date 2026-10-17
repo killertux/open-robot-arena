@@ -12,10 +12,12 @@
 #   5. tools/package.sh --no-smoke   (stage the portable Linux tarball)
 #   6. tools/smoke_package.sh        (unpack it and use it as a player would)
 #
-# The smoke test is the headless render check: it walks the botlab route
-# (7 frames), the exhibition route through the launcher (3 frames), and
-# compares the boot frame byte for byte with an independent `uishot` render of
-# mainmenu.gib. It is reused rather than duplicated here.
+# The smoke test is the headless render check: it runs the packaged client
+# (`ra2-app --offscreen`) to the main menu, compares that frame byte for byte
+# with an independent `uishot` render of mainmenu.gib, and keeps one
+# `ra2-shell` botlab route run (7 frames) to prove the CLI still works. The
+# launcher is exercised headlessly as well. It is reused rather than duplicated
+# here.
 #
 # No network: cargo runs --offline and CARGO_NET_OFFLINE=true is exported so
 # build scripts (oxijolt's optional prebuilt archive) do not fetch either. The
@@ -42,7 +44,7 @@ stage="setup"
 tests=0
 tests_failed=0
 botlab_frames=0
-exhibition_frames=0
+app_frame="not run"
 smoke_state="not run"
 done=0
 
@@ -54,7 +56,7 @@ finish() {
     fi
     echo
     echo "check: FAIL at: $stage"
-    echo "check: ${tests} tests passed, ${tests_failed} failed; ${botlab_frames} botlab + ${exhibition_frames} exhibition frames written; package smoke ${smoke_state}"
+    echo "check: ${tests} tests passed, ${tests_failed} failed; ${botlab_frames} botlab frames written; ra2-app boot frame ${app_frame}; package smoke ${smoke_state}"
     rm -rf "$TMP"
     # `set -e` already made the failing command non-zero; keep a non-zero exit.
     [ "$rc" -ne 0 ] || rc=1
@@ -88,17 +90,17 @@ run "build" sh -c 'cd engine && cargo build --release --offline'
 run "package" tools/package.sh --no-smoke
 run "package smoke" tools/smoke_package.sh
 
-frames=$(sed -n 's/^smoke: PASS.* \([0-9][0-9]*\) botlab frames, \([0-9][0-9]*\) exhibition frames.*/\1 \2/p' \
+frames=$(sed -n 's/^smoke: PASS.* \([0-9][0-9]*\) botlab frames.*/\1/p' \
     "$TMP/package_smoke.log" | tail -1)
 if [ -z "$frames" ]; then
     stage="package smoke summary"
     echo "check: the smoke passed but its summary line could not be read" >&2
     exit 1
 fi
-botlab_frames=${frames% *}
-exhibition_frames=${frames#* }
+botlab_frames=$frames
+app_frame="== independent uishot render of mainmenu.gib"
 smoke_state=ok
 
 done=1
 echo
-echo "check: PASS — ${tests} tests passed, ${tests_failed} failed; ${botlab_frames} botlab + ${exhibition_frames} exhibition frames written; boot frame == independent uishot render of mainmenu.gib; package smoke ok"
+echo "check: PASS — ${tests} tests passed, ${tests_failed} failed; ${botlab_frames} botlab frames written; ra2-app boot frame ${app_frame}; launcher ok; package smoke ok"

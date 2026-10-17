@@ -16,14 +16,14 @@ platform code was added.
 
 | | Linux x86_64 | macOS arm64 | macOS x86_64 | Windows x86_64 |
 |---|---|---|---|---|
-| **State** | **verified** (151 tests; tarball smoke) | not built | not built | not built |
+| **State** | **verified** (267 tests; tarball smoke) | not built | not built | not built |
 | Rust target | `x86_64-unknown-linux-gnu` | `aarch64-apple-darwin` | `x86_64-apple-darwin` | `x86_64-pc-windows-msvc` |
 | Toolchain | rustc/cargo 1.98.1 (measured) | stable + Xcode CLT | stable + Xcode CLT | stable MSVC + VS Build Tools |
 | Jolt C++ (`oxijolt-sys` 1.1.0 + Jolt 5.6.0) | both paths run here: P2's build used the prebuilt archive, `check.sh` the vendored CMake build | **no archive for macOS in `prebuilt.txt` → CMake + vendored Jolt** | same | archive listed (MSVC 14.44, `MultiThreadedDLL`); CMake fallback |
 | wgpu 30 backend | Vulkan (Mesa) | Metal | Metal | DX12 (Vulkan only if present) |
 | Python 3.12 runtime | `libpython3.12.so.1.0` + stdlib | `libpython3.12.dylib` + stdlib | same | `python3.12.dll` + `python312.lib` + `Lib\` |
 | Point `pyo3` at it | auto (`sysconfig`) | `PYO3_PYTHON` | `PYO3_PYTHON` | `PYO3_PYTHON` |
-| Package | `.tar.gz` + `run.sh` (built) | `.app` + sign/notarise (**not written**) | same | portable `.zip` + `.cmd`/`.ps1` or MSI (**not written**) |
+| Package | `.tar.gz` + `run.sh` (built) | `.app` skeleton + sign/notarise (**script written, never run**) | same | portable `.zip` layout (**script written, never run**) or MSI (**not written**) |
 | Game found by | `--game`, `RA2_GAME_DIR`, launcher search | a launcher would pass `--game`/`RA2_GAME_DIR` | same | same |
 | Verified here | build, tests, routes, boot-frame equality, missing-game errors, Python check, tarball | **nothing** | **nothing** | **nothing** |
 
@@ -43,7 +43,7 @@ Common to all three:
   `CMakeLists.txt`. Both paths have run on this Linux host: the original P2
   build used the prebuilt archive, and `tools/check.sh` (which exports
   `CARGO_NET_OFFLINE=true`) rebuilds the tarball from the vendored Jolt and
-  passed the 151 tests and the smoke. That is Linux evidence for the CMake
+  passed the 267 tests and the smoke. That is Linux evidence for the CMake
   path, not macOS or Windows evidence. One AI assertion was re-windowed from 20 s to 30 s because the
   source build lands its first hit at 20.23 s; see `docs/08` §9.
 * **A wgpu adapter, even offscreen.** `Renderer::new` asks for
@@ -63,7 +63,7 @@ creates that name inside `OUT_DIR` from the versioned `libpython3.12.so.1.0`
 when only the runtime is installed. `readelf -d` shows the runtime dependency:
 
 ```
-$ readelf -d engine/target/release/ra2-shell | grep NEEDED
+$ readelf -d engine/target/release/ra2-app | grep NEEDED
   (NEEDED)  Shared library: [libpython3.12.so.1.0]
 ```
 
@@ -87,7 +87,7 @@ What is known from the sources, not from a run:
   ```sh
   export PYO3_PYTHON=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
   cd engine && cargo build --release --offline
-  otool -L target/release/ra2-shell | grep libpython
+  otool -L target/release/ra2-app | grep libpython
   ```
 
   The expected dependency is `libpython3.12.dylib`. The 3.12 standard library
@@ -110,10 +110,16 @@ What is known from the sources, not from a run:
   `RA2_GAME_DIR`). `ra2script` then `chdir`s to the game root, exactly as on
   Linux; Python accepts `/` separators on macOS.
 * **Package.** The intended shape is a `.app` bundle with
-  `Contents/Info.plist`, `Contents/MacOS/` (a small launcher plus `bin/`),
-  `Contents/Resources/icon.icns`, and the game **not** inside. Distribution
-  outside the developer's machine needs a Developer ID signature with the
-  hardened runtime and notarisation:
+  `Contents/Info.plist`, `Contents/MacOS/` (the client plus a `bin/` of the
+  tools), `Contents/Resources/icon.icns`, and the game **not** inside.
+  `packaging/macos/bundle.sh` now writes that skeleton: it refuses non-Darwin
+  hosts, requires a release build, copies `ra2-app` and the five tools, writes
+  `Info.plist`, and puts a README in `Contents/Resources/` naming the
+  `libpython3.12.dylib`, Jolt, Metal and signing gaps. **The script has never
+  been executed on macOS; no `.app` from it exists.** It does not build, copy
+  the dylib, create an `.icns`, sign or notarise. Distribution outside the
+  developer's machine needs a Developer ID signature with the hardened runtime
+  and notarisation:
 
   ```sh
   codesign --force --deep --options runtime --sign "Developer ID Application: …" "Open Robot Arena.app"
@@ -122,8 +128,8 @@ What is known from the sources, not from a run:
   ```
 
   These commands are the documented path, **not** something this repository
-  has run or scripted yet. `tools/package.sh` refuses non-Linux hosts
-  (`uname -s`), so there is no macOS artifact to sign.
+  has run. `tools/package.sh` refuses non-Linux hosts (`uname -s`), so there is
+  no macOS artifact to sign.
 
 ### 2.3 Windows x86_64
 
@@ -146,7 +152,7 @@ What is known from the sources, not from a run:
   $env:PYO3_PYTHON = "C:\Program Files\Python312\python.exe"
   cd engine
   cargo build --release --offline
-  dumpbin /dependents target\release\ra2-shell.exe | Select-String python
+  dumpbin /dependents target\release\ra2-app.exe | Select-String python
   ```
 
   Expected: `python312.dll` resolved from
@@ -160,9 +166,11 @@ What is known from the sources, not from a run:
   The original game's `D3D8.dll`, `D3D9.dll` and `dgVoodoo` are never loaded
   or shipped.
 * **Console vs windowed subsystem.** The tools are console programs (default
-  Rust subsystem on Windows) and print their frame paths; `ra2-shell` has no
-  window or input loop, so no `windows_subsystem = "windows"` attribute was
-  added. A future windowed `ra2app` would need one.
+  Rust subsystem on Windows). `ra2-app` opens a `winit` window but keeps that
+  console subsystem, so a Windows launch would show a console alongside the
+  game window; whether that is acceptable, and whether a
+  `windows_subsystem = "windows"` attribute or a GUI launcher is wanted, is
+  **unverified and undecided**. No attribute was added.
 * **Game discovery.** `--game` and `RA2_GAME_DIR` work unchanged. A portable
   launcher would also try `%LOCALAPPDATA%\ra2-open-robot-arena\game`,
   `game\` beside the executable and `%ProgramFiles(x86)%\Robot Arena 2`; only
@@ -171,12 +179,15 @@ What is known from the sources, not from a run:
   directory case-insensitively when a direct `Path::join` misses. This has
   been exercised on Linux's case-sensitive filesystem, not on NTFS.
 * **Package.** The intended shape is a portable `.zip` containing
-  `bin\ra2-shell.exe` and the four tools, a `run.cmd`/`run.ps1` that performs
-  the game search and the Python check, `README.txt`, and the licences; or an
-  MSI built with WiX. The `.desktop` file and `run.sh`/`install.sh` are Linux
-  only and are not part of a Windows package. **Neither the launcher nor the
-  installer has been written**, because writing them here would be untested
-  code presented as a path.
+  `ra2-app.exe` and the five tools, a `run.cmd`/`run.ps1` that performs the
+  game search and the Python check, `README.txt`, and the licences; or an MSI
+  built with WiX. `packaging/windows/zip.sh` now writes the binary/layout half:
+  it must run under Git Bash/MSYS/Cygwin on Windows, requires the MSVC `.exe`
+  files, and emits a README naming the `python3.12.dll`, Jolt and DX12 gaps.
+  **It has never been executed; no Windows zip exists.** It does not write a
+  `run.cmd`/`run.ps1`: that launcher is still open work, and writing it here
+  would be untested code presented as a path. The `.desktop` file and
+  `run.sh`/`install.sh` are Linux only and are not part of a Windows package.
 
 ## 3. What is unverified, and what would verify it
 
@@ -185,22 +196,56 @@ For each platform, the same acceptance the Linux tarball has (docs/08 §5):
 | Unverified | The evidence that would close it |
 |---|---|
 | It compiles and links | `cargo build --release --offline` from a clean `engine/target` |
-| The test suite passes | `cargo test --release --offline --workspace` (151 tests on Linux; corpus tests skip without the game) |
-| The shell boots the data and walks both routes | `cargo run -q --release -p ra2-shell -- --route botlab --out out --game "$GAME"` and `--route exhibition`; 7 and 3 PNGs, 1280×1005 |
-| The boot frame is the main menu | `cargo run -q --release -p ra2-render --example uishot -- "$GAME/UI/mainmenu/mainmenu.gib" ref.png 1280 1005`; `cmp out/00-mainmenu.png ref.png` |
+| The test suite passes | `cargo test --release --offline --workspace` (267 tests on Linux; corpus tests skip without the game) |
+| The shell boots the data and walks both routes | `cargo run -q --release -p ra2-app -- --game "$GAME" --offscreen out.png`; and the CLI routes `cargo run -q --release -p ra2-shell -- --route botlab --out out --game "$GAME"` / `--route exhibition`; 7 and 3 PNGs, 1280×1005 |
+| The boot frame is the main menu | `cargo run -q --release -p ra2-render --example uishot -- "$GAME/UI/mainmenu/mainmenu.gib" ref.png 1280 1005`; `cmp out.png ref.png` |
 | The Python link is discoverable | `otool -L` (macOS) / `dumpbin /dependents` (Windows) shows the 3.12 library, and the 3.12 stdlib is found at runtime |
 | The game search and its error | run with `--game` pointing at a directory without `RA2.cfz`, `UI/` and `Scripts/`; the error must name all three |
-| The packaged artifact runs from a clean tree | unpack the `.app`/`.zip` on a machine with no Rust toolchain and no game inside; run the same routes |
+| The packaged artifact runs from a clean tree | unpack the `.app`/`.zip` on a machine with no Rust toolchain and no game inside; run the same commands |
 | Signing, notarisation, installer | `codesign --verify --deep --strict` + `spctl -a -vv` + `xcrun stapler validate`; or an installed MSI that launches |
 | arm64 Windows, universal macOS, aarch64 Linux | one build/test/smoke run per target; none exists |
 
+### 3.1 The three unknowns that decide the build
+
+These are the ones to check first; a failure in any of them blocks the artifact
+regardless of packaging:
+
+1. **Jolt prebuilt availability.** `oxijolt-sys`'s `prebuilt.txt` lists
+   `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc` archives and **no
+   macOS entry**. macOS must therefore compile vendored Jolt 5.6.0 with CMake
+   and a C++17 compiler; Windows may use the MSVC 14.44 archive or fall back
+   to CMake. **Unknown:** whether the macOS CMake build succeeds with the
+   current Xcode SDK and whether the Windows archive is present, downloadable,
+   and ABI-compatible with the installed toolset. Neither path was run here.
+2. **The Python DLL/dylib.** pyo3 links the 3.12 shared library at build time
+   and the loader resolves it before `main()`. **Unknown:** whether a
+   relocated package can find `libpython3.12.dylib`/`python3.12.dll` without
+   `DYLD_LIBRARY_PATH`/`PYTHONHOME`/`PATH` changes, where the 3.12 standard
+   library is found from a copied tree, and whether `install_name_tool` or a
+   bundled interpreter tree is needed. Nothing was bundled; the Linux decision
+   (require the system 3.12) is the only measured one.
+3. **The wgpu backend.** `Backends::all()` picks Metal on macOS and DX12 on
+   Windows. **Unknown:** whether a Metal device exists in every session
+   (including SSH/CI) and whether DX12 (or WARP) provides an adapter for the
+   offscreen and windowed paths. Only Vulkan/Mesa was exercised here.
+
+### 3.2 The scripts
+
+`packaging/macos/bundle.sh` and `packaging/windows/zip.sh` are the M12.1/M12.2
+artifacts. Both header-mark themselves `WRITTEN, NEVER RUN`; each refuses to
+stage on the wrong host rather than pretending to cross-package. They write a
+layout and a README, not a tested application: the macOS script does not copy
+or repair the dylib, build an `.icns`, sign or notarise, and the Windows
+script does not write `run.cmd`/`run.ps1`. Their output must not be published
+as a release until the table above passes on that platform.
+
 The honest summary: **the platform table is a plan with one verified row.**
 Linux is the artifact this repository ships today. macOS and Windows have a
-named toolchain, library and packaging path; they do not have a build, a test
-run, a screenshot or a notarised bundle behind them, and this document does not
-pretend otherwise.
+named toolchain, library and packaging path, and now a reviewable packaging
+script; they do not have a build, a test run, a screenshot or a notarised
+bundle behind them, and this document does not pretend otherwise.
 
-## 4. Why no more code was added
+## 4. Why no more Rust code was added
 
 The cheap, real configuration was checked:
 
