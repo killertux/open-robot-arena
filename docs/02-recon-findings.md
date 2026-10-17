@@ -306,6 +306,18 @@ rectangle is that body frame; `_Size` is the size the fill was authored at
 (640×480 for the league screen) and must not be used as the drawing size. A
 textured background uses its own `_Size`/rect as an `Image` does.
 
+**Unresolved:** the decorated widget is still placed against its original
+parent, not *inside* the attachment body. On `hq_league.gib` that puts the
+scroller's body at x = 32 (0.025 of Slot1) and its scroll bar at 623, while the
+grid is at x = 0..591; if the original nests the widget in the decorator, the
+grid would be at 32..623 and the bar would touch it, and the background panel
+would start at the grid's edge. The corpus cannot decide it from geometry alone
+(the two readings differ on 143 widgets), so the next read is the binary's
+decorator layout: `FUN_00607b10` sets the child and its parent pointer, and the
+child frame setters it calls (vtable slots +0x20/+0x2c/+0x58) are where the
+offset, if any, is applied. The background itself is drawn at its own body
+frame either way.
+
 The binary says the same thing. The `Background` writer `FUN_00614790` emits
 `Tiling` and `Image` and then calls the Decorator writer `FUN_00607de0`, which
 writes `Widget true` and the decorated widget record. The attachment's own base
