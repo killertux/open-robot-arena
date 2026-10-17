@@ -279,18 +279,16 @@ impl UiAssets {
             out.push(UiQuad {
                 rect: glyph.rect,
                 corners: None,
-                // The face's page is stored **both ways round**: bottom-up in `v`
-                // and mirrored in `u`, so both pairs are swapped. The `v` was
-                // measured with `T` and `L` (drawn in byte order, `T`'s bar is at
-                // the bottom); the `u` is what the page looks like read as a
-                // picture — its `E` has its three bars on the *left* of the stem,
-                // its `F` the same, and so on through the alphabet — and it is
-                // why every label used to draw each letter with a stroke of its
-                // neighbour: the cell was right and the letter in it was reversed.
+                // The face's page is stored **bottom-up only**. `v` is swapped
+                // (the page's first row is the glyph's last); `u` is not: flipped
+                // vertically, the page's row reads `E F G H I J K L M N O P Q R
+                // S T U` upright and in order, so swapping `u` would mirror every
+                // glyph. It did, for a while — see the module note in
+                // `ra2fmt::giff`.
                 uv: [
-                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
-                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
                     glyph.cell[0] as f32 / pw,
+                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
+                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
                     glyph.cell[1] as f32 / ph,
                 ],
                 color,
@@ -336,12 +334,12 @@ impl UiAssets {
             out.push(UiQuad {
                 rect: glyph.rect,
                 corners: None,
-                // The page is stored both ways round — bottom-up in `v`, mirrored
-                // in `u` — so both pairs are swapped. See `text_quads`.
+                // The page is stored bottom-up only: swap `v`, not `u`. See
+                // `text_quads`.
                 uv: [
-                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
-                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
                     glyph.cell[0] as f32 / pw,
+                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
+                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
                     glyph.cell[1] as f32 / ph,
                 ],
                 color,
@@ -1084,6 +1082,35 @@ mod tests {
                 font.advance(c)
             );
         }
+    }
+
+    /// **The page is bottom-up only; the glyph quad swaps `v`, not `u`.** The
+    /// page's row at y 233 flipped vertically reads `E F G H I J K L M N O P Q R
+    /// S T U V` upright and in order, so a quad whose left edge samples the
+    /// cell's right edge (`u0 > u1`) mirrors every letter. This pins the
+    /// measured orientation: the left vertex's `u` is the cell's left, and only
+    /// the vertical pair is swapped (the page's first row is the glyph's last).
+    #[test]
+    fn a_glyph_quad_swaps_v_and_not_u() {
+        let Some(game) = game_dir() else { return };
+        let scene = scene_of(&game, "help/help_ws_overview.gib");
+        let quad = scene
+            .quads
+            .iter()
+            .find(|q| q.texture != 0 && scene.textures[q.texture].label.starts_with('#'))
+            .expect("a label's glyph quad");
+        assert!(
+            quad.uv[0] < quad.uv[2],
+            "u must rise left to right (cell left {}, right {})",
+            quad.uv[0],
+            quad.uv[2]
+        );
+        assert!(
+            quad.uv[1] > quad.uv[3],
+            "v must fall top to bottom (cell bottom {}, top {})",
+            quad.uv[1],
+            quad.uv[3]
+        );
     }
 
     /// The `+Background` attachment is drawn, and behind the widget it dresses:
