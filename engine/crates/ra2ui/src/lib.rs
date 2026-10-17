@@ -15,7 +15,7 @@
 //! amount is also what a *sibling-of-child* is placed against, so children are
 //! positioned in their parent's own frame.
 //!
-//! ## `Alignment` is a 3×3 anchor
+//! ## `Alignment` is a 3×3 anchor (except on a `TextBox`)
 //!
 //! `Alignment` is `horizontal | vertical`, with `1`/`2`/`4` for left/centre/
 //! right and `8`/`16`/`32` for top/middle/bottom. It says which point *of the
@@ -30,6 +30,15 @@
 //! | `Group "logo grp"` | `0.5 0.07` | 10 = centre\|top | 512×76 at x=384, y=70 |
 //! | `Group "sawback grp"` | `0.5 0.5` | 18 = centre\|middle | centred |
 //! | `Group "common buts"` | `0.5 1` | 34 = centre\|bottom | bottom edge at the screen's bottom |
+//!
+//! A `TextBox` is the exception: its `Alignment` is the text's alignment inside
+//! the box, so the box itself is placed at its own `Position` (top-left). The
+//! data settles it — `matchresults.gib`'s title is `Position 0 0`,
+//! `Size 1 1 28 0`, `Alignment 18`, and reading the field as a box anchor put
+//! the title half a box above its panel and clipped it away. The `Text` child of
+//! a `TextBox`/`Group` is placed by its **baseline**: `statusmeters.gib`'s name
+//! is a 12-pixel box whose `Text` is at y 8, and a 12-pixel face's ink only lands
+//! inside that box when 8 is the baseline.
 //!
 //! ## `SplitFrame` splits, and the slot order is the child order
 //!
@@ -895,6 +904,14 @@ pub fn draw_order_parented<'a>(
         parent: Option<&'a Placement<'a>>,
         out: &mut Vec<(&'a Placement<'a>, Option<&'a Placement<'a>>)>,
     ) {
+        // A hidden widget takes its whole subtree with it. The scene builder
+        // checks visibility per widget too, but a hidden group's children are
+        // still `Visible true` in the file — `gamewindow.gib`'s countdown text
+        // and `result_cell.gib`'s `Spectator` are exactly that — so the walk has
+        // to stop here rather than rely on the leaf's own flag.
+        if !p.widget.visible() {
+            return;
+        }
         // A `Background` is the one attachment that draws *behind* what it
         // dresses; every other body (a caption's text, a scroller's bar, a
         // border) draws in front. That is what the class means: the body's frame
@@ -944,17 +961,25 @@ pub fn place(widget: &Widget, parent: Frame) -> Placement<'_> {
 
 /// Place one widget inside `parent`, sizing an unmeasured label from its text.
 pub fn place_with<'a>(widget: &'a Widget, parent: Frame, fonts: Option<&Fonts>) -> Placement<'a> {
-    place_at(widget, parent, None, fonts)
+    place_at(widget, parent, None, fonts, false)
 }
 
 /// Place one widget, carrying down the clip its ancestors impose.
+///
+/// `baseline` says that this widget is a `Text` whose `_Position.y` is the
+/// **glyph baseline**, not the top of its line box. That is the origin the game
+/// writes: `statusmeters.gib`'s name is a 12 px box with its `Text` at y 8, and
+/// a 12-pixel font's ink only lands inside that box when 8 is the baseline.
+/// Direct children of a `TextBox`/`Group` are placed that way; a `Caption`'s
+/// body is already centred by [`centre_captions`] and keeps its top-left frame.
 fn place_at<'a>(
     widget: &'a Widget,
     parent: Frame,
     inherited: Option<Frame>,
     fonts: Option<&Fonts>,
+    baseline: bool,
 ) -> Placement<'a> {
-    let frame = sized(widget, parent, widget.size(), fonts);
+    let frame = sized(widget, parent, widget.size(), fonts, baseline);
     let clip = match ClipMode::from_value(widget.clip_mode()) {
         ClipMode::None => inherited,
         ClipMode::SelfFrame => Some(intersect(inherited, frame)),
@@ -968,10 +993,13 @@ fn place_at<'a>(
         // A scroll bar puts its parts at its two ends and between them.
         WidgetKind::ScrollBar => scroll_children(widget, frame, clip, fonts),
         _ => {
+            // Explicit text inside a box or a group is positioned by its
+            // baseline; an attachment's body (a caption) is not.
+            let baseline_text = matches!(widget.kind, WidgetKind::TextBox | WidgetKind::Group);
             let placed: Vec<Placement> = widget
                 .children
                 .iter()
-                .map(|c| place_at(c, frame, clip, fonts))
+                .map(|c| place_at(c, frame, clip, fonts, baseline_text))
                 .collect();
             placed
         }
@@ -987,7 +1015,7 @@ fn place_at<'a>(
         .filter_map(|a| {
             a.body.as_deref().map(|body| PlacedAttachment {
                 attachment: a,
-                body: place_at(body, parent, inherited, fonts),
+                body: place_at(body, parent, inherited, fonts, false),
             })
         })
         .collect();
@@ -1108,7 +1136,7 @@ fn scroll_children<'a>(
     let mut placed: Vec<Placement<'a>> = widget
         .children
         .iter()
-        .map(|c| place_at(c, frame, clip, fonts))
+        .map(|c| place_at(c, frame, clip, fonts, false))
         .collect();
     let zero = Frame::new(frame.x, frame.y, 0.0, 0.0);
     let less = placed.get(bar.less).map(|p| p.frame).unwrap_or(zero);
@@ -1161,6 +1189,7 @@ fn sized(
     parent: Frame,
     size: Option<ra2fmt::gib::Axes>,
     fonts: Option<&Fonts>,
+    baseline: bool,
 ) -> Frame {
     // A zero is the editor's automatic size. For a label that is its text's
     // extent, which is what the game does too — a `Text` in every shipped screen
@@ -1188,18 +1217,37 @@ fn sized(
     } else {
         Anchor::TOP_LEFT
     };
+    // A `Text` whose `_Position.y` is a baseline shifts its frame up by the
+    // face's ascent, so `text_run`'s `frame.y + ascent` lands on that baseline.
+    let ascent = if baseline {
+        fonts
+            .and_then(|fonts| widget.font().and_then(|name| fonts.get(name)))
+            .map(|font| font.ascent as f32)
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
     Frame::new(
         parent.x + px - anchor.h * w,
-        parent.y + py - anchor.v * h,
+        parent.y + py - anchor.v * h - ascent,
         w,
         h,
     )
 }
 
-/// Only the widgets whose class declares an `Alignment` have one; for the rest
-/// the anchor is the top-left, which `from_alignment(0)` also gives.
+/// Whether a widget's `Alignment` anchors its **box**.
+///
+/// `Group` and `Window` do. A `TextBox` does not: its `Alignment` is the text
+/// alignment inside the box, and anchoring the box by it moves the record half
+/// its own width/height out of its parent. The shipped records settle it —
+/// `common/matchresults.gib`'s title is `Position 0 0`, `Size 1 1 28 0`,
+/// `Alignment 18` and its `Text` child is authored at `_Position 186 19`; read
+/// as an anchor the box starts at y = −14 and the title is clipped away, read as
+/// a top-left box at 0,0 the child lands where the designer put it.
+/// `statusmeters.gib`'s `points` is the same: `Position 46 51`, `Alignment 17`,
+/// and the number under `POINTS:` only when the position is the box's own.
 fn has_alignment(widget: &Widget) -> bool {
-    widget.field("Alignment").is_some()
+    widget.field("Alignment").is_some() && widget.kind != WidgetKind::TextBox
 }
 
 /// One axis of a `Position`/`Size`, in pixels.
@@ -1261,7 +1309,7 @@ fn split_children<'a>(
         .children
         .iter()
         .enumerate()
-        .map(|(i, c)| place_at(c, panes[i.min(1)], clip, fonts))
+        .map(|(i, c)| place_at(c, panes[i.min(1)], clip, fonts, false))
         .collect()
 }
 
@@ -2053,14 +2101,14 @@ mod tests {
         }
         assert_eq!(
             pairs.len(),
-            13,
+            12,
             "equal-ChildOrder overlapping sibling pairs"
         );
         // The 328 older pairs were mostly a control followed by the caption
         // holder that draws its text. That holder is the `Caption` attachment's
         // *body*, not a sibling, so it is no longer part of this count: the
         // caption is drawn in front because of what the attachment is, not
-        // because of a `ChildOrder` tie. What is left is 13 true sibling
+        // because of a `ChildOrder` tie. What is left is 12 true sibling
         // overlaps; the largest is `multiplayer.gib`'s list against its heading
         // grid, and the file order still says the earlier one is in front.
         for button in ["Options button", "MainMenu button", "Help button"] {
@@ -2076,7 +2124,7 @@ mod tests {
             && p.3 == "list grp"));
     }
 
-    /// Every shipped file, placed: 4,348 widgets, all finite, and 204 whose
+    /// Every shipped file, placed: 4,348 widgets, all finite, and 155 whose
     /// frame reaches past the screen. Those are of two kinds, both expected:
     /// *fragments* — files like `botlab/control_cell.gib` that are a content
     /// slot's payload and were never meant to be placed against the screen —
@@ -2230,12 +2278,15 @@ mod tests {
         // fell back to half the frame for every split whose master is not the
         // first slot. The corpus is 4,348 widgets, and since every attachment
         // takes its body there are no ownerless records left to place against
-        // the screen: the 204 that still reach past it are fragments and
-        // authored oversize frames, not nesting failures. Fifty-seven of the
-        // 116 files place entirely on screen.
+        // the screen: the 155 that still reach past it are fragments and
+        // authored oversize frames, not nesting failures. Seventy-seven of the
+        // 116 files place entirely on screen. (A `TextBox` keeps its authored
+        // rectangle now — its `Alignment` is text alignment, not a box anchor —
+        // and a `Text` child is positioned by its baseline, so fewer frames are
+        // pushed past the edge than the earlier reading had.)
         assert_eq!(placed, 4348);
-        assert_eq!(outside, 204, "off screen");
-        assert_eq!(perfect, 57, "perfect files");
+        assert_eq!(outside, 155, "off screen");
+        assert_eq!(perfect, 77, "perfect files");
         // The worst offender is a fragment, not a screen.
         assert!(
             worst.1.ends_with("botlab/armor.gib") || worst.1.ends_with("botlab/adjust_none.gib"),
@@ -2484,7 +2535,7 @@ mod tests {
             }
         }
         assert_eq!(negatives, 613, "children with a negative ChildOrder");
-        assert_eq!(overlapping, 73, "those overlapping a non-negative sibling");
+        assert_eq!(overlapping, 66, "those overlapping a non-negative sibling");
         assert_eq!(controls, 256, "negative orders on pressed controls");
 
         let text = std::fs::read_to_string(game.join("UI/mainmenu/mainmenu.gib")).unwrap();
@@ -2618,5 +2669,62 @@ mod text_run_tests {
             spaced[1].rect.x,
             frame.x + font.advance('A') as f32 + font.space_advance() as f32
         );
+    }
+
+    /// A `TextBox` keeps its authored rectangle (its `Alignment` is the text's,
+    /// not the box's), and its `Text` child is placed by the baseline. Two
+    /// shipped cases pin both halves: the match-results title inside its panel
+    /// and `statusmeters.gib`'s points under `POINTS:`.
+    #[test]
+    fn a_textbox_is_a_box_and_its_text_is_a_baseline() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let fonts = Fonts::load(&game.join("RA2.cfz")).unwrap();
+        let text = std::fs::read_to_string(ui.join("common/matchresults.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+        let placed = resolve_with(&gib, DESIGN_SCREEN, Some(&fonts));
+        let title = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "New [TextBox]" && p.widget.kind == WidgetKind::TextBox)
+            .expect("the title's TextBox");
+        assert_eq!(title.frame.x, 380.0);
+        assert_eq!(title.frame.y, 289.5);
+        assert_eq!(title.frame.w, 520.0);
+        assert_eq!(title.frame.h, 28.0);
+        let child = title
+            .children
+            .iter()
+            .find(|p| p.widget.kind == WidgetKind::Text)
+            .expect("the title's Text");
+        assert_eq!(child.frame.x, 380.0 + 186.0);
+        // The glyphs' ink is inside the box, not clipped below it.
+        let font = fonts.get("fg_d24").expect("fg_d24");
+        let run = text_run(font, child.frame, "Match Results");
+        assert!(run[0].rect.y >= title.frame.y - 4.0, "title above its box");
+        assert!(
+            run[0].rect.bottom() <= title.frame.bottom(),
+            "title below its box"
+        );
+
+        let text = std::fs::read_to_string(ui.join("common/statusmeters.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+        let placed = resolve_with(&gib, DESIGN_SCREEN, Some(&fonts));
+        let points = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "points")
+            .expect("the points TextBox");
+        assert_eq!(points.frame.x, 46.0);
+        assert_eq!(points.frame.y, 51.0);
+        let child = points
+            .children
+            .iter()
+            .find(|p| p.widget.kind == WidgetKind::Text)
+            .expect("the points Text");
+        let font = fonts.get("fg_dcn14").expect("fg_dcn14");
+        let run = text_run(font, child.frame, "8888");
+        assert!(run[0].rect.y >= points.frame.y - 5.0);
+        assert!(run[0].rect.bottom() <= points.frame.bottom() + 5.0);
     }
 }

@@ -214,6 +214,16 @@ pub struct RobotReport {
     pub points: i32,
     pub damage_dealt: f32,
     pub damage_taken: f32,
+    /// The HUD's three meters, as fractions 0..1 of each part's starting
+    /// hitpoints. **Our mapping, not the binary's:** `0x4b2f20` binds the
+    /// `statusmeters.gib` widgets but the per-frame fill was not traced, and the
+    /// original's battery/air are consumable resources while this port has no
+    /// energy model. So `battery` is the remaining hitpoints of the robot's
+    /// `Battery` components, `air` of its `AirTank` components, and `armor` of
+    /// its chassis. A robot without a battery/air tank reports 0 for that bar.
+    pub battery: f32,
+    pub air: f32,
+    pub armor: f32,
     /// `plus.isDefeated` — state != 0, which includes eliminated.
     pub defeated: bool,
     /// `plus.isEliminated` — state 3 only.
@@ -237,6 +247,10 @@ pub struct MatchReport {
     pub winners: Vec<usize>,
     /// Fight time in seconds, excluding the countdown.
     pub duration: f32,
+    /// The explicit match length, when the event set one (`None` = "No limit").
+    /// The HUD's `time` box counts down from this; without it the clock counts
+    /// up.
+    pub duration_limit: Option<f32>,
     pub robots: Vec<RobotReport>,
     /// The duel's human-readable event log (KO, parts, eliminations, a broken
     /// arena `Tick`). Damage is in the per-robot numbers, not repeated here.
@@ -358,6 +372,11 @@ impl Match {
         self.clock
     }
 
+    /// Seconds left in the pre-fight countdown (`0.0` once the fight begins).
+    pub fn countdown_left(&self) -> f32 {
+        self.countdown_left
+    }
+
     /// Advance one fixed step (`MatchConfig::dt`, the existing duel's step).
     pub fn step(&mut self) {
         let dt = self.config.dt;
@@ -425,6 +444,22 @@ impl Match {
                     points: ra2script::points(i as i32),
                     damage_dealt: self.duel.damage_dealt.get(i).copied().unwrap_or(0.0),
                     damage_taken: self.duel.damage_taken.get(i).copied().unwrap_or(0.0),
+                    battery: component_fraction(robot, |c| {
+                        c.class == "Battery" || c.base == "Battery"
+                    }),
+                    air: component_fraction(robot, |c| c.class == "AirTank" || c.base == "AirTank"),
+                    armor: robot
+                        .health
+                        .first()
+                        .zip(robot.rig.components.first())
+                        .map(|(left, c)| {
+                            if c.hitpoints > 0.0 {
+                                (left / c.hitpoints).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            }
+                        })
+                        .unwrap_or(0.0),
                     defeated: !robot.is_alive(),
                     eliminated: robot.eliminated,
                     winner: self.winners.contains(&i),
@@ -439,6 +474,7 @@ impl Match {
             reason: self.reason,
             winners: self.winners.clone(),
             duration: self.clock,
+            duration_limit: self.config.duration,
             robots,
             log: self.duel.log.clone(),
         }
@@ -553,6 +589,31 @@ impl Match {
 /// `EventNumBots` from a robot list: the original accepts only 2 or 4.
 fn match_event_num_bots_from_entries(n: usize) -> usize {
     event_num_bots(n)
+}
+
+/// Remaining fraction of the hitpoints of every attached component matching
+/// `which`. A robot with no such component is 0 (the bar is empty), and a
+/// component knocked off counts as gone.
+fn component_fraction(
+    robot: &crate::robot::Robot,
+    which: impl Fn(&crate::rig::Component) -> bool,
+) -> f32 {
+    let mut total = 0.0;
+    let mut left = 0.0;
+    for (i, component) in robot.rig.components.iter().enumerate() {
+        if !which(component) || component.hitpoints <= 0.0 {
+            continue;
+        }
+        total += component.hitpoints;
+        if robot.attached.get(i).copied().unwrap_or(false) {
+            left += robot.health.get(i).copied().unwrap_or(0.0).max(0.0);
+        }
+    }
+    if total > 0.0 {
+        (left / total).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// The AI teams' names and logos, for the result cells.
@@ -986,6 +1047,71 @@ mod tests {
             line.contains("Traceback") || line.contains("RuntimeError"),
             "the traceback is carried: {line}"
         );
+    }
+
+    /// M8.7: the report carries the three HUD bar fractions and the configured
+    /// length the clock counts down from.
+    #[test]
+    fn the_report_carries_the_hud_bars_and_the_time_limit() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let config = MatchConfig::new(
+            path(&game, "Arenas/box.py"),
+            GameType::Deathmatch,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team6/Bot2.bot")),
+            ],
+        )
+        .with_duration(Some(12.0));
+        let mut m = Match::new(config).expect("the match builds");
+        assert_eq!(m.countdown_left(), COUNTDOWN_SECONDS);
+        m.step();
+        assert!(m.countdown_left() < COUNTDOWN_SECONDS);
+        let report = m.report();
+        assert_eq!(report.duration_limit, Some(12.0));
+        for robot in &report.robots {
+            for (name, value) in [
+                ("battery", robot.battery),
+                ("air", robot.air),
+                ("armor", robot.armor),
+            ] {
+                assert!(
+                    (0.0..=1.0).contains(&value),
+                    "robot {} {name} = {value}",
+                    robot.slot
+                );
+            }
+        }
+        println!(
+            "bars: {:?}",
+            report
+                .robots
+                .iter()
+                .map(|r| (r.bot_name.as_str(), r.battery, r.air, r.armor))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// M8.8: the three camera strings are the config's vocabulary, and nothing
+    /// else is silently accepted.
+    #[test]
+    fn the_camera_modes_are_the_configs_three_words() {
+        assert!(matches!(
+            crate::DuelCamera::from_config("watch"),
+            Some(crate::DuelCamera::Watch)
+        ));
+        assert!(matches!(
+            crate::DuelCamera::from_config("static"),
+            Some(crate::DuelCamera::Static)
+        ));
+        assert!(matches!(
+            crate::DuelCamera::from_config("orbit"),
+            Some(crate::DuelCamera::Orbit { .. })
+        ));
+        assert!(crate::DuelCamera::from_config("chase").is_none());
+        assert_eq!(crate::DuelCamera::Watch.name(), "watch");
+        assert_eq!(crate::DuelCamera::Orbit { period: 24.0 }.name(), "orbit");
     }
 
     /// M8.4: a zero-point time-out is a draw, not an invented tie-break.

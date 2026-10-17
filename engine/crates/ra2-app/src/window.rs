@@ -13,7 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ra2_render::ui::UiRenderer;
+use ra2_render::Renderer as MeshRenderer;
 use ra2_shell::Shell;
+use ra2sim::r#match::MatchState;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -53,6 +55,31 @@ pub fn run(game: &Path, size: [u32; 2]) -> Result<(), String> {
     }
 }
 
+/// Open the match in a window: the same composition the offscreen runner uses,
+/// one frame per loop. `Esc` pauses, `C` cycles watch/static/orbit, and the
+/// pause dialog's resume/quit buttons are hit-tested through the layout.
+pub fn run_match(options: crate::match_mode::Options) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Err(
+            "no display (DISPLAY and WAYLAND_DISPLAY are both unset); the windowed client \
+             needs one — use --match --out DIR for the headless path"
+                .into(),
+        );
+    }
+    let event_loop = EventLoop::new()
+        .map_err(|e| format!("cannot open a window: {e}; use --match --out DIR for the match"))?;
+    let mut app = App::new_match(options)?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| format!("the window loop failed: {e}"))?;
+    match app.error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 struct Gpu {
     /// Held so the surface's instance outlives it.
     _instance: wgpu::Instance,
@@ -61,6 +88,11 @@ struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     ui: UiRenderer,
+    /// The 3D pipeline pair, on the same device as the surface.
+    mesh: MeshRenderer,
+    /// The 3D pass's depth buffer, recreated on resize.
+    _depth: wgpu::Texture,
+    depth_view: wgpu::TextureView,
 }
 
 impl Gpu {
@@ -110,6 +142,9 @@ impl Gpu {
         }
         surface.configure(&device, &config);
         let ui = UiRenderer::new_for(&device, config.format);
+        let mesh =
+            MeshRenderer::from_device(&device, &queue).map_err(|e| format!("3D renderer: {e}"))?;
+        let (depth, depth_view) = depth_target(&device, size);
         Ok(Gpu {
             _instance: instance,
             surface,
@@ -117,6 +152,9 @@ impl Gpu {
             queue,
             config,
             ui,
+            mesh,
+            _depth: depth,
+            depth_view,
         })
     }
 
@@ -127,11 +165,33 @@ impl Gpu {
         self.config.width = size[0];
         self.config.height = size[1];
         self.surface.configure(&self.device, &self.config);
+        let (depth, depth_view) = depth_target(&self.device, size);
+        self._depth = depth;
+        self.depth_view = depth_view;
     }
 
     fn configure(&mut self) {
         self.surface.configure(&self.device, &self.config);
     }
+}
+
+fn depth_target(device: &wgpu::Device, size: [u32; 2]) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("match-depth"),
+        size: wgpu::Extent3d {
+            width: size[0].max(1),
+            height: size[1].max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 fn window_size(window: &Window) -> [u32; 2] {
@@ -143,6 +203,9 @@ struct App {
     requested: [u32; 2],
     shell: Shell,
     frames: FrameRenderer,
+    /// `Some` when `--match` is playing; the shell stays booted so quitting the
+    /// match returns to its main menu.
+    session: Option<crate::match_mode::Session>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     cursor: Option<PhysicalPosition<f64>>,
@@ -156,6 +219,19 @@ struct App {
 
 impl App {
     fn new(game: &Path, requested: [u32; 2]) -> Result<App, String> {
+        App::with_session(game, requested, None)
+    }
+
+    fn new_match(options: crate::match_mode::Options) -> Result<App, String> {
+        let session = crate::match_mode::Session::new(&options)?;
+        App::with_session(&options.game, options.size, Some(session))
+    }
+
+    fn with_session(
+        game: &Path,
+        requested: [u32; 2],
+        session: Option<crate::match_mode::Session>,
+    ) -> Result<App, String> {
         let shell = Shell::boot(game, SHELL_SIZE)?;
         let frames = FrameRenderer::open(game)?;
         println!(
@@ -171,6 +247,7 @@ impl App {
             requested,
             shell,
             frames,
+            session,
             window: None,
             gpu: None,
             cursor: None,
@@ -207,7 +284,6 @@ impl App {
         if size != [gpu.config.width, gpu.config.height] {
             gpu.resize(size);
         }
-        let frame = self.frames.frame(&mut self.shell, size);
 
         let current = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
@@ -228,18 +304,52 @@ impl App {
         let view = current
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        if let Err(error) = gpu.ui.render_to(
-            &gpu.device,
-            &gpu.queue,
-            &frame.scene,
-            &view,
-            gpu.config.format,
-            size[0],
-            size[1],
-        ) {
-            self.error = Some(format!("could not draw the shell: {error}"));
-            event_loop.exit();
-            return;
+
+        let format = gpu.config.format;
+        if let Some(session) = &mut self.session {
+            let scene = match session.scene() {
+                Ok(scene) => scene,
+                Err(error) => {
+                    self.error = Some(format!("could not build the match frame: {error}"));
+                    event_loop.exit();
+                    return;
+                }
+            };
+            if let Err(error) =
+                session.render_3d(&gpu.mesh, &view, &gpu.depth_view, format, size[0], size[1])
+            {
+                self.error = Some(format!("could not draw the match: {error}"));
+                event_loop.exit();
+                return;
+            }
+            if let Err(error) = gpu.ui.render_over_to(
+                &gpu.device,
+                &gpu.queue,
+                &scene,
+                &view,
+                format,
+                size[0],
+                size[1],
+            ) {
+                self.error = Some(format!("could not draw the HUD: {error}"));
+                event_loop.exit();
+                return;
+            }
+        } else {
+            let frame = self.frames.frame(&mut self.shell, size);
+            if let Err(error) = gpu.ui.render_to(
+                &gpu.device,
+                &gpu.queue,
+                &frame.scene,
+                &view,
+                format,
+                size[0],
+                size[1],
+            ) {
+                self.error = Some(format!("could not draw the shell: {error}"));
+                event_loop.exit();
+                return;
+            }
         }
         gpu.queue.present(current);
     }
@@ -297,8 +407,36 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
-                    event_loop.exit();
+                match event.physical_key {
+                    PhysicalKey::Code(KeyCode::Escape) => {
+                        let mut quit = false;
+                        if let Some(session) = &mut self.session {
+                            if session.matched.state() == MatchState::Results {
+                                quit = true;
+                            } else {
+                                session.toggle_pause();
+                            }
+                        } else {
+                            event_loop.exit();
+                        }
+                        if quit {
+                            ra2script::set_paused(false);
+                            self.session = None;
+                            println!("match over; back on {}", self.shell.screen_id());
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::KeyC) if self.session.is_some() => {
+                        if let Some(session) = &mut self.session {
+                            session.cycle_camera();
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    _ => {}
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -322,6 +460,37 @@ impl ApplicationHandler for App {
                     // A click in a bar is no click at all.
                     return;
                 };
+                let mut quit = false;
+                if let Some(session) = &mut self.session {
+                    if session.matched.state() == MatchState::Results {
+                        if session.results_button_at(point).is_some() {
+                            quit = true;
+                        }
+                    } else {
+                        match session.pause_button_at(point).as_deref() {
+                            Some("resume button") => {
+                                session.toggle_pause();
+                            }
+                            Some("quit button") | Some("end match button") => quit = true,
+                            _ => {}
+                        }
+                    }
+                }
+                if quit {
+                    ra2script::set_paused(false);
+                    self.session = None;
+                    println!("match quit; back on {}", self.shell.screen_id());
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                if self.session.is_some() {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 match self.shell.click(point[0], point[1]) {
                     Ok(step) => {
                         println!("{}", crate::describe(&step));
@@ -349,8 +518,12 @@ impl ApplicationHandler for App {
         let now = Instant::now();
         if now >= self.next_update {
             // One fixed update. The shell has no time-dependent drawing yet, so
-            // the tick only asks for the next frame; the cadence is the game's.
+            // its tick only asks for the next frame; the match advances at its
+            // own `dt` through the accumulator.
             self.next_update = now + UPDATE;
+            if let Some(session) = &mut self.session {
+                session.advance(UPDATE.as_secs_f32());
+            }
             if let Some(window) = &self.window {
                 window.request_redraw();
             }

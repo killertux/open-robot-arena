@@ -21,6 +21,7 @@ ra2fmt = { path = "../ra2fmt" }
 ra2-render = { path = "../ra2-render" }
 ra2script = { path = "../ra2script" }
 ra2ui = { path = "../ra2ui" }
+wgpu = "30.0.1"
 
 [dev-dependencies]
 pyo3 = { version = "0.23.5", features = ["auto-initialize"] }

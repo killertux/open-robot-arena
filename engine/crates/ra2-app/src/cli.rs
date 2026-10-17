@@ -10,6 +10,19 @@ pub struct Args {
     pub size: [u32; 2],
     pub clicks: Vec<[f32; 2]>,
     pub help: bool,
+    /// `--match`: play a `ra2sim::match::Match` instead of the shell.
+    pub match_mode: bool,
+    /// `--match --out DIR`: the offscreen evidence run.
+    pub out: Option<PathBuf>,
+    /// Fight seconds before the evidence script's decision (and the HUD clock's
+    /// configured length).
+    pub seconds: Option<f32>,
+    /// `--quit-at N`: open the pause dialog at N fight seconds, then quit.
+    pub quit_at: Option<f32>,
+    /// `--bots a.bot,b.bot`, overriding the two shipped AI bots.
+    pub bots: Vec<PathBuf>,
+    /// `--arena PATH`, overriding `Arenas/box.py`.
+    pub arena: Option<PathBuf>,
 }
 
 impl Default for Args {
@@ -20,21 +33,40 @@ impl Default for Args {
             size: [1280, 1005],
             clicks: Vec::new(),
             help: false,
+            match_mode: false,
+            out: None,
+            seconds: None,
+            quit_at: None,
+            bots: Vec::new(),
+            arena: None,
         }
     }
 }
 
 pub fn usage() -> &'static str {
     "usage: ra2-app [--game DIR] [--offscreen PNG] [--size WxH] [--clicks \"x,y;x,y;...\"]\n\
+     \x20      ra2-app --match [--seconds N] [--out DIR] [--quit-at N]\n\
+     \x20                [--bots A.bot,B.bot] [--arena PATH]\n\
      \n\
      With no --offscreen the shell opens in a window. With it, the same loop runs\n\
      headlessly: boot, apply the click script in the shell's 1280x1005 coordinates,\n\
      write the final frame to PNG, print the trace and exit. Escape quits the window.\n\
      \n\
+     --match plays a DEATHMATCH on the box arena (two shipped AI bots by default):\n\
+     in a window, or headlessly with --out, which writes countdown/fight/results\n\
+     PNGs at the named moments and prints every state transition. In the window,\n\
+     Escape pauses, C cycles the camera; the pause dialog resumes or quits to menu.\n\
+     \n\
        --game DIR       the install (default: RA2_GAME, else local/game)\n\
        --offscreen PNG  render the final state and exit (the CI path)\n\
        --size WxH       window/target size (default 1280x1005; the shell stays 1280x1005)\n\
        --clicks SCRIPT  semicolon-separated x,y points, applied in order\n\
+       --match          play a match instead of the shell\n\
+       --seconds N      fight length for --match (default 30)\n\
+       --out DIR        write the match's PNG frames and exit\n\
+       --quit-at N      pause at N fight seconds, quit to the menu, write pause/menu PNGs\n\
+       --bots A,B       two .bot paths for --match\n\
+       --arena PATH     arena script for --match (default Arenas/box.py)\n\
        -h, --help       this text"
 }
 
@@ -50,6 +82,32 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             }
             "--size" => parsed.size = parse_size(&next(&mut args, "--size")?)?,
             "--clicks" => parsed.clicks = parse_clicks(&next(&mut args, "--clicks")?)?,
+            "--match" => parsed.match_mode = true,
+            "--out" => parsed.out = Some(PathBuf::from(next(&mut args, "--out")?)),
+            "--seconds" => {
+                let value = next(&mut args, "--seconds")?;
+                let seconds: f32 = value
+                    .parse()
+                    .map_err(|_| format!("--seconds is not a number: {value:?}"))?;
+                parsed.seconds = Some(seconds);
+            }
+            "--quit-at" => {
+                let value = next(&mut args, "--quit-at")?;
+                let seconds: f32 = value
+                    .parse()
+                    .map_err(|_| format!("--quit-at is not a number: {value:?}"))?;
+                parsed.quit_at = Some(seconds);
+            }
+            "--bots" => {
+                let value = next(&mut args, "--bots")?;
+                parsed.bots = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+            }
+            "--arena" => parsed.arena = Some(PathBuf::from(next(&mut args, "--arena")?)),
             "-h" | "--help" => parsed.help = true,
             other => return Err(format!("unknown argument {other:?}\n{}", usage())),
         }
@@ -156,5 +214,37 @@ mod tests {
         assert_eq!(args.offscreen, Some(PathBuf::from("out.png")));
         assert_eq!(args.size, [1920, 1080]);
         assert_eq!(args.clicks, vec![[1.0, 2.0], [3.0, 4.0]]);
+    }
+
+    #[test]
+    fn the_match_flags_parse() {
+        let args = parse(
+            [
+                "--match",
+                "--seconds",
+                "20",
+                "--out",
+                "frames",
+                "--quit-at",
+                "5",
+                "--bots",
+                "a.bot, b.bot",
+                "--arena",
+                "Arenas/hilltop.py",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert!(args.match_mode);
+        assert_eq!(args.seconds, Some(20.0));
+        assert_eq!(args.out, Some(PathBuf::from("frames")));
+        assert_eq!(args.quit_at, Some(5.0));
+        assert_eq!(
+            args.bots,
+            vec![PathBuf::from("a.bot"), PathBuf::from("b.bot")]
+        );
+        assert_eq!(args.arena, Some(PathBuf::from("Arenas/hilltop.py")));
+        assert!(parse(["--seconds".into(), "x".into()]).is_err());
     }
 }

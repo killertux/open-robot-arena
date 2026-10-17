@@ -10,11 +10,15 @@
 //! cargo run -q --release -p ra2-app -- --game ../local/game
 //! cargo run -q --release -p ra2-app -- --game ../local/game \
 //!     --offscreen /tmp/m7.png --clicks "573.5,534.8;787.2,446.0"
+//! cargo run -q --release -p ra2-app -- --game ../local/game \
+//!     --match --seconds 30 --out /tmp/ra2-match
 //! ```
 
 pub mod cli;
 pub mod frame;
 pub mod headless;
+pub mod hud;
+pub mod match_mode;
 pub mod viewport;
 pub mod window;
 
@@ -36,6 +40,21 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         return Ok(());
     }
     let game = find_game(args.game.as_deref())?;
+    if args.match_mode {
+        let options = match_mode::Options::new(
+            &game,
+            args.arena.clone(),
+            args.bots.clone(),
+            args.seconds,
+            args.out.clone(),
+            args.quit_at,
+            args.size,
+        )?;
+        return match options.out {
+            Some(_) => match_mode::run_headless(options),
+            None => window::run_match(options),
+        };
+    }
     match args.offscreen {
         Some(out) => headless::run(&game, &out, args.size, &args.clicks),
         None => window::run(&game, args.size),

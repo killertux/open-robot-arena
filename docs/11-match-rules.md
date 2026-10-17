@@ -426,3 +426,8 @@ is the `plus.addPoints` store and the script's own `scoringPlayer` is set. A
 - The hilltop model's *visible* hill is not in the static collider this port
   builds (the collider is the backdrop box), so the KOTH test parks a chassis
   in `King_Zone`; the script/zone/score path it exercises is the real one.
+
+**M8.6–M8.10 (presentation)** are in `docs/14-match-presentation.md`: the
+`--match` frame commands, the HUD binding, the three camera rules, the results
+slots and the pause dialog. That document also names the bar mapping and the
+`watch`/`orbit` framing as ours, and the intro as still unimplemented.

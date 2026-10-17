@@ -880,7 +880,7 @@ impl UiRenderer {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.draw(device, queue, scene, &view, width, height);
+        self.draw(device, queue, scene, &view, width, height, true);
 
         let row = (width * 4).div_ceil(256) * 256;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -952,12 +952,59 @@ impl UiRenderer {
         if format != self.format {
             return Err(format!("this UiRenderer draws {:?}, not {format:?}", self.format).into());
         }
-        self.draw(device, queue, scene, view, width.max(1), height.max(1));
+        self.draw(
+            device,
+            queue,
+            scene,
+            view,
+            width.max(1),
+            height.max(1),
+            true,
+        );
+        Ok(())
+    }
+
+    /// Draw a scene **over** an existing colour target, without clearing it and
+    /// without a depth attachment.
+    ///
+    /// This is the HUD composition: the 3D pass has already written the target,
+    /// and the screen's quads are alpha-blended on top. The letterbox bars are
+    /// not painted black (a clear would hide the scene there); only the scene's
+    /// own quads are drawn. The view's format must be the one this renderer was
+    /// built for.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_over_to(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &UiScene,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if format != self.format {
+            return Err(format!("this UiRenderer draws {:?}, not {format:?}", self.format).into());
+        }
+        self.draw(
+            device,
+            queue,
+            scene,
+            view,
+            width.max(1),
+            height.max(1),
+            false,
+        );
         Ok(())
     }
 
     /// The shared half of every entry point: build the draw list in target
     /// pixels, record one pass, and submit it.
+    ///
+    /// `clear` is the difference between a frame and an overlay: the readback
+    /// path starts from black (and shows its letterbox bars), while
+    /// [`UiRenderer::render_over_to`] keeps what is already in the target.
+    #[allow(clippy::too_many_arguments)]
     fn draw(
         &self,
         device: &wgpu::Device,
@@ -966,6 +1013,7 @@ impl UiRenderer {
         view: &wgpu::TextureView,
         width: u32,
         height: u32,
+        clear: bool,
     ) {
         let viewport = fit(
             [scene.size[0] as f32, scene.size[1] as f32],
@@ -1021,8 +1069,13 @@ impl UiRenderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         // Black, opaque: the composite starts the same way, and
-                        // it is also what the letterbox bars show.
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        // it is also what the letterbox bars show. An overlay
+                        // keeps the 3D frame underneath.
+                        load: if clear {
+                            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],

@@ -14,8 +14,10 @@
 //!      RA2_OBSTACLE      arena prop filter (name|all|none)
 //!      RA2_CAM           ex,ey,ez,tx,ty,tz  or  @<n|name>
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3};
@@ -103,15 +105,26 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
 /// Reusable offscreen wgpu renderer. Holds the GPU device and pipelines so a
 /// caller can render many frames (e.g. an animation or a physics sandbox)
 /// without re-initialising the adapter each time.
+/// One format's pair of mesh pipelines.
+struct Pipelines {
+    opaque: wgpu::RenderPipeline,
+    blend: wgpu::RenderPipeline,
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     bgl: wgpu::BindGroupLayout,
-    pipeline_opaque: wgpu::RenderPipeline,
-    pipeline_blend: wgpu::RenderPipeline,
+    shader: wgpu::ShaderModule,
     sampler: wgpu::Sampler,
     color_format: wgpu::TextureFormat,
     depth_format: wgpu::TextureFormat,
+    /// Pipelines are specific to their colour target's format. The offscreen
+    /// readback uses [`Renderer::color_format`]; the app draws the live match
+    /// into a window surface whose format the swapchain chose, so the same
+    /// renderer has to build a second pair (and it is built once, not per
+    /// frame).
+    pipelines: RefCell<HashMap<wgpu::TextureFormat, Rc<Pipelines>>>,
 }
 
 impl Renderer {
@@ -146,7 +159,20 @@ impl Renderer {
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,
             }))?;
+        Renderer::from_device(&device, &queue)
+    }
 
+    /// A renderer on a device the caller already owns — the window path has a
+    /// surface, so it must share that device rather than open a second adapter.
+    ///
+    /// The offscreen [`Renderer::new`] path is this function with a fresh
+    /// device; both build the same pipelines for [`Renderer::color_format`].
+    pub fn from_device(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let device = device.clone();
+        let queue = queue.clone();
         let color_format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let depth_format = wgpu::TextureFormat::Depth32Float;
 
@@ -187,64 +213,6 @@ impl Renderer {
             ],
         });
 
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[Some(&bgl)],
-            immediate_size: 0,
-        });
-
-        let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
-        let cull = match std::env::var("RA2_CULL").as_deref() {
-            Ok("back") => Some(wgpu::Face::Back),
-            Ok("front") => Some(wgpu::Face::Front),
-            _ => None,
-        };
-        let make_pipeline = |label: &str, blend: bool, depth_write: bool| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<Vertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &attrs,
-                    })],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: color_format,
-                        blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    // RA2/D3D8 geometry is wound clockwise when viewed from outside.
-                    front_face: wgpu::FrontFace::Cw,
-                    cull_mode: cull,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: depth_format,
-                    depth_write_enabled: Some(depth_write),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        let pipeline_opaque = make_pipeline("opaque", false, true);
-        let pipeline_blend = make_pipeline("blend", true, false);
-
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
@@ -253,16 +221,92 @@ impl Renderer {
             ..Default::default()
         });
 
-        Ok(Renderer {
+        let renderer = Renderer {
             device,
             queue,
             bgl,
-            pipeline_opaque,
-            pipeline_blend,
+            shader,
             sampler,
             color_format,
             depth_format,
-        })
+            pipelines: RefCell::new(HashMap::new()),
+        };
+        // Build the readback format's pipelines now, so a missing feature is
+        // reported by the constructor rather than by the first frame.
+        let _ = renderer.pipelines_for(color_format);
+        Ok(renderer)
+    }
+
+    /// The pipelines that draw into a target of `format`, built once.
+    fn pipelines_for(&self, format: wgpu::TextureFormat) -> Rc<Pipelines> {
+        if let Some(found) = self.pipelines.borrow().get(&format) {
+            return found.clone();
+        }
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(&self.bgl)],
+                immediate_size: 0,
+            });
+        let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
+        let cull = match std::env::var("RA2_CULL").as_deref() {
+            Ok("back") => Some(wgpu::Face::Back),
+            Ok("front") => Some(wgpu::Face::Front),
+            _ => None,
+        };
+        let make = |label: &str, blend: bool, depth_write: bool| {
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &self.shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[Some(wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<Vertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &attrs,
+                        })],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &self.shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        // RA2/D3D8 geometry is wound clockwise when viewed from outside.
+                        front_face: wgpu::FrontFace::Cw,
+                        cull_mode: cull,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: self.depth_format,
+                        depth_write_enabled: Some(depth_write),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
+        let pipelines = Rc::new(Pipelines {
+            opaque: make("opaque", false, true),
+            blend: make("blend", true, false),
+        });
+        self.pipelines
+            .borrow_mut()
+            .insert(format, pipelines.clone());
+        pipelines
     }
 
     /// Render a single group of items with an explicit view-projection matrix.
@@ -294,6 +338,63 @@ impl Renderer {
         w: u32,
         h: u32,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let color = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("color"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.color_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.depth_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.render_groups_to(
+            groups,
+            view_proj,
+            &color_view,
+            &depth_view,
+            self.color_format,
+        )?;
+        self.read_texture(&color, w, h)
+    }
+
+    /// Draw several groups into a caller-supplied colour target and depth
+    /// buffer.
+    ///
+    /// This is [`Renderer::render_groups`] without the private texture and the
+    /// readback: the colour pass clears to the same dark grey, writes depth, and
+    /// orders opaque geometry before blended geometry exactly as the readback
+    /// path does. `format` must be the colour target's own format; pipelines for
+    /// a format are built on first use and cached.
+    pub fn render_groups_to(
+        &self,
+        groups: &[RenderGroup<'_>],
+        view_proj: Mat4,
+        color_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         struct Gpu {
             vbuf: wgpu::Buffer,
             bg: wgpu::BindGroup,
@@ -371,37 +472,7 @@ impl Renderer {
             }
         }
 
-        let color = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("color"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.color_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.depth_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-
+        let pipelines = self.pipelines_for(format);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -409,7 +480,7 @@ impl Renderer {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
+                    view: color_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -423,7 +494,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
+                    view: depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -435,20 +506,35 @@ impl Renderer {
                 multiview_mask: None,
             });
             // Opaque geometry first, then blended (transparent) geometry.
-            rp.set_pipeline(&self.pipeline_opaque);
+            rp.set_pipeline(&pipelines.opaque);
             for g in gpu_items.iter().filter(|g| !g.blend) {
                 rp.set_bind_group(0, &g.bg, &[]);
                 rp.set_vertex_buffer(0, g.vbuf.slice(..));
                 rp.draw(0..g.count, 0..1);
             }
-            rp.set_pipeline(&self.pipeline_blend);
+            rp.set_pipeline(&pipelines.blend);
             for g in gpu_items.iter().filter(|g| g.blend) {
                 rp.set_bind_group(0, &g.bg, &[]);
                 rp.set_vertex_buffer(0, g.vbuf.slice(..));
                 rp.draw(0..g.count, 0..1);
             }
         }
+        self.queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
 
+    /// Copy a colour texture back as RGBA8, top row first.
+    ///
+    /// The texture must belong to this renderer's device and have a
+    /// `COPY_SRC` usage; its bytes are read in the texture's own format (the
+    /// match composition uses `Rgba8Unorm` so the HUD's byte pipeline and the
+    /// 3D pass share one target).
+    pub fn read_texture(
+        &self,
+        texture: &wgpu::Texture,
+        w: u32,
+        h: u32,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let align = 256u32;
         let unpadded = w * 4;
         let padded = unpadded.div_ceil(align) * align;
@@ -458,9 +544,12 @@ impl Renderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &color,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,

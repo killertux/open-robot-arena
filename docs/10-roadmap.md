@@ -181,11 +181,11 @@ in the game's own script.
 | M8.3 | **done (state)** — `game_type`/`players`/`paused`/`over`/scores written; `Arena.tickInterval`; zone + phantom contents; `addPoints`/`getPoints`; `eliminatePlayer` state 3; `zap` visual state; `Arena.Tick` errors surfaced. Audio remains M5 | `ra2script::{plus,arena}`, `ra2sim` |
 | M8.4 | **done (rules)** — last robot (`FUN_00418040`), last team and team totals (`FUN_00418770`), the `+0x20` score, 4.0 s countdown, match clock. Damage→points (`FUN_004175b0`) remains unproven and is not invented | `ra2sim::match` |
 | M8.5 | **done** — spawn on the arena's start points in ID order with the model's facing; `EventNumBots` (2 or 4, anything else 4) for Battle Royal, four distinct spawns | `ra2sim::match` |
-| M8.6 | **done** — the match loop: fixed-step physics, the arena `Tick` at 0.25 s, the AI cadence, damage events, defeated/KO and elimination, the countdown and the clock | `ra2sim::match` |
-| M8.7 | HUD: the shipped HUD `.gib` screens placed and driven by live state (health bars, points, clock, names, messages) | `ra2ui` + `ra2-app` |
-| M8.8 | Camera: `watch`/`static`/`orbit` (the binary's own vocabulary, not chase/top) and the arena's `AddCamera`, with the shipped bounds | `ra2-app` |
-| M8.9 | Results: the `common/matchresults.gib` slots filled from the match (`ra2ui::results` already binds them), then the return to the menu | `ra2ui::results`, `ra2-app` |
-| M8.10 | Pause/quit, Esc, and the arena intro (the shipped `.gib` + music) | `ra2-app` |
+| M8.6 | **done** — the match loop: fixed-step physics, the arena `Tick` at 0.25 s, the AI cadence, damage events, defeated/KO and elimination, the countdown and the clock; the live 3D frame composes into an arbitrary target (`Duel::render_to`) | `ra2sim::match`, `ra2sim::duel` |
+| M8.7 | **done** — HUD: `gamewindow.gib` + `statusmeters.gib` placed and driven by live state (four status groups, names, points, the three bars, the clock, the countdown, the camera name), with `hud()` unit tests | `ra2ui` + `ra2-app` |
+| M8.8 | **done** — camera: `watch`/`static`/`orbit` (the binary's own vocabulary) from `ra2.cfg`'s `DefaultCamera`; `C` cycles in the window. The C++ `watch`/`orbit` framing is named as ours | `ra2-app`, `ra2sim::duel` |
+| M8.9 | **done** — results: `common/matchresults.gib`'s four slots filled from `MatchReport::results()` through `ra2ui::results`, the placed tree asserted, then the return to the menu | `ra2ui::results`, `ra2-app` |
+| M8.10 | **done (pause/quit)** — `Esc` opens `common/ingame_dialog.gib` (`in game popup win`); resume and quit, with a deterministic `--quit-at` run writing `pause.png`/`menu.png`. The arena intro remains unimplemented (`skip group` is hidden) | `ra2-app` |
 
 **Acceptance.** Headless: a scripted `Match` on the box arena, two AI bots,
 produces a winner and a filled result screen; the score sequence for

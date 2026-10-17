@@ -13,6 +13,10 @@ path = "src/main.rs"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 pollster = "1.0.1"
 ra2-render = { path = "../ra2-render" }
+ra2script = { path = "../ra2script" }
 ra2-shell = { path = "../ra2-shell" }
+ra2fmt = { path = "../ra2fmt" }
+ra2sim = { path = "../ra2sim" }
+ra2ui = { path = "../ra2ui" }
 wgpu = "30.0.1"
 winit = "0.30.13"

@@ -1846,6 +1846,10 @@ dependencies = [
  "pollster",
  "ra2-render",
  "ra2-shell",
+ "ra2fmt",
+ "ra2script",
+ "ra2sim",
+ "ra2ui",
  "wgpu",
  "winit",
 ]
@@ -1921,6 +1925,7 @@ dependencies = [
  "ra2fmt",
  "ra2script",
  "ra2ui",
+ "wgpu",
 ]
 
 [[package]]
