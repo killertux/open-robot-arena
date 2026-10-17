@@ -8,12 +8,15 @@
 //!   `rayTest`, `isDefeated`, the match clock. These go to the live match
 //!   through [`crate::MatchApi`].
 //! * **Scene description** — the camera and backdrop calls, the arena picker.
-//! * **Presentation** — sounds and particles, which belong to M5. They are
-//!   accepted, given handles where the scripts expect them, and recorded so a
-//!   run reports exactly what it dropped rather than silently ignoring it.
+//! * **Sound** — `createSound`, `playSound`, `loopSound`, `stopSound` and
+//!   `removeSound` are a real handle table and an ordered queue
+//!   ([`crate::SoundQueue`]); a caller drains it into `ra2-audio`.
+//! * **Presentation still deferred** — particles and the camera are recorded so
+//!   a run reports exactly what it dropped rather than silently ignoring it.
 
 use std::collections::BTreeMap;
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
@@ -372,44 +375,81 @@ fn eliminate_player(bot: i32) {
 #[pyfunction]
 #[pyo3(signature = (path, looping, location))]
 #[pyo3(name = "createSound")]
-fn create_sound(path: &str, looping: &Bound<'_, PyAny>, location: (f32, f32, f32)) -> u64 {
-    let _ = (looping, location);
+fn create_sound(
+    path: &str,
+    looping: &Bound<'_, PyAny>,
+    location: (f32, f32, f32),
+) -> PyResult<u64> {
+    // The scripts pass both booleans and `1` for the loop flag; both mean the
+    // same thing to the engine.
+    let looping = looping.is_truthy()?;
     let mut st = crate::state();
-    let handle = st.next_handle;
-    st.next_handle += 1;
-    st.sounds.insert(handle, path.to_string());
-    st.defer("audio (M5)");
-    handle
+    Ok(st
+        .sounds
+        .create(path, looping, [location.0, location.1, location.2])
+        .0)
 }
 
 #[pyfunction]
 #[pyo3(name = "playSound")]
-fn play_sound(_sound: u64) {
-    defer("audio (M5)");
+fn play_sound(sound: u64) -> PyResult<()> {
+    crate::state()
+        .sounds
+        .play(crate::SoundId(sound))
+        .map_err(PyValueError::new_err)
 }
 
 #[pyfunction]
 #[pyo3(name = "playOnce")]
-fn play_once(_sound: u64) {
-    defer("audio (M5)");
+fn play_once(sound: u64) -> PyResult<()> {
+    crate::state()
+        .sounds
+        .play_once(crate::SoundId(sound))
+        .map_err(PyValueError::new_err)
 }
 
 #[pyfunction]
 #[pyo3(name = "loopSound")]
-fn loop_sound(_sound: u64) {
-    defer("audio (M5)");
+fn loop_sound(sound: u64) -> PyResult<()> {
+    crate::state()
+        .sounds
+        .loop_sound(crate::SoundId(sound))
+        .map_err(PyValueError::new_err)
 }
 
+/// `plus.stopSound(handle)` — stop it, keeping the handle for a later play.
+///
+/// A script's `__del__` may run after the match has already removed the handle
+/// (`Arenas.SuperArena.__del__` stops and removes its end music), so stopping an
+/// unknown handle is a named warning rather than an exception.
 #[pyfunction]
 #[pyo3(name = "stopSound")]
-fn stop_sound(_sound: u64) {
-    defer("audio (M5)");
+fn stop_sound(sound: u64) -> PyResult<()> {
+    let id = crate::SoundId(sound);
+    let mut st = crate::state();
+    if !st.sounds.stop(id) {
+        st.log.push(format!(
+            "plus.stopSound: sound {id} is already stopped or removed"
+        ));
+    }
+    Ok(())
 }
 
+/// `plus.removeSound(handle)` — free it, stopping it if it is sounding.
+///
+/// Tolerated when the handle is already gone: the shipped arenas remove sounds
+/// from `__del__`, after the match has torn the arena down and often after the
+/// same handle was removed in `DoIntro`. The warning names the handle.
 #[pyfunction]
 #[pyo3(name = "removeSound")]
-fn remove_sound(_sound: u64) {
-    defer("audio (M5)");
+fn remove_sound(sound: u64) -> PyResult<()> {
+    let id = crate::SoundId(sound);
+    let mut st = crate::state();
+    if !st.sounds.remove(id) {
+        st.log
+            .push(format!("plus.removeSound: sound {id} was already removed"));
+    }
+    Ok(())
 }
 
 #[pyfunction]
@@ -832,7 +872,173 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BotSnapshot, Vec3};
+    use crate::{BotSnapshot, SoundId, SoundQueue, SoundRequest, Vec3};
+
+    /// Start with an empty sound table and queue. The script layer is
+    /// process-global, so every sound test clears it first.
+    fn reset_sounds() {
+        let mut st = crate::state();
+        st.sounds = SoundQueue::new();
+        st.log.clear();
+    }
+
+    /// The five calls the shipped arenas make are a handle table and an
+    /// ordered queue, with no device and no `ra2-app` in sight.
+    ///
+    /// `Arenas/__init__.py`, `king.py` and the hazards are the callers: they
+    /// create music with `loop=False` and loop it later, create hazard loops
+    /// with `loop=True`, play a handle more than once, stop it, and remove it.
+    /// This runs the same sequence through the real `plus` module.
+    #[test]
+    fn plus_sounds_are_handles_on_an_ordered_queue() {
+        let _guard = crate::lock();
+        reset_sounds();
+        Python::with_gil(|py| {
+            crate::plus::register(py).expect("register plus");
+            py.run(
+                c"import plus\n\
+intro = plus.createSound(r'Sounds\\intro_music\\smell_glue.wav', True, (1.0, 2.0, 3.0))\n\
+crowd = plus.createSound('Sounds/crowd/LoudCheer_Loop.wav', False, (4.0, 5.0, 6.0))\n\
+plus.playSound(intro)\n\
+plus.playSound(intro)\n\
+plus.loopSound(crowd)\n\
+plus.stopSound(intro)\n\
+plus.removeSound(intro)\n",
+                None,
+                None,
+            )
+            .expect("the script's sound sequence runs");
+            let ids: (u64, u64) = py
+                .eval(c"(intro, crowd)", None, None)
+                .expect("both handles")
+                .extract()
+                .expect("handles are integers");
+            assert_eq!(ids, (1, 2), "handles are stable and start at 1");
+        });
+
+        let st = crate::state();
+        assert_eq!(
+            st.sounds.requests(),
+            &[
+                SoundRequest::Play {
+                    id: SoundId(1),
+                    path: r"Sounds\intro_music\smell_glue.wav".to_string(),
+                    looping: true,
+                    position: [1.0, 2.0, 3.0],
+                },
+                SoundRequest::Play {
+                    id: SoundId(1),
+                    path: r"Sounds\intro_music\smell_glue.wav".to_string(),
+                    looping: true,
+                    position: [1.0, 2.0, 3.0],
+                },
+                SoundRequest::Loop { id: SoundId(2) },
+                SoundRequest::Stop { id: SoundId(1) },
+                SoundRequest::Stop { id: SoundId(1) },
+            ],
+            "play, play, loop, stop, and the stop half of remove, in call order"
+        );
+        assert!(
+            st.sounds.get(SoundId(1)).is_none(),
+            "removeSound frees the handle"
+        );
+        let crowd = st
+            .sounds
+            .get(SoundId(2))
+            .expect("the other sound is still live");
+        assert!(crowd.looping, "loopSound sets the loop flag");
+        assert_eq!(crowd.path, "Sounds/crowd/LoudCheer_Loop.wav");
+        assert_eq!(crowd.position, [4.0, 5.0, 6.0]);
+        assert!(
+            !st.deferred.iter().any(|what| what.contains("audio")),
+            "sounds are no longer deferred: {:?}",
+            st.deferred
+        );
+    }
+
+    /// `createSound` takes the loop flag the scripts actually pass, which is
+    /// both a bool and the integer `1` (`Hazards.RotClaw`).
+    #[test]
+    fn create_sound_takes_the_scripts_truthy_loop_flag() {
+        let _guard = crate::lock();
+        reset_sounds();
+        Python::with_gil(|py| {
+            crate::plus::register(py).unwrap();
+            py.run(
+                c"import plus\n\
+looped = plus.createSound('Sounds/default_loop.wav', 1, (0, 0, 0))\n\
+once = plus.createSound('Sounds/default_once.wav', False, (0, 0, 0))\n",
+                None,
+                None,
+            )
+            .unwrap();
+        });
+        let st = crate::state();
+        assert!(st.sounds.get(SoundId(1)).unwrap().looping);
+        assert!(!st.sounds.get(SoundId(2)).unwrap().looping);
+        assert!(st.sounds.requests().is_empty(), "creating does not play");
+    }
+
+    /// An unknown handle is a named error, not a silent no-op — a typo in a
+    /// script must not look like success.
+    #[test]
+    fn plus_play_sound_names_an_unknown_handle() {
+        let _guard = crate::lock();
+        reset_sounds();
+        Python::with_gil(|py| {
+            crate::plus::register(py).unwrap();
+            let plus = py.import("plus").unwrap();
+            let error = plus
+                .call_method1("playSound", (4242u64,))
+                .expect_err("an unknown handle must raise");
+            assert!(
+                error.is_instance_of::<PyValueError>(py),
+                "the error should be a ValueError: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("4242"),
+                "the message names the handle: {message}"
+            );
+            assert!(message.contains("playSound"), "{message}");
+        });
+        assert!(
+            crate::state().sounds.requests().is_empty(),
+            "a failed play queues nothing"
+        );
+    }
+
+    /// The arenas remove their sounds from `__del__`; by then the match may
+    /// already have removed the same handle in `DoIntro`. That is a named
+    /// warning, not a panic and not a Python exception.
+    #[test]
+    fn a_scripts_del_can_remove_an_already_removed_sound() {
+        let _guard = crate::lock();
+        reset_sounds();
+        Python::with_gil(|py| {
+            crate::plus::register(py).unwrap();
+            py.run(
+                c"import plus\nsound = plus.createSound('Sounds/button_click.wav', False, (0.0, 0.0, 0.0))\nclass Teardown(object):\n    def __init__(self, handle):\n        self.handle = handle\n    def __del__(self):\n        plus.removeSound(self.handle)\nkeeper = Teardown(sound)\nplus.removeSound(sound)\ndel keeper\n",
+                None,
+                None,
+            )
+            .expect("the second removal is tolerated");
+        });
+        let st = crate::state();
+        assert_eq!(
+            st.sounds.requests(),
+            &[SoundRequest::Stop { id: SoundId(1) }],
+            "one stop, not two"
+        );
+        assert!(
+            st.log
+                .iter()
+                .any(|line| line.contains("sound 1") && line.contains("already removed")),
+            "the warning names the handle: {:?}",
+            st.log
+        );
+        assert!(st.sounds.get(SoundId(1)).is_none());
+    }
 
     /// A blade: long in Y, thin in X and Z. Its bounding sphere is 2 m across,
     /// so it is the shape that tells the two tests apart.

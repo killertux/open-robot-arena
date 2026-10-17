@@ -1909,6 +1909,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "pyo3",
+ "ra2-audio",
  "ra2-render",
  "ra2fmt",
  "ra2ui",
