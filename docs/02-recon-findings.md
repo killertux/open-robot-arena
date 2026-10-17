@@ -256,6 +256,70 @@ and AI logic. **Game behaviour is substantially scriptable/observable.**
   and `"player icon img"` are in the binary, matching `Name` fields in
   `UI/multiplayer/*.gib`.
 
+### `+Background`: the attachment's body is what it draws
+
+The attachment is not a colour and carries no filename. Across all 116 shipped
+screens there are **295 `+Background`s in 82 files**, and every one has exactly
+the same three fields with the same shape:
+
+```
+Tiling false|true
+Image true 0
+Widget true
+```
+
+`Tiling` is **236 false / 59 true**, `Image` is *true* with index **0** in every
+one, and `Widget true` is the flag that says the widget it dresses follows. None
+carries a `Name` or a `NumChildren`.
+
+What it draws is its **body** — the headerless base `Widget` record the writer
+emits *after* the decorated widget's whole subtree. That rule is measured over
+every attachment kind, not just `Background`: **758 attachments, 758 bodies**,
+and all **758** headerless records in the corpus are one of those bodies. A body
+carries the base fields (`PassMouse`, `Notes`, `Name`, `ID`, `Position`, `Size`,
+`Visible`, `ChildOrder`, `ClipMode`, `NumChildren`) and its own children, and
+the Background's body has exactly **one** child: the `[Image]` its `Image true 0`
+indexes.
+
+That image is the background, and its own fields say which kind:
+
+- **223 are colour fills**: a blank `_Filename` and a `_ForeColor` — e.g.
+  `hq_league.gib`'s root body is `0 0 1 1` with a 640×480 `Image` coloured
+  `0.3 0.23 0.51 1`, the screen's purple; its grid body is `0.025 0.95` with a
+  607×319 image coloured `0.8 0.8 0.9 1`, the light panel behind the cells (both
+  sizes are the editor's 640×480 authoring canvas; the drawn body frame is
+  `0.95` of its parent).
+- **72 are textures**: `metaldots_pattern.bmp` (most of them),
+  `UI_ScrollBack.bmp`, `botlab/crossing_wires.tga`, `teamhq/particleboard.bmp`,
+  `teamhq/season_results.bmp`, `golden_sawblade_background.bmp`, and so on.
+- **All 59 `Tiling true` backgrounds name a texture, and no colour fill is
+  tiled.** The texture's unlabelled rect carries the repeat (`metaldots_pattern`
+  is `0 0 5.32813 3.14063` = 341×201 pixels of a 64×64 pattern); the image's
+  `_Tiling` is `false` on all 295 and is not the flag that matters — the
+  attachment's `Tiling` is.
+
+The body's frame is **not** always the decorated widget's: it is the same on 152
+of the 295 and different on 143. It is the background's own rectangle (measured
+against the widget's parent), which is why `hq_league.gib`'s panel is 608 pixels
+wide behind a 591-pixel grid at the authoring size. For a colour fill the drawn
+rectangle is that body frame; `_Size` is the size the fill was authored at
+(640×480 for the league screen) and must not be used as the drawing size. A
+textured background uses its own `_Size`/rect as an `Image` does.
+
+The binary says the same thing. The `Background` writer `FUN_00614790` emits
+`Tiling` and `Image` and then calls the Decorator writer `FUN_00607de0`, which
+writes `Widget true` and the decorated widget record. The attachment's own base
+`Widget` fields are written by `FUN_005e9eb0` *after* that, and the reader
+(`FUN_006141c0` → `FUN_006148b0`) resolves the serialized image index with
+`FUN_005e7440` against the body's child vector. So the body is the attachment's
+own record, not an ownerless sibling.
+
+A consequence, measured: with every attachment taking its body, **all 116 files
+nest to exactly one root** (the old count was 28; the missing records were these
+bodies). The two screens where a background tile was drawn over its dialog are
+the same records: a `Background` body used to be placed as a sibling and drawn
+after the window it belongs to.
+
 ### The workshop's own composition
 
 The bot lab — the workshop — is `UI/botlab/botlabwin.gib`: a toolbar of six tabs,

@@ -61,8 +61,8 @@ local/           # (git-ignored) game files + converted cache
   (`ra2fmt::gib`) parses all 116 shipped screens — the main menu, team HQ, the
   bot lab, the HUD, every dialog — into widget trees, and `ra2ui` resolves those
   trees into rectangles: `Position`/`Size` with their fraction-or-pixels flags,
-  `Alignment` as the 3×3 anchor, split frames into their two panes. All 3590
-  widgets place with finite frames, 71 of the 116 files entirely on screen, and
+  `Alignment` as the 3×3 anchor, split frames into their two panes. All 4,348
+  widgets place with finite frames, 57 of the 116 files entirely on screen, and
   the main menu's logo, backdrop and button strip land where its own art says
   they should — which is checked by *looking*: `tools/ui_compose.py` rasterises a
   screen from the engine's own rectangles and the game's own art, and the main
@@ -85,7 +85,8 @@ local/           # (git-ignored) game files + converted cache
   `Point Selection.tga` (the game's own art, named by no screen), captions are
   found by their `Caption` attachment and centred in their buttons, and the
   bottom bar's chrome — written after the bar rather than in it — lands in the
-  bar.
+  bar. Every `+Background` draws what its own body says: a colour fill or a
+  texture, behind its widget.
 - **M6 — Packaging.** Linux/macOS/Windows builds.
 
 ## M5 design notes
@@ -270,16 +271,30 @@ local/           # (git-ignored) game files + converted cache
   three bar-chrome images re-parented onto the bar written before them, was
   compensating for records the reader had failed to close. Both are gone, and
   `credits.gib`'s window is visible over its own backdrop for the first time.
-- **What the shell still does not draw is named, and so is what it cannot yet
-  read.** `ra2-render`'s `ui` path draws a `Glyph` (a wrapped paragraph in its
-  `_Margin` box, with the writer's `\n` line breaks) and a `Lines` polyline (its
-  point pairs), so the four undrawn kinds are down to the `Placeholder` — the
-  rectangle the 3D view fills, which is not the shell's to draw at all. What is
-  *unread* is the nesting: a `.gib`'s `NumChildren` does not always close a
-  file to one root (28 of 116 do), so 88 screens leave blocks a level up, and on
-  two of them the background tile lands on top of the dialog. That is recorded,
-  measured, and in the open questions rather than smoothed over — the game's own
-  reader is where the rule is.
+- **What the shell still does not draw is named.** `ra2-render`'s `ui` path draws
+  a `Glyph` (a wrapped paragraph in its `_Margin` box, with the writer's `\n`
+  line breaks) and a `Lines` polyline (its point pairs), so the undrawn kinds are
+  down to the `Placeholder` — the rectangle the 3D view fills, which is not the
+  shell's to draw at all. The nesting question is now **closed**: each attachment
+  owns the headerless base `Widget` record written after the widget it dresses
+  (its *body*), so all 116 files nest to one root, and the two backgrounds that
+  used to land over their dialogs are behind them. The measurement is in the
+  recon notes; the parser's `Attachment::body` is the rule.
+- **An attachment is the data's, and its body is what it draws.** A
+  `+Background` carries no colour and no filename — only `Tiling`, `Image` and
+  `Widget` — so it was tempting to invent a fill. The body says otherwise: a
+  headerless base `Widget` with its own frame and exactly one `[Image]` child,
+  which is either a **colour fill** (a blank `_Filename` plus `_ForeColor`, 223
+  of 295) or a **texture** (72, with the `Tiling true` ones repeating at the
+  texture's size). `hq_league.gib` is the worked case: a purple 640×480 fill
+  behind the whole screen and a light 607×319 panel behind the grid. The
+  renderer draws the body before the widget it dresses and the other four kinds
+  after it, and a blank-named `Image` became a fill quad everywhere — which also
+  paints the match-results title bar and every button's state background. The
+  tests are `every_background_is_a_colour_fill_or_a_texture`,
+  `an_attachment_body_follows_the_widget_it_dresses` and
+  `the_match_results_background_is_drawn_behind_its_cells`; the pictures are
+  `uishot` before/after on `matchresults.gib` and `hq_league.gib`.
 - **The renderer is checked against a second renderer, written the other way
   round.** `tools/ui_compose.py` rasterises a screen on the CPU, in Python, from
   the resolver's own rectangles; `ra2-render`'s `ui` path draws the same screen
