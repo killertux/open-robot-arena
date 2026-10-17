@@ -2179,8 +2179,9 @@ mod tests {
             // The model's per-point table is what we used to dress the chassis;
             // where the two disagree is exactly where a decal came out wrong.
             let mesh = ch.mesh.as_ref().unwrap();
-            let groups: Vec<std::collections::HashMap<u32, [f32; 2]>> =
-                ch.face_groups.iter().map(group_table).collect();
+            let groups: Vec<std::collections::HashMap<u32, [f32; 2]>> = (0..ch.face_groups.len())
+                .map(|gi| group_table(ch, gi))
+                .collect();
             let (mut raw_ok, mut raw_n) = (0usize, 0usize);
             for tri in mesh.indices.as_chunks::<3>().0 {
                 let t = [tri[0], tri[1], tri[2]];
@@ -2207,10 +2208,14 @@ mod tests {
 
     /// A face group's `vertex -> skin coordinate` table: the file lists the
     /// coordinates for the group's vertices in ascending index order (F10).
-    fn group_table(fg: &ra2fmt::bot::FaceGroup) -> std::collections::HashMap<u32, [f32; 2]> {
+    fn group_table(
+        ch: &ra2fmt::bot::Chassis,
+        gi: usize,
+    ) -> std::collections::HashMap<u32, [f32; 2]> {
+        let fg = &ch.face_groups[gi];
         let mut seen: Vec<u32> = Vec::new();
-        for f in &fg.faces {
-            for &i in f {
+        for f in ch.faces.iter().filter(|f| f.group == gi as i32) {
+            for &i in &f.points {
                 if !seen.contains(&i) {
                     seen.push(i);
                 }

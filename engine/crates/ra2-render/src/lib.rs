@@ -1383,10 +1383,11 @@ fn chassis_mesh_vertices(ch: &ra2fmt::bot::Chassis, world: Mat4) -> Vec<Vertex> 
     let groups: Vec<std::collections::HashMap<u32, [f32; 2]>> = ch
         .face_groups
         .iter()
-        .map(|fg| {
+        .enumerate()
+        .map(|(gi, fg)| {
             let mut seen: Vec<u32> = Vec::new();
-            for f in &fg.faces {
-                for &i in f {
+            for f in ch.faces.iter().filter(|f| f.group == gi as i32) {
+                for &i in &f.points {
                     if !seen.contains(&i) {
                         seen.push(i);
                     }

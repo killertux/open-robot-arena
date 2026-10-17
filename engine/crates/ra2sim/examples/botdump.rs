@@ -114,9 +114,15 @@ fn main() {
     let mut group_total = 0usize;
     let mut in_own_rect = 0usize;
     for (g, fg) in ch.face_groups.iter().enumerate() {
-        total_faces += fg.faces.len();
+        let group_faces: Vec<[u32; 3]> = ch
+            .faces
+            .iter()
+            .filter(|f| f.group == g as i32)
+            .map(|f| f.points)
+            .collect();
+        total_faces += group_faces.len();
         let mut seen: Vec<u32> = Vec::new();
-        for f in &fg.faces {
+        for f in &group_faces {
             for &i in f {
                 if !seen.contains(&i) {
                     seen.push(i);
@@ -135,8 +141,7 @@ fn main() {
                 k
             })
             .collect();
-        matched += fg
-            .faces
+        matched += group_faces
             .iter()
             .filter(|f| {
                 let mut k = **f;
@@ -169,7 +174,7 @@ fn main() {
         if g < 3 {
             println!(
                 "  group {g}: {} faces, {} coords, bounds {:?}",
-                fg.faces.len(),
+                group_faces.len(),
                 fg.coords.len(),
                 fg.bounds
             );
