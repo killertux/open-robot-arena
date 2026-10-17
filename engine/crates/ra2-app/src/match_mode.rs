@@ -455,7 +455,7 @@ fn names_on_path(placed: &[ra2ui::Placement<'_>], path: &[usize]) -> Vec<String>
 }
 
 /// The offscreen run: frames, transitions, winner.
-pub fn run_headless(options: Options) -> Result<(), String> {
+pub fn run_headless(options: Options) -> Result<MatchReport, String> {
     let out = options
         .out
         .clone()
@@ -661,7 +661,7 @@ pub fn run_headless(options: Options) -> Result<(), String> {
             .unwrap_or(0),
         out.display()
     );
-    Ok(())
+    Ok(session.report())
 }
 
 fn write_frame(

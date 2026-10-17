@@ -40,6 +40,9 @@ pub struct Component {
     /// The preview art, as a path from the game's own root:
     /// `Components\ztek\ztek_preview.bmp`.
     pub art: String,
+    /// The definition's own file in `Components.cfz` — the name a `.bot`
+    /// writes in its component rows (`Components\ztek1.txt`).
+    pub file: String,
 }
 
 /// The grid the palette fills, by name.
@@ -86,6 +89,7 @@ pub fn all(game: &Path) -> Result<Vec<Component>, String> {
             name: def.name.clone(),
             category,
             art: format!("Components\\{}\\{}", def.dir, def.preview),
+            file: entry.name.clone(),
         });
     }
     Ok(out)

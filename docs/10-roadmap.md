@@ -214,17 +214,25 @@ the library, decals) → save → reload it → `Test Robot` in an arena.
 | # | Work item | Lands in |
 |---|---|---|
 | M9.1 | ✅ **W1 `bot::write`**: 1.12, **57/57** semantic and byte-identical, measured over `Robot Designs/`, `AI/` and `Teams/` | `ra2fmt::bot` |
-| M9.2 | ◐ Component placement *(model done; UI wiring remains)*: attach at a mount point with the F1 rule (already the renderer's), remove, undo; the palette's filtering and selection already exist | `ra2ui::workshop` |
-| M9.3 | ◐ Wiring *(model done; UI wiring remains)*: the control board's buttons and the wiring canvas (`control grid`), the game's own control-board model (.gib + the `.bot`'s wiring data) | `ra2ui`, `ra2fmt::bot` |
-| M9.4 | ◐ Paint *(model done; UI wiring remains)*: the texture library and custom textures lists, decals/surface layer, the chassis face groups (F10) as the paint target | `ra2ui`, `ra2fmt::bot` |
-| M9.5 | `Test Robot`: open a match with the current bot (M8's `Match`) and return its damage to the workshop | `ra2-app` |
-| M9.6 | The workshop's own state: what a tab remembers, `Save As`, `Import`/`Export` to `Robot Designs/` | `ra2-app` |
+| M9.2 | ✅ Component placement: attach at a mount point with the F1 rule (already the renderer's), remove, undo; the palette's filtering and selection already exist, and `--build` wires a palette click to `Build::attach` *(the baseplate drag placement tool remains; see `docs/17-workshop-ui.md`)* | `ra2ui::workshop`, `ra2-app` |
+| M9.3 | ◐ Wiring *(model + read-only display done)*: the shipped `control grid` is filled with `control_cell.gib` cells and the board/bindings are listed; adding a control, dragging it and choosing an action remains | `ra2ui`, `ra2-app` |
+| M9.4 | ✅ Paint: the texture library and custom textures lists, `Paint::fill_group` on a face group, live preview, save/reload; decals/surface layers/texture-entire stay model-only | `ra2ui`, `ra2-app` |
+| M9.5 | ✅ `Test Robot`: `--build` saves the bot and starts M8's `Match` on the box arena against a shipped AI bot, shows it with M8's presentation and reports the damage (reported, not applied) | `ra2-app` |
+| M9.6 | ✅ The workshop's own state: `Save As` to `Robot Designs/`, `Open`, `Import`/`Export` of bots and custom textures, the name box and the round-trip | `ra2-app` |
 | M9.7 | ✅ The bot's stats panel: weight (`Armor_Definitions` + mass rules), hitpoints, cost — from the same tables the sim uses | `ra2ui`, `ra2fmt` |
 
 **Acceptance.** Round-trip test over all 57+ stock bots; a built bot's saved file
 reopens with the same component tree, mass and hitpoints as the live one; a
 painted chassis renders its decals in the same face groups the sim uses; the
 import/export path is the shipped `Robot Designs/`.
+
+Landed: `ra2-app --build` drives the shipped bot lab and a live `Build` —
+palette click → `Build::attach`, remove/undo, armour plate, texture + face group
+→ `Paint::fill_group`, Save As/Open to `Robot Designs/`, `Test Robot` through
+M8's `Match`. The scripted build's manual run is **3 parts, 89.1 kg, 960 hp**
+in the model, the reload and `ra2sim::rig` alike. Wiring is displayed read-only.
+The commands, frames, editable/read-only split and what is unproven are in
+`docs/17-workshop-ui.md`.
 
 **Risks.** The `.bot` writer's version quirks (mitigate: round-trip first, then
 write); the wiring model is the least-read part of the format (M9.3 is where it

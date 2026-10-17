@@ -23,6 +23,12 @@ pub struct Args {
     pub bots: Vec<PathBuf>,
     /// `--arena PATH`, overriding `Arenas/box.py`.
     pub arena: Option<PathBuf>,
+    /// `--build`: the bot lab as a live workshop.
+    pub build_mode: bool,
+    /// `--start PATH`: a `.bot` to open in `--build` (default: a stock chassis).
+    pub start: Option<PathBuf>,
+    /// `--save-as NAME`: the design name the headless `--build` run types.
+    pub save_as: Option<String>,
 }
 
 impl Default for Args {
@@ -39,6 +45,9 @@ impl Default for Args {
             quit_at: None,
             bots: Vec::new(),
             arena: None,
+            build_mode: false,
+            start: None,
+            save_as: None,
         }
     }
 }
@@ -47,6 +56,8 @@ pub fn usage() -> &'static str {
     "usage: ra2-app [--game DIR] [--offscreen PNG] [--size WxH] [--clicks \"x,y;x,y;...\"]\n\
      \x20      ra2-app --match [--seconds N] [--out DIR] [--quit-at N]\n\
      \x20                [--bots A.bot,B.bot] [--arena PATH]\n\
+     \x20      ra2-app --build [--start BOT] [--save-as NAME] [--seconds N] [--out DIR]\n\
+     \x20                [--size WxH]\n\
      \n\
      With no --offscreen the shell opens in a window. With it, the same loop runs\n\
      headlessly: boot, apply the click script in the shell's 1280x1005 coordinates,\n\
@@ -57,13 +68,22 @@ pub fn usage() -> &'static str {
      PNGs at the named moments and prints every state transition. In the window,\n\
      Escape pauses, C cycles the camera; the pause dialog resumes or quits to menu.\n\
      \n\
+     --build opens the bot lab through the shipped route and edits a live model:\n\
+     a palette click attaches a component at the model's mount, the armour grid\n\
+     sets the plate, a texture plus a face row paints, Enter saves, Ctrl+Z undoes.\n\
+     With --out it runs a scripted build headlessly and writes build-chassis.png,\n\
+     build-parts.png, build-paint.png and build-test.png.\n\
+     \n\
        --game DIR       the install (default: RA2_GAME, else local/game)\n\
        --offscreen PNG  render the final state and exit (the CI path)\n\
        --size WxH       window/target size (default 1280x1005; the shell stays 1280x1005)\n\
        --clicks SCRIPT  semicolon-separated x,y points, applied in order\n\
        --match          play a match instead of the shell\n\
-       --seconds N      fight length for --match (default 30)\n\
-       --out DIR        write the match's PNG frames and exit\n\
+       --build          open the workshop (bot lab) as an editor\n\
+       --start BOT      the .bot to open in --build (default: a stock chassis)\n\
+       --save-as NAME   the design name the headless --build run types and saves\n\
+       --seconds N      fight length for --match; test length for --build (default 30/4)\n\
+       --out DIR        write the match/build's PNG frames and exit\n\
        --quit-at N      pause at N fight seconds, quit to the menu, write pause/menu PNGs\n\
        --bots A,B       two .bot paths for --match\n\
        --arena PATH     arena script for --match (default Arenas/box.py)\n\
@@ -108,6 +128,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
                     .collect();
             }
             "--arena" => parsed.arena = Some(PathBuf::from(next(&mut args, "--arena")?)),
+            "--build" => parsed.build_mode = true,
+            "--start" => parsed.start = Some(PathBuf::from(next(&mut args, "--start")?)),
+            "--save-as" => parsed.save_as = Some(next(&mut args, "--save-as")?),
             "-h" | "--help" => parsed.help = true,
             other => return Err(format!("unknown argument {other:?}\n{}", usage())),
         }
@@ -214,6 +237,31 @@ mod tests {
         assert_eq!(args.offscreen, Some(PathBuf::from("out.png")));
         assert_eq!(args.size, [1920, 1080]);
         assert_eq!(args.clicks, vec![[1.0, 2.0], [3.0, 4.0]]);
+    }
+
+    #[test]
+    fn the_build_flags_parse() {
+        let args = parse(
+            [
+                "--build",
+                "--start",
+                "AI/Team1/Bot0.bot",
+                "--save-as",
+                "My Bot",
+                "--seconds",
+                "3",
+                "--out",
+                "frames",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert!(args.build_mode);
+        assert_eq!(args.start, Some(PathBuf::from("AI/Team1/Bot0.bot")));
+        assert_eq!(args.save_as.as_deref(), Some("My Bot"));
+        assert_eq!(args.seconds, Some(3.0));
+        assert_eq!(args.out, Some(PathBuf::from("frames")));
     }
 
     #[test]

@@ -372,9 +372,16 @@ impl GameLibrary {
     /// Parse a definition's mesh (`.gmf`), resolved case-insensitively under
     /// `Components/`.
     pub fn load_component_mesh(&self, def: &ComponentDef) -> Option<GmiScene> {
-        let path = ra2fmt::find_ci(&self.root.join("Components"), &def.mesh_rel_path())?;
+        let path = self.component_mesh_path(def)?;
         let bytes = std::fs::read(path).ok()?;
         ra2fmt::gmi::parse(&bytes).ok()
+    }
+
+    /// Where a definition's `.gmf` lives, resolved case-insensitively under
+    /// `Components/`. The preview renderer needs the directory to resolve the
+    /// mesh's own textures.
+    pub fn component_mesh_path(&self, def: &ComponentDef) -> Option<PathBuf> {
+        ra2fmt::find_ci(&self.root.join("Components"), &def.mesh_rel_path())
     }
 
     /// Parse a `.bot` file.

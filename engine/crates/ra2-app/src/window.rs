@@ -20,7 +20,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::frame::FrameRenderer;
@@ -70,6 +70,32 @@ pub fn run_match(options: crate::match_mode::Options) -> Result<(), String> {
     let event_loop = EventLoop::new()
         .map_err(|e| format!("cannot open a window: {e}; use --match --out DIR for the match"))?;
     let mut app = App::new_match(options)?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| format!("the window loop failed: {e}"))?;
+    match app.error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Open the workshop in a window: the bot lab, its live build model, the 3D
+/// placeholder preview and the editable panel.
+pub fn run_build(options: crate::build_mode::Options) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Err(
+            "no display (DISPLAY and WAYLAND_DISPLAY are both unset); the windowed client \
+             needs one — use --build --out DIR for the headless path"
+                .into(),
+        );
+    }
+    let event_loop = EventLoop::new()
+        .map_err(|e| format!("cannot open a window: {e}; use --build --out DIR"))?;
+    let builder = crate::build_mode::Builder::open(&options.game, options.start.as_deref())?;
+    let size = options.size;
+    let mut app = App::with_builder(&options.game, size, builder)?;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop
         .run_app(&mut app)
@@ -206,6 +232,10 @@ struct App {
     /// `Some` when `--match` is playing; the shell stays booted so quitting the
     /// match returns to its main menu.
     session: Option<crate::match_mode::Session>,
+    /// `Some` when `--build` is open: the workshop model and its preview.
+    builder: Option<crate::build_mode::Builder>,
+    /// The modifiers currently held, for Ctrl+Z / Ctrl+Y.
+    modifiers: ModifiersState,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     cursor: Option<PhysicalPosition<f64>>,
@@ -225,6 +255,16 @@ impl App {
     fn new_match(options: crate::match_mode::Options) -> Result<App, String> {
         let session = crate::match_mode::Session::new(&options)?;
         App::with_session(&options.game, options.size, Some(session))
+    }
+
+    fn with_builder(
+        game: &Path,
+        requested: [u32; 2],
+        builder: crate::build_mode::Builder,
+    ) -> Result<App, String> {
+        let mut app = App::with_session(game, requested, None)?;
+        app.builder = Some(builder);
+        Ok(app)
     }
 
     fn with_session(
@@ -248,6 +288,8 @@ impl App {
             shell,
             frames,
             session,
+            builder: None,
+            modifiers: ModifiersState::empty(),
             window: None,
             gpu: None,
             cursor: None,
@@ -335,6 +377,28 @@ impl App {
                 event_loop.exit();
                 return;
             }
+        } else if let Some(builder) = &mut self.builder {
+            let scene = match builder.scene(size) {
+                Ok(scene) => scene,
+                Err(error) => {
+                    self.error = Some(format!("could not build the workshop frame: {error}"));
+                    event_loop.exit();
+                    return;
+                }
+            };
+            if let Err(error) = gpu.ui.render_to(
+                &gpu.device,
+                &gpu.queue,
+                &scene,
+                &view,
+                format,
+                size[0],
+                size[1],
+            ) {
+                self.error = Some(format!("could not draw the workshop: {error}"));
+                event_loop.exit();
+                return;
+            }
         } else {
             let frame = self.frames.frame(&mut self.shell, size);
             if let Err(error) = gpu.ui.render_to(
@@ -407,6 +471,51 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if self.builder.is_some() && self.session.is_none() {
+                    let ctrl = self.modifiers.control_key();
+                    let mut action: Option<Result<(), String>> = None;
+                    match event.physical_key {
+                        PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
+                        PhysicalKey::Code(KeyCode::Backspace) => {
+                            if let Some(builder) = &mut self.builder {
+                                builder.backspace();
+                            }
+                        }
+                        PhysicalKey::Code(KeyCode::Enter) => {
+                            if let Some(builder) = &mut self.builder {
+                                action = Some(builder.enter());
+                            }
+                        }
+                        PhysicalKey::Code(KeyCode::KeyZ) if ctrl => {
+                            if let Some(builder) = &mut self.builder {
+                                builder.undo();
+                            }
+                        }
+                        PhysicalKey::Code(KeyCode::KeyY) if ctrl => {
+                            if let Some(builder) = &mut self.builder {
+                                builder.redo();
+                            }
+                        }
+                        _ if !ctrl => {
+                            if let Some(text) = &event.text {
+                                if let Some(builder) = &mut self.builder {
+                                    for c in text.chars() {
+                                        builder.type_char(c);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    if let Some(Err(error)) = action {
+                        self.fail(event_loop, error);
+                        return;
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 match event.physical_key {
                     PhysicalKey::Code(KeyCode::Escape) => {
                         let mut quit = false;
@@ -421,7 +530,11 @@ impl ApplicationHandler for App {
                         }
                         if quit {
                             ra2script::set_paused(false);
+                            let report = self.session.as_ref().map(|s| s.report());
                             self.session = None;
+                            if let (Some(builder), Some(report)) = (&mut self.builder, report) {
+                                builder.set_report(report);
+                            }
                             println!("match over; back on {}", self.shell.screen_id());
                         }
                         if let Some(window) = &self.window {
@@ -438,6 +551,9 @@ impl ApplicationHandler for App {
                     }
                     _ => {}
                 }
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Some(position);
@@ -478,7 +594,11 @@ impl ApplicationHandler for App {
                 }
                 if quit {
                     ra2script::set_paused(false);
+                    let report = self.session.as_ref().map(|s| s.report());
                     self.session = None;
+                    if let (Some(builder), Some(report)) = (&mut self.builder, report) {
+                        builder.set_report(report);
+                    }
                     println!("match quit; back on {}", self.shell.screen_id());
                     if let Some(window) = &self.window {
                         window.request_redraw();
@@ -486,6 +606,43 @@ impl ApplicationHandler for App {
                     return;
                 }
                 if self.session.is_some() {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                if self.builder.is_some() {
+                    let target_size = self
+                        .window
+                        .as_ref()
+                        .map(|w| window_size(w))
+                        .unwrap_or([SHELL_SIZE[0] as u32, SHELL_SIZE[1] as u32]);
+                    let mut test = None;
+                    if let Some(builder) = &mut self.builder {
+                        if let Err(error) = builder.click(point[0], point[1]) {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        if builder.take_test_request() {
+                            test = Some(builder.test_options(target_size));
+                        }
+                    }
+                    if let Some(result) = test {
+                        match result.and_then(|options| crate::match_mode::Session::new(&options)) {
+                            Ok(session) => {
+                                println!(
+                                    "test robot: {} vs {}",
+                                    session.report().robots[0].bot_name,
+                                    session.report().robots[1].bot_name
+                                );
+                                self.session = Some(session);
+                            }
+                            Err(error) => {
+                                self.fail(event_loop, error);
+                                return;
+                            }
+                        }
+                    }
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }

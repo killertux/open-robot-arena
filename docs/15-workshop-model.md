@@ -1,8 +1,9 @@
 # The workshop model (M9.2–M9.4, M9.7)
 
 What landed: a tested **model library** for building, wiring, painting and
-pricing a robot, over `ra2fmt::bot::Bot`. It is engine code, not a window: no
-`ra2-app` integration, no input loop, no 3D preview. The future UI drives it.
+pricing a robot, over `ra2fmt::bot::Bot`, and the application slice that drives
+it (`ra2-app --build`, `docs/17-workshop-ui.md`). The model is engine code; the
+window is presentation and click routing over it.
 
 The model lives in `ra2ui::workshop`:
 
@@ -336,18 +337,22 @@ the project's corpus tests do) and `cargo clippy -- -D warnings` clean.
   `.gmf` could expose a point intended for more than one child; the model follows
   the corpus.
 
-## 7. What the future UI still needs
+## 7. The UI, now
 
-- Wire `Build`/`ControlBoard`/`Paint` into the bot lab's screens: the palette's
-  mount selection (`build.info(i).mounts` + `Attachment::accepts`), the chassis
-  steps, the wiring canvas (`control_grid` cells from `Control::cell`), the
-  appearance dropdown and the `texture list`/`decal list` rows
-  (`GameLibrary::textures()/decals()/edges()/custom_textures()`).
-- A 3D preview: `Build::transforms()` already returns the renderer's own
-  matrices; the chassis' painted skin is `Paint::skin().to_tga()`.
-- Mouse→face-group picking for paint: not in the model (no camera); the UI
-  supplies the group index and normalised point.
-- Save/Save As/Import/Export (M9.6), the `Test Robot` hand-off to `Match` (M9.5),
-  and a combined undo story (placement and paint currently undo separately).
-- A stats panel bound to `BotStats` — weigh, colour the over-800 case, and show
-  per-part rows; cost stays `None` until a table is recovered.
+The first application slice landed in `ra2-app --build`; its behaviour, frames
+and read-only list are in `docs/17-workshop-ui.md`. What it took from this page:
+
+- the tabs and chassis steps are the shipped `BotLab` screens, not a new UI;
+- the component palette click is `Build::attach` (the F1 rule), the `remove
+  button` is `Build::remove`, and Ctrl+Z is `Build::undo`;
+- the parts, mounts and bindings are drawn in a synthetic panel in the screens'
+  3D placeholder — the shipped screens have no slot for those lists;
+- the preview composites `ra2-render`'s own `chassis_items`/`scene_items` at
+  `Build::transforms()`;
+- paint uses `Paint::fill_group` plus the model's texture lists, and the skin
+  survives `Bot::write`/`parse`;
+- Save As/Open are `Robot Designs/<name>.bot`, Test Robot is M8's `Match`.
+
+Still open: **wiring editing** (add/drag/bind a control), decals/surface
+layers/texture-entire in the UI, chassis drawing, mouse→face-group picking, a
+mouse baseplate placement tool, and applying match damage back to the build.

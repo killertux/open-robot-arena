@@ -10,6 +10,7 @@ name = "ra2-app"
 path = "src/main.rs"
 
 [dependencies]
+glam = "0.34.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 pollster = "1.0.1"
 ra2-render = { path = "../ra2-render" }

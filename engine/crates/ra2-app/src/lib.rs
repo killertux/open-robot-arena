@@ -14,6 +14,7 @@
 //!     --match --seconds 30 --out /tmp/ra2-match
 //! ```
 
+pub mod build_mode;
 pub mod cli;
 pub mod frame;
 pub mod headless;
@@ -40,6 +41,20 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         return Ok(());
     }
     let game = find_game(args.game.as_deref())?;
+    if args.build_mode {
+        let options = build_mode::Options {
+            game: game.clone(),
+            start: args.start.clone(),
+            name: args.save_as.clone().unwrap_or_else(|| "M9 Bot".to_string()),
+            out: args.out.clone(),
+            size: args.size,
+            seconds: args.seconds.unwrap_or(4.0),
+        };
+        return match options.out {
+            Some(_) => build_mode::run_headless(&options),
+            None => window::run_build(options),
+        };
+    }
     if args.match_mode {
         let options = match_mode::Options::new(
             &game,
@@ -51,7 +66,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
             args.size,
         )?;
         return match options.out {
-            Some(_) => match_mode::run_headless(options),
+            Some(_) => match_mode::run_headless(options).map(|_| ()),
             None => window::run_match(options),
         };
     }

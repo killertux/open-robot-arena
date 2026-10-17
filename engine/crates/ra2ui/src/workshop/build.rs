@@ -217,6 +217,46 @@ impl Build {
         self.bot.name = name.into();
     }
 
+    /// Change the chassis armour. The `.bot` records **twice** the hardness the
+    /// editor's `Armor_Definitions.txt` states (a stock steel chassis stores
+    /// 350 for the editor's 175), so the caller passes the definition's row and
+    /// this writes the same convention the corpus uses.
+    pub fn set_armour(&mut self, armour: ra2fmt::armor::ArmourDef) -> bool {
+        let Some(chassis) = self
+            .bot
+            .components
+            .first_mut()
+            .and_then(|c| c.chassis.as_mut())
+        else {
+            return false;
+        };
+        if chassis.armour.is_some_and(|a| a.type_id == armour.type_id) {
+            return false;
+        }
+        self.snapshot();
+        let chassis = self
+            .bot
+            .components
+            .first_mut()
+            .and_then(|c| c.chassis.as_mut())
+            .expect("the chassis exists");
+        chassis.armour = Some(ra2fmt::bot::Armour {
+            type_id: armour.type_id,
+            weight: armour.weight,
+            hardness: armour.hardness * 2.0,
+        });
+        chassis.armour_material = Some(
+            ra2fmt::bot::Armour {
+                type_id: armour.type_id,
+                weight: armour.weight,
+                hardness: armour.hardness,
+            }
+            .material_row(),
+        );
+        self.info[0] = chassis_info(chassis);
+        true
+    }
+
     pub fn bot(&self) -> &Bot {
         &self.bot
     }

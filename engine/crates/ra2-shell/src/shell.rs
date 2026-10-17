@@ -158,6 +158,29 @@ impl Shell {
         }
     }
 
+    /// The workshop, when it is on screen. The application's build mode owns the
+    /// model and fills the lab's lists through this view; the screen itself stays
+    /// `ra2ui::workshop`'s.
+    pub fn lab(&self) -> Option<&BotLab> {
+        match &self.screen {
+            Screen::Page(_) => None,
+            Screen::Lab(lab) => Some(lab),
+        }
+    }
+
+    /// The workshop, to write the lists the screens say to fill.
+    pub fn lab_mut(&mut self) -> Option<&mut BotLab> {
+        match &mut self.screen {
+            Screen::Page(_) => None,
+            Screen::Lab(lab) => Some(lab),
+        }
+    }
+
+    /// A point inside `name` that a click reaches it at, found by hit-testing.
+    pub fn point_for(&self, name: &str) -> Result<[f32; 2], String> {
+        self.reachable(name).map(|(x, y)| [x, y])
+    }
+
     pub fn trace(&self) -> &[Step] {
         &self.trace
     }
