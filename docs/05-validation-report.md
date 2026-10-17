@@ -711,7 +711,10 @@ Known, documented, not yet fixed:
     zero, `leading` 4–7) and no other layout of the 133800 bytes does better (best
     strict-bracket 9/92, `512x128`). The field order and the `v` flip are settled by
     the builder (`FUN_005cd560`: `u0 = x/W … v1 = (y+h)/H`), and the page's picture
-    is the **high byte**; the low byte is colour, not a mask.
+    is the **high byte**; the low byte is colour, not a mask. **S8 resolved the
+    residue**: the record rects and the page are two packings, and the parser now
+    reads the page's own glyph runs (`repack_from_page`), so the cells bracket
+    their ink and the condensed faces read.
 
     **The page is not advance-packed.** The hypothesis that it follows the pen
     (`x = Σ advance` within a row) was measured and refuted: `fg_mcn14`'s row at
@@ -779,7 +782,10 @@ Known, documented, not yet fixed:
     rather than misplaced. The game reads the same file, so this render is
     faithful to the data — and the old suspicion of "a one-record slip" in the
     glyph table is refuted, since the same index gives the right letter in
-    another face.
+    another face. **S8 later corrected this**: the page does hold a whole `O` at
+    243..255 on the row above; the record's rect was looking at the row below.
+    The parser now derives the cells from the page's runs, and `ROBOT WORKSHOP`
+    reads.
 
     The labels that looked wrong were not a face's problem but every face's: the
     glyph page is stored **bottom-up** and neither renderer swapped the `v`s of a

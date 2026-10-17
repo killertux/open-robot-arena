@@ -638,44 +638,59 @@ So the shell is complete but for two files the shipped build left out, and the
 test keeps the inventory — the count of names, the seven `System` screens and the
 two missing files — as the baseline.
 
-### A letter that does not draw: `fg_d20`'s `O`
+### The `O`, the caption, and the font's two tables
 
-The shell's biggest face is `fg_d20` — ascent 26, descent −14, so a 40-pixel line —
-and **15 widgets in 5 files** use it, `botlab/botlabwin.gib`'s `title txt` among
-them. Its metrics are right (the glyph run's baseline is one ascent below the
-box's top, and `fg_d20`'s line height has a test beside it), and the face does
-draw — but **not every letter**. A probe of `ROBOT WORKSHOP D20` in `fg_d20` comes
-out `R BT W RKSH P D2`, with **every `O` missing**: the four in `ROBOT` and
-`WORKSHOP` all draw nothing, while the surrounding letters are correct. **Two faces have no `O`, not one.** Measured across all nine: every face ships a
-96-record table and record 45 is the character `O` in all of them, but `fg_d20`'s
-rect holds 21 pixels across 3 of its 11 columns and `fg_mcn12`'s 12 pixels across 2
-of 8, where the other seven draw a whole letter (40 pixels and up, over six columns
-or more). The advances are intact (17 and 9 against their neighbours' 10 and 5), so
-the letter is *skipped* rather than drawn in the wrong place — which is what
-`teamhq/select_team.gib`'s title shows, reading `SELECT Y UR R B TI CS TEAM` at 12
-pixels, and what `botlab/botlabwin.gib`'s `title txt` shows at 20.
+The main menu's captions (`EXHIBITION`, `TEAM HQ`, `MULTIPLAYER`) and the bottom
+bar's (`Options`, `Credits`, `Quit`) came out as `E/XIUBITIU !N`, `TEA V HO`,
+`VULTIUPAY ER` and `Opti o is` / `0 edi ts` / `Q ui t`. The caption path is not
+special: a plain `[Text]` in `fg_d20` (`WATER MOW EfGbDqp`) garbled the same way,
+one `Placement` carries each caption's text and it is drawn once. The difference
+is in the `.giff` itself.
 
-The cause is now measured, and it is the *font file*, not the reader. `fg_d20`
-page is 256×256 and its record 45 — the character `O` — is a full 11×14 rect whose
-ink sits in its last three columns: **21 pixels of a letter**, where the record's
-neighbours each hold a whole one. The **same record in `fg_mcn14` draws a whole
-`O`** (45 pixels over eight columns), and the rects around it are a packed row —
-each beginning one to three columns after the last one ended — so the record
-mapping and the rects are right and the *page* is simply blank where that `O`
-should be. Its advance is intact (17 against a neighbour's 10), which is why the
-letter is **skipped** rather than drawn in the wrong place: `ROBOT WORKSHOP D20`
-becomes `R BT W RKSH P D2` with nothing out of position.
+**The records' rects and the page are two different packings.** The page is a
+256×256 (or 512×512) atlas whose rows run bottom-up in record order; a row's last
+glyph is carried to the **end of the row above** (the `A..N` row ends with the
+`9` from the row below, the `P..c` row ends with the `O`). The records' four
+rect floats are a cumulative layout that drifts from those runs — on `fg_d20`,
+`A..O`'s record cells tile 66..246 while the page's `A..O` runs span 69..253. The
+`O` is the clearest case: record 45's rect is 235..246 on the row at y 223 and
+holds **21 pixels over 3 of its 11 columns**, which the earlier reading called
+"no `O` in `fg_d20`"; the page's `O` is at **243..255 on the `P..c` row (y 205)**,
+**116 pixels over 12 columns**. `fg_mcn12`'s record 45 is a fragment for the same
+reason (its page row has no third row to carry into; that one face still reads a
+partial `O`).
 
-Two things follow. The game reads the same file, so the game's `fg_d20` text has
-no `O` either — this render is faithful to the data. And the old suspicion that
-the glyph table might carry "a one-record slip somewhere in the middle" is
-**refuted**: the same index gives the right letter in another face, which a slip
-would not.
+**The advance table is two records ahead of the page table.** The loader's own
+loop starts at `0x20`, and the metrics show it: `fg_mcn16`'s glyph record for `i`
+carries 7 and its `n` carries 3, while the records two on carry 3 and 7 — the
+page's own widths. Spacing by the glyph table makes `Options` read `Opti o is`;
+spacing by the shifted table makes it read `Options`. The two halves are read
+where each is right: cells from the page, advances from the shifted record.
 
-That is what `botlabwin.gib`'s `title txt` actually is: a label whose text cannot
-be spelled in its own face. It is in the draw list and it *is* drawn — the word
-just loses its `O`s, and with the `O`s gone the remainder is easy to miss
-altogether against the toolbar art.
+`ra2fmt::giff::Font::repack_from_page` does this at parse time: for each packed
+row it finds the page's ink runs, applies the row cascade, and writes each
+record's cell (`u0..v1`), its `third` (the row band's top relative to the
+baseline) and leaves the advance in its table; `Font::advance` reads two records
+on. `ra2 font` prints the effective advance, so `tools/ui_compose.py` and
+`uishot` draw the same run. Every shipped face maps **94 cells** (the sentinel
+record is the 95th), and the corpus's **122 `Caption` attachments in 53 of 116
+files** — the 758 attachments also hold 295 `Background`s — are each a body with
+one non-empty `Text`, centred in the button and drawn once. The game itself
+re-packs the glyphs at load (`FUN_005cd560`), so reading the page's runs is what
+the shipped loader does too.
+
+Pictures: `uishot` and `ui_compose.py` on `mainmenu.gib` both read
+`EXHIBITION`, `TEAM HQ`, `MULTIPLAYER`, `Options`, `Credits`, `Quit`;
+`teamhq/select_team.gib` reads `SELECT YOUR ROBOTICS TEAM` and its captions
+`New Team` / `Continue` (`Delete Team` is behind the proxied bottom bar, a
+layout overlap rather than a caption one). Tests:
+`the_font_page_supplies_the_o_the_records_misplace`,
+`every_face_maps_its_page_runs`,
+`the_advance_table_is_two_records_ahead_of_the_page`,
+`the_cells_are_the_pages_glyph_runs`,
+`each_caption_is_drawn_once_at_its_buttons_frame`,
+`every_caption_in_the_corpus_is_one_text_body` (147 tests in the suite).
+
 
 ### The UI project document: the shell's own index of itself, and a check on it
 

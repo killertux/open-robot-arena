@@ -91,11 +91,13 @@ local/           # (git-ignored) game files + converted cache
   bar. Every `+Background` draws what its own body says: a colour fill or a
   texture, behind its widget. `ra2-shell` boots the shipped `Scripts/Main.py`,
   opens the data's main menu and walks the menu → bot lab and menu → arena-picker
-  routes by hit-tested clicks (S6). **Named residues:** S1's condensed-face
-  glyph-cell clipping, which is the shipped font file's own (measured in
-  [`07-m5-m6-checklist.md`](07-m5-m6-checklist.md) S1), and S4's workshop list
-  and paint tools, which are the game's C++ and are named/deferred rather than
-  approximated.
+  routes by hit-tested clicks (S6). **Named residues:** `fg_mcn12`'s `O` cell is
+  a two-column fragment (its page row has no row above to carry the glyph into),
+  and some title boxes are narrower than the shifted advance table's extent, so
+  they clip as the data says; S4's workshop list and paint tools are the game's
+  C++ and are named/deferred rather than approximated. The font's rect/page
+  packing is settled (S8): cells are the page's own glyph runs and the advance
+  table is read two records on.
 - **M6 — Packaging.** ✅ Done for Linux x86_64: the portable tarball, launcher,
   installer, `.desktop`, icon and unpack-and-run smoke are built and measured
   ([`08-packaging.md`](08-packaging.md)). macOS and modern Windows are a

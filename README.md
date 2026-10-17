@@ -78,12 +78,14 @@ robot inventory → bot lab → chassis step (7 frames), and main menu → exhib
 setup → arena picker (3 frames). Two renderers written the other way round —
 `ra2-render`'s wgpu path and `tools/ui_compose.py` on the CPU — agree to a mean
 per-channel difference of **0.42/255** on `mainmenu.gib` and **0.24/255** on
-`hq_league.gib`. Caveats: there is a **glyph-cell clipping residue** that is the
-shipped font file's own — the condensed faces sample a shifted cell, and in
-every face the ink overhangs the advance-sized cell (58–82 of 94 left borders
-land on ink; S1 in [`docs/07-m5-m6-checklist.md`](docs/07-m5-m6-checklist.md)) —
-and the workshop's **list and paint tools** are the game's C++ and are
-named/deferred (S4). There is no window or input loop.
+`hq_league.gib`. Caveats: the font's record rects and page are two packings, so
+`ra2fmt` derives each glyph cell from the page's own ink runs and reads the
+advance table two records on (S8 in
+[`docs/07-m5-m6-checklist.md`](docs/07-m5-m6-checklist.md)); the remaining font
+residue is `fg_mcn12`'s partial `O`, and titles whose authored box is narrower
+than the shifted advance table clip as the data says. The workshop's **list and
+paint tools** are the game's C++ and are named/deferred (S4). There is no
+window or input loop.
 
 ### M6 — packaging
 
@@ -124,8 +126,9 @@ Measured, not aspirational.
 * Some fidelity residues: a share of stock robots still lacks wheel traction,
   the damage scale is calibrated, and Jolt's friction law differs from Havok's
   (F6/F7/F9/F11 in [`docs/06-deferred-fidelity.md`](docs/06-deferred-fidelity.md)).
-* The condensed-face glyph-cell clipping described under M5. The game's own
-  font file is inconsistent; the renderer stays faithful to it.
+* `fg_mcn12`'s partial `O` (its page row has no row above to carry the glyph
+  into), and title boxes authored narrower than the shifted advance table, which
+  clip as the data says. The other faces' glyph cells are the page's own runs.
 * macOS and Windows builds — documented, unverified. arm64, musl, static
   linking, Flatpak and AppImage are not built.
 * Game data, mod support, network play, an update feed and signing/CI.

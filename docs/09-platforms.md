@@ -16,7 +16,7 @@ platform code was added.
 
 | | Linux x86_64 | macOS arm64 | macOS x86_64 | Windows x86_64 |
 |---|---|---|---|---|
-| **State** | **verified** (145 tests; tarball smoke) | not built | not built | not built |
+| **State** | **verified** (147 tests; tarball smoke) | not built | not built | not built |
 | Rust target | `x86_64-unknown-linux-gnu` | `aarch64-apple-darwin` | `x86_64-apple-darwin` | `x86_64-pc-windows-msvc` |
 | Toolchain | rustc/cargo 1.98.1 (measured) | stable + Xcode CLT | stable + Xcode CLT | stable MSVC + VS Build Tools |
 | Jolt C++ (`oxijolt-sys` 1.1.0 + Jolt 5.6.0) | both paths run here: P2's build used the prebuilt archive, `check.sh` the vendored CMake build | **no archive for macOS in `prebuilt.txt` → CMake + vendored Jolt** | same | archive listed (MSVC 14.44, `MultiThreadedDLL`); CMake fallback |
@@ -43,7 +43,7 @@ Common to all three:
   `CMakeLists.txt`. Both paths have run on this Linux host: the original P2
   build used the prebuilt archive, and `tools/check.sh` (which exports
   `CARGO_NET_OFFLINE=true`) rebuilds the tarball from the vendored Jolt and
-  passed the 145 tests and the smoke. That is Linux evidence for the CMake
+  passed the 147 tests and the smoke. That is Linux evidence for the CMake
   path, not macOS or Windows evidence. One AI assertion was re-windowed from 20 s to 30 s because the
   source build lands its first hit at 20.23 s; see `docs/08` §9.
 * **A wgpu adapter, even offscreen.** `Renderer::new` asks for
@@ -185,7 +185,7 @@ For each platform, the same acceptance the Linux tarball has (docs/08 §5):
 | Unverified | The evidence that would close it |
 |---|---|
 | It compiles and links | `cargo build --release --offline` from a clean `engine/target` |
-| The test suite passes | `cargo test --release --offline --workspace` (145 tests on Linux; corpus tests skip without the game) |
+| The test suite passes | `cargo test --release --offline --workspace` (147 tests on Linux; corpus tests skip without the game) |
 | The shell boots the data and walks both routes | `cargo run -q --release -p ra2-shell -- --route botlab --out out --game "$GAME"` and `--route exhibition`; 7 and 3 PNGs, 1280×1005 |
 | The boot frame is the main menu | `cargo run -q --release -p ra2-render --example uishot -- "$GAME/UI/mainmenu/mainmenu.gib" ref.png 1280 1005`; `cmp out/00-mainmenu.png ref.png` |
 | The Python link is discoverable | `otool -L` (macOS) / `dumpbin /dependents` (Windows) shows the 3.12 library, and the 3.12 stdlib is found at runtime |

@@ -357,7 +357,7 @@ duplicated:
 The final line is:
 
 ```
-check: PASS — 145 tests passed, 0 failed; 7 botlab + 3 exhibition frames written; boot frame == independent uishot render of mainmenu.gib; package smoke ok
+check: PASS — 147 tests passed, 0 failed; 7 botlab + 3 exhibition frames written; boot frame == independent uishot render of mainmenu.gib; package smoke ok
 ```
 
 On failure the trap prints `check: FAIL at: <stage>` and keeps the stage's
