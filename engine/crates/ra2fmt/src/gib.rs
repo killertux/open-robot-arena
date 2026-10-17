@@ -50,6 +50,18 @@
 //! that **all of a widget's own fields precede its children**: no field line ever
 //! appears between two child blocks.
 //!
+//! ## An attachment has a body
+//!
+//! The writer emits an attachment *before* the widget it dresses, and the
+//! attachment's own base `Widget` record — a headerless block with its frame and
+//! its own children — *after* that widget's whole subtree. The body is what the
+//! attachment draws: a `Background`'s is the image (a colour fill or a texture),
+//! a `Caption`'s is the text, a `Scroller`'s is the scroll bar. So the parser
+//! reads the attachment, the decorated widget, and then the body, and stores it
+//! on [`Attachment::body`]. Measured over the whole corpus: 758 attachments, 758
+//! bodies, and every headerless record is one of those bodies. A file that is
+//! nothing but an attachment is a *fragment* and has no body.
+//!
 //! ## Geometry
 //!
 //! `Position` and `Size` are four numbers: an amount and a flag for each axis
@@ -103,6 +115,13 @@ impl<'a> Iterator for WidgetWalk<'a> {
     type Item = &'a Widget;
     fn next(&mut self) -> Option<&'a Widget> {
         let w = self.stack.pop()?;
+        // An attachment's body is a widget record too, written apart from the
+        // child list (`Attachment::body`), so the walk follows it as well.
+        for a in w.attachments.iter().rev() {
+            if let Some(body) = &a.body {
+                self.stack.push(body);
+            }
+        }
         self.stack.extend(w.children.iter().rev());
         Some(w)
     }
@@ -121,10 +140,10 @@ pub struct Widget {
     pub kind: WidgetKind,
     /// True when the file wrote **no `[Kind]` header** for this record. The base
     /// class `Widget` is the only kind the writer leaves nameless — its header
-    /// comes from a virtual call that returns nothing for it — and such a child
-    /// does **not** count against its parent's `NumChildren`. Measured over the
-    /// whole corpus: `sum(NumChildren)` plus the number of headerless records is
-    /// `records - 1` in all 116 files.
+    /// comes from a virtual call that returns nothing for it — and every one of
+    /// the 758 headerless records in the corpus is an attachment's body (see
+    /// [`Attachment::body`]), which is why a headerless record is never one of a
+    /// parent's counted children.
     pub implicit: bool,
     pub fields: Vec<Field>,
     /// `Background`/`Border`/`Caption`/... blocks that follow this widget.
@@ -270,11 +289,46 @@ impl Widget {
 pub struct Attachment {
     pub kind: AttachmentKind,
     pub fields: Vec<Field>,
+    /// The recipe this attachment carries behind the widget it dresses, as the
+    /// shipped writer orders it: a headerless base `Widget` record, written
+    /// **after** the decorated widget's whole subtree, whose children are what
+    /// the attachment draws. A `Background`'s body holds exactly one child — the
+    /// `Image` its `Image true <n>` field indexes — and the body's own
+    /// `Position`/`Size` is the background's frame. A `Caption`'s holds the
+    /// `Text` that captions the button; a `Scroller`'s holds its `ScrollBar`.
+    ///
+    /// Measured over all 116 files: 758 attachments, 758 bodies, and every
+    /// headerless record in the corpus is one of these bodies. A file that is
+    /// nothing but an attachment is a fragment and has no body.
+    pub body: Option<Box<Widget>>,
 }
 
 impl Attachment {
     pub fn field(&self, name: &str) -> Option<&Field> {
         self.fields.iter().find(|f| f.name.as_deref() == Some(name))
+    }
+
+    /// Which child of [`Attachment::body`] the `Image <present> <index>` field
+    /// names, when it names one.
+    ///
+    /// The field is written as two values on one line — a flag and an index into
+    /// the attachment's own children — so `Image true 0` means *the first child
+    /// of the body*, which is the image a `Background` draws. A field with no
+    /// index (`Image false`) names nothing.
+    pub fn image_index(&self) -> Option<usize> {
+        let f = self.field("Image")?;
+        let mut tokens = f.raw.split_whitespace();
+        if tokens.next()? != "true" {
+            return None;
+        }
+        tokens.next()?.parse().ok()
+    }
+
+    /// Whether the art this attachment repeats: `Tiling true` on 59 of the 295
+    /// backgrounds, and on every one of those the image names a texture (no
+    /// colour fill is ever tiled).
+    pub fn tiling(&self) -> bool {
+        self.flag("Tiling").unwrap_or(false)
     }
 
     pub fn flag(&self, name: &str) -> Option<bool> {
@@ -595,11 +649,7 @@ pub fn parse(text: &str) -> Result<Gib, Error> {
         .split('\n')
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .collect();
-    let mut p = Parser {
-        lines,
-        at: 0,
-        pending: Vec::new(),
-    };
+    let mut p = Parser { lines, at: 0 };
 
     p.skip_blank();
     let header = p.lines.get(p.at).copied().unwrap_or("");
@@ -624,12 +674,6 @@ pub fn parse(text: &str) -> Result<Gib, Error> {
 struct Parser<'a> {
     lines: Vec<&'a str>,
     at: usize,
-    /// Attachments read but not yet hung on a widget. The shipped writer puts a
-    /// widget's attachments *before* it — every `[Background]` in the corpus is
-    /// followed by a widget, and the head of `armor.gib` shows a `Background`
-    /// and a `Border` between a group and the group they dress — so they are
-    /// carried forward and taken by the next widget block.
-    pending: Vec<Attachment>,
 }
 
 impl<'a> Parser<'a> {
@@ -649,7 +693,7 @@ impl<'a> Parser<'a> {
 
     /// One record: an optional `[Kind]` header and then its fields, ending at
     /// the record's own `NumChildren` — which is the last field of every record
-    /// in the corpus, checked over all 116 files and 3,590 widgets.
+    /// in the corpus, checked over all 116 files and 4,348 widgets.
     ///
     /// The header is **optional** and that is not a quirk of the reader: the
     /// base class `Widget` is the one kind whose header the writer leaves out,
@@ -703,6 +747,55 @@ impl<'a> Parser<'a> {
         Ok(Some((kind, out, named)))
     }
 
+    /// Whether the cursor is on a record without a `[Kind]` header — the base
+    /// `Widget` class, which is how every attachment writes its own body.
+    fn headerless(&mut self) -> bool {
+        self.skip_blank();
+        self.lines
+            .get(self.at)
+            .is_some_and(|l| !l.trim().is_empty() && !l.starts_with('['))
+    }
+
+    /// One widget record and its counted children.
+    fn widget(&mut self, kind: String, fields: Vec<Field>, named: bool) -> Result<Widget, Error> {
+        let count = fields
+            .iter()
+            .find(|f| f.name.as_deref() == Some("NumChildren"))
+            .and_then(|f| f.number())
+            .unwrap_or(0.0) as usize;
+        let mut children = Vec::new();
+        // The children are the next `count` **named** widget blocks. A count of
+        // zero means the record has no children *at all*: the writer gates its
+        // whole child loop on `0 < NumChildren` (`FUN_005e7ca0`).
+        let mut counted = 0usize;
+        while counted < count {
+            self.skip_blank();
+            if self.at >= self.lines.len() {
+                return Err(Error::UnexpectedEof {
+                    at: self.at,
+                    wanted: count - counted,
+                });
+            }
+            let Block::Widget(child) = self.block()? else {
+                return Err(Error::Structure(format!(
+                    "line {}: an attachment with no widget above it",
+                    self.at + 1
+                )));
+            };
+            if !child.implicit {
+                counted += 1;
+            }
+            children.push(child);
+        }
+        Ok(Widget {
+            kind: WidgetKind::parse(&kind),
+            implicit: !named,
+            fields,
+            attachments: Vec::new(),
+            children,
+        })
+    }
+
     fn block(&mut self) -> Result<Block, Error> {
         let at = self.at;
         let Some((kind, fields, named)) = self.record()? else {
@@ -711,70 +804,47 @@ impl<'a> Parser<'a> {
                 at + 1,
             )));
         };
-        let Some(count) = fields
+        if fields
             .iter()
-            .find(|f| f.name.as_deref() == Some("NumChildren"))
-            .and_then(|f| f.number())
-        else {
-            // An attachment: it dresses the widget that comes *next*, so it is
-            // held and that widget takes it. On its own at the end of a file it
-            // is a *fragment* — a slot's worth of chrome with no widget of its
-            // own — and comes back as itself.
-            let attachment = Attachment {
+            .all(|f| f.name.as_deref() != Some("NumChildren"))
+        {
+            // An attachment: it dresses the widget that comes *next*. On its own
+            // at the end of a file it is a *fragment* — a slot's worth of chrome
+            // with no widget of its own — and comes back as itself.
+            let mut attachment = Attachment {
                 kind: AttachmentKind::parse(&kind),
                 fields,
+                body: None,
             };
-            self.pending.push(attachment.clone());
             self.skip_blank();
             if self.at >= self.lines.len() {
                 return Ok(Block::Attachment(attachment));
             }
-            return self.block();
-        };
-        let count = count as usize;
-        let mut children = Vec::new();
-        let attachments = std::mem::take(&mut self.pending);
-        // The children are the next `count` **named** widget blocks. Two things
-        // in between do not count: an attachment, which dresses the child that
-        // follows (and has already been taken by that child's own `block` call),
-        // and a headerless record, which is a child all the same — it is just not
-        // one the count names. Both are read and both are kept in place.
-        // A count of zero means the record has no children *at all*: the writer
-        // gates its whole child loop on `0 < NumChildren` (`FUN_005e7ca0`), so
-        // even a headerless child — which the count does not name — is absent.
-        if count > 0 {
-            let mut counted = 0usize;
-            while counted < count {
-                self.skip_blank();
-                if self.at >= self.lines.len() {
-                    return Err(Error::UnexpectedEof {
-                        at: self.at,
-                        wanted: count - counted,
-                    });
-                }
-                let child = match self.block()? {
-                    Block::Widget(w) => w,
-                    Block::Attachment(_) => unreachable!("an attachment came back mid-run"),
-                };
-                // Only a *named* child fills a slot; an unnamed one is a sibling
-                // of the child before it, which is what the buttons' caption
-                // holders are: `mainmenu.gib`'s `exhibition button` is followed
-                // by a headerless `Widget` of the button's own size, and it lands
-                // in the group the button is in — the same frame the button's own
-                // `Position` was measured against.
-                if !child.implicit {
-                    counted += 1;
-                }
-                children.push(child);
+            let Block::Widget(mut widget) = self.block()? else {
+                return Err(Error::Structure(format!(
+                    "line {}: an attachment with no widget above it",
+                    self.at + 1
+                )));
+            };
+            // The attachment's own base `Widget` record — with its frame and the
+            // children it draws — is written immediately after the decorated
+            // widget's whole subtree. That is the shipped writer's order, not a
+            // guess: the Background writer (`FUN_00614790`) emits `Tiling`/`Image`
+            // and then the Decorator writer's `Widget true` plus the widget, and
+            // its own base fields follow (measured: all 758 attachments in the
+            // corpus have one, and every headerless record in all 116 files is
+            // one of these bodies).
+            if self.headerless() {
+                let (bkind, bfields, bnamed) = self.record()?.expect("headerless record");
+                attachment.body = Some(Box::new(self.widget(bkind, bfields, bnamed)?));
             }
+            // Attachments are written outermost first, so the outer one is read
+            // first; `insert(0)` keeps them in the file's order (`Background`
+            // before the `Scroller` that wraps it).
+            widget.attachments.insert(0, attachment);
+            return Ok(Block::Widget(widget));
         }
-        Ok(Block::Widget(Widget {
-            kind: WidgetKind::parse(&kind),
-            implicit: !named,
-            fields,
-            attachments,
-            children,
-        }))
+        Ok(Block::Widget(self.widget(kind, fields, named)?))
     }
 }
 
@@ -990,6 +1060,129 @@ NumChildren 0\n";
                 out.push(path);
             }
         }
+    }
+
+    /// Every `+Background` in the corpus, read as its own data: 295 of them in
+    /// 82 files, and every one is `Tiling`/`Image`/`Widget` with a body. The
+    /// body's single child is the image the `Image true 0` field indexes — 223
+    /// colour fills (a blank `_Filename` plus `_ForeColor`) and 72 textures. The
+    /// 59 `Tiling true` backgrounds all name a texture; no colour fill is tiled.
+    ///
+    /// The same measurement pins the attachment body rule: 758 attachments, 758
+    /// bodies, and 758 headerless records — every one of the base `Widget`
+    /// records in the corpus is an attachment's body, not an ownerless sibling.
+    #[test]
+    fn every_background_is_a_colour_fill_or_a_texture() {
+        let Some(ui) = game_dir() else { return };
+        let mut files = Vec::new();
+        gib_files(&ui, &mut files);
+
+        let mut backgrounds = 0;
+        let mut fills = 0;
+        let mut textures = 0;
+        let mut tiled = 0;
+        let mut shapes = std::collections::BTreeSet::new();
+        let mut attachments = 0;
+        let mut with_body = 0;
+        let mut implicit = 0;
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let gib = parse(&text).unwrap();
+            for w in gib.walk() {
+                if w.implicit {
+                    implicit += 1;
+                }
+                for a in &w.attachments {
+                    attachments += 1;
+                    let body = a.body.as_deref().unwrap_or_else(|| {
+                        panic!(
+                            "{}: an attached {} with no body",
+                            path.display(),
+                            a.kind.name()
+                        )
+                    });
+                    with_body += 1;
+                    assert_eq!(body.kind, WidgetKind::Widget, "{}", path.display());
+                    assert!(body.implicit, "{}: a body is headerless", path.display());
+                    if a.kind != AttachmentKind::Background {
+                        continue;
+                    }
+                    backgrounds += 1;
+                    shapes.insert(
+                        a.fields
+                            .iter()
+                            .filter_map(|f| f.name.clone())
+                            .collect::<Vec<_>>(),
+                    );
+                    let index = a.image_index().unwrap_or_else(|| {
+                        panic!("{}: a Background with no image", path.display())
+                    });
+                    let image = body.children.get(index).unwrap_or_else(|| {
+                        panic!("{}: image {index} is not a child", path.display())
+                    });
+                    assert_eq!(image.kind, WidgetKind::Image, "{}", path.display());
+                    match image.filename() {
+                        Some("") => {
+                            fills += 1;
+                            assert!(
+                                image.fore_color().is_some(),
+                                "{}: a fill with no colour",
+                                path.display()
+                            );
+                            assert!(!a.tiling(), "{}: a tiled colour fill", path.display());
+                        }
+                        Some(_) => {
+                            textures += 1;
+                            if a.tiling() {
+                                tiled += 1;
+                            }
+                        }
+                        None => panic!("{}: the image names no _Filename", path.display()),
+                    }
+                }
+            }
+        }
+        assert_eq!(files.len(), 116);
+        assert_eq!(backgrounds, 295, "the +Background attachments");
+        assert_eq!(fills, 223, "colour fills");
+        assert_eq!(textures, 72, "textured backgrounds");
+        assert_eq!(tiled, 59, "Tiling true, all of them textures");
+        assert_eq!(shapes.len(), 1, "{shapes:?}");
+        assert_eq!(
+            shapes.into_iter().next().unwrap(),
+            ["Tiling", "Image", "Widget"]
+        );
+        assert_eq!(attachments, 758);
+        assert_eq!(with_body, 758);
+        assert_eq!(
+            implicit, 758,
+            "every headerless record is an attachment body"
+        );
+    }
+
+    /// The shipped writer's order, in one place: an attachment's body is the
+    /// headerless record after the widget it dresses, and a second attachment
+    /// nests outside it. `matchresults.gib`'s continue button carries a `Border`
+    /// and a `Caption`; the Caption's body comes first (it is the inner one) and
+    /// holds the `Text` "Continue", and the Border's body follows.
+    #[test]
+    fn an_attachment_body_follows_the_widget_it_dresses() {
+        let Some(ui) = game_dir() else { return };
+        let path = ui.join("common/matchresults.gib");
+        let gib = parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let button = gib
+            .walk()
+            .find(|w| w.name() == "continue button")
+            .expect("the continue button");
+        assert_eq!(button.attachments.len(), 2);
+        assert_eq!(button.attachments[0].kind, AttachmentKind::Border);
+        assert_eq!(button.attachments[1].kind, AttachmentKind::Caption);
+        let caption = button.attachments[1].body.as_deref().unwrap();
+        assert_eq!(caption.children.len(), 1);
+        assert_eq!(caption.children[0].kind, WidgetKind::Text);
+        assert_eq!(caption.children[0].text(), Some("Continue"));
+        let border = button.attachments[0].body.as_deref().unwrap();
+        assert!(border.children.is_empty());
     }
 
     /// Every screen the game ships, parsed. This is the shape of the claim the

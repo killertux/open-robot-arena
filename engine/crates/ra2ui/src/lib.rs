@@ -109,7 +109,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use ra2fmt::gib::{Block, Gib, Length, Widget, WidgetKind};
+use ra2fmt::gib::{Attachment, AttachmentKind, Block, Gib, Length, Widget, WidgetKind};
 
 pub mod arenas;
 pub mod cells;
@@ -556,6 +556,19 @@ pub struct Placement<'a> {
     /// clip above it. `None` when nothing above it clips.
     pub clip: Option<Frame>,
     pub children: Vec<Placement<'a>>,
+    /// The widgets its attachments carry: a `Background`'s image, a `Caption`'s
+    /// text, a `Scroller`'s bar. They are placed against the widget's **parent**
+    /// frame, because the attachment's own `Position`/`Size` are measured there
+    /// (the decorated widget is a child of the same parent), and they are drawn
+    /// around the widget: a background behind it, the rest in front.
+    pub attachments: Vec<PlacedAttachment<'a>>,
+}
+
+/// One attachment's body, placed around the widget it dresses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedAttachment<'a> {
+    pub attachment: &'a Attachment,
+    pub body: Placement<'a>,
 }
 
 impl<'a> Placement<'a> {
@@ -571,7 +584,9 @@ impl<'a> Placement<'a> {
 
     /// Whether this widget and everything under it is inside `frame`.
     pub fn fits(&self, frame: &Frame) -> bool {
-        frame.contains(&self.frame) && self.children.iter().all(|c| c.fits(frame))
+        frame.contains(&self.frame)
+            && self.children.iter().all(|c| c.fits(frame))
+            && self.attachments.iter().all(|a| a.body.fits(frame))
     }
 
     /// The container parts this widget lays out itself, if it is one.
@@ -624,6 +639,9 @@ impl<'a, 'b> Iterator for PlacementWalk<'a, 'b> {
     type Item = &'b Placement<'a>;
     fn next(&mut self) -> Option<&'b Placement<'a>> {
         let p = self.stack.pop()?;
+        for a in p.attachments.iter().rev() {
+            self.stack.push(&a.body);
+        }
         self.stack.extend(p.children.iter().rev());
         Some(p)
     }
@@ -810,6 +828,17 @@ pub fn draw_order_parented<'a>(
         parent: Option<&'a Placement<'a>>,
         out: &mut Vec<(&'a Placement<'a>, Option<&'a Placement<'a>>)>,
     ) {
+        // A `Background` is the one attachment that draws *behind* what it
+        // dresses; every other body (a caption's text, a scroller's bar, a
+        // border) draws in front. That is what the class means: the body's frame
+        // is the panel under the widget, and the corpus makes the point on
+        // `hq_league.gib`, whose grid has a 607×319 light panel behind it and a
+        // black text row on top.
+        for a in &p.attachments {
+            if p.widget.visible() && a.attachment.kind == AttachmentKind::Background {
+                visit(&a.body, Some(p), out);
+            }
+        }
         out.push((p, parent));
         // Higher `ChildOrder` is drawn later, and so is in front. Where two
         // children share one, the **earlier record is in front**: the read is
@@ -823,6 +852,11 @@ pub fn draw_order_parented<'a>(
         children.sort_by_key(|p| p.widget.child_order());
         for c in children {
             visit(c, Some(p), out);
+        }
+        for a in &p.attachments {
+            if p.widget.visible() && a.attachment.kind != AttachmentKind::Background {
+                visit(&a.body, Some(p), out);
+            }
         }
     }
     // The top level is a sibling set too: a file's own records are ordered by
@@ -869,25 +903,42 @@ fn place_at<'a>(
         // A scroll bar puts its parts at its two ends and between them.
         WidgetKind::ScrollBar => scroll_children(widget, frame, clip, fonts),
         _ => {
-            let mut placed: Vec<Placement> = widget
+            let placed: Vec<Placement> = widget
                 .children
                 .iter()
                 .map(|c| place_at(c, frame, clip, fonts))
                 .collect();
-            centre_captions(&mut placed);
             placed
         }
     };
+    // An attachment's own record is measured against the widget's *parent*, not
+    // against the widget: a `Background` may be larger than what it dresses (the
+    // 607×319 panel behind `hq_league.gib`'s 591-pixel grid) and a `Caption`
+    // hangs off the same button. It inherits the parent's clip, then applies its
+    // own `ClipMode`.
+    let mut attachments: Vec<PlacedAttachment> = widget
+        .attachments
+        .iter()
+        .filter_map(|a| {
+            a.body.as_deref().map(|body| PlacedAttachment {
+                attachment: a,
+                body: place_at(body, parent, inherited, fonts),
+            })
+        })
+        .collect();
+    centre_captions(widget, frame, &mut attachments);
     Placement {
         widget,
         frame,
         clip,
         children,
+        attachments,
     }
 }
 
-/// A button that carries a `Caption` attachment takes the `Text` after it as its
-/// caption, and the caption is drawn centred in the button.
+/// A button that carries a `Caption` attachment takes the `Text` in the
+/// attachment's body as its caption, and the caption is drawn centred in the
+/// button.
 ///
 /// Both halves are measured. There are exactly **122** `Caption` attachments in
 /// the corpus and exactly **122** buttons and check boxes whose four state images
@@ -900,24 +951,29 @@ fn place_at<'a>(
 /// the group's they would all pile up at the left — which is what a composite
 /// does before this rule. Inside their buttons 14 of 67, 18 of 72 and 9 of 40 are
 /// each roughly centred, which is where the game puts them.
-fn centre_captions(children: &mut [Placement<'_>]) {
-    for i in 0..children.len() {
-        let captioned = matches!(
-            children[i].widget.kind,
-            WidgetKind::Button | WidgetKind::CheckBox
-        ) && children[i].widget.attachment("Caption").is_some();
-        if !captioned || i + 1 >= children.len() || children[i + 1].widget.kind != WidgetKind::Text
-        {
-            continue;
+fn centre_captions(widget: &Widget, frame: Frame, attachments: &mut [PlacedAttachment<'_>]) {
+    if !matches!(widget.kind, WidgetKind::Button | WidgetKind::CheckBox)
+        || widget.attachment("Caption").is_none()
+    {
+        return;
+    }
+    for a in attachments
+        .iter_mut()
+        .filter(|a| a.attachment.kind == AttachmentKind::Caption)
+    {
+        // The Caption's body holds the `Text` (and nothing else in the corpus).
+        for caption in a.body.children.iter_mut() {
+            if caption.widget.kind != WidgetKind::Text {
+                continue;
+            }
+            let text = caption.frame;
+            caption.frame = Frame::new(
+                frame.x + (frame.w - text.w) / 2.0,
+                frame.y + (frame.h - text.h) / 2.0,
+                text.w,
+                text.h,
+            );
         }
-        let button = children[i].frame;
-        let caption = children[i + 1].frame;
-        children[i + 1].frame = Frame::new(
-            button.x + (button.w - caption.w) / 2.0,
-            button.y + (button.h - caption.h) / 2.0,
-            caption.w,
-            caption.h,
-        );
     }
 }
 
@@ -951,6 +1007,9 @@ fn shift(placement: &mut Placement<'_>, dx: f32, dy: f32) {
     for child in placement.children.iter_mut() {
         shift(child, dx, dy);
     }
+    for a in placement.attachments.iter_mut() {
+        shift(&mut a.body, dx, dy);
+    }
 }
 
 /// Work out again what a placed subtree is clipped to, `parent` being the frame
@@ -964,6 +1023,11 @@ fn reclip(placement: &mut Placement<'_>, parent: Frame, inherited: Option<Frame>
     let (frame, clip) = (placement.frame, placement.clip);
     for child in placement.children.iter_mut() {
         reclip(child, frame, clip);
+    }
+    // An attachment body hangs off the same parent the widget does, so it is
+    // re-clipped against that parent and the same inherited clip.
+    for a in placement.attachments.iter_mut() {
+        reclip(&mut a.body, parent, inherited);
     }
 }
 
@@ -1382,11 +1446,13 @@ mod tests {
         assert_eq!(horizontal, 1, "one of them horizontal");
     }
 
-    /// What makes `ClipMode 2` readable as a clip *by the parent*: of the
-    /// fifteen widgets that carry it, eleven are placed so that they stick out
-    /// of the parent, where a self-clip would do nothing at all — and the other
-    /// four are chrome that moves afterwards, the two selection bars and two of
+    /// What makes `ClipMode 2` readable as a clip *by the parent*: of the sixty
+    /// widgets that carry it, forty-seven are placed so that they stick out of
+    /// the parent, where a self-clip would do nothing at all — and the rest are
+    /// chrome that moves afterwards, the selection bars and two of
     /// `comp_properties.gib`'s tabs. Every one of them clips inside the parent.
+    /// (The count was 32 before the attachment bodies were read: 28 of the 60
+    /// are bodies, which used to be placed as siblings of the wrong parent.)
     #[test]
     fn a_clip_mode_two_widget_is_clipped_by_its_parent() {
         let Some(game) = game_dir() else { return };
@@ -1398,14 +1464,24 @@ mod tests {
             let text = std::fs::read_to_string(path).unwrap();
             let gib = ra2fmt::gib::parse(&text).unwrap();
             for root in resolve(&gib, DESIGN_SCREEN) {
-                walk_clip_two(&root, &mut seen, &mut outside);
+                walk_clip_two(
+                    &root,
+                    Frame::new(0.0, 0.0, DESIGN_SCREEN[0], DESIGN_SCREEN[1]),
+                    &mut seen,
+                    &mut outside,
+                );
             }
         }
-        assert_eq!(seen, 32, "ClipMode 2 widgets shipped");
-        assert_eq!(outside, 23, "of them sticking out of the parent");
+        assert_eq!(seen, 60, "ClipMode 2 widgets shipped");
+        assert_eq!(outside, 47, "of them sticking out of the parent");
     }
 
-    fn walk_clip_two(placement: &Placement<'_>, seen: &mut usize, outside: &mut usize) {
+    fn walk_clip_two(
+        placement: &Placement<'_>,
+        parent: Frame,
+        seen: &mut usize,
+        outside: &mut usize,
+    ) {
         for child in &placement.children {
             if child.widget.clip_mode() == 2 {
                 *seen += 1;
@@ -1417,11 +1493,32 @@ mod tests {
                     format_frame(&clip),
                     format_frame(&placement.frame),
                 );
-                if !placement.frame.contains(&child.frame) {
+                if !parent.contains(&child.frame) {
                     *outside += 1;
                 }
             }
-            walk_clip_two(child, seen, outside);
+            walk_clip_two(child, placement.frame, seen, outside);
+        }
+        // An attachment body is measured against the decorated widget's parent,
+        // which is the `parent` this call was given — not against the widget it
+        // dresses.
+        for a in &placement.attachments {
+            let body = &a.body;
+            if body.widget.clip_mode() == 2 {
+                *seen += 1;
+                let clip = body.clip.expect("a clipped widget has a clip");
+                assert!(
+                    parent.contains(&clip) || placement.clip.is_some(),
+                    "the clip of an attached {} is {}, which is not inside its parent {}",
+                    body.widget.kind.name(),
+                    format_frame(&clip),
+                    format_frame(&parent),
+                );
+                if !parent.contains(&body.frame) {
+                    *outside += 1;
+                }
+            }
+            walk_clip_two(body, parent, seen, outside);
         }
     }
 
@@ -1512,29 +1609,16 @@ mod tests {
     }
 
     /// The places where two siblings share a `ChildOrder` **and** their frames
-    /// overlap: **328 pairs**, which is where the tie-break matters at all, and
-    /// they are kept as a baseline.
+    /// overlap: **13 pairs**, which is where the tie-break matters at all, and
+    /// they are kept as a baseline. The older count of 328 was mostly a control
+    /// followed by the headerless record that draws its caption; that record is
+    /// the `Caption` attachment's body, not a sibling, which is the same reason
+    /// the corpus's 758 headerless records nest (see `Attachment::body`).
     ///
-    /// What they do *not* do is decide which way the tie goes. Their dominant
-    /// shape is a named control followed by an unnamed `Widget` holding the same
-    /// text — `common/bottomnav.gib`'s `Options button` then a label reading
-    /// `Options`, `botlab/ch_stepbuttons.gib`'s step buttons then their numerals
-    /// — and that pair reads the same either way round, because a `Button` with a
-    /// `Caption` attachment draws its own caption from a `Text` such as that one:
-    /// the text is in front of the button's art whichever of the two draws it.
-    /// Only **6** pairs in the whole corpus put art over a sibling that has a
-    /// `Background` (`exhibition/arena.gib`'s overlay over its `ListBox`,
-    /// `teamhq/select_team.gib`'s over its grid, three in `teamhq/repairs.gib`),
-    /// and an overlay drawn over a list is as plausible over as under.
-    ///
-    /// So the tie's direction stays **open**, with one argument pointing away
-    /// from what `draw_order` and `input::hit` do today: in
-    /// `botlab/components.gib` the palette's grid shares a `ChildOrder` with the
-    /// category bar, comes later in the file, and is drawn over the buttons that
-    /// the palette needs clicked — which the game must not do, so *there* the
-    /// earlier record would be the front one. What settles it is the game's own
-    /// hit test, since with a grid in front the buttons still have to be
-    /// reachable.
+    /// What they do *not* do is decide which way the tie goes. The largest is
+    /// `multiplayer/multiplayer.gib`'s server list against its heading grid, and
+    /// the file order says the earlier record is in front; the rule is the one
+    /// `draw_order_parented` implements.
     #[test]
     fn a_child_order_tie_is_broken_by_the_file() {
         let Some(game) = game_dir() else { return };
@@ -1576,39 +1660,37 @@ mod tests {
         }
         assert_eq!(
             pairs.len(),
-            328,
+            13,
             "equal-ChildOrder overlapping sibling pairs"
         );
-        // The convention, named: each of the nav bar's three buttons is followed
-        // by the label that draws its text, and the step buttons by their
-        // numerals.
+        // The 328 older pairs were mostly a control followed by the caption
+        // holder that draws its text. That holder is the `Caption` attachment's
+        // *body*, not a sibling, so it is no longer part of this count: the
+        // caption is drawn in front because of what the attachment is, not
+        // because of a `ChildOrder` tie. What is left is 13 true sibling
+        // overlaps; the largest is `multiplayer.gib`'s list against its heading
+        // grid, and the file order still says the earlier one is in front.
         for button in ["Options button", "MainMenu button", "Help button"] {
-            assert!(
-                pairs.iter().any(|p| p.0 == "common/bottomnav.gib"
-                    && p.1.starts_with(button)
-                    && p.2.starts_with(' ')
-                    && p.3 == "gray grp"),
-                "bottomnav: {button} is followed by its label"
-            );
+            let gib = std::fs::read_to_string(ui.join("common/bottomnav.gib")).unwrap();
+            let gib = ra2fmt::gib::parse(&gib).unwrap();
+            let found = gib.walk().find(|w| w.name() == button).unwrap();
+            let caption = found.attachment("Caption").expect("a Caption attachment");
+            let body = caption.body.as_deref().expect("the caption's body");
+            assert_eq!(body.children[0].kind, WidgetKind::Text, "{button}");
         }
-        assert!(pairs
-            .iter()
-            .any(|p| p.0 == "botlab/ch_stepbuttons.gib" && p.1.starts_with("step 1 button")));
-        assert!(pairs
-            .iter()
-            .any(|p| p.0 == "botlab/components.gib" && p.1.starts_with("comp upper grp")));
+        assert!(pairs.iter().any(|p| p.0 == "multiplayer/multiplayer.gib"
+            && p.1.starts_with("server listbox")
+            && p.3 == "list grp"));
     }
 
-    /// Every shipped file, placed: 4,348 widgets, all finite, and 228 whose
-    /// frame reaches past the screen. Those are of three kinds, all expected:
+    /// Every shipped file, placed: 4,348 widgets, all finite, and 204 whose
+    /// frame reaches past the screen. Those are of two kinds, both expected:
     /// *fragments* — files like `botlab/control_cell.gib` that are a content
     /// slot's payload and were never meant to be placed against the screen —
-    /// children whose declared `Size` is larger than the pane they sit in, which
-    /// the game clips (`ClipMode`) where this resolver does not yet, and the
-    /// records the file's counts leave without a home (see
-    /// `a_file_does_not_always_nest_to_one_root`), which are placed against the
-    /// screen because nothing claims them. Fifty-six of the 116 files place
-    /// entirely on screen.
+    /// and children whose declared `Size` is larger than the pane they sit in,
+    /// which the game clips (`ClipMode`) where this resolver does not yet.
+    /// Fifty-seven of the 116 files place entirely on screen.
+    ///
     /// Every piece of art a shipped screen names, resolved the way the renderer
     /// resolves it — the loose tree under `UI`, then the game's own root (a
     /// component's preview lives there), then `RA2.cfz` by stem — and the ones
@@ -1753,17 +1835,21 @@ mod tests {
         // twenty-six shipped values are two tokens, `0.14 1` or `90 0`, and the
         // reader that took them for two axes found no four-number value and
         // fell back to half the frame for every split whose master is not the
-        // first slot. The counts are higher than they were because the reader
-        // now closes a record at its `NumChildren` and keeps the headerless
-        // base `Widget` records that used to be swallowed: 4,348 widgets, not
-        // 3,590. The 228 that fall outside are the records whose owning group is
-        // full, which the file's own count cannot express — see
-        // `a_file_does_not_always_nest_to_one_root`.
+        // first slot. The corpus is 4,348 widgets, and since every attachment
+        // takes its body there are no ownerless records left to place against
+        // the screen: the 204 that still reach past it are fragments and
+        // authored oversize frames, not nesting failures. Fifty-seven of the
+        // 116 files place entirely on screen.
         assert_eq!(placed, 4348);
-        assert_eq!(outside, 228, "off screen");
-        assert_eq!(perfect, 56, "perfect files");
+        assert_eq!(outside, 204, "off screen");
+        assert_eq!(perfect, 57, "perfect files");
         // The worst offender is a fragment, not a screen.
-        assert!(worst.1.ends_with("botlab/adjust_none.gib"), "{}", worst.1);
+        assert!(
+            worst.1.ends_with("botlab/armor.gib") || worst.1.ends_with("botlab/adjust_none.gib"),
+            "{} {}",
+            worst.1,
+            worst.0
+        );
     }
 
     /// A `Proxy` is the data's own slot: it names a `.gib` and that fragment is
@@ -1941,48 +2027,34 @@ mod tests {
         assert_eq!(p.widget.field("Width").and_then(|f| f.number()), Some(4.0));
     }
 
-    /// **Open, but bounded.** A record's `NumChildren` counts its *named*
-    /// children only — measured over the whole corpus: `sum(NumChildren)` plus
-    /// the headerless records is `records - 1` in all 116 files — so a
-    /// headerless child, or a button's caption holder, has no slot to claim when
-    /// the group it belongs to is already full. Forty-nine of the 116 files then
-    /// nest to a single root; the rest leave a few records at the top level, and
-    /// the largest, `import_texture.gib`, ends with six.
+    /// **Closed by the attachment body.** A record's `NumChildren` counts its
+    /// *named* children only, and the headerless records — 758 of them, the base
+    /// `Widget` class — are the bodies of the attachments. Once each attachment
+    /// takes its body (written after the decorated widget's subtree), every one
+    /// of the 116 shipped files nests to exactly **one root**.
     ///
-    /// Both halves are the data's, not an inference: the counts are on disk, and
-    /// the headerless records are the base `Widget` class, whose `[Kind]` header
-    /// the writer emits from a virtual call and which has no name to emit. What
-    /// is missing is where an uncounted record goes when its parent's count is
-    /// already satisfied — the file cannot say, and neither the game's reader
-    /// nor this one has been shown to handle it. It is *not* a placement
-    /// failure: the records land somewhere finite, and the counts above are
-    /// computed with the same trees.
+    /// Before the body rule this test recorded the opposite — 49 files closed to
+    /// one root and `import_texture.gib` left six records at the top level —
+    /// because the bodies had no owner and were placed as siblings. The counts
+    /// are the data's: `sum(NumChildren)` plus the 758 headerless records is
+    /// `records - 1` in every file, and each headerless record belongs to the
+    /// attachment written before the widget it wraps.
     #[test]
-    fn a_file_does_not_always_nest_to_one_root() {
+    fn every_file_nests_to_one_root() {
         let Some(game) = game_dir() else { return };
         let mut files = Vec::new();
         collect_gib(&game.join("UI"), &mut files);
-        let mut single = 0;
         let mut worst = (0usize, String::new());
         for path in &files {
             let text = std::fs::read_to_string(path).unwrap();
             let gib = ra2fmt::gib::parse(&text).unwrap();
             let roots = gib.widgets().count();
-            if roots == 1 {
-                single += 1;
-            }
             if roots > worst.0 {
                 worst = (roots, path.display().to_string());
             }
         }
         assert_eq!(files.len(), 116);
-        assert_eq!(single, 49, "files that nest to their Window");
-        assert!(
-            worst.1.ends_with("botlab/import_texture.gib"),
-            "{}",
-            worst.1
-        );
-        assert_eq!(worst.0, 6, "worst roots");
+        assert_eq!(worst.0, 1, "worst roots: {}", worst.1);
     }
 
     /// Draw order is `ChildOrder` ascending, ties by file order — which is what
