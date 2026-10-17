@@ -10,7 +10,9 @@
 //! * the end conditions are `FUN_00418040` (last robot / last team) and
 //!   `FUN_00418770` (points);
 //! * the score is the script layer's `+0x20` store, so King of the Hill's
-//!   `plus.addPoints` is the same number the results screen reads.
+//!   `plus.addPoints` is the same number the results screen reads; in every
+//!   other type the hits add their effective damage (the not-KOTH branch of
+//!   `FUN_004175b0`, `docs/19-match-fidelity.md` §1).
 //!
 //! ## What is deliberately explicit
 //!
@@ -26,6 +28,8 @@
 //! robot, or points when an explicit duration runs out.
 
 use std::path::Path;
+
+use glam::Vec3;
 
 use crate::duel::{BotSetup, Duel};
 use crate::sim::DriveInput;
@@ -215,12 +219,14 @@ pub struct RobotReport {
     pub damage_dealt: f32,
     pub damage_taken: f32,
     /// The HUD's three meters, as fractions 0..1 of each part's starting
-    /// hitpoints. **Our mapping, not the binary's:** `0x4b2f20` binds the
-    /// `statusmeters.gib` widgets but the per-frame fill was not traced, and the
-    /// original's battery/air are consumable resources while this port has no
-    /// energy model. So `battery` is the remaining hitpoints of the robot's
-    /// `Battery` components, `air` of its `AirTank` components, and `armor` of
-    /// its chassis. A robot without a battery/air tank reports 0 for that bar.
+    /// hitpoints. The widget mapping and fill geometry are the binary's
+    /// (`0x476b60` → `0x4b3540`/`0x4b3570`/`0x4b35a0`; left-anchored,
+    /// `trunc(fraction * 52)`, armour `trunc(fraction * 26)`), but the status
+    /// object's `+0xa8`/`+0xa4` sources are not decoded, so the fractions here
+    /// are still our component-hitpoint mapping: `battery` is the remaining
+    /// hitpoints of the robot's `Battery` components, `air` of its `AirTank`
+    /// components, and `armor` of its chassis. A robot without a battery/air
+    /// tank reports 0 for that bar.
     pub battery: f32,
     pub air: f32,
     pub armor: f32,
@@ -389,6 +395,9 @@ impl Match {
                 // (`0x477480` → `0x416360`).
                 let idle = vec![DriveInput::default(); self.duel.robots.len()];
                 self.duel.step_direct(&idle, dt);
+                // Nothing scores before the bell; a contact during the countdown
+                // is not a hit the match awards.
+                self.duel.take_score_hits();
                 self.countdown_left -= dt;
                 if self.countdown_left <= 0.0 {
                     self.countdown_left = 0.0;
@@ -397,6 +406,7 @@ impl Match {
             }
             MatchState::Fight => {
                 self.duel.step(dt);
+                self.score_hits();
                 self.clock += dt;
                 if let Some(reason) = self.end_reason() {
                     self.finish(reason);
@@ -421,6 +431,57 @@ impl Match {
         ra2script::state()
             .requests
             .push(ra2script::Request::Eliminate { bot: bot as i32 });
+    }
+
+    /// Apply one hit through the match's own damage event.
+    ///
+    /// It is the path the physics uses (`Duel::apply_hit`): the victim takes the
+    /// damage and the match applies its game type's scoring rule. A test drives
+    /// a deterministic blow with it; a weapon can use it too.
+    pub fn hit(&mut self, attacker: usize, victim: usize, component: usize, damage: f32) {
+        if self.state != MatchState::Fight {
+            return;
+        }
+        let point = self
+            .duel
+            .robots
+            .get(victim)
+            .map(|r| r.position(&*self.duel.physics))
+            .unwrap_or(Vec3::ZERO);
+        self.duel
+            .apply_hit(Some(attacker), victim, component, damage, point);
+        self.score_hits();
+    }
+
+    /// Turn this step's hits into points, with the rules `FUN_004175b0` applies.
+    ///
+    /// The award happens for every game type **except** `KING OF THE HILL`
+    /// (`0x4176f2` is a *not-equal* test: `FUN_004206a0` returns
+    /// `FUN_00402200(...) == 0`, and `FUN_00402200` is string equality). In
+    /// `TEAM MATCH` the attacker and victim must be on different teams
+    /// (`0x417737`; the team is robot `+0x30`, `FUN_004177c0`); in the other
+    /// modes the rule has no team test, so a teammate hit still scores.
+    fn score_hits(&mut self) {
+        let hits = self.duel.take_score_hits();
+        if self.config.game_type == GameType::KingOfTheHill {
+            return;
+        }
+        for hit in hits {
+            if self.config.game_type == GameType::TeamMatch {
+                let Some(victim) = self.duel.robots.get(hit.victim) else {
+                    continue;
+                };
+                let Some(attacker) = self.duel.robots.get(hit.attacker) else {
+                    continue;
+                };
+                if victim.team == attacker.team {
+                    continue;
+                }
+            }
+            // `FUN_004178a0`'s `fild score; fadd damage; __ftol; store`
+            // (`0x417918`): the effective damage is added and truncated per hit.
+            ra2script::add_points_float(hit.attacker as i32, hit.damage);
+        }
     }
 
     /// The match's current result. Valid in every state; the numbers are live.
@@ -533,6 +594,20 @@ impl Match {
     /// for `TEAM MATCH`).
     fn decide_winners(&self, reason: WinReason) -> Vec<usize> {
         if self.config.game_type == GameType::TeamMatch {
+            // `FUN_00418040` ends a TEAM MATCH on the last team standing and
+            // hands that side to the results screen; points settle only the
+            // time-out (`FUN_00418770`). Points can be non-zero on both sides
+            // now that damage scores, so the last-team branch must come first.
+            if reason == WinReason::LastTeam {
+                if let Some(i) =
+                    (0..self.duel.robots.len()).find(|&i| self.duel.robots[i].is_alive())
+                {
+                    let team = self.duel.robots[i].team;
+                    return (0..self.duel.robots.len())
+                        .filter(|&j| self.duel.robots[j].team == team)
+                        .collect();
+                }
+            }
             let mut totals: std::collections::BTreeMap<usize, i32> =
                 std::collections::BTreeMap::new();
             for (i, robot) in self.duel.robots.iter().enumerate() {
@@ -548,18 +623,6 @@ impl Match {
                 return (0..self.duel.robots.len())
                     .filter(|&i| top.contains(&self.duel.robots[i].team))
                     .collect();
-            }
-            if reason == WinReason::LastTeam {
-                // No points on the board: the side still standing is the
-                // winner. (The recon leaves the all-zero case open.)
-                if let Some(i) =
-                    (0..self.duel.robots.len()).find(|&i| self.duel.robots[i].is_alive())
-                {
-                    let team = self.duel.robots[i].team;
-                    return (0..self.duel.robots.len())
-                        .filter(|&j| self.duel.robots[j].team == team)
-                        .collect();
-                }
             }
             return Vec::new();
         }
@@ -764,6 +827,22 @@ mod tests {
         assert!(report.robots[0].defeated && report.robots[0].eliminated);
         assert!(report.robots[1].winner);
         assert!(report.duration > 25.0, "fight time {}", report.duration);
+        // A real blow over the 10-damage gate is points in DEATHMATCH.
+        if report
+            .robots
+            .iter()
+            .any(|r| r.damage_dealt >= crate::duel::SCORE_HIT_MIN_DAMAGE)
+        {
+            assert!(
+                report.robots.iter().any(|r| r.points > 0),
+                "damage was dealt but the score stayed zero: {:?}",
+                report
+                    .robots
+                    .iter()
+                    .map(|r| (r.damage_dealt, r.points))
+                    .collect::<Vec<_>>()
+            );
+        }
         assert!(
             report.log.iter().any(|l| l.contains("eliminated")),
             "no elimination in the log: {:?}",
@@ -778,6 +857,164 @@ mod tests {
         // Over → Results after the configured delay (0 here).
         m.step();
         assert_eq!(m.state(), MatchState::Results);
+    }
+
+    /// M11: a landed hit scores its effective damage in the non-KOTH types.
+    ///
+    /// `FUN_004175b0`'s award is gated on the game type being **not**
+    /// `KING OF THE HILL` (`0x4176f2`; `FUN_004206a0` is inequality), and the
+    /// score write truncates the sum (`0x417918`). The 10-damage gate is
+    /// `FUN_00417330`'s `10.0 <= param_5`. In `TEAM MATCH` the attacker and
+    /// victim must differ (`0x417737`); the other modes have no team test.
+    #[test]
+    fn a_hit_scores_its_effective_damage_except_in_koth_and_against_teammates() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+
+        let build = |game_type: GameType, teams: [usize; 2]| {
+            MatchConfig::new(
+                path(&game, "Arenas/box.py"),
+                game_type,
+                vec![
+                    RobotEntry::ai(teams[0], path(&game, "AI/Team1/Bot0.bot")),
+                    RobotEntry::ai(teams[1], path(&game, "AI/Team6/Bot2.bot")),
+                ],
+            )
+            .with_results_delay(0.0)
+        };
+
+        // DEATHMATCH: every hit over the gate adds its effective damage, and the
+        // sum is truncated to the integer field per event.
+        let mut m = Match::new(build(GameType::Deathmatch, [0, 1])).expect("a deathmatch");
+        countdown_over(&mut m);
+        m.hit(0, 1, 0, 12.7);
+        assert_eq!(ra2script::points(0), 12, "12.7 truncates to 12");
+        m.hit(0, 1, 0, 37.9);
+        assert_eq!(ra2script::points(0), 49, "37.9 adds 37");
+        m.hit(0, 1, 0, 9.9);
+        assert_eq!(
+            ra2script::points(0),
+            49,
+            "a hit under the 10.0 gate does not score"
+        );
+        assert_eq!(ra2script::points(1), 0, "the victim earns nothing");
+        println!(
+            "deathmatch points: attacker={} victim={}",
+            ra2script::points(0),
+            ra2script::points(1)
+        );
+
+        // TEAM MATCH: the same hit from a teammate is worth nothing; an
+        // opponent's is worth its damage.
+        let mut team = Match::new(build(GameType::TeamMatch, [0, 0])).expect("a team match");
+        countdown_over(&mut team);
+        team.hit(0, 1, 0, 40.0);
+        assert_eq!(
+            ra2script::points(0),
+            0,
+            "1.20: hitting a teammate adds no points"
+        );
+        team.duel.robots[1].team = 1;
+        team.hit(0, 1, 0, 40.0);
+        assert_eq!(ra2script::points(0), 40, "an opponent's hit scores");
+        println!("team match points: teammate=0, opponent=40");
+
+        // KING OF THE HILL: damage never scores; its score is the script's.
+        let mut koth =
+            Match::new(build(GameType::KingOfTheHill, [0, 1])).expect("a king-of-the-hill match");
+        countdown_over(&mut koth);
+        koth.hit(0, 1, 0, 40.0);
+        assert_eq!(
+            ra2script::points(0),
+            0,
+            "King of the Hill's score is the zone script's, not damage"
+        );
+    }
+
+    /// M11: the results rows carry the points a real DEATHMATCH landed.
+    ///
+    /// The real fight is the M8.2 two-brain one; a deterministic 24-damage blow
+    /// is added after it so the row is guaranteed to be non-zero, then the match
+    /// is ended and the report's `results()` (the shape the results screen
+    /// fills) is read back.
+    #[test]
+    fn a_real_deathmatch_reports_non_zero_points_to_the_results_rows() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+        let config = MatchConfig::new(
+            path(&game, "Arenas/box.py"),
+            GameType::Deathmatch,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team6/Bot2.bot")),
+            ],
+        )
+        .with_results_delay(0.0);
+        let mut m = Match::new(config).expect("the match builds");
+        countdown_over(&mut m);
+        m.hit(0, 1, 0, 24.0);
+        m.eliminate(1);
+        m.step();
+        while m.state() != MatchState::Results {
+            m.step();
+        }
+        let report = m.report();
+        let rows = report.results();
+        println!(
+            "results rows: {:?}",
+            rows.iter()
+                .map(|r| (r.bot_name.as_str(), r.points))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(rows[0].points, 24);
+        assert!(rows.iter().any(|r| r.points > 0));
+        assert_eq!(report.robots[0].points, rows[0].points);
+    }
+
+    /// A `TEAM MATCH` last-team finish beats the points table.
+    ///
+    /// `FUN_00418040` hands the surviving side to the results; only a time-out
+    /// goes through `FUN_00418770`'s team totals. Give the side that will be
+    /// eliminated the larger score, then eliminate it: the survivor wins.
+    #[test]
+    fn a_team_match_last_team_finish_beats_a_higher_points_total() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+        let config = MatchConfig::new(
+            path(&game, "Arenas/box.py"),
+            GameType::TeamMatch,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team6/Bot2.bot")),
+            ],
+        )
+        .with_results_delay(0.0);
+        let mut m = Match::new(config).expect("a team match");
+        countdown_over(&mut m);
+        // Team 1 scores 50; its robot is then eliminated, leaving team 0.
+        m.hit(1, 0, 0, 50.0);
+        assert_eq!(ra2script::points(1), 50);
+        m.eliminate(1);
+        m.step();
+        assert_eq!(m.state(), MatchState::Over);
+        let report = m.report();
+        println!(
+            "team finish: reason={:?} winners={:?} points={:?}",
+            report.reason,
+            report.winners,
+            report.robots.iter().map(|r| r.points).collect::<Vec<_>>()
+        );
+        assert_eq!(report.reason, Some(WinReason::LastTeam));
+        assert_eq!(report.winners, vec![0], "the surviving team wins");
     }
 
     /// M8.3: King of the Hill's own `Tick` scores 10 points every 0.5 s.

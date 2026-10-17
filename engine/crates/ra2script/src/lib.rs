@@ -511,6 +511,26 @@ impl State {
         }
         self.scores[bot] += amount;
     }
+
+    /// A damage hit's score write: `FUN_004178a0`'s
+    /// `fild [robot+0x20]; fadd amount; __ftol; store` (`0x417918`–`0x417928`).
+    ///
+    /// The stored score is an `i32` and the original truncates the sum to it, so
+    /// a hit worth 12.7 adds 12 (the fractional part is lost per event, not
+    /// carried). Only a positive finite amount scores; `FUN_004178a0`'s guard is
+    /// `0.0 < amount`.
+    pub fn add_points_float(&mut self, bot: i32, amount: f32) {
+        if !amount.is_finite() || amount <= 0.0 {
+            return;
+        }
+        let Ok(bot) = usize::try_from(bot) else {
+            return;
+        };
+        if bot >= self.scores.len() {
+            self.scores.resize(bot + 1, 0);
+        }
+        self.scores[bot] += amount.trunc() as i32;
+    }
 }
 
 static STATE: Mutex<State> = Mutex::new(State::new());
@@ -599,6 +619,12 @@ pub fn points(bot: i32) -> i32 {
 /// both go through here — there is no "set".
 pub fn add_points(bot: i32, amount: i32) {
     state().add_points(bot, amount);
+}
+
+/// Add a damage hit's effective damage to a player's score, with the original's
+/// per-event truncation (`0x417918`; see [`State::add_points_float`]).
+pub fn add_points_float(bot: i32, amount: f32) {
+    state().add_points_float(bot, amount);
 }
 
 /// Take the requests the scripts queued during the last tick.

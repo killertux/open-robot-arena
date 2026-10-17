@@ -58,6 +58,30 @@ fn spawn_prop(physics: &mut dyn PhysicsBackend, p: &crate::scene::Prop) -> Optio
     physics.create_body(&desc).ok()
 }
 
+/// The damage threshold below which a robot-vs-robot hit does not score.
+///
+/// `FUN_00417330` gates the whole damage event on `10.0 <= param_5` before it
+/// calls the hit handler (`FUN_004175b0`) at `0x4173xx`; a hit under 10 points
+/// of damage still hurts, but awards no score.
+pub const SCORE_HIT_MIN_DAMAGE: f32 = 10.0;
+
+/// One hit that the match may score.
+///
+/// The original's hit handler (`FUN_004175b0`) turns a landed blow into points
+/// outside King of the Hill: the victim must still be alive (`+0x34 == 0`), the
+/// attacker must be a real player, and in `TEAM MATCH` the attacker and victim
+/// must be on different teams (`FUN_004177c0`, `+0x30`). The damage awarded is
+/// the effective damage returned by the hit's own calculation
+/// (`FUN_00489620`, the component's vtable `+0x1c`), which is what this event
+/// carries.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScoreHit {
+    pub attacker: usize,
+    pub victim: usize,
+    /// Effective damage, the amount `FUN_004178a0` adds to `+0x20`.
+    pub damage: f32,
+}
+
 /// A duel: physics world, arena, two robots, debris and the damage model.
 pub struct Duel {
     pub physics: Box<dyn PhysicsBackend>,
@@ -77,6 +101,9 @@ pub struct Duel {
     /// Damage each robot has landed on another, summed over the match. Arena
     /// hazards' damage has no attacker and is only in `damage_taken`.
     pub damage_dealt: Vec<f32>,
+    /// Hits that the match has not scored yet. The duel knows the damage and the
+    /// attacker; the game type and teams are the match's, so it drains this.
+    score_hits: Vec<ScoreHit>,
     /// Which robot pairs were touching at the end of the last step, so a blow is
     /// dealt when contact *begins* instead of every step it lasts.
     contact_pairs: Vec<bool>,
@@ -379,6 +406,7 @@ impl Duel {
             log: Vec::new(),
             damage_taken,
             damage_dealt: vec![0.0; n],
+            score_hits: Vec::new(),
             contact_pairs,
             ai: bots.iter().map(|_| AiState::new()).collect(),
             script_ai,
@@ -1124,19 +1152,76 @@ impl Duel {
         }
         self.contact_pairs = touching;
         for imp in &impacts {
-            self.damage_taken[imp.target] += imp.damage;
-            self.damage_dealt[imp.attacker] += imp.damage;
-            // The brains spot a "good hit" by matching the component id against
-            // their own weapon list (`AI/__init__.py:CheckForWeaponHits`).
-            self.last_done[imp.attacker] = (imp.by as i32, imp.damage, self.time);
-            self.last_received[imp.target] = (imp.component as i32, imp.damage, self.time);
-            if self.robots[imp.target].damage(imp.component, imp.damage) {
-                self.break_off(imp.target, imp.component, imp.point);
-            } else if imp.component == 0 {
-                // A hurt chassis caves in before it dies (F9).
-                self.buckle_chassis(imp.target);
+            self.apply_hit(
+                Some(imp.attacker),
+                imp.target,
+                imp.component,
+                imp.damage,
+                imp.point,
+            );
+        }
+    }
+
+    /// Apply one damage event, and remember whether it is a scoring hit.
+    ///
+    /// This is the engine's side of `FUN_00417330` → `FUN_004175b0`: the damage
+    /// and the attacker are recorded here, and [`Match`](crate::r#match::Match)
+    /// applies the game type's rule (damage does not score in King of the Hill,
+    /// and a teammate hit does not score in Team Match). `attacker` is `None`
+    /// for a hazard's own damage, which never stores points (`plus.damage` goes
+    /// through `FUN_004148f0`, whose player id is `-1`).
+    ///
+    /// The victim's state is tested *before* the blow lands, like
+    /// `FUN_004175b0`'s `+0x34 == 0`; the damage awarded is the effective
+    /// damage the hit calculation returned.
+    pub fn apply_hit(
+        &mut self,
+        attacker: Option<usize>,
+        victim: usize,
+        component: usize,
+        damage: f32,
+        point: Vec3,
+    ) -> bool {
+        if victim >= self.robots.len()
+            || component >= self.robots[victim].health.len()
+            || !damage.is_finite()
+            || damage <= 0.0
+        {
+            return false;
+        }
+        let victim_was_alive = self.robots[victim].is_alive();
+        self.damage_taken[victim] += damage;
+        if let Some(attacker) = attacker {
+            if attacker < self.robots.len() {
+                self.damage_dealt[attacker] += damage;
+                // The brains spot a "good hit" by matching the component id
+                // against their own weapon list (`AI/__init__.py:CheckForWeaponHits`).
+                self.last_done[attacker] = (component as i32, damage, self.time);
+                if victim_was_alive && damage >= SCORE_HIT_MIN_DAMAGE {
+                    self.score_hits.push(ScoreHit {
+                        attacker,
+                        victim,
+                        damage,
+                    });
+                }
             }
         }
+        self.last_received[victim] = (component as i32, damage, self.time);
+        if self.robots[victim].damage(component, damage) {
+            self.break_off(victim, component, point);
+            true
+        } else {
+            if component == 0 {
+                // A hurt chassis caves in before it dies (F9).
+                self.buckle_chassis(victim);
+            }
+            false
+        }
+    }
+
+    /// Take the hits the match has not scored yet.
+    pub fn take_score_hits(&mut self) -> Vec<ScoreHit> {
+        std::mem::take(&mut self.score_hits)
     }
 
     /// Deform a robot's chassis to match its damage, and rebake its collider.
