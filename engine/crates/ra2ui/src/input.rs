@@ -41,7 +41,7 @@
 
 use ra2fmt::gib::{Widget, WidgetKind};
 
-use crate::{draw_order, Frame, Placement};
+use crate::{draw_key, draw_order, is_control, Frame, Placement};
 
 impl Frame {
     /// Whether a point is inside the rectangle. The right and bottom edges are
@@ -56,29 +56,58 @@ impl Frame {
 /// `[]` is a root itself; `[2, 0]` is the first child of the third root. Only
 /// widgets that are `Visible` and inside their clip can be hit.
 pub fn hit(roots: &[Placement<'_>], x: f32, y: f32) -> Option<Vec<usize>> {
-    for index in front_to_back(roots.iter().map(|p| p.widget.child_order())) {
+    hit_with(roots, x, y, can_take_a_click)
+}
+
+/// The **control** a click operates, passing through chrome.
+///
+/// [`hit`] answers "what is under the point" and can stop on a panel, a proxy's
+/// empty rectangle or a label. A shell button must be found even when the file
+/// draws a full-screen proxy over its rectangle — `select_team.gib`'s bottom
+/// navigation proxy is 1280×50 and covers the `continue button` at 779,443,
+/// while the bar's own art ends at x=768 — or when a decorative plate is over
+/// it. This variant stops only on [`is_control`] classes; the path still carries
+/// the containers above, so a caption's button is found from the path.
+pub fn hit_control(roots: &[Placement<'_>], x: f32, y: f32) -> Option<Vec<usize>> {
+    hit_with(roots, x, y, is_control)
+}
+
+fn hit_with(
+    roots: &[Placement<'_>],
+    x: f32,
+    y: f32,
+    takes: fn(&WidgetKind) -> bool,
+) -> Option<Vec<usize>> {
+    for index in front_to_back(roots.iter().map(|p| p.widget)) {
         let mut path = vec![index];
-        if let Some(found) = hit_at(&roots[index], x, y, &mut path) {
+        if let Some(found) = hit_at(&roots[index], x, y, &mut path, takes) {
             return Some(found);
         }
     }
     None
 }
 
-/// Indices ordered front to back: `ChildOrder` ascending is back to front, and
-/// ties keep file order, so reversing it gives what is drawn last first.
-fn front_to_back(orders: impl Iterator<Item = i32>) -> Vec<usize> {
-    let mut order: Vec<(i32, usize)> = orders.enumerate().map(|(i, o)| (o, i)).collect();
-    // Higher `ChildOrder` is drawn later and so is in front; where two share it,
+/// Indices ordered front to back: the draw order reversed, ties keeping file
+/// order, so what is drawn last is tested first.
+fn front_to_back<'a>(widgets: impl Iterator<Item = &'a Widget>) -> Vec<usize> {
+    let mut order: Vec<(i32, usize)> = widgets.enumerate().map(|(i, w)| (draw_key(w), i)).collect();
+    // Higher draw key is drawn later and so is in front; a negative order on a
+    // pressed control draws last (see `ra2ui::draw_key`); where two share it,
     // the **earlier** record is in front — see `draw_order_parented`.
     order.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     order.into_iter().map(|(_, i)| i).collect()
 }
 
-fn hit_at(p: &Placement<'_>, x: f32, y: f32, path: &mut Vec<usize>) -> Option<Vec<usize>> {
-    for index in front_to_back(p.children.iter().map(|c| c.widget.child_order())) {
+fn hit_at(
+    p: &Placement<'_>,
+    x: f32,
+    y: f32,
+    path: &mut Vec<usize>,
+    takes: fn(&WidgetKind) -> bool,
+) -> Option<Vec<usize>> {
+    for index in front_to_back(p.children.iter().map(|c| c.widget)) {
         path.push(index);
-        if let Some(found) = hit_at(&p.children[index], x, y, path) {
+        if let Some(found) = hit_at(&p.children[index], x, y, path, takes) {
             return Some(found);
         }
         path.pop();
@@ -93,7 +122,7 @@ fn hit_at(p: &Placement<'_>, x: f32, y: f32, path: &mut Vec<usize>) -> Option<Ve
     // `chassis.gib` draws its two notes over its two buttons. Refusing to stop at
     // one lets the search fall through to what is behind it, which is what makes
     // those controls clickable at all.
-    (p.widget.visible() && inside && can_take_a_click(&p.widget.kind)).then(|| path.clone())
+    (p.widget.visible() && inside && takes(&p.widget.kind)).then(|| path.clone())
 }
 
 /// Whether a class can be what a click *lands on*.

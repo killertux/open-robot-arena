@@ -647,24 +647,91 @@ impl<'a, 'b> Iterator for PlacementWalk<'a, 'b> {
     }
 }
 
+/// Whether a class is one a player operates.
+///
+/// This is the vocabulary a click can *land on*: a `Button`, a `CheckBox` (a tab
+/// or an option), a `ListBox`/`Grid` (a list), a `DropDown`, a `ScrollBar`, a
+/// `Slider`, a `TextBox`. Everything else — a `Window`, `Group`, `SplitFrame`,
+/// `Image`, `Text`, `Glyph`, `Lines`, `Rectangle`, `Proxy`, `Placeholder` — is
+/// the screen's chrome.
+pub fn is_control(kind: &WidgetKind) -> bool {
+    matches!(
+        kind,
+        WidgetKind::Button
+            | WidgetKind::CheckBox
+            | WidgetKind::ListBox
+            | WidgetKind::Grid
+            | WidgetKind::DropDown
+            | WidgetKind::ScrollBar
+            | WidgetKind::Slider
+            | WidgetKind::TextBox
+    )
+}
+
+/// Whether a negative `ChildOrder` on this class draws it **last**.
+///
+/// The class is a control the player presses: a `Button`, a `CheckBox` (a tab or
+/// an option), a `TextBox`, a `Slider` or a `DropDown`. A `Grid`/`ListBox` is a
+/// control too — `input::hit_control` stops on it — but it is a *content area*,
+/// and `botlab/components.gib` is the case that pins the difference: its palette
+/// grid is -1 and its category bar is -1, the bar is written first, and the
+/// screen's own note says the buttons filter the grid, so the bar has to stay in
+/// front of the grid. Promoting every negative control put the grid over the
+/// buttons.
+pub fn draws_last_when_negative(kind: &WidgetKind) -> bool {
+    matches!(
+        kind,
+        WidgetKind::Button
+            | WidgetKind::CheckBox
+            | WidgetKind::TextBox
+            | WidgetKind::Slider
+            | WidgetKind::DropDown
+    )
+}
+
+/// The draw key of a sibling.
+///
+/// A non-negative `ChildOrder` is itself and draws ascending. **A negative order
+/// on a pressed control draws last** ([`draws_last_when_negative`]): 613 shipped
+/// children carry a negative order, and 73 of them overlap a non-negative
+/// sibling. The pressed controls among those are the ones the screens' own notes
+/// require to be operable — the main menu's three buttons under the saw plate,
+/// `bottomnav.gib`'s bar buttons under their panel, the credits window's close
+/// button, the options' dropdowns and sliders.
+///
+/// A negative order on chrome still draws first: `select_team.gib`'s full-screen
+/// `cement img` is -1 and must stay behind the dialog; the credits backdrop is an
+/// `Attachment`, drawn explicitly behind its widget; and the palette's grid keeps
+/// the tie with the category bar, where the earlier record is in front.
+///
+/// So the sign does not mean "front" or "behind" by itself; it means *no order*,
+/// and what "no order" resolves to depends on what the record is. The earlier
+/// reading — negative is always behind — is what left the main menu without
+/// `EXHIBITION`, `TEAM HQ` and `MULTIPLAYER`.
+pub fn draw_key(widget: &Widget) -> i32 {
+    let order = widget.child_order();
+    if order < 0 && draws_last_when_negative(&widget.kind) {
+        i32::MAX
+    } else {
+        order
+    }
+}
+
 /// The widgets to draw, back to front.
 ///
 /// A parent is drawn before its children and its children by `ChildOrder`
-/// **ascending**, ties broken by file order — but the *top level* is drawn in
-/// file order. Both halves are measured:
+/// **ascending**, with a negative order last ([`draw_key`]), ties broken by file
+/// order. The top level is a sibling set and sorts the same way.
 ///
 /// * Inside `mainmenu.gib`'s window the cement background is 1, the saw backdrop
 ///   2 and the logo group 3, so drawing the file's own order would paint the
-///   background over the logo. A label follows its button (the button is -1 and
-///   the `Text` beside it 0), and a button's four state images are 0..3 with
-///   only the first visible, which is what puts a label over its art.
-/// * The top level is *not* sorted. `mainmenu.gib`'s blocks are the window (3),
-///   then the `Multiplayer button` (-1) and its `Multiplayer` label (0), then
-///   the bottom bar (4) and its decorations (5–7); sorting them would draw the
-///   button and its label *before* the window, and the window's full-screen
-///   cement background would then cover both of them. Drawn in file order the
-///   buttons and labels land on top of the background, which is what the game
-///   shows.
+///   background over the logo. A button's four state images are 0..3 with only
+///   the first visible, which is what puts a label over its art.
+/// * The main menu's three buttons are -1 inside `sawback grp` while the plate
+///   is 6; drawing them first would hide `EXHIBITION`, `TEAM HQ` and
+///   `MULTIPLAYER` behind the plate. Drawn last they land on it, which is what
+///   the game shows and what the screens' own notes require (the notes say the
+///   buttons link somewhere, so a click has to reach them).
 pub fn draw_order<'a>(roots: &'a [Placement<'a>]) -> Vec<&'a Placement<'a>> {
     draw_order_parented(roots)
         .into_iter()
@@ -849,7 +916,7 @@ pub fn draw_order_parented<'a>(
         // optiongroup"*) says those buttons are what the player clicks, so they
         // have to be the ones in front of the cells.
         let mut children: Vec<&Placement> = p.children.iter().rev().collect();
-        children.sort_by_key(|p| p.widget.child_order());
+        children.sort_by_key(|p| draw_key(p.widget));
         for c in children {
             visit(c, Some(p), out);
         }
@@ -860,11 +927,9 @@ pub fn draw_order_parented<'a>(
         }
     }
     // The top level is a sibling set too: a file's own records are ordered by
-    // `ChildOrder` exactly as a widget's children are, which is what puts a
-    // modal backdrop (child order -1) behind the window it belongs to (3) when
-    // the reader could not give the backdrop a parent.
+    // `ChildOrder` exactly as a widget's children are.
     let mut top: Vec<&Placement> = roots.iter().rev().collect();
-    top.sort_by_key(|p| p.widget.child_order());
+    top.sort_by_key(|p| draw_key(p.widget));
     let mut out = Vec::new();
     for r in top {
         visit(r, None, &mut out);
@@ -2057,9 +2122,97 @@ mod tests {
         assert_eq!(worst.0, 1, "worst roots: {}", worst.1);
     }
 
+    /// A negative `ChildOrder` means *no order*, not "behind": a negative order
+    /// on a **control** draws last, and on **chrome** it still draws first. The
+    /// corpus has 613 negative orders and 73 overlap a non-negative sibling. The
+    /// two worked cases are the main menu's buttons (-1 under a plate whose
+    /// images are 1..7) and `select_team.gib`'s full-screen `cement img` (-1,
+    /// which must stay behind its dialog).
+    #[test]
+    fn a_negative_child_order_draws_last_only_on_a_control() {
+        let Some(game) = game_dir() else { return };
+        let mut files = Vec::new();
+        collect_gib(&game.join("UI"), &mut files);
+        let (mut negatives, mut overlapping, mut controls) = (0usize, 0usize, 0usize);
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let gib = ra2fmt::gib::parse(&text).unwrap();
+            let placed = resolve(&gib, DESIGN_SCREEN);
+            for parent in placed.iter().flat_map(|p| p.walk()) {
+                for child in &parent.children {
+                    if child.widget.child_order() >= 0 {
+                        continue;
+                    }
+                    negatives += 1;
+                    controls += usize::from(draws_last_when_negative(&child.widget.kind));
+                    if parent
+                        .children
+                        .iter()
+                        .any(|c| c.widget.child_order() >= 0 && c.frame.intersects(&child.frame))
+                    {
+                        overlapping += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(negatives, 613, "children with a negative ChildOrder");
+        assert_eq!(overlapping, 73, "those overlapping a non-negative sibling");
+        assert_eq!(controls, 256, "negative orders on pressed controls");
+
+        let text = std::fs::read_to_string(game.join("UI/mainmenu/mainmenu.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+        let placed = resolve(&gib, DESIGN_SCREEN);
+        let order = draw_order(&placed);
+        let at = |name: &str| {
+            order
+                .iter()
+                .position(|p| p.widget.name() == name)
+                .unwrap_or_else(|| panic!("{name} is not drawn"))
+        };
+        let plate = order
+            .iter()
+            .position(|p| {
+                p.widget
+                    .filename()
+                    .is_some_and(|f| f.replace('\\', "/").ends_with("main_backdrop.tga"))
+            })
+            .expect("the saw plate");
+        for button in ["exhibition button", "Team HQ button", "Multiplayer button"] {
+            assert!(plate < at(button), "{button} is behind the saw plate");
+        }
+
+        // The chrome with a negative order stays behind: `select_team.gib`'s
+        // cement is -1 and its `continue button` is the control a click must
+        // reach, at 779,443 82x20.
+        let text = std::fs::read_to_string(game.join("UI/teamhq/select_team.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+        let placed = resolve(&gib, DESIGN_SCREEN);
+        let order = draw_order(&placed);
+        let at = |name: &str| {
+            order
+                .iter()
+                .position(|p| p.widget.name() == name)
+                .unwrap_or_else(|| panic!("{name} is not drawn"))
+        };
+        assert!(
+            at("cement img") < at("continue button"),
+            "the cement is the screen behind the dialog"
+        );
+        let path = crate::input::hit_control(&placed, 820.0, 453.5).expect("the continue button");
+        let mut placement = &placed[path[0]];
+        let mut names = vec![placement.widget.name()];
+        for index in &path[1..] {
+            placement = &placement.children[*index];
+            names.push(placement.widget.name());
+        }
+        assert!(
+            names.contains(&"continue button"),
+            "the click lands on the continue button, path {names:?}"
+        );
+    }
+
     /// Draw order is `ChildOrder` ascending, ties by file order — which is what
-    /// puts the full-screen background first and the logo after it, and what
-    /// puts a button's label (0) after the button itself (-1).
+    /// puts the full-screen background first and the logo after it.
     #[test]
     fn the_background_is_drawn_before_the_logo() {
         let Some(game) = game_dir() else { return };
