@@ -57,6 +57,353 @@ pub const SIDECAR_NAME: &str = "career.dat";
 /// The sidecar format version.
 pub const SIDECAR_VERSION: u32 = 1;
 
+/// Every event's bracket is 16 entrants, `FUN_004695a0`'s `16.0` at
+/// `0x6a7280` (the constant is compared with `1.0` at `0x6a5600`).
+pub const BRACKET_ENTRANTS: usize = 16;
+/// The fifteen AI teams an opponent is drawn from (`FUN_00419190(0xf)` at
+/// `0x4696d1`; the argument 15 is the exclusive bound).
+pub const BRACKET_AI_TEAMS: usize = 15;
+
+/// One participant in an event bracket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Entrant {
+    /// The career's own team.
+    Player,
+    /// An AI team, by its slot in `AI/Teams.txt` order (0…14).
+    Ai(usize),
+}
+
+impl Entrant {
+    /// `-1` for the player, the AI slot otherwise: the sidecar's spelling.
+    pub fn code(&self) -> i32 {
+        match self {
+            Entrant::Player => -1,
+            Entrant::Ai(slot) => *slot as i32,
+        }
+    }
+
+    /// Read a sidecar code. A negative code is the player; 0…14 is an AI slot.
+    pub fn from_code(code: i32) -> Option<Self> {
+        if code < 0 {
+            Some(Entrant::Player)
+        } else if (code as usize) < BRACKET_AI_TEAMS {
+            Some(Entrant::Ai(code as usize))
+        } else {
+            None
+        }
+    }
+}
+
+/// One match of an event round: the bots that fight it. The player is always
+/// in `rounds[current].matches[0].entrants[0]` (`FUN_004695a0` skips the random
+/// draw for match 0, slot 0; `FUN_0046c830` writes the player back there).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BracketMatch {
+    pub entrants: Vec<Entrant>,
+}
+
+/// One round's matches. Round 0 has `16 / bots` matches, and each later round
+/// has `1 / bots` of the previous count (`FUN_004695a0`'s `local_5c` loop).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BracketRound {
+    pub matches: Vec<BracketMatch>,
+}
+
+/// One played round, as the bracket screen shows it and as the save keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoundResult {
+    /// Zero-based round index.
+    pub round: usize,
+    /// The opponents the player met in this round, in slot order.
+    pub opponents: Vec<Entrant>,
+    pub won: bool,
+    /// The points this round added to the event (`Team+0x54`).
+    pub points: i32,
+    /// The entered robot's score (`robot_points / 200` is the bonus part).
+    pub robot_points: i32,
+}
+
+/// Where the player stands in the event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BracketStatus {
+    /// There are rounds left to play.
+    Playing,
+    /// The player lost in this zero-based round; the event is over.
+    Eliminated { round: usize },
+    /// The player won the final round.
+    Champion,
+}
+
+impl BracketStatus {
+    fn name(&self) -> &'static str {
+        match self {
+            BracketStatus::Playing => "playing",
+            BracketStatus::Eliminated { .. } => "eliminated",
+            BracketStatus::Champion => "champion",
+        }
+    }
+}
+
+/// The event bracket: 16 entrants, 2 or 4 bots per match, and the player's
+/// path through the rounds.
+///
+/// The shape is measured from the binary (`docs/16-career.md` §3):
+///
+/// * `FUN_004695a0` starts at `16.0` (`0x6a7280`) and divides by the bracket
+///   config's bots-per-match (`+0x10c`) for each round's match count.
+/// * `FUN_00468f50` stores the round's bots (`+4`) and advancing entrants
+///   (`+8`); the shipped value is one winner per match.
+/// * `FUN_0046c240` calls `"Final Match"` when the round index
+///   (`Team+0x110`) equals the bracket's `+0x8` minus one, so `+0x8` is the
+///   round count: 4 for a two-bot event, 2 for a four-bot event.
+/// * `Events.txt`'s settings line carries that bots-per-match value: every
+///   four-tier event has setting 2, every two-tier event has setting 4.
+///
+/// The original re-draws the next round's field when the player advances
+/// (`FUN_0046c830`), drawing each non-player slot from the fifteen AI teams
+/// with `FUN_00419190(0xf)`; this model does the same with an explicit,
+/// deterministic seed. Duplicates are possible in both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventBracket {
+    /// The event's `Events.txt` index.
+    pub event: usize,
+    /// 16 (`BRACKET_ENTRANTS`).
+    pub entrants: usize,
+    /// Bots in one match: 2 or 4 (`Events.txt`'s first setting).
+    pub bots_per_match: usize,
+    /// 2 or 4 (`Events.txt`'s tier count).
+    pub rounds: usize,
+    /// The zero-based round the player is in.
+    pub round: usize,
+    /// The draw's seed; the original's RNG/seed are not recovered.
+    pub seed: u64,
+    pub status: BracketStatus,
+    /// The current round's field. `opponents` is slot 1 onward of the player's
+    /// match (match 0), i.e. the next bots to beat.
+    pub current: BracketRound,
+    pub opponents: Vec<Entrant>,
+    /// The rounds already played, in order.
+    pub results: Vec<RoundResult>,
+    /// The event's winner once it is over; the player if they took the final.
+    pub champion: Option<Entrant>,
+}
+
+impl EventBracket {
+    /// The bracket an event starts with. The original's `FUN_004695a0` builds
+    /// the whole field at once; this builds the player's current round and
+    /// leaves later rounds to be drawn on advancement (the original redraws
+    /// them in `FUN_0046c830` too).
+    pub fn new(event: usize, data: &Event, seed: u64) -> Result<Self, String> {
+        let (rounds, bots_per_match) = event_shape(data)?;
+        let mut bracket = EventBracket {
+            event,
+            entrants: BRACKET_ENTRANTS,
+            bots_per_match,
+            rounds,
+            round: 0,
+            seed,
+            status: BracketStatus::Playing,
+            current: BracketRound {
+                matches: Vec::new(),
+            },
+            opponents: Vec::new(),
+            results: Vec::new(),
+            champion: None,
+        };
+        bracket.draw_round();
+        Ok(bracket)
+    }
+
+    /// The event's round label: `"Final Match"` in the last round, `"Round N"`
+    /// otherwise — exactly `FUN_0046c240`'s branch at `0x46c283`/`0x46c295`.
+    pub fn round_label(&self) -> String {
+        if self.round + 1 >= self.rounds {
+            "Final Match".to_string()
+        } else {
+            format!("Round {}", self.round + 1)
+        }
+    }
+
+    /// The names of the bots waiting in the current round.
+    pub fn opponents(&self) -> &[Entrant] {
+        &self.opponents
+    }
+
+    /// How many matches the player's current round has.
+    pub fn matches_in_round(&self, round: usize) -> usize {
+        let divisor = self.bots_per_match.saturating_pow(round as u32);
+        (self.entrants / divisor.max(1)).max(1) / self.bots_per_match.max(1)
+    }
+
+    /// Draw the current round's field. Match 0, slot 0 is the player; every
+    /// other slot is `FUN_00419190(0xf) % 15`, with repeats (the original does
+    /// not de-duplicate within a match). The draw is seeded by the bracket
+    /// seed, the event and the round, so a replay is reproducible.
+    fn draw_round(&mut self) {
+        let matches = self.matches_in_round(self.round);
+        let mut rng = RoundRng::new(self.seed, self.event, self.round);
+        let mut round = BracketRound {
+            matches: Vec::with_capacity(matches),
+        };
+        for m in 0..matches {
+            let mut entrants = Vec::with_capacity(self.bots_per_match);
+            for slot in 0..self.bots_per_match {
+                if m == 0 && slot == 0 {
+                    entrants.push(Entrant::Player);
+                } else {
+                    entrants.push(Entrant::Ai((rng.next() as usize) % BRACKET_AI_TEAMS));
+                }
+            }
+            round.matches.push(BracketMatch { entrants });
+        }
+        self.opponents = round
+            .matches
+            .first()
+            .map(|m| m.entrants.iter().skip(1).copied().collect())
+            .unwrap_or_default();
+        self.current = round;
+    }
+
+    /// Replace the current round's draw with a saved field. The saved
+    /// opponents are what matters for the player's path; the other matches are
+    /// regenerated from the seed.
+    pub fn restore_opponents(&mut self, opponents: &[Entrant]) {
+        if let Some(first) = self.current.matches.first_mut() {
+            for (slot, entrant) in opponents.iter().enumerate() {
+                if let Some(target) = first.entrants.get_mut(slot + 1) {
+                    *target = *entrant;
+                }
+            }
+        }
+        self.opponents = opponents.to_vec();
+    }
+
+    /// Draw and score the remaining rounds for the AI teams, as
+    /// `FUN_0046ca90(0,0)` does after a loss. The player takes no further
+    /// points. The final round's winner is drawn from its field.
+    fn simulate_remaining(&mut self, participation: i32, league: &mut [i32]) {
+        let first = match self.status {
+            BracketStatus::Eliminated { round } => round + 1,
+            _ => return,
+        };
+        let mut finalists = Vec::new();
+        // A loss in the final round has no rounds left to simulate, but the
+        // final's winner still has to be drawn (`FUN_0046ca90` always reaches
+        // the final-winner pick).
+        if first >= self.rounds {
+            finalists = self
+                .current
+                .matches
+                .first()
+                .map(|m| {
+                    m.entrants
+                        .iter()
+                        .filter_map(|e| match e {
+                            Entrant::Ai(slot) => Some(*slot),
+                            Entrant::Player => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+        }
+        for round in first..self.rounds {
+            let saved_round = self.round;
+            self.round = round;
+            self.draw_round();
+            for m in &self.current.matches {
+                for entrant in &m.entrants {
+                    if let Entrant::Ai(slot) = entrant {
+                        if *slot < league.len() {
+                            league[*slot] += participation;
+                        }
+                    }
+                }
+            }
+            if round + 1 == self.rounds {
+                finalists = self
+                    .current
+                    .matches
+                    .first()
+                    .map(|m| {
+                        m.entrants
+                            .iter()
+                            .filter_map(|e| match e {
+                                Entrant::Ai(slot) => Some(*slot),
+                                Entrant::Player => None,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+            }
+            self.round = saved_round;
+        }
+        let mut rng = RoundRng::new(self.seed ^ 0x5eed, self.event, self.rounds);
+        if !finalists.is_empty() {
+            let champion = finalists[rng.next() as usize % finalists.len()];
+            self.champion = Some(Entrant::Ai(champion));
+            if champion < league.len() {
+                // The final winner's extra share (`FUN_0046ca90`'s last
+                // `FUN_0046c5d0`) is the same participation amount.
+                league[champion] += participation;
+            }
+        }
+    }
+}
+
+/// The event's bracket shape: the tier count is the round count, and the
+/// first trailing setting is the bots in a match.
+///
+/// The shipped data agrees on all 25 events: four tiers ↔ setting 2, two
+/// tiers ↔ setting 4, and `bots ^ rounds == 16`. When a file does not, the
+/// tier count still decides the rounds and the bots are derived from the
+/// 16-entrant constant; that fallback is explicit rather than a guess.
+pub fn event_shape(event: &Event) -> Result<(usize, usize), String> {
+    let rounds = event.tiers.len();
+    if !(2..=4).contains(&rounds) {
+        return Err(format!(
+            "event {:?} has {rounds} tiers; the shipped brackets are 2 or 4 rounds",
+            event.name
+        ));
+    }
+    let from_file = event
+        .settings
+        .first()
+        .copied()
+        .filter(|bots| {
+            (*bots == 2 || *bots == 4) && (*bots as usize).pow(rounds as u32) == BRACKET_ENTRANTS
+        })
+        .map(|bots| bots as usize);
+    let bots = from_file.unwrap_or(match rounds {
+        4 => 2,
+        2 => 4,
+        // Only 2 and 4 ship; this branch keeps the function total for a mod.
+        3 => 2,
+        _ => 4,
+    });
+    Ok((rounds, bots))
+}
+
+/// A small deterministic PRNG for the draw. The original uses `FUN_00419190`;
+/// its algorithm and seed were not recovered, so the seed is explicit config.
+struct RoundRng(u64);
+
+impl RoundRng {
+    fn new(seed: u64, event: usize, round: usize) -> Self {
+        let mixed = seed
+            ^ ((event as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+            ^ ((round as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9));
+        RoundRng(mixed | 1)
+    }
+
+    fn next(&mut self) -> u32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) as u32
+    }
+}
+
 /// The season's shape: a new career starts on the schedule, enters one event,
 /// and is complete after nine finished events.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,6 +534,28 @@ pub struct MatchAward {
     pub won: bool,
 }
 
+/// What one bracket round did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoundOutcome {
+    pub event: usize,
+    /// The zero-based round that was played.
+    pub round: usize,
+    pub opponents: Vec<Entrant>,
+    pub won: bool,
+    pub points: i32,
+    pub participation: i32,
+    pub bonus: i32,
+    pub robot_points: i32,
+    /// The event ended with this round (a final win or any loss).
+    pub event_finished: bool,
+    /// The event's winner, when this round ended it.
+    pub champion: Option<Entrant>,
+    /// The next round's opponents; empty when the event is over.
+    pub next: Vec<Entrant>,
+    /// The event record, when this round ended the event.
+    pub record: Option<EventRecord>,
+}
+
 /// The career: the game's team tables, the event list, the season and the
 /// sidecar-only state.
 #[derive(Clone, Debug)]
@@ -215,6 +584,11 @@ pub struct Career {
     pub rounds_won: u32,
     /// Matches lost in the current event.
     pub rounds_lost: u32,
+    /// The season/draw seed. The original's RNG was not recovered; this is the
+    /// explicit seed the schedule and the brackets are drawn from.
+    pub seed: u64,
+    /// The event in progress, when the career is in one.
+    pub bracket: Option<EventBracket>,
 }
 
 impl Career {
@@ -271,6 +645,8 @@ impl Career {
             money: 0,
             rounds_won: 0,
             rounds_lost: 0,
+            seed: 0,
+            bracket: None,
         })
     }
 
@@ -297,6 +673,13 @@ impl Career {
                 .map_err(|e| format!("{}: {e}", sidecar.display()))?;
         }
         career.sync_history();
+        if let SeasonPhase::InEvent { event } = career.phase {
+            if career.bracket.is_none() {
+                if let Some(data) = career.events.get(event) {
+                    career.bracket = Some(EventBracket::new(event, data, career.seed)?);
+                }
+            }
+        }
         Ok(career)
     }
 
@@ -311,6 +694,7 @@ impl Career {
     /// [`Career::new`] with an explicit policy.
     pub fn new_with_policy(game: &Path, seed: u64, policy: CareerPolicy) -> Result<Self, String> {
         let mut career = Self::load_with_policy(game, policy)?;
+        career.seed = seed;
         career.ensure_schedule(seed);
         Ok(career)
     }
@@ -433,7 +817,9 @@ impl Career {
         self.sync_history();
     }
 
-    /// Enter an event from this season's schedule.
+    /// Enter an event from this season's schedule. The bracket's field is
+    /// drawn from the event's shape and the career's explicit seed
+    /// (`FUN_004695a0`; see [`EventBracket`]).
     pub fn enter_event(&mut self, event: usize) -> Result<(), String> {
         if !matches!(self.phase, SeasonPhase::Schedule) {
             return Err(format!(
@@ -444,6 +830,11 @@ impl Career {
         if !self.schedule.contains(&event) {
             return Err(format!("event {event} is not on this season's schedule"));
         }
+        let data = self
+            .events
+            .get(event)
+            .ok_or_else(|| format!("event {event} is not in Events.txt"))?;
+        self.bracket = Some(EventBracket::new(event, data, self.seed)?);
         self.phase = SeasonPhase::InEvent { event };
         self.rounds_won = 0;
         self.rounds_lost = 0;
@@ -451,6 +842,45 @@ impl Career {
         self.player_mut().set_defeated(0);
         self.player_mut().set_event_index(event as i32);
         Ok(())
+    }
+
+    /// The bracket in progress, if there is one.
+    pub fn bracket(&self) -> Option<&EventBracket> {
+        self.bracket.as_ref()
+    }
+
+    /// The next bots the player must beat, by AI slot. Empty when no event is
+    /// in progress or the event is over.
+    pub fn next_opponents(&self) -> &[Entrant] {
+        match &self.bracket {
+            Some(bracket) if bracket.status == BracketStatus::Playing => bracket.opponents(),
+            _ => &[],
+        }
+    }
+
+    /// The AI team's name for a bracket entrant, from the AI table's named
+    /// records in file order.
+    pub fn entrant_name(&self, entrant: Entrant) -> String {
+        match entrant {
+            Entrant::Player => self.team_name().to_string(),
+            Entrant::Ai(slot) => self
+                .ai_teams()
+                .nth(slot)
+                .map_or_else(|| format!("AI {slot}"), |team| team.name.clone()),
+        }
+    }
+
+    /// The participation points one match round is worth: `160 / rounds` — the
+    /// divisor is the bracket's `+0x8` (`FUN_0046c400` at `0x46c454` and
+    /// `0x46c52d`), which `FUN_0046c240` establishes as the round count. When
+    /// there is no bracket (the legacy path and the tests), the report's robot
+    /// count is used, which is the previous `160 / robots` reading.
+    fn participation_for(&self, robots: usize) -> i32 {
+        let divisor = self
+            .bracket
+            .as_ref()
+            .map_or(robots, |bracket| bracket.rounds);
+        self.policy.participation_points / divisor.max(1) as i32
     }
 
     /// The prize tier for a number of wins in an event: the tier the results
@@ -485,8 +915,7 @@ impl Career {
             .get(entered_robot)
             .ok_or_else(|| format!("the report has no robot {entered_robot}"))?;
         let player_team = entered.team;
-        let robots = report.robots.len().max(1) as i32;
-        let participation = self.policy.participation_points / robots;
+        let participation = self.participation_for(report.robots.len().max(1));
         let bonus = entered.points.max(0) / self.policy.score_divisor;
         let points = participation + bonus;
 
@@ -657,7 +1086,147 @@ impl Career {
         Ok(done)
     }
 
-    /// Finish the current event: fold its points into the season, count the
+    /// Play one bracket round. This is the measured event flow
+    /// (`FUN_0046ce50` → `FUN_0046c830` → `FUN_0046c400`):
+    ///
+    /// * the round pays `robot_points / 200 + 160 / rounds` to the player;
+    /// * every AI participant of every match in the round gets `160 / rounds`
+    ///   (`FUN_0046c400`'s bracket loop at `0x46c4f0`–`0x46c545`);
+    /// * a win advances to the next round (`FUN_0046c830`'s
+    ///   `FUN_004faaf0`, which increments `Team+0x110`), and the next round's
+    ///   field is drawn afresh;
+    /// * a loss ends the event (`FUN_0046ce50`'s `FUN_0046ca90(0,0)`), and
+    ///   `FUN_0046ca90` draws and scores the remaining rounds for the AI teams
+    ///   only;
+    /// * the final win stores the trophy and the loss does not.
+    pub fn play_round(
+        &mut self,
+        report: &MatchReport,
+        entered_robot: usize,
+    ) -> Result<RoundOutcome, String> {
+        let (event, round, rounds, opponents) = {
+            let bracket = self
+                .bracket
+                .as_ref()
+                .ok_or_else(|| "no event bracket is in progress".to_string())?;
+            if bracket.status != BracketStatus::Playing {
+                return Err("the event bracket is already over".to_string());
+            }
+            (
+                bracket.event,
+                bracket.round,
+                bracket.rounds,
+                bracket.opponents.clone(),
+            )
+        };
+        let entered = report
+            .robots
+            .get(entered_robot)
+            .ok_or_else(|| format!("the report has no robot {entered_robot}"))?;
+        let player_team = entered.team;
+        let participation = self.policy.participation_points / rounds.max(1) as i32;
+        let bonus = entered.points.max(0) / self.policy.score_divisor;
+        let points = participation + bonus;
+
+        // Every AI slot in every match of this round scores, exactly as the
+        // binary's nested bracket loop does; repeats in a melee score twice.
+        let mut league = self.player().opponent_points();
+        {
+            let bracket = self.bracket.as_ref().expect("checked above");
+            for m in &bracket.current.matches {
+                for entrant in &m.entrants {
+                    if let Entrant::Ai(slot) = entrant {
+                        if *slot < league.len() {
+                            league[*slot] += participation;
+                        }
+                    }
+                }
+            }
+        }
+
+        {
+            let player = self.player_mut();
+            player.set_event_points(player.event_points() + points);
+            if entered.points > player.highest_score() {
+                player.set_highest_score(entered.points);
+            }
+            let defeated = report
+                .robots
+                .iter()
+                .filter(|robot| robot.team == player_team && robot.defeated)
+                .count() as i32;
+            player.set_defeated(player.defeated() + defeated);
+        }
+
+        let won = report.winners.contains(&entered_robot);
+        let result = RoundResult {
+            round,
+            opponents: opponents.clone(),
+            won,
+            points,
+            robot_points: entered.points,
+        };
+        let (finished, champion, next) = {
+            let fastest = won && report.duration < self.player().fastest_win();
+            if fastest {
+                self.player_mut().set_fastest_win(report.duration);
+            }
+            let bracket = self.bracket.as_mut().expect("checked above");
+            bracket.results.push(result.clone());
+            if won {
+                self.rounds_won += 1;
+                bracket.round += 1;
+                if bracket.round >= bracket.rounds {
+                    bracket.status = BracketStatus::Champion;
+                    bracket.champion = Some(Entrant::Player);
+                    (true, bracket.champion, Vec::new())
+                } else {
+                    bracket.draw_round();
+                    (false, None, bracket.opponents.clone())
+                }
+            } else {
+                self.rounds_lost += 1;
+                bracket.status = BracketStatus::Eliminated { round };
+                bracket.simulate_remaining(participation, &mut league);
+                (true, bracket.champion, Vec::new())
+            }
+        };
+        self.player_mut().set_opponent_points(league);
+
+        let repairs = self.repairs_from_report(report, entered_robot);
+        for repair in repairs {
+            if !self
+                .repairs
+                .iter()
+                .any(|old| old.robot == repair.robot && old.component == repair.component)
+            {
+                self.repairs.push(repair);
+            }
+        }
+
+        let record = if finished {
+            let trophy = matches!(champion, Some(Entrant::Player));
+            Some(self.finish_event(trophy)?)
+        } else {
+            None
+        };
+        Ok(RoundOutcome {
+            event,
+            round,
+            opponents,
+            won,
+            points,
+            participation,
+            bonus,
+            robot_points: entered.points,
+            event_finished: finished,
+            champion,
+            next,
+            record,
+        })
+    }
+
+    /// Complete the current event: fold its points into the season, count the
     /// event, store the trophy when won, recompute the rank and advance the
     /// phase after nine events.
     pub fn finish_event(&mut self, won: bool) -> Result<EventRecord, String> {
@@ -747,6 +1316,7 @@ impl Career {
             .map(|prize| prize.model.clone())
             .collect::<Vec<_>>();
         self.player_mut().set_prizes(&models);
+        self.bracket = None;
         Ok(record)
     }
 
@@ -756,6 +1326,7 @@ impl Career {
         if !matches!(self.phase, SeasonPhase::Complete) {
             return Err("the season is not complete".to_string());
         }
+        self.seed = seed;
         let player = self.player_mut();
         player.set_season_index(player.season_index() + 1);
         player.set_season_points(0);
@@ -773,6 +1344,7 @@ impl Career {
         self.repairs.clear();
         self.rounds_won = 0;
         self.rounds_lost = 0;
+        self.bracket = None;
         self.phase = SeasonPhase::Schedule;
         self.ensure_schedule(seed);
         Ok(())
@@ -850,6 +1422,7 @@ impl Career {
         let mut out = String::new();
         out.push_str(&format!("ra2career {SIDECAR_VERSION}\n"));
         out.push_str(&format!("season {}\n", self.season()));
+        out.push_str(&format!("seed {}\n", self.seed));
         match &self.phase {
             SeasonPhase::Schedule => out.push_str("phase schedule\n"),
             SeasonPhase::InEvent { event } => out.push_str(&format!("phase event {event}\n")),
@@ -864,6 +1437,50 @@ impl Career {
             "entered {}\n",
             self.entered_event().map_or(-1, |e| e as i64)
         ));
+        match &self.bracket {
+            Some(bracket) => {
+                out.push_str("bracket 1\n");
+                out.push_str(&format!("bracket-event {}\n", bracket.event));
+                out.push_str(&format!(
+                    "bracket-shape {} {} {}\n",
+                    bracket.entrants, bracket.bots_per_match, bracket.rounds
+                ));
+                out.push_str(&format!(
+                    "bracket-state {} {} {} {}\n",
+                    bracket.round,
+                    bracket.status.name(),
+                    bracket.seed,
+                    bracket
+                        .champion
+                        .map_or_else(|| "none".to_string(), |e| e.code().to_string())
+                ));
+                out.push_str(&format!("bracket-opponents {}\n", bracket.opponents.len()));
+                if !bracket.opponents.is_empty() {
+                    out.push_str("bracket-opponent");
+                    for entrant in &bracket.opponents {
+                        out.push_str(&format!(" {}", entrant.code()));
+                    }
+                    out.push('\n');
+                }
+                out.push_str(&format!("bracket-results {}\n", bracket.results.len()));
+                for result in &bracket.results {
+                    out.push_str(&format!(
+                        "bracket-result {} {} {} {} {}\n",
+                        result.round,
+                        u8::from(result.won),
+                        result.points,
+                        result.robot_points,
+                        result.opponents.len()
+                    ));
+                    out.push_str("bracket-result-opponents");
+                    for entrant in &result.opponents {
+                        out.push_str(&format!(" {}", entrant.code()));
+                    }
+                    out.push('\n');
+                }
+            }
+            None => out.push_str("bracket 0\n"),
+        }
         out.push_str(&format!("schedule {}\n", self.schedule.len()));
         for id in &self.schedule {
             out.push_str(&format!("event {id}\n"));
@@ -930,6 +1547,12 @@ impl Career {
         let mut prizes = None;
         let mut repairs = None;
         let mut history = None;
+        let mut bracket_active = false;
+        let mut bracket_event = None;
+        let mut bracket_shape = None;
+        let mut bracket_state = None;
+        let mut bracket_opponents = None;
+        let mut bracket_results: Option<Vec<RoundResult>> = None;
         while let Some(line) = lines.next() {
             if line.trim().is_empty() {
                 continue;
@@ -939,6 +1562,96 @@ impl Career {
                 "season" => {
                     let season: i32 = rest.parse().map_err(|_| "bad season")?;
                     self.player_mut().set_season_index(season);
+                }
+                "seed" => self.seed = rest.trim().parse().map_err(|_| "bad seed")?,
+                "bracket" => bracket_active = rest.trim() == "1",
+                "bracket-event" => {
+                    bracket_event = Some(rest.trim().parse().map_err(|_| "bad bracket event")?)
+                }
+                "bracket-shape" => {
+                    let mut fields = rest.split_whitespace();
+                    let entrants = fields
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("bad bracket entrants")?;
+                    let bots = fields
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("bad bracket bots")?;
+                    let rounds = fields
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("bad bracket rounds")?;
+                    bracket_shape = Some((entrants, bots, rounds));
+                }
+                "bracket-state" => {
+                    let mut fields = rest.split_whitespace();
+                    let round: usize = fields
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("bad bracket round")?;
+                    let status = fields.next().ok_or("bad bracket status")?.to_string();
+                    let seed: u64 = fields
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("bad bracket seed")?;
+                    let champion = match fields.next().ok_or("bad bracket champion")? {
+                        "none" => None,
+                        code => Some(
+                            Entrant::from_code(code.parse().map_err(|_| "bad champion")?)
+                                .ok_or("bad champion slot")?,
+                        ),
+                    };
+                    bracket_state = Some((round, status, seed, champion));
+                }
+                "bracket-opponents" => {
+                    let count: usize = rest.parse().map_err(|_| "bad bracket opponent count")?;
+                    let line = lines.next().ok_or("the bracket opponents end early")?;
+                    bracket_opponents = Some(parse_entrants_line(line, count)?);
+                }
+                "bracket-results" => {
+                    let count: usize = rest.parse().map_err(|_| "bad bracket result count")?;
+                    let mut list = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let line = lines.next().ok_or("the bracket results end early")?;
+                        let body = line
+                            .strip_prefix("bracket-result ")
+                            .ok_or_else(|| format!("bad bracket result line {line:?}"))?;
+                        let mut fields = body.split_whitespace();
+                        let round = fields
+                            .next()
+                            .and_then(|v| v.parse().ok())
+                            .ok_or("bad bracket result round")?;
+                        let won = fields
+                            .next()
+                            .and_then(|v| v.parse::<u8>().ok())
+                            .ok_or("bad bracket result won")?
+                            != 0;
+                        let points = fields
+                            .next()
+                            .and_then(|v| v.parse().ok())
+                            .ok_or("bad bracket result points")?;
+                        let robot_points = fields
+                            .next()
+                            .and_then(|v| v.parse().ok())
+                            .ok_or("bad bracket result robot points")?;
+                        let count: usize = fields
+                            .next()
+                            .and_then(|v| v.parse().ok())
+                            .ok_or("bad bracket result opponents")?;
+                        let line = lines
+                            .next()
+                            .ok_or("the bracket result opponents end early")?;
+                        let opponents = parse_entrants_line(line, count)?;
+                        list.push(RoundResult {
+                            round,
+                            opponents,
+                            won,
+                            points,
+                            robot_points,
+                        });
+                    }
+                    bracket_results = Some(list);
                 }
                 "phase" => {
                     self.phase = match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
@@ -1102,8 +1815,70 @@ impl Career {
         if let Some(list) = history {
             self.history = list;
         }
+        if bracket_active {
+            if let (
+                Some(event),
+                Some((entrants, bots, rounds)),
+                Some((round, status, seed, champion)),
+            ) = (bracket_event, bracket_shape, bracket_state)
+            {
+                let data = self
+                    .events
+                    .get(event)
+                    .ok_or_else(|| format!("the bracket's event {event} is not in Events.txt"))?;
+                let mut bracket = EventBracket::new(event, data, seed)?;
+                bracket.entrants = entrants;
+                bracket.bots_per_match = bots;
+                bracket.rounds = rounds;
+                bracket.round = round;
+                bracket.status = match status.as_str() {
+                    "playing" => BracketStatus::Playing,
+                    "eliminated" => BracketStatus::Eliminated { round },
+                    "champion" => BracketStatus::Champion,
+                    other => return Err(format!("bad bracket status {other:?}")),
+                };
+                bracket.champion = champion;
+                bracket.results = bracket_results.unwrap_or_default();
+                if round < rounds {
+                    bracket.draw_round();
+                } else {
+                    bracket.current = BracketRound {
+                        matches: Vec::new(),
+                    };
+                    bracket.opponents.clear();
+                }
+                if let Some(opponents) = bracket_opponents {
+                    bracket.restore_opponents(&opponents);
+                }
+                self.bracket = Some(bracket);
+            }
+        } else {
+            self.bracket = None;
+        }
         Ok(())
     }
+}
+
+/// Read a line of the form `<key> <code> <code> …`, with `count` codes.
+fn parse_entrants_line(line: &str, count: usize) -> Result<Vec<Entrant>, String> {
+    let (_, body) = line
+        .split_once(' ')
+        .ok_or_else(|| format!("bad entrant line {line:?}"))?;
+    let mut entrants = Vec::with_capacity(count);
+    for token in body.split_whitespace() {
+        if entrants.len() == count {
+            break;
+        }
+        let code: i32 = token.parse().map_err(|_| "bad entrant code")?;
+        entrants.push(Entrant::from_code(code).ok_or("bad entrant slot")?);
+    }
+    if entrants.len() != count {
+        return Err(format!(
+            "the entrant line has {} codes, expected {count}",
+            entrants.len()
+        ));
+    }
+    Ok(entrants)
 }
 
 /// Map a report team slot to the player's fifteen-entry league line.
@@ -1326,27 +2101,28 @@ mod tests {
 
     fn synthetic_events(count: usize) -> Vec<Event> {
         (0..count)
-            .map(|i| Event {
-                name: format!("Event {i}"),
-                description: String::new(),
-                tiers: vec![
-                    (
-                        "Arenas\\event_results\\prizes\\A.gmf".to_string(),
-                        "tier 0".to_string(),
+            .map(|i| {
+                let (tiers, bots) = if i % 2 == 0 { (4, 2) } else { (2, 4) };
+                Event {
+                    name: format!("Event {i}"),
+                    description: String::new(),
+                    tiers: (0..tiers)
+                        .map(|t| {
+                            (
+                                format!("Arenas\\event_results\\prizes\\T{t}.gmf"),
+                                format!("tier {t}"),
+                            )
+                        })
+                        .collect(),
+                    trophy: (
+                        format!("Arenas\\event_results\\prizes\\Trophy{i}\\Trophy{i}.gmf"),
+                        format!("won event {i}"),
+                        "UI\\teamhq\\events\\trophies\\Trophy.tga".to_string(),
                     ),
-                    (
-                        "Arenas\\event_results\\prizes\\B.gmf".to_string(),
-                        "tier 1".to_string(),
-                    ),
-                ],
-                trophy: (
-                    format!("Arenas\\event_results\\prizes\\Trophy{i}\\Trophy{i}.gmf"),
-                    format!("won event {i}"),
-                    "UI\\teamhq\\events\\trophies\\Trophy.tga".to_string(),
-                ),
-                art: String::new(),
-                arena: ("Combat Arena".to_string(), String::new()),
-                settings: vec![2, 1, 1, 1],
+                    art: String::new(),
+                    arena: ("Combat Arena".to_string(), String::new()),
+                    settings: vec![bots, 1, 1, 1],
+                }
             })
             .collect()
     }
@@ -1362,13 +2138,17 @@ mod tests {
     fn write_synthetic_events(dir: &Path) {
         let mut text = String::from("0\n");
         for i in 0..25 {
+            let (tiers, bots) = if i % 2 == 0 { (4, 2) } else { (2, 4) };
+            text.push_str(&format!("Event {i}\ndescription\n{tiers}\n"));
+            for t in 0..tiers {
+                text.push_str(&format!(
+                    "Arenas\\event_results\\prizes\\T{t}.gmf\ntier {t}\n"
+                ));
+            }
             text.push_str(&format!(
-                "Event {i}\ndescription\n2\n\
-                 Arenas\\event_results\\prizes\\A.gmf\ntier 0\n\
-                 Arenas\\event_results\\prizes\\B.gmf\ntier 1\n\
-                 Arenas\\event_results\\prizes\\Trophy{i}\\Trophy{i}.gmf\n\
+                "Arenas\\event_results\\prizes\\Trophy{i}\\Trophy{i}.gmf\n\
                  won event {i}\nUI\\teamhq\\events\\trophies\\Trophy.tga\n\
-                 art.bmp\nCombat Arena\npreview.bmp\n2\n1\n1\n1\n"
+                 art.bmp\nCombat Arena\npreview.bmp\n{bots}\n1\n1\n1\n"
             ));
         }
         std::fs::write(events_path(dir), text).unwrap();
@@ -1391,6 +2171,10 @@ mod tests {
         );
         let event = career.schedule[0];
         career.enter_event(event).unwrap();
+        // This test is the legacy report/save path, not the bracket: clear the
+        // bracket so the divisor is the report's robot count (160/2), as the
+        // pre-bracket model measured.
+        career.bracket = None;
 
         // The player's robot scores 500; the AI robot is defeated. Two robots
         // means 160/2 = 80 participation each, and 500/200 = 2 for the player.
@@ -1563,44 +2347,228 @@ mod tests {
     #[test]
     fn nine_events_complete_the_season_and_the_next_one_resets_it() {
         let mut career = synthetic_career();
+        career.seed = 99;
+        let mut expected = 0;
+        let mut rounds_total = 0u32;
         for n in 0..9 {
             let event = career.schedule[n];
             career.enter_event(event).unwrap();
-            career
-                .award_match(
-                    &report(
-                        "DEATHMATCH",
-                        vec![
-                            robot(0, 0, "Test Team", 200, 0.0, false),
-                            robot(1, 1, "AI", 0, 0.0, true),
-                        ],
-                        vec![0],
-                    ),
-                    0,
-                )
-                .unwrap();
-            career.finish_event(true).unwrap();
+            let rounds = career.bracket().unwrap().rounds as u32;
+            rounds_total += rounds;
+            for round in 0..rounds {
+                let outcome = career
+                    .play_round(
+                        &report(
+                            "DEATHMATCH",
+                            vec![
+                                robot(0, 0, "Test Team", 2000, 0.0, false),
+                                robot(1, 1, "AI", 0, 0.0, true),
+                            ],
+                            vec![0],
+                        ),
+                        0,
+                    )
+                    .unwrap();
+                assert!(outcome.won);
+                assert_eq!(outcome.round, round as usize);
+                expected += outcome.points;
+                let finished = round + 1 == rounds;
+                assert_eq!(outcome.event_finished, finished);
+            }
+            assert!(!matches!(career.phase, SeasonPhase::InEvent { .. }));
         }
         assert_eq!(career.phase, SeasonPhase::Complete);
         assert_eq!(career.history.len(), 9);
         assert_eq!(career.player().total_events(), 9);
         assert_eq!(career.player().events_won(), 9);
-        assert_eq!(career.player().wins(), 9);
-        assert!(career.prizes.len() >= 9, "each won event stores a trophy");
-        // 200/200 + 160/2 = 81 an event.
-        assert_eq!(career.player().season_points(), 9 * 81);
-        assert_eq!(career.rank(), 1);
+        assert_eq!(career.player().wins(), rounds_total as i32);
+        // The event pays `rounds * (160 / rounds + 2000 / 200)`; over the
+        // season that is `9 * 160 + 10 * rounds`.
+        assert_eq!(expected, 9 * 160 + 10 * rounds_total as i32);
+        assert_eq!(career.player().season_points(), expected);
+        assert_eq!(career.rank(), 1, "every event was a final win");
+        assert_eq!(career.prizes.len(), 10, "nine trophies and the sawblade");
+        assert_eq!(career.prizes.last().unwrap().event, usize::MAX);
 
         career.next_season(11).unwrap();
         assert_eq!(career.phase, SeasonPhase::Schedule);
         assert_eq!(career.season(), 1);
+        assert_eq!(career.seed, 11);
         assert_eq!(career.player().season_points(), 0);
         assert_eq!(career.history.len(), 0);
+        assert!(career.bracket.is_none());
         assert_eq!(career.schedule.len(), 9);
         assert_eq!(career.player().total_events(), 9, "lifetime count is kept");
     }
 
-    /// A no-op career load/save leaves the shipped team tables byte-identical.
+    /// The shipped `Events.txt` shapes are the measured bracket shapes: the
+    /// tier count is the round count, the first setting is the bots per match,
+    /// and the two multiply to the 16 entrants.
+    #[test]
+    fn every_shipped_event_is_a_sixteen_entrant_bracket() {
+        let Some(game) = game_dir() else { return };
+        let text = ra2fmt::event::read(&game.join("Events.txt")).unwrap();
+        let events = ra2fmt::event::parse(&text).unwrap();
+        for event in &events {
+            let (rounds, bots) = event_shape(event).unwrap();
+            assert_eq!(rounds, event.tiers.len(), "{}", event.name);
+            assert_eq!(
+                Some(bots),
+                event.settings.first().map(|b| *b as usize),
+                "{}",
+                event.name
+            );
+            assert_eq!(bots.pow(rounds as u32), BRACKET_ENTRANTS, "{}", event.name);
+            assert!(rounds == 2 || rounds == 4);
+        }
+    }
+
+    /// A loss ends the event but not the season: the history records it, no
+    /// trophy is stored, the bracket is gone and the schedule is still open.
+    #[test]
+    fn a_loss_eliminates_from_the_event_but_not_from_the_season() {
+        let mut career = synthetic_career();
+        career.seed = 5;
+        let event = career.schedule[0];
+        career.enter_event(event).unwrap();
+        let rounds = career.bracket().unwrap().rounds;
+        let outcome = career
+            .play_round(
+                &report(
+                    "DEATHMATCH",
+                    vec![
+                        robot(0, 0, "Test Team", 400, 40.0, false),
+                        robot(1, 1, "AI", 0, 0.0, true),
+                    ],
+                    vec![1],
+                ),
+                0,
+            )
+            .unwrap();
+        assert!(!outcome.won);
+        assert!(outcome.event_finished);
+        assert!(matches!(outcome.champion, Some(Entrant::Ai(_))));
+        assert_eq!(outcome.points, 160 / rounds as i32 + 2);
+        assert!(career.bracket.is_none());
+        assert_eq!(career.phase, SeasonPhase::Schedule);
+        assert_eq!(career.history.len(), 1);
+        let record = &career.history[0];
+        assert_eq!(record.event, event);
+        assert!(!record.won);
+        assert_eq!(record.rounds_won, 0);
+        assert_eq!(record.rounds_lost, 1);
+        assert_eq!(record.points, outcome.points);
+        assert!(career.prizes.is_empty(), "no trophy for a loss");
+        assert_eq!(career.player().season_points(), outcome.points);
+        // The AI field still scored its participation, so the league line is
+        // not all zero after one round.
+        assert!(career.player().opponent_points().iter().any(|p| *p > 0));
+    }
+
+    /// The same seed draws the same bracket, round after round.
+    #[test]
+    fn replaying_the_same_seed_reproduces_the_bracket() {
+        let mut first = synthetic_career();
+        first.seed = 0x5eed_1234;
+        let mut second = synthetic_career();
+        second.seed = 0x5eed_1234;
+        let event = first.schedule[1];
+        first.enter_event(event).unwrap();
+        second.enter_event(event).unwrap();
+        assert_eq!(first.bracket, second.bracket);
+        let rounds = first.bracket().unwrap().rounds;
+        for _ in 0..rounds {
+            let win = report(
+                "DEATHMATCH",
+                vec![
+                    robot(0, 0, "Test Team", 1000, 0.0, false),
+                    robot(1, 1, "AI", 0, 0.0, true),
+                ],
+                vec![0],
+            );
+            let a = first.play_round(&win, 0).unwrap();
+            let b = second.play_round(&win, 0).unwrap();
+            assert_eq!(a, b);
+            assert_eq!(first.bracket, second.bracket);
+        }
+    }
+
+    /// Losing the final still crowns an AI and stores no trophy.
+    #[test]
+    fn a_final_loss_crowns_an_ai_and_stores_no_trophy() {
+        let mut career = synthetic_career();
+        career.seed = 21;
+        let event = career.schedule[1]; // the synthetic schedule alternates shapes
+        assert_eq!(career.events[event].tiers.len(), 2);
+        career.enter_event(event).unwrap();
+        let win = report(
+            "DEATHMATCH",
+            vec![
+                robot(0, 0, "Test Team", 200, 0.0, false),
+                robot(1, 1, "AI", 0, 0.0, true),
+            ],
+            vec![0],
+        );
+        let loss = report(
+            "DEATHMATCH",
+            vec![
+                robot(0, 0, "Test Team", 200, 0.0, false),
+                robot(1, 1, "AI", 0, 0.0, true),
+            ],
+            vec![1],
+        );
+        let first = career.play_round(&win, 0).unwrap();
+        assert!(first.won && !first.event_finished);
+        let final_loss = career.play_round(&loss, 0).unwrap();
+        assert!(final_loss.event_finished);
+        assert!(!final_loss.won);
+        assert!(matches!(final_loss.champion, Some(Entrant::Ai(_))));
+        let record = career.history.last().unwrap();
+        assert!(!record.won);
+        assert_eq!(record.rounds_won, 1);
+        assert_eq!(record.rounds_lost, 1);
+        assert!(career.prizes.is_empty());
+    }
+
+    /// A save in the middle of a season restores the bracket, the current
+    /// round and the next opponents.
+    #[test]
+    fn save_reload_mid_season_restores_the_bracket_and_opponents() {
+        let dir = TestDir::new("bracket-save");
+        write_synthetic_events(dir.path());
+        let mut career = synthetic_career();
+        career.seed = 77;
+        career.save(dir.path()).unwrap();
+        let event = career.schedule[0];
+        career.enter_event(event).unwrap();
+        let _ = career
+            .play_round(
+                &report(
+                    "DEATHMATCH",
+                    vec![
+                        robot(0, 0, "Test Team", 800, 0.0, false),
+                        robot(1, 1, "AI", 0, 0.0, true),
+                    ],
+                    vec![0],
+                ),
+                0,
+            )
+            .unwrap();
+        let expected_bracket = career.bracket.clone().expect("a bracket");
+        let expected_points = career.player().event_points();
+        assert!(expected_bracket.round > 0 || expected_bracket.rounds == 1);
+        let expected_opponents = career.next_opponents().to_vec();
+        career.save(dir.path()).unwrap();
+
+        let loaded = Career::load(dir.path()).unwrap();
+        assert_eq!(loaded.seed, 77);
+        assert_eq!(loaded.phase, SeasonPhase::InEvent { event });
+        assert_eq!(loaded.bracket.as_ref(), Some(&expected_bracket));
+        assert_eq!(loaded.next_opponents(), expected_opponents.as_slice());
+        assert_eq!(loaded.player().event_points(), expected_points);
+        assert_eq!(loaded.bracket().unwrap().round, expected_bracket.round);
+    }
+
     #[test]
     fn the_shipped_team_tables_round_trip_after_a_no_op_career() {
         let Some(dir) = copy_game("noop") else {
