@@ -688,6 +688,63 @@ four armour types as name, description, texture and the numbers
 (`0 8 0 0 80` = type 0, weight 8, …, hardness 80), which is exactly the three
 things `armor_cell.gib` binds.
 
+#### The lists whose content is runtime
+
+The same rule covers the lists whose rows are **not** shipped. Measured from the
+screens' own `Notes` and each list's raw `Rows`/`Columns`/`RowHeight`/`ColWidths`
+(the rows are the game's, not the author's placeholders):
+
+| screen | list | its own note | template / binding children | row geometry | where the rows come from |
+|---|---|---|---|---|---|
+| `teamhq/hq_league.gib` | `league grid` | *"fill with league_cell.gib with the teams in order of rank"* | `league_cell.gib`: `rank`, `league team name`, `motto`, `points`, `league team logo` | `Rows 16`, `Columns 1`, `RowHeight 70`, `ColWidths 388 17` | team identity: `Teams/Teams.txt` + `AI/Teams.txt`; points/rank: the live league table (runtime, never shipped) |
+| `teamhq/season_results.gib` | `results grid` | *"fill with sresults_cell.gib just like league standings"* | `sresults_cell.gib`: `rank`, `league team name`, `points`, `league team logo` (no motto) | `Rows 16`, `Columns 1`, `RowHeight 36`, `ColWidths 201 17` | the same live standings; the screen's `message` is selected by rank bucket from four strings baked in the binary |
+| `common/matchresults.gib` | four `result slot 1..4` groups, 22,36 / 22,126 / 22,216 / 22,306, 478×80 | *"load result_cell.gib into this slot with appropriate data"* (×4) | `result_cell.gib`: `team logo`, `bot preview`, `points`, `bot name`, `team name`, `immobilized text`, `winner text`, `Spectator [TextBox]` | each slot's own 478×80 | the live match (`FUN_00488120`): one cell per bot, with its team logo/name, preview, points and the immobilized/winner flags |
+| `teamhq/hq_events.gib` | `event grid` | *"fill with this season's events (event_cell.gib)"* | `event_cell.gib`: `preview img`, `xout` | `Rows 3`, `Columns 3`, `RowHeight 64`, `ColWidths 114 17` | the season's selection is runtime; the drawable list is `Events.txt` (25 events measured) |
+| `teamhq/hq_history.gib` | `prizes grid` | *"fill grid with prize bitmaps for all past events (only show last 32…). Show most recently won prizes first. Cell size should be fixed at 80 x 80"* | no template; rows are prize bitmaps | `Rows 4`, `Columns 5`, `RowHeight 82`, `ColWidths 82 17` ×5 — the note says 80×80, the file says 82×82 | the team's past events (runtime); the note is the format |
+| `teamhq/hq_robots.gib` | `robot grid` | *"fill grid with team robots (robot_cell.gib)"* — **`robot_cell.gib` does not ship** | `bot_cell.gib`: `bot snapshot img`, `bot name`, `weight class`; `nobot_cell.gib` for an empty slot | `Rows 3`, `Columns 2`, `RowHeight 70`, `ColWidths 213 17` | `Teams/TeamN/BotN.bot` (the team's roster; runtime, read by `FUN_004ff570`) |
+| `teamhq/joinevent.gib` | `robot grid` | *"user chooses one of his six robots to enter this event"* | `exhibition/choosebot_cell.gib`: `bot preview`, `weight icon` (light/medium/heavy by class); `FUN_00482170` | `Rows 1`, `Columns 6`, `RowHeight 90`, `ColWidths 90 17` ×6 | the selected team's six robots (runtime roster) |
+| `teamhq/select_team.gib` | `select team grid` | *"load team_cell.gib's into these grid cells for each team."* | `team_cell.gib`: `logo img`, `team name textbox`, `team motto textbox` | `Rows 9`, `Columns 1`, `RowHeight 80`, `ColWidths 444 17` | the team slots in `Teams/Teams.txt` (one named team ships) |
+| `exhibition/selectbot_player.gib`, `selectbot_computer.gib` | `robots grid` | *"load the (up to) six robots for the selected team into this grid"* | `choosebot_cell.gib`: `bot preview`, `weight icon` | `Rows 1`, `RowHeight 90`; `Columns 6` (player, 541 px) / `Columns 3` (computer, 271 px) | the selected team's roster (runtime) |
+| `teamhq/repairs.gib` | `repairs list` | *"fill with components and repair times for each"* | no template; text rows | `Rows 16`, `Columns 2`, `RowHeight 18`, `ColWidths 116 17` | the damaged component state and repair clock (runtime) |
+| `botlab/decals.gib`, `surfacelayer.gib`, `texturefill.gib` | `decal list` / `texture list` | *"fill with all the decal image filenames found in the texture library"* / *"…image filenames…"* | text rows | each list's own `Sel Bar` | the files in `Texture Library/` and `Custom Textures/` (runtime filesystem) |
+| `botlab/importbot.gib`, `import_texture.gib` | `file list` | *"populate with bot designs in the appropriate game folder"* / *"populate with available custom textures"* | text rows | each list's own `Sel Bar` | `Robot Designs/*.bot` / the custom texture folders (runtime filesystem) |
+| `multiplayer/multiplayer.gib` | `server listbox`; `heading grid` | *"fill with server list"*; *"put column headings here"* | text rows; headings are fixed labels | each list's own `Sel Bar` | the network browser (runtime) |
+| `multiplayer/prematch.gib` | `spectator list` | *"list of the spectators (joined but not in the match)"* | text rows | `0.950 × 134` | the network session (runtime) |
+
+The unnamed `ListBox`es in `botlab/appearance.gib`, `comp_preview.gib`,
+`video_options.gib`, `gametype.gib`, `mpc_settings.gib` and the wiring connection
+screens are a `DropDown`'s option list, not game rows; the `control grid`s in
+`botlab/wiring.gib` and `common/controls_reminder.gib` are the wiring canvas, not
+a list. They are not in the table above for that reason.
+
+**The two team tables are the game's own, and the points are not in them.**
+`FUN_00502150` loads `Teams\Teams.txt` and then `AI\Teams.txt`; `Team::load`
+(`FUN_004fabf0`) reads each record's first three lines as name, motto and logo
+(`Team::save`, `FUN_004fb010`, writes the same three first). The shipped
+`Teams/Teams.txt` has sixteen slots with one named team (`The Rookies`); the AI
+table has fifteen (`Red Zone` … `The Scrappers`), so the two grids' 16 rows are
+the player's team plus the fifteen AI teams. The field the constructor sets to `10000.0`
+(`Team + 0xb8`) is written as `10000` for the player and `100000` for the AI
+teams, and is the team's money; the fifteen-int line (`Team + 0x5c`) is all
+zero in both files. So a fresh season has no points to read, and
+`ra2ui::standings` takes the live points as an explicit input.
+
+**The league window's fill is the same two templates.** `FUN_004fe0c0` (the
+league tab's refresh) calls `FUN_00500230`: it makes a `LeagueCell` per team
+(`FUN_004fcf50`, whose constructor binds `league team name`, `motto`, `points`,
+`rank` and `league team logo`), reads name/motto/logo from the team and the
+points from the live table, and labels the i-th row `i + 1`. The season-results
+window does the same with `SeasonResultCell` (`FUN_004e8020`) in `FUN_004e8860`.
+The match-results fill is `FUN_00488120`, which loads `common/result_cell.gib`
+per bot and binds the `ResultCell` (`FUN_00487480`); that constructor hides
+`immobilized text`, `winner text` and `Spectator [TextBox]` before the match
+shows the two flags it needs.
+
+**One note is already contradicted by the data.** `hq_robots.gib` says
+`robot_cell.gib`; no file of that name ships, and the fill at `FUN_004ff570`
+loads `bot_cell.gib` (and `nobot_cell.gib` for an empty slot). The data wins,
+and the table above names `bot_cell.gib`.
+
 ### Input: what a click lands on, and what it changes
 
 - **`PassMouse` distinguishes nothing.** It is `true` on all 1,298 widgets in the

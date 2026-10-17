@@ -76,9 +76,11 @@ local/           # (git-ignored) game files + converted cache
   its two ends and between. The screens are *drawn*: `ra2-render`'s 2D path
   (`ui`) turns a placed screen into textured quads — art, fills and glyph runs,
   each carrying the clip `ClipMode` worked out — and draws them headlessly, so
-  `uishot <screen.gib> <out.png>` renders any of the 116 shipped screens. Still
-  to come: the cells' *content* (a `LoadCell` field the game's own reader
-  consumes). The visual
+  `uishot <screen.gib> <out.png>` renders any of the 116 shipped screens. The
+  cells' *content* is filled from the game's own data for the shipped lists
+  (`ra2ui::cells`, `components`, `events`, `standings`, `results`); the lists
+  whose source is runtime state are named in the recon notes, and the two S2
+  screens take that state as an explicit input. The visual
   pass is done: tiles repeat at their texture's own size, the selection bars draw
   `Point Selection.tga` (the game's own art, named by no screen), captions are
   found by their `Caption` attachment and centred in their buttons, and the
@@ -155,9 +157,10 @@ local/           # (git-ignored) game files + converted cache
   cannot disagree about what a component is — and the definitions and their art
   ship in `Components.cfz` and `Components/`. The armour grid and this one are the
   same shape: a screen that states its own content, and game data that is exactly
-  that content. What is left of the shell's lists are the ones whose content is
-  *runtime* rather than shipped — the team HQ's standings, the match results — and
-  those want the same rule with a live source.
+  that content. The lists whose content is *runtime* rather than shipped — the
+  team HQ's standings and the match results — are the same rule with a live
+  source: `ra2ui::standings` and `ra2ui::results` take that state as an explicit
+  input, because the game never writes it to a file the port can read.
 - **The shell is checked against its own index, not only against itself.** The
   game ships the UI editor's project document, and it is a second witness to
   every screen: the name and class of each file's root, and the 489 widgets the
@@ -175,9 +178,25 @@ local/           # (git-ignored) game files + converted cache
   and the code disagree the data wins, because there is nothing to re-author: the
   armour grid's four cells are the four `Armor_Definitions.txt` rows, with their
   own textures, descriptions and weights, and `cargo run -p ra2-render --example
-  workshop` renders them. The same machinery is what the team HQ's lists and the
-  match results' slots need; `cells` carries the rule and the notes, so the rest
-  is a table.
+  workshop` renders them. The same machinery now covers the lists whose rows are
+  **runtime**: `ra2ui::standings` fills `hq_league.gib` and `season_results.gib`
+  from the game's team tables (`Teams/Teams.txt` + `AI/Teams.txt`, loaded by
+  `FUN_00502150`) with the live league's points as an explicit input — the
+  points are the window's own table and never ship — and `ra2ui::results` loads
+  `result_cell.gib` into `common/matchresults.gib`'s four `result slot` groups,
+  one per bot in the match. Where a note and a file disagree the file wins:
+  `hq_robots.gib` says `robot_cell.gib`, and the shipped cell is `bot_cell.gib`.
+- **A runtime list states its own shape, and the shape is the test.** The
+  standings' 16 rows are not made up: both screens say `Rows 16`, the two team
+  tables hold exactly sixteen named teams, and the fill labels the i-th row
+  `i + 1` because that is what `FUN_00500230` does. The match results' four
+  slots are 478×80 at the file's own positions, and the cell's constructor gives
+  the default visibility the template file does not (`immobilized text`,
+  `winner text` and `Spectator [TextBox]` start hidden). Tests pin the geometry
+  and the bound text (`the_league_grid_is_filled_from_the_standings`,
+  `the_match_results_slots_take_the_matchs_own_results`), and the picture is
+  `hq_league.png` / `season_results.png` / `matchresults.png` from the workshop
+  example.
 - **The shell has input, and the workshop's tabs are live.** `ra2ui::input`
   hit-tests a point against the placed tree the way it is drawn — in reverse, so
   the last thing drawn is the first thing hit, and children before their parent
