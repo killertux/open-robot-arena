@@ -315,6 +315,10 @@ shipped game; the game-dependent ones skip when it is absent):
 5. `the_career_sidecar_is_byte_stable` — save, load, save; identical sidecar.
 6. `the_sidecar_round_trips_every_text_field` — tabs and backslashes in a robot
    name survive.
+7. `a_damaging_match_leaves_a_repair_the_clock_completes_and_saves` — a
+   damaged report leaves one entry (cost 0), 12 s of 30 s elapsed round-trips
+   through the sidecar, the 18 s tick completes it, the save reloads empty and
+   no money was charged.
 7. `engine/crates/ra2fmt/src/team.rs`'s
    `career_fields_are_typed_and_list_lines_round_trip` — the league line,
    prize/schedule list lines and the nine history lines parse and write

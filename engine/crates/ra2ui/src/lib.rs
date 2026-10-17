@@ -127,6 +127,7 @@ pub mod events;
 pub mod hq;
 pub mod input;
 pub mod project;
+pub mod repairs;
 pub mod results;
 pub mod standings;
 pub mod workshop;

@@ -63,6 +63,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
             args.out.clone(),
             args.size,
             args.seconds,
+            args.report_damage,
         )?;
         return match options.out {
             Some(_) => hq_mode::run_headless(options),

@@ -16,6 +16,11 @@ pub struct Args {
     pub hq: bool,
     /// `--hq --simulate-event N`: play schedule row N headlessly.
     pub simulate_event: Option<usize>,
+    /// `--hq --report-damage N`: add N damage to the player's match report
+    /// before the career award. The shipped match in this environment never
+    /// closes on its opponent, so its report has zero damage; this is the
+    /// evidence/test knob for the repairs screen, not a game rule.
+    pub report_damage: Option<f32>,
     /// `--match --out DIR`: the offscreen evidence run.
     pub out: Option<PathBuf>,
     /// Fight seconds before the evidence script's decision (and the HUD clock's
@@ -46,6 +51,7 @@ impl Default for Args {
             match_mode: false,
             hq: false,
             simulate_event: None,
+            report_damage: None,
             out: None,
             seconds: None,
             quit_at: None,
@@ -64,7 +70,8 @@ pub fn usage() -> &'static str {
      \x20                [--bots A.bot,B.bot] [--arena PATH]\n\
      \x20      ra2-app --build [--start BOT] [--save-as NAME] [--seconds N] [--out DIR]\n\
      \x20                [--size WxH]\n\
-     \x20      ra2-app --hq [--simulate-event N] [--seconds N] [--out DIR]\n\
+     \x20      ra2-app --hq [--simulate-event N] [--seconds N] [--report-damage N]\n\
+     \x20                [--out DIR]\n\
      \n\
      With no --offscreen the shell opens in a window. With it, the same loop runs\n\
      headlessly: boot, apply the click script in the shell's 1280x1005 coordinates,\n\
@@ -79,7 +86,8 @@ pub fn usage() -> &'static str {
      a palette click attaches a component at the model's mount, the armour grid\n\
      sets the plate, a texture plus a face row paints, Enter saves, Ctrl+Z undoes.\n\
      With --out it runs a scripted build headlessly and writes build-chassis.png,\n\
-     build-parts.png, build-paint.png and build-test.png.\n\
+     build-parts.png, build-wiring.png, wiring-add.png, wiring-bound.png,\n\
+     build-paint.png and build-test.png.\n\
      \n\
        --game DIR       the install (default: RA2_GAME, else local/game)\n\
        --offscreen PNG  render the final state and exit (the CI path)\n\
@@ -90,6 +98,7 @@ pub fn usage() -> &'static str {
        --start BOT      the .bot to open in --build (default: a stock chassis)\n\
        --save-as NAME   the design name the headless --build run types and saves\n\
        --seconds N      fight length for --match; test length for --build (default 30/4)\n\
+       --report-damage N  --hq evidence knob: N damage in the player's match report\n\
        --out DIR        write the match/build's PNG frames and exit\n\
        --quit-at N      pause at N fight seconds, quit to the menu, write pause/menu PNGs\n\
        --bots A,B       two .bot paths for --match\n\
@@ -118,6 +127,18 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
                         .parse()
                         .map_err(|_| format!("--simulate-event is not a number: {value:?}"))?,
                 );
+            }
+            "--report-damage" => {
+                let value = next(&mut args, "--report-damage")?;
+                let damage: f32 = value
+                    .parse()
+                    .map_err(|_| format!("--report-damage is not a number: {value:?}"))?;
+                if !(damage.is_finite() && damage >= 0.0) {
+                    return Err(format!(
+                        "--report-damage must be non-negative, got {damage}"
+                    ));
+                }
+                parsed.report_damage = Some(damage);
             }
             "--out" => parsed.out = Some(PathBuf::from(next(&mut args, "--out")?)),
             "--seconds" => {
@@ -291,6 +312,8 @@ mod tests {
                 "2",
                 "--seconds",
                 "3",
+                "--report-damage",
+                "40",
                 "--out",
                 "frames",
             ]
@@ -301,8 +324,10 @@ mod tests {
         assert!(args.hq);
         assert_eq!(args.simulate_event, Some(2));
         assert_eq!(args.seconds, Some(3.0));
+        assert_eq!(args.report_damage, Some(40.0));
         assert_eq!(args.out, Some(PathBuf::from("frames")));
         assert!(parse(["--simulate-event".into(), "x".into()]).is_err());
+        assert!(parse(["--report-damage".into(), "-1".into()]).is_err());
     }
 
     #[test]
