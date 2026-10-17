@@ -35,7 +35,10 @@ fn game_root() -> Option<PathBuf> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out = PathBuf::from(std::env::args().nth(1).unwrap_or("/tmp/workshop".into()));
+    let out = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("workshop"));
     std::fs::create_dir_all(&out)?;
     let game = game_root().ok_or("no local/game (set RA2_GAME)")?;
     let (width, height) = (1280u32, 1005u32);

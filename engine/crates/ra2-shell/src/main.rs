@@ -1,8 +1,8 @@
 //! The shell's entry point: boot the main menu and drive it headlessly.
 //!
 //! ```text
-//! cargo run -q -p ra2-shell -- --route botlab --out /tmp/ra2-shell
-//! cargo run -q -p ra2-shell -- --script my-input.txt --out /tmp/ra2-shell
+//! cargo run -q -p ra2-shell -- --route botlab --out ra2-shell-frames
+//! cargo run -q -p ra2-shell -- --script my-input.txt --out ra2-shell-frames
 //! ```
 //!
 //! The game is found through `RA2_GAME_DIR` or the repository's `local/game`;
@@ -41,7 +41,9 @@ fn run() -> Result<(), String> {
     let mut game_dir: Option<PathBuf> = None;
     let mut script_path: Option<PathBuf> = None;
     let mut route: Option<String> = None;
-    let mut out = PathBuf::from("/tmp/ra2-shell");
+    // The system temp directory, not `/tmp`: the latter is a drive-root path on
+    // Windows. The default is otherwise the same on every platform.
+    let mut out = std::env::temp_dir().join("ra2-shell");
     let mut size = [1280.0f32, 1005.0];
     let mut python = true;
 
