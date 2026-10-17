@@ -1673,6 +1673,156 @@ mod tests {
         assert_eq!(exhibition.frame.h, 26.0);
     }
 
+    /// **The help screen's first body reads from its page runs.** The line is
+    /// `fg_mcn14`'s long `At the top of your screen...`; the first glyph must be
+    /// the page's `A` (not `B`, which is what the order-only mapping gave), the
+    /// run's width is the sum of the face's advances, and every sampled cell has
+    /// ink. This is the face the one-glyph shift was reported on.
+    #[test]
+    fn the_help_line_reads_from_its_page_runs() {
+        let Some(game) = game_dir() else { return };
+        let fonts = Fonts::load(&game.join("RA2.cfz")).expect("the shipped faces");
+        let text = std::fs::read_to_string(game.join("UI/help/help_ws_overview.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+        let placed = resolve_with(&gib, DESIGN_SCREEN, Some(&fonts));
+        let body = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| {
+                p.widget
+                    .text()
+                    .is_some_and(|t| t.starts_with("At the top of your screen"))
+            })
+            .expect("the help body");
+        let label = body.widget.text().unwrap();
+        let font = fonts.get("fg_mcn14").expect("fg_mcn14");
+        let run = text_run(font, body.frame, label);
+        assert_eq!(
+            run.len(),
+            label.chars().filter(|c| *c != ' ').count(),
+            "one glyph per non-space character"
+        );
+        let (ax, ay, aw, ah) = font.glyph('A').rect(font.page_width, font.page_height);
+        assert_eq!(run[0].cell, [ax, ay, aw, ah], "the first glyph is A");
+        let (tx, ty, tw, th) = font.glyph('t').rect(font.page_width, font.page_height);
+        assert_eq!(run[1].cell, [tx, ty, tw, th], "the second glyph is t");
+
+        let sum: i32 = label.chars().map(|c| font.advance(c)).sum();
+        assert_eq!(body.frame.w, sum as f32, "the run's width");
+        for glyph in &run {
+            assert!(glyph.cell[2] > 0 && glyph.cell[3] > 0, "a cell");
+            let ink = (glyph.cell[1]..glyph.cell[1] + glyph.cell[3])
+                .flat_map(|y| {
+                    (glyph.cell[0]..glyph.cell[0] + glyph.cell[2]).map(move |x| font.coverage(x, y))
+                })
+                .filter(|&v| v > 40)
+                .count();
+            assert!(ink > 0, "a cell with no ink: {glyph:?}");
+        }
+    }
+
+    /// **The pangram and the alphabet read in every face.** For each of the nine
+    /// shipped faces, the `The quick brown fox...` run has one glyph per
+    /// non-space character, its width is the sum of the advances, every cell has
+    /// ink, and the upper/lower case alphabet and the digits all have real page
+    /// cells. This is the per-face check the one-glyph shift failed.
+    #[test]
+    fn the_pangram_reads_in_every_face() {
+        let Some(game) = game_dir() else { return };
+        let fonts = Fonts::load(&game.join("RA2.cfz")).expect("the shipped faces");
+        let faces = [
+            "fg_d18", "fg_d20", "fg_d24", "fg_d26", "fg_dcn14", "fg_dcn16", "fg_mcn12", "fg_mcn14",
+            "fg_mcn16",
+        ];
+        let pangram = "The quick brown fox jumps over the lazy dog. 0123456789";
+        for face in faces {
+            let font = fonts.get(face).expect(face);
+            let frame = Frame::new(
+                0.0,
+                0.0,
+                font.extent(pangram).0 as f32,
+                font.line_height() as f32,
+            );
+            let run = text_run(font, frame, pangram);
+            assert_eq!(
+                run.len(),
+                pangram.chars().filter(|c| *c != ' ').count(),
+                "{face}: one glyph per non-space character"
+            );
+            let sum: i32 = pangram.chars().map(|c| font.advance(c)).sum();
+            assert_eq!(font.extent(pangram).0, sum, "{face}: the run's width");
+            let (tx, ty, tw, th) = font.glyph('T').rect(font.page_width, font.page_height);
+            assert_eq!(run[0].cell, [tx, ty, tw, th], "{face}: the first glyph");
+            for glyph in &run {
+                assert!(
+                    glyph.cell[2] > 0 && glyph.cell[3] > 0,
+                    "{face}: a zero cell"
+                );
+                let ink = (glyph.cell[1]..glyph.cell[1] + glyph.cell[3])
+                    .flat_map(|y| {
+                        (glyph.cell[0]..glyph.cell[0] + glyph.cell[2])
+                            .map(move |x| font.coverage(x, y))
+                    })
+                    .filter(|&v| v > 40)
+                    .count();
+                assert!(ink > 0, "{face}: a cell with no ink: {glyph:?}");
+            }
+            for c in ('A'..='Z').chain('a'..='z').chain('0'..='9') {
+                let (x, y, w, h) = font.glyph(c).rect(font.page_width, font.page_height);
+                assert!(w > 0 && h > 0, "{face}: {c:?} has no cell");
+                let ink = (y..y + h)
+                    .flat_map(|yy| (x..x + w).map(move |xx| font.coverage(xx, yy)))
+                    .filter(|&v| v > 40)
+                    .count();
+                assert!(ink > 0, "{face}: {c:?} has no ink");
+            }
+        }
+    }
+
+    /// The two screens that read before the font repack still do: the bot lab's
+    /// title and the team picker's title are `fg_d20` runs whose first cell is
+    /// their first letter, whose width is the advance sum, and whose cells hold
+    /// ink.
+    #[test]
+    fn the_bot_lab_and_team_picker_titles_still_read() {
+        let Some(game) = game_dir() else { return };
+        let fonts = Fonts::load(&game.join("RA2.cfz")).expect("the shipped faces");
+        for (screen, title) in [
+            ("botlab/botlabwin.gib", "ROBOT WORKSHOP"),
+            ("teamhq/select_team.gib", "SELECT YOUR ROBOTICS TEAM"),
+        ] {
+            let text = std::fs::read_to_string(game.join("UI").join(screen)).unwrap();
+            let gib = ra2fmt::gib::parse(&text).unwrap();
+            let placed = resolve_with(&gib, DESIGN_SCREEN, Some(&fonts));
+            let body = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.text() == Some(title))
+                .unwrap_or_else(|| panic!("{screen}: {title}"));
+            let font = fonts.get("fg_d20").expect("fg_d20");
+            let run = text_run(font, body.frame, title);
+            let first = title.chars().next().unwrap();
+            let (x, y, w, h) = font.glyph(first).rect(font.page_width, font.page_height);
+            assert_eq!(run[0].cell, [x, y, w, h], "{screen}: the first glyph");
+            let sum: i32 = title.chars().map(|c| font.advance(c)).sum();
+            assert_eq!(
+                font.extent(title).0,
+                sum,
+                "{screen}: the run's width is the advance sum"
+            );
+            for glyph in &run {
+                let ink = (glyph.cell[1]..glyph.cell[1] + glyph.cell[3])
+                    .flat_map(|yy| {
+                        (glyph.cell[0]..glyph.cell[0] + glyph.cell[2])
+                            .map(move |xx| font.coverage(xx, yy))
+                    })
+                    .filter(|&v| v > 40)
+                    .count();
+                assert!(ink > 0, "{screen}: a cell with no ink: {glyph:?}");
+            }
+        }
+    }
+
     /// **The corpus's captions are all one `Text` body.** 122 `Caption`
     /// attachments in 53 of the 116 files (the 758 attachments also hold 295
     /// `Background`s), and each caption is a body with exactly one non-empty
