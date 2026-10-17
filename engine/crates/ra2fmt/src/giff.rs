@@ -276,10 +276,14 @@ impl Font {
     /// face does carry is what a space looks like; the first record, which is
     /// what [`glyph`](Self::glyph) falls back to, is nothing like it.
     pub fn space_advance(&self) -> i32 {
-        let mut widths: Vec<i32> = self
-            .glyphs
-            .iter()
-            .map(|g| g.advance)
+        // The median of the **effective** advances, not the raw glyph records:
+        // the two tables are two records apart, and the space is a character
+        // with no glyph record of its own. This is also what `ra2 font` prints
+        // and `tools/ui_compose.py` measures, so the two renderers space a line
+        // the same.
+        let mut widths: Vec<i32> = (0..self.glyphs.len())
+            .map(|i| char::from_u32(FIRST_CHAR + i as u32).unwrap_or(' '))
+            .map(|c| self.advance(c))
             .filter(|a| *a > 0)
             .collect();
         widths.sort_unstable();
