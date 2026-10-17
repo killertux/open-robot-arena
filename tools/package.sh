@@ -11,6 +11,12 @@
 
 set -eu
 
+# `--offline` covers Cargo; a build script is not told about it. oxijolt's
+# `prebuilt` feature can otherwise fetch a native archive with curl on a fresh
+# build, so tell it the same thing: build Jolt from the vendored sources.
+CARGO_NET_OFFLINE=true
+export CARGO_NET_OFFLINE
+
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 cd "$ROOT"
 

@@ -20,6 +20,11 @@
 
 set -eu
 
+# The independent `uishot` render below is a Cargo invocation; keep its build
+# scripts offline too (see tools/package.sh).
+CARGO_NET_OFFLINE=true
+export CARGO_NET_OFFLINE
+
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 TARBALL=${1:-}
 if [ -z "$TARBALL" ]; then
