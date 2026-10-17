@@ -183,6 +183,9 @@ fn every_shipped_bots_stats_equal_the_rigs_own() {
 #[test]
 fn a_built_bots_stats_equal_the_rigs_after_a_save_and_reload() {
     let Some(root) = game_root() else { return };
+    // The saved bot lives in a temporary folder, so the loader cannot find the
+    // game by walking up from it; point it at the same root the model used.
+    std::env::set_var("RA2_GAME", &root);
     let library = GameLibrary::open(&root).unwrap();
     let stock = GameLibrary::read_bot(&root.join("AI/Team1/Bot0.bot")).unwrap();
     let mut chassis = stock.components[0].chassis.clone().unwrap();

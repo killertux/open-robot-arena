@@ -1,6 +1,6 @@
 //! The career: teams, a nine-event season, points, prizes and repairs.
 //!
-//! The recon behind this module is in `docs/14-career.md`. The short form:
+//! The recon behind this module is in `docs/16-career.md`. The short form:
 //!
 //! * **Teams** are the game's own records (`ra2fmt::team`). The player's league
 //!   points live at `Team+0x58` (the second closing line); the fifteen AI
@@ -1182,6 +1182,9 @@ mod tests {
             points,
             damage_dealt: 0.0,
             damage_taken: damage,
+            battery: 1.0,
+            air: 1.0,
+            armor: 1.0,
             defeated,
             eliminated: defeated,
             winner: false,
@@ -1201,6 +1204,7 @@ mod tests {
             reason: None,
             winners,
             duration: 42.0,
+            duration_limit: None,
             robots,
             log: Vec::new(),
         }

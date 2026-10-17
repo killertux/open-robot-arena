@@ -20,7 +20,7 @@
 //! fifteen-int league line (`Team+0x5c`..`+0x94`), and three closing lines.
 //!
 //! The typed accessors below name the fields the career recon recovered
-//! (`docs/14-career.md`): the league line is the **points of the fifteen AI
+//! (`docs/16-career.md`): the league line is the **points of the fifteen AI
 //! teams**, the first closing line is the points earned in the current event,
 //! the second is the player's season points, the third accumulates defeated
 //! robots, and the state lines carry the season index, ranks and history
@@ -94,7 +94,7 @@ impl Team {
     /// The state line at `Team+0xb8`. The team-HQ screen reads it as the
     /// fastest win in seconds and shows `N/A` when it is [`FASTEST_WIN_NONE`].
     /// The field was called "money" in earlier docs; the recon did not find a
-    /// cash field or a cash deduction anywhere (see `docs/14-career.md`).
+    /// cash field or a cash deduction anywhere (see `docs/16-career.md`).
     pub const FASTEST_WIN_INDEX: usize = 8;
 
     /// The `N/A` sentinel the shipped records carry at `+0xb8`.

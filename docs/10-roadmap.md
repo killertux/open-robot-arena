@@ -214,12 +214,12 @@ the library, decals) → save → reload it → `Test Robot` in an arena.
 | # | Work item | Lands in |
 |---|---|---|
 | M9.1 | ✅ **W1 `bot::write`**: 1.12, **57/57** semantic and byte-identical, measured over `Robot Designs/`, `AI/` and `Teams/` | `ra2fmt::bot` |
-| M9.2 | Component placement: attach at a mount point with the F1 rule (already the renderer's), remove, undo; the palette's filtering and selection already exist | `ra2ui::workshop` |
-| M9.3 | Wiring: the control board's buttons and the wiring canvas (`control grid`), the game's own control-board model (.gib + the `.bot`'s wiring data) | `ra2ui`, `ra2fmt::bot` |
-| M9.4 | Paint: the texture library and custom textures lists, decals/surface layer, the chassis face groups (F10) as the paint target | `ra2ui`, `ra2fmt::bot` |
+| M9.2 | ◐ Component placement *(model done; UI wiring remains)*: attach at a mount point with the F1 rule (already the renderer's), remove, undo; the palette's filtering and selection already exist | `ra2ui::workshop` |
+| M9.3 | ◐ Wiring *(model done; UI wiring remains)*: the control board's buttons and the wiring canvas (`control grid`), the game's own control-board model (.gib + the `.bot`'s wiring data) | `ra2ui`, `ra2fmt::bot` |
+| M9.4 | ◐ Paint *(model done; UI wiring remains)*: the texture library and custom textures lists, decals/surface layer, the chassis face groups (F10) as the paint target | `ra2ui`, `ra2fmt::bot` |
 | M9.5 | `Test Robot`: open a match with the current bot (M8's `Match`) and return its damage to the workshop | `ra2-app` |
 | M9.6 | The workshop's own state: what a tab remembers, `Save As`, `Import`/`Export` to `Robot Designs/` | `ra2-app` |
-| M9.7 | The bot's stats panel: weight (`Armor_Definitions` + mass rules), hitpoints, cost — from the same tables the sim uses | `ra2ui`, `ra2fmt` |
+| M9.7 | ✅ The bot's stats panel: weight (`Armor_Definitions` + mass rules), hitpoints, cost — from the same tables the sim uses | `ra2ui`, `ra2fmt` |
 
 **Acceptance.** Round-trip test over all 57+ stock bots; a built bot's saved file
 reopens with the same component tree, mass and hitpoints as the live one; a
@@ -244,13 +244,13 @@ record.
 
 | # | Work item | Lands in |
 |---|---|---|
-| M10.1 | **Season state**: where the league table lives (the `Team` 15-int line — all zero in the shipped copy — and/or the TeamHQ object), how a season starts/ends; write it down | `docs/02` |
-| M10.2 | `career` model: teams, roster, points, money, events entered, prizes, repairs, season phase; `W1` writes it where the game does | new `ra2sim::career` (or `ra2game`) |
+| M10.1 | ✅ **Season state**: the 15 ints are the fifteen AI teams' league points; the record's other career fields are named in `docs/16-career.md`, with the unproven ones listed | `docs/16-career.md` |
+| M10.2 | ✅ `career` model: teams, roster, points, money, events entered, prizes, repairs, season phase; `W1` writes it where the game does | new `ra2sim::career` (or `ra2game`) |
 | M10.3 | Team HQ flows: select/create team, robot inventory (`hq_robots` — `bot_cell.gib`, not the `robot_cell.gib` its note names), league/season grids (S2's fills), history/prizes (`hq_history`), event schedule (`hq_events`) | `ra2ui` + `ra2-app` |
 | M10.4 | Events: `Events.txt` → entry rules, tiers, prize list (`golden_sawblade`/`event_results` scene), the prize screen at the end of an event | `ra2fmt::event`, `ra2-app` |
-| M10.5 | Repairs: the damage a match leaves on components, the repair list (`repairs.gib`), cost and time, the `ReadMe`'s "graphic for fractured items" | `ra2ui`, `ra2sim` |
-| M10.6 | Money/points: the per-type scoring (damage, KO, zone) and what it is worth outside the match; teammates do not score (the 1.20 rule) | `ra2sim::match`, `ra2sim::career` |
-| M10.7 | The career save/load, versioned, with a "your game directory" location | `W1`, `ra2-app` |
+| M10.5 | ◐ Repairs *(model done; the `repairs.gib` screen remains)*: the damage a match leaves on components, the repair list (`repairs.gib`), cost and time, the `ReadMe`'s "graphic for fractured items" | `ra2ui`, `ra2sim` |
+| M10.6 | ◐ Money/points: the per-type scoring (damage, KO, zone) and what it is worth outside the match; teammates do not score (the 1.20 rule) | `ra2sim::match`, `ra2sim::career` |
+| M10.7 | ✅ The career save/load, versioned, with a "your game directory" location | `W1`, `ra2-app` |
 
 **Acceptance.** A headless career run: start a season, fight the first event's
 rounds, collect a prize, repair, save, restart, and the table/prizes/roster are
@@ -337,10 +337,10 @@ M7 client ──► M8 match ──► M9 workshop ──► M10 meta-game ─�
 
 | # | Risk | Likelihood / impact | Retire by | When |
 |---|---|---|---|---|
-| R1 | The match shell owns more than the scripts suggest (countdown, camera, end handoff) | med / **high** | M8.1 recon before M8.2; a minimal flow first | M8 start |
+| R1 | ~~The match shell owns more than the scripts suggest~~ | retired | M8.1 recon (docs/11) + a working match | done |
 | R2 | The `.bot` writer cannot reproduce every shipped file | med / high | round-trip all 57 bots before any UI work (M9.1) | M9 start |
 | R3 | The career save format is not recoverable | med / med | M10.1 read; documented sidecar if not | M10 start |
-| R4 | No Wine ⇒ no A/B oracle | high / med | W4: install/drive, else captured fixtures | M7–M8 |
+| R4 | ~~No Wine ⇒ no A/B oracle~~ | retired | flatpak Wine 9.0 runs the original; `tools/oracle` measures | done |
 | R5 | The AI/arena scripts call `plus` APIs not yet implemented | med / med | the recorded drops from a real run are the list | M8.3 |
 | R6 | Jolt's friction law (F6) differs and cannot be hooked | high / low-med | accept and keep named; the oracle says how much it shows | M11 |
 | R7 | macOS/Windows toolchains (Jolt, Python, wgpu) | med / med | a CI build early, not late | M12 start |
