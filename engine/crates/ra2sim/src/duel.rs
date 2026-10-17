@@ -2564,6 +2564,70 @@ mod tests {
         assert!(after[1] <= before[1], "the crush must not reverse");
     }
 
+    /// F9: the crush **curve** is linear in the damage taken, and it is
+    /// measured, not tuned.
+    ///
+    /// `FUN_0045f2b0` applies a hit as `hp -= amount` (clamped), so the only
+    /// quantity the chassis has to drive the deformation is the fraction of its
+    /// hitpoint pool that is gone. `Robot::buckle` applies that fraction to the
+    /// *pristine* mesh, so the top ring lands on the file's own floor exactly at
+    /// a full crush; this test samples the curve at quarter points and prints
+    /// it. The silhouette the game gets from its runtime subdivision is F9's
+    /// remaining gap, not the curve.
+    #[test]
+    fn the_crush_curve_is_linear_in_damage() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let setups = [BotSetup {
+            path: game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        }];
+        let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        let c = &duel.robots[0].rig.components[0];
+        let floor = c.buckle.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+        let top = c.hull_points.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+        let span = top - floor;
+        let max_hp = duel.robots[0].health[0].max(1.0);
+        assert!(span > 0.05, "the chassis has a movable region ({span} m)");
+
+        let mut rows = Vec::new();
+        let mut moved_before = 0.0f32;
+        for f in [0.25f32, 0.5, 0.75, 1.0] {
+            duel.robots[0].health[0] = max_hp * (1.0 - f);
+            duel.robots[0].buckle(&mut *duel.physics);
+            let now_top = duel.robots[0].rig.components[0]
+                .hull_points
+                .iter()
+                .map(|p| p.y)
+                .fold(f32::MIN, f32::max);
+            let moved = top - now_top;
+            rows.push(format!(
+                "f={f:.2}: top moved {moved:.4} m (linear {:.4})",
+                f * span
+            ));
+            assert!(
+                (moved - f * span).abs() < 0.02,
+                "f={f:.2}: moved {moved:.4}, linear would be {:.4}",
+                f * span
+            );
+            assert!(
+                moved > moved_before + 1e-3,
+                "the crush must grow with damage: {moved} after {moved_before}"
+            );
+            moved_before = moved;
+        }
+        assert!(
+            (moved_before - span).abs() < 0.03,
+            "a full crush must land the top ring on the file's floor: moved {moved_before:.4} of {span:.4}"
+        );
+        println!(
+            "crush curve (linear in the hitpoint fraction):\n  {}",
+            rows.join("\n  ")
+        );
+    }
+
     /// F10: the chassis is dressed from the file's **face groups**, so every
     /// triangle's skin coordinates land inside the patch the file allocates for
     /// its side. The model's own per-point table cannot manage that — a mesh

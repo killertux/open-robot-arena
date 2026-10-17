@@ -195,6 +195,13 @@ pub struct Component {
     /// How far the chassis has already buckled (0 pristine, 1 at its last
     /// hitpoint).
     pub buckle_fraction: f32,
+    /// The chassis' pristine hull points and drawn vertices (F9). The crush is
+    /// applied *from* these on every update, so the curve is linear in the
+    /// damage fraction and a full crush lands the top ring exactly on the
+    /// file's movable floor; compounding the relative step on the already
+    /// crushed mesh is asymptotic and never reaches it.
+    pub rest_hull: Vec<Vec3>,
+    pub rest_items: Vec<Vec<Vec3>>,
     /// Children component indices (motor-driven subtree).
     pub children: Vec<usize>,
 }
@@ -864,6 +871,22 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             }
         });
 
+        // F9: keep the chassis' pristine geometry so every crush update applies
+        // an absolute displacement from it (see `Robot::buckle`).
+        let rest_hull = if i == 0 {
+            hull_points.clone()
+        } else {
+            Vec::new()
+        };
+        let rest_items = if i == 0 {
+            items
+                .iter()
+                .map(|item| item.vertices.iter().map(|v| Vec3::from(v.pos)).collect())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         components.push(Component {
             index: i,
             parent,
@@ -897,6 +920,8 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 Vec::new()
             },
             buckle_fraction: 0.0,
+            rest_hull,
+            rest_items,
             children: Vec::new(),
         });
     }
@@ -1144,6 +1169,8 @@ mod tests {
             piston: None,
             buckle: Vec::new(),
             buckle_fraction: 0.0,
+            rest_hull: Vec::new(),
+            rest_items: Vec::new(),
             children: Vec::new(),
         }
     }
