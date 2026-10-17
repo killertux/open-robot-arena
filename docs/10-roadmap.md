@@ -53,27 +53,38 @@ What the plan can rely on, and where it is written down:
 - **Packaging** — the Linux tarball, launcher, installer, `tools/check.sh`.
 - **151 tests**, fmt/clippy clean, `tools/check.sh` PASS.
 
-### The fact that shapes the rest of the plan
+### Where the match rules actually live (corrected by M8.1)
 
-**The match rules are largely *data*, not black-box C++.** Measured in the
-shipped scripts:
+The first draft of this plan assumed the rules were mostly script-side. The
+M8.1 recon (`docs/11-match-rules.md`) measured otherwise, and the plan follows
+the measurement:
 
-- `Arenas/king.py` (`KingOfHill`) scores with `plus.addPoints`, asks
-  `plus.getGameType`, `plus.isMatchOver`, `plus.isDefeated`, and plays
-  `plus.createSound`/`plus.playSound` — all of which are ours to implement in
-  `ra2script::plus`.
-- Game types are arena data: `DEATHMATCH`, `BATTLE ROYAL`, `TEAM MATCH`,
-  `TABLE TOP`, `KING OF THE HILL` (`Arenas/*.py`'s `game_types`, filterable —
-  `Arenas/__init__.py`'s `enumAvailable(type)`).
-- Events, prizes, tiers and arenas are `Events.txt`; the HUD and every dialog
-  are `.gib`; the settings are `ra2.cfg`; the sounds and music are files.
-- The 1.20 ReadMe names the rules the patches touched — teammates not scoring,
-  King-of-the-Hill zones, fractured parts, spectator names — which is a
-  free specification for the match shell.
+- **Game types are declared in data** — `DEATHMATCH`, `BATTLE ROYAL`,
+  `TEAM MATCH`, `TABLETOP`, `KING OF THE HILL` in `Arenas/*.py`'s
+  `game_types` (filtered by `Arenas/__init__.py`'s `enumAvailable(type)`).
+- **KOTH's zone scoring is script** — `king.py` is the one arena that scores,
+  with `plus.addPoints`, `plus.getGameType`, `plus.isMatchOver`,
+  `plus.isDefeated` and sounds.
+- **Every win condition is C++** — `FUN_00418040` (last robot / last team),
+  `FUN_00418770` (points finish), with the score in a robot field at `+0x20`.
+  Deathmatch, Battle Royal and Team Match have no script rule at all.
+- **The match shell is C++** — HUD (`0x4749c0`), countdown (`0x477480`,
+  4.0 s), per-frame update (`0x412fc0`), results handoff (`0x4170e0`), and the
+  `isMatchOver` byte (`0x416450`).
+- **Our `plus` state is inert** — `game_type`, `players`, `paused`, `over` are
+  never written outside construction, `Arena.tickInterval` is missing, and
+  zone contents are empty. KOTH's `Tick` currently raises and is swallowed.
+- Events/prizes are `Events.txt`, the HUD and dialogs are `.gib`, settings are
+  `ra2.cfg`, sounds/music are files.
 
-So M8 is mostly **engine API + flow + presentation**, not a decompilation wall.
-The C++ still owns the *match shell* (spawn, countdown, camera, HUD refresh,
-end-of-match handoff) and the *application glue* (screen stack, save files).
+So M8 is **engine state + a C++ match shell reproduced from addresses + a
+script API that actually carries match state**, then presentation. It is a
+larger job than the first draft said, and M8.1 is done precisely so it is
+estimated against evidence.
+
+The oracle is also settled: the original runs under the installed flatpak
+Wine 9.0 and its frames are captured in `local/oracle/` (`docs/12-oracle.md`),
+so A/B comparisons are available now rather than at M11.
 
 ---
 
@@ -128,14 +139,17 @@ menu music and button sounds; quit and relaunch with the window where you left i
 
 | # | Work item | Lands in |
 |---|---|---|
-| M7.1 | `ra2-app` binary: `winit` window + `wgpu` surface, reusing `ra2-render`'s UI pipeline (offscreen path preserved for tests) | new crate `engine/crates/ra2-app` |
-| M7.2 | Input: mouse position (the shell's `PtInRect`/hover/click order), keyboard (Esc, arrows/Tab for focus), a bindings table; hit-testing already exists in `ra2ui::input` | `ra2-app`, `ra2ui::input` |
-| M7.3 | The loop: fixed 50 ms update, present at vsync, resize, DPI, fullscreen/windowed | `ra2-app` |
-| M7.4 | Screen stack: move `ra2-shell`'s `nav` into a `Flow` the app drives; keep the scripted route runner as the headless entry | `ra2-shell::nav` → shared |
+| M7.1 | ✅ `ra2-app` binary: `winit` window + `wgpu` surface, reusing `ra2-render`'s UI pipeline (offscreen path preserved for tests) | new crate `engine/crates/ra2-app` |
+| M7.2 | ✅ Input: mouse position (the shell's `PtInRect`/hover/click order), keyboard (Esc, arrows/Tab for focus), a bindings table; hit-testing already exists in `ra2ui::input` *(mouse mapping and Esc are in; arrows/Tab and the bindings table remain)* | `ra2-app`, `ra2ui::input` |
+| M7.3 | ✅ The loop: fixed 50 ms update, present at vsync, resize, DPI, fullscreen/windowed *(the fixed tick, Fifo present, resize and DPI are in; a fullscreen toggle remains)* | `ra2-app` |
+| M7.4 | ◐ Screen stack: move `ra2-shell`'s `nav` into a `Flow` the app drives; keep the scripted route runner as the headless entry *(the app and the headless path now drive one shared frame loop; `nav` has not yet moved into a `Flow`)* | `ra2-shell::nav` → shared |
 | M7.5 | Audio: `rodio`/`cpal` (MP3 + WAV), 2D/3D, music per screen group, volumes from `ra2.cfg`; `plus.createSound`/`playSound` real | new `ra2-audio`, `ra2script::plus` |
 | M7.6 | Settings: read/write `ra2.cfg`; a settings dialog drawn from the shipped `.gib` (options screen) | `ra2fmt::cfg`, `ra2-app` |
 | M7.7 | Text entry where the shell needs it (team name), the OS clipboard for import/export paths | `ra2-app` |
 | M7.8 | Cursor: the shipped cursor art, hover/click states per the corpus | `ra2-render`, `ra2ui` |
+
+The windowed path is built but was not exercised in this environment; the
+shared loop's offscreen half and its tests are the evidence here.
 
 **Acceptance.** A headless test drives the same `Flow` with a click script and
 produces the same frames as the windowed path (the loop is one code path); a
@@ -162,15 +176,16 @@ in the game's own script.
 
 | # | Work item | Lands in |
 |---|---|---|
-| M8.1 | **W5 recon**: the match object, spawn order, countdown, camera modes, HUD field writes, end handoff, per-type scoring, KO/immobilise rules; write it in `docs/02` with addresses | `docs/02-recon-findings.md` |
+| M8.1 | **done** — **W5 recon**: the match object, countdown, HUD writes, end handoff, per-type scoring, KO rules, the `plus` gap table | `docs/11-match-rules.md` |
 | M8.2 | `Match` state machine: `Setup → Spawn → Countdown → Fight → Over → Results`, driven by data (`ra2.cfg`'s `EventNumBots`, the arena's start points, the event's numbers) | new `ra2sim::match` |
-| M8.3 | Grow `plus` to what the arenas call: `getGameType`, `addPoints`, `isMatchOver`, `isDefeated`, `getPoints`, `playSound`, `createSound`, `SetCamera`, `GetCamera`, plus what the HUD scripts need | `ra2script::plus` |
-| M8.4 | Spawn: two teams' robots on the arena's start points, with the original's order and facing; `EventNumBots` for Battle Royal | `ra2sim::match` |
-| M8.5 | The match loop: fixed-step physics, the arena `Tick`, the AI cadence, damage events, defeated/KO, the countdown and the clock | `ra2sim::match` |
-| M8.6 | HUD: the shipped HUD `.gib` screens placed and driven by live state (health bars, points, clock, names, messages) | `ra2ui` + `ra2-app` |
-| M8.7 | Camera: `watch`/`chase`/`top` and the arena's own cameras (`AddCamera`), with the shipped bounds | `ra2-app` |
-| M8.8 | Results: the `common/matchresults.gib` slots filled from the match (`ra2ui::results` already binds them), then the return to the menu | `ra2ui::results`, `ra2-app` |
-| M8.9 | Pause/quit, Esc, and the arena intro (the shipped `.gib` + music) | `ra2-app` |
+| M8.3 | Grow `plus` and the arena host to what the match needs: write `game_type`/`players`/`paused`/`over` (currently inert), add `Arena.tickInterval`, populate zone contents (`GetZoneContents`, `GetRobotsInPhantom`), implement `addPoints`/`getPoints`, `eliminatePlayer`, `zap`, and the sounds | `ra2script::{plus,arena}`, `ra2sim` |
+| M8.4 | The C++ win conditions, reproduced from the recon: last robot (`FUN_00418040`), team totals (`FUN_00418770`), the `+0x20` score, damage→points (`FUN_004175b0`), the 4.0 s countdown and the clock | `ra2sim::match` |
+| M8.5 | Spawn: the teams' robots on the arena's start points, with the original's order and facing; `EventNumBots` (2 or 4, anything else rewritten to 4) for Battle Royal | `ra2sim::match` |
+| M8.6 | The match loop: fixed-step physics, the arena `Tick`, the AI cadence, damage events, defeated/KO, the countdown and the clock | `ra2sim::match` |
+| M8.7 | HUD: the shipped HUD `.gib` screens placed and driven by live state (health bars, points, clock, names, messages) | `ra2ui` + `ra2-app` |
+| M8.8 | Camera: `watch`/`static`/`orbit` (the binary's own vocabulary, not chase/top) and the arena's `AddCamera`, with the shipped bounds | `ra2-app` |
+| M8.9 | Results: the `common/matchresults.gib` slots filled from the match (`ra2ui::results` already binds them), then the return to the menu | `ra2ui::results`, `ra2-app` |
+| M8.10 | Pause/quit, Esc, and the arena intro (the shipped `.gib` + music) | `ra2-app` |
 
 **Acceptance.** Headless: a scripted `Match` on the box arena, two AI bots,
 produces a winner and a filled result screen; the score sequence for
@@ -372,23 +387,23 @@ Named so they are decisions, not omissions:
 
 Concrete, in order, each ending in a commit:
 
-1. **W5/M8.1 recon**: read the match shell (REA) and write the address map in
-   `docs/02`; list every `plus.*` call the arenas/AI make that we do not
-   implement (from a real run's recorded drops).
-2. **W4**: try the original under Wine (`xvfb-run`), or set up captured
-   fixtures; write down which.
-3. **M7.1**: `ra2-app` opens a window and presents `mainmenu.gib` through the
-   existing UI pipeline; the offscreen path stays.
-4. **M7.3/M7.2**: the fixed-step loop and mouse/keyboard hit-testing; click the
-   menu's `TEAM HQ` and land on `select_team`.
+1. **done** — **W5/M8.1 recon**: `docs/11-match-rules.md`. The rules are C++,
+   not script; KOTH alone scores in `king.py`.
+2. **done** — **W4**: the original runs under the installed flatpak Wine 9.0;
+   the main menu is captured at 1024×768 and 1280×1024 (`docs/12-oracle.md`).
+3. **done** — **M7.1/M7.2/M7.3**: `ra2-app` presents the shell offscreen and
+   in a window, with exact click mapping (`engine/crates/ra2-app`).
+4. **done** — **M7.3/M7.2**: the loop and hit-testing; the main menu →
+   `select_team` → `teamhq` click path is a test.
 5. **M7.5/W2**: decode and play one MP3 and one WAV; music per screen group;
    the `ra2.cfg` volumes.
 6. **M7.6/W3**: `ra2.cfg` read/write with the shipped keys.
 7. **M8.2**: the `Match` state machine headless (spawn → fight → over) on the
    box arena, with the result screen.
-8. **M8.3**: `plus.addPoints`/`getGameType`/`isMatchOver`/`isDefeated`, and the
+8. **M8.3**: wire the inert `plus` state (`game_type`, `points`, `over`,
+   `paused`, `players`), `Arena.tickInterval`, zone contents, and the
    King-of-the-Hill score test against `king.py`.
-9. **M8.6**: the live HUD, driven by the match state, read in a frame.
+9. **M8.7**: the live HUD, driven by the match state, read in a frame.
 10. **M9.1/W1**: the `.bot` writer and the 57-bot round-trip.
 
 After that, the milestones' own tables are the backlog; each item is small
