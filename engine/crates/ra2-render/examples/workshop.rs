@@ -143,7 +143,194 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // And screens outside the workshop, to the same two rules.
     render_events(&game.join("UI"), &game, &out)?;
     render_arenas(&game.join("UI"), &game, &out)?;
+    render_standings(&game.join("UI"), &game, &out)?;
+    render_match_results(&game.join("UI"), &game, &out)?;
     Ok(())
+}
+
+/// Compose `hq_league.gib` and `season_results.gib`, fill each grid with the
+/// game's own team roster, and render them.
+///
+/// The identity is shipped (`Teams/Teams.txt` + `AI/Teams.txt`); the points and
+/// rank are the live league's and never ship, so the picture uses the explicit
+/// empty table — a fresh season: no points, the roster in the manager's order.
+fn render_standings(
+    ui: &std::path::Path,
+    game: &std::path::Path,
+    out: &std::path::Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let rows = ra2ui::standings::empty(game)?;
+    let mut filled = 0;
+    for (screen, grid, template) in [
+        (
+            ra2ui::standings::LEAGUE_SCREEN,
+            ra2ui::standings::LEAGUE_GRID,
+            ra2ui::standings::LEAGUE_TEMPLATE,
+        ),
+        (
+            ra2ui::standings::RESULTS_SCREEN,
+            ra2ui::standings::RESULTS_GRID,
+            ra2ui::standings::RESULTS_TEMPLATE,
+        ),
+    ] {
+        let mut gib = ra2ui::workshop::load(ui, screen)?;
+        ra2ui::inline_proxies_in(&mut gib, ui);
+        let cell = ra2ui::cells::template(ui, template)?;
+        for block in gib.blocks.iter_mut() {
+            let Block::Widget(root) = block else { continue };
+            let Some(list) = ra2ui::workshop::find_mut(root, grid) else {
+                continue;
+            };
+            filled = if screen == ra2ui::standings::LEAGUE_SCREEN {
+                ra2ui::standings::fill_league(list, &cell, &rows)
+            } else {
+                ra2ui::standings::fill_results(list, &cell, &rows)
+            };
+            break;
+        }
+
+        // Read the first row back by the names the cell template's notes give,
+        // before drawing it: the measurement is the text, not only the cells.
+        if let Some(Block::Widget(root)) = gib.blocks.iter().find(|b| matches!(b, Block::Widget(_)))
+        {
+            if let Some(list) = ra2ui::workshop::find(root, grid) {
+                if let Some(row) = list.children.iter().find(|c| c.name().contains("cell")) {
+                    println!(
+                        "  {screen}: row 1 = rank {}, {}, {} points, {} ({})",
+                        cell_value(row, ra2ui::standings::RANK),
+                        cell_value(row, ra2ui::standings::NAME),
+                        cell_value(row, ra2ui::standings::POINTS),
+                        cell_value(row, ra2ui::standings::MOTTO),
+                        cell_art(row, ra2ui::standings::LOGO)
+                    );
+                }
+            }
+        }
+
+        let mut assets = UiAssets::open(game)?;
+        let placed = ra2ui::resolve_with(&gib, [1280.0, 1005.0], Some(assets.faces()));
+        let placed = placed.into_iter().collect::<Vec<_>>();
+        let scene = assets.scene(&placed, [1280, 1005]);
+        let renderer = Renderer::new()?;
+        let ui_renderer = UiRenderer::new(renderer.device());
+        let pixels = ui_renderer.render(renderer.device(), renderer.queue(), &scene)?;
+        let name = if screen == ra2ui::standings::LEAGUE_SCREEN {
+            "hq_league.png"
+        } else {
+            "season_results.png"
+        };
+        let path = out.join(name);
+        image::RgbaImage::from_raw(1280, 1005, pixels)
+            .ok_or("readback")?
+            .save(&path)?;
+        println!(
+            "  filled {screen} with {filled} rows and rendered {}",
+            path.display()
+        );
+    }
+    Ok(filled)
+}
+
+/// Compose `common/matchresults.gib` and fill its four slots with a match.
+///
+/// The real source is the live match and does not ship; this is the shape the
+/// screen needs, filled here with two explicit results so the row's text can be
+/// read and the labels checked by eye. The art is the game's own.
+fn render_match_results(
+    ui: &std::path::Path,
+    game: &std::path::Path,
+    out: &std::path::Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut gib = ra2ui::workshop::load(ui, "common/matchresults.gib")?;
+    ra2ui::inline_proxies_in(&mut gib, ui);
+    let template = ra2ui::cells::template(ui, ra2ui::results::TEMPLATE)?;
+    let results = [
+        ra2ui::results::MatchResult {
+            team_logo: "Teams\\orange_skull.bmp".into(),
+            bot_preview: "exhibition\\sample_bot.bmp".into(),
+            points: 248,
+            bot_name: "The Wrangler".into(),
+            team_name: "TEAM STINKBOMBS".into(),
+            immobilized: true,
+            winner: false,
+        },
+        ra2ui::results::MatchResult {
+            team_logo: "AI\\red_zone.bmp".into(),
+            bot_preview: "exhibition\\sample_bot.bmp".into(),
+            points: 125,
+            bot_name: "Red Menace".into(),
+            team_name: "Red Zone".into(),
+            immobilized: false,
+            winner: true,
+        },
+    ];
+    let mut filled = 0;
+    for block in gib.blocks.iter_mut() {
+        let Block::Widget(root) = block else { continue };
+        filled = ra2ui::results::fill(root, &template, &results);
+        break;
+    }
+    println!("  matchresults: read back the two rows from the filled cells");
+    if let Some(Block::Widget(root)) = gib.blocks.iter().find(|b| matches!(b, Block::Widget(_))) {
+        for slot in ra2ui::results::SLOTS.iter().take(results.len()) {
+            let Some(slot) = ra2ui::workshop::find(root, slot) else {
+                continue;
+            };
+            let Some(cell) = slot
+                .children
+                .iter()
+                .find(|c| c.name() == ra2ui::results::CELL)
+            else {
+                continue;
+            };
+            println!(
+                "    {}: {}, {}, {} points",
+                slot.name(),
+                cell_value(cell, ra2ui::results::BOT_NAME),
+                cell_value(cell, ra2ui::results::TEAM_NAME),
+                cell_value(cell, ra2ui::results::POINTS)
+            );
+        }
+    }
+
+    let mut assets = UiAssets::open(game)?;
+    let placed = ra2ui::resolve_with(&gib, [1280.0, 1005.0], Some(assets.faces()));
+    let placed = placed.into_iter().collect::<Vec<_>>();
+    let scene = assets.scene(&placed, [1280, 1005]);
+    let renderer = Renderer::new()?;
+    let ui_renderer = UiRenderer::new(renderer.device());
+    let pixels = ui_renderer.render(renderer.device(), renderer.queue(), &scene)?;
+    let path = out.join("matchresults.png");
+    image::RgbaImage::from_raw(1280, 1005, pixels)
+        .ok_or("readback")?
+        .save(&path)?;
+    println!(
+        "  filled {} match-result slots and rendered {}",
+        filled,
+        path.display()
+    );
+    Ok(filled)
+}
+
+/// A `TextBox` row's value, from its own `Text` child.
+fn cell_value(row: &ra2fmt::gib::Widget, name: &str) -> String {
+    ra2ui::workshop::find(row, name)
+        .and_then(|w| {
+            w.children
+                .iter()
+                .find(|c| c.kind == ra2fmt::gib::WidgetKind::Text)
+        })
+        .and_then(|c| c.field("_Text"))
+        .map(|f| f.text().to_string())
+        .unwrap_or_default()
+}
+
+/// A row's art file, from the child the template names.
+fn cell_art(row: &ra2fmt::gib::Widget, name: &str) -> String {
+    ra2ui::workshop::find(row, name)
+        .and_then(|w| w.filename())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Compose `hq_events.gib`, fill its own grid with the game's own events, and
