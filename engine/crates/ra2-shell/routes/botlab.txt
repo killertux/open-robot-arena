@@ -1,0 +1,20 @@
+# Main menu -> Team HQ -> robot inventory -> bot lab -> a tab -> a chassis step.
+#
+# The clicks are widget names rather than pixels: the runner finds a point that
+# actually reaches the named widget by hit-testing the placed screen, and the
+# widget's own Notes decide the transition. A pixel click (click x y) works the
+# same way and is the CI form; see the test.
+shot 00-mainmenu.png
+wait 1
+click "Team HQ button"
+shot 01-select-team.png
+click "continue button"
+shot 02-team-hq.png
+click "robots button"
+shot 03-robot-inventory.png
+click "workshop button"
+shot 04-botlab-overview.png
+click "chassis button"
+shot 05-botlab-chassis.png
+click "structure design button"
+shot 06-chassis-step1.png

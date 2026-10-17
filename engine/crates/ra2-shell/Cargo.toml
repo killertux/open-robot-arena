@@ -1,0 +1,18 @@
+[package]
+name = "ra2-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The game shell's entry point: boot the shipped main menu and navigate it headlessly."
+
+[[bin]]
+name = "ra2-shell"
+path = "src/main.rs"
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+pyo3 = { version = "0.23.5", features = ["auto-initialize"] }
+ra2-render = { path = "../ra2-render" }
+ra2fmt = { path = "../ra2fmt" }
+ra2script = { path = "../ra2script" }
+ra2ui = { path = "../ra2ui" }

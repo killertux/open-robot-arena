@@ -950,6 +950,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ra2-shell"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "pyo3",
+ "ra2-render",
+ "ra2fmt",
+ "ra2script",
+ "ra2ui",
+]
+
+[[package]]
 name = "ra2fmt"
 version = "0.1.0"
 dependencies = [

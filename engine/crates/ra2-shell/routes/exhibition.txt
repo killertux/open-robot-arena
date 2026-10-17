@@ -1,0 +1,11 @@
+# Main menu -> exhibition setup -> the arena picker.
+#
+# The setup screen's `arena button` says "click to load arena.gib into content
+# group"; the loaded list's own note says "populate with arena names", and the
+# names come from the game's arena scripts.
+shot 00-mainmenu.png
+wait 1
+click "exhibition button"
+shot 01-exhibition-setup.png
+click "arena button"
+shot 02-arena-picker.png
