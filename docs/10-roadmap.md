@@ -289,9 +289,9 @@ do not fake the original file. Prize scene geometry (`event_results.py`).
 | # | Work item | Lands in |
 |---|---|---|
 | M11.1 | **W4 the oracle**: Wine under `xvfb` (or captured fixtures) for A/B frames: the main menu, a bot lab screen, one arena, one match. Record the differences. | `tools/`, `docs/` |
-| M11.2 | The traction survey: 27/45 → the mount/contact layer (F11/F4/F5) with the oracle to tell us which side is wrong | `ra2sim` |
-| M11.3 | F9's crush curve and subdivided silhouette; F12's mass rule (one density cannot satisfy both anchors — keep the conflict named unless the oracle settles it); F7's per-material damage scale | `ra2sim` |
-| M11.4 | F6 friction combination — blocked on `oxijolt`; if it gains a hook, land Havok's `√(µ₁²+µ₂²)`; otherwise it stays named | `oxijolt` |
+| M11.2 | The traction survey: **28 → 39 / 45** after the contact-layer fixes (the robot's own bodies share a collision group; internal control/power fittings add no hull). The six left are four rest-pose weapon/mount cases, one chassis-child placement case and one curved path — measured in `docs/06` F4 | `ra2sim` |
+| M11.3 | F9's crush curve **closed as a testable linear curve** (four samples 0.0927/0.1855/0.2782/0.3709 m), with the collider re-bake named as the residual (`UsedByConstraint`); F12's mass rule re-checked (`0x5c6820` is a vtable slot; the file's zero is taken at face value) and the two anchors kept; F7's per-material damage scale **not established** — `+0x1c` is apply-damage, the four armour plates measure ×1.00, and the next read is the `MaterialObject` `+4` float | `ra2sim` |
+| M11.4 | F6 friction combination — checked `oxijolt` **1.1.0+jolt-5.6.0**: no combine hook; stays named, and the survey does not need it | `oxijolt` |
 | M11.5 | The shell's residues: title boxes narrower than the advance extent; the decorator-layout question (S7); the spin motor's rest pose (F1) | `ra2ui`, `ra2render`, `ra2sim` |
 | M11.6 | Content sweep: every arena in every game type, every stock bot in a match, every event entered — the counts as tests | `ra2sim`, `ra2ui` |
 | M11.7 | Performance: the fixed step, the UI at resolution, a measured frame budget on the reference machine | `ra2-app`, `ra2sim` |

@@ -38,9 +38,10 @@ live in that file; they are not re-measured here.
 A robot drops into an arena, drives on a scripted input timeline, collides with
 walls and movable props, and the run renders to a frame strip. The physics sits
 behind a `PhysicsBackend` trait; Jolt is the implementation. On the measured
-45-bot box-arena survey, **27 of 45 stock robots travel 2 m or more**. Caveat:
-the rest creep or barely move — the wheel/contact model, the arena colliders and
-Jolt's friction combination law, not a global speed constant (F2/F4/F5/F6).
+45-bot box-arena survey, **39 of 45 stock robots travel 2 m or more**. Caveat:
+the six that remain are rest-pose weapons/props and one curved path, not the
+motor law or a global speed constant (F2/F4/F5); the friction-combination law
+(F6) stays blocked on the binding.
 The data is the game's: arena gravity, fixed collision geometry, per-body
 friction/elasticity, and chassis mass from armour weight × surface area.
 
@@ -126,7 +127,7 @@ Measured, not aspirational.
   the arena picker with its 12 arena names.
 * Booting the game's own `Scripts/Main.py`; running the 14 arenas, the shipped
   AI and the hazard zones.
-* The physics sandbox and two-robot duels, headless; 27/45 stock bots reach
+* The physics sandbox and two-robot duels, headless; 39/45 stock bots reach
   2 m on the survey.
 * The Linux tarball with the `ra2-app` client, its launcher, and its
   unpack-and-run smoke test.
