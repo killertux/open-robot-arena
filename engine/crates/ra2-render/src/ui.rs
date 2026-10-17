@@ -263,28 +263,21 @@ impl UiAssets {
             if glyph.cell[2] <= 0 || glyph.cell[3] <= 0 {
                 continue;
             }
-            if text.len() < 8 {
-                eprintln!(
-                    "DEBUG glyph {:?} cell {:?} rect {:?} page {:?} widget {:?}",
-                    text,
-                    glyph.cell,
-                    glyph.rect,
-                    (pw, ph),
-                    p.frame
-                );
-            }
             out.push(UiQuad {
                 rect: glyph.rect,
                 corners: None,
-                // The face's page is stored **bottom-up**, so the two `v`s are
-                // swapped: the cell's lower byte row is the one the eye sees at
-                // the top of the quad. Measured, not assumed — drawn `T` and `L`
-                // through the whole pipeline come out with `T`'s bar at the
-                // bottom of its box and `L`'s foot at the top until this is done.
+                // The face's page is stored **both ways round**: bottom-up in `v`
+                // and mirrored in `u`, so both pairs are swapped. The `v` was
+                // measured with `T` and `L` (drawn in byte order, `T`'s bar is at
+                // the bottom); the `u` is what the page looks like read as a
+                // picture — its `E` has its three bars on the *left* of the stem,
+                // its `F` the same, and so on through the alphabet — and it is
+                // why every label used to draw each letter with a stroke of its
+                // neighbour: the cell was right and the letter in it was reversed.
                 uv: [
-                    glyph.cell[0] as f32 / pw,
-                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
                     (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
+                    glyph.cell[0] as f32 / pw,
                     glyph.cell[1] as f32 / ph,
                 ],
                 color,
@@ -330,15 +323,12 @@ impl UiAssets {
             out.push(UiQuad {
                 rect: glyph.rect,
                 corners: None,
-                // The face's page is stored **bottom-up**, so the two `v`s are
-                // swapped: the cell's lower byte row is the one the eye sees at
-                // the top of the quad. Measured, not assumed — drawn `T` and `L`
-                // through the whole pipeline come out with `T`'s bar at the
-                // bottom of its box and `L`'s foot at the top until this is done.
+                // The page is stored both ways round — bottom-up in `v`, mirrored
+                // in `u` — so both pairs are swapped. See `text_quads`.
                 uv: [
-                    glyph.cell[0] as f32 / pw,
-                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
                     (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
+                    glyph.cell[0] as f32 / pw,
                     glyph.cell[1] as f32 / ph,
                 ],
                 color,

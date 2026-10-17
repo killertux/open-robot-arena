@@ -173,6 +173,10 @@ class Font:
 
     def _rect(self, g):
         adv, bear, third, u0, v0, u1, v1 = g
+        # The page's rows are stored **bottom-up**, so `v` is turned over here.
+        # `u` is not: the cells run left to right in reading order. What *is*
+        # mirrored is the glyph inside its cell (the `draw` below flips the
+        # sample in `u`, as the engine's renderer does).
         x0, x1 = round(u0 * self.width), round(u1 * self.width)
         y0, y1 = self.height - round(v1 * self.height), self.height - round(v0 * self.height)
         return adv, third, x0, y0, x1 - x0, y1 - y0
@@ -203,12 +207,14 @@ class Font:
             adv, third, gx, gy, w, h = self._rect(g)
             top = y + 0 - third          # the caller passes the baseline
             for yy in range(h):
-                # The page is stored **bottom-up**, so the cell's *last* byte row
-                # is the one the eye sees first. Sampling it in byte order draws
-                # every glyph upside-down: a capital `T` comes out with its bar at
-                # the bottom. The engine's own renderer does the same swap.
+                # The page is stored **both ways round**: bottom-up in `v` and
+                # mirrored in `u`. The last byte row is the one the eye sees first
+                # (sampled in byte order a `T` comes out with its bar at the
+                # bottom), and the cell's columns run right to left (sampled as
+                # stored, an `E` comes out with its bars on the left of the stem).
+                # The engine's own renderer swaps both, the same way round.
                 sy = gy + h - 1 - yy
-                row = self.page[sy * self.width + gx : sy * self.width + gx + w]
+                row = self.page[sy * self.width + gx : sy * self.width + gx + w][::-1]
                 for xx, v in enumerate(row):
                     if not v:
                         continue

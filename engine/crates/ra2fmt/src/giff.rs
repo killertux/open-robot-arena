@@ -176,8 +176,18 @@ pub struct Glyph {
 }
 
 impl Glyph {
-    /// The glyph's rect in the page in pixels, top-left origin — the page is
-    /// stored bottom-up, so `v` is flipped here.
+    /// The glyph's rect in the page in pixels, top-left origin. The page's rows
+    /// are stored **bottom-up** — `v` is measured from the bottom — so `v` is
+    /// turned over here. `u` is **not**: the cells run left to right in reading
+    /// order, so `u0..u1` names the cell directly.
+    ///
+    /// What *is* mirrored is the **glyph inside its cell**. Read as a picture the
+    /// page's `E` carries its three bars on the left of the stem and its `F` the
+    /// same, through the alphabet: each cell holds its letter reversed. A renderer
+    /// therefore flips each glyph's sample in `u` when it makes the quad (both of
+    /// ours do), which is where that belongs — the rect here is the cell, and the
+    /// cell is right. Measured by turning the page into an image and reading it,
+    /// never by reading a rendered word: a mirrored word still reads as itself.
     pub fn rect(&self, width: u32, height: u32) -> (i32, i32, i32, i32) {
         let x0 = (self.u0 * width as f32).round() as i32;
         let x1 = (self.u1 * width as f32).round() as i32;
