@@ -7,15 +7,13 @@
 //!
 //! This test **prints the count and every failing robot with its distance**, so
 //! a change that moves one bot across the line is visible in the log rather
-//! than only in a changed assertion. The assertion is the last recorded count;
-//! the printed table is the measurement.
+//! than only in a changed assertion. The printed table is the measurement.
 //!
 //! Baseline on the tree before the contact-layer fixes (F4's self-collision
 //! group and the internal-fitting hull): **28/45**. The docs' older figure of
 //! 27/45 predates this harness; `Team9/Bot1` is the borderline robot (2.09 m
-//! net, barely over the line). Fourteen of the eighteen/nineteen failures were
-//! robots whose own chassis parts dragged on the floor, which is what the
-//! fixes below address.
+//! net, barely over the line). The measured result after the fixes is
+//! **39/45**; the six that remain are named in `docs/06` F4.
 
 use std::path::{Path, PathBuf};
 
@@ -159,11 +157,12 @@ fn the_traction_survey_prints_its_count_and_failures() {
         "the stock AI set is 45 robots; found {}",
         bots.len()
     );
-    // The last recorded count after the F4 contact-layer fixes. A change that
-    // moves it must update this number *and* the docs; the per-bot table above
+    // The last measured count is 39/45; 38 is the floor because `Team3/Bot1`
+    // sits on the 2 m line (2.00 m printed, just under it). A change that moves
+    // the count must update this number *and* the docs; the per-bot table above
     // is the evidence.
     assert!(
         passed >= 38,
-        "the traction survey regressed: {passed}/45 (was 38/45); failures: {failed:?}"
+        "the traction survey regressed below its floor: {passed}/45 (last measured 39); failures: {failed:?}"
     );
 }

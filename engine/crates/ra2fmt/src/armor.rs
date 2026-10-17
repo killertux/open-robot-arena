@@ -146,4 +146,49 @@ mod tests {
         println!("{}", printed.join("\n"));
         assert_eq!(defs.len(), 4);
     }
+
+    /// The same measurement on the **shipped** archive, when the game is
+    /// present. The unit test above pins the file's shape; this one proves the
+    /// four rows in `RA2.cfz` really are the zeros the parser expects.
+    #[test]
+    fn the_shipped_armor_table_has_no_multiplier() {
+        let Some(root) = std::env::var_os("RA2_GAME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                loop {
+                    let c = p.join("local/game");
+                    if c.is_dir() {
+                        return Some(c);
+                    }
+                    if !p.pop() {
+                        return None;
+                    }
+                }
+            })
+        else {
+            eprintln!("skipping the shipped armour table: no local/game");
+            return;
+        };
+        let cfl = crate::cfl::Cfl::open_path(&root.join("RA2.cfz")).expect("RA2.cfz");
+        let text = cfl
+            .get_text("Armor_Definitions.txt")
+            .expect("Armor_Definitions.txt");
+        let defs = parse(&text);
+        assert_eq!(defs.len(), 4);
+        for d in &defs {
+            assert_eq!(d.damage_scale(), 1.0, "{}", d.name);
+            assert_eq!(d.puncture, 0.0, "{} puncture", d.name);
+            assert_eq!(d.concussion, 0.0, "{} concussion", d.name);
+            println!(
+                "{}: weight {:.0}, heat {:.0}, puncture {:.0}, concussion {:.0}, damage x{:.2}",
+                d.name,
+                d.weight,
+                d.hardness,
+                d.puncture,
+                d.concussion,
+                d.damage_scale()
+            );
+        }
+    }
 }
