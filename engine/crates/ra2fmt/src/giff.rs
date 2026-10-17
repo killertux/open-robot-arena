@@ -42,18 +42,15 @@
 //! rect names, `T`'s ink sits *higher* than `L`'s, which is only true if the page
 //! runs bottom-up.
 //!
-//! The horizontal axis **is** flipped: the page's glyph cells hold each letter
-//! mirrored in `u`. Read as a picture, the row at y 233 reads `Ǝ Ⅎ ⅁ H I J K L M N
-//! O P Q R S T U` left to right — the cells are in reading order and every
-//! letter is reversed *inside its cell* (the `E`'s three bars are on the left of
-//! its stem, the `F`'s on the left, and so on). Both renderers therefore swap the
-//! `u` pair of each glyph's quad, just as they swap `v`. This was the defect that
-//! made every label draw a glyph plus a stroke of its neighbour: the cell was
-//! right and the letter in it was reversed. It was settled by the page **as an
-//! image**, not by a rendered word — a mirrored word still reads as itself, which
-//! is why the earlier "horizontal is not flipped" reading (a column mean, which a
-//! cell that catches a neighbour confounds) was wrong. The workshop toolbar is
-//! not evidence either way: its words are baked into the button `.bmp`.
+//! The page is stored **bottom-up only**. `v` is measured from the bottom, so a
+//! renderer samples the cell bottom-up; `u` is **not** flipped. Flipped
+//! vertically and read left to right, the page's row at y 233 is `E F G H I J K
+//! L M N O P Q R S T U V` — upright letters in reading order. This corrects an
+//! earlier reading: rotating the page 180° both reverses the row and mirrors
+//! each glyph, and that was mistaken for the cells being mirrored in `u`.
+//! Swapping `u` as well mirrors every letter — a rendered `WATER` comes out
+//! `WATƎЯ` — so both renderers swap `v` only. The workshop toolbar is not
+//! evidence either way: its words are baked into the button `.bmp`.
 //!
 //! ## Which record is which character
 //!
@@ -72,12 +69,13 @@
 //!
 //! ## The cells clip the page's glyphs (a separate, measured item)
 //!
-//! With the mirror fixed the labels are upright, but some glyphs are still struck
-//! through — worst on the small condensed faces. The cause is **not** another
-//! reader bug: the rect samples a cell of the page that is shifted a few columns
-//! from the glyph it names, in **every** face. This is a property of the shipped
-//! file (the page's glyph positions and the rects disagree), not of `parse`,
-//! which reads `u0`/`u1` straight. The record's four floats are settled: the
+//! With the vertical flip in place the labels are upright, but some glyphs are
+//! still struck through — worst on the small condensed faces. The cause is
+//! **not** another reader bug: in the condensed faces the rect samples a cell of
+//! the page that is shifted a few columns from the glyph it names, and in every
+//! face the glyph's ink overhangs the advance-sized rect. This is a property of
+//! the shipped file (the page's glyph positions and the rects disagree), not of
+//! `parse`, which reads `u0`/`u1` straight. The record's four floats are settled: the
 //! loader that *builds* a runtime page (`FUN_005cd560`) writes `u0 = x/W`,
 //! `v0 = y/H`, `u1 = (x + width)/W`, `v1 = (y + height)/H`, so the order is
 //! `u0 v0 u1 v1` and `v` is measured from the page's bottom (which
@@ -90,9 +88,10 @@
 //! whose coverage bleeds) puts ink there for almost every record. The workshop
 //! toolbar that *looks* clean is **baked into the button `.bmp` art**, not drawn
 //! by this reader. A probe of all nine faces (`[Text] HAMBURGEFONTSIV`, rendered
-//! by `uishot` and `tools/ui_compose.py`, which agree pixel for pixel) shows
-//! **every face smears**, worst the small condensed ones (`fg_mcn12`, `fg_mcn14`,
-//! `fg_mcn16`), least the large `fg_d*`.
+//! by `uishot` and `tools/ui_compose.py`, which agree) shows the large `fg_d*`
+//! faces reading and the small condensed ones (`fg_mcn12`, `fg_mcn14`,
+//! `fg_mcn16`) smearing: their rects are the ones offset from the page's
+//! glyphs.
 //!
 //! What the page says, measured. Overlaying every rect on the page shows the
 //! borders landing **0–6 columns from the nearest blank cell boundary**, and the
@@ -103,14 +102,15 @@
 //! uniform off-by-N, not a single slip. Across all nine faces **58–82 of 94**
 //! rects have their left border on ink and **58–77** their right border, and only
 //! **0–5** bracket a blank-separated glyph (`fg_mcn14` 69/66/0, `fg_mcn16`
-//! 74/69/0, `fg_d20` 71/58/3). So the cells clip their glyphs in every face; the
-//! small condensed faces look worse only because a few columns is a larger
-//! fraction of a small glyph.
+//! 74/69/0, `fg_d20` 71/58/3). So the advance-sized cells clip the overhanging
+//! glyph in every face; the small condensed faces look worse because their
+//! rects are also offset, and a few columns is a larger fraction of a small
+//! glyph.
 //!
 //! The probe for that is **shape, not reading**: one `[Text]` per face holding
 //! `F`, `L`, `J`, rendered by `uishot`, then each glyph's ink bbox and density
 //! (ink / bbox area). Every bbox fills its cell (the renderer samples exactly the
-//! rect), the letters are **upright** (the mirror is fixed), and the `F` is the
+//! rect), the letters are **upright** (the vertical flip is right), and the `F` is the
 //! sparse one — density **0.43** in `fg_mcn14`, **0.49** in `fg_mcn16`, **0.50**
 //! in `fg_d20`, against the `L`'s 0.57/0.48/0.59 — because the cell keeps the
 //! `F`'s stem and clips a bar. The rendered ink count equals the cell's ink count
@@ -118,12 +118,24 @@
 //! A long label is not a different case: a character's cell and pen are the same
 //! in a two-character label and in the 44-character help line
 //! (`ra2-render`'s `a_glyphs_cell_does_not_depend_on_the_label_length`), the two
-//! renderers agree pixel for pixel, and the alphabet maps in order. The lower-case
+//! renderers agree on the words and layout, and the alphabet maps in order. The lower-case
 //! help body reads worse only because the same tail is a larger fraction of a
 //! 5–9 px cell. Three rescues were tried and rejected — widening the pen to the
 //! cell, squeezing the cell onto the advance, and trimming to the ink bbox — all
 //! because the tail is *inside* the shipped cell. The faithful rescue is the
 //! game's own re-pack, whose cut is the open read above.
+//!
+//! **The page is not advance-packed.** Placing each record at
+//! `x = Σ advance` within its row (the hypothesis that the page follows the pen)
+//! was measured against the record rects. It loses: `fg_mcn14`'s row at y 233
+//! holds 32 records whose advances sum to **197 px**, while that row's page ink
+//! reaches the page's right edge (**255 px**) and the rects span **250 px** — the page runs at roughly the
+//! rect pitch, not the advance pitch. Rendered, the probe `WATER MOW EfGbDqp`
+//! reads under the record rects (cleanly on the regular faces, the upper case
+//! on the condensed ones) and is unreadable under the advance mapping.
+//! The same holds on every face; the condensed rows are the ones whose rects
+//! are a few columns off their glyphs (the next paragraph), and the advance
+//! mapping is off in the opposite direction.
 //!
 //! The file cannot be rescued by another layout. The header is invariant across
 //! all nine faces: word `0x0C` is exactly `1.0f`, the sixteen bytes at `0x18` are
@@ -207,16 +219,14 @@ pub struct Glyph {
 impl Glyph {
     /// The glyph's rect in the page in pixels, top-left origin. The page's rows
     /// are stored **bottom-up** — `v` is measured from the bottom — so `v` is
-    /// turned over here. `u` is **not**: the cells run left to right in reading
-    /// order, so `u0..u1` names the cell directly.
+    /// turned over here. `u` is **not** flipped: the cells run left to right in
+    /// reading order, and the letters inside them are upright when the page is
+    /// turned over. A renderer therefore swaps the glyph quad's `v` pair only;
+    /// swapping `u` mirrors every letter.
     ///
-    /// What *is* mirrored is the **glyph inside its cell**. Read as a picture the
-    /// page's `E` carries its three bars on the left of the stem and its `F` the
-    /// same, through the alphabet: each cell holds its letter reversed. A renderer
-    /// therefore flips each glyph's sample in `u` when it makes the quad (both of
-    /// ours do), which is where that belongs — the rect here is the cell, and the
-    /// cell is right. Measured by turning the page into an image and reading it,
-    /// never by reading a rendered word: a mirrored word still reads as itself.
+    /// The rect is the record's cell, not necessarily the page's glyph: in the
+    /// condensed faces the page's glyph sits a few columns from it, and the
+    /// glyph's ink can overhang the advance-sized rect. See the module note.
     pub fn rect(&self, width: u32, height: u32) -> (i32, i32, i32, i32) {
         let x0 = (self.u0 * width as f32).round() as i32;
         let x1 = (self.u1 * width as f32).round() as i32;
@@ -668,9 +678,11 @@ mod tests {
         );
     }
 
-    /// **The shipped `.giff`'s cells clip its own page's glyphs.** With the mirror
-    /// fixed, the cells still land a few columns off their glyph, in **every**
-    /// face: overlay the rects on the page and the borders cut the glyphs (58–82
+    /// **The shipped `.giff`'s advance cells clip its own page's glyphs.** With
+    /// the vertical flip right and the `u` swap removed, the cells still land a
+    /// few columns off their glyph in the condensed faces and the glyph overhangs
+    /// every advance-sized cell: overlay the rects on the page and the borders
+    /// cut the glyphs (58–82
     /// of 94 left borders and 58–77 right borders land on ink; 0–5 cells bracket a
     /// blank-separated glyph). The shift grows along each row — a small pitch
     /// excess of the page over the rects, not a uniform off-by-N and not a slip —
@@ -766,6 +778,58 @@ mod tests {
                 ("fg_mcn16", 74, 69, 94),
             ],
             "rect borders that land on ink (left, right, scored)"
+        );
+    }
+
+    /// **The page is not advance-packed.** The hypothesis that each record's
+    /// page cell is `Σ advance` along its packed row was measured and refuted:
+    /// `fg_mcn14`'s row at y 233 holds 32 records whose advances total **197**
+    /// pixels, while the row's page ink reaches the page's right edge (**255**) and its rects span
+    /// **250**. A renderer that placed those records at the advance positions
+    /// would draw a row more than fifty pixels too short and the probe `WATER MOW EfGbDqp`
+    /// would not read (it does under the record rects). The page runs at
+    /// roughly the rect pitch; the condensed faces' rects are still a few
+    /// columns off their glyphs, which is the residue the module note names.
+    #[test]
+    fn the_page_is_not_advance_packed() {
+        let Some(font) = shipped("fg_mcn14") else {
+            return;
+        };
+        // The row whose records are E..d: v0 = 13/256.
+        let row: Vec<usize> = font
+            .glyphs
+            .iter()
+            .take(94)
+            .enumerate()
+            .filter(|(_, g)| (g.v0 * 256.0).round() as i64 == 13)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(row.len(), 32, "the row at y 233");
+        let advance: i32 = row.iter().map(|&i| font.glyphs[i].advance).sum();
+        assert_eq!(advance, 197, "the row's advances");
+        let rects: Vec<_> = row
+            .iter()
+            .map(|&i| font.glyphs[i].rect(font.page_width, font.page_height))
+            .collect();
+        let rect_span = rects.iter().map(|r| r.0 + r.2).max().unwrap() - rects[0].0;
+        assert_eq!(rect_span, 250, "the row's rects");
+        // The page's ink in the row's vertical band. The far-right ink is the
+        // wrapped `d e` pair; it is still the same page row.
+        let y0 = rects.iter().map(|r| r.1).min().unwrap();
+        let y1 = rects.iter().map(|r| r.1 + r.3).max().unwrap();
+        let mut last_ink = 0;
+        for x in 0..font.page_width as i32 {
+            if (y0..y1).any(|y| font.coverage(x, y) > 40) {
+                last_ink = x;
+            }
+        }
+        assert!(
+            last_ink >= 250,
+            "the page's row reaches {last_ink}, not the advance sum {advance}"
+        );
+        assert!(
+            last_ink > advance + 40,
+            "the page's row reaches {last_ink}, far beyond the advance sum {advance}"
         );
     }
 

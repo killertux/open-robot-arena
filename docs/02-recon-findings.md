@@ -519,22 +519,23 @@ its note and `PassMouse` — it has no class behaviour to run, so it cannot be a
 control, and a hit has to fall through it to what is behind. `ra2ui::input::hit`
 does that, and the three overlays above are what requires it.
 
-### Fixed: the page is mirrored in u — every glyph drawn reversed
+### Fixed: the page is bottom-up only — the `u` swap was mirroring every glyph
 
-The defect that made every label draw "a glyph plus a stroke of its neighbour" was
-the page's **horizontal orientation**, not the rects. Read as a picture, the page's
-row at y 233 is `Ǝ Ⅎ ⅁ H I J K L M N O P Q R S T U`: the cells run left to right in
-reading order and each letter is reversed *inside its cell*. Both renderers now
-swap each glyph quad's `u` pair, as they already swap `v`. The probe for it is the
-page as an image, not a rendered word (a mirrored word still reads as itself), and
-the workshop toolbar is not evidence either way: its words are baked into the
-button `.bmp`.
+The page's rows are stored bottom-up, but its **columns are not mirrored**. Flipped
+vertically and read left to right, the page's row at y 233 is `E F G H I J K L M N
+O P Q R S T U V`: upright letters in reading order. The earlier `Ǝ Ⅎ ⅁` reading was
+a **180° rotation** of the page, which reverses the row *and* mirrors each letter.
+Both renderers had therefore been swapping each glyph quad's `u` pair as well as
+`v`, which mirrored every glyph — a rendered `WATER` came out `WATƎЯ`. They now
+swap `v` only (`a_glyph_quad_swaps_v_and_not_u`). The workshop toolbar is not
+evidence either way: its words are baked into the button `.bmp`.
 
-### Open (separate, measured): the cells clip the page's glyphs
+### Open (separate, measured): the advance cells clip the page's glyphs
 
-With the mirror fixed the labels are upright, but some glyphs are still struck
-through. The rect samples a cell of the page that is shifted a few columns from
-the glyph it names, in **every** face — a property of the shipped file, not of
+With the vertical flip right the labels are upright, but some glyphs are still
+struck through. In the condensed faces the rect samples a cell of the page that
+is shifted a few columns from the glyph it names, and in every face the glyph's
+ink overhangs the advance-sized rect — a property of the shipped file, not of
 `parse` (which reads `u0`/`u1` straight). The record's four floats are settled:
 the builder `FUN_005cd560` writes `u0 = x/W … v1 = (y+h)/H`; the page's picture is
 the **high byte** (the low byte is colour, not a mask).
@@ -555,6 +556,16 @@ ink and **58–77** their right border; only **0–5** bracket a blank-separated
 (`fg_mcn14` 69/66/0, `fg_mcn16` 74/69/0, `fg_d20` 71/58/3). The header is invariant
 (word `0x0C` = `1.0f`, bytes `0x18..0x28` zero, `leading` 4–7) and no other layout
 of the 133800 bytes does better (best strict-bracket 9/92, `512x128`).
+
+**The page is not advance-packed.** The hypothesis that the page follows the pen
+(`x = Σ advance` within a row) was measured and refuted: `fg_mcn14`'s row at y 233
+holds 32 records whose advances sum to **197 px**, while that row's page ink
+reaches the page's right edge (**255 px**) and its rects span **250 px**. The page runs at roughly the rect
+pitch, not the advance pitch; rendered, `WATER MOW EfGbDqp` reads under the record
+rects and is unreadable under the advance mapping. The strict bracket count is
+~0/94 under both mappings (the glyphs overhang the advance cells), so the reading,
+not a bracket count, is the measurement that decides it. `the_page_is_not_advance_packed`
+keeps the row's numbers.
 
 The game re-packs the glyphs at load: `FUN_00591b50` constructs the font, loads the
 resource, deserialises with `FUN_005ce320`, and calls `FUN_005cd560`, which creates a
@@ -580,9 +591,9 @@ string. Measured, they are not. Instrumenting the quads and diffing the renders:
 - A character's `cell` and its pen are **the same in "At" and in the 44-character
   help line** (`a_glyphs_cell_does_not_depend_on_the_label_length`); they are a
   function of the character and the face, never of the length.
-- `uishot` and `tools/ui_compose.py` are **pixel for pixel identical** on the whole
+- `uishot` and `tools/ui_compose.py` draw the **same words and layout** on the whole
   sentence, and the upper-case alphabet renders in order, so the record→character
-  mapping and the `u`/`v` swap are right.
+  mapping and the `v` flip are right.
 - The difference is the **character mix and the size**. The help line is lower-case,
   and `fg_mcn14`'s lower-case cells are 5–9 px; the same cell-clipping tail (a few
   columns of the neighbour) is a much larger fraction of a lower-case cell, so the
@@ -595,14 +606,14 @@ distorts it; trimming to the ink bbox keeps the tail (it is ink). The faithful
 rescue is the game's own re-pack (`FUN_005cd560`), named above; **how it locates
 the cut is still open**, so the renderer stays faithful to the shipped cell.
 
-### Fixed: a glyph's quad drew its cell mirrored
+### Fixed: a glyph's quad mirrored its cell
 
-The "two shapes per character" reading was the page's `u` mirror, fixed above: the
-quad's uv was right and the letter inside the cell was reversed. The page texture
-was never the problem, and neither was the widget — a `Text` written exactly as
-`ch_stepbuttons.gib` writes its own smeared for the same reason. Readings from
-*ink in a page* stand; readings from *a rendered word* had to be re-checked because
-a mirrored word still reads as itself.
+The "two shapes per character" reading was the `u` swap, removed above: the page
+is bottom-up only, and swapping `u` as well mirrored each letter inside its cell.
+The page texture was never the problem, and neither was the widget — a `Text`
+written exactly as `ch_stepbuttons.gib` writes its own is fine once the quad is
+right. Readings from *ink in a page* stand; readings from *a rendered word* had to
+be re-checked because a mirrored word still reads as itself.
 
 ### What the shell's screens name, and the two things the game does not ship
 

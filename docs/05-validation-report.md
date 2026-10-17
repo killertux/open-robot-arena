@@ -680,18 +680,19 @@ Known, documented, not yet fixed:
     item below shows.
 
     And one long-standing thing is now settled, found while checking those rows.
-    The defect that made every label draw "a glyph plus a stroke of its neighbour"
-    was the page's **horizontal orientation**, not its rects: read as a picture,
-    the page's row at y 233 is `Ǝ Ⅎ ⅁ H I J K L M N O P Q R S T U` — the cells run
-    left to right in reading order and each letter is reversed *inside its cell*.
-    Both renderers now swap each glyph quad's `u` pair, as they already swap `v`
-    (`79570d1`). The probe is the page as an image, never a rendered word (a mirrored
-    word still reads as itself). The workshop toolbar is not evidence either way:
-    its words are **baked into the button `.bmp` art**.
+    The page's rows are bottom-up, but its **columns are not mirrored**. Flipped
+    vertically, the row at y 233 reads `E F G H I J K L M N O P Q R S T U V` —
+    upright letters in reading order. The earlier `Ǝ Ⅎ ⅁` reading was a **180°
+    rotation**, which reverses the row *and* mirrors each letter; both renderers
+    had been swapping each glyph quad's `u` pair as well as `v`, which mirrored
+    every glyph (`WATER` came out `WATƎЯ`). They now swap `v` only
+    (`a_glyph_quad_swaps_v_and_not_u`). The workshop toolbar is not evidence either
+    way: its words are **baked into the button `.bmp` art**.
 
-    A **separate, measured** item remains: with the mirror fixed the labels are
-    upright, but the rect samples a cell of the page shifted a few columns from the
-    glyph it names, in **every** face (not `fg_mcn14` alone). The measurement is
+    A **separate, measured** item remains: with the vertical flip right the labels
+    are upright, but in the condensed faces the rect samples a cell of the page
+    shifted a few columns from the glyph it names, and in every face the glyph's
+    ink overhangs the advance-sized rect. The measurement is
     shape, not reading: one `[Text]` per face holding `F`, `L`, `J`, rendered by
     `uishot`, then each glyph's ink bbox and density. Every bbox fills its cell (the
     renderer samples exactly the rect), the letters are upright, and the `F` is the
@@ -712,6 +713,15 @@ Known, documented, not yet fixed:
     the builder (`FUN_005cd560`: `u0 = x/W … v1 = (y+h)/H`), and the page's picture
     is the **high byte**; the low byte is colour, not a mask.
 
+    **The page is not advance-packed.** The hypothesis that it follows the pen
+    (`x = Σ advance` within a row) was measured and refuted: `fg_mcn14`'s row at
+    y 233 has advances summing to **197 px**, while its page ink reaches the page's right edge (**255 px**)
+    and its rects span **250 px**. The strict bracket count is ~0/94 under both the
+    rect and advance mappings (the glyphs overhang the advance cells), so the
+    deciding measurement is the rendered word: `WATER MOW EfGbDqp` reads under the
+    record rects and is unreadable under the advance mapping. The row's numbers are
+    kept by `the_page_is_not_advance_packed` (`ra2fmt::giff`).
+
     The game **re-packs** the glyphs at load: `FUN_00591b50` constructs the font,
     loads the resource, deserialises with `FUN_005ce320`, and calls `FUN_005cd560`,
     which creates a D3D texture, blits per-glyph bitmaps and recomputes `u/v`. So
@@ -729,7 +739,7 @@ Known, documented, not yet fixed:
     since the help body reads worse than a short label. They are not. A character's
     `cell` and its pen are **identical in "At" and in the 44-character help line**
     (`a_glyphs_cell_does_not_depend_on_the_label_length`, `ra2-render`), `uishot` and
-    `tools/ui_compose.py` are **pixel for pixel identical** on the whole sentence, and
+    `tools/ui_compose.py` draw the **same words and layout** on the whole sentence, and
     the upper-case alphabet renders in order. The help body is lower-case, and
     `fg_mcn14`'s lower-case cells are 5–9 px, so the **same cell-clipping tail** is a
     much larger fraction of the cell and the glyph and its neighbour merge; upper-case
