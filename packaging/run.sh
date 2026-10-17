@@ -174,8 +174,13 @@ fi
 
 if [ "$want_check" -eq 1 ]; then
     print_python_check
-    python_lib_ok && python_stdlib_ok
-    exit $?
+    if python_lib_ok && python_stdlib_ok; then
+        exit 0
+    fi
+    # Print the same guidance a normal launch prints. AppRun in the AppImage
+    # uses this output as its own failure message, so the two cannot drift.
+    check_python >&2 || true
+    exit 1
 fi
 
 if [ "$want_help" -eq 1 ]; then

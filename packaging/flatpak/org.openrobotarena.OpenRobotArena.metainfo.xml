@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.openrobotarena.OpenRobotArena</id>
+  <name>Open Robot Arena</name>
+  <summary>Native Robot Arena 2 client and engine</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <developer id="org.openrobotarena">
+    <name>The Open Robot Arena contributors</name>
+  </developer>
+  <description>
+    <p>
+      Open Robot Arena is a native Linux client and engine for Robot Arena 2:
+      Design &amp; Destroy (Gabriel Interactive / Infogrames, 2003). It reads
+      the original game's data files directly and does not run the original
+      Windows executable.
+    </p>
+    <p>
+      The game is not included. The player supplies a Robot Arena 2
+      installation containing RA2.cfz, UI/ and Scripts/; the Flatpak asks for
+      that directory on first run and passes it to the client as --game.
+    </p>
+    <p>
+      The client renders the original menu and workshop screens, runs the
+      game's Python scripts on CPython 3.12, and ships headless rendering and
+      physics tools (ra2-shell, ra2-render, ra2-sim, ra2-duel, ra2).
+    </p>
+  </description>
+  <launchable type="desktop-id">org.openrobotarena.OpenRobotArena.desktop</launchable>
+  <categories>
+    <category>Game</category>
+    <category>Simulation</category>
+  </categories>
+  <provides>
+    <binary>ra2-app</binary>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-10-17"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

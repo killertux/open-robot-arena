@@ -317,7 +317,7 @@ deterministic ram is the tripwire.
 |---|---|---|
 | M12.1 | ◐ macOS: `.app` bundle, `libpython3.12.dylib`/Jolt, Metal, notarisation notes, arm64 — `packaging/macos/bundle.sh` and the notes exist; **the script was never run and no macOS artifact exists** | `packaging/`, `docs/09` |
 | M12.2 | ◐ Windows: MSVC build, `python3.12.dll`, DX12, portable zip + launcher (or MSI) — `packaging/windows/zip.sh` writes the layout; **never run, no `.exe`, no zip, no `run.cmd`** | `packaging/`, `docs/09` |
-| M12.3 | Linux: Flatpak and/or AppImage built and smoke-tested (network permitting), else the tarball stays the release — **not built; the tarball remains the release** | `packaging/` |
+| M12.3 | ◐ Linux: Flatpak and AppImage recipes — Flatpak manifest on runtime 24.08 (CPython 3.12), first-run portal picker, generated `cargo-sources.json`, AppImage `AppRun` + build script, both with desktop/icon/metainfo. **Statically checked only: not built — `flatpak-builder`, the 24.08 SDK/runtime and `appimagetool`/`linuxdeploy` are missing.** The tarball remains the release | `packaging/`, `docs/08` §6 |
 | M12.4 | ◐ CI: `.github/workflows/ci.yml` on Linux (fmt, clippy `-D warnings`, tests, build, `package.sh --no-smoke`, artifact upload), plus advisory macOS/Windows builds (`continue-on-error`). **Not yet run on GitHub**; `check.sh` itself cannot run without the game, so the workflow uses the individual steps | `.github/` |
 | M12.5 | Versioning, changelog, release notes, a `--version`, and the "supply your own game" first-run flow | `ra2-app` |
 | M12.6 | Docs: the player guide, the troubleshooting page (Python, drivers, game files), the fidelity statement | `docs/` |
@@ -332,7 +332,10 @@ macOS/Windows artifacts exist **and** were run by a human or CI on that platform
 an independent `uishot` render while keeping one `ra2-shell` route run. That is
 the only platform claim in this table with a measurement behind it. The macOS
 and Windows scripts and CI build jobs are marked but unverified; a green
-advisory build would still not be a packaged, run artifact.
+advisory build would still not be a packaged, run artifact. M12.3's Flatpak
+and AppImage recipes are complete and statically checked, but **not built**:
+this host has no `flatpak-builder`, no 24.08 SDK/runtime and no
+`appimagetool`/`linuxdeploy`, so the tarball is still the release.
 
 **Size.** 3–5 blocks (plus whatever the untested platforms cost).
 
