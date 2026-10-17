@@ -202,7 +202,7 @@ impl Armour {
 
     /// The cosmetic armour row the bot editor writes for this type: material
     /// scales, shininess and the editor's own hardness.
-    fn material_row(&self) -> [f32; 5] {
+    pub fn material_row(&self) -> [f32; 5] {
         match self.type_id {
             0 => [0.2669, 0.2669, 0.19975, 0.85, 80.0],
             1 => [0.19975, 0.19975, 0.19975, 0.85, 20.0],

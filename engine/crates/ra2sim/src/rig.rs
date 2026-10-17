@@ -454,87 +454,31 @@ fn power_pair(def: &ra2fmt::component::ComponentDef) -> (Option<f32>, Option<f32
 }
 
 fn num(def: &ra2fmt::component::ComponentDef, key: &str) -> Option<f32> {
-    def.get(key)?.split_whitespace().next()?.parse().ok()
+    def.number(key)
 }
 
-/// The definition's `type` category, lower-cased.
-fn category(def: Option<&ra2fmt::component::ComponentDef>) -> Option<String> {
-    def.and_then(|d| d.get("type")).map(|s| {
-        s.split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase()
-    })
-}
-
-/// The maximum hitpoints the component factory gives a category when the
-/// definition does not declare them.
-///
-/// Recovered from the binary: `FUN_0045cf40` switches on the definition's `type`
-/// (the field the `.txt` parser fills from the `type = ` key, read back by
-/// `FUN_0049aa30`) and stores 400 / 100 / 400 / 400 / 1000 / 1000 into the
-/// component's maximum, after which a `hitpoints = ` line overrides it.
+/// The maximum hitpoints: the definition's `hitpoints`, else the factory's
+/// category table, else the role's fallback (an unloaded component).
 fn type_hitpoints(def: Option<&ra2fmt::component::ComponentDef>, role: Role) -> f32 {
-    match category(def).as_deref() {
-        Some("power") => 400.0,
-        Some("extenders") => 100.0,
-        Some("mechanics") => 400.0,
-        Some("mobility") => 400.0,
-        Some("weapons") => 1000.0,
-        Some("extras") => 1000.0,
-        // Unknown category: the factory sets nothing, so fall back to the role.
-        _ => role.default_hitpoints(),
-    }
+    def.and_then(|d| d.number("hitpoints"))
+        .or_else(|| ra2fmt::component::category_hitpoints(def))
+        .unwrap_or_else(|| role.default_hitpoints())
 }
 
 /// The `fracture` default the same factory sets per category.
 fn type_fracture(def: Option<&ra2fmt::component::ComponentDef>) -> f32 {
-    match category(def).as_deref() {
-        Some("extenders") => 15.0,
-        Some("mechanics") | Some("mobility") | Some("weapons") => 20.0,
-        Some("extras") => 60.0,
-        _ => 0.0,
-    }
+    def.and_then(|d| d.number("fracture"))
+        .or_else(|| ra2fmt::component::category_fracture(def))
+        .unwrap_or(0.0)
 }
 
 fn flag_false(def: &ra2fmt::component::ComponentDef, key: &str) -> bool {
-    def.get(key)
-        .map(|v| v.trim().eq_ignore_ascii_case("false"))
-        .unwrap_or(false)
+    ra2fmt::component::flag_false(def, key)
 }
 
 /// The mass a `.gmf` rigid body with `mass = 0` is given, from the room it takes
-/// up (F12).
-///
-/// Every stock wheel's rigid body stores `mass = 0` — `fatboy_wheel1`,
-/// `miniwheel`, `mudtire`, `shinywheel1`, `wheel1`, `wheel2`, `wheel3`,
-/// `wheel_slim` — as do `slipperbottom` and `cannon_txt`. The engine's own rule
-/// for filling them is not reachable: the body's reader takes the file's zero at
-/// face value (`FUN_005c6820` reads the mass straight into the Havok body at
-/// `+0x20`), so whatever fills it does so where the body enters the simulation.
-/// This is therefore **our** rule, but it is size-aware rather than a flat
-/// number, which is the part that matters: a mudtire and a mini wheel no longer
-/// weigh the same. A part gets its own volume times [`ZERO_MASS_DENSITY`].
-///
-/// **The density cannot satisfy both anchors, which is a finding in itself.**
-///
-/// The one stock wheel whose weight is documented is the mudtire at **22.5 kg**
-/// (the figure that closes Mud Runner's total: `360.6 + 4×22.5 − 4×8 = 418.6`,
-/// the documented weight). Its bounding box is 0.947 × 0.947 × 0.340 m, so that
-/// wants a density of **74 kg/m³** — which would make a mini wheel (the wheel
-/// every stock AI bot runs, 0.652 × 0.652 × 0.135 m) **4.2 kg**, where the rest
-/// of the simulation is calibrated against 8.  A density of **139** keeps the
-/// mini wheel at exactly 8 (so nothing the bots do changes) and puts the mudtire
-/// at 42 kg, which overshoots the documented total badly.
-///
-/// No single density does both, so either the engine's fill is not
-/// volume-proportional at all, or one of the two anchors is wrong. What this
-/// rule buys is the *shape*: a zero-mass body is priced by its size instead of
-/// every one of them weighing the same, which is what made a 0.30 m³ mudtire and
-/// a 0.06 m³ mini wheel both come out at 8 kg. The density is the one that
-/// leaves the wheels the stock bots use exactly where they are.
-const ZERO_MASS_DENSITY: f32 = 139.0;
-
+/// up (F12). The rule and its unresolved density conflict live in
+/// [`ra2fmt::component::zero_mass_fill`] so the workshop reports the same mass.
 fn zero_mass_fill(points: &[Vec3]) -> f32 {
     if points.is_empty() {
         return 7.0;
@@ -544,13 +488,7 @@ fn zero_mass_fill(points: &[Vec3]) -> f32 {
         mn = mn.min(*p);
         mx = mx.max(*p);
     }
-    let e = (mx - mn).max(Vec3::ZERO);
-    let volume = e.x * e.y * e.z;
-    let density = std::env::var("RA2_ZERO_MASS_DENSITY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(ZERO_MASS_DENSITY);
-    (volume * density).max(1.0)
+    ra2fmt::component::zero_mass_fill(mn.to_array(), mx.to_array())
 }
 
 /// Group the components into welded bodies and work out the joints between them.
@@ -864,16 +802,11 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 .map(|a| a.hardness)
                 .unwrap_or_else(|| role.default_hitpoints())
         } else {
-            def.as_ref()
-                .and_then(|d| num(d, "hitpoints"))
-                .unwrap_or_else(|| type_hitpoints(def.as_ref(), role))
+            type_hitpoints(def.as_ref(), role)
         };
         // `fracture` is a per-category default too (extenders 15, mechanics and
         // mobility 20, weapons 20, extras 60) overridden by the definition.
-        let fracture = def
-            .as_ref()
-            .and_then(|d| num(d, "fracture"))
-            .unwrap_or_else(|| type_fracture(def.as_ref()));
+        let fracture = type_fracture(def.as_ref());
         let material = def
             .as_ref()
             .and_then(|d| d.get("material"))

@@ -7,3 +7,4 @@ description = "Parsers for Robot Arena 2 data formats (GMI/.gmf, BOT, CFL3/.cfz,
 
 [dependencies]
 flate2 = "1"
+glam = "0.34.1"
