@@ -104,3 +104,56 @@ mainmenu	1024x768	mainmenu__1024x768__000.png	2026-10-17	flatpak org.winehq.Wine
 
 Record the exact route taken (what was clicked, in order) in `state` or a note
 beside it; the paths are not scriptable yet.
+
+## The comparison harness
+
+Once a pair exists, fidelity is a number and a picture, not an opinion. The
+paths below are from the main tree.
+
+```sh
+# render the canonical screen at the reference's size (from any checkout/worktree)
+tools/oracle/render_ours.sh
+#   -> local/oracle/ours/mainmenu__1024x768.png
+
+python3 tools/oracle/compare.py \
+    local/oracle/ours/mainmenu__1024x768.png \
+    local/oracle/original/mainmenu__1024x768__000.png \
+    local/oracle/diff/mainmenu__1024x768__diff.png --check --threshold 1.45
+
+# render -> compare --check in one step
+tools/oracle/check.sh
+```
+
+`render_ours.sh [screen.gib] [out.png] [w] [h]` defaults to
+`UI/mainmenu/mainmenu.gib` at 1024×768. It finds the game through `RA2_GAME`,
+`<repo>/local/game`, or the main worktree's `local/game` (a linked worktree has
+no `local/` of its own), and writes into the main worktree's
+`local/oracle/ours/` unless `out.png` is given.
+
+`compare.py` requires identical dimensions (it exits 2 and prints both sizes
+otherwise), and reports the same statistic as the shell's existing standard:
+the mean absolute difference per RGB channel (0..255), the overall mean, the
+maximum channel difference, and the fraction of pixels whose largest channel
+difference exceeds `--delta` (default 8). It always prints one JSON line on
+stdout; `--check` exits 1 above `--threshold` (default 0.5) and 0 below, using
+the pointer-masked overall MAE when a pointer was found.
+
+Two capture artifacts are reported, never silently cropped:
+
+- **OS pointer.** Auto-detected as the standard dark-left-edge/bright-arrow
+  shape. `pointer.rect` and `pointer.stats_without` are in the JSON; the
+  rectangle is outlined in magenta on the reference panel. `--pointer-rect
+  x,y,w,h` overrides it and `--pointer-scan off` disables the scan.
+- **Title bar / black border.** Detected per edge; `decorations.rects` and (when
+  found) `decorations.stats_without` are reported. The written image is never
+  cropped.
+
+The diff sheet is 2×2: reference (top left, pointer outlined), ours (top
+right), absolute difference amplified 8× (bottom left), and a 16×16 block heat
+map (bottom right; amber = block mean × 16). The full `heatmap.values` array is
+in the JSON.
+
+`check.sh` gates at the first measured main-menu number (**1.4390 → threshold
+1.45**). It is not part of `tools/check.sh`: CI has no game files and no
+captured originals, so this is a local, game-required gate. Without the
+reference frame it exits 2 (skip), naming the missing path.
