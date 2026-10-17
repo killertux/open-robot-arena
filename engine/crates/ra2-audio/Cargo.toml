@@ -1,0 +1,10 @@
+[package]
+name = "ra2-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Decode and play Robot Arena 2's shipped MP3 music and WAV sounds, with a device-free fallback."
+
+[dependencies]
+ra2fmt = { path = "../ra2fmt" }
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "mp3", "wav"] }

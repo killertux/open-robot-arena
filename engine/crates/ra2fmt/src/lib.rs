@@ -12,6 +12,7 @@
 pub mod arena;
 pub mod armor;
 pub mod bot;
+pub mod cfg;
 pub mod cfl;
 pub mod component;
 pub mod event;
