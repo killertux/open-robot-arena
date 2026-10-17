@@ -648,49 +648,75 @@ one `Placement` carries each caption's text and it is drawn once. The difference
 is in the `.giff` itself.
 
 **The records' rects and the page are two different packings.** The page is a
-256×256 (or 512×512) atlas whose rows run bottom-up in record order; a row's last
-glyph is carried to the **end of the row above** (the `A..N` row ends with the
-`9` from the row below, the `P..c` row ends with the `O`). The records' four
-rect floats are a cumulative layout that drifts from those runs — on `fg_d20`,
-`A..O`'s record cells tile 66..246 while the page's `A..O` runs span 69..253. The
-`O` is the clearest case: record 45's rect is 235..246 on the row at y 223 and
-holds **21 pixels over 3 of its 11 columns**, which the earlier reading called
-"no `O` in `fg_d20`"; the page's `O` is at **243..255 on the `P..c` row (y 205)**,
-**116 pixels over 12 columns**. `fg_mcn12`'s record 45 is a fragment for the same
-reason (its page row has no third row to carry into; that one face still reads a
-partial `O`).
+256×256 (or 512×512) atlas whose rows run bottom-up. Each row is a **regular
+flow** of glyphs plus a **right slot** (the last ~13 columns) holding the records
+that did not fit at the end of the previous row. The row's record block is
+`previous row's last` + this row's records but its last; the page's visual
+sequence is that block **rotated left by the number of right-slot records**.
+A width alignment against the **next record's raw cell width** finds the rotation,
+the blank records, the 1-px bleed at the page edge and the truncated duplicate there.
 
-**The advance table is two records ahead of the page table.** The loader's own
-loop starts at `0x20`, and the metrics show it: `fg_mcn16`'s glyph record for `i`
-carries 7 and its `n` carries 3, while the records two on carry 3 and 7 — the
-page's own widths. Spacing by the glyph table makes `Options` read `Opti o is`;
-spacing by the shifted table makes it read `Options`. The two halves are read
-where each is right: cells from the page, advances from the shifted record.
+`fg_mcn14` — the help screen's face — is the one that showed the missing term:
+its rows are `#..C` + `"` (k=1), `E..c` + `D` (k=1) and `f..~` + `d,e` (k=2).
+The first, order-only pass handled k=1 but read the second row as `D..c` and the
+third as `e..~`, so the help body came out `bU 4f 4bp...`; with the rotation it
+reads `At the top of your screen there are buttons for each area of the
+workshop.`. The working face beside it, `fg_mcn16`: `#..@` + `A` (k=1), `B..]`
++ `A` (k=1), `_..~` + `^` (k=1).
 
-`ra2fmt::giff::Font::repack_from_page` does this at parse time: for each packed
-row it finds the page's ink runs, applies the row cascade, and writes each
-record's cell (`u0..v1`), its `third` (the row band's top relative to the
-baseline) and leaves the advance in its table; `Font::advance` reads two records
-on. `ra2 font` prints the effective advance, so `tools/ui_compose.py` and
-`uishot` draw the same run. Every shipped face maps **94 cells** (the sentinel
-record is the 95th), and the corpus's **122 `Caption` attachments in 53 of 116
-files** — the 758 attachments also hold 295 `Background`s — are each a body with
-one non-empty `Text`, centred in the button and drawn once. The game itself
-re-packs the glyphs at load (`FUN_005cd560`), so reading the page's runs is what
-the shipped loader does too.
+| face | row | group records | block | ink runs | k | matches | cost |
+|---|---|---|---|---|---|---|---|
+| `fg_mcn14` | 0 | 35 (34..68) | 34 (34..67) | 34 | 1 | 34 | 23 |
+| `fg_mcn14` | 1 | 32 (69..100) | 32 (68..99) | 32 | 1 | 32 | 11 |
+| `fg_mcn14` | 2 | 27 (101..127) | 27 (100..126) | 27 | 2 | 27 | 8 |
+| `fg_mcn16` | 0 | 32 (34..65) | 31 (34..64) | 31 | 1 | 31 | 23 |
+| `fg_mcn16` | 1 | 29 (66..94) | 29 (65..93) | 29 | 1 | 29 | 21 |
+| `fg_mcn16` | 2 | 33 (95..127) | 33 (94..126) | 33 | 1 | 33 | 25 |
+
+The `O` is the clearest rect/page disagreement: record 45's rect is 235..246 on
+the row at y 223 and holds **21 pixels over 3 of its 11 columns**, which an
+earlier reading called "no `O` in `fg_d20`"; the page's `O` is at **243..255 on
+the `P..c` row (y 205)**, **116 pixels over 12 columns**. `fg_mcn12`'s record 45
+is still a fragment: its page row has no row above to carry into, so that one
+face reads a partial `O`.
+
+**The advance table is two records ahead in every face, not the page's two
+leading characters.** The glyph table's `i` carries 9/11/13/14/6/7/6/6/7 across
+`fg_d18`…`fg_mcn16`, while the record two on carries 4/5/6/6/3/3/3/3/3 — the
+narrow `i`; `m` is the mirror (5–14 vs 9–21), and `n`/`o` follow. The page's
+first visible run is `#` and the two space-like records before 34 have no run:
+that is the page's layout, and it is a different fact from the advance shift.
+The glyph table stays at `c - 34`; only the advance is read at `c - 32`.
+
+`ra2fmt::giff::page_rows` measures the rows and `Font::repack_from_page` applies
+them at parse time: it writes each record's cell (`u0..v1`), its `third` (the row
+band's top relative to the baseline) and leaves the advance in its table;
+`Font::advance` reads two records on. `ra2 font` prints the effective advance, so
+`tools/ui_compose.py` and `uishot` draw the same run. Every shipped face maps
+**94 cells** (the sentinel record is the 95th), and the corpus's **122 `Caption`
+attachments in 53 of 116 files** — the 758 attachments also hold 295
+`Background`s — are each a body with one non-empty `Text`, centred in the button
+and drawn once. The game itself re-packs the glyphs at load (`FUN_005cd560`), so
+reading the page's runs is what the shipped loader does too.
 
 Pictures: `uishot` and `ui_compose.py` on `mainmenu.gib` both read
-`EXHIBITION`, `TEAM HQ`, `MULTIPLAYER`, `Options`, `Credits`, `Quit`;
-`teamhq/select_team.gib` reads `SELECT YOUR ROBOTICS TEAM` and its captions
-`New Team` / `Continue` (`Delete Team` is behind the proxied bottom bar, a
-layout overlap rather than a caption one). Tests:
+`EXHIBITION`, `TEAM HQ`, `MULTIPLAYER`, `Options`, `Credits`, `Quit`; both read
+the help body's `At the top of your screen...` and the pangram
+`The quick brown fox jumps over the lazy dog. 0123456789` in all nine faces
+(`/tmp/opencode/help-rust.png`, `help-python.png`, `pangram-rust.png`,
+`pangram-python.png`). `teamhq/select_team.gib` reads `SELECT YOUR ROBOTICS
+TEAM` and its captions `New Team` / `Continue` (`Delete Team` is behind the
+proxied bottom bar, a layout overlap rather than a caption one). Tests:
+`the_page_rows_are_measured_and_rotated`,
+`the_help_line_reads_from_its_page_runs`,
+`the_pangram_reads_in_every_face`,
+`the_bot_lab_and_team_picker_titles_still_read`,
 `the_font_page_supplies_the_o_the_records_misplace`,
 `every_face_maps_its_page_runs`,
 `the_advance_table_is_two_records_ahead_of_the_page`,
 `the_cells_are_the_pages_glyph_runs`,
 `each_caption_is_drawn_once_at_its_buttons_frame`,
-`every_caption_in_the_corpus_is_one_text_body` (147 tests in the suite).
-
+`every_caption_in_the_corpus_is_one_text_body` (151 tests in the suite).
 
 ### The UI project document: the shell's own index of itself, and a check on it
 

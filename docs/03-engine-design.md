@@ -96,8 +96,9 @@ local/           # (git-ignored) game files + converted cache
   and some title boxes are narrower than the shifted advance table's extent, so
   they clip as the data says; S4's workshop list and paint tools are the game's
   C++ and are named/deferred rather than approximated. The font's rect/page
-  packing is settled (S8): cells are the page's own glyph runs and the advance
-  table is read two records on.
+  packing is settled (S8): cells are the page's own glyph runs, each row is
+  rotated by its right-slot records and the advance table is read two records
+  on.
 - **M6 — Packaging.** ✅ Done for Linux x86_64: the portable tarball, launcher,
   installer, `.desktop`, icon and unpack-and-run smoke are built and measured
   ([`08-packaging.md`](08-packaging.md)). macOS and modern Windows are a

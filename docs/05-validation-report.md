@@ -784,8 +784,8 @@ Known, documented, not yet fixed:
     glyph table is refuted, since the same index gives the right letter in
     another face. **S8 later corrected this**: the page does hold a whole `O` at
     243..255 on the row above; the record's rect was looking at the row below.
-    The parser now derives the cells from the page's runs, and `ROBOT WORKSHOP`
-    reads.
+    The parser now derives the cells from the page's runs, rotates each row by
+    its right-slot records, and `ROBOT WORKSHOP` reads.
 
     The labels that looked wrong were not a face's problem but every face's: the
     glyph page is stored **bottom-up** and neither renderer swapped the `v`s of a

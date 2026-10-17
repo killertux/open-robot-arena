@@ -79,8 +79,8 @@ setup → arena picker (3 frames). Two renderers written the other way round —
 `ra2-render`'s wgpu path and `tools/ui_compose.py` on the CPU — agree to a mean
 per-channel difference of **0.42/255** on `mainmenu.gib` and **0.24/255** on
 `hq_league.gib`. Caveats: the font's record rects and page are two packings, so
-`ra2fmt` derives each glyph cell from the page's own ink runs and reads the
-advance table two records on (S8 in
+`ra2fmt` derives each glyph cell from the page's own ink runs, rotates each row
+by its right-slot records and reads the advance table two records on (S8 in
 [`docs/07-m5-m6-checklist.md`](docs/07-m5-m6-checklist.md)); the remaining font
 residue is `fg_mcn12`'s partial `O`, and titles whose authored box is narrower
 than the shifted advance table clip as the data says. The workshop's **list and
