@@ -33,9 +33,12 @@
 //! and attaches it. The `remove button` is the shipped button. The armour grid
 //! is the shipped `armor grid` on `armor.gib`; a click sets the armour row.
 //!
-//! Wiring is **read-only this pass**: the shipped `control grid` is filled with
-//! `control_cell.gib` cells and the bindings are listed in the panel. Adding a
-//! control, dropping it on a cell and choosing an action is the next slice.
+//! Wiring is editable: the shipped `new analog`/`new switch`/`new button`
+//! buttons start a placement, a click on a free cell of the shipped
+//! `control grid` adds it, a component row plus an action row binds it through
+//! the model's own matrix, and the shipped `delete button` removes it. This is
+//! click-to-place then click-to-bind (the grid's note says drag; the model call
+//! is the same `ControlBoard::add`).
 
 use std::path::{Path, PathBuf};
 
@@ -48,7 +51,7 @@ use ra2ui::components::Component as PaletteComponent;
 use ra2ui::workshop::build::{Build, Placement as BuildPlacement};
 use ra2ui::workshop::library::{GameLibrary, TextureEntry};
 use ra2ui::workshop::paint::Texture;
-use ra2ui::workshop::wiring::ControlKind;
+use ra2ui::workshop::wiring::{Control, ControlKind};
 use ra2ui::workshop::{self};
 use ra2ui::{Frame, Placement};
 
@@ -99,6 +102,12 @@ pub struct Builder {
     target: (usize, i32),
     /// The component a part row or the remove button acts on.
     selected_part: Option<usize>,
+    /// The control kind waiting for a free grid cell (the shipped `new
+    /// analog`/`new switch`/`new button` buttons set it), and the control and
+    /// binding target the player has picked.
+    wire_placing: Option<ControlKind>,
+    wire_control: Option<[i32; 2]>,
+    wire_component: Option<usize>,
     /// The palette row on top (the grid is a one-row window of a longer list).
     palette_scroll: usize,
     selected_texture: Option<TextureEntry>,
@@ -193,6 +202,9 @@ impl Builder {
             selected: None,
             target: (0, 0),
             selected_part: None,
+            wire_placing: None,
+            wire_control: None,
+            wire_component: None,
             palette_scroll: 0,
             selected_texture: None,
             name_buffer,
@@ -347,6 +359,12 @@ impl Builder {
             .and_then(ra2ui::Grid::from_widget)
             .map(|g| g.columns.max(1) as usize)
             .unwrap_or(4)
+    }
+
+    /// Click a cell of the shipped `control grid` (place or select a control).
+    pub fn click_control_cell(&mut self, cell: [i32; 2]) -> Result<(), String> {
+        let point = self.control_cell_point(cell)?;
+        self.click(point[0], point[1])
     }
 
     /// Click the palette cell at `index` in the current category.
@@ -666,6 +684,100 @@ impl Builder {
             self.refresh_panel();
             return Ok(());
         }
+        if let Some(rest) = action.strip_prefix("m9:new:") {
+            let kind = match rest {
+                "analog" => ControlKind::Analog,
+                "switch" => ControlKind::Switch,
+                "button" => ControlKind::Button,
+                other => return Err(format!("unknown control kind {other:?}")),
+            };
+            self.wire_placing = Some(kind);
+            self.status = format!("place a {}: click a free control grid cell", kind.label());
+            self.refresh_panel();
+            return Ok(());
+        }
+        if action == "m9:wirecancel" {
+            self.wire_placing = None;
+            self.status = "placement cancelled".into();
+            self.refresh_panel();
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:wirecell:") {
+            let (x, y) = rest
+                .split_once(':')
+                .ok_or_else(|| format!("bad grid cell {rest:?}"))?;
+            let cell = [
+                x.parse().map_err(|_| format!("bad cell column {x:?}"))?,
+                y.parse().map_err(|_| format!("bad cell row {y:?}"))?,
+            ];
+            self.place_control(cell);
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:wirectl:") {
+            let (x, y) = rest
+                .split_once(':')
+                .ok_or_else(|| format!("bad control cell {rest:?}"))?;
+            let cell = [
+                x.parse().map_err(|_| format!("bad cell column {x:?}"))?,
+                y.parse().map_err(|_| format!("bad cell row {y:?}"))?,
+            ];
+            self.wire_placing = None;
+            self.wire_control = Some(cell);
+            self.wire_component = None;
+            let name = self
+                .build
+                .board()
+                .control_at(cell)
+                .map(|c| c.name.clone())
+                .unwrap_or_default();
+            self.status = format!("selected control {name}");
+            self.refresh_panel();
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:wirecomp:") {
+            let index: usize = rest
+                .parse()
+                .map_err(|_| format!("bad component row {rest:?}"))?;
+            self.wire_component = Some(index);
+            let class = self
+                .build
+                .components()
+                .get(index)
+                .map(|c| c.class.clone())
+                .unwrap_or_default();
+            self.status = format!("bind to component {index} ({class}): click an action");
+            self.refresh_panel();
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:wireact:") {
+            let (slot, index) = rest
+                .split_once(':')
+                .ok_or_else(|| format!("bad action row {rest:?}"))?;
+            let slot: usize = slot.parse().map_err(|_| format!("bad slot {slot:?}"))?;
+            let index: usize = index.parse().map_err(|_| format!("bad action {index:?}"))?;
+            self.bind_selected(slot, index);
+            return Ok(());
+        }
+        if action == "m9:wireremove" {
+            let Some(cell) = self.wire_control else {
+                self.status = "select a control first".into();
+                self.refresh_panel();
+                return Ok(());
+            };
+            match self.build.board_mut().remove(cell) {
+                Some(control) => {
+                    self.wire_control = None;
+                    self.wire_component = None;
+                    self.status = format!("removed control {}", control.name);
+                    return self.refresh();
+                }
+                None => {
+                    self.status = "there is no control there".into();
+                    self.refresh_panel();
+                    return Ok(());
+                }
+            }
+        }
         if let Some(rest) = action.strip_prefix("m9:armor:") {
             let type_id: i32 = rest
                 .parse()
@@ -814,6 +926,31 @@ impl Builder {
         let chain = chain(&placed, &path);
         if chain.iter().any(|p| p.widget.name() == "remove button") {
             return Some("m9:remove".into());
+        }
+        if self.tab() == Some("wiring button") {
+            for (button, action) in [
+                ("new analog", "m9:new:analog"),
+                ("new switch", "m9:new:switch"),
+                ("new button", "m9:new:button"),
+                ("delete button", "m9:wireremove"),
+            ] {
+                if chain.iter().any(|p| p.widget.name() == button) {
+                    return Some(action.into());
+                }
+            }
+            if let Some(name) = chain
+                .iter()
+                .find_map(|p| p.widget.name().strip_prefix("m9:ctl:"))
+            {
+                return Some(format!("m9:wirectl:{name}"));
+            }
+            // An empty cell has no control clone, so the grid's own geometry
+            // names it: this is the click-to-place target.
+            if let Some(cell) = self.control_cell_at(x, y) {
+                if self.build.board().control_at(cell).is_none() {
+                    return Some(format!("m9:wirecell:{}:{}", cell[0], cell[1]));
+                }
+            }
         }
         if let Some(name) = chain
             .iter()
@@ -981,7 +1118,7 @@ impl Builder {
                 let Some(grid) = workshop::find_mut(root, "control grid") else {
                     continue;
                 };
-                grid.children.retain(|c| c.name() != "control grp");
+                grid.children.retain(|c| !c.name().starts_with("m9:ctl:"));
                 let Some(g) = ra2ui::Grid::from_widget(grid) else {
                     return;
                 };
@@ -990,6 +1127,11 @@ impl Builder {
                     let y = g.row_height * control.cell[1] as f32;
                     for root in template.widgets() {
                         let mut cell = root.clone();
+                        ra2ui::input::set_field(
+                            &mut cell,
+                            "Name",
+                            &format!("m9:ctl:{}:{}", control.cell[0], control.cell[1]),
+                        );
                         ra2ui::input::set_field(&mut cell, "Position", &format!("{x} 0 {y} 0"));
                         ra2ui::input::set_field(
                             &mut cell,
@@ -1049,6 +1191,132 @@ impl Builder {
             .is_some_and(|info| info.has_mount(mount));
         if used || !exists {
             self.target = (0, 0);
+        }
+    }
+
+    /// The shipped `control grid`'s geometry, when the wiring tab is on screen.
+    fn control_grid(&self) -> Option<(ra2ui::Frame, ra2ui::Grid)> {
+        let placed = self.shell.placements();
+        let grid = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "control grid")?;
+        let geometry = ra2ui::Grid::from_widget(grid.widget)?;
+        Some((grid.frame, geometry))
+    }
+
+    /// The centre of a control-grid cell, for a scripted click and for a
+    /// player's click-to-place.
+    pub fn control_cell_point(&self, cell: [i32; 2]) -> Result<[f32; 2], String> {
+        let (frame, grid) = self
+            .control_grid()
+            .ok_or_else(|| "the wiring tab's control grid is not on screen".to_string())?;
+        let rect = grid.cell(frame, cell[1], cell[0]);
+        Ok([rect.x + rect.w / 2.0, rect.y + rect.h / 2.0])
+    }
+
+    /// The cell a point inside the shipped `control grid` names, or `None` when
+    /// it is outside the authors' `Rows`/`Columns` (3×4).
+    fn control_cell_at(&self, x: f32, y: f32) -> Option<[i32; 2]> {
+        let (frame, grid) = self.control_grid()?;
+        for row in 0..grid.rows {
+            for column in 0..grid.columns {
+                if grid.cell(frame, row, column).contains_point(x, y) {
+                    return Some([column, row]);
+                }
+            }
+        }
+        None
+    }
+
+    /// Add the pending control kind at a free cell. The shipped grid holds one
+    /// control per cell (`ControlBoard::add`); the name is one of the corpus'
+    /// own (`New Analog`, `Flip`, `New Button`).
+    fn place_control(&mut self, cell: [i32; 2]) {
+        if let Some(existing) = self.build.board().control_at(cell) {
+            self.wire_placing = None;
+            self.wire_control = Some(cell);
+            self.status = format!("cell {},{} holds {}", cell[0], cell[1], existing.name);
+            self.refresh_panel();
+            return;
+        }
+        let Some(kind) = self.wire_placing else {
+            self.status = "pick New Analog, New Switch or New Button first".into();
+            self.refresh_panel();
+            return;
+        };
+        let name = match kind {
+            ControlKind::Analog => "New Analog",
+            ControlKind::Switch => "Flip",
+            ControlKind::Button => "New Button",
+        };
+        match self.build.board_mut().add(Control::new(name, cell, kind)) {
+            Ok(()) => {
+                self.wire_placing = None;
+                self.wire_control = Some(cell);
+                self.wire_component = None;
+                self.status = format!("added {name} at cell {},{}", cell[0], cell[1]);
+                if let Err(e) = self.refresh() {
+                    self.status = e;
+                }
+            }
+            Err(e) => {
+                self.status = e.to_string();
+                self.refresh_panel();
+            }
+        }
+    }
+
+    /// Bind the selected control to the selected component and action, through
+    /// the model's matrix (`Build::bind_action`). One binding per slot: a new
+    /// click replaces the row that was there.
+    fn bind_selected(&mut self, slot: usize, action_index: usize) {
+        let Some(cell) = self.wire_control else {
+            self.status = "select a control cell first".into();
+            self.refresh_panel();
+            return;
+        };
+        let Some(component) = self.wire_component else {
+            self.status = "pick the component to bind".into();
+            self.refresh_panel();
+            return;
+        };
+        let Some(control) = self.build.board().control_at(cell).cloned() else {
+            self.status = "that cell holds no control".into();
+            self.refresh_panel();
+            return;
+        };
+        let class = self
+            .build
+            .components()
+            .get(component)
+            .map(|c| c.class.clone())
+            .unwrap_or_default();
+        let actions =
+            ra2ui::workshop::wiring::ControlBoard::actions_for(control.kind, &class, slot);
+        let Some(action) = actions.get(action_index).copied() else {
+            self.status =
+                format!("component {component} ({class}) has no action {action_index} here");
+            self.refresh_panel();
+            return;
+        };
+        self.build.board_mut().unbind(component, cell, slot);
+        match self.build.bind_action(component, action, cell, slot) {
+            Ok(()) => {
+                self.status = format!(
+                    "{} <- {} on {} slot {slot}",
+                    class,
+                    action.name(),
+                    control.name
+                );
+                if let Err(e) = self.refresh() {
+                    self.status = e;
+                }
+            }
+            Err(e) => {
+                self.status = e.to_string();
+                self.refresh_panel();
+            }
         }
     }
 
@@ -1175,14 +1443,26 @@ impl Builder {
             "wiring button" => {
                 rows.push((
                     String::new(),
-                    "Control board (read-only this pass)".into(),
+                    "Control board: New ... then click a free cell (3x4)".into(),
                     [0.6, 0.8, 1.0, 1.0],
                 ));
-                for control in self.build.board().controls.iter().take(4) {
+                if let Some(kind) = self.wire_placing {
                     rows.push((
-                        String::new(),
+                        "m9:wirecancel".into(),
                         format!(
-                            "{} [{}] {} cell {},{}",
+                            "placing {}: click a free cell (or click to cancel)",
+                            kind.label()
+                        ),
+                        [1.0, 0.9, 0.5, 1.0],
+                    ));
+                }
+                for control in self.build.board().controls.iter().take(5) {
+                    let selected = self.wire_control == Some(control.cell);
+                    rows.push((
+                        format!("m9:wirectl:{}:{}", control.cell[0], control.cell[1]),
+                        format!(
+                            "{}{} [{}] {} cell {},{}",
+                            if selected { "> " } else { "" },
                             control.name,
                             control.kind.label(),
                             control.key_label(),
@@ -1192,8 +1472,10 @@ impl Builder {
                         [0.9, 0.9, 0.9, 1.0],
                     ));
                 }
+                // The board's saved rows come before the binding controls, so
+                // the evidence frame shows the row the click wrote.
                 rows.push((String::new(), "Bindings".into(), [0.6, 0.8, 1.0, 1.0]));
-                for binding in self.build.board().bindings.iter().take(5) {
+                for binding in self.build.board().bindings.iter().take(3) {
                     let target = self
                         .build
                         .components()
@@ -1211,6 +1493,63 @@ impl Builder {
                         ),
                         [0.9, 0.9, 0.9, 1.0],
                     ));
+                }
+                if let Some(cell) = self.wire_control {
+                    let control = self.build.board().control_at(cell).cloned();
+                    let kind = control.as_ref().map(|c| c.kind);
+                    rows.push((
+                        String::new(),
+                        format!(
+                            "bind {} ({}) to:",
+                            control.as_ref().map(|c| c.name.as_str()).unwrap_or("?"),
+                            kind.map(|k| k.label()).unwrap_or("?")
+                        ),
+                        [0.6, 0.8, 1.0, 1.0],
+                    ));
+                    for (i, component) in self.build.components().iter().enumerate() {
+                        let Some(kind) = kind else { break };
+                        if ra2ui::workshop::wiring::ControlBoard::actions_for(
+                            kind,
+                            &component.class,
+                            0,
+                        )
+                        .is_empty()
+                        {
+                            continue;
+                        }
+                        let selected = self.wire_component == Some(i);
+                        rows.push((
+                            format!("m9:wirecomp:{i}"),
+                            format!(
+                                "{}{i}: {} ({})",
+                                if selected { "> " } else { "" },
+                                component.class,
+                                self.build
+                                    .component_info(i)
+                                    .map(|info| info.name.clone())
+                                    .unwrap_or_else(|| component.class.clone())
+                            ),
+                            [0.9, 1.0, 0.7, 1.0],
+                        ));
+                    }
+                    if let (Some(kind), Some(component)) = (kind, self.wire_component) {
+                        let target = self.build.components().get(component);
+                        for slot in 0..kind.slots() {
+                            let Some(target) = target else { break };
+                            let actions = ra2ui::workshop::wiring::ControlBoard::actions_for(
+                                kind,
+                                &target.class,
+                                slot,
+                            );
+                            for (index, action) in actions.iter().enumerate() {
+                                rows.push((
+                                    format!("m9:wireact:{slot}:{index}"),
+                                    format!("slot {slot}: {}", action.name()),
+                                    [0.7, 0.9, 0.7, 1.0],
+                                ));
+                            }
+                        }
+                    }
                 }
             }
             "paintshop button" => {
@@ -1802,9 +2141,46 @@ pub fn script(
         builder.shot(&out.join("build-parts.png"), target)?;
     }
 
-    // 3. The wiring tab: the board and its bindings, read-only this pass.
+    // 3. The wiring tab: add an analog control at a free cell, then bind it to
+    // the motor's spin action. Click-to-place, then click-to-bind.
     builder.click_named("wiring button")?;
+    builder.click_named("new analog")?;
+    builder.click_control_cell([3, 1])?;
+    if builder.build.board().control_at([3, 1]).is_none() {
+        return Err("the New Analog button plus a free cell did not add a control".into());
+    }
+    println!(
+        "  wiring: added {} at cell 3,1",
+        builder
+            .build
+            .board()
+            .control_at([3, 1])
+            .map(|c| c.name.clone())
+            .unwrap_or_default()
+    );
     if frames {
+        builder.shot(&out.join("wiring-add.png"), target)?;
+    }
+    builder.click_action("m9:wirecomp:1")?;
+    builder.click_action("m9:wireact:0:0")?;
+    let wired = builder.build().board().bindings.clone();
+    let expected = wired.iter().any(|binding| {
+        binding.component == 1 && binding.control == [3, 1, 0] && binding.action == "Spin Clockwise"
+    });
+    if !expected {
+        return Err(format!("the bind click did not wire the motor: {wired:?}"));
+    }
+    println!(
+        "  wiring: bound component 1 to {:?} on {:?} slot 0",
+        wired.last().map(|b| b.action.as_str()).unwrap_or(""),
+        builder
+            .build()
+            .board()
+            .control_at([3, 1])
+            .map(|c| c.name.as_str())
+    );
+    if frames {
+        builder.shot(&out.join("wiring-bound.png"), target)?;
         builder.shot(&out.join("build-wiring.png"), target)?;
     }
 
@@ -1837,6 +2213,7 @@ pub fn script(
     println!("  saved {}", path.display());
     let stats = builder.build.stats();
     let live_components = builder.build.to_bot().components;
+    let live_board = builder.build.board().clone();
     let live_skin = builder.build.paint().skin().cloned();
 
     // 5. Reload through the game's reader.
@@ -1845,6 +2222,17 @@ pub fn script(
     if builder.build.components() != live_components.as_slice() {
         return Err("the reloaded component tree is not the saved one".into());
     }
+    let reloaded_board = builder.build.board();
+    if reloaded_board != &live_board {
+        return Err(format!(
+            "the reloaded wiring is not the saved one: {reloaded_board:?} != {live_board:?}"
+        ));
+    }
+    println!(
+        "  wiring reloaded: {} control(s), {} binding(s)",
+        reloaded_board.controls.len(),
+        reloaded_board.bindings.len()
+    );
     if reloaded != stats {
         return Err(format!(
             "the reloaded stats differ: {reloaded:?} != {stats:?}"
@@ -1932,9 +2320,14 @@ pub fn script(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ra2ui::workshop::wiring::{Action, ControlBoard};
     use std::path::PathBuf;
 
     fn game_dir() -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("RA2_GAME") {
+            let dir = PathBuf::from(dir);
+            return dir.is_dir().then_some(dir);
+        }
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -1961,6 +2354,68 @@ mod tests {
         assert!(builder.build.can_undo());
         assert!(builder.undo());
         assert_eq!(builder.build.components().len(), before);
+    }
+
+    /// M9.3's flow: the shipped `new analog` button, a free `control grid`
+    /// cell, a component row and an action row. The saved board is the board
+    /// that is read back.
+    #[test]
+    fn adding_a_control_binding_it_and_saving_round_trips_the_same_board() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        assert_eq!(builder.build.components()[1].class, "SpinMotor");
+        builder.click_named("wiring button").unwrap();
+        let before = builder.build.board().controls.len();
+        builder.click_named("new analog").unwrap();
+        builder.click_control_cell([3, 1]).unwrap();
+        assert_eq!(builder.build.board().controls.len(), before + 1);
+        let added = builder.build.board().control_at([3, 1]).unwrap().clone();
+        assert_eq!(added.kind, ControlKind::Analog);
+        assert_eq!(added.name, "New Analog");
+
+        builder.click_action("m9:wirecomp:1").unwrap();
+        builder.click_action("m9:wireact:0:0").unwrap();
+        assert_eq!(
+            builder.build.board().bindings.last(),
+            Some(&ra2fmt::bot::Binding {
+                component: 1,
+                action: "Spin Clockwise".into(),
+                control: [3, 1, 0],
+            })
+        );
+        assert!(builder.build.wiring_errors().is_empty());
+
+        let saved = builder.build.save();
+        let bot = ra2fmt::bot::parse(&saved).unwrap();
+        let reread = ControlBoard::from_bot(&bot).unwrap();
+        assert_eq!(&reread, builder.build.board());
+
+        // An invalid action for this kind is the model's own refusal.
+        let err = builder
+            .build
+            .bind_action(1, Action::OnOffClockwise, [3, 1], 0)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ra2ui::workshop::wiring::WiringError::ActionNotAllowed { .. }
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("Spin Clockwise"), "{err}");
+
+        // One control per cell: New Analog over Forward's cell adds nothing.
+        let count = builder.build.board().controls.len();
+        builder.click_named("new analog").unwrap();
+        builder.click_control_cell([1, 0]).unwrap();
+        assert_eq!(builder.build.board().controls.len(), count);
+        assert_eq!(
+            builder.build.board().control_at([1, 0]).unwrap().name,
+            "Forward"
+        );
     }
 
     /// A click on one of the shipped armour cells sets that plate on the model.
@@ -2027,6 +2482,8 @@ mod tests {
             "build-chassis.png",
             "build-parts.png",
             "build-wiring.png",
+            "wiring-add.png",
+            "wiring-bound.png",
             "build-paint.png",
             "build-test.png",
         ] {

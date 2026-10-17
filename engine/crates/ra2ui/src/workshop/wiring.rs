@@ -436,6 +436,50 @@ impl ControlBoard {
         Ok(())
     }
 
+    /// Wire `component` to `action`, checking it against the game's matrix
+    /// before the row is written.
+    ///
+    /// [`ControlBoard::bind`] is the raw writer used by the corpus round-trip
+    /// (a loaded row must be re-writable even if it is unusual). An editor's
+    /// click goes through this method, so a button cannot be given an analog
+    /// spin action and the error names the actions that kind *can* give.
+    pub fn bind_checked(
+        &mut self,
+        components: &[Component],
+        component: usize,
+        action: Action,
+        cell: [i32; 2],
+        slot: usize,
+    ) -> Result<(), WiringError> {
+        let control = self
+            .control_at(cell)
+            .ok_or_else(|| WiringError::NoControlAt {
+                cell,
+                available: self.names(),
+            })?;
+        if slot >= control.kind.slots() {
+            return Err(WiringError::SlotOutOfRange {
+                kind: control.kind,
+                slot,
+                slots: control.kind.slots(),
+            });
+        }
+        let Some(target) = components.get(component) else {
+            return Err(WiringError::ComponentOutOfRange(component));
+        };
+        let allowed = Self::actions_for(control.kind, &target.class, slot);
+        if !allowed.contains(&action) {
+            return Err(WiringError::ActionNotAllowed {
+                kind: control.kind,
+                class: target.class.clone(),
+                slot,
+                action,
+                allowed: allowed.iter().map(|a| a.name()).collect(),
+            });
+        }
+        self.bind(component, action, cell, slot)
+    }
+
     /// Wire by control name. The error for an unknown name quotes the board's
     /// own list, which is the list the player can see.
     pub fn bind_named(
@@ -906,6 +950,47 @@ mod tests {
                 Action::Right
             ]
         );
+    }
+
+    #[test]
+    fn bind_checked_refuses_an_action_the_kind_and_class_do_not_allow() {
+        let components = vec![
+            Component {
+                parent: -1,
+                class: "Chassis".into(),
+                ..Default::default()
+            },
+            Component {
+                parent: 0,
+                class: "SpinMotor".into(),
+                ..Default::default()
+            },
+        ];
+        let mut board = ControlBoard::default_board();
+        let err = board
+            .bind_checked(&components, 1, Action::OnOffClockwise, [1, 0], 0)
+            .unwrap_err();
+        match err {
+            WiringError::ActionNotAllowed {
+                kind,
+                class,
+                action,
+                allowed,
+                ..
+            } => {
+                assert_eq!(kind, ControlKind::Analog);
+                assert_eq!(class, "SpinMotor");
+                assert_eq!(action, Action::OnOffClockwise);
+                assert_eq!(allowed, vec!["Spin Clockwise", "Spin Counter-clockwise"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        // The analog spin action goes in, and the raw writer is not affected.
+        board
+            .bind_checked(&components, 1, Action::SpinClockwise, [1, 0], 0)
+            .unwrap();
+        assert_eq!(board.bindings.len(), 1);
+        assert!(board.validate(&components).is_empty());
     }
 
     #[test]

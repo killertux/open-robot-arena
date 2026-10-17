@@ -173,6 +173,10 @@ and 9 action strings are exactly `SHIPPED_CONTROL_NAMES` and
 `SHIPPED_ACTION_NAMES`. `an_unknown_control_name_is_rejected_with_the_boards_list`
 asserts the error carries `Forward`, `LeftRight`, `Fire`, `Spin`;
 `a_cell_holds_one_control` covers the one-control-per-cell rule.
+`bind_checked_refuses_an_action_the_kind_and_class_do_not_allow` covers the
+editor's row: `Build::bind_action` calls `ControlBoard::bind_checked`, which
+refuses an action outside `actions_for(kind, class, slot)` and quotes the
+allowed list. The raw `bind` remains the file round-trip writer.
 
 ---
 
@@ -353,6 +357,10 @@ and read-only list are in `docs/17-workshop-ui.md`. What it took from this page:
   survives `Bot::write`/`parse`;
 - Save As/Open are `Robot Designs/<name>.bot`, Test Robot is M8's `Match`.
 
-Still open: **wiring editing** (add/drag/bind a control), decals/surface
-layers/texture-entire in the UI, chassis drawing, mouse→face-group picking, a
-mouse baseplate placement tool, and applying match damage back to the build.
+Wiring editing landed as click-to-place then click-to-bind (`new analog` /
+`new switch` / `new button` + a free `control grid` cell, then a component row
+and an action row; `delete button` removes). Still open: **wiring drag**,
+decals/surface layers/texture-entire in the UI, chassis drawing,
+mouse→face-group picking, a mouse baseplate placement tool, and applying match
+damage back to the build (the career's repair bench is the separate M10.5
+path, `docs/18-hq-ui.md`).

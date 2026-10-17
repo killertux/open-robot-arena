@@ -526,6 +526,19 @@ impl Build {
         self.board.validate(&self.bot.components)
     }
 
+    /// Bind a control to a component through the game's action matrix. This is
+    /// the editor's row ("bind it"), not the raw file writer.
+    pub fn bind_action(
+        &mut self,
+        component: usize,
+        action: crate::workshop::wiring::Action,
+        cell: [i32; 2],
+        slot: usize,
+    ) -> Result<(), WiringError> {
+        self.board
+            .bind_checked(&self.bot.components, component, action, cell, slot)
+    }
+
     /// The bot as it would be saved: the board and the painted chassis applied.
     pub fn to_bot(&self) -> Bot {
         let mut bot = self.bot.clone();
