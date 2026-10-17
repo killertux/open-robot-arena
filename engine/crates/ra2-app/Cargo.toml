@@ -1,0 +1,18 @@
+[package]
+name = "ra2-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The interactive Robot Arena 2 shell: a winit window and a headless path over one frame builder."
+
+[[bin]]
+name = "ra2-app"
+path = "src/main.rs"
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+pollster = "1.0.1"
+ra2-render = { path = "../ra2-render" }
+ra2-shell = { path = "../ra2-shell" }
+wgpu = "30.0.1"
+winit = "0.30.13"

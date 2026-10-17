@@ -44,6 +44,7 @@ use crate::resolve_ci;
 
 /// A texture the draw list can name: the game's own art, a face's glyph page, or
 /// the single white pixel a fill uses.
+#[derive(Clone)]
 pub struct UiTexture {
     pub label: String,
     pub width: u32,
@@ -81,6 +82,77 @@ pub struct UiScene {
     pub missing: Vec<String>,
     /// The quads a repeated pattern would have drawn, and are left out.
     pub tiles: Vec<String>,
+}
+
+/// Where a scene's rectangle lands inside a target, preserving aspect ratio.
+///
+/// A shell screen is 1280×1005, a window is whatever the player made it, and the
+/// scene is centred in the target with the remainder left as bars. The window
+/// and the offscreen path both use [`fit`], so the pixels a click is mapped
+/// through and the pixels the renderer draws through are the same rectangle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Viewport {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// Target pixels per scene pixel.
+    pub scale: f32,
+}
+
+impl Viewport {
+    /// Where a scene point lands in the target.
+    pub fn map(&self, point: [f32; 2]) -> [f32; 2] {
+        [
+            self.x + point[0] * self.scale,
+            self.y + point[1] * self.scale,
+        ]
+    }
+
+    /// A scene rectangle in target pixels.
+    pub fn map_frame(&self, frame: Frame) -> Frame {
+        Frame::new(
+            self.x + frame.x * self.scale,
+            self.y + frame.y * self.scale,
+            frame.w * self.scale,
+            frame.h * self.scale,
+        )
+    }
+
+    /// Whether a target point is inside the scene's rectangle rather than in a
+    /// letterbox/pillarbox bar.
+    pub fn contains(&self, point: [f32; 2]) -> bool {
+        point[0] >= self.x
+            && point[0] < self.x + self.w
+            && point[1] >= self.y
+            && point[1] < self.y + self.h
+    }
+
+    /// A target point in scene coordinates, or `None` in a bar.
+    pub fn to_scene(&self, point: [f32; 2]) -> Option<[f32; 2]> {
+        self.contains(point).then(|| {
+            [
+                (point[0] - self.x) / self.scale,
+                (point[1] - self.y) / self.scale,
+            ]
+        })
+    }
+}
+
+/// Fit a scene of `scene` pixels, centred, into a target of `target` pixels.
+pub fn fit(scene: [f32; 2], target: [f32; 2]) -> Viewport {
+    let scene = [scene[0].max(1.0), scene[1].max(1.0)];
+    let target = [target[0].max(1.0), target[1].max(1.0)];
+    let scale = (target[0] / scene[0]).min(target[1] / scene[1]);
+    let w = scene[0] * scale;
+    let h = scene[1] * scale;
+    Viewport {
+        x: (target[0] - w) / 2.0,
+        y: (target[1] - h) / 2.0,
+        w,
+        h,
+        scale,
+    }
 }
 
 /// A screen's art and faces, and the textures they have been loaded into.
@@ -180,7 +252,10 @@ impl UiAssets {
         }
         UiScene {
             size: screen,
-            textures: std::mem::take(&mut self.textures),
+            // Cloned, not taken: an interactive client draws the same assets
+            // frame after frame, and a drained asset set would only work for
+            // the first picture. The diagnostics are per scene and are drained.
+            textures: self.textures.clone(),
             quads,
             missing: std::mem::take(&mut self.missing),
             tiles: std::mem::take(&mut self.tiles),
@@ -679,8 +754,15 @@ pub struct UiRenderer {
 impl UiRenderer {
     pub fn new(device: &wgpu::Device) -> UiRenderer {
         // Not sRGB: the composite this is checked against blends bytes, and the
-        // art is already 8-bit.
-        let format = wgpu::TextureFormat::Rgba8Unorm;
+        // art is already 8-bit. The surface path asks for its own format with
+        // `new_for`, because a pipeline's target format must match the texture
+        // it draws into.
+        UiRenderer::new_for(device, wgpu::TextureFormat::Rgba8Unorm)
+    }
+
+    /// A renderer whose pipeline targets `format` — the swapchain's own format
+    /// when drawing a window, `Rgba8Unorm` for the offscreen readback.
+    pub fn new_for(device: &wgpu::Device, format: wgpu::TextureFormat) -> UiRenderer {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ui-shader"),
             source: wgpu::ShaderSource::Wgsl(UI_SHADER.into()),
@@ -768,46 +850,22 @@ impl UiRenderer {
         queue: &wgpu::Queue,
         scene: &UiScene,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let (width, height) = (scene.size[0].max(1), scene.size[1].max(1));
-        let textures: Vec<wgpu::BindGroup> = scene
-            .textures
-            .iter()
-            .map(|t| bind_texture(device, queue, &self.bgl, &self.sampler, t))
-            .collect();
-        // Group consecutive quads that share a texture and a clip: one draw and
-        // one scissor each.
-        let mut batches: Vec<(usize, [u32; 4], Vec<UiVertex>)> = Vec::new();
-        for quad in &scene.quads {
-            let Some(scissor) = scissor_of(quad.clip, width, height) else {
-                continue;
-            };
-            let push = match batches.last_mut() {
-                Some((texture, clip, verts)) if *texture == quad.texture && *clip == scissor => {
-                    verts
-                }
-                _ => {
-                    batches.push((quad.texture, scissor, Vec::new()));
-                    &mut batches.last_mut().unwrap().2
-                }
-            };
-            push.extend_from_slice(&quad_vertices(quad, width, height));
-        }
-        let gpu: Vec<(usize, [u32; 4], wgpu::Buffer, u32)> = batches
-            .iter()
-            .map(|(texture, clip, verts)| {
-                let buffer = wgpu::util::DeviceExt::create_buffer_init(
-                    device,
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("ui-verts"),
-                        contents: bytemuck::cast_slice(verts),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    },
-                );
-                (*texture, *clip, buffer, verts.len() as u32)
-            })
-            .collect();
+        self.render_at(device, queue, scene, scene.size)
+    }
 
-        let target = device.create_texture(&wgpu::TextureDescriptor {
+    /// Draw a scene into a texture of `target` pixels and read it back as RGBA8,
+    /// top row first. The scene is centred and letterboxed, so a target of a
+    /// different shape is the window path and a target equal to `scene.size` is
+    /// the 1:1 path the pixel checks use.
+    pub fn render_at(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &UiScene,
+        target: [u32; 2],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let (width, height) = (target[0].max(1), target[1].max(1));
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("ui-color"),
             size: wgpu::Extent3d {
                 width,
@@ -821,35 +879,8 @@ impl UiRenderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui") });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ui"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        // Black, opaque: the composite starts the same way.
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            for (texture, clip, buffer, count) in &gpu {
-                pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
-                pass.set_bind_group(0, &textures[*texture], &[]);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..*count, 0..1);
-            }
-        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.draw(device, queue, scene, &view, width, height);
 
         let row = (width * 4).div_ceil(256) * 256;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -858,9 +889,11 @@ impl UiRenderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui") });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &target,
+                texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -897,6 +930,116 @@ impl UiRenderer {
         drop(data);
         buffer.unmap();
         Ok(out)
+    }
+
+    /// Draw a scene into an arbitrary view, with the view's own format and
+    /// size. The bars of a target whose aspect differs from the scene's are
+    /// cleared black, exactly as the readback path clears its texture.
+    ///
+    /// The view's format must be the one this renderer was built for
+    /// ([`UiRenderer::new_for`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_to(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &UiScene,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if format != self.format {
+            return Err(format!("this UiRenderer draws {:?}, not {format:?}", self.format).into());
+        }
+        self.draw(device, queue, scene, view, width.max(1), height.max(1));
+        Ok(())
+    }
+
+    /// The shared half of every entry point: build the draw list in target
+    /// pixels, record one pass, and submit it.
+    fn draw(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &UiScene,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) {
+        let viewport = fit(
+            [scene.size[0] as f32, scene.size[1] as f32],
+            [width as f32, height as f32],
+        );
+        let textures: Vec<wgpu::BindGroup> = scene
+            .textures
+            .iter()
+            .map(|t| bind_texture(device, queue, &self.bgl, &self.sampler, t))
+            .collect();
+        // Group consecutive quads that share a texture and a clip: one draw and
+        // one scissor each.
+        let mut batches: Vec<(usize, [u32; 4], Vec<UiVertex>)> = Vec::new();
+        for quad in &scene.quads {
+            let clip = quad.clip.map(|clip| viewport.map_frame(clip));
+            let Some(scissor) = scissor_of(clip, width, height) else {
+                continue;
+            };
+            let push = match batches.last_mut() {
+                Some((texture, clip, verts)) if *texture == quad.texture && *clip == scissor => {
+                    verts
+                }
+                _ => {
+                    batches.push((quad.texture, scissor, Vec::new()));
+                    &mut batches.last_mut().unwrap().2
+                }
+            };
+            push.extend_from_slice(&quad_vertices(quad, &viewport, width, height));
+        }
+        let gpu: Vec<(usize, [u32; 4], wgpu::Buffer, u32)> = batches
+            .iter()
+            .map(|(texture, clip, verts)| {
+                let buffer = wgpu::util::DeviceExt::create_buffer_init(
+                    device,
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("ui-verts"),
+                        contents: bytemuck::cast_slice(verts),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    },
+                );
+                (*texture, *clip, buffer, verts.len() as u32)
+            })
+            .collect();
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Black, opaque: the composite starts the same way, and
+                        // it is also what the letterbox bars show.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            for (texture, clip, buffer, count) in &gpu {
+                pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
+                pass.set_bind_group(0, &textures[*texture], &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
+        }
+        queue.submit(Some(encoder.finish()));
     }
 }
 
@@ -955,12 +1098,18 @@ fn bind_texture(
 }
 
 /// The four corners of a quad, in clip space, with its source rect.
-fn quad_vertices(quad: &UiQuad, width: u32, height: u32) -> [UiVertex; 6] {
-    let to_clip = |x: f32, y: f32| [x / width as f32 * 2.0 - 1.0, 1.0 - y / height as f32 * 2.0];
+fn quad_vertices(quad: &UiQuad, viewport: &Viewport, width: u32, height: u32) -> [UiVertex; 6] {
+    let to_clip = |p: [f32; 2]| {
+        let p = viewport.map(p);
+        [
+            p[0] / width as f32 * 2.0 - 1.0,
+            1.0 - p[1] / height as f32 * 2.0,
+        ]
+    };
     let [u0, v0, u1, v1] = quad.uv;
     let use_alpha = f32::from(u8::from(quad.alpha));
     let vertex = |x: f32, y: f32, u: f32, v: f32| UiVertex {
-        pos: to_clip(x, y),
+        pos: to_clip([x, y]),
         uv: [u, v],
         color: quad.color,
         use_alpha,

@@ -11,12 +11,14 @@ by the user.
 ## Status
 
 **M1–M5 have landed as measured, with the named residues below; M6 is done for
-Linux x86_64.** The engine is a
+Linux x86_64; M7's interactive shell (window, input, the shared loop) is in.**
+The engine is a
 Rust workspace that reads the original `.gmf`, `.bot`, CFL3, `.gib` and `.giff`
 data and runs the shipped Python 2.2 arenas and AI on an embedded CPython 3.12.
 It renders headlessly with `wgpu` and simulates with Jolt. It is an engine and a
-verification harness, not a finished game client: there is no interactive
-window, and the in-match game is still the original C++.
+verification harness more than a finished game client: the shell now opens in a
+window, but the in-match game is still the original C++, and audio, settings, the
+bot lab's editors and the match are not playable through the shell yet.
 
 ### M1 — assets render
 
@@ -95,6 +97,18 @@ entry and icon, built offline and unpack-and-run smoke-tested
 documented, **unverified** path: no build, test or artifact exists on either
 ([`docs/09-platforms.md`](docs/09-platforms.md)).
 
+### M7 — the interactive shell
+
+`ra2-app` is the shell as an application: a `winit` window presenting the same
+`ra2-render` UI pipeline, or the same loop headlessly with `--offscreen` for CI.
+The shell stays 1280×1005 logical and is letterboxed into the window; a click is
+mapped back through that rectangle (bar clicks are ignored), Escape quits, a
+resize reconfigures the surface, and the loop ticks at the game's 50 ms. The
+windowed path is built but was **not** exercised in this environment; the
+offscreen path and its tests are what ran here.
+Audio, `ra2.cfg`, the screen-stack `Flow`, text entry and the cursor art
+(M7.4–M7.8) are still open.
+
 ## What works / what does not
 
 Measured, not aspirational.
@@ -115,8 +129,9 @@ Measured, not aspirational.
 
 **Does not work yet**
 
-* There is no interactive window, mouse or keyboard loop. The shell writes
-  PNGs and stops; the desktop entry opens a terminal run.
+* The shell's window is mouse-and-Escape only: there is no keyboard focus
+  navigation, no audio and no settings file, and the screen stack is still the
+  runner's rather than a `Flow` shared with the game.
 * The actual match (driving, damage, scoring) is the original C++ and is not
   playable through the shell — the route stops at the arena picker.
   `ra2-sim` and `ra2-duel` are the playable headless physics paths.
@@ -184,6 +199,27 @@ cargo run -q --release -p ra2-shell -- --script my-input.txt --out /tmp/ra2-shel
 
 The boot screen and every transition are the shipped data's. `--no-python`
 skips booting `Scripts/Main.py`, not the Python dependency.
+
+### The interactive client
+
+```bash
+cd engine
+cargo run -q --release -p ra2-app -- --game ../local/game
+```
+
+That opens the shell's main menu in a window. Left-click the menu, Escape quits;
+the shell is 1280×1005 logical and is letterboxed into whatever size the window
+is. The same loop without a window is the CI path:
+
+```bash
+cargo run -q --release -p ra2-app -- --game ../local/game \
+  --offscreen /tmp/ra2-shell.png --clicks "573.5,534.8;787.2,446.0"
+```
+
+`--clicks` is semicolon-separated points in the shell's own coordinates (the
+run above is main menu → TEAM HQ → team HQ); it prints the click trace and the
+final screen. `--size WxH` sets the window or PNG target, not the shell's
+layout.
 
 ### The two-renderer check
 
@@ -263,7 +299,8 @@ tools/     Our own analysis/extraction/build scripts + tools/check.sh
 packaging/ Launcher, installer, .desktop, icon, and unbuilt Flatpak/AppImage recipes
 engine/    The native engine (Rust workspace: ra2fmt, ra2-cli, ra2-render,
            ra2sim, ra2script — the script layer on an embedded CPython —,
-           ra2ui, the shell's layout model, and ra2-shell, its entry point)
+           ra2ui, the shell's layout model, ra2-shell, its headless entry point,
+           and ra2-app, the interactive client)
 dist/      (git-ignored) portable tarballs built by tools/package.sh
 local/     (git-ignored) original game files and extracted data
 ```
