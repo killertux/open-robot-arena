@@ -21,6 +21,9 @@ pub struct Args {
     pub hq: bool,
     /// `--hq --simulate-event N`: play schedule row N headlessly.
     pub simulate_event: Option<usize>,
+    /// `--hq --simulate-season`: play all nine events with deterministic
+    /// opponents and write the season evidence frames.
+    pub simulate_season: bool,
     /// `--hq --report-damage N`: add N damage to the player's match report
     /// before the career award. The shipped match in this environment never
     /// closes on its opponent, so its report has zero damage; this is the
@@ -60,6 +63,7 @@ impl Default for Args {
             match_mode: false,
             hq: false,
             simulate_event: None,
+            simulate_season: false,
             report_damage: None,
             out: None,
             seconds: None,
@@ -81,8 +85,8 @@ pub fn usage() -> &'static str {
      \x20                [--bots A.bot,B.bot] [--arena PATH] [--audio-report]\n\
      \x20      ra2-app --build [--start BOT] [--save-as NAME] [--seconds N] [--out DIR]\n\
      \x20                [--size WxH]\n\
-     \x20      ra2-app --hq [--simulate-event N] [--seconds N] [--report-damage N]\n\
-     \x20                [--out DIR]\n\
+     \x20      ra2-app --hq [--simulate-event N | --simulate-season] [--seconds N]\n\
+     \x20                [--report-damage N] [--out DIR]\n\
      \n\
      With no --offscreen the shell opens in a window. With it, the same loop runs\n\
      headlessly: boot, apply the click script in the shell's 1280x1005 coordinates,\n\
@@ -111,6 +115,8 @@ pub fn usage() -> &'static str {
        --start BOT      the .bot to open in --build (default: a stock chassis)\n\
        --save-as NAME   the design name the headless --build run types and saves\n\
        --seconds N      fight length for --match; test length for --build (default 30/4)\n\
+       --simulate-event N  --hq: play schedule row N's whole event headlessly\n\
+       --simulate-season   --hq: play the nine-event season and write the evidence\n\
        --report-damage N  --hq evidence knob: N damage in the player's match report\n\
        --out DIR        write the match/build's PNG frames and exit\n\
        --quit-at N      pause at N fight seconds, quit to the menu, write pause/menu PNGs\n\
@@ -153,6 +159,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
                         .map_err(|_| format!("--simulate-event is not a number: {value:?}"))?,
                 );
             }
+            "--simulate-season" => parsed.simulate_season = true,
             "--report-damage" => {
                 let value = next(&mut args, "--report-damage")?;
                 let damage: f32 = value
@@ -368,11 +375,20 @@ mod tests {
         .unwrap();
         assert!(args.hq);
         assert_eq!(args.simulate_event, Some(2));
+        assert!(!args.simulate_season);
         assert_eq!(args.seconds, Some(3.0));
         assert_eq!(args.report_damage, Some(40.0));
         assert_eq!(args.out, Some(PathBuf::from("frames")));
         assert!(parse(["--simulate-event".into(), "x".into()]).is_err());
         assert!(parse(["--report-damage".into(), "-1".into()]).is_err());
+        let season = parse(
+            ["--hq", "--simulate-season"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        assert!(season.simulate_season);
+        assert!(season.simulate_event.is_none());
     }
 
     #[test]

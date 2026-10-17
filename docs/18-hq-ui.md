@@ -16,9 +16,14 @@ cargo run -q --release -p ra2-app -- --game "$RA2_GAME" --hq
 # headless: the roster, the league/events/history tabs, no event
 cargo run -q --release -p ra2-app -- --game "$RA2_GAME" --hq --out /tmp/hq
 
-# headless: enter schedule row N, play one match, award, save, reload
+# headless: enter schedule row N, play its whole event, award, save, reload
 cargo run -q --release -p ra2-app -- --game "$RA2_GAME" \
     --hq --simulate-event 1 --out /tmp/hq --seconds 3
+
+# headless: play all nine events with deterministic opponents and write the
+# season evidence (season.png, bracket.png, round.png, champion.png)
+cargo run -q --release -p ra2-app -- --game "$RA2_GAME" \
+    --hq --simulate-season --out /tmp/season --seconds 3
 
 # the same, with a damaged report for the repair bench (evidence knob, below)
 cargo run -q --release -p ra2-app -- --game "$RA2_GAME" \
@@ -42,19 +47,26 @@ symlinks to the install.
 | league | `teamhq/hq_league.gib` + `league_cell.gib` | sixteen rows in rank order; `Season N`, `Events remaining: N` | `season_points`, `opponent_points`, `rank` |
 | season results | `teamhq/season_results.gib` + `sresults_cell.gib` | the same standings, its own cell | the same |
 | history | `teamhq/hq_history.gib` | the eight counters, the fastest win, the prize grid (most recent first) | the player's state fields, `Career::prizes` |
-| events | `teamhq/hq_events.gib` + `event_cell.gib` | one art cell per event on the nine-event schedule | `Career::schedule` |
-| event entry | `teamhq/event_bracket.gib` | event art, title, description, `ROUND 1`, `Play Next Round!` | `Career::enter_event` |
+| events | `teamhq/hq_events.gib` + `event_cell.gib` (and the completed/in-progress/disabled cells) | one art cell per event on the nine-event schedule, with its state (`CHAMPION`/`PLAYED`, `round/rounds`, `OUT`) and the schedule title's in-progress line | `Career::schedule`, `Career::history`, `Career::bracket` |
+| event entry | `teamhq/event_bracket.gib` | event art, title, description, `Round N`/`Final Match`, the bracket's rounds and next opponents, `Play Next Round!` | `Career::enter_event`, `EventBracket` |
 | match | `gamewindow.gib` / `statusmeters.gib` over the 3D duel | M8's HUD | `ra2sim::match::Match` |
 | results | `common/matchresults.gib` + `result_cell.gib` | the two bots, their points, the winner text | `MatchReport::results` |
-| award | `teamhq/event_winner.gib` | team, robot, `1/1` rounds, event points, the prize text; the arena preview is composited behind the window | `Career::award_match`, `Career::finish_event` |
+| next round | `teamhq/event_bracket.gib` again | the next field and opponent; a between-rounds repairs bench when the match left damage | `Career::play_round`, `EventBracket::draw_round` |
+| award | `teamhq/event_winner.gib` | team, robot, `rounds won/total`, event points, the prize text; the arena preview is composited behind the window | `Career::play_round` → `finish_event` |
 | back | `teamhq/teamhq.gib` | the league and history, from the **reloaded** career | `Career::load` |
 
 The event's arena is `Events.txt`'s `arena` line (matched against
 `ra2ui::arenas::all`, the scripts' own `name`). Its game type is the arena
 script's `game_types` list — `Combat Arena` → `DEATHMATCH`, `LumaZone` →
 `KING OF THE HILL`, `FlexTop` → `TABLETOP` — not a number in `Events.txt`.
-The player enters their first roster robot against the first AI team's first
-robot.
+The player enters their first roster robot. The event is the measured
+16-entrant bracket: `Events.txt`'s tier count is the number of rounds, its first
+setting is 2 or 4 bots per match, the player is match 0 slot 0, and every other
+slot is a deterministic draw from the fifteen AI teams (`docs/16-career.md`
+§3a). A win advances and redraws the next field; a loss ends the event but not
+the season; the trophy is stored only on the final win. `Play Next Round!`
+starts the current round, so the same screen is shown again with the next
+opponent until the event ends.
 
 ## ## The repair bench (`teamhq/repairs.gib`)
 
@@ -121,7 +133,7 @@ empty list (`0:00`, no rows).
 | `hq.png` | the HQ on the robots tab, the team's six robots by name and class |
 | `hq-events.png` | the schedule, nine event art cells |
 | `event.png` | the bracket for the entered event, with the arena preview behind it |
-| `match.png` | the live HUD at the fight's midpoint |
+| `match.png` | the live HUD at the first fight's midpoint |
 | `results.png` | `common/matchresults.gib` filled from the match report |
 | `award.png` | `event_winner.gib`: team, robot, rounds, points and the prize text |
 | `repairs-list.png` | `teamhq/repairs.gib`: the damaged robot's row, `0:30 / 0:30 (0%)`, the clock at `0:30` |
@@ -129,27 +141,63 @@ empty list (`0:00`, no rows).
 | `hq-after.png` | the league after the award, read back from the save |
 | `hq-history.png` | the history after the award, with the stored trophy art |
 
-Without `--simulate-event`, `--hq --out DIR` writes `hq.png`, `hq-league.png`,
-`hq-events.png` and `hq-history.png`.
+`--hq --simulate-season --out DIR` writes the season-level set:
 
-### The evidence run (row 1, `--seconds 3`)
+| frame | what it shows |
+|---|---|
+| `season.png` | the events tab **while the first event is in progress**: the nine cells, the in-progress cell's `round/rounds`, the title's `Event 1/9: Round N of M — next: …` |
+| `bracket.png` | the first event's bracket: every round, the player's opponents and `NEXT` |
+| `round.png` | a later round of the first event: the completed round's `WON` line and the new opponent |
+| `champion.png` | the season's last screen: `golden_sawblade.gib` when rank 1, otherwise `season_results.gib` |
+| `season-final.png` | the events tab after the ninth event, every cell `CHAMPION` or `PLAYED` |
+| `hq.png` | the HQ at the start, before the season |
+
+Without `--simulate-event`/`--simulate-season`, `--hq --out DIR` writes `hq.png`,
+`hq-league.png`, `hq-events.png` and `hq-history.png`.
+
+### The evidence run (row 0, `--seconds 0.2`)
+
+The event's `Events.txt` shape decides the rounds. Row 0 in the seed-7 schedule
+is `Robo-Depot`, a 2-round, 4-bot event, so it pays `160/2 = 80` per round:
 
 ```text
-event: schedule row 1 -> Events.txt #6 "Strategic Engineering Robot Games"
-arena: .../Arenas/box.py (DEATHMATCH)
-points: 0 -> 80 (event 80 = participation 80 + bonus 0)
-rank: 1 -> 1 (career.rank())
-result: won true, rounds 1/1
-prize: Arenas\event_results\prizes\Square_Plaque\square_plaque.gmf — You took
-       FIRST PLACE in this event! You won this plaque with your robot's name
-       engraved! (art UI\teamhq\events\trophies\Square Plaque.tga)
-reloaded: 80 points, rank 1, 1 prize(s)
+round 1: vs The Good ol' Boys, The Scrappers, North Polers — won; +80 event points (80 + 0)
+round 2: vs Team Z, The Good ol' Boys, The Scrappers — won; +80 event points (80 + 0)
+award: 160 event points, won true, rounds 2/0
+reloaded: 160 points, rank 5, 1 prize(s)
 ```
 
-The points are the model's: `award_match` adds `160 / robots` participation and
-`robot points / 200`; `finish_event` folds the event total into the season and
-stores the event's trophy. The print's `rank` is `Career::rank` (the number of AI
-teams strictly ahead, plus one), not a UI table.
+`--simulate-event` now plays the **whole event** (all rounds), not one match.
+The points are the model's: `play_round` adds `160 / rounds` participation and
+`robot points / 200` per round; `finish_event` folds the event total into the
+season and stores the event's trophy only on the final win. The print's `rank`
+is `Career::rank` (the number of AI teams strictly ahead, plus one), not a UI
+table.
+
+### The season evidence (`--simulate-season --seconds 0.2`)
+
+The seed-7 calendar, with the real match engine and the model's bracket:
+
+```text
+row 0  Robo-Depot                 2 rounds, 4 bots   won final   +160  trophy
+row 1  Strategic Engineering      4 rounds, 2 bots   won final   +160  trophy
+row 2  Biggie Bot Mash            2 rounds, 4 bots   won final   +160  trophy
+row 3  BBA Midwest Event          4 rounds, 2 bots   lost round 3, eliminated  +120
+row 4  Hot Dog Harry's Rumble     2 rounds, 4 bots   won final   +160  trophy
+row 5  Mortal Robot               4 rounds, 2 bots   won final   +160  trophy
+row 6  Robot Scrapyard TV         4 rounds, 2 bots   won final   +160  trophy
+row 7  F.O.R.C.E. Tournament      4 rounds, 2 bots   won final   +160  trophy
+row 8  Powerbolt Championship     4 rounds, 2 bots   won final   +160  trophy
+season 0 complete: 1400 points, rank 1, 9 prize(s), 9 event(s) played
+```
+
+Nine prizes = eight event trophies plus `UI\teamhq\golden_sawblade.tga`; the
+lost event stored none (its tier message is on the award screen only). The
+round lines in `bracket.png` are `Round 1: You vs … — NEXT` and
+`Final Match: You vs … — not drawn`; `round.png` is the next round after a
+win, and `champion.png` is the golden sawblade because the final rank is 1.
+The same deterministic draw is what `replaying_the_same_seed_reproduces_the_bracket`
+asserts.
 
 ## Tests
 
@@ -170,6 +218,21 @@ teams strictly ahead, plus one), not a UI table.
   prize, roster and the game's own `Teams.txt`.
 - `a_headless_hq_run_writes_the_named_frames` — the nine PNGs at the requested
   size, including `repairs-list.png` and `repairs-done.png`.
+- `a_headless_season_run_completes_and_writes_the_season_frames` — nine events
+  through the real match engine, the career ends `Complete`, and
+  `season.png`, `bracket.png`, `round.png`, `champion.png` are PNGs at the
+  requested size.
+- `the_hq_view_carries_the_bracket_shape_and_the_next_opponent` — the view's
+  round count is the event's tiers, the first round has `16 / bots` matches and
+  the next opponent is one of the AI teams.
+- `ra2ui::hq::tests::the_bracket_group_is_filled_from_the_view` — the shipped
+  `bracket group` gets the status line, one line per round and the next
+  opponent.
+- `ra2sim::career::tests::every_shipped_event_is_a_sixteen_entrant_bracket`,
+  `a_loss_eliminates_from_the_event_but_not_the_season`,
+  `replaying_the_same_seed_reproduces_the_bracket` and
+  `save_reload_mid_season_restores_the_bracket_and_opponents` — the bracket
+  rules, the elimination rule, the deterministic replay and the mid-season save.
 - `damage_appears_on_the_repairs_screen_and_completing_it_persists` — a damaged
   report → one row (`My Robot`, `0:30`), five six-second ticks → `0:00`, the
   save/reload is empty, money stays 0, and a healthy career opens the empty
@@ -184,68 +247,78 @@ teams strictly ahead, plus one), not a UI table.
 
 ## What is not proven
 
-1. **Brackets and rounds.** The career model exposes `rounds_won`,
-   `rounds_lost`, `finish_event(won)` and the tier list, but no bracket, round
-   count or opponents (`docs/16-career.md` §6). The flow therefore plays **one
-   match** and prints that fact; the award's `1/1` is the model's count, not a
-   bracket. `Events.txt`'s first setting (2 or 4) is not applied to the robot
-   count: its meaning was not established.
-2. **Opponents.** The career model has no event participants or pairings. The
-   port takes the first AI team's first robot; a real season's opponents are
-   not recoverable from the files read so far.
-3. **The event's game type.** `Events.txt` does not name one. The port reads the
+1. **The bracket's visual columns.** The model has the real rounds, the field
+   and the next opponent; `event_bracket.gib`'s `bracket group` is filled with
+   one labeled line per round. The original's `FUN_0046ad60` draws a column per
+   round with bot logos and `questionmark.bmp` through a custom control
+   (`FUN_005f6010`) that was not decoded, so the port's arrangement is its own
+   while the data is the game's.
+2. **The draw's RNG algorithm and seed.** The original calls `FUN_00419190`
+   with 15; its algorithm and seed are not recovered. The career keeps an
+   explicit seed (`hq_mode::SEED` = 7, sidecar `seed`) and draws every
+   non-player slot with a small deterministic PRNG. The *rule* (0…14, per
+   slot, per round, no de-duplication) is measured; the numbers are not the
+   original's.
+3. **The two-winner variant.** `FUN_004698f0` contains a two-advancing-entrants
+   case; no shipped event uses it. The port implements single elimination
+   (one winner per match).
+4. **The exact `Events.txt` → bracket-config writer.** The data correlation is
+   total (2 ↔ 4 rounds, 4 ↔ 2 rounds, `bots ^ rounds == 16`); the code path that
+   copies the setting into the team record's six bracket ints was not traced.
+   The model prefers the shipped setting and has a tier-derived fallback.
+5. **The event's game type.** `Events.txt` does not name one. The port reads the
    arena script's `game_types` and picks Deathmatch first when the arena offers
    several; the original's event setup may have carried a different selection.
-4. **The match length.** The event setup window's time dropdown was not read; the
+6. **The match length.** The event setup window's time dropdown was not read; the
    length is the explicit `--seconds` (30 by default), and the evidence run
    prints its own decision at that limit. That decision is the `--match`
    evidence script (`plus.eliminatePlayer`, the tabletop path), not a rule.
-5. **Robot snapshots.** A `.bot` stores a raw 128×128 TGA blob, not a file name
+7. **Robot snapshots.** A `.bot` stores a raw 128×128 TGA blob, not a file name
    the UI can resolve. The inventory draws the shipped `teamhq/nobot.bmp`
    silhouette in the `bot snapshot img` cell; the robot's own picture is unshown.
    This is a screen whose source has no model field.
-6. **Prize art and the trophy scene.** The stored prize's `art` is a `.tga`
+8. **Prize art and the trophy scene.** The stored prize's `art` is a `.tga`
    (`UI\teamhq\events\trophies\…`) and is drawn in the history grid; the trophy
    `model` is a `.gmf` in `Arenas\event_results`, and the `event_results`
    3D scene (`Arenas/event_results.py`) is not composed. The award is the
    shipped `event_winner.gib` over the event arena's preview.
-7. **The league's competition level.** `hq_league.gib`'s `competition level`
+9. **The league's competition level.** `hq_league.gib`'s `competition level`
    note names `AMATEUR`/`SEMI-PROFESSIONAL`/`PROFESSIONAL`, but the career model
    has no level field; the screen keeps its own `LEAGUE STANDINGS` label.
-8. **Rank on a fresh season.** `Career::rank()` counts AI teams strictly ahead;
+10. **Rank on a fresh season.** `Career::rank()` counts AI teams strictly ahead;
    with all points zero every team ties and the player is rank 1, while the
    shipped team record carries `16`. The screens show the model's rank; the
    shipped 16 is not recomputed.
-9. **The schedule draw.** The original's RNG and seed were not recovered
+11. **The schedule draw.** The original's RNG and seed were not recovered
    (`docs/16-career.md` §3). The career uses seed 7 (`hq_mode::SEED`); the
    schedule is the nine distinct events that seed draws.
-10. **`hq_history`'s prize grid has no cell template.** The grid's note says
+12. **`hq_history`'s prize grid has no cell template.** The grid's note says
     "prize bitmaps … fixed at 80×80", but no `.gib` cell ships. The port adds an
     `Image` per prize at the grid's own 82×82 cell geometry. The note also says
     "only show last 32"; the career's `max_prizes` is 20 and the grid's visible
     area is 4×5, so the model's list is what is drawn.
-11. **The award's prize text clips.** The `prize description` `DisplayBox` is
+13. **The award's prize text clips.** The `prize description` `DisplayBox` is
     authored at a 211×64 margin. Long tournament messages wrap past it and the
     screen shows the visible part; the complete description is in the run's
     print and in the history's stored prize.
-12. **The event description clips.** `event_bracket.gib`'s description
+14. **The event description clips.** `event_bracket.gib`'s description
     `DisplayBox` is authored at 400×50; long `Events.txt` descriptions wrap past
     it. The full text is in `Events.txt`.
-13. **The repair screen's component-level damage.** A `MatchReport` has no
+15. **The repair screen's component-level damage.** A `MatchReport` has no
     component list, so a repair row names the robot; the `Team+0x12c` decoder
     and the `damage.tga` fractured icon are not implemented. The screen's
     `repairs 3d placeholder` is left as the screen's own dark backing, not the
     robot preview.
-14. **A live damaging match.** The shipped match in this environment reports
+16. **A live damaging match.** The shipped match in this environment reports
     zero damage (the evidence knob above), so the repair flow is proven with a
     `MatchReport` — the career's own input — rather than a match that closed on
     damage. The repair time unit is the model's explicit 30 s; the original
     passes `0x1e` to the progress widget but its unit was not established.
-15. **The bench's canvas.** `repairs.gib` is authored at 800×600 and its bench
+17. **The bench's canvas.** `repairs.gib` is authored at 800×600 and its bench
     is drawn at that size on the 1280×1005 shell; the arena backdrop does not
     stretch to the rest of the target, so the lower part of `repairs-list.png`
     is the clear colour. The screen's own art and widgets are unchanged.
-16. **The windowed `--hq` loop is not exercised here.** This environment has no
+18. **The windowed `--hq` loop is not exercised here.** This environment has no
     display, so `run_hq` shares the same `Session` and frame composition as the
     headless run but was not opened in a window; the PNGs are the evidence. The
     `--simulate-event` flow is the headless path and requires `--out`.

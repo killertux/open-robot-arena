@@ -73,7 +73,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         };
     }
     if args.hq {
-        let options = hq_mode::Options::new(
+        let mut options = hq_mode::Options::new(
             &game,
             args.simulate_event,
             args.out.clone(),
@@ -85,6 +85,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
             args.seconds,
             args.report_damage,
         )?;
+        options.simulate_season = args.simulate_season;
         return match options.out {
             Some(_) => hq_mode::run_headless(options),
             None => window::run_hq(options, args.audio_report),
