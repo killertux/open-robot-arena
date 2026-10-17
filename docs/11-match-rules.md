@@ -63,9 +63,10 @@ Same eight arenas. Team membership is a robot field read by `FUN_004177c0`
   each side's points and chooses the higher side; otherwise it settles the
   winner from the per-robot points. It then calls the results handoff with the
   two ids taken from the match's ordered player list (`FUN_0047a220(0/1)`).
-- the 1.20 rule "teammates do not score" is visible in the KOTH damage branch:
-  `FUN_004175b0` compares team ids and returns when equal
-  (`0x417737`, `TEAM MATCH` compare after `KING OF THE HILL` at `0x4176f2`).
+- the 1.20 rule "teammates do not score" is the `TEAM MATCH` branch of the
+  damage award: `FUN_004175b0` compares team ids and returns when equal
+  (`0x417737`); the game-type test is `FUN_004206a0`, which is string
+  **inequality**, so the outer branch is "not `KING OF THE HILL`" (`0x4176f2`).
 
 ### 1.4 TABLE TOP
 
@@ -271,11 +272,23 @@ naming is not the config's vocabulary. The per-arena cameras are the scripts'
   `FUN_00494f50`.
 - The only script that calls `addPoints` is `king.py:44`, so KOTH's zone score
   is script-generated and everything else must be C++.
-- The one explicit damage-to-points rule is KOTH-only: `FUN_004175b0` compares
-  the game type with `KING OF THE HILL` (`0x4176f2`) and, when it matches,
-  awards a value derived from the damage (`FUN_00489620`) to the attacker
-  through `FUN_004177e0` (`0x4175b0`); it rejects a teammate in `TEAM MATCH`
-  first (`0x417737`). Non-KOTH scoring was not located (§6).
+- **Damage scores in every type except KOTH.** `FUN_004175b0` tests the game
+  type with `FUN_004206a0` (`0x4176f2`); that helper is
+  `FUN_00402200(...) == 0`, and `FUN_00402200` is *string equality*
+  (`FUN_00402360` = `compare(...)`, `FUN_004023c0`) — so `FUN_004206a0` is
+  **inequality**. The award block is therefore the **not-`KING OF THE HILL`**
+  branch. Inside it the victim must still be alive (`FUN_00413810`, `+0x34 == 0`)
+  and, when the type is `TEAM MATCH` (`0x417737`, again `FUN_004206a0`), the
+  attacker's and victim's team ids must differ (`FUN_004177c0`, `+0x30`); in the
+  other non-KOTH types there is no team test. The amount is the effective damage
+  returned by `FUN_00489620` (the component's vtable `+0x1c`, called with the raw
+  damage), and `FUN_004178a0` writes `score = trunc(score + amount)` at
+  `0x417918`–`0x417928`. The collision path only reaches this when the raw
+  damage is at least `10.0` (`FUN_00417330`). A hazard's damage has attacker
+  `-1` (`FUN_004148f0`) and awards no stored points. The `2.0f` at `0x504d13`
+  and `0x504d5f` is the **flame's burn tick**: `0x504ca0` applies 2.0 damage
+  through `FUN_004148f0` and shows a `2` with `FUN_004177e0`'s store flag zero;
+  it is not a points formula.
 - `FUN_00412fc0` refreshes the HUD score from `getPoints` after every update
   (`0x413657-0x4136e6` → `0x476b60`).
 
@@ -352,11 +365,14 @@ each int means and the copy into `Team+0x5c`; next reads are `0x5024e0`,
 
 ## 6. What this pass could not establish
 
-- **Non-KOTH damage scoring and the time-out end.** `FUN_004175b0` awards
-  damage points only in its `KING OF THE HILL` branch; a second call site uses
-  a constant `2.0f` (`0x504d13`, `0x504d5f`) but is not proven to be per-hit
-  scoring. `+0x17c` is decremented in `0x4774f1` and the time widget hidden at
-  zero, but no path from there to `0x418040` or `0x418770` was found.
+- **The damage formula's inner scale and the time-out end.** The outer rule is
+  now established (§4.1 and §7): damage scores in every type except KOTH, the
+  amount is `FUN_00489620`'s return, and the write truncates. What
+  `FUN_00489620`'s virtual (`component vtable +0x1c`) does to the raw damage —
+  the armour/material scale — was not decoded; this port awards the damage its
+  own model actually applies. The `2.0f` at `0x504d13`/`0x504d5f` is the flame
+  tick, not a scale. `+0x17c` is decremented in `0x4774f1` and the time widget
+  hidden at zero, but no path from there to `0x418040` or `0x418770` was found.
 - **Mode values and flags.** `GameWindow+0x9c` takes values 0–5 (`0x4145f0` is
   the raw getter); the mode names are not recovered. `+0x8c`, `+0x8d`, `+0x8e`,
   `+0x8f`, `+0x158` are only partly known (`+0x8f` = `isMatchOver`,
@@ -408,10 +424,32 @@ it). Hilltop + `KING OF THE HILL` with a chassis parked in `King_Zone` scores
 is the `plus.addPoints` store and the script's own `scoringPlayer` is set. A
 `BATTLE ROYAL` with `EventNumBots=4` spawns four distinct model start points.
 
+**Damage → points (M11, measured).** The whole award is the **not-KOTH** branch
+of `FUN_004175b0`: `FUN_004206a0` is `FUN_00402200(...) == 0`, and `FUN_00402200`
+is string equality, so `0x4176f2` reads "if the type is not `KING OF THE HILL`".
+For a landed hit whose raw damage is at least `10.0` (`FUN_00417330`), with a
+real attacker and a victim still in state `0` (`+0x34`), the attacker's score
+gets the effective damage `FUN_00489620` returns, written as
+`trunc(score + amount)` (`0x417918`–`0x417928`). In `TEAM MATCH` (`0x417737`) a
+teammate hit is rejected; the other non-KOTH types have no team test, so a
+teammate hit scores there. KOTH awards no damage points at all — its only score
+is `king.py`'s `plus.addPoints`. `FUN_004178a0` ignores non-positive amounts, so
+a hit under 10 damage that is passed to it would add nothing; the 10 gate is the
+collision path's. The `2.0f` at `0x504d13`/`0x504d5f` is the flame hazard's
+2.0-damage tick (`0x504ca0` → `FUN_004148f0`), shown with a zero-store
+`FUN_004177e0` call; it is not a points multiplier. The duel exposes each
+scoring hit (`Duel::ScoreHit`) and `Match` applies the type rule; the tests
+measure 12.7 → 12, +37.9 → 49, 9.9 → 0, teammate 40 → 0, opponent 40 → 40. A
+`TEAM MATCH` last-team finish still beats a higher points total: `FUN_00418040`
+hands the survivor to the results, and only the time-out uses `FUN_00418770`'s
+totals.
+
 **Still unproven / deliberate gaps.**
 
-- Non-KOTH damage→points and the KOTH damage award (`FUN_004175b0`,
-  `FUN_00489620`): not implemented; the score is zero in a non-KOTH match.
+- The component virtual behind `FUN_00489620` (`+0x1c`) — the armour/material
+  scale applied to raw damage — was not decoded. This port scores the damage
+  its own model applies, which is the same quantity at the write but not proven
+  to equal the original's per-material scale.
 - The time dropdown's values (`0x4733f0`), `FUN_00412fc0`'s end-of-match timer
   and the results handoff's two ids (`FUN_0047a220(0/1)`): not read. Match
   length and the 3.5 s results delay are explicit config, not hidden constants;
@@ -431,3 +469,10 @@ is the `plus.addPoints` store and the script's own `scoringPlayer` is set. A
 `--match` frame commands, the HUD binding, the three camera rules, the results
 slots and the pause dialog. That document also names the bar mapping and the
 `watch`/`orbit` framing as ours, and the intro as still unimplemented.
+
+**M11** (`docs/19-match-fidelity.md`) closes the three measurable gaps:
+damage→points above, the status-meter fill (`0x476b60` → `0x4b3540`/`0x4b3570`/
+`0x4b35a0`: left-anchored, `trunc(fraction * 52 / 26)`), and the results title
+order (the panel's `+Background` body is an attachment, drawn before the
+window; it is not a sibling with the body's `ChildOrder`). What each
+status field is made of and the component damage scale remain unproven.

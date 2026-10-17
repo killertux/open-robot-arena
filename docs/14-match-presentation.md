@@ -88,20 +88,23 @@ Visibility is the data's own note: `countdown group` is shown during
 shown from `Fight` on. Slots with no robot (two bots in a four-slot HUD) are
 hidden. `skip group` is hidden because the arena intro is not implemented.
 
-**The bars are our mapping, not the binary's.** `0x4b2f20` binds the meter
-widgets, but the per-frame write into them was not traced. This port uses the
-live component hitpoints as the fractions: battery = the robot's `Battery`
-components, air = its `AirTank` components, armor = its chassis. The original's
-battery/air are consumable resources and this port has no energy model yet.
-A robot with no battery or air tank reports 0. The mapping is named in
-`RobotReport`'s fields and in `hud.rs`.
-
-**The bars shrink from the left.** The three bars' right edges all sit at
-x = 75 in `statusmeters.gib` (23+52, 23+52, 49+26), so a width that keeps that
-edge preserves the alignment the file declares: the bar's `Position.x` moves
-right and its `Size`/`_Size` width shrink. A UV crop would have been the other
-option; it would keep the rectangle and rescale the pattern, which is not what
-the aligned right edges ask for.
+**The fill rule is the binary's; the values are still ours.**
+`0x4b2f20` binds the meter widgets (`+0xc8` points, `+0xd0` battery, `+0xd4`
+air, `+0xd8` armour, `+0xdc` the white remainder, `+0xe0`/`+0xe4`/`+0xe8` the
+green/yellow/red dots). The per-frame write is `0x412fc0` → `0x476b60`:
+battery ← `FUN_0043e5f0` (status field `+0xa8`), air ← `FUN_0043e5e0`
+(`+0xa4`), armour ← `FUN_0043e600` (`+0xb4 / +0xb0`, clamped at 0), dot ←
+`FUN_00416940` (`+0xbc`, clamped to 2). `0x4b3540`/`0x4b3570`/`0x4b35a0` then
+set the width to `(int)(fraction * 52.0)` for battery/air and
+`(int)(fraction * 26.0)` for armour with `__ftol` — the fraction is truncated,
+not rounded. `0x4b35a0` also places the white remainder at `x = 49 + width`
+with width `26 - width`, so the fill is **left-anchored and shrinks to the
+right**, keeping the file's x (23, 23, 49). What `+0xa8`/`+0xa4` are made of
+(the `Battery`/`AirTank` energy model) was not decoded, so the fractions this
+port feeds are still the live component hitpoints: battery = the robot's
+`Battery` components, air = its `AirTank` components, armor = its chassis. A
+robot with no battery or air tank reports 0. The mapping is named in
+`RobotReport`'s fields and in `hud.rs`; the geometry is now the binary's.
 
 ## The camera
 
@@ -130,6 +133,14 @@ the placed tree back and asserts that slot 1 and slot 2 carry the report's
 `points`, `bot name` and `team name`, that slots 3/4 stay empty for a duel, and
 that the scene has a real glyph run (not a blank panel).
 
+The title's order is pinned by
+`match_mode::tests::the_results_title_is_not_covered_by_the_panel`: the panel's
+`+Background` body is drawn first, then the title's bar, then its glyphs, and no
+later quad overlaps the ink. The body is an attachment, not a sibling; its
+serialized `Position`/`Size` are against the decorated widget's parent (the
+result slots' 21,35 shadow against the 22,36 slot proves it). The C++ evidence
+and the measured frames are in `docs/19-match-fidelity.md` §2.
+
 ## Pause and quit
 
 `Esc` opens `UI/common/ingame_dialog.gib`, whose root is `in game popup win` —
@@ -142,8 +153,9 @@ difference. Options is not wired.
 
 ## Unproven / deliberately not done
 
-- **The meter fill** at `0x4b2f20`: the binding is known, the per-frame mapping
-  is not. The hitpoint fractions above are ours.
+- **The meter fill's sources** at `0x4b2f20`/`0x476b60`: the widget mapping and
+  the fill geometry are established (`docs/19`); what the status object's
+  `+0xa8`/`+0xa4` are made of is not, so the fractions above are ours.
 - **The `watch` framing** (`0x4770a0`) and **the orbit parameters**
   (`0x476f00`): ours, stated above.
 - **The static camera's rotation/FOV**: `ra2fmt::arena` keeps the position and

@@ -68,9 +68,11 @@ The writer is `FUN_0046c400`, called at the end of every match round. It adds
 `robot points / 200 + 160 / robots` to `+0x54` for the player and
 `160 / robots` to the fifteen entries (`0x46c439`–`0x46c475` for the player,
 `0x46c534`–`0x46c545` for the loop). The constant is `0xa0` = 160 and the
-divisor 200 (`0x51eb851f` magic). That is the only established damage/score
-conversion outside a match; damage itself is only converted by King of the
-Hill's script (`king.py`'s `plus.addPoints`).
+divisor 200 (`0x51eb851f` magic). That is the only established score/points
+conversion outside a match. Inside a match, damage becomes points in every
+type except King of the Hill (`FUN_004175b0`'s not-KOTH branch;
+`docs/19-match-fidelity.md` §1); KOTH's points are its script's
+(`king.py`'s `plus.addPoints`).
 
 At the end of the **event**, `FUN_0046ca90` folds the event points into the
 season (`FUN_0046cd00` → `+0x58 += +0x54`), counts the event (`FUN_0046cd10`
@@ -154,10 +156,10 @@ explicit behaviour rather than pretending to reproduce an unread path.
 * `Team+0x54` — the current event's points; `Team+0x58` — the season's.
 * A match adds `entered robot points / 200 + 160 / robots` for the player and
   `160 / robots` for each other participant (`FUN_0046c400`; see §1). The
-  entered robot's `points` are the script's score (`plus.addPoints`), so this
-  is King of the Hill's zone score in practice; for the other game types the
-  C++ leaves robot points at zero outside the unproven damage branch
-  (`docs/11-match-rules.md` §4.1/§6).
+  entered robot's `points` are its `+0x20` score: King of the Hill's script
+  score (`plus.addPoints`) or, in every other type, accumulated effective
+  damage (`FUN_004175b0`'s not-KOTH branch;
+  `docs/11-match-rules.md` §4.1 and `docs/19-match-fidelity.md` §1).
 * `Team+0x50` accumulates the number of defeated robots (the call site passes
   the count from `FUN_004164a0`'s `FUN_00413810` loop). Its UI label was not
   recovered.
