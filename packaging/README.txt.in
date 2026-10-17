@@ -137,10 +137,13 @@ Does not work yet:
   * Audio, music and video playback are not implemented.
   * The Microsoft/in-game codecs, installers and D3D wrappers in the original
     install (D3D8.dll, dgVoodoo, .exe) are not used.
-  * Some fidelity caveats remain (a quarter of stock robots cannot find wheel
-    traction, BurstMotor rest poses are approximate, per-part damage is
-    calibrated). README.md and docs/06-deferred-fidelity.md in the source tree
-    name each one.
+  * Some fidelity caveats remain (about a quarter of stock robots barely move
+    — the wheel/contact model; BurstMotor rest poses are approximate; per-part
+    damage is calibrated). README.md and docs/06-deferred-fidelity.md in the
+    source tree name each one.
+  * The condensed faces clip a few pixels of some glyph cells. That is the
+    shipped font file's own inconsistency, measured in docs/07 S1; the
+    renderer stays faithful to it.
   * No game data, mod support, network play or update check.
 
 An honest summary: this is an engine and a verification harness, not a

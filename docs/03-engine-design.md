@@ -52,13 +52,15 @@ local/           # (git-ignored) game files + converted cache
 - **M3 — Two robots fight.** ✅ Weapons/motors via the component/controller model;
   damage + buckling *(implemented as `ra2sim::rig`/`robot`/`combat`/`duel` plus the
   `ra2-duel` runner)*.
-- **M4 — Script layer.** 🚧 The engine side of the `plus`/`Arenas`/`AI` object
+- **M4 — Script layer.** ✅ The engine side of the `plus`/`Arenas`/`AI` object
   model, on an embedded CPython 3, running the game's own Python 2 sources
   unmodified. The arena surface, the shipped AI and the hazards have all landed —
   with the AI in place the headline duel closes and trades blows, and standing on
   a registered SmartZone fires the arena's own spikes *(implemented as
-  `ra2script` + `ra2sim::hazards`; see F13)*.
-- **M5 — Game shell.** 🚧 Under way, and the layout now places. A `.gib` reader
+  `ra2script` + `ra2sim::hazards`)*. What remains is presentation, not behaviour:
+  the camera, audio and particle calls are accepted and recorded rather than
+  played (F13 in [`06-deferred-fidelity.md`](06-deferred-fidelity.md)).
+- **M5 — Game shell.** ✅ Done, with two named residues (below). A `.gib` reader
   (`ra2fmt::gib`) parses all 116 shipped screens — the main menu, team HQ, the
   bot lab, the HUD, every dialog — into widget trees, and `ra2ui` resolves those
   trees into rectangles: `Position`/`Size` with their fraction-or-pixels flags,
@@ -87,8 +89,18 @@ local/           # (git-ignored) game files + converted cache
   found by their `Caption` attachment and centred in their buttons, and the
   bottom bar's chrome — written after the bar rather than in it — lands in the
   bar. Every `+Background` draws what its own body says: a colour fill or a
-  texture, behind its widget.
-- **M6 — Packaging.** Linux/macOS/Windows builds.
+  texture, behind its widget. `ra2-shell` boots the shipped `Scripts/Main.py`,
+  opens the data's main menu and walks the menu → bot lab and menu → arena-picker
+  routes by hit-tested clicks (S6). **Named residues:** S1's condensed-face
+  glyph-cell clipping, which is the shipped font file's own (measured in
+  [`07-m5-m6-checklist.md`](07-m5-m6-checklist.md) S1), and S4's workshop list
+  and paint tools, which are the game's C++ and are named/deferred rather than
+  approximated.
+- **M6 — Packaging.** ✅ Done for Linux x86_64: the portable tarball, launcher,
+  installer, `.desktop`, icon and unpack-and-run smoke are built and measured
+  ([`08-packaging.md`](08-packaging.md)). macOS and modern Windows are a
+  documented, honest, **unverified** path ([`09-platforms.md`](09-platforms.md));
+  no build or artifact exists on either.
 
 ## M5 design notes
 
@@ -98,8 +110,8 @@ local/           # (git-ignored) game files + converted cache
   placed. What is ours is the reader (`ra2fmt::gib`) and the layout model
   (`ra2ui`), and both are pinned by the corpus rather than by example — the
   reader by parsing all 116 files into a closed vocabulary, the layout by
-  resolving all 3590 widgets and checking that 71 files place entirely on screen
-  and that the main menu's own art lands where it says it should.
+  resolving all 4,348 widgets and checking that 57 files place entirely on
+  screen and that the main menu's own art lands where it says it should.
 - **Rules are measured, and the measurement is kept.** `Alignment` is a 3×3
   anchor because every one of the 841 values in the corpus is one of those nine
   combinations, and that check is a test rather than a comment. Where a rule is
@@ -355,8 +367,8 @@ local/           # (git-ignored) game files + converted cache
   size, which needs font metrics), `ClipMode`, and the containers that lay their
   own children out were each named as unresolved rather than approximated, and
   the corpus test records how many widgets that affects. As each fell, the
-  measurement that fell it came with it: the 3590 widgets' `ClipMode`s are
-  2288/1287/15 and eleven of the fifteen parent-clipped ones stick out of their
+  measurement that fell it came with it: the 4,348 widgets' `ClipMode`s are
+  2289/1999/60 and 47 of the 60 parent-clipped ones stick out of their
   parents; the 37 selection bars all hang from the row they name at the row
   height, and 31 of the 37 span their columns; the 30 scroll bars' three part
   indices agree with the children's names and kinds. Each of those is a test,

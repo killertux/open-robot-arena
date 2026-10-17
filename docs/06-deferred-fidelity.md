@@ -1243,9 +1243,11 @@ leaves the world, is pinned mid-air and drops when unpinned
 (`the_arena_can_hide_a_body_and_pin_one`). The box arena's three joints (two spikes
 and the saw) all build with the script's own travel. The shipped AI closes the
 fight — the test drives Roly Poly against
-Little Metal Friend in the Combat Arena for 20 s at the engine's own 1/60 step and
+Little Metal Friend in the Combat Arena for 30 s at the engine's own 1/60 step and
 requires the closest gap to go under a metre and damage to land (it reaches contact
-by t≈8.5 s and both take hits); all fourteen stock arenas register from their own
+by t≈8.5 s and both take hits; on the vendored-CMake Jolt build the first hit
+lands at t≈20.23 s, which is why the window is 30 s and not 20); all fourteen
+stock arenas register from their own
 modules;
 `Arenas/box.py`'s configuration arrives intact — 3 cameras, `Some([0.653, 6.894,
 -0.418])` and 10 shadow triangles, a 30×30 grid at 1 m with 207 walls and 24

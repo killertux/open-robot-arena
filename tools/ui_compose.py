@@ -11,9 +11,9 @@ the gear strip along the bottom.
                         [--game DIR] [--dump PATH]
 
 `--dump` reuses a saved `uidump --rects` file instead of running the binary.
-Text is not drawn: a `Text` widget has no image and its extent needs the
-`fg_*.giff` font metrics, which are not decoded yet. What such a widget would
-draw is reported instead.
+Text is drawn with the game's own `fg_*.giff` faces, dumped by `ra2 font
+--page`, so the composite and the wgpu renderer can be compared as pictures
+rather than as rectangles.
 
 Context: `docs/06-deferred-fidelity.md` F1's method, applied to the shell;
 `docs/03-engine-design.md` M5.
