@@ -2279,7 +2279,7 @@ pub fn script(
             out: Some(match_out.clone()),
             ..options
         };
-        let report = crate::match_mode::run_headless(match_options)?;
+        let report = crate::match_mode::run_headless(match_options, false)?;
         let first = match_out.join("fight-first.png");
         if frames && first.is_file() {
             std::fs::copy(&first, out.join("build-test.png"))

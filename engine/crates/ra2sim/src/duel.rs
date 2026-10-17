@@ -1451,7 +1451,12 @@ impl Duel {
         best
     }
 
-    fn camera_pose(&self, camera: &DuelCamera) -> (Vec3, Vec3) {
+    /// The eye and aim point `camera` asks for, in world units.
+    ///
+    /// The presentation uses this for the 3D frame and the audio layer uses it
+    /// for the listener: the ear is the eye and its forward is `aim - eye`, so
+    /// a positional sound is heard from where the picture is taken.
+    pub fn camera_pose(&self, camera: &DuelCamera) -> (Vec3, Vec3) {
         match *camera {
             DuelCamera::Auto => {
                 let focus = self.focus();

@@ -648,6 +648,23 @@ impl Session {
         }
     }
 
+    /// The `teamhq/` group's track unless a match is on screen; the match's
+    /// sounds are the arena's own script requests.
+    pub fn audio_screen(&self) -> Option<&'static str> {
+        match &self.screen {
+            Screen::Match(_) => None,
+            _ => Some("teamhq/teamhq.gib"),
+        }
+    }
+
+    /// The live match's listener, when a match is on screen.
+    pub fn audio_listener(&self) -> Option<ra2_audio::Listener> {
+        match &self.screen {
+            Screen::Match(session) => Some(session.audio_listener()),
+            _ => None,
+        }
+    }
+
     fn match_clock(&self) -> Option<f32> {
         match &self.screen {
             Screen::Match(session) => Some(session.matched.clock()),

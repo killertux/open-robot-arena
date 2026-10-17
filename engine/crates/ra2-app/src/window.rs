@@ -21,9 +21,11 @@ use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
+use crate::audio::AudioSystem;
 use crate::frame::FrameRenderer;
+use crate::options::Options;
 use crate::SHELL_SIZE;
 
 /// The game's update cadence (`ra2.cfg`'s `UpdateInterval` is 50 ms).
@@ -31,7 +33,7 @@ const UPDATE: Duration = Duration::from_millis(50);
 
 /// Open the shell in a window. Returns a clear message, not a panic, when the
 /// machine has no display: the headless path is `--offscreen`.
-pub fn run(game: &Path, size: [u32; 2]) -> Result<(), String> {
+pub fn run(game: &Path, size: [u32; 2], audio_report: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         return Err(
@@ -45,10 +47,12 @@ pub fn run(game: &Path, size: [u32; 2]) -> Result<(), String> {
         format!("cannot open a window: {e}; use --offscreen PNG for the headless path")
     })?;
     let mut app = App::new(game, size)?;
+    app.audio_report = audio_report;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("the window loop failed: {e}"))?;
+    print!("{}", app.audio.report(audio_report));
     match app.error {
         Some(error) => Err(error),
         None => Ok(()),
@@ -61,7 +65,7 @@ pub fn run(game: &Path, size: [u32; 2]) -> Result<(), String> {
 /// Open the Team HQ in a window. The same session the headless run uses: the
 /// shipped `teamhq.gib` and its tabs, `event_bracket.gib` when an event is
 /// entered, and M8's match presentation for the event's match.
-pub fn run_hq(options: crate::hq_mode::Options) -> Result<(), String> {
+pub fn run_hq(options: crate::hq_mode::Options, audio_report: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         return Err(
@@ -73,17 +77,19 @@ pub fn run_hq(options: crate::hq_mode::Options) -> Result<(), String> {
     let event_loop = EventLoop::new()
         .map_err(|e| format!("cannot open a window: {e}; use --hq --out DIR for the HQ"))?;
     let mut app = App::new_hq(options)?;
+    app.audio_report = audio_report;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("the window loop failed: {e}"))?;
+    print!("{}", app.audio.report(audio_report));
     match app.error {
         Some(error) => Err(error),
         None => Ok(()),
     }
 }
 
-pub fn run_match(options: crate::match_mode::Options) -> Result<(), String> {
+pub fn run_match(options: crate::match_mode::Options, audio_report: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         return Err(
@@ -95,10 +101,12 @@ pub fn run_match(options: crate::match_mode::Options) -> Result<(), String> {
     let event_loop = EventLoop::new()
         .map_err(|e| format!("cannot open a window: {e}; use --match --out DIR for the match"))?;
     let mut app = App::new_match(options)?;
+    app.audio_report = audio_report;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("the window loop failed: {e}"))?;
+    print!("{}", app.audio.report(audio_report));
     match app.error {
         Some(error) => Err(error),
         None => Ok(()),
@@ -107,7 +115,7 @@ pub fn run_match(options: crate::match_mode::Options) -> Result<(), String> {
 
 /// Open the workshop in a window: the bot lab, its live build model, the 3D
 /// placeholder preview and the editable panel.
-pub fn run_build(options: crate::build_mode::Options) -> Result<(), String> {
+pub fn run_build(options: crate::build_mode::Options, audio_report: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         return Err(
@@ -121,10 +129,12 @@ pub fn run_build(options: crate::build_mode::Options) -> Result<(), String> {
     let builder = crate::build_mode::Builder::open(&options.game, options.start.as_deref())?;
     let size = options.size;
     let mut app = App::with_builder(&options.game, size, builder)?;
+    app.audio_report = audio_report;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("the window loop failed: {e}"))?;
+    print!("{}", app.audio.report(audio_report));
     match app.error {
         Some(error) => Err(error),
         None => Ok(()),
@@ -254,6 +264,14 @@ struct App {
     requested: [u32; 2],
     shell: Shell,
     frames: FrameRenderer,
+    /// The client's music, click and match-sound policy.
+    audio: AudioSystem,
+    /// The options screen's staged `ra2.cfg`.
+    options: Options,
+    /// Print every play call at exit.
+    audio_report: bool,
+    /// `FullScreen` from the startup file; the window opens borderless when set.
+    full_screen: bool,
     /// `Some` when `--match` is playing; the shell stays booted so quitting the
     /// match returns to its main menu.
     session: Option<crate::match_mode::Session>,
@@ -310,19 +328,28 @@ impl App {
     ) -> Result<App, String> {
         let shell = Shell::boot(game, SHELL_SIZE)?;
         let frames = FrameRenderer::open(game)?;
+        let cfg = crate::options::read_cfg(game);
+        let audio = AudioSystem::new(game, &cfg);
+        let full_screen = cfg.full_screen();
+        let options = Options::open_game(game);
         println!(
-            "booted {} from {} ({}x{}); window target {}x{}",
+            "booted {} from {} ({}x{}); window target {}x{}{}",
             shell.screen_id(),
             game.display(),
             shell.size()[0],
             shell.size()[1],
             requested[0],
-            requested[1]
+            requested[1],
+            if full_screen { ", fullscreen" } else { "" }
         );
         Ok(App {
             requested,
             shell,
             frames,
+            audio,
+            options,
+            audio_report: false,
+            full_screen,
             session,
             builder: None,
             hq: None,
@@ -386,6 +413,8 @@ impl App {
 
         let format = gpu.config.format;
         if let Some(hq) = &mut self.hq {
+            let screen = hq.audio_screen();
+            self.audio.on_screen_opt(screen);
             let (scene, three_d) = match hq.scene() {
                 Ok(scene) => scene,
                 Err(error) => {
@@ -432,6 +461,7 @@ impl App {
             return;
         }
         if let Some(session) = &mut self.session {
+            self.audio.stop_music("the match is on screen");
             let scene = match session.scene() {
                 Ok(scene) => scene,
                 Err(error) => {
@@ -461,6 +491,7 @@ impl App {
                 return;
             }
         } else if let Some(builder) = &mut self.builder {
+            self.audio.on_screen("botlab/botlabwin.gib");
             let scene = match builder.scene(size) {
                 Ok(scene) => scene,
                 Err(error) => {
@@ -483,6 +514,13 @@ impl App {
                 return;
             }
         } else {
+            let screen = self.shell.screen_id();
+            self.audio.on_screen(&screen);
+            if Options::is_screen(&screen) {
+                if let Some(document) = self.shell.document_mut() {
+                    self.options.sync(document);
+                }
+            }
             let frame = self.frames.frame(&mut self.shell, size);
             if let Err(error) = gpu.ui.render_to(
                 &gpu.device,
@@ -513,7 +551,8 @@ impl ApplicationHandler for App {
                 self.requested[0] as f64,
                 self.requested[1] as f64,
             ))
-            .with_min_inner_size(LogicalSize::new(320.0, 240.0));
+            .with_min_inner_size(LogicalSize::new(320.0, 240.0))
+            .with_fullscreen(self.full_screen.then_some(Fullscreen::Borderless(None)));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -746,9 +785,60 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
+                let options_open = Options::is_screen(&self.shell.screen_id());
+                let hit = if options_open {
+                    crate::options::hit(&self.shell, point)
+                } else {
+                    None
+                };
+                if let Some(hit) = &hit {
+                    if let Some(change) = self.options.click(hit) {
+                        println!("options: {change}");
+                        if let Err(error) = self.options.save() {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        self.audio.apply_cfg(self.options.cfg());
+                    }
+                }
                 match self.shell.click(point[0], point[1]) {
                     Ok(step) => {
                         println!("{}", crate::describe(&step));
+                        if crate::activated(&step) {
+                            self.audio.click();
+                        }
+                        // The options window applies on OK, restores on Cancel.
+                        match step.note.as_deref() {
+                            Some(crate::options::OPEN_NOTE) => {
+                                // Re-read the file each time the window opens;
+                                // another program may have edited it.
+                                if let Err(error) = self.options.reload() {
+                                    eprintln!("options: {error}; keeping the staged values");
+                                }
+                            }
+                            Some(crate::options::OK_NOTE) => {
+                                if let Err(error) = self.options.save() {
+                                    self.fail(event_loop, error);
+                                    return;
+                                }
+                                self.audio.apply_cfg(self.options.cfg());
+                            }
+                            Some(crate::options::CANCEL_NOTE) => {
+                                if let Err(error) = self.options.cancel() {
+                                    self.fail(event_loop, error);
+                                    return;
+                                }
+                                self.audio.apply_cfg(self.options.cfg());
+                            }
+                            _ => {}
+                        }
+                        let screen = self.shell.screen_id();
+                        if Options::is_screen(&screen) {
+                            if let Some(document) = self.shell.document_mut() {
+                                self.options.sync(document);
+                            }
+                        }
+                        self.audio.on_screen(&screen);
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }
@@ -781,6 +871,16 @@ impl ApplicationHandler for App {
             }
             if let Some(hq) = &mut self.hq {
                 hq.advance(UPDATE.as_secs_f32());
+            }
+            // One tick of the script sounds, heard from whichever match is
+            // live. The HQ and the build mode own their own match sessions.
+            let listener = if let Some(session) = &self.session {
+                Some(session.audio_listener())
+            } else {
+                self.hq.as_ref().and_then(|hq| hq.audio_listener())
+            };
+            if let Some(listener) = listener {
+                self.audio.drain_match(listener);
             }
             if let Some(window) = &self.window {
                 window.request_redraw();

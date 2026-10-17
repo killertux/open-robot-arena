@@ -1,7 +1,8 @@
 # 13 — Audio, settings, and the writers (M7.5, M7.6, M9.1)
 
-Three workstreams landed together. Each is a library with tests; the
-integration into the running client is named at the end and is not done yet.
+Three workstreams landed together. The first two are libraries with tests **and**
+a running-client integration (M7.5/M7.6, §5); the writers are libraries whose
+UI is M9's.
 
 ## 1. `ra2.cfg` (W3)
 
@@ -22,8 +23,24 @@ integration into the running client is named at the end and is not done yet.
   preservation. The game-file tests skip with a message when `local/game` is
   absent (CI).
 
-Not done: the **options screen** does not yet drive it, and the client does not
-yet read display size/camera/volume from it at startup.
+The client now uses it in both directions (M7.6):
+
+- **Startup.** `ra2-app` reads `<game>/ra2.cfg` before anything else. The
+  `FullScreen` flag and `FSDisplayWidth`/`FSDisplayHeight` set the initial
+  window mode and size when `--size` was not given; the offscreen runners keep
+  their explicit target size and ignore the display keys. The audio volumes and
+  mute flags go to `Audio::apply_cfg`. Nothing is written on boot.
+- **Options.** The main menu's `Options button` opens the shipped
+  `common/options.gib` through the shell; its `video tab`/`audio tab` notes load
+  the shipped `video_options.gib`/`audio_options.gib` into `options content
+  group`. The app maps every control whose note names a setting to its
+  `ra2.cfg` key (the table is in `docs/20-client-audio.md`), mirrors the file
+  into the screen's sliders/checkboxes/dropdowns, writes on change and on `ok
+  button`, and restores the opening bytes on `cancel button`. The resolution dropdown is read-only: the screen says it is filled
+  with screen resolutions, but the data carries no list.
+- **Byte guarantee.** The round-trip tests now include the shipped file itself:
+  changing `MusicVolume` and `DefaultCamera`, writing and re-reading leaves every
+  other line, the CRLF endings and the final newline byte-identical.
 
 ## 2. `ra2-audio` (W2)
 
@@ -104,22 +121,35 @@ money, the closing lines and the line ending.
 - 12 of the 14 state lines still have no recovered meaning; they are preserved
   as typed values but unnamed. There is no high-level "add team" API yet.
 
-## 5. What is not wired yet
+## 5. What is now wired, and what is not
 
-- `ra2-app` does not play music or sounds. The script layer's sounds are now
-  real, though: `plus.createSound` keeps a `SoundId` handle table and
-  `playSound`/`loopSound`/`stopSound`/`removeSound` append ordered
-  `SoundRequest`s to `ra2script::SoundQueue`. `SoundQueue::apply(&mut Audio)`
-  resolves each script path against the game directory (case-insensitively,
-  backslashes or slashes) and drives `ra2-audio`; no device is required and the
-  tests exercise it with `Audio::without_device()`. The app still has to call
-  it once per frame.
-- The options screen does not edit `ra2.cfg`.
-- The workshop does not yet call the `.bot` writer; that is M9's UI work.
-- Nothing in this batch is exercised through a real audio device.
-- `plus.fadeInToLoop`, `plus.fadeOutLoop` and `plus.setVolume` are still
-  recorded rather than performed, so the intro's crowd fades do not reach the
-  mixer.
+- **Shell music.** `ra2-app::audio::AudioSystem::on_screen` maps
+  `Shell::screen_id` through `music_for_screen`. A re-render of the same screen
+  does no work; two screens in one group (the team picker and the HQ) keep the
+  same track; an unmapped screen stops the music. The three shipped tracks are
+  the only ones started.
+- **UI click.** Every shell click whose `Step.hit` is not `"nothing"` plays
+  `Sounds/button_click.wav` at unity through the SFX category, so
+  `SoundVolume`/`SoundMuted` apply. A miss plays nothing. The executable does
+  contain the string `Sounds\button_click.wav`; no call site was traced, so
+  *this mapping from an activating control to that sound is ours*.
+- **Match sounds.** Each app tick (and each offscreen match step) calls
+  `ra2script::take_sound_requests()` and applies the batch with
+  `SoundQueue::apply_requests`, using the match camera's eye and aim as the
+  listener. The arena's `DoIntro` is started at match setup when
+  `ArenaIntros=1`, which is what makes the intro music and announcers real
+  requests; the intro's `fadeInToLoop` crowd remains deferred (see the next
+  item).
+- **Device absence.** `Audio::new` still falls back to a silent instance. The
+  offscreen runners use `Audio::without_device` deliberately; both paths print
+  `audio: no output device (silent log only)` and keep the full play log.
+- **Not done.** `plus.fadeInToLoop`, `plus.fadeOutLoop` and `plus.setVolume` are
+  still recorded rather than performed, so the intro's crowd fades do not reach
+  the mixer. The workshop does not yet call the `.bot` writer; that is M9's UI
+  work. Nothing in this batch is exercised through a physical output device.
+- The options screen's `resolution dropdown` is read-only; `BitsPerPixel` and
+  `UpdateInterval` are not on the shipped screen, so no control was invented for
+  them.
 
 ## 6. plus sound semantics (measured from the scripts)
 

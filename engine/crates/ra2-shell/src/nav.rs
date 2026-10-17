@@ -57,6 +57,21 @@ pub const LINKS: &[Link] = &[
         because: "the bottom navigation bar's own `MainMenu button` names it",
     },
     Link {
+        note: "click to bring up options dialog",
+        screen: "common/options.gib",
+        because: "the main menu's `Options button` opens the shipped options window, whose root is `options win`",
+    },
+    Link {
+        note: "click to close options window",
+        screen: BOOT_SCREEN,
+        because: "the options window's `ok button` closes it; the main menu is the screen it was opened from",
+    },
+    Link {
+        note: "click to close options window but NOT apply changes",
+        screen: BOOT_SCREEN,
+        because: "the options window's `cancel button` closes it without applying; the main menu is the screen underneath",
+    },
+    Link {
         note: "click to go to the bot workshop",
         screen: "botlab/botlabwin.gib",
         because: "the workshop is `botlabwin.gib`, whose root is `botlab win`",

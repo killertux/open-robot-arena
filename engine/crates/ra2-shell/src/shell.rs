@@ -158,6 +158,19 @@ impl Shell {
         }
     }
 
+    /// The composed document, to write what the screen displays.
+    ///
+    /// The options screen is the caller: its sliders, checkboxes and dropdown
+    /// values are the `ra2.cfg` settings, so the app mirrors the file into the
+    /// shipped records before each frame. The workshop's document belongs to
+    /// `ra2ui`, so it is not exposed here.
+    pub fn document_mut(&mut self) -> Option<&mut Gib> {
+        match &mut self.screen {
+            Screen::Page(page) => Some(&mut page.gib),
+            Screen::Lab(_) => None,
+        }
+    }
+
     /// The workshop, when it is on screen. The application's build mode owns the
     /// model and fills the lab's lists through this view; the screen itself stays
     /// `ra2ui::workshop`'s.

@@ -325,6 +325,21 @@ impl SoundQueue {
         audio: &mut ra2_audio::Audio,
     ) -> Vec<String> {
         let requests = std::mem::take(&mut self.requests);
+        self.apply_requests(requests, game_root, listener, audio)
+    }
+
+    /// Drain an already-taken request list into an audio system.
+    ///
+    /// This is [`SoundQueue::apply`] for a caller that used
+    /// [`crate::take_sound_requests`] first: `Loop` and `Stop` still consult
+    /// this queue's handle table, so the requests must have come from it.
+    pub fn apply_requests(
+        &mut self,
+        requests: Vec<SoundRequest>,
+        game_root: &std::path::Path,
+        listener: ra2_audio::Listener,
+        audio: &mut ra2_audio::Audio,
+    ) -> Vec<String> {
         let mut problems = Vec::new();
         for request in requests {
             match request {
@@ -638,6 +653,35 @@ pub fn take_requests() -> Vec<Request> {
 /// without an audio system. To play them, use [`SoundQueue::apply`] instead.
 pub fn take_sound_requests() -> Vec<SoundRequest> {
     state().sounds.take_requests()
+}
+
+/// Run the live arena's own `DoIntro(on)`.
+///
+/// The C++ match shell starts the arena's intro when `ra2.cfg`'s
+/// `ArenaIntros` is on; the Python base class `Arenas.SuperArena.DoIntro`
+/// starts `Introduction()` and `Tick` advances the generator, so the intro's
+/// music, crowd and announcers arrive as ordinary [`SoundRequest`]s. The app
+/// calls this once when a match starts. A match with no script arena is a
+/// successful no-op.
+pub fn arena_intro(on: bool) -> Result<(), String> {
+    use pyo3::types::PyAnyMethods;
+    pyo3::Python::with_gil(|py| {
+        let arena = {
+            let state = state();
+            state
+                .arena_object
+                .as_ref()
+                .map(|object| object.clone_ref(py))
+        };
+        let Some(arena) = arena else {
+            return Ok(());
+        };
+        arena
+            .bind(py)
+            .call_method1("DoIntro", (on,))
+            .map(|_| ())
+            .map_err(|error| format!("arena DoIntro: {error}"))
+    })
 }
 
 /// Take the joints the arena scripts have asked for since the last call.

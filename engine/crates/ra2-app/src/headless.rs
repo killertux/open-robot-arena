@@ -4,11 +4,17 @@
 //! final frame with [`crate::frame`], draws it with `ra2-render`'s UI pipeline
 //! and reads it back. It is the CI entry point for M7 and the proof that the
 //! windowed loop has no logic of its own.
+//!
+//! The audio policy is the windowed one over a silent [`crate::audio::AudioSystem`]
+//! (`Audio::without_device`): the same music switches and click calls are
+//! recorded and printed, never sent to a sound card. That is deliberate for a
+//! headless evidence run and for `cargo test`.
 
 use std::path::Path;
 
 use ra2_shell::{Shell, Step};
 
+use crate::audio::AudioSystem;
 use crate::frame::FrameRenderer;
 use crate::SHELL_SIZE;
 
@@ -17,6 +23,16 @@ pub fn apply_clicks(shell: &mut Shell, clicks: &[[f32; 2]]) -> Result<Vec<Step>,
     let mut steps = Vec::new();
     for &[x, y] in clicks {
         steps.push(shell.click(x, y)?);
+    }
+    Ok(steps)
+}
+
+/// Apply a click script by widget name. The shell resolves each name to a
+/// reachable point with the same hit test a mouse uses.
+pub fn apply_named_clicks(shell: &mut Shell, names: &[String]) -> Result<Vec<Step>, String> {
+    let mut steps = Vec::new();
+    for name in names {
+        steps.push(shell.click_named(name)?);
     }
     Ok(steps)
 }
@@ -50,7 +66,14 @@ pub fn render_png(
 }
 
 /// The `--offscreen` run: boot, click, draw, report.
-pub fn run(game: &Path, out: &Path, size: [u32; 2], clicks: &[[f32; 2]]) -> Result<(), String> {
+pub fn run(
+    game: &Path,
+    out: &Path,
+    size: [u32; 2],
+    clicks: &[[f32; 2]],
+    click_names: &[String],
+    audio_report: bool,
+) -> Result<(), String> {
     let mut shell = Shell::boot(game, SHELL_SIZE)?;
     println!(
         "booted {} from {} ({}x{})",
@@ -59,10 +82,31 @@ pub fn run(game: &Path, out: &Path, size: [u32; 2], clicks: &[[f32; 2]]) -> Resu
         shell.size()[0],
         shell.size()[1]
     );
-    let steps = apply_clicks(&mut shell, clicks)?;
-    for step in &steps {
-        println!("{}", crate::describe(step));
+    let cfg = crate::options::read_cfg(game);
+    let mut audio = AudioSystem::new_silent(game, &cfg);
+    audio.on_screen(&shell.screen_id());
+    let mut settings = crate::options::Options::open_game(game);
+
+    let mut steps = Vec::new();
+    if click_names.is_empty() {
+        for &point in clicks {
+            stage_options(&shell, &mut settings, &mut audio, point)?;
+            steps.push(shell.click(point[0], point[1])?);
+            let step = steps.last().unwrap().clone();
+            finish_step(&mut shell, &mut settings, &mut audio, &step)?;
+        }
+    } else {
+        for name in click_names {
+            // `click_named` resolves this same point and then clicks it; the
+            // options controls need the point before the click.
+            let point = shell.point_for(name)?;
+            stage_options(&shell, &mut settings, &mut audio, point)?;
+            steps.push(shell.click_named(name)?);
+            let step = steps.last().unwrap().clone();
+            finish_step(&mut shell, &mut settings, &mut audio, &step)?;
+        }
     }
+
     render_png(&mut shell, game, out, size)?;
     println!(
         "finished on {} (content: {})",
@@ -76,6 +120,65 @@ pub fn run(game: &Path, out: &Path, size: [u32; 2], clicks: &[[f32; 2]]) -> Resu
         size[1],
         steps.len()
     );
+    print!("{}", audio.report(audio_report));
+    Ok(())
+}
+
+/// Stage the settings control under `point`, if the options window is open.
+fn stage_options(
+    shell: &Shell,
+    settings: &mut crate::options::Options,
+    audio: &mut AudioSystem,
+    point: [f32; 2],
+) -> Result<(), String> {
+    if !crate::options::Options::is_screen(&shell.screen_id()) {
+        return Ok(());
+    }
+    let Some(hit) = crate::options::hit(shell, point) else {
+        return Ok(());
+    };
+    if let Some(change) = settings.click(&hit) {
+        println!("options: {change}");
+        settings.save()?;
+        audio.apply_cfg(settings.cfg());
+    }
+    Ok(())
+}
+
+/// The audio and settings consequences of a shell click.
+fn finish_step(
+    shell: &mut Shell,
+    settings: &mut crate::options::Options,
+    audio: &mut AudioSystem,
+    step: &Step,
+) -> Result<(), String> {
+    println!("{}", crate::describe(step));
+    if crate::activated(step) {
+        audio.click();
+    }
+    match step.note.as_deref() {
+        Some(crate::options::OPEN_NOTE) => {
+            if let Err(error) = settings.reload() {
+                eprintln!("options: {error}; keeping the staged values");
+            }
+        }
+        Some(crate::options::OK_NOTE) => {
+            settings.save()?;
+            audio.apply_cfg(settings.cfg());
+        }
+        Some(crate::options::CANCEL_NOTE) => {
+            settings.cancel()?;
+            audio.apply_cfg(settings.cfg());
+        }
+        _ => {}
+    }
+    let screen = shell.screen_id();
+    if crate::options::Options::is_screen(&screen) {
+        if let Some(document) = shell.document_mut() {
+            settings.sync(document);
+        }
+    }
+    audio.on_screen(&screen);
     Ok(())
 }
 
@@ -122,6 +225,52 @@ mod tests {
             steps[1].note.as_deref(),
             Some("click to go to team hq with selected team (disable button if no team selected)")
         );
+    }
+
+    /// M7.5/M7.6: main menu → Team HQ → robots tab → bot lab is four
+    /// activations and the three shipped tracks, with no restart inside the HQ
+    /// group (the two teamhq screens share `Music/Team HQ`).
+    #[test]
+    fn the_named_route_switches_the_three_tracks_and_clicks_once_per_activation() {
+        let Some(game) = game_dir() else { return };
+        let mut shell = Shell::boot(&game, SHELL_SIZE).unwrap();
+        let cfg = crate::options::read_cfg(&game);
+        let mut audio = AudioSystem::new_silent(&game, &cfg);
+        audio.on_screen(&shell.screen_id());
+
+        let names = [
+            "Team HQ button",
+            "continue button",
+            "robots button",
+            "workshop button",
+        ]
+        .map(str::to_string);
+        let steps = apply_named_clicks(&mut shell, &names).unwrap();
+        for step in &steps {
+            if crate::activated(step) {
+                audio.click();
+            }
+            audio.on_screen(&step.screen);
+        }
+        assert_eq!(shell.screen_id(), "botlab/botlabwin.gib");
+        let log = audio.audio().play_log();
+        let music: Vec<_> = log
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == ra2_audio::PlayKind::Music)
+            .map(|entry| entry.path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(music.len(), 3, "{music:?}");
+        assert!(music[0].ends_with("Music/Main UI/Enter the Battlefield.mp3"));
+        assert!(music[1].ends_with("Music/Team HQ/Robot Tribal Dance.mp3"));
+        assert!(music[2].ends_with("Music/Workshop/Deep inside the Bot Lab.mp3"));
+        let clicks = log
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == ra2_audio::PlayKind::Sound2d)
+            .count();
+        assert_eq!(clicks, 4, "one click per activation, not per mouse-down");
+        println!("{}", audio.report(true));
     }
 
     /// At 1280×1005 the offscreen PNG is the shell's own `shot`, pixel for

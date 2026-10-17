@@ -8,7 +8,12 @@ pub struct Args {
     pub game: Option<PathBuf>,
     pub offscreen: Option<PathBuf>,
     pub size: [u32; 2],
+    /// Whether `--size` was given, so the startup `ra2.cfg` size may be used
+    /// when it was not.
+    pub size_set: bool,
     pub clicks: Vec<[f32; 2]>,
+    /// `--click-names A;B;...`: named controls, for a reproducible shell route.
+    pub click_names: Vec<String>,
     pub help: bool,
     /// `--match`: play a `ra2sim::match::Match` instead of the shell.
     pub match_mode: bool,
@@ -38,6 +43,8 @@ pub struct Args {
     pub start: Option<PathBuf>,
     /// `--save-as NAME`: the design name the headless `--build` run types.
     pub save_as: Option<String>,
+    /// `--audio-report`: print every play call (path, kind, gain, position).
+    pub audio_report: bool,
 }
 
 impl Default for Args {
@@ -46,7 +53,9 @@ impl Default for Args {
             game: None,
             offscreen: None,
             size: [1280, 1005],
+            size_set: false,
             clicks: Vec::new(),
+            click_names: Vec::new(),
             help: false,
             match_mode: false,
             hq: false,
@@ -60,14 +69,16 @@ impl Default for Args {
             build_mode: false,
             start: None,
             save_as: None,
+            audio_report: false,
         }
     }
 }
 
 pub fn usage() -> &'static str {
     "usage: ra2-app [--game DIR] [--offscreen PNG] [--size WxH] [--clicks \"x,y;x,y;...\"]\n\
+     \x20                [--click-names \"Name;Name;...\"] [--audio-report]\n\
      \x20      ra2-app --match [--seconds N] [--out DIR] [--quit-at N]\n\
-     \x20                [--bots A.bot,B.bot] [--arena PATH]\n\
+     \x20                [--bots A.bot,B.bot] [--arena PATH] [--audio-report]\n\
      \x20      ra2-app --build [--start BOT] [--save-as NAME] [--seconds N] [--out DIR]\n\
      \x20                [--size WxH]\n\
      \x20      ra2-app --hq [--simulate-event N] [--seconds N] [--report-damage N]\n\
@@ -93,6 +104,8 @@ pub fn usage() -> &'static str {
        --offscreen PNG  render the final state and exit (the CI path)\n\
        --size WxH       window/target size (default 1280x1005; the shell stays 1280x1005)\n\
        --clicks SCRIPT  semicolon-separated x,y points, applied in order\n\
+       --click-names S  semicolon-separated widget names, applied in order\n\
+       --audio-report   print every audio play call (path, kind, gain, position)\n\
        --match          play a match instead of the shell\n\
        --build          open the workshop (bot lab) as an editor\n\
        --start BOT      the .bot to open in --build (default: a stock chassis)\n\
@@ -116,8 +129,20 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--offscreen" => {
                 parsed.offscreen = Some(PathBuf::from(next(&mut args, "--offscreen")?))
             }
-            "--size" => parsed.size = parse_size(&next(&mut args, "--size")?)?,
+            "--size" => {
+                parsed.size = parse_size(&next(&mut args, "--size")?)?;
+                parsed.size_set = true;
+            }
             "--clicks" => parsed.clicks = parse_clicks(&next(&mut args, "--clicks")?)?,
+            "--click-names" => {
+                parsed.click_names = next(&mut args, "--click-names")?
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+            "--audio-report" => parsed.audio_report = true,
             "--match" => parsed.match_mode = true,
             "--hq" => parsed.hq = true,
             "--simulate-event" => {
@@ -253,6 +278,26 @@ mod tests {
         assert_eq!(parse_size("1280X1005").unwrap(), [1280, 1005]);
         assert!(parse_size("1280").is_err());
         assert!(parse_size("0x1005").is_err());
+    }
+
+    #[test]
+    fn the_audio_and_named_click_flags_parse() {
+        let args = parse(
+            [
+                "--click-names",
+                "Team HQ button; continue button ;",
+                "--audio-report",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(args.click_names, ["Team HQ button", "continue button"]);
+        assert!(args.audio_report);
+        assert!(!args.size_set);
+        let args = parse(["--size", "800x600"].into_iter().map(str::to_string)).unwrap();
+        assert!(args.size_set);
+        assert_eq!(args.size, [800, 600]);
     }
 
     #[test]

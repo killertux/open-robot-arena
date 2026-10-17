@@ -253,6 +253,17 @@ impl Session {
         // turn them off for the deterministic presentation run as well.
         std::env::set_var("RA2_HAZARDS", "0");
         let camera = camera_from_cfg(game)?;
+        // The match shell starts the arena's own intro; `ArenaIntros` is the
+        // shipped switch. The generator advances on the arena's `Tick`, so its
+        // music, crowd and announcer requests reach the app's audio drain.
+        let cfg = crate::options::read_cfg(game);
+        if cfg.arena_intros() {
+            if let Err(error) = ra2script::arena_intro(true) {
+                eprintln!("match: {error}");
+            }
+        } else {
+            println!("arena intro: off (ArenaIntros=0)");
+        }
         let presentation = Presentation::open(game)?;
         let dialog = ra2ui::workshop::load(&game.join("UI"), "common/ingame_dialog.gib")?;
         let report = matched.report();
@@ -280,6 +291,26 @@ impl Session {
 
     pub fn report(&self) -> MatchReport {
         self.matched.report()
+    }
+
+    /// The match's audio listener: the camera's eye, facing its aim point.
+    ///
+    /// This is the same pose [`Session::render_3d`] uses, so a positional sound
+    /// is heard from where the frame is taken. `up` is world +Y; the match
+    /// camera never rolls.
+    pub fn audio_listener(&self) -> ra2_audio::Listener {
+        let (eye, aim) = self.matched.duel.camera_pose(&self.camera);
+        let direction = aim - eye;
+        let forward = if direction.length_squared() > 1e-8 {
+            direction.normalize()
+        } else {
+            glam::Vec3::Z
+        };
+        ra2_audio::Listener::new(
+            [eye.x, eye.y, eye.z],
+            [forward.x, forward.y, forward.z],
+            [0.0, 1.0, 0.0],
+        )
     }
 
     /// One fixed simulation step, with the evidence script's decision at the
@@ -474,7 +505,7 @@ fn names_on_path(placed: &[ra2ui::Placement<'_>], path: &[usize]) -> Vec<String>
 }
 
 /// The offscreen run: frames, transitions, winner.
-pub fn run_headless(options: Options) -> Result<MatchReport, String> {
+pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport, String> {
     let out = options
         .out
         .clone()
@@ -486,6 +517,12 @@ pub fn run_headless(options: Options) -> Result<MatchReport, String> {
     let target = Target::new(renderer.device(), options.size[0], options.size[1]);
 
     let mut session = Session::new(&options)?;
+    let cfg = crate::options::read_cfg(&options.game);
+    let mut audio = crate::audio::AudioSystem::new_silent(&options.game, &cfg);
+    // Nothing from the shell is on screen here; the arena's own intro/crowd
+    // sounds are the match's music, and they arrive as script requests.
+    audio.stop_music("the match is on screen");
+    audio.drain_match(session.audio_listener());
     let mut last_state = session.matched.state();
     let mut wrote_countdown = false;
     let mut wrote_first = false;
@@ -579,6 +616,7 @@ pub fn run_headless(options: Options) -> Result<MatchReport, String> {
 
         let before = session.matched.state();
         session.step();
+        audio.drain_match(session.audio_listener());
         if before == MatchState::Fight
             && session.matched.state() != MatchState::Fight
             && !wrote_last
@@ -680,6 +718,7 @@ pub fn run_headless(options: Options) -> Result<MatchReport, String> {
             .unwrap_or(0),
         out.display()
     );
+    print!("{}", audio.report(audio_report));
     Ok(session.report())
 }
 
@@ -861,6 +900,60 @@ mod tests {
             winner: slot == 0,
             immobilized: false,
         }
+    }
+
+    /// The arena's own `DoIntro` reaches the mixer: the intro music and the
+    /// announcers are script requests, applied at the match camera.
+    #[test]
+    fn the_arena_intro_sounds_reach_the_audio_log() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options = Options::new(
+            &game,
+            None,
+            Vec::new(),
+            Some(3.0),
+            Some(std::env::temp_dir().join("ra2-match-audio")),
+            None,
+            [640, 502],
+        )
+        .unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        let cfg = crate::options::read_cfg(&game);
+        let mut audio = crate::audio::AudioSystem::new_silent(&game, &cfg);
+        audio.drain_match(session.audio_listener());
+        for _ in 0..30 {
+            session.advance(0.05);
+            audio.drain_match(session.audio_listener());
+        }
+        let log = audio.audio().play_log();
+        let sounds: Vec<_> = log
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == ra2_audio::PlayKind::Sound3d)
+            .map(|entry| entry.path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert!(
+            sounds
+                .iter()
+                .any(|path| path.contains("Sounds/intro_music/")),
+            "the intro music is a real request: {sounds:?}"
+        );
+        assert!(
+            sounds
+                .iter()
+                .any(|path| path.contains("Sounds/announcers/")),
+            "an announcer is a real request: {sounds:?}"
+        );
+        let entry = log
+            .entries()
+            .iter()
+            .find(|entry| entry.kind == ra2_audio::PlayKind::Sound3d)
+            .expect("an arena sound");
+        assert_eq!(entry.position, Some([0.0, 0.0, 0.0]));
+        assert!((entry.gain - audio.audio().sfx_gain()).abs() < 1e-6);
+        let listener = session.audio_listener();
+        assert_ne!(listener.position, [0.0, 0.0, 0.0], "not a fixed origin");
     }
 
     fn report() -> MatchReport {
@@ -1067,7 +1160,7 @@ mod tests {
             [640, 502],
         )
         .unwrap();
-        run_headless(options).expect("the headless match runs");
+        run_headless(options, false).expect("the headless match runs");
         for name in [
             "countdown.png",
             "fight-first.png",
@@ -1102,7 +1195,7 @@ mod tests {
             [640, 502],
         )
         .unwrap();
-        run_headless(options).expect("the quit run completes");
+        run_headless(options, false).expect("the quit run completes");
         for name in ["pause.png", "menu.png"] {
             let path = dir.join(name);
             assert!(path.is_file(), "{}", path.display());

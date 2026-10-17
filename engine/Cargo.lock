@@ -1845,6 +1845,7 @@ dependencies = [
  "glam",
  "image",
  "pollster",
+ "ra2-audio",
  "ra2-render",
  "ra2-shell",
  "ra2fmt",

@@ -14,6 +14,7 @@
 //!     --match --seconds 30 --out /tmp/ra2-match
 //! ```
 
+pub mod audio;
 pub mod build_mode;
 pub mod cli;
 pub mod frame;
@@ -21,6 +22,7 @@ pub mod headless;
 pub mod hq_mode;
 pub mod hud;
 pub mod match_mode;
+pub mod options;
 pub mod viewport;
 pub mod window;
 
@@ -42,18 +44,32 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         return Ok(());
     }
     let game = find_game(args.game.as_deref())?;
+    // The startup settings. `--size` overrides the file; the offscreen paths
+    // keep their own target size and ignore the display keys, as they have no
+    // window to size.
+    let cfg = options::read_cfg(&game);
+    let configured_size = options::display_size(&cfg);
+    let window_size = if args.size_set {
+        args.size
+    } else {
+        configured_size
+    };
     if args.build_mode {
         let options = build_mode::Options {
             game: game.clone(),
             start: args.start.clone(),
             name: args.save_as.clone().unwrap_or_else(|| "M9 Bot".to_string()),
             out: args.out.clone(),
-            size: args.size,
+            size: if args.out.is_some() {
+                args.size
+            } else {
+                window_size
+            },
             seconds: args.seconds.unwrap_or(4.0),
         };
         return match options.out {
             Some(_) => build_mode::run_headless(&options),
-            None => window::run_build(options),
+            None => window::run_build(options, args.audio_report),
         };
     }
     if args.hq {
@@ -61,13 +77,17 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
             &game,
             args.simulate_event,
             args.out.clone(),
-            args.size,
+            if args.out.is_some() {
+                args.size
+            } else {
+                window_size
+            },
             args.seconds,
             args.report_damage,
         )?;
         return match options.out {
             Some(_) => hq_mode::run_headless(options),
-            None => window::run_hq(options),
+            None => window::run_hq(options, args.audio_report),
         };
     }
     if args.match_mode {
@@ -78,17 +98,38 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
             args.seconds,
             args.out.clone(),
             args.quit_at,
-            args.size,
+            if args.out.is_some() {
+                args.size
+            } else {
+                window_size
+            },
         )?;
         return match options.out {
-            Some(_) => match_mode::run_headless(options).map(|_| ()),
-            None => window::run_match(options),
+            Some(_) => match_mode::run_headless(options, args.audio_report).map(|_| ()),
+            None => window::run_match(options, args.audio_report),
         };
     }
     match args.offscreen {
-        Some(out) => headless::run(&game, &out, args.size, &args.clicks),
-        None => window::run(&game, args.size),
+        Some(out) => headless::run(
+            &game,
+            &out,
+            args.size,
+            &args.clicks,
+            &args.click_names,
+            args.audio_report,
+        ),
+        None => window::run(&game, window_size, args.audio_report),
     }
+}
+
+/// Whether a click actually activated a control.
+///
+/// `Shell::click` returns `hit: "nothing"` for a point that reached no control
+/// (the bars, empty chrome, a miss). A hit on a control is an activation even
+/// when the control's action is only a state change (an option group's radio),
+/// which is why this is not "the screen changed".
+pub fn activated(step: &Step) -> bool {
+    !step.hit.is_empty() && step.hit != "nothing"
 }
 
 /// A click's one-line trace, the same shape `ra2-shell` prints.
