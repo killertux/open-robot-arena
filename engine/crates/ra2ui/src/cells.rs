@@ -308,4 +308,35 @@ mod tests {
         assert_eq!(fill(&mut list, &template, 4), 0);
         assert!(list.children.is_empty());
     }
+
+    /// `hq_robots.gib`'s own note names `robot_cell.gib`; that file does not
+    /// ship, and the data's cell is `bot_cell.gib`. The data wins, and this test
+    /// names the difference rather than smoothing the note over.
+    #[test]
+    fn the_robot_grid_note_names_a_file_the_game_does_not_ship() {
+        let Some(ui) = ui_root() else { return };
+        let mut gib = crate::workshop::load(&ui, "teamhq/hq_robots.gib").unwrap();
+        let root = gib
+            .blocks
+            .iter_mut()
+            .find_map(|b| match b {
+                Block::Widget(w) => Some(w),
+                _ => None,
+            })
+            .unwrap();
+        let grid = crate::workshop::find_mut(root, "robot grid").expect("the robot grid");
+        assert!(
+            grid.notes().contains("robot_cell.gib"),
+            "the grid's note: {:?}",
+            grid.notes()
+        );
+        assert!(
+            template(&ui, "teamhq/robot_cell.gib").is_err(),
+            "the note's template does not ship"
+        );
+        assert!(
+            template(&ui, "teamhq/bot_cell.gib").is_ok(),
+            "the cell the fill uses (FUN_004ff570) does ship"
+        );
+    }
 }
