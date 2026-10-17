@@ -679,64 +679,51 @@ Known, documented, not yet fixed:
     pixels its own `Sel Bar` states. The rows' *text*, though, is where the open
     item below shows.
 
-    And one long-standing thing is now named, narrowed, and *localised*, found
-    while checking those rows: **the font's records do not bracket its glyphs.**
-    The page itself is fine — dumped with `ra2 font RA2.cfz fg_mcn14 --page` it
-    holds every glyph correctly formed — but the rect a record states frames the
-    wrong few pixels: record 31 (`A`) is `(217, 245, 9, 11)` and that window holds
-    the tail of one glyph and the stem of the next, `K`'s holds a bare stem,
-    `T`'s a stem with a bottom hook. Read as pixel maps, not impressions.
+    And one long-standing thing is now settled, found while checking those rows.
+    The defect that made every label draw "a glyph plus a stroke of its neighbour"
+    was the page's **horizontal orientation**, not its rects: read as a picture,
+    the page's row at y 233 is `Ǝ Ⅎ ⅁ H I J K L M N O P Q R S T U` — the cells run
+    left to right in reading order and each letter is reversed *inside its cell*.
+    Both renderers now swap each glyph quad's `u` pair, as they already swap `v`
+    (`79570d1`). The probe is the page as an image, never a rendered word (a mirrored
+    word still reads as itself). The workshop toolbar is not evidence either way:
+    its words are **baked into the button `.bmp` art**.
 
-    Two things had to be unlearned before it could be measured. First, **the "ink
-    just outside the rect" count is confounded**: consecutive rects are contiguous
-    with a one-pixel gap, so `u0 - 1` and `u1` check the *same shared gap column*,
-    and a packer whose glyphs touch (or whose coverage bleeds) puts ink there for
-    almost every record — 87/86/78 of 92/92/90 in `fg_mcn14`/`fg_mcn16`/`fg_d20`,
-    even though every one of the 89 scored rects **holds ink**. The number is kept
-    only as a baseline. Second, the workshop toolbar that reads
-    `Overview Chassis … Test Robot` cleanly is **baked into the button `.bmp`
-    art**, not drawn by the font reader, so it was never evidence about a face. A
-    probe of all nine faces (`[Text] HAMBURGEFONTSIV`, rendered by `uishot` and by
-    `tools/ui_compose.py`, which agree pixel for pixel) shows **every face
-    smears**, worst the small condensed ones (`fg_mcn12`, `fg_mcn14`, `fg_mcn16`),
-    least the large `fg_d*`.
+    A **separate, measured** item remains: with the mirror fixed the labels are
+    upright, but the rect samples a cell of the page shifted a few columns from the
+    glyph it names, in **every** face (not `fg_mcn14` alone). The measurement is
+    shape, not reading: one `[Text]` per face holding `F`, `L`, `J`, rendered by
+    `uishot`, then each glyph's ink bbox and density. Every bbox fills its cell (the
+    renderer samples exactly the rect), the letters are upright, and the `F` is the
+    sparse one — density **0.43** (`fg_mcn14`), **0.49** (`fg_mcn16`), **0.50**
+    (`fg_d20`) against the `L`'s 0.57/0.48/0.59 — because the cell keeps the `F`'s
+    stem and clips a bar. The rendered ink count equals the cell's ink count
+    exactly, so the renderer is faithful; the file's rect clips.
 
-    The diagnostic is a **picture with the rects drawn on the page**. Overlaying
-    every rect border on `fg_mcn14`'s page at 4× shows the borders landing **0–6
-    columns from the nearest blank cell boundary** — not a uniform off-by-N, not a
-    drift along the row, not a slip: **jitter**, with the rect generally a few
-    columns left of its glyph. Of the 94 scored rects, **69** (`fg_mcn14`), **74**
-    (`fg_mcn16`) and **71** (`fg_d20`) have their **left border on ink** (a blank
-    cell boundary would leave it blank), 66/69/58 their right border, and only ~5
-    bracket a blank-separated cell at all. The fit `cell_start = a·x0 + b` is
-    `a ≈ 1.00, b ≈ 0` with a ~3 px residual on both faces; no constant shift (17/20
-    left for `fg_d20`, 18/33 for `fg_mcn14`), scale or pitch fixes it.
+    Overlaying the rects on the page shows the shift **grows along each row** (a
+    small pitch excess, not a uniform off-by-N or a slip): `fg_mcn14` row 1 is
+    `+0 +3 +5 +5 −1 −2 +3 +3 +5 +7 … +8 +9`, row 0 grows to `+12…+17`, row 2 sits
+    at `0` until its last three. Across all nine faces **58–82 of 94** rects have
+    their left border on ink and **58–77** their right border; only **0–5** bracket
+    a blank-separated glyph (`fg_mcn14` 69/66/0, `fg_mcn16` 74/69/0, `fg_d20`
+    71/58/3). The header is invariant (word `0x0C` = `1.0f`, bytes `0x18..0x28`
+    zero, `leading` 4–7) and no other layout of the 133800 bytes does better (best
+    strict-bracket 9/92, `512x128`). The field order and the `v` flip are settled by
+    the builder (`FUN_005cd560`: `u0 = x/W … v1 = (y+h)/H`), and the page's picture
+    is the **high byte**; the low byte is colour, not a mask.
 
-    The file cannot be rescued by another layout. The header is invariant across
-    all nine faces (word `0x0C` is exactly `1.0f`, the sixteen bytes at `0x18` are
-    zero, `leading` is 4–7 and never the records' `third`), and of the layouts the
-    133800 bytes admit — records at `0x28`/`0x44`/`0x68`, 95 records, a 95-record
-    page at 2700, `512x128`, `128x512` — the best strict-bracket count is **9 of
-    92** (`512x128`), against 92 for a correct file. The field order and the `v`
-    flip are settled by the builder (`FUN_005cd560`: `u0 = x/W`, `v0 = y/H`,
-    `u1 = (x + width)/W`, `v1 = (y + height)/H`, `v` from the page's bottom), and
-    the page's picture is the **high byte**; the low byte is colour, not a mask.
-
-    What is **not** settled is whether the game draws this file directly. Its
-    builder `FUN_005cd560` creates a D3D texture, blits per-glyph bitmaps from a
-    sprite/glyph array (stride `0x54`, data `0x58`) and computes the u/v above — so
-    a rebuild exists at least on the fallback path — but the deserialiser
-    `FUN_005ce100`/`FUN_005ce320` reads **four floats then three ints** per glyph
-    where this file stores **three ints then four floats**, and the `.giff` parser
-    and text-draw routine were not located in a bounded search. So the honest
-    landing is that the shipped `.giff` is **internally inconsistent** (the rects
-    and the page describe different packings) and the renderer stays faithful to
-    the shipped data rather than inventing a correction. The exact next reads are
-    `FUN_00591b50`'s stack args at `0x4e3805`, the `[3 ints][4 floats]` →
-    `[4 floats][3 ints]` conversion, and the routine that consumes `font+0x38` /
-    `font+0x638` to build the quad. Readings this report made from *rendered words*
-    stay less reliable than readings made from *ink counts in a page*, and the `O`
-    measurements above are the latter kind.
+    The game **re-packs** the glyphs at load: `FUN_00591b50` constructs the font,
+    loads the resource, deserialises with `FUN_005ce320`, and calls `FUN_005cd560`,
+    which creates a D3D texture, blits per-glyph bitmaps and recomputes `u/v`. So
+    the runtime's page is a rebuild, and the file's page/rects are its source. What
+    is **not** settled is **how the cut is located** (the record's `u/v`, the
+    `advance`, or the mask): the deserialiser reads **four floats then three ints**
+    where this file stores **three ints then four floats**, so a conversion sits
+    between them. Next reads: `FUN_00591b50`'s stack args at `0x4e3805`; the
+    `[3 ints][4 floats]` → `[4 floats][3 ints]` conversion; which field locates the
+    cut. Readings this report made from *rendered words* stay less reliable than
+    readings made from *ink counts in a page*, and the `O` measurements above are
+    the latter kind.
 
     The shell's art can be counted, and that is worth having before M6: resolving
     every name a shipped screen states the way the renderer does gives **1,303

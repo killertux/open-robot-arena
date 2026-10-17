@@ -443,122 +443,66 @@ its note and `PassMouse` — it has no class behaviour to run, so it cannot be a
 control, and a hit has to fall through it to what is behind. `ra2ui::input::hit`
 does that, and the three overlays above are what requires it.
 
-### Open: the glyph records do not bracket the glyphs
+### Fixed: the page is mirrored in u — every glyph drawn reversed
 
-The page is fine and the records are not. The font's page — dumped with
-`ra2 font RA2.cfz fg_mcn14 --page` — holds all 96 glyphs correctly formed and
-packed in rows. But the **rect a record states does not frame its glyph**, and the
-three below are pixel maps of the page read through the records' own rects, so
-they are measurements rather than impressions:
+The defect that made every label draw "a glyph plus a stroke of its neighbour" was
+the page's **horizontal orientation**, not the rects. Read as a picture, the page's
+row at y 233 is `Ǝ Ⅎ ⅁ H I J K L M N O P Q R S T U`: the cells run left to right in
+reading order and each letter is reversed *inside its cell*. Both renderers now
+swap each glyph quad's `u` pair, as they already swap `v`. The probe for it is the
+page as an image, not a rendered word (a mirrored word still reads as itself), and
+the workshop toolbar is not evidence either way: its words are baked into the
+button `.bmp`.
 
-```text
-A  record 31  rect (217, 245, 9, 11)      T  record 50  rect (123, 232, 7, 11)
-   .........                                 .......
-   ...##..##                                 ....###
-   ...##..##                                 ....##.
-   ####...##                                 ....##.
-   ####...##                                 ....##.
-   #.##...##                                 ....##.
-   #.##...##                                 ....##.
-   ###....##                                 ....##.
-   ###....##                                 ....##.
-   ###....##                                 ##..##.
-   .#.....##                                 #...#..
+### Open (separate, measured): the cells clip the page's glyphs
 
-K  record 41  rect (46, 232, 5, 11)
-   .....
-   ...##
-   ...##
-   ...##
-   ...##
-   ...##
-   ...##
-   ...##
-   ...##
-```
+With the mirror fixed the labels are upright, but some glyphs are still struck
+through. The rect samples a cell of the page that is shifted a few columns from
+the glyph it names, in **every** face — a property of the shipped file, not of
+`parse` (which reads `u0`/`u1` straight). The record's four floats are settled:
+the builder `FUN_005cd560` writes `u0 = x/W … v1 = (y+h)/H`; the page's picture is
+the **high byte** (the low byte is colour, not a mask).
 
-`A`'s window holds the tail of one glyph and the stem of the next, `K`'s holds a
-bare stem, `T`'s holds a stem with a bottom hook.
+The measurement is shape, not reading: one `[Text]` per face holding `F`, `L`, `J`,
+rendered by `uishot`, then each glyph's ink bbox and density (ink / bbox area).
+Every bbox fills its cell (the renderer samples exactly the rect), the letters are
+upright, and the `F` is the sparse one — density **0.43** (`fg_mcn14`), **0.49**
+(`fg_mcn16`), **0.50** (`fg_d20`), against the `L`'s 0.57/0.48/0.59 — because the
+cell keeps the `F`'s stem and clips a bar. The rendered ink count equals the cell's
+ink count exactly, so the renderer is faithful; the file's rect clips.
 
-**The "ink just outside the rect" count is confounded and is only a baseline.**
-A rect that frames its glyph would leave `u0 - 1` and `u1` blank, but consecutive
-rects are contiguous with a one-pixel gap, so the two checks land on the *same
-shared gap column*; a packer whose glyphs touch (or whose coverage bleeds) puts ink
-there for almost every record. So of the 96 records in `fg_mcn14`, 87 "cut a
-neighbour", 86 in `fg_mcn16` and 78 in `fg_d20` — even though every one of the 89
-scored rects **does hold ink**. The lesson came from trying to read the shell: the
-workshop toolbar that *looks* clean is **baked into the button `.bmp` art**, not
-drawn by this reader, so it was never evidence about a face.
+Overlaying the rects on the page shows the shift **grows along each row** (a small
+pitch excess, not a uniform off-by-N or a slip): `fg_mcn14` row 1 is `+0 +3 +5 +5
+−1 −2 +3 +3 +5 +7 … +8 +9`, row 0 grows to `+12…+17`, row 2 sits at `0` until its
+last three. Across all nine faces **58–82 of 94** rects have their left border on
+ink and **58–77** their right border; only **0–5** bracket a blank-separated glyph
+(`fg_mcn14` 69/66/0, `fg_mcn16` 74/69/0, `fg_d20` 71/58/3). The header is invariant
+(word `0x0C` = `1.0f`, bytes `0x18..0x28` zero, `leading` 4–7) and no other layout
+of the 133800 bytes does better (best strict-bracket 9/92, `512x128`).
 
-A probe of all nine faces (`[Text] HAMBURGEFONTSIV`, rendered by `uishot` and by
-`tools/ui_compose.py`, which agree pixel for pixel) shows **every face smears**,
-worst the small condensed ones (`fg_mcn12`, `fg_mcn14`, `fg_mcn16`), least the large
-`fg_d*`. There is no per-face split to exploit.
+The game re-packs the glyphs at load: `FUN_00591b50` constructs the font, loads the
+resource, deserialises with `FUN_005ce320`, and calls `FUN_005cd560`, which creates a
+D3D texture, blits per-glyph bitmaps and **recomputes** `u/v`. So the runtime's page
+is a **rebuild**, and the file's page/rects are its source. What is **not** settled
+is **how the cut is located** (the record's `u/v`, the `advance`, or the mask): the
+deserialiser reads **four floats then three ints** where this file stores **three
+ints then four floats**, so a conversion sits between them. Next reads:
+`FUN_00591b50`'s stack args at `0x4e3805`; the `[3 ints][4 floats]` →
+`[4 floats][3 ints]` conversion; which field locates the cut.
 
-The record's four floats are **not** the open question. The loader that *builds* a
-runtime page (`FUN_005cd560`) writes `u0 = x/W`, `v0 = y/H`, `u1 = (x + width)/W`,
-`v1 = (y + height)/H`, so the order is `u0 v0 u1 v1` and `v` is measured from the
-page's bottom — which is what `Glyph::rect` turns over. The page's picture is the
-**high byte**; the low byte is **not** a glyph mask but the colour/alpha channel
-(more than 99% of it is `0xFF` where the high byte has ink, and the builder writes
-`(coverage << 8) | 0xfff`).
+The old `almost_no_record_brackets_its_glyph` is retired — its premise (that a cell
+which brackets its glyph is the normal case) is wrong.
+`the_font_file_is_internally_inconsistent` keeps the border-on-ink counts for all
+nine faces and the header checks.
 
-The diagnostic is a **picture with the rects drawn on the page**. Overlaying every
-rect border on `fg_mcn14`'s page at 4× shows the borders landing **0–6 columns from
-the nearest blank cell boundary** — not a uniform off-by-N, not a drift along the
-row, not a slip: **jitter**, with the rect generally a few columns left of its
-glyph. Of the 94 scored rects, **69** (`fg_mcn14`), **74** (`fg_mcn16`) and **71**
-(`fg_d20`) have their **left border on ink** (a blank cell boundary would leave it
-blank), 66/69/58 their right border, and only ~5 bracket a blank-separated cell at
-all. The fit `cell_start = a·x0 + b` is `a ≈ 1.00, b ≈ 0` with a ~3 px residual on
-both faces, and no constant shift (17/20 left for `fg_d20`, 18/33 for `fg_mcn14`),
-scale or pitch fixes it.
+### Fixed: a glyph's quad drew its cell mirrored
 
-The file cannot be rescued by another layout. The header is invariant across all
-nine faces: word `0x0C` is exactly `1.0f`, the sixteen bytes at `0x18` are zero,
-and `leading` is 4–7, never the records' `third`. Of the layouts the 133800 bytes
-admit — records at `0x28`/`0x44`/`0x68`, 95 records, a 95-record page at 2700,
-`512x128`, `128x512` — the best strict-bracket count is **9 of 92** (`512x128`),
-against 92 for a correct file.
-
-What is **not** settled is whether the game draws this file directly. Its page
-*builder* (`FUN_005cd560`) creates a D3D texture, blits per-glyph bitmaps from a
-sprite/glyph array (stride `0x54`, data `0x58`) and computes the u/v above — so a
-rebuild exists at least on the fallback path. But the deserialiser
-`FUN_005ce100`/`FUN_005ce320` reads **four floats then three ints** per glyph where
-this file stores **three ints then four floats**; a conversion (or a second,
-unshipped file) sits between them, and the `.giff` parser and the text-draw routine
-were not located in a bounded search. The exact next reads are: (a) `FUN_00591b50`'s
-stack arguments at its call site `0x4e3805` (it is passed both `fg_mcn14.giff` and
-`fg_mcn14`); (b) the conversion from `[3 ints][4 floats]` to `[4 floats][3 ints]`;
-(c) the routine that consumes `font+0x38` (four floats) and `font+0x638` (three
-ints) to build the quad, and whether it samples this page or the rebuilt one.
-
-So the honest landing is that the shipped `.giff` is **internally inconsistent** —
-the rects and the page describe different packings — and the renderer stays faithful
-to the shipped data rather than inventing a correction. `the_font_file_is_internally_inconsistent`
-keeps the border-on-ink counts and the header checks; `almost_no_record_brackets_its_glyph`
-keeps the inside/cut/best-shift and colour-byte numbers.
-
-### Open: a glyph's quad draws its cell and a slice of its neighbour
-
-Found while checking the arena list's rows by eye, and it is the renderer rather
-than the list. **A single character in a `Text` draws two shapes**: one `Text`
-holding `A`, `M`, `O` or `N` each renders as its own glyph *and* a second shape
-beside it, and a longer string renders as its letters with extra strokes
-overlapping them. It is not the widget's construction — a `Text` written exactly
-as `botlab/ch_stepbuttons.gib` writes its own (`_Position 0 0 22 0`, a zero `Size`)
-smears the same way — and it is not one face: `fg_mcn14`, `fg_mcn16` and `fg_mcn12`
-all do it.
-
-So a glyph quad's uv, or the page texture it is taken from, is off by something
-that repeats per cell. What to read next: `glyph_page` against the quad `text_run`
-builds — the uv is `rect / (page_width, page_height)`, so a page uploaded at a
-different size than the rects were computed against would do exactly this.
-
-This is why the readings in this document that came from *ink in a page* stand
-(the `O` measurements are pixel counts, not pictures) while readings that came from
-*looking at rendered words* had to be re-checked each time.
+The "two shapes per character" reading was the page's `u` mirror, fixed above: the
+quad's uv was right and the letter inside the cell was reversed. The page texture
+was never the problem, and neither was the widget — a `Text` written exactly as
+`ch_stepbuttons.gib` writes its own smeared for the same reason. Readings from
+*ink in a page* stand; readings from *a rendered word* had to be re-checked because
+a mirrored word still reads as itself.
 
 ### What the shell's screens name, and the two things the game does not ship
 
