@@ -679,29 +679,41 @@ Known, documented, not yet fixed:
     pixels its own `Sel Bar` states. The rows' *text*, though, is where the open
     item below shows.
 
-    And one long-standing thing is now named, and narrowed, found while checking
-    those rows: **the font's records do not bracket its glyphs.** The page itself
-    is fine — dumped with `ra2 font RA2.cfz fg_mcn14 --page` it holds every glyph
-    correctly formed — but the rect a record states frames the wrong few pixels:
-    record 31 (`A`) is `(217, 245, 9, 11)` and that window holds the tail of one
-    glyph and the stem of the next, `K`'s holds a bare stem, `T`'s a stem with a
-    bottom hook. Read as pixel maps, not impressions. So a single character
-    renders as two shapes, in `fg_mcn14`, `fg_mcn16` and `fg_mcn12`, and a `Text`
-    written exactly as `ch_stepbuttons.gib` writes one does the same: it is the
-    font reader, not the widget. And it is nearly every
+    And one long-standing thing is now named, narrowed, and *localised*, found
+    while checking those rows: **the font's records do not bracket its glyphs.**
+    The page itself is fine — dumped with `ra2 font RA2.cfz fg_mcn14 --page` it
+    holds every glyph correctly formed — but the rect a record states frames the
+    wrong few pixels: record 31 (`A`) is `(217, 245, 9, 11)` and that window holds
+    the tail of one glyph and the stem of the next, `K`'s holds a bare stem,
+    `T`'s a stem with a bottom hook. Read as pixel maps, not impressions. So a
+    single character renders as two shapes, in `fg_mcn14`, `fg_mcn16` and
+    `fg_mcn12`, and a `Text` written exactly as `ch_stepbuttons.gib` writes one
+    does the same: it is the font reader, not the widget. And it is nearly every
     record: of the 96 in `fg_mcn14`, **87 have ink just outside their rect** (86 in
     `fg_mcn16`, 78 in `fg_d20`), so almost none brackets its glyph — kept as a
-    baseline of the defect. It is not a uniform shift (the row at y 233's records
-    are ascending and tight), so the next read is the **raw record words for a
-    known glyph**: whether the word taken as `u0` is the ink's left edge or the pen
-    origin, and whether `u1 - u0` is the glyph's width or its advance. One `Text`
-    holding a single `A`, `M`, `O` or `N` renders as two shapes; a string renders
-    as its letters with extra strokes over them; a `Text` written exactly as the
-    corpus writes one smears the same; and `fg_mcn14`, `fg_mcn16` and `fg_mcn12`
-    all do it. It is the renderer — the quad's uv or the page texture it comes
-    from — and it means readings this report made from *rendered words* were less
-    reliable than readings made from *ink counts in a page*. The `O` measurements
-    above are the latter kind.
+    baseline of the defect.
+
+    What the test now *also* keeps is what rules the cheap answers out. Every one
+    of the 89 scored rects in each face **holds ink**, so the rects are *near*
+    their glyphs; and **no constant shift** of a packed row — every `d` in
+    `-10..=10` — comes close (the best still cuts **17 of 20** for `fg_d20` and
+    **18 of 33** for `fg_mcn14`). The field order and the `v` flip are settled by
+    the loader that *builds* a page (`FUN_005cd560`: `u0 = x/W`, `v0 = y/H`,
+    `u1 = (x + width)/W`, `v1 = (y + height)/H`, `v` from the page's bottom). And
+    the sample pairing is spent: the low byte, one of two planes, big-endian,
+    `512x128`, `128x512`, `512x256`, `256x512`, half-rows repeated — every reading
+    still leaves ~85 of the ~92 scored rects with ink in the one-pixel gap they
+    share with the next glyph, and no field-order × flip × rounding × pairing
+    combination brackets and keeps ink inside. So the records and the page
+    describe **different packings** (the page's blocks sit a few columns left of
+    the rects, at a slightly different per-glyph pitch), and the next read is the
+    **`.giff` → runtime-font conversion**: `FUN_005ce100` opens the file by name
+    and `FUN_005ce320` deserialises it, but reads **four floats then three ints**
+    per glyph where the stored record is **three ints then four floats** — a
+    conversion layer, or a second unshipped file, sits between them. It is the
+    record↔page mapping, not the quad's uv and not the page texture; readings this
+    report made from *rendered words* stay less reliable than readings made from
+    *ink counts in a page*, and the `O` measurements above are the latter kind.
 
     The shell's art can be counted, and that is worth having before M6: resolving
     every name a shipped screen states the way the renderer does gives **1,303

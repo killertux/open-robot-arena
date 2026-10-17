@@ -66,6 +66,37 @@
 //! right for most of the alphabet) or a one-record slip somewhere in the middle
 //! of the table. Everything else lands, including the label's two spaces.
 //!
+//! ## The rects do not bracket the page's glyphs
+//!
+//! The record's four floats are settled: the loader that *builds* a runtime page
+//! (`FUN_005cd560`) writes `u0 = x/W`, `v0 = y/H`, `u1 = (x + width)/W`,
+//! `v1 = (y + height)/H`, so the order is `u0 v0 u1 v1` and `v` is measured from
+//! the page's bottom (which [`Glyph::rect`] turns over). But the stored page's
+//! glyphs do **not** sit in the rects the records name, and the mismatch is not
+//! one of the cheap candidates:
+//!
+//! * the field order, the `v` flip and the rounding rule are settled by that
+//!   loader and by the ink sitting in the page's bottom rows;
+//! * the sample pairing does not settle it either: reading the page as the low
+//!   byte, as one of two planes, big-endian, at `512x128`, `128x512`, `512x256`
+//!   or `256x512`, or as half-rows repeated, all leave ~85 of the ~92 scored
+//!   rects with ink in the one-pixel gap column they share with the next glyph;
+//! * every rect *does* hold ink — the rects are *near* their glyphs — and no
+//!   constant shift of a packed row (every `d` in `-10..=10`) brings the count
+//!   near zero: the best is 17 of 20 for `fg_d20` and 18 of 33 for `fg_mcn14`.
+//!
+//! So the records and the page describe **different packings**: the page's glyph
+//! blocks sit a few columns left of the rects, at a slightly different per-glyph
+//! pitch. `almost_no_record_brackets_its_glyph` keeps the exact counts — ink
+//! inside, ink in the shared gap, and the best shift per packed row — so the day
+//! the mapping is read right the test says so. The next read is the `.giff` →
+//! runtime-font conversion: `FUN_005ce100` opens the file by name and
+//! `FUN_005ce320` deserialises it, but reads **four floats then three ints** per
+//! glyph, where the stored record is **three ints then four floats**. A
+//! conversion layer (or a second, unshipped file) sits between them, and that is
+//! where a record's `u0` — or the page the records point into — may be
+//! re-derived.
+//!
 //! What a font is *for* here is [`Font::extent`]: the size a zero-`Size` `Text`
 //! widget takes, which is `ascent - descent` tall and the sum of the advances
 //! wide.
@@ -324,8 +355,9 @@ mod tests {
     /// records are contiguous in x within their packing row, and the rows
     /// themselves are few — the packer lays glyphs out left to right and wraps,
     /// so `v0` takes only a handful of values across the 95 records. The rects
-    /// are therefore not the open question; the record-to-character alignment
-    /// is (see the module note).
+    /// tile *each other*; whether they bracket the page's glyphs is a separate
+    /// question, and they do not (see the module note and
+    /// `almost_no_record_brackets_its_glyph`).
     #[test]
     fn the_rects_tile_the_page() {
         let Some(font) = shipped("fg_mcn14") else {
@@ -571,34 +603,115 @@ mod tests {
     /// as its own shape plus a stroke of its neighbour.
     ///
     /// This is a **baseline of a defect**, not a rule: the numbers are kept so the
-    /// day the alignment is fixed the test says so.
+    /// day the alignment is fixed the test says so. The test also asserts the
+    /// **measurement that localises the fault**: the cells do hold ink (so the
+    /// rects are near their glyphs), and *no* constant shift of a packed row's
+    /// rects — every `d` in `-10..=10` is tried — brings the cut near zero. The
+    /// fault is therefore not a field order, a flip, a rounding rule, a sample
+    /// pairing or a uniform offset: the records describe a **different packing**
+    /// than the page. See the module note.
     #[test]
     fn almost_no_record_brackets_its_glyph() {
-        let mut counts = Vec::new();
+        let mut inside = Vec::new();
+        let mut cut = Vec::new();
+        let mut best = Vec::new();
         for face in ["fg_mcn14", "fg_mcn16", "fg_d20"] {
             let Some(font) = shipped(face) else { return };
             let w = font.page_width as usize;
             let h = font.page_height as usize;
-            let mut cut = 0;
-            for i in 0..font.glyphs.len() {
-                let (x0, y0, gw, gh) = font.glyphs[i].rect(font.page_width, font.page_height);
+            let ink = |x: i32, y: i32| -> bool {
+                x >= 0
+                    && y >= 0
+                    && (x as usize) < w
+                    && (y as usize) < h
+                    && font.page[(y as usize) * w + x as usize] > 40
+            };
+            let (mut ins, mut cu, mut sc) = (0usize, 0usize, 0usize);
+            for g in &font.glyphs[..94] {
+                let (x0, y0, gw, gh) = g.rect(font.page_width, font.page_height);
                 if gw <= 0 || x0 <= 0 || (x0 + gw) as usize >= w {
                     continue;
                 }
-                let ink_in = |x: i32| {
-                    (y0.max(0)..(y0 + gh).min(h as i32))
-                        .any(|y| font.page[(y as usize) * w + x as usize] > 40)
-                };
-                if ink_in(x0 - 1) || ink_in(x0 + gw) {
-                    cut += 1;
+                sc += 1;
+                let colink = |x: i32| (y0.max(0)..(y0 + gh).min(h as i32)).any(|y| ink(x, y));
+                if (x0..x0 + gw).any(&colink) {
+                    ins += 1;
+                }
+                if colink(x0 - 1) || colink(x0 + gw) {
+                    cu += 1;
                 }
             }
-            counts.push((face, cut));
+            inside.push((face, ins));
+            cut.push((face, cu, sc));
+            // The packed rows, and the best constant shift of each.
+            let mut bands: std::collections::BTreeMap<i64, Vec<usize>> = Default::default();
+            for (i, g) in font.glyphs.iter().enumerate().take(94) {
+                bands
+                    .entry((g.v0 as f64 * 1.0e6).round() as i64)
+                    .or_default()
+                    .push(i);
+            }
+            let mut band_best = Vec::new();
+            for recs in bands.values() {
+                let (mut bc, mut bd, mut bs) = (usize::MAX, 0i32, 0usize);
+                for d in -10i32..=10 {
+                    let (mut c, mut s) = (0usize, 0usize);
+                    for &i in recs {
+                        let (x0, y0, gw, gh) =
+                            font.glyphs[i].rect(font.page_width, font.page_height);
+                        let (x0, x1) = (x0 + d, x0 + gw + d);
+                        if x1 - x0 <= 0 || x0 <= 0 || x1 as usize >= w {
+                            continue;
+                        }
+                        s += 1;
+                        let colink =
+                            |x: i32| (y0.max(0)..(y0 + gh).min(h as i32)).any(|y| ink(x, y));
+                        if colink(x0 - 1) || colink(x1) {
+                            c += 1;
+                        }
+                    }
+                    if c < bc {
+                        bc = c;
+                        bd = d;
+                        bs = s;
+                    }
+                }
+                band_best.push((bd, bc, bs));
+            }
+            band_best.retain(|&(_, _, bs)| bs > 0);
+            best.push((face, band_best));
         }
+        // Every rect holds ink — the rects are *near* their glyphs — and yet
+        // almost every one also has ink in the one-pixel gap column it shares
+        // with the next rect, so the glyph overflows its cell on that side.
         assert_eq!(
-            counts,
-            [("fg_mcn14", 87), ("fg_mcn16", 86), ("fg_d20", 78)],
-            "records whose rect cuts a neighbour"
+            inside,
+            [("fg_mcn14", 89), ("fg_mcn16", 89), ("fg_d20", 89)],
+            "records whose rect holds ink"
+        );
+        assert_eq!(
+            cut,
+            [
+                ("fg_mcn14", 87, 92),
+                ("fg_mcn16", 86, 92),
+                ("fg_d20", 78, 90)
+            ],
+            "records whose rect cuts a neighbour (of those scored)"
+        );
+        // No constant shift of a packed row's rects comes close: the best shift
+        // still cuts a third to two thirds of the row. (The last `fg_d20` band
+        // holds one degenerate record and is dropped.)
+        assert_eq!(
+            best,
+            [
+                ("fg_mcn14", vec![(-5, 18, 33), (-5, 25, 31), (7, 20, 27)]),
+                ("fg_mcn16", vec![(-4, 19, 31), (-4, 22, 28), (-5, 22, 32)]),
+                (
+                    "fg_d20",
+                    vec![(0, 18, 24), (0, 18, 21), (-2, 17, 20), (-2, 20, 25)]
+                ),
+            ],
+            "the best constant shift of each packed row (d, cut, scored)"
         );
     }
 

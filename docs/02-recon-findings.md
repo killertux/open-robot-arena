@@ -484,32 +484,44 @@ And it is nearly every record, not a few. A rect that frames its glyph leaves th
 columns at `u0 - 1` and `u1` blank, and of the 96 records in `fg_mcn14` only
 **five** do — **87 have ink just outside** on one side or both. `fg_mcn16` is 86
 and `fg_d20` 78. The test `almost_no_record_brackets_its_glyph` keeps those three
-numbers, and it is deliberately a **baseline of a defect**: the day the alignment
-is fixed it will say so.
+numbers **and the two that localise the fault**: every one of the 89 scored rects
+in each face **does hold ink** (the rects are *near* their glyphs), and no constant
+shift of a packed row — every `d` in `-10..=10` — comes close (the best still cuts
+**17 of 20** for `fg_d20` and **18 of 33** for `fg_mcn14`). So the rects and the
+page describe **different packings**, and the day the mapping is read right the
+test will say so.
 
-What the alignment *is* is the next thing to read, and the raw record words for a
-known glyph are where: whether the word we take as `u0` is the ink's left edge or
-the **pen origin** (with the ink starting before it), and whether `u1 - u0` is the
-glyph's width or its advance. The advances and the row structure look coherent —
-records 35..44 (`E`..`N`) state 0..7, 9..15, 17..23, 25..32, 34..40, 42..44, 46..50,
-52..59, 61..66, 68..77 in ascending order — so the fault is in the rect's edges
-rather than in which record belongs to which glyph. So the page's glyphs sit a few
-columns left of where the records point, and each record's window covers the wrong
-few pixels — which is why **a single character renders as two shapes**: the glyph
-itself and a stroke of its neighbour. (`A` in a `Text` came out as an `A`-shaped
-blob beside a vertical bar, in `fg_mcn14`, `fg_mcn16` and `fg_mcn12`, and a `Text`
-written exactly as `botlab/ch_stepbuttons.gib` writes its own does the same, so it
-is the font reader and not the widget.)
+The record's four floats are **not** the open question any more. The loader that
+*builds* a runtime page (`FUN_005cd560`) writes `u0 = x/W`, `v0 = y/H`,
+`u1 = (x + width)/W`, `v1 = (y + height)/H`, so the order is `u0 v0 u1 v1` and `v`
+is measured from the page's bottom — which is what `Glyph::rect` turns over. And
+the cheap candidates are exhausted: reading the page as the **low** byte, as **one
+of two planes**, **big-endian**, at **`512x128`**, **`128x512`**, **`512x256`**,
+**`256x512`**, or as half-rows repeated, all leave ~85 of the ~92 scored rects with
+ink in the one-pixel gap column they share with the next glyph, and none of the 384
+field-order × flip × rounding × sample-pairing combinations brackets and keeps ink
+inside at the same time.
 
-It is **not a uniform shift**, which is the next thing to pin down: the row at
-y 233 is exact — records 35..44 (`E`..`N`) state `0..7, 9..15, 17..23, 25..32,
-34..40, 42..44, 46..50, 52..59, 61..66, 68..77` and the page's ink runs sit in
-exactly those columns — while the row at y 245 scatters: its records are 3, 4, 5,
-7, 8, 14, 15, 18, 20, 21, 23, 24, 31, 34, and the ink there is a full row of
-letters. So what to read next is **the page's ink runs per row against the records'
-`u0..u1` as a table**, row by row, to see whether a row's records are offset, or
-assigned to a different row, or the page's rows are not in the order the records
-assume.
+So the page's glyph blocks sit a few columns left of the rects and at a slightly
+different per-glyph pitch, which is why **a single character renders as two
+shapes**: the glyph itself and a stroke of its neighbour. (`A` in a `Text` came out
+as an `A`-shaped blob beside a vertical bar, in `fg_mcn14`, `fg_mcn16` and
+`fg_mcn12`, and a `Text` written exactly as `botlab/ch_stepbuttons.gib` writes its
+own does the same, so it is the font reader and not the widget. The page itself is
+not the question either: drawn through the rects it is the smeared thing, dumped
+raw with `ra2 font … --page` it is every glyph clean.)
+
+The next read is the **`.giff` → runtime-font conversion**. `FUN_005ce100` opens
+the file by name and `FUN_005ce320` deserialises it, but `FUN_005ce320` reads
+**four floats then three ints** per glyph, where the stored record is **three ints
+then four floats**: a conversion layer — or a second, unshipped file format — sits
+between them, and that is where a record's `u0`, or the page the records point
+into, may be re-derived. `almost_no_record_brackets_its_glyph` carries the exact
+inside/cut/best-shift numbers to check it against.
+
+Also settled on the way: the row at y 233 is *not* exact (an earlier reading said
+so) — its records are the same `0..7, 9..15, 17..23 …` and the ink runs sit a few
+columns left of them, like every other row.
 
 ### Open: a glyph's quad draws its cell and a slice of its neighbour
 
