@@ -83,6 +83,8 @@ Working today:
   `.bot` robots, and arena `.py` scenes.
 - `ra2-sim` — headless physics sandbox driving one robot around an arena.
 - `ra2-duel` — headless two-robot fight.
+- `ra2-shell` — the shell's entry point: boots the shipped main menu and walks
+  the menu → bot lab and menu → arena-picker routes headlessly.
 
 Remaining caveats: a chassis is dressed from the **face groups** its `.bot` records
 for each side (that is what fixes decals coming out rotated or mirrored); exact
@@ -197,14 +199,43 @@ categories the screen's option group names. What remains of M5 is the cells' con
 time) and the rest of the workshop's interaction — a tab's own steps, and the
 list and paint tools, which are the game's C++.
 
+**M5 has an entry point.** `ra2-shell` finds the game (`RA2_GAME_DIR`, else
+`local/game`), boots the shipped `Scripts/Main.py` through `ra2script`, opens the
+main menu the game's own executable names, and walks it headlessly by hit-tested
+clicks. The input is a script file, and two routes ship with the runner:
+
+```bash
+cd engine
+
+# Main menu -> team picker -> team HQ -> robot inventory -> bot lab -> chassis step
+cargo run -q -p ra2-shell -- --route botlab --out /tmp/ra2-shell-botlab
+
+# Main menu -> exhibition setup -> the arena picker
+cargo run -q -p ra2-shell -- --route exhibition --out /tmp/ra2-shell-exhibition
+```
+
+Each route writes `shot` frames from `ra2-render`'s UI path. A custom run is the
+same runner with a script (`click x y` or `click "Widget Name"`, `wait n`,
+`shot name.png`):
+
+```bash
+cargo run -q -p ra2-shell -- --script my-input.txt --out /tmp/ra2-shell
+```
+
+The boot screen and every transition are the shipped data's: the main menu is
+`mainmenu/mainmenu.gib` (the executable names it beside the `Main Menu Win`
+class), and a control's own `Notes` say what it loads or which purpose it links
+to. The match after the arena picker is the game's C++, so the route stops at the
+picker.
+
 ## Layout
 
 ```
 docs/      Design notes, reverse-engineering findings, format specs
 tools/     Our own analysis/extraction/build scripts (Python)
 engine/    The native engine (Rust workspace: ra2fmt, ra2-cli, ra2-render,
-           ra2sim, ra2script — the script layer on an embedded CPython — and
-           ra2ui, the shell's layout model)
+           ra2sim, ra2script — the script layer on an embedded CPython —,
+           ra2ui, the shell's layout model, and ra2-shell, its entry point)
 local/     (git-ignored) original game files and extracted data
 ```
 

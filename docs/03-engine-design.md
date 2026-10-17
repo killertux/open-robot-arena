@@ -35,6 +35,7 @@ engine/
     ra2script/   # the plus/Arenas/AI object model on an embedded CPython 3
     ra2ui/       # the shell's layout model: .gib widget trees -> rectangles
     ra2-render/  # wgpu renderer: meshes, and the shell's 2D screens (`ui`)
+    ra2-shell/   # the shell's entry point: boot the menu, navigate it headlessly
     ra2app/      # winit app: menus, workshop, matches                            (planned)
 tools/           # python tooling (format probing, conversion, diffs)
 local/           # (git-ignored) game files + converted cache
@@ -209,6 +210,25 @@ local/           # (git-ignored) game files + converted cache
   screen from disk, which would put the file's baked selection back. The demo is
   a sequence of real clicks, each hit-tested against where the layout put the
   button (`cargo run -p ra2-render --example workshop`).
+- **A negative `ChildOrder` means *no order*, not "behind", and what it resolves
+  to depends on the record.** The corpus has 613 children with a negative order
+  and 73 of them overlap a non-negative sibling. The pressed controls among those
+  — a `Button`, `CheckBox`, `TextBox`, `Slider`, `DropDown` — must draw last or
+  the main menu would have no `EXHIBITION`/`TEAM HQ`/`MULTIPLAYER` over its saw
+  plate, the bottom bar's buttons would be under their panel, and the credits
+  window's close button would be under its backdrop. Chrome with a negative order
+  stays first: `select_team.gib`'s full-screen `cement img` is -1 and belongs
+  behind its dialog. A `Grid`/`ListBox` is an interactive content area, not a
+  pressed control, and stays with the chrome: the palette's grid is -1 and the
+  category bar above it is -1, the bar is written first, and the screen's note
+  says the bar filters the grid. `ra2ui::draw_key` and
+  `input::hit_control` share that ordering — the latter skips chrome so a
+  full-screen `Proxy` (`select_team.gib`'s nav bar is 1280×50 over the 779,443
+  `continue button`) does not swallow a click. Test:
+  `a_negative_child_order_draws_last_only_on_a_control`; the earlier reading
+  ("-1 is behind") is what hid the main menu's buttons, and the old evidence for
+  it was a mis-parented modal backdrop from before the records were cut at their
+  own `NumChildren`.
 - **The workshop is data too, and it composes.** `ra2ui::workshop` turns
   `botlabwin.gib` plus a tab's fragment into the screen the game shows: the
   fragment goes into the group its own `Notes` names (`content slot`), the info
@@ -264,8 +284,10 @@ local/           # (git-ignored) game files + converted cache
   whole files with them.
 - **The top level is a sibling set, and two special cases died when the records
   were cut right.** A file's own records are ordered by `ChildOrder` exactly as
-  a widget's children are, so the resolver sorts them and nothing else: a modal
-  backdrop (`child order -1`) sorts behind the window it belongs to (`3`). The
+  a widget's children are, so the resolver sorts them and nothing else: a
+  backdrop is an `Attachment` (drawn behind its widget), a negative order on
+  chrome draws first, and a negative order on a pressed control draws last (see
+  the `draw_key` note above). The
   old rule — "the top level keeps its own order" — was read off a main menu that
   was in fact a thirteen-root forest, and the resolver's other special case,
   three bar-chrome images re-parented onto the bar written before them, was
@@ -310,9 +332,9 @@ local/           # (git-ignored) game files + converted cache
   wrong pixel rule had already been read as "the font's own tight advances" and
   written into the recon notes as a property of the *font*. It was the
   renderer's, and with it fixed the label reads exactly. The same pass corrected
-  the draw order: `ChildOrder` orders *siblings*, and the top level of a file
-  keeps its own order, which is why the menu's buttons and labels sit on top of
-  the cement rather than under it.
+  the draw order: `ChildOrder` orders *siblings*, and a negative order on a
+  pressed control draws last — which is why the menu's buttons and labels sit on
+  top of the saw plate rather than under it.
 - **The renderer is checked against a second renderer, written the other way
   round.** `tools/ui_compose.py` rasterises a screen on the CPU, in Python, from
   the resolver's own rectangles; `ra2-render`'s `ui` path draws the same screen
@@ -327,8 +349,8 @@ local/           # (git-ignored) game files + converted cache
   rule had already been read as "the font's own tight advances" and written into
   the recon notes as a property of the *font*. It was the renderer's, and with it
   fixed the label reads exactly. The same pass corrected the draw order:
-  `ChildOrder` orders *siblings*, and the top level of a file keeps its own
-  order.
+  `ChildOrder` orders *siblings*, and a negative order on a pressed control
+  draws last.
 - **What is not resolved is not guessed.** Zero `Size` (the editor's automatic
   size, which needs font metrics), `ClipMode`, and the containers that lay their
   own children out were each named as unresolved rather than approximated, and
@@ -341,6 +363,30 @@ local/           # (git-ignored) game files + converted cache
   and where the data does something else — six authored widths, four rows in a
   one-row list — the exception is *listed*, not smoothed into a formula that
   would fit it.
+
+- **The entry point boots the data, and the clicks are the data's.** `ra2-shell`
+  finds the install (`RA2_GAME_DIR`, else `local/game` above the working
+  directory or the crate; `RA2.cfz`, `UI/` and `Scripts/` are required), boots
+  the shipped `Scripts/Main.py` through `ra2script`, and opens the main menu.
+  The boot file is named by the game's own executable (`mainmenu\mainmenu.gib`
+  beside the `Main Menu Win` class) and its root *is* `Main Menu Win`; `Main.py`
+  itself names no screen — it imports the arenas and brains and registers
+  `dispatchEvent`, which is the script layer under the screens, not the screen
+  graph. A click is hit-tested against the placed tree and the control's own
+  `Notes` decides: a `.gib` in the note is loaded (into the group the note names,
+  or as the screen), and the handful of notes that name a purpose instead of a
+  file — `link to team HQ`, `click to go to the bot workshop` — are the small
+  `nav::LINKS` table whose test re-reads every note and target from the shipped
+  files. The routes are input files (`click x y` or `click "Widget Name"`,
+  `wait n`, `shot name.png`), so the run is headless and repeatable:
+  `cargo run -q -p ra2-shell -- --route botlab --out /tmp/ra2-shell`. Main menu →
+  team picker → team HQ → robot inventory → workshop → `chassis button` →
+  `structure design button` is the first route; main menu → exhibition setup →
+  the arena picker is the second. The picker's rows are the game's arena scripts
+  (`ra2ui::arenas`), because the loaded list's own note says *"populate with arena
+  names"*. What the route does **not** cross is the match itself: starting a
+  match, the team and robot pickers' contents, and the bot lab's list/paint tools
+  are the game's C++, and the screens stop there.
 
 ## M4 design notes
 
