@@ -136,13 +136,101 @@ are not yet known precisely enough to script; write down what was clicked).
   (e.g. `cargo run -p ra2-render --example uishot -- <screen.gib> out.png 1024 768`).
 - `manifest.tsv` is the index: `id`, `size`, `file`, `captured`, `wine`,
   `renderer`, `state`, `sha256`. A pair is matched on `id` + `size`.
-- `tools/oracle/compare.py` (M11.1, not written yet) loads a pair, asserts
+- `tools/oracle/compare.py` (M11.1, written; see §7) loads a pair, asserts
   identical dimensions, and reports **mean absolute per-channel difference**
   over RGB, plus a difference image. Thresholds: the shell's existing
-  **0.24–0.42 of 255**; match frames get a number from their first pass, not
-  invented here. A corpus test that needs fixtures **skips** when
+  **0.24–0.42 of 255** is the *two-renderer* agreement (`uishot` against
+  `ui_compose.py` on our own layout); an original-vs-ours pair gets its number
+  from its first pass, not invented here. A corpus test that needs fixtures **skips** when
   `local/oracle/original/` is absent, exactly as the game-corpus tests do.
 - `local/` is already ignored (`/local/` in `.gitignore`), so
   `local/oracle/` needs no new rule and no game pixel is ever committed.
 
 The hand-off procedure is in [`tools/oracle/README.md`](../tools/oracle/README.md).
+
+## 7. First measurement
+
+Measured 2026-10-17 against `mainmenu__1024x768__000.png`, with the capture's
+OS pointer and decorations reported separately. These commands are shown from
+the main tree; from a worktree `tools/oracle/check.sh` is the same pair and
+resolves the main worktree's ignored `local/` itself.
+
+```sh
+tools/oracle/render_ours.sh
+python3 tools/oracle/compare.py \
+    local/oracle/ours/mainmenu__1024x768.png \
+    local/oracle/original/mainmenu__1024x768__000.png \
+    local/oracle/diff/mainmenu__1024x768__diff.png --check --threshold 1.45 \
+    > local/oracle/diff/mainmenu__1024x768__diff.json
+# or the two steps as one gate:
+tools/oracle/check.sh
+```
+
+The JSON is one line on stdout; the abridged copy below omits the paths and the
+64×48 `heatmap.values` array (3072 numbers). The full line is written to
+`local/oracle/diff/mainmenu__1024x768__diff.json`:
+
+```json
+{
+  "size": [1024, 768], "same_size": true,
+  "mae": {"r": 1.4544, "g": 1.4609, "b": 1.4363, "all": 1.4506},
+  "max": 255, "delta": 8,
+  "pixels_over_delta": 15377, "fraction_over_delta": 0.019553,
+  "pointer": {
+    "rect": [510, 383, 15, 19], "source": "auto",
+    "edge_dark_run": 12, "interior_peak": 9, "masked_pixels": 285,
+    "stats_without": {
+      "pixels": 786147,
+      "mae": {"r": 1.4429, "g": 1.4494, "b": 1.4246, "all": 1.4390},
+      "max": 255, "delta": 8,
+      "pixels_over_delta": 15252, "fraction_over_delta": 0.019401
+    }
+  },
+  "decorations": {"detected": false, "title_bar": null, "black_border": null},
+  "heatmap": {"block": 16, "cols": 64, "rows": 48, "scale": 16,
+              "values": "<64x48 block means; see local/oracle/diff/...json>"},
+  "check": {"threshold": 1.45, "metric": "mae.all.pointer_masked",
+            "value": 1.4390, "passed": true}
+}
+```
+
+**What the diff shows.** The art is exact apart from sub-pixel noise: the
+cement backdrop is **0.000** MAE over the top-left 200×200, the left pipe
+**0.131**, the panel texture **0.002**, the saw blade **0.108**, and the gear
+art **0.09–0.18**; 89.5% of the 16×16 blocks are at or below 1 (73.5% exactly
+zero) and only 73 of 3072 exceed 20. What differs is text and button chrome:
+
+- The 512×76 **logo composite is one pixel lower in ours**: the purple "2"
+  badge is at y 63–117 in the reference and y 64–118 in ours. Shifting ours up
+  one row drops the logo crop from **8.44** to **0.51** MAE over the overlapping
+  rows.
+- The three **main-menu buttons** (`fg_d20`: EXHIBITION / TEAM HQ /
+  MULTIPLAYER) have a 1 px black frame on the top, left and right in the
+  reference and no frame in ours. Their labels also start at different x:
+  reference 451 / 450 / 451, ours 463 / 470 / 451; ours is 5 px wider for
+  TEAM HQ and 25 px wider for MULTIPLAYER (it ends at x 594 against 569). These
+  are the brightest blocks (means 45–65 at y 336, 416 and 496).
+- The **bottom bar's** Options / Credits / Quit (`fg_mcn16`) sit 3 px higher in
+  ours (ink y 737–748 against 740–753) and are shorter. The reference also
+  gives those buttons a 1 px light border and a lighter fill (≈ (99,99,97));
+  ours has no border and a darker fill (≈ (37,37,36)). The bar art and the two
+  gears match; the bottom text row still reaches block means of 47–53.
+
+The number is higher than the **0.24–0.42** two-renderer standard because that
+standard compares `uishot` with `ui_compose.py` on the same layout; this pair
+compares our render with the original, so the missing button chrome and the
+glyph-advance differences are included. **1.4390 is this pair's baseline**, and
+it is the number `check.sh` gates on — not 0.42.
+
+The OS pointer is present at (510,383), over the saw blade rather than in a
+corner as the fixture convention asks. Excluding its 15×19 rectangle changes the
+overall number by only **1.4506 → 1.4390**, and the tool always reports both.
+No title bar or black border was found (Xephyr ran without a window manager); if
+one appears, `compare.py` reports its rectangle and a second set of statistics
+with those bands excluded, and never crops the image. The pair is the same
+1024×768, so no resolution caveat applies to this number.
+
+`tools/oracle/check.sh` gates on **1.45** (the pointer-masked 1.4390 rounded up
+for compiler/renderer noise). It is deliberately **not** in `tools/check.sh`:
+CI has no game files and no captured frames, so the oracle would skip there
+anyway; this stays a local, game-required gate.
