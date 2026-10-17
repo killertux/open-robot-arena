@@ -161,6 +161,19 @@ impl UiAssets {
                     quads.push(fill);
                 }
             }
+            if p.widget.kind == ra2fmt::gib::WidgetKind::Image {
+                // An `Image` with a blank `_Filename` is a **colour fill**: the
+                // game draws its `_ForeColor` over its frame, and the shell uses
+                // that for nearly every panel — the match-results title bar, a
+                // button's state backgrounds, and 223 of the 295 `Background`
+                // images (the rest name a texture). It is not art the loader
+                // failed to find, and skipping it is what left black text on the
+                // clear colour.
+                if let Some(fill) = image_fill_quad(p, parent, clip) {
+                    quads.push(fill);
+                    continue;
+                }
+            }
             if let Some(quad) = self.art_quad(p, parent, clip) {
                 quads.push(quad);
             }
@@ -526,6 +539,46 @@ fn rectangle_quad(p: &Placement<'_>, clip: Option<Frame>) -> Option<UiQuad> {
         .field("FillColor")
         .and_then(|f| f.four())
         .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+    if color[3] <= 0.0 {
+        return None;
+    }
+    Some(UiQuad {
+        rect: p.frame,
+        corners: None,
+        uv: [0.0, 0.0, 1.0, 1.0],
+        color,
+        texture: 0, // white
+        alpha: true,
+        clip,
+    })
+}
+
+/// A blank-named `Image`'s fill: the game draws `_ForeColor` over the widget's
+/// frame.
+///
+/// An `Image` that names no file is not missing art — it is a solid colour, and
+/// the shipped screens use it for every panel they draw themselves: a button's
+/// state background, the semitransparent bar behind the match-results title, and
+/// 223 of the corpus's 295 `Background` images. The frame is the widget's own
+/// `Size`, not `_Size`: `_Size` is the size the art was authored at, and
+/// `hq_league.gib`'s full-screen background is authored at 640×480 in a
+/// 1280×1005 frame.
+///
+/// The one blank-named image that is *art* is a selection bar's, and
+/// [`ra2ui::art_for`] names it; that case falls through to the textured path.
+fn image_fill_quad(
+    p: &Placement<'_>,
+    parent: Option<&Placement<'_>>,
+    clip: Option<Frame>,
+) -> Option<UiQuad> {
+    let file = p.widget.filename()?;
+    if !file.is_empty() {
+        return None;
+    }
+    if ra2ui::art_for(p.widget, parent.map(|q| q.widget)).is_some() {
+        return None;
+    }
+    let color = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
     if color[3] <= 0.0 {
         return None;
     }
@@ -1031,6 +1084,80 @@ mod tests {
                 font.advance(c)
             );
         }
+    }
+
+    /// The `+Background` attachment is drawn, and behind the widget it dresses:
+    /// `common/matchresults.gib`'s window carries a 520×426 white 70% panel, and
+    /// each result slot a translucent black body. The cell's own black text
+    /// ("The Wrangler") lands *after* both, which is what makes it readable.
+    ///
+    /// The frame and colour are the attachment's own data, read off its body:
+    /// `Position`/`Size` place it, and its image child's `_ForeColor` is the
+    /// fill. No colour is invented.
+    #[test]
+    fn the_match_results_background_is_drawn_behind_its_cells() {
+        use ra2fmt::gib::Block;
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let mut gib = ra2ui::workshop::load(&ui, "common/matchresults.gib").unwrap();
+        let template = ra2ui::cells::template(&ui, ra2ui::results::TEMPLATE).unwrap();
+        let results = [ra2ui::results::MatchResult {
+            team_logo: "Teams\\orange_skull.bmp".into(),
+            bot_preview: "exhibition\\sample_bot.bmp".into(),
+            points: 248,
+            bot_name: "The Wrangler".into(),
+            team_name: "TEAM STINKBOMBS".into(),
+            immobilized: false,
+            winner: false,
+        }];
+        for block in gib.blocks.iter_mut() {
+            if let Block::Widget(root) = block {
+                ra2ui::results::fill(root, &template, &results);
+                break;
+            }
+        }
+        let mut assets = UiAssets::open(&game).unwrap();
+        let placed: Vec<_> = ra2ui::resolve_with(&gib, [1280.0, 1005.0], Some(assets.faces()))
+            .into_iter()
+            .collect();
+        let scene = assets.scene(&placed, [1280, 1005]);
+
+        let panel = scene
+            .quads
+            .iter()
+            .position(|q| {
+                q.texture == 0
+                    && q.rect.w == 520.0
+                    && q.rect.h == 426.0
+                    && q.color == [1.0, 1.0, 1.0, 0.7]
+            })
+            .expect("the window's white 70% background");
+        let panel_rect = scene.quads[panel].rect;
+        let text = scene
+            .quads
+            .iter()
+            .position(|q| {
+                q.texture != 0
+                    && scene.textures[q.texture].label.starts_with('#')
+                    && q.color == [0.0, 0.0, 0.0, 1.0]
+                    && q.rect.y > panel_rect.y + 40.0
+                    && q.rect.x > panel_rect.x
+            })
+            .expect("the cell's black bot name");
+        let text_rect = scene.quads[text].rect;
+        let cell = scene
+            .quads
+            .iter()
+            .position(|q| {
+                q.texture == 0
+                    && q.rect.w >= text_rect.w
+                    && q.rect.h >= text_rect.h
+                    && q.rect.contains(&text_rect)
+                    && q.color == [0.0, 0.0, 0.0, 0.15]
+            })
+            .expect("the result slot's translucent background");
+        assert!(panel < cell, "the panel is behind the slot");
+        assert!(cell < text, "the slot's background is behind its text");
     }
 
     /// The draw list a screen makes: an image's file is sampled whole, the

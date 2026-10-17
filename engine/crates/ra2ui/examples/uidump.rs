@@ -23,7 +23,9 @@
 //! the resolver worked out from the `ClipMode`s above it — and `0 0 0 0` when
 //! nothing clips it.
 
-use ra2ui::{draw_order, inline_proxies_in, resolve_with, Fonts, Frame, Placement, DESIGN_SCREEN};
+use ra2ui::{
+    draw_order_parented, inline_proxies_in, resolve_with, Fonts, Frame, Placement, DESIGN_SCREEN,
+};
 
 struct Dump {
     screen: Frame,
@@ -111,7 +113,7 @@ fn main() {
     if rects {
         // Draw order is tree order; hidden widgets are skipped, which is what
         // leaves a button showing only the first of its four state images.
-        let line = |p: &Placement| {
+        let line = |p: &Placement, parent: Option<&Placement>| {
             if !p.widget.visible() {
                 return;
             }
@@ -154,9 +156,31 @@ fn main() {
             let Some(file) = p.widget.filename() else {
                 return;
             };
-            if file.is_empty() {
-                return;
-            }
+            // A blank-named `Image` is a solid colour fill. The one exception is
+            // a selection bar, whose art the shell names out of band.
+            let file = if file.is_empty() {
+                if p.widget.kind != ra2fmt::gib::WidgetKind::Image {
+                    return;
+                }
+                match ra2ui::art_for(p.widget, parent.map(|q| q.widget)) {
+                    Some(art) => art,
+                    None => {
+                        let c = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                        if c[3] <= 0.0 {
+                            return;
+                        }
+                        let (cx, cy, cw, ch) = clip_fields(p);
+                        println!(
+                            "{:.2} {:.2} {:.2} {:.2} 1 {:.3} {:.3} {:.3} 0 0 1 1 {} {} {} {} fill:{:.3} {:.3} {:.3} {:.3}",
+                            p.frame.x, p.frame.y, p.frame.w, p.frame.h, c[0], c[1], c[2], cx, cy, cw, ch,
+                            c[0], c[1], c[2], c[3]
+                        );
+                        return;
+                    }
+                }
+            } else {
+                file
+            };
             let uv = p.widget.uv().unwrap_or([0.0, 0.0, 1.0, 1.0]);
             let alpha = p
                 .widget
@@ -195,8 +219,8 @@ fn main() {
                 file.replace('\\', "/")
             );
         };
-        for p in draw_order(&placed) {
-            line(p);
+        for (p, parent) in draw_order_parented(&placed) {
+            line(p, parent);
         }
         return;
     }
