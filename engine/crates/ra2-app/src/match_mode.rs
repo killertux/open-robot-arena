@@ -937,6 +937,118 @@ mod tests {
         );
     }
 
+    /// The results title is drawn over the panel, and nothing covers it.
+    ///
+    /// The panel is the Window's `+Background` body (520×426, white 70%) and
+    /// the title is the `New [TextBox]` at the file's `Position 0 0` with its
+    /// own 520×28 body. The draw order is measured from the scene list: the
+    /// panel first, then the title's bar, then the title's glyphs. A quad drawn
+    /// after the glyphs that overlaps their ink is the failure this pins.
+    #[test]
+    fn the_results_title_is_not_covered_by_the_panel() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let mut presentation = Presentation::open(&game).unwrap();
+        let report = report();
+        let scene = presentation
+            .results_scene(&report)
+            .expect("the results scene builds");
+
+        // The panel: the one white 70% 520×426 fill.
+        let panel = scene
+            .quads
+            .iter()
+            .position(|q| {
+                q.texture == 0
+                    && q.rect.w == 520.0
+                    && q.rect.h == 426.0
+                    && q.color == [1.0, 1.0, 1.0, 0.7]
+            })
+            .expect("the results panel");
+        // The title's own 520×28 body and its glyphs.
+        let bar = scene
+            .quads
+            .iter()
+            .position(|q| {
+                q.texture == 0
+                    && q.rect.w == 520.0
+                    && q.rect.h == 28.0
+                    && q.rect.y == scene.quads[panel].rect.y
+            })
+            .expect("the title bar");
+        let glyphs: Vec<usize> = scene
+            .quads
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| {
+                q.texture != 0
+                    && scene.textures[q.texture].label == "#fg_d24"
+                    && q.color == [0.0, 0.0, 0.0, 1.0]
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!glyphs.is_empty(), "the title's glyphs are in the scene");
+        let first = *glyphs.first().unwrap();
+        let last = *glyphs.last().unwrap();
+        assert!(
+            panel < bar && bar < first,
+            "order is panel ({panel}), title bar ({bar}), glyphs ({first}..={last})"
+        );
+
+        // The visible ink (the glyph rectangle clipped to what the TextBox lets
+        // through) lies inside the panel...
+        let panel_rect = scene.quads[panel].rect;
+        let (mut left, mut top, mut right, mut bottom) = (
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
+        for &i in &glyphs {
+            let q = &scene.quads[i];
+            let r = match q.clip {
+                Some(c) => {
+                    let x = q.rect.x.max(c.x);
+                    let y = q.rect.y.max(c.y);
+                    ra2ui::Frame::new(
+                        x,
+                        y,
+                        (q.rect.right().min(c.right()) - x).max(0.0),
+                        (q.rect.bottom().min(c.bottom()) - y).max(0.0),
+                    )
+                }
+                None => q.rect,
+            };
+            assert!(
+                r.x >= panel_rect.x
+                    && r.y >= panel_rect.y
+                    && r.right() <= panel_rect.right()
+                    && r.bottom() <= panel_rect.bottom(),
+                "title glyph {i} at {r:?} is outside the panel {panel_rect:?}"
+            );
+            left = left.min(r.x);
+            top = top.min(r.y);
+            right = right.max(r.right());
+            bottom = bottom.max(r.bottom());
+        }
+        let ink = ra2ui::Frame::new(left, top, right - left, bottom - top);
+
+        // ...and no later quad draws over it.
+        for (i, q) in scene.quads.iter().enumerate().skip(last + 1) {
+            if q.color[3] <= 0.0 {
+                continue;
+            }
+            let r = q.rect;
+            let overlaps =
+                r.x < ink.right() && ink.x < r.right() && r.y < ink.bottom() && ink.y < r.bottom();
+            assert!(
+                !overlaps,
+                "quad {i} ({:?} at {r:?}, color {:?}) is drawn over the title ink {ink:?}",
+                scene.textures[q.texture].label, q.color
+            );
+        }
+    }
+
     /// A full headless match writes the five named moments and leaves a PNG on
     /// disk for each; the results PNG is the screen just checked.
     #[test]

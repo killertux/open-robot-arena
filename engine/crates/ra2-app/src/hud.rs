@@ -8,12 +8,21 @@
 //! ## The three bars
 //!
 //! `statusmeters.gib` draws a 52 px battery bar, a 52 px air bar and a 26 px
-//! armour bar; their right edges all sit at x = 75 (23+52, 23+52, 49+26). This
-//! port shrinks each bar **from the left**, keeping that right edge — the only
-//! direction that preserves the alignment the file declares. **The C++ fill
-//! written by `0x4b2f20` was not traced**, so the fraction each bar receives is
-//! named in [`ra2sim::match::RobotReport`] and is *our* component-hitpoint
-//! mapping, not the binary's battery/air resource model.
+//! armour bar. The binder at `0x4b2f20` stores their widget pointers, and the
+//! per-frame update (GameWindow update at `0x412fc0` → `0x476b60` →
+//! `0x4b3540`/`0x4b3570`/`0x4b35a0`) sets each width to `(int)(fraction *
+//! base)` and leaves x alone: the fill is **left-anchored and shrinks to the
+//! right**. The armour setter also places the white remainder at `x = 49 +
+//! width`, width `26 - width`, which confirms the direction.
+//!
+//! **Which value each bar receives** is the binary's: battery reads the status
+//! object's `+0xa8` (getter `FUN_0043e5f0`), air `+0xa4` (`FUN_0043e5e0`), and
+//! armour `+0xb4 / +0xb0` (`FUN_0043e600`), clamped at zero; the dot reads
+//! `+0xbc` (`FUN_00416940`, 0 green / 1 yellow / 2 red). What those fields are
+//! made of — the energy model behind `Battery`/`AirTank` — is not established,
+//! so the fraction each bar receives here is still named in
+//! [`ra2sim::match::RobotReport`] and is our component-hitpoint mapping. The
+//! fill geometry and truncation are the binary's.
 //!
 //! ## What is not drawn
 //!
@@ -215,19 +224,26 @@ pub fn countdown_text(left: f32) -> String {
     (((left - 1.0).ceil() as i32).clamp(1, 3)).to_string()
 }
 
-/// Shrink a bar from the left, keeping its right edge, and return its width.
+/// Shrink a bar from the right, keeping its left edge, and return its width.
+///
+/// The original's setter (`0x4b3540` battery, `0x4b3570` air, `0x4b35a0`
+/// armour) computes `width = (int)(fraction * base)` with `__ftol` and gives
+/// that width to the bar; it never moves the bar's x. The armour setter also
+/// places the white remainder at `x = 49 + width` with width `26 - width`
+/// (`0x4b35e6`–`0x4b3636`), which is only coherent when the coloured fill keeps
+/// its left edge and shrinks to the right. The fractional part is dropped, as
+/// the original's `__ftol` does.
 fn set_bar(group: &mut Widget, name: &str, base_width: f32, fraction: f32) -> f32 {
     let Some(bar) = ra2ui::workshop::find_mut(group, name) else {
         return 0.0;
     };
     let fraction = fraction.clamp(0.0, 1.0);
-    let width = base_width * fraction;
-    let base_x = bar.position().map(|p| p.first.amount).unwrap_or(0.0);
-    let x = base_x + (base_width - width);
+    let width = (base_width * fraction).trunc();
+    let x = bar.position().map(|p| p.first.amount).unwrap_or(0.0);
     let height = bar.size().map(|s| s.second.amount).unwrap_or(4.0);
     let y = bar.position().map(|p| p.second.amount).unwrap_or(0.0);
-    // The position moves the resolved frame, `_Size` is what the art is drawn
-    // at, and `Size` keeps the record consistent for a later reader.
+    // `_Size` is what the art is drawn at; `Size` keeps the record consistent
+    // for a later reader, and the position is unchanged (the left edge).
     ra2ui::input::set_field(bar, "Position", &format!("{x} 0 {y} 0"));
     ra2ui::input::set_field(bar, "Size", &format!("{width} 0 {height} 0"));
     ra2ui::input::set_field(bar, "_Size", &format!("{width} 0 {height} 0"));
@@ -385,7 +401,7 @@ mod tests {
     }
 
     /// The names and points land in the slot the player group names, and the
-    /// bars shrink from the left to the fractions the report carries.
+    /// bars fill from the left to the fractions the report carries.
     #[test]
     fn the_status_group_takes_the_reports_names_points_and_bars() {
         let Some(game) = game_dir() else { return };
@@ -404,7 +420,7 @@ mod tests {
         let bound = hud(root, &report, MatchState::Fight, 3.0, 0.0);
         assert_eq!(bound.players[0].name, "Roly Poly");
         assert_eq!(bound.players[0].points, 7);
-        assert_eq!(bound.players[0].bar_widths, [26.0, 13.0, 19.5]);
+        assert_eq!(bound.players[0].bar_widths, [26.0, 13.0, 19.0]);
 
         let placed = ra2ui::resolve_with(&screen, crate::SHELL_SIZE, Some(assets.faces()));
         let first = placed
@@ -422,18 +438,20 @@ mod tests {
         assert_eq!(text_of(second, "name"), "Little Metal Friend");
         assert_eq!(text_of(second, "points"), "3");
 
-        // Battery: 52 px at 50% = 26 px, keeping the right edge at 23+52=75.
+        // Battery: 52 px at 50% = 26 px, and x stays at the file's 23. The
+        // original's `(int)(fraction * 52)` leaves the left edge alone.
         let bar = first.find("battery bar").expect("battery bar");
         assert!((bar.frame.w - 26.0).abs() < 0.01);
         assert!(
-            (bar.frame.x - first.frame.x - 49.0).abs() < 0.01,
-            "the bar's right edge stays at 75 inside the status group"
+            (bar.frame.x - first.frame.x - 23.0).abs() < 0.01,
+            "the bar keeps its left edge at 23 inside the status group"
         );
+        // Armour: 26 * 0.75 = 19.5, truncated to 19 like `__ftol`.
         let armor = first.find("armor bar").expect("armor bar");
-        assert!((armor.frame.w - 19.5).abs() < 0.01);
+        assert!((armor.frame.w - 19.0).abs() < 0.01);
         assert!(
-            (armor.frame.x - first.frame.x - 55.5).abs() < 0.01,
-            "49 + (26 - 19.5)"
+            (armor.frame.x - first.frame.x - 49.0).abs() < 0.01,
+            "49 is the armour bar's own left edge"
         );
         let _ = assets.scene(&placed, [1280, 1005]);
     }
