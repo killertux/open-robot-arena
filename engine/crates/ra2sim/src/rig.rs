@@ -180,6 +180,12 @@ pub struct Component {
     pub fracture: f32,
     /// `material` from the component definition (`metal`, `rubber`, …).
     pub material: Option<String>,
+    /// The damage multiplier of that material (F7): the float at
+    /// `material + 4` in the engine, recovered from the `MaterialObject`
+    /// constructors and the definition's `material = <class>(<n>)` override.
+    /// Metal (and the default for a component that declares none) is 0.1,
+    /// Rubber 0.0, Arenium 0.5; the ram plate overrides Metal to 0.4.
+    pub material_scale: f32,
     /// `false` when the definition says `damageable = false`.
     pub damageable: bool,
     pub role: Role,
@@ -818,6 +824,10 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             .as_ref()
             .and_then(|d| d.get("material"))
             .map(|s| s.to_ascii_lowercase());
+        let material_scale = def
+            .as_ref()
+            .map(|d| d.material().scale)
+            .unwrap_or(ra2fmt::component::DEFAULT_MATERIAL_SCALE);
         let damageable = def
             .as_ref()
             .map(|d| !flag_false(d, "damageable"))
@@ -906,6 +916,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             hitpoints,
             fracture,
             material,
+            material_scale,
             damageable,
             role,
             weapon,
@@ -1157,6 +1168,7 @@ mod tests {
             hitpoints: 1.0,
             fracture: 0.0,
             material: None,
+            material_scale: ra2fmt::component::DEFAULT_MATERIAL_SCALE,
             damageable: true,
             role: if motor { Role::Motor } else { Role::Structure },
             weapon: None,

@@ -9,7 +9,7 @@
 //!
 //! camera: `wide` (default), `chase`, `top`
 //! env:    RA2_OBSTACLE=crates  RA2_MASS_SCALE=1.0  RA2_CAM=<dx,dy,dz>
-//!         RA2_DAMAGE=<scale>
+//!         RA2_FRICTION_LAW=havok  RA2_BUCKLE=<0..1>
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -64,17 +64,17 @@ fn run(
     camera: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut duel = Duel::new(arena, &bots)?;
-    if let Ok(scale) = std::env::var("RA2_DAMAGE") {
-        if let Ok(v) = scale.parse() {
-            duel.combat.material_scale = v;
-        }
-    }
+    let scales: Vec<String> = duel
+        .robots
+        .iter()
+        .map(|r| format!("{:.2}", r.rig.components[0].material_scale))
+        .collect();
     println!(
-        "duel: {} robots, arena_tris={} props={} material_scale={:.3}",
+        "duel: {} robots, arena_tris={} props={} chassis_material_scale=[{}]",
         duel.robots.len(),
         duel.arena.triangles.len(),
         duel.props.len(),
-        duel.combat.material_scale
+        scales.join(", ")
     );
 
     let cam = match camera {

@@ -37,6 +37,45 @@ impl ComponentDef {
         self.get(key)?.split_whitespace().next()?.parse().ok()
     }
 
+    /// The material the component is made of, and its damage scale (F7).
+    ///
+    /// The definition's `material = metal(.4)` line carries a class name and,
+    /// in parentheses, an override for the material object's `+4` float — the
+    /// multiplier `FUN_00489470` applies to a hit from this component. The
+    /// engine's `MaterialObject` subclasses give each class a default:
+    /// `Material`/`Metal` **0.1** (`FUN_00402c70` / `FUN_004891e0` store
+    /// `0x3dcccccd`), `Rubber` **0.0** (`FUN_004899e0`), `Arenium` **0.5**
+    /// (`FUN_00402c50` stores `0x3f000000`). A component inherits `Metal`
+    /// unless its definition says otherwise (`FUN_0045cc10` calls
+    /// `FUN_00489110`, whose constructor allocates a Metal material and stores
+    /// it at `+0x64`), and the factory (`FUN_0045cf40`, `0x45d017`) overwrites
+    /// that material's `+4` from the definition when the override is `>= 0`.
+    ///
+    /// Only five shipped definitions declare the key: the four casters are
+    /// `rubber(0)` and the ram plate is `metal(.4)`.
+    pub fn material(&self) -> MaterialDef {
+        let Some(value) = self.get("material") else {
+            return MaterialDef::default();
+        };
+        let (name, scale) = match value.split_once('(') {
+            Some((name, rest)) => {
+                let scale = rest
+                    .split(')')
+                    .next()
+                    .and_then(|n| n.trim().parse::<f32>().ok());
+                (name.trim().to_ascii_lowercase(), scale)
+            }
+            None => (value.trim().to_ascii_lowercase(), None),
+        };
+        // `FUN_0045cf40` applies the override only when it is `>= 0`; a
+        // negative value leaves the class constructor's default in place.
+        let scale = scale
+            .filter(|s| *s >= 0.0)
+            .or_else(|| material_class_scale(&name))
+            .unwrap_or(DEFAULT_MATERIAL_SCALE);
+        MaterialDef { name, scale }
+    }
+
     /// The `type` category (the component factory's switch), lower-cased.
     pub fn category(&self) -> Option<String> {
         self.get("type").map(|s| {
@@ -72,6 +111,41 @@ pub fn parse(text: &str) -> ComponentDef {
         d.fields.push((k, v));
     }
     d
+}
+
+/// A component's material class and the damage multiplier its `+4` float holds.
+///
+/// The engine has four `MaterialObject` classes. Their constructors are in the
+/// binary at `0x402c70` (`Material`, scale 0.1), `0x402c50` (`Arenium`, 0.5),
+/// `0x4891e0` (`Metal`, 0.1) and `0x4899e0` (`Rubber`, 0.0); each stores the
+/// float at `this[1]` (`+4`). A component definition may override it with
+/// `material = <class>(<float>)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialDef {
+    pub name: String,
+    pub scale: f32,
+}
+
+/// The engine's default component material: `Metal`, whose `+4` is 0.1.
+pub const DEFAULT_MATERIAL_SCALE: f32 = 0.1;
+
+/// The default scale of a material class, from its constructor.
+pub fn material_class_scale(name: &str) -> Option<f32> {
+    match name {
+        "metal" => Some(0.1),
+        "rubber" => Some(0.0),
+        "arenium" => Some(0.5),
+        _ => None,
+    }
+}
+
+impl Default for MaterialDef {
+    fn default() -> Self {
+        MaterialDef {
+            name: "metal".into(),
+            scale: DEFAULT_MATERIAL_SCALE,
+        }
+    }
 }
 
 /// The maximum hitpoints the component factory gives a category when the
@@ -144,4 +218,89 @@ pub fn zero_mass_fill(min: [f32; 3], max: [f32; 3]) -> f32 {
         .and_then(|v| v.parse().ok())
         .unwrap_or(ZERO_MASS_DENSITY);
     (volume * density).max(1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn material_class_defaults_are_the_constructors_floats() {
+        // 0x3dcccccd, 0x3f000000 and 0x00000000.
+        assert_eq!(material_class_scale("metal"), Some(0.1));
+        assert_eq!(material_class_scale("arenium"), Some(0.5));
+        assert_eq!(material_class_scale("rubber"), Some(0.0));
+        assert_eq!(material_class_scale("unobtainium"), None);
+    }
+
+    #[test]
+    fn the_material_override_wins_and_absent_means_metal() {
+        let plain = parse("name = Saw Blade\ntype = weapons\n");
+        assert_eq!(
+            plain.material(),
+            MaterialDef {
+                name: "metal".into(),
+                scale: 0.1
+            }
+        );
+
+        let plate = parse("name = Ram Plate\nmaterial = metal(.4)\n");
+        assert_eq!(plate.material().name, "metal");
+        assert_eq!(plate.material().scale, 0.4);
+
+        let caster = parse("name = Balance Caster\nmaterial = rubber(0)\n");
+        assert_eq!(caster.material().name, "rubber");
+        assert_eq!(caster.material().scale, 0.0);
+
+        let name_only = parse("material = arenium\n");
+        assert_eq!(name_only.material().scale, 0.5);
+
+        // The factory only applies the override when it is non-negative; a
+        // negative value leaves Metal's 0.1.
+        let negative = parse("material = metal(-1)\n");
+        assert_eq!(negative.material().scale, 0.1);
+    }
+
+    /// The shipped definitions, when the game is present: the only three
+    /// distinct values in the stock set, one of them the default.
+    #[test]
+    fn the_shipped_definitions_carry_three_scales() {
+        let Some(root) = std::env::var_os("RA2_GAME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                loop {
+                    let c = p.join("local/game");
+                    if c.is_dir() {
+                        return Some(c);
+                    }
+                    if !p.pop() {
+                        return None;
+                    }
+                }
+            })
+        else {
+            eprintln!("skipping the shipped components: no local/game");
+            return;
+        };
+        let cfl = crate::cfl::Cfl::open_path(&root.join("Components.cfz")).expect("Components.cfz");
+        let find = |suffix: &str| {
+            cfl.entries()
+                .iter()
+                .find(|e| e.name.to_ascii_lowercase().ends_with(suffix))
+                .and_then(|e| cfl.get_text(&e.name))
+                .map(|text| parse(&text).material())
+                .unwrap_or_else(|| panic!("{suffix} in Components.cfz"))
+        };
+        let ram = find("ramplate1.txt");
+        let caster = find("caster.txt");
+        let blade = find("sawblade5.txt");
+        println!(
+            "shipped materials: ram plate {} {:.1}, caster {} {:.1}, saw blade {} {:.1}",
+            ram.name, ram.scale, caster.name, caster.scale, blade.name, blade.scale
+        );
+        assert_eq!((ram.name.as_str(), ram.scale), ("metal", 0.4));
+        assert_eq!((caster.name.as_str(), caster.scale), ("rubber", 0.0));
+        assert_eq!((blade.name.as_str(), blade.scale), ("metal", 0.1));
+    }
 }
