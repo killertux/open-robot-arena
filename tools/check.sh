@@ -12,6 +12,12 @@
 #   5. tools/package.sh --no-smoke   (stage the portable Linux tarball)
 #   6. tools/smoke_package.sh        (unpack it and use it as a player would)
 #
+# NOTE: a pass here means the code builds, the tests pass and the package works.
+# It does NOT mean we match the original game: the render comparison below is a
+# self-consistency check (our own renderers/layout against each other). Fidelity
+# to the original is measured only by tools/oracle/fidelity.py (needs the game
+# and the git-ignored captures; see docs/26-fidelity-baseline.md).
+#
 # The smoke test is the headless render check: it runs the packaged client
 # (`ra2-app --offscreen`) to the main menu, compares that frame byte for byte
 # with an independent `uishot` render of mainmenu.gib, and keeps one
@@ -103,4 +109,4 @@ smoke_state=ok
 
 done=1
 echo
-echo "check: PASS — ${tests} tests passed, ${tests_failed} failed; ${botlab_frames} botlab frames written; ra2-app boot frame ${app_frame}; launcher ok; package smoke ok"
+echo "check: PASS — ${tests} tests passed, ${tests_failed} failed; ${botlab_frames} botlab frames written; ra2-app boot frame ${app_frame}; launcher ok; package smoke ok (self-consistency only: run tools/oracle/fidelity.py for fidelity to the original)"

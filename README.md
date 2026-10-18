@@ -11,7 +11,7 @@ by the user.
 ## Status
 
 **M1–M10 have landed as measured, with the named residues below; M11 is a
-measured fidelity pass and M12 is Linux-complete, with macOS and Windows
+fidelity pass (see Validation below for what was and was not measured against the original) and M12 is Linux-complete, with macOS and Windows
 unverified.** The engine is a Rust workspace that reads the original `.gmf`,
 `.bot`, CFL3, `.gib` and `.giff` data and runs the shipped Python 2.2 arenas and
 AI on an embedded CPython 3.12. It renders with `wgpu` (window or headless) and
@@ -87,7 +87,7 @@ hit-tested clicks. `ra2-shell` boots the shipped `Scripts/Main.py`, opens the
 data's main menu and walks two routes: main menu → team picker → team HQ →
 robot inventory → bot lab → chassis step (7 frames), and main menu → exhibition
 setup → arena picker (3 frames). Two renderers written the other way round —
-`ra2-render`'s wgpu path and `tools/ui_compose.py` on the CPU — agree to a mean
+`ra2-render`'s wgpu path and `tools/ui_compose.py` on the CPU — agree with each other (a self-consistency check, not fidelity to the original) to a mean
 per-channel difference of **0.453/255** on `mainmenu.gib`, **0.235/255** on
 `matchresults.gib` and **0.0001/255** on `statusmeters.gib`; the residue is
 glyph rasterisation, not layout. Caveats: the font's record rects and page are
@@ -365,9 +365,10 @@ cargo run -q --release -p ra2-app -- --game ../local/game \
 `--bots`, `--quit-at` and `--size` shape a match; `--simulate-event N` picks a
 schedule row. Every mode runs headless with `--out` and in a window without it.
 
-### The two-renderer check
+### The two-renderer check (self-consistency, not fidelity)
 
-Two independent drawings of the same screen; they share no code or algorithm.
+Two drawings of the same screen from the same parsed layout and glyph tables;
+they agree with each other, which says nothing about the original.
 The first uses wgpu, the second composites on the CPU from its own resolver and
 the game's own art. `tools/ui_parity.sh` renders ten screens with both and
 reports the per-screen mean absolute difference:
@@ -380,8 +381,7 @@ The measured numbers are in
 [`docs/05-validation-report.md`](docs/05-validation-report.md) §4.22: the
 images land on the same rectangles and the remaining difference is text
 rasterisation (0.0001 for `statusmeters`, 0.235 for `matchresults`, 0.453 for
-`mainmenu`), not layout. The original-vs-ours check is `tools/oracle/check.sh`
-at **1.439/255** on the main menu.
+`mainmenu`), not layout. The original-vs-ours measurements are in Validation below.
 
 ### The portable Linux package
 
@@ -459,6 +459,35 @@ engine/    The native engine (Rust workspace: ra2fmt, ra2-cli, ra2-render,
 dist/      (git-ignored) portable tarballs built by tools/package.sh
 local/     (git-ignored) original game files and extracted data
 ```
+
+## Validation
+
+Fidelity to the original is measured only against **genuine captures of the
+original game** run under Wine (`local/oracle/original/`, git-ignored), never
+against our own reconstructions:
+
+```bash
+tools/oracle/fidelity.py                 # every reachable screen, ours vs original (MAE, diff, side-by-side)
+tools/oracle/fidelity.py --gameplay      # + our simulation traces vs the original's live traces
+```
+
+The current numbers are in [`docs/26-fidelity-baseline.md`](docs/26-fidelity-baseline.md);
+the tools that drive and record the original are in
+[`tools/capture/README.md`](tools/capture/README.md) and
+[`tools/oracle/README.md`](tools/oracle/README.md).
+
+What earlier text called "measured" but was **self-referential**:
+
+* `tools/ui_parity.sh` / `tools/ui_compose.py` and `local/parity/*__compose.png`
+  (MAEs of 0.0001-0.45): both renderers use the Rust parser's glyphs and layout
+  assumptions. They check that two drawings agree, not that either matches the game.
+* Statements that the original cannot receive input (`docs/12-oracle.md` §3.4,
+  `docs/25-windowed.md` §4) were wrong; input works through Frida.
+* The only original-vs-ours number before this harness was the main menu at
+  1.439/255 (rendered natively at 1024x768 by `uishot`); the shipped app path and
+  every other screen were not compared. Physics/AI/damage "measured" claims were
+  checked against Havok/binary constants and our own tests, not against traces of
+  the original, until `--gameplay`.
 
 ## Legal
 
