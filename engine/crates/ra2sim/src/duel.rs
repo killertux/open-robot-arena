@@ -2573,6 +2573,14 @@ mod tests {
         // that ends inside one build's rounding is not measuring that. Measured
         // margin: 9.8 s.
         let dt = 1.0 / 60.0;
+        // The game holds the robots still through the 4 s countdown before the
+        // bell; settling first matters with the game's own friction law (the
+        // cold-start pair can circle instead of engaging), so the test follows
+        // the match's own flow.
+        let idle = vec![DriveInput::default(); duel.robots.len()];
+        for _ in 0..(4.0 / dt) as usize {
+            duel.step_direct(&idle, dt);
+        }
         let mut closest = f32::MAX;
         let mut hits = 0.0f32;
         for _ in 0..(30.0 / dt) as usize {
