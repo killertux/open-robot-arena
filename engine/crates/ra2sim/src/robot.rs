@@ -543,6 +543,19 @@ impl Robot {
         out
     }
 
+    /// Whether a component is smoking: a motor under half its hitpoints turns
+    /// its smoke emitter on (`FUN_0048e0d0` → `FUN_0048e0b0` / `FUN_0048dc50`).
+    /// The renderer may draw the particles; the simulation only keeps the state.
+    pub fn smoking(&self, index: usize) -> bool {
+        let Some(c) = self.rig.components.get(index) else {
+            return false;
+        };
+        c.role == Role::Motor
+            && self.attached[index]
+            && c.hitpoints > 0.0
+            && self.health[index] < 0.5 * c.hitpoints
+    }
+
     /// Break `component` (and anything welded past it) off the robot.
     ///
     /// Returns each detached component with the world transform it had at the

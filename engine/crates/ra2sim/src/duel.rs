@@ -2572,6 +2572,35 @@ mod tests {
         assert!(duel.robots[0].attached[0]);
     }
 
+    /// A motor under half its hitpoints smokes (`FUN_0048e0d0`).
+    #[test]
+    fn a_hurt_motor_smokes() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        let robot = &mut duel.robots[0];
+        let motor = robot
+            .rig
+            .components
+            .iter()
+            .position(|c| c.role == crate::rig::Role::Motor)
+            .expect("a motor");
+        assert!(!robot.smoking(motor));
+        robot.health[motor] = 0.49 * robot.rig.components[motor].hitpoints;
+        assert!(robot.smoking(motor));
+        assert!(!robot.smoking(0), "only motors smoke");
+    }
+
     /// `FUN_00417330`: below 10 a hit only drives effects.
     #[test]
     fn a_hit_under_ten_takes_nothing() {
