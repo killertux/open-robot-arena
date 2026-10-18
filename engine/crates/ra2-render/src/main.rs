@@ -6,7 +6,7 @@
 //!
 //! Env: RA2_DEBUG=1  per-part bounds
 //!      RA2_OBSTACLE=<name|all|none>  RA2_HIDE=<name,...>
-//!      RA2_CAM=<ex,ey,ez,tx,ty,tz>|@<n|name>  RA2_CULL=back|front
+//!      RA2_CAM=<ex,ey,ez,tx,ty,tz>|@<n|name>  RA2_CULL=off
 
 use std::process::ExitCode;
 

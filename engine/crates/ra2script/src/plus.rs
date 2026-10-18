@@ -473,8 +473,7 @@ fn fade_out_loop(_sound: u64, _ms: f32) {
 #[pyfunction]
 #[pyo3(name = "setBackColor")]
 fn set_back_color(r: f32, g: f32, b: f32) {
-    let _ = (r, g, b);
-    defer("camera/backdrop (M5)");
+    crate::state().back_color = Some([r, g, b].map(|c| c.clamp(0.0, 1.0)));
 }
 
 #[pyfunction]
