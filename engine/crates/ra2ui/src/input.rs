@@ -39,7 +39,7 @@
 //! is the whole rule: [`set_state`] shows `0` or `len - 2`, and [`select_option`]
 //! applies it to a group by flipping `Checked` and the images' `Visible`.
 
-use ra2fmt::gib::{Widget, WidgetKind};
+use ra2fmt::gib::{AttachmentKind, Widget, WidgetKind};
 
 use crate::{draw_key, draw_order, is_control, Frame, Grid, Placement};
 
@@ -314,10 +314,323 @@ pub fn set_field(widget: &mut Widget, name: &str, value: &str) {
     });
 }
 
+/// Forget a list's selection: hide its bar and drop the in-memory row/column
+/// markers. A re-filled list starts with no row, which is what the screen shows
+/// until the player clicks one (the shipped `Sel Bar` position is an author's
+/// leftover, not a selection).
+pub fn clear_selection(list: &mut Widget) {
+    list.fields.retain(|field| {
+        !matches!(
+            field.name.as_deref(),
+            Some("_SelectedRow" | "_SelectedColumn")
+        )
+    });
+    if let Some(grid) = Grid::from_widget(list) {
+        if let Some(bar) = selection_bar_mut(list, &grid) {
+            set_field(bar, "Visible", "false");
+        }
+    }
+}
+
 /// Every widget of a screen in draw order, back to front — the order a click
 /// tests in reverse.
 pub fn draw_order_of<'a>(roots: &'a [Placement<'a>]) -> Vec<&'a Placement<'a>> {
     draw_order(roots)
+}
+
+/// The rows a list draws: its content children, i.e. everything except the
+/// selection and highlight bars.
+///
+/// A text list's rows are `Text` children ([`row_count`]); a robot grid's cells
+/// are the `choosebot_cell.gib` groups, so the count has to be the content,
+/// not just the text.
+pub fn content_count(list: &Widget) -> usize {
+    let grid = Grid::from_widget(list);
+    list.children
+        .iter()
+        .filter(|child| !is_bar(child, grid.as_ref()))
+        .count()
+}
+
+fn is_bar(child: &Widget, grid: Option<&Grid>) -> bool {
+    if child.name() == "Sel Bar" || child.name() == "High Bar" {
+        return true;
+    }
+    let Some(grid) = grid else { return false };
+    let id = child.field("ID").and_then(|f| f.number());
+    [grid.selection, grid.highlight]
+        .into_iter()
+        .flatten()
+        .any(|wanted| id == Some(wanted as f32))
+}
+
+/// How many rows of `list` the screen shows at once.
+///
+/// The arena picker's own `Rows 6` is the visible count. A drop-down list spells
+/// `Rows 1` (its collapsed state) and the screen sizes the open list, so there
+/// the count is the list's own height divided by its row height — five rows for
+/// the robot picker's 100-pixel team list.
+pub fn visible_rows(list: &Widget) -> usize {
+    let Some(grid) = Grid::from_widget(list) else {
+        return 0;
+    };
+    if grid.rows > 1 {
+        return grid.rows as usize;
+    }
+    if grid.row_height <= 0.0 {
+        return 0;
+    }
+    let height = list.size().map(|s| s.second.amount).unwrap_or(0.0);
+    ((height / grid.row_height).floor() as usize).max(1)
+}
+
+/// Scroll a single-column list to `offset`, clamped to its content.
+///
+/// The rows are the list's own content children: their `Position` is moved so
+/// the first visible row is at the top, and rows outside the viewport are
+/// hidden — a click cannot reach a row the mouse cannot see. The selection bar
+/// moves with its row. The `+Scroller` attachment is shown when there is
+/// something to scroll, and its thumb is placed at the offset's fraction.
+///
+/// Returns the clamped offset. Lists with more than one column (the robot
+/// picker's `6 × 1` grid) are not scrolled: their cells all share row 0.
+pub fn scroll_rows(list: &mut Widget, offset: usize) -> usize {
+    let Some(grid) = Grid::from_widget(list) else {
+        return 0;
+    };
+    if grid.row_height <= 0.0 || grid.columns > 1 {
+        return 0;
+    }
+    let count = content_count(list);
+    let visible = visible_rows(list).max(1);
+    let max = count.saturating_sub(visible);
+    let offset = offset.min(max);
+    let height = grid.row_height;
+    let selected = field_of(list, "_SelectedRow").and_then(|value| value.parse::<usize>().ok());
+    let mut ordinal = 0;
+    for child in list.children.iter_mut() {
+        if is_bar(child, Some(&grid)) {
+            continue;
+        }
+        let shown = ordinal >= offset && ordinal < offset + visible;
+        set_field(
+            child,
+            "Position",
+            &format!("0 0 {} 0", (ordinal as f32 - offset as f32) * height),
+        );
+        set_field(child, "Visible", if shown { "true" } else { "false" });
+        ordinal += 1;
+    }
+    if let Some(selected) = selected {
+        if selected < count {
+            if let Some(bar) = selection_bar_mut(list, &grid) {
+                set_field(
+                    bar,
+                    "Position",
+                    &format!("0 0 {} 0", (selected as f32 - offset as f32) * height),
+                );
+                set_field(
+                    bar,
+                    "Visible",
+                    if selected >= offset && selected < offset + visible {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                );
+            }
+        }
+    }
+    set_field(list, "_ScrollTop", &offset.to_string());
+    set_scroller_visible(list, count > visible, offset, max);
+    offset
+}
+
+/// Select a cell of a `ListBox`/`Grid`: the row and column the click computed.
+///
+/// `RowSelect` lists select the whole row, so the column is 0. The selection bar
+/// is moved to the cell's own position (its x is the sum of the columns before
+/// it) and the index is remembered in `_SelectedRow`/`_SelectedColumn`.
+pub fn select_cell(list: &mut Widget, row: usize, column: usize) -> bool {
+    let Some(grid) = Grid::from_widget(list) else {
+        return false;
+    };
+    let count = content_count(list);
+    let columns = grid.columns.max(1) as usize;
+    if row.saturating_mul(columns).saturating_add(column) >= count {
+        return false;
+    }
+    let column = if grid.row_select { 0 } else { column };
+    let y = grid.row_height * row as f32;
+    let x = grid.column_x(column as i32);
+    let Some(bar) = selection_bar_mut(list, &grid) else {
+        return false;
+    };
+    set_field(bar, "Position", &format!("{x} 0 {y} 0"));
+    set_field(bar, "Visible", "true");
+    set_field(list, "_SelectedRow", &row.to_string());
+    set_field(list, "_SelectedColumn", &column.to_string());
+    let top = field_of(list, "_ScrollTop")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if top > 0 {
+        // The bar was just written in unshifted row coordinates; put it back
+        // into the scrolled list so it stays on the row the user sees.
+        let visible = visible_rows(list).max(1);
+        let y = (row.saturating_sub(top)) as f32 * grid.row_height;
+        if let Some(bar) = selection_bar_mut(list, &grid) {
+            set_field(bar, "Position", &format!("{x} 0 {y} 0"));
+            set_field(
+                bar,
+                "Visible",
+                if row >= top && row < top + visible {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
+        }
+    }
+    true
+}
+
+/// The selected cell of a list: `(row, column)`, or `(row, 0)` for a
+/// row-selecting list.
+pub fn selected_cell(list: &Widget) -> Option<(usize, usize)> {
+    if let Some(row) = field_of(list, "_SelectedRow").and_then(|v| v.parse::<usize>().ok()) {
+        let column = field_of(list, "_SelectedColumn")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        return Some((row, column));
+    }
+    selected_row(list).map(|row| (row, 0))
+}
+
+/// The `ScrollBar` the list's `+Scroller` attachment carries, when it has one.
+pub fn scroller(list: &Widget) -> Option<&Widget> {
+    let body = list
+        .attachments
+        .iter()
+        .find(|a| a.kind == AttachmentKind::Scroller)?
+        .body
+        .as_deref()?;
+    scrollbar_in(body)
+}
+
+fn scrollbar_in(widget: &Widget) -> Option<&Widget> {
+    if widget.kind == WidgetKind::ScrollBar {
+        return Some(widget);
+    }
+    widget.children.iter().find_map(scrollbar_in)
+}
+
+fn scrollbar_in_mut(widget: &mut Widget) -> Option<&mut Widget> {
+    if widget.kind == WidgetKind::ScrollBar {
+        return Some(widget);
+    }
+    widget.children.iter_mut().find_map(scrollbar_in_mut)
+}
+
+/// Show or hide the list's scrollbar, and place its thumb at `offset / max`.
+fn set_scroller_visible(list: &mut Widget, visible: bool, offset: usize, max: usize) {
+    let track = list.size().map(|s| s.second.amount).unwrap_or(0.0);
+    let Some(body) = list
+        .attachments
+        .iter_mut()
+        .find(|a| a.kind == AttachmentKind::Scroller)
+        .and_then(|a| a.body.as_deref_mut())
+    else {
+        return;
+    };
+    let Some(bar) = scrollbar_in_mut(body) else {
+        return;
+    };
+    set_field(bar, "Visible", if visible { "true" } else { "false" });
+    let model = crate::ScrollBar::from_widget(bar);
+    // The three parts take their visibility from the bar; the file leaves the
+    // buttons and the track hidden because the control was never enabled.
+    for index in [model.less, model.more, model.slider] {
+        if let Some(part) = bar.children.get_mut(index) {
+            set_field(part, "Visible", if visible { "true" } else { "false" });
+            if index == model.slider {
+                thumb(part, offset, max, track);
+            }
+        }
+    }
+}
+
+fn thumb(slider: &mut Widget, offset: usize, max: usize, track: f32) {
+    let Some(image) = slider
+        .children
+        .iter_mut()
+        .find(|c| c.kind == WidgetKind::Image)
+    else {
+        return;
+    };
+    let thumb_height = image.size().map(|s| s.second.amount).unwrap_or(0.0);
+    let travel = (track - 2.0 * 16.0 - thumb_height).max(0.0);
+    let fraction = if max == 0 {
+        0.0
+    } else {
+        offset as f32 / max as f32
+    };
+    set_field(
+        image,
+        "Position",
+        &format!("0 0 {} 0", (fraction * travel).round()),
+    );
+}
+
+/// Fill a single-column list with text rows, in the face the arena picker uses.
+///
+/// The row height and width are the list's own `Sel Bar` (`159 0 18 0` for the
+/// arena picker); a re-fill replaces the rows it made and leaves the file's two
+/// bars alone. Returns how many rows were written.
+pub fn text_rows(list: &mut Widget, texts: &[String]) -> usize {
+    let Some(bar) = list.children.iter().find(|c| c.name() == "Sel Bar") else {
+        return 0;
+    };
+    let height = bar.size().map(|s| s.second.amount).unwrap_or(18.0);
+    let width = bar.size().map(|s| s.first.amount).unwrap_or(159.0);
+    // The list's own face when it states one (the picker's dropdown says
+    // `fg_mcn16`); the arena picker states none, so it uses the shell's most
+    // common row face (`ra2ui::arenas::ROW_FACE`).
+    let face = field_of(list, "_Font")
+        .unwrap_or(crate::arenas::ROW_FACE)
+        .to_string();
+    list.children
+        .retain(|c| c.kind != WidgetKind::Text || c.field("_Font").is_none());
+    let field = |name: &str, raw: &str| ra2fmt::gib::Field {
+        name: Some(name.to_string()),
+        raw: raw.to_string(),
+    };
+    let mut made = 0;
+    for (i, text) in texts.iter().enumerate() {
+        let y = height * i as f32;
+        list.children.push(Widget {
+            kind: WidgetKind::Text,
+            implicit: false,
+            fields: vec![
+                field("Name", ""),
+                field("ID", "-1"),
+                field("Position", &format!("0 0 {y} 0")),
+                field("Size", &format!("{width} 0 {height} 0")),
+                field("Visible", "true"),
+                field("ChildOrder", "-1"),
+                field("ClipMode", "1"),
+                field("NumChildren", "0"),
+                field("_Font", &face),
+                field("_Text", text),
+                field("_ForeColor", "1 1 1 1"),
+                field("_Name", ""),
+                field("_Position", "0 0 0 0"),
+            ],
+            attachments: Vec::new(),
+            children: Vec::new(),
+        });
+        made += 1;
+    }
+    made
 }
 
 #[cfg(test)]
@@ -465,5 +778,46 @@ mod tests {
             _ => None,
         });
         assert!(!set_state(root.unwrap(), true));
+    }
+
+    /// The arena list's own `Rows 6` is the viewport: a five-row offset hides
+    /// rows 0–4, puts row 5 at the top and moves the selection bar with its
+    /// row. A cell selection on the robot grid keeps the column.
+    #[test]
+    fn the_arena_list_scrolls_its_own_rows() {
+        let Some(mut gib) = screen("exhibition/arena.gib") else {
+            return;
+        };
+        let root = gib.blocks.iter_mut().find_map(|b| match b {
+            ra2fmt::gib::Block::Widget(w) => Some(w),
+            _ => None,
+        });
+        let list = crate::workshop::find_mut(root.unwrap(), crate::arenas::LIST).unwrap();
+        let names: Vec<String> = (0..12).map(|i| format!("Arena {i}")).collect();
+        assert_eq!(text_rows(list, &names), 12);
+        assert_eq!(content_count(list), 12);
+        assert_eq!(visible_rows(list), 6, "the list's own Rows");
+        assert_eq!(scroll_rows(list, 0), 0);
+        assert_eq!(scroll_rows(list, 5), 5);
+        assert_eq!(field_of(list, "_ScrollTop"), Some("5"));
+        let rows: Vec<&Widget> = list
+            .children
+            .iter()
+            .filter(|c| c.kind == WidgetKind::Text)
+            .collect();
+        assert!(rows[..5].iter().all(|row| !row.visible()));
+        assert!(rows[5..11].iter().all(|row| row.visible()));
+        assert!(!rows[11].visible(), "row 11 is past the six-row viewport");
+        assert_eq!(rows[5].position().unwrap().second.amount, 0.0);
+        assert!(select_cell(list, 10, 0));
+        assert_eq!(selected_row(list), Some(10));
+        assert_eq!(selected_cell(list), Some((10, 0)));
+        let bar = list
+            .children
+            .iter()
+            .find(|c| c.name() == "Sel Bar")
+            .unwrap();
+        assert!(bar.visible(), "row 10 is in the scrolled viewport");
+        assert_eq!(bar.position().unwrap().second.amount, 5.0 * 18.0);
     }
 }

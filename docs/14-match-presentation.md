@@ -217,9 +217,10 @@ difference. Options is not wired.
   feature already implemented; the offscreen evidence does not claim otherwise.
 - **The windowed loop** was not run here (no display); it compiles and shares
   every drawing function with the offscreen path.
-- **The exhibition robots and the setup's match-time dropdown** are not wired:
-  the player is fixed to `Teams/Team0/Bot0.bot`, the opponent to
-  `AI/Team1/Bot0.bot`, and a windowed exhibition match has no explicit duration.
-  The robots tab's `exhib_robots.gib` slots are not selectable yet; the game
-  type is read from the Game Settings tab when it has been opened. The full list
-  is in `docs/21-play.md` §5.
+- **The exhibition robots and the setup's match-time dropdown** are wired: the
+  Robots tab's own slots open the shipped `selectbot_player.gib`/
+  `selectbot_computer.gib` windows and the two robots come from the selected
+  team records and `.bot` slots; the time dropdown's displayed `5 minutes` is
+  the match length. The arena list is filtered by the selected type and scrolls
+  to all twelve rows. The class filter and player slots 2/4 remain unwired; the
+  full list is in `docs/21-play.md` §5.

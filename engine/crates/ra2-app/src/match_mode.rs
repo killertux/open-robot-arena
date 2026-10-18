@@ -1320,6 +1320,11 @@ mod tests {
 
     /// `--quit-at` opens the shipped pause dialog, clicks its quit button and
     /// returns to the main menu; both frames are on disk.
+    ///
+    /// The pause is opened at fight time 0: a box-arena fight between two
+    /// heavy AI bots can end inside the first tick (the match's own win rule),
+    /// and then there is no `Fight` frame left to pause over. Zero is the one
+    /// fight instant every match has.
     #[test]
     fn quitting_through_the_pause_dialog_writes_pause_and_menu() {
         let Some(game) = game_dir() else { return };
@@ -1332,7 +1337,7 @@ mod tests {
             Vec::new(),
             Some(2.0),
             Some(dir.clone()),
-            Some(0.5),
+            Some(0.0),
             [640, 502],
         )
         .unwrap();

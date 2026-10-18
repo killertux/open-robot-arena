@@ -19,7 +19,7 @@ use ra2sim::r#match::MatchState;
 use ra2sim::DriveInput;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
@@ -712,6 +712,43 @@ impl ApplicationHandler for App {
                 self.cursor = None;
                 self.set_hover(None);
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.session.is_some() || self.hq.is_some() || self.builder.is_some() {
+                    return;
+                }
+                let Some(cursor) = self.cursor else {
+                    return;
+                };
+                let Some(point) = self.map_cursor(cursor) else {
+                    return;
+                };
+                // A wheel up is a smaller offset; winit's positive `y` is up.
+                let rows = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => {
+                        if y > 0.0 {
+                            -1
+                        } else if y < 0.0 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    MouseScrollDelta::PixelDelta(position) => {
+                        if position.y > 0.0 {
+                            -1
+                        } else if position.y < 0.0 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                };
+                if rows != 0 && self.shell.scroll_at(point[0], point[1], rows) {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -861,6 +898,7 @@ impl ApplicationHandler for App {
                             match crate::play_mode::session_from_shell(
                                 self.shell.game(),
                                 &self.shell,
+                                None,
                                 None,
                             ) {
                                 Ok((session, _)) => {

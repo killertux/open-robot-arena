@@ -13,4 +13,4 @@ pub mod nav;
 pub mod script;
 pub mod shell;
 
-pub use shell::{Shell, Shot, Step};
+pub use shell::{Pick, Shell, Shot, Step};

@@ -40,6 +40,13 @@ fn a_scripted_drive_moves_robot_zero_and_reaches_the_results() {
         out: out.clone(),
         size: [1280, 1005],
         arena_script: Some("box.py".into()),
+        arena_index: None,
+        game_type: None,
+        team: None,
+        bot: None,
+        opponent_team: None,
+        opponent_bot: None,
+        time: None,
     };
     let outcome = play_mode::run_headless(&options).expect("the play run completes");
     assert!(
@@ -84,7 +91,7 @@ fn the_start_button_starts_a_match_and_is_not_a_shell_link() {
     assert_eq!(step.note, None, "the note is not a navigation");
     assert_eq!(shell.screen_id(), "exhibition/exhib_setup.gib");
 
-    let (session, choice) = play_mode::session_from_shell(&game, &shell, Some(1.0)).unwrap();
+    let (session, choice) = play_mode::session_from_shell(&game, &shell, Some(1.0), None).unwrap();
     assert_eq!(choice.arena_script, "box.py");
     assert_eq!(choice.game_type, GameType::Deathmatch);
     assert_eq!(session.matched.state(), MatchState::Countdown);

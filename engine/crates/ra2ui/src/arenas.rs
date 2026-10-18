@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-use ra2fmt::gib::{Field, Widget, WidgetKind};
+use ra2fmt::gib::Widget;
 
 /// The list, by the name the screen gives it.
 pub const LIST: &str = "arena listbox";
@@ -36,6 +36,18 @@ pub struct Arena {
     pub preview: String,
     /// The script it comes from, relative to `Arenas`.
     pub script: String,
+    /// The game types the script declares (`game_types`), in its own spelling.
+    pub game_types: Vec<String>,
+}
+
+impl Arena {
+    /// Whether the arena offers `game_type`, compared case-insensitively
+    /// against the script's own spelling (`KING OF THE HILL`).
+    pub fn supports(&self, game_type: &str) -> bool {
+        self.game_types
+            .iter()
+            .any(|declared| declared.eq_ignore_ascii_case(game_type.trim()))
+    }
 }
 
 /// Every arena the game ships, by name.
@@ -72,6 +84,7 @@ pub fn all(game: &Path) -> Result<Vec<Arena>, String> {
             name: script.name,
             preview: script.preview.unwrap_or_default(),
             script: path.file_name().unwrap().to_string_lossy().to_string(),
+            game_types: script.game_types,
         });
     }
     out.sort_by(|a, b| {
@@ -83,59 +96,27 @@ pub fn all(game: &Path) -> Result<Vec<Arena>, String> {
     Ok(out)
 }
 
+/// The arenas the picker offers for `game_type`: the original's own filter,
+/// `Arenas/__init__.py`'s `enumAvailable(type)` —
+///
+/// ```python
+/// list = [x for x in arenas if x.in_list and type in x.game_types]
+/// ```
+///
+/// `game_type` is the script's spelling (`KING OF THE HILL`).
+pub fn available(game: &Path, game_type: &str) -> Result<Vec<Arena>, String> {
+    Ok(all(game)?
+        .into_iter()
+        .filter(|arena| arena.supports(game_type))
+        .collect())
+}
+
 /// Fill the list with one text row per arena.
 ///
 /// Returns how many rows were written — nothing when the list is not there.
 pub fn fill_list(list: &mut Widget, arenas: &[Arena]) -> usize {
-    // The row is the list's own selection bar: `Sel Bar` is `159 0 18 0`.
-    let Some(bar) = list.children.iter().find(|c| c.name() == "Sel Bar") else {
-        return 0;
-    };
-    let height = bar.size().map(|s| s.second.amount).unwrap_or(18.0);
-    let width = bar.size().map(|s| s.first.amount).unwrap_or(159.0);
-    // A refill replaces the rows it made: they are the list's children that are
-    // text, which leaves the file's own two bars alone.
-    list.children
-        .retain(|c| c.kind != WidgetKind::Text || c.field("_Font").is_none());
-    let mut made = 0;
-    for (i, arena) in arenas.iter().enumerate() {
-        let y = height * i as f32;
-        let mut row = row_widget(arena.name.clone());
-        crate::input::set_field(&mut row, "Position", &format!("0 0 {y} 0"));
-        crate::input::set_field(&mut row, "Size", &format!("{width} 0 {height} 0"));
-        list.children.push(row);
-        made += 1;
-    }
-    made
-}
-
-/// One row: a `Text` with the name, in [`ROW_FACE`].
-fn row_widget(text: String) -> Widget {
-    let field = |name: &str, raw: &str| Field {
-        name: Some(name.to_string()),
-        raw: raw.to_string(),
-    };
-    Widget {
-        kind: WidgetKind::Text,
-        implicit: false,
-        fields: vec![
-            field("Name", ""),
-            field("ID", "-1"),
-            field("Position", "0 0 0 0"),
-            field("Size", "159 0 18 0"),
-            field("Visible", "true"),
-            field("ChildOrder", "-1"),
-            field("ClipMode", "1"),
-            field("NumChildren", "0"),
-            field("_Font", ROW_FACE),
-            field("_Text", &text),
-            field("_ForeColor", "1 1 1 1"),
-            field("_Name", ""),
-            field("_Position", "0 0 0 0"),
-        ],
-        attachments: Vec::new(),
-        children: Vec::new(),
-    }
+    let names: Vec<String> = arenas.iter().map(|a| a.name.clone()).collect();
+    crate::input::text_rows(list, &names)
 }
 
 #[cfg(test)]
@@ -154,6 +135,32 @@ mod tests {
                 return None;
             }
         }
+    }
+
+    /// `enumAvailable(type)` is the scripts' own `game_types`: eight arenas for
+    /// deathmatch, the two tabletop tops, the two King-of-the-Hill hills, and
+    /// the box arena declares the three fight types it can host.
+    #[test]
+    fn the_available_list_is_filtered_by_the_scripts_game_types() {
+        let Some(game) = game_dir() else { return };
+        let deathmatch = available(&game, "DEATHMATCH").unwrap();
+        assert_eq!(deathmatch.len(), 8);
+        assert!(deathmatch.iter().all(|arena| arena.supports("DEATHMATCH")));
+        assert_eq!(available(&game, "TABLETOP").unwrap().len(), 2);
+        assert_eq!(available(&game, "KING OF THE HILL").unwrap().len(), 2);
+        assert_eq!(available(&game, "BATTLE ROYAL").unwrap().len(), 8);
+        assert_eq!(available(&game, "TEAM MATCH").unwrap().len(), 8);
+        let box_ = all(&game)
+            .unwrap()
+            .into_iter()
+            .find(|arena| arena.script == "box.py")
+            .unwrap();
+        assert!(box_.supports("DEATHMATCH"));
+        assert!(box_.supports("BATTLE ROYAL"));
+        assert!(box_.supports("TEAM MATCH"));
+        assert!(!box_.supports("TABLETOP"));
+        assert!(!box_.supports("KING OF THE HILL"));
+        assert!(available(&game, "NONSENSE").unwrap().is_empty());
     }
 
     /// The arenas are the scripts that name one, and the names are the game's

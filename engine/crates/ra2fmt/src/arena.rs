@@ -20,6 +20,9 @@ pub struct ArenaScript {
     /// Whether the script registers an arena (`Arenas.register(SomeArena)`), which
     /// is what makes it one rather than the package or a helper.
     pub registered: bool,
+    /// `game_types = ['DEATHMATCH', …]` — the types the arena offers. The
+    /// original's `Arenas.enumAvailable(type)` filters on this list.
+    pub game_types: Vec<String>,
     /// Main arena model path, as written in the script.
     pub model: Option<String>,
     /// `extent = (x0, z0, x1, z1)` — the play field in the horizontal plane.
@@ -97,6 +100,14 @@ pub fn parse_script(text: &str) -> ArenaScript {
 
     // `Arenas.register(BoxArena)` — the game's own way of declaring an arena.
     a.registered = text.contains("Arenas.register");
+
+    // `game_types = ['DEATHMATCH', 'BATTLE ROYAL', …]` — single or double
+    // quotes; the list may wrap onto more than one line.
+    if let Some(pos) = text.find("game_types") {
+        let rest = &text[pos..];
+        let end = rest.find(']').map(|i| i + 1).unwrap_or(rest.len());
+        a.game_types = quoted_lits(&rest[..end]);
+    }
 
     // Main model: the first quoted string inside an `__init__(self, "...")` call.
     for args in call_args(text, "__init__") {
@@ -212,6 +223,33 @@ fn call_args<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
     out
 }
 
+/// Quoted string literals with either quote character. The arena scripts spell
+/// their `game_types` list with single quotes, which [`str_lits`] does not read.
+fn quoted_lits(s: &str) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let quote = chars[i];
+        if quote != '\'' && quote != '"' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut j = start;
+        while j < chars.len() && chars[j] != quote {
+            if chars[j] == '\\' {
+                j += 1;
+            }
+            j += 1;
+        }
+        let text: String = chars[start..j.min(chars.len())].iter().collect();
+        out.push(unescape(&text));
+        i = j + 1;
+    }
+    out
+}
+
 /// Extract all double-quoted string literals (with Python-style `\\`/`\"`
 /// unescaping applied).
 fn str_lits(s: &str) -> Vec<String> {
@@ -309,6 +347,7 @@ mod tests {
         let src = r#"
 class PracticeArena(Arenas.SuperArena):
     name = "Practice Arena"
+    game_types = ['DEATHMATCH', 'BATTLE ROYAL']
     def __init__(self):
         Arenas.SuperArena.__init__(self, "Arenas/practice arena/practice_arena.gmf")
     def AddShadowReceivers(self):
@@ -321,6 +360,7 @@ class PracticeArena(Arenas.SuperArena):
 "#;
         let a = parse_script(src);
         assert_eq!(a.name, "Practice Arena");
+        assert_eq!(a.game_types, vec!["DEATHMATCH", "BATTLE ROYAL"]);
         assert_eq!(
             a.model.as_deref(),
             Some("Arenas/practice arena/practice_arena.gmf")

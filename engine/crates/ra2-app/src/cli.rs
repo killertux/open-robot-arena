@@ -21,6 +21,18 @@ pub struct Args {
     pub play: bool,
     /// `--play --drive "0-2:1,0;2-4:1,1"`.
     pub drive: Option<String>,
+    /// `--play --team N --bot N`: the player's team record and `.bot` slot.
+    pub team: Option<usize>,
+    pub bot: Option<i32>,
+    /// `--play --opponent-team N --opponent-bot N`.
+    pub opponent_team: Option<usize>,
+    pub opponent_bot: Option<i32>,
+    /// `--play --gametype deathmatch|battle-royal|team-match|tabletop|king-of-hill`.
+    pub gametype: Option<String>,
+    /// `--play --arena-index N`: the arena row to click, after scrolling.
+    pub arena_index: Option<usize>,
+    /// `--play --time SECONDS`: the setup screen's match length.
+    pub time: Option<f32>,
     /// `--hq`: boot the Team HQ and its career.
     pub hq: bool,
     /// `--hq --simulate-event N`: play schedule row N headlessly.
@@ -67,6 +79,13 @@ impl Default for Args {
             match_mode: false,
             play: false,
             drive: None,
+            team: None,
+            bot: None,
+            opponent_team: None,
+            opponent_bot: None,
+            gametype: None,
+            arena_index: None,
+            time: None,
             hq: false,
             simulate_event: None,
             simulate_season: false,
@@ -90,7 +109,9 @@ pub fn usage() -> &'static str {
      \x20      ra2-app --match [--seconds N] [--out DIR] [--quit-at N]\n\
      \x20                [--bots A.bot,B.bot] [--arena PATH] [--audio-report]\n\
      \x20      ra2-app --play --drive \"0-2:1,0;2-4:1,1\" [--seconds N] [--out DIR]\n\
-     \x20                [--arena PATH] [--size WxH]\n\
+     \x20                [--team N --bot N] [--opponent-team N --opponent-bot N]\n\
+     \x20                [--gametype deathmatch|battle-royal|team-match|tabletop|king-of-hill]\n\
+     \x20                [--arena PATH | --arena-index N] [--time SECONDS] [--size WxH]\n\
      \x20      ra2-app --build [--start BOT] [--save-as NAME] [--seconds N] [--out DIR]\n\
      \x20                [--size WxH]\n\
      \x20      ra2-app --hq [--simulate-event N | --simulate-season] [--seconds N]\n\
@@ -107,8 +128,12 @@ pub fn usage() -> &'static str {
      \n\
      --play starts the exhibition match from the shipped setup screen and drives\n\
      robot 0 with --drive (fight-time seconds; throttle,steer). With --out it\n\
-     clicks Exhibition, Arena, the arena row, hazards off, Game Settings and Start\n\
-     Game, then writes play-setup.png, play-drive.png and play-results.png.\n\
+     clicks Exhibition, the two robot pickers, Arena (scrolling to the row),\n\
+     hazards, Game Settings and Start Game, then writes play-setup.png,\n\
+     play-drive.png and play-results.png. --team/--bot and\n\
+     --opponent-team/--opponent-bot choose the records and .bot slots;\n\
+     --gametype filters the arena list; --arena-index clicks the row after\n\
+     scrolling it into view; --time is the setup screen's match length.\n\
      \n\
      --build opens the bot lab through the shipped route and edits a live model:\n\
      a palette click attaches a component at the model's mount, the armour grid\n\
@@ -126,6 +151,13 @@ pub fn usage() -> &'static str {
        --match          play a match instead of the shell\n\
        --play           start the exhibition match from the shipped setup screen\n\
        --drive SCRIPT   --play's robot 0 input: \"start-end:throttle,steer;...\"\n\
+       --team N         --play: the player's Teams/Teams.txt record (default: career team)\n\
+       --bot N          --play: the player's .bot slot in that team's Robots line\n\
+       --opponent-team N  --play: the AI/Teams.txt record (default: team 1)\n\
+       --opponent-bot N   --play: the opponent's .bot slot (default: 0)\n\
+       --gametype T     --play: deathmatch|battle-royal|team-match|tabletop|king-of-hill\n\
+       --arena-index N  --play: click arena row N, scrolling it into view\n\
+       --time SECONDS   --play: the setup screen's match length\n\
        --build          open the workshop (bot lab) as an editor\n\
        --start BOT      the .bot to open in --build (default: a stock chassis)\n\
        --save-as NAME   the design name the headless --build run types and saves\n\
@@ -167,6 +199,37 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--match" => parsed.match_mode = true,
             "--play" => parsed.play = true,
             "--drive" => parsed.drive = Some(next(&mut args, "--drive")?),
+            "--team" => parsed.team = Some(parse_index(&next(&mut args, "--team")?, "--team")?),
+            "--bot" => parsed.bot = Some(parse_int(&next(&mut args, "--bot")?, "--bot")?),
+            "--opponent-team" => {
+                parsed.opponent_team = Some(parse_index(
+                    &next(&mut args, "--opponent-team")?,
+                    "--opponent-team",
+                )?)
+            }
+            "--opponent-bot" => {
+                parsed.opponent_bot = Some(parse_int(
+                    &next(&mut args, "--opponent-bot")?,
+                    "--opponent-bot",
+                )?)
+            }
+            "--gametype" => parsed.gametype = Some(next(&mut args, "--gametype")?),
+            "--arena-index" => {
+                parsed.arena_index = Some(parse_index(
+                    &next(&mut args, "--arena-index")?,
+                    "--arena-index",
+                )?)
+            }
+            "--time" => {
+                let value = next(&mut args, "--time")?;
+                let seconds: f32 = value
+                    .parse()
+                    .map_err(|_| format!("--time is not a number: {value:?}"))?;
+                if !(seconds.is_finite() && seconds > 0.0) {
+                    return Err(format!("--time must be positive, got {seconds}"));
+                }
+                parsed.time = Some(seconds);
+            }
             "--hq" => parsed.hq = true,
             "--simulate-event" => {
                 let value = next(&mut args, "--simulate-event")?;
@@ -227,6 +290,18 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
 fn next(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
     args.next()
         .ok_or_else(|| format!("{flag} needs a value\n{}", usage()))
+}
+
+fn parse_index(value: &str, flag: &str) -> Result<usize, String> {
+    value
+        .parse()
+        .map_err(|_| format!("{flag} is not a row: {value:?}"))
+}
+
+fn parse_int(value: &str, flag: &str) -> Result<i32, String> {
+    value
+        .parse()
+        .map_err(|_| format!("{flag} is not a number: {value:?}"))
 }
 
 /// `1280x1005`, as the other runners spell it.
@@ -432,6 +507,41 @@ mod tests {
         assert_eq!(args.out, Some(PathBuf::from("play")));
         assert_eq!(args.arena, Some(PathBuf::from("Arenas/box.py")));
         assert!(parse(["--drive".into()].into_iter()).is_err());
+
+        let chosen = parse(
+            [
+                "--play",
+                "--team",
+                "5",
+                "--bot",
+                "1",
+                "--opponent-team",
+                "3",
+                "--opponent-bot",
+                "0",
+                "--gametype",
+                "king-of-hill",
+                "--arena-index",
+                "10",
+                "--time",
+                "12",
+                "--out",
+                "play",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(chosen.team, Some(5));
+        assert_eq!(chosen.bot, Some(1));
+        assert_eq!(chosen.opponent_team, Some(3));
+        assert_eq!(chosen.opponent_bot, Some(0));
+        assert_eq!(chosen.gametype.as_deref(), Some("king-of-hill"));
+        assert_eq!(chosen.arena_index, Some(10));
+        assert_eq!(chosen.time, Some(12.0));
+        assert!(parse(["--team", "x"].into_iter().map(str::to_string)).is_err());
+        assert!(parse(["--arena-index", "-1"].into_iter().map(str::to_string)).is_err());
+        assert!(parse(["--time", "0"].into_iter().map(str::to_string)).is_err());
     }
 
     #[test]

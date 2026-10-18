@@ -17,7 +17,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ra2fmt::gib::{Block, Gib};
+use ra2fmt::gib::{AttachmentKind, Block, Gib, Widget, WidgetKind};
+use ra2ui::teams::{self, Roster, Side};
 use ra2ui::workshop::{self, BotLab};
 use ra2ui::{Fonts, Placement};
 
@@ -35,6 +36,37 @@ struct Page {
     /// How many children each slot had before a fragment was loaded into it.
     /// A second load replaces the first rather than stacking on it.
     slot_base: BTreeMap<String, usize>,
+    /// The scroll offset of each single-column list, by widget name. It is
+    /// view state, not a record the writer owns.
+    scroll: BTreeMap<String, usize>,
+}
+
+/// One robot the exhibition picker chose: the team's record slot and the
+/// `.bot` slot number the team's own `Robots:` line names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pick {
+    pub team: usize,
+    pub bot: i32,
+}
+
+/// The shipped robot picker window, open over the setup screen.
+struct Popup {
+    side: Side,
+    /// The `exhib_robots.gib` slot the choice lands in (`player1 group`,
+    /// `player3 group`).
+    panel: String,
+    /// Whether this slot feeds the two-robot match. Slots 2 and 4 are the
+    /// shipped four-robot layout and stay display-only in this client.
+    used: bool,
+    gib: Gib,
+    rosters: Vec<Roster>,
+    /// The record slot selected in the dropdown.
+    team: usize,
+    /// The ordinal in the selected roster's `Robots:` line, not the `.bot`
+    /// slot number.
+    robot: Option<usize>,
+    /// The dropdown list's scroll offset.
+    scroll: usize,
 }
 
 enum Screen {
@@ -97,10 +129,28 @@ pub struct Shell {
     /// tab share `content group`, so the list may not be on screen when Start
     /// is pressed.
     arena_choice: Option<String>,
+    /// The row the arena list selected, and how many rows it offered, for the
+    /// headless report.
+    arena_row: Option<usize>,
+    arena_rows: Option<usize>,
+    /// The arena list's last scroll offset (0 when nothing scrolled).
+    arena_scroll: Option<usize>,
     /// The game type the picker last selected, in the original's spelling.
     game_type_choice: Option<String>,
     /// The arena's `hazard checkbox`, when the loaded arena script has one.
     hazard_choice: Option<bool>,
+    /// The match-time dropdown's own visible text (`5 minutes`), and the
+    /// seconds it states. `Some(None)` is a "No limit" value; `None` means the
+    /// tab was never loaded.
+    time_text: Option<String>,
+    time_seconds: Option<Option<f32>>,
+    /// The robots the player and the computer picked, from the shipped
+    /// `selectbot_player.gib`/`selectbot_computer.gib` windows. `None` means
+    /// the robots tab was not used; the caller's defaults apply.
+    player_pick: Option<Pick>,
+    opponent_pick: Option<Pick>,
+    /// The picker window open over the setup screen.
+    popup: Option<Popup>,
 }
 
 impl Shell {
@@ -123,8 +173,16 @@ impl Shell {
             screen,
             trace: Vec::new(),
             arena_choice: None,
+            arena_row: None,
+            arena_rows: None,
+            arena_scroll: None,
             game_type_choice: None,
             hazard_choice: None,
+            time_text: None,
+            time_seconds: None,
+            player_pick: None,
+            opponent_pick: None,
+            popup: None,
         })
     }
 
@@ -145,7 +203,11 @@ impl Shell {
     }
 
     /// The fragment in the page's slot, or the workshop's own tab/step screen.
+    /// A picker popup in front of the page is the content the trace names.
     pub fn content_id(&self) -> Option<String> {
+        if let Some(popup) = &self.popup {
+            return Some(popup.side.picker().to_string());
+        }
         match &self.screen {
             Screen::Page(page) => page.content.last().map(|(_, screen)| screen.clone()),
             Screen::Lab(lab) => {
@@ -229,6 +291,18 @@ impl Shell {
         self.arena_choice.as_deref()
     }
 
+    /// The arena row the list selected (0-based) and how many rows it showed
+    /// when it did.
+    pub fn arena_row(&self) -> Option<(usize, usize)> {
+        Some((self.arena_row?, self.arena_rows?))
+    }
+
+    /// The arena list's last scroll offset; `Some(0)` means the list was
+    /// loaded but not scrolled.
+    pub fn arena_scroll(&self) -> Option<usize> {
+        self.arena_scroll
+    }
+
     /// The game type the game-type tab selected, in the original's spelling
     /// (`DEATHMATCH`), or `None` when that tab has never been loaded.
     pub fn game_type_choice(&self) -> Option<&str> {
@@ -241,28 +315,80 @@ impl Shell {
         self.hazard_choice
     }
 
+    /// The match-time dropdown's own visible text (`5 minutes`), when the
+    /// Game Settings tab has been loaded.
+    pub fn time_text(&self) -> Option<&str> {
+        self.time_text.as_deref()
+    }
+
+    /// The match length the dropdown displays: `Some(Some(seconds))` for
+    /// "N minutes", `Some(None)` for "No limit", `None` when the tab was not
+    /// loaded. The file does not carry the dropdown's option list, only the
+    /// value it currently shows.
+    pub fn time_choice(&self) -> Option<Option<f32>> {
+        self.time_seconds
+    }
+
+    /// The player's robot from the shipped picker, or `None` when the robots
+    /// tab was never used.
+    pub fn player_pick(&self) -> Option<Pick> {
+        self.player_pick
+    }
+
+    /// The computer's robot from the shipped picker.
+    pub fn opponent_pick(&self) -> Option<Pick> {
+        self.opponent_pick
+    }
+
+    /// The picker window in front of the page, when one is open.
+    pub fn popup_id(&self) -> Option<&'static str> {
+        self.popup.as_ref().map(|popup| popup.side.picker())
+    }
+
     /// Click one row of a `ListBox`/`Grid`, by the list's own geometry.
     ///
-    /// The point is the row's centre inside the placed list; a row below the
-    /// list's clip is not reachable, exactly as a mouse would find it. The
-    /// click then goes through [`Shell::click`], so the row selection is
-    /// recorded in the same document the frame draws.
+    /// A row below the list's viewport is scrolled into view first — the list's
+    /// own `Scroller` state is what `--arena-index 10` exercises — and then the
+    /// click goes through [`Shell::click`], so the row selection is recorded in
+    /// the same document the frame draws.
     pub fn click_list_row(&mut self, list_name: &str, row: usize) -> Result<Step, String> {
+        let (grid, visible) = {
+            let placed = self.placements();
+            let list = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == list_name)
+                .ok_or_else(|| format!("no widget called {list_name:?} on {}", self.screen_id()))?;
+            let grid = ra2ui::Grid::from_widget(list.widget)
+                .ok_or_else(|| format!("{list_name:?} is not a list"))?;
+            if grid.row_height <= 0.0 {
+                return Err(format!("{list_name:?} states no row height"));
+            }
+            let visible = ra2ui::input::visible_rows(list.widget).max(1);
+            (grid, visible)
+        };
+        let offset = self.list_scroll(list_name);
+        if row < offset || row >= offset + visible {
+            let target = if row < offset {
+                row
+            } else {
+                (row + 1).saturating_sub(visible)
+            };
+            self.set_list_scroll(list_name, target)?;
+        }
         let placed = self.placements();
         let list = placed
             .iter()
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == list_name)
             .ok_or_else(|| format!("no widget called {list_name:?} on {}", self.screen_id()))?;
-        let grid = ra2ui::Grid::from_widget(list.widget)
-            .ok_or_else(|| format!("{list_name:?} is not a list"))?;
-        if grid.row_height <= 0.0 {
-            return Err(format!("{list_name:?} states no row height"));
-        }
+        let top = ra2ui::input::field_of(list.widget, "_ScrollTop")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
         // The visible list, not the authored `ColWidths` sum: the arena list's
         // 300+17 is clipped to the 159-pixel frame the scroller gives it.
         let x = list.frame.x + list.frame.w / 2.0;
-        let y = list.frame.y + grid.row_height * row as f32 + grid.row_height / 2.0;
+        let y = list.frame.y + grid.row_height * (row - top) as f32 + grid.row_height / 2.0;
         if let Some(clip) = list.clip {
             if !clip.contains_point(x, y) {
                 return Err(format!(
@@ -273,12 +399,170 @@ impl Shell {
         self.click(x, y)
     }
 
-    /// The placed tree, with the screen's own faces.
-    pub fn placements(&self) -> Vec<Placement<'_>> {
+    /// Click the picker's own `team dropdown` row.
+    pub fn click_popup_team(&mut self, row: usize) -> Result<Step, String> {
+        let (grid, visible, top) = {
+            let popup = self
+                .popup
+                .as_ref()
+                .ok_or_else(|| "no robot picker is open".to_string())?;
+            let placed = ra2ui::resolve_with(&popup.gib, self.size, Some(&self.fonts));
+            let list = picker_team_list_placed(&placed)
+                .ok_or_else(|| "the picker has no team list".to_string())?;
+            let grid = ra2ui::Grid::from_widget(list.widget)
+                .ok_or_else(|| "the picker's team list is not a list".to_string())?;
+            let visible = ra2ui::input::visible_rows(list.widget).max(1);
+            (grid, visible, popup.scroll)
+        };
+        let offset = top;
+        if row < offset || row >= offset + visible {
+            let target = if row < offset {
+                row
+            } else {
+                (row + 1).saturating_sub(visible)
+            };
+            self.set_popup_scroll(target);
+        }
+        let popup = self
+            .popup
+            .as_ref()
+            .ok_or_else(|| "no robot picker is open".to_string())?;
+        let placed = ra2ui::resolve_with(&popup.gib, self.size, Some(&self.fonts));
+        let list = picker_team_list_placed(&placed)
+            .ok_or_else(|| "the picker has no team list".to_string())?;
+        let top = ra2ui::input::field_of(list.widget, "_ScrollTop")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        let x = list.frame.x + list.frame.w / 2.0;
+        let y = list.frame.y + grid.row_height * (row - top) as f32 + grid.row_height / 2.0;
+        self.click(x, y)
+    }
+
+    /// Click column `column` of the picker's `robots grid`.
+    pub fn click_popup_robot(&mut self, column: usize) -> Result<Step, String> {
+        let popup = self
+            .popup
+            .as_ref()
+            .ok_or_else(|| "no robot picker is open".to_string())?;
+        let placed = ra2ui::resolve_with(&popup.gib, self.size, Some(&self.fonts));
+        let grid = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "robots grid")
+            .ok_or_else(|| "the picker has no robots grid".to_string())?;
+        let model = ra2ui::Grid::from_widget(grid.widget)
+            .ok_or_else(|| "robots grid is not a grid".to_string())?;
+        let x = grid.frame.x + model.column_x(column as i32) + model.row_height / 2.0;
+        let y = grid.frame.y + model.row_height / 2.0;
+        self.click(x, y)
+    }
+
+    /// The arena list's scroll-bar click, as a target offset.
+    fn arena_scrollbar_at(&self, x: f32, y: f32) -> Option<usize> {
+        let placed = self.placements();
+        let list = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == ra2ui::arenas::LIST)?;
+        let count = ra2ui::input::content_count(list.widget);
+        let visible = ra2ui::input::visible_rows(list.widget).max(1);
+        let max = count.saturating_sub(visible);
+        scrollbar_target(list, x, y, self.list_scroll(ra2ui::arenas::LIST), max)
+    }
+
+    /// Scroll the list under `x, y` by `rows` (positive scrolls down). Returns
+    /// whether a scrollable list was under the point.
+    ///
+    /// The wheel and the scrollbar share this; the popup's team list and the
+    /// setup screen's arena list are the two live lists.
+    pub fn scroll_at(&mut self, x: f32, y: f32, rows: i32) -> bool {
+        if self.popup.is_some() {
+            let top = {
+                let popup = self.popup.as_ref().unwrap();
+                let placed = ra2ui::resolve_with(&popup.gib, self.size, Some(&self.fonts));
+                let Some(list) = picker_team_list_placed(&placed) else {
+                    return false;
+                };
+                if !list.widget.visible() || !list.frame.contains_point(x, y) {
+                    return false;
+                }
+                popup.scroll as i32
+            };
+            let target = (top + rows).max(0) as usize;
+            self.set_popup_scroll(target);
+            return true;
+        }
+        let top = {
+            let placed = self.placements();
+            let Some(list) = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == ra2ui::arenas::LIST)
+            else {
+                return false;
+            };
+            if !list.frame.contains_point(x, y) {
+                return false;
+            }
+            self.list_scroll(ra2ui::arenas::LIST) as i32
+        };
+        let target = (top + rows).max(0) as usize;
+        self.set_list_scroll(ra2ui::arenas::LIST, target).is_ok()
+    }
+
+    fn list_scroll(&self, list: &str) -> usize {
         match &self.screen {
+            Screen::Page(page) => page.scroll.get(list).copied().unwrap_or(0),
+            Screen::Lab(_) => 0,
+        }
+    }
+
+    fn set_list_scroll(&mut self, list: &str, offset: usize) -> Result<usize, String> {
+        let Screen::Page(page) = &mut self.screen else {
+            return Err("no page to scroll".to_string());
+        };
+        let mut applied = offset;
+        for block in page.gib.blocks.iter_mut() {
+            let Block::Widget(root) = block else { continue };
+            let Some(widget) = workshop::find_mut(root, list) else {
+                continue;
+            };
+            applied = ra2ui::input::scroll_rows(widget, offset);
+            break;
+        }
+        page.scroll.insert(list.to_string(), applied);
+        if list == ra2ui::arenas::LIST {
+            self.arena_scroll = Some(applied);
+        }
+        Ok(applied)
+    }
+
+    fn set_popup_scroll(&mut self, offset: usize) {
+        let Some(popup) = &mut self.popup else { return };
+        let Some(root) = root_widget_mut(&mut popup.gib) else {
+            return;
+        };
+        let Some(list) = picker_team_list_mut(root) else {
+            return;
+        };
+        popup.scroll = ra2ui::input::scroll_rows(list, offset);
+    }
+
+    /// The placed tree, with the screen's own faces. A picker popup is placed
+    /// after the page, so it draws and hit-tests in front of it.
+    pub fn placements(&self) -> Vec<Placement<'_>> {
+        let mut placed = match &self.screen {
             Screen::Page(page) => ra2ui::resolve_with(&page.gib, self.size, Some(&self.fonts)),
             Screen::Lab(lab) => lab.placements(self.size, Some(&self.fonts)),
+        };
+        if let Some(popup) = &self.popup {
+            placed.extend(ra2ui::resolve_with(
+                &popup.gib,
+                self.size,
+                Some(&self.fonts),
+            ));
         }
+        placed
     }
 
     /// Click at a point, hit-tested against the placed tree.
@@ -293,6 +577,34 @@ impl Shell {
             step: None,
             point: [x, y],
         };
+        if self.popup.is_some() {
+            return self.click_popup(x, y);
+        }
+        // The arena list's own scroll bar: clicking its arrows moves one row,
+        // and clicking the track jumps to that fraction. The bar is the
+        // document's `+Scroller` attachment, so it is not a `hit_control`.
+        if let Some(target) = self.arena_scrollbar_at(x, y) {
+            self.set_list_scroll(ra2ui::arenas::LIST, target)?;
+            step.hit = "ScrollBar".to_string();
+            return Ok(self.finish(step));
+        }
+        // A click on a `load appropriate gib for player N here` region opens the
+        // shipped picker window. The region is the screen's own group; no
+        // control is under the point, so this is the picker's entry point.
+        if let Some((side, panel, hit, note)) = self.picker_region(x, y)? {
+            let step = Step {
+                command: format!("click {x} {y}"),
+                hit,
+                note: Some(note),
+                screen: String::new(),
+                content: None,
+                tab: None,
+                step: None,
+                point: [x, y],
+            };
+            self.open_picker(side, panel, x, y)?;
+            return Ok(self.finish(step));
+        }
         let replacement = match &mut self.screen {
             Screen::Page(page) => click_page(
                 &self.ui,
@@ -303,19 +615,289 @@ impl Shell {
                 x,
                 y,
                 &mut step,
+                self.game_type_choice.as_deref(),
             )?,
             Screen::Lab(lab) => click_lab(&self.fonts, self.size, lab, x, y, &mut step)?,
         };
         if let Some(target) = replacement {
             self.screen = load_screen(&self.ui, &target)?;
         }
+        Ok(self.finish(step))
+    }
+
+    /// Stamp the screen/content on a step, remember the choices and append it
+    /// to the trace.
+    fn finish(&mut self, mut step: Step) -> Step {
         step.screen = self.screen_id();
         step.content = self.content_id();
         step.tab = self.tab().map(str::to_string);
         step.step = self.step().map(str::to_string);
         self.remember_choices();
         self.trace.push(step.clone());
-        Ok(step)
+        step
+    }
+
+    /// The `load appropriate gib for player N here` region a click landed on.
+    ///
+    /// The region is the shipped `exhib_robots.gib` group itself; its own note
+    /// says where the robot's cell goes. The picker window is the shipped
+    /// `selectbot_player.gib`/`selectbot_computer.gib`: slots 1 and 2 are the
+    /// player's side (`team 1 group`), slots 3 and 4 the computer's (`team 2
+    /// group`), which is what the two window titles say.
+    fn picker_region(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<(Side, String, String, String)>, String> {
+        let placed = self.placements();
+        let control = ra2ui::input::hit_control(&placed, x, y);
+        if control.is_some() {
+            return Ok(None);
+        }
+        let Some(path) = ra2ui::input::hit(&placed, x, y) else {
+            return Ok(None);
+        };
+        let chain = chain(&placed, &path);
+        let Some(group) = chain.iter().rev().find(|p| {
+            p.widget
+                .notes()
+                .trim_start()
+                .starts_with("load appropriate gib for player")
+        }) else {
+            return Ok(None);
+        };
+        let note = group.widget.notes().trim().to_string();
+        let panel = group.widget.name().to_string();
+        let slot = note
+            .split_whitespace()
+            .filter_map(|token| token.parse::<usize>().ok())
+            .next()
+            .unwrap_or(1);
+        let side = if slot <= 2 {
+            Side::Player
+        } else {
+            Side::Computer
+        };
+        Ok(Some((
+            side,
+            panel.clone(),
+            format!("Group {panel:?}"),
+            note,
+        )))
+    }
+
+    fn open_picker(&mut self, side: Side, panel: String, _x: f32, _y: f32) -> Result<(), String> {
+        let (path, _) = game::screen(&self.ui, side.picker())
+            .ok_or_else(|| format!("{} is not shipped", side.picker()))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut gib = ra2fmt::gib::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        ra2ui::inline_proxies_in(&mut gib, &self.ui);
+        let rosters = teams::rosters(&self.game, side)?;
+        if rosters.is_empty() {
+            return Err(format!("{} has no teams", side.table()));
+        }
+        let team = match side {
+            Side::Player => teams::career_player_slot(&rosters).unwrap_or(0),
+            Side::Computer => {
+                if rosters.len() > 1 {
+                    1
+                } else {
+                    0
+                }
+            }
+        };
+        // The dropdown's list is opened by its own `Down Button`; the file's
+        // `Visible true` is the authored open state, and a drop-down starts
+        // closed.
+        if let Some(root) = root_widget_mut(&mut gib) {
+            set_team_list_open(root, false);
+        }
+        let mut popup = Popup {
+            side,
+            used: panel == "player1 group" || panel == "player3 group",
+            panel,
+            gib,
+            rosters,
+            team,
+            robot: None,
+            scroll: 0,
+        };
+        refresh_picker(&mut popup, &self.ui, &self.game)?;
+        self.popup = Some(popup);
+        Ok(())
+    }
+
+    /// A click inside the shipped picker window.
+    fn click_popup(&mut self, x: f32, y: f32) -> Result<Step, String> {
+        let mut popup = self.popup.take().expect("a popup");
+        let mut step = Step {
+            command: format!("click {x} {y}"),
+            hit: String::new(),
+            note: None,
+            screen: String::new(),
+            content: None,
+            tab: None,
+            step: None,
+            point: [x, y],
+        };
+        let placed = ra2ui::resolve_with(&popup.gib, self.size, Some(&self.fonts));
+        // The team list's own scroll bar (it has a `+Scroller` too).
+        if let Some(list) = picker_team_list_placed(&placed) {
+            let count = ra2ui::input::content_count(list.widget);
+            let visible = ra2ui::input::visible_rows(list.widget).max(1);
+            let max = count.saturating_sub(visible);
+            if let Some(target) = scrollbar_target(list, x, y, popup.scroll, max) {
+                if let Some(root) = root_widget_mut(&mut popup.gib) {
+                    if let Some(list) = picker_team_list_mut(root) {
+                        popup.scroll = ra2ui::input::scroll_rows(list, target);
+                    }
+                }
+                self.popup = Some(popup);
+                step.hit = "ScrollBar".to_string();
+                return Ok(self.finish(step));
+            }
+        }
+        let Some(path) = ra2ui::input::hit_control(&placed, x, y) else {
+            self.popup = Some(popup);
+            return Ok(self.finish(step));
+        };
+        let chain = chain(&placed, &path);
+        step.hit = chain.last().map(|p| describe(p)).unwrap_or_default();
+        let named = |wanted: &str| chain.iter().any(|p| p.widget.name() == wanted);
+
+        if named("cancel button") {
+            self.popup = None;
+            return Ok(self.finish(step));
+        }
+        if named("ok button") {
+            let pick = popup.robot.and_then(|ordinal| {
+                popup
+                    .rosters
+                    .get(popup.team)
+                    .and_then(|roster| roster.robots.get(ordinal).copied())
+                    .map(|bot| Pick {
+                        team: popup.team,
+                        bot,
+                    })
+            });
+            if let Some(pick) = pick {
+                if popup.used {
+                    match popup.side {
+                        Side::Player => self.player_pick = Some(pick),
+                        Side::Computer => self.opponent_pick = Some(pick),
+                    }
+                }
+                let panel = popup.panel.clone();
+                let side = popup.side;
+                let ui = self.ui.clone();
+                self.apply_panel(&panel, pick, side, &ui)?;
+                self.popup = None;
+            } else {
+                println!(
+                    "robots: {} team {} has no robot to accept",
+                    popup.side.name(),
+                    popup.team
+                );
+                self.popup = Some(popup);
+            }
+            return Ok(self.finish(step));
+        }
+        // The drop-down: its arrow toggles the list; the text box does the same.
+        if named("Down Button") || (named("team dropdown") && !named_list(&chain)) {
+            if let Some(root) = root_widget_mut(&mut popup.gib) {
+                let open = picker_team_list_mut(root)
+                    .map(|list| ra2ui::input::field_of(list, "Visible") == Some("true"))
+                    .unwrap_or(false);
+                set_team_list_open(root, !open);
+            }
+            self.popup = Some(popup);
+            return Ok(self.finish(step));
+        }
+        // A row of the team list.
+        if let Some(list) = chain
+            .iter()
+            .find(|p| p.widget.kind == ra2fmt::gib::WidgetKind::ListBox)
+        {
+            if let Some(grid) = ra2ui::Grid::from_widget(list.widget) {
+                let row = (((y - list.frame.y) / grid.row_height).floor().max(0.0) as usize)
+                    + popup.scroll;
+                if row < popup.rosters.len() {
+                    popup.team = row;
+                    popup.robot = None;
+                    if let Some(root) = root_widget_mut(&mut popup.gib) {
+                        set_team_list_open(root, false);
+                    }
+                    refresh_picker(&mut popup, &self.ui, &self.game)?;
+                }
+            }
+            self.popup = Some(popup);
+            return Ok(self.finish(step));
+        }
+        // A cell of the robot grid.
+        if let Some(grid) = chain.iter().find(|p| {
+            p.widget.kind == ra2fmt::gib::WidgetKind::Grid && p.widget.name() == "robots grid"
+        }) {
+            if let Some(model) = ra2ui::Grid::from_widget(grid.widget) {
+                let column = (((x - grid.frame.x) / model.row_height).floor().max(0.0) as usize)
+                    .min(model.columns.max(1) as usize - 1);
+                let robots = popup
+                    .rosters
+                    .get(popup.team)
+                    .map(|roster| roster.robots.len())
+                    .unwrap_or(0);
+                if column < robots {
+                    popup.robot = Some(column);
+                    refresh_picker(&mut popup, &self.ui, &self.game)?;
+                }
+            }
+            self.popup = Some(popup);
+            return Ok(self.finish(step));
+        }
+        self.popup = Some(popup);
+        Ok(self.finish(step))
+    }
+
+    /// Put the accepted robot's own `choosebot_cell.gib` into the setup
+    /// screen's `playerN group` — the slot's note says to load the appropriate
+    /// gib here.
+    fn apply_panel(
+        &mut self,
+        panel: &str,
+        pick: Pick,
+        side: Side,
+        ui: &Path,
+    ) -> Result<(), String> {
+        let cell = workshop::load(ui, "exhibition/choosebot_cell.gib")?;
+        let Some(mut cell) = cell.widgets().next().cloned() else {
+            return Err("choosebot_cell.gib has no root".to_string());
+        };
+        let game = self.game().to_path_buf();
+        if let Some((_, class)) =
+            teams::bot_info(&teams::bot_path(&game, side, pick.team, pick.bot))
+        {
+            let icon = match class {
+                0 => "exhibition/light_icon.bmp",
+                1 => "exhibition/medium_icon.bmp",
+                _ => "exhibition/heavy_icon.bmp",
+            };
+            if let Some(icon_widget) = workshop::find_mut(&mut cell, "weight icon") {
+                ra2ui::input::set_field(icon_widget, "_Filename", icon);
+            }
+        }
+        let Screen::Page(page) = &mut self.screen else {
+            return Ok(());
+        };
+        for block in page.gib.blocks.iter_mut() {
+            let Block::Widget(root) = block else { continue };
+            let Some(group) = workshop::find_mut(root, panel) else {
+                continue;
+            };
+            group.children.clear();
+            group.children.push(cell);
+            return Ok(());
+        }
+        Ok(())
     }
 
     /// Keep the exhibition picker's choices across content-tab loads.
@@ -333,7 +915,14 @@ impl Shell {
             return;
         };
         if let Some(list) = ra2ui::workshop::find(root, ra2ui::arenas::LIST) {
-            let selected = ra2ui::input::selected_row(list).and_then(|row| {
+            self.arena_rows = Some(ra2ui::input::content_count(list));
+            self.arena_scroll = ra2ui::input::field_of(list, "_ScrollTop")
+                .and_then(|value| value.parse::<usize>().ok());
+            let selected_row = ra2ui::input::selected_row(list);
+            if let Some(row) = selected_row {
+                self.arena_row = Some(row);
+            }
+            let selected = selected_row.and_then(|row| {
                 list.children
                     .iter()
                     .filter(|c| c.kind == ra2fmt::gib::WidgetKind::Text)
@@ -372,6 +961,61 @@ impl Shell {
                 self.hazard_choice = Some(checked == "true");
             }
         }
+        if let Some(dropdown) = ra2ui::workshop::find(root, "time dropdown") {
+            if let Some(text) = dropdown
+                .children
+                .iter()
+                .find(|c| c.kind == ra2fmt::gib::WidgetKind::TextBox)
+                .and_then(|box_| {
+                    box_.children
+                        .iter()
+                        .find(|c| c.kind == ra2fmt::gib::WidgetKind::Text)
+                })
+                .and_then(|text| text.field("_Text"))
+                .map(|field| field.text().trim().to_string())
+                .filter(|text| !text.is_empty())
+            {
+                self.time_text = Some(text.clone());
+                self.time_seconds = parse_match_time(&text);
+            }
+        }
+    }
+
+    /// Click a named widget that is a *region* rather than a control (the
+    /// setup screen's `playerN group` slots). The point is the region's centre;
+    /// the click still goes through [`Shell::click`], so the picker opens the
+    /// same way a mouse would open it.
+    pub fn click_region(&mut self, name: &str) -> Result<Step, String> {
+        let (x, y) = {
+            let placed = self.placements();
+            let region = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == name)
+                .ok_or_else(|| format!("no region called {name:?} on {}", self.screen_id()))?;
+            let frame = region.frame;
+            let mut found = None;
+            for iy in 1..8 {
+                for ix in 1..10 {
+                    let x = frame.x + frame.w * ix as f32 / 10.0;
+                    let y = frame.y + frame.h * iy as f32 / 8.0;
+                    if let Some(path) = ra2ui::input::hit(&placed, x, y) {
+                        if chain(&placed, &path)
+                            .iter()
+                            .any(|p| p.widget.name() == name)
+                        {
+                            found = Some((x, y));
+                            break;
+                        }
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            found.ok_or_else(|| format!("no visible part of {name:?} is clickable"))?
+        };
+        self.click(x, y)
     }
 
     /// Click the named widget, at a point found by hit-testing where the layout
@@ -495,6 +1139,7 @@ fn load_screen(ui: &Path, key: &str) -> Result<Screen, String> {
         gib,
         content: Vec::new(),
         slot_base: BTreeMap::new(),
+        scroll: BTreeMap::new(),
     }))
 }
 
@@ -545,34 +1190,49 @@ fn click_page(
     x: f32,
     y: f32,
     step: &mut Step,
+    game_type: Option<&str>,
 ) -> Result<Option<String>, String> {
     let plan = plan_page(page, fonts, size, x, y, step);
     // What the click changes inside the screen: an option-group member, a list
     // row, or a standalone checkbox. All three are the data's own controls; the
     // row geometry is the list's `RowHeight` and its `Sel Bar`.
-    let (option, row, checkbox) = {
+    let (option, cell, checkbox) = {
         let placed = ra2ui::resolve_with(&page.gib, size, Some(fonts));
         let Some(path) = ra2ui::input::hit_control(&placed, x, y) else {
             return Ok(None);
         };
         let chain = chain(&placed, &path);
         let option = option_in(&chain);
-        let row = chain
+        let cell = chain
             .iter()
             .rev()
-            .find(|p| p.widget.kind == ra2fmt::gib::WidgetKind::ListBox)
+            .find(|p| {
+                p.widget.kind == ra2fmt::gib::WidgetKind::ListBox
+                    || p.widget.kind == ra2fmt::gib::WidgetKind::Grid
+            })
             .and_then(|list| {
                 let grid = ra2ui::Grid::from_widget(list.widget)?;
                 if grid.row_height <= 0.0 {
                     return None;
                 }
-                let index = ((y - list.frame.y) / grid.row_height).floor();
-                if index < 0.0 {
-                    return None;
-                }
-                let index = index as usize;
-                (index < ra2ui::input::row_count(list.widget))
-                    .then_some((list.widget.name().to_string(), index))
+                let top = ra2ui::input::field_of(list.widget, "_ScrollTop")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let row = (((y - list.frame.y) / grid.row_height).floor().max(0.0) as usize)
+                    .saturating_add(top);
+                let columns = grid.columns.max(1) as usize;
+                let column = if grid.row_select || columns == 1 {
+                    0
+                } else {
+                    (((x - list.frame.x) / grid.row_height).floor().max(0.0) as usize)
+                        .min(columns - 1)
+                };
+                let count = ra2ui::input::content_count(list.widget);
+                (row.saturating_mul(columns).saturating_add(column) < count).then_some((
+                    list.widget.name().to_string(),
+                    row,
+                    column,
+                ))
             });
         let checkbox = if option.is_none() {
             chain
@@ -583,7 +1243,7 @@ fn click_page(
         } else {
             None
         };
-        (option, row, checkbox)
+        (option, cell, checkbox)
     };
     if let Some((group, child)) = &option {
         for block in page.gib.blocks.iter_mut() {
@@ -592,11 +1252,17 @@ fn click_page(
             }
         }
     }
-    if let Some((list, index)) = &row {
-        for block in page.gib.blocks.iter_mut() {
-            if let Block::Widget(root) = block {
-                if let Some(widget) = ra2ui::workshop::find_mut(root, list) {
-                    ra2ui::input::select_row(widget, *index);
+    if let Some((list, row, column)) = &cell {
+        if !list.is_empty() {
+            for block in page.gib.blocks.iter_mut() {
+                if let Block::Widget(root) = block {
+                    if let Some(widget) = ra2ui::workshop::find_mut(root, list) {
+                        ra2ui::input::select_cell(widget, *row, *column);
+                        let top = ra2ui::input::field_of(widget, "_ScrollTop")
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        ra2ui::input::scroll_rows(widget, top);
+                    }
                 }
             }
         }
@@ -615,7 +1281,7 @@ fn click_page(
         Plan::Nothing => Ok(None),
         Plan::Replace { target, .. } => Ok(Some(target)),
         Plan::Load { target, slot, .. } => {
-            load_into(page, ui, game, &slot, &target)?;
+            load_into(page, ui, game, &slot, &target, game_type)?;
             Ok(None)
         }
     }
@@ -629,6 +1295,7 @@ fn load_into(
     game: &Path,
     slot: &str,
     target: &str,
+    game_type: Option<&str>,
 ) -> Result<(), String> {
     let (path, key) =
         game::screen(ui, target).ok_or_else(|| format!("{target} is not in {}", ui.display()))?;
@@ -655,7 +1322,8 @@ fn load_into(
         return Err(format!("{} has no group called {slot:?}", page.key));
     }
     page.content.push((slot.to_string(), key.clone()));
-    fill_lists(&mut page.gib, game)?;
+    fill_lists(&mut page.gib, game, game_type)?;
+    page.scroll.insert(ra2ui::arenas::LIST.to_string(), 0);
     Ok(())
 }
 
@@ -663,9 +1331,11 @@ fn load_into(
 ///
 /// The arena picker is the shipped case: its listbox says *"populate with arena
 /// names"*, and the names come from the game's own arena scripts
-/// (`ra2ui::arenas`). The source and the destination are both named by the
-/// data, so this is not a table of screens.
-fn fill_lists(gib: &mut Gib, game: &Path) -> Result<(), String> {
+/// (`ra2ui::arenas`). When the Game Settings tab has selected a type, the list
+/// is that type's `enumAvailable` set; before the tab is opened the full twelve
+/// are offered and the caller filters the choice. The source and the
+/// destination are both named by the data, so this is not a table of screens.
+fn fill_lists(gib: &mut Gib, game: &Path, game_type: Option<&str>) -> Result<(), String> {
     let wants_arenas = gib.walk().any(|w| {
         w.notes()
             .trim()
@@ -674,13 +1344,18 @@ fn fill_lists(gib: &mut Gib, game: &Path) -> Result<(), String> {
     if !wants_arenas {
         return Ok(());
     }
-    let arenas = ra2ui::arenas::all(game)?;
+    let arenas = match game_type {
+        Some(game_type) => ra2ui::arenas::available(game, game_type)?,
+        None => ra2ui::arenas::all(game)?,
+    };
     for block in gib.blocks.iter_mut() {
         let Block::Widget(root) = block else { continue };
         let Some(list) = workshop::find_mut(root, ra2ui::arenas::LIST) else {
             continue;
         };
         ra2ui::arenas::fill_list(list, &arenas);
+        ra2ui::input::clear_selection(list);
+        ra2ui::input::scroll_rows(list, 0);
         break;
     }
     Ok(())
@@ -722,6 +1397,220 @@ fn click_lab(
         step.note = Some(format!("the workshop's {step_button} step"));
     }
     Ok(None)
+}
+
+/// Parse the time dropdown's own value (`5 minutes`, `No limit`).
+///
+/// The listbox under it is empty in the shipped file — the option list is not
+/// in the data — so the current value is the only one that can be read. This is
+/// exposed as [`Shell::time_choice`].
+fn parse_match_time(text: &str) -> Option<Option<f32>> {
+    let lower = text.trim().to_ascii_lowercase();
+    if lower.contains("no limit") || lower.contains("unlimited") {
+        return Some(None);
+    }
+    let number: f32 = lower.split_whitespace().next()?.parse().ok()?;
+    let seconds = if lower.contains("minute") {
+        number * 60.0
+    } else if lower.contains("second") {
+        number
+    } else {
+        return None;
+    };
+    (seconds.is_finite() && seconds > 0.0).then_some(Some(seconds))
+}
+
+fn root_widget_mut(gib: &mut Gib) -> Option<&mut Widget> {
+    gib.blocks.iter_mut().find_map(|block| match block {
+        Block::Widget(widget) => Some(widget),
+        Block::Attachment(_) => None,
+    })
+}
+
+/// The picker's `team dropdown` list, from the document.
+fn picker_team_list_mut(widget: &mut Widget) -> Option<&mut Widget> {
+    let dropdown = workshop::find_mut(widget, "team dropdown")?;
+    dropdown
+        .children
+        .iter_mut()
+        .find(|child| child.kind == WidgetKind::ListBox)
+}
+
+/// Open or close the picker's team list.
+///
+/// The authored list sits on the dropdown's text box at `0 0`; a drop-down's
+/// open list hangs below the field, so opening moves it to `0 0 20 0` (the
+/// field is 20 pixels high) and puts it in front of the text. That is view
+/// state, not a record the file owns.
+fn set_team_list_open(widget: &mut Widget, open: bool) {
+    let Some(list) = picker_team_list_mut(widget) else {
+        return;
+    };
+    if open {
+        ra2ui::input::set_field(list, "Position", "0 0 20 0");
+        ra2ui::input::set_field(list, "ChildOrder", "100");
+    }
+    ra2ui::input::set_field(list, "Visible", if open { "true" } else { "false" });
+    // The drop-down clips to its collapsed 20-pixel field and its `select team
+    // group` is 110 pixels high; the open list hangs below the field and may
+    // run past the group, so those two clips are lifted while the list is open.
+    for name in ["team dropdown", "select team group", "bg group"] {
+        if let Some(widget) = workshop::find_mut(widget, name) {
+            ra2ui::input::set_field(widget, "ClipMode", if open { "0" } else { "1" });
+        }
+    }
+    // The motto and the robot-name boxes are later siblings of the drop-down,
+    // so they are hit-tested before it; an open list covers them. Hide them
+    // while it is open (the drop-down is modal) and show them again on close.
+    for name in ["team motto", "robot name"] {
+        if let Some(box_) = workshop::find_mut(widget, name) {
+            ra2ui::input::set_field(box_, "Visible", if open { "false" } else { "true" });
+        }
+    }
+}
+
+/// The same list after placement.
+fn picker_team_list_placed<'a>(placed: &'a [Placement<'a>]) -> Option<&'a Placement<'a>> {
+    let dropdown = placed
+        .iter()
+        .flat_map(|p| p.walk())
+        .find(|p| p.widget.name() == "team dropdown")?;
+    dropdown
+        .children
+        .iter()
+        .find(|child| child.widget.kind == WidgetKind::ListBox)
+}
+
+fn named_list(chain: &[&Placement<'_>]) -> bool {
+    chain.iter().any(|p| p.widget.kind == WidgetKind::ListBox)
+}
+
+/// Set a `TextBox`'s visible string, both on the box and on its `Text` child.
+fn set_text(widget: &mut Widget, text: &str) {
+    ra2ui::input::set_field(widget, "_Text", text);
+    for child in widget.children.iter_mut() {
+        if child.kind == WidgetKind::Text {
+            ra2ui::input::set_field(child, "_Text", text);
+        }
+    }
+}
+
+/// Rebuild the open picker from its selected team and robot: the dropdown's
+/// rows, the dropdown text, the robot cells (with their weight icons), the
+/// selection and the labels the screen's own notes name.
+fn refresh_picker(popup: &mut Popup, ui: &Path, game: &Path) -> Result<(), String> {
+    let template = workshop::load(ui, "exhibition/choosebot_cell.gib")?
+        .widgets()
+        .next()
+        .cloned()
+        .ok_or_else(|| "choosebot_cell.gib has no root".to_string())?;
+    let team = popup.team.min(popup.rosters.len().saturating_sub(1));
+    popup.team = team;
+    let roster = popup.rosters[team].clone();
+    if roster.robots.is_empty() {
+        popup.robot = None;
+    } else if popup.robot.is_none_or(|robot| robot >= roster.robots.len()) {
+        popup.robot = Some(0);
+    }
+    let robot_name = popup
+        .robot
+        .and_then(|ordinal| roster.robots.get(ordinal).copied())
+        .map(|bot| {
+            let path = teams::bot_path(game, popup.side, team, bot);
+            match teams::bot_info(&path) {
+                Some((name, _)) => name,
+                None => format!("Bot{bot} (no .bot file)"),
+            }
+        })
+        .unwrap_or_else(|| "no robots in this team".to_string());
+    let Some(root) = root_widget_mut(&mut popup.gib) else {
+        return Err("the picker has no root widget".to_string());
+    };
+    if let Some(list) = picker_team_list_mut(root) {
+        teams::fill_team_list(list, &popup.rosters);
+        popup.scroll = ra2ui::input::scroll_rows(list, popup.scroll);
+        ra2ui::input::select_cell(list, team, 0);
+        popup.scroll = ra2ui::input::scroll_rows(list, popup.scroll);
+    }
+    if let Some(dropdown) = workshop::find_mut(root, "team dropdown") {
+        if let Some(textbox) = dropdown
+            .children
+            .iter_mut()
+            .find(|child| child.kind == WidgetKind::TextBox)
+        {
+            set_text(textbox, &roster.name);
+        }
+    }
+    if let Some(grid) = workshop::find_mut(root, "robots grid") {
+        grid.children
+            .retain(|child| child.name() == "Sel Bar" || child.name() == "High Bar");
+        for (ordinal, bot) in roster.robots.iter().enumerate() {
+            let mut cell = template.clone();
+            ra2ui::input::set_field(&mut cell, "Position", &format!("{} 0 0 0", 90 * ordinal));
+            let path = teams::bot_path(game, popup.side, team, *bot);
+            if let Some((_, class)) = teams::bot_info(&path) {
+                let icon = match class {
+                    0 => "exhibition/light_icon.bmp",
+                    1 => "exhibition/medium_icon.bmp",
+                    _ => "exhibition/heavy_icon.bmp",
+                };
+                if let Some(icon_widget) = workshop::find_mut(&mut cell, "weight icon") {
+                    ra2ui::input::set_field(icon_widget, "_Filename", icon);
+                }
+            }
+            grid.children.push(cell);
+        }
+        if let Some(robot) = popup.robot {
+            ra2ui::input::select_cell(grid, 0, robot);
+        }
+    }
+    if let Some(name) = workshop::find_mut(root, "robot name") {
+        set_text(name, &robot_name);
+    }
+    if let Some(motto) = workshop::find_mut(root, "team motto") {
+        set_text(motto, &roster.motto);
+    }
+    if !roster.logo.is_empty() {
+        if let Some(logo) = workshop::find_mut(root, "team logo img") {
+            ra2ui::input::set_field(logo, "_Filename", &roster.logo);
+        }
+    }
+    Ok(())
+}
+
+/// The offset a click inside a list's `+Scroller` bar asks for.
+///
+/// The bar is the attachment's `ScrollBar`: its own `Less`/`More` buttons are
+/// the first and last parts, and the track between them is the third. A click
+/// on an arrow moves one row; a click on the track jumps to that fraction of
+/// the content. `None` when the point is not on this list's bar.
+fn scrollbar_target(list: &Placement<'_>, x: f32, y: f32, top: usize, max: usize) -> Option<usize> {
+    let bar = list
+        .attachments
+        .iter()
+        .find(|a| a.attachment.kind == AttachmentKind::Scroller)?
+        .body
+        .walk()
+        .find(|p| p.widget.kind == WidgetKind::ScrollBar)?;
+    if !bar.frame.contains_point(x, y) || !bar.widget.visible() {
+        return None;
+    }
+    let model = ra2ui::ScrollBar::from_widget(bar.widget);
+    let less = bar.children.get(model.less)?.frame;
+    let more = bar.children.get(model.more)?.frame;
+    let parts = model.parts(bar.frame, less, more);
+    let track = parts[2];
+    if y < track.y {
+        return Some(top.saturating_sub(1));
+    }
+    if y >= track.bottom() {
+        return Some((top + 1).min(max));
+    }
+    if track.h <= 0.0 {
+        return Some(top);
+    }
+    let fraction = ((y - track.y) / track.h).clamp(0.0, 1.0);
+    Some((fraction * max as f32).round() as usize)
 }
 
 fn chain<'a>(roots: &'a [Placement<'a>], path: &[usize]) -> Vec<&'a Placement<'a>> {

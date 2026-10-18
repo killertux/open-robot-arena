@@ -97,10 +97,26 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
             .out
             .clone()
             .ok_or_else(|| "--play needs --out DIR (the headless exhibition run)".to_string())?;
-        let seconds = args.seconds.unwrap_or(play_mode::DEFAULT_SECONDS);
+        let seconds = match args.seconds {
+            Some(seconds) => seconds,
+            // Without an explicit evidence length, `--time` is both the
+            // setup's match length and this run's length.
+            None => args.time.unwrap_or(play_mode::DEFAULT_SECONDS),
+        };
         if !(seconds.is_finite() && seconds > 0.0) {
             return Err(format!("--seconds must be positive, got {seconds}"));
         }
+        if args.arena_index.is_some() && args.arena.is_some() {
+            return Err("--play takes --arena or --arena-index, not both".to_string());
+        }
+        let game_type = match args.gametype.as_deref() {
+            Some(name) => Some(play_mode::parse_game_type(name).ok_or_else(|| {
+                format!(
+                    "--gametype {name:?} is not deathmatch/battle-royal/team-match/tabletop/king-of-hill"
+                )
+            })?),
+            None => None,
+        };
         let arena_script = args.arena.as_ref().map(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
@@ -114,6 +130,13 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
             out,
             size: args.size,
             arena_script,
+            arena_index: args.arena_index,
+            game_type,
+            team: args.team,
+            bot: args.bot,
+            opponent_team: args.opponent_team,
+            opponent_bot: args.opponent_bot,
+            time: args.time,
         };
         return play_mode::run_headless(&options).map(|_| ());
     }

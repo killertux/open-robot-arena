@@ -130,6 +130,7 @@ pub mod project;
 pub mod repairs;
 pub mod results;
 pub mod standings;
+pub mod teams;
 pub mod workshop;
 
 /// The faces a screen's labels name, loaded from a game installation's

@@ -191,16 +191,22 @@ in the game's own script.
 | M8.8 | **done** — camera: `watch`/`static`/`orbit` (the binary's own vocabulary) from `ra2.cfg`'s `DefaultCamera`; `C` cycles in the window. A player-controlled match starts on the driving **chase** camera (our choice) and cycles `chase → watch → orbit`. The C++ `watch`/`orbit` framing is named as ours | `ra2-app`, `ra2sim::duel` |
 | M8.9 | **done** — results: `common/matchresults.gib`'s four slots filled from `MatchReport::results()` through `ra2ui::results`, the placed tree asserted, then the return to the menu | `ra2ui::results`, `ra2-app` |
 | M8.10 | **done (pause/quit)** — `Esc` opens `common/ingame_dialog.gib` (`in game popup win`); resume and quit, with a deterministic `--quit-at` run writing `pause.png`/`menu.png`. The arena intro remains unimplemented (`skip group` is hidden) | `ra2-app` |
-| M8.11 | **done (play)** — the shipped exhibition setup's `start game button` (note *"start the game"*) starts a player-controlled `Match`: the arena is the picker row (`Arenas/box.py` when none), the game type is the Game Settings tab's selection (`DEATHMATCH` when unopened, printed as the default), hazards follow the arena's `hazard checkbox`, and robot 0 is `Teams/Team0/Bot0.bot` against `AI/Team1/Bot0.bot`. `Match::step_with(&[Option<DriveInput>])` lets the window drive robot 0 (`None` = shipped AI), W/S/A/D and the arrows drive, and `Continue`/quit return to the setup screen. `--play --drive "…" --seconds N --out DIR` writes `play-setup.png`/`play-drive.png`/`play-results.png`. Robot/team selection and the match-time dropdown remain unwired (`docs/21-play.md`) | `ra2sim::match`, `ra2-app` |
+| M8.11 | **done (play, choices)** — the shipped exhibition setup's `start game button` (note *"start the game"*) starts a player-controlled `Match`. The arena is the picker row (`Arenas/box.py` when none), the game type is the Game Settings tab's own `Selection` (its shipped default is `deathmatch checkbox`, whether or not the tab was opened), hazards follow the arena's `hazard checkbox`, and the two robots come from the shipped `selectbot_player.gib`/`selectbot_computer.gib` windows: `Teams/Teams.txt`'s 16 records for the player (default: the career's first named team) and `AI/Teams.txt`'s 15 for the computer (default: team 1), each with its own `Robots:` slots. The arena list is filtered by the type's `game_types` (`enumAvailable`), scrolls its `Rows 6` viewport by wheel/scrollbar, and replaces an incompatible row with the first arena that supports the type, saying so. The time dropdown's displayed `5 minutes` is the match length (`--time` replaces it; `--seconds` is the headless run override). `Match::step_with(&[Option<DriveInput>])` lets the window drive robot 0 (`None` = shipped AI), W/S/A/D and the arrows drive, and `Continue`/quit return to the setup screen. `--play --drive "…" --seconds N --team/--bot --opponent-team/--opponent-bot --gametype --arena-index --time --out DIR` writes `play-setup.png`/`play-drive.png`/`play-results.png`. The weight-class filter, player slots 2/4 and a windowed run remain unwired (`docs/21-play.md`) | `ra2sim::match`, `ra2fmt::arena`, `ra2ui::arenas`, `ra2ui::teams`, `ra2-shell`, `ra2-app` |
 
-Landed: the exhibition screen is playable. Its Arena tab's rows select the
-arena, the Game Settings tab's option group selects the game type, and Start
-Game builds the match; the window drives robot 0 with `Match::step_with`. The
-headless evidence is `--play --drive "0-2:1,0;2-4:1,1" --seconds 8 --out DIR`
-(the run in `docs/21-play.md` moved `C.R.U.S.H.` 23.29 m and reached `Results`
-with `C.R.U.S.H.` 40 – Roly Poly 38). The robots tab, the match-time dropdown,
-arena scrolling and the arena→game-type filtering remain unwired and are named
-there.
+Landed: the exhibition screen is playable and its choices are real. The Robots
+tab's own `playerN group` slots open the shipped pickers, whose `team dropdown`
+and `robots grid` select from the game's 16 player / 15 AI team records; the
+Arena tab's rows select the arena and scroll to all twelve with the wheel; the
+Game Settings tab's option group selects the type and filters the arena list by
+the arena's own `game_types`; Start Game builds the match from those choices.
+The window drives robot 0 with `Match::step_with`. The headless evidence is
+`--play --drive "0-2:1,0;2-4:1,1" --seconds 8 --out DIR` (the run in
+`docs/21-play.md` moved `C.R.U.S.H.` 23.29 m and reached `Results` with
+`C.R.U.S.H.` 40 – Roly Poly 38); `--team 0 --bot 1 --opponent-team 5
+--opponent-bot 1` spawns `Sting Ray` against `The Boxer`, `--gametype
+king-of-hill` filters to `hilltop`/`king` and picks `hilltop`, and
+`--arena-index 10` scrolls to `Parking Lot`. The weight-class option group,
+player slots 2/4 and a windowed run remain unwired and are named there.
 
 **Acceptance.** Headless: a scripted `Match` on the box arena, two AI bots,
 produces a winner and a filled result screen; the score sequence for
