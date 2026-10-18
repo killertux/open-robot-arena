@@ -522,6 +522,9 @@ pub fn text_run(font: &ra2fmt::Font, frame: Frame, text: &str) -> Vec<PlacedGlyp
 /// data does not state.
 pub fn wrap_lines(font: &ra2fmt::Font, text: &str, width: f32) -> Vec<String> {
     let mut out = Vec::new();
+    // The `.gib` writer stores a line break as the two characters `\n`
+    // (`credits.gib`'s paragraphs); the engine reads it as a newline.
+    let text = text.replace("\\n", "\n");
     for hard in text.split('\n') {
         if width <= 0.0 {
             out.push(hard.to_string());
@@ -998,7 +1001,25 @@ fn place_at<'a>(
     fonts: Option<&Fonts>,
     baseline: bool,
 ) -> Placement<'a> {
-    let frame = sized(widget, parent, widget.size(), fonts, baseline);
+    place_core(widget, parent, inherited, fonts, baseline, None)
+}
+
+/// [`place_at`], with the widget's own frame optionally forced: a split frame
+/// gives each slot's child the slot's rectangle whatever the child's
+/// `Position`/`Size` say (`exhib_setup.gib`'s `top slot` states 418 px and is
+/// the whole 87% pane).
+fn place_core<'a>(
+    widget: &'a Widget,
+    parent: Frame,
+    inherited: Option<Frame>,
+    fonts: Option<&Fonts>,
+    baseline: bool,
+    forced: Option<Frame>,
+) -> Placement<'a> {
+    let frame = match forced {
+        Some(frame) => frame,
+        None => sized(widget, parent, widget.size(), fonts, baseline),
+    };
     let clip = match ClipMode::from_value(widget.clip_mode()) {
         ClipMode::None => inherited,
         ClipMode::SelfFrame => Some(intersect(inherited, frame)),
@@ -1044,6 +1065,19 @@ fn place_at<'a>(
             })
         })
         .collect();
+    // A `Glyph` dressed by a `DisplayBox` is the box's paragraph: the widget
+    // itself is `Position 0 0 0 0` (it hangs from its parent's corner) and the
+    // box it fills is the attachment's body. `credits.gib`'s two name lists are
+    // both at the window's origin until each moves to its own box.
+    let mut frame = frame;
+    if widget.kind == WidgetKind::Glyph {
+        if let Some(boxed) = attachments
+            .iter()
+            .find(|a| a.attachment.kind == AttachmentKind::DisplayBox)
+        {
+            frame = boxed.body.frame;
+        }
+    }
     Placement {
         widget,
         frame,
@@ -1264,35 +1298,36 @@ fn split_children<'a>(
         .unwrap_or(if horizontal { frame.w } else { frame.h } / 2.0);
     let master_size = master_size.clamp(0.0, if horizontal { frame.w } else { frame.h });
 
+    // `Master` names the slot MasterSize sizes. Slot 0 is always the first
+    // (top/left) pane and slot 1 the second, so a master of 1 is the pane at
+    // the far end (`exhib_setup.gib`'s 13% bottom bar) and slot 0 takes the rest.
+    let total = if horizontal { frame.w } else { frame.h };
+    let first = if master == 1 {
+        total - master_size
+    } else {
+        master_size
+    };
     let (a, b) = if horizontal {
         (
-            Frame::new(frame.x, frame.y, master_size, frame.h),
-            Frame::new(
-                frame.x + master_size,
-                frame.y,
-                frame.w - master_size,
-                frame.h,
-            ),
+            Frame::new(frame.x, frame.y, first, frame.h),
+            Frame::new(frame.x + first, frame.y, total - first, frame.h),
         )
     } else {
         (
-            Frame::new(frame.x, frame.y, frame.w, master_size),
-            Frame::new(
-                frame.x,
-                frame.y + master_size,
-                frame.w,
-                frame.h - master_size,
-            ),
+            Frame::new(frame.x, frame.y, frame.w, first),
+            Frame::new(frame.x, frame.y + first, frame.w, total - first),
         )
     };
-    // `Master` names the slot MasterSize sizes; the other takes the remainder.
-    let panes = if master == 1 { [b, a] } else { [a, b] };
+    let panes = [a, b];
 
     widget
         .children
         .iter()
         .enumerate()
-        .map(|(i, c)| place_at(c, panes[i.min(1)], clip, fonts, false))
+        .map(|(i, c)| {
+            let pane = panes[i.min(1)];
+            place_core(c, pane, clip, fonts, false, Some(pane))
+        })
         .collect()
 }
 

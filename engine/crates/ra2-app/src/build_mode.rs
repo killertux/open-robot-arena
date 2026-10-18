@@ -1650,6 +1650,14 @@ impl Builder {
             }
         }
         if self.tab() == Some("chassis button") {
+            // The step layer's group (`steps and snap group`, 46% x 70 px in
+            // the content corner) lies over the tools pane's lower-left
+            // buttons by design; the control under the point is what the
+            // player clicks, not the container drawn over it.
+            let chain = match ra2ui::input::hit_control(&placed, x, y) {
+                Some(path) => self::chain(&placed, &path),
+                None => chain.clone(),
+            };
             if chain
                 .iter()
                 .any(|p| p.widget.name() == "clear outline button")
@@ -3474,17 +3482,9 @@ mod tests {
         let points = builder.build.chassis().unwrap().bottom.len();
         assert!(points > 4, "the freeform click added a point: {points}");
 
-        let clear = builder
-            .shell()
-            .placements()
-            .iter()
-            .flat_map(|p| p.walk())
-            .find(|p| p.widget.name() == "clear outline button")
-            .map(|p| p.frame)
-            .expect("the shipped clear outline button");
-        builder
-            .click(clear.x + clear.w * 0.5, clear.y + clear.h * 0.5)
-            .unwrap();
+        // The button's centre can sit under the steps group's row at some
+        // sizes; `click_named` finds a point that actually reaches it.
+        builder.click_named("clear outline button").unwrap();
         assert!(builder.build.chassis().unwrap().bottom.is_empty());
     }
 

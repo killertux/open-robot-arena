@@ -186,6 +186,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::SHELL_SIZE;
 
     fn game_dir() -> Option<PathBuf> {
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

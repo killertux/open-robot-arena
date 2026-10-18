@@ -84,6 +84,11 @@ impl AudioSystem {
     /// Switch to the screen group's track, or stop when the group is not one
     /// the shipped music directories establish.
     pub fn on_screen(&mut self, screen: &str) {
+        // A modal window (options, credits) opens over the screen and leaves
+        // its music running: the executable's modal loop never touches it.
+        if ra2_shell::bindings::is_window(screen) {
+            return;
+        }
         // The same screen on a re-render is not a transition. Updating the
         // stored id is still harmless, and it keeps the report's "screen" name
         // accurate when two screens share a track.

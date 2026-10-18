@@ -22,6 +22,7 @@ use ra2ui::teams::{self, Roster, Side};
 use ra2ui::workshop::{self, BotLab};
 use ra2ui::{Fonts, Placement};
 
+use crate::bindings::{self, Action};
 use crate::game;
 use crate::nav::{self, Navigation};
 
@@ -166,6 +167,10 @@ pub struct Shell {
     slot_picks: [Option<Pick>; 4],
     /// The picker window open over the setup screen.
     popup: Option<Popup>,
+    /// The modal windows open over the screen, oldest first (the options and
+    /// credits windows over the main menu). The top one owns the input; the
+    /// screen under it keeps its state and keeps drawing.
+    windows: Vec<Page>,
 }
 
 impl Shell {
@@ -199,6 +204,7 @@ impl Shell {
             opponent_pick: None,
             slot_picks: [None; 4],
             popup: None,
+            windows: Vec::new(),
         })
     }
 
@@ -219,6 +225,14 @@ impl Shell {
 
     /// The screen on display, relative to `UI`.
     pub fn screen_id(&self) -> String {
+        if let Some(window) = self.windows.last() {
+            return window.key.clone();
+        }
+        self.base_screen_id()
+    }
+
+    /// The screen under any modal window: what the music and the flow follow.
+    pub fn base_screen_id(&self) -> String {
         match &self.screen {
             Screen::Page(page) => page.key.clone(),
             Screen::Lab(_) => workshop::SCREEN.to_string(),
@@ -230,6 +244,9 @@ impl Shell {
     pub fn content_id(&self) -> Option<String> {
         if let Some(popup) = &self.popup {
             return Some(popup.side.picker().to_string());
+        }
+        if let Some(window) = self.windows.last() {
+            return window.content.last().map(|(_, screen)| screen.clone());
         }
         match &self.screen {
             Screen::Page(page) => page.content.last().map(|(_, screen)| screen.clone()),
@@ -261,6 +278,9 @@ impl Shell {
 
     /// The composed document, for reading back what a screen now says.
     pub fn document(&self) -> &Gib {
+        if let Some(window) = self.windows.last() {
+            return &window.gib;
+        }
         match &self.screen {
             Screen::Page(page) => &page.gib,
             Screen::Lab(lab) => &lab.document,
@@ -274,6 +294,9 @@ impl Shell {
     /// shipped records before each frame. The workshop's document belongs to
     /// `ra2ui`, so it is not exposed here.
     pub fn document_mut(&mut self) -> Option<&mut Gib> {
+        if let Some(window) = self.windows.last_mut() {
+            return Some(&mut window.gib);
+        }
         match &mut self.screen {
             Screen::Page(page) => Some(&mut page.gib),
             Screen::Lab(_) => None,
@@ -583,6 +606,13 @@ impl Shell {
             Screen::Page(page) => ra2ui::resolve_with(&page.gib, self.size, Some(&self.fonts)),
             Screen::Lab(lab) => lab.placements(self.size, Some(&self.fonts)),
         };
+        // On a tie of `ChildOrder` the earlier record is in front, so the
+        // windows go ahead of the screen, the newest first.
+        for window in &self.windows {
+            let mut above = ra2ui::resolve_with(&window.gib, self.size, Some(&self.fonts));
+            above.append(&mut placed);
+            placed = above;
+        }
         if let Some(popup) = &self.popup {
             placed.extend(ra2ui::resolve_with(
                 &popup.gib,
@@ -633,7 +663,34 @@ impl Shell {
             self.open_picker(side, panel, x, y)?;
             return Ok(self.finish(step));
         }
-        let replacement = match &mut self.screen {
+        if !self.windows.is_empty() {
+            // A modal window owns the input: a click outside its controls is
+            // swallowed, not passed to the screen under it.
+            let game_type = self.game_type_choice.clone();
+            let window = self.windows.last_mut().expect("a window is open");
+            let transition = click_page(
+                &self.ui,
+                &self.game,
+                &self.fonts,
+                self.size,
+                window,
+                x,
+                y,
+                &mut step,
+                game_type.as_deref(),
+            )?;
+            match transition {
+                Some(Transition::Open(target)) => self.open_window(&target)?,
+                // Any screen change a window asks for closes it: the screen
+                // under it is the one it was opened from.
+                Some(Transition::Close | Transition::Replace(_)) => {
+                    self.windows.pop();
+                }
+                None => {}
+            }
+            return Ok(self.finish(step));
+        }
+        let transition = match &mut self.screen {
             Screen::Page(page) => click_page(
                 &self.ui,
                 &self.game,
@@ -645,12 +702,54 @@ impl Shell {
                 &mut step,
                 self.game_type_choice.as_deref(),
             )?,
-            Screen::Lab(lab) => click_lab(&self.fonts, self.size, lab, x, y, &mut step)?,
+            Screen::Lab(lab) => {
+                click_lab(&self.fonts, self.size, lab, x, y, &mut step)?.map(Transition::Replace)
+            }
         };
-        if let Some(target) = replacement {
-            self.screen = load_screen(&self.ui, &target)?;
+        match transition {
+            Some(Transition::Replace(target)) if bindings::is_window(&target) => {
+                self.open_window(&target)?;
+            }
+            Some(Transition::Replace(target)) => {
+                self.screen = load_screen(&self.ui, &target)?;
+            }
+            Some(Transition::Open(target)) => self.open_window(&target)?,
+            Some(Transition::Close) | None => {}
         }
         Ok(self.finish(step))
+    }
+
+    /// Open a modal window over the screen (`FUN_005e5620`). A window that is
+    /// already the top one is not opened twice.
+    fn open_window(&mut self, target: &str) -> Result<(), String> {
+        if let Some(top) = self.windows.last() {
+            if top.key.eq_ignore_ascii_case(target) {
+                return Ok(());
+            }
+        }
+        if let Screen::Page(mut page) = load_screen(&self.ui, target)? {
+            // The options window opens on its Video tab: its constructor
+            // fills the content group, so the window is never shown empty.
+            if target.eq_ignore_ascii_case("common/options.gib") {
+                load_into(
+                    &mut page,
+                    &self.ui,
+                    &self.game,
+                    "options content group",
+                    "common/video_options.gib",
+                    None,
+                )?;
+            }
+            self.windows.push(page);
+            Ok(())
+        } else {
+            Err(format!("{target} is not a window"))
+        }
+    }
+
+    /// How many modal windows are open over the screen.
+    pub fn window_depth(&self) -> usize {
+        self.windows.len()
     }
 
     /// Stamp the screen/content on a step, remember the choices and append it
@@ -1066,10 +1165,14 @@ impl Shell {
     fn reachable(&self, name: &str) -> Result<(f32, f32), String> {
         let page = matches!(self.screen, Screen::Page(_));
         let hit = |placed: &[Placement<'_>], x: f32, y: f32| {
+            // The control under a point first: a container drawn over a
+            // control (the workshop's step layer over the tools pane) is not
+            // what a player clicks. The workshop falls back to what is under
+            // the point for names that are not controls.
             if page {
                 ra2ui::input::hit_control(placed, x, y)
             } else {
-                ra2ui::input::hit(placed, x, y)
+                ra2ui::input::hit_control(placed, x, y).or_else(|| ra2ui::input::hit(placed, x, y))
             }
         };
         let placed = self.placements();
@@ -1130,10 +1233,15 @@ impl Shell {
         let [width, height] = self.size;
         let (width, height) = (width as u32, height as u32);
         let mut assets = UiAssets::open(&self.game).map_err(|e| e.to_string())?;
-        let placed: Vec<Placement<'_>> = match &self.screen {
+        let mut placed: Vec<Placement<'_>> = match &self.screen {
             Screen::Page(page) => ra2ui::resolve_with(&page.gib, self.size, Some(assets.faces())),
             Screen::Lab(lab) => lab.placements(self.size, Some(assets.faces())),
         };
+        for window in &self.windows {
+            let mut above = ra2ui::resolve_with(&window.gib, self.size, Some(assets.faces()));
+            above.append(&mut placed);
+            placed = above;
+        }
         let scene = assets.scene(&placed, [width, height]);
         let renderer = Renderer::new().map_err(|e| e.to_string())?;
         let ui = UiRenderer::new(renderer.device());
@@ -1179,7 +1287,16 @@ fn load_screen(ui: &Path, key: &str) -> Result<Screen, String> {
 enum Plan {
     Nothing,
     Replace { target: String },
+    Open { target: String },
+    Close,
     Load { target: String, slot: String },
+}
+
+/// What a click asks the shell to do with the screens.
+enum Transition {
+    Replace(String),
+    Open(String),
+    Close,
 }
 
 fn plan_page(page: &Page, fonts: &Fonts, size: [f32; 2], x: f32, y: f32, step: &mut Step) -> Plan {
@@ -1190,6 +1307,32 @@ fn plan_page(page: &Page, fonts: &Fonts, size: [f32; 2], x: f32, y: f32, step: &
     };
     let chain = chain(&placed, &path);
     step.hit = chain.last().map(|p| describe(p)).unwrap_or_default();
+    // The executable's own handler bindings, by widget name, come first; the
+    // `Notes` strings only answer for widgets no recovered binding covers.
+    let bound = chain
+        .iter()
+        .rev()
+        .find_map(|p| bindings::lookup(&page.key, p.widget.name()).map(|binding| (*p, binding)));
+    if let Some((owner, binding)) = bound {
+        // The app keys its options staging on the control's note text, so the
+        // note is still reported when the record has one.
+        let note = owner.widget.notes().trim();
+        step.note = Some(if note.is_empty() {
+            format!("{} [{}]", owner.widget.name(), binding.at)
+        } else {
+            note.to_string()
+        });
+        return match binding.action {
+            Action::Goto(screen) => Plan::Replace {
+                target: screen.to_string(),
+            },
+            Action::Window(screen) => Plan::Open {
+                target: screen.to_string(),
+            },
+            Action::Close => Plan::Close,
+            Action::Quit => Plan::Nothing,
+        };
+    }
     let found = chain
         .iter()
         .rev()
@@ -1223,7 +1366,7 @@ fn click_page(
     y: f32,
     step: &mut Step,
     game_type: Option<&str>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<Transition>, String> {
     let plan = plan_page(page, fonts, size, x, y, step);
     // What the click changes inside the screen: an option-group member, a list
     // row, or a standalone checkbox. All three are the data's own controls; the
@@ -1311,7 +1454,9 @@ fn click_page(
     }
     match plan {
         Plan::Nothing => Ok(None),
-        Plan::Replace { target, .. } => Ok(Some(target)),
+        Plan::Replace { target, .. } => Ok(Some(Transition::Replace(target))),
+        Plan::Open { target } => Ok(Some(Transition::Open(target))),
+        Plan::Close => Ok(Some(Transition::Close)),
         Plan::Load { target, slot, .. } => {
             load_into(page, ui, game, &slot, &target, game_type)?;
             Ok(None)
