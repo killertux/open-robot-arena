@@ -229,12 +229,13 @@ the library, decals) → save → reload it → `Test Robot` in an arena.
 | # | Work item | Lands in |
 |---|---|---|
 | M9.1 | ✅ **W1 `bot::write`**: 1.12, **57/57** semantic and byte-identical, measured over `Robot Designs/`, `AI/` and `Teams/` | `ra2fmt::bot` |
-| M9.2 | ✅ Component placement: attach at a mount point with the F1 rule (already the renderer's), remove, undo; the palette's filtering and selection already exist, and `--build` wires a palette click to `Build::attach` *(the baseplate drag placement tool remains; see `docs/17-workshop-ui.md`)* | `ra2ui::workshop`, `ra2-app` |
+| M9.2 | ✅ Component placement: attach at a mount point with the F1 rule (already the renderer's), remove, undo; a click on the live preview places a chassis child with the corpus' stored transform (`y = 0`, the quarter turn, the `0..1000` blueprint grid at 0.22 m per 100 units), and the sim's `local` matrix agrees. `--build` wires the palette click and the preview click to `Build::attach` / `Build::place_on_baseplate`; drag and footprint/overlap rules remain unnamed (see `docs/17-workshop-ui.md`) | `ra2fmt`, `ra2ui::workshop`, `ra2-app` |
 | M9.3 | ✅ Wiring: the shipped `control grid` is filled with `control_cell.gib`; `new analog`/`new switch`/`new button` + a free cell adds a control (`ControlBoard::add`), `delete button` removes it, and a component + an action from the model's matrix binds it (`Build::bind_action`, `bind_checked`). Saving and re-reading the board is identical; a wrong action for the kind is refused. Click-to-place then click-to-bind (no drag) | `ra2ui`, `ra2-app` |
-| M9.4 | ✅ Paint: the texture library and custom textures lists, `Paint::fill_group` on a face group, live preview, save/reload; decals/surface layers/texture-entire stay model-only | `ra2ui`, `ra2-app` |
+| M9.4 | ✅ Paint: fill, surface layer and decal modes; the texture/decal lists; a preview click picks the face group (and a decal's position) by ray-casting the chassis; scale row; save/reload; `Paint::undo`. Texture-entire stays model-only | `ra2ui`, `ra2-app` |
 | M9.5 | ✅ `Test Robot`: `--build` saves the bot and starts M8's `Match` on the box arena against a shipped AI bot, shows it with M8's presentation and reports the damage (reported, not applied) | `ra2-app` |
 | M9.6 | ✅ The workshop's own state: `Save As` to `Robot Designs/`, `Open`, `Import`/`Export` of bots and custom textures, the name box and the round-trip | `ra2-app` |
 | M9.7 | ✅ The bot's stats panel: weight (`Armor_Definitions` + mass rules), hitpoints, cost — from the same tables the sim uses | `ra2ui`, `ra2fmt` |
+| M9.8 | ✅ S4 chassis drawing: the shipped `Editing Area`, freeform/circle/rectangle tools, snap, the radius/length/width/height sliders and the step-2 point move act on the stored outlines; a moved top point also moves the mesh's ring vertex (**57/57** bots obey the ring rule). Mesh point/face add/remove round-trips. The outline→mesh extrusion/UV atlas is not recovered | `ra2ui`, `ra2-app` |
 
 **Acceptance.** Round-trip test over all 57+ stock bots; a built bot's saved file
 reopens with the same component tree, mass and hitpoints as the live one; a

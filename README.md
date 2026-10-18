@@ -96,8 +96,9 @@ by its right-slot records and reads the advance table two records on (S8 in
 [`docs/07-m5-m6-checklist.md`](docs/07-m5-m6-checklist.md)); the remaining font
 residue is only titles whose authored box is narrower than the shifted advance
 table, which clip as the data says. The workshop's **list and
-paint tools** are the game's C++ and are named/deferred (S4). The window and
-input loop arrived with M7 (`ra2-app`).
+paint tools** are the game's C++ and are named/deferred (S4), except the data
+operations measured here: the paint modes and the chassis outline/mesh editor.
+The window and input loop arrived with M7 (`ra2-app`).
 
 ### M6 — packaging
 
@@ -144,9 +145,10 @@ steps set the plate (the corpus' 2× editor hardness), a library texture fills a
 face group, the control board adds a control and binds it to an action from the
 shipped matrix, and the preview uses the same F1 transform as the renderer and
 the rig. `Save As` writes `Robot Designs/<name>.bot` with the writer and reopens
-it; the scripted run prints 1 part/56.1 kg/160 hp, then 3 parts/89.1 kg/960 hp,
-identical to the rig. `Test Robot` opens a real match. Baseplate drag placement,
-decal/surface layers and the shipped drawing tools remain open.
+it; the scripted run prints 1 part/56.1 kg/160 hp, then 3 parts/88.6 kg/960 hp,
+identical to the rig. `Test Robot` opens a real match. Baseplate drag rotation
+(the shift-mouse gesture), texture-entire and the game's outline→mesh extrusion
+remain open.
 
 ### M10 — the team HQ and the season
 
@@ -217,8 +219,9 @@ Measured, not aspirational.
   selection and the match-time dropdown are not selectable, the arena picker
   scrolls only its six visible rows, and a game type is not validated against
   the arena's own list.
-* The workshop's baseplate drag placement, decal/surface-layer UI, the shipped
-  drawing tools and the desktop's 3D preview of the original.
+* The workshop's baseplate drag rotation (shift-mouse), texture-entire, the
+  game's outline→mesh extrusion/UV atlas, and the desktop's 3D preview of the
+  original.
 * Component-level repair (a repair row names the robot; `Team+0x12c` is not
   decoded), the in-match robot preview image, and the event's 3D prize scene.
 * Physical audio playback was not exercised; the click-sound call site is our
