@@ -145,9 +145,9 @@ empty list (`0:00`, no rows).
 
 | frame | what it shows |
 |---|---|
-| `season.png` | the events tab **while the first event is in progress**: the nine cells, the in-progress cell's `round/rounds`, the title's `Event 1/9: Round N of M — next: …` |
+| `season.png` | the events tab **while the first event is in progress**: the nine cells, the in-progress cell, and the title suffix `E1/9 R1` |
 | `bracket.png` | the first event's bracket: every round, the player's opponents and `NEXT` |
-| `round.png` | a later round of the first event: the completed round's `WON` line and the new opponent |
+| `round.png` | the first **won** round with another round after it, in any event: the completed round's `WON` line and the new opponent. Written only when such a round exists (the match results are the engine's) |
 | `champion.png` | the season's last screen: `golden_sawblade.gib` when rank 1, otherwise `season_results.gib` |
 | `season-final.png` | the events tab after the ninth event, every cell `CHAMPION` or `PLAYED` |
 | `hq.png` | the HQ at the start, before the season |
@@ -176,10 +176,14 @@ table.
 
 ### The season evidence (`--simulate-season --seconds 0.2`)
 
-The seed-7 calendar, with the real match engine and the model's bracket:
+The seed-7 calendar, with the real match engine and the model's bracket. The
+**draw** (events, opponents, rounds, bots) is deterministic; the **match
+results** are the engine's. The evidence decision at the end of a short match
+eliminates whichever robot is behind on armour/battery/air, so the player can
+lose a round (and the event) under load. This is one run:
 
 ```text
-row 0  Robo-Depot                 2 rounds, 4 bots   won final   +160  trophy
+row 0  Robo-Depot                 2 rounds, 4 bots   lost round 1, eliminated  +80
 row 1  Strategic Engineering      4 rounds, 2 bots   won final   +160  trophy
 row 2  Biggie Bot Mash            2 rounds, 4 bots   won final   +160  trophy
 row 3  BBA Midwest Event          4 rounds, 2 bots   lost round 3, eliminated  +120
@@ -188,16 +192,18 @@ row 5  Mortal Robot               4 rounds, 2 bots   won final   +160  trophy
 row 6  Robot Scrapyard TV         4 rounds, 2 bots   won final   +160  trophy
 row 7  F.O.R.C.E. Tournament      4 rounds, 2 bots   won final   +160  trophy
 row 8  Powerbolt Championship     4 rounds, 2 bots   won final   +160  trophy
-season 0 complete: 1400 points, rank 1, 9 prize(s), 9 event(s) played
+season 0 complete: 1320 points, rank 1, 7 prize(s), 9 event(s) played
 ```
 
-Nine prizes = eight event trophies plus `UI\teamhq\golden_sawblade.tga`; the
-lost event stored none (its tier message is on the award screen only). The
-round lines in `bracket.png` are `Round 1: You vs … — NEXT` and
-`Final Match: You vs … — not drawn`; `round.png` is the next round after a
-win, and `champion.png` is the golden sawblade because the final rank is 1.
-The same deterministic draw is what `replaying_the_same_seed_reproduces_the_bracket`
-asserts.
+The exact points, trophies and rank therefore vary from run to run; the nine
+events and `Complete` do not. `bracket.png` is the first event's entry and
+`season.png` is the in-progress events tab. `round.png` is written at the first
+**won** round that has another round after it, in any event; if every first
+round is lost there is no `round.png`, and the test checks it when present
+rather than demanding it. `champion.png` is the season's last screen
+(`golden_sawblade.gib` at rank 1, otherwise `season_results.gib`), and
+`season-final.png` is the finished events tab. The deterministic part is what
+`replaying_the_same_seed_reproduces_the_bracket` asserts.
 
 ## Tests
 
@@ -214,14 +220,18 @@ asserts.
 - `ra2-app::hq_mode::tests::a_click_on_the_event_row_enters_that_event` — the
   app-level click and `Career::enter_event` agree with the schedule row.
 - `a_simulated_event_saves_and_the_next_app_run_reads_the_same_record` — a real
-  `Match` through the flow, the save, a second `Session::open`, the points,
-  prize, roster and the game's own `Teams.txt`.
+  `Match` through the flow, the save, a second `Session::open`, the player's
+  standing (found by name, not by the leader's row), the prize, roster and the
+  game's own `Teams.txt`. The assertion compares the **player's** season points,
+  in memory and on disk, not the row-0 score: the standings are rank-ordered and
+  an AI can lead after a lost round.
 - `a_headless_hq_run_writes_the_named_frames` — the nine PNGs at the requested
   size, including `repairs-list.png` and `repairs-done.png`.
 - `a_headless_season_run_completes_and_writes_the_season_frames` — nine events
   through the real match engine, the career ends `Complete`, and
-  `season.png`, `bracket.png`, `round.png`, `champion.png` are PNGs at the
-  requested size.
+  `hq.png`, `season.png`, `bracket.png`, `season-final.png`, `champion.png`
+  are PNGs at the requested size; `round.png` is checked when a won round with
+  another round after it occurred.
 - `the_hq_view_carries_the_bracket_shape_and_the_next_opponent` — the view's
   round count is the event's tiers, the first round has `16 / bots` matches and
   the next opponent is one of the AI teams.
@@ -230,9 +240,12 @@ asserts.
   opponent.
 - `ra2sim::career::tests::every_shipped_event_is_a_sixteen_entrant_bracket`,
   `a_loss_eliminates_from_the_event_but_not_the_season`,
-  `replaying_the_same_seed_reproduces_the_bracket` and
-  `save_reload_mid_season_restores_the_bracket_and_opponents` — the bracket
-  rules, the elimination rule, the deterministic replay and the mid-season save.
+  `a_final_loss_crowns_an_ai_and_stores_no_trophy`,
+  `replaying_the_same_seed_reproduces_the_bracket`,
+  `save_reload_mid_season_restores_the_bracket_and_opponents` and
+  `a_multi_round_event_writes_the_points_the_career_holds_after_every_round` —
+  the bracket rules, the elimination rule, the deterministic replay, the
+  mid-season save and the save-path invariant after every round.
 - `damage_appears_on_the_repairs_screen_and_completing_it_persists` — a damaged
   report → one row (`My Robot`, `0:30`), five six-second ticks → `0:00`, the
   save/reload is empty, money stays 0, and a healthy career opens the empty
@@ -273,6 +286,11 @@ asserts.
    length is the explicit `--seconds` (30 by default), and the evidence run
    prints its own decision at that limit. That decision is the `--match`
    evidence script (`plus.eliminatePlayer`, the tabletop path), not a rule.
+   The scripted loser is chosen from the live robot state (armour + battery +
+   air), so a short evidence match can eliminate **either** robot and the
+   season's points/trophies vary; the bracket draw does not. The season test
+   therefore requires only the frames every run writes and checks `round.png`
+   when a won round exists.
 7. **Robot snapshots.** A `.bot` stores a raw 128×128 TGA blob, not a file name
    the UI can resolve. The inventory draws the shipped `teamhq/nobot.bmp`
    silhouette in the `bot snapshot img` cell; the robot's own picture is unshown.

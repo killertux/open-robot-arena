@@ -897,6 +897,7 @@ impl Session {
         capture: &mut dyn FnMut(&mut Session, &str) -> Result<(), String>,
     ) -> Result<Outcome, String> {
         self.play_event(row, seconds, capture, FramePlan::single())
+            .map(|(outcome, _)| outcome)
     }
 
     /// Play every event on the schedule, in order, with deterministic
@@ -911,18 +912,20 @@ impl Session {
         self.set_event_seconds(seconds);
         let mut outcomes = Vec::new();
         let mut first_bracket = true;
+        let mut round_captured = false;
         for row in 0..self.career.schedule.len() {
             if matches!(self.career.phase, ra2sim::career::SeasonPhase::Complete) {
                 break;
             }
             let plan = FramePlan {
                 bracket: first_bracket.then_some("bracket.png"),
-                round: first_bracket.then_some("round.png"),
+                round: (!round_captured).then_some("round.png"),
                 award: Some("champion.png"),
                 season_hq: first_bracket,
                 ..FramePlan::season()
             };
-            let outcome = self.play_event(row, seconds, capture, plan)?;
+            let (outcome, captured_round) = self.play_event(row, seconds, capture, plan)?;
+            round_captured |= captured_round;
             println!("{}", outcome.summary());
             first_bracket = false;
             outcomes.push(outcome);
@@ -952,7 +955,7 @@ impl Session {
         seconds: f32,
         capture: &mut dyn FnMut(&mut Session, &str) -> Result<(), String>,
         plan: FramePlan<'_>,
-    ) -> Result<Outcome, String> {
+    ) -> Result<(Outcome, bool), String> {
         let event = *self
             .career
             .schedule
@@ -1186,29 +1189,32 @@ impl Session {
                 "the reloaded points {reloaded_points} are not {expected}"
             ));
         }
-        Ok(Outcome {
-            row,
-            event,
-            event_name: self.career.events[event].name.clone(),
-            arena: config.arena.clone(),
-            game_type: config.game_type.as_str(),
-            points_before,
-            points_after: reloaded_points,
-            event_points: record.points,
-            participation,
-            bonus,
-            rank_before,
-            rank_after: reloaded_rank,
-            won: record.won,
-            rounds_won: record.rounds_won,
-            rounds_lost: record.rounds_lost,
-            prize_model: prize.as_ref().map(|p| p.model.clone()),
-            prize_art: prize.as_ref().map(|p| p.art.clone()),
-            prize_description: prize.as_ref().map(|p| p.description.clone()),
-            reloaded_points,
-            reloaded_rank,
-            reloaded_prizes: self.career.prizes.len(),
-        })
+        Ok((
+            Outcome {
+                row,
+                event,
+                event_name: self.career.events[event].name.clone(),
+                arena: config.arena.clone(),
+                game_type: config.game_type.as_str(),
+                points_before,
+                points_after: reloaded_points,
+                event_points: record.points,
+                participation,
+                bonus,
+                rank_before,
+                rank_after: reloaded_rank,
+                won: record.won,
+                rounds_won: record.rounds_won,
+                rounds_lost: record.rounds_lost,
+                prize_model: prize.as_ref().map(|p| p.model.clone()),
+                prize_art: prize.as_ref().map(|p| p.art.clone()),
+                prize_description: prize.as_ref().map(|p| p.description.clone()),
+                reloaded_points,
+                reloaded_rank,
+                reloaded_prizes: self.career.prizes.len(),
+            },
+            round_shot,
+        ))
     }
 
     /// Tick the repair bench to empty and leave it. The bench is the same
@@ -2171,17 +2177,25 @@ mod tests {
         let mut session = Session::open(game.path()).unwrap();
         let before = session.career.season_points();
         let mut capture = |_: &mut Session, _: &str| Ok(());
-        // The save/reload test uses a DEATHMATCH event: the evidence decision
-        // leaves the player the win deterministically, while the KING OF THE
-        // HILL event's arena script can settle a short match on its own.
+        // The event's match outcomes are the engine's, not this test's: the
+        // evidence decision eliminates whichever robot is behind on armour,
+        // battery and air. A multi-round event therefore ends anywhere from
+        // the first to the final round. The save/reload assertions must not
+        // assume a win.
         let outcome = session
             .simulate(1, 0.3, &mut capture)
             .expect("the event flow runs");
         assert_eq!(outcome.points_before, before);
         assert!(outcome.points_after >= before);
-        // A match can be lost (the shipped brains and the box arena's script
-        // are not deterministic over a tenth of a second), so the prize is
-        // conditional; the save/read-back assertions are not.
+        println!(
+            "event: {} round(s) played (won {}, lost {}); record points {}; season {} -> {}",
+            outcome.rounds_won + outcome.rounds_lost,
+            outcome.rounds_won,
+            outcome.rounds_lost,
+            outcome.event_points,
+            outcome.points_before,
+            outcome.points_after
+        );
         let expected_prizes = usize::from(outcome.won);
         assert_eq!(outcome.prize_model.is_some(), outcome.won);
         assert_eq!(outcome.reloaded_points, outcome.points_after);
@@ -2200,18 +2214,38 @@ mod tests {
         }
         assert_eq!(second.career.history.len(), 1);
         let view = second.view().unwrap();
-        assert_eq!(view.standings[0].points, outcome.points_after);
+        // The standings are in rank order: row 0 is the leader, which need not
+        // be the player when an AI outscored them. Find the player's row.
+        let player_row = view
+            .standings
+            .iter()
+            .find(|standing| standing.team.name == second.career.team_name())
+            .expect("the player's standing");
+        assert_eq!(player_row.points, outcome.points_after);
         assert_eq!(view.prizes.len(), expected_prizes);
         assert_eq!(
             view.robots[0].name,
             session_robot_name(game.path()).unwrap()
         );
-        // The game's own table carries the season points and the schedule.
+        // The game's own table carries the same season points and event points
+        // the career holds; this is the save-path invariant, independent of
+        // the match's result.
         let table =
             ra2fmt::team::read_table(&ra2sim::career::player_table_path(game.path())).unwrap();
         let slot = second.career.player_slot;
-        assert_eq!(table.teams[slot].season_points(), outcome.points_after);
-        assert_eq!(table.teams[slot].schedule().len(), 9);
+        let disk = &table.teams[slot];
+        println!(
+            "written player record: season points {}, event points {}, event id {}, total events {}, schedule {}",
+            disk.season_points(),
+            disk.event_points(),
+            disk.event_index(),
+            disk.total_events(),
+            disk.schedule().len()
+        );
+        assert_eq!(disk.season_points(), second.career.season_points());
+        assert_eq!(disk.season_points(), outcome.points_after);
+        assert_eq!(disk.event_points(), second.career.player().event_points());
+        assert_eq!(disk.schedule().len(), 9);
         assert!(ra2sim::career::sidecar_path(game.path()).is_file());
     }
 
@@ -2242,12 +2276,30 @@ mod tests {
         .unwrap();
         options.simulate_season = true;
         run_headless(options).expect("the season run completes");
-        for name in ["season.png", "bracket.png", "round.png", "champion.png"] {
+        // Every run writes these: the HQ boot, the in-progress season screen,
+        // the first bracket, the completed season screen and the champion
+        // screen. `round.png` needs a won round with another round after it;
+        // the match outcomes are the engine's, so it is checked when present
+        // rather than demanded from every run.
+        for name in [
+            "hq.png",
+            "season.png",
+            "bracket.png",
+            "season-final.png",
+            "champion.png",
+        ] {
             let path = dir.join(name);
             let image = image::open(&path)
                 .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
                 .into_rgba8();
             assert_eq!(image.dimensions(), (640, 502), "{name}");
+        }
+        let round = dir.join("round.png");
+        if round.is_file() {
+            let image = image::open(&round)
+                .unwrap_or_else(|e| panic!("{}: {e}", round.display()))
+                .into_rgba8();
+            assert_eq!(image.dimensions(), (640, 502), "round.png");
         }
         let career = Career::load(game.path()).unwrap();
         assert_eq!(career.history.len(), 9, "nine events were played");
