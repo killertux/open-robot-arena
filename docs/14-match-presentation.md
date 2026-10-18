@@ -105,9 +105,9 @@ visible fields, and is covered by unit tests. It binds:
 | `battery bar` (52 px) | `robots[N].battery` |
 | `air bar` (52 px) | `robots[N].air` |
 | `armor bar` (26 px) | `robots[N].armor` |
-| `time` text | fight clock as `m:ss`, counting down from `MatchReport::duration_limit` (up when the match has "No limit") |
-| `count number` | `3`, `2`, `1` during the recovered 4.0 s countdown |
-| `camera textbox` | `watch` / `static` / `orbit` (`hud::set_camera`) |
+| `time` text | fight clock as `m:ss`, counting down from `MatchReport::duration_limit`; the group is hidden when the match has "No limit" (`0x416360` shows it only for a timed match) |
+| `count number` | `trunc(timer)` — `3`, `2`, `1`, one second each; the fight starts at 1.0 s remaining |
+| `camera textbox` | `Watch Cam` / `Static Cam` / `Orbit Cam` (or the arena's static name); `Chase Cam (ours)` while driving. Shown for 3.0 s after a change (`hud::set_camera`) |
 
 Visibility is the data's own note: `countdown group` is shown during
 `Countdown` and hidden otherwise; `time group` is hidden during `Countdown` and
@@ -132,6 +132,13 @@ port feeds are still the live component hitpoints: battery = the robot's
 robot with no battery or air tank reports 0. The mapping is named in
 `RobotReport`'s fields and in `hud.rs`; the geometry is now the binary's.
 
+The `chat group` opens on `\` (`0x475ee0` shows `+0x1b4` and focuses
+`+0x1b8`), the file's own note. The windowed loop implements the minimum:
+backslash opens/closes it, typed characters fill `chat entry`, Backspace edits,
+Enter/Escape close it. The submitted line is logged, not drawn in the
+`DisplayBox`, and nothing is sent. The original's close key and display-box
+retention remain unproven (`docs/24` §8).
+
 ## The camera
 
 `ra2.cfg`'s `DefaultCamera` is read with `ra2fmt::cfg`; the three strings are the
@@ -152,6 +159,14 @@ instead and cycles `chase → watch → orbit` (see above and `docs/21-play.md`)
 - **orbit** — *our rule*: one revolution every 24 s around the live midpoint at
   `clamp(separation × 0.85 + 6, 7, 44)`, elevated by 55% of the distance.
   `0x476f00` was not traced.
+
+The `camera textbox` is the binary's: `FUN_00477180` shows it for 3.0 s
+(`+0x17c = 3.0`, `0x4771a2`) and `0x4774f1` hides it. The names are the camera
+objects' own — `Watch Cam`, `Static Cam`, `Orbit Cam` (`0x6f1044`, `0x6f1038`,
+`0x6f102c`) — with an arena's `AddStaticCamera` name replacing the static
+default. This port uses those names (static shows the arena's `Static 1` for
+the box) and `Chase Cam (ours)` for the driving camera, which is not a binary
+mode. See `docs/24-match-shell.md` §5.
 
 ## Results
 
@@ -194,12 +209,13 @@ difference. Options is not wired.
 - **The pause dialog's identity**: the popup is identified by its root
   (`in game popup win`) and its notes; the confirmation dialog the quit path is
   said to show in the original is not reproduced.
-- **The countdown's per-second schedule inside the 4.0 s**: the 4.0 s timer and
-  the `3` sample are data; `3 → 2 → 1` with the last second holding `1` is our
-  reading.
-- **Which robot gets which status corner**: `0x4749c0` loads the four
-  `playerN status` groups, but the assignment was not traced. Robot 0 goes in
-  `player1 status`, robot 1 in `player2 status`, and 3/4 are hidden for a duel.
+- **The countdown's per-second schedule** is now measured (`docs/24` §3): the
+  timer is 4.0 s, the number is `trunc(timer)`, and the fight begins at 1.0 s
+  remaining. `3 → 2 → 1` each hold one second, so the visible countdown is three
+  seconds; the 4.0 timer is one second longer than the numbers use.
+- **Which robot gets which status corner** is measured (`docs/24` §2): meter
+  *i* binds to `player{i+1} status`, so robot 0 is top-left, 1 top-right,
+  2 bottom-left, 3 bottom-right. The four-slot test pins it.
 - **The text layout correction**: `ra2ui` now treats a `TextBox`'s `Alignment`
   as text alignment (the box keeps its authored `Position`) and places a
   `TextBox`/`Group`'s `Text` child by its baseline. This is measured against the

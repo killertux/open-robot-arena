@@ -270,8 +270,14 @@ The geometry and truncation are the binary's; the energy model is not.
    `param_5` (10.0); this port gates on the damage its model applies, which is
    the same value at our single damage point. If a weapon path ever passes raw
    and effective damage separately, the gate belongs on the raw value.
-4. **The time-out end** (`+0x17c` countdown to `0x418040`/`0x418770`) is still
-   not traced; the match length remains explicit config (`docs/11` §6).
+4. **The time-out end** is now traced (`docs/24-match-shell.md` §1): `+0xe0`
+   is the seconds remaining (`+0xdc * 60` at match init), it ticks only while
+   `+0x8e` (fighting) is set, and at zero `0x4133b3` calls `FUN_00418770(0)`.
+   Only alive robots count; a unique best wins and a shared best is a draw.
+   The earlier note that `+0x17c` was the match clock was wrong: `+0x17c` is
+   the **camera-name display timer** (`+0x178` = `camera textbox`). The match
+   object's constructor default is 3 minutes (`0x41276d`), not "No limit".
+   This port now implements that comparison and its tie rule.
 5. **The title's 1–2 px top clip** is the TextBox's own `ClipMode 1` plus the
    baseline (`_Position y = 19`, `fg_d24` ascent), not a covering quad. Fixing
    it would mean moving the title or ignoring the box's clip, both of which
@@ -298,3 +304,15 @@ M8.10 pass, points still zero); the after run is `/tmp/ra2-m11-final/results.png
 identical in both because
 the overdraw was the *sibling-order* treatment of the body, which this base
 does not do; the measured scene order and the C++ proof are §2.
+
+---
+
+## 6. M12: the rest of the shell
+
+`docs/24-match-shell.md` closes the remaining shell details: the match clock
+(`+0xe0`, excluding the countdown), the `FUN_00418770(0)` time-out and its
+tie/draw rule, the `playerN status` slot order, the exact countdown schedule
+(`trunc(timer)`, fight at 1.0 s remaining), the two result ids and the 3.5 s
+results delay, the camera textbox's names and 3-second window, and the chat
+group's backslash key. The points here are unchanged: the status fields' sources
+and the component damage scale remain the two unproven quantities.

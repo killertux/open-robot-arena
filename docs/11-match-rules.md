@@ -371,8 +371,10 @@ each int means and the copy into `Team+0x5c`; next reads are `0x5024e0`,
   `FUN_00489620`'s virtual (`component vtable +0x1c`) does to the raw damage —
   the armour/material scale — was not decoded; this port awards the damage its
   own model actually applies. The `2.0f` at `0x504d13`/`0x504d5f` is the flame
-  tick, not a scale. `+0x17c` is decremented in `0x4774f1` and the time widget
-  hidden at zero, but no path from there to `0x418040` or `0x418770` was found.
+  tick, not a scale. This pass did not find a path from `+0x17c` to
+  `0x418040`/`0x418770`; M12 did, and corrected the field: `+0x17c` is the
+  **camera-name timer** (`docs/24` §5), while the match clock is `+0xe0` and
+  its zero calls `0x418770` from `0x4133b3` (`docs/24` §1).
 - **Mode values and flags.** `GameWindow+0x9c` takes values 0–5 (`0x4145f0` is
   the raw getter); the mode names are not recovered. `+0x8c`, `+0x8d`, `+0x8e`,
   `+0x8f`, `+0x158` are only partly known (`+0x8f` = `isMatchOver`,
@@ -450,12 +452,6 @@ totals.
   scale applied to raw damage — was not decoded. This port scores the damage
   its own model applies, which is the same quantity at the write but not proven
   to equal the original's per-material scale.
-- The time dropdown's values (`0x4733f0`), `FUN_00412fc0`'s end-of-match timer
-  and the results handoff's two ids (`FUN_0047a220(0/1)`): not read. Match
-  length and the 3.5 s results delay are explicit config, not hidden constants;
-  a zero-point time-out is reported as a draw.
-- The clock's displayed value may include the countdown (`0x4759c0` "starts the
-  clock"); `MatchReport.duration` is fight time only.
 - Which robots "immobilized text" covers, and the bot preview image the result
   cell expects, are not established; the preview is empty and the text hidden.
 - The `EventNumBots` spawn loop (above the four start points) was not traced;
@@ -476,3 +472,39 @@ damage→points above, the status-meter fill (`0x476b60` → `0x4b3540`/`0x4b357
 order (the panel's `+Background` body is an attachment, drawn before the
 window; it is not a sibling with the body's `ChildOrder`). What each
 status field is made of and the component damage scale remain unproven.
+
+**M12 — the match shell (`docs/24-match-shell.md`).** The clock, time-out,
+slot mapping, countdown, results handoff, camera textbox and chat are now
+measured:
+
+- The clock is `+0xe0` seconds remaining, set to `+0xdc * 60` at match init
+  (`0x415e90`, minutes from `FUN_00414230`/`0x414230`), and it ticks only while
+  `+0x8e` (fighting) is set — **the countdown is not in the clock**. The
+  match object's constructor default is a **3-minute** timed match
+  (`0x41276d`); "No limit" is `FUN_00414230(0)` (`0x414238`).
+- At zero, `0x4133b3` calls `FUN_00418770(0)` (`0x418770`). Only **alive**
+  robots count. A unique positive highest score wins; a shared or zero best sets
+  `+0x74` and is a **draw** (5-5 and 0-0 alike). `TEAM MATCH` sums alive robots by team; a tie
+  is a draw, otherwise the first two robots of the winning side are the two
+  result ids (`FUN_0047a220(0/1)`). The time-out is checked before the
+  last-robot rule in `0x412fc0`.
+- `playerN status` is bound in creation order: meter 0 → `player1`,
+  1 → `player2`, 2 → `player3`, 3 → `player4` (`0x474abc`–`0x474c2d`). The
+  file's corners are 1 top-left, 2 top-right, 3 bottom-left, 4 bottom-right.
+- The countdown timer is 4.0 s (`0x475a97`), but the number is
+  `trunc(timer)` and the fight starts when it reaches 0 (`0x4775b1`–`0x47766b`).
+  The visible sequence is `3`, `2`, `1`, one second each; the fight starts at
+  1.0 s remaining. The previous "hold 1 for the last second" reading was
+  wrong.
+- `FUN_004170e0(p1, p2)` (`0x4170e0`) passes the two winner **row ids** to
+  `FUN_004884b0`; a row gets the winner text only if its id is `p1` or `p2`
+  and `+0x74 == 0`. The handoff writes the 3.5 s results delay
+  (`+0xec = 0x6a5788`, `0x41721c`); `0x412fc0` shows `match results window`
+  and `in game popup win` when it expires (`0x41309c`).
+- `camera textbox` is `+0x178`; `FUN_00477180` shows it for 3.0 s
+  (`+0x17c = 3.0`, `0x4771a2`) and `0x4774f1` hides it. The names are
+  `Watch Cam` / `Static Cam` / `Orbit Cam` (or the arena's own
+  `AddStaticCamera` name); `chase` is this client's mode, labelled as ours.
+- The chat group opens on `\` (`0x475ee0`); this port implements open/close
+  and a local entry only. The original's close key and display-box retention
+  are still unproven (see `docs/24` §8).
