@@ -601,7 +601,7 @@ impl ApplicationHandler for App {
                 if self
                     .session
                     .as_ref()
-                    .is_some_and(|session| session.player_controlled)
+                    .is_some_and(|session| session.player_controlled && !session.chat_open())
                     && is_drive_key(&event.physical_key) =>
             {
                 let pressed = event.state == ElementState::Pressed;
@@ -660,7 +660,41 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
+                let ctrl = self.modifiers.control_key();
+                // The chat entry owns the keyboard while it is open
+                // (`0x475ee0` opens it on `\`; the text field consumes the
+                // rest). Enter/Escape close it; nothing is sent anywhere.
+                if let Some(session) = &mut self.session {
+                    if session.chat_open() {
+                        match event.physical_key {
+                            PhysicalKey::Code(KeyCode::Escape | KeyCode::Enter) => {
+                                session.chat_submit();
+                            }
+                            PhysicalKey::Code(KeyCode::Backspace) => session.chat_backspace(),
+                            _ if !ctrl => {
+                                if let Some(text) = &event.text {
+                                    for c in text.chars() {
+                                        session.chat_type(c);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                        return;
+                    }
+                }
                 match event.physical_key {
+                    PhysicalKey::Code(KeyCode::Backslash) if self.session.is_some() => {
+                        if let Some(session) = &mut self.session {
+                            session.toggle_chat();
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
                     PhysicalKey::Code(KeyCode::Escape) => {
                         if self.hq.is_some() {
                             event_loop.exit();
