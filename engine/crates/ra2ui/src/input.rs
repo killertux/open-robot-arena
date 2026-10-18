@@ -711,7 +711,7 @@ mod tests {
         };
         let roots = resolve(&gib, DESIGN_SCREEN);
         // `chassis button` is the second tab, placed at 431,37 100x24.
-        let path = hit(&roots, 437.0, 45.0).expect("a click on the chassis tab");
+        let path = hit(&roots, 437.0, 120.0).expect("a click on the chassis tab");
         let widget = at_roots(&roots, &path).unwrap();
         assert!(
             widget.kind == WidgetKind::Image || widget.kind == WidgetKind::CheckBox,

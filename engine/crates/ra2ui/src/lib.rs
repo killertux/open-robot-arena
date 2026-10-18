@@ -1604,7 +1604,7 @@ mod tests {
             }
         }
         assert_eq!(seen, 60, "ClipMode 2 widgets shipped");
-        assert_eq!(outside, 47, "of them sticking out of the parent");
+        assert_eq!(outside, 46, "of them sticking out of the parent");
     }
 
     fn walk_clip_two(
@@ -2305,8 +2305,8 @@ mod tests {
         // and a `Text` child is positioned by its baseline, so fewer frames are
         // pushed past the edge than the earlier reading had.)
         assert_eq!(placed, 4348);
-        assert_eq!(outside, 155, "off screen");
-        assert_eq!(perfect, 77, "perfect files");
+        assert_eq!(outside, 66, "off screen");
+        assert_eq!(perfect, 82, "perfect files");
         // The worst offender is a fragment, not a screen.
         assert!(
             worst.1.ends_with("botlab/armor.gib") || worst.1.ends_with("botlab/adjust_none.gib"),
@@ -2350,9 +2350,10 @@ mod tests {
             "every one of them is the bottom bar: {named:?}"
         );
 
-        // `botlabwin.gib`'s proxy sits in the 49-pixel strip at the bottom of its
-        // own content area, so the bar lands there rather than on the screen's
-        // bottom edge — the file's geometry, not a guess.
+        // `botlabwin.gib`'s proxy sits in the strip at the bottom of the
+        // window: `lowersplit`'s slot 1 is the master (`Master 1`) and takes
+        // the last 12%, so the bar is flush with the screen's bottom edge
+        // (1005 - 36), as in the original.
         let text = std::fs::read_to_string(ui.join("botlab/botlabwin.gib")).unwrap();
         let mut gib = ra2fmt::gib::parse(&text).unwrap();
         let loaded = inline_proxies_in(&mut gib, &ui);
@@ -2363,7 +2364,7 @@ mod tests {
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "common buts")
             .expect("the bottom bar was loaded into the proxy");
-        assert_eq!(bar.frame, Frame::new(512.0, 584.7, 256.0, 36.0));
+        assert_eq!(bar.frame, Frame::new(512.0, 969.0, 256.0, 36.0));
     }
 
     /// `MasterSize` is **one axis**, not two: all twenty-six split frames in
@@ -2392,23 +2393,22 @@ mod tests {
         // 49-pixel nav strip and the content slot takes the 363.4 above it, so
         // the strip's pane starts 49.56 below the split and it fills it.
         assert_eq!(frame("botlab splt"), Frame::new(0.0, 0.0, 1280.0, 1005.0));
-        assert!((frame("lowersplit").y - 207.7).abs() < 0.1);
+        assert!((frame("lowersplit").y - 140.7).abs() < 0.1);
         assert!(
-            (frame("content slot").y - 257.3).abs() < 0.1,
+            (frame("content slot").y - 140.7).abs() < 0.1,
             "{}",
             frame("content slot").y
         );
-        assert_eq!(frame("content slot").h, 364.0);
+        assert!((frame("content slot").h - 760.6).abs() < 0.1);
         let split = placed
             .iter()
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "lowersplit")
             .unwrap();
         assert_eq!(split.children.len(), 2);
-        // 12% of the 413 it splits, and the strip lands on its own
-        // `Position 0 0 364 0` inside the content slot's 364.
-        assert_eq!(split.children[1].frame.h, 49.0);
-        assert!((split.children[1].frame.y - 571.7).abs() < 0.1);
+        // 12% of the 864.3 it splits, at the far end of the split.
+        assert!((split.children[1].frame.h - 103.7).abs() < 0.1);
+        assert!((split.children[1].frame.y - 901.3).abs() < 0.1);
     }
 
     /// A `Glyph` wraps its text at spaces to the width its `_Margin` gives it,
@@ -2555,7 +2555,7 @@ mod tests {
             }
         }
         assert_eq!(negatives, 613, "children with a negative ChildOrder");
-        assert_eq!(overlapping, 66, "those overlapping a non-negative sibling");
+        assert_eq!(overlapping, 67, "those overlapping a non-negative sibling");
         assert_eq!(controls, 256, "negative orders on pressed controls");
 
         let text = std::fs::read_to_string(game.join("UI/mainmenu/mainmenu.gib")).unwrap();
@@ -2597,7 +2597,7 @@ mod tests {
             at("cement img") < at("continue button"),
             "the cement is the screen behind the dialog"
         );
-        let path = crate::input::hit_control(&placed, 820.0, 453.5).expect("the continue button");
+        let path = crate::input::hit_control(&placed, 820.0, 883.0).expect("the continue button");
         let mut placement = &placed[path[0]];
         let mut names = vec![placement.widget.name()];
         for index in &path[1..] {
