@@ -49,6 +49,11 @@ pub struct Robot {
     pub health: Vec<f32>,
     /// Whether each component is still on the robot.
     pub attached: Vec<bool>,
+    /// Whether the component was torn off by a single blow larger than its
+    /// `fracture` threshold (`FUN_0045f2b0`'s second break rule). The repaired
+    /// state is the original's `Team+0x13c` fractured flag; a component that
+    /// merely ground down to zero hitpoints is detached but not fractured.
+    pub fractured: Vec<bool>,
     /// Natural mass × `mass_scale`.
     pub mass: f32,
     pub mass_scale: f32,
@@ -134,6 +139,7 @@ impl Robot {
         Ok(Robot {
             health: rig.components.iter().map(|c| c.hitpoints).collect(),
             attached: vec![true; n],
+            fractured: vec![false; n],
             parts,
             mass: rig.mass * mass_scale,
             mass_scale,
@@ -480,6 +486,9 @@ impl Robot {
         let fracture = self.rig.components[index].fracture;
         if self.health[index] <= 0.0 || (fracture > 0.0 && amount > fracture) {
             self.health[index] = self.health[index].max(0.0);
+            if fracture > 0.0 && amount > fracture {
+                self.fractured[index] = true;
+            }
             return true;
         }
         false

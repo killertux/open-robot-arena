@@ -202,6 +202,53 @@ pub enum WinReason {
     Timeout,
 }
 
+/// One component's damage in a match report.
+///
+/// The original keeps the same data per team in `Team+0x12c` (the component id,
+/// current and maximum hitpoints) and `Team+0x13c` (the fractured flag); the
+/// repairs window reads exactly those two lists (`docs/22-component-repairs.md`).
+/// [`hp`](Self::hp) is the component's remaining hitpoints and
+/// [`total_hp`](Self::total_hp) is its pristine maximum, so the screen's bar is
+/// `(total - current) / total`, the shipped `FUN_004d6480` expression.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComponentDamage {
+    /// The component's index in the robot design (the `.bot` component order).
+    pub index: usize,
+    /// The component definition's display name, or its class when it has none.
+    pub name: String,
+    /// The `.bot` class string (`SpinMotor`, `Wheel`, ...).
+    pub class: String,
+    /// The component definition's base class (`Weapon`, `SpinMotor`, ...).
+    pub base: String,
+    /// Remaining hitpoints.
+    pub hp: f32,
+    /// Pristine hitpoints.
+    pub total_hp: f32,
+    /// The component is no longer on the robot.
+    pub detached: bool,
+    /// A single blow larger than the component's `fracture` threshold tore it
+    /// off (`FUN_0045f2b0`'s second rule); this is the original's `damage.tga`
+    /// row.
+    pub fractured: bool,
+}
+
+impl ComponentDamage {
+    /// Whether the component needs a repair row: it lost hitpoints, came away,
+    /// or was fractured.
+    pub fn damaged(&self) -> bool {
+        self.detached || self.fractured || self.hp < self.total_hp
+    }
+
+    /// The remaining fraction the screen's health bar draws, `0.0..=1.0`.
+    pub fn fraction(&self) -> f32 {
+        if self.total_hp > 0.0 {
+            (self.hp / self.total_hp).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+}
+
 /// One robot's row in the result screen's data.
 #[derive(Clone, Debug)]
 pub struct RobotReport {
@@ -239,6 +286,10 @@ pub struct RobotReport {
     /// The result screen's `immobilized text`. The condition is not
     /// established for our damage model; it stays hidden rather than guessing.
     pub immobilized: bool,
+    /// Every component, in design order, with its remaining and pristine
+    /// hitpoints and its detached/fractured state. `Career::repairs_from_report`
+    /// turns the damaged ones into component-level repair rows.
+    pub components: Vec<ComponentDamage>,
 }
 
 /// The match's result: the shape `ra2ui::results` fills its four slots from.
@@ -536,6 +587,26 @@ impl Match {
                     eliminated: robot.eliminated,
                     winner: self.winners.contains(&i),
                     immobilized: false,
+                    components: robot
+                        .rig
+                        .components
+                        .iter()
+                        .enumerate()
+                        .map(|(component, c)| ComponentDamage {
+                            index: component,
+                            name: if c.name.is_empty() {
+                                c.class.clone()
+                            } else {
+                                c.name.clone()
+                            },
+                            class: c.class.clone(),
+                            base: c.base.clone(),
+                            hp: robot.health.get(component).copied().unwrap_or(0.0),
+                            total_hp: c.hitpoints,
+                            detached: !robot.attached.get(component).copied().unwrap_or(false),
+                            fractured: robot.fractured.get(component).copied().unwrap_or(false),
+                        })
+                        .collect(),
                 }
             })
             .collect();

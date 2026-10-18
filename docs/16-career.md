@@ -250,28 +250,42 @@ zero by default**; nothing in the game's files is written from it.
 
 ## 5. Repairs
 
+The full component-level recon, with the pseudocode and the remaining unknowns,
+is `docs/22-component-repairs.md`. In brief:
+
 * The damage is kept in the **team record's event block at `Team+0x12c`**,
-  not in the `.bot` file. `Team::save` writes it when `Robot In Event != -1`
-  (`0x4fb377`–`0x4fb37f`), and `Team::load` reads it (`0x4faee9`–`0x4faef1`).
-  `FUN_004df7f0` writes two lists of `(index, value)` pairs, which is the shape
-  of a component damage list; the exact component ids are not decoded here.
-* The repairs window (`teamhq\repairs.gib`, constructor `FUN_004d5de0`) binds
-  `repairs list`, `repair time` and `repair button`. `FUN_004d6480` draws the
-  damaged components, the `damage.tga` icon for fractured items (the 1.20
-  patch note) and a health bar computed as `(max - current) / max`.
+  not in the `.bot` file. It is two `std::map<int, …>` instances:
+  `Team+0x12c` maps a component id to `{current hp, max hp}` and
+  `Team+0x13c` maps the same id to the fractured flag. `Team::save` writes both
+  lists when `Robot In Event != -1` (`0x4fb377`–`0x4fb37f`), and `Team::load`
+  reads them (`0x4faee9`–`0x4faef1`); `FUN_004df7f0` writes a count and
+  `<id> <current> <max>` per node, then a count and `<id> <flag>`.
+* The repairs window (`teamhq\repairs.gib`, constructor `FUN_004d5de0`, open
+  `FUN_004d62a0`) binds `repairs list`, `repair time` and `repair button`.
+  `FUN_004d6480` draws one row per damaged component: the component's name, a
+  health bar computed as `(max - current) / max` scaled to 20 units, and the
+  shipped `UI\teamhq\damage.tga` icon when the `Team+0x13c` flag is 1 (the
+  1.20 patch note's fractured marker).
 * Repairing is a **progress bar over time**: `FUN_004d6e10` advances the bar,
-  and when `FUN_0058b470` reports it full it calls `FUN_004d7010`, which
-  decrements the damaged-component count and `FUN_005ff530` restores the
-  components. The `repair time` text is driven by the same list. No money is
+  and when `FUN_0058b470` reports it full it restores that one component
+  (`Team+0x12c`: current = max; `Team+0x13c`: flag = 0) and calls
+  `FUN_004d7010`/`FUN_005ff530`, which erase the selected component row and
+  decrement the model count. It is per component, not per robot. No money is
   charged.
-* The window passes `0x1e` (30) to the progress widget (`0x4d6334`), but the
-  unit (seconds, ticks) was not established. **Cost and time are explicit
-  config** (`CareerPolicy::repair_seconds`, `repair_cost`); the defaults are
-  30 and 0.
-* `MatchReport` carries per-robot `damage_taken`/`defeated`, not components.
-  `Career::repairs_from_report` therefore produces one repair per damaged robot
-  and names the robot as the component; the component-level list would need the
-  `+0x12c` decoder, which is not implemented.
+* The window passes `0x1e` (30) to `FUN_0058b150` with the **minutes** selector
+  (`FUN_0058b2f0`), so `repair time` starts at `00:30:00`; the screen's own
+  instructions say "You have 30 minutes to make repairs". The model therefore
+  defaults `CareerPolicy::repair_seconds` to 1800; `repair_cost` stays 0.
+* `MatchReport` now carries every component's `hp`/`total_hp` and its
+  `detached`/`fractured` state. `Career::repairs_from_report` produces one
+  row per damaged/detached/fractured component, grouped under its robot, with
+  the component index/name/class and the recorded hitpoints; a completed row
+  removes that component's damage. The binary's component id is the row key;
+  the port uses the sim's 0-based component index and names it as such.
+
+**What is still not proven:** the match routine that inserts into `Team+0x12c`,
+the exact derivation of the component id, and whether every row gets the same
+30-minute clock or a damage-scaled one (`docs/22-component-repairs.md` §3).
 
 ---
 
@@ -291,8 +305,9 @@ zero by default**; nothing in the game's files is written from it.
    the `N/A` sentinel and the minimum update are strong, the UI label is the
    evidence; **money is disproven**.
 6. Any **cash economy** or **repair cost**; none was found.
-7. The **repair time unit** and the component-level damage encoding in
-   `Team+0x12c`.
+7. The **match writer** of the component damage block, the exact component-id
+   derivation, and whether the 30-minute bench clock scales per row; the shape
+   of `Team+0x12c`/`Team+0x13c` is established (`docs/22-component-repairs.md`).
 8. The **season advance** path (`+0x98` increment, league reset); the model's
    `next_season` is explicit.
 9. Whether the original writes `AI/Teams.txt` on a career save. This port writes
@@ -402,10 +417,12 @@ shipped game; the game-dependent ones skip when it is absent):
 11. `the_career_sidecar_is_byte_stable` — save, load, save; identical sidecar.
 12. `the_sidecar_round_trips_every_text_field` — tabs and backslashes in a robot
     name survive.
-13. `a_damaging_match_leaves_a_repair_the_clock_completes_and_saves` — a
-    damaged report leaves one entry (cost 0), 12 s of 30 s elapsed round-trips
-    through the sidecar, the 18 s tick completes it, the save reloads empty and
-    no money was charged.
+13. `a_damaging_match_leaves_a_repair_the_clock_completes_and_saves` and
+    `component_damage_leaves_one_row_per_component_and_repairs_in_order` — two
+    damaged components leave two entries (cost 0), 40% of the 30-minute clock
+    round-trips through the sidecar, the remaining 60% completes one row, the
+    detached row keeps its name, the save reloads empty and no money was
+    charged.
 14. `engine/crates/ra2fmt/src/team.rs`'s
     `career_fields_are_typed_and_list_lines_round_trip` — the league line,
     prize/schedule list lines and the nine history lines parse and write

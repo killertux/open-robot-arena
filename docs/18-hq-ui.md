@@ -71,37 +71,44 @@ opponent until the event ends.
 ## ## The repair bench (`teamhq/repairs.gib`)
 
 After the award, the run opens the shipped repairs window when the match left a
-pending repair (the windowed flow also goes there on `continue button`); the
-headless evidence run opens it even when empty so the `0:00` state is in the
-frame set. It is the game's own screen (`FUN_004d5de0`) and the model is the
-only source:
+pending component repair (the windowed flow also goes there on `continue
+button`); the headless evidence run opens it even when empty so the `0:00` state
+is in the frame set. It is the game's own screen (`FUN_004d5de0`) and the model
+is the only source:
 
 | the screen's widget | what fills it | career call |
 |---|---|---|
-| `repairs list` (`Rows 16, Columns 2`) | one row per pending repair: the damaged component in the `Component` column, remaining / total and the bar's percentage in the `Time` column | `Career::repairs`, `Career::repair_progress` |
-| `repair time` | the longest remaining repair, `m:ss` (`0:30` for the policy's default) | `Career::repairs` |
-| `repair button` (`click to repair the selected item`) | advance the selected repair's clock by one six-second tick; a full bar completes it | `Career::advance_repair` |
+| `repairs list` (`Rows 16, Columns 2`) | one row per damaged component: the robot, the component class, `current/total` and the remaining clock, plus the shipped `teamhq\damage.tga` icon in a fractured row | `Career::repairs`, `Career::repair_progress` |
+| `repair time` | the longest remaining repair, `m:ss` (`30:00` for the policy's default 30 minutes) | `Career::repairs` |
+| `repair button` (`click to repair the selected item`) | advance the selected repair's clock by one six-second tick; a full bar completes that component only | `Career::advance_repair` |
 | `finished button` | leave the bench, reload the career and return to the HQ | `Career::load` |
 | `repairs 3d placeholder` | the screen's own dark backing (the robot preview is not composed) | — |
 
-**It is time, not a purchase.** `docs/16-career.md` §5: `FUN_004d6e10` advances
-a progress bar and `FUN_0058b470`/`FUN_004d7010` complete it; no cost string or
-subtraction path was recovered. The model's `Repair.cost` is 0 and
+**It is time, not a purchase.** `docs/16-career.md` §5 and
+`docs/22-component-repairs.md` §2: `FUN_004d6e10` advances a progress bar and
+`FUN_0058b470`/`FUN_004d7010` complete it; no cost string or subtraction path
+was recovered. The window's clock is `FUN_0058b150(0x1e,1)`, the minutes setter,
+so `repair time` starts at `00:30:00`; the screen's instructions say "You have
+30 minutes to make repairs". The model's `Repair.cost` is 0 and
 `Career::advance_repair` never touches `money`. `Repair.elapsed` is persisted in
 `Teams/career.dat` (`repair` line, fifth field), so a partially served repair
-survives a save; completing the bar removes the entry and the application saves
-the career immediately, which is what "the damage is cleared" means here.
+survives a save; completing the bar removes that component's row and the
+application saves the career immediately, which is what "the damage is cleared"
+means here.
 
 **Where the damage comes from.** `Career::repairs_from_report` runs in
-`award_match`: one entry per robot on the player's team with `damage_taken > 0`
-or `defeated`. The entry names the robot as its component: a `MatchReport` has
-no component damage, and `Team+0x12c`'s component list is not decoded.
+`award_match`: one entry per damaged, detached or fractured component on the
+player's robot(s). The entry carries the component's index in the design, its
+display name and class, the recorded current/maximum hitpoints and the
+`detached`/`fractured` state — the original's `Team+0x12c` (current/max) and
+`Team+0x13c` (fractured flag) lists. The rows are grouped under the robot.
 
 **The evidence knob.** The shipped match in this environment ends on the
 evidence decision (`plus.eliminatePlayer`, the tabletop path) and reports
 **zero damage** — the brains do not close on the opponent even in 20–60 s, so
-no real report produces a row. `--report-damage N` adds `N` damage to the
-player's `ReportRobot` after the match and before `award_match`; it is a
+no real report produces a row. `--report-damage N` writes N damage into the
+player's first damageable non-chassis component and tears off a second one, so
+the report hands the career two component rows, one of them fractured. It is a
 test/evidence input, not a game rule. The career then sees exactly what a
 damaging match would hand it. The normal run without the flag shows the
 screen's empty state.
@@ -111,18 +118,23 @@ screen's empty state.
 ```text
 fight ended at 3.02s, results screen is next
 report damage: +40 on "C.R.U.S.H." (evidence knob; the match dealt 0)
-  repairs: 1 entry (C.R.U.S.H.), clock 0:30
-  repair complete: C.R.U.S.H.
-  repairs done after 5 clock tick(s)
+  component 1 "Red Bird Spin Motor" [SpinMotor]: 360/400
+  component 2 "Red Bird Spin Motor" [SpinMotor]: 0/400 detached fractured
+  repairs: 2 component row(s), clock 30:00
+    C.R.U.S.H. / Red Bird Spin Motor [SpinMotor] hp 360/400 (90%) 30:00, intact
+    C.R.U.S.H. / Red Bird Spin Motor [SpinMotor] hp 0/400 (0%) 30:00, fractured (damage.tga)
+  repair complete: Red Bird Spin Motor
+  repair complete: Red Bird Spin Motor
+  repairs done after 600 clock tick(s)
 result: won true, rounds 1/1
-reloaded: 80 points, rank 1, 1 prize(s)
 ```
 
-Five six-second ticks fill the policy's 30-second bar; the fifth removes the
-entry and saves. `return_to_hq` reloads the career, so the `hq-after.png` frame
-is drawn from a save with no pending repair. Without `--report-damage`, the
-same run prints `repairs: 0 entries (), clock 0:00` and both frames show the
-empty list (`0:00`, no rows).
+The 30-minute clock at six seconds per tick is 300 ticks per component; the two
+rows take 600. The first completion removes only that component's row. The
+`return_to_hq` reloads the career, so the `hq-after.png` frame is drawn from a
+save with no pending repair. Without `--report-damage`, the same run prints
+`repairs: 0 component row(s), clock 0:00` and both frames show the empty list
+(`0:00`, no rows).
 
 ## Frames
 
@@ -136,8 +148,8 @@ empty list (`0:00`, no rows).
 | `match.png` | the live HUD at the first fight's midpoint |
 | `results.png` | `common/matchresults.gib` filled from the match report |
 | `award.png` | `event_winner.gib`: team, robot, rounds, points and the prize text |
-| `repairs-list.png` | `teamhq/repairs.gib`: the damaged robot's row, `0:30 / 0:30 (0%)`, the clock at `0:30` |
-| `repairs-done.png` | the same screen after five ticks: empty list, `0:00` |
+| `repairs-components.png` | `teamhq/repairs.gib`: one row per damaged component, `360/400 90% 30:00`, the fractured row carrying `damage.tga` |
+| `repairs-done.png` | the same screen after both clocks fill: empty list, `0:00` |
 | `hq-after.png` | the league after the award, read back from the save |
 | `hq-history.png` | the history after the award, with the stored trophy art |
 
@@ -226,7 +238,7 @@ rather than demanding it. `champion.png` is the season's last screen
   in memory and on disk, not the row-0 score: the standings are rank-ordered and
   an AI can lead after a lost round.
 - `a_headless_hq_run_writes_the_named_frames` — the nine PNGs at the requested
-  size, including `repairs-list.png` and `repairs-done.png`.
+  size, including `repairs-components.png` and `repairs-done.png`.
 - `a_headless_season_run_completes_and_writes_the_season_frames` — nine events
   through the real match engine, the career ends `Complete`, and
   `hq.png`, `season.png`, `bracket.png`, `season-final.png`, `champion.png`
@@ -246,15 +258,22 @@ rather than demanding it. `champion.png` is the season's last screen
   `a_multi_round_event_writes_the_points_the_career_holds_after_every_round` —
   the bracket rules, the elimination rule, the deterministic replay, the
   mid-season save and the save-path invariant after every round.
-- `damage_appears_on_the_repairs_screen_and_completing_it_persists` — a damaged
-  report → one row (`My Robot`, `0:30`), five six-second ticks → `0:00`, the
-  save/reload is empty, money stays 0, and a healthy career opens the empty
-  list.
-- `ra2ui::repairs::tests::the_list_is_the_careers_rows_and_the_empty_state_is_empty`
-  and `the_repair_button_and_a_row_are_hit_tested_by_the_shipped_widgets` — the
-  list/time fills, the empty state, the button/row hit test.
+- `damage_appears_on_the_repairs_screen_and_completing_it_persists` — a report
+  with two damaged components → two rows (`My Robot / Bent Axle [Axle]`,
+  `My Robot / Torn Spinner [SpinMotor]`, the second with `damage.tga`), 300
+  six-second ticks per 30-minute clock → the first row alone completes, then
+  the second, the save/reload is empty, money stays 0, and a healthy career
+  opens the empty list.
+- `ra2ui::repairs::tests::the_list_is_the_careers_rows_and_the_empty_state_is_empty`,
+  `a_component_row_names_the_robot_class_hp_and_fractured_icon` and
+  `the_repair_button_and_a_row_are_hit_tested_by_the_shipped_widgets` — the
+  list/time fills, the component columns and percentages, exactly one
+  `damage.tga` icon on the fractured row, the empty state, the button/row hit
+  test.
 - `ra2sim::career::tests::a_damaging_match_leaves_a_repair_the_clock_completes_and_saves`
-  — 40% elapsed round-trips, the completing tick clears the entry, no charge.
+  and `component_damage_leaves_one_row_per_component_and_repairs_in_order` — the
+  component row state round-trips at 40% elapsed, two components complete one
+  at a time, the detached component keeps its name, no charge.
 - `the_event_arena_and_game_type_come_from_the_data` — Combat Arena →
   Deathmatch, FlexTop → Tabletop, LumaZone → King of the Hill.
 
@@ -322,19 +341,21 @@ rather than demanding it. `champion.png` is the season's last screen
 14. **The event description clips.** `event_bracket.gib`'s description
     `DisplayBox` is authored at 400×50; long `Events.txt` descriptions wrap past
     it. The full text is in `Events.txt`.
-15. **The repair screen's component-level damage.** A `MatchReport` has no
-    component list, so a repair row names the robot; the `Team+0x12c` decoder
-    and the `damage.tga` fractured icon are not implemented. The screen's
-    `repairs 3d placeholder` is left as the screen's own dark backing, not the
-    robot preview.
+15. **The repair screen's component-level damage.** The rows, the component
+    index/name/class and hitpoints, and the `damage.tga` fractured icon are
+    implemented; the original's match-side writer of `Team+0x12c`/`+0x13c` and
+    the exact component-id derivation remain unproven
+    (`docs/22-component-repairs.md` §3). The screen's `repairs 3d placeholder`
+    is left as the screen's own dark backing, not the robot preview.
 16. **A live damaging match.** The shipped match in this environment reports
-    zero damage (the evidence knob above), so the repair flow is proven with a
-    `MatchReport` — the career's own input — rather than a match that closed on
-    damage. The repair time unit is the model's explicit 30 s; the original
-    passes `0x1e` to the progress widget but its unit was not established.
+    zero damage (the evidence knob above), so the component repair flow is
+    proven with a `MatchReport` — the career's own input — rather than a match
+    that closed on damage. The clock is the recovered 30 minutes
+    (`docs/22-component-repairs.md` §2); the progress bar's own advance rate is
+    the model's six-second UI tick.
 17. **The bench's canvas.** `repairs.gib` is authored at 800×600 and its bench
     is drawn at that size on the 1280×1005 shell; the arena backdrop does not
-    stretch to the rest of the target, so the lower part of `repairs-list.png`
+    stretch to the rest of the target, so the lower part of `repairs-components.png`
     is the clear colour. The screen's own art and widgets are unchanged.
 18. **The windowed `--hq` loop is not exercised here.** This environment has no
     display, so `run_hq` shares the same `Session` and frame composition as the

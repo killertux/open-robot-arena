@@ -28,8 +28,9 @@ pub use combat::{CombatConfig, Impact};
 pub use duel::{BotSetup, Debris, Duel, DuelCamera};
 pub use jolt::JoltBackend;
 pub use r#match::{
-    event_num_bots, Controller, GameType, Match, MatchConfig, MatchReport, MatchState, RobotEntry,
-    RobotReport, WinReason, COUNTDOWN_SECONDS, DEFAULT_RESULTS_DELAY, DEFAULT_STEP,
+    event_num_bots, ComponentDamage, Controller, GameType, Match, MatchConfig, MatchReport,
+    MatchState, RobotEntry, RobotReport, WinReason, COUNTDOWN_SECONDS, DEFAULT_RESULTS_DELAY,
+    DEFAULT_STEP,
 };
 pub use rig::{Component, MotorStats, RobotRig, Role, WeaponStats};
 pub use robot::Robot;
