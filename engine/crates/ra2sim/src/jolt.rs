@@ -168,6 +168,8 @@ pub struct JoltBackend {
     /// Every body's state at the start of the last step (raw id), which is what
     /// Havok's collision events see: they fire before the step resolves.
     pre_step: HashMap<u32, BodyState>,
+    /// The length of the last step.
+    last_dt: f32,
 }
 
 impl JoltBackend {
@@ -180,14 +182,13 @@ impl JoltBackend {
         // events recorded, only the settings callback; oxijolt installs the
         // native contact listener whenever one is set.
         let friction = Arc::new(RwLock::new(HashMap::new()));
-        // The game's own combine law is the default; `RA2_FRICTION_LAW=jolt`
-        // opts into Jolt's `sqrt(µ₁·µ₂)` for comparison. With Havok's law the
-        // 45-bot survey measures 38/45 against 39/45 under Jolt's: the two
-        // losses are a ~2 cm-low wheel on two bots (F1 mount residual), not
-        // the law. See F6/F1 in `docs/06-deferred-fidelity.md`.
+        // The recovered combine law (the Havok resolver's `computeImpulse`,
+        // `0x540820`: `mu = sqrt(muA * muB)`) is Jolt's own default, so the
+        // listener leaves it alone. `RA2_FRICTION_LAW=sum` opts into the older
+        // `sqrt(muA^2 + muB^2)` the Xtra documentation states, for comparison.
         let havok = std::env::var("RA2_FRICTION_LAW")
-            .map(|v| !v.eq_ignore_ascii_case("jolt"))
-            .unwrap_or(true);
+            .map(|v| v.eq_ignore_ascii_case("sum"))
+            .unwrap_or(false);
         // The listener is always installed: it also logs every contact point for
         // the damage model, and only applies the friction law when asked to.
         let contact_log = Arc::new(Mutex::new(Vec::new()));
@@ -206,6 +207,7 @@ impl JoltBackend {
             friction,
             contact_log,
             pre_step: HashMap::new(),
+            last_dt: 1.0 / 60.0,
         })
     }
 
@@ -255,6 +257,11 @@ impl JoltBackend {
                 .collect();
             return Shape::new_compound(&refs).map_err(|e| BackendError::Shape(format!("{e:?}")));
         }
+        if let ShapeDesc::OffsetCenterOfMass { shape, offset } = shape {
+            let inner = Self::build_shape(shape)?;
+            return Shape::new_offset_center_of_mass(&inner, Self::v(*offset))
+                .map_err(|e| BackendError::Shape(format!("{e:?}")));
+        }
         let build = || -> Result<Shape, oxijolt::prelude::ShapeError> {
             Ok(match shape {
                 ShapeDesc::Box { half_extents } => Shape::new_box(Self::v(*half_extents))?,
@@ -277,7 +284,9 @@ impl JoltBackend {
                     mesh
                 }
                 // Handled above; a compound never reaches this closure.
-                ShapeDesc::Compound(_) => unreachable!("compound handled before this closure"),
+                ShapeDesc::Compound(_) | ShapeDesc::OffsetCenterOfMass { .. } => {
+                    unreachable!("handled before this closure")
+                }
             })
         };
         build().map_err(|e| BackendError::Shape(format!("{e:?}")))
@@ -433,7 +442,12 @@ impl PhysicsBackend for JoltBackend {
         Self::un_v(self.world.gravity())
     }
 
+    fn last_dt(&self) -> f32 {
+        self.last_dt
+    }
+
     fn step(&mut self, dt: f32) -> StepInfo {
+        self.last_dt = dt;
         // The collision events of this step see the bodies as they are now.
         self.pre_step.clear();
         if let Ok(mut log) = self.contact_log.lock() {

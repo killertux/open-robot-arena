@@ -17,8 +17,7 @@ use std::io::Write;
 
 use glam::Vec3;
 use ra2sim::{
-    BotSetup, DriveScript, Duel, GameType, Match, MatchConfig, MatchState, RobotEntry, BOT_FORWARD,
-    DEFAULT_STEP,
+    BotSetup, DriveScript, Duel, GameType, Match, MatchConfig, MatchState, RobotEntry, DEFAULT_STEP,
 };
 
 const EVERY: usize = 6;
@@ -43,7 +42,7 @@ fn sample(duel: &Duel) -> Vec<(Vec3, f32, f32, f32, f32)> {
         .iter()
         .map(|r| {
             let tf = r.transform(&*duel.physics);
-            let f = tf.transform_vector3(BOT_FORWARD);
+            let f = tf.transform_vector3(r.rig.forward());
             let flat = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
             let heading = flat.x.atan2(flat.z);
             let speed = r.velocity(&*duel.physics).dot(flat);

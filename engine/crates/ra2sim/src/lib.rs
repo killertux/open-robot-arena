@@ -11,6 +11,7 @@ pub mod duel;
 pub mod hazards;
 pub mod immobility;
 pub mod jolt;
+pub mod massprops;
 pub mod r#match;
 pub mod montage;
 pub mod rig;

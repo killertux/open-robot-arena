@@ -56,6 +56,14 @@ pub enum ShapeDesc {
     /// Several shapes in one body, each with its own pose — how a body made of
     /// separately-positioned parts (a robot's welded components) is built.
     Compound(Vec<CompoundChild>),
+    /// `shape` with the body's centre of mass moved by `offset` (shape space).
+    /// Only the centre moves; the collision surface stays where it is. A robot's
+    /// body uses it to put the centre at the components' mass-weighted mean
+    /// instead of the collision hulls' volume-weighted one.
+    OffsetCenterOfMass {
+        shape: Box<ShapeDesc>,
+        offset: Vec3,
+    },
 }
 
 /// A body's membership in a robot's self-collision group.
@@ -364,6 +372,12 @@ pub trait PhysicsBackend {
 
     fn gravity(&self) -> Vec3;
     fn step(&mut self, dt: f32) -> StepInfo;
+    /// The length of the last [`step`](Self::step) (a step before any is 1/60 s).
+    /// A caller that turns a force into an impulse uses it as the next step's
+    /// length.
+    fn last_dt(&self) -> f32 {
+        1.0 / 60.0
+    }
     /// Whether two bodies touched during the last step (a default `false` lets
     /// simpler backends skip contact reporting).
     /// The contact points of the last [`step`](Self::step), one event per

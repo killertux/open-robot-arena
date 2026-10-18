@@ -236,3 +236,41 @@ Ours now ends at 21.0 s (LastRobot, winner robot 0) instead of timing out at 114
 
 Robots are still about 5x too slow, so no contact point reaches the original's >=10 gate and no damage
 is applied. The turn sign is now negative (left/right mirroring through the wiring) while the original's is positive.
+
+
+## After physics (fx/physics)
+
+Same harness (`tools/oracle/fidelity.py --gameplay`), Scout drive test
+(`drive-scout-box__live__000`). `fidtrace` now measures speed along the robot's own
+front (`rig.forward()`), not a fixed axis.
+
+| metric | original | baseline | after physics |
+|---|---:|---:|---:|
+| turn_rate_rad_s (in place) | 10.66 | -1.33 | 8.4 (-21 %) |
+| top_speed (m/s) | 11.12 | 2.26 | 11.5 (+3 %) |
+| t_to_90pct_s | 1.58 | 1.70 | 1.60 |
+| straight_distance_m | 15.42 | 2.77 | 15.9 (+3 %) |
+| speed_at_release | 10.86 | 0.10 | 11.5 |
+| coast_distance_m | 8.05 | 0.01 | 5.9 (-26 %) |
+
+Traction survey (45 stock bots, 3 s at full throttle, >= 2 m): 35/45 -> 43/45.
+Chassis hitpoints now read 1828 (Scout) and 2662 (ALARM), as in the original.
+
+What is recovered and what is fitted:
+
+* Recovered: chassis hitpoints = trunc(area x hardness) (`0x44d86d`); motor power
+  degradation with damage (`FUN_0045fa90`); friction combine mu = sqrt(muA mu B)
+  (`0x540820`, replaces the sum law); component masses from every rigid body of a
+  `.gmf` (a mini wheel is 17 kg, not 8); centre of mass at the mass-weighted mean
+  of the components.
+* Inferred from the original's rest heights: a 0.045 m skin on every robot hull
+  (0.9 x the Havok tolerance 0.1 halved once; Scout rests at y = -1.895 vs -1.884,
+  ALARM without its hammer at -1.80 vs -1.811), round wheel hulls.
+* Fitted (named constants in `robot.rs`): wheel drag rate 4.3 (per unit
+  `resistance`, times robot mass), sideways grip rate/cap, wheel coupling rate.
+  The thrust itself (motor torque / wheel radius, no friction limit, no speed
+  limit) is read off the drive trace: 2 x 560 N.m on 0.33 m wheels is 15.2 m/s^2
+  and the trace starts at 13.8 m/s^2.
+* Not done: the original's `g` power factor (robot +0x9c/+0xa0, taken as 1); the
+  hinge-servo `k` (refuted live, k = 1.02); gravity -12 and the 1/30 s step with
+  two substeps (recovered statically, not applied here).

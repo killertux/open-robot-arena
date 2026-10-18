@@ -290,6 +290,29 @@ pub struct JointInfo {
     /// `limits` are metres of travel, `rate` is m/s and the torques are forces.
     pub slider: bool,
     pub use_kind: JointUse,
+    /// A wheel's own numbers (`None` for every other joint).
+    pub wheel: Option<WheelDrive>,
+}
+
+/// What a wheel joint needs to push the robot along.
+///
+/// The original's wheels are **not** friction-limited: the Scout's own drive
+/// trace accelerates at 13.8 m/s² (1.4 g) at full throttle from a rest pose in
+/// which its wheels are not carrying its weight (the rest height matches a
+/// robot sitting on its battery and its tail, wheels clear of the floor), and
+/// its pitch does not change while it does so. A velocity motor and Coulomb
+/// friction cannot do that, so a wheel here is a *thrust* and a *drag*: see
+/// [`crate::robot::Robot`]'s `drive_wheel`.
+#[derive(Clone, Copy, Debug)]
+pub struct WheelDrive {
+    /// Rolling radius in metres: the farthest the wheel's collision hull reaches
+    /// from its axle (for the stock mini wheel, the 0.33 m `wheel_traction`
+    /// ring).
+    pub radius: f32,
+    /// The definition's `grip`.
+    pub grip: f32,
+    /// The definition's `resistance`.
+    pub resistance: f32,
 }
 
 /// One rigid body of the assembled robot: components welded together. A motor
@@ -683,6 +706,25 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             axis,
             slider: piston.is_some(),
             use_kind,
+            wheel: if use_kind == JointUse::Wheel {
+                comps[root].wheel.as_ref().map(|w| {
+                    let radius = comps[root]
+                        .hull_points
+                        .iter()
+                        .map(|p| {
+                            let rel = comps[root].local.transform_point3(*p) - pivot;
+                            (rel - axis * rel.dot(axis)).length()
+                        })
+                        .fold(0.0f32, f32::max);
+                    WheelDrive {
+                        radius: radius.max(0.05),
+                        grip: w.grip,
+                        resistance: w.resistance,
+                    }
+                })
+            } else {
+                None
+            },
         });
     }
 
@@ -772,13 +814,10 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             let mass = if let Some(m) = num(&lc.def, "mass") {
                 m
             } else {
-                let sum: f32 = lc
-                    .scene
-                    .objects
-                    .iter()
-                    .flat_map(|o| &o.rigid_bodies)
-                    .map(|rb| rb.mass)
-                    .sum();
+                // Every rigid body of the file, children included: a wheel's
+                // `wheelgroup` is a zero-mass parent whose `miniwheel` (9) and
+                // `wheel_traction` (8) children carry the mass.
+                let sum: f32 = lc.scene.rigid_bodies().iter().map(|rb| rb.mass).sum();
                 if sum > 0.0 {
                     sum
                 } else {

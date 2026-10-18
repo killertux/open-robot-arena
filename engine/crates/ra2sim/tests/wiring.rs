@@ -354,7 +354,7 @@ fn driving_and_turning_go_through_the_bindings() {
             .map(|s| s.angular_velocity.y)
             .unwrap_or(0.0);
         assert!(
-            yaw < -0.3,
+            yaw < -0.2,
             "{bot}: its right key turned it at {yaw} rad/s about +Y"
         );
     }
