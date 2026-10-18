@@ -649,7 +649,7 @@ Measured on the same 45-bot survey (box arena, arena start point, full throttle,
 
 The recorded 27/45 predates this harness; the same command measures 28/45 on
 the tree before the fixes (`Team9/Bot1` is the borderline robot at 2.09 m). The
-six that remain, with the measured cause:
+eight that remain, with the measured cause:
 
 | bot | travel | measured cause (lowest hull point vs the wheel line) |
 |---|---|---|

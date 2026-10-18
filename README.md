@@ -18,14 +18,15 @@ AI on an embedded CPython 3.12. It renders with `wgpu` (window or headless) and
 simulates with Jolt.
 
 The client, `ra2-app`, now boots the shipped shell, opens a real match from the
-exhibition screen and lets the player drive it, renders the game's HUD, results
-and music, builds and paints a robot in the bot lab and saves it, and runs a
-nine-event season in the team HQ with points, prizes and repairs that persist.
-It is still not a complete replacement for the original: the exhibition's
-robots and game-type tabs are not selectable, the workshop's baseplate
-placement and decal layers remain model-only, and repairs name the robot rather
-than the component. What is unresolved is named with its measurement rather
-than rounded off.
+exhibition screen with the players' own team/robot and game-type/arena choices,
+lets the player drive it, renders the game's HUD, results (with each robot's own
+snapshot) and music, builds and paints a robot in the bot lab and saves it, and
+runs a nine-event season in the team HQ with points, prizes and component-level
+repairs that persist. It is still not a complete replacement for the original:
+the weight-class filter and the time dropdown's option list are not in the data,
+the workshop's shift-mouse rotation and outline-to-mesh extrusion are not
+recovered, and the event's 3D prize scene is not composed. What is unresolved
+is named with its measurement rather than rounded off.
 
 ### M1 — assets render
 
@@ -46,7 +47,7 @@ A robot drops into an arena, drives on a scripted input timeline, collides with
 walls and movable props, and the run renders to a frame strip. The physics sits
 behind a `PhysicsBackend` trait; Jolt is the implementation. On the measured
 45-bot box-arena survey with the game's own friction law, **37 of 45 stock robots travel 2 m or more**. Caveat:
-the seven that remain are rest-pose weapons/props, two F1 wheel-height
+the eight that remain are rest-pose weapons/props, two F1 wheel-height
 residuals and one curved path, not the motor law or a global speed constant
 (F2/F4/F5); Havok's friction-combination law (F6) is now the default.
 The data is the game's: arena gravity, fixed collision geometry, per-body
@@ -172,7 +173,7 @@ The oracle is real: the original runs under the installed flatpak Wine 9.0, and
 **1.439/255** mean absolute channel difference (pointer masked); the windowed
 client's own route was captured and verified with synthetic X input. The traction
 survey rose from 28/45 to **37/45** after finding that Jolt was colliding each
-robot's parts with their own chassis; the seven remaining cases are measured
+robot's parts with their own chassis; the eight remaining cases are measured
 rest-pose contacts, two F1 wheel-height residuals and one curved path. Havok's
 friction-combination law is now the default (F6), the per-material damage scale
 is recovered (Metal 0.1, `ramplate1` 0.4, `rubber(0)` 0.0) and applied, the
@@ -207,31 +208,37 @@ Measured, not aspirational.
 * Booting the game's own `Scripts/Main.py`; running the 14 arenas, the shipped
   AI and the hazard zones.
 * A full match: spawn, countdown, HUD, cameras, pause, results, damage scoring
-  and the arena's own sounds, headless and in the client.
-* Building, painting, wiring, saving, reloading and testing a robot; the saved
-  file round-trips 57/57 shipped bots byte-identically.
-* A nine-event career: brackets, points, prizes, repairs, the game's own team
-  tables and a documented sidecar, surviving restart.
+  and the arena's own sounds, headless and in the client; a four-slot Battle
+  Royal and 2v2 Team Match, with each robot's own snapshot in the result cells.
+* Building, painting, wiring, saving, reloading and testing a robot; baseplate
+  placement, decal/layer paint and the chassis outline tools; the saved file
+  round-trips 57/57 shipped bots byte-identically.
+* A nine-event career: brackets, points, prizes, component-level repairs, the
+  game's own team tables and a documented sidecar, surviving restart.
+* The windowed client's own route captured with synthetic X input (menu →
+  exhibition → arena → match → pause), at **7.2 ms/frame** offscreen and
+  **0.057 ms/step** for the match.
 * The Linux tarball with the `ra2-app` client, its launcher, and its
   unpack-and-run smoke test.
 
 **Does not work yet**
 
-* Keyboard driving beyond the exhibition default: the robots tab, team
-  selection and the match-time dropdown are not selectable, the arena picker
-  scrolls only its six visible rows, and a game type is not validated against
-  the arena's own list.
-* The workshop's baseplate drag rotation (shift-mouse), texture-entire, the
-  game's outline→mesh extrusion/UV atlas, and the desktop's 3D preview of the
+* The exhibition's weight-class filter is not read, the time dropdown's option
+  list is empty in the shipped data (`--time`/`--seconds` replace it), and the
+  headless CLI names only slots 1 and 3 — slots 2/4 work in the window and take
+  the roster's next robot from the CLI.
+* The workshop's shift-mouse rotation, texture-entire, the game's
+  outline-to-mesh extrusion/UV atlas, and the desktop's 3D preview of the
   original.
-* Component-level repair (a repair row names the robot; `Team+0x12c` is not
-  decoded), the in-match robot preview image, and the event's 3D prize scene.
+* The event's 3D prize scene (`event_results.py`), the repairs screen's 3D
+  placeholder, and the match-side writer that fills `Team+0x12c`/`+0x13c` (the
+  bench reads and writes them; the match inserts a report-derived list).
 * Physical audio playback was not exercised; the click-sound call site is our
   mapping. Crowd fades are recorded, not performed.
 * macOS and Windows builds — documented, unverified. arm64, musl, static
   linking, Flatpak and AppImage are not built. Signing and notarisation are
   absent.
-* Some fidelity residues: seven stock robots still fail the traction survey
+* Some fidelity residues: eight stock robots still fail the traction survey
   (rest-pose contacts, two F1 wheel-height residuals, one curved path); the
   crush curve and collider re-bake are in, but the buckle silhouette and some
   old-version mount details remain measured rather than exact (F9/F11 in
