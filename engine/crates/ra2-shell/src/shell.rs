@@ -210,6 +210,13 @@ impl Shell {
         self.size
     }
 
+    /// Re-lay the shell out at a new screen size. The original lays its
+    /// screens out natively at the display resolution, so a resize changes the
+    /// layout, not a scale.
+    pub fn set_size(&mut self, size: [f32; 2]) {
+        self.size = size;
+    }
+
     /// The screen on display, relative to `UI`.
     pub fn screen_id(&self) -> String {
         match &self.screen {

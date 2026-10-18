@@ -16,7 +16,6 @@ use ra2_shell::{Shell, Step};
 
 use crate::audio::AudioSystem;
 use crate::frame::FrameRenderer;
-use crate::SHELL_SIZE;
 
 /// Apply a click script, in order, at the shell's own coordinates.
 pub fn apply_clicks(shell: &mut Shell, clicks: &[[f32; 2]]) -> Result<Vec<Step>, String> {
@@ -74,7 +73,7 @@ pub fn run(
     click_names: &[String],
     audio_report: bool,
 ) -> Result<(), String> {
-    let mut shell = Shell::boot(game, SHELL_SIZE)?;
+    let mut shell = Shell::boot(game, [size[0] as f32, size[1] as f32])?;
     println!(
         "booted {} from {} ({}x{})",
         shell.screen_id(),
