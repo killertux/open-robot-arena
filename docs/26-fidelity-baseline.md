@@ -167,3 +167,72 @@ Matches are not reproducible run to run. Findings (2026-10-18):
   not the RNG: the game's time source (frame dt under llvmpipe, `plus.getFPS()` ~17-80) and AI timers are
   wall-clock driven. `plus.setTimestep`/`setSubsteps` exist and were **not** tried. Consequence: compare
   distributions, not trajectories; scripted-input tests (the drive test) are the reproducible kind.
+
+## After wave 1 (fx/damage, fx/wiring, fx/render-core, fx/font merged)
+
+Measured with the same command on branch `fidelity`. MAE, before (baseline above) -> after.
+
+| fixture | renderer | before | after |
+|---|---|---:|---:|
+| mainmenu | app | 23.96 | 24.13 |
+| mainmenu | shell | 1.45 | 0.59 |
+| exhibition-settings | app | 54.81 | 21.26 |
+| exhibition-settings | shell | 49.06 | 16.52 |
+| exhibition-arena | app | 60.22 | 27.58 |
+| exhibition-arena | shell | 56.88 | 24.25 |
+| exhibition-arena-box | app | 51.17 | 25.50 |
+| exhibition-robots | app | 52.82 | 22.29 |
+| exhibition-robots | shell | 47.53 | 19.53 |
+| exhibition-deathmatch | app | 54.23 | 21.42 |
+| exhibition-deathmatch | shell | 48.72 | 17.25 |
+| teamhq-select | app | 18.60 | 18.85 |
+| teamhq-select | shell | 10.04 | 10.44 |
+| teamhq-inventory | app | 33.14 | 33.52 |
+| teamhq-inventory | shell | 26.31 | 26.70 |
+| teamhq-standings | app | 49.86 | 50.15 |
+| teamhq-standings | shell | 44.38 | 44.50 |
+| teamhq-events | app | 50.14 | 50.27 |
+| teamhq-events | shell | 44.70 | 44.79 |
+| teamhq-history | app | 30.28 | 30.65 |
+| teamhq-history | shell | 24.59 | 24.94 |
+| botlab-overview | app | 32.73 | 32.85 |
+| botlab-overview | shell | 28.59 | 28.46 |
+| botlab-chassis | app | 30.39 | 30.43 |
+| botlab-chassis | shell | 23.87 | 23.63 |
+| botlab-components | app | 32.90 | 32.95 |
+| botlab-components | shell | 26.01 | 25.83 |
+| botlab-wiring | app | 35.32 | 35.30 |
+| botlab-wiring | shell | 30.59 | 30.35 |
+| botlab-paint | app | 37.18 | 37.22 |
+| botlab-paint | shell | 30.10 | 29.88 |
+| match-countdown | app | 42.60 | 39.18 |
+| match-hud | app | 26.98 | 44.35 |
+| match-results | app | 44.49 | 56.53 |
+| **mean of 19** | app | 40.10 | 33.39 |
+| **mean of 15** | shell | 32.86 | 24.51 |
+
+Reading it: the shell path improved on every screen (font layout and borders: exhibition screens
+~50 -> ~17-24, mainmenu 1.45 -> 0.59). The app path improved less since it still resamples the
+1280x1005 layout. Regressions: match-hud 26.98 -> 44.35 and match-results 44.49 -> 56.53; the render-core
+left-handed view with per-material culling now shows the arena brightly lit from a different camera,
+where the original frame is nearly black, so the number moves with the camera/lighting, not the HUD.
+Exhibition settings: the mode artwork panel is empty in ours.
+
+### Gameplay after wave 1 (Scout vs ALARM)
+
+Ours now ends at 21.0 s (LastRobot, winner robot 0) instead of timing out at 114.8 s.
+
+| metric | before | after | original |
+|---|---:|---:|---:|
+| drive top_speed m/s | 2.26 | 2.31 | 11.12 |
+| turn_rate rad/s | -1.33 | -2.25 | 10.66 |
+| t_to_90pct s | 1.70 | 2.00 | 1.58 |
+| straight_distance m | 2.77 | 2.99 | 15.42 |
+| coast_distance m | 0.01 | 0.98 | 8.05 |
+| robot 0 speed_max | - | 1.39 | 9.19 |
+| robot 1 speed_max | - | 0.01 | 7.46 |
+| damage events | 0 | 0 | 8 |
+| hp_start (robots 0/1) | 300/350 | 300/350 | 1828/2662 |
+
+Robots are still about 5x too slow, so no contact point reaches the original's >=10 gate and no damage
+is applied. The turn sign is now negative (left/right mirroring through the wiring) while the original's is positive.
