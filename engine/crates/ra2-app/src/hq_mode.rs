@@ -1646,12 +1646,10 @@ pub fn event_screen(
         ra2ui::input::set_field(image, "_Filename", &event.art);
     }
     // The preview the bracket's own note names is the arena's, not the shipped
-    // `sample_arena.bmp` placeholder. `_Size` is the editor's unset canvas
-    // (1280×1005), which lets the renderer use the layout's full-screen frame
-    // rather than the 640×480 the placeholder was authored at.
+    // `sample_arena.bmp` placeholder. The image's layout `Size` is the full
+    // screen, which is what the renderer draws it at.
     if let Some(image) = find_mut_in(&mut gib, "background img") {
         ra2ui::input::set_field(image, "_Filename", &event.arena.1);
-        ra2ui::input::set_field(image, "_Size", "1280 0 1005 0");
     }
     set_value_in(&mut gib, "event title", &event.name);
     set_first_display(&mut gib, &plain_text(&event.description));

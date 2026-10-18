@@ -1888,13 +1888,11 @@ impl Builder {
                         };
                         ra2ui::cells::bind_art(&mut cell, "control img", art);
                         // `control_cell.gib` was authored at 415×273 and its
-                        // art files are 60×40; the renderer honours `_Size`, so
-                        // without this the cell draws the top-left corner of a
-                        // 415-pixel image and reads as a white square.
+                        // art files are 60×40; the image is drawn at its layout
+                        // `Size`, so it is set here.
                         if let Some(img) = workshop::find_mut(&mut cell, "control img") {
                             ra2ui::input::set_field(img, "Position", "3 0 15 0");
                             ra2ui::input::set_field(img, "Size", "60 0 40 0");
-                            ra2ui::input::set_field(img, "_Size", "60 0 40 0");
                         }
                         ra2ui::cells::bind_value(&mut cell, "control name", &control.name);
                         ra2ui::cells::bind_value(&mut cell, "control input", &control.key_label());

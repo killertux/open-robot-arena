@@ -139,12 +139,6 @@ impl Repairs {
     ) -> Result<Repairs, String> {
         let mut document = load(ui_root, SCREEN)?;
         fit_splits_in(&mut document);
-        // The window is authored against an 800×600 canvas; the arena image
-        // behind it (`background img`'s own note says so) is stretched to the
-        // shell's screen so the window is not floating over black.
-        if let Some(image) = find_mut_in_gib(&mut document, "background img") {
-            crate::input::set_field(image, "_Size", "1280 0 1005 0");
-        }
         let mut repairs = Repairs {
             document,
             rows: Vec::new(),
