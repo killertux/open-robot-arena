@@ -17,6 +17,10 @@ pub struct Args {
     pub help: bool,
     /// `--match`: play a `ra2sim::match::Match` instead of the shell.
     pub match_mode: bool,
+    /// `--play`: the exhibition flow, with robot 0 driven by `--drive`.
+    pub play: bool,
+    /// `--play --drive "0-2:1,0;2-4:1,1"`.
+    pub drive: Option<String>,
     /// `--hq`: boot the Team HQ and its career.
     pub hq: bool,
     /// `--hq --simulate-event N`: play schedule row N headlessly.
@@ -61,6 +65,8 @@ impl Default for Args {
             click_names: Vec::new(),
             help: false,
             match_mode: false,
+            play: false,
+            drive: None,
             hq: false,
             simulate_event: None,
             simulate_season: false,
@@ -83,6 +89,8 @@ pub fn usage() -> &'static str {
      \x20                [--click-names \"Name;Name;...\"] [--audio-report]\n\
      \x20      ra2-app --match [--seconds N] [--out DIR] [--quit-at N]\n\
      \x20                [--bots A.bot,B.bot] [--arena PATH] [--audio-report]\n\
+     \x20      ra2-app --play --drive \"0-2:1,0;2-4:1,1\" [--seconds N] [--out DIR]\n\
+     \x20                [--arena PATH] [--size WxH]\n\
      \x20      ra2-app --build [--start BOT] [--save-as NAME] [--seconds N] [--out DIR]\n\
      \x20                [--size WxH]\n\
      \x20      ra2-app --hq [--simulate-event N | --simulate-season] [--seconds N]\n\
@@ -96,6 +104,11 @@ pub fn usage() -> &'static str {
      in a window, or headlessly with --out, which writes countdown/fight/results\n\
      PNGs at the named moments and prints every state transition. In the window,\n\
      Escape pauses, C cycles the camera; the pause dialog resumes or quits to menu.\n\
+     \n\
+     --play starts the exhibition match from the shipped setup screen and drives\n\
+     robot 0 with --drive (fight-time seconds; throttle,steer). With --out it\n\
+     clicks Exhibition, Arena, the arena row, hazards off, Game Settings and Start\n\
+     Game, then writes play-setup.png, play-drive.png and play-results.png.\n\
      \n\
      --build opens the bot lab through the shipped route and edits a live model:\n\
      a palette click attaches a component at the model's mount, the armour grid\n\
@@ -111,17 +124,19 @@ pub fn usage() -> &'static str {
        --click-names S  semicolon-separated widget names, applied in order\n\
        --audio-report   print every audio play call (path, kind, gain, position)\n\
        --match          play a match instead of the shell\n\
+       --play           start the exhibition match from the shipped setup screen\n\
+       --drive SCRIPT   --play's robot 0 input: \"start-end:throttle,steer;...\"\n\
        --build          open the workshop (bot lab) as an editor\n\
        --start BOT      the .bot to open in --build (default: a stock chassis)\n\
        --save-as NAME   the design name the headless --build run types and saves\n\
-       --seconds N      fight length for --match; test length for --build (default 30/4)\n\
+       --seconds N      fight length for --match/--play; test length for --build\n\
        --simulate-event N  --hq: play schedule row N's whole event headlessly\n\
        --simulate-season   --hq: play the nine-event season and write the evidence\n\
        --report-damage N  --hq evidence knob: N damage in the player's match report\n\
-       --out DIR        write the match/build's PNG frames and exit\n\
+       --out DIR        write the match/play/build PNG frames and exit\n\
        --quit-at N      pause at N fight seconds, quit to the menu, write pause/menu PNGs\n\
        --bots A,B       two .bot paths for --match\n\
-       --arena PATH     arena script for --match (default Arenas/box.py)\n\
+       --arena PATH     arena script for --match/--play (default Arenas/box.py)\n\
        -h, --help       this text"
 }
 
@@ -150,6 +165,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             }
             "--audio-report" => parsed.audio_report = true,
             "--match" => parsed.match_mode = true,
+            "--play" => parsed.play = true,
+            "--drive" => parsed.drive = Some(next(&mut args, "--drive")?),
             "--hq" => parsed.hq = true,
             "--simulate-event" => {
                 let value = next(&mut args, "--simulate-event")?;
@@ -389,6 +406,32 @@ mod tests {
         .unwrap();
         assert!(season.simulate_season);
         assert!(season.simulate_event.is_none());
+    }
+
+    #[test]
+    fn the_play_flags_parse() {
+        let args = parse(
+            [
+                "--play",
+                "--drive",
+                "0-2:1,0;2-4:1,1",
+                "--seconds",
+                "6",
+                "--out",
+                "play",
+                "--arena",
+                "Arenas/box.py",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert!(args.play);
+        assert_eq!(args.drive.as_deref(), Some("0-2:1,0;2-4:1,1"));
+        assert_eq!(args.seconds, Some(6.0));
+        assert_eq!(args.out, Some(PathBuf::from("play")));
+        assert_eq!(args.arena, Some(PathBuf::from("Arenas/box.py")));
+        assert!(parse(["--drive".into()].into_iter()).is_err());
     }
 
     #[test]

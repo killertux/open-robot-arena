@@ -62,6 +62,18 @@ pub struct Step {
     pub point: [f32; 2],
 }
 
+impl Step {
+    /// The `Name` of the widget the click landed on, from the trace string the
+    /// shell writes (`Button "start game button"`). A nameless widget is
+    /// `None`; the class is still in [`Step::hit`].
+    pub fn hit_widget(&self) -> Option<&str> {
+        let start = self.hit.find('"')? + 1;
+        let rest = &self.hit[start..];
+        let end = rest.find('"')?;
+        Some(&rest[..end])
+    }
+}
+
 /// A screen written to a PNG.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shot {
@@ -80,6 +92,15 @@ pub struct Shell {
     size: [f32; 2],
     screen: Screen,
     trace: Vec<Step>,
+    /// The arena script the picker last selected (`box.py`). The choice
+    /// survives loading another content tab: the arena list and the game-type
+    /// tab share `content group`, so the list may not be on screen when Start
+    /// is pressed.
+    arena_choice: Option<String>,
+    /// The game type the picker last selected, in the original's spelling.
+    game_type_choice: Option<String>,
+    /// The arena's `hazard checkbox`, when the loaded arena script has one.
+    hazard_choice: Option<bool>,
 }
 
 impl Shell {
@@ -101,6 +122,9 @@ impl Shell {
             size,
             screen,
             trace: Vec::new(),
+            arena_choice: None,
+            game_type_choice: None,
+            hazard_choice: None,
         })
     }
 
@@ -198,6 +222,57 @@ impl Shell {
         &self.trace
     }
 
+    /// The arena script the picker selected, as `Arenas` writes it (`box.py`).
+    /// `None` means the screen has not selected a row; the caller's default is
+    /// `Arenas/box.py`.
+    pub fn arena_choice(&self) -> Option<&str> {
+        self.arena_choice.as_deref()
+    }
+
+    /// The game type the game-type tab selected, in the original's spelling
+    /// (`DEATHMATCH`), or `None` when that tab has never been loaded.
+    pub fn game_type_choice(&self) -> Option<&str> {
+        self.game_type_choice.as_deref()
+    }
+
+    /// The arena's `hazard checkbox`, when its fragment is loaded: `Some(true)`
+    /// is checked ("Hazards enabled").
+    pub fn hazard_choice(&self) -> Option<bool> {
+        self.hazard_choice
+    }
+
+    /// Click one row of a `ListBox`/`Grid`, by the list's own geometry.
+    ///
+    /// The point is the row's centre inside the placed list; a row below the
+    /// list's clip is not reachable, exactly as a mouse would find it. The
+    /// click then goes through [`Shell::click`], so the row selection is
+    /// recorded in the same document the frame draws.
+    pub fn click_list_row(&mut self, list_name: &str, row: usize) -> Result<Step, String> {
+        let placed = self.placements();
+        let list = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == list_name)
+            .ok_or_else(|| format!("no widget called {list_name:?} on {}", self.screen_id()))?;
+        let grid = ra2ui::Grid::from_widget(list.widget)
+            .ok_or_else(|| format!("{list_name:?} is not a list"))?;
+        if grid.row_height <= 0.0 {
+            return Err(format!("{list_name:?} states no row height"));
+        }
+        // The visible list, not the authored `ColWidths` sum: the arena list's
+        // 300+17 is clipped to the 159-pixel frame the scroller gives it.
+        let x = list.frame.x + list.frame.w / 2.0;
+        let y = list.frame.y + grid.row_height * row as f32 + grid.row_height / 2.0;
+        if let Some(clip) = list.clip {
+            if !clip.contains_point(x, y) {
+                return Err(format!(
+                    "row {row} of {list_name:?} is clipped out of view ({x:.1},{y:.1})"
+                ));
+            }
+        }
+        self.click(x, y)
+    }
+
     /// The placed tree, with the screen's own faces.
     pub fn placements(&self) -> Vec<Placement<'_>> {
         match &self.screen {
@@ -238,8 +313,65 @@ impl Shell {
         step.content = self.content_id();
         step.tab = self.tab().map(str::to_string);
         step.step = self.step().map(str::to_string);
+        self.remember_choices();
         self.trace.push(step.clone());
         Ok(step)
+    }
+
+    /// Keep the exhibition picker's choices across content-tab loads.
+    ///
+    /// The arena list and the game-type tab both live in `content group`, so
+    /// opening one replaces the other in the document. The screen's own
+    /// `_SelectedRow`, option group's `Selection` and checkbox's `Checked` are
+    /// still the record while each is loaded; this copies them when they are.
+    fn remember_choices(&mut self) {
+        let Screen::Page(page) = &self.screen else {
+            return;
+        };
+        let root = page.gib.widgets().next();
+        let Some(root) = root else {
+            return;
+        };
+        if let Some(list) = ra2ui::workshop::find(root, ra2ui::arenas::LIST) {
+            let selected = ra2ui::input::selected_row(list).and_then(|row| {
+                list.children
+                    .iter()
+                    .filter(|c| c.kind == ra2fmt::gib::WidgetKind::Text)
+                    .filter(|c| c.field("_Font").is_some())
+                    .nth(row)
+                    .and_then(|c| c.field("_Text"))
+                    .map(|f| f.text().to_string())
+            });
+            if let Some(name) = selected {
+                if let Ok(arenas) = ra2ui::arenas::all(&self.game) {
+                    if let Some(arena) = arenas.iter().find(|a| a.name == name) {
+                        self.arena_choice = Some(arena.script.clone());
+                    }
+                }
+            }
+        }
+        if let Some(group) = ra2ui::workshop::find(root, "game type optiongroup")
+            .filter(|g| g.kind == ra2fmt::gib::WidgetKind::OptionGroup)
+        {
+            if let Some(selection) = ra2ui::input::field_of(group, "Selection") {
+                let game_type = match selection {
+                    "deathmatch checkbox" => Some("DEATHMATCH"),
+                    "battle royal checkbox" => Some("BATTLE ROYAL"),
+                    "teams checkbox" => Some("TEAM MATCH"),
+                    "tabletop checkbox" => Some("TABLETOP"),
+                    "kingofhill checkbox" => Some("KING OF THE HILL"),
+                    _ => None,
+                };
+                if let Some(game_type) = game_type {
+                    self.game_type_choice = Some(game_type.to_string());
+                }
+            }
+        }
+        if let Some(hazard) = ra2ui::workshop::find(root, "hazard checkbox") {
+            if let Some(checked) = ra2ui::input::field_of(hazard, "Checked") {
+                self.hazard_choice = Some(checked == "true");
+            }
+        }
     }
 
     /// Click the named widget, at a point found by hit-testing where the layout
@@ -415,14 +547,67 @@ fn click_page(
     step: &mut Step,
 ) -> Result<Option<String>, String> {
     let plan = plan_page(page, fonts, size, x, y, step);
-    let option = {
+    // What the click changes inside the screen: an option-group member, a list
+    // row, or a standalone checkbox. All three are the data's own controls; the
+    // row geometry is the list's `RowHeight` and its `Sel Bar`.
+    let (option, row, checkbox) = {
         let placed = ra2ui::resolve_with(&page.gib, size, Some(fonts));
-        ra2ui::input::hit_control(&placed, x, y).and_then(|path| option_in(&chain(&placed, &path)))
+        let Some(path) = ra2ui::input::hit_control(&placed, x, y) else {
+            return Ok(None);
+        };
+        let chain = chain(&placed, &path);
+        let option = option_in(&chain);
+        let row = chain
+            .iter()
+            .rev()
+            .find(|p| p.widget.kind == ra2fmt::gib::WidgetKind::ListBox)
+            .and_then(|list| {
+                let grid = ra2ui::Grid::from_widget(list.widget)?;
+                if grid.row_height <= 0.0 {
+                    return None;
+                }
+                let index = ((y - list.frame.y) / grid.row_height).floor();
+                if index < 0.0 {
+                    return None;
+                }
+                let index = index as usize;
+                (index < ra2ui::input::row_count(list.widget))
+                    .then_some((list.widget.name().to_string(), index))
+            });
+        let checkbox = if option.is_none() {
+            chain
+                .iter()
+                .rev()
+                .find(|p| p.widget.kind == ra2fmt::gib::WidgetKind::CheckBox)
+                .map(|p| p.widget.name().to_string())
+        } else {
+            None
+        };
+        (option, row, checkbox)
     };
     if let Some((group, child)) = &option {
         for block in page.gib.blocks.iter_mut() {
             if let Block::Widget(root) = block {
                 ra2ui::input::select_option(root, group, child);
+            }
+        }
+    }
+    if let Some((list, index)) = &row {
+        for block in page.gib.blocks.iter_mut() {
+            if let Block::Widget(root) = block {
+                if let Some(widget) = ra2ui::workshop::find_mut(root, list) {
+                    ra2ui::input::select_row(widget, *index);
+                }
+            }
+        }
+    }
+    if let Some(name) = &checkbox {
+        for block in page.gib.blocks.iter_mut() {
+            if let Block::Widget(root) = block {
+                if let Some(widget) = ra2ui::workshop::find_mut(root, name) {
+                    let checked = ra2ui::input::field_of(widget, "Checked") == Some("true");
+                    ra2ui::input::set_state(widget, !checked);
+                }
             }
         }
     }

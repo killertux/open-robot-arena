@@ -23,6 +23,7 @@ pub mod hq_mode;
 pub mod hud;
 pub mod match_mode;
 pub mod options;
+pub mod play_mode;
 pub mod viewport;
 pub mod window;
 
@@ -90,6 +91,31 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
             Some(_) => hq_mode::run_headless(options),
             None => window::run_hq(options, args.audio_report),
         };
+    }
+    if args.play {
+        let out = args
+            .out
+            .clone()
+            .ok_or_else(|| "--play needs --out DIR (the headless exhibition run)".to_string())?;
+        let seconds = args.seconds.unwrap_or(play_mode::DEFAULT_SECONDS);
+        if !(seconds.is_finite() && seconds > 0.0) {
+            return Err(format!("--seconds must be positive, got {seconds}"));
+        }
+        let arena_script = args.arena.as_ref().map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("box.py")
+                .to_string()
+        });
+        let options = play_mode::Options {
+            game,
+            drive: args.drive.clone().unwrap_or_default(),
+            seconds,
+            out,
+            size: args.size,
+            arena_script,
+        };
+        return play_mode::run_headless(&options).map(|_| ());
     }
     if args.match_mode {
         let options = match_mode::Options::new(

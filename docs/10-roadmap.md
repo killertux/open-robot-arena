@@ -140,7 +140,7 @@ menu music and button sounds; quit and relaunch with the window where you left i
 | # | Work item | Lands in |
 |---|---|---|
 | M7.1 | ✅ `ra2-app` binary: `winit` window + `wgpu` surface, reusing `ra2-render`'s UI pipeline (offscreen path preserved for tests) | new crate `engine/crates/ra2-app` |
-| M7.2 | ✅ Input: mouse position (the shell's `PtInRect`/hover/click order), keyboard (Esc, arrows/Tab for focus), a bindings table; hit-testing already exists in `ra2ui::input` *(mouse mapping and Esc are in; arrows/Tab and the bindings table remain)* | `ra2-app`, `ra2ui::input` |
+| M7.2 | ✅ Input: mouse position (the shell's `PtInRect`/hover/click order), keyboard (Esc, arrows/Tab for focus), a bindings table; hit-testing already exists in `ra2ui::input` *(mouse mapping, Esc and the match's driving keys are in — `W`/`S`/`Up`/`Down` throttle, `A`/`D`/`Left`/`Right` steer, release centres, `C` cycles; arrows for shell focus and the general bindings table remain)* | `ra2-app`, `ra2ui::input` |
 | M7.3 | ✅ The loop: fixed 50 ms update, present at vsync, resize, DPI, fullscreen/windowed *(the fixed tick, Fifo present, resize and DPI are in; a fullscreen toggle remains)* | `ra2-app` |
 | M7.4 | ◐ Screen stack: move `ra2-shell`'s `nav` into a `Flow` the app drives; keep the scripted route runner as the headless entry *(the app and the headless path now drive one shared frame loop; `nav` has not yet moved into a `Flow`)* | `ra2-shell::nav` → shared |
 | M7.5 | **done** — Audio: `ra2-audio` decodes/plays MP3+WAV, 2D/3D, maps music to the three screen groups and applies the `ra2.cfg` volume law; the client switches tracks per shell screen, plays `Sounds/button_click.wav` on an activating shell click, and drains `ra2script`'s sound requests at the match camera each tick (including the arena's own `DoIntro` when `ArenaIntros=1`) *(a physical output device was not exercised; crowd fades remain deferred)* | `ra2-audio`, `ra2script::plus`, `ra2-app::audio` |
@@ -183,9 +183,19 @@ in the game's own script.
 | M8.5 | **done** — spawn on the arena's start points in ID order with the model's facing; `EventNumBots` (2 or 4, anything else 4) for Battle Royal, four distinct spawns | `ra2sim::match` |
 | M8.6 | **done** — the match loop: fixed-step physics, the arena `Tick` at 0.25 s, the AI cadence, damage events, defeated/KO and elimination, the countdown and the clock; the live 3D frame composes into an arbitrary target (`Duel::render_to`) | `ra2sim::match`, `ra2sim::duel` |
 | M8.7 | **done** — HUD: `gamewindow.gib` + `statusmeters.gib` placed and driven by live state (four status groups, names, points, the three bars, the clock, the countdown, the camera name), with `hud()` unit tests | `ra2ui` + `ra2-app` |
-| M8.8 | **done** — camera: `watch`/`static`/`orbit` (the binary's own vocabulary) from `ra2.cfg`'s `DefaultCamera`; `C` cycles in the window. The C++ `watch`/`orbit` framing is named as ours | `ra2-app`, `ra2sim::duel` |
+| M8.8 | **done** — camera: `watch`/`static`/`orbit` (the binary's own vocabulary) from `ra2.cfg`'s `DefaultCamera`; `C` cycles in the window. A player-controlled match starts on the driving **chase** camera (our choice) and cycles `chase → watch → orbit`. The C++ `watch`/`orbit` framing is named as ours | `ra2-app`, `ra2sim::duel` |
 | M8.9 | **done** — results: `common/matchresults.gib`'s four slots filled from `MatchReport::results()` through `ra2ui::results`, the placed tree asserted, then the return to the menu | `ra2ui::results`, `ra2-app` |
 | M8.10 | **done (pause/quit)** — `Esc` opens `common/ingame_dialog.gib` (`in game popup win`); resume and quit, with a deterministic `--quit-at` run writing `pause.png`/`menu.png`. The arena intro remains unimplemented (`skip group` is hidden) | `ra2-app` |
+| M8.11 | **done (play)** — the shipped exhibition setup's `start game button` (note *"start the game"*) starts a player-controlled `Match`: the arena is the picker row (`Arenas/box.py` when none), the game type is the Game Settings tab's selection (`DEATHMATCH` when unopened, printed as the default), hazards follow the arena's `hazard checkbox`, and robot 0 is `Teams/Team0/Bot0.bot` against `AI/Team1/Bot0.bot`. `Match::step_with(&[Option<DriveInput>])` lets the window drive robot 0 (`None` = shipped AI), W/S/A/D and the arrows drive, and `Continue`/quit return to the setup screen. `--play --drive "…" --seconds N --out DIR` writes `play-setup.png`/`play-drive.png`/`play-results.png`. Robot/team selection and the match-time dropdown remain unwired (`docs/21-play.md`) | `ra2sim::match`, `ra2-app` |
+
+Landed: the exhibition screen is playable. Its Arena tab's rows select the
+arena, the Game Settings tab's option group selects the game type, and Start
+Game builds the match; the window drives robot 0 with `Match::step_with`. The
+headless evidence is `--play --drive "0-2:1,0;2-4:1,1" --seconds 8 --out DIR`
+(the run in `docs/21-play.md` moved `C.R.U.S.H.` 23.29 m and reached `Results`
+with `C.R.U.S.H.` 40 – Roly Poly 38). The robots tab, the match-time dropdown,
+arena scrolling and the arena→game-type filtering remain unwired and are named
+there.
 
 **Acceptance.** Headless: a scripted `Match` on the box arena, two AI bots,
 produces a winner and a filled result screen; the score sequence for

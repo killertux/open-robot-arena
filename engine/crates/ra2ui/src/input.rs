@@ -41,7 +41,7 @@
 
 use ra2fmt::gib::{Widget, WidgetKind};
 
-use crate::{draw_key, draw_order, is_control, Frame, Placement};
+use crate::{draw_key, draw_order, is_control, Frame, Grid, Placement};
 
 impl Frame {
     /// Whether a point is inside the rectangle. The right and bottom edges are
@@ -224,6 +224,77 @@ fn select_in(widget: &mut Widget, group: &str, child: &str, changed: &mut Vec<St
         .children
         .iter_mut()
         .any(|c| select_in(c, group, child, changed))
+}
+
+/// The index of the selected row of a `ListBox`/`Grid`, if one was selected.
+///
+/// The selection is the list's own `Sel Bar` (`Grid::selection` names its
+/// child `ID`), and the row is recovered from the bar's y divided by the
+/// list's `RowHeight`. This port also keeps `_SelectedRow` on the list so a
+/// selection at row 0 is distinguishable from the file's unselected bar; the
+/// field is our in-memory marker and is never written to disk.
+pub fn selected_row(list: &Widget) -> Option<usize> {
+    if let Some(field) = list.field("_SelectedRow") {
+        return field.number().map(|n| n.max(0.0) as usize);
+    }
+    let grid = Grid::from_widget(list)?;
+    let bar = selection_bar(list, &grid)?;
+    if !bar.visible() {
+        return None;
+    }
+    let y = bar.position()?.second.amount;
+    (grid.row_height > 0.0).then(|| (y / grid.row_height).max(0.0) as usize)
+}
+
+/// Select `row` in a `ListBox`/`Grid`: move its `Sel Bar` to the row, mark it
+/// visible, and remember the index. Returns `false` when the list is not a
+/// `Grid`/`ListBox` or the row has no text child.
+pub fn select_row(list: &mut Widget, row: usize) -> bool {
+    let Some(grid) = Grid::from_widget(list) else {
+        return false;
+    };
+    if grid.row_height <= 0.0 || row >= row_count(list) {
+        return false;
+    }
+    let y = grid.row_height * row as f32;
+    let Some(bar) = selection_bar_mut(list, &grid) else {
+        return false;
+    };
+    set_field(bar, "Position", &format!("0 0 {y} 0"));
+    set_field(bar, "Visible", "true");
+    set_field(list, "_SelectedRow", &row.to_string());
+    true
+}
+
+/// The text rows a list has drawn. The file's own `Sel Bar`/`High Bar` are not
+/// text, so they are not rows.
+pub fn row_count(list: &Widget) -> usize {
+    list.children
+        .iter()
+        .filter(|c| c.kind == WidgetKind::Text && c.field("_Font").is_some())
+        .count()
+}
+
+fn selection_bar<'a>(list: &'a Widget, grid: &Grid) -> Option<&'a Widget> {
+    grid.selection
+        .and_then(|id| {
+            list.children
+                .iter()
+                .find(|c| c.field("ID").and_then(|f| f.number()) == Some(id as f32))
+        })
+        .or_else(|| list.children.iter().find(|c| c.name() == "Sel Bar"))
+}
+
+fn selection_bar_mut<'a>(list: &'a mut Widget, grid: &Grid) -> Option<&'a mut Widget> {
+    let index = match grid.selection {
+        Some(id) => list
+            .children
+            .iter()
+            .position(|c| c.field("ID").and_then(|f| f.number()) == Some(id as f32)),
+        None => None,
+    }
+    .or_else(|| list.children.iter().position(|c| c.name() == "Sel Bar"))?;
+    list.children.get_mut(index)
 }
 
 /// A widget's field as text.

@@ -16,6 +16,7 @@ use ra2_render::ui::UiRenderer;
 use ra2_render::Renderer as MeshRenderer;
 use ra2_shell::Shell;
 use ra2sim::r#match::MatchState;
+use ra2sim::DriveInput;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -592,6 +593,27 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            // The driving keys change the player's input on press *and*
+            // release: releasing W/S/A/D (or the arrows) centres the axis. The
+            // match still steps at its own fixed cadence; this only changes the
+            // value sampled at the next tick.
+            WindowEvent::KeyboardInput { event, .. }
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.player_controlled)
+                    && is_drive_key(&event.physical_key) =>
+            {
+                let pressed = event.state == ElementState::Pressed;
+                if let Some(session) = &mut self.session {
+                    let mut input = session.drive();
+                    apply_drive_key(&event.physical_key, pressed, &mut input);
+                    session.set_drive(input);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if self.builder.is_some() && self.session.is_none() {
                     let ctrl = self.modifiers.control_key();
@@ -832,6 +854,25 @@ impl ApplicationHandler for App {
                             }
                             _ => {}
                         }
+                        // The exhibition screen's own `start game button` note
+                        // says "start the game"; it is not a shell link. Build
+                        // the match from the choices the screen has selected.
+                        if step.hit_widget() == Some(crate::play_mode::START_BUTTON) {
+                            match crate::play_mode::session_from_shell(
+                                self.shell.game(),
+                                &self.shell,
+                                None,
+                            ) {
+                                Ok((session, _)) => {
+                                    ra2script::set_paused(false);
+                                    self.session = Some(session);
+                                }
+                                Err(error) => {
+                                    self.fail(event_loop, error);
+                                    return;
+                                }
+                            }
+                        }
                         let screen = self.shell.screen_id();
                         if Options::is_screen(&screen) {
                             if let Some(document) = self.shell.document_mut() {
@@ -887,5 +928,35 @@ impl ApplicationHandler for App {
             }
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_update));
+    }
+}
+
+/// The keys that drive robot 0: W/S or Up/Down for throttle, A/D or
+/// Left/Right for steer.
+fn is_drive_key(key: &PhysicalKey) -> bool {
+    matches!(
+        key,
+        PhysicalKey::Code(
+            KeyCode::KeyW
+                | KeyCode::KeyS
+                | KeyCode::KeyA
+                | KeyCode::KeyD
+                | KeyCode::ArrowUp
+                | KeyCode::ArrowDown
+                | KeyCode::ArrowLeft
+                | KeyCode::ArrowRight
+        )
+    )
+}
+
+/// Apply a driving key edge. Press sets the axis to ±1; release centres it.
+fn apply_drive_key(key: &PhysicalKey, pressed: bool, input: &mut DriveInput) {
+    let value = if pressed { 1.0 } else { 0.0 };
+    match key {
+        PhysicalKey::Code(KeyCode::KeyW | KeyCode::ArrowUp) => input.throttle = value,
+        PhysicalKey::Code(KeyCode::KeyS | KeyCode::ArrowDown) => input.throttle = -value,
+        PhysicalKey::Code(KeyCode::KeyA | KeyCode::ArrowLeft) => input.steer = -value,
+        PhysicalKey::Code(KeyCode::KeyD | KeyCode::ArrowRight) => input.steer = value,
+        _ => {}
     }
 }

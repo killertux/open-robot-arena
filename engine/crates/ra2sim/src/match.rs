@@ -385,6 +385,17 @@ impl Match {
 
     /// Advance one fixed step (`MatchConfig::dt`, the existing duel's step).
     pub fn step(&mut self) {
+        self.step_with(&[]);
+    }
+
+    /// Advance one fixed step with per-robot player inputs.
+    ///
+    /// `inputs[i]` is `Some(input)` for a robot the player drives and `None`
+    /// for a robot on the shipped AI. The inputs are ignored during the
+    /// countdown and after the fight, and are sampled once per fixed step
+    /// during `Fight` — the same cadence the physics uses. An empty slice is
+    /// [`Match::step`], the AI-versus-AI match.
+    pub fn step_with(&mut self, inputs: &[Option<DriveInput>]) {
         let dt = self.config.dt;
         match self.state {
             MatchState::Setup => self.state = MatchState::Countdown,
@@ -405,7 +416,7 @@ impl Match {
                 }
             }
             MatchState::Fight => {
-                self.duel.step(dt);
+                self.duel.step_with(inputs, dt);
                 self.score_hits();
                 self.clock += dt;
                 if let Some(reason) = self.end_reason() {

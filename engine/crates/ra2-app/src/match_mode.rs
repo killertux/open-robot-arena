@@ -26,7 +26,7 @@ use ra2_render::ui::{UiAssets, UiRenderer, UiScene};
 use ra2_render::Renderer;
 use ra2fmt::gib::{Block, Gib, Widget};
 use ra2sim::r#match::{Match, MatchConfig, MatchReport, MatchState, RobotEntry};
-use ra2sim::{DuelCamera, GameType};
+use ra2sim::{DriveInput, Duel, DuelCamera, GameType};
 
 use crate::hud;
 use crate::SHELL_SIZE;
@@ -35,6 +35,13 @@ use crate::SHELL_SIZE;
 /// use.
 pub const ARENA: &str = "Arenas/box.py";
 pub const BOTS: [&str; 2] = ["AI/Team1/Bot0.bot", "AI/Team6/Bot2.bot"];
+/// The exhibition player's robot: the career/team table's team 0, robot 0.
+pub const PLAYER_BOT: &str = "Teams/Team0/Bot0.bot";
+/// The exhibition opponent: the first shipped AI team's first robot.
+pub const OPPONENT_BOT: &str = "AI/Team1/Bot0.bot";
+/// The arena picker's default when no row is selected (the game's own
+/// `Events.txt` name for `box.py` is `Combat Arena`).
+pub const DEFAULT_ARENA_SCRIPT: &str = "box.py";
 /// How long the offscreen evidence fight runs before its scripted decision.
 pub const DEFAULT_SECONDS: f32 = 30.0;
 
@@ -122,12 +129,40 @@ pub fn camera_from_cfg(game: &Path) -> Result<DuelCamera, String> {
         .ok_or_else(|| format!("{name:?} in {} is not watch/static/orbit", path.display()))
 }
 
+/// The driving camera: behind the player's heading, scaled to the robot.
+///
+/// This is **our choice**, not one of the binary's three config cameras
+/// (`watch`/`static`/`orbit`): a chase frame keeps the robot the player is
+/// steering at a readable size, and `C` still reaches the shipped vocabulary.
+pub fn chase_camera(duel: &Duel, robot: usize) -> DuelCamera {
+    let robot = robot.min(duel.robots.len().saturating_sub(1));
+    let size = duel
+        .robots
+        .get(robot)
+        .map(|r| ((r.rig.max - r.rig.min) * 0.5).length())
+        .unwrap_or(1.0)
+        .max(0.4);
+    DuelCamera::Chase {
+        robot,
+        distance: size * 2.6 + 0.8,
+        height: size * 1.9 + 0.5,
+    }
+}
+
 /// A live match plus its screens. The window loop and the offscreen runner
 /// share this, so the pictures cannot diverge.
 pub struct Session {
     pub matched: Match,
     pub camera: DuelCamera,
     pub paused: bool,
+    /// Whether this match has a local player driving robot 0. The exhibition
+    /// flow sets it; `--match` and the HQ events are AI-versus-AI and leave it
+    /// false, so their camera sequence stays the config's three modes.
+    pub player_controlled: bool,
+    /// The robot the player drives (0 in this client).
+    pub player_robot: usize,
+    /// The keyboard input sampled at the latest tick.
+    player_input: DriveInput,
     /// Accumulates wall-clock time for [`Session::advance`].
     accumulator: f32,
     /// The pause dialog's widgets, loaded once.
@@ -252,7 +287,55 @@ impl Session {
         // The shipped hazards move the box fight around; the duel's own tests
         // turn them off for the deterministic presentation run as well.
         std::env::set_var("RA2_HAZARDS", "0");
-        let camera = camera_from_cfg(game)?;
+        Session::with_match_controlled(game, matched, false)
+    }
+
+    /// Start the exhibition match the shipped setup screen chose.
+    ///
+    /// The player's robot is robot 0 (`Teams/Team0/Bot0.bot` by default) and
+    /// the opponent is the first shipped AI team's first robot. `hazards` is
+    /// the arena picker's own `hazard checkbox`; `None` means the arena script
+    /// did not expose one and the environment is left alone. The environment
+    /// is read while the world is built, so this must happen before
+    /// [`Match::new`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn exhibition(
+        game: &Path,
+        arena: &Path,
+        game_type: GameType,
+        player_bot: &Path,
+        opponent_bot: &Path,
+        seconds: Option<f32>,
+        hazards: Option<bool>,
+    ) -> Result<Session, String> {
+        match hazards {
+            Some(true) => std::env::set_var("RA2_HAZARDS", "1"),
+            Some(false) => std::env::set_var("RA2_HAZARDS", "0"),
+            None => {}
+        }
+        let config = MatchConfig::new(
+            arena.to_string_lossy().to_string(),
+            game_type,
+            vec![
+                RobotEntry::ai(0, player_bot.to_string_lossy().to_string()),
+                RobotEntry::ai(1, opponent_bot.to_string_lossy().to_string()),
+            ],
+        )
+        .with_duration(seconds);
+        let matched = Match::new(config).map_err(|e| e.to_string())?;
+        Session::with_match_controlled(game, matched, true)
+    }
+
+    fn with_match_controlled(
+        game: &Path,
+        matched: Match,
+        player_controlled: bool,
+    ) -> Result<Session, String> {
+        let camera = if player_controlled {
+            chase_camera(&matched.duel, 0)
+        } else {
+            camera_from_cfg(game)?
+        };
         // The match shell starts the arena's own intro; `ArenaIntros` is the
         // shipped switch. The generator advances on the arena's `Tick`, so its
         // music, crowd and announcer requests reach the app's audio drain.
@@ -283,6 +366,9 @@ impl Session {
             matched,
             camera,
             paused: false,
+            player_controlled,
+            player_robot: 0,
+            player_input: DriveInput::default(),
             accumulator: 0.0,
             dialog,
             presentation,
@@ -313,6 +399,27 @@ impl Session {
         )
     }
 
+    /// Set the keyboard drive sampled at the next fixed step. A
+    /// player-controlled session feeds robot 0; an AI-only session ignores it.
+    pub fn set_drive(&mut self, input: DriveInput) {
+        self.player_input = input;
+    }
+
+    /// The input the next step will sample.
+    pub fn drive(&self) -> DriveInput {
+        self.player_input
+    }
+
+    /// Where robot `robot` is, in world units. `None` when the match has no
+    /// such robot.
+    pub fn robot_position(&self, robot: usize) -> Option<glam::Vec3> {
+        self.matched
+            .duel
+            .robots
+            .get(robot)
+            .map(|r| r.position(&*self.matched.duel.physics))
+    }
+
     /// One fixed simulation step, with the evidence script's decision at the
     /// configured length. A natural finish (a destroyed chassis) is left alone.
     pub fn step(&mut self) {
@@ -334,7 +441,13 @@ impl Session {
                 }
             }
         }
-        self.matched.step();
+        let mut inputs = vec![None; self.matched.duel.robots.len()];
+        if self.player_controlled {
+            if let Some(input) = inputs.get_mut(self.player_robot) {
+                *input = Some(self.player_input);
+            }
+        }
+        self.matched.step_with(&inputs);
     }
 
     /// Advance by wall-clock seconds at the match's own `dt`.
@@ -362,10 +475,21 @@ impl Session {
     }
 
     pub fn cycle_camera(&mut self) {
-        self.camera = match self.camera {
-            DuelCamera::Watch => DuelCamera::Static,
-            DuelCamera::Static => DuelCamera::Orbit { period: 24.0 },
-            _ => DuelCamera::Watch,
+        self.camera = if self.player_controlled {
+            // Driving starts in chase; `C` cycles chase → watch → orbit. The
+            // binary's config vocabulary is watch/static/orbit, so `chase` is
+            // this client's driving choice and is printed as such.
+            match self.camera {
+                DuelCamera::Chase { .. } => DuelCamera::Watch,
+                DuelCamera::Watch => DuelCamera::Orbit { period: 24.0 },
+                _ => chase_camera(&self.matched.duel, self.player_robot),
+            }
+        } else {
+            match self.camera {
+                DuelCamera::Watch => DuelCamera::Static,
+                DuelCamera::Static => DuelCamera::Orbit { period: 24.0 },
+                _ => DuelCamera::Watch,
+            }
         };
         println!("camera: {}", self.camera.name());
     }
@@ -515,6 +639,8 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
     let renderer = Renderer::new().map_err(|e| e.to_string())?;
     let ui = UiRenderer::new_for(renderer.device(), wgpu::TextureFormat::Rgba8Unorm);
     let target = Target::new(renderer.device(), options.size[0], options.size[1]);
+    let size = options.size;
+    let out = options.out.as_ref().unwrap();
 
     let mut session = Session::new(&options)?;
     let cfg = crate::options::read_cfg(&options.game);
@@ -552,7 +678,15 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
             if session.matched.state() == MatchState::Fight && session.matched.clock() >= quit_at {
                 session.paused = true;
                 ra2script::set_paused(true);
-                write_frame(&mut session, &renderer, &ui, &target, &options, "pause.png")?;
+                write_frame(
+                    &mut session,
+                    &renderer,
+                    &ui,
+                    &target,
+                    size,
+                    out,
+                    "pause.png",
+                )?;
                 let point = {
                     let dialog = session.dialog.clone();
                     let placed = ra2ui::resolve_with(
@@ -582,7 +716,8 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
                 &renderer,
                 &ui,
                 &target,
-                &options,
+                size,
+                out,
                 "countdown.png",
             )?;
             wrote_countdown = true;
@@ -594,7 +729,8 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
                 &renderer,
                 &ui,
                 &target,
-                &options,
+                size,
+                out,
                 "fight-first.png",
             )?;
             wrote_first = true;
@@ -608,7 +744,8 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
                 &renderer,
                 &ui,
                 &target,
-                &options,
+                size,
+                out,
                 "fight-mid.png",
             )?;
             wrote_mid = true;
@@ -632,7 +769,8 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
                     &renderer,
                     &ui,
                     &target,
-                    &options,
+                    size,
+                    out,
                     "fight-mid.png",
                 )?;
                 wrote_mid = true;
@@ -644,7 +782,8 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
                 &renderer,
                 &ui,
                 &target,
-                &options,
+                size,
+                out,
                 "fight-last.png",
             )?;
             wrote_last = true;
@@ -672,7 +811,8 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
                 &renderer,
                 &ui,
                 &target,
-                &options,
+                size,
+                out,
                 "results.png",
             )?;
             println!(
@@ -713,7 +853,7 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
     }
     println!(
         "wrote {} frame(s) to {}",
-        std::fs::read_dir(&out)
+        std::fs::read_dir(out)
             .map(|d| d.filter_map(Result::ok).count())
             .unwrap_or(0),
         out.display()
@@ -722,12 +862,13 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
     Ok(session.report())
 }
 
-fn write_frame(
+pub(crate) fn write_frame(
     session: &mut Session,
     renderer: &Renderer,
     ui: &UiRenderer,
     target: &Target,
-    options: &Options,
+    size: [u32; 2],
+    out: &Path,
     name: &str,
 ) -> Result<(), String> {
     let scene = session.scene()?;
@@ -736,8 +877,8 @@ fn write_frame(
         &target.color_view,
         &target.depth_view,
         wgpu::TextureFormat::Rgba8Unorm,
-        options.size[0],
-        options.size[1],
+        size[0],
+        size[1],
     )?;
     ui.render_over_to(
         renderer.device(),
@@ -745,15 +886,15 @@ fn write_frame(
         &scene,
         &target.color_view,
         wgpu::TextureFormat::Rgba8Unorm,
-        options.size[0],
-        options.size[1],
+        size[0],
+        size[1],
     )
     .map_err(|e| e.to_string())?;
     let pixels = renderer
-        .read_texture(&target.color, options.size[0], options.size[1])
+        .read_texture(&target.color, size[0], size[1])
         .map_err(|e| e.to_string())?;
-    let path = options.out.as_ref().unwrap().join(name);
-    write_png(&path, options.size, pixels)?;
+    let path = out.join(name);
+    write_png(&path, size, pixels)?;
     println!("  wrote {}", path.display());
     Ok(())
 }
@@ -790,15 +931,15 @@ fn write_png(path: &Path, size: [u32; 2], pixels: Vec<u8>) -> Result<(), String>
 }
 
 /// The offscreen colour target.
-struct Target {
-    color: wgpu::Texture,
-    color_view: wgpu::TextureView,
+pub(crate) struct Target {
+    pub(crate) color: wgpu::Texture,
+    pub(crate) color_view: wgpu::TextureView,
     _depth: wgpu::Texture,
-    depth_view: wgpu::TextureView,
+    pub(crate) depth_view: wgpu::TextureView,
 }
 
 impl Target {
-    fn new(device: &wgpu::Device, width: u32, height: u32) -> Target {
+    pub(crate) fn new(device: &wgpu::Device, width: u32, height: u32) -> Target {
         let color = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("match-color"),
             size: wgpu::Extent3d {

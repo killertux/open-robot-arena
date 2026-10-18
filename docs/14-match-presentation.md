@@ -1,4 +1,4 @@
-# 14 — The match on screen (M8.6–M8.10)
+# 14 — The match on screen (M8.6–M8.11)
 
 This is the presentation pass on top of `docs/11-match-rules.md` §7. The rules
 are `ra2sim::match`'s; this document is what is drawn and how to reproduce it.
@@ -44,6 +44,32 @@ The windowed path is the same composition, one frame per loop:
 the dialog's `resume button` resumes and `quit button` / `end match button`
 return to the shell's main menu. The window could not be exercised in this
 environment (no display), so its evidence is the shared offscreen path.
+
+## Starting from the exhibition screen
+
+The normal shell mode (no `--match`, `--build` or `--hq`) intercepts the
+shipped setup screen's `start game button` — its note is *"start the game"* —
+and starts a player-controlled match. The arena is the selected row of
+`exhibition/arena.gib` (`Arenas/box.py` when none is selected), the game type is
+the Game Settings tab's selection (`DEATHMATCH` when that tab was not opened,
+printed as the default), and hazards follow the arena's own `hazard checkbox`.
+The player is `Teams/Team0/Bot0.bot` (robot 0) against
+`AI/Team1/Bot0.bot`; the robots tab is not selectable yet.
+
+The shell stays on `exhibition/exhib_setup.gib` underneath the match, so the
+results screen's `Continue` and the pause dialog's `quit button` return to the
+setup screen, not the main menu. `docs/21-play.md` is the full flow, the keys,
+the driving camera and the `--play` evidence run.
+
+## Driving
+
+A player-controlled match starts with `DuelCamera::Chase { robot: 0, … }`:
+**this is our choice**, not one of the binary's three config cameras. `W`/`S`
+(or Up/Down) set throttle ±1 and `A`/`D` (or Left/Right) set steer ∓1; releasing
+an axis centres it. The input is sampled once per fixed match step through
+`Match::step_with(&[Option<DriveInput>])`, where `None` means the shipped AI for
+that robot. `C` cycles `chase → watch → orbit` while driving. The HUD's
+`camera textbox` shows `chase` when that camera is active.
 
 ## What is drawn, in order
 
@@ -109,7 +135,10 @@ robot with no battery or air tank reports 0. The mapping is named in
 ## The camera
 
 `ra2.cfg`'s `DefaultCamera` is read with `ra2fmt::cfg`; the three strings are the
-binary's (`0x4759c0`): `watch`, `static`, `orbit`. `C` cycles them in the window.
+binary's (`0x4759c0`): `watch`, `static`, `orbit`. An AI-only match (`--match`,
+an HQ event) starts on that setting and `C` cycles them in the window. A
+player-controlled exhibition match starts on the driving **chase** camera
+instead and cycles `chase → watch → orbit` (see above and `docs/21-play.md`).
 
 - **watch** — *our rule*: focus is the mean position of every live robot; the
   distance is `clamp(largest pair separation × 0.85 + 5, 6, 42)` along the
@@ -146,8 +175,10 @@ and the measured frames are in `docs/19-match-fidelity.md` §2.
 `Esc` opens `UI/common/ingame_dialog.gib`, whose root is `in game popup win` —
 the in-game pause popup, not one of the out-of-match dialogs. Its own notes name
 `resume button`, `end match button`, `options button` and `quit button`;
-resume closes the dialog, quit/end-match return to the shell's already-booted
-main menu. The original shows a confirmation dialog before quitting
+resume closes the dialog, quit/end-match return to whatever shell screen is
+underneath — the main menu for `--match`, `exhibition/exhib_setup.gib` for a
+match started from the exhibition flow. The original shows a confirmation
+dialog before quitting
 (`0x487d50` mentions one); this port returns directly, which is named as a
 difference. Options is not wired.
 
@@ -186,3 +217,9 @@ difference. Options is not wired.
   feature already implemented; the offscreen evidence does not claim otherwise.
 - **The windowed loop** was not run here (no display); it compiles and shares
   every drawing function with the offscreen path.
+- **The exhibition robots and the setup's match-time dropdown** are not wired:
+  the player is fixed to `Teams/Team0/Bot0.bot`, the opponent to
+  `AI/Team1/Bot0.bot`, and a windowed exhibition match has no explicit duration.
+  The robots tab's `exhib_robots.gib` slots are not selectable yet; the game
+  type is read from the Game Settings tab when it has been opened. The full list
+  is in `docs/21-play.md` §5.

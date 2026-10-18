@@ -475,6 +475,17 @@ impl Duel {
 
     /// Advance one step: motors, AI, physics, then combat.
     pub fn step(&mut self, dt: f32) {
+        self.step_with(&[], dt);
+    }
+
+    /// Advance one step with optional per-robot driver overrides.
+    ///
+    /// `overrides[i]` is `Some(input)` for a robot the caller drives (the
+    /// exhibition match's player) and `None` for every robot the shipped AI or
+    /// the stand-in driver owns. The brains still tick, so the other robots
+    /// behave exactly as they do on [`Duel::step`]; the overridden robot's own
+    /// brain output is discarded.
+    pub fn step_with(&mut self, overrides: &[Option<DriveInput>], dt: f32) {
         // The game's own AI drives when it loaded; a robot the binding table
         // does not cover, or a run without the script layer, keeps the stand-in.
         // Brains run on the game's own cadence — an eighth of a second per tick
@@ -490,22 +501,23 @@ impl Duel {
             if !self.robots[i].is_alive() {
                 continue;
             }
-            // Two robots face each other; in a four-robot match the stand-in
-            // driver goes for the nearest survivor. The game's own AI chooses
-            // its own target through `GetEnemies`, so this only affects the
-            // fallback driver.
-            let opponent = self.nearest_opponent(i);
-            let contact = opponent
-                .map(|o| self.robots_touching(i, o))
-                .unwrap_or(false);
-            let input =
+            let input = overrides.get(i).copied().flatten().unwrap_or_else(|| {
+                // Two robots face each other; in a four-robot match the stand-in
+                // driver goes for the nearest survivor. The game's own AI chooses
+                // its own target through `GetEnemies`, so this only affects the
+                // fallback driver.
+                let opponent = self.nearest_opponent(i);
+                let contact = opponent
+                    .map(|o| self.robots_touching(i, o))
+                    .unwrap_or(false);
                 drives
                     .get_mut(i)
                     .and_then(Option::take)
                     .unwrap_or_else(|| match opponent {
                         Some(o) => self.ai_input(i, o, dt, contact),
                         None => DriveInput::default(),
-                    });
+                    })
+            });
             // Drive through the motors: the wheel hinges push the robot.
             let tuning = self.tuning;
             self.robots[i].drive(&mut *self.physics, input, &tuning);
