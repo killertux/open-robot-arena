@@ -18,11 +18,28 @@ use crate::scene::{self, ArenaScene, Prop, USER_ARENA, USER_PROP};
 /// Forward is -Z in RA2 model space.
 pub const BOT_FORWARD: Vec3 = Vec3::new(0.0, 0.0, -1.0);
 
-/// Driver input for one instant, each in `[-1, 1]`.
+/// Driver input for one instant.
+///
+/// `throttle` and `steer` (each in `[-1, 1]`) are a stand-in driver's
+/// `Forward`/`LeftRight` keys; `keys` are the DirectInput scan codes a human
+/// holds, which the robot's own wiring maps to controls. Both reach the motors
+/// only through the bot's wiring (see [`crate::controls`]).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DriveInput {
     pub throttle: f32,
     pub steer: f32,
+    pub keys: crate::controls::KeySet,
+}
+
+impl DriveInput {
+    /// A stand-in driver's `throttle`/`steer` with no keys held.
+    pub fn new(throttle: f32, steer: f32) -> Self {
+        DriveInput {
+            throttle,
+            steer,
+            keys: Default::default(),
+        }
+    }
 }
 
 /// A single time-segment of a scripted drive.
@@ -74,10 +91,7 @@ impl DriveScript {
     pub fn at(&self, t: f32) -> DriveInput {
         for k in &self.keys {
             if t < k.until {
-                return DriveInput {
-                    throttle: k.throttle,
-                    steer: k.steer,
-                };
+                return DriveInput::new(k.throttle, k.steer);
             }
         }
         DriveInput::default()
@@ -85,21 +99,12 @@ impl DriveScript {
 }
 
 /// Tuning for the drive that is not a property of the parts themselves.
-#[derive(Clone, Copy, Debug)]
-pub struct DriveTuning {
-    /// Yaw rate the steering input asks for (rad/s).
-    ///
-    /// A robot's top speed is its own motors' (`power` in the component
-    /// definitions), so only steering is left here: the original steers through
-    /// its `Steering` components and the control wiring, which is not modelled.
-    pub max_yaw_rate: f32,
-}
-
-impl Default for DriveTuning {
-    fn default() -> Self {
-        DriveTuning { max_yaw_rate: 2.2 }
-    }
-}
+///
+/// Nothing is left: a robot's speed is its motors' (`power` in the component
+/// definitions) and it turns because its wiring drives the sides differently.
+/// The struct stays so a future tuning has a place to go.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DriveTuning {}
 
 /// A movable prop (crate, barrel, ...) placed in the world.
 pub struct PropEntity {
@@ -307,7 +312,7 @@ impl Sandbox {
         let target = self.bot_position();
         let fwd = self
             .bot_transform()
-            .transform_vector3(BOT_FORWARD)
+            .transform_vector3(self.robot.rig.forward())
             .normalize_or_zero();
 
         let (eye, aim) = match *camera {

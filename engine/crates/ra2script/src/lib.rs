@@ -39,7 +39,7 @@ pub mod ui;
 
 pub use arena::{Arena, ArenaData, ArenaDetail, Drive, HingeController, PrismaticController};
 pub use host::ScriptHost;
-pub use plus::Ai;
+pub use plus::{Ai, InputEvent};
 /// The audio backend, re-exported so a caller draining [`SoundQueue`] does not
 /// need a direct dependency on `ra2-audio`.
 pub use ra2_audio;

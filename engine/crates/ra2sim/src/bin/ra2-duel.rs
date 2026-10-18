@@ -142,6 +142,7 @@ fn run(
             .map(|_| ra2sim::DriveInput {
                 throttle: 1.0,
                 steer: 0.0,
+                ..Default::default()
             })
             .collect()
     } else {

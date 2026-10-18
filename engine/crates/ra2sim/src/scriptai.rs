@@ -16,7 +16,6 @@ use ra2script::{BotSnapshot, ScriptHost};
 
 use crate::backend::PhysicsBackend;
 use crate::robot::Robot;
-use crate::sim::{DriveInput, BOT_FORWARD};
 
 /// A robot's name as the AI's binding table spells it.
 ///
@@ -34,7 +33,7 @@ pub fn bot_name(rig: &crate::rig::RobotRig) -> String {
 /// What the scripts get to see about one robot.
 pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
     let transform = robot.transform(physics);
-    let forward = transform.transform_vector3(BOT_FORWARD);
+    let forward = transform.transform_vector3(robot.rig.forward());
     // The scripts think in a heading whose `(sin, cos)` is the facing, so the
     // direction is flattened: a robot on its back still has a heading.
     let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
@@ -119,8 +118,10 @@ impl ScriptAi {
         self.host.brain_count()
     }
 
-    /// Run every brain for one tick; `None` where the robot has no brain.
-    pub fn tick(&self, count: usize) -> Vec<Option<DriveInput>> {
+    /// Run every brain for one tick; `Some(events)` for each robot a brain
+    /// drives, `events` being the `Input` calls it made, and `None` where the
+    /// robot has no brain.
+    pub fn tick(&self, count: usize) -> Vec<Option<Vec<ra2script::InputEvent>>> {
         Self::collect(count, self.host.tick_brains())
     }
 
@@ -137,16 +138,42 @@ impl ScriptAi {
         self.host.run_arena_tick(dt)
     }
 
-    /// The controls each brain last set, without running one.
-    pub fn drives(&self, count: usize) -> Vec<Option<DriveInput>> {
-        Self::collect(count, self.host.read_drives())
+    /// The robots a brain drives, without running one: the controls simply
+    /// hold between ticks, so there are no new events.
+    pub fn drives(&self, count: usize) -> Vec<Option<Vec<ra2script::InputEvent>>> {
+        Self::collect(
+            count,
+            self.host
+                .brain_robots()
+                .into_iter()
+                .map(|i| (i, Vec::new()))
+                .collect(),
+        )
     }
 
-    fn collect(count: usize, raw: Vec<(usize, (f32, f32))>) -> Vec<Option<DriveInput>> {
+    fn collect(
+        count: usize,
+        raw: Vec<(usize, Vec<ra2script::InputEvent>)>,
+    ) -> Vec<Option<Vec<ra2script::InputEvent>>> {
         let mut out = vec![None; count];
-        for (i, (throttle, steer)) in raw {
+        for (i, mut events) in raw {
+            // Handedness. The scripts steer with `Input("LeftRight", 1, +turning)`
+            // for a *positive* heading error, and the wiring makes slot 1 (the
+            // `D` key) turn the robot to its right. Our `plus.GetHeadingTo`
+            // measures the angle from `+Z` toward `+X`, which is counter-clockwise
+            // — to the robot's left — seen from above, so a positive error means
+            // the target is on the left here and on the right in the game's own
+            // (left-handed) frame. The two frames differ by a mirror; applying it
+            // to the one steering control keeps the shipped AI closing on its
+            // target (measured: with the raw sign the two robots of
+            // `the_shipped_ai_closes_to_contact` circle 23 m apart).
+            for (name, _, value) in &mut events {
+                if name == "LeftRight" {
+                    *value = -*value;
+                }
+            }
             if i < out.len() {
-                out[i] = Some(DriveInput { throttle, steer });
+                out[i] = Some(events);
             }
         }
         out

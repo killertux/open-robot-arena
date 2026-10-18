@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::controls::Wiring;
 use glam::{Mat4, Vec3};
 use ra2_render::DrawItem;
 use ra2fmt::gmi::Attachment;
@@ -98,6 +99,10 @@ pub struct MotorStats {
     pub torque: f32,
     /// Burst motor travel, radians (`start`, `end`).
     pub burst: Option<[f32; 2]>,
+    /// A `ServoMotor`: holds its position at a zero command instead of
+    /// coasting. (Ours: the binary's auto-lock flag, `motor+0x64`, is set
+    /// through `SetAutoLocks` and its default for a servo is not recovered.)
+    pub servo: bool,
 }
 
 /// Wheel behaviour from the component definition.
@@ -316,9 +321,21 @@ pub struct RobotRig {
     pub part_of: Vec<usize>,
     /// Component index → transform within its part.
     pub part_local: Vec<Mat4>,
+    /// The bot's control board: which controls drive which components.
+    pub wiring: Wiring,
+    /// The `.bot`'s forward heading (radians, `0` or `PI` in every stock bot):
+    /// the direction the robot's front faces in its own frame, as a rotation of
+    /// `-Z` about `Y`. The motors' `Spin Clockwise` wiring is written against
+    /// it — the stock bots with a `PI` heading drive toward `+Z` on `W`.
+    pub heading: f32,
 }
 
 impl RobotRig {
+    /// The robot's front in its own frame: `-Z` turned by [`RobotRig::heading`].
+    pub fn forward(&self) -> Vec3 {
+        Vec3::new(-self.heading.sin(), 0.0, -self.heading.cos())
+    }
+
     /// Animated bot-local transform of every component for a set of motor
     /// angles. A motor turns its rotor about the local +Z axis (RA2's axle
     /// direction), carrying its whole attached subtree.
@@ -629,7 +646,7 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
                     .as_ref()
                     .map(|w| w.resistance * torque_unit())
                     .unwrap_or(0.0)
-            } else if m.burst.is_some() {
+            } else if m.burst.is_some() || m.servo {
                 m.torque
             } else {
                 0.0
@@ -867,6 +884,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 speed: speed.unwrap_or(20.0),
                 torque: torque.unwrap_or(20.0) * torque_unit(),
                 burst: bot.components[i].burst_angles,
+                servo: bot.components[i].class.eq_ignore_ascii_case("ServoMotor"),
             }
         });
 
@@ -980,6 +998,8 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
         parts,
         part_of,
         part_local,
+        wiring: Wiring::from_bot(&bot),
+        heading: bot.heading.unwrap_or(0.0),
     })
 }
 
@@ -1173,6 +1193,7 @@ mod tests {
             role: if motor { Role::Motor } else { Role::Structure },
             weapon: None,
             motor: motor.then_some(MotorStats {
+                servo: false,
                 speed: 10.0,
                 torque: 400.0,
                 burst: None,
@@ -1210,6 +1231,8 @@ mod tests {
             parts,
             part_of,
             part_local,
+            wiring: Wiring::default(),
+            heading: 0.0,
         };
         rig.components[1].children = vec![2];
 

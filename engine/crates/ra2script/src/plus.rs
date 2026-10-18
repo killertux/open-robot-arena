@@ -597,33 +597,24 @@ fn get_points(bot: i32) -> i32 {
     crate::points(bot)
 }
 
-/// The `Forward`/`LeftRight` channels a brain has set, as `(throttle, steer)`
-/// in `[-1, 1]` — what `Robot::drive` takes.
+/// One `Input(name, slot, value)` call a brain made: the control's name, its
+/// binding slot and the value.
+pub type InputEvent = (String, i32, f32);
+
+/// Take the `Input` calls a brain has made since the last call, in order.
 ///
-/// `SuperAI.Turn` sets `LeftRight` 0 and 1 opposite (`-turning` and `turning`),
-/// so the steer is their difference; `Throttle` sets `Forward` 0.
-///
-/// The scripts' `Turn` is positive for a *positive* heading error (`AimToHeading`
-/// turns by `dir = sign(heading)`), while `Robot::drive` applies
-/// `yaw = -steer * rate` — the stand-in driver compensates by negating the error,
-/// and so does this.
-pub fn read_drive(brain: &Py<PyAny>, py: Python<'_>) -> Option<(f32, f32)> {
+/// The original delivers every call to the matching controls as an event (a
+/// non-zero value is a press, zero a release; `0x4012f0` -> `0x4dd5f0` ->
+/// `0x508ce0`), so a burst device fires on each press even when the level does
+/// not change. The levels stay available to the script through
+/// `GetInputStatus`. The wiring (which wires listen to `Forward`, `LeftRight`,
+/// `Spin`, `Fire!` ...) is the robot's own and is applied by the simulator, which
+/// keeps the `LeftRight` slots 0 and 1 apart instead of collapsing them.
+pub fn take_input_events(brain: &Py<PyAny>, py: Python<'_>) -> Option<Vec<InputEvent>> {
     let obj = brain.bind(py);
     let ai = obj.downcast::<Ai>().ok()?;
-    let ai = ai.borrow();
-    let channel = |name: &str, index: i32| {
-        ai.inputs
-            .get(&(name.to_string(), index))
-            .copied()
-            .unwrap_or(0.0)
-    };
-    let forward = channel("Forward", 0);
-    let left = channel("LeftRight", 0);
-    let right = channel("LeftRight", 1);
-    Some((
-        (forward / 100.0).clamp(-1.0, 1.0),
-        ((left - right) / 200.0).clamp(-1.0, 1.0),
-    ))
+    let mut ai = ai.borrow_mut();
+    Some(std::mem::take(&mut ai.events))
 }
 
 /// The zones a brain asked to be told about.
@@ -655,6 +646,8 @@ pub struct Ai {
     pub active: bool,
     /// The control board's inputs, `(name, index) -> value`.
     pub inputs: BTreeMap<(String, i32), f32>,
+    /// Every `Input` call since the simulator last took them.
+    pub events: Vec<InputEvent>,
     /// SmartZones this brain asked to be told about, `(name, id)`.
     pub zones: Vec<(String, i32)>,
 }
@@ -734,10 +727,13 @@ impl Ai {
 
     /// `Input(name, index, value)` — a control-board channel.
     ///
-    /// `Forward` and `LeftRight` are the drive; anything else (a `Spin` or a paw
-    /// trigger the bot's own AI names) is read back by those scripts.
+    /// The name is a control on the bot's own board (`Forward`, `LeftRight`,
+    /// `Spin`, `Fire!`, `Lefthook` ...), the index its binding slot. The call is
+    /// queued as an event for the simulator and the level kept for
+    /// `GetInputStatus`.
     fn Input(&mut self, name: &str, index: i32, value: f32) {
         self.inputs.insert((name.to_string(), index), value);
+        self.events.push((name.to_string(), index, value));
     }
 
     fn GetInputStatus(&self, name: &str, index: i32) -> f32 {
