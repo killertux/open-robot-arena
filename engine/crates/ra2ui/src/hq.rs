@@ -120,10 +120,14 @@ pub struct RobotRow {
     pub name: String,
     /// The class the `.bot` records, as the cell's own note asks for it.
     pub class: String,
-    /// A file the UI can draw. The `.bot`'s 128×128 snapshot is an embedded
-    /// TGA blob, not a named file, so the caller leaves this empty unless it
-    /// has written one somewhere the UI can name.
+    /// A file the UI can draw: the shipped `nobot.bmp` silhouette when the
+    /// `.bot` has no snapshot, otherwise the synthetic key of
+    /// [`RobotRow::preview_image`].
     pub preview: String,
+    /// The `.bot`'s own 128×128 snapshot, decoded from the file's embedded TGA.
+    /// The caller registers it with the renderer's `UiAssets` under
+    /// [`RobotRow::preview`].
+    pub preview_image: Option<crate::preview::Preview>,
 }
 
 /// One event on the season schedule: its `Events.txt` index, record and the
@@ -1042,11 +1046,13 @@ mod tests {
                     name: "Big Fat Robot".into(),
                     class: "Heavy".into(),
                     preview: String::new(),
+                    preview_image: None,
                 },
                 RobotRow {
                     name: "Tiny".into(),
                     class: "Light".into(),
                     preview: String::new(),
+                    preview_image: None,
                 },
             ],
             standings: crate::standings::table(&teams, &points),

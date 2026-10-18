@@ -65,14 +65,22 @@ pub const IMMOBILIZED: &str = "immobilized text";
 pub const WINNER: &str = "winner text";
 pub const SPECTATOR: &str = "Spectator [TextBox]";
 
+/// The shipped placeholder a bot without a snapshot keeps.
+pub const PLACEHOLDER: &str = "exhibition\\sample_bot.bmp";
+
 /// One bot's result in a match: the shape `result_cell.gib` draws.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchResult {
     /// The team's logo, a game-relative path as `_Filename` wants it.
     pub team_logo: String,
-    /// The bot's picture. The game renders the bot's own preview into an image;
-    /// this port takes the file the renderer can draw.
+    /// The bot's picture: a game-relative path, or the synthetic key
+    /// [`crate::preview::Preview::key`] gives the `.bot`'s own snapshot.
     pub bot_preview: String,
+    /// The decoded snapshot behind [`MatchResult::bot_preview`], when the bot
+    /// has one. The caller registers it with the renderer's `UiAssets` before
+    /// the scene is built; the picture lives in memory and is never written to
+    /// a file.
+    pub bot_preview_image: Option<crate::preview::Preview>,
     /// The bot's points in the match.
     pub points: i32,
     pub bot_name: String,
@@ -191,7 +199,8 @@ mod tests {
         let results = [
             MatchResult {
                 team_logo: "Teams\\orange_skull.bmp".into(),
-                bot_preview: "exhibition\\sample_bot.bmp".into(),
+                bot_preview: PLACEHOLDER.into(),
+                bot_preview_image: None,
                 points: 248,
                 bot_name: "The Wrangler".into(),
                 team_name: "TEAM STINKBOMBS".into(),
@@ -200,7 +209,8 @@ mod tests {
             },
             MatchResult {
                 team_logo: "AI\\red_zone.bmp".into(),
-                bot_preview: "exhibition\\sample_bot.bmp".into(),
+                bot_preview: PLACEHOLDER.into(),
+                bot_preview_image: None,
                 points: 125,
                 bot_name: "Red Menace".into(),
                 team_name: "Red Zone".into(),
@@ -282,7 +292,8 @@ mod tests {
         let template = crate::cells::template(&game.join("UI"), TEMPLATE).unwrap();
         let result = MatchResult {
             team_logo: "Teams\\orange_skull.bmp".into(),
-            bot_preview: "exhibition\\sample_bot.bmp".into(),
+            bot_preview: PLACEHOLDER.into(),
+            bot_preview_image: None,
             points: 0,
             bot_name: "B".into(),
             team_name: "T".into(),
@@ -310,5 +321,65 @@ mod tests {
             "the slot's own y"
         );
         assert_eq!(slot.children[0].frame, slot.frame);
+    }
+
+    /// The four slots can each carry a different `.bot`'s own snapshot. The
+    /// cell binds the synthetic key and the decoded picture rides beside it, so
+    /// the renderer can register the texture without a temp file.
+    #[test]
+    fn the_four_result_slots_can_carry_four_distinct_previews() {
+        let Some(game) = game_dir() else { return };
+        let mut gib = load(&game, "common/matchresults.gib");
+        let template = crate::cells::template(&game.join("UI"), TEMPLATE).unwrap();
+        let mut results = Vec::new();
+        for (index, relative) in [
+            "AI/Team1/Bot0.bot",
+            "AI/Team1/Bot1.bot",
+            "AI/Team6/Bot2.bot",
+            "AI/Team6/Bot0.bot",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let bytes = std::fs::read(game.join(relative)).unwrap();
+            let bot = ra2fmt::bot::parse(&bytes).unwrap();
+            let image = crate::preview::Preview::decode_tga(bot.snapshot.as_deref().unwrap())
+                .expect("the bot's TGA");
+            assert!(!image.is_white());
+            results.push(MatchResult {
+                team_logo: String::new(),
+                bot_preview: image.key(&format!("result-{index}")),
+                bot_preview_image: Some(image),
+                points: index as i32,
+                bot_name: bot.name,
+                team_name: format!("Team {}", index + 1),
+                immobilized: false,
+                winner: index == 0,
+            });
+        }
+        let screen = root(&mut gib);
+        assert_eq!(fill(screen, &template, &results), 4);
+        let placed = crate::resolve(&gib, crate::DESIGN_SCREEN);
+        for (index, result) in results.iter().enumerate() {
+            let slot = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == SLOTS[index])
+                .unwrap();
+            let preview = slot
+                .walk()
+                .find(|p| p.widget.name() == BOT_PREVIEW)
+                .expect("the cell's preview image");
+            assert_eq!(preview.widget.filename(), Some(&*result.bot_preview));
+            assert_ne!(
+                result.bot_preview,
+                results[(index + 1) % 4].bot_preview,
+                "slot {index}'s key is its own"
+            );
+            assert!(result
+                .bot_preview_image
+                .as_ref()
+                .is_some_and(|p| !p.is_white()));
+        }
     }
 }

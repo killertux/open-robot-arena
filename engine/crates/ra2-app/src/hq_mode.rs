@@ -831,6 +831,14 @@ impl Session {
         let Session { assets, screen, .. } = self;
         match screen {
             Screen::Hq(hq) => {
+                // The inventory's cells carry the robots' own snapshots under
+                // content-addressed keys; register them before the draw list is
+                // built. Nothing is written to disk.
+                for row in &hq.view().robots {
+                    if let Some(preview) = &row.preview_image {
+                        assets.add_preview(&row.preview, preview);
+                    }
+                }
                 let placed = hq.placements(SHELL_SIZE, Some(assets.faces()));
                 Ok((assets.scene(&placed, size), false))
             }
@@ -1309,22 +1317,31 @@ pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, Strin
         .map(|slot| {
             let path = player_robot_path(game, career.player_slot, *slot);
             match read_bot(&path) {
-                Some(bot) => ra2ui::hq::RobotRow {
-                    name: bot.name.clone(),
-                    class: ra2ui::workshop::stats::WeightClass::from_file(bot.class)
-                        .label()
-                        .to_string(),
-                    // The `.bot`'s snapshot is an embedded 128×128 TGA blob, not
-                    // a file the UI can name; the shipped `nobot.bmp` is the
-                    // inventory's own empty slot art and keeps the white name
-                    // readable. The robot's own snapshot remains unshown (see
-                    // docs/18-hq-ui.md).
-                    preview: "teamhq\\nobot.bmp".to_string(),
-                },
+                Some(bot) => {
+                    let preview_image = bot
+                        .snapshot
+                        .as_deref()
+                        .and_then(ra2ui::preview::Preview::decode_tga);
+                    let preview = preview_image
+                        .as_ref()
+                        .map(|picture| picture.key(&format!("hq-{slot}")))
+                        .unwrap_or_else(|| "teamhq\\nobot.bmp".to_string());
+                    ra2ui::hq::RobotRow {
+                        name: bot.name.clone(),
+                        class: ra2ui::workshop::stats::WeightClass::from_file(bot.class)
+                            .label()
+                            .to_string(),
+                        // The `.bot`'s own snapshot is the picture the original
+                        // draws; `nobot.bmp` is only the empty-slot silhouette.
+                        preview,
+                        preview_image,
+                    }
+                }
                 None => ra2ui::hq::RobotRow {
                     name: format!("Bot {slot}"),
                     class: String::new(),
                     preview: "teamhq\\nobot.bmp".to_string(),
+                    preview_image: None,
                 },
             }
         })
@@ -2409,7 +2426,7 @@ mod tests {
             bot_name: name.to_string(),
             team_name: format!("Team {team}"),
             team_logo: String::new(),
-            bot_preview: String::new(),
+            bot_preview: None,
             points: 0,
             damage_dealt: 0.0,
             damage_taken: damage,
@@ -2535,6 +2552,79 @@ mod tests {
                 .into_rgba8();
             assert_eq!(image.dimensions(), (640, 502), "{name}");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The robot inventory's `bot snapshot img` cells draw the `.bot` files'
+    /// own TGA snapshots. The scene names in-memory textures with the
+    /// content-addressed `#bot-preview:` keys, and the written `hq.png` pixel at
+    /// each picture's centre is the source picture's centre — not `nobot.bmp`
+    /// and not the white fill.
+    #[test]
+    fn the_inventory_cells_draw_the_bots_own_snapshots() {
+        let Some(game) = TestGame::new("previews") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("ra2-hq-previews-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let options = Options::new(
+            game.path(),
+            None,
+            Some(dir.clone()),
+            [1280, 1005],
+            Some(0.3),
+            None,
+        )
+        .unwrap();
+        run_headless(options).expect("the headless HQ run completes");
+        let image = image::open(dir.join("hq.png"))
+            .expect("hq.png")
+            .into_rgba8();
+        assert_eq!(image.dimensions(), (1280, 1005));
+
+        let mut session = Session::open(game.path()).unwrap();
+        assert!(session
+            .career
+            .player()
+            .robots
+            .iter()
+            .any(|slot| read_bot(&player_robot_path(
+                game.path(),
+                session.career.player_slot,
+                *slot
+            ))
+            .is_some_and(|bot| bot.snapshot.is_some())));
+        let (scene, _) = session.scene().unwrap();
+        let mut checked = 0;
+        for quad in &scene.quads {
+            let texture = &scene.textures[quad.texture];
+            if !texture.label.starts_with("#bot-preview:hq-") {
+                continue;
+            }
+            // A tenth into the picture is clear of the cell's name/class text,
+            // which the layout hangs over the right part of the strip.
+            let (sx, sy) = (texture.width / 10, texture.height / 10);
+            let source = ((sy * texture.width + sx) * 4) as usize;
+            let expected = [
+                texture.rgba[source],
+                texture.rgba[source + 1],
+                texture.rgba[source + 2],
+            ];
+            let x = (quad.rect.x + quad.rect.w * 0.1).floor() as u32;
+            let y = (quad.rect.y + quad.rect.h * 0.1).floor() as u32;
+            let actual = image.get_pixel(x, y);
+            for channel in 0..3 {
+                assert!(
+                    (i32::from(actual[channel]) - i32::from(expected[channel])).abs() <= 2,
+                    "inventory preview at ({x},{y}) is {:?}, not {:?} from {}",
+                    actual,
+                    expected,
+                    texture.label
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "the inventory drew a #bot-preview texture");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

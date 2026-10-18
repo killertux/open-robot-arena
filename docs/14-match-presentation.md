@@ -53,13 +53,17 @@ and starts a player-controlled match. The arena is the selected row of
 `exhibition/arena.gib` (`Arenas/box.py` when none is selected), the game type is
 the Game Settings tab's selection (`DEATHMATCH` when that tab was not opened,
 printed as the default), and hazards follow the arena's own `hazard checkbox`.
-The player is `Teams/Team0/Bot0.bot` (robot 0) against
-`AI/Team1/Bot0.bot`; the robots tab is not selectable yet.
+The robots tab's four slots are the shipped pickers: slots 1 and 2 (the screen's
+`team 1 group`) are the player's side, slots 3 and 4 (`team 2 group`) the
+computer's. A `BATTLE ROYAL` spawns all four with teams `[0,1,2,3]`; a
+`TEAM MATCH` is 2v2 with slots 1+2 against slots 3+4 (teams `[0,0,1,1]`); every
+other type is slot 1 against slot 3. Slot 1 is match robot 0 and the driven
+robot. `docs/21-play.md` is the full flow, the keys, the driving camera and the
+`--play` evidence run.
 
 The shell stays on `exhibition/exhib_setup.gib` underneath the match, so the
 results screen's `Continue` and the pause dialog's `quit button` return to the
-setup screen, not the main menu. `docs/21-play.md` is the full flow, the keys,
-the driving camera and the `--play` evidence run.
+setup screen, not the main menu.
 
 ## Driving
 
@@ -157,10 +161,17 @@ instead and cycles `chase → watch → orbit` (see above and `docs/21-play.md`)
 
 On `MatchState::Results` the app loads `common/matchresults.gib` and calls
 `ra2ui::results::fill` with `MatchReport::results()` (`result_cell.gib` is the
-template). The run prints `results screen: N of M bot(s) placed`; the test reads
-the placed tree back and asserts that slot 1 and slot 2 carry the report's
-`points`, `bot name` and `team name`, that slots 3/4 stay empty for a duel, and
-that the scene has a real glyph run (not a blank panel).
+template). The run prints `results screen: N of M bot(s) placed`; the tests read
+the placed tree back and assert that every filled slot carries the report's
+`points`, `bot name`, `team name` and picture. A duel fills slots 1 and 2 and
+leaves 3/4 empty; a four-robot `BATTLE ROYAL` or 2v2 `TEAM MATCH` fills all
+four. The `bot preview` image is the `.bot` file's own snapshot: the match
+decodes the embedded TGA once when it is built, `MatchReport::results()` gives
+each row a content-addressed `#bot-preview:result-N-<hash>` key, and
+`UiAssets::add_preview` registers the pixels in memory. No temp file is written
+and the `.bot` format is not changed. A bot without a snapshot keeps the shipped
+`exhibition/sample_bot.bmp` placeholder. `docs/23-previews-and-modes.md` has the
+pixel-checked frames.
 
 The title's order is pinned by
 `match_mode::tests::the_results_title_is_not_covered_by_the_panel`: the panel's
@@ -218,9 +229,11 @@ difference. Options is not wired.
 - **The windowed loop** was not run here (no display); it compiles and shares
   every drawing function with the offscreen path.
 - **The exhibition robots and the setup's match-time dropdown** are wired: the
-  Robots tab's own slots open the shipped `selectbot_player.gib`/
-  `selectbot_computer.gib` windows and the two robots come from the selected
-  team records and `.bot` slots; the time dropdown's displayed `5 minutes` is
-  the match length. The arena list is filtered by the selected type and scrolls
-  to all twelve rows. The class filter and player slots 2/4 remain unwired; the
-  full list is in `docs/21-play.md` §5.
+  Robots tab's four slots open the shipped `selectbot_player.gib`/
+  `selectbot_computer.gib` windows, all four robots come from the selected team
+  records and `.bot` slots, `BATTLE ROYAL` is four bots with one team each and
+  `TEAM MATCH` is 2v2 with the screen's own side pairs; the time dropdown's
+  displayed `5 minutes` is the match length. The arena list is filtered by the
+  selected type and scrolls to all twelve rows. The class filter and the
+  per-slot headless flags remain unwired; the full list is in
+  `docs/21-play.md` §5.

@@ -23,10 +23,12 @@
 //! names. Defaults: the career's player team (the first named `Teams.txt`
 //! record) and AI team 1, robot 0.
 //!
-//! This client uses slot 1 (the player) and slot 3 (the computer's first robot);
-//! the two-robot match has no second robot per side, so slots 2 and 4 stay
-//! empty. They are the same shipped pickers and can be wired to a four-robot
-//! Battle Royal later.
+//! All four slots are wired. A DEATHMATCH (and the other two-robot types) uses
+//! slot 1 against slot 3; a BATTLE ROYAL uses slots 1–4 as four teams; a TEAM
+//! MATCH uses slots 1+2 (the player's side) against slots 3+4 (the computer's).
+//! Slot 1 is always match robot 0, the driven robot. Slots 2 and 4 default to
+//! the next robot on their side's roster, and the picker windows select them the
+//! same way as 1 and 3.
 //!
 //! ## The arena and game type
 //!
@@ -49,7 +51,7 @@ use std::path::{Path, PathBuf};
 use ra2_render::ui::UiRenderer;
 use ra2_render::Renderer;
 use ra2_shell::{Pick, Shell};
-use ra2sim::r#match::{MatchState, RobotReport};
+use ra2sim::r#match::{MatchState, RobotEntry, RobotReport};
 use ra2sim::{DriveScript, GameType, MatchReport};
 
 use crate::match_mode::{self, Session};
@@ -60,10 +62,19 @@ pub const START_BUTTON: &str = "start game button";
 pub const START_NOTE: &str = "start the game";
 /// The default headless play length.
 pub const DEFAULT_SECONDS: f32 = 8.0;
-/// The two slots this client uses: the human's (`team 1 group`) and the
-/// computer's first robot (`team 2 group`).
-pub const PLAYER_PANEL: &str = "player1 group";
-pub const OPPONENT_PANEL: &str = "player3 group";
+/// The four slots `exhib_robots.gib` carries, in the screen's own order. Slots
+/// 1 and 2 are its `team 1 group` (the player's side), slots 3 and 4 its
+/// `team 2 group` (the computer's side).
+pub const SLOT_PANELS: [&str; 4] = [
+    "player1 group",
+    "player2 group",
+    "player3 group",
+    "player4 group",
+];
+/// The human's first robot (`team 1 group`), which is the driven robot.
+pub const PLAYER_PANEL: &str = SLOT_PANELS[0];
+/// The computer's first robot (`team 2 group`).
+pub const OPPONENT_PANEL: &str = SLOT_PANELS[2];
 
 /// The game types the five checkbox records select, in the file's order.
 pub const GAME_TYPE_CONTROLS: [(&str, GameType); 5] = [
@@ -131,7 +142,12 @@ pub struct Choice {
     pub game_type_control: String,
     /// `Some` when the arena fragment's `hazard checkbox` was present.
     pub hazards: Option<bool>,
+    /// The four `exhib_robots.gib` slots, in the screen's order: player 1 and
+    /// 2 (team 1 group), then player 3 and 4 (team 2 group).
+    pub slots: [RobotChoice; 4],
+    /// Slot 1, kept as the named player choice.
     pub player: RobotChoice,
+    /// Slot 3, kept as the named first opponent choice.
     pub opponent: RobotChoice,
     /// The time dropdown's visible text (`5 minutes`), when read.
     pub time_text: Option<String>,
@@ -140,6 +156,22 @@ pub struct Choice {
 }
 
 impl Choice {
+    /// One line per slot for the trace: the side, record, `.bot` slot and path.
+    pub fn slot_line(&self, slot: usize) -> String {
+        let choice = &self.slots[slot];
+        format!(
+            "slot {}: {} team {} ({} slot {}), robot {}: {} ({})",
+            slot + 1,
+            choice.side,
+            choice.team_name,
+            choice.side,
+            choice.team,
+            choice.bot,
+            choice.bot_name,
+            choice.path.display()
+        )
+    }
+
     /// A one-line description of the two chosen robots for the trace.
     pub fn robots_line(&self) -> String {
         format!(
@@ -159,6 +191,26 @@ impl Choice {
             self.opponent.bot_name,
             self.opponent.path.display()
         )
+    }
+
+    /// The match entries the game type asks for.
+    ///
+    /// * `BATTLE ROYAL` — all four slots, one team each (a free-for-all);
+    /// * `TEAM MATCH` — all four slots as 2v2: slots 1 and 2 are the screen's
+    ///   `team 1 group`, slots 3 and 4 its `team 2 group`;
+    /// * every other type — the two-robot duel the client has always started:
+    ///   slot 1 against slot 3.
+    ///
+    /// Slot 1 is entry 0 in every case, so it stays the driven robot.
+    pub fn match_entries(&self) -> Vec<RobotEntry> {
+        let entry = |slot: usize, team: usize| {
+            RobotEntry::ai(team, self.slots[slot].path.to_string_lossy().to_string())
+        };
+        match self.game_type {
+            GameType::BattleRoyal => vec![entry(0, 0), entry(1, 1), entry(2, 2), entry(3, 3)],
+            GameType::TeamMatch => vec![entry(0, 0), entry(1, 0), entry(2, 1), entry(3, 1)],
+            _ => vec![entry(0, 0), entry(2, 1)],
+        }
     }
 }
 
@@ -230,6 +282,50 @@ pub fn default_picks(game: &Path) -> Result<(Pick, Pick), String> {
             bot: opponent_bot,
         },
     ))
+}
+
+/// The default picks for all four slots.
+///
+/// Slot 1 is the career player's first robot and slot 3 the first AI team's, as
+/// before. Slot 2 is the next robot on the player's own `Robots:` line (and slot
+/// 4 the next on the AI team's), so the default Battle Royal is four different
+/// robots. When a roster has only one robot the next named record with a robot
+/// is used; the shipped tables always have a second robot for the defaults.
+pub fn default_slot_picks(game: &Path) -> Result<[Pick; 4], String> {
+    let (player, opponent) = default_picks(game)?;
+    slot_picks_for(game, player, opponent)
+}
+
+/// The four slot picks around a named slot 1/slot 3 choice: the companion slot
+/// on each side is the next robot in the same roster (or another record with a
+/// robot when this one has none).
+pub fn slot_picks_for(game: &Path, player: Pick, opponent: Pick) -> Result<[Pick; 4], String> {
+    let next = |side: ra2ui::teams::Side, base: Pick| -> Result<Pick, String> {
+        let rosters = ra2ui::teams::rosters(game, side)?;
+        if let Some(roster) = rosters.get(base.team) {
+            if let Some(bot) = roster.robots.iter().find(|bot| **bot > base.bot) {
+                return Ok(Pick {
+                    team: base.team,
+                    bot: *bot,
+                });
+            }
+        }
+        for roster in rosters.iter().filter(|r| r.slot != base.team) {
+            if let Some(bot) = roster.robots.first() {
+                return Ok(Pick {
+                    team: roster.slot,
+                    bot: *bot,
+                });
+            }
+        }
+        Ok(base)
+    };
+    Ok([
+        player,
+        next(ra2ui::teams::Side::Player, player)?,
+        opponent,
+        next(ra2ui::teams::Side::Computer, opponent)?,
+    ])
 }
 
 /// Read the setup screen's choices.
@@ -313,17 +409,23 @@ pub fn choice_from_shell(game: &Path, shell: &Shell) -> Result<Choice, String> {
                 .map(|row| (row, available.len()))
         });
 
-    let (default_player, default_opponent) = default_picks(game)?;
-    let player = robot_choice(
-        game,
-        ra2ui::teams::Side::Player,
-        shell.player_pick().unwrap_or(default_player),
-    )?;
-    let opponent = robot_choice(
-        game,
-        ra2ui::teams::Side::Computer,
-        shell.opponent_pick().unwrap_or(default_opponent),
-    )?;
+    let defaults = default_slot_picks(game)?;
+    let mut slots = Vec::with_capacity(4);
+    for (slot, default) in defaults.iter().enumerate() {
+        let side = if slot < 2 {
+            ra2ui::teams::Side::Player
+        } else {
+            ra2ui::teams::Side::Computer
+        };
+        slots.push(robot_choice(
+            game,
+            side,
+            shell.slot_pick(slot).unwrap_or(*default),
+        )?);
+    }
+    let slots: [RobotChoice; 4] = slots.try_into().expect("four slots");
+    let player = slots[0].clone();
+    let opponent = slots[2].clone();
 
     let time_choice = shell.time_choice();
     Ok(Choice {
@@ -336,6 +438,7 @@ pub fn choice_from_shell(game: &Path, shell: &Shell) -> Result<Choice, String> {
         game_type_read,
         game_type_control: game_type_control(game_type).to_string(),
         hazards: shell.hazard_choice(),
+        slots,
         player,
         opponent,
         time_text: shell.time_text().map(str::to_string),
@@ -363,8 +466,7 @@ pub fn session_from_shell(
         game,
         &choice.arena_path,
         choice.game_type,
-        &choice.player.path,
-        &choice.opponent.path,
+        choice.match_entries(),
         duration,
         choice.hazards,
     )?;
@@ -393,33 +495,27 @@ fn print_choices(choice: &Choice, seconds: Option<f32>, time_override: Option<f3
             None => "left at the script's default (no hazard checkbox)",
         }
     );
+    for slot in 0..choice.slots.len() {
+        println!("{}", choice.slot_line(slot));
+    }
+    let entries = choice.match_entries();
     println!(
-        "player team: {} (Teams/Teams.txt slot {}), robot {}: {} ({})",
-        choice.player.team_name,
-        choice.player.team,
-        choice.player.bot,
-        choice.player.bot_name,
-        choice.player.path.display()
-    );
-    println!(
-        "opponent team: {} (AI/Teams.txt slot {}), robot {}: {} ({})",
-        choice.opponent.team_name,
-        choice.opponent.team,
-        choice.opponent.bot,
-        choice.opponent.bot_name,
-        choice.opponent.path.display()
+        "match entries: {} robot(s), teams {:?} (the four slots are 1 and 2 on the player's side, 3 and 4 on the computer's; BATTLE ROYAL is one team each, TEAM MATCH is 2v2)",
+        entries.len(),
+        entries.iter().map(|entry| entry.team).collect::<Vec<_>>()
     );
     let arena_row = choice
         .arena_row
         .map(|(row, rows)| format!("arena row {row} of {rows}"))
         .unwrap_or_else(|| "arena row not read (the row was replaced)".to_string());
     println!(
-        "selected rows: {arena_row}, game type {}, player team {}, player robot {}, opponent team {}, opponent robot {}",
+        "selected rows: {arena_row}, game type {}, slots {:?}",
         choice.game_type_control,
-        choice.player.team,
-        choice.player.bot,
-        choice.opponent.team,
-        choice.opponent.bot
+        choice
+            .slots
+            .iter()
+            .map(|slot| (slot.team, slot.bot))
+            .collect::<Vec<_>>()
     );
     if let Some(seconds) = time_override {
         println!(
@@ -473,8 +569,8 @@ pub struct Options {
 }
 
 impl Options {
-    /// The picker target after the flag defaults.
-    fn picks(&self) -> Result<(Pick, Pick), String> {
+    /// The four picker targets after the flag defaults.
+    fn picks(&self) -> Result<[Pick; 4], String> {
         let (mut player, mut opponent) = default_picks(&self.game)?;
         if let Some(team) = self.team {
             player.team = team;
@@ -490,7 +586,7 @@ impl Options {
         if let Some(bot) = self.opponent_bot {
             opponent.bot = bot;
         }
-        Ok((player, opponent))
+        slot_picks_for(&self.game, player, opponent)
     }
 }
 
@@ -532,13 +628,18 @@ pub fn select_setup(options: &Options) -> Result<(Shell, Vec<ra2_shell::Step>), 
         steps.push(shell.click_named(game_type_control(game_type))?);
     }
 
-    // The two robot pickers, through the Robots tab and its own slots.
-    let (player, opponent) = options.picks()?;
+    // The four robot pickers, through the Robots tab and its own slots. Slots 1
+    // and 2 are `team 1 group` (player side), slots 3 and 4 `team 2 group`
+    // (computer side); the same shipped windows serve all four.
+    let picks = options.picks()?;
     steps.push(shell.click_named("robots button")?);
-    for (panel, pick, side) in [
-        (PLAYER_PANEL, player, ra2ui::teams::Side::Player),
-        (OPPONENT_PANEL, opponent, ra2ui::teams::Side::Computer),
-    ] {
+    for (slot, pick) in picks.iter().enumerate() {
+        let panel = SLOT_PANELS[slot];
+        let side = if slot < 2 {
+            ra2ui::teams::Side::Player
+        } else {
+            ra2ui::teams::Side::Computer
+        };
         let rosters = ra2ui::teams::rosters(&options.game, side)?;
         let roster = rosters.get(pick.team).ok_or_else(|| {
             format!(
@@ -668,18 +769,11 @@ pub fn run_headless(options: &Options) -> Result<Outcome, String> {
         session_from_shell(&options.game, &shell, Some(options.seconds), options.time)?;
     // The match really carries the screen's choices.
     let config = &session.matched.config;
-    for (index, chosen) in [(0, &choice.player), (1, &choice.opponent)] {
-        let relative = chosen
-            .path
-            .strip_prefix(&options.game)
-            .unwrap_or(&chosen.path)
-            .to_string_lossy()
-            .to_string();
-        if !config.robots[index].bot_path.ends_with(&relative) {
+    for (index, chosen) in choice.match_entries().iter().enumerate() {
+        if config.robots[index].bot_path != chosen.bot_path {
             return Err(format!(
                 "the match's robot {index} is {:?}, not {}",
-                config.robots[index].bot_path,
-                chosen.path.display()
+                config.robots[index].bot_path, chosen.bot_path
             ));
         }
     }

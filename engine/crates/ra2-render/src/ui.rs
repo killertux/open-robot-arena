@@ -205,6 +205,34 @@ impl UiAssets {
         0
     }
 
+    /// Register an in-memory picture under a synthetic key and return the key.
+    ///
+    /// This is how a `.bot`'s embedded snapshot reaches the draw list: the
+    /// picture is content-addressed ([`ra2ui::preview::Preview::key`]), so a
+    /// second frame with the same picture reuses the texture, and no temp file
+    /// is written. The key is what the result cell's `bot preview` and the HQ
+    /// inventory's `bot snapshot img` carry as their `_Filename`.
+    pub fn add_preview(&mut self, key: &str, preview: &ra2ui::preview::Preview) -> bool {
+        if let Some(found) = self.index.get(key) {
+            return found.is_some();
+        }
+        if preview.width == 0
+            || preview.height == 0
+            || preview.rgba.len() != (preview.width * preview.height * 4) as usize
+        {
+            return false;
+        }
+        let index = self.textures.len();
+        self.textures.push(UiTexture {
+            label: key.to_string(),
+            width: preview.width,
+            height: preview.height,
+            rgba: preview.rgba.clone(),
+        });
+        self.index.insert(key.to_string(), Some(index));
+        true
+    }
+
     /// Build the draw list for a placed screen.
     pub fn scene(&mut self, roots: &[Placement<'_>], screen: [u32; 2]) -> UiScene {
         let mut quads = Vec::new();
@@ -1331,6 +1359,7 @@ mod tests {
         let results = [ra2ui::results::MatchResult {
             team_logo: "Teams\\orange_skull.bmp".into(),
             bot_preview: "exhibition\\sample_bot.bmp".into(),
+            bot_preview_image: None,
             points: 248,
             bot_name: "The Wrangler".into(),
             team_name: "TEAM STINKBOMBS".into(),

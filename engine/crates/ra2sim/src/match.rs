@@ -258,10 +258,11 @@ pub struct RobotReport {
     pub bot_name: String,
     pub team_name: String,
     pub team_logo: String,
-    /// The bot's picture. The original renders one from the live model; this
-    /// port has no renderer in the match, so it is empty. **Unproven:** the
-    /// exact image the screen expects is not in the recon.
-    pub bot_preview: String,
+    /// The bot's picture, decoded from the `.bot` file's own embedded TGA
+    /// snapshot. The original renders a preview from the live model; the file's
+    /// snapshot is the picture the game ships, and this port uses it rather
+    /// than drawing another.
+    pub bot_preview: Option<ra2ui::preview::Preview>,
     pub points: i32,
     pub damage_dealt: f32,
     pub damage_taken: f32,
@@ -322,7 +323,12 @@ impl MatchReport {
             .iter()
             .map(|r| ra2ui::results::MatchResult {
                 team_logo: r.team_logo.clone(),
-                bot_preview: r.bot_preview.clone(),
+                bot_preview: r
+                    .bot_preview
+                    .as_ref()
+                    .map(|picture| picture.key(&format!("result-{}", r.slot)))
+                    .unwrap_or_else(|| ra2ui::results::PLACEHOLDER.to_string()),
+                bot_preview_image: r.bot_preview.clone(),
                 points: r.points,
                 bot_name: r.bot_name.clone(),
                 team_name: r.team_name.clone(),
@@ -347,6 +353,8 @@ pub struct Match {
     reason: Option<WinReason>,
     winners: Vec<usize>,
     teams: Vec<ra2fmt::team::Team>,
+    /// The robots' own `.bot` snapshots, decoded once when the match is built.
+    previews: Vec<Option<ra2ui::preview::Preview>>,
 }
 
 impl Match {
@@ -401,6 +409,11 @@ impl Match {
         }
 
         let teams = team_table(&config.arena);
+        let previews = config
+            .robots
+            .iter()
+            .map(|entry| bot_preview(&entry.bot_path))
+            .collect();
         Ok(Match {
             countdown_left: config.countdown,
             config,
@@ -411,6 +424,7 @@ impl Match {
             reason: None,
             winners: Vec::new(),
             teams,
+            previews,
         })
     }
 
@@ -563,7 +577,7 @@ impl Match {
                         .map(|t| t.name.clone())
                         .unwrap_or_else(|| format!("Team {}", robot.team + 1)),
                     team_logo: team.map(|t| t.logo.clone()).unwrap_or_default(),
-                    bot_preview: String::new(),
+                    bot_preview: self.previews.get(i).cloned().flatten(),
                     points: ra2script::points(i as i32),
                     damage_dealt: self.duel.damage_dealt.get(i).copied().unwrap_or(0.0),
                     damage_taken: self.duel.damage_taken.get(i).copied().unwrap_or(0.0),
@@ -763,6 +777,14 @@ fn component_fraction(
 
 /// The AI teams' names and logos, for the result cells.
 ///
+/// A `.bot`'s own snapshot, decoded. The file format stores an uncompressed
+/// TGA blob; nothing is rendered here.
+fn bot_preview(path: &str) -> Option<ra2ui::preview::Preview> {
+    let bytes = std::fs::read(path).ok()?;
+    let bot = ra2fmt::bot::parse(&bytes).ok()?;
+    ra2ui::preview::Preview::decode_tga(bot.snapshot.as_deref()?)
+}
+
 /// The event's team slot is the index into `AI/Teams.txt`; that is the table
 /// the shipped AI team folders (`AI/Team1` …) line up with in their own order.
 fn team_table(arena: &str) -> Vec<ra2fmt::team::Team> {

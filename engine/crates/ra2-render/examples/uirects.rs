@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for root in &roots {
         for placed in root.walk() {
             let name = placed.widget.name();
-            if !wanted.is_empty() && !wanted.iter().any(|w| *w == name) {
+            if !wanted.is_empty() && !wanted.contains(&name) {
                 continue;
             }
             let f = placed.frame;

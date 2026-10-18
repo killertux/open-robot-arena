@@ -232,7 +232,15 @@ impl Presentation {
                     _ => None,
                 })
                 .ok_or_else(|| "matchresults.gib has no root widget".to_string())?;
-            let filled = ra2ui::results::fill(root, &template, &report.results());
+            let results = report.results();
+            let filled = ra2ui::results::fill(root, &template, &results);
+            // The cells name their own snapshots by content-addressed key; put
+            // every decoded picture in the asset set before the scene resolves.
+            for result in &results {
+                if let Some(preview) = &result.bot_preview_image {
+                    self.assets.add_preview(&result.bot_preview, preview);
+                }
+            }
             println!(
                 "results screen: {filled} of {} bot(s) placed",
                 report.robots.len()
@@ -292,19 +300,18 @@ impl Session {
 
     /// Start the exhibition match the shipped setup screen chose.
     ///
-    /// The player's robot is robot 0 (`Teams/Team0/Bot0.bot` by default) and
-    /// the opponent is the first shipped AI team's first robot. `hazards` is
-    /// the arena picker's own `hazard checkbox`; `None` means the arena script
-    /// did not expose one and the environment is left alone. The environment
-    /// is read while the world is built, so this must happen before
+    /// `entries` are the robots the four `playerN group` slots selected, with
+    /// the team ids the mode assigns (slot 1 is entry 0, the driven robot).
+    /// `hazards` is the arena picker's own `hazard checkbox`; `None` means the
+    /// arena script did not expose one and the environment is left alone. The
+    /// environment is read while the world is built, so this must happen before
     /// [`Match::new`].
     #[allow(clippy::too_many_arguments)]
     pub fn exhibition(
         game: &Path,
         arena: &Path,
         game_type: GameType,
-        player_bot: &Path,
-        opponent_bot: &Path,
+        entries: Vec<RobotEntry>,
         seconds: Option<f32>,
         hazards: Option<bool>,
     ) -> Result<Session, String> {
@@ -313,15 +320,8 @@ impl Session {
             Some(false) => std::env::set_var("RA2_HAZARDS", "0"),
             None => {}
         }
-        let config = MatchConfig::new(
-            arena.to_string_lossy().to_string(),
-            game_type,
-            vec![
-                RobotEntry::ai(0, player_bot.to_string_lossy().to_string()),
-                RobotEntry::ai(1, opponent_bot.to_string_lossy().to_string()),
-            ],
-        )
-        .with_duration(seconds);
+        let config = MatchConfig::new(arena.to_string_lossy().to_string(), game_type, entries)
+            .with_duration(seconds);
         let matched = Match::new(config).map_err(|e| e.to_string())?;
         Session::with_match_controlled(game, matched, true)
     }
@@ -1029,7 +1029,7 @@ mod tests {
             bot_name: name.into(),
             team_name: team.into(),
             team_logo: String::new(),
-            bot_preview: String::new(),
+            bot_preview: None,
             points,
             damage_dealt: 10.0 * (slot + 1) as f32,
             damage_taken: 5.0,

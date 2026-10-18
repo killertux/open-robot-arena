@@ -43,7 +43,7 @@ symlinks to the install.
 | step | shipped screen | what fills it | career call |
 |---|---|---|---|
 | boot | `teamhq/teamhq.gib` | the team name, motto and logo; `robots button`'s fragment in `hq content group` | `Career::team_name`, `Career::player` |
-| roster | `teamhq/hq_robots.gib` + `bot_cell.gib` | one cell per player `Robots:` slot: the `.bot`'s name and class | the player's `Team::robots` |
+| roster | `teamhq/hq_robots.gib` + `bot_cell.gib` | one cell per player `Robots:` slot: the `.bot`'s name, class and its own 128×128 snapshot in `bot snapshot img` | the player's `Team::robots` and the `.bot` files |
 | league | `teamhq/hq_league.gib` + `league_cell.gib` | sixteen rows in rank order; `Season N`, `Events remaining: N` | `season_points`, `opponent_points`, `rank` |
 | season results | `teamhq/season_results.gib` + `sresults_cell.gib` | the same standings, its own cell | the same |
 | history | `teamhq/hq_history.gib` | the eight counters, the fastest win, the prize grid (most recent first) | the player's state fields, `Career::prizes` |
@@ -142,7 +142,7 @@ save with no pending repair. Without `--report-damage`, the same run prints
 
 | frame | what it shows |
 |---|---|
-| `hq.png` | the HQ on the robots tab, the team's six robots by name and class |
+| `hq.png` | the HQ on the robots tab, the team's robots by name, class and their own `.bot` snapshot |
 | `hq-events.png` | the schedule, nine event art cells |
 | `event.png` | the bracket for the entered event, with the arena preview behind it |
 | `match.png` | the live HUD at the first fight's midpoint |
@@ -222,6 +222,10 @@ rather than demanding it. `champion.png` is the season's last screen
 - `ra2ui::hq::tests::the_tabs_are_the_screens_their_notes_name` — re-reads the
   four buttons' notes.
 - `the_robots_tab_is_filled_from_the_roster` — `bot_cell.gib` into `robot grid`.
+- `the_inventory_cells_draw_the_bots_own_snapshots` — the `bot snapshot img`
+  cells bind the `.bot` files' embedded TGAs under content-addressed
+  `#bot-preview:hq-N-…` keys, and the written `hq.png` pixel at each picture is
+  the decoded snapshot's own texel (not `nobot.bmp`).
 - `the_league_grid_is_the_careers_standings` — the 16 rows, the player's 42
   points, `Season 3`, `Events remaining: 7`, and the content area is not clipped
   to one row.
@@ -311,9 +315,12 @@ rather than demanding it. `champion.png` is the season's last screen
    therefore requires only the frames every run writes and checks `round.png`
    when a won round exists.
 7. **Robot snapshots.** A `.bot` stores a raw 128×128 TGA blob, not a file name
-   the UI can resolve. The inventory draws the shipped `teamhq/nobot.bmp`
-   silhouette in the `bot snapshot img` cell; the robot's own picture is unshown.
-   This is a screen whose source has no model field.
+   the UI can resolve. The inventory now decodes it (`ra2ui::preview`) and
+   binds a content-addressed in-memory texture to `bot snapshot img`; the
+   results cells use the same decode. A `.bot` with no snapshot keeps the
+   shipped `teamhq/nobot.bmp` silhouette, and nothing is written to a temp
+   file. The `.bot` format and the `choosebot_cell.gib` picker cell are
+   unchanged.
 8. **Prize art and the trophy scene.** The stored prize's `art` is a `.tga`
    (`UI\teamhq\events\trophies\…`) and is drawn in the history grid; the trophy
    `model` is a `.gmf` in `Arenas\event_results`, and the `event_results`

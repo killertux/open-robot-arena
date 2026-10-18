@@ -456,8 +456,10 @@ totals.
   a zero-point time-out is reported as a draw.
 - The clock's displayed value may include the countdown (`0x4759c0` "starts the
   clock"); `MatchReport.duration` is fight time only.
-- Which robots "immobilized text" covers, and the bot preview image the result
-  cell expects, are not established; the preview is empty and the text hidden.
+- Which robots "immobilized text" covers is not established; the text stays
+  hidden. The result cell's preview is now the `.bot` file's own embedded TGA
+  snapshot (`docs/23-previews-and-modes.md`); the exact image the original's
+  live preview renderer would produce is not established.
 - The `EventNumBots` spawn loop (above the four start points) was not traced;
   the port uses the model's start points in ID order.
 - `plus.zap`'s own damage: not established, and it awards none.

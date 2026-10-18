@@ -299,7 +299,7 @@ mod tests {
             bot_name: name.into(),
             team_name: format!("Team {}", slot + 1),
             team_logo: String::new(),
-            bot_preview: String::new(),
+            bot_preview: None,
             points,
             damage_dealt: 0.0,
             damage_taken: 0.0,

@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ra2_app::play_mode::{self, Options};
 use ra2_shell::Pick;
+use ra2fmt::gib::Block;
+use ra2sim::r#match::MatchState;
 use ra2sim::GameType;
 
 fn game_dir() -> Option<PathBuf> {
@@ -309,5 +311,168 @@ fn the_time_dropdowns_displayed_value_is_the_match_length() {
         session.matched.config.duration,
         Some(12.0),
         "--time replaces the dropdown's value"
+    );
+}
+
+/// The four `playerN group` slots all open the shipped pickers, and a BATTLE
+/// ROYAL carries all four robots on four distinct spawn points. The results
+/// screen lists the same four names in its four slots, and slot 1 is the driven
+/// robot.
+#[test]
+fn a_battle_royal_carries_four_slots_four_spawns_and_four_result_rows() {
+    let Some(game) = game_dir() else { return };
+    let _guard = ra2script::lock();
+    let mut options = options(&game);
+    options.game_type = Some(GameType::BattleRoyal);
+    let (shell, _) = play_mode::select_setup(&options).expect("the four pickers");
+    for slot in 0..4 {
+        assert!(
+            shell.slot_pick(slot).is_some(),
+            "slot {} kept its pick",
+            slot + 1
+        );
+    }
+
+    let (session, choice) =
+        play_mode::session_from_shell(&game, &shell, Some(1.0), None).expect("a battle royal");
+    assert_eq!(choice.slots.len(), 4);
+    assert_eq!(session.player_robot, 0, "slot 1 is the driven robot");
+    let config = &session.matched.config;
+    assert_eq!(config.game_type, GameType::BattleRoyal);
+    assert_eq!(config.bot_count, 4);
+    assert_eq!(config.robots.len(), 4);
+    assert_eq!(
+        config.robots.iter().map(|r| r.team).collect::<Vec<_>>(),
+        vec![0, 1, 2, 3],
+        "a free-for-all gives each slot its own team id"
+    );
+    let paths: std::collections::HashSet<_> =
+        config.robots.iter().map(|r| r.bot_path.clone()).collect();
+    assert_eq!(paths.len(), 4, "four different .bot files");
+    assert_eq!(session.matched.duel.robots.len(), 4);
+
+    let mut spawns: Vec<[f32; 3]> = Vec::new();
+    for robot in &session.matched.duel.robots {
+        let position = robot.position(&*session.matched.duel.physics);
+        let position = [position.x, position.y, position.z];
+        assert!(
+            spawns.iter().all(|other: &[f32; 3]| {
+                let dx = other[0] - position[0];
+                let dy = other[1] - position[1];
+                let dz = other[2] - position[2];
+                (dx * dx + dy * dy + dz * dz).sqrt() >= 1.0
+            }),
+            "two robots share a start point: {position:?}"
+        );
+        spawns.push(position);
+    }
+
+    let report = session.report();
+    let rows = report.results();
+    assert_eq!(rows.len(), 4);
+    for (index, row) in rows.iter().enumerate() {
+        assert_eq!(row.bot_name, report.robots[index].bot_name);
+        assert!(
+            row.bot_preview_image.is_some(),
+            "slot {} carries the .bot's own picture",
+            index + 1
+        );
+    }
+
+    // The shipped results screen fills all four slots with those names.
+    let ui = game.join("UI");
+    let mut screen = ra2ui::workshop::load(&ui, "common/matchresults.gib").unwrap();
+    let template = ra2ui::cells::template(&ui, ra2ui::results::TEMPLATE).unwrap();
+    let root = screen
+        .blocks
+        .iter_mut()
+        .find_map(|b| match b {
+            Block::Widget(w) => Some(w),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(ra2ui::results::fill(root, &template, &rows), 4);
+    let placed = ra2ui::resolve(&screen, ra2ui::DESIGN_SCREEN);
+    for (index, row) in rows.iter().enumerate() {
+        let slot = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == ra2ui::results::SLOTS[index])
+            .unwrap();
+        let name = slot
+            .walk()
+            .find(|p| p.widget.name() == ra2ui::results::BOT_NAME)
+            .expect("the result cell's bot name");
+        let text = name
+            .widget
+            .children
+            .iter()
+            .find(|c| c.kind == ra2fmt::gib::WidgetKind::Text)
+            .and_then(|c| c.field("_Text"))
+            .map(|f| f.text())
+            .unwrap_or("");
+        assert_eq!(text, row.bot_name, "result slot {}", index + 1);
+    }
+}
+
+/// A TEAM MATCH is 2v2 with the screen's own pairs: slots 1 and 2 (team 1
+/// group) are team 0, slots 3 and 4 (team 2 group) team 1. Slot 1 stays driven,
+/// and a teammate's hit scores nothing.
+#[test]
+fn a_two_v_two_team_match_uses_the_screens_side_pairs_and_ignores_teammate_hits() {
+    let Some(game) = game_dir() else { return };
+    let _guard = ra2script::lock();
+    let mut options = options(&game);
+    options.game_type = Some(GameType::TeamMatch);
+    let (shell, _) = play_mode::select_setup(&options).expect("the four pickers");
+    let (mut session, choice) =
+        play_mode::session_from_shell(&game, &shell, Some(2.0), None).expect("a team match");
+    assert_eq!(session.player_robot, 0, "slot 1 is the driven robot");
+
+    let config = &session.matched.config;
+    assert_eq!(config.game_type, GameType::TeamMatch);
+    assert_eq!(config.robots.len(), 4);
+    assert_eq!(
+        config.robots.iter().map(|r| r.team).collect::<Vec<_>>(),
+        vec![0, 0, 1, 1],
+        "slots 1+2 vs slots 3+4"
+    );
+    assert_eq!(
+        session
+            .matched
+            .duel
+            .robots
+            .iter()
+            .map(|r| r.team)
+            .collect::<Vec<_>>(),
+        vec![0, 0, 1, 1],
+        "the spawned robots carry the screen's pairs"
+    );
+    assert_ne!(
+        choice.slots[0].path, choice.slots[1].path,
+        "the two player-side slots are different robots"
+    );
+    assert_ne!(
+        choice.slots[2].path, choice.slots[3].path,
+        "the two computer-side slots are different robots"
+    );
+
+    while session.matched.state() == MatchState::Countdown {
+        session.matched.step();
+    }
+    assert_eq!(session.matched.state(), MatchState::Fight);
+
+    let before = ra2script::points(0);
+    session.matched.hit(0, 1, 0, 40.0);
+    assert_eq!(
+        ra2script::points(0),
+        before,
+        "hitting the team's own second robot adds nothing"
+    );
+    session.matched.hit(0, 2, 0, 40.0);
+    assert_eq!(
+        ra2script::points(0),
+        before + 40,
+        "hitting the other team scores its damage"
     );
 }

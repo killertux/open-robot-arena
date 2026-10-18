@@ -251,6 +251,7 @@ fn render_match_results(
         ra2ui::results::MatchResult {
             team_logo: "Teams\\orange_skull.bmp".into(),
             bot_preview: "exhibition\\sample_bot.bmp".into(),
+            bot_preview_image: None,
             points: 248,
             bot_name: "The Wrangler".into(),
             team_name: "TEAM STINKBOMBS".into(),
@@ -260,6 +261,7 @@ fn render_match_results(
         ra2ui::results::MatchResult {
             team_logo: "AI\\red_zone.bmp".into(),
             bot_preview: "exhibition\\sample_bot.bmp".into(),
+            bot_preview_image: None,
             points: 125,
             bot_name: "Red Menace".into(),
             team_name: "Red Zone".into(),

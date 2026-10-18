@@ -126,6 +126,7 @@ pub mod components;
 pub mod events;
 pub mod hq;
 pub mod input;
+pub mod preview;
 pub mod project;
 pub mod repairs;
 pub mod results;

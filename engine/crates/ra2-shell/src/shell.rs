@@ -52,12 +52,12 @@ pub struct Pick {
 /// The shipped robot picker window, open over the setup screen.
 struct Popup {
     side: Side,
-    /// The `exhib_robots.gib` slot the choice lands in (`player1 group`,
-    /// `player3 group`).
+    /// The `exhib_robots.gib` slot the choice lands in, 0-based
+    /// (`player1 group` … `player4 group`).
+    slot: usize,
+    /// The slot group's own name (`player1 group`), which `apply_panel` writes
+    /// the accepted cell into.
     panel: String,
-    /// Whether this slot feeds the two-robot match. Slots 2 and 4 are the
-    /// shipped four-robot layout and stay display-only in this client.
-    used: bool,
     gib: Gib,
     rosters: Vec<Roster>,
     /// The record slot selected in the dropdown.
@@ -72,6 +72,17 @@ struct Popup {
 enum Screen {
     Page(Page),
     Lab(BotLab),
+}
+
+/// The 0-based `playerN group` index, from the slot group's own name.
+fn panel_slot(panel: &str) -> Option<usize> {
+    match panel {
+        "player1 group" => Some(0),
+        "player2 group" => Some(1),
+        "player3 group" => Some(2),
+        "player4 group" => Some(3),
+        _ => None,
+    }
 }
 
 /// What one click did, and what the screen became.
@@ -149,6 +160,10 @@ pub struct Shell {
     /// the robots tab was not used; the caller's defaults apply.
     player_pick: Option<Pick>,
     opponent_pick: Option<Pick>,
+    /// One pick per `playerN group` slot, 0-based. Slots 1 and 3 are the same
+    /// records as `player_pick`/`opponent_pick`; slots 2 and 4 feed a four-robot
+    /// Battle Royal or the second robot of a 2v2 Team Match.
+    slot_picks: [Option<Pick>; 4],
     /// The picker window open over the setup screen.
     popup: Option<Popup>,
 }
@@ -182,6 +197,7 @@ impl Shell {
             time_seconds: None,
             player_pick: None,
             opponent_pick: None,
+            slot_picks: [None; 4],
             popup: None,
         })
     }
@@ -338,6 +354,11 @@ impl Shell {
     /// The computer's robot from the shipped picker.
     pub fn opponent_pick(&self) -> Option<Pick> {
         self.opponent_pick
+    }
+
+    /// The robot chosen in `playerN group` (`slot` 0…3).
+    pub fn slot_pick(&self, slot: usize) -> Option<Pick> {
+        self.slot_picks.get(slot).copied().flatten()
     }
 
     /// The picker window in front of the page, when one is open.
@@ -659,10 +680,11 @@ impl Shell {
         };
         let chain = chain(&placed, &path);
         let Some(group) = chain.iter().rev().find(|p| {
-            p.widget
-                .notes()
-                .trim_start()
-                .starts_with("load appropriate gib for player")
+            let note = p.widget.notes().trim_start().to_ascii_lowercase();
+            // `exhib_robots.gib` carries two spellings: "load appropriate gib
+            // for player 1 here" on slots 1 and 3, and "load appropriate
+            // player 2 gib" on slots 2 and 4.
+            note.contains("load appropriate") && note.contains("player")
         }) else {
             return Ok(None);
         };
@@ -715,7 +737,8 @@ impl Shell {
         }
         let mut popup = Popup {
             side,
-            used: panel == "player1 group" || panel == "player3 group",
+            slot: panel_slot(&panel)
+                .ok_or_else(|| format!("{panel:?} is not one of the four robot slots"))?,
             panel,
             gib,
             rosters,
@@ -782,11 +805,13 @@ impl Shell {
                     })
             });
             if let Some(pick) = pick {
-                if popup.used {
-                    match popup.side {
-                        Side::Player => self.player_pick = Some(pick),
-                        Side::Computer => self.opponent_pick = Some(pick),
-                    }
+                if let Some(slot) = self.slot_picks.get_mut(popup.slot) {
+                    *slot = Some(pick);
+                }
+                match popup.slot {
+                    0 => self.player_pick = Some(pick),
+                    2 => self.opponent_pick = Some(pick),
+                    _ => {}
                 }
                 let panel = popup.panel.clone();
                 let side = popup.side;

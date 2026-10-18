@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use ra2_app::play_mode::{self, Options};
 use ra2_app::SHELL_SIZE;
 use ra2_shell::Shell;
+use ra2fmt::gib::Block;
 use ra2sim::r#match::MatchState;
 use ra2sim::GameType;
 
@@ -103,4 +104,164 @@ fn the_start_button_starts_a_match_and_is_not_a_shell_link() {
         Some(value) => std::env::set_var("RA2_HAZARDS", value),
         None => std::env::remove_var("RA2_HAZARDS"),
     }
+}
+
+/// A four-bot BATTLE ROYAL runs through the shipped setup and writes a results
+/// frame whose four cells each draw the `.bot` file's own snapshot.
+///
+/// The pixel check samples a tenth into each preview frame and compares it with
+/// the same texel of the decoded picture, so a placeholder, a blank fill or a
+/// mixed-up cell fails.
+#[test]
+fn a_battle_royal_writes_four_result_slots_with_the_bots_pictures() {
+    let Some(game) = game_dir() else { return };
+    let _guard = ra2script::lock();
+    let out = std::env::temp_dir().join(format!("ra2-play-br-{}", std::process::id()));
+    std::fs::remove_dir_all(&out).ok();
+    let options = Options {
+        game: game.clone(),
+        drive: "0-1:1,0".into(),
+        seconds: 2.0,
+        out: out.clone(),
+        size: [1280, 1005],
+        arena_script: Some("box.py".into()),
+        arena_index: None,
+        game_type: Some(GameType::BattleRoyal),
+        team: None,
+        bot: None,
+        opponent_team: None,
+        opponent_bot: None,
+        time: None,
+    };
+    let outcome = play_mode::run_headless(&options).expect("the battle royal run completes");
+    assert_eq!(outcome.report.robots.len(), 4);
+    assert_eq!(outcome.report.game_type, "BATTLE ROYAL");
+    assert_eq!(
+        outcome
+            .report
+            .robots
+            .iter()
+            .map(|robot| robot.team)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+
+    let results = outcome.report.results();
+    assert_eq!(results.len(), 4);
+    let mut keys = std::collections::HashSet::new();
+    for row in &results {
+        assert!(row.bot_preview_image.is_some());
+        keys.insert(row.bot_preview.clone());
+    }
+    assert_eq!(keys.len(), 4, "four different preview textures");
+
+    // The shipped results screen, filled from the same rows, gives the frames
+    // the cells draw at.
+    let ui = game.join("UI");
+    let mut screen = ra2ui::workshop::load(&ui, "common/matchresults.gib").unwrap();
+    let template = ra2ui::cells::template(&ui, ra2ui::results::TEMPLATE).unwrap();
+    let root = screen
+        .blocks
+        .iter_mut()
+        .find_map(|b| match b {
+            Block::Widget(w) => Some(w),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(ra2ui::results::fill(root, &template, &results), 4);
+    let placed = ra2ui::resolve(&screen, ra2ui::DESIGN_SCREEN);
+    let pixels = image::open(out.join("play-results.png"))
+        .expect("play-results.png")
+        .into_rgba8();
+    assert_eq!(pixels.dimensions(), (1280, 1005));
+
+    let mut checked = 0;
+    for (index, row) in results.iter().enumerate() {
+        let slot = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == ra2ui::results::SLOTS[index])
+            .unwrap();
+        let preview = slot
+            .walk()
+            .find(|p| p.widget.name() == ra2ui::results::BOT_PREVIEW)
+            .expect("the result cell's preview");
+        let picture = row.bot_preview_image.as_ref().unwrap();
+        let (sx, sy) = (picture.width / 10, picture.height / 10);
+        let source = ((sy * picture.width + sx) * 4) as usize;
+        let expected = [
+            picture.rgba[source],
+            picture.rgba[source + 1],
+            picture.rgba[source + 2],
+        ];
+        let x = (preview.frame.x + preview.frame.w * 0.1).floor() as u32;
+        let y = (preview.frame.y + preview.frame.h * 0.1).floor() as u32;
+        let actual = pixels.get_pixel(x, y);
+        for channel in 0..3 {
+            assert!(
+                (i32::from(actual[channel]) - i32::from(expected[channel])).abs() <= 2,
+                "result slot {} at ({x},{y}) is {:?}, not {:?} from {}",
+                index + 1,
+                actual,
+                expected,
+                row.bot_name
+            );
+        }
+        assert!(
+            !(actual[0] == 255 && actual[1] == 255 && actual[2] == 255),
+            "slot {} is not the white fill",
+            index + 1
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 4);
+    std::fs::remove_dir_all(&out).ok();
+}
+
+/// A 2v2 TEAM MATCH runs the four slots as the screen's pairs and writes its
+/// results frame at the design size.
+#[test]
+fn a_team_match_runs_two_versus_two_and_writes_its_results() {
+    let Some(game) = game_dir() else { return };
+    let _guard = ra2script::lock();
+    let out = std::env::temp_dir().join(format!("ra2-play-team-{}", std::process::id()));
+    std::fs::remove_dir_all(&out).ok();
+    let options = Options {
+        game,
+        drive: "0-1:1,0".into(),
+        seconds: 2.0,
+        out: out.clone(),
+        size: [1280, 1005],
+        arena_script: Some("box.py".into()),
+        arena_index: None,
+        game_type: Some(GameType::TeamMatch),
+        team: None,
+        bot: None,
+        opponent_team: None,
+        opponent_bot: None,
+        time: None,
+    };
+    let outcome = play_mode::run_headless(&options).expect("the team match run completes");
+    assert_eq!(outcome.report.robots.len(), 4);
+    assert_eq!(outcome.report.game_type, "TEAM MATCH");
+    assert_eq!(
+        outcome
+            .report
+            .robots
+            .iter()
+            .map(|robot| robot.team)
+            .collect::<Vec<_>>(),
+        vec![0, 0, 1, 1],
+        "slots 1+2 against slots 3+4"
+    );
+    let rows = outcome.report.results();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0].team_name, rows[1].team_name);
+    assert_eq!(rows[2].team_name, rows[3].team_name);
+    assert_ne!(rows[0].team_name, rows[2].team_name);
+    let frame = image::open(out.join("play-results.png"))
+        .expect("play-results.png")
+        .into_rgba8();
+    assert_eq!(frame.dimensions(), (1280, 1005));
+    std::fs::remove_dir_all(&out).ok();
 }

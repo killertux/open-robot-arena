@@ -77,6 +77,32 @@ reads `Teams/Teams.txt` and defaults to the first named record, exactly the rule
 `ra2sim::career::Career::from_tables` uses. There is no separate career-team
 menu here, and none is invented.
 
+### The four slots, BATTLE ROYAL and TEAM MATCH
+
+`exhib_robots.gib` has four slots and all four are wired. The screen's own
+groups pair them: `team 1 group` holds `player1 group` and `player2 group` (the
+player's side), `team 2 group` holds `player3 group` and `player4 group` (the
+computer's). Slot 1 is always match robot 0, so it is the driven robot and the
+chase camera's subject.
+
+| game type | entries | team ids |
+|---|---|---|
+| `BATTLE ROYAL` | slots 1, 2, 3 and 4 | `[0, 1, 2, 3]` — every slot its own team |
+| `TEAM MATCH` | slots 1 and 2 against slots 3 and 4 | `[0, 0, 1, 1]` — the screen's own side pairs |
+| `DEATHMATCH`, `TABLETOP`, `KING OF THE HILL` | slot 1 against slot 3 | `[0, 1]` |
+
+The default slot 2 is the next robot on slot 1's `Robots:` line and slot 4 the
+next on slot 3's, so the default Battle Royal is four different `.bot` files.
+When `--team/--bot` or `--opponent-team/--opponent-bot` changes slot 1 or 3, the
+companion slot follows that same roster. A one-robot roster falls back to the
+next named record with a robot; the shipped tables have several.
+
+`MatchConfig::bot_count` is 4 for a Battle Royal (the original's
+`EventNumBots` accepts 2 or 4), and `Match::new` puts the four robots on the
+arena model's four start points in the arena's order. The results screen then
+fills all four of its slots, and each cell draws that `.bot` file's own snapshot
+(see below).
+
 ### Game type and arena availability
 
 The original filters the arena picker by the arena's own `game_types`
@@ -161,6 +187,20 @@ The chosen route (team 0 robot 1, AI team 5 robot 1):
     --drive "0-2:1,0;2-4:1,1" --seconds 8 --out /tmp/ra2-play-chosen
 ```
 
+Four robots and teams:
+
+```sh
+# BATTLE ROYAL: slots 1-4 are four robots, one team each.
+./engine/target/release/ra2-app --game local/game \
+    --play --gametype battle-royal --drive "0-2:1,0" --seconds 4 \
+    --out /tmp/ra2-play-br
+
+# TEAM MATCH: slots 1+2 (team 0) against slots 3+4 (team 1).
+./engine/target/release/ra2-app --game local/game \
+    --play --gametype team-match --drive "0-2:1,0" --seconds 4 \
+    --out /tmp/ra2-play-team
+```
+
 The other selectors:
 
 ```sh
@@ -194,10 +234,10 @@ is the same `Session` started by clicking `start game button`.
 
 Every run:
 
-1. clicks `exhibition button`, `robots button`, the player and computer slot
-   regions, each picker's `Down Button`/`team dropdown` row/`robots grid`
-   cell/`ok button`, `arena button`, the arena row (scrolling it into view),
-   the hazard checkbox, `gametype button`, and clicks `start game button`;
+1. clicks `exhibition button`, `robots button`, the four slot regions, each
+   picker's `Down Button`/`team dropdown` row/`robots grid` cell/`ok button`,
+   `arena button`, the arena row (scrolling it into view), the hazard checkbox,
+   `gametype button`, and clicks `start game button`;
 2. writes `play-setup.png` from the shipped setup screen with the chosen row
    selected;
 3. drives robot 0 with the script, samples the drive at the match's fixed step,
@@ -219,10 +259,20 @@ Printed (the default run above, `--seconds 8`; the 8-second route is the one
   click 480.5 425.5 -> ... [ListBox (unnamed)] ... content exhibition/selectbot_player.gib
   click 416 584.5 -> ... [Grid "robots grid"] ... content exhibition/selectbot_player.gib
   click "ok button" -> ... content exhibition/exhib_robots.gib
+  click 743 228.32 -> ... [Group "player2 group"] ... content exhibition/selectbot_player.gib
+  click "Down Button" -> ... content exhibition/selectbot_player.gib
+  click 480.5 425.5 -> ... [ListBox (unnamed)] ... content exhibition/selectbot_player.gib
+  click 506 584.5 -> ... [Grid "robots grid"] ... content exhibition/selectbot_player.gib
+  click "ok button" -> ... content exhibition/exhib_robots.gib
   click 515 380.68 -> ... [Group "player3 group"] ... content exhibition/selectbot_computer.gib
   click "Down Button" -> ... content exhibition/selectbot_computer.gib
   click 480.5 443.5 -> ... [ListBox (unnamed)] ... content exhibition/selectbot_computer.gib
   click 557 581.5 -> ... [Grid "robots grid"] ... content exhibition/selectbot_computer.gib
+  click "ok button" -> ... content exhibition/exhib_robots.gib
+  click 743 380.68 -> ... [Group "player4 group"] ... content exhibition/selectbot_computer.gib
+  click "Down Button" -> ... content exhibition/selectbot_computer.gib
+  click 480.5 443.5 -> ... [ListBox (unnamed)] ... content exhibition/selectbot_computer.gib
+  click 647 581.5 -> ... [Grid "robots grid"] ... content exhibition/selectbot_computer.gib
   click "ok button" -> ... content exhibition/exhib_robots.gib
   click "arena button" -> ... content exhibition/arena.gib
   click 561.5 234.89 -> ... [ListBox "arena listbox"] ... content exhibition/arena.gib
@@ -230,25 +280,57 @@ Printed (the default run above, `--seconds 8`; the 8-second route is the one
   click "gametype button" -> ... content exhibition/gametype.gib
   click "start game button" -> exhibition/exhib_setup.gib [Button "start game button"] ...
 exhibition: Combat Arena (box.py), game type DEATHMATCH, hazards off (hazard checkbox unchecked)
-player team: The Rookies (Teams/Teams.txt slot 0), robot 0: C.R.U.S.H. (Teams/Team0/Bot0.bot)
-opponent team: PREHISTORIC (AI/Teams.txt slot 1), robot 0: Roly Poly (AI/Team1/Bot0.bot)
-selected rows: arena row 2 of 12, game type deathmatch checkbox, player team 0, player robot 0, opponent team 1, opponent robot 0
+slot 1: player team The Rookies (player slot 0), robot 0: C.R.U.S.H. (Teams/Team0/Bot0.bot)
+slot 2: player team The Rookies (player slot 0), robot 1: Sting Ray (Teams/Team0/Bot1.bot)
+slot 3: computer team PREHISTORIC (computer slot 1), robot 0: Roly Poly (AI/Team1/Bot0.bot)
+slot 4: computer team PREHISTORIC (computer slot 1), robot 1: SaberTooth (AI/Team1/Bot1.bot)
+match entries: 2 robot(s), teams [0, 1] (the four slots are 1 and 2 on the player's side, 3 and 4 on the computer's; BATTLE ROYAL is one team each, TEAM MATCH is 2v2)
+selected rows: arena row 2 of 12, game type deathmatch checkbox, slots [(0, 0), (0, 1), (1, 0), (1, 1)]
 match time: 5 minutes (300 s from the time dropdown's displayed value; its option list is not in the data)
 match length for this run: 8 s (--seconds when given, otherwise --time or the default; it overrides the dropdown's value)
   Countdown -> Fight at 0.00s, points [0, 0], winners []
   Fight -> Over at 8.00s, points [40, 38], winners [0]
+results screen: 2 of 2 bot(s) placed
 state Results, winner C.R.U.S.H., points [("C.R.U.S.H.", 40), ("Roly Poly", 38)]
 player robot: C.R.U.S.H. (robot 0), start (-9.82, -1.73, 10.01),
               end (8.17, -1.84, -4.78), distance 23.29 m
 ```
 
-The chosen-route run prints the records and slots the click flow selected:
+The chosen-route run prints the records and slots the click flow selected (the
+companion slots follow the chosen rosters):
 
 ```text
-player team: The Rookies (Teams/Teams.txt slot 0), robot 1: Sting Ray (.../Teams/Team0/Bot1.bot)
-opponent team: Team SPARK (AI/Teams.txt slot 5), robot 1: The Boxer (.../AI/Team5/Bot1.bot)
-selected rows: arena row 2 of 12, game type deathmatch checkbox, player team 0, player robot 1, opponent team 5, opponent robot 1
+slot 1: player team The Rookies (player slot 0), robot 1: Sting Ray (…/Teams/Team0/Bot1.bot)
+slot 2: player team The Rookies (player slot 0), robot 2: BOT-CHOY (…/Teams/Team0/Bot2.bot)
+slot 3: computer team Team SPARK (computer slot 5), robot 1: The Boxer (…/AI/Team5/Bot1.bot)
+slot 4: computer team Team SPARK (computer slot 5), robot 2: EMERGENCY (…/AI/Team5/Bot2.bot)
+selected rows: arena row 2 of 12, game type deathmatch checkbox, slots [(0, 1), (0, 2), (5, 1), (5, 2)]
 ```
+
+The Battle Royal run prints its four entries and four result rows:
+
+```text
+exhibition: Combat Arena (box.py), game type BATTLE ROYAL, hazards off (hazard checkbox unchecked)
+slot 1: player team The Rookies (player slot 0), robot 0: C.R.U.S.H. (Teams/Team0/Bot0.bot)
+slot 2: player team The Rookies (player slot 0), robot 1: Sting Ray (Teams/Team0/Bot1.bot)
+slot 3: computer team PREHISTORIC (computer slot 1), robot 0: Roly Poly (AI/Team1/Bot0.bot)
+slot 4: computer team PREHISTORIC (computer slot 1), robot 1: SaberTooth (AI/Team1/Bot1.bot)
+match entries: 4 robot(s), teams [0, 1, 2, 3] (…)
+selected rows: arena row 1 of 8, game type battle royal checkbox, slots [(0, 0), (0, 1), (1, 0), (1, 1)]
+  Countdown -> Fight at 0.00s, points [0, 0, 0, 0], winners []
+  Fight -> Over at 4.02s, points [0, 0, 0, 0], winners []
+results screen: 4 of 4 bot(s) placed
+  arena start points: 4
+  robot 0: "C.R.U.S.H." at (-9.82,-1.73,10.01)
+  robot 1: "Sting Ray" at (9.58,-1.38,-9.38)
+  robot 2: "Roly Poly" at (9.58,-1.78,10.09)
+  robot 3: "SaberTooth" at (-9.82,-1.30,-9.39)
+```
+
+The TEAM MATCH run is the same four slots with `match entries: 4 robot(s),
+teams [0, 0, 1, 1]`; the results rows show the same team name for slots 1+2 and
+for slots 3+4.
+
 
 The exact end position and points depend on the arena's physics and the robots;
 the run prints its own numbers. The tests assert the invariants, not those
@@ -265,6 +347,28 @@ floats:
   — the two picker windows select `Teams/Team5/Bot1.bot` and
   `AI/Team3/Bot0.bot` (a test game gives team 5 the shipped team 0 roster), and
   the spawned names and `MatchConfig` paths are those files, not the defaults;
+- `ra2-app::exhibition::a_battle_royal_carries_four_slots_four_spawns_and_four_result_rows`
+  — all four slots open a picker, the match spawns four different `.bot` files
+  on four start points at least 1 m apart, teams are `[0,1,2,3]`, slot 1 is the
+  driven robot, and the shipped results screen's four slots carry the same four
+  names;
+- `ra2-app::exhibition::a_two_v_two_team_match_uses_the_screens_side_pairs_and_ignores_teammate_hits`
+  — slots 1+2 are team 0 and slots 3+4 team 1, slot 1 is driven, a hit on the
+  teammate scores 0 and a hit on the other team scores its damage;
+- `ra2-app::play::a_battle_royal_writes_four_result_slots_with_the_bots_pictures`
+  — the offscreen results frame has four distinct `#bot-preview:` textures,
+  and the written pixel at each cell is the decoded `.bot` snapshot's own texel;
+- `ra2-app::play::a_team_match_runs_two_versus_two_and_writes_its_results` —
+  the 2v2 run writes a four-row results frame at 1280×1005;
+- `ra2ui::preview::tests::a_shipped_bots_snapshot_decodes_to_its_stored_dimensions`
+  — `AI/Team1/Bot0.bot`'s embedded TGA decodes to 128×128 with non-white
+  pixels;
+- `ra2ui::results::tests::the_four_result_slots_can_carry_four_distinct_previews`
+  — four decoded pictures get four distinct keys and each result cell binds its
+  own key;
+- `ra2-app::hq_mode::tests::the_inventory_cells_draw_the_bots_own_snapshots` —
+  the HQ inventory's `bot snapshot img` cells draw the same decoded pictures,
+  checked in the written `hq.png`;
 - `ra2-app::exhibition::king_of_the_hill_filters_the_picker_and_picks_hilltop`
   — `enumAvailable(KING OF THE HILL)` is `[hilltop.py, king.py]`, the box arena
   is absent, and the fallback is `Hill Top Arena`;
@@ -290,20 +394,37 @@ The windowed keys and the wheel are compiled and share `Session`/`Match` with
 this run. **No windowed run is claimed here: this environment's display is left
 to the capture agent.** The shared offscreen path is the evidence.
 
+### The result and inventory pictures
+
+The `.bot` file's `snapshot` field is the uncompressed TGA the original shows as
+the robot's picture. `ra2ui::preview::Preview::decode_tga` decodes it into RGBA8
+in memory; `Preview::key("result-N")` gives a content-addressed synthetic name
+(`#bot-preview:result-N-<hash>`) that `ra2_render::ui::UiAssets` registers as a
+texture. The result cell's `bot preview` and the HQ cell's `bot snapshot img`
+carry that key in `_Filename`; neither path writes a temp file, and the `.bot`
+format is unchanged. A bot with no snapshot keeps the shipped
+`exhibition/sample_bot.bmp` (results) or `teamhq/nobot.bmp` (inventory)
+placeholder.
+
+Read the two frames with `docs/23-previews-and-modes.md`'s commands:
+`preview-results.png` and `preview-inventory.png` (both 1280×1005).
+
 ## 5. What is not wired
 
-- **Player slots 2 and 4.** `exhib_robots.gib` has four slots; a two-robot
-  match uses slot 1 (the player) and slot 3 (the computer's first robot). Slots
-  2 and 4 are the same shipped pickers and would be the second robot per side
-  in a four-robot Battle Royal; this client does not spawn them.
+- **The robot cell picture in the picker.** `choosebot_cell.gib`'s `bot preview`
+  image stays the shipped `exhibition/sample_bot.bmp`; the `.bot`'s snapshot is
+  decoded and drawn in the **results cells** and the **HQ inventory**, not in
+  this picker cell. The cell's `weight icon` is set from the bot's own `class`,
+  and the picker's `robot name` is the `.bot`'s name.
 - **The match-time dropdown's option list.** The control's current value
   (`5 minutes`) is read and used, but the listbox under it is empty in the
   shipped file, so there is no data for the other choices. `--time` is the
   explicit replacement, and `--seconds` remains the headless run length.
-- **The robot cell's picture.** `choosebot_cell.gib`'s `bot preview` image
-  stays the shipped `exhibition/sample_bot.bmp`; the `.bot` file's 128×128 TGA
-  snapshot is not decoded into the cell. The cell's `weight icon` is set from
-  the bot's own `class`, and the picker's `robot name` is the `.bot`'s name.
+- **A per-slot command-line picker.** `--team/--bot` and
+  `--opponent-team/--opponent-bot` name slot 1 and slot 3; slot 2 and slot 4
+  come from their rosters' next robot (or the picker clicks in the shell). The
+  window can select any of the four through the shipped pickers; the headless
+  flags do not spell out all four.
 - **The weight class option group.** The Game Settings tab's
   `weight class optiongroup` is not read; the picker offers every robot in the
   team's roster. The original's filtering by class is not implemented.
