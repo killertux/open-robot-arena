@@ -17,8 +17,8 @@ use std::io::Write;
 
 use glam::Vec3;
 use ra2sim::{
-    BotSetup, DriveInput, DriveScript, Duel, GameType, Match, MatchConfig, MatchState, RobotEntry,
-    BOT_FORWARD, DEFAULT_STEP,
+    BotSetup, DriveScript, Duel, GameType, Match, MatchConfig, MatchState, RobotEntry, BOT_FORWARD,
+    DEFAULT_STEP,
 };
 
 const EVERY: usize = 6;
@@ -81,31 +81,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 step += 1;
                 if m.state() == MatchState::Fight {
                     let t = m.clock();
+                    #[allow(clippy::needless_range_loop)]
                     for v in 0..n {
                         let d = m.duel.damage_taken[v] - taken[v];
                         if d > 0.0 {
-                            let dd: f32 = (0..n)
-                                .map(|k| m.duel.damage_dealt[k] - dealt[k])
-                                .sum();
                             let attacker = (0..n)
                                 .find(|&k| m.duel.damage_dealt[k] - dealt[k] > 0.0)
                                 .map(|k| k as i64)
                                 .unwrap_or(-1);
-                            let _ = dd;
                             writeln!(
                                 dmg,
                                 "{{\"t\": {t}, \"victim\": {v}, \"attacker\": {attacker}, \"amount\": {d}}}"
                             )?;
                         }
                     }
-                    if step % EVERY == 0 {
+                    if step.is_multiple_of(EVERY) {
                         write!(trace, "{}", row(t, &sample(&m.duel)))?;
                     }
                 }
-                for k in 0..n {
-                    taken[k] = m.duel.damage_taken[k];
-                    dealt[k] = m.duel.damage_dealt[k];
-                }
+                taken[..n].copy_from_slice(&m.duel.damage_taken[..n]);
+                dealt[..n].copy_from_slice(&m.duel.damage_dealt[..n]);
             }
             let r = m.report();
             eprintln!(
@@ -133,8 +128,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for s in 0..steps {
                 let t = s as f32 * DEFAULT_STEP;
                 let input = script.at(t);
-                duel.step_direct(&[DriveInput { ..input }], DEFAULT_STEP);
-                if s % EVERY == 0 {
+                duel.step_direct(&[input], DEFAULT_STEP);
+                if s.is_multiple_of(EVERY) {
                     write!(trace, "{}", row(t, &sample(&duel)))?;
                 }
             }
