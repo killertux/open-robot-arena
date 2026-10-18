@@ -10,15 +10,21 @@ by the user.
 
 ## Status
 
-**M1–M5 have landed as measured, with the named residues below; M6 is done for
-Linux x86_64; M7's interactive shell (window, input, the shared loop) is in.**
-The engine is a
-Rust workspace that reads the original `.gmf`, `.bot`, CFL3, `.gib` and `.giff`
-data and runs the shipped Python 2.2 arenas and AI on an embedded CPython 3.12.
-It renders headlessly with `wgpu` and simulates with Jolt. It is an engine and a
-verification harness more than a finished game client: the shell now opens in a
-window, but the in-match game is still the original C++, and audio, settings, the
-bot lab's editors and the match are not playable through the shell yet.
+**M1–M10 have landed as measured, with the named residues below; M11 is a
+measured fidelity pass and M12 is Linux-complete, with macOS and Windows
+unverified.** The engine is a Rust workspace that reads the original `.gmf`,
+`.bot`, CFL3, `.gib` and `.giff` data and runs the shipped Python 2.2 arenas and
+AI on an embedded CPython 3.12. It renders with `wgpu` (window or headless) and
+simulates with Jolt.
+
+The client, `ra2-app`, now boots the shipped shell, opens a real match with the
+arena's own geometry and the game's HUD, results and music, builds and paints a
+robot in the bot lab and saves it, and runs a nine-event season in the team HQ
+with points, prizes and repairs that persist. It is still not a complete
+replacement for the original: driving is not wired to the keyboard, the
+exhibition screen stops at its start button, and the workshop's baseplate
+placement and decal layers remain model-only. What is unresolved is named with
+its measurement rather than rounded off.
 
 ### M1 — assets render
 
@@ -72,7 +78,7 @@ audio, particle and Gooey calls are accepted and *recorded*, not played (F13).
 
 Every screen is the game's own `.gib`: `ra2fmt::gib` reads all **116 shipped
 screens** into widget trees, and `ra2ui` places all **4,348 widgets**;
-**57 of the 116 files** place entirely on screen (the rest are fragments and
+**77 of the 116 files** place entirely on screen (the rest are fragments and
 authored oversize frames, named in the test). The renderer draws art, fills,
 fonts and clipped glyph runs headlessly, and the workshop's tabs are live
 hit-tested clicks. `ra2-shell` boots the shipped `Scripts/Main.py`, opens the
@@ -80,8 +86,10 @@ data's main menu and walks two routes: main menu → team picker → team HQ →
 robot inventory → bot lab → chassis step (7 frames), and main menu → exhibition
 setup → arena picker (3 frames). Two renderers written the other way round —
 `ra2-render`'s wgpu path and `tools/ui_compose.py` on the CPU — agree to a mean
-per-channel difference of **0.42/255** on `mainmenu.gib` and **0.24/255** on
-`hq_league.gib`. Caveats: the font's record rects and page are two packings, so
+per-channel difference of **0.453/255** on `mainmenu.gib`, **0.235/255** on
+`matchresults.gib` and **0.0001/255** on `statusmeters.gib`; the residue is
+glyph rasterisation, not layout. Caveats: the font's record rects and page are
+two packings, so
 `ra2fmt` derives each glyph cell from the page's own ink runs, rotates each row
 by its right-slot records and reads the advance table two records on (S8 in
 [`docs/07-m5-m6-checklist.md`](docs/07-m5-m6-checklist.md)); the remaining font
@@ -94,24 +102,86 @@ input loop arrived with M7 (`ra2-app`).
 
 Linux x86_64 ships as a portable tarball with the `ra2-app` client, a
 launcher, installer, `.desktop` entry and icon, built offline and
-unpack-and-run smoke-tested
-([`docs/08-packaging.md`](docs/08-packaging.md)). macOS and Windows are a
-documented, **unverified** path: no build, test or artifact exists on either
-([`docs/09-platforms.md`](docs/09-platforms.md)). CI (`.github/workflows/ci.yml`)
-runs the Linux verification steps without the game, plus advisory macOS and
-Windows builds.
+unpack-and-run smoke-tested. macOS and Windows are a documented, **unverified**
+path: no build, test or artifact exists on either.
 
-### M7 — the interactive shell
+### M7 — the interactive client
 
 `ra2-app` is the shell as an application: a `winit` window presenting the same
 `ra2-render` UI pipeline, or the same loop headlessly with `--offscreen` for CI.
 The shell stays 1280×1005 logical and is letterboxed into the window; a click is
 mapped back through that rectangle (bar clicks are ignored), Escape quits, a
-resize reconfigures the surface, and the loop ticks at the game's 50 ms. The
-windowed path is built but was **not** exercised in this environment; the
-offscreen path and its tests are what ran here.
-Audio, `ra2.cfg`, the screen-stack `Flow`, text entry and the cursor art
-(M7.4–M7.8) are still open.
+resize reconfigures the surface, and the loop ticks at the game's 50 ms. Music
+follows the screen group, an activating click plays `Sounds/button_click.wav`,
+and the shipped options screen edits `ra2.cfg` byte-exactly (volumes, mutes,
+fullscreen, camera and the rest; the resolution dropdown is read-only because
+the data carries no list). The windowed path is built but was **not** exercised
+in this environment (no display); the offscreen path and its tests are what ran.
+The screen-stack `Flow` and custom cursor art remain open — no cursor art ships,
+and the button art the corpus names is blank.
+
+### M8 — the match
+
+`--match` runs the game's own match shape: the arena's start points, the 4.0 s
+countdown, the HUD (`gamewindow.gib` + `statusmeters.gib` with names, points and
+the three bars), the watch/static/orbit cameras, the shipped `matchresults.gib`
+filled from the report, and an in-game pause dialog. Damage scores in every game
+type except King of the Hill, whose zone points come from `king.py`; a hit under
+10 damage scores nothing, and a teammate hit scores nothing. A 30 s box
+DEATHMATCH now finishes with points around `[31, 32]` rather than `[0, 0]`.
+Driving input and the exhibition start button are the remaining gap.
+
+### M9 — the workshop
+
+`--build` boots the shipped bot lab and edits a robot with the real model: a
+palette click attaches one component to a mount, undo reverses it, the armour
+steps set the plate (the corpus' 2× editor hardness), a library texture fills a
+face group, the control board adds a control and binds it to an action from the
+shipped matrix, and the preview uses the same F1 transform as the renderer and
+the rig. `Save As` writes `Robot Designs/<name>.bot` with the writer and reopens
+it; the scripted run prints 1 part/56.1 kg/160 hp, then 3 parts/89.1 kg/960 hp,
+identical to the rig. `Test Robot` opens a real match. Baseplate drag placement,
+decal/surface layers and the shipped drawing tools remain open.
+
+### M10 — the team HQ and the season
+
+`--hq` opens the shipped `teamhq.gib` with its four tabs, the player's robots,
+the league from the career's points, the season's history and its nine-event
+schedule. An event is a 16-entrant single-elimination bracket: `Events.txt`'s
+setting gives 2 bots × 4 rounds or 4 bots × 2 rounds, the player is match 0 slot
+0, a win advances, a loss ends the event (not the season), only the final win
+stores the trophy, and a season ends with the golden sawblade. Points are
+`robot_points/200 + 160/rounds`; teammates never score. The career writes the
+game's own `Teams/Teams.txt` and `AI/Teams.txt`, with a versioned
+`Teams/career.dat` sidecar for the fields that have no recovered game home.
+Repairs are a time-driven bench (`repairs.gib`), not a purchase.
+`--hq --simulate-season` plays all nine events headlessly and writes the season
+frames.
+
+### M11 — fidelity
+
+The oracle is real: the original runs under the installed flatpak Wine 9.0, and
+`tools/oracle` measures our main-menu render against its captured frame at
+**1.439/255** mean absolute channel difference (pointer masked). The traction
+survey rose from 28/45 to **39/45** after finding that Jolt was colliding each
+robot's parts with their own chassis; the six remaining cases are measured
+rest-pose weapon/prop contacts, not the friction law. The armour table's four
+plates scale damage by **×1.00** (puncture and concussion are zero on every
+plate), the crush curve is now linear in damage, and F6 (Jolt's friction
+combination) stays blocked because `oxijolt` 1.1.0 exposes no combine hook. The
+match's bar geometry is the binary's; the fractions are our component hitpoints.
+
+### M12 — release
+
+The Linux x86_64 tarball carries `ra2-app`, the CLI tools, the launcher,
+installer, `.desktop` entry and icon, built offline and smoke-tested
+([`docs/08-packaging.md`](docs/08-packaging.md)). CI runs the Linux verification
+steps without the game, with advisory macOS/Windows builds. macOS and Windows
+are documented, **unverified** paths — scripts exist for a `.app` and a portable
+zip, but neither was ever run and no artifact exists
+([`docs/09-platforms.md`](docs/09-platforms.md)). Flatpak and AppImage recipes
+exist and are **not built here**: `flatpak-builder`, the 24.08 SDK and
+`appimagetool` are missing.
 
 ## What works / what does not
 
@@ -122,36 +192,43 @@ Measured, not aspirational.
 * Reading 181/181 meshes, all 57 robots, all 116 `.gib` screens, the `.giff`
   faces, CFL3 archives, team files and arena scripts.
 * Rendering any shipped robot or arena to a PNG; no Wine, no Windows.
-* The shell's main menu, team picker, team HQ, robot inventory, bot lab and
-  chassis steps, walked by the screens' own notes; the exhibition setup and
-  the arena picker with its 12 arena names.
+* The shell's main menu, team picker, team HQ, robot inventory, bot lab,
+  chassis steps and the exhibition setup/arena picker, walked by the screens'
+  own notes.
 * Booting the game's own `Scripts/Main.py`; running the 14 arenas, the shipped
   AI and the hazard zones.
-* The physics sandbox and two-robot duels, headless; 39/45 stock bots reach
-  2 m on the survey.
+* A full match: spawn, countdown, HUD, cameras, pause, results, damage scoring
+  and the arena's own sounds, headless and in the client.
+* Building, painting, wiring, saving, reloading and testing a robot; the saved
+  file round-trips 57/57 shipped bots byte-identically.
+* A nine-event career: brackets, points, prizes, repairs, the game's own team
+  tables and a documented sidecar, surviving restart.
 * The Linux tarball with the `ra2-app` client, its launcher, and its
   unpack-and-run smoke test.
 
 **Does not work yet**
 
-* The shell's window is mouse-and-Escape only: there is no keyboard focus
-  navigation, no audio and no settings file, and the screen stack is still the
-  runner's rather than a `Flow` shared with the game.
-* The actual match (driving, damage, scoring) is the original C++ and is not
-  playable through the shell — the route stops at the arena picker.
-  `ra2-sim` and `ra2-duel` are the playable headless physics paths.
-* The workshop's component-list and paint tools (S4), and the in-match HUD's
-  live state, are not implemented.
-* Audio, music and video playback.
-* Some fidelity residues: a share of stock robots still lacks wheel traction,
-  the damage scale is calibrated, and Jolt's friction law differs from Havok's
-  (F6/F7/F9/F11 in [`docs/06-deferred-fidelity.md`](docs/06-deferred-fidelity.md)).
+* Keyboard driving and the exhibition screen's start button: the client plays
+  matches it is given (`--match`, `--hq`, `Test Robot`), not one the player
+  starts and drives from the menu. The camera, HUD and scoring are there.
+* The workshop's baseplate drag placement, decal/surface-layer UI, the shipped
+  drawing tools and the desktop's 3D preview of the original.
+* Component-level repair (a repair row names the robot; `Team+0x12c` is not
+  decoded), the in-match robot preview image, and the event's 3D prize scene.
+* Physical audio playback was not exercised; the click-sound call site is our
+  mapping. Crowd fades are recorded, not performed.
+* macOS and Windows builds — documented, unverified. arm64, musl, static
+  linking, Flatpak and AppImage are not built. Signing and notarisation are
+  absent.
+* Some fidelity residues: six stock robots still fail the traction survey, the
+  damage scale is calibrated, Jolt's friction law differs from Havok's (F6),
+  and the crush collider is refused on constrained bodies (F9/F11 in
+  [`docs/06-deferred-fidelity.md`](docs/06-deferred-fidelity.md)).
 * Title boxes authored narrower than the shifted advance table, which clip as
   the data says. The other faces' glyph cells are the page's own runs; both
   former O fragments are whole.
-* macOS and Windows builds — documented, unverified. arm64, musl, static
-  linking, Flatpak and AppImage are not built.
-* Game data, mod support, network play, an update feed and signing/CI.
+* Network play, mods beyond the game's own directories, an update feed and
+  localisation.
 
 ## Run it
 
@@ -234,23 +311,51 @@ run above is main menu → TEAM HQ → team HQ); it prints the click trace and t
 final screen. `--size WxH` sets the window or PNG target, not the shell's
 layout.
 
+### The other modes
+
+```bash
+cd engine
+
+# A match: box arena, two shipped AI bots, five named frames, a printed trace.
+cargo run -q --release -p ra2-app -- --game ../local/game \
+  --match --seconds 30 --out /tmp/ra2-match
+
+# The workshop: build, paint, save to Robot Designs/, test in a match.
+cargo run -q --release -p ra2-app -- --game ../local/game \
+  --build --save-as "My Bot" --seconds 20 --out /tmp/ra2-build
+
+# The team HQ: one simulated event, or the whole nine-event season.
+cargo run -q --release -p ra2-app -- --game ../local/game \
+  --hq --simulate-event 1 --out /tmp/ra2-hq
+cargo run -q --release -p ra2-app -- --game ../local/game \
+  --hq --simulate-season --out /tmp/ra2-season
+
+# What the client would play, with no output device.
+cargo run -q --release -p ra2-app -- --game ../local/game \
+  --offscreen /tmp/menu.png --audio-report
+```
+
+`--start <bot>` opens the workshop from an existing design; `--arena`,
+`--bots`, `--quit-at` and `--size` shape a match; `--simulate-event N` picks a
+schedule row. Every mode runs headless with `--out` and in a window without it.
+
 ### The two-renderer check
 
 Two independent drawings of the same screen; they share no code or algorithm.
-The first uses wgpu, the second composites on the CPU from the resolver's own
-rectangles and the game's own art. From the repository root:
+The first uses wgpu, the second composites on the CPU from its own resolver and
+the game's own art. `tools/ui_parity.sh` renders ten screens with both and
+reports the per-screen mean absolute difference:
 
 ```bash
-(cd engine && cargo build -q --release -p ra2ui --example uidump)
-(cd engine && cargo run -q --release -p ra2-render --example uishot -- \
-  "$RA2_GAME_DIR/UI/mainmenu/mainmenu.gib" /tmp/mainmenu-wgpu.png 1280 1005)
-python3 tools/ui_compose.py \
-  "$RA2_GAME_DIR/UI/mainmenu/mainmenu.gib" /tmp/mainmenu-cpu.png
+tools/ui_parity.sh          # needs RA2_GAME_DIR (or local/game)
 ```
 
-Compare the two PNGs. The measured mean per-channel differences are in
-[`docs/03-engine-design.md`](docs/03-engine-design.md) (M5), not hidden in this
-README.
+The measured numbers are in
+[`docs/05-validation-report.md`](docs/05-validation-report.md) §4.22: the
+images land on the same rectangles and the remaining difference is text
+rasterisation (0.0001 for `statusmeters`, 0.235 for `matchresults`, 0.453 for
+`mainmenu`), not layout. The original-vs-ours check is `tools/oracle/check.sh`
+at **1.439/255** on the main menu.
 
 ### The portable Linux package
 
