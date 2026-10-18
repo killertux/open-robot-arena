@@ -810,6 +810,14 @@ impl Session {
         }
     }
 
+    /// The sounds the live match's steps made since the last call.
+    pub fn take_cues(&mut self) -> Vec<crate::match_sounds::SoundCue> {
+        match &mut self.screen {
+            Screen::Match(session) => session.take_cues(),
+            _ => Vec::new(),
+        }
+    }
+
     fn match_clock(&self) -> Option<f32> {
         match &self.screen {
             Screen::Match(session) => Some(session.matched.clock()),

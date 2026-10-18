@@ -183,6 +183,10 @@ pub struct Session {
     /// The pause dialog's widgets, loaded once.
     pub dialog: Gib,
     presentation: Presentation,
+    /// What the match sounds like: impacts, countdown, motors.
+    match_sounds: crate::match_sounds::MatchSounds,
+    /// Cues waiting for the audio drain.
+    cues: Vec<crate::match_sounds::SoundCue>,
 }
 
 /// The values the HUD needs that are not part of the match report: the camera
@@ -353,7 +357,7 @@ impl Session {
 
     fn with_match_controlled(
         game: &Path,
-        matched: Match,
+        mut matched: Match,
         player_controlled: bool,
     ) -> Result<Session, String> {
         let camera = if player_controlled {
@@ -364,8 +368,11 @@ impl Session {
         // The match shell starts the arena's own intro; `ArenaIntros` is the
         // shipped switch. The generator advances on the arena's `Tick`, so its
         // music, crowd and announcer requests reach the app's audio drain.
+        // Every priced contact is a sound (`FUN_0045f3a0`); the session drains
+        // them each step into cues.
+        matched.duel.record_impacts = true;
         let cfg = crate::options::read_cfg(game);
-        if cfg.arena_intros() {
+        if cfg.arena_intros() && std::env::var("RA2_ARENA_INTROS").as_deref() != Ok("0") {
             if let Err(error) = ra2script::arena_intro(true) {
                 eprintln!("match: {error}");
             }
@@ -408,6 +415,8 @@ impl Session {
             chat_entry: String::new(),
             dialog,
             presentation,
+            match_sounds: crate::match_sounds::MatchSounds::new(),
+            cues: Vec::new(),
         })
     }
 
@@ -489,6 +498,13 @@ impl Session {
             }
         }
         self.matched.step_with(&inputs);
+        let cues = self.match_sounds.observe(&mut self.matched);
+        self.cues.extend(cues);
+    }
+
+    /// Take the sounds the steps since the last call made.
+    pub fn take_cues(&mut self) -> Vec<crate::match_sounds::SoundCue> {
+        std::mem::take(&mut self.cues)
     }
 
     /// Advance by wall-clock seconds at the match's own `dt`.
@@ -592,6 +608,9 @@ impl Session {
         }
         if !self.chat_entry.is_empty() {
             println!("chat (local): {}", self.chat_entry);
+            // `Sounds\chat.wav`: the match object makes it with the countdown
+            // beep and the critical hit (`0x415849`).
+            self.cues.push(crate::match_sounds::SoundCue::Chat);
             self.chat_entry.clear();
         }
         self.chat_open = false;
@@ -752,7 +771,7 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
 
     let mut session = Session::new(&options)?;
     let cfg = crate::options::read_cfg(&options.game);
-    let mut audio = crate::audio::AudioSystem::new_silent(&options.game, &cfg);
+    let mut audio = crate::audio::AudioSystem::new_offscreen(&options.game, &cfg);
     // Nothing from the shell is on screen here; the arena's own intro/crowd
     // sounds are the match's music, and they arrive as script requests.
     audio.stop_music("the match is on screen");
@@ -862,6 +881,8 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
         let before = session.matched.state();
         session.step();
         audio.drain_match(session.audio_listener());
+        let cues = session.take_cues();
+        audio.play_cues(cues, session.audio_listener());
         if before == MatchState::Fight
             && session.matched.state() != MatchState::Fight
             && !wrote_last
@@ -966,6 +987,12 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
             .unwrap_or(0),
         out.display()
     );
+    let total = audio.audio().clock();
+    let seconds = std::env::var("RA2_AUDIO_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(total);
+    audio.finish_capture(seconds)?;
     print!("{}", audio.report(audio_report));
     Ok(session.report())
 }
@@ -1150,6 +1177,65 @@ mod tests {
             immobilized: false,
             components: Vec::new(),
         }
+    }
+
+    /// A priced contact on a component plays one of that component's own
+    /// `damagesounds` at the contact point, at the volume the damage maps to
+    /// (`FUN_0045f3a0`), and a hit of 4 or less is silent.
+    #[test]
+    fn a_contact_plays_the_struck_components_damage_sound() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options = Options::new(
+            &game,
+            None,
+            Vec::new(),
+            Some(3.0),
+            Some(std::env::temp_dir().join("ra2-match-impact")),
+            None,
+            [640, 502],
+        )
+        .unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        assert!(session.matched.duel.record_impacts);
+        let chassis_sounds = session.matched.duel.robots[1].rig.components[0]
+            .sounds
+            .damage
+            .clone();
+        assert!(!chassis_sounds.is_empty(), "the chassis has impact sounds");
+        for damage in [3.0_f32, 52.0] {
+            session.matched.duel.impacts.push(ra2sim::combat::Impact {
+                attacker: 0,
+                target: 1,
+                component: 0,
+                by: 0,
+                damage,
+                point: glam::Vec3::new(1.0, 2.0, 3.0),
+                speed: 4.0,
+            });
+        }
+        let mut sounds = crate::match_sounds::MatchSounds::new();
+        let cues = sounds.observe(&mut session.matched);
+        let impacts: Vec<_> = cues
+            .iter()
+            .filter_map(|c| match c {
+                crate::match_sounds::SoundCue::Impact {
+                    path,
+                    position,
+                    hundredths_db,
+                } => Some((path.clone(), *position, *hundredths_db)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(impacts.len(), 1, "damage 3 is under the floor: {cues:?}");
+        let (path, position, volume) = &impacts[0];
+        assert!(
+            chassis_sounds.contains(path),
+            "{path} not in {chassis_sounds:?}"
+        );
+        assert_eq!(*position, [1.0, 2.0, 3.0]);
+        assert!((-760..=-740).contains(volume), "{volume}");
+        assert!(session.matched.duel.impacts.is_empty(), "consumed");
     }
 
     /// The arena's own `DoIntro` reaches the mixer: the intro music and the

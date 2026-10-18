@@ -161,6 +161,8 @@ impl PreviewCamera {
 /// The live workshop: the shell, the model, and the panel drawn over the 3D
 /// placeholder.
 pub struct Builder {
+    /// Workshop sounds waiting for the audio drain (attach, removal).
+    sounds: Vec<crate::audio::UiSound>,
     game: PathBuf,
     ui: PathBuf,
     library: GameLibrary,
@@ -220,6 +222,11 @@ struct Panel {
 }
 
 impl Builder {
+    /// The workshop sounds the clicks since the last call made.
+    pub fn take_sounds(&mut self) -> Vec<crate::audio::UiSound> {
+        std::mem::take(&mut self.sounds)
+    }
+
     /// Boot the shell and reach the bot lab, then open `start` (or build from
     /// the stock chassis).
     pub fn open(game: &Path, start: Option<&Path>) -> Result<Builder, String> {
@@ -325,6 +332,7 @@ impl Builder {
             preview: None,
             preview_camera: None,
             test_requested: false,
+            sounds: Vec::new(),
             test_seconds: 4.0,
             last_report: None,
         };
@@ -1113,6 +1121,7 @@ impl Builder {
             }
             match self.build.remove(index) {
                 Ok(removed) => {
+                    self.sounds.push(crate::audio::UiSound::ComponentRemoved);
                     self.selected_part = None;
                     self.status = format!("removed {removed} component(s)");
                     return self.refresh();
@@ -1334,6 +1343,15 @@ impl Builder {
             placement,
         ) {
             Ok(attached) => {
+                // The definition's own `attachsound` (cmp_generic, cmp_wheels,
+                // cmp_sawblade, ...), played when the part snaps on.
+                let attach = info
+                    .def
+                    .as_ref()
+                    .and_then(|d| d.get("attachsound"))
+                    .map(|p| p.trim().to_string());
+                self.sounds
+                    .push(crate::audio::UiSound::ComponentAttached(attach));
                 self.selected_part = Some(attached);
                 self.status = format!(
                     "attached {} to {parent} mount {parent_mount} (component {attached})",

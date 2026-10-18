@@ -985,6 +985,11 @@ impl ApplicationHandler for App {
             if let Some(hq) = &mut self.hq {
                 hq.advance(UPDATE.as_secs_f32());
             }
+            if let Some(builder) = &mut self.builder {
+                for sound in builder.take_sounds() {
+                    self.audio.ui(sound);
+                }
+            }
             // One tick of the script sounds, heard from whichever match is
             // live. The HQ and the build mode own their own match sessions.
             let listener = if let Some(session) = &self.session {
@@ -994,6 +999,14 @@ impl ApplicationHandler for App {
             };
             if let Some(listener) = listener {
                 self.audio.drain_match(listener);
+                let cues = if let Some(session) = &mut self.session {
+                    session.take_cues()
+                } else if let Some(hq) = &mut self.hq {
+                    hq.take_cues()
+                } else {
+                    Vec::new()
+                };
+                self.audio.play_cues(cues, listener);
             }
             if let Some(window) = &self.window {
                 window.request_redraw();

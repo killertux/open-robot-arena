@@ -22,6 +22,7 @@ pub mod headless;
 pub mod hq_mode;
 pub mod hud;
 pub mod match_mode;
+pub mod match_sounds;
 pub mod options;
 pub mod play_mode;
 pub mod viewport;
