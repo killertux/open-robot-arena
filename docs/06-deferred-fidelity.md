@@ -1432,3 +1432,39 @@ hazard cells, and after `HazardsOn(True)` the saw and two spike zones with ids 1
 2 and 3; `RayTest` finds the floor under start point 0 and `GetPath` routes from
 it to the arena centre; and the translation is pinned against the constructs the
 survey found, including that text inside a string is left alone.
+
+## Control wiring (F14)
+
+The `.bot` control board now drives the simulation (`ra2sim::controls`); the
+global tank-yaw formula is gone. Recovered from `Robot Arena 2.exe`:
+
+* Component classes register their actions with handler objects
+  (`ServoMotor` `FUN_004ecdf0`, `SpinMotor` `FUN_004f5120`): analog `Spin
+  Clockwise`/`Counter-clockwise` scale the control value by `+1`/`-1`, button
+  `On ...` and switch `On/Off ...` add `+/-100`. The handler (`0x4ed2f0`) keeps the
+  active inputs and re-sums them: `command = clamp(sum, -100, 100)` (`0x4ed370`,
+  `0x4ed860`, `0x4599b0`), stored as the motor's speed percent (`0x48ead0`).
+  The motor step (`0x481450`) drives at `percent * 0.01 * speed`; zero releases
+  the motor (or locks it when its auto-lock flag is set).
+* `plus.AI.Input(name, slot, value)` (`0x4012f0` -> `0x4dd5f0` -> `0x508ce0`) walks
+  the bot's controls, matches by **name** and slot and delivers a press (non-zero)
+  or release; each call is an event, which is how `Poker.py`/`Flipper.py` re-fire a
+  burst device. `LeftRight` slots 0/1 stay separate (`A`/`D`).
+* Stock vocabulary (all 57 bots): `SpinMotor` `Spin CW/CCW` (analog) and `On/Off
+  CW/CCW` (switch), `ServoMotor` `Spin CW/CCW`, `BurstMotor`/`BurstPiston` `Fire`
+  (button), `Steering` `Forward/Backward/Left/Right`.
+* A wire names its control by grid cell; the slot picks the key. Keys are
+  DirectInput scan codes (`Team4/Bot1` binds the numeric keypad).
+* A bot's `heading` (0 or PI) is its front: stock wiring is written against it
+  (122 of 130 wheels agree with `CW = -rotation about the mount axis` once the
+  front is the heading; 8 wheels on 3 bots disagree).
+
+Ours / open: the burst cycle speed (`COCK_FRACTION`), a servo holding at zero
+command (its auto-lock default is not recovered), the piston's retracted end,
+`Steering` components (2 bots, not driven), the load-dependent torque cap
+(`HingeController` slot 10 = `0x480510` has no direct caller, it is a Havok motor
+callback), and the AI's `LeftRight` sign: `plus.GetHeadingTo` is counter-clockwise
+here and clockwise in the game's left-handed frame, so `ScriptAi` mirrors that one
+control. Survey effect: 38/45 -> 35/45 here (37 -> 34 vendored); the three losses
+are bots that only crept because their spinner was always on, or that now lead
+with the part at their heading's front (rest-pose F4 residuals).
