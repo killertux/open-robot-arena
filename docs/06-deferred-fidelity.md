@@ -12,9 +12,9 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F1 | Mount-point (attachment frame) alignment | **landed** — `A_parent·R_z(start)·R_x(π)·R_z(angle)·A_own⁻¹`; the "spinner's height" was a motor mounted axle-down, not a missing offset |
 | F2 | Assembled-bodies path is the only robot path | **landed** |
 | F3 | The motor law, from the game's own data | **landed** (speed is rad/s, torque x40 — both from the binary) |
-| F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` is the material tag, not a collider); the robot's own bodies now share a collision group (a wheel no longer collides with its chassis) — survey **28 → 39 / 45** |
+| F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` is the material tag, not a collider); the robot's own bodies now share a collision group (a wheel no longer collides with its chassis) — survey **28 → 39 / 45** under Jolt's law, **38 / 45** with the game's own law (F6) |
 | F5 | Collision shape kinds (`SIMULATION_GEOMETRY`, `HAVOK_GEO_TYPE`) | **landed** |
-| F6 | Friction combination law differs from Havok 1.x | **implemented** through `ContactSettings::set_combined_friction` in `oxijolt` **1.1.0+jolt-5.6.0** (the newest on crates.io); **off by default** (`RA2_FRICTION_LAW=havok`) because the correct law takes the survey 39 → 38 on the F1 wheel-height residual — measured below |
+| F6 | Friction combination law differs from Havok 1.x | **landed and on by default**: Havok's `sqrt(µ₁²+µ₂²)` through `ContactSettings::set_combined_friction` in `oxijolt` **1.1.0+jolt-5.6.0** (the newest on crates.io); the survey is **38/45**, the two losses being the F1 wheel-height residual — measured below |
 | F7 | Damage model: an event, not a per-step integral | **landed, scale recovered**: the engine's own formula and `fracture`, and the hit's `scale` is the **attacker component's** `MaterialObject +4` — Metal **0.1**, Rubber **0.0**, Arenium **0.5**, with the ram plate's `metal(.4)` = **0.4**; the four armour plates still measure ×1.00 (they carry no term in the formula) |
 | F8 | Pistons slide their children (prismatic) | **landed** (nothing drives them yet) |
 | F9 | The chassis buckles (crush points from the `.bot`) | **landed, collider included**: travel is the file's own movable region, the curve is absolute-from-rest and measured at four points, and `set_body_shape` now removes/recreates the chassis' hinges with their angle as the reference — collider top falls 0.205 m at half damage and the robot still drives 6.81 m |
@@ -747,7 +747,7 @@ only fires on impacts (F7), and on the box arena they still end pressed into
 opposite walls. Deciding *when* to engage is what the original's control layer
 does (M4); this AI only ever drives at the opponent.
 
-## F6 — Friction combination law — **implemented, off by default**
+## F6 — Friction combination law — **implemented, on by default**
 
 Havok 1.x's own era reference states contact friction is `sqrt(µ₁² + µ₂²)`; Jolt
 combines as `sqrt(µ₁ · µ₂)`. On the octagon (floor 0.80) with a 0.30 robot that
@@ -766,7 +766,7 @@ FFI, no unsafe.
 **What is implemented.** `JoltBackend` records each body's `BodyDesc::friction`
 by raw body id and installs a listener that sets
 `sqrt(µ₁² + µ₂²)` on every added and persisted contact (`havok_combined_friction`
-in `jolt.rs`). It can be switched on with `RA2_FRICTION_LAW=havok`.
+in `jolt.rs`). It is the default; `RA2_FRICTION_LAW=jolt` switches to Jolt's law for comparison.
 
 **Measured, both ways.**
 
@@ -776,15 +776,15 @@ in `jolt.rs`). It can be switched on with `RA2_FRICTION_LAW=havok`.
 | deterministic head-on ram, opening blow (`AI/Team1/Bot0`) | **24.4** | **30.3** |
 | 45-bot traction survey (box arena, 3 s, ≥ 2 m) | **39/45** | **38/45** |
 
-**Why it is off by default.** The law is right, and it exposes the F1
+**Why the survey drops by one.** The law is right, and it exposes the F1
 wheel-mount residual rather than failing on its own: `AI/Team7/Bot1`'s two
 wheels on one side have their lowest hull points at **−2.207 m** and the other
 side at **−2.013 m**, a **0.194 m** axle-height difference, so only one pair
 touches the floor and the robot spins: 2.03 m under Jolt's law becomes 1.49 m
 under Havok's. `AI/Team3/Bot1` goes 2.00 → 1.47 m the same way (its four wheel
-hubs are at y = +0.10/+0.10/−0.10/−0.10). The physical default therefore stays
-Jolt until those wheel mounts are placed symmetrically; the law is a one-line
-env switch once they are.
+hubs are at y = +0.10/+0.10/−0.10/−0.10). The law therefore stays the default, and the two
+survey losses are the F1 residual rather than the law; they disappear when
+those wheel mounts are placed symmetrically.
 
 ## F7 — Damage is an event; its numbers are fully sourced
 

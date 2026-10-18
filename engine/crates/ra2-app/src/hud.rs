@@ -27,14 +27,25 @@
 //! ## What is not drawn
 //!
 //! The arena intro (`skip group`) is not implemented, so the group is hidden.
-//! The chat widgets are left hidden as the file writes them. The camera name
-//! comes from [`set_camera`], because the camera is the app's state, not the
-//! match's.
+//! The camera name comes from [`set_camera`], because the camera is the app's
+//! state, not the match's; `0x4749c0` binds `camera textbox` to `+0x178` and
+//! `FUN_00477180` shows it for 3.0 s before `0x4774f1` hides it again.
 //!
-//! **Which robot gets which corner** is not established: `0x4749c0` loads all
-//! four `playerN status` groups, but the recon did not trace the assignment.
-//! This port puts robot 0 in `player1 status`, robot 1 in `player2 status`, and
-//! hides 3/4 when the match has two robots; that is named as our reading.
+//! ## The slots
+//!
+//! `0x4749c0` creates the four status meters into `+0x15c`, `+0x160`, `+0x164`
+//! and `+0x168` in that order (`0x474abc`–`0x474af9`), then attaches meter 0 to
+//! `player1 status` (`0x474afb`–`0x474b43`), 1 to `player2 status`
+//! (`0x474b46`–`0x474b91`), 2 to `player3 status` and 3 to `player4 status`.
+//! The file puts `player1` at `0.01 1 0.02 1` (top-left), `player2` at
+//! `0.99 1 0.02 1` (top-right), `player3` at `0.01 1 0.98 1` (bottom-left) and
+//! `player4` at `0.99 1 0.98 1` (bottom-right). Robot 0 is therefore the
+//! top-left corner, and a two-robot match hides the bottom row.
+//!
+//! The chat group stays hidden until the backslash key: `0x475ee0` shows
+//! `+0x1b4` (`chat group`) and focuses `+0x1b8` (`chat entry`) when the key is
+//! `\` and the match state is playing. [`set_chat`] is the minimum open/close;
+//! no network path exists in this client.
 
 use std::path::Path;
 
@@ -145,7 +156,10 @@ pub fn hud(
     countdown_left: f32,
 ) -> Hud {
     let show_countdown = state == MatchState::Countdown;
-    let show_time = !show_countdown;
+    // `0x416360` shows `time group` (`FUN_00477460`, the widget at `+0x1c8`)
+    // with the match's `+0xd8` timed flag; a "No limit" match never shows the
+    // box. `0x4758c0` hides it before the countdown.
+    let show_time = !show_countdown && report.duration_limit.is_some();
 
     set_visible(screen, COUNTDOWN_GROUP, show_countdown);
     set_visible(screen, TIME_GROUP, show_time);
@@ -196,10 +210,26 @@ pub fn hud(
     }
 }
 
-/// Put the camera's config name in `camera textbox`. The camera belongs to the
-/// app, so this is separate from the match report's binding.
-pub fn set_camera(screen: &mut Widget, name: &str) {
+/// Put the camera's name in `camera textbox` and show or hide the box.
+///
+/// The camera belongs to the app, so this is separate from the match report's
+/// binding. `visible` is the original's 3.0 s display window: `FUN_00477180`
+/// shows the box and writes `+0x17c = 3.0` (`0x4771a2`); `0x4774f1` decrements
+/// it and hides the box (`+0x178`) at zero.
+pub fn set_camera(screen: &mut Widget, name: &str, visible: bool) {
     set_text(screen, CAMERA_BOX, name);
+    set_visible(screen, CAMERA_BOX, visible);
+}
+
+/// Show or hide the chat group and put the typed line in `chat entry`.
+///
+/// The original opens it on `\` (`0x475ee0`: show `+0x1b4`, focus `+0x1b8`).
+/// The file's `chat displaybox` is a `DisplayBox`, not a widget this port's
+/// tree sets text on; the last submitted line is only logged. Nothing is sent
+/// anywhere.
+pub fn set_chat(screen: &mut Widget, open: bool, entry: &str) {
+    set_visible(screen, "chat group", open);
+    set_text(screen, "chat entry", entry);
 }
 
 /// The HUD clock: `m:ss`.
@@ -215,13 +245,17 @@ pub fn clock_text(clock: f32, limit: Option<f32>) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-/// The countdown number: 3, 2, 1 over the recovered 4.0 s.
+/// The countdown number: `trunc` of the 4.0 s timer, while positive.
 ///
-/// The last second keeps showing `1`; the exact per-second schedule inside
-/// `0x477480` was not traced beyond the 4.0 s timer, and the file's sample text
-/// is `3`.
+/// `0x477480` draws `trunc(+0x1dc)` (`0x63aabc`) and starts the fight when it
+/// is zero (`0x4775bc`–`0x47766b`). So `3` shows for `(3, 4]`, `2` for
+/// `(2, 3]`, `1` for `[1, 2]`, and the fight begins below 1.0. The file's
+/// sample text is `3`; a value under 1.0 returns the empty string because the
+/// countdown group is hidden by then.
 pub fn countdown_text(left: f32) -> String {
-    (((left - 1.0).ceil() as i32).clamp(1, 3)).to_string()
+    ra2sim::countdown_number(left)
+        .map(|n| n.to_string())
+        .unwrap_or_default()
 }
 
 /// Shrink a bar from the right, keeping its left edge, and return its width.
@@ -342,21 +376,25 @@ mod tests {
     }
 
     /// The clock is the configured length counting down, and the countdown is
-    /// 3/2/1 over the recovered 4.0 s.
+    /// `trunc(timer)` — 3, 2, 1 for one second each, with the fight starting
+    /// at 1.0 s remaining (`0x477480`).
     #[test]
     fn the_clock_counts_down_from_the_configured_length() {
         assert_eq!(clock_text(0.0, Some(10.0)), "0:10");
         assert_eq!(clock_text(9.5, Some(10.0)), "0:01");
         assert_eq!(clock_text(10.0, Some(10.0)), "0:00");
         assert_eq!(clock_text(65.0, Some(300.0)), "3:55");
-        // "No limit" counts up.
+        // "No limit" counts up (but the time group is hidden; see below).
         assert_eq!(clock_text(65.0, None), "1:05");
 
         assert_eq!(countdown_text(4.0), "3");
         assert_eq!(countdown_text(3.5), "3");
-        assert_eq!(countdown_text(3.0), "2");
-        assert_eq!(countdown_text(2.0), "1");
-        assert_eq!(countdown_text(0.5), "1");
+        assert_eq!(countdown_text(3.0), "3");
+        assert_eq!(countdown_text(2.999), "2");
+        assert_eq!(countdown_text(2.0), "2");
+        assert_eq!(countdown_text(1.5), "1");
+        assert_eq!(countdown_text(1.0), "1");
+        assert_eq!(countdown_text(0.999), "", "the fight has begun");
     }
 
     /// Countdown and time groups swap exactly as their own notes say, and a
@@ -455,5 +493,171 @@ mod tests {
             "49 is the armour bar's own left edge"
         );
         let _ = assets.scene(&placed, [1280, 1005]);
+    }
+
+    fn four_report() -> MatchReport {
+        let mut report = report();
+        report.robots = vec![
+            robot(0, "Roly Poly", 1),
+            robot(1, "Little Metal Friend", 2),
+            robot(2, "Third Bot", 3),
+            robot(3, "Fourth Bot", 4),
+        ];
+        report
+    }
+
+    /// `0x4749c0` attaches the four meters to `player1..4 status` in order,
+    /// and the file's corners are 1 top-left, 2 top-right, 3 bottom-left,
+    /// 4 bottom-right.
+    #[test]
+    fn the_four_status_groups_take_the_robots_in_order_from_the_top_left() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let mut screen = load(&ui).unwrap();
+        let mut assets = ra2_render::ui::UiAssets::open(&game).unwrap();
+        let report = four_report();
+        let root = screen
+            .blocks
+            .iter_mut()
+            .find_map(|b| match b {
+                ra2fmt::gib::Block::Widget(w) => Some(w),
+                _ => None,
+            })
+            .unwrap();
+        let bound = hud(root, &report, MatchState::Fight, 1.0, 0.0);
+        assert_eq!(bound.players.len(), 4);
+        for (i, player) in bound.players.iter().enumerate() {
+            assert_eq!(player.slot, i);
+            assert_eq!(player.name, report.robots[i].bot_name);
+            assert_eq!(player.points, i as i32 + 1);
+            assert!(player.visible);
+        }
+
+        let placed = ra2ui::resolve_with(&screen, crate::SHELL_SIZE, Some(assets.faces()));
+        let group = |name: &str| {
+            placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == name)
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let p1 = group("player1 status");
+        let p2 = group("player2 status");
+        let p3 = group("player3 status");
+        let p4 = group("player4 status");
+        assert_eq!(text_of(p1, "name"), "Roly Poly");
+        assert_eq!(text_of(p2, "name"), "Little Metal Friend");
+        assert_eq!(text_of(p3, "name"), "Third Bot");
+        assert_eq!(text_of(p4, "name"), "Fourth Bot");
+        // 1 and 2 are the top row; 3 and 4 the bottom row.
+        let mid_x = crate::SHELL_SIZE[0] / 2.0;
+        let mid_y = crate::SHELL_SIZE[1] / 2.0;
+        assert!(p1.frame.x < mid_x && p1.frame.y < mid_y, "player1 {p1:?}");
+        assert!(p2.frame.x > mid_x && p2.frame.y < mid_y, "player2 {p2:?}");
+        assert!(p3.frame.x < mid_x && p3.frame.y > mid_y, "player3 {p3:?}");
+        assert!(p4.frame.x > mid_x && p4.frame.y > mid_y, "player4 {p4:?}");
+        let _ = assets.scene(&placed, [1280, 1005]);
+    }
+
+    /// The camera box carries the camera object's name and is only shown for
+    /// the original's 3.0 s after a change (`0x4771a2`, `0x4774f1`).
+    #[test]
+    fn the_camera_textbox_shows_the_cameras_name_then_hides() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let mut screen = load(&ui).unwrap();
+        let root = screen
+            .blocks
+            .iter_mut()
+            .find_map(|b| match b {
+                ra2fmt::gib::Block::Widget(w) => Some(w),
+                _ => None,
+            })
+            .unwrap();
+        set_camera(root, "Orbit Cam", true);
+        let box_ = ra2ui::workshop::find(root, CAMERA_BOX).unwrap();
+        assert!(box_.visible());
+        assert_eq!(text_of_widget(box_), "Orbit Cam");
+        set_camera(root, "Orbit Cam", false);
+        assert!(!ra2ui::workshop::find(root, CAMERA_BOX).unwrap().visible());
+
+        assert_eq!(ra2sim::DuelCamera::Watch.display_name(), "Watch Cam");
+        assert_eq!(ra2sim::DuelCamera::Static.display_name(), "Static Cam");
+        assert_eq!(
+            ra2sim::DuelCamera::Orbit { period: 24.0 }.display_name(),
+            "Orbit Cam"
+        );
+        assert_eq!(
+            ra2sim::DuelCamera::Chase {
+                robot: 0,
+                distance: 4.0,
+                height: 2.0
+            }
+            .display_name(),
+            "Chase Cam (ours)"
+        );
+    }
+
+    /// The chat group opens on the backslash key (the file's own note and
+    /// `0x475ee0`); this is the open/close minimum, with no network.
+    #[test]
+    fn the_chat_group_opens_and_closes_with_the_entry_text() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let mut screen = load(&ui).unwrap();
+        let root = screen
+            .blocks
+            .iter_mut()
+            .find_map(|b| match b {
+                ra2fmt::gib::Block::Widget(w) => Some(w),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!ra2ui::workshop::find(root, "chat group").unwrap().visible());
+        set_chat(root, true, "hello");
+        assert!(ra2ui::workshop::find(root, "chat group").unwrap().visible());
+        assert_eq!(
+            text_of_widget(ra2ui::workshop::find(root, "chat entry").unwrap()),
+            "hello"
+        );
+        set_chat(root, false, "");
+        assert!(!ra2ui::workshop::find(root, "chat group").unwrap().visible());
+    }
+
+    /// A "No limit" match never shows the time group: `0x416360` calls
+    /// `FUN_00477460` with the timed byte, and `0x4758c0` hid the group before
+    /// the countdown.
+    #[test]
+    fn a_no_limit_match_hides_the_time_group() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let mut screen = load(&ui).unwrap();
+        let mut report = report();
+        report.duration_limit = None;
+        let root = screen
+            .blocks
+            .iter_mut()
+            .find_map(|b| match b {
+                ra2fmt::gib::Block::Widget(w) => Some(w),
+                _ => None,
+            })
+            .unwrap();
+        let bound = hud(root, &report, MatchState::Fight, 5.0, 0.0);
+        assert!(!bound.show_time);
+        assert!(
+            !ra2ui::workshop::find(root, TIME_GROUP).unwrap().visible(),
+            "time group is hidden without a clock"
+        );
+    }
+
+    fn text_of_widget(widget: &Widget) -> String {
+        widget
+            .children
+            .iter()
+            .find(|c| c.kind == WidgetKind::Text)
+            .and_then(|c| c.field("_Text"))
+            .or_else(|| widget.field("_Text"))
+            .map(|f| f.text().to_string())
+            .unwrap_or_default()
     }
 }

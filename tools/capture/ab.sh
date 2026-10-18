@@ -11,13 +11,13 @@
 # the captures live).
 #
 # The original screens this harness could reach are the two `mainmenu` sizes
-# (docs/22-windowed.md §4).  A missing fixture for another id is reported and
+# (docs/25-windowed.md §4).  A missing fixture for another id is reported and
 # skipped, never invented.  The canonical A/B size is 1024x768; the 1280x1024
 # menu is the shipped-config reference and carries the 1280x1005-vs-1280x1024
 # caveat from docs/12-oracle.md §4.
 #
 # Output columns: id, size, MAE, pointer-masked MAE, blocks > 20, largest blocks.
-# The same lines are what docs/22-windowed.md's table records.
+# The same lines are what docs/25-windowed.md's table records.
 
 set -eu
 

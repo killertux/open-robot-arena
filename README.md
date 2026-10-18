@@ -45,10 +45,10 @@ live in that file; they are not re-measured here.
 A robot drops into an arena, drives on a scripted input timeline, collides with
 walls and movable props, and the run renders to a frame strip. The physics sits
 behind a `PhysicsBackend` trait; Jolt is the implementation. On the measured
-45-bot box-arena survey, **39 of 45 stock robots travel 2 m or more**. Caveat:
-the six that remain are rest-pose weapons/props and one curved path, not the
-motor law or a global speed constant (F2/F4/F5); the friction-combination law
-(F6) stays blocked on the binding.
+45-bot box-arena survey with the game's own friction law, **38 of 45 stock robots travel 2 m or more**. Caveat:
+the seven that remain are rest-pose weapons/props, two F1 wheel-height
+residuals and one curved path, not the motor law or a global speed constant
+(F2/F4/F5); Havok's friction-combination law (F6) is now the default.
 The data is the game's: arena gravity, fixed collision geometry, per-body
 friction/elasticity, and chassis mass from armour weight × surface area.
 
@@ -169,13 +169,15 @@ frames.
 
 The oracle is real: the original runs under the installed flatpak Wine 9.0, and
 `tools/oracle` measures our main-menu render against its captured frame at
-**1.439/255** mean absolute channel difference (pointer masked). The traction
-survey rose from 28/45 to **39/45** after finding that Jolt was colliding each
-robot's parts with their own chassis; the six remaining cases are measured
-rest-pose weapon/prop contacts, not the friction law. The armour table's four
-plates scale damage by **×1.00** (puncture and concussion are zero on every
-plate), the crush curve is now linear in damage, and F6 (Jolt's friction
-combination) stays blocked because `oxijolt` 1.1.0 exposes no combine hook. The
+**1.439/255** mean absolute channel difference (pointer masked); the windowed
+client's own route was captured and verified with synthetic X input. The traction
+survey rose from 28/45 to **38/45** after finding that Jolt was colliding each
+robot's parts with their own chassis; the seven remaining cases are measured
+rest-pose contacts, two F1 wheel-height residuals and one curved path. Havok's
+friction-combination law is now the default (F6), the per-material damage scale
+is recovered (Metal 0.1, `ramplate1` 0.4, `rubber(0)` 0.0) and applied, the
+armour plates themselves are ×1.00, and the crush curve is linear in damage
+with a hinge-preserving collider re-bake (F7/F9). The
 match's bar geometry is the binary's; the fractions are our component hitpoints.
 
 ### M12 — release
@@ -229,9 +231,10 @@ Measured, not aspirational.
 * macOS and Windows builds — documented, unverified. arm64, musl, static
   linking, Flatpak and AppImage are not built. Signing and notarisation are
   absent.
-* Some fidelity residues: six stock robots still fail the traction survey, the
-  damage scale is calibrated, Jolt's friction law differs from Havok's (F6),
-  and the crush collider is refused on constrained bodies (F9/F11 in
+* Some fidelity residues: seven stock robots still fail the traction survey
+  (rest-pose contacts, two F1 wheel-height residuals, one curved path); the
+  crush curve and collider re-bake are in, but the buckle silhouette and some
+  old-version mount details remain measured rather than exact (F9/F11 in
   [`docs/06-deferred-fidelity.md`](docs/06-deferred-fidelity.md)).
 * Title boxes authored narrower than the shifted advance table, which clip as
   the data says. The other faces' glyph cells are the page's own runs; both

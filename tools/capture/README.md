@@ -1,6 +1,6 @@
 # Capture and synthetic input
 
-The tools behind `docs/22-windowed.md`. Game pixels and game files stay in
+The tools behind `docs/25-windowed.md`. Game pixels and game files stay in
 `local/` and are never committed.
 
 ## Quick start
@@ -71,5 +71,5 @@ mouse: DirectInput8 is acquired exclusively and ignores XTEST, XWarpPointer,
 XSendEvent, host-pointer input through Xephyr, `SetCursorPos`/`mouse_event` from
 a Wine process (`wininput.py`), and a `/dev/uinput` virtual mouse
 (`uinput_mouse.py`). The script records the failed click and never labels a
-screen it did not capture. The full measured history is in `docs/22-windowed.md`
+screen it did not capture. The full measured history is in `docs/25-windowed.md`
 §4.

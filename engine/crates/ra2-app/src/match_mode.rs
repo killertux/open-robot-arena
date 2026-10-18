@@ -45,6 +45,13 @@ pub const DEFAULT_ARENA_SCRIPT: &str = "box.py";
 /// How long the offscreen evidence fight runs before its scripted decision.
 pub const DEFAULT_SECONDS: f32 = 30.0;
 
+/// How long `camera textbox` stays up after a camera change, in seconds.
+///
+/// `FUN_00477180` shows the box and writes `+0x17c = 0x40400000` (3.0) at
+/// `0x4771a2`; the per-frame clock at `0x4774f1` decrements it and hides the
+/// box (`+0x178`) when it reaches zero.
+pub const CAMERA_LABEL_SECONDS: f32 = 3.0;
+
 /// What `--match` was asked to do.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -165,9 +172,26 @@ pub struct Session {
     player_input: DriveInput,
     /// Accumulates wall-clock time for [`Session::advance`].
     accumulator: f32,
+    /// Seconds left on `camera textbox`'s 3.0 s display window.
+    camera_label_left: f32,
+    /// The arena's own first static camera name (`AddStaticCamera`), which the
+    /// original puts in the textbox instead of the class default.
+    static_camera_label: Option<String>,
+    /// The chat group is open (backslash). Local only; nothing is sent.
+    chat_open: bool,
+    chat_entry: String,
     /// The pause dialog's widgets, loaded once.
     pub dialog: Gib,
     presentation: Presentation,
+}
+
+/// The values the HUD needs that are not part of the match report: the camera
+/// name (and its 3 s window) and the local chat state.
+struct ScreenBind {
+    camera: String,
+    show_camera: bool,
+    chat_open: bool,
+    chat_entry: String,
 }
 
 struct Presentation {
@@ -204,13 +228,14 @@ impl Presentation {
         state: MatchState,
         clock: f32,
         countdown_left: f32,
-        camera: &str,
+        bind: &ScreenBind,
     ) -> Result<(hud::Hud, UiScene), String> {
         let Some(root) = self.root_mut() else {
             return Err("gamewindow.gib has no root widget".into());
         };
         let bound = hud::hud(root, report, state, clock, countdown_left);
-        hud::set_camera(root, camera);
+        hud::set_camera(root, &bind.camera, bind.show_camera);
+        hud::set_chat(root, bind.chat_open, &bind.chat_entry);
         let placed = ra2ui::resolve_with(&self.hud, SHELL_SIZE, Some(self.assets.faces()));
         // The scene's coordinates are the design screen, not the target: the
         // renderer's `fit` maps 1280×1005 into the window or PNG.
@@ -253,21 +278,21 @@ impl Presentation {
     }
 
     /// The HUD with the pause dialog over it.
-    #[allow(clippy::too_many_arguments)]
     fn pause_scene(
         &mut self,
         report: &MatchReport,
         state: MatchState,
         clock: f32,
         countdown_left: f32,
-        camera: &str,
+        bind: &ScreenBind,
         dialog: &Gib,
     ) -> Result<UiScene, String> {
         let Some(root) = self.root_mut() else {
             return Err("gamewindow.gib has no root widget".into());
         };
         hud::hud(root, report, state, clock, countdown_left);
-        hud::set_camera(root, camera);
+        hud::set_camera(root, &bind.camera, bind.show_camera);
+        hud::set_chat(root, bind.chat_open, &bind.chat_entry);
         let mut placed = ra2ui::resolve_with(&self.hud, SHELL_SIZE, Some(self.assets.faces()));
         let dialog_placed = ra2ui::resolve_with(dialog, SHELL_SIZE, Some(self.assets.faces()));
         placed.extend(dialog_placed);
@@ -349,6 +374,13 @@ impl Session {
         }
         let presentation = Presentation::open(game)?;
         let dialog = ra2ui::workshop::load(&game.join("UI"), "common/ingame_dialog.gib")?;
+        // `0x418d70`/`0x418e20` ask the scene camera for its name; the arena's
+        // `AddStaticCamera` first argument is that name ("Static 1" in
+        // `Arenas/box.py:22`). Our static mode uses the first position, so it
+        // can carry the same name.
+        let static_camera_label = ra2fmt::arena::parse_path(Path::new(&matched.config.arena))
+            .ok()
+            .and_then(|script| script.static_cameras.first().map(|c| c.name.clone()));
         let report = matched.report();
         println!(
             "match: {} — {}, {:.0}s, camera {}",
@@ -370,6 +402,10 @@ impl Session {
             player_robot: 0,
             player_input: DriveInput::default(),
             accumulator: 0.0,
+            camera_label_left: CAMERA_LABEL_SECONDS,
+            static_camera_label,
+            chat_open: false,
+            chat_entry: String::new(),
             dialog,
             presentation,
         })
@@ -423,6 +459,11 @@ impl Session {
     /// One fixed simulation step, with the evidence script's decision at the
     /// configured length. A natural finish (a destroyed chassis) is left alone.
     pub fn step(&mut self) {
+        // `0x4774f1`: the camera-name window runs on the game's own dt.
+        if self.camera_label_left > 0.0 {
+            let dt = self.matched.config.dt;
+            self.camera_label_left = (self.camera_label_left - dt).max(0.0);
+        }
         if self.matched.state() == MatchState::Fight {
             let dt = self.matched.config.dt;
             let limit = self.matched.config.duration;
@@ -491,7 +532,78 @@ impl Session {
                 _ => DuelCamera::Watch,
             }
         };
-        println!("camera: {}", self.camera.name());
+        self.camera_label_left = CAMERA_LABEL_SECONDS;
+        println!("camera: {} ({})", self.camera.name(), self.camera_label());
+    }
+
+    /// The text `camera textbox` shows: the camera object's name, with the
+    /// arena's own static-camera name when it has one.
+    pub fn camera_label(&self) -> &str {
+        if matches!(self.camera, DuelCamera::Static) {
+            if let Some(name) = &self.static_camera_label {
+                return name;
+            }
+        }
+        self.camera.display_name()
+    }
+
+    /// Whether the 3.0 s camera-name window is still open.
+    pub fn show_camera_label(&self) -> bool {
+        self.camera_label_left > 0.0
+    }
+
+    /// Whether the local chat entry is open (backslash).
+    pub fn chat_open(&self) -> bool {
+        self.chat_open
+    }
+
+    /// Open or close the chat group. `0x475ee0` opens it on `\` during play
+    /// (`+0x1b4` visible, `+0x1b8` focused). The text is local; nothing is
+    /// sent.
+    pub fn toggle_chat(&mut self) {
+        if self.matched.state() == MatchState::Results || self.paused {
+            return;
+        }
+        self.chat_open = !self.chat_open;
+        self.chat_entry.clear();
+        println!("chat: {}", if self.chat_open { "open" } else { "closed" });
+    }
+
+    /// Append a typed character to the chat entry.
+    pub fn chat_type(&mut self, c: char) {
+        if self.chat_open && !c.is_control() {
+            self.chat_entry.push(c);
+        }
+    }
+
+    /// Remove the last typed character.
+    pub fn chat_backspace(&mut self) {
+        if self.chat_open {
+            self.chat_entry.pop();
+        }
+    }
+
+    /// Close the chat entry on Enter or Escape and log the line. The file's
+    /// `chat displaybox` is a `DisplayBox`; drawing its history is not part of
+    /// this minimum.
+    pub fn chat_submit(&mut self) {
+        if !self.chat_open {
+            return;
+        }
+        if !self.chat_entry.is_empty() {
+            println!("chat (local): {}", self.chat_entry);
+            self.chat_entry.clear();
+        }
+        self.chat_open = false;
+    }
+
+    fn screen_bind(&self) -> ScreenBind {
+        ScreenBind {
+            camera: self.camera_label().to_string(),
+            show_camera: self.show_camera_label(),
+            chat_open: self.chat_open,
+            chat_entry: self.chat_entry.clone(),
+        }
     }
 
     /// The scene for this instant: results at the end, otherwise HUD (plus the
@@ -504,19 +616,14 @@ impl Session {
         if state == MatchState::Results {
             return self.presentation.results_scene(&report);
         }
+        let bind = self.screen_bind();
         if self.paused {
             let dialog = self.dialog.clone();
-            self.presentation.pause_scene(
-                &report,
-                state,
-                clock,
-                countdown,
-                self.camera.name(),
-                &dialog,
-            )
+            self.presentation
+                .pause_scene(&report, state, clock, countdown, &bind, &dialog)
         } else {
             self.presentation
-                .hud_scene(&report, state, clock, countdown, self.camera.name())
+                .hud_scene(&report, state, clock, countdown, &bind)
                 .map(|(_, scene)| scene)
         }
     }
@@ -528,8 +635,9 @@ impl Session {
         let state = self.matched.state();
         let clock = self.matched.clock();
         let countdown = self.matched.countdown_left();
+        let bind = self.screen_bind();
         self.presentation
-            .hud_scene(&report, state, clock, countdown, self.camera.name())
+            .hud_scene(&report, state, clock, countdown, &bind)
     }
 
     /// Whether a click in the pause dialog hit a named button.
@@ -1348,6 +1456,48 @@ mod tests {
             assert!(path.is_file(), "{}", path.display());
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `camera textbox` names the camera object and hides after 3.0 s.
+    ///
+    /// The three shipped cameras call themselves `Watch Cam`, `Static Cam` and
+    /// `Orbit Cam` (`0x6f1044`, `0x6f1038`, `0x6f102c`); the arena's own
+    /// `AddStaticCamera("Static 1", …)` (`Arenas/box.py:22`) replaces the
+    /// static default. `FUN_00477180` shows the box for 3.0 s (`0x4771a2`) and
+    /// `0x4774f1` hides it at zero.
+    #[test]
+    fn the_camera_textbox_names_the_camera_and_hides_after_three_seconds() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options = Options::new(
+            &game,
+            None,
+            Vec::new(),
+            Some(2.0),
+            Some(std::env::temp_dir().join("ra2-match-camera-label")),
+            None,
+            [640, 502],
+        )
+        .unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        assert_eq!(session.camera_label(), "Watch Cam");
+        assert!(session.show_camera_label());
+        session.cycle_camera();
+        assert_eq!(
+            session.camera_label(),
+            "Static 1",
+            "the arena's own static camera name"
+        );
+        assert!(session.show_camera_label(), "a change re-opens the window");
+        session.cycle_camera();
+        assert_eq!(session.camera_label(), "Orbit Cam");
+        let steps = (crate::match_mode::CAMERA_LABEL_SECONDS / session.matched.config.dt).ceil()
+            as usize
+            + 2;
+        for _ in 0..steps {
+            session.step();
+        }
+        assert!(!session.show_camera_label(), "the 3.0 s window has run out");
     }
 
     /// The shipped dialog is the in-game pause popup; its two buttons are named

@@ -130,14 +130,14 @@ impl JoltBackend {
         // events recorded, only the settings callback; oxijolt installs the
         // native contact listener whenever one is set.
         let friction = Arc::new(RwLock::new(HashMap::new()));
-        // `RA2_FRICTION_LAW=havok` enables the game's own combine law. It is
-        // off by default until the wheel-mount residual is fixed: with it the
-        // 45-bot survey measures 38/45 (`Team3/Bot1` 1.47 m, `Team7/Bot1`
-        // 1.49 m, both spinning on a ~2 cm-low wheel) against 39/45 under
-        // Jolt's `sqrt(µ₁·µ₂)`. See F6/F1 in `docs/06-deferred-fidelity.md`.
+        // The game's own combine law is the default; `RA2_FRICTION_LAW=jolt`
+        // opts into Jolt's `sqrt(µ₁·µ₂)` for comparison. With Havok's law the
+        // 45-bot survey measures 38/45 against 39/45 under Jolt's: the two
+        // losses are a ~2 cm-low wheel on two bots (F1 mount residual), not
+        // the law. See F6/F1 in `docs/06-deferred-fidelity.md`.
         let havok = std::env::var("RA2_FRICTION_LAW")
-            .map(|v| v.eq_ignore_ascii_case("havok"))
-            .unwrap_or(false);
+            .map(|v| !v.eq_ignore_ascii_case("jolt"))
+            .unwrap_or(true);
         if havok {
             world.set_contact_listener(Some(Arc::new(HavokFriction {
                 friction: Arc::clone(&friction),

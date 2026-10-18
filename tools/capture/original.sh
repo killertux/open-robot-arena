@@ -6,7 +6,7 @@
 #   RA2_CAPTURE_XEPHYR=1 tools/capture/original.sh   # start the display first
 #
 # What this script can and cannot do on this machine (measured 2026-10-18,
-# documented in docs/22-windowed.md §4):
+# documented in docs/25-windowed.md §4):
 #
 #   * It can reach the **main menu**: the two startup dialogs are dismissed with
 #     Return, which Wine receives through the normal keyboard path.
@@ -178,7 +178,7 @@ Method: XTEST XTestFakeMotionEvent + XTestFakeButtonEvent after XSetInputFocus.
 Reason measured with WINEDEBUG=+dinput: DirectInput8 exclusive mouse,
 GetDeviceData returns 0 events for XTEST, XWarpPointer, XSendEvent, host
 pointer through Xephyr, Wine SetCursorPos/mouse_event, and /dev/uinput.
-See docs/22-windowed.md §4.
+See docs/25-windowed.md §4.
 EOF
     echo "original: mainmenu captured; click at $CLICK_X,$CLICK_Y did not activate (MAE $MAE)"
     echo "          see $ORIG/mainmenu__${SIZE}__${SEQ}.click-failed.txt"
