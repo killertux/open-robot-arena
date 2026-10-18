@@ -30,6 +30,74 @@ use glam::{Mat4, Quat, Vec3};
 use crate::bot::{Bot, Component};
 use crate::gmi::Attachment;
 
+/// The rotation **every chassis child in the shipped corpus stores**:
+/// `(x, y, z, w) = (√½, 0, 0, √½)`, a quarter turn about +X.
+///
+/// All **523** chassis children across the 57 shipped bots carry exactly this
+/// quaternion; it is the component's model-up convention on the baseplate, not
+/// a player choice. The workshop writes it when it places a new chassis child.
+pub const CHASSIS_CHILD_ROTATION: [f32; 4] = [
+    std::f32::consts::FRAC_1_SQRT_2,
+    0.0,
+    0.0,
+    std::f32::consts::FRAC_1_SQRT_2,
+];
+
+/// The blueprint's unit scale: its own `Unit Scale AP = .22 M` bar means 100
+/// outline units are 0.22 m, so 1000 units span 2.2 m.
+///
+/// The chassis' `bottom`/`top` outlines are stored in `0..1000`; the embedded
+/// mesh's rings are those outlines mapped through this scale (measured on all
+/// 57 bots, `x = (u - 500) · 0.0022`, `z = -(v - 500) · 0.0022`).
+pub const BASEPLATE_UNITS_PER_METRE: f32 = 1000.0 / 2.2;
+
+/// The half-extent of the blueprint sheet, in metres (`1000` units → ±1.1 m).
+pub const BASEPLATE_HALF_EXTENT: f32 = 1.1;
+
+/// An outline coordinate (`0..1000`, the file's own space) as bot-local metres.
+///
+/// The mesh negates the outline's `v` axis, which is why this is `(u, -v)`:
+/// measured on every shipped chassis, the mesh's first ring is the `bottom`
+/// outline in file order with `z` mirrored, and the second is `top`.
+pub fn baseplate_to_world(point: [f32; 2]) -> [f32; 2] {
+    [
+        (point[0] - 500.0) / BASEPLATE_UNITS_PER_METRE,
+        -(point[1] - 500.0) / BASEPLATE_UNITS_PER_METRE,
+    ]
+}
+
+/// Bot-local metres as an outline coordinate (`0..1000`), the inverse of
+/// [`baseplate_to_world`].
+pub fn world_to_baseplate(point: [f32; 2]) -> [f32; 2] {
+    [
+        500.0 + point[0] * BASEPLATE_UNITS_PER_METRE,
+        500.0 - point[1] * BASEPLATE_UNITS_PER_METRE,
+    ]
+}
+
+/// Clamp a bot-local point to the blueprint sheet the baseplate grid covers.
+pub fn clamp_baseplate(point: [f32; 2]) -> [f32; 2] {
+    [
+        point[0].clamp(-BASEPLATE_HALF_EXTENT, BASEPLATE_HALF_EXTENT),
+        point[1].clamp(-BASEPLATE_HALF_EXTENT, BASEPLATE_HALF_EXTENT),
+    ]
+}
+
+/// The component a baseplate click creates: the stored transform the corpus
+/// uses (`y = 0`, the quarter-turn rotation, the player's yaw and height).
+pub fn chassis_child(point: [f32; 2], angle: f32, height: f32) -> Component {
+    let point = clamp_baseplate(point);
+    Component {
+        parent: 0,
+        parent_mount: 0,
+        translation: [point[0], 0.0, point[1]],
+        rotation: CHASSIS_CHILD_ROTATION,
+        angle,
+        height,
+        ..Default::default()
+    }
+}
+
 /// A `.gmf` transform triple (four rows of three) as a `Mat4`.
 ///
 /// The rows are axes, the last one the origin — PyRA2's `TransformMatrix`
@@ -295,6 +363,33 @@ mod tests {
         let frames = MountFrames::empty(2);
         let stored = worlds(&bot, &frames, MountOptions::default());
         assert_eq!(stored[1], component_local(&child));
+    }
+
+    /// The baseplate's own scale: the blueprint says 100 units are 0.22 m, and
+    /// the mesh negates `v`. A round trip through both directions is exact.
+    #[test]
+    fn the_baseplate_maps_outline_units_to_metres() {
+        assert!((baseplate_to_world([500.0, 500.0])[0]).abs() < 1e-6);
+        assert!((baseplate_to_world([600.0, 500.0])[0] - 0.22).abs() < 1e-6);
+        assert!((baseplate_to_world([500.0, 400.0])[1] - 0.22).abs() < 1e-6);
+        let world = baseplate_to_world([731.0, 219.0]);
+        let back = world_to_baseplate(world);
+        assert!((back[0] - 731.0).abs() < 1e-3);
+        assert!((back[1] - 219.0).abs() < 1e-3);
+        assert_eq!(clamp_baseplate([4.0, -4.0]), [1.1, -1.1]);
+    }
+
+    /// A placed chassis child carries the file's own quarter turn, `y = 0`, and
+    /// the point the click named.
+    #[test]
+    fn a_chassis_child_uses_the_stored_transform() {
+        let c = chassis_child([0.44, -0.66], 1.25, 0.1);
+        assert_eq!(c.parent, 0);
+        assert_eq!(c.parent_mount, 0);
+        assert_eq!(c.translation, [0.44, 0.0, -0.66]);
+        assert_eq!(c.rotation, CHASSIS_CHILD_ROTATION);
+        assert_eq!(c.angle, 1.25);
+        assert_eq!(c.height, 0.1);
     }
 
     /// A component-to-component link with a child's point but no parent point

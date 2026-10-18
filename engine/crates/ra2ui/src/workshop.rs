@@ -51,6 +51,7 @@ use ra2fmt::gib::{Block, Gib, Widget};
 use crate::{input, Fonts, Placement};
 
 pub mod build;
+pub mod chassis;
 pub mod library;
 pub mod paint;
 pub mod stats;
