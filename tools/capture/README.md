@@ -112,3 +112,19 @@ attaches hang: `kill -9 $(pgrep -x frida-server)` and start it again
 seconds after a dialog's OK before a `shot`.  Matches are **not** reproducible
 across runs (same route, three matches, two different winners); UI screens are (a re-boot
 re-capture of `teamhq-select` was byte-identical).
+
+## Audio of the original
+
+```sh
+tools/capture/record_audio.sh local/oracle/original/audio/mainmenu-music__15s__000.wav 15
+```
+
+Records only the game's own PipeWire/Pulse stream (`parec --monitor-stream=<index of "Robot Arena 2.exe">`,
+48 kHz stereo s16), so host audio is not mixed in. Works with the Wine flatpak running; verified for the main
+menu music and a match.
+
+## Correction: input to the original is possible
+
+The earlier statement that no synthetic mouse reaches the original was wrong; see "The original game's
+input limit" above and `docs/12-oracle.md` §3.4. The measurement scripts built on it are in
+`tools/oracle/README.md` (fidelity harness and `capture_*.py`).

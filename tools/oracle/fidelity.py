@@ -477,34 +477,59 @@ def drive_compare(gdir):
                        capture_output=True, text=True, env=env(), timeout=300)
     if p.returncode:
         return {"error": p.stderr[-300:]}
-    return {"reference": os.path.basename(ref), "meta": m,
-            "original": drive_metrics(last_segment(read_trace(ref)), m),
-            "ours": drive_metrics(read_trace(ours_tsv), m)}
+    orows = read_trace(ref)
+    # original: phase edges from the recorded command columns (cmd_throttle, cmd_turn)
+    def first(pred, start=0):
+        for i in range(start, len(orows)):
+            if pred(orows[i][1][0]):
+                return i
+        return None
+    i_turn = first(lambda d: d[7] != 0)
+    i_turn_end = first(lambda d: d[7] == 0, i_turn)
+    i_str = first(lambda d: d[6] != 0, i_turn_end)
+    i_str_end = first(lambda d: d[6] == 0, i_str)
+    oe = {k: orows[i][0] for k, i in (("turn_start", i_turn), ("turn_end", i_turn_end),
+                                      ("str_start", i_str), ("str_end", i_str_end))}
+    segs = [seg.split(":")[0].split("-") for seg in m["ours_script"].split(";")]
+    se = {"turn_start": float(segs[0][0]), "turn_end": float(segs[0][1]),
+          "str_start": float(segs[2][0]), "str_end": float(segs[2][1])}
+    return {"reference": os.path.basename(ref), "meta": m, "original_edges": oe,
+            "original": drive_metrics(orows, oe), "ours": drive_metrics(read_trace(ours_tsv), se)}
 
 
-def drive_metrics(rows, m):
-    """Straight leg [0,straight_s], then turn leg: time to 90% of top speed,
-    top speed, distance covered, and the mean yaw rate during the turn."""
-    t0 = rows[0][0]
-    rel = [(t - t0, d[0]) for t, d in rows]
-    straight = [(t, d) for t, d in rel if t <= m["straight_s"]]
-    top = max(abs(d[3]) for _, d in straight)
-    t90 = next((t for t, d in straight if abs(d[3]) >= 0.9 * top), None)
-    p0, p1 = straight[0][1][1], straight[-1][1][1]
-    dist = math.hypot(p1[0] - p0[0], p1[2] - p0[2])
-    turn = [(t, d) for t, d in rel if t >= m["straight_s"] + m.get("turn_skip_s", 0.5)]
-    rate = float("nan")
-    if len(turn) > 2:
-        unwrap, prev, acc = [], turn[0][1][2], 0.0
-        for t, d in turn:
-            h = d[2]
-            dh = (h - prev + math.pi) % (2 * math.pi) - math.pi
+def drive_metrics(rows, e):
+    """Per-phase numbers of the single-robot drive test (robot 0)."""
+    pts = [(t, d[0]) for t, d in rows]
+    def seg(a, b):
+        return [(t, d) for t, d in pts if a <= t <= b]
+    # turn in place: mean yaw rate after a 0.5 s spin-up, and the peak
+    turn = seg(e["turn_start"] + 0.5, e["turn_end"])
+    rates, prev = [], None
+    acc = 0.0
+    for t, d in turn:
+        if prev is not None:
+            dh = (d[2] - prev[1] + math.pi) % (2 * math.pi) - math.pi
             acc += dh
-            prev = h
-            unwrap.append((t, acc))
-        rate = (unwrap[-1][1] - unwrap[0][1]) / (unwrap[-1][0] - unwrap[0][0])
-    return {"top_speed": top, "t_to_90pct": t90, "straight_distance": dist,
-            "turn_rate_rad_s": rate}
+            if t > prev[0]:
+                rates.append(dh / (t - prev[0]))
+        prev = (t, d[2])
+    span = turn[-1][0] - turn[0][0] if len(turn) > 1 else float("nan")
+    st = seg(e["str_start"], e["str_end"])
+    top = max((abs(d[3]) for _, d in st), default=float("nan"))
+    t90 = next((t - e["str_start"] for t, d in st if abs(d[3]) >= 0.9 * top), float("nan"))
+    def disp(a, b):
+        s0 = seg(a, b)
+        if len(s0) < 2:
+            return float("nan")
+        p0, p1 = s0[0][1][1], s0[-1][1][1]
+        return math.hypot(p1[0] - p0[0], p1[2] - p0[2])
+    peak_after = max((abs(d[3]) for _, d in seg(e["str_end"], e["str_end"] + 0.2)), default=float("nan"))
+    return {"turn_rate_rad_s": acc / span if span == span and span > 0 else float("nan"),
+            "turn_rate_peak": max((abs(r) for r in rates), default=float("nan")),
+            "top_speed": top, "t_to_90pct_s": t90,
+            "straight_distance_m": disp(e["str_start"], e["str_end"]),
+            "coast_distance_m": disp(e["str_end"], e["str_end"] + 3.0),
+            "speed_at_release": peak_after}
 
 
 # --------------------------------------------------------------------------
@@ -518,6 +543,8 @@ def fmt(x, nd=2):
 def screens_md(rows):
     lines = ["| fixture | renderer | MAE | masked | >8 px | lowfreq | status |",
              "|---|---|---:|---:|---:|---:|---|"]
+    arena = [r for r in rows if r["id"].startswith("arena-") and r["status"] == "unreachable"]
+    rows = [r for r in rows if r not in arena]
     for r in rows:
         if r["status"] == "ok":
             lines.append(f"| {r['id']} | {r['renderer']} | {r['mae']:.2f} | {r['masked']:.2f} | "
@@ -525,6 +552,9 @@ def screens_md(rows):
         else:
             lines.append(f"| {r['id']} | {r['renderer']} | - | - | - | - | "
                          f"{r['status']}: {r.get('reason', '')} |")
+    if arena:
+        lines.append("| arena-* (%d references: select/intro/countdown/f2/f3/f3b/f4 x 8 arenas) | - | - | - | - | - | "
+                     "unreachable: no app route to a per-arena match camera still |" % (len(arena) // 2 or len(arena)))
     ok = [r for r in rows if r["status"] == "ok"]
     for rd in sorted({r["renderer"] for r in ok}):
         sub = [r for r in ok if r["renderer"] == rd]
@@ -557,7 +587,7 @@ def gameplay_md(g):
     dv = g.get("drive", {})
     if "original" in dv:
         L += ["", f"Drive test ({dv['reference']}):", "", "| metric | original | ours |", "|---|---:|---:|"]
-        for k in ("top_speed", "t_to_90pct", "straight_distance", "turn_rate_rad_s"):
+        for k in ("turn_rate_rad_s", "turn_rate_peak", "top_speed", "t_to_90pct_s", "straight_distance_m", "speed_at_release", "coast_distance_m"):
             L.append(f"| {k} | {fmt(dv['original'][k])} | {fmt(dv['ours'][k])} |")
     elif dv:
         L += ["", "Drive test: " + (dv.get("skipped") or dv.get("error", ""))]

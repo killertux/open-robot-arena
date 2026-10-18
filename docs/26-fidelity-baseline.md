@@ -1,0 +1,169 @@
+# 26 - Fidelity baseline (the "before")
+
+Measured 2026-10-18 by `tools/oracle/fidelity.py --gameplay` on the `fx/oracle-harness`
+branch, against **genuine captures of the original** (flatpak Wine 9.0, wined3d/llvmpipe,
+1024x768, `local/oracle/original/`). Nothing here uses `tools/ui_compose.py`; those
+numbers (0.0001-0.45) are self-consistency, not fidelity (see README "Validation").
+Every later fix should be reported as a change to this table.
+
+Reproduce: `cd engine && cargo build --release --offline && cargo build --release --offline -p ra2sim --example fidtrace`,
+then `RA2_GAME=local/game python3 tools/oracle/fidelity.py --gameplay` (about 90 s). Outputs
+go to `local/oracle/fidelity/latest/` (`summary.md/json`, `ours/`, `side/` = original | ours | |diff| x4).
+
+## Metrics
+
+* `MAE`: mean absolute RGB difference, 0..255, over the whole frame. `masked`: same with the OS
+  pointer excluded (no capture of ours has one; kept for the old `mainmenu__000`). `>8 px`: fraction of
+  pixels differing by more than 8 in any channel. `lowfreq`: MAE after a 16x16 box downscale (layout and
+  colour, ignoring glyph detail).
+* Renderers. **app** = `ra2-app --offscreen --size 1024x768`: the shipped path. The shell is laid out
+  at its fixed 1280x1005 design size and resampled to 1024x768, so it can never match a game that lays
+  out natively at 1024x768. **shell** = `ra2-shell --size 1024x768`: native layout at the reference size.
+  The shell column is the fairer test of the layout/art code; the app column is what a player sees.
+* Match fixtures compare a *live fight* with ours (different robots positions, scores, camera), so
+  only the HUD/arena look is meaningful there, not a number near zero.
+
+## Screens
+
+| fixture | renderer | MAE | masked | >8 px | lowfreq | status |
+|---|---|---:|---:|---:|---:|---|
+| mainmenu | app | 23.96 | 23.96 | 48.5% | 17.64 | ok |
+| mainmenu | shell | 1.45 | 1.44 | 2.0% | 0.75 | ok |
+| exhibition-settings | app | 54.81 | 54.81 | 93.4% | 53.22 | ok |
+| exhibition-settings | shell | 49.06 | 49.06 | 88.0% | 47.33 | ok |
+| exhibition-arena | app | 60.22 | 60.22 | 89.3% | 58.37 | ok |
+| exhibition-arena | shell | 56.88 | 56.88 | 86.7% | 54.95 | ok |
+| exhibition-arena-box | app | 51.17 | 51.17 | 85.7% | 49.22 | ok |
+| exhibition-arena-box | shell | - | - | - | - | unreachable: only ra2-app --play drives the arena list |
+| exhibition-robots | app | 52.82 | 52.82 | 93.9% | 51.23 | ok |
+| exhibition-robots | shell | 47.53 | 47.53 | 88.1% | 45.78 | ok |
+| exhibition-deathmatch | app | 54.23 | 54.23 | 93.3% | 51.77 | ok |
+| exhibition-deathmatch | shell | 48.72 | 48.72 | 88.2% | 46.06 | ok |
+| exhibition-pick-ai | app | - | - | - | - | unreachable: the Select Computer Robot dialog has no named-click route in the shell |
+| exhibition-pick-ai | shell | - | - | - | - | unreachable: the Select Computer Robot dialog has no named-click route in the shell |
+| exhibition-robots-filled | app | - | - | - | - | unreachable: picker clicks need pixel points; ra2-app cannot mix pixel and named clicks |
+| exhibition-robots-filled | shell | - | - | - | - | unreachable: picker clicks need pixel points; ra2-app cannot mix pixel and named clicks |
+| teamhq-select | app | 18.60 | 18.60 | 50.2% | 15.89 | ok |
+| teamhq-select | shell | 10.04 | 10.04 | 19.9% | 9.11 | ok |
+| teamhq-inventory | app | 33.14 | 33.14 | 71.7% | 29.34 | ok |
+| teamhq-inventory | shell | 26.31 | 26.31 | 50.4% | 23.68 | ok |
+| teamhq-standings | app | 49.86 | 49.86 | 74.2% | 44.45 | ok |
+| teamhq-standings | shell | 44.38 | 44.38 | 57.4% | 39.54 | ok |
+| teamhq-events | app | 50.14 | 50.14 | 75.4% | 43.49 | ok |
+| teamhq-events | shell | 44.70 | 44.70 | 58.4% | 38.87 | ok |
+| teamhq-history | app | 30.28 | 30.28 | 69.5% | 26.49 | ok |
+| teamhq-history | shell | 24.59 | 24.59 | 48.6% | 21.95 | ok |
+| botlab-overview | app | 32.73 | 32.73 | 66.4% | 29.01 | ok |
+| botlab-overview | shell | 28.59 | 28.59 | 51.8% | 26.05 | ok |
+| botlab-chassis | app | 30.39 | 30.39 | 63.5% | 27.89 | ok |
+| botlab-chassis | shell | 23.87 | 23.87 | 45.5% | 22.25 | ok |
+| botlab-components | app | 32.90 | 32.90 | 68.2% | 29.08 | ok |
+| botlab-components | shell | 26.01 | 26.01 | 50.7% | 23.35 | ok |
+| botlab-wiring | app | 35.32 | 35.32 | 70.5% | 29.77 | ok |
+| botlab-wiring | shell | 30.59 | 30.59 | 60.6% | 25.67 | ok |
+| botlab-paint | app | 37.18 | 37.18 | 74.4% | 33.76 | ok |
+| botlab-paint | shell | 30.10 | 30.10 | 62.9% | 27.33 | ok |
+| match-countdown | app | 42.60 | 42.60 | 96.3% | 40.94 | ok |
+| match-countdown | shell | - | - | - | - | unreachable: the match is only rendered by ra2-app |
+| match-hud | app | 26.98 | 26.98 | 95.1% | 25.96 | ok |
+| match-hud | shell | - | - | - | - | unreachable: the match is only rendered by ra2-app |
+| match-results | app | 44.49 | 44.49 | 90.8% | 41.70 | ok |
+| match-results | shell | - | - | - | - | unreachable: the match is only rendered by ra2-app |
+| arena-* (56 references: select/intro/countdown/f2/f3/f3b/f4 x 8 arenas) | - | - | - | - | - | unreachable: no app route to a per-arena match camera still |
+| **mean of 19** | app | 40.10 | 40.10 | 77.4% | 36.80 | |
+| **mean of 15** | shell | 32.86 | 32.85 | 57.3% | 30.18 | |
+
+Reading it: the only screen near the original is `mainmenu` on the shell path (1.45; this is the
+historic 1.439 number). The app path is 24 on the same screen (the 1280x1005 resample). Every other
+shell screen is 10-60: the exhibition setup is the worst (about 50-60; the shell at 1024x768 lays the
+panels out wrongly: see `side/shell/exhibition-*.png`), Team HQ/bot lab 10-45. Not reachable by our app
+today: the Select Computer Robot dialog, filled robot slots, per-arena static cameras (56 original
+stills of the eight stock arenas exist as references), the match HUD with the original's camera.
+
+## Gameplay (Scout vs ALARM, Combat Arena, DEATHMATCH, no human input)
+
+Original fight length used: 114.8 s.  Ours: fight 114.81s, reason Some(Timeout), winners [], points [0, 0]
+
+| robot | metric | original | ours |
+|---|---|---:|---:|
+
+| damage | original | ours |
+|---|---:|---:|
+| events | 8.00 | 0.00 |
+| weapon_events | 3.00 | 0.00 |
+| env_events | 5.00 | 0.00 |
+| events_per_s | 0.07 | 0.00 |
+| total | 165.69 | 0.00 |
+| magnitude <5 | 0 | 0 |
+| magnitude 5-10 | 0 | 0 |
+| magnitude 10-20 | 7 | 0 |
+| magnitude 20-50 | 0 | 0 |
+| magnitude >=50 | 1 | 0 |
+
+Drive test (drive-scout-box__live__000.tsv):
+
+| metric | original | ours |
+|---|---:|---:|
+| turn_rate_rad_s | 10.66 | -1.33 |
+| turn_rate_peak | 14.94 | 1.64 |
+| top_speed | 11.12 | 2.26 |
+| t_to_90pct_s | 1.58 | 1.70 |
+| straight_distance_m | 15.42 | 2.77 |
+| speed_at_release | 10.86 | 0.10 |
+| coast_distance_m | 8.05 | 0.01 |
+
+Notes on the numbers.
+
+* Original side: `match-trace-box-scout-alarm__live__002.tsv` (one whole match, 114.8 s of fight) and
+  `match-damage__live__000.jsonl` (8 calls into the damage sink; weapon hits are logged on both
+  participants, hence pairs). Ours: `ra2sim --example fidtrace` (`Match` with the shipped AI, same bots,
+  same length), the same heading/speed conventions (`atan2(fx,fz)`; forward velocity).
+* **The original's robots fight and move; ours barely do** (ALARM never moves, Scout drifts ~27 m, no
+  damage in 115 s). The AI bring-up in our sim is the largest gameplay gap.
+* **Hitpoints are on a different scale**: the original's `plus.getHitpoints(p,0)` is 1828 (Scout) / 2662
+  (ALARM) at the start; ours reports the chassis health in 300 / 350.
+* Our damage events are per physics step in which `damage_taken` grew (one number per step per
+  victim); the original's are per call of `FUN_004175b0`. Compare counts and magnitudes loosely.
+* Drive test: the original Scout reaches ~11 m/s in ~1.6 s and spins in place at ~10 rad/s; ours reaches
+  ~2.3 m/s and turns at ~1.3 rad/s. The motor model is far too weak/slow (see
+  `drive-scout-box__live__000.tsv`; the straight leg was released at ~2.2 s so 15 m is the original).
+  The original was driven by `SuperAI.Throttle(100)/Turn(100)` (the commanded values are columns in
+  the trace) with both AI brains neutered; ours uses `DriveInput {throttle 1, steer 1}`.
+
+## Ground truth added for other workstreams
+
+| what | where | produced by |
+|---|---|---|
+| 8 stock arenas x (picker select, intro fly-by, countdown, F2 orbit, F3 static 1, F3 again = static 2, F4 watch) 1024x768 | `original/arena-<id>-<shot>__1024x768__000.png` (id: bridge, box, compressor, electric, halfcircle, metalskull, parkinglot, octagon) | `tools/oracle/capture_arenas.py` |
+| Deterministic-ish drive test (turn in place, coast, full throttle, stop; ~13 Hz; command columns) | `original/drive-scout-box__live__000.tsv/.json` | `tools/oracle/capture_drive.py` |
+| Weapon test: inert Scout vs ALARM's Poker AI, per-component health, damage hook | `original/weapon-alarm-vs-inert-scout__live__000.tsv/.jsonl` | `tools/oracle/capture_weapon.py` |
+| Audio: main menu music (13 s), match (18 s) from the game's own stream | `original/audio/*.wav` | `tools/capture/record_audio.sh` |
+| Reproducibility runs | `original/repro-{none,seed}__live__00{0,1}.tsv` | `tools/oracle/capture_repro.py` |
+
+Limits of the weapon test: only Red Zone robots can be picked (the team drop-down of the Select Computer
+Robot dialog does not open under our mouse injection), so no spinner/hammer attacker; the AI attacker
+landed only two weapon hits (20.0 and 25.2) before idling. Pre-fight damage already present at the first sample (Scout
+at 0.83).
+
+## Audio
+
+`tools/capture/record_audio.sh OUT.wav [SECONDS]` records only the game's PipeWire stream:
+`parec --monitor-stream=<sink-input index of "Robot Arena 2.exe">` (48 kHz stereo s16). It works; both
+captures are non-silent (rms about 2600, peak up to full scale), and it does not pick up host audio.
+
+## Reproducibility
+
+Matches are not reproducible run to run. Findings (2026-10-18):
+
+* The exe has no `srand`/`rand` symbols (static CRT). The VS CRT `_rand` is at `0x63dcf2` (found by the
+  LCG constant `0x269ec3`; the seed lives in per-thread data `+0x14`); its only callers are a
+  `std::random_shuffle` over collision triangles (`0x546f70`) and `0x620b50`, `0x62c430`. The shipped
+  Python arenas use the `random` module (announcer choice, `Hazards.py` timing).
+* `tools/oracle/frida/ra2_seed.js` replaces `_rand` with a fixed-seed LCG, and `random.seed(1234)` can be run
+  in-game before Start Game (`capture_repro.py --pin seed`).
+* Two identical matches (Scout vs ALARM, no input) drift apart immediately without pins (robot 1 up to
+  9 m apart at 6 s of fight time; 2-3 m at 10-20 s) and still do with both pins (robot positions
+  differ by 1-2 m at 6 s and 3-6 m at 20 s), though less early. The remaining nondeterminism is
+  not the RNG: the game's time source (frame dt under llvmpipe, `plus.getFPS()` ~17-80) and AI timers are
+  wall-clock driven. `plus.setTimestep`/`setSubsteps` exist and were **not** tried. Consequence: compare
+  distributions, not trajectories; scripted-input tests (the drive test) are the reproducible kind.
