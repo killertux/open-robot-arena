@@ -471,12 +471,25 @@ fn num(def: &ra2fmt::component::ComponentDef, key: &str) -> Option<f32> {
 }
 
 /// The maximum hitpoints: the definition's `hitpoints`, else the factory's
-/// category table, else the role's fallback (an unloaded component).
+/// category table, else **100**.
+///
+/// The component constructor (`FUN_0045cc10`, `0x45cc8e`) stores a maximum of
+/// `0x64` before the factory's `type` switch (`FUN_0045cf40`, `0x45d09e`..) runs,
+/// so a component whose `type` is none of the six categories keeps 100 — not an
+/// invented per-role number. Only a component with no definition at all (never
+/// the case in the game) falls back to the role's guess.
 fn type_hitpoints(def: Option<&ra2fmt::component::ComponentDef>, role: Role) -> f32 {
-    def.and_then(|d| d.number("hitpoints"))
-        .or_else(|| ra2fmt::component::category_hitpoints(def))
-        .unwrap_or_else(|| role.default_hitpoints())
+    match def {
+        Some(d) => d
+            .number("hitpoints")
+            .or_else(|| ra2fmt::component::category_hitpoints(def))
+            .unwrap_or(COMPONENT_DEFAULT_HITPOINTS),
+        None => role.default_hitpoints(),
+    }
 }
+
+/// The maximum hitpoints the component constructor stores (`mov [esi+0xe8], 0x64`).
+const COMPONENT_DEFAULT_HITPOINTS: f32 = 100.0;
 
 /// The `fracture` default the same factory sets per category.
 fn type_fracture(def: Option<&ra2fmt::component::ComponentDef>) -> f32 {
@@ -1041,6 +1054,9 @@ mod tests {
         assert_eq!(hp("type = mobility\n"), 400.0);
         assert_eq!(hp("type = weapons\n"), 1000.0);
         assert_eq!(hp("type = extras\n"), 1000.0);
+        // No category: the constructor's 100, not a per-role guess.
+        assert_eq!(hp("name = x\n"), 100.0);
+        assert_eq!(hp("type = whatever\n"), 100.0);
         // A declared value wins (the ramplate declares 1000, a disc 500).
         assert_eq!(hp("type = weapons\nhitpoints = 500\n"), 500.0);
         // `fracture` has category defaults of its own.
