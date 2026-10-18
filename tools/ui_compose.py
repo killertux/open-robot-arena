@@ -195,7 +195,7 @@ def ra2_tool():
 class Font:
     """A `fg_*.giff`, dumped by `ra2 font` so that this stays a picture-maker."""
 
-    FIRST_CHAR = 34  # see `ra2fmt::giff`
+    FIRST_CHAR = 32  # see `ra2fmt::giff`: 95 records, 0x20..0x7E
 
     def __init__(self, ra2_binary, cfz, name, tmpdir):
         self.name = name
@@ -245,36 +245,29 @@ class Font:
         return g[0] if g else self.space_advance()
 
     def space_advance(self):
-        """The table starts at `"` -- the space and the bang are not in it -- so
-        a space is given the median advance, which is what it looks like."""
-        advances = sorted(g[0] for g in self.glyphs_only if g[0] > 0)
-        return advances[len(advances) // 2]
+        """The space has its own record (cell empty, advance 2-6)."""
+        return self.glyphs_only[0][0]
 
     def extent(self, text):
         """`(sum of advances, line height)`, the game's own extent."""
         return sum(self.advance(c) for c in text), self.line_height()
 
     def _rect(self, g):
-        _adv, _bear, third, u0, v0, u1, v1 = g
-        # The page's rows are stored **bottom-up**, so `v` is turned over here.
-        # `u` is not: the cells run left to right in reading order, and flipped
-        # vertically the page's row reads upright and in order.
+        _adv, bearing_x, bearing_y, u0, v0, u1, v1 = g
+        # The page is in texture order (top row first) and `v` is measured on
+        # it from the top, as in `ra2fmt::giff`.
         x0, x1 = round(u0 * self.width), round(u1 * self.width)
-        y0, y1 = self.height - round(v1 * self.height), self.height - round(v0 * self.height)
-        return third, x0, y0, x1 - x0, y1 - y0
+        y0, y1 = round(v0 * self.height), round(v1 * self.height)
+        return bearing_x, bearing_y, x0, y0, x1 - x0, y1 - y0
 
     def draw_glyph(self, canvas, width, height, x, y, ch, tint, clip):
         """Draw one glyph with its cell's top at `(x, y)`."""
         g = self.glyph(ch)
         if g is None:
             return
-        third, gx, gy, w, h = self._rect(g)
+        _bx, _by, gx, gy, w, h = self._rect(g)
         for yy in range(h):
-            # The page is stored **bottom-up only**: the last byte row is the
-            # one the eye sees first (sampled in byte order a `T` comes out with
-            # its bar at the bottom). The columns are **not** mirrored -- flipped
-            # vertically, the page's row reads upright and in order.
-            sy = gy + h - 1 - yy
+            sy = gy + yy
             row = self.page[sy * self.width + gx : sy * self.width + gx + w]
             for xx, v in enumerate(row):
                 if not v:
@@ -304,8 +297,8 @@ class Font:
             if g is None:
                 pen += self.space_advance()
                 continue
-            _third, _gx, _gy, _w, _h = self._rect(g)
-            self.draw_glyph(canvas, width, height, pen, y - _third, ch, tint, clip)
+            bx, by, _gx, _gy, _w, _h = self._rect(g)
+            self.draw_glyph(canvas, width, height, pen + bx, y - by, ch, tint, clip)
             pen += g[0]
 
     def wrap(self, text, width):
