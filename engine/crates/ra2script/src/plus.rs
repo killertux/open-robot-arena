@@ -135,7 +135,9 @@ fn is_match_paused() -> bool {
 
 #[pyfunction]
 #[pyo3(name = "introComplete")]
-fn intro_complete() {}
+fn intro_complete() {
+    crate::state().intro_running = false;
+}
 
 #[pyfunction]
 #[pyo3(name = "getPlayers")]
@@ -479,38 +481,51 @@ fn set_back_color(r: f32, g: f32, b: f32) {
 #[pyfunction]
 #[pyo3(name = "setCameraPosition")]
 fn set_camera_position(x: f32, y: f32, z: f32) {
-    let _ = (x, y, z);
-    defer("camera/backdrop (M5)");
+    crate::state()
+        .camera_commands
+        .push(crate::camera::CameraCommand::Position([x, y, z]));
 }
 
 #[pyfunction]
 #[pyo3(name = "setCameraRotation")]
-fn set_camera_rotation(x: f32, y: f32) {
-    let _ = (x, y);
-    defer("camera/backdrop (M5)");
+fn set_camera_rotation(pitch: f32, yaw: f32) {
+    crate::state()
+        .camera_commands
+        .push(crate::camera::CameraCommand::Rotation([pitch, yaw]));
 }
 
 #[pyfunction]
 #[pyo3(name = "setCameraFOV")]
 fn set_camera_fov(fov: f32) {
-    let _ = fov;
-    defer("camera/backdrop (M5)");
+    crate::state()
+        .camera_commands
+        .push(crate::camera::CameraCommand::Fov(fov));
 }
 
 #[pyfunction]
 #[pyo3(name = "setCameraFOVRange")]
-fn set_camera_fov_range(a: f32, b: f32, c: f32, d: f32) {
-    let _ = (a, b, c, d);
-    defer("camera/backdrop (M5)");
+fn set_camera_fov_range(min_distance: f32, max_distance: f32, fov_near: f32, fov_far: f32) {
+    crate::state()
+        .camera_commands
+        .push(crate::camera::CameraCommand::FovRange([
+            min_distance,
+            max_distance,
+            fov_near,
+            fov_far,
+        ]));
 }
 
-/// `animateCamera(from_pos, from_rot, from_fov, to_pos, to_rot, to_fov, ?,
-/// seconds)` — the intro fly-throughs and the hazard showcase shots.
+/// `animateCamera(pos0, rot0, fov0, pos1, rot1, fov1, t0, t1)` — the intro
+/// fly-throughs and the hazard showcase shots. See [`crate::camera`].
 #[pyfunction]
-#[pyo3(signature = (*_args))]
+#[pyo3(signature = (*args))]
 #[pyo3(name = "animateCamera")]
-fn animate_camera(_args: &Bound<'_, PyTuple>) {
-    defer("camera/backdrop (M5)");
+fn animate_camera(args: &Bound<'_, PyTuple>) -> PyResult<()> {
+    let animation = crate::camera::parse_animation(args)?;
+    crate::state()
+        .camera_commands
+        .push(crate::camera::CameraCommand::Animate(animation));
+    Ok(())
 }
 
 #[pyfunction]
