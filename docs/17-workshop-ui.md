@@ -34,14 +34,23 @@ quits (and in a `Test Robot` match it pauses, as `--match` does).
 | select an armour plate | a plate row in the panel on the `armor` step (the shipped `armor grid` is filled and drawn as well; its lower half is under the shell's bottom bar, so the panel row is what is clickable) | `Build::set_armour` |
 | select a component | a click on a `components grid` cell (the shipped palette, filled by its own `Notes` rule) | `ra2ui::components` |
 | attach it | the same click attaches at the panel's selected mount | `Build::attach` (the F1 rule) |
+| place / move a chassis child | a click on the live 3D preview, on the baseplate plane; the part's current angle and lift are kept | `Build::place_on_baseplate` (the stored transform) |
+| rotate / lift a chassis child | the panel's `rotate ±90 deg` and `lift +0.05 m` rows (the game's SHIFT-mouse rotate is not wired) | `Build::place_on_baseplate` |
 | choose the parent mount | a click on a mount row in the panel (`chassis baseplate 0:0`, or `component N mount M (axle_m)`) | `Build::attach`'s parent/own mounts |
 | remove | the shipped `remove button` (removes the selected part and its subtree) | `Build::remove` |
 | add a control | the shipped `new analog` / `new switch` / `new button` button, then a free `control grid` cell | `ControlBoard::add` |
 | select / delete a control | a click on its `control grid` cell; the shipped `delete button` | `ControlBoard::remove` |
 | bind a control | select the control cell, then the component row and an action row in the panel | `Build::bind_action` (`ControlBoard::bind_checked`) |
 | undo / redo placement | `Ctrl+Z` / `Ctrl+Y` or the panel row | `Build::undo` / `redo` |
-| paint a face group | select a `Texture Library/` row (or a `Custom Textures/` row), then a face row | `Paint::fill_group` |
+| choose a paint mode | the Paint Shop's `mode: texture fill / surface layer / decal` rows | `PaintMode` |
+| paint a face group | select a `Texture Library/` row (or `Custom Textures/`), then a face row or the preview | `Paint::fill_group` |
+| add a surface layer | the `surface layer` mode, a texture, then a face row or the preview | `Paint::layer_group` |
+| place a decal | the `decal` mode, a `Texture Library/decals/` row, a `scale` row, then a click on the preview (the mouse point becomes the decal position) | `Paint::decal_group` |
 | undo paint | `Ctrl+Z` on the Paint Shop tab | `Paint::undo` |
+| draw a chassis outline | chassis step 1: the shipped `freeform` / `circle` / `rectangle` checkboxes, the `radius` / `length` / `width` sliders, and a click in the shipped `Editing Area`; `clear outline button` clears | `Build::add_chassis_outline_point` / `set_chassis_circle` / `set_chassis_rectangle` / `clear_chassis_outline` |
+| move a top-panel point | chassis step 2: click a point in the `Editing Area`, then click where it should go | `Build::move_chassis_outline_point` (moves the mesh ring vertex too) |
+| set the extrusion height | chassis step 2: the shipped `height slider` | `Build::set_chassis_height` |
+| snap to grid | the shipped `snap checkbox` or the panel's `snap to grid` row | the outline's 100-unit grid |
 | Save As | type a name, `Enter` (or the `m9:save` row) | `Build::save_to` → `Robot Designs/<name>.bot` |
 | Open / import a bot | type a name under `Robot Designs/`, then the `m9:open` row | `Build::load` |
 | export a bot | Save As, or `Build::export_bot` (the `exportbot.gib` operation) | copy in `Robot Designs/` |
@@ -102,6 +111,15 @@ The rendered RGBA is pushed into the `UiScene` as a `UiTexture` and a clipped
 `UiRenderer` they use for the shell. The preview is cached by the model's
 revision counter and rebuilt after an edit.
 
+The same frame stores the camera it drew with (`view_proj` and its inverse, the
+preview rectangle and its pixel size). A click is unprojected into a ray: on the
+Components tab it meets the chassis' `y = 0` mounting plane and becomes
+`Build::place_on_baseplate`'s point; on the Paint Shop it is tested against the
+chassis triangles (Möller–Trumbore), and the winning triangle's group and
+barycentric skin coordinate become the paint target. The framing is ours; the
+ray-to-baseplate and ray-to-skin laws are the model's data (the blueprint scale
+and the face groups' coordinates).
+
 ## 4. Wiring: click-to-place, click-to-bind
 
 The shipped `control grid` is the editor's surface (`Rows 3, Columns 4`,
@@ -148,25 +166,64 @@ itself is not.
 
 ## 5. Paint
 
-`Paint Shop` lists the shipped texture library (`Texture Library/`, the model's
-own file list) and the player's `Custom Textures/`. Selecting a row sets the
-texture; selecting a face row applies `Paint::fill_group` to that group's
-rectangle on the 256×256 skin. The preview re-renders from
-`chassis_items(&build.to_bot(), …)`, so the filled patch is visible
-immediately.
+The Paint Shop is the three shipped screens in one tab. Three `mode` rows choose
+**texture fill**, **surface layer** or **decal**; the list below them is
+`Texture Library/` (fill/layer) or `Texture Library/decals/` (decal), plus the
+player's first `Custom Textures/` file for fill/layer. Selecting a face row
+applies the current mode to that group; clicking the live preview applies it to
+the group under the cursor. For a decal the click's point inside the group is the
+position (the screen's *"position the decal with your mouse and click to apply
+it"*), and the `scale` row steps `0.25, 0.5, 0.75, 1.0, 1.5, 2.0` of the group's
+width. Every operation goes through `Paint::{fill_group, layer_group,
+decal_group}`; `Ctrl+Z` on this tab is `Paint::undo`.
 
-The Shipped `decals.gib`/`surfacelayer.gib` operations exist in the model
-(`Paint::decal_group`, `Paint::layer_group`) and are **not** wired in this
-slice. `fill_all` ("texture entire") is also model-only for now. The
-appearance dropdown and its effect screens are not loaded; the panel's list is
-the model's `GameLibrary::textures()/custom_textures()`, which is the same
-directory the screen's own list is filled from.
+The preview re-renders from `chassis_items(&build.to_bot(), …)`, so the
+composited skin is visible immediately. The panel rows are limited to what fits
+the placeholder; the model has every group and the whole library.
+
+`fill_all` ("texture entire") is the one model operation still without a row.
+The appearance dropdown and its effect screens are not loaded; the panel's list
+is the model's `GameLibrary::textures()/decals()/custom_textures()`, the same
+directories the screens' own lists are filled from.
 
 Paint survives save/reload: `Build::save` writes `to_bot()`'s painted TGA
 through `ra2fmt::bot::write`, and `Build::load` re-reads it. The headless test
-compares the skin's pixels after the round-trip.
+does fill → layer → decal, compares the skin's pixels after the round-trip, and
+undoes the layer back to the filled skin.
 
-## 6. Save, import, export, and the round-trip
+## 6. Chassis drawing
+
+The chassis tab's own structure steps are the drawing screens, and the model
+acts on their shipped widgets:
+
+- **step 1** (`chassis_structure1.gib`): `freeform checkbox` appends a baseplate
+  outline point where the player clicks the shipped `Editing Area`; `circle
+  checkbox` / `rectangle checkbox` use the click as the centre and the
+  `radius` / `length` / `width` sliders as their size. Clicking a horizontal
+  slider sets it from the click's fraction; `height slider` on step 2 is read
+  vertically. `clear outline button` empties the outline. `Snap to grid` (the
+  shipped checkbox, plus a panel row because its state images cover it) rounds
+  to the 100-unit blueprint grid.
+- **step 2** (`chassis_structure2.gib`): a click on the `Editing Area` selects
+  the nearest top-panel point; a second click moves it. The matching mesh ring
+  vertex moves with it (the corpus' 57/57 ring rule), so the preview shows the
+  slanted side. The `height slider` scales the extrusion's `y`.
+- `finished button` validates the outline and reports its point count; it does
+  **not** regenerate the mesh (the game's extrusion/UV atlas is not recovered).
+
+The panel on step 1 is a three-row strip at the bottom of the blueprint (the
+screen has no 3D placeholder to put it in), so it does not cover the drawing
+area. On step 2 it sits in the screen's own `3d view placeholder`.
+
+The drawing rules are the tutorial's: at most 16 points, no two closer than one
+grid unit, no self-intersection, last point joins the first. The unit is the
+blueprint's own `AP = .22 M` bar: 100 outline units = 0.22 m, 1000 units = 2.2 m.
+The 100-unit cell for snapping is our reading of that scale (the shipped
+blueprint image does not paint its grid lines).
+
+---
+
+## 7. Save, import, export, and the round-trip
 
 - **Save As** writes `Game/Robot Designs/<name>.bot`. The name is the filename
   box's contents; `/ \ : * ? " < > |` are refused rather than rewritten. An
@@ -186,7 +243,7 @@ The headless run writes the design, deletes it after re-reading it (so the
 player's install is not littered), and the test uses a temp directory with the
 game's entries symlinked and a real `Robot Designs/` inside it.
 
-## 7. Test Robot (M9.5)
+## 8. Test Robot (M9.5)
 
 `Test Robot` saves the current build and starts `ra2sim::match::Match` on
 `Arenas/box.py` as a DEATHMATCH: the player's built bot against
@@ -201,38 +258,47 @@ for the panel's `last test:` line. It is **not applied** to the workshop
 state — a damaged component has no workshop representation yet (`ra2sim`'s
 damage lives in the match's rig, not in a `.bot`).
 
-## 8. The scripted proof and its numbers
+## 9. The scripted proof and its numbers
 
 ```text
 start: 1 parts, 56.1 kg, 160 hp
   chassis step: Some("structure design button") (chassis split)
+  chassis: snap off
+  chassis: moved top point 0 from [600, 200] to Some([575, 274]) (height 0.74 m)
+  placement: component 1 at 0.37, -0.22 m, angle 0.00, height 0.00
   attached: 0 Chassis -> -1@0, 1 SpinMotor -> 0@0, 2 Wheel -> 1@3
   wiring: added New Analog at cell 3,1
   wiring: bound component 1 to "Spin Clockwise" on Some("New Analog") slot 0
-  paint: 10 group(s), changed true
+  paint: 10 group(s), changed true, modes fill/layer/decal
   saved .../Robot Designs/M9 Demo.bot
   wiring reloaded: 5 control(s), 1 binding(s)
-  reloaded: 3 parts, 89.1 kg, 960 hp (rig: 3 parts, 89.1 kg, 960 hp)
+  reloaded: 3 parts, 88.6 kg, 960 hp (rig: 3 parts, 88.6 kg, 960 hp)
 ```
 
 The rig is `ra2sim::rig::load` — the simulator's own loader — and agrees with
-the model after save/reload: **3 parts, 89.1 kg, 960 hp** on both sides. The
+the model after save/reload: **3 parts, 88.6 kg, 960 hp** on both sides. The
+chassis' moved top point changes the surface area (89.1 kg before it). The
 scene's prints in `--out` are:
 
 | file | what it shows |
 |---|---|
 | `build-chassis.png` | the chassis tab on the shipped `structure design` step, the preview of the stock chassis |
+| `chassis-step.png` | chassis step 2 after the top-panel point move, with the shipped height slider and the panel's snap state |
+| `chassis-draw.png` | the Components tab preview after the move: the slanted side the drawing tool produced |
+| `placement.png` | the motor after a click on the baseplate preview: the panel's `place 1: click the preview (0.37, -0.22 m, 0 deg, +0.00)` |
 | `build-parts.png` | the Components tab: the palette, the attached Z-Tek motor + mini wheel, the part list and mount rows |
 | `build-wiring.png` | the Wiring tab: the shipped `control grid` with one `control_cell.gib` per control, and the binding rows |
 | `wiring-add.png` | after `new analog` + a click on the free cell 3,1: five cells and the `New Analog` selection (unbound) |
 | `wiring-bound.png` | after the component and action clicks: `SpinMotor <- Spin Clockwise @ 3,1 slot 0` in the panel, the same row the save writes |
-| `build-paint.png` | the Paint Shop: the texture list, the 10 face groups, and the preview with group 0 filled |
+| `layer.png` | Paint Shop after fill + surface layer on face group 0; the preview shows the composited skin |
+| `decal.png` | after the decal mode, a decal row and a click on the preview; the red decal is on the face under the cursor |
+| `build-paint.png` | the Paint Shop after all three operations (mode rows, list, faces, scale) |
 | `build-test.png` | M8's HUD + 3D frame of the test match (the first fight frame) |
 
 The test's own frames are 640×502; the manual evidence run above is
 1280×1005.
 
-## 9. What is read-only, out of scope, or unproven
+## 10. What is read-only, out of scope, or unproven
 
 - **Wiring drag** — the shipped `control grid` note says *"controls can be
   dragged and dropped here"*; this slice uses click-to-place instead (the
@@ -241,17 +307,17 @@ The test's own frames are 640×502; the manual evidence run above is
 - **Wiring undo** — the board is not part of `Build`'s undo history.
 - **The shipped armour grid** — filled and drawn, but its rows sit under the
   shell's bottom bar; plate selection is the panel's row.
-- **Decals, surface layers, texture-entire** — model-only.
-- **Chassis drawing** — `chassis_structure1/2.gib` are shown by their own
-  buttons, but the freeform/circle/rectangle drawing tools do nothing; a new
-  bot starts from a stock chassis mesh, not a player-drawn one.
-- **Baseplate placement** — a new chassis child is placed at a fixed spread on
-  the chassis' top plate; the game's own is a mouse placement in the 3D view,
-  which is not wired. Component-to-component links do use the model's F1 rule.
+- **Texture-entire** — `Paint::fill_all` is still model-only; the three shipped
+  mode operations are wired.
+- **The outline→mesh extrusion** — a changed outline is stored and saved, and a
+  step-2 point move moves its mesh vertex, but the game's extrusion and UV
+  atlas rebuild are not recovered. `finished button` validates, it does not
+  regenerate the mesh.
+- **`buckle_model`** — a chassis geometry edit drops the saved buckle copy.
 - **The palette's scroll** — the headless script scrolls the grid to the
   requested row; the window has no scroll-wheel/scrollbar interaction yet.
 - **The appearance effect dropdown** — not populated or clickable; the panel's
-  texture list is the model's directory list instead.
+  texture/decal lists are the model's directory lists instead.
 - **The shipped weight/class boxes** — the panel shows the model's mass,
   hitpoints and computed class; the screen's own `weight`/`weightclass`
   `TextBox`es are not written.
@@ -263,15 +329,17 @@ The test's own frames are 640×502; the manual evidence run above is
   LeftRight, Fire, Spin on W/S, A/D, Space, Q) is the model's convenience, not
   the game's new-bot state (the tutorial's blank controller).
 - **The panel** — ours. It is the only invented control surface; every other
-  click is a shipped widget or the game's own data.
+  click is a shipped widget or the game's own data. The chassis step-1 panel is
+  a strip along the blueprint's bottom because that screen has no 3D placeholder.
 
-## 10. Tests
+## 11. Tests
 
 | test | what it pins |
 |---|---|
 | `build_mode::tests::a_palette_click_attaches_one_component_and_undo_reverses_it` | one palette row click = one `Build::attach`; undo removes exactly that component |
 | `build_mode::tests::an_armour_cell_sets_the_chassis_plate` | a plate row sets the `.bot` armour (steel 20 kg/350 hp, twice the editor's hardness) and is undoable |
-| `build_mode::tests::the_scripted_build_saves_reloads_and_matches_the_rig` | the scripted run writes `Robot Designs/<name>.bot`, reloads it, compares components, stats, board and skin, compares model == reloaded == rig, and writes the seven frames |
+| `build_mode::tests::the_shipped_chassis_slider_and_clear_button_act_on_the_outline` | a click on the shipped `radius slider` sets 400, a click in the `Editing Area` adds a baseplate point, and `clear outline button` empties the outline |
+| `build_mode::tests::the_scripted_build_saves_reloads_and_matches_the_rig` | the scripted run draws a top point, places a motor on the preview, fills/layers/decals, writes `Robot Designs/<name>.bot`, reloads it, compares components, stats, board and skin, compares model == reloaded == rig, and writes the twelve frames |
 | `build_mode::tests::adding_a_control_binding_it_and_saving_round_trips_the_same_board` | `new analog` + free cell 3,1, bind the motor's `Spin Clockwise`, save/re-read the same board; an invalid action (`On/Off Clockwise` on an analog) is refused; a second control in Forward's cell is refused |
 | `ra2ui::workshop::wiring::tests::bind_checked_refuses_an_action_the_kind_and_class_do_not_allow` | the model's refusal and its `allowed` list (`Spin Clockwise`, `Spin Counter-clockwise`) |
 | `cli::tests::the_build_flags_parse` | `--build`, `--start`, `--save-as`, `--seconds`, `--out` |

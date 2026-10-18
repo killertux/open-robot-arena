@@ -73,6 +73,18 @@ impl Placement {
             ..Default::default()
         }
     }
+
+    /// A chassis child on the baseplate: `y = 0`, the quarter-turn rotation
+    /// every stock chassis child stores, and the player's yaw and height.
+    pub fn on_baseplate(point: [f32; 2], angle: f32, height: f32) -> Self {
+        let point = mount::clamp_baseplate(point);
+        Placement {
+            translation: [point[0], 0.0, point[1]],
+            rotation: mount::CHASSIS_CHILD_ROTATION,
+            angle,
+            height,
+        }
+    }
 }
 
 /// The editor's limits.
@@ -415,6 +427,181 @@ impl Build {
         Ok(index)
     }
 
+    /// Place an attached chassis child at a baseplate point.
+    ///
+    /// This is the game's stored placement: the point is bot-local metres on
+    /// the mounting plane (`y = 0`), clamped to the blueprint sheet (`±1.1 m`,
+    /// the `0..1000` outline grid); the quaternion is the quarter turn every
+    /// stock chassis child stores; `angle` and `height` are the player's yaw and
+    /// lift. The renderer and the rig derive the world matrix from these same
+    /// fields through [`ra2fmt::mount::worlds`].
+    pub fn place_on_baseplate(
+        &mut self,
+        index: usize,
+        point: [f32; 2],
+        angle: f32,
+        height: f32,
+    ) -> Result<(), BuildError> {
+        let count = self.bot.components.len();
+        if index == 0 || index >= count {
+            return Err(BuildError::NotChassisChild { index, count });
+        }
+        if self.bot.components[index].parent != 0 {
+            return Err(BuildError::NotChassisChild { index, count });
+        }
+        let placement = Placement::on_baseplate(point, angle, height);
+        self.snapshot();
+        let component = &mut self.bot.components[index];
+        component.translation = placement.translation;
+        component.rotation = placement.rotation;
+        component.angle = placement.angle;
+        component.height = placement.height;
+        Ok(())
+    }
+
+    // -- Chassis drawing (S4) -------------------------------------------------
+    //
+    // Every edit works on a copy, so a refused edit leaves the model untouched;
+    // a successful one snapshots first and then resets the saved buckle model
+    // (it is a copy of the old chassis geometry) and `Paint`'s group list.
+
+    fn chassis_copy(&self) -> Result<Chassis, BuildError> {
+        self.chassis()
+            .cloned()
+            .ok_or(BuildError::Library(LibraryError::Parse(
+                "the first component is not a chassis".into(),
+            )))
+    }
+
+    fn commit_chassis(&mut self, chassis: Chassis) {
+        self.snapshot();
+        if let Some(slot) = self
+            .bot
+            .components
+            .first_mut()
+            .and_then(|c| c.chassis.as_mut())
+        {
+            *slot = chassis.clone();
+        }
+        self.bot.buckle_model = None;
+        self.info[0] = chassis_info(&chassis);
+        self.paint.set_geometry(&chassis);
+    }
+
+    pub fn add_chassis_outline_point(
+        &mut self,
+        which: super::chassis::Outline,
+        point: [i32; 2],
+        snap: bool,
+    ) -> Result<usize, BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        let index = super::chassis::add_outline_point(&mut chassis, which, point, snap)?;
+        self.commit_chassis(chassis);
+        Ok(index)
+    }
+
+    pub fn remove_chassis_outline_point(
+        &mut self,
+        which: super::chassis::Outline,
+        index: usize,
+    ) -> Result<[i32; 2], BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        let point = super::chassis::remove_outline_point(&mut chassis, which, index)?;
+        self.commit_chassis(chassis);
+        Ok(point)
+    }
+
+    pub fn clear_chassis_outline(&mut self, which: super::chassis::Outline) {
+        if let Ok(mut chassis) = self.chassis_copy() {
+            super::chassis::clear_outline(&mut chassis, which);
+            self.commit_chassis(chassis);
+        }
+    }
+
+    pub fn set_chassis_circle(
+        &mut self,
+        which: super::chassis::Outline,
+        centre: [i32; 2],
+        radius: i32,
+    ) -> Result<(), BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        super::chassis::set_circle(&mut chassis, which, centre, radius);
+        self.commit_chassis(chassis);
+        Ok(())
+    }
+
+    pub fn set_chassis_rectangle(
+        &mut self,
+        which: super::chassis::Outline,
+        centre: [i32; 2],
+        length: i32,
+        width: i32,
+    ) -> Result<(), BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        super::chassis::set_rectangle(&mut chassis, which, centre, length, width);
+        self.commit_chassis(chassis);
+        Ok(())
+    }
+
+    pub fn move_chassis_outline_point(
+        &mut self,
+        which: super::chassis::Outline,
+        index: usize,
+        point: [i32; 2],
+        snap: bool,
+    ) -> Result<(), BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        super::chassis::move_outline_point(&mut chassis, which, index, point, snap)?;
+        self.commit_chassis(chassis);
+        Ok(())
+    }
+
+    pub fn set_chassis_height(&mut self, height: f32) -> Result<(), BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        super::chassis::set_height(&mut chassis, height)?;
+        // The saved buckle model is a copy of the old geometry; `commit_chassis`
+        // drops it, as the game does when the shape is rebuilt.
+        self.commit_chassis(chassis);
+        Ok(())
+    }
+
+    pub fn add_chassis_mesh_point(
+        &mut self,
+        point: [f32; 3],
+        normal: [f32; 3],
+        uv: [f32; 2],
+    ) -> Result<usize, BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        let index = super::chassis::add_mesh_point(&mut chassis, point, normal, uv)?;
+        self.commit_chassis(chassis);
+        Ok(index)
+    }
+
+    pub fn remove_chassis_mesh_point(&mut self, index: usize) -> Result<[f32; 3], BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        let point = super::chassis::remove_mesh_point(&mut chassis, index)?;
+        self.commit_chassis(chassis);
+        Ok(point)
+    }
+
+    pub fn add_chassis_face(
+        &mut self,
+        group: usize,
+        points: [u32; 3],
+    ) -> Result<usize, BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        let index = super::chassis::add_face(&mut chassis, group, points)?;
+        self.commit_chassis(chassis);
+        Ok(index)
+    }
+
+    pub fn remove_chassis_face(&mut self, index: usize) -> Result<ra2fmt::bot::Face, BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        let face = super::chassis::remove_face(&mut chassis, index)?;
+        self.commit_chassis(chassis);
+        Ok(face)
+    }
+
     /// Remove a component and everything attached below it.
     ///
     /// The bindings that named the removed components go with them; the parent
@@ -692,6 +879,12 @@ pub enum BuildError {
     },
     UnknownComponent(String),
     CannotRemoveChassis,
+    /// A placement edit named a component that is not a chassis child.
+    NotChassisChild {
+        index: usize,
+        count: usize,
+    },
+    Chassis(super::chassis::ChassisError),
     OverWeight {
         mass: f32,
         limit: f32,
@@ -733,6 +926,11 @@ impl std::fmt::Display for BuildError {
             ),
             BuildError::UnknownComponent(file) => write!(f, "no component definition for {file:?}"),
             BuildError::CannotRemoveChassis => write!(f, "the chassis cannot be removed"),
+            BuildError::NotChassisChild { index, count } => write!(
+                f,
+                "component {index} is not a chassis child ({count} components)"
+            ),
+            BuildError::Chassis(e) => write!(f, "{e}"),
             BuildError::OverWeight { mass, limit } => {
                 write!(
                     f,
@@ -756,6 +954,12 @@ impl From<LibraryError> for BuildError {
 impl From<WiringError> for BuildError {
     fn from(e: WiringError) -> Self {
         BuildError::Wiring(e)
+    }
+}
+
+impl From<super::chassis::ChassisError> for BuildError {
+    fn from(e: super::chassis::ChassisError) -> Self {
+        BuildError::Chassis(e)
     }
 }
 
@@ -897,6 +1101,41 @@ mod tests {
         assert_eq!(reloaded.board(), build.board());
         // The writer round-trips the file it just wrote.
         assert_eq!(back.write(), bytes);
+    }
+
+    /// F1's chassis branch: a baseplate placement writes the file's own stored
+    /// transform and nothing else, and undo restores it.
+    #[test]
+    fn a_baseplate_placement_uses_the_stored_rule_and_undo_restores_it() {
+        let mut build = Build::new("Place", chassis());
+        let motor = build
+            .attach_info(motor_info(), 0, 0, 0, Placement::default())
+            .unwrap();
+        let before = build.components()[motor].clone();
+        build
+            .place_on_baseplate(motor, [0.37, -0.22], 0.7, 0.1)
+            .unwrap();
+        let placed = build.components()[motor].clone();
+        assert_eq!(placed.translation, [0.37, 0.0, -0.22]);
+        assert_eq!(placed.rotation, mount::CHASSIS_CHILD_ROTATION);
+        assert_eq!(placed.angle, 0.7);
+        assert_eq!(placed.height, 0.1);
+        // The renderer and the rig read these fields through `component_local`,
+        // and the chassis has no mount frame to change that.
+        assert_eq!(build.transforms()[motor], mount::component_local(&placed));
+        assert!(build.undo());
+        assert_eq!(build.components()[motor], before);
+        assert!(build.redo());
+        assert_eq!(build.components()[motor], placed);
+
+        // A link below the chassis is not a baseplate placement.
+        let wheel = build
+            .attach_info(wheel_info(), motor, 1, 1, Placement::default())
+            .unwrap();
+        assert!(matches!(
+            build.place_on_baseplate(wheel, [0.0, 0.0], 0.0, 0.0),
+            Err(BuildError::NotChassisChild { .. })
+        ));
     }
 
     #[test]

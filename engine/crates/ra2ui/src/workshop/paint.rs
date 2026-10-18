@@ -308,6 +308,19 @@ impl Paint {
         &self.groups
     }
 
+    /// Refresh the face groups and face rows after a chassis geometry edit.
+    /// The skin, its original bytes and the undo stack are untouched: a face
+    /// edit changes *where* paint is addressed, not what paint exists.
+    pub fn set_geometry(&mut self, chassis: &Chassis) {
+        self.groups = chassis
+            .face_groups
+            .iter()
+            .enumerate()
+            .map(|(index, g)| group(index, g, &chassis.faces))
+            .collect();
+        self.faces = chassis.faces.clone();
+    }
+
     pub fn faces(&self) -> &[Face] {
         &self.faces
     }
@@ -707,6 +720,48 @@ mod tests {
         let skin = Skin::from_tga(ch2.texture_tga.as_deref().unwrap()).unwrap();
         assert_eq!(skin.pixel(0, 0), [1, 2, 3, 255]);
         assert_eq!(skin.pixel(64, 0), [10, 20, 30, 255]);
+    }
+
+    /// M9.4's sequence: fill, then a surface layer, then a decal. The writer's
+    /// bytes and the face groups survive a re-read, and undo puts the previous
+    /// skin back.
+    #[test]
+    fn fill_then_layer_then_decal_round_trips_and_undo_restores_the_skin() {
+        let ch = chassis();
+        let mut paint = Paint::from_chassis(&ch);
+        paint
+            .fill_group(0, &Texture::solid(4, 4, [200, 20, 20, 255]))
+            .unwrap();
+        let after_fill = paint.skin().unwrap().clone();
+        paint
+            .layer_group(0, &Texture::solid(4, 4, [20, 200, 20, 128]))
+            .unwrap();
+        assert_ne!(paint.skin().unwrap(), &after_fill);
+        assert!(paint.undo(), "the layer is one undo step");
+        assert_eq!(paint.skin().unwrap(), &after_fill);
+        assert!(paint.redo());
+        paint
+            .decal_group(
+                0,
+                &Texture::solid(2, 2, [240, 240, 20, 255]),
+                [0.5, 0.5],
+                0.5,
+            )
+            .unwrap();
+        let skin = paint.skin().unwrap().clone();
+
+        let mut bot = bot(ch.clone());
+        paint.apply_to(bot.components[0].chassis.as_mut().unwrap());
+        let bytes = bot.write();
+        let back = ra2fmt::bot::parse(&bytes).unwrap();
+        let read = back.components[0].chassis.as_ref().unwrap();
+        let wrote = bot.components[0].chassis.as_ref().unwrap();
+        assert_eq!(read.face_groups, wrote.face_groups);
+        assert_eq!(read.faces, wrote.faces);
+        assert_eq!(read.texture_tga, wrote.texture_tga);
+        let reloaded = Skin::from_tga(read.texture_tga.as_deref().unwrap()).unwrap();
+        assert_eq!(reloaded, skin);
+        assert_eq!(back.write(), bytes);
     }
 
     fn game_root() -> Option<std::path::PathBuf> {

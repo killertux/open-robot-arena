@@ -178,6 +178,66 @@ fn every_shipped_bots_stats_equal_the_rigs_own() {
     );
 }
 
+/// M9.2's acceptance: a part placed on the baseplate keeps the game's stored
+/// transform through the writer, and the simulator's own local matrix for it is
+/// the model's.
+#[test]
+fn a_placed_chassis_child_round_trips_and_the_rigs_local_matrix_matches() {
+    let Some(root) = game_root() else { return };
+    std::env::set_var("RA2_GAME", &root);
+    let library = GameLibrary::open(&root).unwrap();
+    let stock = GameLibrary::read_bot(&root.join("AI/Team1/Bot0.bot")).unwrap();
+    let mut chassis = stock.components[0].chassis.clone().unwrap();
+    chassis.texture_tga = None;
+    let mut build = ra2ui::workshop::build::Build::new("Placed", chassis);
+    let motor_info = library.component_info_by_file("Components\\anglemotor1.txt");
+    let base_mount = *motor_info.mounts.keys().next().unwrap();
+    let motor = build
+        .attach(
+            &library,
+            "Components\\anglemotor1.txt",
+            0,
+            0,
+            base_mount,
+            ra2ui::workshop::build::Placement::default(),
+        )
+        .unwrap();
+    let (point, angle, height) = ([0.37, -0.22], 0.7, 0.1);
+    build
+        .place_on_baseplate(motor, point, angle, height)
+        .unwrap();
+    let model = build.transforms();
+    let saved = build.components()[motor].clone();
+    assert_eq!(saved.translation, [point[0], 0.0, point[1]]);
+    assert_eq!(saved.rotation, ra2fmt::mount::CHASSIS_CHILD_ROTATION);
+    assert_eq!(saved.angle, angle);
+    assert_eq!(saved.height, height);
+    assert_eq!(model[motor], ra2fmt::mount::component_local(&saved));
+
+    let dir = std::env::temp_dir().join(format!("ra2-placed-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Placed.bot");
+    build.save_to(&path).unwrap();
+
+    let rig = ra2sim::rig::load(path.to_str().unwrap()).unwrap();
+    assert_eq!(rig.components.len(), build.components().len());
+    for (i, matrix) in model.iter().enumerate() {
+        for r in 0..4 {
+            for c in 0..4 {
+                let (a, b) = (matrix.col(r)[c], rig.components[i].local.col(r)[c]);
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "component {i} matrix [{r}][{c}]: {a} != {b}"
+                );
+            }
+        }
+    }
+    let reloaded = ra2ui::workshop::build::Build::load(&library, &path).unwrap();
+    assert_eq!(reloaded.components(), build.components());
+    assert_eq!(reloaded.transforms(), model);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// M9.7 for a *built* bot: build from scratch out of real components, save it,
 /// and compare the model's stats with the rig's for the saved file.
 #[test]

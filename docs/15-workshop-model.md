@@ -61,6 +61,47 @@ component (mount points, mass, hitpoints) and the edit history.
 - **No size/overlap rule.** The baseplate placement is visual in the game and the
   file records only the transform, so there is no recovered rule to enforce.
 
+### The baseplate rule (measured)
+
+A chassis child's stored fields are the whole placement: `translation`,
+`rotation`, `angle`, `height` and `parent_mount`. Across the 57 shipped bots
+(**523** chassis children):
+
+| field | value |
+|---|---|
+| `parent_mount` | **0** in all 523 (the baseplate, not a `.gmf` point) |
+| `rotation` | `(0.707107, 0, 0, 0.707107)` — a quarter turn about +X — in all 523 |
+| `translation.y` | **0** within `±1.2e-6` (the mounting plane) |
+| `translation.x` / `.z` | the planar point; `x` runs `-1.2553..1.2918` |
+| `angle` | 19 distinct values, 205 zero and 150 at π/2 (a free yaw) |
+| `height` | 13 distinct non-zero values from `-0.3` to `0.6` (416 are zero) |
+
+The blueprint measures its own scale: `blueprint.bmp`'s bar reads *"Unit Scale
+AP = .22 M"*, and every shipped chassis agrees — **100 outline units = 0.22 m**,
+so the `0..1000` sheet spans 2.2 m. The embedded mesh's two rings are exactly
+the two outlines through that scale (all **57/57** bots, **2,292** mesh points):
+`x = (u-500)·0.0022`, `z = -(v-500)·0.0022`, the bottom at `y = 0` and the top at
+`y = Chassis::height`. That last fact is what lets chassis step 2 move an outline
+point and the mesh vertex together.
+
+`Build::place_on_baseplate(index, point, angle, height)` writes that rule:
+
+```text
+translation = [point.x, 0, point.z]        (clamped to the ±1.1 m sheet)
+rotation    = CHASSIS_CHILD_ROTATION
+angle       = the player's yaw
+height      = the player's lift
+```
+
+It does **not** clamp the point to the chassis polygon: **97** of the 498
+non-SmartZone chassis children in the corpus lie outside their own `bottom`
+outline (wheels overhang, parts sit on the edge), so a polygon clamp would be a
+new rule the data contradicts. The sheet clamp is the blueprint's own bound.
+
+The `Placement::on_baseplate` constructor is the same rule for a fresh
+`Build::attach`. The UI's preview click calls it; the renderer and the rig read
+the same fields through `ra2fmt::mount::worlds` / `component_local`.
+
 ### API shape
 
 ```rust
@@ -91,6 +132,14 @@ Other placement tests: one mount refuses a second child; the chassis baseplate
 takes many; an unknown mount is refused with the available ids; an incompatible
 plug/socket is refused; removing a parent removes the subtree, and undo/redo
 restore it; a component above 800 kg is refused.
+
+`a_baseplate_placement_uses_the_stored_rule_and_undo_restores_it` pins the
+chassis branch (translation `y = 0`, the corpus rotation, exact angle/height) and
+undo/redo. `a_placed_chassis_child_round_trips_and_the_rigs_local_matrix_matches`
+(ra2sim) saves a real motor placed at `0.37, -0.22 m`, `0.7 rad`, `0.1 m`; the
+simulator's own `local` matrix is element-for-element the model's
+`Build::transforms()` (**maximum difference below 1e-5**), and the reloaded
+model is the saved one.
 
 ---
 
@@ -197,6 +246,14 @@ The three shipped paint screens are the three operations:
 | `botlab/surfacelayer.gib` | *"Click a panel on your chassis to add this texture layer"* | `Paint::layer_group` |
 | `botlab/decals.gib` | *"Position the decal with your mouse and click to apply it"* + `scale slider` | `Paint::decal_group` |
 
+All three are wired in the Paint Shop. The mode rows choose the operation, the
+list is `Texture Library/` or `Texture Library/decals/`, and a click on the live
+preview ray-casts the chassis mesh, finds the face group that owns the triangle
+(the renderer's own point→skin lookup), and applies the operation there. For a
+decal the hit's barycentric skin coordinate becomes the normalised position
+inside that group's rectangle; the panel's `scale` row steps `0.25 … 2.0`. The
+panel's face rows are the same operation without a 3D click.
+
 `fill_all` is the screens' *"texture entire"*. The texture list is the files in
 `Texture Library/`; the decal list is `Texture Library/decals/`; the edge styles
 are `Texture Library/edges/*.txt` (`Filename`, `Preview`, `Length ratio`, `Width`)
@@ -217,8 +274,11 @@ them (`Paint::face_range_counts`), so the paint target and the sim cannot drift.
 face rows, indices and the 60 out-of-range rows on all 57 bots.
 `a_painted_chassis_round_trips_through_the_writer` paints two groups and a decal,
 writes the bot, re-reads it, and compares the face groups, face rows and the skin
-pixels. `an_untouched_paint_writes_the_original_bytes_back` covers the
-byte-exact no-op case.
+pixels. `fill_then_layer_then_decal_round_trips_and_undo_restores_the_skin` is
+the M9.4 sequence: fill, layer (one undo step back to the filled skin, then
+redo), decal; the written bytes re-read to the same `Skin`, the same face groups
+and a byte-identical second write. `an_untouched_paint_writes_the_original_bytes_back`
+covers the byte-exact no-op case.
 
 ### What is our rule, not the game's
 
@@ -230,7 +290,66 @@ operations and the file specifies the target patches; the sampling law is ours.
 
 ---
 
-## 4. Stats (M9.7)
+## 4. Chassis drawing (S4)
+
+### What the shipped screens are
+
+`botlab/chassis_structure1.gib` draws the **baseplate outline**: the
+`freeform checkbox` (*"select to plot points manually"*), the `circle checkbox`
+and `rectangle checkbox`, the `radius slider`, the `length slider` and the
+`width slider`, and `clear outline button` (*"click to erase the outline"*).
+`chassis_structure2.gib` edits the **top panel** (*"You can't draw a new shape
+here, you can only select points and move them"*) and the `height slider`
+(*"adjust height of extrusion"*). `ch_stepbuttons.gib` adds `Snap to grid` and
+`finished button`. `Basic_Tutorial.htm` states the rules: at most **16** points,
+no two closer than one grid unit, no intersecting lines, last point joins the
+first.
+
+### What the file stores, and what this slice does
+
+`Chassis` stores both outlines (`bottom` / `top`, `0..1000`), the extrusion
+`height`, the embedded mesh (`points` / `normals` / `uvs` / `indices`), the
+`face_groups` and the per-group `faces`. The mesh's two rings are **exactly**
+the outlines through the blueprint scale (measured on **57/57** bots,
+**2,292** points), so:
+
+| screen operation | model call | data |
+|---|---|---|
+| freeform click | `Build::add_chassis_outline_point` | appends a `bottom` point; 16-point, one-grid-unit and self-intersection rules |
+| circle / rectangle | `Build::set_chassis_circle` / `set_chassis_rectangle` | replaces the `bottom` outline (12-gon / 4 corners) |
+| `clear outline button` | `Build::clear_chassis_outline` | empties the outline |
+| step 2 point move | `Build::move_chassis_outline_point` | moves a `top` point **and** the matching mesh ring vertex |
+| `height slider` | `Build::set_chassis_height` | `Chassis::height` + a uniform y scale of the mesh and its buckle points |
+| mesh point / face edit | `Build::add_chassis_mesh_point` / `remove_…` / `add_chassis_face` / `remove_chassis_face` | points/normals/uvs, `indices`, `faces`, `face_groups[*].coords`, `face_count` |
+
+The outline edits call the tutorial's checks; the mesh edits keep the group
+coordinates in the renderer's own order (one coordinate per unique point,
+ascending by point index) and update `face_count = indices/3`. Both forms
+round-trip through `Bot::write` unchanged.
+
+**What is not regenerated:** the game's *extrusion* from a changed outline into
+a whole new mesh and UV atlas is not recovered. This slice stores an added or
+removed outline point (and saves it), and it moves an existing point's mesh
+vertex exactly; it does not rebuild the sides/atlas from a new outline. The
+`finished button` is therefore a validation/status action, not a mesh generator.
+Chassis geometry edits drop the bot's saved `buckle_model` (a copy of the old
+geometry; only one shipped bot carries one).
+
+### Test
+
+`outline_points_snap_to_the_blueprint_grid_and_follow_the_tutorial_rules`
+covers snap, the one-unit rule, the bow-tie refusal and the 16-point ceiling.
+`the_circle_and_rectangle_tools_write_outlines_the_writer_keeps` and
+`a_mesh_point_and_face_round_trip_and_keep_the_group_coordinates_in_order`
+prove the writer reproduces both edits. `removing_a_shared_mesh_point_removes_its_faces_and_shifts_the_rest`
+covers reindexing. `the_height_slider_scales_the_extrusion_and_keeps_the_outlines`
+covers the y scale. `moving_a_top_point_moves_the_mesh_ring_vertex` and
+`every_shipped_chassis_mesh_ring_is_its_own_outline` pin the ring rule
+(**57/57**, **2,292** points).
+
+---
+
+## 5. Stats (M9.7)
 
 `BotStats` reports the robot's mass, the sum of the components' structural
 hitpoints, the chassis' own hitpoints, the declared and computed weight class and
@@ -283,7 +402,7 @@ not in the shipped data.
 
 ---
 
-## 5. Tests and the gate
+## 6. Tests and the gate
 
 New tests, all in the model's own modules plus one `ra2sim` integration test:
 
@@ -291,6 +410,8 @@ New tests, all in the model's own modules plus one `ra2sim` integration test:
 |---|---|
 | `a_built_bot_saves_and_reloads_with_the_same_tree_mounts_and_transforms` | chassis + 2 components round-trip; component list, mounts, F1 transforms |
 | `a_real_motor_and_wheel_keep_the_game_mount_rule` | the same with the shipped meshes, save/reload through the library |
+| `a_baseplate_placement_uses_the_stored_rule_and_undo_restores_it` | `y = 0`, the corpus quarter turn, angle/height, undo/redo, non-chassis refusal |
+| `a_placed_chassis_child_round_trips_and_the_rigs_local_matrix_matches` | saved placement, reloaded model and the rig's `local` agree below 1e-5 |
 | `one_mount_holds_one_component`, `the_chassis_baseplate_takes_many_children` | the socket rule and its chassis exception |
 | `removing_a_parent_removes_its_subtree_and_undo_restores_it` | remove/undo/redo |
 | `the_editor_weight_limit_is_enforced` | the 800 kg check |
@@ -298,10 +419,19 @@ New tests, all in the model's own modules plus one `ra2sim` integration test:
 | `every_shipped_board_round_trips_through_the_model` | 57 bots, **707** binding rows; 19 names and 9 action strings match the constants |
 | `an_unknown_control_name_is_rejected_with_the_boards_list` | the shipped name list in the error |
 | `a_painted_chassis_round_trips_through_the_writer` | paint + face groups + TGA round-trip |
+| `fill_then_layer_then_decal_round_trips_and_undo_restores_the_skin` | fill → layer → decal; undo back to the filled skin; identical re-read |
 | `face_groups_are_the_sims_flat_file_ordered_list` | **496** groups, **1,808** rows, **60** out of range, all 57 bots |
 | `a_custom_texture_is_listed_and_loads_by_name` | the custom-texture folder, list order and image decode |
+| `every_shipped_chassis_mesh_ring_is_its_own_outline` | **57/57** bots, **2,292** mesh points are the two outlines |
+| `outline_points_snap_to_the_blueprint_grid_and_follow_the_tutorial_rules` | snap, 16 points, one grid unit, no self-intersection |
+| `the_circle_and_rectangle_tools_write_outlines_the_writer_keeps` | automatic outlines round-trip |
+| `a_mesh_point_and_face_round_trip_and_keep_the_group_coordinates_in_order` | mesh point/face add/remove and `face_count` |
+| `removing_a_shared_mesh_point_removes_its_faces_and_shifts_the_rest` | reindexing |
+| `the_height_slider_scales_the_extrusion_and_keeps_the_outlines` | height y scale |
+| `moving_a_top_point_moves_the_mesh_ring_vertex` | step 2 moves the mesh vertex |
 | `every_shipped_bots_stats_equal_the_rigs_own` | 57/57 exact mass and hitpoints, and the model's transforms equal the rig's `local` matrices |
 | `a_built_bots_stats_equal_the_rigs_after_a_save_and_reload` | 80.1 kg / 960 hp on both sides |
+
 
 The crate is `cargo test --release --workspace` clean (with `RA2_GAME` pointing at
 the shipped data the game-gated tests run; without it they skip, as the rest of
@@ -309,13 +439,23 @@ the project's corpus tests do) and `cargo clippy -- -D warnings` clean.
 
 ---
 
-## 6. What remains unproven
+## 7. What remains unproven
 
 - **Cost.** No shipped table. `None`.
 - **Paint compositing.** Fill/layer/decal sampling, the decal's scale law, and
   the top-left rectangle convention are ours; the screens/flags are the game's.
-- **Baseplate size and overlap.** No recovered rule; attach does not check the
-  footprint.
+- **Baseplate overlap.** The point is clamped to the blueprint sheet, not to the
+  chassis polygon: 97/498 non-SmartZone stock children sit outside their own
+  bottom outline. No smaller footprint rule is recovered.
+- **Chassis extrusion and UV atlas.** A changed outline is stored and saved, and
+  a moved step-2 point moves its mesh vertex, but the game's extrusion of a new
+  outline into a new mesh/atlas is not recovered. The `finished button` does not
+  regenerate the mesh.
+- **`buckle_model`.** Chassis geometry edits drop the saved buckle copy (only one
+  shipped bot carries one); the game's exact reset is not observed.
+- **The snap grid's cell.** The blueprint's `AP = .22 M` bar fixes 100 outline
+  units to 0.22 m; that the snap lines are 100 units apart is our reading — the
+  shipped `blueprint.bmp` has no painted grid lines.
 - **The control grid's dimensions.** The corpus' highest cell is column 3, row 1
   (4 columns × 2 rows at least); the screens' `control grid` does not state a
   size, so the model does not enforce one.
@@ -341,7 +481,7 @@ the project's corpus tests do) and `cargo clippy -- -D warnings` clean.
   `.gmf` could expose a point intended for more than one child; the model follows
   the corpus.
 
-## 7. The UI, now
+## 8. The UI, now
 
 The first application slice landed in `ra2-app --build`; its behaviour, frames
 and read-only list are in `docs/17-workshop-ui.md`. What it took from this page:
@@ -349,18 +489,18 @@ and read-only list are in `docs/17-workshop-ui.md`. What it took from this page:
 - the tabs and chassis steps are the shipped `BotLab` screens, not a new UI;
 - the component palette click is `Build::attach` (the F1 rule), the `remove
   button` is `Build::remove`, and Ctrl+Z is `Build::undo`;
+- a click on the live preview is `Build::place_on_baseplate` (components) and the
+  paint pickers (Paint Shop), using one stored camera for both;
 - the parts, mounts and bindings are drawn in a synthetic panel in the screens'
   3D placeholder — the shipped screens have no slot for those lists;
 - the preview composites `ra2-render`'s own `chassis_items`/`scene_items` at
   `Build::transforms()`;
-- paint uses `Paint::fill_group` plus the model's texture lists, and the skin
-  survives `Bot::write`/`parse`;
+- paint uses `Paint::fill_group` / `layer_group` / `decal_group` plus the model's
+  texture and decal lists, and the skin survives `Bot::write`/`parse`;
+- the chassis steps' `Editing Area` is `Build`'s outline editor, and the step-2
+  point move is `Build::move_chassis_outline_point`;
 - Save As/Open are `Robot Designs/<name>.bot`, Test Robot is M8's `Match`.
 
-Wiring editing landed as click-to-place then click-to-bind (`new analog` /
-`new switch` / `new button` + a free `control grid` cell, then a component row
-and an action row; `delete button` removes). Still open: **wiring drag**,
-decals/surface layers/texture-entire in the UI, chassis drawing,
-mouse→face-group picking, a mouse baseplate placement tool, and applying match
-damage back to the build (the career's repair bench is the separate M10.5
-path, `docs/18-hq-ui.md`).
+Still open: **wiring drag**, texture-entire in the UI, the game's outline→mesh
+extrusion/atlas rebuild, and applying match damage back to the build (the
+career's repair bench is the separate M10.5 path, `docs/18-hq-ui.md`).
