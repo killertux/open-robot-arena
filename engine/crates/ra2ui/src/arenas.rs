@@ -31,6 +31,8 @@ pub const ROW_FACE: &str = "fg_mcn14";
 pub struct Arena {
     /// The name the list shows — `Combat Arena`.
     pub name: String,
+    /// The class docstring the picker shows under the preview.
+    pub description: String,
     /// The art the picker hands the C++ beside the name, as the script writes it:
     /// `box/box_preview.bmp`.
     pub preview: String,
@@ -82,6 +84,7 @@ pub fn all(game: &Path) -> Result<Vec<Arena>, String> {
         }
         out.push(Arena {
             name: script.name,
+            description: script.description,
             preview: script.preview.unwrap_or_default(),
             script: path.file_name().unwrap().to_string_lossy().to_string(),
             game_types: script.game_types,

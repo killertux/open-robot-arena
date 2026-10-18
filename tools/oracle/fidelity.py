@@ -103,8 +103,8 @@ FIXTURES = [
          route=["exhibition button", "robots button"]),
     dict(id="exhibition-deathmatch", ref="exhibition-deathmatch__1024x768__000.png",
          route=["exhibition button", "gametype button", "deathmatch checkbox"]),
-    dict(id="exhibition-pick-ai", ref="exhibition-pick-ai__1024x768__000.png", unreachable=
-         "the Select Computer Robot dialog has no named-click route in the shell"),
+    dict(id="exhibition-pick-ai", ref="exhibition-pick-ai__1024x768__000.png",
+         route=["exhibition button", "robots button", "computer player button"]),
     dict(id="exhibition-robots-filled", ref="exhibition-robots-filled__1024x768__000.png",
          unreachable="picker clicks need pixel points; ra2-app cannot mix pixel and named clicks"),
     dict(id="teamhq-select", ref="teamhq-select__1024x768__000.png", route=["Team HQ button"]),

@@ -164,6 +164,13 @@ pub struct Shell {
     /// records as `player_pick`/`opponent_pick`; slots 2 and 4 feed a four-robot
     /// Battle Royal or the second robot of a 2v2 Team Match.
     slot_picks: [Option<Pick>; 4],
+    /// Which table each slot's robot came from. The slot's own join buttons
+    /// choose it (`human player button` / `computer player button`); an unset
+    /// slot is the screen's team-1/team-2 default.
+    slot_sides: [Option<Side>; 4],
+    /// The picked robots' own `.bot` snapshots, by the texture key the slot's
+    /// `bot img` carries. The renderer registers them before it draws.
+    previews: BTreeMap<String, ra2ui::preview::Preview>,
     /// The picker window open over the setup screen.
     popup: Option<Popup>,
 }
@@ -198,6 +205,8 @@ impl Shell {
             player_pick: None,
             opponent_pick: None,
             slot_picks: [None; 4],
+            slot_sides: [None; 4],
+            previews: BTreeMap::new(),
             popup: None,
         })
     }
@@ -354,6 +363,24 @@ impl Shell {
     /// The computer's robot from the shipped picker.
     pub fn opponent_pick(&self) -> Option<Pick> {
         self.opponent_pick
+    }
+
+    /// The table slot `slot` (0…3) draws its robot from.
+    pub fn slot_side(&self, slot: usize) -> Side {
+        self.slot_sides
+            .get(slot)
+            .copied()
+            .flatten()
+            .unwrap_or(if slot < 2 {
+                Side::Player
+            } else {
+                Side::Computer
+            })
+    }
+
+    /// The pictures the screen's `bot img` widgets name by synthetic key.
+    pub fn previews(&self) -> &BTreeMap<String, ra2ui::preview::Preview> {
+        &self.previews
     }
 
     /// The robot chosen in `playerN group` (`slot` 0…3).
@@ -609,6 +636,19 @@ impl Shell {
             step.hit = "ScrollBar".to_string();
             return Ok(self.finish(step));
         }
+        // `Eject` ("click to remove this player from the match") empties the slot.
+        if let Some(slot) = self.eject_slot_at(x, y) {
+            self.slot_picks[slot] = None;
+            self.slot_sides[slot] = None;
+            match slot {
+                0 => self.player_pick = None,
+                2 => self.opponent_pick = None,
+                _ => {}
+            }
+            step.hit = "eject button".to_string();
+            self.refresh_robot_slots()?;
+            return Ok(self.finish(step));
+        }
         // A click on a `load appropriate gib for player N here` region opens the
         // shipped picker window. The region is the screen's own group; no
         // control is under the point, so this is the picker's entry point.
@@ -642,8 +682,31 @@ impl Shell {
         };
         if let Some(target) = replacement {
             self.screen = load_screen(&self.ui, &target)?;
+            self.load_default_tab()?;
         }
+        self.refresh_robot_slots()?;
+        self.refresh_arena_detail();
         Ok(self.finish(step))
+    }
+
+    /// The exhibition setup opens on its `Game Settings` tab: the button is
+    /// drawn selected, so the screen's own `gametype.gib` is already in the
+    /// content group (the original's constructor does the same load).
+    fn load_default_tab(&mut self) -> Result<(), String> {
+        let game_type = self.game_type_choice.clone();
+        if let Screen::Page(page) = &mut self.screen {
+            if page.key.eq_ignore_ascii_case("exhibition/exhib_setup.gib") {
+                load_into(
+                    page,
+                    &self.ui,
+                    &self.game,
+                    "content group",
+                    "gametype.gib",
+                    game_type.as_deref(),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Stamp the screen/content on a step, remember the choices and append it
@@ -672,14 +735,23 @@ impl Shell {
     ) -> Result<Option<(Side, String, String, String)>, String> {
         let placed = self.placements();
         let control = ra2ui::input::hit_control(&placed, x, y);
-        if control.is_some() {
+        // The slot's own join/change buttons open the picker like its region.
+        let slot_button = control.as_ref().is_some_and(|path| {
+            chain(&placed, path).iter().any(|p| {
+                matches!(
+                    p.widget.name(),
+                    "human player button" | "computer player button" | "change robot button"
+                )
+            })
+        });
+        if control.is_some() && !slot_button {
             return Ok(None);
         }
         let Some(path) = ra2ui::input::hit(&placed, x, y) else {
             return Ok(None);
         };
-        let chain = chain(&placed, &path);
-        let Some(group) = chain.iter().rev().find(|p| {
+        let hit_chain = chain(&placed, &path);
+        let Some(group) = hit_chain.iter().rev().find(|p| {
             let note = p.widget.notes().trim_start().to_ascii_lowercase();
             // `exhib_robots.gib` carries two spellings: "load appropriate gib
             // for player 1 here" on slots 1 and 3, and "load appropriate
@@ -695,17 +767,42 @@ impl Shell {
             .filter_map(|token| token.parse::<usize>().ok())
             .next()
             .unwrap_or(1);
-        let side = if slot <= 2 {
+        let mut side = if slot <= 2 {
             Side::Player
         } else {
             Side::Computer
         };
+        if slot_button {
+            let button = control.as_ref().and_then(|path| {
+                chain(&placed, path)
+                    .iter()
+                    .find_map(|p| match p.widget.name() {
+                        "human player button" => Some(Side::Player),
+                        "computer player button" => Some(Side::Computer),
+                        _ => None,
+                    })
+            });
+            if let Some(button) = button {
+                side = button;
+            }
+        }
         Ok(Some((
             side,
             panel.clone(),
             format!("Group {panel:?}"),
             note,
         )))
+    }
+
+    /// The 0-based slot whose `eject button` is under the point.
+    fn eject_slot_at(&self, x: f32, y: f32) -> Option<usize> {
+        let placed = self.placements();
+        let path = ra2ui::input::hit_control(&placed, x, y)?;
+        let chain = chain(&placed, &path);
+        if !chain.iter().any(|p| p.widget.name() == "eject button") {
+            return None;
+        }
+        chain.iter().find_map(|p| panel_slot(p.widget.name()))
     }
 
     fn open_picker(&mut self, side: Side, panel: String, _x: f32, _y: f32) -> Result<(), String> {
@@ -721,13 +818,8 @@ impl Shell {
         }
         let team = match side {
             Side::Player => teams::career_player_slot(&rosters).unwrap_or(0),
-            Side::Computer => {
-                if rosters.len() > 1 {
-                    1
-                } else {
-                    0
-                }
-            }
+            // The original's Select Computer Robot opens on its first team.
+            Side::Computer => 0,
         };
         // The dropdown's list is opened by its own `Down Button`; the file's
         // `Visible true` is the authored open state, and a drop-down starts
@@ -808,6 +900,7 @@ impl Shell {
                 if let Some(slot) = self.slot_picks.get_mut(popup.slot) {
                     *slot = Some(pick);
                 }
+                self.slot_sides[popup.slot] = Some(popup.side);
                 match popup.slot {
                     0 => self.player_pick = Some(pick),
                     2 => self.opponent_pick = Some(pick),
@@ -883,9 +976,13 @@ impl Shell {
         Ok(self.finish(step))
     }
 
-    /// Put the accepted robot's own `choosebot_cell.gib` into the setup
-    /// screen's `playerN group` — the slot's note says to load the appropriate
-    /// gib here.
+    /// Put the accepted robot into the setup screen's `playerN group`.
+    ///
+    /// The slot's note says to load the appropriate gib here; the exhibition
+    /// screen reuses the multiplayer lobby's cells: `activeplayer.gib` for a
+    /// slot that holds a robot (its picture, team name, bot name, the
+    /// player/computer icon, `Eject` and the change-robot button) and
+    /// `noplayer.gib` for an open one.
     fn apply_panel(
         &mut self,
         panel: &str,
@@ -893,36 +990,167 @@ impl Shell {
         side: Side,
         ui: &Path,
     ) -> Result<(), String> {
-        let cell = workshop::load(ui, "exhibition/choosebot_cell.gib")?;
+        let cell = workshop::load(ui, "multiplayer/activeplayer.gib")?;
         let Some(mut cell) = cell.widgets().next().cloned() else {
-            return Err("choosebot_cell.gib has no root".to_string());
+            return Err("activeplayer.gib has no root".to_string());
         };
         let game = self.game().to_path_buf();
-        if let Some((_, class)) =
-            teams::bot_info(&teams::bot_path(&game, side, pick.team, pick.bot))
-        {
-            let icon = match class {
-                0 => "exhibition/light_icon.bmp",
-                1 => "exhibition/medium_icon.bmp",
-                _ => "exhibition/heavy_icon.bmp",
-            };
-            if let Some(icon_widget) = workshop::find_mut(&mut cell, "weight icon") {
-                ra2ui::input::set_field(icon_widget, "_Filename", icon);
+        let path = teams::bot_path(&game, side, pick.team, pick.bot);
+        let bot_name = teams::bot_info(&path)
+            .map(|(name, _)| name)
+            .unwrap_or_default();
+        let team_name = teams::rosters(&game, side)
+            .ok()
+            .and_then(|rosters| rosters.get(pick.team).map(|r| r.name.clone()))
+            .unwrap_or_default();
+        let preview = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| ra2fmt::bot::parse(&bytes).ok())
+            .and_then(|bot| bot.snapshot)
+            .and_then(|tga| ra2ui::preview::Preview::decode_tga(&tga));
+        let image = match &preview {
+            Some(preview) => {
+                let key = preview.key(&format!("slot-{panel}"));
+                self.previews.insert(key.clone(), preview.clone());
+                key
+            }
+            None => "exhibition\\sample_bot.bmp".to_string(),
+        };
+        ra2ui::cells::bind_art(&mut cell, "bot img", &image);
+        ra2ui::cells::bind_value(&mut cell, "team name", &team_name);
+        ra2ui::cells::bind_value(&mut cell, "bot name", &bot_name);
+        ra2ui::cells::bind_art(
+            &mut cell,
+            "player icon img",
+            match side {
+                Side::Player => "multiplayer\\local_player_icon.bmp",
+                Side::Computer => "multiplayer\\computer_player_icon.bmp",
+            },
+        );
+        // The lobby's ready check and spectator tag belong to network play.
+        for name in ["ready label", "ready checkbox", "spectator [TextBox]"] {
+            if let Some(widget) = workshop::find_mut(&mut cell, name) {
+                ra2ui::input::set_field(widget, "Visible", "false");
             }
         }
+        self.put_in_panel(panel, cell);
+        Ok(())
+    }
+
+    /// Show `noplayer.gib` (OPEN, with its two join buttons) in an empty slot.
+    fn open_panel(&mut self, panel: &str, ui: &Path) -> Result<(), String> {
+        let cell = workshop::load(ui, "multiplayer/noplayer.gib")?;
+        let Some(cell) = cell.widgets().next().cloned() else {
+            return Err("noplayer.gib has no root".to_string());
+        };
+        self.put_in_panel(panel, cell);
+        Ok(())
+    }
+
+    /// Replace what a slot group holds after its own background image.
+    fn put_in_panel(&mut self, panel: &str, cell: Widget) {
         let Screen::Page(page) = &mut self.screen else {
-            return Ok(());
+            return;
         };
         for block in page.gib.blocks.iter_mut() {
             let Block::Widget(root) = block else { continue };
             let Some(group) = workshop::find_mut(root, panel) else {
                 continue;
             };
-            group.children.clear();
+            group.children.truncate(1);
             group.children.push(cell);
+            return;
+        }
+    }
+
+    /// Whether the robots tab is the content on screen.
+    fn robots_tab_loaded(&self) -> bool {
+        match &self.screen {
+            Screen::Page(page) => page
+                .content
+                .last()
+                .is_some_and(|(_, key)| key.eq_ignore_ascii_case("exhibition/exhib_robots.gib")),
+            Screen::Lab(_) => false,
+        }
+    }
+
+    /// Fill every slot of the robots tab from the picks made so far: the
+    /// accepted robot's cell, or the open slot. The tab is rebuilt from its
+    /// file whenever it is loaded, so this runs after each click.
+    fn refresh_robot_slots(&mut self) -> Result<(), String> {
+        if !self.robots_tab_loaded() {
             return Ok(());
         }
+        let ui = self.ui.clone();
+        for (slot, panel) in [
+            "player1 group",
+            "player2 group",
+            "player3 group",
+            "player4 group",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let side = self.slot_side(slot);
+            match self.slot_picks[slot] {
+                Some(pick) => self.apply_panel(panel, pick, side, &ui)?,
+                None => self.open_panel(panel, &ui)?,
+            }
+        }
         Ok(())
+    }
+
+    /// The arena tab's picture and description follow the selected row: the
+    /// script's `preview` bitmap into `arena preview img`, and its class
+    /// docstring into `description`.
+    fn refresh_arena_detail(&mut self) {
+        let game = self.game.clone();
+        let game_type = self
+            .game_type_choice
+            .clone()
+            .unwrap_or_else(|| "DEATHMATCH".to_string());
+        let Screen::Page(page) = &mut self.screen else {
+            return;
+        };
+        let Some(root) = page.gib.widgets().next() else {
+            return;
+        };
+        let Some(list) = workshop::find(root, ra2ui::arenas::LIST) else {
+            return;
+        };
+        let Some(row) = ra2ui::input::selected_row(list) else {
+            return;
+        };
+        let Ok(arenas) = ra2ui::arenas::available(&game, &game_type) else {
+            return;
+        };
+        let Some(arena) = arenas.get(row) else {
+            return;
+        };
+        let picture = image::open(game.join("Arenas").join(arena.preview.replace('\\', "/")))
+            .ok()
+            .map(|image| {
+                let image = image.into_rgba8();
+                let (width, height) = image.dimensions();
+                ra2ui::preview::Preview {
+                    width,
+                    height,
+                    rgba: image.into_raw(),
+                }
+            });
+        let key = picture.as_ref().map(|p| p.key("arena"));
+        for block in page.gib.blocks.iter_mut() {
+            let Block::Widget(root) = block else { continue };
+            if let Some(key) = &key {
+                ra2ui::cells::bind_art(root, "arena preview img", key);
+            }
+            if let Some(description) = workshop::find_mut(root, "description") {
+                ra2ui::cells::bind_prose(description, &arena.description);
+            }
+        }
+        if let (Some(key), Some(picture)) = (key, picture) {
+            self.previews.insert(key, picture);
+        }
     }
 
     /// Keep the exhibition picker's choices across content-tab loads.
@@ -1123,6 +1351,9 @@ impl Shell {
         let [width, height] = self.size;
         let (width, height) = (width as u32, height as u32);
         let mut assets = UiAssets::open(&self.game).map_err(|e| e.to_string())?;
+        for (key, preview) in &self.previews {
+            assets.add_preview(key, preview);
+        }
         let placed: Vec<Placement<'_>> = match &self.screen {
             Screen::Page(page) => ra2ui::resolve_with(&page.gib, self.size, Some(assets.faces())),
             Screen::Lab(lab) => lab.placements(self.size, Some(assets.faces())),
@@ -1346,10 +1577,79 @@ fn load_into(
     if !loaded {
         return Err(format!("{} has no group called {slot:?}", page.key));
     }
+    if key.eq_ignore_ascii_case("exhibition/gametype.gib") {
+        default_game_settings(&mut page.gib);
+    }
+    if key.eq_ignore_ascii_case("exhibition/exhib_robots.gib") {
+        show_slots_for(&mut page.gib, game_type);
+    }
     page.content.push((slot.to_string(), key.clone()));
     fill_lists(&mut page.gib, game, game_type)?;
     page.scroll.insert(ra2ui::arenas::LIST.to_string(), 0);
+    // The arena tab opens with its first row selected (the original's list).
+    for block in page.gib.blocks.iter_mut() {
+        let Block::Widget(root) = block else { continue };
+        if let Some(list) = workshop::find_mut(root, ra2ui::arenas::LIST) {
+            if ra2ui::input::selected_row(list).is_none() {
+                ra2ui::input::select_row(list, 0);
+            }
+        }
+    }
     Ok(())
+}
+
+/// The Game Settings tab's constructor defaults (`FUN_004733f0`, `0x4733f0`):
+/// DEATHMATCH, ALLWEIGHT (the file's own checked boxes) and a match time of 3
+/// minutes. The constructor fills the time dropdown with `No limit`, then
+/// `1 2 3 4 5 10 15 20`, and selects `3`; the file's `5 minutes` is an editor
+/// placeholder. The dropdown shows the bare number.
+fn default_game_settings(gib: &mut Gib) {
+    for block in gib.blocks.iter_mut() {
+        let Block::Widget(root) = block else { continue };
+        let Some(dropdown) = workshop::find_mut(root, "time dropdown") else {
+            continue;
+        };
+        for child in dropdown.children.iter_mut() {
+            if child.kind == WidgetKind::TextBox {
+                set_text(child, "3");
+            }
+        }
+    }
+}
+
+/// Only BATTLE ROYAL and TEAM MATCH use all four robot slots. A duel shows
+/// two panels side by side in the top row (the original's DEATHMATCH setup):
+/// slot 1 and slot 3, the opponent, the pair the match is built from, each
+/// centred in half of the area. Slots 2 and 4 are not shown.
+fn show_slots_for(gib: &mut Gib, game_type: Option<&str>) {
+    let four = matches!(game_type, Some("BATTLE ROYAL") | Some("TEAM MATCH"));
+    if four {
+        return;
+    }
+    for block in gib.blocks.iter_mut() {
+        let Block::Widget(root) = block else { continue };
+        // Hit-testing does not skip an invisible group, so the two unused slots
+        // leave the tree (slot 3 now sits where slot 2 was).
+        for name in ["team 1 group", "team 2 group"] {
+            if let Some(team) = workshop::find_mut(root, name) {
+                team.children
+                    .retain(|c| c.name() != "player2 group" && c.name() != "player4 group");
+            }
+        }
+        // Two half-width columns, so slot 1 and slot 3 are each centred in
+        // their own half and neither group covers the other's hit area.
+        for (name, x) in [("team 1 group", "0.25"), ("team 2 group", "0.75")] {
+            if let Some(team) = workshop::find_mut(root, name) {
+                ra2ui::input::set_field(team, "Position", &format!("{x} 1 0.25 1"));
+                ra2ui::input::set_field(team, "Size", "0.5 1 0.5 1");
+            }
+        }
+        for name in ["player1 group", "player3 group"] {
+            if let Some(slot) = workshop::find_mut(root, name) {
+                ra2ui::input::set_field(slot, "Position", "0.5 1 0.5 1");
+            }
+        }
+    }
 }
 
 /// Fill the lists whose own `Notes` say what fills them.
@@ -1435,7 +1735,8 @@ fn parse_match_time(text: &str) -> Option<Option<f32>> {
         return Some(None);
     }
     let number: f32 = lower.split_whitespace().next()?.parse().ok()?;
-    let seconds = if lower.contains("minute") {
+    // The constructor's option strings are bare numbers of minutes.
+    let seconds = if lower.contains("minute") || lower.split_whitespace().count() == 1 {
         number * 60.0
     } else if lower.contains("second") {
         number

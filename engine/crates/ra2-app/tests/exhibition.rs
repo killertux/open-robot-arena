@@ -181,14 +181,9 @@ fn king_of_the_hill_filters_the_picker_and_picks_hilltop() {
     assert_eq!(choice.game_type, GameType::KingOfTheHill);
     assert_eq!(choice.arena_script, "hilltop.py");
     assert_eq!(choice.arena_name, "Hill Top Arena");
-    assert!(
-        choice
-            .arena_note
-            .as_deref()
-            .is_some_and(|note| note.contains("supports KING OF THE HILL")),
-        "{:?}",
-        choice.arena_note
-    );
+    // The tab opens with its first row selected, so the list's own choice
+    // stands and no fallback note is needed.
+    assert_eq!(choice.arena_note, None);
     assert_eq!(choice.arena_row, Some((0, 2)));
 }
 
@@ -253,36 +248,37 @@ fn the_arena_lists_scroller_and_wheel_move_the_viewport() {
     // The wheel over the list body.
     let wheel = [list.x + list.w / 2.0, list.y + 20.0];
     assert!(shell.scroll_at(wheel[0], wheel[1], 2));
-    assert_eq!(shell.arena_scroll(), Some(3));
+    // Eight DEATHMATCH arenas, six visible: the offset stops at two.
+    assert_eq!(shell.arena_scroll(), Some(2));
 }
 
 /// Row 10 is past the six rows the picker shows; the list scrolls and the click
 /// lands on `Parking Lot`.
 #[test]
-fn arena_index_ten_scrolls_the_picker_and_selects_parking_lot() {
+fn arena_index_six_scrolls_the_picker_and_selects_parking_lot() {
     let Some(game) = game_dir() else { return };
     let _guard = ra2script::lock();
     let mut options = options(&game);
-    options.arena_index = Some(10);
+    options.arena_index = Some(6);
     let (shell, _) = play_mode::select_setup(&options).expect("the click flow");
     assert_eq!(
         shell.arena_row(),
-        Some((10, 12)),
-        "the tenth row of the twelve"
+        Some((6, 8)),
+        "the seventh row of the eight DEATHMATCH arenas"
     );
     assert_eq!(
         shell.arena_scroll(),
-        Some(5),
-        "six visible rows means row 10 needs a five-row offset"
+        Some(1),
+        "six visible rows means row 6 needs a one-row offset"
     );
     let choice = play_mode::choice_from_shell(&game, &shell).expect("the choice");
     assert_eq!(choice.arena_name, "Parking Lot");
     assert_eq!(choice.arena_script, "parkinglot.py");
-    assert_eq!(choice.arena_row, Some((10, 12)));
+    assert_eq!(choice.arena_row, Some((6, 8)));
 }
 
-/// The time dropdown's displayed value is data (`5 minutes`); its option list
-/// is not. The screen's value is the match length, and `--seconds`/`--time`
+/// The time dropdown's displayed value is data (`3`, the constructor's default; the
+/// option list is `No limit`, 1-5, 10, 15, 20, `FUN_004733f0`). The screen's value is the match length, and `--seconds`/`--time`
 /// override it explicitly.
 #[test]
 fn the_time_dropdowns_displayed_value_is_the_match_length() {
@@ -292,14 +288,14 @@ fn the_time_dropdowns_displayed_value_is_the_match_length() {
     options.arena_script = Some("box.py".to_string());
     let (mut shell, _) = play_mode::select_setup(&options).expect("the click flow");
     shell.click_named("gametype button").expect("Game Settings");
-    assert_eq!(shell.time_text(), Some("5 minutes"));
-    assert_eq!(shell.time_choice(), Some(Some(300.0)));
+    assert_eq!(shell.time_text(), Some("3"));
+    assert_eq!(shell.time_choice(), Some(Some(180.0)));
     let choice = play_mode::choice_from_shell(&game, &shell).expect("the choice");
-    assert_eq!(choice.time_text.as_deref(), Some("5 minutes"));
-    assert_eq!(choice.time_seconds, Some(300.0));
+    assert_eq!(choice.time_text.as_deref(), Some("3"));
+    assert_eq!(choice.time_seconds, Some(180.0));
 
     let (session, _) = play_mode::session_from_shell(&game, &shell, None, None).unwrap();
-    assert_eq!(session.matched.config.duration, Some(300.0));
+    assert_eq!(session.matched.config.duration, Some(180.0));
     let (session, _) = play_mode::session_from_shell(&game, &shell, Some(2.0), None).unwrap();
     assert_eq!(
         session.matched.config.duration,

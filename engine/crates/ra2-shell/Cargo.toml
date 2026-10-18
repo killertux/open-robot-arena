@@ -10,7 +10,7 @@ name = "ra2-shell"
 path = "src/main.rs"
 
 [dependencies]
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "bmp"] }
 pyo3 = { version = "0.23.5", features = ["auto-initialize"] }
 ra2-render = { path = "../ra2-render" }
 ra2fmt = { path = "../ra2fmt" }
