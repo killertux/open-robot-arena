@@ -383,16 +383,18 @@ impl Robot {
     /// (`tools/vendor/PyRA2/.../Bot file format analysis.txt` §"3D model of bot
     /// with buckling points"). Until now a chassis only ever died whole.
     ///
-    /// Both the drawn chassis and (when the body is free) its collider follow,
-    /// so a hurt robot is visibly crushed. **The collider re-bake is refused by
-    /// Jolt while a hinge uses the chassis body** (`set_shape:
-    /// UsedByConstraint`), which is every motorized stock robot: the drawn
-    /// chassis crushes but the collider stays the pristine shape. That is F9's
-    /// measured residual; removing and recreating the chassis' hinges around
-    /// `set_body_shape` is the next step. The movable region is the file's own:
-    /// the lowest buckle point pins the floor plate (the Octagon-sized robots
-    /// keep everything below the mid-height rigid), and the motion grows with
-    /// height above it, so the top caves in furthest.
+    /// Both the drawn chassis and its collider follow, so a hurt robot is
+    /// visibly crushed *and* its hull is the crushed one. Jolt refuses
+    /// `set_shape` on a constrained body (`UsedByConstraint`), which is every
+    /// motorized stock robot; the backend therefore removes the chassis'
+    /// hinges, re-shapes the body and recreates each hinge with its **current
+    /// angle as the reference**, so a burst motor's travel does not move. The
+    /// recreated joints keep their handles, so `parts[].joint` stays valid.
+    /// Measured on `AI/Team1/Bot0`: the collider's top falls 0.205 m at half
+    /// damage and the robot still drives 6.81 m in 3 s. The movable region is
+    /// the file's own: the lowest buckle point pins the floor plate (the
+    /// Octagon-sized robots keep everything below the mid-height rigid), and
+    /// the motion grows with height above it, so the top caves in furthest.
     ///
     /// **How far it moves is the file's own limit.** The buckle points are a ring
     /// at mid-height and a ring at the top, and the movable region is the top
