@@ -2569,6 +2569,66 @@ mod tests {
         assert_eq!(loaded.bracket().unwrap().round, expected_bracket.round);
     }
 
+    /// A multi-round event writes the season and event points the career
+    /// holds after every round, not only at the end.
+    #[test]
+    fn a_multi_round_event_writes_the_points_the_career_holds_after_every_round() {
+        let dir = TestDir::new("bracket-save-points");
+        write_synthetic_events(dir.path());
+        let mut career = synthetic_career();
+        career.seed = 3;
+        career.save(dir.path()).unwrap();
+        let event = career.schedule[0];
+        career.enter_event(event).unwrap();
+        let rounds = career.bracket().unwrap().rounds;
+        assert_eq!(rounds, 4, "event 0 is a four-round event");
+        let win = report(
+            "DEATHMATCH",
+            vec![
+                robot(0, 0, "Test Team", 2000, 0.0, false),
+                robot(1, 1, "AI", 0, 0.0, true),
+            ],
+            vec![0],
+        );
+        for round in 0..rounds {
+            let outcome = career.play_round(&win, 0).unwrap();
+            assert!(outcome.won);
+            career.save(dir.path()).unwrap();
+            let table = team::read_table(&player_table_path(dir.path())).unwrap();
+            let disk = &table.teams[career.player_slot];
+            println!(
+                "round {}/{}: career season {}, event {}; disk season {}, event {}",
+                round + 1,
+                rounds,
+                career.player().season_points(),
+                career.player().event_points(),
+                disk.season_points(),
+                disk.event_points()
+            );
+            assert_eq!(
+                disk.season_points(),
+                career.player().season_points(),
+                "season points after round {}",
+                round + 1
+            );
+            assert_eq!(
+                disk.event_points(),
+                career.player().event_points(),
+                "event points after round {}",
+                round + 1
+            );
+        }
+        assert!(career.bracket.is_none());
+        assert_eq!(career.history.len(), 1);
+        // Four rounds at 160/4 = 40 plus 2000/200 = 10 each.
+        assert_eq!(career.player().season_points(), 4 * 50);
+        let table = team::read_table(&player_table_path(dir.path())).unwrap();
+        assert_eq!(
+            table.teams[career.player_slot].season_points(),
+            career.player().season_points()
+        );
+    }
+
     #[test]
     fn the_shipped_team_tables_round_trip_after_a_no_op_career() {
         let Some(dir) = copy_game("noop") else {

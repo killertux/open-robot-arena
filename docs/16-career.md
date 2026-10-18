@@ -393,16 +393,20 @@ shipped game; the game-dependent ones skip when it is absent):
    seed draw the same field and the same opponents round after round.
 8. `save_reload_mid_season_restores_the_bracket_and_opponents` — a save after a
    won round restores the seed, phase, bracket, round and next opponents.
-9. `the_shipped_team_tables_round_trip_after_a_no_op_career` — the corpus
-   test: both tables byte-identical after load/save.
-10. `the_career_sidecar_is_byte_stable` — save, load, save; identical sidecar.
-11. `the_sidecar_round_trips_every_text_field` — tabs and backslashes in a robot
+9. `a_multi_round_event_writes_the_points_the_career_holds_after_every_round` —
+   a four-round event saved after each round; the file's `+0x58` (season) and
+   `+0x54` (event) equal the career's after every round and at the end. This is
+   the save-path invariant the app-level test relies on.
+10. `the_shipped_team_tables_round_trip_after_a_no_op_career` — the corpus
+    test: both tables byte-identical after load/save.
+11. `the_career_sidecar_is_byte_stable` — save, load, save; identical sidecar.
+12. `the_sidecar_round_trips_every_text_field` — tabs and backslashes in a robot
     name survive.
-12. `a_damaging_match_leaves_a_repair_the_clock_completes_and_saves` — a
+13. `a_damaging_match_leaves_a_repair_the_clock_completes_and_saves` — a
     damaged report leaves one entry (cost 0), 12 s of 30 s elapsed round-trips
     through the sidecar, the 18 s tick completes it, the save reloads empty and
     no money was charged.
-13. `engine/crates/ra2fmt/src/team.rs`'s
+14. `engine/crates/ra2fmt/src/team.rs`'s
     `career_fields_are_typed_and_list_lines_round_trip` — the league line,
     prize/schedule list lines and the nine history lines parse and write
     byte-for-byte.
