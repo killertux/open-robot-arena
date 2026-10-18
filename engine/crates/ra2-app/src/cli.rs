@@ -28,8 +28,9 @@ pub struct Args {
     /// `--hq --simulate-season`: play all nine events with deterministic
     /// opponents and write the season evidence frames.
     pub simulate_season: bool,
-    /// `--hq --report-damage N`: add N damage to the player's match report
-    /// before the career award. The shipped match in this environment never
+    /// `--hq --report-damage N`: write N damage into the player's first
+    /// component and tear off a second one, so the report hands the career a
+    /// component-level repair list. The shipped match in this environment never
     /// closes on its opponent, so its report has zero damage; this is the
     /// evidence/test knob for the repairs screen, not a game rule.
     pub report_damage: Option<f32>,
@@ -132,7 +133,7 @@ pub fn usage() -> &'static str {
        --seconds N      fight length for --match/--play; test length for --build\n\
        --simulate-event N  --hq: play schedule row N's whole event headlessly\n\
        --simulate-season   --hq: play the nine-event season and write the evidence\n\
-       --report-damage N  --hq evidence knob: N damage in the player's match report\n\
+       --report-damage N  --hq evidence knob: N damage to the player's components\n\
        --out DIR        write the match/play/build PNG frames and exit\n\
        --quit-at N      pause at N fight seconds, quit to the menu, write pause/menu PNGs\n\
        --bots A,B       two .bot paths for --match\n\

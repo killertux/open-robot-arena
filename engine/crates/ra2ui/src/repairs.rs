@@ -38,23 +38,75 @@ pub const TITLE: &str = "repairs title";
 /// Text face for a list row: the list's own `_Font System` is a tool font, and
 /// the screens' small face is what the shipped cells use.
 pub const ROW_FACE: &str = "fg_mcn12";
+/// The fractured row's icon: the string `FUN_004d6480` loads at `0x6fd5b8`
+/// when the `Team+0x13c` flag is 1.
+pub const FRACTURED_ICON: &str = "teamhq\\damage.tga";
 
-/// One line of the repairs list. `component` is what occupies the first
-/// column; `time` is the second column's state string (remaining / total and
-/// the bar's percentage). `progress` is the model's bar in `0.0..=1.0`.
+/// One line of the repairs list. `robot`, `component` and `class` are the
+/// first columns; `time` is the second column's state string (remaining / total
+/// and the bar's percentage). `progress` is the model's bar in `0.0..=1.0`.
+/// `hp`/`total_hp` are the shipped health bar's current and maximum, and
+/// `fractured` draws the `teamhq\damage.tga` icon (`FUN_004d6480`'s
+/// `0x6fd5b8`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
+    pub robot: String,
     pub component: String,
+    pub class: String,
     pub time: String,
     pub progress: f32,
+    pub hp: f32,
+    pub total_hp: f32,
+    pub fractured: bool,
 }
 
 impl Row {
+    /// The original three-field row: a component name, its time/state and the
+    /// bar. Kept for callers that have no robot/class split.
     pub fn new(component: impl Into<String>, time: impl Into<String>, progress: f32) -> Row {
         Row {
+            robot: String::new(),
             component: component.into(),
+            class: String::new(),
             time: time.into(),
             progress: progress.clamp(0.0, 1.0),
+            hp: 0.0,
+            total_hp: 0.0,
+            fractured: false,
+        }
+    }
+
+    /// A component row: the robot and component names, the component class,
+    /// the current/total hitpoints and the fractured state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn component(
+        robot: impl Into<String>,
+        component: impl Into<String>,
+        class: impl Into<String>,
+        time: impl Into<String>,
+        progress: f32,
+        hp: f32,
+        total_hp: f32,
+        fractured: bool,
+    ) -> Row {
+        Row {
+            robot: robot.into(),
+            component: component.into(),
+            class: class.into(),
+            time: time.into(),
+            progress: progress.clamp(0.0, 1.0),
+            hp,
+            total_hp,
+            fractured,
+        }
+    }
+
+    /// The remaining hitpoint percentage, as the row's label prints it.
+    pub fn hp_percent(&self) -> i32 {
+        if self.total_hp > 0.0 {
+            ((self.hp / self.total_hp).clamp(0.0, 1.0) * 100.0).round() as i32
+        } else {
+            0
         }
     }
 }
@@ -196,9 +248,9 @@ impl Repairs {
         None
     }
 
-    /// Fill the shipped `repairs list` with the rows. Two `Text` widgets per
-    /// row: the component in the first column and the time/state in the second,
-    /// which are the list's own `ColWidths 116 17 116 17`.
+    /// Fill the shipped `repairs list` with the rows. A component row is icon
+    /// (fractured only), robot, component, class and `hp/total time`; a plain
+    /// [`Row::new`] keeps the original two-column component/time shape.
     fn fill(&mut self) -> Result<(), String> {
         let rows = self.rows.clone();
         let selected = self.selected;
@@ -210,38 +262,77 @@ impl Repairs {
         };
         let height = grid.row_height.max(18.0);
         let width = grid.col_widths.first().copied().unwrap_or(116.0);
-        let second_x = width;
-        // Rows are the text children this module made; the file's own selection
-        // and highlight bars stay.
-        list.children.retain(|c| {
-            !(c.kind == WidgetKind::Text
-                && c.field("_Font").is_some()
-                && c.name().starts_with("repair row"))
-        });
+        // The list area is 290 logical pixels wide (`ColWidths 116 17 116 17`).
+        // Pack a component row as icon | robot | component | class | hp/time so
+        // the two shipped columns do not overlap their own text.
+        let columns = [20.0, 130.0, 240.0, 375.0];
+        let widths = [100.0, 100.0, 125.0, 90.0];
+        // Rows are the widgets this module made; the file's own selection and
+        // highlight bars stay.
+        list.children
+            .retain(|c| !c.name().starts_with("repair row"));
         for (index, row) in rows.iter().enumerate() {
             let y = height * index as f32;
-            let mut left = row_widget(
-                &format!("repair row {index} component"),
-                &row.component,
-                0.0,
-                y,
-                width,
-                height,
-            );
-            let mut right = row_widget(
-                &format!("repair row {index} time"),
-                &row.time,
-                second_x,
-                y,
-                width,
-                height,
-            );
-            if index == selected {
-                crate::input::set_field(&mut left, "_ForeColor", "1 1 0.6 1");
-                crate::input::set_field(&mut right, "_ForeColor", "1 1 0.6 1");
+            if row.fractured {
+                list.children.push(icon_widget(
+                    &format!("repair row {index} icon"),
+                    FRACTURED_ICON,
+                    0.0,
+                    y,
+                    height,
+                    height,
+                ));
             }
-            list.children.push(left);
-            list.children.push(right);
+            let component_row =
+                row.total_hp > 0.0 || !row.robot.is_empty() || !row.class.is_empty();
+            let texts: [String; 4] = if component_row {
+                [
+                    clip(&row.robot, 12),
+                    clip(&row.class, 10),
+                    clip(
+                        &format!("{:.0}/{:.0} {}%", row.hp, row.total_hp, row.hp_percent()),
+                        13,
+                    ),
+                    clip(&row.time, 8),
+                ]
+            } else {
+                [
+                    row.component.clone(),
+                    String::new(),
+                    String::new(),
+                    row.time.clone(),
+                ]
+            };
+            let xs = if component_row {
+                columns
+            } else {
+                [0.0, width, width * 2.0, width * 3.0]
+            };
+            let ws = if component_row {
+                widths
+            } else {
+                [width, width, width, width]
+            };
+            for (column, text) in texts.iter().enumerate() {
+                if text.is_empty() {
+                    continue;
+                }
+                let mut widget = row_widget(
+                    &format!(
+                        "repair row {index} {}",
+                        ["robot", "component", "class", "time"][column]
+                    ),
+                    text,
+                    xs[column],
+                    y,
+                    ws[column],
+                    height,
+                );
+                if index == selected {
+                    crate::input::set_field(&mut widget, "_ForeColor", "1 1 0.6 1");
+                }
+                list.children.push(widget);
+            }
         }
         // The file's `Sel Bar` follows the selected row (the authors' own bar).
         let rows_len = rows.len();
@@ -257,6 +348,19 @@ impl Repairs {
             crate::input::set_field(bar, "Visible", if rows_len == 0 { "false" } else { "true" });
         }
         Ok(())
+    }
+}
+
+/// A cell's text, cut to `max` characters so a long robot/component name
+/// cannot run into the next column (the shipped list has two 116-pixel
+/// columns; the renderer does not clip text to a column by itself).
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
     }
 }
 
@@ -282,6 +386,41 @@ fn row_widget(name: &str, text: &str, x: f32, y: f32, w: f32, h: f32) -> Widget 
             field("Visible", "true"),
             field("ChildOrder", "0"),
             field("ClipMode", "1"),
+            field("NumChildren", "0"),
+        ],
+        attachments: Vec::new(),
+        children: Vec::new(),
+    }
+}
+
+/// The fractured row's `Image`: the same fields a shipped image carries, with
+/// the `teamhq\damage.tga` file `FUN_004d6480` loads.
+fn icon_widget(name: &str, file: &str, x: f32, y: f32, w: f32, h: f32) -> Widget {
+    use ra2fmt::gib::Field;
+    let field = |name: &str, raw: &str| Field {
+        name: Some(name.to_string()),
+        raw: raw.to_string(),
+    };
+    Widget {
+        kind: WidgetKind::Image,
+        implicit: false,
+        fields: vec![
+            field("_Tiling", "false"),
+            field("_Filename", file),
+            field("_BufferWidth", "0 0 0 0"),
+            field("_Size", &format!("{w} 0 {h} 0")),
+            field("_Alpha", "true"),
+            field("_Filtering", "0"),
+            field("_ForeColor", "1 1 1 1"),
+            field("_Name", ""),
+            field("_Position", "0 0 0 0"),
+            field("Name", name),
+            field("ID", "-1"),
+            field("Position", &format!("{x} 0 {y} 0")),
+            field("Size", &format!("{w} 0 {h} 0")),
+            field("Visible", "true"),
+            field("ChildOrder", "1"),
+            field("ClipMode", "0"),
             field("NumChildren", "0"),
         ],
         attachments: Vec::new(),
@@ -460,6 +599,73 @@ mod tests {
             0
         );
         assert_eq!(empty.rows().len(), 0);
+    }
+
+    #[test]
+    fn a_component_row_names_the_robot_class_hp_and_fractured_icon() {
+        let Some(ui) = ui_root() else { return };
+        let rows = vec![
+            Row::component(
+                "C.R.U.S.H.",
+                "Bent Axle",
+                "Axle",
+                "29:00",
+                0.03,
+                40.0,
+                100.0,
+                false,
+            ),
+            Row::component(
+                "C.R.U.S.H.",
+                "Torn Spinner",
+                "SpinMotor",
+                "30:00",
+                0.0,
+                0.0,
+                80.0,
+                true,
+            ),
+        ];
+        let screen = Repairs::open(&ui, "Round 1 Repairs", rows, "30:00").unwrap();
+        assert_eq!(screen.rows().len(), 2);
+        assert_eq!(screen.rows()[0].hp_percent(), 40);
+        assert_eq!(screen.rows()[1].hp_percent(), 0);
+        let placed = screen.placements(DESIGN_SCREEN, None);
+        let list = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == LIST)
+            .unwrap();
+        let texts: Vec<&str> = list
+            .children
+            .iter()
+            .filter(|c| c.widget.kind == WidgetKind::Text)
+            .filter_map(|c| c.widget.text())
+            .collect();
+        assert!(texts.iter().any(|t| t.contains("C.R.U.S.H.")));
+        // The screen's four visible fields are the robot, the component class,
+        // the current/total hitpoints and the remaining clock; the component's
+        // display name stays on the model row.
+        assert!(texts.contains(&"Axle"));
+        assert!(texts.contains(&"SpinMotor"));
+        assert!(texts.iter().any(|t| t.contains("40/100 40%")), "{texts:?}");
+        assert!(texts.contains(&"29:00"));
+        assert_eq!(screen.rows()[0].component, "Bent Axle");
+        assert_eq!(screen.rows()[1].component, "Torn Spinner");
+        // Exactly one row is fractured, and its shipped icon is in the list.
+        let icons: Vec<&str> = list
+            .children
+            .iter()
+            .filter(|c| c.widget.kind == WidgetKind::Image)
+            .filter_map(|c| c.widget.filename())
+            .collect();
+        assert_eq!(icons, vec![FRACTURED_ICON]);
+        let icon = list
+            .children
+            .iter()
+            .find(|c| c.widget.name() == "repair row 1 icon")
+            .expect("the fractured row's icon");
+        assert_eq!(icon.widget.filename(), Some(FRACTURED_ICON));
     }
 
     #[test]

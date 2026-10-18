@@ -269,8 +269,8 @@ is `docs/22-component-repairs.md`. In brief:
 * Repairing is a **progress bar over time**: `FUN_004d6e10` advances the bar,
   and when `FUN_0058b470` reports it full it restores that one component
   (`Team+0x12c`: current = max; `Team+0x13c`: flag = 0) and calls
-  `FUN_004d7010`/`FUN_005ff530`, which removes the selected row and decrements
-  the damaged-component count. It is per component, not per robot. No money is
+  `FUN_004d7010`/`FUN_005ff530`, which erase the selected component row and
+  decrement the model count. It is per component, not per robot. No money is
   charged.
 * The window passes `0x1e` (30) to `FUN_0058b150` with the **minutes** selector
   (`FUN_0058b2f0`), so `repair time` starts at `00:30:00`; the screen's own

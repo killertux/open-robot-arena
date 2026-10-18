@@ -115,11 +115,12 @@ if (FUN_0058b470(progress)) {         // compared with window+0x160
 }
 ```
 
-`FUN_004d7010` calls `FUN_005ff530(i)`, decrements the list's row count at
-`window+0x168` (`0x4d701e`–`0x4d7027`), and adjusts the selection. It is the
-selected row that is restored, not the robot: repairs are **per component**.
-`FUN_005ff530` removes the element at `[list+4] + i*0x18` and decrements the
-count at `[list+0xcc]`.
+`FUN_004d7010` calls `FUN_005ff530(i)`, decrements a count at `[this+0x168]`
+(`0x4d701e`–`0x4d7027`), and adjusts the selection. `FUN_005ff530` erases the
+`i`-th 0x18-byte element from the array at `[this+4]` and decrements
+`[this+0xcc]`; it is a model/list erase, **not** the component restore (the
+restore is the two map writes just above). It is the selected component that
+is restored, not the robot: repairs are **per component**.
 
 ## 2. The clock: 30 minutes
 

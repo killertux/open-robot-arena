@@ -56,10 +56,10 @@ use crate::SHELL_SIZE;
 pub const SEED: u64 = 7;
 
 /// One click of the repairs screen's clock. The original advances a progress
-/// bar over time (`FUN_004d6e10`) and passes `0x1e` (30) to the widget, but the
-/// unit was not established; the model's policy default is 30 seconds and this
-/// headless/UI tick is six of them. The value is ours, the model's `seconds`
-/// is the explicit repair time.
+/// bar over time (`FUN_004d6e10`) against the shipped 30-minute clock
+/// (`FUN_0058b150(0x1e,1)` → `00:30:00`); this headless/UI tick is six
+/// seconds of that clock. The value is ours, the model's `seconds` is the
+/// explicit repair time.
 pub const REPAIR_TICK_SECONDS: f32 = 6.0;
 
 /// What `--hq` was asked to do.
@@ -134,7 +134,7 @@ impl FramePlan<'static> {
             match_frame: Some("match.png"),
             results: Some("results.png"),
             award: Some("award.png"),
-            repairs_list: Some("repairs-list.png"),
+            repairs_list: Some("repairs-components.png"),
             repairs_done: Some("repairs-done.png"),
             hq_after: Some("hq-after.png"),
             hq_history: Some("hq-history.png"),
@@ -335,7 +335,10 @@ impl Session {
     }
 
     /// The rows the shipped `repairs list` draws, from the career's pending
-    /// repairs and their clock. No cost is shown because the model has none.
+    /// component repairs and their clock. Each row is one component with its
+    /// robot, class, current/total hitpoints and the `damage.tga` icon when the
+    /// original's fractured flag is set. No cost is shown because the model has
+    /// none.
     pub fn repair_rows(&self) -> Vec<RepairRow> {
         self.career
             .repairs
@@ -344,15 +347,15 @@ impl Session {
             .map(|(index, repair)| {
                 let progress = self.career.repair_progress(index).unwrap_or(1.0);
                 let remaining = (repair.seconds - repair.elapsed).max(0.0);
-                RepairRow::new(
+                RepairRow::component(
+                    repair.robot.clone(),
                     repair.component.clone(),
-                    format!(
-                        "{} / {} ({}%)",
-                        repairs::format_time(remaining),
-                        repairs::format_time(repair.seconds),
-                        (progress * 100.0).round() as i32
-                    ),
+                    repair.component_class.clone(),
+                    repairs::format_time(remaining),
                     progress,
+                    repair.hp,
+                    repair.total_hp,
+                    repair.fractured,
                 )
             })
             .collect()
@@ -645,13 +648,29 @@ impl Session {
         };
         if self.report_damage > 0.0 {
             if let Some(player) = report.robots.first_mut() {
+                let before = player.damage_taken;
+                damage_report_components(player, self.report_damage);
                 player.damage_taken += self.report_damage;
                 println!(
                     "report damage: +{:.0} on {:?} (evidence knob; the match dealt {:.0})",
-                    self.report_damage,
-                    player.bot_name,
-                    player.damage_taken - self.report_damage
+                    self.report_damage, player.bot_name, before
                 );
+                for component in player.components.iter().filter(|c| c.damaged()) {
+                    println!(
+                        "  component {} {:?} [{}]: {:.0}/{:.0}{}{}",
+                        component.index,
+                        component.name,
+                        component.class,
+                        component.hp,
+                        component.total_hp,
+                        if component.detached { " detached" } else { "" },
+                        if component.fractured {
+                            " fractured"
+                        } else {
+                            ""
+                        }
+                    );
+                }
             }
         }
         let outcome = self.career.play_round(&report, 0)?;
@@ -1110,21 +1129,24 @@ impl Session {
         // damage; the headless run writes both states even when it was empty.
         self.open_repairs()?;
         println!(
-            "  repairs: {} entr{} ({}), clock {}",
+            "  repairs: {} component row(s), clock {}",
             self.career.repairs.len(),
-            if self.career.repairs.len() == 1 {
-                "y"
-            } else {
-                "ies"
-            },
-            self.career
-                .repairs
-                .iter()
-                .map(|r| r.component.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
             self.repair_clock()
         );
+        for row in self.repair_rows() {
+            println!(
+                "    {} / {} [{}] hp {:.0}/{:.0} ({}%) {}, {}{}",
+                row.robot,
+                row.component,
+                row.class,
+                row.hp,
+                row.total_hp,
+                row.hp_percent(),
+                row.time,
+                if row.fractured { "fractured" } else { "intact" },
+                if row.fractured { " (damage.tga)" } else { "" }
+            );
+        }
         if let Some(name) = plan.repairs_list {
             capture(self, name)?;
         }
@@ -1985,6 +2007,62 @@ pub fn run_headless(options: Options) -> Result<(), String> {
     Ok(())
 }
 
+/// The `--report-damage` evidence knob, at component level.
+///
+/// A shipped match in this environment reports zero damage, so the knob takes
+/// the player's first two damageable non-chassis components and writes the
+/// same state a real hit would: the first loses `damage` hitpoints, the second
+/// is torn off and marked fractured (the `damage.tga` row). It is an evidence
+/// input, not a game rule; `Career::repairs_from_report` sees only the report.
+fn damage_report_components(robot: &mut ra2sim::r#match::RobotReport, damage: f32) {
+    let candidates: Vec<usize> = robot
+        .components
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.total_hp > 0.0 && c.index != 0 && c.class != "Chassis")
+        .map(|(i, _)| i)
+        .collect();
+    // Prefer two different components (name/class) so the evidence frame shows
+    // two distinct rows; fall back to the first two when the robot is built of
+    // duplicates.
+    let mut chosen: Vec<usize> = Vec::new();
+    for &i in &candidates {
+        let c = &robot.components[i];
+        if chosen
+            .iter()
+            .all(|&j| robot.components[j].name != c.name || robot.components[j].class != c.class)
+        {
+            chosen.push(i);
+            if chosen.len() == 2 {
+                break;
+            }
+        }
+    }
+    for &i in &candidates {
+        if chosen.len() == 2 {
+            break;
+        }
+        if !chosen.contains(&i) {
+            chosen.push(i);
+        }
+    }
+    let Some(&first) = chosen.first() else {
+        return;
+    };
+    let c = &mut robot.components[first];
+    c.hp = (c.hp - damage).max(0.0);
+    if c.hp <= 0.0 {
+        c.detached = true;
+        c.fractured = true;
+    }
+    if let Some(&second) = chosen.get(1) {
+        let c = &mut robot.components[second];
+        c.hp = 0.0;
+        c.detached = true;
+        c.fractured = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2308,12 +2386,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A damaged report becomes a repairs-screen row; the repair button's clock
-    /// clears it, the save reads back empty, and a fresh career opens the
-    /// screen's own empty state.
+    /// Two damaged components on one robot become two repairs-screen rows; the
+    /// repair clock completes them one at a time, the detached row keeps its
+    /// name and fractured icon, the save reads back the cleared damage, and a
+    /// fresh career opens the screen's own empty state.
     #[test]
     fn damage_appears_on_the_repairs_screen_and_completing_it_persists() {
-        use ra2sim::r#match::RobotReport;
+        use ra2sim::r#match::{ComponentDamage, RobotReport};
         let Some(game) = TestGame::new("repairs") else {
             return;
         };
@@ -2341,7 +2420,31 @@ mod tests {
             eliminated: false,
             winner: false,
             immobilized: false,
+            components: Vec::new(),
         };
+        let mut player = robot(0, "My Robot", 42.0);
+        player.components = vec![
+            ComponentDamage {
+                index: 1,
+                name: "Bent Axle".to_string(),
+                class: "Axle".to_string(),
+                base: "Axle".to_string(),
+                hp: 40.0,
+                total_hp: 100.0,
+                detached: false,
+                fractured: false,
+            },
+            ComponentDamage {
+                index: 3,
+                name: "Torn Spinner".to_string(),
+                class: "SpinMotor".to_string(),
+                base: "SpinMotor".to_string(),
+                hp: 0.0,
+                total_hp: 80.0,
+                detached: true,
+                fractured: true,
+            },
+        ];
         let report = MatchReport {
             game_type: "DEATHMATCH",
             arena: "Arenas/box/box.gmf".to_string(),
@@ -2350,23 +2453,39 @@ mod tests {
             winners: vec![0],
             duration: 3.0,
             duration_limit: None,
-            robots: vec![robot(0, "My Robot", 42.0), robot(1, "Red Zone", 0.0)],
+            robots: vec![player, robot(1, "Red Zone", 0.0)],
             log: Vec::new(),
         };
         session.career.award_match(&report, 0).unwrap();
         session.open_repairs().unwrap();
         let rows = session.repairs().unwrap().rows().to_vec();
-        assert_eq!(rows.len(), 1, "one entry per damaged robot: {rows:?}");
-        assert_eq!(rows[0].component, "My Robot");
-        assert!(rows[0].time.contains("0:30"), "{}", rows[0].time);
-        assert_eq!(session.repair_clock(), "0:30");
+        assert_eq!(rows.len(), 2, "one row per damaged component: {rows:?}");
+        assert_eq!(rows[0].robot, "My Robot");
+        assert_eq!(rows[0].component, "Bent Axle");
+        assert_eq!(rows[0].class, "Axle");
+        assert_eq!(rows[0].hp, 40.0);
+        assert_eq!(rows[0].total_hp, 100.0);
+        assert_eq!(rows[0].hp_percent(), 40);
+        assert!(!rows[0].fractured);
+        assert_eq!(rows[1].component, "Torn Spinner");
+        assert_eq!(rows[1].class, "SpinMotor");
+        assert!(rows[1].fractured);
+        assert!(rows[0].time.contains("30:00"), "{}", rows[0].time);
+        assert_eq!(session.repair_clock(), "30:00");
 
-        // Five six-second ticks fill the 30-second bar; the fifth completes it.
-        for _ in 0..4 {
+        // The 30-minute clock at the six-second tick: 299 ticks leave the row,
+        // the 300th completes it, and the other component is still pending.
+        for _ in 0..299 {
             assert_eq!(session.repair_tick().unwrap(), None);
         }
+        assert_eq!(session.career.repairs.len(), 2);
+        assert_eq!(session.repair_tick().unwrap().as_deref(), Some("Bent Axle"));
         assert_eq!(session.career.repairs.len(), 1);
-        assert_eq!(session.repair_tick().unwrap().as_deref(), Some("My Robot"));
+        assert_eq!(session.career.repairs[0].component, "Torn Spinner");
+
+        for _ in 0..300 {
+            session.repair_tick().unwrap();
+        }
         assert!(session.career.repairs.is_empty());
         assert!(session.repairs().unwrap().rows().is_empty());
         assert_eq!(session.career.money, 0, "no repair cost exists");
@@ -2405,7 +2524,7 @@ mod tests {
             "match.png",
             "results.png",
             "award.png",
-            "repairs-list.png",
+            "repairs-components.png",
             "repairs-done.png",
             "hq-after.png",
             "hq-history.png",
