@@ -21,6 +21,9 @@ pub struct GmiScene {
     pub hinges: Vec<HingeJoint>,
     /// The scene's static background colour (RGB 0..1).
     pub background: [f32; 3],
+    /// The scene's static ambient colour as stored. The original engine does
+    /// not use it: it fixes `D3DRS_AMBIENT` to `0xff262626` (`FUN_0058f390`).
+    pub ambient: [f32; 3],
 }
 
 /// A hinge declared by a model's Havok constraint solver.
@@ -48,6 +51,11 @@ pub struct HingeJoint {
 }
 
 impl GmiScene {
+    /// Scene light objects (`*LIGHT`).
+    pub fn lights(&self) -> impl Iterator<Item = &SceneObject> {
+        self.objects.iter().filter(|o| o.light.is_some())
+    }
+
     /// Geometric objects that carry a mesh.
     pub fn meshes(&self) -> impl Iterator<Item = &SceneObject> {
         self.objects.iter().filter(|o| o.mesh.is_some())
@@ -171,13 +179,51 @@ pub struct Texture {
     pub class: String,
     /// Referenced bitmap file name (may be empty).
     pub bitmap: String,
+    /// `*MAP_AMOUNT`.
+    pub amount: f32,
+    /// The map slot (`GMTexture+0x34`): 0 ambient, 1 diffuse, 2 specular,
+    /// 3 shine, 4 shine strength, 5 self-illumination, 6 opacity, 7 filter
+    /// colour, 8 bump, 9 reflect, 10 refract, ... The original's material
+    /// builder (`FUN_005ae630`) only acts on 1, 5, 6 and 9.
+    pub kind: i32,
+    /// `*MAP_TYPE` (Screen / Explicit / Spherical ...), as stored.
+    pub map_type: i32,
+    /// u offset, v offset, u tiling, v tiling, angle (kept as stored; the
+    /// original never applies a texture matrix, bar the sphere map).
+    pub uv: [f32; 5],
+    /// `*BITMAP_COLORMAP_ENABLE`.
+    pub colormap: i32,
+    /// `*BITMAP_INVERT`. On an opacity map the original alpha-tests only when
+    /// this is 1 (`FUN_005ae630` case 6), and sorts-and-blends otherwise.
+    pub invert: i32,
+    /// `*BITMAP_FILTER`: 0 Pyramidal, 1 SAT. The original maps 0 to point
+    /// sampling and 1 to bilinear (`FUN_005b24c0`, texture entry `+0xc`).
+    pub filter: i32,
+    /// `*BITMAP_MAP_CHANNEL` (1 based).
+    pub channel: i32,
 }
+
+/// `MAP_*` slot numbers (`Texture::kind`).
+pub const MAP_DIFFUSE: i32 = 1;
+pub const MAP_SELFILLUM: i32 = 5;
+pub const MAP_OPACITY: i32 = 6;
+pub const MAP_REFLECT: i32 = 9;
 
 #[derive(Debug, Clone, Default)]
 pub struct Material {
     pub name: String,
     pub class: String,
+    pub ambient: [f32; 3],
     pub diffuse: [f32; 3],
+    pub specular: [f32; 3],
+    /// `*MATERIAL_SHINE` (the original's D3D specular power is this times 100).
+    pub shine: f32,
+    /// `*MATERIAL_SHINESTRENGTH` (scales the specular colour).
+    pub shine_strength: f32,
+    /// `*MATERIAL_SELFILLUM`. The original's builder never reads it.
+    pub self_illum: f32,
+    /// `*MATERIAL_XP_TYPE` as stored: 1 Filter (alpha blend), 3 Additive.
+    pub xp_type: i32,
     /// Transparency (0 = opaque).
     pub transparency: f32,
     /// The GMF material's "two sided" flag as stored. The original's material
@@ -228,6 +274,20 @@ pub struct Mesh {
     pub texfaces: Vec<[u32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub backface_cull: i32,
+    /// Vertex colours (`ccount` entries, RGB 0..1) and their per-face indices.
+    pub colors: Vec<[f32; 3]>,
+    pub colorfaces: Vec<[u32; 3]>,
+    /// Extra UV channels (`*MESH_MAPPINGCHANNEL`): the lightmaps' second set.
+    pub channels: Vec<TexChannel>,
+}
+
+/// One additional texture-coordinate channel of a mesh.
+#[derive(Debug, Clone, Default)]
+pub struct TexChannel {
+    /// The channel number a texture's `channel` refers to (2 is the first extra).
+    pub index: i32,
+    pub texcoords: Vec<[f32; 3]>,
+    pub texfaces: Vec<[u32; 3]>,
 }
 
 impl Mesh {
@@ -355,7 +415,27 @@ pub struct SceneObject {
     pub transform: [[f32; 3]; 4],
     pub data: String,
     pub mesh: Option<Mesh>,
+    pub light: Option<Light>,
     pub rigid_bodies: Vec<RigidBody>,
+}
+
+/// A `*LIGHT` object. Only omni lights occur in the shipped data; the original
+/// turns each into a `D3DLIGHT_POINT` (`FUN_005ba1e0`): diffuse = colour x
+/// intensity, no specular/ambient, position = the node's translation, range =
+/// `attn_end` and attenuation `(0.4, 3/range, 40/range^2)` when `far_atten`,
+/// else range 10000 and attenuation `(1, 0, 0)`.
+#[derive(Debug, Clone, Default)]
+pub struct Light {
+    /// 0 = Omni.
+    pub kind: i32,
+    pub shadows: i32,
+    pub use_light: i32,
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub aspect: f32,
+    pub attn_start: f32,
+    pub attn_end: f32,
+    pub far_atten: bool,
 }
 
 /// One attachment point on a component mesh.
@@ -581,9 +661,10 @@ impl<'a> Parser<'a> {
         if hdr != [3, 1, 0, 15] {
             return Err(Error::Structure(format!("unexpected GMI header {hdr:?}")));
         }
-        let background = self.read_scene()?;
+        let (background, ambient) = self.read_scene()?;
         let mut scene = GmiScene {
             background,
+            ambient,
             materials: self.read_material_list()?,
             ..GmiScene::default()
         };
@@ -607,7 +688,7 @@ impl<'a> Parser<'a> {
         self.r.tm()
     }
 
-    fn read_scene(&mut self) -> Result<[f32; 3], Error> {
+    fn read_scene(&mut self) -> Result<([f32; 3], [f32; 3]), Error> {
         self.expect_node(1, 2, "scene")?;
         self.r.string()?; // source
         self.r.i32()?; // first frame
@@ -615,8 +696,8 @@ impl<'a> Parser<'a> {
         self.r.i32()?; // speed
         self.r.i32()?; // ticks
         let background = self.r.color()?; // static background
-        self.r.color()?; // static ambient
-        Ok(background)
+        let ambient = self.r.color()?; // static ambient
+        Ok((background, ambient))
     }
 
     fn read_material_list(&mut self) -> Result<Vec<Material>, Error> {
@@ -633,18 +714,18 @@ impl<'a> Parser<'a> {
             class: self.r.string()?,
             ..Default::default()
         };
-        self.r.color()?; // ambient
+        m.ambient = self.r.color()?;
         m.diffuse = self.r.color()?;
-        self.r.color()?; // specular
-        self.r.f32()?; // shine
-        self.r.f32()?; // shine strength
+        m.specular = self.r.color()?;
+        m.shine = self.r.f32()?;
+        m.shine_strength = self.r.f32()?;
         m.transparency = self.r.f32()?;
         self.r.f32()?; // wire size
         self.r.i32()?; // shading type
         self.r.f32()?; // xp falloff
-        self.r.f32()?; // self illumination
+        m.self_illum = self.r.f32()?;
         m.two_sided = self.r.i32()?;
-        self.r.i32()?; // xp type
+        m.xp_type = self.r.i32()?;
         let texcount = self.r.i32()?;
         if texcount != 0 {
             m.textures = self.read_texture_list()?;
@@ -664,24 +745,29 @@ impl<'a> Parser<'a> {
 
     fn read_texture(&mut self) -> Result<Texture, Error> {
         self.expect_node(15, 4, "texture")?;
-        let t = Texture {
+        let mut t = Texture {
             name: self.r.string()?,
             class: self.r.string()?,
             bitmap: self.r.string()?,
+            ..Default::default()
         };
-        self.r.f32()?; // amount
-        self.r.i32()?; // type
-        self.r.i32()?; // map type
-        for _ in 0..8 {
-            self.r.f32()?; // u/v offset + tiling, angle, blur, blur offset, noise
+        t.amount = self.r.f32()?;
+        t.kind = self.r.i32()?;
+        t.map_type = self.r.i32()?;
+        for k in 0..8 {
+            // u/v offset + tiling, angle, blur, blur offset, noise amount
+            let v = self.r.f32()?;
+            if k < 5 {
+                t.uv[k] = v;
+            }
         }
         self.r.f32()?; // noise size
         self.r.i32()?; // noise level
         self.r.f32()?; // noise phase
-        self.r.i32()?; // invert
-        self.r.i32()?; // unknown
-        self.r.i32()?; // filter
-        self.r.i32()?; // channel
+        t.colormap = self.r.i32()?; // *BITMAP_COLORMAP_ENABLE
+        t.invert = self.r.i32()?; // *BITMAP_INVERT
+        t.filter = self.r.i32()?;
+        t.channel = self.r.i32()?;
         let subcount = self.r.i32()?;
         if subcount != 0 {
             let _ = self.read_texture_list()?;
@@ -775,14 +861,15 @@ impl<'a> Parser<'a> {
             }
         }
         if self.r.i32()? != 0 {
-            self.read_texture_channels()?;
+            m.channels = self.read_texture_channels()?;
         }
         for _ in 0..ccount {
-            let _ = self.r.vec3()?;
+            m.colors.push(self.r.vec3()?);
         }
         if ccount != 0 {
             for _ in 0..fcount {
-                let _ = self.r.triplet()?;
+                let (a, b, c) = self.r.triplet()?;
+                m.colorfaces.push([a as u32, b as u32, c as u32]);
             }
         }
         for _ in 0..(fcount.max(0) * 4) {
@@ -792,10 +879,14 @@ impl<'a> Parser<'a> {
         Ok(m)
     }
 
-    fn read_texture_channels(&mut self) -> Result<(), Error> {
+    fn read_texture_channels(&mut self) -> Result<Vec<TexChannel>, Error> {
         let n = self.r.i32()?;
+        let mut out = Vec::new();
         for _ in 0..n {
-            self.r.i32()?; // channel index
+            let mut ch = TexChannel {
+                index: self.r.i32()?,
+                ..Default::default()
+            };
             let tcount = self.r.i32()?;
             self.r.i32()?;
             let fcount = self.r.i32()?;
@@ -804,15 +895,17 @@ impl<'a> Parser<'a> {
             self.r.i32()?;
             self.r.i32()?;
             for _ in 0..tcount {
-                let _ = self.r.vec3()?;
+                ch.texcoords.push(self.r.vec3()?);
             }
             if tcount != 0 {
                 for _ in 0..fcount {
-                    let _ = self.r.triplet()?;
+                    let (a, b, c) = self.r.triplet()?;
+                    ch.texfaces.push([a as u32, b as u32, c as u32]);
                 }
             }
+            out.push(ch);
         }
-        Ok(())
+        Ok(out)
     }
 
     fn read_attachment(&mut self, flags: i32) -> Result<SceneObject, Error> {
@@ -838,22 +931,26 @@ impl<'a> Parser<'a> {
         if !target.is_empty() {
             let _ = self.read_tm_node()?;
         }
-        self.r.i32()?;
-        self.r.i32()?;
-        self.r.i32()?;
-        self.r.color()?;
-        self.r.f32()?;
-        self.r.f32()?;
-        self.r.take(8)?;
-        self.r.f32()?;
-        self.r.f32()?;
-        self.r.f32()?;
-        self.r.u8()?;
+        let mut l = Light {
+            kind: self.r.i32()?,
+            shadows: self.r.i32()?,
+            use_light: self.r.i32()?,
+            color: self.r.color()?,
+            intensity: self.r.f32()?,
+            aspect: self.r.f32()?,
+            ..Default::default()
+        };
+        self.r.take(8)?; // hotspot / falloff (spot lights only)
+        l.attn_start = self.r.f32()?;
+        l.attn_end = self.r.f32()?;
+        self.r.f32()?; // target distance
+        l.far_atten = self.r.u8()? != 0;
         self.r.take(3)?;
         Ok(SceneObject {
             kind: ObjectKind::Light,
             name,
             transform,
+            light: Some(l),
             ..Default::default()
         })
     }

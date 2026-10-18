@@ -7,10 +7,15 @@
 //! Env: RA2_DEBUG=1  per-part bounds
 //!      RA2_OBSTACLE=<name|all|none>  RA2_HIDE=<name,...>
 //!      RA2_CAM=<ex,ey,ez,tx,ty,tz>|@<n|name>  RA2_CULL=off
+//!      RA2_STILL=<x,y,z,pitch,yaw,fov>  a script-style camera (as in an arena's
+//!        `AddStaticCamera`: position, (pitch, yaw) radians, vertical fov radians)
 
 use std::process::ExitCode;
 
-use ra2_render::{bounds, camera_override, collect_items, debug_print_items, mvp_matrix, Renderer};
+use ra2_render::{
+    bounds, camera_override, collect_items, debug_print_items, look_at_lh, mvp_matrix,
+    perspective_lh, scene_background, Renderer,
+};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -56,9 +61,42 @@ fn run(
     let radius = ((max - min).length() * 0.5).max(0.001);
 
     let renderer = Renderer::new()?;
-    let mvp = mvp_matrix(center, radius, w, h, camera_override(input));
+    if let Some(bg) = scene_background(input) {
+        renderer.set_background(bg);
+    }
+    let mvp = match still_camera(w, h) {
+        Some(m) => m,
+        None => mvp_matrix(center, radius, w, h, camera_override(input)),
+    };
     let rgba = renderer.render(&items, mvp, w, h)?;
 
     image::save_buffer(output, &rgba, w, h, image::ColorType::Rgba8)?;
     Ok((items.len(), ntris))
+}
+
+/// `RA2_STILL=x,y,z,pitch,yaw,fov`: a camera the way the arena scripts state
+/// one. Pitch looks down when positive, yaw turns from +Z towards +X.
+fn still_camera(w: u32, h: u32) -> Option<glam::Mat4> {
+    let spec = std::env::var("RA2_STILL").ok()?;
+    let f: Vec<f32> = spec
+        .split(',')
+        .filter_map(|x| x.trim().parse().ok())
+        .collect();
+    if f.len() < 6 {
+        return None;
+    }
+    let eye = glam::Vec3::new(f[0], f[1], f[2]);
+    let (pitch, yaw, fov) = (f[3], f[4], f[5]);
+    let dir = glam::Vec3::new(
+        yaw.sin() * pitch.cos(),
+        -pitch.sin(),
+        yaw.cos() * pitch.cos(),
+    );
+    // `D3DXMatrixLookAtLH` with a world-up of +Y, as the original builds its
+    // views. A pitch just past the zenith (`1.5708 > pi/2`, as the overhead
+    // cameras use) flips the horizontal part of the forward vector, which is
+    // what turns the overhead views the right way up.
+    let view = look_at_lh(eye, eye + dir, glam::Vec3::Y);
+    let proj = perspective_lh(fov, w as f32 / h as f32, 0.1, 2000.0);
+    Some(proj * view)
 }

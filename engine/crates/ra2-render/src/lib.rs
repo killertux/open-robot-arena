@@ -14,613 +14,21 @@
 //!      RA2_OBSTACLE      arena prop filter (name|all|none)
 //!      RA2_CAM           ex,ey,ez,tx,ty,tz  or  @<n|name>
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 
-use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use ra2fmt::{bot as botfmt, component as compfmt, gmi, mount};
-use wgpu::util::DeviceExt;
 
 pub use ra2fmt::mount::{component_local, tm_mat4, MountMode};
 
+pub mod material;
+mod renderer;
 pub mod ui;
 
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-pub struct Vertex {
-    pub pos: [f32; 3],
-    pub nrm: [f32; 3],
-    pub uv: [f32; 2],
-    /// Tint + alpha (material transparency); `[1,1,1,1]` for opaque geometry.
-    pub color: [f32; 4],
-}
-
-impl Vertex {
-    /// A plain lit vertex (position, normal, uv), option-ally tinted.
-    pub fn new(pos: Vec3, nrm: Vec3, uv: [f32; 2]) -> Self {
-        Vertex {
-            pos: pos.into(),
-            nrm: nrm.into(),
-            uv,
-            color: [1.0, 1.0, 1.0, 1.0],
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-struct Uniforms {
-    mvp: [[f32; 4]; 4],
-    /// The group's model matrix, for rotating normals into world space.
-    model: [[f32; 4]; 4],
-    light: [f32; 4],
-}
-
-/// One drawable batch: triangles sharing a texture, plus how to blend them.
-#[derive(Clone)]
-pub struct DrawItem {
-    pub vertices: Vec<Vertex>,
-    pub tex: Vec<u8>,
-    pub tw: u32,
-    pub th: u32,
-    pub label: String,
-    /// Draw with alpha blending (transparent material).
-    pub blend: bool,
-    /// Cull back faces (D3D `CULL_CCW`: the original's per-material state).
-    pub cull: bool,
-}
-
-/// A set of items sharing one model transform within a frame.
-pub struct RenderGroup<'a> {
-    pub items: &'a [DrawItem],
-    pub model: Mat4,
-}
-
-const SHADER: &str = r#"
-struct Uniforms { mvp: mat4x4<f32>, model: mat4x4<f32>, light: vec4<f32>, };
-@group(0) @binding(0) var<uniform> u: Uniforms;
-@group(0) @binding(1) var tex: texture_2d<f32>;
-@group(0) @binding(2) var samp: sampler;
-
-struct VsIn { @location(0) pos: vec3<f32>, @location(1) nrm: vec3<f32>, @location(2) uv: vec2<f32>, @location(3) color: vec4<f32> };
-struct VsOut { @builtin(position) clip: vec4<f32>, @location(0) nrm: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) color: vec4<f32> };
-
-@vertex
-fn vs_main(i: VsIn) -> VsOut {
-    var o: VsOut;
-    o.clip = u.mvp * vec4<f32>(i.pos, 1.0);
-    o.nrm = (u.model * vec4<f32>(i.nrm, 0.0)).xyz;
-    o.uv = i.uv;
-    o.color = i.color;
-    return o;
-}
-
-@fragment
-fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
-    let c = textureSample(tex, samp, i.uv);
-    let n = normalize(i.nrm);
-    let l = max(dot(n, normalize(u.light.xyz)), 0.0);
-    let shade = 0.35 + 0.65 * l;
-    return vec4<f32>(c.rgb * shade * i.color.rgb, i.color.a);
-}
-"#;
-
-/// Reusable offscreen wgpu renderer. Holds the GPU device and pipelines so a
-/// caller can render many frames (e.g. an animation or a physics sandbox)
-/// without re-initialising the adapter each time.
-/// One format's pair of mesh pipelines.
-struct Pipelines {
-    opaque: wgpu::RenderPipeline,
-    blend: wgpu::RenderPipeline,
-    opaque_cull: wgpu::RenderPipeline,
-    blend_cull: wgpu::RenderPipeline,
-}
-
-pub struct Renderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    bgl: wgpu::BindGroupLayout,
-    shader: wgpu::ShaderModule,
-    sampler: wgpu::Sampler,
-    color_format: wgpu::TextureFormat,
-    depth_format: wgpu::TextureFormat,
-    /// Pipelines are specific to their colour target's format. The offscreen
-    /// readback uses [`Renderer::color_format`]; the app draws the live match
-    /// into a window surface whose format the swapchain chose, so the same
-    /// renderer has to build a second pair (and it is built once, not per
-    /// frame).
-    pipelines: RefCell<HashMap<wgpu::TextureFormat, Rc<Pipelines>>>,
-    /// Clear colour (the arena's `setBackColor`), RGB 0..1 in the target's own
-    /// (non-linear) byte space, like the original's D3D8 clear.
-    background: std::cell::Cell<[f32; 3]>,
-}
-
-impl Renderer {
-    /// Set the clear colour of every following frame (RGB 0..1).
-    pub fn set_background(&self, rgb: [f32; 3]) {
-        self.background.set(rgb);
-    }
-
-    /// The device, so another renderer (the shell's 2D one) can share it rather
-    /// than open a second adapter.
-    pub fn device(&self) -> &wgpu::Device {
-        &self.device
-    }
-
-    pub fn queue(&self) -> &wgpu::Queue {
-        &self.queue
-    }
-
-    /// Initialise the GPU (first available adapter).
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        // --- wgpu ---------------------------------------------------------
-        let mut idesc = wgpu::InstanceDescriptor::new_without_display_handle();
-        idesc.backends = wgpu::Backends::all();
-        let instance = wgpu::Instance::new(idesc);
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))?;
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("ra2-render"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                trace: wgpu::Trace::Off,
-            }))?;
-        Renderer::from_device(&device, &queue)
-    }
-
-    /// A renderer on a device the caller already owns — the window path has a
-    /// surface, so it must share that device rather than open a second adapter.
-    ///
-    /// The offscreen [`Renderer::new`] path is this function with a fresh
-    /// device; both build the same pipelines for [`Renderer::color_format`].
-    pub fn from_device(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let device = device.clone();
-        let queue = queue.clone();
-        let color_format = wgpu::TextureFormat::Rgba8Unorm;
-        let depth_format = wgpu::TextureFormat::Depth32Float;
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("mesh-shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
-
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        let renderer = Renderer {
-            device,
-            queue,
-            bgl,
-            shader,
-            sampler,
-            color_format,
-            depth_format,
-            pipelines: RefCell::new(HashMap::new()),
-            background: std::cell::Cell::new([0.06, 0.07, 0.09]),
-        };
-        // Build the readback format's pipelines now, so a missing feature is
-        // reported by the constructor rather than by the first frame.
-        let _ = renderer.pipelines_for(color_format);
-        Ok(renderer)
-    }
-
-    /// The pipelines that draw into a target of `format`, built once.
-    fn pipelines_for(&self, format: wgpu::TextureFormat) -> Rc<Pipelines> {
-        if let Some(found) = self.pipelines.borrow().get(&format) {
-            return found.clone();
-        }
-        let layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: None,
-                bind_group_layouts: &[Some(&self.bgl)],
-                immediate_size: 0,
-            });
-        let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
-        // Per-item culling is the original's per-material state; `RA2_CULL=off`
-        // disables it for debugging.
-        let cull_on = std::env::var("RA2_CULL").as_deref() != Ok("off");
-        let make = |label: &str, blend: bool, depth_write: bool, cull: bool| {
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&layout),
-                    vertex: wgpu::VertexState {
-                        module: &self.shader,
-                        entry_point: Some("vs_main"),
-                        buffers: &[Some(wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<Vertex>() as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &attrs,
-                        })],
-                        compilation_options: Default::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &self.shader,
-                        entry_point: Some("fs_main"),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format,
-                            blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: Default::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        // The GMF triangles' right-handed cross product points
-                        // into the solid; in the left-handed view that reads
-                        // counter-clockwise from outside, so that is the front.
-                        front_face: wgpu::FrontFace::Ccw,
-                        cull_mode: (cull && cull_on).then_some(wgpu::Face::Back),
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: self.depth_format,
-                        depth_write_enabled: Some(depth_write),
-                        depth_compare: Some(wgpu::CompareFunction::Less),
-                        stencil: wgpu::StencilState::default(),
-                        bias: wgpu::DepthBiasState::default(),
-                    }),
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                })
-        };
-        let pipelines = Rc::new(Pipelines {
-            opaque: make("opaque", false, true, false),
-            blend: make("blend", true, false, false),
-            opaque_cull: make("opaque-cull", false, true, true),
-            blend_cull: make("blend-cull", true, false, true),
-        });
-        self.pipelines
-            .borrow_mut()
-            .insert(format, pipelines.clone());
-        pipelines
-    }
-
-    /// Render a single group of items with an explicit view-projection matrix.
-    pub fn render(
-        &self,
-        items: &[DrawItem],
-        mvp: Mat4,
-        w: u32,
-        h: u32,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        self.render_groups(
-            &[RenderGroup {
-                items,
-                model: Mat4::IDENTITY,
-            }],
-            mvp,
-            w,
-            h,
-        )
-    }
-
-    /// Render several groups of items, each with its own model transform, under
-    /// one shared view-projection matrix. Lets the sandbox draw a static arena
-    /// and a moving robot without re-uploading the arena's textures per frame.
-    pub fn render_groups(
-        &self,
-        groups: &[RenderGroup<'_>],
-        view_proj: Mat4,
-        w: u32,
-        h: u32,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let color = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("color"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.color_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.depth_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-
-        self.render_groups_to(
-            groups,
-            view_proj,
-            &color_view,
-            &depth_view,
-            self.color_format,
-        )?;
-        self.read_texture(&color, w, h)
-    }
-
-    /// Draw several groups into a caller-supplied colour target and depth
-    /// buffer.
-    ///
-    /// This is [`Renderer::render_groups`] without the private texture and the
-    /// readback: the colour pass clears to the same dark grey, writes depth, and
-    /// orders opaque geometry before blended geometry exactly as the readback
-    /// path does. `format` must be the colour target's own format; pipelines for
-    /// a format are built on first use and cached.
-    pub fn render_groups_to(
-        &self,
-        groups: &[RenderGroup<'_>],
-        view_proj: Mat4,
-        color_view: &wgpu::TextureView,
-        depth_view: &wgpu::TextureView,
-        format: wgpu::TextureFormat,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        struct Gpu {
-            vbuf: wgpu::Buffer,
-            bg: wgpu::BindGroup,
-            count: u32,
-            blend: bool,
-            cull: bool,
-        }
-        let mut gpu_items: Vec<Gpu> = Vec::new();
-        for group in groups {
-            if group.items.is_empty() {
-                continue;
-            }
-            let uniforms = Uniforms {
-                mvp: (view_proj * group.model).to_cols_array_2d(),
-                model: group.model.to_cols_array_2d(),
-                // Towards the light, in world space (Y up).
-                light: [-0.4, 0.7, -0.6, 0.0],
-            };
-            let ubuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("uniforms"),
-                    contents: bytemuck::bytes_of(&uniforms),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-            for it in group.items {
-                let vbuf = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some(&it.label),
-                        contents: bytemuck::cast_slice(&it.vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                let tex = self.device.create_texture_with_data(
-                    &self.queue,
-                    &wgpu::TextureDescriptor {
-                        label: Some("albedo"),
-                        size: wgpu::Extent3d {
-                            width: it.tw,
-                            height: it.th,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                        view_formats: &[],
-                    },
-                    wgpu::util::TextureDataOrder::LayerMajor,
-                    &it.tex,
-                );
-                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: None,
-                    layout: &self.bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: ubuf.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                    ],
-                });
-                gpu_items.push(Gpu {
-                    vbuf,
-                    bg,
-                    count: it.vertices.len() as u32,
-                    blend: it.blend,
-                    cull: it.cull,
-                });
-            }
-        }
-
-        let pipelines = self.pipelines_for(format);
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("main"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: color_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear({
-                            let [r, g, b] = self.background.get();
-                            wgpu::Color {
-                                r: r as f64,
-                                g: g as f64,
-                                b: b as f64,
-                                a: 1.0,
-                            }
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            // Opaque geometry first, then blended (transparent) geometry; each
-            // split by the item's culling state.
-            for (blend, cull, pipeline) in [
-                (false, false, &pipelines.opaque),
-                (false, true, &pipelines.opaque_cull),
-                (true, false, &pipelines.blend),
-                (true, true, &pipelines.blend_cull),
-            ] {
-                rp.set_pipeline(pipeline);
-                for g in gpu_items
-                    .iter()
-                    .filter(|g| g.blend == blend && g.cull == cull)
-                {
-                    rp.set_bind_group(0, &g.bg, &[]);
-                    rp.set_vertex_buffer(0, g.vbuf.slice(..));
-                    rp.draw(0..g.count, 0..1);
-                }
-            }
-        }
-        self.queue.submit(Some(encoder.finish()));
-        Ok(())
-    }
-
-    /// Copy a colour texture back as RGBA8, top row first.
-    ///
-    /// The texture must belong to this renderer's device and have a
-    /// `COPY_SRC` usage; its bytes are read in the texture's own format (the
-    /// match composition uses `Rgba8Unorm` so the HUD's byte pipeline and the
-    /// 3D pass share one target).
-    pub fn read_texture(
-        &self,
-        texture: &wgpu::Texture,
-        w: u32,
-        h: u32,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let align = 256u32;
-        let unpadded = w * 4;
-        let padded = unpadded.div_ceil(align) * align;
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: (padded * h) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        let slice = readback.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        self.device.poll(wgpu::PollType::wait_indefinitely())?;
-        rx.recv()??;
-
-        let mapped = slice.get_mapped_range()?;
-        let mut rgba = Vec::with_capacity((unpadded * h) as usize);
-        for row in 0..h as usize {
-            let start = row * padded as usize;
-            rgba.extend_from_slice(&mapped[start..start + unpadded as usize]);
-        }
-        drop(mapped);
-        readback.unmap();
-
-        Ok(rgba)
-    }
-}
+pub use material::{scene_lights, Image, Light, Material, Stage, StageKind};
+pub use renderer::{DrawItem, RenderGroup, Renderer, Vertex};
 
 // ---------------------------------------------------------------------------
 // scene collection
@@ -656,7 +64,7 @@ pub fn debug_print_items(items: &[DrawItem]) {
             b = b.max(p);
         }
         eprintln!(
-            "  part {:26} verts={:5} bbox=({:.3},{:.3},{:.3})..({:.3},{:.3},{:.3}) tex={}x{}",
+            "  part {:26} verts={:5} bbox=({:.3},{:.3},{:.3})..({:.3},{:.3},{:.3}) tex={}x{}{}",
             it.label,
             it.vertices.len(),
             a.x,
@@ -665,8 +73,19 @@ pub fn debug_print_items(items: &[DrawItem]) {
             b.x,
             b.y,
             b.z,
-            it.tw,
-            it.th
+            it.tex_size().0,
+            it.tex_size().1,
+            if it.material.transparent {
+                if it.material.additive {
+                    " additive"
+                } else if it.material.no_alpha_test {
+                    " blended"
+                } else {
+                    " alpha-test"
+                }
+            } else {
+                ""
+            }
         );
     }
 }
@@ -1244,19 +663,13 @@ pub fn chassis_items(bot: &botfmt::Bot, world: Mat4) -> Vec<DrawItem> {
     if verts.is_empty() {
         return Vec::new();
     }
-    let (tex, tw, th) = match &ch.texture_tga {
-        Some(tga) => decode_image(tga).unwrap_or_else(|| (solid([120, 120, 125, 255], 4, 4), 4, 4)),
-        None => (solid([120, 120, 125, 255], 4, 4), 4, 4),
-    };
-    vec![DrawItem {
-        vertices: verts,
-        tex,
-        tw,
-        th,
-        label: "chassis".into(),
-        blend: false,
-        cull: true,
-    }]
+    let image = ch
+        .texture_tga
+        .as_deref()
+        .and_then(decode_image)
+        .map(|(rgba, w, h)| Image::from_rgba(rgba, w, h))
+        .unwrap_or_else(|| Image::solid([120, 120, 125, 255]));
+    vec![DrawItem::new(verts, Material::textured(image), "chassis")]
 }
 
 pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>> {
@@ -1412,6 +825,7 @@ fn chassis_mesh_vertices(ch: &ra2fmt::bot::Chassis, world: Mat4) -> Vec<Vertex> 
                 pos: pos.into(),
                 nrm: n.into(),
                 uv,
+                uv2: uv,
                 color: [1.0, 1.0, 1.0, 1.0],
             });
         }
@@ -1419,16 +833,54 @@ fn chassis_mesh_vertices(ch: &ra2fmt::bot::Chassis, world: Mat4) -> Vec<Vertex> 
     out
 }
 
-/// `(texture, tint+alpha, backface cull, vertices)` of one material batch.
-type SceneGroup = (Option<PathBuf>, [f32; 4], bool, Vec<Vertex>);
+/// One material batch: its material and vertices.
+type SceneGroup = (Material, Vec<Vertex>);
 
-/// Whether the original culls back faces for a face of `mesh` using
-/// `material`. Its material apply (`FUN_005b24c0`) sets `D3DRS_CULLMODE` to CCW
-/// or NONE by one flag; the GMF supplies the mesh's `backface_cull` and the
-/// material's `two_sided`, so a face is culled when the mesh asks for it and the
-/// material is one-sided.
-fn face_culls(mesh: &gmi::Mesh, material: Option<&gmi::Material>) -> bool {
-    mesh.backface_cull != 0 && material.is_none_or(|m| m.two_sided == 0)
+/// An object's transform in scene space: its node transform composed with its
+/// parents' (a `.gmf` stores linked nodes' transforms relative to the parent, so
+/// the bridge arena's tanks sit at their `sidegroup` helper's origin until the
+/// chain is applied).
+fn node_world(scene: &gmi::GmiScene, o: &gmi::SceneObject) -> Mat4 {
+    let mut m = tm_mat4(&o.transform);
+    let mut parent = o.parent.as_str();
+    for _ in 0..32 {
+        if parent.is_empty() || parent.eq_ignore_ascii_case("(null)") {
+            break;
+        }
+        let Some(p) = scene.find_object(parent) else {
+            break;
+        };
+        m = tm_mat4(&p.transform) * m;
+        parent = p.parent.as_str();
+    }
+    m
+}
+
+/// Lower-cased names of the objects the original never draws as scenery: the
+/// scene's rigid-body collision and trigger geometry.
+///
+/// A rigid body with `use_display_proxy` is displayed as its `display_proxy`
+/// group (or as nothing when that is empty), never as its own mesh; that covers
+/// the arenas' collision hulls (`main_collision`), damage and trigger zones
+/// (`saw_zone`, `hazardzone1`, `Hammer_Damage_Zone`) and the `h_*` stand-ins.
+/// A body's `geometry_proxy` is its physics mesh and is not drawn either. This
+/// replaces the old "drop faces with transparency >= 0.5" heuristic, which was
+/// really aimed at those volumes' red/green debug materials but also removed
+/// real surfaces such as the skull arena's `pit shadow` (transparency 0.5).
+fn physics_only_objects(scene: &gmi::GmiScene) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for rb in scene.rigid_bodies() {
+        if rb.use_display_proxy {
+            out.insert(rb.name.trim().to_ascii_lowercase());
+        }
+        for proxy in rb.geometry_proxy.split(',') {
+            let proxy = proxy.trim();
+            if !proxy.is_empty() && !proxy.eq_ignore_ascii_case("(null)") {
+                out.insert(proxy.to_ascii_lowercase());
+            }
+        }
+    }
+    out
 }
 
 /// Build render vertices for a `.gmf` scene, grouped by resolved material so
@@ -1449,6 +901,7 @@ fn scene_material_groups_opts(
 ) -> Vec<SceneGroup> {
     let mut index: HashMap<u64, usize> = HashMap::new();
     let mut groups: Vec<SceneGroup> = Vec::new();
+    let physics_only = physics_only_objects(scene);
     for o in &scene.objects {
         let Some(mesh) = &o.mesh else { continue };
         if let Some(name) = only_object {
@@ -1456,22 +909,22 @@ fn scene_material_groups_opts(
                 continue;
             }
         }
-        if mesh.is_collision() || is_hidden(&o.name) || is_collision_name(&o.name) {
+        if mesh.is_collision()
+            || is_hidden(&o.name)
+            || is_collision_name(&o.name)
+            || (only_object.is_none() && physics_only.contains(&o.name.to_ascii_lowercase()))
+        {
             continue;
         }
+        let top = scene.materials.get(mesh.material_ref.max(0) as usize);
         // Skip collision-proxy meshes whose material is tagged "havok"/"collision".
-        if scene
-            .materials
-            .get(mesh.material_ref.max(0) as usize)
-            .map(|m| is_collision_name(&m.name))
-            .unwrap_or(false)
-        {
+        if top.map(|m| is_collision_name(&m.name)).unwrap_or(false) {
             continue;
         }
         let obj_world = if object_local {
             world
         } else {
-            world * tm_mat4(&o.transform)
+            world * node_world(scene, o)
         };
         let pts: Vec<Vec3> = mesh
             .points
@@ -1485,42 +938,28 @@ fn scene_material_groups_opts(
         } else {
             glam::Mat3::IDENTITY
         };
+        // The second UV set: the mesh's `*MESH_MAPPINGCHANNEL 2` (lightmaps).
+        let channel2 = mesh.channels.iter().find(|c| c.index == 2);
         for (fi, f) in mesh.faces.iter().enumerate() {
             let (ia, ib, ic) = (f.v[0] as usize, f.v[1] as usize, f.v[2] as usize);
             if ia >= pts.len() || ib >= pts.len() || ic >= pts.len() {
                 continue;
             }
+            let eff = top.map(|m| m.resolve_face(f.material));
             // A face may select a collision sub-material.
-            if scene
-                .materials
-                .get(mesh.material_ref.max(0) as usize)
-                .map(|m| is_collision_name(&m.resolve_face(f.material).name))
-                .unwrap_or(false)
-            {
+            if eff.map(|m| is_collision_name(&m.name)).unwrap_or(false) {
                 continue;
             }
-            // Strongly-transparent materials are invisible volumes / hazard zones.
-            if scene
-                .materials
-                .get(mesh.material_ref.max(0) as usize)
-                .map(|m| m.resolve_face(f.material).transparency >= 0.5)
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let cull = face_culls(
-                mesh,
-                scene
-                    .materials
-                    .get(mesh.material_ref.max(0) as usize)
-                    .map(|m| m.resolve_face(f.material)),
-            );
             let key = ((mesh.material_ref as i64 as u64) << 32)
-                | ((cull as u64) << 31)
-                | (f.material as u32 as u64 & 0x7fff_ffff);
+                | ((mesh.backface_cull as u64 & 0xff) << 24)
+                | ((!mesh.colors.is_empty() as u64) << 23)
+                | (f.material as u32 as u64 & 0x7f_ffff);
             let gi = *index.entry(key).or_insert_with(|| {
-                let (tex, color) = material_slot(scene, mesh.material_ref, f.material, dir);
-                groups.push((tex, color, cull, Vec::new()));
+                let material = match eff {
+                    Some(m) => Material::from_gmi(m, mesh, dir),
+                    None => Material::from_gmi(&gmi::Material::default(), mesh, dir),
+                };
+                groups.push((material, Vec::new()));
                 groups.len() - 1
             });
             let (pa, pb, pc) = (pts[ia], pts[ib], pts[ic]);
@@ -1537,22 +976,26 @@ fn scene_material_groups_opts(
                     .unwrap_or(fallback)
             };
             let normals = [corner_normal(0), corner_normal(1), corner_normal(2)];
-            let color = groups[gi].1;
-            let uv = |idx: usize| -> [f32; 2] {
-                if !mesh.texfaces.is_empty()
-                    && fi < mesh.texfaces.len()
-                    && !mesh.texcoords.is_empty()
-                {
-                    let ti = mesh.texfaces[fi][idx] as usize;
-                    if ti < mesh.texcoords.len() {
-                        // GMF texture coordinates are 3ds Max's (v up); the
-                        // bitmaps are stored top row first, so v is inverted.
-                        return [mesh.texcoords[ti][0], 1.0 - mesh.texcoords[ti][1]];
-                    }
-                }
-                [0.0, 0.0]
+            let uv_of = |texcoords: &[[f32; 3]], texfaces: &[[u32; 3]], idx: usize| {
+                let ti = texfaces.get(fi).map(|t| t[idx] as usize)?;
+                // GMF texture coordinates are 3ds Max's (v up); the bitmaps are
+                // stored top row first, so v is inverted.
+                texcoords.get(ti).map(|t| [t[0], 1.0 - t[1]])
             };
-            let g = &mut groups[gi].3;
+            let uv = |idx: usize| uv_of(&mesh.texcoords, &mesh.texfaces, idx).unwrap_or([0.0, 0.0]);
+            let uv2 = |idx: usize| {
+                channel2
+                    .and_then(|c| uv_of(&c.texcoords, &c.texfaces, idx))
+                    .unwrap_or_else(|| uv(idx))
+            };
+            let color = |idx: usize| -> [f32; 4] {
+                mesh.colorfaces
+                    .get(fi)
+                    .and_then(|cf| mesh.colors.get(cf[idx] as usize))
+                    .map(|c| [c[0], c[1], c[2], 1.0])
+                    .unwrap_or([1.0; 4])
+            };
+            let g = &mut groups[gi].1;
             // A mirroring transform flips the winding; swap two corners back.
             let order = if mirrored { [0, 2, 1] } else { [0, 1, 2] };
             let ps = [pa, pb, pc];
@@ -1561,51 +1004,13 @@ fn scene_material_groups_opts(
                     pos: ps[k].into(),
                     nrm: normals[k].into(),
                     uv: uv(k),
-                    color,
+                    uv2: uv2(k),
+                    color: color(k),
                 });
             }
         }
     }
     groups
-}
-
-/// Resolve the texture path + tint/alpha for a (material slot, face) pair.
-fn material_slot(
-    scene: &gmi::GmiScene,
-    material_ref: i32,
-    face_material: i32,
-    dir: &Path,
-) -> (Option<PathBuf>, [f32; 4]) {
-    let eff = scene
-        .materials
-        .get(material_ref.max(0) as usize)
-        .map(|m| m.resolve_face(face_material));
-    let color = eff
-        .map(|m| {
-            [
-                m.diffuse[0].clamp(0.0, 1.0),
-                m.diffuse[1].clamp(0.0, 1.0),
-                m.diffuse[2].clamp(0.0, 1.0),
-                (1.0 - m.transparency).clamp(0.0, 1.0),
-            ]
-        })
-        .unwrap_or([0.6, 0.6, 0.62, 1.0]);
-    let tex = eff
-        .and_then(|m| m.first_bitmap())
-        .and_then(|b| resolve_bitmap(dir, b));
-    (tex, color)
-}
-
-/// Locate a bitmap referenced by a material, under `dir` or `dir/maps`.
-fn resolve_bitmap(dir: &Path, bitmap: &str) -> Option<PathBuf> {
-    [
-        dir.join(bitmap),
-        dir.join("maps").join(bitmap),
-        dir.join("maps").join(bitmap.to_lowercase()),
-        dir.join(bitmap.replace('\\', "/")),
-    ]
-    .into_iter()
-    .find(|c| c.exists())
 }
 
 /// Push one [`DrawItem`] per material group.
@@ -1616,29 +1021,15 @@ fn push_scene(
     label: &str,
     items: &mut Vec<DrawItem>,
 ) {
-    for (tex, color, cull, verts) in scene_material_groups(scene, world, dir) {
+    let lights = scene_lights(scene, world);
+    let lights = (!lights.is_empty()).then(|| Arc::new(lights));
+    for (material, verts) in scene_material_groups(scene, world, dir) {
         if verts.is_empty() {
             continue;
         }
-        let rgb = [
-            (color[0] * 255.0) as u8,
-            (color[1] * 255.0) as u8,
-            (color[2] * 255.0) as u8,
-            255,
-        ];
-        let (tex, tw, th) = tex
-            .as_deref()
-            .and_then(|p| decode_image(&std::fs::read(p).ok()?))
-            .unwrap_or_else(|| (solid(rgb, 4, 4), 4, 4));
-        items.push(DrawItem {
-            vertices: verts,
-            tex,
-            tw,
-            th,
-            label: label.to_string(),
-            blend: color[3] < 0.999,
-            cull,
-        });
+        let mut item = DrawItem::new(verts, material, label);
+        item.scene_lights = lights.clone();
+        items.push(item);
     }
 }
 
@@ -1659,34 +1050,11 @@ fn object_items_opts(
     dir: &Path,
     object_local: bool,
 ) -> Vec<DrawItem> {
-    let mut items = Vec::new();
-    for (tex, color, cull, verts) in
-        scene_material_groups_opts(scene, Mat4::IDENTITY, dir, Some(object_name), object_local)
-    {
-        if verts.is_empty() {
-            continue;
-        }
-        let rgb = [
-            (color[0] * 255.0) as u8,
-            (color[1] * 255.0) as u8,
-            (color[2] * 255.0) as u8,
-            255,
-        ];
-        let (tex, tw, th) = tex
-            .as_deref()
-            .and_then(|p| decode_image(&std::fs::read(p).ok()?))
-            .unwrap_or_else(|| (solid(rgb, 4, 4), 4, 4));
-        items.push(DrawItem {
-            vertices: verts,
-            tex,
-            tw,
-            th,
-            label: object_name.to_string(),
-            blend: color[3] < 0.999,
-            cull,
-        });
-    }
-    items
+    scene_material_groups_opts(scene, Mat4::IDENTITY, dir, Some(object_name), object_local)
+        .into_iter()
+        .filter(|(_, verts)| !verts.is_empty())
+        .map(|(material, verts)| DrawItem::new(verts, material, object_name))
+        .collect()
 }
 
 /// Every mesh point of a scene in scene space (object transforms applied).
@@ -1777,14 +1145,6 @@ pub(crate) fn decode_image(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         .to_rgba8();
     let (w, h) = (img.width(), img.height());
     Some((img.into_raw(), w, h))
-}
-
-fn solid(rgb: [u8; 4], w: u32, h: u32) -> Vec<u8> {
-    rgb.iter()
-        .cycle()
-        .take((w * h * 4) as usize)
-        .copied()
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1941,6 +1301,43 @@ mod tests {
         stock_bots()
             .first()
             .and_then(|p| p.ancestors().find(|a| a.ends_with("game")).map(Into::into))
+    }
+
+    /// The arenas' own data drives the material mapping: the box arena's glass
+    /// is a blended, lightmapped (unlit) material, its floor carries vertex
+    /// colours and a second UV set, and its one omni light sits where the
+    /// `.gmf` puts it. Collision and trigger volumes are not drawn.
+    #[test]
+    fn box_arena_materials_and_lights_come_from_the_gmf() {
+        let Some(root) = game_root() else { return };
+        let path = root.join("Arenas/box/boxarena.gmf");
+        let scene = gmi::parse(&std::fs::read(&path).unwrap()).unwrap();
+        let lights = scene_lights(&scene, Mat4::IDENTITY);
+        assert_eq!(lights.len(), 1);
+        assert!((lights[0].position - Vec3::new(-9.382856, 11.261452, -3.519421)).length() < 1e-4);
+        let items = scene_items(&scene, Mat4::IDENTITY, path.parent().unwrap(), "box");
+        // The glass: diffuse + lightmap stages, blended, lighting off.
+        let glass: Vec<_> = items
+            .iter()
+            .filter(|i| {
+                i.material
+                    .stages
+                    .iter()
+                    .any(|s| s.kind == StageKind::LightMap)
+            })
+            .collect();
+        assert!(glass
+            .iter()
+            .any(|i| i.material.blended() && !i.material.lighting));
+        // The floor's vertex colours reach the vertices.
+        assert!(items.iter().any(|i| i.material.has_vertex_colors));
+        // Zones and collision hulls are physics only.
+        let hidden = physics_only_objects(&scene);
+        for name in ["saw_zone", "spike_zone1", "arena_collision"] {
+            assert!(hidden.contains(name), "{name}");
+        }
+        // Everything drawn carries the scene's lights.
+        assert!(items.iter().all(|i| i.scene_lights.is_some()));
     }
 
     /// F5: an arena's main collider simulates its *display proxy*.
