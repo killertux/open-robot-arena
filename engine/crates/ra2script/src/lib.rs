@@ -468,6 +468,9 @@ pub struct State {
     pub deferred: Vec<String>,
     /// Anything the script layer wants to say to the operator.
     pub log: Vec<String>,
+    /// The colour the arena script gave `plus.setBackColor` (RGB 0..1); the
+    /// match renderer clears to it.
+    pub back_color: Option<[f32; 3]>,
 }
 
 impl State {
@@ -491,6 +494,7 @@ impl State {
             sounds: SoundQueue::new(),
             deferred: Vec::new(),
             log: Vec::new(),
+            back_color: None,
         }
     }
 

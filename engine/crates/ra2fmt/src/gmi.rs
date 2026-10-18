@@ -19,6 +19,8 @@ pub struct GmiScene {
     pub simulation: Option<SimulationObject>,
     /// The hinges the file's constraint solver declares.
     pub hinges: Vec<HingeJoint>,
+    /// The scene's static background colour (RGB 0..1).
+    pub background: [f32; 3],
 }
 
 /// A hinge declared by a model's Havok constraint solver.
@@ -178,6 +180,10 @@ pub struct Material {
     pub diffuse: [f32; 3],
     /// Transparency (0 = opaque).
     pub transparency: f32,
+    /// The GMF material's "two sided" flag as stored. The original's material
+    /// apply (`FUN_005b24c0`) sets `D3DRS_CULLMODE` to CCW when the byte at
+    /// material+0x10 is non-zero and to NONE when it is zero.
+    pub two_sided: i32,
     pub textures: Vec<Texture>,
     /// Sub-materials of a `Multi/Sub-Object` material. A face's `material` index
     /// selects one of these (falling back to the parent material).
@@ -575,9 +581,12 @@ impl<'a> Parser<'a> {
         if hdr != [3, 1, 0, 15] {
             return Err(Error::Structure(format!("unexpected GMI header {hdr:?}")));
         }
-        let mut scene = GmiScene::default();
-        self.read_scene()?;
-        scene.materials = self.read_material_list()?;
+        let background = self.read_scene()?;
+        let mut scene = GmiScene {
+            background,
+            materials: self.read_material_list()?,
+            ..GmiScene::default()
+        };
         self.read_object_list(&mut scene)?;
         Ok(scene)
     }
@@ -598,16 +607,16 @@ impl<'a> Parser<'a> {
         self.r.tm()
     }
 
-    fn read_scene(&mut self) -> Result<(), Error> {
+    fn read_scene(&mut self) -> Result<[f32; 3], Error> {
         self.expect_node(1, 2, "scene")?;
         self.r.string()?; // source
         self.r.i32()?; // first frame
         self.r.i32()?; // last frame
         self.r.i32()?; // speed
         self.r.i32()?; // ticks
-        self.r.color()?; // static background
+        let background = self.r.color()?; // static background
         self.r.color()?; // static ambient
-        Ok(())
+        Ok(background)
     }
 
     fn read_material_list(&mut self) -> Result<Vec<Material>, Error> {
@@ -634,7 +643,7 @@ impl<'a> Parser<'a> {
         self.r.i32()?; // shading type
         self.r.f32()?; // xp falloff
         self.r.f32()?; // self illumination
-        self.r.i32()?; // two sided
+        m.two_sided = self.r.i32()?;
         self.r.i32()?; // xp type
         let texcount = self.r.i32()?;
         if texcount != 0 {
