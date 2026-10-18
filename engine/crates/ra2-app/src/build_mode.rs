@@ -49,6 +49,7 @@ use ra2_shell::Shell;
 use ra2fmt::gib::{Field, Gib, Widget, WidgetKind};
 use ra2ui::components::Component as PaletteComponent;
 use ra2ui::workshop::build::{Build, Placement as BuildPlacement};
+use ra2ui::workshop::chassis::{self, Outline};
 use ra2ui::workshop::library::{GameLibrary, TextureEntry};
 use ra2ui::workshop::paint::Texture;
 use ra2ui::workshop::wiring::{Control, ControlKind};
@@ -85,6 +86,78 @@ pub struct Options {
 const ROW_FACE: &str = "fg_mcn12";
 const ROW_HEIGHT: f32 = 13.0;
 
+/// Which paint operation the Paint Shop is in. The three shipped screens are
+/// `texturefill.gib`, `surfacelayer.gib` and `decals.gib`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaintMode {
+    Fill,
+    Layer,
+    Decal,
+}
+
+impl PaintMode {
+    fn label(self) -> &'static str {
+        match self {
+            PaintMode::Fill => "texture fill",
+            PaintMode::Layer => "surface layer",
+            PaintMode::Decal => "decal",
+        }
+    }
+}
+
+/// Which automatic outline the chassis step-1 drawing tool makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrawStyle {
+    Freeform,
+    Circle,
+    Rectangle,
+}
+
+impl DrawStyle {
+    fn label(self) -> &'static str {
+        match self {
+            DrawStyle::Freeform => "freeform",
+            DrawStyle::Circle => "circle",
+            DrawStyle::Rectangle => "rectangle",
+        }
+    }
+}
+
+/// The camera the last preview frame used, so a click can be unprojected back
+/// into the bot's own space. The framing is ours; the geometry is the model's.
+#[derive(Clone, Copy, Debug)]
+struct PreviewCamera {
+    view_proj: Mat4,
+    inv_view_proj: Mat4,
+    width: u32,
+    height: u32,
+}
+
+impl PreviewCamera {
+    /// The ray through a point of the preview's rectangle.
+    fn ray(&self, rect: Frame, x: f32, y: f32) -> Option<(Vec3, Vec3)> {
+        if self.width == 0 || self.height == 0 || rect.w <= 0.0 || rect.h <= 0.0 {
+            return None;
+        }
+        let nx = ((x - rect.x) / rect.w) * 2.0 - 1.0;
+        let ny = 1.0 - ((y - rect.y) / rect.h) * 2.0;
+        let near = self.inv_view_proj.project_point3(Vec3::new(nx, ny, 0.0));
+        let far = self.inv_view_proj.project_point3(Vec3::new(nx, ny, 1.0));
+        Some((near, far - near))
+    }
+
+    /// Where the ray meets a plane (`point`, `normal`) in world space.
+    fn plane(&self, rect: Frame, x: f32, y: f32, point: Vec3, normal: Vec3) -> Option<Vec3> {
+        let (origin, direction) = self.ray(rect, x, y)?;
+        let denom = direction.dot(normal);
+        if denom.abs() < 1e-6 {
+            return None;
+        }
+        let t = (point - origin).dot(normal) / denom;
+        (t >= 0.0).then_some(origin + direction * t)
+    }
+}
+
 /// The live workshop: the shell, the model, and the panel drawn over the 3D
 /// placeholder.
 pub struct Builder {
@@ -111,6 +184,21 @@ pub struct Builder {
     /// The palette row on top (the grid is a one-row window of a longer list).
     palette_scroll: usize,
     selected_texture: Option<TextureEntry>,
+    paint_mode: PaintMode,
+    selected_decal: Option<TextureEntry>,
+    selected_group: Option<usize>,
+    decal_at: [f32; 2],
+    decal_scale: f32,
+    /// The baseplate point a palette click should attach to (the last preview
+    /// click), and the current chassis-drawing state.
+    place_point: [f32; 2],
+    draw_style: DrawStyle,
+    draw_centre: Option<[i32; 2]>,
+    draw_point: Option<usize>,
+    draw_snap: bool,
+    shape_radius: i32,
+    shape_length: i32,
+    shape_width: i32,
     name_buffer: String,
     name_edited: bool,
     designs: PathBuf,
@@ -119,6 +207,7 @@ pub struct Builder {
     panel: Panel,
     revision: u64,
     preview: Option<(u64, Vec<u8>, u32, u32)>,
+    preview_camera: Option<PreviewCamera>,
     test_requested: bool,
     test_seconds: f32,
     last_report: Option<ra2sim::r#match::MatchReport>,
@@ -207,6 +296,19 @@ impl Builder {
             wire_component: None,
             palette_scroll: 0,
             selected_texture: None,
+            paint_mode: PaintMode::Fill,
+            selected_decal: None,
+            selected_group: None,
+            decal_at: [0.5, 0.5],
+            decal_scale: 0.5,
+            place_point: [0.0, 0.0],
+            draw_style: DrawStyle::Freeform,
+            draw_centre: None,
+            draw_point: None,
+            draw_snap: true,
+            shape_radius: 300,
+            shape_length: 600,
+            shape_width: 400,
             name_buffer,
             name_edited: false,
             designs,
@@ -221,6 +323,7 @@ impl Builder {
             },
             revision: 0,
             preview: None,
+            preview_camera: None,
             test_requested: false,
             test_seconds: 4.0,
             last_report: None,
@@ -275,7 +378,15 @@ impl Builder {
             self.shell.click(x, y)?;
             return Ok(());
         }
+        if self.panel.preview.contains_point(x, y) {
+            if let Some(result) = self.preview_click(x, y) {
+                return result;
+            }
+        }
         if let Some(action) = self.panel_action(x, y) {
+            return self.apply(&action);
+        }
+        if let Some(action) = self.drawing_action(x, y) {
             return self.apply(&action);
         }
         if let Some(action) = self.widget_action(x, y) {
@@ -287,6 +398,248 @@ impl Builder {
             self.palette_scroll = 0;
         }
         self.refresh()
+    }
+
+    /// The screen point for an outline coordinate on the shipped `Editing Area`
+    /// (chassis steps 1 and 2), for a scripted click.
+    pub fn outline_point_for(&self, point: [i32; 2]) -> Result<[f32; 2], String> {
+        let placed = self.shell.placements();
+        let area = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "Editing Area")
+            .ok_or_else(|| "the current screen has no Editing Area".to_string())?;
+        Ok([
+            area.frame.x + point[0] as f32 / 1000.0 * area.frame.w,
+            area.frame.y + point[1] as f32 / 1000.0 * area.frame.h,
+        ])
+    }
+    fn preview_click(&mut self, x: f32, y: f32) -> Option<Result<(), String>> {
+        let tab = self.shell.tab()?.to_string();
+        self.ensure_preview();
+        match tab.as_str() {
+            "components button" => Some(self.place_at_preview(x, y)),
+            "paintshop button" => Some(self.paint_at_preview(x, y)),
+            _ => None,
+        }
+    }
+
+    fn ensure_preview(&mut self) {
+        let rect = self.panel.preview;
+        if rect.w > 0.0 && rect.h > 0.0 {
+            let _ = self.preview_pixels(rect);
+        }
+    }
+
+    /// The screen point that shows a baseplate point, for a scripted or
+    /// scripted-equivalent click. This is the inverse of [`Builder::baseplate_at`]
+    /// and uses the camera the last frame was drawn with.
+    pub fn preview_point_at(&mut self, point: [f32; 2]) -> Result<[f32; 2], String> {
+        self.ensure_preview();
+        let camera = self
+            .preview_camera
+            .ok_or_else(|| "the preview has not been rendered".to_string())?;
+        let rect = self.panel.preview;
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return Err("the current screen has no 3D preview".into());
+        }
+        let world = self
+            .build
+            .transforms()
+            .first()
+            .copied()
+            .unwrap_or(Mat4::IDENTITY);
+        let p = world.transform_point3(Vec3::new(point[0], 0.0, point[1]));
+        let clip = camera.view_proj * p.extend(1.0);
+        if clip.w.abs() < 1e-6 {
+            return Err("the point is behind the preview camera".into());
+        }
+        let ndc = clip.truncate() / clip.w;
+        Ok([
+            rect.x + (ndc.x * 0.5 + 0.5) * rect.w,
+            rect.y + (0.5 - ndc.y * 0.5) * rect.h,
+        ])
+    }
+
+    /// The bot-local point under a preview click, on the chassis' mounting
+    /// plane (the baseplate). The plane is the chassis' own `y = 0`; the point
+    /// is clamped to the blueprint sheet.
+    fn baseplate_at(&mut self, x: f32, y: f32) -> Option<[f32; 2]> {
+        self.ensure_preview();
+        let camera = self.preview_camera?;
+        let world = self
+            .build
+            .transforms()
+            .first()
+            .copied()
+            .unwrap_or(Mat4::IDENTITY);
+        let point = world.transform_point3(Vec3::ZERO);
+        let normal = world.transform_vector3(Vec3::Y).normalize_or_zero();
+        let hit = camera.plane(self.panel.preview, x, y, point, normal)?;
+        let local = world.inverse().transform_point3(hit);
+        Some(ra2fmt::mount::clamp_baseplate([local.x, local.z]))
+    }
+
+    /// A palette click, or a preview click, places a chassis child at the
+    /// clicked baseplate point. A selected chassis child is moved; otherwise a
+    /// selected palette component is attached there.
+    fn place_at_preview(&mut self, x: f32, y: f32) -> Result<(), String> {
+        let Some(point) = self.baseplate_at(x, y) else {
+            self.status = "the preview does not meet the baseplate here".into();
+            self.refresh_panel();
+            return Ok(());
+        };
+        if let Some(index) = self.selected_part {
+            if let Some(component) = self.build.components().get(index) {
+                if index > 0 && component.parent == 0 {
+                    let (angle, height) = (component.angle, component.height);
+                    self.build
+                        .place_on_baseplate(index, point, angle, height)
+                        .map_err(|e| e.to_string())?;
+                    self.status = format!(
+                        "placed component {index} at {:.2}, {:.2} m",
+                        point[0], point[1]
+                    );
+                    return self.refresh();
+                }
+            }
+        }
+        self.place_point = point;
+        if self.selected.is_some() {
+            return self.attach_selected();
+        }
+        self.status = format!(
+            "placement point {:.2}, {:.2} m: pick a component, then click here",
+            point[0], point[1]
+        );
+        self.refresh_panel();
+        Ok(())
+    }
+
+    /// Paint the face group under a preview click. Fill and layer use the
+    /// selected texture; decal uses the selected decal and the clicked point
+    /// inside the group (the screen's *"position the decal with your mouse and
+    /// click to apply it"*).
+    fn paint_at_preview(&mut self, x: f32, y: f32) -> Result<(), String> {
+        let Some((group, at)) = self.pick_chassis(x, y) else {
+            self.status = "the click did not land on the chassis".into();
+            self.refresh_panel();
+            return Ok(());
+        };
+        self.selected_group = Some(group);
+        self.decal_at = at;
+        match self.paint_mode {
+            PaintMode::Fill | PaintMode::Layer => {
+                let Some(entry) = self.selected_texture.clone() else {
+                    self.status = "pick a texture first".into();
+                    self.refresh_panel();
+                    return Ok(());
+                };
+                let texture = Texture::load(&entry.path).map_err(|e| e.to_string())?;
+                let mode = self.paint_mode;
+                let paint = self.build.paint_mut();
+                let result = if mode == PaintMode::Fill {
+                    paint.fill_group(group, &texture)
+                } else {
+                    paint.layer_group(group, &texture)
+                };
+                result.map_err(|e| e.to_string())?;
+                self.status = format!("{} face group {group} with {}", mode.label(), entry.name);
+            }
+            PaintMode::Decal => {
+                let Some(entry) = self.selected_decal.clone() else {
+                    self.status = "pick a decal first".into();
+                    self.refresh_panel();
+                    return Ok(());
+                };
+                let texture = Texture::load(&entry.path).map_err(|e| e.to_string())?;
+                self.build
+                    .paint_mut()
+                    .decal_group(group, &texture, at, self.decal_scale)
+                    .map_err(|e| e.to_string())?;
+                self.status = format!(
+                    "decal {} on face group {group} at {:.2}, {:.2} scale {:.2}",
+                    entry.name, at[0], at[1], self.decal_scale
+                );
+            }
+        }
+        self.refresh()
+    }
+
+    /// Ray-cast the preview against the chassis mesh and return the face group
+    /// and the skin position inside the group's rectangle.
+    fn pick_chassis(&mut self, x: f32, y: f32) -> Option<(usize, [f32; 2])> {
+        self.ensure_preview();
+        let camera = self.preview_camera?;
+        let (origin, direction) = camera.ray(self.panel.preview, x, y)?;
+        let bot = self.build.to_bot();
+        let chassis = bot.components.first()?.chassis.as_ref()?;
+        let mesh = chassis.mesh.as_ref()?;
+        let world = self
+            .build
+            .transforms()
+            .first()
+            .copied()
+            .unwrap_or(Mat4::IDENTITY);
+        let points: Vec<Vec3> = mesh
+            .points
+            .iter()
+            .map(|p| world.transform_point3(Vec3::from(*p)))
+            .collect();
+        let mut best: Option<(f32, [u32; 3], f32, f32)> = None;
+        for tri in mesh.indices.as_chunks::<3>().0 {
+            let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            if a >= points.len() || b >= points.len() || c >= points.len() {
+                continue;
+            }
+            if let Some((t, u, v)) =
+                ray_triangle(origin, direction, points[a], points[b], points[c])
+            {
+                if best.is_none_or(|(best_t, _, _, _)| t < best_t) {
+                    best = Some((t, *tri, u, v));
+                }
+            }
+        }
+        let (_, tri, u, v) = best?;
+        for group in 0..chassis.face_groups.len() {
+            let Some(uvs) = chassis::group_uvs(chassis, group, tri) else {
+                continue;
+            };
+            let uv = [
+                uvs[0][0] * (1.0 - u - v) + uvs[1][0] * u + uvs[2][0] * v,
+                uvs[0][1] * (1.0 - u - v) + uvs[1][1] * u + uvs[2][1] * v,
+            ];
+            let rect = self.build.paint().group_rect(group)?;
+            let (x1, y1, x2, y2) = rect;
+            if x2 <= x1 || y2 <= y1 {
+                return Some((group, [0.5, 0.5]));
+            }
+            let at = [
+                ((uv[0] - x1 as f32) / (x2 - x1) as f32).clamp(0.0, 1.0),
+                ((uv[1] - y1 as f32) / (y2 - y1) as f32).clamp(0.0, 1.0),
+            ];
+            return Some((group, at));
+        }
+        None
+    }
+
+    /// A click on a chassis step's shipped `Editing Area`, mapped into the
+    /// outline's `0..1000` blueprint. This is the screen's own drawing surface.
+    fn drawing_action(&self, x: f32, y: f32) -> Option<String> {
+        if self.shell.tab() != Some("chassis button") {
+            return None;
+        }
+        let placed = self.shell.placements();
+        let area = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "Editing Area")?;
+        if !area.frame.contains_point(x, y) {
+            return None;
+        }
+        let u = ((x - area.frame.x) / area.frame.w * 1000.0).clamp(0.0, 1000.0) as i32;
+        let v = ((y - area.frame.y) / area.frame.h * 1000.0).clamp(0.0, 1000.0) as i32;
+        Some(format!("m9:draw:{u}:{v}"))
     }
 
     /// Whether a point lands on one of the palette's six category buttons.
@@ -615,18 +968,125 @@ impl Builder {
         }
         if let Some(rest) = action.strip_prefix("m9:face:") {
             let group: usize = rest.parse().map_err(|_| format!("bad face row {rest:?}"))?;
-            let Some(entry) = self.selected_texture.clone() else {
-                self.status = "pick a texture first".into();
-                self.refresh_panel();
-                return Ok(());
+            self.apply_paint_group(group)?;
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:pmode:") {
+            self.paint_mode = match rest {
+                "fill" => PaintMode::Fill,
+                "layer" => PaintMode::Layer,
+                "decal" => PaintMode::Decal,
+                other => return Err(format!("unknown paint mode {other:?}")),
             };
-            let texture = Texture::load(&entry.path).map_err(|e| e.to_string())?;
-            self.build
-                .paint_mut()
-                .fill_group(group, &texture)
-                .map_err(|e| e.to_string())?;
-            self.status = format!("painted face group {group} with {}", entry.name);
+            self.status = format!("paint mode: {}", self.paint_mode.label());
+            self.refresh_panel();
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:dtex:") {
+            let index: usize = rest
+                .parse()
+                .map_err(|_| format!("bad decal row {rest:?}"))?;
+            let entry = self
+                .library
+                .decals()
+                .entries
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("decal {index} is not listed"))?;
+            self.selected_decal = Some(entry.clone());
+            self.status = format!("decal {}", entry.name);
+            self.refresh_panel();
+            return Ok(());
+        }
+        if action == "m9:dscale" {
+            const SCALES: [f32; 6] = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0];
+            let at = SCALES
+                .iter()
+                .position(|s| (*s - self.decal_scale).abs() < 1e-4)
+                .map(|i| (i + 1) % SCALES.len())
+                .unwrap_or(0);
+            self.decal_scale = SCALES[at];
+            self.status = format!("decal scale {:.2}", self.decal_scale);
+            self.refresh_panel();
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:draw:") {
+            let (u, v) = rest
+                .split_once(':')
+                .ok_or_else(|| format!("bad drawing point {rest:?}"))?;
+            let point = [
+                u.parse().map_err(|_| format!("bad outline x {u:?}"))?,
+                v.parse().map_err(|_| format!("bad outline y {v:?}"))?,
+            ];
+            self.draw_chassis(point)?;
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:style:") {
+            self.draw_style = match rest {
+                "freeform" => DrawStyle::Freeform,
+                "circle" => DrawStyle::Circle,
+                "rectangle" => DrawStyle::Rectangle,
+                other => return Err(format!("unknown drawing style {other:?}")),
+            };
+            self.status = format!("drawing: {}", self.draw_style.label());
+            self.refresh_panel();
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:slider:") {
+            let (which, fraction) = rest
+                .split_once(':')
+                .ok_or_else(|| format!("bad slider row {rest:?}"))?;
+            let fraction: f32 = fraction
+                .parse()
+                .map_err(|_| format!("bad slider fraction {fraction:?}"))?;
+            return self.set_slider(which, fraction);
+        }
+        if action == "m9:outline:clear" {
+            let step = self.structure_step();
+            let which = if step == 2 {
+                Outline::Top
+            } else {
+                Outline::Bottom
+            };
+            self.build.clear_chassis_outline(which);
+            self.status = format!("cleared the {} outline", which.label());
             return self.refresh();
+        }
+        if action == "m9:finished" {
+            let chassis = self.build.chassis().cloned().unwrap_or_default();
+            let step = self.structure_step();
+            let (points, outline) = if step == 2 {
+                (chassis.top.clone(), Outline::Top)
+            } else {
+                (chassis.bottom.clone(), Outline::Bottom)
+            };
+            self.status = match chassis::validate_outline(&points) {
+                Ok(()) => format!(
+                    "{} outline finished: {} point(s), height {:.2} m (the mesh is not rebuilt)",
+                    outline.label(),
+                    points.len(),
+                    chassis.height
+                ),
+                Err(e) => format!("{} outline: {e}", outline.label()),
+            };
+            self.refresh_panel();
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:snap:") {
+            self.draw_snap = rest == "on";
+            self.status = format!("snap to grid {}", if self.draw_snap { "on" } else { "off" });
+            self.refresh_panel();
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:rot:") {
+            let delta: f32 = rest.parse().map_err(|_| format!("bad rotation {rest:?}"))?;
+            self.rotate_selected(delta)?;
+            return Ok(());
+        }
+        if let Some(rest) = action.strip_prefix("m9:lift:") {
+            let delta: f32 = rest.parse().map_err(|_| format!("bad lift {rest:?}"))?;
+            self.lift_selected(delta)?;
+            return Ok(());
         }
         if let Some(rest) = action.strip_prefix("m9:palette:") {
             let index: usize = rest
@@ -857,23 +1317,10 @@ impl Builder {
         let (parent, parent_mount) = self.target;
         let own_mount = choose_own_mount(&info, self.build.component_info(parent), parent_mount);
         let placement = if parent == 0 {
-            let index = self
-                .build
-                .components()
-                .iter()
-                .filter(|c| c.parent == 0)
-                .count() as f32;
-            // Sit the part on the chassis' top plate. There is no mouse-drag
-            // placement tool in this slice, and the baseplate's own rule is
-            // "the stored transform decides", so this fixed spread is the UI's
-            // placement, not a game rule.
-            let top = self
-                .build
-                .chassis()
-                .and_then(|c| c.mesh.as_ref())
-                .map(|m| m.points.iter().map(|p| p[1]).fold(f32::MIN, f32::max))
-                .unwrap_or(0.5);
-            BuildPlacement::at([-0.4 + 0.4 * index, top + 0.05, 0.0])
+            // Chassis children use the game's stored transform: the last
+            // preview point (the blueprint's centre until the player clicks),
+            // `y = 0`, the corpus' quarter turn, no yaw and no lift.
+            BuildPlacement::on_baseplate(self.place_point, 0.0, 0.0)
         } else {
             BuildPlacement::default()
         };
@@ -903,6 +1350,256 @@ impl Builder {
                 Ok(())
             }
         }
+    }
+
+    /// Apply the current paint mode to a face group (a panel row or a preview
+    /// click).
+    fn apply_paint_group(&mut self, group: usize) -> Result<(), String> {
+        self.selected_group = Some(group);
+        match self.paint_mode {
+            PaintMode::Fill | PaintMode::Layer => {
+                let Some(entry) = self.selected_texture.clone() else {
+                    self.status = "pick a texture first".into();
+                    self.refresh_panel();
+                    return Ok(());
+                };
+                let texture = Texture::load(&entry.path).map_err(|e| e.to_string())?;
+                let mode = self.paint_mode;
+                let paint = self.build.paint_mut();
+                let result = if mode == PaintMode::Fill {
+                    paint.fill_group(group, &texture)
+                } else {
+                    paint.layer_group(group, &texture)
+                };
+                result.map_err(|e| e.to_string())?;
+                self.status = format!("{} face group {group} with {}", mode.label(), entry.name);
+            }
+            PaintMode::Decal => {
+                let Some(entry) = self.selected_decal.clone() else {
+                    self.status = "pick a decal first".into();
+                    self.refresh_panel();
+                    return Ok(());
+                };
+                let texture = Texture::load(&entry.path).map_err(|e| e.to_string())?;
+                self.build
+                    .paint_mut()
+                    .decal_group(group, &texture, self.decal_at, self.decal_scale)
+                    .map_err(|e| e.to_string())?;
+                self.status = format!(
+                    "decal {} on face group {group} scale {:.2}",
+                    entry.name, self.decal_scale
+                );
+            }
+        }
+        self.refresh()
+    }
+
+    /// The chassis structure step on screen: 1 for the baseplate, 2 for the
+    /// top panel. The screens are told apart by their own widgets.
+    fn structure_step(&self) -> u8 {
+        let Some(lab) = self.shell.lab() else {
+            return 1;
+        };
+        let Some(root) = lab.content_root() else {
+            return 1;
+        };
+        if workshop::find(root, "height slider").is_some() {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// A click on a chassis step's `Editing Area`.
+    fn draw_chassis(&mut self, point: [i32; 2]) -> Result<(), String> {
+        let step = self.structure_step();
+        if step == 2 {
+            let Some(chassis) = self.build.chassis() else {
+                return Ok(());
+            };
+            if let Some(index) = self.draw_point {
+                match self.build.move_chassis_outline_point(
+                    Outline::Top,
+                    index,
+                    point,
+                    self.draw_snap,
+                ) {
+                    Ok(()) => {
+                        self.status =
+                            format!("moved top point {index} to {}, {}", point[0], point[1]);
+                        return self.refresh();
+                    }
+                    Err(e) => {
+                        self.status = e.to_string();
+                        self.refresh_panel();
+                        return Ok(());
+                    }
+                }
+            }
+            let nearest = chassis
+                .top
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, p)| (p[0] - point[0]).pow(2) + (p[1] - point[1]).pow(2))
+                .map(|(i, _)| i);
+            self.draw_point = nearest;
+            self.status = match nearest {
+                Some(index) => format!("selected top point {index}: click again to move it"),
+                None => "the top outline has no points".into(),
+            };
+            self.refresh_panel();
+            return Ok(());
+        }
+        match self.draw_style {
+            DrawStyle::Freeform => {
+                match self
+                    .build
+                    .add_chassis_outline_point(Outline::Bottom, point, self.draw_snap)
+                {
+                    Ok(index) => {
+                        self.status =
+                            format!("baseplate point {index} at {}, {}", point[0], point[1]);
+                        self.refresh()
+                    }
+                    Err(e) => {
+                        self.status = e.to_string();
+                        self.refresh_panel();
+                        Ok(())
+                    }
+                }
+            }
+            DrawStyle::Circle => {
+                self.draw_centre = Some(point);
+                self.build
+                    .set_chassis_circle(Outline::Bottom, point, self.shape_radius)
+                    .map_err(|e| e.to_string())?;
+                self.status = format!(
+                    "circle at {}, {} radius {}",
+                    point[0], point[1], self.shape_radius
+                );
+                self.refresh()
+            }
+            DrawStyle::Rectangle => {
+                self.draw_centre = Some(point);
+                self.build
+                    .set_chassis_rectangle(
+                        Outline::Bottom,
+                        point,
+                        self.shape_length,
+                        self.shape_width,
+                    )
+                    .map_err(|e| e.to_string())?;
+                self.status = format!(
+                    "rectangle at {}, {} {}x{}",
+                    point[0], point[1], self.shape_length, self.shape_width
+                );
+                self.refresh()
+            }
+        }
+    }
+
+    /// The sliders' ranges are ours (the `.gib` has no min/max fields); the
+    /// blueprint's unit scale and the corpus' chassis heights bound them.
+    fn set_slider(&mut self, which: &str, fraction: f32) -> Result<(), String> {
+        let fraction = fraction.clamp(0.0, 1.0);
+        match which {
+            "radius" => {
+                self.shape_radius = 100 + (fraction * 400.0).round() as i32;
+                self.status = format!("circle radius {}", self.shape_radius);
+                if let (Some(centre), true) =
+                    (self.draw_centre, self.draw_style == DrawStyle::Circle)
+                {
+                    self.build
+                        .set_chassis_circle(Outline::Bottom, centre, self.shape_radius)
+                        .map_err(|e| e.to_string())?;
+                    return self.refresh();
+                }
+            }
+            "length" => {
+                self.shape_length = 100 + (fraction * 900.0).round() as i32;
+                self.status = format!("rectangle length {}", self.shape_length);
+                if let (Some(centre), true) =
+                    (self.draw_centre, self.draw_style == DrawStyle::Rectangle)
+                {
+                    self.build
+                        .set_chassis_rectangle(
+                            Outline::Bottom,
+                            centre,
+                            self.shape_length,
+                            self.shape_width,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    return self.refresh();
+                }
+            }
+            "width" => {
+                self.shape_width = 100 + (fraction * 900.0).round() as i32;
+                self.status = format!("rectangle width {}", self.shape_width);
+                if let (Some(centre), true) =
+                    (self.draw_centre, self.draw_style == DrawStyle::Rectangle)
+                {
+                    self.build
+                        .set_chassis_rectangle(
+                            Outline::Bottom,
+                            centre,
+                            self.shape_length,
+                            self.shape_width,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    return self.refresh();
+                }
+            }
+            "height" => {
+                let height = 0.1 + (1.0 - fraction) * 1.1;
+                self.build
+                    .set_chassis_height(height)
+                    .map_err(|e| e.to_string())?;
+                self.status = format!("chassis height {height:.2} m");
+                return self.refresh();
+            }
+            other => return Err(format!("unknown slider {other:?}")),
+        }
+        self.refresh_panel();
+        Ok(())
+    }
+
+    fn selected_chassis_child(&self) -> Option<(usize, f32, f32, [f32; 2])> {
+        let index = self.selected_part?;
+        let component = self.build.components().get(index)?;
+        (index > 0 && component.parent == 0).then_some((
+            index,
+            component.angle,
+            component.height,
+            [component.translation[0], component.translation[2]],
+        ))
+    }
+
+    fn rotate_selected(&mut self, delta: f32) -> Result<(), String> {
+        let Some((index, angle, height, point)) = self.selected_chassis_child() else {
+            self.status = "select a chassis-mounted part first".into();
+            self.refresh_panel();
+            return Ok(());
+        };
+        let angle = (angle + delta).rem_euclid(std::f32::consts::TAU);
+        self.build
+            .place_on_baseplate(index, point, angle, height)
+            .map_err(|e| e.to_string())?;
+        self.status = format!("component {index} angle {:.1} deg", angle.to_degrees());
+        self.refresh()
+    }
+
+    fn lift_selected(&mut self, delta: f32) -> Result<(), String> {
+        let Some((index, angle, height, point)) = self.selected_chassis_child() else {
+            self.status = "select a chassis-mounted part first".into();
+            self.refresh_panel();
+            return Ok(());
+        };
+        let height = (height + delta).clamp(0.0, 1.0);
+        self.build
+            .place_on_baseplate(index, point, angle, height)
+            .map_err(|e| e.to_string())?;
+        self.status = format!("component {index} height {height:.2} m");
+        self.refresh()
     }
 
     /// The action a click on the synthetic panel names, if any.
@@ -950,6 +1647,48 @@ impl Builder {
                 if self.build.board().control_at(cell).is_none() {
                     return Some(format!("m9:wirecell:{}:{}", cell[0], cell[1]));
                 }
+            }
+        }
+        if self.tab() == Some("chassis button") {
+            if chain
+                .iter()
+                .any(|p| p.widget.name() == "clear outline button")
+            {
+                return Some("m9:outline:clear".into());
+            }
+            if chain.iter().any(|p| p.widget.name() == "finished button") {
+                return Some("m9:finished".into());
+            }
+            if chain.iter().any(|p| p.widget.name() == "snap checkbox") {
+                return Some(if self.draw_snap {
+                    "m9:snap:off".into()
+                } else {
+                    "m9:snap:on".into()
+                });
+            }
+            for (button, style) in [
+                ("freeform checkbox", "freeform"),
+                ("circle checkbox", "circle"),
+                ("rectangle checkbox", "rectangle"),
+            ] {
+                if chain.iter().any(|p| p.widget.name() == button) {
+                    return Some(format!("m9:style:{style}"));
+                }
+            }
+            for (widget, which) in [
+                ("radius slider", "radius"),
+                ("length slider", "length"),
+                ("width slider", "width"),
+            ] {
+                if let Some(slider) = chain.iter().find(|p| p.widget.name() == widget) {
+                    let fraction = ((x - slider.frame.x) / slider.frame.w.max(1.0)).clamp(0.0, 1.0);
+                    return Some(format!("m9:slider:{which}:{fraction:.3}"));
+                }
+            }
+            if let Some(slider) = chain.iter().find(|p| p.widget.name() == "height slider") {
+                let fraction =
+                    (1.0 - (y - slider.frame.y) / slider.frame.h.max(1.0)).clamp(0.0, 1.0);
+                return Some(format!("m9:slider:height:{fraction:.3}"));
             }
         }
         if let Some(name) = chain
@@ -1360,16 +2099,31 @@ impl Builder {
             class
         );
         rows.push((String::new(), header, [1.0, 1.0, 1.0, 1.0]));
-        rows.push((
-            "m9:save".into(),
-            format!("Save as: {}_  [Enter]", self.name_buffer),
-            [0.9, 1.0, 0.7, 1.0],
-        ));
-        rows.push((
-            "m9:open".into(),
-            format!("Open: Robot Designs/ ({} bots)", self.designs().len()),
-            [0.8, 0.9, 0.9, 1.0],
-        ));
+        if self.shell.tab() == Some("chassis button") {
+            rows.push((
+                if self.draw_snap {
+                    "m9:snap:off".into()
+                } else {
+                    "m9:snap:on".into()
+                },
+                format!(
+                    "snap to grid: {} (the shipped checkbox's toggle)",
+                    if self.draw_snap { "on" } else { "off" }
+                ),
+                [0.9, 0.8, 0.5, 1.0],
+            ));
+        } else {
+            rows.push((
+                "m9:save".into(),
+                format!("Save as: {}_  [Enter]", self.name_buffer),
+                [0.9, 1.0, 0.7, 1.0],
+            ));
+            rows.push((
+                "m9:open".into(),
+                format!("Open: Robot Designs/ ({} bots)", self.designs().len()),
+                [0.8, 0.9, 0.9, 1.0],
+            ));
+        }
         if !self.status.is_empty() {
             rows.push((String::new(), self.status.clone(), [0.8, 1.0, 0.8, 1.0]));
         }
@@ -1429,6 +2183,34 @@ impl Builder {
                     "undo last attach (Ctrl+Z)".into(),
                     [0.9, 0.8, 0.5, 1.0],
                 ));
+                if let Some((index, angle, height, point)) = self.selected_chassis_child() {
+                    rows.push((
+                        String::new(),
+                        format!(
+                            "place {index}: click the preview ({:.2}, {:.2} m, {:.0} deg, +{:.2})",
+                            point[0],
+                            point[1],
+                            angle.to_degrees(),
+                            height
+                        ),
+                        [0.7, 0.9, 0.7, 1.0],
+                    ));
+                    rows.push((
+                        "m9:rot:-1.5707964".into(),
+                        "rotate -90 deg".into(),
+                        [0.9, 0.8, 0.5, 1.0],
+                    ));
+                    rows.push((
+                        "m9:rot:1.5707964".into(),
+                        "rotate +90 deg".into(),
+                        [0.9, 0.8, 0.5, 1.0],
+                    ));
+                    rows.push((
+                        "m9:lift:0.05".into(),
+                        "lift +0.05 m".into(),
+                        [0.9, 0.8, 0.5, 1.0],
+                    ));
+                }
                 if let Some(component) = &self.selected {
                     rows.push((
                         String::new(),
@@ -1553,36 +2335,64 @@ impl Builder {
                 }
             }
             "paintshop button" => {
-                rows.push((
-                    String::new(),
-                    "Texture Library/ (click, then a face)".into(),
-                    [0.6, 0.8, 1.0, 1.0],
-                ));
-                for (i, entry) in self.library.textures().entries.iter().take(5).enumerate() {
-                    let selected = self
-                        .selected_texture
-                        .as_ref()
-                        .is_some_and(|t| t.name.eq_ignore_ascii_case(&entry.name));
+                for (mode, name) in [
+                    (PaintMode::Fill, "fill"),
+                    (PaintMode::Layer, "layer"),
+                    (PaintMode::Decal, "decal"),
+                ] {
                     rows.push((
-                        format!("m9:tex:{i}"),
-                        format!("{}{}", if selected { "> " } else { "" }, entry.name),
-                        [0.9, 1.0, 0.7, 1.0],
+                        format!("m9:pmode:{name}"),
+                        format!(
+                            "{}mode: {} (click the chassis)",
+                            if self.paint_mode == mode { "> " } else { "" },
+                            mode.label()
+                        ),
+                        [0.6, 0.8, 1.0, 1.0],
                     ));
                 }
-                let custom = self.custom_texture_names();
-                for (i, name) in custom.iter().take(2).enumerate() {
-                    rows.push((
-                        format!("m9:ctex:{i}"),
-                        format!("custom: {name}"),
-                        [0.8, 0.9, 0.8, 1.0],
-                    ));
+                if self.paint_mode == PaintMode::Decal {
+                    for (i, entry) in self.library.decals().entries.iter().take(3).enumerate() {
+                        let selected = self
+                            .selected_decal
+                            .as_ref()
+                            .is_some_and(|t| t.name.eq_ignore_ascii_case(&entry.name));
+                        rows.push((
+                            format!("m9:dtex:{i}"),
+                            format!("{}decal: {}", if selected { "> " } else { "" }, entry.name),
+                            [0.9, 1.0, 0.7, 1.0],
+                        ));
+                    }
+                } else {
+                    for (i, entry) in self.library.textures().entries.iter().take(2).enumerate() {
+                        let selected = self
+                            .selected_texture
+                            .as_ref()
+                            .is_some_and(|t| t.name.eq_ignore_ascii_case(&entry.name));
+                        rows.push((
+                            format!("m9:tex:{i}"),
+                            format!("{}{}", if selected { "> " } else { "" }, entry.name),
+                            [0.9, 1.0, 0.7, 1.0],
+                        ));
+                    }
+                    let custom = self.custom_texture_names();
+                    if let Some(name) = custom.first() {
+                        rows.push((
+                            "m9:ctex:0".into(),
+                            format!("custom: {name}"),
+                            [0.8, 0.9, 0.8, 1.0],
+                        ));
+                    }
                 }
-                rows.push((String::new(), "Faces".into(), [0.6, 0.8, 1.0, 1.0]));
-                for (i, group) in self.build.paint().groups().iter().take(4).enumerate() {
+                for (i, group) in self.build.paint().groups().iter().take(2).enumerate() {
                     rows.push((
                         format!("m9:face:{i}"),
                         format!(
-                            "face {i}: [{},{}]..[{},{}] {} tris",
+                            "{}face {i}: [{},{}]..[{},{}] {} tris",
+                            if self.selected_group == Some(i) {
+                                "> "
+                            } else {
+                                ""
+                            },
                             group.bounds[0],
                             group.bounds[1],
                             group.bounds[2],
@@ -1590,6 +2400,16 @@ impl Builder {
                             group.triangles
                         ),
                         [0.9, 1.0, 0.7, 1.0],
+                    ));
+                }
+                if self.paint_mode == PaintMode::Decal {
+                    rows.push((
+                        "m9:dscale".into(),
+                        format!(
+                            "scale {:.2} (click to step; at {:.2}, {:.2})",
+                            self.decal_scale, self.decal_at[0], self.decal_at[1]
+                        ),
+                        [0.9, 0.8, 0.5, 1.0],
                     ));
                 }
                 rows.push((
@@ -1688,6 +2508,35 @@ impl Builder {
     }
     fn placeholder_frames(&self) -> (Frame, Frame) {
         let placed = self.shell.placements();
+        let has_3d = placed.iter().flat_map(|p| p.walk()).any(|p| {
+            p.widget.kind == WidgetKind::Placeholder
+                && p.widget.name().to_ascii_lowercase().starts_with("3d")
+        });
+        let nav_top = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "common buts")
+            .map(|p| p.frame.y)
+            .unwrap_or(SHELL_SIZE[1]);
+        if !has_3d {
+            // Chassis step 1 has no 3D view: its shipped `Editing Area` is the
+            // drawing surface. The panel becomes a three-row strip along the
+            // bottom of the blueprint, clear of the drawing area and of the
+            // right-hand tools.
+            let content = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| {
+                    p.widget.name() == "blueprint" || p.widget.name() == workshop::CONTENT_SLOT
+                })
+                .map(|p| p.frame)
+                .unwrap_or(Frame::new(0.0, 0.0, SHELL_SIZE[0], SHELL_SIZE[1]));
+            let height = 44.0;
+            let y = (content.bottom() - height - 2.0).max(content.y);
+            let frame = Frame::new(content.x + 2.0, y, (content.w - 4.0).max(10.0), height);
+            let preview = Frame::new(frame.x, frame.y, 0.0, 0.0);
+            return (preview, frame);
+        }
         let placeholder = placed
             .iter()
             .flat_map(|p| p.walk())
@@ -1706,12 +2555,6 @@ impl Builder {
             .unwrap_or(Frame::new(0.0, 0.0, SHELL_SIZE[0], SHELL_SIZE[1]));
         // The shell's own bottom bar is drawn over the content area; a panel
         // that ran under it would be unreadable and unclickable.
-        let nav_top = placed
-            .iter()
-            .flat_map(|p| p.walk())
-            .find(|p| p.widget.name() == "common buts")
-            .map(|p| p.frame.y)
-            .unwrap_or(placeholder.bottom());
         let bottom = placeholder.bottom().min(nav_top - 2.0);
         let height = (bottom - placeholder.y).max(40.0);
         let preview_h = (height * 0.28).max(40.0);
@@ -1794,13 +2637,13 @@ impl Builder {
     /// `scene_items`) and the model is `Build::transforms()` — there is no
     /// second transform rule. The camera framing is ours.
     fn preview_pixels(&mut self, rect: Frame) -> Result<Option<(Vec<u8>, u32, u32)>, String> {
+        let width = rect.w.round().max(16.0) as u32;
+        let height = rect.h.round().max(16.0) as u32;
         if let Some((revision, pixels, w, h)) = &self.preview {
-            if *revision == self.revision {
+            if *revision == self.revision && *w == width && *h == height {
                 return Ok(Some((pixels.clone(), *w, *h)));
             }
         }
-        let width = rect.w.round().max(16.0) as u32;
-        let height = rect.h.round().max(16.0) as u32;
         let bot = self.build.to_bot();
         let world = self.build.transforms();
         let chassis = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
@@ -1864,9 +2707,16 @@ impl Builder {
             0.05,
             radius * 30.0,
         );
+        let view_proj = proj * view;
+        self.preview_camera = Some(PreviewCamera {
+            view_proj,
+            inv_view_proj: view_proj.inverse(),
+            width,
+            height,
+        });
         let pixels = self
             .renderer
-            .render_groups(&groups, proj * view, width, height)
+            .render_groups(&groups, view_proj, width, height)
             .map_err(|e| e.to_string())?;
         self.preview = Some((self.revision, pixels.clone(), width, height));
         Ok(Some((pixels, width, height)))
@@ -1993,6 +2843,36 @@ fn choose_own_mount(
     child.mounts.keys().next().copied().unwrap_or(0)
 }
 
+/// Möller–Trumbore: the ray's distance and barycentric `u, v` of a hit.
+fn ray_triangle(
+    origin: Vec3,
+    direction: Vec3,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+) -> Option<(f32, f32, f32)> {
+    let edge1 = b - a;
+    let edge2 = c - a;
+    let h = direction.cross(edge2);
+    let det = edge1.dot(h);
+    if det.abs() < 1e-8 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let s = origin - a;
+    let u = inv * s.dot(h);
+    if !(-1e-6..=1.0 + 1e-6).contains(&u) {
+        return None;
+    }
+    let q = s.cross(edge1);
+    let v = inv * direction.dot(q);
+    if v < -1e-6 || u + v > 1.0 + 1e-6 {
+        return None;
+    }
+    let t = inv * edge2.dot(q);
+    (t > 1e-6).then_some((t, u, v))
+}
+
 fn chain<'a>(roots: &'a [Placement<'a>], path: &[usize]) -> Vec<&'a Placement<'a>> {
     let mut out = Vec::new();
     let Some(first) = path.first() else {
@@ -2093,8 +2973,72 @@ pub fn script(
         builder.shot(&out.join("build-chassis.png"), target)?;
     }
 
-    // 2. The components tab: mechanics, then the Z-Tek motor's palette cell.
+    // 1b. Chassis step 2: move a top-panel point (the shipped "select points
+    // and move them"), with the shipped snap checkbox turned off first.
+    builder.click_named("step 2 button")?;
+    // The shipped `snap checkbox` is drawn over by its own two state images,
+    // so click its frame rather than looking for a reachable named widget.
+    let snap_frame = builder
+        .shell()
+        .placements()
+        .iter()
+        .flat_map(|p| p.walk())
+        .find(|p| p.widget.name() == "snap checkbox")
+        .map(|p| p.frame);
+    if let Some(frame) = snap_frame {
+        builder.click(frame.x + frame.w * 0.5, frame.y + 2.0)?;
+    }
+    if builder.draw_snap {
+        // The shipped checkbox is drawn over by its own state images; the
+        // panel's row drives the same model flag.
+        builder.click_action("m9:snap:off")?;
+    }
+    println!(
+        "  chassis: snap {}",
+        if builder.draw_snap { "on" } else { "off" }
+    );
+    let top = builder
+        .build
+        .chassis()
+        .map(|c| c.top.clone())
+        .unwrap_or_default();
+    if let Some(point) = top.first().copied() {
+        let select = builder.outline_point_for(point)?;
+        builder.click(select[0], select[1])?;
+        let target = [
+            point[0] + (500 - point[0]) / 4,
+            point[1] + (500 - point[1]) / 4,
+        ];
+        let moved = builder.outline_point_for(target)?;
+        builder.click(moved[0], moved[1])?;
+        let after = builder
+            .build
+            .chassis()
+            .map(|c| c.top.clone())
+            .unwrap_or_default();
+        if after.first().copied() == Some(point) {
+            return Err(format!(
+                "the chassis drawing click did not move top point 0: {:?}",
+                after.first()
+            ));
+        }
+        println!(
+            "  chassis: moved top point 0 from {:?} to {:?} (height {:.2} m)",
+            point,
+            after.first(),
+            builder.build.chassis().map(|c| c.height).unwrap_or(0.0)
+        );
+    }
+    if frames {
+        builder.shot(&out.join("chassis-step.png"), target)?;
+    }
+
+    // 2. The components tab: the preview now shows the moved top point (the
+    // drawing tool's result), then the palette work.
     builder.click_named("components button")?;
+    if frames {
+        builder.shot(&out.join("chassis-draw.png"), target)?;
+    }
     builder.click_named("mechanics button")?;
     let motor_file = "Components\\ztek1.txt";
     let motor = builder.build.components().len();
@@ -2104,6 +3048,27 @@ pub fn script(
             "the palette click attached {} components, not one",
             builder.build.components().len() - motor
         ));
+    }
+    // Place the motor on the baseplate with a click on the live preview. The
+    // model writes the file's stored transform; the click is the point.
+    let place = builder.preview_point_at([0.37, -0.22])?;
+    builder.click(place[0], place[1])?;
+    let placed = builder.build.components()[motor].clone();
+    if (placed.translation[0] - 0.37).abs() > 0.03
+        || (placed.translation[2] + 0.22).abs() > 0.03
+        || placed.translation[1] != 0.0
+    {
+        return Err(format!(
+            "the preview click did not place the motor on the baseplate: {:?}",
+            placed.translation
+        ));
+    }
+    println!(
+        "  placement: component {motor} at {:.2}, {:.2} m, angle {:.2}, height {:.2}",
+        placed.translation[0], placed.translation[2], placed.angle, placed.height
+    );
+    if frames {
+        builder.shot(&out.join("placement.png"), target)?;
     }
     // The motor's axle mount is the parent the wheel hangs off. Click the panel
     // row, as a player would.
@@ -2184,14 +3149,51 @@ pub fn script(
         builder.shot(&out.join("build-wiring.png"), target)?;
     }
 
-    // 4. Paint: pick a texture from the shipped library, then a face group.
+    // 4. Paint: fill, then a surface layer, then a decal placed with the mouse.
     builder.click_named("paintshop button")?;
     if !builder.build.paint().groups().is_empty() {
+        builder.click_action("m9:pmode:fill")?;
         builder.click_action("m9:tex:0")?;
         builder.click_action("m9:face:0")?;
+        let after_fill = builder.build.paint().skin().unwrap().clone();
+        builder.click_action("m9:pmode:layer")?;
+        builder.click_action("m9:tex:1")?;
+        builder.click_action("m9:face:0")?;
+        let after_layer = builder.build.paint().skin().unwrap().clone();
+        if after_layer == after_fill {
+            return Err("the surface layer did not change the skin".into());
+        }
+        if frames {
+            builder.shot(&out.join("layer.png"), target)?;
+        }
+        builder.click_action("m9:pmode:decal")?;
+        builder.click_action("m9:dtex:0")?;
+        builder.click_action("m9:dscale")?;
+        let decal_point = builder.preview_point_at([0.0, 0.0])?;
+        builder.click(decal_point[0], decal_point[1])?;
+        let after_decal = builder.build.paint().skin().unwrap().clone();
+        if after_decal == after_layer {
+            return Err("the decal click did not change the skin".into());
+        }
+        if frames {
+            builder.shot(&out.join("decal.png"), target)?;
+        }
+        // Ctrl+Z on the Paint Shop is the paint undo, not the placement one.
+        if !builder.undo() {
+            return Err("the paint undo found nothing to undo".into());
+        }
+        if builder.build.paint().skin().unwrap() != &after_layer {
+            return Err("paint undo did not restore the previous skin".into());
+        }
+        if !builder.redo() {
+            return Err("the paint redo found nothing to redo".into());
+        }
+        if builder.build.paint().skin().unwrap() != &after_decal {
+            return Err("paint redo did not restore the decal".into());
+        }
     }
     println!(
-        "  paint: {} group(s), changed {}",
+        "  paint: {} group(s), changed {}, modes fill/layer/decal",
         builder.build.paint().group_count(),
         builder.build.paint().is_changed()
     );
@@ -2447,6 +3449,47 @@ mod tests {
         assert_eq!(wrote, armour);
     }
 
+    /// The shipped chassis step's slider and `clear outline button` drive the
+    /// model, and a click in the `Editing Area` adds a baseplate point.
+    #[test]
+    fn the_shipped_chassis_slider_and_clear_button_act_on_the_outline() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.click_named("chassis button").unwrap();
+        builder.click_named("structure design button").unwrap();
+
+        let slider = builder
+            .shell()
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "radius slider")
+            .map(|p| p.frame)
+            .expect("the shipped radius slider");
+        builder
+            .click(slider.x + slider.w * 0.75, slider.y + slider.h * 0.5)
+            .unwrap();
+        assert_eq!(builder.shape_radius, 400);
+
+        let area = builder.outline_point_for([500, 500]).unwrap();
+        builder.click(area[0], area[1]).unwrap();
+        let points = builder.build.chassis().unwrap().bottom.len();
+        assert!(points > 4, "the freeform click added a point: {points}");
+
+        let clear = builder
+            .shell()
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "clear outline button")
+            .map(|p| p.frame)
+            .expect("the shipped clear outline button");
+        builder
+            .click(clear.x + clear.w * 0.5, clear.y + clear.h * 0.5)
+            .unwrap();
+        assert!(builder.build.chassis().unwrap().bottom.is_empty());
+    }
+
     /// The full scripted run: save to a temp game's `Robot Designs/`, reload,
     /// compare model == reloaded == rig, and write the four frames.
     #[test]
@@ -2480,11 +3523,16 @@ mod tests {
         run_headless(&options).expect("the scripted build runs");
         for name in [
             "build-chassis.png",
+            "chassis-step.png",
+            "chassis-draw.png",
             "build-parts.png",
+            "placement.png",
             "build-wiring.png",
             "wiring-add.png",
             "wiring-bound.png",
             "build-paint.png",
+            "layer.png",
+            "decal.png",
             "build-test.png",
         ] {
             let path = out.join(name);
