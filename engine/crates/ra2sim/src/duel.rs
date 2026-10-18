@@ -1595,6 +1595,10 @@ impl DuelCamera {
     }
 
     /// The name the HUD's `camera textbox` shows, in the config's vocabulary.
+    ///
+    /// This is the `ra2.cfg` string (`0x4759c0` compares against `watch`,
+    /// `static`, `orbit`). The textbox itself shows the camera object's own
+    /// name ([`Self::display_name`]).
     pub fn name(self) -> &'static str {
         match self {
             DuelCamera::Watch => "watch",
@@ -1604,6 +1608,29 @@ impl DuelCamera {
             DuelCamera::Wide { .. } => "wide",
             DuelCamera::Chase { .. } => "chase",
             DuelCamera::Top { .. } => "top",
+        }
+    }
+
+    /// The text `camera textbox` shows for this mode.
+    ///
+    /// The binary sets the box in `FUN_00477180` from the camera object and
+    /// shows it for 3.0 s (`+0x17c = 0x40400000`, `0x4771a2`). The three
+    /// shipped cameras name themselves `Watch Cam`, `Static Cam` and
+    /// `Orbit Cam` (`0x6f1044`, `0x6f1038`, `0x6f102c`; constructed by
+    /// `0x43a020`, `0x439f20`, `0x439d60`), and `0x476fd1` pushes the orbit
+    /// literal for the match camera. An arena's `AddStaticCamera`/
+    /// `AddWatchCamera` name (`Arenas/box.py:22-28`: `Static 1`, `Watch 1`)
+    /// replaces the class default; this port keeps the class defaults and
+    /// labels its driving camera as ours.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            DuelCamera::Watch => "Watch Cam",
+            DuelCamera::Static => "Static Cam",
+            DuelCamera::Orbit { .. } => "Orbit Cam",
+            DuelCamera::Auto => "Auto Cam",
+            DuelCamera::Wide { .. } => "Wide Cam",
+            DuelCamera::Chase { .. } => "Chase Cam (ours)",
+            DuelCamera::Top { .. } => "Top Cam",
         }
     }
 }

@@ -14,12 +14,18 @@
 //!   other type the hits add their effective damage (the not-KOTH branch of
 //!   `FUN_004175b0`, `docs/19-match-fidelity.md` §1).
 //!
-//! ## What is deliberately explicit
+//! ## The clock and the results delay
 //!
-//! The time dropdown in `0x4733f0` and the end-of-match timer in `0x412fc0`
-//! were not read, so neither the match length nor the results delay is a
-//! hidden constant: both are [`MatchConfig`] fields ([`MatchConfig::duration`]
-//! is `None` for "No limit", a string the setup window does contain).
+//! The match object's constructor defaults to a timed **3 minutes**
+//! (`0x41276d`); the setup window's setter (`FUN_00414230`, `0x414230`) stores
+//! whole minutes and uses `0` for "No limit". The match clock (`+0xe0`) is
+//! that number times 60 and only ticks while `+0x8e` (fighting) is set, so the
+//! countdown is not in it. See [`DEFAULT_MATCH_SECONDS`] and
+//! `docs/24-match-shell.md` §1.
+//!
+//! The results delay is the binary's 3.5 s: `FUN_004170e0` writes
+//! `+0xec = *0x6a5788` (`0x41721c`) and `0x412fc0` shows the results window
+//! when it expires (`0x41309c`).
 //!
 //! ## What is not a win condition
 //!
@@ -34,9 +40,24 @@ use glam::Vec3;
 use crate::duel::{BotSetup, Duel};
 use crate::sim::DriveInput;
 
-/// The pre-fight countdown, in seconds (`0x4759c0` writes the timer `+0x1dc`
-/// to exactly 4.0; `0x477480` decrements it to zero and begins the fight).
+/// The pre-fight countdown timer, in seconds: `0x4759c0` writes `+0x1dc` to
+/// exactly 4.0 (`0x475a97`).
+///
+/// **This is not the visible length.** `0x477480` draws
+/// `trunc(+0x1dc)` (`0x63aabc`, `fistp` with truncation) in `count number`,
+/// and it begins the fight as soon as that truncation is zero
+/// (`0x4775bc`–`0x47766b`). The visible sequence is therefore `3`, `2`, `1`,
+/// one second each, and the fight starts with 1.0 s still on the timer. The
+/// visible countdown is therefore three seconds long, not four; see
+/// [`COUNTDOWN_END_SECONDS`].
 pub const COUNTDOWN_SECONDS: f32 = 4.0;
+
+/// The countdown value at which `0x477480` hands off to the fight.
+///
+/// The test is `(int)(+0x1dc) > 0`: while the truncation is 1, `2` or `3` the
+/// number is drawn; at 0, `0x416360` starts the fight. So the fight begins
+/// when the timer drops below 1.0, not 0.0.
+pub const COUNTDOWN_END_SECONDS: f32 = 1.0;
 
 /// The physics step the existing duel tests use.
 ///
@@ -47,10 +68,40 @@ pub const DEFAULT_STEP: f32 = 1.0 / 60.0;
 
 /// How long the result screen waits after `Over`, in seconds.
 ///
-/// The roadmap names 3.5 s but the recon did not read `0x412fc0`'s end-of-match
-/// timer, so it is **explicit config** with this as the default — not a hidden
-/// rule.
+/// Measured: `FUN_004170e0` (the results handoff) writes `+0xea = 1` and
+/// `+0xec = 3.5f` (`0x41721c`–`0x417229`, constant `0x6a5788` = `0x40600000`);
+/// `0x412fc0` decrements `+0xec` and at zero shows `match results window` and
+/// `in game popup win` (`0x41309c`–`0x4131fb`). The screen is *filled* at the
+/// handoff; this delay is when it is shown.
 pub const DEFAULT_RESULTS_DELAY: f32 = 3.5;
+
+/// The match object's constructor default: three minutes, timed.
+///
+/// `FUN_00412570` writes `+0xd8 = 1` and `+0xdc = 3` (`0x41276d`–`0x41277e`);
+/// `0x415500` turns `+0xdc` into seconds as `+0xdc * 60` and stores that in the
+/// clock `+0xe0` (`0x415e90`–`0x415ea7`). The setup window's time dropdown
+/// replaces it through `FUN_00414230` (`0x414230`): `0` means "No limit"
+/// (`+0xd8 = 0`) and any other value is minutes. [`MatchConfig::new`] starts
+/// from this default; callers that mean "No limit" pass `None` explicitly.
+pub const DEFAULT_MATCH_MINUTES: u32 = 3;
+
+/// [`DEFAULT_MATCH_MINUTES`] in seconds.
+pub const DEFAULT_MATCH_SECONDS: f32 = DEFAULT_MATCH_MINUTES as f32 * 60.0;
+
+/// The number `count number` shows for a countdown timer value.
+///
+/// `0x477480` draws `trunc(+0x1dc)` and only while it is positive
+/// (`0x4775b1`–`0x477676`); at zero it starts the fight. The value 4.0 is
+/// truncated to 3 on the first update, so the file's sample `3` is the first
+/// number. The upper clamp to 3 covers a caller that draws before the match's
+/// first `step` (our HUD can): the binary never shows 4 because it subtracts
+/// `dt` before drawing. `None` means the fight has begun.
+pub fn countdown_number(left: f32) -> Option<u32> {
+    if left < COUNTDOWN_END_SECONDS {
+        return None;
+    }
+    Some((left as u32).clamp(1, 3))
+}
 
 /// The five game types the original compares against (§1 of the recon).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -136,8 +187,10 @@ pub struct MatchConfig {
     /// `EventNumBots`, already through [`event_num_bots`]. Battle Royal spawns
     /// this many robots; the other types use the entries as given.
     pub bot_count: usize,
-    /// Match length. `None` is the setup window's "No limit". The dropdown's
-    /// actual values were not recovered, so callers state one explicitly.
+    /// Match length in seconds. `None` is the setup window's "No limit"
+    /// (`FUN_00414230(0)` at `0x414238` clears `+0xd8`). The constructor
+    /// default is [`DEFAULT_MATCH_SECONDS`] (3 minutes, `0x41276d`); the time
+    /// dropdown stores whole minutes in `+0xdc` (`FUN_00414230`, `0x414230`).
     pub duration: Option<f32>,
     /// Seconds of countdown, defaulting to the recovered 4.0.
     pub countdown: f32,
@@ -155,7 +208,8 @@ impl MatchConfig {
             game_type,
             robots,
             bot_count,
-            duration: None,
+            // `FUN_00412570`'s constructor default (`0x41276d`): 3 minutes.
+            duration: Some(DEFAULT_MATCH_SECONDS),
             countdown: COUNTDOWN_SECONDS,
             results_delay: DEFAULT_RESULTS_DELAY,
             dt: DEFAULT_STEP,
@@ -299,8 +353,11 @@ pub struct MatchReport {
     pub arena: String,
     pub state: MatchState,
     pub reason: Option<WinReason>,
-    /// 0-based ids of the winner(s). Empty is a draw (for example a zero-point
-    /// time-out), which the original's two-id handoff does not resolve here.
+    /// 0-based ids of the winner(s), as `FUN_004170e0`'s two ids: at most two,
+    /// and exactly the rows that get the result screen's winner text
+    /// (`0x4884b0`). Empty is a draw: `FUN_00418770` sets `+0x74` on a shared
+    /// best score (including all zero), and that byte suppresses the winner
+    /// text (`0x4171f4`–`0x4171fc`).
     pub winners: Vec<usize>,
     /// Fight time in seconds, excluding the countdown.
     pub duration: f32,
@@ -339,9 +396,10 @@ pub struct Match {
     pub duel: Duel,
     state: MatchState,
     countdown_left: f32,
-    /// Fight time only; the original starts its clock with the countdown
-    /// (`0x4759c0`), but the recon does not establish whether the displayed
-    /// time includes it, so the report is explicit about this being fight time.
+    /// Fight time only. Measured: `+0xe4` (elapsed) and `+0xe0` (remaining)
+    /// are both gated on `+0x8e`, the "fighting" byte (`0x412fe1`–`0x412ff8`),
+    /// which `0x416408` sets only when the countdown ends. The clock therefore
+    /// excludes the countdown.
     clock: f32,
     over_left: f32,
     reason: Option<WinReason>,
@@ -461,7 +519,11 @@ impl Match {
                 // is not a hit the match awards.
                 self.duel.take_score_hits();
                 self.countdown_left -= dt;
-                if self.countdown_left <= 0.0 {
+                // `0x4775bc`: the number is drawn while `trunc(+0x1dc) > 0`;
+                // at zero `0x416360` begins the fight and `+0x1dc` is set to
+                // 0 (`0x47766b`). That happens one second before the 4.0
+                // timer would reach 0.
+                if countdown_number(self.countdown_left).is_none() {
                     self.countdown_left = 0.0;
                     self.state = MatchState::Fight;
                 }
@@ -624,6 +686,11 @@ impl Match {
     }
 
     /// The C++ end conditions, in the order the original checks them.
+    ///
+    /// `0x412fc0` checks the clock first (`0x41327d`–`0x4133b3`): when `+0xe0`
+    /// reaches zero it calls `FUN_00418770(0)` and that handoff sets the
+    /// `isMatchOver` byte, so the last-robot/team check later in the same
+    /// update is skipped. The time-out therefore wins a tie at the boundary.
     fn end_reason(&self) -> Option<WinReason> {
         let alive: Vec<usize> = (0..self.duel.robots.len())
             .filter(|&i| self.duel.robots[i].is_alive())
@@ -634,6 +701,10 @@ impl Match {
             .map(|limit| self.clock >= limit)
             .unwrap_or(false);
 
+        if timed_out {
+            return Some(WinReason::Timeout);
+        }
+
         if self.config.game_type == GameType::TeamMatch {
             let mut teams: Vec<usize> = alive.iter().map(|&i| self.duel.robots[i].team).collect();
             teams.sort_unstable();
@@ -641,17 +712,11 @@ impl Match {
             if teams.len() <= 1 {
                 return Some(WinReason::LastTeam);
             }
-            if timed_out {
-                return Some(WinReason::Timeout);
-            }
             return None;
         }
 
         if alive.len() <= 1 {
             return Some(WinReason::LastRobot);
-        }
-        if timed_out {
-            return Some(WinReason::Timeout);
         }
         None
     }
@@ -669,41 +734,58 @@ impl Match {
     /// `FUN_00418040` gives the last robot / last team; `FUN_00418770` settles a
     /// finish on points.
     ///
-    /// Ties at zero and the exact order `FUN_0047a220(0/1)` returns were not
-    /// established by the recon. A zero-point time-out is therefore reported as
-    /// a draw (no winners) rather than inventing a tie-breaker; a shared top
-    /// score reports every robot at that score (every robot on the tied teams
-    /// for `TEAM MATCH`).
+    /// The handoff takes at most **two winner ids**: `FUN_004170e0(p1, p2)`
+    /// forwards both to `FUN_004172d0` and then to `FUN_004884b0`, which marks
+    /// the result row whose id equals `p1` or `p2` (`0x4884b0`), unless the
+    /// match's `+0x74` "no winner" byte is set. `FUN_00418770` sets that byte
+    /// when the best score is shared (including all-zero:
+    /// `0x4189xx`, `+0x74 = 1`), and `FUN_00418040` passes the sole survivor
+    /// plus `-1` for a last-robot finish. A non-team finish therefore names
+    /// the **unique** highest-scoring alive robot, or nobody on a tie; a team
+    /// finish names the first two robots of the winning side in the ordered
+    /// player list (`FUN_0047a220(0)` and `FUN_0047a220(1)`, `0x418770`).
+    /// The running best starts at 0, so a points winner needs a positive
+    /// total; a 0-point best is the equal branch, a draw.
     fn decide_winners(&self, reason: WinReason) -> Vec<usize> {
         if self.config.game_type == GameType::TeamMatch {
             // `FUN_00418040` ends a TEAM MATCH on the last team standing and
-            // hands that side to the results screen; points settle only the
-            // time-out (`FUN_00418770`). Points can be non-zero on both sides
-            // now that damage scores, so the last-team branch must come first.
+            // hands the first survivor (plus a different team's survivor, or
+            // -1 when there is none) to the results screen. Points settle only
+            // the time-out (`FUN_00418770`).
             if reason == WinReason::LastTeam {
-                if let Some(i) =
-                    (0..self.duel.robots.len()).find(|&i| self.duel.robots[i].is_alive())
-                {
-                    let team = self.duel.robots[i].team;
-                    return (0..self.duel.robots.len())
-                        .filter(|&j| self.duel.robots[j].team == team)
-                        .collect();
+                return (0..self.duel.robots.len())
+                    .find(|&i| self.duel.robots[i].is_alive())
+                    .into_iter()
+                    .collect();
+            }
+            if reason == WinReason::Timeout {
+                // Only alive robots are summed (`0x418770` gates on
+                // `FUN_00413810() == 0`), and a tied total is a draw
+                // (`local_24 <= local_28` → `+0x74 = 1`).
+                let mut totals: std::collections::BTreeMap<usize, i32> =
+                    std::collections::BTreeMap::new();
+                for (i, robot) in self.duel.robots.iter().enumerate() {
+                    if robot.is_alive() {
+                        *totals.entry(robot.team).or_insert(0) += ra2script::points(i as i32);
+                    }
                 }
-            }
-            let mut totals: std::collections::BTreeMap<usize, i32> =
-                std::collections::BTreeMap::new();
-            for (i, robot) in self.duel.robots.iter().enumerate() {
-                *totals.entry(robot.team).or_insert(0) += ra2script::points(i as i32);
-            }
-            let best = totals.values().copied().max().unwrap_or(0);
-            if best > 0 {
+                let best = totals.values().copied().max().unwrap_or(0);
                 let top: Vec<usize> = totals
                     .iter()
                     .filter(|(_, p)| **p == best)
                     .map(|(t, _)| *t)
                     .collect();
+                // `local_24`/`local_28` start at 0; a winning side must have
+                // a strictly positive total, otherwise the comparison falls
+                // into the equal branch and `+0x74` marks a draw.
+                if top.len() != 1 || best <= 0 {
+                    return Vec::new();
+                }
+                // `FUN_0047a220(0/1)`: the first two robots of the winning
+                // side in the ordered player list.
                 return (0..self.duel.robots.len())
-                    .filter(|&i| top.contains(&self.duel.robots[i].team))
+                    .filter(|&i| self.duel.robots[i].team == top[0])
+                    .take(2)
                     .collect();
             }
             return Vec::new();
@@ -715,19 +797,34 @@ impl Match {
                 .collect();
         }
 
-        let points: Vec<i32> = (0..self.duel.robots.len())
-            .map(|i| ra2script::points(i as i32))
-            .collect();
-        let best = points.iter().copied().max().unwrap_or(0);
-        if best <= 0 {
-            return Vec::new();
+        // `FUN_00418770`'s non-team branch: only alive robots, and the two ids
+        // it hands over are `local_2c` (the robot that took the strictly best
+        // score) and `-1`. A shared best sets `+0x74` instead and names
+        // nobody.
+        let mut best: Option<(usize, i32)> = None;
+        let mut tied = false;
+        for (i, robot) in self.duel.robots.iter().enumerate() {
+            if !robot.is_alive() {
+                continue;
+            }
+            let points = ra2script::points(i as i32);
+            match best {
+                None => best = Some((i, points)),
+                Some((_, top)) if points > top => {
+                    best = Some((i, points));
+                    tied = false;
+                }
+                Some((_, top)) if points == top => tied = true,
+                Some(_) => {}
+            }
         }
-        points
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| **p == best)
-            .map(|(i, _)| i)
-            .collect()
+        match best {
+            // The original's running best starts at 0 and only a strictly
+            // higher score writes `local_2c`; a 0-point best is the equal
+            // branch, i.e. a draw.
+            Some((i, points)) if !tied && points > 0 => vec![i],
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -848,12 +945,18 @@ mod tests {
         assert_eq!(m.state(), MatchState::Countdown);
         assert!(m.has_shipped_ai(), "the shipped AI did not load");
 
-        // The countdown is the recovered 4.0 s: still counting at 3.9 s.
+        // The timer is 4.0 s, but `0x477480` starts the fight when
+        // `trunc(timer)` reaches 0: at 2.9 s the number is still 2, and the
+        // handoff is one second before the timer's zero.
         let dt = m.config.dt;
-        for _ in 0..(3.9 / dt) as usize {
+        for _ in 0..(2.9 / dt) as usize {
             m.step();
         }
-        assert_eq!(m.state(), MatchState::Countdown, "the countdown is 4.0 s");
+        assert_eq!(
+            m.state(),
+            MatchState::Countdown,
+            "the visible countdown still has a number at 2.9 s"
+        );
         countdown_over(&mut m);
         assert_eq!(m.state(), MatchState::Fight);
 
@@ -1464,5 +1567,164 @@ mod tests {
         assert_eq!(report.reason, Some(WinReason::Timeout));
         assert!(report.winners.is_empty(), "0-0 has no winner to name");
         assert!(report.duration >= 0.2 && report.duration < 0.3);
+    }
+
+    /// `FUN_00418770` on the time-out: the unique highest alive total wins.
+    ///
+    /// `FUN_00418770(0)` is the handoff from `0x4133b3`. For a non-team type it
+    /// walks the alive robots, keeps the best score, and hands that robot's id
+    /// (plus `-1`) to `FUN_004170e0`; the results row with that id gets the
+    /// winner text (`0x4884b0`).
+    #[test]
+    fn a_points_timeout_names_the_unique_higher_total() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+        let config = MatchConfig::new(
+            path(&game, "Arenas/box.py"),
+            GameType::Deathmatch,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team6/Bot2.bot")),
+            ],
+        )
+        .with_duration(Some(0.2))
+        .with_results_delay(0.0);
+        let mut m = Match::new(config).expect("the match builds");
+        countdown_over(&mut m);
+        // The script's own `+0x20` store, the same field `plus.addPoints`
+        // writes in King of the Hill.
+        ra2script::add_points(0, 7);
+        ra2script::add_points(1, 3);
+        while m.state() == MatchState::Fight {
+            m.step();
+        }
+        let report = m.report();
+        println!(
+            "points timeout: reason={:?} winners={:?} points={:?}",
+            report.reason,
+            report.winners,
+            report.robots.iter().map(|r| r.points).collect::<Vec<_>>()
+        );
+        assert_eq!(report.reason, Some(WinReason::Timeout));
+        assert_eq!(report.winners, vec![0], "7 beats 3");
+        assert_eq!(report.robots[0].points, 7);
+        assert_eq!(report.robots[1].points, 3);
+        let rows = report.results();
+        assert!(rows[0].winner, "the results row 1 carries the winner text");
+        assert!(!rows[1].winner);
+    }
+
+    /// A shared best total at the time-out is a draw: `FUN_00418770` sets
+    /// `+0x74` and names nobody.
+    #[test]
+    fn a_tied_points_timeout_is_a_draw() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+        let config = MatchConfig::new(
+            path(&game, "Arenas/box.py"),
+            GameType::Deathmatch,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team6/Bot2.bot")),
+            ],
+        )
+        .with_duration(Some(0.2))
+        .with_results_delay(0.0);
+        let mut m = Match::new(config).expect("the match builds");
+        countdown_over(&mut m);
+        ra2script::add_points(0, 5);
+        ra2script::add_points(1, 5);
+        while m.state() == MatchState::Fight {
+            m.step();
+        }
+        let report = m.report();
+        println!(
+            "tied timeout: winners={:?} points={:?}",
+            report.winners,
+            report.robots.iter().map(|r| r.points).collect::<Vec<_>>()
+        );
+        assert_eq!(report.reason, Some(WinReason::Timeout));
+        assert!(
+            report.winners.is_empty(),
+            "5-5 shares the best score, so +0x74 suppresses the winner text"
+        );
+        assert!(report.results().iter().all(|r| !r.winner));
+    }
+
+    /// The countdown numbers and the one-second handoff.
+    ///
+    /// `0x477480` draws `trunc(+0x1dc)` while it is positive and calls
+    /// `0x416360` when it reaches zero. With the 4.0 timer that is `3`, `2`,
+    /// `1` for one second each, and the fight begins at 1.0 s remaining.
+    #[test]
+    fn the_countdown_is_three_two_one_and_starts_at_one_second_left() {
+        assert_eq!(countdown_number(4.0), Some(3));
+        assert_eq!(countdown_number(3.5), Some(3));
+        assert_eq!(countdown_number(3.0), Some(3));
+        assert_eq!(countdown_number(2.999), Some(2));
+        assert_eq!(countdown_number(2.0), Some(2));
+        assert_eq!(countdown_number(1.001), Some(1));
+        assert_eq!(countdown_number(1.0), Some(1));
+        assert_eq!(countdown_number(0.999), None);
+
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+        let config = MatchConfig::new(
+            path(&game, "Arenas/box.py"),
+            GameType::Deathmatch,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team6/Bot2.bot")),
+            ],
+        )
+        .with_duration(Some(120.0));
+        let mut m = Match::new(config).expect("the match builds");
+        let dt = m.config.dt;
+        for _ in 0..(2.9 / dt) as usize {
+            m.step();
+        }
+        assert_eq!(m.state(), MatchState::Countdown);
+        assert!(
+            m.countdown_left() > 1.0,
+            "2.9 s in, {:.3} s remain",
+            m.countdown_left()
+        );
+        for _ in 0..(0.2 / dt) as usize {
+            m.step();
+            if m.state() == MatchState::Fight {
+                break;
+            }
+        }
+        assert_eq!(
+            m.state(),
+            MatchState::Fight,
+            "the fight starts once trunc(timer) is zero"
+        );
+        assert_eq!(m.countdown_left(), 0.0);
+    }
+
+    /// The match object's measured constructor default: a timed 3 minutes.
+    #[test]
+    fn the_match_defaults_to_the_three_minute_clock() {
+        let config = MatchConfig::new(
+            "arena",
+            GameType::Deathmatch,
+            vec![RobotEntry::ai(0, "a"), RobotEntry::ai(1, "b")],
+        );
+        assert_eq!(config.duration, Some(180.0));
+        assert_eq!(DEFAULT_MATCH_SECONDS, 180.0);
+        assert!(
+            config.duration.is_some(),
+            "the time group is shown when timed"
+        );
     }
 }
