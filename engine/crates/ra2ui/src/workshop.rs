@@ -666,7 +666,9 @@ mod tests {
         let info = at("Info Display");
         assert_eq!(info.h, 18.0);
         assert_eq!(info.w, 1024.0);
-        assert!(info.y + info.h <= at(CONTENT_SLOT).y, "{info:?}");
+        // The strip is the bottom pane of `lowersplit`, under the content.
+        let content = at(CONTENT_SLOT);
+        assert!(info.y >= content.y + content.h, "{info:?}");
         // The bottom bar the window proxies.
         let bar = at("common buts");
         assert_eq!(bar.w, 256.0);
@@ -689,7 +691,7 @@ mod tests {
         assert_eq!(root_name(&lab), "overview split");
 
         // The chassis tab's frame is 431,37 100x24 in `botlabwin.gib`.
-        let hit = lab.click(437.0, 45.0, DESIGN_SCREEN, None).unwrap();
+        let hit = lab.click(437.0, 120.0, DESIGN_SCREEN, None).unwrap();
         assert_eq!(hit.map(|t| t.button), Some("chassis button"));
         assert_eq!(lab.tab, "chassis button");
         assert_eq!(root_name(&lab), "chassis intro split");
@@ -724,7 +726,7 @@ mod tests {
 
         // A click on a tab that is already selected changes nothing.
         assert_eq!(
-            lab.click(437.0, 45.0, DESIGN_SCREEN, None)
+            lab.click(437.0, 120.0, DESIGN_SCREEN, None)
                 .unwrap()
                 .map(|t| t.button),
             Some("chassis button")

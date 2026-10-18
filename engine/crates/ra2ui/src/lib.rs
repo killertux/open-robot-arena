@@ -522,6 +522,9 @@ pub fn text_run(font: &ra2fmt::Font, frame: Frame, text: &str) -> Vec<PlacedGlyp
 /// data does not state.
 pub fn wrap_lines(font: &ra2fmt::Font, text: &str, width: f32) -> Vec<String> {
     let mut out = Vec::new();
+    // The `.gib` writer stores a line break as the two characters `\n`
+    // (`credits.gib`'s paragraphs); the engine reads it as a newline.
+    let text = text.replace("\\n", "\n");
     for hard in text.split('\n') {
         if width <= 0.0 {
             out.push(hard.to_string());
@@ -998,7 +1001,33 @@ fn place_at<'a>(
     fonts: Option<&Fonts>,
     baseline: bool,
 ) -> Placement<'a> {
-    let frame = sized(widget, parent, widget.size(), fonts, baseline);
+    place_core(widget, parent, inherited, fonts, baseline, None)
+}
+
+/// [`place_at`], with the widget's frame optionally forced along a split's axis:
+/// a split frame gives each slot's child the slot's extent *along the axis it
+/// divides* whatever the child's `Position`/`Size` say there (`exhib_setup.gib`'s
+/// `top slot` states 418 px of height and is the whole 87% pane), while the
+/// other axis keeps the child's own rules (`content slot`'s `0.9` of the height
+/// of a horizontal split).
+fn place_core<'a>(
+    widget: &'a Widget,
+    parent: Frame,
+    inherited: Option<Frame>,
+    fonts: Option<&Fonts>,
+    baseline: bool,
+    forced: Option<(Frame, bool)>,
+) -> Placement<'a> {
+    let mut frame = sized(widget, parent, widget.size(), fonts, baseline);
+    if let Some((pane, horizontal)) = forced {
+        if horizontal {
+            frame.x = pane.x;
+            frame.w = pane.w;
+        } else {
+            frame.y = pane.y;
+            frame.h = pane.h;
+        }
+    }
     let clip = match ClipMode::from_value(widget.clip_mode()) {
         ClipMode::None => inherited,
         ClipMode::SelfFrame => Some(intersect(inherited, frame)),
@@ -1044,6 +1073,18 @@ fn place_at<'a>(
             })
         })
         .collect();
+    // A `Glyph` dressed by a `DisplayBox` is the box's paragraph: the widget
+    // itself is `Position 0 0 0 0` (it hangs from its parent's corner) and the
+    // box it fills is the attachment's body. `credits.gib`'s two name lists are
+    // both at the window's origin until each moves to its own box.
+    if widget.kind == WidgetKind::Glyph {
+        if let Some(boxed) = attachments
+            .iter()
+            .find(|a| a.attachment.kind == AttachmentKind::DisplayBox)
+        {
+            frame = boxed.body.frame;
+        }
+    }
     Placement {
         widget,
         frame,
@@ -1264,35 +1305,36 @@ fn split_children<'a>(
         .unwrap_or(if horizontal { frame.w } else { frame.h } / 2.0);
     let master_size = master_size.clamp(0.0, if horizontal { frame.w } else { frame.h });
 
+    // `Master` names the slot MasterSize sizes. Slot 0 is always the first
+    // (top/left) pane and slot 1 the second, so a master of 1 is the pane at
+    // the far end (`exhib_setup.gib`'s 13% bottom bar) and slot 0 takes the rest.
+    let total = if horizontal { frame.w } else { frame.h };
+    let first = if master == 1 {
+        total - master_size
+    } else {
+        master_size
+    };
     let (a, b) = if horizontal {
         (
-            Frame::new(frame.x, frame.y, master_size, frame.h),
-            Frame::new(
-                frame.x + master_size,
-                frame.y,
-                frame.w - master_size,
-                frame.h,
-            ),
+            Frame::new(frame.x, frame.y, first, frame.h),
+            Frame::new(frame.x + first, frame.y, total - first, frame.h),
         )
     } else {
         (
-            Frame::new(frame.x, frame.y, frame.w, master_size),
-            Frame::new(
-                frame.x,
-                frame.y + master_size,
-                frame.w,
-                frame.h - master_size,
-            ),
+            Frame::new(frame.x, frame.y, frame.w, first),
+            Frame::new(frame.x, frame.y + first, frame.w, total - first),
         )
     };
-    // `Master` names the slot MasterSize sizes; the other takes the remainder.
-    let panes = if master == 1 { [b, a] } else { [a, b] };
+    let panes = [a, b];
 
     widget
         .children
         .iter()
         .enumerate()
-        .map(|(i, c)| place_at(c, panes[i.min(1)], clip, fonts, false))
+        .map(|(i, c)| {
+            let pane = panes[i.min(1)];
+            place_core(c, pane, clip, fonts, false, Some((pane, horizontal)))
+        })
         .collect()
 }
 
@@ -1569,7 +1611,7 @@ mod tests {
             }
         }
         assert_eq!(seen, 60, "ClipMode 2 widgets shipped");
-        assert_eq!(outside, 47, "of them sticking out of the parent");
+        assert_eq!(outside, 46, "of them sticking out of the parent");
     }
 
     fn walk_clip_two(
@@ -2263,18 +2305,20 @@ mod tests {
         // fell back to half the frame for every split whose master is not the
         // first slot. The corpus is 4,348 widgets, and since every attachment
         // takes its body there are no ownerless records left to place against
-        // the screen: the 155 that still reach past it are fragments and
-        // authored oversize frames, not nesting failures. Seventy-seven of the
+        // the screen: the 66 that still reach past it are fragments and
+        // authored oversize frames, not nesting failures. Eighty-two of the
         // 116 files place entirely on screen. (A `TextBox` keeps its authored
         // rectangle now — its `Alignment` is text alignment, not a box anchor —
         // and a `Text` child is positioned by its baseline, so fewer frames are
         // pushed past the edge than the earlier reading had.)
         assert_eq!(placed, 4348);
-        assert_eq!(outside, 155, "off screen");
-        assert_eq!(perfect, 77, "perfect files");
+        assert_eq!(outside, 66, "off screen");
+        assert_eq!(perfect, 82, "perfect files");
         // The worst offender is a fragment, not a screen.
         assert!(
-            worst.1.ends_with("botlab/armor.gib") || worst.1.ends_with("botlab/adjust_none.gib"),
+            worst.1.ends_with("botlab/armor.gib")
+                || worst.1.ends_with("botlab/adjust_none.gib")
+                || worst.1.ends_with("botlab/comp_adjust.gib"),
             "{} {}",
             worst.1,
             worst.0
@@ -2315,9 +2359,10 @@ mod tests {
             "every one of them is the bottom bar: {named:?}"
         );
 
-        // `botlabwin.gib`'s proxy sits in the 49-pixel strip at the bottom of its
-        // own content area, so the bar lands there rather than on the screen's
-        // bottom edge — the file's geometry, not a guess.
+        // `botlabwin.gib`'s proxy sits in the strip at the bottom of the
+        // window: `lowersplit`'s slot 1 is the master (`Master 1`) and takes
+        // the last 12%, so the bar is flush with the screen's bottom edge
+        // (1005 - 36), as in the original.
         let text = std::fs::read_to_string(ui.join("botlab/botlabwin.gib")).unwrap();
         let mut gib = ra2fmt::gib::parse(&text).unwrap();
         let loaded = inline_proxies_in(&mut gib, &ui);
@@ -2328,7 +2373,7 @@ mod tests {
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "common buts")
             .expect("the bottom bar was loaded into the proxy");
-        assert_eq!(bar.frame, Frame::new(512.0, 584.7, 256.0, 36.0));
+        assert_eq!(bar.frame, Frame::new(512.0, 969.0, 256.0, 36.0));
     }
 
     /// `MasterSize` is **one axis**, not two: all twenty-six split frames in
@@ -2357,23 +2402,22 @@ mod tests {
         // 49-pixel nav strip and the content slot takes the 363.4 above it, so
         // the strip's pane starts 49.56 below the split and it fills it.
         assert_eq!(frame("botlab splt"), Frame::new(0.0, 0.0, 1280.0, 1005.0));
-        assert!((frame("lowersplit").y - 207.7).abs() < 0.1);
+        assert!((frame("lowersplit").y - 140.7).abs() < 0.1);
         assert!(
-            (frame("content slot").y - 257.3).abs() < 0.1,
+            (frame("content slot").y - 140.7).abs() < 0.1,
             "{}",
             frame("content slot").y
         );
-        assert_eq!(frame("content slot").h, 364.0);
+        assert!((frame("content slot").h - 760.6).abs() < 0.1);
         let split = placed
             .iter()
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "lowersplit")
             .unwrap();
         assert_eq!(split.children.len(), 2);
-        // 12% of the 413 it splits, and the strip lands on its own
-        // `Position 0 0 364 0` inside the content slot's 364.
-        assert_eq!(split.children[1].frame.h, 49.0);
-        assert!((split.children[1].frame.y - 571.7).abs() < 0.1);
+        // 12% of the 864.3 it splits, at the far end of the split.
+        assert!((split.children[1].frame.h - 103.7).abs() < 0.1);
+        assert!((split.children[1].frame.y - 901.3).abs() < 0.1);
     }
 
     /// A `Glyph` wraps its text at spaces to the width its `_Margin` gives it,
@@ -2520,7 +2564,7 @@ mod tests {
             }
         }
         assert_eq!(negatives, 613, "children with a negative ChildOrder");
-        assert_eq!(overlapping, 66, "those overlapping a non-negative sibling");
+        assert_eq!(overlapping, 67, "those overlapping a non-negative sibling");
         assert_eq!(controls, 256, "negative orders on pressed controls");
 
         let text = std::fs::read_to_string(game.join("UI/mainmenu/mainmenu.gib")).unwrap();
@@ -2562,7 +2606,7 @@ mod tests {
             at("cement img") < at("continue button"),
             "the cement is the screen behind the dialog"
         );
-        let path = crate::input::hit_control(&placed, 820.0, 453.5).expect("the continue button");
+        let path = crate::input::hit_control(&placed, 820.0, 883.0).expect("the continue button");
         let mut placement = &placed[path[0]];
         let mut names = vec![placement.widget.name()];
         for index in &path[1..] {

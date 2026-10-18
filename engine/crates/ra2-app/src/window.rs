@@ -327,7 +327,7 @@ impl App {
         requested: [u32; 2],
         session: Option<crate::match_mode::Session>,
     ) -> Result<App, String> {
-        let shell = Shell::boot(game, SHELL_SIZE)?;
+        let shell = Shell::boot(game, [requested[0] as f32, requested[1] as f32])?;
         let frames = FrameRenderer::open(game)?;
         let cfg = crate::options::read_cfg(game);
         let audio = AudioSystem::new(game, &cfg);
@@ -374,9 +374,26 @@ impl App {
         let window = self.window.as_ref()?;
         crate::viewport::to_shell(
             window_size(window),
-            SHELL_SIZE,
+            self.input_space(),
             [position.x as f32, position.y as f32],
         )
+    }
+
+    /// The coordinate space clicks are mapped into: the shell's native screen
+    /// size, or the fixed design size for the tools that still lay out at it.
+    fn input_space(&self) -> [f32; 2] {
+        if self.session.is_some() || self.builder.is_some() || self.hq.is_some() {
+            SHELL_SIZE
+        } else {
+            self.shell.size()
+        }
+    }
+
+    /// Track the window: the shell lays out natively at the new size.
+    fn relayout(&mut self, size: [u32; 2]) {
+        if self.session.is_none() && self.builder.is_none() && self.hq.is_none() {
+            self.shell.set_size([size[0] as f32, size[1] as f32]);
+        }
     }
 
     fn set_hover(&mut self, point: Option<[f32; 2]>) {
@@ -384,6 +401,10 @@ impl App {
     }
 
     fn render(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(window) = &self.window {
+            let size = window_size(window);
+            self.relayout(size);
+        }
         let (Some(window), Some(gpu)) = (&self.window, &mut self.gpu) else {
             return;
         };

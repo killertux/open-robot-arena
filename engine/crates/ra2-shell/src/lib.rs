@@ -8,6 +8,7 @@
 //!
 //! The binary in `src/main.rs` is a thin runner over these.
 
+pub mod bindings;
 pub mod game;
 pub mod nav;
 pub mod script;
