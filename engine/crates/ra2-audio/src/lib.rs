@@ -34,22 +34,26 @@
 //!
 //! # 3D sound
 //!
-//! [`Audio::play_3d`] uses [`rodio::source::Spatial`]'s positional model. The
-//! source is summed to mono and copied to two ears placed
-//! `2 × 0.075 m` apart around the [`Listener`]'s position, along its right
-//! vector. Each ear's amplitude is
+//! [`Audio::play_3d`] and a positioned [`Audio::play_script`] use
+//! [`rodio::source::Spatial`]'s ear model. The source is summed to mono and
+//! copied to two ears placed `2 × 0.075 m` apart around the [`Listener`]'s
+//! position, along its right vector. Each ear's amplitude is
 //!
 //! ```text
-//! pan(left or right) × min(1, 1 / d²)
+//! pan(left or right) × min(1, 1 / d²) × max(1, d)   =   pan × min(1, 1 / d)
 //! ```
 //!
-//! where `d` is the distance from that ear to the emitter (world units, so
-//! one unit is one metre) and `pan` is rodio's ear-distance modifier,
-//! `clamp(((d_ear - d_other) / d_ears + 1) / 4 + 0.5, .., 1)`. Sounds closer
-//! than one unit are not boosted; beyond that they fall off with the inverse
-//! square. There is no Doppler, occlusion or reverb: the shipped game's sound
-//! system is positional only. The log records the emitter position, not the
-//! ears.
+//! where `d` is the distance from that ear to the emitter (world units, one
+//! unit is one metre) and `pan` is rodio's ear-distance modifier. The `max(1, d)`
+//! factor turns rodio's inverse-square into DirectSound3D's default rolloff
+//! (amplitude `1 / d`, -6 dB per doubling, beyond a minimum distance of one).
+//! There is no Doppler, occlusion or reverb.
+//!
+//! A script sound created at `(0, 0, 0)` (every announcer, music and crowd
+//! cue) is **not positional**: it plays centred at its own level
+//! ([`is_unpositioned`]). The match's impacts and motor loops are centred too:
+//! the recording of the original's match audio is exactly dual-mono. The log
+//! records the emitter position, not the ears.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -60,7 +64,9 @@ use ra2fmt::cfg::Cfg;
 use rodio::source::Spatial;
 use rodio::{Decoder, MixerDeviceSink, Player, Source};
 
+pub mod capture;
 pub mod music;
+pub mod rules;
 
 pub use music::{music_for_screen, Track, MAIN_UI, TEAM_HQ, WORKSHOP};
 
@@ -278,6 +284,26 @@ pub struct Audio {
     sound_muted: bool,
     music_muted: bool,
     music_path: Option<PathBuf>,
+    /// `plus.setVolume`/fade state per script handle: the script's own gain,
+    /// linear, before the SFX category. Kept for handles that are not playing
+    /// yet, because the scripts call `setVolume` right after `createSound`.
+    script_gain: BTreeMap<u64, f32>,
+    fades: Vec<Fade>,
+    /// Simulated seconds, advanced by [`Audio::advance`].
+    clock: f32,
+    capture: Option<capture::Capture>,
+}
+
+/// One running `fadeInToLoop`/`fadeOutLoop`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fade {
+    id: u64,
+    from: f32,
+    to: f32,
+    elapsed: f32,
+    duration: f32,
+    /// A fade-out stops the voice when it reaches silence.
+    stop_at_end: bool,
 }
 
 impl Audio {
@@ -315,7 +341,38 @@ impl Audio {
             sound_muted: false,
             music_muted: false,
             music_path: None,
+            script_gain: BTreeMap::new(),
+            fades: Vec::new(),
+            clock: 0.0,
+            capture: None,
         }
+    }
+
+    /// A silent instance that records a timeline for [`capture::Capture::render`].
+    ///
+    /// It has no device, so every play call is a logged no-op as before, and in
+    /// addition the start, stop and gain changes are timed against the clock
+    /// [`Audio::advance`] keeps. This is how the engine's audio is compared with
+    /// recordings of the original.
+    pub fn capturing() -> Audio {
+        let mut audio = Audio::without_device();
+        audio.capture = Some(capture::Capture::default());
+        audio
+    }
+
+    /// The captured timeline, when this instance is [`Audio::capturing`].
+    pub fn capture(&self) -> Option<&capture::Capture> {
+        self.capture.as_ref()
+    }
+
+    /// Mutable access to the captured timeline.
+    pub fn capture_mut(&mut self) -> Option<&mut capture::Capture> {
+        self.capture.as_mut()
+    }
+
+    /// The simulated clock, in seconds.
+    pub fn clock(&self) -> f32 {
+        self.clock
     }
 
     /// The output device, or `None` when this instance is silent.
@@ -420,6 +477,19 @@ impl Audio {
             gain: gain * self.output_sfx_gain(),
             position: None,
         });
+        let out = self.output_sfx_gain();
+        let clock = self.clock;
+        if let Some(cap) = &mut self.capture {
+            cap.start(
+                clock,
+                &path,
+                false,
+                capture::VoiceKind::Flat,
+                gain * out,
+                None,
+                false,
+            );
+        }
         let Some(device) = &self.device else {
             return Ok(());
         };
@@ -453,13 +523,27 @@ impl Audio {
             gain: gain * self.output_sfx_gain(),
             position: Some(position),
         });
+        let out = self.output_sfx_gain();
+        let clock = self.clock;
+        if let Some(cap) = &mut self.capture {
+            cap.start(
+                clock,
+                &path,
+                false,
+                capture::VoiceKind::Positional { position, listener },
+                gain * out,
+                None,
+                false,
+            );
+        }
         let Some(device) = &self.device else {
             return Ok(());
         };
         let source = open_decoder(&path)?;
         let (left, right) = listener.ears();
         let player = Player::connect_new(device.mixer());
-        player.append(Spatial::new(source, position, left, right).amplify(gain));
+        let reach = distance(position, listener.position).max(1.0);
+        player.append(Spatial::new(source, position, left, right).amplify(gain * reach));
         player.set_volume(self.output_sfx_gain());
         self.sfx.retain(|player| !player.empty());
         self.sfx.push(player);
@@ -473,7 +557,8 @@ impl Audio {
     /// emitter for the same positional model as [`Audio::play_3d`]. Playing an
     /// id that is already sounding restarts it, which is what a second
     /// `plus.playSound(handle)` asks for. A later [`Audio::stop_script`] with
-    /// the same id stops it.
+    /// the same id stops it. The handle's `setVolume` level
+    /// ([`Audio::set_script_volume`]) applies, `gain` multiplies it.
     ///
     /// Without a device the call is a successful no-op recorded in the log (the
     /// path is not opened), exactly like [`Audio::play_3d`].
@@ -488,31 +573,49 @@ impl Audio {
     ) -> Result<(), String> {
         let path = path.as_ref().to_path_buf();
         let gain = linear(gain);
+        let script = self.script_gain.get(&id).copied().unwrap_or(1.0);
         self.log.push(PlayEntry {
             path: path.clone(),
             kind: PlayKind::Sound3d,
-            gain: gain * self.output_sfx_gain(),
+            gain: gain * script * self.output_sfx_gain(),
             position: Some(position),
         });
         // A play on a sounding handle restarts it rather than layering a second
-        // copy: the scripts use `playSound` as "start this cue".
+        // copy: the scripts use `playSound` as "start this cue". A fade belongs
+        // to the voice it was started on.
         self.stop_script(id);
+        let out = self.output_sfx_gain();
+        let clock = self.clock;
+        if let Some(cap) = &mut self.capture {
+            cap.start(
+                clock,
+                &path,
+                looping,
+                voice_kind(position, listener),
+                gain * script * out,
+                Some(id),
+                false,
+            );
+        }
         let Some(device) = &self.device else {
             return Ok(());
         };
         let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let reader = BufReader::new(file);
-        let (left, right) = listener.ears();
         let player = Player::connect_new(device.mixer());
-        if looping {
-            let decoder =
-                Decoder::new_looped(reader).map_err(|e| format!("{}: {e}", path.display()))?;
-            player.append(Spatial::new(decoder, position, left, right).amplify(gain));
+        let source: Box<dyn Source + Send> = if looping {
+            Box::new(Decoder::new_looped(reader).map_err(|e| format!("{}: {e}", path.display()))?)
         } else {
-            let decoder = Decoder::new(reader).map_err(|e| format!("{}: {e}", path.display()))?;
-            player.append(Spatial::new(decoder, position, left, right).amplify(gain));
+            Box::new(Decoder::new(reader).map_err(|e| format!("{}: {e}", path.display()))?)
+        };
+        if is_unpositioned(position) {
+            player.append(source.amplify(gain));
+        } else {
+            let (left, right) = listener.ears();
+            let reach = distance(position, listener.position).max(1.0);
+            player.append(Spatial::new(source, position, left, right).amplify(gain * reach));
         }
-        player.set_volume(self.output_sfx_gain());
+        player.set_volume(script * self.output_sfx_gain());
         self.sfx.retain(|player| !player.empty());
         self.scripts.retain(|_, player| !player.empty());
         self.scripts.insert(id, player);
@@ -520,11 +623,124 @@ impl Audio {
     }
 
     /// Stop the script sound with this handle; an unknown or finished handle is
-    /// a no-op.
+    /// a no-op. Its running fade ends with it; its `setVolume` level stays, as
+    /// the handle does.
     pub fn stop_script(&mut self, id: u64) {
+        self.fades.retain(|fade| fade.id != id);
+        let clock = self.clock;
+        if let Some(cap) = &mut self.capture {
+            cap.stop_script(clock, id);
+        }
         if let Some(player) = self.scripts.remove(&id) {
             player.stop();
         }
+    }
+
+    /// The handle's current script level (linear), if it has one.
+    pub fn script_volume(&self, id: u64) -> Option<f32> {
+        self.script_gain.get(&id).copied()
+    }
+
+    /// Forget a handle's `setVolume` level (the handle was removed).
+    pub fn forget_script(&mut self, id: u64) {
+        self.script_gain.remove(&id);
+    }
+
+    /// `plus.setVolume(handle, volume, ..)`: the handle's own level, in
+    /// DirectSound hundredths of a decibel (`0` unity, `-10000` silence). It
+    /// applies at once to a sounding voice and to the next play.
+    pub fn set_script_volume(&mut self, id: u64, hundredths_db: i32) {
+        let gain = hundredths_db_to_gain(hundredths_db);
+        self.fades.retain(|fade| fade.id != id);
+        self.script_gain.insert(id, gain);
+        self.apply_script_gain(id, gain);
+    }
+
+    /// `plus.fadeInToLoop`'s fade: ramp the handle's level from its current
+    /// value to `hundredths_db` over `ms` milliseconds.
+    pub fn fade_script_to(&mut self, id: u64, hundredths_db: i32, ms: f32) {
+        self.fade_script(id, hundredths_db_to_gain(hundredths_db), ms, false);
+    }
+
+    /// `plus.fadeOutLoop`: ramp the handle's level to silence over `ms`
+    /// milliseconds, then stop the voice.
+    pub fn fade_out_script(&mut self, id: u64, ms: f32) {
+        self.fade_script(id, 0.0, ms, true);
+    }
+
+    fn fade_script(&mut self, id: u64, to: f32, ms: f32, stop_at_end: bool) {
+        let from = self.script_gain.get(&id).copied().unwrap_or(1.0);
+        self.fades.retain(|fade| fade.id != id);
+        let duration = (ms / 1000.0).max(0.0);
+        if duration <= 0.0 {
+            self.script_gain.insert(id, to);
+            self.apply_script_gain(id, to);
+            if stop_at_end {
+                self.stop_script(id);
+            }
+            return;
+        }
+        self.fades.push(Fade {
+            id,
+            from,
+            to,
+            elapsed: 0.0,
+            duration,
+            stop_at_end,
+        });
+    }
+
+    fn apply_script_gain(&mut self, id: u64, gain: f32) {
+        let out = self.output_sfx_gain();
+        if let Some(player) = self.scripts.get(&id) {
+            player.set_volume(gain * out);
+        }
+        let clock = self.clock;
+        if let Some(cap) = &mut self.capture {
+            cap.set_gain(clock, Some(id), false, gain * out);
+        }
+    }
+
+    /// Advance the simulated clock by `dt` seconds and run the fades.
+    ///
+    /// The live client calls this once per tick; a fade is a linear ramp in
+    /// gain sampled at that rate (50 ms in the app, finer than the shortest
+    /// shipped fade of 800 ms).
+    pub fn advance(&mut self, dt: f32) {
+        if !(dt.is_finite() && dt > 0.0) {
+            return;
+        }
+        self.clock += dt;
+        let mut finished = Vec::new();
+        let mut updates = Vec::new();
+        for fade in &mut self.fades {
+            fade.elapsed += dt;
+            let k = (fade.elapsed / fade.duration).min(1.0);
+            let gain = fade.from + (fade.to - fade.from) * k;
+            updates.push((fade.id, gain));
+            if k >= 1.0 {
+                finished.push((fade.id, fade.stop_at_end));
+            }
+        }
+        for (id, gain) in updates {
+            self.script_gain.insert(id, gain);
+            self.apply_script_gain(id, gain);
+        }
+        for (id, stop) in finished {
+            self.fades.retain(|fade| fade.id != id);
+            if stop {
+                self.stop_script(id);
+            }
+        }
+        // A finished one-shot leaves the table so it does not pile up.
+        self.scripts.retain(|_, player| !player.empty());
+    }
+
+    /// Whether a script sound is currently sounding (or, with no device, was
+    /// started and not stopped).
+    pub fn script_is_live(&self, id: u64) -> bool {
+        self.scripts.contains_key(&id)
+            || self.capture.as_ref().is_some_and(|c| c.is_script_live(id))
     }
 
     /// Start the music track at `path`, optionally looping it.
@@ -541,6 +757,19 @@ impl Audio {
             gain: self.output_music_gain(),
             position: None,
         });
+        let out = self.output_music_gain();
+        let clock = self.clock;
+        if let Some(cap) = &mut self.capture {
+            cap.start(
+                clock,
+                &path,
+                looping,
+                capture::VoiceKind::Music,
+                out,
+                None,
+                true,
+            );
+        }
         let Some(device) = &self.device else {
             self.music_path = Some(path);
             return Ok(());
@@ -564,21 +793,30 @@ impl Audio {
 
     /// Stop the current music track, if any.
     pub fn stop_music(&mut self) {
+        let clock = self.clock;
+        if let Some(cap) = &mut self.capture {
+            cap.stop_music(clock);
+        }
         if let Some(player) = self.music.take() {
             player.stop();
         }
         self.music_path = None;
     }
 
-    fn refresh_live_volumes(&self) {
-        if let Some(music) = &self.music {
-            music.set_volume(self.output_music_gain());
+    fn refresh_live_volumes(&mut self) {
+        let (music, sfx) = (self.output_music_gain(), self.output_sfx_gain());
+        let clock = self.clock;
+        if let Some(cap) = &mut self.capture {
+            cap.set_gain(clock, None, true, music);
+        }
+        if let Some(player) = &self.music {
+            player.set_volume(music);
         }
         for player in &self.sfx {
-            player.set_volume(self.output_sfx_gain());
+            player.set_volume(sfx);
         }
-        for player in self.scripts.values() {
-            player.set_volume(self.output_sfx_gain());
+        for (id, player) in &self.scripts {
+            player.set_volume(self.script_gain.get(id).copied().unwrap_or(1.0) * sfx);
         }
     }
 }
@@ -586,6 +824,27 @@ impl Audio {
 impl Default for Audio {
     fn default() -> Audio {
         Audio::new()
+    }
+}
+
+/// A script sound created at `(0, 0, 0)` has no position: every shipped
+/// announcer, music and crowd sound is made that way and is heard at full
+/// level whatever the camera does, while the hazards pass their own location.
+/// The recordings of the original agree: its match audio is exactly centred
+/// (left equals right sample for sample).
+pub fn is_unpositioned(position: [f32; 3]) -> bool {
+    position == [0.0; 3]
+}
+
+fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+fn voice_kind(position: [f32; 3], listener: Listener) -> capture::VoiceKind {
+    if is_unpositioned(position) {
+        capture::VoiceKind::Flat
+    } else {
+        capture::VoiceKind::Positional { position, listener }
     }
 }
 
@@ -894,5 +1153,83 @@ SoundMuted=0\r\n\
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn set_volume_before_play_applies_to_the_play() {
+        let mut audio = Audio::capturing();
+        audio.set_script_volume(7, -600);
+        audio
+            .play_script(
+                7,
+                "x.wav",
+                true,
+                [0.0; 3],
+                Listener::looking_forward([0.0; 3]),
+                1.0,
+            )
+            .unwrap();
+        let entry = audio.play_log().last().unwrap();
+        assert_close(entry.gain, 0.501_187_2);
+        assert!(audio.script_is_live(7));
+    }
+
+    #[test]
+    fn a_fade_in_rises_linearly_and_a_fade_out_stops_the_voice() {
+        let mut audio = Audio::capturing();
+        let l = Listener::looking_forward([0.0; 3]);
+        audio.set_script_volume(1, -10_000);
+        audio
+            .play_script(1, "crowd.wav", true, [0.0; 3], l, 1.0)
+            .unwrap();
+        audio.fade_script_to(1, 0, 800.0);
+        for _ in 0..8 {
+            audio.advance(0.05);
+        }
+        // Half way through 0.8 s the level is half of unity.
+        assert_close(audio.script_volume(1).unwrap(), 0.5);
+        for _ in 0..8 {
+            audio.advance(0.05);
+        }
+        assert_close(audio.script_volume(1).unwrap(), 1.0);
+        assert!(audio.script_is_live(1));
+        audio.fade_out_script(1, 2000.0);
+        for _ in 0..20 {
+            audio.advance(0.05);
+        }
+        assert_close(audio.script_volume(1).unwrap(), 0.5);
+        for _ in 0..21 {
+            audio.advance(0.05);
+        }
+        assert!(!audio.script_is_live(1), "the fade-out ended the voice");
+    }
+
+    #[test]
+    fn a_second_set_volume_cancels_a_fade() {
+        let mut audio = Audio::capturing();
+        audio.set_script_volume(2, -10_000);
+        audio.fade_script_to(2, 0, 1000.0);
+        audio.advance(0.1);
+        audio.set_script_volume(2, -600);
+        audio.advance(1.0);
+        assert_close(audio.script_volume(2).unwrap(), 0.501_187_2);
+    }
+
+    #[test]
+    fn the_capture_renders_a_wav_timeline() {
+        let Some(game) = game_dir() else { return };
+        let path = game.join("Sounds/button_click.wav");
+        if !path.is_file() {
+            return;
+        }
+        let mut audio = Audio::capturing();
+        audio.advance(0.5);
+        audio.play_2d(&path, 1.0).unwrap();
+        let out = audio.capture().unwrap().render(1.0);
+        assert_eq!(out.len(), 48_000 * 2);
+        let quiet: f32 = out[..20_000].iter().map(|s| s.abs()).sum();
+        let loud: f32 = out[48_000..60_000].iter().map(|s| s.abs()).sum();
+        assert_eq!(quiet, 0.0, "nothing before the click starts at 0.5 s");
+        assert!(loud > 0.1, "the click is in the mix");
     }
 }
