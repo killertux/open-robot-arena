@@ -1,0 +1,26 @@
+# Main menu -> Exhibition -> DEATHMATCH, Combat Arena (box), AI Red Zone Scout
+# vs AI Red Zone ALARM -> Start Game.  1024x768 game pixels.
+# Run:  ra2_drive.py -f tools/oracle/routes/exhibition_box_scout_alarm.steps
+click 514 346   # MAIN MENU: EXHIBITION
+wait 3
+click 383 214   # Game Settings: DEATHMATCH
+wait 1
+click 176 177   # Arena tab
+wait 1.5
+click 322 188   # Combat Arena
+wait 1
+click 176 221   # Robots tab
+wait 1.5
+click 441 249   # slot 1: computer icon -> Select Computer Robot (Red Zone)
+wait 2.5
+click 428 462   # light bot: Scout
+wait 0.5
+click 648 548   # OK
+wait 4
+click 805 249   # slot 2: computer icon
+wait 2.5
+click 519 462   # medium bot: ALARM
+wait 0.5
+click 648 548   # OK
+wait 4
+hide

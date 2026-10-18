@@ -64,12 +64,51 @@ local/oracle/original/mainmenu__1024x768__003.nopointer  # no mask; no pointer
 `ab.sh` passes `--pointer-rect` or `--pointer-scan off` accordingly and records
 the manual mask in the JSON.
 
-## The original game's input limit
+## The original game's input limit (solved 2026-10-18 with Frida)
 
-`original.sh` can reach and capture the main menu. It cannot move the original's
-mouse: DirectInput8 is acquired exclusively and ignores XTEST, XWarpPointer,
-XSendEvent, host-pointer input through Xephyr, `SetCursorPos`/`mouse_event` from
-a Wine process (`wininput.py`), and a `/dev/uinput` virtual mouse
-(`uinput_mouse.py`). The script records the failed click and never labels a
-screen it did not capture. The full measured history is in `docs/25-windowed.md`
-§4.
+`original.sh` alone still cannot click: X-side mouse input never reaches the
+original's menus.  Measured with Frida: the X click *does* arrive as
+`WM_LBUTTONDOWN`/`UP`, but the game ignores window mouse messages; its UI reads
+a mouse-state object at `0x716428+0x14` (x, y, button and per-frame "moved" /
+"changed" flags, layout as written by `FUN_004e6470`) inside the per-frame UI
+update `FUN_005e4e30`, and under this Wine/Xephyr setup nothing ever fills it
+(the "moved" byte stays 0, so even the DirectInput mouse poll `FUN_005d66c0`
+is skipped).  The keyboard is fine: XTEST keys reach the DirectInput keyboard
+(F1 orbit, F2/F3 static, F4 watch camera in a match).
+
+The working path writes that object from a Frida agent, once per UI frame:
+
+```sh
+tools/capture/original_session.sh start     # Xephyr :5, game, in-sandbox frida-server
+PY=~/tools/frida-venv/bin/python3
+$PY tools/oracle/ra2_drive.py click 514 346 wait 3 hide shot /tmp/exhibition.png
+$PY tools/oracle/ra2_drive.py -f tools/oracle/routes/exhibition_box_scout_alarm.steps
+$PY tools/oracle/ra2_drive.py click 936 647 hide          # Start Game
+DISPLAY=:5 tools/capture/xtest.py key F3                  # Static 3 camera
+$PY tools/oracle/ra2_python.py -c 'import plus; out.write(repr(plus.getPlayers()))'
+$PY tools/oracle/ra2_python.py --sample "repr([plus.getLocation(p) for p in plus.getPlayers()])" \
+    --every 10 --seconds 20 > trace.tsv
+$PY tools/oracle/ra2_hook.py tools/oracle/frida/ra2_damage.js --seconds 60 > damage.jsonl
+tools/oracle/add_fixture.py match-hud /tmp/x.png "route / state"   # -> local/oracle/original + manifest
+tools/capture/original_session.sh stop      # kills everything, restores the prefix ra2.cfg
+```
+
+| file | what |
+|---|---|
+| `original_session.sh` | `start`/`stop`/`status`: backs up and sizes the prefix `ra2.cfg`, starts Xephyr and the game, dismisses the two dialogs, starts `frida-server` inside the flatpak sandbox (`flatpak enter`), waits until the UI loop runs |
+| `../oracle/frida/ra2_input.js` | agent: pins the UI cursor, queues button edges per UI frame (`click`, `setpos`), can also overwrite the dinput mouse state |
+| `../oracle/ra2_drive.py` | step runner: `click X Y`, `move`, `hide` (cursor off-screen), `wait`, `frames`, `shot PATH`, `key KEYSYM`, `eval JS`; `-f FILE` reads steps |
+| `../oracle/routes/*.steps` | recorded click routes (1024x768 game pixels) |
+| `../oracle/frida/ra2_python.js`, `../oracle/ra2_python.py` | run Python 2.2 inside the game (`PyRun_SimpleString` from python22.dll, on the main thread at a UI frame): the whole `plus` API live (`getLocation`, `getHitpoints(p,0)`, `getHealth(p,comp)`, `getTimeElapsed`, ...) |
+| `../oracle/frida/ra2_damage.js`, `../oracle/ra2_hook.py` | log every call to the damage sink `FUN_004175b0` (attacker, victim, component, amount, location, normal) as JSON lines |
+| `../oracle/add_fixture.py` | copy a PNG or a frame directory into `local/oracle/original/` with the next sequence number and append the manifest row |
+
+Notes: host-side `frida -p` fails with `unable to perform ptrace pokedata:
+Input/output error` (the injector resolves libc from the host, not the flatpak
+runtime), which is why the server runs inside the sandbox; the game is pid 2
+there.  If a client is killed mid-RPC, frida-server can wedge and later
+attaches hang: `kill -9 $(pgrep -x frida-server)` and start it again
+(`original_session.sh stop`/`start`).  Some menus repaint late: give a few
+seconds after a dialog's OK before a `shot`.  Matches are **not** reproducible
+across runs (same route, three matches, two different winners); UI screens are (a re-boot
+re-capture of `teamhq-select` was byte-identical).
