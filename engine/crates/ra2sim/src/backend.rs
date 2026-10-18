@@ -191,6 +191,24 @@ pub struct BodyState {
     pub angular_velocity: Vec3,
 }
 
+/// One contact point of one step: Havok's collision event, regenerated every
+/// step while two bodies touch (`FUN_00549c30`).
+///
+/// The two states are the bodies as they were at the *start* of the step, which
+/// is what the original's event record measures its closing speed from
+/// (`FUN_0045a510`): the events fire before the step resolves the contact.
+#[derive(Clone, Copy, Debug)]
+pub struct ContactEvent {
+    pub a: BodyHandle,
+    pub b: BodyHandle,
+    /// Unit normal, pointing from `a` toward `b`.
+    pub normal: Vec3,
+    /// The contact point in world space.
+    pub point: Vec3,
+    pub state_a: BodyState,
+    pub state_b: BodyState,
+}
+
 /// Result of a ray cast.
 #[derive(Clone, Copy, Debug)]
 pub struct RayHit {
@@ -348,6 +366,13 @@ pub trait PhysicsBackend {
     fn step(&mut self, dt: f32) -> StepInfo;
     /// Whether two bodies touched during the last step (a default `false` lets
     /// simpler backends skip contact reporting).
+    /// The contact points of the last [`step`](Self::step), one event per
+    /// point, in a deterministic order. Empty for a backend that cannot report
+    /// them.
+    fn take_contacts(&mut self) -> Vec<ContactEvent> {
+        Vec::new()
+    }
+
     fn in_contact(&self, _a: BodyHandle, _b: BodyHandle) -> bool {
         false
     }

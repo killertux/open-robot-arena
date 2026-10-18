@@ -58,12 +58,26 @@ fn spawn_prop(physics: &mut dyn PhysicsBackend, p: &crate::scene::Prop) -> Optio
     physics.create_body(&desc).ok()
 }
 
-/// The damage threshold below which a robot-vs-robot hit does not score.
+/// The damage below which a hit is not applied at all.
 ///
-/// `FUN_00417330` gates the whole damage event on `10.0 <= param_5` before it
-/// calls the hit handler (`FUN_004175b0`) at `0x4173xx`; a hit under 10 points
-/// of damage still hurts, but awards no score.
-pub const SCORE_HIT_MIN_DAMAGE: f32 = 10.0;
+/// `FUN_00417330` gates the damage event on `10.0 <= param_5` before it calls
+/// the hit handler (`FUN_004175b0`), which is the only path that reaches a
+/// component's hitpoints (`FUN_00489620` → vtable `+0x1c`) and the score. A
+/// smaller hit is handed to `FUN_00417510` instead, which only reaches the
+/// component's effects (vtable `+0x6c`, `FUN_0045f3a0`: sparks and sound).
+pub const SCORE_HIT_MIN_DAMAGE: f32 = crate::combat::APPLY_THRESHOLD;
+
+/// One damage event that reached a component: what `FUN_004175b0` logs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DamageEvent {
+    /// Match time, seconds.
+    pub time: f32,
+    /// The attacking robot, `-1` for the environment and hazards.
+    pub attacker: i32,
+    pub victim: usize,
+    pub component: usize,
+    pub amount: f32,
+}
 
 /// One hit that the match may score.
 ///
@@ -104,9 +118,16 @@ pub struct Duel {
     /// Hits that the match has not scored yet. The duel knows the damage and the
     /// attacker; the game type and teams are the match's, so it drains this.
     score_hits: Vec<ScoreHit>,
-    /// Which robot pairs were touching at the end of the last step, so a blow is
-    /// dealt when contact *begins* instead of every step it lasts.
-    contact_pairs: Vec<bool>,
+    /// Every damage event that reached a component (`FUN_004175b0`), in order.
+    pub damage_events: Vec<DamageEvent>,
+    /// Keep every [`Impact`](combat::Impact), including those under the `10`
+    /// gate, in [`Duel::impacts`] (diagnostics and tests).
+    pub record_impacts: bool,
+    pub impacts: Vec<combat::Impact>,
+    /// Whether the immobility rule runs: the match sets it when the fight
+    /// begins (`FUN_00412fc0` requires `+0x8e`, "fighting").
+    pub immobility_active: bool,
+    immobility: crate::immobility::Tracker,
     /// Per-robot AI state (the stand-in driver).
     ai: Vec<AiState>,
     /// The game's own AI, when its scripts loaded and the bots are known to it.
@@ -392,7 +413,6 @@ impl Duel {
             });
 
         let damage_taken = vec![0.0; robots.len()];
-        let contact_pairs = vec![false; robots.len() * robots.len()];
         Ok(Duel {
             physics,
             arena,
@@ -407,7 +427,11 @@ impl Duel {
             damage_taken,
             damage_dealt: vec![0.0; n],
             score_hits: Vec::new(),
-            contact_pairs,
+            damage_events: Vec::new(),
+            immobility_active: false,
+            record_impacts: false,
+            impacts: Vec::new(),
+            immobility: crate::immobility::Tracker::default(),
             ai: bots.iter().map(|_| AiState::new()).collect(),
             script_ai,
             last_done: vec![(0, 0.0, 0.0); n],
@@ -1015,12 +1039,7 @@ impl Duel {
                     if bot >= self.robots.len() || component >= self.robots[bot].health.len() {
                         continue;
                     }
-                    self.damage_taken[bot] += amount;
-                    if self.robots[bot].damage(component, amount) {
-                        self.break_off(bot, component, point);
-                    } else if component == 0 {
-                        self.buckle_chassis(bot);
-                    }
+                    self.apply_hit(None, bot, component, amount, point);
                 }
                 ra2script::Request::Force { bot, momentum } => {
                     if let Ok(bot) = usize::try_from(bot) {
@@ -1105,19 +1124,13 @@ impl Duel {
         self.run_arena_tick(dt);
         self.drive_joints(dt);
 
-        // The velocities the robots *arrive* with. After the step the collision
-        // has already absorbed them, so a blow has to be measured before it
-        // lands, and it is the *relative* velocity that sets its size.
-        let approach: Vec<Vec3> = (0..self.robots.len())
-            .map(|i| self.robots[i].velocity(&*self.physics))
-            .collect();
-
         let info = self.physics.step(dt);
         if !info.complete {
             eprintln!("ra2sim: step at t={:.2}s dropped contacts", self.time);
         }
 
-        self.resolve_combat(dt, &approach);
+        self.resolve_combat();
+        self.update_immobility(dt);
         self.time += dt;
         // What the scripts asked for, at the top of the step after the one they
         // asked in — `plus.damage`, `plus.force`, `plus.zap` and the tournament's
@@ -1126,43 +1139,17 @@ impl Duel {
         self.service_requests(dt);
     }
 
-    /// Test every robot against every other and apply the resulting damage.
+    /// Turn the step's contact points into damage.
     ///
-    /// `approach` holds each robot's velocity before the step, so a blow is
-    /// priced by the relative speed it arrived with.
-    fn resolve_combat(&mut self, dt: f32, approach: &[Vec3]) {
-        let n = self.robots.len();
-        let mut impacts = Vec::new();
-        let mut touching = vec![false; n * n];
-        for a in 0..n {
-            for b in 0..n {
-                if a == b || !self.robots[a].is_alive() || !self.robots[b].is_alive() {
-                    continue;
-                }
-                let approaching = (approach[a] - approach[b]).length();
-                let first = !self.contact_pairs[a * n + b];
-                if let Some(imp) = combat::detect(
-                    &*self.physics,
-                    &self.robots,
-                    a,
-                    b,
-                    dt,
-                    combat::Contact {
-                        approach: approaching,
-                        first,
-                    },
-                    &self.combat,
-                ) {
-                    touching[a * n + b] = true;
-                    impacts.push(imp);
-                } else if combat::contacting_parts(&*self.physics, &self.robots[a], &self.robots[b])
-                    .is_some()
-                {
-                    touching[a * n + b] = true;
-                }
-            }
+    /// Every contact point of every step is an event, in both directions
+    /// ([`combat::resolve`]); each one then goes through [`Duel::apply_hit`],
+    /// whose `>= 10` gate is the arena's (`FUN_00417330`).
+    fn resolve_combat(&mut self) {
+        let events = self.physics.take_contacts();
+        let impacts = combat::resolve(&self.robots, &events, &self.combat);
+        if self.record_impacts {
+            self.impacts.extend(impacts.iter().copied());
         }
-        self.contact_pairs = touching;
         for imp in &impacts {
             self.apply_hit(
                 Some(imp.attacker),
@@ -1176,16 +1163,19 @@ impl Duel {
 
     /// Apply one damage event, and remember whether it is a scoring hit.
     ///
-    /// This is the engine's side of `FUN_00417330` → `FUN_004175b0`: the damage
-    /// and the attacker are recorded here, and [`Match`](crate::r#match::Match)
-    /// applies the game type's rule (damage does not score in King of the Hill,
-    /// and a teammate hit does not score in Team Match). `attacker` is `None`
-    /// for a hazard's own damage, which never stores points (`plus.damage` goes
-    /// through `FUN_004148f0`, whose player id is `-1`).
+    /// This is the arena's `FUN_00417330`: it ignores a zero hit, and a hit under
+    /// [`CombatConfig::apply_threshold`] (`10.0`) goes no further than the
+    /// sparks and sounds (`FUN_00417510`) — it takes no hitpoints and scores
+    /// nothing. From `10.0` up `FUN_004175b0` applies it to the victim's
+    /// component (`FUN_00489620` → the component's own `apply`) and the match
+    /// scores it: outside King of the Hill, and not between teammates in Team
+    /// Match, which [`Match`](crate::r#match::Match) decides. `attacker` is
+    /// `None` for a hazard's own damage, which never stores points
+    /// (`plus.damage` goes through `FUN_004148f0`, whose player id is `-1`).
     ///
     /// The victim's state is tested *before* the blow lands, like
-    /// `FUN_004175b0`'s `+0x34 == 0`; the damage awarded is the effective
-    /// damage the hit calculation returned.
+    /// `FUN_004175b0`'s `+0x34 == 0`; the score is the effective damage the
+    /// component's `apply` returned.
     pub fn apply_hit(
         &mut self,
         attacker: Option<usize>,
@@ -1197,29 +1187,54 @@ impl Duel {
         if victim >= self.robots.len()
             || component >= self.robots[victim].health.len()
             || !damage.is_finite()
-            || damage <= 0.0
+            || damage < self.combat.apply_threshold
         {
             return false;
         }
+        if !self.robots[victim].attached[component] {
+            // `FUN_00417330`: a component that has come off (`+0xe0 > 0`) ends the event.
+            return false;
+        }
         let victim_was_alive = self.robots[victim].is_alive();
+        let applied = self.robots[victim].damage(component, damage);
         self.damage_taken[victim] += damage;
+        self.damage_events.push(DamageEvent {
+            time: self.time,
+            attacker: attacker.map(|a| a as i32).unwrap_or(-1),
+            victim,
+            component,
+            amount: damage,
+        });
         if let Some(attacker) = attacker {
             if attacker < self.robots.len() {
                 self.damage_dealt[attacker] += damage;
                 // The brains spot a "good hit" by matching the component id
                 // against their own weapon list (`AI/__init__.py:CheckForWeaponHits`).
                 self.last_done[attacker] = (component as i32, damage, self.time);
-                if victim_was_alive && damage >= SCORE_HIT_MIN_DAMAGE {
+                if victim_was_alive && applied.effective > 0.0 {
                     self.score_hits.push(ScoreHit {
                         attacker,
                         victim,
-                        damage,
+                        damage: applied.effective,
                     });
                 }
             }
         }
         self.last_received[victim] = (component as i32, damage, self.time);
-        if self.robots[victim].damage(component, damage) {
+        let name = self.robots[victim].rig.name.clone();
+        if applied.critical {
+            self.log.push(format!(
+                "t={:.1}s  {name}: critical hit {}",
+                self.time, self.robots[victim].criticals
+            ));
+        }
+        if applied.destroyed {
+            self.robots[victim].destroyed = true;
+            self.log
+                .push(format!("t={:.1}s  {name} chassis destroyed", self.time));
+            return true;
+        }
+        if applied.detach {
             self.break_off(victim, component, point);
             true
         } else {
@@ -1242,12 +1257,10 @@ impl Duel {
         self.robots[robot].buckle(physics);
     }
 
-    /// A component died: detach its subtree as flying debris and rebuild the
-    /// robot without it. The chassis ends the fight instead.
+    /// A component came off: detach its subtree as flying debris and rebuild the
+    /// robot without it. (The chassis never does; its end is the third critical
+    /// hit, handled in [`Duel::apply_hit`].)
     fn break_off(&mut self, robot: usize, component: usize, point: Vec3) {
-        if component == 0 {
-            self.robots[robot].destroyed = true;
-        }
         let velocity = self.robots[robot].velocity(&*self.physics);
         let removed = {
             let physics = &mut *self.physics;
@@ -1290,12 +1303,39 @@ impl Duel {
 
         let name = self.robots[robot].rig.name.clone();
         let part = self.robots[robot].rig.components[component].name.clone();
-        if component == 0 {
-            self.log
-                .push(format!("t={:.1}s  {name} chassis destroyed", self.time));
-        } else {
-            self.log
-                .push(format!("t={:.1}s  {name}: {part} knocked off", self.time));
+        self.log
+            .push(format!("t={:.1}s  {name}: {part} knocked off", self.time));
+    }
+
+    /// The immobility rule (`FUN_00412fc0`, block `0x4133b8`), sampled once a
+    /// second while the fight is on: a robot that has not left a sqrt(2) m
+    /// sphere for 10 s is warned (`ImmobilityWarning(id, 1)` to every brain) and
+    /// at 20 s it is IMMOBILIZED (state 2).
+    fn update_immobility(&mut self, dt: f32) {
+        if !self.immobility_active {
+            return;
+        }
+        let positions: Vec<Option<Vec3>> = (0..self.robots.len())
+            .map(|i| {
+                self.robots[i]
+                    .is_alive()
+                    .then(|| self.robots[i].position(&*self.physics))
+            })
+            .collect();
+        for event in self.immobility.update(dt, &positions) {
+            match event {
+                crate::immobility::Event::Warning(id, on) => {
+                    if let Some(ai) = self.script_ai.as_ref() {
+                        ai.immobility_warning(id as i32, on);
+                    }
+                }
+                crate::immobility::Event::Immobilized(id) => {
+                    self.robots[id].immobilized = true;
+                    let name = self.robots[id].rig.name.clone();
+                    self.log
+                        .push(format!("t={:.1}s  {name} immobilized", self.time));
+                }
+            }
         }
     }
 
@@ -1864,10 +1904,12 @@ mod tests {
                 };
                 2
             ];
+            duel.record_impacts = true;
             for _ in 0..(6.0 / (1.0 / 60.0)) as usize {
                 duel.step_direct(&ram, 1.0 / 60.0);
-                if duel.damage_taken[0] > 0.0 {
-                    return duel.damage_taken[0];
+                // The first contact point of the first step the robots touch.
+                if let Some(first) = duel.impacts.first() {
+                    return first.damage;
                 }
             }
             0.0
@@ -1875,12 +1917,122 @@ mod tests {
         let (metal, plate, rubber) = (blow_with(0.1), blow_with(0.4), blow_with(0.0));
         println!("opening ram: metal 0.1 -> {metal:.1}, ram plate 0.4 -> {plate:.1}, rubber 0.0 -> {rubber:.1}");
         assert!(rubber == 0.0, "a rubber part dealt {rubber}");
-        assert!(metal > 10.0, "metal dealt {metal}");
+        assert!(metal > 0.0, "metal dealt {metal}");
         let ratio = plate / metal;
         assert!(
             (ratio - 4.0).abs() < 0.4,
             "the 0.4 material should deal four times the 0.1 one: {ratio:.2}"
         );
+    }
+
+    /// The damage stream of a head-on ram, against the original's live log
+    /// (`match-damage__live__000.jsonl`): the original logged 8 events in a
+    /// 50 s fight, amounts 10.0 to 74.0, the contact pair 16.3 both ways.
+    ///
+    /// A sustained shove is not a hit: after the opening blow the stream is
+    /// only the occasional contact point whose closing speed is high enough for
+    /// the amount to reach the `10` gate, so the rate stays in the original's
+    /// order of magnitude (a few per second at most, never one per step).
+    #[test]
+    fn a_ram_makes_discrete_damage_events_like_the_original() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string();
+        let setups = [
+            BotSetup {
+                path: bot.clone(),
+                yaw_deg: Some(270.0),
+                spawn: Some([-3.0, 0.0]),
+            },
+            BotSetup {
+                path: bot,
+                yaw_deg: Some(90.0),
+                spawn: Some([3.0, 0.0]),
+            },
+        ];
+        let mut duel = Duel::new(&arena, &setups).expect("a duel");
+        duel.record_impacts = true;
+        let ram = vec![
+            DriveInput {
+                throttle: 1.0,
+                steer: 0.0,
+            };
+            2
+        ];
+        let seconds = 12.0;
+        let dt = 1.0 / 60.0;
+        for _ in 0..(seconds / dt) as usize {
+            duel.step_direct(&ram, dt);
+        }
+        let applied: Vec<f32> = duel.damage_events.iter().map(|e| e.amount).collect();
+        let all: Vec<f32> = duel.impacts.iter().map(|i| i.damage).collect();
+        let mut sorted = applied.clone();
+        sorted.sort_by(f32::total_cmp);
+        let pct = |p: f32| {
+            sorted
+                .get(((sorted.len() as f32 - 1.0) * p).round() as usize)
+                .copied()
+                .unwrap_or(0.0)
+        };
+        println!(
+            "ram {seconds:.0}s: {} contact-point hits, {} applied (>=10) = {:.2}/s; \
+             amounts min {:.1} median {:.1} p90 {:.1} max {:.1}",
+            all.len(),
+            applied.len(),
+            applied.len() as f32 / seconds,
+            pct(0.0),
+            pct(0.5),
+            pct(0.9),
+            pct(1.0),
+        );
+        assert!(!applied.is_empty(), "a ram did no damage at all");
+        assert!(
+            applied.len() as f32 / seconds < 30.0,
+            "{} damage events in {seconds}s is a grind, not discrete hits",
+            applied.len()
+        );
+        assert!(applied.iter().all(|a| *a >= 10.0));
+    }
+
+    /// `FUN_00412fc0`: a robot that never leaves its spot is warned at 10 s and
+    /// counted out (state 2) at 20 s of fight, and the brains hear about it.
+    #[test]
+    fn a_robot_that_sits_still_is_immobilized_after_twenty_seconds() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str, x: f32| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: Some([x, 0.0]),
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[
+                bot("AI/Team1/Bot0.bot", -8.0),
+                bot("AI/Team6/Bot2.bot", 8.0),
+            ],
+        )
+        .expect("a duel");
+        let idle = [DriveInput::default(), DriveInput::default()];
+        let dt = 1.0 / 60.0;
+        // Not running until the fight begins.
+        for _ in 0..(25.0 / dt) as usize {
+            duel.step_direct(&idle, dt);
+        }
+        assert!(!duel.robots[0].immobilized, "the rule ran outside a fight");
+        duel.immobility_active = true;
+        for _ in 0..(19.0 / dt) as usize {
+            duel.step_direct(&idle, dt);
+        }
+        assert!(duel.robots[0].is_alive());
+        for _ in 0..(3.0 / dt) as usize {
+            duel.step_direct(&idle, dt);
+        }
+        assert!(duel.robots[0].immobilized);
+        assert!(!duel.robots[0].is_alive(), "state 2 is defeated");
+        assert!(duel.log.iter().any(|l| l.contains("immobilized")));
     }
 
     /// M8.3: the two requests the duel used to drop now change the match.
@@ -2337,38 +2489,114 @@ mod tests {
             .expect("the bot has a part with a fracture value and hitpoints to spare");
         assert!(fracture >= 15.0, "unexpected fracture {fracture}");
 
-        // A blow just under it: taken, but the part stays on.
-        assert!(
-            !robot.damage(index, fracture - 0.5),
-            "a sub-fracture blow took the part off"
-        );
+        // `FUN_0045f2b0` tests the fracture against the hitpoints the part
+        // ALREADY has: while it still has some, even a huge blow only wears it
+        // down (the old model took it off on the blow itself, which was wrong).
+        let before = robot.health[index];
+        let hit = robot.damage(index, fracture + 0.5);
+        assert!(!hit.detach, "a part with hitpoints left was torn off");
         assert!(robot.attached[index]);
-        assert!(robot.health[index] > 0.0);
+        assert!((robot.health[index] - (before - fracture - 0.5)).abs() < 1e-3);
+        assert!((hit.effective - (fracture + 0.5)).abs() < 1e-3);
 
-        // Just over it: off it comes, with hitpoints still showing.
+        // Ground down to zero, it is still on the robot ...
+        robot.health[index] = 0.0;
+        assert!(!robot.damage(index, fracture - 0.5).detach);
+        assert!(robot.attached[index], "zero hitpoints alone do not detach");
+        assert_eq!(robot.health[index], 0.0, "hitpoints never go negative");
+        // ... and a single blow past the fracture now shears it off.
         assert!(
-            robot.health[index] > 1.0,
-            "the part should have hitpoints left: {}",
-            robot.health[index]
+            robot.damage(index, fracture + 0.5).detach,
+            "a blow past the fracture did not take the dead part off"
         );
-        assert!(
-            robot.damage(index, fracture + 0.5),
-            "a blow past the fracture did not take the part off"
-        );
+        assert!(robot.fractured[index]);
 
-        // A chassis declares no `fracture`, so it is only ever worn down.
-        let chassis = robot
+        // A component that declares no `fracture` (0) is only ever worn down.
+        let other = robot
             .rig
             .components
             .iter()
-            .position(|c| c.role == crate::rig::Role::Chassis)
-            .expect("a chassis");
-        assert_eq!(robot.rig.components[chassis].fracture, 0.0);
-        robot.health[chassis] = 1000.0;
-        assert!(
-            !robot.damage(chassis, 500.0),
-            "a chassis should never shear off on one blow"
+            .enumerate()
+            .find(|(i, c)| robot.attached[*i] && *i != index && c.fracture == 0.0 && *i != 0)
+            .map(|(i, _)| i);
+        if let Some(other) = other {
+            robot.health[other] = 0.0;
+            assert!(!robot.damage(other, 500.0).detach);
+        }
+    }
+
+    /// `FUN_0044f370`: a chassis at zero hitpoints is not defeated; from then on
+    /// every blow over 40 is a critical hit and the third destroys the robot.
+    #[test]
+    fn the_chassis_dies_of_three_criticals_not_of_hitpoints() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        let hp = duel.robots[0].health[0];
+        assert!(hp > 0.0);
+
+        // Wearing the chassis down to exactly zero defeats nothing.
+        let point = Vec3::ZERO;
+        assert!(!duel.apply_hit(Some(1), 0, 0, hp, point));
+        assert_eq!(duel.robots[0].health[0], 0.0);
+        assert!(duel.robots[0].is_alive());
+        assert_eq!(
+            duel.robots[0].criticals, 0,
+            "the blow that empties it is not a critical"
         );
+
+        // A hit under 40 is not critical; hitpoints go negative.
+        assert!(!duel.apply_hit(Some(1), 0, 0, 30.0, point));
+        assert_eq!(duel.robots[0].criticals, 0);
+        assert_eq!(duel.robots[0].health[0], -30.0);
+
+        // Criticals 1 and 2 hurt; the third destroys.
+        assert!(!duel.apply_hit(Some(1), 0, 0, 41.0, point));
+        assert!(!duel.apply_hit(Some(1), 0, 0, 90.0, point));
+        assert_eq!(duel.robots[0].criticals, 2);
+        assert!(duel.robots[0].is_alive());
+        assert!(duel.apply_hit(Some(1), 0, 0, 41.0, point));
+        assert!(duel.robots[0].destroyed);
+        assert!(!duel.robots[0].is_alive());
+        // The chassis stays on the robot: DESTROYED is a state, not a detach.
+        assert!(duel.robots[0].attached[0]);
+    }
+
+    /// `FUN_00417330`: below 10 a hit only drives effects.
+    #[test]
+    fn a_hit_under_ten_takes_nothing() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        let hp = duel.robots[0].health[0];
+        duel.apply_hit(Some(1), 0, 0, 9.99, Vec3::ZERO);
+        assert_eq!(duel.robots[0].health[0], hp);
+        assert!(duel.damage_events.is_empty());
+        assert!(duel.take_score_hits().is_empty());
+        duel.apply_hit(Some(1), 0, 0, 10.0, Vec3::ZERO);
+        assert_eq!(duel.robots[0].health[0], hp - 10.0);
+        assert_eq!(duel.damage_events.len(), 1);
+        assert_eq!(duel.take_score_hits().len(), 1);
     }
 
     /// M4/F13: a hazard that only asks for power when it fires still gets it.

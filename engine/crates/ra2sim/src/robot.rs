@@ -31,6 +31,25 @@ fn next_robot_group() -> u32 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// A blow to a chassis whose hitpoints are gone must exceed this to be a
+/// critical hit (`FUN_0044f370`, constant at `0x6a69f8`).
+pub const CRITICAL_BLOW: f32 = 40.0;
+/// The critical hit that destroys the robot (`FUN_004df120`: `crit >= 3`).
+pub const CRITICALS_TO_DESTROY: u32 = 3;
+
+/// What one blow did to a component ([`Robot::damage`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Applied {
+    /// Hitpoints actually removed; the score a hit is worth.
+    pub effective: f32,
+    /// The component should come off the robot.
+    pub detach: bool,
+    /// The blow was a critical hit on the chassis.
+    pub critical: bool,
+    /// That critical hit was the third: the robot is DESTROYED.
+    pub destroyed: bool,
+}
+
 /// Live state of one assembled body.
 pub struct PartState {
     pub body: BodyHandle,
@@ -57,8 +76,12 @@ pub struct Robot {
     /// Natural mass × `mass_scale`.
     pub mass: f32,
     pub mass_scale: f32,
-    /// The chassis body is gone: the robot is out of the fight.
+    /// Robot state 1, DESTROYED: the chassis took its third critical hit.
     pub destroyed: bool,
+    /// Critical hits the chassis has taken (`bot + 0xbc`).
+    pub criticals: u32,
+    /// Robot state 2, IMMOBILIZED: it stayed inside a sqrt(2) m sphere for 20 s.
+    pub immobilized: bool,
     /// `plus.eliminatePlayer` — the original's robot state 3. The robot stays in
     /// the world (it may still be falling), but it is out of the match.
     pub eliminated: bool,
@@ -144,6 +167,8 @@ impl Robot {
             mass: rig.mass * mass_scale,
             mass_scale,
             destroyed: false,
+            criticals: 0,
+            immobilized: false,
             eliminated: false,
             zapped_until: -1.0,
             team,
@@ -315,7 +340,7 @@ impl Robot {
     /// gone. `plus.isDefeated` is the original's "state != 0", so both report
     /// defeated, while `plus.isEliminated` only reports the eliminated state.
     pub fn is_alive(&self) -> bool {
-        self.parts[0].alive && !self.destroyed && !self.eliminated
+        self.parts[0].alive && !self.destroyed && !self.immobilized && !self.eliminated
     }
 
     /// Drive the motors: wheels from the input, spinners at their rated speed.
@@ -466,34 +491,56 @@ impl Robot {
         self.rebuild_part(physics, 0);
     }
 
-    /// Apply damage to a component; returns `true` if it just broke off.
-    /// Apply `amount` to one component; `true` if the part comes away.
+    /// Apply one blow that already passed the arena's `>= 10` gate to a
+    /// component: the original's per-class `apply` (vtable `+0x1c`).
     ///
-    /// There are two ways it does, and the second is the engine's own rule
-    /// (`FUN_0045f2b0`): the part's hitpoints reach zero, **or a single blow is
-    /// larger than the part's `fracture`**, in which case it is taken off
-    /// outright whatever is left of its hitpoints. `fracture` is a per-hit
-    /// threshold, not a reduction — which is why a hazard's flat 25 can never
-    /// dent a ramplate (40) or reach the control board behind a chassis (41),
-    /// and why one solid spinner pass shears a part off rather than grinding it
-    /// down. Components that declare no `fracture` (0) never break this way.
-    pub fn damage(&mut self, index: usize, amount: f32) -> bool {
-        if index >= self.health.len() || !self.attached[index] {
-            return false;
+    /// An ordinary component is `FUN_0045f2b0`:
+    ///
+    /// ```text
+    /// if hp <= 0 && fracture > 0 && fracture < blow   -> queue detach (FUN_00417d70)
+    /// hp -= min(blow, hp)                              -> returns that amount
+    /// ```
+    ///
+    /// The detach test runs **before** the subtraction and reads the hitpoints
+    /// the component *already* has, so a part that is merely ground down to zero
+    /// stays on the robot; it comes away on the next single blow larger than its
+    /// `fracture` (a component whose `fracture` is zero never does). Hitpoints
+    /// cannot go below zero, and the amount returned is what was actually
+    /// subtracted, which is what the match awards as score.
+    ///
+    /// The chassis is `FUN_0044f370` instead: hitpoints go negative without a
+    /// floor, hitpoints reaching zero defeat nothing, and once they are `<= 0`
+    /// every blow over `40.0` is a *critical hit*; the third one is the
+    /// DESTROYED state (`FUN_00417cc0`). It returns the whole blow.
+    pub fn damage(&mut self, index: usize, amount: f32) -> Applied {
+        let mut out = Applied::default();
+        if index >= self.health.len() || !self.attached[index] || amount <= 0.0 {
+            return out;
         }
-        if !self.rig.components[index].damageable {
-            return false;
+        let c = &self.rig.components[index];
+        if !c.damageable {
+            return out;
         }
-        self.health[index] -= amount;
-        let fracture = self.rig.components[index].fracture;
-        if self.health[index] <= 0.0 || (fracture > 0.0 && amount > fracture) {
-            self.health[index] = self.health[index].max(0.0);
-            if fracture > 0.0 && amount > fracture {
-                self.fractured[index] = true;
+        if index == 0 {
+            if self.health[0] <= 0.0 && amount > CRITICAL_BLOW {
+                out.critical = true;
+                self.criticals += 1;
+                if self.criticals >= CRITICALS_TO_DESTROY {
+                    out.destroyed = true;
+                }
             }
-            return true;
+            self.health[0] -= amount;
+            out.effective = amount;
+            return out;
         }
-        false
+        if self.health[index] <= 0.0 && c.fracture > 0.0 && c.fracture < amount {
+            self.fractured[index] = true;
+            out.detach = true;
+        }
+        let taken = amount.min(self.health[index].max(0.0));
+        self.health[index] -= taken;
+        out.effective = taken;
+        out
     }
 
     /// Break `component` (and anything welded past it) off the robot.

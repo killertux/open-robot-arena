@@ -4,7 +4,7 @@
 //! to [`PhysicsBackend`].
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use glam::{Quat, Vec3};
 use oxijolt::prelude::math as m;
@@ -39,10 +39,52 @@ pub fn havok_combined_friction(a: f32, b: f32) -> f32 {
 /// fixed for the duration of a step; the callbacks only read it.
 struct HavokFriction {
     friction: Arc<RwLock<HashMap<u32, f32>>>,
+    /// Whether to replace Jolt's friction with Havok's law.
+    havok: bool,
+    /// Every contact point of the step, for the damage model.
+    log: Arc<Mutex<Vec<RawContact>>>,
+}
+
+/// One contact manifold as Jolt reported it, before it is matched to bodies'
+/// pre-step states. Havok's event manager fires once per contact point per
+/// step (`FUN_00549c30`); the damage pipeline wants the same stream.
+struct RawContact {
+    body1: u32,
+    body2: u32,
+    normal: Vec3,
+    penetration: f32,
+    points: Vec<Vec3>,
 }
 
 impl HavokFriction {
+    fn record(&self, manifold: &ContactManifold) {
+        let points = manifold
+            .points
+            .iter()
+            .map(|p| {
+                let a = JoltBackend::un_rv(p.point_on1);
+                let b = JoltBackend::un_rv(p.point_on2);
+                (a + b) * 0.5
+            })
+            .collect();
+        if let Ok(mut log) = self.log.lock() {
+            if log.len() < 65_536 {
+                log.push(RawContact {
+                    body1: manifold.pair.body1.to_raw(),
+                    body2: manifold.pair.body2.to_raw(),
+                    normal: JoltBackend::un_v(manifold.normal),
+                    penetration: manifold.penetration_depth,
+                    points,
+                });
+            }
+        }
+    }
+
     fn combine(&self, manifold: &ContactManifold, settings: &mut ContactSettings) {
+        self.record(manifold);
+        if !self.havok {
+            return;
+        }
         let Ok(table) = self.friction.read() else {
             return;
         };
@@ -70,9 +112,12 @@ impl ContactListener for HavokFriction {
 }
 
 use crate::backend::{
-    BackendError, BodyDesc, BodyHandle, BodyState, HingeDesc, JointHandle, MotionType,
-    PhysicsBackend, RayHit, ShapeDesc, SliderDesc, StepInfo,
+    BackendError, BodyDesc, BodyHandle, BodyState, ContactEvent, HingeDesc, JointHandle,
+    MotionType, PhysicsBackend, RayHit, ShapeDesc, SliderDesc, StepInfo,
 };
+
+/// How far apart (m) a contact may be and still count as touching.
+const CONTACT_TOLERANCE: f32 = 0.01;
 
 /// The description of one joint, kept so a body can be re-shaped without
 /// losing its constraints (F9). The motor's *state* is here too: recreating a
@@ -118,6 +163,11 @@ pub struct JoltBackend {
     /// Each body's own friction coefficient, by raw Jolt body id, for the
     /// Havok friction-combination listener (F6). Jolt has no getter for it.
     friction: Arc<RwLock<HashMap<u32, f32>>>,
+    /// The contact points the listener logged during the last step.
+    contact_log: Arc<Mutex<Vec<RawContact>>>,
+    /// Every body's state at the start of the last step (raw id), which is what
+    /// Havok's collision events see: they fire before the step resolves.
+    pre_step: HashMap<u32, BodyState>,
 }
 
 impl JoltBackend {
@@ -138,11 +188,14 @@ impl JoltBackend {
         let havok = std::env::var("RA2_FRICTION_LAW")
             .map(|v| !v.eq_ignore_ascii_case("jolt"))
             .unwrap_or(true);
-        if havok {
-            world.set_contact_listener(Some(Arc::new(HavokFriction {
-                friction: Arc::clone(&friction),
-            })));
-        }
+        // The listener is always installed: it also logs every contact point for
+        // the damage model, and only applies the friction law when asked to.
+        let contact_log = Arc::new(Mutex::new(Vec::new()));
+        world.set_contact_listener(Some(Arc::new(HavokFriction {
+            friction: Arc::clone(&friction),
+            havok,
+            log: Arc::clone(&contact_log),
+        })));
         Ok(Self {
             world,
             ids: Vec::new(),
@@ -151,6 +204,8 @@ impl JoltBackend {
             joints: Vec::new(),
             collision_tables: HashMap::new(),
             friction,
+            contact_log,
+            pre_step: HashMap::new(),
         })
     }
 
@@ -379,6 +434,17 @@ impl PhysicsBackend for JoltBackend {
     }
 
     fn step(&mut self, dt: f32) -> StepInfo {
+        // The collision events of this step see the bodies as they are now.
+        self.pre_step.clear();
+        if let Ok(mut log) = self.contact_log.lock() {
+            log.clear();
+        }
+        for handle in 0..self.ids.len() {
+            let handle = handle as BodyHandle;
+            if let (Some(id), Some(state)) = (self.id(handle), self.state(handle)) {
+                self.pre_step.insert(id.to_raw(), state);
+            }
+        }
         match self.world.step(dt) {
             Ok(report) => StepInfo {
                 complete: report.is_complete(),
@@ -388,6 +454,49 @@ impl PhysicsBackend for JoltBackend {
                 StepInfo { complete: false }
             }
         }
+    }
+
+    fn take_contacts(&mut self) -> Vec<ContactEvent> {
+        let raw = match self.contact_log.lock() {
+            Ok(mut log) => std::mem::take(&mut *log),
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for c in raw {
+            // Havok keeps only points closer than its tolerance; Jolt also
+            // reports speculative contacts before the bodies touch.
+            if c.penetration < -CONTACT_TOLERANCE {
+                continue;
+            }
+            let (Some(&a), Some(&b)) = (self.lookup.get(&c.body1), self.lookup.get(&c.body2))
+            else {
+                continue;
+            };
+            let (Some(&state_a), Some(&state_b)) =
+                (self.pre_step.get(&c.body1), self.pre_step.get(&c.body2))
+            else {
+                continue;
+            };
+            for point in c.points {
+                out.push(ContactEvent {
+                    a,
+                    b,
+                    normal: c.normal,
+                    point,
+                    state_a,
+                    state_b,
+                });
+            }
+        }
+        // Jolt's job threads report contacts in no fixed order.
+        out.sort_by(|x, y| {
+            (x.a, x.b)
+                .cmp(&(y.a, y.b))
+                .then(x.point.x.total_cmp(&y.point.x))
+                .then(x.point.y.total_cmp(&y.point.y))
+                .then(x.point.z.total_cmp(&y.point.z))
+        });
+        out
     }
 
     fn in_contact(&self, a: BodyHandle, b: BodyHandle) -> bool {
@@ -979,7 +1088,11 @@ mod tests {
                     (ground.to_raw(), 0.3),
                     (body.to_raw(), 0.3),
                 ])));
-                world.set_contact_listener(Some(Arc::new(HavokFriction { friction: table })));
+                world.set_contact_listener(Some(Arc::new(HavokFriction {
+                    friction: table,
+                    havok: true,
+                    log: Arc::new(Mutex::new(Vec::new())),
+                })));
             }
             for _ in 0..60 {
                 let _ = world.step(1.0 / 60.0);
