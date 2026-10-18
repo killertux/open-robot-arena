@@ -476,21 +476,36 @@ pub struct PlacedGlyph {
     pub rect: Frame,
 }
 
+/// Where a run's pen starts relative to its frame, in pixels. Measured, not
+/// derived: in the original's 1280x1024 capture every label — `EXHIBITION`,
+/// `TEAM HQ`, `MULTIPLAYER`, `Options`, `Credits`, `Quit` — has its ink exactly
+/// one pixel right of and (for the big buttons, whose boxes line up with the
+/// capture to the pixel) one pixel below where `pen + bearing_x` and
+/// `baseline - bearing_y` put it, while the ink's width is identical. The font
+/// object's own extents are `+1` after its build loop (`FUN_005cd560`).
+pub const TEXT_ORIGIN: [f32; 2] = [1.0, 1.0];
+
 /// Lay a string out the way the game's own labels are written: the baseline
-/// sits one `ascent` below the frame's top, each glyph's cell hangs from its own
-/// third above that line, and the pen advances by each glyph's advance. A
-/// character the face has no cell for — a space — advances without drawing.
+/// sits one `ascent` below the frame's top, each glyph's cell starts
+/// `bearing_x` right of the pen and `bearing_y` above that line, and the pen
+/// advances by each glyph's advance. A character with no cell — a space —
+/// advances without drawing.
 pub fn text_run(font: &ra2fmt::Font, frame: Frame, text: &str) -> Vec<PlacedGlyph> {
-    let baseline = frame.y + font.ascent as f32;
-    let mut pen = frame.x;
+    let baseline = frame.y + font.ascent as f32 + TEXT_ORIGIN[1];
+    let mut pen = frame.x + TEXT_ORIGIN[0];
     let mut out = Vec::new();
     for c in text.chars() {
-        if font.has_glyph(c) {
-            let glyph = font.glyph(c);
+        let glyph = font.glyph(c);
+        if glyph.has_ink() {
             let (x, y, w, h) = glyph.rect(font.page_width, font.page_height);
             out.push(PlacedGlyph {
                 cell: [x, y, w, h],
-                rect: Frame::new(pen, baseline - glyph.third as f32, w as f32, h as f32),
+                rect: Frame::new(
+                    pen + glyph.bearing_x as f32,
+                    baseline - glyph.bearing_y as f32,
+                    w as f32,
+                    h as f32,
+                ),
             });
         }
         pen += font.advance(c) as f32;
@@ -998,8 +1013,14 @@ fn place_at<'a>(
         WidgetKind::ScrollBar => scroll_children(widget, frame, clip, fonts),
         _ => {
             // Explicit text inside a box or a group is positioned by its
-            // baseline; an attachment's body (a caption) is not.
-            let baseline_text = matches!(widget.kind, WidgetKind::TextBox | WidgetKind::Group);
+            // baseline, and so is a caption's: a button's `Caption` body is a
+            // bare `Widget` the size of the button, and its `Text` is authored
+            // at the pen's x and the baseline's y inside it (`Options` at
+            // `14 0 13 0` in a 17-pixel button; measured against the original).
+            let baseline_text = matches!(
+                widget.kind,
+                WidgetKind::TextBox | WidgetKind::Group | WidgetKind::Widget
+            );
             let placed: Vec<Placement> = widget
                 .children
                 .iter()
@@ -1013,7 +1034,7 @@ fn place_at<'a>(
     // 607×319 panel behind `hq_league.gib`'s 591-pixel grid) and a `Caption`
     // hangs off the same button. It inherits the parent's clip, then applies its
     // own `ClipMode`.
-    let mut attachments: Vec<PlacedAttachment> = widget
+    let attachments: Vec<PlacedAttachment> = widget
         .attachments
         .iter()
         .filter_map(|a| {
@@ -1023,54 +1044,12 @@ fn place_at<'a>(
             })
         })
         .collect();
-    centre_captions(widget, frame, &mut attachments);
     Placement {
         widget,
         frame,
         clip,
         children,
         attachments,
-    }
-}
-
-/// A button that carries a `Caption` attachment takes the `Text` in the
-/// attachment's body as its caption, and the caption is drawn centred in the
-/// button.
-///
-/// Both halves are measured. There are exactly **122** `Caption` attachments in
-/// the corpus and exactly **122** buttons and check boxes whose four state images
-/// all have a blank `_Filename` — the ones with no art of their own — and each of
-/// the 122 is followed by its `Text` (`mainmenu.gib`'s bar is a gear, a gear, and
-/// then `Button "Options button"`, `Text "Options"`, `Button "credits button"`,
-/// `Text "Credits"`, …). What settles the centring is that the captions' own
-/// positions make no sense against their parent: the three bar captions are at
-/// x = 14, 18 and 9 while their buttons are at x = 32, 105 and 183, so taken as
-/// the group's they would all pile up at the left — which is what a composite
-/// does before this rule. Inside their buttons 14 of 67, 18 of 72 and 9 of 40 are
-/// each roughly centred, which is where the game puts them.
-fn centre_captions(widget: &Widget, frame: Frame, attachments: &mut [PlacedAttachment<'_>]) {
-    if !matches!(widget.kind, WidgetKind::Button | WidgetKind::CheckBox)
-        || widget.attachment("Caption").is_none()
-    {
-        return;
-    }
-    for a in attachments
-        .iter_mut()
-        .filter(|a| a.attachment.kind == AttachmentKind::Caption)
-    {
-        // The Caption's body holds the `Text` (and nothing else in the corpus).
-        for caption in a.body.children.iter_mut() {
-            if caption.widget.kind != WidgetKind::Text {
-                continue;
-            }
-            let text = caption.frame;
-            caption.frame = Frame::new(
-                frame.x + (frame.w - text.w) / 2.0,
-                frame.y + (frame.h - text.h) / 2.0,
-                text.w,
-                text.h,
-            );
-        }
     }
 }
 
@@ -1831,8 +1810,7 @@ mod tests {
         }
     }
 
-    /// The two screens that read before the font repack still do: the bot lab's
-    /// title and the team picker's title are `fg_d20` runs whose first cell is
+    /// The bot lab's title and the team picker's title are `fg_d20` runs whose first cell is
     /// their first letter, whose width is the advance sum, and whose cells hold
     /// ink.
     #[test]
@@ -1933,9 +1911,8 @@ mod tests {
     }
 
     /// **Each caption is drawn once, at the frame the data gives.** A button's
-    /// `Caption` attachment carries a body with one `Text`; the body is placed
-    /// against the button's parent and the text is centred in the **button's**
-    /// frame. The draw order must contain that text exactly once. The run is
+    /// `Caption` attachment carries a body with one `Text`; the body is the
+    /// button's own frame and the text sits at its authored position inside it. The draw order must contain that text exactly once. The run is
     /// spaced by the face's advances, its width is their sum, and every glyph
     /// samples a page cell with ink — the three properties the old readings got
     /// wrong when a caption looked like two overlapping runs.
@@ -1982,19 +1959,23 @@ mod tests {
                 .collect();
             assert_eq!(draws.len(), 1, "{button_name}: drawn once");
 
-            // Centred in the button's own frame, not in the group's.
+            // Flush left at the authored x inside the button, baseline at the
+            // authored y: not centred (the original's captions are not).
             let t = texts[0].frame;
+            let at = texts[0].widget.position().expect("the caption's Position");
+            let ascent = fonts.get(face).expect("the caption's face").ascent as f32;
+            let body = placed_caption.body.frame;
             assert!(
-                (t.x - (button.frame.x + (button.frame.w - t.w) / 2.0)).abs() < 0.01,
+                (t.x - (body.x + at.first.amount)).abs() < 0.01,
                 "{button_name}: x {} vs {}",
                 t.x,
-                button.frame.x + (button.frame.w - t.w) / 2.0
+                body.x + at.first.amount
             );
             assert!(
-                (t.y - (button.frame.y + (button.frame.h - t.h) / 2.0)).abs() < 0.01,
-                "{button_name}: y {} vs {}",
-                t.y,
-                button.frame.y + (button.frame.h - t.h) / 2.0
+                (t.y + ascent - (body.y + at.second.amount)).abs() < 0.01,
+                "{button_name}: baseline {} vs {}",
+                t.y + ascent,
+                body.y + at.second.amount
             );
 
             // The run's width is the sum of the advances, and its cells are the
@@ -2656,22 +2637,36 @@ mod text_run_tests {
             11,
             "one cell per letter, and no cell for a space"
         );
-        assert_eq!(run[0].rect.x, 10.0, "the run starts at the frame");
-        // Each cell starts where the pen had reached.
-        let mut pen = frame.x;
+        // Each cell starts at the pen plus its glyph's left bearing, and sits
+        // `bearing_y` above the baseline `ascent` under the frame's top.
+        let mut pen = frame.x + TEXT_ORIGIN[0];
         for (glyph, placed) in "MULTIPLAYER".chars().zip(&run) {
-            assert_eq!(placed.rect.x, pen, "{glyph}");
+            let g = font.glyph(glyph);
+            assert_eq!(placed.rect.x, pen + g.bearing_x as f32, "{glyph}");
+            assert_eq!(
+                placed.rect.y,
+                frame.y + TEXT_ORIGIN[1] + font.ascent as f32 - g.bearing_y as f32,
+                "{glyph}"
+            );
             pen += font.advance(glyph) as f32;
         }
         let (width, height) = font.extent("MULTIPLAYER");
-        assert_eq!(pen - frame.x, width as f32, "the pen ends at the extent");
+        assert_eq!(
+            pen - frame.x - TEXT_ORIGIN[0],
+            width as f32,
+            "the pen ends at the extent"
+        );
         assert_eq!(height, font.line_height());
         // A space has no cell but does advance.
         let spaced = text_run(font, frame, "A B");
         assert_eq!(spaced.len(), 2);
         assert_eq!(
             spaced[1].rect.x,
-            frame.x + font.advance('A') as f32 + font.space_advance() as f32
+            frame.x
+                + TEXT_ORIGIN[0]
+                + font.advance('A') as f32
+                + font.space_advance() as f32
+                + font.glyph('B').bearing_x as f32
         );
     }
 

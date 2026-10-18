@@ -276,11 +276,9 @@ fn set_bar(group: &mut Widget, name: &str, base_width: f32, fraction: f32) -> f3
     let x = bar.position().map(|p| p.first.amount).unwrap_or(0.0);
     let height = bar.size().map(|s| s.second.amount).unwrap_or(4.0);
     let y = bar.position().map(|p| p.second.amount).unwrap_or(0.0);
-    // `_Size` is what the art is drawn at; `Size` keeps the record consistent
-    // for a later reader, and the position is unchanged (the left edge).
+    // `Size` is what the art is drawn at; the position is unchanged (the left edge).
     ra2ui::input::set_field(bar, "Position", &format!("{x} 0 {y} 0"));
     ra2ui::input::set_field(bar, "Size", &format!("{width} 0 {height} 0"));
-    ra2ui::input::set_field(bar, "_Size", &format!("{width} 0 {height} 0"));
     width
 }
 

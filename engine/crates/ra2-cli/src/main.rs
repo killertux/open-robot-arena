@@ -86,23 +86,19 @@ fn font(cfz: &str, name: &str, rest: &[&str]) -> Result<(), Box<dyn std::error::
     let _ = writeln!(out, "font {name}");
     let _ = writeln!(out, "ascent {}", font.ascent);
     let _ = writeln!(out, "descent {}", font.descent);
-    let _ = writeln!(out, "leading {}", font.leading);
+    let _ = writeln!(out, "extent {}", font.extent);
     let _ = writeln!(out, "line {}", font.line_height());
     let _ = writeln!(out, "page {} {}", font.page_width, font.page_height);
     for (i, g) in font.glyphs.iter().enumerate() {
-        // The record for a character is `(c - FIRST_CHAR) * 28`, so label each
-        // record with the character it belongs to rather than its index. The
-        // advance is the **effective** one (`Font::advance` reads the table two
-        // records ahead of the page table), because that is what a run is spaced
-        // by and what `tools/ui_compose.py` must draw with.
+        // The record for a character is `(c - 0x20) * 28`.
         let c = char::from_u32(ra2fmt::giff::FIRST_CHAR + i as u32).unwrap_or('?');
         let _ = writeln!(
             out,
             "glyph {} {} {} {} {} {} {} {}",
             c as u32,
             font.advance(c),
-            g.bearing,
-            g.third,
+            g.bearing_x,
+            g.bearing_y,
             g.u0,
             g.v0,
             g.u1,

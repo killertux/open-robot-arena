@@ -236,9 +236,39 @@ impl UiAssets {
     /// Build the draw list for a placed screen.
     pub fn scene(&mut self, roots: &[Placement<'_>], screen: [u32; 2]) -> UiScene {
         let mut quads = Vec::new();
-        for (p, parent) in ra2ui::draw_order_parented(roots) {
+        // A `Border` is drawn over the widget it dresses and everything inside
+        // it, so it is emitted when the walk leaves that widget's subtree.
+        let order = ra2ui::draw_order_parented(roots);
+        let addr = |p: &Placement<'_>| p as *const Placement<'_> as usize;
+        let parents: HashMap<usize, Option<usize>> = order
+            .iter()
+            .map(|(p, parent)| (addr(p), parent.map(addr)))
+            .collect();
+        let inside = |mut node: Option<usize>, ancestor: usize| {
+            while let Some(n) = node {
+                if n == ancestor {
+                    return true;
+                }
+                node = parents.get(&n).copied().flatten();
+            }
+            false
+        };
+        let mut borders: Vec<(&Placement<'_>, Option<Frame>)> = Vec::new();
+        for (p, parent) in order.iter().map(|(p, parent)| (*p, *parent)) {
+            while let Some(&(owner, clip)) = borders.last() {
+                if inside(Some(addr(p)), addr(owner)) {
+                    break;
+                }
+                border_quads(owner, clip, &mut quads);
+                borders.pop();
+            }
             if !p.widget.visible() {
                 continue;
+            }
+            if p.widget.attachment("Border").is_some() {
+                // The ring lies outside the frame, so it is not clipped to the
+                // widget's own `ClipMode`, only to what holds it.
+                borders.push((p, parent.and_then(|q| q.clip)));
             }
             let clip = p.clip;
             if clip.is_some_and(|c| c.w <= 0.0 || c.h <= 0.0) {
@@ -277,6 +307,9 @@ impl UiAssets {
             if let Some(quad) = self.art_quad(p, parent, clip) {
                 quads.push(quad);
             }
+        }
+        while let Some((owner, clip)) = borders.pop() {
+            border_quads(owner, clip, &mut quads);
         }
         UiScene {
             size: screen,
@@ -340,14 +373,11 @@ impl UiAssets {
         // is 512x76 and its rect starts at u0 = 0.15625: sampling at the rect
         // draws the middle of the logo.
         //
-        // An `Image` also states its own `_Size`, which is the size the art is
-        // *drawn* at when it differs from the box the layout gave the widget:
-        // a scroll bar's thumb is `Size 1 1 1 1` inside its track and `_Size
-        // 16 0 30 0`. (A tile ignores it: a pattern fills its frame.)
-        let rect = match stated_size(p.widget.field("_Size")) {
-            Some((w, h)) => Frame::new(p.frame.x, p.frame.y, w, h),
-            None => p.frame,
-        };
+        // The widget's layout `Size` governs what is drawn, as in the original:
+        // `_Size` is only the size the art was authored at (`exhib_setup.gib`'s
+        // cement is `Size 1 1 1 1` over a `_Size 640 0 480 0` and fills the
+        // screen; a scroll thumb is `Size 1 1 1 1` too and its bar sizes it).
+        let rect = p.frame;
         Some(UiQuad {
             rect,
             corners: None,
@@ -382,17 +412,13 @@ impl UiAssets {
             out.push(UiQuad {
                 rect: glyph.rect,
                 corners: None,
-                // The face's page is stored **bottom-up only**. `v` is swapped
-                // (the page's first row is the glyph's last); `u` is not: flipped
-                // vertically, the page's row reads `E F G H I J K L M N O P Q R
-                // S T U` upright and in order, so swapping `u` would mirror every
-                // glyph. It did, for a while — see the module note in
-                // `ra2fmt::giff`.
+                // The page is stored in texture order (`ra2fmt::giff` turns the
+                // file's bottom-up TGA over), so the cell's top row is `v0`.
                 uv: [
                     glyph.cell[0] as f32 / pw,
-                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
-                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
                     glyph.cell[1] as f32 / ph,
+                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
                 ],
                 color,
                 texture,
@@ -437,13 +463,12 @@ impl UiAssets {
             out.push(UiQuad {
                 rect: glyph.rect,
                 corners: None,
-                // The page is stored bottom-up only: swap `v`, not `u`. See
-                // `text_quads`.
+                // Texture order, as in `text_quads`.
                 uv: [
                     glyph.cell[0] as f32 / pw,
-                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
-                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
                     glyph.cell[1] as f32 / ph,
+                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
                 ],
                 color,
                 texture,
@@ -460,10 +485,7 @@ impl UiAssets {
         if let Some(found) = self.index.get(&key) {
             return *found;
         }
-        // `Font::page` and `Glyph::rect` already agree: the ink for a glyph
-        // sits at the rows the rect names, first row first. (Measured: drawn
-        // the other way up, an `M` comes out an `M` mirrored, which is the `V`
-        // that `MULTIPLAYER` used to read as.)
+        // `Font::page` is in texture order, the rows `Glyph::rect` names.
         let mut rgba = Vec::with_capacity(font.page.len() * 4);
         for i in 0..font.page.len() {
             rgba.extend_from_slice(&[255, 255, 255, font.page[i]]);
@@ -654,6 +676,55 @@ fn rectangle_quad(p: &Placement<'_>, clip: Option<Frame>) -> Option<UiQuad> {
     })
 }
 
+/// The quads of a widget's `Border` attachment: `Width` rings just *outside*
+/// the widget's frame (measured: the original's 1280x1024 capture has the
+/// button's dark line one pixel beyond its frame on every side), the outermost
+/// in `Outer` and the innermost in `Inner`, the ones between blended.
+fn border_quads(p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
+    let Some(border) = p.widget.attachment("Border") else {
+        return;
+    };
+    let width = border.number("Width").unwrap_or(0.0).round() as i32;
+    let (Some(inner), Some(outer)) = (border.four("Inner"), border.four("Outer")) else {
+        return;
+    };
+    let f = p.frame;
+    for ring in 0..width.max(0) {
+        let t = if width > 1 {
+            ring as f32 / (width - 1) as f32
+        } else {
+            0.0
+        };
+        let color: [f32; 4] = std::array::from_fn(|i| outer[i] + (inner[i] - outer[i]) * t);
+        if color[3] <= 0.0 {
+            continue;
+        }
+        // Ring 0 is the outermost, `width` pixels out; the last is adjacent.
+        let e = (width - ring) as f32;
+        let (x, y, w, h) = (f.x - e, f.y - e, f.w + 2.0 * e, f.h + 2.0 * e);
+        let sides = [
+            Frame::new(x, y, w, 1.0),
+            Frame::new(x, y + h - 1.0, w, 1.0),
+            Frame::new(x, y + 1.0, 1.0, h - 2.0),
+            Frame::new(x + w - 1.0, y + 1.0, 1.0, h - 2.0),
+        ];
+        for rect in sides {
+            if rect.w <= 0.0 || rect.h <= 0.0 {
+                continue;
+            }
+            out.push(UiQuad {
+                rect,
+                corners: None,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                color,
+                texture: 0,
+                alpha: true,
+                clip,
+            });
+        }
+    }
+}
+
 /// A blank-named `Image`'s fill: the game draws `_ForeColor` over the widget's
 /// frame.
 ///
@@ -695,28 +766,6 @@ fn image_fill_quad(
 }
 
 /// Decode art. A `.bmp` or `.tga` the image crate can read, or nothing.
-/// The `_Size` the editor writes when the designer never gave a piece of art a
-/// size: the design canvas itself, 1280×1005. **Eighteen fields in fourteen
-/// files** carry it — `teamhq/event_cell.gib` and the three `eventcell_*.gib`
-/// among them — and a 140×80 event logo drawn at the canvas would be stretched
-/// across the screen. The game draws such art in the box the layout gave it, so
-/// the canvas value is read as *unset*.
-///
-/// Anything else is a real size and overrides the box: a scroll thumb's
-/// `16 0 30 0` inside a 973-pixel track, an armour icon's `88 0 72 0`.
-const UNSET_SIZE: [f32; 2] = [1280.0, 1005.0];
-
-/// The size a widget's `_Size` states, or nothing when it states the editor's
-/// unset.
-fn stated_size(field: Option<&ra2fmt::gib::Field>) -> Option<(f32, f32)> {
-    let axes = field.and_then(ra2fmt::gib::Axes::parse)?;
-    if axes.first.fraction || axes.second.fraction {
-        return None;
-    }
-    let size = (axes.first.amount, axes.second.amount);
-    (size != (UNSET_SIZE[0], UNSET_SIZE[1])).then_some(size)
-}
-
 fn decode_art(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     crate::decode_image(bytes)
 }
@@ -1229,27 +1278,6 @@ fn scissor_of(clip: Option<Frame>, width: u32, height: u32) -> Option<[u32; 4]> 
 
 #[cfg(test)]
 mod tests {
-    use ra2fmt::gib::Field;
-
-    fn size(raw: &str) -> Option<(f32, f32)> {
-        stated_size(Some(&Field {
-            name: Some("_Size".into()),
-            raw: raw.to_string(),
-        }))
-    }
-
-    /// A `_Size` is the art's own size, and the canvas value is the editor's
-    /// unset rather than a size.
-    #[test]
-    fn the_canvas_size_is_not_a_size() {
-        assert_eq!(size("16 0 30 0"), Some((16.0, 30.0)));
-        assert_eq!(size("88 0 72 0"), Some((88.0, 72.0)));
-        assert_eq!(size("1280 0 1005 0"), None);
-        // A fractional axis is not a pixel size either.
-        assert_eq!(size("1 1 1 1"), None);
-        assert_eq!(stated_size(None), None);
-    }
-
     use super::*;
 
     fn game_dir() -> Option<PathBuf> {
@@ -1275,11 +1303,8 @@ mod tests {
         assets.scene(&placed, [1280, 1005])
     }
 
-    /// The long-label smear was the shipped cell, not the length. A character's
-    /// cell is the same in a two-character label as in the 44-character help
-    /// line: the parser now derives the cell from the page's own glyph run, so
-    /// the cell is the glyph (its packed width) and not a slice of a different
-    /// packing. A long label is not a different font or a different measurement.
+    /// A character's cell is the same in a two-character label as in the
+    /// 44-character help line: it is the glyph's record, whatever the run.
     #[test]
     fn a_glyphs_cell_does_not_depend_on_the_label_length() {
         use ra2ui::Frame;
@@ -1299,9 +1324,8 @@ mod tests {
         assert_eq!(short[1].cell, long[1].cell, "the 't' cell");
         assert_eq!(short[0].rect.x, long[0].rect.x);
         assert_eq!(short[1].rect.x, long[1].rect.x);
-        // The cell is the page's glyph run: a real width inside the page, and
-        // the same for both labels. It may be wider or narrower than the
-        // advance — the page's ink is not the advance table.
+        // The cell is a real width inside the page, and the same for both
+        // labels. It may be wider or narrower than the advance.
         for c in ['A', 't', 'h', 'n'] {
             let glyph = font.glyph(c);
             let (_, _, w, _) = glyph.rect(font.page_width, font.page_height);
@@ -1312,14 +1336,27 @@ mod tests {
         }
     }
 
-    /// **The page is bottom-up only; the glyph quad swaps `v`, not `u`.** The
-    /// page's row at y 233 flipped vertically reads `E F G H I J K L M N O P Q R
-    /// S T U V` upright and in order, so a quad whose left edge samples the
-    /// cell's right edge (`u0 > u1`) mirrors every letter. This pins the
-    /// measured orientation: the left vertex's `u` is the cell's left, and only
-    /// the vertical pair is swapped (the page's first row is the glyph's last).
+    /// An image is drawn in the box its layout `Size` gives it, not at its
+    /// `_Size`: `exhibition/exhib_setup.gib`'s cement is `Size 1 1 1 1` with a
+    /// `_Size 640 0 480 0` and covers the whole screen in the original.
     #[test]
-    fn a_glyph_quad_swaps_v_and_not_u() {
+    fn an_image_fills_its_layout_size_not_its_art_size() {
+        let Some(game) = game_dir() else { return };
+        let scene = scene_of(&game, "exhibition/exhib_setup.gib");
+        assert!(
+            scene
+                .quads
+                .iter()
+                .any(|q| q.texture != 0 && q.rect.w >= 1279.0 && q.rect.h >= 1004.0),
+            "a full-screen image quad"
+        );
+    }
+
+    /// A glyph quad samples its cell top to bottom, left to right: the page is
+    /// kept in texture order, so `v` rises down the quad and `u` rises across it.
+    /// (Swapping either mirrors every letter.)
+    #[test]
+    fn a_glyph_quad_samples_its_cell_upright() {
         let Some(game) = game_dir() else { return };
         let scene = scene_of(&game, "help/help_ws_overview.gib");
         let quad = scene
@@ -1334,8 +1371,8 @@ mod tests {
             quad.uv[2]
         );
         assert!(
-            quad.uv[1] > quad.uv[3],
-            "v must fall top to bottom (cell bottom {}, top {})",
+            quad.uv[1] < quad.uv[3],
+            "v must rise top to bottom (cell top {}, bottom {})",
             quad.uv[1],
             quad.uv[3]
         );
