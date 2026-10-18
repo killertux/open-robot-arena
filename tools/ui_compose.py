@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Composite a `.gib` screen into a PNG, from the layout's own data.
 
+SELF-CONSISTENCY TOOL, NOT A REFERENCE: it uses the Rust parser's glyph pages
+and our reading of the layout rules, so a small MAE against `uishot` means two
+of our drawings agree.  Never cite its output as fidelity to the original; the
+reference is a capture of the real game (`tools/oracle/fidelity.py`).
+
 This is the independent half of the project's two-renderer check. It reads the
 `.gib` file, resolves every `Position`/`Size`/`Alignment` against its parent's
 frame, and draws the result with the game's own art under `UI/`. `ra2-render`'s

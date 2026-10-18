@@ -157,3 +157,45 @@ in the JSON.
 1.45**). It is not part of `tools/check.sh`: CI has no game files and no
 captured originals, so this is a local, game-required gate. Without the
 reference frame it exits 2 (skip), naming the missing path.
+
+## The fidelity harness (`fidelity.py`) and the capture scripts
+
+`tools/oracle/fidelity.py` is the comparison harness; `compare.py`/`check.sh` above are the historic
+single-screen gate. Baseline numbers: `docs/26-fidelity-baseline.md`.
+
+```sh
+cd engine && cargo build --release --offline \
+  && cargo build --release --offline -p ra2sim --example fidtrace
+RA2_GAME=local/game python3 tools/oracle/fidelity.py                 # screens, both renderers
+python3 tools/oracle/fidelity.py --only botlab,teamhq --renderer shell
+python3 tools/oracle/fidelity.py --gameplay                          # + traces vs the original's live traces
+python3 tools/oracle/fidelity.py --gameplay-only | --list
+```
+
+Per fixture and renderer (`app` = `ra2-app --offscreen`, `shell` = `ra2-shell` laid out natively at
+1024x768) it writes `ours/`, `side/` (original | ours | |diff| x4) and `summary.md/json` under
+`local/oracle/fidelity/latest/` (`--out` overrides): MAE, pointer-masked MAE, fraction of pixels >8
+off, and a 16x16 low-frequency MAE. Unreachable fixtures are listed with the reason, never invented. Fixtures
+and their named-click routes are the `FIXTURES` table at the top of the file; add one by adding a row (and the
+capture with `add_fixture.py`). `--gameplay` runs `engine/crates/ra2sim/examples/fidtrace.rs`
+(`fidtrace match|drive`, writes traces in the original's format: time, per-player location, heading
+`atan2(fx,fz)`, speed, hitpoints, health) and compares per-robot speed distribution, path length,
+hitpoints, damage events/s and magnitude histogram, plus the drive test (turn rate, top speed, time to 90%,
+distances) when `original/drive-*.tsv` exists.
+
+Capture scripts (all need `tools/capture/original_session.sh start`; one at a time, only one agent may run
+the original):
+
+| script | what |
+|---|---|
+| `capture_arenas.py [--rows 0-7]` | per stock arena: picker, intro, countdown, F2/F3/F3/F4 cameras into `original/arena-<id>-*` + manifest |
+| `capture_drive.py` | in-game Python neuters both AI brains, drives Scout (turn / coast / throttle / stop), samples ~13 Hz incl. the commanded values; writes `original/drive-*.tsv/.json` |
+| `capture_weapon.py` | inert Scout vs ALARM's own AI with the damage hook and a sampler with per-component health |
+| `capture_repro.py --pin none|seed --runs N` | reproducibility experiment (see `docs/26`); `frida/ra2_seed.js` pins the C `rand()` |
+
+Gotchas learnt the hard way: loading a match takes 5-20 s and running in-game Python during the load can leave a
+black screen (wait blind, then check `plus.getPlayers()`); F1 in a match opens the controls-reminder overlay,
+which swallows later key presses and the Continue click (use F2/F3/F4 only); a client killed mid-RPC wedges
+frida-server (`kill -9 $(pgrep -x frida-server)`, restart the session); Python 2.2 inside the game rejects a
+`try/except: break` in a nested `for` under the wrapper (use list comprehensions); the Select Computer Robot team
+drop-down does not open with injected clicks.
