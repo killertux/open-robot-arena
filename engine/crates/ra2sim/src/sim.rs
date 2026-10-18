@@ -321,8 +321,8 @@ impl Sandbox {
             CameraMode::Top { height } => (target + Vec3::new(0.02, height, 0.02), target),
         };
 
-        let view = ra2_render::look_at_rh(eye, aim, Vec3::Y);
-        let proj = ra2_render::perspective_rh(55f32.to_radians(), w as f32 / h as f32, 0.05, 800.0);
+        let view = ra2_render::look_at_lh(eye, aim, Vec3::Y);
+        let proj = ra2_render::perspective_lh(55f32.to_radians(), w as f32 / h as f32, 0.05, 800.0);
         let view_proj = proj * view;
 
         let mut groups = vec![RenderGroup {

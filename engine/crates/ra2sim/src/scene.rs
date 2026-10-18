@@ -23,6 +23,9 @@ pub struct ArenaScene {
     pub friction: f32,
     /// Restitution of the arena's fixed geometry.
     pub restitution: f32,
+    /// The `.gmf`'s static background colour (RGB 0..1); the clear colour
+    /// unless the arena script calls `plus.setBackColor`.
+    pub background: [f32; 3],
 }
 
 /// Gravity every shipped arena but the practice arena declares.
@@ -211,6 +214,7 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
         gravity,
         friction,
         restitution,
+        background: ra2_render::scene_background(path).unwrap_or([0.0; 3]),
     })
 }
 

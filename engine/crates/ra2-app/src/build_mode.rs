@@ -2700,8 +2700,8 @@ impl Builder {
         let center = (min + max) * 0.5;
         let radius = ((max - min).length() * 0.5).max(0.6);
         let eye = center + Vec3::new(radius * 1.9, radius * 1.2, radius * 2.1);
-        let view = ra2_render::look_at_rh(eye, center, Vec3::Y);
-        let proj = ra2_render::perspective_rh(
+        let view = ra2_render::look_at_lh(eye, center, Vec3::Y);
+        let proj = ra2_render::perspective_lh(
             45f32.to_radians(),
             width as f32 / height as f32,
             0.05,

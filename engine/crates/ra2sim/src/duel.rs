@@ -1349,6 +1349,7 @@ impl Duel {
         w: u32,
         h: u32,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        self.apply_background(renderer);
         let groups = self.render_groups();
         renderer.render_groups(&groups, self.view_proj(camera, w, h), w, h)
     }
@@ -1370,6 +1371,7 @@ impl Duel {
         w: u32,
         h: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.apply_background(renderer);
         let groups = self.render_groups();
         renderer.render_groups_to(
             &groups,
@@ -1378,6 +1380,15 @@ impl Duel {
             depth_view,
             format,
         )
+    }
+
+    /// Clear to the arena script's `setBackColor`, else the `.gmf`'s own
+    /// static background.
+    fn apply_background(&self, renderer: &Renderer) {
+        let color = ra2script::state()
+            .back_color
+            .unwrap_or(self.arena.background);
+        renderer.set_background(color);
     }
 
     /// The scene's draw groups, borrowing the arena, the props, the debris and
@@ -1420,8 +1431,8 @@ impl Duel {
     /// The view-projection matrix `camera` asks for at this size.
     pub fn view_proj(&self, camera: &DuelCamera, w: u32, h: u32) -> Mat4 {
         let (eye, aim) = self.camera_pose(camera);
-        let view = ra2_render::look_at_rh(eye, aim, Vec3::Y);
-        let proj = ra2_render::perspective_rh(55f32.to_radians(), w as f32 / h as f32, 0.05, 900.0);
+        let view = ra2_render::look_at_lh(eye, aim, Vec3::Y);
+        let proj = ra2_render::perspective_lh(55f32.to_radians(), w as f32 / h as f32, 0.05, 900.0);
         proj * view
     }
 

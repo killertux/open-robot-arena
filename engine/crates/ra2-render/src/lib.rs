@@ -9,7 +9,7 @@
 //!
 //! Env: RA2_NO_CHASSIS=1  skip the chassis mesh
 //!      RA2_DEBUG=1       print per-part bounds
-//!      RA2_CULL          back|front (default: none)
+//!      RA2_CULL          off disables per-material backface culling
 //!      RA2_HIDE          comma-separated object-name substrings to skip
 //!      RA2_OBSTACLE      arena prop filter (name|all|none)
 //!      RA2_CAM           ex,ey,ez,tx,ty,tz  or  @<n|name>
@@ -54,6 +54,8 @@ impl Vertex {
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct Uniforms {
     mvp: [[f32; 4]; 4],
+    /// The group's model matrix, for rotating normals into world space.
+    model: [[f32; 4]; 4],
     light: [f32; 4],
 }
 
@@ -67,6 +69,8 @@ pub struct DrawItem {
     pub label: String,
     /// Draw with alpha blending (transparent material).
     pub blend: bool,
+    /// Cull back faces (D3D `CULL_CCW`: the original's per-material state).
+    pub cull: bool,
 }
 
 /// A set of items sharing one model transform within a frame.
@@ -76,7 +80,7 @@ pub struct RenderGroup<'a> {
 }
 
 const SHADER: &str = r#"
-struct Uniforms { mvp: mat4x4<f32>, light: vec4<f32>, };
+struct Uniforms { mvp: mat4x4<f32>, model: mat4x4<f32>, light: vec4<f32>, };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
@@ -88,7 +92,7 @@ struct VsOut { @builtin(position) clip: vec4<f32>, @location(0) nrm: vec3<f32>, 
 fn vs_main(i: VsIn) -> VsOut {
     var o: VsOut;
     o.clip = u.mvp * vec4<f32>(i.pos, 1.0);
-    o.nrm = i.nrm;
+    o.nrm = (u.model * vec4<f32>(i.nrm, 0.0)).xyz;
     o.uv = i.uv;
     o.color = i.color;
     return o;
@@ -111,6 +115,8 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
 struct Pipelines {
     opaque: wgpu::RenderPipeline,
     blend: wgpu::RenderPipeline,
+    opaque_cull: wgpu::RenderPipeline,
+    blend_cull: wgpu::RenderPipeline,
 }
 
 pub struct Renderer {
@@ -127,9 +133,17 @@ pub struct Renderer {
     /// renderer has to build a second pair (and it is built once, not per
     /// frame).
     pipelines: RefCell<HashMap<wgpu::TextureFormat, Rc<Pipelines>>>,
+    /// Clear colour (the arena's `setBackColor`), RGB 0..1 in the target's own
+    /// (non-linear) byte space, like the original's D3D8 clear.
+    background: std::cell::Cell<[f32; 3]>,
 }
 
 impl Renderer {
+    /// Set the clear colour of every following frame (RGB 0..1).
+    pub fn set_background(&self, rgb: [f32; 3]) {
+        self.background.set(rgb);
+    }
+
     /// The device, so another renderer (the shell's 2D one) can share it rather
     /// than open a second adapter.
     pub fn device(&self) -> &wgpu::Device {
@@ -175,7 +189,7 @@ impl Renderer {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let device = device.clone();
         let queue = queue.clone();
-        let color_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let color_format = wgpu::TextureFormat::Rgba8Unorm;
         let depth_format = wgpu::TextureFormat::Depth32Float;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -232,6 +246,7 @@ impl Renderer {
             color_format,
             depth_format,
             pipelines: RefCell::new(HashMap::new()),
+            background: std::cell::Cell::new([0.06, 0.07, 0.09]),
         };
         // Build the readback format's pipelines now, so a missing feature is
         // reported by the constructor rather than by the first frame.
@@ -252,12 +267,10 @@ impl Renderer {
                 immediate_size: 0,
             });
         let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
-        let cull = match std::env::var("RA2_CULL").as_deref() {
-            Ok("back") => Some(wgpu::Face::Back),
-            Ok("front") => Some(wgpu::Face::Front),
-            _ => None,
-        };
-        let make = |label: &str, blend: bool, depth_write: bool| {
+        // Per-item culling is the original's per-material state; `RA2_CULL=off`
+        // disables it for debugging.
+        let cull_on = std::env::var("RA2_CULL").as_deref() != Ok("off");
+        let make = |label: &str, blend: bool, depth_write: bool, cull: bool| {
             self.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -284,9 +297,11 @@ impl Renderer {
                     }),
                     primitive: wgpu::PrimitiveState {
                         topology: wgpu::PrimitiveTopology::TriangleList,
-                        // RA2/D3D8 geometry is wound clockwise when viewed from outside.
-                        front_face: wgpu::FrontFace::Cw,
-                        cull_mode: cull,
+                        // The GMF triangles' right-handed cross product points
+                        // into the solid; in the left-handed view that reads
+                        // counter-clockwise from outside, so that is the front.
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: (cull && cull_on).then_some(wgpu::Face::Back),
                         ..Default::default()
                     },
                     depth_stencil: Some(wgpu::DepthStencilState {
@@ -302,8 +317,10 @@ impl Renderer {
                 })
         };
         let pipelines = Rc::new(Pipelines {
-            opaque: make("opaque", false, true),
-            blend: make("blend", true, false),
+            opaque: make("opaque", false, true, false),
+            blend: make("blend", true, false, false),
+            opaque_cull: make("opaque-cull", false, true, true),
+            blend_cull: make("blend-cull", true, false, true),
         });
         self.pipelines
             .borrow_mut()
@@ -402,6 +419,7 @@ impl Renderer {
             bg: wgpu::BindGroup,
             count: u32,
             blend: bool,
+            cull: bool,
         }
         let mut gpu_items: Vec<Gpu> = Vec::new();
         for group in groups {
@@ -410,7 +428,9 @@ impl Renderer {
             }
             let uniforms = Uniforms {
                 mvp: (view_proj * group.model).to_cols_array_2d(),
-                light: [0.4, -0.7, 0.6, 0.0],
+                model: group.model.to_cols_array_2d(),
+                // Towards the light, in world space (Y up).
+                light: [-0.4, 0.7, -0.6, 0.0],
             };
             let ubuf = self
                 .device
@@ -439,7 +459,7 @@ impl Renderer {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
                         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                         view_formats: &[],
                     },
@@ -470,6 +490,7 @@ impl Renderer {
                     bg,
                     count: it.vertices.len() as u32,
                     blend: it.blend,
+                    cull: it.cull,
                 });
             }
         }
@@ -486,11 +507,14 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.06,
-                            g: 0.07,
-                            b: 0.09,
-                            a: 1.0,
+                        load: wgpu::LoadOp::Clear({
+                            let [r, g, b] = self.background.get();
+                            wgpu::Color {
+                                r: r as f64,
+                                g: g as f64,
+                                b: b as f64,
+                                a: 1.0,
+                            }
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -507,18 +531,23 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            // Opaque geometry first, then blended (transparent) geometry.
-            rp.set_pipeline(&pipelines.opaque);
-            for g in gpu_items.iter().filter(|g| !g.blend) {
-                rp.set_bind_group(0, &g.bg, &[]);
-                rp.set_vertex_buffer(0, g.vbuf.slice(..));
-                rp.draw(0..g.count, 0..1);
-            }
-            rp.set_pipeline(&pipelines.blend);
-            for g in gpu_items.iter().filter(|g| g.blend) {
-                rp.set_bind_group(0, &g.bg, &[]);
-                rp.set_vertex_buffer(0, g.vbuf.slice(..));
-                rp.draw(0..g.count, 0..1);
+            // Opaque geometry first, then blended (transparent) geometry; each
+            // split by the item's culling state.
+            for (blend, cull, pipeline) in [
+                (false, false, &pipelines.opaque),
+                (false, true, &pipelines.opaque_cull),
+                (true, false, &pipelines.blend),
+                (true, true, &pipelines.blend_cull),
+            ] {
+                rp.set_pipeline(pipeline);
+                for g in gpu_items
+                    .iter()
+                    .filter(|g| g.blend == blend && g.cull == cull)
+                {
+                    rp.set_bind_group(0, &g.bg, &[]);
+                    rp.set_vertex_buffer(0, g.vbuf.slice(..));
+                    rp.draw(0..g.count, 0..1);
+                }
             }
         }
         self.queue.submit(Some(encoder.finish()));
@@ -640,6 +669,21 @@ pub fn debug_print_items(items: &[DrawItem]) {
             it.th
         );
     }
+}
+
+/// The scene background colour stored in an arena's `.gmf` (via its `.py`
+/// script's model, or the `.gmf` itself); the clear colour when the arena
+/// script does not call `setBackColor`.
+pub fn scene_background(input: &str) -> Option<[f32; 3]> {
+    let lower = input.to_ascii_lowercase();
+    let data = if lower.ends_with(".py") {
+        let script = ra2fmt::arena::parse_path(Path::new(input)).ok()?;
+        let root = find_game_root(Path::new(input))?;
+        std::fs::read(resolve_ci(&root, script.model.as_ref()?)?).ok()?
+    } else {
+        std::fs::read(input).ok()?
+    };
+    Some(gmi::parse(&data).ok()?.background)
 }
 
 /// Physics-proxy triangles of an arena (`.gmf` or `.py`), if it has any.
@@ -1211,6 +1255,7 @@ pub fn chassis_items(bot: &botfmt::Bot, world: Mat4) -> Vec<DrawItem> {
         th,
         label: "chassis".into(),
         blend: false,
+        cull: true,
     }]
 }
 
@@ -1359,7 +1404,10 @@ fn chassis_mesh_vertices(ch: &ra2fmt::bot::Chassis, world: Mat4) -> Vec<Vertex> 
                 mesh.uvs.get(b).copied().unwrap_or([0.0, 0.0]),
                 mesh.uvs.get(cc).copied().unwrap_or([0.0, 0.0]),
             ]);
-        for (pos, uv) in [(pa, group_uv[0]), (pb, group_uv[1]), (pc, group_uv[2])] {
+        // The chassis builder's triangles are the opposite way round to the
+        // arenas' data; swap two corners so the one culling rule holds for
+        // robots too.
+        for (pos, uv) in [(pa, group_uv[0]), (pc, group_uv[2]), (pb, group_uv[1])] {
             out.push(Vertex {
                 pos: pos.into(),
                 nrm: n.into(),
@@ -1371,14 +1419,22 @@ fn chassis_mesh_vertices(ch: &ra2fmt::bot::Chassis, world: Mat4) -> Vec<Vertex> 
     out
 }
 
+/// `(texture, tint+alpha, backface cull, vertices)` of one material batch.
+type SceneGroup = (Option<PathBuf>, [f32; 4], bool, Vec<Vertex>);
+
+/// Whether the original culls back faces for a face of `mesh` using
+/// `material`. Its material apply (`FUN_005b24c0`) sets `D3DRS_CULLMODE` to CCW
+/// or NONE by one flag; the GMF supplies the mesh's `backface_cull` and the
+/// material's `two_sided`, so a face is culled when the mesh asks for it and the
+/// material is one-sided.
+fn face_culls(mesh: &gmi::Mesh, material: Option<&gmi::Material>) -> bool {
+    mesh.backface_cull != 0 && material.is_none_or(|m| m.two_sided == 0)
+}
+
 /// Build render vertices for a `.gmf` scene, grouped by resolved material so
 /// each group can use the correct texture (needed for `Multi/Sub-Object` arenas
 /// where each face selects a sub-material).
-fn scene_material_groups(
-    scene: &gmi::GmiScene,
-    world: Mat4,
-    dir: &Path,
-) -> Vec<(Option<PathBuf>, [f32; 4], Vec<Vertex>)> {
+fn scene_material_groups(scene: &gmi::GmiScene, world: Mat4, dir: &Path) -> Vec<SceneGroup> {
     scene_material_groups_opts(scene, world, dir, None, false)
 }
 
@@ -1390,9 +1446,9 @@ fn scene_material_groups_opts(
     dir: &Path,
     only_object: Option<&str>,
     object_local: bool,
-) -> Vec<(Option<PathBuf>, [f32; 4], Vec<Vertex>)> {
+) -> Vec<SceneGroup> {
     let mut index: HashMap<u64, usize> = HashMap::new();
-    let mut groups: Vec<(Option<PathBuf>, [f32; 4], Vec<Vertex>)> = Vec::new();
+    let mut groups: Vec<SceneGroup> = Vec::new();
     for o in &scene.objects {
         let Some(mesh) = &o.mesh else { continue };
         if let Some(name) = only_object {
@@ -1422,6 +1478,13 @@ fn scene_material_groups_opts(
             .iter()
             .map(|p| obj_world.transform_point3(Vec3::from(*p)))
             .collect();
+        let linear = glam::Mat3::from_mat4(obj_world);
+        let mirrored = linear.determinant() < 0.0;
+        let normal_mat = if linear.determinant().abs() > 1e-12 {
+            linear.inverse().transpose()
+        } else {
+            glam::Mat3::IDENTITY
+        };
         for (fi, f) in mesh.faces.iter().enumerate() {
             let (ia, ib, ic) = (f.v[0] as usize, f.v[1] as usize, f.v[2] as usize);
             if ia >= pts.len() || ib >= pts.len() || ic >= pts.len() {
@@ -1445,14 +1508,35 @@ fn scene_material_groups_opts(
             {
                 continue;
             }
-            let key = ((mesh.material_ref as i64 as u64) << 32) | (f.material as u32 as u64);
+            let cull = face_culls(
+                mesh,
+                scene
+                    .materials
+                    .get(mesh.material_ref.max(0) as usize)
+                    .map(|m| m.resolve_face(f.material)),
+            );
+            let key = ((mesh.material_ref as i64 as u64) << 32)
+                | ((cull as u64) << 31)
+                | (f.material as u32 as u64 & 0x7fff_ffff);
             let gi = *index.entry(key).or_insert_with(|| {
                 let (tex, color) = material_slot(scene, mesh.material_ref, f.material, dir);
-                groups.push((tex, color, Vec::new()));
+                groups.push((tex, color, cull, Vec::new()));
                 groups.len() - 1
             });
             let (pa, pb, pc) = (pts[ia], pts[ib], pts[ic]);
-            let n = (pb - pa).cross(pc - pa).normalize_or_zero();
+            // The stored per-corner normals (`normals[4*face + corner]`, the
+            // fourth being the face normal) point out of the solid; fall back
+            // to the geometric normal (the data is clockwise-outward, so the
+            // right-handed cross product points inwards).
+            let fallback = -(pb - pa).cross(pc - pa).normalize_or_zero();
+            let corner_normal = |corner: usize| -> Vec3 {
+                mesh.normals
+                    .get(fi * 4 + corner)
+                    .map(|n| (normal_mat * Vec3::from(*n)).normalize_or_zero())
+                    .filter(|n| *n != Vec3::ZERO)
+                    .unwrap_or(fallback)
+            };
+            let normals = [corner_normal(0), corner_normal(1), corner_normal(2)];
             let color = groups[gi].1;
             let uv = |idx: usize| -> [f32; 2] {
                 if !mesh.texfaces.is_empty()
@@ -1461,30 +1545,25 @@ fn scene_material_groups_opts(
                 {
                     let ti = mesh.texfaces[fi][idx] as usize;
                     if ti < mesh.texcoords.len() {
-                        return [mesh.texcoords[ti][0], mesh.texcoords[ti][1]];
+                        // GMF texture coordinates are 3ds Max's (v up); the
+                        // bitmaps are stored top row first, so v is inverted.
+                        return [mesh.texcoords[ti][0], 1.0 - mesh.texcoords[ti][1]];
                     }
                 }
                 [0.0, 0.0]
             };
-            let g = &mut groups[gi].2;
-            g.push(Vertex {
-                pos: pa.into(),
-                nrm: n.into(),
-                uv: uv(0),
-                color,
-            });
-            g.push(Vertex {
-                pos: pb.into(),
-                nrm: n.into(),
-                uv: uv(1),
-                color,
-            });
-            g.push(Vertex {
-                pos: pc.into(),
-                nrm: n.into(),
-                uv: uv(2),
-                color,
-            });
+            let g = &mut groups[gi].3;
+            // A mirroring transform flips the winding; swap two corners back.
+            let order = if mirrored { [0, 2, 1] } else { [0, 1, 2] };
+            let ps = [pa, pb, pc];
+            for k in order {
+                g.push(Vertex {
+                    pos: ps[k].into(),
+                    nrm: normals[k].into(),
+                    uv: uv(k),
+                    color,
+                });
+            }
         }
     }
     groups
@@ -1537,7 +1616,7 @@ fn push_scene(
     label: &str,
     items: &mut Vec<DrawItem>,
 ) {
-    for (tex, color, verts) in scene_material_groups(scene, world, dir) {
+    for (tex, color, cull, verts) in scene_material_groups(scene, world, dir) {
         if verts.is_empty() {
             continue;
         }
@@ -1558,6 +1637,7 @@ fn push_scene(
             th,
             label: label.to_string(),
             blend: color[3] < 0.999,
+            cull,
         });
     }
 }
@@ -1580,7 +1660,7 @@ fn object_items_opts(
     object_local: bool,
 ) -> Vec<DrawItem> {
     let mut items = Vec::new();
-    for (tex, color, verts) in
+    for (tex, color, cull, verts) in
         scene_material_groups_opts(scene, Mat4::IDENTITY, dir, Some(object_name), object_local)
     {
         if verts.is_empty() {
@@ -1603,6 +1683,7 @@ fn object_items_opts(
             th,
             label: object_name.to_string(),
             blend: color[3] < 0.999,
+            cull,
         });
     }
     items
@@ -1757,8 +1838,8 @@ pub fn mvp_matrix(center: Vec3, radius: f32, w: u32, h: u32, cam: Option<CamOver
     if let Some(cam) = cam {
         let target = cam.target.unwrap_or(center);
         let dist = (cam.eye - target).length().max(0.001);
-        let view = look_at_rh(cam.eye, target, up_for(cam.eye - target));
-        let proj = perspective_rh(
+        let view = look_at_lh(cam.eye, target, up_for(cam.eye - target));
+        let proj = perspective_lh(
             50f32.to_radians(),
             aspect,
             (dist * 0.01).max(0.01),
@@ -1769,8 +1850,8 @@ pub fn mvp_matrix(center: Vec3, radius: f32, w: u32, h: u32, cam: Option<CamOver
     // RA2 assets are Y-up. Frame a three-quarter view from above/front/right.
     let dir = Vec3::new(0.75, 0.95, -1.0).normalize();
     let eye = center + dir * (radius * 3.0);
-    let view = look_at_rh(eye, center, Vec3::Y);
-    let proj = perspective_rh(45f32.to_radians(), aspect, radius * 0.01, radius * 100.0);
+    let view = look_at_lh(eye, center, Vec3::Y);
+    let proj = perspective_lh(45f32.to_radians(), aspect, radius * 0.01, radius * 100.0);
     proj * view
 }
 
@@ -1783,25 +1864,30 @@ fn up_for(dir: Vec3) -> Vec3 {
     }
 }
 
-pub fn look_at_rh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
+/// Left-handed look-at (`D3DXMatrixLookAtLH`). RA2's data is Direct3D
+/// left-handed (+X right, +Y up, +Z forward), so the view is built left-handed
+/// too; a right-handed look-at mirror-images the world. This and
+/// [`perspective_lh`] are the single conversion point for every 3D view.
+pub fn look_at_lh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
     let f = (center - eye).normalize();
-    let s = f.cross(up).normalize();
-    let u = s.cross(f);
+    let s = up.cross(f).normalize();
+    let u = f.cross(s);
     Mat4::from_cols(
-        glam::Vec4::new(s.x, u.x, -f.x, 0.0),
-        glam::Vec4::new(s.y, u.y, -f.y, 0.0),
-        glam::Vec4::new(s.z, u.z, -f.z, 0.0),
-        glam::Vec4::new(-s.dot(eye), -u.dot(eye), f.dot(eye), 1.0),
+        glam::Vec4::new(s.x, u.x, f.x, 0.0),
+        glam::Vec4::new(s.y, u.y, f.y, 0.0),
+        glam::Vec4::new(s.z, u.z, f.z, 0.0),
+        glam::Vec4::new(-s.dot(eye), -u.dot(eye), -f.dot(eye), 1.0),
     )
 }
 
-pub fn perspective_rh(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+/// Left-handed perspective (`D3DXMatrixPerspectiveFovLH`) with 0..1 depth.
+pub fn perspective_lh(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
     let f = 1.0 / (fov_y * 0.5).tan();
     Mat4::from_cols(
         glam::Vec4::new(f / aspect, 0.0, 0.0, 0.0),
         glam::Vec4::new(0.0, f, 0.0, 0.0),
-        glam::Vec4::new(0.0, 0.0, far / (near - far), -1.0),
-        glam::Vec4::new(0.0, 0.0, near * far / (near - far), 0.0),
+        glam::Vec4::new(0.0, 0.0, far / (far - near), 1.0),
+        glam::Vec4::new(0.0, 0.0, -near * far / (far - near), 0.0),
     )
 }
 
