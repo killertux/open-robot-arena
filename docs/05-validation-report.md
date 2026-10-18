@@ -165,7 +165,7 @@ Jolt is a deliberate substitution (see `03-engine-design.md`), hidden behind the
 
 | Property | Havok 1.7.1 (RA2) | Jolt 5.6 | Action |
 |---|---|---|---|
-| **Friction combination** | `√(μ₁² + μ₂²)` — Havok's own 1.x-era Xtra reference states it verbatim | `√(μ₁ · μ₂)` (documented on `ContactSettings::combined_friction`) | **Differs.** For floor 0.80 vs robot 0.30: Havok 0.854, Jolt 0.490 — ~43 % less grip. Not compensable without raw FFI (the safe API exposes no combine-mode hook). **Documented.** |
+| **Friction combination** | `√(μ₁² + μ₂²)` — Havok's own 1.x-era Xtra reference states it verbatim | `√(μ₁ · μ₂)` by default; `oxijolt` 1.1.0's safe `ContactListener` can set each contact's combined friction | **Implemented (F6), off by default.** `RA2_FRICTION_LAW=havok` enables Havok's law; it is a 20°-slope A/B (0.295 m slide vs 0.001 m hold), but takes the survey 39 → 38 on the still-open wheel-mount residual, so the shipped default stays Jolt. |
 | Restitution combination | **[OPEN]** — no 1.x source found | Jolt's default | Documented. |
 | Per-body damping | **None.** Drag is a *world* setting (`LINEAR_DRAG`/`ANGULAR_DRAG`), and RA2 leaves both at 0 | per-body `linear_damping`/`angular_damping` | **Fixed** — robots no longer damp. |
 | Mass / unyielding | kg; fixed bodies have no mass; `UNYIELDING 1` = immovable | mass kg; static motion type | Matches. |
@@ -201,7 +201,7 @@ Fixed in this pass:
 
 Known, documented, not yet fixed:
 
-8. **Friction combination law** (§3) — differs; Jolt exposes no hook.
+8. **Friction combination law** (§3) — **implemented behind `RA2_FRICTION_LAW=havok`** through the safe contact listener; default off because the correct law turns the `Team3/Bot1`/`Team7/Bot1` wheel-height residual into two survey failures (38/45).
 9. **Motors are torque-driven in the original.** The binary exposes
    `ApplyTorque`, `*ANGULAR_SPEED`, `GetMotorAngle`, and the exporter notes that
    motors round-trip through *Havok constraints*. **Landed (F3):** a definition's
@@ -247,8 +247,10 @@ Known, documented, not yet fixed:
     or the control board behind a chassis (41) while a spinner shears parts away.
     Stock weapons declare both parameters (inside `Components.cfz`) and a chassis
     declares neither, so a bare ram is priced by the collision itself — our parser
-    had been inventing `0.5` for both. A deterministic head-on ram lands 36. Only
-    the contact material's own scale is calibrated (see F7). **[LANDED]**
+    had been inventing `0.5` for both. A deterministic head-on ram lands
+    **24.4** (30.3 with F6's Havok law on), and the material's own scale is now
+    recovered, not calibrated: metal 0.1, ram plate 0.4, rubber 0.0 (see F7).
+    **[LANDED]**
 13. **Component hitpoints — recovered.** The factory `FUN_0045cf40` switches on
     the definition's `type` (the `+0x24` field the `.txt` parser `FUN_004622f0`
     fills, read back by `FUN_0049aa30`) and stores the per-category maximum at
@@ -1055,10 +1057,10 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | `ra2-sim` drives on practice / octagon / hilltop / box | OK — one jointed robot, scripted drive, frames written. The sandbox is no longer arcade-driven: it drives the same assembly the duel does |
 | Stock bots that drive on the jointed assembly | **39/45** travel ≥ 2 m in 3 s (`AI/Team*`, full throttle, box arena, arena start point). The motor law is the game's own (F3), the arenas now collide the geometry they draw (F5), and the contact layer no longer collides a robot's own parts (F4). The six that remain are measured in `docs/06` F4: four rest-pose weapons/mounts drag the floor, one motor body sits below the wheel contact, and one bot moves but curves back under 2 m net. The recorded 27/45 predates the current survey harness; the same command measured 28/45 before this pass |
 | `ra2-duel` on the octagon | **Engages again.** With F3's honest speeds the bout had ended with both robots parked in open floor; the cause was spawn placement, not a collider hole (F11): the duel invented a spread that landed on the rim of the Octagon's 3.7 m drop. It now spawns on the arena's own four `startpoint` attachments |
-| `ra2-duel` damage model (F7) | **Validated on a deterministic ram.** `RA2_DUEL_DRIVE=ram` with two identical `AI/Team1/Bot0` on the box arena: contact at t≈5 s, an opening blow of **34** points, then ~1 point/s while the two rest against each other. Both ends of that match what the original's scripts say — hazards apply 25, `AI/__init__.py` calls `amount > 10` a "good solid hit" — after two real defects were fixed (contact was tested only between root bodies; a blow was a per-step *integral* of speed, so a fast impact weighed almost nothing) |
+| `ra2-duel` damage model (F7) | **Validated on a deterministic ram.** `RA2_DUEL_DRIVE=ram` with two identical `AI/Team1/Bot0` on the box arena: contact at t≈5 s, an opening blow of **24.4** points on the default tree (**30.3** with F6's Havok law on), then ~1 point/s while the two rest against each other. The hit's scale is now recovered, not calibrated: metal **0.1**, ram plate **0.4**, rubber **0.0**; the same blow measures **24.4 / 97.5 / 0.0** on the default tree (30.3 / 121.1 / 0.0 with F6 on) (`the_opening_ram_scales_with_the_attackers_material`). Both ends of that match what the original's scripts say — hazards apply 25, `AI/__init__.py` calls `amount > 10` a "good solid hit" — after two real defects were fixed (contact was tested only between root bodies; a blow was a per-step *integral* of speed, so a fast impact weighed almost nothing) |
 | `ra2-duel` with the AI | **Does not engage.** 30 s of `AI/Team1/Bot0` vs `AI/Team6/Bot2` on the box arena: the pair closes to ~7.7 m, then one robot pins itself against a wall (at `(-11.8, -7.3)` from t = 15 s on, reversing included) and neither touches the other all bout. This is the control layer (M4), not the damage model: the AI is a stand-in that only ever drives at the opponent |
-| 45-bot drive survey | **28 → 39/45** | the self-collision group (+8) and excluding internal control/power fittings from the hull (+3). No failure left is the friction-combination law |
-| `cargo fmt --check`, `clippy`, tests | clean, 41 tests |
+| 45-bot drive survey | **28 → 39/45** | the self-collision group (+8) and excluding internal control/power fittings from the hull (+3). The six that remain are measured in `docs/06` F4 (two real stock contacts, two chassis-child mount residuals, one tilted chassis and one curved path). F6's Havok law would measure **38/45** by adding `Team3/Bot1` and `Team7/Bot1`; it stays off by default |
+| `cargo fmt --check`, `clippy -D warnings`, `cargo test --release --workspace` | clean; the F6/F7/F9 tests and the 39/45 survey included |
 
 ## 7. Recommended order of work
 
@@ -1087,18 +1089,20 @@ The remaining blocker is *behaviour*, not the parts' parameters or the arenas:
    reaches the floor also presses with its full torque and lifts the robot; the
    original only spins one when it is told to. The game's own answer is the
    shipped Python AI, which needs the script layer.
-2. **F7's remaining constant.** The formula, its coefficients and `fracture`
-   are the engine's own; what is still calibrated is the contact **material's**
-   damage scale — the per-material table lives in `MaterialObject` subclasses this
-   build exposes only as RTTI, so the scale is set by the scripts' own anchors.
-   Hitpoints are no longer on the list: they are the engine's per-category table
-   (see §4.13).
-3. **F9's remainder.** Buckling exists, and its *travel* is now the file's own
-   movable region — the top half of the chassis, verified across all 43 stock
-   bots that carry a buckle model. What is left is the *curve* between the ends,
-   the "in" rate (ours: the footprint halves) and the silhouette, which is smooth
-   where the game builds a subdivided crush mesh at runtime from indices that
-   point into a mesh the file does not contain.
+2. **F7 is fully sourced.** The formula, its coefficients, `fracture`, the
+   hitpoints table and now the **material scale** are the engine's own: the
+   `MaterialObject` constructors give Metal 0.1 / Rubber 0.0 / Arenium 0.5, and
+   the component factory writes the definition's `material = <class>(<n>)`
+   override into `material + 4` (ram plate 0.4; only five definitions declare
+   it). The four armour plates are still ×1.00 because the armour is not in the
+   formula. See `docs/06` F7.
+3. **F9's remainder is the silhouette only.** Buckling exists, its *travel* is
+   the file's own movable region, and the **collider now follows**: the backend
+   removes the chassis' hinges, re-shapes, and recreates them with their current
+   angle as the reference. Measured at half damage on `AI/Team1/Bot0`: collider
+   top −1.106 → −1.311 m (0.205 m), then 6.81 m driven. What is left is the
+   *curve* between the ends, the "in" rate (ours: the footprint halves) and the
+   smooth silhouette where the game subdivides at runtime.
 4. **F12 — the mass a zero-mass rigid body gets** (F10's residual). Every wheel
    stores `mass = 0`, so it, not the armour, is the likely source of the 16 %.
    Landed as a size-based rule, and that landing exposes a conflict: the documented
@@ -1109,7 +1113,10 @@ The remaining blocker is *behaviour*, not the parts' parameters or the arenas:
    the doc says so. The engine's own fill is not reachable: its `.gmf` reader
    takes the zero at face value (`FUN_005c6820`), and the material classes are
    RTTI-only in this build.
-5. **F6 — the friction combination law**, if the drive survey needs it.
+5. **F6 — the friction combination law** is implemented behind
+   `RA2_FRICTION_LAW=havok`; enabling it by default needs the F1 wheel-height
+   residual fixed first (one pair of wheels 0.194 m below the other).
+
 6. **A spin motor's arm pose** — found while verifying F1, and separate from it:
    the game's own snapshot draws a hammer arm hanging down where ours lies level.
    The axle is the mount normal, so this is the spin motor's rest phase or its

@@ -256,11 +256,13 @@ The geometry and truncation are the binary's; the energy model is not.
 
 ## 4. What is still unproven
 
-1. **The component damage scale.** `FUN_00489620` calls the hit component's
-   vtable `+0x1c` and returns its float; the armour/material arithmetic inside
-   that virtual was not decoded. This port scores the damage its own model
-   applies, which is the same quantity at the write but not proven equal to the
-   original's per-material scale.
+1. ~~**The component damage scale.**~~ **Resolved (F7).** `FUN_00489620`'s
+   vtable `+0x1c` is apply-damage, not a scale; the hit's `scale` is the
+   **attacking component's** `MaterialObject +4` (`FUN_00489470` reads
+   `*(*(this + 0x64) + 4)`). The constructors give Metal 0.1, Rubber 0.0 and
+   Arenium 0.5, and the definition's `material = <class>(<n>)` overrides it
+   (ram plate `metal(.4)` = 0.4). The port applies that per-component value and
+   the deterministic ram measures 24.4 / 97.5 / 0.0 for 0.1 / 0.4 / 0.0.
 2. **The status fields' producers.** What aggregates `robot+0xa8` (battery bar),
    `+0xa4` (air bar) and `+0xbc` (dot) was not traced (the component classes
    `Battery` at `0x4b3dd0` and `AirTank` at `0x4b4170` are registered, but their

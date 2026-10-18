@@ -14,10 +14,10 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F3 | The motor law, from the game's own data | **landed** (speed is rad/s, torque x40 — both from the binary) |
 | F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` is the material tag, not a collider); the robot's own bodies now share a collision group (a wheel no longer collides with its chassis) — survey **28 → 39 / 45** |
 | F5 | Collision shape kinds (`SIMULATION_GEOMETRY`, `HAVOK_GEO_TYPE`) | **landed** |
-| F6 | Friction combination law differs from Havok 1.x | blocked: `oxijolt` **1.1.0+jolt-5.6.0** has no combine-mode hook (checked again) |
-| F7 | Damage model: an event, not a per-step integral | **landed**: the engine's own formula (`10·piercing·v + concussion·μ·v/2` × material scale) and `fracture` as a per-hit threshold; **no per-material armour scale** — `+0x1c` is apply-damage, the four plates measure ×1.00 |
+| F6 | Friction combination law differs from Havok 1.x | **implemented** through `ContactSettings::set_combined_friction` in `oxijolt` **1.1.0+jolt-5.6.0** (the newest on crates.io); **off by default** (`RA2_FRICTION_LAW=havok`) because the correct law takes the survey 39 → 38 on the F1 wheel-height residual — measured below |
+| F7 | Damage model: an event, not a per-step integral | **landed, scale recovered**: the engine's own formula and `fracture`, and the hit's `scale` is the **attacker component's** `MaterialObject +4` — Metal **0.1**, Rubber **0.0**, Arenium **0.5**, with the ram plate's `metal(.4)` = **0.4**; the four armour plates still measure ×1.00 (they carry no term in the formula) |
 | F8 | Pistons slide their children (prismatic) | **landed** (nothing drives them yet) |
-| F9 | The chassis buckles (crush points from the `.bot`) | **landed**; travel is the file's own movable region, the curve is now absolute-from-rest and measured at four points; the collider re-bake is refused by Jolt (`UsedByConstraint`) and is the residual |
+| F9 | The chassis buckles (crush points from the `.bot`) | **landed, collider included**: travel is the file's own movable region, the curve is absolute-from-rest and measured at four points, and `set_body_shape` now removes/recreates the chassis' hinges with their angle as the reference — collider top falls 0.205 m at half damage and the robot still drives 6.81 m |
 | F10 | Chassis skin decals; 16 %-light weight gap | **landed** (weight: see F12) |
 | F11 | The Octagon's "hole" was a start block | diagnosed; spawns now use the arena's start points |
 | F12 | Component mass when the `.gmf` stores zero | **landed** as our rule — size-based, density pinned to local evidence; the two anchors conflict; `0x5c6820` re-checked: it is a vtable slot, not a function, and takes the file's zero at face value |
@@ -651,21 +651,22 @@ The recorded 27/45 predates this harness; the same command measures 28/45 on
 the tree before the fixes (`Team9/Bot1` is the borderline robot at 2.09 m). The
 six that remain, with the measured cause:
 
-| bot | travel | why |
+| bot | travel | measured cause (lowest hull point vs the wheel line) |
 |---|---|---|
-| `Team0/Bot1` | 0.51 m | the burst **piston's hammer head** hangs to the floor (low −2.277 m against a −2.267 m floor) and props the wheels up; the rest pose is the control layer's (F8/M4), not friction |
-| `Team0/Bot2` | 1.39 m | the **DDT burst-motor bracket wedge** drags (at the floor while the wheels sit 15 cm up); same rest-pose cause |
-| `Team11/Bot0` | 0.06 m | the four **angle-motor bodies** (chassis children, stored placement) hang 8 cm below the wheel contact (motor low −0.309 vs wheel −0.230), so the chassis rests on its motors; the wheels spin freely at 18 rad/s |
-| `Team12/Bot1` | 0.85 m | the **mower blade** is at the floor (low −2.266) and the wheels 1 cm up; rest-pose |
-| `Team8/Bot0` | 0.12 m | a **small wedge** and one motor reach the floor 3 cm below the wheels; rest-pose/mount |
-| `Team3/Bot1` | 2.00 m | it moves (2.33 m by t=2.1 s) but its net displacement at 3 s is just under 2 m — a curved path, not a stall |
+| `Team0/Bot1` | 0.51 m | **(b) a real stock contact:** the burst piston's **hammer head** is **0.298 m** below the wheels in the first 0.5 s, then the robot settles on a motor **0.046–0.087 m** below them. The piston's `prismatic` neutral is `0.0` on every stock definition, so the file's own rest is the hanging rod; the control layer (F8/M4) is what would retract it |
+| `Team0/Bot2` | 1.39 m | **not a rest contact:** the lowest hull point *is* a wheel (0.000 m below the line) for all 3 s; it is slow and decelerating (0.35 → 0.19 m/s), so this is wheel/torque slip, not a dragging part |
+| `Team11/Bot0` | 0.06 m | **(a) mount residual:** the four angle-motor bodies sit **0.079 m below** the wheels at rest and **0.081–0.101 m** while driving, so the chassis rests on its motors; the stored chassis-child transform is unchanged from the file |
+| `Team12/Bot1` | 0.85 m | **(b)/(a):** at rest the **lawn-mower blade** is **0.443 m** and a motor **0.433 m** below the wheel line; after 1 s the **chassis itself** is **0.141–0.152 m** below the wheels and the wheels are lifted — the robot is lying on its blade/hull |
+| `Team8/Bot0` | 0.12 m | **(a) mount residual:** the **small wedge** is **0.097 m** below at 0.5 s and a motor **0.082–0.100 m** below afterwards; it stalls on them |
+| `Team3/Bot1` | 2.00 m | **(b) a curved path, not a stall:** 2.30 m by t=2.0 s, then it comes back to 1.47–2.00 m net; at rest no part is more than 0.02 m below a wheel. Its four wheel hubs sit at y = +0.10/+0.10/−0.10/−0.10, so the chassis is not level and full throttle traces an arc |
 
-No failure left is the friction-combination law (F6); this pass did not need
-it. The chassis-child placement residual in `Team11/Bot0` is the last
-mount-shaped one: the stored transform puts a motor's body below its axle. A
-candidate baseplate-frame rule was measured (43/45 wheels-lowest instead of
-29/45) but it breaks two bots whose wheel axles come out fore-aft, so it was
-**not** landed.
+None of these is a friction failure on the default tree. The one data-supported
+mount residual is the chassis-child placement in `Team11/Bot0`/`Team8/Bot0`
+(stored transform puts a motor body below its axle); a candidate baseplate-frame
+rule was measured (43/45 wheels-lowest instead of 29/45) but it breaks two bots
+whose wheel axles come out fore-aft, so it was **not** landed. With F6's Havok
+law switched on, the arc in `Team3/Bot1` and the 0.194 m axle-height split in
+`Team7/Bot1` become the two extra failures (38/45); see F6.
 
 ## F5 — Collision shape kinds, decoded — **landed**
 
@@ -746,24 +747,49 @@ only fires on impacts (F7), and on the box arena they still end pressed into
 opposite walls. Deciding *when* to engage is what the original's control layer
 does (M4); this AI only ever drives at the opponent.
 
-## F6 — Friction combination law differs (blocked on the binding)
+## F6 — Friction combination law — **implemented, off by default**
 
 Havok 1.x's own era reference states contact friction is `sqrt(µ₁² + µ₂²)`; Jolt
-combines as `sqrt(µ₁ · µ₂)`, and the safe `oxijolt` API exposes no combine-mode
-hook. On the octagon (floor 0.80) with a 0.30 robot that is 0.854 vs 0.490 —
-about 43 % less grip. Only raw FFI or a custom combine would close it.
+combines as `sqrt(µ₁ · µ₂)`. On the octagon (floor 0.80) with a 0.30 robot that
+is 0.854 vs 0.490 — about 43 % less grip.
 
-**Re-checked for this pass.** `oxijolt` is **1.1.0+jolt-5.6.0** (the version in
-`Cargo.toml`/`Cargo.lock`). Its `src/` has no friction-combine setting: the only
-`combine` is `SwingType` for cone limits, and `BodySettings::friction` is a
-single scalar. Jolt itself still combines the two bodies' coefficients with its
-built-in `sqrt(µ₁·µ₂)`. The item therefore stays **blocked, not landed**; the
-survey does not need it (the remaining six failures are rest poses and one
-curved path, F4's table).
+**Version checked.** crates.io's newest `oxijolt` is **1.1.0+jolt-5.6.0**
+(published 2026-10-10), the version already pinned in `Cargo.toml` /
+`Cargo.lock`; there is no newer release. `BodySettings` still has one scalar
+`friction` and no combine mode, and there is no `EFrictionCombineMode` binding.
+**But 1.1.0 does expose the hook the earlier check missed:** the safe
+`ContactListener` receives Jolt's resolved `ContactSettings`, whose
+`set_combined_friction` (`src/listener/contact.rs`) is applied by
+`ContactSolver` (`vendor/.../ContactConstraintManager.cpp:826`). No upgrade, no
+FFI, no unsafe.
 
-## F7 — Damage is an event; its numbers are half-sourced
+**What is implemented.** `JoltBackend` records each body's `BodyDesc::friction`
+by raw body id and installs a listener that sets
+`sqrt(µ₁² + µ₂²)` on every added and persisted contact (`havok_combined_friction`
+in `jolt.rs`). It can be switched on with `RA2_FRICTION_LAW=havok`.
 
-**Landed.** The *shape* of the model, the *formula*, and `fracture`.
+**Measured, both ways.**
+
+| measurement | Jolt `sqrt(µ₁·µ₂)` | Havok `sqrt(µ₁²+µ₂²)` |
+|---|---|---|
+| 1 kg box on a 20° slope, µ = 0.3 both sides, 1 s | slides **0.295 m** | holds, **0.001 m** |
+| deterministic head-on ram, opening blow (`AI/Team1/Bot0`) | **24.4** | **30.3** |
+| 45-bot traction survey (box arena, 3 s, ≥ 2 m) | **39/45** | **38/45** |
+
+**Why it is off by default.** The law is right, and it exposes the F1
+wheel-mount residual rather than failing on its own: `AI/Team7/Bot1`'s two
+wheels on one side have their lowest hull points at **−2.207 m** and the other
+side at **−2.013 m**, a **0.194 m** axle-height difference, so only one pair
+touches the floor and the robot spins: 2.03 m under Jolt's law becomes 1.49 m
+under Havok's. `AI/Team3/Bot1` goes 2.00 → 1.47 m the same way (its four wheel
+hubs are at y = +0.10/+0.10/−0.10/−0.10). The physical default therefore stays
+Jolt until those wheel mounts are placed symmetrically; the law is a one-line
+env switch once they are.
+
+## F7 — Damage is an event; its numbers are fully sourced
+
+**Landed.** The *shape* of the model, the *formula*, `fracture`, and the
+per-material scale.
 
 - **Contact spans every body, not the roots.** A robot is several hinged bodies
   (a chassis group plus a body per motor), and the model tested only the two
@@ -825,35 +851,56 @@ curved path, F4's table).
   `FUN_0049aa30` reads the category back.
 
 Measured on the deterministic head-on ram (`RA2_DUEL_DRIVE=ram`, two identical
-`AI/Team1/Bot0` on the box arena): the opening blow is **36**, and a six-second
-grind shears two parts off. That is the range the game's own scripts describe —
-above the AI's 10-point "good hit" line, around the hazard's flat 25.
+`AI/Team1/Bot0` on the box arena): the opening blow is **24.4** on the default
+(friction-law-off) tree and **30.3** with Havok's law on, and a six-second grind
+shears two parts off. That is the range the game's own scripts describe — above
+the AI's 10-point "good hit" line, around the hazard's flat 25.
 
-**Still open:**
+**The scale is recovered: it is the attacking component's `MaterialObject +4`.**
 
-- **The contact material's `scale`.** It is the one number in the formula that is
-  calibrated rather than recovered. `FUN_00489470` reads it as
-  `*(float *)(*(int *)(contact + 0x64) + 4)` (`0x48950f`..`0x489522`): the
-  contact object's `+0x64` names a material object, and the material's `+4` is
-  the float the hit is multiplied by. **`+0x1c` is not that scale.** This pass
-  read the slot docs/19 pointed at: the `Component` vtable at `0x6a6aa4` has
-  `+0x1c` = `FUN_0045f2b0`, the *apply-damage* virtual — it clamps the amount to
-  the current hitpoints, subtracts it, checks `fracture` (`+0xdc`), and **returns
-  the amount applied**. `FUN_00489620` (`0x489620`) only calls it and formats the
-  returned float for the floating-number display; it is not a multiplier.
-- **The four armour plates carry no damage multiplier.** `FUN_0043c090`
-  (`0x43c090`) reads `Armor_Definitions.txt` (string at `0x6f1278`, rows via
-  `FUN_0043c950`) and labels the row's four stats "weight value", "puncture
-  value", "concussion value", "heat value" (`FUN_0045d800`, `0x43c830`,
-  `0x43c840`, `0x43c850`). The shipped rows are
-  `0 8 0 0 80` / `1 12 0 0 100` / `3 16 0 0 150` / `2 20 0 0 175`: **puncture and
-  concussion are zero on every plate**, and weight/heat are mass and durability.
-  Measured multiplier per plate in our path: **×1.00 for all four**
-  (`no_stock_plate_scales_damage`).
-- **Next read**: the `MaterialObject` subclasses' constructors and the store to
-  the material's `+4`, plus whoever writes `contact + 0x64`. That is where the
-  real per-material float lives; until it is read, `material_scale` (0.125)
-  remains calibrated.
+- `FUN_00489470` reads `*(float *)(*(int *)(this + 0x64) + 4)`
+  (`0x48950f`..`0x489522`); the same object's `+0x68`/`+0x6c` are the
+  `piercing`/`concussion` the formula just used, and the `.txt` parser
+  (`FUN_004622f0`) writes those two from the definition. It is the **attacker's**
+  component, not the target's.
+- The material object is created by `FUN_004893c0` (by name) and installed on the
+  component by **`FUN_00489390`** (`0x489390`: `*(this + 100) = material`, i.e.
+  `+0x64`). The component base constructor (`FUN_0045cc10` → `FUN_00489110`)
+  installs a **Metal** material, and the factory (`FUN_0045cf40`) then overwrites
+  its `+4` from the definition (`0x45d017`: `mov edx,[esi+0x64]; fstp [edx+4]`)
+  when the parsed value (`definition + 0xb0`, parser `FUN_004622f0`) is `>= 0`.
+- The constructors give the class defaults, stored at `this[1]` (`+4`):
+
+  | class | constructor | `+4` |
+  |---|---|---|
+  | `Material` (base) | `0x402c70` | `0x3dcccccd` = **0.1** |
+  | `Metal` | `0x4891e0` | inherits **0.1** |
+  | `Rubber` | `0x4899e0` | **0.0** |
+  | `Arenium` | `0x402c50` | `0x3f000000` = **0.5** |
+
+- Only **five** of the 135 shipped definitions declare `material =`: the four
+  casters are `rubber(0)` and `ramplate1` is `metal(.4)`. Every other component
+  keeps Metal's 0.1. (A negative override leaves the class default; the factory's
+  gate is `0 <= value`.)
+- **Measured in our path**, same head-on ram, setting the attacker's components:
+  Metal 0.1 → **24.4** damage, ram plate 0.4 → **97.5**, Rubber 0.0 → **0.0**
+  on the default tree (Havok's law: 30.3 / 121.1 / 0.0); the 0.4/0.1 ratio is
+  **4.00** either way. The parser agrees on the shipped files
+  (`the_shipped_definitions_carry_three_scales`: ram plate 0.4, caster 0.0, saw
+  blade 0.1).
+- `material_scale` is no longer a `CombatConfig` constant; `RA2_DAMAGE` (the old
+  calibration knob) is gone.
+
+- **The four armour plates still carry no damage multiplier.** `FUN_0043c090`
+  reads `Armor_Definitions.txt` (string `0x6f1278`, rows via `FUN_0043c950`) and
+  labels the four stats "weight", "puncture", "concussion", "heat"
+  (`FUN_0045d800`, `0x43c830`, `0x43c840`, `0x43c850`). The shipped rows are
+  `0 8 0 0 80` / `1 12 0 0 100` / `3 16 0 0 150` / `2 20 0 0 175`: puncture and
+  concussion are **zero on every plate**, and weight/heat are mass and
+  durability. Measured multiplier per plate: **×1.00 for all four**
+  (`no_stock_plate_scales_damage`) — the armour is not in the hit formula at all.
+- The `+0x1c` slot is still **not** a multiplier: it is `FUN_0045f2b0`,
+  apply-damage, which clamps/subtracts and returns the amount applied.
 - Damage is still reported as a running total, not as the five-tuple
   `(component, amount, time, by player, by component)`. The pieces are in
   `Impact`; the script layer is what will need it.
@@ -943,10 +990,9 @@ chassis deforms as it takes damage:
   so the crushed model doesn't look too symmetrical").
 
 The drawn chassis follows, so a hurt robot is visibly crushed — before this a
-chassis only ever died whole. **The collider cannot follow on a motorized robot**:
-Jolt refuses `set_body_shape` on a body a constraint uses (`UsedByConstraint`),
-and that is every stock chassis with hinges; see the measured residual below.
-Only the chassis has a buckle model; parts still detach.
+chassis only ever died whole. **The collider follows too** (the re-bake is
+described below): the backend removes the chassis' hinges, re-shapes the body,
+and recreates them. Only the chassis has a buckle model; parts still detach.
 
 Verified: a test pins that the movable region's footprint and top shrink while
 the floor plate stays put, and that the crush is monotone; `RA2_BUCKLE=<0..1>` on
@@ -975,22 +1021,33 @@ prints the four samples:
 A full crush now lands the top ring exactly on the movable floor, as the file's
 travel says it should.
 
-**The collider does not follow, and that is the measured residual.** `buckle`
-calls `PhysicsBackend::set_body_shape` to re-bake the chassis body, but Jolt
-refuses to change the shape of a body that a constraint uses:
-`set_shape: UsedByConstraint(BodyId …)`. Every motorized stock robot's chassis
-has four hinges, so the **drawn** chassis crushes while its **collider stays the
-pristine shape** — the opposite of what this section used to claim. The fix is a
-hinge-preserving re-bake (remove the chassis' hinges, re-shape, recreate them
-around the children's current poses); it is not shipped here because recreating
-a burst motor's hinge resets its travel reference.
+**The collider follows too — the re-bake is landed.** `buckle` calls
+`PhysicsBackend::set_body_shape` to re-bake the chassis body, but Jolt refuses to
+change the shape of a body that a constraint uses:
+`set_shape: UsedByConstraint(BodyId …)`, which is every motorized stock robot's
+chassis. The backend now removes every joint that uses the body, re-shapes it and
+recreates the joints in place, keeping their handles, their drive command and
+their travel reference: a hinge's current angle becomes the new frame's reference
+(`R_z(+θ)` on the second normal, verified by
+`a_hinged_body_can_be_reshaped_without_losing_its_angle`), and a slider's
+body-local anchors already preserve its offset
+(`a_sliding_body_can_be_reshaped_without_losing_its_offset`).
+
+**Measured on `AI/Team1/Bot0` at half damage** (`a_crushed_chassis_collider_follows_and_the_robot_still_drives`):
+a 21×21 grid of downward rays over the chassis' footprint, keeping only hits on
+the chassis body, puts the collider's top at **−1.106 m** pristine and **−1.311 m**
+crushed — **0.205 m** lower, matching the drawn 0.1855 m plus the settle. The robot
+then drives **6.81 m in 3 s** with the recreated hinges, and the joint count is
+unchanged. The cost is four `remove_constraint` + `create_constraint` calls per
+buckle step (one per chassis hinge on a stock 4-wheel bot), not per frame; it runs
+only when the damage fraction changes.
 
 **The subdivided silhouette** remains ours (see below); the curve is no longer
 part of the gap.
 
 Still open: the crush is smooth rather than faceted — the game's subdivided model
-is what gives it the original's silhouette — the collider re-bake above, and the
-game *writes the crushed model back* on save, which we do not.
+is what gives it the original's silhouette — and the game *writes the crushed
+model back* on save, which we do not.
 
 **The subdivided model, measured (and one attempt that did not earn its keep).**
 The engine builds that mesh before anything can buckle: it "divides the triangular

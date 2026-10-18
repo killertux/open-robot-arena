@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ra2sim::{BotSetup, DriveInput, Duel};
+use ra2sim::{BotSetup, DriveInput, Duel, Role};
 
 const DT: f32 = 1.0 / 60.0;
 const SECONDS: f32 = 3.0;
@@ -104,6 +104,200 @@ fn travel(arena: &Path, bot: &Path) -> Result<(String, f32), Box<dyn std::error:
     }
     let end = duel.robots[0].position(&*duel.physics);
     Ok((name, (end - start).length()))
+}
+
+/// A single robot's three-second run, sampled: displacement, yaw, body height
+/// and the lowest attached part. `RA2_TRACTION_BOT=Team7/Bot1` selects one.
+#[test]
+fn one_bot_reports_its_trajectory_over_time() {
+    let (Some(game), Ok(want)) = (game_dir(), std::env::var("RA2_TRACTION_BOT")) else {
+        return;
+    };
+    let bot = stock_bots(&game)
+        .into_iter()
+        .find(|p| {
+            let n = format!(
+                "{}/{}",
+                p.parent()
+                    .and_then(|q| q.file_name())
+                    .and_then(|q| q.to_str())
+                    .unwrap_or("?"),
+                p.file_stem().and_then(|q| q.to_str()).unwrap_or("?")
+            );
+            n == want
+        })
+        .unwrap_or_else(|| panic!("{want} not found"));
+    let setup = BotSetup {
+        path: bot.to_string_lossy().to_string(),
+        yaw_deg: None,
+        spawn: None,
+    };
+    let arena = game.join("Arenas/box.py");
+    let mut duel = Duel::new(&arena.to_string_lossy(), std::slice::from_ref(&setup)).unwrap();
+    let start = duel.robots[0].position(&*duel.physics);
+    {
+        let robot = &duel.robots[0];
+        for p in 0..robot.rig.parts.len() {
+            let (Some(info), Some(joint)) = (robot.rig.parts[p].joint, robot.parts[p].joint) else {
+                continue;
+            };
+            if !matches!(info.use_kind, ra2sim::rig::JointUse::Wheel) {
+                continue;
+            }
+            let c = &robot.rig.components[robot.rig.parts[p].root];
+            let hub = c.local.transform_point3(glam::Vec3::ZERO);
+            let worlds = robot.component_worlds(&*duel.physics);
+            let low = robot.rig.parts[p]
+                .members
+                .iter()
+                .flat_map(|&i| robot.rig.components[i].hull_points.iter())
+                .map(|q| worlds[robot.rig.parts[p].root].transform_point3(*q).y)
+                .fold(f32::MAX, f32::min);
+            println!(
+                "wheel part {p} {} rate={:.1} rad/s r={:.3} v={:.2} m/s axis=({:.2},{:.2},{:.2}) hub=({:.2},{:.2},{:.2}) low={low:.3} joint={joint}",
+                c.name,
+                info.rate,
+                c.wheel_radius(),
+                info.rate * c.wheel_radius(),
+                info.axis.x,
+                info.axis.y,
+                info.axis.z,
+                hub.x,
+                hub.y,
+                hub.z
+            );
+        }
+    }
+    let drive = DriveInput {
+        throttle: 1.0,
+        steer: 0.0,
+    };
+    for step in 0..180 {
+        duel.step_direct(&[drive], DT);
+        if step % 30 == 29 {
+            let robot = &duel.robots[0];
+            let worlds = robot.component_worlds(&*duel.physics);
+            let low = |i: usize| {
+                robot.rig.components[i]
+                    .hull_points
+                    .iter()
+                    .map(|p| worlds[i].transform_point3(*p).y)
+                    .fold(f32::MAX, f32::min)
+            };
+            let wheel = robot
+                .rig
+                .components
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.role == Role::Wheel)
+                .map(|(i, _)| low(i))
+                .fold(f32::MAX, f32::min);
+            let mut worst = (f32::MAX, String::new());
+            for (i, c) in robot.rig.components.iter().enumerate() {
+                if c.hull_points.is_empty() || !robot.attached[i] {
+                    continue;
+                }
+                let l = low(i);
+                if l < worst.0 {
+                    worst = (l, format!("{} ({:?})", c.name, c.role));
+                }
+            }
+            let (_, rot, pos) = robot
+                .transform(&*duel.physics)
+                .to_scale_rotation_translation();
+            let yaw = rot.to_euler(glam::EulerRot::YXZ).0.to_degrees();
+            let v = robot.velocity(&*duel.physics);
+            println!(
+                "t={:.1}s d={:.2} m pos=({:.2},{:.2}) yaw={:.0}° v=({:.2},{:.2}) wheels={:.3} lowest {} {:.3} ({:.3} below)",
+                (step + 1) as f32 * DT,
+                pos.distance(start),
+                pos.x,
+                pos.z,
+                yaw,
+                v.x,
+                v.z,
+                wheel,
+                worst.1,
+                worst.0,
+                wheel - worst.0
+            );
+        }
+    }
+}
+
+/// The rest-pose height report behind F4's remaining failures: for every stock
+/// robot, the lowest world point of each component against the lowest wheel.
+/// A part below the wheel line can prop the robot up, which no amount of
+/// friction or torque fixes; the print names it and its clearance.
+#[test]
+fn the_rest_pose_report_names_every_part_below_the_wheels() {
+    let (Some(game), Ok(_)) = (game_dir(), std::env::var("RA2_TRACTION_REPORT")) else {
+        return;
+    };
+    let arena = game.join("Arenas/box.py");
+    let mut flagged = 0usize;
+    for bot in stock_bots(&game) {
+        let setup = BotSetup {
+            path: bot.to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let Ok(duel) = Duel::new(&arena.to_string_lossy(), std::slice::from_ref(&setup)) else {
+            continue;
+        };
+        let robot = &duel.robots[0];
+        let worlds = robot.component_worlds(&*duel.physics);
+        let low = |i: usize| {
+            robot.rig.components[i]
+                .hull_points
+                .iter()
+                .map(|p| worlds[i].transform_point3(*p).y)
+                .fold(f32::MAX, f32::min)
+        };
+        let wheel = robot
+            .rig
+            .components
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.role == Role::Wheel)
+            .map(|(i, _)| low(i))
+            .fold(f32::MAX, f32::min);
+        if wheel == f32::MAX {
+            continue;
+        }
+        let name = format!(
+            "{}/{}",
+            bot.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("?"),
+            bot.file_stem().and_then(|n| n.to_str()).unwrap_or("?")
+        );
+        let mut rows = Vec::new();
+        for (i, c) in robot.rig.components.iter().enumerate() {
+            if c.hull_points.is_empty() || !robot.attached[i] {
+                continue;
+            }
+            let l = low(i);
+            if l < wheel - 0.002 {
+                rows.push(format!(
+                    "{} ({:?}) low {:.3} = {:.3} m below the wheels",
+                    c.name,
+                    c.role,
+                    l,
+                    wheel - l
+                ));
+            }
+        }
+        if !rows.is_empty() {
+            flagged += 1;
+            println!("{name}: wheels at {wheel:.3}");
+            for r in rows {
+                println!("  {r}");
+            }
+        }
+    }
+    println!("{flagged} stock robots have a part below the wheel line at rest");
 }
 
 #[test]
