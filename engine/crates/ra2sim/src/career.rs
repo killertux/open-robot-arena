@@ -432,9 +432,12 @@ impl SeasonPhase {
 /// `participation_points` (160) and `score_divisor` (200) are the two constants
 /// in `FUN_0046c400`. `events_per_season` is the `9` in `FUN_00500120`,
 /// `FUN_004ffcc0` and `FUN_0046e2b0`. `max_prizes` is the `0x13` guard in
-/// `FUN_004fab50` (the twentieth prize drops the oldest). `repair_seconds` and
-/// `repair_cost` are **not** established: the repairs window passes `0x1e` to
-/// the progress bar, but its unit is unknown, and no cost path was found.
+/// `FUN_004fab50` (the twentieth prize drops the oldest). `repair_seconds` is
+/// 30 minutes: the repairs window passes `0x1e` to `FUN_0058b150` with the
+/// minutes selector, which splits it into the `giTime` fields as `00:30:00`,
+/// and the screen's own instructions say "You have 30 minutes to make repairs"
+/// (`docs/22-component-repairs.md`). `repair_cost` is **0**: no cost string or
+/// subtraction path was found.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CareerPolicy {
     pub participation_points: i32,
@@ -452,7 +455,7 @@ impl Default for CareerPolicy {
             score_divisor: 200,
             events_per_season: 9,
             max_prizes: 20,
-            repair_seconds: 30.0,
+            repair_seconds: 1_800.0,
             repair_cost: 0,
         }
     }
@@ -487,9 +490,14 @@ pub struct Prize {
     pub art: String,
 }
 
-/// One pending repair. `component` is the damaged robot rather than a single
-/// component: a [`MatchReport`] carries per-robot damage and defeat only, and
-/// the game's component-level damage list (`Team+0x12c`) is not parsed here.
+/// One pending repair, one row per damaged component.
+///
+/// `robot` is the robot's display name and `component` is the component's
+/// display name (`name`, or its class when the definition has no name);
+/// `component_index` is the component's index in the `.bot` design, which is
+/// the key the original's `Team+0x12c` list carries. `hp`/`total_hp` are the
+/// saved current and maximum hitpoints, and `detached`/`fractured` are the
+/// `Team+0x12c`/`Team+0x13c` state.
 ///
 /// `elapsed` is the repair clock's progress. The original repairs window is a
 /// progress bar over time (`FUN_004d6e10`, full at `FUN_0058b470`), not a
@@ -500,10 +508,34 @@ pub struct Prize {
 pub struct Repair {
     pub robot: String,
     pub component: String,
+    /// The component's index in the robot design (`Team+0x12c`'s key).
+    pub component_index: usize,
+    /// The component's `.bot` class (`SpinMotor`, `Wheel`, ...).
+    pub component_class: String,
+    /// Remaining hitpoints when the match ended.
+    pub hp: f32,
+    /// Pristine hitpoints.
+    pub total_hp: f32,
+    /// The component is no longer on the robot.
+    pub detached: bool,
+    /// A single blow larger than the component's fracture threshold tore it
+    /// off; this is the row that gets the shipped `damage.tga` icon.
+    pub fractured: bool,
     pub cost: i64,
     pub seconds: f32,
     /// Seconds of repair time already served.
     pub elapsed: f32,
+}
+
+impl Repair {
+    /// The row's remaining hitpoint fraction (`hp / total_hp`).
+    pub fn hp_percent(&self) -> i32 {
+        if self.total_hp > 0.0 {
+            ((self.hp / self.total_hp).clamp(0.0, 1.0) * 100.0).round() as i32
+        } else {
+            0
+        }
+    }
 }
 
 /// One finished event, as the history screen counts it.
@@ -965,11 +997,9 @@ impl Career {
 
         let repairs = self.repairs_from_report(report, entered_robot);
         for repair in repairs {
-            if !self
-                .repairs
-                .iter()
-                .any(|old| old.robot == repair.robot && old.component == repair.component)
-            {
+            if !self.repairs.iter().any(|old| {
+                old.robot == repair.robot && old.component_index == repair.component_index
+            }) {
                 self.repairs.push(repair);
             }
         }
@@ -983,27 +1013,40 @@ impl Career {
         })
     }
 
-    /// The repair list a report leaves: one entry per damaged or defeated
-    /// robot on the team. Component-level damage is not in [`MatchReport`];
-    /// `component` names the robot and the cost/time come from
-    /// [`CareerPolicy`] because the binary did not establish them.
+    /// The repair list a report leaves: one entry per damaged, detached or
+    /// fractured component on the player's robot(s), grouped by robot and then
+    /// in design order. This is the original's `Team+0x12c` list: a component
+    /// id, its current/maximum hitpoints, and the `Team+0x13c` fractured flag
+    /// (`docs/22-component-repairs.md`). The cost/time still come from
+    /// [`CareerPolicy`] because the binary charges nothing and its clock is the
+    /// window's 30 minutes.
     pub fn repairs_from_report(&self, report: &MatchReport, entered_robot: usize) -> Vec<Repair> {
         let Some(entered) = report.robots.get(entered_robot) else {
             return Vec::new();
         };
-        report
+        let mut repairs = Vec::new();
+        for robot in report
             .robots
             .iter()
             .filter(|robot| robot.team == entered.team)
-            .filter(|robot| robot.defeated || robot.damage_taken > 0.0)
-            .map(|robot| Repair {
-                robot: robot.bot_name.clone(),
-                component: robot.bot_name.clone(),
-                cost: self.policy.repair_cost,
-                seconds: self.policy.repair_seconds,
-                elapsed: 0.0,
-            })
-            .collect()
+        {
+            for component in robot.components.iter().filter(|c| c.damaged()) {
+                repairs.push(Repair {
+                    robot: robot.bot_name.clone(),
+                    component: component.name.clone(),
+                    component_index: component.index,
+                    component_class: component.class.clone(),
+                    hp: component.hp,
+                    total_hp: component.total_hp,
+                    detached: component.detached,
+                    fractured: component.fractured,
+                    cost: self.policy.repair_cost,
+                    seconds: self.policy.repair_seconds,
+                    elapsed: 0.0,
+                });
+            }
+        }
+        repairs
     }
 
     /// The repair clock's progress in `0.0..=1.0`, as the window's progress bar
@@ -1195,11 +1238,9 @@ impl Career {
 
         let repairs = self.repairs_from_report(report, entered_robot);
         for repair in repairs {
-            if !self
-                .repairs
-                .iter()
-                .any(|old| old.robot == repair.robot && old.component == repair.component)
-            {
+            if !self.repairs.iter().any(|old| {
+                old.robot == repair.robot && old.component_index == repair.component_index
+            }) {
                 self.repairs.push(repair);
             }
         }
@@ -1506,12 +1547,18 @@ impl Career {
         out.push_str(&format!("repairs {}\n", self.repairs.len()));
         for repair in &self.repairs {
             out.push_str(&format!(
-                "repair {}\t{}\t{}\t{}\t{}\n",
+                "repair {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 escape(&repair.robot),
                 escape(&repair.component),
                 repair.cost,
                 repair.seconds,
-                repair.elapsed
+                repair.elapsed,
+                repair.component_index,
+                escape(&repair.component_class),
+                repair.hp,
+                repair.total_hp,
+                u8::from(repair.detached),
+                u8::from(repair.fractured)
             ));
         }
         out.push_str(&format!("history {}\n", self.history.len()));
@@ -1745,14 +1792,40 @@ impl Career {
                             .and_then(|v| v.parse::<f32>().ok())
                             .ok_or("bad repair seconds")?;
                         // A sidecar written before the clock existed has no
-                        // fifth field; it starts at zero.
+                        // fifth field; it starts at zero. The component fields
+                        // followed in a later version and default to a
+                        // robot-named row so old saves still load.
                         let elapsed = fields
                             .next()
                             .and_then(|v| v.parse::<f32>().ok())
                             .unwrap_or(0.0);
+                        let component_index = fields
+                            .next()
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        let component_class = fields
+                            .next()
+                            .map(unescape)
+                            .unwrap_or_else(|| "robot".to_string());
+                        let hp = fields
+                            .next()
+                            .and_then(|v| v.parse::<f32>().ok())
+                            .unwrap_or(0.0);
+                        let total_hp = fields
+                            .next()
+                            .and_then(|v| v.parse::<f32>().ok())
+                            .unwrap_or(0.0);
+                        let detached = fields.next().map(|v| v.trim() == "1").unwrap_or(false);
+                        let fractured = fields.next().map(|v| v.trim() == "1").unwrap_or(false);
                         list.push(Repair {
                             robot,
                             component,
+                            component_index,
+                            component_class,
+                            hp,
+                            total_hp,
+                            detached,
+                            fractured,
                             cost,
                             seconds,
                             elapsed,
@@ -1950,7 +2023,7 @@ pub fn sidecar_path(game: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::r#match::{MatchReport, MatchState, RobotReport};
+    use crate::r#match::{ComponentDamage, MatchReport, MatchState, RobotReport};
     use ra2fmt::bot::LineEnding;
     use ra2fmt::team::TeamValue;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2034,6 +2107,22 @@ mod tests {
             eliminated: defeated,
             winner: false,
             immobilized: false,
+            // A synthetic report: one component named after the robot, so a
+            // `damage` figure still becomes a component-level repair row.
+            components: if damage > 0.0 || defeated {
+                vec![ComponentDamage {
+                    index: 1,
+                    name: name.to_string(),
+                    class: "TestPart".to_string(),
+                    base: String::new(),
+                    hp: (100.0 - damage).max(0.0),
+                    total_hp: 100.0,
+                    detached: defeated || damage >= 100.0,
+                    fractured: defeated && damage >= 100.0,
+                }]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -2213,7 +2302,7 @@ mod tests {
         assert_eq!(career.repairs.len(), 1);
         assert_eq!(career.repairs[0].robot, "Test Team");
         assert_eq!(career.repairs[0].cost, 0);
-        assert_eq!(career.repairs[0].seconds, 30.0);
+        assert_eq!(career.repairs[0].seconds, 1_800.0);
 
         let record = career.finish_event(true).unwrap();
         assert_eq!(record.event, event);
@@ -2301,23 +2390,29 @@ mod tests {
         assert_eq!(career.repairs.len(), 1);
         assert_eq!(career.repairs[0].robot, "Damaged Bot");
         assert_eq!(career.repairs[0].component, "Damaged Bot");
+        assert_eq!(career.repairs[0].component_index, 1);
+        assert_eq!(career.repairs[0].hp, 58.0);
+        assert_eq!(career.repairs[0].total_hp, 100.0);
         assert_eq!(career.repairs[0].cost, 0, "the original charges nothing");
         assert_eq!(career.repairs[0].elapsed, 0.0);
         assert_eq!(career.repair_progress(0), Some(0.0));
 
-        // 12 of the repair's 30 seconds served: the bar is 40% full.
-        assert_eq!(career.advance_repair(0, 12.0).unwrap(), None);
+        // 12 of the repair's 30 minutes served: the bar is 40% full.
+        assert_eq!(career.advance_repair(0, 720.0).unwrap(), None);
         let progress = career.repair_progress(0).unwrap();
         assert!((progress - 0.4).abs() < 1e-6, "{progress}");
 
         career.save(dir.path()).unwrap();
         let mut loaded = Career::load(dir.path()).unwrap();
         assert_eq!(loaded.repairs.len(), 1);
-        assert!((loaded.repairs[0].elapsed - 12.0).abs() < 1e-6);
+        assert!((loaded.repairs[0].elapsed - 720.0).abs() < 1e-6);
+        assert_eq!(loaded.repairs[0].component_index, 1);
+        assert_eq!(loaded.repairs[0].component_class, "TestPart");
 
         // The clock that fills the bar completes the entry; nothing is charged.
-        let done = loaded.advance_repair(0, 18.0).unwrap().unwrap();
+        let done = loaded.advance_repair(0, 1_080.0).unwrap().unwrap();
         assert_eq!(done.robot, "Damaged Bot");
+        assert_eq!(done.component, "Damaged Bot");
         assert!(loaded.repairs.is_empty(), "the damage is cleared");
         assert_eq!(loaded.money, 0, "a repair does not charge");
         loaded.save(dir.path()).unwrap();
@@ -2326,6 +2421,98 @@ mod tests {
             reread.repairs.is_empty(),
             "the repaired state is what the save reads back"
         );
+    }
+
+    /// Two damaged components on one robot leave two rows; the clock completes
+    /// them one at a time, the detached component keeps its name, and a save
+    /// in the middle reloads the same component state.
+    #[test]
+    fn component_damage_leaves_one_row_per_component_and_repairs_in_order() {
+        let Some(dir) = copy_game("components") else {
+            eprintln!("skipping component repair test: no local/game");
+            return;
+        };
+        let mut career = Career::new(dir.path(), 7).unwrap();
+        let event = career.schedule[0];
+        career.enter_event(event).unwrap();
+        let mut player = robot(0, 0, "Damaged Bot", 100, 42.0, false);
+        player.components = vec![
+            ComponentDamage {
+                index: 0,
+                name: "Chassis".to_string(),
+                class: "Chassis".to_string(),
+                base: "Chassis".to_string(),
+                hp: 210.0,
+                total_hp: 210.0,
+                detached: false,
+                fractured: false,
+            },
+            ComponentDamage {
+                index: 2,
+                name: "Bent Axle".to_string(),
+                class: "Axle".to_string(),
+                base: "Axle".to_string(),
+                hp: 40.0,
+                total_hp: 100.0,
+                detached: false,
+                fractured: false,
+            },
+            ComponentDamage {
+                index: 5,
+                name: "Torn Spinner".to_string(),
+                class: "SpinMotor".to_string(),
+                base: "SpinMotor".to_string(),
+                hp: 0.0,
+                total_hp: 80.0,
+                detached: true,
+                fractured: true,
+            },
+        ];
+        let opponent = robot(1, 1, "Red Zone", 200, 0.0, true);
+        career
+            .award_match(&report("DEATHMATCH", vec![player, opponent], vec![0]), 0)
+            .unwrap();
+        assert_eq!(career.repairs.len(), 2, "one row per damaged component");
+        assert_eq!(career.repairs[0].robot, "Damaged Bot");
+        assert_eq!(career.repairs[0].component, "Bent Axle");
+        assert_eq!(career.repairs[0].component_index, 2);
+        assert_eq!(career.repairs[0].component_class, "Axle");
+        assert_eq!(career.repairs[0].hp, 40.0);
+        assert_eq!(career.repairs[0].total_hp, 100.0);
+        assert_eq!(career.repairs[0].hp_percent(), 40);
+        assert!(!career.repairs[0].detached);
+        assert_eq!(career.repairs[1].component, "Torn Spinner");
+        assert_eq!(career.repairs[1].component_index, 5);
+        assert!(career.repairs[1].detached);
+        assert!(career.repairs[1].fractured);
+
+        // Half the clock on the first row leaves the second untouched, and the
+        // save round-trips both component states.
+        assert_eq!(career.advance_repair(0, 900.0).unwrap(), None);
+        career.save(dir.path()).unwrap();
+        let mut loaded = Career::load(dir.path()).unwrap();
+        assert_eq!(loaded.repairs.len(), 2);
+        assert_eq!(loaded.repairs[0].component, "Bent Axle");
+        assert_eq!(loaded.repairs[0].component_index, 2);
+        assert!((loaded.repairs[0].elapsed - 900.0).abs() < 1e-6);
+        assert_eq!(loaded.repairs[1].component, "Torn Spinner");
+        assert!(loaded.repairs[1].detached);
+        assert!(loaded.repairs[1].fractured);
+
+        // The first row completes alone; the detached row stays pending.
+        let done = loaded.advance_repair(0, 900.0).unwrap().unwrap();
+        assert_eq!(done.component, "Bent Axle");
+        assert_eq!(loaded.repairs.len(), 1);
+        assert_eq!(loaded.repairs[0].component, "Torn Spinner");
+
+        let done = loaded.advance_repair(0, 1_800.0).unwrap().unwrap();
+        assert_eq!(done.component, "Torn Spinner");
+        assert!(done.detached);
+        assert!(loaded.repairs.is_empty());
+
+        loaded.save(dir.path()).unwrap();
+        let reread = Career::load(dir.path()).unwrap();
+        assert!(reread.repairs.is_empty(), "the cleared damage is saved");
     }
 
     /// The event list is the shipped file: 25 events, tiers two or four.
