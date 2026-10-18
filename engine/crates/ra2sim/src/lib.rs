@@ -6,6 +6,7 @@
 pub mod backend;
 pub mod career;
 pub mod combat;
+pub mod controls;
 pub mod duel;
 pub mod hazards;
 pub mod immobility;

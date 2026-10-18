@@ -593,10 +593,10 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            // The driving keys change the player's input on press *and*
-            // release: releasing W/S/A/D (or the arrows) centres the axis. The
-            // match still steps at its own fixed cadence; this only changes the
-            // value sampled at the next tick.
+            // The robot's keys change the player's input on press *and*
+            // release: the held scan codes go to the robot's own wiring, which
+            // decides what each does. The match still steps at its own fixed
+            // cadence; this only changes the value sampled at the next tick.
             WindowEvent::KeyboardInput { event, .. }
                 if self
                     .session
@@ -1003,32 +1003,76 @@ impl ApplicationHandler for App {
     }
 }
 
-/// The keys that drive robot 0: W/S or Up/Down for throttle, A/D or
-/// Left/Right for steer.
-fn is_drive_key(key: &PhysicalKey) -> bool {
-    matches!(
-        key,
-        PhysicalKey::Code(
-            KeyCode::KeyW
-                | KeyCode::KeyS
-                | KeyCode::KeyA
-                | KeyCode::KeyD
-                | KeyCode::ArrowUp
-                | KeyCode::ArrowDown
-                | KeyCode::ArrowLeft
-                | KeyCode::ArrowRight
-        )
-    )
+/// The DirectInput scan code of a key a robot's controls can be bound to.
+///
+/// A `.bot` stores scan codes (`W` is 17, Space 57), and the robot's own wiring
+/// decides what each one does; the arrow keys are ours, standing in for
+/// `W`/`A`/`S`/`D`. `C` stays the camera key.
+fn dik_of(key: &PhysicalKey) -> Option<i32> {
+    use KeyCode::*;
+    let PhysicalKey::Code(code) = key else {
+        return None;
+    };
+    Some(match code {
+        Digit1 => 2,
+        Digit2 => 3,
+        Digit3 => 4,
+        Digit4 => 5,
+        Digit5 => 6,
+        Digit6 => 7,
+        Digit7 => 8,
+        Digit8 => 9,
+        Digit9 => 10,
+        Digit0 => 11,
+        KeyQ => 16,
+        KeyW | ArrowUp => 17,
+        KeyE => 18,
+        KeyR => 19,
+        KeyT => 20,
+        KeyY => 21,
+        KeyU => 22,
+        KeyI => 23,
+        KeyO => 24,
+        KeyP => 25,
+        KeyA | ArrowLeft => 30,
+        KeyS | ArrowDown => 31,
+        KeyD | ArrowRight => 32,
+        KeyF => 33,
+        KeyG => 34,
+        KeyH => 35,
+        KeyJ => 36,
+        KeyK => 37,
+        KeyL => 38,
+        KeyZ => 44,
+        KeyX => 45,
+        KeyV => 47,
+        KeyB => 48,
+        KeyN => 49,
+        KeyM => 50,
+        Space => 57,
+        Numpad7 => 71,
+        Numpad8 => 72,
+        Numpad9 => 73,
+        Numpad4 => 75,
+        Numpad5 => 76,
+        Numpad6 => 77,
+        Numpad1 => 79,
+        Numpad2 => 80,
+        Numpad3 => 81,
+        Numpad0 => 82,
+        _ => return None,
+    })
 }
 
-/// Apply a driving key edge. Press sets the axis to ±1; release centres it.
+/// Whether a key is one a robot's controls can use.
+fn is_drive_key(key: &PhysicalKey) -> bool {
+    dik_of(key).is_some()
+}
+
+/// Apply a key edge to the keys held, by scan code. The robot's wiring turns
+/// them into controls (`ra2sim::controls`).
 fn apply_drive_key(key: &PhysicalKey, pressed: bool, input: &mut DriveInput) {
-    let value = if pressed { 1.0 } else { 0.0 };
-    match key {
-        PhysicalKey::Code(KeyCode::KeyW | KeyCode::ArrowUp) => input.throttle = value,
-        PhysicalKey::Code(KeyCode::KeyS | KeyCode::ArrowDown) => input.throttle = -value,
-        PhysicalKey::Code(KeyCode::KeyA | KeyCode::ArrowLeft) => input.steer = -value,
-        PhysicalKey::Code(KeyCode::KeyD | KeyCode::ArrowRight) => input.steer = value,
-        _ => {}
+    if let Some(code) = dik_of(key) {
+        input.keys.set(code, pressed);
     }
 }

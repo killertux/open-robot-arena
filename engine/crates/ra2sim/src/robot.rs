@@ -12,6 +12,7 @@ use crate::backend::{
     BackendError, BodyDesc, BodyHandle, CollisionGroupDesc, CompoundChild, HingeDesc, JointHandle,
     MotionType, PhysicsBackend, ShapeDesc, SliderDesc,
 };
+use crate::controls::{ControlState, COCK_FRACTION, FULL};
 use crate::rig::{JointInfo, JointUse, RobotRig, Role};
 use crate::scene::USER_BOT;
 use crate::sim::{DriveInput, DriveTuning};
@@ -49,6 +50,13 @@ pub struct Applied {
     /// That critical hit was the third: the robot is DESTROYED.
     pub destroyed: bool,
 }
+
+/// The sign of a positive ("clockwise") command about a joint's axis. The
+/// original builds the target velocity as `-direction * 0.01 * speed`
+/// (`0x481450`); which way a motor's axis points is settled by the survey of
+/// the stock bots, whose wiring drives the two sides of a robot with opposite
+/// `Spin Clockwise`/`Spin Counter-clockwise` wires.
+const CLOCKWISE: f32 = -1.0;
 
 /// Live state of one assembled body.
 pub struct PartState {
@@ -88,6 +96,22 @@ pub struct Robot {
     /// The electric hazard's `plus.zap` visual, as a deadline on the match
     /// clock. The shipped `Electricity` hazard applies the damage itself.
     pub zapped_until: f32,
+    /// The control board's live state: held keys, the AI's `Input` levels,
+    /// latched switches (see [`crate::controls`]).
+    pub control: ControlState,
+    /// Where each part's burst device is in its fire/re-cock cycle.
+    burst: Vec<BurstPhase>,
+}
+
+/// A burst motor's or piston's cycle: parked (cocked) at its start, released at
+/// full speed to its end, then cocked again slowly (the tutorial: "slowly, but
+/// powerfully cocks the axle ... when it is triggered, the spring is released and
+/// the axle spins at very high torque to its ending position").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BurstPhase {
+    Cocked,
+    Firing,
+    Cocking,
 }
 
 impl Robot {
@@ -171,6 +195,8 @@ impl Robot {
             immobilized: false,
             eliminated: false,
             zapped_until: -1.0,
+            control: ControlState::default(),
+            burst: vec![BurstPhase::Cocked; rig.parts.len()],
             team,
             rig,
         })
@@ -343,25 +369,41 @@ impl Robot {
         self.parts[0].alive && !self.destroyed && !self.immobilized && !self.eliminated
     }
 
-    /// Drive the motors: wheels from the input, spinners at their rated speed.
+    /// Feed the control board: the keys held now, and a stand-in driver's
+    /// `throttle`/`steer` (held as the `Forward`/`LeftRight` keys).
+    fn read_input(&mut self, input: DriveInput) {
+        self.control.set_keys(&self.rig.wiring, input.keys);
+        self.control
+            .set_drive(&self.rig.wiring, input.throttle, input.steer);
+    }
+
+    /// The AI's `Input(name, slot, value)` calls, in order.
+    pub fn apply_inputs(&mut self, events: &[(String, i32, f32)]) {
+        for (name, slot, value) in events {
+            self.control.input(&self.rig.wiring, name, *slot, *value);
+        }
+    }
+
+    /// Drive the motors through the control board.
     ///
-    /// `input.throttle` is a signed fraction of the *motor's* speed: each wheel's
-    /// target is its own motor's rated angular velocity (the definition's `power`
-    /// speed, in rad/s), so a robot's top speed is a property of its parts, not a
-    /// global. `input.steer` adds a yaw rate to the desired hub velocity, which
-    /// makes the two sides differ — a tank-style differential. The original
-    /// steers through its own `Steering` components and the control wiring, which
-    /// is not modelled yet.
+    /// Every motor, wheel and piston is moved by its **wiring** (see
+    /// [`crate::controls`]): the command is the clamped sum, in `-100..=100`, of
+    /// what the held keys and the AI's inputs contribute through the bot's wires.
+    /// A wheel or spinner then turns at `command / 100` of its motor's rated
+    /// speed (the original's motor step `0x481450`); a zero command releases the
+    /// motor (a servo holds). A component nothing is wired to is never driven.
+    /// A burst device waits cocked until its `Fire` wire is pressed.
+    ///
+    /// There is no steering model beyond the wiring: a robot turns because the
+    /// `LeftRight` wires drive its two sides differently. `DriveInput::throttle`
+    /// and `steer` are the `Forward`/`LeftRight` keys of a stand-in driver.
     pub fn drive(
         &mut self,
         physics: &mut dyn PhysicsBackend,
         input: DriveInput,
-        tuning: &DriveTuning,
+        _tuning: &DriveTuning,
     ) {
-        let throttle = input.throttle.clamp(-1.0, 1.0);
-        let yaw = -input.steer.clamp(-1.0, 1.0) * tuning.max_yaw_rate;
-        let forward = Vec3::new(0.0, 0.0, -1.0);
-        let yaw_axis = Vec3::Y;
+        self.read_input(input);
 
         for p in 0..self.rig.parts.len() {
             if !self.parts[p].alive {
@@ -370,33 +412,100 @@ impl Robot {
             let (Some(info), Some(joint)) = (self.rig.parts[p].joint, self.parts[p].joint) else {
                 continue;
             };
-            let target = match info.use_kind {
-                JointUse::Spun => info.rate,
-                // Parked until something triggers it (see `JointUse::Burst`);
-                // its hold is the joint's friction, not a motor. A servo piston
-                // is parked the same way until the control layer moves it (F8).
-                JointUse::Burst | JointUse::Passive | JointUse::Piston => continue,
-                JointUse::Wheel => {
-                    let root = self.rig.parts[p].root;
-                    let c = &self.rig.components[root];
-                    // The wheel rolls perpendicular to the joint axis.
-                    let roll = info.axis.cross(Vec3::Y).normalize_or_zero();
-                    if roll == Vec3::ZERO {
-                        continue;
+            match info.use_kind {
+                JointUse::Passive => {}
+                JointUse::Burst => self.drive_burst(physics, p, info, joint),
+                JointUse::Spun | JointUse::Wheel | JointUse::Piston => {
+                    let command = self
+                        .control
+                        .command(&self.rig.wiring, info.motor)
+                        .unwrap_or(0.0);
+                    // TODO(load limit): the original caps a hinge's torque by the
+                    // load it carries (`HingeController` vtable 0x6a7e44 slot 10 =
+                    // 0x480510, "min(75T, 25m(1-|d|))", speed S*min(1, 2T/(m(1+|d|))))
+                    // but nothing calls it directly: the constructors at 0x480293 and
+                    // 0x480320 only install the vtable, so it is a Havok motor
+                    // callback and the caller is not recovered.
+                    let target = command / FULL * info.rate * CLOCKWISE;
+                    if info.slider {
+                        physics.drive_slider(joint, target);
+                    } else {
+                        physics.drive_hinge(joint, target);
                     }
-                    // The front of the vehicle moves at whatever the wheel's own
-                    // motor can spin it to.
-                    let v = throttle * info.rate * c.wheel_radius();
-                    let hub = c.local.transform_point3(Vec3::ZERO);
-                    let v_hub = forward * v + yaw_axis.cross(hub) * yaw;
-                    v_hub.dot(roll) / c.wheel_radius().max(0.05)
                 }
-            };
-            if info.slider {
-                physics.drive_slider(joint, target);
-            } else {
-                physics.drive_hinge(joint, target);
             }
+        }
+        self.control.end_step();
+    }
+
+    /// One step of a burst motor's or piston's fire cycle.
+    fn drive_burst(
+        &mut self,
+        physics: &mut dyn PhysicsBackend,
+        p: usize,
+        info: JointInfo,
+        joint: JointHandle,
+    ) {
+        // The end of the travel is the farther limit from the rest pose: the
+        // motor's `end - start` (its other limit is zero), or a piston's longer
+        // stroke. (Ours for a piston: the rest pose is taken as the retracted end.)
+        let travel = if info.limits[1].abs() >= info.limits[0].abs() {
+            info.limits[1]
+        } else {
+            info.limits[0]
+        };
+        let dir = if travel < 0.0 { -1.0 } else { 1.0 };
+        let position = if info.slider {
+            physics.slider_offset(joint)
+        } else {
+            physics.hinge_angle(joint)
+        };
+        let reached = (position * dir) >= travel.abs() - if info.slider { 0.01 } else { 0.05 };
+        let home = (position * dir) <= if info.slider { 0.01 } else { 0.05 };
+        let fired = self.control.fired(&self.rig.wiring, info.motor);
+
+        let phase = &mut self.burst[p];
+        let before = *phase;
+        match *phase {
+            BurstPhase::Cocked => {
+                if fired {
+                    *phase = BurstPhase::Firing;
+                }
+            }
+            BurstPhase::Firing => {
+                if reached {
+                    *phase = BurstPhase::Cocking;
+                }
+            }
+            BurstPhase::Cocking => {
+                if fired && !reached {
+                    // Triggered again before it is home: released from here.
+                    *phase = BurstPhase::Firing;
+                } else if home {
+                    *phase = BurstPhase::Cocked;
+                }
+            }
+        }
+        let phase = *phase;
+        let target = match phase {
+            BurstPhase::Cocked => 0.0,
+            BurstPhase::Firing => dir * info.rate,
+            BurstPhase::Cocking => -dir * info.rate * COCK_FRACTION,
+        };
+        // Parked, the joint's friction holds it at the motor's torque; moving, it
+        // must not fight the motor.
+        if phase != before {
+            let friction = if phase == BurstPhase::Cocked {
+                info.friction_torque
+            } else {
+                0.0
+            };
+            physics.set_joint_strength(joint, info.max_torque, friction);
+        }
+        if info.slider {
+            physics.drive_slider(joint, target);
+        } else {
+            physics.drive_hinge(joint, target);
         }
     }
 

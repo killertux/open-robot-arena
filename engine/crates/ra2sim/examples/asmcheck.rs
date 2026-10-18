@@ -54,10 +54,6 @@ fn main() {
         .collect();
 
     let tuning = DriveTuning::default();
-    println!(
-        "tuning: max_yaw={:.1} rad/s (top speed comes from each motor's `power`)",
-        tuning.max_yaw_rate
-    );
 
     // Drive maths, once.
     let forward = Vec3::new(0.0, 0.0, -1.0);
@@ -119,6 +115,7 @@ fn main() {
                 DriveInput {
                     throttle: 1.0,
                     steer: 0.0,
+                    ..Default::default()
                 },
                 &tuning,
             );

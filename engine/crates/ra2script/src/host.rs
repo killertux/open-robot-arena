@@ -344,9 +344,9 @@ impl ScriptHost {
         self.brains.len()
     }
 
-    /// Run every brain one tick and read back its drive, `(robot, (throttle,
-    /// steer))`.
-    pub fn tick_brains(&self) -> Vec<(usize, (f32, f32))> {
+    /// Run every brain one tick and take the `Input` calls it made, `(robot,
+    /// events)`.
+    pub fn tick_brains(&self) -> Vec<(usize, Vec<crate::plus::InputEvent>)> {
         Python::with_gil(|py| {
             self.brains
                 .iter()
@@ -355,7 +355,7 @@ impl ScriptHost {
                         report_once(&format!("brain {i} Tick failed: {e}"));
                         return None;
                     }
-                    let d = ra2script_read_drive(brain, py);
+                    let d = crate::plus::take_input_events(brain, py);
                     if d.is_none() {
                         report_once(&format!("brain {i} is not a plus.AI"));
                     }
@@ -365,18 +365,13 @@ impl ScriptHost {
         })
     }
 
-    /// Read the channels each brain last set, without running one.
+    /// The robots a brain drives, without running one.
     ///
     /// A brain is designed for an eighth of a second per tick (see
     /// [`crate::AI_TICK_INTERVAL`]), while the physics runs many times per tick;
     /// in between, the controls simply hold.
-    pub fn read_drives(&self) -> Vec<(usize, (f32, f32))> {
-        Python::with_gil(|py| {
-            self.brains
-                .iter()
-                .filter_map(|(i, brain)| ra2script_read_drive(brain, py).map(|d| (*i, d)))
-                .collect()
-        })
+    pub fn brain_robots(&self) -> Vec<usize> {
+        self.brains.iter().map(|(i, _)| *i).collect()
     }
 
     /// `Arenas.<script>`'s arena class, instantiated and made current.
@@ -519,10 +514,6 @@ impl ScriptHost {
             None => Ok(true),
         }
     }
-}
-
-fn ra2script_read_drive(brain: &Py<PyAny>, py: Python<'_>) -> Option<(f32, f32)> {
-    crate::plus::read_drive(brain, py)
 }
 
 /// A Python exception rendered with its traceback.
