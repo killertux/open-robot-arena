@@ -474,6 +474,18 @@ impl ScriptHost {
         })
     }
 
+    /// Tell every brain a robot's immobility countdown started or stopped:
+    /// the match calls `ImmobilityWarning(id, on)` on each AI (`FUN_004c3380`).
+    pub fn send_immobility_warning(&self, id: i32, on: bool) {
+        Python::with_gil(|py| {
+            for (_, brain) in &self.brains {
+                if let Err(e) = brain.bind(py).call_method1("ImmobilityWarning", (id, on)) {
+                    report_once(&format!("ImmobilityWarning failed: {e}"));
+                }
+            }
+        })
+    }
+
     /// Call the arena's `Tick`. The clock is [`crate::publish`]'s.
     pub fn tick_arena(&self, py: Python<'_>, _dt: f32) -> PyResult<bool> {
         let arena = crate::state()

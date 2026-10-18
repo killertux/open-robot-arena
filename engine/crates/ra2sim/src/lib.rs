@@ -8,6 +8,7 @@ pub mod career;
 pub mod combat;
 pub mod duel;
 pub mod hazards;
+pub mod immobility;
 pub mod jolt;
 pub mod r#match;
 pub mod montage;

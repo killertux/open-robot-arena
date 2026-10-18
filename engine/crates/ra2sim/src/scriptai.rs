@@ -129,6 +129,11 @@ impl ScriptAi {
         self.host.send_zone_event(direction, zone, robot, chassis)
     }
 
+    /// `ImmobilityWarning(id, on)` to every brain (`FUN_00412fc0`).
+    pub fn immobility_warning(&self, id: i32, on: bool) {
+        self.host.send_immobility_warning(id, on);
+    }
+
     /// Run the arena's own `Tick`, which the game did four times a second.
     ///
     /// An error is returned, not turned into `true`: the duel logs the first

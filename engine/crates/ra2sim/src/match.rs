@@ -540,6 +540,9 @@ impl Match {
                 if countdown_number(self.countdown_left).is_none() {
                     self.countdown_left = 0.0;
                     self.state = MatchState::Fight;
+                    // `FUN_00412fc0` runs its immobility rule only while the
+                    // fight is on (`+0x8e`).
+                    self.duel.immobility_active = true;
                 }
             }
             MatchState::Fight => {

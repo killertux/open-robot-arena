@@ -1,70 +1,71 @@
-//! Weapon impacts: turning contacts into damage.
+//! Collision damage, as the original computes it.
 //!
-//! Jolt reports whether two *bodies* are touching, but not which component
-//! touched which. Rather than guess from geometry (bounding volumes miss real
-//! hull contacts), we let the physics engine decide which of the two robots'
-//! bodies met and then attribute the hit: the attacker contributes its best
-//! weapon among the bodies that made contact, and the damage lands on whichever
-//! of the opponent's contacting bodies carries the nearest destructible part.
+//! Havok fires a collision event for **every contact point on every step** while
+//! two bodies touch (world step `FUN_0052aa60` → event manager `FUN_00549c30`).
+//! The robot's listener (`FUN_00414d80`) turns each event into a hit in *both*
+//! directions: the component on one side asks `computeDamage` (`FUN_00489470`)
+//! about the component on the other, using its **own** `piercing`,
+//! `concussion` and material, and the damage lands on that exact component.
+//! This module is that pipeline, fed by the physics backend's contact points
+//! ([`ContactEvent`]).
 //!
-//! Testing only the robots' root bodies — as this used to — misses every hit
-//! that lands elsewhere. A robot is several hinged parts (a chassis group plus a
-//! body per motor), so a spinner arm or a wheel meeting the opponent is a
-//! different body pair, and those contacts silently did no damage.
+//! ## The record (`FUN_0045a430`)
 //!
-//! ## A hit is an event, and a grind is a rate
+//! `rec0` is the **normal closing speed at the contact point**, measured on the
+//! bodies' state at the start of the step, before the solver touches them:
+//! `|(v_a(p) − v_b(p)) · n|` with `v(p) = v + ω × (p − com)`.
 //!
-//! The game reports damage in *amounts per hit* — `GetLastDamageReceived`
-//! returns `(component, amount, time, by player, by component)`, the AI scripts
-//! treat `amount > 10` as "a good solid hit" and hazards apply a flat 25 — so
-//! the damage a ram does is set by the speed the robots *arrive* with, dealt
-//! once when contact begins. Integrating an instantaneous speed over the steps a
-//! contact lasts (what this used to do) gives a brief fast impact almost no
-//! weight and lets two motionless robots erode each other, which is neither what
-//! the game does nor what a fight looks like.
+//! ## The magnitude (`FUN_0045a5a0`)
 //!
-//! A spinning weapon is different: it works the same joint repeatedly while it
-//! turns, so its rotor **tip speed is a rate** and is applied every step.
-//! Motionless contact therefore does nothing, a ram is a single blow, and a
-//! spinner grinds.
+//! ```text
+//! M = 0.5 · rec0 / (1/m_a + 1/m_b + (r_a×n)·I_a⁻¹(r_a×n) + (r_b×n)·I_b⁻¹(r_b×n))
+//! ```
+//!
+//! A mass of zero or less counts as an inverse mass of `0.08`, and no inverse
+//! mass is smaller than `0.01`, so a body is never heavier than 100 kg to the
+//! formula.
+//!
+//! ## The damage (`FUN_00489470`)
+//!
+//! ```text
+//! damage = (piercing · rec0 · 10 + concussion · M) · scale
+//! ```
+//!
+//! `piercing`/`concussion` and `scale` (the material float) belong to the
+//! *attacking* component. A component that declares neither has the
+//! constructor's defaults: piercing `0`, concussion `1`. Two material classes
+//! zero the hit outright: an **Arenium** victim (class `0x715dc8`) takes
+//! nothing, and an Arenium attacker does nothing to a **Rubber** victim
+//! (class `0x715de4`).
+//!
+//! ## The gates (`FUN_00417330`)
+//!
+//! A component that has already come off (`+0xe0 > 0`, the detach state
+//! machine of `FUN_0045f4e0`/`FUN_0045f710`) on either side ends the event.
+//! Below `10.0` the amount only drives effects (`FUN_00417510` → component
+//! vtable `+0x6c` = `FUN_0045f3a0`: sparks and sound, themselves gated on
+//! `> 10`); from `10.0` up it is applied to the victim (`FUN_004175b0` →
+//! `FUN_00489620` → vtable `+0x1c`) and scored. There is no damage from a
+//! sub-threshold bump, however long it lasts.
 
-use glam::{Mat4, Vec3};
+use std::collections::HashMap;
 
-use crate::backend::PhysicsBackend;
+use glam::{Mat3, Mat4, Vec3};
+
+use crate::backend::{BodyHandle, BodyState, ContactEvent};
 use crate::rig::Role;
 use crate::robot::Robot;
 
-/// Tuning for the damage model.
-///
-/// The engine's own hit formula was recovered from the binary
-/// (`FUN_00489470`, called from the collision handler `FUN_00503c30`):
-///
-/// ```text
-/// damage = (piercing * contact_speed * 10 + concussion * magnitude) * scale
-/// ```
-///
-/// It is **linear and additive** in the two parameters the component declares,
-/// with coefficients **10** and **1**, which is the shape the community's own
-/// measurements fit (`D = 183.9·P + 100·C`). `magnitude` is the collision's
-/// *impulse*: the engine's magnitude function (`FUN_0045a5a0`) works from the
-/// contrast of the two bodies and returns `0.5 · μ · v` for the reduced mass and
-/// closing speed, halving it at the end. `scale` is the **attacking
-/// component's** material float (`FUN_00489470` reads
-/// `*(float *)(*(int *)(this + 0x64) + 4)`): `Metal` 0.1, `Rubber` 0.0,
-/// `Arenium` 0.5, overridden per definition by `material = <class>(<n>)` — the
-/// ram plate is `metal(.4)`. It is no longer calibrated; F7 recovered it from
-/// the `MaterialObject` constructors and the component factory.
-///
-/// A non-weapon part declares neither parameter, so its whole factor is the
-/// impulse's coefficient — a chassis ram is priced by the collision itself,
-/// which is also why there is no per-role weighting: the engine has none.
+/// The coefficients of the hit formula.
 #[derive(Clone, Copy, Debug)]
 pub struct CombatConfig {
-    /// `piercing`'s coefficient — **10**, recovered.
+    /// `piercing`'s coefficient — **10** (`FUN_00489470`).
     pub piercing_weight: f32,
-    /// `concussion`'s coefficient — **1**, recovered; it multiplies the
-    /// collision's impulse.
+    /// `concussion`'s coefficient — **1**; it multiplies [`magnitude`].
     pub concussion_weight: f32,
+    /// Damage below this only produces effects and is never applied or scored
+    /// (`FUN_00417330`: `10.0 <= dmg`).
+    pub apply_threshold: f32,
 }
 
 impl Default for CombatConfig {
@@ -72,26 +73,20 @@ impl Default for CombatConfig {
         CombatConfig {
             piercing_weight: 10.0,
             concussion_weight: 1.0,
+            apply_threshold: APPLY_THRESHOLD,
         }
     }
 }
 
-/// The engine's own gate: a blow smaller than this is discarded.
-///
-/// `FUN_00503c30` only applies its hit when the amount comes out above `0.5`, so
-/// two robots leaning on each other at rest do nothing at all.
-pub const MIN_BLOW: f32 = 0.5;
+/// The smallest hit that is applied to hitpoints and scored.
+pub const APPLY_THRESHOLD: f32 = 10.0;
 
-/// The reduced mass of a pair of robots, `m1·m2/(m1+m2)`.
-///
-/// Half of it is the coefficient of the collision's impulse in the hit formula,
-/// so two heavy robots hurt each other more than a heavy one hurts a light one.
-pub fn reduced_mass(a: &Robot, b: &Robot) -> f32 {
-    let (ma, mb) = (a.remaining_mass().max(0.2), b.remaining_mass().max(0.2));
-    ma * mb / (ma + mb)
-}
+/// `FUN_0045a5a0`'s inverse mass for a body with no mass.
+const INV_MASS_UNKNOWN: f32 = 0.08;
+/// ... and the floor under every inverse mass.
+const INV_MASS_FLOOR: f32 = 0.01;
 
-/// One part hitting another in a single step.
+/// One hit: a component of `attacker` struck a component of `target`.
 #[derive(Clone, Copy, Debug)]
 pub struct Impact {
     pub attacker: usize,
@@ -102,277 +97,366 @@ pub struct Impact {
     pub by: usize,
     pub damage: f32,
     pub point: Vec3,
+    /// The record's closing speed (`rec0`), m/s.
+    pub speed: f32,
 }
 
-/// The best strike one robot can make this step.
-#[derive(Clone, Copy, Debug)]
-struct Strike {
-    /// The component that strikes.
-    index: usize,
-    /// Damage factor (`concussion + piercing` for a weapon).
-    factor: f32,
-    /// The speed the strike arrives with: the robots' closing speed for a blow,
-    /// the part's rotor tip speed for a grinding one (m/s).
-    impact: f32,
-    /// Damage dealt this step.
-    damage: f32,
-    point: Vec3,
-}
-
-/// Damage factor per m/s and rotor tip speed for one attacking component, plus
-/// that tip speed. `worlds` are component world transforms (the rig's bodies
-/// already place them) and `impulse` is half the reduced mass of the two robots
-/// — the engine's collision magnitude without its speed term.
-fn offense(
-    r: &Robot,
-    worlds: &[Mat4],
-    index: usize,
-    impulse: f32,
-    cfg: &CombatConfig,
-) -> Option<(f32, f32)> {
-    let c = &r.rig.components[index];
-    // The collision itself, plus — for a weapon — the two parameters its own
-    // definition declares. A part that declares none contributes the collision
-    // alone, which is how the engine prices a bare ram.
-    let factor = match c.role {
-        Role::Weapon => {
-            let (piercing, concussion) = c
-                .weapon
-                .map(|w| (w.piercing, w.concussion))
-                .unwrap_or((0.0, 0.0));
-            cfg.piercing_weight * piercing + cfg.concussion_weight * impulse * concussion
-        }
-        _ => impulse,
+/// `1/m` the way `FUN_0045a5a0` forms it.
+pub fn inverse_mass_term(mass: f32) -> f32 {
+    let inv = if mass <= 0.0 {
+        INV_MASS_UNKNOWN
+    } else {
+        1.0 / mass
     };
-    if factor <= 0.0 {
-        return None;
-    }
-
-    // Tip speed of the nearest motor turning this part.
-    let here = worlds[index].transform_point3(c.center());
-    let mut tip = 0.0;
-    let mut p = c.parent;
-    while let Some(pi) = p {
-        if let Some(m) = r.rig.components[pi].motor {
-            let mc = &r.rig.components[pi];
-            let mw = worlds[pi].transform_point3(mc.center());
-            tip = m.speed * (here - mw).length();
-            break;
-        }
-        p = r.rig.components[pi].parent;
-    }
-    Some((factor, tip))
+    inv.max(INV_MASS_FLOOR)
 }
 
-/// The attacker's best strike this step, among the components on the bodies that
-/// are touching the opponent.
-///
-/// `blow` is the closing speed the robots arrived with on the step contact
-/// began, and zero while a contact simply continues; `dt` scales the rotor term,
-/// which is a rate.
-fn best_strike(
-    r: &Robot,
-    worlds: &[Mat4],
-    blow: f32,
-    impulse: f32,
-    dt: f32,
-    on_parts: &[bool],
-    cfg: &CombatConfig,
-) -> Option<Strike> {
-    let mut best: Option<Strike> = None;
-    for (i, c) in r.rig.components.iter().enumerate() {
-        if !r.attached[i] || c.hull_points.is_empty() {
-            continue;
-        }
-        if !on_parts.get(r.rig.part_of[i]).copied().unwrap_or(false) {
-            continue;
-        }
-        let Some((factor, tip)) = offense(r, worlds, i, impulse, cfg) else {
-            continue;
-        };
-        // F7: the hit's `scale` is the **attacking component's** material
-        // float (`FUN_00489470` reads it from `this + 0x64`, and the same
-        // object carries the `piercing`/`concussion` it just used). A chassis
-        // that declares no material is Metal, 0.1; a ram plate is 0.4; a
-        // rubber caster is 0.0.
-        let damage = c.material_scale * factor * (blow + tip * dt);
-        if damage <= 0.0 {
-            continue;
-        }
-        let strike = Strike {
-            index: i,
-            factor,
-            impact: blow.max(tip),
-            damage,
-            point: worlds[i].transform_point3(c.center()),
-        };
-        if best.as_ref().map(|b| damage > b.damage).unwrap_or(true) {
-            best = Some(strike);
-        }
-    }
-    best
+/// The angular term of one body: `(r × n) · I⁻¹ (r × n)`.
+pub fn angular_term(r: Vec3, n: Vec3, inv_inertia_world: Mat3) -> f32 {
+    let rn = r.cross(n);
+    rn.dot(inv_inertia_world * rn)
 }
 
-/// Which bodies of `a` and `b` are touching, as `(a_parts, b_parts)` flags.
-///
-/// A robot is several hinged bodies, so a contact is between two particular
-/// bodies (the chassis group, a motor's rotor, a wheel); both sides of it are
-/// what the hit is attributed through.
-pub fn contacting_parts(
-    physics: &dyn PhysicsBackend,
-    a: &Robot,
-    b: &Robot,
-) -> Option<(Vec<bool>, Vec<bool>)> {
-    let mut a_parts = vec![false; a.parts.len()];
-    let mut b_parts = vec![false; b.parts.len()];
-    let mut any = false;
-    for (i, pa) in a.parts.iter().enumerate() {
-        if !pa.alive {
-            continue;
-        }
-        for (j, pb) in b.parts.iter().enumerate() {
-            if !pb.alive {
-                continue;
-            }
-            if physics.in_contact(pa.body, pb.body) {
-                a_parts[i] = true;
-                b_parts[j] = true;
-                any = true;
-            }
-        }
-    }
-    any.then_some((a_parts, b_parts))
+/// `FUN_0045a5a0`: half the closing speed over the effective inverse mass.
+pub fn magnitude(rec0: f32, mass_a: f32, mass_b: f32, ang_a: f32, ang_b: f32) -> f32 {
+    let denom = inverse_mass_term(mass_a) + inverse_mass_term(mass_b) + ang_a + ang_b;
+    rec0 / denom * 0.5
 }
 
-/// How a pair met this step.
+/// What a component does to another, as `FUN_00489470` reads it.
 #[derive(Clone, Copy, Debug)]
-pub struct Contact {
-    /// The closing speed the two robots arrived with, measured *before* the step
-    /// ran, so a blow is priced by the speed it arrived with rather than by
-    /// whatever the collision left behind (m/s).
-    pub approach: f32,
-    /// Whether this step is the one contact began on. A blow is dealt here; a
-    /// contact that simply continues only grinds.
-    pub first: bool,
+pub struct Striker<'a> {
+    pub piercing: f32,
+    pub concussion: f32,
+    /// The attacker's material float (`material + 4`).
+    pub scale: f32,
+    /// The attacker's material class, lower case (`"metal"`, `"arenium"`, …).
+    pub material: &'a str,
 }
 
-/// If robots `a` and `b` are in contact, the damage `a` deals to `b` this step.
-pub fn detect(
-    physics: &dyn PhysicsBackend,
-    robots: &[Robot],
-    a: usize,
-    b: usize,
-    dt: f32,
-    contact: Contact,
+/// `FUN_00489470`: the damage `attacker` does to a component of material
+/// `victim_material`, for a record with closing speed `rec0` and magnitude `m`.
+pub fn hit_damage(
+    attacker: Striker<'_>,
+    victim_material: &str,
+    rec0: f32,
+    m: f32,
     cfg: &CombatConfig,
-) -> Option<Impact> {
-    let (ra, rb) = (&robots[a], &robots[b]);
-    let (a_parts, b_parts) = contacting_parts(physics, ra, rb)?;
-    let (wa, wb) = (ra.component_worlds(physics), rb.component_worlds(physics));
-    let blow = if contact.first { contact.approach } else { 0.0 };
-
-    // The collision's own magnitude, without its speed: half the reduced mass.
-    let impulse = 0.5 * reduced_mass(ra, rb);
-    let strike = best_strike(ra, &wa, blow, impulse, dt, &a_parts, cfg)?;
-
-    // A blow the engine would discard: it only applies a hit above `0.5`. The
-    // gate is on the *blow*, not the grind — a spinner's rotor works the joint
-    // as a rate, and each pass of a blade is a hit of its own.
-    if contact.first && strike.damage <= MIN_BLOW {
-        return None;
+) -> f32 {
+    // Arenium shrugs everything off, and does nothing to rubber.
+    if victim_material == "arenium" {
+        return 0.0;
     }
-
-    // Land the hit on the opponent's part nearest the strike, among the bodies
-    // that are actually touching, and skipping indestructible fittings (control
-    // boards, anchors) that would otherwise soak the damage forever.
-    let mut target = None;
-    let mut best_d = f32::MAX;
-    for (j, c) in rb.rig.components.iter().enumerate() {
-        if !rb.attached[j] || c.hull_points.is_empty() || !c.damageable {
-            continue;
-        }
-        if !b_parts.get(rb.rig.part_of[j]).copied().unwrap_or(false) {
-            continue;
-        }
-        let d = (wb[j].transform_point3(c.center()) - strike.point).length();
-        if d < best_d {
-            best_d = d;
-            target = Some(j);
-        }
+    if attacker.material == "arenium" && victim_material == "rubber" {
+        return 0.0;
     }
-    let component = target?;
-
-    Some(Impact {
-        attacker: a,
-        target: b,
-        component,
-        by: strike.index,
-        damage: strike.damage,
-        point: strike.point,
-    })
+    (attacker.piercing * rec0 * cfg.piercing_weight
+        + m * attacker.concussion * cfg.concussion_weight)
+        * attacker.scale
 }
 
-/// Human-readable summary of what an attacker would do to a target right now.
-pub fn report(
-    physics: &dyn PhysicsBackend,
-    robots: &[Robot],
-    a: usize,
-    b: usize,
-    cfg: &CombatConfig,
-) -> Vec<String> {
-    let (ra, _rb) = (&robots[a], &robots[b]);
-    let wa = ra.component_worlds(physics);
-    let closing = (ra.velocity(physics) - _rb.velocity(physics)).length();
-    let contacts = contacting_parts(physics, ra, _rb);
-
-    let impulse = 0.5 * reduced_mass(ra, _rb);
-    let mut rows = vec![match &contacts {
-        Some((ap, bp)) => format!(
-            "contact=true closing={closing:.2} m/s parts a=[{}] b=[{}]",
-            flag_list(ap),
-            flag_list(bp)
-        ),
-        None => format!("contact=false closing={closing:.2} m/s"),
-    }];
-    if let Some((on_parts, _)) = contacts.as_ref() {
-        for (i, c) in ra.rig.components.iter().enumerate() {
-            if !ra.attached[i] {
-                continue;
-            }
-            let (factor, tip) = offense(ra, &wa, i, impulse, cfg).unwrap_or((0.0, 0.0));
-            if ra.rig.components[i].role == Role::Weapon {
-                let touching = on_parts.get(ra.rig.part_of[i]).copied().unwrap_or(false);
-                rows.push(format!(
-                    "  attacker {:2} {:24} factor={:.2} tip={:5.1} m/s{}",
-                    i,
-                    c.name,
-                    factor,
-                    tip,
-                    if touching { " (touching)" } else { "" }
-                ));
-            }
-        }
-        // What a blow would do, and what the grind does per second.
-        if let Some(s) = best_strike(ra, &wa, closing, impulse, 1.0, on_parts, cfg) {
-            rows.push(format!(
-                "  blow: factor={:.2} impact={:.1} m/s amount={:.0}",
-                s.factor, s.impact, s.damage
-            ));
-        }
-        if let Some(s) = best_strike(ra, &wa, 0.0, impulse, 1.0, on_parts, cfg) {
-            rows.push(format!("  grind: dps={:.0}", s.damage));
-        }
+/// The material class named by a definition's `material = metal(.4)` line.
+pub fn material_class(material: Option<&str>) -> &str {
+    match material {
+        Some(m) => m.split('(').next().unwrap_or("metal").trim(),
+        None => "metal",
     }
-    rows
 }
 
-/// `"0 2 3"` for the entries that are set.
-fn flag_list(flags: &[bool]) -> String {
-    flags
+/// `v(p) = v + ω × (p − com)`.
+pub fn point_velocity(v: Vec3, w: Vec3, com: Vec3, p: Vec3) -> Vec3 {
+    v + w.cross(p - com)
+}
+
+/// A robot body as the formula sees it: mass, centre of mass and the inverse
+/// inertia tensor in world space, built from the components welded into it.
+#[derive(Clone, Copy, Debug)]
+pub struct BodyDynamics {
+    pub mass: f32,
+    pub com: Vec3,
+    pub inv_inertia: Mat3,
+}
+
+/// The dynamics of part `part` of `robot` at pre-step state `state`.
+///
+/// Jolt does not expose a body's inertia tensor, so it is rebuilt from what the
+/// body is made of: each attached component is a solid box of its own extent at
+/// its own mass, about the common centre of mass.
+pub fn body_dynamics(robot: &Robot, part: usize, state: &BodyState) -> BodyDynamics {
+    let members: Vec<usize> = robot.rig.parts[part]
+        .members
         .iter()
-        .enumerate()
-        .filter(|(_, f)| **f)
-        .map(|(i, _)| i.to_string())
-        .collect::<Vec<_>>()
-        .join(" ")
+        .copied()
+        .filter(|&i| robot.attached[i])
+        .collect();
+    let frame = Mat4::from_rotation_translation(state.rotation, state.position);
+    let scale = robot.mass_scale;
+    let mut mass = 0.0;
+    let mut com_local = Vec3::ZERO;
+    for &i in &members {
+        let c = &robot.rig.components[i];
+        let m = c.mass * scale;
+        mass += m;
+        com_local += robot.rig.part_local[i].transform_point3(c.center()) * m;
+    }
+    if mass <= 0.0 {
+        return BodyDynamics {
+            mass: 0.0,
+            com: frame.transform_point3(Vec3::ZERO),
+            inv_inertia: Mat3::ZERO,
+        };
+    }
+    com_local /= mass;
+    let mut inertia = Mat3::ZERO;
+    for &i in &members {
+        let c = &robot.rig.components[i];
+        let m = c.mass * scale;
+        let local = robot.rig.part_local[i];
+        let h = c.half_extents();
+        let diag = Vec3::new(
+            m / 3.0 * (h.y * h.y + h.z * h.z),
+            m / 3.0 * (h.x * h.x + h.z * h.z),
+            m / 3.0 * (h.x * h.x + h.y * h.y),
+        );
+        let rot = Mat3::from_mat4(local);
+        let own = rot * Mat3::from_diagonal(diag) * rot.transpose();
+        let d = local.transform_point3(c.center()) - com_local;
+        let shift = Mat3::from_diagonal(Vec3::splat(d.length_squared()))
+            - Mat3::from_cols(d * d.x, d * d.y, d * d.z);
+        inertia += own + shift * m;
+    }
+    let inv_local = if inertia.determinant().abs() > 1e-9 {
+        inertia.inverse()
+    } else {
+        Mat3::ZERO
+    };
+    let r = Mat3::from_quat(state.rotation);
+    BodyDynamics {
+        mass: mass.max(0.2),
+        com: frame.transform_point3(com_local),
+        inv_inertia: r * inv_local * r.transpose(),
+    }
+}
+
+/// The attached component of `part` closest to the world point `p`, by distance
+/// to its own bounding box. This is the "exact touched component": the compound
+/// body is built from one hull per component, so the contact point lies on one
+/// of them.
+pub fn touched_component(robot: &Robot, part: usize, state: &BodyState, p: Vec3) -> Option<usize> {
+    let frame = Mat4::from_rotation_translation(state.rotation, state.position);
+    let mut best: Option<(usize, f32)> = None;
+    for &i in &robot.rig.parts[part].members {
+        let c = &robot.rig.components[i];
+        if !robot.attached[i] || c.hull_points.is_empty() {
+            continue;
+        }
+        let world = frame * robot.rig.part_local[i];
+        let local = world.inverse().transform_point3(p);
+        let clamped = local.clamp(c.min, c.max);
+        let d = (local - clamped).length_squared();
+        if best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((i, d));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// The attacking parameters of a component.
+fn striker(robot: &Robot, index: usize) -> Striker<'_> {
+    let c = &robot.rig.components[index];
+    let (piercing, concussion) = match (c.role, c.weapon) {
+        (Role::Weapon, Some(w)) => (w.piercing, w.concussion),
+        // The component constructor's defaults (`FUN_00489110`).
+        _ => (0.0, 1.0),
+    };
+    Striker {
+        piercing,
+        concussion,
+        scale: c.material_scale,
+        material: material_class(c.material.as_deref()),
+    }
+}
+
+/// Every hit of one step's contact events, in both directions.
+///
+/// `events` come from [`crate::backend::PhysicsBackend::take_contacts`]; only
+/// contacts between two different robots' bodies are dealt with. A hit is
+/// returned whatever its size, so the caller can apply the
+/// [`CombatConfig::apply_threshold`] gate the way `FUN_00417330` does.
+pub fn resolve(robots: &[Robot], events: &[ContactEvent], cfg: &CombatConfig) -> Vec<Impact> {
+    let mut owner: HashMap<BodyHandle, (usize, usize)> = HashMap::new();
+    for (r, robot) in robots.iter().enumerate() {
+        for (p, part) in robot.parts.iter().enumerate() {
+            if part.alive {
+                owner.insert(part.body, (r, p));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for e in events {
+        let (Some(&(ra, pa)), Some(&(rb, pb))) = (owner.get(&e.a), owner.get(&e.b)) else {
+            continue;
+        };
+        if ra == rb {
+            continue;
+        }
+        let (robot_a, robot_b) = (&robots[ra], &robots[rb]);
+        let dyn_a = body_dynamics(robot_a, pa, &e.state_a);
+        let dyn_b = body_dynamics(robot_b, pb, &e.state_b);
+        let n = e.normal.normalize_or_zero();
+        if n == Vec3::ZERO || dyn_a.mass <= 0.0 || dyn_b.mass <= 0.0 {
+            continue;
+        }
+        let va = point_velocity(
+            e.state_a.linear_velocity,
+            e.state_a.angular_velocity,
+            dyn_a.com,
+            e.point,
+        );
+        let vb = point_velocity(
+            e.state_b.linear_velocity,
+            e.state_b.angular_velocity,
+            dyn_b.com,
+            e.point,
+        );
+        let rec0 = (va - vb).dot(n).abs();
+        let m = magnitude(
+            rec0,
+            dyn_a.mass,
+            dyn_b.mass,
+            angular_term(e.point - dyn_a.com, n, dyn_a.inv_inertia),
+            angular_term(e.point - dyn_b.com, n, dyn_b.inv_inertia),
+        );
+        let (Some(ca), Some(cb)) = (
+            touched_component(robot_a, pa, &e.state_a, e.point),
+            touched_component(robot_b, pb, &e.state_b, e.point),
+        ) else {
+            continue;
+        };
+        for (att, att_c, vic, vic_c) in [(ra, ca, rb, cb), (rb, cb, ra, ca)] {
+            let (attacker, victim) = (&robots[att], &robots[vic]);
+            let damage = hit_damage(
+                striker(attacker, att_c),
+                material_class(victim.rig.components[vic_c].material.as_deref()),
+                rec0,
+                m,
+                cfg,
+            );
+            if damage > 0.0 && damage.is_finite() {
+                out.push(Impact {
+                    attacker: att,
+                    target: vic,
+                    component: vic_c,
+                    by: att_c,
+                    damage,
+                    point: e.point,
+                    speed: rec0,
+                });
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metal(piercing: f32, concussion: f32, scale: f32) -> Striker<'static> {
+        Striker {
+            piercing,
+            concussion,
+            scale,
+            material: "metal",
+        }
+    }
+
+    #[test]
+    fn inverse_mass_follows_the_clamps() {
+        assert_eq!(inverse_mass_term(0.0), 0.08);
+        assert_eq!(inverse_mass_term(-3.0), 0.08);
+        assert!((inverse_mass_term(20.0) - 0.05).abs() < 1e-6);
+        // Heavier than 100 kg is never heavier than 100 kg.
+        assert_eq!(inverse_mass_term(250.0), 0.01);
+    }
+
+    #[test]
+    fn magnitude_is_half_the_speed_over_the_effective_inverse_mass() {
+        // 10 m/s, 20 kg against 50 kg, no rotation:
+        // 0.5 * 10 / (0.05 + 0.02) = 71.428...
+        let m = magnitude(10.0, 20.0, 50.0, 0.0, 0.0);
+        assert!((m - 5.0 / 0.07).abs() < 1e-3, "{m}");
+        // The angular terms add to the denominator.
+        let m = magnitude(10.0, 20.0, 50.0, 0.03, 0.0);
+        assert!((m - 5.0 / 0.10).abs() < 1e-3, "{m}");
+    }
+
+    #[test]
+    fn angular_term_uses_the_lever_arm_perpendicular_to_the_normal() {
+        let inv = Mat3::from_diagonal(Vec3::splat(0.5));
+        // r = (0,1,0), n = (1,0,0): r×n = (0,0,-1), |r×n|² = 1, times 0.5.
+        let t = angular_term(Vec3::Y, Vec3::X, inv);
+        assert!((t - 0.5).abs() < 1e-6);
+        // A contact along the normal through the centre adds nothing.
+        assert_eq!(angular_term(Vec3::X, Vec3::X, inv), 0.0);
+    }
+
+    #[test]
+    fn damage_is_piercing_times_speed_times_ten_plus_concussion_times_magnitude() {
+        let cfg = CombatConfig::default();
+        // (0.3 * 8 * 10 + 0.8 * 40) * 0.1 = (24 + 32) * 0.1 = 5.6
+        let d = hit_damage(metal(0.3, 0.8, 0.1), "metal", 8.0, 40.0, &cfg);
+        assert!((d - 5.6).abs() < 1e-4, "{d}");
+        // A plain chassis: piercing 0, concussion 1, scale 0.1.
+        let d = hit_damage(metal(0.0, 1.0, 0.1), "metal", 8.0, 40.0, &cfg);
+        assert!((d - 4.0).abs() < 1e-4, "{d}");
+        // The ram plate overrides the scale to 0.4.
+        let d = hit_damage(metal(0.0, 1.0, 0.4), "metal", 8.0, 40.0, &cfg);
+        assert!((d - 16.0).abs() < 1e-4, "{d}");
+    }
+
+    #[test]
+    fn arenium_is_immune_and_does_nothing_to_rubber() {
+        let cfg = CombatConfig::default();
+        let a = Striker {
+            material: "arenium",
+            ..metal(0.0, 1.0, 0.5)
+        };
+        assert_eq!(hit_damage(a, "rubber", 8.0, 40.0, &cfg), 0.0);
+        assert!(hit_damage(a, "metal", 8.0, 40.0, &cfg) > 0.0);
+        // Anything that strikes an arenium component does nothing.
+        assert_eq!(
+            hit_damage(metal(0.9, 1.0, 0.1), "arenium", 8.0, 40.0, &cfg),
+            0.0
+        );
+        // Rubber attacks with a scale of zero.
+        assert_eq!(
+            hit_damage(
+                Striker {
+                    material: "rubber",
+                    ..metal(0.0, 1.0, 0.0)
+                },
+                "metal",
+                8.0,
+                40.0,
+                &cfg
+            ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn material_class_reads_the_name_before_the_override() {
+        assert_eq!(material_class(Some("metal(.4)")), "metal");
+        assert_eq!(material_class(Some("rubber(0)")), "rubber");
+        assert_eq!(material_class(Some("arenium")), "arenium");
+        assert_eq!(material_class(None), "metal");
+    }
+
+    #[test]
+    fn point_velocity_adds_the_spin() {
+        let v = point_velocity(Vec3::X, Vec3::Y * 2.0, Vec3::ZERO, Vec3::Z);
+        // ω × r = (0,2,0) × (0,0,1) = (2,0,0)
+        assert!((v - Vec3::new(3.0, 0.0, 0.0)).length() < 1e-6);
+    }
 }
