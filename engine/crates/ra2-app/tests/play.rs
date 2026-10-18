@@ -78,7 +78,8 @@ fn the_start_button_starts_a_match_and_is_not_a_shell_link() {
     let mut shell = Shell::boot(&game, SHELL_SIZE).unwrap();
     shell.click_named("exhibition button").unwrap();
     shell.click_named("arena button").unwrap();
-    let arenas = ra2ui::arenas::all(&game).unwrap();
+    // The setup opens on DEATHMATCH, so the list is that type's arenas.
+    let arenas = ra2ui::arenas::available(&game, "DEATHMATCH").unwrap();
     let row = arenas.iter().position(|a| a.script == "box.py").unwrap();
     shell
         .click_list_row(ra2ui::arenas::LIST, row)

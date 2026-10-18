@@ -445,6 +445,10 @@ impl UiAssets {
         if text.is_empty() {
             return;
         }
+        // A `DisplayBox`'s markup spells a line break as the two characters
+        // `\n` (the credits window's names are one string with seven of them).
+        let text = text.replace("\\n", "\n");
+        let text = text.as_str();
         let Some(box_) = glyph_box(p) else {
             return;
         };

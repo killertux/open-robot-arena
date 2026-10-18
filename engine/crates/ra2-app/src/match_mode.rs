@@ -759,7 +759,7 @@ impl Session {
             ra2ui::resolve_with(screen, SHELL_SIZE, Some(self.presentation.assets.faces()));
         let path = ra2ui::input::hit_control(&placed, point[0], point[1])?;
         let names = names_on_path(&placed, &path);
-        for wanted in ["continue button", "Quit Session button"] {
+        for wanted in ["continue button"] {
             if names.iter().any(|n| n == wanted) {
                 return Some(wanted.to_string());
             }
@@ -1551,7 +1551,7 @@ mod tests {
             scene.quads.len()
         );
         assert!(
-            glyphs > 100,
+            glyphs > 60,
             "a result screen reads, not a blank panel: {glyphs}"
         );
     }

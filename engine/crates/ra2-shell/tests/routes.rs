@@ -308,10 +308,16 @@ fn the_arena_picker_is_the_screen_and_the_arenas_the_data_names() {
         .filter(|c| c.kind == ra2fmt::gib::WidgetKind::Text)
         .filter_map(|c| c.field("_Text").map(|f| f.text()))
         .collect();
+    // The setup screen opens on DEATHMATCH, so the picker lists that type's
+    // arenas (the original's eight rows, Bridge of Doom first).
+    let available = ra2ui::arenas::available(&game, "DEATHMATCH").unwrap();
     assert_eq!(
         rows,
-        arenas.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-        "one row per arena, in the order the game's own picker sorts"
+        available
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
+        "one row per DEATHMATCH arena, in the order the game's own picker sorts"
     );
     assert!(rows.contains(&"Combat Arena"), "{rows:?}");
 }

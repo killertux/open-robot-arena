@@ -342,8 +342,8 @@ pub struct RobotReport {
     pub eliminated: bool,
     /// The result screen's `winner text`.
     pub winner: bool,
-    /// The result screen's `immobilized text`. The condition is not
-    /// established for our damage model; it stays hidden rather than guessing.
+    /// The result screen's `immobilized text`: the robot's state is 2
+    /// (IMMOBILIZED).
     pub immobilized: bool,
     /// Every component, in design order, with its remaining and pristine
     /// hitpoints and its detached/fractured state. `Career::repairs_from_report`
@@ -663,7 +663,17 @@ impl Match {
             .iter()
             .enumerate()
             .map(|(i, robot)| {
-                let team = &self.teams.get(robot.team);
+                // The result cell shows the bot's own AI team: a bot shipped under
+                // `AI/Team<N>/` belongs to `Teams.txt` record N (the folders line up
+                // with the table). `robot.team` is only the match grouping, so it
+                // is the fallback for bots from elsewhere (a career team's own).
+                let team = &self
+                    .config
+                    .robots
+                    .get(i)
+                    .and_then(|entry| ai_team_index(&entry.bot_path))
+                    .or(Some(robot.team))
+                    .and_then(|index| self.teams.get(index));
                 RobotReport {
                     slot: i,
                     team: robot.team,
@@ -695,7 +705,7 @@ impl Match {
                     defeated: !robot.is_alive(),
                     eliminated: robot.eliminated,
                     winner: self.winners.contains(&i),
-                    immobilized: false,
+                    immobilized: robot.immobilized,
                     components: robot
                         .rig
                         .components
@@ -913,6 +923,18 @@ fn bot_preview(path: &str) -> Option<ra2ui::preview::Preview> {
     let bytes = std::fs::read(path).ok()?;
     let bot = ra2fmt::bot::parse(&bytes).ok()?;
     ra2ui::preview::Preview::decode_tga(bot.snapshot.as_deref()?)
+}
+
+/// The `Teams.txt` record a shipped AI bot belongs to: the `N` of `AI/Team<N>/`.
+fn ai_team_index(bot_path: &str) -> Option<usize> {
+    let parts: Vec<&str> = bot_path.split(['/', '\\']).collect();
+    let at = parts.iter().rposition(|p| p.eq_ignore_ascii_case("AI"))?;
+    parts
+        .get(at + 1)?
+        .strip_prefix("Team")
+        .or_else(|| parts.get(at + 1)?.strip_prefix("team"))?
+        .parse()
+        .ok()
 }
 
 /// The event's team slot is the index into `AI/Teams.txt`; that is the table

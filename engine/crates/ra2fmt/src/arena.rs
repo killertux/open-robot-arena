@@ -10,6 +10,9 @@
 #[derive(Debug, Clone, Default)]
 pub struct ArenaScript {
     pub name: String,
+    /// The arena class's docstring: the text the picker shows under the preview
+    /// (`plus.ArenaDetail().description`).
+    pub description: String,
     /// `preview = "box/box_preview.bmp"` — the art the arena picker hands the C++
     /// beside the name (`plus.ArenaDetail().preview`).
     pub preview: Option<String>,
@@ -83,6 +86,22 @@ pub fn parse_script(text: &str) -> ArenaScript {
     if let Some(line) = text.lines().find(|l| l.trim_start().starts_with("name")) {
         if let Some(s) = str_lits(line).into_iter().next() {
             a.name = s;
+        }
+    }
+
+    // The class docstring, the first string line after `class ...:`.
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if line.trim_start().starts_with("class ") && line.trim_end().ends_with(':') {
+            if let Some(next) = lines.next() {
+                let next = next.trim();
+                if next.starts_with('"') {
+                    if let Some(s) = str_lits(next).into_iter().next() {
+                        a.description = s;
+                        break;
+                    }
+                }
+            }
         }
     }
 
