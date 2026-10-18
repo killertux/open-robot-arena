@@ -810,6 +810,14 @@ impl Session {
         }
     }
 
+    /// The sounds the live match's steps made since the last call.
+    pub fn take_cues(&mut self) -> Vec<crate::match_sounds::SoundCue> {
+        match &mut self.screen {
+            Screen::Match(session) => session.take_cues(),
+            _ => Vec::new(),
+        }
+    }
+
     fn match_clock(&self) -> Option<f32> {
         match &self.screen {
             Screen::Match(session) => Some(session.matched.clock()),
@@ -1956,6 +1964,9 @@ impl Target {
 /// The offscreen run: open the HQ, optionally play one event, and write the
 /// named frames.
 pub fn run_headless(options: Options) -> Result<(), String> {
+    // The events it plays drive the process-global script layer; everything that
+    // runs a scripted match serializes on this lock.
+    let _guard = ra2script::lock();
     let out = options
         .out
         .clone()

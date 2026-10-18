@@ -193,6 +193,9 @@ pub struct Component {
     pub material_scale: f32,
     /// `false` when the definition says `damageable = false`.
     pub damageable: bool,
+    /// The sound names the definition carries (`damagesounds`, `motorsound`,
+    /// `firesound`, `runsequence`).
+    pub sounds: ComponentSounds,
     pub role: Role,
     pub weapon: Option<WeaponStats>,
     pub motor: Option<MotorStats>,
@@ -215,6 +218,73 @@ pub struct Component {
     pub rest_items: Vec<Vec<Vec3>>,
     /// Children component indices (motor-driven subtree).
     pub children: Vec<usize>,
+}
+
+/// The sound keys of a component definition (`Components.cfz`).
+///
+/// `damagesounds` is a comma-separated list the original picks from at random
+/// when the component is hit (`FUN_0045cad0` takes a random element of the
+/// victim's list); the chassis takes its list from its armour material. The
+/// rest are played by the motor/weapon: `motorsound` loops while a motor runs,
+/// `runsequence` is spin-up / loop / spin-down, `firesound` plays when the
+/// device fires. Paths are as the definition spells them (`sounds\\x.wav`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ComponentSounds {
+    pub damage: Vec<String>,
+    pub motor: Option<String>,
+    pub fire: Option<String>,
+    pub run_sequence: Vec<String>,
+}
+
+impl ComponentSounds {
+    /// Read the sound keys from a definition.
+    pub fn from_def(def: Option<&ra2fmt::component::ComponentDef>) -> ComponentSounds {
+        let Some(def) = def else {
+            return ComponentSounds::default();
+        };
+        let list = |key: &str| -> Vec<String> {
+            def.get(key)
+                .map(|v| {
+                    v.split(',')
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        ComponentSounds {
+            damage: list("damagesounds"),
+            motor: list("motorsound").into_iter().next(),
+            fire: list("firesound").into_iter().next(),
+            run_sequence: list("runsequence"),
+        }
+    }
+
+    /// The chassis' impact sounds by armour type (`chassis_plast`, `_alum`,
+    /// `_steel`, `_tit` in `Components.cfz`): 0 plastic, 1 aluminium, 2 steel,
+    /// 3 titanium.
+    pub fn chassis(armour_type: i32) -> ComponentSounds {
+        let damage: &[&str] = match armour_type {
+            0 => &[
+                "sounds\\plastic_collision.wav",
+                "sounds\\plastic_collision.wav",
+            ],
+            1 => &[
+                "sounds\\aluminum_collision.wav",
+                "sounds\\aluminum_collision2.wav",
+                "sounds\\aluminum_collision3.wav",
+            ],
+            2 => &[
+                "sounds\\steel_collision.wav",
+                "sounds\\steel_collision2.wav",
+            ],
+            _ => &["sounds\\titanium_hit.wav", "sounds\\titanium_hit2.wav"],
+        };
+        ComponentSounds {
+            damage: damage.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
 }
 
 impl Component {
@@ -862,6 +932,17 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             .as_ref()
             .map(|d| !flag_false(d, "damageable"))
             .unwrap_or(true);
+        let mut sounds = ComponentSounds::from_def(def.as_ref());
+        if i == 0 && sounds.damage.is_empty() {
+            let armour_type = bot
+                .components
+                .first()
+                .and_then(|c| c.chassis.as_ref())
+                .and_then(|c| c.armour)
+                .map(|a| a.type_id)
+                .unwrap_or(2);
+            sounds = ComponentSounds::chassis(armour_type);
+        }
         let piston = (role == Role::Piston).then(|| {
             piston_stats(
                 def.as_ref().expect("a piston has a definition"),
@@ -949,6 +1030,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             material,
             material_scale,
             damageable,
+            sounds,
             role,
             weapon,
             motor,
@@ -1206,6 +1288,7 @@ mod tests {
             material: None,
             material_scale: ra2fmt::component::DEFAULT_MATERIAL_SCALE,
             damageable: true,
+            sounds: ComponentSounds::default(),
             role: if motor { Role::Motor } else { Role::Structure },
             weapon: None,
             motor: motor.then_some(MotorStats {

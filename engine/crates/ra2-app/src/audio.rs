@@ -29,6 +29,58 @@ use ra2fmt::cfg::Cfg;
 /// it are this client's mapping (see the module docs).
 pub const CLICK_SOUND: &str = "Sounds/button_click.wav";
 
+/// A UI or match cue with a fixed file, named by the exe (`Sounds\\...wav`).
+///
+/// Each name is a string in `Robot Arena 2.exe`; where the call site was traced
+/// the address is given, and where it was not the mapping is this client's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UiSound {
+    /// `Sounds\button_click.wav` (`0x5ec275`, the button class).
+    Click,
+    /// `Sounds\cmp_removal.wav` (`0x42f2be`): a component taken off a bot.
+    ComponentRemoved,
+    /// A component's own `attachsound` (`cmp_generic.wav`, `cmp_wheels.wav`, ...)
+    /// when it is attached in the workshop.
+    ComponentAttached(Option<String>),
+    /// `Sounds\snapshot.wav` (`0x43b8f2`, `0x5d7a67`): the workshop snapshot.
+    Snapshot,
+    /// `Sounds\point_plotted.wav` (`0x478fdf`, `0x47905d`): a graph point.
+    PointPlotted,
+    /// `Sounds\eject.wav` (`0x47d3f2`, `0x4d0791`).
+    Eject,
+    /// `Sounds\chat.wav` (`0x415849`): a chat line in a match.
+    Chat,
+    /// `Sounds\match_countdown.wav` (`0x4158bc`): a countdown number.
+    CountdownBeep,
+    /// `Sounds\match_countdown_high.wav` (`0x6f36fc`): the bell.
+    CountdownGo,
+    /// `Sounds\critical_hit.wav` (`0x4157d6`): a chassis critical hit.
+    CriticalHit,
+    /// `Sounds\immobile_countdown.wav` (`0x415763`): the immobility warning.
+    ImmobileWarning,
+}
+
+impl UiSound {
+    /// The file, or `None` for an attach with no sound named.
+    pub fn path(&self) -> Option<String> {
+        let name = match self {
+            UiSound::Click => "Sounds/button_click.wav",
+            UiSound::ComponentRemoved => "Sounds/cmp_removal.wav",
+            UiSound::ComponentAttached(Some(path)) => return Some(path.clone()),
+            UiSound::ComponentAttached(None) => return None,
+            UiSound::Snapshot => "Sounds/snapshot.wav",
+            UiSound::PointPlotted => "Sounds/point_plotted.wav",
+            UiSound::Eject => "Sounds/eject.wav",
+            UiSound::Chat => "Sounds/chat.wav",
+            UiSound::CountdownBeep => "Sounds/match_countdown.wav",
+            UiSound::CountdownGo => "Sounds/match_countdown_high.wav",
+            UiSound::CriticalHit => "Sounds/critical_hit.wav",
+            UiSound::ImmobileWarning => "Sounds/immobile_countdown.wav",
+        };
+        Some(name.to_string())
+    }
+}
+
 /// The client's audio system and its report.
 pub struct AudioSystem {
     game: PathBuf,
@@ -43,6 +95,8 @@ pub struct AudioSystem {
     problems: Vec<String>,
     /// Music start/stop lines, which the `PlayLog` does not record.
     events: Vec<String>,
+    /// The script host's match time at the last drain, for the audio clock.
+    last_match_time: Option<f32>,
 }
 
 impl AudioSystem {
@@ -68,6 +122,163 @@ impl AudioSystem {
             listener: None,
             problems: Vec::new(),
             events: Vec::new(),
+            last_match_time: None,
+        }
+    }
+
+    /// The same policy over a capturing [`Audio`]: no device, but every start,
+    /// stop and fade is timed so [`AudioSystem::render_wav`] can write what the
+    /// client would have played.
+    pub fn new_capturing(game: impl AsRef<Path>, cfg: &Cfg) -> AudioSystem {
+        Self::with_audio(game, cfg, Audio::capturing())
+    }
+
+    /// A capturing system when `RA2_AUDIO_WAV` names an output file, otherwise
+    /// the silent one. The offscreen runners use this so any of them can write
+    /// the audio the client would have played (see [`AudioSystem::finish_capture`]).
+    pub fn new_offscreen(game: impl AsRef<Path>, cfg: &Cfg) -> AudioSystem {
+        if std::env::var_os("RA2_AUDIO_WAV").is_some() {
+            Self::new_capturing(game, cfg)
+        } else {
+            Self::new_silent(game, cfg)
+        }
+    }
+
+    /// Write the captured audio to `RA2_AUDIO_WAV`, if that is set and this
+    /// system is capturing. `RA2_AUDIO_MUSIC_OFFSET` (seconds) starts every
+    /// music track that far into its file, to line a render up with a recording
+    /// that began mid-track. `seconds` is the length to render.
+    pub fn finish_capture(&mut self, seconds: f32) -> Result<(), String> {
+        let Some(path) = std::env::var_os("RA2_AUDIO_WAV") else {
+            return Ok(());
+        };
+        if self.audio.capture().is_none() {
+            return Ok(());
+        }
+        if let Some(offset) = std::env::var("RA2_AUDIO_MUSIC_OFFSET")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            if let Some(capture) = self.audio.capture_mut() {
+                capture.set_music_offset(offset);
+            }
+        }
+        // `RA2_AUDIO_START` drops the first seconds of the render, so a match
+        // render can start where the recording does (the end of the countdown).
+        let start = std::env::var("RA2_AUDIO_START")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0)
+            .max(0.0);
+        let path = std::path::PathBuf::from(path);
+        let capture = self.audio.capture().ok_or("not capturing")?;
+        let mut samples = capture.render(start + seconds);
+        samples.drain(
+            ..((start * ra2_audio::capture::RENDER_RATE as f32) as usize * 2).min(samples.len()),
+        );
+        ra2_audio::capture::write_wav(&path, &samples)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        println!(
+            "audio: wrote {} ({seconds:.2} s from {start:.2} s; {} voices)",
+            path.display(),
+            capture.voice_count()
+        );
+        Ok(())
+    }
+
+    /// Advance the audio clock by `dt` seconds (fades, capture timestamps).
+    pub fn advance(&mut self, dt: f32) {
+        self.audio.advance(dt);
+    }
+
+    /// Mix the captured timeline into a 48 kHz stereo WAV, `seconds` long.
+    pub fn render_wav(&self, path: &Path, seconds: f32) -> Result<(), String> {
+        let capture = self
+            .audio
+            .capture()
+            .ok_or("render_wav needs AudioSystem::new_capturing")?;
+        let samples = capture.render(seconds);
+        ra2_audio::capture::write_wav(path, &samples)
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Play a fixed UI/match sound through the SFX category (2D, unity).
+    pub fn ui(&mut self, sound: UiSound) {
+        let Some(name) = sound.path() else { return };
+        match ra2_audio::resolve_game_path(&self.game, &name) {
+            Some(path) => {
+                if let Err(error) = self.audio.play_2d(&path, 1.0) {
+                    self.problems.push(format!("ui sound: {error}"));
+                }
+            }
+            None => self.problems.push(format!(
+                "ui sound: {name} is not in {}",
+                self.game.display()
+            )),
+        }
+    }
+
+    /// Play what a match step sounded like, heard from `listener`.
+    pub fn play_cues(&mut self, cues: Vec<crate::match_sounds::SoundCue>, listener: Listener) {
+        use crate::match_sounds::SoundCue;
+        for cue in cues {
+            match cue {
+                SoundCue::Impact {
+                    path,
+                    position,
+                    hundredths_db,
+                } => {
+                    let gain = ra2_audio::hundredths_db_to_gain(hundredths_db);
+                    // The original's match audio is centred (left == right), so an
+                    // impact is a flat sound at its volume, not a positioned one;
+                    // the position stays in the cue for a future spatial model.
+                    let _ = (position, listener);
+                    match ra2_audio::resolve_game_path(&self.game, &path) {
+                        Some(file) => {
+                            if let Err(error) = self.audio.play_2d(&file, gain) {
+                                self.problems.push(format!("impact: {error}"));
+                            }
+                        }
+                        None => self
+                            .problems
+                            .push(format!("impact: {path} is not in the game")),
+                    }
+                }
+                SoundCue::Beep { go } => self.ui(if go {
+                    UiSound::CountdownGo
+                } else {
+                    UiSound::CountdownBeep
+                }),
+                SoundCue::Critical { .. } => self.ui(UiSound::CriticalHit),
+                SoundCue::Chat => self.ui(UiSound::Chat),
+                SoundCue::Motor {
+                    key,
+                    on,
+                    path,
+                    position: _,
+                } => {
+                    if on {
+                        match ra2_audio::resolve_game_path(&self.game, &path) {
+                            Some(file) => {
+                                // A motor fades up rather than clicking on.
+                                self.audio.set_script_volume(key, -10_000);
+                                if let Err(error) = self
+                                    .audio
+                                    .play_script(key, &file, true, [0.0; 3], listener, 1.0)
+                                {
+                                    self.problems.push(format!("motor: {error}"));
+                                }
+                                self.audio.fade_script_to(key, 0, 250.0);
+                            }
+                            None => self
+                                .problems
+                                .push(format!("motor: {path} is not in the game")),
+                        }
+                    } else {
+                        self.audio.fade_out_script(key, 250.0);
+                    }
+                }
+            }
         }
     }
 
@@ -148,17 +359,7 @@ impl AudioSystem {
     /// Play the shipped UI click at unity. The effective gain is the SFX
     /// category's (`SoundVolume`, `SoundMuted`), because it is a 2D sound.
     pub fn click(&mut self) {
-        match ra2_audio::resolve_game_path(&self.game, CLICK_SOUND) {
-            Some(path) => {
-                if let Err(error) = self.audio.play_2d(&path, 1.0) {
-                    self.problems.push(format!("click: {error}"));
-                }
-            }
-            None => self.problems.push(format!(
-                "click: {CLICK_SOUND} is not in {}",
-                self.game.display()
-            )),
-        }
+        self.ui(UiSound::Click);
     }
 
     /// Drain this tick's script sounds into the mixer, heard from `listener`.
@@ -168,6 +369,15 @@ impl AudioSystem {
     /// and `stopSound` against it, so both halves stay the script layer's.
     pub fn drain_match(&mut self, listener: Listener) {
         self.listener = Some(listener);
+        // The audio clock follows the script host's match time, so fades and
+        // capture timestamps are in match seconds whatever the tick rate.
+        let now = ra2script::state().time;
+        if let Some(last) = self.last_match_time {
+            if now > last {
+                self.audio.advance(now - last);
+            }
+        }
+        self.last_match_time = Some(now);
         let requests = ra2script::take_sound_requests();
         if requests.is_empty() {
             return;

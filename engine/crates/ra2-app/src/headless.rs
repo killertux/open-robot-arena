@@ -83,7 +83,7 @@ pub fn run(
         shell.size()[1]
     );
     let cfg = crate::options::read_cfg(game);
-    let mut audio = AudioSystem::new_silent(game, &cfg);
+    let mut audio = AudioSystem::new_offscreen(game, &cfg);
     audio.on_screen(&shell.screen_id());
     let mut settings = crate::options::Options::open_game(game);
 
@@ -120,6 +120,13 @@ pub fn run(
         size[1],
         steps.len()
     );
+    // A capture of the shell is the music (and the clicks) for as long as the
+    // recording we compare against: `RA2_AUDIO_SECONDS`, default 13.3 s.
+    let seconds = std::env::var("RA2_AUDIO_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(13.3);
+    audio.finish_capture(seconds)?;
     print!("{}", audio.report(audio_report));
     Ok(())
 }

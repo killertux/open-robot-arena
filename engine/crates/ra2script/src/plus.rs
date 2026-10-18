@@ -454,22 +454,41 @@ fn remove_sound(sound: u64) -> PyResult<()> {
     Ok(())
 }
 
+/// `plus.setVolume(handle, volume, ?)` — the handle's level in DirectSound
+/// hundredths of a decibel (`0` is unity, `-10000` silence). Every shipped call
+/// is `(handle, 0, 0)`; the second integer is a time in milliseconds in the
+/// same two-integer binding as `fadeInToLoop`, so it is accepted and unused
+/// (a level of 0 needs no ramp).
 #[pyfunction]
 #[pyo3(name = "setVolume")]
-fn set_volume(_sound: u64, _a: f32, _b: f32) {
-    defer("audio (M5)");
+fn set_volume(sound: u64, volume: f32, _ms: f32) -> PyResult<()> {
+    crate::state()
+        .sounds
+        .set_volume(crate::SoundId(sound), volume.round() as i32)
+        .map_err(PyValueError::new_err)
 }
 
+/// `plus.fadeInToLoop(handle, volume, ms)` — start the sound looping from
+/// silence and ramp it to `volume` (hundredths of a decibel) over `ms`.
 #[pyfunction]
 #[pyo3(name = "fadeInToLoop")]
-fn fade_in_to_loop(_sound: u64, _volume: f32, _ms: f32) {
-    defer("audio (M5)");
+fn fade_in_to_loop(sound: u64, volume: f32, ms: f32) -> PyResult<()> {
+    crate::state()
+        .sounds
+        .fade_in_to_loop(crate::SoundId(sound), volume.round() as i32, ms)
+        .map_err(PyValueError::new_err)
 }
 
+/// `plus.fadeOutLoop(handle, ms)` — ramp to silence over `ms`, then stop.
 #[pyfunction]
 #[pyo3(name = "fadeOutLoop")]
-fn fade_out_loop(_sound: u64, _ms: f32) {
-    defer("audio (M5)");
+fn fade_out_loop(sound: u64, ms: f32) -> PyResult<()> {
+    // Like `stopSound`: an arena's teardown may fade a handle that is gone.
+    let mut st = crate::state();
+    if let Err(message) = st.sounds.fade_out_loop(crate::SoundId(sound), ms) {
+        st.log.push(message);
+    }
+    Ok(())
 }
 
 #[pyfunction]

@@ -67,7 +67,10 @@ fn main() {
     }
     if std::env::var("GMI_PARENTS").is_ok() {
         for o in &s.objects {
-            println!("NODE {:?} kind {:?} parent {:?} tm {:?}", o.name, o.kind, o.parent, o.transform);
+            println!(
+                "NODE {:?} kind {:?} parent {:?} tm {:?}",
+                o.name, o.kind, o.parent, o.transform
+            );
         }
     }
     for o in s.meshes() {

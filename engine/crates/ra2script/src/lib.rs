@@ -161,6 +161,18 @@ pub enum SoundRequest {
     /// `plus.loopSound(handle)`: play it as a loop, or switch a sounding one
     /// to looping.
     Loop { id: SoundId },
+    /// `plus.setVolume(handle, volume, ..)`: the handle's level in DirectSound
+    /// hundredths of a decibel (`0` unity, `-10000` silence), immediate.
+    SetVolume { id: SoundId, hundredths_db: i32 },
+    /// `plus.fadeInToLoop(handle, volume, ms)`: start it looping from silence
+    /// and ramp to `volume` over `ms` milliseconds.
+    FadeInToLoop {
+        id: SoundId,
+        hundredths_db: i32,
+        ms: f32,
+    },
+    /// `plus.fadeOutLoop(handle, ms)`: ramp to silence over `ms`, then stop.
+    FadeOutLoop { id: SoundId, ms: f32 },
 }
 
 /// The script host's sound handles and the requests they produced.
@@ -299,6 +311,44 @@ impl SoundQueue {
         true
     }
 
+    /// `plus.setVolume(handle, volume, ..)`.
+    pub fn set_volume(&mut self, id: SoundId, hundredths_db: i32) -> Result<(), String> {
+        if !self.sounds.contains_key(&id) {
+            return Err(unknown("setVolume", id));
+        }
+        self.requests
+            .push(SoundRequest::SetVolume { id, hundredths_db });
+        Ok(())
+    }
+
+    /// `plus.fadeInToLoop(handle, volume, ms)`: the sound becomes a loop.
+    pub fn fade_in_to_loop(
+        &mut self,
+        id: SoundId,
+        hundredths_db: i32,
+        ms: f32,
+    ) -> Result<(), String> {
+        let Some(sound) = self.sounds.get_mut(&id) else {
+            return Err(unknown("fadeInToLoop", id));
+        };
+        sound.looping = true;
+        self.requests.push(SoundRequest::FadeInToLoop {
+            id,
+            hundredths_db,
+            ms,
+        });
+        Ok(())
+    }
+
+    /// `plus.fadeOutLoop(handle, ms)`.
+    pub fn fade_out_loop(&mut self, id: SoundId, ms: f32) -> Result<(), String> {
+        if !self.sounds.contains_key(&id) {
+            return Err(unknown("fadeOutLoop", id));
+        }
+        self.requests.push(SoundRequest::FadeOutLoop { id, ms });
+        Ok(())
+    }
+
     /// The queued requests, in call order.
     pub fn requests(&self) -> &[SoundRequest] {
         &self.requests
@@ -379,7 +429,42 @@ impl SoundQueue {
                 }
                 SoundRequest::Stop { id } => {
                     audio.stop_script(id.0);
-                    self.retired.remove(&id);
+                    // A removed handle also loses its `setVolume` level; a
+                    // merely stopped one keeps it for the next play.
+                    if self.retired.remove(&id).is_some() {
+                        audio.forget_script(id.0);
+                    }
+                }
+                SoundRequest::SetVolume { id, hundredths_db } => {
+                    audio.set_script_volume(id.0, hundredths_db);
+                }
+                SoundRequest::FadeInToLoop {
+                    id,
+                    hundredths_db,
+                    ms,
+                } => {
+                    let sound = self.sounds.get(&id).or_else(|| self.retired.get(&id));
+                    let Some(sound) = sound else {
+                        problems.push(format!("plus.fadeInToLoop: sound {id} is gone"));
+                        continue;
+                    };
+                    let (path, position) = (sound.path.clone(), sound.position);
+                    // It starts from silence and rises to the target.
+                    audio.set_script_volume(id.0, -10_000);
+                    play_one(
+                        id,
+                        &path,
+                        true,
+                        position,
+                        game_root,
+                        listener,
+                        audio,
+                        &mut problems,
+                    );
+                    audio.fade_script_to(id.0, hundredths_db, ms);
+                }
+                SoundRequest::FadeOutLoop { id, ms } => {
+                    audio.fade_out_script(id.0, ms);
                 }
             }
         }
@@ -607,6 +692,13 @@ pub fn prepare_match(game_type: &str, players: Vec<i32>) {
     st.paused = false;
     st.over = false;
     st.zone_contents.clear();
+    // A new match inherits nothing of the last one's arena or camera: the
+    // arena object (and with it its intro generator and camera iterators) is
+    // dropped until the new arena is built, and no camera request or running
+    // intro carries over.
+    st.arena_object = None;
+    st.camera_commands.clear();
+    st.intro_running = false;
 }
 
 /// Set the game-type string the scripts read (`plus.getGameType`).
@@ -1332,5 +1424,32 @@ mod shell_tests {
             super::giscript::dispatch_event(py, "anything", &py.None().into_bound(py))
         })
         .expect("the shell's dispatchEvent is called");
+    }
+
+    #[test]
+    fn volume_and_fade_requests_reach_the_audio_clock() {
+        let mut queue = SoundQueue::new();
+        let id = queue.create("Sounds/crowd/LoudCheer_Loop.wav", false, [0.0; 3]);
+        queue.set_volume(id, 0).unwrap();
+        queue.fade_in_to_loop(id, -100, 800.0).unwrap();
+        queue.fade_out_loop(id, 8000.0).unwrap();
+        assert!(queue.get(id).unwrap().looping, "fadeInToLoop makes a loop");
+        assert!(matches!(
+            queue.requests(),
+            [
+                SoundRequest::SetVolume {
+                    hundredths_db: 0,
+                    ..
+                },
+                SoundRequest::FadeInToLoop {
+                    hundredths_db: -100,
+                    ..
+                },
+                SoundRequest::FadeOutLoop { .. }
+            ]
+        ));
+        assert!(queue.set_volume(SoundId(99), 0).is_err());
+        assert!(queue.fade_out_loop(SoundId(99), 1.0).is_err());
+        assert!(queue.remove(id));
     }
 }
