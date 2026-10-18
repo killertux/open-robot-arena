@@ -342,9 +342,9 @@ impl GameLibrary {
         let points = scene_points(&scene);
         let mass = def.number("mass").unwrap_or_else(|| {
             let sum: f32 = scene
-                .objects
+                .rigid_bodies()
                 .iter()
-                .flat_map(|o| &o.rigid_bodies)
+                .filter(|rb| !rb.disable_collisions)
                 .map(|rb| rb.mass)
                 .sum();
             if sum > 0.0 {
@@ -516,8 +516,8 @@ mod tests {
         assert!(wheel.loaded, "the mini wheel should load");
         assert_eq!(wheel.base, "Wheel");
         assert!(
-            (wheel.mass - 8.0).abs() < 0.5,
-            "the mini wheel is the 8 kg anchor, got {}",
+            (wheel.mass - 9.0).abs() < 0.01,
+            "the mini wheel is its hub's 9 kg (the traction ring is a massless phantom), got {}",
             wheel.mass
         );
         assert!(wheel.has_hull);

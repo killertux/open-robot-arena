@@ -2896,7 +2896,10 @@ mod tests {
         // needs (F11) — and the AI is not: it runs on its own eighth-of-a-second
         // cadence whatever the physics does.
         //
-        // 30 s, not 20: the first hit lands at 20.23 s on the vendored CMake
+        // 60 s: with the robots at their recovered speed the shipped AI's idle
+        // spells (it waits in its corner for a random while) decide when the
+        // fight starts, and in the unit-test process it first meets at about 45 s.
+        // 30 s, not 20 (older note): the first hit lands at 20.23 s on the vendored CMake
         // build of Jolt (the prebuilt archive lands it just under 20 s). The
         // behavioural claim is that the shipped AI closes and hits; a window
         // that ends inside one build's rounding is not measuring that. Measured
@@ -2912,10 +2915,17 @@ mod tests {
         }
         duel.record_impacts = true;
         let mut closest = f32::MAX;
-        for _ in 0..(30.0 / dt) as usize {
+        for _ in 0..(60.0 / dt) as usize {
             duel.step(dt);
             closest = closest.min(duel.closest_gap());
         }
+        eprintln!(
+            "DBG {:?}",
+            duel.robots
+                .iter()
+                .map(|r| r.position(&*duel.physics))
+                .collect::<Vec<_>>()
+        );
         let hits: f32 = duel.damage_taken.iter().sum();
         assert!(
             closest < 1.0,

@@ -816,8 +816,15 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             } else {
                 // Every rigid body of the file, children included: a wheel's
                 // `wheelgroup` is a zero-mass parent whose `miniwheel` (9) and
-                // `wheel_traction` (8) children carry the mass.
-                let sum: f32 = lc.scene.rigid_bodies().iter().map(|rb| rb.mass).sum();
+                // `wheel_traction` (8, a phantom: `DISABLE_COLLISIONS`, no mass in the
+                // simulation) children; only the hub's 9 kg counts.
+                let sum: f32 = lc
+                    .scene
+                    .rigid_bodies()
+                    .iter()
+                    .filter(|rb| !rb.disable_collisions)
+                    .map(|rb| rb.mass)
+                    .sum();
                 if sum > 0.0 {
                     sum
                 } else {
