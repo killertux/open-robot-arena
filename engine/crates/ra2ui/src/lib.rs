@@ -1004,22 +1004,30 @@ fn place_at<'a>(
     place_core(widget, parent, inherited, fonts, baseline, None)
 }
 
-/// [`place_at`], with the widget's own frame optionally forced: a split frame
-/// gives each slot's child the slot's rectangle whatever the child's
-/// `Position`/`Size` say (`exhib_setup.gib`'s `top slot` states 418 px and is
-/// the whole 87% pane).
+/// [`place_at`], with the widget's frame optionally forced along a split's axis:
+/// a split frame gives each slot's child the slot's extent *along the axis it
+/// divides* whatever the child's `Position`/`Size` say there (`exhib_setup.gib`'s
+/// `top slot` states 418 px of height and is the whole 87% pane), while the
+/// other axis keeps the child's own rules (`content slot`'s `0.9` of the height
+/// of a horizontal split).
 fn place_core<'a>(
     widget: &'a Widget,
     parent: Frame,
     inherited: Option<Frame>,
     fonts: Option<&Fonts>,
     baseline: bool,
-    forced: Option<Frame>,
+    forced: Option<(Frame, bool)>,
 ) -> Placement<'a> {
-    let frame = match forced {
-        Some(frame) => frame,
-        None => sized(widget, parent, widget.size(), fonts, baseline),
-    };
+    let mut frame = sized(widget, parent, widget.size(), fonts, baseline);
+    if let Some((pane, horizontal)) = forced {
+        if horizontal {
+            frame.x = pane.x;
+            frame.w = pane.w;
+        } else {
+            frame.y = pane.y;
+            frame.h = pane.h;
+        }
+    }
     let clip = match ClipMode::from_value(widget.clip_mode()) {
         ClipMode::None => inherited,
         ClipMode::SelfFrame => Some(intersect(inherited, frame)),
@@ -1326,7 +1334,7 @@ fn split_children<'a>(
         .enumerate()
         .map(|(i, c)| {
             let pane = panes[i.min(1)];
-            place_core(c, pane, clip, fonts, false, Some(pane))
+            place_core(c, pane, clip, fonts, false, Some((pane, horizontal)))
         })
         .collect()
 }
@@ -2298,8 +2306,8 @@ mod tests {
         // fell back to half the frame for every split whose master is not the
         // first slot. The corpus is 4,348 widgets, and since every attachment
         // takes its body there are no ownerless records left to place against
-        // the screen: the 155 that still reach past it are fragments and
-        // authored oversize frames, not nesting failures. Seventy-seven of the
+        // the screen: the 66 that still reach past it are fragments and
+        // authored oversize frames, not nesting failures. Eighty-two of the
         // 116 files place entirely on screen. (A `TextBox` keeps its authored
         // rectangle now — its `Alignment` is text alignment, not a box anchor —
         // and a `Text` child is positioned by its baseline, so fewer frames are
@@ -2309,7 +2317,9 @@ mod tests {
         assert_eq!(perfect, 82, "perfect files");
         // The worst offender is a fragment, not a screen.
         assert!(
-            worst.1.ends_with("botlab/armor.gib") || worst.1.ends_with("botlab/adjust_none.gib"),
+            worst.1.ends_with("botlab/armor.gib")
+                || worst.1.ends_with("botlab/adjust_none.gib")
+                || worst.1.ends_with("botlab/comp_adjust.gib"),
             "{} {}",
             worst.1,
             worst.0
