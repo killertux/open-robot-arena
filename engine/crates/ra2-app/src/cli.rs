@@ -65,6 +65,10 @@ pub struct Args {
     pub save_as: Option<String>,
     /// `--audio-report`: print every play call (path, kind, gain, position).
     pub audio_report: bool,
+    /// `--match --out DIR --camera-shots intro@2.5,countdown,f2@13,f3,f3b,f4`:
+    /// one PNG per camera moment (`cam-<name>.png`), see
+    /// [`crate::match_mode::run_camera_shots`].
+    pub camera_shots: Vec<String>,
 }
 
 impl Default for Args {
@@ -100,6 +104,7 @@ impl Default for Args {
             start: None,
             save_as: None,
             audio_report: false,
+            camera_shots: Vec::new(),
         }
     }
 }
@@ -109,6 +114,7 @@ pub fn usage() -> &'static str {
      \x20                [--click-names \"Name;Name;...\"] [--audio-report]\n\
      \x20      ra2-app --match [--seconds N] [--out DIR] [--quit-at N]\n\
      \x20                [--bots A.bot,B.bot] [--arena PATH] [--audio-report]\n\
+     \x20                [--camera-shots intro@2.5,countdown,f2@13,f3@17,f3b@20,f4@24]\n\
      \x20      ra2-app --play --drive \"0-2:1,0;2-4:1,1\" [--seconds N] [--out DIR]\n\
      \x20                [--team N --bot N] [--opponent-team N --opponent-bot N]\n\
      \x20                [--gametype deathmatch|battle-royal|team-match|tabletop|king-of-hill]\n\
@@ -170,6 +176,9 @@ pub fn usage() -> &'static str {
        --quit-at N      pause at N fight seconds, quit to the menu, write pause/menu PNGs\n\
        --bots A,B       two .bot paths for --match\n\
        --arena PATH     arena script for --match/--play (default Arenas/box.py)\n\
+       --camera-shots L --match --out: one cam-<name>.png per entry of L; intro@T is T\n\
+                        seconds into the arena intro, countdown@N the countdown showing N,\n\
+                        f2|f3|f3b|f4@S presses that camera key at S fight seconds\n\
        -h, --help       this text"
 }
 
@@ -275,6 +284,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(PathBuf::from)
+                    .collect();
+            }
+            "--camera-shots" => {
+                parsed.camera_shots = next(&mut args, "--camera-shots")?
+                    .split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
                     .collect();
             }
             "--arena" => parsed.arena = Some(PathBuf::from(next(&mut args, "--arena")?)),

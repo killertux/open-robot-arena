@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use ra2_render::ui::{UiAssets, UiRenderer, UiScene};
 use ra2_render::Renderer;
 use ra2fmt::gib::{Block, Gib, Widget};
+use ra2sim::camera::SceneCameraKind;
 use ra2sim::r#match::{Match, MatchConfig, MatchReport, MatchState, RobotEntry};
 use ra2sim::{DriveInput, Duel, DuelCamera, GameType};
 
@@ -136,6 +137,17 @@ pub fn camera_from_cfg(game: &Path) -> Result<DuelCamera, String> {
         .ok_or_else(|| format!("{name:?} in {} is not watch/static/orbit", path.display()))
 }
 
+/// The scene-camera configuration a match camera mode asks for, if it is one of
+/// the original's three.
+fn scene_kind(camera: &DuelCamera) -> Option<SceneCameraKind> {
+    match camera {
+        DuelCamera::Static => Some(SceneCameraKind::Static),
+        DuelCamera::Watch => Some(SceneCameraKind::Watch),
+        DuelCamera::Orbit { .. } => Some(SceneCameraKind::Orbit),
+        _ => None,
+    }
+}
+
 /// The driving camera: behind the player's heading, scaled to the robot.
 ///
 /// This is **our choice**, not one of the binary's three config cameras
@@ -174,9 +186,13 @@ pub struct Session {
     accumulator: f32,
     /// Seconds left on `camera textbox`'s 3.0 s display window.
     camera_label_left: f32,
-    /// The arena's own first static camera name (`AddStaticCamera`), which the
-    /// original puts in the textbox instead of the class default.
-    static_camera_label: Option<String>,
+    /// The name the scene camera last reported (`"Static 1"`, `"Watch 1"`,
+    /// from the arena's `Next*Camera`): the original puts it in the textbox
+    /// instead of the class default.
+    camera_name: Option<String>,
+    /// The camera the match settles on once the intro is over: the config's
+    /// `DefaultCamera` (or the chase frame when a player is driving).
+    default_camera: DuelCamera,
     /// The chat group is open (backslash). Local only; nothing is sent.
     chat_open: bool,
     chat_entry: String,
@@ -356,31 +372,39 @@ impl Session {
         matched: Match,
         player_controlled: bool,
     ) -> Result<Session, String> {
-        let camera = if player_controlled {
+        let default_camera = if player_controlled {
             chase_camera(&matched.duel, 0)
         } else {
             camera_from_cfg(game)?
         };
+        let mut matched = matched;
         // The match shell starts the arena's own intro; `ArenaIntros` is the
         // shipped switch. The generator advances on the arena's `Tick`, so its
-        // music, crowd and announcer requests reach the app's audio drain.
+        // music, crowd, announcer and camera requests reach the app. The intro
+        // flies the scene camera in its static configuration (the HUD label
+        // reads `Static 1`); when it ends the config's camera takes over.
         let cfg = crate::options::read_cfg(game);
+        let mut camera = default_camera;
+        let mut camera_name = None;
         if cfg.arena_intros() {
-            if let Err(error) = ra2script::arena_intro(true) {
-                eprintln!("match: {error}");
+            camera = DuelCamera::Static;
+            camera_name = matched.duel.select_scene_camera(SceneCameraKind::Static);
+            match ra2script::arena_intro(true) {
+                Ok(()) => {
+                    if ra2script::camera::intro_running() {
+                        matched.begin_intro();
+                    }
+                }
+                Err(error) => eprintln!("match: {error}"),
             }
         } else {
             println!("arena intro: off (ArenaIntros=0)");
+            if let Some(kind) = scene_kind(&camera) {
+                camera_name = matched.duel.select_scene_camera(kind);
+            }
         }
         let presentation = Presentation::open(game)?;
         let dialog = ra2ui::workshop::load(&game.join("UI"), "common/ingame_dialog.gib")?;
-        // `0x418d70`/`0x418e20` ask the scene camera for its name; the arena's
-        // `AddStaticCamera` first argument is that name ("Static 1" in
-        // `Arenas/box.py:22`). Our static mode uses the first position, so it
-        // can carry the same name.
-        let static_camera_label = ra2fmt::arena::parse_path(Path::new(&matched.config.arena))
-            .ok()
-            .and_then(|script| script.static_cameras.first().map(|c| c.name.clone()));
         let report = matched.report();
         println!(
             "match: {} — {}, {:.0}s, camera {}",
@@ -403,7 +427,8 @@ impl Session {
             player_input: DriveInput::default(),
             accumulator: 0.0,
             camera_label_left: CAMERA_LABEL_SECONDS,
-            static_camera_label,
+            camera_name,
+            default_camera,
             chat_open: false,
             chat_entry: String::new(),
             dialog,
@@ -488,7 +513,48 @@ impl Session {
                 *input = Some(self.player_input);
             }
         }
+        let before = self.matched.state();
         self.matched.step_with(&inputs);
+        if before == MatchState::Intro && self.matched.state() != MatchState::Intro {
+            // `plus.introComplete()`: the match camera takes over.
+            let camera = self.default_camera;
+            self.enter_camera(camera);
+        }
+    }
+
+    /// Skip the arena intro (the `Skip Intro` button): the arena's own
+    /// `DoIntro(False)`, which stops its sounds and calls `plus.introComplete()`.
+    pub fn skip_intro(&mut self) {
+        if self.matched.state() == MatchState::Intro {
+            if let Err(error) = ra2script::arena_intro(false) {
+                eprintln!("match: {error}");
+            }
+            self.matched.end_intro();
+            let camera = self.default_camera;
+            self.enter_camera(camera);
+        }
+    }
+
+    /// Put the match in one of the camera modes and, for the original's three,
+    /// reconfigure the scene camera as its key handler does (`0x439c10`).
+    pub fn enter_camera(&mut self, camera: DuelCamera) {
+        self.camera = camera;
+        self.camera_name =
+            scene_kind(&camera).and_then(|kind| self.matched.duel.select_scene_camera(kind));
+        self.camera_label_left = CAMERA_LABEL_SECONDS;
+    }
+
+    /// The camera keys: F2 orbit, F3 static (the arena's next static camera),
+    /// F4 watch (its next watch camera). `0x439c10` dispatches `0x71`..`0x73`.
+    pub fn camera_key(&mut self, n: u8) {
+        let camera = match n {
+            2 => DuelCamera::Orbit { period: 24.0 },
+            3 => DuelCamera::Static,
+            4 => DuelCamera::Watch,
+            _ => return,
+        };
+        self.enter_camera(camera);
+        println!("camera: {} ({})", self.camera.name(), self.camera_label());
     }
 
     /// Advance by wall-clock seconds at the match's own `dt`.
@@ -516,7 +582,7 @@ impl Session {
     }
 
     pub fn cycle_camera(&mut self) {
-        self.camera = if self.player_controlled {
+        let next = if self.player_controlled {
             // Driving starts in chase; `C` cycles chase → watch → orbit. The
             // binary's config vocabulary is watch/static/orbit, so `chase` is
             // this client's driving choice and is printed as such.
@@ -532,19 +598,17 @@ impl Session {
                 _ => DuelCamera::Watch,
             }
         };
-        self.camera_label_left = CAMERA_LABEL_SECONDS;
+        self.enter_camera(next);
         println!("camera: {} ({})", self.camera.name(), self.camera_label());
     }
 
-    /// The text `camera textbox` shows: the camera object's name, with the
-    /// arena's own static-camera name when it has one.
+    /// The text `camera textbox` shows: the name the scene camera reported
+    /// (`Static 1`, `Watch 1`), else the camera class's own name (`Orbit Cam`).
     pub fn camera_label(&self) -> &str {
-        if matches!(self.camera, DuelCamera::Static) {
-            if let Some(name) = &self.static_camera_label {
-                return name;
-            }
+        match (&self.camera_name, scene_kind(&self.camera)) {
+            (Some(name), Some(_)) => name,
+            _ => self.camera.display_name(),
         }
-        self.camera.display_name()
     }
 
     /// Whether the 3.0 s camera-name window is still open.
@@ -968,6 +1032,132 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
     );
     print!("{}", audio.report(audio_report));
     Ok(session.report())
+}
+
+/// A moment `--camera-shots` photographs.
+#[derive(Clone, Debug, PartialEq)]
+enum Shot {
+    /// `intro@T`: T seconds into the arena intro.
+    Intro(f32),
+    /// `countdown@N`: the first frame whose countdown number is N.
+    Countdown(u32),
+    /// `f2|f3|f3b|f4@S`: press that camera key at S fight seconds, then shoot.
+    Key { key: u8, at: f32 },
+}
+
+fn parse_shot(spec: &str) -> Result<(String, Shot), String> {
+    let (name, at) = match spec.split_once('@') {
+        Some((name, at)) => (
+            name,
+            Some(
+                at.parse::<f32>()
+                    .map_err(|_| format!("--camera-shots {spec:?}: {at:?} is not a number"))?,
+            ),
+        ),
+        None => (spec, None),
+    };
+    let shot = match name {
+        "intro" => Shot::Intro(at.unwrap_or(2.5)),
+        "countdown" => Shot::Countdown(at.unwrap_or(2.0) as u32),
+        "f2" => Shot::Key {
+            key: 2,
+            at: at.unwrap_or(13.0),
+        },
+        "f3" | "f3b" => Shot::Key {
+            key: 3,
+            at: at.unwrap_or(if name == "f3" { 17.0 } else { 20.0 }),
+        },
+        "f4" => Shot::Key {
+            key: 4,
+            at: at.unwrap_or(24.0),
+        },
+        other => {
+            return Err(format!(
+                "--camera-shots: {other:?} is not intro/countdown/f2/f3/f3b/f4"
+            ))
+        }
+    };
+    Ok((name.to_string(), shot))
+}
+
+/// `--camera-shots`: run one match (the arena's intro on) and photograph the
+/// listed camera moments in time order, each to `cam-<name>.png`. The camera
+/// keys are real key presses in the order given: `f3` then `f3b` is F3 twice,
+/// which is how the original's second static camera is reached. Fight seconds
+/// must not exceed `--seconds`.
+pub fn run_camera_shots(options: Options, shots: &[String]) -> Result<(), String> {
+    let out = options
+        .out
+        .clone()
+        .ok_or_else(|| "--camera-shots needs --out DIR".to_string())?;
+    std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let mut pending: Vec<(String, Shot)> = shots
+        .iter()
+        .map(|s| parse_shot(s))
+        .collect::<Result<_, _>>()?;
+    let renderer = Renderer::new().map_err(|e| e.to_string())?;
+    let ui = UiRenderer::new_for(renderer.device(), wgpu::TextureFormat::Rgba8Unorm);
+    let size = options.size;
+    let target = Target::new(renderer.device(), size[0], size[1]);
+    let mut session = Session::new(&options)?;
+    let mut intro_time = 0.0f32;
+    let dt = session.matched.config.dt;
+    // The shots the match reaches in time order; a key shot waits for its
+    // fight second, so keep them sorted by when they can fire.
+    let mut guard = 0u32;
+    while !pending.is_empty() {
+        guard += 1;
+        if guard > 60 * 60 * 20 {
+            return Err(format!(
+                "camera shots never reached: {:?}",
+                pending.iter().map(|p| p.0.clone()).collect::<Vec<_>>()
+            ));
+        }
+        let state = session.matched.state();
+        let clock = session.matched.clock();
+        let countdown = ra2sim::countdown_number(session.matched.countdown_left());
+        // Shots are taken in the order given: only the first can fire.
+        let fire = pending.first().and_then(|(_, shot)| {
+            let ready = match *shot {
+                Shot::Intro(t) => state == MatchState::Intro && intro_time >= t,
+                Shot::Countdown(n) => state == MatchState::Countdown && countdown == Some(n),
+                // A match that ends before the shot's second (a robot out of
+                // the arena at once) is photographed in its final pose.
+                Shot::Key { at, .. } => {
+                    (state == MatchState::Fight && clock >= at)
+                        || matches!(state, MatchState::Over | MatchState::Results)
+                }
+            };
+            ready.then_some(0usize)
+        });
+        if let Some(i) = fire {
+            let (name, shot) = pending.remove(i);
+            if let Shot::Key { key, .. } = shot {
+                session.camera_key(key);
+            }
+            write_frame(
+                &mut session,
+                &renderer,
+                &ui,
+                &target,
+                size,
+                &out,
+                &format!("cam-{name}.png"),
+            )?;
+            continue;
+        }
+        if state == MatchState::Results {
+            return Err(format!(
+                "the match ended before the camera shots {:?}",
+                pending.iter().map(|p| p.0.clone()).collect::<Vec<_>>()
+            ));
+        }
+        if state == MatchState::Intro {
+            intro_time += dt;
+        }
+        session.step();
+    }
+    Ok(())
 }
 
 pub(crate) fn write_frame(
@@ -1458,13 +1648,16 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `camera textbox` names the camera object and hides after 3.0 s.
+    /// `camera textbox` shows the name the scene camera reports and hides
+    /// after 3.0 s.
     ///
-    /// The three shipped cameras call themselves `Watch Cam`, `Static Cam` and
-    /// `Orbit Cam` (`0x6f1044`, `0x6f1038`, `0x6f102c`); the arena's own
-    /// `AddStaticCamera("Static 1", …)` (`Arenas/box.py:22`) replaces the
-    /// static default. `FUN_00477180` shows the box for 3.0 s (`0x4771a2`) and
-    /// `0x4774f1` hides it at zero.
+    /// The intro flies the static configuration (`Static 1`, as in the
+    /// original's `arena-box-intro` capture); the countdown starts on the
+    /// config's `watch` camera, which asks the arena for its first watch camera
+    /// (`Watch 1`); F3 asks for the next static camera each press (`Static 1`,
+    /// `Static 2`) and F2 is the camera class's own `Orbit Cam`.
+    /// `FUN_00477180` shows the box for 3.0 s (`0x4771a2`) and `0x4774f1` hides
+    /// it at zero.
     #[test]
     fn the_camera_textbox_names_the_camera_and_hides_after_three_seconds() {
         let Some(game) = game_dir() else { return };
@@ -1480,17 +1673,23 @@ mod tests {
         )
         .unwrap();
         let mut session = Session::new(&options).expect("the match");
-        assert_eq!(session.camera_label(), "Watch Cam");
+        if session.matched.state() == MatchState::Intro {
+            assert_eq!(session.camera_label(), "Static 1", "the intro's camera");
+            session.skip_intro();
+            session.step();
+        }
+        assert_eq!(session.matched.state(), MatchState::Countdown);
+        assert_eq!(session.camera_label(), "Watch 1");
         assert!(session.show_camera_label());
-        session.cycle_camera();
-        assert_eq!(
-            session.camera_label(),
-            "Static 1",
-            "the arena's own static camera name"
-        );
+        session.camera_key(3);
+        assert_eq!(session.camera_label(), "Static 1");
         assert!(session.show_camera_label(), "a change re-opens the window");
-        session.cycle_camera();
+        session.camera_key(3);
+        assert_eq!(session.camera_label(), "Static 2", "the next static camera");
+        session.camera_key(2);
         assert_eq!(session.camera_label(), "Orbit Cam");
+        session.camera_key(4);
+        assert_eq!(session.camera_label(), "Watch 1");
         let steps = (crate::match_mode::CAMERA_LABEL_SECONDS / session.matched.config.dt).ceil()
             as usize
             + 2;

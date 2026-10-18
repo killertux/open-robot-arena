@@ -156,12 +156,15 @@ pub fn hud(
     countdown_left: f32,
 ) -> Hud {
     let show_countdown = state == MatchState::Countdown;
+    let intro = state == MatchState::Intro;
     // `0x416360` shows `time group` (`FUN_00477460`, the widget at `+0x1c8`)
     // with the match's `+0xd8` timed flag; a "No limit" match never shows the
     // box. `0x4758c0` hides it before the countdown.
-    let show_time = !show_countdown && report.duration_limit.is_some();
+    let show_time = !show_countdown && !intro && report.duration_limit.is_some();
 
     set_visible(screen, COUNTDOWN_GROUP, show_countdown);
+    // The arena intro shows the `Skip Intro` button and nothing else of the HUD.
+    set_visible(screen, "skip group", intro);
     set_visible(screen, TIME_GROUP, show_time);
 
     let countdown = countdown_text(countdown_left);
@@ -171,7 +174,7 @@ pub fn hud(
 
     let mut players = Vec::new();
     for (slot, group) in PLAYERS.iter().enumerate() {
-        let visible = slot < report.robots.len();
+        let visible = slot < report.robots.len() && !intro;
         set_visible(screen, group, visible);
         if !visible {
             continue;

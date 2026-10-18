@@ -92,9 +92,12 @@ fn the_start_button_starts_a_match_and_is_not_a_shell_link() {
     assert_eq!(step.note, None, "the note is not a navigation");
     assert_eq!(shell.screen_id(), "exhibition/exhib_setup.gib");
 
-    let (session, choice) = play_mode::session_from_shell(&game, &shell, Some(1.0), None).unwrap();
+    let (mut session, choice) =
+        play_mode::session_from_shell(&game, &shell, Some(1.0), None).unwrap();
     assert_eq!(choice.arena_script, "box.py");
     assert_eq!(choice.game_type, GameType::Deathmatch);
+    // `ArenaIntros=1` starts the arena's intro; skipping it is the countdown.
+    session.skip_intro();
     assert_eq!(session.matched.state(), MatchState::Countdown);
     assert_eq!(session.matched.config.robots.len(), 2);
     assert!(session.matched.config.robots[0]
