@@ -13,7 +13,8 @@ use crate::backend::{
     MotionType, PhysicsBackend, ShapeDesc, SliderDesc,
 };
 use crate::controls::{ControlState, COCK_FRACTION, FULL};
-use crate::rig::{JointInfo, JointUse, RobotRig, Role};
+use crate::massprops;
+use crate::rig::{JointInfo, JointUse, RobotRig, Role, WheelDrive};
 use crate::scene::USER_BOT;
 use crate::sim::{DriveInput, DriveTuning};
 
@@ -58,6 +59,140 @@ pub struct Applied {
 /// `Spin Clockwise`/`Spin Counter-clockwise` wires.
 const CLOCKWISE: f32 = -1.0;
 
+/// How far under a wheel the ground still counts as touching it (m): the
+/// `tolerance` of 0.1 the game's `.gmf` hands Havok (`SimulationObject`).
+const WHEEL_REACH: f32 = 0.1;
+
+/// How long a wheel stays "touching" after it last was (s): the 0.2 the wheel's
+/// own contact tracker compares its timer against (`0x508080` against the
+/// constant at `0x6a6080`).
+const WHEEL_GROUND_MEMORY: f32 = 0.2;
+
+/// Rolling drag of a wheel, per unit of its `resistance`, as a rate (1/s) times
+/// the robot's mass. **Fitted**: the original Scout's coast-down is exponential
+/// with a time constant of 0.75 s (k = 1.34/s); its two mini wheels declare
+/// `resistance = 0.1`, and with the ~0.3/s our contact friction adds, a rate of
+/// 5.3 per unit resistance gives our Scout the same 1.34/s. The thrust-to-drag
+/// ratio then gives a terminal speed of about 10.5 m/s (the original's 11.1).
+const WHEEL_DRAG_RATE: f32 = 4.3;
+
+/// How fast a grounded wheel kills its sideways speed (1/s) and the most
+/// sideways acceleration it can give, in g. **Fitted** (the original's lateral
+/// grip is not recovered): stiff enough that a robot holds a straight line at
+/// 10 m/s, capped at half a g so a skid-steered four-wheeler can still scrub its
+/// wheels sideways to turn.
+const WHEEL_LATERAL_RATE: f32 = 20.0;
+
+/// How stiffly the wheels' speeds are tied to their commands (1/s). **Fitted**
+/// only in that it must be stiff compared with the drag; see
+/// [`Robot::push_wheels`].
+const WHEEL_COUPLING_RATE: f32 = 30.0;
+
+const WHEEL_LATERAL_G: f32 = 0.5;
+
+/// The collision skin every robot hull is grown by (m).
+///
+/// **Inferred from the original's rest heights**: Havok's convex shapes carry a
+/// radius their hull is grown by, and with a 0.05 m skin the stock Scout rests
+/// at y = -1.880 and ALARM (without its hammer, which does not rest on the
+/// floor in the original) at -1.802, against the original's measured -1.884 and
+/// -1.811 (0.0, the bare hull, gives -1.935 and -1.855; 0.04 and 0.06 give
+/// -1.910/-1.869 for the Scout). It also makes a mini wheel 0.38 m, not 0.33 m,
+/// where it meets the ground.
+const HULL_SKIN: f32 = 0.045;
+
+fn hull_skin() -> f32 {
+    HULL_SKIN
+}
+
+/// A wheel's hull as a fine round ring instead of the model's few-sided one.
+///
+/// The stock tyres are 8 to 13 sided, and a polygon rolls with a bump at every
+/// facet; the ring has the polygon's *mean* radius (between its corners and its
+/// flats) and the same width, about the thinnest axis of the hull (the axle).
+fn round_wheel(points: &[Vec3]) -> Vec<Vec3> {
+    if points.len() < 6 {
+        return points.to_vec();
+    }
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for p in points {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+    let size = hi - lo;
+    let axis = if size.z <= size.x && size.z <= size.y {
+        2
+    } else if size.y <= size.x {
+        1
+    } else {
+        0
+    };
+    let (a, b) = match axis {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    let centre = (lo + hi) * 0.5;
+    let radius = points
+        .iter()
+        .map(|p| ((p[a] - centre[a]).powi(2) + (p[b] - centre[b]).powi(2)).sqrt())
+        .fold(0.0f32, f32::max);
+    // Corners within 5 % of the largest radius, split between the two faces.
+    let corners = points
+        .iter()
+        .filter(|p| {
+            ((p[a] - centre[a]).powi(2) + (p[b] - centre[b]).powi(2)).sqrt() > radius * 0.95
+        })
+        .count();
+    let sides = (corners / 2).clamp(6, 32) as f32;
+    let mean = radius * (1.0 + (std::f32::consts::PI / sides).cos()) * 0.5;
+    let mut out = Vec::with_capacity(48);
+    for k in 0..24 {
+        let t = k as f32 / 24.0 * std::f32::consts::TAU;
+        for face in [lo[axis], hi[axis]] {
+            let mut p = centre;
+            p[a] += mean * t.cos();
+            p[b] += mean * t.sin();
+            p[axis] = face;
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// With `RA2_LEGACY_WHEELS`, a multiplier on the hinge motor's speed and torque
+/// cap (`RA2_WHEEL_PASSES`, default 1). The static study of the Havok hinge servo
+/// (`0x535a50`) suggested the servo might run `k` times per substep, which would
+/// give the Scout 11.1 m/s; a live measurement in the original refuted it
+/// (k = 1.02, with the Scout's drive hinge at 17 rad/s and 675 N·m), so this stays
+/// a comparison knob, not a fit.
+fn motor_passes() -> f32 {
+    std::env::var("RA2_WHEEL_PASSES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.0)
+}
+
+/// `RA2_LEGACY_WHEELS=1` drives wheels with a plain velocity motor again (for
+/// comparison runs).
+fn legacy_wheels() -> bool {
+    std::env::var_os("RA2_LEGACY_WHEELS").is_some()
+}
+
+/// One grounded wheel, sampled for [`Robot::push_wheels`].
+struct WheelSample {
+    parent: usize,
+    info: JointInfo,
+    wheel: WheelDrive,
+    command: f32,
+    /// The way a positive command pushes the robot, along the ground.
+    along: Vec3,
+    /// Across the wheel, along the ground.
+    side: Vec3,
+    velocity: Vec3,
+    point: Vec3,
+}
+
 /// Live state of one assembled body.
 pub struct PartState {
     pub body: BodyHandle,
@@ -101,6 +236,14 @@ pub struct Robot {
     pub control: ControlState,
     /// Where each part's burst device is in its fire/re-cock cycle.
     burst: Vec<BurstPhase>,
+    /// Per wheel part: seconds since it last had ground within reach.
+    wheel_air: Vec<f32>,
+    /// Per wheel part: the surface normal it last found under it.
+    wheel_normal: Vec<Vec3>,
+    /// Per part: the mass-weighted centre of its components, in the part's frame.
+    mass_centre: Vec<Vec3>,
+    /// Per part: the power factor its motor's torque was last set for.
+    motor_power: Vec<f32>,
 }
 
 /// A burst motor's or piston's cycle: parked (cocked) at its start, released at
@@ -197,6 +340,14 @@ impl Robot {
             zapped_until: -1.0,
             control: ControlState::default(),
             burst: vec![BurstPhase::Cocked; rig.parts.len()],
+            wheel_air: vec![WHEEL_GROUND_MEMORY; rig.parts.len()],
+            wheel_normal: vec![Vec3::Y; rig.parts.len()],
+            motor_power: vec![1.0; rig.parts.len()],
+            mass_centre: rig
+                .parts
+                .iter()
+                .map(|part| Self::mass_center(&rig, &part.members).unwrap_or(Vec3::ZERO))
+                .collect(),
             team,
             rig,
         })
@@ -220,21 +371,90 @@ impl Robot {
                     local_position,
                     local_rotation,
                     shape: ShapeDesc::ConvexHull {
-                        points: rig.components[i].hull_points.clone(),
+                        points: massprops::skinned(
+                            &if rig.components[i].role == Role::Wheel {
+                                round_wheel(&rig.components[i].hull_points)
+                            } else {
+                                rig.components[i].hull_points.clone()
+                            },
+                            hull_skin(),
+                        ),
                     },
                     tag: i as u32,
                 }
             })
             .collect();
-        match children.len() {
-            0 => ShapeDesc::Sphere { radius: 0.1 },
+        let offset = Self::center_offset(rig, members);
+        let shape = match children.len() {
+            0 => return ShapeDesc::Sphere { radius: 0.1 },
             1 => children
                 .into_iter()
                 .next()
                 .map(|c| c.shape)
                 .unwrap_or(ShapeDesc::Sphere { radius: 0.1 }),
             _ => ShapeDesc::Compound(children),
+        };
+        match offset {
+            Some(offset) => ShapeDesc::OffsetCenterOfMass {
+                shape: Box::new(shape),
+                offset,
+            },
+            None => shape,
         }
+    }
+
+    /// The components' mass-weighted centre of one body, in the body's own
+    /// frame (`None` for a body with no mass or geometry).
+    fn mass_center(rig: &RobotRig, members: &[usize]) -> Option<Vec3> {
+        let (mut mass, mut moment) = (0.0f32, Vec3::ZERO);
+        for &i in members {
+            let m = rig.components[i].mass;
+            if m <= 0.0 {
+                continue;
+            }
+            let m_local = rig.part_local[i];
+            let pts: Vec<Vec3> = rig.components[i]
+                .hull_points
+                .iter()
+                .map(|p| m_local.transform_point3(*p))
+                .collect();
+            let at = massprops::hull_volume_centroid(&pts)
+                .map(|(_, at)| at)
+                .unwrap_or_else(|| m_local.w_axis.truncate());
+            mass += m;
+            moment += m * at;
+        }
+        (mass > 1e-6).then(|| moment / mass)
+    }
+
+    /// How far to move a body's centre of mass from where the backend puts it
+    /// (the collision hulls' volume-weighted centre) to the components'
+    /// mass-weighted centre, which is what the original's per-component rigid
+    /// bodies integrate to. `None` when there is nothing to correct.
+    fn center_offset(rig: &RobotRig, members: &[usize]) -> Option<Vec3> {
+        let (mut vol, mut vol_moment) = (0.0f32, Vec3::ZERO);
+        for &i in members {
+            let c = &rig.components[i];
+            if c.hull_points.is_empty() || !c.role.is_physical() || c.role == Role::Power {
+                continue;
+            }
+            let m_local = rig.part_local[i];
+            let pts: Vec<Vec3> = c
+                .hull_points
+                .iter()
+                .map(|p| m_local.transform_point3(*p))
+                .collect();
+            if let Some((v, at)) = massprops::hull_volume_centroid(&pts) {
+                vol += v;
+                vol_moment += v * at;
+            }
+        }
+        let mass_centre = Self::mass_center(rig, members)?;
+        if vol <= 1e-9 {
+            return None;
+        }
+        let offset = mass_centre - vol_moment / vol;
+        (offset.is_finite() && offset.length() > 1e-4).then_some(offset)
     }
 
     /// Friction of a body: a wheel gets the `grip` its definition declares for the
@@ -267,6 +487,7 @@ impl Robot {
 
         let max_torque = match info.use_kind {
             JointUse::Passive => 0.0,
+            JointUse::Wheel => info.max_torque * motor_passes(),
             _ => info.max_torque,
         };
         let desc = HingeDesc {
@@ -404,6 +625,7 @@ impl Robot {
         _tuning: &DriveTuning,
     ) {
         self.read_input(input);
+        let mut samples: Vec<WheelSample> = Vec::new();
 
         for p in 0..self.rig.parts.len() {
             if !self.parts[p].alive {
@@ -415,6 +637,18 @@ impl Robot {
             match info.use_kind {
                 JointUse::Passive => {}
                 JointUse::Burst => self.drive_burst(physics, p, info, joint),
+                JointUse::Wheel if info.wheel.is_some() && !legacy_wheels() => {
+                    let command = self
+                        .control
+                        .command(&self.rig.wiring, info.motor)
+                        .unwrap_or(0.0);
+                    let power = self.motor_factor(info.motor);
+                    if let Some(sample) =
+                        self.sample_wheel(physics, p, info, joint, command / FULL * power)
+                    {
+                        samples.push(sample);
+                    }
+                }
                 JointUse::Spun | JointUse::Wheel | JointUse::Piston => {
                     let command = self
                         .control
@@ -426,7 +660,21 @@ impl Robot {
                     // but nothing calls it directly: the constructors at 0x480293 and
                     // 0x480320 only install the vtable, so it is a Havok motor
                     // callback and the caller is not recovered.
-                    let target = command / FULL * info.rate * CLOCKWISE;
+                    let k = if info.use_kind == JointUse::Wheel {
+                        motor_passes()
+                    } else {
+                        1.0
+                    };
+                    let power = self.motor_factor(info.motor);
+                    if (power - self.motor_power[p]).abs() > 1e-4 {
+                        self.motor_power[p] = power;
+                        physics.set_joint_strength(
+                            joint,
+                            info.max_torque * k * power,
+                            info.friction_torque,
+                        );
+                    }
+                    let target = command / FULL * info.rate * CLOCKWISE * k * power;
                     if info.slider {
                         physics.drive_slider(joint, target);
                     } else {
@@ -435,7 +683,167 @@ impl Robot {
                 }
             }
         }
+        self.push_wheels(physics, &samples);
         self.control.end_step();
+    }
+
+    /// How much of its rated speed and torque a motor still delivers.
+    ///
+    /// `FUN_0045fa90`: `f(x) = x * (0.5 + 0.5 * hp / max)`, and `0.5 * x` once the
+    /// motor's hitpoints are below zero — a hurt motor is weaker, down to half.
+    /// The original feeds `f` both the speed and the torque of
+    /// `SetPowerSettings` (the `SpinMotor` apply at `0x4468bc`), after a global
+    /// factor `g` from the robot's power budget (`0x45f130`, set at `0x4dc76c`
+    /// from `min(1, robot+0x9c / robot+0xa0)`). Those two robot fields are not
+    /// identified, so `g` is taken as 1.
+    pub fn motor_factor(&self, motor: usize) -> f32 {
+        let hp = self.health.get(motor).copied().unwrap_or(0.0);
+        let max = self.rig.components[motor].hitpoints.max(1.0);
+        if hp < 0.0 {
+            0.5
+        } else {
+            0.5 + 0.5 * (hp / max).min(1.0)
+        }
+    }
+
+    /// Sample one wheel: is it on the ground, and which way would it push?
+    ///
+    /// The hinge is left free, so the wheel rolls at the speed the ground gives
+    /// it; the push itself is applied by [`Robot::push_wheels`], which needs every
+    /// wheel's sample at once. `None` for a wheel that has not touched ground for
+    /// [`WHEEL_GROUND_MEMORY`].
+    fn sample_wheel(
+        &mut self,
+        physics: &mut dyn PhysicsBackend,
+        p: usize,
+        info: JointInfo,
+        joint: JointHandle,
+        command: f32,
+    ) -> Option<WheelSample> {
+        let wheel = info.wheel?;
+        let parent = self.rig.parts[p].parent?;
+        physics.drive_hinge(joint, 0.0);
+        let dt = physics.last_dt();
+
+        // The pivot and axis are in bot space at the rest pose; the body the
+        // motor sits on carries them (a wheel on an arm moves with the arm).
+        let host = self.rig.components[self.rig.parts[parent].root].local;
+        let to_world = self.part_world(physics, parent) * host.inverse();
+        let centre = to_world.transform_point3(info.pivot);
+        let axle = to_world.transform_vector3(info.axis).normalize_or_zero();
+        if axle == Vec3::ZERO {
+            return None;
+        }
+
+        // Cast *up* from the lowest the ground may be and still count: a mesh is
+        // hit from either side, so this finds the floor whether the wheel hovers
+        // above it or has sunk a little into it, and anything of the robot's own
+        // in the way (the wheel itself, once the floor is out of reach) is not
+        // ground.
+        let own: Vec<BodyHandle> = self.parts.iter().map(|q| q.body).collect();
+        let reach = wheel.radius + hull_skin() + WHEEL_REACH;
+        let found = physics
+            .ray_cast(centre - Vec3::Y * reach, Vec3::Y, reach)
+            .filter(|hit| !own.contains(&hit.body));
+        match found {
+            Some(hit) => {
+                self.wheel_air[p] = 0.0;
+                self.wheel_normal[p] = if hit.normal.y.abs() > 0.3 {
+                    hit.normal * hit.normal.y.signum()
+                } else {
+                    Vec3::Y
+                };
+            }
+            None => self.wheel_air[p] += dt,
+        }
+        if self.wheel_air[p] > WHEEL_GROUND_MEMORY {
+            return None;
+        }
+        let normal = self.wheel_normal[p];
+        // A positive target turns the wheel about its axle by the right-hand
+        // rule, which pushes the robot along `axle x normal`; the control board's
+        // sense is `CLOCKWISE`.
+        let along = axle.cross(normal).normalize_or_zero() * CLOCKWISE;
+        let side = (axle - normal * axle.dot(normal)).normalize_or_zero();
+        if along == Vec3::ZERO {
+            return None;
+        }
+        let velocity = physics
+            .state(self.parts[p].body)
+            .map(|s| s.linear_velocity)
+            .unwrap_or(Vec3::ZERO);
+        let point = match physics.state(self.parts[parent].body) {
+            Some(s) => {
+                // Through the centre of mass's height: a push at the axle would
+                // pitch the robot, and the original's pitch is constant through a
+                // full-throttle run.
+                let com = s.position + s.rotation * self.mass_centre[parent];
+                Vec3::new(centre.x, com.y, centre.z)
+            }
+            None => centre,
+        };
+        Some(WheelSample {
+            parent,
+            info,
+            wheel,
+            command,
+            along,
+            side,
+            velocity,
+            point,
+        })
+    }
+
+    /// Push every grounded wheel: a thrust along the ground, a drag against it, a
+    /// grip sideways, and a coupling that keeps the wheels at the speeds their
+    /// commands ask for relative to each other.
+    ///
+    /// The thrust is the motor's full torque over the wheel's radius, scaled by
+    /// the command and the wheel's `grip` — **recovered** from the original's
+    /// drive trace: two 560 N·m wheels of 0.33 m push a 223 kg Scout at
+    /// 15.2 m/s², and the trace's first 0.1 s reads 13.8 m/s² at 1 m/s. It is
+    /// not limited by friction, because the original's is not (the Scout
+    /// out-accelerates 1 g from a rest pose that is not on its wheels), and not
+    /// by the motor's rated speed, because the Scout reaches 11.1 m/s with
+    /// 18 rad/s motors on 0.33 m wheels. The drag is the fitted
+    /// [`WHEEL_DRAG_RATE`]. The wheels' coupling stands in for the hinge motors'
+    /// stiff speed servos, which hold both wheels of a pair at one speed (a
+    /// centre of mass a few centimetres off the middle of the axle would
+    /// otherwise turn a free pair of thrusts into a spin).
+    fn push_wheels(&mut self, physics: &mut dyn PhysicsBackend, samples: &[WheelSample]) {
+        if samples.is_empty() {
+            return;
+        }
+        let dt = physics.last_dt();
+        let wheels = self
+            .rig
+            .parts
+            .iter()
+            .filter(|q| q.joint.is_some_and(|j| j.wheel.is_some()))
+            .count()
+            .max(1) as f32;
+        let share = self.mass / wheels;
+        // The speed scale the commands imply: least squares of v_i = c_i * u.
+        let (mut cv, mut cc) = (0.0f32, 0.0f32);
+        for w in samples {
+            cv += w.command * w.velocity.dot(w.along);
+            cc += w.command * w.command;
+        }
+        let scale = if cc > 1e-4 { cv / cc } else { 0.0 };
+        for w in samples {
+            let thrust = w.command * w.wheel.grip * w.info.max_torque / w.wheel.radius;
+            let v = w.velocity.dot(w.along);
+            let drag = self.mass * WHEEL_DRAG_RATE * w.wheel.resistance * v;
+            let couple = if cc > 1e-4 && w.command != 0.0 {
+                share * WHEEL_COUPLING_RATE * (v - w.command * scale)
+            } else {
+                0.0
+            };
+            let cap = WHEEL_LATERAL_G * w.wheel.grip * share * physics.gravity().length();
+            let lateral = (-share * WHEEL_LATERAL_RATE * w.velocity.dot(w.side)).clamp(-cap, cap);
+            let force = w.along * (thrust - drag - couple) + w.side * lateral;
+            physics.apply_impulse_at(self.parts[w.parent].body, force * dt, w.point);
+        }
     }
 
     /// One step of a burst motor's or piston's fire cycle.

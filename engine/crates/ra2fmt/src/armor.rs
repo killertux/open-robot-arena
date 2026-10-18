@@ -13,8 +13,8 @@
 //! <heat>` — the same four stats the botlab's armour cell displays
 //! (`FUN_0043c090` reads the rows at `0x6f1278` and labels them "weight value",
 //! "puncture value", "concussion value" and "heat value"). Weight drives the
-//! chassis mass and heat the chassis' hitpoint pool (the data's durability
-//! stat; F7/F10 call it hardness). No stock plate declares a puncture or
+//! chassis mass; the last number (called hardness) multiplies the chassis
+//! surface area to give its hitpoints (`FUN_0044d710`: `trunc(area × hardness)`). No stock plate declares a puncture or
 //! concussion resistance — all four rows carry `0 0` — so there is **no**
 //! per-armour damage multiplier in this file.
 
@@ -32,7 +32,7 @@ pub struct ArmourDef {
     pub puncture: f32,
     /// Concussion resistance (0 on every stock plate).
     pub concussion: f32,
-    /// Heat / durability — the chassis' hitpoints.
+    /// Hardness (the 4th stat): chassis hitpoints = trunc(surface area × this).
     pub hardness: f32,
 }
 
