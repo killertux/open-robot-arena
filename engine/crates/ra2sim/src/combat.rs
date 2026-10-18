@@ -48,20 +48,18 @@ use crate::robot::Robot;
 /// measurements fit (`D = 183.9·P + 100·C`). `magnitude` is the collision's
 /// *impulse*: the engine's magnitude function (`FUN_0045a5a0`) works from the
 /// contrast of the two bodies and returns `0.5 · μ · v` for the reduced mass and
-/// closing speed, halving it at the end. `scale` is the contact material's own
-/// damage factor — the one term still out of reach (the per-material table lives
-/// in the engine's `MaterialObject` classes, which this build does not expose),
-/// so it is the single calibrated number here, set by the anchors the game's own
-/// scripts give: a hazard hit is a flat 25, and ramming two stock robots at a
-/// few metres per second has to land in the same low tens.
+/// closing speed, halving it at the end. `scale` is the **attacking
+/// component's** material float (`FUN_00489470` reads
+/// `*(float *)(*(int *)(this + 0x64) + 4)`): `Metal` 0.1, `Rubber` 0.0,
+/// `Arenium` 0.5, overridden per definition by `material = <class>(<n>)` — the
+/// ram plate is `metal(.4)`. It is no longer calibrated; F7 recovered it from
+/// the `MaterialObject` constructors and the component factory.
 ///
 /// A non-weapon part declares neither parameter, so its whole factor is the
 /// impulse's coefficient — a chassis ram is priced by the collision itself,
 /// which is also why there is no per-role weighting: the engine has none.
 #[derive(Clone, Copy, Debug)]
 pub struct CombatConfig {
-    /// See the type: the contact material's damage scale. Calibrated.
-    pub material_scale: f32,
     /// `piercing`'s coefficient — **10**, recovered.
     pub piercing_weight: f32,
     /// `concussion`'s coefficient — **1**, recovered; it multiplies the
@@ -72,7 +70,6 @@ pub struct CombatConfig {
 impl Default for CombatConfig {
     fn default() -> Self {
         CombatConfig {
-            material_scale: 0.125,
             piercing_weight: 10.0,
             concussion_weight: 1.0,
         }
@@ -193,7 +190,12 @@ fn best_strike(
         let Some((factor, tip)) = offense(r, worlds, i, impulse, cfg) else {
             continue;
         };
-        let damage = cfg.material_scale * factor * (blow + tip * dt);
+        // F7: the hit's `scale` is the **attacking component's** material
+        // float (`FUN_00489470` reads it from `this + 0x64`, and the same
+        // object carries the `piercing`/`concussion` it just used). A chassis
+        // that declares no material is Metal, 0.1; a ram plate is 0.4; a
+        // rubber caster is 0.0.
+        let damage = c.material_scale * factor * (blow + tip * dt);
         if damage <= 0.0 {
             continue;
         }

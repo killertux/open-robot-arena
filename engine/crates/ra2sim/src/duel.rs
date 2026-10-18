@@ -1775,6 +1775,10 @@ mod tests {
                 blow = duel.damage_taken[0];
             }
         }
+        println!(
+            "opening ram: {blow:.1} damage (attacker chassis material x{:.2})",
+            duel.robots[0].rig.components[0].material_scale
+        );
         assert!(blow > 10.0, "the opening ram was only {blow} damage");
         assert!(blow < 400.0, "the opening ram was {blow} damage");
 
@@ -1788,6 +1792,67 @@ mod tests {
         assert!(
             after < blow * 0.25,
             "resting contact added {after} damage after a {blow} blow"
+        );
+    }
+
+    /// F7: the hit's scale is the **attacking component's** material float.
+    ///
+    /// The shipped definitions give three values — Metal 0.1 (the default and
+    /// the saw blade), the ram plate's `metal(.4)` = 0.4, and the casters'
+    /// `rubber(0)` = 0.0. The first blow of the same head-on ram is measured
+    /// with each, so the path is linear in the recovered float and a rubber
+    /// part deals nothing.
+    #[test]
+    fn the_opening_ram_scales_with_the_attackers_material() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string();
+        let blow_with = |scale: f32| -> f32 {
+            let setups = [
+                BotSetup {
+                    path: bot.clone(),
+                    yaw_deg: Some(270.0),
+                    spawn: Some([-3.0, 0.0]),
+                },
+                BotSetup {
+                    path: bot.clone(),
+                    yaw_deg: Some(90.0),
+                    spawn: Some([3.0, 0.0]),
+                },
+            ];
+            let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+            // `damage_taken[0]` is the damage robot 0 *received*, so the
+            // attacker is robot 1; set both sides and the first blow is the
+            // same whichever way one wants to read it.
+            for robot in &mut duel.robots {
+                for c in &mut robot.rig.components {
+                    c.material_scale = scale;
+                }
+            }
+            let ram = vec![
+                DriveInput {
+                    throttle: 1.0,
+                    steer: 0.0,
+                };
+                2
+            ];
+            for _ in 0..(6.0 / (1.0 / 60.0)) as usize {
+                duel.step_direct(&ram, 1.0 / 60.0);
+                if duel.damage_taken[0] > 0.0 {
+                    return duel.damage_taken[0];
+                }
+            }
+            0.0
+        };
+        let (metal, plate, rubber) = (blow_with(0.1), blow_with(0.4), blow_with(0.0));
+        println!("opening ram: metal 0.1 -> {metal:.1}, ram plate 0.4 -> {plate:.1}, rubber 0.0 -> {rubber:.1}");
+        assert!(rubber == 0.0, "a rubber part dealt {rubber}");
+        assert!(metal > 10.0, "metal dealt {metal}");
+        let ratio = plate / metal;
+        assert!(
+            (ratio - 4.0).abs() < 0.4,
+            "the 0.4 material should deal four times the 0.1 one: {ratio:.2}"
         );
     }
 
@@ -2582,6 +2647,109 @@ mod tests {
         duel.robots[0].buckle(&mut *duel.physics);
         let after = duel.robots[0].rig.components[0].items[0].vertices[0].pos;
         assert!(after[1] <= before[1], "the crush must not reverse");
+    }
+
+    /// F9: the crushed **collider** follows the mesh, and a motorized robot
+    /// still drives afterwards.
+    ///
+    /// The backend removes the chassis' hinges, re-shapes the body and recreates
+    /// the hinges with their current angle as the reference. This test measures
+    /// the collider directly — a grid of downward rays over the chassis'
+    /// footprint, keeping only hits on the chassis body — so it cannot pass by
+    /// looking at `hull_points` alone (which the old test did while Jolt was
+    /// refusing the re-bake).
+    #[test]
+    fn a_crushed_chassis_collider_follows_and_the_robot_still_drives() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let setups = [BotSetup {
+            path: game.join("AI/Team1/Bot0.bot").to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        }];
+        let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        let dt = 1.0 / 60.0;
+
+        // The collider's top, sampled through the physics world. Rays start a
+        // metre above the pristine chassis and only hits on the chassis body
+        // count, so a motor housing over the hull cannot be mistaken for it.
+        let collider_top = |duel: &Duel| -> f32 {
+            let robot = &duel.robots[0];
+            let c = &robot.rig.components[0];
+            let worlds = robot.component_worlds(&*duel.physics);
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for p in &c.hull_points {
+                lo = lo.min(*p);
+                hi = hi.max(*p);
+            }
+            let (mut top, mut hits) = (f32::MIN, 0usize);
+            for ix in 0..=20 {
+                for iz in 0..=20 {
+                    let x = lo.x + (hi.x - lo.x) * ix as f32 / 20.0;
+                    let z = lo.z + (hi.z - lo.z) * iz as f32 / 20.0;
+                    let from = worlds[0].transform_point3(Vec3::new(x, hi.y + 1.0, z));
+                    if let Some(hit) = duel.physics.ray_cast(from, Vec3::NEG_Y, 4.0) {
+                        if hit.body == robot.body() {
+                            top = top.max(hit.point.y);
+                            hits += 1;
+                        }
+                    }
+                }
+            }
+            assert!(hits > 0, "no ray hit the chassis collider");
+            top
+        };
+
+        // Let the robot settle on the arena floor.
+        for _ in 0..30 {
+            duel.step_direct(&[DriveInput::default()], dt);
+        }
+        let pristine = collider_top(&duel);
+        let joints = duel.robots[0]
+            .parts
+            .iter()
+            .filter(|p| p.joint.is_some())
+            .count();
+
+        duel.robots[0].health[0] *= 0.5;
+        duel.robots[0].buckle(&mut *duel.physics);
+        for _ in 0..10 {
+            duel.step_direct(&[DriveInput::default()], dt);
+        }
+        let crushed = collider_top(&duel);
+        // The drawn top moves 0.1855 m at half damage; the collider must follow
+        // by most of that (the ray grid is finite, hence the 0.10 m floor).
+        println!("chassis collider top: {pristine:.3} -> {crushed:.3} m");
+        assert!(
+            pristine - crushed > 0.10,
+            "the collider did not follow the crush: {pristine:.3} -> {crushed:.3} m"
+        );
+        assert_eq!(
+            duel.robots[0]
+                .parts
+                .iter()
+                .filter(|p| p.joint.is_some())
+                .count(),
+            joints,
+            "the re-bake lost a joint"
+        );
+
+        // The motorized robot must still drive with the recreated hinges.
+        let start = duel.robots[0].position(&*duel.physics);
+        let drive = DriveInput {
+            throttle: 1.0,
+            steer: 0.0,
+        };
+        for _ in 0..(3.0 / dt) as usize {
+            duel.step_direct(&[drive], dt);
+        }
+        let travelled = duel.robots[0].position(&*duel.physics).distance(start);
+        println!("travelled {travelled:.2} m after the crush");
+        assert!(
+            travelled > 1.0,
+            "the crushed robot did not drive: {travelled:.2} m"
+        );
     }
 
     /// F9: the crush **curve** is linear in the damage taken, and it is
