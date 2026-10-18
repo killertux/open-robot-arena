@@ -4,6 +4,11 @@ M1–M6 are landed (M6 for Linux). This is the plan for the rest: from a verifie
 engine that renders and simulates, to a game a player can sit down and play with
 their own copy of *Robot Arena 2*.
 
+**Delivered 2026-10-17:** M7–M10 are in the client and M11/M12 are the measured
+pass and the release. The gate is **306 tests**, fmt/clippy clean, the Linux
+tarball smoke-tested; the honest remaining gaps are the ones each milestone
+marks ◐ below and in `README.md`'s "what does not work yet".
+
 It is ordered by **risk**, not by comfort: the things that can still invalidate a
 design are first, and each has a "retire by" action with a measurement.
 
@@ -114,8 +119,8 @@ These are not milestones; they are threads several milestones pull on.
 | # | Workstream | What it is | Needed by |
 |---|---|---|---|
 | **W1** | ✅ **Writers** | `bot::write` (1.12; 57/57 byte-identical), `team::write` (both tables byte-identical), `cfg::read/write` (byte-identical). See `docs/13-audio-and-writers.md`. | M9 (save a bot), M10 (career), W3 |
-| **W2** | ◐ **Audio** | `ra2-audio` decodes and levels all three MP3s and the WAV set, plays 2D/3D, and maps music to the three screen groups. Not yet wired into `ra2-app` or `plus.createSound`/`playSound`. | M7, M8 |
-| **W3** | ◐ **Settings** | `ra2fmt::cfg` reads/writes `ra2.cfg` byte-identically with typed access to every client key. The options screen and startup use are not wired. | M7 |
+| **W2** | ✅ **Audio** | `ra2-audio` decodes and levels the MP3/WAV set; the client switches music per screen, plays the click sound and drains `plus`'s handle queue at the match camera. Physical playback and crowd fades are named unverified. | M7, M8 |
+| **W3** | ✅ **Settings** | `ra2fmt::cfg` round-trips byte-identically; startup uses the display/audio/camera keys and the shipped options screen edits them. The resolution dropdown is read-only (the data has no list). | M7 |
 | **W4** | ✅ **The oracle** | The original runs under the installed flatpak Wine 9.0; the main menu is captured at 1024×768 and 1280×1024, and the harness measures **1.439/255** MAE (pointer-masked) against our render. `docs/12-oracle.md`, `tools/oracle/`. | M8, M11 |
 | **W5** | **Match-rule recon** | The C++ match shell: the match object, spawn order, countdown, camera modes (`watch`/`chase`/`top`), HUD field updates, end-of-match handoff, points for damage/KO/zone. Read it from the binary (REA) and from `ReadMe.txt` + the scripts. | M8 |
 | **W6** | **Pacing and performance** | A fixed 50 ms update (`ra2.cfg`) with the physics at a fixed step; frame pacing; the UI at display resolution; no per-frame allocation in the hot path. | M8, M11, M12 |
@@ -145,8 +150,8 @@ menu music and button sounds; quit and relaunch with the window where you left i
 | M7.4 | ◐ Screen stack: move `ra2-shell`'s `nav` into a `Flow` the app drives; keep the scripted route runner as the headless entry *(the app and the headless path now drive one shared frame loop; `nav` has not yet moved into a `Flow`)* | `ra2-shell::nav` → shared |
 | M7.5 | **done** — Audio: `ra2-audio` decodes/plays MP3+WAV, 2D/3D, maps music to the three screen groups and applies the `ra2.cfg` volume law; the client switches tracks per shell screen, plays `Sounds/button_click.wav` on an activating shell click, and drains `ra2script`'s sound requests at the match camera each tick (including the arena's own `DoIntro` when `ArenaIntros=1`) *(a physical output device was not exercised; crowd fades remain deferred)* | `ra2-audio`, `ra2script::plus`, `ra2-app::audio` |
 | M7.6 | **done** — Settings: `ra2.cfg` read/write is byte-exact, startup reads `FullScreen`/`FSDisplayWidth`/`FSDisplayHeight` and the volume/mute keys, and the shipped `common/options.gib` + `audio_options.gib`/`video_options.gib` edit the file (volume, mute, fullscreen, camera and the other exposed keys; the resolution dropdown is read-only because the data carries no list) *(no windowed run in this environment)* | `ra2fmt::cfg`, `ra2-app::options` |
-| M7.7 | Text entry where the shell needs it (team name), the OS clipboard for import/export paths | `ra2-app` |
-| M7.8 | Cursor: the shipped cursor art, hover/click states per the corpus | `ra2-render`, `ra2ui` |
+| M7.7 | ◐ Text entry: the workshop's name box edits and saves with backspace/enter; the team-name box and the clipboard path remain | `ra2-app` |
+| M7.8 | ✅ Cursor: **no cursor art ships** in the data, so the OS cursor is used; hover state is mapped and held for the missing button art, which the corpus leaves blank. Recorded rather than invented | `ra2-render`, `ra2ui` |
 
 The windowed path is built but was not exercised in this environment; the
 shared loop's offscreen half and its tests are the evidence here.
@@ -269,7 +274,7 @@ record.
 | M10.3 | ✅ Team HQ flows: the shipped `teamhq.gib` and its four tabs, robot inventory (`hq_robots` — `bot_cell.gib`, not the `robot_cell.gib` its note names), league/season grids from the career's points (S2's fills), history/prizes (`hq_history`), event schedule (`hq_events`, with the completed/in-progress/disabled cells and the bracket state) | `ra2ui::hq` + `ra2-app::hq_mode` |
 | M10.4 | ✅ Events: `Events.txt` → the event's arena, its arena script's own game type, the **16-entrant bracket** (tiers = rounds, first setting = bots per match, 1 winner; player match 0 slot 0; deterministic drawn opponents), each round through M8's `Match`, `common/matchresults.gib`, the next-round screen, the award (`event_winner.gib`) only when the event ends, the career's per-round points and the final-win trophy; `--hq --simulate-event N` and `--hq --simulate-season` are the headless runs | `ra2fmt::event`, `ra2sim::career`, `ra2ui::hq`, `ra2-app::hq_mode` |
 | M10.5 | ✅ Repairs: `teamhq/repairs.gib` lists the career's damaged robots/components and the repair clock; `repair button` advances `Repair::elapsed` (`Career::advance_repair`, six-second UI tick) and a full bar clears the entry and saves the career. No cost is charged (0). The component-level `Team+0x12c` list and the `damage.tga` fractured icon remain unproven; the `--report-damage` knob is the evidence/test input because the shipped match reports zero damage here | `ra2ui::repairs`, `ra2sim::career`, `ra2-app::hq_mode` |
-| M10.6 | ◐ Money/points: the per-type scoring (damage, KO, zone) and what it is worth outside the match; teammates do not score (the 1.20 rule) | `ra2sim::match`, `ra2sim::career` |
+| M10.6 | ✅ Money/points: damage scores in every type except KOTH (the `0x4176f2` string test), through `FUN_004175b0`'s non-KOTH branch with the 10-damage gate and `trunc(score + effective)`; teammate hits score 0; KOTH stays `king.py`'s. Per-round payment is `robot_points/200 + 160/rounds` | `ra2sim::match`, `ra2sim::career` |
 | M10.7 | ✅ The career save/load, versioned, with a "your game directory" location | `W1`, `ra2-app` |
 
 **Acceptance.** A headless career run: start a season, fight the first event's

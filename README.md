@@ -17,14 +17,15 @@ unverified.** The engine is a Rust workspace that reads the original `.gmf`,
 AI on an embedded CPython 3.12. It renders with `wgpu` (window or headless) and
 simulates with Jolt.
 
-The client, `ra2-app`, now boots the shipped shell, opens a real match with the
-arena's own geometry and the game's HUD, results and music, builds and paints a
-robot in the bot lab and saves it, and runs a nine-event season in the team HQ
-with points, prizes and repairs that persist. It is still not a complete
-replacement for the original: driving is not wired to the keyboard, the
-exhibition screen stops at its start button, and the workshop's baseplate
-placement and decal layers remain model-only. What is unresolved is named with
-its measurement rather than rounded off.
+The client, `ra2-app`, now boots the shipped shell, opens a real match from the
+exhibition screen and lets the player drive it, renders the game's HUD, results
+and music, builds and paints a robot in the bot lab and saves it, and runs a
+nine-event season in the team HQ with points, prizes and repairs that persist.
+It is still not a complete replacement for the original: the exhibition's
+robots and game-type tabs are not selectable, the workshop's baseplate
+placement and decal layers remain model-only, and repairs name the robot rather
+than the component. What is unresolved is named with its measurement rather
+than rounded off.
 
 ### M1 — assets render
 
@@ -125,11 +126,15 @@ and the button art the corpus names is blank.
 `--match` runs the game's own match shape: the arena's start points, the 4.0 s
 countdown, the HUD (`gamewindow.gib` + `statusmeters.gib` with names, points and
 the three bars), the watch/static/orbit cameras, the shipped `matchresults.gib`
-filled from the report, and an in-game pause dialog. Damage scores in every game
-type except King of the Hill, whose zone points come from `king.py`; a hit under
-10 damage scores nothing, and a teammate hit scores nothing. A 30 s box
-DEATHMATCH now finishes with points around `[31, 32]` rather than `[0, 0]`.
-Driving input and the exhibition start button are the remaining gap.
+filled from the report, and an in-game pause dialog. The exhibition screen's
+`start game button` builds that match from its own arena picker, game-type tab
+and hazard checkbox, and the player drives robot 0 with W/S/A/D or the arrows
+(chase camera, `C` cycles). Damage scores in every game type except King of the
+Hill, whose zone points come from `king.py`; a hit under 10 damage scores
+nothing, and a teammate hit scores nothing. A 30 s box DEATHMATCH now finishes
+with points around `[31, 32]` rather than `[0, 0]`. The robots tab (player and
+opponent are fixed), team selection and the match-time dropdown remain
+unwired.
 
 ### M9 — the workshop
 
@@ -208,9 +213,10 @@ Measured, not aspirational.
 
 **Does not work yet**
 
-* Keyboard driving and the exhibition screen's start button: the client plays
-  matches it is given (`--match`, `--hq`, `Test Robot`), not one the player
-  starts and drives from the menu. The camera, HUD and scoring are there.
+* Keyboard driving beyond the exhibition default: the robots tab, team
+  selection and the match-time dropdown are not selectable, the arena picker
+  scrolls only its six visible rows, and a game type is not validated against
+  the arena's own list.
 * The workshop's baseplate drag placement, decal/surface-layer UI, the shipped
   drawing tools and the desktop's 3D preview of the original.
 * Component-level repair (a repair row names the robot; `Team+0x12c` is not
@@ -315,6 +321,13 @@ layout.
 
 ```bash
 cd engine
+
+# Play from the shipped exhibition screen: pick an arena, start, drive robot 0.
+cargo run -q --release -p ra2-app -- --game ../local/game
+#   ... in a window: click EXHIBITION -> ARENA -> a row -> START, then W/S/A/D.
+#   Headless evidence with a drive timeline:
+cargo run -q --release -p ra2-app -- --game ../local/game \
+  --play --drive "0-2:1,0;2-4:1,1" --seconds 8 --out /tmp/ra2-play
 
 # A match: box arena, two shipped AI bots, five named frames, a printed trace.
 cargo run -q --release -p ra2-app -- --game ../local/game \
