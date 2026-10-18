@@ -221,6 +221,17 @@ impl Chassis {
         let area = self.mesh.as_ref().map(|m| m.surface_area()).unwrap_or(0.0);
         area * self.armour.unwrap_or_default().weight
     }
+
+    /// Chassis hitpoints: `trunc(surface area × armour hardness)`, recovered
+    /// from `FUN_0044d710` (0x44d86d..0x44d8d2; area summed over the chassis
+    /// triangles, hardness = the 4th number of the armour row). A stock Scout
+    /// is 6.09342 × 300 = 1828, ALARM 7.6058 × 350 = 2662, the values the
+    /// original reports live.
+    pub fn hitpoints(&self) -> Option<f32> {
+        let armour = self.armour?;
+        let area = self.mesh.as_ref().map(|m| m.surface_area()).unwrap_or(0.0);
+        Some((area * armour.hardness).trunc())
+    }
 }
 
 /// A mesh embedded directly in a `.bot` (chassis shape or buckle model).

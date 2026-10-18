@@ -829,21 +829,19 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             max = Vec3::ZERO;
         }
 
-        // Chassis hitpoints are the armour hardness the bot file records. Every
+        // Chassis hitpoints are trunc(surface area x armour hardness) (FUN_0044d710). Every
         // other component's come from the game's own rule: the component factory
         // (`FUN_0045cf40`) switches on the definition's `type` and stores a
         // default maximum, then a `hitpoints =` line in the definition overrides
         // it. Recovered from the binary: power 400, extenders 100, mechanics 400,
         // mobility 400, weapons 1000, extras 1000 — see F7.
-        let chassis_armour = bot
+        let chassis_hp = bot
             .components
             .first()
             .and_then(|c| c.chassis.as_ref())
-            .and_then(|c| c.armour);
+            .and_then(|c| c.hitpoints());
         let hitpoints = if i == 0 {
-            chassis_armour
-                .map(|a| a.hardness)
-                .unwrap_or_else(|| role.default_hitpoints())
+            chassis_hp.unwrap_or_else(|| role.default_hitpoints())
         } else {
             type_hitpoints(def.as_ref(), role)
         };

@@ -8,7 +8,7 @@
 //! - **component mass** = the definition's `mass =` field, else the sum of the
 //!   `.gmf`'s top-level rigid-body masses, else the F12 zero-mass fill (all
 //!   shared through `ra2fmt::component`);
-//! - **chassis hitpoints** = the armour hardness the bot file records;
+//! - **chassis hitpoints** = trunc(chassis surface area x the armour hardness);
 //! - **component hitpoints** = `hitpoints =` in the definition, else the
 //!   factory's category table (`FUN_0045cf40`: power/extenders/mechanics/
 //!   mobility/weapons/extras → 400/100/400/400/1000/1000), else the role's
@@ -103,7 +103,7 @@ pub struct BotStats {
     /// Sum of every component's structural hitpoints (the chassis' is the
     /// armour hardness).
     pub hitpoints: f32,
-    /// The chassis' own hitpoints (the armour hardness).
+    /// The chassis' own hitpoints (area x armour hardness).
     pub chassis_hitpoints: f32,
     /// The class the `.bot` records, and the class the mass implies.
     pub declared_class: WeightClass,
@@ -120,12 +120,11 @@ pub fn component_hitpoints(class: &str, def: Option<&ComponentDef>) -> f32 {
         .unwrap_or_else(|| role_hitpoints(class))
 }
 
-/// The chassis' hitpoints: the armour hardness the bot file records, else the
+/// The chassis' hitpoints: trunc(area x armour hardness), else the
 /// chassis role's fallback.
 pub fn chassis_hitpoints(chassis: Option<&Chassis>) -> f32 {
     chassis
-        .and_then(|c| c.armour)
-        .map(|a| a.hardness)
+        .and_then(|c| c.hitpoints())
         .unwrap_or_else(|| role_hitpoints("Chassis"))
 }
 
