@@ -45,7 +45,7 @@ live in that file; they are not re-measured here.
 A robot drops into an arena, drives on a scripted input timeline, collides with
 walls and movable props, and the run renders to a frame strip. The physics sits
 behind a `PhysicsBackend` trait; Jolt is the implementation. On the measured
-45-bot box-arena survey with the game's own friction law, **38 of 45 stock robots travel 2 m or more**. Caveat:
+45-bot box-arena survey with the game's own friction law, **37 of 45 stock robots travel 2 m or more**. Caveat:
 the seven that remain are rest-pose weapons/props, two F1 wheel-height
 residuals and one curved path, not the motor law or a global speed constant
 (F2/F4/F5); Havok's friction-combination law (F6) is now the default.
@@ -171,7 +171,7 @@ The oracle is real: the original runs under the installed flatpak Wine 9.0, and
 `tools/oracle` measures our main-menu render against its captured frame at
 **1.439/255** mean absolute channel difference (pointer masked); the windowed
 client's own route was captured and verified with synthetic X input. The traction
-survey rose from 28/45 to **38/45** after finding that Jolt was colliding each
+survey rose from 28/45 to **37/45** after finding that Jolt was colliding each
 robot's parts with their own chassis; the seven remaining cases are measured
 rest-pose contacts, two F1 wheel-height residuals and one curved path. Havok's
 friction-combination law is now the default (F6), the per-material damage scale

@@ -12,9 +12,9 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 | F1 | Mount-point (attachment frame) alignment | **landed** — `A_parent·R_z(start)·R_x(π)·R_z(angle)·A_own⁻¹`; the "spinner's height" was a motor mounted axle-down, not a missing offset |
 | F2 | Assembled-bodies path is the only robot path | **landed** |
 | F3 | The motor law, from the game's own data | **landed** (speed is rad/s, torque x40 — both from the binary) |
-| F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` is the material tag, not a collider); the robot's own bodies now share a collision group (a wheel no longer collides with its chassis) — survey **28 → 39 / 45** under Jolt's law, **38 / 45** with the game's own law (F6) |
+| F4 | Wheel `contact` / `grip` / `resistance` | **landed** (`contact` is the material tag, not a collider); the robot's own bodies now share a collision group (a wheel no longer collides with its chassis) — survey **28 → 39 / 45** under Jolt's law, **37 / 45** with the game's own law (F6; vendored build) |
 | F5 | Collision shape kinds (`SIMULATION_GEOMETRY`, `HAVOK_GEO_TYPE`) | **landed** |
-| F6 | Friction combination law differs from Havok 1.x | **landed and on by default**: Havok's `sqrt(µ₁²+µ₂²)` through `ContactSettings::set_combined_friction` in `oxijolt` **1.1.0+jolt-5.6.0** (the newest on crates.io); the survey is **38/45**, the two losses being the F1 wheel-height residual — measured below |
+| F6 | Friction combination law differs from Havok 1.x | **landed and on by default**: Havok's `sqrt(µ₁²+µ₂²)` through `ContactSettings::set_combined_friction` in `oxijolt` **1.1.0+jolt-5.6.0** (the newest on crates.io); the survey is **37/45** (vendored build; 38 with the prebuilt archive), the two losses being the F1 wheel-height residual — measured below |
 | F7 | Damage model: an event, not a per-step integral | **landed, scale recovered**: the engine's own formula and `fracture`, and the hit's `scale` is the **attacker component's** `MaterialObject +4` — Metal **0.1**, Rubber **0.0**, Arenium **0.5**, with the ram plate's `metal(.4)` = **0.4**; the four armour plates still measure ×1.00 (they carry no term in the formula) |
 | F8 | Pistons slide their children (prismatic) | **landed** (nothing drives them yet) |
 | F9 | The chassis buckles (crush points from the `.bot`) | **landed, collider included**: travel is the file's own movable region, the curve is absolute-from-rest and measured at four points, and `set_body_shape` now removes/recreates the chassis' hinges with their angle as the reference — collider top falls 0.205 m at half damage and the robot still drives 6.81 m |
@@ -666,7 +666,7 @@ mount residual is the chassis-child placement in `Team11/Bot0`/`Team8/Bot0`
 rule was measured (43/45 wheels-lowest instead of 29/45) but it breaks two bots
 whose wheel axles come out fore-aft, so it was **not** landed. With F6's Havok
 law switched on, the arc in `Team3/Bot1` and the 0.194 m axle-height split in
-`Team7/Bot1` become the two extra failures (38/45); see F6.
+`Team7/Bot1` become the two extra failures (37/45 on the vendored build, 38 on the prebuilt archive); see F6.
 
 ## F5 — Collision shape kinds, decoded — **landed**
 
@@ -774,7 +774,7 @@ in `jolt.rs`). It is the default; `RA2_FRICTION_LAW=jolt` switches to Jolt's law
 |---|---|---|
 | 1 kg box on a 20° slope, µ = 0.3 both sides, 1 s | slides **0.295 m** | holds, **0.001 m** |
 | deterministic head-on ram, opening blow (`AI/Team1/Bot0`) | **24.4** | **30.3** |
-| 45-bot traction survey (box arena, 3 s, ≥ 2 m) | **39/45** | **38/45** |
+| 45-bot traction survey (box arena, 3 s, ≥ 2 m, vendored build) | **39/45** | **37/45** |
 
 **Why the survey drops by one.** The law is right, and it exposes the F1
 wheel-mount residual rather than failing on its own: `AI/Team7/Bot1`'s two

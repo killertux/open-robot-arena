@@ -165,7 +165,7 @@ Jolt is a deliberate substitution (see `03-engine-design.md`), hidden behind the
 
 | Property | Havok 1.7.1 (RA2) | Jolt 5.6 | Action |
 |---|---|---|---|
-| **Friction combination** | `√(μ₁² + μ₂²)` — Havok's own 1.x-era Xtra reference states it verbatim | `√(μ₁ · μ₂)` by default; `oxijolt` 1.1.0's safe `ContactListener` can set each contact's combined friction | **Landed and on by default (F6).** Havok's law is a 20°-slope A/B (0.295 m slide vs 0.001 m hold); it takes the survey 39 → 38 on the still-open wheel-mount residual, which is named. `RA2_FRICTION_LAW=jolt` opts into Jolt's law for comparison. |
+| **Friction combination** | `√(μ₁² + μ₂²)` — Havok's own 1.x-era Xtra reference states it verbatim | `√(μ₁ · μ₂)` by default; `oxijolt` 1.1.0's safe `ContactListener` can set each contact's combined friction | **Landed and on by default (F6).** Havok's law is a 20°-slope A/B (0.295 m slide vs 0.001 m hold); it takes the survey 39 → 37 on the still-open wheel-mount residual (vendored build; 38 with the prebuilt archive), which is named. `RA2_FRICTION_LAW=jolt` opts into Jolt's law for comparison. |
 | Restitution combination | **[OPEN]** — no 1.x source found | Jolt's default | Documented. |
 | Per-body damping | **None.** Drag is a *world* setting (`LINEAR_DRAG`/`ANGULAR_DRAG`), and RA2 leaves both at 0 | per-body `linear_damping`/`angular_damping` | **Fixed** — robots no longer damp. |
 | Mass / unyielding | kg; fixed bodies have no mass; `UNYIELDING 1` = immovable | mass kg; static motion type | Matches. |
@@ -201,7 +201,7 @@ Fixed in this pass:
 
 Known, documented, not yet fixed:
 
-8. **Friction combination law** (§3) — **landed and default** through the safe contact listener; the two survey losses (`Team3/Bot1`, `Team7/Bot1`) are the F1 wheel-height residual and are named, not hidden (38/45).
+8. **Friction combination law** (§3) — **landed and default** through the safe contact listener; the two survey losses (`Team3/Bot1`, `Team7/Bot1`) are the F1 wheel-height residual and are named, not hidden (37/45 on the vendored build; 38 on the prebuilt archive).
 9. **Motors are torque-driven in the original.** The binary exposes
    `ApplyTorque`, `*ANGULAR_SPEED`, `GetMotorAngle`, and the exporter notes that
    motors round-trip through *Havok constraints*. **Landed (F3):** a definition's
@@ -1055,12 +1055,12 @@ Binary analysis of `Robot Arena 2.exe` was done with REA + Ghidra 12.1.4
 | All 57 stock bots render | 57/57 |
 | All 12 arena scripts assemble | 12/12 |
 | `ra2-sim` drives on practice / octagon / hilltop / box | OK — one jointed robot, scripted drive, frames written. The sandbox is no longer arcade-driven: it drives the same assembly the duel does |
-| Stock bots that drive on the jointed assembly | **38/45** travel ≥ 2 m in 3 s (`AI/Team*`, full throttle, box arena, arena start point). The motor law is the game's own (F3), the arenas now collide the geometry they draw (F5), and the contact layer no longer collides a robot's own parts (F4). The seven that remain are measured in `docs/06` F4: rest-pose weapons/mounts drag the floor, one motor body sits below the wheel contact, one bot moves but curves back under 2 m net, and two spin on the F1 wheel-height residual. The recorded 27/45 predates the current survey harness; the same command measured 28/45 before this pass |
+| Stock bots that drive on the jointed assembly | **37/45** travel ≥ 2 m in 3 s (`AI/Team*`, full throttle, box arena, arena start point). The motor law is the game's own (F3), the arenas now collide the geometry they draw (F5), and the contact layer no longer collides a robot's own parts (F4). The seven that remain are measured in `docs/06` F4: rest-pose weapons/mounts drag the floor, one motor body sits below the wheel contact, one bot moves but curves back under 2 m net, and two spin on the F1 wheel-height residual. The recorded 27/45 predates the current survey harness; the same command measured 28/45 before this pass |
 | `ra2-duel` on the octagon | **Engages again.** With F3's honest speeds the bout had ended with both robots parked in open floor; the cause was spawn placement, not a collider hole (F11): the duel invented a spread that landed on the rim of the Octagon's 3.7 m drop. It now spawns on the arena's own four `startpoint` attachments |
 | `ra2-duel` damage model (F7) | **Validated on a deterministic ram.** `RA2_DUEL_DRIVE=ram` with two identical `AI/Team1/Bot0` on the box arena: contact at t≈5 s, an opening blow of **24.4** points on the default tree (**30.3** with F6's Havok law on), then ~1 point/s while the two rest against each other. The hit's scale is now recovered, not calibrated: metal **0.1**, ram plate **0.4**, rubber **0.0**; the same blow measures **24.4 / 97.5 / 0.0** on the default tree (30.3 / 121.1 / 0.0 with F6 on) (`the_opening_ram_scales_with_the_attackers_material`). Both ends of that match what the original's scripts say — hazards apply 25, `AI/__init__.py` calls `amount > 10` a "good solid hit" — after two real defects were fixed (contact was tested only between root bodies; a blow was a per-step *integral* of speed, so a fast impact weighed almost nothing) |
 | `ra2-duel` with the AI | **Does not engage.** 30 s of `AI/Team1/Bot0` vs `AI/Team6/Bot2` on the box arena: the pair closes to ~7.7 m, then one robot pins itself against a wall (at `(-11.8, -7.3)` from t = 15 s on, reversing included) and neither touches the other all bout. This is the control layer (M4), not the damage model: the AI is a stand-in that only ever drives at the opponent |
-| 45-bot drive survey | **28 → 38/45** | the self-collision group (+8), excluding internal control/power fittings from the hull (+3), and F6's Havok law (-1 net, adding `Team3/Bot1` and `Team7/Bot1` while another case gains). The seven that remain are measured in `docs/06` F4 |
-| `cargo fmt --check`, `clippy -D warnings`, `cargo test --release --workspace` | clean; the F6/F7/F9 tests and the 38/45 survey included |
+| 45-bot drive survey | **28 → 37/45** | the self-collision group (+8), excluding internal control/power fittings from the hull (+3), and F6's Havok law (-1 net, adding `Team3/Bot1` and `Team7/Bot1` while another case gains). The seven that remain are measured in `docs/06` F4 |
+| `cargo fmt --check`, `clippy -D warnings`, `cargo test --release --workspace` | clean; the F6/F7/F9 tests and the 37/45 survey included |
 
 ## 7. Recommended order of work
 

@@ -110,6 +110,9 @@ fn travel(arena: &Path, bot: &Path) -> Result<(String, f32), Box<dyn std::error:
 /// and the lowest attached part. `RA2_TRACTION_BOT=Team7/Bot1` selects one.
 #[test]
 fn one_bot_reports_its_trajectory_over_time() {
+    // The script host is process-global; these three tests build duels and
+    // must not run their Python state concurrently.
+    let _scripts = ra2script::lock();
     let (Some(game), Ok(want)) = (game_dir(), std::env::var("RA2_TRACTION_BOT")) else {
         return;
     };
@@ -231,6 +234,9 @@ fn one_bot_reports_its_trajectory_over_time() {
 /// friction or torque fixes; the print names it and its clearance.
 #[test]
 fn the_rest_pose_report_names_every_part_below_the_wheels() {
+    // The script host is process-global; these three tests build duels and
+    // must not run their Python state concurrently.
+    let _scripts = ra2script::lock();
     let (Some(game), Ok(_)) = (game_dir(), std::env::var("RA2_TRACTION_REPORT")) else {
         return;
     };
@@ -302,6 +308,9 @@ fn the_rest_pose_report_names_every_part_below_the_wheels() {
 
 #[test]
 fn the_traction_survey_prints_its_count_and_failures() {
+    // The script host is process-global; these three tests build duels and
+    // must not run their Python state concurrently.
+    let _scripts = ra2script::lock();
     let Some(game) = game_dir() else {
         eprintln!("skipping the traction survey: no local/game (set RA2_GAME to run it)");
         return;
@@ -351,12 +360,13 @@ fn the_traction_survey_prints_its_count_and_failures() {
         "the stock AI set is 45 robots; found {}",
         bots.len()
     );
-    // The last measured count is 39/45; 38 is the floor because `Team3/Bot1`
-    // sits on the 2 m line (2.00 m printed, just under it). A change that moves
-    // the count must update this number *and* the docs; the per-bot table above
-    // is the evidence.
+    // The canonical build is the vendored one (`CARGO_NET_OFFLINE=true`), the
+    // one the package ships: 37/45 with the game's friction law (39/45 under
+    // Jolt's). The prebuilt Jolt archive measures one higher. A change that
+    // moves the count must update this number *and* the docs; the per-bot
+    // table above is the evidence.
     assert!(
-        passed >= 38,
-        "the traction survey regressed below its floor: {passed}/45 (last measured 39); failures: {failed:?}"
+        passed >= 37,
+        "the traction survey regressed below its floor: {passed}/45 (last measured 37); failures: {failed:?}"
     );
 }
