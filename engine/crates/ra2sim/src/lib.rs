@@ -4,6 +4,7 @@
 //! bodies from the game's own `.gmf`/`.bot`/arena-script data.
 
 pub mod backend;
+pub mod camera;
 pub mod career;
 pub mod combat;
 pub mod controls;

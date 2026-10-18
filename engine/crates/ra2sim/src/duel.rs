@@ -160,11 +160,9 @@ pub struct Duel {
     /// The `SetPinned` wishes already applied, so the reconciliation below only
     /// talks to the physics when the script actually changed its mind.
     applied_pinned: std::collections::BTreeMap<String, bool>,
-    /// The arena's own `static` view: the first `AddStaticCamera` position its
-    /// script declares, aimed at the arena centre. The script also declares a
-    /// rotation, which `ra2fmt::arena` does not parse; this port aims the camera
-    /// at the arena instead (named in the docs as our reading).
-    static_camera: Option<Vec3>,
+    /// The match's one scene camera (F2/F3/F4, the arena intro): see
+    /// [`crate::camera`].
+    pub scene_camera: crate::camera::SceneCamera,
 }
 
 /// What the AI is doing right now.
@@ -404,18 +402,6 @@ impl Duel {
             );
         }
         let model_hinges = hazards::hinges(arena_path);
-        // The script's first static camera, if it declares one. The arena's own
-        // rotation is not in `ra2fmt::arena`'s record yet, so this port aims it
-        // at the arena centre instead of inventing a yaw/pitch.
-        let static_camera = ra2fmt::arena::parse_path(std::path::Path::new(arena_path))
-            .ok()
-            .and_then(|script| {
-                script
-                    .static_cameras
-                    .first()
-                    .map(|c| Vec3::from(c.position))
-            });
-
         let damage_taken = vec![0.0; robots.len()];
         Ok(Duel {
             physics,
@@ -450,7 +436,7 @@ impl Duel {
             arena_tick_error: None,
             arena_timer: 0.0,
             applied_pinned: std::collections::BTreeMap::new(),
-            static_camera,
+            scene_camera: crate::camera::SceneCamera::default(),
         })
     }
 
@@ -1135,6 +1121,7 @@ impl Duel {
         self.watch_zones();
         self.run_arena_tick(dt);
         self.drive_joints(dt);
+        self.step_scene_camera(dt);
 
         let info = self.physics.step(dt);
         if !info.complete {
@@ -1481,11 +1468,88 @@ impl Duel {
     }
 
     /// The view-projection matrix `camera` asks for at this size.
+    ///
+    /// The three match cameras (`Static`, `Watch`, `Orbit`) are the original's
+    /// scene camera: `D3DXMatrixPerspectiveFovLH(fov, w / h, near, far)` and a
+    /// `D3DXMatrixLookAtLH` view (see [`crate::camera`]). The other modes are
+    /// this port's own and keep a fixed 55 degree lens.
     pub fn view_proj(&self, camera: &DuelCamera, w: u32, h: u32) -> Mat4 {
+        let aspect = w as f32 / h as f32;
+        if let Some(scene) = self.scene_for(camera) {
+            return scene.view_proj(aspect);
+        }
         let (eye, aim) = self.camera_pose(camera);
         let view = ra2_render::look_at_lh(eye, aim, Vec3::Y);
-        let proj = ra2_render::perspective_lh(55f32.to_radians(), w as f32 / h as f32, 0.05, 900.0);
+        let proj = ra2_render::perspective_lh(55f32.to_radians(), aspect, 0.05, 900.0);
         proj * view
+    }
+
+    /// The scene camera as `camera` wants it, or `None` for this port's own
+    /// modes. A mode the scene camera is not currently in is shown with that
+    /// mode's constructor defaults (no script involved).
+    fn scene_for(&self, camera: &DuelCamera) -> Option<crate::camera::SceneCamera> {
+        use crate::camera::{SceneCamera, SceneCameraKind};
+        let kind = match camera {
+            DuelCamera::Static => SceneCameraKind::Static,
+            DuelCamera::Watch => SceneCameraKind::Watch,
+            DuelCamera::Orbit { .. } => SceneCameraKind::Orbit,
+            _ => return None,
+        };
+        let mut scene = if self.scene_camera.kind == kind {
+            self.scene_camera.clone()
+        } else {
+            SceneCamera::new(kind)
+        };
+        scene.follow(self.follow_target());
+        Some(scene)
+    }
+
+    /// Robot 0's position and heading: what the watch and orbit cameras follow
+    /// (`0x43a0ff` / `0x439e5a` hand the first robot to `0x5a6650`).
+    pub fn follow_target(&self) -> Option<crate::camera::Target> {
+        let robot = self.robots.first()?;
+        let position = robot.position(&*self.physics);
+        let rotation = self.physics.state(robot.body()).map(|s| s.rotation)?;
+        let forward = rotation * robot.rig.forward();
+        Some(crate::camera::Target {
+            position,
+            yaw: forward.x.atan2(forward.z),
+        })
+    }
+
+    /// Run what the scripts asked of the camera this step, then the camera's
+    /// own animation clock.
+    fn step_scene_camera(&mut self, dt: f32) {
+        for command in ra2script::camera::take_commands() {
+            self.scene_camera.apply(command);
+        }
+        self.scene_camera.advance(dt);
+    }
+
+    /// Put the scene camera in `kind`'s configuration the way the match shell
+    /// does on a camera key (`F2`/`F3`/`F4`) and, for `Static`/`Watch`, ask the
+    /// arena's script for its next camera of that kind. Returns the camera's
+    /// name (`"Static 1"`), which the HUD's `camera textbox` shows.
+    pub fn select_scene_camera(&mut self, kind: crate::camera::SceneCameraKind) -> Option<String> {
+        use crate::camera::SceneCameraKind;
+        // Anything the scripts queued earlier belongs to the old configuration.
+        for command in ra2script::camera::take_commands() {
+            self.scene_camera.apply(command);
+        }
+        self.scene_camera.select(kind);
+        let name = match kind {
+            SceneCameraKind::Static => {
+                ra2script::camera::next_camera(ra2script::camera::NextCamera::Static)
+            }
+            SceneCameraKind::Watch => {
+                ra2script::camera::next_camera(ra2script::camera::NextCamera::Watch)
+            }
+            SceneCameraKind::Orbit => None,
+        };
+        for command in ra2script::camera::take_commands() {
+            self.scene_camera.apply(command);
+        }
+        name
     }
 
     fn body_model(&self, body: BodyHandle) -> Mat4 {
@@ -1493,37 +1557,6 @@ impl Duel {
             .state(body)
             .map(|s| Mat4::from_rotation_translation(s.rotation, s.position))
             .unwrap_or(Mat4::IDENTITY)
-    }
-
-    /// The midpoint of every robot still in the fight (not just the first two).
-    fn live_focus(&self) -> Vec3 {
-        let alive: Vec<Vec3> = self
-            .robots
-            .iter()
-            .filter(|r| r.is_alive())
-            .map(|r| r.position(&*self.physics))
-            .collect();
-        if alive.is_empty() {
-            return self.arena.center;
-        }
-        alive.iter().copied().sum::<Vec3>() / alive.len() as f32
-    }
-
-    /// The largest distance between two live robots. Zero for fewer than two.
-    fn live_separation(&self) -> f32 {
-        let alive: Vec<Vec3> = self
-            .robots
-            .iter()
-            .filter(|r| r.is_alive())
-            .map(|r| r.position(&*self.physics))
-            .collect();
-        let mut best: f32 = 0.0;
-        for a in 0..alive.len() {
-            for b in a + 1..alive.len() {
-                best = best.max((alive[a] - alive[b]).length());
-            }
-        }
-        best
     }
 
     /// The eye and aim point `camera` asks for, in world units.
@@ -1545,50 +1578,15 @@ impl Duel {
                 let dir = Vec3::new(0.72, 0.55, 0.72).normalize();
                 (focus + dir * dist, focus)
             }
-            DuelCamera::Watch => {
-                // **Our rule, not the C++ one.** `0x4770a0` is the binary's
-                // `watch` entry point, but its framing was not established by
-                // the recon. This is the rule this port implements: frame every
-                // live robot from one raised three-quarter direction; the
-                // midpoint is their mean and the distance grows with the
-                // largest pair separation.
-                let focus = self.live_focus();
-                let dist = (self.live_separation() * 0.85 + 5.0).clamp(6.0, 42.0);
-                // A high three-quarter view: low enough to read the robots,
-                // high enough to clear the box arena's walls at the widest
-                // spawn separation. **Our rule** (the C++ `watch` framing at
-                // `0x4770a0` is not established).
-                let dir = Vec3::new(0.55, 0.85, 0.55).normalize();
-                (focus + dir * dist, focus)
-            }
-            DuelCamera::Static => {
-                // The arena script's own first `AddStaticCamera`, aimed at the
-                // arena centre. When the arena declares none, the fallback is
-                // named: a fixed high three-quarter view of the arena centre.
-                match self.static_camera {
-                    Some(eye) => (eye, self.arena.center),
-                    None => {
-                        // A fixed view of the arena's own bounds: no robot
-                        // position enters it, so `static` really is static.
-                        let radius = (self.arena.max - self.arena.min).length() * 0.5;
-                        let dist = (radius * 1.6).clamp(10.0, 70.0);
-                        (
-                            self.arena.center + Vec3::new(0.55, 0.85, 0.55).normalize() * dist,
-                            self.arena.center,
-                        )
+            DuelCamera::Watch | DuelCamera::Static | DuelCamera::Orbit { .. } => {
+                // The scene camera's own pose (see [`crate::camera`]).
+                match self.scene_for(camera) {
+                    Some(scene) => {
+                        let (eye, aim, _) = scene.pose();
+                        (eye, aim)
                     }
+                    None => (self.arena.center + Vec3::Y, self.arena.center),
                 }
-            }
-            DuelCamera::Orbit { period } => {
-                // **Our rule.** `0x476f00` was not traced; this is a constant
-                // slow orbit: one turn every `period` seconds, distance from the
-                // live separation, aimed at the live midpoint.
-                let focus = self.live_focus();
-                let dist = (self.live_separation() * 0.85 + 6.0).clamp(7.0, 44.0);
-                let angle = self.time * std::f32::consts::TAU / period.max(1.0);
-                let eye =
-                    focus + Vec3::new(angle.cos(), 0.0, angle.sin()) * dist + Vec3::Y * dist * 0.55;
-                (eye, focus)
             }
             DuelCamera::Wide { offset } => {
                 let focus = self.focus();

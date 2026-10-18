@@ -239,6 +239,10 @@ impl MatchConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatchState {
     Setup,
+    /// The arena's own intro (`ArenaIntros=1`): the scripted camera flies while
+    /// the robots sit on their start points. It ends when the script calls
+    /// `plus.introComplete()` (or the player skips it) and the countdown begins.
+    Intro,
     Countdown,
     Fight,
     Over,
@@ -506,6 +510,22 @@ impl Match {
         self.countdown_left
     }
 
+    /// Start the arena intro: the app has called the arena's `DoIntro(True)`.
+    /// Does nothing once the countdown has begun.
+    pub fn begin_intro(&mut self) {
+        if self.state == MatchState::Countdown && self.countdown_left >= self.config.countdown {
+            self.state = MatchState::Intro;
+        }
+    }
+
+    /// End the intro at once (the player skipped it, or the script finished):
+    /// the countdown begins. Does nothing outside the intro.
+    pub fn end_intro(&mut self) {
+        if self.state == MatchState::Intro {
+            self.state = MatchState::Countdown;
+        }
+    }
+
     /// Advance one fixed step (`MatchConfig::dt`, the existing duel's step).
     pub fn step(&mut self) {
         self.step_with(&[]);
@@ -522,6 +542,16 @@ impl Match {
         let dt = self.config.dt;
         match self.state {
             MatchState::Setup => self.state = MatchState::Countdown,
+            MatchState::Intro => {
+                // Like the countdown, the physics and the arena tick (which
+                // advances the intro's generator) run and no brain drives.
+                let idle = vec![DriveInput::default(); self.duel.robots.len()];
+                self.duel.step_direct(&idle, dt);
+                self.duel.take_score_hits();
+                if !ra2script::camera::intro_running() {
+                    self.state = MatchState::Countdown;
+                }
+            }
             MatchState::Countdown => {
                 // The countdown holds the robots still: the physics and the
                 // arena still tick, but no brain drives. The original plays the
