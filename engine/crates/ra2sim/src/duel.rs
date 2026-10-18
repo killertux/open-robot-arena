@@ -1536,6 +1536,8 @@ impl Duel {
         for command in ra2script::camera::take_commands() {
             self.scene_camera.apply(command);
         }
+        let target = self.follow_target();
+        self.scene_camera.follow(target);
         self.scene_camera.advance(dt);
     }
 

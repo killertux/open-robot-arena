@@ -573,6 +573,16 @@ impl Session {
         println!("camera: {} ({})", self.camera.name(), self.camera_label());
     }
 
+    /// The mouse wheel in orbit mode (`0x5a6447`): positive notches zoom in.
+    pub fn orbit_wheel(&mut self, notches: f32) {
+        if matches!(self.camera, DuelCamera::Orbit { .. }) {
+            self.matched
+                .duel
+                .scene_camera
+                .orbit_input(0.0, 0.0, notches);
+        }
+    }
+
     /// Advance by wall-clock seconds at the match's own `dt`.
     pub fn advance(&mut self, seconds: f32) {
         if self.paused {

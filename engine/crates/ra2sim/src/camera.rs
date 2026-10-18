@@ -83,6 +83,67 @@ pub struct SceneCamera {
     clock: f32,
     /// Last known target, so a destroyed robot does not snap the view.
     last_target: Option<Target>,
+    /// The orbit camera's smoothed state (`0x5a6970`).
+    orbit: Orbit,
+}
+
+/// The orbit camera's state (mode 2, `0x5a6970`; input `0x5a6260`).
+///
+/// `0x439d60` sets the aim offset `(0, 1)` (`+0x21c`/`+0x220`), the distance 4
+/// (`+0x224`) and the pitch goal -0.25 (`+0x1e0`). Every frame the heading the
+/// robot faces (`+0x208`) and the user's pitch/yaw goals (`+0x1e0`) are chased
+/// by the spring `0x61bb70` (`+0x1f8` and `+0x19c`), the eye is the aim point
+/// plus `R(yaw = heading + user yaw, pitch = -user pitch) * (0, 0, -distance)`
+/// and the camera looks along `R`. No stock arena calls `AddCameraBlocker`, so
+/// the blocker rays (`0x5a7680`) never run.
+#[derive(Clone, Copy, Debug)]
+pub struct Orbit {
+    /// `+0x1fc`: the smoothed heading, `None` until the first frame.
+    pub heading: Option<f32>,
+    /// `+0x210` y: last frame's goal heading (the spring's feed-forward term).
+    prev_goal: f32,
+    /// `+0x19c`: the smoothed `(pitch, yaw)` the user dialled in.
+    pub user: [f32; 2],
+    /// `+0x1ec`: last frame's user goal.
+    prev_user: [f32; 2],
+    /// `+0x1e0`: the user's `(pitch, yaw)` goal. The pitch is stored negated:
+    /// -0.25 draws the camera looking 0.25 rad down.
+    pub user_goal: [f32; 2],
+    /// `+0x224`, clamped to `[1, 1000]` (`+0x230`, `+0x23c`).
+    pub distance: f32,
+    /// `+0x21c`/`+0x220`: the aim point's offset from the robot.
+    pub aim_offset: [f32; 2],
+}
+
+impl Default for Orbit {
+    fn default() -> Self {
+        Orbit {
+            heading: None,
+            prev_goal: 0.0,
+            user: [-0.25, 0.0],
+            prev_user: [-0.25, 0.0],
+            user_goal: [-0.25, 0.0],
+            distance: 4.0,
+            aim_offset: [0.0, 1.0],
+        }
+    }
+}
+
+/// `0x61bb70`, one component: `cur += d̂ * (k2 * d̂·((prev - goal) * dt) +
+/// (rest - |d|) * k1) * dt` with `d = cur - goal`. The constants are the
+/// camera constructor's `+0x260` = 8, `+0x264` = 20, `+0x268` = 1e-4.
+fn spring(cur: f32, goal: f32, prev_goal: f32, dt: f32) -> f32 {
+    const K1: f32 = 8.0;
+    const K2: f32 = 20.0;
+    const REST: f32 = 0.000_1;
+    let d = cur - goal;
+    let len = d.abs();
+    if len == 0.0 {
+        return cur;
+    }
+    let dir = d.signum();
+    let s = K2 * (dir * (prev_goal - goal) * dt) + (REST - len) * K1;
+    cur + dir * s * dt
 }
 
 impl Default for SceneCamera {
@@ -104,6 +165,7 @@ impl SceneCamera {
             tracks: Vec::new(),
             clock: 0.0,
             last_target: None,
+            orbit: Orbit::default(),
         };
         camera.select(kind);
         camera
@@ -127,8 +189,28 @@ impl SceneCamera {
             }
             SceneCameraKind::Orbit => {
                 self.fov = DEFAULT_FOV;
+                // `0x439d60` starts the orbit on the robot's heading.
+                self.orbit = Orbit::default();
             }
         }
+    }
+
+    /// Mouse input in orbit mode (`0x5a6447`): `wheel` notches (positive zooms
+    /// in) change the distance, and a drag of `(dx, dy)` pixels turns the user's
+    /// yaw/pitch goals by `0.01` rad per pixel times the sensitivities
+    /// (`+0x284`/`+0x288`, taken as 1.0: nothing in the constructor sets them).
+    /// The pitch goal stays within +-pi/2.
+    pub fn orbit_input(&mut self, dx: f32, dy: f32, wheel: f32) {
+        let o = &mut self.orbit;
+        o.distance = (o.distance - wheel).clamp(1.0, 1000.0);
+        o.user_goal[0] = (o.user_goal[0] + dy * 0.01)
+            .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
+        o.user_goal[1] += dx * 0.01;
+    }
+
+    /// The orbit's current state, for tests and the HUD.
+    pub fn orbit_state(&self) -> Orbit {
+        self.orbit
     }
 
     /// Apply one script request (`plus.setCamera*`, `plus.animateCamera`).
@@ -157,6 +239,9 @@ impl SceneCamera {
     /// first time `t` passes `end`.
     pub fn advance(&mut self, dt: f32) {
         self.clock += dt;
+        if self.kind == SceneCameraKind::Orbit {
+            self.advance_orbit(dt);
+        }
         let now = self.clock;
         let mut tracks = std::mem::take(&mut self.tracks);
         for track in tracks.iter_mut() {
@@ -199,6 +284,38 @@ impl SceneCamera {
         self.tracks = tracks;
     }
 
+    /// One frame of the orbit's smoothing (`0x5a6b74`..`0x5a6c7b`).
+    fn advance_orbit(&mut self, dt: f32) {
+        let Some(target) = self.last_target else {
+            return;
+        };
+        let two_pi = std::f32::consts::TAU;
+        let o = &mut self.orbit;
+        match o.heading {
+            None => {
+                o.heading = Some(target.yaw);
+                o.prev_goal = target.yaw;
+            }
+            Some(cur) => {
+                // The goal is the heading nearest the smoothed one, as the
+                // `+-pi` unwrap at `0x5a6a5c` arranges.
+                let mut goal = target.yaw;
+                while goal - cur > std::f32::consts::PI {
+                    goal -= two_pi;
+                }
+                while cur - goal > std::f32::consts::PI {
+                    goal += two_pi;
+                }
+                o.heading = Some(spring(cur, goal, o.prev_goal, dt));
+                o.prev_goal = goal;
+            }
+        }
+        for i in 0..2 {
+            o.user[i] = spring(o.user[i], o.user_goal[i], o.prev_user[i], dt);
+            o.prev_user[i] = o.user_goal[i];
+        }
+    }
+
     /// Remember where the followed robot is (for the frame being drawn).
     pub fn follow(&mut self, target: Option<Target>) {
         if target.is_some() {
@@ -225,18 +342,14 @@ impl SceneCamera {
                     position: Vec3::ZERO,
                     yaw: 0.0,
                 });
-                // `0x5a6cdf`: the eye is the aim point (target + (0, 1, 0),
-                // `+0x21c/+0x220`) plus `(0, 0, -4)` (`+0x224`) turned by the
-                // robot's heading and a 0.25 rad pitch (`+0x19c = -0.25`,
-                // negated at `0x5a6ce8`): behind and above the robot.
-                let aim = target.position + Vec3::new(0.0, 1.0, 0.0);
-                let pitch = 0.25f32;
-                let offset = Vec3::new(
-                    -4.0 * pitch.cos() * target.yaw.sin(),
-                    4.0 * pitch.sin(),
-                    -4.0 * pitch.cos() * target.yaw.cos(),
-                );
-                (aim + offset, aim, Vec3::Y)
+                let o = &self.orbit;
+                // `0x5a69a9`: the aim point is the robot plus `(0, 1, 0)`.
+                let aim = target.position + Vec3::new(o.aim_offset[0], o.aim_offset[1], 0.0);
+                // `0x5a6cf0`: `D3DXMatrixRotationYawPitchRoll(yaw = heading +
+                // user yaw, pitch = -user pitch)` turns `(0, 0, -distance)`.
+                let yaw = o.heading.unwrap_or(target.yaw) + o.user[1];
+                let forward = euler_forward([-o.user[0], yaw, 0.0]);
+                (aim - forward * o.distance, aim, Vec3::Y)
             }
         }
     }
@@ -366,5 +479,43 @@ mod tests {
             yaw: 0.0,
         }));
         assert!((camera.effective_fov() - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_orbit_starts_behind_and_above_then_chases_the_heading() {
+        let mut camera = SceneCamera::new(SceneCameraKind::Orbit);
+        let at = Vec3::new(1.0, 0.5, 2.0);
+        camera.follow(Some(Target {
+            position: at,
+            yaw: 0.0,
+        }));
+        camera.advance(1.0 / 60.0);
+        let (eye, aim, _) = camera.pose();
+        assert!((aim - (at + Vec3::Y)).length() < 1e-6);
+        // 4 units behind along -Z, 4 sin(0.25) above the aim point.
+        assert!((eye.z - (aim.z - 4.0 * 0.25f32.cos())).abs() < 1e-5);
+        assert!((eye.y - (aim.y + 4.0 * 0.25f32.sin())).abs() < 1e-5);
+        // The robot spins a quarter turn: the view lags and closes at ~8/s.
+        camera.follow(Some(Target {
+            position: at,
+            yaw: std::f32::consts::FRAC_PI_2,
+        }));
+        for _ in 0..60 {
+            camera.advance(1.0 / 60.0);
+        }
+        let h = camera.orbit_state().heading.unwrap();
+        let goal = std::f32::consts::FRAC_PI_2;
+        let expected = goal * (1.0 - (-8.0f32).exp());
+        assert!(h > 0.5 * goal && h < goal, "{h}");
+        assert!((h - expected).abs() < 0.1, "{h} vs {expected}");
+    }
+
+    #[test]
+    fn the_orbit_wheel_zooms_between_one_and_a_thousand() {
+        let mut camera = SceneCamera::new(SceneCameraKind::Orbit);
+        camera.orbit_input(0.0, 0.0, 10.0);
+        assert_eq!(camera.orbit_state().distance, 1.0);
+        camera.orbit_input(0.0, 0.0, -5000.0);
+        assert_eq!(camera.orbit_state().distance, 1000.0);
     }
 }
