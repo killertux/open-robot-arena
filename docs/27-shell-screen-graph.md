@@ -14,10 +14,18 @@ resizes, so the window is 1:1 with the layout (no letterbox) for the shell
 screens. Match, HQ and build modes still use `SHELL_SIZE` (their own passes).
 
 `SplitFrame`: `Master N` names the slot that `MasterSize` sizes; slot 0 is always
-the first (top/left) pane, slot 1 the second. `exhib_setup.gib`'s main split is
+the first (top/left) pane and slot 1 the second. `exhib_setup.gib`'s main split is
 `Horizontal false, Master 1, MasterSize 0.13`: slot 1 is the 13% bar at the
-*bottom* (the bottom nav), slot 0 the remaining 87%. The reader had put the
-master pane first, which dropped the title and tabs by a whole pane.
+*bottom* (the bottom nav), slot 0 the remaining 87%. A slot's child takes the
+pane's extent **along the axis the split divides** (its own `Size` there is the
+editor's design-time leftover: `top slot` says 418 px and is the whole 87%
+pane), while across that axis its own `Position`/`Size` apply (`content slot` is
+`0.9` of the height of a horizontal split). Evidence: the panel at
+(255,120)-(985,607) in the 1024x768 capture, `chassis_structure1.gib`'s
+`Slot0 346 px / Slot1 at 346 px` (left 54% / right 46%) and the workshop's
+info strip and nav bar at the bottom. Measured effect (app, 1024x768, MAE):
+main menu 24.0 -> 0.59, teamhq-select 18.6 -> 6.3, botlab-chassis 30.4 -> 17.6,
+exhibition-settings 54.8 -> 13.8.
 
 Text: a `\n` written in a record's `_Text` is a line break (`credits.gib`).
 
