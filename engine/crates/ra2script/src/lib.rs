@@ -172,8 +172,6 @@ pub enum SoundRequest {
     },
     /// `plus.fadeOutLoop(handle, ms)`: ramp to silence over `ms`, then stop.
     FadeOutLoop { id: SoundId, ms: f32 },
-    /// The handle was removed: forget its level.
-    Forget { id: SoundId },
 }
 
 /// The script host's sound handles and the requests they produced.
@@ -309,7 +307,6 @@ impl SoundQueue {
         };
         self.retired.insert(id, sound);
         self.requests.push(SoundRequest::Stop { id });
-        self.requests.push(SoundRequest::Forget { id });
         true
     }
 
@@ -431,7 +428,11 @@ impl SoundQueue {
                 }
                 SoundRequest::Stop { id } => {
                     audio.stop_script(id.0);
-                    self.retired.remove(&id);
+                    // A removed handle also loses its `setVolume` level; a
+                    // merely stopped one keeps it for the next play.
+                    if self.retired.remove(&id).is_some() {
+                        audio.forget_script(id.0);
+                    }
                 }
                 SoundRequest::SetVolume { id, hundredths_db } => {
                     audio.set_script_volume(id.0, hundredths_db);
@@ -463,9 +464,6 @@ impl SoundQueue {
                 }
                 SoundRequest::FadeOutLoop { id, ms } => {
                     audio.fade_out_script(id.0, ms);
-                }
-                SoundRequest::Forget { id } => {
-                    audio.forget_script(id.0);
                 }
             }
         }
@@ -1436,9 +1434,5 @@ mod shell_tests {
         assert!(queue.set_volume(SoundId(99), 0).is_err());
         assert!(queue.fade_out_loop(SoundId(99), 1.0).is_err());
         assert!(queue.remove(id));
-        assert!(matches!(
-            queue.requests().last(),
-            Some(SoundRequest::Forget { .. })
-        ));
     }
 }
