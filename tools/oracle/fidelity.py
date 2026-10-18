@@ -136,17 +136,50 @@ FIXTURES = [
 ]
 
 
+# arena id (the `arena-<id>-*` capture name) -> the arena script `ra2-app --arena` loads.
+ARENA_SCRIPTS = {
+    "box": "box.py", "bridge": "Bridge.py", "compressor": "compressor.py",
+    "electric": "electric.py", "halfcircle": "half.py", "metalskull": "Skull.py",
+    "octagon": "octagon.py", "parkinglot": "parkinglot.py",
+}
+# capture shot -> `--camera-shots` entry (the same key presses as capture_arenas.py:
+# F2, F3, F3 again, F4; ours at 5-11 fight seconds because our fights end sooner; intro ~2.5 s after Start Game).
+ARENA_SHOTS = {
+    "intro": "intro@2.5", "countdown": "countdown@2", "f2": "f2@5", "f3": "f3@7",
+    "f3b": "f3b@9", "f4": "f4@11",
+}
+
+
 def find_arena_fixtures():
-    """arena-<id>-<shot> references from `capture_arenas.py` (original only; the
-    app has no route to a per-arena static camera yet, so they are references
-    waiting for a counterpart, listed here so nobody forgets them)."""
+    """arena-<id>-<shot> references from `capture_arenas.py`.  Ours comes from
+    `ra2-app --match --arena <script> --camera-shots ...` (one run per arena;
+    the key presses are made in order, so f3 then f3b is F3 twice)."""
     out = []
     if os.path.isdir(ORIG):
         for f in sorted(os.listdir(ORIG)):
             if f.startswith("arena-") and f.endswith(".png"):
-                out.append(dict(id=f.split("__")[0], ref=f, unreachable=
-                                "no app route to a per-arena match camera still"))
+                fid = f.split("__")[0]
+                _, arena, shot = fid.split("-", 2)
+                if arena in ARENA_SCRIPTS and shot in ARENA_SHOTS:
+                    out.append(dict(id=fid, ref=f, camshot=(arena, shot),
+                                    note="ours: ra2-app --match camera shot; robot poses differ (live fight)"))
+                else:
+                    out.append(dict(id=fid, ref=f, unreachable=
+                                    "no app route for this arena still (the select screen is a shell fixture)"))
     return out
+
+
+def run_camera_shots(arena, tmp):
+    """One `--camera-shots` run for `arena`; returns the directory of PNGs or None."""
+    d = os.path.join(tmp, "cam-" + arena)
+    os.makedirs(d, exist_ok=True)
+    shots = ",".join(ARENA_SHOTS[k] for k in ("intro", "countdown", "f2", "f3", "f3b", "f4"))
+    bots = ",".join(os.path.join(GAME, "AI", "Team0", b) for b in ("Bot0.bot", "Bot1.bot"))
+    p = subprocess.run([APP, "--game", GAME, "--match", "--seconds", "40", "--out", d,
+                        "--size", "%dx%d" % SIZE, "--bots", bots, "--arena", os.path.join(GAME, "Arenas", ARENA_SCRIPTS[arena]),
+                        "--camera-shots", shots],
+                       capture_output=True, text=True, env=env(), timeout=900)
+    return d if p.returncode == 0 else None
 
 
 # --------------------------------------------------------------------------
@@ -267,6 +300,14 @@ def screens(args, out):
     if any("play" in f for f in fixtures) and "app" in renderers:
         play_dir = run_play_frames(tmp)
 
+    cam_dirs = {}
+    cam_arenas = sorted({f["camshot"][0] for f in fixtures if "camshot" in f
+                         and os.path.exists(os.path.join(ORIG, f["ref"]))}) if "app" in renderers else []
+    if cam_arenas:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(args.jobs, 2))) as pool:
+            for arena, d in zip(cam_arenas, pool.map(lambda a: run_camera_shots(a, tmp), cam_arenas)):
+                cam_dirs[arena] = d
+
     jobs = []
     for fx in fixtures:
         ref_path = os.path.join(ORIG, fx["ref"])
@@ -286,7 +327,18 @@ def screens(args, out):
         out_png = os.path.join(out, "ours", rd, fx["id"] + ".png")
         os.makedirs(os.path.dirname(out_png), exist_ok=True)
         err = None
-        if "match" in fx:
+        if "camshot" in fx:
+            if rd != "app":
+                row["status"] = "unreachable"
+                row["reason"] = "the match is only rendered by ra2-app"
+                return row
+            arena, shot = fx["camshot"]
+            src = os.path.join(cam_dirs.get(arena) or "", "cam-%s.png" % shot)
+            if not os.path.exists(src):
+                row["status"], row["reason"] = "render-failed", "ra2-app --camera-shots failed for " + arena
+                return row
+            shutil.copy(src, out_png)
+        elif "match" in fx:
             if rd != "app":
                 row["status"] = "unreachable"
                 row["reason"] = "the match is only rendered by ra2-app"

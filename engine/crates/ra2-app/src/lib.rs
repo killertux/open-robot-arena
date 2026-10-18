@@ -154,6 +154,9 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
                 window_size
             },
         )?;
+        if !args.camera_shots.is_empty() {
+            return match_mode::run_camera_shots(options, &args.camera_shots);
+        }
         return match options.out {
             Some(_) => match_mode::run_headless(options, args.audio_report).map(|_| ()),
             None => window::run_match(options, args.audio_report),

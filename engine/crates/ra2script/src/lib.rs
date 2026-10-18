@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use glam::{Quat, Vec3};
 
 pub mod arena;
+pub mod camera;
 pub mod giscript;
 pub mod gooey;
 pub mod host;
@@ -471,6 +472,12 @@ pub struct State {
     /// The colour the arena script gave `plus.setBackColor` (RGB 0..1); the
     /// match renderer clears to it.
     pub back_color: Option<[f32; 3]>,
+    /// What `plus.setCamera*` / `plus.animateCamera` asked of the main camera
+    /// since the simulator last drained them ([`camera::take_commands`]).
+    pub camera_commands: Vec<camera::CameraCommand>,
+    /// The arena's intro is playing: `DoIntro(True)` ran and
+    /// `plus.introComplete()` has not.
+    pub intro_running: bool,
 }
 
 impl State {
@@ -495,6 +502,8 @@ impl State {
             deferred: Vec::new(),
             log: Vec::new(),
             back_color: None,
+            camera_commands: Vec::new(),
+            intro_running: false,
         }
     }
 
@@ -680,6 +689,7 @@ pub fn arena_intro(on: bool) -> Result<(), String> {
         let Some(arena) = arena else {
             return Ok(());
         };
+        state().intro_running = on;
         arena
             .bind(py)
             .call_method1("DoIntro", (on,))

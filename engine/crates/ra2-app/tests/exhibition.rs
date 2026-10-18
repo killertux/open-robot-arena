@@ -457,6 +457,7 @@ fn a_two_v_two_team_match_uses_the_screens_side_pairs_and_ignores_teammate_hits(
         "the two computer-side slots are different robots"
     );
 
+    session.skip_intro();
     while session.matched.state() == MatchState::Countdown {
         session.matched.step();
     }

@@ -409,7 +409,13 @@ impl ScriptHost {
         let plus = self.import(py, "plus")?;
         plus.call_method1("setArena", (instance.clone(),))?;
         arenas.setattr("currentArena", instance.clone())?;
-        crate::state().arena_object = Some(instance.clone().unbind());
+        {
+            let mut state = crate::state();
+            state.arena_object = Some(instance.clone().unbind());
+            // A new arena starts with a clean camera: nothing queued, no intro.
+            state.camera_commands.clear();
+            state.intro_running = false;
+        }
         instance.call_method0("AddShadowReceivers")?;
         Ok(Some(instance.unbind()))
     }

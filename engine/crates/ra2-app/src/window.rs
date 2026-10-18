@@ -723,6 +723,25 @@ impl ApplicationHandler for App {
                             window.request_redraw();
                         }
                     }
+                    PhysicalKey::Code(code @ (KeyCode::F2 | KeyCode::F3 | KeyCode::F4))
+                        if self.session.is_some() =>
+                    {
+                        if let Some(session) = &mut self.session {
+                            session.camera_key(match code {
+                                KeyCode::F2 => 2,
+                                KeyCode::F3 => 3,
+                                _ => 4,
+                            });
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::Space) if self.session.is_some() => {
+                        if let Some(session) = &mut self.session {
+                            session.skip_intro();
+                        }
+                    }
                     PhysicalKey::Code(KeyCode::KeyC) if self.session.is_some() => {
                         if let Some(session) = &mut self.session {
                             session.cycle_camera();
