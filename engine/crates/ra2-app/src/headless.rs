@@ -101,9 +101,18 @@ pub fn run(
         for name in click_names {
             // `click_named` resolves this same point and then clicks it; the
             // options controls need the point before the click.
-            let point = shell.point_for(name)?;
+            // `@x,y` is a point in the render size (1024x768 here), so a route can
+            // mix named controls with list rows and other unnamed targets.
+            let at = name.strip_prefix('@').map(parse_point).transpose()?;
+            let point = match at {
+                Some(point) => point,
+                None => shell.point_for(name)?,
+            };
             stage_options(&shell, &mut settings, &mut audio, point)?;
-            steps.push(shell.click_named(name)?);
+            steps.push(match at {
+                Some(point) => shell.click(point[0], point[1])?,
+                None => shell.click_named(name)?,
+            });
             let step = steps.last().unwrap().clone();
             finish_step(&mut shell, &mut settings, &mut audio, &step)?;
         }
@@ -131,6 +140,14 @@ pub fn run(
     audio.finish_capture(seconds)?;
     print!("{}", audio.report(audio_report));
     Ok(())
+}
+
+fn parse_point(text: &str) -> Result<[f32; 2], String> {
+    let (x, y) = text
+        .split_once(',')
+        .ok_or_else(|| format!("click point {text:?} is not x,y"))?;
+    let num = |v: &str| v.trim().parse::<f32>().map_err(|e| format!("{v:?}: {e}"));
+    Ok([num(x)?, num(y)?])
 }
 
 /// Stage the settings control under `point`, if the options window is open.

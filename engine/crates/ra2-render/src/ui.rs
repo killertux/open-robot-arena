@@ -307,6 +307,18 @@ impl UiAssets {
                     clip,
                 });
             }
+            if p.widget.kind == ra2fmt::gib::WidgetKind::Image
+                && p.widget.filename().is_some_and(|f| f.is_empty())
+                && parent.is_some_and(|q| {
+                    q.widget.kind == ra2fmt::gib::WidgetKind::Rectangle
+                        && matches!(q.widget.id(), 100 | 101)
+                        && q.widget.field("Filled").and_then(|f| f.flag()) == Some(true)
+                })
+            {
+                // A list's selection/highlight bar: its `Rectangle` already fills
+                // the colour; stacking the image's identical fill doubles it.
+                continue;
+            }
             if p.widget.kind == ra2fmt::gib::WidgetKind::Image {
                 // An `Image` with a blank `_Filename` is a **colour fill**: the
                 // game draws its `_ForeColor` over its frame, and the shell uses
@@ -565,6 +577,13 @@ fn glyph_box(p: &Placement<'_>) -> Option<Frame> {
     let m = p.widget.field("_Margin")?.numbers();
     if m.len() < 3 {
         return None;
+    }
+    // A glyph that carries a `DisplayBox` is the box's body: its text wraps to
+    // the frame the layout gives it, the stored `_Margin` width being the
+    // editor's leftover (arena.gib states 234 for a 376 px description box,
+    // and the capture wraps at the frame).
+    if p.widget.attachment("DisplayBox").is_some() && p.frame.w > 0.0 {
+        return Some(Frame::new(p.frame.x + m[0], p.frame.y, p.frame.w, m[2].max(p.frame.h)));
     }
     Some(Frame::new(p.frame.x + m[0], p.frame.y, m[1], m[2]))
 }

@@ -820,7 +820,12 @@ pub fn art_for<'a>(
     let bar = parent.kind == WidgetKind::Rectangle
         && matches!(parent.id(), 100 | 101)
         && widget.kind == WidgetKind::Image;
-    bar.then_some("Point Selection.tga")
+    // The original draws that bar's colour once (the capture's selected arena
+    // row is a single 0.5 layer of the fill, (38,38,127) over black): the
+    // `Rectangle` fills it, and the `Image` inside it adds nothing. `Selection.tga`
+    // was a guess for the blank name and smeared a blotch across the row.
+    let _ = bar;
+    None
 }
 
 /// The `.gib` a `Proxy` names, when it names one.
@@ -1066,11 +1071,22 @@ fn place_core<'a>(
                 widget.kind,
                 WidgetKind::TextBox | WidgetKind::Group | WidgetKind::Widget
             );
-            let placed: Vec<Placement> = widget
+            let mut placed: Vec<Placement> = widget
                 .children
                 .iter()
                 .map(|c| place_at(c, frame, clip, fonts, baseline_text))
                 .collect();
+            // A `TextBox`'s `Alignment` is its text's: with the centre bit
+            // (2 of the horizontal nibble: 18, 10, 34) the string is centred
+            // in the box whatever it says, so the authored `Text` position
+            // (made for the placeholder string) is replaced by the centred one.
+            if widget.kind == WidgetKind::TextBox && text_box_centres(widget) {
+                for child in placed.iter_mut().filter(|c| c.widget.kind == WidgetKind::Text) {
+                    if let Some((w, _)) = measured(child.widget, fonts) {
+                        child.frame.x = frame.x + (frame.w - w) / 2.0;
+                    }
+                }
+            }
             placed
         }
     };
@@ -1238,6 +1254,14 @@ fn scroll_children<'a>(
 }
 
 /// The extent a label takes from its own font, when the layout left it at zero.
+/// Whether a `TextBox`'s `Alignment` centres its text horizontally.
+fn text_box_centres(widget: &Widget) -> bool {
+    widget
+        .field("Alignment")
+        .and_then(|f| f.number())
+        .is_some_and(|a| (a as i32) & 7 == 2)
+}
+
 fn measured(widget: &Widget, fonts: Option<&Fonts>) -> Option<(f32, f32)> {
     let fonts = fonts?;
     let (text, face) = (widget.text()?, widget.font()?);

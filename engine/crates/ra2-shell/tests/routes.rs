@@ -353,3 +353,64 @@ fn the_game_directory_error_names_what_the_shell_needs() {
         game::check(&game).unwrap();
     }
 }
+
+/// The arena tab's description is the selected arena's class docstring, in the
+/// `Glyph` that carries the `DisplayBox` on `description grp`'s child (the
+/// file's own "hammers" text is only the editor's placeholder).
+#[test]
+fn the_arena_description_follows_the_selected_row() {
+    let Some(game) = game_dir() else { return };
+    let mut shell = Shell::boot(&game, [1024.0, 768.0]).unwrap();
+    shell.click_named("exhibition button").unwrap();
+    shell.click_named("arena button").unwrap();
+    let arenas = ra2ui::arenas::available(&game, "DEATHMATCH").unwrap();
+    let shown = |shell: &Shell| -> Vec<String> {
+        let root = shell.document().widgets().next().unwrap();
+        let group = ra2ui::workshop::find(root, "description grp").unwrap();
+        let mut out = Vec::new();
+        fn walk(w: &ra2fmt::gib::Widget, out: &mut Vec<String>) {
+            if w.kind == ra2fmt::gib::WidgetKind::Glyph {
+                if let Some(t) = w.field("_Text") {
+                    out.push(t.text().to_string());
+                }
+            }
+            for c in &w.children {
+                walk(c, out);
+            }
+        }
+        walk(group, &mut out);
+        out
+    };
+    assert_eq!(arenas[0].name, "Bridge of Doom");
+    assert!(arenas[0].description.starts_with("Travel across the bridge"));
+    assert_eq!(shown(&shell), vec![arenas[0].description.clone()]);
+    // Row 1 (Combat Arena) is 18 px below row 0 in the 1024x768 layout.
+    shell.click(320.0, 188.0).unwrap();
+    assert_eq!(arenas[1].name, "Combat Arena");
+    assert_eq!(shown(&shell), vec![arenas[1].description.clone()]);
+    assert!(!shown(&shell)[0].contains("hammers and other nice"));
+}
+
+/// The robot picker's cells draw the snapshot each `.bot` carries, not the
+/// "No Robot Preview" placeholder (`exhibition\sample_bot.bmp`).
+#[test]
+fn the_robot_picker_cells_carry_the_bots_snapshots() {
+    let Some(game) = game_dir() else { return };
+    let mut shell = Shell::boot(&game, [1024.0, 768.0]).unwrap();
+    for name in [
+        "exhibition button",
+        "robots button",
+        "computer player button",
+    ] {
+        shell.click_named(name).unwrap();
+    }
+    let keys: Vec<&String> = shell
+        .previews()
+        .keys()
+        .filter(|k| k.starts_with("#bot-preview:picker-"))
+        .collect();
+    assert!(
+        keys.len() >= 3,
+        "one registered snapshot per robot of the first team: {keys:?}"
+    );
+}
