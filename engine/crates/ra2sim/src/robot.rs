@@ -175,6 +175,42 @@ fn motor_passes() -> f32 {
         .unwrap_or(1.0)
 }
 
+/// The first hit of a ray that is not one of `own`'s bodies, never seeing
+/// `wheel` at all: a hit on another of the robot's own bodies is passed through
+/// and the ray goes on from just beyond it.
+///
+/// The interim wheel sampler casts up from below the floor. With the robots
+/// assembled as the original builds them, a wheel resting on the floor can
+/// reach a centimetre below its surface (Jolt lets a resting body sink by its
+/// penetration slop); the ray then met the wheel first — and a ray that starts
+/// inside a convex shape hits it at once, so it could not get past — which
+/// read "no ground" for a wheel standing on the floor: seven stock robots
+/// (Sentinel, Wide Load, ...) did not move on Jolt.
+fn ray_past_own(
+    physics: &dyn PhysicsBackend,
+    origin: Vec3,
+    direction: Vec3,
+    reach: f32,
+    own: &[BodyHandle],
+    wheel: BodyHandle,
+) -> Option<crate::backend::RayHit> {
+    let mut from = origin;
+    let mut left = reach;
+    for _ in 0..8 {
+        let hit = physics.ray_cast_excluding(from, direction, left, wheel)?;
+        if !own.contains(&hit.body) {
+            return Some(hit);
+        }
+        let step = hit.distance + 1e-3;
+        if step >= left {
+            return None;
+        }
+        from += direction * step;
+        left -= step;
+    }
+    None
+}
+
 /// `RA2_LEGACY_WHEELS=1` drives wheels with a plain velocity motor again (for
 /// comparison runs).
 fn legacy_wheels() -> bool {
@@ -298,7 +334,7 @@ impl Robot {
     /// bodies to exist).
     pub fn spawn(
         physics: &mut dyn PhysicsBackend,
-        mut rig: RobotRig,
+        rig: RobotRig,
         team: usize,
         position: Vec3,
         rotation: Quat,
@@ -310,10 +346,13 @@ impl Robot {
         let sub_groups = rig.parts.len() as u32;
 
         let havok = physics.name() == "havok17";
-        let shift = Self::cock_burst_pistons(&mut rig);
+        // Every part starts where the assembly put it: live, a burst piston's
+        // rod is built at its neutral point (ALARM's hammer 0.55 m in front of
+        // its piston, at chassis height) and a burst motor's rotor at its
+        // start angle, both already in the rig's rest pose.
         let mut parts = Vec::with_capacity(rig.parts.len());
         for (p, part) in rig.parts.iter().enumerate() {
-            let world = bot * Mat4::from_translation(shift[p]) * rig.components[part.root].local;
+            let world = bot * rig.components[part.root].local;
             let (_, rot, pos) = world.to_scale_rotation_translation();
             let (shape, mass, friction, restitution, phantom) = if havok {
                 let h = Self::havok_part(&rig, p);
@@ -366,9 +405,7 @@ impl Robot {
             let (Some(parent), Some(info)) = (rig.parts[p].parent, rig.parts[p].joint) else {
                 continue;
             };
-            // The pivot rides on the parent; a child moved off its rest pose
-            // (a cocked piston rod) names it from where it now is.
-            let child_pivot = info.pivot + shift[parent] - shift[p];
+            let child_pivot = info.pivot;
             let joint = if info.slider {
                 Self::make_slider(physics, &rig, &parts, parent, p, info, child_pivot)?
             } else {
@@ -496,52 +533,6 @@ impl Robot {
         (elec, air)
     }
 
-    /// Spawn every burst piston cocked: its rod retracted to the far end of
-    /// its travel, from where it fires. Returns each part's bot-space offset
-    /// from the rest pose, and re-bases those pistons' travel on the cocked
-    /// pose.
-    ///
-    /// Live, ALARM's hammer body (33 kg: hammer head 25 + piston `shaft` 8)
-    /// sits at the chassis' height, 0.82 m in front of it, and the robot rests
-    /// on its four hubs (`bodies.json`, `clist_rest`); at the model's own pose
-    /// the hammer hangs 0.74 m lower, below the wheels, and holds the robot
-    /// up. Its `burstpiston2` declares `prismatic = body, shaft, 0, 0, 1, 0,
-    /// -0.73, 0.2`: the 0.73 m the rod can retract is that difference. So the
-    /// travel counts along the rod's extension, and a burst piston stands at
-    /// its lower limit — retracted — until it fires.
-    fn cock_burst_pistons(rig: &mut RobotRig) -> Vec<Vec3> {
-        let n = rig.parts.len();
-        let mut own = vec![Vec3::ZERO; n];
-        for (p, part) in rig.parts.iter_mut().enumerate() {
-            let Some(info) = part.joint.as_mut() else {
-                continue;
-            };
-            if !(info.slider && info.use_kind == JointUse::Burst) {
-                continue;
-            }
-            let axis = info.axis.normalize_or_zero();
-            let [lower, upper] = info.limits;
-            if axis == Vec3::ZERO || lower >= 0.0 {
-                continue;
-            }
-            // Retracting runs along the declared axis (toward the housing).
-            own[p] = axis * -lower;
-            info.limits = [-(upper - lower), 0.0];
-        }
-        // A part moves with everything it hangs from.
-        (0..n)
-            .map(|p| {
-                let mut total = Vec3::ZERO;
-                let mut q = Some(p);
-                while let Some(i) = q {
-                    total += own[i];
-                    q = rig.parts[i].parent;
-                }
-                total
-            })
-            .collect()
-    }
-
     /// The Havok body of part `p` (see [`crate::rig::HavokParts`]): one convex
     /// piece per colliding rigid body of its components (no skin, the real
     /// wheel hubs), a motor's rotor moved to the part it drives, every rigid
@@ -624,7 +615,8 @@ impl Robot {
         // The rotor of the motor this part hangs from.
         if let Some(info) = part.joint {
             let motor = &rig.components[info.motor];
-            let m = frame.inverse() * motor.local;
+            // A burst motor's rotor is built turned to its start angle.
+            let m = frame.inverse() * motor.rotor_local;
             add(
                 &motor.havok.rotor_collision,
                 m,
@@ -694,7 +686,7 @@ impl Robot {
             }
             let class = rig.components[info.motor].class.to_ascii_lowercase();
             let driven = class == "spinmotor";
-            if !driven && class != "axlemount" {
+            if !driven && class != "axlemount" && class != "steering" {
                 continue;
             }
             let stats = root.wheel.clone().unwrap_or_default();
@@ -1217,9 +1209,14 @@ impl Robot {
         // ground.
         let own: Vec<BodyHandle> = self.parts.iter().map(|q| q.body).collect();
         let reach = wheel.radius + hull_skin() + WHEEL_REACH;
-        let found = physics
-            .ray_cast(centre - Vec3::Y * reach, Vec3::Y, reach)
-            .filter(|hit| !own.contains(&hit.body));
+        let found = ray_past_own(
+            physics,
+            centre - Vec3::Y * reach,
+            Vec3::Y,
+            reach,
+            &own,
+            self.parts[p].body,
+        );
         match found {
             Some(hit) => {
                 self.wheel_air[p] = 0.0;
@@ -1386,6 +1383,13 @@ impl Robot {
             };
             physics.set_joint_strength(joint, info.max_torque * scale.max(0.05), friction);
         }
+        // Parked, the original locks the joint where it is: the hinge
+        // controller's update (`FUN_00481450`) calls `Lock(1)` while its
+        // percentage is zero (`+0x64`, on for every controller but a
+        // `SpinMotor`'s, `0x4f5571`), and the prismatic one's (`FUN_004b5240`)
+        // likewise (`+0x7d`); firing calls `Lock(0)` first (`0x446810`,
+        // `0x448750`). A backend without the lock keeps the friction above.
+        physics.lock_joint(joint, phase == BurstPhase::Cocked);
         if info.slider {
             physics.drive_slider(joint, target);
         } else {

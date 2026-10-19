@@ -25,7 +25,16 @@ templates, `tools/vendor/PyRA2`, and the binary itself (Havok Hardcore 1.7.1).
 
 ---
 
-## F1 — Mount-point (attachment frame) alignment — top priority
+## F1 — Mount-point (attachment frame) alignment — **resolved**
+
+> **Resolved by live measurement** (`docs/29-havok17-backend.md` section 8):
+> the original's scene nodes of 14 stock robots give the rule exactly — a
+> chassis child's own point lands on its stored translation
+> (`T(t)·Q·T(0,0,-height)·Rz(π-angle)·A_own⁻¹`), a link is
+> `P·A_parent·Ry(π)·Rz(-angle)·A_own⁻¹`, and a burst motor's rotor is built at
+> its start angle. It is `MountMode::Game`, the default; everything below is
+> the history of the static guesses (`frames-flip` was close for links but
+> ignored a chassis child's own point and flipped about X instead of Y).
 
 **Status: landed.** The link rule is
 `A_parent · R_z(start) · R_x(π) · R_z(angle) · A_own⁻¹` — the parent's mount

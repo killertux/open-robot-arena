@@ -48,6 +48,13 @@ pub struct HingeJoint {
     pub friction: f32,
     /// `*ANGLE_LIMITS`, in radians.
     pub limits: [f32; 2],
+    /// The hinge node's whole frame (rows are axes, the last the origin):
+    /// `frame[1]` is the spin axis, `frame[3]` the pivot.
+    pub frame: [[f32; 3]; 4],
+    /// `*POINT` and `*SPIN_AXIS` as the file stores them (the exporter's own
+    /// copy; for robot components they are not in component space).
+    pub point: [f32; 3],
+    pub spin_axis: [f32; 3],
 }
 
 impl GmiScene {
@@ -417,6 +424,9 @@ pub struct SceneObject {
     pub mesh: Option<Mesh>,
     pub light: Option<Light>,
     pub rigid_bodies: Vec<RigidBody>,
+    /// A rigid-body collection's `GMID_HAVOK_DIS_COLLISION_PAIRS`: pairs of
+    /// bodies (by name) Havok never collides with each other.
+    pub disabled_pairs: Vec<(String, String)>,
 }
 
 /// A `*LIGHT` object. Only omni lights occur in the shipped data; the original
@@ -1007,13 +1017,16 @@ impl<'a> Parser<'a> {
         let paircount = self.r.i32()?;
         self.r.i32()?; // solver type
         let rigid_bodies = self.read_rigidbody_list()?;
-        if paircount != 0 {
-            self.read_disabled_pairs()?;
-        }
+        let disabled_pairs = if paircount != 0 {
+            self.read_disabled_pairs()?
+        } else {
+            Vec::new()
+        };
         Ok(SceneObject {
             kind: ObjectKind::RigidBodies,
             name,
             rigid_bodies,
+            disabled_pairs,
             ..Default::default()
         })
     }
@@ -1064,14 +1077,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn read_disabled_pairs(&mut self) -> Result<(), Error> {
+    fn read_disabled_pairs(&mut self) -> Result<Vec<(String, String)>, Error> {
         self.expect_node(51, 2, "disabled collision pairs")?;
         let count = self.r.i32()?;
-        for _ in 0..count {
-            let _ = self.r.string()?;
-            let _ = self.r.string()?;
-        }
-        Ok(())
+        (0..count)
+            .map(|_| Ok((self.r.string()?, self.r.string()?)))
+            .collect()
     }
 
     fn read_constraint_solver(&mut self) -> Result<SceneObject, Error> {
@@ -1119,8 +1130,8 @@ impl<'a> Parser<'a> {
                     let transform = self.read_tm_node()?;
                     let body_a = self.r.string()?;
                     let body_b = self.r.string()?;
-                    let _point = self.r.vec3()?;
-                    let _axis = self.r.vec3()?;
+                    let point = self.r.vec3()?;
+                    let spin_axis = self.r.vec3()?;
                     let limited = self.r.u8()? != 0;
                     let friction = self.r.f32()?;
                     let limit_min = self.r.f32()?;
@@ -1144,6 +1155,9 @@ impl<'a> Parser<'a> {
                         limited,
                         friction,
                         limits: [limit_min, limit_max],
+                        frame: transform,
+                        point,
+                        spin_axis,
                     });
                 }
                 53 => {

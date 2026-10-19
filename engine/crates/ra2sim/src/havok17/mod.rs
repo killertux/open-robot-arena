@@ -202,6 +202,8 @@ pub struct Havok17Backend {
     /// Per body: the surface normal its phantom overlapped in the last step.
     phantom_touch: Vec<Option<Vec3>>,
     last_dt: f32,
+    /// Body pairs (lower handle first) that never collide.
+    disabled: std::collections::HashSet<(usize, usize)>,
     /// Diagnostics: step pieces and backsteps since the world was made.
     pub pieces: u64,
     pub backsteps: u64,
@@ -222,6 +224,7 @@ impl Havok17Backend {
             events: Vec::new(),
             phantom_touch: Vec::new(),
             last_dt: 1.0 / 60.0,
+            disabled: Default::default(),
             pieces: 0,
             backsteps: 0,
         })
@@ -287,8 +290,12 @@ impl Havok17Backend {
         }
     }
 
-    /// Whether two bodies are parts of one robot (they never collide).
+    /// Whether two bodies never collide: parts of one robot, or a pair the
+    /// arena disables.
     fn same_group(&self, i: usize, j: usize) -> bool {
+        if self.disabled.contains(&(i.min(j), i.max(j))) {
+            return true;
+        }
         match (self.bodies[i].group, self.bodies[j].group) {
             (Some(a), Some(b)) => a.group == b.group,
             _ => false,
@@ -864,12 +871,31 @@ impl PhysicsBackend for Havok17Backend {
     }
 
     fn ray_cast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<RayHit> {
+        self.ray_cast_excluding(origin, direction, max_distance, u32::MAX)
+    }
+
+    fn ray_cast_excluding(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+        exclude: BodyHandle,
+    ) -> Option<RayHit> {
         let dir = direction.normalize_or_zero() * max_distance;
         if dir == Vec3::ZERO {
             return None;
         }
         let ray = RayCast::new(rv(origin), jv(dir));
-        let hit = self.world.cast_ray(&ray, &QueryFilter::default()).ok()??;
+        let skip = self
+            .geometry
+            .get(exclude as usize)
+            .and_then(|g| g.as_ref())
+            .map(|g| g.id);
+        let filter = match skip {
+            Some(id) => QueryFilter::new().exclude_body(id),
+            None => QueryFilter::default(),
+        };
+        let hit = self.world.cast_ray(&ray, &filter).ok()??;
         Some(RayHit {
             body: self
                 .lookup
@@ -915,6 +941,7 @@ impl PhysicsBackend for Havok17Backend {
             target_velocity: 0.0,
             target: 0.0,
             friction: desc.friction_torque,
+            saved_limits: None,
         });
         Ok((self.joints.len() - 1) as JointHandle)
     }
@@ -943,6 +970,7 @@ impl PhysicsBackend for Havok17Backend {
             target_velocity: 0.0,
             target: 0.0,
             friction: desc.friction_force,
+            saved_limits: None,
         });
         Ok((self.joints.len() - 1) as JointHandle)
     }
@@ -1005,6 +1033,43 @@ impl PhysicsBackend for Havok17Backend {
             j.max_torque = strength;
             j.friction = friction;
         }
+    }
+
+    fn disable_collision(&mut self, a: BodyHandle, b: BodyHandle) {
+        let (a, b) = (a as usize, b as usize);
+        self.disabled.insert((a.min(b), a.max(b)));
+    }
+
+    fn lock_joint(&mut self, handle: JointHandle, locked: bool) -> bool {
+        let Some(position) = self.joint(handle).map(|j| j.position(&self.bodies)) else {
+            return true;
+        };
+        let Some(j) = self.joint_mut(handle) else {
+            return true;
+        };
+        match (locked, j.saved_limits) {
+            (true, None) => {
+                // A slider locks at its offset clamped to its travel
+                // (`FUN_004b50c0`); a hinge at its angle (`FUN_00480e20`).
+                let at = if matches!(j.kind, Kind::Slider { .. }) {
+                    position.clamp(j.limits[0], j.limits[1])
+                } else {
+                    position
+                };
+                j.saved_limits = Some((j.limits, j.limited));
+                j.limits = [at, at];
+                j.limited = true;
+                j.motor = false;
+                j.target_velocity = 0.0;
+            }
+            (false, Some((limits, limited))) => {
+                j.limits = limits;
+                j.limited = limited;
+                j.saved_limits = None;
+            }
+            _ => {}
+        }
+        true
     }
 
     fn set_body_shape(

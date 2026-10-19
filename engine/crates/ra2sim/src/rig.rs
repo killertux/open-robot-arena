@@ -20,6 +20,11 @@ pub enum Role {
     Motor,
     /// A linear actuator (servo/burst piston).
     Piston,
+    /// A free axle a wheel turns on: an `AxleMount` (its `.gmf` declares the
+    /// hinge) or a `Steering` unit's two hubs. The original makes each its own
+    /// rigid body (live, Sentinel's `hub1`/`hub2` and Ripblade's axles are
+    /// bodies of their own, `assembly-*__live__000.json`).
+    Axle,
     Weapon,
     Control,
     Power,
@@ -33,7 +38,7 @@ impl Role {
     /// A motor turns its subtree about the mount axis; a piston *slides* it along
     /// that axis (F8). Both split the child off into its own body.
     pub fn drives(self) -> bool {
-        matches!(self, Role::Motor | Role::Piston)
+        matches!(self, Role::Motor | Role::Piston | Role::Axle)
     }
 
     pub fn of(class: &str, base: &str) -> Role {
@@ -42,6 +47,7 @@ impl Role {
             "Wheel" => Role::Wheel,
             "SpinMotor" | "ServoMotor" | "BurstMotor" => Role::Motor,
             "BurstPiston" | "ServoPiston" => Role::Piston,
+            "AxleMount" | "Steering" => Role::Axle,
             "Weapon" => Role::Weapon,
             "ControlBoard" => Role::Control,
             "Battery" | "AirTank" => Role::Power,
@@ -49,6 +55,7 @@ impl Role {
                 "Weapon" => Role::Weapon,
                 "SpinMotor" | "ServoMotor" | "BurstMotor" => Role::Motor,
                 "ServoPiston" | "BurstPiston" => Role::Piston,
+                "AxleMount" | "Steering" => Role::Axle,
                 "Wheel" => Role::Wheel,
                 "ControlBoard" => Role::Control,
                 _ => Role::Structure,
@@ -63,6 +70,7 @@ impl Role {
             Role::Weapon => 600.0,
             Role::Motor => 350.0,
             Role::Piston => 350.0,
+            Role::Axle => 350.0,
             Role::Wheel => 250.0,
             Role::Structure => 300.0,
             Role::Control => 200.0,
@@ -169,6 +177,12 @@ pub struct Component {
     pub name: String,
     /// Bot-local transform in the rest pose.
     pub local: Mat4,
+    /// The component frame as its rotor carries it, in the rest pose: `local`
+    /// except for a burst motor, whose rotor the original builds turned to its
+    /// start angle ([`ra2fmt::mount::burst_rotor`]).
+    pub rotor_local: Mat4,
+    /// The motor hinge its `.gmf` declares (component space), if any.
+    pub hinge: Option<ra2fmt::mount::RotorHinge>,
     /// Visual batches (component-local).
     pub items: Vec<DrawItem>,
     /// Visual batches for the motor's rotating hub, if it has one.
@@ -782,7 +796,8 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
         // mount axis, a piston slides it along that axis (F8).
         let piston = comps[parent].piston;
         let motor = comps[parent].motor;
-        if motor.is_none() && piston.is_none() {
+        let axle = comps[parent].role == Role::Axle;
+        if motor.is_none() && piston.is_none() && !axle {
             // A split that carries no joint data of its own: weld the child group
             // back on rather than leave it floating.
             part.parent = None;
@@ -815,12 +830,29 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             None => axis,
         };
         let axis = if axis == Vec3::ZERO { Vec3::Z } else { axis };
-        // A burst motor is a limited hinge; everything else swings freely. Its
-        // `[start, end]` are the axle's absolute angles, and the rest pose
-        // leaves the axle at `start`, so the constraint has to allow the travel
-        // from there to `end`. Jolt measures the hinge angle from the pose the
-        // constraint is created in and requires the range to straddle zero, so
-        // the limits are that travel, split about zero.
+        // A burst motor's and an axle mount's hinge is the one their `.gmf`
+        // declares (`Hinge01`, housing to rotor): a burst motor's mount point
+        // on the rotor faces along the arm, not along the axle, and its start
+        // and travel are angles about that hinge's spin axis.
+        let gmf_hinge = comps[parent]
+            .hinge
+            .as_ref()
+            .filter(|_| piston.is_none() && (axle || motor.and_then(|m| m.burst).is_some()));
+        let (pivot, axis) = match gmf_hinge {
+            Some(h) => (
+                parent_local.transform_point3(h.pivot),
+                parent_local.transform_vector3(h.axis).normalize_or(axis),
+            ),
+            None => (pivot, axis),
+        };
+        // A burst motor is a limited hinge; everything else swings freely. The
+        // original builds its rotor at the start angle and then re-creates the
+        // hinge there (`FUN_00480c60`), so the rest pose is the hinge's zero;
+        // the second number is the travel (`FUN_00480dd0` sets the limits to
+        // `0` and `-end` in the game's own angle sense, which is the opposite
+        // of the right-handed turn about the spin axis the start angle is
+        // measured in — Scout's fork swings up, Grog's axe down). Jolt wants
+        // the range to straddle zero.
         //
         // A piston's travel comes straight from its definition, already in that
         // shape (metres either side of the rest pose).
@@ -838,11 +870,24 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
                     JointUse::Piston
                 },
             )
+        } else if axle {
+            // A free axle: the wheel spins on it, nothing drives it here.
+            (
+                0.0,
+                0.0,
+                [-std::f32::consts::PI, std::f32::consts::PI],
+                comps[root]
+                    .wheel
+                    .as_ref()
+                    .map(|w| w.resistance * torque_unit())
+                    .unwrap_or(0.0),
+                JointUse::Passive,
+            )
         } else {
             let m = motor.expect("checked above");
             let limits = match m.burst {
-                Some([start, end]) => {
-                    let d = (end - start).clamp(-std::f32::consts::PI, std::f32::consts::PI);
+                Some([_start, travel]) => {
+                    let d = travel.clamp(-std::f32::consts::PI, std::f32::consts::PI);
                     [d.min(0.0), d.max(0.0)]
                 }
                 None => [-std::f32::consts::PI, std::f32::consts::PI],
@@ -939,8 +984,8 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
 /// Load a `.bot` into a component tree (no physics yet).
 pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
     let (bot, _root, loaded) = ra2_render::load_bot_components(path)?;
-    let rest =
-        ra2_render::component_worlds_mounted(&bot, &loaded, ra2_render::MountMode::from_env());
+    let (rest, carried) =
+        ra2_render::component_assembly_mounted(&bot, &loaded, ra2_render::MountMode::from_env());
     let mut components: Vec<Component> = Vec::with_capacity(bot.components.len());
 
     // The chassis' crush cage (F9) is the bot's, not a component definition's.
@@ -1180,6 +1225,11 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             base,
             name,
             local: rest[i],
+            rotor_local: carried[i],
+            hinge: loaded
+                .get(i)
+                .and_then(|l| l.as_ref())
+                .and_then(|lc| ra2fmt::mount::rotor_hinge(&lc.scene)),
             items,
             rotor_items,
             hull_points,
@@ -1440,6 +1490,8 @@ mod tests {
             base: String::new(),
             name: String::new(),
             local,
+            rotor_local: local,
+            hinge: None,
             items: Vec::new(),
             rotor_items: Vec::new(),
             hull_points: Vec::new(),

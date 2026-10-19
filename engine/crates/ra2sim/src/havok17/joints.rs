@@ -71,6 +71,10 @@ pub struct Joint {
     /// game parks a motor with `Lock` (`FUN_00480e20`); this holds it the way
     /// the Jolt backend's motor friction does.
     pub friction: f32,
+    /// The game's `Lock` (`FUN_00480e20` / `FUN_004b50c0`): while set, the
+    /// limits and `limited` flag the joint had before it was locked; the
+    /// joint's own limits are then both its position at the lock.
+    pub saved_limits: Option<([f32; 2], bool)>,
 }
 
 /// A row of a block: the Jacobian against each body's linear and angular
@@ -269,7 +273,13 @@ impl Joint {
             // Ours: a parked joint resists its own motion up to its friction.
             lambda = (-rel * m).clamp(-self.friction * dt, self.friction * dt);
         }
-        if self.limited {
+        if self.limited && self.saved_limits.is_some() && angular {
+            // Locked at one angle: measure the miss the short way round, so a
+            // hinge locked near ±π does not see a full turn of error.
+            let bound = self.limits[0];
+            let miss = wrap((lambda * k + rel) * dt + position - bound);
+            lambda -= miss * inv_dt * m;
+        } else if self.limited {
             let predicted = (lambda * k + rel) * dt + position;
             let bound = if predicted > self.limits[1] {
                 Some(self.limits[1])
@@ -467,6 +477,7 @@ mod tests {
             target_velocity: velocity,
             target: 0.0,
             friction: 0.0,
+            saved_limits: None,
         }
     }
 

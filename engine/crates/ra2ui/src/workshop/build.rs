@@ -681,23 +681,20 @@ impl Build {
         Ok(removed)
     }
 
-    /// The F1 world transform of every component.
+    /// The world transform of every component, by the original's mount rule
+    /// ([`ra2fmt::mount`]), the same the renderer and the simulator use.
     pub fn transforms(&self) -> Vec<Mat4> {
-        let maps: Vec<BTreeMap<i32, Mat4>> = self
+        let tables: Vec<Option<BTreeMap<i32, ra2fmt::gmi::Attachment>>> = self
             .info
             .iter()
-            .map(|info| {
-                info.mounts
-                    .iter()
-                    .map(|(id, a)| (*id, mount::tm_mat4(&a.transform)))
-                    .collect()
-            })
+            .map(|info| Some(info.mounts.clone()))
             .collect();
+        let hinges = self.info.iter().map(|info| info.hinge.clone()).collect();
         mount::worlds(
             &self.bot,
-            &MountFrames::from_maps(maps),
+            &MountFrames::from_tables(&tables).with_hinges(hinges),
             MountOptions {
-                mode: MountMode::FramesFlipped,
+                mode: MountMode::Game,
                 chassis_plane: 0.0,
             },
         )
@@ -827,6 +824,7 @@ fn chassis_info(chassis: &Chassis) -> ComponentInfo {
         base: "Chassis".into(),
         def: None,
         mounts: BTreeMap::new(),
+        hinge: None,
         mass: chassis.mass().max(5.0),
         has_hull: chassis.mesh.as_ref().is_some_and(|m| !m.points.is_empty()),
         loaded: true,
@@ -1034,6 +1032,7 @@ mod tests {
             base: "SpinMotor".into(),
             def: None,
             mounts,
+            hinge: None,
             mass: 16.0,
             has_hull: true,
             loaded: true,
@@ -1051,6 +1050,7 @@ mod tests {
             base: "Wheel".into(),
             def: None,
             mounts,
+            hinge: None,
             mass: 8.0,
             has_hull: true,
             loaded: true,
@@ -1104,7 +1104,8 @@ mod tests {
     }
 
     /// F1's chassis branch: a baseplate placement writes the file's own stored
-    /// transform and nothing else, and undo restores it.
+    /// fields and nothing else, the part's own mount point lands on them (the
+    /// original's rule, docs/29 section 8), and undo restores it.
     #[test]
     fn a_baseplate_placement_uses_the_stored_rule_and_undo_restores_it() {
         let mut build = Build::new("Place", chassis());
@@ -1120,9 +1121,15 @@ mod tests {
         assert_eq!(placed.rotation, mount::CHASSIS_CHILD_ROTATION);
         assert_eq!(placed.angle, 0.7);
         assert_eq!(placed.height, 0.1);
-        // The renderer and the rig read these fields through `component_local`,
-        // and the chassis has no mount frame to change that.
-        assert_eq!(build.transforms()[motor], mount::component_local(&placed));
+        // The renderer, the rig and the workshop read these fields through the
+        // same rule: the motor's own point (mount 0) sits on the translation,
+        // `height` above the baseplate.
+        let own = mount::tm_mat4(&motor_info().mounts[&0].transform);
+        let at = (build.transforms()[motor] * own).transform_point3(glam::Vec3::ZERO);
+        assert!(
+            at.abs_diff_eq(glam::Vec3::new(0.37, 0.1, -0.22), 1e-5),
+            "{at:?}"
+        );
         assert!(build.undo());
         assert_eq!(build.components()[motor], before);
         assert!(build.redo());

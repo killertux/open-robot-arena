@@ -57,6 +57,79 @@ fn spawn_prop(physics: &mut dyn PhysicsBackend, p: &crate::scene::Prop) -> Optio
     physics.create_body(&desc).ok()
 }
 
+/// The arena `.gmf`'s disabled collision pairs (`GMID_HAVOK_DIS_COLLISION_PAIRS`)
+/// as they apply to the bodies we build: a pair of movable bodies by name, or a
+/// movable body and `None` for the merged static collider — which every fixed
+/// body goes into, so a body is kept off it only when the file disables it
+/// against *every* colliding fixed body. The Parking Lot's trap doors are
+/// (`main_collision`, the scaffolds and barrels), which is what lets them swing
+/// down through the pit's rim when `TrapDoor.Trigger()` unlocks them.
+fn no_collide_pairs(arena_path: &str) -> Vec<(String, Option<String>)> {
+    let Ok(Some(havok)) = ra2_render::collect_havok(arena_path) else {
+        return Vec::new();
+    };
+    let is = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    let fixed: Vec<&str> = havok
+        .bodies
+        .iter()
+        .filter(|b| b.is_static() && b.collides())
+        .map(|b| b.name.as_str())
+        .collect();
+    let movable = |n: &str| {
+        havok
+            .bodies
+            .iter()
+            .any(|b| is(&b.name, n) && !b.is_static() && b.collides())
+    };
+    let disabled = |a: &str, b: &str| {
+        havok
+            .disabled_pairs
+            .iter()
+            .any(|(x, y)| (is(x, a) && is(y, b)) || (is(x, b) && is(y, a)))
+    };
+    let mut out = Vec::new();
+    for (a, b) in &havok.disabled_pairs {
+        if movable(a) && movable(b) {
+            out.push((a.clone(), Some(b.clone())));
+        }
+    }
+    for body in havok
+        .bodies
+        .iter()
+        .filter(|b| !b.is_static() && b.collides())
+    {
+        if !fixed.is_empty() && fixed.iter().all(|f| disabled(&body.name, f)) {
+            out.push((body.name.clone(), None));
+        }
+    }
+    out
+}
+
+/// Tell the backend about [`no_collide_pairs`] for the props now in the world.
+fn apply_no_collide(
+    physics: &mut dyn PhysicsBackend,
+    props: &[PropEntity],
+    arena_body: BodyHandle,
+    pairs: &[(String, Option<String>)],
+) {
+    let body = |name: &str| {
+        props
+            .iter()
+            .find(|p| p.prop.name.eq_ignore_ascii_case(name) && p.body != HIDDEN_PROP)
+            .map(|p| p.body)
+    };
+    for (a, b) in pairs {
+        let Some(a) = body(a) else { continue };
+        let b = match b {
+            Some(b) => body(b),
+            None => Some(arena_body),
+        };
+        if let Some(b) = b {
+            physics.disable_collision(a, b);
+        }
+    }
+}
+
 /// The damage below which a hit is not applied at all.
 ///
 /// `FUN_00417330` gates the damage event on `10.0 <= param_5` before it calls
@@ -159,6 +232,10 @@ pub struct Duel {
     /// The `SetPinned` wishes already applied, so the reconciliation below only
     /// talks to the physics when the script actually changed its mind.
     applied_pinned: std::collections::BTreeMap<String, bool>,
+    /// The arena's disabled collision pairs as they apply to our bodies (see
+    /// [`no_collide_pairs`]), and the merged static collider they may name.
+    no_collide: Vec<(String, Option<String>)>,
+    arena_body: BodyHandle,
     /// The match's one scene camera (F2/F3/F4, the arena intro): see
     /// [`crate::camera`].
     pub scene_camera: crate::camera::SceneCamera,
@@ -254,7 +331,7 @@ impl Duel {
 
         let mut physics: Box<dyn PhysicsBackend> = crate::backend::create_backend(arena.gravity)?;
         let (verts, indices) = arena.triangle_soup();
-        let _arena_body = physics.create_body(
+        let arena_body = physics.create_body(
             &BodyDesc::new(
                 MotionType::Static,
                 ShapeDesc::TriMesh {
@@ -273,6 +350,8 @@ impl Duel {
                 props.push(PropEntity { body, prop: p });
             }
         }
+        let no_collide = no_collide_pairs(arena_path);
+        apply_no_collide(&mut *physics, &props, arena_body, &no_collide);
 
         if std::env::var("RA2_DEBUG").is_ok() {
             for p in &props {
@@ -446,6 +525,8 @@ impl Duel {
             arena_tick_error: None,
             arena_timer: 0.0,
             applied_pinned: std::collections::BTreeMap::new(),
+            no_collide,
+            arena_body,
             scene_camera: crate::camera::SceneCamera::default(),
             fx: ra2_render::effects::Effects::new(
                 ra2_render::find_game_root(std::path::Path::new(arena_path)).as_deref(),
@@ -928,7 +1009,15 @@ impl Duel {
             let hidden = self.props[i].body == HIDDEN_PROP;
             if *on && hidden {
                 match spawn_prop(&mut *self.physics, &self.props[i].prop) {
-                    Some(body) => self.props[i].body = body,
+                    Some(body) => {
+                        self.props[i].body = body;
+                        apply_no_collide(
+                            &mut *self.physics,
+                            &self.props,
+                            self.arena_body,
+                            &self.no_collide,
+                        );
+                    }
                     None => self.log.push(format!("SetActive({name:?}): body failed")),
                 }
             } else if !*on && !hidden {
@@ -954,7 +1043,7 @@ impl Duel {
             } else {
                 self.physics.hinge_angle(j.handle)
             };
-            let (target, force, torque, strength, friction) = {
+            let (target, force, torque, strength, friction, held) = {
                 let mut d = j.drive.lock().unwrap_or_else(|e| e.into_inner());
                 // The script's torque is the *limit* on the drive, and it can
                 // change at any time — a hammer parked with `Lock(True)` only
@@ -967,9 +1056,16 @@ impl Duel {
                 // stopped, and again when the joint arrives at the end of its
                 // travel, which is why the Octagon's pit floors stay up under the
                 // robots until their script gives them a direction.
-                let arrived = if d.direction > 0.0 {
+                // "Arrived" is at the stop the joint is being driven toward
+                // (`FUN_00481450`: the end for a positive command, the start for
+                // a negative one, within 0.05). The command's sense is the
+                // motor's velocity, speed sign included: the Compressor's left
+                // arms are given a negative speed with the same direction as
+                // the right ones, and must not count as home at the other stop.
+                let heading = if d.locked { 0.0 } else { d.speed * d.direction };
+                let arrived = if heading > 0.0 {
                     (pos - j.limits[1]).abs() < 0.05
-                } else if d.direction < 0.0 {
+                } else if heading < 0.0 {
                     (pos - j.limits[0]).abs() < 0.05
                 } else {
                     false
@@ -979,8 +1075,19 @@ impl Duel {
                     || (d.direction == 0.0 && d.auto_lock_idle);
                 let target = if held { 0.0 } else { d.target_velocity() };
                 let friction = if held { strength } else { 0.0 };
-                (target, d.take_force(), d.take_torque(), strength, friction)
+                (
+                    target,
+                    d.take_force(),
+                    d.take_torque(),
+                    strength,
+                    friction,
+                    held,
+                )
             };
+            // The original's `Lock(1)` sets both limits to where the joint is
+            // (`FUN_00480e20`, `FUN_004b50c0`); a backend without it holds the
+            // joint on the friction set above.
+            self.physics.lock_joint(j.handle, held);
             if (j.strength - strength).abs() > 1e-3 || (j.friction - friction).abs() > 1e-3 {
                 self.physics
                     .set_joint_strength(j.handle, strength, friction);
@@ -3123,7 +3230,25 @@ mod tests {
             still.position.y
         );
 
-        // And unpinning it lets it drop the six metres to the floor.
+        // And unpinning it lets it drop the six metres to the floor — once the
+        // trap door it rests on opens. The block spawns on `trapdoor1`, which
+        // `Hazards.TrapDoor.__init__` locks (`hinge.Lock(True)`, both limits
+        // at the current angle: `FUN_00480e20`), so an unpinned block on a
+        // shut door stays put, as it would in the original. The script only
+        // activates the blocks from `TrapDoor.Trigger()`, which unlocks the
+        // hinge, sets direction 100 and applies a torque of 300; do the same.
+        {
+            let door = body_of(&duel, "trapdoor1");
+            let joint = duel
+                .joints
+                .iter()
+                .find(|j| j.body == door)
+                .expect("trapdoor1 is a hinge");
+            let mut d = joint.drive.lock().unwrap_or_else(|e| e.into_inner());
+            d.locked = false;
+            d.direction = 100.0;
+            d.pending_torque += 300.0;
+        }
         {
             let st = ra2script::state();
             let a = st.arena.as_ref().expect("a scripted arena");

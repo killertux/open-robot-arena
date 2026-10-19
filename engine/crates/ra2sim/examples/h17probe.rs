@@ -52,11 +52,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .iter()
                         .map(|w| {
                             let hub = duel.physics.state(r.parts[w.part].body).unwrap();
+                            // Spin about the axle against the rolling spin
+                            // (n × v) / r for the hub's own velocity (r 0.185).
+                            let axle = (s.rotation * w.axle).normalize_or_zero();
+                            let roll = glam::Vec3::Y.cross(hub.linear_velocity) / 0.185;
                             format!(
-                                "[th {:.0} t {} w {:.1}]",
+                                "[th {:.0} t {} w {:.1} spin {:.1} roll {:.1}]",
                                 w.thrust,
                                 w.touching as u8,
-                                hub.angular_velocity.length()
+                                hub.angular_velocity.length(),
+                                hub.angular_velocity.dot(axle),
+                                roll.dot(axle)
                             )
                         })
                         .collect::<Vec<_>>()
