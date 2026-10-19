@@ -48,6 +48,15 @@ pub enum ShapeDesc {
     ConvexHull {
         points: Vec<Vec3>,
     },
+    /// A closed triangle mesh on a moving body that Havok collides as a mesh
+    /// (shape class `GEOMETRIC`): a robot part whose `.gmf` asks for that
+    /// (`rig::collides_as_mesh`) and the chassis the game builds. Its mass
+    /// and inertia are its hull's, and a backend without moving meshes (Jolt)
+    /// collides it as the convex hull of `points`.
+    MeshHull {
+        points: Vec<Vec3>,
+        indices: Vec<[u32; 3]>,
+    },
     /// Triangle mesh (static/kinematic only in most engines).
     TriMesh {
         vertices: Vec<Vec3>,

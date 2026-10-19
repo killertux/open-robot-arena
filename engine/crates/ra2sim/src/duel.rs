@@ -178,6 +178,8 @@ pub struct Duel {
     pub time: f32,
     pub tuning: DriveTuning,
     pub combat: CombatConfig,
+    /// The collision-event filter between the physics and the pricing.
+    pub event_gate: combat::EventGate,
     /// Scales each robot's natural mass.
     pub mass_scale: f32,
     /// Human-readable event log (hits that broke something, KOs, ...).
@@ -542,6 +544,7 @@ impl Duel {
             time: 0.0,
             tuning: DriveTuning::default(),
             combat: CombatConfig::default(),
+            event_gate: Default::default(),
             mass_scale,
             log: Vec::new(),
             damage_taken,
@@ -1475,11 +1478,13 @@ impl Duel {
 
     /// Turn the step's contact points into damage.
     ///
-    /// Every contact point of every step is an event, in both directions
-    /// ([`combat::resolve`]); each one then goes through [`Duel::apply_hit`],
+    /// The contact points the event filter lets through ([`combat::EventGate`])
+    /// are priced in both directions ([`combat::resolve`]); each one then goes
+    /// through [`Duel::apply_hit`],
     /// whose `>= 10` gate is the arena's (`FUN_00417330`).
     fn resolve_combat(&mut self) {
         let events = self.physics.take_contacts();
+        let events = self.event_gate.admit(&self.robots, events, self.time);
         let impacts = combat::resolve(&self.robots, &events, &self.combat);
         if self.record_impacts {
             self.impacts.extend(impacts.iter().copied());
@@ -3267,6 +3272,53 @@ mod tests {
     /// at all — the 1200 N·m only arrives in `Smash`, when a robot walks into the
     /// zone. A joint therefore has to be able to take a new drive strength after
     /// it is built, or the hammer swings as if it weighed nothing.
+    /// The collision-event filter (`FUN_0052d4f0`): two robot bodies pressed
+    /// together at one approaching point every step give one event per body
+    /// registration per second (1 Hz each, so two a second), and a point where
+    /// they part gives none.
+    #[test]
+    fn robot_contacts_reach_the_pricing_once_a_second_per_body() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let duel = Duel::new(
+            &arena,
+            &[bot("AI/Team0/Bot0.bot"), bot("AI/Team0/Bot1.bot")],
+        )
+        .expect("a duel");
+        let (a, b) = (duel.robots[0].parts[0].body, duel.robots[1].parts[0].body);
+        let state = |v: Vec3| crate::backend::BodyState {
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            linear_velocity: v,
+            angular_velocity: Vec3::ZERO,
+        };
+        let event = |closing: f32| crate::backend::ContactEvent {
+            a,
+            b,
+            normal: Vec3::X,
+            point: Vec3::ZERO,
+            state_a: state(Vec3::X * closing),
+            state_b: state(Vec3::ZERO),
+        };
+        let mut gate = combat::EventGate::default();
+        let mut through = Vec::new();
+        for k in 0..120 {
+            let t = k as f32 / 60.0;
+            let got = gate.admit(&duel.robots, vec![event(2.0), event(-2.0)], t);
+            assert!(got.iter().all(|e| e.state_a.linear_velocity.x > 0.0));
+            if !got.is_empty() {
+                through.push(k);
+            }
+        }
+        assert_eq!(through, vec![0, 1, 60, 61], "{through:?}");
+    }
+
     #[test]
     fn a_hammer_that_asks_for_power_late_still_swings() {
         let Some(game) = game_dir() else { return };
@@ -3667,8 +3719,18 @@ mod tests {
         });
         assert!(closed_at < 10.0, "closed only after {closed_at:.1} s");
         assert_eq!(seen, [true, true], "each SmartZone held the enemy");
+        // Live (`local/oracle/original/fight-scout-alarm-box__live__000`, the
+        // shipped AIs on the Box, every priced hit at the arena's gate
+        // `FUN_00417330`): ALARM's Hammer Head lands the first counted blow
+        // 5.3 s in and 63 in 120 s; the Scout's first counts only at 49 s.
+        // So within 30 s the blows are ALARM's.
         let dealt: f32 = duel.damage_dealt.iter().sum();
         assert!(dealt > 0.0, "no damage in 30 s of fighting");
+        assert!(
+            duel.damage_dealt[1] > 0.0,
+            "ALARM's hammer landed nothing in 30 s: {:?}",
+            duel.damage_dealt
+        );
     }
 
     #[test]

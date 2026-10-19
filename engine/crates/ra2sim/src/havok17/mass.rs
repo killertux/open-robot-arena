@@ -90,14 +90,16 @@ pub fn of_shape(shape: &ShapeDesc) -> MassProps {
                 inertia: Mat3::from_diagonal(Vec3::new(side, 0.5 * v * radius * radius, side)),
             }
         }
-        ShapeDesc::ConvexHull { points } => match massprops::hull_inertia(points) {
-            Some((volume, com, inertia)) => MassProps {
-                volume,
-                com,
-                inertia,
-            },
-            None => bounds_box(points),
-        },
+        ShapeDesc::ConvexHull { points } | ShapeDesc::MeshHull { points, .. } => {
+            match massprops::hull_inertia(points) {
+                Some((volume, com, inertia)) => MassProps {
+                    volume,
+                    com,
+                    inertia,
+                },
+                None => bounds_box(points),
+            }
+        }
         ShapeDesc::TriMesh { vertices, .. } => bounds_box(vertices),
         ShapeDesc::Compound(children) => {
             let parts: Vec<MassProps> = children

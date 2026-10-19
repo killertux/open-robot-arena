@@ -86,7 +86,10 @@ fn a_shoved_cube_slides_to_a_stop() {
     let travel = s.position.x - x0;
     let mu = (0.5f32 * 0.3).sqrt();
     let ideal = 16.0 / (2.0 * mu * 12.0);
-    assert!(s.linear_velocity.length() < 0.2, "{s:?}");
+    // Horizontally: between steps a resting body carries the -g·dt the last
+    // integration gave it, which the next step's resolution takes back.
+    let v = s.linear_velocity;
+    assert!(v.x.hypot(v.z) < 0.2, "{s:?}");
     assert!(
         travel > 0.5 * ideal && travel < 2.0 * ideal,
         "slid {travel} vs {ideal}"
@@ -155,4 +158,135 @@ fn a_locked_hinge_holds_its_angle_and_releases() {
         (free - held).abs() > 0.3,
         "the released arm did not swing: {held} -> {free}"
     );
+}
+
+/// The agents' points, not every corner near the floor: a box resting on a
+/// floor triangle is held by the corners that have been its closest point
+/// (the convex x mesh manifold), each once, all inside the tolerance.
+#[test]
+fn a_resting_box_is_held_by_its_manifold_corners() {
+    let mut physics = Havok17Backend::new().unwrap();
+    floor(&mut physics);
+    let c = cube(&mut physics, 0.59);
+    for _ in 0..120 {
+        physics.step(1.0 / 60.0);
+    }
+    let mine: Vec<_> = physics
+        .contacts
+        .iter()
+        .filter(|k| k.a == c as usize || k.b == c as usize)
+        .collect();
+    assert!(!mine.is_empty() && mine.len() <= 4, "{mine:?}");
+    let centre = physics.state(c).unwrap().position;
+    for (n, k) in mine.iter().enumerate() {
+        assert!(k.distance >= 0.0 && k.distance < TOLERANCE, "{k:?}");
+        // At a bottom corner of the cube, half the gap above the floor.
+        let r = k.point - centre;
+        assert!(
+            (r.x.abs() - 0.5).abs() < 0.02 && (r.z.abs() - 0.5).abs() < 0.02,
+            "{k:?}"
+        );
+        for other in &mine[n + 1..] {
+            assert!(k.point.distance(other.point) > 0.1, "{k:?} {other:?}");
+        }
+    }
+}
+
+/// A wheel dropped onto the floor skidding (moving, not turning) is spun up
+/// by the floor's friction toward rolling: the points are the hub's lowest
+/// corners, so nothing ahead of the axle brakes the spin.
+#[test]
+fn a_skidding_wheel_spins_up_toward_rolling() {
+    let mut physics = Havok17Backend::new().unwrap();
+    floor(&mut physics);
+    let (r, h) = (0.25f32, 0.07f32);
+    let mut pts = Vec::new();
+    for k in 0..16 {
+        let a = k as f32 * std::f32::consts::TAU / 16.0;
+        for z in [-h, h] {
+            pts.push(Vec3::new(a.cos() * r, a.sin() * r, z));
+        }
+    }
+    let w = physics
+        .create_body(
+            &BodyDesc::new(MotionType::Dynamic, ShapeDesc::ConvexHull { points: pts })
+                .at(Vec3::new(0.0, r + 0.09, 0.0))
+                .with_mass(20.0)
+                .with_friction(0.5)
+                .with_restitution(0.0),
+        )
+        .unwrap();
+    physics.set_velocity(w, Vec3::new(3.0, 0.0, 0.0), Vec3::ZERO);
+    for _ in 0..90 {
+        physics.step(1.0 / 60.0);
+    }
+    let s = physics.state(w).unwrap();
+    // Rolling toward +x turns the wheel about -z.
+    let roll = s.linear_velocity.x / r;
+    let spin = -s.angular_velocity.z;
+    assert!(s.linear_velocity.x > 0.5, "{s:?}");
+    assert!(
+        spin > 0.6 * roll && spin < 1.3 * roll,
+        "spin {spin} vs rolling {roll}: {s:?}"
+    );
+}
+
+/// A mesh collidable on a moving body (`ShapeDesc::MeshHull`, the game's
+/// chassis and `SIMULATION_GEOMETRY 6` parts) meets the floor through the mesh
+/// x mesh agent: one point per pair of triangles within the tolerance, none
+/// within 3 mm of another.
+#[test]
+fn a_mesh_plate_rests_on_the_floor_with_distinct_points() {
+    let mut physics = Havok17Backend::new().unwrap();
+    floor(&mut physics);
+    let mut points = Vec::new();
+    for x in [-0.5, 0.5] {
+        for y in [-0.05, 0.05] {
+            for z in [-0.4, 0.4] {
+                points.push(Vec3::new(x, y, z));
+            }
+        }
+    }
+    // The box's twelve triangles (points indexed x*4 + y*2 + z).
+    let quads = [
+        [0, 1, 3, 2],
+        [4, 6, 7, 5],
+        [0, 4, 5, 1],
+        [2, 3, 7, 6],
+        [0, 2, 6, 4],
+        [1, 5, 7, 3],
+    ];
+    let indices: Vec<[u32; 3]> = quads
+        .iter()
+        .flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]])
+        .collect();
+    let plate = physics
+        .create_body(
+            &BodyDesc::new(MotionType::Dynamic, ShapeDesc::MeshHull { points, indices })
+                .at(Vec3::new(0.0, 0.14, 0.0))
+                .with_mass(30.0)
+                .with_friction(0.5)
+                .with_restitution(0.0),
+        )
+        .unwrap();
+    for _ in 0..120 {
+        physics.step(1.0 / 60.0);
+    }
+    let s = physics.state(plate).unwrap();
+    assert!(
+        s.position.y > 0.05 && s.position.y < 0.05 + TOLERANCE,
+        "{s:?}"
+    );
+    let mine: Vec<_> = physics
+        .contacts
+        .iter()
+        .filter(|k| k.a == plate as usize || k.b == plate as usize)
+        .collect();
+    assert!(!mine.is_empty(), "the plate fell through");
+    for (n, k) in mine.iter().enumerate() {
+        assert!(k.distance > 0.0 && k.distance < TOLERANCE, "{k:?}");
+        for other in &mine[n + 1..] {
+            assert!(k.point.distance(other.point) > 0.003, "{k:?} {other:?}");
+        }
+    }
 }

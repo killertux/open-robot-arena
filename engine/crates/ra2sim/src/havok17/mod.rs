@@ -27,6 +27,7 @@
 mod body;
 pub mod joints;
 pub mod mass;
+pub mod narrow;
 pub mod resolver;
 
 use std::collections::HashMap;
@@ -45,6 +46,7 @@ use crate::backend::{
 use crate::jolt::JoltBackend;
 use body::Body;
 use joints::{Joint, Kind};
+use narrow::{Aabb, ConvexManifold, MeshManifold, Piece, PieceShape, Pose};
 use resolver::Contact;
 
 /// World gravity as the game sets it (`FUN_0052a000(0, -12, 0)` at
@@ -113,65 +115,23 @@ struct Geometry {
     id: BodyId,
     shape: Shape,
     phantom: Option<Shape>,
-    /// The corners of the body's convex pieces, body-local: where a resting
-    /// face meets a surface (see [`Havok17Backend::detect`]).
+    /// The body's collidables, body-local (what [`narrow`] collides).
+    pieces: Vec<Piece>,
+}
+
+/// A pair of collidables: (body, piece) of A, then of B.
+type PairKey = (usize, u32, usize, u32);
+
+/// One collidable where its body is now.
+struct WorldPiece {
+    body: usize,
+    piece: u32,
+    body_pose: Pose,
+    pose: Pose,
+    /// A convex piece's vertices in world space (empty for a mesh).
     vertices: Vec<Vec3>,
-    /// How far the shape reaches from the body's origin.
-    reach: f32,
-}
-
-/// The corners of `shape`'s convex pieces in shape space (none for round
-/// primitives and meshes, whose contacts are Jolt's closest points).
-fn shape_vertices(shape: &ShapeDesc) -> Vec<Vec3> {
-    match shape {
-        ShapeDesc::Box { half_extents: h } => {
-            let mut out = Vec::with_capacity(8);
-            for x in [-h.x, h.x] {
-                for y in [-h.y, h.y] {
-                    for z in [-h.z, h.z] {
-                        out.push(Vec3::new(x, y, z));
-                    }
-                }
-            }
-            out
-        }
-        ShapeDesc::ConvexHull { points } => crate::massprops::hull_vertices(points),
-        ShapeDesc::Compound(children) => children
-            .iter()
-            .flat_map(|c| {
-                shape_vertices(&c.shape)
-                    .into_iter()
-                    .map(move |v| c.local_position + c.local_rotation * v)
-            })
-            .collect(),
-        ShapeDesc::OffsetCenterOfMass { shape, .. } => shape_vertices(shape),
-        _ => Vec::new(),
-    }
-}
-
-/// How far any point of `shape` is from its origin (a bound).
-fn shape_reach(shape: &ShapeDesc) -> f32 {
-    match shape {
-        ShapeDesc::Box { half_extents } => half_extents.length(),
-        ShapeDesc::Sphere { radius } => *radius,
-        ShapeDesc::Cylinder {
-            half_height,
-            radius,
-        }
-        | ShapeDesc::Capsule {
-            half_height,
-            radius,
-        } => half_height + radius,
-        ShapeDesc::ConvexHull { points }
-        | ShapeDesc::TriMesh {
-            vertices: points, ..
-        } => points.iter().map(|p| p.length()).fold(0.0, f32::max),
-        ShapeDesc::Compound(children) => children
-            .iter()
-            .map(|c| c.local_position.length() + shape_reach(&c.shape))
-            .fold(0.0, f32::max),
-        ShapeDesc::OffsetCenterOfMass { shape, .. } => shape_reach(shape),
-    }
+    radius: f32,
+    bounds: Aabb,
 }
 
 /// What a body looked like before a step piece, for rolling back.
@@ -195,8 +155,14 @@ pub struct Havok17Backend {
     joints: Vec<Joint>,
     /// The contacts of the last collision detection.
     contacts: Vec<Contact>,
-    /// The tolerance that detection used.
-    contact_tolerance: f32,
+    /// The agents' persistent manifolds, per pair of collidables.
+    mesh_manifolds: HashMap<PairKey, MeshManifold>,
+    convex_manifolds: HashMap<PairKey, ConvexManifold>,
+    /// Overlapping pairs a bad step let through (`detector + 0xe4`): they do
+    /// not backstep again while they keep overlapping.
+    excused: std::collections::HashSet<PairKey>,
+    /// Detections run (the manifolds' age stamp).
+    detections: u64,
     /// Collision events of the last step.
     events: Vec<ContactEvent>,
     /// Per body: the surface normal its phantom overlapped in the last step.
@@ -220,7 +186,10 @@ impl Havok17Backend {
             lookup: HashMap::new(),
             joints: Vec::new(),
             contacts: Vec::new(),
-            contact_tolerance: TOLERANCE,
+            mesh_manifolds: HashMap::new(),
+            convex_manifolds: HashMap::new(),
+            excused: Default::default(),
+            detections: 0,
             events: Vec::new(),
             phantom_touch: Vec::new(),
             last_dt: 1.0 / 60.0,
@@ -351,174 +320,346 @@ impl Havok17Backend {
         }
     }
 
-    /// Closest-point collision detection within `tol`. Returns the contacts and
-    /// whether a pair that was apart before now overlaps (the backstep test).
-    fn detect(&mut self, tol: f32) -> (Vec<Contact>, bool) {
-        self.sync();
-        let was_apart: HashMap<(usize, usize), f32> = {
-            let mut m: HashMap<(usize, usize), f32> = HashMap::new();
-            for c in &self.contacts {
-                let e = m.entry((c.a, c.b)).or_insert(f32::MAX);
-                *e = e.min(c.distance);
-            }
-            m
-        };
+    /// The bodies' collidables where they are now.
+    fn world_pieces(&self) -> Vec<WorldPiece> {
         let mut out = Vec::new();
-        let mut penetrated = false;
-        // Corners already turned into contacts, per pair: (pair, side, corner).
-        let mut used: std::collections::HashSet<(usize, usize, bool, usize)> = Default::default();
-        for i in 0..self.bodies.len() {
-            let bi = &self.bodies[i];
-            if !bi.moves() || bi.sensor {
+        for (i, b) in self.bodies.iter().enumerate() {
+            if !b.alive || b.sensor {
                 continue;
             }
             let Some(g) = &self.geometry[i] else { continue };
-            let query = CollideShape::new(&g.shape, rv(bi.origin()), jq(bi.rotation))
-                .max_separation_distance(tol);
-            let Ok(hits) = self
-                .world
-                .collide_shape(&query, &QueryFilter::new().exclude_body(g.id))
-            else {
-                continue;
+            let body = Pose {
+                position: b.origin(),
+                rotation: b.rotation,
             };
-            let mut hits = hits;
-            hits.sort_by(|x, y| {
-                x.body
-                    .to_raw()
-                    .cmp(&y.body.to_raw())
-                    .then(x.sub_shape_id.to_raw().cmp(&y.sub_shape_id.to_raw()))
-            });
-            for hit in hits {
-                let Some(&j) = self.lookup.get(&hit.body.to_raw()) else {
-                    continue;
+            for (k, p) in g.pieces.iter().enumerate() {
+                let pose = Pose {
+                    position: body.apply(p.position),
+                    rotation: body.rotation * p.rotation,
                 };
+                let (vertices, radius, bounds) = match &p.shape {
+                    PieceShape::Convex { vertices, radius } => {
+                        let v: Vec<Vec3> = vertices.iter().map(|v| pose.apply(*v)).collect();
+                        let bounds = Aabb::of(v.iter().copied()).grown(*radius);
+                        (v, *radius, bounds)
+                    }
+                    PieceShape::Mesh(mesh) => (
+                        Vec::new(),
+                        0.0,
+                        mesh.bounds.transformed(pose.position, pose.rotation),
+                    ),
+                };
+                out.push(WorldPiece {
+                    body: i,
+                    piece: k as u32,
+                    body_pose: body,
+                    pose,
+                    vertices,
+                    radius,
+                    bounds,
+                });
+            }
+        }
+        out
+    }
+
+    /// Collision detection (`FUN_00542810`): every pair of collidables within
+    /// the tolerance gets its agent's contact points (see [`narrow`]). Returns
+    /// the contacts and the pairs that make this a bad step (`detector +
+    /// 0x130`, `FUN_00542db0`): a pair whose shapes overlap, unless an earlier
+    /// bad step excused it, and a pair with a point closer than `current_tol`.
+    fn detect(&mut self, current_tol: f32) -> (Vec<Contact>, Vec<PairKey>) {
+        self.sync();
+        self.detections += 1;
+        let stamp = self.detections;
+        let tol = TOLERANCE;
+        let pieces = self.world_pieces();
+        let mut out = Vec::new();
+        let mut bad: Vec<PairKey> = Vec::new();
+        let mut excused_seen: std::collections::HashSet<PairKey> = Default::default();
+        let mut penetrating_bodies: Vec<(usize, usize)> = Vec::new();
+        let mut triangles = Vec::new();
+        for pa in &pieces {
+            let i = pa.body;
+            let bi = &self.bodies[i];
+            if !bi.moves() {
+                continue;
+            }
+            let (dynamic_i, friction_i, restitution_i) =
+                (bi.is_dynamic(), bi.friction, bi.restitution);
+            for pb in &pieces {
+                let j = pb.body;
                 if j == i {
                     continue;
                 }
                 let bj = &self.bodies[j];
-                if !bj.alive || bj.sensor || self.same_group(i, j) {
-                    continue;
-                }
-                // A pair of moving bodies is found from both sides; keep one.
+                // A pair of moving bodies is seen from both sides; keep one.
                 if bj.moves() && j < i {
                     continue;
                 }
-                if !bi.is_dynamic() && !bj.is_dynamic() {
+                if !dynamic_i && !bj.is_dynamic() {
                     continue;
                 }
-                let distance = -hit.penetration_depth;
-                if distance >= tol {
+                let (friction_j, restitution_j) = (bj.friction, bj.restitution);
+                if self.same_group(i, j) {
                     continue;
                 }
-                let normal = un_v(hit.normal);
-                if normal.length_squared() < 0.5 {
+                if !pa.bounds.grown(tol).overlaps(&pb.bounds) {
                     continue;
                 }
-                let normal = normal.normalize();
-                let on_a = un_rv(hit.point_on_shape);
-                let on_b = un_rv(hit.point_on_body);
-                let points = self.manifold(i, j, normal, on_a, on_b, tol, &mut used);
-                let friction = (bi.friction * bj.friction).max(0.0).sqrt();
-                let restitution = bi.restitution * bj.restitution;
-                let mut push = |point: Vec3, distance: f32| {
-                    if distance < 0.0 {
-                        let before = was_apart.get(&(i, j)).copied();
-                        if before.is_none_or(|d| d >= 0.0) {
-                            penetrated = true;
+                let key: PairKey = (i, pa.piece, j, pb.piece);
+                let first = out.len();
+                let mut penetrating = false;
+                let mut points: Vec<narrow::Point> = Vec::new();
+                // Whether the pair's agent sees the bodies the other way round
+                // (A is the convex piece of a convex x mesh pair).
+                let mut swap = false;
+                match (pa.vertices.is_empty(), pb.vertices.is_empty()) {
+                    (false, false) => {
+                        // Convex x convex (`FUN_00544820`).
+                        match narrow::convex_point(
+                            &pa.vertices,
+                            pa.radius,
+                            &pb.vertices,
+                            pb.radius,
+                            &pa.body_pose,
+                            &pb.body_pose,
+                        ) {
+                            None => penetrating = true,
+                            Some((p, c)) if p.distance < tol => {
+                                let m = self.convex_manifolds.entry(key).or_default();
+                                m.seen = stamp;
+                                let kept =
+                                    m.update(p, c.persists(), tol, &pa.body_pose, &pb.body_pose);
+                                points.push(p);
+                                points.extend(kept);
+                            }
+                            Some(_) => {}
                         }
                     }
+                    (false, true) | (true, false) => {
+                        // Convex x mesh (`FUN_00545b50`), the convex piece as A.
+                        swap = pa.vertices.is_empty();
+                        let (cx, ms) = if swap { (pb, pa) } else { (pa, pb) };
+                        let key = (cx.body, cx.piece, ms.body, ms.piece);
+                        penetrating =
+                            self.convex_mesh(key, cx, ms, tol, stamp, &mut triangles, &mut points);
+                    }
+                    (true, true) => {
+                        // Mesh x mesh (`FUN_0054a2a0`).
+                        penetrating =
+                            self.mesh_mesh(pa, pb, tol, &out, &mut triangles, &mut points);
+                    }
+                }
+                let friction = (friction_i * friction_j).max(0.0).sqrt();
+                let restitution = restitution_i * restitution_j;
+                let (ca, cb) = if swap { (j, i) } else { (i, j) };
+                for p in points {
                     out.push(Contact {
-                        a: i,
-                        b: j,
-                        normal,
-                        point,
-                        distance,
+                        a: ca,
+                        b: cb,
+                        normal: p.normal,
+                        point: p.point,
+                        distance: p.distance,
                         friction,
                         restitution,
                     });
-                };
-                if points.is_empty() {
-                    push((on_a + on_b) * 0.5, distance);
-                } else {
-                    for (point, d) in points {
-                        push(point, d);
+                }
+                if penetrating {
+                    if self.excused.contains(&key) {
+                        excused_seen.insert(key);
+                    } else {
+                        bad.push(key);
                     }
+                    if !penetrating_bodies.contains(&(i, j)) {
+                        penetrating_bodies.push((i, j));
+                    }
+                } else if out[first..].iter().any(|c| c.distance < current_tol) {
+                    bad.push(key);
                 }
             }
         }
-        (out, penetrated)
+        // Ours: Havok reports nothing for overlapping shapes and backsteps
+        // until they are apart; when the step is accepted overlapping anyway,
+        // the deepest points Jolt finds for the pair push it apart.
+        for (i, j) in penetrating_bodies {
+            out.extend(self.overlap_contacts(i, j));
+        }
+        self.mesh_manifolds.retain(|_, m| m.seen == stamp);
+        self.convex_manifolds.retain(|_, m| m.seen == stamp);
+        if bad.is_empty() {
+            self.excused.retain(|k| excused_seen.contains(k));
+        }
+        (out, bad)
     }
 
-    /// The contact points of one closest-point hit between `i` (the query
-    /// body) and `j`.
-    ///
-    /// Havok's agents report a point per pair of features within the
-    /// tolerance — two for a mini wheel's flat on the floor, one per hub
-    /// triangle (`clist_rest`, live) — where Jolt reports one deepest point per
-    /// pair of shapes. A face resting on a surface then rocks on one point. So
-    /// every corner of either body that lies within the tolerance of the other's
-    /// surface plane (`normal` through the hit) becomes a point, if a short ray
-    /// along the normal confirms the surface is really under it.
-    #[allow(clippy::too_many_arguments)]
-    fn manifold(
-        &self,
-        i: usize,
-        j: usize,
-        normal: Vec3,
-        on_a: Vec3,
-        on_b: Vec3,
-        tol: f32,
-        used: &mut std::collections::HashSet<(usize, usize, bool, usize)>,
-    ) -> Vec<(Vec3, f32)> {
-        let mut out = Vec::new();
-        for (side, (body, other, plane, n)) in
-            [(false, (i, j, on_b, normal)), (true, (j, i, on_a, -normal))]
+    fn mesh_piece(&self, w: &WorldPiece) -> Option<&narrow::Mesh> {
+        match &self.geometry[w.body]
+            .as_ref()?
+            .pieces
+            .get(w.piece as usize)?
+            .shape
         {
-            let Some(g) = &self.geometry[body] else {
-                continue;
-            };
-            let Some(target) = self.geometry[other].as_ref().map(|g| g.id) else {
-                continue;
-            };
-            let b = &self.bodies[body];
-            let (origin, rotation) = (b.origin(), b.rotation);
-            let reach = self.geometry[other]
-                .as_ref()
-                .map(|g| g.reach)
-                .unwrap_or(0.0)
-                .min(g.reach)
-                .max(0.05)
-                * 2.0;
-            for (k, v) in g.vertices.iter().enumerate() {
-                let w = origin + rotation * *v;
-                let d = n.dot(w - plane);
-                if d >= tol || d < -tol {
-                    continue;
+            PieceShape::Mesh(m) => Some(m),
+            PieceShape::Convex { .. } => None,
+        }
+    }
+
+    /// The convex x mesh agent (`FUN_00545b50`, see [`MeshManifold`]): its
+    /// points into `points`; `true` when the shapes overlap (no points then
+    /// but those of the triangles before the overlapping one).
+    #[allow(clippy::too_many_arguments)]
+    fn convex_mesh(
+        &mut self,
+        key: PairKey,
+        cx: &WorldPiece,
+        ms: &WorldPiece,
+        tol: f32,
+        stamp: u64,
+        triangles: &mut Vec<u32>,
+        points: &mut Vec<narrow::Point>,
+    ) -> bool {
+        let Some(PieceShape::Mesh(mesh)) = self.geometry[ms.body]
+            .as_ref()
+            .and_then(|g| g.pieces.get(ms.piece as usize))
+            .map(|p| &p.shape)
+        else {
+            return false;
+        };
+        let local =
+            Aabb::of(cx.vertices.iter().map(|v| ms.pose.inverse_apply(*v))).grown(cx.radius + tol);
+        mesh.query(&local, triangles);
+        let m = self
+            .mesh_manifolds
+            .entry(key)
+            .or_insert_with(|| MeshManifold {
+                tol2: tol * tol,
+                ..Default::default()
+            });
+        m.seen = stamp;
+        m.refresh(&cx.body_pose, &ms.body_pose);
+        for &t in triangles.iter() {
+            let tri = mesh.triangles[t as usize].map(|v| ms.pose.apply(mesh.vertices[v as usize]));
+            match narrow::convex_point(
+                &cx.vertices,
+                cx.radius,
+                &tri,
+                0.0,
+                &cx.body_pose,
+                &ms.body_pose,
+            ) {
+                None => return true,
+                Some((p, c)) if p.distance < tol => {
+                    if c.persists() {
+                        m.offer(p);
+                    } else {
+                        points.push(p);
+                    }
                 }
-                if w.distance(plane) > reach {
-                    continue;
-                }
-                if used.contains(&(i.min(j), i.max(j), side, k)) {
-                    continue;
-                }
-                // Confirm the surface under the corner.
-                let lift = 0.02 - d.min(0.0);
-                let ray = RayCast::new(rv(w + n * lift), jv(-n * (lift + tol)));
-                let hit = self
-                    .world
-                    .cast_ray(&ray, &QueryFilter::new().exclude_body(g.id))
-                    .ok()
-                    .flatten();
-                if hit.is_none_or(|h| h.body != target) {
-                    continue;
-                }
-                used.insert((i.min(j), i.max(j), side, k));
-                // The contact normal always points from j to i.
-                let point = w - n * (d * 0.5);
-                out.push((point, d));
+                Some(_) => {}
             }
         }
-        out
+        points.extend(m.points.iter().copied());
+        false
+    }
+
+    /// The mesh x mesh agent (`FUN_0054a2a0`, a fixed mesh; `FUN_00549d00`,
+    /// two moving ones): every pair of triangles, one
+    /// of each mesh, within the tolerance of each other gives the midpoint of
+    /// their closest points, unless a point already reported in this
+    /// detection lies within `sqrt(0.001)` tolerances of it. No manifold is
+    /// kept. `true` when two triangles touch (`d < 1e-5`).
+    fn mesh_mesh(
+        &self,
+        pa: &WorldPiece,
+        pb: &WorldPiece,
+        tol: f32,
+        reported: &[Contact],
+        triangles: &mut Vec<u32>,
+        points: &mut Vec<narrow::Point>,
+    ) -> bool {
+        let (Some(ma), Some(mb)) = (self.mesh_piece(pa), self.mesh_piece(pb)) else {
+            return false;
+        };
+        let same = (tol * tol) * narrow::MESH_DUPLICATE;
+        // The candidate triangles: within the tolerance of a fixed mesh's
+        // (its MOPP query, `FUN_0054a080`), within half of it between two
+        // moving meshes' trees (`FUN_00549d00` → `FUN_00550100`).
+        let margin = if self.bodies[pb.body].moves() {
+            tol * 0.5
+        } else {
+            tol
+        };
+        for ta in &ma.triangles {
+            let tri_a = ta.map(|v| pa.pose.apply(ma.vertices[v as usize]));
+            let local = Aabb::of(tri_a.iter().map(|v| pb.pose.inverse_apply(*v))).grown(margin);
+            mb.query(&local, triangles);
+            for &t in triangles.iter() {
+                let tri_b =
+                    mb.triangles[t as usize].map(|v| pb.pose.apply(mb.vertices[v as usize]));
+                let (d, on_a, on_b) = narrow::triangle_closest(&tri_a, &tri_b);
+                if d < 1e-5 {
+                    return true;
+                }
+                if d >= tol {
+                    continue;
+                }
+                let point = (on_a + on_b) * 0.5;
+                if reported
+                    .iter()
+                    .any(|c| c.point.distance_squared(point) < same)
+                    || points
+                        .iter()
+                        .any(|p| p.point.distance_squared(point) < same)
+                {
+                    continue;
+                }
+                points.push(narrow::Point {
+                    normal: (on_a - on_b) / d,
+                    point,
+                    distance: d,
+                    local_a: pa.body_pose.inverse_apply(on_a),
+                    local_b: pb.body_pose.inverse_apply(on_b),
+                });
+            }
+        }
+        false
+    }
+
+    /// The overlap of bodies `i` and `j` as Jolt measures it: one point per
+    /// overlapping pair of sub-shapes, at negative distance.
+    fn overlap_contacts(&self, i: usize, j: usize) -> Vec<Contact> {
+        let (bi, bj) = (&self.bodies[i], &self.bodies[j]);
+        let Some(g) = &self.geometry[i] else {
+            return Vec::new();
+        };
+        let Some(target) = self.geometry[j].as_ref().map(|g| g.id) else {
+            return Vec::new();
+        };
+        let query = CollideShape::new(&g.shape, rv(bi.origin()), jq(bi.rotation));
+        let Ok(hits) = self
+            .world
+            .collide_shape(&query, &QueryFilter::new().exclude_body(g.id))
+        else {
+            return Vec::new();
+        };
+        let friction = (bi.friction * bj.friction).max(0.0).sqrt();
+        let restitution = bi.restitution * bj.restitution;
+        hits.into_iter()
+            .filter(|h| h.body == target && h.penetration_depth > 0.0)
+            .filter_map(|h| {
+                let n = un_v(h.normal);
+                (n.length_squared() > 0.5).then(|| Contact {
+                    a: i,
+                    b: j,
+                    normal: n.normalize(),
+                    point: (un_rv(h.point_on_shape) + un_rv(h.point_on_body)) * 0.5,
+                    distance: -h.penetration_depth,
+                    friction,
+                    restitution,
+                })
+            })
+            .collect()
     }
 
     /// Which surfaces the bodies' phantoms touch now (the phantom events at the
@@ -675,8 +816,7 @@ impl PhysicsBackend for Havok17Backend {
             id,
             shape,
             phantom,
-            vertices: shape_vertices(&desc.shape),
-            reach: shape_reach(&desc.shape),
+            pieces: narrow::pieces_of(&desc.shape),
         }));
         self.phantom_touch.push(None);
         Ok(handle as BodyHandle)
@@ -693,6 +833,9 @@ impl PhysicsBackend for Havok17Backend {
             self.lookup.remove(&g.id.to_raw());
         }
         self.contacts.retain(|c| c.a != i && c.b != i);
+        self.mesh_manifolds.retain(|k, _| k.0 != i && k.2 != i);
+        self.convex_manifolds.retain(|k, _| k.0 != i && k.2 != i);
+        self.excused.retain(|k| k.0 != i && k.2 != i);
         for j in &mut self.joints {
             if j.a == i || j.b == i {
                 j.alive = false;
@@ -777,35 +920,45 @@ impl PhysicsBackend for Havok17Backend {
         let mut done = 0.0f32;
         let mut pieces = 0;
         let mut complete = true;
+        // The tolerance a detection's points must keep (`setCurrentTolerance`):
+        // half the collision tolerance at the first attempt, halved again at
+        // every attempt for the rest of this substep (`0x52aa60`).
+        let mut current_tol = TOLERANCE;
         while done < dt * (1.0 - 1e-4) {
             pieces += 1;
             self.pieces += 1;
             let mut h = dt - done;
-            // 1-2: the events of the last detection, then their impulses.
+            // 1-2: the events of the last detection, then their impulses. The
+            // resolver works with the world's tolerance (`vt + 0x18`).
             self.fire_events();
             let contacts = std::mem::take(&mut self.contacts);
-            resolver::resolve(&mut self.bodies, &contacts, self.contact_tolerance);
+            resolver::resolve(&mut self.bodies, &contacts, TOLERANCE);
             self.contacts = contacts;
-            // 3: integrate and detect, halving on a new overlap.
+            // 3: integrate and detect, halving the step on a bad detection.
             let saved = self.save();
-            let mut tol = TOLERANCE;
             let mut backsteps = 0;
             loop {
+                current_tol *= 0.5;
                 self.integrate(h);
-                let (contacts, penetrated) = self.detect(tol);
-                if penetrated && h > MIN_STEP && backsteps < MAX_BACKSTEPS && pieces < MAX_PIECES {
+                let (contacts, bad) = self.detect(current_tol);
+                if !bad.is_empty()
+                    && h > MIN_STEP
+                    && backsteps < MAX_BACKSTEPS
+                    && pieces < MAX_PIECES
+                {
                     self.restore(&saved);
                     h = (h * 0.5).max(MIN_STEP);
-                    tol *= 0.5;
                     backsteps += 1;
                     self.backsteps += 1;
                     continue;
                 }
-                if penetrated {
+                if !bad.is_empty() {
+                    // "Backstep/Bad Step": accept it, and let its pairs
+                    // overlap from now on (`FUN_00542760`).
                     complete = false;
+                    self.excused.extend(bad);
                 }
                 self.contacts = contacts;
-                self.contact_tolerance = tol;
                 break;
             }
             // 4: actions. The motors use the substep, not the piece.
@@ -818,11 +971,11 @@ impl PhysicsBackend for Havok17Backend {
                     let rest = dt - done;
                     self.fire_events();
                     let contacts = std::mem::take(&mut self.contacts);
-                    resolver::resolve(&mut self.bodies, &contacts, self.contact_tolerance);
+                    resolver::resolve(&mut self.bodies, &contacts, TOLERANCE);
                     self.integrate(rest);
-                    let (contacts, _) = self.detect(TOLERANCE);
+                    let (contacts, bad) = self.detect(current_tol * 0.5);
+                    self.excused.extend(bad);
                     self.contacts = contacts;
-                    self.contact_tolerance = TOLERANCE;
                     joints::solve(&mut self.bodies, &mut self.joints, dt);
                     self.drag();
                 }
@@ -845,7 +998,10 @@ impl PhysicsBackend for Havok17Backend {
                     })
                     .collect();
                 eprintln!(
-                    "h17 body {watch}: v ({:.2},{:.2},{:.2}) w ({:.2},{:.2},{:.2}) {}",
+                    "h17 body {watch}: pieces {pieces} com ({:.4},{:.4},{:.4}) v ({:.2},{:.2},{:.2}) w ({:.2},{:.2},{:.2}) {}",
+                    b.com.x,
+                    b.com.y,
+                    b.com.z,
                     b.velocity.x,
                     b.velocity.y,
                     b.velocity.z,
@@ -1089,8 +1245,7 @@ impl PhysicsBackend for Havok17Backend {
                     .map_err(|e| BackendError::Body(format!("set_shape: {e:?}")))?;
             }
             g.shape = built;
-            g.vertices = shape_vertices(shape);
-            g.reach = shape_reach(shape);
+            g.pieces = narrow::pieces_of(shape);
         }
         let b = &mut self.bodies[i];
         let (origin, rotation) = (b.origin(), b.rotation);
