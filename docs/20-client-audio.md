@@ -338,10 +338,10 @@ is in our own scale (chassis health 300 against the original's 1828), so the
 
 | | original | round 1 | round 2 |
 |---|---:|---:|---:|
-| overall RMS | -22.2 dB | -18.9 dB | -21.0 dB |
-| spectral-shape correlation (9 bands) | | 0.87 | 0.94 |
-| 63 / 125 / 250 / 500 / 1000 Hz band diff (dB) | | | +3.2 / +0.1 / 0.0 / +3.0 / +1.8 |
-| 4 k / 8 k band diff (dB) | | | -5.8 / -11.4 (the recording's impacts) |
+| overall RMS | -22.2 dB | -18.9 dB | -20.9 dB |
+| spectral-shape correlation (9 bands) | | 0.87 | 0.95 |
+| 63 / 125 / 250 / 500 / 1000 Hz band diff (dB) | | | +3.3 / +0.1 / +0.8 / +3.0 / +1.6 |
+| 4 k / 8 k band diff (dB) | | | -3.7 / -10.2 (the recording's impacts) |
 
 The old render used the wrong robots (the default bots, not Scout and ALARM),
 whose `bigmotor_loop` is 17 dB louder than the crowd; with the right pair and the
