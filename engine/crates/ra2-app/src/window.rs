@@ -787,7 +787,15 @@ impl ApplicationHandler for App {
                 self.set_hover(None);
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.session.is_some() || self.hq.is_some() || self.builder.is_some() {
+                if let Some(session) = &mut self.session {
+                    let notches = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(position) => position.y as f32 / 40.0,
+                    };
+                    session.orbit_wheel(notches);
+                    return;
+                }
+                if self.hq.is_some() || self.builder.is_some() {
                     return;
                 }
                 let Some(cursor) = self.cursor else {

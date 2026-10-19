@@ -174,7 +174,10 @@ pub fn hud(
 
     let mut players = Vec::new();
     for (slot, group) in PLAYERS.iter().enumerate() {
-        let visible = slot < report.robots.len() && !intro;
+        // The original's countdown frames (`arena-*-countdown`) show only the
+        // camera name and the countdown box; the status meters appear at the
+        // bell with the time box (`arena-*-f2`/`f4`).
+        let visible = slot < report.robots.len() && !intro && !show_countdown;
         set_visible(screen, group, visible);
         if !visible {
             continue;
@@ -417,8 +420,13 @@ mod tests {
         let countdown = hud(root, &report(), MatchState::Countdown, 0.0, 3.2);
         assert!(countdown.show_countdown && !countdown.show_time);
         assert_eq!(countdown.countdown, "3");
-        assert_eq!(countdown.players.len(), 2, "only two bots are in the match");
-        assert!(countdown.players.iter().all(|p| p.visible));
+        assert!(
+            countdown.players.is_empty(),
+            "the original's countdown frames draw no status meters"
+        );
+        assert!(!ra2ui::workshop::find(root, "player1 status")
+            .unwrap()
+            .visible());
         assert!(ra2ui::workshop::find(root, COUNTDOWN_GROUP)
             .unwrap()
             .visible());
@@ -433,6 +441,7 @@ mod tests {
 
         let fight = hud(root, &report(), MatchState::Fight, 3.0, 0.0);
         assert!(fight.show_time && !fight.show_countdown);
+        assert_eq!(fight.players.len(), 2, "only two bots are in the match");
         assert_eq!(fight.time, "0:07");
         assert!(ra2ui::workshop::find(root, TIME_GROUP).unwrap().visible());
         assert!(!ra2ui::workshop::find(root, COUNTDOWN_GROUP)

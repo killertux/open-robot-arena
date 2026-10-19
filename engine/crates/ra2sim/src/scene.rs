@@ -85,6 +85,20 @@ fn has_floor(triangles: &[[Vec3; 3]], x: f32, z: f32, top: f32) -> bool {
     })
 }
 
+/// Whether every start point has collision under it (within a few metres): the
+/// Metal Skull's decoded rigid-body geometry omits its left plateau, and a robot
+/// spawned there would fall into the pit before the bell.
+fn supports_starts(triangles: &[[Vec3; 3]], starts: &[(Vec3, Vec3)]) -> bool {
+    starts.iter().all(|(p, _)| {
+        let origin = *p + Vec3::Y * 0.01;
+        triangles.iter().any(|t| {
+            ray_triangle(origin, Vec3::NEG_Y, t[0], t[1], t[2])
+                .map(|d| d < 6.0)
+                .unwrap_or(false)
+        })
+    })
+}
+
 /// Load an arena (`.py` script or `.gmf`) into visuals + collision triangles.
 ///
 /// The collider prefers the arena's **own Havok rigid bodies** (the geometry the
@@ -112,6 +126,7 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
         t
     };
 
+    let starts = ra2_render::start_points(path).unwrap_or_default();
     let havok = ra2_render::collect_havok(path)?;
     let gravity = havok
         .as_ref()
@@ -158,6 +173,7 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
             if let Some(h) = &havok {
                 if !h.static_triangles.is_empty()
                     && has_floor(&h.static_triangles, centre.x, centre.z, min.y)
+                    && (mode == "rb" || supports_starts(&h.static_triangles, &starts))
                 {
                     source = "rigid bodies";
                     raw = h.static_triangles.clone();

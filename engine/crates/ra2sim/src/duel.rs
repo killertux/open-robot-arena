@@ -300,7 +300,7 @@ impl Duel {
             let rig = rig::load(&setup.path)?;
             let angle = i as f32 * std::f32::consts::TAU / n as f32;
             if let Some(at) = setup.spawn {
-                let floor = Self::floor_at(&*physics, &arena, at[0], at[1]);
+                let floor = Self::floor_at(&*physics, &arena, at[0], at[1], None);
                 let position = Vec3::new(at[0], floor + 0.06 - rig.min.y, at[1]);
                 // `yaw_deg` is where the robot's *front* points (its `.bot`
                 // heading is not always `-Z`).
@@ -320,15 +320,16 @@ impl Duel {
                 robots.push(robot);
                 continue;
             }
-            let (x, z, spawn_facing) = match starts.get(i) {
-                Some((p, f)) => (p.x, p.z, Some(*f)),
+            let (x, z, spawn_facing, start_y) = match starts.get(i) {
+                Some((p, f)) => (p.x, p.z, Some(*f), Some(p.y)),
                 None => (
                     centre.x + angle.cos() * spread,
                     centre.z + angle.sin() * spread,
                     None,
+                    None,
                 ),
             };
-            let floor = Self::floor_at(&*physics, &arena, x, z);
+            let floor = Self::floor_at(&*physics, &arena, x, z, start_y);
             let position = Vec3::new(x, floor + 0.06 - rig.min.y, z);
 
             // Face where the start point says, else the centre of the arena.
@@ -446,8 +447,20 @@ impl Duel {
     }
 
     /// Highest floor point under `(x, z)`.
-    fn floor_at(physics: &dyn PhysicsBackend, arena: &ArenaScene, x: f32, z: f32) -> f32 {
-        let mut starts = vec![arena.center.y];
+    ///
+    /// `from_y` is the start point's own height: a start point sits above the
+    /// surface it belongs to, so the ray begins there. Casting from the arena
+    /// centre instead starts *inside* a raised platform (the Metal Skull's
+    /// plateaus) and lands on the floor beneath it.
+    fn floor_at(
+        physics: &dyn PhysicsBackend,
+        arena: &ArenaScene,
+        x: f32,
+        z: f32,
+        from_y: Option<f32>,
+    ) -> f32 {
+        let mut starts: Vec<f32> = from_y.into_iter().collect();
+        starts.push(arena.center.y);
         let top = arena.max.y + 10.0;
         if top > arena.center.y {
             starts.push(top);
@@ -1523,6 +1536,8 @@ impl Duel {
         for command in ra2script::camera::take_commands() {
             self.scene_camera.apply(command);
         }
+        let target = self.follow_target();
+        self.scene_camera.follow(target);
         self.scene_camera.advance(dt);
     }
 
