@@ -179,8 +179,9 @@ fn every_shipped_bots_stats_equal_the_rigs_own() {
 }
 
 /// M9.2's acceptance: a part placed on the baseplate keeps the game's stored
-/// transform through the writer, and the simulator's own local matrix for it is
-/// the model's.
+/// fields through the writer, it lands where the original puts it (its own
+/// mount point on the stored translation, lifted by `height`; docs/29 section
+/// 8), and the simulator's own local matrix for it is the model's.
 #[test]
 fn a_placed_chassis_child_round_trips_and_the_rigs_local_matrix_matches() {
     let Some(root) = game_root() else { return };
@@ -212,7 +213,14 @@ fn a_placed_chassis_child_round_trips_and_the_rigs_local_matrix_matches() {
     assert_eq!(saved.rotation, ra2fmt::mount::CHASSIS_CHILD_ROTATION);
     assert_eq!(saved.angle, angle);
     assert_eq!(saved.height, height);
-    assert_eq!(model[motor], ra2fmt::mount::component_local(&saved));
+    // The original's rule, measured live: the motor's own mount point lands on
+    // the stored translation, `height` above the baseplate.
+    let own = ra2fmt::mount::tm_mat4(&motor_info.mounts[&base_mount].transform);
+    let at = (model[motor] * own).transform_point3(glam::Vec3::ZERO);
+    assert!(
+        at.abs_diff_eq(glam::Vec3::new(point[0], height, point[1]), 1e-5),
+        "the own point lands at {at:?}"
+    );
 
     let dir = std::env::temp_dir().join(format!("ra2-placed-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
