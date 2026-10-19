@@ -3,7 +3,8 @@
 //!
 //! Per draw it reproduces, in WGSL: per-vertex Gouraud lighting (emissive 0,
 //! `ambient x global ambient`, plus point lights with D3D8's range and
-//! attenuation, no specular), up to three texture stages with their own UV set
+//! attenuation, and the local-viewer Blinn specular term added after the
+//! texture stages when the material's power is positive), up to three texture stages with their own UV set
 //! and point/bilinear filter, lightmap stages, the sphere environment map, the
 //! `GREATEREQUAL 0x10` alpha test and `SRCALPHA` blending (additive or not).
 //! Frame order is the original's: opaque batches, then alpha-tested batches
@@ -108,6 +109,10 @@ struct DrawUniform {
     /// Per stage: bits 0-1 kind (0 off, 1 modulate, 2 lightmap, 3 env),
     /// bit 2 UV set, bit 3 bilinear.
     stages: [u32; 4],
+    /// `D3DMATERIAL8.Specular` rgb, w = power (0: `SPECULARENABLE` off).
+    specular: [f32; 4],
+    /// The camera's world position (`D3DRS_LOCALVIEWER` is TRUE by default).
+    eye: [f32; 4],
 }
 
 #[repr(C)]
@@ -117,6 +122,7 @@ struct LightUniform {
     pos: [f32; 4],
     diffuse: [f32; 4],
     atten: [f32; 4],
+    specular: [f32; 4],
 }
 
 #[repr(C)]
@@ -138,8 +144,10 @@ struct Draw {
   ambient: vec4<f32>,
   flags: vec4<u32>,
   stages: vec4<u32>,
+  specular: vec4<f32>,
+  eye: vec4<f32>,
 };
-struct Light { pos: vec4<f32>, diffuse: vec4<f32>, atten: vec4<f32>, };
+struct Light { pos: vec4<f32>, diffuse: vec4<f32>, atten: vec4<f32>, specular: vec4<f32>, };
 struct Frame { ambient: vec4<f32>, lights: array<Light, 8>, count: vec4<u32>, };
 
 @group(0) @binding(0) var<uniform> d: Draw;
@@ -163,6 +171,7 @@ struct VsOut {
   @location(1) uv1: vec2<f32>,
   @location(2) uv_env: vec2<f32>,
   @location(3) diffuse: vec4<f32>,
+  @location(4) specular: vec3<f32>,
 };
 
 @vertex
@@ -181,19 +190,31 @@ fn vs_main(i: VsIn) -> VsOut {
     var ma = d.ambient;
     if (has_vc && (d.flags.x & 4u) != 0u) { ma = i.color; }
     var c = ma.rgb * frame.ambient.rgb;
+    var sp = vec3<f32>(0.0);
+    let to_eye = normalize(d.eye.xyz - wp);
     for (var k = 0u; k < frame.count.x; k = k + 1u) {
       let l = frame.lights[k];
       let to = l.pos.xyz - wp;
       let dist = length(to);
       if (dist > l.pos.w || dist <= 0.0) { continue; }
       let att = 1.0 / (l.atten.x + l.atten.y * dist + l.atten.z * dist * dist);
-      let ndl = max(dot(n, to / dist), 0.0);
+      let ldir = to / dist;
+      let ndl = dot(n, ldir);
+      if (ndl <= 0.0) { continue; }
       c = c + md.rgb * l.diffuse.rgb * (ndl * att);
+      if (d.specular.w > 0.0) {
+        let ndh = dot(n, normalize(ldir + to_eye));
+        if (ndh > 0.0) {
+          sp = sp + d.specular.rgb * l.specular.rgb * (pow(ndh, d.specular.w) * att);
+        }
+      }
     }
     o.diffuse = vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), md.a);
+    o.specular = clamp(sp, vec3<f32>(0.0), vec3<f32>(1.0));
   } else {
     // Lighting off: the vertex colour as is, or white.
     o.diffuse = select(vec4<f32>(1.0), i.color, has_vc);
+    o.specular = vec3<f32>(0.0);
   }
   // Sphere map: camera-space normal through the texture matrix
   // (0.5, 0; 0, -0.5; 0.5, 0.5).
@@ -232,6 +253,8 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
       }
     }
   }
+  // D3DRS_SPECULARENABLE: the specular colour is added after the stages.
+  cur = vec4<f32>(min(cur.rgb + i.specular, vec3<f32>(1.0)), cur.a);
   if ((d.flags.x & 8u) != 0u && round(cur.a * 255.0) < 16.0) { discard; }
   return cur;
 }
@@ -723,6 +746,13 @@ impl Renderer {
         let fwd = row(3).truncate().normalize_or_zero();
         let right = row(0).truncate().normalize_or_zero();
         let up = row(1).truncate().normalize_or_zero();
+        // The eye: the point the projection sends to clip (0, 0, *, 0).
+        let eye_h = view_proj.inverse() * Vec4::new(0.0, 0.0, 1.0, 0.0);
+        let eye = if eye_h.w.abs() > 1e-12 {
+            eye_h.truncate() / eye_h.w
+        } else {
+            -fwd * 1.0e6
+        };
 
         // Frame uniform: global ambient and the scene lights.
         let lights: Vec<Light> = match &*self.lights.borrow() {
@@ -743,6 +773,7 @@ impl Renderer {
             slot.pos = [l.position.x, l.position.y, l.position.z, l.range];
             slot.diffuse = [l.diffuse[0], l.diffuse[1], l.diffuse[2], 1.0];
             slot.atten = [l.attenuation[0], l.attenuation[1], l.attenuation[2], 0.0];
+            slot.specular = [l.specular[0], l.specular[1], l.specular[2], 0.0];
         }
         fu.count[0] = lights.len().min(MAX_LIGHTS) as u32;
         self.queue
@@ -785,6 +816,13 @@ impl Renderer {
                 ambient: m.ambient,
                 flags: [flags, 0, 0, 0],
                 stages,
+                specular: [
+                    m.specular[0],
+                    m.specular[1],
+                    m.specular[2],
+                    if m.specular_enabled() { m.power } else { 0.0 },
+                ],
+                eye: [eye.x, eye.y, eye.z, 1.0],
             });
             (draws.len() - 1) as u64
         };

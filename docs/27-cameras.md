@@ -86,6 +86,19 @@ the FOV as vertical with an aspect of 4:3.
   writes `cam-<name>.png`; `tools/oracle/fidelity.py` runs it for the eight
   `arena-<id>-*` fixtures.
 
+## 5b. Rasterisation and capture timing (docs/34)
+
+* D3D8 samples pixel centres at integer screen coordinates; the match render shifts its clip space
+  half a pixel right/down (`ra2_render::d3d_pixel_centers`) to land features on the same pixels as
+  the original (box static cameras `f3` 1.70 -> 0.66, `f3b` 2.90 -> 1.62 MAE).
+* The intro and Skip-Intro moments of the arena captures are fitted per arena at the 1/60 s frame
+  step (`fidelity.py` `ARENA_INTRO`, `ARENA_SKIP`; `tools/oracle/fit_capture_timing.py`). All
+  intros land at 2.13..2.40 s; the fit is one frame sharp, i.e. the scripted flights match.
+* `match-countdown`'s reference is the box intro at 6.55 s (Skip Intro visible, no countdown panel):
+  MAE 1.87 against our `intro@6.55`, 34.79 against our countdown.
+* The camera-name notification is off in seven of the eight intro references while ours (3 s from
+  the intro's camera set-up) is on; see docs/34 §5.
+
 ## 6. Not recovered / approximated
 
 * **Orbit (F2)** (no-target case measured, `docs/30` §6: aim at the origin, 8.6 away)

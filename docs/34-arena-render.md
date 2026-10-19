@@ -1,0 +1,238 @@
+# 34 — Arena render fidelity (the 48 arena stills)
+
+Recovered from `Robot Arena 2.exe` (REA/Ghidra session, rizin disassembly) and measured against the
+original's captures in `local/oracle/original/arena-*` with `tools/oracle/fidelity.py --renderer app
+--only arena-,match- --out <dir>` (side images: reference | ours | |diff| x4). Implementation follows
+the recovered behaviour; no decompiled code was transliterated.
+
+## 1. Results
+
+MAE (0-255, whole 1024x768 frame). *before* is this branch's base (fidelity 7178ea9), *after* this
+round; *lowfreq* is the after MAE on a 16x16 box-downscaled pair (layout and colour without
+pixel-level detail). The docs/28 §3j table was measured on an earlier build; the base run here
+differs from it in a few dynamic shots (`metalskull-f2` 19.39 there, 27.37 here: fight state).
+
+| fixture | before | after | after lowfreq |
+|---|---:|---:|---:|
+| match-countdown | 34.79 | 1.70 | 0.86 |
+| match-hud | 0.49 | 0.30 | 0.12 |
+| match-results | 0.88 | 0.72 | 0.47 |
+| arena-box-countdown | 0.40 | 0.07 | 0.06 |
+| arena-box-f2 | 4.13 | 2.62 | 1.96 |
+| arena-box-f3 | 1.72 | 0.61 | 0.32 |
+| arena-box-f3b | 2.90 | 1.20 | 0.79 |
+| arena-box-f4 | 0.65 | 0.36 | 0.19 |
+| arena-box-intro | 5.55 | 0.66 | 0.27 |
+| arena-bridge-countdown | 7.87 | 3.78 | 2.18 |
+| arena-bridge-f2 | 8.69 | 5.60 | 5.17 |
+| arena-bridge-f3 | 7.13 | 1.28 | 0.94 |
+| arena-bridge-f3b | 7.65 | 1.64 | 1.32 |
+| arena-bridge-f4 | 0.53 | 0.41 | 0.21 |
+| arena-bridge-intro | 16.90 | 4.12 | 1.86 |
+| arena-compressor-countdown | 7.92 | 1.53 | 0.29 |
+| arena-compressor-f2 | 2.38 | 0.38 | 0.16 |
+| arena-compressor-f3 | 6.69 | 0.75 | 0.44 |
+| arena-compressor-f3b | 8.53 | 1.06 | 0.67 |
+| arena-compressor-f4 | 2.05 | 0.40 | 0.15 |
+| arena-compressor-intro | 21.59 | 4.58 | 0.95 |
+| arena-electric-countdown | 26.71 | 10.24 | 2.03 |
+| arena-electric-f2 | 16.07 | 1.33 | 0.95 |
+| arena-electric-f3 | 9.87 | 1.23 | 0.65 |
+| arena-electric-f3b | 8.84 | 1.05 | 0.73 |
+| arena-electric-f4 | 6.22 | 4.62 | 4.27 |
+| arena-electric-intro | 38.77 | 12.01 | 2.58 |
+| arena-halfcircle-countdown | 0.03 | 0.03 | 0.03 |
+| arena-halfcircle-f2 | 10.37 | 8.55 | 7.85 |
+| arena-halfcircle-f3 | 2.98 | 1.12 | 0.71 |
+| arena-halfcircle-f3b | 2.82 | 1.04 | 0.55 |
+| arena-halfcircle-f4 | 1.01 | 0.34 | 0.13 |
+| arena-halfcircle-intro | 19.76 | 2.40 | 1.27 |
+| arena-metalskull-countdown | 1.48 | 1.19 | 0.88 |
+| arena-metalskull-f2 | 27.37 | 26.16 | 25.80 |
+| arena-metalskull-f3 | 4.40 | 1.74 | 1.48 |
+| arena-metalskull-f3b | 5.41 | 2.02 | 1.74 |
+| arena-metalskull-f4 | 87.69 | 87.92 | 81.44 |
+| arena-metalskull-intro | 18.84 | 1.37 | 0.91 |
+| arena-octagon-countdown | 1.99 | 1.85 | 0.66 |
+| arena-octagon-f2 | 7.71 | 6.24 | 5.34 |
+| arena-octagon-f3 | 4.30 | 1.65 | 1.24 |
+| arena-octagon-f3b | 2.68 | 0.97 | 0.64 |
+| arena-octagon-f4 | 11.36 | 7.59 | 7.15 |
+| arena-octagon-intro | 13.33 | 1.69 | 1.06 |
+| arena-parkinglot-countdown | 11.94 | 4.65 | 0.96 |
+| arena-parkinglot-f2 | 17.08 | 18.22 | 16.93 |
+| arena-parkinglot-f3 | 11.93 | 1.93 | 1.57 |
+| arena-parkinglot-f3b | 9.98 | 1.76 | 1.50 |
+| arena-parkinglot-f4 | 4.61 | 1.87 | 1.75 |
+| arena-parkinglot-intro | 27.00 | 3.52 | 0.85 |
+| **mean of 51** | **11.02** | **4.90** | 3.79 |
+
+Above MAE 8 before: 22 shots. After: 6 (`electric-countdown`, `electric-intro`, `halfcircle-f2`,
+`metalskull-f2`, `metalskull-f4`, `parkinglot-f2`); the last four are robot pose / match state, §7.
+
+## 2. Triage of the shots above MAE 8 (before)
+
+| shot | before | cause(s) seen in the side image |
+|---|---:|---|
+| match-countdown | 34.79 | **reference is not a countdown** (Skip Intro button, no COMPETITORS READY panel): timing (§6) |
+| bridge-f2 | 8.69 | robot pose (Scout in view only in ours); missing specular on the tanks (§3.4) |
+| bridge-intro | 16.90 | intro clock (§5); specular; half-pixel |
+| compressor-f3b | 8.53 | fence bars drawn as opaque grey slabs (sub-material id, §3.1) |
+| compressor-intro | 21.59 | the same slab under the foreground fence; intro clock |
+| electric-countdown | 26.71 | bars walls dark with a triangle seam (normals, §3.2) and with Electric's own gradient bitmap where the capture shows Compressor's (§3.3); Skip-Intro clock |
+| electric-f2/f3/f3b | 16.07/9.87/8.84 | same bars walls; generators dull (specular) |
+| electric-intro | 38.77 | bars + intro clock |
+| halfcircle-f2 | 10.37 | robot pose (orbit camera, no target: aims at the origin) |
+| halfcircle-intro | 19.76 | intro clock; saw plates yellow where the capture's are Box's orange (§3.3) |
+| metalskull-f2 | 27.37 | robot pose: the robots are in view only in ours |
+| metalskull-f4 | 87.16-87.69 | **reference taken after the match ended**: the Match Results window is up (ALARM ELIMINATED, 490 points) — match state, not render |
+| metalskull-intro | 18.84 | intro clock |
+| octagon-f4 | 11.36 | a loose floor plate and a robot in other positions (physics state) |
+| octagon-intro | 13.33 | intro clock |
+| parkinglot-countdown | 11.94 | a dark diagonal band across the concrete wall (normals, §3.2); asphalt aliasing |
+| parkinglot-f2 | 17.08 | robot pose |
+| parkinglot-f3/f3b | 11.93/9.98 | normals; specular; half-pixel |
+| parkinglot-intro | 27.00 | intro clock |
+
+## 3. Recovered render rules
+
+### 3.1 Face id -> sub-material (`FUN_005ae630`, `0x5ae8f0..0x5ae913`)
+
+The batch builder walks the sub-materials `0..n-1` and, per pass, takes the faces whose id equals the
+pass. A face id is first clamped: `cmp ebx, count; jle` keeps ids `<= n`, anything above becomes
+`n - 1`. So an id **above** the count draws with the last sub-material and an id **equal** to the
+count matches no pass and is never drawn (a material without sub-materials draws every face).
+We used to fall back to the parent material, which drew the compressor's fence bars (face id 3 of
+the 2-entry `Metal` material) as an untextured, opaque grey slab. Shipped faces affected: the
+compressor `Fence` (24 faces, id 3 of 2), four prize photos (id > n) and `Spike_Trophy` (32 faces with
+id == n, now not drawn). `gmi::Material::resolve_face` returns `Option`.
+
+### 3.2 Stored normals are face, A, B, C
+
+The GMF stores four normals per face. The exe's own GMA writer (`0x5c2568..0x5c265b`, which prints the
+in-memory face record) emits `*MESH_FACENORMAL` from `+0` and `*MESH_VERTEXNORMAL` from `+0xc`,
+`+0x18`, `+0x24`, i.e. the face normal first, then corners A, B, C; the shipped `*_txt.gmf` files
+agree. We read `normals[4f + corner]`, so corner A took the face normal and B, C the wrong corners:
+every smoothed quad showed a lighting seam along its diagonal (Electric's bar walls, Parking Lot's
+concrete wall band). Now `normals[4f + 1 + corner]`, falling back to the face normal.
+
+### 3.3 The texture manager keeps the first file per name for the whole session
+
+`FUN_005ae630` asks for every stage bitmap as `DAT_0071f574 + <name as written in the GMF>`; the
+global path is `Graphics\` (`FUN_0058df20`) and only the bot lab changes it (`FUN_00593a40`, from
+`0x42e650`, `UI\BotLab\Maps`). The texture manager `FUN_00591030` first scans its live list
+comparing each texture's name with that string (`FUN_0058e390`, exact byte compare) and returns the
+hit; only a miss loads a file (`FUN_005a8940` -> `FUN_005a8bd0` -> `FUN_005914d0`, which has its own
+by-name image cache). The directory a model came from is not part of the key, so the first file
+loaded under a name is what every later model with that name gets.
+
+Pixel evidence in the captures, which were taken in one session in the order bridge, box,
+compressor, electric, halfcircle, metalskull, parkinglot, octagon (`capture_arenas.py`):
+
+* Electric's `bars.tga` has a vertical brightness ramp (row peaks 11 -> 251); Compressor's is flat
+  (251 on every row). Down the Electric countdown's bar wall the reference's bar peaks are
+  238 178 214 225 226 232 213 223 218 222 224 219 (flat), ours with Electric's own file were
+  238 28 45 66 81 108 122 151 172 189 205 214 (the ramp).
+* Half Circle's saw plates (`sawhazard.bmp`) are yellow-striped, Box's orange-striped: the
+  `arena-halfcircle-f3b` reference shows them orange.
+
+Three shipped names differ between directories (`bars.tga`, `sawhazard.bmp`, `triple_spike.bmp`, the
+last by a few counts in green); no component or robot texture collides. Implemented as
+`ra2_render::material::session_bitmap` (process-wide, keyed by the GMF's bitmap string; a failed load
+is not cached, as the manager deletes it). `ra2-app --match --earlier-arenas A.py,B.py` loads the
+arenas played before in the same session, and `fidelity.py` passes the capture order
+(`CAPTURE_ORDER`). Whether the list survives every kind of screen change, and what an
+alphabetical-vs-history test would show for `triple_spike.bmp`, was not checked live.
+
+### 3.4 Specular (`FUN_005b24c0`, `FUN_005ba1e0`)
+
+`FUN_005b24c0` sets `D3DRS_SPECULARENABLE` (`0x1d`) to 1 when the material power (`+0x74`, shine x 100)
+is positive (and the global flag `DAT_0071fe89`, which also cuts the stage count to one, is off) and passes the material to
+`SetMaterial` (`vtbl+0xa8`) with specular = shine strength x specular colour. The light builder
+`FUN_005ba1e0` writes `D3DLIGHT8.Diffuse` = colour x intensity, **`Specular` = the colour itself**
+(`in_ECX[0x3f..0x42]`, not scaled), `Ambient` = 0; docs/31 and the old `Light` doc said specular was
+zero, which was wrong. The renderer now evaluates D3D's local-viewer Blinn term per vertex
+(`H = normalize(L + V)`, `Ls x Ms x (N.H)^P x atten`, only for lights with `N.L > 0`) and adds it after
+the texture stages, clamped. The bridge's orange tanks, the compressor's arms and Electric's
+generators get their highlights back (`bridge-f3` 7.1 -> 1.3 with the other fixes).
+
+### 3.5 Pixel centres (D3D8 rasterisation)
+
+Direct3D 8 puts pixel centres on integer screen coordinates; wgpu at half-integers. The original's
+3D image therefore sits half a pixel right and down of ours for the same projection.
+`ra2_render::d3d_pixel_centers` post-translates the clip space by `(+1/w, -1/h)`; `Duel::render` and
+`render_to` apply it (the particles keep the uncorrected matrix for their billboard axes). On the
+pixel-aligned box static cameras: `f3` 1.70 -> 0.66, `f3b` 2.90 -> 1.62, `f4` 0.65 -> 0.36,
+`countdown` 0.25 -> 0.22; one pixel the other way makes all four worse. The 2D HUD is not shifted.
+
+### 3.6 Checked and already right
+
+Opacity maps (alpha test only with `BITMAP_INVERT` 1, else blended and sorted), additive `XP_TYPE` 3,
+lightmaps on UV set 2 switching lighting off, the sphere environment map, the absence of mipmapping
+and the Pyramidal = point / SAT = bilinear filters (`material.rs`) all hold up in these frames. No
+fog was found: none of the 29 call sites of the cached `SetRenderState` wrapper `FUN_00590f30` that
+push an 8-bit state passes a fog state (0x1c, 0x22..0x26); direct `vtbl+0xc8` calls were not
+surveyed, and no frame shows depth fog.
+
+## 4. Electric's lightning and the Metal Skull f4 shot
+
+The lightning (`LightningField`, docs/31) is switched on with the hazards and drawn only while a robot
+is in a charge zone; no bolt is visible in any of the six Electric references, so nothing there
+could be checked or changed. `arena-metalskull-f4` is not a camera
+shot: by the time F4 was pressed ALARM had been eliminated and the Match Results window was up
+(docs/30 §6 noted the same). It cannot be reproduced without the fight outcome.
+
+## 5. Capture timing (fitted, not game behaviour)
+
+`capture_arenas.py` takes the intro still and clicks Skip Intro a fixed wall time after Start Game, so
+the intro clock at both moments depends on load time. `fidelity.py` now uses per-arena intro-clock
+values fitted at the 1/60 s frame step with `tools/oracle/fit_capture_timing.py`
+(`ARENA_INTRO`, `ARENA_SKIP`; table in the script). Every intro fits in 2.13..2.40 s (the script's
+"~2.5 s after Start Game" less load), every skip near the old values; the fit is sharp (one frame
+either side typically doubles the MAE), which is only possible because the camera flights are right.
+The intro and countdown MAEs above depend on these fitted values.
+
+The camera-name notification (`FUN_00477180`, 3 s, docs/24 §5) is on in our intro frames and in the
+Box reference but off in the other seven intro references at the same intro clock. Its countdown
+`0x4774f1` subtracts the frame's `dt` (`[edi+4]`); a long first frame after a slow arena load would
+expire it at once, which fits Box being the quickest to load, but that was not verified live. Not
+changed.
+
+## 6. `match-countdown`: the reference is an intro frame
+
+The reference shows the Combat Arena with the `Skip Intro` button and no COMPETITORS READY panel, so
+it was taken during the intro, not the countdown (the aligned countdown capture was lost with
+`local/`, docs/12). Scanning our box intro: MAE 28 at 0.5 s, 5.2 at 6.5 s, **1.87 at 6.55 s**
+(`fit_capture_timing.py box intro 6.3:6.7 --ref match-countdown__1024x768__000.png`). The fixture
+now renders `ra2-app --camera-shots intro@6.55` (box) and says so in its note; ours-countdown against
+it was 34.79. A real countdown reference still needs a re-capture: the Wine session on Xephyr :5 was
+in use by another agent during this round, so no live capture was taken.
+
+## 7. Remaining gaps
+
+* **Robot pose / match state** (not render): `metalskull-f2` (robots out of view in the original),
+  `parkinglot-f2`, `halfcircle-f2`, `octagon-f2/f4`, `bridge-f2`, `metalskull-f4` (results window).
+* **Electric bars aliasing**: `electric-countdown` 10.2 and `-intro` 12.0 have lowfreq 2.0/2.6; the
+  residual is the 1-2 px wide bars against a camera that is a fraction of a pixel off (the intro and
+  skip clocks are quantised to frames; the half-pixel shift made Electric slightly worse, 7.7 -> 11.0
+  at its best skip frame, while improving every other arena).
+* **Intro camera label** (§5) and the bot lab's own render path (no half-pixel shift there).
+* Not live-verified: the session texture rule's scope (does anything flush the manager's list?) and
+  whether it is first-loaded or search-order for `triple_spike.bmp`.
+
+## 8. Code
+
+* `ra2fmt::gmi::Material::resolve_face` (Option; §3.1), `Mesh::normals` doc (§3.2).
+* `ra2-render`: `lib.rs` corner normals, `d3d_pixel_centers`; `material.rs` `session_bitmap`,
+  `Light::specular`; `renderer.rs` specular uniforms and shader term.
+* `ra2sim::duel` applies the pixel-centre shift in `render`/`render_to`.
+* `ra2-app --earlier-arenas`; `ra2 info` prints each texture's slot, invert, filter and channel.
+* `tools/oracle/fidelity.py`: `CAPTURE_ORDER`/`earlier_arenas`, `ARENA_INTRO`, refitted `ARENA_SKIP`,
+  the `match-countdown` intro fixture; `tools/oracle/fit_capture_timing.py`.
+
+Tests: `a_face_id_past_the_sub_materials_clamps_and_one_equal_to_the_count_is_dropped` (ra2fmt),
+`corner_normals_follow_the_face_normal_in_the_stored_four`,
+`d3d_pixel_centres_shift_half_a_pixel_right_and_down`,
+`specular_is_added_after_the_texture_when_power_is_positive` (GPU; skipped without an adapter),
+`the_first_bitmap_loaded_under_a_name_is_the_sessions`, and the specular colour assertion in
+`omni_lights_become_d3d_point_lights` (ra2-render).

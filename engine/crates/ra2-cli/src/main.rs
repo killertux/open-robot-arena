@@ -72,6 +72,15 @@ fn main() -> ExitCode {
     }
 }
 
+/// One texture as `bitmap{slot,invert,filter,channel}` (slot 1 diffuse, 5
+/// self-illumination, 6 opacity, 9 reflect).
+fn texture_label(t: &gmi::Texture) -> String {
+    format!(
+        "{}{{slot {} inv {} filt {} ch {}}}",
+        t.bitmap, t.kind, t.invert, t.filter, t.channel
+    )
+}
+
 /// Print a font's metrics, one glyph a line, and optionally its page as a PGM.
 fn font(cfz: &str, name: &str, rest: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     use std::fmt::Write;
@@ -280,12 +289,7 @@ fn info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     for m in &scene.materials {
-        let tex: Vec<&str> = m
-            .textures
-            .iter()
-            .map(|t| t.bitmap.as_str())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let tex: Vec<String> = m.textures.iter().map(texture_label).collect();
         println!(
             "    mat {:?} class={:?} trans={:.2} tex=[{}]",
             m.name,
@@ -294,12 +298,7 @@ fn info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
             tex.join(", ")
         );
         for sm in &m.sub_materials {
-            let stex: Vec<&str> = sm
-                .textures
-                .iter()
-                .map(|t| t.bitmap.as_str())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let stex: Vec<String> = sm.textures.iter().map(texture_label).collect();
             println!(
                 "      sub {:?} trans={:.2} tex=[{}]",
                 sm.name,

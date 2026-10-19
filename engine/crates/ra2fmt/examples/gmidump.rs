@@ -81,8 +81,9 @@ fn main() {
             .map(|f| {
                 let t = s.materials.get(m.material_ref.max(0) as usize);
                 t.map(|t| {
-                    let e = t.resolve_face(f.material);
-                    format!("{}({:.2})", e.name, e.transparency)
+                    t.resolve_face(f.material)
+                        .map(|e| format!("{}({:.2})", e.name, e.transparency))
+                        .unwrap_or_else(|| "(not drawn)".into())
                 })
                 .unwrap_or("-".into())
             })
