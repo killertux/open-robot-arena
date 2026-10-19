@@ -299,7 +299,8 @@ fn bound_key(d: &Duel, name: &str, slot: usize) -> i32 {
 /// Forward and turning go through the bindings: for stock bots of both
 /// headings, the key bound to `Forward` moves the robot toward its front and
 /// the one bound to the second `LeftRight` slot turns it clockwise seen from
-/// above (to its right). `Team4/Bot1` binds the numeric keypad, not `WASD`.
+/// above (to its right) — a positive rate about `+Y` in the game's left-handed
+/// frame. `Team4/Bot1` binds the numeric keypad, not `WASD`.
 #[test]
 fn driving_and_turning_go_through_the_bindings() {
     let game = game!();
@@ -336,7 +337,11 @@ fn driving_and_turning_go_through_the_bindings() {
             moved.dot(front)
         );
 
-        // Turning in place with D: clockwise from above is a negative rate about +Y.
+        // Turning in place with D: to the robot's right, which in the game's
+        // left-handed frame (+X right, +Y up, +Z forward) is clockwise from
+        // above and a *positive* rate about +Y. Live, `SuperAI.Turn(+100)`
+        // (the D side of `LeftRight`) spins the Razor at +12.7 rad/s
+        // (`magic-razor__live__000`); see docs/33 §5.
         let mut d = duel_settled(&game, bot, 0);
         let mut keys = KeySet::default();
         keys.set(bound_key(&d, "LeftRight", 1), true);
@@ -354,7 +359,7 @@ fn driving_and_turning_go_through_the_bindings() {
             .map(|s| s.angular_velocity.y)
             .unwrap_or(0.0);
         assert!(
-            yaw < -0.2,
+            yaw > 0.2,
             "{bot}: its right key turned it at {yaw} rad/s about +Y"
         );
     }

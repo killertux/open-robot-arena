@@ -86,25 +86,6 @@ impl Map {
             !c.wall && c.floor
         }
     }
-
-    /// Number of `resolution` steps that must be clear of walls around a cell.
-    fn clearance_cells(&self, radius: f32) -> i32 {
-        if self.resolution <= 0.0 {
-            return 0;
-        }
-        (radius / self.resolution).ceil() as i32
-    }
-
-    fn clear(&self, i: i32, j: i32, cells: i32) -> bool {
-        for dj in -cells..=cells {
-            for di in -cells..=cells {
-                if self.get(i + di, j + dj).wall {
-                    return false;
-                }
-            }
-        }
-        true
-    }
 }
 
 /// A hazard object the arena registered (`AddHazard`).
@@ -222,128 +203,177 @@ impl ArenaData {
         }
     }
 
-    /// Nearest grid cell the AI can stand on, by world position.
-    fn nearest_passable(&self, i: i32, j: i32) -> Option<(i32, i32)> {
-        if self.map.passable(i, j) {
-            return Some((i, j));
-        }
-        for r in 1..=(self.map.cols.max(self.map.rows) + 1) {
-            let mut best: Option<(i32, i32, f32)> = None;
-            for dj in -r..=r {
-                for di in -r..=r {
-                    if di.abs() != r && dj.abs() != r {
-                        continue;
-                    }
-                    let (a, b) = (i + di, j + dj);
-                    if self.map.passable(a, b) {
-                        let d = (di * di + dj * dj) as f32;
-                        if best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
-                            best = Some((a, b, d));
-                        }
-                    }
-                }
-            }
-            if let Some((a, b, _)) = best {
-                return Some((a, b));
-            }
-        }
-        None
-    }
-
-    /// A* over the navigation grid, 8-connected, no corner cutting.
+    /// Whether a circle of `radius` at `p` (world `x`, `z`) crosses one of the
+    /// arena's collision lines (`FUN_004058b0`).
     ///
-    /// Returns grid cells from start to goal, or empty when no route exists. The
-    /// AI calls `FromGrid` on each, so this is in grid space by design.
-    pub fn path(&self, from: Vec3, to: Vec3, radius: f32) -> Vec<(i32, i32)> {
-        let (si, sj) = self.map.to_grid(from);
-        let (gi, gj) = self.map.to_grid(to);
-        let Some(start) = self.nearest_passable(si, sj) else {
-            return Vec::new();
-        };
-        let Some(goal) = self.nearest_passable(gi, gj) else {
-            return Vec::new();
-        };
-        let cells = self.map.clearance_cells(radius);
-        let (cols, rows) = (self.map.cols, self.map.rows);
-        let idx = |i: i32, j: i32| (j * cols + i) as usize;
-        let n = (cols * rows).max(1) as usize;
-
-        let h = |i: i32, j: i32| {
-            let (dx, dy) = ((i - goal.0).abs() as f32, (j - goal.1).abs() as f32);
-            // Octile distance: the cost of 8-connected travel.
-            (dx.max(dy)) + (std::f32::consts::SQRT_2 - 1.0) * (dx.min(dy))
-        };
-
-        let mut g = vec![f32::INFINITY; n];
-        let mut came = vec![usize::MAX; n];
-        let mut open: Vec<(f32, i32, i32)> = vec![(h(start.0, start.1), start.0, start.1)];
-        g[idx(start.0, start.1)] = 0.0;
-
-        let neighbours: [(i32, i32, f32); 8] = [
-            (1, 0, 1.0),
-            (-1, 0, 1.0),
-            (0, 1, 1.0),
-            (0, -1, 1.0),
-            (1, 1, std::f32::consts::SQRT_2),
-            (1, -1, std::f32::consts::SQRT_2),
-            (-1, 1, std::f32::consts::SQRT_2),
-            (-1, -1, std::f32::consts::SQRT_2),
-        ];
-
-        while !open.is_empty() {
-            let mut best = 0;
-            for k in 1..open.len() {
-                if open[k].0 < open[best].0 {
-                    best = k;
-                }
-            }
-            let (_, ci, cj) = open.swap_remove(best);
-            if (ci, cj) == goal {
-                let mut out = Vec::new();
-                let mut cur = idx(ci, cj);
-                while cur != usize::MAX {
-                    out.push(((cur % cols as usize) as i32, (cur / cols as usize) as i32));
-                    cur = came[cur];
-                }
-                out.reverse();
-                return out;
-            }
-            let cg = g[idx(ci, cj)];
-            for (di, dj, cost) in neighbours {
-                let (ni, nj) = (ci + di, cj + dj);
-                if !self.map.passable(ni, nj) || !self.map.clear(ni, nj, cells) {
-                    continue;
-                }
-                if di != 0 && dj != 0 {
-                    // No cutting a corner between two walls.
-                    if !self.map.passable(ci + di, cj) || !self.map.passable(ci, cj + dj) {
-                        continue;
-                    }
-                }
-                let ng = cg + cost;
-                let k = idx(ni, nj);
-                if ng + 1e-6 < g[k] {
-                    g[k] = ng;
-                    came[k] = idx(ci, cj);
-                    open.push((ng + h(ni, nj), ni, nj));
-                }
-            }
-        }
-        Vec::new()
+    /// The original tests every `AddCollisionLine` segment with a
+    /// line-against-circle intersection (`FUN_0061b260`): a segment counts when
+    /// one of the points where its line crosses the circle lies on the segment,
+    /// so a segment wholly inside the circle does not.
+    pub fn blocked_at(&self, p: [f32; 2], radius: f32) -> bool {
+        self.collision_lines
+            .iter()
+            .any(|l| segment_crosses_circle(l.a, l.b, p, radius))
     }
 
-    /// Whether a straight line between two world points stays on the map.
+    /// `IsStraightPathClear` (`FUN_00405720`): march from `from` toward `to` in
+    /// steps of half the search radius and fail at the first stop whose circle
+    /// crosses a collision line. The steps are `trunc(length / step)` and start
+    /// at `from`; the end point itself is not tested.
     pub fn straight_path_clear(&self, from: Vec3, to: Vec3, radius: f32) -> bool {
-        let cells = self.map.clearance_cells(radius);
-        let steps = ((to - from).length() / (self.map.resolution.max(0.05) * 0.5)).ceil() as i32;
-        for s in 0..=steps.max(1) {
-            let t = s as f32 / steps.max(1) as f32;
-            let (i, j) = self.map.to_grid(from.lerp(to, t));
-            if !self.map.passable(i, j) || !self.map.clear(i, j, cells) {
+        self.straight_clear_2d([from.x, from.z], [to.x, to.z], radius)
+    }
+
+    fn straight_clear_2d(&self, from: [f32; 2], to: [f32; 2], radius: f32) -> bool {
+        let d = [to[0] - from[0], to[1] - from[1]];
+        let length = (d[0] * d[0] + d[1] * d[1]).sqrt();
+        let step = radius * 0.5;
+        if step <= 0.0 || length <= 0.0 {
+            return !self.blocked_at(from, radius);
+        }
+        let n = (length / step) as i32;
+        let dir = [d[0] / length * step, d[1] / length * step];
+        let mut p = from;
+        for _ in 0..n {
+            if self.blocked_at(p, radius) {
                 return false;
             }
+            p = [p[0] + dir[0], p[1] + dir[1]];
         }
         true
+    }
+
+    /// A point near `p` that the robot's circle fits at: march from `p` toward
+    /// each vantage point in half-radius steps and take the first stop that is
+    /// clear (`FUN_00405c30`, which `GetPath` runs over the POVs for a start or
+    /// goal pressed against a wall).
+    fn free_point_near(&self, p: [f32; 2], radius: f32) -> [f32; 2] {
+        let step = radius * 0.5;
+        if step <= 0.0 {
+            return p;
+        }
+        for pov in &self.povs {
+            let d = [pov.location[0] - p[0], pov.location[1] - p[1]];
+            let length = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            if length <= 0.0 {
+                continue;
+            }
+            let n = (length / step) as i32;
+            let dir = [d[0] / length * step, d[1] / length * step];
+            let mut q = p;
+            for _ in 0..n {
+                if !self.blocked_at(q, radius) {
+                    return q;
+                }
+                q = [q[0] + dir[0], q[1] + dir[1]];
+            }
+        }
+        p
+    }
+
+    /// `GetPath(from, to, ignore_hazards)` (`FUN_00405990`), as world `(x, z)`
+    /// waypoints — the "grid" of the scripts is the world plane: `ToGrid` is
+    /// `(x, z)` and `FromGrid` puts the map's floor height back.
+    ///
+    /// * A straight run that clears every collision line is the whole route:
+    ///   `[from, to]`.
+    /// * Otherwise a start or goal pressed against a line is moved to a clear
+    ///   point toward a vantage point, and the route runs over the arena's
+    ///   `AddPOV` graph (each POV's own neighbour list; the ends join every POV
+    ///   they can see).
+    /// * When no route exists the answer is still `[from, to]`, never empty: the
+    ///   AI then drives straight at its target.
+    pub fn path(&self, from: Vec3, to: Vec3, radius: f32) -> Vec<[f32; 2]> {
+        let (s, g) = ([from.x, from.z], [to.x, to.z]);
+        if self.straight_clear_2d(s, g, radius) {
+            return vec![s, g];
+        }
+        let s2 = if self.blocked_at(s, radius) {
+            self.free_point_near(s, radius)
+        } else {
+            s
+        };
+        let g2 = if self.blocked_at(g, radius) {
+            self.free_point_near(g, radius)
+        } else {
+            g
+        };
+        self.pov_route(s2, g2, radius).unwrap_or_else(|| vec![s, g])
+    }
+
+    /// Shortest route from `s` to `g` over the vantage graph (Dijkstra; the
+    /// graph is a dozen nodes).
+    fn pov_route(&self, s: [f32; 2], g: [f32; 2], radius: f32) -> Option<Vec<[f32; 2]>> {
+        if self.povs.is_empty() {
+            return None;
+        }
+        let n = self.povs.len();
+        // Nodes: the POVs, then the start (n) and the goal (n + 1).
+        let at = |k: usize| -> [f32; 2] {
+            if k < n {
+                self.povs[k].location
+            } else if k == n {
+                s
+            } else {
+                g
+            }
+        };
+        let dist =
+            |a: [f32; 2], b: [f32; 2]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
+        let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n + 2];
+        for (k, pov) in self.povs.iter().enumerate() {
+            for &nb in &pov.neighbours {
+                if let Some(j) = self.povs.iter().position(|p| p.index == nb) {
+                    if j != k && !edges[k].contains(&j) {
+                        edges[k].push(j);
+                    }
+                    if j != k && !edges[j].contains(&k) {
+                        edges[j].push(k);
+                    }
+                }
+            }
+            if self.straight_clear_2d(s, pov.location, radius) {
+                edges[n].push(k);
+            }
+            if self.straight_clear_2d(pov.location, g, radius) {
+                edges[k].push(n + 1);
+            }
+        }
+        let mut best = vec![f32::INFINITY; n + 2];
+        let mut came = vec![usize::MAX; n + 2];
+        let mut done = vec![false; n + 2];
+        best[n] = 0.0;
+        loop {
+            let u = (0..n + 2)
+                .filter(|&k| !done[k] && best[k].is_finite())
+                .min_by(|&a, &b| best[a].total_cmp(&best[b]))?;
+            if u == n + 1 {
+                break;
+            }
+            done[u] = true;
+            for &v in &edges[u] {
+                let c = best[u] + dist(at(u), at(v));
+                if c < best[v] {
+                    best[v] = c;
+                    came[v] = u;
+                }
+            }
+        }
+        let mut route = vec![g];
+        let mut k = came[n + 1];
+        while k != usize::MAX && k != n {
+            route.push(at(k));
+            k = came[k];
+        }
+        route.push(s);
+        route.reverse();
+        Some(route)
+    }
+
+    /// The map's floor under a world point, for `FromGrid`.
+    pub fn floor_height(&self, x: f32, z: f32) -> f32 {
+        let (i, j) = self.map.to_grid(Vec3::new(x, 0.0, z));
+        self.map.from_grid(i, j).y
     }
 
     /// Distance from `p` to the nearest cell the AI cannot stand on.
@@ -400,6 +430,28 @@ impl ArenaData {
             None => 0.0,
         }
     }
+}
+
+/// Whether the segment `a`–`b` crosses the circle of `radius` about `c`: one of
+/// the two points where its line meets the circle lies on the segment
+/// (`FUN_0061b260`'s parametric test).
+fn segment_crosses_circle(a: [f32; 2], b: [f32; 2], c: [f32; 2], radius: f32) -> bool {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let f = [a[0] - c[0], a[1] - c[1]];
+    let qa = d[0] * d[0] + d[1] * d[1];
+    if qa <= 0.0 {
+        return false;
+    }
+    let qb = 2.0 * (f[0] * d[0] + f[1] * d[1]);
+    let qc = f[0] * f[0] + f[1] * f[1] - radius * radius;
+    let disc = qb * qb - 4.0 * qa * qc;
+    if disc < 0.0 {
+        return false;
+    }
+    let root = disc.sqrt();
+    let t0 = (-qb - root) / (2.0 * qa);
+    let t1 = (-qb + root) / (2.0 * qa);
+    (0.0..=1.0).contains(&t0) || (0.0..=1.0).contains(&t1)
 }
 
 /// `plus.Arena` — the C++ side of every arena script.
@@ -564,28 +616,14 @@ impl Arena {
         self.d().pinned.insert(name.to_string(), on);
     }
 
-    /// `AddCollisionLine((x0, z0), (x1, z1))` — a wall on the navigation map.
+    /// `AddCollisionLine((x0, z0), (x1, z1))` — a wall segment for the AI's
+    /// navigation. The original keeps a list of them (`IsStraightPathClear` and
+    /// `GetPath` test against it); it does not touch the height map.
     fn AddCollisionLine(&self, a: (f32, f32), b: (f32, f32)) {
-        let line = CollisionLine {
+        self.d().collision_lines.push(CollisionLine {
             a: [a.0, a.1],
             b: [b.0, b.1],
-        };
-        let mut d = self.d();
-        let res = d.map.resolution.max(0.01);
-        let steps = (((line.b[0] - line.a[0]).powi(2) + (line.b[1] - line.a[1]).powi(2)).sqrt()
-            / (res * 0.5))
-            .ceil() as i32;
-        for s in 0..=steps.max(1) {
-            let t = s as f32 / steps.max(1) as f32;
-            let x = line.a[0] + (line.b[0] - line.a[0]) * t;
-            let z = line.a[1] + (line.b[1] - line.a[1]) * t;
-            let i = ((x - d.map.extent[0]) / res).floor() as i32;
-            let j = ((d.map.extent[1] - z) / res).floor() as i32;
-            if let Some(k) = d.map.index(i, j) {
-                d.map.cells[k].wall = true;
-            }
-        }
-        d.collision_lines.push(line);
+        });
     }
 
     /// `AddPOV(index, (x, z), (neighbours...))` — the AI's vantage graph.
@@ -708,32 +746,43 @@ impl Arena {
         !c.wall && !c.hazard && !c.floor
     }
 
-    fn ToGrid(&self, p: (f32, f32, f32)) -> (i32, i32) {
-        self.d().map.to_grid(Vec3::new(p.0, p.1, p.2))
+    /// `ToGrid(p)` — the plane point `(x, z)` (`FUN_00406240` keeps the two
+    /// floats as they are).
+    fn ToGrid(&self, p: (f32, f32, f32)) -> (f32, f32) {
+        (p.0, p.2)
     }
 
-    fn FromGrid(&self, grid: (i32, i32)) -> (f32, f32, f32) {
-        let v = self.d().map.from_grid(grid.0, grid.1);
-        (v.x, v.y, v.z)
+    /// `FromGrid((x, z))` — the world point on the map's floor
+    /// (`FUN_00405fa0`).
+    fn FromGrid(&self, grid: (f32, f32)) -> (f32, f32, f32) {
+        let y = self.d().floor_height(grid.0, grid.1);
+        (grid.0, y, grid.1)
     }
 
     fn SetSearchRadius(&mut self, radius: f32) {
         self.search_radius = radius;
     }
 
-    /// `GetPath(from_world, to_world, flag)` — grid cells to follow.
+    /// `GetPath(from_world, to_world, ignore_hazards)` — `(x, z)` waypoints
+    /// (see [`ArenaData::path`]).
     fn GetPath(
         &self,
         from: (f32, f32, f32),
         to: (f32, f32, f32),
-        _blocked: bool,
-    ) -> Vec<(i32, i32)> {
+        _ignore_hazards: bool,
+    ) -> Vec<(f32, f32)> {
         let r = self.search_radius;
-        self.data.lock().unwrap().path(
-            Vec3::new(from.0, from.1, from.2),
-            Vec3::new(to.0, to.1, to.2),
-            r,
-        )
+        self.data
+            .lock()
+            .unwrap()
+            .path(
+                Vec3::new(from.0, from.1, from.2),
+                Vec3::new(to.0, to.1, to.2),
+                r,
+            )
+            .into_iter()
+            .map(|p| (p[0], p[1]))
+            .collect()
     }
 
     fn IsStraightPathClear(

@@ -537,15 +537,48 @@ pub struct RobotRig {
     pub wiring: Wiring,
     /// The `.bot`'s forward heading (radians, `0` or `PI` in every stock bot):
     /// the direction the robot's front faces in its own frame, as a rotation of
-    /// `-Z` about `Y`. The motors' `Spin Clockwise` wiring is written against
-    /// it — the stock bots with a `PI` heading drive toward `+Z` on `W`.
+    /// `+Z` about `Y` — the original's `GetHeading` (`0x4df320`) turns
+    /// `(0, 0, 1)` by the quaternion about `Y` of robot `+0xac` and then by the
+    /// chassis. The stock bots with a `PI` heading drive toward `-Z` on `W`
+    /// (`magic-razor__live__000`: 16.4 m/s along the chassis' `-Z`).
     pub heading: f32,
+    /// The AI's sensor volumes (`SmartZone` components), see [`SmartZone`].
+    pub smart_zones: Vec<SmartZone>,
+}
+
+/// A `SmartZone` component: the box a brain watches for enemies
+/// (`RegisterSmartZone` / `GetZoneContents`, `0x401340` / `0x4014f0`).
+///
+/// The component itself has no body; the box rides on whatever part its
+/// component is mounted to.
+#[derive(Clone, Debug)]
+pub struct SmartZone {
+    /// The SmartZone component's index.
+    pub component: usize,
+    /// Its name line (`weapon`, `flip`, ...), what the brains ask for.
+    pub name: String,
+    /// The zone's frame relative to the component's own world transform (the
+    /// component's stored `local` places it without its own mount point).
+    pub offset: Mat4,
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl SmartZone {
+    /// Whether a sphere of `radius` at `centre` touches the box whose frame is
+    /// `world` (the zone component's world transform times [`Self::offset`]).
+    pub fn touches(&self, world: Mat4, centre: Vec3, radius: f32) -> bool {
+        let p = world.inverse().transform_point3(centre);
+        let r = Vec3::splat(radius);
+        (p.cmpge(self.min - r) & p.cmple(self.max + r)).all()
+    }
 }
 
 impl RobotRig {
-    /// The robot's front in its own frame: `-Z` turned by [`RobotRig::heading`].
+    /// The robot's front in its own frame: `+Z` turned by [`RobotRig::heading`]
+    /// (see there).
     pub fn forward(&self) -> Vec3 {
-        Vec3::new(-self.heading.sin(), 0.0, -self.heading.cos())
+        Vec3::new(self.heading.sin(), 0.0, self.heading.cos())
     }
 
     /// Animated bot-local transform of every component for a set of motor
@@ -983,9 +1016,20 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
 
 /// Load a `.bot` into a component tree (no physics yet).
 pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
-    let (bot, _root, loaded) = ra2_render::load_bot_components(path)?;
+    let (bot, root, loaded) = ra2_render::load_bot_components(path)?;
     let (rest, carried) =
         ra2_render::component_assembly_mounted(&bot, &loaded, ra2_render::MountMode::from_env());
+    let smart_zones: Vec<SmartZone> =
+        ra2_render::bot_smart_zones(&bot, &root, &loaded, ra2_render::MountMode::from_env())
+            .into_iter()
+            .map(|z| SmartZone {
+                component: z.component,
+                name: z.name,
+                offset: rest[z.component].inverse() * z.local,
+                min: z.min,
+                max: z.max,
+            })
+            .collect();
     let mut components: Vec<Component> = Vec::with_capacity(bot.components.len());
 
     // The chassis' crush cage (F9) is the bot's, not a component definition's.
@@ -1308,6 +1352,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
         part_local,
         wiring: Wiring::from_bot(&bot),
         heading: bot.heading.unwrap_or(0.0),
+        smart_zones,
     })
 }
 
@@ -1549,6 +1594,7 @@ mod tests {
             part_local,
             wiring: Wiring::default(),
             heading: 0.0,
+            smart_zones: Vec::new(),
         };
         rig.components[1].children = vec![2];
 
