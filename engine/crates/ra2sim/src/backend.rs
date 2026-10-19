@@ -112,6 +112,12 @@ pub struct BodyDesc {
     pub collision_group: Option<CollisionGroupDesc>,
     /// Free-form tag (used to tell arena from robot bodies).
     pub user_data: u64,
+    /// A *phantom* riding on the body: a volume that only reports what it
+    /// overlaps (see [`PhysicsBackend::phantom_touch`]). A wheel's
+    /// `wheel_traction` object is one — `DISABLE_COLLISIONS` in its `.gmf` —
+    /// which the game counts contacts with to know whether the wheel is on the
+    /// ground (`Wheel` update `0x508080`). Body-local, like `shape`.
+    pub phantom: Option<ShapeDesc>,
 }
 
 impl BodyDesc {
@@ -130,6 +136,7 @@ impl BodyDesc {
             is_sensor: false,
             collision_group: None,
             user_data: 0,
+            phantom: None,
         }
     }
 
@@ -186,6 +193,12 @@ impl BodyDesc {
 
     pub fn with_user_data(mut self, user_data: u64) -> Self {
         self.user_data = user_data;
+        self
+    }
+
+    /// Give the body a phantom volume (see [`BodyDesc::phantom`]).
+    pub fn with_phantom(mut self, phantom: ShapeDesc) -> Self {
+        self.phantom = Some(phantom);
         self
     }
 }
@@ -354,6 +367,30 @@ impl std::fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
+/// Which physics engine a world runs on: `RA2_PHYSICS=havok17` (the
+/// Havok-1.7-faithful dynamics of [`crate::havok17`]) or `jolt` (Jolt Physics,
+/// the default).
+pub fn backend_kind() -> &'static str {
+    match std::env::var("RA2_PHYSICS") {
+        Ok(v) if v.eq_ignore_ascii_case("havok17") || v.eq_ignore_ascii_case("havok") => "havok17",
+        Ok(v) if v.eq_ignore_ascii_case("jolt") => "jolt",
+        _ => DEFAULT_BACKEND,
+    }
+}
+
+/// The engine a world runs on when `RA2_PHYSICS` does not say.
+pub const DEFAULT_BACKEND: &str = "jolt";
+
+/// Create the physics world [`backend_kind`] selects. `gravity` is what the
+/// arena's `.gmf` asks for; the Havok backend uses the game's own world gravity
+/// instead (see [`crate::havok17::GRAVITY`]).
+pub fn create_backend(gravity: Vec3) -> Result<Box<dyn PhysicsBackend>, BackendError> {
+    Ok(match backend_kind() {
+        "havok17" => Box::new(crate::havok17::Havok17Backend::new()?),
+        _ => Box::new(crate::jolt::JoltBackend::new(gravity)?),
+    })
+}
+
 /// The engine-agnostic physics interface the sandbox drives.
 pub trait PhysicsBackend {
     /// Backend name, for reporting.
@@ -371,6 +408,41 @@ pub trait PhysicsBackend {
     fn set_velocity(&mut self, handle: BodyHandle, linear: Vec3, angular: Vec3);
 
     fn gravity(&self) -> Vec3;
+
+    /// The body's mass in kg (`None` for a static body or one the backend does
+    /// not know).
+    fn mass(&self, _handle: BodyHandle) -> Option<f32> {
+        None
+    }
+
+    /// The body's centre of mass in world space. The default is the body's
+    /// origin, which is exact only for a body whose shape is centred on it.
+    fn center_of_mass(&self, handle: BodyHandle) -> Option<Vec3> {
+        self.state(handle).map(|s| s.position)
+    }
+
+    /// Add a force (N, world space, through the centre of mass) to the body's
+    /// accumulator: it acts over the next step and is then cleared — Havok's
+    /// `applyForce` (`body + 0x74`).
+    fn add_force(&mut self, handle: BodyHandle, force: Vec3) {
+        let dt = self.last_dt();
+        self.apply_impulse(handle, force * dt);
+    }
+
+    /// Add a torque (N·m, world space) to the body's accumulator for the next
+    /// step — Havok's `applyTorque` (`body + 0x84`).
+    fn add_torque(&mut self, handle: BodyHandle, torque: Vec3) {
+        let dt = self.last_dt();
+        self.apply_angular_impulse(handle, torque * dt);
+    }
+
+    /// Whether the body's phantom ([`BodyDesc::phantom`]) overlapped another
+    /// body (not of the same collision group) during the last step, with that
+    /// surface's normal (pointing away from it). `None` when it touched nothing,
+    /// or for a backend without phantoms.
+    fn phantom_touch(&self, _handle: BodyHandle) -> Option<Vec3> {
+        None
+    }
     fn step(&mut self, dt: f32) -> StepInfo;
     /// The length of the last [`step`](Self::step) (a step before any is 1/60 s).
     /// A caller that turns a force into an impulse uses it as the next step's

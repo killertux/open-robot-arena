@@ -13,6 +13,7 @@ use crate::backend::{
     MotionType, PhysicsBackend, ShapeDesc, SliderDesc,
 };
 use crate::controls::{ControlState, COCK_FRACTION, FULL};
+use crate::drive::{MagicAction, WheelRecord};
 use crate::energy::{Channel, Energy};
 use crate::massprops;
 use crate::rig::{JointInfo, JointUse, RobotRig, Role, WheelDrive};
@@ -180,6 +181,30 @@ fn legacy_wheels() -> bool {
     std::env::var_os("RA2_LEGACY_WHEELS").is_some()
 }
 
+/// Whether robots drive through the game's own drive model
+/// ([`crate::drive::MagicAction`]) rather than the fitted wheel thrust. It is
+/// the model the `havok17` backend runs; `RA2_DRIVE=magic|interim` overrides.
+fn magic_drive(physics: &dyn PhysicsBackend) -> bool {
+    match std::env::var("RA2_DRIVE") {
+        Ok(v) if v.eq_ignore_ascii_case("magic") => true,
+        Ok(v) if v.eq_ignore_ascii_case("interim") => false,
+        _ => physics.name() == "havok17",
+    }
+}
+
+/// The game's raw torque unit: `SetPowerSettings` stores the definition's
+/// torque at `+0xb4` and ×40 of it at `+0xb8` (`FUN_004810e0`, `0x6a69f8`).
+const TORQUE_UNIT: f32 = 40.0;
+
+/// One body as the Havok backend gets it.
+struct HavokPart {
+    shape: ShapeDesc,
+    mass: f32,
+    friction: f32,
+    restitution: f32,
+    phantom: Option<ShapeDesc>,
+}
+
 /// One grounded wheel, sampled for [`Robot::push_wheels`].
 struct WheelSample {
     parent: usize,
@@ -251,6 +276,8 @@ pub struct Robot {
     /// The batteries and air tanks and what they supplied last step
     /// ([`crate::energy`]): the HUD's battery and air bars.
     pub energy: Energy,
+    /// The game's own drive model ([`crate::drive`]), when the robot uses it.
+    pub magic: Option<MagicAction>,
 }
 
 /// A burst motor's or piston's cycle: parked (cocked) at its start, released at
@@ -271,7 +298,7 @@ impl Robot {
     /// bodies to exist).
     pub fn spawn(
         physics: &mut dyn PhysicsBackend,
-        rig: RobotRig,
+        mut rig: RobotRig,
         team: usize,
         position: Vec3,
         rotation: Quat,
@@ -282,24 +309,35 @@ impl Robot {
         let group = next_robot_group();
         let sub_groups = rig.parts.len() as u32;
 
+        let havok = physics.name() == "havok17";
+        let shift = Self::cock_burst_pistons(&mut rig);
         let mut parts = Vec::with_capacity(rig.parts.len());
         for (p, part) in rig.parts.iter().enumerate() {
-            let world = bot * rig.components[part.root].local;
+            let world = bot * Mat4::from_translation(shift[p]) * rig.components[part.root].local;
             let (_, rot, pos) = world.to_scale_rotation_translation();
-            let shape = Self::part_shape(&rig, &part.members);
-            let mass = (part
-                .members
-                .iter()
-                .map(|&i| rig.components[i].mass)
-                .sum::<f32>()
-                * mass_scale)
-                .max(0.2);
-            let friction = Self::part_friction(&rig, part.members.iter().copied());
-            let desc = BodyDesc::new(MotionType::Dynamic, shape)
+            let (shape, mass, friction, restitution, phantom) = if havok {
+                let h = Self::havok_part(&rig, p);
+                (h.shape, h.mass, h.friction, h.restitution, h.phantom)
+            } else {
+                let mass = part
+                    .members
+                    .iter()
+                    .map(|&i| rig.components[i].mass)
+                    .sum::<f32>();
+                (
+                    Self::part_shape(&rig, &part.members),
+                    mass,
+                    Self::part_friction(&rig, part.members.iter().copied()),
+                    STOCK_RESTITUTION,
+                    None,
+                )
+            };
+            let mass = (mass * mass_scale).max(0.2);
+            let mut desc = BodyDesc::new(MotionType::Dynamic, shape)
                 .at(pos)
                 .with_rotation(rot)
                 .with_friction(friction)
-                .with_restitution(STOCK_RESTITUTION)
+                .with_restitution(restitution)
                 .with_mass(mass)
                 // Driven / hit every step: never let the backend park a body.
                 .with_sleeping(false)
@@ -312,6 +350,9 @@ impl Robot {
                     sub_groups,
                 })
                 .with_user_data(USER_BOT);
+            if let Some(phantom) = phantom {
+                desc = desc.with_phantom(phantom);
+            }
             let body = physics.create_body(&desc)?;
             parts.push(PartState {
                 body,
@@ -325,15 +366,22 @@ impl Robot {
             let (Some(parent), Some(info)) = (rig.parts[p].parent, rig.parts[p].joint) else {
                 continue;
             };
+            // The pivot rides on the parent; a child moved off its rest pose
+            // (a cocked piston rod) names it from where it now is.
+            let child_pivot = info.pivot + shift[parent] - shift[p];
             let joint = if info.slider {
-                Self::make_slider(physics, &rig, &parts, parent, p, info)?
+                Self::make_slider(physics, &rig, &parts, parent, p, info, child_pivot)?
             } else {
-                Self::make_hinge(physics, &rig, &parts, parent, p, info)?
+                Self::make_hinge(physics, &rig, &parts, parent, p, info, child_pivot)?
             };
             parts[p].joint = Some(joint);
         }
 
+        let magic =
+            magic_drive(physics).then(|| Self::magic_records(physics, &rig, &parts, rotation));
+
         Ok(Robot {
+            magic,
             health: rig.components.iter().map(|c| c.hitpoints).collect(),
             attached: vec![true; n],
             fractured: vec![false; n],
@@ -446,6 +494,300 @@ impl Robot {
             }
         }
         (elec, air)
+    }
+
+    /// Spawn every burst piston cocked: its rod retracted to the far end of
+    /// its travel, from where it fires. Returns each part's bot-space offset
+    /// from the rest pose, and re-bases those pistons' travel on the cocked
+    /// pose.
+    ///
+    /// Live, ALARM's hammer body (33 kg: hammer head 25 + piston `shaft` 8)
+    /// sits at the chassis' height, 0.82 m in front of it, and the robot rests
+    /// on its four hubs (`bodies.json`, `clist_rest`); at the model's own pose
+    /// the hammer hangs 0.74 m lower, below the wheels, and holds the robot
+    /// up. Its `burstpiston2` declares `prismatic = body, shaft, 0, 0, 1, 0,
+    /// -0.73, 0.2`: the 0.73 m the rod can retract is that difference. So the
+    /// travel counts along the rod's extension, and a burst piston stands at
+    /// its lower limit — retracted — until it fires.
+    fn cock_burst_pistons(rig: &mut RobotRig) -> Vec<Vec3> {
+        let n = rig.parts.len();
+        let mut own = vec![Vec3::ZERO; n];
+        for (p, part) in rig.parts.iter_mut().enumerate() {
+            let Some(info) = part.joint.as_mut() else {
+                continue;
+            };
+            if !(info.slider && info.use_kind == JointUse::Burst) {
+                continue;
+            }
+            let axis = info.axis.normalize_or_zero();
+            let [lower, upper] = info.limits;
+            if axis == Vec3::ZERO || lower >= 0.0 {
+                continue;
+            }
+            // Retracting runs along the declared axis (toward the housing).
+            own[p] = axis * -lower;
+            info.limits = [-(upper - lower), 0.0];
+        }
+        // A part moves with everything it hangs from.
+        (0..n)
+            .map(|p| {
+                let mut total = Vec3::ZERO;
+                let mut q = Some(p);
+                while let Some(i) = q {
+                    total += own[i];
+                    q = rig.parts[i].parent;
+                }
+                total
+            })
+            .collect()
+    }
+
+    /// The Havok body of part `p` (see [`crate::rig::HavokParts`]): one convex
+    /// piece per colliding rigid body of its components (no skin, the real
+    /// wheel hubs), a motor's rotor moved to the part it drives, every rigid
+    /// body's mass (phantoms included), the top rigid body's material — the
+    /// chassis body is the game's own, with Havok's defaults (live 0.5 / 0.2) —
+    /// and the wheels' traction phantoms.
+    fn havok_part(rig: &RobotRig, p: usize) -> HavokPart {
+        let part = &rig.parts[p];
+        let frame = rig.components[part.root].local;
+        // Which motors drive another part: their rotor belongs there.
+        let drives: Vec<usize> = rig
+            .parts
+            .iter()
+            .filter_map(|q| q.joint.map(|j| j.motor))
+            .collect();
+        let mut children = Vec::new();
+        let mut phantom = Vec::new();
+        let (mut mass, mut moment) = (0.0f32, Vec3::ZERO);
+        let mut add = |pieces: &[Vec<Vec3>], m: Mat4, weight: f32, tag: u32, at: Vec3| {
+            let mut placed = Vec::new();
+            for pts in pieces {
+                let local: Vec<Vec3> = pts.iter().map(|q| m.transform_point3(*q)).collect();
+                if massprops::hull_volume_centroid(&local).is_some() {
+                    placed.push(local);
+                }
+            }
+            let centre = placed
+                .iter()
+                .filter_map(|pts| massprops::hull_volume_centroid(pts))
+                .fold((0.0f32, Vec3::ZERO), |(v, c), (vi, ci)| {
+                    (v + vi, c + ci * vi)
+                });
+            let centre = if centre.0 > 1e-9 {
+                centre.1 / centre.0
+            } else {
+                at
+            };
+            if weight > 0.0 {
+                mass += weight;
+                moment += centre * weight;
+            }
+            for pts in placed {
+                children.push(CompoundChild {
+                    local_position: Vec3::ZERO,
+                    local_rotation: Quat::IDENTITY,
+                    shape: ShapeDesc::ConvexHull { points: pts },
+                    tag,
+                });
+            }
+        };
+        for &i in &part.members {
+            let c = &rig.components[i];
+            let m = rig.part_local[i];
+            let h = &c.havok;
+            let own_rotor = drives.contains(&i);
+            let mut weight = c.mass + h.phantom_mass;
+            if own_rotor {
+                weight -= h.rotor_mass;
+            }
+            // As with the Jolt bodies: a power cell sits inside the chassis (live,
+            // the resting Scout touches the floor with its hubs and fork arm
+            // only, `clist_rest`), and a non-physical fitting is no obstacle.
+            let collides = c.role.is_physical() && c.role != Role::Power;
+            let pieces: Vec<Vec<Vec3>> = if !collides {
+                Vec::new()
+            } else if !h.collision.is_empty() || !h.rotor_collision.is_empty() {
+                let mut v = h.collision.clone();
+                if !own_rotor {
+                    v.extend(h.rotor_collision.iter().cloned());
+                }
+                v
+            } else if !c.hull_points.is_empty() {
+                vec![c.hull_points.clone()]
+            } else {
+                Vec::new()
+            };
+            add(&pieces, m, weight.max(0.0), i as u32, m.w_axis.truncate());
+            phantom.extend(h.phantom.iter().map(|q| m.transform_point3(*q)));
+        }
+        // The rotor of the motor this part hangs from.
+        if let Some(info) = part.joint {
+            let motor = &rig.components[info.motor];
+            let m = frame.inverse() * motor.local;
+            add(
+                &motor.havok.rotor_collision,
+                m,
+                motor.havok.rotor_mass,
+                info.motor as u32,
+                frame.inverse().transform_point3(info.pivot),
+            );
+        }
+        let shape = match children.len() {
+            0 => ShapeDesc::Sphere { radius: 0.1 },
+            _ => ShapeDesc::Compound(children),
+        };
+        let centre = (mass > 1e-6).then(|| moment / mass);
+        let shape = match centre {
+            Some(c) => {
+                let offset = c - crate::havok17::mass::of_shape(&shape).com;
+                if offset.is_finite() && offset.length() > 1e-4 {
+                    ShapeDesc::OffsetCenterOfMass {
+                        shape: Box::new(shape),
+                        offset,
+                    }
+                } else {
+                    shape
+                }
+            }
+            None => shape,
+        };
+        let root = &rig.components[part.root].havok;
+        let (friction, restitution) = if p == 0 {
+            (
+                crate::havok17::DEFAULT_FRICTION,
+                crate::havok17::DEFAULT_RESTITUTION,
+            )
+        } else {
+            (
+                root.friction.unwrap_or(STOCK_FRICTION),
+                root.restitution.unwrap_or(STOCK_RESTITUTION),
+            )
+        };
+        let phantom = (phantom.len() >= 4).then_some(ShapeDesc::ConvexHull { points: phantom });
+        HavokPart {
+            shape,
+            mass: mass.max(0.2),
+            friction,
+            restitution,
+            phantom,
+        }
+    }
+
+    /// The robot's wheel records (`AddWheel`, `FUN_00485490` from
+    /// `FUN_004dc180`): every wheel on a `SpinMotor` or an `AxleMount`, with its
+    /// hub centre and axle in the chassis frame, `grip` and `resistance`.
+    fn magic_records(
+        physics: &dyn PhysicsBackend,
+        rig: &RobotRig,
+        parts: &[PartState],
+        rotation: Quat,
+    ) -> MagicAction {
+        let chassis = parts[0].body;
+        let centre = physics.center_of_mass(chassis).unwrap_or(Vec3::ZERO);
+        let mut wheels = Vec::new();
+        for (p, part) in rig.parts.iter().enumerate() {
+            let Some(info) = part.joint else { continue };
+            let root = &rig.components[part.root];
+            if root.role != Role::Wheel || info.slider {
+                continue;
+            }
+            let class = rig.components[info.motor].class.to_ascii_lowercase();
+            let driven = class == "spinmotor";
+            if !driven && class != "axlemount" {
+                continue;
+            }
+            let stats = root.wheel.clone().unwrap_or_default();
+            let hub = physics.center_of_mass(parts[p].body).unwrap_or(centre);
+            let host = rig.components[rig.parts[0].root].local;
+            wheels.push(WheelRecord {
+                part: p,
+                motor: driven.then_some(info.motor),
+                point: rotation.inverse() * (hub - centre),
+                axle: host
+                    .inverse()
+                    .transform_vector3(info.axis)
+                    .normalize_or_zero(),
+                grip: stats.grip,
+                resistance: stats.resistance,
+                thrust: 0.0,
+                touching: false,
+                air: crate::drive::TOUCH_MEMORY * 2.0,
+                normal: Vec3::Y,
+            });
+        }
+        MagicAction { wheels }
+    }
+
+    /// Drive through the game's own model: the wheels' records get their
+    /// thrust and their touching flag, a wheel in the air spins on its hinge
+    /// servo, and the [`MagicAction`] pushes the chassis.
+    fn drive_magic(&mut self, physics: &mut dyn PhysicsBackend, elec_scale: f32) {
+        let Some(mut magic) = self.magic.take() else {
+            return;
+        };
+        let dt = physics.last_dt();
+        let own: Vec<BodyHandle> = self.parts.iter().map(|q| q.body).collect();
+        for w in &mut magic.wheels {
+            let alive = self.parts[w.part].alive && self.attached[self.rig.parts[w.part].root];
+            // What the wheel's phantom touches; a backend without phantoms (Jolt)
+            // looks for ground just under the hub instead.
+            let touch = if !alive {
+                None
+            } else {
+                physics.phantom_touch(self.parts[w.part].body).or_else(|| {
+                    if physics.name() == "havok17" {
+                        return None;
+                    }
+                    let info = self.rig.parts[w.part].joint?;
+                    let wheel = info.wheel?;
+                    let hub = physics.center_of_mass(self.parts[w.part].body)?;
+                    let reach = wheel.radius + WHEEL_REACH;
+                    physics
+                        .ray_cast(hub - Vec3::Y * reach, Vec3::Y, reach)
+                        .filter(|hit| !own.contains(&hit.body))
+                        .map(|hit| hit.normal * hit.normal.y.signum())
+                })
+            };
+            MagicAction::touch(w, touch, dt);
+            if !alive {
+                w.touching = false;
+            }
+            let Some(motor) = w.motor else {
+                w.thrust = 0.0;
+                continue;
+            };
+            let Some(info) = self.rig.parts[w.part].joint else {
+                continue;
+            };
+            let command = self.control.command(&self.rig.wiring, motor).unwrap_or(0.0);
+            // The power budget's scale (`0x4dc3f0`) is the global factor `g`.
+            let power = self.motor_factor(motor) * elec_scale;
+            // `motor + 0x29c = ftol(f(percent))`, the torque `f(torque)`.
+            let percent = (command * power).trunc() as i32;
+            let torque = info.max_torque / TORQUE_UNIT * power;
+            w.thrust = MagicAction::thrust(torque, percent);
+            if let Some(joint) = self.parts[w.part].joint {
+                if w.touching || percent == 0 {
+                    // `SetPercent` (`0x4f5800`): the hinge motor is off while the
+                    // wheel is down.
+                    physics.drive_hinge(joint, 0.0);
+                } else {
+                    // In the air the hinge servo spins it: `ftol(-pct · 0.01 ·
+                    // speed)` rad/s (`0x481450`), the speed also `f`-scaled.
+                    let target = (percent as f32 * 0.01 * info.rate * power).trunc();
+                    if (power - self.motor_power[w.part]).abs() > 1e-4 {
+                        self.motor_power[w.part] = power;
+                        physics.set_joint_strength(joint, info.max_torque * power, 0.0);
+                    }
+                    physics.drive_hinge(joint, target * CLOCKWISE);
+                }
+            }
+        }
+        if self.parts[0].alive {
+            magic.apply(physics, self.parts[0].body);
+        }
+        self.magic = Some(magic);
     }
 
     /// The compound shape of a body made of `members`.
@@ -572,6 +914,7 @@ impl Robot {
         parent: usize,
         p: usize,
         info: JointInfo,
+        child_pivot: Vec3,
     ) -> Result<JointHandle, BackendError> {
         // The joint's pivot and axis are the parent's mount point, in bot space;
         // both bodies express them in their own space (they coincide in the rest
@@ -589,7 +932,7 @@ impl Robot {
             body_a: parts[parent].body,
             body_b: parts[p].body,
             anchor_a: frame_a.inverse().transform_point3(pivot_bot),
-            anchor_b: frame_b.inverse().transform_point3(pivot_bot),
+            anchor_b: frame_b.inverse().transform_point3(child_pivot),
             axis_a: frame_a.inverse().transform_vector3(axis_bot),
             axis_b: frame_b.inverse().transform_vector3(axis_bot),
             limits: info.limits,
@@ -609,6 +952,7 @@ impl Robot {
         parent: usize,
         p: usize,
         info: JointInfo,
+        child_pivot: Vec3,
     ) -> Result<JointHandle, BackendError> {
         let (pivot_bot, axis_bot) = (info.pivot, info.axis);
         let frame_a = rig.components[rig.parts[parent].root].local;
@@ -622,7 +966,7 @@ impl Robot {
             body_a: parts[parent].body,
             body_b: parts[p].body,
             anchor_a: frame_a.inverse().transform_point3(pivot_bot),
-            anchor_b: frame_b.inverse().transform_point3(pivot_bot),
+            anchor_b: frame_b.inverse().transform_point3(child_pivot),
             axis_a: frame_a.inverse().transform_vector3(axis_bot),
             axis_b: frame_b.inverse().transform_vector3(axis_bot),
             limits: info.limits,
@@ -721,6 +1065,11 @@ impl Robot {
     ) {
         self.read_input(input);
         let mut samples: Vec<WheelSample> = Vec::new();
+        let magic_wheels: Vec<usize> = self
+            .magic
+            .as_ref()
+            .map(|m| m.wheels.iter().map(|w| w.part).collect())
+            .unwrap_or_default();
 
         // The power step (`0x4dc3f0`): what the motors may use this step. A robot
         // with no source on a channel (a hand-built test rig) is not throttled.
@@ -750,6 +1099,9 @@ impl Robot {
             let (Some(info), Some(joint)) = (self.rig.parts[p].joint, self.parts[p].joint) else {
                 continue;
             };
+            if magic_wheels.contains(&p) {
+                continue;
+            }
             match info.use_kind {
                 JointUse::Passive => {}
                 JointUse::Burst => {
@@ -806,6 +1158,7 @@ impl Robot {
             }
         }
         self.push_wheels(physics, &samples);
+        self.drive_magic(physics, elec_scale);
         self.control.end_step();
     }
 
@@ -816,8 +1169,8 @@ impl Robot {
     /// The original feeds `f` both the speed and the torque of
     /// `SetPowerSettings` (the `SpinMotor` apply at `0x4468bc`), after a global
     /// factor `g` from the robot's power budget (`0x45f130`, set at `0x4dc76c`
-    /// from `min(1, robot+0x9c / robot+0xa0)`). Those two robot fields are not
-    /// identified, so `g` is taken as 1.
+    /// from `min(1, robot+0x9c / robot+0xa0)`): that is the power budget's
+    /// scale ([`crate::energy`]), which the callers multiply in.
     pub fn motor_factor(&self, motor: usize) -> f32 {
         let hp = self.health.get(motor).copied().unwrap_or(0.0);
         let max = self.rig.components[motor].hitpoints.max(1.0);

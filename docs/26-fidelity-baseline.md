@@ -274,3 +274,29 @@ What is recovered and what is fitted:
 * Not done: the original's `g` power factor (robot +0x9c/+0xa0, taken as 1); the
   hinge-servo `k` (refuted live, k = 1.02); gravity -12 and the 1/30 s step with
   two substeps (recovered statically, not applied here).
+
+## After havok17 (fx/havok17)
+
+`RA2_PHYSICS=havok17` (opt-in; see `docs/29-havok17-backend.md`): Havok 1.7
+dynamics written from the recovered specification, with the game's own drive
+model (`MagicAction`, `0x4856f0`) instead of the fitted wheel thrust. Drive tests
+run from the original's own start poses (`fidtrace drive-at`).
+
+| metric | original | Jolt + interim | havok17 |
+|---|---:|---:|---:|
+| Scout turn_rate_rad_s (in place) | 10.66 | 8.68 | 10.64 |
+| Scout top_speed (m/s) | 11.12 | 12.4 | 11.04 |
+| Scout t_to_90pct_s | 1.58 | 1.6 | 1.6 |
+| Scout straight_distance_m | 15.42 | 17.44 | 15.71 |
+| Scout coast_distance_m | 8.05 | 7.36 | 5.34 |
+| Scout rest height | -1.884 | -1.896 | -1.932 |
+| ALARM top speed (1.65 s, m/s) | 13.38 | 7.66 | 5.61 |
+| ALARM turn in place (rad/s) | 12.1 | 3.98 | 8.94 |
+| ALARM rest height | -1.811 | -1.807 | -1.832 |
+| traction survey (45 bots) | - | 44/45 | 36/45 |
+
+Nothing in havok17's drive is fitted. Both backends now spawn a burst piston
+cocked (ALARM rested on its hammer: -1.63, now -1.807). Jolt stays the default:
+havok17 loses the multi-robot comparison because our robot assembly puts some
+wheels (ALARM's rear axles, 0.19 m) and parts (ALARM's tanks) where the
+original does not — the live wheel records in docs/29 §6 are the reference.

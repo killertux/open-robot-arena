@@ -6,7 +6,6 @@ use ra2_render::{DrawItem, RenderGroup, Renderer};
 use crate::backend::{BodyDesc, BodyHandle, HingeDesc, MotionType, PhysicsBackend, ShapeDesc};
 use crate::combat::{self, CombatConfig};
 use crate::hazards::{self, LiveJoint, Zone};
-use crate::jolt::JoltBackend;
 use crate::rig;
 use crate::robot::Robot;
 use crate::scene::{self, ArenaScene, USER_ARENA, USER_PROP};
@@ -253,7 +252,7 @@ impl Duel {
         let mut prop_defs = scene::load_props(arena_path, &obstacle)?;
         prop_defs.extend(scene::load_havok_props(arena_path)?);
 
-        let mut physics: Box<dyn PhysicsBackend> = Box::new(JoltBackend::new(arena.gravity)?);
+        let mut physics: Box<dyn PhysicsBackend> = crate::backend::create_backend(arena.gravity)?;
         let (verts, indices) = arena.triangle_soup();
         let _arena_body = physics.create_body(
             &BodyDesc::new(

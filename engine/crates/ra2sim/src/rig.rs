@@ -222,6 +222,107 @@ pub struct Component {
     pub rest_items: Vec<Vec<Vec3>>,
     /// Children component indices (motor-driven subtree).
     pub children: Vec<usize>,
+    /// The component's Havok rigid bodies, as the original builds them.
+    pub havok: HavokParts,
+}
+
+/// What the original's Havok simulation makes of one component, read from the
+/// `.gmf`'s rigid bodies (the `havok17` backend builds its bodies from this;
+/// the Jolt backend keeps the whole-scene hull).
+///
+/// * Only bodies without `DISABLE_COLLISIONS` collide, each with its own
+///   collision object (`GEOMETRY_PROXY_NAME` when set). A wheel's
+///   `wheel_traction` is a *phantom*: the game counts what it touches to know
+///   the wheel is on the ground (`Wheel` factory `0x507c00`), it holds nothing
+///   up. The mini wheel's hub that does is 0.2 m across the flats' corners,
+///   the traction ring 0.33 m.
+/// * Every rigid body has mass, phantoms included: live, the Scout's wheel
+///   bodies weigh 27 kg = mini wheel 9 + its traction phantom 8 + the motor's
+///   `axle` 10 (`havok-step`, body `+0x190`).
+/// * A motor's `.gmf` has two bodies: the housing stays on the body the motor
+///   is bolted to and the rotor (`axle`, `bmotor_axle`) goes with what it
+///   drives. Live, the Scout's chassis body weighs 163.49 kg (its chassis plus
+///   the motor housings, battery and board) and its fork arm 26 kg (extender 2
+///   + fork 12 + `bmotor_axle` 12).
+#[derive(Clone, Debug, Default)]
+pub struct HavokParts {
+    /// One convex piece per colliding rigid body, component-local.
+    pub collision: Vec<Vec<Vec3>>,
+    /// The phantom geometry (all of it, component-local).
+    pub phantom: Vec<Vec3>,
+    /// All the rigid bodies' mass, phantoms included, and the phantoms' share.
+    pub mass: f32,
+    pub phantom_mass: f32,
+    /// A motor's rotor: its mass and collision pieces, which belong to the
+    /// driven body.
+    pub rotor_mass: f32,
+    pub rotor_collision: Vec<Vec<Vec3>>,
+    /// The top rigid body's material.
+    pub friction: Option<f32>,
+    pub restitution: Option<f32>,
+}
+
+impl HavokParts {
+    /// Read a component's `.gmf` scene.
+    pub fn from_scene(scene: &ra2fmt::gmi::GmiScene) -> HavokParts {
+        let objects: BTreeMap<String, Vec<Vec3>> = scene
+            .objects
+            .iter()
+            .filter_map(|o| {
+                let mesh = o.mesh.as_ref()?;
+                if mesh.points.is_empty() {
+                    return None;
+                }
+                let m = ra2_render::object_transform(o);
+                Some((
+                    o.name.to_ascii_lowercase(),
+                    mesh.points
+                        .iter()
+                        .map(|p| m.transform_point3(Vec3::from(*p)))
+                        .collect(),
+                ))
+            })
+            .collect();
+        let points_of = |rb: &ra2fmt::gmi::RigidBody| -> Vec<Vec3> {
+            objects
+                .get(&rb.collision_object().to_ascii_lowercase())
+                .cloned()
+                .unwrap_or_default()
+        };
+        // A motor's rotor (or a piston's rod): `axle`, `bmotor_axle`, `shaft`,
+        // `slider` in every stock motor and piston `.gmf`.
+        let bodies = scene.rigid_bodies();
+        let is_rotor = |rb: &ra2fmt::gmi::RigidBody| {
+            let n = rb.name.to_ascii_lowercase();
+            (n.ends_with("axle") || n == "shaft" || n == "slider") && !n.contains("collision")
+        };
+        let has_rotor = bodies.len() > 1 && bodies.iter().any(|rb| is_rotor(rb));
+        let mut out = HavokParts::default();
+        for rb in &bodies {
+            out.mass += rb.mass.max(0.0);
+            if out.friction.is_none() {
+                out.friction = Some(rb.friction);
+                out.restitution = Some(rb.elasticity);
+            }
+            let pts = points_of(rb);
+            if rb.disable_collisions {
+                out.phantom.extend(pts);
+                out.phantom_mass += rb.mass.max(0.0);
+                continue;
+            }
+            if has_rotor && is_rotor(rb) {
+                out.rotor_mass += rb.mass.max(0.0);
+                if pts.len() >= 4 {
+                    out.rotor_collision.push(pts);
+                }
+                continue;
+            }
+            if pts.len() >= 4 {
+                out.collision.push(pts);
+            }
+        }
+        out
+    }
 }
 
 /// The sound keys of a component definition (`Components.cfz`).
@@ -857,6 +958,18 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             None
         };
 
+        // The Havok bodies the original makes of it (the chassis' is built by
+        // the game itself from its own mesh).
+        let havok = if i == 0 {
+            HavokParts::default()
+        } else {
+            loaded
+                .get(i)
+                .and_then(|l| l.as_ref())
+                .map(|lc| HavokParts::from_scene(&lc.scene))
+                .unwrap_or_default()
+        };
+
         // Chassis geometry is embedded in the `.bot`; everything else comes from
         // a `.gmf`.
         let (items, hull_points, rotor_items, def, base, name, mass, attachments) = if i == 0 {
@@ -1096,6 +1209,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             rest_hull,
             rest_items,
             children: Vec::new(),
+            havok,
         });
     }
 
@@ -1329,6 +1443,7 @@ mod tests {
             items: Vec::new(),
             rotor_items: Vec::new(),
             hull_points: Vec::new(),
+            havok: HavokParts::default(),
             min: Vec3::ZERO,
             max: Vec3::ZERO,
             mass: 1.0,
