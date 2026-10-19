@@ -101,10 +101,15 @@ mod tests {
         assert_eq!(grid.children.len(), bars + events.len());
         for (i, cell) in grid.children.iter().skip(bars).enumerate() {
             let (row, column) = ((i / 3) as f32, (i % 3) as f32);
-            assert_eq!(cell.frame.x, grid.frame.x + 114.0 * column, "cell {i}");
-            assert_eq!(cell.frame.y, grid.frame.y + 64.0 * row, "cell {i}");
-            assert_eq!(cell.frame.w, 114.0, "cell {i}");
-            assert_eq!(cell.frame.h, 64.0, "cell {i}");
+            // `BufferWidth 2` insets each cell inside its 114 x 64 slot.
+            assert_eq!(
+                cell.frame.x,
+                grid.frame.x + 114.0 * column + 2.0,
+                "cell {i}"
+            );
+            assert_eq!(cell.frame.y, grid.frame.y + 64.0 * row + 2.0, "cell {i}");
+            assert_eq!(cell.frame.w, 110.0, "cell {i}");
+            assert_eq!(cell.frame.h, 60.0, "cell {i}");
             // And the art is the event's own.
             let art = cell
                 .walk()

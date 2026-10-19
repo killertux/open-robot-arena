@@ -210,9 +210,10 @@ fn a_game_type_that_the_selected_arena_does_not_support_is_replaced_and_named() 
     assert!(note.contains("does not support KING OF THE HILL"), "{note}");
 }
 
-/// The list's own `+Scroller` and the wheel are both real: the bar is shown
-/// when the twelve rows do not fit, its `More` arrow moves a row, and the wheel
-/// over the list does the same.
+/// The list's own `+Scroller` and the wheel are both real, but the list is 15 rows
+/// tall (282 px / 18, the capture), so the eight DEATHMATCH arenas fit: the bar
+/// is hidden and neither its arrow nor the wheel moves the viewport. (Scrolling a
+/// list that overflows is `ra2ui::input`'s own test, with the file's `Rows 6`.)
 #[test]
 fn the_arena_lists_scroller_and_wheel_move_the_viewport() {
     let Some(game) = game_dir() else { return };
@@ -238,22 +239,22 @@ fn the_arena_lists_scroller_and_wheel_move_the_viewport() {
                     .find(|p| p.widget.kind == ra2fmt::gib::WidgetKind::ScrollBar)
             })
             .expect("the list's scroll bar");
-        assert!(bar.widget.visible(), "shown because 12 rows > 6");
+        assert!(
+            !bar.widget.visible(),
+            "hidden: eight rows fit the 15-row list"
+        );
         (bar.frame, list.frame)
     };
-    // The `More` arrow is the bar's bottom 16 pixels.
     let more = [bar.x + bar.w / 2.0, bar.bottom() - 4.0];
     shell.click(more[0], more[1]).unwrap();
-    assert_eq!(shell.arena_scroll(), Some(1));
-    // The wheel over the list body.
+    assert_eq!(shell.arena_scroll(), Some(0));
     let wheel = [list.x + list.w / 2.0, list.y + 20.0];
-    assert!(shell.scroll_at(wheel[0], wheel[1], 2));
-    // Eight DEATHMATCH arenas, six visible: the offset stops at two.
-    assert_eq!(shell.arena_scroll(), Some(2));
+    shell.scroll_at(wheel[0], wheel[1], 2);
+    assert_eq!(shell.arena_scroll(), Some(0), "nothing to scroll");
 }
 
-/// Row 10 is past the six rows the picker shows; the list scrolls and the click
-/// lands on `Parking Lot`.
+/// Row 6 is inside the 15 rows the picker shows, so the list does not scroll and
+/// the click lands on `Parking Lot`.
 #[test]
 fn arena_index_six_scrolls_the_picker_and_selects_parking_lot() {
     let Some(game) = game_dir() else { return };
@@ -268,8 +269,8 @@ fn arena_index_six_scrolls_the_picker_and_selects_parking_lot() {
     );
     assert_eq!(
         shell.arena_scroll(),
-        Some(1),
-        "six visible rows means row 6 needs a one-row offset"
+        Some(0),
+        "row 6 is in view: the list shows 15 rows"
     );
     let choice = play_mode::choice_from_shell(&game, &shell).expect("the choice");
     assert_eq!(choice.arena_name, "Parking Lot");

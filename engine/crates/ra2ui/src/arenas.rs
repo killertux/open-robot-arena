@@ -239,8 +239,17 @@ mod tests {
             .unwrap();
         assert_eq!(list.children.len(), bars + arenas.len());
         for (i, row) in list.children.iter().skip(bars).enumerate() {
-            assert_eq!(row.frame.y, list.frame.y + 18.0 * i as f32, "row {i}");
-            assert_eq!(row.frame.x, list.frame.x, "row {i}");
+            // Rows sit 18 px apart, text inset by the measured row-text offset.
+            assert_eq!(
+                row.frame.y,
+                list.frame.y + 18.0 * i as f32 + crate::input::ROW_TEXT_Y,
+                "row {i}"
+            );
+            assert_eq!(
+                row.frame.x,
+                list.frame.x + crate::input::ROW_TEXT_X,
+                "row {i}"
+            );
             assert_eq!(row.frame.h, 18.0, "row {i}");
             assert_eq!(row.widget.text(), Some(arenas[i].name.as_str()), "row {i}");
         }

@@ -398,6 +398,7 @@ impl Shell {
     /// layout, not a scale.
     pub fn set_size(&mut self, size: [f32; 2]) {
         self.size = size;
+        self.sync_list_viewports();
     }
 
     /// The screen on display, relative to `UI`.
@@ -1148,7 +1149,52 @@ impl Shell {
 
     /// Stamp the screen/content on a step, remember the choices and append it
     /// to the trace.
+    /// The arena list shows as many rows as its scroller's rectangle holds (the
+    /// capture: 15 rows in a 282 px box, the scroll bar hidden because the eight
+    /// arenas fit), not the file's design-time `Rows 6`. The viewport is only
+    /// known once the page is laid out, so it is measured here and written to the
+    /// list as `_ViewRows`; the selection and highlight bars span the list.
+    fn sync_list_viewports(&mut self) {
+        let rows = {
+            let placed = self.placements();
+            placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == ra2ui::arenas::LIST)
+                .and_then(|list| {
+                    let grid = ra2ui::Grid::from_widget(list.widget)?;
+                    (grid.row_height > 0.0)
+                        .then(|| ((list.frame.h / grid.row_height).floor() as usize).max(1))
+                })
+        };
+        let Some(rows) = rows else { return };
+        let Screen::Page(page) = &mut self.screen else {
+            return;
+        };
+        let mut rescroll = None;
+        for block in page.gib.blocks.iter_mut() {
+            let Block::Widget(root) = block else { continue };
+            let Some(list) = workshop::find_mut(root, ra2ui::arenas::LIST) else {
+                continue;
+            };
+            if ra2ui::input::field_of(list, "_ViewRows") != Some(&rows.to_string()) {
+                ra2ui::input::set_field(list, "_ViewRows", &rows.to_string());
+                for bar in list.children.iter_mut() {
+                    if bar.name() == "Sel Bar" || bar.name() == "High Bar" {
+                        ra2ui::input::set_field(bar, "Size", "1 1 18 0");
+                    }
+                }
+                rescroll = Some(page.scroll.get(ra2ui::arenas::LIST).copied().unwrap_or(0));
+            }
+            break;
+        }
+        if let Some(offset) = rescroll {
+            let _ = self.set_list_scroll(ra2ui::arenas::LIST, offset);
+        }
+    }
+
     fn finish(&mut self, mut step: Step) -> Step {
+        self.sync_list_viewports();
         step.screen = self.screen_id();
         step.content = self.content_id();
         step.tab = self.tab().map(str::to_string);
@@ -1263,6 +1309,9 @@ impl Shell {
         // closed.
         if let Some(root) = root_widget_mut(&mut gib) {
             set_team_list_open(root, false);
+            // The picker is modal: it draws in front of the page whatever the
+            // file's own `ChildOrder` (3) says against the page's root.
+            ra2ui::input::set_field(root, "ChildOrder", "1000");
         }
         let mut popup = Popup {
             side,
@@ -1581,8 +1630,21 @@ impl Shell {
             if let Some(key) = &key {
                 ra2ui::cells::bind_art(root, "arena preview img", key);
             }
-            if let Some(description) = workshop::find_mut(root, "description") {
-                ra2ui::cells::bind_prose(description, &arena.description);
+            // The text is the `DisplayBox` attachment of `description grp` (its
+            // body is the `description` Glyph), not a child of the group.
+            if let Some(group) = workshop::find_mut(root, "description grp") {
+                for attachment in group
+                    .attachments
+                    .iter_mut()
+                    .filter(|a| a.kind == ra2fmt::gib::AttachmentKind::DisplayBox)
+                {
+                    if let Some(field) = attachment.field_mut("Display") {
+                        field.raw = ra2ui::cells::markup_with_text(&field.raw, &arena.description);
+                    }
+                    if let Some(body) = attachment.body.as_deref_mut() {
+                        ra2ui::cells::bind_prose(body, &arena.description);
+                    }
+                }
             }
         }
         if let (Some(key), Some(picture)) = (key, picture) {

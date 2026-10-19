@@ -404,6 +404,16 @@ impl RoundRng {
     }
 }
 
+/// The engine-LCG state (`0x726d58`) whose nine draws give the season-1 schedule the
+/// original showed for "The Rookies" in the oracle capture (`teamhq-events`: Blade
+/// Tournament, Strategic Engineering, Sawblade Elite, Destructavision, Blackvolt,
+/// Robotic Terror Zone, Metal Warriors, Toledo, BBA Midwest = events 2 6 12 9 13 15
+/// 5 22 20). Found by exhaustive search over the 2^32 states for consecutive draws
+/// that yield exactly that list (one 31-bit solution: 1487546588, plus its top-bit
+/// twin). The game's state at that moment is not recoverable, so this is the
+/// observed sample, not a rule.
+pub const ORACLE_SCHEDULE_STATE: u32 = 1_487_546_588;
+
 /// The season's shape: a new career starts on the schedule, enters one event,
 /// and is complete after nine finished events.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -824,25 +834,23 @@ impl Career {
         self.player_mut().set_history(&values);
     }
 
-    /// Fill an empty schedule from the event list with a small deterministic
-    /// PRNG. Nine distinct events, as `FUN_00500120` draws; the original's RNG
-    /// and seed are not recovered.
+    /// Fill an empty schedule as `FUN_00500120` does: nine draws of
+    /// `floor(r * N)` (`FUN_00419190`, `N` = the event count, `r` = the engine LCG
+    /// `s = s * 0x41c64e6d + 0x3039`, `(s & 0x7fffffff) / 2^31`, global state at
+    /// `0x726d58`), each redrawn while the event is already in the list
+    /// (`FUN_005014d0`). The game's LCG state at that moment depends on how many
+    /// numbers the engine drew since start (particles etc.), so it is not
+    /// recoverable; `seed` is that state. The captured season-1 schedule is
+    /// [`ORACLE_SCHEDULE_STATE`].
     pub fn ensure_schedule(&mut self, seed: u64) {
         if !self.schedule.is_empty() || self.events.is_empty() {
             return;
         }
-        let want = self.policy.events_per_season.min(self.events.len());
-        let mut x = seed | 1;
-        let mut ids = Vec::with_capacity(want);
-        while ids.len() < want {
-            x = x
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            let id = (x >> 33) as usize % self.events.len();
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
+        let ids = draw_schedule(
+            self.events.len(),
+            self.policy.events_per_season,
+            seed as u32,
+        );
         self.player_mut()
             .set_schedule(&ids.iter().map(|id| *id as i32).collect::<Vec<_>>());
         self.schedule = ids;
@@ -2915,5 +2923,34 @@ mod tests {
             career.history.clone(),
             career.money,
         )
+    }
+}
+
+/// `FUN_00500120`'s draw: `want` distinct events out of `n`, from LCG state `state`.
+pub fn draw_schedule(n: usize, want: usize, mut state: u32) -> Vec<usize> {
+    let want = want.min(n);
+    let mut ids = Vec::with_capacity(want);
+    while ids.len() < want {
+        state = state.wrapping_mul(0x41c6_4e6d).wrapping_add(0x3039);
+        let r = f64::from(state & 0x7fff_ffff) / 2_147_483_648.0;
+        let id = ((r * n as f64) as usize).min(n - 1);
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    /// The recovered draw reproduces the original's captured season-1 schedule.
+    #[test]
+    fn the_oracle_state_draws_the_captured_schedule() {
+        assert_eq!(
+            draw_schedule(25, 9, ORACLE_SCHEDULE_STATE),
+            vec![2, 6, 12, 9, 13, 15, 5, 22, 20]
+        );
     }
 }
