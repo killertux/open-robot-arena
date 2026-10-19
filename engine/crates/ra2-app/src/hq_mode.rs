@@ -2111,6 +2111,17 @@ fn damage_report_components(robot: &mut ra2sim::r#match::RobotReport, damage: f3
 
 #[cfg(test)]
 mod tests {
+    /// The shell's first season is the schedule the original showed in the oracle
+    /// capture (`FUN_00500120`'s draw from the recovered LCG state).
+    #[test]
+    fn the_shell_schedule_is_the_captured_season_one() {
+        let Some(game) = game_dir() else { return };
+        let view = shell_view(&game).expect("the career view");
+        let ids: Vec<usize> = view.events.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![2, 6, 12, 9, 13, 15, 5, 22, 20]);
+        assert_eq!(view.events[0].event.name, "Blade Tournament");
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

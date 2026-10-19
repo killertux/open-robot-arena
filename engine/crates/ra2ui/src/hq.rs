@@ -617,7 +617,11 @@ impl Hq {
             crate::input::set_field(
                 &mut cell,
                 "Position",
-                &format!("{} 1 {} 1", c as f32 * cw + 0.011 * cw, r as f32 * ch + 0.018 * ch),
+                &format!(
+                    "{} 1 {} 1",
+                    c as f32 * cw + 0.011 * cw,
+                    r as f32 * ch + 0.018 * ch
+                ),
             );
             crate::input::set_field(
                 &mut cell,

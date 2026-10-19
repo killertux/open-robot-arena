@@ -846,7 +846,11 @@ impl Career {
         if !self.schedule.is_empty() || self.events.is_empty() {
             return;
         }
-        let ids = draw_schedule(self.events.len(), self.policy.events_per_season, seed as u32);
+        let ids = draw_schedule(
+            self.events.len(),
+            self.policy.events_per_season,
+            seed as u32,
+        );
         self.player_mut()
             .set_schedule(&ids.iter().map(|id| *id as i32).collect::<Vec<_>>());
         self.schedule = ids;

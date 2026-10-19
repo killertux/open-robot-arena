@@ -425,7 +425,10 @@ pub fn scroll_rows(list: &mut Widget, offset: usize) -> usize {
         set_field(
             child,
             "Position",
-            &format!("{dx} 0 {} 0", (ordinal as f32 - offset as f32) * height + dy),
+            &format!(
+                "{dx} 0 {} 0",
+                (ordinal as f32 - offset as f32) * height + dy
+            ),
         );
         set_field(child, "Visible", if shown { "true" } else { "false" });
         ordinal += 1;
@@ -541,6 +544,11 @@ fn scrollbar_in_mut(widget: &mut Widget) -> Option<&mut Widget> {
 }
 
 /// Show or hide the list's scrollbar, and place its thumb at `offset / max`.
+/// Show or hide a list's `Scroller` bar (the original hides it while every row fits).
+pub fn show_scroller(list: &mut Widget, visible: bool) {
+    set_scroller_visible(list, visible, 0, 0);
+}
+
 fn set_scroller_visible(list: &mut Widget, visible: bool, offset: usize, max: usize) {
     let track = list.size().map(|s| s.second.amount).unwrap_or(0.0);
     let Some(body) = list
@@ -592,8 +600,8 @@ fn thumb(slider: &mut Widget, offset: usize, max: usize, track: f32) {
 
 /// Where a row's text sits inside its row box, measured against the original's
 /// arena list (best shift of our render onto the capture: 2 px right, 5 px up).
-const ROW_TEXT_X: f32 = 2.0;
-const ROW_TEXT_Y: f32 = -5.0;
+pub(crate) const ROW_TEXT_X: f32 = 2.0;
+pub(crate) const ROW_TEXT_Y: f32 = -5.0;
 
 /// Fill a single-column list with text rows, in the face the arena picker uses.
 ///

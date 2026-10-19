@@ -68,11 +68,8 @@ pub fn fill(list: &mut Widget, template: &Gib, cells: usize) -> usize {
             // around the inset frame.
             let b = grid.buffer_width;
             crate::input::set_field(&mut cell, "Position", &format!("{} 0 {} 0", x + b, y + b));
-            crate::input::set_field(
-                &mut cell,
-                "Size",
-                &format!("{} 0 {} 0", width - 2.0 * b, grid.row_height - 2.0 * b),
-            );
+            let size = format!("{} 0 {} 0", width - 2.0 * b, grid.row_height - 2.0 * b);
+            crate::input::set_field(&mut cell, "Size", &size);
             add_border(list, &mut cell, grid.border_width);
             list.children.push(cell);
         }

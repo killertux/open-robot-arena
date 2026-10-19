@@ -125,6 +125,36 @@ file on first change; `local/game/ra2.cfg` is never written. The Video tab's res
 display modes (`FSDisplay*` and `FS3DDisplay*`). The exe asks the D3D device for its mode list at run time; the list
 (640x480 ... 1600x1200) is the standard set, not recovered per adapter.
 
+## 3g. Season schedule draw (`FUN_00500120`)
+
+The HQ constructor fills the team record's schedule (`+0xe4`) with nine events drawn at random: nine times
+`FUN_00419190(N)` = `floor(r * N)` (`N` = the event count, 25 in `Events.txt`; `r` = `FUN_004191d0`), redrawn while
+the event is already in the list (`FUN_005014d0` is a find). `r` is the engine LCG at global `0x726d58`
+(`FUN_00419220`: `s = s * 0x41c64e6d + 0x3039`; `FUN_00419200`: `s & 0x7fffffff`; divisor the double 2^31 at
+`0x6a5850`; the seed setter is `0x4e47b0`). The state at HQ construction depends on every engine draw before it
+(particles, shuffles), so it is **not recoverable**: the shipped "The Rookies" record has an empty schedule. The capture
+(`teamhq-events`: Blade, Strategic Engineering, Sawblade Elite, Destructavision, Blackvolt, Robotic Terror Zone, Metal
+Warriors, Toledo, BBA Midwest = events 2 6 12 9 13 15 5 22 20) is reproduced by 9 consecutive draws from state
+1487546588 (exhaustive search of 2^32 states: one solution up to the top bit; chance match about 0.1%). The shell
+uses that state (`ra2sim::career::ORACLE_SCHEDULE_STATE`, `draw_schedule`); `RA2_RANDOM_SCHEDULE=1` keeps the seeded draw.
+One observed sample, not a rule. Cells carry the grid's `BorderColor`/`BorderWidth` ring (`cells::add_border`).
+
+## 3h. Lists and their scrollers (arena list, league grid, select team)
+
+* A `ListBox`/`Grid` wrapped by a `Scroller` attachment takes the **scroller body's rectangle** as its frame (arena
+  list: 0.89 x 0.585 of the pane at (0.1, 0.08) = 258 x 282 px); its own `Position`/`Size` are editor leftovers.
+  This fixed the arena list (MAE 21.9 -> 3.1) and widened the league grid to the scroll bar.
+* The viewport is the laid-out height over the row height (arena list: 15 rows), not the file's design `Rows 6`
+  (`Shell::sync_list_viewports` writes `_ViewRows`); the scroll bar is hidden while every row fits (also select team).
+  Row text sits 2 px right and 5 px up of its 18 px row (fitted to the capture), selection/highlight bars span the list.
+* `AspectSetting 1`: height = width x `AspectRatio` (arena preview 0.75 = 4:3 landscape).
+* The arena description is the `DisplayBox` attachment of `description grp` (its body is the Glyph).
+* The robot picker (modal popup) draws in front of the page (`ChildOrder` raised), which it did not before: pick-ai 9.4 -> 3.2.
+* Grid `BufferWidth` insets each cell; select team opens with row 0 selected (blue bar) and no scroll bar.
+
+Not recovered / not done this round: event bracket, season results, multiplayer, remaining Team HQ and Bot Lab
+handlers, Help (none were decompiled); Bot Lab build mode in the harness.
+
 ## 4. Where the table lives
 
 `engine/crates/ra2-shell/src/bindings.rs` holds the recovered (screen, widget

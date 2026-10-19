@@ -166,8 +166,17 @@ pub fn fill_select_grid(
         }
         crate::input::clear_selection(grid);
         if !named.is_empty() {
-            crate::input::select_row(grid, 0);
+            crate::input::select_cell(grid, 0, 0);
         }
+        // The bars span the grid (the file's 444 px is the editor's canvas).
+        for bar in grid.children.iter_mut() {
+            if bar.name() == "Sel Bar" || bar.name() == "High Bar" {
+                crate::input::set_field(bar, "Size", "1 1 80 0");
+            }
+        }
+        // The scroll bar only shows when there are more teams than rows.
+        let rows = crate::Grid::from_widget(grid).map_or(0, |g| g.rows.max(0) as usize);
+        crate::input::show_scroller(grid, named.len() > rows);
         return Ok(made);
     }
     Ok(0)

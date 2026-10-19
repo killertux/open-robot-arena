@@ -1309,6 +1309,9 @@ impl Shell {
         // closed.
         if let Some(root) = root_widget_mut(&mut gib) {
             set_team_list_open(root, false);
+            // The picker is modal: it draws in front of the page whatever the
+            // file's own `ChildOrder` (3) says against the page's root.
+            ra2ui::input::set_field(root, "ChildOrder", "1000");
         }
         let mut popup = Popup {
             side,

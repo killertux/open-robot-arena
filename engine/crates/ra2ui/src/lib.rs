@@ -1025,7 +1025,7 @@ fn place_core<'a>(
     // `Position`/`Size` are the editor's leftovers (`arena.gib`'s listbox says
     // 159 x 175 px at (1, 1); the scroller body says 0.89 x 0.585 at (0.1, 0.08)
     // and the capture's black list is 258 x 282 there).
-    if matches!(widget.kind, WidgetKind::ListBox) {
+    if matches!(widget.kind, WidgetKind::ListBox | WidgetKind::Grid) {
         if let Some(body) = widget
             .attachments
             .iter()
@@ -2193,14 +2193,14 @@ mod tests {
         }
         assert_eq!(
             pairs.len(),
-            14,
-            "equal-ChildOrder overlapping sibling pairs (Backgrounds now fill their owner)"
+            3,
+            "equal-ChildOrder overlapping sibling pairs (a Scroller's list and grid now take the scroller's rectangle: 11 pairs were the old 159 x 175 px leftovers)"
         );
         // The 328 older pairs were mostly a control followed by the caption
         // holder that draws its text. That holder is the `Caption` attachment's
         // *body*, not a sibling, so it is no longer part of this count: the
         // caption is drawn in front because of what the attachment is, not
-        // because of a `ChildOrder` tie. What is left is 12 true sibling
+        // because of a `ChildOrder` tie. What is left is 3 true sibling
         // overlaps; the largest is `multiplayer.gib`'s list against its heading
         // grid, and the file order still says the earlier one is in front.
         for button in ["Options button", "MainMenu button", "Help button"] {
@@ -2211,7 +2211,9 @@ mod tests {
             let body = caption.body.as_deref().expect("the caption's body");
             assert_eq!(body.children[0].kind, WidgetKind::Text, "{button}");
         }
-        assert!(pairs.iter().any(|p| p.0 == "multiplayer/multiplayer.gib"
+        // `multiplayer.gib`'s server list used to overlap its heading grid (the
+        // editor's leftover 159 px size); it takes its `Scroller`'s rectangle now.
+        assert!(!pairs.iter().any(|p| p.0 == "multiplayer/multiplayer.gib"
             && p.1.starts_with("server listbox")
             && p.3 == "list grp"));
     }
@@ -2633,7 +2635,7 @@ mod tests {
             }
         }
         assert_eq!(negatives, 613, "children with a negative ChildOrder");
-        assert_eq!(overlapping, 72, "those overlapping a non-negative sibling");
+        assert_eq!(overlapping, 62, "those overlapping a non-negative sibling");
         assert_eq!(controls, 256, "negative orders on pressed controls");
 
         let text = std::fs::read_to_string(game.join("UI/mainmenu/mainmenu.gib")).unwrap();
