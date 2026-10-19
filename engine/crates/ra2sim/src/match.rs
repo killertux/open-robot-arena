@@ -324,18 +324,19 @@ pub struct RobotReport {
     pub points: i32,
     pub damage_dealt: f32,
     pub damage_taken: f32,
-    /// The HUD's three meters, as fractions 0..1 of each part's starting
-    /// hitpoints. The widget mapping and fill geometry are the binary's
-    /// (`0x476b60` → `0x4b3540`/`0x4b3570`/`0x4b35a0`; left-anchored,
-    /// `trunc(fraction * 52)`, armour `trunc(fraction * 26)`), but the status
-    /// object's `+0xa8`/`+0xa4` sources are not decoded, so the fractions here
-    /// are still our component-hitpoint mapping: `battery` is the remaining
-    /// hitpoints of the robot's `Battery` components, `air` of its `AirTank`
-    /// components, and `armor` of its chassis. A robot without a battery/air
-    /// tank reports 0 for that bar.
+    /// The HUD's three meters, as fractions 0..1. The widget mapping and fill
+    /// geometry are the binary's (`0x476b60` → `0x4b3540`/`0x4b3570`/`0x4b35a0`;
+    /// left-anchored, `trunc(fraction * 52)`, armour `trunc(fraction * 26)`).
+    /// `battery` and `air` are `Robot+0xa8` / `+0xa4`: the charge left in the
+    /// batteries and tanks over their totals ([`crate::energy`], docs/30); a
+    /// robot without a battery or tank reports 0 for that bar. `armor` is the
+    /// chassis' hitpoints over its maximum.
     pub battery: f32,
     pub air: f32,
     pub armor: f32,
+    /// `Robot+0xbc` clamped to 2 (`FUN_00416940`, `FUN_0043e570`): the chassis'
+    /// critical hits, which pick the green (0), yellow (1) or red (2+) dot.
+    pub dot: u8,
     /// `plus.isDefeated` — state != 0, which includes eliminated.
     pub defeated: bool,
     /// `plus.isEliminated` — state 3 only.
@@ -686,10 +687,13 @@ impl Match {
                     points: ra2script::points(i as i32),
                     damage_dealt: self.duel.damage_dealt.get(i).copied().unwrap_or(0.0),
                     damage_taken: self.duel.damage_taken.get(i).copied().unwrap_or(0.0),
-                    battery: component_fraction(robot, |c| {
-                        c.class == "Battery" || c.base == "Battery"
-                    }),
-                    air: component_fraction(robot, |c| c.class == "AirTank" || c.base == "AirTank"),
+                    battery: robot
+                        .energy
+                        .fraction(crate::energy::Channel::Elec, &robot.attached),
+                    air: robot
+                        .energy
+                        .fraction(crate::energy::Channel::Air, &robot.attached),
+                    dot: robot.criticals.min(2) as u8,
                     armor: robot
                         .health
                         .first()
@@ -890,31 +894,6 @@ fn match_event_num_bots_from_entries(n: usize) -> usize {
     event_num_bots(n)
 }
 
-/// Remaining fraction of the hitpoints of every attached component matching
-/// `which`. A robot with no such component is 0 (the bar is empty), and a
-/// component knocked off counts as gone.
-fn component_fraction(
-    robot: &crate::robot::Robot,
-    which: impl Fn(&crate::rig::Component) -> bool,
-) -> f32 {
-    let mut total = 0.0;
-    let mut left = 0.0;
-    for (i, component) in robot.rig.components.iter().enumerate() {
-        if !which(component) || component.hitpoints <= 0.0 {
-            continue;
-        }
-        total += component.hitpoints;
-        if robot.attached.get(i).copied().unwrap_or(false) {
-            left += robot.health.get(i).copied().unwrap_or(0.0).max(0.0);
-        }
-    }
-    if total > 0.0 {
-        (left / total).clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
 /// The AI teams' names and logos, for the result cells.
 ///
 /// A `.bot`'s own snapshot, decoded. The file format stores an uncompressed
@@ -1036,6 +1015,13 @@ mod tests {
         );
         countdown_over(&mut m);
         assert_eq!(m.state(), MatchState::Fight);
+        // These two shipped AIs mostly idle in the Combat Arena, so whether the
+        // 20 s IMMOBILIZED rule (its own test: `duel.rs`) ends the fight before
+        // the elimination below depends on how far they happen to roam, which
+        // the battery's power budget (a weak battery slows a robot as it
+        // drains) moves by a few centimetres. This test is about the
+        // last-robot rule, so the immobility rule stays out of it.
+        m.duel.immobility_active = false;
 
         // Let the real fight run long enough to land blows.
         for _ in 0..(30.0 / dt) as usize {

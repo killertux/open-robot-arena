@@ -2442,6 +2442,7 @@ mod tests {
             battery: 1.0,
             air: 1.0,
             armor: 1.0,
+            dot: 0,
             defeated: false,
             eliminated: false,
             winner: false,

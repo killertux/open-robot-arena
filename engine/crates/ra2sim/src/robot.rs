@@ -13,6 +13,7 @@ use crate::backend::{
     MotionType, PhysicsBackend, ShapeDesc, SliderDesc,
 };
 use crate::controls::{ControlState, COCK_FRACTION, FULL};
+use crate::energy::{Channel, Energy};
 use crate::massprops;
 use crate::rig::{JointInfo, JointUse, RobotRig, Role, WheelDrive};
 use crate::scene::USER_BOT;
@@ -244,6 +245,12 @@ pub struct Robot {
     mass_centre: Vec<Vec3>,
     /// Per part: the power factor its motor's torque was last set for.
     motor_power: Vec<f32>,
+    /// Per part: how long a burst device still draws power (`0.6 s` after a
+    /// burst motor is triggered, `0.25 s` for a piston: `0x446916`, `0x44880d`).
+    burst_draw: Vec<f32>,
+    /// The batteries and air tanks and what they supplied last step
+    /// ([`crate::energy`]): the HUD's battery and air bars.
+    pub energy: Energy,
 }
 
 /// A burst motor's or piston's cycle: parked (cocked) at its start, released at
@@ -343,6 +350,8 @@ impl Robot {
             wheel_air: vec![WHEEL_GROUND_MEMORY; rig.parts.len()],
             wheel_normal: vec![Vec3::Y; rig.parts.len()],
             motor_power: vec![1.0; rig.parts.len()],
+            burst_draw: vec![0.0; rig.parts.len()],
+            energy: Self::build_energy(&rig),
             mass_centre: rig
                 .parts
                 .iter()
@@ -351,6 +360,92 @@ impl Robot {
             team,
             rig,
         })
+    }
+
+    /// The robot's batteries and air tanks, full.
+    fn build_energy(rig: &RobotRig) -> Energy {
+        let mut energy = Energy::none();
+        for c in &rig.components {
+            let is = |name: &str| {
+                c.class.eq_ignore_ascii_case(name) || c.base.eq_ignore_ascii_case(name)
+            };
+            if is("Battery") {
+                energy.add_source(c.index, Channel::Elec, c.power, c.hitpoints);
+            } else if is("AirTank") {
+                energy.add_source(c.index, Channel::Air, c.power, c.hitpoints);
+            }
+        }
+        energy
+    }
+
+    /// The electric and air draw of this step, in the component files' units
+    /// (`dt` already multiplied in): `docs/30-energy-and-watch-camera.md` §3.
+    ///
+    /// * a spin motor (and a wheel's motor) draws `|command|` a second, the
+    ///   wired `-100..=100` value the original keeps in `SpinMotor+0x298`;
+    /// * a burst motor draws its `elecmaxinoutrate`, a burst piston its
+    ///   `airmaxinoutrate`, while it is triggered or travelling;
+    /// * any other motor or piston draws its definition's rate scaled by
+    ///   `|command| / 100` (**not measured**: the stock servo and linear
+    ///   actuator classes were not driven on the original).
+    fn power_demand(&mut self, dt: f32) -> (f32, f32) {
+        let mut elec = 0.0;
+        let mut air = 0.0;
+        let mut seen: Vec<usize> = Vec::new();
+        for p in 0..self.rig.parts.len() {
+            if !self.parts[p].alive {
+                continue;
+            }
+            let Some(info) = self.rig.parts[p].joint else {
+                continue;
+            };
+            let motor = info.motor;
+            if seen.contains(&motor) || !self.attached.get(motor).copied().unwrap_or(false) {
+                continue;
+            }
+            seen.push(motor);
+            let c = &self.rig.components[motor];
+            let (power, role) = (c.power, c.role);
+            let spin = c.class.eq_ignore_ascii_case("SpinMotor")
+                || c.base.eq_ignore_ascii_case("SpinMotor")
+                || c.power.elec_rate == 0.0;
+            let command = self
+                .control
+                .command(&self.rig.wiring, motor)
+                .unwrap_or(0.0)
+                .abs();
+            match info.use_kind {
+                JointUse::Passive => {}
+                JointUse::Burst => {
+                    // The trigger starts a fixed draw time (the burst timers of
+                    // the original), whatever the stroke then takes.
+                    if self.burst_draw[p] <= 0.0
+                        && self.burst[p] != BurstPhase::Firing
+                        && self.control.fired(&self.rig.wiring, motor)
+                    {
+                        self.burst_draw[p] = if info.slider { 0.25 } else { 0.6 };
+                    }
+                    if self.burst_draw[p] > 0.0 {
+                        self.burst_draw[p] -= dt;
+                        if info.slider {
+                            air += power.air_rate.abs() * dt;
+                        } else {
+                            elec += power.elec_rate.abs() * dt;
+                        }
+                    }
+                }
+                JointUse::Wheel | JointUse::Spun | JointUse::Piston => {
+                    if info.slider || role == Role::Piston {
+                        air += power.air_rate.abs() * command / FULL * dt;
+                    } else if spin {
+                        elec += command * dt;
+                    } else {
+                        elec += power.elec_rate.abs() * command / FULL * dt;
+                    }
+                }
+            }
+        }
+        (elec, air)
     }
 
     /// The compound shape of a body made of `members`.
@@ -627,6 +722,27 @@ impl Robot {
         self.read_input(input);
         let mut samples: Vec<WheelSample> = Vec::new();
 
+        // The power step (`0x4dc3f0`): what the motors may use this step. A robot
+        // with no source on a channel (a hand-built test rig) is not throttled.
+        let dt = physics.last_dt();
+        let (elec_demand, air_demand) = self.power_demand(dt);
+        let budgets = self
+            .energy
+            .step(dt, elec_demand, air_demand, &self.health, &self.attached);
+        // The original publishes scale 0 on a step with no draw too; nothing is
+        // driven then, but a servo still has to hold, so the scale only applies
+        // to a step that asks for power.
+        let elec_scale = if self.energy.has(Channel::Elec) && elec_demand > 0.0 {
+            budgets.elec.scale
+        } else {
+            1.0
+        };
+        let air_scale = if self.energy.has(Channel::Air) && air_demand > 0.0 {
+            budgets.air.scale
+        } else {
+            1.0
+        };
+
         for p in 0..self.rig.parts.len() {
             if !self.parts[p].alive {
                 continue;
@@ -636,13 +752,16 @@ impl Robot {
             };
             match info.use_kind {
                 JointUse::Passive => {}
-                JointUse::Burst => self.drive_burst(physics, p, info, joint),
+                JointUse::Burst => {
+                    let scale = if info.slider { air_scale } else { elec_scale };
+                    self.drive_burst(physics, p, info, joint, scale)
+                }
                 JointUse::Wheel if info.wheel.is_some() && !legacy_wheels() => {
                     let command = self
                         .control
                         .command(&self.rig.wiring, info.motor)
                         .unwrap_or(0.0);
-                    let power = self.motor_factor(info.motor);
+                    let power = self.motor_factor(info.motor) * elec_scale;
                     if let Some(sample) =
                         self.sample_wheel(physics, p, info, joint, command / FULL * power)
                     {
@@ -665,7 +784,10 @@ impl Robot {
                     } else {
                         1.0
                     };
-                    let power = self.motor_factor(info.motor);
+                    let pneumatic =
+                        info.slider || self.rig.components[info.motor].role == Role::Piston;
+                    let power = self.motor_factor(info.motor)
+                        * if pneumatic { air_scale } else { elec_scale };
                     if (power - self.motor_power[p]).abs() > 1e-4 {
                         self.motor_power[p] = power;
                         physics.set_joint_strength(
@@ -853,6 +975,7 @@ impl Robot {
         p: usize,
         info: JointInfo,
         joint: JointHandle,
+        scale: f32,
     ) {
         // The end of the travel is the farther limit from the rest pose: the
         // motor's `end - start` (its other limit is zero), or a piston's longer
@@ -897,7 +1020,7 @@ impl Robot {
         let phase = *phase;
         let target = match phase {
             BurstPhase::Cocked => 0.0,
-            BurstPhase::Firing => dir * info.rate,
+            BurstPhase::Firing => dir * info.rate * scale,
             BurstPhase::Cocking => -dir * info.rate * COCK_FRACTION,
         };
         // Parked, the joint's friction holds it at the motor's torque; moving, it
@@ -908,7 +1031,7 @@ impl Robot {
             } else {
                 0.0
             };
-            physics.set_joint_strength(joint, info.max_torque, friction);
+            physics.set_joint_strength(joint, info.max_torque * scale.max(0.05), friction);
         }
         if info.slider {
             physics.drive_slider(joint, target);

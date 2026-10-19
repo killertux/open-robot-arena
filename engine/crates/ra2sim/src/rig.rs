@@ -181,6 +181,10 @@ pub struct Component {
     pub mass: f32,
     /// Structural hitpoints.
     pub hitpoints: f32,
+    /// The definition's `electotal`/`elecmaxinoutrate`/`airtotal`/`airmaxinoutrate`
+    /// (a negative rate is a draw): the capacity of a battery or tank, the draw
+    /// of a burst device. See [`crate::energy`].
+    pub power: crate::energy::PowerDef,
     /// `fracture` from the component definition (or its category default).
     pub fracture: f32,
     /// `material` from the component definition (`metal`, `rubber`, …).
@@ -1070,6 +1074,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             max,
             mass,
             hitpoints,
+            power: crate::energy::PowerDef::from_def(def.as_ref()),
             fracture,
             material,
             material_scale,
@@ -1328,6 +1333,7 @@ mod tests {
             max: Vec3::ZERO,
             mass: 1.0,
             hitpoints: 1.0,
+            power: crate::energy::PowerDef::default(),
             fracture: 0.0,
             material: None,
             material_scale: ra2fmt::component::DEFAULT_MATERIAL_SCALE,

@@ -382,6 +382,9 @@ impl Session {
             camera_from_cfg(game)?
         };
         let mut matched = matched;
+        if player_controlled {
+            matched.duel.human_robot = Some(0);
+        }
         // The match shell starts the arena's own intro; `ArenaIntros` is the
         // shipped switch. The generator advances on the arena's `Tick`, so its
         // music, crowd, announcer and camera requests reach the app's audio
@@ -1079,6 +1082,8 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
 enum Shot {
     /// `intro@T`: T seconds into the arena intro.
     Intro(f32),
+    /// `skip@T`: click `Skip Intro` T seconds into the intro (no picture).
+    Skip(f32),
     /// `countdown@N`: the first frame whose countdown number is N.
     Countdown(u32),
     /// `f2|f3|f3b|f4@S`: press that camera key at S fight seconds, then shoot.
@@ -1098,6 +1103,7 @@ fn parse_shot(spec: &str) -> Result<(String, Shot), String> {
     };
     let shot = match name {
         "intro" => Shot::Intro(at.unwrap_or(2.5)),
+        "skip" => Shot::Skip(at.unwrap_or(4.8)),
         "countdown" => Shot::Countdown(at.unwrap_or(2.0) as u32),
         "f2" => Shot::Key {
             key: 2,
@@ -1113,7 +1119,7 @@ fn parse_shot(spec: &str) -> Result<(String, Shot), String> {
         },
         other => {
             return Err(format!(
-                "--camera-shots: {other:?} is not intro/countdown/f2/f3/f3b/f4"
+                "--camera-shots: {other:?} is not intro/skip/countdown/f2/f3/f3b/f4"
             ))
         }
     };
@@ -1159,7 +1165,7 @@ pub fn run_camera_shots(options: Options, shots: &[String]) -> Result<(), String
         // Shots are taken in the order given: only the first can fire.
         let fire = pending.first().and_then(|(_, shot)| {
             let ready = match *shot {
-                Shot::Intro(t) => state == MatchState::Intro && intro_time >= t,
+                Shot::Intro(t) | Shot::Skip(t) => state == MatchState::Intro && intro_time >= t,
                 Shot::Countdown(n) => state == MatchState::Countdown && countdown == Some(n),
                 // A match that ends before the shot's second (a robot out of
                 // the arena at once) is photographed in its final pose.
@@ -1174,6 +1180,12 @@ pub fn run_camera_shots(options: Options, shots: &[String]) -> Result<(), String
             let (name, shot) = pending.remove(i);
             if let Shot::Key { key, .. } = shot {
                 session.camera_key(key);
+            }
+            if matches!(shot, Shot::Skip(_)) {
+                // `Skip Intro`: the countdown inherits the flight's pose at this
+                // moment (the watch camera sets only the eye, docs/30).
+                session.skip_intro();
+                continue;
             }
             write_frame(
                 &mut session,
@@ -1374,6 +1386,7 @@ mod tests {
             battery: 1.0,
             air: 1.0,
             armor: 1.0,
+            dot: 0,
             defeated: slot == 1,
             eliminated: false,
             winner: slot == 0,
