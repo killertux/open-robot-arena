@@ -602,7 +602,6 @@ impl Arena {
         let mut d = self.d();
         d.lightning
             .push((index, [a.0, a.1, a.2], [b.0, b.1, b.2], false));
-        d.defer("lightning (M5)");
     }
 
     fn SetLightningVisible(&self, index: i32, on: bool) {

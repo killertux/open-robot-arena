@@ -71,7 +71,25 @@ was not identified (`FUN_0044d680`), which we replace with "faces the light".
 We use each attached component's hull as a caster and lift the shadow `1 cm`
 off the receiver.
 
-## LightningField, DecalTrigger
+## LightningField (RTTI `0x6f3cec`)
 
-Not recovered or implemented here; `CreateLightning`/`SetLightningVisible` stay
-recorded as deferred.
+`CreateLightning(index, a, b)` (`FUN_004b9ec0` → `FUN_00403d40`) builds a bolt
+(`FUN_0059e840`, vtable `0x6af08c`) from a config at `+0x248`: start, end, width
+`0.03`, `5` segments, amplitude `0.4`, refresh `0.1 +- 0.05 s`. The path
+(`FUN_0059ea10`) is the start, four points `start + (end - start) * i / 5`
+pushed sideways by `0.4 * (r - 0.5)` along the screen-space perpendicular
+(bolt direction x view direction), and the end. `FUN_0059ed40` redraws the
+offsets when the refresh timer runs out. The bolt's colours are blue `(0,0,1,1)`
+and white (`FUN_0059e8b0`) and the generic ribbon renderer `FUN_005b8090`
+(`1373` lines, camera-facing, tapered) draws it. We do not follow that renderer:
+a blue ribbon of half-width `2 * width` with a white core of `width / 5`,
+additive, untextured, because the original's bolts (seen through the electric
+arena's grid, `arena-electric-f2`) are a pixel or two of saturated blue with
+white only at the heart. The electric arena switches the twelve bolts on with
+its hazards and `Charge`/`SetLightningStartEnd` move them to the robots in range;
+the engine's `ResetLightningPositions` is replaced by the script's own.
+
+## DecalTrigger
+
+`Arenas/decals/*.tga` (slashes, pierces, batter marks, fire) are the textures of
+the damage decals that `DecalTrigger` places. Not recovered or implemented.

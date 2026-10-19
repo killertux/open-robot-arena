@@ -77,8 +77,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Vec3::new(0.3, 0.0, 0.3),
         true,
     );
-    let camera = DuelCamera::Wide {
-        offset: Vec3::new(0.0, 1.5, -4.5),
+    // FXSHOT_TOP=<height> looks straight down at the middle of the fight
+    // (the electric arena's bolts lie under its grid).
+    let camera = match std::env::var("FXSHOT_TOP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        Some(height) => DuelCamera::Top { height },
+        None => DuelCamera::Wide {
+            offset: Vec3::new(0.0, 1.5, -4.5),
+        },
     };
     for n in 0..frames * every {
         matched.step();

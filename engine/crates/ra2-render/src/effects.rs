@@ -54,6 +54,24 @@
 //! `collide` here bounce off the arena's declared shadow receiver triangles
 //! (its floor and walls), which is the only arena surface list the scripts give.
 //!
+//! # Lightning (`LightningField`, RTTI `0x6f3cec`; the bolt is `FUN_0059e840`)
+//!
+//! `CreateLightning(index, a, b)` (`FUN_004b9ec0` -> `FUN_00403d40`) builds a
+//! bolt object (vtable `0x6af08c`) from a config at `+0x248`: start, end, width
+//! `0.03`, `5` segments, amplitude `0.4`, refresh `0.1 +- 0.05 s` (`+0x26c`,
+//! `+0x270`). Its path (`FUN_0059ea10`) is `start`, four points `start + (end -
+//! start) * i / 5` pushed sideways by `0.4 * (r - 0.5)` along the screen-space
+//! perpendicular, and `end`; `FUN_0059ed40` redraws the offsets whenever the
+//! refresh timer runs out. The bolt's two colours are blue `(0, 0, 1, 1)` and
+//! white `(1, 1, 1, 1)` (`FUN_0059e8b0`), and the ribbon renderer
+//! (`FUN_005b8090`) draws it camera-facing.
+//!
+//! **Not recovered:** how the ribbon renderer maps the config's widths (`0.03`
+//! times 8, 2 and 2) and the `0.8` factor to the two layers. We draw a blue
+//! ribbon of half-width `2 * width` under a white core of half-width `width / 5`
+//! (the original's bolts read as saturated blue a pixel or two wide with
+//! white only at the heart), both additive and untextured.
+//!
 //! # Shadows (`ShadowWizard`, RTTI `0x6fe950`)
 //!
 //! `SetShadowSource(x, y, z)` stores a point light (`FUN_004ee460`), every
@@ -482,6 +500,24 @@ fn point_in_triangle(p: Vec3, t: &[Vec3; 3]) -> bool {
     u >= -1e-4 && v >= -1e-4 && u + v <= 1.0 + 1e-4
 }
 
+/// Segments of a lightning bolt (`FUN_00403d40`'s config `+0x1c`).
+pub const BOLT_SEGMENTS: usize = 5;
+/// Sideways reach of a bolt's inner points (config `+0x20`).
+pub const BOLT_AMPLITUDE: f32 = 0.4;
+/// A bolt's width (config `+0x18`).
+pub const BOLT_WIDTH: f32 = 0.03;
+/// Mean and spread of the seconds between a bolt's redraws (`+0x26c`, `+0x270`).
+pub const BOLT_REFRESH: (f32, f32) = (0.1, 0.1);
+
+#[derive(Clone, Debug)]
+struct Bolt {
+    start: Vec3,
+    end: Vec3,
+    visible: bool,
+    timer: f32,
+    offsets: [f32; BOLT_SEGMENTS - 1],
+}
+
 /// The most one-shot effects the manager keeps (`FUN_004a3380`: `< 0x14`).
 pub const MAX_EFFECTS: usize = 20;
 /// How long a one-shot effect emits (`FUN_004a3380`'s `0x3dcccccd`).
@@ -497,6 +533,7 @@ pub struct Effects {
     standing: Vec<(u64, Emitter)>,
     textures: Mutex<HashMap<&'static str, Arc<Image>>>,
     collider: Collider,
+    bolts: Vec<(i32, Bolt)>,
 }
 
 impl Effects {
@@ -511,6 +548,7 @@ impl Effects {
             standing: Vec::new(),
             textures: Mutex::new(HashMap::new()),
             collider: Collider::default(),
+            bolts: Vec::new(),
         }
     }
 
@@ -521,7 +559,9 @@ impl Effects {
 
     /// Whether anything is alive.
     pub fn is_empty(&self) -> bool {
-        self.bursts.is_empty() && self.standing.is_empty()
+        self.bursts.is_empty()
+            && self.standing.is_empty()
+            && !self.bolts.iter().any(|(_, b)| b.visible)
     }
 
     fn texture(&self, name: &'static str) -> Option<Arc<Image>> {
@@ -601,10 +641,43 @@ impl Effects {
         }
     }
 
+    /// Set the arena's lightning bolts (`CreateLightning`, `SetLightningStartEnd`,
+    /// `SetLightningVisible`): `(index, start, end, visible)`. A bolt keeps its
+    /// jitter and refresh timer while its index lives.
+    pub fn set_lightning(&mut self, bolts: impl IntoIterator<Item = (i32, Vec3, Vec3, bool)>) {
+        let old = std::mem::take(&mut self.bolts);
+        for (index, start, end, visible) in bolts {
+            let mut bolt = old
+                .iter()
+                .find(|(i, _)| *i == index)
+                .map(|(_, b)| b.clone())
+                .unwrap_or(Bolt {
+                    start,
+                    end,
+                    visible,
+                    timer: 0.0,
+                    offsets: [0.0; BOLT_SEGMENTS - 1],
+                });
+            bolt.start = start;
+            bolt.end = end;
+            bolt.visible = visible;
+            self.bolts.push((index, bolt));
+        }
+    }
+
     /// Advance every emitter by `dt` seconds.
     pub fn step(&mut self, dt: f32) {
         if dt <= 0.0 {
             return;
+        }
+        for (_, b) in self.bolts.iter_mut().filter(|(_, b)| b.visible) {
+            b.timer -= dt;
+            if b.timer <= 0.0 {
+                for o in &mut b.offsets {
+                    *o = BOLT_AMPLITUDE * (self.rng.unit() - 0.5);
+                }
+                b.timer = self.rng.jitter(BOLT_REFRESH.0, BOLT_REFRESH.1);
+            }
         }
         let collider = self.collider.clone();
         let rng = &mut self.rng;
@@ -649,7 +722,29 @@ impl Effects {
                 ));
             }
         }
+        out.extend(self.bolt_items(right, up));
         out
+    }
+
+    /// The visible bolts as camera-facing ribbons: blue under white.
+    fn bolt_items(&self, right: Vec3, up: Vec3) -> Option<DrawItem> {
+        let forward = right.cross(up).normalize_or_zero();
+        let mut vertices = Vec::new();
+        for (_, b) in self.bolts.iter().filter(|(_, b)| b.visible) {
+            let path = b.path(forward);
+            for (colour, half) in [
+                ([0.0, 0.0, 1.0, 1.0], 2.0 * BOLT_WIDTH),
+                ([1.0; 4], 0.2 * BOLT_WIDTH),
+            ] {
+                ribbon(&mut vertices, &path, forward, half, colour);
+            }
+        }
+        if vertices.is_empty() {
+            return None;
+        }
+        let mut material = particle_material(Image::solid([255; 4]), true);
+        material.stages[0].linear = false;
+        Some(DrawItem::new(vertices, material, "lightning"))
     }
 }
 
@@ -660,6 +755,44 @@ pub fn camera_axes(view_proj: Mat4) -> (Vec3, Vec3) {
     let m = view_proj;
     let row = |r: usize| Vec3::new(m.col(0)[r], m.col(1)[r], m.col(2)[r]).normalize_or_zero();
     (row(0), row(1))
+}
+
+impl Bolt {
+    /// `FUN_0059ea10`: start, the inner points pushed along the screen-space
+    /// perpendicular, end.
+    fn path(&self, forward: Vec3) -> Vec<Vec3> {
+        let along = self.end - self.start;
+        let perp = along.cross(forward).normalize_or_zero();
+        let mut pts = vec![self.start];
+        for (i, o) in self.offsets.iter().enumerate() {
+            let t = (i + 1) as f32 / BOLT_SEGMENTS as f32;
+            pts.push(self.start + along * t + perp * *o);
+        }
+        pts.push(self.end);
+        pts
+    }
+}
+
+/// A camera-facing strip along `path`, `half` either side of it.
+fn ribbon(out: &mut Vec<Vertex>, path: &[Vec3], forward: Vec3, half: f32, colour: [f32; 4]) {
+    let side = |k: usize| {
+        let a = path[k.saturating_sub(1)];
+        let b = path[(k + 1).min(path.len() - 1)];
+        (b - a).cross(forward).normalize_or_zero() * half
+    };
+    let v = |pos: Vec3, uv: [f32; 2]| {
+        let mut vx = Vertex::new(pos, -forward, uv);
+        vx.color = colour;
+        vx
+    };
+    for k in 0..path.len() - 1 {
+        let (s0, s1) = (side(k), side(k + 1));
+        let a = v(path[k] + s0, [0.0, 0.0]);
+        let b = v(path[k] - s0, [0.0, 1.0]);
+        let c = v(path[k + 1] - s1, [1.0, 1.0]);
+        let d = v(path[k + 1] + s1, [1.0, 0.0]);
+        out.extend([a, b, c, a, c, d]);
+    }
 }
 
 fn particle_material(image: Arc<Image>, additive: bool) -> Material {
@@ -1070,6 +1203,60 @@ mod tests {
             assert!(v.pos[0] >= -1e-3 && v.pos[0] <= 0.2 + 1e-3);
             assert!(v.pos[2] >= -1e-3 && v.pos[2] <= 0.2 + 1e-3);
         }
+    }
+
+    #[test]
+    fn a_bolt_redraws_its_jitter_when_its_timer_runs_out() {
+        let mut fx = Effects::new(None);
+        fx.set_lightning([(0, Vec3::ZERO, Vec3::new(4.0, 0.0, 0.0), true)]);
+        assert!(!fx.is_empty());
+        fx.step(1.0 / 60.0);
+        let first = fx.bolts[0].1.offsets;
+        assert!(first.iter().any(|o| *o != 0.0));
+        assert!(first.iter().all(|o| o.abs() <= BOLT_AMPLITUDE / 2.0 + 1e-6));
+        for _ in 0..3 {
+            fx.step(1.0 / 60.0);
+        }
+        assert_eq!(
+            fx.bolts[0].1.offsets, first,
+            "still inside the refresh time"
+        );
+        for _ in 0..12 {
+            fx.step(1.0 / 60.0);
+        }
+        assert_ne!(
+            fx.bolts[0].1.offsets, first,
+            "0.15 s at most between redraws"
+        );
+        // Moving it keeps the jitter; hiding it stops it drawing.
+        let kept = fx.bolts[0].1.offsets;
+        fx.set_lightning([(0, Vec3::Y, Vec3::new(4.0, 1.0, 0.0), true)]);
+        assert_eq!(fx.bolts[0].1.offsets, kept);
+        fx.set_lightning([(0, Vec3::Y, Vec3::new(4.0, 1.0, 0.0), false)]);
+        assert!(fx.is_empty());
+        assert!(fx.bolt_items(Vec3::X, Vec3::Y).is_none());
+    }
+
+    #[test]
+    fn a_bolt_is_a_ribbon_of_five_segments_from_start_to_end() {
+        let mut fx = Effects::new(None);
+        fx.set_lightning([(0, Vec3::new(0.0, 0.0, 5.0), Vec3::new(4.0, 0.0, 5.0), true)]);
+        fx.step(1.0 / 60.0);
+        let item = fx.bolt_items(Vec3::X, Vec3::Y).expect("a bolt");
+        // Two layers, five segments, six vertices a segment.
+        assert_eq!(item.vertices.len(), 2 * BOLT_SEGMENTS * 6);
+        assert!(item.material.additive && item.material.blended());
+        let blue = item
+            .vertices
+            .iter()
+            .filter(|v| v.color == [0.0, 0.0, 1.0, 1.0])
+            .count();
+        assert_eq!(blue, BOLT_SEGMENTS * 6);
+        let xs: Vec<f32> = item.vertices.iter().map(|v| v.pos[0]).collect();
+        assert!(xs.iter().cloned().fold(f32::MAX, f32::min).abs() < 0.1);
+        assert!((xs.iter().cloned().fold(f32::MIN, f32::max) - 4.0).abs() < 0.1);
+        // The jitter and the width are sideways to the view (y), never along z.
+        assert!(item.vertices.iter().all(|v| (v.pos[2] - 5.0).abs() < 1e-4));
     }
 
     #[test]

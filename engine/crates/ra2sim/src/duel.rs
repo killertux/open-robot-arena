@@ -1167,6 +1167,18 @@ impl Duel {
                 }
             }
         }
+        // The arena's lightning bolts (`CreateLightning`, ...): the script owns
+        // their ends and switches, the effects draw them.
+        let bolts: Vec<_> = ra2script::state()
+            .arena
+            .as_ref()
+            .and_then(|a| a.lock().ok().map(|a| a.lightning.clone()))
+            .unwrap_or_default();
+        self.fx.set_lightning(
+            bolts
+                .iter()
+                .map(|(i, a, b, on)| (*i, Vec3::from(*a), Vec3::from(*b), *on)),
+        );
         if self.fx.enabled {
             for r in 0..self.robots.len() {
                 let smoking: Vec<usize> = (0..self.robots[r].rig.components.len())
@@ -2886,6 +2898,44 @@ mod tests {
             duel.step(1.0 / 60.0);
         }
         assert!(!duel.fx.is_empty(), "the smoking motor emits");
+    }
+
+    /// The electric arena's twelve bolts (`CreateLightning`) are on while its
+    /// hazards are, and reach the renderer as one ribbon item.
+    #[test]
+    fn the_electric_arenas_lightning_is_drawn() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game
+            .join("Arenas/electric.py")
+            .to_string_lossy()
+            .to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        for _ in 0..6 {
+            duel.step(1.0 / 60.0);
+        }
+        let bolts = ra2script::state()
+            .arena
+            .as_ref()
+            .map(|a| a.lock().unwrap().lightning.clone())
+            .unwrap_or_default();
+        assert_eq!(bolts.len(), 12, "CreateLightning ran twelve times");
+        assert!(bolts.iter().all(|b| b.3), "HazardsOn lit them all");
+        let items = duel.effect_items(Mat4::IDENTITY);
+        let item = items
+            .iter()
+            .find(|i| i.label == "lightning")
+            .expect("the bolts draw");
+        assert_eq!(item.vertices.len(), 12 * 2 * 5 * 6);
     }
 
     /// `FUN_00417330`: below 10 a hit only drives effects.
