@@ -280,6 +280,121 @@ fn striker(robot: &Robot, index: usize) -> Striker<'_> {
     }
 }
 
+/// The collision-event filter the robots register with (`FUN_0052d4f0`, the
+/// world's event manager ahead of the game's listener).
+///
+/// Every robot body is registered once at 1 Hz (`FUN_0045ab90` →
+/// `FUN_004ad500(body, 2, 1.0)` → `FUN_0052d850`, from the robot set-up
+/// `0x414d66` and `0x507ed6`); a weapon that declares `frequency` registers its
+/// bodies at that rate instead (`0x502f7a` .. `0x503038`). A contact point
+/// becomes an event only if one of its two bodies' registrations is due
+/// (a full interval since it last let one through) and the bodies close at the
+/// point (`FUN_0052d740`: the normal relative velocity against the
+/// registration's threshold, 0); the registration that let it through is then
+/// reset. All other points are dropped before the game prices anything. Live
+/// (`fightcontacts-scout-alarm-box__live__000`): the robots touch at up to 13
+/// points a step, yet only 16 % of those steps price a hit, one per component
+/// pair, and a pair that stays in contact is priced again about 1.0 s later.
+#[derive(Clone, Debug, Default)]
+pub struct EventGate {
+    last: HashMap<BodyHandle, f32>,
+}
+
+impl EventGate {
+    /// The events of one step that get through, in order.
+    pub fn admit(
+        &mut self,
+        robots: &[Robot],
+        events: Vec<ContactEvent>,
+        now: f32,
+    ) -> Vec<ContactEvent> {
+        let mut interval: HashMap<BodyHandle, f32> = HashMap::new();
+        let mut owner: HashMap<BodyHandle, (usize, usize)> = HashMap::new();
+        for (r, robot) in robots.iter().enumerate() {
+            for (p, part) in robot.parts.iter().enumerate() {
+                if part.alive {
+                    owner.insert(part.body, (r, p));
+                }
+            }
+        }
+        let com = |body: BodyHandle, state: &BodyState| match owner.get(&body) {
+            Some(&(r, p)) => body_dynamics(&robots[r], p, state).com,
+            None => state.position,
+        };
+        for robot in robots {
+            for (p, part) in robot.parts.iter().enumerate() {
+                if !part.alive {
+                    continue;
+                }
+                let rate = robot.rig.parts[p]
+                    .members
+                    .iter()
+                    .filter_map(|&i| robot.rig.components[i].weapon.and_then(|w| w.frequency))
+                    .fold(None, |m: Option<f32>, f| Some(m.map_or(f, |m| m.max(f))))
+                    .unwrap_or(1.0);
+                interval.insert(part.body, 1.0 / rate);
+            }
+        }
+        let mut out = Vec::new();
+        for e in events {
+            let n = e.normal.normalize_or_zero();
+            let va = point_velocity(
+                e.state_a.linear_velocity,
+                e.state_a.angular_velocity,
+                com(e.a, &e.state_a),
+                e.point,
+            );
+            let vb = point_velocity(
+                e.state_b.linear_velocity,
+                e.state_b.angular_velocity,
+                com(e.b, &e.state_b),
+                e.point,
+            );
+            if (va - vb).dot(n) <= 0.0 {
+                continue;
+            }
+            let due = |gate: &Self, body: BodyHandle| {
+                interval
+                    .get(&body)
+                    .is_some_and(|iv| gate.last.get(&body).is_none_or(|t| now - t >= *iv - 1e-4))
+            };
+            let through = if due(self, e.a) {
+                Some(e.a)
+            } else if due(self, e.b) {
+                Some(e.b)
+            } else {
+                None
+            };
+            if let Some(body) = through {
+                self.last.insert(body, now);
+                out.push(e);
+            }
+        }
+        out
+    }
+}
+
+/// How squarely a weapon's striking faces meet the contact
+/// (`Weapon::computeDamage`, `FUN_005032f0`): the contact normal toward the
+/// victim, in the weapon's frame, against its `normal` faces; 1 for anything
+/// that is not a weapon or lists no face.
+fn face_alignment(
+    robot: &Robot,
+    index: usize,
+    part: usize,
+    state: &BodyState,
+    toward: Vec3,
+) -> f32 {
+    let c = &robot.rig.components[index];
+    let Some(w) = c.weapon.filter(|_| c.role == Role::Weapon) else {
+        return 1.0;
+    };
+    let _ = part;
+    let (_, rotation, _) = robot.rig.part_local[index].to_scale_rotation_translation();
+    let world = state.rotation * rotation;
+    w.alignment(world.inverse() * toward)
+}
+
 /// Every hit of one step's contact events, in both directions.
 ///
 /// `events` come from [`crate::backend::PhysicsBackend::take_contacts`]; only
@@ -336,7 +451,10 @@ pub fn resolve(robots: &[Robot], events: &[ContactEvent], cfg: &CombatConfig) ->
         ) else {
             continue;
         };
-        for (att, att_c, vic, vic_c) in [(ra, ca, rb, cb), (rb, cb, ra, ca)] {
+        for (att, att_c, vic, vic_c, toward, state, part) in [
+            (ra, ca, rb, cb, n, &e.state_a, pa),
+            (rb, cb, ra, ca, -n, &e.state_b, pb),
+        ] {
             let (attacker, victim) = (&robots[att], &robots[vic]);
             let damage = hit_damage(
                 striker(attacker, att_c),
@@ -344,7 +462,7 @@ pub fn resolve(robots: &[Robot], events: &[ContactEvent], cfg: &CombatConfig) ->
                 rec0,
                 m,
                 cfg,
-            );
+            ) * face_alignment(attacker, att_c, part, state, toward);
             if damage > 0.0 && damage.is_finite() {
                 out.push(Impact {
                     attacker: att,

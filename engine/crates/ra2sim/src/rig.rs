@@ -91,10 +91,61 @@ pub struct WeaponStats {
     pub concussion: f32,
     /// Cutting damage factor (`piercing`).
     pub piercing: f32,
-    /// Blade spin frequency from the definition (used for the damage rate).
-    pub frequency: f32,
+    /// The definition's `frequency`: the weapon's bodies get their collision
+    /// events at most this often per second (`0x502f7a` registers them with
+    /// the event filter, `FUN_004ad500`); without one they keep the robot's
+    /// 1 Hz ([`crate::combat::EventGate`]).
+    pub frequency: Option<f32>,
     /// Blade reach (component bounding radius), in metres.
     pub reach: f32,
+    /// The striking faces (`normal = <abs> x y z [x y z ...]`), component
+    /// frame: `Weapon::computeDamage` (`FUN_005032f0`) scales the hit by
+    /// `min(1, Σ max(n·f, 0))` over them (`|n·f|` when `abs`), `n` the contact
+    /// normal toward the victim. None listed: the hit is not scaled.
+    pub faces: [Vec3; 4],
+    pub face_count: usize,
+    pub faces_abs: bool,
+}
+
+impl WeaponStats {
+    /// How squarely a contact with normal `n` (component frame, toward the
+    /// victim) meets the striking faces (`FUN_005032f0`).
+    pub fn alignment(&self, n: Vec3) -> f32 {
+        if self.face_count == 0 {
+            return 1.0;
+        }
+        let sum: f32 = self.faces[..self.face_count]
+            .iter()
+            .map(|f| {
+                let d = n.dot(*f);
+                if self.faces_abs {
+                    d.abs()
+                } else {
+                    d.max(0.0)
+                }
+            })
+            .sum();
+        sum.min(1.0)
+    }
+}
+
+/// The weapon's `normal` line: `<abs> x y z [x y z ...]`.
+fn weapon_faces(def: Option<&ra2fmt::component::ComponentDef>) -> ([Vec3; 4], usize, bool) {
+    let mut faces = [Vec3::ZERO; 4];
+    let Some(line) = def.and_then(|d| d.get("normal")) else {
+        return (faces, 0, true);
+    };
+    let mut words = line.split_whitespace();
+    let abs = !words
+        .next()
+        .is_some_and(|w| w.eq_ignore_ascii_case("false") || w == "0");
+    let nums: Vec<f32> = words.filter_map(|w| w.parse().ok()).collect();
+    let mut n = 0;
+    for c in nums.as_chunks::<3>().0.iter().take(4) {
+        faces[n] = Vec3::new(c[0], c[1], c[2]);
+        n += 1;
+    }
+    (faces, n, abs)
 }
 
 /// Motor behaviour from the component definition.
@@ -384,6 +435,9 @@ fn smart_zone_mass(root: &std::path::Path, file: &str) -> HavokParts {
         ..HavokParts::default()
     }
 }
+
+/// A weapon's material float when its definition declares none (`0x502e5f`).
+pub const WEAPON_MATERIAL_SCALE: f32 = 0.8;
 
 /// Whether Havok collides a rigid body with this `SIMULATION_GEOMETRY` as a
 /// triangle mesh (shape class `GEOMETRIC`, 4) rather than as a convex hull
@@ -1260,10 +1314,18 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             .as_ref()
             .and_then(|d| d.get("material"))
             .map(|s| s.to_ascii_lowercase());
+        // A weapon's constructor (`FUN_00502e10`, `0x502e5f`) sets its Metal
+        // material's float to 0.8; a `material` line still overrides it.
+        let undeclared = if role == Role::Weapon {
+            WEAPON_MATERIAL_SCALE
+        } else {
+            ra2fmt::component::DEFAULT_MATERIAL_SCALE
+        };
         let material_scale = def
             .as_ref()
+            .filter(|d| d.get("material").is_some())
             .map(|d| d.material().scale)
-            .unwrap_or(ra2fmt::component::DEFAULT_MATERIAL_SCALE);
+            .unwrap_or(undeclared);
         let damageable = def
             .as_ref()
             .map(|d| !flag_false(d, "damageable"))
@@ -1285,24 +1347,29 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 base.eq_ignore_ascii_case("BurstPiston"),
             )
         });
+        let (faces, face_count, faces_abs) = weapon_faces(def.as_ref());
         let weapon = (role == Role::Weapon).then(|| WeaponStats {
-            // Neither parameter has a default. The engine's factory leaves both
-            // at zero unless the definition declares them, and **every stock
-            // weapon does** (`Components.cfz`: the blade is `concussion = .8`,
-            // `piercing = .3`, the sawblade `.9`/`.1`) while a chassis declares
-            // neither — which is exactly what makes a spinner bite and a bare
-            // chassis only ram. Inventing 0.5 here as this used to would price
-            // every part as a half-decent weapon.
+            // The component constructor's defaults (`FUN_00489110`: `+0x68`
+            // piercing 0, `+0x6c` concussion 1.0), which the weapon constructor
+            // keeps: the Hammer Head, Sledge Hammer, Iron Fist, Saw Blade, Ninja
+            // Star and ChewBlade declare neither. Live
+            // (`fight-scout-alarm-box__live__000`), ALARM's Hammer Head prices
+            // its hits at up to exactly 8× what the Scout part it strikes
+            // prices the same record at (0.8 / 0.1 material, concussion 1 on
+            // both sides).
             concussion: def
                 .as_ref()
                 .and_then(|d| num(d, "concussion"))
-                .unwrap_or(0.0),
+                .unwrap_or(1.0),
             piercing: def.as_ref().and_then(|d| num(d, "piercing")).unwrap_or(0.0),
             frequency: def
                 .as_ref()
                 .and_then(|d| num(d, "frequency"))
-                .unwrap_or(4.0),
+                .filter(|f| *f > 0.0),
             reach: ((max - min) * 0.5).length().max(0.1),
+            faces,
+            face_count,
+            faces_abs,
         });
 
         let motor = (role == Role::Motor).then(|| {
@@ -1445,6 +1512,65 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Weapon::computeDamage` (`FUN_005032f0`): the hit scales with how
+    /// squarely the contact meets the listed faces, `min(1, Σ max(n·f, 0))`
+    /// (`|n·f|` for `normal = true ...`).
+    #[test]
+    fn a_weapon_prices_by_its_striking_faces() {
+        let w = WeaponStats {
+            concussion: 1.0,
+            piercing: 0.0,
+            frequency: None,
+            reach: 0.3,
+            faces: [Vec3::NEG_X, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO],
+            face_count: 1,
+            faces_abs: false,
+        };
+        assert_eq!(w.alignment(Vec3::NEG_X), 1.0);
+        assert_eq!(w.alignment(Vec3::X), 0.0);
+        assert!((w.alignment(Vec3::new(-0.6, 0.8, 0.0)) - 0.6).abs() < 1e-6);
+        let both = WeaponStats {
+            faces: [Vec3::X, Vec3::Y, Vec3::ZERO, Vec3::ZERO],
+            face_count: 2,
+            faces_abs: true,
+            ..w
+        };
+        assert!((both.alignment(Vec3::new(-0.6, -0.8, 0.0)) - 1.0).abs() < 1e-6);
+        let none = WeaponStats { face_count: 0, ..w };
+        assert_eq!(none.alignment(Vec3::X), 1.0);
+    }
+
+    /// The Hammer Head declares neither `concussion`, `piercing` nor
+    /// `material`: it keeps the component constructor's concussion 1
+    /// (`FUN_00489110`) and the weapon constructor's 0.8 material
+    /// (`0x502e5f`), and strikes with its -X face (`normal = false -1 0 0`).
+    #[test]
+    fn the_hammer_head_keeps_the_constructors_defaults() {
+        let Some(game) = std::env::var_os("RA2_GAME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let p =
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local/game");
+                p.exists().then_some(p)
+            })
+        else {
+            return;
+        };
+        let rig = load(&game.join("AI/Team0/Bot1.bot").to_string_lossy()).expect("ALARM");
+        let hammer = rig
+            .components
+            .iter()
+            .find(|c| c.name == "Hammer Head")
+            .expect("ALARM's hammer");
+        let w = hammer.weapon.expect("a weapon");
+        assert_eq!((w.piercing, w.concussion), (0.0, 1.0));
+        assert_eq!(hammer.material_scale, WEAPON_MATERIAL_SCALE);
+        assert_eq!(
+            (w.face_count, w.faces_abs, w.faces[0]),
+            (1, false, Vec3::NEG_X)
+        );
+    }
 
     /// F12: a `.gmf` body with `mass = 0` is priced by the room it takes up.
     ///

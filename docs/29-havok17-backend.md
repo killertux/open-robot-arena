@@ -529,7 +529,7 @@ survey); the AI's commands were not traced.
 
 Recovered from the agents (`FUN_00543370` dispatches a pair of collidables on
 the sum of their shape classes, collidable `+0x18`) and checked against new
-live captures (`tools/oracle/capture_contacts.py` + `frida/ra2_contacts.js`:
+live captures (`tools/oracle/capture_contacts.py` + `frida/ra2_contacts.js`, captures `contacts-drive-*` and `contacts-nohaz-*`:
 every contact the resolver is handed, `0x53ed80` entry, with the bodies;
 `contacts_report.py`; `capture_contacts_set.sh` for any stock robot with the
 Combat Arena's hazards off).
@@ -601,7 +601,7 @@ distance):
 Step pieces: live 3 % of substeps are backstepped, ours 2.5 %.
 
 **Drive tests** from the original's spawn poses, Combat Arena hazards off,
-sampled every step (fresh captures `contacts-<bot>__live__000`, the
+sampled every step (fresh captures `contacts-nohaz-<bot>__live__000`, the
 original's straight durations: Scout 1.967 s, ALARM 1.6, FlapJack 1.867, Razor
 2.0, Wide Load 2.133; poses from the captured chassis). The earlier tables
 sampled ours every 0.1 s and started the coast at the first sample after the
@@ -628,18 +628,53 @@ the wall is met, not the drive model.
 
 Before the merge of `f6cb227` (old drive record axle) the same tree read
 Scout 11.00 / 1.37 / 14.37, coast 7.86; ALARM coast 11.00; FlapJack 7.31.
-Traction survey 45/45. AI suite (`fidtrace match`, ten pairings): nine deal
-damage (eight before). Open: Scout v ALARM deals far less than before (box,
-120 s: one 11-point hit against seven hits, 132 points), and
-`duel::tests::the_shipped_ai_closes_sees_its_enemy_and_lands_blows` (damage
-within 30 s) fails. The hits are there — ALARM's hammer head meets the Scout's
-fork arm at 20-32 m/s — but priced at 4-8, under the arena's gate of 10; the
-corner manifold used to give such a pair several points, each priced alone.
-Collision events are fired per contact point (`FUN_00549c30` walks the whole
-contact list), so the count now follows the agents; whether the original
-prices these hits higher (its fork arm and hammer head are a mesh and a convex
-piece) is not measured. Turning the bad-step rule's close-contact test off
-makes that test pass by chance (the 120 s matches still deal 0-1 hits).
+Traction survey 45/45.
+
+**From contact to damage** (settled against live fights). With the faithful
+contacts, Scout v ALARM dealt almost nothing and
+`the_shipped_ai_closes_sees_its_enemy_and_lands_blows` failed; a live fight
+(`fight-scout-alarm-box__live__000`, `tools/oracle/capture_fight.py` +
+`frida/ra2_fight_hits.js`: every `computeDamage` and every arena gate call)
+showed ALARM's Hammer Head landing the first counted hit 5.3 s in and 63 in
+120 s, where ours priced the hammer at zero. Three pricing rules were missing
+and one event rule:
+
+* a weapon that declares no `concussion`/`piercing` keeps the component
+  constructor's 1 / 0 (`FUN_00489110` stores `+0x6c = 1.0`; the weapon
+  constructor does not touch it) — ours had 0 / 0, so the Hammer Head, Sledge
+  Hammer, Iron Fist, Saw Blade, Ninja Star and ChewBlade did nothing;
+* a weapon's material float is 0.8 unless its definition names a material
+  (`FUN_00502e10`, `0x502e5f`). Live the hammer prices a record at up to
+  exactly 8x what the struck Scout part (0.1, concussion 1) prices it at;
+* `Weapon::computeDamage` (`FUN_005032f0`) multiplies the base hit by
+  `min(1, Σ max(n·f, 0))` over the definition's `normal = <abs> f...` faces
+  (`|n·f|` when `abs`), `n` the contact normal toward the victim in the
+  weapon's frame: live the hammer's ratio to the base is 0..1 (median 0.79,
+  11 % zero);
+* the world's collision-event filter (`FUN_0052d4f0`, ahead of the game's
+  listener) lets a contact point through only if one of its bodies'
+  registrations is due — every robot body at 1 Hz (`FUN_0045ab90` →
+  `FUN_004ad500(body, 2, 1.0)`), a weapon with `frequency` at that rate
+  (`0x502f7a`) — and the bodies close at the point (`FUN_0052d740`); the
+  registration is then reset. Live
+  (`fightcontacts-scout-alarm-box__live__000`) the robots touch at up to 13
+  points a step, but only 16 % of those steps price a hit, one per component
+  pair, and a pair in contact is priced again about 1.0 s later.
+  `combat::EventGate`; before, every point of every step piece was priced.
+
+| fight (Box, 120 s, shipped AIs) | original | before | now |
+|---|---|---|---|
+| Scout v ALARM: ALARM counted / total / first | 63 / 2470 / 5.3 s | 0 | 49 / 1161 / 2.6 s |
+| Scout v ALARM: Scout counted / total | 9 / 121 (first 49 s) | 1 / 11 | 0 |
+| Razor v FlapJack: Razor / FlapJack counted | 3 (40) / 1 (12), first 6.0 s | 0 / 0 | 8 (265), first 33 s / 0 |
+
+(Before = this branch's contacts without the pricing rules; f6cb227 had 7
+Scout hits, from the corner manifold's extra points.) The test now also checks
+that within 30 s the blows are ALARM's, as live. AI suite (ten pairings): all
+ten deal damage (eight on f6cb227). Captures are in
+`local/oracle/original` (`contacts-drive-*`, `contacts-nohaz-*`, `fight-*`,
+`fightcontacts-*`, `hinge-octagon`, `agent-dispatch-scout-alarm`; manifest
+rows of 2026-10-19).
 
 **Mass**: every stock chassis body with a SmartZone weighs 2 kg more live
 (163.49 against our 161.49 kg; Razor, without one, 212.52 on both): the
@@ -649,8 +684,8 @@ loader skips. `rig::smart_zone_mass` adds it to the body it is bolted to.
 **Hinge direction rule** (`0x4814ca..`): the HingeController takes `+0x70/+0x74`
 as min/max of the hinge's limits (`FUN_004801f0`), so the start > end flip
 never fires from construction; `hinge + 0x60` is the axis in body B's frame
-(`FUN_00525830`). Live (Octagon, `Arenas.currentArena.Hammer1.Smash()`, hinge
-atom `0x535a50` hooked): the motor velocity is `+94` (the negated
+(`FUN_00525830`). Live (`hinge-octagon__live__000`: Octagon, `Arenas.currentArena.Hammer1.Smash()`,
+hinge atom `0x535a50` hooked): the motor velocity is `+94` (the negated
 `trunc(-0.95·100)`) and the hammer turns `+x` (ω 11-16 rad/s) toward the
 arena's centre; retracting, `-2` and `-x`. Ours drives the same hammer `+x`
 toward the centre with the velocity's own sign, so applying the axis rule on
