@@ -514,8 +514,9 @@ impl Havok17Backend {
         out
     }
 
-    /// Which surfaces the bodies' phantoms overlap now (the phantom events at
-    /// the end of `stepTo`).
+    /// Which surfaces the bodies' phantoms touch now (the phantom events at the
+    /// end of `stepTo`). A phantom is a collidable flagged `DISABLE_COLLISIONS`:
+    /// detected like any other, within the tolerance, but never resolved.
     fn detect_phantoms(&mut self) {
         for i in 0..self.bodies.len() {
             self.phantom_touch[i] = None;
@@ -527,7 +528,8 @@ impl Havok17Backend {
                 continue;
             };
             let id = self.geometry[i].as_ref().map(|g| g.id);
-            let query = CollideShape::new(phantom, rv(b.origin()), jq(b.rotation));
+            let query = CollideShape::new(phantom, rv(b.origin()), jq(b.rotation))
+                .max_separation_distance(TOLERANCE);
             let filter = match id {
                 Some(id) => QueryFilter::new().exclude_body(id),
                 None => QueryFilter::new(),
@@ -545,7 +547,7 @@ impl Havok17Backend {
                     continue;
                 }
                 let n = un_v(hit.normal);
-                if n.length_squared() < 0.5 {
+                if n.length_squared() < 0.5 || -hit.penetration_depth >= TOLERANCE {
                     continue;
                 }
                 if best.is_none_or(|(d, _)| hit.penetration_depth > d) {

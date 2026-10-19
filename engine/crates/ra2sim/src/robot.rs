@@ -291,7 +291,7 @@ impl Robot {
     /// bodies to exist).
     pub fn spawn(
         physics: &mut dyn PhysicsBackend,
-        rig: RobotRig,
+        mut rig: RobotRig,
         team: usize,
         position: Vec3,
         rotation: Quat,
@@ -303,9 +303,10 @@ impl Robot {
         let sub_groups = rig.parts.len() as u32;
 
         let havok = physics.name() == "havok17";
+        let shift = Self::cock_burst_pistons(&mut rig);
         let mut parts = Vec::with_capacity(rig.parts.len());
         for (p, part) in rig.parts.iter().enumerate() {
-            let world = bot * rig.components[part.root].local;
+            let world = bot * Mat4::from_translation(shift[p]) * rig.components[part.root].local;
             let (_, rot, pos) = world.to_scale_rotation_translation();
             let (shape, mass, friction, restitution, phantom) = if havok {
                 let h = Self::havok_part(&rig, p);
@@ -358,10 +359,13 @@ impl Robot {
             let (Some(parent), Some(info)) = (rig.parts[p].parent, rig.parts[p].joint) else {
                 continue;
             };
+            // The pivot rides on the parent; a child moved off its rest pose
+            // (a cocked piston rod) names it from where it now is.
+            let child_pivot = info.pivot + shift[parent] - shift[p];
             let joint = if info.slider {
-                Self::make_slider(physics, &rig, &parts, parent, p, info)?
+                Self::make_slider(physics, &rig, &parts, parent, p, info, child_pivot)?
             } else {
-                Self::make_hinge(physics, &rig, &parts, parent, p, info)?
+                Self::make_hinge(physics, &rig, &parts, parent, p, info, child_pivot)?
             };
             parts[p].joint = Some(joint);
         }
@@ -395,6 +399,52 @@ impl Robot {
             team,
             rig,
         })
+    }
+
+    /// Spawn every burst piston cocked: its rod retracted to the far end of
+    /// its travel, from where it fires. Returns each part's bot-space offset
+    /// from the rest pose, and re-bases those pistons' travel on the cocked
+    /// pose.
+    ///
+    /// Live, ALARM's hammer body (33 kg: hammer head 25 + piston `shaft` 8)
+    /// sits at the chassis' height, 0.82 m in front of it, and the robot rests
+    /// on its four hubs (`bodies.json`, `clist_rest`); at the model's own pose
+    /// the hammer hangs 0.74 m lower, below the wheels, and holds the robot
+    /// up. Its `burstpiston2` declares `prismatic = body, shaft, 0, 0, 1, 0,
+    /// -0.73, 0.2`: the 0.73 m the rod can retract is that difference. So the
+    /// travel counts along the rod's extension, and a burst piston stands at
+    /// its lower limit — retracted — until it fires.
+    fn cock_burst_pistons(rig: &mut RobotRig) -> Vec<Vec3> {
+        let n = rig.parts.len();
+        let mut own = vec![Vec3::ZERO; n];
+        for (p, part) in rig.parts.iter_mut().enumerate() {
+            let Some(info) = part.joint.as_mut() else {
+                continue;
+            };
+            if !(info.slider && info.use_kind == JointUse::Burst) {
+                continue;
+            }
+            let axis = info.axis.normalize_or_zero();
+            let [lower, upper] = info.limits;
+            if axis == Vec3::ZERO || lower >= 0.0 {
+                continue;
+            }
+            // Retracting runs along the declared axis (toward the housing).
+            own[p] = axis * -lower;
+            info.limits = [-(upper - lower), 0.0];
+        }
+        // A part moves with everything it hangs from.
+        (0..n)
+            .map(|p| {
+                let mut total = Vec3::ZERO;
+                let mut q = Some(p);
+                while let Some(i) = q {
+                    total += own[i];
+                    q = rig.parts[i].parent;
+                }
+                total
+            })
+            .collect()
     }
 
     /// The Havok body of part `p` (see [`crate::rig::HavokParts`]): one convex
@@ -632,11 +682,7 @@ impl Robot {
                     let target = (percent as f32 * 0.01 * info.rate * power).trunc();
                     if (power - self.motor_power[w.part]).abs() > 1e-4 {
                         self.motor_power[w.part] = power;
-                        physics.set_joint_strength(
-                            joint,
-                            info.max_torque * power,
-                            info.friction_torque,
-                        );
+                        physics.set_joint_strength(joint, info.max_torque * power, 0.0);
                     }
                     physics.drive_hinge(joint, target * CLOCKWISE);
                 }
@@ -772,6 +818,7 @@ impl Robot {
         parent: usize,
         p: usize,
         info: JointInfo,
+        child_pivot: Vec3,
     ) -> Result<JointHandle, BackendError> {
         // The joint's pivot and axis are the parent's mount point, in bot space;
         // both bodies express them in their own space (they coincide in the rest
@@ -789,7 +836,7 @@ impl Robot {
             body_a: parts[parent].body,
             body_b: parts[p].body,
             anchor_a: frame_a.inverse().transform_point3(pivot_bot),
-            anchor_b: frame_b.inverse().transform_point3(pivot_bot),
+            anchor_b: frame_b.inverse().transform_point3(child_pivot),
             axis_a: frame_a.inverse().transform_vector3(axis_bot),
             axis_b: frame_b.inverse().transform_vector3(axis_bot),
             limits: info.limits,
@@ -809,6 +856,7 @@ impl Robot {
         parent: usize,
         p: usize,
         info: JointInfo,
+        child_pivot: Vec3,
     ) -> Result<JointHandle, BackendError> {
         let (pivot_bot, axis_bot) = (info.pivot, info.axis);
         let frame_a = rig.components[rig.parts[parent].root].local;
@@ -822,7 +870,7 @@ impl Robot {
             body_a: parts[parent].body,
             body_b: parts[p].body,
             anchor_a: frame_a.inverse().transform_point3(pivot_bot),
-            anchor_b: frame_b.inverse().transform_point3(pivot_bot),
+            anchor_b: frame_b.inverse().transform_point3(child_pivot),
             axis_a: frame_a.inverse().transform_vector3(axis_bot),
             axis_b: frame_b.inverse().transform_vector3(axis_bot),
             limits: info.limits,

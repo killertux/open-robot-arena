@@ -170,6 +170,9 @@ pub struct JoltBackend {
     pre_step: HashMap<u32, BodyState>,
     /// The length of the last step.
     last_dt: f32,
+    /// Each body's centre of mass in its own frame (by handle), from the
+    /// shape's own volume distribution (`havok17::mass`).
+    com_local: Vec<Vec3>,
 }
 
 impl JoltBackend {
@@ -208,6 +211,7 @@ impl JoltBackend {
             contact_log,
             pre_step: HashMap::new(),
             last_dt: 1.0 / 60.0,
+            com_local: Vec::new(),
         })
     }
 
@@ -356,6 +360,8 @@ impl PhysicsBackend for JoltBackend {
         self.shapes.push(shape);
         let handle = self.ids.len() as BodyHandle;
         self.ids.push(Some(id));
+        self.com_local
+            .push(crate::havok17::mass::of_shape(&desc.shape).com);
         self.lookup.insert(id.to_raw(), handle);
         if let Ok(mut table) = self.friction.write() {
             table.insert(id.to_raw(), desc.friction);
@@ -440,6 +446,38 @@ impl PhysicsBackend for JoltBackend {
 
     fn gravity(&self) -> Vec3 {
         Self::un_v(self.world.gravity())
+    }
+
+    fn mass(&self, handle: BodyHandle) -> Option<f32> {
+        self.world.body(self.id(handle)?).ok()?.mass()
+    }
+
+    fn center_of_mass(&self, handle: BodyHandle) -> Option<Vec3> {
+        let s = self.state(handle)?;
+        let local = self
+            .com_local
+            .get(handle as usize)
+            .copied()
+            .unwrap_or(Vec3::ZERO);
+        Some(s.position + s.rotation * local)
+    }
+
+    fn add_force(&mut self, handle: BodyHandle, force: Vec3) {
+        if let Some(id) = self.id(handle) {
+            if let Ok(mut body) = self.world.body_mut(id) {
+                body.activate();
+                let _ = body.add_force(Self::v(force));
+            }
+        }
+    }
+
+    fn add_torque(&mut self, handle: BodyHandle, torque: Vec3) {
+        if let Some(id) = self.id(handle) {
+            if let Ok(mut body) = self.world.body_mut(id) {
+                body.activate();
+                let _ = body.add_torque(Self::v(torque));
+            }
+        }
     }
 
     fn last_dt(&self) -> f32 {
@@ -724,6 +762,9 @@ impl PhysicsBackend for JoltBackend {
             return Err(BackendError::Body("set_shape on a missing body".into()));
         };
         let built = Self::build_shape(shape)?;
+        if let Some(c) = self.com_local.get_mut(handle as usize) {
+            *c = crate::havok17::mass::of_shape(shape).com;
+        }
 
         // Jolt refuses `set_shape` while a constraint uses the body
         // (`UsedByConstraint`). Every stock chassis is hinged to its wheels, so
