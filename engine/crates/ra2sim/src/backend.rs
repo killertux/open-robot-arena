@@ -4,7 +4,7 @@
 //! today) can be swapped for another by adding an implementation. All values
 //! are in RA2 world units, treated as metres, in the engine's Y-up frame.
 
-use glam::{Quat, Vec3};
+use glam::{Mat3, Quat, Vec3};
 
 /// Opaque handle to a body within a backend.
 pub type BodyHandle = u32;
@@ -513,6 +513,19 @@ pub trait PhysicsBackend {
     /// Drive a hinge's motor: target angular velocity in rad/s. A target of zero
     /// stops the motor and lets the joint swing freely.
     fn drive_hinge(&mut self, _handle: JointHandle, _target_velocity: f32) {}
+
+    /// A body's mass, centre of mass (body frame, from its origin) and
+    /// inverse inertia (body frame), when the backend holds them.
+    fn mass_properties(&self, _handle: BodyHandle) -> Option<(f32, Vec3, Mat3)> {
+        None
+    }
+
+    /// Steer a hinge: turn its free axis, in body A's frame, about `steer_axis`
+    /// (also in A's frame) from where it was built, so that it reads
+    /// `cos(angle) axis + sin(angle) (axis x steer_axis)` — Havok's wheel
+    /// constraint's `setSteeringAngle` (`FUN_00553af0`). A backend without it
+    /// ignores the call.
+    fn steer_hinge(&mut self, _handle: JointHandle, _steer_axis: Vec3, _angle: f32) {}
 
     /// The hinge's current angle in radians (`0.0` if unknown).
     fn hinge_angle(&self, _handle: JointHandle) -> f32 {

@@ -890,6 +890,12 @@ impl PhysicsBackend for Havok17Backend {
         self.body(handle).filter(|b| b.is_dynamic()).map(|b| b.mass)
     }
 
+    fn mass_properties(&self, handle: BodyHandle) -> Option<(f32, Vec3, Mat3)> {
+        self.body(handle)
+            .filter(|b| b.is_dynamic())
+            .map(|b| (b.mass, b.com_local, b.inv_inertia_local))
+    }
+
     fn center_of_mass(&self, handle: BodyHandle) -> Option<Vec3> {
         self.body(handle).map(|b| b.com)
     }
@@ -1098,6 +1104,7 @@ impl PhysicsBackend for Havok17Backend {
             target: 0.0,
             friction: desc.friction_torque,
             saved_limits: None,
+            steer_rest: None,
         });
         Ok((self.joints.len() - 1) as JointHandle)
     }
@@ -1127,6 +1134,7 @@ impl PhysicsBackend for Havok17Backend {
             target: 0.0,
             friction: desc.friction_force,
             saved_limits: None,
+            steer_rest: None,
         });
         Ok((self.joints.len() - 1) as JointHandle)
     }
@@ -1149,6 +1157,22 @@ impl PhysicsBackend for Havok17Backend {
 
     fn drive_hinge(&mut self, handle: JointHandle, target_velocity: f32) {
         self.set_motor(handle, target_velocity);
+    }
+
+    fn steer_hinge(&mut self, handle: JointHandle, steer_axis: Vec3, angle: f32) {
+        let Some(j) = self.joint_mut(handle) else {
+            return;
+        };
+        let rest = j.steer_rest;
+        let joints::Kind::Hinge { axis_a, ref_a, .. } = &mut j.kind else {
+            return;
+        };
+        let (rest_axis, rest_ref) = rest.unwrap_or((*axis_a, *ref_a));
+        // `cos θ a + sin θ (a × s)` is the turn by `-θ` about `s`.
+        let turn = Quat::from_axis_angle(steer_axis.normalize_or_zero(), -angle);
+        *axis_a = (turn * rest_axis).normalize_or_zero();
+        *ref_a = (turn * rest_ref).normalize_or_zero();
+        j.steer_rest = Some((rest_axis, rest_ref));
     }
 
     fn hinge_angle(&self, handle: JointHandle) -> f32 {

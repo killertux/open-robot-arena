@@ -1484,8 +1484,11 @@ impl Duel {
     /// whose `>= 10` gate is the arena's (`FUN_00417330`).
     fn resolve_combat(&mut self) {
         let events = self.physics.take_contacts();
-        let events = self.event_gate.admit(&self.robots, events, self.time);
-        let impacts = combat::resolve(&self.robots, &events, &self.combat);
+        let props = combat::mass_props(&*self.physics, &self.robots);
+        let events = self
+            .event_gate
+            .admit(&self.robots, events, self.time, &props);
+        let impacts = combat::resolve_with(&self.robots, &events, &self.combat, &props);
         if self.record_impacts {
             self.impacts.extend(impacts.iter().copied());
         }
@@ -3310,7 +3313,12 @@ mod tests {
         let mut through = Vec::new();
         for k in 0..120 {
             let t = k as f32 / 60.0;
-            let got = gate.admit(&duel.robots, vec![event(2.0), event(-2.0)], t);
+            let got = gate.admit(
+                &duel.robots,
+                vec![event(2.0), event(-2.0)],
+                t,
+                &combat::MassProps::new(),
+            );
             assert!(got.iter().all(|e| e.state_a.linear_velocity.x > 0.0));
             if !got.is_empty() {
                 through.push(k);
@@ -3646,6 +3654,136 @@ mod tests {
             spin > 5.0,
             "Turn(+100) spins the Razor at {spin} rad/s about +Y"
         );
+    }
+
+    /// The battery power factor `g` (the power budget's scale, docs/30) scales
+    /// a spin motor's *percentage* only: the thrust keeps the hinge
+    /// controller's raw torque. The Razor's 24000/400 battery is undersized
+    /// for its four motors, and live its records fall one percent every
+    /// 0.6 s, 1940, 1920, 1900, 1880, 1862 (= 2 · trunc(0.7 · 14 · {99..95}),
+    /// `magic-razor__live__000`); scaling the torque too would read 1900 for
+    /// the second step.
+    #[test]
+    fn an_undersized_battery_lowers_the_percentage_and_not_the_torque() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let razor = BotSetup {
+            path: game
+                .join("AI/Team10/Bot1.bot")
+                .to_string_lossy()
+                .to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(&arena, &[razor]).expect("a duel");
+        let dt = 1.0 / 60.0;
+        let idle = [DriveInput::default()];
+        for _ in 0..30 {
+            duel.step_direct(&idle, dt);
+        }
+        duel.robots[0].apply_inputs(&[
+            ("LeftRight".to_string(), 0, -100.0),
+            ("LeftRight".to_string(), 1, 100.0),
+        ]);
+        let mut changes: Vec<(f32, f32)> = Vec::new();
+        for i in 0..180 {
+            duel.step_direct(&idle, dt);
+            let thrust = duel.robots[0].magic.as_ref().expect("a drive model").wheels[0]
+                .thrust
+                .abs();
+            if changes.last().is_none_or(|c| c.1 != thrust) {
+                changes.push((i as f32 * dt, thrust));
+            }
+        }
+        let values: Vec<f32> = changes.iter().map(|c| c.1).collect();
+        assert_eq!(
+            values,
+            vec![1960.0, 1940.0, 1920.0, 1900.0, 1880.0, 1862.0],
+            "{changes:?}"
+        );
+        for w in changes[2..].windows(2) {
+            let gap = w[1].0 - w[0].0;
+            assert!(
+                (gap - 0.6).abs() < 0.05,
+                "one percent per 0.6 s: {changes:?}"
+            );
+        }
+    }
+
+    /// A `Steering` unit drives and steers: its hubs' records take the unit's
+    /// thrust (`power` 14: 1960 at full) and their axle turns with the hub to
+    /// `π/6` at full lock, as Sentinel's live records do
+    /// (`magic-sentinel__live__000`: -1960, axle (0.866, 0, -0.5) at
+    /// `Turn(+100)`). Driving forward with `Turn(+100)` raises the heading (as
+    /// `Turn(+)` does on a skid-steered robot); driving forward alone does not.
+    #[test]
+    fn a_steering_unit_steers_sentinel() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let run = |turn: bool| {
+            let sentinel = BotSetup {
+                path: game.join("AI/Team0/Bot2.bot").to_string_lossy().to_string(),
+                yaw_deg: None,
+                spawn: None,
+            };
+            let mut duel = Duel::new(&arena, &[sentinel]).expect("a duel");
+            let dt = 1.0 / 60.0;
+            let idle = [DriveInput::default()];
+            for _ in 0..30 {
+                duel.step_direct(&idle, dt);
+            }
+            let heading = |d: &Duel| {
+                let r = &d.robots[0];
+                let f = r.transform(&*d.physics).transform_vector3(r.rig.forward());
+                f.x.atan2(f.z)
+            };
+            let h0 = heading(&duel);
+            let mut inputs = vec![
+                ("Forward".to_string(), 0, 100.0),
+                ("Forward".to_string(), 1, 0.0),
+            ];
+            if turn {
+                inputs.push(("LeftRight".to_string(), 0, -100.0));
+                inputs.push(("LeftRight".to_string(), 1, 100.0));
+            }
+            duel.robots[0].apply_inputs(&inputs);
+            let mut turned = 0.0f32;
+            let mut last = h0;
+            for _ in 0..45 {
+                duel.step_direct(&idle, dt);
+                let h = heading(&duel);
+                turned += (h - last + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                last = h;
+            }
+            let magic = duel.robots[0].magic.clone().expect("a drive model");
+            (turned, magic)
+        };
+        let (turned, magic) = run(true);
+        let steered: Vec<_> = magic.wheels.iter().filter(|w| w.steer.is_some()).collect();
+        assert_eq!(steered.len(), 2, "two steering hubs");
+        for w in &steered {
+            assert_eq!(w.thrust, -1960.0);
+            let s = w.steer.expect("steer");
+            assert!(
+                (s.angle + std::f32::consts::PI / 6.0).abs() < 1e-4,
+                "{}",
+                s.angle
+            );
+            assert!(
+                (w.axle - Vec3::new(0.866, 0.0, -0.5)).length() < 0.01,
+                "{:?}",
+                w.axle
+            );
+        }
+        assert!(
+            turned > 0.5,
+            "Turn(+100) at full throttle turns {turned} rad in 0.75 s"
+        );
+        let (straight, _) = run(false);
+        assert!(straight.abs() < 0.2, "straight ahead turns {straight} rad");
     }
 
     /// The shipped AI closes on its enemy, sees it in its own SmartZone and

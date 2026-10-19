@@ -148,10 +148,16 @@ physics/AI work. The model itself reproduces every per-action number above.
 
 ## 5. Not recovered / not verified
 
-* Servo motors, angle motors, linear actuators, steering, magnets, cannons,
+* Servo motors, angle motors, linear actuators, magnets, cannons,
   flamethrowers have `*maxinoutrate` in their definitions but were not driven on
   the original; their draw here is `rate * |command| / 100` (**guess**). Weapons'
-  draws (cannon air, flamethrower, magnet) are **not modelled**.
+  draws (cannon air, flamethrower, magnet) are **not modelled**. A `Steering`
+  unit draws `|drive command| * dt` like a spin motor (its `+0x5c`,
+  `0x4f6cd0`; read from the code, docs/29 §11a), whatever its
+  `elecmaxinoutrate`.
+* The scale `g` reaches a spin motor's (and a steering unit's) thrust through
+  its integer percentage only, not its torque (docs/29 §11b, checked on the
+  Razor's live records).
 * The effect of an empty tank on a piston (force factor 0) is code reading only.
 * The original's `+0x80` flag (a robot with it clear gets scale 1 and no budget) is
   set for every robot seen.

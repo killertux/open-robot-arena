@@ -241,6 +241,48 @@ pub fn body_dynamics(robot: &Robot, part: usize, state: &BodyState) -> BodyDynam
     }
 }
 
+/// What the physics backend holds for a body: mass, centre of mass in the
+/// body's frame and inverse inertia in the body's frame.
+pub type MassProps = HashMap<BodyHandle, (f32, Vec3, Mat3)>;
+
+/// The backend's own mass properties of every live robot body (empty for a
+/// backend that does not expose them).
+pub fn mass_props(physics: &dyn crate::backend::PhysicsBackend, robots: &[Robot]) -> MassProps {
+    let mut out = MassProps::new();
+    for robot in robots {
+        for part in robot.parts.iter().filter(|p| p.alive) {
+            if let Some(m) = physics.mass_properties(part.body) {
+                out.insert(part.body, m);
+            }
+        }
+    }
+    out
+}
+
+/// The dynamics `FUN_0045a5a0` prices with: the Havok bodies' own mass
+/// (`body + 0x190`, read by `FUN_0045a430` into the record), centre of mass
+/// (`+0x30`) and world inverse inertia (`+0x10c`). Without the backend's
+/// numbers (Jolt), [`body_dynamics`] rebuilds them from the components.
+fn dynamics_of(
+    robot: &Robot,
+    part: usize,
+    body: BodyHandle,
+    state: &BodyState,
+    props: &MassProps,
+) -> BodyDynamics {
+    match props.get(&body) {
+        Some(&(mass, com_local, inv_local)) => {
+            let r = Mat3::from_quat(state.rotation);
+            BodyDynamics {
+                mass,
+                com: state.position + state.rotation * com_local,
+                inv_inertia: r * inv_local * r.transpose(),
+            }
+        }
+        None => body_dynamics(robot, part, state),
+    }
+}
+
 /// The attached component of `part` closest to the world point `p`, by distance
 /// to its own bounding box. This is the "exact touched component": the compound
 /// body is built from one hull per component, so the contact point lies on one
@@ -307,6 +349,7 @@ impl EventGate {
         robots: &[Robot],
         events: Vec<ContactEvent>,
         now: f32,
+        props: &MassProps,
     ) -> Vec<ContactEvent> {
         let mut interval: HashMap<BodyHandle, f32> = HashMap::new();
         let mut owner: HashMap<BodyHandle, (usize, usize)> = HashMap::new();
@@ -318,7 +361,7 @@ impl EventGate {
             }
         }
         let com = |body: BodyHandle, state: &BodyState| match owner.get(&body) {
-            Some(&(r, p)) => body_dynamics(&robots[r], p, state).com,
+            Some(&(r, p)) => dynamics_of(&robots[r], p, body, state, props).com,
             None => state.position,
         };
         for robot in robots {
@@ -402,6 +445,16 @@ fn face_alignment(
 /// returned whatever its size, so the caller can apply the
 /// [`CombatConfig::apply_threshold`] gate the way `FUN_00417330` does.
 pub fn resolve(robots: &[Robot], events: &[ContactEvent], cfg: &CombatConfig) -> Vec<Impact> {
+    resolve_with(robots, events, cfg, &MassProps::new())
+}
+
+/// [`resolve`] with the physics backend's own mass properties ([`mass_props`]).
+pub fn resolve_with(
+    robots: &[Robot],
+    events: &[ContactEvent],
+    cfg: &CombatConfig,
+    props: &MassProps,
+) -> Vec<Impact> {
     let mut owner: HashMap<BodyHandle, (usize, usize)> = HashMap::new();
     for (r, robot) in robots.iter().enumerate() {
         for (p, part) in robot.parts.iter().enumerate() {
@@ -419,8 +472,8 @@ pub fn resolve(robots: &[Robot], events: &[ContactEvent], cfg: &CombatConfig) ->
             continue;
         }
         let (robot_a, robot_b) = (&robots[ra], &robots[rb]);
-        let dyn_a = body_dynamics(robot_a, pa, &e.state_a);
-        let dyn_b = body_dynamics(robot_b, pb, &e.state_b);
+        let dyn_a = dynamics_of(robot_a, pa, e.a, &e.state_a, props);
+        let dyn_b = dynamics_of(robot_b, pb, e.b, &e.state_b, props);
         let n = e.normal.normalize_or_zero();
         if n == Vec3::ZERO || dyn_a.mass <= 0.0 || dyn_b.mass <= 0.0 {
             continue;

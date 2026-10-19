@@ -34,6 +34,10 @@
 //! (`DAT_006a57a8`) an angular impulse that bleeds the excess spin at
 //! `0.1 · m`. `m` is the chassis body's mass (`body + 0x190`).
 //!
+//! A `Steering` unit's hubs have records too: they take the unit's own thrust
+//! and their axle turns with the hub's steer angle ([`Steer`], docs/29 §11a),
+//! which is all steering does to the push.
+//!
 //! Decoded from the x87 code of `0x4856f0` (its vector helpers: `0x404990`
 //! scale, `0x45a730` cross, `0x535940` dot, `0x401ae0` length,
 //! `0x4b0a10`/`0x4812e0` impulse at a point, `0x4b0950` force accumulator
@@ -63,14 +67,67 @@ pub const SPIN_LIMIT: f32 = 10.0;
 pub const SPIN_BLEED: f32 = 0.1;
 /// A wheel stays touching this long after its phantom last touched (`0x6a6080`).
 pub const TOUCH_MEMORY: f32 = 0.2;
+/// A `Steering` unit's full lock: a steer command of 100 asks for `π/6`
+/// (`0x4f6790`: `command · π (0x6ab2d4) · 1/6 (0x6ab350) · 0.01`).
+pub const STEER_LOCK: f32 = std::f32::consts::PI / 6.0;
+/// How fast a steered hub turns toward its target angle, rad/s (`0x5089d0`,
+/// `0x6a7384`).
+pub const STEER_RATE: f32 = 4.0;
+
+/// What a `Steering` unit's record carries besides a plain wheel's.
+#[derive(Clone, Copy, Debug)]
+pub struct Steer {
+    /// The `Steering` component.
+    pub unit: usize,
+    /// Its drive torque (the definition's `power`).
+    pub power: f32,
+    /// The steering axis, chassis frame (the hub constraint's `+0x98`), and
+    /// in the frame of the body the hub's hinge hangs from.
+    pub axis: Vec3,
+    pub hinge_axis: Vec3,
+    /// The record's axle at zero steer.
+    pub rest_axle: Vec3,
+    /// The hub's angle now (`+0x68`, copied to the record's `+0x24`) and the
+    /// one it is turning to (`+0x64`).
+    pub angle: f32,
+    pub target: f32,
+}
+
+impl Steer {
+    /// The target a steer command (`-100..=100`) asks for.
+    pub fn target_for(command: f32) -> f32 {
+        command.clamp(-100.0, 100.0) * 0.01 * STEER_LOCK
+    }
+
+    /// One step of the hub's turn (`0x5089d0`): at most `STEER_RATE · dt`
+    /// toward the target, landing on it when that is closer.
+    pub fn turn(&mut self, dt: f32) {
+        let gap = self.target - self.angle;
+        let step = STEER_RATE * dt;
+        if step >= gap.abs() {
+            self.angle = self.target;
+        } else {
+            self.angle += step.copysign(gap);
+        }
+    }
+
+    /// The steered axle (`FUN_00553af0`): `cos θ a + sin θ (a × s)`.
+    pub fn axle(&self) -> Vec3 {
+        let (sin, cos) = self.angle.sin_cos();
+        self.rest_axle * cos + self.rest_axle.cross(self.axis) * sin
+    }
+}
 
 /// One wheel record (`0x50` bytes in the original).
 #[derive(Clone, Debug)]
 pub struct WheelRecord {
     /// The wheel's own body (its hub) — what touches the ground.
     pub part: usize,
-    /// The `SpinMotor` component driving it (`None` for an axle mount).
+    /// The `SpinMotor` component driving it (`None` for an axle mount or a
+    /// steering hub).
     pub motor: Option<usize>,
+    /// The `Steering` unit whose hub this is.
+    pub steer: Option<Steer>,
     /// Hub centre relative to the chassis centre, chassis frame (`+0x2c`).
     pub point: Vec3,
     /// The axle, chassis frame (`+0x3c`).
@@ -207,10 +264,39 @@ mod tests {
     }
 
     #[test]
+    fn a_steering_hub_turns_at_four_radians_a_second_to_its_lock() {
+        // Full lock is π/6 (`0x4f6790`); the live records read ±0.524.
+        assert!((Steer::target_for(-100.0) - (-0.524)).abs() < 1e-3);
+        assert_eq!(Steer::target_for(250.0), STEER_LOCK);
+        let mut s = Steer {
+            unit: 7,
+            power: 14.0,
+            axis: Vec3::Y,
+            hinge_axis: Vec3::Y,
+            rest_axle: Vec3::X,
+            angle: 0.0,
+            target: Steer::target_for(-100.0),
+        };
+        s.turn(0.1);
+        assert!((s.angle + 0.4).abs() < 1e-6, "4 rad/s: {}", s.angle);
+        s.turn(0.1);
+        assert_eq!(s.angle, s.target, "lands on the target");
+        // `cos θ a + sin θ (a × s)`: at -π/6 the axle reads (0.866, 0, -0.5),
+        // as Sentinel's live records do (`magic-sentinel__live__000`).
+        let a = s.axle();
+        assert!((a - Vec3::new(0.8660, 0.0, -0.5)).length() < 1e-3, "{a:?}");
+        // The unit's thrust doubles `trunc(0.7 · power · percent)`: 1960 at a
+        // full command and 196 at 10 % for `power = 14`, the live records.
+        assert_eq!(MagicAction::thrust(14.0, -100), -1960.0);
+        assert_eq!(MagicAction::thrust(14.0, 10), 196.0);
+    }
+
+    #[test]
     fn a_wheel_stays_down_for_a_fifth_of_a_second() {
         let mut w = WheelRecord {
             part: 1,
             motor: None,
+            steer: None,
             point: Vec3::ZERO,
             axle: Vec3::X,
             grip: 1.0,
