@@ -391,6 +391,9 @@ impl Session {
         // session drains them each step into cues.
         matched.duel.record_impacts = true;
         let cfg = crate::options::read_cfg(game);
+        // `FUN_0046e5e0() == 1`: sparks and motor smoke are the `GraphicEffects`
+        // option's.
+        matched.duel.fx.enabled = cfg.graphic_effects();
         let mut camera = default_camera;
         let mut camera_name = None;
         if cfg.arena_intros() && std::env::var("RA2_ARENA_INTROS").as_deref() != Ok("0") {
@@ -1411,6 +1414,7 @@ mod tests {
                 by: 0,
                 damage,
                 point: glam::Vec3::new(1.0, 2.0, 3.0),
+                normal: glam::Vec3::Y,
                 speed: 4.0,
             });
         }

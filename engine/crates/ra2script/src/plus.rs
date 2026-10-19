@@ -11,8 +11,11 @@
 //! * **Sound** — `createSound`, `playSound`, `loopSound`, `stopSound` and
 //!   `removeSound` are a real handle table and an ordered queue
 //!   ([`crate::SoundQueue`]); a caller drains it into `ra2-audio`.
-//! * **Presentation still deferred** — particles and the camera are recorded so
-//!   a run reports exactly what it dropped rather than silently ignoring it.
+//! * **Particles** — `AddParticleEmitter` registers a flame emitter in
+//!   [`crate::State::emitters`] (`SetEmitting` flips it); the match's particle
+//!   system draws it.
+//! * **Presentation still deferred** — the camera calls are recorded so a run
+//!   reports exactly what it dropped rather than silently ignoring it.
 
 use std::collections::BTreeMap;
 
@@ -561,12 +564,15 @@ fn add_particle_emitter(
     velocity: (f32, f32, f32),
     variance: (f32, f32, f32),
 ) -> ParticleEmitter {
-    defer("particles (M5)");
-    ParticleEmitter {
+    let mut st = crate::state();
+    st.emitters.push(crate::arena::EmitterState {
         location: [location.0, location.1, location.2],
         velocity: [velocity.0, velocity.1, velocity.2],
         variance: [variance.0, variance.1, variance.2],
         emitting: false,
+    });
+    ParticleEmitter {
+        id: st.emitters.len() - 1,
     }
 }
 
@@ -982,6 +988,43 @@ plus.removeSound(intro)\n",
             !st.deferred.iter().any(|what| what.contains("audio")),
             "sounds are no longer deferred: {:?}",
             st.deferred
+        );
+    }
+
+    /// `Hazards.Flame` makes its emitter with `plus.AddParticleEmitter` and
+    /// flips it with `SetEmitting`; the engine side reads the switch from the
+    /// script state (`FUN_004b5760` builds the emitter, `FUN_0048e0b0` is the
+    /// switch).
+    #[test]
+    fn a_flame_emitter_is_registered_and_switched() {
+        let _guard = crate::lock();
+        crate::state().emitters.clear();
+        Python::with_gil(|py| {
+            crate::plus::register(py).expect("register plus");
+            py.run(
+                c"import plus\n\
+e = plus.AddParticleEmitter((1.0, 2.0, 3.0), (0.0, 0.5, 0.0), (0.1, 0.0, 0.1))\n\
+f = plus.AddParticleEmitter((4.0, 5.0, 6.0), (0.0, 1.0, 0.0), (0.0, 0.0, 0.0))\n\
+assert e.emitting == False\n\
+e.SetEmitting(True)\n\
+assert e.emitting == True and f.emitting == False\n\
+f.emitting = True\n\
+e.SetEmitting(False)\n",
+                None,
+                None,
+            )
+            .expect("the flame hazard's calls run");
+        });
+        let st = crate::state();
+        assert_eq!(st.emitters.len(), 2);
+        assert_eq!(st.emitters[0].location, [1.0, 2.0, 3.0]);
+        assert_eq!(st.emitters[0].velocity, [0.0, 0.5, 0.0]);
+        assert_eq!(st.emitters[0].variance, [0.1, 0.0, 0.1]);
+        assert!(!st.emitters[0].emitting);
+        assert!(st.emitters[1].emitting, "the attribute is the switch too");
+        assert!(
+            !st.deferred.iter().any(|what| what.contains("particles")),
+            "particles are no longer deferred"
         );
     }
 

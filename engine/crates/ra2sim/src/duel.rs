@@ -163,6 +163,11 @@ pub struct Duel {
     /// The match's one scene camera (F2/F3/F4, the arena intro): see
     /// [`crate::camera`].
     pub scene_camera: crate::camera::SceneCamera,
+    /// The match's particle effects (sparks, debris, motor smoke, flames).
+    pub fx: ra2_render::effects::Effects,
+    /// The arena's shadow light and receiver triangles, read from the script
+    /// layer once the arena script has declared them.
+    shadow: Option<(Vec3, Vec<[Vec3; 3]>)>,
 }
 
 /// What the AI is doing right now.
@@ -438,6 +443,10 @@ impl Duel {
             arena_timer: 0.0,
             applied_pinned: std::collections::BTreeMap::new(),
             scene_camera: crate::camera::SceneCamera::default(),
+            fx: ra2_render::effects::Effects::new(
+                ra2_render::find_game_root(std::path::Path::new(arena_path)).as_deref(),
+            ),
+            shadow: None,
         })
     }
 
@@ -1142,6 +1151,7 @@ impl Duel {
         }
 
         self.resolve_combat();
+        self.update_effects(dt);
         self.update_immobility(dt);
         self.time += dt;
         // What the scripts asked for, at the top of the step after the one they
@@ -1149,6 +1159,70 @@ impl Duel {
         // `eliminatePlayer`. It belongs to the step, not to whichever driver ran
         // it, so an arena hazard reaches the robots however the robots are driven.
         self.service_requests(dt);
+    }
+
+    /// Advance the particle effects: the motors that smoke, the arena's flames,
+    /// and the shadow data once the arena script has declared it.
+    fn update_effects(&mut self, dt: f32) {
+        if self.shadow.is_none() {
+            let st = ra2script::state();
+            if let Some(arena) = st.arena.as_ref() {
+                if let Ok(a) = arena.lock() {
+                    if let Some(light) = a.shadow_source {
+                        let tris: Vec<[Vec3; 3]> = a
+                            .shadow_triangles
+                            .iter()
+                            .map(|t| [Vec3::from(t[0]), Vec3::from(t[1]), Vec3::from(t[2])])
+                            .collect();
+                        self.fx.set_collision(tris.clone());
+                        self.shadow = Some((Vec3::from(light), tris));
+                    }
+                }
+            }
+        }
+        // The arena's lightning bolts (`CreateLightning`, ...): the script owns
+        // their ends and switches, the effects draw them.
+        let bolts: Vec<_> = ra2script::state()
+            .arena
+            .as_ref()
+            .and_then(|a| a.lock().ok().map(|a| a.lightning.clone()))
+            .unwrap_or_default();
+        self.fx.set_lightning(
+            bolts
+                .iter()
+                .map(|(i, a, b, on)| (*i, Vec3::from(*a), Vec3::from(*b), *on)),
+        );
+        if self.fx.enabled {
+            for r in 0..self.robots.len() {
+                let smoking: Vec<usize> = (0..self.robots[r].rig.components.len())
+                    .filter(|&i| self.robots[r].smoking(i))
+                    .collect();
+                let worlds =
+                    (!smoking.is_empty()).then(|| self.robots[r].component_worlds(&*self.physics));
+                for i in 0..self.robots[r].rig.components.len() {
+                    if self.robots[r].rig.components[i].role != crate::rig::Role::Motor {
+                        continue;
+                    }
+                    let key = ((r as u64) << 16) | i as u64;
+                    let on = smoking.contains(&i);
+                    let at = worlds
+                        .as_ref()
+                        .map_or(Vec3::ZERO, |w| w[i].transform_point3(Vec3::ZERO));
+                    self.fx.motor_smoke(key, at, on);
+                }
+            }
+            let flames: Vec<_> = ra2script::state().emitters.clone();
+            for (i, e) in flames.iter().enumerate() {
+                self.fx.flame(
+                    (1 << 40) | i as u64,
+                    Vec3::from(e.location),
+                    Vec3::from(e.velocity),
+                    Vec3::from(e.variance),
+                    e.emitting,
+                );
+            }
+        }
+        self.fx.step(dt);
     }
 
     /// Turn the step's contact points into damage.
@@ -1163,6 +1237,7 @@ impl Duel {
             self.impacts.extend(impacts.iter().copied());
         }
         for imp in &impacts {
+            self.sparks_for(imp);
             self.apply_hit(
                 Some(imp.attacker),
                 imp.target,
@@ -1170,6 +1245,30 @@ impl Duel {
                 imp.damage,
                 imp.point,
             );
+        }
+    }
+
+    /// The sparks of one priced contact (`FUN_0045f3a0` → `FUN_004a2a50`):
+    /// only above `10` damage, only when a metal part is in the contact and no
+    /// rubber one is, `int(damage)` of them leaving along the contact normal.
+    fn sparks_for(&mut self, imp: &combat::Impact) {
+        if imp.damage <= 10.0 || !self.fx.enabled {
+            return;
+        }
+        let class = |robot: usize, component: usize| {
+            self.robots
+                .get(robot)
+                .and_then(|r| r.rig.components.get(component))
+                .map(|c| combat::material_class(c.material.as_deref()).to_string())
+        };
+        let classes = [
+            class(imp.target, imp.component),
+            class(imp.attacker, imp.by),
+        ];
+        let metal = classes.iter().flatten().any(|c| c == "metal");
+        let rubber = classes.iter().flatten().any(|c| c == "rubber");
+        if metal && !rubber {
+            self.fx.sparks(imp.damage, imp.point, imp.normal);
         }
     }
 
@@ -1247,6 +1346,7 @@ impl Duel {
             return true;
         }
         if applied.detach {
+            self.fx.debris(damage, point, Vec3::Y);
             self.break_off(victim, component, point);
             true
         } else {
@@ -1402,8 +1502,14 @@ impl Duel {
         h: u32,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         self.apply_background(renderer);
-        let groups = self.render_groups();
-        renderer.render_groups(&groups, self.view_proj(camera, w, h), w, h)
+        let view_proj = self.view_proj(camera, w, h);
+        let fx = self.effect_items(view_proj);
+        let mut groups = self.render_groups();
+        groups.push(RenderGroup {
+            items: &fx,
+            model: Mat4::IDENTITY,
+        });
+        renderer.render_groups(&groups, view_proj, w, h)
     }
 
     /// Render the current frame into an existing colour target and depth
@@ -1424,14 +1530,49 @@ impl Duel {
         h: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.apply_background(renderer);
-        let groups = self.render_groups();
-        renderer.render_groups_to(
-            &groups,
-            self.view_proj(camera, w, h),
-            color_view,
-            depth_view,
-            format,
-        )
+        let view_proj = self.view_proj(camera, w, h);
+        let fx = self.effect_items(view_proj);
+        let mut groups = self.render_groups();
+        groups.push(RenderGroup {
+            items: &fx,
+            model: Mat4::IDENTITY,
+        });
+        renderer.render_groups_to(&groups, view_proj, color_view, depth_view, format)
+    }
+
+    /// The shadows and particles of this frame, in world space.
+    ///
+    /// Shadows are each attached component's hull projected from the arena's
+    /// shadow light onto its declared receivers (`ShadowWizard`); particles are
+    /// billboarded to the camera `view_proj` looks through.
+    pub fn effect_items(&self, view_proj: Mat4) -> Vec<DrawItem> {
+        let mut out = Vec::new();
+        if let Some((light, receivers)) = &self.shadow {
+            // One caster per attached component, as `ShadowWizard` has one per
+            // object: its hull points in the world.
+            let mut casters: Vec<Vec<Vec3>> = Vec::new();
+            for r in self.robots.iter().filter(|r| r.parts[0].alive) {
+                let worlds = r.component_worlds(&*self.physics);
+                for (i, c) in r.rig.components.iter().enumerate() {
+                    if r.attached[i] && !c.hull_points.is_empty() {
+                        casters.push(
+                            c.hull_points
+                                .iter()
+                                .map(|p| worlds[i].transform_point3(*p))
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            out.extend(ra2_render::effects::shadow_item(
+                *light, receivers, &casters,
+            ));
+        }
+        if !self.fx.is_empty() {
+            let (right, up) = ra2_render::effects::camera_axes(view_proj);
+            out.extend(self.fx.items(right, up));
+        }
+        out
     }
 
     /// Clear to the arena script's `setBackColor`, else the `.gmf`'s own
@@ -2684,6 +2825,132 @@ mod tests {
         robot.health[motor] = 0.49 * robot.rig.components[motor].hitpoints;
         assert!(robot.smoking(motor));
         assert!(!robot.smoking(0), "only motors smoke");
+    }
+
+    /// `FUN_0045f3a0` / `FUN_004a2a50`: a hit over 10 on metal throws sparks
+    /// (`int(damage)` of them, along the contact normal), a hit of 10 or less
+    /// does not, and neither does one that touches rubber.
+    #[test]
+    fn sparks_follow_the_impact_rule() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        let hit = |damage: f32| combat::Impact {
+            attacker: 1,
+            target: 0,
+            component: 0,
+            by: 0,
+            damage,
+            point: Vec3::new(0.0, 1.0, 0.0),
+            normal: Vec3::Y,
+            speed: 3.0,
+        };
+        duel.sparks_for(&hit(10.0));
+        assert!(duel.fx.is_empty(), "10 is not over 10");
+        duel.sparks_for(&hit(14.5));
+        assert!(!duel.fx.is_empty(), "a priced metal hit throws sparks");
+        duel.fx = ra2_render::effects::Effects::new(None);
+        duel.fx.enabled = false;
+        duel.sparks_for(&hit(40.0));
+        assert!(duel.fx.is_empty(), "GraphicEffects off");
+        duel.fx.enabled = true;
+        for r in &mut duel.robots {
+            for c in &mut r.rig.components {
+                c.material = Some("rubber(0)".into());
+            }
+        }
+        duel.sparks_for(&hit(40.0));
+        assert!(duel.fx.is_empty(), "rubber on the contact: no sparks");
+    }
+
+    /// `ShadowWizard`: the arena's declared light and receivers reach the
+    /// renderer, and a robot over the floor casts onto it; a flame hazard's
+    /// emitter turns on with `SetEmitting`.
+    #[test]
+    fn the_arena_declares_the_shadows_and_flames() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        duel.step(1.0 / 60.0);
+        let items = duel.effect_items(Mat4::IDENTITY);
+        let shadow = items
+            .iter()
+            .find(|i| i.label == "shadows")
+            .expect("shadows");
+        assert!(shadow.material.blended());
+        // The shadow lies on the floor (y = -2.1126 + the lift) or a wall.
+        assert!(shadow
+            .vertices
+            .iter()
+            .any(|v| (v.pos[1] + 2.1126).abs() < 0.05));
+        // A motor under half its hitpoints smokes once the step runs.
+        let robot = &mut duel.robots[0];
+        let motor = (0..robot.rig.components.len())
+            .find(|&i| robot.rig.components[i].role == crate::rig::Role::Motor)
+            .expect("Scout has a motor");
+        robot.health[motor] = 0.4 * robot.rig.components[motor].hitpoints;
+        for _ in 0..30 {
+            duel.step(1.0 / 60.0);
+        }
+        assert!(!duel.fx.is_empty(), "the smoking motor emits");
+    }
+
+    /// The electric arena's twelve bolts (`CreateLightning`) are on while its
+    /// hazards are, and reach the renderer as one ribbon item.
+    #[test]
+    fn the_electric_arenas_lightning_is_drawn() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game
+            .join("Arenas/electric.py")
+            .to_string_lossy()
+            .to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        for _ in 0..6 {
+            duel.step(1.0 / 60.0);
+        }
+        let bolts = ra2script::state()
+            .arena
+            .as_ref()
+            .map(|a| a.lock().unwrap().lightning.clone())
+            .unwrap_or_default();
+        assert_eq!(bolts.len(), 12, "CreateLightning ran twelve times");
+        assert!(bolts.iter().all(|b| b.3), "HazardsOn lit them all");
+        let items = duel.effect_items(Mat4::IDENTITY);
+        let item = items
+            .iter()
+            .find(|i| i.label == "lightning")
+            .expect("the bolts draw");
+        assert_eq!(item.vertices.len(), 12 * 2 * 5 * 6);
     }
 
     /// `FUN_00417330`: below 10 a hit only drives effects.
