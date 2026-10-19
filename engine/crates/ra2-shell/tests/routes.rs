@@ -427,7 +427,11 @@ fn the_help_button_opens_the_screens_help_window() {
     shell.click_named("exhibition button").unwrap();
     let step = shell.click_named("Help button").unwrap();
     assert_eq!(step.screen, "help/helpframe.gib");
-    assert!(step.note.as_deref().unwrap_or("").contains("help"), "{:?}", step.note);
+    assert!(
+        step.note.as_deref().unwrap_or("").contains("help"),
+        "{:?}",
+        step.note
+    );
     let doc = shell.document();
     let texts: Vec<String> = doc
         .walk()
@@ -442,11 +446,20 @@ fn the_help_button_opens_the_screens_help_window() {
 
     // The bot lab: each tab has its own help (ids 4-9).
     let mut shell = Shell::boot(&game, [1024.0, 768.0]).unwrap();
-    for name in ["Team HQ button", "continue button", "robots button", "workshop button"] {
+    for name in [
+        "Team HQ button",
+        "continue button",
+        "robots button",
+        "workshop button",
+    ] {
         shell.click_named(name).unwrap();
     }
     shell.click_named("wiring button").unwrap();
     let step = shell.click_named("Help button").unwrap();
     assert_eq!(step.screen, "help/helpframe.gib");
-    assert!(step.note.as_deref().unwrap_or("").contains("(8)"), "{:?}", step.note);
+    assert!(
+        step.note.as_deref().unwrap_or("").contains("(8)"),
+        "{:?}",
+        step.note
+    );
 }

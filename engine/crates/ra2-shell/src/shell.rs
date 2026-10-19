@@ -1093,7 +1093,14 @@ impl Shell {
             if let (true, Some(content)) =
                 (target.eq_ignore_ascii_case("help/helpframe.gib"), content)
             {
-                load_into(&mut page, &self.ui, &self.game, "help content group", content, None)?;
+                load_into(
+                    &mut page,
+                    &self.ui,
+                    &self.game,
+                    "help content group",
+                    content,
+                    None,
+                )?;
             }
             if target.eq_ignore_ascii_case("teamhq/editteam.gib") {
                 // The constructor sets the caption for a new team and starts the

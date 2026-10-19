@@ -576,11 +576,7 @@ impl UiAssets {
             }
             // The next run starts below this one's finished lines.
             let lines = ra2ui::wrap_lines(&font, &text, box_.w);
-            let finished = if text.ends_with('\n') {
-                lines.len().saturating_sub(1)
-            } else {
-                lines.len().saturating_sub(1).max(0)
-            };
+            let finished = lines.len().saturating_sub(1);
             box_.y += finished as f32 * font.ascent as f32;
         }
     }

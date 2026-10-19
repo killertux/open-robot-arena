@@ -328,7 +328,11 @@ mod tests {
         let mut arts: Vec<&str> = all.iter().map(|c| c.art.as_str()).collect();
         arts.sort_unstable();
         arts.dedup();
-        assert_eq!(arts.len(), all.len(), "no two palette cells share a picture");
+        assert_eq!(
+            arts.len(),
+            all.len(),
+            "no two palette cells share a picture"
+        );
     }
 
     /// The six categories are a partition: every component is in one, and the

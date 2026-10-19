@@ -2175,17 +2175,15 @@ impl Builder {
     }
 
     /// The cell a point inside the shipped `control grid` names, or `None` when
-    /// it is outside the authors' `Rows`/`Columns` (3×4).
+    /// it is outside the board's 3x3 cells ([`control_cell_size`]).
     fn control_cell_at(&self, x: f32, y: f32) -> Option<[i32; 2]> {
-        let (frame, grid) = self.control_grid()?;
-        for row in 0..grid.rows {
-            for column in 0..grid.columns {
-                if grid.cell(frame, row, column).contains_point(x, y) {
-                    return Some([column, row]);
-                }
-            }
+        let (frame, _) = self.control_grid()?;
+        if !frame.contains_point(x, y) {
+            return None;
         }
-        None
+        let (w, h) = control_cell_size(frame);
+        let (column, row) = (((x - frame.x) / w) as i32, ((y - frame.y) / h) as i32);
+        (column < 3 && row < 3).then_some([column, row])
     }
 
     /// Add the pending control kind at a free cell. The shipped grid holds one
@@ -3383,16 +3381,16 @@ pub fn script(
     // the motor's spin action. Click-to-place, then click-to-bind.
     builder.click_named("wiring button")?;
     builder.click_named("new analog")?;
-    builder.click_control_cell([3, 1])?;
-    if builder.build.board().control_at([3, 1]).is_none() {
+    builder.click_control_cell([2, 1])?;
+    if builder.build.board().control_at([2, 1]).is_none() {
         return Err("the New Analog button plus a free cell did not add a control".into());
     }
     println!(
-        "  wiring: added {} at cell 3,1",
+        "  wiring: added {} at cell 2,1",
         builder
             .build
             .board()
-            .control_at([3, 1])
+            .control_at([2, 1])
             .map(|c| c.name.clone())
             .unwrap_or_default()
     );
@@ -3403,7 +3401,7 @@ pub fn script(
     builder.click_action("m9:wireact:0:0")?;
     let wired = builder.build().board().bindings.clone();
     let expected = wired.iter().any(|binding| {
-        binding.component == 1 && binding.control == [3, 1, 0] && binding.action == "Spin Clockwise"
+        binding.component == 1 && binding.control == [2, 1, 0] && binding.action == "Spin Clockwise"
     });
     if !expected {
         return Err(format!("the bind click did not wire the motor: {wired:?}"));
@@ -3414,7 +3412,7 @@ pub fn script(
         builder
             .build()
             .board()
-            .control_at([3, 1])
+            .control_at([2, 1])
             .map(|c| c.name.as_str())
     );
     if frames {
@@ -3645,9 +3643,9 @@ mod tests {
         builder.click_named("wiring button").unwrap();
         let before = builder.build.board().controls.len();
         builder.click_named("new analog").unwrap();
-        builder.click_control_cell([3, 1]).unwrap();
+        builder.click_control_cell([2, 1]).unwrap();
         assert_eq!(builder.build.board().controls.len(), before + 1);
-        let added = builder.build.board().control_at([3, 1]).unwrap().clone();
+        let added = builder.build.board().control_at([2, 1]).unwrap().clone();
         assert_eq!(added.kind, ControlKind::Analog);
         assert_eq!(added.name, "New Analog");
 
@@ -3658,7 +3656,7 @@ mod tests {
             Some(&ra2fmt::bot::Binding {
                 component: 1,
                 action: "Spin Clockwise".into(),
-                control: [3, 1, 0],
+                control: [2, 1, 0],
             })
         );
         assert!(builder.build.wiring_errors().is_empty());
@@ -3671,7 +3669,7 @@ mod tests {
         // An invalid action for this kind is the model's own refusal.
         let err = builder
             .build
-            .bind_action(1, Action::OnOffClockwise, [3, 1], 0)
+            .bind_action(1, Action::OnOffClockwise, [2, 1], 0)
             .unwrap_err();
         assert!(
             matches!(
