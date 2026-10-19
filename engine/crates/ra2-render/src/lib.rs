@@ -23,6 +23,7 @@ use ra2fmt::{bot as botfmt, component as compfmt, gmi, mount};
 
 pub use ra2fmt::mount::{component_local, tm_mat4, MountMode};
 
+pub mod effects;
 pub mod material;
 mod renderer;
 pub mod ui;
