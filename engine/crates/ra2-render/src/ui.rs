@@ -291,6 +291,22 @@ impl UiAssets {
                     quads.push(fill);
                 }
             }
+            if p.widget.kind == ra2fmt::gib::WidgetKind::Placeholder
+                && p.widget.name().to_ascii_lowercase().starts_with("3d")
+            {
+                // The 3D view's slot: the engine draws the scene over a 0.15 grey
+                // clear (the capture's panel is (38,38,38)); the 3D pass composites
+                // over this fill where there is a model.
+                quads.push(UiQuad {
+                    rect: p.frame,
+                    corners: None,
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                    color: [0.15, 0.15, 0.15, 1.0],
+                    texture: 0,
+                    alpha: true,
+                    clip,
+                });
+            }
             if p.widget.kind == ra2fmt::gib::WidgetKind::Image {
                 // An `Image` with a blank `_Filename` is a **colour fill**: the
                 // game draws its `_ForeColor` over its frame, and the shell uses
