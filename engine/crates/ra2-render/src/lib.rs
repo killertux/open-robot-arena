@@ -738,13 +738,28 @@ pub fn component_worlds_mounted(
     loaded: &[Option<BotComponent>],
     mode: MountMode,
 ) -> Vec<Mat4> {
+    component_assembly_mounted(bot, loaded, mode).0
+}
+
+/// [`component_worlds_mounted`] plus each component's frame as its rotor
+/// carries it (a burst motor's rotor starts turned to its start angle; see
+/// [`ra2fmt::mount::assembly`]).
+pub fn component_assembly_mounted(
+    bot: &botfmt::Bot,
+    loaded: &[Option<BotComponent>],
+    mode: MountMode,
+) -> (Vec<Mat4>, Vec<Mat4>) {
     let tables: Vec<Option<std::collections::BTreeMap<i32, gmi::Attachment>>> = loaded
         .iter()
         .map(|lc| lc.as_ref().map(|lc| lc.scene.attachment_table()))
         .collect();
-    mount::worlds(
+    let hinges = loaded
+        .iter()
+        .map(|lc| lc.as_ref().and_then(|lc| mount::rotor_hinge(&lc.scene)))
+        .collect();
+    mount::assembly(
         bot,
-        &mount::MountFrames::from_tables(&tables),
+        &mount::MountFrames::from_tables(&tables).with_hinges(hinges),
         mount::MountOptions {
             mode,
             chassis_plane: chassis_plane(),
@@ -1420,7 +1435,7 @@ mod tests {
         let mut stored_misses = 0usize;
         for path in &bots {
             let (bot, _root, loaded) = load_bot_components(path.to_str().unwrap()).unwrap();
-            let shipped = component_worlds_mounted(&bot, &loaded, MountMode::FramesFlipped);
+            let (shipped, carried) = component_assembly_mounted(&bot, &loaded, MountMode::Game);
             let stored = component_worlds_mounted(&bot, &loaded, MountMode::Stored);
             for (i, lc) in loaded.iter().enumerate() {
                 let Some(lc) = lc else { continue };
@@ -1439,20 +1454,22 @@ mod tests {
                 else {
                     continue;
                 };
-                let gap = |world: &[Mat4]| {
+                // A point on a burst motor's rotor rides the rotor, which the
+                // original turns to its start angle.
+                let gap = |world: &[Mat4], parents: &[Mat4]| {
                     let child = (world[i] * tm_mat4(&own.transform)).transform_point3(Vec3::ZERO);
-                    let par = (world[parent] * tm_mat4(&on_parent.transform))
+                    let par = (parents[parent] * tm_mat4(&on_parent.transform))
                         .transform_point3(Vec3::ZERO);
                     (child - par).length()
                 };
-                let g = gap(&shipped);
+                let g = gap(&shipped, &carried);
                 assert!(
                     g < 1e-3,
                     "{}: component {i} ({}) misses its parent point by {g}",
                     path.display(),
                     lc.label
                 );
-                if gap(&stored) > 0.05 {
+                if gap(&stored, &stored) > 0.05 {
                     stored_misses += 1;
                 }
                 checked += 1;
@@ -1490,7 +1507,7 @@ mod tests {
             }
         };
         let (bot, _root, loaded) = load_bot_components(path.to_str().unwrap()).unwrap();
-        let world = component_worlds_mounted(&bot, &loaded, MountMode::FramesFlipped);
+        let world = component_worlds_mounted(&bot, &loaded, MountMode::Game);
         let label = |i: usize| {
             loaded
                 .get(i)

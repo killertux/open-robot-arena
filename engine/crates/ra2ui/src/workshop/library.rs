@@ -80,6 +80,9 @@ pub struct ComponentInfo {
     pub def: Option<ComponentDef>,
     /// The component's own mount points, keyed by the id a `.bot` names.
     pub mounts: BTreeMap<i32, Attachment>,
+    /// The motor hinge its mesh declares (a burst motor's rotor is built at
+    /// its start angle about it; see [`ra2fmt::mount::burst_rotor`]).
+    pub hinge: Option<ra2fmt::mount::RotorHinge>,
     /// Mass in kg, by the simulator's rule.
     pub mass: f32,
     /// Whether the mesh has geometry (and so counts toward the robot's mass).
@@ -339,6 +342,7 @@ impl GameLibrary {
             return ComponentInfo::unloaded(class, file);
         };
         let mounts = scene.attachment_table();
+        let hinge = ra2fmt::mount::rotor_hinge(&scene);
         let points = scene_points(&scene);
         let mass = def.number("mass").unwrap_or_else(|| {
             let sum: f32 = scene
@@ -363,6 +367,7 @@ impl GameLibrary {
             base: def.class.clone(),
             def: Some(def),
             mounts,
+            hinge,
             mass,
             has_hull: !points.is_empty(),
             loaded: true,

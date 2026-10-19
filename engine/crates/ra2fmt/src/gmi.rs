@@ -48,6 +48,13 @@ pub struct HingeJoint {
     pub friction: f32,
     /// `*ANGLE_LIMITS`, in radians.
     pub limits: [f32; 2],
+    /// The hinge node's whole frame (rows are axes, the last the origin):
+    /// `frame[1]` is the spin axis, `frame[3]` the pivot.
+    pub frame: [[f32; 3]; 4],
+    /// `*POINT` and `*SPIN_AXIS` as the file stores them (the exporter's own
+    /// copy; for robot components they are not in component space).
+    pub point: [f32; 3],
+    pub spin_axis: [f32; 3],
 }
 
 impl GmiScene {
@@ -1119,8 +1126,8 @@ impl<'a> Parser<'a> {
                     let transform = self.read_tm_node()?;
                     let body_a = self.r.string()?;
                     let body_b = self.r.string()?;
-                    let _point = self.r.vec3()?;
-                    let _axis = self.r.vec3()?;
+                    let point = self.r.vec3()?;
+                    let spin_axis = self.r.vec3()?;
                     let limited = self.r.u8()? != 0;
                     let friction = self.r.f32()?;
                     let limit_min = self.r.f32()?;
@@ -1144,6 +1151,9 @@ impl<'a> Parser<'a> {
                         limited,
                         friction,
                         limits: [limit_min, limit_max],
+                        frame: transform,
+                        point,
+                        spin_axis,
                     });
                 }
                 53 => {

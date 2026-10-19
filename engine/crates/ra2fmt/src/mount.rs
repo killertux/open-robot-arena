@@ -1,27 +1,30 @@
-//! Component placement: the F1 mount rule, shared by the renderer, the
-//! simulator and the workshop.
+//! Component placement: how a `.bot` puts its components together, shared by
+//! the renderer, the simulator and the workshop.
 //!
-//! A `.bot` places a component on its parent in one of two ways. A **chassis
-//! child** (parent 0) is placed by its stored transform alone — translation,
-//! quaternion, yaw `angle` and vertical `height` — because the chassis has a
-//! single mount point and no `.gmf` to carry attachment frames. Every other
-//! link can align attachment frames:
+//! The rule is the original's, measured on the live game (every scene node of
+//! 16 stock robots as built, `tools/oracle/capture_assembly.py`, compared with
+//! `tools/oracle/assembly_compare.py`; `docs/29-havok17-backend.md` section 8).
+//! With `A_own` a component's own mount point (`own_mount`), `A_parent` the
+//! parent's (`parent_mount`), both from the `.gmf` attachment table:
 //!
 //! ```text
-//! A_parent · R_z(start) · R_x(π) · R_z(angle) · A_own⁻¹
+//! chassis child:  T(t) · Q · T(0, 0, -height) · Rz(π - angle) · A_own⁻¹
+//! component link: P · A_parent · Ry(π) · Rz(-angle) · A_own⁻¹
 //! ```
 //!
-//! `A_parent` is the parent-side mount frame, `A_own` the child's own point, the
-//! 180° turn about X is a male plug into a female socket, `start` is a burst
-//! motor's rest angle (applied on the parent's side, because it is the axle that
-//! turns) and `angle` is the player's free spin (applied on the child's side,
-//! because it belongs to the placement). Both rotations pass through the child's
-//! named point, so the snap survives.
+//! `t` and `Q` are the stored translation and quaternion (every stock chassis
+//! child stores the quarter turn about X, so `Q`'s Z axis is the chassis' down
+//! and `-height` lifts the part); the own point's origin lands exactly on `t`.
+//! At a link the child's point is turned half a turn about the parent point's
+//! Y (a plug into a socket) and spun by `-angle` about the common Z. `P` is
+//! the parent's pose as carried by whatever hosts the parent point: the
+//! component itself, or, for a burst motor's axle (`Host = bmotor_axle`), the
+//! rotor turned to its start angle ([`burst_rotor`]).
 //!
-//! This module is the **only** implementation of that rule: `ra2-render` and
-//! `ra2-ui`'s workshop both call it. See `docs/06-deferred-fidelity.md` F1 for
-//! the evidence (wheel axles stay horizontal, the rotor clears the chassis, and
-//! the bots' own previews agree).
+//! This module is the **only** implementation of the rule: `ra2-render`,
+//! `ra2sim` and `ra2-ui`'s workshop all call it. The older guesses
+//! (`MountMode::FramesFlipped` and friends) stay selectable through `RA2_MOUNT`
+//! for comparison only.
 
 use std::collections::BTreeMap;
 
@@ -133,6 +136,8 @@ pub fn component_local(c: &Component) -> Mat4 {
 /// How a component is placed on its parent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MountMode {
+    /// The original's rule (see the module documentation). **The default.**
+    Game,
     /// The stored transform alone — `translation * quaternion * yaw * height`.
     /// Kept because it is what reproduces the game's layout for *chassis*
     /// children, but it cannot place a chain: every component-to-component link
@@ -142,10 +147,9 @@ pub enum MountMode {
     /// At a component-to-component mount, align the child's attachment frame to
     /// the parent's: `A_parent * A_own⁻¹`.
     Frames,
-    /// The same, with a 180° rotation about X between the frames — a male plug
-    /// into a female socket. **The default**: it is the only rule that both
-    /// keeps every wheel's axle horizontal and lifts a rotor clear of the
-    /// chassis, and it reproduces the game's own botlab preview.
+    /// The same, with a 180° rotation about X between the frames — the earlier
+    /// guess at the plug rule (the default before the live measurement; it
+    /// ignores a chassis child's own point and turns about the wrong axis).
     FramesFlipped,
     /// The stored transform, resolved *through* the child's own mount frame:
     /// `M * A_own⁻¹`.
@@ -155,15 +159,16 @@ pub enum MountMode {
 }
 
 impl MountMode {
-    /// `RA2_MOUNT=frames-flip` (default) | `stored` | `frames` | `stored-own`
-    /// | `frames-stored`.
+    /// `RA2_MOUNT=game` (default) | `frames-flip` | `stored` | `frames` |
+    /// `stored-own` | `frames-stored`.
     pub fn from_env() -> MountMode {
         match std::env::var("RA2_MOUNT").unwrap_or_default().as_str() {
             "stored" => MountMode::Stored,
             "frames" => MountMode::Frames,
+            "frames-flip" => MountMode::FramesFlipped,
             "stored-own" => MountMode::StoredOwn,
             "frames-stored" => MountMode::FramesStored,
-            _ => MountMode::FramesFlipped,
+            _ => MountMode::Game,
         }
     }
 }
@@ -176,12 +181,33 @@ impl MountMode {
 #[derive(Clone, Debug, Default)]
 pub struct MountFrames {
     components: Vec<BTreeMap<i32, Mat4>>,
+    /// Per component: the mesh object hosting each point (`Host = axle`),
+    /// lower-cased; points on the component's own body are absent.
+    hosts: Vec<BTreeMap<i32, String>>,
+    /// Per component: its motor hinge, when its `.gmf` declares one.
+    hinges: Vec<Option<RotorHinge>>,
+}
+
+/// A motor's hinge as its `.gmf` constraint solver declares it, in component
+/// space: `Hinge01` joins the housing (`body_a`) and the rotor (`body_b`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RotorHinge {
+    /// The rotor object (`bmotor_axle`, `axle`), lower-cased.
+    pub rotor: String,
+    /// `TM_ROW3` of the hinge node: the pivot.
+    pub pivot: Vec3,
+    /// `TM_ROW1` of the hinge node: the spin axis.
+    pub axis: Vec3,
+    /// The rotor object's own transform (`TM`).
+    pub rotor_tm: Mat4,
 }
 
 impl MountFrames {
     pub fn empty(components: usize) -> Self {
         MountFrames {
             components: vec![BTreeMap::new(); components],
+            hosts: vec![BTreeMap::new(); components],
+            hinges: vec![None; components],
         }
     }
 
@@ -197,17 +223,73 @@ impl MountFrames {
                         .collect()
                 })
                 .collect(),
+            hosts: tables
+                .iter()
+                .map(|t| {
+                    t.iter()
+                        .flat_map(|m| m.iter())
+                        .filter_map(|(id, a)| a.host.clone().map(|h| (*id, h.to_ascii_lowercase())))
+                        .collect()
+                })
+                .collect(),
+            hinges: vec![None; tables.len()],
         }
     }
 
     /// Frames already in matrix form, index-aligned with the component list.
     pub fn from_maps(maps: Vec<BTreeMap<i32, Mat4>>) -> Self {
-        MountFrames { components: maps }
+        let n = maps.len();
+        MountFrames {
+            components: maps,
+            hosts: vec![BTreeMap::new(); n],
+            hinges: vec![None; n],
+        }
+    }
+
+    /// Add each component's motor hinge (index-aligned with the components).
+    pub fn with_hinges(mut self, hinges: Vec<Option<RotorHinge>>) -> Self {
+        self.hinges = hinges;
+        self
+    }
+
+    /// Add each component's point hosts (index-aligned with the components).
+    pub fn with_hosts(mut self, hosts: Vec<BTreeMap<i32, String>>) -> Self {
+        self.hosts = hosts;
+        self
     }
 
     pub fn get(&self, component: usize, mount: i32) -> Option<Mat4> {
         self.components.get(component)?.get(&mount).copied()
     }
+
+    /// The mesh object hosting `mount` on `component`, if it is not the
+    /// component's own body.
+    pub fn host(&self, component: usize, mount: i32) -> Option<&str> {
+        self.hosts.get(component)?.get(&mount).map(|s| s.as_str())
+    }
+
+    /// The motor hinge of `component`, if it has one.
+    pub fn hinge(&self, component: usize) -> Option<&RotorHinge> {
+        self.hinges.get(component)?.as_ref()
+    }
+}
+
+/// The hinge of a component's `.gmf`: the first `Hinge01`-style constraint,
+/// or `None` when the file declares none.
+pub fn rotor_hinge(scene: &crate::gmi::GmiScene) -> Option<RotorHinge> {
+    let h = scene.hinges.first()?;
+    let rotor = h.body_b.to_ascii_lowercase();
+    let rotor_tm = scene
+        .find_object(&h.body_b)
+        .map(|o| tm_mat4(&o.transform))
+        .unwrap_or(Mat4::IDENTITY);
+    let axis = Vec3::from(h.frame[1]).normalize_or_zero();
+    Some(RotorHinge {
+        rotor,
+        pivot: Vec3::from(h.frame[3]),
+        axis: if axis == Vec3::ZERO { Vec3::Z } else { axis },
+        rotor_tm,
+    })
 }
 
 /// The knobs the renderer exposes on the command line.
@@ -221,7 +303,7 @@ pub struct MountOptions {
 impl Default for MountOptions {
     fn default() -> Self {
         MountOptions {
-            mode: MountMode::FramesFlipped,
+            mode: MountMode::Game,
             chassis_plane: 0.0,
         }
     }
@@ -229,37 +311,133 @@ impl Default for MountOptions {
 
 /// Chained bot-local transform for every component (parents before children).
 pub fn worlds(bot: &Bot, frames: &MountFrames, options: MountOptions) -> Vec<Mat4> {
-    let mut world = vec![Mat4::IDENTITY; bot.components.len()];
+    assembly(bot, frames, options).0
+}
+
+/// [`worlds`] plus, per component, the pose of the component frame as its
+/// rotor carries it: equal to the component's own pose except for a burst
+/// motor, whose rotor (and everything mounted on it) the original turns to
+/// its start angle when it builds the robot ([`burst_rotor`]).
+pub fn assembly(bot: &Bot, frames: &MountFrames, options: MountOptions) -> (Vec<Mat4>, Vec<Mat4>) {
+    let n = bot.components.len();
+    let mut world = vec![Mat4::IDENTITY; n];
+    let mut rotor = vec![Mat4::IDENTITY; n];
     for (i, c) in bot.components.iter().enumerate() {
         let local = component_local(c);
         if i == 0 || c.parent < 0 || c.parent as usize >= i {
             world[i] = local;
+            rotor[i] = local;
             continue;
         }
         let parent = c.parent as usize;
-        // A BurstMotor swings its axle about the axle's own axis, so its
-        // children ride along. When a mount frame is available the rotation
-        // goes *inside* the link (about the point's Z, through the point's
-        // origin); see `mount_link`.
-        let rest = match bot.components[parent].burst_angles {
-            Some([start, _]) => Mat4::from_rotation_z(start),
-            None => Mat4::IDENTITY,
-        };
-        let link = mount_link(bot, frames, i, options.mode);
-        // The stored translation's Y is always 0 in every stock bot, so the
-        // height of a chassis-mounted part has to come from the chassis'
-        // mounting plane.
+        // The stored translation's Y is always 0 in every stock bot: the
+        // chassis' mounting plane is bot-space y = 0 (live, a chassis child's
+        // own point lands exactly on its stored translation).
         let base = if parent == 0 {
             Mat4::from_translation(Vec3::new(0.0, options.chassis_plane, 0.0))
         } else {
             Mat4::IDENTITY
         };
-        world[i] = match link {
-            Some(link) => world[parent] * base * link,
-            None => world[parent] * base * rest * local,
+        world[i] = if options.mode == MountMode::Game {
+            game_link(bot, frames, i, &world, &rotor).unwrap_or(world[parent] * local)
+        } else {
+            let rest = match bot.components[parent].burst_angles {
+                Some([start, _]) => Mat4::from_rotation_z(start),
+                None => Mat4::IDENTITY,
+            };
+            match mount_link(bot, frames, i, options.mode) {
+                Some(link) => world[parent] * link,
+                None => world[parent] * rest * local,
+            }
         };
+        world[i] = base * world[i];
+        rotor[i] = world[i];
+        if options.mode == MountMode::Game && c.burst_angles.is_some() {
+            if let Some(h) = frames.hinge(i) {
+                rotor[i] = burst_rotor(world[i], h, c.burst_angles.map(|a| a[0]).unwrap_or(0.0));
+            }
+        }
     }
-    world
+    (world, rotor)
+}
+
+/// The original's placement of component `i` (see the module documentation),
+/// or `None` when a frame it needs is missing.
+fn game_link(
+    bot: &Bot,
+    frames: &MountFrames,
+    i: usize,
+    world: &[Mat4],
+    rotor: &[Mat4],
+) -> Option<Mat4> {
+    let c = &bot.components[i];
+    let parent = c.parent as usize;
+    let own_inv = frames
+        .get(i, c.own_mount)
+        .map(|m| m.inverse())
+        .unwrap_or(Mat4::IDENTITY);
+    if parent == 0 {
+        let q =
+            Quat::from_xyzw(c.rotation[0], c.rotation[1], c.rotation[2], c.rotation[3]).normalize();
+        return Some(
+            Mat4::from_translation(Vec3::from(c.translation))
+                * Mat4::from_quat(q)
+                * Mat4::from_translation(Vec3::new(0.0, 0.0, -c.height))
+                * Mat4::from_rotation_z(std::f32::consts::PI - c.angle)
+                * own_inv,
+        );
+    }
+    let socket = frames.get(parent, c.parent_mount)?;
+    // A point on a rotor rides the rotor; any other on the component itself.
+    let carrier = match (frames.host(parent, c.parent_mount), frames.hinge(parent)) {
+        (Some(host), Some(h)) if host == h.rotor => rotor[parent],
+        _ => world[parent],
+    };
+    Some(
+        carrier
+            * socket
+            * Mat4::from_rotation_y(std::f32::consts::PI)
+            * Mat4::from_rotation_z(-c.angle)
+            * own_inv,
+    )
+}
+
+/// The original's start pose of a burst motor's rotor, as the component frame
+/// the rotor carries (bot space).
+///
+/// `BurstMotor` sets its start angle through the hinge controller
+/// (`FUN_00446960` → `FUN_00480c60` → `FUN_004808a0`), which does not turn the
+/// rotor from where it was built: it gives the rotor body an absolute
+/// orientation. With `a` the hinge axis (the housing's `Hinge01` spin axis) in
+/// the robot's frame and `p` the reference the hinge builds for it
+/// (`FUN_00525830`: `a × ŷ` when `|a.x| ≥ 0.57`, else `a × x̂`, normalised),
+/// the rotor's Z is `-a` and its Y is `p` turned by the start angle about `a`.
+/// Measured on eight burst motors of six robots (both stock models, all four
+/// mounting orientations): the rotor lands within 1° of this, and the burst
+/// motor's own model (`burstmotor.gmf`, whose hinge axis is its +Z) comes out
+/// flipped end for end relative to its housing — which is what the live robots
+/// show. The pivot stays where it was built.
+pub fn burst_rotor(housing: Mat4, hinge: &RotorHinge, start: f32) -> Mat4 {
+    let a = housing.transform_vector3(hinge.axis).normalize_or_zero();
+    if a == Vec3::ZERO {
+        return housing;
+    }
+    let p = if a.x.abs() >= 0.57 {
+        a.cross(Vec3::Y)
+    } else {
+        a.cross(Vec3::X)
+    }
+    .normalize();
+    let y = Quat::from_axis_angle(a, start) * p;
+    let z = -a;
+    let x = y.cross(z);
+    let target = glam::Mat3::from_cols(x, y, z);
+    // The rotor object's frame now, and where the original puts it.
+    let rest = housing * hinge.rotor_tm;
+    let rest_rot = glam::Mat3::from_mat4(rest);
+    let turn = target * rest_rot.transpose();
+    let pivot = housing.transform_point3(hinge.pivot);
+    Mat4::from_translation(pivot) * Mat4::from_mat3(turn) * Mat4::from_translation(-pivot) * housing
 }
 
 /// The relative transform of component `i` on its parent for `mode`.
@@ -268,7 +446,7 @@ pub fn worlds(bot: &Bot, frames: &MountFrames, options: MountOptions) -> Vec<Mat
 /// folds in the child's own attach frame, and `Frames`/`FramesStored` also the
 /// parent's, so the child's named point is snapped onto the parent's.
 fn mount_link(bot: &Bot, frames: &MountFrames, i: usize, mode: MountMode) -> Option<Mat4> {
-    if mode == MountMode::Stored {
+    if matches!(mode, MountMode::Stored | MountMode::Game) {
         return None;
     }
     let c = &bot.components[i];
@@ -287,7 +465,7 @@ fn mount_link(bot: &Bot, frames: &MountFrames, i: usize, mode: MountMode) -> Opt
     }
     let parent_frame = parent_frame.unwrap_or(Mat4::IDENTITY);
     Some(match mode {
-        MountMode::Stored => unreachable!(),
+        MountMode::Stored | MountMode::Game => unreachable!(),
         MountMode::StoredOwn => local * own_inv,
         MountMode::Frames | MountMode::FramesFlipped => {
             let mate = match mode {
@@ -341,27 +519,55 @@ mod tests {
         }
     }
 
-    /// The chassis has no frames, so a chassis child keeps its stored transform
-    /// even in the frame modes — every stock chassis child names mount `0`.
+    /// A chassis child lands with its own mount point on the stored
+    /// translation, `height` above the baseplate, turned by `π - angle` about
+    /// that point's Z (live: every chassis child of 14 stock robots,
+    /// docs/29 section 8). The legacy `Stored` mode keeps the stored transform.
     #[test]
-    fn a_chassis_child_keeps_its_stored_transform() {
-        let mut child = Component {
+    fn a_chassis_child_puts_its_own_point_on_the_stored_translation() {
+        let child = Component {
             parent: 0,
             parent_mount: 0,
             own_mount: 1,
             translation: [1.0, 0.0, 2.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
+            rotation: CHASSIS_CHILD_ROTATION,
             angle: 0.5,
             height: 0.25,
+            class: "Component".into(),
             ..Default::default()
         };
-        child.class = "Component".into();
         let bot = Bot {
             components: vec![chassis(), child.clone()],
             ..Default::default()
         };
-        let frames = MountFrames::empty(2);
-        let stored = worlds(&bot, &frames, MountOptions::default());
+        // A base point 0.1 m below the component's origin, facing down (the
+        // stock motors' Point01).
+        let point = Mat4::from_cols(
+            glam::Vec4::new(-1.0, 0.0, 0.0, 0.0),
+            glam::Vec4::new(0.0, 0.0, -1.0, 0.0),
+            glam::Vec4::new(0.0, -1.0, 0.0, 0.0),
+            glam::Vec4::new(0.0, -0.1, 0.0, 1.0),
+        );
+        let mut frames = MountFrames::empty(2);
+        frames.components[1].insert(1, point);
+        let world = worlds(&bot, &frames, MountOptions::default());
+        let at = (world[1] * point).transform_point3(Vec3::ZERO);
+        assert!(at.abs_diff_eq(Vec3::new(1.0, 0.25, 2.0), 1e-5), "{at:?}");
+        // The component's own up stays up, turned by the angle about it.
+        let up = world[1].transform_vector3(Vec3::Y);
+        assert!(up.abs_diff_eq(Vec3::Y, 1e-5), "{up:?}");
+        let x = world[1].transform_vector3(Vec3::X);
+        let expect = Mat4::from_rotation_y(0.5).transform_vector3(Vec3::X);
+        assert!(x.abs_diff_eq(expect, 1e-5), "{x:?} vs {expect:?}");
+
+        let stored = worlds(
+            &bot,
+            &frames,
+            MountOptions {
+                mode: MountMode::Stored,
+                chassis_plane: 0.0,
+            },
+        );
         assert_eq!(stored[1], component_local(&child));
     }
 
@@ -396,10 +602,14 @@ mod tests {
     /// keeps the stored transform ("nothing to align to").
     #[test]
     fn a_link_with_no_parent_frame_falls_back_to_stored() {
-        let mut parent = chassis();
-        parent.class = "SpinMotor".into();
+        let mut motor = Component {
+            parent: 0,
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            ..Default::default()
+        };
+        motor.class = "SpinMotor".into();
         let mut child = Component {
-            parent: 0, // the parent is index 0, but it has no `.gmf` frame
+            parent: 1, // the motor, which has no frame for mount 4
             parent_mount: 4,
             own_mount: 1,
             translation: [0.5, 0.0, 0.0],
@@ -408,12 +618,79 @@ mod tests {
         };
         child.class = "Wheel".into();
         let bot = Bot {
-            components: vec![parent, child.clone()],
+            components: vec![chassis(), motor, child.clone()],
             ..Default::default()
         };
-        let mut frames = MountFrames::empty(2);
-        frames.components[1].insert(1, Mat4::IDENTITY);
+        let mut frames = MountFrames::empty(3);
+        frames.components[2].insert(1, Mat4::IDENTITY);
         let world = worlds(&bot, &frames, MountOptions::default());
-        assert_eq!(world[1], component_local(&child));
+        assert_eq!(world[2], world[1] * component_local(&child));
+    }
+
+    /// A component link: the child's point meets the parent's, turned half a
+    /// turn about the parent point's Y and spun by `-angle` about its Z.
+    #[test]
+    fn a_link_plugs_the_childs_point_into_the_parents() {
+        let mut motor = Component {
+            parent: 0,
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            ..Default::default()
+        };
+        motor.class = "SpinMotor".into();
+        let child = Component {
+            parent: 1,
+            parent_mount: 4,
+            own_mount: 1,
+            angle: 0.3,
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            class: "Wheel".into(),
+            ..Default::default()
+        };
+        let bot = Bot {
+            components: vec![chassis(), motor, child],
+            ..Default::default()
+        };
+        let socket = Mat4::from_translation(Vec3::new(0.2, 0.0, -0.15));
+        let plug = Mat4::from_translation(Vec3::new(0.0, 0.0, 0.05));
+        let mut frames = MountFrames::empty(3);
+        frames.components[1].insert(4, socket);
+        frames.components[2].insert(1, plug);
+        let world = worlds(&bot, &frames, MountOptions::default());
+        let want = world[1]
+            * socket
+            * Mat4::from_rotation_y(std::f32::consts::PI)
+            * Mat4::from_rotation_z(-0.3)
+            * plug.inverse();
+        assert!(world[2].abs_diff_eq(want, 1e-6));
+        let a = (world[2] * plug).transform_point3(Vec3::ZERO);
+        let b = (world[1] * socket).transform_point3(Vec3::ZERO);
+        assert!(a.abs_diff_eq(b, 1e-6));
+    }
+
+    /// A burst motor's rotor is built at its start angle by the original's
+    /// absolute rule: rotor Z = -axis, rotor Y = the hinge reference turned by
+    /// the start angle about the axis (docs/29 section 8). The Scout's own
+    /// numbers: housing yawed so its +Z (the hinge axis) is the robot's -X,
+    /// start 3.05433 rad; live, the rotor's Y is (0, -0.097, 0.995).
+    #[test]
+    fn a_burst_rotor_starts_at_its_angle_about_the_hinge() {
+        let housing = Mat4::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+        let hinge = RotorHinge {
+            rotor: "bmotor_axle".into(),
+            pivot: Vec3::new(0.0, 0.0, -0.058),
+            axis: Vec3::Z,
+            rotor_tm: Mat4::from_translation(Vec3::new(0.0, 0.0, -0.059)),
+        };
+        let r = burst_rotor(housing, &hinge, 3.05433);
+        let y = r.transform_vector3(Vec3::Y);
+        let z = r.transform_vector3(Vec3::Z);
+        assert!(z.abs_diff_eq(Vec3::X, 1e-5), "{z:?}");
+        assert!(
+            y.abs_diff_eq(Vec3::new(0.0, -0.0872, 0.9962), 1e-3),
+            "{y:?}"
+        );
+        // The pivot does not move.
+        let p = housing.transform_point3(hinge.pivot);
+        assert!(r.transform_point3(hinge.pivot).abs_diff_eq(p, 1e-6));
     }
 }

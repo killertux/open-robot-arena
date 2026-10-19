@@ -300,3 +300,41 @@ cocked (ALARM rested on its hammer: -1.63, now -1.807). Jolt stays the default:
 havok17 loses the multi-robot comparison because our robot assembly puts some
 wheels (ALARM's rear axles, 0.19 m) and parts (ALARM's tanks) where the
 original does not — the live wheel records in docs/29 §6 are the reference.
+
+## After assembly (fx/assembly)
+
+Robot assembly now follows the original's own rule, measured live on 14 stock
+robots (`docs/29-havok17-backend.md` section 8, `tools/oracle/capture_assembly.py`):
+a chassis child's own mount point lands on its stored translation, a link plugs
+the child's point into the parent's with a half turn about the point's Y, a
+burst motor's rotor is built at its start angle, axle mounts and steering hubs
+are bodies of their own. Every mesh of the 14 robots is within 8 mm of the
+original as built (before: mean 0.13-1.2 m per robot, worst 2.3 m), pinned by
+`cargo test -p ra2sim --test assembly`.
+
+Drive tests from the original's start poses (`fidtrace drive-at`; sim time):
+
+| metric | original | Jolt + interim | Jolt + MagicAction | havok17 |
+|---|---:|---:|---:|---:|
+| Scout top speed (m/s) | 11.12 | 12.92 | 11.1 | 11.11 |
+| Scout straight distance (m) | 15.42 | 17.97 | 16.85 | 15.72 |
+| Scout coast (m) | 8.05 | 8.12 | 5.2 | 5.83 |
+| Scout turn in place (rad/s) | 10.66 | 10.27 | 10.77 | 10.59 |
+| ALARM top speed (1.65 s, m/s) | 13.38 | 9.81 | 11.82 | 14.22 |
+| ALARM distance / coast (m) | 14.11 / 11.91 | 11.41 / 4.19 | 13.39 / 3.05 | 14.4 / 9.05 |
+| ALARM turn in place (rad/s) | 12.1 | 5.33 | 10.41 | 10.57 |
+| FlapJack top / turn | 9.92 / 10.16 | 11.69 / 5.43 | 8.7 / 7.99 | 9.95 / 9.56 |
+| Razor top / turn | 16.07 / 12.2 | 12.03 / 8.48 | 15.94 / 12.23 | 16.52 / 12.25 |
+| Wide Load top / turn | 13.3 / 12.37 | 5.46 / 3.55 | 14.46 / 11.33 | 13.44 / 11.99 |
+| rest, bot origin y (Scout / ALARM) | -2.086 / -2.074 | -2.009 / -1.983 | -2.009 / -1.983 | -2.100 / -2.075 |
+| traction survey (45 bots) | - | 38/45 | 45/45 | 45/45 |
+
+(The rest heights quoted before, -1.884 / -1.811, were `plus.getLocation`, the
+chassis body's centre of mass, not the bot origin ours reports.)
+
+havok17 is now the closest on every robot except the coast (our hubs skid,
+docs/29 section 6 item 2). It is not the default yet: four tests that need
+havok17 features unrelated to driving (parked burst lock, piston creep, arena
+prop pin/unpin, script-driven arena hinges) fail with it; see docs/29 section 5.
+The interim Jolt wheels lose six survey robots now that the wheels sit where
+the original puts them (44/45 before).
