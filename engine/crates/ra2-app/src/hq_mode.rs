@@ -1323,6 +1323,17 @@ pub fn shell_view(game: &Path) -> Option<ra2ui::hq::View> {
     build_view(&career, game).ok()
 }
 
+/// The shell's event hook: a career of its own (the shipped team) that enters
+/// the event the player chose and answers with the HQ's new data.
+pub fn shell_enter_hook(game: &Path) -> Option<ra2_shell::shell::EnterHook> {
+    let mut career = fresh_career(game).ok()?;
+    let game = game.to_path_buf();
+    Some(Box::new(move |event| {
+        career.enter_event(event).ok()?;
+        build_view(&career, &game).ok()
+    }))
+}
+
 /// The `ra2ui::hq::View` for a career: the roster, standings, schedule, prizes
 /// and the team record's counters.
 pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, String> {
@@ -1668,34 +1679,7 @@ pub fn event_screen(
     event: &Event,
     bracket: Option<&ra2ui::hq::BracketView>,
 ) -> Result<Gib, String> {
-    let mut gib = ra2ui::hq::load(ui_root, "teamhq/event_bracket.gib")?;
-    ra2ui::hq::fit_splits_in(&mut gib);
-    if let Some(image) = find_mut_in(&mut gib, "event graphic") {
-        ra2ui::input::set_field(image, "_Filename", &event.art);
-    }
-    // The preview the bracket's own note names is the arena's, not the shipped
-    // `sample_arena.bmp` placeholder. The image's layout `Size` is the full
-    // screen, which is what the renderer draws it at.
-    if let Some(image) = find_mut_in(&mut gib, "background img") {
-        ra2ui::input::set_field(image, "_Filename", &event.arena.1);
-    }
-    set_value_in(&mut gib, "event title", &event.name);
-    set_first_display(&mut gib, &plain_text(&event.description));
-    if let Some(bracket) = bracket {
-        set_value_in(&mut gib, "round heading textbox", &bracket.round_label);
-        ra2ui::hq::fill_bracket(&mut gib, bracket);
-        if let Some(button) = find_mut_in(&mut gib, "play button") {
-            ra2ui::input::set_field(
-                button,
-                "Visible",
-                if bracket.can_play { "true" } else { "false" },
-            );
-        }
-        set_value_in(&mut gib, "bracket status", &bracket.status);
-    } else {
-        set_value_in(&mut gib, "round heading textbox", "ROUND 1");
-    }
-    Ok(gib)
+    ra2ui::event_screens::bracket_screen(ui_root, event, bracket)
 }
 
 /// Rebuild the bracket screen from the live career. A round win returns here
@@ -2120,6 +2104,41 @@ mod tests {
         let ids: Vec<usize> = view.events.iter().map(|e| e.id).collect();
         assert_eq!(ids, vec![2, 6, 12, 9, 13, 15, 5, 22, 20]);
         assert_eq!(view.events[0].event.name, "Blade Tournament");
+    }
+
+    /// `FUN_00500c40` (bound to the schedule at 0x4fdc4e): a click on an event
+    /// cell with no event in progress opens the join window; Enter Event opens
+    /// the bracket; with an event in progress another cell only says so.
+    #[test]
+    fn an_event_cell_click_follows_the_exe_handler() {
+        let Some(game) = game_dir() else { return };
+        let mut shell = ra2_shell::Shell::boot(&game, [1024.0, 768.0]).unwrap();
+        shell.set_hq_view(shell_view(&game).unwrap());
+        shell.set_enter_hook(shell_enter_hook(&game).unwrap());
+        for name in ["Team HQ button", "continue button", "events button"] {
+            shell.click_named(name).unwrap();
+        }
+        // The first cell, then Cancel: nothing changes.
+        shell.click(430.0, 376.0).unwrap();
+        assert_eq!(shell.window_depth(), 1);
+        assert_eq!(shell.base_screen_id(), "teamhq/teamhq.gib");
+        shell.click_named("cancel button").unwrap();
+        assert_eq!(shell.window_depth(), 0);
+        // Enter Event: the bracket of that event.
+        shell.click(430.0, 376.0).unwrap();
+        shell.click_named("enter event button").unwrap();
+        assert_eq!(shell.window_depth(), 0);
+        assert_eq!(shell.base_screen_id(), "teamhq/event_bracket.gib");
+        // Back to the HQ: another cell is refused with the exe's message box.
+        shell.click_named("later button").unwrap();
+        shell.click_named("events button").unwrap();
+        shell.click(560.0, 376.0).unwrap();
+        assert_eq!(shell.window_depth(), 1);
+        assert_eq!(shell.base_screen_id(), "teamhq/teamhq.gib");
+        // The event in progress opens its bracket again.
+        shell.click_named("ok button").unwrap();
+        shell.click(430.0, 376.0).unwrap();
+        assert_eq!(shell.base_screen_id(), "teamhq/event_bracket.gib");
     }
 
     use super::*;

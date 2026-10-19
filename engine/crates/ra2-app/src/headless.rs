@@ -77,6 +77,9 @@ pub fn run(
     if let Some(view) = crate::hq_mode::shell_view(game) {
         shell.set_hq_view(view);
     }
+    if let Some(hook) = crate::hq_mode::shell_enter_hook(game) {
+        shell.set_enter_hook(hook);
+    }
     println!(
         "booted {} from {} ({}x{})",
         shell.screen_id(),

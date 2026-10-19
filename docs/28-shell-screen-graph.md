@@ -213,6 +213,53 @@ Changed test expectations: `ra2ui` palette (131 -> 70 cells, mechanics 30 -> 15,
 pictures); league/results/armour grid cells take the grid width; `key_label` is `"W - S"` (was `"W / S"`).
 
 
+## 3j. Shell4: event click flow, bot lab camera findings, arena stills
+
+Evidence: `fidelity.py --renderer app --out <dir>` before (baseline run of this branch at a89708b) and after; side
+images reference | ours | diff. Measured MAE (app renderer, 1024x768): botlab-overview 5.47, -chassis 5.10,
+-components 5.49, -wiring 5.23, -paint 6.63, match-results 0.73, teamhq-events 7.86, exhibition-settings 4.07
+(the 3i table quotes 5.87/5.50/5.82/5.56/7.04: those were taken before the lab harness was re-run on Bot0; the
+numbers above are the baseline of this round). Nothing in 3j changes those renders, so before = after for them.
+
+* **Event click (`FUN_00500c40`, bound at `0x4fdc4e` in the Team HQ constructor `0x4fd380` to the `event grid`).**
+  `FUN_00416940` is the career's current event (-1 = none). None: modal `JoinEventWindow` (`FUN_00481b60`,
+  `teamhq/joinevent.gib`, window `join event window`); the current event itself: `EventBracketWindow`
+  (`FUN_0046a500`, `event bracket win`, screen switch `FUN_005e5ba0`), or `repairs win` (`FUN_004d5de0`) when
+  `FUN_005011e0` is false; any other cell: message box `Robot Arena 2` / "Each team may enter one event at a time.
+  Finish your current event before beginning a new one." (`0x6ff2f8`, `FUN_005e5e40`, OK only).
+  Join window binds `cancel button` -> `0x468a60` (close), `enter event button` -> `FUN_00481f20` (needs a chosen
+  robot: close, build the bracket for event + robot, hide `team hq win`, show the bracket), `robot grid` ->
+  `FUN_00482590` (chosen robot's name into `robot name`; `FUN_004fa3b0` rejects an unusable robot: name cleared, enter
+  disabled). The grid is 6 cells of 90 px (`choosebot_cell.gib` template, preview = the `.bot` snapshot).
+  Implemented in `ra2ui::event_screens` and `Shell::click_event_cell`/`enter_event`; the shell asks the application
+  to enter the event through `Shell::set_enter_hook` (`hq_mode::shell_enter_hook` owns a `Career`), and draws the
+  bracket from the returned view. Route: `Team HQ button;continue button;events button;@430,376` (join window),
+  `...;enter event button` (bracket), `...;later button` (back; note the original returns to the cached HQ window,
+  ours rebuilds it on the Robots tab). Test `an_event_cell_click_follows_the_exe_handler`; ra2ui unit tests for the
+  message and markup helper. `hq_mode::event_screen` now delegates to `ra2ui::event_screens::bracket_screen`.
+* **Repairs and season results.** Reached from inside the bracket window (`FUN_0046ce50` pushes `repairs.gib`
+  after a round, `FUN_0046e2b0` pushes `season_results.gib` after the last event); both need a played match. They
+  stay on the `--hq --simulate-event` path (`hq_mode`), not on the shell graph. No capture exists for them, so no
+  fixture was added.
+* **Bot Lab camera: the premise did not hold.** All five lab captures (overview, chassis, components, wiring, paint)
+  show the same near-top-down view with the robot's front toward the top, a flat 0.15 grey background and the zoom/
+  rotate hint at the lower right; there is no low front three-quarter view in the references. The large diff areas are
+  the **design**: the capture's C.R.U.S.H. is a hammer-arm robot (395.2 kg) while the shipped `Teams/Team0/Bot0.bot` is a
+  four-wheeler (387.2 kg), so no camera change can close the gap with the available assets. Components and Wiring do
+  show a translucent chassis (white box outline, internals visible); that rendering mode is not recovered. Not done.
+* **Match results snapshots.** Already implemented (the `.bot` snapshots draw in both rows; MAE 0.73). The remaining
+  diff is match state: the capture's fight ended with ALARM immobilized (Scout winner, "MATCH WINNER" and
+  "IMMOBILIZED" badges, 26/663 points) while our 20 s scripted fight times out (no winner, 31/0). `ra2ui::results`
+  already draws both badges from `RobotReport.winner/immobilized`; the data is a sim outcome, out of scope.
+* **Arena stills.** They already have an app route (`ra2-app --match --arena ... --camera-shots`, `fidelity.py`
+  `find_arena_fixtures`): all 48 are measured. MAE: box 0.40/4.15/1.75/2.83/0.65/5.55 (countdown/f2/f3/f3b/f4/intro),
+  bridge 7.87/8.72/7.13/7.66/0.46/16.90, compressor 7.92/2.38/6.69/8.52/2.05/21.59, electric 26.73/15.96/9.84/8.77/6.10/38.76,
+  halfcircle 0.03/8.61/2.90/2.78/1.01/19.67, metalskull 1.40/19.39/4.13/5.38/87.16/18.85, octagon 1.98/8.08/4.19/2.66/15.63/13.30,
+  parkinglot 11.94/19.66/11.91/9.89/4.62/27.00. `match-countdown` is 34.79 (camera/intro pose). All are camera/physics
+  dependent; not touched.
+* Not done: Team HQ events 7.86 (diff is resampling edges on every cell, not layout) and exhibition-settings 4.07.
+
+
 ## 4. Where the table lives
 
 `engine/crates/ra2-shell/src/bindings.rs` holds the recovered (screen, widget
