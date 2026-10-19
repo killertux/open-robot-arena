@@ -54,8 +54,30 @@ pub const CANCEL_NOTE: &str = "click to close options window but NOT apply chang
 /// Read the install's `ra2.cfg`; a missing file (or key) keeps the documented
 /// defaults. This never writes.
 pub fn read_cfg(game: &Path) -> Cfg {
-    let path = game.join("ra2.cfg");
-    Cfg::read(&path).unwrap_or_else(|_| Cfg::parse(""))
+    let path = settings_path(game);
+    Cfg::read(&path)
+        .or_else(|_| Cfg::read(&game.join("ra2.cfg")))
+        .unwrap_or_else(|_| Cfg::parse(""))
+}
+
+/// Where the client keeps the player's settings: the user's own config
+/// directory (`RA2_CONFIG` overrides the file), never the install, which is
+/// read-only data. The first read falls back to the install's shipped
+/// `ra2.cfg`; the first change creates this file from it.
+pub fn settings_path(_game: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("RA2_CONFIG") {
+        return PathBuf::from(path);
+    }
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    };
+    base.unwrap_or_else(std::env::temp_dir)
+        .join("open-robot-arena")
+        .join("ra2.cfg")
 }
 
 /// The initial window size from `FSDisplayWidth`/`FSDisplayHeight`, with zero
@@ -67,6 +89,17 @@ pub fn display_size(cfg: &Cfg) -> [u32; 2] {
     ]
 }
 
+/// The display modes the video tab offers, smallest first.
+pub const RESOLUTIONS: [[u32; 2]; 7] = [
+    [640, 480],
+    [800, 600],
+    [1024, 768],
+    [1152, 864],
+    [1280, 960],
+    [1280, 1024],
+    [1600, 1200],
+];
+
 /// The staged settings and the file they came from.
 pub struct Options {
     path: PathBuf,
@@ -77,9 +110,22 @@ pub struct Options {
 }
 
 impl Options {
-    /// Open `<game>/ra2.cfg`.
+    /// Open the player's settings (see [`settings_path`]), starting from the
+    /// install's `ra2.cfg` when the player has none yet. The install is only
+    /// ever read.
     pub fn open_game(game: &Path) -> Options {
-        Options::open(game.join("ra2.cfg"))
+        let path = settings_path(game);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if !path.is_file() {
+            if let Ok(shipped) = std::fs::read_to_string(game.join("ra2.cfg")) {
+                // Seed with the shipped values; `cancel` on a fresh install
+                // then restores exactly these bytes.
+                let _ = std::fs::write(&path, shipped);
+            }
+        }
+        Options::open(path)
     }
 
     /// Open a settings file. A missing file starts from the documented
@@ -211,9 +257,24 @@ impl Options {
             self.cfg.set_graphic_detail(value);
             return Some(Self::changed(format!("GraphicDetail={value}")));
         }
-        // The resolution dropdown is read-only: the screen names no options.
+        // The resolution dropdown lists the display modes. The binary asks the
+        // D3D device for its modes at run time (they depend on the adapter), so
+        // the list here is the standard 4:3 and 5:4 set a 2003 adapter reports;
+        // a click steps to the next mode and writes both the 2D and 3D keys.
         if any("resolution dropdown") {
-            return None;
+            let current = [self.cfg.fs_display_width(), self.cfg.fs_display_height()];
+            let next = RESOLUTIONS
+                .iter()
+                .position(|mode| *mode == current)
+                .map(|i| RESOLUTIONS[(i + 1) % RESOLUTIONS.len()])
+                .unwrap_or(RESOLUTIONS[0]);
+            self.cfg.set_fs_display_width(next[0]);
+            self.cfg.set_fs_display_height(next[1]);
+            self.cfg
+                .set_or_insert("FS3DDisplayWidth", &next[0].to_string());
+            self.cfg
+                .set_or_insert("FS3DDisplayHeight", &next[1].to_string());
+            return Some(Self::changed(format!("FSDisplay={}x{}", next[0], next[1])));
         }
         // A click on either half of the camera dropdown cycles the binary's
         // three config modes. The screen's note says "fill with camera
@@ -630,8 +691,8 @@ mod tests {
 
         assert_eq!(
             options.click(&hit(&["resolution dropdown", "Down Button"])),
-            None,
-            "the resolution list is not in the data"
+            Some("FSDisplay=1600x1200".to_string()),
+            "the resolution dropdown steps to the next display mode"
         );
 
         options.save().unwrap();
