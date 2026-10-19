@@ -5,7 +5,12 @@
 //! ```text
 //! fidtrace match <arena.py> <botA> <botB> <seconds> <trace.tsv> <damage.jsonl>
 //! fidtrace drive <arena.py> <bot> "0-5:1,0;5-8:0,1" <seconds> <trace.tsv>
+//! fidtrace drive-at <arena.py> <bot> <x> <z> <heading> <script> <seconds> <trace.tsv>
 //! ```
+//!
+//! `drive-at` spawns the robot at `(x, z)` facing `heading` (the trace's own
+//! convention), to repeat a stretch of an original drive trace from where it
+//! started.
 //!
 //! Trace rows: `time<TAB>[(player, (x, y, z), heading, speed, hitpoints, health)]`
 //! with the original's heading convention (`atan2(fx, fz)`, radians) and speed
@@ -110,18 +115,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 r.robots.iter().map(|x| x.points).collect::<Vec<_>>()
             );
         }
-        Some("drive") if a.len() == 6 => {
-            let secs: f32 = a[4].parse()?;
-            let script = DriveScript::parse(&a[3]);
+        Some(mode @ ("drive" | "drive-at"))
+            if a.len() == 6 || (mode == "drive-at" && a.len() == 9) =>
+        {
+            let at = mode == "drive-at";
+            let (pose, rest) = if at {
+                let (x, z, h): (f32, f32, f32) = (a[3].parse()?, a[4].parse()?, a[5].parse()?);
+                // The spawn yaw turns the robot's front from `heading + PI`.
+                (
+                    Some(([x, z], (h - std::f32::consts::PI).to_degrees())),
+                    &a[6..],
+                )
+            } else {
+                (None, &a[3..])
+            };
+            let secs: f32 = rest[1].parse()?;
+            let script = DriveScript::parse(&rest[0]);
             let mut duel = Duel::new(
                 &a[1],
                 &[BotSetup {
                     path: a[2].clone(),
-                    yaw_deg: None,
-                    spawn: None,
+                    yaw_deg: pose.map(|p| p.1),
+                    spawn: pose.map(|p| p.0),
                 }],
             )?;
-            let mut trace = std::fs::File::create(&a[5])?;
+            let mut trace = std::fs::File::create(&rest[2])?;
             writeln!(trace, "time_elapsed\t[(player, location xyz, heading, speed, hitpoints(p,0), health fraction)]")?;
             let steps = (secs / DEFAULT_STEP) as usize;
             for s in 0..steps {
@@ -134,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         _ => {
-            eprintln!("usage: fidtrace match <arena> <botA> <botB> <seconds> <trace.tsv> <damage.jsonl>\n       fidtrace drive <arena> <bot> <script> <seconds> <trace.tsv>");
+            eprintln!("usage: fidtrace match <arena> <botA> <botB> <seconds> <trace.tsv> <damage.jsonl>\n       fidtrace drive <arena> <bot> <script> <seconds> <trace.tsv>\n       fidtrace drive-at <arena> <bot> <x> <z> <heading> <script> <seconds> <trace.tsv>");
             std::process::exit(2);
         }
     }

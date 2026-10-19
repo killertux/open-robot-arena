@@ -10,7 +10,6 @@ use glam::{Mat4, Quat, Vec3};
 use ra2_render::{RenderGroup, Renderer};
 
 use crate::backend::{BodyDesc, BodyHandle, MotionType, PhysicsBackend, ShapeDesc};
-use crate::jolt::JoltBackend;
 use crate::rig::{self, RobotRig};
 use crate::robot::Robot;
 use crate::scene::{self, ArenaScene, Prop, USER_ARENA, USER_PROP};
@@ -140,7 +139,7 @@ impl Sandbox {
         let mass_scale = mass_scale(rig.mass);
         let (components, parts) = (rig.components.len(), rig.parts.len());
 
-        let mut physics: Box<dyn PhysicsBackend> = Box::new(JoltBackend::new(arena.gravity)?);
+        let mut physics: Box<dyn PhysicsBackend> = crate::backend::create_backend(arena.gravity)?;
 
         // Static arena geometry.
         let (verts, indices) = arena.triangle_soup();

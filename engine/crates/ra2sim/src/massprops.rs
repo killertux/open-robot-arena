@@ -33,6 +33,52 @@ pub fn hull_volume_centroid(points: &[Vec3]) -> Option<(f32, Vec3)> {
     Some((volume as f32, reference + (moment / volume).as_vec3()))
 }
 
+/// Volume, volume-centroid and inertia tensor (about that centroid, at unit
+/// density) of the convex hull of `points`, or `None` for a degenerate set.
+///
+/// The hull is split into tetrahedra from a reference point; each contributes
+/// its covariance `det(A) A C0 Aᵀ` (with `C0` the unit tetrahedron's), and the
+/// inertia is `trace(C) I - C` once the covariance is moved to the centroid.
+pub fn hull_inertia(points: &[Vec3]) -> Option<(f32, Vec3, glam::Mat3)> {
+    use glam::{DMat3, DVec3};
+    let faces = quickhull(points)?;
+    let reference = (points.iter().copied().sum::<Vec3>() / points.len() as f32).as_dvec3();
+    let c0 = DMat3::from_cols(
+        DVec3::new(2.0, 1.0, 1.0),
+        DVec3::new(1.0, 2.0, 1.0),
+        DVec3::new(1.0, 1.0, 2.0),
+    ) * (1.0 / 120.0);
+    let mut volume = 0.0f64;
+    let mut moment = DVec3::ZERO;
+    let mut cov = DMat3::ZERO;
+    for [a, b, c] in faces {
+        let (a, b, c) = (
+            points[a].as_dvec3() - reference,
+            points[b].as_dvec3() - reference,
+            points[c].as_dvec3() - reference,
+        );
+        let m = DMat3::from_cols(a, b, c);
+        let det = m.determinant();
+        volume += det / 6.0;
+        moment += det / 6.0 * (a + b + c) / 4.0;
+        cov += m * c0 * m.transpose() * det;
+    }
+    if volume.abs() < 1e-9 {
+        return None;
+    }
+    let centre = moment / volume;
+    // Move the covariance from the reference point to the centroid.
+    let shift = DMat3::from_cols(centre * centre.x, centre * centre.y, centre * centre.z);
+    let cov = cov - shift * volume;
+    let trace = cov.x_axis.x + cov.y_axis.y + cov.z_axis.z;
+    let inertia = DMat3::IDENTITY * trace - cov;
+    Some((
+        volume as f32,
+        (reference + centre).as_vec3(),
+        inertia.as_mat3(),
+    ))
+}
+
 /// The points of `points`' convex hull pushed out by `d` along every face's
 /// normal: a hull whose faces sit exactly `d` outside the original's. This is a
 /// collision *skin* — Havok's convex shapes carry a radius that their hull is
@@ -48,6 +94,22 @@ pub fn skinned(points: &[Vec3], d: f32) -> Vec<Vec3> {
             .cross(points[c] - points[a])
             .normalize_or_zero();
         out.extend([points[a] + n * d, points[b] + n * d, points[c] + n * d]);
+    }
+    out
+}
+
+/// The distinct corners of the convex hull of `points` (points closer than a
+/// millimetre are one corner). Empty for a degenerate set.
+pub fn hull_vertices(points: &[Vec3]) -> Vec<Vec3> {
+    let Some(faces) = quickhull(points) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Vec3> = Vec::new();
+    for i in faces.iter().flatten().copied() {
+        let p = points[i];
+        if !out.iter().any(|q| q.distance_squared(p) < 1e-6) {
+            out.push(p);
+        }
     }
     out
 }
@@ -186,6 +248,29 @@ mod tests {
         let (v, c) = hull_volume_centroid(&pts).expect("a hull");
         assert!((v - 2.0 * 3.0 * 1.5).abs() < 1e-3, "{v}");
         assert!((c - Vec3::new(1.0, 2.5, -0.25)).length() < 1e-3, "{c}");
+    }
+
+    #[test]
+    fn a_box_hull_has_the_boxs_inertia() {
+        let (w, h, d) = (2.0f32, 3.0f32, 1.5f32);
+        let mut pts = Vec::new();
+        for x in [0.0, w] {
+            for y in [1.0, 1.0 + h] {
+                for z in [-1.0, -1.0 + d] {
+                    pts.push(Vec3::new(x, y, z));
+                }
+            }
+        }
+        let (v, c, i) = hull_inertia(&pts).expect("a hull");
+        assert!((v - w * h * d).abs() < 1e-3);
+        assert!((c - Vec3::new(1.0, 2.5, -0.25)).length() < 1e-3, "{c}");
+        let ix = v * (h * h + d * d) / 12.0;
+        let iy = v * (w * w + d * d) / 12.0;
+        let iz = v * (w * w + h * h) / 12.0;
+        assert!((i.x_axis.x - ix).abs() < 1e-3, "{i:?}");
+        assert!((i.y_axis.y - iy).abs() < 1e-3, "{i:?}");
+        assert!((i.z_axis.z - iz).abs() < 1e-3, "{i:?}");
+        assert!(i.x_axis.y.abs() < 1e-3 && i.x_axis.z.abs() < 1e-3 && i.y_axis.z.abs() < 1e-3);
     }
 
     #[test]

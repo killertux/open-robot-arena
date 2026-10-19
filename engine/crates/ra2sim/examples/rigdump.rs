@@ -66,6 +66,29 @@ fn main() {
             }
             _ => String::new(),
         };
+        let h = &c.havok;
+        let piece_r: Vec<String> = h
+            .collision
+            .iter()
+            .map(|pts| {
+                let (lo, hi) = pts.iter().fold(
+                    (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN)),
+                    |(a, b), p| (a.min(*p), b.max(*p)),
+                );
+                format!("{:.2}x{:.2}x{:.2}", hi.x - lo.x, hi.y - lo.y, hi.z - lo.z)
+            })
+            .collect();
+        let havok = format!(
+            " | havok m={:.1} rotor={:.1} pieces=[{}] rotor_pieces={} phantom_pts={} mu={:?} e={:?}",
+            h.mass,
+            h.rotor_mass,
+            piece_r.join(" "),
+            h.rotor_collision.len(),
+            h.phantom.len(),
+            h.friction,
+            h.restitution
+        );
+        let extra = extra + &havok;
         let pos = c.local.w_axis.truncate();
         let mut bmin = glam::Vec3::splat(f32::MAX);
         let mut bmax = glam::Vec3::splat(f32::MIN);

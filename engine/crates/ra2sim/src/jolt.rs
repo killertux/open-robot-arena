@@ -238,7 +238,7 @@ impl JoltBackend {
         Quat::from_xyzw(q.x, q.y, q.z, q.w)
     }
 
-    fn build_shape(shape: &ShapeDesc) -> Result<Shape, BackendError> {
+    pub(crate) fn build_shape(shape: &ShapeDesc) -> Result<Shape, BackendError> {
         // Compounds recurse, so they are handled before the leaf closure.
         if let ShapeDesc::Compound(children) = shape {
             let built: Vec<Shape> = children
