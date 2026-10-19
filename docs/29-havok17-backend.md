@@ -95,16 +95,12 @@ angular rows, two perpendicular linear rows, servo along the axis) and
 point-to-point (three rows) blocks follow the hinge's scheme; their own atoms
 (`0x5318b0`, `0x534840`) were not decompiled.
 
-**Narrowphase** (ours, on Jolt): every moving body's shape is queried with
-`CollideShape` and `max_separation_distance = tol`; a pair of moving bodies is
-kept once; a robot's own bodies never collide. Havok reports a point per pair
-of features within the tolerance — live, two per mini-wheel hub on the floor,
-one per hub triangle (`clist_rest`) — where Jolt reports one deepest point per
-shape pair, on which a resting face rocks. So every corner of either body's
-convex pieces within the tolerance of the other's surface plane through the
-hit becomes a contact (a short ray confirms the surface under it), the point
-halfway between corner and surface. Mesh triangle order (the original
-`random_shuffle`s, `0x546f70`) is not reproduced.
+**Narrowphase** (`narrow.rs`, recovered, section 10): Havok's own collision
+agents — GJK closest points per convex piece against each nearby mesh
+triangle or against another convex piece, each pair with its persistent
+manifold, and triangle-pair closest points between two meshes. Jolt is only
+asked for ray casts, phantoms and, when a step is accepted overlapping, the
+depth of the overlap. Mesh triangle order (the MOPP's) is not reproduced.
 
 **Phantoms**: a body may carry a phantom shape (a wheel's `wheel_traction`,
 `DISABLE_COLLISIONS` in its `.gmf`), detected like any collidable within the
@@ -248,29 +244,9 @@ on the default tree).
    section 6 in the previous version of this note (Scout hubs at
    `(-0.490, -0.133, -0.202)`, ...) are hub centres relative to the chassis
    body's centre of mass; the scene capture of section 8 now pins every part.
-2. Coast: our hubs still skid after the thrust stops. During thrust they turn
-   at about 60 % of rolling, as live (30 rad/s at 9.9 m/s), but in the coast
-   they only creep toward rolling where the original's reach it within 0.3 s
-   (`havok-step__live__023`): Scout coasts 5.8 m instead of 8.05, FlapJack 5.2
-   instead of 6.5, Razor 5.3 instead of 7.8, ALARM 9.1 instead of 11.9 (Wide
-   Load, which drags its axle-mount skids, coasts 3.0 instead of 1.8). Turning
-   the wheel hinges' parked friction (ours, 40 × `resistance`) off changes the
-   Scout's coast by 0.1 m only, so the hinge is not it; the hub-floor contact
-   (our corner manifold, item 5) is the suspect. Measured on the default tree
-   (section 9): during the Scout's coast the hub's floor contacts carry the
-   weight (normal impulses about 1300 N per hub) and slide at the cone's edge
-   (`|J_t| / J_n` = 0.28-0.30 = µ), yet their torque about the axle is small
-   and changes sign from one step to the next, and the hub spins *down*
-   (33 -> 20 rad/s in one step at one point). The contacts are the hub's
-   polygon corners up to 0.165 m ahead of or behind the axle and up to the
-   0.1 m tolerance above the floor: the leading corners of a spinning hub move
-   down, count as approaching, and get normal impulses whose lever arm about
-   the axle opposes the spin. Havok's convex/triangle agent reports one closest
-   point per triangle instead. Keeping only corners within 3 mm of the closest
-   distance (an experiment, not committed) raised the Scout's coast from 5.85
-   to 6.46 m and ALARM's from 7.4 to 8.1 m, but cut Razor's from 5.3 to 4.2 m,
-   so it is not the whole story; the fix is the faithful narrowphase
-   (item 5).
+2. ~~Coast~~: the hubs' contacts were the corner manifold's (item 5). With
+   Havok's agents (section 10) the hub contacts per step match the live
+   counts and the coasts the fresh hazard-free captures.
 3. The power factor `g` (battery drain) is 1; ALARM's live thrust falls 7 % in
    12 s.
 4. Steering wheels (`Steering` records) and the Havok wheel constraint
@@ -284,9 +260,11 @@ on the default tree).
    now bodies of their own on a free hinge about the hub axle (live, `hub1` and
    `hub2` are bodies), and their wheels get records without thrust, like an
    `AxleMount`'s; deactivation (2 s / 2 s) is off.
-5. Narrowphase: Jolt's closest points plus our corner manifold stand in for
-   Havok's agents (`0x543370`); a faithful one needs our own GJK convex/mesh
-   agents (step 3 of the plan in the `havok-scope` study).
+5. ~~Narrowphase~~: Havok's agents (section 10). Still not reproduced: the
+   MOPP's triangle order, Havok's tie-breaking in GJK (its support search
+   hill-climbs from the last support vertex, `0x55b000`), the arena's fixed
+   convex bodies (merged into one mesh here), `SIMULATION_GEOMETRY 0`
+   (not observed live; collided as convex).
 6. The weapon test (`weapon-alarm-vs-inert-scout__live__000`) is not compared
    yet; ALARM's hammer is now where the original has it.
 
@@ -546,3 +524,144 @@ already records (the original's robots fight; ours barely do), not a backend
 regression. That the robots standing still are not being driven by their AI
 is an inference (the same robots drive under direct input in the traction
 survey); the AI's commands were not traced.
+
+## 10. Contacts as Havok 1.7 makes them (fx/havok-contact)
+
+Recovered from the agents (`FUN_00543370` dispatches a pair of collidables on
+the sum of their shape classes, collidable `+0x18`) and checked against new
+live captures (`tools/oracle/capture_contacts.py` + `frida/ra2_contacts.js`:
+every contact the resolver is handed, `0x53ed80` entry, with the bodies;
+`contacts_report.py`; `capture_contacts_set.sh` for any stock robot with the
+Combat Arena's hazards off).
+
+**Shape classes in play** (live, `0x543370` hooked on the Scout and ALARM):
+robot parts are convex (`CXGEOMETRIC` 0x400) except the chassis the game
+builds and the parts whose `.gmf` body says `SIMULATION_GEOMETRY 6` (fork
+arm, bracket wedge, snowplows), which are meshes (`GEOMETRIC` 4); the arena is
+a mesh. `rig::collides_as_mesh`, `ShapeDesc::MeshHull` (a mesh collidable
+massed as its hull; Jolt collides it as the hull). The chassis collidable is
+the `.bot`'s chassis mesh with its own triangles.
+
+**Convex x mesh** (`FUN_00545b50`): for every triangle the MOPP finds near the
+convex piece (its box grown by the tolerance), GJK closest points
+(`FUN_0055c390`: Johnson simplex, ends when `|v|²` stops falling; triangle
+support `0x55b200`, convex support hill-climbing `0x55b000`). A distance below
+zero is an overlap: the pair goes on the penetration list and reports nothing
+more. Within the tolerance, the final simplex's vertices decide:
+two points (an edge on either side), or three with one vertex of A, one of B,
+or a repeated vertex on both sides (vertex-face, edge-edge) *persist*; the
+rest (vertex-vertex, face against edge or face) are reported for this
+detection only. A persisting point replaces a kept one within the tolerance
+whose normal is within `acos 0.8`, else joins the pair's manifold (a hash
+entry per collidable pair, `det + 0x2b4`). Every detection first re-measures
+the kept points from their two body-fixed points (`+0x20` on A, `+0x30` on B):
+dropped once they are a tolerance apart in any direction, else the midpoint,
+and the distance along the normal they were found with. All kept points are
+reported after the triangles'.
+
+**Convex x convex** (`FUN_00544820`, `FUN_0055b880`): the GJK point is always
+reported; kept points die as above, are reported with the *new* normal and
+`|p_A - p_B|` if at least 4 tolerances from the new point, and one closer
+keeps the new point out of the manifold.
+
+**Mesh x mesh** (`FUN_0054a2a0` fixed mesh, `FUN_00549d00` two moving ones):
+every pair of triangles within the tolerance (moving pairs' trees are queried
+with half of it) gives the midpoint of their closest points
+(`FUN_0055e950` → `FUN_00561410`; `< 1e-5` is an overlap), unless a point
+already in the detection's list lies within `sqrt(0.001)` tolerances; no
+manifold.
+
+**Tolerances.** The agents and the resolver always use the world's tolerance
+0.1 (`vt + 0x18`, `0x52e750`). The *current* tolerance (`setCurrentTolerance`
+writes `det + 0x1c`) is halved before every detection attempt of a substep,
+starting at 0.05 (`0x52aa60`), and only decides the bad step: a detection is
+bad (`det + 0x130` non-empty, `0x52b320`) when a pair overlaps, unless a
+previous bad step excused it (`det + 0xe4`, kept while it keeps overlapping),
+or when any new point is closer than the current tolerance (`0x542db0`). A bad
+detection rolls back and halves the step; after 30 the step is accepted and
+its pairs excused (`0x542760`). Before this the detection itself used the
+halved tolerance, the resolver too, and only a newly overlapping pair counted
+as bad. Ours additionally gives an accepted overlapping pair Jolt's deepest
+points so it separates (Havok reports none for it).
+
+The arena soup carries each triangle in both windings for Jolt; havok17 keeps
+each once (live contact lists hold no repeated point).
+
+**Live check: contacts per step** (Scout from its spawn, 2 s full throttle, 2 s
+coast, hazards off; points against the arena per body and step, median
+distance):
+
+| body | phase | original | before (corner manifold) | now |
+|---|---|---|---|---|
+| hub | drive | 0: 33 %, 1: 51 %, 2: 15 %; 0.095 | 0: 37 %, 2: 40 %, 3-5: 22 %; 0.088 | 0: 34 %, 1: 50 %, 2: 15 %; 0.082 |
+| hub | coast | 0: 16 %, 1: 50 %, 2: 31 %; 0.094 | 0: 24 %, 2: 42 %, 3-7: 30 %; 0.089 | 0: 20 %, 1: 68 %, 2: 11 %; 0.093 |
+| fork arm | drive | 0: 7 %, 1: 32 %, 2: 60 %; 0.095 | 0: 25 %, 2: 68 %; 0.088 | 0: 19 %, 1: 19 %, 2: 58 %; 0.093 |
+| chassis | all | none | none | none (a handful) |
+
+Step pieces: live 3 % of substeps are backstepped, ours 2.5 %.
+
+**Drive tests** from the original's spawn poses, Combat Arena hazards off,
+sampled every step (fresh captures `contacts-<bot>__live__000`, the
+original's straight durations: Scout 1.967 s, ALARM 1.6, FlapJack 1.867, Razor
+2.0, Wide Load 2.133; poses from the captured chassis). The earlier tables
+sampled ours every 0.1 s and started the coast at the first sample after the
+stop, which loses up to 0.1 s of the fastest motion (1.1 m on the Scout); and
+the earlier ALARM pose ran it over the spike plate, whose firing launched ours.
+Turn rates are magnitudes, against the earlier captures. "before" is fidelity
+`f6cb227`, "now" this branch merged with it:
+
+| robot | metric | original | before | now |
+|---|---|---:|---:|---:|
+| Scout | top / t90 / dist | 11.01 / 1.47 / 14.29 | 11.18 / 1.47 / 14.43 | 10.92 / 1.47 / 14.25 |
+| Scout | coast / turn | 7.89 / 10.66 | 7.00 / 10.68 | 7.24 / 10.68 |
+| ALARM | top / t90 / dist | 13.85 / 1.22 / 14.15 | 13.88 / 1.28 / 14.07 | 13.88 / 1.27 / 14.20 |
+| ALARM | coast / turn | 11.15 / 12.1 | 9.75 / 11.00 | 10.92 / 10.99 |
+| FlapJack | top / t90 / dist | 10.31 / 1.45 / 12.41 | 10.55 / 1.45 / 12.24 | 10.45 / 1.43 / 12.27 |
+| FlapJack | coast / turn | 6.78 / 10.16 | 6.45 / 9.44 | 6.82 / 9.09 |
+| Razor | top / t90 / dist | 17.50 / 1.52 / 23.07 | 17.08 / 1.43 / 22.62 | 16.51 / 1.42 / 22.40 |
+| Razor | coast* / turn | 5.72 / 12.2 | 7.53 / 12.24 | 7.84 / 12.18 |
+| Wide Load | top / t90 / dist | 13.90 / 1.55 / 19.49 | 13.29 / 1.63 / 17.77 | 13.47 / 1.62 / 18.09 |
+| Wide Load | coast* / turn | 8.61 / 12.37 | 8.13 / 13.21 | 8.39 / 12.83 |
+
+\* both coast into a wall in the original and here; the distance is where
+the wall is met, not the drive model.
+
+Before the merge of `f6cb227` (old drive record axle) the same tree read
+Scout 11.00 / 1.37 / 14.37, coast 7.86; ALARM coast 11.00; FlapJack 7.31.
+Traction survey 45/45. AI suite (`fidtrace match`, ten pairings): nine deal
+damage (eight before). Open: Scout v ALARM deals far less than before (box,
+120 s: one 11-point hit against seven hits, 132 points), and
+`duel::tests::the_shipped_ai_closes_sees_its_enemy_and_lands_blows` (damage
+within 30 s) fails. The hits are there — ALARM's hammer head meets the Scout's
+fork arm at 20-32 m/s — but priced at 4-8, under the arena's gate of 10; the
+corner manifold used to give such a pair several points, each priced alone.
+Collision events are fired per contact point (`FUN_00549c30` walks the whole
+contact list), so the count now follows the agents; whether the original
+prices these hits higher (its fork arm and hammer head are a mesh and a convex
+piece) is not measured. Turning the bad-step rule's close-contact test off
+makes that test pass by chance (the 120 s matches still deal 0-1 hits).
+
+**Mass**: every stock chassis body with a SmartZone weighs 2 kg more live
+(163.49 against our 161.49 kg; Razor, without one, 212.52 on both): the
+SmartZone's `.gmf` body (2 kg, `DISABLE_COLLISIONS`), which the renderer's
+loader skips. `rig::smart_zone_mass` adds it to the body it is bolted to.
+
+**Hinge direction rule** (`0x4814ca..`): the HingeController takes `+0x70/+0x74`
+as min/max of the hinge's limits (`FUN_004801f0`), so the start > end flip
+never fires from construction; `hinge + 0x60` is the axis in body B's frame
+(`FUN_00525830`). Live (Octagon, `Arenas.currentArena.Hammer1.Smash()`, hinge
+atom `0x535a50` hooked): the motor velocity is `+94` (the negated
+`trunc(-0.95·100)`) and the hammer turns `+x` (ω 11-16 rad/s) toward the
+arena's centre; retracting, `-2` and `-x`. Ours drives the same hammer `+x`
+toward the centre with the velocity's own sign, so applying the axis rule on
+top would reverse it: left out, now with a live check. `Hammer2.Smash()` moved
+nothing live (only one hammer atom ever ran its motor); ours swings the
+mirrored hammer at +14.4 z, toward the centre. Not resolved.
+
+**Locked hinge settling**: a hinge locked while swinging overshoots by about
+0.08 rad and settles 0.03 rad past the lock angle in our test arm. The cause is
+the order the recovered setup prescribes (`0x535a50`): the limit impulse about
+the free axis uses the bodies' inertia about their centres (`k = aᵀ(I_A⁻¹ +
+I_B⁻¹)a`), then the pivot rows' impulses turn part of it back. Ours follows
+that order; whether the original settles the same was not measured.
+

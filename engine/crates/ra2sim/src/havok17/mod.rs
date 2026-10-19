@@ -425,8 +425,8 @@ impl Havok17Backend {
                             &pa.body_pose,
                             &pb.body_pose,
                         ) {
-                            Err(()) => penetrating = true,
-                            Ok((p, c)) if p.distance < tol => {
+                            None => penetrating = true,
+                            Some((p, c)) if p.distance < tol => {
                                 let m = self.convex_manifolds.entry(key).or_default();
                                 m.seen = stamp;
                                 let kept =
@@ -434,7 +434,7 @@ impl Havok17Backend {
                                 points.push(p);
                                 points.extend(kept);
                             }
-                            Ok(_) => {}
+                            Some(_) => {}
                         }
                     }
                     (false, true) | (true, false) => {
@@ -548,15 +548,15 @@ impl Havok17Backend {
                 &cx.body_pose,
                 &ms.body_pose,
             ) {
-                Err(()) => return true,
-                Ok((p, c)) if p.distance < tol => {
+                None => return true,
+                Some((p, c)) if p.distance < tol => {
                     if c.persists() {
                         m.offer(p);
                     } else {
                         points.push(p);
                     }
                 }
-                Ok(_) => {}
+                Some(_) => {}
             }
         }
         points.extend(m.points.iter().copied());

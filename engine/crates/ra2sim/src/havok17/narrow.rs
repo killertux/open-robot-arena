@@ -787,7 +787,7 @@ impl Pose {
 }
 
 /// The closest points of two convex pieces given in world space, with their
-/// radii. `Err(())` when they overlap.
+/// radii. `None` when they overlap.
 pub fn convex_point(
     a: &[Vec3],
     ra: f32,
@@ -795,19 +795,19 @@ pub fn convex_point(
     rb: f32,
     pose_a: &Pose,
     pose_b: &Pose,
-) -> Result<(Point, Closest), ()> {
+) -> Option<(Point, Closest)> {
     let c = closest(a, b);
     if c.overlap || c.distance <= 1e-6 {
-        return Err(());
+        return None;
     }
     let distance = c.distance - ra - rb;
     if distance < 0.0 {
-        return Err(());
+        return None;
     }
     let normal = (c.on_a - c.on_b) / c.distance;
     let on_a = c.on_a - normal * ra;
     let on_b = c.on_b + normal * rb;
-    Ok((
+    Some((
         Point {
             normal,
             point: (on_a + on_b) * 0.5,

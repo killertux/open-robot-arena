@@ -1121,8 +1121,10 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                     let n = m.points.len() as u32;
                     let tris: Vec<[u32; 3]> = m
                         .indices
-                        .chunks_exact(3)
-                        .map(|t| [t[0], t[1], t[2]])
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .copied()
                         .filter(|t| t.iter().all(|&v| v < n))
                         .collect();
                     HavokParts {
