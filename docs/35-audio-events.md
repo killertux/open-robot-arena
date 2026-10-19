@@ -33,6 +33,12 @@ recovered behaviour, its addresses, and the numbers.
   `frida-server` after a few minutes (restart it; the survey uses one attach), and
   `pkill -f <pattern>` kills the shell whose command line contains the pattern.
 
+* **`SoundVolume` does not reach the effects.** Recorded at -600 and at -3000
+  (`audio-vol-*`, `player_joined.wav`), the effect plays at the file's own level in both
+  (peak 0.66 / 0.58 against the file's 0.61), and the script `hopp_club` loop records at
+  -13.8 dB against its file's -14.7 dB. Only the music takes the cfg volume. The client
+  used to apply -600 to every effect; `Audio::apply_cfg` now leaves the SFX gain at unity.
+
 ## 2. The sound API (addresses)
 
 `SoundWizard` is one global (`0x7146d0` -> object `0x7161b8`); every effect handle is
@@ -251,3 +257,24 @@ hits stay near the floor. That is the damage scale of the combat side, flagged i
   cadence of the motor loops (ours stop/start about twice as often as the original's one per
   second per handle).
 * The music's silent gap is one constant (2.5 s) for a 1.1 s + 1.2..2.0 s range.
+
+## 12. Re-check after the steering merge (3169ec4) and the SFX-gain fix
+
+Same scenario and windows as section 10 (hazards on, bell + 5.5..33.5 s).
+
+| | original | 3169ec4 | + SFX at unity |
+|---|---:|---:|---:|
+| impacts, first 60 s | 80 | 83 | 83 |
+| impacts louder than -900 | ~15 % | 6.7 % (8 of 120) | 6.7 % |
+| fight-window level | -19.2 dB | -27.5 dB | -21.5 dB |
+| spectral shape (9 bands) | | 0.827 | 0.827 |
+| crowd at the bell / first change | `somewhat_to_bored` / -14.5 | same / -14.1 | same |
+
+Of the 8 dB gap, 6 dB was audio-side (the -600 on effects, above) and is fixed. The
+remaining 2.3 dB and the 4 to 7 dB shortfall at 4 and 8 kHz are combat-side: with
+the new pricing our loudest hits are 100, 97, 90, 89, 73 (volume 0 to -420) but only
+eight exceed -900, and our crowd gets no component-loss excitement in this run (live: +20
+from a lost part in three of five fights). Impact volume mapping, the crowd's
+excitement thresholds and the motor level (-700, constant, no volume change in the
+log) were each checked against the log and are right; the input (hit sizes, part
+losses) is what differs.
