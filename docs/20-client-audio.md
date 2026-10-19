@@ -188,10 +188,11 @@ real location (hazard loops) keeps the positional model with DirectSound3D's
 * **Match sounds** (`ra2-app/src/match_sounds.rs`): impacts (rule above),
   countdown beeps and bell, chassis criticals, chat, and a loop per turning
   motor (`motorsound`, or the middle file of `runsequence`), faded in/out over
-  0.25 s, released after 0.5 s of stillness. Unrecovered: the original's motor
-  pitch/volume scaling with speed, `firesound` timing, arena material sounds
-  (`SetSubMaterialSound`/`AddXtraSound`), the crowd-mood table, the immobility
-  countdown tick, `frc_generic*`.
+  0.25 s, released after 0.5 s of stillness. Round 2 (section 10) added the crowd
+  mood machine, motor pitch, burst `firesound`s and the immobility tick.
+  Still unrecovered: arena material sounds (`SetSubMaterialSound`/
+  `AddXtraSound`: no arena-contact event reaches the app), the play site of the
+  `Begin_*` announcer lines, the motor volume term (`+0x29c`).
 * **UI** (`audio::UiSound`): click (activating controls), workshop attach
   (the definition's `attachsound`) and removal. Snapshot, point-plotted, eject
   and the lobby sounds have no UI in this client yet; `AudioSystem::ui` takes
@@ -239,3 +240,117 @@ and the match counts down immediately, so with `ArenaIntros=1` the arena's intro
 music and announcers play over the countdown and the first 25 s of the fight,
 where the original plays them before the countdown (its recording of the fight
 has none). The ordering belongs to the match/camera work.
+
+## 10. Round 2: crowd, motors, immobility, countdown (M-audio2)
+
+Everything here is from `Robot Arena 2.exe` (file VAs) unless it says
+"ours".
+
+### The crowd (`RACrowd`, `ra2-app/src/crowd.rs`)
+
+The match object builds it in `FUN_00415500` (`FUN_004d4420` constructor,
+`FUN_004d46e0` loads the 22 sounds at unity, no 3D position; the object is
+`match+0x158`, absent in game modes 3 and 4). State: mood (starts 2), excitement
+(starts `0x37` = 55), a 1 s decay clock, an idle clock, a shout cooldown.
+
+* **Tick** (`FUN_004d5260`, from the match update `FUN_00412fc0` whenever the
+  match is updating): excitement falls by 1 per second (never below 0). Mood is
+  a step function of it: `<35` 0 (bored), `<45` 1 (somewhat bored), `<70` 2
+  (normal), `<85` 3 (mildly excited), `<95` 4 (excited), else 5 (loud). The
+  loops are `bored_loop`, `somewhat_bored_loop`, `normal_loop`,
+  `mildly_excited_loop`, `excited_loop`, `loud_loop`.
+* **Mood change** (`FUN_004d5430`): the old loop stops, the new one starts, the
+  current looped shout fades over 1000 ms, and a one-shot plays. Rising: the
+  burst for the new mood (`FUN_004d5710`: 5 `loud_burstcheer`, 3 or 4
+  `med_burstcheer`, 2 `somewhat_to_normal`, 1 `bored_to_somewhat`). Otherwise
+  the transition into the new mood: 0 `somewhat_to_bored`, 1
+  `normal_to_somewhat`, 2 `mildly_to_normal`, 3 `excited_to_mildly`, 4
+  `ecstatic_to_excited`.
+* **Fight start** (`FUN_00416360` calls `FUN_00416440`): re-enters the current
+  mood without stopping the previous loop: `normal_loop` plus the one-shot
+  `mildly_to_normal`. The crowd has already been ticking through the 4 s
+  countdown, so excitement is 51 at the bell.
+* **Excitement** (`FUN_004d53e0(n, burst)`, capped at 100; `n >= 10` also clears
+  the idle clock and the bored flags): a damage event (`FUN_004175b0`, the same
+  call that scores points) adds 5 for more than 50, 10 for more than 100, 20
+  for more than 300 and nothing below; a robot destroyed (`FUN_00418040`
+  state 1) adds 20 with a `loud_burstcheer`; `FUN_0045f4e0` adds 20.
+* **Shouts** (`FUN_004d5560`): tried when (mood 5 or the taunt flag) and the
+  10 s cooldown and the 6 s shout clock are both up. Mood 5 picks from chant,
+  stompstompclap (both *looped*, 6 s) and waytogo, hitemagain (played once). The
+  taunt flag is raised when excitement is under 15 after ten seconds without a
+  gain of 10 or more; it picks from youmakemesick, boo, comeon (once). A new
+  shout fades a still-sounding chant over 500 ms.
+* Not in the table: `ambient_stadium`, `angry_loop`, `bored_to_normal`.
+
+Ours: `Crowd` is a line-for-line port (unit-tested); `MatchSounds` feeds it the
+countdown/fight ticks, impact damage and destroyed chassis. The robots' damage
+is in our own scale (chassis health 300 against the original's 1828), so the
+50/100/300 steps fire less often than they would in the original.
+
+### Motors, weapons, immobility
+
+* **Motor sound** (class with the vtable at `0x6ab214`; update `FUN_004f59f0`,
+  pitch `FUN_004f5b50`): the loop plays while the motor's output command is
+  non-zero and stops when it returns to zero, at unity volume. While it plays
+  the DirectSound frequency is set every update to `f/2 + (f - f/2) * r` with
+  `f` the file's own rate and `r = |omega| / max_rate` (`FUN_004813e0` over the
+  definition's rate at `+0xb0`): an octave low at rest, the file's pitch at full
+  rate. Ours: `match_sounds::motor_pitch`, applied with
+  `Audio::set_script_speed` (a `SetFrequency` equivalent that bends the voice in
+  the offline render too). Ours still starts the loop from the hinge's measured rate rather than
+  the command (the app does not see the command).
+* **firesound**: a burst motor plays its `firesound` once when it is released.
+  Ours detects the release from the hinge rate (above 3 rad/s from park). Burst
+  pistons are not detected (the app has no slider position).
+* **Immobility tick**: `Sounds\immobile_countdown.wav` is built with the match
+  object (`0x415763`). A cross-correlation of the recording with the file finds it
+  four times, at 13.82, 15.09, 16.37 and 17.48 s (normalised correlation 0.41 to
+  0.62 against at most 0.06 anywhere else in the first 17 s): one tick per
+  sampled second of the 10 to 20 s warning. The spacing is 1.11 to 1.28 s, so
+  the original's match clock in that recording ran at about 0.82 of wall time.
+  Ours: one tick per sampled second while a robot is warned.
+* **The match object's eight sounds** (`FUN_00415500`; the handles live in the
+  match object): `+0x110` an array of four, `frc_generic1/2/4/5.wav`; `+0x138`
+  `immobile_countdown.wav`; `+0x140` `critical_hit.wav`; `+0x148` `chat.wav`;
+  `+0x150` `match_countdown.wav`. Their uses, from the call sites:
+  * `+0x150` plays (`FUN_00475b60`) when the countdown window's number text
+    changes: one `match_countdown.wav` per number, as ours. The bell,
+    `match_countdown_high.wav`, is loaded by the countdown window (`0x4775ec`)
+    the moment its timer reaches zero, next to a random pick of the six
+    `Begin_*` announcer lines the window holds (`0x474ef7`: AndWereOff,
+    BuzzerSignalsStart, HereWeGo, KickMatchInGear, LetsBegin, MayStrongestWin).
+    The recording has no `Begin_*` voice in its first seconds (no match above a
+    normalised correlation of 0.15), so the announcer is not played here.
+  * `+0x140` plays on every chassis critical (the robot method `FUN_004df120`
+    counts them; the third destroys the robot through `FUN_00417cc0`, which
+    plays it again and calls `FUN_00418040` with state 1): ours plays it on
+    each increment of the robot's critical count, as before.
+  * `+0x148` plays for a chat line (`FUN_00475520`).
+  * `+0x138` plays for each second of the immobility counter (`FUN_004124e0`),
+    see above.
+  * `+0x110` plays one of the four at random (`FUN_00419160`) from the robot
+    removal `FUN_0045f4e0`, which also excites the crowd by 20. Ours plays it
+    when a chassis is destroyed.
+
+### Numbers (Scout vs ALARM, Combat Arena, `--bots AI/Team0/Bot0.bot,Bot1.bot`,
+`RA2_ARENA_INTROS=0 RA2_AUDIO_START=3 RA2_AUDIO_SECONDS=18.1`)
+
+| | original | round 1 | round 2 |
+|---|---:|---:|---:|
+| overall RMS | -22.2 dB | -18.9 dB | -21.0 dB |
+| spectral-shape correlation (9 bands) | | 0.87 | 0.94 |
+| 63 / 125 / 250 / 500 / 1000 Hz band diff (dB) | | | +3.2 / +0.1 / 0.0 / +3.0 / +1.8 |
+| 4 k / 8 k band diff (dB) | | | -5.8 / -11.4 (the recording's impacts) |
+
+The old render used the wrong robots (the default bots, not Scout and ALARM),
+whose `bigmotor_loop` is 17 dB louder than the crowd; with the right pair and the
+crowd the low bands match to a few dB. The recording's eight full-scale
+transients (40 ms wide, 0.53 s ... 14.09 s) match no file in `Sounds\` (best
+normalised correlation 0.35, against 0.4 to 0.6 for a true hit), so they are not
+a known sample; the ones the physics round should produce as impacts will be
+quiet in comparison (impact volume is 0 dB only at a damage of 100).
+
+`RA2_AUDIO_TRACE=1` prints every voice with its start in render time;
+`wavtool identify <ref.wav> <t> <dir>` finds which file of a directory sits at
+`t` in a recording.
