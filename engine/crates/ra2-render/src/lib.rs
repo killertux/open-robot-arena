@@ -223,6 +223,11 @@ pub struct HavokArena {
     pub static_triangles: Vec<[Vec3; 3]>,
     /// Every rigid body in the file (static and movable).
     pub bodies: Vec<HavokBody>,
+    /// Pairs of bodies (by name) that never collide with each other — the
+    /// rigid-body collection's `GMID_HAVOK_DIS_COLLISION_PAIRS`. The Parking
+    /// Lot's trap doors, for one, are disabled against every fixed body around
+    /// them, so they swing through the pit's rim.
+    pub disabled_pairs: Vec<(String, String)>,
 }
 
 impl HavokArena {
@@ -376,6 +381,11 @@ pub fn collect_havok(input: &str) -> Result<Option<HavokArena>, Box<dyn std::err
 
     let mut arena = HavokArena {
         gravity: scene.simulation.as_ref().map(|s| Vec3::from(s.gravity)),
+        disabled_pairs: scene
+            .objects
+            .iter()
+            .flat_map(|o| o.disabled_pairs.iter().cloned())
+            .collect(),
         ..Default::default()
     };
 

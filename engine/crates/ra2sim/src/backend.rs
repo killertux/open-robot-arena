@@ -368,8 +368,8 @@ impl std::fmt::Display for BackendError {
 impl std::error::Error for BackendError {}
 
 /// Which physics engine a world runs on: `RA2_PHYSICS=havok17` (the
-/// Havok-1.7-faithful dynamics of [`crate::havok17`]) or `jolt` (Jolt Physics,
-/// the default).
+/// Havok-1.7-faithful dynamics of [`crate::havok17`], the default) or `jolt`
+/// (Jolt Physics, kept as an opt-in fallback).
 pub fn backend_kind() -> &'static str {
     match std::env::var("RA2_PHYSICS") {
         Ok(v) if v.eq_ignore_ascii_case("havok17") || v.eq_ignore_ascii_case("havok") => "havok17",
@@ -379,7 +379,7 @@ pub fn backend_kind() -> &'static str {
 }
 
 /// The engine a world runs on when `RA2_PHYSICS` does not say.
-pub const DEFAULT_BACKEND: &str = "jolt";
+pub const DEFAULT_BACKEND: &str = "havok17";
 
 /// Create the physics world [`backend_kind`] selects. `gravity` is what the
 /// arena's `.gmf` asks for; the Havok backend uses the game's own world gravity
@@ -522,6 +522,24 @@ pub trait PhysicsBackend {
     /// again on the way back up. A parked joint is held by the friction, the way
     /// a parked piston is (F8).
     fn set_joint_strength(&mut self, _handle: JointHandle, _strength: f32, _friction: f32) {}
+
+    /// Lock a joint where it is, or release it — the game's `Lock`.
+    ///
+    /// The original never parks a motor on friction: its hinge controller's
+    /// `Lock(1)` (`FUN_00480e20`) reads the current angle (`FUN_00481190`),
+    /// sets *both* hinge limits to it (`FUN_00480880(θ, θ)`) and turns the
+    /// motor off (`atom + 0x91 = 0`); `Lock(0)` restores the stored limits
+    /// (`+0x68/+0x6c`). The prismatic controller's (`FUN_004b50c0`) sets both
+    /// travel limits to the current offset clamped to the travel. Returns
+    /// `false` for a backend that has no such lock (the caller then parks the
+    /// joint on its friction, see [`Self::set_joint_strength`]).
+    fn lock_joint(&mut self, _handle: JointHandle, _locked: bool) -> bool {
+        false
+    }
+
+    /// Never collide these two bodies: a pair from the arena's
+    /// `GMID_HAVOK_DIS_COLLISION_PAIRS`. A backend may ignore it.
+    fn disable_collision(&mut self, _a: BodyHandle, _b: BodyHandle) {}
 
     /// Replace a body's collision shape in place, optionally with a new mass.
     /// Used to rebuild a robot's body after a part comes off: the body keeps its

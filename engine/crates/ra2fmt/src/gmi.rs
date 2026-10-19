@@ -424,6 +424,9 @@ pub struct SceneObject {
     pub mesh: Option<Mesh>,
     pub light: Option<Light>,
     pub rigid_bodies: Vec<RigidBody>,
+    /// A rigid-body collection's `GMID_HAVOK_DIS_COLLISION_PAIRS`: pairs of
+    /// bodies (by name) Havok never collides with each other.
+    pub disabled_pairs: Vec<(String, String)>,
 }
 
 /// A `*LIGHT` object. Only omni lights occur in the shipped data; the original
@@ -1014,13 +1017,16 @@ impl<'a> Parser<'a> {
         let paircount = self.r.i32()?;
         self.r.i32()?; // solver type
         let rigid_bodies = self.read_rigidbody_list()?;
-        if paircount != 0 {
-            self.read_disabled_pairs()?;
-        }
+        let disabled_pairs = if paircount != 0 {
+            self.read_disabled_pairs()?
+        } else {
+            Vec::new()
+        };
         Ok(SceneObject {
             kind: ObjectKind::RigidBodies,
             name,
             rigid_bodies,
+            disabled_pairs,
             ..Default::default()
         })
     }
@@ -1071,14 +1077,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn read_disabled_pairs(&mut self) -> Result<(), Error> {
+    fn read_disabled_pairs(&mut self) -> Result<Vec<(String, String)>, Error> {
         self.expect_node(51, 2, "disabled collision pairs")?;
         let count = self.r.i32()?;
-        for _ in 0..count {
-            let _ = self.r.string()?;
-            let _ = self.r.string()?;
-        }
-        Ok(())
+        (0..count)
+            .map(|_| Ok((self.r.string()?, self.r.string()?)))
+            .collect()
     }
 
     fn read_constraint_solver(&mut self) -> Result<SceneObject, Error> {

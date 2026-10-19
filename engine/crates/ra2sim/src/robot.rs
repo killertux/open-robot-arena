@@ -1342,6 +1342,13 @@ impl Robot {
             };
             physics.set_joint_strength(joint, info.max_torque * scale.max(0.05), friction);
         }
+        // Parked, the original locks the joint where it is: the hinge
+        // controller's update (`FUN_00481450`) calls `Lock(1)` while its
+        // percentage is zero (`+0x64`, on for every controller but a
+        // `SpinMotor`'s, `0x4f5571`), and the prismatic one's (`FUN_004b5240`)
+        // likewise (`+0x7d`); firing calls `Lock(0)` first (`0x446810`,
+        // `0x448750`). A backend without the lock keeps the friction above.
+        physics.lock_joint(joint, phase == BurstPhase::Cocked);
         if info.slider {
             physics.drive_slider(joint, target);
         } else {
