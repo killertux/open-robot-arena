@@ -55,6 +55,19 @@ use crate::SHELL_SIZE;
 /// (`docs/16-career.md` §3), so the schedule is explicit; the value is ours.
 pub const SEED: u64 = 7;
 
+/// The career the shell and the HQ open: the shipped team with the schedule the
+/// oracle capture showed (the original draws it at random; see
+/// [`ra2sim::career::ORACLE_SCHEDULE_STATE`]). A saved schedule wins.
+fn fresh_career(game: &Path) -> Result<Career, String> {
+    let mut career = Career::new_with_policy(game, SEED, CareerPolicy::default())?;
+    if career.history.is_empty() && std::env::var_os("RA2_RANDOM_SCHEDULE").is_none() {
+        let n = career.events.len();
+        let ids = ra2sim::career::draw_schedule(n, 9, ra2sim::career::ORACLE_SCHEDULE_STATE);
+        let _ = career.set_schedule(&ids);
+    }
+    Ok(career)
+}
+
 /// One click of the repairs screen's clock. The original advances a progress
 /// bar over time (`FUN_004d6e10`) against the shipped 30-minute clock
 /// (`FUN_0058b150(0x1e,1)` → `00:30:00`); this headless/UI tick is six
@@ -268,7 +281,7 @@ pub struct Session {
 impl Session {
     /// Load the career and open the HQ on the robots tab.
     pub fn open(game: &Path) -> Result<Session, String> {
-        let career = Career::new_with_policy(game, SEED, CareerPolicy::default())?;
+        let career = fresh_career(game)?;
         let assets = UiAssets::open(game).map_err(|e| e.to_string())?;
         let view = build_view(&career, game)?;
         let hq = ra2ui::hq::Hq::open(&game.join("UI"), view)?;
@@ -1306,7 +1319,7 @@ impl Session {
 /// The Team HQ's data for the shell: the team record in the game's own
 /// `Teams/` (read-only; nothing is written).
 pub fn shell_view(game: &Path) -> Option<ra2ui::hq::View> {
-    let career = Career::new_with_policy(game, SEED, CareerPolicy::default()).ok()?;
+    let career = fresh_career(game).ok()?;
     build_view(&career, game).ok()
 }
 

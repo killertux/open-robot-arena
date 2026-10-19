@@ -64,16 +64,45 @@ pub fn fill(list: &mut Widget, template: &Gib, cells: usize) -> usize {
         let y = grid.row_height * row as f32;
         for root in &roots {
             let mut cell = root.clone();
-            crate::input::set_field(&mut cell, "Position", &format!("{x} 0 {y} 0"));
+            // `BufferWidth` insets the cell inside its slot; the border is drawn
+            // around the inset frame.
+            let b = grid.buffer_width;
+            crate::input::set_field(&mut cell, "Position", &format!("{} 0 {} 0", x + b, y + b));
             crate::input::set_field(
                 &mut cell,
                 "Size",
-                &format!("{width} 0 {} 0", grid.row_height),
+                &format!("{} 0 {} 0", width - 2.0 * b, grid.row_height - 2.0 * b),
             );
+            add_border(list, &mut cell, grid.border_width);
             list.children.push(cell);
         }
     }
     cells
+}
+
+/// Dress a cell with the list's own `BorderColor` / `BorderWidth` ring (the grid
+/// lines the original draws around each cell). Does nothing for width 0.
+pub fn add_border(list: &Widget, cell: &mut Widget, width: f32) {
+    if width <= 0.0 {
+        return;
+    }
+    let color = list
+        .field("BorderColor")
+        .map_or("0 0 0 1", |f| f.raw.trim())
+        .to_string();
+    let field = |name: &str, raw: String| ra2fmt::gib::Field {
+        name: Some(name.to_string()),
+        raw,
+    };
+    cell.attachments.push(Attachment {
+        kind: ra2fmt::gib::AttachmentKind::Border,
+        fields: vec![
+            field("Width", format!("{width}")),
+            field("Inner", color.clone()),
+            field("Outer", color),
+        ],
+        body: None,
+    });
 }
 
 /// Write a row's art file into the child the template names.

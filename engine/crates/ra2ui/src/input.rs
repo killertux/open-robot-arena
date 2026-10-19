@@ -374,6 +374,10 @@ pub fn visible_rows(list: &Widget) -> usize {
     let Some(grid) = Grid::from_widget(list) else {
         return 0;
     };
+    // The viewport the shell measured from the laid-out scroller.
+    if let Some(rows) = field_of(list, "_ViewRows").and_then(|v| v.parse::<usize>().ok()) {
+        return rows;
+    }
     if grid.rows > 1 {
         return grid.rows as usize;
     }
@@ -413,10 +417,15 @@ pub fn scroll_rows(list: &mut Widget, offset: usize) -> usize {
             continue;
         }
         let shown = ordinal >= offset && ordinal < offset + visible;
+        let (dx, dy) = if child.kind == WidgetKind::Text {
+            (ROW_TEXT_X, ROW_TEXT_Y)
+        } else {
+            (0.0, 0.0)
+        };
         set_field(
             child,
             "Position",
-            &format!("0 0 {} 0", (ordinal as f32 - offset as f32) * height),
+            &format!("{dx} 0 {} 0", (ordinal as f32 - offset as f32) * height + dy),
         );
         set_field(child, "Visible", if shown { "true" } else { "false" });
         ordinal += 1;
@@ -581,6 +590,11 @@ fn thumb(slider: &mut Widget, offset: usize, max: usize, track: f32) {
     );
 }
 
+/// Where a row's text sits inside its row box, measured against the original's
+/// arena list (best shift of our render onto the capture: 2 px right, 5 px up).
+const ROW_TEXT_X: f32 = 2.0;
+const ROW_TEXT_Y: f32 = -5.0;
+
 /// Fill a single-column list with text rows, in the face the arena picker uses.
 ///
 /// The row height and width are the list's own `Sel Bar` (`159 0 18 0` for the
@@ -613,7 +627,7 @@ pub fn text_rows(list: &mut Widget, texts: &[String]) -> usize {
             fields: vec![
                 field("Name", ""),
                 field("ID", "-1"),
-                field("Position", &format!("0 0 {y} 0")),
+                field("Position", &format!("{ROW_TEXT_X} 0 {} 0", y + ROW_TEXT_Y)),
                 field("Size", &format!("{width} 0 {height} 0")),
                 field("Visible", "true"),
                 field("ChildOrder", "-1"),
@@ -808,7 +822,7 @@ mod tests {
         assert!(rows[..5].iter().all(|row| !row.visible()));
         assert!(rows[5..11].iter().all(|row| row.visible()));
         assert!(!rows[11].visible(), "row 11 is past the six-row viewport");
-        assert_eq!(rows[5].position().unwrap().second.amount, 0.0);
+        assert_eq!(rows[5].position().unwrap().second.amount, ROW_TEXT_Y);
         assert!(select_cell(list, 10, 0));
         assert_eq!(selected_row(list), Some(10));
         assert_eq!(selected_cell(list), Some((10, 0)));

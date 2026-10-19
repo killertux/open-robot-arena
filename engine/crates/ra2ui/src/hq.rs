@@ -617,10 +617,17 @@ impl Hq {
             crate::input::set_field(
                 &mut cell,
                 "Position",
-                &format!("{} 1 {} 1", c as f32 * cw, r as f32 * ch),
+                &format!("{} 1 {} 1", c as f32 * cw + 0.011 * cw, r as f32 * ch + 0.018 * ch),
             );
-            crate::input::set_field(&mut cell, "Size", &format!("{cw} 1 {ch} 1"));
+            crate::input::set_field(
+                &mut cell,
+                "Size",
+                &format!("{} 1 {} 1", cw * 0.978, ch * 0.964),
+            );
             crate::cells::bind_art(&mut cell, "preview img", &row.event.art);
+            // The grid's black cell lines (`BorderColor 0 0 0 1`, `BorderWidth 1`) and
+            // `BufferWidth 2`: the art sits a pixel inside the line.
+            crate::cells::add_border(grid, &mut cell, geometry.border_width);
             let (label, color) = match row.state {
                 EventState::Completed => {
                     let won = self

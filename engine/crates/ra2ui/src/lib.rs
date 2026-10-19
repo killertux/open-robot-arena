@@ -1021,6 +1021,20 @@ fn place_core<'a>(
     if let Some(owner) = fill {
         frame = owner;
     }
+    // A list a `Scroller` wraps fills the scroller's own rectangle: the list's
+    // `Position`/`Size` are the editor's leftovers (`arena.gib`'s listbox says
+    // 159 x 175 px at (1, 1); the scroller body says 0.89 x 0.585 at (0.1, 0.08)
+    // and the capture's black list is 258 x 282 there).
+    if matches!(widget.kind, WidgetKind::ListBox) {
+        if let Some(body) = widget
+            .attachments
+            .iter()
+            .find(|a| a.kind == AttachmentKind::Scroller)
+            .and_then(|a| a.body.as_deref())
+        {
+            frame = sized(body, parent, body.size(), fonts, false);
+        }
+    }
     if let Some((pane, horizontal)) = forced {
         if horizontal {
             frame.x = pane.x;
@@ -1304,7 +1318,7 @@ fn aspect(widget: &Widget, w: f32, h: f32) -> (f32, f32) {
         return (w, h);
     }
     match setting as i32 {
-        1 => (w, w / ratio),
+        1 => (w, w * ratio),
         2 => (h * ratio, h),
         _ => (w, h),
     }
