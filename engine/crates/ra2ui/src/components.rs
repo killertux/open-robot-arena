@@ -70,6 +70,7 @@ pub fn all(game: &Path) -> Result<Vec<Component>, String> {
     let cfl = ra2fmt::cfl::Cfl::open_path(&game.join("Components.cfz"))
         .map_err(|e| format!("Components.cfz: {e}"))?;
     let mut out = Vec::new();
+    let mut order: Vec<i32> = Vec::new();
     for entry in cfl.entries() {
         if !entry.name.to_ascii_lowercase().ends_with(".txt") {
             continue;
@@ -85,6 +86,24 @@ pub fn all(game: &Path) -> Result<Vec<Component>, String> {
         if !CATEGORIES.iter().any(|(name, _)| *name == category) || def.preview.is_empty() {
             continue;
         }
+        // The palette lists the base definitions: a `hidden = 1` one (the Smart
+        // Zone's size picker) and the `Styles\` variants it points at are
+        // reached through the part's own style choice, not as palette cells.
+        let hidden = def.get("hidden").is_some_and(|h| h.trim() == "1");
+        if hidden
+            || entry
+                .name
+                .replace('/', "\\")
+                .to_ascii_lowercase()
+                .contains("\\styles\\")
+        {
+            continue;
+        }
+        let sort = def
+            .get("sort")
+            .and_then(|v| v.trim().parse::<i32>().ok())
+            .unwrap_or(0);
+        order.push(sort);
         out.push(Component {
             name: def.name.clone(),
             category,
@@ -92,7 +111,16 @@ pub fn all(game: &Path) -> Result<Vec<Component>, String> {
             file: entry.name.clone(),
         });
     }
-    Ok(out)
+    // Palette order (capture, Power tab: control board, CO2 tank, large air
+    // tank, Nifty, small pack, then SuperVolt): the definition's `sort` key
+    // (the control board's is -10), then the file name, case-folded.
+    let mut keyed: Vec<(i32, String, Component)> = out
+        .into_iter()
+        .zip(order)
+        .map(|(c, sort)| (sort, c.file.to_ascii_lowercase(), c))
+        .collect();
+    keyed.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    Ok(keyed.into_iter().map(|(_, _, c)| c).collect())
 }
 
 /// The components one category holds.
@@ -181,15 +209,47 @@ pub fn fill_grid(grid: &mut Widget, game: &Path, components: &[&Component]) -> u
         else {
             continue;
         };
-        let (row, column) = ((i as i32) / columns, (i as i32) % columns);
+        // `Rows 1` under a horizontal `Scroller` is one long row the bar scrolls
+        // (the capture's Power tab runs five cells to the panel's edge).
+        let one_row = geometry.rows == 1
+            && grid
+                .attachments
+                .iter()
+                .any(|a| a.kind == ra2fmt::gib::AttachmentKind::Scroller);
+        let (row, column) = if one_row {
+            (0, i as i32)
+        } else {
+            ((i as i32) / columns, (i as i32) % columns)
+        };
         // Centred on the cell, which is where the art's own inset content lands
         // in it.
-        let x = geometry.column_x(column) - (art_width - cell_width) / 2.0;
-        let y = geometry.row_height * row as f32 - (art_height - geometry.row_height) / 2.0;
+        let (x, y) = if one_row {
+            // The capture's cells sit edge to edge at the art's own width
+            // (96 px, 1 px black rules between), not at `ColWidths`' 78.
+            (
+                art_width * column as f32,
+                -(art_height - geometry.row_height) / 2.0,
+            )
+        } else {
+            (
+                geometry.column_x(column) - (art_width - cell_width) / 2.0,
+                geometry.row_height * row as f32 - (art_height - geometry.row_height) / 2.0,
+            )
+        };
         let mut cell = image_widget();
         crate::input::set_field(&mut cell, "Position", &format!("{x} 0 {y} 0"));
         crate::input::set_field(&mut cell, "Size", &format!("{art_width} 0 {art_height} 0"));
         crate::input::set_field(&mut cell, "_Filename", &component.art);
+        if one_row {
+            // Capture: unselected cells are the art at 0.6 grey ((155,155,155)
+            // over the white), the selected one full white, with a black rule.
+            let tint = if i == 0 { "1 1 1 1" } else { "0.6 0.6 0.6 1" };
+            crate::input::set_field(&mut cell, "_ForeColor", tint);
+            // In front of the grid's own selection bar (`ChildOrder` 0): the
+            // capture shows only the bar's under-line past the cell's edge.
+            crate::input::set_field(&mut cell, "ChildOrder", "10");
+            crate::cells::add_border(grid, &mut cell, 1.0);
+        }
         grid.children.push(cell);
         made += 1;
     }
@@ -246,7 +306,11 @@ mod tests {
     fn the_palette_is_the_games_own_components() {
         let Some(game) = game_dir() else { return };
         let all = all(&game).unwrap();
-        assert_eq!(all.len(), 131, "the components the archive defines");
+        // 131 definitions in the archive; the palette lists the 70 base ones: the
+        // 61 `Styles\` variants and `hidden = 1` size pickers are reached through
+        // a part's own style choice (capture: the Power tab runs control board,
+        // CO2 tank, large air tank, Nifty, small pack, SuperVolt, no Smart Zone).
+        assert_eq!(all.len(), 70, "the base components the palette lists");
         for component in &all {
             assert!(
                 CATEGORIES.iter().any(|(c, _)| *c == component.category),
@@ -259,7 +323,12 @@ mod tests {
             assert_eq!(bmp_size(&path), Some([96.0, 72.0]), "{}", component.name);
         }
         // The names are the definitions' own, not the directory names.
-        assert!(all.iter().any(|c| c.name == "Z-Tek Motor (HP)"));
+        assert!(all.iter().any(|c| c.name.starts_with("Z-Tek Motor")));
+        // One cell per preview picture: the 70 shipped 96x72 previews.
+        let mut arts: Vec<&str> = all.iter().map(|c| c.art.as_str()).collect();
+        arts.sort_unstable();
+        arts.dedup();
+        assert_eq!(arts.len(), all.len(), "no two palette cells share a picture");
     }
 
     /// The six categories are a partition: every component is in one, and the
@@ -325,7 +394,7 @@ mod tests {
         );
         let (category, filled) = fill_selected(root, &game, &all).unwrap();
         assert_eq!(category, "mechanics");
-        assert_eq!(filled, 30, "mechanics is the motors and pistons");
+        assert_eq!(filled, 15, "mechanics is the base motors and pistons");
         assert_eq!(
             crate::workshop::find(root, GRID).unwrap().children.len(),
             bars + filled,
@@ -369,14 +438,13 @@ mod tests {
             .unwrap();
         assert_eq!(grid.children.len(), bars + power.len());
         for (i, cell) in grid.children.iter().skip(bars).enumerate() {
-            let column = (i % 4) as f32;
-            let row = (i / 4) as f32;
-            // 96 wide and 72 tall, one column (78) and one row (72) apart, and
-            // centred on its cell.
+            // `Rows 1` under a horizontal scroller is one row: each cell is
+            // 96 wide and 72 tall, edge to edge (capture: black rules every
+            // 96 px from the grid's left edge).
             assert_eq!(cell.frame.w, 96.0, "cell {i}");
             assert_eq!(cell.frame.h, 72.0, "cell {i}");
-            assert_eq!(cell.frame.x, grid.frame.x - 9.0 + 78.0 * column, "cell {i}");
-            assert_eq!(cell.frame.y, grid.frame.y + 72.0 * row, "cell {i}");
+            assert_eq!(cell.frame.x, grid.frame.x + 96.0 * i as f32, "cell {i}");
+            assert_eq!(cell.frame.y, grid.frame.y, "cell {i}");
         }
     }
 }

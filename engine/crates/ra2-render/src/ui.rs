@@ -275,7 +275,17 @@ impl UiAssets {
                 continue;
             }
             if p.widget.kind == ra2fmt::gib::WidgetKind::Text {
-                self.text_quads(p, clip, &mut quads);
+                // A `MultiLine` text box wraps its text to its own width.
+                let wrap = parent
+                    .filter(|q| {
+                        q.widget.kind == ra2fmt::gib::WidgetKind::TextBox
+                            && q.widget
+                                .field("MultiLine")
+                                .and_then(|f| f.flag())
+                                .unwrap_or(false)
+                    })
+                    .map(|q| (q.frame.right() - p.frame.x).max(1.0));
+                self.text_quads(p, clip, wrap, &mut quads);
                 continue;
             }
             if p.widget.kind == ra2fmt::gib::WidgetKind::Glyph {
@@ -418,7 +428,13 @@ impl UiAssets {
     }
 
     /// The quads a label draws: one per glyph's cell, tinted by `_ForeColor`.
-    fn text_quads(&mut self, p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
+    fn text_quads(
+        &mut self,
+        p: &Placement<'_>,
+        clip: Option<Frame>,
+        wrap: Option<f32>,
+        out: &mut Vec<UiQuad>,
+    ) {
         let (Some(text), Some(face)) = (p.widget.text(), p.widget.font()) else {
             return;
         };
@@ -433,7 +449,24 @@ impl UiAssets {
         };
         let color = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
         let (pw, ph) = (font.page_width as f32, font.page_height as f32);
-        for glyph in ra2ui::text_run(&font, p.frame, text) {
+        let glyphs: Vec<ra2ui::PlacedGlyph> = match wrap {
+            // The exe advances a wrapped line by the face's ascent.
+            Some(width) => ra2ui::wrap_lines(&font, text, width)
+                .iter()
+                .enumerate()
+                .flat_map(|(i, line)| {
+                    let at = Frame::new(
+                        p.frame.x,
+                        p.frame.y + i as f32 * font.ascent as f32,
+                        p.frame.w,
+                        p.frame.h,
+                    );
+                    ra2ui::text_run(&font, at, line)
+                })
+                .collect(),
+            None => ra2ui::text_run(&font, p.frame, text),
+        };
+        for glyph in glyphs {
             if glyph.cell[2] <= 0 || glyph.cell[3] <= 0 {
                 continue;
             }
@@ -467,46 +500,88 @@ impl UiAssets {
     /// by its margin against whatever holds it — so the box is `_Margin` at the
     /// widget's own frame origin.
     fn glyph_quads(&mut self, p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
-        let (Some(text), Some(face)) = (p.widget.text(), p.widget.font()) else {
+        let Some(mut box_) = glyph_box(p) else {
             return;
         };
-        if text.is_empty() {
-            return;
-        }
-        // A `DisplayBox`'s markup spells a line break as the two characters
-        // `\n` (the credits window's names are one string with seven of them).
-        let text = text.replace("\\n", "\n");
-        let text = text.as_str();
-        let Some(box_) = glyph_box(p) else {
-            return;
-        };
-        let Some(font) = self.faces.get(face).cloned() else {
-            return;
-        };
-        let Some(texture) = self.glyph_page(face, &font) else {
-            return;
-        };
-        let color = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
-        let (pw, ph) = (font.page_width as f32, font.page_height as f32);
-        for glyph in ra2ui::paragraph_run(&font, box_, text, box_.w) {
-            if glyph.cell[2] <= 0 || glyph.cell[3] <= 0 {
+        // A glyph is one or more runs (`Params 2` in `chassis.gib`: a heading in
+        // `fg_d18` ending in a line break, then the paragraph in `fg_mcn14`);
+        // each run's lines start where the one before ended.
+        let faces: Vec<String> = p
+            .widget
+            .fields_named("_Font")
+            .map(|f| f.text().to_string())
+            .collect();
+        let texts: Vec<String> = p
+            .widget
+            .fields_named("_Text")
+            .map(|f| f.text().to_string())
+            .collect();
+        let colors: Vec<[f32; 4]> = p
+            .widget
+            .fields_named("_ForeColor")
+            .map(|f| {
+                let n = f.numbers();
+                [
+                    n.first().copied().unwrap_or(1.0),
+                    n.get(1).copied().unwrap_or(1.0),
+                    n.get(2).copied().unwrap_or(1.0),
+                    n.get(3).copied().unwrap_or(1.0),
+                ]
+            })
+            .collect();
+        for (i, face) in faces.iter().enumerate() {
+            let Some(text) = texts.get(i) else { break };
+            // A `DisplayBox`'s markup spells a line break as the two characters
+            // `\n` (the credits window's names are one string with seven of them).
+            let text = text.replace("\\n", "\n");
+            let color = colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            let Some(font) = self.faces.get(face.as_str()).cloned() else {
                 continue;
+            };
+            if !text.is_empty() {
+                let Some(texture) = self.glyph_page(face, &font) else {
+                    continue;
+                };
+                let (pw, ph) = (font.page_width as f32, font.page_height as f32);
+                // The capture draws a paragraph's first line half an ascent
+                // above where the face's own baseline rule puts it (9 px for
+                // fg_mcn14, 12 for fg_d18: the arena description and chassis.gib's
+                // heading and body), so each run is lifted by `ascent / 2`.
+                let lifted = Frame::new(
+                    box_.x,
+                    box_.y - (font.ascent as f32 / 2.0).round(),
+                    box_.w,
+                    box_.h,
+                );
+                for glyph in ra2ui::paragraph_run(&font, lifted, &text, box_.w) {
+                    if glyph.cell[2] <= 0 || glyph.cell[3] <= 0 {
+                        continue;
+                    }
+                    out.push(UiQuad {
+                        rect: glyph.rect,
+                        corners: None,
+                        // Texture order, as in `text_quads`.
+                        uv: [
+                            glyph.cell[0] as f32 / pw,
+                            glyph.cell[1] as f32 / ph,
+                            (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                            (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
+                        ],
+                        color,
+                        texture,
+                        alpha: true,
+                        clip,
+                    });
+                }
             }
-            out.push(UiQuad {
-                rect: glyph.rect,
-                corners: None,
-                // Texture order, as in `text_quads`.
-                uv: [
-                    glyph.cell[0] as f32 / pw,
-                    glyph.cell[1] as f32 / ph,
-                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
-                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
-                ],
-                color,
-                texture,
-                alpha: true,
-                clip,
-            });
+            // The next run starts below this one's finished lines.
+            let lines = ra2ui::wrap_lines(&font, &text, box_.w);
+            let finished = if text.ends_with('\n') {
+                lines.len().saturating_sub(1)
+            } else {
+                lines.len().saturating_sub(1).max(0)
+            };
+            box_.y += finished as f32 * font.ascent as f32;
         }
     }
 
@@ -583,7 +658,12 @@ fn glyph_box(p: &Placement<'_>) -> Option<Frame> {
     // editor's leftover (arena.gib states 234 for a 376 px description box,
     // and the capture wraps at the frame).
     if p.widget.attachment("DisplayBox").is_some() && p.frame.w > 0.0 {
-        return Some(Frame::new(p.frame.x + m[0], p.frame.y, p.frame.w, m[2].max(p.frame.h)));
+        return Some(Frame::new(
+            p.frame.x + m[0],
+            p.frame.y,
+            p.frame.w,
+            m[2].max(p.frame.h),
+        ));
     }
     Some(Frame::new(p.frame.x + m[0], p.frame.y, m[1], m[2]))
 }

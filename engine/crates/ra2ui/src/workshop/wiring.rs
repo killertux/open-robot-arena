@@ -245,13 +245,26 @@ impl Control {
         self
     }
 
-    /// `"W / S"`-style input label, as `botlab/control_cell.gib` shows it.
+    /// The DirectInput code of a binding row: 1.07/1.08 files write three
+    /// numbers (`0 57 0`, the code second), newer ones four (code third) — the
+    /// same rule the simulator's wiring reader applies.
+    pub fn key_code(row: &[i32; 4]) -> i32 {
+        if row[2] != 0 {
+            row[2]
+        } else {
+            row[1]
+        }
+    }
+
+    /// `"W - S"`-style input label, as `botlab/control_cell.gib` shows it: the
+    /// keys joined with `" - "` (the string at `0x6f1cc0` that the exe's
+    /// control-cell filler `FUN_004451b0` puts between them).
     pub fn key_label(&self) -> String {
         self.keys
             .iter()
-            .map(|row| dik_name(row[2]))
+            .map(|row| dik_name(Self::key_code(row)))
             .collect::<Vec<_>>()
-            .join(" / ")
+            .join(" - ")
     }
 
     fn from_controller(c: &Controller) -> Result<Self, WiringError> {
@@ -836,8 +849,8 @@ mod tests {
         assert_eq!(board.names(), ["Forward", "LeftRight", "Fire", "Spin"]);
         let forward = board.control_at([1, 0]).unwrap();
         assert_eq!(forward.kind, ControlKind::Analog);
-        assert_eq!(forward.key_label(), "W / S");
-        assert_eq!(board.control_at([2, 0]).unwrap().key_label(), "A / D");
+        assert_eq!(forward.key_label(), "W - S");
+        assert_eq!(board.control_at([2, 0]).unwrap().key_label(), "A - D");
         assert_eq!(board.control_at([0, 0]).unwrap().key_label(), "Space");
     }
 

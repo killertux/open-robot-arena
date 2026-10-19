@@ -1067,6 +1067,11 @@ impl Shell {
     /// Open a modal window over the screen (`FUN_005e5620`). A window that is
     /// already the top one is not opened twice.
     fn open_window(&mut self, target: &str) -> Result<(), String> {
+        // `window#content`: the help frame carries the gib its id names.
+        let (target, content) = match target.split_once('#') {
+            Some((window, content)) => (window, Some(content)),
+            None => (target, None),
+        };
         if let Some(top) = self.windows.last() {
             if top.key.eq_ignore_ascii_case(target) {
                 return Ok(());
@@ -1084,6 +1089,11 @@ impl Shell {
                     "common/video_options.gib",
                     None,
                 )?;
+            }
+            if let (true, Some(content)) =
+                (target.eq_ignore_ascii_case("help/helpframe.gib"), content)
+            {
+                load_into(&mut page, &self.ui, &self.game, "help content group", content, None)?;
             }
             if target.eq_ignore_ascii_case("teamhq/editteam.gib") {
                 // The constructor sets the caption for a new team and starts the
@@ -1969,6 +1979,9 @@ fn plan_page(page: &Page, fonts: &Fonts, size: [f32; 2], x: f32, y: f32, step: &
             Action::Window(screen) => Plan::Open {
                 target: screen.to_string(),
             },
+            Action::Help(gib) => Plan::Open {
+                target: format!("help/helpframe.gib#{gib}"),
+            },
             Action::Close => Plan::Close,
             Action::Confirm => {
                 step.note = Some(format!("confirm {}", binding.at));
@@ -2266,6 +2279,13 @@ fn click_lab(
     let chain = chain(&placed, &path);
     step.hit = chain.last().map(|p| describe(p)).unwrap_or_default();
 
+    // The bottom bar's Help button opens the help for the tab on show.
+    if chain.iter().any(|p| p.widget.name() == "Help button") {
+        if let Some(id) = bindings::lab_help_id(lab.tab, lab.step) {
+            step.note = Some(format!("FUN_004e4ab0({id}): help window"));
+            return Ok(Some(bindings::help_target(id)));
+        }
+    }
     // A purpose-named transition out of the workshop (the exit button) is the
     // shell's. It is checked first: the exit button is a plain button, so the
     // workshop would ignore it.

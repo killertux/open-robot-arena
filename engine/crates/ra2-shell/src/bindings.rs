@@ -22,8 +22,52 @@ pub enum Action {
     /// Close the modal window and run its confirmed action (the Yes of the
     /// delete-team box, `FUN_004ec110`).
     Confirm,
+    /// Open the help window (`FUN_004e4ab0`: a switch on the screen's help id
+    /// loads one `UI\\help\\help_*.gib` into the frame and runs it modally).
+    Help(&'static str),
     /// Leave the game.
     Quit,
+}
+
+/// The help id -> gib table of `FUN_004e4ab0` (switch on its argument):
+/// 0 select team, 1 Team HQ, 2 event bracket, 3 repairs, 4-10 the workshop's
+/// overview / chassis / armor / components / wiring / paint shop / test robot,
+/// 11 exhibition, 12 multiplayer, 13 create game, 14 pre-match.
+pub const HELP_GIBS: [&str; 15] = [
+    "help/help_selectteam.gib",
+    "help/help_teamhq.gib",
+    "help/help_eventbracket.gib",
+    "help/help_repairs.gib",
+    "help/help_ws_overview.gib",
+    "help/help_ws_chassis.gib",
+    "help/help_ws_armor.gib",
+    "help/help_ws_components.gib",
+    "help/help_ws_wiring.gib",
+    "help/help_ws_paintshop.gib",
+    "help/help_ws_testrobot.gib",
+    "help/help_exhibition.gib",
+    "help/help_multiplayer.gib",
+    "help/help_multicreate.gib",
+    "help/help_multiprematch.gib",
+];
+
+/// The window key a help request opens: the frame, then `#` and the gib the id
+/// names.
+pub fn help_target(id: usize) -> String {
+    format!("help/helpframe.gib#{}", HELP_GIBS[id])
+}
+
+/// The workshop's help id for its tab (and the chassis tab's armor step).
+pub fn lab_help_id(tab: &str, step: Option<&str>) -> Option<usize> {
+    match tab {
+        "overview button" => Some(4),
+        "chassis button" => Some(if step == Some("armor button") { 6 } else { 5 }),
+        "components button" => Some(7),
+        "wiring button" => Some(8),
+        "paintshop button" => Some(9),
+        "test button" | "testrobot button" => Some(10),
+        _ => None,
+    }
 }
 
 /// The screens that open as a modal window over whatever is showing.
@@ -32,10 +76,12 @@ pub const WINDOWS: &[&str] = &[
     "common/credits.gib",
     "common/messagebox.gib",
     "teamhq/editteam.gib",
+    "help/helpframe.gib",
 ];
 
 /// Whether a screen is one of the modal windows.
 pub fn is_window(screen: &str) -> bool {
+    let screen = screen.split('#').next().unwrap_or(screen);
     WINDOWS.iter().any(|w| w.eq_ignore_ascii_case(screen))
 }
 
@@ -50,6 +96,30 @@ pub struct Binding {
 
 /// Main-menu constructor `FUN_00486960`.
 pub const BINDINGS: &[Binding] = &[
+    Binding {
+        screen: "help/helpframe.gib",
+        name: "close button",
+        action: Action::Close,
+        at: "help window: its Close button ends the modal loop",
+    },
+    Binding {
+        screen: "teamhq/select_team.gib",
+        name: "Help button",
+        action: Action::Help("help/help_selectteam.gib"),
+        at: "FUN_004e4ab0(0)",
+    },
+    Binding {
+        screen: "teamhq/teamhq.gib",
+        name: "Help button",
+        action: Action::Help("help/help_teamhq.gib"),
+        at: "FUN_004e4ab0(1)",
+    },
+    Binding {
+        screen: "exhibition/exhib_setup.gib",
+        name: "Help button",
+        action: Action::Help("help/help_exhibition.gib"),
+        at: "FUN_004e4ab0(0xb)",
+    },
     Binding {
         screen: "mainmenu/mainmenu.gib",
         name: "Quit button",

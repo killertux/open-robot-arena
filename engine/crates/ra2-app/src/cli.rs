@@ -63,6 +63,8 @@ pub struct Args {
     pub start: Option<PathBuf>,
     /// `--save-as NAME`: the design name the headless `--build` run types.
     pub save_as: Option<String>,
+    /// `--build-view TAB`: open the bot lab, show one tab and write one frame.
+    pub build_view: Option<String>,
     /// `--audio-report`: print every play call (path, kind, gain, position).
     pub audio_report: bool,
     /// `--match --out DIR --camera-shots intro@2.5,countdown,f2@13,f3,f3b,f4`:
@@ -103,6 +105,7 @@ impl Default for Args {
             build_mode: false,
             start: None,
             save_as: None,
+            build_view: None,
             audio_report: false,
             camera_shots: Vec::new(),
         }
@@ -167,6 +170,8 @@ pub fn usage() -> &'static str {
        --time SECONDS   --play: the setup screen's match length\n\
        --build          open the workshop (bot lab) as an editor\n\
        --start BOT      the .bot to open in --build (default: a stock chassis)\n\
+       --build-view TAB overview|chassis|components|wiring|paint: with --build --out,\n\
+     \x20                  write build-view-TAB.png of that tab on --start's design and exit\n\
        --save-as NAME   the design name the headless --build run types and saves\n\
        --seconds N      fight length for --match/--play; test length for --build\n\
        --simulate-event N  --hq: play schedule row N's whole event headlessly\n\
@@ -296,6 +301,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--arena" => parsed.arena = Some(PathBuf::from(next(&mut args, "--arena")?)),
             "--build" => parsed.build_mode = true,
             "--start" => parsed.start = Some(PathBuf::from(next(&mut args, "--start")?)),
+            "--build-view" => parsed.build_view = Some(next(&mut args, "--build-view")?),
             "--save-as" => parsed.save_as = Some(next(&mut args, "--save-as")?),
             "-h" | "--help" => parsed.help = true,
             other => return Err(format!("unknown argument {other:?}\n{}", usage())),

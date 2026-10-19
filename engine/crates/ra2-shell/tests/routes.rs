@@ -382,7 +382,9 @@ fn the_arena_description_follows_the_selected_row() {
         out
     };
     assert_eq!(arenas[0].name, "Bridge of Doom");
-    assert!(arenas[0].description.starts_with("Travel across the bridge"));
+    assert!(arenas[0]
+        .description
+        .starts_with("Travel across the bridge"));
     assert_eq!(shown(&shell), vec![arenas[0].description.clone()]);
     // Row 1 (Combat Arena) is 18 px below row 0 in the 1024x768 layout.
     shell.click(320.0, 188.0).unwrap();
@@ -413,4 +415,38 @@ fn the_robot_picker_cells_carry_the_bots_snapshots() {
         keys.len() >= 3,
         "one registered snapshot per robot of the first team: {keys:?}"
     );
+}
+
+/// The bottom bar's Help button opens the help window with the gib the exe's
+/// help switch (`FUN_004e4ab0`) names for the screen, and its Close button
+/// ends it.
+#[test]
+fn the_help_button_opens_the_screens_help_window() {
+    let Some(game) = game_dir() else { return };
+    let mut shell = Shell::boot(&game, [1024.0, 768.0]).unwrap();
+    shell.click_named("exhibition button").unwrap();
+    let step = shell.click_named("Help button").unwrap();
+    assert_eq!(step.screen, "help/helpframe.gib");
+    assert!(step.note.as_deref().unwrap_or("").contains("help"), "{:?}", step.note);
+    let doc = shell.document();
+    let texts: Vec<String> = doc
+        .walk()
+        .filter_map(|w| w.field("_Text").map(|f| f.text().to_string()))
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Exhibition")),
+        "the exhibition help is in the frame: {texts:?}"
+    );
+    shell.click_named("close button").unwrap();
+    assert_eq!(shell.screen_id(), "exhibition/exhib_setup.gib");
+
+    // The bot lab: each tab has its own help (ids 4-9).
+    let mut shell = Shell::boot(&game, [1024.0, 768.0]).unwrap();
+    for name in ["Team HQ button", "continue button", "robots button", "workshop button"] {
+        shell.click_named(name).unwrap();
+    }
+    shell.click_named("wiring button").unwrap();
+    let step = shell.click_named("Help button").unwrap();
+    assert_eq!(step.screen, "help/helpframe.gib");
+    assert!(step.note.as_deref().unwrap_or("").contains("(8)"), "{:?}", step.note);
 }

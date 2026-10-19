@@ -1081,7 +1081,10 @@ fn place_core<'a>(
             // in the box whatever it says, so the authored `Text` position
             // (made for the placeholder string) is replaced by the centred one.
             if widget.kind == WidgetKind::TextBox && text_box_centres(widget) {
-                for child in placed.iter_mut().filter(|c| c.widget.kind == WidgetKind::Text) {
+                for child in placed
+                    .iter_mut()
+                    .filter(|c| c.widget.kind == WidgetKind::Text)
+                {
                     if let Some((w, _)) = measured(child.widget, fonts) {
                         child.frame.x = frame.x + (frame.w - w) / 2.0;
                     }
@@ -1260,6 +1263,20 @@ fn scroll_children<'a>(
         );
         placement.frame.w = target.w;
         placement.frame.h = target.h;
+        // The part's `Background` dresses the part: its body was placed at the
+        // authored track width (281 px of a 313 px bar), so it takes the
+        // resized frame like any background does.
+        let owner = placement.frame;
+        for a in placement
+            .attachments
+            .iter_mut()
+            .filter(|a| a.attachment.kind == AttachmentKind::Background)
+        {
+            a.body.frame = owner;
+            for child in a.body.children.iter_mut() {
+                child.frame = owner;
+            }
+        }
     }
     // The track is not the height the file gave it, so every clip in the three
     // parts is worked out again rather than moved.
