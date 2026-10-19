@@ -528,6 +528,31 @@ impl Hq {
         };
         let made = crate::cells::fill(grid, &template, rows.len());
         let bars = grid.children.len() - made;
+        // Nothing is selected until the player clicks a robot (the shipped bar
+        // positions are the author's leftovers).
+        clear_bars(grid);
+        // The inventory grid divides its own rectangle evenly into `Rows` x
+        // `Columns` cells (the capture's cells are 341 x 119 px in a 683 x 357
+        // grid, not the file's 213 x 70) and fills down each column first.
+        if let Some(geometry) = Grid::from_widget(grid) {
+            let (cols, rws) = (
+                geometry.columns.max(1) as usize,
+                geometry.rows.max(1) as usize,
+            );
+            for (i, cell) in grid.children[bars..].iter_mut().enumerate() {
+                let (col, row) = (i / rws, i % rws);
+                if col >= cols {
+                    break;
+                }
+                let (w, h) = (1.0 / cols as f32, 1.0 / rws as f32);
+                crate::input::set_field(
+                    cell,
+                    "Position",
+                    &format!("{} 1 {} 1", col as f32 * w, row as f32 * h),
+                );
+                crate::input::set_field(cell, "Size", &format!("{w} 1 {h} 1"));
+            }
+        }
         for (cell, row) in grid.children[bars..].iter_mut().zip(rows) {
             crate::cells::bind_value(cell, BOT_NAME, &row.name);
             crate::cells::bind_value(cell, BOT_CLASS, &row.class);
@@ -545,6 +570,7 @@ impl Hq {
             return Ok(());
         };
         crate::standings::fill_league(grid, &template, &rows);
+        clear_bars(grid);
         bind_value_in(
             &mut self.document,
             "season",
@@ -570,6 +596,7 @@ impl Hq {
         let columns = geometry.columns.max(1) as usize;
         let width = geometry.col_widths.first().copied().unwrap_or(0.0);
         grid.children.retain(|c| c.name() != "event cell group");
+        clear_bars(grid);
         for (index, row) in rows.iter().enumerate() {
             let relative = match row.state {
                 EventState::Completed => EVENT_COMPLETED,
@@ -581,16 +608,18 @@ impl Hq {
             let Some(root) = template.widgets().next().cloned() else {
                 continue;
             };
-            let (r, c) = ((index / columns) as i32, (index % columns) as i32);
-            let x = geometry.column_x(c);
-            let y = geometry.row_height * r as f32;
+            // Like the inventory, the schedule divides its own rectangle evenly
+            // into `Rows` x `Columns` cells.
+            let (r, c) = (index / columns, index % columns);
+            let rows_n = geometry.rows.max(1) as f32;
+            let (cw, ch) = (1.0 / columns as f32, 1.0 / rows_n);
             let mut cell = root;
-            crate::input::set_field(&mut cell, "Position", &format!("{x} 0 {y} 0"));
             crate::input::set_field(
                 &mut cell,
-                "Size",
-                &format!("{width} 0 {} 0", geometry.row_height),
+                "Position",
+                &format!("{} 1 {} 1", c as f32 * cw, r as f32 * ch),
             );
+            crate::input::set_field(&mut cell, "Size", &format!("{cw} 1 {ch} 1"));
             crate::cells::bind_art(&mut cell, "preview img", &row.event.art);
             let (label, color) = match row.state {
                 EventState::Completed => {
@@ -648,7 +677,7 @@ impl Hq {
             };
             set_value(
                 title,
-                &format!("Event Schedule - S{}{bracket}", self.view.season + 1),
+                &format!("Event Schedule - Season {}{bracket}", self.view.season + 1),
             );
             title
                 .children
@@ -716,6 +745,55 @@ impl Hq {
         }
         Ok(())
     }
+}
+
+/// Hide the selection and highlight bars of a freshly filled grid.
+fn clear_bars(grid: &mut Widget) {
+    crate::input::clear_selection(grid);
+    if let Some(id) = Grid::from_widget(grid).and_then(|g| g.highlight) {
+        for child in grid.children.iter_mut() {
+            if crate::input::field_of(child, "ID").and_then(|v| v.trim().parse::<i32>().ok())
+                == Some(id)
+            {
+                crate::input::set_field(child, "Visible", "false");
+            }
+        }
+    }
+}
+
+/// Fill an already composed `teamhq.gib` document (the shell's own page, whose
+/// content group holds the tab's screen) from a [`View`]: the team header and
+/// the tab named by `button`. This is what the shell calls after it loads a tab
+/// into `hq content group`.
+pub fn fill_document(
+    ui_root: &Path,
+    document: &mut Gib,
+    button: &str,
+    view: &View,
+) -> Result<(), String> {
+    let Some(tab) = tab(button) else {
+        return Ok(());
+    };
+    let taken = std::mem::replace(
+        document,
+        Gib {
+            version: String::new(),
+            blocks: Vec::new(),
+        },
+    );
+    let mut hq = Hq {
+        ui_root: ui_root.to_path_buf(),
+        document: taken,
+        tab: tab.button,
+        view: view.clone(),
+        slot_own: 0,
+        slot_ready: false,
+        screen_at: 0,
+    };
+    fill_team(&mut hq.document, view);
+    let result = hq.fill_tab();
+    *document = hq.document;
+    result
 }
 
 /// Make every `SplitFrame`'s children fill their pane. See [`Hq::open`] for why

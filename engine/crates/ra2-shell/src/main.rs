@@ -23,7 +23,7 @@ const EXHIBITION: &str = include_str!("../routes/exhibition.txt");
 
 fn usage() -> String {
     "usage: ra2-shell [--game DIR] (--route botlab|exhibition | --script FILE) \
-     [--out DIR] [--size WxH] [--no-python]\n\
+     [--out DIR] [--size WxH] [--no-python] [--animate]\n\
      \n\
      The routes are scripted input files: click x y (or click \"Widget Name\"), \
      wait n, shot name.png."
@@ -46,6 +46,7 @@ fn run() -> Result<(), String> {
     let mut out = std::env::temp_dir().join("ra2-shell");
     let mut size = [1280.0f32, 1005.0];
     let mut python = true;
+    let mut animate = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -67,6 +68,7 @@ fn run() -> Result<(), String> {
                 size = parse_size(&value)?;
             }
             "--no-python" => python = false,
+            "--animate" => animate = true,
             "-h" | "--help" => {
                 println!("{}", usage());
                 return Ok(());
@@ -111,6 +113,7 @@ fn run() -> Result<(), String> {
     }
 
     let mut shell = Shell::boot(&game, size)?;
+    shell.set_animate(animate);
     println!(
         "booted {} from {} ({}x{})",
         ra2_shell::nav::BOOT_SCREEN,
@@ -129,7 +132,9 @@ fn run() -> Result<(), String> {
                 report(&step);
             }
             Command::Wait { ticks } => {
-                println!("wait {ticks}: the shell has no time-dependent drawing");
+                // A tick is 1/60 s; only `--animate` has anything to advance.
+                shell.advance(ticks as f32 / 60.0);
+                println!("wait {ticks}");
             }
             Command::Shot { name } => {
                 let path = out.join(&name);

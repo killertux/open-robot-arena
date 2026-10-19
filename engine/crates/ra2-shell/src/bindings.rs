@@ -19,12 +19,20 @@ pub enum Action {
     Window(&'static str),
     /// Close the modal window (the modal pointer is cleared; the loop ends).
     Close,
+    /// Close the modal window and run its confirmed action (the Yes of the
+    /// delete-team box, `FUN_004ec110`).
+    Confirm,
     /// Leave the game.
     Quit,
 }
 
 /// The screens that open as a modal window over whatever is showing.
-pub const WINDOWS: &[&str] = &["common/options.gib", "common/credits.gib"];
+pub const WINDOWS: &[&str] = &[
+    "common/options.gib",
+    "common/credits.gib",
+    "common/messagebox.gib",
+    "teamhq/editteam.gib",
+];
 
 /// Whether a screen is one of the modal windows.
 pub fn is_window(screen: &str) -> bool {
@@ -77,6 +85,73 @@ pub const BINDINGS: &[Binding] = &[
         name: "Multiplayer button",
         action: Action::Goto("multiplayer/multiplayer.gib"),
         at: "0x486960 -> FUN_004870b0: multiplayer win from multiplayer\\multiplayer.gib, FUN_005e5810",
+    },
+    // Select-team constructor `FUN_004eb540` (init `FUN_004ec2c0`).
+    Binding {
+        screen: "teamhq/select_team.gib",
+        name: "MainMenu button",
+        action: Action::Goto("mainmenu/mainmenu.gib"),
+        at: "0x4eb540 -> handler 0x4eba40 (back to the main menu)",
+    },
+    Binding {
+        screen: "teamhq/select_team.gib",
+        name: "Options button",
+        action: Action::Window("common/options.gib"),
+        at: "0x4eb540 -> handler 0x4e4990 (options window)",
+    },
+    Binding {
+        screen: "teamhq/select_team.gib",
+        name: "continue button",
+        action: Action::Goto("teamhq/teamhq.gib"),
+        at: "0x4eb540 -> FUN_004eba60: `Loading...` (0x4e6bd0), TeamHQWindow(teamhq\\teamhq.gib) cached as `team hq win`, selects the grid's team, FUN_004fe0c0, switch 0x5e5830",
+    },
+    Binding {
+        screen: "teamhq/select_team.gib",
+        name: "new team button",
+        action: Action::Window("teamhq/editteam.gib"),
+        at: "0x4eb540 -> FUN_004ebd40: no empty slot -> box `New Team`/`There are no empty team slots.`; else modal EditTeamWindow(teamhq\\editteam.gib), caption `New Robotics Team`, OK creates the record (FUN_00502680)",
+    },
+    Binding {
+        screen: "teamhq/select_team.gib",
+        name: "delete team button",
+        action: Action::Window("common/messagebox.gib"),
+        at: "0x4eb540 -> FUN_004ec110: box `Delete Team` / `Are you sure you want to delete <team>?` (Yes/No, style 0xc); Yes deletes the record (FUN_00502680) and refills the grid (FUN_004ec310)",
+    },
+    Binding {
+        screen: "common/messagebox.gib",
+        name: "yes button",
+        action: Action::Confirm,
+        at: "message box: result 4 (Yes)",
+    },
+    Binding {
+        screen: "common/messagebox.gib",
+        name: "no button",
+        action: Action::Close,
+        at: "message box: result 3 (No)",
+    },
+    Binding {
+        screen: "common/messagebox.gib",
+        name: "ok button",
+        action: Action::Close,
+        at: "message box: OK",
+    },
+    Binding {
+        screen: "common/messagebox.gib",
+        name: "cancel button",
+        action: Action::Close,
+        at: "message box: Cancel",
+    },
+    Binding {
+        screen: "teamhq/editteam.gib",
+        name: "ok button",
+        action: Action::Confirm,
+        at: "EditTeamWindow: result 1 (OK) creates/updates the team",
+    },
+    Binding {
+        screen: "teamhq/editteam.gib",
+        name: "cancel button",
+        action: Action::Close,
+        at: "EditTeamWindow: cancel",
     },
     // The modal windows' own buttons close them. The executable binds these in
     // the window classes' constructors; the names are the shipped records'.
