@@ -14,7 +14,8 @@
 //!
 //! Trace rows: `time<TAB>[(player, (x, y, z), heading, speed, hitpoints, health)]`
 //! with the original's heading convention (`atan2(fx, fz)`, radians) and speed
-//! (forward component of the chassis velocity), every 6 steps (0.1 s).
+//! (forward component of the chassis velocity), every 6 steps (0.1 s;
+//! `RA2_TRACE_EVERY=1` for every step in the drive tests).
 //! Damage rows are one JSON object per *step in which a robot's damage_taken
 //! grew*: `{"t","victim","attacker"(-1 env),"amount"}`.
 
@@ -26,6 +27,16 @@ use ra2sim::{
 };
 
 const EVERY: usize = 6;
+
+/// The drive tests' sampling interval in steps: `RA2_TRACE_EVERY` (default
+/// [`EVERY`]; 1 samples every step, which the coast measurements need).
+fn drive_every() -> usize {
+    std::env::var("RA2_TRACE_EVERY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(EVERY)
+}
 
 fn row(t: f32, robots: &[(Vec3, f32, f32, f32, f32)]) -> String {
     let mut s = format!("{t}\t[");
@@ -142,11 +153,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut trace = std::fs::File::create(&rest[2])?;
             writeln!(trace, "time_elapsed\t[(player, location xyz, heading, speed, hitpoints(p,0), health fraction)]")?;
             let steps = (secs / DEFAULT_STEP) as usize;
+            let every = drive_every();
             for s in 0..steps {
                 let t = s as f32 * DEFAULT_STEP;
                 let input = script.at(t);
                 duel.step_direct(&[input], DEFAULT_STEP);
-                if s.is_multiple_of(EVERY) {
+                if s.is_multiple_of(every) {
                     write!(trace, "{}", row(t, &sample(&duel)))?;
                 }
             }

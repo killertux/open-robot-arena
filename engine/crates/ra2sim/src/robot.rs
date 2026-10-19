@@ -551,17 +551,18 @@ impl Robot {
         let mut children = Vec::new();
         let mut phantom = Vec::new();
         let (mut mass, mut moment) = (0.0f32, Vec3::ZERO);
-        let mut add = |pieces: &[Vec<Vec3>], m: Mat4, weight: f32, tag: u32, at: Vec3| {
+        type Piece = (Vec<Vec3>, Option<Vec<[u32; 3]>>);
+        let mut add = |pieces: &[Piece], m: Mat4, weight: f32, tag: u32, at: Vec3| {
             let mut placed = Vec::new();
-            for pts in pieces {
+            for (pts, mesh) in pieces {
                 let local: Vec<Vec3> = pts.iter().map(|q| m.transform_point3(*q)).collect();
                 if massprops::hull_volume_centroid(&local).is_some() {
-                    placed.push(local);
+                    placed.push((local, mesh.clone()));
                 }
             }
             let centre = placed
                 .iter()
-                .filter_map(|pts| massprops::hull_volume_centroid(pts))
+                .filter_map(|(pts, _)| massprops::hull_volume_centroid(pts))
                 .fold((0.0f32, Vec3::ZERO), |(v, c), (vi, ci)| {
                     (v + vi, c + ci * vi)
                 });
@@ -574,11 +575,18 @@ impl Robot {
                 mass += weight;
                 moment += centre * weight;
             }
-            for pts in placed {
+            for (pts, mesh) in placed {
+                let shape = match mesh {
+                    Some(indices) => ShapeDesc::MeshHull {
+                        points: pts,
+                        indices,
+                    },
+                    None => ShapeDesc::ConvexHull { points: pts },
+                };
                 children.push(CompoundChild {
                     local_position: Vec3::ZERO,
                     local_rotation: Quat::IDENTITY,
-                    shape: ShapeDesc::ConvexHull { points: pts },
+                    shape,
                     tag,
                 });
             }
@@ -596,16 +604,29 @@ impl Robot {
             // the resting Scout touches the floor with its hubs and fork arm
             // only, `clist_rest`), and a non-physical fitting is no obstacle.
             let collides = c.role.is_physical() && c.role != Role::Power;
-            let pieces: Vec<Vec<Vec3>> = if !collides {
+            let mesh_of = |pts: &Vec<Vec3>, mesh: Option<&Option<Vec<[u32; 3]>>>| {
+                (pts.clone(), mesh.cloned().flatten())
+            };
+            let pieces: Vec<Piece> = if !collides {
                 Vec::new()
             } else if !h.collision.is_empty() || !h.rotor_collision.is_empty() {
-                let mut v = h.collision.clone();
+                let mut v: Vec<Piece> = h
+                    .collision
+                    .iter()
+                    .enumerate()
+                    .map(|(k, pts)| mesh_of(pts, h.collision_mesh.get(k)))
+                    .collect();
                 if !own_rotor {
-                    v.extend(h.rotor_collision.iter().cloned());
+                    v.extend(
+                        h.rotor_collision
+                            .iter()
+                            .enumerate()
+                            .map(|(k, pts)| mesh_of(pts, h.rotor_collision_mesh.get(k))),
+                    );
                 }
                 v
             } else if !c.hull_points.is_empty() {
-                vec![c.hull_points.clone()]
+                vec![(c.hull_points.clone(), None)]
             } else {
                 Vec::new()
             };
@@ -617,8 +638,20 @@ impl Robot {
             let motor = &rig.components[info.motor];
             // A burst motor's rotor is built turned to its start angle.
             let m = frame.inverse() * motor.rotor_local;
+            let rotor: Vec<Piece> = motor
+                .havok
+                .rotor_collision
+                .iter()
+                .enumerate()
+                .map(|(k, pts)| {
+                    (
+                        pts.clone(),
+                        motor.havok.rotor_collision_mesh.get(k).cloned().flatten(),
+                    )
+                })
+                .collect();
             add(
-                &motor.havok.rotor_collision,
+                &rotor,
                 m,
                 motor.havok.rotor_mass,
                 info.motor as u32,

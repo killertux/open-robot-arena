@@ -278,7 +278,7 @@ impl JoltBackend {
                     half_height,
                     radius,
                 } => Shape::new_capsule(*half_height, *radius)?,
-                ShapeDesc::ConvexHull { points } => {
+                ShapeDesc::ConvexHull { points } | ShapeDesc::MeshHull { points, .. } => {
                     let pts: Vec<m::Vec3> = points.iter().map(|p| Self::v(*p)).collect();
                     Shape::new_convex_hull(&pts)?
                 }

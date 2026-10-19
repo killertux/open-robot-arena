@@ -260,8 +260,12 @@ pub struct Component {
 ///   + fork 12 + `bmotor_axle` 12).
 #[derive(Clone, Debug, Default)]
 pub struct HavokParts {
-    /// One convex piece per colliding rigid body, component-local.
+    /// One piece per colliding rigid body, component-local.
     pub collision: Vec<Vec<Vec3>>,
+    /// Per piece of `collision`: the triangles (into its points) when Havok
+    /// collides it as a mesh rather than as a convex hull
+    /// ([`collides_as_mesh`]).
+    pub collision_mesh: Vec<Option<Vec<[u32; 3]>>>,
     /// The phantom geometry (all of it, component-local).
     pub phantom: Vec<Vec3>,
     /// All the rigid bodies' mass, phantoms included, and the phantoms' share.
@@ -271,6 +275,7 @@ pub struct HavokParts {
     /// driven body.
     pub rotor_mass: f32,
     pub rotor_collision: Vec<Vec<Vec3>>,
+    pub rotor_collision_mesh: Vec<Option<Vec<[u32; 3]>>>,
     /// The top rigid body's material.
     pub friction: Option<f32>,
     pub restitution: Option<f32>,
@@ -279,7 +284,8 @@ pub struct HavokParts {
 impl HavokParts {
     /// Read a component's `.gmf` scene.
     pub fn from_scene(scene: &ra2fmt::gmi::GmiScene) -> HavokParts {
-        let objects: BTreeMap<String, Vec<Vec3>> = scene
+        type Geometry = (Vec<Vec3>, Vec<[u32; 3]>);
+        let objects: BTreeMap<String, Geometry> = scene
             .objects
             .iter()
             .filter_map(|o| {
@@ -288,16 +294,24 @@ impl HavokParts {
                     return None;
                 }
                 let m = ra2_render::object_transform(o);
+                let n = mesh.points.len() as u32;
                 Some((
                     o.name.to_ascii_lowercase(),
-                    mesh.points
-                        .iter()
-                        .map(|p| m.transform_point3(Vec3::from(*p)))
-                        .collect(),
+                    (
+                        mesh.points
+                            .iter()
+                            .map(|p| m.transform_point3(Vec3::from(*p)))
+                            .collect(),
+                        mesh.faces
+                            .iter()
+                            .map(|f| f.v)
+                            .filter(|v| v.iter().all(|&i| i < n))
+                            .collect(),
+                    ),
                 ))
             })
             .collect();
-        let points_of = |rb: &ra2fmt::gmi::RigidBody| -> Vec<Vec3> {
+        let geometry_of = |rb: &ra2fmt::gmi::RigidBody| -> Geometry {
             objects
                 .get(&rb.collision_object().to_ascii_lowercase())
                 .cloned()
@@ -318,7 +332,9 @@ impl HavokParts {
                 out.friction = Some(rb.friction);
                 out.restitution = Some(rb.elasticity);
             }
-            let pts = points_of(rb);
+            let (pts, faces) = geometry_of(rb);
+            let mesh =
+                (collides_as_mesh(rb.simulation_geometry) && !faces.is_empty()).then_some(faces);
             if rb.disable_collisions {
                 out.phantom.extend(pts);
                 out.phantom_mass += rb.mass.max(0.0);
@@ -328,15 +344,59 @@ impl HavokParts {
                 out.rotor_mass += rb.mass.max(0.0);
                 if pts.len() >= 4 {
                     out.rotor_collision.push(pts);
+                    out.rotor_collision_mesh.push(mesh);
                 }
                 continue;
             }
             if pts.len() >= 4 {
                 out.collision.push(pts);
+                out.collision_mesh.push(mesh);
             }
         }
         out
     }
+}
+
+/// What a SmartZone adds to the body it is bolted to: its `.gmf` rigid body's
+/// mass, a phantom (`DISABLE_COLLISIONS`, 2 kg in every stock SmartZone) the
+/// renderer's loader skips. Live, the Scout's, ALARM's, FlapJack's and Wide
+/// Load's chassis bodies weigh exactly 2 kg more than their other members
+/// (163.49 against 161.49 kg; Razor, which has none, 212.52 on both). Only the
+/// mass is kept: the zone itself is the game's own, not a collidable.
+fn smart_zone_mass(root: &std::path::Path, file: &str) -> HavokParts {
+    let cfl = ra2fmt::Cfl::open_path(&root.join("Components.cfz")).ok();
+    let text = cfl
+        .as_ref()
+        .and_then(|cf| cf.get_text(file))
+        .or_else(|| std::fs::read_to_string(root.join(file.replace('\\', "/"))).ok());
+    let Some(text) = text else {
+        return HavokParts::default();
+    };
+    let def = ra2fmt::component::parse(&text);
+    let path = root.join("Components").join(def.mesh_rel_path());
+    let Some(Ok(scene)) = std::fs::read(path).ok().map(|b| ra2fmt::gmi::parse(&b)) else {
+        return HavokParts::default();
+    };
+    let h = HavokParts::from_scene(&scene);
+    HavokParts {
+        mass: h.mass,
+        phantom_mass: h.mass,
+        ..HavokParts::default()
+    }
+}
+
+/// Whether Havok collides a rigid body with this `SIMULATION_GEOMETRY` as a
+/// triangle mesh (shape class `GEOMETRIC`, 4) rather than as a convex hull
+/// (`CXGEOMETRIC`, 0x400).
+///
+/// Live (the agent dispatch `FUN_00543370`, collidable `+0x18`, Scout and
+/// ALARM): the mini wheel (2), the extender, motor housings and rotors, the
+/// control board (3) are convex; the fork arm (6) is a mesh, as are the
+/// chassis bodies the game builds. 6 is used by the fork arm, the bracket
+/// wedge and the two snowplows; 0 (angler, ram plate, steering hubs) was not
+/// observed and stays convex.
+pub fn collides_as_mesh(simulation_geometry: i32) -> bool {
+    simulation_geometry == 6
 }
 
 /// The sound keys of a component definition (`Components.cfz`).
@@ -983,7 +1043,7 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
 
 /// Load a `.bot` into a component tree (no physics yet).
 pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
-    let (bot, _root, loaded) = ra2_render::load_bot_components(path)?;
+    let (bot, root, loaded) = ra2_render::load_bot_components(path)?;
     let (rest, carried) =
         ra2_render::component_assembly_mounted(&bot, &loaded, ra2_render::MountMode::from_env());
     let mut components: Vec<Component> = Vec::with_capacity(bot.components.len());
@@ -1006,7 +1066,31 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
         // The Havok bodies the original makes of it (the chassis' is built by
         // the game itself from its own mesh).
         let havok = if i == 0 {
-            HavokParts::default()
+            // The chassis the game builds is one mesh collidable (live: a
+            // `GEOMETRIC` collidable on every chassis body): the `.bot`'s own
+            // chassis mesh, triangles and all.
+            bot.components
+                .first()
+                .and_then(|c| c.chassis.as_ref())
+                .and_then(|ch| ch.mesh.as_ref())
+                .map(|m| {
+                    let n = m.points.len() as u32;
+                    let tris: Vec<[u32; 3]> = m
+                        .indices
+                        .chunks_exact(3)
+                        .map(|t| [t[0], t[1], t[2]])
+                        .filter(|t| t.iter().all(|&v| v < n))
+                        .collect();
+                    HavokParts {
+                        collision: vec![m.points.iter().map(|p| Vec3::from(*p)).collect()],
+                        collision_mesh: vec![(!tris.is_empty()).then_some(tris)],
+                        ..HavokParts::default()
+                    }
+                })
+                .filter(|h| h.collision[0].len() >= 4)
+                .unwrap_or_default()
+        } else if c.class == "SmartZone" {
+            smart_zone_mass(&root, &c.file)
         } else {
             loaded
                 .get(i)
