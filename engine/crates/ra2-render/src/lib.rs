@@ -1072,7 +1072,14 @@ fn scene_material_groups_opts(
             if ia >= pts.len() || ib >= pts.len() || ic >= pts.len() {
                 continue;
             }
-            let eff = top.map(|m| m.resolve_face(f.material));
+            let eff = match top {
+                Some(m) => match m.resolve_face(f.material) {
+                    Some(e) => Some(e),
+                    // An id equal to the sub-material count is never drawn.
+                    None => continue,
+                },
+                None => None,
+            };
             // A face may select a collision sub-material.
             if eff.map(|m| is_collision_name(&m.name)).unwrap_or(false) {
                 continue;
@@ -1090,18 +1097,23 @@ fn scene_material_groups_opts(
                 groups.len() - 1
             });
             let (pa, pb, pc) = (pts[ia], pts[ib], pts[ic]);
-            // The stored per-corner normals (`normals[4*face + corner]`, the
-            // fourth being the face normal) point out of the solid; fall back
-            // to the geometric normal (the data is clockwise-outward, so the
-            // right-handed cross product points inwards).
-            let fallback = -(pb - pa).cross(pc - pa).normalize_or_zero();
-            let corner_normal = |corner: usize| -> Vec3 {
+            // Four normals are stored per face: the face normal, then the
+            // vertex normals of corners A, B, C (`normals[4*face + 1 + corner]`).
+            // The exe's own GMA writer (`0x5c2568..0x5c265b`) prints the
+            // in-memory face record in that order (`*MESH_FACENORMAL` at +0,
+            // `*MESH_VERTEXNORMAL` at +0xc, +0x18, +0x24). Fall back to the
+            // stored face normal, then to the geometric one (the data is
+            // clockwise-outward, so the right-handed cross product points
+            // inwards).
+            let stored = |slot: usize| -> Option<Vec3> {
                 mesh.normals
-                    .get(fi * 4 + corner)
+                    .get(fi * 4 + slot)
                     .map(|n| (normal_mat * Vec3::from(*n)).normalize_or_zero())
                     .filter(|n| *n != Vec3::ZERO)
-                    .unwrap_or(fallback)
             };
+            let fallback =
+                stored(0).unwrap_or_else(|| -(pb - pa).cross(pc - pa).normalize_or_zero());
+            let corner_normal = |corner: usize| -> Vec3 { stored(1 + corner).unwrap_or(fallback) };
             let normals = [corner_normal(0), corner_normal(1), corner_normal(2)];
             let uv_of = |texcoords: &[[f32; 3]], texfaces: &[[u32; 3]], idx: usize| {
                 let ti = texfaces.get(fi).map(|t| t[idx] as usize)?;
@@ -1368,6 +1380,19 @@ pub fn look_at_lh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
 }
 
 /// Left-handed perspective (`D3DXMatrixPerspectiveFovLH`) with 0..1 depth.
+/// Direct3D 8 puts pixel centres on integer screen coordinates (a vertex at
+/// x = 3.0 lands on the centre of pixel 3), wgpu at half-integers. The original
+/// therefore shows every 3D feature half a pixel further right and down than
+/// the same projection rasterised here; this post-transform moves the clip
+/// space by that half pixel. Measured on the pixel-aligned box static cameras
+/// (`arena-box-f3` 1.70 -> 0.66 MAE, `arena-box-f3b` 2.90 -> 1.62).
+pub fn d3d_pixel_centers(view_proj: Mat4, w: u32, h: u32) -> Mat4 {
+    if w == 0 || h == 0 {
+        return view_proj;
+    }
+    Mat4::from_translation(Vec3::new(1.0 / w as f32, -1.0 / h as f32, 0.0)) * view_proj
+}
+
 pub fn perspective_lh(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
     let f = 1.0 / (fov_y * 0.5).tan();
     Mat4::from_cols(
@@ -1428,6 +1453,111 @@ mod tests {
         stock_bots()
             .first()
             .and_then(|p| p.ancestors().find(|a| a.ends_with("game")).map(Into::into))
+    }
+
+    /// A face stores its own normal first, then corner A, B, C's (the exe's
+    /// GMA writer at `0x5c2568`); each render vertex takes its corner's.
+    #[test]
+    fn corner_normals_follow_the_face_normal_in_the_stored_four() {
+        let mesh = gmi::Mesh {
+            material_ref: -2,
+            points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces: vec![gmi::Face {
+                v: [0, 1, 2],
+                material: 0,
+            }],
+            normals: vec![
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, -1.0],
+            ],
+            ..Default::default()
+        };
+        let scene = gmi::GmiScene {
+            materials: vec![gmi::Material::default()],
+            objects: vec![gmi::SceneObject {
+                kind: gmi::ObjectKind::Geometric,
+                name: "tri".into(),
+                transform: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]],
+                mesh: Some(gmi::Mesh {
+                    material_ref: 0,
+                    ..mesh
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let items = scene_items(&scene, Mat4::IDENTITY, Path::new("."), "t");
+        let n: Vec<[f32; 3]> = items[0].vertices.iter().map(|v| v.nrm).collect();
+        assert_eq!(n, vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]]);
+    }
+
+    /// D3D8 samples pixel centres at integer screen coordinates: the clip
+    /// space moves half a pixel right and down.
+    #[test]
+    fn d3d_pixel_centres_shift_half_a_pixel_right_and_down() {
+        let m = d3d_pixel_centers(Mat4::IDENTITY, 1024, 768);
+        let p = m * glam::Vec4::new(0.0, 0.0, 0.5, 1.0);
+        // NDC x spans 1024 pixels over 2 units: half a pixel is 1/1024.
+        assert!((p.x - 1.0 / 1024.0).abs() < 1e-7);
+        assert!((p.y + 1.0 / 768.0).abs() < 1e-7);
+        assert_eq!(d3d_pixel_centers(Mat4::IDENTITY, 0, 0), Mat4::IDENTITY);
+    }
+
+    /// The specular term (power > 0, the light's specular colour) is added on
+    /// top of the textured colour, per vertex; power 0 leaves it out.
+    #[test]
+    fn specular_is_added_after_the_texture_when_power_is_positive() {
+        let Ok(renderer) = Renderer::new() else {
+            return;
+        };
+        let quad = |z: f32| {
+            let n = Vec3::new(0.0, 0.0, -1.0);
+            [
+                (-1.0, -1.0),
+                (1.0, -1.0),
+                (1.0, 1.0),
+                (-1.0, -1.0),
+                (1.0, 1.0),
+                (-1.0, 1.0),
+            ]
+            .iter()
+            .map(|&(x, y)| Vertex::new(Vec3::new(x, y, z), n, [0.0, 0.0]))
+            .collect::<Vec<_>>()
+        };
+        let draw = |power: f32| {
+            let material = Material {
+                diffuse: [0.2, 0.2, 0.2, 1.0],
+                ambient: [0.0; 4],
+                specular: [1.0, 1.0, 1.0, 0.0],
+                power,
+                cull: false,
+                ..Material::default()
+            };
+            let mut item = DrawItem::new(quad(5.0), material, "q");
+            item.scene_lights = Some(Arc::new(vec![Light {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                range: 100.0,
+                diffuse: [1.0; 3],
+                specular: [1.0; 3],
+                attenuation: [1.0, 0.0, 0.0],
+            }]));
+            let vp = perspective_lh(1.0, 1.0, 0.5, 50.0)
+                * look_at_lh(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), Vec3::Y);
+            let px = renderer.render(&[item], vp, 16, 16).unwrap();
+            let at = (8 * 16 + 8) * 4;
+            px[at] as i32
+        };
+        let flat = draw(0.0);
+        let shiny = draw(10.0);
+        assert!((flat - 51).abs() <= 2, "diffuse only: {flat}");
+        // Per vertex (Gouraud) like D3D: the corners' N.H ~ 0.98, so the
+        // interpolated highlight is strong but not pure white.
+        assert!(
+            shiny > flat + 120,
+            "the highlight adds on top: {flat} -> {shiny}"
+        );
     }
 
     /// The arenas' own data drives the material mapping: the box arena's glass

@@ -1800,6 +1800,7 @@ impl Duel {
         self.apply_background(renderer);
         let view_proj = self.view_proj(camera, w, h);
         let fx = self.effect_items(view_proj);
+        let view_proj = ra2_render::d3d_pixel_centers(view_proj, w, h);
         let mut groups = self.render_groups();
         groups.push(RenderGroup {
             items: &fx,
@@ -1828,6 +1829,7 @@ impl Duel {
         self.apply_background(renderer);
         let view_proj = self.view_proj(camera, w, h);
         let fx = self.effect_items(view_proj);
+        let view_proj = ra2_render::d3d_pixel_centers(view_proj, w, h);
         let mut groups = self.render_groups();
         groups.push(RenderGroup {
             items: &fx,

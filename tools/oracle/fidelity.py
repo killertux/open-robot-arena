@@ -127,8 +127,10 @@ FIXTURES = [
          build="wiring"),
     dict(id="botlab-paint", ref="botlab-paint__1024x768__000.png",
          build="paint"),
-    dict(id="match-countdown", ref="match-countdown__1024x768__000.png", match="countdown.png",
-         note="ours: ra2-app --match Scout vs ALARM, Combat Arena, watch camera"),
+    dict(id="match-countdown", ref="match-countdown__1024x768__000.png", introshot=("box", 6.55),
+         note="the reference is NOT a countdown frame: it shows the Combat Arena intro flight with the "
+              "Skip Intro button and no COMPETITORS READY panel; ours is the box intro at the fitted "
+              "6.55 s (docs/34-arena-render.md section 6)"),
     dict(id="match-hud", ref="match-hud__1024x768__000.png", match="fight-mid.png",
          note="robot positions/HUD values differ by construction (live fight)"),
     dict(id="match-results", ref="match-results__1024x768__000.png", match="results.png",
@@ -150,14 +152,21 @@ ARENA_SHOTS = {
 }
 
 
-# The capture script clicks `Skip Intro` a fixed wall time after `Start Game`, but each arena loads for a
-# different time, so the intro clock reads differently at the click.  The watch camera keeps the pose
-# the intro flight had at that moment (docs/30), hence the countdown still depends on it.  These are
-# FITTED capture-timing parameters (the intro-clock second whose countdown best matches the reference),
-# not game behaviour; `skip@T` is `--camera-shots`' "click Skip Intro at intro second T".
+# The capture script presses keys a fixed WALL time after `Start Game`, but each arena loads for a
+# different time, so the intro clock reads differently at the intro shot and at the `Skip Intro`
+# click.  The watch camera keeps the pose the intro flight had at the click (docs/30), hence the
+# countdown still depends on it.  These are FITTED capture-timing parameters (the intro-clock
+# moment, at 1/60 s frame resolution, whose frame best matches the reference), not game
+# behaviour: `skip@T` is "click Skip Intro at intro second T", `intro@T` the intro still.  Fitted
+# with tools/oracle/fit_capture_timing.py after the docs/34 render fixes (half-pixel centres,
+# normals, sub-material ids, the session texture cache).
 ARENA_SKIP = {
-    "box": 4.6, "bridge": 5.1, "compressor": 6.8, "electric": 7.5, "halfcircle": 4.5,
-    "metalskull": 4.8, "octagon": 4.65, "parkinglot": 4.9,
+    "box": 4.615, "bridge": 5.132, "compressor": 6.749, "electric": 7.47, "halfcircle": 4.5,
+    "metalskull": 4.799, "octagon": 4.649, "parkinglot": 4.915,
+}
+ARENA_INTRO = {
+    "box": 2.348, "bridge": 2.332, "compressor": 2.132, "electric": 2.398, "halfcircle": 2.165,
+    "metalskull": 2.281, "octagon": 2.348, "parkinglot": 2.348,
 }
 
 
@@ -180,17 +189,32 @@ def find_arena_fixtures():
     return out
 
 
+# The order `capture_arenas.py` captured the arena stills in, one after another in ONE
+# session of the original (its DEFAULT_NAMES, the Arena list order).  The original's texture
+# manager keeps the first file loaded under a bitmap name for the whole session
+# (docs/34-arena-render.md section 2), so e.g. Electric showed Compressor's `bars.tga` and Half
+# Circle Box's `sawhazard.bmp`.  `--earlier-arenas` replays that history.
+CAPTURE_ORDER = ["bridge", "box", "compressor", "electric", "halfcircle",
+                 "metalskull", "parkinglot", "octagon"]
+
+
+def earlier_arenas(arena):
+    return [os.path.join(GAME, "Arenas", ARENA_SCRIPTS[a])
+            for a in CAPTURE_ORDER[:CAPTURE_ORDER.index(arena)]]
+
+
 def run_camera_shots(arena, tmp):
     """One `--camera-shots` run for `arena`; returns the directory of PNGs or None."""
     d = os.path.join(tmp, "cam-" + arena)
     os.makedirs(d, exist_ok=True)
     shots = ",".join(
-        [ARENA_SHOTS["intro"], "skip@%g" % ARENA_SKIP.get(arena, 4.8)]
+        ["intro@%g" % ARENA_INTRO.get(arena, 2.5), "skip@%g" % ARENA_SKIP.get(arena, 4.8)]
         + [ARENA_SHOTS[k] for k in ("countdown", "f2", "f3", "f3b", "f4")])
     bots = ",".join(os.path.join(GAME, "AI", "Team0", b) for b in ("Bot0.bot", "Bot1.bot"))
     p = subprocess.run([APP, "--game", GAME, "--match", "--seconds", "40", "--out", d,
                         "--size", "%dx%d" % SIZE, "--bots", bots, "--arena", os.path.join(GAME, "Arenas", ARENA_SCRIPTS[arena]),
-                        "--camera-shots", shots],
+                        "--camera-shots", shots]
+                       + (["--earlier-arenas", ",".join(earlier_arenas(arena))] if earlier_arenas(arena) else []),
                        capture_output=True, text=True, env=env(), timeout=900)
     return d if p.returncode == 0 else None
 
@@ -246,6 +270,20 @@ def render_shell(fx, out_png):
             return (p.stderr or p.stdout).strip().splitlines()[-1:] or ["failed"]
         shutil.copy(os.path.join(d, "out.png"), out_png)
     return None
+
+
+def run_intro_shot(arena, at, tmp):
+    """`ra2-app --match --arena ... --camera-shots intro@AT`: one intro frame; the PNG or None."""
+    d = os.path.join(tmp, "intro-%s-%g" % (arena, at))
+    os.makedirs(d, exist_ok=True)
+    bots = ",".join(os.path.join(GAME, "AI", "Team0", b) for b in ("Bot0.bot", "Bot1.bot"))
+    p = subprocess.run([APP, "--game", GAME, "--match", "--seconds", "5", "--out", d,
+                        "--size", "%dx%d" % SIZE, "--bots", bots,
+                        "--arena", os.path.join(GAME, "Arenas", ARENA_SCRIPTS[arena]),
+                        "--camera-shots", "intro@%g" % at],
+                       capture_output=True, text=True, env=env(), timeout=600)
+    png = os.path.join(d, "cam-intro.png")
+    return png if p.returncode == 0 and os.path.exists(png) else None
 
 
 def run_match_frames(tmp):
@@ -359,7 +397,17 @@ def screens(args, out):
         out_png = os.path.join(out, "ours", rd, fx["id"] + ".png")
         os.makedirs(os.path.dirname(out_png), exist_ok=True)
         err = None
-        if "camshot" in fx:
+        if "introshot" in fx:
+            if rd != "app":
+                row["status"] = "unreachable"
+                row["reason"] = "the match is only rendered by ra2-app"
+                return row
+            src = run_intro_shot(fx["introshot"][0], fx["introshot"][1], tmp)
+            if not src:
+                row["status"], row["reason"] = "render-failed", "ra2-app --camera-shots intro failed"
+                return row
+            shutil.copy(src, out_png)
+        elif "camshot" in fx:
             if rd != "app":
                 row["status"] = "unreachable"
                 row["reason"] = "the match is only rendered by ra2-app"

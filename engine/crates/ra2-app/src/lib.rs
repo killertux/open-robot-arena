@@ -144,6 +144,17 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         return play_mode::run_headless(&options).map(|_| ());
     }
     if args.match_mode {
+        for earlier in &args.earlier_arenas {
+            // Load (and drop) the earlier arenas' models: only the session's
+            // texture manager keeps anything from them.
+            let path = if earlier.is_absolute() || earlier.exists() {
+                earlier.clone()
+            } else {
+                game.join(earlier)
+            };
+            ra2_render::collect_items(&path.to_string_lossy())
+                .map_err(|e| format!("--earlier-arenas {}: {e}", path.display()))?;
+        }
         let options = match_mode::Options::new(
             &game,
             args.arena.clone(),

@@ -71,6 +71,13 @@ pub struct Args {
     /// one PNG per camera moment (`cam-<name>.png`), see
     /// [`crate::match_mode::run_camera_shots`].
     pub camera_shots: Vec<String>,
+    /// `--earlier-arenas a.py,b.py`: arenas loaded earlier in the same session,
+    /// in order. The original's texture manager keeps the first file loaded
+    /// under a bitmap name for the whole session
+    /// ([`ra2_render::material::session_bitmap`]), so what an arena shows
+    /// depends on which arenas came before it; the oracle stills were captured
+    /// one after another in one session.
+    pub earlier_arenas: Vec<PathBuf>,
 }
 
 impl Default for Args {
@@ -108,6 +115,7 @@ impl Default for Args {
             build_view: None,
             audio_report: false,
             camera_shots: Vec::new(),
+            earlier_arenas: Vec::new(),
         }
     }
 }
@@ -118,6 +126,7 @@ pub fn usage() -> &'static str {
      \x20      ra2-app --match [--seconds N] [--out DIR] [--quit-at N]\n\
      \x20                [--bots A.bot,B.bot] [--arena PATH] [--audio-report]\n\
      \x20                [--camera-shots intro@2.5,countdown,f2@13,f3@17,f3b@20,f4@24]\n\
+     \x20                [--earlier-arenas A.py,B.py]\n\
      \x20      ra2-app --play --drive \"0-2:1,0;2-4:1,1\" [--seconds N] [--out DIR]\n\
      \x20                [--team N --bot N] [--opponent-team N --opponent-bot N]\n\
      \x20                [--gametype deathmatch|battle-royal|team-match|tabletop|king-of-hill]\n\
@@ -285,6 +294,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--bots" => {
                 let value = next(&mut args, "--bots")?;
                 parsed.bots = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+            }
+            "--earlier-arenas" => {
+                parsed.earlier_arenas = next(&mut args, "--earlier-arenas")?
                     .split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
