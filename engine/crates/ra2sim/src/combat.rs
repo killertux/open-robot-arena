@@ -97,6 +97,9 @@ pub struct Impact {
     pub by: usize,
     pub damage: f32,
     pub point: Vec3,
+    /// The contact normal out of the struck component's body (the direction
+    /// the sparks of `FUN_004a2a50` leave along).
+    pub normal: Vec3,
     /// The record's closing speed (`rec0`), m/s.
     pub speed: f32,
 }
@@ -350,6 +353,8 @@ pub fn resolve(robots: &[Robot], events: &[ContactEvent], cfg: &CombatConfig) ->
                     by: att_c,
                     damage,
                     point: e.point,
+                    // `n` points from `a` toward `b`.
+                    normal: if vic == ra { n } else { -n },
                     speed: rec0,
                 });
             }
