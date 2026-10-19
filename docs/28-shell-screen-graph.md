@@ -155,6 +155,64 @@ One observed sample, not a rule. Cells carry the grid's `BorderColor`/`BorderWid
 Not recovered / not done this round: event bracket, season results, multiplayer, remaining Team HQ and Bot Lab
 handlers, Help (none were decompiled); Bot Lab build mode in the harness.
 
+## 3i. Shell3: descriptions, thumbnails, scrollers, bot lab view, Help
+
+Evidence: `fidelity.py --out <dir>` (side images: reference | ours | diff). MAE before -> after (app renderer):
+exhibition-arena 3.10 -> 2.17, exhibition-arena-box 12.50 -> 1.69, exhibition-pick-ai 3.17 -> 2.40, teamhq-standings
+6.09 -> 4.23, botlab-overview 9.28 -> 5.87, -chassis 4.94 -> 5.50, -components 8.48 -> 5.82, -wiring 6.48 -> 5.56,
+-paint 9.08 -> 7.04, match-hud 0.55 -> 0.50 (mean of 68: 9.21 -> 8.85). Chassis went up because the harness now shows the
+real design (see below) instead of an empty lab; its text and layout are closer, the 3D model is the remaining gap.
+
+* **Arena description.** The `DisplayBox` hangs on the **unnamed child** of `description grp` and is a `Glyph` that
+  also carries `_Text`; the old code looked on the group itself and so always showed the file's editor placeholder
+  ("hammers..."). The selected row's docstring is now written into every `DisplayBox`/`Glyph` under the group.
+  A `Glyph` with a `DisplayBox` wraps to its **frame** (376 px here), not the stored `_Margin` width (234).
+  Test `the_arena_description_follows_the_selected_row`.
+* **Paragraph position.** A `Glyph` paragraph's first line sits `ascent/2` above the face's own baseline rule
+  (9 px fg_mcn14, 12 px fg_d18; fitted on the arena description and `chassis.gib`), and a `Glyph` may have several
+  runs (`Params 2`: `fg_d18` heading ending in a newline, then `fg_mcn14` text): each run starts below the lines
+  the previous one finished. A `Text` in a `MultiLine true` `TextBox` wraps to the box (help windows).
+* **Pick-ai thumbnails.** The robot cells' `bot preview` is the **TGA snapshot stored in each `.bot`**
+  (`ra2fmt::bot` `snapshot`), registered as a `#bot-preview:picker-*` texture; `sample_bot.bmp` ("No Robot Preview")
+  remains for a bot without one. Test `the_robot_picker_cells_carry_the_bots_snapshots`.
+* **Centred text boxes.** A `TextBox` whose `Alignment` has the centre bit (18, 10, 34) centres its `Text` child on
+  the box whatever it says (the authored `_Position` was made for the placeholder string): fixes the picker's robot
+  name, standings, events, match HUD.
+* **exhibition-arena-box 12.50.** Harness, not engine: the fixture used `--play`, which clicks hazards **off** and
+  scrolls to a different row. It is now a route (`exhibition`, `arena`, `@320,188`; `--click-names` accepts `@x,y`
+  points in the render size). Also: selection/highlight bars were drawn twice (the `Rectangle` fill and the `Image`
+  inside it, `Selection.tga` was a guess for the blank name and smeared a blotch); the capture draws one 0.5 layer
+  ((38,38,127) on black) **behind** the row text (list rows get `ChildOrder` 10, `ClipMode` 0).
+* **Standings scroll bar (6.09 -> 4.23).** A `Scroller`'s `ScrollBar` stands flush inside the right edge of the
+  scroller body (capture: bar x 924..940 of a body 293..940), not at its authored x (591); a one-column grid in a
+  scroller runs its rows to the bar (cells' width = grid width, not `ColWidths` 388). The slider's `Background`
+  body is resized with the track (it kept the authored 281 px: the "extra strip").
+* **Bot lab view.** `ra2-app --build --start Teams/Team0/Bot0.bot --build-view overview|chassis|components|wiring|paint
+  --out DIR --size WxH` lays the lab out natively at the capture size, hides the synthetic edit panel, fills the 3D
+  view (top-down camera, 0.15 grey) and writes one frame; `fidelity.py` uses it (the capture was taken on C.R.U.S.H.).
+  Recovered/derived rules: overview name/weight/class/snapshot come from the open design (weight class by mass
+  thresholds); Components: the palette lists base definitions only (no `hidden = 1`, no `Styles\` variants: 70 =
+  the 70 distinct previews), ordered by `sort` then file name (control board `sort = -10`; capture: board, CO2 tank,
+  large air tank, Nifty, small pack, SuperVolt), as **one row** scrolled horizontally (`Rows 1` + horizontal `Scroller`)
+  with cells 96 px edge to edge, unselected cells at 0.6 grey; Wiring: the control grid is **3 x 3** cells of a third of
+  its frame (capture: rules at x 556/698/840/982, y 386/499/612), control-cell labels are `Name`, key names joined
+  with `" - "` (separator string at `0x6f1cc0`, filler `FUN_004451b0` loads `control_cell.gib`, sets `control name`,
+  `control input` (`FUN_00444820/00444830` iterate the keys) and `control img`); a 1.07/1.08 key row `0 57 0` has its
+  code **second**; Paint Shop opens on **Color Fill**: `effect dropdown` text and `colorfill.gib` in
+  `effect settings group`. Not done: the translucent chassis in Components/Wiring, the exact C.R.U.S.H. mesh/camera
+  (the capture's design weighs 395.2 kg, Bot0 here 387.2), the colour swatch default.
+* **Help (`FUN_004e4ab0`).** Switch on a help id: 0 `help_selectteam`, 1 `help_teamhq`, 2 `help_eventbracket`,
+  3 `help_repairs`, 4-10 `help_ws_` overview/chassis/armor/components/wiring/paintshop/testrobot, 11 `help_exhibition`,
+  12 `help_multiplayer`, 13 `help_multicreate`, 14 `help_multiprematch`; it loads the gib (`FUN_00480110`) into the
+  frame's `help content group` and runs it modally (`FUN_005e5620`). Bound on select team, Team HQ, exhibition setup
+  and every lab tab (`bindings::lab_help_id`); the frame's `close button` closes it. Test
+  `the_help_button_opens_the_screens_help_window`. Event bracket, repairs and multiplayer help ids exist in the table
+  but their screens are not reachable yet.
+
+Changed test expectations: `ra2ui` palette (131 -> 70 cells, mechanics 30 -> 15, cells one row 96 px apart, distinct
+pictures); league/results/armour grid cells take the grid width; `key_label` is `"W - S"` (was `"W / S"`).
+
+
 ## 4. Where the table lives
 
 `engine/crates/ra2-shell/src/bindings.rs` holds the recovered (screen, widget

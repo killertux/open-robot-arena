@@ -97,8 +97,8 @@ FIXTURES = [
     dict(id="exhibition-arena", ref="exhibition-arena__1024x768__000.png",
          route=["exhibition button", "arena button"]),
     dict(id="exhibition-arena-box", ref="exhibition-arena-box__1024x768__000.png",
-         play="setup",
-         note="ours: ra2-app --play (arena row clicked, hazards UNCHECKED; reference has hazards on)"),
+         route=["exhibition button", "arena button", "@320,188"],
+         note="route: Combat Arena row (an @x,y point in the render size's coordinates); hazards stay checked as in the reference"),
     dict(id="exhibition-robots", ref="exhibition-robots__1024x768__000.png",
          route=["exhibition button", "robots button"]),
     dict(id="exhibition-deathmatch", ref="exhibition-deathmatch__1024x768__000.png",
@@ -117,16 +117,16 @@ FIXTURES = [
     dict(id="teamhq-history", ref="teamhq-history__1024x768__000.png",
          route=TEAMHQ + ["history button"]),
     dict(id="botlab-overview", ref="botlab-overview__1024x768__000.png",
-         route=TEAMHQ + ["robots button", "workshop button"],
-         note="reference has C.R.U.S.H. selected and a random tip line"),
+         build="overview",
+         note="ours: ra2-app --build on C.R.U.S.H. (Teams/Team0/Bot0.bot); the reference shows a random tip line"),
     dict(id="botlab-chassis", ref="botlab-chassis__1024x768__000.png",
-         route=TEAMHQ + ["robots button", "workshop button", "chassis button"]),
+         build="chassis"),
     dict(id="botlab-components", ref="botlab-components__1024x768__000.png",
-         route=TEAMHQ + ["robots button", "workshop button", "components button"]),
+         build="components"),
     dict(id="botlab-wiring", ref="botlab-wiring__1024x768__000.png",
-         route=TEAMHQ + ["robots button", "workshop button", "wiring button"]),
+         build="wiring"),
     dict(id="botlab-paint", ref="botlab-paint__1024x768__000.png",
-         route=TEAMHQ + ["robots button", "workshop button", "paintshop button"]),
+         build="paint"),
     dict(id="match-countdown", ref="match-countdown__1024x768__000.png", match="countdown.png",
          note="ours: ra2-app --match Scout vs ALARM, Combat Arena, watch camera"),
     dict(id="match-hud", ref="match-hud__1024x768__000.png", match="fight-mid.png",
@@ -203,6 +203,20 @@ def env():
     e = dict(os.environ)
     e["RA2_GAME"] = GAME
     return e
+
+
+def render_build(fx, out_png):
+    """The bot lab with the design the capture had open (C.R.U.S.H., Teams/Team0/Bot0.bot),
+    one tab, no editing: `ra2-app --build --build-view TAB`."""
+    with tempfile.TemporaryDirectory() as d:
+        p = subprocess.run([APP, "--game", GAME, "--build", "--start", "Teams/Team0/Bot0.bot",
+                            "--build-view", fx["build"], "--out", d, "--size", "%dx%d" % SIZE],
+                           capture_output=True, text=True, env=env(), timeout=180)
+        src = os.path.join(d, "build-view-%s.png" % fx["build"])
+        if p.returncode or not os.path.exists(src):
+            return (p.stderr or p.stdout).strip().splitlines()[-1:] or ["failed"]
+        shutil.copy(src, out_png)
+    return None
 
 
 def render_app(fx, out_png):
@@ -376,6 +390,12 @@ def screens(args, out):
                 row["status"], row["reason"] = "render-failed", "ra2-app --play failed"
                 return row
             shutil.copy(src, out_png)
+        elif "build" in fx:
+            if rd != "app":
+                row["status"] = "unreachable"
+                row["reason"] = "the build-mode lab is only rendered by ra2-app"
+                return row
+            err = render_build(fx, out_png)
         elif rd == "app":
             err = render_app(fx, out_png)
         else:

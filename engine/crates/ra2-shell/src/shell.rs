@@ -1067,6 +1067,11 @@ impl Shell {
     /// Open a modal window over the screen (`FUN_005e5620`). A window that is
     /// already the top one is not opened twice.
     fn open_window(&mut self, target: &str) -> Result<(), String> {
+        // `window#content`: the help frame carries the gib its id names.
+        let (target, content) = match target.split_once('#') {
+            Some((window, content)) => (window, Some(content)),
+            None => (target, None),
+        };
         if let Some(top) = self.windows.last() {
             if top.key.eq_ignore_ascii_case(target) {
                 return Ok(());
@@ -1082,6 +1087,18 @@ impl Shell {
                     &self.game,
                     "options content group",
                     "common/video_options.gib",
+                    None,
+                )?;
+            }
+            if let (true, Some(content)) =
+                (target.eq_ignore_ascii_case("help/helpframe.gib"), content)
+            {
+                load_into(
+                    &mut page,
+                    &self.ui,
+                    &self.game,
+                    "help content group",
+                    content,
                     None,
                 )?;
             }
@@ -1324,7 +1341,7 @@ impl Shell {
             robot: None,
             scroll: 0,
         };
-        refresh_picker(&mut popup, &self.ui, &self.game)?;
+        refresh_picker(&mut popup, &self.ui, &self.game, &mut self.previews)?;
         self.popup = Some(popup);
         Ok(())
     }
@@ -1432,7 +1449,7 @@ impl Shell {
                     if let Some(root) = root_widget_mut(&mut popup.gib) {
                         set_team_list_open(root, false);
                     }
-                    refresh_picker(&mut popup, &self.ui, &self.game)?;
+                    refresh_picker(&mut popup, &self.ui, &self.game, &mut self.previews)?;
                 }
             }
             self.popup = Some(popup);
@@ -1452,7 +1469,7 @@ impl Shell {
                     .unwrap_or(0);
                 if column < robots {
                     popup.robot = Some(column);
-                    refresh_picker(&mut popup, &self.ui, &self.game)?;
+                    refresh_picker(&mut popup, &self.ui, &self.game, &mut self.previews)?;
                 }
             }
             self.popup = Some(popup);
@@ -1633,18 +1650,7 @@ impl Shell {
             // The text is the `DisplayBox` attachment of `description grp` (its
             // body is the `description` Glyph), not a child of the group.
             if let Some(group) = workshop::find_mut(root, "description grp") {
-                for attachment in group
-                    .attachments
-                    .iter_mut()
-                    .filter(|a| a.kind == ra2fmt::gib::AttachmentKind::DisplayBox)
-                {
-                    if let Some(field) = attachment.field_mut("Display") {
-                        field.raw = ra2ui::cells::markup_with_text(&field.raw, &arena.description);
-                    }
-                    if let Some(body) = attachment.body.as_deref_mut() {
-                        ra2ui::cells::bind_prose(body, &arena.description);
-                    }
-                }
+                bind_description(group, &arena.description);
             }
         }
         if let (Some(key), Some(picture)) = (key, picture) {
@@ -1980,6 +1986,9 @@ fn plan_page(page: &Page, fonts: &Fonts, size: [f32; 2], x: f32, y: f32, step: &
             Action::Window(screen) => Plan::Open {
                 target: screen.to_string(),
             },
+            Action::Help(gib) => Plan::Open {
+                target: format!("help/helpframe.gib#{gib}"),
+            },
             Action::Close => Plan::Close,
             Action::Confirm => {
                 step.note = Some(format!("confirm {}", binding.at));
@@ -2277,6 +2286,13 @@ fn click_lab(
     let chain = chain(&placed, &path);
     step.hit = chain.last().map(|p| describe(p)).unwrap_or_default();
 
+    // The bottom bar's Help button opens the help for the tab on show.
+    if chain.iter().any(|p| p.widget.name() == "Help button") {
+        if let Some(id) = bindings::lab_help_id(lab.tab, lab.step) {
+            step.note = Some(format!("FUN_004e4ab0({id}): help window"));
+            return Ok(Some(bindings::help_target(id)));
+        }
+    }
     // A purpose-named transition out of the workshop (the exit button) is the
     // shell's. It is checked first: the exit button is a plain button, so the
     // workshop would ignore it.
@@ -2399,7 +2415,12 @@ fn set_text(widget: &mut Widget, text: &str) {
 /// Rebuild the open picker from its selected team and robot: the dropdown's
 /// rows, the dropdown text, the robot cells (with their weight icons), the
 /// selection and the labels the screen's own notes name.
-fn refresh_picker(popup: &mut Popup, ui: &Path, game: &Path) -> Result<(), String> {
+fn refresh_picker(
+    popup: &mut Popup,
+    ui: &Path,
+    game: &Path,
+    previews: &mut BTreeMap<String, ra2ui::preview::Preview>,
+) -> Result<(), String> {
     let template = workshop::load(ui, "exhibition/choosebot_cell.gib")?
         .widgets()
         .next()
@@ -2449,6 +2470,19 @@ fn refresh_picker(popup: &mut Popup, ui: &Path, game: &Path) -> Result<(), Strin
             let mut cell = template.clone();
             ra2ui::input::set_field(&mut cell, "Position", &format!("{} 0 0 0", 90 * ordinal));
             let path = teams::bot_path(game, popup.side, team, *bot);
+            // The cell's `bot preview` is the snapshot the `.bot` file carries
+            // (a 128x128 TGA the game rendered when the design was saved);
+            // `sample_bot.bmp` ("No Robot Preview") stays for a bot without one.
+            let snapshot = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| ra2fmt::bot::parse(&bytes).ok())
+                .and_then(|bot| bot.snapshot)
+                .and_then(|tga| ra2ui::preview::Preview::decode_tga(&tga));
+            if let Some(snapshot) = snapshot {
+                let key = snapshot.key("picker");
+                ra2ui::cells::bind_art(&mut cell, "bot preview", &key);
+                previews.insert(key, snapshot);
+            }
             if let Some((_, class)) = teams::bot_info(&path) {
                 let icon = match class {
                     0 => "exhibition/light_icon.bmp",
@@ -2525,6 +2559,29 @@ fn chain<'a>(roots: &'a [Placement<'a>], path: &[usize]) -> Vec<&'a Placement<'a
         out.push(next);
     }
     out
+}
+
+/// Put `text` into every `DisplayBox` under `widget` (the group's own and its
+/// children's: in `arena.gib` the box hangs on the group's unnamed child).
+fn bind_description(widget: &mut ra2fmt::gib::Widget, text: &str) {
+    for attachment in widget
+        .attachments
+        .iter_mut()
+        .filter(|a| a.kind == ra2fmt::gib::AttachmentKind::DisplayBox)
+    {
+        if let Some(field) = attachment.field_mut("Display") {
+            field.raw = ra2ui::cells::markup_with_text(&field.raw, text);
+        }
+        if let Some(body) = attachment.body.as_deref_mut() {
+            ra2ui::cells::bind_prose(body, text);
+        }
+    }
+    if widget.kind == ra2fmt::gib::WidgetKind::Glyph {
+        ra2ui::input::set_field(widget, "_Text", text);
+    }
+    for child in widget.children.iter_mut() {
+        bind_description(child, text);
+    }
 }
 
 /// A widget's description for the trace: its class and its data name.

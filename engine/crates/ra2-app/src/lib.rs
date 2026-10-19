@@ -69,6 +69,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
                 window_size
             },
             seconds: args.seconds.unwrap_or(4.0),
+            view: args.build_view.clone(),
         };
         return match options.out {
             Some(_) => build_mode::run_headless(&options),

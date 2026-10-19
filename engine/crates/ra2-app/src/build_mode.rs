@@ -79,6 +79,8 @@ pub struct Options {
     pub out: Option<PathBuf>,
     pub size: [u32; 2],
     pub seconds: f32,
+    /// Show one tab on the `--start` design, write its frame and stop.
+    pub view: Option<String>,
 }
 
 /// The row-height and face of the synthetic panel. `fg_mcn12` is the shell's
@@ -161,6 +163,12 @@ impl PreviewCamera {
 /// The live workshop: the shell, the model, and the panel drawn over the 3D
 /// placeholder.
 pub struct Builder {
+    /// The size the shell is laid out at (1280x1005 for the window; the
+    /// harness lays it out natively at the capture's size).
+    size: [f32; 2],
+    /// The fidelity harness's view: the 3D view fills its placeholder and the
+    /// synthetic edit panel is not drawn.
+    view_only: bool,
     /// Workshop sounds waiting for the audio drain (attach, removal).
     sounds: Vec<crate::audio::UiSound>,
     game: PathBuf,
@@ -230,11 +238,20 @@ impl Builder {
     /// Boot the shell and reach the bot lab, then open `start` (or build from
     /// the stock chassis).
     pub fn open(game: &Path, start: Option<&Path>) -> Result<Builder, String> {
+        Self::open_sized(game, start, SHELL_SIZE)
+    }
+
+    /// [`Builder::open`] with the shell laid out natively at `size`.
+    pub fn open_sized(
+        game: &Path,
+        start: Option<&Path>,
+        size: [f32; 2],
+    ) -> Result<Builder, String> {
         let game = game
             .canonicalize()
             .map_err(|e| format!("{}: {e}", game.display()))?;
         let library = GameLibrary::open(&game).map_err(|e| e.to_string())?;
-        let mut shell = Shell::boot(&game, SHELL_SIZE)?;
+        let mut shell = Shell::boot(&game, size)?;
         // The shipped route, exactly as `ra2-shell`'s botlab route walks it.
         shell.click_named("Team HQ button")?;
         shell.click_named("continue button")?;
@@ -286,6 +303,8 @@ impl Builder {
         let designs = game.join(DESIGNS);
         let custom_textures = game.join(CUSTOM_TEXTURES);
         let mut builder = Builder {
+            size,
+            view_only: false,
             ui: game.join("UI"),
             game,
             library,
@@ -672,7 +691,7 @@ impl Builder {
 
     /// Click the synthetic panel row carrying `action`.
     pub fn click_action(&mut self, action: &str) -> Result<(), String> {
-        let placed = ra2ui::resolve_with(&self.panel.gib, SHELL_SIZE, Some(self.assets.faces()));
+        let placed = ra2ui::resolve_with(&self.panel.gib, self.size, Some(self.assets.faces()));
         let row = placed
             .iter()
             .flat_map(|p| p.walk())
@@ -702,13 +721,62 @@ impl Builder {
                         .join(", ")
                 )
             })?;
-        let columns = self.palette_columns();
-        let row = index / columns.max(1);
-        if row != self.palette_scroll {
-            self.palette_scroll = row;
+        let (horizontal, visible, _) = self.palette_window();
+        let scroll = if horizontal {
+            // One long row, scrolled by cell: bring the cell into the window.
+            if index < self.palette_scroll {
+                index
+            } else if index >= self.palette_scroll + visible {
+                index + 1 - visible
+            } else {
+                self.palette_scroll
+            }
+        } else {
+            index / self.palette_columns().max(1)
+        };
+        if scroll != self.palette_scroll {
+            self.palette_scroll = scroll;
             self.refresh_palette();
         }
         self.click_palette(index)
+    }
+
+    /// Whether the palette is one horizontally scrolled row (`components.gib`'s
+    /// grid is `Rows 1` under a horizontal `Scroller`, `PermScrolls true`), and
+    /// how many whole cells the grid's frame shows.
+    fn palette_window(&self) -> (bool, usize, f32) {
+        let placed = self.shell.placements();
+        let Some(grid) = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "components grid")
+        else {
+            return (false, 4, 78.0);
+        };
+        let Some(g) = ra2ui::Grid::from_widget(grid.widget) else {
+            return (false, 4, 78.0);
+        };
+        let horizontal = g.rows == 1
+            && grid
+                .widget
+                .attachments
+                .iter()
+                .any(|a| a.kind == ra2fmt::gib::AttachmentKind::Scroller);
+        // The cells are the art's own width apart.
+        let stride = grid
+            .widget
+            .children
+            .iter()
+            .find(|c| c.filename().is_some_and(|f| f.starts_with("Components")))
+            .and_then(|c| c.size())
+            .map(|s| s.first.amount)
+            .filter(|w| *w > 0.0)
+            .unwrap_or_else(|| g.column_x(1).max(1.0));
+        (
+            horizontal,
+            ((grid.frame.w / stride).ceil() as usize).max(1),
+            stride,
+        )
     }
 
     /// The palette grid's column count (`components.gib` says `Columns 4`).
@@ -1622,7 +1690,7 @@ impl Builder {
 
     /// The action a click on the synthetic panel names, if any.
     fn panel_action(&self, x: f32, y: f32) -> Option<String> {
-        let placed = ra2ui::resolve_with(&self.panel.gib, SHELL_SIZE, Some(self.assets.faces()));
+        let placed = ra2ui::resolve_with(&self.panel.gib, self.size, Some(self.assets.faces()));
         let path = ra2ui::input::hit(&placed, x, y)?;
         let chain = chain(&placed, &path);
         chain.iter().rev().find_map(|p| {
@@ -1742,12 +1810,94 @@ impl Builder {
     /// Recompute the panel and every list the current screen asks for.
     pub fn refresh(&mut self) -> Result<(), String> {
         self.revision = self.revision.wrapping_add(1);
+        self.refresh_overview();
+        self.refresh_effects();
         self.refresh_palette();
         self.refresh_armour();
         self.refresh_controls();
         self.normalize_target();
         self.refresh_panel();
         Ok(())
+    }
+
+    /// The tabs that show the open design's numbers (overview, components) take
+    /// its name, mass and weight class; the overview's snapshot box takes the
+    /// snapshot the `.bot` carries.
+    fn refresh_overview(&mut self) {
+        let stats = self.build.stats();
+        let name = self.build.name().to_string();
+        let mass = format!("{:.1}", stats.mass);
+        let class = ra2ui::workshop::stats::WeightClass::of_mass(stats.mass).full_label();
+        let snapshot = self
+            .build
+            .to_bot()
+            .snapshot
+            .as_deref()
+            .and_then(ra2ui::preview::Preview::decode_tga);
+        let key = snapshot.as_ref().map(|p| p.key("lab-snapshot"));
+        if let (Some(key), Some(snapshot)) = (&key, &snapshot) {
+            self.assets.add_preview(key, snapshot);
+        }
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            for (widget, text) in [
+                ("bot name textbox", name.as_str()),
+                ("weight", mass.as_str()),
+                ("weightclass", class),
+            ] {
+                if let Some(w) = workshop::find_mut(root, widget) {
+                    ra2ui::input::set_field(w, "_Text", text);
+                    for child in w.children.iter_mut() {
+                        if child.kind == WidgetKind::Text {
+                            ra2ui::input::set_field(child, "_Text", text);
+                        }
+                    }
+                }
+            }
+            if let Some(key) = &key {
+                ra2ui::cells::bind_art(root, "snapshot img", key);
+            }
+        }
+    }
+
+    /// The Paint Shop opens on its first effect, Color Fill: the dropdown names
+    /// it and `colorfill.gib` is loaded into `effect settings group` (the
+    /// group's own note: "load individual effects gibs here").
+    fn refresh_effects(&mut self) {
+        if self.shell.tab() != Some("paintshop button") {
+            return;
+        }
+        let Ok(fragment) = workshop::load(&self.ui, "botlab/colorfill.gib") else {
+            return;
+        };
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            if let Some(dropdown) = workshop::find_mut(root, "effect dropdown") {
+                if let Some(text) = dropdown
+                    .children
+                    .iter_mut()
+                    .find(|c| c.kind == WidgetKind::TextBox)
+                    .and_then(|b| b.children.iter_mut().find(|c| c.kind == WidgetKind::Text))
+                {
+                    ra2ui::input::set_field(text, "_Text", "Color Fill");
+                }
+            }
+            if let Some(slot) = workshop::find_mut(root, "effect settings group") {
+                if slot.children.is_empty() {
+                    workshop::load_into(root, &fragment, "effect settings group");
+                }
+            }
+        }
     }
 
     fn refresh_palette(&mut self) {
@@ -1757,6 +1907,7 @@ impl Builder {
         }
         let mut category = None;
         let scroll = self.palette_scroll;
+        let (horizontal, visible, stride) = self.palette_window();
         if let Some(lab) = self.shell.lab_mut() {
             for block in lab.document.blocks.iter_mut() {
                 let ra2fmt::gib::Block::Widget(root) = block else {
@@ -1792,6 +1943,37 @@ impl Builder {
                                 )
                             });
                             for (rank, &ci) in order.iter().enumerate() {
+                                if horizontal {
+                                    let cell = &mut grid.children[ci];
+                                    ra2ui::input::set_field(
+                                        cell,
+                                        "Name",
+                                        &format!("m9:cell:{rank}"),
+                                    );
+                                    let shown = rank >= scroll && rank < scroll + visible;
+                                    ra2ui::input::set_field(
+                                        cell,
+                                        "Visible",
+                                        if shown { "true" } else { "false" },
+                                    );
+                                    if shown {
+                                        // `fill_grid` put the cell at its own column;
+                                        // the scroll moves the row left by cells.
+                                        let at = cell
+                                            .field("Position")
+                                            .map(|f| f.numbers())
+                                            .unwrap_or_default();
+                                        let x = at.first().copied().unwrap_or(0.0)
+                                            - stride * scroll as f32;
+                                        let y = at.get(2).copied().unwrap_or(0.0);
+                                        ra2ui::input::set_field(
+                                            cell,
+                                            "Position",
+                                            &format!("{x} 0 {y} 0"),
+                                        );
+                                    }
+                                    continue;
+                                }
                                 let row = rank / columns;
                                 let cell = &mut grid.children[ci];
                                 ra2ui::input::set_field(cell, "Name", &format!("m9:cell:{rank}"));
@@ -1875,6 +2057,11 @@ impl Builder {
             return;
         };
         let board = self.build.board().clone();
+        let Some((frame, _)) = self.control_grid() else {
+            return;
+        };
+        let (cell_w, cell_h) = control_cell_size(frame);
+        let selected = self.wire_control;
         if let Some(lab) = self.shell.lab_mut() {
             for block in lab.document.blocks.iter_mut() {
                 let ra2fmt::gib::Block::Widget(root) = block else {
@@ -1884,12 +2071,28 @@ impl Builder {
                     continue;
                 };
                 grid.children.retain(|c| !c.name().starts_with("m9:ctl:"));
-                let Some(g) = ra2ui::Grid::from_widget(grid) else {
-                    return;
-                };
+                // The grid's selection bar shows only on a selected control.
+                for bar in grid.children.iter_mut().filter(|c| c.name() == "Sel Bar") {
+                    match selected {
+                        Some(cell) => {
+                            ra2ui::input::set_field(
+                                bar,
+                                "Position",
+                                &format!(
+                                    "{} 0 {} 0",
+                                    cell_w * cell[0] as f32,
+                                    cell_h * cell[1] as f32
+                                ),
+                            );
+                            ra2ui::input::set_field(bar, "Size", &format!("{cell_w} 0 {cell_h} 0"));
+                            ra2ui::input::set_field(bar, "Visible", "true");
+                        }
+                        None => ra2ui::input::set_field(bar, "Visible", "false"),
+                    }
+                }
                 for control in &board.controls {
-                    let x = g.column_x(control.cell[0]);
-                    let y = g.row_height * control.cell[1] as f32;
+                    let x = cell_w * control.cell[0] as f32;
+                    let y = cell_h * control.cell[1] as f32;
                     for root in template.widgets() {
                         let mut cell = root.clone();
                         ra2ui::input::set_field(
@@ -1901,11 +2104,7 @@ impl Builder {
                         ra2ui::input::set_field(
                             &mut cell,
                             "Size",
-                            &format!(
-                                "{} 0 {} 0",
-                                g.col_widths.first().copied().unwrap_or(66.0),
-                                g.row_height
-                            ),
+                            &format!("{cell_w} 0 {cell_h} 0"),
                         );
                         let art = match control.kind {
                             ControlKind::Analog => "botlab\\ctrl_analog.bmp",
@@ -1913,13 +2112,6 @@ impl Builder {
                             ControlKind::Button => "botlab\\ctrl_button.bmp",
                         };
                         ra2ui::cells::bind_art(&mut cell, "control img", art);
-                        // `control_cell.gib` was authored at 415×273 and its
-                        // art files are 60×40; the image is drawn at its layout
-                        // `Size`, so it is set here.
-                        if let Some(img) = workshop::find_mut(&mut cell, "control img") {
-                            ra2ui::input::set_field(img, "Position", "3 0 15 0");
-                            ra2ui::input::set_field(img, "Size", "60 0 40 0");
-                        }
                         ra2ui::cells::bind_value(&mut cell, "control name", &control.name);
                         ra2ui::cells::bind_value(&mut cell, "control input", &control.key_label());
                         grid.children.push(cell);
@@ -1974,22 +2166,24 @@ impl Builder {
         let (frame, grid) = self
             .control_grid()
             .ok_or_else(|| "the wiring tab's control grid is not on screen".to_string())?;
-        let rect = grid.cell(frame, cell[1], cell[0]);
-        Ok([rect.x + rect.w / 2.0, rect.y + rect.h / 2.0])
+        let _ = grid;
+        let (w, h) = control_cell_size(frame);
+        Ok([
+            frame.x + w * (cell[0] as f32 + 0.5),
+            frame.y + h * (cell[1] as f32 + 0.5),
+        ])
     }
 
     /// The cell a point inside the shipped `control grid` names, or `None` when
-    /// it is outside the authors' `Rows`/`Columns` (3×4).
+    /// it is outside the board's 3x3 cells ([`control_cell_size`]).
     fn control_cell_at(&self, x: f32, y: f32) -> Option<[i32; 2]> {
-        let (frame, grid) = self.control_grid()?;
-        for row in 0..grid.rows {
-            for column in 0..grid.columns {
-                if grid.cell(frame, row, column).contains_point(x, y) {
-                    return Some([column, row]);
-                }
-            }
+        let (frame, _) = self.control_grid()?;
+        if !frame.contains_point(x, y) {
+            return None;
         }
-        None
+        let (w, h) = control_cell_size(frame);
+        let (column, row) = (((x - frame.x) / w) as i32, ((y - frame.y) / h) as i32);
+        (column < 3 && row < 3).then_some([column, row])
     }
 
     /// Add the pending control kind at a free cell. The shipped grid holds one
@@ -2541,7 +2735,7 @@ impl Builder {
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "common buts")
             .map(|p| p.frame.y)
-            .unwrap_or(SHELL_SIZE[1]);
+            .unwrap_or(self.size[1]);
         if !has_3d {
             // Chassis step 1 has no 3D view: its shipped `Editing Area` is the
             // drawing surface. The panel becomes a three-row strip along the
@@ -2554,7 +2748,7 @@ impl Builder {
                     p.widget.name() == "blueprint" || p.widget.name() == workshop::CONTENT_SLOT
                 })
                 .map(|p| p.frame)
-                .unwrap_or(Frame::new(0.0, 0.0, SHELL_SIZE[0], SHELL_SIZE[1]));
+                .unwrap_or(Frame::new(0.0, 0.0, self.size[0], self.size[1]));
             let height = 44.0;
             let y = (content.bottom() - height - 2.0).max(content.y);
             let frame = Frame::new(content.x + 2.0, y, (content.w - 4.0).max(10.0), height);
@@ -2576,9 +2770,15 @@ impl Builder {
                     .find(|p| p.widget.name() == workshop::CONTENT_SLOT)
                     .map(|p| p.frame)
             })
-            .unwrap_or(Frame::new(0.0, 0.0, SHELL_SIZE[0], SHELL_SIZE[1]));
+            .unwrap_or(Frame::new(0.0, 0.0, self.size[0], self.size[1]));
         // The shell's own bottom bar is drawn over the content area; a panel
         // that ran under it would be unreadable and unclickable.
+        if self.view_only {
+            return (
+                placeholder,
+                Frame::new(placeholder.x, placeholder.y, 0.0, 0.0),
+            );
+        }
         let bottom = placeholder.bottom().min(nav_top - 2.0);
         let height = (bottom - placeholder.y).max(40.0);
         let preview_h = (height * 0.28).max(40.0);
@@ -2602,7 +2802,8 @@ impl Builder {
     pub fn scene(&mut self, _target: [u32; 2]) -> Result<UiScene, String> {
         let mut scene = {
             let placed = self.shell.placements();
-            self.assets.scene(&placed, [1280, 1005])
+            self.assets
+                .scene(&placed, [self.size[0] as u32, self.size[1] as u32])
         };
         let preview_rect = self.panel.preview;
         if let Some((pixels, width, height)) = self.preview_pixels(preview_rect)? {
@@ -2623,9 +2824,14 @@ impl Builder {
                 clip: Some(preview_rect),
             });
         }
+        if self.view_only {
+            return Ok(scene);
+        }
         let panel_placed =
-            ra2ui::resolve_with(&self.panel.gib, SHELL_SIZE, Some(self.assets.faces()));
-        let panel_scene = self.assets.scene(&panel_placed, [1280, 1005]);
+            ra2ui::resolve_with(&self.panel.gib, self.size, Some(self.assets.faces()));
+        let panel_scene = self
+            .assets
+            .scene(&panel_placed, [self.size[0] as u32, self.size[1] as u32]);
         let offset = scene.textures.len();
         scene.textures.extend(panel_scene.textures);
         for mut quad in panel_scene.quads {
@@ -2642,7 +2848,7 @@ impl Builder {
         let renderer = &self.renderer;
         let ui = UiRenderer::new(renderer.device());
         let pixels = ui
-            .render(renderer.device(), renderer.queue(), &scene)
+            .render_at(renderer.device(), renderer.queue(), &scene, size)
             .map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -2723,8 +2929,18 @@ impl Builder {
         }
         let center = (min + max) * 0.5;
         let radius = ((max - min).length() * 0.5).max(0.6);
-        let eye = center + Vec3::new(radius * 1.9, radius * 1.2, radius * 2.1);
-        let view = ra2_render::look_at_lh(eye, center, Vec3::Y);
+        let (eye, up) = if self.view_only {
+            // The original's lab looks straight down at the robot, nose up the
+            // screen, over the 3D view's 0.15 grey.
+            self.renderer.set_background([0.15; 3]);
+            (center + Vec3::new(0.0, radius * 3.0, 0.0), Vec3::Z)
+        } else {
+            (
+                center + Vec3::new(radius * 1.9, radius * 1.2, radius * 2.1),
+                Vec3::Y,
+            )
+        };
+        let view = ra2_render::look_at_lh(eye, center, up);
         let proj = ra2_render::perspective_lh(
             45f32.to_radians(),
             width as f32 / height as f32,
@@ -2745,6 +2961,14 @@ impl Builder {
         self.preview = Some((self.revision, pixels.clone(), width, height));
         Ok(Some((pixels, width, height)))
     }
+}
+
+/// The control grid's cell size: the board is three cells across and three
+/// down, each a third of the grid's frame (capture: rules at x 556, 698, 840,
+/// 982 and y 386, 499, 612 on a 426 x 339 px grid). The file's own
+/// `Columns 4`/`ColWidths 66`/`RowHeight 70` are the editor's canvas.
+fn control_cell_size(frame: Frame) -> (f32, f32) {
+    (frame.w / 3.0, frame.h / 3.0)
 }
 
 /// One line of the synthetic panel.
@@ -2944,6 +3168,29 @@ pub fn run_headless(options: &Options) -> Result<(), String> {
         .as_ref()
         .ok_or_else(|| "--build --out DIR is the offscreen path".to_string())?;
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    if let Some(view) = &options.view {
+        let mut builder = Builder::open_sized(
+            &options.game,
+            options.start.as_deref(),
+            [options.size[0] as f32, options.size[1] as f32],
+        )?;
+        builder.view_only = true;
+        builder.refresh()?;
+        // The harness path: the bot lab as the player sees it after opening a
+        // design from the inventory and clicking one tab, no editing.
+        let button = match view.as_str() {
+            "overview" => "overview button",
+            "chassis" => "chassis button",
+            "components" => "components button",
+            "wiring" => "wiring button",
+            "paint" => "paintshop button",
+            other => return Err(format!("unknown --build-view {other:?}")),
+        };
+        if view != "overview" {
+            builder.click_named(button)?;
+        }
+        return builder.shot(&out.join(format!("build-view-{view}.png")), options.size);
+    }
     let mut builder = Builder::open(&options.game, options.start.as_deref())?;
     script(
         &mut builder,
@@ -3134,16 +3381,16 @@ pub fn script(
     // the motor's spin action. Click-to-place, then click-to-bind.
     builder.click_named("wiring button")?;
     builder.click_named("new analog")?;
-    builder.click_control_cell([3, 1])?;
-    if builder.build.board().control_at([3, 1]).is_none() {
+    builder.click_control_cell([2, 1])?;
+    if builder.build.board().control_at([2, 1]).is_none() {
         return Err("the New Analog button plus a free cell did not add a control".into());
     }
     println!(
-        "  wiring: added {} at cell 3,1",
+        "  wiring: added {} at cell 2,1",
         builder
             .build
             .board()
-            .control_at([3, 1])
+            .control_at([2, 1])
             .map(|c| c.name.clone())
             .unwrap_or_default()
     );
@@ -3154,7 +3401,7 @@ pub fn script(
     builder.click_action("m9:wireact:0:0")?;
     let wired = builder.build().board().bindings.clone();
     let expected = wired.iter().any(|binding| {
-        binding.component == 1 && binding.control == [3, 1, 0] && binding.action == "Spin Clockwise"
+        binding.component == 1 && binding.control == [2, 1, 0] && binding.action == "Spin Clockwise"
     });
     if !expected {
         return Err(format!("the bind click did not wire the motor: {wired:?}"));
@@ -3165,7 +3412,7 @@ pub fn script(
         builder
             .build()
             .board()
-            .control_at([3, 1])
+            .control_at([2, 1])
             .map(|c| c.name.as_str())
     );
     if frames {
@@ -3396,9 +3643,9 @@ mod tests {
         builder.click_named("wiring button").unwrap();
         let before = builder.build.board().controls.len();
         builder.click_named("new analog").unwrap();
-        builder.click_control_cell([3, 1]).unwrap();
+        builder.click_control_cell([2, 1]).unwrap();
         assert_eq!(builder.build.board().controls.len(), before + 1);
-        let added = builder.build.board().control_at([3, 1]).unwrap().clone();
+        let added = builder.build.board().control_at([2, 1]).unwrap().clone();
         assert_eq!(added.kind, ControlKind::Analog);
         assert_eq!(added.name, "New Analog");
 
@@ -3409,7 +3656,7 @@ mod tests {
             Some(&ra2fmt::bot::Binding {
                 component: 1,
                 action: "Spin Clockwise".into(),
-                control: [3, 1, 0],
+                control: [2, 1, 0],
             })
         );
         assert!(builder.build.wiring_errors().is_empty());
@@ -3422,7 +3669,7 @@ mod tests {
         // An invalid action for this kind is the model's own refusal.
         let err = builder
             .build
-            .bind_action(1, Action::OnOffClockwise, [3, 1], 0)
+            .bind_action(1, Action::OnOffClockwise, [2, 1], 0)
             .unwrap_err();
         assert!(
             matches!(
@@ -3535,6 +3782,7 @@ mod tests {
             out: Some(out.clone()),
             size: [640, 502],
             seconds: 0.6,
+            view: None,
         };
         run_headless(&options).expect("the scripted build runs");
         for name in [

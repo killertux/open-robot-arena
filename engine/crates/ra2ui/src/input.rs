@@ -638,8 +638,10 @@ pub fn text_rows(list: &mut Widget, texts: &[String]) -> usize {
                 field("Position", &format!("{ROW_TEXT_X} 0 {} 0", y + ROW_TEXT_Y)),
                 field("Size", &format!("{width} 0 {height} 0")),
                 field("Visible", "true"),
-                field("ChildOrder", "-1"),
-                field("ClipMode", "1"),
+                // In front of the file's own bars (`ChildOrder` 3 and 4), as the
+                // capture draws the selected row's text white over its bar.
+                field("ChildOrder", "10"),
+                field("ClipMode", "0"),
                 field("NumChildren", "0"),
                 field("_Font", &face),
                 field("_Text", text),
