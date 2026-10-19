@@ -279,10 +279,24 @@ mod tests {
             .find(|p| p.widget.name() == LEAGUE_GRID)
             .unwrap();
         assert_eq!(grid.children.len(), 2 + rows.len());
+        // The scroll bar stands flush inside the right edge of the scroller body
+        // (capture: bar at x 924..940, grid from 293), not at the authored x 591.
+        let scroller = grid
+            .attachments
+            .iter()
+            .find(|a| a.attachment.kind == ra2fmt::gib::AttachmentKind::Scroller)
+            .expect("the grid's scroller");
+        let bar = scroller
+            .body
+            .walk()
+            .find(|p| p.widget.kind == ra2fmt::gib::WidgetKind::ScrollBar)
+            .expect("the scroll bar");
+        assert_eq!(bar.frame.right(), scroller.body.frame.right());
+        assert_eq!(grid.frame.w, scroller.body.frame.w);
         for (i, cell) in grid.children.iter().skip(2).enumerate() {
             assert_eq!(cell.frame.x, grid.frame.x, "row {i}");
             assert_eq!(cell.frame.y, grid.frame.y + 70.0 * i as f32, "row {i}");
-            assert_eq!(cell.frame.w, 388.0, "row {i}");
+            assert_eq!(cell.frame.w, grid.frame.w, "row {i}: the cell runs to the scroll bar");
             assert_eq!(cell.frame.h, 70.0, "row {i}");
             assert_eq!(cell.widget.name(), "league cell split");
         }
@@ -373,7 +387,7 @@ mod tests {
             .unwrap();
         for (i, cell) in grid.children.iter().skip(2).enumerate() {
             assert_eq!(cell.frame.y, grid.frame.y + 36.0 * i as f32, "row {i}");
-            assert_eq!(cell.frame.w, 201.0, "row {i}");
+            assert_eq!(cell.frame.w, grid.frame.w, "row {i}");
         }
         assert_eq!(
             grid.children[2]

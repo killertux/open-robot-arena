@@ -58,6 +58,12 @@ pub fn fill(list: &mut Widget, template: &Gib, cells: usize) -> usize {
     let columns = grid.columns.max(1) as usize;
     let width = grid.col_widths.first().copied().unwrap_or(0.0);
     let roots: Vec<Widget> = template.widgets().cloned().collect();
+    let full_width = columns == 1
+        && grid.buffer_width == 0.0
+        && list
+            .attachments
+            .iter()
+            .any(|a| a.kind == ra2fmt::gib::AttachmentKind::Scroller);
     for index in 0..cells {
         let (row, column) = ((index / columns) as i32, (index % columns) as i32);
         let x = grid.column_x(column);
@@ -68,7 +74,14 @@ pub fn fill(list: &mut Widget, template: &Gib, cells: usize) -> usize {
             // around the inset frame.
             let b = grid.buffer_width;
             crate::input::set_field(&mut cell, "Position", &format!("{} 0 {} 0", x + b, y + b));
-            let size = format!("{} 0 {} 0", width - 2.0 * b, grid.row_height - 2.0 * b);
+            // A one-column grid inside a `Scroller` runs its rows the whole way
+            // to the bar (the standings capture: the cell rules reach the
+            // scroll bar although `ColWidths` says 388 of 630 px).
+            let size = if full_width {
+                format!("1 1 {} 0", grid.row_height - 2.0 * b)
+            } else {
+                format!("{} 0 {} 0", width - 2.0 * b, grid.row_height - 2.0 * b)
+            };
             crate::input::set_field(&mut cell, "Size", &size);
             add_border(list, &mut cell, grid.border_width);
             list.children.push(cell);
@@ -269,7 +282,9 @@ mod tests {
             let y = grid.frame.y + 84.0 * row as f32;
             assert_eq!(cell.frame.y, y, "row {row}");
             assert_eq!(cell.frame.x, grid.frame.x, "row {row} is one column");
-            assert_eq!(cell.frame.w, 300.0);
+            // A scroller-wrapped single column runs to the grid's own width
+            // (the file's `ColWidths 300` is the editor's canvas).
+            assert_eq!(cell.frame.w, grid.frame.w);
             assert_eq!(cell.frame.h, 84.0);
         }
 

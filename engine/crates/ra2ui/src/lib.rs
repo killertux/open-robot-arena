@@ -1130,6 +1130,28 @@ fn place_core<'a>(
             })
         })
         .collect();
+    // A `Scroller`'s bar stands flush inside the right edge of the scroller's rectangle
+    // (`hq_league.gib` writes it at x 591 of a body that is 647 px wide in the
+    // capture, whose 16 px bar sits at 924 = 293 + 647 - 16).
+    // The authored x is the editor's canvas, as the list's own size is.
+    let mut attachments = attachments;
+    for a in attachments
+        .iter_mut()
+        .filter(|a| a.attachment.kind == AttachmentKind::Scroller)
+    {
+        let right = a.body.frame.right();
+        let body_frame = a.body.frame;
+        for bar in a
+            .body
+            .children
+            .iter_mut()
+            .filter(|c| c.widget.kind == WidgetKind::ScrollBar)
+        {
+            let dx = right - bar.frame.w - bar.frame.x;
+            shift(bar, dx, 0.0);
+            reclip(bar, body_frame, attachment_clip);
+        }
+    }
     // A `Glyph` dressed by a `DisplayBox` is the box's paragraph: the widget
     // itself is `Position 0 0 0 0` (it hangs from its parent's corner) and the
     // box it fills is the attachment's body. `credits.gib`'s two name lists are
