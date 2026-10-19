@@ -74,6 +74,9 @@ pub fn run(
     audio_report: bool,
 ) -> Result<(), String> {
     let mut shell = Shell::boot(game, [size[0] as f32, size[1] as f32])?;
+    if let Some(view) = crate::hq_mode::shell_view(game) {
+        shell.set_hq_view(view);
+    }
     println!(
         "booted {} from {} ({}x{})",
         shell.screen_id(),

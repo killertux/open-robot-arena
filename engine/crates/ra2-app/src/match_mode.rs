@@ -130,11 +130,14 @@ impl Options {
 /// The camera from `ra2.cfg`'s `DefaultCamera` (`watch`, `static`, `orbit`).
 /// An unknown value is reported, not silently replaced.
 pub fn camera_from_cfg(game: &Path) -> Result<DuelCamera, String> {
-    let path = game.join("ra2.cfg");
-    let cfg = ra2fmt::cfg::Cfg::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let cfg = crate::options::read_cfg(game);
     let name = cfg.default_camera();
-    DuelCamera::from_config(name)
-        .ok_or_else(|| format!("{name:?} in {} is not watch/static/orbit", path.display()))
+    DuelCamera::from_config(name).ok_or_else(|| {
+        format!(
+            "{name:?} in {} is not watch/static/orbit",
+            crate::options::settings_path(game).display()
+        )
+    })
 }
 
 /// The scene-camera configuration a match camera mode asks for, if it is one of

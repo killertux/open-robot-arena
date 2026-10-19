@@ -216,6 +216,11 @@ def render_app(fx, out_png):
 
 
 def render_shell(fx, out_png):
+    # Team HQ / bot lab need the career (the original's captures were taken with the
+    # shipped team "The Rookies", Teams/Team0); only ra2-app loads it, and it lays the
+    # shell out natively at the target size too, so it is the shell column for them.
+    if "Team HQ button" in fx["route"]:
+        return render_app(fx, out_png)
     with tempfile.TemporaryDirectory() as d:
         script = os.path.join(d, "r.steps")
         lines = ['click "%s"' % n for n in fx["route"]] + ["shot out.png"]

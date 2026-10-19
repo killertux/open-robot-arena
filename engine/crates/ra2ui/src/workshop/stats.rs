@@ -56,6 +56,15 @@ impl WeightClass {
         }
     }
 
+    /// The inventory's class names, the exe's strings at `0x6fd7b0`.
+    pub fn full_label(self) -> &'static str {
+        match self {
+            WeightClass::Light => "Lightweight",
+            WeightClass::Medium => "Middleweight",
+            WeightClass::Heavy => "Heavyweight",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             WeightClass::Light => "Light",

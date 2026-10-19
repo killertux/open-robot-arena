@@ -178,6 +178,50 @@ pub struct Shell {
     /// credits windows over the main menu). The top one owns the input; the
     /// screen under it keeps its state and keeps drawing.
     windows: Vec<Page>,
+    /// The career the Team HQ draws (roster, standings, schedule, history), set
+    /// by the application. Without it the HQ shows the shipped records' text.
+    hq_view: Option<ra2ui::hq::View>,
+    /// The `(content count, fragment)` the HQ was last filled for.
+    hq_filled: Option<(usize, String)>,
+    /// Whether screen switches animate (the window does; scripts and tests
+    /// switch instantly so a frame is always the settled screen).
+    animate: bool,
+    /// The switch in progress: the screen being left, drawn under the 0.2 s
+    /// fade-out, then the new one under the fade-in.
+    fade: Option<Fade>,
+    /// The screens whose first visit showed the "Loading..." splash.
+    visited: std::collections::BTreeSet<String>,
+    /// The select-team list's edits. The install's `Teams/` is read-only data,
+    /// so a delete or a new team lives here, for the session.
+    deleted_teams: std::collections::BTreeSet<usize>,
+    new_teams: Vec<teams::Roster>,
+    /// The team the open delete box is about.
+    pending_delete: Option<usize>,
+}
+
+/// `FUN_005e5ba0`'s screen switch: black overlays of 0.2 s each way. On a
+/// screen's first visit `FUN_004e6bd0` first shows the `common/loading.gib`
+/// window ("Loading...") over the screen being left while the heavy window is
+/// built.
+struct Fade {
+    from: Screen,
+    loading: Option<Gib>,
+    overlay: Gib,
+    t: f32,
+}
+
+/// The fade's duration each way (`0x3e4ccccd` = 0.2).
+pub const FADE_SECONDS: f32 = 0.2;
+/// How long the splash stays up on a first visit. The original shows it for as
+/// long as the window takes to construct, which is not a fixed number; this is
+/// a typical load.
+pub const LOADING_SECONDS: f32 = 0.6;
+
+fn overlay_gib(alpha: f32) -> Gib {
+    let text = format!(
+        "T 1.09\n[Window]\nDraggable false\nAlignment 0\nPassMouse false\nNotes fade overlay\nName fade overlay\nID -1\nPosition 0 0 0 0\nSize 1 1 1 1\nVisible true\nChildOrder -1\nClipMode 0\nNumChildren 1\n[Image]\n_Tiling false\n_Filename \n_BufferWidth 0 0 0 0\n_Size 1 0 1 0\n_Alpha true\n_Filtering 0\n_ForeColor 0 0 0 {alpha}\n_Name \n_Position 0 0 0 0\n0 0 1 1\nName \nID -1\nPosition 0 0 0 0\nSize 1 1 1 1\nVisible true\nChildOrder 0\nClipMode 0\nNumChildren 0\nPassMouse false\nNotes \n"
+    );
+    ra2fmt::gib::parse(&text).expect("the overlay record parses")
 }
 
 impl Shell {
@@ -214,7 +258,131 @@ impl Shell {
             previews: BTreeMap::new(),
             popup: None,
             windows: Vec::new(),
+            hq_view: None,
+            hq_filled: None,
+            animate: false,
+            fade: None,
+            visited: Default::default(),
+            deleted_teams: Default::default(),
+            new_teams: Vec::new(),
+            pending_delete: None,
         })
+    }
+
+    /// Animate screen switches (the window turns this on).
+    pub fn set_animate(&mut self, on: bool) {
+        self.animate = on;
+        if !on {
+            self.fade = None;
+        }
+    }
+
+    /// Whether a screen switch is still playing.
+    pub fn transitioning(&self) -> bool {
+        self.fade.is_some()
+    }
+
+    /// Whether the "Loading..." splash is up.
+    pub fn loading_visible(&self) -> bool {
+        self.fade
+            .as_ref()
+            .is_some_and(|f| f.loading.is_some() && f.t < LOADING_SECONDS)
+    }
+
+    /// Advance the switch by `dt` seconds.
+    pub fn advance(&mut self, dt: f32) {
+        let Some(fade) = &mut self.fade else { return };
+        fade.t += dt;
+        let load = if fade.loading.is_some() {
+            LOADING_SECONDS
+        } else {
+            0.0
+        };
+        if fade.t >= load + 2.0 * FADE_SECONDS {
+            self.fade = None;
+            return;
+        }
+        let u = (fade.t - load) / FADE_SECONDS;
+        let alpha = if u < 0.0 {
+            0.0
+        } else if u < 1.0 {
+            u
+        } else {
+            2.0 - u
+        };
+        fade.overlay = overlay_gib(alpha.clamp(0.0, 1.0));
+    }
+
+    /// Switch to a freshly loaded screen, with the original's loading splash and
+    /// fade when animating.
+    fn switch_to(&mut self, screen: Screen, key: &str) {
+        let from = std::mem::replace(&mut self.screen, screen);
+        if !self.animate {
+            return;
+        }
+        let first = self.visited.insert(key.to_ascii_lowercase());
+        let heavy = ["exhibition/exhib_setup.gib", "teamhq/select_team.gib"]
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(key));
+        let loading = if first && heavy {
+            game::screen(&self.ui, "common/loading.gib").and_then(|(path, _)| {
+                let text = std::fs::read_to_string(path).ok()?;
+                let mut gib = ra2fmt::gib::parse(&text).ok()?;
+                ra2ui::inline_proxies_in(&mut gib, &self.ui);
+                Some(gib)
+            })
+        } else {
+            None
+        };
+        self.fade = Some(Fade {
+            from,
+            loading,
+            overlay: overlay_gib(0.0),
+            t: 0.0,
+        });
+    }
+
+    /// Give the Team HQ its career: the tabs are filled from it as they load.
+    /// The robots' own snapshots are registered with the shell's previews.
+    pub fn set_hq_view(&mut self, view: ra2ui::hq::View) {
+        for row in &view.robots {
+            if let Some(preview) = &row.preview_image {
+                self.previews.insert(row.preview.clone(), preview.clone());
+            }
+        }
+        self.hq_view = Some(view);
+        self.hq_filled = None;
+        let _ = self.fill_hq();
+    }
+
+    /// Fill the Team HQ page from the career when a tab was just loaded.
+    fn fill_hq(&mut self) -> Result<(), String> {
+        let Some(view) = &self.hq_view else {
+            return Ok(());
+        };
+        let Screen::Page(page) = &mut self.screen else {
+            return Ok(());
+        };
+        if !page.key.eq_ignore_ascii_case(ra2ui::hq::SCREEN) {
+            self.hq_filled = None;
+            return Ok(());
+        }
+        let Some((_, fragment)) = page.content.last() else {
+            return Ok(());
+        };
+        let stamp = (page.content.len(), fragment.clone());
+        if self.hq_filled.as_ref() == Some(&stamp) {
+            return Ok(());
+        }
+        let Some(tab) = ra2ui::hq::TABS
+            .iter()
+            .find(|t| t.fragment.eq_ignore_ascii_case(fragment))
+        else {
+            return Ok(());
+        };
+        ra2ui::hq::fill_document(&self.ui, &mut page.gib, tab.button, view)?;
+        self.hq_filled = Some(stamp);
+        Ok(())
     }
 
     pub fn game(&self) -> &Path {
@@ -629,6 +797,42 @@ impl Shell {
     /// The placed tree, with the screen's own faces. A picker popup is placed
     /// after the page, so it draws and hit-tests in front of it.
     pub fn placements(&self) -> Vec<Placement<'_>> {
+        if let Some(fade) = &self.fade {
+            let load = if fade.loading.is_some() {
+                LOADING_SECONDS
+            } else {
+                0.0
+            };
+            let faces = Some(&self.fonts);
+            fn screen_placed<'a>(
+                screen: &'a Screen,
+                size: [f32; 2],
+                faces: Option<&Fonts>,
+            ) -> Vec<Placement<'a>> {
+                match screen {
+                    Screen::Page(page) => ra2ui::resolve_with(&page.gib, size, faces),
+                    Screen::Lab(lab) => lab.placements(size, faces),
+                }
+            }
+            if fade.t < load {
+                let mut placed = screen_placed(&fade.from, self.size, faces);
+                if let Some(loading) = &fade.loading {
+                    let mut above = ra2ui::resolve_with(loading, self.size, faces);
+                    above.append(&mut placed);
+                    placed = above;
+                }
+                return placed;
+            }
+            let base = if fade.t < load + FADE_SECONDS {
+                &fade.from
+            } else {
+                &self.screen
+            };
+            let mut placed = screen_placed(base, self.size, faces);
+            let mut above = ra2ui::resolve_with(&fade.overlay, self.size, faces);
+            above.append(&mut placed);
+            return above;
+        }
         let mut placed = match &self.screen {
             Screen::Page(page) => ra2ui::resolve_with(&page.gib, self.size, Some(&self.fonts)),
             Screen::Lab(lab) => lab.placements(self.size, Some(&self.fonts)),
@@ -719,12 +923,20 @@ impl Shell {
                 &mut step,
                 game_type.as_deref(),
             )?;
+            let confirmed = step
+                .note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("confirm "));
             match transition {
                 Some(Transition::Open(target)) => self.open_window(&target)?,
                 // Any screen change a window asks for closes it: the screen
                 // under it is the one it was opened from.
                 Some(Transition::Close | Transition::Replace(_)) => {
-                    self.windows.pop();
+                    if let Some(window) = self.windows.pop() {
+                        if confirmed {
+                            self.confirm_window(&window)?;
+                        }
+                    }
                 }
                 None => {}
             }
@@ -751,7 +963,9 @@ impl Shell {
                 self.open_window(&target)?;
             }
             Some(Transition::Replace(target)) => {
-                self.screen = load_screen(&self.ui, &target)?;
+                self.fade = None;
+                let screen = load_screen(&self.ui, &target)?;
+                self.switch_to(screen, &target);
                 self.load_default_tab()?;
             }
             Some(Transition::Open(target)) => self.open_window(&target)?,
@@ -759,6 +973,7 @@ impl Shell {
         }
         self.refresh_robot_slots()?;
         self.refresh_arena_detail();
+        self.fill_hq()?;
         Ok(self.finish(step))
     }
 
@@ -777,6 +992,72 @@ impl Shell {
                     "gametype.gib",
                     game_type.as_deref(),
                 )?;
+            }
+            // The select-team screen fills its grid with the player's teams.
+            if page.key.eq_ignore_ascii_case("teamhq/select_team.gib") {
+                let rosters = team_rosters(&self.game, &self.deleted_teams, &self.new_teams);
+                let _ = teams::fill_select_grid(&self.ui, &mut page.gib, &rosters);
+            }
+            // The Team HQ's constructor loads the Robot Inventory tab (its
+            // button is the one drawn selected).
+            if page.key.eq_ignore_ascii_case(ra2ui::hq::SCREEN) {
+                load_into(
+                    page,
+                    &self.ui,
+                    &self.game,
+                    ra2ui::hq::CONTENT_SLOT,
+                    ra2ui::hq::TABS[0].fragment,
+                    None,
+                )?;
+            }
+        }
+        self.fill_hq()
+    }
+
+    /// What a confirmed window does: the delete box removes the team it asked
+    /// about; the edit-team window adds the team it collected.
+    fn confirm_window(&mut self, window: &Page) -> Result<(), String> {
+        if window.key.eq_ignore_ascii_case("common/messagebox.gib") {
+            if let Some(slot) = self.pending_delete.take() {
+                self.deleted_teams.insert(slot);
+            }
+        } else if window.key.eq_ignore_ascii_case("teamhq/editteam.gib") {
+            let read = |name: &str| {
+                window
+                    .gib
+                    .blocks
+                    .iter()
+                    .find_map(|b| match b {
+                        Block::Widget(root) => workshop::find(root, name).map(text_of),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            };
+            let name = read("name input textbox");
+            let slots: Vec<usize> = teams::rosters(&self.game, Side::Player)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| !r.named)
+                .map(|r| r.slot)
+                .filter(|slot| !self.new_teams.iter().any(|t| t.slot == *slot))
+                .collect();
+            if let (false, Some(slot)) = (name.trim().is_empty(), slots.first()) {
+                self.new_teams.push(teams::Roster {
+                    slot: *slot,
+                    name,
+                    motto: read("team motto input textbox"),
+                    logo: "Teams\\orange_skull.bmp".to_string(),
+                    robots: Vec::new(),
+                    named: true,
+                });
+            }
+        } else {
+            return Ok(());
+        }
+        let rosters = team_rosters(&self.game, &self.deleted_teams, &self.new_teams);
+        if let Screen::Page(page) = &mut self.screen {
+            if page.key.eq_ignore_ascii_case("teamhq/select_team.gib") {
+                let _ = teams::fill_select_grid(&self.ui, &mut page.gib, &rosters);
             }
         }
         Ok(())
@@ -802,6 +1083,56 @@ impl Shell {
                     "common/video_options.gib",
                     None,
                 )?;
+            }
+            if target.eq_ignore_ascii_case("teamhq/editteam.gib") {
+                // The constructor sets the caption for a new team and starts the
+                // fields empty (FUN_004ebd40: `New Robotics Team`).
+                for block in page.gib.blocks.iter_mut() {
+                    let Block::Widget(root) = block else { continue };
+                    for (name, text) in [
+                        ("window caption", "New Robotics Team"),
+                        ("name input textbox", ""),
+                        ("team motto input textbox", ""),
+                    ] {
+                        if let Some(w) = workshop::find_mut(root, name) {
+                            set_text(w, text);
+                        }
+                    }
+                }
+            }
+            if target.eq_ignore_ascii_case("common/messagebox.gib") {
+                // The delete box (FUN_004ec110): `Delete Team`, `Are you sure
+                // you want to delete <team>?`, Yes/No only.
+                let selected = match &self.screen {
+                    Screen::Page(p) => p.gib.blocks.iter().find_map(|b| match b {
+                        Block::Widget(root) => workshop::find(root, teams::SELECT_GRID)
+                            .and_then(ra2ui::input::selected_row),
+                        _ => None,
+                    }),
+                    Screen::Lab(_) => None,
+                };
+                let rosters = team_rosters(&self.game, &self.deleted_teams, &self.new_teams);
+                let team = selected.and_then(|row| rosters.get(row));
+                self.pending_delete = team.map(|t| t.slot);
+                let body = format!(
+                    "Are you sure you want to delete {}?",
+                    team.map(|t| t.name.as_str()).unwrap_or("this team")
+                );
+                for block in page.gib.blocks.iter_mut() {
+                    let Block::Widget(root) = block else { continue };
+                    for (name, text) in
+                        [("caption bar", "Delete Team"), ("text box", body.as_str())]
+                    {
+                        if let Some(w) = workshop::find_mut(root, name) {
+                            set_text(w, text);
+                        }
+                    }
+                    for name in ["ok button", "cancel button"] {
+                        if let Some(w) = workshop::find_mut(root, name) {
+                            ra2ui::input::set_field(w, "Visible", "false");
+                        }
+                    }
+                }
             }
             self.windows.push(page);
             Ok(())
@@ -1464,15 +1795,7 @@ impl Shell {
         for (key, preview) in &self.previews {
             assets.add_preview(key, preview);
         }
-        let mut placed: Vec<Placement<'_>> = match &self.screen {
-            Screen::Page(page) => ra2ui::resolve_with(&page.gib, self.size, Some(assets.faces())),
-            Screen::Lab(lab) => lab.placements(self.size, Some(assets.faces())),
-        };
-        for window in &self.windows {
-            let mut above = ra2ui::resolve_with(&window.gib, self.size, Some(assets.faces()));
-            above.append(&mut placed);
-            placed = above;
-        }
+        let placed = self.placements();
         let scene = assets.scene(&placed, [width, height]);
         let renderer = Renderer::new().map_err(|e| e.to_string())?;
         let ui = UiRenderer::new(renderer.device());
@@ -1494,6 +1817,41 @@ impl Shell {
             missing: scene.missing.len(),
         })
     }
+}
+
+/// The named player teams the select screen lists: the install's records, less
+/// the session's deletions, plus the teams made this session.
+fn team_rosters(
+    game: &Path,
+    deleted: &std::collections::BTreeSet<usize>,
+    created: &[teams::Roster],
+) -> Vec<teams::Roster> {
+    let mut rosters: Vec<teams::Roster> = teams::rosters(game, Side::Player)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.named && !deleted.contains(&r.slot))
+        .collect();
+    rosters.extend(
+        created
+            .iter()
+            .filter(|r| !deleted.contains(&r.slot))
+            .cloned(),
+    );
+    rosters
+}
+
+/// A text box's displayed text: its own `_Text`, else its `Text` child's.
+fn text_of(widget: &Widget) -> String {
+    for child in &widget.children {
+        if child.kind == WidgetKind::Text {
+            if let Some(t) = ra2ui::input::field_of(child, "_Text") {
+                return t.to_string();
+            }
+        }
+    }
+    ra2ui::input::field_of(widget, "_Text")
+        .unwrap_or("")
+        .to_string()
 }
 
 fn load_screen(ui: &Path, key: &str) -> Result<Screen, String> {
@@ -1561,6 +1919,10 @@ fn plan_page(page: &Page, fonts: &Fonts, size: [f32; 2], x: f32, y: f32, step: &
                 target: screen.to_string(),
             },
             Action::Close => Plan::Close,
+            Action::Confirm => {
+                step.note = Some(format!("confirm {}", binding.at));
+                Plan::Close
+            }
             Action::Quit => Plan::Nothing,
         };
     }
@@ -1710,7 +2072,6 @@ fn load_into(
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut fragment = ra2fmt::gib::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     ra2ui::inline_proxies_in(&mut fragment, ui);
-
     let mut loaded = false;
     let Page { gib, slot_base, .. } = page;
     for block in gib.blocks.iter_mut() {

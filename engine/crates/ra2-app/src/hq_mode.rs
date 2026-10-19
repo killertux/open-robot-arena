@@ -1303,6 +1303,13 @@ impl Session {
     }
 }
 
+/// The Team HQ's data for the shell: the team record in the game's own
+/// `Teams/` (read-only; nothing is written).
+pub fn shell_view(game: &Path) -> Option<ra2ui::hq::View> {
+    let career = Career::new_with_policy(game, SEED, CareerPolicy::default()).ok()?;
+    build_view(&career, game).ok()
+}
+
 /// The `ra2ui::hq::View` for a career: the roster, standings, schedule, prizes
 /// and the team record's counters.
 pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, String> {
@@ -1337,7 +1344,7 @@ pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, Strin
                     ra2ui::hq::RobotRow {
                         name: bot.name.clone(),
                         class: ra2ui::workshop::stats::WeightClass::from_file(bot.class)
-                            .label()
+                            .full_label()
                             .to_string(),
                         // The `.bot`'s own snapshot is the picture the original
                         // draws; `nobot.bmp` is only the empty-slot silhouette.

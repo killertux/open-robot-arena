@@ -327,7 +327,11 @@ impl App {
         requested: [u32; 2],
         session: Option<crate::match_mode::Session>,
     ) -> Result<App, String> {
-        let shell = Shell::boot(game, [requested[0] as f32, requested[1] as f32])?;
+        let mut shell = Shell::boot(game, [requested[0] as f32, requested[1] as f32])?;
+        if let Some(view) = crate::hq_mode::shell_view(game) {
+            shell.set_hq_view(view);
+        }
+        shell.set_animate(true);
         let frames = FrameRenderer::open(game)?;
         let cfg = crate::options::read_cfg(game);
         let audio = AudioSystem::new(game, &cfg);
@@ -1025,6 +1029,7 @@ impl ApplicationHandler for App {
             // its tick only asks for the next frame; the match advances at its
             // own `dt` through the accumulator.
             self.next_update = now + UPDATE;
+            self.shell.advance(UPDATE.as_secs_f32());
             if let Some(session) = &mut self.session {
                 session.advance(UPDATE.as_secs_f32());
             }

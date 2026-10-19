@@ -65,13 +65,71 @@ Binds by widget name (`FUN_004294e0` lookup + `FUN_004873a0` bind):
 "Loading..." (`FUN_004e6bd0`, string 0x6f2ad0) is shown only on the *first* visit,
 while the heavy window is constructed; later visits find the cached window by name.
 
+## 3b. Select team (`SelectTeamWindow`, ctor `FUN_004eb540`, init `FUN_004ec2c0`)
+
+Recovered this pass (widget -> handler):
+
+| widget | handler | does |
+|---|---|---|
+| `Help button` | 0x4e4ab0 | help |
+| `MainMenu button` | 0x4eba40 | back to the main menu |
+| `Options button` | 0x4e4990 | options window |
+| `continue button` | 0x4eba60 | `Loading...` (`FUN_004e6bd0`), `TeamHQWindow(teamhq\teamhq.gib)` found by name `team hq win` or built (0x200 bytes), selects the grid's team, HQ init `FUN_004fe0c0`, sounds 0xcd/0xc9, switch `FUN_005e5830` |
+| `new team button` | 0x4ebd40 | no empty slot: box `New Team` / `There are no empty team slots.`; otherwise modal `EditTeamWindow(teamhq\editteam.gib)`, caption `New Robotics Team`; OK (result 1) creates the record (`FUN_00502680`), refills the grid (`FUN_004ec310`) |
+| `delete team button` | 0x4ec110 | box `Delete Team` / `Are you sure you want to delete <team>?` (message box style 0xc = Yes/No, window `common/messagebox.gib`); Yes (4) deletes the record and refills the grid |
+| `select team grid` | 0x4ebc70 (click), 0x4eba60 (double click) | select a row / continue |
+
+The shell fills `select team grid` from `Teams/Teams.txt` with `team_cell.gib`
+(`ra2ui::teams::fill_select_grid`), selects row 0 (so Continue works at once). A delete or a new team is kept in
+the session, never written (the install is read-only data); the original rewrites `Teams/`.
+
+## 3c. Team HQ (`teamhq/teamhq.gib`) and its tabs
+
+The HQ opens on Robot Inventory. The shell fills each tab from the career as the tab loads
+(`Shell::set_hq_view`, `ra2ui::hq::fill_document`): the header (team name, motto, logo), the inventory grid,
+the league table, the season grid and the history counters. The data is the career model's
+(`ra2-app::hq_mode::shell_view`: the team record in `Teams/`, nothing written). Layout facts measured on
+the captures (1024x768):
+
+* Inventory / schedule grids divide their own rectangle evenly into `Rows` x `Columns` (3 x 2: 341 x 119 px
+  cells in a 683 x 357 grid, not the file's `RowHeight 70` / `ColWidths 213`); the inventory fills down each
+  column first (C.R.U.S.H., Sting Ray, BOT-CHOY / Forkie, Atom Smasher, Walrus).
+* `AspectSetting`/`AspectRatio` on a group: 1 derives the height from the width (botlab `3d grp`: 0.92 of the
+  left pane, square, 471 px), 2 derives the width from the height (`bot img group`: the 128 px snapshot is drawn
+  square at the cell height, not stretched across 455 px). The group's Background is clipped to it.
+* Class labels are the exe's strings at 0x6fd7b0: `Lightweight`, `Middleweight`, `Heavyweight`.
+* Nothing is selected until a click: the shipped `Sel Bar`/`High Bar` positions are leftovers.
+
+## 3d. Text line pitch (`FUN_00602210`)
+
+The rich-text layout advances each line by the font's *ascent* (`FUN_00602bf0` = `font+0xab8`), not by
+`ascent - descent` (`FUN_00602c00` measures the box the same way). `paragraph_run` uses `ascent`; the credits
+names (8 lines in a 142 px box) now sit at the pitch the box implies.
+
+## 3e. "Loading..." and the screen switch fade
+
+`FUN_004e6bd0(text)` builds `UI\Common\loading.gib` (`loading window`, 160 x 60, centred, `caption bar` text
+`Loading...`, `fg_dcn16`, colour `1 0.7 0.26 1`) once, then shows it modally (`FUN_005e5690`). It is called by
+the main-menu Exhibition / Team HQ handlers and select team's `continue button` before the heavy window is built;
+the window is then looked up by name, so only the first visit pays. `FUN_005e5ba0` then switches with a 0.2 s
+fade each way (`0x3e4ccccd`). `Shell::set_animate(true)` (the window client) plays: loading splash over the old screen
+(first visit of select team / exhibition only; 0.6 s here because our construction is instant), black overlay
+0 -> 1 over the old screen in 0.2 s, 1 -> 0 over the new one in 0.2 s. Scripts and tests stay instant;
+`ra2-shell --animate` with `wait N` (1/60 s ticks) draws the in-between frames.
+
+## 3f. Options settings location
+
+Settings are the player's, so the client reads and writes `ra2.cfg` in the user's config directory
+(`$XDG_CONFIG_HOME` or `~/.config`, `%APPDATA%`, `RA2_CONFIG` overrides), seeded from the install's shipped
+file on first change; `local/game/ra2.cfg` is never written. The Video tab's resolution dropdown steps through the
+display modes (`FSDisplay*` and `FS3DDisplay*`). The exe asks the D3D device for its mode list at run time; the list
+(640x480 ... 1600x1200) is the standard set, not recovered per adapter.
+
 ## 4. Where the table lives
 
 `engine/crates/ra2-shell/src/bindings.rs` holds the recovered (screen, widget
 name) -> action table; `Shell` consults it before a `Notes` string. Screens
-whose constructors were not recovered in this pass (select team, team HQ and
-its tabs, exhibition setup content, bot lab, results) still navigate by the
-`.gib` `Notes` (nav.rs); only the main menu and the options/credits windows are
-exe-derived so far. The select-team `continue button`, `new team button`,
-`delete team button` names are present in the record and bound by
-`SelectTeamWindow` (0x4eb540, init 0x4ec2c0); their handlers are not decoded.
+whose constructors were not recovered (team HQ tabs, exhibition setup content,
+bot lab, results) still navigate by the `.gib` `Notes` (nav.rs); the main menu,
+select team (above) and the options/credits/message box/edit team windows are
+exe-derived.

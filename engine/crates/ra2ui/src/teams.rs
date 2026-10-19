@@ -135,6 +135,44 @@ pub fn fill_team_list(list: &mut Widget, rosters: &[Roster]) -> usize {
     crate::input::text_rows(list, &rows)
 }
 
+/// The select-team screen's grid (`select_team.gib`), and the cell the binary
+/// loads into it for each team (`team_cell.gib`'s own note).
+pub const SELECT_GRID: &str = "select team grid";
+pub const SELECT_CELL: &str = "teamhq/team_cell.gib";
+
+/// Fill the select-team grid with a cell per named team (`FUN_004ec2c0` /
+/// `FUN_004ec310` fill it from `Teams/Teams.txt`) and select the first row,
+/// which is what the screen opens with.
+pub fn fill_select_grid(
+    ui_root: &Path,
+    document: &mut ra2fmt::gib::Gib,
+    rosters: &[Roster],
+) -> Result<usize, String> {
+    use ra2fmt::gib::Block;
+    let template = crate::cells::template(ui_root, SELECT_CELL)?;
+    let named: Vec<&Roster> = rosters.iter().filter(|r| r.named).collect();
+    for block in document.blocks.iter_mut() {
+        let Block::Widget(root) = block else { continue };
+        let Some(grid) = crate::workshop::find_mut(root, SELECT_GRID) else {
+            continue;
+        };
+        grid.children.retain(|c| c.name() != "team cell");
+        let made = crate::cells::fill(grid, &template, named.len());
+        let bars = grid.children.len() - made;
+        for (cell, roster) in grid.children[bars..].iter_mut().zip(&named) {
+            crate::cells::bind_value(cell, "team name textbox", &roster.name);
+            crate::cells::bind_value(cell, "team motto textbox", &roster.motto);
+            crate::cells::bind_art(cell, "logo img", &roster.logo);
+        }
+        crate::input::clear_selection(grid);
+        if !named.is_empty() {
+            crate::input::select_row(grid, 0);
+        }
+        return Ok(made);
+    }
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

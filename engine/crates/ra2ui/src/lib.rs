@@ -562,17 +562,15 @@ pub fn paragraph_run(
     width: f32,
 ) -> Vec<PlacedGlyph> {
     let line_height = font.line_height() as f32;
+    // The exe's text layout (FUN_00602210) advances each line by the font's
+    // ascent (`FUN_00602bf0` = font+0xab8), not by ascent - descent.
+    let pitch = font.ascent as f32;
     let mut out = Vec::new();
     for (i, line) in wrap_lines(font, text, width).into_iter().enumerate() {
         if line.is_empty() {
             continue;
         }
-        let line_frame = Frame::new(
-            frame.x,
-            frame.y + i as f32 * line_height,
-            width,
-            line_height,
-        );
+        let line_frame = Frame::new(frame.x, frame.y + i as f32 * pitch, width, line_height);
         out.extend(text_run(font, line_frame, &line));
     }
     out
@@ -1001,7 +999,7 @@ fn place_at<'a>(
     fonts: Option<&Fonts>,
     baseline: bool,
 ) -> Placement<'a> {
-    place_core(widget, parent, inherited, fonts, baseline, None)
+    place_core(widget, parent, inherited, fonts, baseline, None, None)
 }
 
 /// [`place_at`], with the widget's frame optionally forced along a split's axis:
@@ -1017,8 +1015,12 @@ fn place_core<'a>(
     fonts: Option<&Fonts>,
     baseline: bool,
     forced: Option<(Frame, bool)>,
+    fill: Option<Frame>,
 ) -> Placement<'a> {
     let mut frame = sized(widget, parent, widget.size(), fonts, baseline);
+    if let Some(owner) = fill {
+        frame = owner;
+    }
     if let Some((pane, horizontal)) = forced {
         if horizontal {
             frame.x = pane.x;
@@ -1063,13 +1065,38 @@ fn place_core<'a>(
     // 607×319 panel behind `hq_league.gib`'s 591-pixel grid) and a `Caption`
     // hangs off the same button. It inherits the parent's clip, then applies its
     // own `ClipMode`.
+    // A widget that clips to itself clips its attachments too: botlab's
+    // `3d grp` has a stray 296-px dark Background at (12, 24), which the capture
+    // never shows outside the 3D view's square.
+    let attachment_clip = if widget.kind == WidgetKind::Group
+        && ClipMode::from_value(widget.clip_mode()) == ClipMode::SelfFrame
+        && widget
+            .field("AspectSetting")
+            .is_some_and(|f| f.text().trim() != "0")
+    {
+        clip
+    } else {
+        inherited
+    };
     let attachments: Vec<PlacedAttachment> = widget
         .attachments
         .iter()
         .filter_map(|a| {
             a.body.as_deref().map(|body| PlacedAttachment {
                 attachment: a,
-                body: place_at(body, parent, inherited, fonts, false),
+                body: place_core(
+                    body,
+                    parent,
+                    attachment_clip,
+                    fonts,
+                    false,
+                    None,
+                    // A `Background` dresses its owner: the body's own pixel
+                    // size is the editor's canvas, the game stretches it over
+                    // the widget (the capture's HQ panels are tinted edge to
+                    // edge).
+                    (a.kind == AttachmentKind::Background).then_some(frame),
+                ),
             })
         })
         .collect();
@@ -1231,6 +1258,11 @@ fn sized(
         Some(s) => dim(Some(s.second), parent.h, fit.map(|f| f.1).unwrap_or(0.0)),
         None => parent.h,
     };
+    // `AspectSetting`/`AspectRatio` on a group (width / height): 1 derives the
+    // height from the width (botlab's `3d grp`: 0.92 of the left pane wide, as
+    // tall as wide), 2 derives the width from the height (the inventory's
+    // `bot img group`: 455 px asked, a square of the cell's height drawn).
+    let (w, h) = aspect(widget, w, h);
     let position = widget.position();
     let (px, py) = match position {
         Some(p) => (axis(p.first, parent.w), axis(p.second, parent.h)),
@@ -1257,6 +1289,25 @@ fn sized(
         w,
         h,
     )
+}
+
+fn aspect(widget: &Widget, w: f32, h: f32) -> (f32, f32) {
+    if widget.kind != WidgetKind::Group {
+        return (w, h);
+    }
+    let number =
+        |name: &str| input::field_of(widget, name).and_then(|v| v.trim().parse::<f32>().ok());
+    let (Some(setting), Some(ratio)) = (number("AspectSetting"), number("AspectRatio")) else {
+        return (w, h);
+    };
+    if ratio <= 0.0 {
+        return (w, h);
+    }
+    match setting as i32 {
+        1 => (w, w / ratio),
+        2 => (h * ratio, h),
+        _ => (w, h),
+    }
 }
 
 /// Whether a widget's `Alignment` anchors its **box**.
@@ -1333,7 +1384,7 @@ fn split_children<'a>(
         .enumerate()
         .map(|(i, c)| {
             let pane = panes[i.min(1)];
-            place_core(c, pane, clip, fonts, false, Some((pane, horizontal)))
+            place_core(c, pane, clip, fonts, false, Some((pane, horizontal)), None)
         })
         .collect()
 }
@@ -2128,8 +2179,8 @@ mod tests {
         }
         assert_eq!(
             pairs.len(),
-            12,
-            "equal-ChildOrder overlapping sibling pairs"
+            14,
+            "equal-ChildOrder overlapping sibling pairs (Backgrounds now fill their owner)"
         );
         // The 328 older pairs were mostly a control followed by the caption
         // holder that draws its text. That holder is the `Caption` attachment's
@@ -2305,20 +2356,24 @@ mod tests {
         // fell back to half the frame for every split whose master is not the
         // first slot. The corpus is 4,348 widgets, and since every attachment
         // takes its body there are no ownerless records left to place against
-        // the screen: the 66 that still reach past it are fragments and
+        // the screen: the 54 that still reach past it are fragments and
         // authored oversize frames, not nesting failures. Eighty-two of the
         // 116 files place entirely on screen. (A `TextBox` keeps its authored
         // rectangle now — its `Alignment` is text alignment, not a box anchor —
         // and a `Text` child is positioned by its baseline, so fewer frames are
         // pushed past the edge than the earlier reading had.)
         assert_eq!(placed, 4348);
-        assert_eq!(outside, 66, "off screen");
+        assert_eq!(
+            outside, 54,
+            "off screen (a Background fills its owner, so fewer frames overshoot)"
+        );
         assert_eq!(perfect, 82, "perfect files");
         // The worst offender is a fragment, not a screen.
         assert!(
             worst.1.ends_with("botlab/armor.gib")
                 || worst.1.ends_with("botlab/adjust_none.gib")
-                || worst.1.ends_with("botlab/comp_adjust.gib"),
+                || worst.1.ends_with("botlab/comp_adjust.gib")
+                || worst.1.ends_with("exhibition/gametype.gib"),
             "{} {}",
             worst.1,
             worst.0
@@ -2438,7 +2493,7 @@ mod tests {
         assert_eq!(lines, vec!["chassis".to_string(), "chassis".to_string()]);
 
         // A paragraph's first line hangs from the box's top the same way a
-        // label does, and a wrapped second line sits one line height lower.
+        // label does, and a wrapped second line sits one ascent lower (the exe's line advance).
         let width = font.extent("chassis").0 as f32 + 1.0;
         let two = paragraph_run(
             font,
@@ -2453,8 +2508,8 @@ mod tests {
         );
         assert_eq!(
             two.last().unwrap().rect.y - first,
-            font.line_height() as f32,
-            "the second line is one line height below the first"
+            font.ascent as f32,
+            "the second line is one ascent below the first (FUN_00602210)"
         );
     }
 
@@ -2564,7 +2619,7 @@ mod tests {
             }
         }
         assert_eq!(negatives, 613, "children with a negative ChildOrder");
-        assert_eq!(overlapping, 67, "those overlapping a non-negative sibling");
+        assert_eq!(overlapping, 72, "those overlapping a non-negative sibling");
         assert_eq!(controls, 256, "negative orders on pressed controls");
 
         let text = std::fs::read_to_string(game.join("UI/mainmenu/mainmenu.gib")).unwrap();
