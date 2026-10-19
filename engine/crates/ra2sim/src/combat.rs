@@ -104,6 +104,89 @@ pub struct Impact {
     pub speed: f32,
 }
 
+/// A robot part touching a named arena prop (a hazard, a hammer, a cinder
+/// block): what the arena's sub-material sound rule reads (`0x405090`,
+/// `docs/35-audio-events.md`). The robot-versus-robot [`resolve`] ignores it.
+#[derive(Clone, Debug)]
+pub struct MaterialContact {
+    /// The prop's name, as the arena script spells its sub-material
+    /// (`SetSubMaterialSound(name, ...)`).
+    pub prop: String,
+    pub robot: usize,
+    pub point: Vec3,
+    /// `FUN_0045a5a0` for this contact: half the closing speed over the
+    /// effective inverse mass (an unknown prop mass counts as `0.08`).
+    pub magnitude: f32,
+}
+
+/// The contacts of one step between a robot's body and a named prop body.
+pub fn material_contacts(
+    robots: &[Robot],
+    props: &[(BodyHandle, &str, f32)],
+    events: &[ContactEvent],
+) -> Vec<MaterialContact> {
+    let mut owner: HashMap<BodyHandle, (usize, usize)> = HashMap::new();
+    for (r, robot) in robots.iter().enumerate() {
+        for (p, part) in robot.parts.iter().enumerate() {
+            if part.alive {
+                owner.insert(part.body, (r, p));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for e in events {
+        // `a` and `b` in either order: one is a robot part, the other a prop.
+        let (robot_side, prop_side, robot_is_a) = match (
+            owner.get(&e.a),
+            owner.get(&e.b),
+            props.iter().find(|p| p.0 == e.a),
+            props.iter().find(|p| p.0 == e.b),
+        ) {
+            (Some(&o), None, _, Some(p)) => (o, p, true),
+            (None, Some(&o), Some(p), _) => (o, p, false),
+            _ => continue,
+        };
+        let (r, part) = robot_side;
+        let (state_r, state_p) = if robot_is_a {
+            (&e.state_a, &e.state_b)
+        } else {
+            (&e.state_b, &e.state_a)
+        };
+        let dyn_r = body_dynamics(&robots[r], part, state_r);
+        let n = e.normal.normalize_or_zero();
+        if n == Vec3::ZERO || dyn_r.mass <= 0.0 {
+            continue;
+        }
+        let v_r = point_velocity(
+            state_r.linear_velocity,
+            state_r.angular_velocity,
+            dyn_r.com,
+            e.point,
+        );
+        let v_p = point_velocity(
+            state_p.linear_velocity,
+            state_p.angular_velocity,
+            state_p.position,
+            e.point,
+        );
+        let rec0 = (v_r - v_p).dot(n).abs();
+        let magnitude = magnitude(
+            rec0,
+            dyn_r.mass,
+            prop_side.2,
+            angular_term(e.point - dyn_r.com, n, dyn_r.inv_inertia),
+            0.0,
+        );
+        out.push(MaterialContact {
+            prop: prop_side.1.to_string(),
+            robot: r,
+            point: e.point,
+            magnitude,
+        });
+    }
+    out
+}
+
 /// `1/m` the way `FUN_0045a5a0` forms it.
 pub fn inverse_mass_term(mass: f32) -> f32 {
     let inv = if mass <= 0.0 {

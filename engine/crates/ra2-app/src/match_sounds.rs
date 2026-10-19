@@ -14,9 +14,14 @@
 //!   screen, the high beep marks the bell, and the critical hit plays on a
 //!   chassis critical.
 //! * **Motor loops**: a component's `motorsound` (or the middle file of its
-//!   `runsequence`) loops while the motor's hinge turns. The original's pitch
-//!   and volume scaling with speed was not recovered, so the loop plays at its
-//!   recorded pitch.
+//!   `runsequence`) loops, created at -700, while the motor's output command is
+//!   non-zero (`docs/35-audio-events.md` section 7); the pitch follows the hinge
+//!   rate (`FUN_004f5b50`).
+//! * **Weapon triggers**: the `firesound` plays on the trigger press, a piston on
+//!   every press and an electric burst motor only when cocked (`-500`).
+//! * **The countdown window**: a `Begin_*` line half a second after the bell.
+//! * **Arena sub-material sounds**: a robot part touching a prop the arena script
+//!   gave a sound plays it at the rule in `ra2_audio::rules::material_volume_hdb`.
 
 use std::collections::HashMap;
 
@@ -33,6 +38,13 @@ pub enum SoundCue {
         position: [f32; 3],
         hundredths_db: i32,
     },
+    /// An arena sub-material sound (`SetSubMaterialSound`): a robot struck a
+    /// named prop whose script registered `path`, at `hundredths_db`.
+    Material {
+        path: String,
+        position: [f32; 3],
+        hundredths_db: i32,
+    },
     /// A countdown beep; `go` is the bell that starts the fight.
     Beep { go: bool },
     /// A chassis critical hit.
@@ -41,8 +53,16 @@ pub enum SoundCue {
     Chat,
     /// A robot's removal: one of the four `frc_generic` sounds.
     Force { path: &'static str },
-    /// A weapon fired: its component's `firesound`.
-    Fire { path: String, position: [f32; 3] },
+    /// A weapon trigger: its component's `firesound` at `hundredths_db`
+    /// (`-500` for an electric burst motor, `0` for a piston).
+    Fire {
+        path: String,
+        position: [f32; 3],
+        hundredths_db: i32,
+    },
+    /// The countdown window's announcer: one of the six `Begin_*` lines, played
+    /// half a second after the bell.
+    Announce { path: &'static str },
     /// One second of an immobility warning: `immobile_countdown.wav`.
     ImmobileTick,
     /// The match is over and the crowd goes quiet: every loop fades out.
@@ -75,10 +95,10 @@ pub struct MatchSounds {
     criticals: Vec<u32>,
     angles: HashMap<(usize, usize), f32>,
     running: HashMap<(usize, usize), bool>,
-    /// Seconds each running motor has been below the audible rate.
-    quiet_for: HashMap<(usize, usize), f32>,
     crowd: Crowd,
     destroyed: Vec<bool>,
+    /// Each robot's `attached` flags at the last step, to see a part come off.
+    attached: Vec<Vec<bool>>,
     /// The last playback rate sent for each running motor loop.
     pitch: HashMap<(usize, usize), f32>,
     /// A private copy of the immobility rule (`FUN_00412fc0`), run to know when
@@ -86,6 +106,8 @@ pub struct MatchSounds {
     immobility: ra2sim::immobility::Tracker,
     immobility_clock: f32,
     warned: Vec<bool>,
+    /// Seconds until the `Begin_*` line, while one is pending.
+    begin_in: Option<f32>,
 }
 
 /// The playback rate of a motor loop at `rate` rad/s of a motor whose full
@@ -100,8 +122,6 @@ pub fn motor_pitch(rate: f32, full: f32) -> f32 {
     0.5 + 0.5 * (rate.abs() / full)
 }
 
-/// Motor angular speed (rad/s) above which its loop sounds.
-pub const MOTOR_AUDIBLE_RATE: f32 = 1.0;
 /// The four sounds `FUN_00415500` builds at `match+0x110` and `FUN_00419160`
 /// picks from at random (`frc_generic3.wav` is not among them).
 pub const FRC_SOUNDS: [&str; 4] = [
@@ -110,10 +130,24 @@ pub const FRC_SOUNDS: [&str; 4] = [
     "Sounds/frc_generic4.wav",
     "Sounds/frc_generic5.wav",
 ];
-/// Hinge rate (rad/s) above which a parked burst motor counts as released.
-pub const BURST_FIRE_RATE: f32 = 3.0;
-/// How long a motor must be still before its loop is released.
-pub const MOTOR_RELEASE_SECONDS: f32 = 0.5;
+/// The six `Begin_*` announcer lines the countdown window holds (`0x474ef7`).
+pub const BEGIN_LINES: [&str; 6] = [
+    "Sounds/announcers/Begin_AndWereOff.wav",
+    "Sounds/announcers/Begin_BuzzerSignalsStart.wav",
+    "Sounds/announcers/Begin_HereWeGo.wav",
+    "Sounds/announcers/Begin_KickMatchInGear.wav",
+    "Sounds/announcers/Begin_LetsBegin.wav",
+    "Sounds/announcers/Begin_MayStrongestWin.wav",
+];
+/// Seconds from the bell to the `Begin_*` line: 0.51 s in every live capture
+/// (`audio-match-*__live`: bell created at 30.52, line played at 31.04).
+pub const BEGIN_DELAY: f32 = 0.5;
+/// The volume a motor loop is created at (`-700` hundredths of a dB, every
+/// `motorloop*` handle of the live captures).
+pub const MOTOR_LOOP_HDB: i32 = -700;
+/// The volume the electric burst motor's `firesound` is created at (`-500`;
+/// the piston's is `0`).
+pub const BURST_FIRE_HDB: i32 = -500;
 
 impl MatchSounds {
     pub fn new() -> MatchSounds {
@@ -124,13 +158,14 @@ impl MatchSounds {
             criticals: Vec::new(),
             angles: HashMap::new(),
             running: HashMap::new(),
-            quiet_for: HashMap::new(),
             crowd: Crowd::new(),
             destroyed: Vec::new(),
+            attached: Vec::new(),
             pitch: HashMap::new(),
             immobility: ra2sim::immobility::Tracker::default(),
             immobility_clock: 0.0,
             warned: Vec::new(),
+            begin_in: None,
         }
     }
 
@@ -161,6 +196,7 @@ impl MatchSounds {
         }
         if state == MatchState::Fight && self.last_state == Some(MatchState::Countdown) {
             cues.push(SoundCue::Beep { go: true });
+            self.begin_in = Some(BEGIN_DELAY);
             // `FUN_00416360`: the fight begins and the crowd re-enters its mood.
             let events = self.crowd.start();
             cues.extend(events.into_iter().map(crowd_cue));
@@ -171,8 +207,29 @@ impl MatchSounds {
         }
         self.last_state = Some(state);
 
-        // The crowd's tick runs while the match is updating (`FUN_00412fc0`).
-        if matches!(state, MatchState::Countdown | MatchState::Fight) {
+        // The announcer's line half a second after the bell.
+        if let Some(left) = self.begin_in {
+            let left = left - matched.config.dt;
+            if left <= 0.0 {
+                self.begin_in = None;
+                let pick = (self.next() as usize) % BEGIN_LINES.len();
+                cues.push(SoundCue::Announce {
+                    path: BEGIN_LINES[pick],
+                });
+            } else {
+                self.begin_in = Some(left);
+            }
+        }
+
+        // The crowd's tick runs while the match is updating (`FUN_00412fc0`),
+        // which includes the arena intro: the object is built with the match
+        // (live: `crowd/*.wav` created at 4.95 s, `normal_to_somewhat` 11.1 s
+        // later, `somewhat_to_bored` 10 s after that, so the crowd is bored at
+        // the bell and re-enters with `somewhat_to_bored`).
+        if matches!(
+            state,
+            MatchState::Intro | MatchState::Countdown | MatchState::Fight
+        ) {
             let events = self.crowd.tick(matched.config.dt);
             cues.extend(events.into_iter().map(crowd_cue));
         }
@@ -205,24 +262,65 @@ impl MatchSounds {
             });
         }
 
-        // A destroyed robot: `FUN_00418040` state 1 excites the crowd by 20
-        // with a burst cheer.
-        if self.destroyed.len() < matched.duel.robots.len() {
-            self.destroyed.resize(matched.duel.robots.len(), false);
+        // Arena sub-material sounds: a robot part touched a named prop the
+        // arena script gave a sound (`0x405090`).
+        let contacts = std::mem::take(&mut matched.duel.material_contacts);
+        if !contacts.is_empty() && state == MatchState::Fight {
+            let registered = arena_material_sounds();
+            for contact in contacts {
+                let Some((_, factor, path)) = registered
+                    .iter()
+                    .find(|(name, _, _)| name.eq_ignore_ascii_case(&contact.prop))
+                else {
+                    continue;
+                };
+                let Some(hundredths_db) =
+                    ra2_audio::rules::material_volume_hdb(*factor, contact.magnitude)
+                else {
+                    continue;
+                };
+                cues.push(SoundCue::Material {
+                    path: path.clone(),
+                    position: [contact.point.x, contact.point.y, contact.point.z],
+                    hundredths_db,
+                });
+            }
+        }
+
+        // A component coming off (`FUN_00417d70` -> `FUN_0045f4e0`): one of the
+        // four `frc_generic` sounds (`FUN_00419160`) and the crowd +20 with a
+        // burst cheer. Live: `frc_generic5` + `loud_burstcheer` at the same
+        // instant, 4 to 13 s into three of five fights, and none at the end.
+        if self.attached.len() < matched.duel.robots.len() {
+            self.attached.resize(matched.duel.robots.len(), Vec::new());
         }
         for (i, robot) in matched.duel.robots.iter().enumerate() {
-            if robot.destroyed && !self.destroyed[i] && state == MatchState::Fight {
-                // `FUN_00418040` (state 1: +20 and a burst cheer) and the
-                // removal `FUN_0045f4e0` (+20 and a random one of the four
-                // `frc_generic` sounds, `FUN_00419160`).
+            let before = std::mem::replace(&mut self.attached[i], robot.attached.clone());
+            let lost = state == MatchState::Fight
+                && before
+                    .iter()
+                    .zip(&robot.attached)
+                    .skip(1)
+                    .any(|(was, now)| *was && !*now);
+            if lost {
                 let events = self.crowd.excite(20, true);
-                cues.extend(events.into_iter().map(crowd_cue));
-                let events = self.crowd.excite(20, false);
                 cues.extend(events.into_iter().map(crowd_cue));
                 let pick = (self.next() as usize) % FRC_SOUNDS.len();
                 cues.push(SoundCue::Force {
                     path: FRC_SOUNDS[pick],
                 });
+            }
+        }
+
+        // A robot destroyed (`FUN_00418040` state 1): the crowd +20 with a
+        // burst cheer; the `frc_generic` sound is the component's, not this.
+        if self.destroyed.len() < matched.duel.robots.len() {
+            self.destroyed.resize(matched.duel.robots.len(), false);
+        }
+        for (i, robot) in matched.duel.robots.iter().enumerate() {
+            if robot.destroyed && !self.destroyed[i] && state == MatchState::Fight {
+                let events = self.crowd.excite(20, true);
+                cues.extend(events.into_iter().map(crowd_cue));
             }
             self.destroyed[i] = robot.destroyed;
         }
@@ -279,8 +377,33 @@ impl MatchSounds {
             self.criticals[i] = robot.criticals;
         }
 
-        // Motor loops.
+        // Weapon triggers: the firesound plays on the trigger itself, not on
+        // the stroke (`0x446810` burst motor, `0x448750` piston).
+        for robot in matched.duel.robots.iter_mut() {
+            let events = robot.take_fire_events();
+            let p = robot.position(matched.duel.physics.as_ref());
+            for motor in events {
+                let Some(path) = robot.rig.components[motor].sounds.fire.clone() else {
+                    continue;
+                };
+                let slider = robot.rig.parts.iter().any(|part| {
+                    part.joint
+                        .as_ref()
+                        .is_some_and(|j| j.motor == motor && j.slider)
+                });
+                cues.push(SoundCue::Fire {
+                    path,
+                    position: [p.x, p.y, p.z],
+                    hundredths_db: if slider { 0 } else { BURST_FIRE_HDB },
+                });
+            }
+        }
+
+        // Motor loops: one handle per motor component, looping while the
+        // motor's output command is non-zero (`FUN_004f59f0`) and silent when
+        // it returns to zero or the match is over.
         let dt = matched.config.dt.max(1e-4);
+        let over = state == MatchState::Results || state == MatchState::Over;
         let mut motor_cues = Vec::new();
         for (ri, robot) in matched.duel.robots.iter().enumerate() {
             for (pi, part) in robot.rig.parts.iter().enumerate() {
@@ -288,34 +411,10 @@ impl MatchSounds {
                     continue;
                 };
                 let Some(handle) = state.joint else { continue };
-                if joint.slider {
+                if joint.slider || joint.use_kind == ra2sim::rig::JointUse::Burst {
                     continue;
                 }
                 let motor = &robot.rig.components[joint.motor];
-                if joint.use_kind == ra2sim::rig::JointUse::Burst {
-                    // A burst motor plays its `firesound` when it is released:
-                    // the swing from its parked angle shows as a sudden rate.
-                    let angle = matched.duel.physics.hinge_angle(handle);
-                    let prev = self.angles.insert((ri, pi), angle).unwrap_or(angle);
-                    let mut d = angle - prev;
-                    if d > std::f32::consts::PI {
-                        d -= std::f32::consts::TAU;
-                    } else if d < -std::f32::consts::PI {
-                        d += std::f32::consts::TAU;
-                    }
-                    let swinging = robot.attached[joint.motor] && (d / dt).abs() > BURST_FIRE_RATE;
-                    let was = self.running.insert((ri, pi), swinging).unwrap_or(false);
-                    if swinging && !was {
-                        if let Some(path) = motor.sounds.fire.clone() {
-                            let p = robot.position(matched.duel.physics.as_ref());
-                            motor_cues.push(SoundCue::Fire {
-                                path,
-                                position: [p.x, p.y, p.z],
-                            });
-                        }
-                    }
-                    continue;
-                }
                 let sound = motor.sounds.motor.clone().or_else(|| {
                     // `runsequence = spin-up, loop, spin-down`: the loop.
                     motor.sounds.run_sequence.get(1).cloned()
@@ -329,16 +428,12 @@ impl MatchSounds {
                 } else if d < -std::f32::consts::PI {
                     d += std::f32::consts::TAU;
                 }
-                let turning = robot.attached[joint.motor]
-                    && robot.is_alive()
-                    && (d / dt).abs() > MOTOR_AUDIBLE_RATE;
-                let was = self.running.get(&(ri, pi)).copied().unwrap_or(false);
-                // A loop stops only after the motor has been quiet for a while,
-                // so a turning wheel's frame-to-frame jitter is not a stutter.
-                let quiet = self.quiet_for.entry((ri, pi)).or_insert(0.0);
-                *quiet = if turning { 0.0 } else { *quiet + dt };
-                let on = turning || (was && *quiet < MOTOR_RELEASE_SECONDS);
-                self.running.insert((ri, pi), on);
+                let command = robot
+                    .control
+                    .command(&robot.rig.wiring, joint.motor)
+                    .unwrap_or(0.0);
+                let on = !over && robot.attached[joint.motor] && robot.is_alive() && command != 0.0;
+                let was = self.running.insert((ri, pi), on).unwrap_or(false);
                 if on && was {
                     let speed = motor_pitch(d / dt, joint.rate);
                     let last = self.pitch.get(&(ri, pi)).copied().unwrap_or(1.0);
@@ -371,6 +466,23 @@ impl Default for MatchSounds {
     fn default() -> Self {
         MatchSounds::new()
     }
+}
+
+/// The live arena's `SetSubMaterialSound` registrations that name a sound:
+/// `(sub-material name, volume factor, sound path)`.
+fn arena_material_sounds() -> Vec<(String, f32, String)> {
+    let Some(arena) = ra2script::state().arena.clone() else {
+        return Vec::new();
+    };
+    let data = arena.lock().unwrap_or_else(|e| e.into_inner());
+    data.sub_materials
+        .iter()
+        .filter_map(|(name, _material, factor, sound)| {
+            sound
+                .as_ref()
+                .map(|sound| (name.clone(), *factor, sound.clone()))
+        })
+        .collect()
 }
 
 fn crowd_cue(event: CrowdEvent) -> SoundCue {

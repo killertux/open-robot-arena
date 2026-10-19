@@ -188,6 +188,19 @@ pub fn activated(step: &Step) -> bool {
     !step.hit.is_empty() && step.hit != "nothing"
 }
 
+/// Whether a click plays `Sounds\\button_click.wav`.
+///
+/// The original plays it from the push-button class's mouse-up handler
+/// (`0x5ec1e0`) and from nowhere else: a tab, a checkbox, a radio group member,
+/// a slider, a scroll bar and a list row are silent. Live (`ui-click-survey`):
+/// the main-menu buttons, Options, OK, Cancel, Main Menu, Continue, Workshop
+/// and Back to HQ click; the exhibition tabs, the arena list, the options
+/// checkboxes, radios and sliders do not. The shell names the widget class first
+/// in `Step::hit` (`Button "start game button"`).
+pub fn plays_click(step: &Step) -> bool {
+    activated(step) && (step.hit.starts_with("Button") || step.hit == "eject button")
+}
+
 /// A click's one-line trace, the same shape `ra2-shell` prints.
 pub fn describe(step: &Step) -> String {
     format!(

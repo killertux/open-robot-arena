@@ -199,3 +199,25 @@ which swallows later key presses and the Continue click (use F2/F3/F4 only); a c
 frida-server (`kill -9 $(pgrep -x frida-server)`, restart the session); Python 2.2 inside the game rejects a
 `try/except: break` in a nested `for` under the wrapper (use list comprehensions); the Select Computer Robot team
 drop-down does not open with injected clicks.
+
+## Audio captures (M-audio3)
+
+`docs/35-audio-events.md` is the recovered behaviour; these are the tools that
+recorded it. All need `tools/capture/original_session.sh start` and write into
+`local/oracle/original/` (git-ignored) with a `manifest.tsv` row per file.
+
+| Tool | What it does |
+|---|---|
+| `frida/ra2_sounds.js` | Hooks every `SoundWizard` call (create, play, loop, stop, volume, fades; `0x4f0000`..`0x4f1130`), the music layer (`0x4f1350` folder, `0x4f12d0` track, `0x4f1620`) and the DirectMusic UI one-shot (`0x6287e0`). Rows carry `Date.now()`. |
+| `capture_audio.py NAME SECONDS` | `parec --monitor-stream` of the game's own sink input (48 kHz stereo) plus the agent's log, side by side; line 1 of the `.jsonl` is the host epoch of the WAV start. |
+| `capture_audio_match.py` | A whole Scout v ALARM exhibition match on the Combat Arena: intro, countdown, fight, results (`SKIP_INTRO=1`, `FIGHT_SECONDS`, `RESULT_SECONDS`). |
+| `survey_clicks.py NAME STEPS.tsv` | One attach, one click per line of `routes/click_survey.tsv`; `.clicks.tsv` says which click played `button_click.wav`. |
+| `audio_events.py LOG.jsonl` | Normalises a log into `t_s kind file volume handle note` lines. |
+| `audio_compare.py ORIG.events.tsv OURS.log` | The same match, original against `RA2_AUDIO_TRACE=1` of `ra2-app --match`, aligned on the bell. |
+| `frida/ra2_music_probe.js` | One-off: which music-layer calls run at a screen or match transition. |
+
+Limits found on the way (`docs/35` section 1): the DirectMusic UI clicks and
+(apparently) the in-match music request are not audible through Wine, so for them
+the call log is the evidence, not the WAV; repeated `frida` attaches wedge
+`frida-server` (restart it, and prefer one attach per script);
+`pkill -f` patterns match your own shell command line.

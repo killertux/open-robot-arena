@@ -58,6 +58,10 @@ pub enum UiSound {
     CriticalHit,
     /// `Sounds\immobile_countdown.wav` (`0x415763`): the immobility warning.
     ImmobileWarning,
+    /// `Sounds\player_joined.wav`: a robot is put in an exhibition slot (live,
+    /// `ui-click-survey`: created and played at the Select Computer Robot
+    /// dialog's OK, one `SoundWizard` one-shot, 0 hundredths of a dB).
+    PlayerJoined,
 }
 
 impl UiSound {
@@ -76,6 +80,7 @@ impl UiSound {
             UiSound::CountdownGo => "Sounds/match_countdown_high.wav",
             UiSound::CriticalHit => "Sounds/critical_hit.wav",
             UiSound::ImmobileWarning => "Sounds/immobile_countdown.wav",
+            UiSound::PlayerJoined => "Sounds/player_joined.wav",
         };
         Some(name.to_string())
     }
@@ -99,6 +104,25 @@ pub struct AudioSystem {
     last_match_time: Option<f32>,
     /// How many crowd one-shots have been started (their ring of voice ids).
     crowd_shots: u64,
+    /// Whether a screen change leaves the silent gap the original does (the
+    /// windowed client; the offscreen runners start the next track at once).
+    music_gap: bool,
+    /// The next track, waiting out the gap.
+    pending_music: Option<PendingTrack>,
+}
+
+/// Seconds between the old track being cut and the new one being heard when
+/// the shell moves between the main menu, the Team HQ and the workshop. Live
+/// (`ui-click-survey`): the old track stops at the click (80.25 s, 95.2 s), the
+/// screen builds and the music folder is set about 1.1 s later, and the new
+/// track is audible 1.2 to 2.0 s after that.
+pub const MUSIC_GAP_SECONDS: f32 = 2.5;
+
+#[derive(Clone, Debug)]
+struct PendingTrack {
+    left: f32,
+    track: Track,
+    path: PathBuf,
 }
 
 impl AudioSystem {
@@ -126,6 +150,30 @@ impl AudioSystem {
             events: Vec::new(),
             last_match_time: None,
             crowd_shots: 0,
+            music_gap: false,
+            pending_music: None,
+        }
+    }
+
+    /// Leave the original's silent gap between one area's track and the next
+    /// (see [`MUSIC_GAP_SECONDS`]); the windowed client turns this on and calls
+    /// [`AudioSystem::tick_music`] with real time.
+    pub fn with_music_gap(mut self, on: bool) -> AudioSystem {
+        self.music_gap = on;
+        self
+    }
+
+    /// Advance the music gap by `dt` real seconds and start the waiting track
+    /// when it is over.
+    pub fn tick_music(&mut self, dt: f32) {
+        let Some(pending) = self.pending_music.as_mut() else {
+            return;
+        };
+        pending.left -= dt;
+        if pending.left <= 0.0 {
+            if let Some(PendingTrack { track, path, .. }) = self.pending_music.take() {
+                self.start_track(track, path);
+            }
         }
     }
 
@@ -266,12 +314,48 @@ impl AudioSystem {
                 }),
                 SoundCue::Critical { .. } => self.ui(UiSound::CriticalHit),
                 SoundCue::Chat => self.ui(UiSound::Chat),
-                SoundCue::Fire { path, position } => {
+                SoundCue::Material {
+                    path,
+                    position,
+                    hundredths_db,
+                } => {
                     // Centred like every match effect (see `Impact`).
                     let _ = position;
+                    let gain = ra2_audio::hundredths_db_to_gain(hundredths_db);
                     match ra2_audio::resolve_game_path(&self.game, &path) {
                         Some(file) => {
+                            if let Err(error) = self.audio.play_2d(&file, gain) {
+                                self.problems.push(format!("material: {error}"));
+                            }
+                        }
+                        None => self
+                            .problems
+                            .push(format!("material: {path} is not in the game")),
+                    }
+                }
+                SoundCue::Announce { path } => {
+                    match ra2_audio::resolve_game_path(&self.game, path) {
+                        Some(file) => {
                             if let Err(error) = self.audio.play_2d(&file, 1.0) {
+                                self.problems.push(format!("announcer: {error}"));
+                            }
+                        }
+                        None => self
+                            .problems
+                            .push(format!("announcer: {path} is not in the game")),
+                    }
+                }
+                SoundCue::Fire {
+                    path,
+                    position,
+                    hundredths_db,
+                } => {
+                    // Centred like every match effect (see `Impact`).
+                    let _ = position;
+                    let gain = ra2_audio::hundredths_db_to_gain(hundredths_db);
+                    match ra2_audio::resolve_game_path(&self.game, &path) {
+                        Some(file) => {
+                            if let Err(error) = self.audio.play_2d(&file, gain) {
                                 self.problems.push(format!("fire: {error}"));
                             }
                         }
@@ -373,7 +457,8 @@ impl AudioSystem {
                     if on {
                         match ra2_audio::resolve_game_path(&self.game, &path) {
                             Some(file) => {
-                                // A motor fades up rather than clicking on.
+                                // A motor fades up rather than clicking on, to the
+                                // level its handle is created at.
                                 self.audio.set_script_volume(key, -10_000);
                                 if let Err(error) = self
                                     .audio
@@ -381,7 +466,11 @@ impl AudioSystem {
                                 {
                                     self.problems.push(format!("motor: {error}"));
                                 }
-                                self.audio.fade_script_to(key, 0, 250.0);
+                                self.audio.fade_script_to(
+                                    key,
+                                    crate::match_sounds::MOTOR_LOOP_HDB,
+                                    250.0,
+                                );
                             }
                             None => self
                                 .problems
@@ -419,18 +508,39 @@ impl AudioSystem {
         let same_screen = self.current_screen.as_deref() == Some(screen);
         self.current_screen = Some(screen.to_string());
 
+        // A screen outside the three areas (the exhibition setup, help, the
+        // options window) does not touch the music: live, the track playing
+        // when the exhibition opened kept playing through its screens.
         let Some(track) = music_for_screen(screen) else {
-            self.stop_music(&format!("{screen} has no established track"));
             return;
         };
         let path = track.in_game_dir(&self.game);
-        if self.current_music.as_deref() == Some(path.as_path()) {
+        if self.current_music.as_deref() == Some(path.as_path())
+            || self.pending_music.as_ref().is_some_and(|p| p.path == path)
+        {
             return;
         }
         if same_screen {
             return;
         }
-        self.start_track(track, path);
+        // Another area: the old track is cut at once, the new one follows.
+        if self.current_music.take().is_some() {
+            self.audio.stop_music();
+            self.events.push("music: stop (another area)".to_string());
+        }
+        if self.music_gap {
+            self.events.push(format!(
+                "music: {} in {MUSIC_GAP_SECONDS} s",
+                track.relative_path()
+            ));
+            self.pending_music = Some(PendingTrack {
+                left: MUSIC_GAP_SECONDS,
+                track,
+                path,
+            });
+        } else {
+            self.start_track(track, path);
+        }
     }
 
     /// The same switch for a caller that already mapped the screen, or `None`
@@ -468,6 +578,7 @@ impl AudioSystem {
         // The next `on_screen` must start a track again even if it is the same
         // screen that was playing before the stop (a match interrupted it).
         self.current_screen = None;
+        self.pending_music = None;
         if self.current_music.take().is_some() {
             self.audio.stop_music();
             self.events.push(format!("music: stop ({reason})"));
@@ -480,18 +591,25 @@ impl AudioSystem {
         self.ui(UiSound::Click);
     }
 
-    /// The sounds a shell click makes: the button class's click when a control
-    /// was activated (`crate::activated`), and the control's own sound on top.
+    /// The sounds a shell click makes: the button class's click when a push
+    /// button was hit (`crate::plays_click`), and the control's own sound on top.
     /// Today only the lobby's `eject button` has one (`eject.wav`, `0x47d3f2`);
     /// the snapshot and point-plotted sounds wait for screens that do not
     /// exist yet.
     pub fn shell_step(&mut self, step: &ra2_shell::Step) {
-        if !crate::activated(step) {
-            return;
+        if crate::plays_click(step) {
+            self.click();
         }
-        self.click();
         if step.hit == "eject button" || step.hit_widget() == Some("eject button") {
             self.ui(UiSound::Eject);
+        }
+        // The workshop's snapshot button (`snapshot button`, `overview.gib`).
+        if step.hit_widget() == Some("snapshot button") {
+            self.ui(UiSound::Snapshot);
+        }
+        // A robot accepted into an exhibition slot: the selection dialog's OK.
+        if step.hit_widget() == Some("ok button") && step.screen.starts_with("exhibition/") {
+            self.ui(UiSound::PlayerJoined);
         }
     }
 
@@ -646,16 +764,129 @@ mod tests {
         assert!(paths[1].ends_with("Music/Team HQ/Robot Tribal Dance.mp3"));
         assert!(paths[2].ends_with("Music/Workshop/Deep inside the Bot Lab.mp3"));
 
+        // A screen outside the three areas leaves the track playing: live, the
+        // exhibition setup, help and the options window do not touch the music.
         audio.on_screen("help/help.gib");
-        assert!(audio.audio.music_path().is_none(), "unmapped screen stops");
+        audio.on_screen("exhibition/exhib_setup.gib");
+        assert!(
+            audio.audio.music_path().is_some(),
+            "unmapped screen keeps it"
+        );
+        assert_eq!(audio.audio.play_log().len(), 3, "and starts nothing");
         let report = audio.report(true);
-        assert!(report.contains("music: stop"), "{report}");
+        assert!(report.contains("music: stop (another area)"), "{report}");
 
         // A match stops the shell music without changing the screen; when the
         // shell comes back to the same screen it must start again.
         audio.stop_music("the match is on screen");
         audio.on_screen("botlab/botlabwin.gib");
         assert_eq!(audio.audio.play_log().len(), 4, "the track restarts");
+    }
+
+    /// Moving to another area cuts the old track at once and the new one is
+    /// heard only after a silent gap (live: cut at the click, folder set about
+    /// 1.1 s later, audible 1.2 to 2.0 s after that); the same area keeps its
+    /// track and a screen outside the areas does not touch it.
+    #[test]
+    fn another_area_cuts_the_track_and_the_next_follows_after_the_gap() {
+        let Some(game) = game_dir() else { return };
+        let mut audio =
+            AudioSystem::new_silent(&game, &cfg_with_unity_volumes()).with_music_gap(true);
+        audio.on_screen("mainmenu/mainmenu.gib");
+        assert!(
+            audio.audio.music_path().is_none(),
+            "the first track waits too"
+        );
+        audio.tick_music(MUSIC_GAP_SECONDS + 0.01);
+        assert!(audio
+            .audio
+            .music_path()
+            .unwrap()
+            .ends_with("Enter the Battlefield.mp3"));
+
+        // The exhibition does not touch it.
+        audio.on_screen("exhibition/exhib_setup.gib");
+        assert!(audio
+            .audio
+            .music_path()
+            .unwrap()
+            .ends_with("Enter the Battlefield.mp3"));
+        // The Team HQ cuts it at the click and starts later.
+        audio.on_screen("teamhq/teamhq.gib");
+        assert!(audio.audio.music_path().is_none(), "cut at once");
+        audio.tick_music(MUSIC_GAP_SECONDS - 0.5);
+        assert!(audio.audio.music_path().is_none(), "still in the gap");
+        // The same screen asked again does not restart the wait.
+        audio.on_screen("teamhq/select_team.gib");
+        audio.tick_music(0.6);
+        assert!(audio
+            .audio
+            .music_path()
+            .unwrap()
+            .ends_with("Robot Tribal Dance.mp3"));
+        // Inside the area (workshop tabs set the same folder again): no restart.
+        let starts = audio.audio.play_log().len();
+        audio.on_screen("teamhq/teamhq.gib");
+        audio.tick_music(10.0);
+        assert_eq!(audio.audio.play_log().len(), starts);
+        // A match stops everything, including a track still waiting.
+        audio.on_screen("botlab/botlabwin.gib");
+        audio.stop_music("the match is on screen");
+        audio.tick_music(10.0);
+        assert!(audio.audio.music_path().is_none());
+    }
+
+    /// Only the push-button class clicks (`0x5ec1e0`): tabs, check boxes, radio
+    /// groups, sliders and list rows are silent; the snapshot button also plays
+    /// `snapshot.wav` and the exhibition's slot OK plays `player_joined.wav`.
+    #[test]
+    fn only_push_buttons_click() {
+        let Some(game) = game_dir() else { return };
+        let mut audio = AudioSystem::new_silent(&game, &cfg_with_unity_volumes());
+        let step = |hit: &str, screen: &str| ra2_shell::Step {
+            command: "click".into(),
+            hit: hit.into(),
+            note: None,
+            screen: screen.into(),
+            content: None,
+            tab: None,
+            step: None,
+            point: [0.0, 0.0],
+        };
+        let played = |audio: &AudioSystem| -> Vec<String> {
+            audio
+                .audio
+                .play_log()
+                .entries()
+                .iter()
+                .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
+                .collect()
+        };
+        for hit in [
+            "OptionGroup \"arena button\"",
+            "CheckBox \"hazard checkbox\"",
+            "Slider \"effects volume slider\"",
+            "ScrollBar",
+            "nothing",
+        ] {
+            audio.shell_step(&step(hit, "exhibition/exhib_setup.gib"));
+        }
+        assert!(played(&audio).is_empty(), "{:?}", played(&audio));
+        audio.shell_step(&step(
+            "Button \"exhibition button\"",
+            "exhibition/exhib_setup.gib",
+        ));
+        assert_eq!(played(&audio), ["button_click.wav"]);
+        audio.shell_step(&step("Button \"snapshot button\"", "botlab/botlabwin.gib"));
+        assert_eq!(
+            played(&audio),
+            ["button_click.wav", "button_click.wav", "snapshot.wav"]
+        );
+        audio.shell_step(&step("Button \"ok button\"", "exhibition/exhib_setup.gib"));
+        assert_eq!(
+            &played(&audio)[3..],
+            ["button_click.wav", "player_joined.wav"]
+        );
     }
 
     #[test]

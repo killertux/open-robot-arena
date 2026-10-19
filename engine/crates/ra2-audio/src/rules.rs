@@ -28,6 +28,32 @@ pub const IMPACT_VOLUME_FLOOR_HDB: f32 = -1500.0;
 /// Damage above which a hit also throws sparks (`FUN_0045f3a0`'s `10.0 <`).
 pub const SPARK_DAMAGE_MIN: f32 = 10.0;
 
+/// Contact magnitude (`FUN_0045a5a0` times the sub-material's factor) at or
+/// below which an arena sub-material makes no sound (`0x6a579c`, the first
+/// float of the match object's second `CRect`, `+0x14`).
+pub const MATERIAL_MAGNITUDE_QUIET: f32 = 0.5;
+/// The magnitude at which an arena sub-material sound reaches unity (`0x6a5798`).
+pub const MATERIAL_MAGNITUDE_LOUD: f32 = 100.0;
+/// The volume at [`MATERIAL_MAGNITUDE_QUIET`] (`0x6a57a0`): the quietest
+/// material sound is `-300` hundredths of a decibel, not silence.
+pub const MATERIAL_VOLUME_FLOOR_HDB: f32 = -300.0;
+
+/// The volume an arena sub-material sound plays at for a contact of
+/// `magnitude`, with the sub-material's `factor` (the third argument of
+/// `SetSubMaterialSound`), in hundredths of a decibel; `None` below the
+/// threshold. The handler `0x405090` multiplies the factor into the contact's
+/// magnitude, compares it with `0x6a579c` and maps it through the second
+/// `CRect` (`FUN_00419240`'s flag selects it).
+pub fn material_volume_hdb(factor: f32, magnitude: f32) -> Option<i32> {
+    let v = factor * magnitude;
+    if !v.is_finite() || v <= MATERIAL_MAGNITUDE_QUIET {
+        return None;
+    }
+    let k = ((v - MATERIAL_MAGNITUDE_QUIET) / (MATERIAL_MAGNITUDE_LOUD - MATERIAL_MAGNITUDE_QUIET))
+        .clamp(0.0, 1.0);
+    Some((MATERIAL_VOLUME_FLOOR_HDB * (1.0 - k)) as i32)
+}
+
 /// The volume an impact of `damage` plays at, in hundredths of a decibel, or
 /// `None` when it is too quiet to start.
 pub fn impact_volume_hdb(damage: f32) -> Option<i32> {
@@ -53,5 +79,20 @@ mod tests {
         let mid = impact_volume_hdb(52.0).unwrap();
         assert!((-760..=-740).contains(&mid), "{mid}");
         assert!(impact_volume_hdb(f32::NAN).is_none());
+    }
+
+    #[test]
+    fn arena_material_sounds_sit_between_minus_three_db_and_unity() {
+        // Below the threshold: silent.
+        assert_eq!(material_volume_hdb(0.7, 0.5), None);
+        assert_eq!(material_volume_hdb(0.0, 50.0), None);
+        // The quietest audible one is nearly the floor, the loudest is unity.
+        let quiet = material_volume_hdb(1.0, 0.6).unwrap();
+        assert!((-300..=-295).contains(&quiet), "{quiet}");
+        assert_eq!(material_volume_hdb(1.0, 100.0), Some(0));
+        assert_eq!(material_volume_hdb(0.8, 1000.0), Some(0));
+        // The live captures' spike hits (factor 0.7) were -137 .. -298.
+        assert_eq!(material_volume_hdb(0.7, 78.0), Some(-136));
+        assert_eq!(material_volume_hdb(0.7, 14.5), Some(-270));
     }
 }
