@@ -8,7 +8,7 @@
 //!
 //! The method list is not invented: it is exactly the set the shipped scripts
 //! call (see `docs/06-deferred-fidelity.md`, F13). Where a call belongs to the
-//! presentation layer that lands in M5 (sounds, lightning, particles) it is
+//! presentation layer that lands in M5 (sounds, lightning) it is
 //! recorded rather than performed, and says so once.
 
 use std::collections::BTreeMap;
@@ -1199,20 +1199,43 @@ pub struct ArenaDetail {
     pub id: i64,
 }
 
-/// `plus.AddParticleEmitter` — the flame hazard's smoke.
+/// `plus.AddParticleEmitter(location, velocity, variance)` — the flame hazard's
+/// flame (`FUN_004b5760`). The script holds a handle; the emitter's state lives
+/// in [`crate::State::emitters`], where the match's particle system reads it.
 #[pyclass(name = "ParticleEmitter", module = "plus")]
 #[derive(Clone, Debug)]
 pub struct ParticleEmitter {
+    pub id: usize,
+}
+
+/// What the engine sees of one `ParticleEmitter`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmitterState {
     pub location: [f32; 3],
     pub velocity: [f32; 3],
     pub variance: [f32; 3],
-    #[pyo3(get, set)]
     pub emitting: bool,
 }
 
 #[pymethods]
 impl ParticleEmitter {
+    /// `SetEmitting(on)` (`FUN_0048e0b0`).
     fn SetEmitting(&mut self, on: bool) {
-        self.emitting = on;
+        if let Some(e) = crate::state().emitters.get_mut(self.id) {
+            e.emitting = on;
+        }
+    }
+
+    #[getter]
+    fn emitting(&self) -> bool {
+        crate::state()
+            .emitters
+            .get(self.id)
+            .is_some_and(|e| e.emitting)
+    }
+
+    #[setter(emitting)]
+    fn set_emitting_attr(&mut self, on: bool) {
+        self.SetEmitting(on);
     }
 }

@@ -563,6 +563,8 @@ pub struct State {
     /// The arena's intro is playing: `DoIntro(True)` ran and
     /// `plus.introComplete()` has not.
     pub intro_running: bool,
+    /// The flame emitters the scripts created (`plus.AddParticleEmitter`).
+    pub emitters: Vec<arena::EmitterState>,
 }
 
 impl State {
@@ -589,6 +591,7 @@ impl State {
             back_color: None,
             camera_commands: Vec::new(),
             intro_running: false,
+            emitters: Vec::new(),
         }
     }
 
@@ -699,6 +702,7 @@ pub fn prepare_match(game_type: &str, players: Vec<i32>) {
     st.arena_object = None;
     st.camera_commands.clear();
     st.intro_running = false;
+    st.emitters.clear();
 }
 
 /// Set the game-type string the scripts read (`plus.getGameType`).
