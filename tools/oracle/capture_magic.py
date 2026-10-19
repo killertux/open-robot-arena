@@ -4,7 +4,9 @@
 Needs `tools/capture/original_session.sh start` and the exhibition set up as for
 capture_drive.py (routes/exhibition_box_scout_alarm.steps).  Neuters the AI,
 then drives robot PLAYER (env, default 0 = Scout; 1 = ALARM) through the drive
-test (turn 3 s, coast 1.5 s, straight 3 s, stop 3 s) while
+test (turn 3 s, coast 1.5 s, straight 3 s, stop 3 s; TURN_THROTTLE drives
+the turn phase too, for a car-steered robot; CAR_OFF=1 clears the AI's car
+flag so that Throttle(0) is zero) while
 frida/ra2_magic.js records the drive model's per-wheel records and the chassis
 body every Havok step.  Writes
   local/oracle/original/magic-<bot>__live__<seq>.jsonl     raw rows
@@ -92,6 +94,10 @@ def main():
     if os.environ.get("SKIP_START") != "1":
         cd.start_match(os.environ.get("ARENA_ROW_Y", "188"))
     print("neuter:", cd.py(cd.NEUTER))
+    if os.environ.get("CAR_OFF") == "1":
+        # SuperAI.Throttle adds 10 per call to a slow car-steered robot
+        # (`bCarSteering`), which keeps it pushing in the coast and stop legs.
+        cd.py(f"import AI\nAI.running_ai[{player}].bCarSteering = 0")
     dev = frida.get_device_manager().add_remote_device(HOST)
     pid = [p for p in dev.enumerate_processes() if p.name == "Robot Arena 2.exe"][0].pid
     sess = dev.attach(pid)
@@ -116,7 +122,10 @@ def main():
     time.sleep(2.5)
     t0 = time.time()
     ai = f"import AI\nAI.running_ai[{player}]"
-    plan = [("turn", f"{ai}.Throttle(0)\nAI.running_ai[{player}].Turn(100)", 3.0),
+    # A car-steered robot (a `Steering` unit) does not turn in place: set
+    # TURN_THROTTLE (e.g. 100) to drive it round a circle in the turn phase.
+    tt = int(os.environ.get("TURN_THROTTLE", "0"))
+    plan = [("turn", f"{ai}.Throttle({tt})\nAI.running_ai[{player}].Turn(100)", float(os.environ.get("TURN", "3.0"))),
             ("coast", f"{ai}.Throttle(0)\nAI.running_ai[{player}].Turn(0)", 1.5),
             ("straight", f"{ai}.Throttle(100)\nAI.running_ai[{player}].Turn(0)", float(os.environ.get("STRAIGHT", "2.2"))),
             ("stop", f"{ai}.Throttle(0)\nAI.running_ai[{player}].Turn(0)", 3.0)]

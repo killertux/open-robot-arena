@@ -271,6 +271,9 @@ pub struct Component {
     pub wheel: Option<WheelStats>,
     /// Linear stats when this component is a piston (F8).
     pub piston: Option<PistonStats>,
+    /// A `Steering` unit's drive torque: its definition's `power` (`+0x2e0`,
+    /// read at `0x4f637b`; the constructor's default is `1.0`, `0x4f5fdb`).
+    pub steer_power: Option<f32>,
     /// The chassis' buckle model (F9): the positions the bot file marks as
     /// movable, which the original shifts "down and in" as the chassis is hit.
     /// Only the chassis has one.
@@ -1445,6 +1448,12 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             motor,
             wheel,
             piston,
+            steer_power: (c.class.eq_ignore_ascii_case("Steering")
+                || def
+                    .as_ref()
+                    .and_then(|d| d.get("base"))
+                    .is_some_and(|b| b.trim().eq_ignore_ascii_case("Steering")))
+            .then(|| def.as_ref().and_then(|d| num(d, "power")).unwrap_or(1.0)),
             // The chassis' crush cage (F9). Its points name the chassis mesh's
             // own space, which for component 0 is bot space.
             buckle: if i == 0 {
@@ -1773,6 +1782,7 @@ mod tests {
             }),
             wheel: None,
             piston: None,
+            steer_power: None,
             buckle: Vec::new(),
             buckle_fraction: 0.0,
             rest_hull: Vec::new(),

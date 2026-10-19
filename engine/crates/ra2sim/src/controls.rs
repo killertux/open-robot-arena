@@ -74,6 +74,9 @@ pub enum Action {
     Drive(i8),
     /// `Fire`: triggers a burst motor or burst piston.
     Fire,
+    /// Adds `sign` times the control's value to a `Steering` unit's steer
+    /// command (`Left` `+1`, `Right` `-1`).
+    Steer(i8),
 }
 
 impl Action {
@@ -87,10 +90,27 @@ impl Action {
             | "On/Off Counter-clockwise"
             | "Retract" => Action::Drive(-1),
             "Fire" => Action::Fire,
-            // `Steering` (Forward/Backward/Left/Right) drives a Havok wheel
-            // constraint's steer angle; not modelled (see `docs/06`).
             _ => return None,
         })
+    }
+
+    /// The action behind a wire on a component of class `class`: the
+    /// `Steering` unit registers its own four (`FUN_004f5fe0`..`0x4f6167`):
+    /// `Forward` `-1` and `Backward` `+1` on its drive handler (`0x4f6600` ->
+    /// `0x4f6720`), `Left` `+1` and `Right` `-1` on its steer handler
+    /// (`0x4f6680` -> `0x4f6790`). (The `Hovercraft` class registers the same
+    /// names with other signs; no stock robot has one and it is not modelled.)
+    pub fn parse_for(class: &str, name: &str) -> Option<Action> {
+        if class.trim().eq_ignore_ascii_case("Steering") {
+            match name.trim() {
+                "Forward" => return Some(Action::Drive(-1)),
+                "Backward" => return Some(Action::Drive(1)),
+                "Left" => return Some(Action::Steer(1)),
+                "Right" => return Some(Action::Steer(-1)),
+                _ => {}
+            }
+        }
+        Action::parse(name)
     }
 }
 
@@ -143,7 +163,12 @@ impl Wiring {
         }
         let mut wires = Vec::new();
         for b in &bot.bindings {
-            let Some(action) = Action::parse(&b.action) else {
+            let class = usize::try_from(b.component)
+                .ok()
+                .and_then(|i| bot.components.get(i))
+                .map(|c| c.class.as_str())
+                .unwrap_or("");
+            let Some(action) = Action::parse_for(class, &b.action) else {
                 continue;
             };
             let Some(controller) = cells
@@ -299,10 +324,32 @@ impl ControlState {
     /// The speed command of `component` in `-100..=100`: the clamped sum of
     /// what its wires contribute; `None` when nothing drives it.
     pub fn command(&self, wiring: &Wiring, component: usize) -> Option<f32> {
+        self.sum(wiring, component, |a| match a {
+            Action::Drive(sign) => Some(sign),
+            _ => None,
+        })
+    }
+
+    /// A `Steering` unit's steer command in `-100..=100` (its `Left`/`Right`
+    /// wires, summed and clamped like a drive command); `None` when nothing
+    /// steers it.
+    pub fn steer_command(&self, wiring: &Wiring, component: usize) -> Option<f32> {
+        self.sum(wiring, component, |a| match a {
+            Action::Steer(sign) => Some(sign),
+            _ => None,
+        })
+    }
+
+    fn sum(
+        &self,
+        wiring: &Wiring,
+        component: usize,
+        sign_of: impl Fn(Action) -> Option<i8>,
+    ) -> Option<f32> {
         let mut sum = 0.0;
         let mut any = false;
         for w in wiring.wires.iter().filter(|w| w.component == component) {
-            let Action::Drive(sign) = w.action else {
+            let Some(sign) = sign_of(w.action) else {
                 continue;
             };
             any = true;
@@ -399,6 +446,53 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn a_steering_unit_registers_its_own_four_actions() {
+        // `0x4f5fe0..0x4f6167`: Forward -1, Backward +1, Left +1, Right -1.
+        assert_eq!(
+            Action::parse_for("Steering", "Forward"),
+            Some(Action::Drive(-1))
+        );
+        assert_eq!(
+            Action::parse_for("Steering", "Backward"),
+            Some(Action::Drive(1))
+        );
+        assert_eq!(
+            Action::parse_for("Steering", "Left"),
+            Some(Action::Steer(1))
+        );
+        assert_eq!(
+            Action::parse_for("Steering", "Right"),
+            Some(Action::Steer(-1))
+        );
+        assert_eq!(Action::parse_for("SpinMotor", "Forward"), None);
+        let w = Wiring {
+            controls: vec![Control {
+                name: "LeftRight".into(),
+                kind: Kind::Analog,
+                keys: vec![dik::A, dik::D],
+            }],
+            wires: vec![
+                Wire {
+                    component: 7,
+                    action: Action::Steer(1),
+                    controller: 0,
+                    slot: 0,
+                },
+                Wire {
+                    component: 7,
+                    action: Action::Steer(-1),
+                    controller: 0,
+                    slot: 1,
+                },
+            ],
+        };
+        let mut s = ControlState::default();
+        s.input(&w, "LeftRight", 1, 100.0);
+        assert_eq!(s.steer_command(&w, 7), Some(-100.0));
+        assert_eq!(s.command(&w, 7), None, "steering wires are not a drive");
     }
 
     #[test]

@@ -85,6 +85,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .with_duration(Some(secs));
             let mut m = Match::new(cfg)?;
+            // `FIDTRACE_HITS=<path>`: every priced hit (both directions, before
+            // the `>= 10` gate), in the shape `tools/oracle/fight_report.py`
+            // reads from the original's captures.
+            let mut hits = match std::env::var("FIDTRACE_HITS") {
+                Ok(p) => {
+                    m.duel.record_impacts = true;
+                    Some(std::fs::File::create(p)?)
+                }
+                Err(_) => None,
+            };
             let mut trace = std::fs::File::create(&a[5])?;
             let mut dmg = std::fs::File::create(&a[6])?;
             writeln!(trace, "time_elapsed\t[(player, location xyz, heading, speed, hitpoints(p,0), health fraction)]")?;
@@ -94,6 +104,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             while m.state() != MatchState::Results && step < (secs * 90.0) as usize + 2000 {
                 m.step();
                 step += 1;
+                if let Some(f) = hits.as_mut() {
+                    let t = m.clock();
+                    for i in std::mem::take(&mut m.duel.impacts) {
+                        let name = |r: usize, c: usize| {
+                            m.duel.robots[r].rig.components[c].name.replace('"', "'")
+                        };
+                        writeln!(
+                            f,
+                            "{{\"t\": {t}, \"att\": {}, \"by\": \"{}\", \"vic\": {}, \"comp\": \"{}\", \"amount\": {}, \"speed\": {}}}",
+                            i.attacker,
+                            name(i.attacker, i.by),
+                            i.target,
+                            name(i.target, i.component),
+                            i.damage,
+                            i.speed
+                        )?;
+                    }
+                }
                 if m.state() == MatchState::Fight {
                     let t = m.clock();
                     #[allow(clippy::needless_range_loop)]

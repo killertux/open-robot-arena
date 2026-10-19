@@ -147,7 +147,9 @@ records read thrust 1960 (= 2·trunc(0.7·14·100)), grip 1, resistance 0.1 for
 the Scout; 1940 at a 99 % command; and the chassis masses 163.49 kg (Scout),
 232.12 kg (ALARM). ALARM's thrust falls from 1940 to 1802 in 12 s at full
 throttle: the power factor `g` of `SpinMotor`'s `SetPowerSettings` (robot
-`+0x9c/+0xa0`, `0x45f130`) drops as its battery drains; we still take `g = 1`.
+`+0x9c/+0xa0`, `0x45f130`) drops as its battery drains. `g` is the power
+budget's electric scale (docs/30) and it scales the motor's *percentage* only
+(section 11).
 
 ## 4. How the original builds a robot's bodies (`rig::HavokParts`)
 
@@ -247,19 +249,12 @@ on the default tree).
 2. ~~Coast~~: the hubs' contacts were the corner manifold's (item 5). With
    Havok's agents (section 10) the hub contacts per step match the live
    counts and the coasts the fresh hazard-free captures.
-3. The power factor `g` (battery drain) is 1; ALARM's live thrust falls 7 % in
-   12 s.
-4. Steering wheels (`Steering` records) and the Havok wheel constraint
-   (type 5) are not modelled. `0x486860` and `0x486890` (reached only
-   indirectly) are thin wrappers that, if their wheel has a record, write
-   into it: `0x486860` copies a vector into the matching record
-   (`0x485660`; most likely the axle `+0x3c`, i.e. steering turns the
-   record's axle rather than adding thrust) and `0x486890` sets the record's
-   dword `+0x24` (`0x4856b0`); the steering unit's update that calls them
-   was not traced, so the field meanings are unconfirmed: a `Steering` unit's hubs are
-   now bodies of their own on a free hinge about the hub axle (live, `hub1` and
-   `hub2` are bodies), and their wheels get records without thrust, like an
-   `AxleMount`'s; deactivation (2 s / 2 s) is off.
+3. ~~The power factor `g`~~: the power budget's scale, on the percentage
+   only (section 11).
+4. ~~Steering wheels~~: the `Steering` unit drives and steers (section 11).
+   Still not modelled: the Havok wheel constraint's suspension (the hub is
+   our hinge with its axle turned, not a type-5 constraint), deactivation
+   (2 s / 2 s).
 5. ~~Narrowphase~~: Havok's agents (section 10). Still not reproduced: the
    MOPP's triangle order, Havok's tie-breaking in GJK (its support search
    hill-climbs from the last support vertex, `0x55b000`), the arena's fixed
@@ -700,3 +695,194 @@ the free axis uses the bodies' inertia about their centres (`k = aᵀ(I_A⁻¹ +
 I_B⁻¹)a`), then the pivot rows' impulses turn part of it back. Ours follows
 that order; whether the original settles the same was not measured.
 
+
+## 11. Steering units, the power factor and hit pricing (fx/steering)
+
+### 11a. The `Steering` unit (recovered)
+
+RTTI `.?AVSteering@@`, vtable `0x6ab2dc`. A powered steering unit is a drive
+motor *and* a steering rack:
+
+* **wires** (`0x4f5fe0..0x4f6167`): `Forward` (sign `-1`) and `Backward`
+  (`+1`) go to its drive handler (`0x4f6600` -> `0x4f6720`: the clamped sum is
+  the command `+0x2cc`); `Left` (`+1`) and `Right` (`-1`) to its steer handler
+  (`0x4f6680` -> `0x4f6790`). Sentinel wires `Forward`/`Backward` to the
+  `Forward` control and `Left`/`Right` to `LeftRight`. (`Hovercraft`,
+  vtable `0x6ab6f4`, registers the same names with other signs; no stock robot
+  has one.)
+* **drive**: its tick (`0x4f6850`) sets `+0x2d0 = ftol(f(ftol(command · g)))`
+  (`g` the electric scale `0x714a70`, `f` the health factor `0x45fa90`); the
+  thrust is `ftol(+0x2d0 · power · 0.7)` (`0x4f6700`, `power` = the
+  definition's `power`, `+0x2e0`, default 1, all three stock units 14),
+  doubled into the record like a spin motor's. It draws `|command| · dt`
+  (`0x4f6cd0`, vtable slot `+0x5c`), as a spin motor does.
+* **steer**: `0x4f6790` gives both hubs (`+0x294`, `+0x298`) the target
+  `command · π · 1/6 · 0.01` (`0x6ab2d4`, `0x6ab350`: full lock `π/6`); each
+  hub's action (`0x508920`, vtable `0x6ab958`) turns its angle `+0x68` toward
+  the target `+0x64` at 4 rad/s (`0x5089d0`, `0x6a7384`) and hands it to the
+  Havok wheel constraint (`0x52b610` -> `FUN_00553af0`), which rebuilds its
+  axle as `cos θ a₀ + sin θ (a₀ × s)` from the unsteered axle `a₀` (`+0xb8`)
+  and the steering axis `s` (`+0x98`).
+* **records**: the robot update (`0x4dc912..0x4dca24`) writes, for each of the
+  unit's wheels (`0x4f6d00` count, `0x4f6d10` wheel), the thrust (`0x486820`),
+  touching (`0x486830`), the normal (`0x486850`), the hub's current axle in
+  the chassis frame (`0x4f6d30` -> `0x508a50`, into the record's `+0x3c` by
+  `0x486860`/`0x485660`) and its angle (`0x4f6d60` -> `+0x68`, into `+0x24`
+  by `0x486890`/`0x4856b0`). `MagicAction` reads neither `+0x24` nor `+0x28`:
+  steering acts only through the record's axle, i.e. the push direction
+  `d = -(axle × n)` and the sideways impulse along the axle turn with the hubs.
+
+Live (`magic-sentinel__live__000`, the earlier drive test): the two steering
+records read thrust `-1960` at full `Forward` and `196` at 10 % (the spin
+motors `∓2520`, raw torque 18), their axle `+X` for **both** hubs (the spin
+motors' `+X`/`-X`), and at `Turn(+100)` the angle `-0.524` with the axle
+`(0.864, ±0.02, -0.503)`; the angle reaches the lock within one sample.
+
+Ours (`drive::Steer`, `Robot::drive_magic`): a steering hub's record carries
+the unit, its `power`, the steering axis (the unit's mount point `-Z`, the
+chassis' up for every stock mount) and its unsteered axle (the unit's hub
+line, model `+Z` from `hub1` to `hub2`, which is `+X` on Sentinel as live);
+every step the angle turns toward the steer command's target at 4 rad/s, the
+record's axle is rebuilt as the constraint does, and the hub's hinge axis is
+turned the same way (`PhysicsBackend::steer_hinge`, havok17; Jolt keeps the
+hub unsteered and only the record turns).
+
+### 11b. The power factor `g` (recovered, verified live)
+
+`g` is the power budget's electric scale (docs/30: `clamp(S/D, 0.25, 1)`,
+published at `0x714a70` by `0x4dc3f0`), and it enters a spin motor's thrust
+**through the percentage only**: the tick (`0x4f59f0`) calls
+`SetPercent(ftol(command · g))`, which stores `motor + 0x29c =
+ftol(f(percent))` (`0x4f5800`); the thrust (`0x4f5780`) multiplies that by the
+hinge controller's `+0xb4` (`0x4d33b0`), the raw torque `SetPowerSettings`
+(`0x4810e0`) stored from the definition, which the spin motor's tick never
+rescales. Ours multiplied the torque by `g · f` as well.
+
+The robot with an undersized battery is the Razor (Nifty 24000 / 400 for four
+spin motors: `S/D = 400 / 396` at full charge and a 99 % command, below 1 after
+0.6 s), and its live records show it (`magic-razor__live__000`, `Turn(+100)`):
+`1940, 1920, 1900, 1880, 1862` every 0.6 s, which is `2 · trunc(0.7 · 14 · p)`
+for `p = 99, 98, 97, 96, 95`. Ours now reads `1960` (a full 100 command),
+then `1940, 1920, 1900, 1880, 1862` at 0.1, 0.7, 1.3, 1.9 and 2.5 s; with the
+torque scaled too it read 1900 at the second step. The same holds for ALARM,
+MiniBerg and Roly Poly (also 24000 / 400 on four motors).
+(`duel::tests::an_undersized_battery_lowers_the_percentage_and_not_the_torque`.)
+
+### 11c. Hit pricing with the Havok bodies' own mass properties
+
+`FUN_0045a5a0` (the magnitude `M`) takes its masses from the hit record
+(`+0x2c`/`+0x30`, filled by `FUN_0045a430` from each rigid body's `+0x190`
+while the flag `0x6f2210` is set, which it is), the lever arm from the
+rigid body's centre of mass (`+0x30`) and the inverse inertia from the rigid
+body's world tensor (`+0x10c`, `0x45a7f0`). Ours rebuilt all three from the
+components as solid boxes (`combat::body_dynamics`, a Jolt-era stand-in), which
+for the hammer and the Scout's parts gave a far smaller effective mass: live
+the big hammer blows price `amount / rec0 ≈ 8` (128.6 at 17.3 m/s, 103.4 at
+12.5, 72.4 at 9.5; `fight-scout-alarm-box__live__000`), ours `≈ 3` (60.6 at
+17.5, 32.4 at 12.1). The pricing and the event gate now take the backend's
+own mass, centre of mass and inverse inertia (`PhysicsBackend::mass_properties`,
+`combat::mass_props`; Jolt keeps the rebuild): ours `≈ 9` (107.5 at 11.8).
+
+The Scout's counted hits live are the reverse pricing of ALARM's hardest
+blows (the struck Scout part prices the hammer at `0.1 · M`: 11.43 against
+91.19, 10.85 against 86.81), so they need `M ≥ 100`, i.e. ALARM blows of
+`≥ 80`; with the box inertia ours never priced one.
+
+The event gate (`FUN_0052d4f0`) was read again: each body's registration list
+holds entries `{+4 partner (0 = any), +8 interval, +0xc/+0x10 last time
+(integer seconds + fraction), +0x14 closing threshold}`; one body's entries
+are tried, then the other's, and the first due entry whose partner matches and
+whose `FUN_0052d740` closing test passes lets the point through and is reset,
+which is what `combat::EventGate` does. Which point of a step that is depends on the order of
+the step's contact points, which follows Havok's agents and the MOPP's triangle
+order (not reproduced, section 5); it stays approximate.
+
+### 11d. Validation
+
+**Sentinel, live** (new captures, Combat Arena, hazards off, Sentinel in the
+`Team0/Bot0` slot; `capture_magic_set.sh`, which also takes `TURN_THROTTLE`
+for a car-steered robot and `CAR_OFF` to clear the AI's `bCarSteering`, whose
+`Throttle` adds 10 per call to a slow car and keeps it pushing). Ours is
+`fidtrace drive-at` from the captured chassis pose:
+
+| Sentinel | original | before | after |
+|---|---:|---:|---:|
+| straight 1.98 s from spawn (`magic-sentinel__live__002`): top / t90 | 14.98 / 1.45 | 7.52 / 1.40 | 14.12 / 1.42 |
+| straight: distance / coast (m) | 19.79 / 7.88* | 9.76 / 5.39 | 18.44 / 10.56 |
+| full throttle + `Turn(+100)`, first 0.9 s (`magic-sentinel__live__001`): heading change (rad) | +1.43 | +0.02 | +1.27 |
+| same: path (m) / top speed (m/s) | 4.54 / 8.46 | 2.75 / 5.49 | 4.44 / 8.24 |
+| steering records: thrust / angle / axle at `Turn(+100)` | -1960 / -0.524 / (0.866, 0, -0.5) | 0 / - / (∓1, 0, 0) | -1960 / -0.524 / (0.866, 0, -0.5) |
+
+\* the original's coast ends against a wall 1.1 s after the stop.
+Before, the steering hubs pushed nothing (the spin motors' 2520 alone) and
+did not steer; the circle's 0.02 rad was the free hubs' drag.
+
+**Drive-at table** (section 10's, hazards off, every step):
+
+| robot | metric | original | before | after |
+|---|---|---:|---:|---:|
+| Scout | top / t90 / dist / coast / turn | 11.01 / 1.47 / 14.29 / 7.89 / 10.66 | 10.92 / 1.47 / 14.25 / 7.24 / 10.68 | unchanged |
+| ALARM | top / t90 / dist | 13.85 / 1.22 / 14.15 | 13.88 / 1.27 / 14.20 | 13.77 / 1.23 / 14.12 |
+| ALARM | coast / turn | 11.15 / 12.1 | 10.92 / 10.99 | 10.82 / 11.02 |
+| FlapJack | top / t90 / dist / coast / turn | 10.31 / 1.45 / 12.41 / 6.78 / 10.16 | 10.45 / 1.43 / 12.27 / 6.82 / 9.09 | unchanged |
+| Razor | top / t90 / dist | 17.50 / 1.52 / 23.07 | 16.51 / 1.42 / 22.40 | **16.99 / 1.35 / 22.97** |
+| Razor | coast* / turn | 5.72 / 12.2 | 7.84 / 12.18 | 6.11 / 12.27 |
+| Wide Load | top / t90 / dist / coast* / turn | 13.90 / 1.55 / 19.49 / 8.61 / 12.37 | 13.47 / 1.62 / 18.09 / 8.39 / 12.83 | unchanged |
+
+Only the two robots whose battery is undersized moved (the torque is no longer
+scaled by `g`). Traction survey: 45/45.
+
+**Fights** (Box, 120 s, shipped AIs; counted = `>= 10`; ours with
+`FIDTRACE_HITS`, which dumps every priced hit in `fight_report.py`'s terms):
+
+| fight | original | before | after |
+|---|---|---|---|
+| Scout v ALARM: ALARM counted / total / first | 63 / 2470 / 5.3 s | 49 / 1161 / 2.6 s | 69 / 1544 / 2.6 s |
+| Scout v ALARM: Scout counted / total / first | 9 / 121 / 49.4 s | 0 | 1 / 14 / 51.7 s |
+| Razor v FlapJack: Razor / FlapJack counted (total) | 3 (40) / 1 (12), first 6.0 s | 8 (265) / 0, first 33 s | 2 (39) / 0, first 27.8 s |
+
+The Razor's over-pricing went with the torque fix (its spike strip now meets
+FlapJack at other moments; with the torque fix alone, box inertia: 3 (90),
+first 27.8 s) and the inertia fix (2 (39)). Its first counted hit stays late:
+our first contact, 3.4 s in at 10.5 m/s, is FlapJack's light wedge body
+against the Razor's chassis (7.35, under the gate), where the original's first,
+6.0 s in at 6.4 m/s, is chassis against chassis (12.22 both ways). That is
+the fight's approach, not the pricing.
+
+**Sentinel v Wide Load on the Compressor** (hazards on, 120 s; live
+`fight-sentinel-wideload-compressor__live__001`, its `.speed.tsv` the
+positions):
+
+| | original | before | after |
+|---|---|---|---|
+| robots in contact | first counted hit 2.0 s in | 36.6 s | 8.0 s |
+| Wide Load counted / total / first | 60 / 1778 / 2.0 s | 48 / 2109 / 36.5 s † | 84 / 2736 / 8.0 s |
+| Sentinel counted / total / first | 2 / 23 / 28.8 s | 5 / 78 / 58.2 s † | 4 / 45 / 25.9 s |
+| path Sentinel / Wide Load (m) | 44 / 80 | 137 / 265 | 216 / 246 |
+
+† applied damage events of the old binary (no hit dump), attributed by who
+dealt damage that step. It is a fight now, as in the original. (`__live__000` is not one: the brains
+were still neutered by an earlier capture in the same game session, since
+`capture_drive.NEUTER` patches the brain classes' `Think`; a fight capture
+needs a fresh session.)
+
+**AI suite** (ten pairings, `fidtrace match`): before 10/10 deal damage, after
+9/10. The one that stopped is Octagon Scout v ALARM, and it is not the
+change's: in both trees ALARM is thrown out of the ring at 1.4 s, at 20 m/s
+from (2.7, -0.1, -2.2) by the hellraiser it drives over (`HellRaiser` at
+`(3.56, -0.15, -0.26)`, `SetPowerSettings(80, 1500)`), and lands outside at
+y 2.5. The trees are identical to 7.6 s; before, ALARM happened to slide off
+its perch at 9 s and fight, after it stays there and is immobilised at 24 s.
+The live Octagon match (`fight-scout-alarm-octagon__live__000`) has nobody
+launched (ALARM's highest point is y 1.6), ALARM landing 24 counted hits (944)
+and the Scout 4 (48) before it drops into a deathpit at 67 s. The hellraiser's
+violence is the open item: the hinge controller's load cap (`0x480510`,
+`min(75 T, 25 m (1 - |d|))`, speed `S · min(1, 2T / (m (1 + |d|)))`, the
+`TODO(load limit)` in `robot.rs`) is not modelled.
+
+**FlapJack's turn** (9.09 against 10.16, item 4 of the task): not cheap. Ours
+reaches the same 11 rad/s plateau as the original but spins up more slowly
+(4.7 rad/s at 0.5 s, 7.5 at 1.0 s; the original 6.9 and 11.2). Both the
+original's chassis (its casters) and the 27 kg wedge body touch the floor on
+about 90 % of the steps of the straight capture (`contacts-nohaz-flapjack`),
+so the extra drag is not a contact that should be missing; not resolved.

@@ -13,7 +13,7 @@ use crate::backend::{
     MotionType, PhysicsBackend, ShapeDesc, SliderDesc,
 };
 use crate::controls::{ControlState, COCK_FRACTION, FULL};
-use crate::drive::{MagicAction, WheelRecord};
+use crate::drive::{MagicAction, Steer, WheelRecord};
 use crate::energy::{Channel, Energy};
 use crate::massprops;
 use crate::rig::{JointInfo, JointUse, RobotRig, Role, WheelDrive};
@@ -499,6 +499,12 @@ impl Robot {
                 .command(&self.rig.wiring, motor)
                 .unwrap_or(0.0)
                 .abs();
+            if c.steer_power.is_some() {
+                // A `Steering` unit asks `|command| · dt` like a spin motor
+                // (`0x4f6cd0`, vtable slot `+0x5c`); steering itself is free.
+                elec += command * dt;
+                continue;
+            }
             match info.use_kind {
                 JointUse::Passive => {}
                 JointUse::Burst => {
@@ -725,17 +731,57 @@ impl Robot {
             let stats = root.wheel.clone().unwrap_or_default();
             let hub = physics.center_of_mass(parts[p].body).unwrap_or(centre);
             let host = rig.components[rig.parts[0].root].local;
+            // The record's axle is the hinge axis turned by the motor's own
+            // sense, `CLOCKWISE` (the motor step drives at `-direction`,
+            // `0x481450`): live, the Razor's right-hand wheels read
+            // `(-1, 0, 0)` where their hinge axis is `+X`
+            // (`magic-razor__live__000`), and with it a positive `Forward`
+            // drives the chassis toward its front.
+            let axle =
+                (host.inverse().transform_vector3(info.axis) * CLOCKWISE).normalize_or_zero();
+            // A `Steering` unit's hubs (`0x4dc912..0x4dca24`): their records get
+            // the unit's thrust, and their axle and angle from the hub every
+            // update. The unit steers about its own up, its mount point's `-Z`
+            // (every chassis child's mount `Z` is the chassis' down). Both
+            // hubs' axles are the unit's hub line, the model's `+Z` from `hub1`
+            // to `hub2`, not each mount point's own axis: live, Sentinel's two
+            // steering records read `+X` where its spin motors' read `+X` and
+            // `-X` (`magic-sentinel__live__000`).
+            let steer = (class == "steering").then(|| {
+                let unit = &rig.components[info.motor];
+                let mount_z = unit
+                    .attachments
+                    .get(&unit.own_mount)
+                    .map(|a| Vec3::from(a.transform[2]))
+                    .filter(|z| *z != Vec3::ZERO)
+                    .unwrap_or(Vec3::Z);
+                let up = (-unit.local.transform_vector3(mount_z)).normalize_or(Vec3::Y);
+                let line = unit.local.transform_vector3(Vec3::Z);
+                let axle = host.inverse().transform_vector3(line).normalize_or(axle);
+                let frame_a = rig
+                    .parts
+                    .get(rig.parts[p].parent.unwrap_or(0))
+                    .map(|q| rig.components[q.root].local)
+                    .unwrap_or(host);
+                Steer {
+                    unit: info.motor,
+                    power: unit.steer_power.unwrap_or(1.0),
+                    axis: host.inverse().transform_vector3(up).normalize_or(Vec3::Y),
+                    hinge_axis: frame_a
+                        .inverse()
+                        .transform_vector3(up)
+                        .normalize_or(Vec3::Y),
+                    rest_axle: axle,
+                    angle: 0.0,
+                    target: 0.0,
+                }
+            });
             wheels.push(WheelRecord {
                 part: p,
                 motor: driven.then_some(info.motor),
+                steer,
                 point: rotation.inverse() * (hub - centre),
-                // The record's axle is the hinge axis turned by the motor's
-                // own sense, `CLOCKWISE` (the motor step drives at `-direction`,
-                // `0x481450`): live, the Razor's right-hand wheels read
-                // `(-1, 0, 0)` where their hinge axis is `+X`
-                // (`magic-razor__live__000`), and with it a positive
-                // `Forward` drives the chassis toward its front.
-                axle: (host.inverse().transform_vector3(info.axis) * CLOCKWISE).normalize_or_zero(),
+                axle,
                 grip: stats.grip,
                 resistance: stats.resistance,
                 thrust: 0.0,
@@ -781,6 +827,32 @@ impl Robot {
             if !alive {
                 w.touching = false;
             }
+            if let Some(mut steer) = w.steer {
+                // The unit's tick (`0x4f6850`): `+0x2d0 = ftol(f(ftol(command ·
+                // g)))`; its thrust `ftol(+0x2d0 · power · 0.7)` (`0x4f6700`),
+                // doubled into the record like a spin motor's. The hub turns
+                // toward the steer command's angle (`0x508920` -> `0x5089d0`)
+                // and the record takes its axle (`0x486860`) and angle
+                // (`0x486890`).
+                let command = self
+                    .control
+                    .command(&self.rig.wiring, steer.unit)
+                    .unwrap_or(0.0);
+                let percent = self.scaled_percent(steer.unit, command, elec_scale);
+                w.thrust = MagicAction::thrust(steer.power, percent);
+                steer.target = Steer::target_for(
+                    self.control
+                        .steer_command(&self.rig.wiring, steer.unit)
+                        .unwrap_or(0.0),
+                );
+                steer.turn(dt);
+                w.axle = steer.axle();
+                if let Some(joint) = self.parts[w.part].joint {
+                    physics.steer_hinge(joint, steer.hinge_axis, steer.angle);
+                }
+                w.steer = Some(steer);
+                continue;
+            }
             let Some(motor) = w.motor else {
                 w.thrust = 0.0;
                 continue;
@@ -791,9 +863,14 @@ impl Robot {
             let command = self.control.command(&self.rig.wiring, motor).unwrap_or(0.0);
             // The power budget's scale (`0x4dc3f0`) is the global factor `g`.
             let power = self.motor_factor(motor) * elec_scale;
-            // `motor + 0x29c = ftol(f(percent))`, the torque `f(torque)`.
-            let percent = (command * power).trunc() as i32;
-            let torque = info.max_torque / TORQUE_UNIT * power;
+            // `SetPercent(ftol(command · g))` (`0x4f59f0`) stores
+            // `motor + 0x29c = ftol(f(percent))` (`0x4f5800`); the thrust takes
+            // the hinge controller's *raw* torque (`+0xb4`, `0x4d33b0`), which
+            // neither `g` nor `f` touches: live, the Razor's records fall
+            // 1940, 1920, 1900, 1880, 1862 (= 2 · trunc(0.7 · 14 · {99..95}))
+            // as its undersized battery's scale drops (`magic-razor__live__000`).
+            let percent = self.scaled_percent(motor, command, elec_scale);
+            let torque = info.max_torque / TORQUE_UNIT;
             w.thrust = MagicAction::thrust(torque, percent);
             if let Some(joint) = self.parts[w.part].joint {
                 if w.touching || percent == 0 {
@@ -1082,8 +1159,9 @@ impl Robot {
     /// motor (a servo holds). A component nothing is wired to is never driven.
     /// A burst device waits cocked until its `Fire` wire is pressed.
     ///
-    /// There is no steering model beyond the wiring: a robot turns because the
-    /// `LeftRight` wires drive its two sides differently. `DriveInput::throttle`
+    /// A skid-steered robot turns because the `LeftRight` wires drive its two
+    /// sides differently; a `Steering` unit turns its hubs (see
+    /// [`crate::drive::Steer`]). `DriveInput::throttle`
     /// and `steer` are the `Forward`/`LeftRight` keys of a stand-in driver.
     pub fn drive(
         &mut self,
@@ -1188,6 +1266,14 @@ impl Robot {
         self.push_wheels(physics, &samples);
         self.drive_magic(physics, elec_scale);
         self.control.end_step();
+    }
+
+    /// A motor's integer percentage as the original stores it:
+    /// `ftol(f(ftol(command · g)))`, `g` the power budget's scale and `f` the
+    /// component's health factor ([`Robot::motor_factor`]).
+    fn scaled_percent(&self, motor: usize, command: f32, scale: f32) -> i32 {
+        let asked = (command * scale).trunc();
+        (asked * self.motor_factor(motor)).trunc() as i32
     }
 
     /// How much of its rated speed and torque a motor still delivers.

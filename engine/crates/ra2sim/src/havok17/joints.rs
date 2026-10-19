@@ -75,6 +75,10 @@ pub struct Joint {
     /// limits and `limited` flag the joint had before it was locked; the
     /// joint's own limits are then both its position at the lock.
     pub saved_limits: Option<([f32; 2], bool)>,
+    /// A steered hinge's free axis and reference in A's frame as built
+    /// (Havok's wheel constraint keeps the unsteered axle, `+0xb8`, and
+    /// rebuilds the steered one from it, `FUN_00553af0`).
+    pub steer_rest: Option<(Vec3, Vec3)>,
 }
 
 /// A row of a block: the Jacobian against each body's linear and angular
@@ -478,6 +482,7 @@ mod tests {
             target: 0.0,
             friction: 0.0,
             saved_limits: None,
+            steer_rest: None,
         }
     }
 
