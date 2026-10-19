@@ -296,6 +296,35 @@ impl JoltBackend {
         build().map_err(|e| BackendError::Shape(format!("{e:?}")))
     }
 
+    fn ray_filtered(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+        exclude: Option<BodyId>,
+    ) -> Option<RayHit> {
+        let dir = direction.normalize_or_zero() * max_distance;
+        if dir == Vec3::ZERO {
+            return None;
+        }
+        let ray = RayCast::new(Self::rv(origin), Self::v(dir));
+        let filter = match exclude {
+            Some(id) => QueryFilter::new().exclude_body(id),
+            None => QueryFilter::default(),
+        };
+        let hit = self.world.cast_ray(&ray, &filter).ok()??;
+        Some(RayHit {
+            body: self
+                .lookup
+                .get(&hit.body.to_raw())
+                .copied()
+                .unwrap_or(u32::MAX),
+            distance: hit.distance,
+            point: origin + direction.normalize_or_zero() * hit.distance,
+            normal: Self::un_v(hit.normal),
+        })
+    }
+
     fn id(&self, handle: BodyHandle) -> Option<BodyId> {
         self.ids.get(handle as usize).copied().flatten()
     }
@@ -559,22 +588,17 @@ impl PhysicsBackend for JoltBackend {
     }
 
     fn ray_cast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<RayHit> {
-        let dir = direction.normalize_or_zero() * max_distance;
-        if dir == Vec3::ZERO {
-            return None;
-        }
-        let ray = RayCast::new(Self::rv(origin), Self::v(dir));
-        let hit = self.world.cast_ray(&ray, &QueryFilter::default()).ok()??;
-        Some(RayHit {
-            body: self
-                .lookup
-                .get(&hit.body.to_raw())
-                .copied()
-                .unwrap_or(u32::MAX),
-            distance: hit.distance,
-            point: origin + direction.normalize_or_zero() * hit.distance,
-            normal: Self::un_v(hit.normal),
-        })
+        self.ray_filtered(origin, direction, max_distance, None)
+    }
+
+    fn ray_cast_excluding(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+        exclude: BodyHandle,
+    ) -> Option<RayHit> {
+        self.ray_filtered(origin, direction, max_distance, self.id(exclude))
     }
 
     fn create_hinge(&mut self, desc: &HingeDesc) -> Result<JointHandle, BackendError> {

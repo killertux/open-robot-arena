@@ -175,6 +175,42 @@ fn motor_passes() -> f32 {
         .unwrap_or(1.0)
 }
 
+/// The first hit of a ray that is not one of `own`'s bodies, never seeing
+/// `wheel` at all: a hit on another of the robot's own bodies is passed through
+/// and the ray goes on from just beyond it.
+///
+/// The interim wheel sampler casts up from below the floor. With the robots
+/// assembled as the original builds them, a wheel resting on the floor can
+/// reach a centimetre below its surface (Jolt lets a resting body sink by its
+/// penetration slop); the ray then met the wheel first — and a ray that starts
+/// inside a convex shape hits it at once, so it could not get past — which
+/// read "no ground" for a wheel standing on the floor: seven stock robots
+/// (Sentinel, Wide Load, ...) did not move on Jolt.
+fn ray_past_own(
+    physics: &dyn PhysicsBackend,
+    origin: Vec3,
+    direction: Vec3,
+    reach: f32,
+    own: &[BodyHandle],
+    wheel: BodyHandle,
+) -> Option<crate::backend::RayHit> {
+    let mut from = origin;
+    let mut left = reach;
+    for _ in 0..8 {
+        let hit = physics.ray_cast_excluding(from, direction, left, wheel)?;
+        if !own.contains(&hit.body) {
+            return Some(hit);
+        }
+        let step = hit.distance + 1e-3;
+        if step >= left {
+            return None;
+        }
+        from += direction * step;
+        left -= step;
+    }
+    None
+}
+
 /// `RA2_LEGACY_WHEELS=1` drives wheels with a plain velocity motor again (for
 /// comparison runs).
 fn legacy_wheels() -> bool {
@@ -1173,9 +1209,14 @@ impl Robot {
         // ground.
         let own: Vec<BodyHandle> = self.parts.iter().map(|q| q.body).collect();
         let reach = wheel.radius + hull_skin() + WHEEL_REACH;
-        let found = physics
-            .ray_cast(centre - Vec3::Y * reach, Vec3::Y, reach)
-            .filter(|hit| !own.contains(&hit.body));
+        let found = ray_past_own(
+            physics,
+            centre - Vec3::Y * reach,
+            Vec3::Y,
+            reach,
+            &own,
+            self.parts[p].body,
+        );
         match found {
             Some(hit) => {
                 self.wheel_air[p] = 0.0;

@@ -338,3 +338,39 @@ havok17 features unrelated to driving (parked burst lock, piston creep, arena
 prop pin/unpin, script-driven arena hinges) fail with it; see docs/29 section 5.
 The interim Jolt wheels lose six survey robots now that the wheels sit where
 the original puts them (44/45 before).
+
+## After havok-default (fx/havok-default)
+
+`havok17` is the default backend; `RA2_PHYSICS=jolt` is the fallback.
+What it took (`docs/29-havok17-backend.md` section 9): the game's `Lock` as
+the original does it (both limits at the current angle, `FUN_00480e20`; the
+prismatic `FUN_004b50c0`; self-locking while the command is zero,
+`FUN_00481450`/`FUN_004b5240`), the arenas' disabled collision pairs
+(`GMID_HAVOK_DIS_COLLISION_PAIRS`, which free the Parking Lot's trap doors),
+and the hazard auto-lock judged by the sense the joint is driven in. On Jolt,
+the interim wheel sampler no longer mistakes the robot's own wheel for "no
+ground" (seven robots stood still).
+
+Drive tests from the original's start poses (`fidtrace drive-at`; sim time):
+
+| metric | original | havok17 (default) | Jolt + interim |
+|---|---:|---:|---:|
+| Scout top speed (m/s) | 11.12 | 11.31 | 12.92 |
+| Scout straight distance / coast (m) | 15.42 / 8.05 | 15.86 / 5.85 | 17.97 / 8.12 |
+| Scout turn in place (rad/s) | 10.66 | 10.71 | 10.27 |
+| ALARM top speed (1.65 s, m/s) | 13.38 | 12.57 | 9.81 |
+| ALARM distance / coast (m) | 14.11 / 11.91 | 13.91 / 7.44 | 11.41 / 4.13 |
+| ALARM turn in place (rad/s) | 12.1 | 11.04 | 5.33 |
+| FlapJack top / turn | 9.92 / 10.16 | 10.66 / 9.42 | 11.69 / 5.43 |
+| Razor top / turn | 16.07 / 12.2 | 16.52 / 12.25 | 12.03 / 8.48 |
+| Wide Load top / turn | 13.3 / 12.37 | 13.39 / 13.25 | 5.46 / 3.55 |
+| rest, bot origin y (Scout / ALARM) | -2.086 / -2.074 | -2.086 / -2.075 | -2.009 / -1.983 |
+| traction survey (45 bots) | - | 45/45 | 45/45 |
+
+Open: the coast (hubs skid; docs/29 section 6 item 2 has the measurement
+pointing at the corner manifold), the battery power factor, steering
+records, and the AI: in nine AI-vs-AI matches on five arenas the robots
+mostly do not engage — every match ends early on an immobilised robot and
+only one (Octagon, Razor vs FlapJack) scores (two hits >= 10, 35 points). Jolt
+does no better on the same pairings, so this is the AI bring-up gap recorded
+above, not the backend.

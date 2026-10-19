@@ -92,3 +92,67 @@ fn a_shoved_cube_slides_to_a_stop() {
         "slid {travel} vs {ideal}"
     );
 }
+
+/// The game's `Lock` (`FUN_00480e20`): both hinge limits at the current angle.
+/// A horizontal arm hinged to a fixed body sags under gravity while free, and
+/// holds where it was locked; unlocked, it swings again.
+#[test]
+fn a_locked_hinge_holds_its_angle_and_releases() {
+    let mut physics = Havok17Backend::new().unwrap();
+    let base = physics
+        .create_body(&BodyDesc::new(
+            MotionType::Static,
+            ShapeDesc::Box {
+                half_extents: Vec3::splat(0.1),
+            },
+        ))
+        .unwrap();
+    let arm = physics
+        .create_body(
+            &BodyDesc::new(
+                MotionType::Dynamic,
+                ShapeDesc::Box {
+                    half_extents: Vec3::new(0.5, 0.05, 0.05),
+                },
+            )
+            .at(Vec3::new(0.8, 0.0, 0.0))
+            .with_mass(10.0),
+        )
+        .unwrap();
+    let mut desc = HingeDesc::new(base, arm, Vec3::ZERO, Vec3::Z);
+    // The arm starts 0.3 m out, clear of the base by more than the tolerance.
+    desc.anchor_b = Vec3::new(-0.8, 0.0, 0.0);
+    let hinge = physics.create_hinge(&desc).unwrap();
+    for _ in 0..6 {
+        physics.step(1.0 / 60.0);
+    }
+    // Locked while it swings: it stops within a step or two of where the lock
+    // caught it, then holds.
+    let at_lock = physics.hinge_angle(hinge);
+    assert!(physics.lock_joint(hinge, true));
+    for _ in 0..60 {
+        physics.step(1.0 / 60.0);
+    }
+    let held = physics.hinge_angle(hinge);
+    assert!(
+        (held - at_lock).abs() < 0.05,
+        "the lock let it fall: {at_lock} -> {held}"
+    );
+    for _ in 0..120 {
+        physics.step(1.0 / 60.0);
+    }
+    let after = physics.hinge_angle(hinge);
+    assert!(
+        (after - held).abs() < 0.005,
+        "a locked arm moved: {held} -> {after}"
+    );
+    physics.lock_joint(hinge, false);
+    for _ in 0..30 {
+        physics.step(1.0 / 60.0);
+    }
+    let free = physics.hinge_angle(hinge);
+    assert!(
+        (free - held).abs() > 0.3,
+        "the released arm did not swing: {held} -> {free}"
+    );
+}

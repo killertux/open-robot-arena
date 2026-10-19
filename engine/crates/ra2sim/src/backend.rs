@@ -464,6 +464,18 @@ pub trait PhysicsBackend {
     }
     fn ray_cast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<RayHit>;
 
+    /// [`Self::ray_cast`] that does not see `exclude`. The default ignores the
+    /// exclusion.
+    fn ray_cast_excluding(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+        _exclude: BodyHandle,
+    ) -> Option<RayHit> {
+        self.ray_cast(origin, direction, max_distance)
+    }
+
     /// Create a revolute joint. Backends without joints may reject this.
     fn create_hinge(&mut self, _desc: &HingeDesc) -> Result<JointHandle, BackendError> {
         Err(BackendError::Body(

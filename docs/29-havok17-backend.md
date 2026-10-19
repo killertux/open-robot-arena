@@ -8,13 +8,11 @@ measurements of the original). Jolt is kept only as a geometry engine: it holds
 every body's shape at its pose and answers closest-point queries and ray casts;
 Jolt's solver never runs in this backend.
 
-Selection: `RA2_PHYSICS=havok17` (default `jolt`). The game's drive model
+Selection: `havok17` is the default (`backend::DEFAULT_BACKEND`);
+`RA2_PHYSICS=jolt` selects the Jolt fallback. The game's drive model
 (section 3) runs with `havok17` by default; `RA2_DRIVE=magic|interim`
-overrides it for either backend. With the robot assembly fixed (section 8)
-havok17 is the closest to the original on every robot measured, but it is not
-the default yet: four workspace tests need backend features it lacks
-(section 5). `RA2_H17_DEBUG=<body>` prints one body's state and
-contacts every step.
+overrides it for either backend (Jolt defaults to the interim wheels).
+`RA2_H17_DEBUG=<body>` prints one body's state and contacts every step.
 
 ## 1. The speed puzzle (resolved)
 
@@ -238,25 +236,8 @@ MagicAction beats the interim wheels on ALARM, FlapJack, Razor and Wide Load
 and on the survey, but coasts far too short (Wide Load 1.2 m, FlapJack 1.7 m)
 and is no clear win.
 
-**Decision: Jolt + interim stays the default for now**, because switching to
-havok17 (tried: `DEFAULT_BACKEND = "havok17"`, full workspace test run) fails
-four tests that exercise features havok17 does not implement yet, none of
-them drive or assembly:
-
-* `wiring::a_burst_motor_fires_on_its_trigger_and_cocks_again`: a parked burst
-  arm folds under the robot's weight (0.4 rad/s). Ours parks it with joint
-  friction (the motor's torque); the original locks it by setting both hinge
-  limits to the current angle (`FUN_00480e20(1)` → `FUN_00480880(θ, θ)`), which
-  havok17 should do.
-* `wiring::a_burst_piston_extends_when_its_key_is_pressed`: the parked rod
-  creeps 7-11 cm (already so before the assembly change).
-* `duel::the_arena_can_hide_a_body_and_pin_one`: an unpinned arena prop falls
-  8 cm in 0.5 s instead of free-falling.
-* `duel::the_models_own_hinges_are_driven_by_the_script`: the compressor's
-  smash arms do not move under their script.
-
-Once those pass under havok17, it should become the default
-(`backend::DEFAULT_BACKEND`).
+**havok17 is now the default** (section 9 has what it took and the numbers
+on the default tree).
 
 ## 6. What is missing
 
@@ -272,11 +253,31 @@ Once those pass under havok17, it should become the default
    Load, which drags its axle-mount skids, coasts 3.0 instead of 1.8). Turning
    the wheel hinges' parked friction (ours, 40 × `resistance`) off changes the
    Scout's coast by 0.1 m only, so the hinge is not it; the hub-floor contact
-   (our corner manifold, item 5) is the suspect.
+   (our corner manifold, item 5) is the suspect. Measured on the default tree
+   (section 9): during the Scout's coast the hub's floor contacts carry the
+   weight (normal impulses about 1300 N per hub) and slide at the cone's edge
+   (`|J_t| / J_n` = 0.28-0.30 = µ), yet their torque about the axle is small
+   and changes sign from one step to the next, and the hub spins *down*
+   (33 -> 20 rad/s in one step at one point). The contacts are the hub's
+   polygon corners up to 0.165 m ahead of or behind the axle and up to the
+   0.1 m tolerance above the floor: the leading corners of a spinning hub move
+   down, count as approaching, and get normal impulses whose lever arm about
+   the axle opposes the spin. Havok's convex/triangle agent reports one closest
+   point per triangle instead. Keeping only corners within 3 mm of the closest
+   distance (an experiment, not committed) raised the Scout's coast from 5.85
+   to 6.46 m and ALARM's from 7.4 to 8.1 m, but cut Razor's from 5.3 to 4.2 m,
+   so it is not the whole story; the fix is the faithful narrowphase
+   (item 5).
 3. The power factor `g` (battery drain) is 1; ALARM's live thrust falls 7 % in
    12 s.
-4. Steering wheels (`Steering` records, `0x486860`/`0x486890`) and the Havok
-   wheel constraint (type 5) are not modelled: a `Steering` unit's hubs are
+4. Steering wheels (`Steering` records) and the Havok wheel constraint
+   (type 5) are not modelled. `0x486860` and `0x486890` (reached only
+   indirectly) are thin wrappers that, if their wheel has a record, write
+   into it: `0x486860` copies a vector into the matching record
+   (`0x485660`; most likely the axle `+0x3c`, i.e. steering turns the
+   record's axle rather than adding thrust) and `0x486890` sets the record's
+   dword `+0x24` (`0x4856b0`); the steering unit's update that calls them
+   was not traced, so the field meanings are unconfirmed: a `Steering` unit's hubs are
    now bodies of their own on a free hinge about the hub axle (live, `hub1` and
    `hub2` are bodies), and their wheels get records without thrust, like an
    `AxleMount`'s; deactivation (2 s / 2 s) is off.
@@ -412,3 +413,133 @@ first step); in plain positions 0.24 / 0.81, 0.03 / 0.47, 0.02 / 0.28.
 
 `cargo test -p ra2sim --test assembly` pins all 310 meshes to 1 cm
 (worst 8 mm, a burst rotor's one-step sag).
+
+## 9. havok17 as the default (fx/havok-default)
+
+With the default switched, four workspace tests failed; each was a game rule
+the backend lacked, recovered and implemented as below.
+
+**`Lock` (`PhysicsBackend::lock_joint`).** The hinge controller's `Lock(1)`
+(`FUN_00480e20`) reads the current angle (`FUN_00481190`), sets *both* limits
+to it (`FUN_00480880(θ, θ)`) and turns the motor off (`atom + 0x91 = 0`);
+`Lock(0)` restores the stored limits (`+0x68/+0x6c`). The prismatic
+controller's (`FUN_004b50c0`) sets both travel limits to the current offset
+clamped to the travel. The controllers lock themselves in their update: the
+hinge one (`FUN_00481450`) while the command (`+0x7c`) is zero if `+0x64`,
+and on arriving within 0.05 of the end it is driven toward if `+0x65` — both
+default on (`0x480234`/`0x480237`) and turned off only by `SpinMotor`
+(`0x4f5571`/`0x4f557e`) — the prismatic one (`FUN_004b5240`) likewise with
+`+0x7d` (on from construction, `0x4b47b0` ends with `Lock(1)`; a burst
+piston's fire clears it, `0x448750`). Firing calls `Lock(0)` first (burst
+motor `0x446810`, piston `0x448750`). So a cocked burst motor or piston is
+held by its limits, not by friction: ours locks it while cocked
+(`Robot::drive_burst`), and a hazard joint while it is held
+(`Duel::drive_joints`). havok17 implements the lock as limits `[θ, θ]` (a
+locked hinge measures its miss the short way round); Jolt keeps the friction
+park (`lock_joint` returns `false`). Fixes
+`a_burst_motor_fires_on_its_trigger_and_cocks_again` and
+`a_burst_piston_extends_when_its_key_is_pressed`.
+
+**Disabled collision pairs.** An arena `.gmf`'s rigid-body collection carries
+`GMID_HAVOK_DIS_COLLISION_PAIRS` (`ra2fmt` read and discarded them): pairs of
+bodies Havok never collides. They are now parsed (`SceneObject::disabled_pairs`,
+`HavokArena::disabled_pairs`) and applied to havok17
+(`PhysicsBackend::disable_collision`): between two movable bodies by name, and
+between a movable body and the merged static collider when the file disables
+it against *every* colliding fixed body. The Parking Lot's trap doors are
+disabled against `main_collision`, the scaffolds and the barrels, and sit in
+their frame with 5-16 mm to spare: without the pairs a door is wedged and
+cannot open. Jolt ignores the pairs.
+
+**`the_arena_can_hide_a_body_and_pin_one`'s premise.** The cinder block it
+pins and unpins spawns resting on `trapdoor1`, which `Hazards.TrapDoor.__init__`
+locks (`hinge.Lock(True)`). Under a faithful lock an unpinned block on a shut
+door stays put; it fell before only because Jolt's friction park let the door
+sag to -0.39 rad. The parking lot script activates the blocks from
+`TrapDoor.Trigger()`, which unlocks the hinge, sets direction 100 and applies
+a torque of 300; the test now does the same before unpinning, and the block
+falls with the door (both backends).
+
+**Hazard auto-lock arrival.** `FUN_00481450` checks the end for a positive
+command and the start for a negative one. Our test used the sign of
+`SetDirection` alone; the Compressor's `Smasher` gives its two arms opposite
+speeds (`SetPowerSettings(12, ..)` / `(-12, ..)`) with the same direction, so
+the arm driven toward its upper stop was taken as already home at the lower
+one and locked. The sense is now that of the velocity the joint is driven at
+(speed times direction). Fixes `the_models_own_hinges_are_driven_by_the_script`.
+Not reproduced, and unverified: the original's velocity is
+`trunc(-0.01 · percent · speed)` (`0x4814ca..`, `0x6a69cc` = 0.01) and is
+negated when any component of a hinge atom vector (`+0x60..+0x68`, probably
+the axis) is below -0.5 (`0x6a7e88`) and again when start > end
+(`+0x70 > +0x74`). Applying the axis rule would reverse one of the Octagon's
+two mirrored hammers and the Half arena's hammer relative to now, and without
+a live check of which way they swing it is left out.
+
+**Jolt fallback.** Seven robots did not move on Jolt + interim after the
+assembly fix (Sentinel, Raptor, Civil Disobedience, Backyard Ripper,
+BOT-204, Eye Poker, Dementia). Not the convex radius (traced on Sentinel;
+the fix brings all seven back): the interim sampler
+casts a ray up from below the floor to find ground, and with the wheels where
+the original puts them a resting wheel reaches about a centimetre below the
+floor's surface (Sentinel's to -2.278 on a floor at -2.267), so the ray met
+the robot's own wheel first and read "no ground". The ray now skips the wheel
+(`ray_cast_excluding`) and passes through the robot's other bodies. Jolt +
+interim: 45/45 (38/45), and `a_scripted_drive_moves_robot_zero_and_reaches_the_results`
+passes on Jolt again.
+
+**Validation on the default tree** (same drive tests as section 5; Jolt is
+`RA2_PHYSICS=jolt`, interim wheels):
+
+| robot / metric | original | havok17 (default) | before (section 5) | Jolt + interim |
+|---|---:|---:|---:|---:|
+| Scout top / t90 | 11.12 / 1.58 | 11.31 / 1.7 | 11.11 / 1.6 | 12.92 / 1.6 |
+| Scout distance / coast (m) | 15.42 / 8.05 | 15.86 / 5.85 | 15.72 / 5.83 | 17.97 / 8.12 |
+| Scout turn (rad/s) | 10.66 | 10.71 | 10.59 | 10.27 |
+| Scout 1.35 s: top / distance / coast | 9.32 / 7.83 / 6.72 | 9.34 / 7.51 / 4.89 | 9.19 / 7.47 / 5.05 | 10.52 / 8.45 / 7.78 |
+| Scout rest (bot origin y) | -2.086 | -2.086 | -2.100 | -2.009 |
+| ALARM top (1.65 s) | 13.38 | 12.57 | 14.22 | 9.81 |
+| ALARM distance / coast | 14.11 / 11.91 | 13.91 / 7.44 | 14.4 / 9.05 | 11.41 / 4.13 |
+| ALARM turn | 12.1 | 11.04 | 10.57 | 5.33 |
+| ALARM rest | -2.074 | -2.075 | -2.075 | -1.983 |
+| FlapJack top / t90 | 9.92 / 1.37 | 10.66 / 1.4 | 9.95 / 1.4 | 11.69 / 1.5 |
+| FlapJack distance / coast | 12.34 / 6.51 | 12.14 / 6.03 | 11.44 / 5.18 | 13.62 / 7.34 |
+| FlapJack turn | 10.16 | 9.42 | 9.56 | 5.43 |
+| Razor top / t90 | 16.07 / 1.38 | 16.52 / 1.3 | 16.52 / 1.3 | 12.03 / 1.2 |
+| Razor distance / coast | 20.56 / 7.82 | 21.3 / 5.31 | 21.3 / 5.31 | 17.2 / 5.18 |
+| Razor turn | 12.2 | 12.25 | 12.25 | 8.48 |
+| Wide Load top / t90 | 13.3 / 1.52 | 13.39 / 1.6 | 13.44 / 1.6 | 5.46 / 1.2 |
+| Wide Load distance / coast | 18.09 / 1.79 | 17.19 / 3.29 | 17.28 / 3.01 | 8.35 / 2.22 |
+| Wide Load turn | 12.37 | 13.25 | 11.99 | 3.55 |
+| traction survey | - | 45/45 | 45/45 | 45/45 (38/45) |
+
+The robots with a burst device changed (Scout's fork, ALARM's piston,
+FlapJack's wedge, Wide Load's piston): their parked weapon is now held rigid
+by the lock instead of flexing on friction. Razor has none and did not
+change. The Scout's and ALARM's rest heights now match the original's to
+1 mm. Better: Scout and ALARM rest, ALARM top speed and turn, FlapJack
+distance and coast. Worse: Scout top (+0.2), ALARM coast (-1.6), FlapJack top
+(+0.7), Wide Load turn (+0.9). havok17 is still the closest of the backends on
+every robot except the coast.
+
+(The Scout and ALARM originals are the numbers measured earlier; their raw
+captures — `drive-scout-box__live__000`, `magic-scout__live__003`,
+`magic-alarm__live__000` — were lost with `local/` on 2026-10-19, so only the
+start poses kept in the validation scripts were reused. FlapJack, Razor and
+Wide Load are against `magic-<bot>__live__000`.)
+
+**AI-vs-AI matches** (`fidtrace match`, 120 s limit, shipped AI): the robots
+do not fight. On the default backend: box Scout-ALARM 59 s (min distance
+1.45 m, pushing, no damage), box Razor-FlapJack 40 s, box Grog-Boxer 51 s, box
+Tornado-Ripblade 21 s (both stand still after 2 s), Octagon Razor-FlapJack
+47 s (two hits >= 10, 37 damage to Razor, FlapJack 35 points), Octagon
+Scout-ALARM 25 s, Compressor Sentinel-Wide Load 25 s (neither leaves its
+start), Hilltop Grog-Boxer 21 s, Parking Lot Tornado-BEAR 26 s. Every one
+ends early on `LastRobot` (a robot immobilised, 20 s inside a sqrt(2) m
+sphere) with 0 points except the one Octagon match. Jolt is no better on the
+same pairings (box Scout-ALARM 39 s, Compressor 68 s, Hilltop 41 s, box
+Tornado-Ripblade 21 s, box Razor-FlapJack 75 s, box Grog-Boxer 21 s, Octagon
+Razor-FlapJack 23 s; all 0 points). This is the AI bring-up gap docs/26
+already records (the original's robots fight; ours barely do), not a backend
+regression. That the robots standing still are not being driven by their AI
+is an inference (the same robots drive under direct input in the traction
+survey); the AI's commands were not traced.

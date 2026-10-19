@@ -871,12 +871,31 @@ impl PhysicsBackend for Havok17Backend {
     }
 
     fn ray_cast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<RayHit> {
+        self.ray_cast_excluding(origin, direction, max_distance, u32::MAX)
+    }
+
+    fn ray_cast_excluding(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+        exclude: BodyHandle,
+    ) -> Option<RayHit> {
         let dir = direction.normalize_or_zero() * max_distance;
         if dir == Vec3::ZERO {
             return None;
         }
         let ray = RayCast::new(rv(origin), jv(dir));
-        let hit = self.world.cast_ray(&ray, &QueryFilter::default()).ok()??;
+        let skip = self
+            .geometry
+            .get(exclude as usize)
+            .and_then(|g| g.as_ref())
+            .map(|g| g.id);
+        let filter = match skip {
+            Some(id) => QueryFilter::new().exclude_body(id),
+            None => QueryFilter::default(),
+        };
+        let hit = self.world.cast_ray(&ray, &filter).ok()??;
         Some(RayHit {
             body: self
                 .lookup
