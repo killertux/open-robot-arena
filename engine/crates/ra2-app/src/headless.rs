@@ -295,7 +295,14 @@ mod tests {
             .iter()
             .filter(|entry| entry.kind == ra2_audio::PlayKind::Sound2d)
             .count();
-        assert_eq!(clicks, 4, "one click per activation, not per mouse-down");
+        // The push buttons click (`Team HQ`, `continue`, `workshop`); the robots
+        // tab is a radio-group member and does not (live: the exhibition and
+        // HQ tabs are silent, `ui-click-survey`).
+        let hits: Vec<_> = steps.iter().map(|s| s.hit.clone()).collect();
+        assert_eq!(
+            clicks, 3,
+            "one click per push button, none for the tab: {hits:?}"
+        );
         println!("{}", audio.report(true));
     }
 

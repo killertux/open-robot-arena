@@ -348,7 +348,10 @@ impl Session {
         // turn them off for the deterministic presentation run as well. The
         // environment is read while the world is built, so this must come
         // before `Match::new`.
-        std::env::set_var("RA2_HAZARDS", "0");
+        // `RA2_MATCH_HAZARDS=1` keeps them on, for the audio comparisons against
+        // the live exhibition captures (hazards enabled: the intro names them).
+        let hazards = std::env::var("RA2_MATCH_HAZARDS").is_ok_and(|v| v == "1");
+        std::env::set_var("RA2_HAZARDS", if hazards { "1" } else { "0" });
         let matched = Match::new(options.match_config()).map_err(|e| e.to_string())?;
         let mut session = Session::with_match(&options.game, matched)?;
         session.set_layout(options.size);
@@ -1512,6 +1515,146 @@ mod tests {
         assert_eq!(*position, [1.0, 2.0, 3.0]);
         assert!((-760..=-740).contains(volume), "{volume}");
         assert!(session.matched.duel.impacts.is_empty(), "consumed");
+    }
+
+    /// Steps a session by 0.05 s until `until` says stop, collecting every cue
+    /// with the elapsed time at the step that made it (the match clock stands
+    /// still through the intro).
+    fn run_for_cues(
+        session: &mut Session,
+        max_seconds: f32,
+        mut until: impl FnMut(&Session, &[crate::match_sounds::SoundCue]) -> bool,
+    ) -> Vec<(f32, crate::match_sounds::SoundCue)> {
+        let mut all = Vec::new();
+        let mut clock = 0.0f32;
+        for _ in 0..(max_seconds / 0.05) as usize {
+            session.advance(0.05);
+            clock += 0.05;
+            let cues = session.take_cues();
+            let stop = until(session, &cues);
+            all.extend(cues.into_iter().map(|c| (clock, c)));
+            if stop {
+                break;
+            }
+        }
+        all
+    }
+
+    /// The countdown window plays one of six `Begin_*` lines half a second
+    /// after the bell (live: bell created at 30.52 s, line played at 31.04 s
+    /// and at 30.85 s in the two full-match captures, `docs/35`).
+    #[test]
+    fn the_bell_is_followed_half_a_second_later_by_one_begin_line() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options =
+            Options::new(&game, None, Vec::new(), Some(12.0), None, None, [640, 502]).unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        session.skip_intro();
+        let mut fight_for = 0.0f32;
+        let cues = run_for_cues(&mut session, 12.0, |s, _| {
+            if s.matched.state() == MatchState::Fight {
+                fight_for += 0.05;
+            }
+            fight_for > 1.5
+        });
+        let bell = cues
+            .iter()
+            .find(|(_, c)| matches!(c, crate::match_sounds::SoundCue::Beep { go: true }))
+            .map(|(t, _)| *t)
+            .expect("the bell");
+        let lines: Vec<_> = cues
+            .iter()
+            .filter_map(|(t, c)| match c {
+                crate::match_sounds::SoundCue::Announce { path } => Some((*t, *path)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let (at, path) = lines[0];
+        assert!(
+            crate::match_sounds::BEGIN_LINES.contains(&path),
+            "{path} is not one of the six"
+        );
+        assert!(
+            (0.4..=0.65).contains(&(at - bell)),
+            "{} s after the bell",
+            at - bell
+        );
+        // Every one of them is a shipped file.
+        for line in crate::match_sounds::BEGIN_LINES {
+            assert!(game.join(line).is_file(), "{line}");
+        }
+    }
+
+    /// The crowd object is built with the match and ticks through the arena
+    /// intro: excitement 55 falls a point a second, so the first mood change
+    /// (`normal_to_somewhat` at 44) comes about 11 s in, long before the bell
+    /// (live: `crowd/*.wav` created at 4.95 s, the transition at 16.07 s).
+    #[test]
+    fn the_crowd_ticks_through_the_intro() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options =
+            Options::new(&game, None, Vec::new(), Some(40.0), None, None, [640, 502]).unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        let cues = run_for_cues(&mut session, 13.0, |s, _| {
+            s.matched.state() != MatchState::Intro
+        });
+        let change = cues
+            .iter()
+            .find(|(_, c)| {
+                matches!(c, crate::match_sounds::SoundCue::CrowdOneShot { path }
+                    if path.contains("normal_to_somewhat"))
+            })
+            .map(|(t, _)| *t);
+        let change = change.unwrap_or_else(|| panic!("no mood change in the intro: {cues:?}"));
+        assert!((10.0..=12.5).contains(&change), "{change}");
+    }
+
+    /// Weapon triggers sound once per press, at the class's own level
+    /// (`-500` electric burst motor, `0` piston), not once per stroke: the
+    /// live Scout v ALARM fights have the piston's `air_trigger` about every
+    /// half second and the burst motor's `burst_trigger` twice in 100 s.
+    #[test]
+    fn weapon_triggers_sound_once_per_press() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let bots = vec![
+            game.join("AI/Team0/Bot0.bot"),
+            game.join("AI/Team0/Bot1.bot"),
+        ];
+        let options = Options::new(&game, None, bots, Some(40.0), None, None, [640, 502]).unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        session.skip_intro();
+        let mut fight_for = 0.0f32;
+        let cues = run_for_cues(&mut session, 40.0, |s, _| {
+            if s.matched.state() == MatchState::Fight {
+                fight_for += 0.05;
+            }
+            fight_for >= 25.0
+        });
+        let fires: Vec<(f32, i32)> = cues
+            .iter()
+            .filter_map(|(t, c)| match c {
+                crate::match_sounds::SoundCue::Fire { hundredths_db, .. } => {
+                    Some((*t, *hundredths_db))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!fires.is_empty(), "the AIs fire in 25 s of fight");
+        assert!(
+            fires.iter().all(|(_, db)| *db == 0 || *db == -500),
+            "{fires:?}"
+        );
+        // Never faster than the AI's own half-second trigger (3 Hz at most
+        // for two robots, with slack for the step grid).
+        assert!(
+            fires.len() as f32 <= 25.0 * 4.0 + 4.0,
+            "{} fires",
+            fires.len()
+        );
     }
 
     /// The arena's own `DoIntro` reaches the mixer: the intro music and the

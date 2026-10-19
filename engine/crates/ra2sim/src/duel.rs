@@ -198,6 +198,9 @@ pub struct Duel {
     /// gate, in [`Duel::impacts`] (diagnostics and tests).
     pub record_impacts: bool,
     pub impacts: Vec<combat::Impact>,
+    /// Robot-versus-prop contacts the event gate let through, while
+    /// `record_impacts` is on (the arena's sub-material sounds read them).
+    pub material_contacts: Vec<combat::MaterialContact>,
     /// Whether the immobility rule runs: the match sets it when the fight
     /// begins (`FUN_00412fc0` requires `+0x8e`, "fighting").
     pub immobility_active: bool,
@@ -554,6 +557,7 @@ impl Duel {
             immobility_active: false,
             record_impacts: false,
             impacts: Vec::new(),
+            material_contacts: Vec::new(),
             immobility: crate::immobility::Tracker::default(),
             ai: bots.iter().map(|_| AiState::new()).collect(),
             script_ai,
@@ -1490,6 +1494,13 @@ impl Duel {
             .admit(&self.robots, events, self.time, &props);
         let impacts = combat::resolve_with(&self.robots, &events, &self.combat, &props);
         if self.record_impacts {
+            let props: Vec<(BodyHandle, &str, f32)> = self
+                .props
+                .iter()
+                .map(|p| (p.body, p.prop.name.as_str(), p.prop.mass))
+                .collect();
+            self.material_contacts
+                .extend(combat::material_contacts(&self.robots, &props, &events));
             self.impacts.extend(impacts.iter().copied());
         }
         for imp in &impacts {
@@ -2259,6 +2270,145 @@ mod tests {
                 return None;
             }
         }
+    }
+
+    /// The firesound plays on the trigger itself (`0x446810` for an electric
+    /// burst motor, which needs it cocked; `0x448750` for a piston, on every
+    /// press): a press makes one fire event, a held trigger makes none, and an
+    /// electric burst motor that has been released ignores the next press.
+    #[test]
+    fn a_trigger_press_makes_one_fire_event_and_a_cocked_burst_motor_only() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let path = |p: &str| game.join(p).to_string_lossy().to_string();
+        let setups = [
+            BotSetup {
+                path: path("AI/Team0/Bot0.bot"),
+                yaw_deg: Some(270.0),
+                spawn: Some([-6.0, 0.0]),
+            },
+            BotSetup {
+                path: path("AI/Team5/Bot1.bot"),
+                yaw_deg: Some(90.0),
+                spawn: Some([6.0, 0.0]),
+            },
+        ];
+        let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        let wiring = duel.robots[0].rig.wiring.clone();
+        let burst = duel.robots[0]
+            .rig
+            .parts
+            .iter()
+            .filter_map(|p| p.joint.as_ref())
+            .find(|j| j.use_kind == crate::rig::JointUse::Burst)
+            .map(|j| (j.motor, j.slider))
+            .expect("Team0/Bot0 carries a burst device");
+        let wire = wiring
+            .wires
+            .iter()
+            .find(|w| w.component == burst.0 && w.action == crate::controls::Action::Fire)
+            .expect("the burst device has a Fire wire");
+        let name = wiring.controls[wire.controller].name.clone();
+        let slot = wire.slot as i32;
+        let dt = 1.0 / 60.0;
+        let idle = vec![DriveInput::default(); 2];
+        let step = |duel: &mut Duel| duel.step_direct(&idle, dt);
+
+        step(&mut duel);
+        assert!(duel.robots[0].take_fire_events().is_empty());
+        duel.robots[0].control.input(&wiring, &name, slot, 100.0);
+        step(&mut duel);
+        assert_eq!(duel.robots[0].take_fire_events(), [burst.0]);
+        // Still held, nothing pressed: no second event.
+        step(&mut duel);
+        assert!(duel.robots[0].take_fire_events().is_empty());
+        // Pressed again while the device is travelling.
+        duel.robots[0].control.input(&wiring, &name, slot, 100.0);
+        step(&mut duel);
+        let again = duel.robots[0].take_fire_events();
+        if burst.1 {
+            assert_eq!(again, [burst.0], "a piston sounds on every press");
+        } else {
+            assert!(again.is_empty(), "a released burst motor is not cocked");
+        }
+    }
+
+    /// A robot part touching a named prop is a material contact, priced with
+    /// `FUN_0045a5a0`'s magnitude (half the closing speed over the effective
+    /// inverse mass); a contact with no prop in it, or between two robots, is
+    /// not (`docs/35-audio-events.md`, the arena sub-material sounds).
+    #[test]
+    fn a_robot_touching_a_named_prop_is_a_material_contact() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team5/Bot1.bot").to_string_lossy().to_string();
+        let setups = [
+            BotSetup {
+                path: bot.clone(),
+                yaw_deg: Some(270.0),
+                spawn: Some([-3.0, 0.0]),
+            },
+            BotSetup {
+                path: bot,
+                yaw_deg: Some(90.0),
+                spawn: Some([3.0, 0.0]),
+            },
+        ];
+        let duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        let robot_body = duel.robots[0].parts[0].body;
+        let other_body = duel.robots[1].parts[0].body;
+        let prop: BodyHandle = BodyHandle::MAX - 1;
+        let moving = crate::backend::BodyState {
+            position: Vec3::ZERO,
+            rotation: glam::Quat::IDENTITY,
+            linear_velocity: Vec3::new(0.0, 6.0, 0.0),
+            angular_velocity: Vec3::ZERO,
+        };
+        let still = crate::backend::BodyState {
+            linear_velocity: Vec3::ZERO,
+            ..moving
+        };
+        let event = |a, b, state_a, state_b| crate::backend::ContactEvent {
+            a,
+            b,
+            normal: Vec3::Y,
+            point: Vec3::ZERO,
+            state_a,
+            state_b,
+        };
+        let props = [(prop, "spikes1", 0.0_f32)];
+        // Robot as `a`, prop as `b`; and the other way round (normal flipped by
+        // the caller's convention: the closing speed is an absolute value).
+        let hits = combat::material_contacts(
+            &duel.robots,
+            &props,
+            &[
+                event(robot_body, prop, moving, still),
+                event(prop, robot_body, still, moving),
+                // Two robots: not a material contact.
+                event(robot_body, other_body, moving, still),
+                // A body that is neither: ignored.
+                event(robot_body, prop - 1, moving, still),
+            ],
+        );
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(hits.iter().all(|h| h.prop == "spikes1" && h.robot == 0));
+        let dyn_r = combat::body_dynamics(&duel.robots[0], 0, &moving);
+        let expected = combat::magnitude(
+            6.0,
+            dyn_r.mass,
+            0.0,
+            combat::angular_term(Vec3::ZERO - dyn_r.com, Vec3::Y, dyn_r.inv_inertia),
+            0.0,
+        );
+        assert!(expected > 0.0);
+        assert!(
+            (hits[0].magnitude - expected).abs() < 1e-3,
+            "{} vs {expected}",
+            hits[0].magnitude
+        );
     }
 
     /// F7: a ram is an *event*, sized by the speed the robots arrive with.
