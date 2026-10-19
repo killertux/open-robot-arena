@@ -689,6 +689,8 @@ pub struct Ai {
     pub events: Vec<InputEvent>,
     /// SmartZones this brain asked to be told about, `(name, id)`.
     pub zones: Vec<(String, i32)>,
+    /// `fNoseOffset`.
+    pub nose: f32,
 }
 
 impl Ai {
@@ -876,13 +878,16 @@ impl Ai {
         .unwrap_or(0.0)
     }
 
-    /// `(component, amount, time)` of the last hit we landed.
-    fn GetLastDamageDone(&self) -> (i32, f32, f32) {
-        with_bot(self.bot, |b| b.last_damage_done).unwrap_or((0, 0.0, 0.0))
+    /// `(component, amount, time, victim, victim component)` of the last hit
+    /// we landed (see [`crate::DamageRecord`]).
+    fn GetLastDamageDone(&self) -> crate::DamageRecord {
+        with_bot(self.bot, |b| b.last_damage_done).unwrap_or(crate::NO_DAMAGE)
     }
 
-    fn GetLastDamageReceived(&self) -> (i32, f32, f32) {
-        with_bot(self.bot, |b| b.last_damage_received).unwrap_or((0, 0.0, 0.0))
+    /// `(component, amount, time, attacker, attacker component)` of the last
+    /// hit we took. `AI/Spinner.py` reads index 3, so a 3-tuple raises.
+    fn GetLastDamageReceived(&self) -> crate::DamageRecord {
+        with_bot(self.bot, |b| b.last_damage_received).unwrap_or(crate::NO_DAMAGE)
     }
 
     /// `RegisterSmartZone(name, id)` — "tell me when a robot enters this zone".
@@ -892,16 +897,76 @@ impl Ai {
         }
     }
 
-    /// The robots inside a named zone, as `(robot, chassis)` readings.
+    /// The robots inside one of *this robot's* SmartZones, as `(1-based
+    /// robot, chassis)` readings (`FUN_004014f0`: the robot's SmartZone
+    /// component whose name matches, then every body its phantom overlaps,
+    /// decoded from the body's tag `robot << 4 | chassis`).
     fn GetZoneContents(&self, zone: &str) -> Vec<(i32, bool)> {
         crate::state()
-            .zone_contents
-            .get(zone)
+            .robot_zones
+            .get(&(self.bot, zone.to_string()))
             .cloned()
             .unwrap_or_default()
     }
 
     fn ResetComponents(&self) {}
+
+    // The engine's notifications. `AI.SuperAI` and the brains override them
+    // and call up into these base versions (`AI.SuperAI.LostComponent(self,
+    // id)` in every weapon brain), so each must exist and answer `True`, as
+    // the C++ defaults bound at `0x4bba00` do.
+
+    /// `SmartZoneEvent(direction, id, robot, chassis)` — a robot entered (`1`)
+    /// or left (`-1`) one of our registered SmartZones.
+    #[pyo3(signature = (_direction, _id, _robot, _chassis))]
+    fn SmartZoneEvent(&self, _direction: i32, _id: i32, _robot: i32, _chassis: bool) -> bool {
+        true
+    }
+
+    /// `LostComponent(id)` — one of our components came off or was destroyed.
+    fn LostComponent(&self, _id: i32) -> bool {
+        true
+    }
+
+    /// `FractureEvent()` — a part broke loose somewhere; time to refresh.
+    fn FractureEvent(&self) -> bool {
+        true
+    }
+
+    /// `CriticalHit(...)` — unused by the shipped brains.
+    #[pyo3(signature = (*_args))]
+    fn CriticalHit(&self, _args: &Bound<'_, PyTuple>) -> bool {
+        true
+    }
+
+    /// `PlayerOut(id)` — a robot is out of the match.
+    fn PlayerOut(&self, _id: i32) -> bool {
+        true
+    }
+
+    /// `ReThink()` — re-evaluate now.
+    fn ReThink(&self) -> bool {
+        true
+    }
+
+    /// `Winner(...)` — the match is decided.
+    #[pyo3(signature = (*_args))]
+    fn Winner(&self, _args: &Bound<'_, PyTuple>) -> bool {
+        true
+    }
+
+    /// `fNoseOffset` — the brain's `nose` constructor argument (`AI+0x40`,
+    /// bound read/write next to `tickInterval`). The shipped scripts only store
+    /// it, and none of the C++ queries the AI uses reads it.
+    #[getter]
+    fn fNoseOffset(&self) -> f32 {
+        self.nose
+    }
+
+    #[setter]
+    fn set_fNoseOffset(&mut self, nose: f32) {
+        self.nose = nose;
+    }
 }
 
 #[cfg(test)]

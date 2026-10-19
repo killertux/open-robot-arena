@@ -84,8 +84,8 @@ pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
         components,
         spheres,
         boxes,
-        last_damage_done: (0, 0.0, 0.0),
-        last_damage_received: (0, 0.0, 0.0),
+        last_damage_done: ra2script::NO_DAMAGE,
+        last_damage_received: ra2script::NO_DAMAGE,
         eliminated: robot.eliminated,
     }
 }
@@ -130,6 +130,34 @@ impl ScriptAi {
         self.host.send_zone_event(direction, zone, robot, chassis)
     }
 
+    /// The SmartZones robot `robot`'s brain registered, `(name, id)`.
+    pub fn brain_smart_zones(&self, robot: usize) -> Vec<(String, i32)> {
+        self.host.brain_smart_zones(robot)
+    }
+
+    /// `SmartZoneEvent(direction, id, other + 1, chassis)` to `robot`'s brain.
+    pub fn smart_zone_event(
+        &self,
+        robot: usize,
+        direction: i32,
+        id: i32,
+        other: i32,
+        chassis: bool,
+    ) {
+        self.host
+            .send_smart_zone_event(robot, direction, id, other, chassis);
+    }
+
+    /// `LostComponent(component)` to `robot`'s brain.
+    pub fn lost_component(&self, robot: usize, component: i32) {
+        self.host.send_lost_component(robot, component);
+    }
+
+    /// `PlayerOut(id)` to every brain.
+    pub fn player_out(&self, id: i32) {
+        self.host.send_player_out(id);
+    }
+
     /// `ImmobilityWarning(id, on)` to every brain (`FUN_00412fc0`).
     pub fn immobility_warning(&self, id: i32, on: bool) {
         self.host.send_immobility_warning(id, on);
@@ -161,22 +189,7 @@ impl ScriptAi {
         raw: Vec<(usize, Vec<ra2script::InputEvent>)>,
     ) -> Vec<Option<Vec<ra2script::InputEvent>>> {
         let mut out = vec![None; count];
-        for (i, mut events) in raw {
-            // Handedness. The scripts steer with `Input("LeftRight", 1, +turning)`
-            // for a *positive* heading error, and the wiring makes slot 1 (the
-            // `D` key) turn the robot to its right. Our `plus.GetHeadingTo`
-            // measures the angle from `+Z` toward `+X`, which is counter-clockwise
-            // — to the robot's left — seen from above, so a positive error means
-            // the target is on the left here and on the right in the game's own
-            // (left-handed) frame. The two frames differ by a mirror; applying it
-            // to the one steering control keeps the shipped AI closing on its
-            // target (measured: with the raw sign the two robots of
-            // `the_shipped_ai_closes_to_contact` circle 23 m apart).
-            for (name, _, value) in &mut events {
-                if name == "LeftRight" {
-                    *value = -*value;
-                }
-            }
+        for (i, events) in raw {
             if i < out.len() {
                 out[i] = Some(events);
             }

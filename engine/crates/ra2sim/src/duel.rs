@@ -204,11 +204,21 @@ pub struct Duel {
     ai: Vec<AiState>,
     /// The game's own AI, when its scripts loaded and the bots are known to it.
     script_ai: Option<ScriptAi>,
-    /// `(component, amount, time)` of the last blow each robot landed, which is
-    /// what its brain reads back with `GetLastDamageDone` to spot a good hit.
-    last_done: Vec<(i32, f32, f32)>,
+    /// The last blow each robot landed, which is what its brain reads back
+    /// with `GetLastDamageDone` to spot a good hit (see
+    /// [`ra2script::DamageRecord`]).
+    last_done: Vec<ra2script::DamageRecord>,
     /// …and the last it took.
-    last_received: Vec<(i32, f32, f32)>,
+    last_received: Vec<ra2script::DamageRecord>,
+    /// The robots' own SmartZones the brains registered, per robot:
+    /// `(index into rig.smart_zones, id)`.
+    brain_zones: Vec<Vec<(usize, i32)>>,
+    /// Which components of which robot were inside each brain zone last step,
+    /// keyed `(robot, zone index, other robot, component)`.
+    brain_zone_inside: std::collections::BTreeSet<(usize, usize, usize, usize)>,
+    /// Each robot's components' attached flags and its alive flag as the
+    /// brains last heard of them (`LostComponent`, `PlayerOut`).
+    brain_known: Vec<(Vec<bool>, bool)>,
     /// Seconds until the brains are run again.
     brain_timer: f32,
     /// Where the arena came from, for the hazards' own lookups.
@@ -390,9 +400,11 @@ impl Duel {
             if let Some(at) = setup.spawn {
                 let floor = Self::floor_at(&*physics, &arena, at[0], at[1], None);
                 let position = Vec3::new(at[0], floor + 0.06 - rig.min.y, at[1]);
-                // `yaw_deg` is where the robot's *front* points (its `.bot`
-                // heading is not always `-Z`).
-                let yaw = setup.yaw_deg.map(f32::to_radians).unwrap_or(0.0) - rig.heading;
+                // `yaw_deg` is where the robot's *front* points, as `-Z` turned
+                // by it; the front itself is `+Z` turned by the `.bot` heading
+                // ([`rig::RobotRig::forward`]).
+                let yaw = setup.yaw_deg.map(f32::to_radians).unwrap_or(0.0) + std::f32::consts::PI
+                    - rig.heading;
                 let robot = Robot::spawn(
                     &mut *physics,
                     rig,
@@ -428,11 +440,15 @@ impl Duel {
                     dir = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
                 }
             }
-            // The robot's front is its `.bot` heading, not always `-Z`.
+            // The robot's front ([`rig::RobotRig::forward`], `+Z` turned by its
+            // `.bot` heading) faces `dir`: in the original a robot starts with
+            // its weapon toward the arena centre (`assembly-scout__live__000`:
+            // the flipper's burst motor sits at chassis `+Z` 0.33 m, and the
+            // chassis' `+Z` points at the centre).
             let yaw = setup
                 .yaw_deg
-                .map(f32::to_radians)
-                .unwrap_or_else(|| f32::atan2(-dir.x, -dir.z))
+                .map(|a| a.to_radians() + std::f32::consts::PI)
+                .unwrap_or_else(|| f32::atan2(dir.x, dir.z))
                 - rig.heading;
 
             let robot = Robot::spawn(
@@ -460,6 +476,31 @@ impl Duel {
         // robots are in `Bindings.py`. Without it the stand-in driver runs.
         let script_ai = script_ai_for(arena_path, &robots);
         let n = robots.len();
+        // The SmartZones each brain asked for in its `Activate`
+        // (`RegisterSmartZone(name, id)`, `0x401340`): matched by name to the
+        // robot's own SmartZone components.
+        let brain_zones: Vec<Vec<(usize, i32)>> = (0..n)
+            .map(|r| {
+                let Some(ai) = script_ai.as_ref() else {
+                    return Vec::new();
+                };
+                ai.brain_smart_zones(r)
+                    .into_iter()
+                    .filter_map(|(name, id)| {
+                        robots[r]
+                            .rig
+                            .smart_zones
+                            .iter()
+                            .position(|z| z.name.eq_ignore_ascii_case(&name))
+                            .map(|k| (k, id))
+                    })
+                    .collect()
+            })
+            .collect();
+        let brain_known: Vec<(Vec<bool>, bool)> = robots
+            .iter()
+            .map(|r| (r.attached.clone(), r.is_alive()))
+            .collect();
         // The arena's own hazards: the zones its script registered, and the
         // hinges its model declares.
         let registered = ra2script::state()
@@ -513,8 +554,11 @@ impl Duel {
             immobility: crate::immobility::Tracker::default(),
             ai: bots.iter().map(|_| AiState::new()).collect(),
             script_ai,
-            last_done: vec![(0, 0.0, 0.0); n],
-            last_received: vec![(0, 0.0, 0.0); n],
+            last_done: vec![ra2script::NO_DAMAGE; n],
+            last_received: vec![ra2script::NO_DAMAGE; n],
+            brain_zones,
+            brain_zone_inside: std::collections::BTreeSet::new(),
+            brain_known,
             brain_timer: 0.0,
             arena_path: arena_path.to_string(),
             model_hinges,
@@ -924,6 +968,96 @@ impl Duel {
         ra2script::publish_zone_contents(contents);
     }
 
+    /// Watch each robot's own SmartZones for the parts of the others.
+    ///
+    /// The original's zone is a phantom on the robot (`RegisterSmartZone`,
+    /// `0x401340`, hooks the brain's `SmartZoneEvent` to it): every body that
+    /// enters or leaves is an event `(1 | -1, id, robot + 1, chassis)`, and
+    /// `GetZoneContents` (`0x4014f0`) lists one `(robot + 1, chassis)` reading
+    /// per body inside. A component stands in for its body here. The robot's
+    /// own parts are not reported: the weapon brains fire whenever their
+    /// sensor holds anything, and they do not fire at themselves.
+    fn watch_brain_zones(&mut self) {
+        if self.script_ai.is_none() || self.brain_zones.iter().all(Vec::is_empty) {
+            return;
+        }
+        let worlds: Vec<Vec<Mat4>> = (0..self.robots.len())
+            .map(|i| self.robots[i].component_worlds(&*self.physics))
+            .collect();
+        let mut contents: std::collections::BTreeMap<(i32, String), Vec<(i32, bool)>> =
+            std::collections::BTreeMap::new();
+        let mut now = std::collections::BTreeSet::new();
+        let mut events: Vec<(usize, i32, i32, i32, bool)> = Vec::new();
+        for r in 0..self.robots.len() {
+            for &(k, id) in &self.brain_zones[r] {
+                let zone = &self.robots[r].rig.smart_zones[k];
+                if !self.robots[r]
+                    .attached
+                    .get(zone.component)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let frame = worlds[r][zone.component] * zone.offset;
+                let readings = contents.entry((r as i32, zone.name.clone())).or_default();
+                for (o, w) in worlds.iter().enumerate() {
+                    if o == r || !self.robots[o].is_alive() {
+                        continue;
+                    }
+                    for (ci, c) in self.robots[o].rig.components.iter().enumerate() {
+                        if !self.robots[o].attached[ci] || c.hull_points.is_empty() {
+                            continue;
+                        }
+                        let p = w[ci].transform_point3(c.center());
+                        if zone.touches(frame, p, c.radius()) {
+                            readings.push((o as i32 + 1, ci == 0));
+                            now.insert((r, k, o, ci));
+                            if !self.brain_zone_inside.contains(&(r, k, o, ci)) {
+                                events.push((r, 1, id, o as i32 + 1, ci == 0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for &(r, k, o, ci) in self.brain_zone_inside.difference(&now) {
+            if let Some(&(_, id)) = self.brain_zones[r].iter().find(|(kk, _)| *kk == k) {
+                events.push((r, -1, id, o as i32 + 1, ci == 0));
+            }
+        }
+        self.brain_zone_inside = now;
+        ra2script::publish_robot_zones(contents);
+        if let Some(ai) = self.script_ai.as_ref() {
+            for (r, direction, id, other, chassis) in events {
+                ai.smart_zone_event(r, direction, id, other, chassis);
+            }
+        }
+    }
+
+    /// Tell the brains what the step took away: a component that came off
+    /// (`LostComponent(id)` to its own robot's brain, `FractureEvent` to all)
+    /// and a robot that is out (`PlayerOut(id)` to every brain).
+    fn notify_brains(&mut self) {
+        let Some(ai) = self.script_ai.as_ref() else {
+            return;
+        };
+        for (r, robot) in self.robots.iter().enumerate() {
+            let (known, alive) = &mut self.brain_known[r];
+            for (ci, now) in robot.attached.iter().enumerate() {
+                if known.get(ci).copied().unwrap_or(false) && !now {
+                    ai.lost_component(r, ci as i32);
+                }
+            }
+            known.clone_from(&robot.attached);
+            let alive_now = robot.is_alive();
+            if *alive && !alive_now {
+                ai.player_out(r as i32);
+            }
+            *alive = alive_now;
+        }
+    }
+
     /// Run the arena's own `Tick`, at the rate the game did.
     ///
     /// `Hazards.Flame` counts by a quarter of a second and `Electricity` counts
@@ -1253,6 +1387,7 @@ impl Duel {
         self.build_joints();
         self.apply_arena_flags();
         self.watch_zones();
+        self.watch_brain_zones();
         self.run_arena_tick(dt);
         self.drive_joints(dt);
         self.step_scene_camera(dt);
@@ -1265,6 +1400,7 @@ impl Duel {
         self.resolve_combat();
         self.update_effects(dt);
         self.update_immobility(dt);
+        self.notify_brains();
         self.time += dt;
         // What the scripts asked for, at the top of the step after the one they
         // asked in — `plus.damage`, `plus.force`, `plus.zap` and the tournament's
@@ -1350,8 +1486,8 @@ impl Duel {
         }
         for imp in &impacts {
             self.sparks_for(imp);
-            self.apply_hit(
-                Some(imp.attacker),
+            self.apply_hit_by(
+                Some((imp.attacker, imp.by)),
                 imp.target,
                 imp.component,
                 imp.damage,
@@ -1407,6 +1543,23 @@ impl Duel {
         damage: f32,
         point: Vec3,
     ) -> bool {
+        // Without a known part of the attacker the record says the chassis.
+        self.apply_hit_by(attacker.map(|a| (a, 0)), victim, component, damage, point)
+    }
+
+    /// [`Duel::apply_hit`] with the attacker's part that landed the blow, which
+    /// is what the attacker's brain reads back from `GetLastDamageDone`
+    /// (`CheckForWeaponHits` matches it against its weapon list).
+    pub fn apply_hit_by(
+        &mut self,
+        attacker: Option<(usize, usize)>,
+        victim: usize,
+        component: usize,
+        damage: f32,
+        point: Vec3,
+    ) -> bool {
+        let by = attacker.map(|(_, by)| by);
+        let attacker = attacker.map(|(a, _)| a);
         if victim >= self.robots.len()
             || component >= self.robots[victim].health.len()
             || !damage.is_finite()
@@ -1433,7 +1586,13 @@ impl Duel {
                 self.damage_dealt[attacker] += damage;
                 // The brains spot a "good hit" by matching the component id
                 // against their own weapon list (`AI/__init__.py:CheckForWeaponHits`).
-                self.last_done[attacker] = (component as i32, damage, self.time);
+                self.last_done[attacker] = (
+                    by.unwrap_or(0) as i32,
+                    damage,
+                    self.time,
+                    victim as i32,
+                    component as i32,
+                );
                 if victim_was_alive && applied.effective > 0.0 {
                     self.score_hits.push(ScoreHit {
                         attacker,
@@ -1443,7 +1602,13 @@ impl Duel {
                 }
             }
         }
-        self.last_received[victim] = (component as i32, damage, self.time);
+        self.last_received[victim] = (
+            component as i32,
+            damage,
+            self.time,
+            attacker.map(|a| a as i32).unwrap_or(-1),
+            by.map(|b| b as i32).unwrap_or(-1),
+        );
         let name = self.robots[victim].rig.name.clone();
         if applied.critical {
             self.log.push(format!(
@@ -1994,8 +2159,10 @@ fn ai_drive(
     let dot = fwd.dot(to).clamp(-1.0, 1.0);
     let cross = fwd.cross(to).y;
     let angle = cross.atan2(dot);
-    // The controller applies yaw = -steer * rate, so negate the heading error.
-    let steer = (-angle * 2.2).clamp(-1.0, 1.0);
+    // A positive steer is the `D` key, `LeftRight` slot 1: like the
+    // original's `SuperAI.Turn(+)` it raises the heading `atan2(fx, fz)`, so it
+    // answers a positive heading error.
+    let steer = (angle * 2.2).clamp(-1.0, 1.0);
 
     if state.press {
         return DriveInput {
@@ -3359,6 +3526,149 @@ mod tests {
             (hits - gated).abs() <= 1e-3 * (1.0 + gated) + 1e-3,
             "applied {hits} is not the >=10 contact points {gated}"
         );
+    }
+
+    /// A robot starts with its front toward the arena centre and turns the way
+    /// the original's does.
+    ///
+    /// Live, the Scout's flipper motor sits at chassis `+Z` and the chassis'
+    /// `+Z` points at the centre (`assembly-scout__live__000`, burst motor at
+    /// chassis `(-0.01, 0.21, 0.33)`), and `SuperAI.Turn(+100)` spins the Razor
+    /// at +12.7 rad/s about `+Y` (`magic-razor__live__000`, every wheel record
+    /// at thrust -1940, right-hand wheels' record axle `(-1, 0, 0)`). Both used
+    /// to be the other way round: the robots fought with their weapons behind
+    /// them and the shipped AI turned away from its target.
+    #[test]
+    fn a_robot_faces_the_centre_weapon_first_and_turns_as_the_original() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let duel = Duel::new(&arena, &[bot("AI/Team0/Bot0.bot")]).expect("a duel");
+        let scout = &duel.robots[0];
+        let tf = scout.transform(&*duel.physics);
+        let centre = Vec3::new(-tf.w_axis.x, 0.0, -tf.w_axis.z).normalize();
+        let front = tf.transform_vector3(scout.rig.forward());
+        assert!(front.dot(centre) > 0.95, "front {front} centre {centre}");
+        let worlds = scout.component_worlds(&*duel.physics);
+        let burst = scout
+            .rig
+            .components
+            .iter()
+            .position(|c| c.class == "BurstMotor")
+            .expect("the Scout's flipper motor");
+        let local = tf
+            .inverse()
+            .transform_point3(worlds[burst].w_axis.truncate());
+        assert!(
+            (local - Vec3::new(-0.011, 0.212, 0.327)).length() < 0.1,
+            "the flipper motor sits at chassis {local} (live: (-0.01, 0.21, 0.33))"
+        );
+
+        // Turn(+100), as `SuperAI.Turn` sends it.
+        let mut duel = Duel::new(&arena, &[bot("AI/Team10/Bot1.bot")]).expect("a duel");
+        let dt = 1.0 / 60.0;
+        let idle = [DriveInput::default()];
+        for _ in 0..30 {
+            duel.step_direct(&idle, dt);
+        }
+        duel.robots[0].apply_inputs(&[
+            ("LeftRight".to_string(), 0, -100.0),
+            ("LeftRight".to_string(), 1, 100.0),
+        ]);
+        let mut spin = 0.0f32;
+        for _ in 0..30 {
+            duel.step_direct(&idle, dt);
+            spin = spin.max(
+                duel.physics
+                    .state(duel.robots[0].body())
+                    .map(|s| s.angular_velocity.y)
+                    .unwrap_or(0.0),
+            );
+        }
+        assert!(
+            spin > 5.0,
+            "Turn(+100) spins the Razor at {spin} rad/s about +Y"
+        );
+    }
+
+    /// The shipped AI closes on its enemy, sees it in its own SmartZone and
+    /// fires, and the blows land.
+    ///
+    /// Scout (`Flipper`, zone `flip`) against ALARM (`Poker`, zone `weapon`) in
+    /// the Combat Arena: the brains' `Engage` drives to the enemy over the
+    /// collision-line navigation, the robots' SmartZone components report the
+    /// enemy's parts (`RegisterSmartZone` / `SmartZoneEvent` /
+    /// `GetZoneContents`), and the weapon brains press `Flip` / `Fire`.
+    /// Measured: in contact 2.8 s into the fight, both zones see the other robot
+    /// within 5 s, damage from about 6 s.
+    #[test]
+    fn the_shipped_ai_closes_sees_its_enemy_and_lands_blows() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        // The match's own preparation: the brains read the game type when they
+        // are built (`SuperAI.__init__` adds the tabletop or King of the Hill
+        // tactics), and the script layer is process-global, so a test that ran
+        // before may have left another one.
+        ra2script::prepare_match("DEATHMATCH", vec![0, 1]);
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team0/Bot0.bot"), bot("AI/Team0/Bot1.bot")],
+        )
+        .expect("a duel");
+        assert!(duel.script_ai.is_some(), "the shipped AI did not load");
+        assert_eq!(duel.brain_zones[0].len(), 1, "Scout's `flip` zone");
+        assert_eq!(duel.brain_zones[1].len(), 1, "ALARM's `weapon` zone");
+        let dt = 1.0 / 60.0;
+        let idle = vec![DriveInput::default(); 2];
+        for _ in 0..(4.0 / dt) as usize {
+            duel.step_direct(&idle, dt);
+        }
+        let distance = |d: &Duel| {
+            let (a, b) = (
+                d.robots[0].position(&*d.physics),
+                d.robots[1].position(&*d.physics),
+            );
+            Vec3::new(a.x - b.x, 0.0, a.z - b.z).length()
+        };
+        let start = distance(&duel);
+        let mut closed_at = None;
+        let mut seen = [false; 2];
+        for step in 0..(30.0 / dt) as usize {
+            duel.step(dt);
+            let t = step as f32 * dt;
+            if closed_at.is_none() && distance(&duel) < 3.0 {
+                closed_at = Some(t);
+            }
+            let zones = ra2script::state().robot_zones.clone();
+            for (r, other) in [(0i32, 2i32), (1, 1)] {
+                if zones.iter().any(|((robot, _), readings)| {
+                    *robot == r && readings.iter().any(|x| x.0 == other)
+                }) {
+                    seen[r as usize] = true;
+                }
+            }
+        }
+        let closed_at = closed_at.unwrap_or_else(|| {
+            panic!(
+                "the robots never closed from {start:.1} m: {:.1} m apart",
+                distance(&duel)
+            )
+        });
+        assert!(closed_at < 10.0, "closed only after {closed_at:.1} s");
+        assert_eq!(seen, [true, true], "each SmartZone held the enemy");
+        let dealt: f32 = duel.damage_dealt.iter().sum();
+        assert!(dealt > 0.0, "no damage in 30 s of fighting");
     }
 
     #[test]
