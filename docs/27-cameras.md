@@ -88,14 +88,19 @@ the FOV as vertical with an aspect of 4:3.
 
 ## 6. Not recovered / approximated
 
-* **Orbit (F2)** follows robot 0 from 4 units behind and 1 above its aim point
+* **Orbit (F2)** (no-target case measured, `docs/30` §6: aim at the origin, 8.6 away)
+  follows the human robot from 4 units behind and 1 above its aim point
   at pitch 0.25 and its heading (the values the constructor stores). The
   smoothing (`0x61bb70`), mouse look/zoom and the camera-blocker ray tests
   (`0x5a7680`, `AddCameraBlocker`) were not reproduced; the capture shows the
   robots smaller than this renders them, so the distance or lens is off.
-* **Watch** looks straight at robot 0's position; nothing else about its
-  target selection was found (`NextAutoCamera` is a stub returning `""`).
+* **Watch** (corrected in `docs/30`): its target is the *human* player's robot
+  (`0x4014b0(0)`), which an AI-only exhibition does not have, so it has no
+  target and keeps the rotation and FOV the intro flight left (0.675 rad on Metal
+  Skull). `NextAutoCamera` is a stub returning `""`.
 * Three arenas whose `extent` is not centred on the origin (`Bridge`, `half`,
   `Skull`) are framed with the right scale and orientation but sit about 5
-  units / 0.2 rad off the capture; the other five line up exactly. Cause not
+  units / 0.2 rad off the capture; the other five line up exactly (the watch
+  frames were off because of the inherited intro pose, `docs/30` §6; the static
+  ones were not re-checked). Cause not
   established.

@@ -9,6 +9,7 @@ pub mod career;
 pub mod combat;
 pub mod controls;
 pub mod duel;
+pub mod energy;
 pub mod hazards;
 pub mod immobility;
 pub mod jolt;

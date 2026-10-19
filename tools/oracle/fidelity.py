@@ -150,6 +150,17 @@ ARENA_SHOTS = {
 }
 
 
+# The capture script clicks `Skip Intro` a fixed wall time after `Start Game`, but each arena loads for a
+# different time, so the intro clock reads differently at the click.  The watch camera keeps the pose
+# the intro flight had at that moment (docs/30), hence the countdown still depends on it.  These are
+# FITTED capture-timing parameters (the intro-clock second whose countdown best matches the reference),
+# not game behaviour; `skip@T` is `--camera-shots`' "click Skip Intro at intro second T".
+ARENA_SKIP = {
+    "box": 4.6, "bridge": 5.1, "compressor": 6.8, "electric": 7.5, "halfcircle": 4.5,
+    "metalskull": 4.8, "octagon": 4.65, "parkinglot": 4.9,
+}
+
+
 def find_arena_fixtures():
     """arena-<id>-<shot> references from `capture_arenas.py`.  Ours comes from
     `ra2-app --match --arena <script> --camera-shots ...` (one run per arena;
@@ -173,7 +184,9 @@ def run_camera_shots(arena, tmp):
     """One `--camera-shots` run for `arena`; returns the directory of PNGs or None."""
     d = os.path.join(tmp, "cam-" + arena)
     os.makedirs(d, exist_ok=True)
-    shots = ",".join(ARENA_SHOTS[k] for k in ("intro", "countdown", "f2", "f3", "f3b", "f4"))
+    shots = ",".join(
+        [ARENA_SHOTS["intro"], "skip@%g" % ARENA_SKIP.get(arena, 4.8)]
+        + [ARENA_SHOTS[k] for k in ("countdown", "f2", "f3", "f3b", "f4")])
     bots = ",".join(os.path.join(GAME, "AI", "Team0", b) for b in ("Bot0.bot", "Bot1.bot"))
     p = subprocess.run([APP, "--game", GAME, "--match", "--seconds", "40", "--out", d,
                         "--size", "%dx%d" % SIZE, "--bots", bots, "--arena", os.path.join(GAME, "Arenas", ARENA_SCRIPTS[arena]),

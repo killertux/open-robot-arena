@@ -87,6 +87,10 @@ pub struct SceneCamera {
     orbit: Orbit,
 }
 
+/// What the original's orbit camera reads for its distance when the match has
+/// no human player to follow (docs/30 §5; the constructor stores 4).
+pub const ORBIT_DISTANCE_NO_TARGET: f32 = 8.6;
+
 /// The orbit camera's state (mode 2, `0x5a6970`; input `0x5a6260`).
 ///
 /// `0x439d60` sets the aim offset `(0, 1)` (`+0x21c`/`+0x220`), the distance 4
@@ -338,18 +342,42 @@ impl SceneCamera {
                 }
             },
             SceneCameraKind::Orbit => {
-                let target = self.last_target.unwrap_or(Target {
-                    position: Vec3::ZERO,
-                    yaw: 0.0,
-                });
                 let o = &self.orbit;
-                // `0x5a69a9`: the aim point is the robot plus `(0, 1, 0)`.
-                let aim = target.position + Vec3::new(o.aim_offset[0], o.aim_offset[1], 0.0);
+                // `0x5a69a9`: the aim point is the robot plus `(0, 1, 0)`. With no
+                // target (an AI-only match has no human player) `0x5a69a3` jumps
+                // to `0x5a6b74` and the aim is the stored point `+0x1b0` = the
+                // origin, with no offset and heading 0 (measured live: the F2
+                // eye sits at `(0, 2.128, -8.333)` = `8.6 * (0, sin .25, -cos .25)`).
+                let (aim, target_yaw) = match self.last_target {
+                    Some(t) => (
+                        t.position + Vec3::new(o.aim_offset[0], o.aim_offset[1], 0.0),
+                        t.yaw,
+                    ),
+                    None => (Vec3::ZERO, 0.0),
+                };
+                let target = Target {
+                    position: aim,
+                    yaw: target_yaw,
+                };
+                // Measured on the live original with no human player (both
+                // arenas tried): `+0x224` reads 8.6, not the constructor's 4.
+                // Where the extra 4.6 comes from was not found, so it is
+                // applied only to this case and only until the user zooms.
+                let distance =
+                    if self.last_target.is_none() && o.distance == Orbit::default().distance {
+                        ORBIT_DISTANCE_NO_TARGET
+                    } else {
+                        o.distance
+                    };
                 // `0x5a6cf0`: `D3DXMatrixRotationYawPitchRoll(yaw = heading +
                 // user yaw, pitch = -user pitch)` turns `(0, 0, -distance)`.
                 let yaw = o.heading.unwrap_or(target.yaw) + o.user[1];
                 let forward = euler_forward([-o.user[0], yaw, 0.0]);
-                (aim - forward * o.distance, aim, Vec3::Y)
+                (
+                    target.position - forward * distance,
+                    target.position,
+                    Vec3::Y,
+                )
             }
         }
     }
@@ -479,6 +507,36 @@ mod tests {
             yaw: 0.0,
         }));
         assert!((camera.effective_fov() - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_watch_camera_without_a_target_keeps_the_pose_it_inherited() {
+        // Measured on the original: the countdown's `Watch Cam 1` sets only the
+        // eye; the rotation and FOV stay what the intro flight left (0.675 rad).
+        let mut camera = SceneCamera::new(SceneCameraKind::Static);
+        camera.apply(CameraCommand::Rotation([0.4376, -3.1628]));
+        camera.apply(CameraCommand::Fov(0.675));
+        camera.select(SceneCameraKind::Watch);
+        camera.apply(CameraCommand::Position([-1.26, 3.0, 4.56]));
+        camera.apply(CameraCommand::FovRange([2.0, 8.0, 1.2, 0.9]));
+        assert_eq!(camera.effective_fov(), 0.675, "no target: no range rule");
+        let (eye, aim, _) = camera.pose();
+        assert_eq!(eye, Vec3::new(-1.26, 3.0, 4.56));
+        let forward = (aim - eye).normalize();
+        let expected = euler_forward([0.4376, -3.1628, 0.0]);
+        assert!((forward - expected).length() < 1e-5);
+    }
+
+    #[test]
+    fn the_orbit_without_a_target_looks_at_the_origin_from_8_6() {
+        // Live: eye (0, 2.128, -8.333) with the pitch goal 0.25, yaw 0.
+        let camera = SceneCamera::new(SceneCameraKind::Orbit);
+        let (eye, aim, _) = camera.pose();
+        assert_eq!(aim, Vec3::ZERO);
+        assert!(
+            (eye - Vec3::new(0.0, 2.1277, -8.3326)).length() < 1e-3,
+            "{eye}"
+        );
     }
 
     #[test]

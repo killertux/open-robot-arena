@@ -18,11 +18,11 @@
 //! **Which value each bar receives** is the binary's: battery reads the status
 //! object's `+0xa8` (getter `FUN_0043e5f0`), air `+0xa4` (`FUN_0043e5e0`), and
 //! armour `+0xb4 / +0xb0` (`FUN_0043e600`), clamped at zero; the dot reads
-//! `+0xbc` (`FUN_00416940`, 0 green / 1 yellow / 2 red). What those fields are
-//! made of — the energy model behind `Battery`/`AirTank` — is not established,
-//! so the fraction each bar receives here is still named in
-//! [`ra2sim::match::RobotReport`] and is our component-hitpoint mapping. The
-//! fill geometry and truncation are the binary's.
+//! `+0xbc` (`FUN_00416940`, 0 green / 1 yellow / 2 red). `+0xa8`/`+0xa4` are
+//! the charge left over the total of the robot's batteries and air tanks, run
+//! down by the motors and pistons (`ra2sim::energy`, docs/30), and `+0xbc` is
+//! the chassis' critical-hit count. The fill geometry and truncation are the
+//! binary's.
 //!
 //! ## What is not drawn
 //!
@@ -75,6 +75,9 @@ pub const COUNTDOWN_GROUP: &str = "countdown group";
 pub const COUNTDOWN_BOX: &str = "count number";
 pub const CAMERA_BOX: &str = "camera textbox";
 
+/// The status dots, in the order `FUN_004b3640` lights them (`0x4b313c`,
+/// `0x4b3187`, `0x4b31ce` bind them to `+0xe0`, `+0xe4`, `+0xe8`).
+pub const DOTS: [&str; 3] = ["green dot", "yellow dot", "red dot"];
 /// The bars and their widths in `statusmeters.gib`.
 pub const BARS: [(&str, f32); 3] = [
     ("battery bar", 52.0),
@@ -93,6 +96,8 @@ pub struct HudPlayer {
     pub battery: f32,
     pub air: f32,
     pub armor: f32,
+    /// The lit status dot: 0 green, 1 yellow, 2 red (`FUN_004b3640`).
+    pub dot: u8,
     /// The drawn widths after the left-side shrink.
     pub bar_widths: [f32; 3],
     /// Whether this slot's group is visible.
@@ -195,6 +200,10 @@ pub fn hud(
             set_bar(group, BARS[1].0, BARS[1].1, robot.air),
             set_bar(group, BARS[2].0, BARS[2].1, robot.armor),
         ];
+        // `FUN_004b3640`: exactly one of the three dots shows.
+        for (i, name) in DOTS.iter().enumerate() {
+            set_visible(group, name, i == usize::from(robot.dot.min(2)));
+        }
         players.push(HudPlayer {
             slot,
             name: robot.bot_name.clone(),
@@ -202,6 +211,7 @@ pub fn hud(
             battery: robot.battery,
             air: robot.air,
             armor: robot.armor,
+            dot: robot.dot.min(2),
             bar_widths: widths,
             visible,
         });
@@ -344,6 +354,7 @@ mod tests {
             battery: 0.5,
             air: 0.25,
             armor: 0.75,
+            dot: 1,
             defeated: slot == 1,
             eliminated: false,
             winner: slot == 0,
@@ -470,6 +481,7 @@ mod tests {
         assert_eq!(bound.players[0].name, "Roly Poly");
         assert_eq!(bound.players[0].points, 7);
         assert_eq!(bound.players[0].bar_widths, [26.0, 13.0, 19.0]);
+        assert_eq!(bound.players[0].dot, 1, "one critical hit: the yellow dot");
 
         let placed = ra2ui::resolve_with(&screen, crate::SHELL_SIZE, Some(assets.faces()));
         let first = placed

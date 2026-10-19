@@ -163,6 +163,11 @@ pub struct Duel {
     /// The match's one scene camera (F2/F3/F4, the arena intro): see
     /// [`crate::camera`].
     pub scene_camera: crate::camera::SceneCamera,
+    /// The robot of the local human player, if the match has one. The F2/F4
+    /// constructors hand `0x4014b0(0)` (the human player list's first entry)
+    /// to the camera as its target; an AI-only match has none, and the
+    /// original's cameras then have no target at all (measured live, docs/30).
+    pub human_robot: Option<usize>,
 }
 
 /// What the AI is doing right now.
@@ -438,6 +443,7 @@ impl Duel {
             arena_timer: 0.0,
             applied_pinned: std::collections::BTreeMap::new(),
             scene_camera: crate::camera::SceneCamera::default(),
+            human_robot: None,
         })
     }
 
@@ -1517,10 +1523,11 @@ impl Duel {
         Some(scene)
     }
 
-    /// Robot 0's position and heading: what the watch and orbit cameras follow
-    /// (`0x43a0ff` / `0x439e5a` hand the first robot to `0x5a6650`).
+    /// The human player's robot position and heading: what the watch and orbit
+    /// cameras follow (`0x43a0ff` / `0x439e5a` hand `0x4014b0(0)`, the first
+    /// human player, to `0x5a6650`). `None` without a human player.
     pub fn follow_target(&self) -> Option<crate::camera::Target> {
-        let robot = self.robots.first()?;
+        let robot = self.robots.get(self.human_robot?)?;
         let position = robot.position(&*self.physics);
         let rotation = self.physics.state(robot.body()).map(|s| s.rotation)?;
         let forward = rotation * robot.rig.forward();
@@ -3377,5 +3384,94 @@ mod tests {
             }
         }
         assert!(touched, "a head-on ram never registered contact");
+    }
+
+    /// The watch and orbit cameras follow the human player's robot
+    /// (`0x4014b0(0)`); an AI-only match has none (measured on the original:
+    /// `+0x1a8` stays null through F2 and F4).
+    #[test]
+    fn the_cameras_have_no_target_without_a_human_player() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team0/Bot0.bot").to_string_lossy().to_string();
+        let mut duel = Duel::new(
+            &arena,
+            &[BotSetup {
+                path: bot,
+                yaw_deg: None,
+                spawn: None,
+            }],
+        )
+        .expect("a duel");
+        assert!(duel.follow_target().is_none());
+        duel.human_robot = Some(0);
+        assert!(duel.follow_target().is_some());
+    }
+
+    /// Measured on the original (docs/30 §3): the Scout's two spin motors cost
+    /// 200 a second at full throttle, a flipper press 0.6 s of 500 a second, an
+    /// idle robot nothing, and an empty battery stops the motors.
+    #[test]
+    fn the_scout_pays_the_originals_power_bills() {
+        use crate::energy::Channel;
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team0/Bot0.bot").to_string_lossy().to_string();
+        let mut duel = Duel::new(
+            &arena,
+            &[BotSetup {
+                path: bot,
+                yaw_deg: None,
+                spawn: None,
+            }],
+        )
+        .expect("a duel");
+        let dt = 1.0 / 60.0;
+        let charge = |d: &Duel| {
+            let r = &d.robots[0];
+            r.energy.charge(Channel::Elec, &r.attached)
+        };
+        assert_eq!(duel.robots[0].energy.elec_total, 52000.0);
+        assert_eq!(duel.robots[0].energy.air_total, 0.0);
+        // Idle: nothing leaves the battery.
+        let start = charge(&duel);
+        for _ in 0..120 {
+            duel.step_direct(&[DriveInput::default()], dt);
+        }
+        assert_eq!(charge(&duel), start);
+        // Two seconds of full throttle: 2 motors x 100 a second.
+        let drive = DriveInput {
+            throttle: 1.0,
+            steer: 0.0,
+            ..Default::default()
+        };
+        for _ in 0..120 {
+            duel.step_direct(&[drive], dt);
+        }
+        let used = start - charge(&duel);
+        assert!(
+            (used - 400.0).abs() < 4.0,
+            "two seconds of throttle cost {used}"
+        );
+        // A flipper press: 0.6 s x 500 a second.
+        let before = charge(&duel);
+        duel.robots[0].apply_inputs(&[("Flip".to_string(), 0, 1.0)]);
+        for _ in 0..120 {
+            duel.step_direct(&[DriveInput::default()], dt);
+        }
+        let flip = before - charge(&duel);
+        assert!((flip - 300.0).abs() < 8.0, "a flip cost {flip}");
+        // An empty battery: the budget says zero.
+        duel.robots[0].energy.sources[0].current = 0.0;
+        duel.step_direct(&[drive], dt);
+        assert_eq!(duel.robots[0].energy.last.elec.scale, 0.0);
+        assert_eq!(
+            duel.robots[0]
+                .energy
+                .fraction(Channel::Elec, &duel.robots[0].attached),
+            0.0
+        );
     }
 }
