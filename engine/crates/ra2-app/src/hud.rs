@@ -300,7 +300,17 @@ fn set_bar(group: &mut Widget, name: &str, base_width: f32, fraction: f32) -> f3
 
 fn set_visible(root: &mut Widget, name: &str, visible: bool) {
     if let Some(widget) = ra2ui::workshop::find_mut(root, name) {
-        ra2ui::input::set_field(widget, "Visible", if visible { "true" } else { "false" });
+        let value = if visible { "true" } else { "false" };
+        ra2ui::input::set_field(widget, "Visible", value);
+        // The group's `Background`/`Border` bodies were saved with the group's
+        // own visibility (`countdown group` and `time group` were hidden in the
+        // editor, so their 0.4 black panel and black border bodies say
+        // `Visible false`); they show and hide with the owner.
+        for attachment in &mut widget.attachments {
+            if let Some(body) = attachment.body.as_mut() {
+                ra2ui::input::set_field(body, "Visible", value);
+            }
+        }
     }
 }
 
@@ -410,6 +420,38 @@ mod tests {
         assert_eq!(countdown_text(1.5), "1");
         assert_eq!(countdown_text(1.0), "1");
         assert_eq!(countdown_text(0.999), "", "the fight has begun");
+    }
+
+    /// The countdown group's `Background` (0.4 black panel) and `Border` bodies
+    /// are saved `Visible false`; they follow the group, or the box has no panel.
+    #[test]
+    fn the_countdown_panel_and_border_show_with_the_group() {
+        let Some(game) = game_dir() else { return };
+        let mut screen = load(&game.join("UI")).unwrap();
+        let root = screen
+            .blocks
+            .iter_mut()
+            .find_map(|b| match b {
+                ra2fmt::gib::Block::Widget(w) => Some(w),
+                _ => None,
+            })
+            .unwrap();
+        let bodies = |root: &Widget| {
+            let group = ra2ui::workshop::find(root, COUNTDOWN_GROUP).unwrap();
+            group
+                .attachments
+                .iter()
+                .filter_map(|a| a.body.as_ref())
+                .map(|b| b.visible())
+                .collect::<Vec<_>>()
+        };
+        hud(root, &report(), MatchState::Fight, 3.0, 0.0);
+        let hidden = bodies(root);
+        assert!(!hidden.is_empty() && hidden.iter().all(|v| !v));
+        hud(root, &report(), MatchState::Countdown, 0.0, 3.2);
+        let shown = bodies(root);
+        assert_eq!(shown.len(), hidden.len());
+        assert!(shown.iter().all(|v| *v), "panel and border are drawn");
     }
 
     /// Countdown and time groups swap exactly as their own notes say, and a
