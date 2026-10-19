@@ -386,7 +386,11 @@ impl App {
     /// The coordinate space clicks are mapped into: the shell's native screen
     /// size, or the fixed design size for the tools that still lay out at it.
     fn input_space(&self) -> [f32; 2] {
-        if self.session.is_some() || self.builder.is_some() || self.hq.is_some() {
+        if let (true, Some(window)) = (self.session.is_some(), &self.window) {
+            // The match lays its windows out natively on the window.
+            let [w, h] = window_size(window);
+            [w as f32, h as f32]
+        } else if self.builder.is_some() || self.hq.is_some() {
             SHELL_SIZE
         } else {
             self.shell.size()
@@ -488,6 +492,7 @@ impl App {
         }
         if let Some(session) = &mut self.session {
             self.audio.stop_music("the match is on screen");
+            session.set_layout(size);
             let scene = match session.scene() {
                 Ok(scene) => scene,
                 Err(error) => {
@@ -725,24 +730,12 @@ impl ApplicationHandler for App {
                             event_loop.exit();
                             return;
                         }
-                        let mut quit = false;
                         if let Some(session) = &mut self.session {
-                            if session.matched.state() == MatchState::Results {
-                                quit = true;
-                            } else {
-                                session.toggle_pause();
-                            }
+                            // `0x475ee0`: Esc skips the intro, opens/closes the
+                            // pause popup, and is ignored once the match is over.
+                            session.escape();
                         } else {
                             event_loop.exit();
-                        }
-                        if quit {
-                            ra2script::set_paused(false);
-                            let report = self.session.as_ref().map(|s| s.report());
-                            self.session = None;
-                            if let (Some(builder), Some(report)) = (&mut self.builder, report) {
-                                builder.set_report(report);
-                            }
-                            println!("match over; back on {}", self.shell.screen_id());
                         }
                         if let Some(window) = &self.window {
                             window.request_redraw();
@@ -869,7 +862,13 @@ impl ApplicationHandler for App {
                             Some("resume button") => {
                                 session.toggle_pause();
                             }
-                            Some("quit button") | Some("end match button") => quit = true,
+                            // result 8: the game exits (`0x4122d0`).
+                            Some("quit button") => {
+                                event_loop.exit();
+                                return;
+                            }
+                            // result 4: back to the screen the match came from.
+                            Some("end match button") => quit = true,
                             _ => {}
                         }
                     }

@@ -210,6 +210,15 @@ pub struct Session {
 
 /// The values the HUD needs that are not part of the match report: the camera
 /// name (and its 3 s window) and the local chat state.
+/// The effect of an Esc key press, see [`Session::escape`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Escape {
+    SkippedIntro,
+    Paused,
+    Resumed,
+    Ignored,
+}
+
 struct ScreenBind {
     camera: String,
     show_camera: bool,
@@ -222,6 +231,11 @@ struct Presentation {
     assets: UiAssets,
     hud: Gib,
     results: Option<Gib>,
+    /// The screen the windows lay out on: the target's own size. The original
+    /// lays every GUI window out natively at the display resolution
+    /// (`docs/28` §1), in the match as in the shell, so this is the window or
+    /// PNG size and the scenes need no scaling.
+    layout: [f32; 2],
 }
 
 impl Presentation {
@@ -234,7 +248,12 @@ impl Presentation {
             assets,
             hud,
             results: None,
+            layout: SHELL_SIZE,
         })
+    }
+
+    fn scene_size(&self) -> [u32; 2] {
+        [self.layout[0].round() as u32, self.layout[1].round() as u32]
     }
 
     fn root_mut(&mut self) -> Option<&mut Widget> {
@@ -259,10 +278,10 @@ impl Presentation {
         let bound = hud::hud(root, report, state, clock, countdown_left);
         hud::set_camera(root, &bind.camera, bind.show_camera);
         hud::set_chat(root, bind.chat_open, &bind.chat_entry);
-        let placed = ra2ui::resolve_with(&self.hud, SHELL_SIZE, Some(self.assets.faces()));
+        let placed = ra2ui::resolve_with(&self.hud, self.layout, Some(self.assets.faces()));
         // The scene's coordinates are the design screen, not the target: the
-        // renderer's `fit` maps 1280×1005 into the window or PNG.
-        let size = [SHELL_SIZE[0] as u32, SHELL_SIZE[1] as u32];
+        // renderer's `fit` is then the identity (layout == target).
+        let size = self.scene_size();
         let scene = self.assets.scene(&placed, size);
         Ok((bound, scene))
     }
@@ -296,8 +315,8 @@ impl Presentation {
             self.results = Some(screen);
         }
         let screen = self.results.as_ref().unwrap();
-        let placed = ra2ui::resolve_with(screen, SHELL_SIZE, Some(self.assets.faces()));
-        Ok(self.assets.scene(&placed, scensize()))
+        let placed = ra2ui::resolve_with(screen, self.layout, Some(self.assets.faces()));
+        Ok(self.assets.scene(&placed, self.scene_size()))
     }
 
     /// The HUD with the pause dialog over it.
@@ -316,10 +335,10 @@ impl Presentation {
         hud::hud(root, report, state, clock, countdown_left);
         hud::set_camera(root, &bind.camera, bind.show_camera);
         hud::set_chat(root, bind.chat_open, &bind.chat_entry);
-        let mut placed = ra2ui::resolve_with(&self.hud, SHELL_SIZE, Some(self.assets.faces()));
-        let dialog_placed = ra2ui::resolve_with(dialog, SHELL_SIZE, Some(self.assets.faces()));
+        let mut placed = ra2ui::resolve_with(&self.hud, self.layout, Some(self.assets.faces()));
+        let dialog_placed = ra2ui::resolve_with(dialog, self.layout, Some(self.assets.faces()));
         placed.extend(dialog_placed);
-        Ok(self.assets.scene(&placed, scensize()))
+        Ok(self.assets.scene(&placed, self.scene_size()))
     }
 }
 
@@ -331,7 +350,9 @@ impl Session {
         // before `Match::new`.
         std::env::set_var("RA2_HAZARDS", "0");
         let matched = Match::new(options.match_config()).map_err(|e| e.to_string())?;
-        Session::with_match(&options.game, matched)
+        let mut session = Session::with_match(&options.game, matched)?;
+        session.set_layout(options.size);
+        Ok(session)
     }
 
     /// A live match and its shipped screens from an already-built [`Match`].
@@ -607,6 +628,42 @@ impl Session {
         }
     }
 
+    /// What Esc does in a match (`0x475ee0`): while the arena intro plays it
+    /// skips it (`0x477900`); once the match is over (`+0x1d5`) it is ignored;
+    /// otherwise it opens the `in game popup win` dialog (and pauses), and with
+    /// the dialog open it closes it again (resume). `quit_game` is what the
+    /// dialog's `quit button` does (result 8: `0x4122d0`, the game exits);
+    /// `end match button` is result 4 (back to `exhibition_setup_win`, or the
+    /// Team HQ's flow for an event).
+    pub fn escape(&mut self) -> Escape {
+        match self.matched.state() {
+            MatchState::Results | MatchState::Over => Escape::Ignored,
+            MatchState::Intro => {
+                self.skip_intro();
+                Escape::SkippedIntro
+            }
+            _ => {
+                self.toggle_pause();
+                if self.paused {
+                    Escape::Paused
+                } else {
+                    Escape::Resumed
+                }
+            }
+        }
+    }
+
+    /// Lay the windows out natively on a target of `size` pixels. Windows are
+    /// resolved at every frame, so a resize takes effect on the next one.
+    pub fn set_layout(&mut self, size: [u32; 2]) {
+        self.presentation.layout = [size[0].max(1) as f32, size[1].max(1) as f32];
+    }
+
+    /// The screen the HUD windows are laid out on.
+    pub fn layout(&self) -> [f32; 2] {
+        self.presentation.layout
+    }
+
     pub fn toggle_pause(&mut self) {
         if self.matched.state() == MatchState::Results {
             return;
@@ -749,7 +806,7 @@ impl Session {
         }
         let placed = ra2ui::resolve_with(
             &self.dialog,
-            SHELL_SIZE,
+            self.presentation.layout,
             Some(self.presentation.assets.faces()),
         );
         let path = ra2ui::input::hit_control(&placed, point[0], point[1])?;
@@ -774,8 +831,11 @@ impl Session {
             let _ = self.presentation.results_scene(&report);
         }
         let screen = self.presentation.results.as_ref()?;
-        let placed =
-            ra2ui::resolve_with(screen, SHELL_SIZE, Some(self.presentation.assets.faces()));
+        let placed = ra2ui::resolve_with(
+            screen,
+            self.presentation.layout,
+            Some(self.presentation.assets.faces()),
+        );
         let path = ra2ui::input::hit_control(&placed, point[0], point[1])?;
         let names = names_on_path(&placed, &path);
         for wanted in ["continue button"] {
@@ -901,7 +961,7 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
                     let dialog = session.dialog.clone();
                     let placed = ra2ui::resolve_with(
                         &dialog,
-                        SHELL_SIZE,
+                        session.presentation.layout,
                         Some(session.presentation.assets.faces()),
                     );
                     button_point(&placed, "quit button")
@@ -1353,10 +1413,6 @@ fn button_point(placed: &[ra2ui::Placement<'_>], name: &str) -> Option<[f32; 2]>
     None
 }
 
-fn scensize() -> [u32; 2] {
-    [SHELL_SIZE[0] as u32, SHELL_SIZE[1] as u32]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1550,6 +1606,61 @@ mod tests {
 
     /// The four result slots are filled from the report's own rows: the points
     /// and bot name land in slots 1 and 2, and slots 3/4 stay empty for a duel.
+    /// Esc in the original (`0x475ee0`): pause popup on/off during play, ignored
+    /// once the match is over.
+    #[test]
+    fn escape_toggles_the_pause_dialog_and_is_ignored_in_the_results() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options =
+            Options::new(&game, None, Vec::new(), Some(3.0), None, None, [640, 502]).unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        session.skip_intro();
+        while session.matched.state() != MatchState::Fight {
+            session.step();
+        }
+        assert_eq!(session.escape(), Escape::Paused);
+        assert!(session.paused);
+        assert_eq!(session.escape(), Escape::Resumed);
+        assert!(!session.paused);
+        while session.matched.state() != MatchState::Results {
+            session.step();
+        }
+        assert_eq!(session.escape(), Escape::Ignored);
+        assert!(!session.paused);
+    }
+
+    /// The match windows lay out natively on the target (the original has no
+    /// design size): at 1024x768 the countdown group is the 210x96 box the
+    /// `arena-*-countdown` captures show at x 407..617, y 336..432, and the
+    /// scene is exactly the target size so the renderer's fit is the identity.
+    #[test]
+    fn the_match_windows_lay_out_natively_on_the_target() {
+        let Some(game) = game_dir() else { return };
+        let mut presentation = Presentation::open(&game).unwrap();
+        presentation.layout = [1024.0, 768.0];
+        let bind = ScreenBind {
+            camera: "Watch 1".into(),
+            show_camera: true,
+            chat_open: false,
+            chat_entry: String::new(),
+        };
+        let (_, scene) = presentation
+            .hud_scene(&report(), MatchState::Countdown, 0.0, 2.5, &bind)
+            .unwrap();
+        assert_eq!(scene.size, [1024, 768]);
+        let placed = ra2ui::resolve_with(&presentation.hud, presentation.layout, None);
+        let group = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "countdown group")
+            .expect("the countdown group");
+        assert_eq!(
+            [group.frame.x, group.frame.y, group.frame.w, group.frame.h],
+            [407.0, 336.0, 210.0, 96.0]
+        );
+    }
+
     #[test]
     fn the_results_screen_takes_the_reports_slots() {
         let Some(game) = game_dir() else { return };
