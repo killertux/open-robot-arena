@@ -197,7 +197,18 @@ pub struct Shell {
     new_teams: Vec<teams::Roster>,
     /// The team the open delete box is about.
     pending_delete: Option<usize>,
+    /// The schedule row the open join-event window is about (`FUN_00500c40`).
+    join_event: Option<usize>,
+    /// Enters an event in the application's career and returns the Team HQ's
+    /// refreshed data (the bracket exists from then on).
+    enter_hook: Option<EnterHook>,
+    /// A message box waiting to open: `(caption, body)` (`FUN_005e5e40`).
+    pending_message: Option<(String, String)>,
 }
+
+/// What the application does when the player enters an event: the event's
+/// `Events.txt` index in, the Team HQ's data out.
+pub type EnterHook = Box<dyn FnMut(usize) -> Option<ra2ui::hq::View>>;
 
 /// `FUN_005e5ba0`'s screen switch: black overlays of 0.2 s each way. On a
 /// screen's first visit `FUN_004e6bd0` first shows the `common/loading.gib`
@@ -266,6 +277,9 @@ impl Shell {
             deleted_teams: Default::default(),
             new_teams: Vec::new(),
             pending_delete: None,
+            join_event: None,
+            enter_hook: None,
+            pending_message: None,
         })
     }
 
@@ -344,6 +358,12 @@ impl Shell {
 
     /// Give the Team HQ its career: the tabs are filled from it as they load.
     /// The robots' own snapshots are registered with the shell's previews.
+    /// Let the application's career take the entered event (the bracket is
+    /// drawn from its answer).
+    pub fn set_enter_hook(&mut self, hook: EnterHook) {
+        self.enter_hook = Some(hook);
+    }
+
     pub fn set_hq_view(&mut self, view: ra2ui::hq::View) {
         for row in &view.robots {
             if let Some(preview) = &row.preview_image {
@@ -908,6 +928,13 @@ impl Shell {
             self.open_picker(side, panel, x, y)?;
             return Ok(self.finish(step));
         }
+        if self.windows.is_empty() {
+            if let Some(index) = self.event_cell_at(x, y) {
+                step.hit = "event grid".to_string();
+                self.click_event_cell(index)?;
+                return Ok(self.finish(step));
+            }
+        }
         if !self.windows.is_empty() {
             // A modal window owns the input: a click outside its controls is
             // swallowed, not passed to the screen under it.
@@ -941,6 +968,7 @@ impl Shell {
                 }
                 None => {}
             }
+            self.refresh_join_window();
             return Ok(self.finish(step));
         }
         let transition = match &mut self.screen {
@@ -1022,6 +1050,8 @@ impl Shell {
             if let Some(slot) = self.pending_delete.take() {
                 self.deleted_teams.insert(slot);
             }
+        } else if window.key.eq_ignore_ascii_case("teamhq/joinevent.gib") {
+            return self.enter_event(window);
         } else if window.key.eq_ignore_ascii_case("teamhq/editteam.gib") {
             let read = |name: &str| {
                 window
@@ -1118,6 +1148,41 @@ impl Shell {
                     }
                 }
             }
+            if let (true, Some((caption, body))) = (
+                target.eq_ignore_ascii_case("common/messagebox.gib"),
+                self.pending_message.take(),
+            ) {
+                // `FUN_005e5e40(caption, text, 1)`: an OK-only box.
+                for block in page.gib.blocks.iter_mut() {
+                    let Block::Widget(root) = block else { continue };
+                    for (name, text) in [("caption bar", &caption), ("text box", &body)] {
+                        if let Some(w) = workshop::find_mut(root, name) {
+                            set_text(w, text);
+                        }
+                    }
+                    for name in ["yes button", "no button", "cancel button"] {
+                        if let Some(w) = workshop::find_mut(root, name) {
+                            ra2ui::input::set_field(w, "Visible", "false");
+                        }
+                    }
+                }
+                self.windows.push(page);
+                return Ok(());
+            }
+            if target.eq_ignore_ascii_case("teamhq/joinevent.gib") {
+                if let (Some(view), Some(index)) = (&self.hq_view, self.join_event) {
+                    if let Some(row) = view.events.get(index) {
+                        let selected = (!view.robots.is_empty()).then_some(0);
+                        ra2ui::event_screens::fill_join_window(
+                            &self.ui,
+                            &mut page.gib,
+                            &row.event,
+                            &view.robots,
+                            selected,
+                        )?;
+                    }
+                }
+            }
             if target.eq_ignore_ascii_case("common/messagebox.gib") {
                 // The delete box (FUN_004ec110): `Delete Team`, `Are you sure
                 // you want to delete <team>?`, Yes/No only.
@@ -1157,6 +1222,160 @@ impl Shell {
         } else {
             Err(format!("{target} is not a window"))
         }
+    }
+
+    /// The schedule cell a point is in, while the Team HQ shows the Events tab.
+    fn event_cell_at(&self, x: f32, y: f32) -> Option<usize> {
+        let Screen::Page(page) = &self.screen else {
+            return None;
+        };
+        if self.hq_view.is_none() || !page.key.eq_ignore_ascii_case(ra2ui::hq::SCREEN) {
+            return None;
+        }
+        let placed = ra2ui::resolve_with(&page.gib, self.size, Some(&self.fonts));
+        let grid = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == ra2ui::hq::EVENT_GRID)?;
+        let geometry = ra2ui::Grid::from_widget(grid.widget)?;
+        if !grid.frame.contains_point(x, y) {
+            return None;
+        }
+        let columns = geometry.columns.max(1) as usize;
+        for row in 0..geometry.rows.max(1) as usize {
+            for column in 0..columns {
+                if geometry
+                    .cell(grid.frame, row as i32, column as i32)
+                    .contains_point(x, y)
+                {
+                    let index = row * columns + column;
+                    return (index < self.hq_view.as_ref()?.events.len()).then_some(index);
+                }
+            }
+        }
+        None
+    }
+
+    /// The schedule's click handler `FUN_00500c40` (bound at `0x4fdc4e`): no
+    /// event in progress opens the join window, the event in progress opens its
+    /// bracket, any other cell says one event at a time.
+    fn click_event_cell(&mut self, index: usize) -> Result<(), String> {
+        use ra2ui::hq::EventState;
+        let Some(view) = &self.hq_view else {
+            return Ok(());
+        };
+        let current = view
+            .events
+            .iter()
+            .position(|r| r.state == EventState::InProgress);
+        match current {
+            None => {
+                self.join_event = Some(index);
+                self.open_window("teamhq/joinevent.gib")
+            }
+            Some(current) if current == index => {
+                let row = view.events[index].clone();
+                let gib = ra2ui::event_screens::bracket_screen(
+                    &self.ui,
+                    &row.event,
+                    view.bracket.as_ref(),
+                )?;
+                self.show_bracket(gib);
+                Ok(())
+            }
+            Some(_) => {
+                self.pending_message = Some((
+                    ra2ui::event_screens::CAPTION.to_string(),
+                    ra2ui::event_screens::ONE_EVENT_AT_A_TIME.to_string(),
+                ));
+                self.open_window("common/messagebox.gib")
+            }
+        }
+    }
+
+    fn show_bracket(&mut self, gib: Gib) {
+        let key = "teamhq/event_bracket.gib";
+        let page = Page {
+            key: key.to_string(),
+            gib,
+            content: Vec::new(),
+            slot_base: BTreeMap::new(),
+            scroll: BTreeMap::new(),
+        };
+        self.fade = None;
+        self.switch_to(Screen::Page(page), key);
+    }
+
+    /// `FUN_00482590` after a click in the join window: the chosen robot's name.
+    fn refresh_join_window(&mut self) {
+        let Some(window) = self.windows.last_mut() else {
+            return;
+        };
+        if !window.key.eq_ignore_ascii_case("teamhq/joinevent.gib") {
+            return;
+        }
+        let Some(view) = &self.hq_view else {
+            return;
+        };
+        let selected = window.gib.blocks.iter().find_map(|b| match b {
+            Block::Widget(root) => workshop::find(root, "robot grid").and_then(|g| {
+                ra2ui::input::field_of(g, "_SelectedColumn").and_then(|v| v.parse::<usize>().ok())
+            }),
+            _ => None,
+        });
+        let name = selected
+            .and_then(|i| view.robots.get(i))
+            .map(|r| r.name.clone())
+            .unwrap_or_default();
+        for block in window.gib.blocks.iter_mut() {
+            if let Block::Widget(root) = block {
+                if let Some(w) = workshop::find_mut(root, "robot name") {
+                    set_text(w, &name);
+                }
+            }
+        }
+    }
+
+    /// `FUN_00481f20`: with a robot chosen the join window closes and the
+    /// bracket opens for the event; the event is now the one in progress.
+    fn enter_event(&mut self, window: &Page) -> Result<(), String> {
+        use ra2ui::hq::EventState;
+        let chosen = window.gib.blocks.iter().find_map(|b| match b {
+            Block::Widget(root) => workshop::find(root, "robot grid")
+                .and_then(|g| ra2ui::input::field_of(g, "_SelectedColumn"))
+                .and_then(|v| v.parse::<usize>().ok()),
+            _ => None,
+        });
+        let (Some(index), Some(_robot)) = (self.join_event.take(), chosen) else {
+            return Ok(());
+        };
+        let Some(view) = &mut self.hq_view else {
+            return Ok(());
+        };
+        for (i, row) in view.events.iter_mut().enumerate() {
+            if row.state != EventState::Completed {
+                row.state = if i == index {
+                    EventState::InProgress
+                } else {
+                    EventState::Disabled
+                };
+            }
+        }
+        let id = view.events[index].id;
+        if let Some(hook) = &mut self.enter_hook {
+            if let Some(fresh) = hook(id) {
+                self.hq_view = Some(fresh);
+                self.hq_filled = None;
+            }
+        }
+        let Some(view) = &self.hq_view else {
+            return Ok(());
+        };
+        let row = view.events[view.event_index(id).unwrap_or(index)].clone();
+        let gib =
+            ra2ui::event_screens::bracket_screen(&self.ui, &row.event, view.bracket.as_ref())?;
+        self.show_bracket(gib);
+        Ok(())
     }
 
     /// How many modal windows are open over the screen.

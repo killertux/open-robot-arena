@@ -123,6 +123,7 @@ use ra2fmt::gib::{Attachment, AttachmentKind, Block, Gib, Length, Widget, Widget
 pub mod arenas;
 pub mod cells;
 pub mod components;
+pub mod event_screens;
 pub mod events;
 pub mod hq;
 pub mod input;

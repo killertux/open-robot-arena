@@ -76,6 +76,7 @@ pub const WINDOWS: &[&str] = &[
     "common/credits.gib",
     "common/messagebox.gib",
     "teamhq/editteam.gib",
+    "teamhq/joinevent.gib",
     "help/helpframe.gib",
 ];
 
@@ -210,6 +211,18 @@ pub const BINDINGS: &[Binding] = &[
         name: "cancel button",
         action: Action::Close,
         at: "message box: Cancel",
+    },
+    Binding {
+        screen: "teamhq/joinevent.gib",
+        name: "cancel button",
+        action: Action::Close,
+        at: "JoinEventWindow 0x481b60 binds cancel button to 0x468a60 (close)",
+    },
+    Binding {
+        screen: "teamhq/joinevent.gib",
+        name: "enter event button",
+        action: Action::Confirm,
+        at: "JoinEventWindow 0x481b60 -> FUN_00481f20: with a robot chosen, close, build the event bracket window, show it",
     },
     Binding {
         screen: "teamhq/editteam.gib",

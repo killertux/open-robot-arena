@@ -331,6 +331,9 @@ impl App {
         if let Some(view) = crate::hq_mode::shell_view(game) {
             shell.set_hq_view(view);
         }
+        if let Some(hook) = crate::hq_mode::shell_enter_hook(game) {
+            shell.set_enter_hook(hook);
+        }
         shell.set_animate(true);
         let frames = FrameRenderer::open(game)?;
         let cfg = crate::options::read_cfg(game);
