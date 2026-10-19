@@ -945,9 +945,7 @@ impl ApplicationHandler for App {
                 match self.shell.click(point[0], point[1]) {
                     Ok(step) => {
                         println!("{}", crate::describe(&step));
-                        if crate::activated(&step) {
-                            self.audio.click();
-                        }
+                        self.audio.shell_step(&step);
                         // The options window applies on OK, restores on Cancel.
                         match step.note.as_deref() {
                             Some(crate::options::OPEN_NOTE) => {

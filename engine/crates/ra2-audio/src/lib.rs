@@ -656,6 +656,24 @@ impl Audio {
         self.apply_script_gain(id, gain);
     }
 
+    /// Change the playback rate of a sounding script voice (DirectSound
+    /// `SetFrequency`): `1.0` is the file's own pitch. Ignored when the handle
+    /// is not sounding.
+    pub fn set_script_speed(&mut self, id: u64, speed: f32) {
+        let speed = if speed.is_finite() {
+            speed.clamp(0.1, 8.0)
+        } else {
+            1.0
+        };
+        let clock = self.clock;
+        if let Some(cap) = &mut self.capture {
+            cap.set_speed(clock, id, speed);
+        }
+        if let Some(player) = self.scripts.get(&id) {
+            player.set_speed(speed);
+        }
+    }
+
     /// `plus.fadeInToLoop`'s fade: ramp the handle's level from its current
     /// value to `hundredths_db` over `ms` milliseconds.
     pub fn fade_script_to(&mut self, id: u64, hundredths_db: i32, ms: f32) {
@@ -1231,5 +1249,59 @@ SoundMuted=0\r\n\
         let loud: f32 = out[48_000..60_000].iter().map(|s| s.abs()).sum();
         assert_eq!(quiet, 0.0, "nothing before the click starts at 0.5 s");
         assert!(loud > 0.1, "the click is in the mix");
+    }
+
+    /// A 16-bit mono 48 kHz WAV of a constant-amplitude ramp, `n` samples.
+    fn write_ramp(path: &Path, n: usize) {
+        use std::io::Write;
+        let mut f = File::create(path).unwrap();
+        let data = (n * 2) as u32;
+        f.write_all(b"RIFF").unwrap();
+        f.write_all(&(36 + data).to_le_bytes()).unwrap();
+        f.write_all(b"WAVEfmt ").unwrap();
+        f.write_all(&16u32.to_le_bytes()).unwrap();
+        f.write_all(&1u16.to_le_bytes()).unwrap();
+        f.write_all(&1u16.to_le_bytes()).unwrap();
+        f.write_all(&48_000u32.to_le_bytes()).unwrap();
+        f.write_all(&96_000u32.to_le_bytes()).unwrap();
+        f.write_all(&2u16.to_le_bytes()).unwrap();
+        f.write_all(&16u16.to_le_bytes()).unwrap();
+        f.write_all(b"data").unwrap();
+        f.write_all(&data.to_le_bytes()).unwrap();
+        for i in 0..n {
+            let v = (i as f32 / n as f32 * 20_000.0) as i16;
+            f.write_all(&v.to_le_bytes()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_speed_change_bends_a_captured_voice() {
+        let path = std::env::temp_dir().join("ra2-audio-speed-ramp.wav");
+        write_ramp(&path, 48_000);
+        let mut audio = Audio::capturing();
+        let play = |audio: &mut Audio| {
+            audio
+                .play_script(
+                    1,
+                    &path,
+                    false,
+                    [0.0; 3],
+                    Listener::looking_forward([0.0; 3]),
+                    1.0,
+                )
+                .unwrap();
+        };
+        play(&mut audio);
+        let plain = audio.capture().unwrap().render(0.25);
+        // At unity, a quarter second reaches a quarter of the ramp.
+        let end_plain = plain[plain.len() - 2];
+        audio.set_script_speed(1, 2.0);
+        let fast = audio.capture().unwrap().render(0.25);
+        let end_fast = fast[fast.len() - 2];
+        assert!(
+            end_fast > end_plain * 1.8 && end_fast < end_plain * 2.2,
+            "{end_plain} vs {end_fast}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

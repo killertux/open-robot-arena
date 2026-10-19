@@ -159,9 +159,7 @@ fn finish_step(
     step: &Step,
 ) -> Result<(), String> {
     println!("{}", crate::describe(step));
-    if crate::activated(step) {
-        audio.click();
-    }
+    audio.shell_step(step);
     match step.note.as_deref() {
         Some(crate::options::OPEN_NOTE) => {
             if let Err(error) = settings.reload() {
@@ -254,9 +252,7 @@ mod tests {
         .map(str::to_string);
         let steps = apply_named_clicks(&mut shell, &names).unwrap();
         for step in &steps {
-            if crate::activated(step) {
-                audio.click();
-            }
+            audio.shell_step(step);
             audio.on_screen(&step.screen);
         }
         assert_eq!(shell.screen_id(), "botlab/botlabwin.gib");

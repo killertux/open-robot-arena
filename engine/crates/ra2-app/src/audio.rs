@@ -97,6 +97,8 @@ pub struct AudioSystem {
     events: Vec<String>,
     /// The script host's match time at the last drain, for the audio clock.
     last_match_time: Option<f32>,
+    /// How many crowd one-shots have been started (their ring of voice ids).
+    crowd_shots: u64,
 }
 
 impl AudioSystem {
@@ -123,6 +125,7 @@ impl AudioSystem {
             problems: Vec::new(),
             events: Vec::new(),
             last_match_time: None,
+            crowd_shots: 0,
         }
     }
 
@@ -172,6 +175,18 @@ impl AudioSystem {
             .max(0.0);
         let path = std::path::PathBuf::from(path);
         let capture = self.audio.capture().ok_or("not capturing")?;
+        // `RA2_AUDIO_TRACE=1` lists every voice with its start in the render's
+        // own time, to line a render up against a recording by ear and eye.
+        if std::env::var_os("RA2_AUDIO_TRACE").is_some() {
+            println!("audio-trace speed points: {}", capture.speed_points());
+            for (t, file) in capture.starts() {
+                println!(
+                    "audio-trace {:8.3}s {}",
+                    t - start,
+                    file.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+                );
+            }
+        }
         let mut samples = capture.render(start + seconds);
         samples.drain(
             ..((start * ra2_audio::capture::RENDER_RATE as f32) as usize * 2).min(samples.len()),
@@ -251,6 +266,104 @@ impl AudioSystem {
                 }),
                 SoundCue::Critical { .. } => self.ui(UiSound::CriticalHit),
                 SoundCue::Chat => self.ui(UiSound::Chat),
+                SoundCue::Fire { path, position } => {
+                    // Centred like every match effect (see `Impact`).
+                    let _ = position;
+                    match ra2_audio::resolve_game_path(&self.game, &path) {
+                        Some(file) => {
+                            if let Err(error) = self.audio.play_2d(&file, 1.0) {
+                                self.problems.push(format!("fire: {error}"));
+                            }
+                        }
+                        None => self
+                            .problems
+                            .push(format!("fire: {path} is not in the game")),
+                    }
+                }
+                SoundCue::Force { path } => match ra2_audio::resolve_game_path(&self.game, path) {
+                    Some(file) => {
+                        if let Err(error) = self.audio.play_2d(&file, 1.0) {
+                            self.problems.push(format!("force: {error}"));
+                        }
+                    }
+                    None => self
+                        .problems
+                        .push(format!("force: {path} is not in the game")),
+                },
+                SoundCue::ImmobileTick => self.ui(UiSound::ImmobileWarning),
+                SoundCue::MotorPitch { key, speed } => self.audio.set_script_speed(key, speed),
+                SoundCue::CrowdStop => {
+                    for mood in 0..crate::crowd::LOOPS.len() as u8 {
+                        let key = crate::match_sounds::crowd_key(mood);
+                        if self.audio.script_is_live(key) {
+                            self.audio.fade_out_script(key, 1000.0);
+                        }
+                    }
+                    let key = crate::match_sounds::crowd_shout_key();
+                    if self.audio.script_is_live(key) {
+                        self.audio.fade_out_script(key, 1000.0);
+                    }
+                }
+                SoundCue::CrowdLoop { mood, on } => {
+                    let key = crate::match_sounds::crowd_key(mood);
+                    if on {
+                        let Some(name) = crate::crowd::LOOPS.get(mood as usize) else {
+                            continue;
+                        };
+                        match ra2_audio::resolve_game_path(&self.game, name) {
+                            Some(file) => {
+                                self.audio.set_script_volume(key, 0);
+                                if let Err(error) = self
+                                    .audio
+                                    .play_script(key, &file, true, [0.0; 3], listener, 1.0)
+                                {
+                                    self.problems.push(format!("crowd: {error}"));
+                                }
+                            }
+                            None => self.problems.push(format!("crowd: {name} is missing")),
+                        }
+                    } else {
+                        // A short fade keeps the cut from clicking.
+                        self.audio.fade_out_script(key, 50.0);
+                    }
+                }
+                SoundCue::CrowdOneShot { path } => {
+                    match ra2_audio::resolve_game_path(&self.game, path) {
+                        Some(file) => {
+                            self.crowd_shots += 1;
+                            let key = crate::match_sounds::crowd_shot_key(self.crowd_shots);
+                            self.audio.set_script_volume(key, 0);
+                            if let Err(error) = self
+                                .audio
+                                .play_script(key, &file, false, [0.0; 3], listener, 1.0)
+                            {
+                                self.problems.push(format!("crowd: {error}"));
+                            }
+                        }
+                        None => self.problems.push(format!("crowd: {path} is missing")),
+                    }
+                }
+                SoundCue::CrowdLoopShout { path } => {
+                    match ra2_audio::resolve_game_path(&self.game, path) {
+                        Some(file) => {
+                            let key = crate::match_sounds::crowd_shout_key();
+                            self.audio.set_script_volume(key, 0);
+                            if let Err(error) = self
+                                .audio
+                                .play_script(key, &file, true, [0.0; 3], listener, 1.0)
+                            {
+                                self.problems.push(format!("crowd: {error}"));
+                            }
+                        }
+                        None => self.problems.push(format!("crowd: {path} is missing")),
+                    }
+                }
+                SoundCue::CrowdFadeShout { ms } => {
+                    let key = crate::match_sounds::crowd_shout_key();
+                    if self.audio.script_is_live(key) {
+                        self.audio.fade_out_script(key, ms);
+                    }
+                }
                 SoundCue::Motor {
                     key,
                     on,
@@ -365,6 +478,21 @@ impl AudioSystem {
     /// category's (`SoundVolume`, `SoundMuted`), because it is a 2D sound.
     pub fn click(&mut self) {
         self.ui(UiSound::Click);
+    }
+
+    /// The sounds a shell click makes: the button class's click when a control
+    /// was activated (`crate::activated`), and the control's own sound on top.
+    /// Today only the lobby's `eject button` has one (`eject.wav`, `0x47d3f2`);
+    /// the snapshot and point-plotted sounds wait for screens that do not
+    /// exist yet.
+    pub fn shell_step(&mut self, step: &ra2_shell::Step) {
+        if !crate::activated(step) {
+            return;
+        }
+        self.click();
+        if step.hit == "eject button" || step.hit_widget() == Some("eject button") {
+            self.ui(UiSound::Eject);
+        }
     }
 
     /// Drain this tick's script sounds into the mixer, heard from `listener`.
@@ -548,6 +676,33 @@ mod tests {
         audio.apply_cfg(&muted);
         audio.click();
         assert_eq!(audio.audio.play_log().last().unwrap().gain, 0.0);
+    }
+
+    #[test]
+    fn an_eject_click_plays_the_click_and_the_eject_sound() {
+        let Some(game) = game_dir() else { return };
+        let mut audio = AudioSystem::new_silent(&game, &cfg_with_unity_volumes());
+        let step = |hit: &str| ra2_shell::Step {
+            command: "click".into(),
+            hit: hit.into(),
+            note: None,
+            screen: "exhibition/exhib_setup.gib".into(),
+            content: None,
+            tab: None,
+            step: None,
+            point: [0.0, 0.0],
+        };
+        audio.shell_step(&step("nothing"));
+        assert!(audio.audio.play_log().is_empty());
+        audio.shell_step(&step("eject button"));
+        let paths: Vec<_> = audio
+            .audio
+            .play_log()
+            .entries()
+            .iter()
+            .map(|e| e.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(paths, ["button_click.wav", "eject.wav"]);
     }
 
     #[test]

@@ -50,6 +50,9 @@ struct Voice {
     gain: Vec<(f32, f32)>,
     /// Seconds into the file at which playback starts.
     offset: f32,
+    /// `(time, playback rate)` points: a pitch change (`SetFrequency`) is a
+    /// rate change of the whole voice. Empty means unity.
+    speed: Vec<(f32, f32)>,
 }
 
 /// The recorded timeline.
@@ -81,6 +84,7 @@ impl Capture {
             kind,
             gain: vec![(t, gain)],
             offset: 0.0,
+            speed: Vec::new(),
         });
         if let Some(id) = script_id {
             self.live_script.insert(id, index);
@@ -99,6 +103,18 @@ impl Capture {
         if let Some(voice) = index.and_then(|i| self.voices.get_mut(i)) {
             if voice.stop.is_none() {
                 voice.gain.push((t, gain));
+            }
+        }
+    }
+
+    pub(crate) fn set_speed(&mut self, t: f32, script_id: u64, speed: f32) {
+        let index = self.live_script.get(&script_id).copied();
+        if let Some(voice) = index.and_then(|i| self.voices.get_mut(i)) {
+            if voice.stop.is_none() {
+                if voice.speed.is_empty() {
+                    voice.speed.push((voice.start, 1.0));
+                }
+                voice.speed.push((t, speed));
             }
         }
     }
@@ -133,6 +149,11 @@ impl Capture {
     /// The number of voices started.
     pub fn voice_count(&self) -> usize {
         self.voices.len()
+    }
+
+    /// How many playback-rate points were recorded across all voices.
+    pub fn speed_points(&self) -> usize {
+        self.voices.iter().map(|v| v.speed.len()).sum()
     }
 
     /// Start times and paths, for a report.
@@ -173,6 +194,10 @@ impl Capture {
             return;
         }
         let mut gi = 0usize;
+        let mut si = 0usize;
+        // Position in input frames; advanced by the current rate each output
+        // frame so a pitch change bends the voice instead of jumping it.
+        let mut pos = skip as f32;
         for f in first..stop {
             let t = f as f32 / RENDER_RATE as f32;
             while gi + 1 < voice.gain.len() && voice.gain[gi + 1].0 <= t {
@@ -189,7 +214,27 @@ impl Capture {
             } else {
                 voice.gain[gi].1
             };
-            let pos = (t - voice.start) * rate as f32 + skip as f32;
+            let speed = if voice.speed.is_empty() {
+                1.0
+            } else {
+                while si + 1 < voice.speed.len() && voice.speed[si + 1].0 <= t {
+                    si += 1;
+                }
+                if si + 1 < voice.speed.len() {
+                    let (t0, v0) = voice.speed[si];
+                    let (t1, v1) = voice.speed[si + 1];
+                    if t1 > t0 {
+                        v0 + (v1 - v0) * ((t - t0) / (t1 - t0)).clamp(0.0, 1.0)
+                    } else {
+                        v1
+                    }
+                } else {
+                    voice.speed[si].1
+                }
+            };
+            let here = pos;
+            pos += rate as f32 / RENDER_RATE as f32 * speed;
+            let pos = here;
             let mut i0 = pos as usize;
             let frac = pos - i0 as f32;
             if voice.looping {

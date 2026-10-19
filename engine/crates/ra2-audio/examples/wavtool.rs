@@ -320,6 +320,71 @@ fn wcorr(a: &str, b: &str) {
     );
 }
 
+/// `identify <ref.wav> <t> <dir>`: which wav under `dir` (recursively) best
+/// matches the reference around `t` seconds. Mono, 6 kHz, first 0.4 s of the
+/// candidate, searched over `t - 0.25 .. t + 0.25`; prints the best few.
+fn identify(reference: &str, t: f32, dir: &str) {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("wav")) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    let mono6k = |v: &[f32]| -> Vec<f32> {
+        v.chunks(16)
+            .map(|c| c.iter().step_by(2).sum::<f32>() / (c.len() / 2).max(1) as f32)
+            .collect()
+    };
+    let r = mono6k(&load(reference));
+    let mut files = Vec::new();
+    walk(std::path::Path::new(dir), &mut files);
+    let start = ((t - 0.25).max(0.0) * 6000.0) as usize;
+    let end = (((t + 0.25) * 6000.0) as usize).min(r.len());
+    let mut scored = Vec::new();
+    for f in files {
+        let Some(path) = f.to_str() else { continue };
+        let Ok(cand) = std::panic::catch_unwind(|| load(path)) else {
+            continue;
+        };
+        let c = mono6k(&cand);
+        let n = c.len().min(2400);
+        if n < 120 {
+            continue;
+        }
+        let c = &c[..n];
+        let ce: f32 = c.iter().map(|x| x * x).sum();
+        if ce < 1e-6 {
+            continue;
+        }
+        let mut best = (0.0f32, 0usize);
+        let mut lag = start;
+        while lag + n <= end.max(start + n) && lag + n <= r.len() {
+            let seg = &r[lag..lag + n];
+            let (mut dot, mut se) = (0.0f32, 0.0f32);
+            for i in 0..n {
+                dot += seg[i] * c[i];
+                se += seg[i] * seg[i];
+            }
+            let score = dot / (se * ce).sqrt().max(1e-9);
+            if score > best.0 {
+                best = (score, lag);
+            }
+            lag += 1;
+        }
+        scored.push((best.0, best.1 as f32 / 6000.0, path.to_string()));
+    }
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (s, at, p) in scored.iter().take(6) {
+        println!("{s:.3} at {at:.3}s  {p}");
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     match a.first().map(String::as_str) {
@@ -333,6 +398,7 @@ fn main() {
             a.get(3).and_then(|v| v.parse().ok()),
             a.get(4).and_then(|v| v.parse().ok()),
         ),
+        Some("identify") => identify(&a[1], a[2].parse().unwrap(), &a[3]),
         _ => eprintln!("usage: wavtool decode|stats|xcorr|spectra ..."),
     }
 }
