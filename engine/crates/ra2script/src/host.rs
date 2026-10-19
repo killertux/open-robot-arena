@@ -352,8 +352,14 @@ impl ScriptHost {
                 .iter()
                 .filter_map(|(i, brain)| {
                     if let Err(e) = brain.bind(py).call_method0("Tick") {
-                        report_once(&format!("brain {i} Tick failed: {e}"));
+                        report_once(&format!(
+                            "brain {i} Tick failed: {}",
+                            describe_python_error(py, e)
+                        ));
                         return None;
+                    }
+                    if trace_brains() {
+                        trace_brain(py, *i, brain);
                     }
                     let d = crate::plus::take_input_events(brain, py);
                     if d.is_none() {
@@ -487,6 +493,76 @@ impl ScriptHost {
         })
     }
 
+    /// The SmartZones robot `robot`'s brain registered (`RegisterSmartZone`),
+    /// `(name, id)`.
+    pub fn brain_smart_zones(&self, robot: usize) -> Vec<(String, i32)> {
+        Python::with_gil(|py| {
+            self.brains
+                .iter()
+                .filter(|(i, _)| *i == robot)
+                .flat_map(|(_, brain)| crate::plus::registered_zones(brain, py))
+                .collect()
+        })
+    }
+
+    /// `SmartZoneEvent(direction, id, robot, chassis)` to robot `robot`'s
+    /// brain: `other` (1-based) entered (`1`) or left (`-1`) its zone `id`.
+    pub fn send_smart_zone_event(
+        &self,
+        robot: usize,
+        direction: i32,
+        id: i32,
+        other: i32,
+        chassis: bool,
+    ) {
+        self.call_brains(Some(robot), "SmartZoneEvent", |py| {
+            (direction, id, other, chassis)
+                .into_pyobject(py)
+                .map(|t| t.into_any())
+        });
+    }
+
+    /// `LostComponent(id)` to robot `robot`'s brain.
+    pub fn send_lost_component(&self, robot: usize, component: i32) {
+        self.call_brains(Some(robot), "LostComponent", |py| {
+            (component,).into_pyobject(py).map(|t| t.into_any())
+        });
+        // A part coming off is also every brain's cue to refresh its sensors.
+        self.call_brains(None, "FractureEvent", |py| {
+            Ok(pyo3::types::PyTuple::empty(py).into_any())
+        });
+    }
+
+    /// `PlayerOut(id)` (0-based) to every brain.
+    pub fn send_player_out(&self, id: i32) {
+        self.call_brains(None, "PlayerOut", |py| {
+            (id,).into_pyobject(py).map(|t| t.into_any())
+        });
+    }
+
+    fn call_brains<F>(&self, robot: Option<usize>, method: &str, args: F)
+    where
+        F: Fn(Python<'_>) -> PyResult<Bound<'_, PyAny>>,
+    {
+        Python::with_gil(|py| {
+            for (i, brain) in &self.brains {
+                if robot.is_some_and(|r| r != *i) {
+                    continue;
+                }
+                let result = args(py).and_then(|a| {
+                    let a = a.downcast_into::<PyTuple>()?;
+                    brain.bind(py).call_method1(method, a)
+                });
+                if let Err(e) = result {
+                    report_once(&format!(
+                        "brain {i} {method} failed: {}",
+                        describe_python_error(py, e)
+                    ));
+                }
+            }
+        })
+    }
+
     /// Call the arena's `Tick`. The clock is [`crate::publish`]'s.
     pub fn tick_arena(&self, py: Python<'_>, _dt: f32) -> PyResult<bool> {
         let arena = crate::state()
@@ -541,6 +617,74 @@ fn describe_python_error(py: Python<'_>, e: PyErr) -> String {
         },
         Err(_) => e.to_string(),
     }
+}
+
+/// `RA2_AI_TRACE=1`: print what every brain decided on every tick (its tactic,
+/// the throttle and turn it set, the inputs it sent) to stderr. A diagnostic
+/// for the AI command path; off by default.
+fn trace_brains() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_AI_TRACE").is_ok_and(|v| v != "0"))
+}
+
+fn trace_brain(py: Python<'_>, robot: usize, brain: &Py<PyAny>) {
+    let b = brain.bind(py);
+    let attr = |name: &str| -> String {
+        b.getattr(name)
+            .and_then(|v| v.str().map(|s| s.to_string()))
+            .unwrap_or_else(|_| "-".to_string())
+    };
+    let tactic = b
+        .getattr("lastTactic")
+        .and_then(|t| t.getattr("name"))
+        .and_then(|n| n.str().map(|s| s.to_string()))
+        .unwrap_or_else(|_| "-".to_string());
+    let events = b
+        .downcast::<crate::plus::Ai>()
+        .map(|ai| format!("{:?}", ai.borrow().events))
+        .unwrap_or_default();
+    let (time, at) = {
+        let st = crate::state();
+        let at = st
+            .bot(robot as i32)
+            .map(|s| {
+                format!(
+                    "({:.2},{:.2}) h={:.2} v={:.2} w={:.2}",
+                    s.location.x,
+                    s.location.z,
+                    s.direction.x.atan2(s.direction.z),
+                    s.speed,
+                    s.turning
+                )
+            })
+            .unwrap_or_default();
+        (st.time, at)
+    };
+    // The route the brain would get to its nearest enemy right now.
+    let locals = pyo3::types::PyDict::new(py);
+    let _ = locals.set_item("_b", b);
+    let route = py
+        .run(
+            c_str!(
+                "import Arenas, plus\n\
+_e, _d = _b.GetNearestEnemy()\n\
+_a = Arenas.currentArena\n\
+_a.SetSearchRadius(_b.fRadius)\n\
+_p = None\n\
+if _e is not None:\n    _w = list(_a.GetPath(_b.GetLocation(), plus.getLocation(_e), False))\n    _h = [round(_b.GetHeadingTo(_a.FromGrid(x), False), 2) for x in _w]\n    _p = (_e, round(_d, 2), [(round(x[0], 1), round(x[1], 1)) for x in _w], _h, _a.IsStraightPathClear(_b.GetLocation(), plus.getLocation(_e), False))\n"
+            ),
+            None,
+            Some(&locals),
+        )
+        .and_then(|_| locals.get_item("_p"))
+        .map(|p| p.map(|p| p.to_string()).unwrap_or_default())
+        .unwrap_or_else(|e| format!("err {e}"));
+    eprintln!(
+        "ai t={time:.3} bot={robot} {at} tactic={tactic} throttle={} turn={} route={route} sensors={} events={events}",
+        attr("set_throttle"),
+        attr("set_turn_throttle"),
+        attr("sensors"),
+    );
 }
 
 /// Report a script fault once. A broken brain fails every tick, and a duel runs

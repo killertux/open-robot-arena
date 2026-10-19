@@ -41,6 +41,7 @@ pub mod ui;
 pub use arena::{Arena, ArenaData, ArenaDetail, Drive, HingeController, PrismaticController};
 pub use host::ScriptHost;
 pub use plus::{Ai, InputEvent};
+
 /// The audio backend, re-exported so a caller draining [`SoundQueue`] does not
 /// need a direct dependency on `ra2-audio`.
 pub use ra2_audio;
@@ -74,15 +75,31 @@ pub struct BotSnapshot {
     /// rotation)` — which is what `plus.rayTest` answers against: a part is
     /// rarely a ball, and the flame jet is supposed to touch what it hits.
     pub boxes: Vec<(Vec3, Vec3, Quat)>,
-    /// `(component, amount, time)` of the last blow this robot landed.
-    pub last_damage_done: (i32, f32, f32),
-    /// …and the last one it took.
-    pub last_damage_received: (i32, f32, f32),
+    /// The last blow this robot landed (`GetLastDamageDone`, robot `+0xc4`).
+    pub last_damage_done: DamageRecord,
+    /// …and the last one it took (`GetLastDamageReceived`, robot `+0xd8`).
+    pub last_damage_received: DamageRecord,
     /// `plus.isEliminated` — the original's robot state 3, which is a *different*
     /// state from a defeated robot: a robot taken out by falling off a tabletop
     /// is eliminated, while a robot whose chassis is gone is defeated.
     pub eliminated: bool,
 }
+
+/// One remembered hit, as `plus.AI.GetLastDamageDone/Received` hand it to the
+/// scripts: a 5-tuple `(component, amount, time, player, other component)`.
+///
+/// The record is five fields at robot `+0xc4` (done) / `+0xd8` (received):
+/// `+0` component, `+4` amount, `+8` the other player, `+0xc` the other
+/// player's component, `+0x10` the time; `FUN_004b9050`/`FUN_004b9130` build
+/// the tuple in the order `+0, +4, +0x10, +8, +0xc`. `AI/Spinner.py` reads
+/// `damage[3]` as "by player" ("component damaged, amount, at time, by
+/// player, by component"); for a blow *done*, `component` is the robot's own
+/// part that landed it — `CheckForWeaponHits` matches it against the weapon
+/// list — and the player/component are the victim's.
+pub type DamageRecord = (i32, f32, f32, i32, i32);
+
+/// No hit yet: no component, no player.
+pub const NO_DAMAGE: DamageRecord = (0, 0.0, 0.0, -1, -1);
 
 /// Something a script asked the engine to do.
 ///
@@ -537,6 +554,9 @@ pub struct State {
     pub joints: Vec<arena::JointRequest>,
     /// Which robots the engine currently reports inside each registered zone.
     pub zone_contents: BTreeMap<String, Vec<(i32, bool)>>,
+    /// Which robots each robot's own SmartZones overlap, keyed by `(robot,
+    /// zone name)`, as `(1-based robot, chassis)` (`AI.GetZoneContents`).
+    pub robot_zones: BTreeMap<(i32, String), Vec<(i32, bool)>>,
     pub time: f32,
     pub dt: f32,
     pub paused: bool,
@@ -578,6 +598,7 @@ impl State {
             requests: Vec::new(),
             joints: Vec::new(),
             zone_contents: BTreeMap::new(),
+            robot_zones: BTreeMap::new(),
             time: 0.0,
             dt: 1.0 / 30.0,
             paused: false,
@@ -695,6 +716,7 @@ pub fn prepare_match(game_type: &str, players: Vec<i32>) {
     st.paused = false;
     st.over = false;
     st.zone_contents.clear();
+    st.robot_zones.clear();
     // A new match inherits nothing of the last one's arena or camera: the
     // arena object (and with it its intro generator and camera iterators) is
     // dropped until the new arena is built, and no camera request or running
@@ -732,6 +754,12 @@ pub fn set_over(over: bool) {
 /// model's phantom volumes (`GetRobotsInPhantom`).
 pub fn publish_zone_contents(contents: BTreeMap<String, Vec<(i32, bool)>>) {
     state().zone_contents = contents;
+}
+
+/// Publish what each robot's own SmartZones hold this step, keyed by `(robot,
+/// zone name)`, values `(1-based robot, chassis)`.
+pub fn publish_robot_zones(contents: BTreeMap<(i32, String), Vec<(i32, bool)>>) {
+    state().robot_zones = contents;
 }
 
 /// A player's score, for the match's win conditions.
@@ -1140,25 +1168,19 @@ mod tests {
             assert_eq!(list_len(&arena, py, "WatchCams"), 1);
 
             // `HazardsOn(True)` builds the hazards, registers their zones and
-            // walls the map around them.
-            let walls_before = arena_data()
-                .lock()
-                .unwrap()
-                .map
-                .cells
-                .iter()
-                .filter(|c| c.wall)
-                .count();
+            // fences them (and the walls) with collision lines.
+            let lines_before = arena_data().lock().unwrap().collision_lines.len();
             assert!(host.hazards_on(py, true).unwrap());
-            let (zones, walls_after, hz) = {
+            let (zones, lines_after, hz) = {
                 let data = arena_data();
                 let d = data.lock().unwrap();
-                let walls = d.map.cells.iter().filter(|c| c.wall).count();
+                let lines = d.collision_lines.len();
                 assert!(d.map.hazards_on);
                 assert!(d.sub_materials.len() >= 3, "SetSubMaterialSound");
-                (d.zones.clone(), walls, list_len(&arena, py, "hazards"))
+                (d.zones.clone(), lines, list_len(&arena, py, "hazards"))
             };
-            assert!(walls_after > walls_before, "AddCollisionLine walls the map");
+            // `box.py`: three hazard boxes of four lines, and the four walls.
+            assert_eq!(lines_after - lines_before, 16, "AddCollisionLine");
             let spikes = arena.bind(py).getattr("spikes1").unwrap();
             let ty = spikes.get_type().name().unwrap().to_string();
             (zones, hz, ty)
@@ -1171,6 +1193,113 @@ mod tests {
         assert_eq!(hazards, 3);
         // The hazards are the script's own classes, with their own state.
         assert_eq!(spikes_type, "Spikes");
+    }
+
+    /// The AI's navigation is the original's (`FUN_00405990`, `FUN_00405720`):
+    /// the arena's collision lines and vantage points, not a grid search. A
+    /// straight run that clears every line is the whole route, a blocked one goes
+    /// over the POVs, and a robot pressed against a wall still gets a route —
+    /// an empty answer leaves `DriveToLocation` doing nothing, which is how the
+    /// robots used to park against the walls.
+    #[test]
+    fn the_ai_paths_around_collision_lines_and_always_gets_a_route() {
+        let Some((host, _guard)) = boot() else { return };
+        with_py(|py| {
+            host.load_arenas(py).unwrap();
+            let arena = host.create_arena(py, "Combat Arena").unwrap();
+            assert!(host.hazards_on(py, true).unwrap());
+            let a = arena.bind(py);
+            a.call_method1("SetSearchRadius", (1.2f32,)).unwrap();
+            let clear = |from: (f32, f32, f32), to: (f32, f32, f32)| -> bool {
+                a.call_method1("IsStraightPathClear", (from, to, false))
+                    .unwrap()
+                    .extract()
+                    .unwrap()
+            };
+            let path = |from: (f32, f32, f32), to: (f32, f32, f32)| -> Vec<(f32, f32)> {
+                a.call_method1("GetPath", (from, to, false))
+                    .unwrap()
+                    .extract()
+                    .unwrap()
+            };
+
+            // Open floor: the straight run is the route, end to end.
+            let (from, to) = ((-9.0, -2.0, 9.0), (-9.0, -2.0, -2.0));
+            assert!(clear(from, to));
+            assert_eq!(path(from, to), vec![(-9.0, 9.0), (-9.0, -2.0)]);
+
+            // Corner to corner crosses the spikes' box (`box.py`: x 4.2..5.6,
+            // z -6.4..-3.9), so the route bends over the vantage points.
+            let (from, to) = ((-9.9, -1.9, 9.95), (9.7, -1.9, -9.5));
+            assert!(!clear(from, to));
+            let route = path(from, to);
+            assert!(route.len() > 2, "{route:?}");
+            assert_eq!(route[0], (-9.9, 9.95));
+            assert_eq!(*route.last().unwrap(), (9.7, -9.5));
+            let second = route[1];
+            assert!(
+                clear(from, (second.0, -1.9, second.1)),
+                "the first leg is clear: {route:?}"
+            );
+
+            // Pressed against the west wall (`x = -12.7`) a 1.2 m robot's own
+            // spot crosses the line; it still gets a way out.
+            let route = path((-11.9, -1.9, 7.0), (9.7, -1.9, -9.5));
+            assert!(route.len() >= 2, "{route:?}");
+        });
+    }
+
+    /// `GetLastDamageReceived`/`Done` are the original's 5-tuples
+    /// (`FUN_004b9050`: component, amount, time, player, player's component), and
+    /// the shipped `Spinner.RobotInRange` reads the player at index 3. A 3-tuple
+    /// made every spinner's `Engage` raise once an enemy came within range.
+    #[test]
+    fn a_spinner_brain_reads_the_five_field_damage_record() {
+        let Some((host, _guard)) = boot() else { return };
+        with_py(|py| {
+            host.load_arenas(py).unwrap();
+            host.create_arena(py, "Combat Arena").unwrap();
+            host.load_ai(py).unwrap();
+            let brain = host
+                .create_ai(py, "Tornado", 0)
+                .expect("Tornado has a brain in Bindings.py");
+            let me = BotSnapshot {
+                alive: true,
+                direction: Vec3::Z,
+                last_damage_received: (3, 25.0, 9.5, 1, 7),
+                last_damage_done: NO_DAMAGE,
+                ..Default::default()
+            };
+            let other = BotSnapshot {
+                alive: true,
+                location: Vec3::new(1.0, 0.0, 0.0),
+                direction: Vec3::Z,
+                ..Default::default()
+            };
+            publish(vec![me, other], 10.0, 1.0 / 60.0);
+            let b = brain.bind(py);
+            let record: DamageRecord = b
+                .call_method0("GetLastDamageReceived")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(record, (3, 25.0, 9.5, 1, 7));
+            // Robot 1 is 1 m away and hit us half a second ago.
+            let in_range: (bool, bool) = b
+                .call_method1("RobotInRange", (1,))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(in_range, (true, true));
+            // Nothing landed yet reads as nobody's (what the simulator
+            // publishes before the first hit).
+            let done: DamageRecord = b
+                .call_method0("GetLastDamageDone")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(done, NO_DAMAGE);
+        });
     }
 
     /// M4: `plus.Arena` answers the script's geometry and pathing questions.
@@ -1201,8 +1330,9 @@ mod tests {
                 .unwrap();
             assert!(hit.0, "the arena floor is under the start point");
 
-            // And the navigation grid gives a route across the arena.
-            let path: Vec<(i32, i32)> = obj
+            // And the navigation gives a route across the arena, as world
+            // `(x, z)` points from the start to the goal.
+            let path: Vec<(f32, f32)> = obj
                 .call_method1(
                     "GetPath",
                     ((start.0, start.1, start.2), (0.0, -2.0, 0.0), false),
@@ -1214,18 +1344,25 @@ mod tests {
                 path.len() >= 2,
                 "a route from the start point to the centre"
             );
+            assert_eq!(path[0], (start.0, start.2), "{path:?}");
+            assert_eq!(*path.last().unwrap(), (0.0, 0.0), "{path:?}");
 
-            let (di, dj) = obj
-                .call_method1("ToGrid", ((0.0f32, 0.0f32, 0.0f32),))
+            // The scripts' grid is the world plane (`FUN_00406240`,
+            // `FUN_00405fa0`): `ToGrid` keeps `(x, z)` and `FromGrid` puts the
+            // floor back under it.
+            let g = obj
+                .call_method1("ToGrid", ((1.5f32, 0.0f32, -2.25f32),))
                 .unwrap()
-                .extract::<(i32, i32)>()
+                .extract::<(f32, f32)>()
                 .unwrap();
+            assert_eq!(g, (1.5, -2.25));
             let back: (f32, f32, f32) = obj
-                .call_method1("FromGrid", ((di, dj),))
+                .call_method1("FromGrid", (g,))
                 .unwrap()
                 .extract()
                 .unwrap();
-            assert!(back.0.abs() <= 1.0 && back.2.abs() <= 1.0, "{back:?}");
+            assert_eq!((back.0, back.2), (1.5, -2.25));
+            assert!((back.1 + 2.265).abs() < 0.01, "the box floor: {back:?}");
         });
     }
 

@@ -184,6 +184,9 @@ time. Scout and ALARM against the numbers measured earlier
 copied into a Red Zone slot): 3 s turn in place, then about 2 s straight from
 the pose the original started it, and 3 s of coast. Turn rates are given as
 magnitudes (the two sides' heading conventions were not reconciled).
+(Reconciled since, docs/33 §5: the record axle is now `CLOCKWISE · axis` as
+live, a robot's front is chassis `+Z` turned by its heading, and `Turn(+)`
+turns at a positive rate about `+Y` as in the original.)
 
 After the assembly fix (section 8):
 

@@ -645,6 +645,107 @@ pub fn load_bot_components(input: &str) -> Result<LoadedBot, Box<dyn std::error:
     Ok((bot, root, loaded))
 }
 
+/// A robot's `SmartZone` — the AI's sensor volume — placed as the robot is built.
+///
+/// [`load_bot_components`] skips the SmartZone components (nothing draws them
+/// and they carry no body the fight touches), but the brains read them:
+/// `RegisterSmartZone(name, id)` / `GetZoneContents(name)` (`0x401340`,
+/// `0x4014f0`) find the robot's SmartZone component by its name line and
+/// report the robots its phantom overlaps. The component's definition names
+/// a box mesh (`smartzone1.gmf`: `smart_zone`, about 0.44 x 0.29 x 0.46 m, set
+/// off 1.06–1.52 m from its mount point; the `Styles` sizes are larger).
+#[derive(Clone, Debug)]
+pub struct SmartZoneVolume {
+    /// The component's index in the `.bot`.
+    pub component: usize,
+    /// The zone's name line (`weapon`, `flip`, `swing`, ...).
+    pub name: String,
+    /// Bot-local frame of the zone component, mounted by its own attach point.
+    pub local: Mat4,
+    /// The zone mesh's bounds in that frame.
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+/// Every `SmartZone` of a parsed robot (see [`SmartZoneVolume`]).
+///
+/// `loaded` is what [`load_bot_components`] returned for the same robot; the
+/// zones' own meshes are loaded here so their mount frames take part in the
+/// assembly exactly as a drawn component's would.
+pub fn bot_smart_zones(
+    bot: &botfmt::Bot,
+    root: &Path,
+    loaded: &[Option<BotComponent>],
+    mode: MountMode,
+) -> Vec<SmartZoneVolume> {
+    let cfl = ra2fmt::Cfl::open_path(&root.join("Components.cfz")).ok();
+    let mut scenes: Vec<(usize, gmi::GmiScene)> = Vec::new();
+    for (i, c) in bot.components.iter().enumerate() {
+        if c.class != "SmartZone" || c.file.is_empty() {
+            continue;
+        }
+        let text = cfl
+            .as_ref()
+            .and_then(|cf| cf.get_text(&c.file))
+            .or_else(|| std::fs::read_to_string(root.join(c.file.replace('\\', "/"))).ok());
+        let Some(text) = text else { continue };
+        let def = compfmt::parse(&text);
+        let mesh_path = root.join("Components").join(def.mesh_rel_path());
+        if let Some(Ok(scene)) = std::fs::read(&mesh_path).ok().map(|b| gmi::parse(&b)) {
+            scenes.push((i, scene));
+        }
+    }
+    if scenes.is_empty() {
+        return Vec::new();
+    }
+    let mut tables: Vec<Option<std::collections::BTreeMap<i32, gmi::Attachment>>> = loaded
+        .iter()
+        .map(|lc| lc.as_ref().map(|lc| lc.scene.attachment_table()))
+        .collect();
+    tables.resize(bot.components.len(), None);
+    for (i, scene) in &scenes {
+        tables[*i] = Some(scene.attachment_table());
+    }
+    let hinges = loaded
+        .iter()
+        .map(|lc| lc.as_ref().and_then(|lc| mount::rotor_hinge(&lc.scene)))
+        .collect();
+    let (rest, _) = mount::assembly(
+        bot,
+        &mount::MountFrames::from_tables(&tables).with_hinges(hinges),
+        mount::MountOptions {
+            mode,
+            chassis_plane: chassis_plane(),
+        },
+    );
+    scenes
+        .into_iter()
+        .filter_map(|(i, scene)| {
+            let points = scene_points(&scene, true);
+            if points.is_empty() {
+                return None;
+            }
+            let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for p in &points {
+                min = min.min(*p);
+                max = max.max(*p);
+            }
+            Some(SmartZoneVolume {
+                component: i,
+                name: bot.components[i]
+                    .smart_zone
+                    .clone()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                local: rest[i],
+                min,
+                max,
+            })
+        })
+        .collect()
+}
+
 /// Visual batches for a scene in `world` space (skipping collision proxies).
 pub fn scene_items(scene: &gmi::GmiScene, world: Mat4, dir: &Path, label: &str) -> Vec<DrawItem> {
     let mut items = Vec::new();

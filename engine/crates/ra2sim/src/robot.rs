@@ -696,10 +696,13 @@ impl Robot {
                 part: p,
                 motor: driven.then_some(info.motor),
                 point: rotation.inverse() * (hub - centre),
-                axle: host
-                    .inverse()
-                    .transform_vector3(info.axis)
-                    .normalize_or_zero(),
+                // The record's axle is the hinge axis turned by the motor's
+                // own sense, `CLOCKWISE` (the motor step drives at `-direction`,
+                // `0x481450`): live, the Razor's right-hand wheels read
+                // `(-1, 0, 0)` where their hinge axis is `+X`
+                // (`magic-razor__live__000`), and with it a positive
+                // `Forward` drives the chassis toward its front.
+                axle: (host.inverse().transform_vector3(info.axis) * CLOCKWISE).normalize_or_zero(),
                 grip: stats.grip,
                 resistance: stats.resistance,
                 thrust: 0.0,
@@ -1232,10 +1235,10 @@ impl Robot {
             return None;
         }
         let normal = self.wheel_normal[p];
-        // A positive target turns the wheel about its axle by the right-hand
-        // rule, which pushes the robot along `axle x normal`; the control board's
-        // sense is `CLOCKWISE`.
-        let along = axle.cross(normal).normalize_or_zero() * CLOCKWISE;
+        // A positive command pushes the robot along `axle x normal`, the same
+        // way the game's own drive model does (`MagicAction`'s
+        // `-(record axle x normal)` with the record axle `CLOCKWISE · axle`).
+        let along = axle.cross(normal).normalize_or_zero();
         let side = (axle - normal * axle.dot(normal)).normalize_or_zero();
         if along == Vec3::ZERO {
             return None;
