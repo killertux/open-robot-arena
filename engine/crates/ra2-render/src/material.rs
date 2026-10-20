@@ -106,14 +106,40 @@ fn session_bitmaps() -> &'static Mutex<HashMap<String, Arc<Image>>> {
 /// load is not cached (the manager deletes it), so a later model may still find
 /// its own.
 pub fn session_bitmap(dir: &Path, bitmap: &str) -> Option<Arc<Image>> {
-    if let Some(hit) = session_bitmaps().lock().ok()?.get(bitmap) {
+    let key = format!("{}{bitmap}", texture_path());
+    if let Some(hit) = session_bitmaps().lock().ok()?.get(&key) {
         return Some(hit.clone());
     }
     let img = resolve_bitmap(dir, bitmap).and_then(|p| load_image(&p))?;
     if let Ok(mut c) = session_bitmaps().lock() {
-        return Some(c.entry(bitmap.to_string()).or_insert(img).clone());
+        return Some(c.entry(key).or_insert(img).clone());
     }
     Some(img)
+}
+
+/// The default texture path (`FUN_0058df20` sets `DAT_0071f574` to this).
+pub const GRAPHICS_PATH: &str = "Graphics\\";
+
+fn texture_path_cell() -> &'static Mutex<String> {
+    static PATH: OnceLock<Mutex<String>> = OnceLock::new();
+    PATH.get_or_init(|| Mutex::new(GRAPHICS_PATH.to_string()))
+}
+
+/// The global texture path the session cache is keyed with (`DAT_0071f574`).
+pub fn texture_path() -> String {
+    texture_path_cell()
+        .lock()
+        .map(|p| p.clone())
+        .unwrap_or_else(|_| GRAPHICS_PATH.to_string())
+}
+
+/// Change the global texture path as the bot lab does (`FUN_00593a40`,
+/// `UI\\BotLab\\Maps\\`). Bitmaps requested under another path never share an
+/// entry with the arena's `Graphics\\` ones, even when the bare names match.
+pub fn set_texture_path(path: &str) {
+    if let Ok(mut p) = texture_path_cell().lock() {
+        *p = path.to_string();
+    }
 }
 
 /// What a texture stage does (`FUN_005b24c0`, texture type 0/1/2).
@@ -575,10 +601,14 @@ mod tests {
         assert_eq!(l.attenuation, [0.4, 3.0 / 40.0, 40.0 / 1600.0]);
     }
 
+    /// Serialises the tests that read or change the global texture path.
+    static PATH_LOCK: Mutex<()> = Mutex::new(());
+
     /// The texture manager hands every later model the first file loaded under
     /// a bitmap name (`FUN_00591030` / `FUN_0058e390`).
     #[test]
     fn the_first_bitmap_loaded_under_a_name_is_the_sessions() {
+        let _g = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("ra2-session-bitmap-{}", std::process::id()));
         let (a, b) = (base.join("a"), base.join("b"));
         std::fs::create_dir_all(&a).unwrap();
@@ -595,6 +625,33 @@ mod tests {
         assert_eq!(&second.rgba[..3], &[200, 0, 0]);
         assert!(Arc::ptr_eq(&first, &second));
         assert!(session_bitmap(&b, "zz_missing_bitmap.png").is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The cache key carries the texture path, so a bot-lab request for a bare
+    /// name the arena already loaded is a separate entry.
+    #[test]
+    fn the_session_key_includes_the_texture_path() {
+        let _g = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("ra2-session-key-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let name = format!("zz_key_{}.png", std::process::id());
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([9, 9, 9, 255]))
+            .save(base.join(&name))
+            .unwrap();
+        let other = base.join("lab");
+        std::fs::create_dir_all(&other).unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(other.join(&name))
+            .unwrap();
+        let arena = session_bitmap(&base, &name).unwrap();
+        set_texture_path("UI\\BotLab\\Maps\\");
+        let lab = session_bitmap(&other, &name).unwrap();
+        set_texture_path(GRAPHICS_PATH);
+        let arena_again = session_bitmap(&base, &name).unwrap();
+        assert_eq!(&lab.rgba[..3], &[1, 2, 3]);
+        assert_eq!(&arena.rgba[..3], &[9, 9, 9]);
+        assert!(Arc::ptr_eq(&arena, &arena_again));
         let _ = std::fs::remove_dir_all(&base);
     }
 }
