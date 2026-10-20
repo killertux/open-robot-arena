@@ -221,6 +221,11 @@ pub struct Builder {
     test_requested: bool,
     test_seconds: f32,
     last_report: Option<ra2sim::r#match::MatchReport>,
+    /// The team robot this workshop session edits (`Teams/Team<N>/Bot<M>.bot`)
+    /// when it was opened from the Team HQ's inventory: leaving the lab writes
+    /// the design back there, so the HQ, the event join window and the
+    /// exhibition pickers all see the edited robot.
+    team_target: Option<PathBuf>,
 }
 
 /// The synthetic panel in the 3D placeholder.
@@ -354,6 +359,7 @@ impl Builder {
             sounds: Vec::new(),
             test_seconds: 4.0,
             last_report: None,
+            team_target: None,
         };
         builder.refresh()?;
         Ok(builder)
@@ -894,6 +900,32 @@ impl Builder {
             self.refresh().ok();
         }
         done
+    }
+
+    /// Edit a team robot in place: [`Builder::save_to_team`] writes the design
+    /// to `path` (the inventory slot the workshop was opened on).
+    pub fn set_team_target(&mut self, path: PathBuf) {
+        self.team_target = Some(path);
+    }
+
+    /// The team robot file this session writes back to, if any.
+    pub fn team_target(&self) -> Option<&Path> {
+        self.team_target.as_deref()
+    }
+
+    /// Write the design back to its team slot (`Back to HQ` from a robot the
+    /// inventory opened). `None` when the session edits no team robot.
+    pub fn save_to_team(&mut self) -> Result<Option<PathBuf>, String> {
+        let Some(path) = self.team_target.clone() else {
+            return Ok(None);
+        };
+        let name = self.design_name();
+        self.build.set_name(&name);
+        self.build
+            .save_to(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.status = format!("saved {}", path.display());
+        Ok(Some(path))
     }
 
     /// Save As to `Robot Designs/<name>.bot`.

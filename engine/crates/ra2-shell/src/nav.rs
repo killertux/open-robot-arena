@@ -164,6 +164,9 @@ pub fn navigation(note: &str) -> Option<Navigation> {
     if note.is_empty() {
         return None;
     }
+    if describes_contents(note) {
+        return None;
+    }
     if let Some(screen) = screen_in(note) {
         return Some(Navigation::File {
             screen,
@@ -175,6 +178,31 @@ pub fn navigation(note: &str) -> Option<Navigation> {
         .find(|link| link.note.eq_ignore_ascii_case(note))
         .copied()
         .map(Navigation::Link)
+}
+
+/// Whether a note is the author's comment on what the widget is *filled
+/// with*, not where a click goes: `fill grid with team robots
+/// (robot_cell.gib)`, `fill with this season's events (event_cell.gib)`,
+/// `load result_cell.gib into this slot with appropriate data`, `load
+/// 'statusmeters.gib' here`, `can have noplayer.gib, activeplayer.gib, or
+/// closedplayer.gib`. The C++ fills those widgets itself; a click on a robot
+/// or an event cell must never replace the screen with the cell template.
+pub fn describes_contents(note: &str) -> bool {
+    let lower = note.trim().to_ascii_lowercase();
+    if lower.starts_with("fill ") || lower.starts_with("can have ") {
+        return true;
+    }
+    if lower.starts_with("load ") {
+        if lower.ends_with(" here") {
+            return true;
+        }
+        if let Some(slot) = slot_in(&lower) {
+            if slot.starts_with("this ") || slot.starts_with("these ") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The link a note names, if it is one of the table's.
@@ -360,5 +388,24 @@ mod tests {
             })
         );
         assert_eq!(navigation("click to quit"), None);
+    }
+
+    /// A note about what a grid is filled with names a cell template, not a
+    /// screen: clicking the HQ's robot or event grid must not navigate to it.
+    #[test]
+    fn content_notes_are_not_navigation() {
+        for note in [
+            "fill grid with team robots (robot_cell.gib)",
+            "fill with this season's events (event_cell.gib)",
+            "fill with league_cell.gib with the teams in order of rank",
+            "load result_cell.gib into this slot with appropriate data",
+            "load team_cell.gib's into these grid cells for each team.",
+            "load 'statusmeters.gib' here",
+            "can have noplayer.gib, activeplayer.gib, or closedplayer.gib",
+        ] {
+            assert_eq!(navigation(note), None, "{note}");
+        }
+        assert!(navigation("load hq_robots.gib into hq content group").is_some());
+        assert!(navigation("click to open edit team window (editteam.gib)").is_some());
     }
 }

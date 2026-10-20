@@ -202,13 +202,23 @@ pub struct Shell {
     /// Enters an event in the application's career and returns the Team HQ's
     /// refreshed data (the bracket exists from then on).
     enter_hook: Option<EnterHook>,
+    /// The text box the last click landed on (on the top window, or the
+    /// screen when no window is open): typed characters go there.
+    text_focus: Option<String>,
+    /// The event the join window entered this session (`Events.txt` id) and
+    /// the robot column chosen in its grid.
+    entered_event: Option<(usize, usize)>,
     /// A message box waiting to open: `(caption, body)` (`FUN_005e5e40`).
     pending_message: Option<(String, String)>,
 }
 
+/// The longest text a shell edit field takes.
+pub const MAX_TEXT: usize = 32;
+
 /// What the application does when the player enters an event: the event's
-/// `Events.txt` index in, the Team HQ's data out.
-pub type EnterHook = Box<dyn FnMut(usize) -> Option<ra2ui::hq::View>>;
+/// `Events.txt` index and the join window's chosen robot column in, the Team
+/// HQ's data out.
+pub type EnterHook = Box<dyn FnMut(usize, Option<usize>) -> Option<ra2ui::hq::View>>;
 
 /// `FUN_005e5ba0`'s screen switch: black overlays of 0.2 s each way. On a
 /// screen's first visit `FUN_004e6bd0` first shows the `common/loading.gib`
@@ -278,6 +288,8 @@ impl Shell {
             new_teams: Vec::new(),
             pending_delete: None,
             join_event: None,
+            text_focus: None,
+            entered_event: None,
             enter_hook: None,
             pending_message: None,
         })
@@ -360,6 +372,100 @@ impl Shell {
     /// The robots' own snapshots are registered with the shell's previews.
     /// Let the application's career take the entered event (the bracket is
     /// drawn from its answer).
+    /// The event entered through the join window this session, with the
+    /// robot column chosen in its grid.
+    pub fn entered_event(&self) -> Option<(usize, usize)> {
+        self.entered_event
+    }
+
+    /// The text box typed characters go to, if one has the focus.
+    pub fn text_focus(&self) -> Option<&str> {
+        self.text_focus.as_deref()
+    }
+
+    /// The focused text box's text.
+    pub fn focused_text(&self) -> Option<String> {
+        let name = self.text_focus.as_deref()?;
+        let gib = match self.windows.last() {
+            Some(window) => &window.gib,
+            None => match &self.screen {
+                Screen::Page(page) => &page.gib,
+                Screen::Lab(_) => return None,
+            },
+        };
+        gib.blocks.iter().find_map(|b| match b {
+            Block::Widget(root) => workshop::find(root, name).map(text_of),
+            _ => None,
+        })
+    }
+
+    /// Whether the focused text box is one the player may type in (its
+    /// record's own `Editable true`; labels such as a robot's weight class
+    /// are text boxes too).
+    fn focused_is_editable(&self) -> bool {
+        let Some(name) = self.text_focus.as_deref() else {
+            return false;
+        };
+        let gib = match self.windows.last() {
+            Some(window) => &window.gib,
+            None => match &self.screen {
+                Screen::Page(page) => &page.gib,
+                Screen::Lab(_) => return false,
+            },
+        };
+        gib.blocks.iter().any(|b| match b {
+            Block::Widget(root) => workshop::find(root, name).is_some_and(|w| {
+                ra2ui::input::field_of(w, "Editable").is_some_and(|v| v.trim() == "true")
+            }),
+            _ => false,
+        })
+    }
+
+    /// Type into the focused text box (the edit-team window's name and motto,
+    /// the multiplayer fields). Printable ASCII only; the field keeps at most
+    /// `MAX_TEXT` characters.
+    pub fn type_char(&mut self, c: char) -> bool {
+        if !(c.is_ascii_graphic() || c == ' ') {
+            return false;
+        }
+        self.edit_focused(|text| {
+            if text.chars().count() < MAX_TEXT {
+                text.push(c);
+            }
+        })
+    }
+
+    /// Backspace in the focused text box.
+    pub fn backspace(&mut self) -> bool {
+        self.edit_focused(|text| {
+            text.pop();
+        })
+    }
+
+    fn edit_focused(&mut self, edit: impl FnOnce(&mut String)) -> bool {
+        let Some(name) = self.text_focus.clone() else {
+            return false;
+        };
+        let gib = match self.windows.last_mut() {
+            Some(window) => &mut window.gib,
+            None => match &mut self.screen {
+                Screen::Page(page) => &mut page.gib,
+                Screen::Lab(_) => return false,
+            },
+        };
+        for block in gib.blocks.iter_mut() {
+            if let Block::Widget(root) = block {
+                if let Some(widget) = workshop::find_mut(root, &name) {
+                    let mut text = text_of(widget);
+                    edit(&mut text);
+                    set_text(widget, &text);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn set_enter_hook(&mut self, hook: EnterHook) {
         self.enter_hook = Some(hook);
     }
@@ -1241,19 +1347,16 @@ impl Shell {
         if !grid.frame.contains_point(x, y) {
             return None;
         }
+        // The schedule divides its own rectangle evenly into `Rows` x
+        // `Columns` cells (`ra2ui::hq` lays the cells out that way), not by the
+        // file's design-time `RowHeight`/`ColWidths`, so the hit test does too.
+        // A point on the grid is always the grid's: a miss between cells or
+        // past the last event is swallowed, never the grid's `Notes` link.
         let columns = geometry.columns.max(1) as usize;
-        for row in 0..geometry.rows.max(1) as usize {
-            for column in 0..columns {
-                if geometry
-                    .cell(grid.frame, row as i32, column as i32)
-                    .contains_point(x, y)
-                {
-                    let index = row * columns + column;
-                    return (index < self.hq_view.as_ref()?.events.len()).then_some(index);
-                }
-            }
-        }
-        None
+        let rows = geometry.rows.max(1) as usize;
+        let column = (((x - grid.frame.x) / grid.frame.w) * columns as f32).floor() as usize;
+        let row = (((y - grid.frame.y) / grid.frame.h) * rows as f32).floor() as usize;
+        Some(row.min(rows - 1) * columns + column.min(columns - 1))
     }
 
     /// The schedule's click handler `FUN_00500c40` (bound at `0x4fdc4e`): no
@@ -1264,6 +1367,9 @@ impl Shell {
         let Some(view) = &self.hq_view else {
             return Ok(());
         };
+        if index >= view.events.len() {
+            return Ok(());
+        }
         let current = view
             .events
             .iter()
@@ -1346,7 +1452,7 @@ impl Shell {
                 .and_then(|v| v.parse::<usize>().ok()),
             _ => None,
         });
-        let (Some(index), Some(_robot)) = (self.join_event.take(), chosen) else {
+        let (Some(index), Some(robot)) = (self.join_event.take(), chosen) else {
             return Ok(());
         };
         let Some(view) = &mut self.hq_view else {
@@ -1362,8 +1468,9 @@ impl Shell {
             }
         }
         let id = view.events[index].id;
+        self.entered_event = Some((id, robot));
         if let Some(hook) = &mut self.enter_hook {
-            if let Some(fresh) = hook(id) {
+            if let Some(fresh) = hook(id, Some(robot)) {
                 self.hq_view = Some(fresh);
                 self.hq_filled = None;
             }
@@ -1430,6 +1537,16 @@ impl Shell {
     }
 
     fn finish(&mut self, mut step: Step) -> Step {
+        // A click on a text box focuses it; any other click takes the focus
+        // away, as a click elsewhere does in the original's edit fields.
+        self.text_focus = step
+            .hit
+            .strip_prefix("TextBox ")
+            .map(|name| name.trim_matches('"').to_string())
+            .filter(|name| !name.is_empty());
+        if !self.focused_is_editable() {
+            self.text_focus = None;
+        }
         self.sync_list_viewports();
         step.screen = self.screen_id();
         step.content = self.content_id();

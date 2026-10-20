@@ -18,6 +18,7 @@ pub mod audio;
 pub mod build_mode;
 pub mod cli;
 pub mod crowd;
+pub mod flow;
 pub mod frame;
 pub mod headless;
 pub mod hq_mode;

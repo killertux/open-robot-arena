@@ -37,7 +37,7 @@ use ra2fmt::gib::{Block, Field, Gib, Widget, WidgetKind};
 use ra2fmt::team::Team;
 
 use crate::standings::Standing;
-use crate::{Fonts, Grid, Placement};
+use crate::{Fonts, Frame, Grid, Placement};
 
 /// The team HQ window.
 pub const SCREEN: &str = "teamhq/teamhq.gib";
@@ -387,9 +387,8 @@ impl Hq {
             .find(|p| p.widget.name() == EVENT_GRID)?;
         let geometry = Grid::from_widget(grid.widget)?;
         let columns = geometry.columns.max(1) as usize;
-        let row = (index / columns) as i32;
-        let column = (index % columns) as i32;
-        let cell = geometry.cell(grid.frame, row, column);
+        let rows = geometry.rows.max(1) as usize;
+        let cell = schedule_cell(grid.frame, rows, columns, index / columns, index % columns);
         Some([cell.x + cell.w / 2.0, cell.y + cell.h / 2.0])
     }
 
@@ -413,7 +412,7 @@ impl Hq {
         let rows = geometry.rows.max(1) as usize;
         for row in 0..rows {
             for column in 0..columns {
-                let cell = geometry.cell(grid.frame, row as i32, column as i32);
+                let cell = schedule_cell(grid.frame, rows, columns, row, column);
                 if cell.contains_point(point[0], point[1]) {
                     return Some(row * columns + column);
                 }
@@ -1101,6 +1100,15 @@ pub fn fill_bracket(gib: &mut Gib, bracket: &BracketView) {
     }
     let children = group.children.len().to_string();
     crate::input::set_field(group, "NumChildren", &children);
+}
+
+/// A schedule cell: the grid divides its own rectangle evenly into `Rows` x
+/// `Columns` (the cells are laid out that way in [`Hq`]'s fill), so the hit
+/// test and the drawing agree at every screen size, not the file's
+/// design-time `RowHeight`/`ColWidths`.
+fn schedule_cell(frame: Frame, rows: usize, columns: usize, row: usize, column: usize) -> Frame {
+    let (w, h) = (frame.w / columns as f32, frame.h / rows as f32);
+    Frame::new(frame.x + column as f32 * w, frame.y + row as f32 * h, w, h)
 }
 
 #[cfg(test)]
