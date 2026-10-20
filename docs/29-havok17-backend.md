@@ -875,10 +875,8 @@ y 2.5. The trees are identical to 7.6 s; before, ALARM happened to slide off
 its perch at 9 s and fight, after it stays there and is immobilised at 24 s.
 The live Octagon match (`fight-scout-alarm-octagon__live__000`) has nobody
 launched (ALARM's highest point is y 1.6), ALARM landing 24 counted hits (944)
-and the Scout 4 (48) before it drops into a deathpit at 67 s. The hellraiser's
-violence is the open item: the hinge controller's load cap (`0x480510`,
-`min(75 T, 25 m (1 - |d|))`, speed `S · min(1, 2T / (m (1 + |d|)))`, the
-`TODO(load limit)` in `robot.rs`) is not modelled.
+and the Scout 4 (48) before it drops into a deathpit at 67 s. It was not the hellraiser's violence
+but its trigger: section 12.
 
 **FlapJack's turn** (9.09 against 10.16, item 4 of the task): not cheap. Ours
 reaches the same 11 rad/s plateau as the original but spins up more slowly
@@ -886,3 +884,176 @@ reaches the same 11 rad/s plateau as the original but spins up more slowly
 original's chassis (its casters) and the 27 kg wedge body touch the floor on
 about 90 % of the steps of the straight capture (`contacts-nohaz-flapjack`),
 so the extra drag is not a contact that should be missing; not resolved.
+
+## 12. Motor controllers, burst strokes and SmartZones (fx/load-limit)
+
+New live captures (fresh sessions, `tools/oracle/frida/ra2_hinge_ctl.js` via
+`ra2_hook.py`; `tools/oracle/capture_weapons_set.sh` + `capture_weapons.py` +
+`frida/ra2_weapons.js` with the AIs neutered and hazards off):
+`hingectl-scout-alarm-box__live__000`, `hingectl-scout-alarm-octagon__live__000`,
+`weapons-tornado-ripblade__live__000..002`, `weapons-scout-alarm__live__000`.
+The model is `ra2sim::motor`.
+
+### 12a. The hinge controller (recovered, verified live)
+
+`HingeController` (vtable `0x6a7e44`) and the prismatic one (`0x6a91b8`) are
+Havok actions: their slot-5 updates run every substep (live, 302 world steps
+and 11 x 302 hinge updates in 5 s, all called from `0x531030`).
+
+* `SetPowerSettings(S, T)` (`0x4810e0`) stores `+0xb0 = S`, `+0xb4 = T`, the
+  motor speed `+0xbc = S` and maximum torque `+0xb8 = 40 T`.
+* **The load cap** is vtable slot 10, `0x480510`. A robot calls it for every
+  controller of every component (`0x4dc390`) each time a component is added
+  while it is built (`0x4dc287`, so the last call, with every body complete,
+  holds) and again when one comes off (`0x4dbe3f`, `0x417c1d`; live the Scout's
+  fork was re-capped from 462 to 296 N·m at 5.96 s in the Octagon when its
+  attachments broke off). With `m` the mass of the hinge's body B (the child),
+  `d = pivot_B · perp_B` (the pivot from B's centre of mass, in B's frame,
+  along the constraint's reference perpendicular `+0x80`, which `0x525830`
+  makes `normalize(a × Y)` for `|a.x| ≥ 0.57`, else `a × X`, in the robot
+  frame, section 8):
+  `+0xb8 = min(75 T, 25 m (1 - |d|))` (`75 T` when `m (1 - |d|) <= 0`) and
+  `+0xbc = S · min(1, 2 T / (m (1 + |d|)))`. The arena's hinges are not a
+  robot's and are never capped.
+* **The update** (`0x481450`): with the integer percentage `p` (`+0x7c`) the
+  motor runs at `trunc(p · 0.01f · +0xbc)` (x87, `__ftol` truncates; `0.01f` is
+  just under a hundredth, so a full command is one short of an integer speed)
+  and `+0xb8`, sign-corrected; `p = 0` turns the motor off, or locks the hinge
+  when it auto-locks. A spin motor's `p` is `ftol(f(ftol(command · g)))`
+  (section 11b): neither `f` nor `g` touches the speed or the torque.
+
+Live against ours (`HingeSettings`, `RA2_MOTOR_DEBUG=1` prints them):
+
+| controller | definition | live `+0xb8` / motor | ours |
+|---|---|---|---|
+| Scout, ALARM drive (27 kg wheels, `d` 0) | `18 14` | 675 / 17 rad/s at 100 % | 675 / 17 |
+| Scout fork arm (26 kg, `d` 0.288) | `5 35` | 462.4 | 451.2 (`d` 0.306) |
+| Tornado spinner (125 kg) | `36 48` | 3123.9 / 27 | 3123.9 / 27 |
+| Ripblade disc (53 kg) | `36 24` | 1324.5 / -32 | 1324.5 / -32 |
+| Octagon hammer (arena) | `95 1200`, `3 300` | 48000 / 94, 12000 / -2 | 48000 / 94, 12000 / -2 |
+
+Before, ours ran the definition's `40 T` at the full speed and scaled both by
+`f · g`: Tornado's spinner at 1920 N·m toward 36 rad/s. Live and ours now
+plateau alike: Tornado's shell 14-16 rad/s (ours 15.0), Ripblade's disc ~17.5
+(ours 17-18), both up within 0.5 s, and with the motor off a spinner coasts
+(live 15.5 rad/s, nearly undamped, over 4 s).
+
+### 12b. Burst motors and burst pistons (recovered, verified live)
+
+A burst motor's definition carries two pairs: `burst = <n> <speed> <torque>`
+and `power = <speed> <torque>` (`burst motor.txt`: `0 50 90`, `5 35`).
+Firing (`0x446810`, while home and armed) unlocks, sets
+`SetPowerSettings(f(g · 50), f(g · 90))` and `+100`, and starts a 0.6 s timer
+(`+0x298`); the hinge locks itself on arriving within 0.05 rad of the end.
+When the timer runs out (`0x446670`) it unlocks, sets
+`SetPowerSettings(f(g · 5), f(g · 35))` and `-100`, and it may fire again once
+locked within 0.05 of the start (`0x4810b0`). Live (Scout's fork): the motor
+at -49 rad/s / 3600 N·m for exactly 36 substeps, then 4 rad/s / 1400 N·m; the
+fork at its end 6-7 substeps after the trigger (peak 37 rad/s), home 22
+substeps after the cock began. Ours fired at the *cocking* pair's 5 rad/s
+and cocked at an invented 15 % (`COCK_FRACTION`, gone).
+
+A burst piston (`0x448750`): unlock, a one-substep push `0x4b51b0(-1000 g)`,
+auto-lock off, direction `ftol(f(100 g))` for 0.25 s, then auto-lock on and
+direction `ftol(f(-100))`. Its prismatic controller (`0x4b5240`, skipped while
+locked) is a **force**, not a motor: while the rod is short of the stop it is
+driven to (`+0x70` for a positive direction, `+0x6c` for a negative one, 0.05)
+it pushes `-(dir · F)` along the axis (`SetPowerSettings(S, F)`, `0x4b2af0`,
+raw: no x40), unless the rod already moves that way at `S` or faster; at the
+stop it locks if it auto-locks. Live (ALARM's `burstpiston2`, `60 100`): stops
+`+0x6c = 0`, `+0x70 = -0.73`, forces -1000 then -10000 a substep, out to -0.73
+in 6 substeps, held to 0.25 s, back to 0 in 5 and locked. So a burst piston
+travels `[lower, neutral]` only; ours allowed `[lower, upper]` and its rod
+slammed through home to `+0.2`. Ours now (`Robot::drive_burst`,
+`drive_prismatic`): out in 5 substeps, back in 5. A servo piston is the same
+controller (direction = its percentage, stops lower/upper) — not driven live.
+
+### 12c. Switches take every AI press as a toggle (verified live)
+
+`weapons-tornado-ripblade__live__002`: Tornado's `Spin` switch came on at
+`Input("Spin", 0, 1)`, went off at a second `Input(.., 1)`, stayed off through
+`Input(.., 0)`, came on at the next `1` and stayed on through the next `0`.
+Ours set a switch to the last value's level; `ControlState::input` now
+toggles on every non-zero call, as a key press does.
+
+### 12d. SmartZones need an overlap (inferred from live behaviour)
+
+The Octagon's hellraiser that threw ALARM out at 1.4 s was raised by
+`hellzone2`: ours tested each component's *bounding sphere* against the zone.
+Live, ALARM drives the same line past it (at 1.34 s at (2.56, -2.28), ours
+(2.56, -2.30) at 1.28 s) and the hellraiser never rises (no
+`SetPowerSettings(80, 1500)` in 150 s, `HellRaiser.timer` never reset). With
+the component's collision pieces tested against the zone box (separating axes,
+`Zone::touches_points`) ALARM's chassis still comes within 0.1 m (the world's
+tolerance) but does not overlap; with zero tolerance nothing triggers, which
+is what ours now does.
+
+### 12e. Validation
+
+**Drive-at table** (section 11d's, hazards off):
+
+| robot | metric | original | before | after |
+|---|---|---:|---:|---:|
+| Scout | top / t90 / dist / coast / turn | 11.01 / 1.47 / 14.29 / 7.89 / 10.66 | 10.92 / 1.47 / 14.25 / 7.24 / 10.68 | unchanged |
+| ALARM | top / t90 / dist | 13.85 / 1.22 / 14.15 | 13.77 / 1.23 / 14.12 | 13.96 / 1.27 / 14.23 |
+| ALARM | coast / turn | 11.15 / 12.1 | 10.82 / 11.02 | 11.07 / 11.02 |
+| FlapJack | top / t90 / dist / coast / turn | 10.31 / 1.45 / 12.41 / 6.78 / 10.16 | 10.45 / 1.43 / 12.27 / 6.82 / 9.09 | 10.46 / 1.47 / 12.05 / 6.97 / 9.25 |
+| Razor | top / t90 / dist / coast / turn | 17.50 / 1.52 / 23.07 / 5.72 / 12.2 | 16.99 / 1.35 / 22.97 / 6.11 / 12.27 | unchanged |
+| Wide Load | top / t90 / dist / coast / turn | 13.90 / 1.55 / 19.49 / 8.61 / 12.37 | 13.47 / 1.62 / 18.09 / 8.39 / 12.83 | 13.13 / 1.60 / 17.91 / 9.17 / 12.85 |
+| Sentinel (default spawn) | straight top / dist / coast; circle heading / path / top | - | 14.52 / 18.71 / 10.17; 1.20 / 4.40 / 8.06 | unchanged |
+
+The changes are the wheels' in-air servo (17 rad/s at 675 N·m instead of 18 at
+560 · f · g) and the pistons now locked at rest; Wide Load's top speed moves
+within its run-to-run scatter (the speed traces agree to 0.2 m/s).
+
+**AI suite** (ten pairings): before 9/10 deal damage, after **10/10**. The
+Octagon's Scout v ALARM meets in the middle at 2 s as live, ALARM landing 6
+counted hits (284) before the Scout is out at 64 s (live: 24 (944), the Scout
+into a deathpit at 67 s); before, nobody dealt damage.
+
+**Fights** (Box/Compressor 120 s, shipped AIs, counted = `>= 10`):
+
+| fight | original | before | after |
+|---|---|---|---|
+| Scout v ALARM: ALARM counted / total / first | 63 / 2470 / 5.3 s | 69 / 1544 / 2.6 s | 12 / 595 / 4.6 s, fight over at 59 s |
+| Scout v ALARM: Scout counted / total / first | 9 / 121 / 49.4 s | 1 / 14 / 51.7 s | 4 / 48 / 14.6 s |
+| Razor v FlapJack: Razor / FlapJack counted (total), first | 3 (40) / 1 (12), 6.0 s | 2 (39) / 0, 27.8 s | 2 (32) / 1 (14), 10.5 s |
+| Sentinel v Wide Load: Wide Load counted / total / first | 60 / 1778 / 2.0 s | 84 / 2736 / 8.0 s | 80 / 2230 / 6.9 s |
+| Sentinel v Wide Load: Sentinel counted / total / first | 2 / 23 / 28.8 s | 4 / 45 / 25.9 s | 6 / 72 / 37.2 s |
+
+Scout v ALARM in the box now ends early: the Scout's fork, at its live 49 rad/s
+and 3600 N·m, flips ALARM onto its back (immobilised at 59 s), which the
+original's does not. The cause is not found. Ruled out (`bodies-scout-alarm__live__000`,
+`frida/ra2_body_dump.js`: raw dumps of the fork's hinge atom and bodies; body
+`+0x190` mass, `+0x98` inverse mass, `+0x30` centre, `+0x10c` world inverse
+inertia, three rows of stride 16, `+0x19c` the local inertia):
+
+* the arm's mass (26 both) and inertia (principal moments live 2.57 / 2.51 /
+  0.17 kg·m², ours 2.64 / 2.54 / 0.16), the chassis' (163.49 both);
+* the motor's clamp: one `maxTorque · dt` per substep in both, and the
+  per-substep acceleration agrees (live 18.5 then 37.3 rad/s, ours 17.8 then
+  35.9; an earlier reading of "twice as fast" compared the wrong rows).
+
+What differs: live, the motor runs two substeps with the arm barely moving
+(3.8, 2.3 rad/s) before it accelerates, and over its last three substeps it
+slows (25, 13, 9 rad/s) with a backstep in between (two solver calls in one
+substep: a new contact), before locking at the end; ours locks at its end at
+the peak speed. Our robots' chassis centres of mass also sit 1.5-4 cm lower
+than live (in the robot frame, `y`: Scout 0.159 against 0.195, ALARM 0.238
+against 0.263, FlapJack 0.183 against 0.208); taking the chassis piece's box
+centre instead of its volume centroid closes half of `y` but moves `z` the
+wrong way, so the rule is not that either. A lower centre makes ours harder
+to flip, not easier. Traction survey: 45/45.
+
+**FlapJack's spin-up** (task of section 11d): not the load cap — a grounded
+wheel's hinge motor is off. Part of it is the wheel records' hub offsets
+(`+0x2c`): live (0.465, -0.152, -0.405) and (-0.450, -0.145, -0.394), ours
+(0.421, -0.109, -0.463) and (-0.386, -0.109, -0.466), 12 % less lever for the
+yaw torque. Forcing the live offsets, ours reaches 4.6 rad/s at 0.4 s (was
+4.0, live 5.8) and turns at 9.9 rad/s (was 9.25, live 10.16). The live offsets
+are not hub minus final chassis centre of mass (live that is (0.436, -0.123,
+-0.425)): `AddWheel` (`0x485490`) stores them while the robot is still being
+assembled, and the chassis body's centre at that moment was not recovered.
+Our chassis centre of mass also sits 2.6 cm lower and 3.5 cm further forward
+than live ((0.003, 0.183, -0.053) against (-0.001, 0.209, -0.088) in the robot
+frame, `assembly-flapjack__live__000`).

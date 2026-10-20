@@ -532,7 +532,20 @@ impl Duel {
                 "  hazard zones: {}",
                 zones
                     .iter()
-                    .map(|z| format!("{}#{}, ", z.name, z.id))
+                    .map(|z| {
+                        if std::env::var_os("FIDTRACE_LOG").is_some() {
+                            format!(
+                                "{}#{} [{:?}..{:?} at {:?}], ",
+                                z.name,
+                                z.id,
+                                z.min,
+                                z.max,
+                                z.inv.inverse().w_axis.truncate()
+                            )
+                        } else {
+                            format!("{}#{}, ", z.name, z.id)
+                        }
+                    })
                     .collect::<String>()
             );
         }
@@ -889,6 +902,11 @@ impl Duel {
     /// and `robot` counts from one — `Hazards.Electricity` immediately does
     /// `r = robot - 1`, and `AI.SuperAI.SmartZoneEvent` does the same.
     fn watch_zones(&mut self) {
+        // A SmartZone is a phantom, and a body is in it when it *overlaps* it:
+        // live, ALARM drives past the Octagon's `hellzone2` with its chassis
+        // within 0.1 m of it (the world's collision tolerance) and the
+        // hellraiser never rises (docs/29 section 12).
+        const ZONE_TOLERANCE: f32 = 0.0;
         if self.zones.is_empty() && self.phantoms.is_empty() {
             return;
         }
@@ -905,14 +923,29 @@ impl Duel {
             let mut inside_robots: Vec<(i32, bool)> = Vec::new();
             for (robot, w) in worlds.iter().enumerate() {
                 let mut inside = false;
+                let mut by: Option<usize> = None;
                 let mut chassis = false;
                 for (ci, c) in self.robots[robot].rig.components.iter().enumerate() {
                     if !self.robots[robot].attached[ci] {
                         continue;
                     }
-                    let p = w[ci].transform_point3(c.center());
-                    if zone.touches(p, c.radius()) {
+                    // What the phantom can see: the component's collision
+                    // pieces (a power cell or fitting collides with nothing).
+                    let collides = c.role.is_physical() && c.role != crate::rig::Role::Power;
+                    let pieces: Vec<Vec3> = if !c.havok.collision.is_empty() {
+                        c.havok
+                            .collision
+                            .iter()
+                            .chain(c.havok.rotor_collision.iter())
+                            .flatten()
+                            .copied()
+                            .collect()
+                    } else {
+                        c.hull_points.clone()
+                    };
+                    if collides && zone.touches_points(w[ci], &pieces, ZONE_TOLERANCE) {
                         inside = true;
+                        by.get_or_insert(ci);
                         if ci == 0 {
                             chassis = true;
                         }
@@ -929,11 +962,21 @@ impl Duel {
                     }
                     self.zone_inside[zi][robot] = inside;
                     self.log.push(format!(
-                        "zone {:?} ({}) robot {} {}",
+                        "zone {:?} ({}) robot {} {}{}",
                         zone.name,
                         zone.id,
                         robot + 1,
-                        if inside { "entered" } else { "left" }
+                        if inside { "entered" } else { "left" },
+                        by.map(|c| format!(
+                            " by {:?} at {:?}",
+                            self.robots[robot].rig.components[c].name,
+                            zone.inv.transform_point3(
+                                w[c].transform_point3(
+                                    self.robots[robot].rig.components[c].center()
+                                )
+                            )
+                        ))
+                        .unwrap_or_default()
                     ));
                 }
             }
@@ -1214,7 +1257,17 @@ impl Duel {
                 let held = d.locked
                     || (arrived && d.auto_lock_stops)
                     || (d.direction == 0.0 && d.auto_lock_idle);
-                let target = if held { 0.0 } else { d.target_velocity() };
+                // A hinge runs at `trunc(direction · 0.01 · speed)` (the hinge
+                // controller, [`crate::motor::hinge_velocity`]): live the
+                // Octagon's hammer smashes at 94 for its 95 and retracts at -2
+                // for its 3. A slider keeps the velocity motor.
+                let target = if held {
+                    0.0
+                } else if j.slider {
+                    d.target_velocity()
+                } else {
+                    crate::motor::hinge_velocity(d.direction as i32, d.speed)
+                };
                 let friction = if held { strength } else { 0.0 };
                 (
                     target,
