@@ -14,7 +14,9 @@
 //! `results.png`. The fight is a real one; if neither chassis is destroyed by
 //! `N`, the **evidence script** ends it through `plus.eliminatePlayer`'s own
 //! request (the state-3 path `flextop.py:188` uses) for the robot with less
-//! hitpoints left. That is a script, not a game rule, and it is printed.
+//! hitpoints left. That is a script, not a game rule, and it is printed. A
+//! match a player plays (exhibition, Team HQ event, `Test Robot`) does not use
+//! it: its time-out goes to the judges' decision (`FUN_00418770`, points).
 //!
 //! `--quit-at N` opens the pause dialog at `N` seconds, writes `pause.png`,
 //! presses its `quit button` through the same hit test a mouse uses, and writes
@@ -183,6 +185,14 @@ pub struct Session {
     pub player_controlled: bool,
     /// The robot the player drives (0 in this client).
     pub player_robot: usize,
+    /// Whether the offscreen evidence script settles a fight that reaches
+    /// its length with every chassis intact (`plus.eliminatePlayer` on the
+    /// weaker robot). Only the AI-versus-AI evidence runs (`--match`, the
+    /// headless `--hq` season) use it; a match the player plays times out
+    /// to the original's judges' decision, `FUN_00418770` (the unique best
+    /// score among the robots still alive wins; a shared or zero best is a
+    /// draw), which [`ra2sim::r#match::Match`] applies.
+    pub evidence_decision: bool,
     /// The keyboard input sampled at the latest tick.
     player_input: DriveInput,
     /// Accumulates wall-clock time for [`Session::advance`].
@@ -206,6 +216,15 @@ pub struct Session {
     match_sounds: crate::match_sounds::MatchSounds,
     /// Cues waiting for the audio drain.
     cues: Vec<crate::match_sounds::SoundCue>,
+    /// The F1 controls reminder for the player's robot (`None` when no
+    /// robot is driven or its file has no board).
+    reminder: Option<crate::reminder::Reminder>,
+    /// The reminder window is up (modal; the match is paused under it).
+    reminder_open: bool,
+    /// The pause dialog's `options button` replaced the dialog with the
+    /// options window (`FUN_00476700`); the match stays paused until the
+    /// options window closes, and then resumes.
+    options_open: bool,
 }
 
 /// The values the HUD needs that are not part of the match report: the camera
@@ -483,6 +502,7 @@ impl Session {
             paused: false,
             player_controlled,
             player_robot: 0,
+            evidence_decision: !player_controlled,
             player_input: DriveInput::default(),
             accumulator: 0.0,
             camera_label_left: CAMERA_LABEL_SECONDS,
@@ -494,7 +514,88 @@ impl Session {
             presentation,
             match_sounds: crate::match_sounds::MatchSounds::new(),
             cues: Vec::new(),
+            reminder: None,
+            reminder_open: false,
+            options_open: false,
         })
+        .map(|mut session: Session| {
+            if player_controlled {
+                session.load_reminder(game);
+            }
+            session
+        })
+    }
+
+    /// Build the F1 reminder for the robot the player drives.
+    fn load_reminder(&mut self, game: &Path) {
+        let Some(entry) = self.matched.config.robots.get(self.player_robot) else {
+            return;
+        };
+        match crate::reminder::Reminder::open(game, &entry.bot_path) {
+            Ok(reminder) => self.reminder = Some(reminder),
+            Err(error) => eprintln!("controls reminder: {error}"),
+        }
+    }
+
+    /// Whether the controls reminder is on screen.
+    pub fn reminder_open(&self) -> bool {
+        self.reminder_open
+    }
+
+    /// Whether the options window opened from the pause dialog is up.
+    pub fn options_open(&self) -> bool {
+        self.options_open
+    }
+
+    /// Whether the match clock is held: the pause dialog, the controls
+    /// reminder or the options window is up.
+    pub fn frozen(&self) -> bool {
+        self.paused || self.reminder_open || self.options_open
+    }
+
+    fn sync_frozen(&mut self) {
+        ra2script::set_paused(self.frozen());
+    }
+
+    /// `F1` (`0x475ee0`, key `0x70`): ignored while the arena intro plays
+    /// and while another modal window (the pause dialog) owns the keys;
+    /// otherwise it shows the controls reminder for the player's robot and
+    /// pauses the match under it. With the reminder up, `F1` moves to the next
+    /// local robot (`0x482a10`); this client has one, so it closes it.
+    pub fn controls_key(&mut self) -> bool {
+        let state = self.matched.state();
+        if state == MatchState::Intro || state == MatchState::Results {
+            return false;
+        }
+        if self.reminder_open {
+            self.reminder_open = false;
+            self.sync_frozen();
+            return true;
+        }
+        if self.paused || self.options_open || self.reminder.is_none() {
+            return false;
+        }
+        self.reminder_open = true;
+        self.sync_frozen();
+        true
+    }
+
+    /// The pause dialog's `options button` (`FUN_00476700`): the dialog
+    /// closes and the options window is shown modally over the paused match.
+    pub fn open_options(&mut self) {
+        if !self.paused {
+            return;
+        }
+        self.paused = false;
+        self.options_open = true;
+        self.sync_frozen();
+    }
+
+    /// The options window closed (OK or Cancel): the dialog's modal loop
+    /// returns (result 1) and the match resumes.
+    pub fn close_options(&mut self) {
+        self.options_open = false;
+        self.sync_frozen();
     }
 
     pub fn report(&self) -> MatchReport {
@@ -550,7 +651,7 @@ impl Session {
             let dt = self.matched.config.dt;
             self.camera_label_left = (self.camera_label_left - dt).max(0.0);
         }
-        if self.matched.state() == MatchState::Fight {
+        if self.evidence_decision && self.matched.state() == MatchState::Fight {
             let dt = self.matched.config.dt;
             let limit = self.matched.config.duration;
             if let Some(limit) = limit {
@@ -637,7 +738,7 @@ impl Session {
 
     /// Advance by wall-clock seconds at the match's own `dt`.
     pub fn advance(&mut self, seconds: f32) {
-        if self.paused {
+        if self.frozen() {
             return;
         }
         self.accumulator += seconds;
@@ -658,6 +759,17 @@ impl Session {
     /// `end match button` is result 4 (back to `exhibition_setup_win`, or the
     /// Team HQ's flow for an event).
     pub fn escape(&mut self) -> Escape {
+        if self.reminder_open {
+            // `0x482a10`: Esc closes the reminder (result 1).
+            self.reminder_open = false;
+            self.sync_frozen();
+            return Escape::Resumed;
+        }
+        if self.options_open {
+            // The options window owns the keys; the client's options
+            // window has no Esc binding.
+            return Escape::Ignored;
+        }
         match self.matched.state() {
             MatchState::Results | MatchState::Over => Escape::Ignored,
             MatchState::Intro => {
@@ -690,8 +802,11 @@ impl Session {
         if self.matched.state() == MatchState::Results {
             return;
         }
+        if self.reminder_open || self.options_open {
+            return;
+        }
         self.paused = !self.paused;
-        ra2script::set_paused(self.paused);
+        ra2script::set_paused(self.frozen());
         println!("pause: {}", if self.paused { "on" } else { "off" });
     }
 
@@ -739,7 +854,7 @@ impl Session {
     /// (`+0x1b4` visible, `+0x1b8` focused). The text is local; nothing is
     /// sent.
     pub fn toggle_chat(&mut self) {
-        if self.matched.state() == MatchState::Results || self.paused {
+        if self.matched.state() == MatchState::Results || self.frozen() {
             return;
         }
         self.chat_open = !self.chat_open;
@@ -798,6 +913,14 @@ impl Session {
             return self.presentation.results_scene(&report);
         }
         let bind = self.screen_bind();
+        if self.reminder_open {
+            if let Some(reminder) = &self.reminder {
+                let window = reminder.filled(self.presentation.layout);
+                return self
+                    .presentation
+                    .pause_scene(&report, state, clock, countdown, &bind, &window);
+            }
+        }
         if self.paused {
             let dialog = self.dialog.clone();
             self.presentation
@@ -858,7 +981,12 @@ impl Session {
         );
         let path = ra2ui::input::hit_control(&placed, point[0], point[1])?;
         let names = names_on_path(&placed, &path);
-        for wanted in ["resume button", "quit button", "end match button"] {
+        for wanted in [
+            "resume button",
+            "quit button",
+            "end match button",
+            "options button",
+        ] {
             if names.iter().any(|n| n == wanted) {
                 return Some(wanted.to_string());
             }
@@ -2187,5 +2315,122 @@ mod tests {
         assert_eq!(root.name(), "in game popup win");
         assert!(ra2ui::workshop::find(root, "resume button").is_some());
         assert!(ra2ui::workshop::find(root, "quit button").is_some());
+    }
+
+    /// A fight the player drives, past the intro.
+    fn player_fight(game: &Path, seconds: f32) -> Session {
+        let options = Options::new(
+            game,
+            None,
+            Vec::new(),
+            Some(seconds),
+            None,
+            None,
+            [640, 502],
+        )
+        .unwrap();
+        let mut session = Session::new_player(&options).expect("the match");
+        session.skip_intro();
+        while session.matched.state() != MatchState::Fight {
+            session.step();
+        }
+        session
+    }
+
+    /// F1 (`0x475ee0`, key `0x70`) shows `common/controls_reminder.gib` for
+    /// the player's robot over the paused match; F1 again or Esc closes it
+    /// (`0x482a10`); it is refused in the intro and while the pause dialog
+    /// owns the keys.
+    #[test]
+    fn f1_shows_the_controls_reminder_over_a_paused_match() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options =
+            Options::new(&game, None, Vec::new(), Some(3.0), None, None, [640, 502]).unwrap();
+        let mut intro = Session::new_player(&options).expect("the match");
+        if intro.matched.state() == MatchState::Intro {
+            assert!(!intro.controls_key(), "F1 is ignored while the intro plays");
+        }
+        drop(intro);
+        let mut session = player_fight(&game, 3.0);
+        let hud_quads = session.scene().unwrap().quads.len();
+        assert!(session.controls_key());
+        assert!(session.reminder_open() && session.frozen());
+        let clock = session.matched.clock();
+        session.advance(1.0);
+        assert_eq!(
+            session.matched.clock(),
+            clock,
+            "the match is paused under it"
+        );
+        let scene = session.scene().unwrap();
+        assert!(
+            scene.quads.len() > hud_quads,
+            "the reminder window and its control cells draw over the HUD"
+        );
+        assert!(session.controls_key(), "F1 again closes it");
+        assert!(!session.reminder_open() && !session.frozen());
+        session.controls_key();
+        assert_eq!(session.escape(), Escape::Resumed, "Esc closes it");
+        assert!(!session.reminder_open());
+        assert_eq!(session.escape(), Escape::Paused);
+        assert!(!session.controls_key(), "the pause dialog owns the keys");
+        assert_eq!(session.escape(), Escape::Resumed);
+    }
+
+    /// The pause dialog's `options button` (`FUN_00476700`): the dialog
+    /// goes, the match stays paused under the options window, and closing
+    /// the window resumes the match.
+    #[test]
+    fn pause_options_holds_the_match_until_the_window_closes() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let mut session = player_fight(&game, 3.0);
+        assert_eq!(session.escape(), Escape::Paused);
+        let placed = ra2ui::resolve_with(
+            &session.dialog,
+            session.layout(),
+            Some(session.presentation.assets.faces()),
+        );
+        let options = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "options button")
+            .expect("the dialog has an options button")
+            .frame;
+        let point = [options.x + options.w / 2.0, options.y + options.h / 2.0];
+        assert_eq!(
+            session.pause_button_at(point).as_deref(),
+            Some("options button")
+        );
+        session.open_options();
+        assert!(session.options_open() && !session.paused && session.frozen());
+        let clock = session.matched.clock();
+        session.advance(1.0);
+        assert_eq!(session.matched.clock(), clock);
+        assert_eq!(session.escape(), Escape::Ignored);
+        session.close_options();
+        assert!(!session.frozen());
+        session.advance(0.5);
+        assert!(session.matched.clock() > clock);
+    }
+
+    /// A match the player plays that runs out of time is the judges'
+    /// (`FUN_00418770`, points), not the evidence script's elimination.
+    #[test]
+    fn a_player_match_that_times_out_goes_to_the_judges() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let mut session = player_fight(&game, 2.0);
+        assert!(!session.evidence_decision);
+        while !matches!(
+            session.matched.state(),
+            MatchState::Over | MatchState::Results
+        ) {
+            session.step();
+        }
+        let report = session.report();
+        assert_eq!(report.reason, Some(ra2sim::r#match::WinReason::Timeout));
+        assert!(report.robots.iter().all(|r| !r.eliminated));
     }
 }

@@ -191,10 +191,9 @@ pub struct Shell {
     fade: Option<Fade>,
     /// The screens whose first visit showed the "Loading..." splash.
     visited: std::collections::BTreeSet<String>,
-    /// The select-team list's edits. The install's `Teams/` is read-only data,
-    /// so a delete or a new team lives here, for the session.
-    deleted_teams: std::collections::BTreeSet<usize>,
-    new_teams: Vec<teams::Roster>,
+    /// The logo files the edit-team window's `logo listbox` lists
+    /// (`FUN_00468760`: `Teams\*.bmp`), in row order.
+    edit_logos: Vec<String>,
     /// The team the open delete box is about.
     pending_delete: Option<usize>,
     /// The schedule row the open join-event window is about (`FUN_00500c40`).
@@ -202,6 +201,11 @@ pub struct Shell {
     /// Enters an event in the application's career and returns the Team HQ's
     /// refreshed data (the bracket exists from then on).
     enter_hook: Option<EnterHook>,
+    /// Opens the career of the team record the select screen's `continue
+    /// button` chose and returns its Team HQ data (`FUN_004eba60`).
+    team_hook: Option<TeamHook>,
+    /// The player team slot the HQ is showing (`Teams/Teams.txt` record).
+    team_slot: Option<usize>,
     /// The text box the last click landed on (on the top window, or the
     /// screen when no window is open): typed characters go there.
     text_focus: Option<String>,
@@ -219,6 +223,10 @@ pub const MAX_TEXT: usize = 32;
 /// `Events.txt` index and the join window's chosen robot column in, the Team
 /// HQ's data out.
 pub type EnterHook = Box<dyn FnMut(usize, Option<usize>) -> Option<ra2ui::hq::View>>;
+
+/// What the application does when the player continues to a team's HQ: the
+/// team's `Teams/Teams.txt` slot in, that team's Team HQ data out.
+pub type TeamHook = Box<dyn FnMut(usize) -> Option<ra2ui::hq::View>>;
 
 /// `FUN_005e5ba0`'s screen switch: black overlays of 0.2 s each way. On a
 /// screen's first visit `FUN_004e6bd0` first shows the `common/loading.gib`
@@ -284,9 +292,10 @@ impl Shell {
             animate: false,
             fade: None,
             visited: Default::default(),
-            deleted_teams: Default::default(),
-            new_teams: Vec::new(),
             pending_delete: None,
+            edit_logos: Vec::new(),
+            team_hook: None,
+            team_slot: None,
             join_event: None,
             text_focus: None,
             entered_event: None,
@@ -468,6 +477,70 @@ impl Shell {
 
     pub fn set_enter_hook(&mut self, hook: EnterHook) {
         self.enter_hook = Some(hook);
+    }
+
+    pub fn set_team_hook(&mut self, hook: TeamHook) {
+        self.team_hook = Some(hook);
+    }
+
+    /// The player team slot the Team HQ was last continued to.
+    pub fn team_slot(&self) -> Option<usize> {
+        self.team_slot
+    }
+
+    /// Refill the select-team grid from the table and select the row of
+    /// `slot` (`FUN_004ec310`, then `FUN_004ec8d0(0, slot, 1)` after a new
+    /// team is made).
+    fn select_team_row(&mut self, slot: usize) {
+        let rosters = team_rosters(&self.game);
+        let row = rosters.iter().position(|r| r.slot == slot);
+        let Screen::Page(page) = &mut self.screen else {
+            return;
+        };
+        if !page.key.eq_ignore_ascii_case("teamhq/select_team.gib") {
+            return;
+        }
+        let _ = teams::fill_select_grid(&self.ui, &mut page.gib, &rosters);
+        if let Some(row) = row {
+            for block in page.gib.blocks.iter_mut() {
+                let Block::Widget(root) = block else { continue };
+                if let Some(grid) = workshop::find_mut(root, teams::SELECT_GRID) {
+                    ra2ui::input::clear_selection(grid);
+                    ra2ui::input::select_cell(grid, row, 0);
+                }
+            }
+        }
+    }
+
+    /// `continue button` on select team (`FUN_004eba60`): the HQ is the
+    /// grid's selected team. The application loads that team's career.
+    fn continue_with_selected_team(&mut self) {
+        let Screen::Page(page) = &self.screen else {
+            return;
+        };
+        if !page.key.eq_ignore_ascii_case("teamhq/select_team.gib") {
+            return;
+        }
+        let row =
+            page.gib
+                .blocks
+                .iter()
+                .find_map(|b| match b {
+                    Block::Widget(root) => workshop::find(root, teams::SELECT_GRID)
+                        .and_then(ra2ui::input::selected_row),
+                    _ => None,
+                })
+                .unwrap_or(0);
+        let rosters = team_rosters(&self.game);
+        let Some(slot) = rosters.get(row).map(|r| r.slot) else {
+            return;
+        };
+        self.team_slot = Some(slot);
+        if let Some(hook) = &mut self.team_hook {
+            if let Some(view) = hook(slot) {
+                self.set_hq_view(view);
+            }
+        }
     }
 
     pub fn set_hq_view(&mut self, view: ra2ui::hq::View) {
@@ -1075,6 +1148,7 @@ impl Shell {
                 None => {}
             }
             self.refresh_join_window();
+            self.refresh_edit_team_logo();
             return Ok(self.finish(step));
         }
         let transition = match &mut self.screen {
@@ -1098,6 +1172,9 @@ impl Shell {
                 self.open_window(&target)?;
             }
             Some(Transition::Replace(target)) => {
+                if target.eq_ignore_ascii_case(ra2ui::hq::SCREEN) {
+                    self.continue_with_selected_team();
+                }
                 self.fade = None;
                 let screen = load_screen(&self.ui, &target)?;
                 self.switch_to(screen, &target);
@@ -1128,9 +1205,22 @@ impl Shell {
                     game_type.as_deref(),
                 )?;
             }
+            // The create-game screen opens on its settings tab
+            // (`FUN_0049a000` loads `mpc_settings.gib` into `content group`;
+            // `mp settings button` is the one drawn selected).
+            if page.key.eq_ignore_ascii_case("multiplayer/mp_create.gib") {
+                load_into(
+                    page,
+                    &self.ui,
+                    &self.game,
+                    "content group",
+                    "mpc_settings.gib",
+                    None,
+                )?;
+            }
             // The select-team screen fills its grid with the player's teams.
             if page.key.eq_ignore_ascii_case("teamhq/select_team.gib") {
-                let rosters = team_rosters(&self.game, &self.deleted_teams, &self.new_teams);
+                let rosters = team_rosters(&self.game);
                 let _ = teams::fill_select_grid(&self.ui, &mut page.gib, &rosters);
             }
             // The Team HQ's constructor loads the Robot Inventory tab (its
@@ -1154,7 +1244,7 @@ impl Shell {
     fn confirm_window(&mut self, window: &Page) -> Result<(), String> {
         if window.key.eq_ignore_ascii_case("common/messagebox.gib") {
             if let Some(slot) = self.pending_delete.take() {
-                self.deleted_teams.insert(slot);
+                teams::delete_team(&self.game, slot)?;
             }
         } else if window.key.eq_ignore_ascii_case("teamhq/joinevent.gib") {
             return self.enter_event(window);
@@ -1171,33 +1261,57 @@ impl Shell {
                     .unwrap_or_default()
             };
             let name = read("name input textbox");
-            let slots: Vec<usize> = teams::rosters(&self.game, Side::Player)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|r| !r.named)
-                .map(|r| r.slot)
-                .filter(|slot| !self.new_teams.iter().any(|t| t.slot == *slot))
-                .collect();
-            if let (false, Some(slot)) = (name.trim().is_empty(), slots.first()) {
-                self.new_teams.push(teams::Roster {
-                    slot: *slot,
-                    name,
-                    motto: read("team motto input textbox"),
-                    logo: "Teams\\orange_skull.bmp".to_string(),
-                    robots: Vec::new(),
-                    named: true,
-                });
+            if !name.trim().is_empty() {
+                let logo = selected_logo(&window.gib, &self.edit_logos)
+                    .unwrap_or_else(|| "Teams\\orange_skull.bmp".to_string());
+                let created = teams::create_team(
+                    &self.game,
+                    name.trim(),
+                    &read("team motto input textbox"),
+                    &logo,
+                )?;
+                if let Some(slot) = created {
+                    self.select_team_row(slot);
+                    return Ok(());
+                }
             }
         } else {
             return Ok(());
         }
-        let rosters = team_rosters(&self.game, &self.deleted_teams, &self.new_teams);
+        let rosters = team_rosters(&self.game);
         if let Screen::Page(page) = &mut self.screen {
             if page.key.eq_ignore_ascii_case("teamhq/select_team.gib") {
                 let _ = teams::fill_select_grid(&self.ui, &mut page.gib, &rosters);
             }
         }
         Ok(())
+    }
+
+    /// An OK-only message box over the screen (`FUN_005e5e40(caption, text,
+    /// 1)`, `common/messagebox.gib`).
+    pub fn show_message(&mut self, caption: &str, body: &str) -> Result<(), String> {
+        self.pending_message = Some((caption.to_string(), body.to_string()));
+        self.open_window("common/messagebox.gib")
+    }
+
+    /// Open a modal window over whatever the application shows (the pause
+    /// dialog's `options button` opens `common/options.gib` over the match,
+    /// `FUN_00476700`). The window is on the shell's window stack, so clicks
+    /// and its OK/Cancel behave as over a shell screen.
+    pub fn open_modal(&mut self, target: &str) -> Result<(), String> {
+        self.open_window(target)
+    }
+
+    /// The open windows alone, newest in front, without the screen under
+    /// them: what an application draws over its own frame.
+    pub fn window_placements(&self) -> Vec<Placement<'_>> {
+        let mut placed = Vec::new();
+        for window in &self.windows {
+            let mut above = ra2ui::resolve_with(&window.gib, self.size, Some(&self.fonts));
+            above.append(&mut placed);
+            placed = above;
+        }
+        placed
     }
 
     /// Open a modal window over the screen (`FUN_005e5620`). A window that is
@@ -1212,6 +1326,19 @@ impl Shell {
             if top.key.eq_ignore_ascii_case(target) {
                 return Ok(());
             }
+        }
+        if target.eq_ignore_ascii_case("teamhq/editteam.gib")
+            && !teams::rosters(&self.game, Side::Player)
+                .unwrap_or_default()
+                .iter()
+                .any(|r| !r.named)
+        {
+            // `FUN_004ebd40`: no empty slot, an OK box instead of the window.
+            self.pending_message = Some((
+                "New Team".to_string(),
+                "There are no empty team slots.".to_string(),
+            ));
+            return self.open_window("common/messagebox.gib");
         }
         if let Screen::Page(mut page) = load_screen(&self.ui, target)? {
             // The options window opens on its Video tab: its constructor
@@ -1241,6 +1368,10 @@ impl Shell {
             if target.eq_ignore_ascii_case("teamhq/editteam.gib") {
                 // The constructor sets the caption for a new team and starts the
                 // fields empty (FUN_004ebd40: `New Robotics Team`).
+                // `FUN_00468760` lists every `Teams\*.bmp` in `logo listbox`;
+                // `FUN_00468a90` shows `Teams\` + the selected row in `logo
+                // image preview`.
+                self.edit_logos = team_logos(&self.game);
                 for block in page.gib.blocks.iter_mut() {
                     let Block::Widget(root) = block else { continue };
                     for (name, text) in [
@@ -1251,6 +1382,16 @@ impl Shell {
                         if let Some(w) = workshop::find_mut(root, name) {
                             set_text(w, text);
                         }
+                    }
+                    if let Some(list) = workshop::find_mut(root, "logo listbox") {
+                        ra2ui::input::text_rows(list, &self.edit_logos);
+                        ra2ui::input::select_row(list, 0);
+                    }
+                    if let (Some(first), Some(preview)) = (
+                        self.edit_logos.first(),
+                        workshop::find_mut(root, "logo image preview"),
+                    ) {
+                        ra2ui::input::set_field(preview, "_Filename", &format!("Teams\\{first}"));
                     }
                 }
             }
@@ -1300,7 +1441,7 @@ impl Shell {
                     }),
                     Screen::Lab(_) => None,
                 };
-                let rosters = team_rosters(&self.game, &self.deleted_teams, &self.new_teams);
+                let rosters = team_rosters(&self.game);
                 let team = selected.and_then(|row| rosters.get(row));
                 self.pending_delete = team.map(|t| t.slot);
                 let body = format!(
@@ -1381,10 +1522,11 @@ impl Shell {
             }
             Some(current) if current == index => {
                 let row = view.events[index].clone();
-                let gib = ra2ui::event_screens::bracket_screen(
+                let gib = ra2ui::event_screens::bracket_screen_at(
                     &self.ui,
                     &row.event,
                     view.bracket.as_ref(),
+                    self.size,
                 )?;
                 self.show_bracket(gib);
                 Ok(())
@@ -1413,6 +1555,26 @@ impl Shell {
     }
 
     /// `FUN_00482590` after a click in the join window: the chosen robot's name.
+    /// The edit-team window's preview follows the logo list's selection
+    /// (`FUN_00468a90`).
+    fn refresh_edit_team_logo(&mut self) {
+        let Some(window) = self.windows.last_mut() else {
+            return;
+        };
+        if !window.key.eq_ignore_ascii_case("teamhq/editteam.gib") {
+            return;
+        }
+        let logo = selected_logo(&window.gib, &self.edit_logos);
+        for block in window.gib.blocks.iter_mut() {
+            let Block::Widget(root) = block else { continue };
+            if let (Some(logo), Some(preview)) =
+                (&logo, workshop::find_mut(root, "logo image preview"))
+            {
+                ra2ui::input::set_field(preview, "_Filename", logo);
+            }
+        }
+    }
+
     fn refresh_join_window(&mut self) {
         let Some(window) = self.windows.last_mut() else {
             return;
@@ -1479,8 +1641,12 @@ impl Shell {
             return Ok(());
         };
         let row = view.events[view.event_index(id).unwrap_or(index)].clone();
-        let gib =
-            ra2ui::event_screens::bracket_screen(&self.ui, &row.event, view.bracket.as_ref())?;
+        let gib = ra2ui::event_screens::bracket_screen_at(
+            &self.ui,
+            &row.event,
+            view.bracket.as_ref(),
+            self.size,
+        )?;
         self.show_bracket(gib);
         Ok(())
     }
@@ -2223,25 +2389,41 @@ impl Shell {
     }
 }
 
-/// The named player teams the select screen lists: the install's records, less
-/// the session's deletions, plus the teams made this session.
-fn team_rosters(
-    game: &Path,
-    deleted: &std::collections::BTreeSet<usize>,
-    created: &[teams::Roster],
-) -> Vec<teams::Roster> {
-    let mut rosters: Vec<teams::Roster> = teams::rosters(game, Side::Player)
+/// The logos the edit-team window offers: every `Teams/*.bmp`, in the
+/// case-insensitive name order a Windows directory listing gives.
+fn team_logos(game: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(game.join("Teams"))
+        .map(|dir| {
+            dir.filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_file())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|name| name.to_ascii_lowercase().ends_with(".bmp"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort_by_key(|name| name.to_ascii_lowercase());
+    names
+}
+
+/// `Teams\<row>` for the edit-team window's selected logo row.
+fn selected_logo(gib: &Gib, logos: &[String]) -> Option<String> {
+    let row = gib.blocks.iter().find_map(|b| match b {
+        Block::Widget(root) => {
+            workshop::find(root, "logo listbox").and_then(ra2ui::input::selected_row)
+        }
+        _ => None,
+    })?;
+    logos.get(row).map(|name| format!("Teams\\{name}"))
+}
+
+/// The named player teams the select screen lists: the records of the
+/// install's `Teams/Teams.txt`, which New Team and Delete Team write.
+fn team_rosters(game: &Path) -> Vec<teams::Roster> {
+    teams::rosters(game, Side::Player)
         .unwrap_or_default()
         .into_iter()
-        .filter(|r| r.named && !deleted.contains(&r.slot))
-        .collect();
-    rosters.extend(
-        created
-            .iter()
-            .filter(|r| !deleted.contains(&r.slot))
-            .cloned(),
-    );
-    rosters
+        .filter(|r| r.named)
+        .collect()
 }
 
 /// A text box's displayed text: its own `_Text`, else its `Text` child's.

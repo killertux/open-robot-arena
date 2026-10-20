@@ -245,13 +245,24 @@ impl EventBracket {
         let mut round = BracketRound {
             matches: Vec::with_capacity(matches),
         };
+        // `FUN_004695a0`: every slot but match 0's first (the player) is
+        // drawn again (`FUN_00419190`) while the team is already in this
+        // round's list (`FUN_005014d0`), so a round's field has no repeats.
+        let mut drawn: Vec<usize> = Vec::new();
         for m in 0..matches {
             let mut entrants = Vec::with_capacity(self.bots_per_match);
             for slot in 0..self.bots_per_match {
                 if m == 0 && slot == 0 {
                     entrants.push(Entrant::Player);
                 } else {
-                    entrants.push(Entrant::Ai((rng.next() as usize) % BRACKET_AI_TEAMS));
+                    let mut team = (rng.next() as usize) % BRACKET_AI_TEAMS;
+                    if drawn.len() < BRACKET_AI_TEAMS {
+                        while drawn.contains(&team) {
+                            team = (rng.next() as usize) % BRACKET_AI_TEAMS;
+                        }
+                    }
+                    drawn.push(team);
+                    entrants.push(Entrant::Ai(team));
                 }
             }
             round.matches.push(BracketMatch { entrants });
@@ -643,11 +654,32 @@ impl Career {
         events: Vec<Event>,
         policy: CareerPolicy,
     ) -> Result<Self, String> {
-        let player_slot = player_table
-            .teams
-            .iter()
-            .position(Team::is_named)
-            .ok_or_else(|| "the player's team table has no named team".to_string())?;
+        Self::from_tables_for(player_table, ai_table, events, policy, None)
+    }
+
+    /// [`Career::from_tables`] for the team record at `slot` (the one the
+    /// select-team screen continued with, `FUN_004eba60`); `None` is the
+    /// first named record.
+    pub fn from_tables_for(
+        player_table: TeamTable,
+        ai_table: TeamTable,
+        events: Vec<Event>,
+        policy: CareerPolicy,
+        slot: Option<usize>,
+    ) -> Result<Self, String> {
+        let player_slot = match slot {
+            Some(slot) => {
+                if !player_table.teams.get(slot).is_some_and(Team::is_named) {
+                    return Err(format!("team slot {slot} is empty"));
+                }
+                slot
+            }
+            None => player_table
+                .teams
+                .iter()
+                .position(Team::is_named)
+                .ok_or_else(|| "the player's team table has no named team".to_string())?,
+        };
         let player = &player_table.teams[player_slot];
         let schedule = player
             .schedule()
@@ -700,13 +732,22 @@ impl Career {
 
     /// [`Career::load`] with an explicit policy.
     pub fn load_with_policy(game: &Path, policy: CareerPolicy) -> Result<Self, String> {
+        Self::load_team(game, policy, None)
+    }
+
+    /// The career of the team record at `slot` (`None`: the first named one).
+    pub fn load_team(
+        game: &Path,
+        policy: CareerPolicy,
+        slot: Option<usize>,
+    ) -> Result<Self, String> {
         let player_table = team::read_table(&player_table_path(game))?;
         let ai_table = team::read_table(&ai_table_path(game))?;
         let text = ra2fmt::event::read(&events_path(game))?;
         let events = ra2fmt::event::parse(&text)
             .map_err(|e| format!("{}: {e}", events_path(game).display()))?;
-        let mut career = Self::from_tables(player_table, ai_table, events, policy)?;
-        let sidecar = sidecar_path(game);
+        let mut career = Self::from_tables_for(player_table, ai_table, events, policy, slot)?;
+        let sidecar = sidecar_path_for(game, career.player_slot);
         if sidecar.is_file() {
             let text = std::fs::read_to_string(&sidecar)
                 .map_err(|e| format!("{}: {e}", sidecar.display()))?;
@@ -735,7 +776,17 @@ impl Career {
 
     /// [`Career::new`] with an explicit policy.
     pub fn new_with_policy(game: &Path, seed: u64, policy: CareerPolicy) -> Result<Self, String> {
-        let mut career = Self::load_with_policy(game, policy)?;
+        Self::new_team(game, seed, policy, None)
+    }
+
+    /// [`Career::new_with_policy`] for the team record at `slot`.
+    pub fn new_team(
+        game: &Path,
+        seed: u64,
+        policy: CareerPolicy,
+        slot: Option<usize>,
+    ) -> Result<Self, String> {
+        let mut career = Self::load_team(game, policy, slot)?;
         career.seed = seed;
         career.ensure_schedule(seed);
         Ok(career)
@@ -1457,7 +1508,7 @@ impl Career {
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
 
-        let sidecar = sidecar_path(game);
+        let sidecar = sidecar_path_for(game, self.player_slot);
         if let Some(parent) = sidecar.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
@@ -2028,6 +2079,17 @@ pub fn sidecar_path(game: &Path) -> PathBuf {
     game.join("Teams").join(SIDECAR_NAME)
 }
 
+/// The sidecar of the team record at `slot`: `Teams/career.dat` for slot 0
+/// (the shipped team), `Teams/career<slot>.dat` for the others. Each team
+/// keeps its own sidecar-only state, as each keeps its own record.
+pub fn sidecar_path_for(game: &Path, slot: usize) -> PathBuf {
+    if slot == 0 {
+        sidecar_path(game)
+    } else {
+        game.join("Teams").join(format!("career{slot}.dat"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2202,6 +2264,7 @@ mod tests {
             .map(|i| {
                 let (tiers, bots) = if i % 2 == 0 { (4, 2) } else { (2, 4) };
                 Event {
+                    id: i as i32,
                     name: format!("Event {i}"),
                     description: String::new(),
                     tiers: (0..tiers)
@@ -2219,7 +2282,7 @@ mod tests {
                     ),
                     art: String::new(),
                     arena: ("Combat Arena".to_string(), String::new()),
-                    settings: vec![bots, 1, 1, 1],
+                    settings: vec![bots, 1, 1],
                 }
             })
             .collect()
@@ -2234,10 +2297,12 @@ mod tests {
     /// Write the 25 synthetic events in `Events.txt`'s own record shape, so a
     /// `Career::load` test has a real event list to read.
     fn write_synthetic_events(dir: &Path) {
-        let mut text = String::from("0\n");
+        // Each record starts with its id line (`FUN_00469350` reads `+4`
+        // first) and ends with three numbers.
+        let mut text = String::new();
         for i in 0..25 {
             let (tiers, bots) = if i % 2 == 0 { (4, 2) } else { (2, 4) };
-            text.push_str(&format!("Event {i}\ndescription\n{tiers}\n"));
+            text.push_str(&format!("{i}\nEvent {i}\ndescription\n{tiers}\n"));
             for t in 0..tiers {
                 text.push_str(&format!(
                     "Arenas\\event_results\\prizes\\T{t}.gmf\ntier {t}\n"
@@ -2246,7 +2311,7 @@ mod tests {
             text.push_str(&format!(
                 "Arenas\\event_results\\prizes\\Trophy{i}\\Trophy{i}.gmf\n\
                  won event {i}\nUI\\teamhq\\events\\trophies\\Trophy.tga\n\
-                 art.bmp\nCombat Arena\npreview.bmp\n{bots}\n1\n1\n1\n"
+                 art.bmp\nCombat Arena\npreview.bmp\n{bots}\n1\n1\n"
             ));
         }
         std::fs::write(events_path(dir), text).unwrap();
@@ -2923,6 +2988,34 @@ mod tests {
             career.history.clone(),
             career.money,
         )
+    }
+    /// A round's field has no repeated team (`FUN_004695a0` redraws a team
+    /// already in the round's list).
+    #[test]
+    fn a_rounds_field_has_no_repeated_team() {
+        for (event, data) in synthetic_events(4).iter().enumerate() {
+            for seed in 0..8u64 {
+                let bracket = EventBracket::new(event, data, seed).unwrap();
+                let mut teams: Vec<usize> = bracket
+                    .current
+                    .matches
+                    .iter()
+                    .flat_map(|m| m.entrants.iter())
+                    .filter_map(|e| match e {
+                        Entrant::Ai(slot) => Some(*slot),
+                        Entrant::Player => None,
+                    })
+                    .collect();
+                assert_eq!(teams.len(), BRACKET_ENTRANTS - 1);
+                teams.sort_unstable();
+                teams.dedup();
+                assert_eq!(
+                    teams.len(),
+                    BRACKET_ENTRANTS - 1,
+                    "event {event} seed {seed}"
+                );
+            }
+        }
     }
 }
 

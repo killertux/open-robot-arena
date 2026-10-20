@@ -113,6 +113,17 @@ pub fn bracket_screen(
     event: &Event,
     bracket: Option<&BracketView>,
 ) -> Result<Gib, String> {
+    bracket_screen_at(ui_root, event, bracket, [1280.0, 1024.0])
+}
+
+/// [`bracket_screen`] with the bracket graphic laid out for a screen of
+/// `screen` pixels (`crate::hq::fill_bracket_at`).
+pub fn bracket_screen_at(
+    ui_root: &Path,
+    event: &Event,
+    bracket: Option<&BracketView>,
+    screen: [f32; 2],
+) -> Result<Gib, String> {
     let mut gib = crate::hq::load(ui_root, "teamhq/event_bracket.gib")?;
     crate::hq::fit_splits_in(&mut gib);
     if let Some(image) = find_mut_in(&mut gib, "event graphic") {
@@ -126,12 +137,11 @@ pub fn bracket_screen(
     set_first_display(&mut gib, &plain_text(&event.description));
     if let Some(bracket) = bracket {
         set_value_in(&mut gib, "round heading textbox", &bracket.round_label);
-        crate::hq::fill_bracket(&mut gib, bracket);
+        crate::hq::fill_bracket_at(&mut gib, bracket, screen);
         if let Some(button) = find_mut_in(&mut gib, "play button") {
             let visible = if bracket.can_play { "true" } else { "false" };
             crate::input::set_field(button, "Visible", visible);
         }
-        set_value_in(&mut gib, "bracket status", &bracket.status);
     } else {
         set_value_in(&mut gib, "round heading textbox", "ROUND 1");
     }

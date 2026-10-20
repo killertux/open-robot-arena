@@ -80,6 +80,7 @@ pub fn run(
     if let Some(hook) = crate::hq_mode::shell_enter_hook(game) {
         shell.set_enter_hook(hook);
     }
+    shell.set_team_hook(crate::hq_mode::shell_team_hook(game));
     println!(
         "booted {} from {} ({}x{})",
         shell.screen_id(),

@@ -108,6 +108,107 @@ pub fn rosters(game: &Path, side: Side) -> Result<Vec<Roster>, String> {
         .collect())
 }
 
+/// The record an empty player slot holds: blank identity lines, no robots,
+/// and the reset counters (`FUN_004fa230` clears the record to these; the
+/// shipped table's fifteen empty slots are exactly this record).
+const EMPTY_RECORD: &str = "0\r\n\r\n\r\n\r\nRobots:\r\nRobot In Event: -1\r\n0\r\n16\r\n16\r\n0\r\n0\r\n0\r\n0\r\n0\r\n10000\r\ntrue\r\n0\r\nfalse\r\n0\r\n-1\r\n0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 \r\n0\r\n0\r\n0\r\n";
+
+/// A fresh empty player record.
+pub fn empty_player_record() -> Team {
+    team::parse_table(EMPTY_RECORD)
+        .ok()
+        .and_then(|table| table.teams.into_iter().next())
+        .unwrap_or_default()
+}
+
+/// `New Team`'s OK (`FUN_004ebd40`, result 1): the first empty slot of
+/// `Teams/Teams.txt` becomes the team (`FUN_00502680(slot, 1)` marks it
+/// used), and the table is written at once: the dialog broadcasts message 200
+/// (`FUN_005882f0`), whose listener, registered by the player table's
+/// constructor at `0x502173`, is `FUN_00502720` -> `FUN_005024e0`
+/// (`Teams\Teams.txt`). The team's robot folder `Teams/Team<slot>/` is made
+/// for its robots. Returns the slot, or `None` when every slot is taken
+/// (the dialog's "There are no empty team slots." case).
+pub fn create_team(
+    game: &Path,
+    name: &str,
+    motto: &str,
+    logo: &str,
+) -> Result<Option<usize>, String> {
+    let path = game.join(Side::Player.table());
+    let mut table = team::read_table(&path)?;
+    let Some(slot) = table.teams.iter().position(|t| !t.is_named()) else {
+        return Ok(None);
+    };
+    let ending = table.teams[slot].line_ending;
+    let mut record = empty_player_record();
+    record.line_ending = ending;
+    record.name = name.to_string();
+    record.motto = motto.to_string();
+    record.logo = logo.to_string();
+    table.teams[slot] = record;
+    table
+        .write_to(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let folder = game.join(Side::Player.root()).join(format!("Team{slot}"));
+    std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    Ok(Some(slot))
+}
+
+/// A robot built in the workshop from an empty inventory selection joins
+/// the team: the record's `Robots:` line gains the first free slot number and
+/// the robot is `Teams/Team<team>/Bot<n>.bot`. The table is written at once.
+/// Returns the new robot's path.
+pub fn add_robot(game: &Path, team: usize) -> Result<PathBuf, String> {
+    let path = game.join(Side::Player.table());
+    let mut table = team::read_table(&path)?;
+    let record = table
+        .teams
+        .get_mut(team)
+        .filter(|t| t.is_named())
+        .ok_or_else(|| format!("{}: team slot {team} is empty", path.display()))?;
+    let folder = game.join(Side::Player.root()).join(format!("Team{team}"));
+    let slot = (0..)
+        .find(|n: &i32| !record.robots.contains(n) && !folder.join(format!("Bot{n}.bot")).exists())
+        .expect("a free robot slot");
+    record.robots.push(slot);
+    table
+        .write_to(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    Ok(folder.join(format!("Bot{slot}.bot")))
+}
+
+/// `Delete Team`'s Yes (`FUN_004ec110`, result 4): the record is cleared
+/// (`FUN_00502680(slot, 0)`, `FUN_004fa230`) and the table written through the
+/// same message-200 listener. The robots' files are left where they are; the
+/// slot simply lists none.
+pub fn delete_team(game: &Path, slot: usize) -> Result<(), String> {
+    let path = game.join(Side::Player.table());
+    let mut table = team::read_table(&path)?;
+    let Some(existing) = table.teams.get(slot) else {
+        return Err(format!("{}: no team slot {slot}", path.display()));
+    };
+    let ending = existing.line_ending;
+    let mut record = empty_player_record();
+    record.line_ending = ending;
+    table.teams[slot] = record;
+    table
+        .write_to(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // The client's own per-team career sidecar (`ra2sim::career::
+    // sidecar_path_for`) goes with the record.
+    let sidecar = if slot == 0 {
+        game.join("Teams").join("career.dat")
+    } else {
+        game.join("Teams").join(format!("career{slot}.dat"))
+    };
+    if sidecar.is_file() {
+        std::fs::remove_file(&sidecar).map_err(|e| format!("{}: {e}", sidecar.display()))?;
+    }
+    Ok(())
+}
+
 /// The default player team: the career's team, which is the first named record
 /// of `Teams/Teams.txt` (the same rule `Career::from_tables` uses).
 pub fn career_player_slot(rosters: &[Roster]) -> Option<usize> {

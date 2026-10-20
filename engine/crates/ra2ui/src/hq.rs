@@ -159,6 +159,8 @@ pub enum EventState {
 pub struct BracketSlot {
     pub name: String,
     pub player: bool,
+    /// The team's logo (`Teams\\orange_skull.bmp`), the bracket's picture.
+    pub logo: String,
 }
 
 /// One match of a round, as `event_bracket.gib`'s generated bracket shows it.
@@ -972,12 +974,8 @@ fn text_widget(name: &str, text: &str, rect: [f32; 4], font: &str, color: &str) 
     text_widget_with(name, text, rect, font, color, false)
 }
 
-/// The same `Text` record with fractional coordinates: the bracket group is a
-/// fraction of the screen, so its generated columns are too.
-fn text_widget_frac(name: &str, text: &str, rect: [f32; 4], font: &str, color: &str) -> Widget {
-    text_widget_with(name, text, rect, font, color, true)
-}
-
+/// A `Text` record in pixels (`fractional = false`) or in fractions of its
+/// parent.
 fn text_widget_with(
     name: &str,
     text: &str,
@@ -1015,91 +1013,281 @@ fn text_widget_with(
     }
 }
 
-/// Fill `event_bracket.gib`'s `bracket group` from the career's bracket.
-///
-/// The binary builds a column per round (`FUN_0046ad60`'s
-/// `FUN_00406d20() + 1` loop), draws the first round's `16 / bots` matches and
-/// puts `UI\teamhq\questionmark.bmp` in the rounds that have not been reached
-/// (`0x46adf…`). This composes the same columns from plain `Text` records; the
-/// player's match and the next opponents are the visible part.
+/// The entrants of a 16-team bracket (`FUN_0046ad60`'s `16.0`).
+pub const BRACKET_ENTRANTS: usize = 16;
+/// The art of a bracket cell not drawn yet (`UI\teamhq\questionmark.bmp`).
+pub const QUESTION_MARK: &str = "teamhq\\questionmark.bmp";
+
+/// Fill `event_bracket.gib`'s `bracket group` from the career's bracket, laid
+/// out for a 1280x1024 screen (the cells are fractions of the group, so the
+/// picture scales with the window).
 pub fn fill_bracket(gib: &mut Gib, bracket: &BracketView) {
+    fill_bracket_at(gib, bracket, [1280.0, 1024.0]);
+}
+
+/// The bracket graphic the bracket window builds (`FUN_0046ad60`), for a
+/// screen of `screen` pixels:
+///
+/// * one row per round plus the champion's (`FUN_00406d20() + 1`), 16 team
+///   pictures in the first row, each next row `advance / bots` of the one
+///   above (`FUN_004698f0`);
+/// * the picture size is `min((w - 192) / 16, (h - 15 * rows) / rows)` of
+///   the group less 6 px; the 16 first-row pictures spread over the width
+///   (`(w - 16 * size) / 15` apart), the rows over the height;
+/// * a later row's pictures sit centred under the match they come from;
+/// * each match is joined to the next row by the bracket lines of
+///   `FUN_0046b4d0` (4 px, black): a 13 px drop from its first and last
+///   picture, the bar between them, and a 13 px stem down from its centre;
+/// * a picture is the entrant team's logo (`FUN_004699b0` -> the team's
+///   `+0x28`) up to the current round, `questionmark.bmp` beyond it;
+/// * the player's picture in the current round has a 2 px blue frame 3 px
+///   out (`FUN_0046b720`, colour `0 0 1 1`).
+pub fn fill_bracket_at(gib: &mut Gib, bracket: &BracketView, screen: [f32; 2]) {
+    let frame = crate::resolve(gib, screen)
+        .iter()
+        .flat_map(|p| p.walk())
+        .find(|p| p.widget.name() == BRACKET_GROUP)
+        .map(|p| p.frame);
     let Some(group) = find_mut_in(gib, BRACKET_GROUP) else {
         return;
     };
     group.children.clear();
-    group.children.push(text_widget_frac(
-        "bracket status",
-        &bracket.status,
-        [0.02, 0.055, 0.96, 0.10],
-        "fg_mcn14",
-        if bracket.can_play {
-            "0.4 1 0.6 1"
-        } else {
-            "0.85 0.85 0.85 1"
-        },
-    ));
-    for (index, round) in bracket.rounds.iter().enumerate() {
-        let y = 0.13 + 0.17 * index as f32;
-        let player = round
-            .matches
-            .iter()
-            .find(|matched| matched.player_match)
-            .cloned()
-            .unwrap_or(BracketMatchView {
-                slots: Vec::new(),
-                player_match: true,
-                won: None,
-            });
-        let opponents = player
-            .slots
-            .iter()
-            .filter(|slot| !slot.player)
-            .map(|slot| {
-                if slot.name.is_empty() {
-                    "?".to_string()
-                } else {
-                    slot.name.clone()
-                }
-            })
-            .collect::<Vec<_>>();
-        let opposition = if opponents.is_empty() || opponents.iter().all(|name| name == "?") {
-            "?".to_string()
-        } else {
-            opponents.join(", ")
-        };
-        let result = if round.played {
-            match player.won {
-                Some(true) => " — WON",
-                Some(false) => " — LOST",
-                None => "",
-            }
-        } else if round.current {
-            " — NEXT"
-        } else {
-            " — not drawn"
-        };
-        let line = format!("{}: You vs {}{}", round.label, opposition, result);
-        let color = if round.current {
-            "1 0.95 0.55 1"
-        } else if round.played {
-            if player.won == Some(true) {
-                "0.6 1 0.6 1"
-            } else {
-                "1 0.6 0.6 1"
-            }
-        } else {
-            "0.65 0.65 0.65 1"
-        };
-        group.children.push(text_widget_frac(
-            &format!("round {index} line"),
-            &line,
-            [0.03, y, 0.94, 0.13],
-            "fg_mcn16",
-            color,
-        ));
+    let Some(frame) = frame.filter(|f| f.w > 10.0 && f.h > 10.0) else {
+        return;
+    };
+    for widget in bracket_widgets(bracket, frame.w, frame.h) {
+        group.children.push(widget);
     }
     let children = group.children.len().to_string();
     crate::input::set_field(group, "NumChildren", &children);
+}
+
+/// One placed bracket picture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BracketCell {
+    pub row: usize,
+    pub index: usize,
+    /// Left, top and edge, in the group's pixels.
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+}
+
+/// Where `FUN_0046ad60` puts every picture for a bracket of `rounds` rounds
+/// with `bots` robots per match and `advance` going on, in a group of
+/// `w` x `h` pixels.
+pub fn bracket_cells(
+    rounds: usize,
+    bots: usize,
+    advance: usize,
+    w: f32,
+    h: f32,
+) -> Vec<BracketCell> {
+    let bots = bots.max(1);
+    let advance = advance.clamp(1, bots);
+    let (w, h) = (w - 6.0, h - 6.0);
+    let rows = rounds + 1;
+    let size = ((w - 192.0) / BRACKET_ENTRANTS as f32)
+        .min((h - rows as f32 * 15.0) / rows as f32)
+        .max(4.0);
+    let vgap = if rows > 1 {
+        (h - size * rows as f32) / (rows as f32 - 1.0)
+    } else {
+        0.0
+    };
+    let hgap = (w - size * BRACKET_ENTRANTS as f32) / (BRACKET_ENTRANTS as f32 - 1.0);
+    let mut cells = Vec::new();
+    // Row 0: the sixteen, centred.
+    let n = BRACKET_ENTRANTS as f32;
+    let x0 = w * 0.5 - size * n * 0.5 - (n * 0.5 - 0.5) * hgap;
+    let mut previous: Vec<f32> = (0..BRACKET_ENTRANTS)
+        .map(|i| x0 + i as f32 * (size + hgap))
+        .collect();
+    for (index, x) in previous.iter().enumerate() {
+        cells.push(BracketCell {
+            row: 0,
+            index,
+            x: 3.0 + x,
+            y: 3.0,
+            size,
+        });
+    }
+    for row in 1..rows {
+        let y = 3.0 + row as f32 * (size + vgap);
+        let gap = hgap.min(size * 0.5);
+        let mut next = Vec::new();
+        for chunk in previous.chunks(bots) {
+            let left = chunk[0];
+            let right = chunk[chunk.len() - 1] + size;
+            let span = size * advance as f32 + gap * (advance as f32 - 1.0);
+            let start = (left + right) * 0.5 - span * 0.5;
+            for k in 0..advance {
+                next.push(start + k as f32 * (size + gap));
+            }
+        }
+        for (index, x) in next.iter().enumerate() {
+            cells.push(BracketCell {
+                row,
+                index,
+                x: 3.0 + x,
+                y,
+                size,
+            });
+        }
+        previous = next;
+    }
+    cells
+}
+
+fn bracket_widgets(bracket: &BracketView, w: f32, h: f32) -> Vec<Widget> {
+    let rounds = bracket.rounds.len().max(1);
+    let bots = bracket
+        .rounds
+        .iter()
+        .flat_map(|r| r.matches.iter())
+        .map(|m| m.slots.len())
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    let cells = bracket_cells(rounds, bots, 1, w, h);
+    let frac = |x: f32, y: f32, cw: f32, ch: f32| [x / w, y / h, cw / w, ch / h];
+    let mut out = Vec::new();
+    // Bracket lines first, so the pictures draw over their ends.
+    for row in 0..rounds {
+        let these: Vec<&BracketCell> = cells.iter().filter(|c| c.row == row).collect();
+        let below = cells.iter().find(|c| c.row == row + 1);
+        let Some(below) = below else { continue };
+        for (m, chunk) in these.chunks(bots).enumerate() {
+            let first = chunk[0];
+            let last = chunk[chunk.len() - 1];
+            let half = first.size * 0.5;
+            let mid = (first.y + first.size + below.y) * 0.5;
+            let left = first.x;
+            let right = last.x + last.size;
+            let centre = (left + right) * 0.5;
+            let line =
+                |name: String, r: [f32; 4]| bracket_line(&name, frac(r[0], r[1], r[2], r[3]));
+            out.push(line(
+                format!("bracket line {row}:{m}:a"),
+                [left + half + 2.0 - 2.0, mid - 13.0, 4.0, 13.0],
+            ));
+            out.push(line(
+                format!("bracket line {row}:{m}:b"),
+                [left + half, mid - 2.0, (right - half) - (left + half), 4.0],
+            ));
+            out.push(line(
+                format!("bracket line {row}:{m}:c"),
+                [right - half - 2.0 - 2.0, mid - 13.0, 4.0, 13.0],
+            ));
+            out.push(line(
+                format!("bracket line {row}:{m}:d"),
+                [centre - 2.0, mid, 4.0, 13.0],
+            ));
+        }
+    }
+    let current = bracket.round;
+    for cell in &cells {
+        let slot = bracket.rounds.get(cell.row).and_then(|round| {
+            let m = cell.index / bots;
+            let k = cell.index % bots;
+            if round.matches.len() == 1 && !round.current {
+                // A played round keeps only the player's match (match 0).
+                (m == 0).then(|| round.matches[0].slots.get(k)).flatten()
+            } else {
+                round
+                    .matches
+                    .get(m)
+                    .and_then(|matched| matched.slots.get(k))
+            }
+        });
+        let champion = cell.row == rounds
+            && bracket.rounds.last().is_some_and(|r| r.played)
+            && bracket
+                .rounds
+                .last()
+                .and_then(|r| r.matches.first())
+                .is_some_and(|m| m.won == Some(true));
+        let art = if champion {
+            bracket
+                .rounds
+                .first()
+                .and_then(|r| r.matches.first())
+                .and_then(|m| m.slots.iter().find(|s| s.player))
+                .map(|s| s.logo.clone())
+                .unwrap_or_else(|| QUESTION_MARK.to_string())
+        } else if cell.row <= current {
+            slot.filter(|s| !s.logo.is_empty())
+                .map(|s| s.logo.clone())
+                .unwrap_or_else(|| QUESTION_MARK.to_string())
+        } else {
+            QUESTION_MARK.to_string()
+        };
+        let mut image = image_widget(
+            &format!("bracket cell {}:{}", cell.row, cell.index),
+            &art,
+            0.0,
+            0.0,
+            cell.size,
+            cell.size,
+        );
+        let [x, y, cw, ch] = frac(cell.x, cell.y, cell.size, cell.size);
+        crate::input::set_field(&mut image, "Position", &format!("{x} 1 {y} 1"));
+        crate::input::set_field(&mut image, "Size", &format!("{cw} 1 {ch} 1"));
+        crate::input::set_field(&mut image, "ChildOrder", "5");
+        out.push(image);
+    }
+    // The player's frame on the current round (match 0, slot 0).
+    if bracket.can_play {
+        if let Some(cell) = cells.iter().find(|c| c.row == current && c.index == 0) {
+            let (x0, y0) = (cell.x - 3.0, cell.y - 3.0);
+            let e = cell.size + 6.0;
+            for (i, r) in [
+                [x0, y0, e, 2.0],
+                [x0, y0 + e - 2.0, e, 2.0],
+                [x0, y0, 2.0, e],
+                [x0 + e - 2.0, y0, 2.0, e],
+            ]
+            .iter()
+            .enumerate()
+            {
+                let mut edge =
+                    bracket_line(&format!("player frame {i}"), frac(r[0], r[1], r[2], r[3]));
+                crate::input::set_field(&mut edge, "FillColor", "0 0 1 1");
+                crate::input::set_field(&mut edge, "ChildOrder", "6");
+                out.push(edge);
+            }
+        }
+    }
+    out
+}
+
+/// A filled black bar at a fraction of the bracket group.
+fn bracket_line(name: &str, rect: [f32; 4]) -> Widget {
+    let field = |name: &str, raw: &str| Field {
+        name: Some(name.to_string()),
+        raw: raw.to_string(),
+    };
+    let [x, y, w, h] = rect;
+    Widget {
+        kind: WidgetKind::Rectangle,
+        implicit: false,
+        fields: vec![
+            field("Filled", "true"),
+            field("FillColor", "0 0 0 1"),
+            field("BorderWidth", "0"),
+            field("BorderColor", "0 0 0 0"),
+            field("Name", name),
+            field("ID", "-1"),
+            field("Position", &format!("{x} 1 {y} 1")),
+            field("Size", &format!("{w} 1 {h} 1")),
+            field("Visible", "true"),
+            field("ChildOrder", "4"),
+            field("ClipMode", "0"),
+            field("NumChildren", "0"),
+        ],
+        attachments: Vec::new(),
+        children: Vec::new(),
+    }
 }
 
 /// A schedule cell: the grid divides its own rectangle evenly into `Rows` x
@@ -1452,10 +1640,12 @@ mod tests {
                             BracketSlot {
                                 name: "The Rookies".into(),
                                 player: true,
+                                logo: "Teams\\orange_skull.bmp".into(),
                             },
                             BracketSlot {
                                 name: "Red Zone".into(),
                                 player: false,
+                                logo: "AI\\redX.bmp".into(),
                             },
                         ],
                         player_match: true,
@@ -1471,10 +1661,12 @@ mod tests {
                             BracketSlot {
                                 name: "The Rookies".into(),
                                 player: true,
+                                logo: "Teams\\orange_skull.bmp".into(),
                             },
                             BracketSlot {
                                 name: "Blue Fury".into(),
                                 player: false,
+                                logo: "AI\\star.bmp".into(),
                             },
                         ],
                         player_match: true,
@@ -1490,26 +1682,59 @@ mod tests {
         fill_bracket(&mut gib, &view);
         let root = gib.widgets().next().unwrap();
         let group = find(root, BRACKET_GROUP).expect("the bracket group");
-        assert!(group.children.len() >= 3, "status + one line per round");
-        assert!(group.children.iter().any(|c| c.name() == "bracket status"));
-        let first = group
+        let cell = |name: &str| {
+            group
+                .children
+                .iter()
+                .find(|c| c.name() == name)
+                .and_then(|c| c.field("_Filename"))
+                .map(|f| f.text().to_string())
+        };
+        // Two rounds of 2-bot matches would be 16 + 8 + 4 pictures; the
+        // view's widest match decides the bots (2) and its rounds the rows.
+        let pictures = group
             .children
             .iter()
-            .find(|c| c.name() == "round 0 line")
-            .unwrap();
+            .filter(|c| c.name().starts_with("bracket cell "))
+            .count();
+        assert_eq!(pictures, 16 + 8 + 4);
+        // Round 1 (played): the player's match keeps its two logos; the
+        // rest of the row is unknown here.
         assert_eq!(
-            first.field("_Text").map(|f| f.text()),
-            Some("Round 1: You vs Red Zone — WON")
+            cell("bracket cell 0:0").as_deref(),
+            Some("Teams\\orange_skull.bmp")
         );
-        let player = group
+        assert_eq!(cell("bracket cell 0:1").as_deref(), Some("AI\\redX.bmp"));
+        assert_eq!(cell("bracket cell 0:2").as_deref(), Some(QUESTION_MARK));
+        // The current round shows its field; beyond it, question marks.
+        assert_eq!(cell("bracket cell 1:1").as_deref(), Some("AI\\star.bmp"));
+        assert_eq!(cell("bracket cell 2:0").as_deref(), Some(QUESTION_MARK));
+        assert!(group.children.iter().any(|c| c.name() == "player frame 0"));
+        assert!(group
             .children
             .iter()
-            .find(|c| c.name() == "round 1 line")
-            .unwrap();
-        assert_eq!(
-            player.field("_Text").map(|f| f.text()),
-            Some("Final Match: You vs Blue Fury — NEXT")
-        );
+            .any(|c| c.name() == "bracket line 0:0:b"));
+    }
+
+    /// `FUN_0046ad60`'s geometry: sixteen pictures across, each next row
+    /// centred under its match, a 4-bot two-round bracket ending in one.
+    #[test]
+    fn the_bracket_cells_follow_the_recovered_layout() {
+        let cells = bracket_cells(2, 4, 1, 1000.0, 400.0);
+        let row = |r: usize| cells.iter().filter(|c| c.row == r).collect::<Vec<_>>();
+        assert_eq!(row(0).len(), 16);
+        assert_eq!(row(1).len(), 4);
+        assert_eq!(row(2).len(), 1);
+        let size = row(0)[0].size;
+        assert!((size - ((994.0 - 192.0) / 16.0f32).min((394.0 - 45.0) / 3.0)).abs() < 1e-3);
+        // The first row spans the width less 6 px.
+        let last = row(0)[15];
+        assert!((last.x + last.size - (3.0 + 994.0)).abs() < 0.5);
+        // A next-row picture is centred under its match of four.
+        let m0 = (row(0)[0].x + row(0)[3].x + size) / 2.0;
+        assert!((row(1)[0].x + size / 2.0 - m0).abs() < 0.5);
+        // The final's winner sits in the middle.
+        assert!((row(2)[0].x + size / 2.0 - 500.0).abs() < 0.5);
     }
 
     #[test]
