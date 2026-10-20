@@ -358,6 +358,17 @@ impl Session {
         Ok(session)
     }
 
+    /// [`Session::new`] with the player driving robot 0: the workshop's
+    /// `Test Robot`, where the player tries the robot they just built with its
+    /// own wiring.
+    pub fn new_player(options: &Options) -> Result<Session, String> {
+        std::env::set_var("RA2_HAZARDS", "0");
+        let matched = Match::new(options.match_config()).map_err(|e| e.to_string())?;
+        let mut session = Session::with_match_controlled(&options.game, matched, true)?;
+        session.set_layout(options.size);
+        Ok(session)
+    }
+
     /// A live match and its shipped screens from an already-built [`Match`].
     /// This is the same presentation the `--match` path uses; the Team HQ's
     /// event flow supplies a match whose arena and game type come from
@@ -368,6 +379,14 @@ impl Session {
         // turn them off for the deterministic presentation run as well.
         std::env::set_var("RA2_HAZARDS", "0");
         Session::with_match_controlled(game, matched, false)
+    }
+
+    /// [`Session::with_match`] with the player driving robot 0: the Team HQ's
+    /// event match, which the original plays with the player's own robot under
+    /// the keyboard (chase camera, Esc pauses), exactly like an exhibition.
+    pub fn with_match_player(game: &Path, matched: Match) -> Result<Session, String> {
+        std::env::set_var("RA2_HAZARDS", "0");
+        Session::with_match_controlled(game, matched, true)
     }
 
     /// Start the exhibition match the shipped setup screen chose.
@@ -800,6 +819,31 @@ impl Session {
         let bind = self.screen_bind();
         self.presentation
             .hud_scene(&report, state, clock, countdown, &bind)
+    }
+
+    /// Whether a click during the arena intro hit the HUD's `skip button`
+    /// ("click to skip past the announcer intro", in `skip group`, which the
+    /// HUD shows only while the intro plays).
+    pub fn skip_button_at(&mut self, point: [f32; 2]) -> bool {
+        if self.matched.state() != MatchState::Intro || self.paused {
+            return false;
+        }
+        // Bind the HUD for the current moment, so the hit test sees the same
+        // visibility the frame drew.
+        if self.hud_now().is_err() {
+            return false;
+        }
+        let placed = ra2ui::resolve_with(
+            &self.presentation.hud,
+            self.presentation.layout,
+            Some(self.presentation.assets.faces()),
+        );
+        let Some(path) = ra2ui::input::hit_control(&placed, point[0], point[1]) else {
+            return false;
+        };
+        names_on_path(&placed, &path)
+            .iter()
+            .any(|n| n == "skip button")
     }
 
     /// Whether a click in the pause dialog hit a named button.

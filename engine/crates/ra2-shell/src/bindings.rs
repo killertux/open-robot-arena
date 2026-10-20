@@ -78,6 +78,7 @@ pub const WINDOWS: &[&str] = &[
     "teamhq/editteam.gib",
     "teamhq/joinevent.gib",
     "help/helpframe.gib",
+    "multiplayer/ip_connect.gib",
 ];
 
 /// Whether a screen is one of the modal windows.
@@ -255,6 +256,38 @@ pub const BINDINGS: &[Binding] = &[
         name: "close button",
         action: Action::Close,
         at: "CreditsWindow",
+    },
+    // Multiplayer window constructor `FUN_004976a0`. Navigation only: no
+    // session is hosted or joined (no network layer).
+    Binding {
+        screen: "multiplayer/multiplayer.gib",
+        name: "Help button",
+        action: Action::Help("help/help_multiplayer.gib"),
+        at: "0x4976a0 -> FUN_004e4ab0(0xc)",
+    },
+    Binding {
+        screen: "multiplayer/multiplayer.gib",
+        name: "Create Game button",
+        action: Action::Goto("multiplayer/mp_create.gib"),
+        at: "0x4976a0 -> FUN_0049a000: `create mp game win` from multiplayer\\mp_create.gib (MultiplayerCreateWnd), switch FUN_005e5810",
+    },
+    Binding {
+        screen: "multiplayer/multiplayer.gib",
+        name: "IP connect button",
+        action: Action::Window("multiplayer/ip_connect.gib"),
+        at: "0x4976a0 -> FUN_00497cd0: `ip connect window` from multiplayer\\ip_connect.gib, modal FUN_005e5690",
+    },
+    Binding {
+        screen: "multiplayer/ip_connect.gib",
+        name: "cancel button",
+        action: Action::Close,
+        at: "ip connect window: close and cancel IP connect",
+    },
+    Binding {
+        screen: "multiplayer/mp_create.gib",
+        name: "Help button",
+        action: Action::Help("help/help_multicreate.gib"),
+        at: "FUN_004e4ab0(0xd)",
     },
 ];
 

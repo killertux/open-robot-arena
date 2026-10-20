@@ -1,0 +1,160 @@
+//! The hand-offs between the shell and the live game modes.
+//!
+//! The windowed client boots the shell (`ra2_shell::Shell`) and a player walks
+//! the shipped screens. Three of those screens are only the entry to a live
+//! mode that this crate implements beside the shell:
+//!
+//! * the Team HQ's event bracket (`teamhq/event_bracket.gib`): its `play
+//!   button` starts the event's match, and the round's results, repairs and
+//!   award follow ([`crate::hq_mode::Session`]);
+//! * the bot lab (`botlab/botlabwin.gib`), reached from the HQ's `workshop
+//!   button`: the editable workshop ([`crate::build_mode::Builder`]);
+//! * the exhibition setup's `start game button` ([`crate::play_mode`]).
+//!
+//! The functions here are the hand-offs, kept out of the window loop so the
+//! route can be driven and tested headlessly. The career on disk (`Teams/`) is
+//! the state the shell and the event flow share, as the original keeps one team
+//! record for both.
+
+use std::path::{Path, PathBuf};
+
+use ra2_shell::Shell;
+
+use crate::build_mode::Builder;
+use crate::hq_mode;
+
+/// The bracket screen the shell shows for an entered event.
+pub const BRACKET_SCREEN: &str = "teamhq/event_bracket.gib";
+
+/// Which robot cell of the Team HQ's inventory a point is on. The inventory
+/// grid lays its cells out evenly (`ra2ui::hq`), down each column first, in
+/// roster order; the cell index is the roster index.
+pub fn inventory_cell_at(shell: &Shell, point: [f32; 2]) -> Option<usize> {
+    if !shell
+        .base_screen_id()
+        .eq_ignore_ascii_case(ra2ui::hq::SCREEN)
+        || shell.window_depth() > 0
+    {
+        return None;
+    }
+    let placed = ra2ui::resolve(shell.document(), shell.size());
+    let grid = placed
+        .iter()
+        .flat_map(|p| p.walk())
+        .find(|p| p.widget.name() == ra2ui::hq::ROBOT_GRID)?;
+    if !grid.frame.contains_point(point[0], point[1]) {
+        return None;
+    }
+    grid.children
+        .iter()
+        .filter(|cell| {
+            let name = cell.widget.name();
+            name != "Sel Bar" && name != "High Bar"
+        })
+        .position(|cell| cell.frame.contains_point(point[0], point[1]))
+}
+
+/// The `.bot` of roster entry `index` of the career's team.
+pub fn inventory_robot_path(game: &Path, index: usize) -> Option<PathBuf> {
+    let career = ra2sim::career::Career::load(game).ok()?;
+    let slot = *career.player().robots.get(index)?;
+    let path = hq_mode::player_robot_path(game, career.player_slot, slot);
+    path.is_file().then_some(path)
+}
+
+/// The workshop for the HQ's `workshop button`: the inventory robot the player
+/// selected, edited in place (`Back to HQ` writes it back to its team slot),
+/// or a new robot from the stock chassis when none is selected.
+pub fn open_workshop(game: &Path, robot: Option<usize>) -> Result<Builder, String> {
+    let path = robot.and_then(|index| inventory_robot_path(game, index));
+    let mut builder = Builder::open(game, path.as_deref())?;
+    if let Some(path) = path {
+        builder.set_team_target(path);
+    }
+    Ok(builder)
+}
+
+/// The workshop is being left (`Back to HQ`, `Main Menu`): write a team robot
+/// back to its slot and refresh the shell's HQ data, so the inventory, the join
+/// window and the exhibition pickers show the edited robot.
+pub fn close_workshop(builder: &mut Builder, shell: &mut Shell) -> Result<Option<PathBuf>, String> {
+    let saved = builder.save_to_team()?;
+    if let Some(view) = hq_mode::shell_view(shell.game()) {
+        shell.set_hq_view(view);
+    }
+    Ok(saved)
+}
+
+/// The control that took the workshop's own shell out of the lab, so the
+/// application's shell (still on the lab screen) can follow it: the lab's
+/// `back button` (`Back to HQ`, `0x43b6d0`: the Team HQ window) or the bottom
+/// bar's `MainMenu button`.
+pub fn lab_exit_control(workshop_shell: &Shell) -> Option<String> {
+    let screen = workshop_shell.base_screen_id();
+    if screen.eq_ignore_ascii_case(ra2ui::hq::SCREEN) {
+        Some("back button".to_string())
+    } else if screen.eq_ignore_ascii_case(ra2_shell::nav::BOOT_SCREEN) {
+        Some("MainMenu button".to_string())
+    } else {
+        None
+    }
+}
+
+/// Whether a click on `screen` hit a control the executable binds to leaving
+/// the game (the main menu's `Quit button`, handler `0x486c30`). The shell
+/// itself has nothing to show for it; the application exits.
+pub fn quits(screen: &str, step: &ra2_shell::Step) -> bool {
+    step.hit_widget()
+        .and_then(|name| ra2_shell::bindings::lookup(screen, name))
+        .is_some_and(|binding| binding.action == ra2_shell::bindings::Action::Quit)
+}
+
+/// The event match's length in the windowed client. `Events.txt` carries no
+/// match time and the event setup window's field was not recovered; this is
+/// the exhibition setup's own default (`3` minutes), stated here rather than
+/// the 30 s evidence length the headless runs use.
+pub const EVENT_MATCH_SECONDS: f32 = 180.0;
+
+/// The bracket's `play button`: the event the shell entered (`Events.txt` id
+/// and the join window's robot column), its next round's match, with the
+/// player driving the entered robot. A saved career already in that event
+/// resumes it; the round's award is what writes the career.
+pub fn start_event_match(
+    game: &Path,
+    entered: Option<(usize, usize)>,
+    seconds: f32,
+) -> Result<hq_mode::Session, String> {
+    let mut hq = hq_mode::Session::open(game)?;
+    hq.set_player_drives(true);
+    hq.set_event_seconds(seconds);
+    match entered {
+        Some((event, robot)) => hq.enter_or_resume(event, Some(robot))?,
+        None => hq.resume_event()?,
+    }
+    hq.start_match()?;
+    Ok(hq)
+}
+
+/// The bracket's `forfeit button`: the event closes as a loss with the rounds
+/// won so far, and the career is saved.
+pub fn forfeit_event(game: &Path, entered: Option<(usize, usize)>) -> Result<(), String> {
+    let mut hq = hq_mode::Session::open(game)?;
+    match entered {
+        Some((event, robot)) => hq.enter_or_resume(event, Some(robot))?,
+        None => hq.resume_event()?,
+    }
+    hq.forfeit_event()
+}
+
+/// The event flow is back on the HQ (the player left the bracket, or the
+/// event ended): the shell shows the Team HQ again with the saved career.
+pub fn return_to_shell_hq(shell: &mut Shell) -> Result<(), String> {
+    if let Some(view) = hq_mode::shell_view(shell.game()) {
+        shell.set_hq_view(view);
+    }
+    if shell.base_screen_id().eq_ignore_ascii_case(BRACKET_SCREEN) {
+        // The bracket's own `later button` is the shipped way back to the HQ.
+        shell.click_named("later button")?;
+    }
+    Ok(())
+}

@@ -416,6 +416,9 @@ pub struct Match {
     reason: Option<WinReason>,
     winners: Vec<usize>,
     teams: Vec<ra2fmt::team::Team>,
+    /// `Teams/Teams.txt`'s records by slot (named or not): a career robot under
+    /// `Teams/Team<N>/` belongs to record N.
+    player_teams: Vec<ra2fmt::team::Team>,
     /// The robots' own `.bot` snapshots, decoded once when the match is built.
     previews: Vec<Option<ra2ui::preview::Preview>>,
 }
@@ -472,6 +475,7 @@ impl Match {
         }
 
         let teams = team_table(&config.arena);
+        let player_teams = player_team_table(&config.arena);
         let previews = config
             .robots
             .iter()
@@ -487,6 +491,7 @@ impl Match {
             reason: None,
             winners: Vec::new(),
             teams,
+            player_teams,
             previews,
         })
     }
@@ -668,13 +673,21 @@ impl Match {
                 // `AI/Team<N>/` belongs to `Teams.txt` record N (the folders line up
                 // with the table). `robot.team` is only the match grouping, so it
                 // is the fallback for bots from elsewhere (a career team's own).
-                let team = &self
+                // A career robot (`Teams/Team<N>/`) is the player table's
+                // record N: the exhibition's player slots and the HQ's events
+                // show the player's own team, not the AI record of that number.
+                let path = self
                     .config
                     .robots
                     .get(i)
-                    .and_then(|entry| ai_team_index(&entry.bot_path))
-                    .or(Some(robot.team))
-                    .and_then(|index| self.teams.get(index));
+                    .map(|entry| entry.bot_path.as_str());
+                let team = &match path.and_then(player_team_index) {
+                    Some(index) => self.player_teams.get(index).filter(|t| t.is_named()),
+                    None => path
+                        .and_then(ai_team_index)
+                        .or(Some(robot.team))
+                        .and_then(|index| self.teams.get(index)),
+                };
                 RobotReport {
                     slot: i,
                     team: robot.team,
@@ -916,6 +929,36 @@ fn ai_team_index(bot_path: &str) -> Option<usize> {
         .ok()
 }
 
+/// `Teams/Team<N>/...` -> `N`: the player-table record a career robot belongs to.
+fn player_team_index(bot_path: &str) -> Option<usize> {
+    let parts: Vec<&str> = bot_path.split(['/', '\\']).collect();
+    let at = parts
+        .iter()
+        .rposition(|p| p.eq_ignore_ascii_case("Teams"))?;
+    let folder = parts.get(at + 1)?;
+    // The folder must be followed by the `.bot` itself (`Teams/Teams.txt` is
+    // not a robot).
+    parts.get(at + 2)?;
+    folder
+        .strip_prefix("Team")
+        .or_else(|| folder.strip_prefix("team"))?
+        .parse()
+        .ok()
+}
+
+/// `Teams/Teams.txt` in slot order, unnamed records kept so the slot is the
+/// index.
+fn player_team_table(arena: &str) -> Vec<ra2fmt::team::Team> {
+    let Some(root) = ra2_render::find_game_root(Path::new(arena)) else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(root.join("Teams").join("Teams.txt"))
+        .ok()
+        .and_then(|text| ra2fmt::team::parse_table(&text).ok())
+        .map(|table| table.teams)
+        .unwrap_or_default()
+}
+
 /// The event's team slot is the index into `AI/Teams.txt`; that is the table
 /// the shipped AI team folders (`AI/Team1` …) line up with in their own order.
 fn team_table(arena: &str) -> Vec<ra2fmt::team::Team> {
@@ -930,6 +973,19 @@ fn team_table(arena: &str) -> Vec<ra2fmt::team::Team> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A career robot's team is the player table's record, an AI robot's the
+    /// AI table's, and neither is read from the other path.
+    #[test]
+    fn a_result_rows_team_comes_from_the_table_the_bot_lives_in() {
+        assert_eq!(player_team_index("/g/Teams/Team0/Bot1.bot"), Some(0));
+        assert_eq!(player_team_index("C:\\g\\Teams\\Team3\\Bot0.bot"), Some(3));
+        assert_eq!(player_team_index("/g/AI/Team0/Bot1.bot"), None);
+        assert_eq!(player_team_index("/g/Teams/Teams.txt"), None);
+        assert_eq!(player_team_index("/g/Robot Designs/M9 Bot.bot"), None);
+        assert_eq!(ai_team_index("/g/AI/Team5/Bot1.bot"), Some(5));
+        assert_eq!(ai_team_index("/g/Teams/Team0/Bot1.bot"), None);
+    }
     use glam::Vec3;
     use pyo3::prelude::*;
 

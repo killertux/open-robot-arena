@@ -278,8 +278,17 @@ struct App {
     session: Option<crate::match_mode::Session>,
     /// `Some` when `--build` is open: the workshop model and its preview.
     builder: Option<crate::build_mode::Builder>,
-    /// `Some` when `--hq` is open: the shipped HQ and its event flow.
+    /// `Some` when `--hq` is open: the shipped HQ and its event flow. The
+    /// shell's own Team HQ hands its event bracket to one of these as well
+    /// (`hq_from_shell`), and takes the player back when the event flow returns
+    /// to the HQ.
     hq: Option<crate::hq_mode::Session>,
+    /// The event flow was started from the shell's bracket, not `--hq`.
+    hq_from_shell: bool,
+    /// The workshop was opened from the shell's Team HQ, not `--build`.
+    lab_from_shell: bool,
+    /// The inventory robot the player last clicked in the shell's Team HQ.
+    inventory_pick: Option<usize>,
     /// The modifiers currently held, for Ctrl+Z / Ctrl+Y.
     modifiers: ModifiersState,
     window: Option<Arc<Window>>,
@@ -361,6 +370,9 @@ impl App {
             session,
             builder: None,
             hq: None,
+            hq_from_shell: false,
+            lab_from_shell: false,
+            inventory_pick: None,
             modifiers: ModifiersState::empty(),
             window: None,
             gpu: None,
@@ -369,6 +381,27 @@ impl App {
             next_update: Instant::now(),
             error: None,
         })
+    }
+
+    /// The match on screen: an exhibition/test match, or the Team HQ's event
+    /// match.
+    fn live_match(&self) -> Option<&crate::match_mode::Session> {
+        self.session
+            .as_ref()
+            .or_else(|| self.hq.as_ref().and_then(|hq| hq.match_session()))
+    }
+
+    fn live_match_mut(&mut self) -> Option<&mut crate::match_mode::Session> {
+        match &mut self.session {
+            Some(session) => Some(session),
+            None => self.hq.as_mut().and_then(|hq| hq.match_session_mut()),
+        }
+    }
+
+    fn request_redraw(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl Into<String>) {
@@ -632,13 +665,12 @@ impl ApplicationHandler for App {
             // cadence; this only changes the value sampled at the next tick.
             WindowEvent::KeyboardInput { event, .. }
                 if self
-                    .session
-                    .as_ref()
+                    .live_match()
                     .is_some_and(|session| session.player_controlled && !session.chat_open())
                     && is_drive_key(&event.physical_key) =>
             {
                 let pressed = event.state == ElementState::Pressed;
-                if let Some(session) = &mut self.session {
+                if let Some(session) = self.live_match_mut() {
                     let mut input = session.drive();
                     apply_drive_key(&event.physical_key, pressed, &mut input);
                     session.set_drive(input);
@@ -697,7 +729,7 @@ impl ApplicationHandler for App {
                 // The chat entry owns the keyboard while it is open
                 // (`0x475ee0` opens it on `\`; the text field consumes the
                 // rest). Enter/Escape close it; nothing is sent anywhere.
-                if let Some(session) = &mut self.session {
+                if let Some(session) = self.live_match_mut() {
                     if session.chat_open() {
                         match event.physical_key {
                             PhysicalKey::Code(KeyCode::Escape | KeyCode::Enter) => {
@@ -719,57 +751,67 @@ impl ApplicationHandler for App {
                         return;
                     }
                 }
+                let in_match = self.live_match().is_some();
+                if !in_match && self.hq.is_none() && self.shell.text_focus().is_some() {
+                    // A focused shell text box (New Team's name and motto)
+                    // takes the typing.
+                    let typed = match event.physical_key {
+                        PhysicalKey::Code(KeyCode::Backspace) => self.shell.backspace(),
+                        PhysicalKey::Code(KeyCode::Escape) => false,
+                        _ if !ctrl => event
+                            .text
+                            .as_ref()
+                            .map(|text| {
+                                text.chars()
+                                    .fold(false, |any, c| self.shell.type_char(c) | any)
+                            })
+                            .unwrap_or(false),
+                        _ => false,
+                    };
+                    if typed {
+                        self.request_redraw();
+                        return;
+                    }
+                }
                 match event.physical_key {
-                    PhysicalKey::Code(KeyCode::Backslash) if self.session.is_some() => {
-                        if let Some(session) = &mut self.session {
+                    PhysicalKey::Code(KeyCode::Backslash) if in_match => {
+                        if let Some(session) = self.live_match_mut() {
                             session.toggle_chat();
                         }
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
+                        self.request_redraw();
                     }
                     PhysicalKey::Code(KeyCode::Escape) => {
-                        if self.hq.is_some() {
-                            event_loop.exit();
-                            return;
-                        }
-                        if let Some(session) = &mut self.session {
+                        if let Some(session) = self.live_match_mut() {
                             // `0x475ee0`: Esc skips the intro, opens/closes the
                             // pause popup, and is ignored once the match is over.
                             session.escape();
                         } else {
                             event_loop.exit();
                         }
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
+                        self.request_redraw();
                     }
                     PhysicalKey::Code(code @ (KeyCode::F2 | KeyCode::F3 | KeyCode::F4))
-                        if self.session.is_some() =>
+                        if in_match =>
                     {
-                        if let Some(session) = &mut self.session {
+                        if let Some(session) = self.live_match_mut() {
                             session.camera_key(match code {
                                 KeyCode::F2 => 2,
                                 KeyCode::F3 => 3,
                                 _ => 4,
                             });
                         }
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
+                        self.request_redraw();
                     }
-                    PhysicalKey::Code(KeyCode::Space) if self.session.is_some() => {
-                        if let Some(session) = &mut self.session {
+                    PhysicalKey::Code(KeyCode::Space) if in_match => {
+                        if let Some(session) = self.live_match_mut() {
                             session.skip_intro();
                         }
                     }
-                    PhysicalKey::Code(KeyCode::KeyC) if self.session.is_some() => {
-                        if let Some(session) = &mut self.session {
+                    PhysicalKey::Code(KeyCode::KeyC) if in_match => {
+                        if let Some(session) = self.live_match_mut() {
                             session.cycle_camera();
                         }
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
+                        self.request_redraw();
                     }
                     _ => {}
                 }
@@ -787,7 +829,7 @@ impl ApplicationHandler for App {
                 self.set_hover(None);
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if let Some(session) = &mut self.session {
+                if let Some(session) = self.live_match_mut() {
                     let notches = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y,
                         MouseScrollDelta::PixelDelta(position) => position.y as f32 / 40.0,
@@ -844,19 +886,58 @@ impl ApplicationHandler for App {
                     return;
                 };
                 if let Some(hq) = &mut self.hq {
-                    match hq.click(point) {
-                        Ok(_) => {
-                            if let Some(window) = &self.window {
-                                window.request_redraw();
+                    // The event match's own HUD and pause dialog come first; the
+                    // results' Continue is the event flow's.
+                    let mut abandon = false;
+                    if let Some(session) = hq.match_session_mut() {
+                        if session.matched.state() != MatchState::Results {
+                            if session.skip_button_at(point) {
+                                session.skip_intro();
+                            } else {
+                                match session.pause_button_at(point).as_deref() {
+                                    Some("resume button") => session.toggle_pause(),
+                                    Some("quit button") => {
+                                        event_loop.exit();
+                                        return;
+                                    }
+                                    Some("end match button") => abandon = true,
+                                    _ => {}
+                                }
+                            }
+                            if !abandon {
+                                self.request_redraw();
+                                return;
                             }
                         }
-                        Err(error) => self.fail(event_loop, error),
                     }
+                    let result = if abandon {
+                        hq.abandon_match().map(|_| true)
+                    } else {
+                        hq.click(point)
+                    };
+                    if let Err(error) = result {
+                        self.fail(event_loop, error);
+                        return;
+                    }
+                    if self.hq_from_shell && hq.on_hq_screen() {
+                        // The event flow is back on the HQ: the shell's own Team
+                        // HQ takes over again, refreshed from the saved career.
+                        self.hq = None;
+                        self.hq_from_shell = false;
+                        if let Err(error) = crate::flow::return_to_shell_hq(&mut self.shell) {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        println!("event flow left; back on {}", self.shell.screen_id());
+                    }
+                    self.request_redraw();
                     return;
                 }
                 let mut quit = false;
                 if let Some(session) = &mut self.session {
-                    if session.matched.state() == MatchState::Results {
+                    if session.skip_button_at(point) {
+                        session.skip_intro();
+                    } else if session.matched.state() == MatchState::Results {
                         if session.results_button_at(point).is_some() {
                             quit = true;
                         }
@@ -902,6 +983,7 @@ impl ApplicationHandler for App {
                         .map(|w| window_size(w))
                         .unwrap_or([SHELL_SIZE[0] as u32, SHELL_SIZE[1] as u32]);
                     let mut test = None;
+                    let mut left_lab = None;
                     if let Some(builder) = &mut self.builder {
                         if let Err(error) = builder.click(point[0], point[1]) {
                             self.fail(event_loop, error);
@@ -910,9 +992,37 @@ impl ApplicationHandler for App {
                         if builder.take_test_request() {
                             test = Some(builder.test_options(target_size));
                         }
+                        if self.lab_from_shell && builder.shell().lab().is_none() {
+                            // `Back to HQ` / `Main Menu`: the workshop's shell
+                            // left the lab; the same control takes the app's
+                            // shell there.
+                            left_lab = Some(crate::flow::lab_exit_control(builder.shell()));
+                        }
+                    }
+                    if let Some(control) = left_lab {
+                        let mut builder = self.builder.take().expect("the workshop is open");
+                        self.lab_from_shell = false;
+                        match crate::flow::close_workshop(&mut builder, &mut self.shell) {
+                            Ok(Some(path)) => println!("workshop: saved {}", path.display()),
+                            Ok(None) => {}
+                            Err(error) => eprintln!("workshop: {error}"),
+                        }
+                        if let Some(control) = control {
+                            match self.shell.click_named(&control) {
+                                Ok(step) => println!("{}", crate::describe(&step)),
+                                Err(error) => eprintln!("workshop: {error}"),
+                            }
+                        }
+                        let screen = self.shell.screen_id();
+                        self.audio.on_screen(&screen);
+                        self.request_redraw();
+                        return;
                     }
                     if let Some(result) = test {
-                        match result.and_then(|options| crate::match_mode::Session::new(&options)) {
+                        // `Test Robot`: the player drives the robot just built.
+                        match result
+                            .and_then(|options| crate::match_mode::Session::new_player(&options))
+                        {
                             Ok(session) => {
                                 println!(
                                     "test robot: {} vs {}",
@@ -948,9 +1058,74 @@ impl ApplicationHandler for App {
                         self.audio.apply_cfg(self.options.cfg());
                     }
                 }
+                if let Some(index) = crate::flow::inventory_cell_at(&self.shell, point) {
+                    self.inventory_pick = Some(index);
+                }
+                let screen_before = self.shell.base_screen_id();
                 match self.shell.click(point[0], point[1]) {
                     Ok(step) => {
                         println!("{}", crate::describe(&step));
+                        if crate::flow::quits(&screen_before, &step) {
+                            // `Quit` (`0x486c30`): the game exits.
+                            event_loop.exit();
+                            return;
+                        }
+                        let on_bracket = screen_before
+                            .eq_ignore_ascii_case(crate::flow::BRACKET_SCREEN)
+                            && self.shell.window_depth() == 0;
+                        if on_bracket && step.hit_widget() == Some("play button") {
+                            // `Play Next Round!`: the event's match, with the
+                            // player driving the entered robot.
+                            match crate::flow::start_event_match(
+                                self.shell.game(),
+                                self.shell.entered_event(),
+                                crate::flow::EVENT_MATCH_SECONDS,
+                            ) {
+                                Ok(hq) => {
+                                    self.hq = Some(hq);
+                                    self.hq_from_shell = true;
+                                }
+                                Err(error) => {
+                                    self.fail(event_loop, error);
+                                    return;
+                                }
+                            }
+                            self.request_redraw();
+                            return;
+                        }
+                        if on_bracket && step.hit_widget() == Some("forfeit button") {
+                            if let Err(error) = crate::flow::forfeit_event(
+                                self.shell.game(),
+                                self.shell.entered_event(),
+                            ) {
+                                eprintln!("forfeit: {error}");
+                            }
+                            if let Some(view) = crate::hq_mode::shell_view(self.shell.game()) {
+                                self.shell.set_hq_view(view);
+                            }
+                        }
+                        if self.shell.lab().is_some() && self.builder.is_none() {
+                            // The HQ's `workshop button`: the editable workshop on
+                            // the robot the player selected.
+                            match crate::flow::open_workshop(self.shell.game(), self.inventory_pick)
+                            {
+                                Ok(builder) => {
+                                    println!(
+                                        "workshop: {}",
+                                        builder
+                                            .team_target()
+                                            .map(|p| p.display().to_string())
+                                            .unwrap_or_else(|| "a new robot".to_string())
+                                    );
+                                    self.builder = Some(builder);
+                                    self.lab_from_shell = true;
+                                }
+                                Err(error) => {
+                                    self.fail(event_loop, error);
+                                    return;
+                                }
+                            }
+                        }
                         self.audio.shell_step(&step);
                         // The options window applies on OK, restores on Cancel.
                         match step.note.as_deref() {
@@ -1008,7 +1183,10 @@ impl ApplicationHandler for App {
                             window.request_redraw();
                         }
                     }
-                    Err(error) => self.fail(event_loop, error),
+                    // A click the shell cannot follow (a screen the data does
+                    // not ship) is reported, not fatal: the player stays on
+                    // the screen they were on.
+                    Err(error) => eprintln!("click {:.0},{:.0}: {error}", point[0], point[1]),
                 }
             }
             WindowEvent::Resized(size) => {
