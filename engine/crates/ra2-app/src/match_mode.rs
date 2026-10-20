@@ -1196,6 +1196,9 @@ enum Shot {
     Skip(f32),
     /// `countdown@N`: the first frame whose countdown number is N.
     Countdown(u32),
+    /// `cd@R`: the first countdown frame with `R` seconds (of 4.0) left; the
+    /// state-hooked live captures record the countdown reading they were shot at.
+    CountdownLeft(f32),
     /// `f2|f3|f3b|f4@S`: press that camera key at S fight seconds, then shoot.
     Key { key: u8, at: f32 },
 }
@@ -1215,6 +1218,7 @@ fn parse_shot(spec: &str) -> Result<(String, Shot), String> {
         "intro" => Shot::Intro(at.unwrap_or(2.5)),
         "skip" => Shot::Skip(at.unwrap_or(4.8)),
         "countdown" => Shot::Countdown(at.unwrap_or(2.0) as u32),
+        "cd" => Shot::CountdownLeft(at.unwrap_or(2.0)),
         "f2" => Shot::Key {
             key: 2,
             at: at.unwrap_or(13.0),
@@ -1229,7 +1233,7 @@ fn parse_shot(spec: &str) -> Result<(String, Shot), String> {
         },
         other => {
             return Err(format!(
-                "--camera-shots: {other:?} is not intro/skip/countdown/f2/f3/f3b/f4"
+                "--camera-shots: {other:?} is not intro/skip/countdown/cd/f2/f3/f3b/f4"
             ))
         }
     };
@@ -1277,6 +1281,9 @@ pub fn run_camera_shots(options: Options, shots: &[String]) -> Result<(), String
             let ready = match *shot {
                 Shot::Intro(t) | Shot::Skip(t) => state == MatchState::Intro && intro_time >= t,
                 Shot::Countdown(n) => state == MatchState::Countdown && countdown == Some(n),
+                Shot::CountdownLeft(r) => {
+                    state == MatchState::Countdown && session.matched.countdown_left() <= r
+                }
                 // A match that ends before the shot's second (a robot out of
                 // the arena at once) is photographed in its final pose.
                 Shot::Key { at, .. } => {
@@ -1476,6 +1483,14 @@ mod tests {
                 return None;
             }
         }
+    }
+
+    #[test]
+    fn a_countdown_left_shot_parses() {
+        let (name, shot) = parse_shot("cd@1.95").unwrap();
+        assert_eq!(name, "cd");
+        assert_eq!(shot, Shot::CountdownLeft(1.95));
+        assert_eq!(parse_shot("cd").unwrap().1, Shot::CountdownLeft(2.0));
     }
 
     fn robot(slot: usize, name: &str, team: &str, points: i32) -> RobotReport {

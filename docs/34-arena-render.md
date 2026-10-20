@@ -70,6 +70,12 @@ differs from it in a few dynamic shots (`metalskull-f2` 19.39 there, 27.37 here:
 Above MAE 8 before: 22 shots. After: 6 (`electric-countdown`, `electric-intro`, `halfcircle-f2`,
 `metalskull-f2`, `metalskull-f4`, `parkinglot-f2`); the last four are robot pose / match state, §7.
 
+Second round (section 9): the 51 old references are unchanged (mean 4.55 at this base, no render change;
+the 4.90 above was measured at the previous base) and are marked unreliable where they were timed by
+wall clock. The 18 new references measure at mean **2.32**: countdown2 0.03-2.80, match-countdown2
+0.11, metalskull-f4live 0.33, intro2 1.52-8.60 (with the camera-clock rule; 12.3-58.3 with the game's
+intro clock taken at face value). Full run: 69 shots, mean 3.97.
+
 ## 2. Triage of the shots above MAE 8 (before)
 
 | shot | before | cause(s) seen in the side image |
@@ -119,8 +125,11 @@ concrete wall band). Now `normals[4f + 1 + corner]`, falling back to the face no
 ### 3.3 The texture manager keeps the first file per name for the whole session
 
 `FUN_005ae630` asks for every stage bitmap as `DAT_0071f574 + <name as written in the GMF>`; the
-global path is `Graphics\` (`FUN_0058df20`) and only the bot lab changes it (`FUN_00593a40`, from
-`0x42e650`, `UI\BotLab\Maps`). The texture manager `FUN_00591030` first scans its live list
+global path is a std::string that only the bot lab changes (`FUN_00593a40`, from `0x42e650`,
+`UI\BotLab\Maps`). **Correction (live, section 9):** the static initialiser `FUN_0058df20` mentions
+`Graphics\`, but the string is empty at run time: all 573 arena-load requests had the prefix `""`, so
+the manager's key is the bare name as written in the GMF (`sawhazard.bmp`). `session_bitmap` keys
+on `texture_path() + name` with an empty default; `set_texture_path` is the bot lab's switch. The texture manager `FUN_00591030` first scans its live list
 comparing each texture's name with that string (`FUN_0058e390`, exact byte compare) and returns the
 hit; only a miss loads a file (`FUN_005a8940` -> `FUN_005a8bd0` -> `FUN_005914d0`, which has its own
 by-name image cache). The directory a model came from is not part of the key, so the first file
@@ -141,8 +150,7 @@ last by a few counts in green); no component or robot texture collides. Implemen
 `ra2_render::material::session_bitmap` (process-wide, keyed by the GMF's bitmap string; a failed load
 is not cached, as the manager deletes it). `ra2-app --match --earlier-arenas A.py,B.py` loads the
 arenas played before in the same session, and `fidelity.py` passes the capture order
-(`CAPTURE_ORDER`). Whether the list survives every kind of screen change, and what an
-alphabetical-vs-history test would show for `triple_spike.bmp`, was not checked live.
+(`CAPTURE_ORDER`). Section 9 checks the scope live.
 
 ### 3.4 Specular (`FUN_005b24c0`, `FUN_005ba1e0`)
 
@@ -192,11 +200,9 @@ values fitted at the 1/60 s frame step with `tools/oracle/fit_capture_timing.py`
 either side typically doubles the MAE), which is only possible because the camera flights are right.
 The intro and countdown MAEs above depend on these fitted values.
 
-The camera-name notification (`FUN_00477180`, 3 s, docs/24 §5) is on in our intro frames and in the
-Box reference but off in the other seven intro references at the same intro clock. Its countdown
-`0x4774f1` subtracts the frame's `dt` (`[edi+4]`); a long first frame after a slow arena load would
-expire it at once, which fits Box being the quickest to load, but that was not verified live. Not
-changed.
+The camera-name notification: see section 9.3 (rule recovered and verified live). The old intro/skip
+references are now marked unreliable in the manifest; the fitted tables below are kept only so they
+stay comparable, and the new state-hooked references do not use them (section 9).
 
 ## 6. `match-countdown`: the reference is an intro frame
 
@@ -205,8 +211,7 @@ it was taken during the intro, not the countdown (the aligned countdown capture 
 `local/`, docs/12). Scanning our box intro: MAE 28 at 0.5 s, 5.2 at 6.5 s, **1.87 at 6.55 s**
 (`fit_capture_timing.py box intro 6.3:6.7 --ref match-countdown__1024x768__000.png`). The fixture
 now renders `ra2-app --camera-shots intro@6.55` (box) and says so in its note; ours-countdown against
-it was 34.79. A real countdown reference still needs a re-capture: the Wine session on Xephyr :5 was
-in use by another agent during this round, so no live capture was taken.
+it was 34.79. The real countdown reference is `match-countdown2` (section 9, MAE 0.11).
 
 ## 7. Remaining gaps
 
@@ -216,9 +221,12 @@ in use by another agent during this round, so no live capture was taken.
   residual is the 1-2 px wide bars against a camera that is a fraction of a pixel off (the intro and
   skip clocks are quantised to frames; the half-pixel shift made Electric slightly worse, 7.7 -> 11.0
   at its best skip frame, while improving every other arena).
-* **Intro camera label** (§5) and the bot lab's own render path (no half-pixel shift there).
-* Not live-verified: the session texture rule's scope (does anything flush the manager's list?) and
-  whether it is first-loaded or search-order for `triple_spike.bmp`.
+* The bot lab's own render path (no half-pixel shift there).
+* Arena decals (`Arenas\\decals\\*.tga`, loader reference at `0x44f105`, class `DecalTrigger`
+  `0x6ef5e4`), scorch marks, sparks and smoke were not recovered or drawn this round (section 9.5).
+* The intro camera's clock lags the frame-dt sum by the arena-load stall plus 0.265 s; we render a
+  deterministic intro and do not model the stall (section 9.2), so intro stills are only comparable
+  when the stall is known.
 
 ## 8. Code
 
@@ -227,6 +235,9 @@ in use by another agent during this round, so no live capture was taken.
   `Light::specular`; `renderer.rs` specular uniforms and shader term.
 * `ra2sim::duel` applies the pixel-centre shift in `render`/`render_to`.
 * `ra2-app --earlier-arenas`; `ra2 info` prints each texture's slot, invert, filter and channel.
+* `tools/oracle/capture_arena_states.py`, `frida/ra2_matchstate.js`, `arena_states.json`;
+  `fidelity.py` `LIVE_SHOTS`/`run_live_shots`/`INTRO_CAMERA_LAG`; `ra2-app --camera-shots cd@R`;
+  `ra2_render::material::{texture_path, set_texture_path}`.
 * `tools/oracle/fidelity.py`: `CAPTURE_ORDER`/`earlier_arenas`, `ARENA_INTRO`, refitted `ARENA_SKIP`,
   the `match-countdown` intro fixture; `tools/oracle/fit_capture_timing.py`.
 
@@ -236,3 +247,94 @@ Tests: `a_face_id_past_the_sub_materials_clamps_and_one_equal_to_the_count_is_dr
 `specular_is_added_after_the_texture_when_power_is_positive` (GPU; skipped without an adapter),
 `the_first_bitmap_loaded_under_a_name_is_the_sessions`, and the specular colour assertion in
 `omni_lights_become_d3d_point_lights` (ra2-render).
+
+## 9. State-hooked live captures (second round)
+
+The first round's references were taken at fixed wall times; this one waits on game state. Tool:
+`tools/oracle/capture_arena_states.py` with the Frida agent `tools/oracle/frida/ra2_matchstate.js`
+(session via `tools/capture/original_session.sh`, docs/12). Evidence (local, backed up):
+`local/oracle/original/arena-*-intro2`, `-countdown2`, `match-countdown2`, `arena-metalskull-f4live`
+(PNG), `arena-texture-session-forward` / `-reverse` (event logs), the unreliable-rows note
+`note-unreliable-references` in `manifest.tsv`, clocks in `tools/oracle/arena_states.json`.
+
+### 9.1 Hook points (match object = `ecx`)
+
+| address | what | field read |
+|---|---|---|
+| `0x475540` | match start | |
+| `0x4758c0` | pre-countdown state: the intro is running (Skip Intro shown) | |
+| `0x4759c0` | countdown start (Skip click **or** the intro's own end) | `+0x1dc` = 4.0 |
+| `0x416360` | fight begins | `+0x8e` |
+| `0x477480` | per-frame update, `[esp+4]+4` = frame dt | `+0x17c` label timer, `+0x1c0` is a 5 s wrapping timer (not the intro clock) |
+| `0x477180` | camera-name notification shown, `+0x17c = 3.0` | |
+| `0x591030`, `0x5914d0` | texture-manager get, image load/lookup | |
+
+The intro clock used here is the sum of `0x477480`'s dt since `0x4758c0` (equal to `3.0 - +0x17c`
+while the label runs). Natural intro lengths (intro state to countdown start) were 22.9-25.8 s of
+that clock; the countdown reads 4.0 s at its start and the fight begins when it reaches 1.0.
+
+### 9.2 What the new references show
+
+* `countdown2` (the intro runs to its end, no skip; shot at a countdown reading of 1.98 s, bracketed
+  by two clock reads 20 ms apart): our natural end-of-intro pose matches at **0.03-2.8** (electric
+  0.03, halfcircle 0.03, box 0.11, compressor 0.15, metalskull 0.78, octagon 1.03, parkinglot 1.74,
+  bridge 2.80; residual is robot pose). The skip clocks `ARENA_SKIP` are not needed for these.
+* `match-countdown2` is a real COMPETITORS READY frame (Combat Arena), MAE 0.11.
+* `arena-metalskull-f4live` (F4 two seconds into the fight, results window not up, clock 2:56):
+  **0.33**, against 87.6 for the old after-the-match shot.
+* Electric's bars: with the exact natural pose `electric-countdown2` is **0.03**, so the old 10.2/12.0
+  came from the quantised skip/intro clocks, not from the camera's sub-pixel pose or the bars
+  rendering. `electric-intro2` is 5.88 (1/60 s step of the intro clock and the robot pose).
+* `intro2` (shot at intro clock 2.31): taking the game's clock as our intro time gives 12-58; the
+  camera's own clock lags it by **the first long frame after the arena load plus 0.265 s**:
+  `camera T = intro clock - first_frame_dt - 0.265` (first_frame_dt = the second match update, 0.19 s
+  bridge, 0.39 box, 0.44 compressor, 0.78 electric, 0.49 half, 0.39 skull, 1.28 parking lot, 0.95
+  octagon). Six arenas were fitted at 1/60 s step first (offset minus stall 0.257-0.279); applied to all
+  eight, `intro2` is box 1.67, bridge 8.60, compressor 2.37, electric 5.88, halfcircle 6.49, metalskull
+  5.41, octagon 2.79, parkinglot 1.52 (parkinglot and metalskull were not in the fit). The constant
+  0.265 s is fitted, its cause (a delay before the intro generator advances) was not found.
+
+### 9.3 The camera-name label rule (`FUN_00477180`, `0x4774f1`)
+
+`0x4758c0` (intro state) calls the notification, which sets `+0x17c = 3.0`; each `0x477480` update
+subtracts the frame's dt (observed: `+0x17c = 3.0 - intro clock` to the millisecond) and the box is
+hidden when it reaches 0. The first update after the arena load carries the whole load stall as its
+dt (0.19-1.28 s above), so the label is visible while `intro clock < 3.0`, i.e. for a **shorter time
+of intro flight the longer the arena took to load**. A new still at intro clock 2.31 shows the label in
+all eight arenas (the new references), and the countdown re-triggers it (`0x4759c0` calls it again;
+every `countdown2` shows it). The old references were shot at camera T 2.13-2.40, i.e. intro clock
+`T + stall + 0.265` = 2.8-3.9 s with this session's stalls: Electric, Octagon and Parking Lot are
+over 3 s (label off, as in their references), Box lands at 3.00 (label on in its reference), while the
+other four predict "on" and show "off", which only a larger stall in the old session explains (the
+stall is not reproducible and the old references are unreliable). Ours keeps the label for the
+first 3 s of intro; no change.
+
+### 9.4 The session texture cache, live
+
+* The global texture path (`0x71f574`) is the empty string for all 573 arena requests; the key is the
+  bare name (section 3.3 corrected).
+* Forward session (bridge .. octagon, 8 arenas, two passes in one game): one image load for each of
+  `bars.tga` (compressor), `sawhazard.bmp` and `triple_spike.bmp` (box); every later request returned
+  the same texture. The clear-all functions (`0x592300` textures, `0x5924e0` images, both called only
+  from the graphics shutdown `0x5926d0`) never ran, and `0x591410` (a stage's release, 1045 calls) did
+  not remove a name from the lookup (`bars.tga` was released after Compressor's match and returned
+  unchanged for Electric, no file opened).
+* Reverse session (fresh game: half circle, box, electric, compressor), with file opens: Half Circle
+  opens `Arenas/half/Maps\sawhazard.bmp` and `triple_spike.bmp` (its own, the B variants); **Box then opens
+  neither** (it did open all its other maps) and so shows Half Circle's. Electric opens its own gradient
+  `bars.tga`; Compressor opens no `bars.tga`. So the rule is **first loaded wins, not a directory
+  search order** (the forward order had coincided with alphabetical), which is what `session_bitmap`
+  does; a model's file is looked up in its own `Arenas/<dir>/Maps`.
+* The bot lab's switch (`0x593a40`) never fired (no Team HQ visit); its key is separate by
+  construction (`texture_path()` is part of the key). Test:
+  `the_session_key_includes_the_texture_path`.
+
+### 9.5 Not done
+
+Arena decals/scorch marks, sparks and smoke were not attempted: the decal textures are loaded from
+`Arenas\decals\` by code near `0x44f105` and placed by `DecalTrigger` on weapon damage, which needs
+the match's hit events (ra2sim, another agent's area) before it can be drawn or measured. No frame in
+the 69 references shows one.
+
+Tests added: `the_session_key_includes_the_texture_path` (ra2-render), `a_countdown_left_shot_parses`
+(ra2-app).
