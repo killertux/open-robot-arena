@@ -1481,10 +1481,11 @@ impl Shell {
             }
             Some(current) if current == index => {
                 let row = view.events[index].clone();
-                let gib = ra2ui::event_screens::bracket_screen(
+                let gib = ra2ui::event_screens::bracket_screen_at(
                     &self.ui,
                     &row.event,
                     view.bracket.as_ref(),
+                    self.size,
                 )?;
                 self.show_bracket(gib);
                 Ok(())
@@ -1579,8 +1580,12 @@ impl Shell {
             return Ok(());
         };
         let row = view.events[view.event_index(id).unwrap_or(index)].clone();
-        let gib =
-            ra2ui::event_screens::bracket_screen(&self.ui, &row.event, view.bracket.as_ref())?;
+        let gib = ra2ui::event_screens::bracket_screen_at(
+            &self.ui,
+            &row.event,
+            view.bracket.as_ref(),
+            self.size,
+        )?;
         self.show_bracket(gib);
         Ok(())
     }

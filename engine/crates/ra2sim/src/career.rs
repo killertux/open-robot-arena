@@ -245,13 +245,24 @@ impl EventBracket {
         let mut round = BracketRound {
             matches: Vec::with_capacity(matches),
         };
+        // `FUN_004695a0`: every slot but match 0's first (the player) is
+        // drawn again (`FUN_00419190`) while the team is already in this
+        // round's list (`FUN_005014d0`), so a round's field has no repeats.
+        let mut drawn: Vec<usize> = Vec::new();
         for m in 0..matches {
             let mut entrants = Vec::with_capacity(self.bots_per_match);
             for slot in 0..self.bots_per_match {
                 if m == 0 && slot == 0 {
                     entrants.push(Entrant::Player);
                 } else {
-                    entrants.push(Entrant::Ai((rng.next() as usize) % BRACKET_AI_TEAMS));
+                    let mut team = (rng.next() as usize) % BRACKET_AI_TEAMS;
+                    if drawn.len() < BRACKET_AI_TEAMS {
+                        while drawn.contains(&team) {
+                            team = (rng.next() as usize) % BRACKET_AI_TEAMS;
+                        }
+                    }
+                    drawn.push(team);
+                    entrants.push(Entrant::Ai(team));
                 }
             }
             round.matches.push(BracketMatch { entrants });
@@ -2286,10 +2297,12 @@ mod tests {
     /// Write the 25 synthetic events in `Events.txt`'s own record shape, so a
     /// `Career::load` test has a real event list to read.
     fn write_synthetic_events(dir: &Path) {
-        let mut text = String::from("0\n");
+        // Each record starts with its id line (`FUN_00469350` reads `+4`
+        // first) and ends with three numbers.
+        let mut text = String::new();
         for i in 0..25 {
             let (tiers, bots) = if i % 2 == 0 { (4, 2) } else { (2, 4) };
-            text.push_str(&format!("Event {i}\ndescription\n{tiers}\n"));
+            text.push_str(&format!("{i}\nEvent {i}\ndescription\n{tiers}\n"));
             for t in 0..tiers {
                 text.push_str(&format!(
                     "Arenas\\event_results\\prizes\\T{t}.gmf\ntier {t}\n"
@@ -2298,7 +2311,7 @@ mod tests {
             text.push_str(&format!(
                 "Arenas\\event_results\\prizes\\Trophy{i}\\Trophy{i}.gmf\n\
                  won event {i}\nUI\\teamhq\\events\\trophies\\Trophy.tga\n\
-                 art.bmp\nCombat Arena\npreview.bmp\n{bots}\n1\n1\n1\n"
+                 art.bmp\nCombat Arena\npreview.bmp\n{bots}\n1\n1\n"
             ));
         }
         std::fs::write(events_path(dir), text).unwrap();
@@ -2976,6 +2989,31 @@ mod tests {
             career.money,
         )
     }
+    /// A round's field has no repeated team (`FUN_004695a0` redraws a team
+    /// already in the round's list).
+    #[test]
+    fn a_rounds_field_has_no_repeated_team() {
+        for (event, data) in synthetic_events(4).iter().enumerate() {
+            for seed in 0..8u64 {
+                let bracket = EventBracket::new(event, data, seed).unwrap();
+                let mut teams: Vec<usize> = bracket
+                    .current
+                    .matches
+                    .iter()
+                    .flat_map(|m| m.entrants.iter())
+                    .filter_map(|e| match e {
+                        Entrant::Ai(slot) => Some(*slot),
+                        Entrant::Player => None,
+                    })
+                    .collect();
+                assert_eq!(teams.len(), BRACKET_ENTRANTS - 1);
+                teams.sort_unstable();
+                teams.dedup();
+                assert_eq!(teams.len(), BRACKET_ENTRANTS - 1, "event {event} seed {seed}");
+            }
+        }
+    }
+
 }
 
 /// `FUN_00500120`'s draw: `want` distinct events out of `n`, from LCG state `state`.
@@ -3005,4 +3043,5 @@ mod schedule_tests {
             vec![2, 6, 12, 9, 13, 15, 5, 22, 20]
         );
     }
+
 }

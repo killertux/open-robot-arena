@@ -87,6 +87,10 @@ pub struct Options {
 /// small face; 12-pixel rows fit the placeholder's lower half.
 const ROW_FACE: &str = "fg_mcn12";
 const ROW_HEIGHT: f32 = 13.0;
+/// A `Text` in a group is placed by its baseline (`ra2ui::place`), so a
+/// row's text is written one ascent of `fg_mcn12` below the row's top; at
+/// the top it was drawn above its own clip and showed only its lower half.
+const ROW_BASELINE: f32 = 10.0;
 
 /// Which paint operation the Paint Shop is in. The three shipped screens are
 /// `texturefill.gib`, `surfacelayer.gib` and `decals.gib`.
@@ -244,6 +248,23 @@ impl Builder {
     /// the stock chassis).
     pub fn open(game: &Path, start: Option<&Path>) -> Result<Builder, String> {
         Self::open_sized(game, start, SHELL_SIZE)
+    }
+
+    /// Lay the lab out natively at `size` (the window's), as the shell's
+    /// other screens are (docs/28 §1). The panel and the 3D view follow the
+    /// new layout.
+    pub fn set_size(&mut self, size: [f32; 2]) -> Result<(), String> {
+        if size == self.size || size[0] < 1.0 || size[1] < 1.0 {
+            return Ok(());
+        }
+        self.size = size;
+        self.shell.set_size(size);
+        self.refresh()
+    }
+
+    /// The screen the lab is laid out on; clicks are in this space.
+    pub fn size(&self) -> [f32; 2] {
+        self.size
     }
 
     /// [`Builder::open`] with the shell laid out natively at `size`.
@@ -3050,14 +3071,16 @@ fn make_panel(frame: Frame, preview: Frame, rows: &[(String, String, [f32; 4])])
                 field("_Position", "0 0 0 0"),
                 field("Name", action),
                 field("ID", "-1"),
-                field("Position", &format!("4 0 {y} 0")),
+                field("Position", &format!("4 0 {} 0", y + ROW_BASELINE)),
                 field(
                     "Size",
                     &format!("{} 0 {} 0", (frame.w - 8.0).max(10.0), ROW_HEIGHT),
                 ),
                 field("Visible", "true"),
                 field("ChildOrder", "0"),
-                field("ClipMode", "1"),
+                // The row's box is its hit area; the text is not clipped to
+                // it (its descenders and baseline fall below the ascent).
+                field("ClipMode", "0"),
                 field("NumChildren", "0"),
             ],
             attachments: Vec::new(),

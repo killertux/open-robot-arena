@@ -423,12 +423,16 @@ impl App {
     /// The coordinate space clicks are mapped into: the shell's native screen
     /// size, or the fixed design size for the tools that still lay out at it.
     fn input_space(&self) -> [f32; 2] {
-        if let (true, Some(window)) = (self.session.is_some(), &self.window) {
-            // The match lays its windows out natively on the window.
+        if let (true, Some(window)) = (
+            self.session.is_some() || self.hq.is_some(),
+            &self.window,
+        ) {
+            // The match and the Team HQ's event screens lay their windows out
+            // natively on the window.
             let [w, h] = window_size(window);
             [w as f32, h as f32]
-        } else if self.builder.is_some() || self.hq.is_some() {
-            SHELL_SIZE
+        } else if let Some(builder) = &self.builder {
+            builder.size()
         } else {
             self.shell.size()
         }
@@ -575,6 +579,7 @@ impl App {
 
         let format = gpu.config.format;
         if let Some(hq) = &mut self.hq {
+            hq.set_layout(size);
             let screen = hq.audio_screen();
             self.audio.on_screen_opt(screen);
             let (scene, three_d) = match hq.scene() {
@@ -687,6 +692,9 @@ impl App {
             }
         } else if let Some(builder) = &mut self.builder {
             self.audio.on_screen("botlab/botlabwin.gib");
+            if let Err(error) = builder.set_size([size[0] as f32, size[1] as f32]) {
+                eprintln!("workshop: {error}");
+            }
             let scene = match builder.scene(size) {
                 Ok(scene) => scene,
                 Err(error) => {
