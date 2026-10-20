@@ -18,6 +18,7 @@ pub mod jolt;
 pub mod massprops;
 pub mod r#match;
 pub mod montage;
+pub mod motor;
 pub mod rig;
 pub mod robot;
 pub mod scene;

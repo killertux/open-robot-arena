@@ -158,6 +158,12 @@ pub struct MotorStats {
     pub torque: f32,
     /// Burst motor travel, radians (`start`, `end`).
     pub burst: Option<[f32; 2]>,
+    /// A burst motor's firing power: the last two numbers of its definition's
+    /// `burst = <n> <speed> <torque>` line (`burst motor.txt`: `0 50 90`). The
+    /// motor fires with these and cocks again with `power` (live: the Scout's
+    /// fork is set `SetPowerSettings(50, 90)` when it fires, `(5, 35)` when it
+    /// cocks; `0x4468fa`, `0x446737`). The torque is raw, before the ×40.
+    pub fire: Option<[f32; 2]>,
     /// A `ServoMotor`: holds its position at a zero command instead of
     /// coasting. (Ours: the binary's auto-lock flag, `motor+0x64`, is set
     /// through `SetAutoLocks` and its default for a servo is not recovered.)
@@ -596,6 +602,8 @@ pub struct JointInfo {
     /// `limits` are metres of travel, `rate` is m/s and the torques are forces.
     pub slider: bool,
     pub use_kind: JointUse,
+    /// A burst motor's firing pair (speed, raw torque): [`MotorStats::fire`].
+    pub fire: Option<[f32; 2]>,
     /// A wheel's own numbers (`None` for every other joint).
     pub wheel: Option<WheelDrive>,
 }
@@ -820,7 +828,15 @@ fn piston_stats(def: &ra2fmt::component::ComponentDef, burst: bool) -> PistonSta
     } else {
         Vec3::Z
     };
-    let limits = if nums.len() >= 6 {
+    let limits = if nums.len() >= 6 && burst {
+        // A burst piston's controller stops are its neutral point and its
+        // lower travel (live, ALARM's: `+0x6c = 0`, `+0x70 = -0.73`), and the
+        // rod comes back to rest exactly at the neutral point: its travel is
+        // `[lower, neutral]`, the `upper` number unused
+        // (`weapons-scout-alarm__live__000`, docs/29 section 12).
+        let lower = nums[4] - nums[3];
+        [lower.min(0.0), lower.max(0.0)]
+    } else if nums.len() >= 6 {
         [nums[4], nums[5]]
     } else {
         // No usable travel: a barely-moving rod still beats a weld, and keeps
@@ -843,6 +859,17 @@ fn power_pair(def: &ra2fmt::component::ComponentDef) -> (Option<f32>, Option<f32
     };
     let mut it = v.split_whitespace().filter_map(|t| t.parse::<f32>().ok());
     (it.next(), it.next())
+}
+
+/// A burst motor's firing pair: the second and third numbers of its `burst`
+/// line (the first is not used for the power).
+fn burst_power(def: &ra2fmt::component::ComponentDef) -> Option<[f32; 2]> {
+    let v = def.get("burst")?;
+    let n: Vec<f32> = v
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter_map(|t| t.parse::<f32>().ok())
+        .collect();
+    (n.len() >= 3).then(|| [n[1], n[2]])
 }
 
 fn num(def: &ra2fmt::component::ComponentDef, key: &str) -> Option<f32> {
@@ -1076,6 +1103,7 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             axis,
             slider: piston.is_some(),
             use_kind,
+            fire: motor.and_then(|m| m.fire).filter(|_| piston.is_none()),
             wheel: if use_kind == JointUse::Wheel {
                 comps[root].wheel.as_ref().map(|w| {
                     let radius = comps[root]
@@ -1384,6 +1412,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 speed: speed.unwrap_or(20.0),
                 torque: torque.unwrap_or(20.0) * torque_unit(),
                 burst: bot.components[i].burst_angles,
+                fire: def.as_ref().and_then(burst_power),
                 servo: bot.components[i].class.eq_ignore_ascii_case("ServoMotor"),
             }
         });
@@ -1663,18 +1692,23 @@ mod tests {
     ///
     /// The definition's `prismatic` line carries the travel, and the axis is in
     /// the piston's own space — `burstpiston1.txt` says
-    /// `body, shaft, 0, 0, 1, 0.0, -0.60, .8`, which is a rod that slides along
-    /// its local +Z from 0.60 back to 0.80 out.
+    /// `body, shaft, 0, 0, 1, 0.0, -0.60, .8`. A servo piston slides from
+    /// -0.60 to 0.80 about its neutral point; a burst piston only between its
+    /// lower stop and the neutral point it rests at (live, ALARM's
+    /// `burstpiston2`: stops 0 and -0.73).
     #[test]
     fn piston_travel_comes_from_the_prismatic_line() {
         let d = ra2fmt::component::parse(
             "prismatic = body, shaft, 0, 0, 1, 0.0, -0.60, .8\npower = 60 100\n",
         );
-        let p = piston_stats(&d, true);
+        let p = piston_stats(&d, false);
         assert_eq!(p.axis, Vec3::Z);
         assert_eq!(p.limits, [-0.60, 0.8]);
         assert_eq!(p.speed, 60.0);
         assert_eq!(p.force, 100.0 * torque_unit());
+        assert!(!p.burst);
+        let p = piston_stats(&d, true);
+        assert_eq!(p.limits, [-0.60, 0.0]);
         assert!(p.burst);
 
         // No usable line at all still yields a joint, and one that moves.
@@ -1779,6 +1813,7 @@ mod tests {
                 speed: 10.0,
                 torque: 400.0,
                 burst: None,
+                fire: None,
             }),
             wheel: None,
             piston: None,

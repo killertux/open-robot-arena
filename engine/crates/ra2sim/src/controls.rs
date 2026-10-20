@@ -26,10 +26,11 @@
 //!
 //! # What is ours
 //!
-//! The keyboard path (DirectInput scan code -> slot press) is as above. How a
-//! switch latches on a key press (toggle) is inferred from its name; how fast a
-//! burst motor re-cocks is not in the binary's wiring code and is a guess
-//! (see [`COCK_FRACTION`]).
+//! The keyboard path (DirectInput scan code -> slot press) is as above. That a
+//! switch toggles on every press, a key's or an AI `Input`'s, is measured live
+//! (docs/29 section 12), not read from the wiring code. A burst motor's stroke
+//! (fire, then cock with its `power` pair) is the motor's own
+//! ([`crate::motor`], docs/29 section 12).
 
 use std::collections::BTreeMap;
 
@@ -37,10 +38,6 @@ use ra2fmt::bot::Bot;
 
 /// The percentage a button or switch contributes, and the clamp of the sum.
 pub const FULL: f32 = 100.0;
-
-/// How fast a burst device cocks again after firing, as a fraction of its rated
-/// speed. The tutorial says "slowly, but powerfully"; the number is a guess.
-pub const COCK_FRACTION: f32 = 0.15;
 
 /// What a control is (`position[2]` of the `.bot` row).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,14 +254,19 @@ impl ControlState {
     /// `Input(name, slot, value)`: set the slot of every control called `name`.
     ///
     /// A non-zero value is a press (it fires burst devices every time, as the
-    /// original delivers each call as an event); zero is a release. A switch is
-    /// on while its last value is non-zero.
+    /// original delivers each call as an event); zero is a release. A switch
+    /// toggles on every press, as on a key, and a release leaves it as it is:
+    /// live (`weapons-tornado-ripblade__live__002`), Tornado's `Spin` switch
+    /// came on at `Input("Spin", 0, 1)`, went *off* at a second
+    /// `Input("Spin", 0, 1)`, stayed off through `Input("Spin", 0, 0)`, came on
+    /// at the next `1` and stayed on through the next `0`.
     pub fn input(&mut self, wiring: &Wiring, name: &str, slot: i32, value: f32) {
         let slot = slot.max(0) as usize;
         for c in wiring.controls_named(name) {
             self.held.insert((c, slot), value.clamp(-FULL, FULL));
-            if wiring.controls[c].kind == Kind::Switch {
-                self.latched.insert((c, slot), value != 0.0);
+            if wiring.controls[c].kind == Kind::Switch && value != 0.0 {
+                let on = self.latched.entry((c, slot)).or_insert(false);
+                *on = !*on;
             }
             if value != 0.0 {
                 self.pressed.push((c, slot));
@@ -531,11 +533,18 @@ mod tests {
         keys.set(dik::SPACE, true);
         s.set_keys(&w, keys);
         assert_eq!(s.command(&w, 7), Some(0.0), "off after the second tap");
-        // The AI sets the switch directly.
+        // The AI's calls are presses too: every non-zero one toggles the
+        // switch, a zero leaves it (live, `weapons-tornado-ripblade__live__002`).
         s.input(&w, "Spin", 0, 1.0);
         assert_eq!(s.command(&w, 7), Some(100.0));
         s.input(&w, "Spin", 0, 0.0);
+        assert_eq!(s.command(&w, 7), Some(100.0), "a release leaves it on");
+        s.input(&w, "Spin", 0, 1.0);
+        assert_eq!(s.command(&w, 7), Some(0.0), "a second press turns it off");
+        s.input(&w, "Spin", 0, 0.0);
         assert_eq!(s.command(&w, 7), Some(0.0));
+        s.input(&w, "Spin", 0, 1.0);
+        assert_eq!(s.command(&w, 7), Some(100.0));
         // Every non-zero call is a trigger; a level alone is not.
         assert!(!s.fired(&w, 9));
         s.input(&w, "Fire", 0, 1.0);

@@ -12,10 +12,11 @@ use crate::backend::{
     BackendError, BodyDesc, BodyHandle, CollisionGroupDesc, CompoundChild, HingeDesc, JointHandle,
     MotionType, PhysicsBackend, ShapeDesc, SliderDesc,
 };
-use crate::controls::{ControlState, COCK_FRACTION, FULL};
+use crate::controls::{ControlState, FULL};
 use crate::drive::{MagicAction, Steer, WheelRecord};
 use crate::energy::{Channel, Energy};
 use crate::massprops;
+use crate::motor::{self, HingeSettings, PrismaticSettings};
 use crate::rig::{JointInfo, JointUse, RobotRig, Role, WheelDrive};
 use crate::scene::USER_BOT;
 use crate::sim::{DriveInput, DriveTuning};
@@ -168,6 +169,18 @@ fn round_wheel(points: &[Vec3]) -> Vec<Vec3> {
 /// give the Scout 11.1 m/s; a live measurement in the original refuted it
 /// (k = 1.02, with the Scout's drive hinge at 17 rad/s and 675 N·m), so this stays
 /// a comparison knob, not a fit.
+/// The velocity to hand the backend for a hinge controller's: `0` turns the
+/// motor off, so a non-zero percentage whose truncated velocity is zero (the
+/// original's motor *on* at velocity 0, which holds the hinge) is passed as a
+/// vanishing velocity of the percentage's sign.
+fn hinge_target(velocity: f32, percent: i32) -> f32 {
+    if velocity == 0.0 && percent != 0 {
+        1e-9 * percent.signum() as f32
+    } else {
+        velocity
+    }
+}
+
 fn motor_passes() -> f32 {
     std::env::var("RA2_WHEEL_PASSES")
         .ok()
@@ -304,8 +317,21 @@ pub struct Robot {
     wheel_normal: Vec<Vec3>,
     /// Per part: the mass-weighted centre of its components, in the part's frame.
     mass_centre: Vec<Vec3>,
-    /// Per part: the power factor its motor's torque was last set for.
-    motor_power: Vec<f32>,
+    /// Per part: the maximum torque (force) its joint motor was last set to.
+    motor_torque: Vec<f32>,
+    /// Per hinge part: its hinge controller's power settings ([`motor`]),
+    /// capped by the load it carries.
+    hinge: Vec<HingeSettings>,
+    /// Per hinge part: the pivot and the reference perpendicular in the child
+    /// body's frame, as the constraint was built (the load cap's `d`).
+    load_frame: Vec<(Vec3, Vec3)>,
+    /// Per slider part: its prismatic controller's power settings.
+    prismatic: Vec<PrismaticSettings>,
+    /// Per burst part: the fire timer (`+0x298`: 0.6 s for a burst motor,
+    /// 0.25 s for a burst piston) that ends the stroke.
+    burst_timer: Vec<f32>,
+    /// Per slider part: the prismatic controller's direction (`+0x80`).
+    slider_dir: Vec<f32>,
     /// Per part: how long a burst device still draws power (`0.6 s` after a
     /// burst motor is triggered, `0.25 s` for a piston: `0x446916`, `0x44880d`).
     burst_draw: Vec<f32>,
@@ -417,7 +443,7 @@ impl Robot {
         let magic =
             magic_drive(physics).then(|| Self::magic_records(physics, &rig, &parts, rotation));
 
-        Ok(Robot {
+        let mut robot = Robot {
             magic,
             health: rig.components.iter().map(|c| c.hitpoints).collect(),
             attached: vec![true; n],
@@ -434,7 +460,32 @@ impl Robot {
             burst: vec![BurstPhase::Cocked; rig.parts.len()],
             wheel_air: vec![WHEEL_GROUND_MEMORY; rig.parts.len()],
             wheel_normal: vec![Vec3::Y; rig.parts.len()],
-            motor_power: vec![1.0; rig.parts.len()],
+            motor_torque: rig
+                .parts
+                .iter()
+                .map(|q| q.joint.map(|j| j.max_torque).unwrap_or(0.0))
+                .collect(),
+            hinge: rig
+                .parts
+                .iter()
+                .map(|q| match q.joint {
+                    Some(j) if !j.slider => HingeSettings::new(j.rate, j.max_torque / TORQUE_UNIT),
+                    _ => HingeSettings::new(0.0, 0.0),
+                })
+                .collect(),
+            load_frame: (0..rig.parts.len())
+                .map(|q| Self::load_frame(&rig, q))
+                .collect(),
+            prismatic: rig
+                .parts
+                .iter()
+                .map(|q| PrismaticSettings {
+                    speed: q.joint.map(|j| j.rate).unwrap_or(0.0),
+                    force: q.joint.map(|j| j.max_torque / TORQUE_UNIT).unwrap_or(0.0),
+                })
+                .collect(),
+            burst_timer: vec![0.0; rig.parts.len()],
+            slider_dir: vec![0.0; rig.parts.len()],
             burst_draw: vec![0.0; rig.parts.len()],
             energy: Self::build_energy(&rig),
             mass_centre: rig
@@ -444,7 +495,82 @@ impl Robot {
                 .collect(),
             team,
             rig,
-        })
+        };
+        robot.cap_loads(physics);
+        Ok(robot)
+    }
+
+    /// A hinge part's pivot and reference perpendicular in its own body's
+    /// frame, as `0x525830` stores them when it builds the constraint (`+0x40`,
+    /// `+0x80`). The perpendicular is taken in the robot's frame.
+    fn load_frame(rig: &RobotRig, p: usize) -> (Vec3, Vec3) {
+        let Some(info) = rig.parts[p].joint.filter(|j| !j.slider) else {
+            return (Vec3::ZERO, Vec3::ZERO);
+        };
+        let to_b = rig.components[rig.parts[p].root].local.inverse();
+        (
+            to_b.transform_point3(info.pivot),
+            to_b.transform_vector3(motor::reference_perpendicular(info.axis))
+                .normalize_or_zero(),
+        )
+    }
+
+    /// Cap every hinge controller of the robot by the load it carries
+    /// ([`HingeSettings::load_cap`]). The original does it for all of a robot's
+    /// controllers each time a component is added (`0x4dc390` from
+    /// `0x4dc287`) and again when one comes off (`0x4dbe3f`, `0x417c1d`); the
+    /// last call of the build is the one that holds, with every body complete.
+    /// The motor's torque follows.
+    pub fn cap_loads(&mut self, physics: &mut dyn PhysicsBackend) {
+        for p in 0..self.rig.parts.len() {
+            let Some(info) = self.rig.parts[p].joint else {
+                continue;
+            };
+            if info.slider || info.use_kind == JointUse::Passive || !self.parts[p].alive {
+                continue;
+            }
+            let body = self.parts[p].body;
+            let (mass, com) = match physics.mass_properties(body) {
+                Some((m, com, _)) => (m, com),
+                None => (
+                    physics.mass(body).unwrap_or(0.0),
+                    self.mass_centre.get(p).copied().unwrap_or(Vec3::ZERO),
+                ),
+            };
+            if mass <= 0.0 {
+                continue;
+            }
+            let (pivot_b, perp_b) = self.load_frame[p];
+            let d = motor::load_offset(pivot_b, com, perp_b);
+            self.hinge[p].load_cap(mass, d);
+            if std::env::var_os("RA2_MOTOR_DEBUG").is_some() {
+                eprintln!(
+                    "load cap: part {p} ({}) m {mass:.2} d {d:.3}: {:?}",
+                    self.rig.components[self.rig.parts[p].root].name, self.hinge[p]
+                );
+            }
+            if let Some(joint) = self.parts[p].joint {
+                let k = if info.use_kind == JointUse::Wheel {
+                    motor_passes()
+                } else {
+                    1.0
+                };
+                let torque = self.hinge[p].max_torque * k;
+                // A burst motor's strength follows its stroke (`drive_burst`).
+                if info.use_kind != JointUse::Burst {
+                    physics.set_joint_strength(joint, torque, info.friction_torque);
+                    self.motor_torque[p] = torque;
+                }
+            }
+        }
+    }
+
+    /// Part `p`'s hinge controller settings as they stand ([`motor`]): the
+    /// definition's power pair, capped by the load (`0x480510`) or reset by a
+    /// burst motor's stroke.
+    pub fn hinge_settings(&self, p: usize) -> Option<HingeSettings> {
+        self.rig.parts.get(p)?.joint.filter(|j| !j.slider)?;
+        self.hinge.get(p).copied()
     }
 
     /// The robot's batteries and air tanks, full.
@@ -511,7 +637,7 @@ impl Robot {
                     // The trigger starts a fixed draw time (the burst timers of
                     // the original), whatever the stroke then takes.
                     if self.burst_draw[p] <= 0.0
-                        && self.burst[p] != BurstPhase::Firing
+                        && self.burst[p] == BurstPhase::Cocked
                         && self.control.fired(&self.rig.wiring, motor)
                     {
                         self.burst_draw[p] = if info.slider { 0.25 } else { 0.6 };
@@ -861,8 +987,6 @@ impl Robot {
                 continue;
             };
             let command = self.control.command(&self.rig.wiring, motor).unwrap_or(0.0);
-            // The power budget's scale (`0x4dc3f0`) is the global factor `g`.
-            let power = self.motor_factor(motor) * elec_scale;
             // `SetPercent(ftol(command · g))` (`0x4f59f0`) stores
             // `motor + 0x29c = ftol(f(percent))` (`0x4f5800`); the thrust takes
             // the hinge controller's *raw* torque (`+0xb4`, `0x4d33b0`), which
@@ -878,14 +1002,18 @@ impl Robot {
                     // wheel is down.
                     physics.drive_hinge(joint, 0.0);
                 } else {
-                    // In the air the hinge servo spins it: `ftol(-pct · 0.01 ·
-                    // speed)` rad/s (`0x481450`), the speed also `f`-scaled.
-                    let target = (percent as f32 * 0.01 * info.rate * power).trunc();
-                    if (power - self.motor_power[w.part]).abs() > 1e-4 {
-                        self.motor_power[w.part] = power;
-                        physics.set_joint_strength(joint, info.max_torque * power, 0.0);
+                    // In the air the hinge controller spins it (`0x481450`):
+                    // `trunc(p · 0.01 · speed)` rad/s at the load-capped
+                    // torque ([`motor`]); `p` already carries `f` and `g`.
+                    let ctl = self.hinge[w.part];
+                    if (ctl.max_torque - self.motor_torque[w.part]).abs() > 1e-3 {
+                        self.motor_torque[w.part] = ctl.max_torque;
+                        physics.set_joint_strength(joint, ctl.max_torque, 0.0);
                     }
-                    physics.drive_hinge(joint, target * CLOCKWISE);
+                    physics.drive_hinge(
+                        joint,
+                        hinge_target(ctl.velocity(percent), percent) * CLOCKWISE,
+                    );
                 }
             }
         }
@@ -1226,40 +1354,41 @@ impl Robot {
                         samples.push(sample);
                     }
                 }
+                JointUse::Spun | JointUse::Wheel | JointUse::Piston if info.slider => {
+                    let command = self
+                        .control
+                        .command(&self.rig.wiring, info.motor)
+                        .unwrap_or(0.0);
+                    // The prismatic controller's direction is the integer
+                    // percentage, as a hinge's (`+0x80`).
+                    let dir = self.scaled_percent(info.motor, command, air_scale) as f32;
+                    self.slider_dir[p] = dir;
+                    let stops = (info.limits[0], info.limits[1]);
+                    self.drive_prismatic(physics, p, info, joint, dir, stops, true);
+                }
                 JointUse::Spun | JointUse::Wheel | JointUse::Piston => {
                     let command = self
                         .control
                         .command(&self.rig.wiring, info.motor)
                         .unwrap_or(0.0);
-                    // TODO(load limit): the original caps a hinge's torque by the
-                    // load it carries (`HingeController` vtable 0x6a7e44 slot 10 =
-                    // 0x480510, "min(75T, 25m(1-|d|))", speed S*min(1, 2T/(m(1+|d|))))
-                    // but nothing calls it directly: the constructors at 0x480293 and
-                    // 0x480320 only install the vtable, so it is a Havok motor
-                    // callback and the caller is not recovered.
                     let k = if info.use_kind == JointUse::Wheel {
                         motor_passes()
                     } else {
                         1.0
                     };
-                    let pneumatic =
-                        info.slider || self.rig.components[info.motor].role == Role::Piston;
-                    let power = self.motor_factor(info.motor)
-                        * if pneumatic { air_scale } else { elec_scale };
-                    if (power - self.motor_power[p]).abs() > 1e-4 {
-                        self.motor_power[p] = power;
-                        physics.set_joint_strength(
-                            joint,
-                            info.max_torque * k * power,
-                            info.friction_torque,
-                        );
+                    // The hinge controller (`0x481450`, [`motor`]): velocity
+                    // `trunc(p · 0.01 · speed)` at the integer percentage `p`
+                    // (`ftol(f(ftol(command · g)))`, the health factor and the
+                    // power budget's scale), the load-capped maximum torque,
+                    // which neither scales.
+                    let percent = self.scaled_percent(info.motor, command, elec_scale);
+                    let torque = self.hinge[p].max_torque * k;
+                    if (torque - self.motor_torque[p]).abs() > 1e-3 {
+                        self.motor_torque[p] = torque;
+                        physics.set_joint_strength(joint, torque, info.friction_torque);
                     }
-                    let target = command / FULL * info.rate * CLOCKWISE * k * power;
-                    if info.slider {
-                        physics.drive_slider(joint, target);
-                    } else {
-                        physics.drive_hinge(joint, target);
-                    }
+                    let target = hinge_target(self.hinge[p].velocity(percent), percent);
+                    physics.drive_hinge(joint, target * CLOCKWISE * k);
                 }
             }
         }
@@ -1440,7 +1569,28 @@ impl Robot {
         }
     }
 
-    /// One step of a burst motor's or piston's fire cycle.
+    /// A burst device's stroke, as the original runs it.
+    ///
+    /// **Burst motor** (`0x446810` fire, `0x446670` tick): triggered while
+    /// it is home, it unlocks, takes its *firing* power
+    /// (`SetPowerSettings(f(g · burst speed), f(g · burst torque))`, the
+    /// definition's `burst` line, `f` the health factor and `g` the power
+    /// budget's scale) and drives at `+100` for 0.6 s (`+0x298`); the hinge
+    /// locks itself on arriving within 0.05 rad of the end (`0x481450`). When
+    /// the timer runs out it unlocks and cocks back at `-100` with its `power`
+    /// pair, again `f(g · x)`, and locks home; it may fire again once it is
+    /// locked within 0.05 of the start (`0x4810b0`). Live (Scout's fork,
+    /// `burst motor.txt`: `burst = 0 50 90`, `power = 5 35`): fire at 49 rad/s
+    /// and 3600 N·m, cock at 4 rad/s and 1400 N·m.
+    ///
+    /// **Burst piston** (`0x448750` fire, `0x448650` tick): it unlocks, gives
+    /// the rod a one-substep push of `1000 · g` (`0x4b51b0(-1000 · g)`), turns
+    /// its auto-lock off and drives the prismatic controller at direction
+    /// `ftol(f(100 · g))` for 0.25 s; then auto-lock back on and direction
+    /// `ftol(f(-100))`, home at the lower stop; ready once locked there
+    /// (`0x4b5180`). The controller pushes with `|direction| · F` (the
+    /// definition's raw force) up to the rod speed `S`
+    /// ([`PrismaticSettings::force`]).
     fn drive_burst(
         &mut self,
         physics: &mut dyn PhysicsBackend,
@@ -1449,74 +1599,206 @@ impl Robot {
         joint: JointHandle,
         scale: f32,
     ) {
-        // The end of the travel is the farther limit from the rest pose: the
-        // motor's `end - start` (its other limit is zero), or a piston's longer
-        // stroke. (Ours for a piston: the rest pose is taken as the retracted end.)
-        let travel = if info.limits[1].abs() >= info.limits[0].abs() {
-            info.limits[1]
-        } else {
-            info.limits[0]
-        };
-        let dir = if travel < 0.0 { -1.0 } else { 1.0 };
+        let dt = physics.last_dt();
+        // The health factor `f` (`0x45fa90`) as a multiplier.
+        let hf = self.motor_factor(info.motor);
+        let fired = self.control.fired(&self.rig.wiring, info.motor);
         let position = if info.slider {
             physics.slider_offset(joint)
         } else {
             physics.hinge_angle(joint)
         };
-        let reached = (position * dir) >= travel.abs() - if info.slider { 0.01 } else { 0.05 };
-        let home = (position * dir) <= if info.slider { 0.01 } else { 0.05 };
-        let fired = self.control.fired(&self.rig.wiring, info.motor);
+        // The stroke's two ends: a motor fires from its start angle (the rest
+        // pose) to the far end of its travel; a piston from its neutral point
+        // to its lower stop (live, ALARM's rod: stops `+0x6c = 0` and `+0x70 =
+        // -0.73`, out to -0.73 in six substeps and back in five,
+        // `weapons-scout-alarm__live__000`).
+        let (home, end) = if info.slider {
+            (0.0, info.limits[0])
+        } else if info.limits[1].abs() >= info.limits[0].abs() {
+            (0.0, info.limits[1])
+        } else {
+            (0.0, info.limits[0])
+        };
+        let tol = 0.05;
+        let at_home = (position - home).abs() < tol;
+        let at_end = (position - end).abs() < tol;
 
-        let phase = &mut self.burst[p];
-        let before = *phase;
-        match *phase {
+        let before = self.burst[p];
+        match before {
             BurstPhase::Cocked => {
                 if fired {
-                    *phase = BurstPhase::Firing;
+                    self.burst[p] = BurstPhase::Firing;
+                    self.burst_timer[p] = if info.slider { 0.25 } else { 0.6 };
+                    if info.slider {
+                        self.slider_dir[p] = (FULL * scale * hf).trunc();
+                        // The one-shot push toward the far stop
+                        // (`0x4b51b0(-1000 · g)`).
+                        self.push_slider(physics, p, info, -1000.0 * scale);
+                    } else {
+                        let [speed, torque] = info
+                            .fire
+                            .unwrap_or([info.rate, info.max_torque / TORQUE_UNIT]);
+                        self.hinge[p].set_power(scale * speed * hf, scale * torque * hf);
+                    }
                 }
             }
             BurstPhase::Firing => {
-                if reached {
-                    *phase = BurstPhase::Cocking;
+                self.burst_timer[p] -= dt;
+                if self.burst_timer[p] <= 0.0 {
+                    self.burst_timer[p] = 0.0;
+                    self.burst[p] = BurstPhase::Cocking;
+                    if info.slider {
+                        self.slider_dir[p] = (-FULL * hf).trunc();
+                    } else {
+                        let torque = info.max_torque / TORQUE_UNIT;
+                        self.hinge[p].set_power(scale * info.rate * hf, scale * torque * hf);
+                    }
                 }
             }
             BurstPhase::Cocking => {
-                if fired && !reached {
-                    // Triggered again before it is home: released from here.
-                    *phase = BurstPhase::Firing;
-                } else if home {
-                    *phase = BurstPhase::Cocked;
+                if at_home {
+                    self.burst[p] = BurstPhase::Cocked;
                 }
             }
         }
-        let phase = *phase;
-        let target = match phase {
-            BurstPhase::Cocked => 0.0,
-            BurstPhase::Firing => dir * info.rate * scale,
-            BurstPhase::Cocking => -dir * info.rate * COCK_FRACTION,
+        let phase = self.burst[p];
+        if phase != before && std::env::var_os("RA2_BURST_DEBUG").is_some() {
+            eprintln!(
+                "burst {} part {p}: {before:?} -> {phase:?} at {position:.3} (home {home:.3}, end {end:.3}) {:?}",
+                self.rig.name, self.hinge[p]
+            );
+        }
+        if info.slider {
+            // Auto-lock is off while it fires; at home (or never fired) it
+            // stays locked.
+            let dir = match phase {
+                BurstPhase::Cocked => 0.0,
+                _ => self.slider_dir[p],
+            };
+            self.drive_prismatic(
+                physics,
+                p,
+                info,
+                joint,
+                dir,
+                (end, home),
+                phase != BurstPhase::Firing,
+            );
+            return;
+        }
+        // The hinge: locked while cocked, and on arriving at the end it is
+        // driven toward (`0x481450`, auto-lock at the stops).
+        let locked = match phase {
+            BurstPhase::Cocked => true,
+            BurstPhase::Firing => at_end,
+            BurstPhase::Cocking => at_home,
         };
-        // Parked, the joint's friction holds it at the motor's torque; moving, it
-        // must not fight the motor.
-        if phase != before {
+        let dir = if end < home { -1.0 } else { 1.0 };
+        let percent = match phase {
+            BurstPhase::Firing => 100,
+            BurstPhase::Cocking => -100,
+            BurstPhase::Cocked => 0,
+        };
+        let torque = self.hinge[p].max_torque;
+        if (torque - self.motor_torque[p]).abs() > 1e-3 || phase != before {
+            self.motor_torque[p] = torque;
             let friction = if phase == BurstPhase::Cocked {
                 info.friction_torque
             } else {
                 0.0
             };
-            physics.set_joint_strength(joint, info.max_torque * scale.max(0.05), friction);
+            physics.set_joint_strength(joint, torque, friction);
         }
-        // Parked, the original locks the joint where it is: the hinge
-        // controller's update (`FUN_00481450`) calls `Lock(1)` while its
-        // percentage is zero (`+0x64`, on for every controller but a
-        // `SpinMotor`'s, `0x4f5571`), and the prismatic one's (`FUN_004b5240`)
-        // likewise (`+0x7d`); firing calls `Lock(0)` first (`0x446810`,
-        // `0x448750`). A backend without the lock keeps the friction above.
-        physics.lock_joint(joint, phase == BurstPhase::Cocked);
-        if info.slider {
-            physics.drive_slider(joint, target);
+        // Parked, a backend without the lock keeps the friction above.
+        let lock_supported = physics.lock_joint(joint, locked);
+        let target = if locked && lock_supported {
+            0.0
         } else {
-            physics.drive_hinge(joint, target);
+            hinge_target(self.hinge[p].velocity(percent), percent) * dir
+        };
+        physics.drive_hinge(joint, target);
+    }
+
+    /// The prismatic controller's update (`0x4b5240`) for a robot slider:
+    /// locked while its direction is zero or it sits at the stop it is driven
+    /// toward (when it auto-locks), else pushing the rod with
+    /// `-(dir · F)` along its axis ([`PrismaticSettings::force`]) and its
+    /// housing back. A positive direction drives the rod toward `-axis`, to the
+    /// first of `stops` (`+0x70`), a negative one to the second (`+0x6c`).
+    #[allow(clippy::too_many_arguments)]
+    fn drive_prismatic(
+        &mut self,
+        physics: &mut dyn PhysicsBackend,
+        p: usize,
+        info: JointInfo,
+        joint: JointHandle,
+        dir: f32,
+        stops: (f32, f32),
+        auto_lock: bool,
+    ) {
+        let position = physics.slider_offset(joint);
+        let arrived = (dir > 0.0 && (position - stops.0).abs() < 0.05)
+            || (dir < 0.0 && (position - stops.1).abs() < 0.05);
+        let hold = dir == 0.0 || arrived;
+        // The motor is never used: the controller is a force. A backend without
+        // the lock holds the rod on the definition's force as friction.
+        physics.drive_slider(joint, 0.0);
+        let locked = hold && auto_lock;
+        let lock_supported = physics.lock_joint(joint, locked);
+        let friction = if locked && !lock_supported {
+            info.friction_torque
+        } else {
+            0.0
+        };
+        if (friction - self.motor_torque[p]).abs() > 1e-3 {
+            self.motor_torque[p] = friction;
+            physics.set_joint_strength(joint, 0.0, friction);
         }
+        if hold {
+            return;
+        }
+        let Some(parent) = self.rig.parts[p].parent else {
+            return;
+        };
+        let (Some(a), Some(b)) = (
+            physics.state(self.parts[parent].body),
+            physics.state(self.parts[p].body),
+        ) else {
+            return;
+        };
+        let axis = self.slider_axis(physics, p, info);
+        let rel = b.linear_velocity - a.linear_velocity;
+        // The rod's speed in the sense a positive direction drives it.
+        let along = -rel.dot(axis);
+        if let Some(force) = self.prismatic[p].force(dir, along, rel.length()) {
+            self.push_slider(physics, p, info, -force);
+        }
+    }
+
+    /// A slider's axis in the world, from its housing's frame.
+    fn slider_axis(&self, physics: &dyn PhysicsBackend, p: usize, info: JointInfo) -> Vec3 {
+        let Some(parent) = self.rig.parts[p].parent else {
+            return Vec3::ZERO;
+        };
+        let frame_a = self.rig.components[self.rig.parts[parent].root].local;
+        let local = frame_a.inverse().transform_vector3(info.axis);
+        let rot = physics
+            .state(self.parts[parent].body)
+            .map(|s| s.rotation)
+            .unwrap_or(Quat::IDENTITY);
+        (rot * local).normalize_or_zero()
+    }
+
+    /// Push a slider's rod along its axis with `force` newtons for this
+    /// substep, and its housing the other way (`0x4b51b0`).
+    fn push_slider(&self, physics: &mut dyn PhysicsBackend, p: usize, info: JointInfo, force: f32) {
+        let Some(parent) = self.rig.parts[p].parent else {
+            return;
+        };
+        let axis = self.slider_axis(physics, p, info);
+        physics.add_force(self.parts[p].body, axis * force);
+        physics.add_force(self.parts[parent].body, -axis * force);
     }
 
     /// Cave the chassis in as it takes damage (F9).
@@ -1730,6 +2012,8 @@ impl Robot {
             }
             self.rebuild_part(physics, part);
         }
+        // A component coming off re-caps every hinge (`0x4dbe3f`).
+        self.cap_loads(physics);
         out
     }
 

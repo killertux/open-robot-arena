@@ -100,8 +100,8 @@ macro_rules! game {
 
 /// `Team10/Bot0` ("Berserker") has a `Spin` switch wired to its spinner: with
 /// the switch off the spinner is still; the AI's `Input("Spin", 0, 1)` or a tap
-/// of its key (Space) spins it up; `Input("Spin", 0, 0)` / a second tap turns it
-/// off.
+/// of its key (Space) spins it up; a second `Input("Spin", 0, 1)` / a second tap
+/// turns it off.
 #[test]
 fn a_spinner_spins_only_while_its_switch_is_on() {
     let game = game!();
@@ -123,7 +123,14 @@ fn a_spinner_spins_only_while_its_switch_is_on() {
     let on = relative_spin(&d, p);
     assert!(on > rate * 0.5, "the spinner reached {on} of {rate} rad/s");
 
+    // A release leaves the switch on; the next press turns it off (live,
+    // docs/29 section 12c).
     d.robots[0].apply_inputs(&[("Spin".into(), 0, 0.0)]);
+    assert_eq!(
+        d.robots[0].control.command(&d.robots[0].rig.wiring, 1),
+        Some(100.0)
+    );
+    d.robots[0].apply_inputs(&[("Spin".into(), 0, 1.0)]);
     assert_eq!(
         d.robots[0].control.command(&d.robots[0].rig.wiring, 1),
         Some(0.0)

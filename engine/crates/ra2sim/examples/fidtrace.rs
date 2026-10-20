@@ -6,7 +6,16 @@
 //! fidtrace match <arena.py> <botA> <botB> <seconds> <trace.tsv> <damage.jsonl>
 //! fidtrace drive <arena.py> <bot> "0-5:1,0;5-8:0,1" <seconds> <trace.tsv>
 //! fidtrace drive-at <arena.py> <bot> <x> <z> <heading> <script> <seconds> <trace.tsv>
+//! fidtrace weapons <arena.py> <botA> <botB> <plan> <seconds> <joints.tsv>
 //! ```
+//!
+//! `weapons` spawns two robots with no AI and presses their controls as
+//! `tools/oracle/capture_weapons.py` does on the original: the plan is
+//! `player:control:value:seconds;...`, each step held for its seconds. Rows,
+//! every step: `time player part motor rel_speed position` for every jointed
+//! part, `rel_speed` the child body's angular speed relative to its parent's
+//! (m/s along the axis for a slider) and `position` the hinge angle or slider
+//! offset.
 //!
 //! `drive-at` spawns the robot at `(x, z)` facing `heading` (the trace's own
 //! convention), to repeat a stretch of an original drive trace from where it
@@ -65,6 +74,13 @@ fn sample(duel: &Duel) -> Vec<(Vec3, f32, f32, f32, f32)> {
             let hp: f32 = r.health.iter().sum();
             let total: f32 = r.rig.components.iter().map(|c| c.hitpoints).sum();
             let frac = if total > 0.0 { hp / total } else { 0.0 };
+            // `FIDTRACE_UP=1`: the chassis' up in place of the health fraction
+            // (its `y`: 1 upright, -1 on its back), for diagnosing flips.
+            let frac = if std::env::var_os("FIDTRACE_UP").is_some() {
+                tf.transform_vector3(glam::Vec3::Y).normalize_or_zero().y
+            } else {
+                frac
+            };
             (tf.w_axis.truncate(), heading, speed, r.health[0], frac)
         })
         .collect()
@@ -101,9 +117,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let n = m.duel.robots.len();
             let (mut taken, mut dealt) = (vec![0.0f32; n], vec![0.0f32; n]);
             let mut step = 0usize;
+            // `FIDTRACE_LOG=1`: the duel's log lines (zones, hazards, parts
+            // lost) on stderr as they happen, with the match clock.
+            let show_log = std::env::var_os("FIDTRACE_LOG").is_some();
+            let mut logged = 0usize;
             while m.state() != MatchState::Results && step < (secs * 90.0) as usize + 2000 {
                 m.step();
                 step += 1;
+                if show_log {
+                    let t = m.clock();
+                    for line in m.duel.log.iter().skip(logged) {
+                        eprintln!("[{t:7.2}] {line}");
+                    }
+                    logged = m.duel.log.len();
+                }
                 if let Some(f) = hits.as_mut() {
                     let t = m.clock();
                     for i in std::mem::take(&mut m.duel.impacts) {
@@ -188,6 +215,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 duel.step_direct(&[input], DEFAULT_STEP);
                 if s.is_multiple_of(every) {
                     write!(trace, "{}", row(t, &sample(&duel)))?;
+                }
+            }
+        }
+        Some("weapons") if a.len() == 7 => {
+            let secs: f32 = a[5].parse()?;
+            let plan: Vec<(usize, String, f32, f32)> = a[4]
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    let f: Vec<&str> = s.split(':').collect();
+                    (
+                        f[0].parse().unwrap_or(0),
+                        f[1].to_string(),
+                        f[2].parse().unwrap_or(0.0),
+                        f[3].parse().unwrap_or(0.0),
+                    )
+                })
+                .collect();
+            let mut duel = Duel::new(
+                &a[1],
+                &[
+                    BotSetup {
+                        path: a[2].clone(),
+                        yaw_deg: None,
+                        spawn: None,
+                    },
+                    BotSetup {
+                        path: a[3].clone(),
+                        yaw_deg: None,
+                        spawn: None,
+                    },
+                ],
+            )?;
+            let mut out = std::fs::File::create(&a[6])?;
+            writeln!(out, "time\tplayer\tpart\tmotor\trel_speed\tposition")?;
+            let steps = (secs / DEFAULT_STEP) as usize;
+            let (mut k, mut until) = (0usize, 0.0f32);
+            for s in 0..steps {
+                let t = s as f32 * DEFAULT_STEP;
+                while k < plan.len() && t >= until {
+                    let (p, ref name, value, hold) = plan[k];
+                    if p < duel.robots.len() {
+                        let r = &mut duel.robots[p];
+                        r.control.input(&r.rig.wiring, name, 0, value);
+                    }
+                    until = t + hold;
+                    k += 1;
+                }
+                duel.step_direct(&[ra2sim::sim::DriveInput::default(); 2], DEFAULT_STEP);
+                for (p, r) in duel.robots.iter().enumerate() {
+                    for (q, part) in r.rig.parts.iter().enumerate() {
+                        let (Some(info), Some(parent), Some(joint)) =
+                            (part.joint, part.parent, r.parts[q].joint)
+                        else {
+                            continue;
+                        };
+                        let (Some(sa), Some(sb)) = (
+                            duel.physics.state(r.parts[parent].body),
+                            duel.physics.state(r.parts[q].body),
+                        ) else {
+                            continue;
+                        };
+                        let axis = (sa.rotation
+                            * r.rig.components[r.rig.parts[parent].root]
+                                .local
+                                .inverse()
+                                .transform_vector3(info.axis))
+                        .normalize_or_zero();
+                        let (rel, pos) = if info.slider {
+                            (
+                                (sb.linear_velocity - sa.linear_velocity).dot(axis),
+                                duel.physics.slider_offset(joint),
+                            )
+                        } else {
+                            (
+                                (sb.angular_velocity - sa.angular_velocity).dot(axis),
+                                duel.physics.hinge_angle(joint),
+                            )
+                        };
+                        writeln!(
+                            out,
+                            "{:.4}\t{p}\t{q}\t{}\t{rel:.3}\t{pos:.4}",
+                            t + DEFAULT_STEP,
+                            r.rig.components[info.motor].name
+                        )?;
+                    }
                 }
             }
         }

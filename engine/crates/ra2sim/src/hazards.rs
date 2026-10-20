@@ -39,6 +39,45 @@ impl Zone {
         let r = Vec3::splat(radius);
         (p.cmpge(self.min - r) & p.cmple(self.max + r)).all()
     }
+
+    /// Whether a convex body — `points` in the frame `world` puts in the world
+    /// (a component's collision pieces) — comes within `tolerance` of the zone.
+    ///
+    /// The original's SmartZone is a Havok phantom: a body is in it when the
+    /// collision detection finds it within the world's tolerance (0.1). This is
+    /// a separating-axis test on the zone's three axes and on 24 directions
+    /// around its vertical, which is exact for the upright boxes the stock
+    /// zones are and within a few millimetres for the robots' convex pieces. A
+    /// bounding sphere, or even a component's box, is too generous: ALARM's
+    /// chassis box grazed the Octagon's `hellzone2` as it drove past where the
+    /// original never raises the hellraiser (live, `HellRaiser.timer` never
+    /// reset); its hull, chamfered at the corners, stays clear.
+    pub fn touches_points(&self, world: Mat4, points: &[Vec3], tolerance: f32) -> bool {
+        if points.is_empty() {
+            return false;
+        }
+        let to_zone = self.inv * world;
+        let local: Vec<Vec3> = points
+            .iter()
+            .map(|p| to_zone.transform_point3(*p))
+            .collect();
+        let centre = (self.min + self.max) * 0.5;
+        let half = (self.max - self.min) * 0.5;
+        let mut axes = vec![Vec3::X, Vec3::Y, Vec3::Z];
+        for k in 1..24 {
+            let a = k as f32 * std::f32::consts::PI / 24.0;
+            axes.push(Vec3::new(a.cos(), 0.0, a.sin()));
+        }
+        axes.iter().all(|l| {
+            let c = centre.dot(*l);
+            let r = half.x * l.x.abs() + half.y * l.y.abs() + half.z * l.z.abs();
+            let (lo, hi) = local.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+                let d = p.dot(*l);
+                (lo.min(d), hi.max(d))
+            });
+            lo <= c + r + tolerance && hi >= c - r - tolerance
+        })
+    }
 }
 
 /// Resolve the zones a script registered against the arena's own geometry.
@@ -182,6 +221,49 @@ mod tests {
     /// a range containing zero, so the travel is taken from the model's lower
     /// stop. The Octagon's hellraiser arms ship `[1°, 70°]`, which Jolt refuses
     /// outright; the Compressor's smash arms already say `[0, 0.27]`.
+    /// The Octagon's `hellzone2` (x 3.1..4.0, z -1.4..0.9) and ALARM's chassis
+    /// (about 1.5 x 1.1 m) at (2.56, -2.28) heading the diagonal, as it drives
+    /// past live without raising the hellraiser: its bounding sphere reached the
+    /// zone, its box does not.
+    #[test]
+    fn a_zone_is_touched_by_a_body_not_its_bounding_sphere() {
+        let zone = Zone {
+            name: "hellzone2".into(),
+            id: 2,
+            inv: Mat4::IDENTITY,
+            min: Vec3::new(3.1, -0.1, -1.4),
+            max: Vec3::new(4.0, 0.6, 0.9),
+        };
+        // A 1.5 x 0.4 x 1.1 m box.
+        let (min, max) = (Vec3::new(-0.75, -0.2, -0.55), Vec3::new(0.75, 0.2, 0.55));
+        let corners: Vec<Vec3> = (0..8)
+            .map(|k| {
+                Vec3::new(
+                    if k & 1 == 0 { min.x } else { max.x },
+                    if k & 2 == 0 { min.y } else { max.y },
+                    if k & 4 == 0 { min.z } else { max.z },
+                )
+            })
+            .collect();
+        let at = |x: f32, z: f32, yaw: f32| {
+            Mat4::from_rotation_translation(glam::Quat::from_rotation_y(yaw), Vec3::new(x, 0.2, z))
+        };
+        // Driving past diagonally, a metre off: the sphere reaches, the body
+        // does not.
+        let past = at(2.56, -2.28, -0.77);
+        assert!(zone.touches(
+            past.transform_point3(Vec3::ZERO),
+            ((max - min) * 0.5).length()
+        ));
+        assert!(!zone.touches_points(past, &corners, 0.1));
+        // On the plate it is in.
+        assert!(zone.touches_points(at(3.5, -0.2, 0.3), &corners, 0.1));
+        // Within the tolerance of a face counts; beyond it does not.
+        assert!(zone.touches_points(at(2.31, 0.0, 0.0), &corners, 0.1));
+        assert!(!zone.touches_points(at(2.2, 0.0, 0.0), &corners, 0.1));
+        assert!(!zone.touches_points(at(3.5, 0.0, 0.0), &[], 0.1));
+    }
+
     #[test]
     fn hinge_travel_is_taken_from_the_models_lower_stop() {
         assert_eq!(hinge_limits([0.0, 0.27052602]), [0.0, 0.27052602]);
