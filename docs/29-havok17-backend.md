@@ -1023,11 +1023,27 @@ into a deathpit at 67 s); before, nobody dealt damage.
 
 Scout v ALARM in the box now ends early: the Scout's fork, at its live 49 rad/s
 and 3600 N·m, flips ALARM onto its back (immobilised at 59 s), which the
-original's does not. Open item: our fork accelerates about twice as fast as
-the live one (to 36 rad/s in one substep, at its end in 4; live 18.5 then 37,
-at its end in 6-7), so the arm's effective inertia in our hinge servo, or the
-original's first substeps after `Lock(0)`, still differ. Traction survey:
-45/45.
+original's does not. The cause is not found. Ruled out (`bodies-scout-alarm__live__000`,
+`frida/ra2_body_dump.js`: raw dumps of the fork's hinge atom and bodies; body
+`+0x190` mass, `+0x98` inverse mass, `+0x30` centre, `+0x10c` world inverse
+inertia, three rows of stride 16, `+0x19c` the local inertia):
+
+* the arm's mass (26 both) and inertia (principal moments live 2.57 / 2.51 /
+  0.17 kg·m², ours 2.64 / 2.54 / 0.16), the chassis' (163.49 both);
+* the motor's clamp: one `maxTorque · dt` per substep in both, and the
+  per-substep acceleration agrees (live 18.5 then 37.3 rad/s, ours 17.8 then
+  35.9; an earlier reading of "twice as fast" compared the wrong rows).
+
+What differs: live, the motor runs two substeps with the arm barely moving
+(3.8, 2.3 rad/s) before it accelerates, and over its last three substeps it
+slows (25, 13, 9 rad/s) with a backstep in between (two solver calls in one
+substep: a new contact), before locking at the end; ours locks at its end at
+the peak speed. Our robots' chassis centres of mass also sit 1.5-4 cm lower
+than live (in the robot frame, `y`: Scout 0.159 against 0.195, ALARM 0.238
+against 0.263, FlapJack 0.183 against 0.208); taking the chassis piece's box
+centre instead of its volume centroid closes half of `y` but moves `z` the
+wrong way, so the rule is not that either. A lower centre makes ours harder
+to flip, not easier. Traction survey: 45/45.
 
 **FlapJack's spin-up** (task of section 11d): not the load cap — a grounded
 wheel's hinge motor is off. Part of it is the wheel records' hub offsets
