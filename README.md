@@ -233,8 +233,11 @@ Measured, not aspirational.
 * The event's 3D prize scene (`event_results.py`), the repairs screen's 3D
   placeholder, and the match-side writer that fills `Team+0x12c`/`+0x13c` (the
   bench reads and writes them; the match inserts a report-derived list).
-* Physical audio playback was not exercised; the click-sound call site is our
-  mapping. Crowd fades are recorded, not performed.
+* Physical audio playback was not exercised. The click rule (push buttons only),
+  the `Begin_*` line, weapon triggers, motor loops and the music policy are from the
+  original's own sound-call log (`docs/35-audio-events.md`); open there: the
+  in-match music request, `AddXtraSound`, the damage scale that sets the impact
+  loudness and the crowd's excitement.
 * macOS and Windows builds — documented, unverified. arm64, musl, static
   linking, Flatpak and AppImage are not built. Signing and notarisation are
   absent.

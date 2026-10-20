@@ -335,6 +335,10 @@ pub struct Robot {
     /// Per part: how long a burst device still draws power (`0.6 s` after a
     /// burst motor is triggered, `0.25 s` for a piston: `0x446916`, `0x44880d`).
     burst_draw: Vec<f32>,
+    /// Weapon triggers since [`Robot::take_fire_events`]: the motor component
+    /// of each trigger press that makes the original play its `firesound`
+    /// (`docs/35-audio-events.md`). Bounded; nothing but the client's audio reads it.
+    fire_events: Vec<usize>,
     /// The batteries and air tanks and what they supplied last step
     /// ([`crate::energy`]): the HUD's battery and air bars.
     pub energy: Energy,
@@ -487,6 +491,7 @@ impl Robot {
             burst_timer: vec![0.0; rig.parts.len()],
             slider_dir: vec![0.0; rig.parts.len()],
             burst_draw: vec![0.0; rig.parts.len()],
+            fire_events: Vec::new(),
             energy: Self::build_energy(&rig),
             mass_centre: rig
                 .parts
@@ -638,6 +643,15 @@ impl Robot {
             match info.use_kind {
                 JointUse::Passive => {}
                 JointUse::Burst => {
+                    // The firesound plays on the trigger itself: a piston
+                    // (`0x448750`) on every press, an electric burst motor
+                    // (`0x446810`) only while it is cocked.
+                    if self.control.fired(&self.rig.wiring, motor)
+                        && (info.slider || self.burst[p] == BurstPhase::Cocked)
+                        && self.fire_events.len() < 256
+                    {
+                        self.fire_events.push(motor);
+                    }
                     // The trigger starts a fixed draw time (the burst timers of
                     // the original), whatever the stroke then takes.
                     if self.burst_draw[p] <= 0.0
@@ -1407,6 +1421,11 @@ impl Robot {
     fn scaled_percent(&self, motor: usize, command: f32, scale: f32) -> i32 {
         let asked = (command * scale).trunc();
         (asked * self.motor_factor(motor)).trunc() as i32
+    }
+
+    /// The weapon triggers (motor component indices) since the last call.
+    pub fn take_fire_events(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.fire_events)
     }
 
     /// How much of its rated speed and torque a motor still delivers.

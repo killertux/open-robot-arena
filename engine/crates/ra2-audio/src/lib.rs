@@ -438,7 +438,10 @@ impl Audio {
     /// [`Audio::set_sfx_gain`] or [`Audio::set_music_gain`] replaces the
     /// configured gain while the per-category mute still overrides it.
     pub fn apply_cfg(&mut self, cfg: &Cfg) {
-        self.sfx_gain = hundredths_db_to_gain(cfg.sound_volume());
+        // `SoundVolume` does not reach the `SoundWizard` effects: live, effects
+        // recorded at -600 and at -3000 play at the file's own level
+        // (`docs/35-audio-events.md` section 1). Only the music takes its volume.
+        self.sfx_gain = 1.0;
         self.music_gain = hundredths_db_to_gain(cfg.music_volume());
         self.sound_muted = cfg.sound_muted();
         self.music_muted = cfg.music_muted();
@@ -1090,7 +1093,8 @@ SoundMuted=0\r\n\
         let mut audio = Audio::without_device();
         audio.apply_cfg(&cfg);
 
-        assert_close(audio.output_sfx_gain(), 0.501_187_2);
+        // SoundVolume does not reach the effects (docs/35 section 1).
+        assert_close(audio.output_sfx_gain(), 1.0);
         assert_eq!(audio.output_music_gain(), 0.0);
 
         audio.apply_cfg(&Cfg::parse(

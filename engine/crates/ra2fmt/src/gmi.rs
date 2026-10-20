@@ -244,14 +244,26 @@ pub struct Material {
 }
 
 impl Material {
-    /// Resolve the effective material for a face within this (top-level) slot.
-    pub fn resolve_face(&self, face_material: i32) -> &Material {
-        if !self.sub_materials.is_empty() {
-            if let Some(m) = self.sub_materials.get(face_material.max(0) as usize) {
-                return m;
-            }
+    /// Resolve the effective material for a face within this (top-level) slot,
+    /// the way the original's batch builder (`FUN_005ae630`) does: without
+    /// sub-materials every face uses this material; with `n` of them a face id
+    /// above `n` is clamped to the last one (`n - 1`), and a face whose id is
+    /// exactly `n` (or negative) matches no sub-material pass and is not drawn
+    /// (`None`). The compressor's fence bars are face id 3 of 2 sub-materials.
+    pub fn resolve_face(&self, face_material: i32) -> Option<&Material> {
+        let n = self.sub_materials.len() as i32;
+        if n == 0 {
+            return Some(self);
         }
-        self
+        let id = if face_material > n {
+            n - 1
+        } else {
+            face_material
+        };
+        if id < 0 || id >= n {
+            return None;
+        }
+        self.sub_materials.get(id as usize)
     }
 
     /// First referenced bitmap file name, if any.
@@ -279,6 +291,8 @@ pub struct Mesh {
     pub texcoords: Vec<[f32; 3]>,
     /// Per-face texture indices (parallel to `faces`), when present.
     pub texfaces: Vec<[u32; 3]>,
+    /// Four per face: the face normal, then corner A, B, C's vertex normals
+    /// (the order the exe's GMA writer prints them, `0x5c2568`).
     pub normals: Vec<[f32; 3]>,
     pub backface_cull: i32,
     /// Vertex colours (`ccount` entries, RGB 0..1) and their per-face indices.
@@ -431,7 +445,7 @@ pub struct SceneObject {
 
 /// A `*LIGHT` object. Only omni lights occur in the shipped data; the original
 /// turns each into a `D3DLIGHT_POINT` (`FUN_005ba1e0`): diffuse = colour x
-/// intensity, no specular/ambient, position = the node's translation, range =
+/// intensity, specular = colour, no ambient, position = the node's translation, range =
 /// `attn_end` and attenuation `(0.4, 3/range, 40/range^2)` when `far_atten`,
 /// else range 10000 and attenuation `(1, 0, 0)`.
 #[derive(Debug, Clone, Default)]
@@ -1198,6 +1212,36 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `FUN_005ae630` clamps a face id above the sub-material count to the last
+    /// one and draws no face whose id equals the count (`0x5ae8fa`: `jle`).
+    #[test]
+    fn a_face_id_past_the_sub_materials_clamps_and_one_equal_to_the_count_is_dropped() {
+        let sub = |name: &str| Material {
+            name: name.into(),
+            ..Default::default()
+        };
+        let multi = Material {
+            name: "Metal".into(),
+            sub_materials: vec![sub("Chain Fence"), sub("Bars")],
+            ..Default::default()
+        };
+        let name = |id: i32| multi.resolve_face(id).map(|m| m.name.clone());
+        assert_eq!(name(0).as_deref(), Some("Chain Fence"));
+        assert_eq!(name(1).as_deref(), Some("Bars"));
+        assert_eq!(name(2), None, "an id equal to the count matches no pass");
+        assert_eq!(
+            name(3).as_deref(),
+            Some("Bars"),
+            "the compressor fence's bars"
+        );
+        assert_eq!(name(-1), None);
+        let plain = sub("Floor");
+        assert_eq!(
+            plain.resolve_face(7).map(|m| m.name.as_str()),
+            Some("Floor")
+        );
+    }
 
     fn attachment(name: &str, data: &str) -> Attachment {
         let o = SceneObject {

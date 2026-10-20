@@ -21,7 +21,8 @@
 //! * `MATERIAL_TRANSPARENCY > 0` makes the material blended with diffuse alpha
 //!   `1 - transparency` (no alpha test). The diffuse colour is the GMF diffuse
 //!   unless a diffuse map exists, then white. Ambient is the GMF ambient.
-//!   Specular is `shine strength x specular colour`, power `shine x 100`.
+//!   Specular is `shine strength x specular colour`, power `shine x 100`;
+//!   `D3DRS_SPECULARENABLE` is on iff the power is positive.
 //!   Emissive is never set (zero); `MATERIAL_SELFILLUM` is never read.
 //! * A bitmap that cannot be loaded still takes its stage and samples black.
 //! * `BITMAP_FILTER` 0 (Pyramidal) samples with point filtering, 1 (SAT) with
@@ -30,6 +31,9 @@
 //! * Lighting is on unless the mesh carries vertex colours or a lightmap stage
 //!   is present. `MATERIAL_XP_TYPE` 3 is additive (`SRCALPHA, ONE`).
 //! * Back faces are culled (`CULL_CCW`) iff the mesh's `BACKFACE_CULL` is 1.
+//! * Bitmaps are shared by name for the whole session ([`session_bitmap`]).
+//! * A face id above the sub-material count uses the last sub-material; one
+//!   equal to the count is not drawn (`gmi::Material::resolve_face`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -80,6 +84,36 @@ pub fn load_image(path: &Path) -> Option<Arc<Image>> {
         c.insert(path.to_path_buf(), img.clone());
     }
     img
+}
+
+fn session_bitmaps() -> &'static Mutex<HashMap<String, Arc<Image>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Image>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A GMF material's bitmap as the original's texture manager hands it out.
+///
+/// Every model's stage asks for `"Graphics\\" + <bitmap as written in the GMF>`
+/// (`FUN_005ae630` prefixes the global texture path `DAT_0071f574`, which
+/// `FUN_0058df20` sets to `Graphics\\` and only the bot lab changes), and the
+/// manager (`FUN_00591030`) returns the first live texture whose name equals
+/// that string (`FUN_0058e390`, an exact compare), loading a new one only on a
+/// miss. So within one session the first file loaded under a name is the one
+/// every later model with that name gets, whatever its own directory holds.
+/// Three shipped names differ between arenas (`bars.tga`: compressor vs
+/// electric/skull, `sawhazard.bmp`: box vs half, `triple_spike.bmp`); the
+/// original captures show it (`docs/34-arena-render.md`). A file that fails to
+/// load is not cached (the manager deletes it), so a later model may still find
+/// its own.
+pub fn session_bitmap(dir: &Path, bitmap: &str) -> Option<Arc<Image>> {
+    if let Some(hit) = session_bitmaps().lock().ok()?.get(bitmap) {
+        return Some(hit.clone());
+    }
+    let img = resolve_bitmap(dir, bitmap).and_then(|p| load_image(&p))?;
+    if let Ok(mut c) = session_bitmaps().lock() {
+        return Some(c.entry(bitmap.to_string()).or_insert(img).clone());
+    }
+    Some(img)
 }
 
 /// What a texture stage does (`FUN_005b24c0`, texture type 0/1/2).
@@ -187,14 +221,12 @@ impl Material {
                     // loader returned, and the stage then samples black. The
                     // shipped octagon's `light_flare_diffuse.tga` is such a
                     // file; the flare quads vanish under additive blending.
-                    let image = resolve_bitmap(dir, &t.bitmap)
-                        .and_then(|p| load_image(&p))
-                        .unwrap_or_else(|| {
-                            if std::env::var("RA2_DEBUG").is_ok() {
-                                eprintln!("  missing bitmap {:?} (black stage)", t.bitmap);
-                            }
-                            Image::solid([0, 0, 0, 255])
-                        });
+                    let image = session_bitmap(dir, &t.bitmap).unwrap_or_else(|| {
+                        if std::env::var("RA2_DEBUG").is_ok() {
+                            eprintln!("  missing bitmap {:?} (black stage)", t.bitmap);
+                        }
+                        Image::solid([0, 0, 0, 255])
+                    });
                     let (kind, linear) = match t.kind {
                         gmi::MAP_DIFFUSE => {
                             has_diffuse_map = true;
@@ -299,9 +331,12 @@ pub struct Light {
     pub position: Vec3,
     /// `D3DLIGHT8.Range`.
     pub range: f32,
-    /// Diffuse colour (the GMF colour times its intensity). Specular and
-    /// ambient are zero, as the original zeroes them (`FUN_005ba1e0`).
+    /// Diffuse colour (the GMF colour times its intensity).
     pub diffuse: [f32; 3],
+    /// Specular colour: the GMF colour *not* scaled by the intensity
+    /// (`FUN_005ba1e0` writes `D3DLIGHT8.Specular` = colour, `.Diffuse` =
+    /// colour x intensity, `.Ambient` = 0).
+    pub specular: [f32; 3],
     /// `D3DLIGHT8.Attenuation0..2`.
     pub attenuation: [f32; 3],
 }
@@ -329,6 +364,7 @@ impl Light {
                 l.color[1] * l.intensity,
                 l.color[2] * l.intensity,
             ],
+            specular: l.color,
             attenuation,
         })
     }
@@ -343,6 +379,7 @@ impl Light {
             position: Vec3::new(-0.4, 0.7, -0.6).normalize() * 5000.0,
             range: 10000.0,
             diffuse: [1.0; 3],
+            specular: [0.0; 3],
             attenuation: [1.0, 0.0, 0.0],
         }
     }
@@ -520,6 +557,11 @@ mod tests {
         let l = Light::from_gmi(&o, Mat4::IDENTITY).unwrap();
         assert_eq!(l.position, Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(l.diffuse, [2.0, 1.0, 0.5]);
+        assert_eq!(
+            l.specular,
+            [1.0, 0.5, 0.25],
+            "specular is the colour, unscaled"
+        );
         assert_eq!((l.range, l.attenuation), (10000.0, [1.0, 0.0, 0.0]));
         let far = gmi::Light {
             far_atten: true,
@@ -531,5 +573,28 @@ mod tests {
         let l = Light::from_gmi(&o, Mat4::IDENTITY).unwrap();
         assert_eq!(l.range, 40.0);
         assert_eq!(l.attenuation, [0.4, 3.0 / 40.0, 40.0 / 1600.0]);
+    }
+
+    /// The texture manager hands every later model the first file loaded under
+    /// a bitmap name (`FUN_00591030` / `FUN_0058e390`).
+    #[test]
+    fn the_first_bitmap_loaded_under_a_name_is_the_sessions() {
+        let base = std::env::temp_dir().join(format!("ra2-session-bitmap-{}", std::process::id()));
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let name = format!("zz_session_{}.png", std::process::id());
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([200, 0, 0, 255]))
+            .save(a.join(&name))
+            .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 200, 255]))
+            .save(b.join(&name))
+            .unwrap();
+        let first = session_bitmap(&a, &name).unwrap();
+        let second = session_bitmap(&b, &name).unwrap();
+        assert_eq!(&second.rgba[..3], &[200, 0, 0]);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(session_bitmap(&b, "zz_missing_bitmap.png").is_none());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

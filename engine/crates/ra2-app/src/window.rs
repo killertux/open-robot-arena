@@ -337,7 +337,7 @@ impl App {
         shell.set_animate(true);
         let frames = FrameRenderer::open(game)?;
         let cfg = crate::options::read_cfg(game);
-        let audio = AudioSystem::new(game, &cfg);
+        let audio = AudioSystem::new(game, &cfg).with_music_gap(true);
         let full_screen = cfg.full_screen();
         let options = Options::open_game(game);
         println!(
@@ -1032,6 +1032,7 @@ impl ApplicationHandler for App {
             // own `dt` through the accumulator.
             self.next_update = now + UPDATE;
             self.shell.advance(UPDATE.as_secs_f32());
+            self.audio.tick_music(UPDATE.as_secs_f32());
             if let Some(session) = &mut self.session {
                 session.advance(UPDATE.as_secs_f32());
             }

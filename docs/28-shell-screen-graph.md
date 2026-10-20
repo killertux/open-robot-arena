@@ -256,7 +256,7 @@ numbers above are the baseline of this round). Nothing in 3j changes those rende
   bridge 7.87/8.72/7.13/7.66/0.46/16.90, compressor 7.92/2.38/6.69/8.52/2.05/21.59, electric 26.73/15.96/9.84/8.77/6.10/38.76,
   halfcircle 0.03/8.61/2.90/2.78/1.01/19.67, metalskull 1.40/19.39/4.13/5.38/87.16/18.85, octagon 1.98/8.08/4.19/2.66/15.63/13.30,
   parkinglot 11.94/19.66/11.91/9.89/4.62/27.00. `match-countdown` is 34.79 (camera/intro pose). All are camera/physics
-  dependent; not touched.
+  dependent; not touched. Triaged and re-measured in docs/34 (mean of the 51 match/arena fixtures 11.02 -> 4.90).
 * Not done: Team HQ events 7.86 (diff is resampling edges on every cell, not layout) and exhibition-settings 4.07.
 
 

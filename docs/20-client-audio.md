@@ -1,5 +1,10 @@
 # 20 — Client audio and the options screen (M7.5/M7.6 wiring)
 
+> **Superseded in part by [`35-audio-events.md`](35-audio-events.md)** (live sound-call
+> logs and recordings, M-audio3): the music policy (§2), the click rule (§3), the
+> `Begin_*` announcer, weapon triggers, motor loops, the crowd's intro tick and the
+> arena material sounds. Where this page disagrees, 35 is the later evidence.
+
 This is the running-client half of `docs/13-audio-and-writers.md`. The libraries
 are unchanged in what they claim; this page records where the app calls them,
 which controls edit which key, and what the evidence is.
@@ -20,8 +25,9 @@ which controls edit which key, and what the evidence is.
 `music_for_screen(Shell::screen_id())` is consulted on every shell transition.
 The resolved file is compared to the current one, so a redraw never restarts a
 track. Two screens in one group (the team picker and the HQ) share a track, and
-an unmapped screen (`exhibition/`, `help/`, `common/options.gib`, …) stops the
-music, as `music_for_screen` documents. The three tracks are the only starts:
+an unmapped screen (`exhibition/`, `help/`, `common/options.gib`, …) leaves the
+current track playing (live, `docs/35` section 3; an earlier version of this client
+stopped it). The three tracks are the only starts:
 
 | Screen | Track |
 |---|---|
@@ -42,10 +48,10 @@ checkbox or option-group member is one click. The sound is
 `Sounds/button_click.wav` at per-call gain `1.0`; `Audio::play_2d` multiplies it
 by the SFX category (`SoundVolume`, `SoundMuted`), so muting works.
 
-The shipped executable contains the string `Sounds\button_click.wav`. No call
-site was traced, and the scripts/UI notes do not name it. **The mapping "every
-activating shell click plays it" is this client's, not established game
-behaviour.**
+The shipped executable contains the string `Sounds\button_click.wav`; its one call
+site is the push-button class's mouse-up handler (`0x5ec1e0`, `docs/35` section 4).
+Only `Button` widgets click; tabs, check boxes, radio groups, sliders and list rows
+do not (`crate::plays_click`).
 
 ## 4. Match sounds
 
@@ -190,9 +196,10 @@ real location (hazard loops) keeps the positional model with DirectSound3D's
   motor (`motorsound`, or the middle file of `runsequence`), faded in/out over
   0.25 s, released after 0.5 s of stillness. Round 2 (section 10) added the crowd
   mood machine, motor pitch, burst `firesound`s and the immobility tick.
-  Still unrecovered: arena material sounds (`SetSubMaterialSound`/
-  `AddXtraSound`: no arena-contact event reaches the app), the play site of the
-  `Begin_*` announcer lines, the motor volume term (`+0x29c`).
+  Recovered later (`docs/35`): the `Begin_*` line (bell + 0.5 s), arena material
+  sounds (`SetSubMaterialSound`), weapon triggers on the press, motor loops from the
+  command at -700, the crowd's tick through the intro. Still open: `AddXtraSound`,
+  the motor pitch's volume term, the music request at the bell.
 * **UI** (`audio::UiSound`): click (activating controls), workshop attach
   (the definition's `attachsound`) and removal. Snapshot, point-plotted, eject
   and the lobby sounds have no UI in this client yet; `AudioSystem::ui` takes
@@ -320,8 +327,9 @@ is in our own scale (chassis health 300 against the original's 1828), so the
     the moment its timer reaches zero, next to a random pick of the six
     `Begin_*` announcer lines the window holds (`0x474ef7`: AndWereOff,
     BuzzerSignalsStart, HereWeGo, KickMatchInGear, LetsBegin, MayStrongestWin).
-    The recording has no `Begin_*` voice in its first seconds (no match above a
-    normalised correlation of 0.15), so the announcer is not played here.
+    The first recording had no `Begin_*` voice in its first seconds, but the live
+    sound-call logs show one in every match: created at the bell, played 0.5 s
+    later (`docs/35` section 5).
   * `+0x140` plays on every chassis critical (the robot method `FUN_004df120`
     counts them; the third destroys the robot through `FUN_00417cc0`, which
     plays it again and calls `FUN_00418040` with state 1): ours plays it on

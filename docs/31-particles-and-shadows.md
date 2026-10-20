@@ -89,6 +89,13 @@ white only at the heart. The electric arena switches the twelve bolts on with
 its hazards and `Charge`/`SetLightningStartEnd` move them to the robots in range;
 the engine's `ResetLightningPositions` is replaced by the script's own.
 
+## Lights: specular (correction, docs/34 §3.4)
+
+`FUN_005ba1e0` gives each omni light `D3DLIGHT8.Specular` = its colour (unscaled by the intensity)
+and `Diffuse` = colour x intensity, `Ambient` 0; with `D3DRS_SPECULARENABLE` on for materials whose
+power is positive (`FUN_005b24c0`) the arenas' and robots' highlights come from it. The renderer now
+draws that term; earlier notes here and in `material.rs` said the light specular was zero.
+
 ## DecalTrigger
 
 `Arenas/decals/*.tga` (slashes, pierces, batter marks, fire) are the textures of
