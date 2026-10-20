@@ -1826,7 +1826,10 @@ mod tests {
         // baseline lands on the authored y 18: the label's box ends inside the
         // group and level with the radio, not 12 pixels under the clip.
         assert!(label.bottom() <= group.bottom(), "{label:?} in {group:?}");
-        assert!(label.bottom() > radio.y && label.y < radio.bottom(), "{label:?} beside {radio:?}");
+        assert!(
+            label.bottom() > radio.y && label.y < radio.bottom(),
+            "{label:?} beside {radio:?}"
+        );
     }
 
     /// The measured path: with the screen's faces, a label the editor left at

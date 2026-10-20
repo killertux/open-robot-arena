@@ -80,8 +80,9 @@ Recovered this pass (widget -> handler):
 | `select team grid` | 0x4ebc70 (click), 0x4eba60 (double click) | select a row / continue |
 
 The shell fills `select team grid` from `Teams/Teams.txt` with `team_cell.gib`
-(`ra2ui::teams::fill_select_grid`), selects row 0 (so Continue works at once). A delete or a new team is kept in
-the session, never written (the install is read-only data); the original rewrites `Teams/`.
+(`ra2ui::teams::fill_select_grid`), selects row 0 (so Continue works at once). New Team and Delete Team write
+`Teams/Teams.txt` at once, as the original does (message 200 → `FUN_00502720`, docs/36 §9.4); Continue opens the
+selected row's team (docs/36 §9.3).
 
 ## 3c. Team HQ (`teamhq/teamhq.gib`) and its tabs
 
@@ -259,6 +260,25 @@ numbers above are the baseline of this round). Nothing in 3j changes those rende
   dependent; not touched. Triaged and re-measured in docs/34 (mean of the 51 match/arena fixtures 11.02 -> 4.90).
 * Not done: Team HQ events 7.86 (diff is resampling edges on every cell, not layout) and exhibition-settings 4.07.
 
+
+## 3k. Play2: native event flow and workshop, modal windows over the match, baselines
+
+(docs/36 §9 has the addresses and tests.)
+
+* **Native layout everywhere.** The Team HQ's event flow (`hq_mode::Session::set_layout`: bracket, award, repairs,
+  season end, the event match's HUD) and the workshop (`Builder::set_size`) now lay out at the window size like the
+  shell's screens; nothing is letterboxed at 1280x1005 any more except the headless evidence frames, which keep the
+  design size.
+* **Bracket graphic** (`ra2ui::hq::fill_bracket_at`, `FUN_0046ad60`): pictures and lines in `bracket group`, laid
+  out for the screen it is built at and written as fractions of the group.
+* **Windows over the match.** The pause dialog's Options opens `common/options.gib` on the shell's window stack
+  (`Shell::open_modal`); the match draws only the windows (`Shell::window_placements`) over its frame. F1's
+  `common/controls_reminder.gib` is the match's own window (`ra2-app::reminder`).
+* **`OptionGroup` text is baseline-placed**, like a `Group`'s: `video_options.gib`'s `Low`/`Medium`/`High`/`Off`/`On`
+  and `multiplayer.gib`'s `Local Network`/`Internet` now sit beside their radios instead of under the group's clip.
+* **Defaults the constructors load**: the create-game screen's `mpc_settings.gib` tab (`FUN_0049a000`), the edit-team
+  window's logo list (`FUN_00468760`).
+* **Esc** does nothing on shell screens and windows (`0x5ee6b0`).
 
 ## 4. Where the table lives
 

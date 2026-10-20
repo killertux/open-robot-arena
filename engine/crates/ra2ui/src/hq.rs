@@ -1076,7 +1076,13 @@ pub struct BracketCell {
 /// Where `FUN_0046ad60` puts every picture for a bracket of `rounds` rounds
 /// with `bots` robots per match and `advance` going on, in a group of
 /// `w` x `h` pixels.
-pub fn bracket_cells(rounds: usize, bots: usize, advance: usize, w: f32, h: f32) -> Vec<BracketCell> {
+pub fn bracket_cells(
+    rounds: usize,
+    bots: usize,
+    advance: usize,
+    w: f32,
+    h: f32,
+) -> Vec<BracketCell> {
     let bots = bots.max(1);
     let advance = advance.clamp(1, bots);
     let (w, h) = (w - 6.0, h - 6.0);
@@ -1159,7 +1165,8 @@ fn bracket_widgets(bracket: &BracketView, w: f32, h: f32) -> Vec<Widget> {
             let left = first.x;
             let right = last.x + last.size;
             let centre = (left + right) * 0.5;
-            let line = |name: String, r: [f32; 4]| bracket_line(&name, frac(r[0], r[1], r[2], r[3]));
+            let line =
+                |name: String, r: [f32; 4]| bracket_line(&name, frac(r[0], r[1], r[2], r[3]));
             out.push(line(
                 format!("bracket line {row}:{m}:a"),
                 [left + half + 2.0 - 2.0, mid - 13.0, 4.0, 13.0],
@@ -1187,7 +1194,10 @@ fn bracket_widgets(bracket: &BracketView, w: f32, h: f32) -> Vec<Widget> {
                 // A played round keeps only the player's match (match 0).
                 (m == 0).then(|| round.matches[0].slots.get(k)).flatten()
             } else {
-                round.matches.get(m).and_then(|matched| matched.slots.get(k))
+                round
+                    .matches
+                    .get(m)
+                    .and_then(|matched| matched.slots.get(k))
             }
         });
         let champion = cell.row == rounds
@@ -1240,7 +1250,8 @@ fn bracket_widgets(bracket: &BracketView, w: f32, h: f32) -> Vec<Widget> {
             .iter()
             .enumerate()
             {
-                let mut edge = bracket_line(&format!("player frame {i}"), frac(r[0], r[1], r[2], r[3]));
+                let mut edge =
+                    bracket_line(&format!("player frame {i}"), frac(r[0], r[1], r[2], r[3]));
                 crate::input::set_field(&mut edge, "FillColor", "0 0 1 1");
                 crate::input::set_field(&mut edge, "ChildOrder", "6");
                 out.push(edge);
@@ -1689,14 +1700,20 @@ mod tests {
         assert_eq!(pictures, 16 + 8 + 4);
         // Round 1 (played): the player's match keeps its two logos; the
         // rest of the row is unknown here.
-        assert_eq!(cell("bracket cell 0:0").as_deref(), Some("Teams\\orange_skull.bmp"));
+        assert_eq!(
+            cell("bracket cell 0:0").as_deref(),
+            Some("Teams\\orange_skull.bmp")
+        );
         assert_eq!(cell("bracket cell 0:1").as_deref(), Some("AI\\redX.bmp"));
         assert_eq!(cell("bracket cell 0:2").as_deref(), Some(QUESTION_MARK));
         // The current round shows its field; beyond it, question marks.
         assert_eq!(cell("bracket cell 1:1").as_deref(), Some("AI\\star.bmp"));
         assert_eq!(cell("bracket cell 2:0").as_deref(), Some(QUESTION_MARK));
         assert!(group.children.iter().any(|c| c.name() == "player frame 0"));
-        assert!(group.children.iter().any(|c| c.name() == "bracket line 0:0:b"));
+        assert!(group
+            .children
+            .iter()
+            .any(|c| c.name() == "bracket line 0:0:b"));
     }
 
     /// `FUN_0046ad60`'s geometry: sixteen pictures across, each next row

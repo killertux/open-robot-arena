@@ -169,9 +169,7 @@ pub fn add_robot(game: &Path, team: usize) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{}: team slot {team} is empty", path.display()))?;
     let folder = game.join(Side::Player.root()).join(format!("Team{team}"));
     let slot = (0..)
-        .find(|n: &i32| {
-            !record.robots.contains(n) && !folder.join(format!("Bot{n}.bot")).exists()
-        })
+        .find(|n: &i32| !record.robots.contains(n) && !folder.join(format!("Bot{n}.bot")).exists())
         .expect("a free robot slot");
     record.robots.push(slot);
     table

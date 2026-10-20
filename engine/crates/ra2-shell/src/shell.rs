@@ -1205,6 +1205,19 @@ impl Shell {
                     game_type.as_deref(),
                 )?;
             }
+            // The create-game screen opens on its settings tab
+            // (`FUN_0049a000` loads `mpc_settings.gib` into `content group`;
+            // `mp settings button` is the one drawn selected).
+            if page.key.eq_ignore_ascii_case("multiplayer/mp_create.gib") {
+                load_into(
+                    page,
+                    &self.ui,
+                    &self.game,
+                    "content group",
+                    "mpc_settings.gib",
+                    None,
+                )?;
+            }
             // The select-team screen fills its grid with the player's teams.
             if page.key.eq_ignore_ascii_case("teamhq/select_team.gib") {
                 let rosters = team_rosters(&self.game);

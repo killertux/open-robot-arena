@@ -423,10 +423,7 @@ impl App {
     /// The coordinate space clicks are mapped into: the shell's native screen
     /// size, or the fixed design size for the tools that still lay out at it.
     fn input_space(&self) -> [f32; 2] {
-        if let (true, Some(window)) = (
-            self.session.is_some() || self.hq.is_some(),
-            &self.window,
-        ) {
+        if let (true, Some(window)) = (self.session.is_some() || self.hq.is_some(), &self.window) {
             // The match and the Team HQ's event screens lay their windows out
             // natively on the window.
             let [w, h] = window_size(window);

@@ -3009,11 +3009,14 @@ mod tests {
                 assert_eq!(teams.len(), BRACKET_ENTRANTS - 1);
                 teams.sort_unstable();
                 teams.dedup();
-                assert_eq!(teams.len(), BRACKET_ENTRANTS - 1, "event {event} seed {seed}");
+                assert_eq!(
+                    teams.len(),
+                    BRACKET_ENTRANTS - 1,
+                    "event {event} seed {seed}"
+                );
             }
         }
     }
-
 }
 
 /// `FUN_00500120`'s draw: `want` distinct events out of `n`, from LCG state `state`.
@@ -3043,5 +3046,4 @@ mod schedule_tests {
             vec![2, 6, 12, 9, 13, 15, 5, 22, 20]
         );
     }
-
 }

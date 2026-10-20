@@ -1260,11 +1260,11 @@ impl Session {
         let point = self.event_point(row)?;
         let index = {
             let Session {
-                        assets,
-                        screen,
-                        layout,
-                        ..
-                    } = self;
+                assets,
+                screen,
+                layout,
+                ..
+            } = self;
             let Screen::Hq(hq) = screen else {
                 return Err("the HQ is not on screen".to_string());
             };

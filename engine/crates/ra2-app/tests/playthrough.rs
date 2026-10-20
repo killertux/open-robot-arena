@@ -557,6 +557,14 @@ fn quit_and_the_multiplayer_buttons_are_bound() {
     shell.click_named("close button").unwrap();
     shell.click_named("Create Game button").unwrap();
     assert_eq!(shell.base_screen_id(), "multiplayer/mp_create.gib");
+    // It opens on its settings tab (`FUN_0049a000` loads mpc_settings.gib).
+    assert_eq!(
+        shell.content_id().as_deref(),
+        Some("multiplayer/mpc_settings.gib")
+    );
+    assert!(
+        document_has_text(&shell, "Server Name:") || shell.point_for("server name textbox").is_ok()
+    );
     shell.click_named("cancel game button").unwrap();
     assert_eq!(shell.base_screen_id(), "multiplayer/multiplayer.gib");
 }
@@ -671,7 +679,9 @@ fn a_new_workshop_robot_joins_the_roster() {
     for name in ["Team HQ button", "continue button"] {
         shell.click_named(name).unwrap();
     }
-    let roster_before = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap().teams[0]
+    let roster_before = ra2fmt::team::read_table(&game.join("Teams/Teams.txt"))
+        .unwrap()
+        .teams[0]
         .robots
         .clone();
 
@@ -680,7 +690,10 @@ fn a_new_workshop_robot_joins_the_roster() {
     let mut builder = flow::open_workshop(game, None).unwrap();
     assert!(builder.team_target().is_none());
     builder.click_named("back button").unwrap();
-    assert_eq!(flow::close_workshop(&mut builder, &mut shell).unwrap(), None);
+    assert_eq!(
+        flow::close_workshop(&mut builder, &mut shell).unwrap(),
+        None
+    );
     shell.click_named("back button").unwrap();
 
     // A part attached: the robot joins at the first free slot.
@@ -694,9 +707,15 @@ fn a_new_workshop_robot_joins_the_roster() {
         .unwrap()
         .expect("the new robot is saved to the team");
     let free = (0..).find(|n| !roster_before.contains(n)).unwrap();
-    assert!(saved.ends_with(format!("Teams/Team0/Bot{free}.bot")), "{}", saved.display());
+    assert!(
+        saved.ends_with(format!("Teams/Team0/Bot{free}.bot")),
+        "{}",
+        saved.display()
+    );
     assert!(saved.is_file());
-    let roster = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap().teams[0]
+    let roster = ra2fmt::team::read_table(&game.join("Teams/Teams.txt"))
+        .unwrap()
+        .teams[0]
         .robots
         .clone();
     assert_eq!(roster.len(), roster_before.len() + 1);
@@ -722,7 +741,9 @@ fn the_robot_in_an_event_is_not_editable() {
     assert!(!flow::robot_in_event(game, 0));
     let mut shell = window_shell(game);
     shell.click_named("Team HQ button").unwrap();
-    shell.show_message("Robot Arena 2", flow::ROBOT_IN_EVENT).unwrap();
+    shell
+        .show_message("Robot Arena 2", flow::ROBOT_IN_EVENT)
+        .unwrap();
     assert_eq!(shell.window_depth(), 1);
     shell.click_named("ok button").unwrap();
     assert_eq!(shell.window_depth(), 0);
