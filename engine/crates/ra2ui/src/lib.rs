@@ -1068,9 +1068,17 @@ fn place_core<'a>(
             // bare `Widget` the size of the button, and its `Text` is authored
             // at the pen's x and the baseline's y inside it (`Options` at
             // `14 0 13 0` in a 17-pixel button; measured against the original).
+            // An `OptionGroup`'s labels are too: `video_options.gib` puts its
+            // radios at y 6 and their `Low`/`Medium`/`High` labels at y 18 in
+            // a 28-pixel clipped group, which only reads with 18 as the
+            // baseline (and `multiplayer.gib`'s `Local Network`/`Internet`
+            // beside radios at 0 and 24 with labels at 12 and 36).
             let baseline_text = matches!(
                 widget.kind,
-                WidgetKind::TextBox | WidgetKind::Group | WidgetKind::Widget
+                WidgetKind::TextBox
+                    | WidgetKind::Group
+                    | WidgetKind::Widget
+                    | WidgetKind::OptionGroup
             );
             let mut placed: Vec<Placement> = widget
                 .children
@@ -1791,6 +1799,34 @@ mod tests {
 
     fn format_frame(f: &Frame) -> String {
         format!("{:.0},{:.0} {:.0}x{:.0}", f.x, f.y, f.w, f.h)
+    }
+
+    /// An option group's labels are placed by their baseline, like a group's:
+    /// `video_options.gib`'s `Low` sits beside its radio, inside the 28-pixel
+    /// clipped group, instead of below it where the clip hid it.
+    #[test]
+    fn option_group_labels_sit_on_their_baseline() {
+        let Some(game) = game_dir() else { return };
+        let fonts = Fonts::load(&game.join("RA2.cfz")).expect("the shipped faces");
+        let text = std::fs::read_to_string(game.join("UI/common/video_options.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+        let placed = resolve_with(&gib, DESIGN_SCREEN, Some(&fonts));
+        let find = |name: &str| {
+            placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == name)
+                .map(|p| p.frame)
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let group = find("detail optiongrp");
+        let radio = find("detail low checkbox");
+        let label = find("low txt");
+        // The frame is lifted by the face's ascent so that the text's
+        // baseline lands on the authored y 18: the label's box ends inside the
+        // group and level with the radio, not 12 pixels under the clip.
+        assert!(label.bottom() <= group.bottom(), "{label:?} in {group:?}");
+        assert!(label.bottom() > radio.y && label.y < radio.bottom(), "{label:?} beside {radio:?}");
     }
 
     /// The measured path: with the screen's faces, a label the editor left at
