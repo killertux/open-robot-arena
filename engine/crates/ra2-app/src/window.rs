@@ -5,8 +5,8 @@
 //! asks for a redraw; input is handled where it arrives. What the milestone
 //! needs from this module is the shape: one `FrameRenderer`, a surface that is
 //! reconfigured on resize, a click mapped through the scene's rectangle, and a
-//! clean exit (Escape, the close button) rather than a panic when there is no
-//! display.
+//! clean exit (the main menu's `Quit`, the close button) rather than a panic
+//! when there is no display.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -343,6 +343,7 @@ impl App {
         if let Some(hook) = crate::hq_mode::shell_enter_hook(game) {
             shell.set_enter_hook(hook);
         }
+        shell.set_team_hook(crate::hq_mode::shell_team_hook(game));
         shell.set_animate(true);
         let frames = FrameRenderer::open(game)?;
         let cfg = crate::options::read_cfg(game);
@@ -440,6 +441,101 @@ impl App {
         }
     }
 
+    /// The pause dialog's `options button` (`FUN_00476700`): the dialog
+    /// closes and `options win` (`common/options.gib`) is shown modally over
+    /// the paused match. The window lives on the shell's window stack, laid
+    /// out natively on the window, and edits the same staged `ra2.cfg` as the
+    /// main menu's.
+    fn open_match_options(&mut self) -> Result<(), String> {
+        if let Some(window) = &self.window {
+            let [w, h] = window_size(window);
+            self.shell.set_size([w as f32, h as f32]);
+        }
+        self.shell.open_modal(crate::options::SCREEN)?;
+        if let Err(error) = self.options.reload() {
+            eprintln!("options: {error}; keeping the staged values");
+        }
+        if let Some(document) = self.shell.document_mut() {
+            self.options.sync(document);
+        }
+        if let Some(session) = self.live_match_mut() {
+            session.open_options();
+        }
+        Ok(())
+    }
+
+    /// A click while the options window is over the match: the options
+    /// controls, then the shell's own window handling (tabs, OK, Cancel).
+    /// When the window closes the match resumes.
+    fn match_options_click(&mut self, position: PhysicalPosition<f64>) -> Result<(), String> {
+        let Some(window) = &self.window else {
+            return Ok(());
+        };
+        let Some(point) = crate::viewport::to_shell(
+            window_size(window),
+            self.shell.size(),
+            [position.x as f32, position.y as f32],
+        ) else {
+            return Ok(());
+        };
+        self.options_hit(point)?;
+        match self.shell.click(point[0], point[1]) {
+            Ok(step) => {
+                println!("{}", crate::describe(&step));
+                self.audio.shell_step(&step);
+                self.apply_options_step(&step)?;
+            }
+            Err(error) => eprintln!("click {:.0},{:.0}: {error}", point[0], point[1]),
+        }
+        if Options::is_screen(&self.shell.screen_id()) {
+            if let Some(document) = self.shell.document_mut() {
+                self.options.sync(document);
+            }
+        } else if let Some(session) = self.live_match_mut() {
+            session.close_options();
+        }
+        Ok(())
+    }
+
+    /// The options window's own controls (radios, sliders, checkboxes) under
+    /// a click, applied to the staged `ra2.cfg`.
+    fn options_hit(&mut self, point: [f32; 2]) -> Result<(), String> {
+        if !Options::is_screen(&self.shell.screen_id()) {
+            return Ok(());
+        }
+        if let Some(hit) = crate::options::hit(&self.shell, point) {
+            if let Some(change) = self.options.click(&hit) {
+                println!("options: {change}");
+                self.options.save()?;
+                self.audio.apply_cfg(self.options.cfg());
+            }
+        }
+        Ok(())
+    }
+
+    /// The options window applies on OK and restores on Cancel.
+    fn apply_options_step(&mut self, step: &ra2_shell::Step) -> Result<(), String> {
+        match step.note.as_deref() {
+            Some(crate::options::OPEN_NOTE) => {
+                // Re-read the file each time the window opens; another
+                // program may have edited it.
+                if let Err(error) = self.options.reload() {
+                    eprintln!("options: {error}; keeping the staged values");
+                }
+            }
+            Some(crate::options::OK_NOTE) => {
+                self.options.save()?;
+                self.audio.apply_cfg(self.options.cfg());
+            }
+            Some(crate::options::CANCEL_NOTE) => {
+                self.options.cancel()?;
+                self.audio.apply_cfg(self.options.cfg());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn set_hover(&mut self, point: Option<[f32; 2]>) {
         self.hover = point;
     }
@@ -510,6 +606,22 @@ impl App {
                     event_loop.exit();
                     return;
                 }
+                if hq.match_session().is_some_and(|m| m.options_open()) {
+                    let windows = self.frames.windows_scene(&self.shell);
+                    if let Err(error) = gpu.ui.render_over_to(
+                        &gpu.device,
+                        &gpu.queue,
+                        &windows,
+                        &view,
+                        format,
+                        size[0],
+                        size[1],
+                    ) {
+                        self.error = Some(format!("could not draw the options window: {error}"));
+                        event_loop.exit();
+                        return;
+                    }
+                }
             } else if let Err(error) = gpu.ui.render_to(
                 &gpu.device,
                 &gpu.queue,
@@ -556,6 +668,22 @@ impl App {
                 self.error = Some(format!("could not draw the HUD: {error}"));
                 event_loop.exit();
                 return;
+            }
+            if session.options_open() {
+                let windows = self.frames.windows_scene(&self.shell);
+                if let Err(error) = gpu.ui.render_over_to(
+                    &gpu.device,
+                    &gpu.queue,
+                    &windows,
+                    &view,
+                    format,
+                    size[0],
+                    size[1],
+                ) {
+                    self.error = Some(format!("could not draw the options window: {error}"));
+                    event_loop.exit();
+                    return;
+                }
             }
         } else if let Some(builder) = &mut self.builder {
             self.audio.on_screen("botlab/botlabwin.gib");
@@ -664,10 +792,12 @@ impl ApplicationHandler for App {
             // decides what each does. The match still steps at its own fixed
             // cadence; this only changes the value sampled at the next tick.
             WindowEvent::KeyboardInput { event, .. }
-                if self
-                    .live_match()
-                    .is_some_and(|session| session.player_controlled && !session.chat_open())
-                    && is_drive_key(&event.physical_key) =>
+                if self.live_match().is_some_and(|session| {
+                    session.player_controlled
+                        && !session.chat_open()
+                        && (event.state == ElementState::Released
+                            || !(session.reminder_open() || session.options_open()))
+                }) && is_drive_key(&event.physical_key) =>
             {
                 let pressed = event.state == ElementState::Pressed;
                 if let Some(session) = self.live_match_mut() {
@@ -684,7 +814,9 @@ impl ApplicationHandler for App {
                     let ctrl = self.modifiers.control_key();
                     let mut action: Option<Result<(), String>> = None;
                     match event.physical_key {
-                        PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
+                        // The lab is a shell window: Esc does nothing there
+                        // (see the shell's Esc below).
+                        PhysicalKey::Code(KeyCode::Escape) => {}
                         PhysicalKey::Code(KeyCode::Backspace) => {
                             if let Some(builder) = &mut self.builder {
                                 builder.backspace();
@@ -785,10 +917,30 @@ impl ApplicationHandler for App {
                             // `0x475ee0`: Esc skips the intro, opens/closes the
                             // pause popup, and is ignored once the match is over.
                             session.escape();
-                        } else {
+                        } else if crate::flow::shell_escape(&mut self.shell) {
                             event_loop.exit();
                         }
+                        // On the shell's screens and windows Esc does
+                        // nothing, as in the original: the base window's key
+                        // handler (`0x5ee6b0`) only forwards a key to the
+                        // focused control, and the only handlers that test
+                        // for Esc (`0x1b`) are the match window's
+                        // (`0x475ee0`), the in-game popup's (`0x476a1b`) and
+                        // the controls reminder's (`0x482a10`). The game is
+                        // left through `Quit` or the window's close button.
                         self.request_redraw();
+                    }
+                    PhysicalKey::Code(KeyCode::F1) if in_match => {
+                        if let Some(session) = self.live_match_mut() {
+                            session.controls_key();
+                        }
+                        self.request_redraw();
+                    }
+                    _ if self
+                        .live_match()
+                        .is_some_and(|m| m.reminder_open() || m.options_open()) =>
+                    {
+                        // A modal window over the match owns the keys.
                     }
                     PhysicalKey::Code(code @ (KeyCode::F2 | KeyCode::F3 | KeyCode::F4))
                         if in_match =>
@@ -881,6 +1033,14 @@ impl ApplicationHandler for App {
                 let Some(cursor) = self.cursor else {
                     return;
                 };
+                if self.live_match().is_some_and(|m| m.options_open()) {
+                    if let Err(error) = self.match_options_click(cursor) {
+                        self.fail(event_loop, error);
+                        return;
+                    }
+                    self.request_redraw();
+                    return;
+                }
                 let Some(point) = self.map_cursor(cursor) else {
                     // A click in a bar is no click at all.
                     return;
@@ -889,6 +1049,7 @@ impl ApplicationHandler for App {
                     // The event match's own HUD and pause dialog come first; the
                     // results' Continue is the event flow's.
                     let mut abandon = false;
+                    let mut open_options = false;
                     if let Some(session) = hq.match_session_mut() {
                         if session.matched.state() != MatchState::Results {
                             if session.skip_button_at(point) {
@@ -901,8 +1062,16 @@ impl ApplicationHandler for App {
                                         return;
                                     }
                                     Some("end match button") => abandon = true,
+                                    Some("options button") => open_options = true,
                                     _ => {}
                                 }
+                            }
+                            if open_options {
+                                if let Err(error) = self.open_match_options() {
+                                    eprintln!("options: {error}");
+                                }
+                                self.request_redraw();
+                                return;
                             }
                             if !abandon {
                                 self.request_redraw();
@@ -934,6 +1103,7 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let mut quit = false;
+                let mut open_options = false;
                 if let Some(session) = &mut self.session {
                     if session.skip_button_at(point) {
                         session.skip_intro();
@@ -953,9 +1123,17 @@ impl ApplicationHandler for App {
                             }
                             // result 4: back to the screen the match came from.
                             Some("end match button") => quit = true,
+                            Some("options button") => open_options = true,
                             _ => {}
                         }
                     }
+                }
+                if open_options {
+                    if let Err(error) = self.open_match_options() {
+                        eprintln!("options: {error}");
+                    }
+                    self.request_redraw();
+                    return;
                 }
                 if quit {
                     ra2script::set_paused(false);
@@ -1042,21 +1220,9 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                let options_open = Options::is_screen(&self.shell.screen_id());
-                let hit = if options_open {
-                    crate::options::hit(&self.shell, point)
-                } else {
-                    None
-                };
-                if let Some(hit) = &hit {
-                    if let Some(change) = self.options.click(hit) {
-                        println!("options: {change}");
-                        if let Err(error) = self.options.save() {
-                            self.fail(event_loop, error);
-                            return;
-                        }
-                        self.audio.apply_cfg(self.options.cfg());
-                    }
+                if let Err(error) = self.options_hit(point) {
+                    self.fail(event_loop, error);
+                    return;
                 }
                 if let Some(index) = crate::flow::inventory_cell_at(&self.shell, point) {
                     self.inventory_pick = Some(index);
@@ -1079,7 +1245,7 @@ impl ApplicationHandler for App {
                             match crate::flow::start_event_match(
                                 self.shell.game(),
                                 self.shell.entered_event(),
-                                crate::flow::EVENT_MATCH_SECONDS,
+                                crate::flow::event_match_seconds(&self.shell),
                             ) {
                                 Ok(hq) => {
                                     self.hq = Some(hq);
@@ -1127,30 +1293,9 @@ impl ApplicationHandler for App {
                             }
                         }
                         self.audio.shell_step(&step);
-                        // The options window applies on OK, restores on Cancel.
-                        match step.note.as_deref() {
-                            Some(crate::options::OPEN_NOTE) => {
-                                // Re-read the file each time the window opens;
-                                // another program may have edited it.
-                                if let Err(error) = self.options.reload() {
-                                    eprintln!("options: {error}; keeping the staged values");
-                                }
-                            }
-                            Some(crate::options::OK_NOTE) => {
-                                if let Err(error) = self.options.save() {
-                                    self.fail(event_loop, error);
-                                    return;
-                                }
-                                self.audio.apply_cfg(self.options.cfg());
-                            }
-                            Some(crate::options::CANCEL_NOTE) => {
-                                if let Err(error) = self.options.cancel() {
-                                    self.fail(event_loop, error);
-                                    return;
-                                }
-                                self.audio.apply_cfg(self.options.cfg());
-                            }
-                            _ => {}
+                        if let Err(error) = self.apply_options_step(&step) {
+                            self.fail(event_loop, error);
+                            return;
                         }
                         // The exhibition screen's own `start game button` note
                         // says "start the game"; it is not a shell link. Build

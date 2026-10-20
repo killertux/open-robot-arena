@@ -59,13 +59,57 @@ pub const SEED: u64 = 7;
 /// oracle capture showed (the original draws it at random; see
 /// [`ra2sim::career::ORACLE_SCHEDULE_STATE`]). A saved schedule wins.
 fn fresh_career(game: &Path) -> Result<Career, String> {
-    let mut career = Career::new_with_policy(game, SEED, CareerPolicy::default())?;
+    let mut career = Career::new_team(game, SEED, CareerPolicy::default(), selected_team(game))?;
     if career.history.is_empty() && std::env::var_os("RA2_RANDOM_SCHEDULE").is_none() {
         let n = career.events.len();
         let ids = ra2sim::career::draw_schedule(n, 9, ra2sim::career::ORACLE_SCHEDULE_STATE);
         let _ = career.set_schedule(&ids);
     }
     Ok(career)
+}
+
+/// The team record the player continued to from the select-team screen,
+/// per install (`FUN_004eba60` hands the grid's team to the `team hq win`;
+/// the original keeps it in memory for the session, and so does this). The
+/// shell, the event flow and the workshop all open this team's career.
+static SELECTED_TEAM: std::sync::Mutex<std::collections::BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Make `slot` the install's current team.
+pub fn select_team(game: &Path, slot: usize) {
+    if let Ok(mut map) = SELECTED_TEAM.lock() {
+        map.insert(game.to_path_buf(), slot);
+    }
+}
+
+/// The install's current team, when the player chose one this session
+/// (otherwise the first named record).
+pub fn selected_team(game: &Path) -> Option<usize> {
+    SELECTED_TEAM
+        .lock()
+        .ok()
+        .and_then(|map| map.get(game).copied())
+        .filter(|slot| {
+            ra2ui::teams::rosters(game, ra2ui::teams::Side::Player)
+                .ok()
+                .and_then(|rosters| rosters.get(*slot).map(|r| r.named))
+                .unwrap_or(false)
+        })
+}
+
+/// The current team's saved career, as the event flow and the HQ reload it.
+pub fn load_career(game: &Path) -> Result<Career, String> {
+    Career::load_team(game, CareerPolicy::default(), selected_team(game))
+}
+
+/// The shell's team hook: continuing to a team's HQ makes it the current
+/// team and answers with its Team HQ data.
+pub fn shell_team_hook(game: &Path) -> ra2_shell::shell::TeamHook {
+    let game = game.to_path_buf();
+    Box::new(move |slot| {
+        select_team(&game, slot);
+        shell_view(&game)
+    })
 }
 
 /// One click of the repairs screen's clock. The original advances a progress
@@ -888,7 +932,7 @@ impl Session {
     /// is what proves the save: the next frames are drawn from what was read
     /// back, not from the in-memory career.
     pub fn return_to_hq(&mut self) -> Result<(), String> {
-        self.career = Career::load(&self.game)?;
+        self.career = load_career(&self.game)?;
         let view = build_view(&self.career, &self.game)?;
         let hq = ra2ui::hq::Hq::open(&self.game.join("UI"), view)?;
         self.current_event = None;
@@ -1733,8 +1777,15 @@ pub fn bracket_view(career: &Career) -> Option<ra2ui::hq::BracketView> {
     })
 }
 
-/// The event's match: the arena script and game type from the data, the player's
-/// first robot against the first AI team's first robot. One match.
+/// The event's match, as the bracket's `play button` sets it up
+/// (`FUN_0046c720`): the event's arena, its game type code (`Events.txt`
+/// `+0x118`, see [`ra2fmt::event::Event::game_type_name`]) and its robots per
+/// match (`+0x10c`): the player's entered robot against every opponent the
+/// bracket put in the player's match, so a 4-bot event is a 4-robot match.
+/// `seconds` is the match length; the bracket sets none (only the exhibition
+/// time dropdown, `FUN_00474330` -> `FUN_00414230`, writes it on the global
+/// game object), so an event match lasts the constructor's 3 minutes
+/// (`0x41276d`) unless the player changed the exhibition time this session.
 pub fn match_config(
     game: &Path,
     event: &Event,
@@ -1752,7 +1803,10 @@ pub fn match_config(
             )
         })?;
     let script = game.join("Arenas").join(&arena.script);
-    let game_type = arena_game_type(&script)?;
+    let game_type = match event.game_type_name().and_then(GameType::parse) {
+        Some(game_type) => game_type,
+        None => arena_game_type(&script)?,
+    };
     // `Robot In Event`: the robot the join window entered, when it is still on
     // the roster; otherwise the first roster slot.
     let entered = career.player().event_robot;
@@ -1770,23 +1824,34 @@ pub fn match_config(
     if !player.is_file() {
         return Err(format!("{} is not a .bot file", player.display()));
     }
-    let ai_slot = match career.next_opponents().first() {
-        Some(Entrant::Ai(slot)) => *slot,
-        _ => 0,
-    };
-    let opponent = ai_robot_path(game, ai_slot, 0);
-    if !opponent.is_file() {
-        return Err(format!("{} is not a .bot file", opponent.display()));
+    let mut robots = vec![RobotEntry::ai(0, player.to_string_lossy().to_string())];
+    let mut opponents: Vec<usize> = career
+        .next_opponents()
+        .iter()
+        .filter_map(|entrant| match entrant {
+            Entrant::Ai(slot) => Some(*slot),
+            Entrant::Player => None,
+        })
+        .collect();
+    if opponents.is_empty() {
+        opponents.push(0);
     }
-    Ok(MatchConfig::new(
-        script.to_string_lossy().to_string(),
-        game_type,
-        vec![
-            RobotEntry::ai(0, player.to_string_lossy().to_string()),
-            RobotEntry::ai(1, opponent.to_string_lossy().to_string()),
-        ],
+    let wanted = event
+        .bots_per_match()
+        .map(|bots| bots.max(2) as usize)
+        .unwrap_or(2);
+    for slot in opponents.into_iter().take(wanted - 1) {
+        let opponent = ai_robot_path(game, slot, 0);
+        if !opponent.is_file() {
+            return Err(format!("{} is not a .bot file", opponent.display()));
+        }
+        let team = robots.len();
+        robots.push(RobotEntry::ai(team, opponent.to_string_lossy().to_string()));
+    }
+    Ok(
+        MatchConfig::new(script.to_string_lossy().to_string(), game_type, robots)
+            .with_duration(Some(seconds)),
     )
-    .with_duration(Some(seconds)))
 }
 
 /// The game type an arena declares in its own `game_types` list. The list is the
@@ -2417,25 +2482,53 @@ mod tests {
         assert_eq!(view.stats.current_rank, career.rank());
     }
 
-    /// The event's arena and game type are the data's: `Events.txt` names the
-    /// arena, and the arena script declares its own `game_types`.
+    /// The event's match is the data's: `Events.txt` names the arena, its
+    /// game type code (`+0x118`: 0 battle royal, 1 deathmatch, 2 king of the
+    /// hill, 3 tabletop) and its robots per match (`+0x10c`), and the player
+    /// meets every opponent the bracket put in the match.
     #[test]
-    fn the_event_arena_and_game_type_come_from_the_data() {
+    fn the_event_match_takes_its_game_type_and_field_from_the_data() {
         let Some(game) = game_dir() else { return };
-        let career = Career::new(&game, SEED).unwrap();
         let events = ra2ui::events::all(&game).unwrap();
-        for (index, expected) in [
-            ("F.O.R.C.E. Tournament", GameType::Deathmatch),
-            ("Blade Tournament", GameType::Tabletop),
-            ("Robo-Depot", GameType::KingOfTheHill),
+        for (name, expected, robots) in [
+            ("F.O.R.C.E. Tournament", GameType::Deathmatch, 2),
+            ("Blade Tournament", GameType::Tabletop, 4),
+            ("Robo-Depot", GameType::KingOfTheHill, 4),
         ] {
-            let event = events
+            let id = events
                 .iter()
-                .find(|event| event.name == index)
-                .unwrap_or_else(|| panic!("no event {index:?}"));
-            let config = match_config(&game, event, &career, 1.0).unwrap();
-            assert_eq!(config.game_type, expected, "{index}");
+                .position(|event| event.name == name)
+                .unwrap_or_else(|| panic!("no event {name:?}"));
+            let career = entered(&game, id);
+            let config = match_config(&game, &events[id], &career, 1.0).unwrap();
+            assert_eq!(config.game_type, expected, "{name}");
+            assert_eq!(config.robots.len(), robots, "{name}");
+            let teams: std::collections::BTreeSet<usize> =
+                config.robots.iter().map(|r| r.team).collect();
+            assert_eq!(teams.len(), robots, "{name}: one team per robot");
         }
+        // A battle royal event (The Octagon, code 0).
+        let id = events
+            .iter()
+            .position(|event| event.game_type_code() == Some(0))
+            .expect("a battle royal event");
+        let career = entered(&game, id);
+        let config = match_config(&game, &events[id], &career, 1.0).unwrap();
+        assert_eq!(config.game_type, GameType::BattleRoyal);
+        assert_eq!(
+            config.robots.len(),
+            events[id].bots_per_match().unwrap() as usize
+        );
+    }
+
+    /// A career in event `id` (put on its schedule first).
+    fn entered(game: &Path, id: usize) -> Career {
+        let mut career = Career::new(game, SEED).unwrap();
+        let mut ids: Vec<usize> = vec![id];
+        ids.extend((0..career.events.len()).filter(|e| *e != id).take(8));
+        career.set_schedule(&ids).unwrap();
+        career.enter_event(id).unwrap();
+        career
     }
 
     /// The season's bracket data reaches the UI: the round count is the

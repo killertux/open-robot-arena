@@ -122,6 +122,7 @@ fn window_shell(game: &Path) -> Shell {
     let mut shell = Shell::boot(game, WINDOW).unwrap();
     shell.set_hq_view(hq_mode::shell_view(game).unwrap());
     shell.set_enter_hook(hq_mode::shell_enter_hook(game).unwrap());
+    shell.set_team_hook(hq_mode::shell_team_hook(game));
     shell
 }
 
@@ -382,11 +383,18 @@ fn a_robot_edited_in_the_workshop_is_saved_to_its_slot_and_fights() {
 }
 
 /// New Team: a click focuses the shipped editable name box, typing fills it,
-/// a label text box takes no typing, and OK adds the team to the picker.
+/// a label text box takes no typing, and OK makes the team: the first empty
+/// record of `Teams/Teams.txt` is written at once (`FUN_004ebd40` ->
+/// message 200 -> `FUN_00502720`), with its `Teams/Team<N>/` folder, and the
+/// new row is selected. `continue button` opens *that* team's HQ, a fresh
+/// boot lists it, and Delete Team's Yes clears the record on disk.
 #[test]
-fn a_new_team_is_typed_into_the_edit_team_window() {
-    let Some(game) = game_dir() else { return };
-    let mut shell = Shell::boot(&game, WINDOW).unwrap();
+fn a_new_team_is_typed_saved_selected_and_deleted() {
+    let Some(scratch) = ScratchGame::new("newteam") else {
+        return;
+    };
+    let game = scratch.path();
+    let mut shell = window_shell(game);
     shell.click_named("Team HQ button").unwrap();
     let rows_before = select_rows(&shell);
     shell.click_named("new team button").unwrap();
@@ -404,6 +412,98 @@ fn a_new_team_is_typed_into_the_edit_team_window() {
     shell.click_named("ok button").unwrap();
     assert_eq!(shell.window_depth(), 0);
     assert_eq!(select_rows(&shell), rows_before + 1);
+
+    // On disk at once: the record and its robot folder.
+    let table = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap();
+    let slot = table
+        .teams
+        .iter()
+        .position(|t| t.name == "Robo Rats")
+        .expect("the new team is in Teams/Teams.txt");
+    assert!(game.join(format!("Teams/Team{slot}")).is_dir());
+
+    // The new row is selected, so Continue opens the new team's HQ.
+    shell.click_named("continue button").unwrap();
+    assert_eq!(shell.base_screen_id(), "teamhq/teamhq.gib");
+    assert_eq!(shell.team_slot(), Some(slot));
+    assert_eq!(hq_mode::selected_team(game), Some(slot));
+    assert!(document_has_text(&shell, "Robo Rats"));
+    assert!(!document_has_text(&shell, "The Rookies"));
+
+    // A fresh boot lists it; the first row is still The Rookies' HQ.
+    let mut shell = window_shell(game);
+    shell.click_named("Team HQ button").unwrap();
+    assert_eq!(select_rows(&shell), rows_before + 1);
+    shell.click_named("continue button").unwrap();
+    assert_eq!(shell.team_slot(), Some(0));
+    assert!(document_has_text(&shell, "The Rookies"));
+
+    // Delete Team on the new row: Yes clears the record on disk.
+    shell.click_named("MainMenu button").unwrap();
+    shell.click_named("Team HQ button").unwrap();
+    click_select_row(&mut shell, rows_before);
+    shell.click_named("delete team button").unwrap();
+    assert_eq!(shell.window_depth(), 1);
+    shell.click_named("yes button").unwrap();
+    assert_eq!(shell.window_depth(), 0);
+    assert_eq!(select_rows(&shell), rows_before);
+    let table = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap();
+    assert!(!table.teams.iter().any(|t| t.name == "Robo Rats"));
+    assert!(!table.teams[slot].is_named());
+    assert_eq!(table.teams.len(), 16);
+}
+
+/// Continuing with a team other than the first opens that team's HQ: its
+/// name, its roster, its career (`FUN_004eba60` selects the grid's team).
+#[test]
+fn the_selected_team_is_the_one_the_hq_opens() {
+    let Some(scratch) = ScratchGame::new("selectteam") else {
+        return;
+    };
+    let game = scratch.path();
+    let slot = ra2ui::teams::create_team(game, "Second Team", "Motto", "Teams\\star.bmp")
+        .unwrap()
+        .expect("an empty slot");
+    let mut shell = window_shell(game);
+    shell.click_named("Team HQ button").unwrap();
+    assert_eq!(select_rows(&shell), 2);
+    click_select_row(&mut shell, 1);
+    shell.click_named("continue button").unwrap();
+    assert_eq!(shell.team_slot(), Some(slot));
+    assert!(document_has_text(&shell, "Second Team"));
+    let view = hq_mode::shell_view(game).unwrap();
+    assert_eq!(view.team.name, "Second Team");
+    assert!(view.robots.is_empty(), "a new team has no robots yet");
+    // The career the event flow opens is the same team's.
+    let career = hq_mode::load_career(game).unwrap();
+    assert_eq!(career.player_slot, slot);
+}
+
+/// Click the select-team grid's `row`-th team cell.
+fn click_select_row(shell: &mut Shell, row: usize) {
+    let placed = ra2ui::resolve(shell.document(), shell.size());
+    let cell = placed
+        .iter()
+        .flat_map(|p| p.walk())
+        .filter(|p| p.widget.name() == "team cell")
+        .nth(row)
+        .map(|p| p.frame)
+        .unwrap_or_else(|| panic!("no team cell {row}"));
+    shell
+        .click(cell.x + cell.w / 2.0, cell.y + cell.h / 2.0)
+        .unwrap();
+}
+
+/// Whether any widget of the current page shows `text`.
+fn document_has_text(shell: &Shell, text: &str) -> bool {
+    fn walk(widget: &ra2fmt::gib::Widget, text: &str) -> bool {
+        ra2ui::input::field_of(widget, "_Text").is_some_and(|t| t.trim() == text)
+            || widget.children.iter().any(|c| walk(c, text))
+    }
+    shell.document().blocks.iter().any(|b| match b {
+        Block::Widget(root) => walk(root, text),
+        _ => false,
+    })
 }
 
 fn select_rows(shell: &Shell) -> usize {
@@ -492,4 +592,56 @@ fn the_skip_intro_button_skips_the_arena_intro() {
         Some(value) => std::env::set_var("RA2_ARENA_INTROS", value),
         None => std::env::remove_var("RA2_ARENA_INTROS"),
     }
+}
+
+/// Esc on the shell's screens and windows does nothing (`0x5ee6b0`): it does
+/// not quit, leave the screen or close a window.
+#[test]
+fn escape_on_the_shell_does_nothing() {
+    let Some(game) = game_dir() else { return };
+    let mut shell = Shell::boot(&game, WINDOW).unwrap();
+    for route in [&[][..], &["exhibition button"][..], &["Options button"][..]] {
+        let mut shell_here = Shell::boot(&game, WINDOW).unwrap();
+        for name in route {
+            shell_here.click_named(name).unwrap();
+        }
+        let (screen, depth) = (shell_here.screen_id(), shell_here.window_depth());
+        assert!(!flow::shell_escape(&mut shell_here), "Esc does not quit");
+        assert_eq!(shell_here.screen_id(), screen);
+        assert_eq!(shell_here.window_depth(), depth);
+    }
+    assert!(!flow::shell_escape(&mut shell));
+}
+
+/// An event match is as long as the session's exhibition time: the bracket
+/// never sets one (`FUN_0046c720`), so a fresh session's is the constructor's
+/// 3 minutes.
+#[test]
+fn an_event_match_lasts_the_sessions_match_time() {
+    let Some(game) = game_dir() else { return };
+    let shell = Shell::boot(&game, WINDOW).unwrap();
+    assert_eq!(flow::event_match_seconds(&shell), 180.0);
+}
+
+/// The pause dialog's `options button` opens `options win` over the match:
+/// the shell's window stack holds it (drawn alone over the match frame), and
+/// its OK closes it again.
+#[test]
+fn the_match_options_window_is_a_shell_modal() {
+    let Some(game) = game_dir() else { return };
+    let mut shell = Shell::boot(&game, WINDOW).unwrap();
+    shell.click_named("exhibition button").unwrap();
+    let base = shell.base_screen_id();
+    shell.open_modal("common/options.gib").unwrap();
+    assert_eq!(shell.window_depth(), 1);
+    assert_eq!(shell.screen_id(), "common/options.gib");
+    let windows = shell.window_placements();
+    assert!(!windows.is_empty());
+    assert!(
+        windows.len() < shell.placements().len(),
+        "the screen is not drawn"
+    );
+    shell.click_named("cancel button").unwrap();
+    assert_eq!(shell.window_depth(), 0);
+    assert_eq!(shell.base_screen_id(), base);
 }

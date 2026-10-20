@@ -56,7 +56,7 @@ pub fn inventory_cell_at(shell: &Shell, point: [f32; 2]) -> Option<usize> {
 
 /// The `.bot` of roster entry `index` of the career's team.
 pub fn inventory_robot_path(game: &Path, index: usize) -> Option<PathBuf> {
-    let career = ra2sim::career::Career::load(game).ok()?;
+    let career = hq_mode::load_career(game).ok()?;
     let slot = *career.player().robots.get(index)?;
     let path = hq_mode::player_robot_path(game, career.player_slot, slot);
     path.is_file().then_some(path)
@@ -109,11 +109,25 @@ pub fn quits(screen: &str, step: &ra2_shell::Step) -> bool {
         .is_some_and(|binding| binding.action == ra2_shell::bindings::Action::Quit)
 }
 
-/// The event match's length in the windowed client. `Events.txt` carries no
-/// match time and the event setup window's field was not recovered; this is
-/// the exhibition setup's own default (`3` minutes), stated here rather than
-/// the 30 s evidence length the headless runs use.
-pub const EVENT_MATCH_SECONDS: f32 = 180.0;
+/// The event match's length when the session never touched the exhibition
+/// time: the match settings constructor's 3 minutes (`0x41276d`,
+/// [`ra2sim::r#match::DEFAULT_MATCH_SECONDS`]).
+pub const EVENT_MATCH_SECONDS: f32 = ra2sim::r#match::DEFAULT_MATCH_SECONDS;
+
+/// The event match's length. The bracket's match setup (`FUN_0046c720`)
+/// writes the arena, game type, robots per match and advancing robots into
+/// the global match settings but never the time; the only writer of the
+/// time is the exhibition setup's dropdown (`FUN_00474330` ->
+/// `FUN_00414230`). So an event match is as long as the last exhibition
+/// time the player chose this session, and 3 minutes when they chose none.
+/// "No limit" there is no limit here either.
+pub fn event_match_seconds(shell: &Shell) -> f32 {
+    match shell.time_choice() {
+        Some(Some(seconds)) => seconds,
+        Some(None) => f32::INFINITY,
+        None => EVENT_MATCH_SECONDS,
+    }
+}
 
 /// The bracket's `play button`: the event the shell entered (`Events.txt` id
 /// and the join window's robot column), its next round's match, with the
@@ -157,4 +171,14 @@ pub fn return_to_shell_hq(shell: &mut Shell) -> Result<(), String> {
         shell.click_named("later button")?;
     }
     Ok(())
+}
+
+/// Esc on a shell screen or window. The original's menus ignore it: the base
+/// window's key handler (`0x5ee6b0`) only forwards a key to the focused
+/// control, and the only key handlers that test for Esc (`0x1b`) are the
+/// match window's (`0x475ee0`), the in-game popup's (`0x476a1b`) and the
+/// controls reminder's (`0x482a10`). Nothing changes and the client keeps
+/// running; the answer is whether the application should exit (never).
+pub fn shell_escape(_shell: &mut Shell) -> bool {
+    false
 }
