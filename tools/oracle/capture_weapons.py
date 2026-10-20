@@ -21,7 +21,7 @@ import frida
 
 import capture_drive as cd
 
-AGENT = os.path.join(cd.HERE, "frida", "ra2_weapons.js")
+AGENT = os.environ.get("AGENT", os.path.join(cd.HERE, "frida", "ra2_weapons.js"))
 HOST = os.environ.get("RA2_FRIDA_HOST", "127.0.0.1:27142")
 
 

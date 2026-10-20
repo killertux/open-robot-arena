@@ -545,8 +545,12 @@ impl Robot {
             self.hinge[p].load_cap(mass, d);
             if std::env::var_os("RA2_MOTOR_DEBUG").is_some() {
                 eprintln!(
-                    "load cap: part {p} ({}) m {mass:.2} d {d:.3}: {:?}",
-                    self.rig.components[self.rig.parts[p].root].name, self.hinge[p]
+                    "load cap: part {p} ({}) m {mass:.2} d {d:.3} com {com:?} inertia {:?}: {:?}",
+                    self.rig.components[self.rig.parts[p].root].name,
+                    physics
+                        .mass_properties(body)
+                        .map(|(_, _, inv)| inv.inverse()),
+                    self.hinge[p]
                 );
             }
             if let Some(joint) = self.parts[p].joint {
