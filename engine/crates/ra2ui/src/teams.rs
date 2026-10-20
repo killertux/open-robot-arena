@@ -155,6 +155,32 @@ pub fn create_team(
     Ok(Some(slot))
 }
 
+/// A robot built in the workshop from an empty inventory selection joins
+/// the team: the record's `Robots:` line gains the first free slot number and
+/// the robot is `Teams/Team<team>/Bot<n>.bot`. The table is written at once.
+/// Returns the new robot's path.
+pub fn add_robot(game: &Path, team: usize) -> Result<PathBuf, String> {
+    let path = game.join(Side::Player.table());
+    let mut table = team::read_table(&path)?;
+    let record = table
+        .teams
+        .get_mut(team)
+        .filter(|t| t.is_named())
+        .ok_or_else(|| format!("{}: team slot {team} is empty", path.display()))?;
+    let folder = game.join(Side::Player.root()).join(format!("Team{team}"));
+    let slot = (0..)
+        .find(|n: &i32| {
+            !record.robots.contains(n) && !folder.join(format!("Bot{n}.bot")).exists()
+        })
+        .expect("a free robot slot");
+    record.robots.push(slot);
+    table
+        .write_to(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    Ok(folder.join(format!("Bot{slot}.bot")))
+}
+
 /// `Delete Team`'s Yes (`FUN_004ec110`, result 4): the record is cleared
 /// (`FUN_00502680(slot, 0)`, `FUN_004fa230`) and the table written through the
 /// same message-200 listener. The robots' files are left where they are; the

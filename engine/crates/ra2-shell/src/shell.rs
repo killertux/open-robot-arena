@@ -191,6 +191,9 @@ pub struct Shell {
     fade: Option<Fade>,
     /// The screens whose first visit showed the "Loading..." splash.
     visited: std::collections::BTreeSet<String>,
+    /// The logo files the edit-team window's `logo listbox` lists
+    /// (`FUN_00468760`: `Teams\*.bmp`), in row order.
+    edit_logos: Vec<String>,
     /// The team the open delete box is about.
     pending_delete: Option<usize>,
     /// The schedule row the open join-event window is about (`FUN_00500c40`).
@@ -290,6 +293,7 @@ impl Shell {
             fade: None,
             visited: Default::default(),
             pending_delete: None,
+            edit_logos: Vec::new(),
             team_hook: None,
             team_slot: None,
             join_event: None,
@@ -1144,6 +1148,7 @@ impl Shell {
                 None => {}
             }
             self.refresh_join_window();
+            self.refresh_edit_team_logo();
             return Ok(self.finish(step));
         }
         let transition = match &mut self.screen {
@@ -1244,11 +1249,13 @@ impl Shell {
             };
             let name = read("name input textbox");
             if !name.trim().is_empty() {
+                let logo = selected_logo(&window.gib, &self.edit_logos)
+                    .unwrap_or_else(|| "Teams\\orange_skull.bmp".to_string());
                 let created = teams::create_team(
                     &self.game,
                     name.trim(),
                     &read("team motto input textbox"),
-                    "Teams\\orange_skull.bmp",
+                    &logo,
                 )?;
                 if let Some(slot) = created {
                     self.select_team_row(slot);
@@ -1265,6 +1272,13 @@ impl Shell {
             }
         }
         Ok(())
+    }
+
+    /// An OK-only message box over the screen (`FUN_005e5e40(caption, text,
+    /// 1)`, `common/messagebox.gib`).
+    pub fn show_message(&mut self, caption: &str, body: &str) -> Result<(), String> {
+        self.pending_message = Some((caption.to_string(), body.to_string()));
+        self.open_window("common/messagebox.gib")
     }
 
     /// Open a modal window over whatever the application shows (the pause
@@ -1341,6 +1355,10 @@ impl Shell {
             if target.eq_ignore_ascii_case("teamhq/editteam.gib") {
                 // The constructor sets the caption for a new team and starts the
                 // fields empty (FUN_004ebd40: `New Robotics Team`).
+                // `FUN_00468760` lists every `Teams\*.bmp` in `logo listbox`;
+                // `FUN_00468a90` shows `Teams\` + the selected row in `logo
+                // image preview`.
+                self.edit_logos = team_logos(&self.game);
                 for block in page.gib.blocks.iter_mut() {
                     let Block::Widget(root) = block else { continue };
                     for (name, text) in [
@@ -1351,6 +1369,16 @@ impl Shell {
                         if let Some(w) = workshop::find_mut(root, name) {
                             set_text(w, text);
                         }
+                    }
+                    if let Some(list) = workshop::find_mut(root, "logo listbox") {
+                        ra2ui::input::text_rows(list, &self.edit_logos);
+                        ra2ui::input::select_row(list, 0);
+                    }
+                    if let (Some(first), Some(preview)) = (
+                        self.edit_logos.first(),
+                        workshop::find_mut(root, "logo image preview"),
+                    ) {
+                        ra2ui::input::set_field(preview, "_Filename", &format!("Teams\\{first}"));
                     }
                 }
             }
@@ -1514,6 +1542,26 @@ impl Shell {
     }
 
     /// `FUN_00482590` after a click in the join window: the chosen robot's name.
+    /// The edit-team window's preview follows the logo list's selection
+    /// (`FUN_00468a90`).
+    fn refresh_edit_team_logo(&mut self) {
+        let Some(window) = self.windows.last_mut() else {
+            return;
+        };
+        if !window.key.eq_ignore_ascii_case("teamhq/editteam.gib") {
+            return;
+        }
+        let logo = selected_logo(&window.gib, &self.edit_logos);
+        for block in window.gib.blocks.iter_mut() {
+            let Block::Widget(root) = block else { continue };
+            if let (Some(logo), Some(preview)) =
+                (&logo, workshop::find_mut(root, "logo image preview"))
+            {
+                ra2ui::input::set_field(preview, "_Filename", logo);
+            }
+        }
+    }
+
     fn refresh_join_window(&mut self) {
         let Some(window) = self.windows.last_mut() else {
             return;
@@ -2326,6 +2374,33 @@ impl Shell {
             missing: scene.missing.len(),
         })
     }
+}
+
+/// The logos the edit-team window offers: every `Teams/*.bmp`, in the
+/// case-insensitive name order a Windows directory listing gives.
+fn team_logos(game: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(game.join("Teams"))
+        .map(|dir| {
+            dir.filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_file())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|name| name.to_ascii_lowercase().ends_with(".bmp"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort_by_key(|name| name.to_ascii_lowercase());
+    names
+}
+
+/// `Teams\<row>` for the edit-team window's selected logo row.
+fn selected_logo(gib: &Gib, logos: &[String]) -> Option<String> {
+    let row = gib.blocks.iter().find_map(|b| match b {
+        Block::Widget(root) => {
+            workshop::find(root, "logo listbox").and_then(ra2ui::input::selected_row)
+        }
+        _ => None,
+    })?;
+    logos.get(row).map(|name| format!("Teams\\{name}"))
 }
 
 /// The named player teams the select screen lists: the records of the

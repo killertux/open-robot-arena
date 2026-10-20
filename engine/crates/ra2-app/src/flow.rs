@@ -68,10 +68,34 @@ pub fn inventory_robot_path(game: &Path, index: usize) -> Option<PathBuf> {
 pub fn open_workshop(game: &Path, robot: Option<usize>) -> Result<Builder, String> {
     let path = robot.and_then(|index| inventory_robot_path(game, index));
     let mut builder = Builder::open(game, path.as_deref())?;
-    if let Some(path) = path {
-        builder.set_team_target(path);
+    match path {
+        Some(path) => builder.set_team_target(path),
+        None => {
+            if let Ok(career) = hq_mode::load_career(game) {
+                builder.set_team_new(career.player_slot);
+            }
+        }
     }
     Ok(builder)
+}
+
+/// The workshop button's guard (`FUN_004fee90`): the robot entered in the
+/// team's current event (`Robot In Event`) cannot be edited; the HQ shows
+/// `Robot Arena 2` / this message instead of the lab.
+pub const ROBOT_IN_EVENT: &str = "This robot is currently entered in an event and is not editable.";
+
+/// Whether inventory robot `index` is the one entered in the career's
+/// current event.
+pub fn robot_in_event(game: &Path, index: usize) -> bool {
+    let Ok(career) = hq_mode::load_career(game) else {
+        return false;
+    };
+    career.entered_event().is_some()
+        && career
+            .player()
+            .robots
+            .get(index)
+            .is_some_and(|slot| *slot == career.player().event_robot)
 }
 
 /// The workshop is being left (`Back to HQ`, `Main Menu`): write a team robot

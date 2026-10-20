@@ -1278,6 +1278,24 @@ impl ApplicationHandler for App {
                                 self.shell.set_hq_view(view);
                             }
                         }
+                        let locked = self.shell.lab().is_some()
+                            && self.builder.is_none()
+                            && self.inventory_pick.is_some_and(|index| {
+                                crate::flow::robot_in_event(self.shell.game(), index)
+                                    || self.shell.entered_event().map(|(_, robot)| robot)
+                                        == Some(index)
+                            });
+                        if locked {
+                            // `FUN_004fee90`: the entered robot is not editable;
+                            // the HQ stays, with the exe's message.
+                            let _ = self.shell.click_named("back button");
+                            if let Err(error) = self
+                                .shell
+                                .show_message("Robot Arena 2", crate::flow::ROBOT_IN_EVENT)
+                            {
+                                eprintln!("workshop: {error}");
+                            }
+                        }
                         if self.shell.lab().is_some() && self.builder.is_none() {
                             // The HQ's `workshop button`: the editable workshop on
                             // the robot the player selected.

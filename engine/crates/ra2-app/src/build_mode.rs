@@ -230,6 +230,9 @@ pub struct Builder {
     /// the design back there, so the HQ, the event join window and the
     /// exhibition pickers all see the edited robot.
     team_target: Option<PathBuf>,
+    /// The team a robot built from an empty inventory selection joins when
+    /// the lab is left (`FUN_004fee90` opens the lab for the HQ's team).
+    team_new: Option<usize>,
 }
 
 /// The synthetic panel in the 3D placeholder.
@@ -381,6 +384,7 @@ impl Builder {
             test_seconds: 4.0,
             last_report: None,
             team_target: None,
+            team_new: None,
         };
         builder.refresh()?;
         Ok(builder)
@@ -936,7 +940,21 @@ impl Builder {
 
     /// Write the design back to its team slot (`Back to HQ` from a robot the
     /// inventory opened). `None` when the session edits no team robot.
+    /// A new robot (no inventory robot was selected) joins team `team`'s
+    /// roster when the lab is left, if anything was built or named.
+    pub fn set_team_new(&mut self, team: usize) {
+        self.team_new = Some(team);
+    }
+
     pub fn save_to_team(&mut self) -> Result<Option<PathBuf>, String> {
+        if self.team_target.is_none() {
+            if let Some(team) = self.team_new {
+                if self.build.can_undo() || self.name_edited {
+                    let path = ra2ui::teams::add_robot(&self.game, team)?;
+                    self.team_target = Some(path);
+                }
+            }
+        }
         let Some(path) = self.team_target.clone() else {
             return Ok(None);
         };

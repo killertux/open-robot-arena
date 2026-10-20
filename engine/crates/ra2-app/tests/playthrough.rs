@@ -409,6 +409,16 @@ fn a_new_team_is_typed_saved_selected_and_deleted() {
     assert_eq!(shell.focused_text().as_deref(), Some("Robo Rats"));
     shell.click_named("window caption").unwrap();
     assert_eq!(shell.text_focus(), None, "a caption is not editable");
+    // The logo list is `Teams\*.bmp` (`FUN_00468760`); the third row is the
+    // team's logo.
+    let mut logos: Vec<String> = std::fs::read_dir(game.join("Teams"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.to_ascii_lowercase().ends_with(".bmp"))
+        .collect();
+    logos.sort_by_key(|n| n.to_ascii_lowercase());
+    shell.click_list_row("logo listbox", 2).unwrap();
     shell.click_named("ok button").unwrap();
     assert_eq!(shell.window_depth(), 0);
     assert_eq!(select_rows(&shell), rows_before + 1);
@@ -421,6 +431,7 @@ fn a_new_team_is_typed_saved_selected_and_deleted() {
         .position(|t| t.name == "Robo Rats")
         .expect("the new team is in Teams/Teams.txt");
     assert!(game.join(format!("Teams/Team{slot}")).is_dir());
+    assert_eq!(table.teams[slot].logo, format!("Teams\\{}", logos[2]));
 
     // The new row is selected, so Continue opens the new team's HQ.
     shell.click_named("continue button").unwrap();
@@ -644,4 +655,75 @@ fn the_match_options_window_is_a_shell_modal() {
     shell.click_named("cancel button").unwrap();
     assert_eq!(shell.window_depth(), 0);
     assert_eq!(shell.base_screen_id(), base);
+}
+
+/// A robot built from an empty inventory selection joins the team when the
+/// lab is left: a free `Bot<n>.bot` slot is written and the record's
+/// `Robots:` line lists it. Leaving without building adds nothing.
+#[test]
+fn a_new_workshop_robot_joins_the_roster() {
+    let Some(scratch) = ScratchGame::new("newbot") else {
+        return;
+    };
+    let game = scratch.path();
+    let _guard = ra2script::lock();
+    let mut shell = window_shell(game);
+    for name in ["Team HQ button", "continue button"] {
+        shell.click_named(name).unwrap();
+    }
+    let roster_before = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap().teams[0]
+        .robots
+        .clone();
+
+    // Nothing built: nothing added.
+    shell.click_named("workshop button").unwrap();
+    let mut builder = flow::open_workshop(game, None).unwrap();
+    assert!(builder.team_target().is_none());
+    builder.click_named("back button").unwrap();
+    assert_eq!(flow::close_workshop(&mut builder, &mut shell).unwrap(), None);
+    shell.click_named("back button").unwrap();
+
+    // A part attached: the robot joins at the first free slot.
+    shell.click_named("workshop button").unwrap();
+    let mut builder = flow::open_workshop(game, None).unwrap();
+    builder.click_named("components button").unwrap();
+    builder.click_named("mechanics button").unwrap();
+    builder.click_palette_file("Components\\ztek1.txt").unwrap();
+    builder.click_named("back button").unwrap();
+    let saved = flow::close_workshop(&mut builder, &mut shell)
+        .unwrap()
+        .expect("the new robot is saved to the team");
+    let free = (0..).find(|n| !roster_before.contains(n)).unwrap();
+    assert!(saved.ends_with(format!("Teams/Team0/Bot{free}.bot")), "{}", saved.display());
+    assert!(saved.is_file());
+    let roster = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap().teams[0]
+        .robots
+        .clone();
+    assert_eq!(roster.len(), roster_before.len() + 1);
+    assert!(roster.contains(&free));
+    let view = hq_mode::shell_view(game).unwrap();
+    assert_eq!(view.robots.len(), roster.len());
+}
+
+/// The robot entered in the team's current event is not editable
+/// (`FUN_004fee90`'s guard and message).
+#[test]
+fn the_robot_in_an_event_is_not_editable() {
+    let Some(scratch) = ScratchGame::new("lockedbot") else {
+        return;
+    };
+    let game = scratch.path();
+    let mut career = ra2sim::career::Career::new(game, hq_mode::SEED).unwrap();
+    let event = career.schedule[0];
+    career.enter_event(event).unwrap();
+    career.player_mut().event_robot = career.player().robots[1];
+    career.save(game).unwrap();
+    assert!(flow::robot_in_event(game, 1));
+    assert!(!flow::robot_in_event(game, 0));
+    let mut shell = window_shell(game);
+    shell.click_named("Team HQ button").unwrap();
+    shell.show_message("Robot Arena 2", flow::ROBOT_IN_EVENT).unwrap();
+    assert_eq!(shell.window_depth(), 1);
+    shell.click_named("ok button").unwrap();
+    assert_eq!(shell.window_depth(), 0);
 }
