@@ -192,6 +192,7 @@ pub fn usage() -> &'static str {
        --arena PATH     arena script for --match/--play (default Arenas/box.py)\n\
        --camera-shots L --match --out: one cam-<name>.png per entry of L; intro@T is T\n\
                         seconds into the arena intro, countdown@N the countdown showing N,\n\
+                        cd@R the first countdown frame with R of 4 s left,\n\
                         f2|f3|f3b|f4@S presses that camera key at S fight seconds\n\
        -h, --help       this text"
 }

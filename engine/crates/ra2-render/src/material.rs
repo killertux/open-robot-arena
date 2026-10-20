@@ -93,27 +93,60 @@ fn session_bitmaps() -> &'static Mutex<HashMap<String, Arc<Image>>> {
 
 /// A GMF material's bitmap as the original's texture manager hands it out.
 ///
-/// Every model's stage asks for `"Graphics\\" + <bitmap as written in the GMF>`
-/// (`FUN_005ae630` prefixes the global texture path `DAT_0071f574`, which
-/// `FUN_0058df20` sets to `Graphics\\` and only the bot lab changes), and the
-/// manager (`FUN_00591030`) returns the first live texture whose name equals
-/// that string (`FUN_0058e390`, an exact compare), loading a new one only on a
-/// miss. So within one session the first file loaded under a name is the one
-/// every later model with that name gets, whatever its own directory holds.
-/// Three shipped names differ between arenas (`bars.tga`: compressor vs
-/// electric/skull, `sawhazard.bmp`: box vs half, `triple_spike.bmp`); the
-/// original captures show it (`docs/34-arena-render.md`). A file that fails to
-/// load is not cached (the manager deletes it), so a later model may still find
-/// its own.
+/// Every model's stage asks the manager (`FUN_00591030`) for the string
+/// `<texture path> + <bitmap as written in the GMF>` (`FUN_005ae630` builds it
+/// from the global `DAT_0071f574`, which only the bot lab's `FUN_00593a40`
+/// changes) and gets back the first live texture whose name equals it
+/// (`FUN_0058e390`, an exact compare), loading a file only on a miss. Live
+/// (`tools/oracle/capture_arena_states.py`, docs/34 section 9) the path is the
+/// empty string for every one of 573 arena-load requests, so the arena key is
+/// the bare name, and 8 arenas played twice in one session loaded each shared
+/// name's file exactly once: the first file loaded under a name is what every
+/// later model with that name gets, whatever its own directory holds
+/// (`bars.tga` compressor then electric/skull, `sawhazard.bmp` and
+/// `triple_spike.bmp` from box). Nothing cleared the list (the clear-all
+/// functions `0x592300`/`0x5924e0` run only from the graphics shutdown).
+/// A file that fails to load is not cached (the manager deletes it).
+///
+/// The key carries the current texture path ([`set_texture_path`]), so a
+/// bot-lab request (path set by `FUN_00593a40`) never shares an entry with an
+/// arena's bare name.
 pub fn session_bitmap(dir: &Path, bitmap: &str) -> Option<Arc<Image>> {
-    if let Some(hit) = session_bitmaps().lock().ok()?.get(bitmap) {
+    let key = format!("{}{bitmap}", texture_path());
+    if let Some(hit) = session_bitmaps().lock().ok()?.get(&key) {
         return Some(hit.clone());
     }
     let img = resolve_bitmap(dir, bitmap).and_then(|p| load_image(&p))?;
     if let Ok(mut c) = session_bitmaps().lock() {
-        return Some(c.entry(bitmap.to_string()).or_insert(img).clone());
+        return Some(c.entry(key).or_insert(img).clone());
     }
     Some(img)
+}
+
+/// The default texture path: empty (`DAT_0071f574` is a NULL `std::string`
+/// pointer in every arena load seen live).
+pub const DEFAULT_TEXTURE_PATH: &str = "";
+
+fn texture_path_cell() -> &'static Mutex<String> {
+    static PATH: OnceLock<Mutex<String>> = OnceLock::new();
+    PATH.get_or_init(|| Mutex::new(DEFAULT_TEXTURE_PATH.to_string()))
+}
+
+/// The global texture path the session cache is keyed with (`DAT_0071f574`).
+pub fn texture_path() -> String {
+    texture_path_cell()
+        .lock()
+        .map(|p| p.clone())
+        .unwrap_or_else(|_| DEFAULT_TEXTURE_PATH.to_string())
+}
+
+/// Change the global texture path as the bot lab does (`FUN_00593a40`, called
+/// from `0x42e650` with `UI\\BotLab\\Maps`). Bitmaps requested under another path
+/// never share an entry with the arena's, even when the bare names match.
+pub fn set_texture_path(path: &str) {
+    if let Ok(mut p) = texture_path_cell().lock() {
+        *p = path.to_string();
+    }
 }
 
 /// What a texture stage does (`FUN_005b24c0`, texture type 0/1/2).
@@ -575,10 +608,14 @@ mod tests {
         assert_eq!(l.attenuation, [0.4, 3.0 / 40.0, 40.0 / 1600.0]);
     }
 
+    /// Serialises the tests that read or change the global texture path.
+    static PATH_LOCK: Mutex<()> = Mutex::new(());
+
     /// The texture manager hands every later model the first file loaded under
     /// a bitmap name (`FUN_00591030` / `FUN_0058e390`).
     #[test]
     fn the_first_bitmap_loaded_under_a_name_is_the_sessions() {
+        let _g = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("ra2-session-bitmap-{}", std::process::id()));
         let (a, b) = (base.join("a"), base.join("b"));
         std::fs::create_dir_all(&a).unwrap();
@@ -595,6 +632,33 @@ mod tests {
         assert_eq!(&second.rgba[..3], &[200, 0, 0]);
         assert!(Arc::ptr_eq(&first, &second));
         assert!(session_bitmap(&b, "zz_missing_bitmap.png").is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The cache key carries the texture path, so a bot-lab request for a bare
+    /// name the arena already loaded is a separate entry.
+    #[test]
+    fn the_session_key_includes_the_texture_path() {
+        let _g = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("ra2-session-key-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let name = format!("zz_key_{}.png", std::process::id());
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([9, 9, 9, 255]))
+            .save(base.join(&name))
+            .unwrap();
+        let other = base.join("lab");
+        std::fs::create_dir_all(&other).unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(other.join(&name))
+            .unwrap();
+        let arena = session_bitmap(&base, &name).unwrap();
+        set_texture_path("UI\\BotLab\\Maps\\");
+        let lab = session_bitmap(&other, &name).unwrap();
+        set_texture_path(DEFAULT_TEXTURE_PATH);
+        let arena_again = session_bitmap(&base, &name).unwrap();
+        assert_eq!(&lab.rgba[..3], &[1, 2, 3]);
+        assert_eq!(&arena.rgba[..3], &[9, 9, 9]);
+        assert!(Arc::ptr_eq(&arena, &arena_again));
         let _ = std::fs::remove_dir_all(&base);
     }
 }

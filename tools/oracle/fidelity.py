@@ -160,6 +160,8 @@ ARENA_SHOTS = {
 # behaviour: `skip@T` is "click Skip Intro at intro second T", `intro@T` the intro still.  Fitted
 # with tools/oracle/fit_capture_timing.py after the docs/34 render fixes (half-pixel centres,
 # normals, sub-material ids, the session texture cache).
+# (Both tables serve only the old wall-clock references, now marked unreliable in the manifest; the
+# state-hooked arena-*-intro2/-countdown2 references use the measured clocks in arena_states.json.)
 ARENA_SKIP = {
     "box": 4.615, "bridge": 5.132, "compressor": 6.749, "electric": 7.47, "halfcircle": 4.5,
     "metalskull": 4.799, "octagon": 4.649, "parkinglot": 4.915,
@@ -170,6 +172,29 @@ ARENA_INTRO = {
 }
 
 
+# State-hooked captures (tools/oracle/capture_arena_states.py, docs/34 section 9): the intro still is
+# taken at an intro clock (summed frame dt since the intro state began) and the countdown still after
+# the intro ran to its end, at a countdown reading, both recorded from the original in
+# tools/oracle/arena_states.json -- measured game state, not fitted wall time.
+LIVE_SHOTS = ("intro2", "countdown2", "f4live")
+LIVE_FILE = {"intro2": "cam-intro.png", "countdown2": "cam-cd.png", "f4live": "cam-f4.png"}
+
+
+# The intro camera's own clock lags the summed frame dt by the first long frame (the arena-load
+# stall: the second match update, 0.19..1.28 s) plus this constant, measured by fitting our intro
+# flight to the six best-fitting state-hooked stills (fit residual +-0.01 s):
+#     camera T = intro clock - first_frame_dt - INTRO_CAMERA_LAG        (docs/34 section 9)
+INTRO_CAMERA_LAG = 0.265
+
+
+def live_states():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "arena_states.json")) as f:
+            return json.load(f)
+    except OSError:
+        return {}
+
+
 def find_arena_fixtures():
     """arena-<id>-<shot> references from `capture_arenas.py`.  Ours comes from
     `ra2-app --match --arena <script> --camera-shots ...` (one run per arena;
@@ -177,10 +202,16 @@ def find_arena_fixtures():
     out = []
     if os.path.isdir(ORIG):
         for f in sorted(os.listdir(ORIG)):
+            if f.startswith("match-countdown2__") and f.endswith(".png"):
+                out.append(dict(id="match-countdown2", ref=f, livecam=("box", "countdown2"),
+                                note="the real match countdown (COMPETITORS READY), Combat Arena"))
             if f.startswith("arena-") and f.endswith(".png"):
                 fid = f.split("__")[0]
                 _, arena, shot = fid.split("-", 2)
-                if arena in ARENA_SCRIPTS and shot in ARENA_SHOTS:
+                if arena in ARENA_SCRIPTS and shot in LIVE_SHOTS:
+                    out.append(dict(id=fid, ref=f, livecam=(arena, shot),
+                                    note="ours: --camera-shots at the recorded game clock (state-hooked capture)"))
+                elif arena in ARENA_SCRIPTS and shot in ARENA_SHOTS:
                     out.append(dict(id=fid, ref=f, camshot=(arena, shot),
                                     note="ours: ra2-app --match camera shot; robot poses differ (live fight)"))
                 else:
@@ -216,6 +247,31 @@ def run_camera_shots(arena, tmp):
                         "--camera-shots", shots]
                        + (["--earlier-arenas", ",".join(earlier_arenas(arena))] if earlier_arenas(arena) else []),
                        capture_output=True, text=True, env=env(), timeout=900)
+    return d if p.returncode == 0 else None
+
+
+def run_live_shots(arena, tmp):
+    """`--camera-shots` for the state-hooked references: the intro still at the recorded intro
+    clock, then (the intro runs to its end, no skip) the first countdown frame at the recorded
+    countdown reading, and F4 a few fight seconds in for the arenas with an f4live reference."""
+    st = live_states().get(arena)
+    if not st:
+        return None
+    d = os.path.join(tmp, "live-" + arena)
+    os.makedirs(d, exist_ok=True)
+    t_intro = statistics.mean(st["intro_clock"]) - st["first_frame_dt"] - INTRO_CAMERA_LAG
+    shots = ["intro@%.3f" % t_intro,
+             "cd@%.3f" % statistics.mean(st["countdown_left"])]
+    if os.path.exists(os.path.join(ORIG, "arena-%s-f4live__1024x768__000.png" % arena)):
+        shots.append("f4@2.5")
+    bots = ",".join(os.path.join(GAME, "AI", "Team0", b) for b in ("Bot0.bot", "Bot1.bot"))
+    p = subprocess.run([APP, "--game", GAME, "--match", "--seconds", "40", "--out", d,
+                        "--size", "%dx%d" % SIZE, "--bots", bots, "--arena", os.path.join(GAME, "Arenas", ARENA_SCRIPTS[arena]),
+                        "--camera-shots", ",".join(shots)]
+                       + (["--earlier-arenas", ",".join(earlier_arenas(arena))] if earlier_arenas(arena) else []),
+                       capture_output=True, text=True, env=env(), timeout=900)
+    if p.returncode:
+        sys.stderr.write(p.stderr[-400:])
     return d if p.returncode == 0 else None
 
 
@@ -378,6 +434,14 @@ def screens(args, out):
             for arena, d in zip(cam_arenas, pool.map(lambda a: run_camera_shots(a, tmp), cam_arenas)):
                 cam_dirs[arena] = d
 
+    live_dirs = {}
+    live_arenas = sorted({f["livecam"][0] for f in fixtures if "livecam" in f
+                          and os.path.exists(os.path.join(ORIG, f["ref"]))}) if "app" in renderers else []
+    if live_arenas:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(args.jobs, 2))) as pool:
+            for arena, d in zip(live_arenas, pool.map(lambda a: run_live_shots(a, tmp), live_arenas)):
+                live_dirs[arena] = d
+
     jobs = []
     for fx in fixtures:
         ref_path = os.path.join(ORIG, fx["ref"])
@@ -405,6 +469,17 @@ def screens(args, out):
             src = run_intro_shot(fx["introshot"][0], fx["introshot"][1], tmp)
             if not src:
                 row["status"], row["reason"] = "render-failed", "ra2-app --camera-shots intro failed"
+                return row
+            shutil.copy(src, out_png)
+        elif "livecam" in fx:
+            if rd != "app":
+                row["status"] = "unreachable"
+                row["reason"] = "the match is only rendered by ra2-app"
+                return row
+            arena, shot = fx["livecam"]
+            src = os.path.join(live_dirs.get(arena) or "", LIVE_FILE[shot])
+            if not os.path.exists(src):
+                row["status"], row["reason"] = "render-failed", "ra2-app --camera-shots failed for " + arena
                 return row
             shutil.copy(src, out_png)
         elif "camshot" in fx:
