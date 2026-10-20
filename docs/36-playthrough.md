@@ -448,3 +448,11 @@ Not verified against a capture of the original (none exists).
   deathmatch slot 2 label, `Finish Later` before a round (session only), event
   `End Match` result-4 path, the award's 3D prize scene, drag placement in the
   lab, the original's AI robot choice per team in an event (robot 0 is used).
+
+### 9.10 Gate (round 2)
+
+`cargo fmt --all --check` and `cargo clippy --release --offline --workspace
+--all-targets -- -D warnings` clean; `cargo test --release --offline
+--workspace --no-fail-fast` **551 passed, 0 failed** (538 at the start of the
+round); `find ../local/game -newer <stamp>` printed nothing (every test that
+writes a team, a career or a robot runs on a scratch install).
