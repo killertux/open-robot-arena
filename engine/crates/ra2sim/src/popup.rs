@@ -234,13 +234,7 @@ mod tests {
         // Live: a wall hit at (8.365, -1.965, -12.389) with normal (0, 0, 1) -> start
         // (8.365, -1.965, -12.489), after the rise (8.365, -0.979, -12.653).
         let mut d = DamageDisplay::new();
-        d.request(
-            0,
-            false,
-            34.297,
-            Vec3::new(8.365, -1.965, -12.389),
-            Vec3::Z,
-        );
+        d.request(0, false, 34.297, Vec3::new(8.365, -1.965, -12.389), Vec3::Z);
         d.step(0.2, true);
         let mut n = d.numbers()[0].clone();
         assert_eq!(n.text, "34");
@@ -252,7 +246,13 @@ mod tests {
     #[test]
     fn an_attacker_number_is_green_and_leans_with_the_normal() {
         let mut d = DamageDisplay::new();
-        d.request(0, true, 12.9, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0));
+        d.request(
+            0,
+            true,
+            12.9,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        );
         d.step(0.2, true);
         let n = &d.numbers()[0];
         assert_eq!(n.text, "12");

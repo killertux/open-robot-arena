@@ -901,7 +901,8 @@ mod tests {
             (layer.y + layer.h - (slot.y + slot.h)).abs() < 0.5,
             "{layer:?}"
         );
-        assert!((layer.w - slot.w * 0.46).abs() < 0.5, "{layer:?}");
+        // (a group is whole pixels wide: the 46% is truncated)
+        assert!((layer.w - slot.w * 0.46).abs() < 1.0, "{layer:?}");
         assert_eq!(layer.h, 70.0, "{layer:?}");
 
         // The armor step has none: its screen fills the slot on its own.

@@ -959,7 +959,11 @@ impl Session {
         let bind = self.screen_bind();
         let mut scene = if let Some(window) = self
             .reminder_open
-            .then(|| self.reminder.as_ref().map(|r| r.filled(self.presentation.layout)))
+            .then(|| {
+                self.reminder
+                    .as_ref()
+                    .map(|r| r.filled(self.presentation.layout))
+            })
             .flatten()
         {
             self.presentation
@@ -2485,7 +2489,9 @@ mod tests {
             .collect();
         assert_eq!(red.len(), before + 2, "`25` is two glyph cells");
         // drawn first, under the HUD
-        assert!(scene.quads[..2].iter().all(|q| q.color[..3] == [0.8, 0.0, 0.0]));
+        assert!(scene.quads[..2]
+            .iter()
+            .all(|q| q.color[..3] == [0.8, 0.0, 0.0]));
         for _ in 0..(1.0 / dt) as usize {
             session.step();
         }

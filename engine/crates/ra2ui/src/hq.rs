@@ -596,7 +596,8 @@ impl Hq {
         };
         let columns = geometry.columns.max(1) as usize;
         let width = geometry.col_widths.first().copied().unwrap_or(0.0);
-        grid.children.retain(|c| c.name() != "event cell group");
+        grid.children
+            .retain(|c| c.name() != "event cell group" && !c.name().starts_with("grid line"));
         clear_bars(grid);
         for (index, row) in rows.iter().enumerate() {
             let relative = match row.state {
@@ -614,25 +615,26 @@ impl Hq {
             let (r, c) = (index / columns, index % columns);
             let rows_n = geometry.rows.max(1) as f32;
             let (cw, ch) = (1.0 / columns as f32, 1.0 / rows_n);
+            // The art sits inside the slot's left/top line and `BufferWidth 2`: it starts
+            // `1 + 2` px in and stops 2 px short of the next slot's line (live, 1024x768: slot
+            // 184 x 111, lines at 341/525/709 and 318/429/540/651, art 344..522 x 321..426).
+            // Fractions of the 184 x 111 slot, so they hold at the other sizes too.
             let mut cell = root;
             crate::input::set_field(
                 &mut cell,
                 "Position",
                 &format!(
                     "{} 1 {} 1",
-                    c as f32 * cw + 0.011 * cw,
-                    r as f32 * ch + 0.018 * ch
+                    c as f32 * cw + 3.0 / 184.0 * cw,
+                    r as f32 * ch + 3.0 / 111.0 * ch
                 ),
             );
             crate::input::set_field(
                 &mut cell,
                 "Size",
-                &format!("{} 1 {} 1", cw * 0.978, ch * 0.964),
+                &format!("{} 1 {} 1", cw * 179.0 / 184.0, ch * 106.0 / 111.0),
             );
             crate::cells::bind_art(&mut cell, "preview img", &row.event.art);
-            // The grid's black cell lines (`BorderColor 0 0 0 1`, `BorderWidth 1`) and
-            // `BufferWidth 2`: the art sits a pixel inside the line.
-            crate::cells::add_border(grid, &mut cell, geometry.border_width);
             let (label, color) = match row.state {
                 EventState::Completed => {
                     let won = self
@@ -672,6 +674,25 @@ impl Hq {
                 crate::input::set_field(&mut cell, "NumChildren", &children);
             }
             grid.children.push(cell);
+        }
+        // The grid's own lines (`BorderColor 0 0 0 1`, `BorderWidth 1`), one pixel each and shared
+        // between neighbours: a vertical line at the left of every column and a horizontal one at
+        // the top of every row and under the last (live: no line at the right edge).
+        let rows_n = geometry.rows.max(1) as usize;
+        let tall = 1.0 + 1.0 / (rows_n as f32 * 111.0);
+        for c in 0..columns {
+            grid.children.push(grid_line(
+                &format!("grid line column {c}"),
+                [c as f32 / columns as f32, 1.0, 0.0, 1.0],
+                [1.0, 0.0, tall, 1.0],
+            ));
+        }
+        for r in 0..=rows_n {
+            grid.children.push(grid_line(
+                &format!("grid line row {r}"),
+                [0.0, 1.0, r as f32 / rows_n as f32, 1.0],
+                [1.0, 1.0, 1.0, 0.0],
+            ));
         }
         // The schedule's own title states the season; the bracket state is the
         // short `E<n>/9 R<n>` suffix, which fits the title box's one line.
@@ -821,9 +842,39 @@ pub fn fit_splits_in(gib: &mut Gib) {
 
 fn fit_splits(widget: &mut Widget) {
     if widget.kind == WidgetKind::SplitFrame {
+        // The pane fills along the split; across it the child keeps its own authored extent
+        // (the calendar's `Slot1` is `Size 0.95 1 198 0` in a top/bottom split: 0.95 of the
+        // pane wide, which is the schedule's 552 px at 1024x768, not the pane's 583).
+        let horizontal = widget
+            .field("Horizontal")
+            .and_then(|f| f.flag())
+            .unwrap_or(true);
         for child in widget.children.iter_mut() {
-            crate::input::set_field(child, "Position", "0 0 0 0");
-            crate::input::set_field(child, "Size", "1 1 1 1");
+            let pair = |name: &str, second: bool, fallback: &str| -> String {
+                let n = child
+                    .field(name)
+                    .map(|f| f.numbers())
+                    .filter(|n| n.len() == 4)
+                    .unwrap_or_default();
+                match (n.is_empty(), second) {
+                    (true, _) => fallback.to_string(),
+                    (false, false) => format!("{} {}", n[0], n[1]),
+                    (false, true) => format!("{} {}", n[2], n[3]),
+                }
+            };
+            let (position, size) = if horizontal {
+                (
+                    format!("0 0 {}", pair("Position", true, "0 0")),
+                    format!("1 1 {}", pair("Size", true, "1 1")),
+                )
+            } else {
+                (
+                    format!("{} 0 0", pair("Position", false, "0 0")),
+                    format!("{} 1 1", pair("Size", false, "1 1")),
+                )
+            };
+            crate::input::set_field(child, "Position", &position);
+            crate::input::set_field(child, "Size", &size);
         }
     }
     for child in widget.children.iter_mut() {
@@ -1261,6 +1312,26 @@ fn bracket_widgets(bracket: &BracketView, w: f32, h: f32) -> Vec<Widget> {
     out
 }
 
+/// A one-pixel black grid line: `pos` and `size` are `[x, mode, y, mode]` (mode 1 is a fraction
+/// of the grid, 0 pixels).
+fn grid_line(name: &str, pos: [f32; 4], size: [f32; 4]) -> Widget {
+    let mut line = bracket_line(name, [0.0; 4]);
+    crate::input::set_field(
+        &mut line,
+        "Position",
+        &format!("{} {} {} {}", pos[0], pos[1] as i32, pos[2], pos[3] as i32),
+    );
+    crate::input::set_field(
+        &mut line,
+        "Size",
+        &format!(
+            "{} {} {} {}",
+            size[0], size[1] as i32, size[2], size[3] as i32
+        ),
+    );
+    line
+}
+
 /// A filled black bar at a fraction of the bracket group.
 fn bracket_line(name: &str, rect: [f32; 4]) -> Widget {
     let field = |name: &str, raw: &str| Field {
@@ -1550,6 +1621,53 @@ mod tests {
             Some(Click::Event(9)),
             "the grid stays on screen after the click"
         );
+    }
+
+    /// The schedule's grid at 1024x768 is the original's: 552 px wide (`Slot1` is 0.95 of the split
+    /// pane, whole pixels), one pixel line at the left of each column (x 341, 525, 709 live) and at
+    /// the top of each row, and the art 3 px in from the line, 179 px wide (344..522).
+    #[test]
+    fn the_schedule_grid_has_shared_lines_and_art_inside_them() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let events = crate::events::all(&game).unwrap();
+        let mut hq_view = view(&game);
+        hq_view.events = events
+            .iter()
+            .take(9)
+            .enumerate()
+            .map(|(id, e)| EventRow {
+                id,
+                event: e.clone(),
+                state: EventState::Available,
+            })
+            .collect();
+        let hq = Hq::open_on(&ui, hq_view, "events button").unwrap();
+        let placed = hq.placements([1024.0, 768.0], None);
+        let all: Vec<_> = placed.iter().flat_map(|p| p.walk()).collect();
+        let grid = all.iter().find(|p| p.widget.name() == EVENT_GRID).unwrap();
+        assert_eq!(grid.frame.w, 552.0);
+        let line = |name: &str| all.iter().find(|p| p.widget.name() == name).unwrap().frame;
+        let xs: Vec<f32> = (0..3)
+            .map(|c| line(&format!("grid line column {c}")).x.floor())
+            .collect();
+        assert_eq!(xs, [341.0, 525.0, 709.0]);
+        assert_eq!(line("grid line column 1").w, 1.0);
+        assert_eq!(line("grid line row 0").y.floor(), 318.0);
+        assert_eq!(line("grid line row 0").w.round(), 552.0);
+        assert_eq!(
+            all.iter()
+                .filter(|p| p.widget.name().starts_with("grid line row"))
+                .count(),
+            4,
+            "a line under the last row too, none at the right edge"
+        );
+        let cell = all
+            .iter()
+            .find(|p| p.widget.name() == "event cell group")
+            .unwrap();
+        assert_eq!(cell.frame.x.floor(), 344.0, "line + BufferWidth 2");
+        assert_eq!(cell.frame.w.round(), 179.0);
     }
 
     /// The history screen binds the career's counters and draws the prize art

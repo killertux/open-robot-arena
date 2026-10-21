@@ -1778,15 +1778,29 @@ mod tests {
         let Some(game) = game_dir() else { return };
         let mut assets = UiAssets::open(&game).unwrap();
         let mut scene = assets.scene(&[], [1024, 768]);
-        assets.centered_text(&mut scene, "fg_d20", "25", [481.0, 206.0], [0.8, 0.0, 0.0, 1.0]);
+        assets.centered_text(
+            &mut scene,
+            "fg_d20",
+            "25",
+            [481.0, 206.0],
+            [0.8, 0.0, 0.0, 1.0],
+        );
         assert_eq!(scene.quads.len(), 2, "one quad a digit");
-        let left = scene.quads.iter().map(|q| q.rect.x).fold(f32::MAX, f32::min);
+        let left = scene
+            .quads
+            .iter()
+            .map(|q| q.rect.x)
+            .fold(f32::MAX, f32::min);
         let right = scene
             .quads
             .iter()
             .map(|q| q.rect.x + q.rect.w)
             .fold(f32::MIN, f32::max);
-        let top = scene.quads.iter().map(|q| q.rect.y).fold(f32::MAX, f32::min);
+        let top = scene
+            .quads
+            .iter()
+            .map(|q| q.rect.y)
+            .fold(f32::MAX, f32::min);
         let bottom = scene
             .quads
             .iter()
@@ -1794,8 +1808,17 @@ mod tests {
             .fold(f32::MIN, f32::max);
         // the cells (11 + 12 wide, 15 tall) sit inside the 22 x 40 line box centred there
         assert_eq!((right - left, bottom - top), (23.0, 15.0));
-        assert_eq!(left, 471.0, "the line box starts 11 left of the centre, the cell a pixel in");
-        assert!(scene.quads.iter().all(|q| q.color == [0.8, 0.0, 0.0, 1.0] && q.clip.is_none()));
-        assert!(scene.textures.iter().any(|t| t.label == "#fg_d20"), "the face's page is in the scene");
+        assert_eq!(
+            left, 471.0,
+            "the line box starts 11 left of the centre, the cell a pixel in"
+        );
+        assert!(scene
+            .quads
+            .iter()
+            .all(|q| q.color == [0.8, 0.0, 0.0, 1.0] && q.clip.is_none()));
+        assert!(
+            scene.textures.iter().any(|t| t.label == "#fg_d20"),
+            "the face's page is in the scene"
+        );
     }
 }

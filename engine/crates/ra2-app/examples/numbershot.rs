@@ -23,7 +23,9 @@ use ra2sim::{DuelCamera, GameType, Match, MatchConfig, MatchState, RobotEntry};
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 11 {
-        return Err("usage: numbershot <out_dir> ex ey ez tx ty tz fov px py pz [amount] [green]".into());
+        return Err(
+            "usage: numbershot <out_dir> ex ey ez tx ty tz fov px py pz [amount] [green]".into(),
+        );
     }
     let game = PathBuf::from(std::env::var("RA2_GAME").map_err(|_| "set RA2_GAME")?);
     let out = PathBuf::from(&args[0]);
@@ -41,8 +43,14 @@ fn main() -> Result<(), String> {
         arena,
         GameType::Deathmatch,
         vec![
-            RobotEntry::ai(0, game.join("AI/Team0/Bot0.bot").to_string_lossy().to_string()),
-            RobotEntry::ai(1, game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string()),
+            RobotEntry::ai(
+                0,
+                game.join("AI/Team0/Bot0.bot").to_string_lossy().to_string(),
+            ),
+            RobotEntry::ai(
+                1,
+                game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string(),
+            ),
         ],
     )
     .with_duration(Some(180.0));
@@ -74,15 +82,10 @@ fn main() -> Result<(), String> {
     place(&mut session);
     // the hit: a hazard's red number on the human robot, or the attacker's green one
     if green {
-        session.matched.duel.apply_hit_normal(
-            0.0,
-            Some((0, 0)),
-            1,
-            0,
-            amount,
-            point,
-            Vec3::ZERO,
-        );
+        session
+            .matched
+            .duel
+            .apply_hit_normal(0.0, Some((0, 0)), 1, 0, amount, point, Vec3::ZERO);
     } else {
         session
             .matched

@@ -1401,6 +1401,19 @@ fn sized(
     // tall as wide), 2 derives the width from the height (the inventory's
     // `bot img group`: 455 px asked, a square of the cell's height drawn).
     let (w, h) = aspect(widget, w, h);
+    // A `Group`/`Window` is whole pixels wide and tall: `frac * parent` is truncated (measured,
+    // not read from the exe: the schedule's grid is 552 x 333 px at 1024x768 where the exact
+    // fractions give 553.9 x 335.6, the exhibition panels one to two pixels short of the exact
+    // ones; over the 104 fixtures this took the mean from 3.66 to 3.56). The Team HQ's own
+    // chrome groups keep the exact size (their captures sit on the fractions: truncating them
+    // moved the inventory, history, standings and edit-team screens 0.1-0.4 MAE away).
+    let (w, h) = if matches!(widget.kind, WidgetKind::Group | WidgetKind::Window)
+        && !EXACT_GROUPS.contains(&widget.name())
+    {
+        (w.trunc(), h.trunc())
+    } else {
+        (w, h)
+    };
     let position = widget.position();
     let (px, py) = match position {
         Some(p) => (axis(p.first, parent.w), axis(p.second, parent.h)),
@@ -1446,6 +1459,21 @@ fn sized(
         h,
     )
 }
+
+/// The Team HQ screen's own groups, laid out at their exact fractions (see [`sized`]).
+const EXACT_GROUPS: [&str; 11] = [
+    "hq content group",
+    "team heading group",
+    "kills group",
+    "logo grp",
+    "UL slot",
+    "UR slot",
+    "LL slot",
+    "LR slot",
+    "robot cell group",
+    "bot img group",
+    "grid grp",
+];
 
 fn aspect(widget: &Widget, w: f32, h: f32) -> (f32, f32) {
     if widget.kind != WidgetKind::Group {
