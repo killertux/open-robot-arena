@@ -423,7 +423,11 @@ impl Duel {
             let rig = rig::load(&setup.path)?;
             let angle = i as f32 * std::f32::consts::TAU / n as f32;
             if let Some(at) = setup.spawn {
-                let floor = Self::floor_at(&*physics, &arena, at[0], at[1], None);
+                // Probe from just above the play surface (the start points'
+                // height): an arena collider closed at the top (the Half Circle's
+                // `Collision Box`, docs/29 section 12h) has a roof to land on.
+                let above = starts.first().map(|(p, _)| p.y + 1.0);
+                let floor = Self::floor_at(&*physics, &arena, at[0], at[1], above);
                 let position = Vec3::new(at[0], floor + 0.06 - rig.min.y, at[1]);
                 // `yaw_deg` is where the robot's *front* points, as `-Z` turned
                 // by it; the front itself is `+Z` turned by the `.bot` heading

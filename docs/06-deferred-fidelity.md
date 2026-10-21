@@ -691,6 +691,11 @@ Y row). All three are planes you can name — `Clawtop`'s `Plane06` and `FlexTop
 200 m quad for them; before, they produced zero triangles and the arenas fell
 back to their visible meshes.
 
+> **Superseded (docs/29 §12h):** live, the original collides a geom-5 body as
+> its *own* mesh (the box's 8-vertex `arena_collision`, the Octagon's 65-vertex
+> `main_collision`, the Compressor's `collision box`, `colliders-*__live__000`);
+> the display group is only drawn. The reading below was inferred from data.
+
 **`SIMULATION_GEOMETRY`**: 1 (convex) and 2 (concave) name the body's own object,
 3/4 (proxy convex/concave) name `GEOMETRY_PROXY_NAME`, and **5/6 are the
 display-proxy forms**, naming `DISPLAY_PROXY_NAME`. That last one is the decode

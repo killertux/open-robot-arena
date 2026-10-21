@@ -217,6 +217,26 @@ impl MagicAction {
             force += drive + drag;
         }
         physics.add_force(chassis, rot * force);
+        if crate::havok17::dumping() {
+            let ws: Vec<String> = self
+                .wheels
+                .iter()
+                .map(|w| {
+                    format!(
+                        "[{},{},[{},{},{}]]",
+                        w.thrust,
+                        u8::from(w.touching),
+                        w.normal.x,
+                        w.normal.y,
+                        w.normal.z
+                    )
+                })
+                .collect();
+            crate::havok17::dump_line(format_args!(
+                "[\"G\",0,\"h{chassis}\",[{}],{yaw}]",
+                ws.join(",")
+            ));
+        }
         let up = rot * Vec3::Y;
         if yaw.abs() > YAW_TORQUE_MIN {
             physics.add_torque(chassis, Vec3::new(0.0, yaw, 0.0));

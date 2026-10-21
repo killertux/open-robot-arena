@@ -10,6 +10,9 @@
 //   A  [A,seq,h,rollbacks]   0x52a990 actions entry: one per accepted step piece
 //                            (rollbacks = "Backstep/Roll Back" counter DAT_00719724)
 //   G  [G,seq,chassis,[[thrust,touching],...]]  0x4856f0 MagicAction apply entry
+//   P  [P,seq,body,[floats 0..0x200]]  once per body, when it is first seen: its raw
+//      floats (+0x30 centre of mass, +0xcc transform, +0x10c world inverse inertia,
+//      +0x190 mass, +0x19c local inertia; docs/29 sections 12e/12h)
 'use strict';
 let seq = 0, rows = [];
 function push(r) { rows.push(r); if (rows.length >= 256) flush(); }
@@ -18,6 +21,13 @@ const f = p => p.readFloat();
 const vec = p => [f(p), f(p.add(4)), f(p.add(8))];
 const MAX = (typeof MAX_CONTACTS === 'number') ? MAX_CONTACTS : 400;
 const known = new Map();
+const floats = (p, len) => { const o = []; for (let i = 0; i < len; i += 4) o.push(p.add(i).readFloat()); return o; };
+function learn(p) {
+  const k = p.toString();
+  if (known.has(k)) return;
+  known.set(k, p);
+  push(['P', seq, k, floats(p, 0x200)]);
+}
 
 Interceptor.attach(ptr('0x53ed80'), { onEnter() {
   try {
@@ -31,7 +41,7 @@ Interceptor.attach(ptr('0x53ed80'), { onEnter() {
     for (let r = b; r.compare(e) < 0 && n < MAX; r = r.add(0x74), n++) {
       const ca = r.add(8).readPointer(), cb = r.add(0xc).readPointer();
       const ba = ca.add(0x1c).readPointer(), bb = cb.add(0x1c).readPointer();
-      for (const p of [ba, bb]) if (!known.has(p.toString()) && f(p.add(0x190)) > 0) known.set(p.toString(), p);
+      for (const p of [ba, bb]) if (!known.has(p.toString()) && f(p.add(0x190)) > 0) learn(p);
       out.push([ba.toString(), bb.toString(), vec(r.add(0x10)), vec(r.add(0x20)), f(r.add(0x54)),
                 f(r.add(0x58)), f(r.add(0x5c)), f(r.add(0x60)), f(r.add(0x64)), ca.toString(), cb.toString()]);
     }
@@ -55,7 +65,7 @@ Interceptor.attach(ptr('0x4856f0'), { onEnter() {
     const b = t.add(0x24).readPointer(), e = t.add(0x28).readPointer();
     const ws = [];
     for (let r = b; r.compare(e) < 0; r = r.add(0x50)) ws.push([r.add(4).readS32(), r.add(8).readU8()]);
-    if (!known.has(body.toString())) known.set(body.toString(), body);
+    learn(body);
     push(['G', ++seq, body.toString(), ws]);
   } catch (err) { push(['E', ++seq, String(err)]); }
 } });
