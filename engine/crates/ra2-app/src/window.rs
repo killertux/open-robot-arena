@@ -256,6 +256,27 @@ fn depth_target(device: &wgpu::Device, size: [u32; 2]) -> (wgpu::Texture, wgpu::
     (texture, view)
 }
 
+/// The video modes of the monitor the window is on: each size once, smallest
+/// first. Empty when the platform reports none (Wayland), which leaves the
+/// options window its standard list.
+fn display_modes(window: &Window) -> Vec<[u32; 2]> {
+    let mut modes: Vec<[u32; 2]> = window
+        .current_monitor()
+        .map(|monitor| {
+            monitor
+                .video_modes()
+                .map(|mode| {
+                    let size = mode.size();
+                    [size.width, size.height]
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    modes.sort_unstable();
+    modes.dedup();
+    modes
+}
+
 fn window_size(window: &Window) -> [u32; 2] {
     let size = window.inner_size();
     [size.width.max(1), size.height.max(1)]
@@ -453,6 +474,7 @@ impl App {
             self.shell.set_size([w as f32, h as f32]);
         }
         self.shell.open_modal(crate::options::SCREEN)?;
+        self.options.register_dropdowns(&mut self.shell);
         if let Err(error) = self.options.reload() {
             eprintln!("options: {error}; keeping the staged values");
         }
@@ -516,6 +538,12 @@ impl App {
 
     /// The options window applies on OK and restores on Cancel.
     fn apply_options_step(&mut self, step: &ra2_shell::Step) -> Result<(), String> {
+        self.options.register_dropdowns(&mut self.shell);
+        let picks = self.shell.take_dropdown_picks();
+        for change in self.options.absorb_picks(&picks) {
+            println!("options: {change}");
+            self.options.save()?;
+        }
         match step.note.as_deref() {
             Some(crate::options::OPEN_NOTE) => {
                 // Re-read the file each time the window opens; another
@@ -770,6 +798,9 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        // The resolution dropdown lists what the display offers (the exe asks
+        // the D3D device, `FUN_004a00b0`).
+        self.options.set_display_modes(&display_modes(&window));
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.next_update = Instant::now() + UPDATE;

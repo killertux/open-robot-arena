@@ -184,6 +184,11 @@ fn finish_step(
 ) -> Result<(), String> {
     println!("{}", crate::describe(step));
     audio.shell_step(step);
+    settings.register_dropdowns(shell);
+    for change in settings.absorb_picks(&shell.take_dropdown_picks()) {
+        println!("options: {change}");
+        settings.save()?;
+    }
     match step.note.as_deref() {
         Some(crate::options::OPEN_NOTE) => {
             if let Err(error) = settings.reload() {

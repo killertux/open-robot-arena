@@ -17,7 +17,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ra2fmt::gib::{AttachmentKind, Block, Gib, Widget, WidgetKind};
+use ra2fmt::gib::{Block, Gib, Widget, WidgetKind};
+use ra2ui::dropdown::scrollbar_target;
 use ra2ui::teams::{self, Roster, Side};
 use ra2ui::workshop::{self, BotLab};
 use ra2ui::{Fonts, Placement};
@@ -40,6 +41,9 @@ struct Page {
     /// The scroll offset of each single-column list, by widget name. It is
     /// view state, not a record the writer owns.
     scroll: BTreeMap<String, usize>,
+    /// The match-time dropdown's value the player chose: a reloaded
+    /// `gametype.gib` starts at the constructor's `3` and takes this back.
+    time_text: Option<String>,
 }
 
 /// One robot the exhibition picker chose: the team's record slot and the
@@ -156,6 +160,13 @@ pub struct Shell {
     /// tab was never loaded.
     time_text: Option<String>,
     time_seconds: Option<Option<f32>>,
+    /// The rows of each dropdown the exe fills at run time, by widget name
+    /// (`time dropdown` from the Game Settings constructor; the options
+    /// window's lists are registered by the application).
+    dropdown_items: BTreeMap<String, Vec<String>>,
+    /// `(dropdown, text)` for each row picked since the last
+    /// [`Shell::take_dropdown_picks`].
+    dropdown_picks: Vec<(String, String)>,
     /// The robots the player and the computer picked, from the shipped
     /// `selectbot_player.gib`/`selectbot_computer.gib` windows. `None` means
     /// the robots tab was not used; the caller's defaults apply.
@@ -280,6 +291,11 @@ impl Shell {
             hazard_choice: None,
             time_text: None,
             time_seconds: None,
+            dropdown_items: BTreeMap::from([(
+                "time dropdown".to_string(),
+                TIME_ITEMS.iter().map(|t| t.to_string()).collect(),
+            )]),
+            dropdown_picks: Vec::new(),
             player_pick: None,
             opponent_pick: None,
             slot_picks: [None; 4],
@@ -1069,6 +1085,10 @@ impl Shell {
         if self.popup.is_some() {
             return self.click_popup(x, y);
         }
+        if let Some(hit) = self.click_dropdown(x, y) {
+            step.hit = hit;
+            return Ok(self.finish(step));
+        }
         // The arena list's own scroll bar: clicking its arrows moves one row,
         // and clicking the track jumps to that fraction. The bar is the
         // document's `+Scroller` attachment, so it is not a `hit_control`.
@@ -1187,6 +1207,52 @@ impl Shell {
         self.refresh_arena_detail();
         self.fill_hq()?;
         Ok(self.finish(step))
+    }
+
+    /// Register the rows a dropdown lists (the exe fills them when the window
+    /// is built: `FUN_004a00b0` the resolutions, `FUN_004a0400` the cameras).
+    pub fn set_dropdown_items(&mut self, name: &str, items: Vec<String>) {
+        self.dropdown_items.insert(name.to_string(), items);
+    }
+
+    /// The rows picked from dropdown lists since the last call.
+    pub fn take_dropdown_picks(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.dropdown_picks)
+    }
+
+    /// A click on a registered dropdown (or anywhere while one is open): the
+    /// field or arrow toggles the list, a row picks it, the list's scroll bar
+    /// scrolls it and a click elsewhere closes it, consumed. Returns the name
+    /// the step reports, or `None` when the click is not a dropdown's.
+    fn click_dropdown(&mut self, x: f32, y: f32) -> Option<String> {
+        use ra2ui::dropdown::{self, Part};
+        let (name, part) = {
+            let placed = self.placements();
+            let hit = ra2ui::input::hit_control(&placed, x, y);
+            dropdown::click_part(&placed, hit.as_deref(), x, y)?
+        };
+        let items = self.dropdown_items.get(&name)?.clone();
+        let gib = self.document_mut()?;
+        let open = dropdown::is_open(gib, &name);
+        match part {
+            Part::Field if open => dropdown::close(gib, &name),
+            Part::Field => {
+                let current = dropdown::text(gib, &name).unwrap_or_default();
+                let selected = items
+                    .iter()
+                    .position(|item| item.eq_ignore_ascii_case(current.trim()))
+                    .unwrap_or(0);
+                dropdown::open(gib, &name, &items, selected);
+            }
+            Part::Row(row) => {
+                if let Some(text) = dropdown::pick(gib, &name, &items, row) {
+                    self.dropdown_picks.push((name.clone(), text));
+                }
+            }
+            Part::Scroll(top) => dropdown::scroll(gib, &name, top),
+            Part::Outside => dropdown::close(gib, &name),
+        }
+        Some(name)
     }
 
     /// The exhibition setup opens on its `Game Settings` tab: the button is
@@ -1544,6 +1610,7 @@ impl Shell {
     fn show_bracket(&mut self, gib: Gib) {
         let key = "teamhq/event_bracket.gib";
         let page = Page {
+            time_text: None,
             key: key.to_string(),
             gib,
             content: Vec::new(),
@@ -2239,6 +2306,11 @@ impl Shell {
                 self.time_seconds = parse_match_time(&text);
             }
         }
+        if let Some(text) = self.time_text.clone() {
+            if let Screen::Page(page) = &mut self.screen {
+                page.time_text = Some(text);
+            }
+        }
     }
 
     /// Click a named widget that is a *region* rather than a control (the
@@ -2450,6 +2522,7 @@ fn load_screen(ui: &Path, key: &str) -> Result<Screen, String> {
     let mut gib = ra2fmt::gib::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     ra2ui::inline_proxies_in(&mut gib, ui);
     Ok(Screen::Page(Page {
+        time_text: None,
         key,
         gib,
         content: Vec::new(),
@@ -2680,7 +2753,8 @@ fn load_into(
         return Err(format!("{} has no group called {slot:?}", page.key));
     }
     if key.eq_ignore_ascii_case("exhibition/gametype.gib") {
-        default_game_settings(&mut page.gib);
+        let time = page.time_text.clone();
+        default_game_settings(&mut page.gib, time.as_deref());
     }
     if key.eq_ignore_ascii_case("exhibition/exhib_robots.gib") {
         show_slots_for(&mut page.gib, game_type);
@@ -2705,7 +2779,7 @@ fn load_into(
 /// minutes. The constructor fills the time dropdown with `No limit`, then
 /// `1 2 3 4 5 10 15 20`, and selects `3`; the file's `5 minutes` is an editor
 /// placeholder. The dropdown shows the bare number.
-fn default_game_settings(gib: &mut Gib) {
+fn default_game_settings(gib: &mut Gib, chosen: Option<&str>) {
     for block in gib.blocks.iter_mut() {
         let Block::Widget(root) = block else { continue };
         let Some(dropdown) = workshop::find_mut(root, "time dropdown") else {
@@ -2713,11 +2787,17 @@ fn default_game_settings(gib: &mut Gib) {
         };
         for child in dropdown.children.iter_mut() {
             if child.kind == WidgetKind::TextBox {
-                set_text(child, "3");
+                set_text(child, chosen.unwrap_or(DEFAULT_TIME));
             }
         }
     }
 }
+
+/// The match-time list the Game Settings constructor fills (`FUN_004733f0`:
+/// `No limit` with value 0, then 1, 2, 3, 4, 5, 10, 15 and 20 minutes, each
+/// item's value being its number) and the one it selects.
+pub const TIME_ITEMS: [&str; 9] = ["No limit", "1", "2", "3", "4", "5", "10", "15", "20"];
+const DEFAULT_TIME: &str = "3";
 
 /// Only BATTLE ROYAL and TEAM MATCH use all four robot slots. A duel shows
 /// two panels side by side in the top row (the original's DEATHMATCH setup):
@@ -3029,41 +3109,6 @@ fn refresh_picker(
         }
     }
     Ok(())
-}
-
-/// The offset a click inside a list's `+Scroller` bar asks for.
-///
-/// The bar is the attachment's `ScrollBar`: its own `Less`/`More` buttons are
-/// the first and last parts, and the track between them is the third. A click
-/// on an arrow moves one row; a click on the track jumps to that fraction of
-/// the content. `None` when the point is not on this list's bar.
-fn scrollbar_target(list: &Placement<'_>, x: f32, y: f32, top: usize, max: usize) -> Option<usize> {
-    let bar = list
-        .attachments
-        .iter()
-        .find(|a| a.attachment.kind == AttachmentKind::Scroller)?
-        .body
-        .walk()
-        .find(|p| p.widget.kind == WidgetKind::ScrollBar)?;
-    if !bar.frame.contains_point(x, y) || !bar.widget.visible() {
-        return None;
-    }
-    let model = ra2ui::ScrollBar::from_widget(bar.widget);
-    let less = bar.children.get(model.less)?.frame;
-    let more = bar.children.get(model.more)?.frame;
-    let parts = model.parts(bar.frame, less, more);
-    let track = parts[2];
-    if y < track.y {
-        return Some(top.saturating_sub(1));
-    }
-    if y >= track.bottom() {
-        return Some((top + 1).min(max));
-    }
-    if track.h <= 0.0 {
-        return Some(top);
-    }
-    let fraction = ((y - track.y) / track.h).clamp(0.0, 1.0);
-    Some((fraction * max as f32).round() as usize)
 }
 
 fn chain<'a>(roots: &'a [Placement<'a>], path: &[usize]) -> Vec<&'a Placement<'a>> {

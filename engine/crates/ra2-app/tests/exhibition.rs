@@ -311,6 +311,73 @@ fn the_time_dropdowns_displayed_value_is_the_match_length() {
     );
 }
 
+/// The time dropdown opens its list (`No limit`, 1-5, 10, 15, 20: the
+/// constructor `FUN_004733f0`), a row picks the match length, a click elsewhere
+/// closes the list without changing it, and the choice survives a trip to the
+/// arena tab and back.
+#[test]
+fn the_time_dropdown_opens_its_list_and_a_row_sets_the_match_length() {
+    let Some(game) = game_dir() else { return };
+    let _guard = ra2script::lock();
+    let mut options = options(&game);
+    options.arena_script = Some("box.py".to_string());
+    let (mut shell, _) = play_mode::select_setup(&options).expect("the click flow");
+    shell.click_named("gametype button").expect("Game Settings");
+    let frame_of = |shell: &ra2_shell::Shell, name: &str| {
+        let placed = shell.placements();
+        placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == name)
+            .map(|p| p.frame)
+            .unwrap_or_else(|| panic!("no {name}"))
+    };
+    let rows_of = |shell: &ra2_shell::Shell| -> Vec<String> {
+        let placed = shell.placements();
+        let dropdown = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "time dropdown")
+            .expect("the dropdown");
+        let list = dropdown
+            .walk()
+            .find(|p| p.widget.kind == ra2fmt::gib::WidgetKind::ListBox)
+            .expect("its list");
+        list.widget
+            .children
+            .iter()
+            .filter(|c| c.kind == ra2fmt::gib::WidgetKind::Text && c.visible())
+            .filter_map(|c| c.field("_Text").map(|f| f.text().to_string()))
+            .collect()
+    };
+    assert!(rows_of(&shell).is_empty(), "closed: no rows");
+    let field = frame_of(&shell, "time dropdown");
+    // The arrow opens the list; the rows are the constructor's, five shown.
+    shell.click(field.x + field.w - 8.0, field.y + 9.0).unwrap();
+    assert_eq!(rows_of(&shell), ["No limit", "1", "2", "3", "4"]);
+    // A click away closes it and changes nothing.
+    shell.click(field.x + field.w + 200.0, field.y + 9.0).unwrap();
+    assert!(rows_of(&shell).is_empty());
+    assert_eq!(shell.time_choice(), Some(Some(180.0)));
+    // Open again and pick `No limit`, then `4`.
+    for (row, expected) in [(0usize, None), (4, Some(240.0))] {
+        shell.click(field.x + field.w - 8.0, field.y + 9.0).unwrap();
+        let rowh = 18.0;
+        shell
+            .click(field.x + 20.0, field.y + field.h + rowh * row as f32 + 9.0)
+            .unwrap();
+        assert!(rows_of(&shell).is_empty(), "a pick closes the list");
+        assert_eq!(shell.time_choice(), Some(expected));
+    }
+    assert_eq!(shell.time_text(), Some("4"));
+    let choice = play_mode::choice_from_shell(&game, &shell).expect("the choice");
+    assert_eq!(choice.time_seconds, Some(240.0));
+    // The arena tab replaces the tab; the choice is still the player's.
+    shell.click_named("arena button").expect("Arena tab");
+    shell.click_named("gametype button").expect("Game Settings");
+    assert_eq!(shell.time_text(), Some("4"));
+}
+
 /// The four `playerN group` slots all open the shipped pickers, and a BATTLE
 /// ROYAL carries all four robots on four distinct spawn points. The results
 /// screen lists the same four names in its four slots, and slot 1 is the driven
