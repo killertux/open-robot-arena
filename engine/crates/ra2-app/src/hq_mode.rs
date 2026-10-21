@@ -1964,8 +1964,18 @@ pub fn match_config(
         .bots_per_match()
         .map(|bots| bots.max(2) as usize)
         .unwrap_or(2);
+    // The AI team brings the robot of the player's weight class: the play
+    // handler (`FUN_0046bb70`) passes `Team+0x118`, the class of the robot in
+    // the event (stored by `FUN_0046aa50` with `FUN_004faac0` when the bracket
+    // opens), clamped to 0..=2, as the bot number of each opponent team
+    // (`FUN_004fa890` builds `AI\Team<N>\Bot<class>.bot`). Every shipped AI
+    // team's Bot0/Bot1/Bot2 are its light, medium and heavy robot.
+    let class = ai_bot_for_class(read_bot(&player).map(|bot| bot.class).unwrap_or(0));
     for slot in opponents.into_iter().take(wanted - 1) {
-        let opponent = ai_robot_path(game, slot, 0);
+        let mut opponent = ai_robot_path(game, slot, class);
+        if !opponent.is_file() {
+            opponent = ai_robot_path(game, slot, 0);
+        }
         if !opponent.is_file() {
             return Err(format!("{} is not a .bot file", opponent.display()));
         }
@@ -2016,6 +2026,16 @@ pub fn ai_robot_path(game: &Path, team: usize, robot: i32) -> PathBuf {
     game.join("AI")
         .join(format!("Team{team}"))
         .join(format!("Bot{robot}.bot"))
+}
+
+/// The AI robot number the player's robot class selects: 0, 1 or 2 as they
+/// are, anything else 0 (`0x46be9e`..`0x46beb5`).
+pub fn ai_bot_for_class(class: i32) -> i32 {
+    if (0..=2).contains(&class) {
+        class
+    } else {
+        0
+    }
 }
 
 fn read_bot(path: &Path) -> Option<ra2fmt::bot::Bot> {
@@ -2688,6 +2708,41 @@ mod tests {
             config.robots.len(),
             events[id].bots_per_match().unwrap() as usize
         );
+    }
+
+    /// The AI teams bring the robot of the player's weight class
+    /// (`FUN_0046bb70` -> `FUN_004fa890`, bot number = `Team+0x118`, the class
+    /// of the robot in the event): a light, medium or heavy entry meets Bot0,
+    /// Bot1 or Bot2 of each AI team, and the class numbers match the files.
+    #[test]
+    fn the_ai_teams_bring_the_robot_of_the_players_weight_class() {
+        let Some(game) = game_dir() else { return };
+        let events = ra2ui::events::all(&game).unwrap();
+        let id = events
+            .iter()
+            .position(|event| event.name == "F.O.R.C.E. Tournament")
+            .expect("a duel event");
+        let mut seen = std::collections::BTreeSet::new();
+        let career = entered(&game, id);
+        for &slot in &career.player().robots.clone() {
+            let mut career = entered(&game, id);
+            career.player_mut().event_robot = slot;
+            let player = player_robot_path(&game, career.player_slot, slot);
+            let class = read_bot(&player).map(|bot| bot.class).unwrap();
+            let config = match_config(&game, &events[id], &career, 1.0).unwrap();
+            let opponent = &config.robots[1].bot_path;
+            assert!(
+                opponent.ends_with(&format!("Bot{}.bot", ai_bot_for_class(class))),
+                "a class {class} robot meets {opponent}"
+            );
+            let brought = read_bot(Path::new(opponent)).unwrap();
+            assert_eq!(brought.class, class, "the AI robot is of the same class");
+            seen.insert(class);
+        }
+        assert!(!seen.is_empty());
+        assert_eq!(ai_bot_for_class(7), 0);
+        assert_eq!(ai_bot_for_class(-1), 0);
+        assert_eq!(ai_bot_for_class(2), 2);
     }
 
     /// A career in event `id` (put on its schedule first).
