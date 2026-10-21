@@ -408,21 +408,69 @@ fn striker(robot: &Robot, index: usize) -> Striker<'_> {
 /// The collision-event filter the robots register with (`FUN_0052d4f0`, the
 /// world's event manager ahead of the game's listener).
 ///
-/// Every robot body is registered once at 1 Hz (`FUN_0045ab90` →
-/// `FUN_004ad500(body, 2, 1.0)` → `FUN_0052d850`, from the robot set-up
-/// `0x414d66` and `0x507ed6`); a weapon that declares `frequency` registers its
-/// bodies at that rate instead (`0x502f7a` .. `0x503038`). A contact point
-/// becomes an event only if one of its two bodies' registrations is due
-/// (a full interval since it last let one through) and the bodies close at the
-/// point (`FUN_0052d740`: the normal relative velocity against the
-/// registration's threshold, 0); the registration that let it through is then
-/// reset. All other points are dropped before the game prices anything. Live
-/// (`fightcontacts-scout-alarm-box__live__000`): the robots touch at up to 13
-/// points a step, yet only 16 % of those steps price a hit, one per component
-/// pair, and a pair that stays in contact is priced again about 1.0 s later.
+/// Registrations are per **collidable**, and every component has its own: the
+/// robot set-up (`FUN_00414a60`) walks the robot's components and registers
+/// each one's collidables at 1 Hz (`FUN_00414cd0` → `FUN_0045ab90` →
+/// `FUN_004ad500(c, 2, 1.0)` → `FUN_0052d850`, which appends an entry to that
+/// collidable's list), and a wheel's collidable gets a second 1 Hz entry
+/// (`0x507ed6`); a weapon that declares `frequency` registers at that rate
+/// instead (`0x502f7a` .. `0x503038`). Live
+/// (`eventreg-sentinel-wideload-compressor__live__000`): 48 registrations, one
+/// per component collidable and two on each of the eight wheels, all with
+/// partner 0, interval 1 s, threshold 0, type 2. A contact point becomes an
+/// event if one of its two collidables has a due entry (a full interval since
+/// it last let one through; `a`'s list first, then `b`'s) and the bodies'
+/// normal relative speed is at least the entry's threshold (`FUN_0052d740`
+/// takes it as `|Δv · n|`, so with threshold 0 every point passes this test);
+/// the entry that let it through is reset. All other points are dropped before
+/// the game prices anything. So each of Wide Load's four spikes is priced up
+/// to once a second, not their shaft body once between them.
 #[derive(Clone, Debug, Default)]
 pub struct EventGate {
-    last: HashMap<BodyHandle, f32>,
+    /// Per (body, component): the last time each of its entries let a point
+    /// through.
+    last: HashMap<(BodyHandle, usize), Vec<Option<f32>>>,
+}
+
+/// A component's registrations with the event filter: the interval of each
+/// entry (see [`EventGate`]).
+///
+/// Batteries, air tanks, control boards and SmartZones have no collidable and
+/// no registration (live: the five components of the two robots without one
+/// are their batteries, Wide Load's air tank and their control boards; the
+/// SmartZones' phantoms are not registered either).
+pub fn event_registrations(c: &crate::rig::Component) -> Vec<f32> {
+    match (c.role, c.weapon.and_then(|w| w.frequency)) {
+        (Role::Power | Role::Control, _) => Vec::new(),
+        (Role::Weapon, Some(f)) => vec![1.0 / f],
+        (Role::Wheel, _) => vec![1.0, 1.0],
+        _ => vec![1.0],
+    }
+}
+
+/// The registered component of `part` nearest the point (as
+/// [`touched_component`], over the components that have a collidable).
+fn registered_component(robot: &Robot, part: usize, state: &BodyState, p: Vec3) -> Option<usize> {
+    let frame = Mat4::from_rotation_translation(state.rotation, state.position);
+    let zones: Vec<usize> = robot.rig.smart_zones.iter().map(|z| z.component).collect();
+    let mut best: Option<(usize, f32)> = None;
+    for &i in &robot.rig.parts[part].members {
+        let c = &robot.rig.components[i];
+        if !robot.attached[i]
+            || c.hull_points.is_empty()
+            || zones.contains(&i)
+            || event_registrations(c).is_empty()
+        {
+            continue;
+        }
+        let world = frame * robot.rig.part_local[i];
+        let local = world.inverse().transform_point3(p);
+        let d = (local - local.clamp(c.min, c.max)).length_squared();
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((i, d));
+        }
+    }
+    best.map(|(i, _)| i)
 }
 
 impl EventGate {
@@ -432,9 +480,7 @@ impl EventGate {
         robots: &[Robot],
         events: Vec<ContactEvent>,
         now: f32,
-        props: &MassProps,
     ) -> Vec<ContactEvent> {
-        let mut interval: HashMap<BodyHandle, f32> = HashMap::new();
         let mut owner: HashMap<BodyHandle, (usize, usize)> = HashMap::new();
         for (r, robot) in robots.iter().enumerate() {
             for (p, part) in robot.parts.iter().enumerate() {
@@ -443,56 +489,29 @@ impl EventGate {
                 }
             }
         }
-        let com = |body: BodyHandle, state: &BodyState| match owner.get(&body) {
-            Some(&(r, p)) => dynamics_of(&robots[r], p, body, state, props).com,
-            None => state.position,
-        };
-        for robot in robots {
-            for (p, part) in robot.parts.iter().enumerate() {
-                if !part.alive {
-                    continue;
-                }
-                let rate = robot.rig.parts[p]
-                    .members
-                    .iter()
-                    .filter_map(|&i| robot.rig.components[i].weapon.and_then(|w| w.frequency))
-                    .fold(None, |m: Option<f32>, f| Some(m.map_or(f, |m| m.max(f))))
-                    .unwrap_or(1.0);
-                interval.insert(part.body, 1.0 / rate);
-            }
-        }
         let mut out = Vec::new();
         for e in events {
-            let n = e.normal.normalize_or_zero();
-            let va = point_velocity(
-                e.state_a.linear_velocity,
-                e.state_a.angular_velocity,
-                com(e.a, &e.state_a),
-                e.point,
-            );
-            let vb = point_velocity(
-                e.state_b.linear_velocity,
-                e.state_b.angular_velocity,
-                com(e.b, &e.state_b),
-                e.point,
-            );
-            if (va - vb).dot(n) <= 0.0 {
-                continue;
+            let mut through = false;
+            for (body, state) in [(e.a, &e.state_a), (e.b, &e.state_b)] {
+                let Some(&(r, p)) = owner.get(&body) else {
+                    continue;
+                };
+                let robot = &robots[r];
+                let Some(c) = registered_component(robot, p, state, e.point) else {
+                    continue;
+                };
+                let iv = event_registrations(&robot.rig.components[c]);
+                let last = self.last.entry((body, c)).or_default();
+                last.resize(iv.len(), None);
+                if let Some(k) =
+                    (0..iv.len()).find(|&k| last[k].is_none_or(|t| now - t >= iv[k] - 1e-4))
+                {
+                    last[k] = Some(now);
+                    through = true;
+                    break;
+                }
             }
-            let due = |gate: &Self, body: BodyHandle| {
-                interval
-                    .get(&body)
-                    .is_some_and(|iv| gate.last.get(&body).is_none_or(|t| now - t >= *iv - 1e-4))
-            };
-            let through = if due(self, e.a) {
-                Some(e.a)
-            } else if due(self, e.b) {
-                Some(e.b)
-            } else {
-                None
-            };
-            if let Some(body) = through {
-                self.last.insert(body, now);
+            if through {
                 out.push(e);
             }
         }

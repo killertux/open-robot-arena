@@ -1884,3 +1884,111 @@ Traction survey 45/45.
 **Still open.** ALARM still ends on its back in 3 of 12 box runs (live 2 of 13)
 and some tail-stands last longer than live; Wide Load's hits are now half the
 live mean (60.8 against 118); the other items of §12j.
+
+### 12l. The event filter's registrations, the burst motor's wrap, the Compressor's endings (fx/wideload)
+
+New live captures (one fresh session, Sentinel and Wide Load copied into the
+prefix `AI/Team0` Bot0/Bot1 slots and restored, sha256 checked; manifest rows
+in `manifest-additions-2026-10-21-wideload.tsv`):
+`fight-sentinel-wideload-compressor__live__005..007` with
+`fightpos-sentinel-wideload-compressor__live__000..002` (three Compressor
+fights: every priced hit, and every 6 frames both robots' location,
+`isUpsideDown`, last tactic, commanded throttle and turn and sensor table;
+`tools/oracle/capture_fightpos_set.sh`) and
+`eventreg-sentinel-wideload-compressor__live__000` (`frida/ra2_eventreg.js`,
+loaded at the main menu: every collision-event registration of the three
+match loads). Diagnostics: `fightprobe`'s detail lines give each jointed
+part's rotation and angular velocity relative to its parent.
+
+**The event filter registers collidables, one per component (recovered,
+verified live).** The robot set-up `FUN_00414a60` loops over the robot's
+components and, inside, over each component's collidables, registering every
+one (`FUN_00414cd0` → `FUN_0045ab90` → `FUN_004ad500(c, 2, 1.0)` →
+`FUN_0052d850`, which appends an entry to that collidable's list and never
+merges). Live, every match load makes 48 registrations: 9 arena bodies
+(`FUN_00415140`), one per robot component collidable (31 for Sentinel's 13
+and Wide Load's 23 components) and a second on each of the eight wheels
+(`0x507ed6`), all with partner 0, interval 1 s, threshold 0, type 2. Sections
+10-11's per-*body* reading was wrong: Wide Load's spike shaft is one body but
+nine components, and live each of its four spikes is priced about 100 times
+in a 120 s fight (`fight-...__live__003`: 107, 100, 100, 95), up to three
+times within 0.12 s on one victim component and again a second later. The
+gate's speed test (`FUN_0052d740`) compares `|Δv · n|` with the entry's
+threshold, 0, so every point passes it; ours had required a closing point.
+`combat::EventGate` now keys entries by (body, the component the point
+touches), two for a wheel, `a`'s list first; test
+`duel::tests::robot_contacts_reach_the_pricing_once_a_second_per_component`.
+Replaying the live box contact stream (`fightcontacts-scout-alarm-box__live__000`,
+robot-robot points only) through the models: per body 129 events, per
+collidable 158, per collidable with the wheels doubled 181, against 153 live
+events (306 H rows); the box capture holds the collidables of each point, and
+this agrees with the registrations only to 18 %; not resolved further.
+
+**A burst motor's target wraps past the stop (bug, fixed).** Sentinel fires
+its wedge at 50 rad/s and 3600 N·m against 1.67 rad of travel; the wedge
+overshoots the lock tolerance (1.77 rad), so the motor stays on and its target
+runs on at 50 rad/s. Once the target was more than π ahead, the servo's error
+was taken the short way round, and the same turn was subtracted from the
+*angle* the limit is checked against: the hinge looked a turn below its lower
+stop, the limit's correction spun the wedge at 160 rad/s, it went round
+through 360° and launched Sentinel off the floor (FlapJack's box fights
+change with the fix too, not traced; Scout's fork never leads by π). The limit now uses the measured angle
+(`havok17/joints.rs`, test `a_hinge_driven_past_its_stop_stays_at_it`); the
+stroke stops at 1.70 and cocks back. In the Compressor this was most of ours
+flipping: before, a robot went over in 12 of 12 runs (Sentinel 8-21 s in),
+after in 6 of 12.
+
+**The live Compressor fights end early too.** In the three new fights a robot
+goes onto its back 11, 14 and 21 s in (Sentinel twice, Wide Load once; from a
+ledge or the other's flipper) and both AIs fall idle for good at 32, 58 and
+55 s game time (the last tactic `None`, commands zero), while the positions
+stand still and the priced hits stop with the robots still touching: the
+match is over, the upside-down robot counted out. Wide Load lands 8, 32 and 23
+counted hits. With `fight-...__001` (hits stop at 40 s, both robots still from
+45 s) and `__002` (hits stop at about 90 s), four of seven live fights end
+early. Section 12j's "both robots still run at 120 s" held for `__003` and
+`__004` only. Live, seven fights: Wide Load 60, 118, 158, 136, 8, 32, 23
+counted (mean 76) with 116-590 priced hits (mean 283); Sentinel 2, 13, 7, 7,
+1, 3, 4 (mean 5.3).
+
+**Which components are registered.** The registration ids of the capture
+are handed out in component order (Sentinel's 13, then Wide Load's 23), and
+the doubled entries land exactly on the eight wheels and Sentinel's Powered
+Steering Unit on three collidables (the unit and its two hubs). The six ids
+without a registration are both robots' batteries and control boards, Wide
+Load's air tank and both SmartZones: those components have no collidable. The
+gate therefore takes the nearest component *with* a registration
+(`combat::registered_component`; no effect in the fights below, a contact
+point is practically never nearest an internal part). ALARM and the Scout
+were not captured; their Hammer Head and Forklift Arm are weapons like Wide
+Load's spikes, which are registered.
+
+**Validation.** Before = `fidelity` ce1aa67 (with alarm-tail's piston rule),
+after = this branch; ensembles are `FIDTRACE_WARMUP` runs (12 runs: 0, 7, 13,
+19, 26, 31, 37, 43, 50, 57, 64, 71; 24 runs add 2, 5, 9, 11, 16, 22, 28, 34,
+40, 47, 53, 60), counted = `>= 10` on the other robot, total = every priced
+hit on it (live counts zero-amount hits too, ours drops them). The two
+changes were also run one at a time (temporary switches, since removed):
+
+| fight | live | before | hinge fix only | gate only | after |
+|---|---|---|---|---|---|
+| Compressor Sentinel v Wide Load, 12 runs: Wide Load / Sentinel | 76 (283) / 5.3, 4 of 7 end early | 55.8 (114) / 7.3, 97 s, 7/12 full | | | 93.9 (336) / 5.2, 110 s, 10/12 full |
+| box Scout v ALARM, 24 runs: ALARM / Scout | 63, 77, 37 / 9, 6, 7 | 19.2 (126) / 4.6, 88 s, 6/24 | 20.2 / 4.7, 87 s | 21.2 / 4.8, 89 s | 22.2 (140) / 5.1, 83 s, 4/24 |
+| Octagon Scout v ALARM, 24 runs: ALARM / Scout | 24 (944), Scout out at 67 s | 12.2 (59) / 2.7, 74 s, 7/24 | 8.8 / 2.3, 67 s | 8.9 / 1.7, 67 s | 10.5 (55) / 2.7, 72 s, 4/24 |
+| box Razor v FlapJack, six runs: Razor / FlapJack | 3 (40) / 1 (12) | 3.8 (109) / 1.0 (106), 106 s, 4/6 | | | 7.5 (165) / 1.3 (158), 105 s, 4/6 |
+
+Across the Compressor's 12 runs a robot goes over in all 12 before and in 6
+after. The Octagon's two halves of 12 scatter more than the variants differ
+(ALARM 13.8 / 10.7 before, 9.4 / 11.6 after, 5.9 / 11.8 with the gate only).
+A first version of this table showed the box ALARM falling by a third: its
+"before" binary had been built with an experimental per-body gate left in the
+working tree, not ce1aa67; with the switches reproducing ce1aa67 bit for bit
+there is no drop.
+
+**Still open.** The live Compressor's flips and early ends (four of seven live
+fights; ours now 2 of 12 runs end early): how the robots go over (ledge falls,
+the wedge's lift) was not traced; ours rarely flips without the hinge bug.
+The box replay's 18 % surplus of events under the per-collidable rule (a live
+event-registration capture of Scout v ALARM would settle which of their
+components are registered). The arena's hazard bodies are registered too
+(nine in the Compressor) and are not in ours.

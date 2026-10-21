@@ -8,6 +8,10 @@
 //! centre (FlexTop's table, docs/29 section 12j).
 use ra2sim::{GameType, Match, MatchConfig, MatchState, RobotEntry};
 
+fn info_parent(rig: &ra2sim::rig::RobotRig, p: usize) -> usize {
+    rig.parts[p].parent.unwrap_or(0)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let secs: f32 = a[3].parse()?;
@@ -79,6 +83,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         line += &format!(" s{p} {:.2}", m.duel.physics.slider_offset(j));
                     } else if info.use_kind == ra2sim::rig::JointUse::Burst {
                         line += &format!(" h{p} {:.2}", m.duel.physics.hinge_angle(j));
+                        // The part's rotation relative to its parent, as a
+                        // rotation vector in the parent's frame (a burst
+                        // hinge should turn about its axis only).
+                        if let (Some(pa), Some(pb)) = (
+                            m.duel.physics.state(r.parts[info_parent(&r.rig, p)].body),
+                            m.duel.physics.state(part.body),
+                        ) {
+                            let q = pa.rotation.inverse() * pb.rotation;
+                            let rest = r.rig.part_local[r.rig.parts[p].root];
+                            let rest = glam::Quat::from_mat4(&rest);
+                            let q = q * rest.inverse();
+                            let q = if q.w < 0.0 { -q } else { q };
+                            let (ax, an) = q.to_axis_angle();
+                            let v = ax * an;
+                            line += &format!(" rel({:.2},{:.2},{:.2})", v.x, v.y, v.z);
+                            let dw =
+                                pa.rotation.inverse() * (pb.angular_velocity - pa.angular_velocity);
+                            line += &format!(" dw({:.1},{:.1},{:.1})", dw.x, dw.y, dw.z);
+                        }
                     }
                 }
             }
