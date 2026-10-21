@@ -441,16 +441,6 @@ impl Session {
         self.return_to_hq()
     }
 
-    /// The pause dialog's `End Match` in an event: the round is not played
-    /// and nothing is recorded; the bracket comes back with the same opponent.
-    pub fn abandon_match(&mut self) -> Result<(), String> {
-        if !matches!(self.screen, Screen::Match(_)) {
-            return Err("no match is on screen".to_string());
-        }
-        ra2script::set_paused(false);
-        refresh_event_screen(self)
-    }
-
     /// Add `damage` to the player's match report before the career award. This
     /// is an evidence/test knob (`--report-damage`), not a game rule: the
     /// shipped match in this environment reports zero damage.

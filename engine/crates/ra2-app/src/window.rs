@@ -1085,7 +1085,6 @@ impl ApplicationHandler for App {
                 if let Some(hq) = &mut self.hq {
                     // The event match's own HUD and pause dialog come first; the
                     // results' Continue is the event flow's.
-                    let mut abandon = false;
                     let mut open_options = false;
                     if let Some(session) = hq.match_session_mut() {
                         if session.matched.state() != MatchState::Results {
@@ -1098,7 +1097,12 @@ impl ApplicationHandler for App {
                                         event_loop.exit();
                                         return;
                                     }
-                                    Some("end match button") => abandon = true,
+                                    // Result 4 in an event (`0x475ee0`): the
+                                    // judges decide now and the round goes on
+                                    // to its results and award.
+                                    Some("end match button") => {
+                                        session.end_for_judges();
+                                    }
                                     Some("options button") => open_options = true,
                                     _ => {}
                                 }
@@ -1110,18 +1114,11 @@ impl ApplicationHandler for App {
                                 self.request_redraw();
                                 return;
                             }
-                            if !abandon {
-                                self.request_redraw();
-                                return;
-                            }
+                            self.request_redraw();
+                            return;
                         }
                     }
-                    let result = if abandon {
-                        hq.abandon_match().map(|_| true)
-                    } else {
-                        hq.click(point)
-                    };
-                    if let Err(error) = result {
+                    if let Err(error) = hq.click(point) {
                         self.fail(event_loop, error);
                         return;
                     }
