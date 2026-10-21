@@ -877,18 +877,14 @@ The "n/a"/36-56 rows of the "before" column are the Teams.txt reading bug above
 ### Gaps
 
 * The award robot's yaw drift; the bracket's entrant order (the original draws
-  its opponents from its own random state; ours is the oracle schedule); the
-  bracket's top and bottom black bands are fully opaque in the original.
-* **Repairs**: the original draws the robot top-down in the `3d view group`
-  (ours shows the dark placeholder), and the window's wood border is a 2 px tan
-  frame (ours a thin cream line). The headless run lists simulated damage; the
-  original's robot was undamaged.
+  its opponents from its own random state; ours is the oracle schedule); both are
+  still open after 9.21 (the black bands turned out to be already equal).
+* **Repairs** (see 9.21): the robot view, the border and the undamaged state are done.
 * **One event at a time**: clicking another event while one is in progress opens a
   message box (caption `Robot Arena 2`, OK) whose body was empty in the capture,
   and the original then stopped responding (CPU busy, no repaint) twice in a row
   under Wine. Whether that is the Wine/Frida setup or the exe was not settled;
   ours shows the recovered text (`ONE_EVENT_AT_A_TIME`).
-* The F1 reminder's key bars are inset 2-3 px per cell in the original.
 * Tool notes: after any `frida` timeout the next `ra2_drive.py` call works only
   once `frida-server` is restarted; never `pkill -f frida` (it matches the shell
   and kills the sandbox); a `flatpak enter` helper left from a killed attach keeps
@@ -902,3 +898,61 @@ The "n/a"/36-56 rows of the "before" column are the Teams.txt reading bug above
 ../local/game -newer <stamp>` printed nothing. New tests: `team::tests::the_originals_own_save_with_a_schedule_parses_and_round_trips`,
 `playthrough::edit_team_shows_the_teams_own_record_and_ok_rewrites_it`; the options dropdown test
 now expects the `WxHxDepth` rows and the watch/orbit/static order.
+
+## 9.21 Round 5 (`fx/polish`, 2026-10-21): repairs, borders, centred groups, F1 grid, workshop panel
+
+Numbers are `tools/oracle/fidelity.py --renderer app` (ours vs the original, 1024x768), before = `fidelity`
+c014140 + the harness fix, after = this branch. Nothing new was captured from the original this round.
+
+* **Repairs (`0x46ce50`, `teamhq/repairs.gib`).** The `3d view group` (`repairs 3d placeholder`, "show bot needing
+  repairs here") now shows the entered robot straight down, nose up, on a (25, 25, 25) backing (measured in the
+  reference), drawn over the placeholder by `Session::prepare_repairs` / `build_mode::robot_top_view` (the lab's
+  own view). The original's robot is a different design (the capture's team), so the picture differs inside the
+  box. An empty bench opens with the 30:00 clock (`FUN_004d62a0`; the reference reads `30:00` with no rows).
+  The harness state is undamaged: `ra2-app --hq --simulate-event N --bench-undamaged` opens the bench with no
+  pending repairs (fidelity.py passes it). MAE 9.97 -> 5.63 (with the offsets below; 10.05 with only the robot).
+* **`Border` with `Width >= 2`.** Every ring is `Outer` (the repair bench's wood frame, `Width 2`, `Inner 1 1 1 1`,
+  `Outer 0.55 0.45 0.3`, is two pixels of (140, 114, 76) in the reference, no white one), and its `Background`
+  stretches over the frame grown by the border (`ra2ui::background_fill`): the wood tile phase then matches
+  (shift search 1.0 MAE at (+1, +2) became 0.9 at (-1, 0), i.e. only the next item). Inventory 1.85 -> 1.75,
+  event join 4.76 -> 4.50, events 6.01 -> 5.91.
+* **Centred groups anchor in whole pixels** (`ra2ui::sized`): a `Group`/`Window` with an anchor places itself at
+  `parent + position - trunc(anchor * trunc(size))`. Measured, not read from the exe: `main group` of the bench
+  (0.9 of 1024 = 921.6 wide at `Position 0.5`) starts at 52 (512 - 460), not 51.2, and every widget inside it was
+  one pixel left of the reference; the F1 window had the same +1. Over the 104 app fixtures (mean 3.68 -> 3.58):
+  exhibition settings 2.65 -> 2.45, arena list 1.57 -> 1.45, robots 0.95 -> 0.75, deathmatch 2.57 -> 2.36,
+  pick-ai 2.15 -> 1.95, team select 1.29 -> 0.92, new team 1.33 -> 0.96, bot lab 4.8-6.0 -> 4.5-5.8, bracket 7.15 /
+  7.01 -> 6.21 / 6.00, repairs 8.66 (with the border) -> 5.63, F1 9.31 -> 6.83. Worse: `teamhq-events` 5.91 -> 6.36
+  and the event join window 4.50 -> 4.84 (the cells of those grids sit on other rules). **This is the cause of the
+  exhibition screens' remaining 2-3 MAE layout offset** (item 6): the box's width is fractional, the original
+  halves a truncated width. Tried and rejected: truncating sizes and rounding every position (3.77), applying the
+  rule to every widget kind (the standings background lost 2.67 -> 4.47), the vertical axis (events 7.0).
+* **F1 reminder grid.** The nine cell lines are one pixel each (lines at x 388, 471, 554, 637 and y 395, 461 in the
+  capture: the cell is `floor(grid / 3)`, 83 px), not a double line; a control's cell sits one pixel inside its
+  line (`BufferWidth 1`), so the key bars are 80 px in the 83 px pitch (ours were 82-83). Lines are pixel-exact.
+* **Workshop (Bot Lab).** The synthetic text panel (parts list, `Save as:` row, tab text rows) under the robot view
+  is gone from the player's lab: `flow::open_workshop` and `window::run_build` call
+  `Builder::apply_debug_panel_default`, which leaves the robot view filling the screen's own 3D placeholder (the
+  harness's `view_only`). `--debug-panel` brings the panel back; the scripted `--build --out` demo keeps it because
+  it drives the model through its rows. Test `build_mode::the_player_route_hides_the_synthetic_panel_unless_asked`.
+  The bot-lab MAE rows are unchanged by this (the harness already ran view-only).
+* **Award robot yaw: not done.** `FUN_0046e710` builds the robot with `FUN_00439be0` -> `FUN_004a5c40`, `FUN_004fa890`
+  (the AI-robot builder of 9.17), so the pad robot is an AI player of the running arena; `event_results.py` has
+  no per-tick code that turns it (`Tick` only counts to 3.5). The four award captures show different yaws and
+  positions (sampled at unknown times), so a rate cannot be read from them. The likely driver is the AI idling
+  without a target; verifying it needs timed captures of the award scene (not taken).
+* **Bracket: not done.** Measured the bands: the top black band is already opaque (0 in both), the bottom band
+  differs by 3-6 levels at y 676-692 only, below any visible difference. The entrant order is drawn by
+  `FUN_004695a0` from the engine LCG at `0x726d58`, whose state at that moment depends on every earlier draw
+  (particles, menus, the schedule); it is not determinable from the code, only fittable per capture.
+* **Flamethrower flame: not done** (docs/37: the weapon's gameplay is not in the sim, so an emitter would have
+  nothing to follow).
+* **Process note.** Career-saving harness modes (`--hq --simulate-event`) must run on a scratch install; before the
+  harness fix two runs of this round wrote the real install's career (restored by the coordinator).
+
+### 9.21 Gate
+
+`cargo fmt --all --check` and clippy (`-D warnings`) clean; `cargo test --release --offline --workspace
+--no-fail-fast` **596 passed, 0 failed**; `find ../local/game -newer <stamp>` printed nothing. The anchor rule
+is limited to centred (0 < anchor < 1) groups after two `ra2ui` tests (the off-screen count and the bottom-right
+step layer) failed with it on every anchor.

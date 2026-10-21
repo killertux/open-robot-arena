@@ -133,6 +133,9 @@ pub struct Options {
     /// Evidence/test knob: damage added to the player's match report before the
     /// career award. Zero by default; see `cli::Args::report_damage`.
     pub report_damage: f32,
+    /// Harness knob (`--bench-undamaged`): the repair bench opens with no
+    /// pending repairs, as the original's did for an undamaged robot.
+    pub bench_undamaged: bool,
 }
 
 impl Options {
@@ -162,6 +165,7 @@ impl Options {
             size,
             seconds,
             report_damage,
+            bench_undamaged: false,
         })
     }
 }
@@ -325,6 +329,8 @@ pub struct Session {
     last_round: Option<RoundOutcome>,
     /// Evidence/test damage added to the player's report before the award.
     report_damage: f32,
+    /// See [`Options::bench_undamaged`].
+    bench_undamaged: bool,
     /// The repair bench was opened between rounds: `finished button` returns to
     /// the bracket, not the HQ.
     repairs_after_round: bool,
@@ -335,6 +341,9 @@ pub struct Session {
     /// The screen the windows are laid out on (the window's size; the
     /// 1280x1005 design size for the headless evidence frames).
     layout: [f32; 2],
+    /// The repair bench's robot, drawn straight down for the `3d view group`
+    /// (`prepare_repairs`): width, height, RGBA pixels.
+    repairs_view: Option<(u32, u32, Vec<u8>)>,
 }
 
 impl Session {
@@ -356,10 +365,56 @@ impl Session {
             last_report: None,
             last_round: None,
             report_damage: 0.0,
+            bench_undamaged: false,
             repairs_after_round: false,
             player_drives: false,
             layout: SHELL_SIZE,
+            repairs_view: None,
         })
+    }
+
+    /// Draw the robot needing repairs, straight down on black, for the bench's
+    /// `3d view group` (`repairs.gib`: `repairs 3d placeholder`, "show bot
+    /// needing repairs here"). The renderer is the caller's, so call this
+    /// before [`Session::scene`] on the bench; it is a no-op elsewhere and
+    /// when the view is already drawn at this size.
+    pub fn prepare_repairs(&mut self, renderer: &Renderer) -> Result<(), String> {
+        let Screen::Repairs(screen) = &self.screen else {
+            return Ok(());
+        };
+        let placed = screen.placements(self.layout, Some(self.assets.faces()));
+        let Some(frame) = repairs::placeholder_frame(&placed) else {
+            return Ok(());
+        };
+        let (w, h) = (
+            (frame.x + frame.w).floor() as u32 - frame.x.floor() as u32,
+            (frame.y + frame.h).floor() as u32 - frame.y.floor() as u32,
+        );
+        if w < 8 || h < 8 || matches!(&self.repairs_view, Some((vw, vh, _)) if (*vw, *vh) == (w, h))
+        {
+            return Ok(());
+        }
+        let player = self.career.player();
+        let path = player_robot_path(&self.game, self.career.player_slot, player.event_robot);
+        if !path.is_file() {
+            // No robot entered (`event_robot` -1): the box keeps its backing.
+            self.repairs_view = None;
+            return Ok(());
+        }
+        let library =
+            ra2ui::workshop::library::GameLibrary::open(&self.game).map_err(|e| e.to_string())?;
+        let build = ra2ui::workshop::build::Build::load(&library, &path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.repairs_view = crate::build_mode::robot_top_view(
+            renderer,
+            &self.game,
+            &build,
+            [25.0 / 255.0; 3], // the reference's backing is (25, 25, 25)
+            w,
+            h,
+        )?
+        .map(|pixels| (w, h, pixels));
+        Ok(())
     }
 
     /// Let the player drive the entered robot in the event's matches, as the
@@ -554,12 +609,21 @@ impl Session {
     /// Open `teamhq/repairs.gib` from the career's current pending list. A
     /// healthy roster opens the screen's own empty state (no rows, `0:00`).
     pub fn open_repairs(&mut self) -> Result<(), String> {
+        if self.bench_undamaged {
+            self.career.repairs.clear();
+        }
         let selected = self
             .repairs()
             .map(|screen| screen.selected())
             .unwrap_or_default();
         let rows = self.repair_rows();
-        let clock = self.repair_clock();
+        // An empty bench still shows the policy's 30-minute clock when it
+        // opens (the original's reference frame reads 30:00 with no rows).
+        let clock = if self.career.repairs.is_empty() {
+            repairs::format_time(30.0 * 60.0)
+        } else {
+            self.repair_clock()
+        };
         let mut screen = Repairs::open(&self.game.join("UI"), "Round 1 Repairs", rows, &clock)?;
         screen.set_selected(selected);
         self.screen = Screen::Repairs(Box::new(screen));
@@ -1090,6 +1154,7 @@ impl Session {
             assets,
             screen,
             layout,
+            repairs_view,
             ..
         } = self;
         match screen {
@@ -1115,7 +1180,36 @@ impl Session {
             }
             Screen::Repairs(screen) => {
                 let placed = screen.placements(*layout, Some(assets.faces()));
-                Ok((assets.scene(&placed, size), false))
+                let mut scene = assets.scene(&placed, size);
+                if let (Some((w, h, pixels)), Some(frame)) =
+                    (repairs_view.as_ref(), repairs::placeholder_frame(&placed))
+                {
+                    // The robot sits in the placeholder, over its black backing
+                    // and under the group's one-pixel border (drawn last).
+                    let rect = ra2ui::Frame::new(
+                        frame.x.floor(),
+                        frame.y.floor(),
+                        (frame.x + frame.w).floor() - frame.x.floor(),
+                        (frame.y + frame.h).floor() - frame.y.floor(),
+                    );
+                    let texture = scene.textures.len();
+                    scene.textures.push(ra2_render::ui::UiTexture {
+                        label: "repairs robot".into(),
+                        width: *w,
+                        height: *h,
+                        rgba: pixels.clone(),
+                    });
+                    scene.quads.push(ra2_render::ui::UiQuad {
+                        rect,
+                        corners: None,
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                        color: [1.0, 1.0, 1.0, 1.0],
+                        texture,
+                        alpha: false,
+                        clip: Some(rect),
+                    });
+                }
+                Ok((scene, false))
             }
             Screen::Match(session) => Ok((session.scene()?, true)),
         }
@@ -1167,6 +1261,7 @@ impl Session {
         out: &Path,
         name: &str,
     ) -> Result<(), String> {
+        self.prepare_repairs(renderer)?;
         let (scene, three_d) = self.scene()?;
         if three_d {
             self.render_3d(
@@ -2374,6 +2469,7 @@ pub fn run_headless(options: Options) -> Result<(), String> {
     session.set_layout(options.size);
     session.set_event_seconds(options.seconds);
     session.set_report_damage(options.report_damage);
+    session.bench_undamaged = options.bench_undamaged;
     println!(
         "HQ: {:?}, season {} (zero-based), {} points, rank {}, {} prizes",
         session.career.team_name(),

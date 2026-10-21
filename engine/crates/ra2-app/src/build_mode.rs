@@ -73,6 +73,17 @@ pub const DESIGNS: &str = "Robot Designs";
 /// The game's own custom-texture folder.
 pub const CUSTOM_TEXTURES: &str = "Custom Textures";
 
+/// `--debug-panel`: draw the synthetic edit panel (a text list of parts, mass
+/// and the save name) under the robot view. The original's lab has no such
+/// list, so the player-facing screens leave it off; the scripted harness runs
+/// keep it because they drive the model through its rows.
+static DEBUG_PANEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turn the synthetic panel on for the player-facing screens (`--debug-panel`).
+pub fn set_debug_panel_default(on: bool) {
+    DEBUG_PANEL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// `--build` options that the window and the offscreen runner share.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -2495,6 +2506,14 @@ impl Builder {
     }
 
     /// Recompute the panel and every list the current screen asks for.
+    /// The player-facing lab: the robot view fills the screen's own 3D
+    /// placeholder and no synthetic panel is drawn, unless `--debug-panel`.
+    pub fn apply_debug_panel_default(&mut self) -> Result<(), String> {
+        self.view_only = !DEBUG_PANEL.load(std::sync::atomic::Ordering::Relaxed);
+        self.preview = None;
+        self.refresh()
+    }
+
     pub fn refresh(&mut self) -> Result<(), String> {
         self.revision = self.revision.wrapping_add(1);
         self.refresh_overview();
@@ -3627,6 +3646,88 @@ impl Builder {
     }
 }
 
+/// A robot seen straight down, nose up the screen, over `background`: the
+/// original's "3d view group" on the repair bench (`repairs.gib`, `3d view
+/// group` holding `repairs 3d placeholder`) and the lab's own view. Pixels are
+/// RGBA, `width x height`; `None` when the design has nothing to draw.
+pub fn robot_top_view(
+    renderer: &Renderer,
+    game: &Path,
+    build: &Build,
+    background: [f32; 3],
+    width: u32,
+    height: u32,
+) -> Result<Option<Vec<u8>>, String> {
+    let library = GameLibrary::open(game).map_err(|e| e.to_string())?;
+    let bot = build.to_bot();
+    let world = build.transforms();
+    let chassis = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
+    let mut owned: Vec<(usize, Vec<DrawItem>)> = Vec::new();
+    for i in 1..bot.components.len() {
+        let Some(info) = build.component_info(i) else {
+            continue;
+        };
+        let Some(def) = info.def.as_ref() else {
+            continue;
+        };
+        let Some(scene) = library.load_component_mesh(def) else {
+            continue;
+        };
+        let dir = library
+            .component_mesh_path(def)
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| game.join("Components"));
+        owned.push((
+            i,
+            ra2_render::scene_items(&scene, Mat4::IDENTITY, &dir, &info.name),
+        ));
+    }
+    let mut groups: Vec<RenderGroup<'_>> = Vec::new();
+    if !chassis.is_empty() && !world.is_empty() {
+        groups.push(RenderGroup {
+            items: &chassis,
+            model: world[0],
+        });
+    }
+    for (i, items) in &owned {
+        if let Some(model) = world.get(*i) {
+            groups.push(RenderGroup {
+                items,
+                model: *model,
+            });
+        }
+    }
+    if groups.is_empty() {
+        return Ok(None);
+    }
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for group in &groups {
+        for item in group.items {
+            for v in &item.vertices {
+                let p = group.model.transform_point3(Vec3::from(v.pos));
+                min = min.min(p);
+                max = max.max(p);
+            }
+        }
+    }
+    let center = (min + max) * 0.5;
+    let radius = ((max - min).length() * 0.5).max(0.6);
+    let eye = center + Vec3::new(0.0, radius * 3.0, 0.0);
+    let view = ra2_render::look_at_lh(eye, center, Vec3::Z);
+    let proj = ra2_render::perspective_lh(
+        45f32.to_radians(),
+        width as f32 / height as f32,
+        0.05,
+        radius * 30.0,
+    );
+    renderer.set_background(background);
+    renderer
+        .render_groups(&groups, proj * view, width, height)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
 /// The control grid's cell size: the board is three cells across and three
 /// down, each a third of the grid's frame (capture: rules at x 556, 698, 840,
 /// 982 and y 386, 499, 612 on a 426 x 339 px grid). The file's own
@@ -4290,6 +4391,20 @@ mod tests {
                 return None;
             }
         }
+    }
+
+    /// The player-facing lab draws no synthetic text panel (the original's has
+    /// none); the harness keeps it unless the player route is applied.
+    #[test]
+    fn the_player_route_hides_the_synthetic_panel_unless_asked() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        assert!(!builder.view_only, "the scripted harness keeps its panel");
+        set_debug_panel_default(false);
+        builder.apply_debug_panel_default().unwrap();
+        assert!(builder.view_only);
+        // The robot view fills the placeholder: no strip is cut off for rows.
+        assert_eq!(builder.panel.preview.w, builder.placeholder_frames().0.w);
     }
 
     /// A palette click only selects the part; Attach plus a drag and a click

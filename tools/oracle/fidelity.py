@@ -420,7 +420,7 @@ def hq_frame(fx, tmp):
         d = os.path.join(tmp, "hq%d" % row)
         os.makedirs(d, exist_ok=True)
         p = subprocess.run([APP, "--game", GAME, "--hq", "--simulate-event", str(row), "--out", d,
-                            "--size", "%dx%d" % SIZE],
+                            "--bench-undamaged", "--size", "%dx%d" % SIZE],
                            capture_output=True, text=True, env=env(), timeout=900)
         _FRAMES[("hq", row)] = d if p.returncode == 0 else None
     d = _FRAMES[("hq", row)]

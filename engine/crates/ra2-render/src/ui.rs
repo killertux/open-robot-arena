@@ -835,11 +835,10 @@ fn border_quads(p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
     };
     let f = p.frame;
     for ring in 0..width.max(0) {
-        let t = if width > 1 {
-            ring as f32 / (width - 1) as f32
-        } else {
-            0.0
-        };
+        // Every ring is `Outer`: the original's 2-pixel wood frame on the repair
+        // bench (`Width 2`, `Inner 1 1 1 1`, `Outer 0.55 0.45 0.3`) is two pixels
+        // of (140, 114, 76) with no white one (reference event-repairs).
+        let t = 0.0;
         let color: [f32; 4] = std::array::from_fn(|i| outer[i] + (inner[i] - outer[i]) * t);
         if color[3] <= 0.0 {
             continue;
