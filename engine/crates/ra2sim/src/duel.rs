@@ -33,11 +33,43 @@ pub struct BotSetup {
     pub spawn: Option<[f32; 2]>,
 }
 
-/// A SmartZone is a phantom, and a body is in it when it *overlaps* it: live,
-/// ALARM drives past the Octagon's `hellzone2` with its chassis within 0.1 m of
-/// it (the world's collision tolerance) and the hellraiser never rises (docs/29
-/// section 12d). The robots' own zones are the same phantoms (docs/29 §12g).
-const ZONE_TOLERANCE: f32 = 0.0;
+/// A collision piece as a zone sees it: the part it rides, its points and,
+/// for a mesh piece, its triangles.
+type ZonePiece<'a> = (usize, &'a [Vec3], Option<&'a [[u32; 3]]>);
+
+/// What a SmartZone's phantom can see of a component: each collision piece
+/// (its rotor's riding `rotor_part`, the rest `own_part`) with its triangles
+/// when Havok collides it as a mesh, or its hull when it has no pieces.
+///
+/// A body is in a zone when it *overlaps* it: live, ALARM drives past the
+/// Octagon's `hellzone2` with its chassis within 0.1 m of it (the world's
+/// collision tolerance) and the hellraiser never rises (docs/29 section 12d),
+/// and the agents only list a phantom's pair at a negative distance; a mesh
+/// piece overlaps only where one of its triangles does (§12i,
+/// [`crate::hazards::box_touches_piece`]). The robots' own zones are the same
+/// phantoms (docs/29 §12g).
+fn zone_pieces(
+    c: &crate::rig::Component,
+    own_part: usize,
+    rotor_part: usize,
+) -> Vec<ZonePiece<'_>> {
+    let h = &c.havok;
+    if h.collision.is_empty() && h.rotor_collision.is_empty() {
+        return vec![(own_part, c.hull_points.as_slice(), None)];
+    }
+    h.collision
+        .iter()
+        .enumerate()
+        .map(|(k, p)| {
+            let mesh = h.collision_mesh.get(k).and_then(|m| m.as_deref());
+            (own_part, p.as_slice(), mesh)
+        })
+        .chain(h.rotor_collision.iter().enumerate().map(|(k, p)| {
+            let mesh = h.rotor_collision_mesh.get(k).and_then(|m| m.as_deref());
+            (rotor_part, p.as_slice(), mesh)
+        }))
+        .collect()
+}
 
 /// The handle a hidden prop's slot carries while its body is gone.
 ///
@@ -955,8 +987,14 @@ impl Duel {
                     // What the phantom can see: the component's collision
                     // pieces (a power cell or fitting collides with nothing).
                     let collides = c.role.is_physical() && c.role != crate::rig::Role::Power;
-                    let pieces = c.zone_points();
-                    if collides && zone.touches_points(w[ci], &pieces, ZONE_TOLERANCE) {
+                    let to_zone = zone.inv * w[ci];
+                    if collides
+                        && zone_pieces(c, 0, 0).into_iter().any(|(_, pts, mesh)| {
+                            crate::hazards::box_touches_piece(
+                                to_zone, zone.min, zone.max, pts, mesh,
+                            )
+                        })
+                    {
                         inside = true;
                         by.get_or_insert(ci);
                         if ci == 0 {
@@ -1071,12 +1109,18 @@ impl Duel {
                         continue;
                     }
                     // One reading per collidable of the other robot that
-                    // overlaps the zone (`GetZoneContents` walks the zone's
-                    // overlapping pairs; live, ALARM's sensor counts up to six
-                    // for the Scout, `aistate-scout-alarm-box__live__000`),
-                    // `chassis` when it belongs to the chassis body. A motor's
-                    // rotor rides the body it drives.
+                    // overlaps the zone (`GetZoneContents` walks the phantom
+                    // list for the zone's pairs and reads each other
+                    // collidable's tag, `robot << 4 | chassis`; live, ALARM's
+                    // sensor counts up to six for the Scout,
+                    // `aistate-scout-alarm-box__live__000`). `chassis` when it
+                    // is the chassis body's own collidable; a motor's rotor
+                    // rides the body it drives. The other robot's phantoms are
+                    // in that list too (docs/29 §12i, `zonelist-*__live__*`):
+                    // its wheels' traction rings and its SmartZones, all
+                    // tagged non-chassis.
                     let other = &self.robots[o];
+                    let mut hits: Vec<(usize, bool)> = Vec::new();
                     for (ci, c) in other.rig.components.iter().enumerate() {
                         if !other.attached[ci]
                             || !c.role.is_physical()
@@ -1091,35 +1135,49 @@ impl Duel {
                             .iter()
                             .position(|q| q.joint.is_some_and(|j| j.motor == ci))
                             .unwrap_or(own_part);
-                        let pieces: Vec<(usize, &Vec<Vec3>)> =
-                            if c.havok.collision.is_empty() && c.havok.rotor_collision.is_empty() {
-                                vec![(own_part, &c.hull_points)]
-                            } else {
-                                c.havok
-                                    .collision
-                                    .iter()
-                                    .map(|p| (own_part, p))
-                                    .chain(c.havok.rotor_collision.iter().map(|p| (rotor_part, p)))
-                                    .collect()
-                            };
-                        for (k2, (part, pts)) in pieces.into_iter().enumerate() {
-                            if !crate::hazards::box_touches_points(
-                                to_zone * w[ci],
-                                zone.min,
-                                zone.max,
-                                pts,
-                                ZONE_TOLERANCE,
-                            ) {
-                                continue;
+                        let to = to_zone * w[ci];
+                        for (k2, (part, pts, mesh)) in
+                            zone_pieces(c, own_part, rotor_part).into_iter().enumerate()
+                        {
+                            if crate::hazards::box_touches_piece(to, zone.min, zone.max, pts, mesh)
+                            {
+                                hits.push((ci * 64 + k2, part == 0));
                             }
-                            let key = (r, k, o, ci * 64 + k2);
-                            readings.push((o as i32 + 1, part == 0));
-                            now.insert(key);
-                            if !self.brain_zone_inside.contains(&key) {
-                                events.push((r, 1, id, o as i32 + 1, part == 0));
-                            }
-                            chassis_of.insert(key, part == 0);
                         }
+                        for (k2, (pts, _)) in c.havok.phantom_pieces.iter().enumerate() {
+                            if crate::hazards::box_touches_piece(to, zone.min, zone.max, pts, None)
+                            {
+                                hits.push((ci * 64 + 32 + k2, false));
+                            }
+                        }
+                    }
+                    for (zi, z) in other.rig.smart_zones.iter().enumerate() {
+                        if !other.attached.get(z.component).copied().unwrap_or(false) {
+                            continue;
+                        }
+                        let corners: Vec<Vec3> = (0..8)
+                            .map(|q| {
+                                Vec3::new(
+                                    if q & 1 == 0 { z.min.x } else { z.max.x },
+                                    if q & 2 == 0 { z.min.y } else { z.max.y },
+                                    if q & 4 == 0 { z.min.z } else { z.max.z },
+                                )
+                            })
+                            .collect();
+                        let to = to_zone * w[z.component] * z.offset;
+                        if crate::hazards::box_touches_piece(to, zone.min, zone.max, &corners, None)
+                        {
+                            hits.push((usize::MAX - zi, false));
+                        }
+                    }
+                    for (piece, chassis) in hits {
+                        let key = (r, k, o, piece);
+                        readings.push((o as i32 + 1, chassis));
+                        now.insert(key);
+                        if !self.brain_zone_inside.contains(&key) {
+                            events.push((r, 1, id, o as i32 + 1, chassis));
+                        }
+                        chassis_of.insert(key, chassis);
                     }
                 }
             }

@@ -90,6 +90,89 @@ pub fn box_touches_points(
     })
 }
 
+/// Whether a collision piece is in a zone the way Havok's phantom finds it.
+///
+/// The phantom's list (`det + 0x100`, cleared with the contacts every
+/// detection, `0x542660`) only takes a pair whose closest-point query comes
+/// out *negative*: the convex agent (`0x544820`) and the convex-mesh agent
+/// (`0x545b50`) push a pair with a phantom on either side there when the GJK
+/// distance is below zero, and report nothing for one merely within the
+/// tolerance. The convex-mesh agent runs that query per *triangle* the MOPP
+/// finds near the convex piece, so a mesh piece (a chassis, a
+/// `SIMULATION_GEOMETRY 6` part) is in the zone only while one of its
+/// triangles crosses it: a zone wholly inside a mesh body's volume sees
+/// nothing of it. A convex piece is its hull.
+pub fn box_touches_piece(
+    to_box: Mat4,
+    min: Vec3,
+    max: Vec3,
+    points: &[Vec3],
+    mesh: Option<&[[u32; 3]]>,
+) -> bool {
+    match mesh {
+        Some(tris) if !tris.is_empty() => box_touches_triangles(to_box, min, max, points, tris),
+        _ => box_touches_points(to_box, min, max, points, 0.0),
+    }
+}
+
+/// Whether any of the triangles (indices into `points`, carried into the
+/// box's frame by `to_box`) overlaps the box `min..max`: the separating-axis
+/// test on the box's three axes, the triangle's normal and the nine edge
+/// crossings, exact for a triangle against a box.
+pub fn box_touches_triangles(
+    to_box: Mat4,
+    min: Vec3,
+    max: Vec3,
+    points: &[Vec3],
+    tris: &[[u32; 3]],
+) -> bool {
+    let centre = (min + max) * 0.5;
+    let half = (max - min) * 0.5;
+    let local: Vec<Vec3> = points
+        .iter()
+        .map(|p| to_box.transform_point3(*p) - centre)
+        .collect();
+    let separated = |axis: Vec3, v: &[Vec3; 3]| -> bool {
+        if axis.length_squared() < 1e-12 {
+            return false;
+        }
+        let r = half.x * axis.x.abs() + half.y * axis.y.abs() + half.z * axis.z.abs();
+        let d = [axis.dot(v[0]), axis.dot(v[1]), axis.dot(v[2])];
+        let lo = d[0].min(d[1]).min(d[2]);
+        let hi = d[0].max(d[1]).max(d[2]);
+        lo > r || hi < -r
+    };
+    tris.iter().any(|t| {
+        let Some(v) = (|| {
+            Some([
+                *local.get(t[0] as usize)?,
+                *local.get(t[1] as usize)?,
+                *local.get(t[2] as usize)?,
+            ])
+        })() else {
+            return false;
+        };
+        let e = [v[1] - v[0], v[2] - v[1], v[0] - v[2]];
+        if [Vec3::X, Vec3::Y, Vec3::Z]
+            .iter()
+            .any(|&a| separated(a, &v))
+        {
+            return false;
+        }
+        if separated(e[0].cross(e[1]), &v) {
+            return false;
+        }
+        for a in [Vec3::X, Vec3::Y, Vec3::Z] {
+            for ed in e {
+                if separated(a.cross(ed), &v) {
+                    return false;
+                }
+            }
+        }
+        true
+    })
+}
+
 /// Resolve the zones a script registered against the arena's own geometry.
 ///
 /// A name the model does not carry is skipped: the scripts register zones for
@@ -272,6 +355,48 @@ mod tests {
         assert!(zone.touches_points(at(2.31, 0.0, 0.0), &corners, 0.1));
         assert!(!zone.touches_points(at(2.2, 0.0, 0.0), &corners, 0.1));
         assert!(!zone.touches_points(at(3.5, 0.0, 0.0), &[], 0.1));
+    }
+
+    /// Havok's phantom sees a mesh piece only where one of its triangles
+    /// crosses the zone (`0x545b50`): a zone wholly inside a closed mesh sees
+    /// nothing of it, while the same piece as a convex hull fills the zone.
+    #[test]
+    fn a_zone_inside_a_mesh_body_sees_none_of_its_triangles() {
+        let (lo, hi) = (Vec3::splat(-1.0), Vec3::splat(1.0));
+        let pts: Vec<Vec3> = (0..8)
+            .map(|k| {
+                Vec3::new(
+                    if k & 1 == 0 { lo.x } else { hi.x },
+                    if k & 2 == 0 { lo.y } else { hi.y },
+                    if k & 4 == 0 { lo.z } else { hi.z },
+                )
+            })
+            .collect();
+        // The cube's twelve triangles.
+        let quads = [
+            [0, 1, 3, 2],
+            [4, 6, 7, 5],
+            [0, 4, 5, 1],
+            [2, 3, 7, 6],
+            [0, 2, 6, 4],
+            [1, 5, 7, 3],
+        ];
+        let tris: Vec<[u32; 3]> = quads
+            .iter()
+            .flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]])
+            .collect();
+        let (zmin, zmax) = (Vec3::splat(-0.3), Vec3::splat(0.3));
+        let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+        // Inside: the hull fills the zone, no triangle reaches it.
+        assert!(box_touches_piece(at(0.0), zmin, zmax, &pts, None));
+        assert!(!box_touches_piece(at(0.0), zmin, zmax, &pts, Some(&tris)));
+        // Across a face: both.
+        assert!(box_touches_piece(at(1.1), zmin, zmax, &pts, Some(&tris)));
+        assert!(box_touches_piece(at(1.1), zmin, zmax, &pts, None));
+        // Clear of it: neither, also not within a tolerance (a pair only
+        // enters the list overlapping).
+        assert!(!box_touches_piece(at(1.35), zmin, zmax, &pts, Some(&tris)));
+        assert!(!box_touches_piece(at(1.35), zmin, zmax, &pts, None));
     }
 
     #[test]

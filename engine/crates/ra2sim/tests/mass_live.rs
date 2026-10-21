@@ -1,7 +1,7 @@
 //! The Havok bodies' mass properties against the original, measured live
 //! (`docs/29-havok17-backend.md` section 12f).
 //!
-//! `tests/data/mass_live.tsv` holds, for 14 stock robots, the chassis body's
+//! `tests/data/mass_live.tsv` holds, for 17 stock robots, the chassis body's
 //! mass and centre of mass in the robot frame (`assembly-*__live__000`), and
 //! for five of them every wheel record's offset as `AddWheel` stored it
 //! (`magic-*__live__*`, record `+0x2c`, chassis frame).
