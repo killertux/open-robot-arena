@@ -252,7 +252,7 @@ hits stay near the floor. That is the damage scale of the combat side, flagged i
 
 * The Main UI request at the bell (section 3) and whether a Windows machine plays it.
 * `AddXtraSound`; arena material sounds for a hit on the static collider.
-* Weapon firesound levels of the cannon, flamethrower, magnet and hovercraft classes.
+* Weapon firesound levels of the cannon (the flamethrower: docs/37 section 6), flamethrower, magnet and hovercraft classes.
 * Impact loudness distribution (damage scale), the crowd it excites, and the restart
   cadence of the motor loops (ours stop/start about twice as often as the original's one per
   second per handle).

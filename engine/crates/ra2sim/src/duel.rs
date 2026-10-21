@@ -22,6 +22,71 @@ pub struct Debris {
 /// `BodyDesc::user_data` tag for flying parts.
 pub const USER_DEBRIS: u64 = 4;
 
+/// The damage of one flame-particle hit: `0x504d13` pushes `2.0` for
+/// `FUN_004148f0` (docs/37 section 6).
+pub const FLAME_DAMAGE: f32 = 2.0;
+
+/// The effects key of a robot's Flamethrower jet.
+fn flame_key(robot: usize, component: usize) -> u64 {
+    (1 << 41) | ((robot as u64) << 16) | component as u64
+}
+
+/// The robot a [`flame_key`] names.
+fn flame_owner(key: u64) -> usize {
+    ((key >> 16) & 0xffff) as usize
+}
+
+/// Where a ray enters an oriented box from outside, and the face it enters by
+/// (the normal facing the ray's origin). A ray that starts inside meets nothing:
+/// the original's cast does not hit a body it begins within.
+fn ray_box_entry(
+    origin: Vec3,
+    u: Vec3,
+    len: f32,
+    centre: Vec3,
+    half: Vec3,
+    rotation: glam::Quat,
+) -> Option<(f32, Vec3)> {
+    let inv = rotation.conjugate();
+    let o = inv * (origin - centre);
+    let d = inv * u;
+    let mut enter = f32::NEG_INFINITY;
+    let mut exit = len;
+    let mut axis_in = 0;
+    let mut sign_in = 1.0;
+    for axis in 0..3 {
+        let (o, d, h) = (o[axis], d[axis], half[axis]);
+        if d.abs() < 1e-9 {
+            if o.abs() > h {
+                return None;
+            }
+            continue;
+        }
+        let t1 = (-h - o) / d;
+        let t2 = (h - o) / d;
+        let (near, far, s) = if t1 < t2 {
+            (t1, t2, -1.0)
+        } else {
+            (t2, t1, 1.0)
+        };
+        if near > enter {
+            enter = near;
+            axis_in = axis;
+            sign_in = s;
+        }
+        exit = exit.min(far);
+        if enter > exit {
+            return None;
+        }
+    }
+    if enter <= 0.0 || enter > len {
+        return None;
+    }
+    let mut local = Vec3::ZERO;
+    local[axis_in] = sign_in;
+    Some((enter, rotation * local))
+}
+
 /// How to spawn one robot.
 #[derive(Clone, Debug)]
 pub struct BotSetup {
@@ -1748,7 +1813,83 @@ impl Duel {
                 );
             }
         }
-        self.fx.step(dt);
+        self.update_flamethrowers(dt);
+    }
+
+    /// The Flamethrowers' jets: each robot's emitters follow their nozzles, the
+    /// particles step, and every segment a flame particle covered is cast
+    /// against the other robots' components (`FUN_005bdc00` casts it, `0x504b90`
+    /// skips the robot's own parts and `0x504ca0` damages what it reaches with
+    /// `FUN_004148f0(robot, component, 2.0)`: the hazard path, no attacker, no
+    /// score). Docs/37 section 6.
+    fn update_flamethrowers(&mut self, dt: f32) {
+        let mut any = false;
+        for r in 0..self.robots.len() {
+            for jet in self.robots[r].flame_jets(&*self.physics) {
+                let key = flame_key(r, jet.robot_component);
+                self.fx.jet(key, jet.position, jet.velocity, jet.on);
+                any = true;
+            }
+        }
+        if !any {
+            self.fx.step(dt);
+            return;
+        }
+        // The parts the flames can hit, once for the step: every robot's
+        // components as oriented boxes, and whose they are.
+        let targets: Vec<Vec<(Vec3, Vec3, glam::Quat, bool)>> = self
+            .robots
+            .iter()
+            .map(|robot| {
+                let alive = robot.is_alive();
+                let worlds = robot.component_worlds(&*self.physics);
+                (0..robot.rig.components.len())
+                    .map(|i| {
+                        let (_, rotation, _) = worlds[i].to_scale_rotation_translation();
+                        (
+                            robot.component_sphere(&worlds, i).0,
+                            robot.rig.components[i].half_extents(),
+                            rotation,
+                            alive && robot.attached[i],
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        // `0x504b90` skips the jet's own robot; every other part is cast.
+        let mut hits: Vec<(usize, usize, Vec3)> = Vec::new();
+        self.fx.step_with(dt, &mut |key, from, to| {
+            let owner = flame_owner(key);
+            let d = to - from;
+            let len = d.length();
+            if len <= 1e-6 {
+                return None;
+            }
+            let u = d / len;
+            let mut best: Option<(f32, usize, usize, Vec3)> = None;
+            for (v, boxes) in targets.iter().enumerate() {
+                if v == owner {
+                    continue;
+                }
+                for (c, (centre, half, rotation, live)) in boxes.iter().enumerate() {
+                    if !live {
+                        continue;
+                    }
+                    if let Some((t, n)) = ray_box_entry(from, u, len, *centre, *half, *rotation) {
+                        if best.is_none_or(|(b, ..)| t < b) {
+                            best = Some((t, v, c, n));
+                        }
+                    }
+                }
+            }
+            let (t, v, c, n) = best?;
+            let point = from + u * t;
+            hits.push((v, c, point));
+            Some((point, n))
+        });
+        for (v, c, point) in hits {
+            self.apply_hit_with(0.0, None, v, c, FLAME_DAMAGE, point);
+        }
     }
 
     /// Turn the step's contact points into damage.
@@ -2009,12 +2150,29 @@ impl Duel {
         damage: f32,
         point: Vec3,
     ) -> bool {
+        let threshold = self.combat.apply_threshold;
+        self.apply_hit_with(threshold, attacker, victim, component, damage, point)
+    }
+
+    /// [`Duel::apply_hit_by`] with the smallest damage that is applied:
+    /// `FUN_00417330` gates a contact's hit at [`CombatConfig::apply_threshold`],
+    /// but `FUN_004148f0` (what a flame and `plus.damage` call) reaches
+    /// `FUN_004175b0` directly, so a 2.0 flame hit is applied.
+    pub fn apply_hit_with(
+        &mut self,
+        threshold: f32,
+        attacker: Option<(usize, usize)>,
+        victim: usize,
+        component: usize,
+        damage: f32,
+        point: Vec3,
+    ) -> bool {
         let by = attacker.map(|(_, by)| by);
         let attacker = attacker.map(|(a, _)| a);
         if victim >= self.robots.len()
             || component >= self.robots[victim].health.len()
             || !damage.is_finite()
-            || damage < self.combat.apply_threshold
+            || damage < threshold
         {
             return false;
         }
@@ -5170,5 +5328,187 @@ mod tests {
                 .fraction(Channel::Elec, &duel.robots[0].attached),
             0.0
         );
+    }
+
+    /// The two robots of a flame test: the flamethrower robot at x = -2 facing +x,
+    /// a stock Scout 2.2 m ahead of it facing back.
+    fn flame_duel(game: &std::path::Path, tag: &str, tank: bool) -> Duel {
+        let flame = crate::flame::fixture::flame_bot(game, tag, tank);
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        Duel::new(
+            &arena,
+            &[
+                BotSetup {
+                    path: flame.to_string_lossy().to_string(),
+                    yaw_deg: Some(270.0),
+                    spawn: Some([-2.0, 0.0]),
+                },
+                BotSetup {
+                    path: game.join("AI/Team0/Bot0.bot").to_string_lossy().to_string(),
+                    yaw_deg: Some(90.0),
+                    spawn: Some([0.2, 0.0]),
+                },
+            ],
+        )
+        .expect("a duel")
+    }
+
+    fn run_flame(duel: &mut Duel, seconds: f32) {
+        let dt = 1.0 / 60.0;
+        for _ in 0..(seconds / dt) as usize {
+            duel.step_direct(&[DriveInput::default(), DriveInput::default()], dt);
+        }
+    }
+
+    /// docs/37 section 6: the jet lights only while the power step's air and
+    /// electric scales are both above zero (`0x504790`), so a Flamethrower on a
+    /// robot with no air tank never emits (live: no emitter started on the tankless
+    /// Scout, `flame-open__live__000..003`; with a tank, `004` and `005`).
+    #[test]
+    fn a_flamethrower_with_no_air_tank_never_lights() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let mut duel = flame_duel(&game, "notank", false);
+        duel.robots[0].apply_inputs(&[("Flame".into(), 0, 100.0)]);
+        run_flame(&mut duel, 2.0);
+        let f = &duel.robots[0].flames[0].state;
+        assert!(f.firing, "the control board switched it on");
+        assert!(!f.emitting, "but there is no air to light it");
+        assert!(duel.damage_events.is_empty());
+    }
+
+    /// A flame particle that reaches another robot is `FUN_004148f0(robot,
+    /// component, 2.0)`: 2 hitpoints per hit, applied below the 10-point gate of a
+    /// contact, with no attacker and so no score (docs/19 section 1.3).
+    #[test]
+    fn a_jet_burns_the_other_robot_for_two_a_hit_and_scores_nothing() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let mut duel = flame_duel(&game, "tank", true);
+        let air0 = {
+            let r = &duel.robots[0];
+            r.energy.charge(crate::energy::Channel::Air, &r.attached)
+        };
+        duel.robots[0].apply_inputs(&[("Flame".into(), 0, 100.0)]);
+        run_flame(&mut duel, 2.0);
+        let f = &duel.robots[0].flames[0].state;
+        assert!(f.emitting && (f.scale - 1.0).abs() < 1e-3, "{f:?}");
+        let burns: Vec<_> = duel
+            .damage_events
+            .iter()
+            .filter(|e| e.victim == 1)
+            .collect();
+        assert!(!burns.is_empty(), "the Scout in front was never hit");
+        assert!(burns
+            .iter()
+            .all(|e| e.amount == FLAME_DAMAGE && e.attacker == -1));
+        assert!(
+            duel.damage_events.iter().all(|e| e.victim != 0),
+            "own parts are skipped"
+        );
+        assert!(duel.take_score_hits().is_empty());
+        // the jet draws 100 of air a second whatever its level (`0x504c50`)
+        let r = &duel.robots[0];
+        let used = air0 - r.energy.charge(crate::energy::Channel::Air, &r.attached);
+        assert!((used - 200.0).abs() < 25.0, "used {used} of air in 2 s");
+    }
+
+    /// `Fire burst` is a tenth of a second of flame (`0x504b60`: timer `0.1`, the
+    /// step after it runs out switches the emitter off).
+    #[test]
+    fn a_burst_is_a_tenth_of_a_second_of_flame() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let mut duel = flame_duel(&game, "burst", true);
+        duel.robots[0].apply_inputs(&[("FlameBurst".into(), 0, 100.0)]);
+        let dt = 1.0 / 60.0;
+        let mut on = 0;
+        for _ in 0..60 {
+            duel.step_direct(&[DriveInput::default(), DriveInput::default()], dt);
+            if duel.robots[0].flames[0].state.emitting {
+                on += 1;
+            }
+            duel.robots[0].apply_inputs(&[("FlameBurst".into(), 0, 0.0)]);
+        }
+        let seconds = on as f32 * dt;
+        assert!(
+            (0.08..=0.16).contains(&seconds),
+            "a burst burned {seconds} s"
+        );
+        assert!(!duel.robots[0].flames[0].state.firing);
+    }
+
+    /// The jet's speed scale is `level * 0.01 * air scale` fixed when the emitter
+    /// starts, and flies along the component's `(0, 0, -5)` (forward for the test
+    /// robot, whose flamethrower is turned half a turn).
+    #[test]
+    fn the_jet_flies_forward_at_five_metres_a_second_at_level_100() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let mut duel = flame_duel(&game, "jet", true);
+        duel.robots[0].apply_inputs(&[("Flame".into(), 0, 100.0)]);
+        run_flame(&mut duel, 0.2);
+        let jets = duel.robots[0].flame_jets(&*duel.physics);
+        assert_eq!(jets.len(), 1);
+        let jet = jets[0];
+        assert!(jet.on);
+        let forward = duel.robots[0]
+            .transform(&*duel.physics)
+            .transform_vector3(duel.robots[0].rig.forward());
+        // the jet's own velocity plus the chassis' (`0x5048e0` adds the robot's)
+        let own = jet.velocity - duel.robots[0].velocity(&*duel.physics);
+        assert!((own.length() - 5.0).abs() < 0.05, "{own:?}");
+        assert!(
+            own.normalize().dot(forward) > 0.97,
+            "{own:?} vs {forward:?}"
+        );
+        // the nozzle is ahead of the robot's nose
+        let origin = duel.robots[0].position(&*duel.physics);
+        assert!((jet.position - origin).dot(forward) > 1.0);
+    }
+
+    /// A probe, not a check: how many flame hits an ALARM standing `d` metres
+    /// (centre to centre) in front of the jet takes in 9 s at level 100. Live
+    /// (`flame-wait__live__001`, 3.3 m, ALARM driven up to the jet): 16 hits.
+    #[test]
+    #[ignore]
+    fn probe_flame_hits_by_distance() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        for d in [2.4f32, 2.8, 3.0, 3.3, 3.6] {
+            let flame = crate::flame::fixture::flame_bot(&game, "probe", true);
+            let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+            let mut duel = Duel::new(
+                &arena,
+                &[
+                    BotSetup {
+                        path: flame.to_string_lossy().to_string(),
+                        yaw_deg: Some(270.0),
+                        spawn: Some([-2.0, 0.0]),
+                    },
+                    BotSetup {
+                        path: game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string(),
+                        yaw_deg: Some(90.0),
+                        spawn: Some([-2.0 + d, 0.0]),
+                    },
+                ],
+            )
+            .expect("a duel");
+            duel.robots[0].apply_inputs(&[("Flame".into(), 0, 100.0)]);
+            run_flame(&mut duel, 9.0);
+            let hits = duel
+                .damage_events
+                .iter()
+                .filter(|e| e.victim == 1 && e.amount == FLAME_DAMAGE)
+                .count();
+            let hp: f32 = duel.robots[1].health.iter().sum();
+            let hp0: f32 = duel.robots[1]
+                .rig
+                .components
+                .iter()
+                .map(|c| c.hitpoints)
+                .sum();
+            eprintln!("PROBE d={d} hits={hits} hp lost={:.1}", hp0 - hp);
+        }
     }
 }

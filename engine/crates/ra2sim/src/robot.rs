@@ -388,11 +388,35 @@ pub struct Robot {
     /// of each trigger press that makes the original play its `firesound`
     /// (`docs/35-audio-events.md`). Bounded; nothing but the client's audio reads it.
     fire_events: Vec<usize>,
+    /// The robot's Flamethrowers: the component index, the component's state
+    /// ([`crate::flame`]) and the command its `Fire` wires last delivered.
+    pub flames: Vec<FlameUnit>,
+    /// What the flames' sounds should do since [`Robot::take_flame_sounds`]:
+    /// `(component, call)`. Bounded; only the client's audio reads it.
+    flame_sounds: Vec<(usize, crate::flame::Sound)>,
     /// The batteries and air tanks and what they supplied last step
     /// ([`crate::energy`]): the HUD's battery and air bars.
     pub energy: Energy,
     /// The game's own drive model ([`crate::drive`]), when the robot uses it.
     pub magic: Option<MagicAction>,
+}
+
+/// One Flamethrower of a robot.
+#[derive(Clone, Debug)]
+pub struct FlameUnit {
+    pub component: usize,
+    pub state: crate::flame::Flamethrower,
+    /// The `Fire` command (`-100..=100`) last delivered to the handler.
+    pub command: i32,
+}
+
+/// Where a Flamethrower's jet starts and where it flies (`0x5048e0`).
+#[derive(Clone, Copy, Debug)]
+pub struct FlameJet {
+    pub robot_component: usize,
+    pub on: bool,
+    pub position: Vec3,
+    pub velocity: Vec3,
 }
 
 /// A burst motor's or piston's cycle: parked (cocked) at its start, released at
@@ -555,6 +579,17 @@ impl Robot {
             slider_dir: vec![0.0; rig.parts.len()],
             burst_draw: vec![0.0; rig.parts.len()],
             fire_events: Vec::new(),
+            flames: rig
+                .components
+                .iter()
+                .filter(|c| c.is_flamethrower())
+                .map(|c| FlameUnit {
+                    component: c.index,
+                    state: crate::flame::Flamethrower::default(),
+                    command: 0,
+                })
+                .collect(),
+            flame_sounds: Vec::new(),
             energy: Self::build_energy(&rig),
             mass_centre: rig
                 .parts
@@ -741,6 +776,15 @@ impl Robot {
                         elec += power.elec_rate.abs() * command / FULL * dt;
                     }
                 }
+            }
+        }
+        // A Flamethrower asks `dt` of both channels at its definition's rates,
+        // whatever its level, while its jet is on or its burst timer runs (`0x504c50`).
+        for f in &self.flames {
+            if f.state.drawing() && self.attached[f.component] {
+                let power = self.rig.components[f.component].power;
+                elec += power.elec_rate.abs() * dt;
+                air += power.air_rate.abs() * dt;
             }
         }
         (elec, air)
@@ -1588,10 +1632,14 @@ impl Robot {
         // The power step (`0x4dc3f0`): what the motors may use this step. A robot
         // with no source on a channel (a hand-built test rig) is not throttled.
         let dt = physics.last_dt();
+        self.flame_inputs();
         let (elec_demand, air_demand) = self.power_demand(dt);
         let budgets = self
             .energy
             .step(dt, elec_demand, air_demand, &self.health, &self.attached);
+        // The published scales; a Flamethrower lights only while both are above
+        // zero, so a channel the robot has no source on counts as 0 here.
+        self.flame_update(dt, budgets.air.scale, budgets.elec.scale);
         // The original publishes scale 0 on a step with no draw too; nothing is
         // driven then, but a servo still has to hold, so the scale only applies
         // to a step that asks for power.
@@ -1683,6 +1731,89 @@ impl Robot {
     fn scaled_percent(&self, motor: usize, command: f32, scale: f32) -> i32 {
         let asked = (command * scale).trunc();
         (asked * self.motor_factor(motor)).trunc() as i32
+    }
+
+    /// The control board's calls on the Flamethrowers: the `Fire` wires' command
+    /// to the analog handler (when it changed), a `Fire burst` press to the
+    /// button handler. They land before the power step, which then sees the jet.
+    fn flame_inputs(&mut self) {
+        // The scales the last power step published (`*0x714a6c`, `*0x714a70`).
+        let powered = self.energy.last.air.scale > 0.0 && self.energy.last.elec.scale > 0.0;
+        for k in 0..self.flames.len() {
+            let component = self.flames[k].component;
+            let disabled = !self.attached[component];
+            let mut sounds = Vec::new();
+            if let Some(v) = self.control.flame_level(&self.rig.wiring, component) {
+                let command = v.trunc() as i32;
+                if command != self.flames[k].command {
+                    self.flames[k].command = command;
+                    self.flames[k].state.fire(
+                        command != 0,
+                        command,
+                        disabled,
+                        powered,
+                        &mut sounds,
+                    );
+                }
+            }
+            if self.control.burst_pressed(&self.rig.wiring, component) {
+                self.flames[k]
+                    .state
+                    .press_burst(100, disabled, powered, &mut sounds);
+            }
+            for s in sounds {
+                if self.flame_sounds.len() < 256 {
+                    self.flame_sounds.push((component, s));
+                }
+            }
+        }
+    }
+
+    /// The Flamethrowers' own step (`0x504790`), after the power step has
+    /// published its scales.
+    fn flame_update(&mut self, dt: f32, air: f32, elec: f32) {
+        for k in 0..self.flames.len() {
+            let component = self.flames[k].component;
+            let disabled = !self.attached[component];
+            let mut sounds = Vec::new();
+            self.flames[k]
+                .state
+                .update(dt, disabled, air, elec, &mut sounds);
+            for s in sounds {
+                if self.flame_sounds.len() < 256 {
+                    self.flame_sounds.push((component, s));
+                }
+            }
+        }
+    }
+
+    /// The jets of this robot's Flamethrowers, in the world (`0x5048e0`): the
+    /// nozzle `(0, 0.176, -0.9)` of the component's frame, flying along its
+    /// `(0, 0, -5)` times the speed scale, plus the chassis' own velocity.
+    pub fn flame_jets(&self, physics: &dyn PhysicsBackend) -> Vec<FlameJet> {
+        if self.flames.is_empty() {
+            return Vec::new();
+        }
+        let worlds = self.component_worlds(physics);
+        let carried = self.velocity(physics);
+        self.flames
+            .iter()
+            .map(|f| {
+                let w = worlds[f.component];
+                FlameJet {
+                    robot_component: f.component,
+                    on: f.state.emitting,
+                    position: w.transform_point3(crate::flame::NOZZLE_LOCAL),
+                    velocity: w.transform_vector3(crate::flame::JET_LOCAL * f.state.scale)
+                        + carried,
+                }
+            })
+            .collect()
+    }
+
+    /// The flame sound calls since the last call: `(component, call)`.
+    pub fn take_flame_sounds(&mut self) -> Vec<(usize, crate::flame::Sound)> {
+        std::mem::take(&mut self.flame_sounds)
     }
 
     /// The weapon triggers (motor component indices) since the last call.

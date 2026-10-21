@@ -32,6 +32,15 @@ pub enum Role {
     Structure,
 }
 
+impl Component {
+    /// Whether this is a `Flamethrower` (class `Flamethrower`; the definition's
+    /// `base` says the same).
+    pub fn is_flamethrower(&self) -> bool {
+        self.class.eq_ignore_ascii_case("Flamethrower")
+            || self.base.eq_ignore_ascii_case("Flamethrower")
+    }
+}
+
 impl Role {
     /// A component whose children hang off a joint the engine drives.
     ///
@@ -1485,7 +1494,14 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 .get(i)
                 .and_then(|l| l.as_ref())
                 .and_then(|lc| ra2fmt::mount::rotor_hinge(&lc.scene)),
-            items,
+            // The original draws no Flamethrower model: live, a camera 1.3 m ahead of
+            // and 1.9 m beside a robot with one shows its nose and the flame only
+            // (docs/37 section 6).
+            items: if c.class.eq_ignore_ascii_case("Flamethrower") {
+                Vec::new()
+            } else {
+                items
+            },
             rotor_items,
             hull_points,
             min,

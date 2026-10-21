@@ -74,6 +74,12 @@ pub enum Action {
     /// Adds `sign` times the control's value to a `Steering` unit's steer
     /// command (`Left` `+1`, `Right` `-1`).
     Steer(i8),
+    /// A `Flamethrower`'s analog `Fire` (`Analog<Flamethrower>`, scale 1): the jet
+    /// is on while the control is non-zero, at the control's value as its level.
+    Flame,
+    /// A `Flamethrower`'s `Fire burst` button (`Button<Flamethrower>`, scale 100):
+    /// each press is a tenth of a second of flame.
+    FlameBurst,
 }
 
 impl Action {
@@ -98,6 +104,15 @@ impl Action {
     /// (`0x4f6680` -> `0x4f6790`). (The `Hovercraft` class registers the same
     /// names with other signs; no stock robot has one and it is not modelled.)
     pub fn parse_for(class: &str, name: &str) -> Option<Action> {
+        if class.trim().eq_ignore_ascii_case("Flamethrower") {
+            // `FUN_00504080` registers `Fire` on an analog (handler `0x504a70`) and
+            // `Fire burst` on a button (`0x504b60`).
+            match name.trim() {
+                "Fire" => return Some(Action::Flame),
+                "Fire burst" => return Some(Action::FlameBurst),
+                _ => {}
+            }
+        }
         if class.trim().eq_ignore_ascii_case("Steering") {
             match name.trim() {
                 "Forward" => return Some(Action::Drive(-1)),
@@ -377,6 +392,26 @@ impl ControlState {
                 };
         }
         any.then(|| sum.clamp(-FULL, FULL))
+    }
+
+    /// A `Flamethrower`'s `Fire` command: the clamped sum of what its analog
+    /// `Fire` wires hold (`Analog<Flamethrower>` scales by 1), `None` when no
+    /// such wire is there. Non-zero is the jet on, the value its level.
+    pub fn flame_level(&self, wiring: &Wiring, component: usize) -> Option<f32> {
+        self.sum(wiring, component, |a| match a {
+            Action::Flame => Some(1),
+            _ => None,
+        })
+    }
+
+    /// Whether a `Fire burst` wire of `component` was pressed since the last
+    /// [`ControlState::end_step`] (`0x504b60` does something only on a press).
+    pub fn burst_pressed(&self, wiring: &Wiring, component: usize) -> bool {
+        wiring.wires.iter().any(|w| {
+            w.component == component
+                && w.action == Action::FlameBurst
+                && self.pressed.contains(&(w.controller, w.slot))
+        })
     }
 
     /// Whether a `Fire` wire of `component` was pressed since the last

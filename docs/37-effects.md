@@ -53,10 +53,7 @@ for car steering, then `FUN_0048e0b0` = `SetEmitting(1)`; the emitter follows th
 
 Both gate on `GraphicEffects == 1`, colour white fading to alpha 0, alpha blended. New: the steering smoke
 (`Config::steering_smoke`) and `<=` (it was `<`). No smoke comes from a hurt chassis, a weapon or the robot as
-a whole. `Flamethrower` (`0x504080`) owns a flame emitter of its own (the hazard flame's configuration,
-80/s, 0.3 s, blue -> white, `flame.tga`, additive) positioned at its nozzle: **not implemented**, the weapon's
-gameplay is not in the sim (re-checked in the polish round, docs/36 9.21: still
-not implemented; there is no firing state for an emitter to follow).
+a whole. The `Flamethrower` component's flame is section 6.
 
 ## 3. Decals (`DecalTrigger`, RTTI `0x6ef5e4`, constructor `0x5a0e00`, object `0x1cf4` bytes)
 
@@ -111,7 +108,77 @@ Code: `ra2_render::decals` (parse, project, corners, material), `Duel::{mark_for
 
 ## 5. Gaps
 
-Flamethrower flame; the exact per-vertex normals and lighting of a decal (ours uses the face normal); the
+The flame's hit rate against distance (section 6), its colour (live is pinker and whiter than ours); the exact per-vertex normals and lighting of a decal (ours uses the face normal); the
 original's subdivided chassis mesh (decal polygons are the same shape, fewer fans); live look of the slash
 (additive) decals; `0x71abcc` (the camera-relative decal direction branch) is `(0, 0, 0)` and no stock
 definition uses a zero direction, so that branch is not implemented.
+
+## 6. The Flamethrower (`0x504080`, vtable `0x6ab664`, RTTI `Flamethrower`)
+
+Live: `tools/oracle/frida/ra2_flame.js` via `tools/oracle/capture_flame.py` (captures `flame-open__live__000`,
+`flame-wait__live__000/001`, composite `flame-ours-v-live__1024x2304__000.png`), driven by a test robot made
+with `ra2sim --example flamebot` (a Scout, a Flamethrower on its nose turned half a turn so it points forward, a
+CO2 tank, an analog `Flame` wired to `Fire`, a button `FlameBurst` wired to `Fire burst`). **No stock robot,
+AI or team has one** (`Flame Chopper` in `AI/Bindings.py` is only a name); the definition is
+`Components\flamethrower.txt`: `base = Flamethrower`, `standard = 0`, `hidden = 2`,
+`firesound = sounds\flame_thrower.wav`, `airmaxinoutrate = -100`, `elecmaxinoutrate = -100`.
+
+**Controls.** The constructor registers two handlers: analog `Fire` (`0x504a70(on, level)`, scale 1) and
+button `Fire burst` (`0x504b60`, scale 100). `Fire` switches the jet on while the control is non-zero, `level`
+being its value; `Fire burst` is `Fire(1, 100)` plus `burst = 1` and a `0.1 s` timer, and a release does nothing.
+The step (`0x504790`) counts the timer down and, when it has run out and the emitter is on, switches it off.
+Live: a burst's emitter was on 0.10-0.20 s (the original steps at 1/30 s; ours at 1/60 s gives 0.10-0.12 s).
+(`AI.Input` from the in-game Python reaches the wires, but a call made inside another Frida hook's callback is
+invisible to the hooks, so the live handler calls were made from the agent's own thread.)
+
+**Power.** The jet draws `airmaxinoutrate` and `elecmaxinoutrate` times `dt` (100 each a second, **whatever the
+level**) while it is on or its burst timer runs (`0x504c50`). The emitter starts only while both published
+power scales (`0x714a6c` air, `0x714a70` electric, docs/30 section 3) are above zero, and its speed scale is
+`level * 0.01 * air scale`, **fixed when it starts**. Consequences, all live: with no air tank the emitter never
+starts (the tankless Scout: ticks with `firing = 1`, `emitting = 0`); with a CO2 tank (800, 120 a second) the
+first jet has scale 1.0 and, as the tank runs down, later starts had 0.44 (level 50), 0.30 (level 20) and 0.24
+(a burst), so one tank is about eight seconds of full flame and then a weak one. A level change while on only
+changes the sound.
+
+**The emitter** (`Arenas\particles\flame.tga`, named "Fire burst"; config dump of the live emitter): 80 a second,
+life 0.3 +- 0.075 s, velocity `(0, 0, -5) * scale` in the component's frame rotated to the world **plus the
+chassis' velocity**, spread `(0.5, 0.5, 0.5)`, no gravity, colour blue `(0, 0, 1, 1)` to white (green spread
+0.3), size 0.2 to 0.4, additive, collides with the world without reflecting, elasticity 1. It sits at
+`component * (0, 0.176, -0.9)` (live world matrix: component at `(0, 0.0037, 0.5491)` in the robot's frame,
+rotation `diag(-1, 1, -1)`, nozzle `(0, 0.180, 1.449)`: our `ra2fmt::mount` placement agrees to 1e-3). With
+`angle = 0` the jet points out of the back of the chassis; the test robot uses half a turn. Config `ra2_render::
+effects::Config::{flame, JET_SPREAD}`, `Effects::{jet, step_with}`.
+
+**Damage.** Each particle's step is cast against the world (`0x5bdc00`; `0x504b90` skips the jet's own robot);
+a hit calls `0x504ca0`, which for a robot's part is `FUN_004148f0(robot, component, 2.0)` (the hazard path: no
+attacker, no score, a floating `2` shown): **2.0 hitpoints a hit**, applied below the 10-point gate of a contact
+because `0x4148f0` reaches `0x4175b0` directly. The particle then leaves the surface in a random direction at
+its own speed (the non-reflect branch of `0x5bdc00`). Live (`flame-wait__live__000`, ALARM driven into the jet
+3.3 m away, level 100): 16 damage events, all `amount 2.0`, `attacker -1`, from `0x4149b3`, in clusters of 2-3
+a frame while ALARM was in reach; ALARM lost 22 hitpoints (component materials scale a hit). With ALARM at
+2.1 m, so that the nozzle was inside it, only 1-2 hits (a cast that starts inside a body hits nothing; ours
+likewise: `duel::ray_box_entry`). Ours (`Duel::update_flamethrowers`, `apply_hit_with`) gives 1.75 hits a 60 Hz
+step at 3.3 m against about 2.6 a frame live: the right order, **the rate against distance is not
+calibrated** (the live robots would not hold still at a chosen range).
+
+**Sound.** The handle is created in `Init(0)`: `sounds\flame_thrower.wav` at volume 0, 3D, 100/20. Every `Fire`
+call does `SetVolume(20 * level - 2000)` hundredths of a dB (0, -1000, -1600 at 100, 50, 20: live) and `Stop`
+at off, but the `Loop` is gated on the power scales being above zero at the call, which they are not until the
+jet's own draw has been asked for, so **a jet switched on from rest is silent** (no `Loop` in any live call).
+`ra2sim::flame::Sound`, `SoundCue::Flame`.
+
+**Look.** `flame-ours-v-live__1024x2304__000.png`: the live flame is a soft cluster of large additive
+puffs, pink and violet at the edge and white-yellow at the core; ours is the same shape and length but more
+orange. The original draws **no model** for the component (a camera beside the nose shows the piston and fork
+and the flame, no gun), so ours does not either (`rig.rs`).
+
+**Code.** `ra2sim::flame` (state machine, tests), `controls::Action::{Flame, FlameBurst}`,
+`Robot::{flame_inputs, flame_update, flame_jets}`, `Duel::update_flamethrowers`; workshop wiring accepts
+`Fire` on an analog and `Fire burst` on a button for a Flamethrower. Tests: `flame::tests::*`,
+`duel::tests::{a_flamethrower_with_no_air_tank_never_lights, a_jet_burns_the_other_robot_for_two_a_hit_and_scores_nothing,
+a_burst_is_a_tenth_of_a_second_of_flame, the_jet_flies_forward_at_five_metres_a_second_at_level_100}`,
+`effects::tests::a_flamethrower_jet_follows_its_nozzle_and_scatters_on_a_hit`. `--example flameshot` photographs
+ours with the live camera.
+
+**Open.** Hit rate against distance; the flame's colour; the scatter direction law; the `Loop` when other air
+draws keep the scales up; AI brains that fire it (none ship); the floating `2`.

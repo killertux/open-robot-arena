@@ -448,6 +448,40 @@ impl AudioSystem {
                         self.audio.fade_out_script(key, ms);
                     }
                 }
+                SoundCue::Flame {
+                    key,
+                    call,
+                    path,
+                    position: _,
+                } => match call {
+                    ra2sim::flame::Sound::Loop => {
+                        match ra2_audio::resolve_game_path(&self.game, &path) {
+                            // Created at volume 0 (full): `0x6ab1d4` is 0.0.
+                            Some(file) => {
+                                self.audio.set_script_volume(key, 0);
+                                if let Err(error) = self
+                                    .audio
+                                    .play_script(key, &file, true, [0.0; 3], listener, 1.0)
+                                {
+                                    self.problems.push(format!("flame: {error}"));
+                                }
+                            }
+                            None => self
+                                .problems
+                                .push(format!("flame: {path} is not in the game")),
+                        }
+                    }
+                    ra2sim::flame::Sound::Volume(hundredths_db) => {
+                        if self.audio.script_is_live(key) {
+                            self.audio.set_script_volume(key, hundredths_db);
+                        }
+                    }
+                    ra2sim::flame::Sound::Stop => {
+                        if self.audio.script_is_live(key) {
+                            self.audio.stop_script(key);
+                        }
+                    }
+                },
                 SoundCue::Motor {
                     key,
                     on,
