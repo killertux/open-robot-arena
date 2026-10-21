@@ -1519,3 +1519,117 @@ of the wheel contacts); the Scout's sensor that never lets go of a
 tail-standing ALARM, and with it ALARM ending on its back in five of six box
 runs and its counted hits; the wheels' transverse inertia (+3-5 %); which
 other `.gmf` children or open meshes the original drops or treats as here.
+
+### 12i. What a SmartZone sees, the arena colliders elsewhere, the plows (fx/physics-zone)
+
+New live captures (fresh sessions, all in `local/oracle/original` with
+manifest rows, `manifest-additions-2026-10-21-physics-zone.tsv`):
+`zonelist-scout-alarm-box__live__000..002` with
+`aistate-scout-alarm-box__live__004..006` (three box fight starts, 45 s,
+hazards on, shipped AIs; `frida/ra2_zone.js` through `capture_fight.py AGENT=
+PREFIX=zonelist`), `colliders-{bridge,electric,halfcircle,metalskull,
+parkinglot,hilltop,flextop,clawtop}__live__000` (`frida/ra2_colliders.js`,
+40 s AI fights) and `assembly-{berserker,dadog,bigdog,snowjob}__live__000`.
+Diagnostic: `examples/zoneprobe.rs` (places both chassis at live poses and
+tests a robot's zones against the other's chassis as a hull and as its mesh,
+and the two zones against each other); `arenadump` prints bounds to the mm.
+
+**The phantom list (recovered, verified live).** `GetZoneContents`
+(`0x4014f0`) copies the world's phantom pair list (`0x4ae1f0`: the collision
+detector at `*(*(*0x714670 + 0x20) + 0x18)`, vector at `+0x100`) and, for every
+pair holding one of the zone's collidables, reports the other collidable's tag
+(`+0x54`, `robot << 4 | chassis`, `0x414430`), skipping tag 0 (the arena). The
+list is cleared with the contacts before every detection (`0x542660`) and only
+the collision agents fill it: when a pair with a phantom (`+0x58`) on either
+side comes out of the closest-point query at a **negative** distance, the
+convex agent (`0x544820`) and the convex-mesh agent (`0x545b50`) push it there
+(`0x5444a0` for the implicit ones); a phantom pair within the tolerance
+reports nothing at all. The convex-mesh agent runs that query per *triangle*
+the MOPP returns near the convex piece and stops at the first that overlaps,
+so a mesh collidable (every chassis, the `SIMULATION_GEOMETRY 6` parts) is in a
+zone only while one of its triangles crosses it. A zone that sits wholly inside
+a chassis' volume does not see it. That is the original's dropout: when the
+Scout's nose is under a tail-standing ALARM its flip zone lies inside ALARM's
+chassis.
+
+Live, three fight starts, 261 `GetZoneContents` calls with both chassis
+poses (`zoneprobe` on `zonelist-*`):
+
+| rule | Scout's zone has ALARM's chassis | ALARM's zone has the Scout's chassis | zone v zone |
+|---|---|---|---|
+| hull (before) | 192/261 agree (ours reads it in 133, live 64) | 248/261 | - |
+| mesh triangles (now) | **261/261** | **261/261** | 259/261 |
+
+The list also holds the other robot's **phantoms**, which the zone counts:
+its wheels' traction rings (tag `robot << 4 | 4`) and its SmartZone (each robot
+has one convex phantom on the chassis body, tagged non-chassis). Ours now
+counts per collision piece with the mesh rule, the traction rings (their
+convex hulls) and the other robot's zone boxes, all but the chassis' own
+pieces as `chassis = 0` (`duel::watch_brain_zones`, `zone_pieces`,
+`hazards::box_touches_piece`; test
+`hazards::a_zone_inside_a_mesh_body_sees_none_of_its_triangles`). The
+arena's registered zones take the same per-piece mesh rule (they were the
+union of a component's pieces as one hull); whether they also see the
+traction rings was not checked.
+
+Effect on the box fight (`fightprobe`, twelve warmups 0..71, ALARM's pose):
+before, ALARM ends on its back in 11 of 12 runs (upright 25 % of the time on
+average); now in 6 of 12 (upright 52 %), against live 1 in 7. With only the
+mesh rule and without the phantoms: 9 of 12.
+
+**The arena colliders elsewhere (verified live).** Every arena's fixed
+collidables are the bodies' own meshes grown by 0.05, with the vertex count in
+the header, as section 12h found for three: Bridge of Doom `h_floor` (24),
+Electric `Collision Box` (16), Half Circle `Collision Box` (38) and its `Hammer
+Stop Zone` box, Metal Skull `structure_collision` (50), Parking Lot
+`main_collision` (12), Hill Top `Collision Box` (33; its bounds reach y -0.433
+through a vertex no triangle uses), ClawTop `main_collision` (56): all match
+ours to the millimetre. **FlexTop is the exception**: its only fixed
+collidable is `Plane01`, an implicit plane (type 16) at y -9.813; the table is
+the 400 kg dynamic `floor_collision`. Ours finds no floor among the fixed
+bodies and falls back to the visible geometry (1436 triangles) as a static
+collider; with the rigid bodies only (`RA2_COLLISION=rb`) our match ends at
+0.02 s with both robots out, so the dynamic table needs work first. Left open.
+
+**The plows and the rotator bar.** Da Dog, Big Dog (`sd_snowplow`) and
+SnowJob (`snowplow`) chassis bodies match live to 0.1 mm in mass and centre
+(`tests/mass_live.rs`, now 17 robots). Berserker's (`rotatorbar`) does not:
+chassis 117.74 kg at (0.0016, 0.2404, 0.0351) against live (0.0032, 0.2465,
+0.0379), and its 72 kg spinner body at y 0.5829 against 0.5975 (+14.6 mm
+along the motor axis). The rotator bar is a convex (`SIMULATION_GEOMETRY 3`)
+proxy of three closed bars; its mesh centroid instead of its hull's would
+give half of that. Not resolved; Berserker is not in the table test.
+
+**Validation.** Before = `fidelity` 29371d9 (c014140 plus a tools change),
+after = this branch.
+
+Drive-at table (section 11d's runs, Sentinel rows as 12h): identical before
+and after (no zone is read): Scout 11.01 / 1.42 / 14.42 / 7.85 / 10.77,
+ALARM 13.92 / 1.23 / 14.12 / 8.90 / 11.28, FlapJack 10.40 / 1.48 / 11.80 /
+7.19 / 10.11, Razor 17.13 / 1.53 / 22.60 / 7.28 / 12.49, Wide Load 13.45 /
+1.67 / 17.95 / 10.71 / 13.17, Sentinel straight 14.83 / 1.48 / 18.79 /
+10.07, circle 1.424 / 4.58 / 8.56. (Section 12h's "after" column came from an
+earlier build of that branch.)
+
+Fights as ensembles (six runs each, `FIDTRACE_WARMUP` 0/7/13/19/26/31; mean
+counted hits (mean total), mean length, runs that last 120 s):
+
+| fight | original | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 63, 77, 37 / 9, 6, 7 | 14.2 (765) / 4.5 (59), 82 s, 0/6 | 17.3 (994) / 5.8 (80), 73 s, 1/6 |
+| box Razor v FlapJack: Razor / FlapJack | 3 (40) / 1 (12) | 2.7 (58) / 1.0 (13), 107 s, 5/6 | 3.8 (108) / 1.0 (13), 106 s, 4/6 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 60 (1778) / 2 (23) | 57.0 (1884) / 6.2 (84), 114 s, 5/6 | 31.0 (1091) / 5.0 (74), 88 s, 2/6 |
+| Octagon Scout v ALARM: ALARM / Scout | 24 (944), Scout out at 67 s | 6.7 (403) / 2.0 (29), 61 s, 0/6 | 9.0 (454) / 2.5 (32), 53 s, 0/6 |
+
+Six runs of a fight scatter about as much as these differences (the mesh-only
+and mesh-plus-rings variants gave the Compressor 46.7 and 37.5); the
+Compressor's shorter fights are the one move away from live and were not
+traced. AI suite (ten pairings, warmups 0/7/13): before 29/30 deal damage,
+after 29/30 (warmup 0: 10/10; Tornado v Ripblade at warmup 13 in both).
+
+**Still open.** ALARM still ends on its back in half the box runs (live 1 in
+7); FlexTop's dynamic table; the rotator bar's mass; whether the arena's
+zones see traction rings; the heading drift (ours 0.26-0.30, live 0.19: not
+worked on beyond confirming that `MagicAction` runs once per step piece per
+robot, live 730 G rows for 365 pieces with two robots); the wheels'
+transverse inertia (+3-5 %).

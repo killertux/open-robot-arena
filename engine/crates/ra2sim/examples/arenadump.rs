@@ -122,7 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!(
                 "  {:<22} mass={:7.1} geom={} collides={} static={} tris={:4} \
-                 x=[{:6.1},{:6.1}] y=[{:6.1},{:6.1}] z=[{:6.1},{:6.1}] \
+                 x=[{:7.3},{:7.3}] y=[{:7.3},{:7.3}] z=[{:7.3},{:7.3}] \
                  proxy={:?} display={:?} use_display={} geo_type={}",
                 b.name,
                 b.mass,
