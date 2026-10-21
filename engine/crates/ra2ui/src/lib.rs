@@ -1009,6 +1009,28 @@ fn place_at<'a>(
     place_core(widget, parent, inherited, fonts, baseline, None, None)
 }
 
+/// The rectangle a `Background` stretches over: the owner's frame, grown by
+/// its `Border`'s width when that is two pixels or more. On the repair bench
+/// (`repairs.gib` `main group`, `Border Width 2`) the original's wood tile
+/// starts at the border's outer edge (reference event-repairs: tile phase
+/// matches ours moved 2 px up and left, ring pixels on the box's own edge).
+fn background_fill(widget: &Widget, frame: Frame) -> Frame {
+    let width = widget
+        .attachment("Border")
+        .and_then(|b| b.number("Width"))
+        .unwrap_or(0.0)
+        .round();
+    if width < 2.0 {
+        return frame;
+    }
+    Frame::new(
+        frame.x - width,
+        frame.y - width,
+        frame.w + 2.0 * width,
+        frame.h + 2.0 * width,
+    )
+}
+
 /// [`place_at`], with the widget's frame optionally forced along a split's axis:
 /// a split frame gives each slot's child the slot's extent *along the axis it
 /// divides* whatever the child's `Position`/`Size` say there (`exhib_setup.gib`'s
@@ -1158,7 +1180,7 @@ fn place_core<'a>(
                     // size is the editor's canvas, the game stretches it over
                     // the widget (the capture's HQ panels are tinted edge to
                     // edge).
-                    (a.kind == AttachmentKind::Background).then_some(frame),
+                    (a.kind == AttachmentKind::Background).then_some(background_fill(widget, frame)),
                 ),
             })
         })
@@ -1398,9 +1420,20 @@ fn sized(
     } else {
         0.0
     };
+    // The original anchors in whole pixels: the offset is the truncated half
+    // (or whole) of the truncated size (`FUN_...` of the window class, measured:
+    // the repair bench's `main group`, 0.9 of 1024 = 921.6 wide at `Position
+    // 0.5`, starts at 512 - 460 = 52, not 51.2; reference event-repairs).
+    let offset = |anchor: f32, size: f32| {
+        if std::env::var_os("RA2_SNAP").is_some() {
+            (anchor * size.trunc()).trunc()
+        } else {
+            anchor * size
+        }
+    };
     Frame::new(
-        parent.x + px - anchor.h * w,
-        parent.y + py - anchor.v * h - ascent,
+        parent.x + px - offset(anchor.h, w),
+        parent.y + py - offset(anchor.v, h) - ascent,
         w,
         h,
     )

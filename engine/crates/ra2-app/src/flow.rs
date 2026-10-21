@@ -68,6 +68,7 @@ pub fn inventory_robot_path(game: &Path, index: usize) -> Option<PathBuf> {
 pub fn open_workshop(game: &Path, robot: Option<usize>) -> Result<Builder, String> {
     let path = robot.and_then(|index| inventory_robot_path(game, index));
     let mut builder = Builder::open(game, path.as_deref())?;
+    builder.apply_debug_panel_default()?;
     match path {
         Some(path) => builder.set_team_target(path),
         None => {

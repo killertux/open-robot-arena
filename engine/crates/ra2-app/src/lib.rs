@@ -60,6 +60,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     } else {
         configured_size
     };
+    build_mode::set_debug_panel_default(args.debug_panel);
     if args.build_mode {
         let options = build_mode::Options {
             game: game.clone(),
@@ -93,6 +94,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
             args.report_damage,
         )?;
         options.simulate_season = args.simulate_season;
+        options.bench_undamaged = args.bench_undamaged;
         return match options.out {
             Some(_) => hq_mode::run_headless(options),
             None => window::run_hq(options, args.audio_report),
