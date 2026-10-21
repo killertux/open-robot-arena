@@ -80,6 +80,26 @@ LOCAL = os.environ.get("RA2_ORACLE_LOCAL") or (
     else os.path.join(main_root(), "local"))
 ORIG = os.path.join(LOCAL, "oracle", "original")
 GAME = os.environ.get("RA2_GAME") or os.path.join(LOCAL, "game")
+
+# Directories and files the app writes (careers, teams, robots, settings).  The
+# runs below get a scratch install that copies these and links the rest, so no
+# mode (`--hq --simulate-event` saves a whole season) writes the real install.
+WRITABLE = ("Teams", "AI", "Robot Designs")
+
+
+def scratch_install(src):
+    """A temporary copy of the install `src`: writable parts copied, the rest symlinked."""
+    dst = tempfile.mkdtemp(prefix="ra2-fidelity-game-")
+    for name in os.listdir(src):
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if name in WRITABLE and os.path.isdir(s):
+            shutil.copytree(s, d, symlinks=False)
+        elif os.path.isfile(s) and name.lower().endswith((".txt", ".cfg")):
+            shutil.copy2(s, d)
+        else:
+            os.symlink(s, d)
+    return dst
+
 BIN = os.path.join(ROOT, "engine", "target", "release")
 APP = os.path.join(BIN, "ra2-app")
 SHELL = os.path.join(BIN, "ra2-shell")
@@ -906,6 +926,8 @@ def main():
             sys.exit("fidelity: missing %s (cd engine && cargo build --release --offline)" % exe)
     if not os.path.isdir(ORIG):
         sys.exit("fidelity: no originals at %s (git-ignored local data)" % ORIG)
+    global GAME
+    GAME = scratch_install(GAME)
     out = args.out or os.path.join(LOCAL, "oracle", "fidelity", "latest")
     os.makedirs(out, exist_ok=True)
     result = {"date": datetime.datetime.now().isoformat(timespec="seconds"), "size": list(SIZE)}
@@ -922,6 +944,7 @@ def main():
     open(os.path.join(out, "summary.md"), "w").write("\n".join(md))
     print("\n".join(md))
     print("wrote", out)
+    shutil.rmtree(GAME, ignore_errors=True)
     return 0
 
 
