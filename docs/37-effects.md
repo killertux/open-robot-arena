@@ -108,7 +108,7 @@ Code: `ra2_render::decals` (parse, project, corners, material), `Duel::{mark_for
 
 ## 5. Gaps
 
-The flame's hit rate against distance (section 6), its colour (live is pinker and whiter than ours); the exact per-vertex normals and lighting of a decal (ours uses the face normal); the
+The flame's hit rate against distance (section 6), the exact per-vertex normals and lighting of a decal (ours uses the face normal); the
 original's subdivided chassis mesh (decal polygons are the same shape, fewer fans); live look of the slash
 (additive) decals; `0x71abcc` (the camera-relative decal direction branch) is `(0, 0, 0)` and no stock
 definition uses a zero direction, so that branch is not implemented.
@@ -116,7 +116,7 @@ definition uses a zero direction, so that branch is not implemented.
 ## 6. The Flamethrower (`0x504080`, vtable `0x6ab664`, RTTI `Flamethrower`)
 
 Live: `tools/oracle/frida/ra2_flame.js` via `tools/oracle/capture_flame.py` (captures `flame-open__live__000`,
-`flame-wait__live__000/001`, composite `flame-ours-v-live__1024x2304__000.png`), driven by a test robot made
+`flame-wait__live__000/001`, side-by-sides kept outside the oracle directory), driven by a test robot made
 with `ra2sim --example flamebot` (a Scout, a Flamethrower on its nose turned half a turn so it points forward, a
 CO2 tank, an analog `Flame` wired to `Fire`, a button `FlameBurst` wired to `Fire burst`). **No stock robot,
 AI or team has one** (`Flame Chopper` in `AI/Bindings.py` is only a name); the definition is
@@ -167,10 +167,12 @@ at off, but the `Loop` is gated on the power scales being above zero at the call
 jet's own draw has been asked for, so **a jet switched on from rest is silent** (no `Loop` in any live call).
 `ra2sim::flame::Sound`, `SoundCue::Flame`.
 
-**Look.** `flame-ours-v-live__1024x2304__000.png`: the live flame is a soft cluster of large additive
-puffs, pink and violet at the edge and white-yellow at the core; ours is the same shape and length but more
-orange. The original draws **no model** for the component (a camera beside the nose shows the piston and fork
-and the flame, no gun), so ours does not either (`rig.rs`).
+**Look.** the side-by-sides (live left, ours right; not archived, they are renders of ours; `ra2-app --example flameshot`, same
+camera and HUD, hazards off as live, both AIs stopped): position, size, pink/white/blue colour and length match.
+(An earlier composite with a different arena state and no HUD looked wrong because of the comparison, not the
+flame.) The red cylinder and fork in both are the Scout's own `BurstMotor` and its arm. The original draws **no
+model** for the Flamethrower: with `RA2_FLAME_MODEL=1` ours draws the gun at the nose, covering the cylinder, and
+live shows the bare cylinder, so ours hides it (`rig.rs`).
 
 **Code.** `ra2sim::flame` (state machine, tests), `controls::Action::{Flame, FlameBurst}`,
 `Robot::{flame_inputs, flame_update, flame_jets}`, `Duel::update_flamethrowers`; workshop wiring accepts
@@ -180,5 +182,5 @@ a_burst_is_a_tenth_of_a_second_of_flame, the_jet_flies_forward_at_five_metres_a_
 `effects::tests::a_flamethrower_jet_follows_its_nozzle_and_scatters_on_a_hit`. `--example flameshot` photographs
 ours with the live camera.
 
-**Open.** Hit rate against distance; the flame's colour; the scatter direction law; the `Loop` when other air
+**Open.** Hit rate against distance the scatter direction law; the `Loop` when other air
 draws keep the scales up; AI brains that fire it (none ship); the floating `2`.

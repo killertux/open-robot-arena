@@ -1497,7 +1497,9 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             // The original draws no Flamethrower model: live, a camera 1.3 m ahead of
             // and 1.9 m beside a robot with one shows its nose and the flame only
             // (docs/37 section 6).
-            items: if c.class.eq_ignore_ascii_case("Flamethrower") {
+            items: if c.class.eq_ignore_ascii_case("Flamethrower")
+                && std::env::var_os("RA2_FLAME_MODEL").is_none()
+            {
                 Vec::new()
             } else {
                 items
