@@ -295,6 +295,9 @@ enum Screen {
     Match(Box<match_mode::Session>),
     Award {
         gib: Gib,
+        /// The event-results 3D scene under the window (`FUN_0046e140`);
+        /// `None` for the season's end screen.
+        prize: Option<Box<crate::prize_scene::PrizeScene>>,
     },
     /// `teamhq/repairs.gib`: the between-rounds repair bench.
     Repairs(Box<Repairs>),
@@ -935,6 +938,24 @@ impl Session {
                     .map(|(_, message)| message.clone())
                     .unwrap_or_default()
             };
+            // The prize model: the tier the rounds won pick, the trophy for a
+            // won event (docs/36 section 9.11).
+            let model = if record.won {
+                event.trophy.0.clone()
+            } else {
+                self.career
+                    .prize_for_rounds(event_id, record.rounds_won as usize)
+                    .map(|(model, _)| model.clone())
+                    .unwrap_or_default()
+            };
+            let prize = crate::prize_scene::PrizeScene::load(
+                &self.game,
+                &model,
+                &self.career.player().logo,
+            )
+            .map(Box::new)
+            .map_err(|e| eprintln!("award scene: {e}"))
+            .ok();
             let gib = award_screen(
                 &self.game.join("UI"),
                 &event,
@@ -942,13 +963,14 @@ impl Session {
                 &bot_name,
                 &record,
                 &description,
+                prize.is_none(),
             )?;
             println!(
                 "award: {} event points, won {}, rounds {}/{}",
                 record.points, record.won, record.rounds_won, record.rounds_lost
             );
             self.last_record = Some(record);
-            self.screen = Screen::Award { gib };
+            self.screen = Screen::Award { gib, prize };
         } else {
             self.last_record = None;
             if self.career.repairs.is_empty() {
@@ -1002,6 +1024,9 @@ impl Session {
             Screen::Match(session) => {
                 session.render_3d(renderer, color, depth, format, width, height)
             }
+            Screen::Award {
+                prize: Some(prize), ..
+            } => prize.render(renderer, color, depth, format, width, height),
             _ => Ok(()),
         }
     }
@@ -1082,7 +1107,11 @@ impl Session {
                 let placed = hq.placements(*layout, Some(assets.faces()));
                 Ok((assets.scene(&placed, size), false))
             }
-            Screen::Event { gib, .. } | Screen::Award { gib, .. } | Screen::SeasonEnd { gib } => {
+            Screen::Award { gib, prize } => {
+                let placed = ra2ui::resolve_with(gib, *layout, Some(assets.faces()));
+                Ok((assets.scene(&placed, size), prize.is_some()))
+            }
+            Screen::Event { gib, .. } | Screen::SeasonEnd { gib } => {
                 let placed = ra2ui::resolve_with(gib, *layout, Some(assets.faces()));
                 Ok((assets.scene(&placed, size), false))
             }
@@ -1142,10 +1171,7 @@ impl Session {
     ) -> Result<(), String> {
         let (scene, three_d) = self.scene()?;
         if three_d {
-            let Screen::Match(session) = &self.screen else {
-                return Err("a 3D frame without a match".to_string());
-            };
-            session.render_3d(
+            self.render_3d(
                 renderer,
                 &target.color_view,
                 &target.depth_view,
@@ -1223,7 +1249,7 @@ impl Session {
             capture(self, "season-final.png")?;
             let view = self.view()?;
             let gib = season_end_screen(&self.game.join("UI"), &view)?;
-            self.screen = Screen::Award { gib };
+            self.screen = Screen::Award { gib, prize: None };
             capture(self, "champion.png")?;
         }
         println!(
@@ -2018,17 +2044,20 @@ pub fn award_screen(
     bot: &str,
     record: &EventRecord,
     description: &str,
+    preview_backdrop: bool,
 ) -> Result<Gib, String> {
     let mut gib = ra2ui::hq::load(ui_root, "teamhq/event_winner.gib")?;
     ra2ui::hq::fit_splits_in(&mut gib);
     // The award is a modal: the shipped window has no full-screen background,
-    // because the original draws it over the event-results 3D scene. This port
-    // composes the event's own arena preview behind it instead of leaving the
-    // frame black.
-    gib.blocks.insert(
-        0,
-        Block::Widget(full_screen_image("arena preview", &event.arena.1)),
-    );
+    // because the original draws it over the event-results 3D scene
+    // (`prize_scene`). Without that scene (a missing model or install) the
+    // event's own arena preview stands behind it instead of a black frame.
+    if preview_backdrop {
+        gib.blocks.insert(
+            0,
+            Block::Widget(full_screen_image("arena preview", &event.arena.1)),
+        );
+    }
     if let Some(image) = find_mut_in(&mut gib, "event img") {
         ra2ui::input::set_field(image, "_Filename", &event.art);
     }
@@ -2451,6 +2480,43 @@ mod tests {
         assert_eq!(shell.base_screen_id(), "teamhq/event_bracket.gib");
     }
 
+    /// The award's 3D scene (`FUN_0046e140`): the event-results arena through the
+    /// `fixed cam`, the tier's prize model on the winner spot and the team's logo
+    /// on the banner. Each of the three changes the picture.
+    #[test]
+    fn the_award_scene_shows_the_prize_and_the_teams_logo() {
+        let Some(game) = game_dir() else { return };
+        let Ok(renderer) = Renderer::new() else {
+            return;
+        };
+        let (w, h) = (320u32, 251u32);
+        let target = Target::new(renderer.device(), w, h);
+        let draw = |prize: &str, logo: &str| -> Vec<u8> {
+            let scene = crate::prize_scene::PrizeScene::load(&game, prize, logo).unwrap();
+            assert_eq!(scene.has_prize(), prize.ends_with(".gmf"), "{prize}");
+            scene
+                .render(
+                    &renderer,
+                    &target.color_view,
+                    &target.depth_view,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    w,
+                    h,
+                )
+                .unwrap();
+            renderer.read_texture(&target.color, w, h).unwrap()
+        };
+        let trophy = "Arenas\\event_results\\prizes\\Gold_Cup_Trophy\\Gold_Cup_Trophy.gmf";
+        let logo = "Teams\\orange_skull.bmp";
+        let with = draw(trophy, logo);
+        let bare = draw("", logo);
+        let other = draw(trophy, "Teams\\Atom.bmp");
+        assert!(with.iter().any(|&b| b != 0), "the scene is not black");
+        let differing = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
+        assert!(differing(&with, &bare) > 500, "the prize is on the spot");
+        assert!(differing(&with, &other) > 500, "the banner takes the logo");
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2811,9 +2877,10 @@ mod tests {
             "",
             &career.history[8],
             "",
+            true,
         )
         .unwrap();
-        session.screen = Screen::Award { gib };
+        session.screen = Screen::Award { gib, prize: None };
         let point = session.control_point(&["continue button"]).unwrap();
         session.click(point).unwrap();
         assert!(matches!(session.screen, Screen::SeasonEnd { .. }));
