@@ -1992,3 +1992,161 @@ The box replay's 18 % surplus of events under the per-collidable rule (a live
 event-registration capture of Scout v ALARM would settle which of their
 components are registered). The arena's hazard bodies are registered too
 (nine in the Compressor) and are not in ours.
+
+### 12m. ALARM's hits, the rebuilt chassis, the piston rod's inertia, the event filter (fx/alarm-hits)
+
+New live captures (fresh sessions on `:7`, prefix restored and sha256
+checked; manifest rows in `manifest-additions-2026-10-21-alarm-hits.tsv`):
+`fight-scout-alarm-box__live__003..005` with
+`fightpos-scout-alarm-box__live__000..002` (three more 120 s box fights,
+`capture_fightpos_set.sh`), `fightweapons-scout-alarm-box__live__000`
+(`frida/ra2_weapons.js` over those three fights: the Scout's fork motor and
+ALARM's piston every substep), `eventreg-scout-alarm-box__live__000..001`
+(`frida/ra2_eventreg.js`, the registrations of six match loads) and
+`fightcontacts-scout-alarm-box__live__004..006` (`frida/ra2_fightcontacts.js`,
+new: `ra2_contacts.js` and the priced hits in one script; 40 s each, the
+capture starts some seconds into the fight). Diagnostics: `fightprobe`'s
+detail lines carry the chassis' x and z and print every component that comes
+off.
+
+**The live box fights scatter, and end early too.** The three new fights give
+ALARM 10, 40 and 4 counted hits on the Scout (the Scout 0, 6, 1). In two of
+them ALARM goes onto its back (from 37.7 s and 19.6 s; `fightpos`, y -1.81,
+`isUpsideDown`) and the brains fall idle at 78 and 82 s; in the third the Scout
+is on its side from 79 s. With `__000..002`: ALARM 63, 77, 37, 10, 40, 4
+(mean 38.5), the Scout 9, 6, 7, 0, 6, 1 (mean 4.8); robot hits stop at 121,
+120, 36, 63, 120 and 77 s, so three of six run the full length (§12l's live
+column held the three high ones only). Ours before: 22.2 counted in 83 s, 5/24
+full.
+
+**What is short: the time ALARM spends on its wheels, not its blows.** The
+priced hits of ALARM on the Scout per fight, by amount (zero-amount hits are
+in live's first bin only):
+
+| amount | 1-2 | 2-5 | 5-10 | 10-20 | 20-40 | 40-80 | ≥ 80 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| live (6 fights) | 25.5 | 13.7 | 5.2 | 10.3 | 12.5 | 12.2 | 3.5 |
+| ours before (24) | 29.0 | 14.6 | 6.4 | 6.8 | 5.9 | 5.1 | 4.4 |
+
+The blows below 10 are as many as live; the counted ones are fewer at every
+size. Per second that ALARM stands upright (up.y > 0.5), ours lands 0.58
+counted hits; live 0.64 in `__001` (upright for 120 s) and 0.33 in the new
+`__004`. The hammer's rate agrees too: live ALARM's piston fires 10-20 times
+per 20 s of fighting (every 0.5-1 s, `fightweapons`, O rows), ours 14-19; the
+rod goes out in 6-7 substeps unloaded and 13-17 against the Scout, and home in
+5 (F rows: the push is ±10000 per substep, `|direction| · F`, as ours). At
+the first meeting the head leaves at 10-11 m/s relative to the chassis live
+(`fightcontacts-...__live__003`, 4.03-4.12 s) and at 4-9 m/s in ours (warmup
+19, before), from a rod pushed in 0.29 m live and 0.13 m in ours; one case
+each, not followed further. The
+difference is that ALARM is on its back far more: on its back (up.y < -0.8)
+for at least 5 s by 45 s in 14 of our 24 runs, against about 5 in 19 live
+starts (§12j's 13 plus the new six); ours mostly at its first meeting with
+the Scout (10 of 24 within 6 s).
+
+**At the first meeting ALARM is lifted twice as hard.** At the first contact
+both games meet the same way (head on, the Scout 1.9-2.2 m in front of ALARM,
+closing at 13-17 m/s, `fightcontacts` B rows in ALARM's frame; the fork goes
+under ALARM's chassis at (-0.25, -0.30, 0.62) beside the hammer head and the
+Scout's chassis meets the hammer head, to the centimetre in both), and the fork
+runs 0 → 1.13 rad in 0.15 s in both. But within 0.7 s ALARM's chassis rises at
+1.0 m/s live (1.07, 1.10, 0.28, 1.46; nose up at most 0.5, never below up.y
+0.87) and at 1.9 m/s in ours (24 runs; nose up 0.38 on average, below up.y 0.5
+in 10). Not traced to a cause; what was found on the way is below.
+
+**A rebuilt body keeps its Havok mass, and the chassis collider does not
+crush (bug, fixed).** When the chassis buckles (or a part comes off)
+`Robot::rebuild_part` re-made the body by the Jolt rule:
+the members' masses summed (a motor's rotor counted in the chassis as well as
+in the body it drives), the convex hull of the members and its inertia. At its
+first blow the Scout's chassis went from 163.49 to 193.49 kg, its centre of
+mass 3 cm forward and 5 cm down. Live it stays 163.49 kg through a fight and
+its wheels keep their place about its centre of mass to 5 mm
+(`fightcontacts-scout-alarm-box__live__000`, 2.6 s against 60 s). On the
+Havok backend the rebuild now uses the body the robot was built with
+(`havok_part`, the members still attached) and sets its inertia
+(`PhysicsBackend::set_body_inertia`); test
+`mass_live::a_buckled_chassis_keeps_its_mass_and_centre`. The chassis'
+Havok collidable is the `.bot` mesh, which the crush (F9, our own rule) does
+not move, so on this backend the collider stays as built and only the drawn
+chassis caves in. That is what the original does: in
+`fightcontacts-scout-alarm-box__live__006` the Scout's chassis has lost 971 of
+its 1828 hitpoints by 20 s and 1406 by 30 s, and contacts still land on its
+top at y 0.359 above its centre of mass, the pristine height (`__000`, `__005`
+the same), where our crush would have brought it 0.13 m down. Letting the
+collider follow (tried: the crushed mesh as the shape with the built mass
+properties) gave box ALARM 16.0 counted in 61 s, 2/24 full, ALARM on its back
+by 45 s in 18/24. `duel::tests::a_crushed_chassis_collider_follows_and_the_robot_still_drives`
+now asks for the collider to stay on havok17 and to follow on Jolt.
+
+**A piston rod has its housing's inertia (measured live, code not located).**
+The rod body's local inertia (`+0x19c`) is its chassis' with the diagonal
+scaled by 0.2 and the products of inertia unchanged: ALARM's 33 kg hammer rod
+(9.830, 14.541, 7.282 / -0.1215, 0.0264, -0.8657) against its chassis (49.149,
+72.705, 36.411, the same products) in all three `fightcontacts-...__live__001..003`,
+and Wide Load's 63 kg rod against its 226.67 kg chassis likewise
+(`contacts-nohaz-wideload__live__001`); the world inverse inertia (`+0x10c`)
+agrees, so the solver uses it. Ours gave the rod its own geometry's (0.31,
+3.81, 3.78). `Robot::spawn` now builds every slider's body so
+(`ROD_INERTIA`); test `mass_live::alarms_hammer_rod_takes_its_chassis_inertia`.
+The 0.2 constant is not found in the code (none of the eight `0.2f` loads near
+the robot and prismatic code is it).
+
+The first meeting with both: ALARM rises at 1.76 m/s (median 1.42; live 1.0),
+nose up 0.28, below up.y 0.5 in 6 of 24. But later in the fight ours goes onto
+its back more, not less (below).
+
+**Which components the event filter registers (verified live for Scout v
+ALARM).** Every box match load makes 29 registrations: four arena bodies, the
+Scout's chassis, burst motor, both angle motors, both wheels, Round Extender
+and Forklift Arm (ids 1-6, 9, 10), ALARM's chassis, four angle motors, four
+wheels, Burst Piston and Hammer Head (ids 12-20, 24, 25), and a second entry
+on each of the six wheels; none for the batteries, the CO2 tanks, the control
+boards and the SmartZones. That is §12l's rule (`combat::registered_component`).
+
+**How the filter decides (recovered) and what calls it.** The filter is
+`0x52d4f0` (vtable `0x6ac110` slot 2, behind Havok's filter chain `0x554c70`,
+which calls it and passes the event on when it returns nonzero). For an event
+between collidables A and B it walks A's list (`0x52e0c0`): an entry whose
+partner is 0 or B, whose interval has run out since its last firing and whose
+speed test passes (`0x52d740`, `|Δv · n| >= threshold`) takes it: the time is
+stored, the event's type set and 0 returned. If none of A's does, B's list is
+walked the same way, and an entry there also swaps A and B and flips the
+normal. At most one entry per event, A's first: ours. What differs is how
+often it is asked. Replaying the live contact stream of
+`fightcontacts-...__live__004..006` through the live registrations: one event
+per resolver point per step (ours) gives 345 events against 268 live (+29 %),
+one per collidable pair when it starts touching 284 (-6..+36 % per run). Live
+the fork lies against ALARM's chassis for a second at a time with no event at
+all (`__004`, 0.1-1.1 s), so the events are not the resolver's points. Which
+Havok callback calls the chain (a new contact point, a new pair) was not
+captured: a hook on `0x52d4f0` was prepared but the live session was held by
+another agent. Ours still asks once per resolver point and step.
+
+**Validation.** Before = `fidelity` 59cfdbc, built from a clean tree (its
+ensembles reproduce §12l to the digit); after = this branch. `FIDTRACE_WARMUP`
+ensembles (12 runs: 0, 7, 13, 19, 26, 31, 37, 43, 50, 57, 64, 71; 24 add 2, 5,
+9, 11, 16, 22, 28, 34, 40, 47, 53, 60), counted = `>= 10` on the other robot
+(mean, total in brackets), mean length, full-length runs:
+
+| fight | live | before | rebuild only | after |
+|---|---|---|---|---|
+| box Scout v ALARM, 24: ALARM / Scout | 63, 77, 37, 10, 40, 4 / 9, 6, 7, 0, 6, 1; 3/6 full | 22.2 (140) / 5.1, 83 s, 5/24 | 21.2 (116) / 4.2, 75 s, 7/24 | 17.4 (137) / 3.2, 77 s, 7/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 14/24 | 14/24 | 19/24 |
+| Compressor Sentinel v Wide Load, 12: Wide Load / Sentinel | 76 (283) / 5.3 | 93.9 (336) / 5.2, 110 s, 10/12 | 82.3 (369) / 4.2, 109 s, 9/12 | 82.3 (349) / 4.8, 106 s, 9/12 |
+| Octagon Scout v ALARM, 24: ALARM / Scout | 24 (944) / 4 | 10.5 (55) / 2.7, 72 s, 4/24 | 10.6 (72) / 2.0, 65 s, 5/24 | 11.0 (72) / 2.3, 73 s, 6/24 |
+| box Razor v FlapJack, 24: Razor / FlapJack | 3 (40) / 1 (12) | 8.4 (156) / 1.7, 100 s, 17/24 | | 12.7 (202) / 1.4, 110 s, 21/24 |
+
+(Razor v FlapJack over §12l's six warmups: 7.5 / 1.3 before, 12.0 / 3.8
+after.) AI suite (ten pairings, warmup 0): 10/10 deal damage before and after.
+
+So the two body fixes do not bring ALARM's hits up: the box ALARM is a little
+lower (within one standard deviation of the 24-run mean, 18-22), the
+Compressor's Wide Load moves towards live, Razor away from it. They are kept
+because both are what the original's bodies measure.
+
+**Still open.** Why ALARM rises twice as fast at the first meeting and goes
+onto its back three times as often (the rod's inertia lowers the first and
+raises the second); the 0.2 of the rod's inertia in the code; what Havok calls the event filter for (a hook on `0x52d4f0` with the contacts settles it); the
+live piston's out stroke ends after 6-7 or 15 substeps, ours after a fixed
+0.25 s; the items of §12l.

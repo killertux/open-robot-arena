@@ -55,10 +55,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut next = 0.0f32;
     let mut steps = 0usize;
+    // Components that came off, as they go.
+    let mut attached: Vec<Vec<bool>> = m.duel.robots.iter().map(|r| r.attached.clone()).collect();
     while m.state() != MatchState::Results && m.clock() < secs && steps < (secs * 400.0) as usize {
         m.step();
         steps += 1;
         let t = m.clock();
+        for (ri, r) in m.duel.robots.iter().enumerate() {
+            for (ci, (&now, was)) in r.attached.iter().zip(attached[ri].iter_mut()).enumerate() {
+                if now != *was {
+                    println!(
+                        "{t:7.3} robot {ri} component {ci} {:?} attached {now}",
+                        r.rig.components[ci].name
+                    );
+                    *was = now;
+                }
+            }
+        }
         let detail = window.is_some_and(|(x, y)| t >= x && t <= y);
         if detail {
             let mut line = format!("{t:7.3}");
@@ -67,7 +80,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let up = s.rotation * glam::Vec3::Y;
                 let fwd = s.rotation * r.rig.forward();
                 line += &format!(
-                    " | y {:5.2} up {:5.2} fwd {:5.2} v ({:5.1},{:5.1},{:5.1}) w {:5.1}",
+                    " | x {:6.2} z {:6.2} y {:5.2} up {:5.2} fwd {:5.2} v ({:5.1},{:5.1},{:5.1}) w {:5.1}",
+                    s.position.x,
+                    s.position.z,
                     s.position.y,
                     up.y,
                     fwd.y,

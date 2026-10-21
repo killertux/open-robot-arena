@@ -614,6 +614,11 @@ pub trait PhysicsBackend {
     /// `GMID_HAVOK_DIS_COLLISION_PAIRS`. A backend may ignore it.
     fn disable_collision(&mut self, _a: BodyHandle, _b: BodyHandle) {}
 
+    /// Set a dynamic body's inertia tensor about its centre of mass (body
+    /// frame), as [`BodyDesc::with_inertia`] does at creation. A backend may
+    /// ignore it.
+    fn set_body_inertia(&mut self, _handle: BodyHandle, _inertia: Mat3) {}
+
     /// Replace a body's collision shape in place, optionally with a new mass.
     /// Used to rebuild a robot's body after a part comes off: the body keeps its
     /// id, pose and joints.

@@ -1413,6 +1413,18 @@ impl PhysicsBackend for Havok17Backend {
         true
     }
 
+    fn set_body_inertia(&mut self, handle: BodyHandle, inertia: Mat3) {
+        if inertia.determinant().abs() <= 1e-12 {
+            return;
+        }
+        if let Some(b) = self.bodies.get_mut(handle as usize) {
+            if b.motion == MotionType::Dynamic {
+                b.inv_inertia_local = inertia.inverse();
+                b.refresh_inertia();
+            }
+        }
+    }
+
     fn set_body_shape(
         &mut self,
         handle: BodyHandle,
