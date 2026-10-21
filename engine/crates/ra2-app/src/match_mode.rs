@@ -243,6 +243,12 @@ pub enum Escape {
     Ignored,
 }
 
+/// Where the damage number's line box sits against the projected point, in pixels: measured
+/// against the original's frames (docs/37 section 7): the `25` of a hazard hit at the projection
+/// `(480.0, 211.6)` has its ink at x 471-491, y 200-212; at `(502.8, 272.9)` x 493-513,
+/// y 262-274.
+pub const DAMAGE_NUMBER_OFFSET: [f32; 2] = [1.0, -5.5];
+
 struct ScreenBind {
     camera: String,
     show_camera: bool,
@@ -468,6 +474,8 @@ impl Session {
         // option's.
         matched.duel.fx.enabled = cfg.graphic_effects();
         matched.duel.fx.detail = cfg.graphic_detail();
+        // `GraphicMessages` (the options window's "damage" switch): whether a hit shows its number.
+        matched.set_damage_messages(cfg.graphic_messages());
         let mut camera = default_camera;
         let mut camera_name = None;
         if cfg.arena_intros() && std::env::var("RA2_ARENA_INTROS").as_deref() != Ok("0") {
@@ -949,23 +957,57 @@ impl Session {
             return self.presentation.results_scene(&report);
         }
         let bind = self.screen_bind();
-        if self.reminder_open {
-            if let Some(reminder) = &self.reminder {
-                let window = reminder.filled(self.presentation.layout);
-                return self
-                    .presentation
-                    .pause_scene(&report, state, clock, countdown, &bind, &window);
-            }
-        }
-        if self.paused {
+        let mut scene = if let Some(window) = self
+            .reminder_open
+            .then(|| {
+                self.reminder
+                    .as_ref()
+                    .map(|r| r.filled(self.presentation.layout))
+            })
+            .flatten()
+        {
+            self.presentation
+                .pause_scene(&report, state, clock, countdown, &bind, &window)?
+        } else if self.paused {
             let dialog = self.dialog.clone();
             self.presentation
-                .pause_scene(&report, state, clock, countdown, &bind, &dialog)
+                .pause_scene(&report, state, clock, countdown, &bind, &dialog)?
         } else {
             self.presentation
                 .hud_scene(&report, state, clock, countdown, &bind)
-                .map(|(_, scene)| scene)
+                .map(|(_, scene)| scene)?
+        };
+        self.add_damage_numbers(&mut scene);
+        Ok(scene)
+    }
+
+    /// The floating damage numbers (`ArenaManager::DamageDisplay`, docs/37 section 7): text drawn
+    /// 1:1 at the projection of a world point, under the HUD windows.
+    fn add_damage_numbers(&mut self, scene: &mut UiScene) {
+        if self.matched.damage_numbers().is_empty() {
+            return;
         }
+        let [w, h] = scene.size;
+        let view_proj = self.matched.duel.view_proj(&self.camera, w, h);
+        let before = scene.quads.len();
+        for n in self.matched.damage_numbers() {
+            let clip = view_proj * n.position().extend(1.0);
+            if clip.w <= 0.0 {
+                continue;
+            }
+            let x = (clip.x / clip.w * 0.5 + 0.5) * w as f32;
+            let y = (0.5 - clip.y / clip.w * 0.5) * h as f32;
+            self.presentation.assets.centered_text(
+                scene,
+                ra2sim::popup::FACE,
+                &n.text,
+                [x + DAMAGE_NUMBER_OFFSET[0], y + DAMAGE_NUMBER_OFFSET[1]],
+                n.colour(),
+            );
+        }
+        // the numbers belong to the 3D scene: the HUD draws over them
+        let added = scene.quads.len() - before;
+        scene.quads.rotate_right(added);
     }
 
     /// Bind the HUD this instant and return both its values and its scene. The
@@ -2405,6 +2447,66 @@ mod tests {
             session.step();
         }
         session
+    }
+
+    /// The floating damage number (docs/37 section 7) reaches the HUD scene as two `fg_d20` cells in
+    /// the damage colour, behind the HUD windows, 0.15 s after a hazard hit on the human robot,
+    /// and is gone a second after that; the options window's `GraphicMessages` switch turns it off.
+    #[test]
+    fn a_hazard_hit_on_the_player_shows_a_red_number_for_a_second() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let mut session = player_fight(&game, 30.0);
+        session.set_layout([1024, 768]);
+        let point = session.matched.duel.robots[0].position(&*session.matched.duel.physics);
+        let count = |session: &mut Session| {
+            session
+                .scene()
+                .expect("a scene")
+                .quads
+                .iter()
+                .filter(|q| q.color[..3] == [0.8, 0.0, 0.0])
+                .count()
+        };
+        let before = count(&mut session);
+        session
+            .matched
+            .duel
+            .apply_hit(None, 0, 0, 25.0, point + glam::Vec3::Y * 0.3);
+        let dt = session.matched.config.dt;
+        for _ in 0..(0.1 / dt) as usize {
+            session.step();
+        }
+        assert_eq!(count(&mut session), before, "the entry waits 0.15 s");
+        for _ in 0..(0.2 / dt) as usize {
+            session.step();
+        }
+        let scene = session.scene().expect("a scene");
+        let red: Vec<_> = scene
+            .quads
+            .iter()
+            .filter(|q| q.color[..3] == [0.8, 0.0, 0.0])
+            .collect();
+        assert_eq!(red.len(), before + 2, "`25` is two glyph cells");
+        // drawn first, under the HUD
+        assert!(scene.quads[..2]
+            .iter()
+            .all(|q| q.color[..3] == [0.8, 0.0, 0.0]));
+        for _ in 0..(1.0 / dt) as usize {
+            session.step();
+        }
+        assert_eq!(count(&mut session), before, "a number lives one second");
+
+        // `GraphicMessages=0`: the hit makes no number
+        session.matched.set_damage_messages(false);
+        session
+            .matched
+            .duel
+            .apply_hit(None, 0, 0, 25.0, point + glam::Vec3::Y * 0.3);
+        for _ in 0..(0.3 / dt) as usize {
+            session.step();
+        }
+        assert_eq!(count(&mut session), before);
     }
 
     /// F1 (`0x475ee0`, key `0x70`) shows `common/controls_reminder.gib` for

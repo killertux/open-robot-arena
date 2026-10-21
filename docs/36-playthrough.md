@@ -956,3 +956,35 @@ c014140 + the harness fix, after = this branch. Nothing new was captured from th
 --no-fail-fast` **596 passed, 0 failed**; `find ../local/game -newer <stamp>` printed nothing. The anchor rule
 is limited to centred (0 < anchor < 1) groups after two `ra2ui` tests (the off-screen count and the bottom-right
 step layer) failed with it on every anchor.
+
+## 9.22 Round 6 (`fx/ui-numbers`, 2026-10-21): the schedule grid and whole-pixel groups
+
+Numbers are `tools/oracle/fidelity.py --renderer app` (ours vs the original, 1024x768, 104 fixtures), before = `fidelity`
+ffcae47, after = this branch. Nothing new was captured for the shell.
+
+* **The schedule grid was drawn with per-cell rings.** Measured in `teamhq-events` (1024x768): the grid is **552 x 333** px
+  with ONE black pixel line shared between neighbours: vertical lines at x 341, 525, 709 (the left of each column, none at
+  the right edge, 334 rows long) and horizontal ones at y 318, 429, 540, 651 (the top of each row and one under the last);
+  the art starts `1 + BufferWidth 2` = 3 px inside a line and stops 2 px short of the next (344..522, 321..426). Ours gave
+  every cell its own ring, so neighbours had two lines three pixels apart and the art 1 px off. `Hq::fill_events` now puts
+  the cells at `3/184 x 3/111` of their slot with `179/184 x 106/111` of its size and adds `grid line column N` /
+  `grid line row N` rectangles (`grid_line`). Test `hq::tests::the_schedule_grid_has_shared_lines_and_art_inside_them`.
+* **A split's children keep their authored extent across the split.** `fit_splits` made every child of a split
+  `Size 1 1 1 1`; the calendar's `Slot1` is `Size 0.95 1 198 0` in a top/bottom split, i.e. **0.95 of the pane wide** (552
+  of 581.. px, not the pane's 583). Only the axis along the split fills the pane now (`hq::fit_splits`).
+* **A `Group`/`Window` is whole pixels wide and tall** (`ra2ui::sized`): `frac * parent` is truncated. With that the grid is
+  552 wide at 1024x768 (it was 553.9) and the exhibition panels land on the capture's edges. The Team HQ's own chrome
+  groups (`EXACT_GROUPS`: `hq content group`, the four slots, `team heading group`, `kills group`, `logo grp`, the
+  inventory's `robot cell group`, `bot img group`, `grid grp`) keep the exact fractions: the captures of the inventory,
+  history, standings and edit-team screens sit on them (truncating them cost those four 0.1-0.4 MAE). Not read from the
+  exe; fitted per fixture (variants tried: all groups, width only 5.21, height only 5.35 for events; rounding 6.31).
+* Numbers (MAE, before -> after): teamhq-events **6.35 -> 3.20**, event join 4.84 -> **3.25**, join robot 4.71 -> **3.12**,
+  exhibition robots 0.75 -> 0.06, settings 2.45 -> 1.68, deathmatch 2.36 -> 1.60, pick-ai 1.95 -> 1.48, time list open 2.58
+  -> 1.83, weight light 2.42 -> 1.65, pick-ai light 1.87 -> 1.40, bot lab wiring 4.96 -> 4.36, paint 5.72 -> 5.40, bracket
+  6.21 / 6.00 -> 5.82 / 5.59, repairs 4.96 -> 4.74, F1 6.83 -> 6.69; teamhq inventory / standings / history / edit team
+  unchanged (1.77 / 2.67 / 0.24 / 1.80 against 1.75 / 2.71 / 0.24 / 1.79); **arena box 1.07 -> 1.28** is the one regression.
+  Mean over the 104: **3.663 -> 3.537**.
+* **Open.** The schedule's rows are one pixel short (lines at 318, 429, 541: the pane is 334 px tall where the capture's
+  is 333); the capture's `Right TB split` / content group heights sit about 3 px under ours (420 against 422.9) and the
+  vertical chain is not recovered. The join window's robot row still differs by a selected robot (ours has C.R.U.S.H.
+  selected, the capture none).

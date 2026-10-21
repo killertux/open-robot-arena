@@ -392,6 +392,9 @@ pub struct Duel {
     /// Hits that the match has not scored yet. The duel knows the damage and the
     /// attacker; the game type and teams are the match's, so it drains this.
     score_hits: Vec<ScoreHit>,
+    /// The floating-number requests of the hits applied since the match last drained them
+    /// ([`crate::popup`]); the match filters them by game type and human player.
+    pub popups: Vec<crate::popup::Request>,
     /// Every damage event that reached a component (`FUN_004175b0`), in order.
     pub damage_events: Vec<DamageEvent>,
     /// Keep every [`Impact`](combat::Impact), including those under the `10`
@@ -779,6 +782,7 @@ impl Duel {
             damage_taken,
             damage_dealt: vec![0.0; n],
             score_hits: Vec::new(),
+            popups: Vec::new(),
             damage_events: Vec::new(),
             immobility_active: false,
             record_impacts: false,
@@ -1916,12 +1920,16 @@ impl Duel {
         for imp in &impacts {
             self.sparks_for(imp);
             self.mark_for(imp);
-            self.apply_hit_by(
+            let threshold = self.combat.apply_threshold;
+            self.apply_hit_normal(
+                threshold,
                 Some((imp.attacker, imp.by)),
                 imp.target,
                 imp.component,
                 imp.damage,
                 imp.point,
+                // the record's normal points into the struck component
+                -imp.normal,
             );
         }
     }
@@ -2165,6 +2173,30 @@ impl Duel {
         damage: f32,
         point: Vec3,
     ) -> bool {
+        self.apply_hit_normal(
+            threshold,
+            attacker,
+            victim,
+            component,
+            damage,
+            point,
+            Vec3::ZERO,
+        )
+    }
+
+    /// [`Duel::apply_hit_with`] with the hit record's normal (pointing *into* the struck
+    /// component), which the floating number leans away from; a hazard has none.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_hit_normal(
+        &mut self,
+        threshold: f32,
+        attacker: Option<(usize, usize)>,
+        victim: usize,
+        component: usize,
+        damage: f32,
+        point: Vec3,
+        normal: Vec3,
+    ) -> bool {
         let by = attacker.map(|(_, by)| by);
         let attacker = attacker.map(|(a, _)| a);
         if victim >= self.robots.len()
@@ -2180,6 +2212,16 @@ impl Duel {
         }
         let victim_was_alive = self.robots[victim].is_alive();
         let applied = self.robots[victim].damage(component, damage);
+        if applied.effective > 0.0 {
+            self.popups.push(crate::popup::Request {
+                attacker: attacker.filter(|a| *a < self.robots.len()),
+                victim,
+                victim_alive: victim_was_alive,
+                amount: applied.effective,
+                point,
+                normal,
+            });
+        }
         self.damage_taken[victim] += damage;
         self.damage_events.push(DamageEvent {
             time: self.time,

@@ -20,6 +20,7 @@ pub mod massprops;
 pub mod r#match;
 pub mod montage;
 pub mod motor;
+pub mod popup;
 pub mod rig;
 pub mod robot;
 pub mod scene;

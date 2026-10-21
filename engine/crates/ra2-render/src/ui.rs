@@ -368,6 +368,54 @@ impl UiAssets {
         }
     }
 
+    /// The quads of one run of text drawn outside any layout (the floating damage numbers):
+    /// `face`'s own glyph cells, one pixel to a texel, the text's line box centred on `center`
+    /// (scene pixels), tinted `color`. The scene's texture list is refreshed, so a face first
+    /// used here is in `scene.textures`.
+    pub fn centered_text(
+        &mut self,
+        scene: &mut UiScene,
+        face: &str,
+        text: &str,
+        center: [f32; 2],
+        color: [f32; 4],
+    ) {
+        let Some(font) = self.faces.get(face).cloned() else {
+            return;
+        };
+        let Some(texture) = self.glyph_page(face, &font) else {
+            return;
+        };
+        let (w, h) = font.extent(text);
+        let frame = Frame::new(
+            (center[0] - w as f32 / 2.0).floor(),
+            (center[1] - h as f32 / 2.0).floor(),
+            w as f32,
+            h as f32,
+        );
+        let (pw, ph) = (font.page_width as f32, font.page_height as f32);
+        for glyph in ra2ui::text_run(&font, frame, text) {
+            if glyph.cell[2] <= 0 || glyph.cell[3] <= 0 {
+                continue;
+            }
+            scene.quads.push(UiQuad {
+                rect: glyph.rect,
+                corners: None,
+                uv: [
+                    glyph.cell[0] as f32 / pw,
+                    glyph.cell[1] as f32 / ph,
+                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
+                ],
+                color,
+                texture,
+                alpha: true,
+                clip: None,
+            });
+        }
+        scene.textures = self.textures.clone();
+    }
+
     /// The quad a widget's `_Filename` draws, if it names art this build can
     /// load and is not a repeated pattern.
     fn art_quad(
@@ -1721,5 +1769,56 @@ mod tests {
             assert!(quad.uv[2] > 1.0 || quad.uv[3] > 1.0, "{label} repeats");
         }
         assert!(checked > 0, "the trough was drawn");
+    }
+
+    /// The floating damage number is the face's own cells, one pixel to a texel, centred on the
+    /// point: `fg_d20`'s `25` is 22 wide and its ink 21 (live: ink x 471-491).
+    #[test]
+    fn a_centred_number_is_the_faces_own_cells_around_the_point() {
+        let Some(game) = game_dir() else { return };
+        let mut assets = UiAssets::open(&game).unwrap();
+        let mut scene = assets.scene(&[], [1024, 768]);
+        assets.centered_text(
+            &mut scene,
+            "fg_d20",
+            "25",
+            [481.0, 206.0],
+            [0.8, 0.0, 0.0, 1.0],
+        );
+        assert_eq!(scene.quads.len(), 2, "one quad a digit");
+        let left = scene
+            .quads
+            .iter()
+            .map(|q| q.rect.x)
+            .fold(f32::MAX, f32::min);
+        let right = scene
+            .quads
+            .iter()
+            .map(|q| q.rect.x + q.rect.w)
+            .fold(f32::MIN, f32::max);
+        let top = scene
+            .quads
+            .iter()
+            .map(|q| q.rect.y)
+            .fold(f32::MAX, f32::min);
+        let bottom = scene
+            .quads
+            .iter()
+            .map(|q| q.rect.y + q.rect.h)
+            .fold(f32::MIN, f32::max);
+        // the cells (11 + 12 wide, 15 tall) sit inside the 22 x 40 line box centred there
+        assert_eq!((right - left, bottom - top), (23.0, 15.0));
+        assert_eq!(
+            left, 471.0,
+            "the line box starts 11 left of the centre, the cell a pixel in"
+        );
+        assert!(scene
+            .quads
+            .iter()
+            .all(|q| q.color == [0.8, 0.0, 0.0, 1.0] && q.clip.is_none()));
+        assert!(
+            scene.textures.iter().any(|t| t.label == "#fg_d20"),
+            "the face's page is in the scene"
+        );
     }
 }
