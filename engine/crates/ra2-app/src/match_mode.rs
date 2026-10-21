@@ -196,6 +196,10 @@ pub struct Session {
     pub evidence_decision: bool,
     /// The keyboard input sampled at the latest tick.
     player_input: DriveInput,
+    /// Network play, host side: the drive each remote human last sent for its
+    /// robot (`HumanRemote` applying `giRemoteInputMessage`s, docs/38 §6).
+    /// `None` leaves a robot to its AI.
+    remote_inputs: Vec<Option<DriveInput>>,
     /// Accumulates wall-clock time for [`Session::advance`].
     accumulator: f32,
     /// Seconds left on `camera textbox`'s 3.0 s display window.
@@ -506,6 +510,7 @@ impl Session {
             player_robot: 0,
             evidence_decision: !player_controlled,
             player_input: DriveInput::default(),
+            remote_inputs: Vec::new(),
             accumulator: 0.0,
             camera_label_left: CAMERA_LABEL_SECONDS,
             camera_name,
@@ -630,6 +635,15 @@ impl Session {
         self.player_input = input;
     }
 
+    /// Network play, host side: drive `robot` from a remote player's input
+    /// (`None` hands it back to its AI).
+    pub fn set_remote_drive(&mut self, robot: usize, input: Option<DriveInput>) {
+        if self.remote_inputs.len() <= robot {
+            self.remote_inputs.resize(robot + 1, None);
+        }
+        self.remote_inputs[robot] = input;
+    }
+
     /// The input the next step will sample.
     pub fn drive(&self) -> DriveInput {
         self.player_input
@@ -672,6 +686,11 @@ impl Session {
             }
         }
         let mut inputs = vec![None; self.matched.duel.robots.len()];
+        for (slot, remote) in inputs.iter_mut().zip(&self.remote_inputs) {
+            if remote.is_some() {
+                *slot = *remote;
+            }
+        }
         if self.player_controlled {
             if let Some(input) = inputs.get_mut(self.player_robot) {
                 *input = Some(self.player_input);

@@ -10,6 +10,7 @@ members = [
     "crates/ra2ui",
     "crates/ra2-app",
     "crates/ra2-audio",
+    "crates/ra2net",
 ]
 
 [workspace.package]

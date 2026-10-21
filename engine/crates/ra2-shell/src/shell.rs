@@ -1431,6 +1431,25 @@ impl Shell {
         Ok(())
     }
 
+    /// Switch to a screen as a `Goto` binding does, for the transitions the
+    /// application makes on its own: a hosted or joined multiplayer session
+    /// reaching the pre-match lobby (`FUN_0049a780` builds the prematch window
+    /// after `Host`), or leaving it. Any open window closes.
+    pub fn goto(&mut self, target: &str) -> Result<(), String> {
+        self.windows.clear();
+        self.popup = None;
+        self.fade = None;
+        let screen = load_screen(&self.ui, target)?;
+        self.switch_to(screen, target);
+        self.load_default_tab()
+    }
+
+    /// Close the top window without running its action (the IP-connect
+    /// window once the connect has been read from it).
+    pub fn close_window(&mut self) -> bool {
+        self.windows.pop().is_some()
+    }
+
     /// An OK-only message box over the screen (`FUN_005e5e40(caption, text,
     /// 1)`, `common/messagebox.gib`).
     pub fn show_message(&mut self, caption: &str, body: &str) -> Result<(), String> {
