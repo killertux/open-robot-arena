@@ -92,7 +92,7 @@ struct Row {
     error: f32,
 }
 
-fn wrap(angle: f32) -> f32 {
+pub(crate) fn wrap(angle: f32) -> f32 {
     let tau = std::f32::consts::TAU;
     let a = (angle + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI;
     if a.is_finite() {

@@ -33,6 +33,24 @@ pub fn hull_volume_centroid(points: &[Vec3]) -> Option<(f32, Vec3)> {
     Some((volume as f32, reference + (moment / volume).as_vec3()))
 }
 
+/// Volume and volume-centroid of the solid a triangle mesh bounds, by the
+/// divergence theorem over its triangles as they are wound (`None` when the
+/// enclosed volume is not positive).
+pub fn mesh_volume_centroid(points: &[Vec3], triangles: &[[u32; 3]]) -> Option<(f32, Vec3)> {
+    let mut volume = 0.0f64;
+    let mut moment = glam::DVec3::ZERO;
+    for t in triangles {
+        let get = |i: u32| points.get(i as usize).map(|p| p.as_dvec3());
+        let (Some(a), Some(b), Some(c)) = (get(t[0]), get(t[1]), get(t[2])) else {
+            continue;
+        };
+        let v = a.dot(b.cross(c)) / 6.0;
+        volume += v;
+        moment += v * (a + b + c) / 4.0;
+    }
+    (volume > 1e-9).then(|| (volume as f32, (moment / volume).as_vec3()))
+}
+
 /// Volume, volume-centroid and inertia tensor (about that centroid, at unit
 /// density) of the convex hull of `points`, or `None` for a degenerate set.
 ///

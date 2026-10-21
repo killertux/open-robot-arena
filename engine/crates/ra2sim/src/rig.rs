@@ -326,6 +326,8 @@ pub struct HavokParts {
     /// collides it as a mesh rather than as a convex hull
     /// ([`collides_as_mesh`]).
     pub collision_mesh: Vec<Option<Vec<[u32; 3]>>>,
+    /// Per piece of `collision`: its rigid body's own mass.
+    pub collision_mass: Vec<f32>,
     /// The phantom geometry (all of it, component-local).
     pub phantom: Vec<Vec3>,
     /// All the rigid bodies' mass, phantoms included, and the phantoms' share.
@@ -336,6 +338,14 @@ pub struct HavokParts {
     pub rotor_mass: f32,
     pub rotor_collision: Vec<Vec<Vec3>>,
     pub rotor_collision_mesh: Vec<Option<Vec<[u32; 3]>>>,
+    /// Per piece of `rotor_collision`: its rigid body's own mass.
+    pub rotor_piece_mass: Vec<f32>,
+    /// Per phantom rigid body: its geometry and its own mass (it places that
+    /// mass, though it collides with nothing).
+    pub phantom_pieces: Vec<(Vec<Vec3>, f32)>,
+    /// Geometry (component-local) that places the mass of a component with
+    /// nothing to collide: a SmartZone's zone.
+    pub mass_points: Vec<Vec3>,
     /// The top rigid body's material.
     pub friction: Option<f32>,
     pub restitution: Option<f32>,
@@ -382,7 +392,10 @@ impl HavokParts {
         let bodies = scene.rigid_bodies();
         let is_rotor = |rb: &ra2fmt::gmi::RigidBody| {
             let n = rb.name.to_ascii_lowercase();
-            (n.ends_with("axle") || n == "shaft" || n == "slider") && !n.contains("collision")
+            // A `Steering` unit's `hub1`/`hub2` (5 kg each) ride its hubs: live
+            // Sentinel's hub bodies weigh 23 kg (wheel 18 + hub 5).
+            (n.ends_with("axle") || n == "shaft" || n == "slider" || n == "hub1" || n == "hub2")
+                && !n.contains("collision")
         };
         let has_rotor = bodies.len() > 1 && bodies.iter().any(|rb| is_rotor(rb));
         let mut out = HavokParts::default();
@@ -396,6 +409,9 @@ impl HavokParts {
             let mesh =
                 (collides_as_mesh(rb.simulation_geometry) && !faces.is_empty()).then_some(faces);
             if rb.disable_collisions {
+                if pts.len() >= 4 {
+                    out.phantom_pieces.push((pts.clone(), rb.mass.max(0.0)));
+                }
                 out.phantom.extend(pts);
                 out.phantom_mass += rb.mass.max(0.0);
                 continue;
@@ -405,12 +421,14 @@ impl HavokParts {
                 if pts.len() >= 4 {
                     out.rotor_collision.push(pts);
                     out.rotor_collision_mesh.push(mesh);
+                    out.rotor_piece_mass.push(rb.mass.max(0.0));
                 }
                 continue;
             }
             if pts.len() >= 4 {
                 out.collision.push(pts);
                 out.collision_mesh.push(mesh);
+                out.collision_mass.push(rb.mass.max(0.0));
             }
         }
         out
@@ -1496,6 +1514,24 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             children: Vec::new(),
             havok,
         });
+    }
+
+    // A SmartZone's mass sits at its zone's centre (the zone box in the
+    // component's frame).
+    for z in &smart_zones {
+        if let Some(c) = components.get_mut(z.component) {
+            let (lo, hi) = (z.min, z.max);
+            c.havok.mass_points = (0..8)
+                .map(|k| {
+                    let p = Vec3::new(
+                        if k & 1 == 0 { lo.x } else { hi.x },
+                        if k & 2 == 0 { lo.y } else { hi.y },
+                        if k & 4 == 0 { lo.z } else { hi.z },
+                    );
+                    z.offset.transform_point3(p)
+                })
+                .collect();
+        }
     }
 
     // Link children.
