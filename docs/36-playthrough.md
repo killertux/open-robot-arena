@@ -272,8 +272,8 @@ changed (`md5sum`) → an exhibition `--play --team 0 --bot 1` spawns the
 1. **A save location**: the career and the workshop write into the install
    (`Teams/`, `Robot Designs/`), as the original does; a read-only or shared
    install needs a per-user copy.
-2. **Workshop drag placement**: new parts are placed at a fixed spread, the
-   original places them by mouse (§9.18).
+2. **Workshop drag placement**: done (§9.18); open: the original's physics
+   overlap query and a live trace of one drag.
 3. **A capture of the original's bracket, options, award and dropdown
    windows** to confirm the recovered layouts (§9.8, §9.11, §9.12). Round 3
    read everything from the exe; the original was not run.
@@ -324,7 +324,7 @@ read from `Robot Arena 2.exe` (addresses given).
 | 6 | Time-out decided by the judges | **fixed** |
 | 7 | Esc on shell screens | **fixed** (ignored, as in the original) |
 | 8 | Event screens and workshop native; bracket graphic | **fixed** (the award's 3D prize scene: round 3, 9.11) |
-| 9 | Smaller items | 7 fixed, 1 not reproduced; the rest were closed in round 3 (9.11-9.17) except the lab's drag placement (9.18) |
+| 9 | Smaller items | 7 fixed, 1 not reproduced; the rest were closed in round 3 (9.11-9.17) and the lab's drag placement (9.18) |
 
 ### 9.1 Pause → Options (`FUN_00476700`)
 
@@ -452,8 +452,8 @@ Not verified against a capture of the original (none exists).
 * **closed in round 3** Resolution dropdown list, time dropdown list,
   weight-class filter, deathmatch slot 2 label, `Finish Later` before a round,
   event `End Match` result-4 path, the award's 3D prize scene, the original's
-  AI robot choice per team in an event (§9.11-§9.17). **open** drag placement
-  in the lab (§9.18).
+  AI robot choice per team in an event (§9.11-§9.17); the lab's drag placement
+  (§9.18, `fx/workshop2`).
 
 ### 9.10 Gate (round 2)
 
@@ -603,29 +603,142 @@ of **the player's weight class**. `hq_mode::match_config` now reads the entered
 robot's class (`ai_bot_for_class`); it was `Bot0`. Test
 `hq_mode::the_ai_teams_bring_the_robot_of_the_players_weight_class`.
 
-## 9.18 Workshop drag placement: not done, what was found
+## 9.18 Workshop drag placement (`fx/workshop2`)
 
-Not implemented this round (lowest priority). The leads, from the exe: the
-components tab (`FUN_0042ac20`, class `BotLabComponents`) loads
-`botlab/components.gib` and `botlab/comp_preview.gib` (`component preview
-group`: the part's name, `component 3d preview`, a `style dropdown group`
-labelled `Component option:` and the `attach button`, whose note says *"click to
-begin attachment dragging for placement"*). The palette click only selects the
-part and shows that preview; the green attachment-point boxes
-(`UI\BotLab\AP_box_selected.gmf` / `AP_box_unselected.gmf`, loaded by
-`FUN_0042e650`) choose the mount, and the instruction tip strings (`0x6f07f4`:
-*"Click the Attach button to place a component."*, `0x6f0828`: *"Click a green
-box to change the component's attachment point. Then click the Attach button to
-place a component."*) describe the order: pick the part, pick a green box, click
-Attach. The Attach handler is `0x42c3a0`: it first applies the editor's mass
-check ("Total mass of robot must not exceed 800 kg.", `FUN_0043ca70` /
-`FUN_004df0b0`, already in `Build`) and then starts the placement drag. This
-client attaches on the palette click at the panel's selected mount and places
-chassis children with a click on the preview (`Build::place_on_baseplate`); the
-`comp_preview` panel, the `Component option:` style list, the Attach button
-and the drag itself (the part follows the mouse over the baseplate until a
-click, with `heading_arrow.gmf` for the SHIFT rotation, `FUN_00437770`) are
-the missing pieces. The drag's handlers were not traced.
+The Components tab's flow as the exe runs it, traced from `BotLabComponents`
+(`FUN_0042ac20` builds it; its handlers are `0x42b460` mouse button,
+`0x42b590` mouse move, `FUN_0042c3a0` Attach, `FUN_0042c850` drag follow,
+`FUN_0042d360` SHIFT, `FUN_0042d3e0` CTRL, `FUN_0042d4b0` drop,
+`FUN_0042d280` pick, `FUN_0042f270` remove). Model: `ra2ui::workshop::placement`;
+app: `ra2-app` `build_mode` (`Builder::mouse_moved`, `attach_pressed`,
+`drop_click`). Everything below is derived from the exe except where it says
+*ours*.
+
+**Pick (`FUN_0042e650`).** A palette click only selects the part. It loads
+`botlab\comp_preview.gib` into the screen's `component content group` (the
+note on that group: *"contains either component preview, adjustments, or
+appearance"*) and fills `component name textbox`, `component weight textbox`,
+`component description` (a `<text font fg_mcn14 color 0 0 0 1>` box), the
+`style dropdown group` (`model label` = `Component options (N)`, N = styles + 1;
+hidden when the part has none) and the `component 3d preview`. Styles are the
+definition's `styles = Label, file, Label, file, ...` line: the first label is
+the palette's own definition, then a `Components\Styles\<file>` and its label
+per style; choosing one swaps the previewed (and later placed) definition
+(`FUN_0042f050`, `FUN_00462ec0`; stock bots use `Components\Styles\ztek2.txt`,
+`anglemotor2.txt`, `smartzone2.txt`, ...). The preview draws
+`UI\BotLab\AP_box_selected.gmf` on the chosen attachment point and
+`AP_box_unselected.gmf` on the others, each at the point's own frame. A point
+gets a box unless its type mask is exactly `axle_m` (0x10) or `generic_m` (4)
+(`FUN_0045de80` maps the `Attach =` names to the bits `base_m` 1, `base_f` 2,
+`generic_m` 4, `generic_f` 8, `axle_m` 0x10, `axle_f` 0x20): the plugs other
+parts push onto are not offered as a part's own mount. The tip below the
+preview is `0x6f07f4` for a part with fewer than two points, else `0x6f0828`.
+Clicking a box chooses the part's own mount.
+
+**Attach (`FUN_0042c3a0`, the button's note: *"click to begin attachment
+dragging for placement"*).** The mass check first (`FUN_0042f790`: robot mass
++ the part's weight must not pass `DAT_006aa9a4`; the box says *"Total mass of
+robot must not exceed 800 kg."*); then the drag starts (`this+0x15c = 1`), the
+tip becomes `0x6f04f8` (*"Drag the component where you want it to go, then
+click. Hold shift to rotate the component. Hold control to raise/lower the
+component."*) and the part is placed where the mouse already is
+(`FUN_0042c6b0`).
+
+**Drag (`FUN_0042c850`).** On every mouse move the part follows the mouse ray.
+It lands on a free, compatible attachment point of a placed part (the chassis'
+baseplate is the chassis' own point), or, over nothing, floats 3.0 m along the
+ray (`0x40400000`) and is not droppable. Each position is judged in this order
+and the part is painted red (`FUN_0042c780`, overlay `1 0 0 0.3`) while it is
+refused, the tip being the refusal:
+collision with the robot (`FUN_004a8660`, a physics query) gives *"Components
+should not intersect the chassis or other components."* (code 3), or *"Robots
+cannot exceed a maximum size."* when it still collides with the arena's size
+box (code 2); a part origin farther than 3.0 m (`0x6a6078`) or lower than
+-1.5 m (`0x6a6074`) gives the size text (code 4); and for a chassis child the
+chassis' own point test (`vtable+0x1c`, two points) gives *"Baseplate
+components must fit inside the chassis."* (code 5).
+
+**SHIFT and CTRL (`0x42b6b4` -> `FUN_0042d360`, `FUN_0042d3e0`).** The mouse
+movement is reduced to its dominant axis (the larger of |dx| and |dy|, signed,
+in whole pixels). With SHIFT held, `delta * 0.2` (`0x6a6080`) is added to a
+counter (`this+0x11c`) that wraps at 36 (`0x6a5a68`; below zero it adds 36),
+and the part's turn is `trunc(counter) * 10 deg` (`0x6a5df4 * 0x6a607c`). With
+CTRL held the same product goes to a second counter (`this+0x120`), clamped at
+0 below and at the chassis height (`+0x2ec` of the chassis object) above, and
+the lift is `trunc(counter) * 0.05 m` (`0x6f035c`); the stored chassis-child
+`angle` and `height` are exactly these. While a modifier is held the part stays
+where it is and is re-judged.
+
+**Drop (`FUN_0042d4b0`, on the button release).** Over something and not
+refused: the part is added to the robot (`FUN_004dbf40`), the attach sound
+plays, the mass readout updates (`FUN_0046c710`), and the drag ends. Over
+something but refused: nothing happens, the part stays on the drag. Over
+nothing: the drag is cancelled (`FUN_0042c280`).
+
+**Select, remove, move.** A click with no drag picks the placed part under the
+mouse (`FUN_0042d280`, each part's own pick), or nothing. The remove button
+(`FUN_0042f270`) acts on that selection: a part with parts attached to it is
+refused with a message box titled `Remove Component` (*"You must delete the
+components attached to this first."*, `FUN_004db920` is the leaf test);
+otherwise it plays `Sounds\cmp_removal.wav`, removes the part
+(`FUN_004dbc80`) and updates the mass. **There is no move**: to put a part
+elsewhere the player removes it and attaches it again. `heading_arrow.gmf` is
+not part of the drag: `FUN_00437770` (the lab window's constructor) loads it
+once as a model of the window (`this+0x1c4`); it belongs to the chassis'
+heading slider, not to placement.
+
+**In the client.**
+
+* A palette click selects (the tip `TIP_BOXES`/`TIP_ATTACH`), the shipped
+  `comp_preview` group is loaded into `component content group` and filled, the
+  preview renders the part and its two green boxes (`AP_box_*.gmf`), a click on
+  a box (nearest within 30 px) chooses the own mount, and the shipped `attach
+  button` (redrawn over the preview, as it is the placeholder's child) starts
+  the drag. The `Component option` dropdown is `ra2ui::dropdown` driven through
+  `Shell::set_dropdown_items`; the lab's document is now reachable by the
+  shell's dropdown click (`click_dropdown`).
+* The drag: `Builder::mouse_moved` (the window forwards the cursor and the
+  SHIFT/CTRL state) re-picks, re-plans and re-judges; the part is drawn in the
+  lab preview at its candidate transform (the model's own mount rule on a copy
+  of the component list), red when refused, floating when over nothing; the
+  framing ignores it. A click in the preview drops it. *Ours:* the drop is on
+  the button press, not the release (the Attach press is on another widget, so
+  the order does not matter); the pick radius around a socket (9 cm), the
+  overlap test (oriented boxes on the parts' mesh bounds with 5 cm of slack,
+  parent skipped, instead of the physics query; on the 57 stock bots 1 in 100
+  non-adjacent pairs still exceed it, and every chassis child fits), the
+  chassis fit (the part origin and its mesh-box centre inside the bottom
+  outline; the exe tests two points) and the pick of a placed part (mesh
+  boxes) are ours. The size cap's second form (code 2, the arena box) has no
+  counterpart.
+* The old behaviour is gone: the palette click no longer attaches, the preview
+  click no longer moves a part, and the panel's *Attach to* mount rows and
+  `rotate`/`lift` rows are removed. Remove takes the selected part, refuses one
+  with children, and no longer falls back to the last part.
+* Saving is unchanged: the dropped part is a `Component` with the stored
+  `parent`, `parent_mount`, `own_mount`, `angle` and `height` the game writes
+  (`ra2fmt::bot::write`); a test reads the saved bytes back to the same
+  components and the same bytes.
+
+Evidence: `ra2ui::workshop::placement` tests (SHIFT/CTRL arithmetic and wrap,
+the mount bits, box overlap, polygon fit, drop/refuse/snap/remove/pick/mass
+rules, and the 57-stock-bot check), `ra2-app` `build_mode` tests
+(`a_palette_click_selects_and_only_a_drag_attaches_one_component`,
+`shift_and_control_turn_and_raise_the_dragged_part`,
+`a_refused_spot_keeps_the_drag_and_a_click_over_nothing_ends_it`,
+`attach_refuses_a_part_that_would_pass_the_mass_limit`,
+`a_click_selects_a_placed_part_and_remove_refuses_one_with_children`,
+`a_click_on_a_green_box_chooses_the_parts_own_mount`,
+`the_style_list_swaps_the_definition_the_part_is_placed_with`) and the scripted
+build (`--build --out`), whose frames `component-selected.png`,
+`component-drag.png`, `component-refused.png` and `placement.png` show the
+flow. Gate: `cargo fmt --all --check` and `cargo clippy --release --offline
+--workspace --all-targets -- -D warnings` clean; `cargo test --release
+--offline --workspace --no-fail-fast` **589 passed, 0 failed** (561 at the end
+of round 3); `find ../local/game -newer <stamp>` printed nothing. The original
+was not run for this item: addresses and constants are from
+the exe only; a live trace of one drag would confirm the SHIFT/CTRL input axis
+and the exact judge order.
 
 ## 9.19 Gate (round 3)
 

@@ -9,9 +9,11 @@
 //! - a [`Build`] for the current robot, a [`GameLibrary`] and the lists the
 //!   screens' own `Notes` say to fill (the component palette, the armour grid,
 //!   the wiring control grid);
-//! - the palette click attaches the selected component through
-//!   [`Build::attach`] (the F1 mount rule), and the model's parts, mounts and
-//!   stats are drawn in a panel in the screen's own 3D placeholder;
+//! - the palette click selects a component and the shipped `comp_preview`
+//!   group shows it; the Attach button starts a drag that ends in
+//!   [`Build::drop_part`] (the F1 mount rule, `ra2ui::workshop::placement`,
+//!   docs/36 §9.18), and the model's parts and stats are drawn in a panel in
+//!   the screen's own 3D placeholder;
 //! - a live preview built from `Build::transforms()` and `ra2-render`'s item
 //!   loader (`chassis_items` + `scene_items`), composited into that placeholder;
 //! - paint, save/open, import/export and `Test Robot` (M8's [`Match`]).
@@ -21,10 +23,10 @@
 //! The panel is a synthetic `.gib` in the 3D placeholder: the shipped screens
 //! have no slot for a part list, a mount chooser or a face-group list, so one is
 //! added there and named in `docs/17-workshop-ui.md`. New parts on the chassis
-//! baseplate are placed at a fixed spread because there is no mouse-drag
-//! placement tool yet; a component-to-component mount uses the model's F1 rule
-//! and needs no placement at all. The camera framing is ours; the geometry and
-//! transforms are the model's and the renderer's.
+//! baseplate and on other parts are placed by the original's drag (select,
+//! Attach, drag, click; SHIFT turns, CTRL raises). The camera framing, the pick
+//! radius and the overlap test are ours; the geometry and transforms are the
+//! model's and the renderer's.
 //!
 //! ## Interaction that the shipped screen already has
 //!
@@ -48,10 +50,11 @@ use ra2_render::{DrawItem, RenderGroup, Renderer};
 use ra2_shell::Shell;
 use ra2fmt::gib::{Field, Gib, Widget, WidgetKind};
 use ra2ui::components::Component as PaletteComponent;
-use ra2ui::workshop::build::{Build, Placement as BuildPlacement};
+use ra2ui::workshop::build::{Build, BuildError};
 use ra2ui::workshop::chassis::{self, Outline};
-use ra2ui::workshop::library::{GameLibrary, TextureEntry};
+use ra2ui::workshop::library::{ComponentInfo, GameLibrary, TextureEntry};
 use ra2ui::workshop::paint::Texture;
+use ra2ui::workshop::placement::{self, Candidate, Drag, Hover, Refusal};
 use ra2ui::workshop::wiring::{Control, ControlKind};
 use ra2ui::workshop::{self};
 use ra2ui::{Frame, Placement};
@@ -151,17 +154,6 @@ impl PreviewCamera {
         let far = self.inv_view_proj.project_point3(Vec3::new(nx, ny, 1.0));
         Some((near, far - near))
     }
-
-    /// Where the ray meets a plane (`point`, `normal`) in world space.
-    fn plane(&self, rect: Frame, x: f32, y: f32, point: Vec3, normal: Vec3) -> Option<Vec3> {
-        let (origin, direction) = self.ray(rect, x, y)?;
-        let denom = direction.dot(normal);
-        if denom.abs() < 1e-6 {
-            return None;
-        }
-        let t = (point - origin).dot(normal) / denom;
-        (t >= 0.0).then_some(origin + direction * t)
-    }
 }
 
 /// The live workshop: the shell, the model, and the panel drawn over the 3D
@@ -185,8 +177,24 @@ pub struct Builder {
     palette: Vec<PaletteComponent>,
     shown: Vec<PaletteComponent>,
     selected: Option<PaletteComponent>,
-    /// `(parent component, parent mount)` the next palette click attaches to.
-    target: (usize, i32),
+    /// The green box chosen in the component preview: the selected part's own
+    /// attachment point (`FUN_0042e650` marks the first one).
+    own_mount: i32,
+    /// The style (`Components\Styles\...`) picked in the `Component option`
+    /// dropdown; the palette's own definition when `None`.
+    style_file: Option<String>,
+    /// The part being dragged after the Attach button (`FUN_0042c3a0`).
+    drag: Option<ActiveDrag>,
+    /// The last mouse position, and the SHIFT/CTRL state the window reports.
+    cursor: Option<[f32; 2]>,
+    shift: bool,
+    ctrl: bool,
+    /// The `comp_preview` panel's 3D view: the part and its green boxes.
+    comp_preview: Option<CompPreview>,
+    /// The definition the loaded `comp_preview` group was filled for: the
+    /// group is rebuilt only when it changes, so an open style list survives
+    /// the refresh after its own click.
+    comp_key: Option<String>,
     /// The component a part row or the remove button acts on.
     selected_part: Option<usize>,
     /// The control kind waiting for a free grid cell (the shipped `new
@@ -203,9 +211,7 @@ pub struct Builder {
     selected_group: Option<usize>,
     decal_at: [f32; 2],
     decal_scale: f32,
-    /// The baseplate point a palette click should attach to (the last preview
-    /// click), and the current chassis-drawing state.
-    place_point: [f32; 2],
+    /// The current chassis-drawing state.
     draw_style: DrawStyle,
     draw_centre: Option<[i32; 2]>,
     draw_point: Option<usize>,
@@ -233,6 +239,107 @@ pub struct Builder {
     /// The team a robot built from an empty inventory selection joins when
     /// the lab is left (`FUN_004fee90` opens the lab for the HQ's team).
     team_new: Option<usize>,
+}
+
+/// Where a scripted drag drops its part.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlaceOn {
+    /// A bot-local `(x, z)` on the baseplate, in metres.
+    Baseplate([f32; 2]),
+    /// A free attachment point of a placed part.
+    Mount { parent: usize, mount: i32 },
+}
+
+/// Write a paragraph into a widget that carries it twice: its `Glyph`'s `_Text`
+/// and the markup of the `DisplayBox` that dresses it (and that box's body).
+fn set_prose(widget: &mut Widget, text: &str) {
+    if widget.field("_Text").is_some() {
+        ra2ui::input::set_field(widget, "_Text", text);
+    }
+    for attachment in widget.attachments.iter_mut() {
+        if attachment.kind == ra2fmt::gib::AttachmentKind::DisplayBox {
+            if let Some(field) = attachment.field_mut("Display") {
+                field.raw = ra2ui::cells::markup_with_text(&field.raw, text);
+            }
+            if let Some(body) = attachment.body.as_mut() {
+                set_prose(body, text);
+            }
+        }
+    }
+    for child in widget.children.iter_mut() {
+        set_prose(child, text);
+    }
+}
+
+/// Write a paragraph into the `Glyph` whose `DisplayBox` body is called `name`
+/// (the box is the named record: its frame is the paragraph's rectangle).
+fn set_prose_named(widget: &mut Widget, name: &str, text: &str) -> bool {
+    if widget
+        .attachments
+        .iter()
+        .any(|a| a.body.as_ref().is_some_and(|b| b.name() == name))
+    {
+        set_prose(widget, text);
+        return true;
+    }
+    for child in widget.children.iter_mut() {
+        if set_prose_named(child, name, text) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The part's meshes with every vertex tinted red (`FUN_0042c780`'s `1 0 0
+/// 0.3` overlay while the part cannot be dropped).
+fn tinted(items: &[DrawItem]) -> Vec<DrawItem> {
+    items
+        .iter()
+        .map(|item| {
+            let vertices = item
+                .vertices
+                .iter()
+                .map(|v| ra2_render::Vertex {
+                    color: [1.0, 0.25, 0.25, 1.0],
+                    ..*v
+                })
+                .collect();
+            let mut out = DrawItem::new(vertices, item.material.clone(), item.label.clone());
+            out.material.has_vertex_colors = true;
+            out.scene_lights = item.scene_lights.clone();
+            out
+        })
+        .collect()
+}
+
+/// A part being dragged (`BotLabComponents` `+0xd4`, with `+0xd8`/`+0xd9`:
+/// whether it may be dropped and whether it is over anything).
+struct ActiveDrag {
+    drag: Drag,
+    /// The part's meshes, and the same tinted red for a refused spot
+    /// (`FUN_0042c780` paints the part red while it cannot be dropped).
+    items: Vec<DrawItem>,
+    red: Vec<DrawItem>,
+    /// Where the mouse last was in the preview, so SHIFT/CTRL re-judge the
+    /// part in place.
+    at: [f32; 2],
+    hover: Option<Hover>,
+    candidate: Option<Candidate>,
+    refusal: Option<Refusal>,
+    /// Where the part floats when nothing is under the mouse: 3 m along the
+    /// ray (`FUN_0042c850`'s `0x40400000`).
+    floating: Mat4,
+}
+
+/// The component preview's last frame and its camera, to unproject a click
+/// onto a green box.
+struct CompPreview {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    rect: Frame,
+    camera: PreviewCamera,
+    key: String,
 }
 
 /// The synthetic panel in the 3D placeholder.
@@ -344,7 +451,14 @@ impl Builder {
             palette,
             shown: Vec::new(),
             selected: None,
-            target: (0, 0),
+            own_mount: 0,
+            style_file: None,
+            drag: None,
+            cursor: None,
+            shift: false,
+            ctrl: false,
+            comp_preview: None,
+            comp_key: None,
             selected_part: None,
             wire_placing: None,
             wire_control: None,
@@ -356,7 +470,6 @@ impl Builder {
             selected_group: None,
             decal_at: [0.5, 0.5],
             decal_scale: 0.5,
-            place_point: [0.0, 0.0],
             draw_style: DrawStyle::Freeform,
             draw_centre: None,
             draw_point: None,
@@ -436,6 +549,12 @@ impl Builder {
             self.shell.click(x, y)?;
             return Ok(());
         }
+        self.cursor = Some([x, y]);
+        if self.drag.is_some() && !self.panel.preview.contains_point(x, y) {
+            // Any other click ends the drag, as the category and tab buttons
+            // do (`FUN_0042c280`).
+            self.cancel_drag();
+        }
         if self.panel.preview.contains_point(x, y) {
             if let Some(result) = self.preview_click(x, y) {
                 return result;
@@ -450,11 +569,15 @@ impl Builder {
         if let Some(action) = self.widget_action(x, y) {
             return self.apply(&action);
         }
+        if self.tab() == Some("components button") && self.comp_click(x, y) {
+            return Ok(());
+        }
         let category = self.category_click(x, y);
         self.shell.click(x, y)?;
         if category {
             self.palette_scroll = 0;
         }
+        self.take_style_pick();
         self.refresh()
     }
 
@@ -519,59 +642,667 @@ impl Builder {
         ])
     }
 
-    /// The bot-local point under a preview click, on the chassis' mounting
-    /// plane (the baseplate). The plane is the chassis' own `y = 0`; the point
-    /// is clamped to the blueprint sheet.
-    fn baseplate_at(&mut self, x: f32, y: f32) -> Option<[f32; 2]> {
+    /// A click on the preview. While a part is being dragged it is the drop
+    /// (`FUN_0042d4b0`); otherwise it selects the placed part under the mouse
+    /// (`FUN_0042d280`), or nothing.
+    fn place_at_preview(&mut self, x: f32, y: f32) -> Result<(), String> {
+        if self.drag.is_some() {
+            return self.drop_click();
+        }
+        let Some((origin, direction)) = self.bot_ray(x, y) else {
+            return Ok(());
+        };
+        self.selected_part = self.build.pick_part(origin, direction);
+        self.status = match self.selected_part {
+            Some(i) => format!(
+                "selected component {i}: {}",
+                self.build
+                    .component_info(i)
+                    .map(|info| info.name.clone())
+                    .unwrap_or_default()
+            ),
+            None => String::new(),
+        };
+        self.refresh_panel();
+        Ok(())
+    }
+
+    // -- The placement drag (docs/36 §9.18) ----------------------------------
+
+    /// The selected part and the definition the Attach button would place: the
+    /// style picked in the `Component option` list, else the palette's own.
+    fn selected_info(&self) -> Option<(ComponentInfo, String)> {
+        let component = self.selected.as_ref()?;
+        let file = self
+            .style_file
+            .clone()
+            .unwrap_or_else(|| component.file.clone());
+        let info = self.library.component_info_by_file(&file);
+        info.loaded.then(|| {
+            let name = if info.name.is_empty() {
+                component.name.clone()
+            } else {
+                info.name.clone()
+            };
+            (info, name)
+        })
+    }
+
+    /// The part's styles as the `Component option` list shows them: the
+    /// definition's `styles = Label, file.txt, Label, file.txt, ...` line (the
+    /// first label is the palette's own definition, then a file and its label
+    /// per style; a lone `Default` is no choice). `FUN_0042e650` reads them
+    /// through `FUN_0042f050`/`FUN_00462ec0` and loads `Components\Styles\<file>`.
+    fn style_list(&self) -> Vec<(String, Option<String>)> {
+        let Some(component) = &self.selected else {
+            return Vec::new();
+        };
+        let base = self.library.component_info_by_file(&component.file);
+        let Some(styles) = base.def.as_ref().and_then(|d| d.get("styles")) else {
+            return Vec::new();
+        };
+        let tokens: Vec<&str> = styles.split(',').map(str::trim).collect();
+        if tokens.len() < 3 {
+            return Vec::new();
+        }
+        let mut out = vec![(tokens[0].to_string(), None)];
+        for pair in tokens[1..].chunks(2) {
+            if let [file, label] = pair {
+                out.push((
+                    label.to_string(),
+                    Some(format!("Components\\Styles\\{file}")),
+                ));
+            }
+        }
+        out
+    }
+
+    /// A palette click: it only selects the part and shows its preview
+    /// (`FUN_0042e650`); nothing is attached until the Attach button.
+    fn select_component(&mut self, component: PaletteComponent) {
+        self.cancel_drag();
+        self.style_file = None;
+        self.selected = Some(component);
+        self.comp_preview = None;
+        if let Some((info, _)) = self.selected_info() {
+            self.own_mount = placement::default_own_mount(&info);
+            self.status = placement::preview_tip(&info).into();
+        }
+    }
+
+    /// The part's meshes, placed at its own origin.
+    fn part_items(&self, info: &ComponentInfo) -> Vec<DrawItem> {
+        let Some(def) = info.def.as_ref() else {
+            return Vec::new();
+        };
+        let Some(scene) = self.library.load_component_mesh(def) else {
+            return Vec::new();
+        };
+        let dir = self
+            .library
+            .component_mesh_path(def)
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| self.game.join("Components"));
+        ra2_render::scene_items(&scene, Mat4::IDENTITY, &dir, &info.name)
+    }
+
+    /// The Attach button (`FUN_0042c3a0`): the mass check first, then the drag.
+    fn attach_pressed(&mut self) -> Result<(), String> {
+        self.cancel_drag();
+        let Some((info, name)) = self.selected_info() else {
+            self.status = "Pick a component in the palette first.".into();
+            self.refresh_panel();
+            return Ok(());
+        };
+        if let Err(e) = self.build.check_attach_mass(&info) {
+            self.status = match e {
+                BuildError::OverWeight { limit, .. } => placement::mass_message(limit),
+                other => other.to_string(),
+            };
+            self.refresh_panel();
+            return Ok(());
+        }
+        let items = self.part_items(&info);
+        let red = tinted(&items);
+        self.drag = Some(ActiveDrag {
+            drag: Drag::new(info, name, self.own_mount),
+            items,
+            red,
+            at: self.cursor.unwrap_or([0.0, 0.0]),
+            hover: None,
+            candidate: None,
+            refusal: None,
+            floating: Mat4::IDENTITY,
+        });
+        self.status = placement::TIP_DRAG.into();
+        // `FUN_0042c6b0`: the part is placed where the mouse already is.
+        if let Some([x, y]) = self.cursor {
+            self.drag_to(x, y);
+        }
+        self.preview = None;
+        self.refresh_panel();
+        Ok(())
+    }
+
+    /// End the drag without adding anything (`FUN_0042c280`).
+    fn cancel_drag(&mut self) {
+        if self.drag.take().is_some() {
+            self.preview = None;
+            if self.status == placement::TIP_DRAG
+                || self.status == Refusal::Intersects.message()
+                || self.status == Refusal::TooLarge.message()
+                || self.status == Refusal::OutsideChassis.message()
+            {
+                self.status.clear();
+            }
+        }
+    }
+
+    /// The mouse ray in the robot's own space, when the preview has been drawn.
+    fn bot_ray(&mut self, x: f32, y: f32) -> Option<(Vec3, Vec3)> {
         self.ensure_preview();
         let camera = self.preview_camera?;
+        let (origin, direction) = camera.ray(self.panel.preview, x, y)?;
         let world = self
             .build
             .transforms()
             .first()
             .copied()
             .unwrap_or(Mat4::IDENTITY);
-        let point = world.transform_point3(Vec3::ZERO);
-        let normal = world.transform_vector3(Vec3::Y).normalize_or_zero();
-        let hit = camera.plane(self.panel.preview, x, y, point, normal)?;
-        let local = world.inverse().transform_point3(hit);
-        Some(ra2fmt::mount::clamp_baseplate([local.x, local.z]))
+        let inverse = world.inverse();
+        Some((
+            inverse.transform_point3(origin),
+            inverse.transform_vector3(direction),
+        ))
     }
 
-    /// A palette click, or a preview click, places a chassis child at the
-    /// clicked baseplate point. A selected chassis child is moved; otherwise a
-    /// selected palette component is attached there.
-    fn place_at_preview(&mut self, x: f32, y: f32) -> Result<(), String> {
-        let Some(point) = self.baseplate_at(x, y) else {
-            self.status = "the preview does not meet the baseplate here".into();
+    /// Re-judge the dragged part at the mouse (`FUN_0042c850`).
+    fn drag_to(&mut self, x: f32, y: f32) {
+        let Some(mut active) = self.drag.take() else {
+            return;
+        };
+        active.at = [x, y];
+        let ray = if self.panel.preview.contains_point(x, y) {
+            self.bot_ray(x, y)
+        } else {
+            None
+        };
+        active.hover = ray.and_then(|(o, d)| self.build.pick(&active.drag, o, d));
+        active.candidate = active
+            .hover
+            .as_ref()
+            .and_then(|h| self.build.plan(&active.drag, h));
+        active.refusal = active
+            .candidate
+            .as_ref()
+            .and_then(|c| self.build.judge(&active.drag, c));
+        if let Some((o, d)) = ray {
+            active.floating = Mat4::from_translation(o + d.normalize_or_zero() * 3.0)
+                * Mat4::from_rotation_y(active.drag.angle());
+        }
+        let hovering = active.candidate.is_some();
+        self.status = match (&active.refusal, hovering) {
+            (Some(r), _) => r.message().to_string(),
+            _ => placement::TIP_DRAG.to_string(),
+        };
+        self.drag = Some(active);
+        self.preview = None;
+        self.refresh_panel();
+    }
+
+    /// The mouse moved. With a part on the drag the part follows it; SHIFT turns
+    /// it and CTRL raises it by the dominant axis of the movement
+    /// (`0x42b6b4`: the larger of |dx| and |dy|, signed).
+    pub fn mouse_moved(&mut self, x: f32, y: f32) {
+        let last = self.cursor.replace([x, y]);
+        let Some(active) = self.drag.as_mut() else {
+            return;
+        };
+        let (dx, dy) = last.map(|l| (x - l[0], y - l[1])).unwrap_or((0.0, 0.0));
+        let delta = if dx.abs() > dy.abs() { dx } else { dy };
+        if self.shift {
+            active.drag.rotate(delta);
+            let [ax, ay] = active.at;
+            self.drag_to(ax, ay);
+        } else if self.ctrl {
+            let ceiling = self.build.chassis_height();
+            active.drag.raise(delta, ceiling);
+            let [ax, ay] = active.at;
+            self.drag_to(ax, ay);
+        } else {
+            self.drag_to(x, y);
+        }
+    }
+
+    /// SHIFT and CTRL as the window reports them.
+    pub fn set_modifiers(&mut self, shift: bool, ctrl: bool) {
+        self.shift = shift;
+        self.ctrl = ctrl;
+    }
+
+    /// Whether a part is on the drag.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// The click while dragging (`FUN_0042d4b0`): drop the part if it is over
+    /// something and not refused; a refused part stays in the drag; over
+    /// nothing, the drag ends.
+    fn drop_click(&mut self) -> Result<(), String> {
+        let Some(active) = self.drag.as_ref() else {
+            return Ok(());
+        };
+        let Some(hover) = active.hover else {
+            self.cancel_drag();
             self.refresh_panel();
             return Ok(());
         };
-        if let Some(index) = self.selected_part {
-            if let Some(component) = self.build.components().get(index) {
-                if index > 0 && component.parent == 0 {
-                    let (angle, height) = (component.angle, component.height);
-                    self.build
-                        .place_on_baseplate(index, point, angle, height)
-                        .map_err(|e| e.to_string())?;
-                    self.status = format!(
-                        "placed component {index} at {:.2}, {:.2} m",
-                        point[0], point[1]
+        if active.candidate.is_none() || active.refusal.is_some() {
+            return Ok(());
+        }
+        let drag = active.drag.clone();
+        match self.build.drop_part(&drag, &hover) {
+            Ok(index) => {
+                let attach = drag
+                    .info
+                    .def
+                    .as_ref()
+                    .and_then(|d| d.get("attachsound"))
+                    .map(|p| p.trim().to_string());
+                self.sounds
+                    .push(crate::audio::UiSound::ComponentAttached(attach));
+                self.drag = None;
+                self.selected_part = None;
+                self.status = format!("attached {} (component {index})", drag.name);
+                self.refresh()
+            }
+            Err(e) => {
+                self.status = e.to_string();
+                self.refresh_panel();
+                Ok(())
+            }
+        }
+    }
+
+    /// A click in the component preview picks the green box nearest to it.
+    fn comp_click(&mut self, x: f32, y: f32) -> bool {
+        self.ensure_comp_preview();
+        let Some(cp) = &self.comp_preview else {
+            return false;
+        };
+        if !cp.rect.contains_point(x, y) {
+            return false;
+        }
+        let Some((info, _)) = self.selected_info() else {
+            return false;
+        };
+        let mut best: Option<(f32, i32)> = None;
+        for id in placement::selectable_mounts(&info) {
+            let Some(point) = info.mounts.get(&id) else {
+                continue;
+            };
+            let at = ra2_render::tm_mat4(&point.transform).transform_point3(Vec3::ZERO);
+            let clip = cp.camera.view_proj * at.extend(1.0);
+            if clip.w <= 0.0 {
+                continue;
+            }
+            let ndc = clip.truncate() / clip.w;
+            let sx = cp.rect.x + (ndc.x * 0.5 + 0.5) * cp.rect.w;
+            let sy = cp.rect.y + (0.5 - ndc.y * 0.5) * cp.rect.h;
+            let d = ((sx - x).powi(2) + (sy - y).powi(2)).sqrt();
+            if d < 30.0 && best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, id));
+            }
+        }
+        if let Some((_, id)) = best {
+            self.own_mount = id;
+            self.comp_preview = None;
+            self.refresh_panel();
+        }
+        true
+    }
+
+    /// The screen point of a green box in the component preview, for a scripted
+    /// click.
+    pub fn box_point(&mut self, mount: i32) -> Result<[f32; 2], String> {
+        self.ensure_comp_preview();
+        let cp = self
+            .comp_preview
+            .as_ref()
+            .ok_or_else(|| "the component preview is not on screen".to_string())?;
+        let (info, _) = self
+            .selected_info()
+            .ok_or_else(|| "no component is selected".to_string())?;
+        let point = info
+            .mounts
+            .get(&mount)
+            .ok_or_else(|| format!("the part has no point {mount}"))?;
+        let at = ra2_render::tm_mat4(&point.transform).transform_point3(Vec3::ZERO);
+        let clip = cp.camera.view_proj * at.extend(1.0);
+        let ndc = clip.truncate() / clip.w;
+        Ok([
+            cp.rect.x + (ndc.x * 0.5 + 0.5) * cp.rect.w,
+            cp.rect.y + (0.5 - ndc.y * 0.5) * cp.rect.h,
+        ])
+    }
+
+    /// The component preview's rectangle: the shipped `component 3d preview`
+    /// placeholder of the `comp_preview` group, when it is loaded.
+    fn comp_rect(&self) -> Option<Frame> {
+        self.shell
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "component 3d preview")
+            .map(|p| p.frame)
+    }
+
+    fn ensure_comp_preview(&mut self) {
+        if let Some(rect) = self.comp_rect() {
+            if rect.w > 0.0 && rect.h > 0.0 {
+                let _ = self.comp_preview_pixels(rect);
+            }
+        }
+    }
+
+    /// Load the `comp_preview` group into the screen's `component content
+    /// group` for the selected part (`FUN_0042f440` mode 1 hands it the group)
+    /// and fill its name, weight and description boxes and the style list
+    /// (`FUN_0042e650`).
+    fn refresh_comp_preview(&mut self) {
+        if self.shell.tab() != Some("components button") {
+            return;
+        }
+        let selected = self.selected_info();
+        let styles = self.style_list();
+        let fragment = workshop::load(&self.ui, "botlab/comp_preview.gib").ok();
+        let labels: Vec<String> = styles.iter().map(|(label, _)| label.clone()).collect();
+        let current = self
+            .style_file
+            .as_ref()
+            .and_then(|f| styles.iter().find(|(_, file)| file.as_ref() == Some(f)))
+            .or_else(|| styles.first())
+            .map(|(label, _)| label.clone())
+            .unwrap_or_default();
+        if let Some(lab) = self.shell.lab_mut() {
+            for block in lab.document.blocks.iter_mut() {
+                let ra2fmt::gib::Block::Widget(root) = block else {
+                    continue;
+                };
+                let Some(slot) = workshop::find_mut(root, "component content group") else {
+                    continue;
+                };
+                let key = selected.as_ref().map(|(info, _)| info.file.clone());
+                if !slot.children.is_empty() && self.comp_key == key {
+                    continue;
+                }
+                slot.children.clear();
+                self.comp_key = key;
+                let (Some((info, name)), Some(fragment)) = (&selected, &fragment) else {
+                    continue;
+                };
+                workshop::load_into(root, fragment, "component content group");
+                let description = info
+                    .def
+                    .as_ref()
+                    .and_then(|d| d.get("description"))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let weight = format!("{:.1}", info.mass);
+                for (widget, text) in [
+                    ("component name textbox", name.as_str()),
+                    ("component weight textbox", weight.as_str()),
+                ] {
+                    if let Some(w) = workshop::find_mut(root, widget) {
+                        ra2ui::input::set_field(w, "_Text", text);
+                        for child in w.children.iter_mut() {
+                            if child.kind == WidgetKind::Text {
+                                ra2ui::input::set_field(child, "_Text", text);
+                            }
+                        }
+                    }
+                }
+                set_prose_named(root, "component description", &description);
+                // `FUN_0042e650` hides the style group for a part with no
+                // alternatives, and titles it `Component options (N)`.
+                if let Some(group) = workshop::find_mut(root, "style dropdown group") {
+                    ra2ui::input::set_field(
+                        group,
+                        "Visible",
+                        if labels.is_empty() { "false" } else { "true" },
                     );
-                    return self.refresh();
+                    if let Some(label) = workshop::find_mut(group, "model label") {
+                        let text = format!("Component options ({})", labels.len());
+                        ra2ui::input::set_field(label, "_Text", &text);
+                        for child in label.children.iter_mut() {
+                            ra2ui::input::set_field(child, "_Text", &text);
+                        }
+                    }
+                    if let Some(drop) = workshop::find_mut(group, "component option") {
+                        ra2ui::input::set_field(drop, "_Text", &current);
+                        for child in drop.children.iter_mut() {
+                            if child.kind == WidgetKind::TextBox {
+                                for text in child.children.iter_mut() {
+                                    ra2ui::input::set_field(text, "_Text", &current);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-        self.place_point = point;
-        if self.selected.is_some() {
-            return self.attach_selected();
+        self.shell.set_dropdown_items("component option", labels);
+    }
+
+    /// A style row was picked in the `Component option` list: the preview and
+    /// the part Attach places are that style's definition.
+    fn take_style_pick(&mut self) {
+        let picks = self.shell.take_dropdown_picks();
+        for (name, text) in picks {
+            if name != "component option" {
+                continue;
+            }
+            let styles = self.style_list();
+            if let Some((_, file)) = styles
+                .iter()
+                .find(|(label, _)| label.eq_ignore_ascii_case(text.trim()))
+            {
+                self.cancel_drag();
+                self.style_file = file.clone();
+                self.comp_preview = None;
+                if let Some((info, _)) = self.selected_info() {
+                    self.own_mount = placement::default_own_mount(&info);
+                }
+            }
         }
-        self.status = format!(
-            "placement point {:.2}, {:.2} m: pick a component, then click here",
-            point[0], point[1]
+    }
+
+    /// The part and its green boxes, rendered into `rect`: `AP_box_selected`
+    /// on the chosen point, `AP_box_unselected` on the others
+    /// (`UI\BotLab\AP_box_*.gmf`, placed by the attachment's own frame).
+    fn comp_preview_pixels(&mut self, rect: Frame) -> Option<()> {
+        let (info, _) = self.selected_info()?;
+        let width = rect.w.round().max(16.0) as u32;
+        let height = rect.h.round().max(16.0) as u32;
+        let key = format!("{}|{}|{width}x{height}", info.file, self.own_mount);
+        if self.comp_preview.as_ref().is_some_and(|c| c.key == key) {
+            return Some(());
+        }
+        let part = self.part_items(&info);
+        let boxes = placement::selectable_mounts(&info);
+        let ap_dir = ra2fmt::find_ci(&self.ui, "botlab")?;
+        let load = |file: &str| -> Vec<DrawItem> {
+            let Some(path) = ra2fmt::find_ci(&ap_dir, file) else {
+                return Vec::new();
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                return Vec::new();
+            };
+            let Ok(scene) = ra2fmt::gmi::parse(&bytes) else {
+                return Vec::new();
+            };
+            ra2_render::scene_items(&scene, Mat4::IDENTITY, &ap_dir, file)
+        };
+        let selected_box = load("AP_box_selected.gmf");
+        let unselected_box = load("AP_box_unselected.gmf");
+        let mut groups: Vec<RenderGroup<'_>> = vec![RenderGroup {
+            items: &part,
+            model: Mat4::IDENTITY,
+        }];
+        for id in &boxes {
+            let Some(point) = info.mounts.get(id) else {
+                continue;
+            };
+            groups.push(RenderGroup {
+                items: if *id == self.own_mount {
+                    &selected_box
+                } else {
+                    &unselected_box
+                },
+                model: ra2_render::tm_mat4(&point.transform),
+            });
+        }
+        let (mn, mx) = info.bounds.unwrap_or(([-0.2; 3], [0.2; 3]));
+        let (mn, mx) = (Vec3::from(mn), Vec3::from(mx));
+        let center = (mn + mx) * 0.5;
+        let radius = ((mx - mn).length() * 0.5).max(0.15);
+        let eye = center + Vec3::new(radius * 1.9, radius * 1.4, radius * 2.2);
+        let view = ra2_render::look_at_lh(eye, center, Vec3::Y);
+        let proj = ra2_render::perspective_lh(
+            45f32.to_radians(),
+            width as f32 / height as f32,
+            0.02,
+            radius * 30.0,
         );
-        self.refresh_panel();
-        Ok(())
+        let view_proj = proj * view;
+        let pixels = self
+            .renderer
+            .render_groups(&groups, view_proj, width, height)
+            .ok()?;
+        self.comp_preview = Some(CompPreview {
+            pixels,
+            width,
+            height,
+            rect,
+            camera: PreviewCamera {
+                view_proj,
+                inv_view_proj: view_proj.inverse(),
+                width,
+                height,
+            },
+            key,
+        });
+        Some(())
+    }
+
+    /// The screen point of a world point in the main preview, for a scripted
+    /// drag.
+    pub fn preview_point_of(&mut self, world: Vec3) -> Result<[f32; 2], String> {
+        self.ensure_preview();
+        let camera = self
+            .preview_camera
+            .ok_or_else(|| "the preview has not been rendered".to_string())?;
+        let rect = self.panel.preview;
+        let clip = camera.view_proj * world.extend(1.0);
+        if clip.w.abs() < 1e-6 {
+            return Err("the point is behind the preview camera".into());
+        }
+        let ndc = clip.truncate() / clip.w;
+        Ok([
+            rect.x + (ndc.x * 0.5 + 0.5) * rect.w,
+            rect.y + (0.5 - ndc.y * 0.5) * rect.h,
+        ])
+    }
+
+    /// The screen point that drops a part on `over`, for a scripted drag.
+    pub fn drag_point(&mut self, over: PlaceOn) -> Result<[f32; 2], String> {
+        let world = match over {
+            PlaceOn::Baseplate(point) => Vec3::new(point[0], 0.0, point[1]),
+            PlaceOn::Mount { parent, mount } => {
+                let worlds = self.build.transforms();
+                let info = self
+                    .build
+                    .component_info(parent)
+                    .ok_or_else(|| format!("component {parent} does not exist"))?;
+                let point = info
+                    .mounts
+                    .get(&mount)
+                    .ok_or_else(|| format!("component {parent} has no point {mount}"))?;
+                (worlds[parent] * ra2_render::tm_mat4(&point.transform))
+                    .transform_point3(Vec3::ZERO)
+            }
+        };
+        self.preview_point_of(world)
+    }
+
+    /// The harness's whole gesture: select `file` in the open category, press
+    /// Attach, move the mouse to `over` and click. The mouse moves go through
+    /// [`Builder::mouse_moved`] and the clicks through [`Builder::click`], as
+    /// the window's events do. Returns the new component's index.
+    pub fn place_component(&mut self, file: &str, over: PlaceOn) -> Result<usize, String> {
+        let before = self.build.components().len();
+        self.click_palette_file(file)?;
+        let attach = self.attach_point()?;
+        self.mouse_moved(attach[0], attach[1]);
+        self.click(attach[0], attach[1])?;
+        if self.drag.is_none() {
+            return Err(format!("the drag did not start ({})", self.status));
+        }
+        let at = self.drag_point(over)?;
+        self.mouse_moved(at[0], at[1]);
+        self.click(at[0], at[1])?;
+        if self.build.components().len() != before + 1 {
+            return Err(format!("the drop did not attach ({})", self.status));
+        }
+        Ok(before)
+    }
+
+    /// [`Builder::place_component`] at the first baseplate spot (a 10 cm grid)
+    /// the drag accepts, for a robot whose free room is not known.
+    pub fn place_component_free(&mut self, file: &str) -> Result<usize, String> {
+        let before = self.build.components().len();
+        self.click_palette_file(file)?;
+        let attach = self.attach_point()?;
+        self.mouse_moved(attach[0], attach[1]);
+        self.click(attach[0], attach[1])?;
+        for gx in -9..=9 {
+            for gz in -9..=9 {
+                let at = self.drag_point(PlaceOn::Baseplate([gx as f32 * 0.1, gz as f32 * 0.1]))?;
+                self.mouse_moved(at[0], at[1]);
+                let free = self
+                    .drag
+                    .as_ref()
+                    .is_some_and(|a| a.candidate.is_some() && a.refusal.is_none());
+                if free {
+                    self.click(at[0], at[1])?;
+                    return if self.build.components().len() == before + 1 {
+                        Ok(before)
+                    } else {
+                        Err(format!("the drop did not attach ({})", self.status))
+                    };
+                }
+            }
+        }
+        self.cancel_drag();
+        Err("no free spot on the baseplate".into())
+    }
+
+    /// The screen point of the Attach button: the shipped `attach button` of
+    /// the `comp_preview` group when it is loaded, else the panel's row.
+    pub fn attach_point(&self) -> Result<[f32; 2], String> {
+        let placed = self.shell.placements();
+        if let Some(button) = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "attach button")
+        {
+            return Ok([
+                button.frame.x + button.frame.w * 0.5,
+                button.frame.y + button.frame.h * 0.5,
+            ]);
+        }
+        Err("the component preview (and its Attach button) is not on screen".into())
     }
 
     /// Paint the face group under a preview click. Fill and layer use the
@@ -997,7 +1728,8 @@ impl Builder {
         self.build = build;
         self.selected = None;
         self.selected_part = None;
-        self.target = (0, 0);
+        self.cancel_drag();
+        self.style_file = None;
         self.status = format!("opened {}", path.display());
         self.refresh()
     }
@@ -1225,16 +1957,6 @@ impl Builder {
             self.refresh_panel();
             return Ok(());
         }
-        if let Some(rest) = action.strip_prefix("m9:rot:") {
-            let delta: f32 = rest.parse().map_err(|_| format!("bad rotation {rest:?}"))?;
-            self.rotate_selected(delta)?;
-            return Ok(());
-        }
-        if let Some(rest) = action.strip_prefix("m9:lift:") {
-            let delta: f32 = rest.parse().map_err(|_| format!("bad lift {rest:?}"))?;
-            self.lift_selected(delta)?;
-            return Ok(());
-        }
         if let Some(rest) = action.strip_prefix("m9:palette:") {
             let index: usize = rest
                 .parse()
@@ -1244,25 +1966,30 @@ impl Builder {
                 .get(index)
                 .cloned()
                 .ok_or_else(|| format!("palette cell {index} is not filled"))?;
-            self.selected = Some(component.clone());
-            self.attach_selected()?;
+            self.select_component(component);
+            return self.refresh();
+        }
+        if action == "m9:attach" {
+            return self.attach_pressed();
+        }
+        if let Some(rest) = action.strip_prefix("m9:box:") {
+            let id: i32 = rest.parse().map_err(|_| format!("bad box {rest:?}"))?;
+            self.own_mount = id;
+            self.refresh_panel();
             return Ok(());
         }
         if action == "m9:remove" {
-            let index = self
-                .selected_part
-                .or_else(|| self.build.components().len().checked_sub(1))
-                .unwrap_or(0);
-            if index == 0 {
-                self.status = "the chassis cannot be removed".into();
+            // `FUN_0042f270`: only the selected placed part, and only a leaf.
+            let Some(index) = self.selected_part else {
+                self.status = "Select a placed component to remove.".into();
                 self.refresh_panel();
                 return Ok(());
-            }
-            match self.build.remove(index) {
-                Ok(removed) => {
+            };
+            match self.build.remove_leaf(index) {
+                Ok(()) => {
                     self.sounds.push(crate::audio::UiSound::ComponentRemoved);
                     self.selected_part = None;
-                    self.status = format!("removed {removed} component(s)");
+                    self.status = format!("removed component {index}");
                     return self.refresh();
                 }
                 Err(e) => {
@@ -1271,19 +1998,6 @@ impl Builder {
                     return Ok(());
                 }
             }
-        }
-        if let Some(rest) = action.strip_prefix("m9:mount:") {
-            let (parent, mount) = rest
-                .split_once(':')
-                .ok_or_else(|| format!("bad mount row {rest:?}"))?;
-            let parent: usize = parent
-                .parse()
-                .map_err(|_| format!("bad parent {parent:?}"))?;
-            let mount: i32 = mount.parse().map_err(|_| format!("bad mount {mount:?}"))?;
-            self.target = (parent, mount);
-            self.status = format!("attach to component {parent} mount {mount}");
-            self.refresh_panel();
-            return Ok(());
         }
         if let Some(rest) = action.strip_prefix("m9:part:") {
             let index: usize = rest.parse().map_err(|_| format!("bad part row {rest:?}"))?;
@@ -1441,72 +2155,6 @@ impl Builder {
         }
         self.refresh_panel();
         Ok(())
-    }
-
-    /// Attach the selected palette component at [`Builder::target`].
-    ///
-    /// The child's own mount is chosen from its attachment types so the model's
-    /// socket rule (`Build::attach`) accepts it: the parent mount's type list
-    /// must accept one of the child's. Chassis children get a fixed spread
-    /// because there is no placement tool; component-to-component links use the
-    /// model's F1 mount rule and `Placement::default()`.
-    fn attach_selected(&mut self) -> Result<(), String> {
-        let Some(component) = self.selected.clone() else {
-            self.status = "pick a component in the palette".into();
-            self.refresh_panel();
-            return Ok(());
-        };
-        let info = self.library.component_info_by_file(&component.file);
-        if !info.loaded {
-            self.status = format!("{} did not load", component.file);
-            self.refresh_panel();
-            return Ok(());
-        }
-        let (parent, parent_mount) = self.target;
-        let own_mount = choose_own_mount(&info, self.build.component_info(parent), parent_mount);
-        let placement = if parent == 0 {
-            // Chassis children use the game's stored transform: the last
-            // preview point (the blueprint's centre until the player clicks),
-            // `y = 0`, the corpus' quarter turn, no yaw and no lift.
-            BuildPlacement::on_baseplate(self.place_point, 0.0, 0.0)
-        } else {
-            BuildPlacement::default()
-        };
-        let before = self.build.components().len();
-        match self.build.attach(
-            &self.library,
-            &component.file,
-            parent,
-            parent_mount,
-            own_mount,
-            placement,
-        ) {
-            Ok(attached) => {
-                // The definition's own `attachsound` (cmp_generic, cmp_wheels,
-                // cmp_sawblade, ...), played when the part snaps on.
-                let attach = info
-                    .def
-                    .as_ref()
-                    .and_then(|d| d.get("attachsound"))
-                    .map(|p| p.trim().to_string());
-                self.sounds
-                    .push(crate::audio::UiSound::ComponentAttached(attach));
-                self.selected_part = Some(attached);
-                self.status = format!(
-                    "attached {} to {parent} mount {parent_mount} (component {attached})",
-                    component.name
-                );
-                self.refresh()
-            }
-            Err(e) => {
-                self.status = e.to_string();
-                if self.build.components().len() != before {
-                    return Err("a refused attach changed the component list".into());
-                }
-                self.refresh_panel();
-                Ok(())
-            }
-        }
     }
 
     /// Apply the current paint mode to a face group (a panel row or a preview
@@ -1720,45 +2368,6 @@ impl Builder {
         Ok(())
     }
 
-    fn selected_chassis_child(&self) -> Option<(usize, f32, f32, [f32; 2])> {
-        let index = self.selected_part?;
-        let component = self.build.components().get(index)?;
-        (index > 0 && component.parent == 0).then_some((
-            index,
-            component.angle,
-            component.height,
-            [component.translation[0], component.translation[2]],
-        ))
-    }
-
-    fn rotate_selected(&mut self, delta: f32) -> Result<(), String> {
-        let Some((index, angle, height, point)) = self.selected_chassis_child() else {
-            self.status = "select a chassis-mounted part first".into();
-            self.refresh_panel();
-            return Ok(());
-        };
-        let angle = (angle + delta).rem_euclid(std::f32::consts::TAU);
-        self.build
-            .place_on_baseplate(index, point, angle, height)
-            .map_err(|e| e.to_string())?;
-        self.status = format!("component {index} angle {:.1} deg", angle.to_degrees());
-        self.refresh()
-    }
-
-    fn lift_selected(&mut self, delta: f32) -> Result<(), String> {
-        let Some((index, angle, height, point)) = self.selected_chassis_child() else {
-            self.status = "select a chassis-mounted part first".into();
-            self.refresh_panel();
-            return Ok(());
-        };
-        let height = (height + delta).clamp(0.0, 1.0);
-        self.build
-            .place_on_baseplate(index, point, angle, height)
-            .map_err(|e| e.to_string())?;
-        self.status = format!("component {index} height {height:.2} m");
-        self.refresh()
-    }
-
     /// The action a click on the synthetic panel names, if any.
     fn panel_action(&self, x: f32, y: f32) -> Option<String> {
         let placed = ra2ui::resolve_with(&self.panel.gib, self.size, Some(self.assets.faces()));
@@ -1778,6 +2387,9 @@ impl Builder {
         let placed = self.shell.placements();
         let path = ra2ui::input::hit(&placed, x, y)?;
         let chain = chain(&placed, &path);
+        if chain.iter().any(|p| p.widget.name() == "attach button") {
+            return Some("m9:attach".into());
+        }
         if chain.iter().any(|p| p.widget.name() == "remove button") {
             return Some("m9:remove".into());
         }
@@ -1872,7 +2484,11 @@ impl Builder {
         let rank: usize = match hit {
             Some(hit) => hit.parse().ok()?,
             // The selection bar is the grid's own first cell background.
-            None if chain.iter().any(|p| p.widget.name() == "Sel Bar") => 0,
+            None if chain.iter().any(|p| p.widget.name() == "Sel Bar")
+                && chain.iter().any(|p| p.widget.name() == "components grid") =>
+            {
+                0
+            }
             None => return None,
         };
         Some(format!("m9:palette:{rank}"))
@@ -1884,9 +2500,9 @@ impl Builder {
         self.refresh_overview();
         self.refresh_effects();
         self.refresh_palette();
+        self.refresh_comp_preview();
         self.refresh_armour();
         self.refresh_controls();
-        self.normalize_target();
         self.refresh_panel();
         Ok(())
     }
@@ -2193,33 +2809,6 @@ impl Builder {
         }
     }
 
-    fn normalize_target(&mut self) {
-        let n = self.build.components().len();
-        let (parent, mount) = self.target;
-        if parent >= n {
-            self.target = (0, 0);
-            return;
-        }
-        if parent == 0 {
-            if mount != 0 {
-                self.target = (0, 0);
-            }
-            return;
-        }
-        let used = self
-            .build
-            .components()
-            .iter()
-            .any(|c| c.parent == parent as i32 && c.parent_mount == mount);
-        let exists = self
-            .build
-            .component_info(parent)
-            .is_some_and(|info| info.has_mount(mount));
-        if used || !exists {
-            self.target = (0, 0);
-        }
-    }
-
     /// The shipped `control grid`'s geometry, when the wiring tab is on screen.
     fn control_grid(&self) -> Option<(ra2ui::Frame, ra2ui::Grid)> {
         let placed = self.shell.placements();
@@ -2348,30 +2937,6 @@ impl Builder {
         }
     }
 
-    fn free_mounts(&self, parent: usize) -> Vec<(i32, String)> {
-        let Some(info) = self.build.component_info(parent) else {
-            return Vec::new();
-        };
-        info.mounts
-            .iter()
-            .filter(|(mount, _)| {
-                !self
-                    .build
-                    .components()
-                    .iter()
-                    .any(|c| c.parent == parent as i32 && c.parent_mount == **mount)
-            })
-            .map(|(mount, a)| {
-                let types = if a.types.is_empty() {
-                    "-".to_string()
-                } else {
-                    a.types.join(" ")
-                };
-                (*mount, types)
-            })
-            .collect()
-    }
-
     /// Rebuild the synthetic panel: a background and one `Text` row per line,
     /// framed from the screen's own 3D placeholder.
     fn refresh_panel(&mut self) {
@@ -2424,7 +2989,7 @@ impl Builder {
                     "Parts (click to select)".into(),
                     [0.6, 0.8, 1.0, 1.0],
                 ));
-                for (i, c) in self.build.components().iter().enumerate().take(3) {
+                for (i, c) in self.build.components().iter().enumerate().take(4) {
                     let info = self.build.component_info(i);
                     let name = info
                         .map(|i| i.name.clone())
@@ -2437,78 +3002,42 @@ impl Builder {
                     };
                     rows.push((format!("m9:part:{i}"), label, [0.9, 0.9, 0.9, 1.0]));
                 }
-                rows.push((String::new(), "Attach to".into(), [0.6, 0.8, 1.0, 1.0]));
-                let (parent, mount) = self.target;
-                rows.push((
-                    "m9:mount:0:0".into(),
-                    format!(
-                        "{}chassis baseplate 0:0",
-                        if (parent, mount) == (0, 0) { "> " } else { "" }
-                    ),
-                    [0.9, 1.0, 0.7, 1.0],
-                ));
-                for (i, c) in self.build.components().iter().enumerate().skip(1).take(1) {
-                    let info = self.build.component_info(i);
-                    let name = info
-                        .map(|i| i.name.clone())
-                        .unwrap_or_else(|| c.class.clone());
-                    for (mount, types) in self.free_mounts(i).into_iter().take(3) {
-                        rows.push((
-                            format!("m9:mount:{i}:{mount}"),
-                            format!(
-                                "{}{i}: {name} mount {mount} ({types})",
-                                if (parent, mount) == (i, mount) {
-                                    "> "
-                                } else {
-                                    ""
-                                }
-                            ),
-                            [0.9, 1.0, 0.7, 1.0],
-                        ));
-                    }
-                }
                 rows.push((
                     "m9:undo".into(),
                     "undo last attach (Ctrl+Z)".into(),
                     [0.9, 0.8, 0.5, 1.0],
                 ));
-                if let Some((index, angle, height, point)) = self.selected_chassis_child() {
+                rows.push((
+                    "m9:remove".into(),
+                    match self.selected_part {
+                        Some(i) => format!("remove component {i} (the shipped remove button)"),
+                        None => "remove: click a placed part first".into(),
+                    },
+                    [0.9, 0.8, 0.5, 1.0],
+                ));
+                if let Some((info, name)) = self.selected_info() {
+                    // The shipped `comp_preview` group is the real panel; these
+                    // rows are the same controls for the harness frame.
                     rows.push((
-                        String::new(),
-                        format!(
-                            "place {index}: click the preview ({:.2}, {:.2} m, {:.0} deg, +{:.2})",
-                            point[0],
-                            point[1],
-                            angle.to_degrees(),
-                            height
-                        ),
-                        [0.7, 0.9, 0.7, 1.0],
+                        "m9:attach".into(),
+                        format!("[ Attach ] {name} ({:.1} kg)", info.mass),
+                        [0.7, 1.0, 0.7, 1.0],
                     ));
-                    rows.push((
-                        "m9:rot:-1.5707964".into(),
-                        "rotate -90 deg".into(),
-                        [0.9, 0.8, 0.5, 1.0],
-                    ));
-                    rows.push((
-                        "m9:rot:1.5707964".into(),
-                        "rotate +90 deg".into(),
-                        [0.9, 0.8, 0.5, 1.0],
-                    ));
-                    rows.push((
-                        "m9:lift:0.05".into(),
-                        "lift +0.05 m".into(),
-                        [0.9, 0.8, 0.5, 1.0],
-                    ));
-                }
-                if let Some(component) = &self.selected {
-                    rows.push((
-                        String::new(),
-                        format!(
-                            "next: {} -> click a mount, then a palette cell",
-                            component.name
-                        ),
-                        [0.7, 0.9, 0.7, 1.0],
-                    ));
+                    for id in placement::selectable_mounts(&info) {
+                        let types = info
+                            .mounts
+                            .get(&id)
+                            .map(|a| a.types.join(" "))
+                            .unwrap_or_default();
+                        rows.push((
+                            format!("m9:box:{id}"),
+                            format!(
+                                "{}green box {id} ({types})",
+                                if id == self.own_mount { "> " } else { "  " }
+                            ),
+                            [0.9, 1.0, 0.7, 1.0],
+                        ));
+                    }
                 }
             }
             "wiring button" => {
@@ -2852,7 +3381,13 @@ impl Builder {
         }
         let bottom = placeholder.bottom().min(nav_top - 2.0);
         let height = (bottom - placeholder.y).max(40.0);
-        let preview_h = (height * 0.28).max(40.0);
+        // The Components tab needs room to drag a part about; its rows are few.
+        let share = if self.shell.tab() == Some("components button") {
+            0.6
+        } else {
+            0.28
+        };
+        let preview_h = (height * share).max(40.0);
         let preview = Frame::new(
             placeholder.x + 2.0,
             placeholder.y + 2.0,
@@ -2894,6 +3429,49 @@ impl Builder {
                 alpha: false,
                 clip: Some(preview_rect),
             });
+        }
+        if self.tab() == Some("components button") {
+            if let Some(rect) = self.comp_rect() {
+                if self.comp_preview_pixels(rect).is_some() {
+                    if let Some(cp) = &self.comp_preview {
+                        let texture = scene.textures.len();
+                        scene.textures.push(UiTexture {
+                            label: "m9 component preview".into(),
+                            width: cp.width,
+                            height: cp.height,
+                            rgba: cp.pixels.clone(),
+                        });
+                        scene.quads.push(UiQuad {
+                            rect,
+                            corners: None,
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                            color: [1.0, 1.0, 1.0, 1.0],
+                            texture,
+                            alpha: false,
+                            clip: Some(rect),
+                        });
+                    }
+                    // The Attach button is a child of the preview's placeholder,
+                    // so the 3D view is drawn under it.
+                    let placed = self.shell.placements();
+                    if let Some(group) = placed.iter().flat_map(|p| p.walk()).find(|n| {
+                        n.children
+                            .iter()
+                            .any(|c| c.widget.name() == "attach button")
+                    }) {
+                        let over = self.assets.scene(
+                            std::slice::from_ref(group),
+                            [self.size[0] as u32, self.size[1] as u32],
+                        );
+                        let offset = scene.textures.len();
+                        scene.textures.extend(over.textures);
+                        for mut quad in over.quads {
+                            quad.texture += offset;
+                            scene.quads.push(quad);
+                        }
+                    }
+                }
+            }
         }
         if self.view_only {
             return Ok(scene);
@@ -2996,6 +3574,21 @@ impl Builder {
                     min = min.min(p);
                     max = max.max(p);
                 }
+            }
+        }
+        // The dragged part rides on top of the robot; it is not part of the
+        // framing, or the camera would chase the mouse.
+        if let Some(active) = self.drag.as_ref() {
+            let (items, model) = match &active.candidate {
+                Some(c) if active.refusal.is_none() => (&active.items, c.world),
+                Some(c) => (&active.red, c.world),
+                None => (&active.red, active.floating),
+            };
+            if !items.is_empty() {
+                groups.push(RenderGroup {
+                    items: items.as_slice(),
+                    model,
+                });
             }
         }
         let center = (min + max) * 0.5;
@@ -3135,33 +3728,6 @@ fn make_panel(frame: Frame, preview: Frame, rows: &[(String, String, [f32; 4])])
         },
         preview,
     }
-}
-
-/// The child's own mount for a link: one the parent's mount accepts; else the
-/// component's `base_f` when it has one; else its first mount. A missing type
-/// list means "the data does not say", the same reading the model uses.
-fn choose_own_mount(
-    child: &ra2ui::workshop::library::ComponentInfo,
-    parent: Option<&ra2ui::workshop::library::ComponentInfo>,
-    parent_mount: i32,
-) -> i32 {
-    if let Some(point) = parent.and_then(|p| p.mounts.get(&parent_mount)) {
-        if let Some((id, _)) = child
-            .mounts
-            .iter()
-            .find(|(_, a)| a.types.iter().any(|t| point.accepts(t)))
-        {
-            return *id;
-        }
-    }
-    if let Some((id, _)) = child
-        .mounts
-        .iter()
-        .find(|(_, a)| a.types.iter().any(|t| t.eq_ignore_ascii_case("base_f")))
-    {
-        return *id;
-    }
-    child.mounts.keys().next().copied().unwrap_or(0)
 }
 
 /// Möller–Trumbore: the ray's distance and barycentric `u, v` of a hit.
@@ -3386,24 +3952,43 @@ pub fn script(
     builder.click_named("mechanics button")?;
     let motor_file = "Components\\ztek1.txt";
     let motor = builder.build.components().len();
+    // Pick the part: it is only selected, and the comp_preview group shows it.
     builder.click_palette_file(motor_file)?;
-    if builder.build.components().len() != motor + 1 {
+    if builder.build.components().len() != motor {
+        return Err("a palette click attached a part; only Attach may".into());
+    }
+    if frames {
+        builder.shot(&out.join("component-selected.png"), target)?;
+    }
+    // Attach, then drag the part over the baseplate and click.
+    let attach = builder.attach_point()?;
+    builder.mouse_moved(attach[0], attach[1]);
+    builder.click(attach[0], attach[1])?;
+    if !builder.dragging() {
         return Err(format!(
-            "the palette click attached {} components, not one",
-            builder.build.components().len() - motor
+            "Attach did not start a drag ({})",
+            builder.status()
         ));
     }
-    // Place the motor on the baseplate with a click on the live preview. The
-    // model writes the file's stored transform; the click is the point.
-    let place = builder.preview_point_at([0.37, -0.22])?;
+    let place = builder.drag_point(PlaceOn::Baseplate([0.37, -0.22]))?;
+    builder.mouse_moved(place[0], place[1]);
+    if frames {
+        builder.shot(&out.join("component-drag.png"), target)?;
+    }
     builder.click(place[0], place[1])?;
+    if builder.build.components().len() != motor + 1 {
+        return Err(format!(
+            "the drop did not attach the motor ({})",
+            builder.status()
+        ));
+    }
     let placed = builder.build.components()[motor].clone();
     if (placed.translation[0] - 0.37).abs() > 0.03
         || (placed.translation[2] + 0.22).abs() > 0.03
         || placed.translation[1] != 0.0
     {
         return Err(format!(
-            "the preview click did not place the motor on the baseplate: {:?}",
+            "the drop did not place the motor on the baseplate: {:?}",
             placed.translation
         ));
     }
@@ -3414,21 +3999,42 @@ pub fn script(
     if frames {
         builder.shot(&out.join("placement.png"), target)?;
     }
-    // The motor's axle mount is the parent the wheel hangs off. Click the panel
-    // row, as a player would.
+    if frames {
+        // A refused spot: the part is drawn red and the tip says why. Clicking
+        // over nothing ends the drag.
+        builder.click_palette_file(motor_file)?;
+        let attach = builder.attach_point()?;
+        builder.click(attach[0], attach[1])?;
+        let over = builder.drag_point(PlaceOn::Baseplate([0.40, -0.22]))?;
+        builder.mouse_moved(over[0], over[1]);
+        builder.shot(&out.join("component-refused.png"), target)?;
+        println!("  refused drop: {}", builder.status());
+        let corner = [builder.panel.preview.x + 3.0, builder.panel.preview.y + 3.0];
+        builder.mouse_moved(corner[0], corner[1]);
+        builder.click(corner[0], corner[1])?;
+        if builder.dragging() {
+            return Err("a click over nothing did not end the drag".into());
+        }
+    }
+    // The motor's axle point is the socket the wheel's drag snaps to.
     let axle = builder
-        .free_mounts(motor)
-        .into_iter()
-        .find(|(_, types)| {
-            types
-                .split_whitespace()
-                .any(|t| t.eq_ignore_ascii_case("axle_m"))
+        .build
+        .component_info(motor)
+        .and_then(|info| {
+            info.mounts
+                .iter()
+                .find(|(_, a)| a.types.iter().any(|t| t == "axle_m"))
+                .map(|(id, _)| *id)
         })
-        .map(|(mount, _)| mount)
         .ok_or_else(|| "the motor has no free axle_M mount".to_string())?;
-    builder.click_action(&format!("m9:mount:{motor}:{axle}"))?;
     builder.click_named("mobility button")?;
-    builder.click_palette_file("Components\\miniwheel.txt")?;
+    builder.place_component(
+        "Components\\miniwheel.txt",
+        PlaceOn::Mount {
+            parent: motor,
+            mount: axle,
+        },
+    )?;
     if builder.build.components().len() != motor + 2 {
         return Err(format!(
             "the wheel did not attach to the motor: {} components",
@@ -3686,20 +4292,267 @@ mod tests {
         }
     }
 
-    /// A click on a palette row attaches exactly one component, and the model's
-    /// undo reverses it.
+    /// A palette click only selects the part; Attach plus a drag and a click
+    /// adds exactly one component, and the model's undo reverses it.
     #[test]
-    fn a_palette_click_attaches_one_component_and_undo_reverses_it() {
+    fn a_palette_click_selects_and_only_a_drag_attaches_one_component() {
         let Some(game) = game_dir() else { return };
         let mut builder = Builder::open(&game, None).unwrap();
         builder.click_named("components button").unwrap();
         builder.click_named("mechanics button").unwrap();
         let before = builder.build.components().len();
         builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        assert_eq!(
+            builder.build.components().len(),
+            before,
+            "a palette click attaches nothing"
+        );
+        assert_eq!(builder.status(), ra2ui::workshop::placement::TIP_BOXES);
+        let index = builder
+            .place_component("Components\\ztek1.txt", PlaceOn::Baseplate([0.2, 0.1]))
+            .unwrap();
+        assert_eq!(index, before);
         assert_eq!(builder.build.components().len(), before + 1);
         assert!(builder.build.can_undo());
         assert!(builder.undo());
         assert_eq!(builder.build.components().len(), before);
+    }
+
+    /// Open the lab on the Mechanics palette with the Z-Tek selected and the
+    /// drag started, the mouse on the Attach button.
+    fn dragging_ztek(game: &Path) -> Builder {
+        let mut builder = Builder::open(game, None).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        let attach = builder.attach_point().unwrap();
+        builder.mouse_moved(attach[0], attach[1]);
+        builder.click(attach[0], attach[1]).unwrap();
+        assert!(builder.dragging(), "Attach starts the drag");
+        assert_eq!(builder.status(), placement::TIP_DRAG);
+        builder
+    }
+
+    /// SHIFT turns the part by the dominant axis of the mouse movement in ten
+    /// degree steps and CTRL raises it in five centimetre steps, and the
+    /// drop stores both in the file's own `angle` and `height`.
+    #[test]
+    fn shift_and_control_turn_and_raise_the_dragged_part() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = dragging_ztek(&game);
+        let at = builder.drag_point(PlaceOn::Baseplate([0.1, 0.0])).unwrap();
+        builder.mouse_moved(at[0], at[1]);
+        // Hold SHIFT and move 12 px right and 3 down: dominant axis +12, so
+        // 12 * 0.2 = 2.4 steps, which truncates to 2 = 20 degrees.
+        builder.set_modifiers(true, false);
+        builder.mouse_moved(at[0] + 12.0, at[1] + 3.0);
+        // Hold CTRL and move 10 px: 2 steps = 0.10 m.
+        builder.set_modifiers(false, true);
+        builder.mouse_moved(at[0] + 12.0, at[1] + 13.0);
+        builder.set_modifiers(false, false);
+        // The part stayed where it was while the modifiers were held.
+        builder.mouse_moved(at[0], at[1]);
+        builder.click(at[0], at[1]).unwrap();
+        let part = builder.build.components().last().unwrap().clone();
+        assert!(
+            (part.angle - 20f32.to_radians()).abs() < 1e-3,
+            "angle {}",
+            part.angle
+        );
+        assert!((part.height - 0.10).abs() < 1e-4, "height {}", part.height);
+        assert!((part.translation[0] - 0.1).abs() < 0.03);
+        // The dropped robot is the game's own file: the writer's bytes read
+        // back to the same components and write back to the same bytes.
+        let bytes = builder.build.save();
+        let back = ra2fmt::bot::parse(&bytes).unwrap();
+        assert_eq!(back.components, builder.build.to_bot().components);
+        assert_eq!(back.write(), bytes);
+        assert_eq!(back.components.last().unwrap().angle, part.angle);
+    }
+
+    /// A refused spot keeps the part in the drag with the exe's text; a click
+    /// over nothing ends it; and nothing was attached either way.
+    #[test]
+    fn a_refused_spot_keeps_the_drag_and_a_click_over_nothing_ends_it() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        builder
+            .place_component("Components\\ztek1.txt", PlaceOn::Baseplate([0.0, 0.0]))
+            .unwrap();
+        let count = builder.build.components().len();
+        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        let attach = builder.attach_point().unwrap();
+        builder.click(attach[0], attach[1]).unwrap();
+        // Onto the first motor.
+        let over = builder.drag_point(PlaceOn::Baseplate([0.03, 0.0])).unwrap();
+        builder.mouse_moved(over[0], over[1]);
+        assert_eq!(
+            builder.status(),
+            "Components should not intersect the chassis or other components."
+        );
+        builder.click(over[0], over[1]).unwrap();
+        assert!(builder.dragging(), "a refused part stays in the drag");
+        assert_eq!(builder.build.components().len(), count);
+        // Off the baseplate sheet altogether: over nothing.
+        let nothing = [builder.panel.preview.x + 3.0, builder.panel.preview.y + 3.0];
+        builder.mouse_moved(nothing[0], nothing[1]);
+        builder.click(nothing[0], nothing[1]).unwrap();
+        assert!(!builder.dragging(), "a click over nothing cancels");
+        assert_eq!(builder.build.components().len(), count);
+    }
+
+    /// Mass check on the Attach button: a robot at the limit refuses the part
+    /// with the exe's sentence and no drag starts.
+    #[test]
+    fn attach_refuses_a_part_that_would_pass_the_mass_limit() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder
+            .build
+            .set_limits(ra2ui::workshop::build::BuildLimits { max_mass: 60.0 });
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        let attach = builder.attach_point().unwrap();
+        builder.click(attach[0], attach[1]).unwrap();
+        assert!(!builder.dragging());
+        assert_eq!(
+            builder.status(),
+            "Total mass of robot must not exceed 60 kg."
+        );
+    }
+
+    /// A placed part is selected by clicking it, there is no move, and the
+    /// remove button refuses a part that still has children.
+    #[test]
+    fn a_click_selects_a_placed_part_and_remove_refuses_one_with_children() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        let motor = builder
+            .place_component("Components\\ztek1.txt", PlaceOn::Baseplate([0.0, 0.0]))
+            .unwrap();
+        let axle = builder
+            .build
+            .component_info(motor)
+            .and_then(|i| {
+                i.mounts
+                    .iter()
+                    .find(|(_, a)| a.types.iter().any(|t| t == "axle_m"))
+                    .map(|(id, _)| *id)
+            })
+            .unwrap();
+        builder.click_named("mobility button").unwrap();
+        builder
+            .place_component(
+                "Components\\miniwheel.txt",
+                PlaceOn::Mount {
+                    parent: motor,
+                    mount: axle,
+                },
+            )
+            .unwrap();
+        // Click the motor in the preview: it is selected.
+        let at = builder.drag_point(PlaceOn::Baseplate([0.0, 0.0])).unwrap();
+        builder.click(at[0], at[1]).unwrap();
+        assert_eq!(builder.selected_part, Some(motor));
+        builder.click_action("m9:remove").unwrap();
+        assert_eq!(
+            builder.status(),
+            "You must delete the components attached to this first."
+        );
+        assert_eq!(builder.build.components().len(), 3);
+        // The wheel is a leaf: select it by row and remove it, then the motor.
+        builder.click_action("m9:part:2").unwrap();
+        builder.click_action("m9:remove").unwrap();
+        assert_eq!(builder.build.components().len(), 2);
+        builder.click_action("m9:part:1").unwrap();
+        builder.click_action("m9:remove").unwrap();
+        assert_eq!(builder.build.components().len(), 1);
+    }
+
+    /// The green boxes: a click on a box in the component preview chooses the
+    /// part's own mount, and the drag uses it.
+    #[test]
+    fn a_click_on_a_green_box_chooses_the_parts_own_mount() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        let (info, _) = builder.selected_info().unwrap();
+        let boxes = placement::selectable_mounts(&info);
+        assert!(boxes.len() >= 2, "the Z-Tek has two base faces: {boxes:?}");
+        let first = builder.own_mount;
+        let other = *boxes.iter().find(|b| **b != first).unwrap();
+        let at = builder.box_point(other).unwrap();
+        builder.click(at[0], at[1]).unwrap();
+        assert_eq!(builder.own_mount, other);
+        let attach = builder.attach_point().unwrap();
+        builder.click(attach[0], attach[1]).unwrap();
+        let place = builder.drag_point(PlaceOn::Baseplate([0.2, 0.2])).unwrap();
+        builder.mouse_moved(place[0], place[1]);
+        builder.click(place[0], place[1]).unwrap();
+        assert_eq!(builder.build.components().last().unwrap().own_mount, other);
+    }
+
+    /// `styles = Standard, ztek2.txt, High Power`: the list has both labels and
+    /// picking the second places `Components\Styles\ztek2.txt`.
+    #[test]
+    fn the_style_list_swaps_the_definition_the_part_is_placed_with() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        let styles = builder.style_list();
+        assert_eq!(
+            styles
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>(),
+            ["Standard", "High Power"]
+        );
+        // Open the dropdown and click its second row.
+        let field = builder
+            .shell()
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "component option")
+            .map(|p| p.frame)
+            .unwrap();
+        builder
+            .click(field.x + 10.0, field.y + field.h * 0.5)
+            .unwrap();
+        let list = builder
+            .shell()
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| {
+                p.widget.kind == WidgetKind::ListBox && p.frame.h > 0.0 && p.frame.y >= field.y
+            })
+            .map(|p| p.frame)
+            .unwrap();
+        // Rows are 18 px: the second one.
+        builder.click(list.x + 10.0, list.y + 27.0).unwrap();
+        assert_eq!(
+            builder.style_file.as_deref(),
+            Some("Components\\Styles\\ztek2.txt")
+        );
+        let attach = builder.attach_point().unwrap();
+        builder.click(attach[0], attach[1]).unwrap();
+        let place = builder.drag_point(PlaceOn::Baseplate([0.2, 0.2])).unwrap();
+        builder.mouse_moved(place[0], place[1]);
+        builder.click(place[0], place[1]).unwrap();
+        assert_eq!(
+            builder.build.components().last().unwrap().file,
+            "Components\\Styles\\ztek2.txt"
+        );
     }
 
     /// M9.3's flow: the shipped `new analog` button, a free `control grid`
@@ -3711,7 +4564,9 @@ mod tests {
         let mut builder = Builder::open(&game, None).unwrap();
         builder.click_named("components button").unwrap();
         builder.click_named("mechanics button").unwrap();
-        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        builder
+            .place_component("Components\\ztek1.txt", PlaceOn::Baseplate([0.2, 0.2]))
+            .unwrap();
         assert_eq!(builder.build.components()[1].class, "SpinMotor");
         builder.click_named("wiring button").unwrap();
         let before = builder.build.board().controls.len();

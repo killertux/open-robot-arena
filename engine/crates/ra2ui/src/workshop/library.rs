@@ -87,6 +87,9 @@ pub struct ComponentInfo {
     pub mass: f32,
     /// Whether the mesh has geometry (and so counts toward the robot's mass).
     pub has_hull: bool,
+    /// The mesh's bounding box in the component's own space (`min`, `max`), the
+    /// box the placement drag's overlap test uses.
+    pub bounds: Option<([f32; 3], [f32; 3])>,
     /// Whether the definition *and* mesh loaded.
     pub loaded: bool,
 }
@@ -370,6 +373,7 @@ impl GameLibrary {
             hinge,
             mass,
             has_hull: !points.is_empty(),
+            bounds: (!points.is_empty()).then(|| bounds(&points)),
             loaded: true,
         }
     }

@@ -339,7 +339,9 @@ fn a_robot_edited_in_the_workshop_is_saved_to_its_slot_and_fights() {
     let before = builder.build().components().len();
     builder.click_named("components button").unwrap();
     builder.click_named("mechanics button").unwrap();
-    builder.click_palette_file("Components\\ztek1.txt").unwrap();
+    builder
+        .place_component_free("Components\\ztek1.txt")
+        .unwrap();
     assert_eq!(builder.build().components().len(), before + 1);
     builder.click_named("back button").unwrap();
     assert!(builder.shell().lab().is_none(), "Back to HQ leaves the lab");
@@ -829,7 +831,9 @@ fn a_new_workshop_robot_joins_the_roster() {
     let mut builder = flow::open_workshop(game, None).unwrap();
     builder.click_named("components button").unwrap();
     builder.click_named("mechanics button").unwrap();
-    builder.click_palette_file("Components\\ztek1.txt").unwrap();
+    builder
+        .place_component_free("Components\\ztek1.txt")
+        .unwrap();
     builder.click_named("back button").unwrap();
     let saved = flow::close_workshop(&mut builder, &mut shell)
         .unwrap()

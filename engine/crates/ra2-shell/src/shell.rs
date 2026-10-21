@@ -1270,7 +1270,12 @@ impl Shell {
             dropdown::click_part(&placed, hit.as_deref(), x, y)?
         };
         let items = self.dropdown_items.get(&name)?.clone();
-        let gib = self.document_mut()?;
+        // The lab's document is `ra2ui::workshop`'s, but its `Component
+        // option` list is the same control.
+        let gib = match &mut self.screen {
+            Screen::Lab(lab) if self.windows.is_empty() => &mut lab.document,
+            _ => self.document_mut()?,
+        };
         let open = dropdown::is_open(gib, &name);
         match part {
             Part::Field if open => dropdown::close(gib, &name),

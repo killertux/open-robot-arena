@@ -1007,10 +1007,20 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+                // SHIFT turns and CTRL raises the part on the placement drag.
+                if let Some(builder) = &mut self.builder {
+                    builder.set_modifiers(self.modifiers.shift_key(), self.modifiers.control_key());
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Some(position);
                 let point = self.map_cursor(position);
+                if let (Some(builder), Some(point)) = (&mut self.builder, point) {
+                    builder.mouse_moved(point[0], point[1]);
+                    if builder.dragging() {
+                        self.request_redraw();
+                    }
+                }
                 self.set_hover(point);
             }
             WindowEvent::CursorLeft { .. } => {

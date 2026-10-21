@@ -32,12 +32,13 @@ quits (and in a `Test Robot` match it pauses, as `--match` does).
 |---|---|---|
 | choose a tab / a chassis step | the shipped toolbar and step buttons | `ra2ui::workshop::BotLab` |
 | select an armour plate | a plate row in the panel on the `armor` step (the shipped `armor grid` is filled and drawn as well; its lower half is under the shell's bottom bar, so the panel row is what is clickable) | `Build::set_armour` |
-| select a component | a click on a `components grid` cell (the shipped palette, filled by its own `Notes` rule) | `ra2ui::components` |
-| attach it | the same click attaches at the panel's selected mount | `Build::attach` (the F1 rule) |
-| place / move a chassis child | a click on the live 3D preview, on the baseplate plane; the part's current angle and lift are kept | `Build::place_on_baseplate` (the stored transform) |
-| rotate / lift a chassis child | the panel's `rotate ±90 deg` and `lift +0.05 m` rows (the game's SHIFT-mouse rotate is not wired) | `Build::place_on_baseplate` |
-| choose the parent mount | a click on a mount row in the panel (`chassis baseplate 0:0`, or `component N mount M (axle_m)`) | `Build::attach`'s parent/own mounts |
-| remove | the shipped `remove button` (removes the selected part and its subtree) | `Build::remove` |
+| select a component | a click on a `components grid` cell (the shipped palette). It only selects: the shipped `comp_preview.gib` fills `component content group` (name, weight, description, `Component option` styles, the part and its green `AP_box_*.gmf` points) | `ra2ui::components`, `placement::selectable_mounts` |
+| choose the part's own mount | a click on a green box in the component preview (or the panel's `green box` row) | `Drag::own_mount` |
+| choose a style | the shipped `Component option` dropdown (`styles = Label, file, ...`) | `Shell::set_dropdown_items` |
+| attach it | the shipped `attach button`: the mass check, then the part follows the mouse over the 3D view; SHIFT turns it (10 deg steps), CTRL raises it (5 cm steps); the part is red and the tip says why while it is refused; a click drops it, a click over nothing cancels (docs/36 §9.18) | `Build::check_attach_mass`, `pick`, `plan`, `judge`, `drop_part` (`ra2ui::workshop::placement`) |
+| select a placed part | a click on it in the 3D view (a click over nothing deselects); the panel's part rows do the same | `Build::pick_part` |
+| move a placed part | not in the game: remove it and attach it again | |
+| remove | the shipped `remove button`: the selected part only, refused while parts hang on it | `Build::remove_leaf` |
 | add a control | the shipped `new analog` / `new switch` / `new button` button, then a free `control grid` cell | `ControlBoard::add` |
 | select / delete a control | a click on its `control grid` cell; the shipped `delete button` | `ControlBoard::remove` |
 | bind a control | select the control cell, then the component row and an action row in the panel | `Build::bind_action` (`ControlBoard::bind_checked`) |
@@ -58,7 +59,7 @@ quits (and in a `Test Robot` match it pauses, as `--match` does).
 | export a texture | the `export texture -> Custom Textures/` row | `Paint::skin().to_tga()` |
 | Test Robot | the `m9:test` row on the tab | `ra2sim::match::Match` with the saved bot |
 
-The component palette click is one component per click. The click is
+The component palette click selects one component per click. The click is
 hit-tested against the placed grid and identified by the cell's **rank** in the
 filled palette (the placed children are in draw order; several stock components
 share one preview bitmap, so art cannot identify a row).
@@ -113,8 +114,9 @@ revision counter and rebuilt after an edit.
 
 The same frame stores the camera it drew with (`view_proj` and its inverse, the
 preview rectangle and its pixel size). A click is unprojected into a ray: on the
-Components tab it meets the chassis' `y = 0` mounting plane and becomes
-`Build::place_on_baseplate`'s point; on the Paint Shop it is tested against the
+Components tab it is the placement drag's mouse ray (bot-local; it meets a free
+socket within 9 cm, else the chassis' `y = 0` plane, `Build::pick`) or, with no
+drag, the pick of a placed part (`Build::pick_part`); on the Paint Shop it is tested against the
 chassis triangles (Möller–Trumbore), and the winning triangle's group and
 barycentric skin coordinate become the paint target. The framing is ours; the
 ray-to-baseplate and ray-to-skin laws are the model's data (the blueprint scale

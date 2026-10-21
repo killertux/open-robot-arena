@@ -487,10 +487,14 @@ The first application slice landed in `ra2-app --build`; its behaviour, frames
 and read-only list are in `docs/17-workshop-ui.md`. What it took from this page:
 
 - the tabs and chassis steps are the shipped `BotLab` screens, not a new UI;
-- the component palette click is `Build::attach` (the F1 rule), the `remove
-  button` is `Build::remove`, and Ctrl+Z is `Build::undo`;
-- a click on the live preview is `Build::place_on_baseplate` (components) and the
-  paint pickers (Paint Shop), using one stored camera for both;
+- the component palette click only selects; the Attach button's drag ends in
+  `Build::drop_part` (`ra2ui::workshop::placement`: pick, plan, judge, the SHIFT
+  and CTRL counters, docs/36 §9.18), the `remove button` is
+  `Build::remove_leaf` (a part with children is refused), and Ctrl+Z is
+  `Build::undo`;
+- a click on the live preview is the drag's drop or the pick of a placed part
+  (components) and the paint pickers (Paint Shop), using one stored camera for
+  both;
 - the parts, mounts and bindings are drawn in a synthetic panel in the screens'
   3D placeholder — the shipped screens have no slot for those lists;
 - the preview composites `ra2-render`'s own `chassis_items`/`scene_items` at
