@@ -2008,8 +2008,8 @@ impl Robot {
     /// The prismatic controller's update (`0x4b5240`) for a robot slider:
     /// locked while its direction is zero or it sits at the stop it is driven
     /// toward (when it auto-locks), else pushing the rod with
-    /// `-(dir · F)` along its axis ([`PrismaticSettings::force`]) and its
-    /// housing back. A positive direction drives the rod toward `-axis`, to the
+    /// `-(dir · F)` along its axis ([`PrismaticSettings::force`]) (the rod
+    /// only, [`Self::push_slider`]). A positive direction drives the rod toward `-axis`, to the
     /// first of `stops` (`+0x70`), a negative one to the second (`+0x6c`).
     #[allow(clippy::too_many_arguments)]
     fn drive_prismatic(
@@ -2076,14 +2076,23 @@ impl Robot {
     }
 
     /// Push a slider's rod along its axis with `force` newtons for this
-    /// substep, and its housing the other way (`0x4b51b0`).
+    /// substep (`0x4b51b0`).
+    ///
+    /// The rod alone: `0x4b51b0` scales the constraint's axis by the force,
+    /// turns it into the world with the housing's frame and applies it once,
+    /// to the rod's body (`this + 0x5c`, `0x4b0950`); nothing pushes the
+    /// housing back. The robot takes the rod's momentum only when the rod
+    /// reaches its stop. Live (`fightcontacts-scout-alarm-box__live__001/002`,
+    /// ALARM's hammer): the chassis' speed along the stroke goes
+    /// `0 → +0.4 → +1.9` m/s with no recoil first, on its wheels and on its
+    /// tail alike; with the reaction ours recoiled to -0.8 first and kept
+    /// only +1.2 (docs/29 section 12k).
     fn push_slider(&self, physics: &mut dyn PhysicsBackend, p: usize, info: JointInfo, force: f32) {
-        let Some(parent) = self.rig.parts[p].parent else {
+        if self.rig.parts[p].parent.is_none() {
             return;
-        };
+        }
         let axis = self.slider_axis(physics, p, info);
         physics.add_force(self.parts[p].body, axis * force);
-        physics.add_force(self.parts[parent].body, -axis * force);
     }
 
     /// Cave the chassis in as it takes damage (F9).

@@ -228,6 +228,47 @@ fn a_burst_piston_strikes_out_and_back_as_the_original() {
     }
 }
 
+/// The piston pushes its rod alone (`0x4b51b0`): the chassis does not recoil
+/// while the hammer goes out and takes its momentum at the stop. Live
+/// (`fightcontacts-scout-alarm-box__live__001/002`, ALARM upright on its
+/// wheels), the chassis' speed along the stroke goes `0 → +0.4..1.0 → +1.6..2.2`
+/// m/s in two steps, and back by about -2 when the rod returns (docs/29
+/// section 12k).
+#[test]
+fn a_burst_piston_kicks_the_robot_only_at_its_stop() {
+    let game = game!();
+    let _scripts = ra2script::lock();
+    let mut d = duel(&game, "AI/Team0/Bot1.bot", 60);
+    let p = parts_of(&d, JointUse::Burst)[0];
+    let name = control_of(&d, p);
+    let along = |d: &Duel| {
+        let r = &d.robots[0];
+        let fwd = r
+            .transform(&*d.physics)
+            .transform_vector3(r.rig.forward())
+            .normalize();
+        d.physics
+            .state(r.parts[0].body)
+            .unwrap()
+            .linear_velocity
+            .dot(fwd)
+    };
+    d.robots[0].apply_inputs(&[(name, 0, 1.0)]);
+    let speeds: Vec<f32> = (0..12)
+        .map(|_| {
+            d.step_direct(&[DriveInput::default()], DT);
+            along(&d)
+        })
+        .collect();
+    let peak = speeds.iter().copied().fold(f32::MIN, f32::max);
+    let low = speeds.iter().copied().fold(f32::MAX, f32::min);
+    assert!(low > -0.2, "the chassis recoils: {speeds:?}");
+    assert!(
+        (1.5..2.6).contains(&peak),
+        "the kick at the stop: {peak} (live 1.6-2.2), {speeds:?}"
+    );
+}
+
 /// Tornado's spinner: the motor runs at 27 rad/s but the shell settles near 15
 /// within half a second (live 14-16 from 0.4 s on,
 /// `weapons-tornado-ripblade__live__000`), and its `Spin` switch toggles on each

@@ -1801,3 +1801,86 @@ workspace tests 644 passed, 0 failed, 1 ignored (the Berserker spinner).
 hammer's kick (above); the Compressor's Wide Load at a third of the live
 hits; the table's mass rule; the rotator bar; the heading drift and the
 wheels' transverse inertia (not worked on).
+
+### 12k. ALARM's tail and the piston's kick (fx/alarm-tail)
+
+No new live captures: the existing `fightcontacts-scout-alarm-box__live__000..003`
+(chassis and wheel bodies at every resolver entry, every contact) were enough.
+The A/B runs below used a throwaway environment switch that was removed before
+the commit.
+
+**What ALARM rests on past vertical: the same as live.** In chassis
+coordinates (centre of mass origin), live and ours rest past vertical on both
+rear wheels (contacts at y -0.10..-0.25, z -0.79..-0.81) *and* the chassis'
+top rear edge (±0.43..0.45, +0.38, -0.73) at up.y -0.10..-0.16
+(`fightcontacts-...__live__002`, 16.3-19.7 s; ours `invertprobe` pitched 95°,
+the same points to the centimetre). Alone on that edge live ALARM balances up
+to up.y -0.48 (the edge lies 28° past vertical from the centre: live 21.4-22.1
+s, ~1 s). Section 12j's "up.y -0.30 on the edge alone" in `__live__001` is
+ALARM leaning on the Scout: from 11.92 to 12.12 s its underside rests on the
+Scout's chassis and fork, which take its 3-5 rad/s down to 0.8. So the
+geometry, the wheel shapes and the contact radii are not the cause.
+
+**The piston pushes its rod only (recovered, verified against live data).**
+`0x4b51b0` (the burst piston's one-substep push and the prismatic
+controller's force, `0x4b5240`) scales the constraint's axis (`+0x58` → `+0x54`)
+by the force, turns it into the world with the housing's frame (`+0x60`), and
+applies it once, through `0x4b0950`, to one body: the rod's (`+0x5c`; it
+wakes it and calls `0x4b09d0` → `0x45e940`). Nothing is applied to the
+housing; the rest of the function only computes the rod's position in the
+housing's frame into a local. So the robot does not recoil while the hammer
+goes out and takes the hammer's momentum when the rod hits its stop. The live
+chassis show exactly that (ALARM's speed along the stroke, step by step, at
+the resolver's entry):
+
+| | out stroke | back stroke |
+|---|---|---|
+| live, on its wheels (`__live__001/002`, about ten strokes) | 0 → +0.4..1.0 → +1.6..2.2 | Δ -2.0..-2.2 |
+| live, on its tail (`__live__001`, 12.22 s) | vy -0.33 → +0.21 → +1.63 (hop 0.106 m) | |
+| ours before, on its back | +0.1 → -0.4 → -0.8 → -0.05 → +0.9 | |
+| ours before, on its tail (`invertprobe ... 95 4 fire`) | vy -0.13 → -0.83 → -0.91 → 0 → +1.16 (hop 0.06 m) | |
+| ours now, on its back | 0 → +0.75 → +2.2 | Δ -2.3 |
+| ours now, on its tail | vy -0.18 → +0.46 → +1.83 (hop 0.16 m) | |
+
+With the reaction the hammer's push and its stop cancelled and only what the
+floor took while the chassis recoiled was left; without it the robot gains
+the rod's momentum, `F · t / m ≈ 21 m/s · 33 kg / 339 kg ≈ 2 m/s`, as live.
+`Robot::push_slider`; test
+`motors::a_burst_piston_kicks_the_robot_only_at_its_stop`. Every robot with a
+piston changes: ALARM (`burstpiston2`) and Wide Load (`BurstPiston`).
+
+**Box Scout v ALARM, ALARM's tail.** Twelve fights (`fightprobe`, warmups
+0/7/13/19/26/31/39/45/52/58/64/71, 46 s, ALARM's up vector every 0.5 s from 5.7
+to 45 s; on its back up.y < -0.8, vertical -0.8..0.5):
+
+| | live (13, §12j) | before | after |
+|---|---|---|---|
+| on its back at 45 s | 2 | 6 | 3 |
+| mean time on its back | 11 % | 42 % | 25 % |
+| mean time vertical | 15 % | 6 % | 17 % |
+
+(This counts a little differently from §12j's 9/12 and 49 %, which came from
+the per-step trace; read the rows against each other.) ALARM now stands on its
+tail and hops there, as live, and the Scout pushing under it is what tips it
+either way. Two of the twelve stand on their tails for more than half the
+window; live the longest stand is 8 s.
+
+**Validation.** Before = `fidelity` 5bdd94a (§12j's table, the same build and
+scripts), after = this branch. The drive-at table is unchanged (no piston
+fires). Ensembles (six warmups 0..31, 120 s, counted = `>= 10` on the other
+robot; mean counted (mean total), mean length, full-length runs):
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 63, 77, 37 / 9, 6, 7 | 11.2 (412) / 5.5 (78), 73 s, 1/6 | 21.7 (923) / 4.7 (60), 85 s, 2/6 |
+| box Razor v FlapJack: Razor / FlapJack | 3 (40) / 1 (12) | 3.8 (108) / 0.0, 106 s, 4/6 | 3.8 (108) / 1.0 (13), 106 s, 4/6 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 60, 118, 158, 136 / 2, 13, 7, 7 | 24.8 (848) / 4.5 (74), 88 s, 2/6 | 60.8 (2242) / 8.7 (129), 100 s, 4/6 |
+| Octagon Scout v ALARM: ALARM / Scout | 24 (944), Scout out at 67 s | 6.0 (224) / 2.3 (32), 53 s, 0/6 | 19.8 (925) / 5.0 (68), 87 s, 3/6 |
+
+(Neither Razor nor FlapJack has a piston; FlapJack's 1.0 (13) is what §12i
+read for the same build line.) AI suite (ten pairings, warmup 0): 10/10 deal damage.
+Traction survey 45/45.
+
+**Still open.** ALARM still ends on its back in 3 of 12 box runs (live 2 of 13)
+and some tail-stands last longer than live; Wide Load's hits are now half the
+live mean (60.8 against 118); the other items of §12j.
