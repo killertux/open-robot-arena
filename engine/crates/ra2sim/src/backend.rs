@@ -501,6 +501,36 @@ pub trait PhysicsBackend {
         ))
     }
 
+    /// Create a point-to-point (ball-and-socket) joint holding `anchor` (world
+    /// space, at creation) of both bodies together. Backends without one may
+    /// reject this.
+    fn create_point_to_point(
+        &mut self,
+        _a: BodyHandle,
+        _b: BodyHandle,
+        _anchor: Vec3,
+    ) -> Result<JointHandle, BackendError> {
+        Err(BackendError::Body(
+            "point-to-point joints unsupported by this backend".into(),
+        ))
+    }
+
+    /// Create an angular dashpot (`GM_HavokAngularDashpot`): a damped spring
+    /// pulling `b`'s orientation towards `a`'s times `rest` (`b`'s orientation
+    /// relative to `a` that it holds). Backends without one may reject this.
+    fn create_angular_dashpot(
+        &mut self,
+        _a: BodyHandle,
+        _b: BodyHandle,
+        _rest: Quat,
+        _strength: f32,
+        _damping: f32,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Body(
+            "dashpots unsupported by this backend".into(),
+        ))
+    }
+
     /// Create a prismatic joint. Backends without sliders may reject this.
     fn create_slider(&mut self, _desc: &SliderDesc) -> Result<JointHandle, BackendError> {
         Err(BackendError::Body(

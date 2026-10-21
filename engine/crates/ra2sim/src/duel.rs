@@ -71,6 +71,14 @@ fn zone_pieces(
         .collect()
 }
 
+/// Diagnostic: `RA2_ZONE_PHANTOMS=0` keeps the other robot's phantoms (its
+/// traction rings and SmartZones) out of a robot's zone readings, as before
+/// docs/29 section 12i.
+fn zone_phantoms() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_ZONE_PHANTOMS").map_or(true, |v| v != "0"))
+}
+
 /// The handle a hidden prop's slot carries while its body is gone.
 ///
 /// A body handle is a `u32`, so the top value is free. `Arena.SetActive(name,
@@ -79,20 +87,102 @@ fn zone_pieces(
 const HIDDEN_PROP: BodyHandle = u32::MAX;
 
 /// Build one arena prop's body from its `.gmf` rigid body definition.
-fn spawn_prop(physics: &mut dyn PhysicsBackend, p: &crate::scene::Prop) -> Option<BodyHandle> {
-    let desc = BodyDesc::new(
-        MotionType::Dynamic,
-        ShapeDesc::ConvexHull {
+pub(crate) fn spawn_prop(
+    physics: &mut dyn PhysicsBackend,
+    p: &crate::scene::Prop,
+) -> Option<BodyHandle> {
+    let mut shape = match &p.mesh {
+        Some(indices) => ShapeDesc::MeshHull {
+            points: p.hull_points.clone(),
+            indices: indices.clone(),
+        },
+        None => ShapeDesc::ConvexHull {
             points: p.hull_points.clone(),
         },
-    )
-    .at(p.position)
-    .with_rotation(p.rotation)
-    .with_friction(p.friction)
-    .with_restitution(p.restitution)
-    .with_mass(p.mass)
-    .with_user_data(USER_PROP);
+    };
+    let mut inertia = None;
+    if let Some((com, i)) = p.live_mass {
+        if let Some((_, hull_com, _)) = crate::massprops::hull_inertia(&p.hull_points) {
+            shape = ShapeDesc::OffsetCenterOfMass {
+                shape: Box::new(shape),
+                offset: com - hull_com,
+            };
+            inertia = Some(i);
+        }
+    }
+    let mut desc = BodyDesc::new(MotionType::Dynamic, shape)
+        .at(p.position)
+        .with_rotation(p.rotation)
+        .with_friction(p.friction)
+        .with_restitution(p.restitution)
+        .with_mass(p.mass)
+        .with_user_data(USER_PROP);
+    desc.inertia = inertia;
     physics.create_body(&desc).ok()
+}
+
+/// Hang the arena's movable bodies from what the file's point-to-point
+/// constraints and angular dashpots attach them to (FlexTop's table, docs/29
+/// section 12j). A fixed end (`anchor03`, a massless body that collides with
+/// nothing) is the static arena body, whose frame is the world's.
+pub(crate) fn suspend_props(
+    physics: &mut dyn PhysicsBackend,
+    arena_path: &str,
+    arena_body: BodyHandle,
+    props: &[PropEntity],
+) {
+    let Ok(Some(havok)) = ra2_render::collect_havok(arena_path) else {
+        return;
+    };
+    let fixed = |name: &str| {
+        havok
+            .bodies
+            .iter()
+            .find(|b| b.name.eq_ignore_ascii_case(name) && b.is_static())
+    };
+    let end = |name: &str| -> Option<(BodyHandle, Mat4)> {
+        if let Some(b) = fixed(name) {
+            return Some((arena_body, b.transform));
+        }
+        let p = props
+            .iter()
+            .find(|p| p.prop.name.eq_ignore_ascii_case(name) && p.body != HIDDEN_PROP)?;
+        Some((
+            p.body,
+            Mat4::from_rotation_translation(p.prop.rotation, p.prop.position),
+        ))
+    };
+    for c in &havok.point_to_points {
+        let (Some((a, ta)), Some((b, _))) = (end(&c.body_a), end(&c.body_b)) else {
+            continue;
+        };
+        if a == b {
+            continue;
+        }
+        // `*POINT1` is in the first body's frame.
+        let anchor = ta.transform_point3(Vec3::from(c.point_a));
+        if let Err(e) = physics.create_point_to_point(a, b, anchor) {
+            eprintln!("ra2sim: point-to-point {} skipped: {e}", c.name);
+        }
+    }
+    for d in &havok.dashpots {
+        let (Some((a, ta)), Some((b, tb))) = (end(&d.body_a), end(&d.body_b)) else {
+            continue;
+        };
+        if a == b {
+            continue;
+        }
+        // The file's quaternion is `(x, y, z, w)`; B's orientation relative to
+        // A's frame is the stored one on top of the two placed frames.
+        let (_, ra, _) = ta.to_scale_rotation_translation();
+        let (_, rb, _) = tb.to_scale_rotation_translation();
+        let stored =
+            Quat::from_xyzw(d.rotation[0], d.rotation[1], d.rotation[2], d.rotation[3]).normalize();
+        let rest = ra.inverse() * rb * stored;
+        if let Err(e) = physics.create_angular_dashpot(a, b, rest, d.strength, d.damping) {
+            eprintln!("ra2sim: dashpot {} skipped: {e}", d.name);
+        }
+    }
 }
 
 /// The arena `.gmf`'s disabled collision pairs (`GMID_HAVOK_DIS_COLLISION_PAIRS`)
@@ -419,6 +509,7 @@ impl Duel {
         }
         let no_collide = no_collide_pairs(arena_path);
         apply_no_collide(&mut *physics, &props, arena_body, &no_collide);
+        suspend_props(&mut *physics, arena_path, arena_body, &props);
 
         if std::env::var("RA2_DEBUG").is_ok() {
             for p in &props {
@@ -1144,7 +1235,13 @@ impl Duel {
                                 hits.push((ci * 64 + k2, part == 0));
                             }
                         }
-                        for (k2, (pts, _)) in c.havok.phantom_pieces.iter().enumerate() {
+                        for (k2, (pts, _)) in c
+                            .havok
+                            .phantom_pieces
+                            .iter()
+                            .enumerate()
+                            .filter(|_| zone_phantoms())
+                        {
                             if crate::hazards::box_touches_piece(to, zone.min, zone.max, pts, None)
                             {
                                 hits.push((ci * 64 + 32 + k2, false));
@@ -1152,7 +1249,9 @@ impl Duel {
                         }
                     }
                     for (zi, z) in other.rig.smart_zones.iter().enumerate() {
-                        if !other.attached.get(z.component).copied().unwrap_or(false) {
+                        if !zone_phantoms()
+                            || !other.attached.get(z.component).copied().unwrap_or(false)
+                        {
                             continue;
                         }
                         let corners: Vec<Vec3> = (0..8)

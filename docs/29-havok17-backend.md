@@ -1633,3 +1633,171 @@ zones see traction rings; the heading drift (ours 0.26-0.30, live 0.19: not
 worked on beyond confirming that `MagicAction` runs once per step piece per
 robot, live 730 G rows for 365 pieces with two robots); the wheels'
 transverse inertia (+3-5 %).
+
+### 12j. FlexTop's table, the tail-stand statistics, the Compressor ensemble (fx/physics-flex)
+
+New live captures (fresh sessions, all in `local/oracle/original` with
+manifest rows, `manifest-additions-2026-10-21-physics-flex.tsv`):
+`flextable-scout-alarm-flextop__live__000` (`frida/ra2_dashpot.js`: every
+angular-dashpot apply with its raw fields, the table body and both chassis per
+step), `fight-scout-alarm-flextop__live__000..002` with
+`flexpos-scout-alarm-flextop__live__000..002` (three FlexTop fights, hits and
+10 Hz positions), `upside-scout-alarm-box__live__000..005` (six more box
+fight starts, 52 s each: location, `isUpsideDown`, tactic),
+`zonelist-sentinel-wideload-compressor__live__000` and
+`fight-sentinel-wideload-compressor__live__002..004` (Sentinel and Wide Load
+copied into the prefix `AI/Team0` slots and restored, sha256 checked).
+Diagnostics: `examples/tableprobe.rs` (the table alone from a live state),
+`examples/poseprobe.rs` (a robot placed at a live chassis pose: how far each
+component reaches below its centre), `fightprobe` takes
+`FIGHTPROBE_GAME=tabletop` and prints a suspended prop's tilt,
+`RA2_ZONE_PHANTOMS=0` keeps the other robot's phantoms out of a SmartZone
+(the rule before §12i), `gmfdump` prints hinges, dashpots and
+point-to-points.
+
+**How FlexTop holds its table (recovered, verified live).** The `.gmf` has a
+point-to-point constraint (node 53, `Point-Point01`: `anchor03`'s
+`(0, 0, 0)` and `floor_collision`'s `(0, 0.1196, 0)`, both the world point
+`(0, 0.2025, 0)`) and two angular dashpots (node 49, `Dashpot01/02`, both
+`anchor03` → `floor_collision`, `*STRENGTH` 1000, `*DAMPING` 0.08, rest
+rotation identity). `anchor03` is a massless body that collides with nothing;
+the table is the 400 kg `floor_collision`, a 12-sided ring 0.7 m thick with
+the hole in the middle (its mesh has no bottom faces) plus four rim boxes; the
+only fixed collidable is `Plane01`. No other arena or component `.gmf` has a
+dashpot or a point-to-point (docs/04 §2.5 says otherwise). The dashpot's
+reader is `0x5ca940` over the base dashpot's `0x5ca1b0` (`+0x80` strength,
+`+0x84` damping, `+0x88` interpenetrations byte, then four floats at `+0x8c`);
+its action's apply is `0x52cc00` (vtable `0x6ac0cc`; the linear dashpot's is
+`0x52c190`, which the "Actions/Dashpots" timer brackets). Per call:
+`f = 200 · (t2 - t1)` (`DAT_006ac0f0`; live the two times differ by 1/60 per
+step), the error rotation between `q_A · rest` and `q_B` as a rotation vector
+(`0x4f80b0`: `2 acos |w|`, the short way; under 0.001 none), and the angular
+impulse `J = f (strength · θn + damping · (ω_A - ω_B))`, `-J` to A and `+J`
+to B through the world inverse inertia (`0x485ec0`: `ω += I⁻¹ J`, body
+`+0x10c`, `+0x64`), each only for a movable body (`0x4812c0`). Live, the
+free table (robots fallen off) gains 0.056 rad/s per step at a 0.135 rad tilt;
+the formula with the live inertia predicts it to 3 %, the rest being gravity
+on a centre 0.88 m above the pivot. Strength 1000 makes it a stiff spring
+(period 1.25 s); the robots on it tilt it 5-10°.
+
+Ours: `ra2fmt::gmi` keeps the dashpots and point-to-points,
+`ra2_render::HavokArena` carries them, `PhysicsBackend::create_point_to_point`
+and `create_angular_dashpot` build them (havok17: the point-to-point's three
+rows already in `joints.rs`, the dashpot in `havok17/dashpot.rs`, applied per
+step piece before the constraint solver; the order of the two actions is not
+recovered), `duel::suspend_props` hangs the prop from the static arena body
+standing in for `anchor03` (both have the world's frame), the table collides
+as its own mesh (`Prop::mesh`, a ring a robot falls through), and
+`scene::load_arena` accepts the plane as the arena collider when the start
+points stand on a suspended body (before: no fixed floor near the starts, so
+the visible geometry, 1436 triangles, was a static collider). The table's
+mass properties are taken **as measured** (`scene::LIVE_MASS`): centre
+`(0, 1.0000, 0)` in its own frame (0.8805 m above the pivot), inertia
+(15550.73, 31099.06, 15550.73) kg·m², xz -6.48. Its hull would give centre
+0.974 and (15025, 29869, 14950); the live tensor is flat (`Iyy = Ixx + Izz`
+to 0.01 %), which neither the hull, the open mesh's solid from any origin,
+the faces' area nor the vertices reproduce. The rule is not recovered.
+
+From the live state at step 1502 of the capture, the free table (`tableprobe`,
+test `tests/flextop_live.rs`):
+
+| step | live rotation vector | ours | live ω | ours |
+|---:|---|---|---|---|
+| 30 | (0.041, -0.024, -0.025) | (0.042, -0.025, -0.020) | (-0.29, 0.07, -0.67) | (-0.31, 0.08, -0.70) |
+| 60 | (-0.070, 0.022, -0.060) | (-0.071, 0.022, -0.068) | (0.12, 0.09, 0.59) | (0.15, 0.09, 0.63) |
+| 120 | (-0.045, -0.028, -0.133) | (-0.045, -0.029, -0.137) | (-0.31, -0.02, -0.15) | (-0.29, -0.01, -0.13) |
+
+Ours swings 3-6 % wider, in phase after 2 s. Live, the table freezes once the
+match is over (its velocity stays, its pose stops); not modelled.
+
+FlexTop Scout v ALARM (Deathmatch in ours, Tabletop live; six warmups; the
+fight ends when the first robot is off the table, y < -6):
+
+| | live (3 runs) | before | after |
+|---|---|---|---|
+| first robot off | 16.3, 10.4, ≤ 5.7 s | 6, 24, 5, 24, 5, 17 s | 10, 18, 6, 9, 10, 8 s |
+| counted hits Scout / ALARM (per run) | 0 / 1.3 | 0 / 0.2 | 1.5 / 1.8 |
+| table | swings 5-10°, robots slide off the low side | static | swings 2-10° |
+
+**ALARM on its back: the live rate is 2 in 13, not 1 in 7.** With six more
+box fight starts the live set is 13 (`aistate-*__live__000..006`,
+`upside-*__live__000..005`). Counting from 5.7 s to 45 s with ALARM's
+`getLocation` and `isUpsideDown` (on its back: upside down with the centre at
+the upright height, y < -1.65; standing on its tail or nose: y ≥ -1.5):
+
+| | live (13) | ours (12, warmups 0..71) |
+|---|---|---|
+| on its back at 45 s | 2 | 9 |
+| mean time on its back | 11 % | 49 % |
+| vertical episodes / ending on its back | 35 / 2 | 25 / 13 (per step) |
+| mean time vertical | 15 % | 5 % |
+
+The earlier "back" readings of `aistate-...__live__004` were tail-stands
+(`zonelist-...__live__000`: up.y ±0.2, centre 0.4 m high). On its back ALARM
+rests as live (centre 0.51 m above the floor in both; `poseprobe` at the live
+pose of `zonelist-...__live__002`). The difference is on the tail. Live
+(`fightcontacts-...__live__001`, 11.9-13.2 s) ALARM rises at 3-5 rad/s, stops
+at up.y -0.30 resting on its chassis' rear edge alone (the only contact of its
+bodies), and 0.3 s later its own `InvertHandler` fires the hammer: the centre
+hops 0.11 m and ALARM rotates forward through vertical back onto its wheels.
+Ours, alone on its tail (`invertprobe` pitched), rests at up.y -0.1 on its
+rear wheels and the same hammer stroke hops it 0.06 m; in the fights it
+reaches vertical with 1.4-2.5 rad/s and goes on over backwards within
+0.3-0.7 s (e.g. warmup 19, 14.55-15.8 s: fork stroke, vertical at 15.1 s with
+ω 2 rad/s, the Scout backing away, on its back at 15.8 s). So what differs is
+how the tail stops the rotation (what ALARM touches past vertical: live the
+rear edge of the chassis at -0.30, ours the rear wheels at -0.1) and the
+hammer's kick; neither is recovered. The Scout's decisions are not the cause:
+its zone readings agree with the live list (§12i) and it was not pushing in
+the traced falls. `isUpsideDown` is the chassis' up.y < 0 (`0x4df4f0`), as
+ours.
+
+**Compressor Sentinel v Wide Load: the zone rule, and a gap 3× larger than
+it.** The drop from 57 to 31 is the phantom rule of §12i: with
+`RA2_ZONE_PHANTOMS=0` the same build gives Wide Load 41.8 (1335) counted in
+103 s (4/6 full), with it 24.8 (848) in 88 s (2/6; Sentinel wins twice, at 30
+and 65 s). The rule holds on this pairing too: the live phantom list
+(`zonelist-sentinel-wideload-compressor__live__000`) holds zone-v-traction-ring
+pairs (tags 32/20, both phantoms, 96 entries) and zone-v-zone pairs, as the
+box captures. So it stays. But three new live fights give Wide Load **118,
+158 and 136** counted hits (4390, 4516, 3835) with both robots running at 120
+s, Sentinel 13, 7, 7; the earlier reference (60, `__001`) is the low one. Live
+mean of four: 118 counted. Ours is a third of that with or without the rule;
+not traced further.
+
+**Berserker's rotator bar (not recovered).** The chassis body is within the
+test's 7 mm (6.9 mm) and is now a row of `tests/data/mass_live.tsv`. The
+spinner body (rotator bar 14 kg, three angle connectors 4 kg, three axe heads
+12 kg, the Z-Tek's rotor 10 kg) is 14.6 mm low along the motor axis: 1.05
+kg·m. The rotator bar's mesh solid instead of its hull closes 0.54 of it
+(y +0.016 against -0.023 in its frame); no single other piece's mesh, box or
+vertex mean gives the rest, and the live assembly capture has no component
+positions to tell a mass rule from a placement (its component nodes are
+identity children of the root). The live collidable class says
+`SIMULATION_GEOMETRY 3` is convex (§12g), so the mesh solid is not taken.
+`mass_live::berserkers_spinner_body_matches_the_original` states the live
+value and is ignored.
+
+**Validation.** Before = `fidelity` 0ff4467, after = this branch. Nothing but
+FlexTop changes: the dashpots and point-to-points exist only in
+`flextop.gmf`, and the suspended-body paths only run for it; the traces of
+box Scout v ALARM and Compressor Sentinel v Wide Load (warmup 7, 40 s) are
+byte-identical before and after, so the drive-at table and the other fights
+are unchanged. The ensembles of this build (six warmups, counted = `>= 10`
+on the other robot; this counts a little differently from §12i's table, which
+the numbers below should be read against only within the row):
+
+| fight | live | this build (before = after) |
+|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 63, 77, 37 / 9, 6, 7 | 11.2 (412) / 5.5 (78), 73 s, 1/6 |
+| box Razor v FlapJack: Razor / FlapJack | 3 (40) / 1 (12) | 3.8 (108) / 0.0, 106 s, 4/6 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 60, 118, 158, 136 / 2, 13, 7, 7 | 24.8 (848) / 4.5 (74), 88 s, 2/6 |
+| Octagon Scout v ALARM: ALARM / Scout | 24 (944), Scout out at 67 s | 6.0 (224) / 2.3 (32), 53 s, 0/6 |
+
+AI suite (ten pairings, warmup 0): 10/10 deal damage. Traction survey 45/45;
+workspace tests 644 passed, 0 failed, 1 ignored (the Berserker spinner).
+
+**Still open.** ALARM's tail: what it rests on past vertical and the
+hammer's kick (above); the Compressor's Wide Load at a third of the live
+hits; the table's mass rule; the rotator bar; the heading drift and the
+wheels' transverse inertia (not worked on).

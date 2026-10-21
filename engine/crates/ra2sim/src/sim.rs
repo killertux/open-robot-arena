@@ -12,7 +12,7 @@ use ra2_render::{RenderGroup, Renderer};
 use crate::backend::{BodyDesc, BodyHandle, MotionType, PhysicsBackend, ShapeDesc};
 use crate::rig::{self, RobotRig};
 use crate::robot::Robot;
-use crate::scene::{self, ArenaScene, Prop, USER_ARENA, USER_PROP};
+use crate::scene::{self, ArenaScene, Prop, USER_ARENA};
 
 /// Forward is -Z in RA2 model space.
 pub const BOT_FORWARD: Vec3 = Vec3::new(0.0, 0.0, -1.0);
@@ -153,7 +153,7 @@ impl Sandbox {
         .with_friction(arena.friction)
         .with_restitution(arena.restitution)
         .with_user_data(USER_ARENA);
-        physics.create_body(&arena_desc)?;
+        let arena_body = physics.create_body(&arena_desc)?;
 
         // Spawn the robot with its lowest point just above the floor.
         let spawn = Self::find_spawn(&*physics, &arena, &rig);
@@ -174,23 +174,12 @@ impl Sandbox {
         // Movable props (arena obstacles with embedded rigid bodies).
         let mut props = Vec::new();
         for p in prop_defs {
-            let desc = BodyDesc::new(
-                MotionType::Dynamic,
-                ShapeDesc::ConvexHull {
-                    points: p.hull_points.clone(),
-                },
-            )
-            .at(p.position)
-            .with_rotation(p.rotation)
-            .with_friction(p.friction)
-            .with_restitution(p.restitution)
-            .with_mass(p.mass)
-            .with_user_data(USER_PROP);
-            match physics.create_body(&desc) {
-                Ok(body) => props.push(PropEntity { body, prop: p }),
-                Err(e) => eprintln!("ra2sim: prop {} skipped: {e}", p.name),
+            match crate::duel::spawn_prop(&mut *physics, &p) {
+                Some(body) => props.push(PropEntity { body, prop: p }),
+                None => eprintln!("ra2sim: prop {} skipped", p.name),
             }
         }
+        crate::duel::suspend_props(&mut *physics, arena_path, arena_body, &props);
 
         println!(
             "sandbox: backend={} arena_tris={} props={} components={} parts={} mass={:.0}kg spawn={:.2},{:.2},{:.2}",

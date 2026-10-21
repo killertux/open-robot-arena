@@ -255,3 +255,45 @@ fn alarms_wheel_bodies_match_the_original() {
         );
     }
 }
+
+/// Berserker's spinner body (`rotatorbar`, three angle connectors and three
+/// axe heads on the Z-Tek's rotor): live 72 kg with its centre of mass at
+/// robot-frame y 0.5975 (`assembly-berserker__live__000`); ours puts it
+/// 14.6 mm lower along the motor axis. Taking the rotator bar's mesh solid
+/// instead of its hull (y +0.0158 against -0.0225 in its frame) closes half of
+/// that and no other piece's rule closes the rest; the rule is not recovered
+/// (docs/29 section 12j). Ignored until it is.
+#[test]
+#[ignore = "Berserker's spinner body: mass rule not recovered (docs/29 §12j)"]
+fn berserkers_spinner_body_matches_the_original() {
+    let Some(game) = game_dir() else {
+        return;
+    };
+    let _scripts = ra2script::lock();
+    let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+    let setup = BotSetup {
+        path: game
+            .join("AI/Team10/Bot0.bot")
+            .to_string_lossy()
+            .to_string(),
+        yaw_deg: None,
+        spawn: None,
+    };
+    let d = Duel::new(&arena, std::slice::from_ref(&setup)).expect("a duel");
+    let r = &d.robots[0];
+    let s = d.physics.state(r.parts[0].body).expect("chassis");
+    let frame = r.rig.components[r.rig.parts[0].root].local;
+    let p = (1..r.rig.parts.len())
+        .find(|&p| {
+            d.physics
+                .mass(r.parts[p].body)
+                .is_some_and(|m| (m - 72.0).abs() < 0.01)
+        })
+        .expect("the spinner body");
+    let com = d.physics.center_of_mass(r.parts[p].body).expect("centre");
+    let ours = frame.transform_point3(s.rotation.inverse() * (com - s.position));
+    assert!(
+        (ours.y - 0.5975).abs() < 0.002,
+        "spinner centre {ours}, live y 0.5975"
+    );
+}

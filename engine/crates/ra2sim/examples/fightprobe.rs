@@ -2,6 +2,10 @@
 //! every half second (who tips over, when).
 //!
 //! Usage: `fightprobe <arena.py> <botA> <botB> <seconds>`
+//!
+//! `FIGHTPROBE_GAME=tabletop` plays a Tabletop match (FlexTop, ClawTop); every
+//! half second the line also gives each suspended prop's tilt (rad) and
+//! centre (FlexTop's table, docs/29 section 12j).
 use ra2sim::{GameType, Match, MatchConfig, MatchState, RobotEntry};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -9,7 +13,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let secs: f32 = a[3].parse()?;
     let cfg = MatchConfig::new(
         a[0].clone(),
-        GameType::Deathmatch,
+        match std::env::var("FIGHTPROBE_GAME").as_deref() {
+            Ok("tabletop") => GameType::Tabletop,
+            _ => GameType::Deathmatch,
+        },
         vec![
             RobotEntry::ai(0, a[1].clone()),
             RobotEntry::ai(1, a[2].clone()),
@@ -33,6 +40,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (x, y) = w.split_once('-')?;
         Some((x.parse().ok()?, y.parse().ok()?))
     });
+    for p in m.duel.props.iter().filter(|p| p.prop.mesh.is_some()) {
+        if let Some((mass, com, inv)) = m.duel.physics.mass_properties(p.body) {
+            let i = inv.inverse();
+            println!(
+                "{}: {mass:.1} kg, centre {com:.4} (body frame), inertia {:.2} {:.2} {:.2} / {:.2} {:.2} {:.2}",
+                p.prop.name, i.x_axis.x, i.y_axis.y, i.z_axis.z, i.y_axis.x, i.z_axis.x, i.z_axis.y
+            );
+        }
+    }
     let mut next = 0.0f32;
     let mut steps = 0usize;
     while m.state() != MatchState::Results && m.clock() < secs && steps < (secs * 400.0) as usize {
@@ -78,6 +94,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     " | ({:6.2},{:6.2},{:6.2}) up.y {:5.2} fwd.y {:5.2}",
                     s.position.x, s.position.y, s.position.z, up.y, fwd.y
                 );
+            }
+            for p in m.duel.props.iter().filter(|p| p.prop.mesh.is_some()) {
+                if let Some(s) = m.duel.physics.state(p.body) {
+                    let up = s.rotation * glam::Vec3::Y;
+                    let c = m.duel.physics.center_of_mass(p.body).unwrap_or(s.position);
+                    line += &format!(
+                        " | {} tilt {:.3} com ({:.3},{:.3},{:.3})",
+                        p.prop.name,
+                        up.y.clamp(-1.0, 1.0).acos(),
+                        c.x,
+                        c.y,
+                        c.z
+                    );
+                }
             }
             println!("{line}");
         }

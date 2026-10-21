@@ -25,6 +25,7 @@
 //! and repeats from 1 until the substep's time is used up.
 
 mod body;
+pub mod dashpot;
 pub mod joints;
 pub mod mass;
 pub mod narrow;
@@ -186,6 +187,8 @@ pub struct Havok17Backend {
     /// Jolt body id (raw) → our handle.
     lookup: HashMap<u32, usize>,
     joints: Vec<Joint>,
+    /// The angular dashpots (actions, run before the constraint solver).
+    dashpots: Vec<dashpot::AngularDashpot>,
     /// The contacts of the last collision detection.
     contacts: Vec<Contact>,
     /// The agents' persistent manifolds, per pair of collidables.
@@ -218,6 +221,7 @@ impl Havok17Backend {
             geometry: Vec::new(),
             lookup: HashMap::new(),
             joints: Vec::new(),
+            dashpots: Vec::new(),
             contacts: Vec::new(),
             mesh_manifolds: HashMap::new(),
             convex_manifolds: HashMap::new(),
@@ -1065,6 +1069,9 @@ impl PhysicsBackend for Havok17Backend {
             if dumping() {
                 dump_line(format_args!("[\"A\",0,{h},{}]", self.backsteps));
             }
+            for d in &self.dashpots {
+                d.apply(&mut self.bodies, h);
+            }
             joints::solve(&mut self.bodies, &mut self.joints, dt);
             self.drag();
             done += h;
@@ -1079,6 +1086,9 @@ impl PhysicsBackend for Havok17Backend {
                     let (contacts, bad) = self.detect(current_tol * 0.5);
                     self.excused.extend(bad);
                     self.contacts = contacts;
+                    for d in &self.dashpots {
+                        d.apply(&mut self.bodies, rest);
+                    }
                     joints::solve(&mut self.bodies, &mut self.joints, dt);
                     self.drag();
                 }
@@ -1204,6 +1214,60 @@ impl PhysicsBackend for Havok17Backend {
             steer_rest: None,
         });
         Ok((self.joints.len() - 1) as JointHandle)
+    }
+
+    fn create_point_to_point(
+        &mut self,
+        a: BodyHandle,
+        b: BodyHandle,
+        anchor: Vec3,
+    ) -> Result<JointHandle, BackendError> {
+        let (Some(ba), Some(bb)) = (self.body(a), self.body(b)) else {
+            return Err(BackendError::Body(
+                "point-to-point on a missing body".into(),
+            ));
+        };
+        let anchor_a = ba.rotation.inverse() * (anchor - ba.origin());
+        let anchor_b = bb.rotation.inverse() * (anchor - bb.origin());
+        self.joints.push(Joint {
+            alive: true,
+            a: a as usize,
+            b: b as usize,
+            anchor_a,
+            anchor_b,
+            kind: Kind::PointToPoint,
+            limits: [0.0, 0.0],
+            limited: false,
+            motor: false,
+            max_torque: 0.0,
+            target_velocity: 0.0,
+            target: 0.0,
+            friction: 0.0,
+            saved_limits: None,
+            steer_rest: None,
+        });
+        Ok((self.joints.len() - 1) as JointHandle)
+    }
+
+    fn create_angular_dashpot(
+        &mut self,
+        a: BodyHandle,
+        b: BodyHandle,
+        rest: Quat,
+        strength: f32,
+        damping: f32,
+    ) -> Result<(), BackendError> {
+        if self.body(a).is_none() || self.body(b).is_none() {
+            return Err(BackendError::Body("dashpot on a missing body".into()));
+        }
+        self.dashpots.push(dashpot::AngularDashpot {
+            a: a as usize,
+            b: b as usize,
+            rest,
+            strength,
+            damping,
+        });
+        Ok(())
     }
 
     fn create_slider(&mut self, desc: &SliderDesc) -> Result<JointHandle, BackendError> {

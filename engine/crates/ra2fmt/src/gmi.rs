@@ -19,6 +19,11 @@ pub struct GmiScene {
     pub simulation: Option<SimulationObject>,
     /// The hinges the file's constraint solver declares.
     pub hinges: Vec<HingeJoint>,
+    /// The angular dashpots (`*GMID_HAVOK_ANGULAR_DASHPOT`, node 49).
+    pub dashpots: Vec<AngularDashpot>,
+    /// The point-to-point constraints (`*GMID_HAVOK_POINTTOPOINT`, node 53)
+    /// the file's constraint solvers declare.
+    pub point_to_points: Vec<PointToPoint>,
     /// The scene's static background colour (RGB 0..1).
     pub background: [f32; 3],
     /// The scene's static ambient colour as stored. The original engine does
@@ -55,6 +60,37 @@ pub struct HingeJoint {
     /// copy; for robot components they are not in component space).
     pub point: [f32; 3],
     pub spin_axis: [f32; 3],
+}
+
+/// An angular dashpot (`GM_HavokAngularDashpot`): a damped spring that pulls
+/// two bodies' relative orientation towards a stored one.
+///
+/// The exe's reader (`0x5ca940`, the base dashpot's at `0x5ca1b0`) reads the
+/// name, the node frame, the two body names, `*STRENGTH` (`+0x80`),
+/// `*DAMPING` (`+0x84`), `*ALLOW_INTERPENETRATIONS` (`+0x88`, a byte) and
+/// then the angular dashpot's own four floats (`+0x8c`), a rotation.
+#[derive(Clone, Debug, Default)]
+pub struct AngularDashpot {
+    pub name: String,
+    pub frame: [[f32; 3]; 4],
+    pub body_a: String,
+    pub body_b: String,
+    pub strength: f32,
+    pub damping: f32,
+    pub allow_interpenetrations: bool,
+    pub rotation: [f32; 4],
+}
+
+/// A point-to-point (ball-and-socket) constraint from a constraint list.
+#[derive(Clone, Debug, Default)]
+pub struct PointToPoint {
+    pub name: String,
+    pub frame: [[f32; 3]; 4],
+    pub body_a: String,
+    pub body_b: String,
+    /// The two vectors the node stores after the bodies.
+    pub point_a: [f32; 3],
+    pub point_b: [f32; 3],
 }
 
 impl GmiScene {
@@ -589,6 +625,8 @@ pub fn parse(data: &[u8]) -> Result<GmiScene, Error> {
     Parser {
         r: Reader::new(data),
         pending_hinges: Vec::new(),
+        pending_p2p: Vec::new(),
+        dashpots: Vec::new(),
     }
     .parse()
 }
@@ -673,6 +711,9 @@ struct Parser<'a> {
     r: Reader<'a>,
     /// Hinges read from the constraint list now being parsed.
     pending_hinges: Vec<HingeJoint>,
+    /// Point-to-point constraints read from the constraint list being parsed.
+    pending_p2p: Vec<PointToPoint>,
+    dashpots: Vec<AngularDashpot>,
 }
 
 impl<'a> Parser<'a> {
@@ -692,6 +733,7 @@ impl<'a> Parser<'a> {
             ..GmiScene::default()
         };
         self.read_object_list(&mut scene)?;
+        scene.dashpots = std::mem::take(&mut self.dashpots);
         Ok(scene)
     }
 
@@ -822,6 +864,7 @@ impl<'a> Parser<'a> {
                     let solver = self.read_constraint_solver()?;
                     scene.objects.push(solver);
                     scene.hinges.append(&mut self.pending_hinges);
+                    scene.point_to_points.append(&mut self.pending_p2p);
                 }
                 49 => scene.objects.push(self.read_angular_dashpot()?),
                 other => scene.objects.push(SceneObject {
@@ -1100,6 +1143,7 @@ impl<'a> Parser<'a> {
 
     fn read_constraint_solver(&mut self) -> Result<SceneObject, Error> {
         self.pending_hinges.clear();
+        self.pending_p2p.clear();
         let name = self.r.string()?;
         self.r.f32()?; // threshold
         self.r.string()?; // rigid body collection name
@@ -1174,12 +1218,20 @@ impl<'a> Parser<'a> {
                     });
                 }
                 53 => {
-                    let _ = self.r.string()?;
-                    let _ = self.read_tm_node()?;
-                    let _ = self.r.string()?;
-                    let _ = self.r.string()?;
-                    let _ = self.r.vec3()?;
-                    let _ = self.r.vec3()?;
+                    let name = self.r.string()?;
+                    let frame = self.read_tm_node()?;
+                    let body_a = self.r.string()?;
+                    let body_b = self.r.string()?;
+                    let point_a = self.r.vec3()?;
+                    let point_b = self.r.vec3()?;
+                    self.pending_p2p.push(PointToPoint {
+                        name,
+                        frame,
+                        body_a,
+                        body_b,
+                        point_a,
+                        point_b,
+                    });
                 }
                 other => {
                     return Err(Error::Structure(format!("unknown constraint node {other}")));
@@ -1191,15 +1243,26 @@ impl<'a> Parser<'a> {
 
     fn read_angular_dashpot(&mut self) -> Result<SceneObject, Error> {
         let name = self.r.string()?;
-        let _ = self.read_tm_node()?;
-        let _ = self.r.string()?;
-        let _ = self.r.string()?;
-        self.r.f32()?;
-        self.r.f32()?;
-        self.r.u8()?;
-        for _ in 0..4 {
-            self.r.f32()?;
+        let frame = self.read_tm_node()?;
+        let body_a = self.r.string()?;
+        let body_b = self.r.string()?;
+        let strength = self.r.f32()?;
+        let damping = self.r.f32()?;
+        let allow_interpenetrations = self.r.u8()? != 0;
+        let mut rotation = [0.0; 4];
+        for r in &mut rotation {
+            *r = self.r.f32()?;
         }
+        self.dashpots.push(AngularDashpot {
+            name: name.clone(),
+            frame,
+            body_a,
+            body_b,
+            strength,
+            damping,
+            allow_interpenetrations,
+            rotation,
+        });
         Ok(SceneObject {
             kind: ObjectKind::Dashpot,
             name,

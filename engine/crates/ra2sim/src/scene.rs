@@ -98,6 +98,29 @@ fn supports_starts(triangles: &[[Vec3; 3]], starts: &[(Vec3, Vec3)]) -> bool {
     })
 }
 
+/// The fixed collision triangles plus those of the movable bodies the file's
+/// constraints hold up, where they rest: FlexTop's only fixed collidable is an
+/// implicit plane 9.8 m down (`colliders-flextop__live__000`), and its start
+/// points stand on the table, a 400 kg body hung from a point-to-point and two
+/// angular dashpots (docs/29 section 12j).
+fn with_suspended(h: &ra2_render::HavokArena) -> Vec<[Vec3; 3]> {
+    let mut out = h.static_triangles.clone();
+    for b in h
+        .bodies
+        .iter()
+        .filter(|b| !b.is_static() && b.collides() && h.is_suspended(&b.name))
+    {
+        for t in b.points.as_chunks::<3>().0 {
+            out.push([
+                b.transform.transform_point3(t[0]),
+                b.transform.transform_point3(t[1]),
+                b.transform.transform_point3(t[2]),
+            ]);
+        }
+    }
+    out
+}
+
 /// Load an arena (`.py` script or `.gmf`) into visuals + collision triangles.
 ///
 /// The collider prefers the arena's **own Havok rigid bodies** (the geometry the
@@ -178,7 +201,7 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
                         max.y + 1.0,
                         centre.y,
                     )
-                    && (mode == "rb" || supports_starts(&h.static_triangles, &starts))
+                    && (mode == "rb" || supports_starts(&with_suspended(h), &starts))
                 {
                     source = "rigid bodies";
                     raw = h.static_triangles.clone();
@@ -252,6 +275,48 @@ pub struct Prop {
     pub restitution: f32,
     /// Visual batches, object-local.
     pub items: Vec<DrawItem>,
+    /// Collide as this triangle mesh over `hull_points` (Havok's `GEOMETRIC`
+    /// collidable) instead of their hull: a body the file's constraints hold,
+    /// FlexTop's table, which is a ring with the hole in the middle a robot
+    /// can fall through.
+    pub mesh: Option<Vec<[u32; 3]>>,
+    /// Mass properties read off the original where no rule is recovered:
+    /// the centre of mass in the object's frame and the inertia tensor about
+    /// it (see [`LIVE_MASS`]).
+    pub live_mass: Option<(Vec3, glam::Mat3)>,
+}
+
+/// Arena bodies whose mass properties are taken from the original as measured
+/// (body `+0x30`, `+0x19c`), because the rule Havok derives them by is not
+/// recovered: `(arena body, centre in the object frame, inertia diagonal,
+/// inertia xz)`.
+///
+/// FlexTop's table (`flextable-scout-alarm-flextop__live__000`): 400 kg, its
+/// centre 0.8805 m above the pivot, i.e. `(0, 1.0000, 0)` in its own frame,
+/// and an inertia of (15550.73, 31099.06, 15550.73) kg·m² with an xz term of
+/// -6.48: a flat distribution (`Iyy = Ixx + Izz` to 0.01 %). Its mesh's hull
+/// gives (0, 0.974, 0) and (15025, 29869, 14950); the open mesh's own solid,
+/// the area of its faces and its vertices do not fit either (docs/29 §12j).
+pub const LIVE_MASS: &[(&str, [f32; 3], [f32; 3], f32)] = &[(
+    "floor_collision",
+    [0.0, 1.0000, 0.0],
+    [15550.73, 31099.06, 15550.73],
+    -6.484,
+)];
+
+fn live_mass(name: &str, mass: f32) -> Option<(Vec3, glam::Mat3)> {
+    let (_, com, diag, xz) = LIVE_MASS
+        .iter()
+        .find(|(n, ..)| n.eq_ignore_ascii_case(name))?;
+    if (mass - 400.0).abs() > 1e-3 {
+        return None;
+    }
+    let i = glam::Mat3::from_cols(
+        Vec3::new(diag[0], 0.0, *xz),
+        Vec3::new(0.0, diag[1], 0.0),
+        Vec3::new(*xz, 0.0, diag[2]),
+    );
+    Some((Vec3::from(*com), i))
 }
 
 /// Load movable props from the arena script's `AddXtra` meshes. Props whose
@@ -314,6 +379,8 @@ pub fn load_props(
                     friction: rb.friction.max(0.05),
                     restitution: rb.elasticity.clamp(0.0, 1.0),
                     items,
+                    mesh: None,
+                    live_mass: None,
                 });
             }
         }
@@ -334,6 +401,12 @@ pub fn load_havok_props(path: &str) -> Result<Vec<Prop>, Box<dyn std::error::Err
         .filter(|b| !b.is_static() && b.collides() && !b.points.is_empty() && !b.items.is_empty())
         .map(|b| {
             let (_, rotation, position) = b.transform.to_scale_rotation_translation();
+            // `points` is a triangle soup: three per face.
+            let mesh = havok.is_suspended(&b.name).then(|| {
+                (0..b.points.len() as u32 / 3)
+                    .map(|i| [3 * i, 3 * i + 1, 3 * i + 2])
+                    .collect()
+            });
             Prop {
                 name: b.name.clone(),
                 hull_points: b.points.clone(),
@@ -343,6 +416,8 @@ pub fn load_havok_props(path: &str) -> Result<Vec<Prop>, Box<dyn std::error::Err
                 friction: b.friction.max(0.05),
                 restitution: b.elasticity.clamp(0.0, 1.0),
                 items: b.items.clone(),
+                live_mass: mesh.as_ref().and_then(|_| live_mass(&b.name, b.mass)),
+                mesh,
             }
         })
         .collect())
