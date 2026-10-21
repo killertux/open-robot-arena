@@ -25,6 +25,7 @@ pub mod hq_mode;
 pub mod hud;
 pub mod match_mode;
 pub mod match_sounds;
+pub mod net_play;
 pub mod options;
 pub mod play_mode;
 pub mod prize_scene;

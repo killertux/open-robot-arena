@@ -71,7 +71,7 @@ Screenshots referenced below are in the session scratchpad
 | Edited robot in an exhibition match | not possible | fixed |
 | Workshop `Test Robot` | AI drives the player's robot | fixed (player drives) |
 | Multiplayer: Create Game, IP Address, Help | **dead** | fixed (navigation only) |
-| Multiplayer: Join, Refresh, Start Game | dead | broken (no network layer; out of scope) |
+| Multiplayer: Join, Refresh, Start Game | dead | fixed (netplay, docs/38; our transport) |
 
 Counts: 26 rows; **16 fixed this round** (2 of them crashes/dead ends that
 closed or stranded the client), 6 worked already, 4 still broken (pause
@@ -261,8 +261,14 @@ changed (`md5sum`) → an exhibition `--play --team 0 --bot 1` spawns the
   `ra2-shell/src/bindings.rs`; test
   `playthrough::quit_and_the_multiplayer_buttons_are_bound`. (`90-ip.png`,
   `92-help.png`, `91-create.png`)
-* **broken (out of scope)** Join Game, Refresh List, Connect, Start Game do
-  nothing: there is no network layer.
+* **fixed (netplay, docs/38)** Refresh List enumerates LAN hosts (DirectPlay
+  `EnumHosts` frames, `RA2_NET_HOSTS` adds direct addresses) into `server
+  listbox`; Join Game / the IP window's Connect join the host; Create Game's
+  Start Game hosts and opens `prematch.gib`, whose panels, ready box,
+  disconnect and Begin Match work; the match is host-authoritative (inputs
+  up, snapshots down). The transport is ours (not DirectPlay byte for byte),
+  so the original cannot join this port's games. Test
+  `ra2-app/tests/netplay.rs`.
 * **fixed (round 2)** The LAN/Internet radio labels sit beside their radios
   (option-group labels are baseline-placed, §9.9); the create screen opens on
   its `mpc_settings.gib` tab.
@@ -277,7 +283,8 @@ changed (`md5sum`) → an exhibition `--play --team 0 --bot 1` spawns the
 3. **A capture of the original's bracket, options, award and dropdown
    windows** to confirm the recovered layouts (§9.8, §9.11, §9.12). Round 3
    read everything from the exe; the original was not run.
-4. Multiplayer networking (Join/Refresh/Start) if ever in scope.
+4. Multiplayer: done over our own transport (docs/38); open are DirectPlay
+   wire compatibility, spectators, voice and the scoring messages.
 
 Done in round 3 (§9.11 to §9.17): the award's 3D prize scene, the resolution,
 camera and match-time dropdown lists, the weight-class filter, the duel's open

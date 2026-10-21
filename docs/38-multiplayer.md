@@ -1,0 +1,303 @@
+# 38 — Multiplayer: what the original sends, and `ra2net`
+
+Robot Arena 2 1.20's network play, recovered from `Robot Arena 2.exe` (Ghidra
+12.1.4 headless + rizin 0.9.1 over the shipped exe; no network traffic of the
+original was captured, see §7), and how this port implements it
+(`engine/crates/ra2net`, wired into the client by
+`engine/crates/ra2-app/src/net_play.rs`).
+
+Addresses are the exe's. "Inferred" marks a name or meaning the code does not
+spell out.
+
+## 1. Architecture in one page
+
+| Layer | Original | Where | This port |
+|---|---|---|---|
+| Transport | **DirectPlay 8**, `IDirectPlay8Peer` (CLSID {286F484D-375E-4458-A272-B138E2F80A6A}, IID {5102DACF-…}) on the TCP/IP service provider (CLSID_DP8SP_TCPIP {EBFE7BA0-628D-11D2-AE0F-006097B01411}, `0x6b8028`): UDP | `CoCreateInstance` `0x623442`; wrapper "giNetwork" `0x620c40..0x627000` | `ra2net::frame`/`link`/`session`: a reliable-UDP link shaped after DirectPlay 8's reliable protocol (§3), our own session-core messages |
+| LAN discovery | DirectPlay `EnumHosts` with the app GUID, broadcast to the enumeration port 6073 | `FUN_00625cd0` (from Refresh, `FUN_00498460`) | `ra2net::dpn` (§2) + `session::Browser` |
+| Internet discovery | **GameSpy**: QR SDK (query & reporting) on UDP 9655.., heartbeats to `master.gamespy.com:27900`; server list over TCP `master.gamespy.com:28900`, encrypted (`enctype 2`) | `FUN_00509290` (`qr_init`), `0x50a940`..`0x50b4a0` (server list) | `ra2net::gamespy` answers the query protocol; the master (defunct since 2014) is never contacted |
+| Game messages | `giNetMessage` subclasses serialised into a binary stream | vtables `0x6aa694..0x6aa8b0`, dispatcher `RA2NetInterface` `FUN_004ce940` | `ra2net::message` — byte-for-byte (§4) |
+| Match model | **Host-authoritative state sync**: joiners send inputs, the host simulates and sends world snapshots at the connection-speed rate; scoring events are their own messages | `Synchronizer` `0x4f77b0`, `giSyncMessage` `0x4d2b60` | `ra2net::sync`, `game::NetGame`, `net_play::{capture, apply}` (§6) |
+| Voice | DirectPlay Voice objects exist (`DV_*` strings, `0x628500..`) | `0x6285e0` | not implemented |
+
+There is **no lockstep**: nothing in the message set carries a frame number or
+an input frame; the host's snapshots (positions, rotations, velocities of
+every rigid body) overwrite the joiners' bodies, and the ReadMe's 1.20 notes
+("removed force and torque data from sync message", "removed guaranteed
+messages from host (changed to synced, non-guaranteed)", "decreased bandwidth
+and update intervals for internet connections") describe exactly that design.
+`Events_2Player.txt` is the 2-player *event* table (`FUN_0046d8b0`), not
+network data.
+
+## 2. Sessions, ports and discovery
+
+* **Application GUID** {BBEDEC00-E25F-11D5-9CF6-0001023E5510}, bytes at
+  `0x6aaa70`, copied into the config by `0x49aa40`.
+* **Game port** 9791 (`0x263f`, pushed from `0x6b17e8` at `0x49a846` into the
+  config, `FUN_00621fd0`); `ra2.cfg`'s `[Begin Multiplayer Config]` may carry
+  `Port=` and `PlayerName=` (`FUN_006229e0` reads, `FUN_00622a90` writes,
+  strings `0x7096c0`/`0x7096b4`).
+* **Mode**: the config's `+4` is the role; multiplayer uses 2 = peer
+  (`FUN_00621fd0(2, …)` at `0x49a87e`). Mode 0 would be `IDirectPlay8Server`
+  (CLSID {DA825E1B-…}, `0x624e4e`); it is not used by the screens.
+* **Host** (`Create Game` → `start game button` → `FUN_0049a780` →
+  `FUN_006268b0`): device address port = game port, `SetPeerInfo` (name),
+  `Host` with a `DPN_APPLICATION_DESC` (size 0x48): the GUID, `dwMaxPlayers`,
+  the session name (`server name textbox`, default `Default Server`), the
+  password with `DPNSESSION_REQUIREPASSWORD` (0x80).
+* **Refresh** (LAN): `EnumHosts(desc{GUID}, host address without hostname,
+  device address, no user data, count/interval default, timeout INFINITE)`.
+  **IP Address**: the same with `hostname` set.
+* **Enumeration reply**: the host's `ENUM_HOSTS_QUERY` case of the callback
+  (`FUN_00623720`, message `0xffff000a`) returns 8 bytes, two words kept in
+  `giNetwork+0x23c`/`+0x240` and set by `FUN_0047ba70`: the number of
+  occupied lobby slots of kind 2|3 and of kind 0|1 (computer and human, by the
+  kinds `FUN_0047d120` draws; inferred). The joiner turns a reply into a
+  `giAddHostMessage` (`0x78`, `0x4d3b40`) — a server-list row.
+* **Connect** (`FUN_00626260`): `Connect` with user connect data `"01.00\0"`
+  (`0x6f3914`, 6 bytes). A 1 s timer (`0x6267a0`) counts
+  `Connecting to Server     %d` from 10 (`DAT_00709860`) and cancels at 0.
+* **Admission** (`INDICATE_CONNECT`, callback case `0xffff000e`): connect data
+  ≠ `01.00` → refuse with reply word **900**; lobby not taking players (the
+  interface's `+0x38`) → refuse with **901**. The joiner's `CONNECT_COMPLETE`
+  (case `0xffff0005`) maps them to "Connection refused.  Incompatible
+  versions." (`0x709728`) and "Connection refused.  Game already in
+  progress." (`0x709754`); any other refusal shows "Connection was refused by
+  server.\nThe game may be full or has already started." (`0x6fce70`).
+* **Sends**: `IDirectPlay8Peer::SendTo` (vtable `+0x1c`) with flags
+  `0x20` (`NOLOOPBACK`) or `0x28` (`+GUARANTEED`, while giNetwork's guarantee
+  switch is on) in the base send `FUN_00620ee0`; classes override with
+  `FUN_00621190(msg, flags, timeout)`: 0x38 (`+NONSEQUENTIAL+GUARANTEED`) for
+  `CloseResultsWindow`/`AddArenaBot`, 0x20 with 5000 ms for `RemoteInput`,
+  0x20 with 1000 ms for `PlayerReady` and `Sync`, flags 0 for chat text.
+  giNetwork tracks async sends and resends a lost one ("[giNetwork::PLost!
+  Resent!]", `0x7097bc`).
+* **Timeouts**: no `SetCaps` call; DirectPlay's own keep-alive/timeout
+  defaults apply.
+
+### Wire layouts (DirectPlay 8 service provider, [MC-DPL8CS])
+
+`EnumQuery` (port 6073 broadcast, or the host's port):
+
+| off | size | field |
+|---|---|---|
+| 0 | 1 | lead byte `0x00` |
+| 1 | 1 | command `0x02` |
+| 2 | 2 | enum payload (echoed) |
+| 4 | 1 | type: `0x01` GUID follows, `0x02` none |
+| 5 | 16 | application GUID (type 1) |
+| … | n | application payload (none from RA2) |
+
+`EnumResponse` (offsets from 4 are relative to byte 4):
+
+| off | size | field |
+|---|---|---|
+| 0 | 1 | `0x00` |
+| 1 | 1 | `0x03` |
+| 2 | 2 | enum payload |
+| 4 | 4 | reply offset (RA2's 8 bytes) |
+| 8 | 4 | reply size (8) |
+| 0x0c | 4 | application desc size `0x50` |
+| 0x10 | 4 | desc flags (0x80: password) |
+| 0x14 | 4 | max players |
+| 0x18 | 4 | current players |
+| 0x1c | 4 | session name offset |
+| 0x20 | 4 | session name size (UTF-16LE with NUL) |
+| 0x24..0x3b | 6×4 | password, reserved, app-reserved offset/size (0) |
+| 0x3c | 16 | instance GUID |
+| 0x4c | 16 | application GUID |
+| 0x5c | … | name, then the reply |
+
+These follow the specification; they are not checked against a capture (§7).
+
+## 3. Session transport (ours, DirectPlay-shaped)
+
+DirectPlay 8 delivers the messages above with its reliable protocol
+([MC-DPL8R]) and its core layer (connect info, name table, host migration).
+`ra2net` reproduces the frame *shapes* and does the same jobs:
+
+| frame | bytes |
+|---|---|
+| `CFRAME` CONNECT / CONNECTED / HARD_DISCONNECT | `0x80`(+`0x08` poll), opcode `0x01`/`0x02`/`0x04`, msg id, rsp id, u32 version `0x00010006`, u32 session, u32 timestamp — 16 bytes |
+| `CFRAME` SACK | `0x80`, `0x06`, flags (`0x01` response, `0x02` mask), retry, next seq, next recv, 2 pad, u32 timestamp, [u32 mask] |
+| `DFRAME` | command (`0x01` data, `0x02` reliable, `0x04` sequential, `0x08` poll, `0x10` new msg, `0x20` end msg, `0x40` user-1 = session-core), control (`0x01` retry, `0x02` keep-alive, `0x10` mask), seq, next recv, [u32 mask], payload |
+
+Guaranteed messages are sequenced, acknowledged (cumulative + one 32-frame
+selective mask, piggy-backed or a delayed SACK), retransmitted with backoff,
+fragmented above 1200 bytes; non-guaranteed ones go once and are delivered on
+arrival (DirectPlay also sequences those; we do not). Keep-alives every 1 s
+while idle, a link times out after 10 s of silence or 12 failed retries.
+
+Session-core messages (ours, `USER_1` frames): `0xC1` connect info (name,
+password, connect data), `0xC2` accept (your id, host id, player table),
+`0xC3` refuse (code + reply word 900/901), `0xC4`/`0xC5` player joined/left,
+`0xC6` terminate, `0xC7`/`0xC8` relay. DirectPlay 8 peers form a full mesh;
+here joiners link to the host only and the host relays a message a joiner
+addresses to another player.
+
+## 4. The game messages
+
+Every message is `u32 type` + fields, little-endian, no framing
+(`ra2net::stream`): words are 4 bytes (`0x58a0b0`/`0x58a1d0`), bytes 1
+(`0x58a0d0`), bools 1 (`0x58a050` writes `v != 0`; `0x58a160` reads `== 1`),
+strings a length word then the bytes without terminator (`0x58a0f0`/`0x58a210`).
+The type is the constructor's argument to `FUN_00620d20`.
+
+| type | class (vtable) | read / write | fields after the type |
+|---|---|---|---|
+| `0x65` | chat text (`0x6b17a8`) | `0x621bc0`/`0x621bf0` | string |
+| `0x71` | `giGroupInfoMessage` (`0x6aa77c`) | `0x4d17a0`/`0x4d18b0` | u32 player, u32 group, u32 state, 4 strings (name, team, robot, robot file — inferred), bool flag (ready, inferred), u32, bool has-robot, then the robot design stream to the end (written by the design's own `+0x4c`, read by `FUN_005b52d0`) |
+| `0x73` | `giRemoteInputMessage` (`0x6aa7f4`) | `0x4d23d0`/`0x4d2400` | u32 robot, then `Bot::Input` (`0x4819a0`): three key words (`+4`, `+8`, `+0xc`, matched together by `0x508ca0`) and the value (`+0x10`); a reader for a peer older than 1.11 skips `+8` (`0x481a34`) |
+| `0x74` | `giSyncMessage` (`0x6aa808`) | `0x4d25d0`/`0x4d2b60` | f32 snapshot size, u32 packed size, zlib 1.1.3 stream (§6) |
+| `0x76` | second text class (`0x6b17b8`) | as `0x65` | string |
+| `0x12d` | `giAddArenaBotMessage` (`0x6aa7e0`) | `0x4d2050`/`0x4d2100` | 3 u32, then (when the sender holds one) an AI design to the end |
+| `0x12e` | `giPrepareMatchMessage` (`0x6aa7cc`) | `0x4d1f50`/`0x4d1f80` | bool, string |
+| `0x12f` | `giPlayerReadyMessage` (`0x6a88a0`) | `0x4d2220`/`0x4d2270` | u32 player, u32 ready (≠0) |
+| `0x130` | `giBeginMatchMessage` (`0x6aa714`) | base | — |
+| `0x131` | `giEndMatchMessage` (`0x6a8888`, ctor `0x4924f0`) | base | — |
+| `0x132` | `giPlayerLoadingMessage` (`0x6aa768`) | `0x4d1590`/`0x4d15b0` | u32 |
+| `0x133` | `giArenaPreviewMessage` (`0x6aa7b8`) | `0x4d1ac0`/`0x4d1ae0` | string |
+| `0x134` | `giChangeGameTypeMessage` (`0x6aa790`) | same | string |
+| `0x135` | `giBotDamageMessage` (`0x6aa72c`, ctor `0x4d0f10`) | `0x4d0fb0`/`0x4d1050` | words `+0x1c`, `+0x24`, `+0x20`, `+0x28`, `+0x2c`, vec3 `+0x30`, vec3 `+0x40`, word `+0x50` (order checked in the disassembly of `0x4d1050`) |
+| `0x136` | `giChangeWeightClassMessage` (`0x6aa7a4`) | `0x4d1ac0`/`0x4d1ae0` | string |
+| `0x137` | `giMatchWinMessage` (`0x6a5830`) | `0x4d3480`/`0x4d34b0` | u32, u32 — the two winner ids of `FUN_004172d0` (docs/24 §4) |
+| `0x138` | `giTimeSyncMessage` (`0x6aa820`, built at `0x413300`) | `0x4d3550`/`0x4d3590` | u32, 4 u32 |
+| `0x139` | `giAddPointsMessage` (`0x6aa834`, ctor `0x4d3620`) | `0x4d3680`/`0x4d3710` | u32, u32, vec3, vec3, bool, bool |
+| `0x13a` | `giPlayerOutMessage` (`0x6aa848`) | `0x4d3480`/`0x4d34b0` | u32, u32 |
+| `0x13b` | `giBotImmobileMessage` (`0x6aa85c`, ctor `0x4d3890`) | `0x4d38e0`/`0x4d3940` | u32, vec3, bool, u32 |
+| `0x13c` | `giStartCountDownMessage` (`0x6aa870`) | `0x4d39f0`/`0x4d3a00` | — |
+| `0x13e` | `giCloseResultsWindowMessage` (`0x6a8398`, ctor `0x487f40`) | base | — |
+| `0x13f` | `giPeerDataLoadedMessage` (`0x6aa884`) | `0x4d3a60`/`0x4d3a90` | u32 |
+| `0x140` | `giFractureMessage` (`0x6aa740`) | `0x4d1240`/`0x4d13d0` | u32 robot, u32, u32 count, count × 14 words |
+| `0x141` | `giCriticalHitMessage` (`0x6aa754`) | `0x4d1590`/`0x4d15b0` | u32 |
+
+Local-only ids of the same numbering (the callback's notifications, never on
+the wire): `0x6e` player created, `0x6f` destroyed, `0x75` session
+terminated, `0x78` add host (enumeration reply), `0x79` connect complete,
+`0x7a` connect failed with a text.
+
+## 5. The lobby (`prematch.gib`)
+
+The host owns the lobby: each slot is a `giGroupInfoMessage`; slot kinds 0/1
+human, 2/3 computer, odd kinds with a robot loaded, 4 a player who left
+(`FUN_0047d120`; inferred from its branches and `FUN_0047ba70`'s counts).
+Game type, weight class and arena travel as `0x134`/`0x136`/`0x133`. Ready is
+`0x12f`; chat `0x65` (shown in `chat messages`). The start (dispatcher cases):
+`0x12e` prepare → every peer loads (`0x132` loading, `0x13f` loaded) → `0x130`
+begin and `0x13c` count-down; `0x13e` closes the results window, `0x131` ends.
+`AllowNonStandardMultiplayer` in `ra2.cfg` exists; its use was not traced.
+
+## 6. In the match
+
+* **Inputs**: `HumanLocal` (vtable `0x6a8ebc`, `+0x10` = `0x4b2dc0`) sends
+  every `Bot::Input` it delivers to its own robot as `0x73` to the host
+  (`0x4cff10`), non-guaranteed, 5 s timeout. The host's `HumanRemote`
+  applies them.
+* **Snapshots**: the `Synchronizer` (global `0x718404`, update `0x4f77b0`)
+  adds the frame time to an accumulator; at the interval it zeroes it, builds
+  `giSyncMessage` (`0x4d2470`) and sends it; it keeps a bandwidth estimate
+  ("Bandwidth:(%f,%f,%f)K/sec Updates:(%f,%f,%f)", `0x6fec64`). The interval
+  is the create screen's *Connection speed* (`FUN_0048e4a0`):
+
+  | label | interval (s) | rate | 2nd float |
+  |---|---|---|---|
+  | LAN | `0x3c99999a` 0.01875 | 53.3 Hz | 32746 |
+  | T1 (512K/s) | 0.03125 | 32 Hz | 8000 |
+  | Cable (384K/s) | `0x3d2a64c3` 0.0416 | 24 Hz | 6000 |
+  | DSL (256K/s) | 0.0625 | 16 Hz | 4000 |
+  | DSL (128K/s) | 0.125 | 8 Hz | 2000 |
+
+* **Snapshot body** (`0x4d2b60`, uncompressed; the writer counts its size as
+  it goes and sends that count as the float): u32 clock (`FUN_00469b90`),
+  u32 (`FUN_00609060`), u32 body count, bool partial (`+0x40`), f32 robot
+  count; per robot f32 + one f32 per component; per controller u32 id + f32
+  (vtable `+0x70`); per device u32 id, u8 kind, then kind 1: bool + 4 f32,
+  kind 4: f32, kind 5: bool, u32, 3 f32; per body u32 id, bool awake,
+  position (body `+0x30`), rotation (`+0x40`, scalar first, as `0x45e9b0`
+  copies it), and when awake linear (`+0x54`) and angular (`+0x64`)
+  velocity. Sizes: 17-byte header, 33/57 bytes per body. The controller and
+  device lists carry **no count**: both ends walk lists built from the same
+  designs (`ra2net::sync::SyncSchema`). Errors the reader prints: "ERROR: Bad
+  Rigid Body ID in SyncList", "Bad Controller ID", "Sync ignored - not in
+  game yet".
+* **Scoring** comes from the host as `0x135`/`0x139`/`0x13b`/`0x140`/`0x141`,
+  the end as `0x137` (winner ids) then `0x131`.
+
+This port: `net_play::capture` writes every live robot part body
+(id = robot << 16 | part) with empty robot/controller/device lists;
+`net_play::apply` sets each body's transform and velocities; the host drives
+remote robots through `match_mode::Session::set_remote_drive`. Our
+remote-input key words name the drive axes (0 throttle, 1 steer, value in
+percent), not a `.bot` control binding — a joiner of this port and one of the
+original would not understand each other's inputs.
+
+## 7. Evidence and wire-compatibility status
+
+* Static: everything above is from the exe (Ghidra decompilation of
+  `0x4ce5f0..0x4d3d00`, `0x620c40..0x62b000`, `0x509000..0x50c200`, the RTTI
+  vtables of the 24 `gi*Message` classes; rizin disassembly where the order of
+  chained stream calls mattered). No live capture: the oracle runs the game
+  under flatpak Wine 9.0 whose `dpnet.dll` is Wine's builtin ("Wine builtin
+  DLL"; its trace strings mark most interface methods `stub` or
+  `Semi-stub`), which does not implement the DirectPlay 8 protocol, so the
+  original under Wine has no DirectPlay frames to sniff; Microsoft's `dpnet`
+  would need a download (not done).
+* **Wire-compatible** with the original: the game-message payloads (§4) and
+  the snapshot layout, the GameSpy query replies (§8), the enumeration frames
+  as far as the specification goes (§2).
+* **Not wire-compatible**: the session transport (§3) — the original's
+  DirectPlay core and reliable layer are not reproduced byte for byte, so an
+  original client cannot join a port host or vice versa; the inputs' key
+  words (§6).
+
+## 8. GameSpy (Internet) — the defunct master
+
+`GSIntegration::Initialize` (`FUN_0047efe0`): `qr_init(NULL, 0, 9655,
+"robotarena2", "h4Yc9D", basic, info, rules, players)`; the SDK binds the
+first free UDP port in 9655..9754 (`FUN_00509290`), heartbeats
+`\heartbeat\<port>\gamename\robotarena2` to `master.gamespy.com:27900`
+(`FUN_0050a1f0`) every 300 000 ms. The Internet tab asks the master
+(TCP 28900) with `\gamename\%s\gamever\%d\location\0\validate\%s\enctype\2\final\\queryid\1.1\`
+and `\list\cmp\gamename\robotarena2\where\gamemode='openstaging'\final\`
+(`FUN_0050aaf0`), then queries each server's `\status\`. The callbacks'
+texts (`0x6f3990`, `0x6f3a50`, `0x6f3a40`, `0x6f3a80`, `0x6f3ab0`):
+
+```
+basic   \gamename\robotarena2\gamever\01.00\location\0\final\\queryid\N.1
+info    \hostname\%s\hostport\%d\hostip\%s\mapname\%s\gametype\%s\numplayers\%d\maxplayers\%d\gamemode\%s\programversion\%s\hostspeed\%s\final\\queryid\N.1
+rules   \cl_weightclass\%s\cl_hazards\%d\cl_pword\%s\password\%d\final\\queryid\N.1
+players \player_%d\%s\\ ... \final\\queryid\N.1
+```
+
+`N` is the game's own counter (`DAT_006f391c`, 1..100, bumped by basic and
+info); the SDK then appends its `\final\` and `\queryid\<query>.<packet>`
+(`qr_parse_query` `FUN_005099b0`, `packet_send` `FUN_00509d10`), splitting at
+1400 bytes. `gamemode` is `openstaging` in the lobby, `openplaying`
+(`0x6f3940`) in a match. `ra2net::gamespy::Responder` produces these replies;
+nothing in the port talks to a master server.
+
+## 9. What is implemented and tested
+
+* `ra2net` unit tests: every message's bytes; the snapshot size equals the
+  writer's running count; zlib round trip; the speed table and pacing; the
+  enumeration frames and the app GUID bytes; frame layouts; the link through
+  ~25 % pseudo-random loss (order, once-only, fragmentation), keep-alive,
+  timeout, hard disconnect; the lobby's ownership rules; the GameSpy replies.
+* `ra2net/tests/loopback.rs` (two or more sessions on 127.0.0.1): discovery
+  by enumeration; join + lobby (settings, a 3000-byte robot design, ready,
+  chat both ways); refusals 900/901/full; connect timeout; a 2 s synced match
+  (inputs to the host, ~53 Hz snapshots back, a late joiner refused 901, the
+  win, the joiner leaving); the host ending the session; a silent joiner timing
+  out; joiner-to-joiner relay.
+* `ra2-app/tests/netplay.rs`: through the shipped screens (Create Game →
+  Start Game hosts and opens the prematch; Refresh lists the host; the row +
+  Join reaches the prematch on the joiner; ready; disconnect) and a real
+  `Duel` on the box arena where the joiner's robot, driven by its remote
+  input on the host, ends where the host's snapshot puts it.
+
+Open: the DirectPlay core/reliable byte layouts; voice; host migration
+(DirectPlay supports it, RA2's use not traced); spectators (the prematch's
+`spectator list` and "spectator_joined.wav" `0x492f11`); the scoring messages'
+use in the port's match (the joiner's own damage still runs locally between
+snapshots); the GameSpy `\secure\` validation reply; the meaning of several
+fields marked inferred.

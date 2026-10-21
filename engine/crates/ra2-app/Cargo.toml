@@ -18,6 +18,7 @@ ra2-render = { path = "../ra2-render" }
 ra2script = { path = "../ra2script" }
 ra2-shell = { path = "../ra2-shell" }
 ra2fmt = { path = "../ra2fmt" }
+ra2net = { path = "../ra2net" }
 ra2sim = { path = "../ra2sim" }
 ra2ui = { path = "../ra2ui" }
 wgpu = "30.0.1"

@@ -2604,8 +2604,13 @@ mod tests {
                         for child in std::fs::read_dir(&from).unwrap() {
                             let child = child.unwrap();
                             let child_to = to.join(child.file_name());
+                            let name = child.file_name().to_string_lossy().to_lowercase();
                             if child.file_name() == "Teams.txt" {
                                 std::fs::copy(child.path(), child_to).unwrap();
+                            } else if name.starts_with("career") && name.ends_with(".dat") {
+                                // A career sidecar in the real install is
+                                // never linked: the test's save would write
+                                // through the link into the install.
                             } else {
                                 symlink(&child.path(), &child_to);
                             }
@@ -2788,8 +2793,12 @@ mod tests {
 
     #[test]
     fn a_click_on_the_event_row_enters_that_event() {
-        let Some(game) = game_dir() else { return };
-        let mut session = Session::open(&game).unwrap();
+        // Entering an event saves the career: a scratch install, never the
+        // real one.
+        let Some(game) = TestGame::new("click") else {
+            return;
+        };
+        let mut session = Session::open(game.path()).unwrap();
         session.select_tab("events button").unwrap();
         let expected = session.career.schedule[2];
         let point = session.event_point(2).unwrap();

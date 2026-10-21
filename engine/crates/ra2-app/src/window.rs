@@ -321,6 +321,8 @@ struct App {
     hover: Option<[f32; 2]>,
     next_update: Instant,
     error: Option<String>,
+    /// The multiplayer screens' session (docs/38).
+    net: crate::net_play::NetPlay,
 }
 
 impl App {
@@ -403,7 +405,32 @@ impl App {
             hover: None,
             next_update: Instant::now(),
             error: None,
+            net: crate::net_play::NetPlay::new(),
         })
+    }
+
+    /// Do what a network step asks: start the lobby's match, or report the
+    /// session's end over the server list.
+    fn net_action(&mut self, action: crate::net_play::NetAction) {
+        match action {
+            crate::net_play::NetAction::None => {}
+            crate::net_play::NetAction::StartMatch { arena } => {
+                match self.net.match_session(self.shell.game(), &arena) {
+                    Ok(session) => {
+                        ra2script::set_paused(false);
+                        self.session = Some(session);
+                    }
+                    Err(error) => eprintln!("network match: {error}"),
+                }
+            }
+            crate::net_play::NetAction::Ended(text) => {
+                self.session = None;
+                if let Err(error) = self.shell.show_message("Robot Arena 2", &text) {
+                    eprintln!("network: {error}");
+                }
+            }
+        }
+        self.request_redraw();
     }
 
     /// The match on screen: an exhibition/test match, or the Team HQ's event
@@ -1272,9 +1299,14 @@ impl ApplicationHandler for App {
                     self.inventory_pick = Some(index);
                 }
                 let screen_before = self.shell.base_screen_id();
+                let clicked_on = self.shell.screen_id();
                 match self.shell.click(point[0], point[1]) {
                     Ok(step) => {
                         println!("{}", crate::describe(&step));
+                        match self.net.on_step(&mut self.shell, &clicked_on, &step) {
+                            Ok(action) => self.net_action(action),
+                            Err(error) => eprintln!("network: {error}"),
+                        }
                         if crate::flow::quits(&screen_before, &step) {
                             // `Quit` (`0x486c30`): the game exits.
                             event_loop.exit();
@@ -1418,8 +1450,14 @@ impl ApplicationHandler for App {
             self.next_update = now + UPDATE;
             self.shell.advance(UPDATE.as_secs_f32());
             self.audio.tick_music(UPDATE.as_secs_f32());
+            match self.net.tick(&mut self.shell) {
+                Ok(action) => self.net_action(action),
+                Err(error) => eprintln!("network: {error}"),
+            }
             if let Some(session) = &mut self.session {
+                self.net.before_step(session);
                 session.advance(UPDATE.as_secs_f32());
+                self.net.after_step(session, UPDATE.as_secs_f32());
             }
             if let Some(hq) = &mut self.hq {
                 hq.advance(UPDATE.as_secs_f32());

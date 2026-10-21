@@ -1,0 +1,9 @@
+[package]
+name = "ra2net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robot Arena 2 multiplayer: the giNetwork message layer, DirectPlay 8 enumeration, the session transport, the lobby and the in-match synchroniser."
+
+[dependencies]
+flate2 = "1.1.10"
