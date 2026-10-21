@@ -252,6 +252,19 @@ impl Config {
         }
     }
 
+    /// `FUN_004f6a10`: the smoke a car-steering unit under half its hitpoints
+    /// gives off, a thinner cousin of [`Config::motor_smoke`]: one texture
+    /// (`smoke.tga`), rising at `0.7` with a spread of `0.3`.
+    pub fn steering_smoke() -> Config {
+        Config {
+            velocity: Vec3::new(0.0, 0.7, 0.0),
+            velocity_spread: Vec3::new(0.3, 0.0, 0.3),
+            texture_mode: TextureMode::Single,
+            textures: &["smoke.tga"],
+            ..Config::motor_smoke()
+        }
+    }
+
     /// `FUN_0048dc50`: the smoke a motor under half its hitpoints gives off.
     pub fn motor_smoke() -> Config {
         Config {
@@ -518,6 +531,16 @@ struct Bolt {
     offsets: [f32; BOLT_SEGMENTS - 1],
 }
 
+/// How many particles a hit of `damage` throws (`FUN_0045f9f0` over
+/// `FUN_004194f0`): `damage` from `10..100` maps linearly to `3..hi` and is
+/// clamped, `hi` being `20` at `GraphicDetail = 2` and `10` below it. Live: damage
+/// 12.34, 16.70, 38.39, 71.06 and 115.1 gave 3.44, 4.27, 8.36, 14.53 and 20.
+pub fn hit_count(damage: f32, detail: u32) -> f32 {
+    let hi = if detail >= 2 { 20.0 } else { 10.0 };
+    let t = ((damage - 10.0) / 90.0).clamp(0.0, 1.0);
+    (hi - 3.0) * t + 3.0
+}
+
 /// The most one-shot effects the manager keeps (`FUN_004a3380`: `< 0x14`).
 pub const MAX_EFFECTS: usize = 20;
 /// How long a one-shot effect emits (`FUN_004a3380`'s `0x3dcccccd`).
@@ -529,6 +552,8 @@ pub struct Effects {
     rng: Rng,
     /// `GraphicEffects` (`FUN_0046e5e0() == 1`).
     pub enabled: bool,
+    /// `GraphicDetail` (`0x7164f8 + 0x54`), which caps the spark count.
+    pub detail: u32,
     bursts: Vec<Emitter>,
     standing: Vec<(u64, Emitter)>,
     textures: Mutex<HashMap<&'static str, Arc<Image>>>,
@@ -544,12 +569,23 @@ impl Effects {
             game: game.map(Path::to_path_buf),
             rng: Rng(0x1234_5678),
             enabled: true,
+            detail: 2,
             bursts: Vec::new(),
             standing: Vec::new(),
             textures: Mutex::new(HashMap::new()),
             collider: Collider::default(),
             bolts: Vec::new(),
         }
+    }
+
+    /// The game directory the textures come from, if any.
+    pub fn game_dir(&self) -> Option<&Path> {
+        self.game.as_deref()
+    }
+
+    /// A car-steering unit's smoke, `key` naming the unit.
+    pub fn steering_smoke(&mut self, key: u64, point: Vec3, on: bool) {
+        self.standing_emitter(key, Config::steering_smoke, point, on);
     }
 
     /// The surfaces sparks and debris bounce off (the arena's receivers).
@@ -593,19 +629,23 @@ impl Effects {
     }
 
     /// The sparks of a hit of `damage > 10` at `point` (`FUN_004a2a50`):
-    /// `int(damage)` particles flying along `normal * 2`.
+    /// [`hit_count`] particles flying along `normal * 2`, where `normal` is the
+    /// hit record's own (into the struck component).
     pub fn sparks(&mut self, damage: f32, point: Vec3, normal: Vec3) {
-        let count = damage as i32;
+        let count = hit_count(damage, self.detail) as i32;
         if count > 0 {
             self.burst(Config::spark(count, normal * 2.0, Vec3::ONE), point);
         }
     }
 
-    /// The metal bits of a part knocked off (`FUN_004a2a50`'s debris case).
+    /// The metal bits a chassis hit throws besides the sparks (`FUN_0044ee70` calls
+    /// `FUN_004a2a50` a second time with its debris flag): a quarter of the
+    /// spark count (`0x6a54c0`), truncated, flying along `normal * 6` (the chooser
+    /// scales its vector in place by `2` and then by `3`).
     pub fn debris(&mut self, damage: f32, point: Vec3, normal: Vec3) {
-        let count = damage as i32;
+        let count = (hit_count(damage, self.detail) * 0.25) as i32;
         if count > 0 {
-            self.burst(Config::debris(count, normal * 3.0, Vec3::ONE), point);
+            self.burst(Config::debris(count, normal * 6.0, Vec3::ONE), point);
         }
     }
 
@@ -989,6 +1029,32 @@ fn clip_to_triangle(poly: &[[f32; 2]], tri: &[[f32; 2]; 3]) -> Vec<[f32; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Live (`tools/oracle/frida/ra2_fx.js`, `0x4a2a50` argument 1 over hit damage,
+    /// `GraphicDetail = 2`): the spark count's rule.
+    #[test]
+    fn the_hit_count_follows_the_live_log() {
+        for (damage, count) in [
+            (12.33672, 3.44138),
+            (16.70277, 4.26608),
+            (38.39037, 8.36262),
+            (71.05929, 14.53342),
+            (115.14941, 20.0),
+            (133.62216, 20.0),
+        ] {
+            assert!(
+                (hit_count(damage, 2) - count).abs() < 1e-3,
+                "{damage}: {} vs {count}",
+                hit_count(damage, 2)
+            );
+        }
+        // Below `GraphicDetail 2` the ceiling is 10.
+        assert!((hit_count(200.0, 1) - 10.0).abs() < 1e-6);
+        assert!((hit_count(55.0, 0) - 6.5).abs() < 1e-4);
+        // The debris of a chassis hit is a quarter of it: 0..=5.
+        assert_eq!((hit_count(12.3, 2) * 0.25) as i32, 0);
+        assert_eq!((hit_count(200.0, 2) * 0.25) as i32, 5);
+    }
 
     fn run(cfg: Config, seconds: f32) -> (Emitter, usize) {
         let mut e = Emitter::new(cfg, Vec3::ZERO, true, EMIT_SECONDS);
