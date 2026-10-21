@@ -1100,6 +1100,26 @@ fn place_core<'a>(
                     }
                 }
             }
+            // A left-aligned `TextBox` keeps its text `Buffer` pixels in from the
+            // edge (`video_options.gib`'s resolution field says `Buffer 8`: the
+            // capture's `1024x768x32` starts 8 px inside the box).
+            if widget.kind == WidgetKind::TextBox
+                && !text_box_centres(widget)
+                && !text_box_right(widget)
+            {
+                let buffer = widget
+                    .field("Buffer")
+                    .and_then(|f| f.number())
+                    .unwrap_or(0.0);
+                if buffer > 0.0 {
+                    for child in placed
+                        .iter_mut()
+                        .filter(|c| c.widget.kind == WidgetKind::Text)
+                    {
+                        child.frame.x += buffer;
+                    }
+                }
+            }
             placed
         }
     };
@@ -1309,6 +1329,14 @@ fn text_box_centres(widget: &Widget) -> bool {
         .field("Alignment")
         .and_then(|f| f.number())
         .is_some_and(|a| (a as i32) & 7 == 2)
+}
+
+/// Whether a `TextBox`'s `Alignment` puts its text at the right edge.
+fn text_box_right(widget: &Widget) -> bool {
+    widget
+        .field("Alignment")
+        .and_then(|f| f.number())
+        .is_some_and(|a| (a as i32) & 7 == 4)
 }
 
 fn measured(widget: &Widget, fonts: Option<&Fonts>) -> Option<(f32, f32)> {

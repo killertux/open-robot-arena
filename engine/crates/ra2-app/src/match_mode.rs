@@ -18,7 +18,8 @@
 //! match a player plays (exhibition, Team HQ event, `Test Robot`) does not use
 //! it: its time-out goes to the judges' decision (`FUN_00418770`, points).
 //!
-//! `--quit-at N` opens the pause dialog at `N` seconds, writes `pause.png`,
+//! `--quit-at N` shows the F1 controls reminder (`reminder.png`), then opens the
+//! pause dialog at `N` seconds, writes `pause.png`,
 //! presses its `quit button` through the same hit test a mouse uses, and writes
 //! `menu.png` from a fresh shell — the deterministic pause/quit proof.
 
@@ -1137,6 +1138,22 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
 
         if let Some(quit_at) = options.quit_at {
             if session.matched.state() == MatchState::Fight && session.matched.clock() >= quit_at {
+                // F1 first: the controls reminder over the match, then closed.
+                if session.reminder.is_none() {
+                    session.load_reminder(&options.game);
+                }
+                if session.controls_key() {
+                    write_frame(
+                        &mut session,
+                        &renderer,
+                        &ui,
+                        &target,
+                        size,
+                        out,
+                        "reminder.png",
+                    )?;
+                    session.controls_key();
+                }
                 session.paused = true;
                 ra2script::set_paused(true);
                 write_frame(

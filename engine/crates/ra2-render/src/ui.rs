@@ -235,6 +235,13 @@ impl UiAssets {
 
     /// Build the draw list for a placed screen.
     pub fn scene(&mut self, roots: &[Placement<'_>], screen: [u32; 2]) -> UiScene {
+        // The exe lays its windows out in whole pixels: both edges of a box
+        // are truncated (capture comparison: the exhibition panel's right and
+        // bottom edges and everything hung from them sat one pixel further
+        // out with fractional edges). The placed tree keeps its exact frames
+        // for hit tests; the draw list snaps them.
+        let snapped: Vec<Placement<'_>> = roots.iter().map(snap_placement).collect();
+        let roots = &snapped[..];
         let mut quads = Vec::new();
         // A `Border` is drawn over the widget it dresses and everything inside
         // it, so it is emitted when the walk leaves that widget's subtree.
@@ -639,6 +646,29 @@ impl UiAssets {
         }
         self.index.insert(key, index);
         index
+    }
+}
+
+/// A box with both edges truncated to whole pixels.
+fn snap_frame(f: Frame) -> Frame {
+    let (x0, y0) = (f.x.floor(), f.y.floor());
+    Frame::new(x0, y0, (f.x + f.w).floor() - x0, (f.y + f.h).floor() - y0)
+}
+
+fn snap_placement<'a>(p: &Placement<'a>) -> Placement<'a> {
+    Placement {
+        widget: p.widget,
+        frame: snap_frame(p.frame),
+        clip: p.clip.map(snap_frame),
+        children: p.children.iter().map(snap_placement).collect(),
+        attachments: p
+            .attachments
+            .iter()
+            .map(|a| ra2ui::PlacedAttachment {
+                attachment: a.attachment,
+                body: snap_placement(&a.body),
+            })
+            .collect(),
     }
 }
 

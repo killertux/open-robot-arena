@@ -184,6 +184,8 @@ pub struct Shell {
     /// (`time dropdown` from the Game Settings constructor; the options
     /// window's lists are registered by the application).
     dropdown_items: BTreeMap<String, Vec<String>>,
+    /// A dropdown's row text colour (`r g b a`), where the exe sets one.
+    dropdown_colors: BTreeMap<String, String>,
     /// `(dropdown, text)` for each row picked since the last
     /// [`Shell::take_dropdown_picks`].
     dropdown_picks: Vec<(String, String)>,
@@ -225,6 +227,8 @@ pub struct Shell {
     /// The logo files the edit-team window's `logo listbox` lists
     /// (`FUN_00468760`: `Teams\*.bmp`), in row order.
     edit_logos: Vec<String>,
+    /// The team the open edit-team window edits (`None`: it creates one).
+    edit_team: Option<usize>,
     /// The team the open delete box is about.
     pending_delete: Option<usize>,
     /// The schedule row the open join-event window is about (`FUN_00500c40`).
@@ -323,6 +327,7 @@ impl Shell {
                 "time dropdown".to_string(),
                 TIME_ITEMS.iter().map(|t| t.to_string()).collect(),
             )]),
+            dropdown_colors: BTreeMap::new(),
             dropdown_picks: Vec::new(),
             player_pick: None,
             opponent_pick: None,
@@ -338,6 +343,7 @@ impl Shell {
             visited: Default::default(),
             pending_delete: None,
             edit_logos: Vec::new(),
+            edit_team: None,
             team_hook: None,
             team_slot: None,
             join_event: None,
@@ -1253,6 +1259,12 @@ impl Shell {
         self.dropdown_items.insert(name.to_string(), items);
     }
 
+    /// The colour (`r g b a`) of a dropdown's rows.
+    pub fn set_dropdown_row_color(&mut self, name: &str, color: &str) {
+        self.dropdown_colors
+            .insert(name.to_string(), color.to_string());
+    }
+
     /// The rows picked from dropdown lists since the last call.
     pub fn take_dropdown_picks(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.dropdown_picks)
@@ -1270,6 +1282,7 @@ impl Shell {
             dropdown::click_part(&placed, hit.as_deref(), x, y)?
         };
         let items = self.dropdown_items.get(&name)?.clone();
+        let color = self.dropdown_colors.get(&name).cloned();
         // The lab's document is `ra2ui::workshop`'s, but its `Component
         // option` list is the same control.
         let gib = match &mut self.screen {
@@ -1286,6 +1299,9 @@ impl Shell {
                     .position(|item| item.eq_ignore_ascii_case(current.trim()))
                     .unwrap_or(0);
                 dropdown::open(gib, &name, &items, selected);
+                if let Some(color) = color {
+                    dropdown::set_row_color(gib, &name, &color);
+                }
             }
             Part::Row(row) => {
                 if let Some(text) = dropdown::pick(gib, &name, &items, row) {
@@ -1370,6 +1386,25 @@ impl Shell {
                     .unwrap_or_default()
             };
             let name = read("name input textbox");
+            if let Some(slot) = self.edit_team.take() {
+                if !name.trim().is_empty() {
+                    let logo = selected_logo(&window.gib, &self.edit_logos)
+                        .unwrap_or_else(|| "Teams\\orange_skull.bmp".to_string());
+                    teams::update_team(
+                        &self.game,
+                        slot,
+                        name.trim(),
+                        &read("team motto input textbox"),
+                        &logo,
+                    )?;
+                    if let Some(hook) = &mut self.team_hook {
+                        if let Some(view) = hook(slot) {
+                            self.set_hq_view(view);
+                        }
+                    }
+                }
+                return Ok(());
+            }
             if !name.trim().is_empty() {
                 let logo = selected_logo(&window.gib, &self.edit_logos)
                     .unwrap_or_else(|| "Teams\\orange_skull.bmp".to_string());
@@ -1436,7 +1471,17 @@ impl Shell {
                 return Ok(());
             }
         }
+        // The HQ's `edit team button` edits its own team; the select screen's
+        // `new team button` creates one.
+        let editing = target.eq_ignore_ascii_case("teamhq/editteam.gib")
+            && matches!(&self.screen, Screen::Page(page)
+                if page.key.eq_ignore_ascii_case(ra2ui::hq::SCREEN))
+            && self.team_slot.is_some();
+        if target.eq_ignore_ascii_case("teamhq/editteam.gib") {
+            self.edit_team = if editing { self.team_slot } else { None };
+        }
         if target.eq_ignore_ascii_case("teamhq/editteam.gib")
+            && !editing
             && !teams::rosters(&self.game, Side::Player)
                 .unwrap_or_default()
                 .iter()
@@ -1481,12 +1526,31 @@ impl Shell {
                 // `FUN_00468a90` shows `Teams\` + the selected row in `logo
                 // image preview`.
                 self.edit_logos = team_logos(&self.game);
+                // Editing starts from the team's own record (capture
+                // `teamhq-editteam`: caption `Edit Robotics Team`, its name and
+                // motto in the boxes, its logo selected and previewed).
+                let record = self.edit_team.and_then(|slot| {
+                    teams::rosters(&self.game, Side::Player)
+                        .ok()?
+                        .into_iter()
+                        .find(|r| r.slot == slot)
+                });
+                let (caption, name_text, motto_text) = match &record {
+                    Some(r) => ("Edit Robotics Team", r.name.as_str(), r.motto.as_str()),
+                    None => ("New Robotics Team", "", ""),
+                };
+                let logo_row = record.as_ref().and_then(|r| {
+                    let file = r.logo.rsplit(['\\', '/']).next().unwrap_or("");
+                    self.edit_logos
+                        .iter()
+                        .position(|l| l.eq_ignore_ascii_case(file))
+                });
                 for block in page.gib.blocks.iter_mut() {
                     let Block::Widget(root) = block else { continue };
                     for (name, text) in [
-                        ("window caption", "New Robotics Team"),
-                        ("name input textbox", ""),
-                        ("team motto input textbox", ""),
+                        ("window caption", caption),
+                        ("name input textbox", name_text),
+                        ("team motto input textbox", motto_text),
                     ] {
                         if let Some(w) = workshop::find_mut(root, name) {
                             set_text(w, text);
@@ -1494,10 +1558,12 @@ impl Shell {
                     }
                     if let Some(list) = workshop::find_mut(root, "logo listbox") {
                         ra2ui::input::text_rows(list, &self.edit_logos);
-                        ra2ui::input::select_row(list, 0);
+                        ra2ui::input::select_row(list, logo_row.unwrap_or(0));
+                        // The list's own bar shows once the rows overflow.
+                        ra2ui::input::scroll_rows(list, 0);
                     }
                     if let (Some(first), Some(preview)) = (
-                        self.edit_logos.first(),
+                        self.edit_logos.get(logo_row.unwrap_or(0)),
                         workshop::find_mut(root, "logo image preview"),
                     ) {
                         ra2ui::input::set_field(preview, "_Filename", &format!("Teams\\{first}"));

@@ -47,6 +47,9 @@ pub const CAMERA_FOV: f32 = 45.0 * 0.015;
 pub struct PrizeScene {
     arena: Vec<DrawItem>,
     prize: Vec<DrawItem>,
+    /// The team's robot on the winner's pad, with its world transform.
+    robot: Vec<DrawItem>,
+    robot_world: Mat4,
     camera: SceneCamera,
 }
 
@@ -56,7 +59,12 @@ impl PrizeScene {
     /// without a model (the lowest tier of an event names only the directory)
     /// leaves the spot empty, as an `AddXtra` of a missing file does. `logo` is
     /// the team's logo path (`Teams\...bmp`).
-    pub fn load(game: &Path, prize: &str, logo: &str) -> Result<PrizeScene, String> {
+    pub fn load(
+        game: &Path,
+        prize: &str,
+        logo: &str,
+        robot: Option<&Path>,
+    ) -> Result<PrizeScene, String> {
         let script = ra2_render::resolve_ci(game, "Arenas/event_results.py")
             .ok_or("Arenas/event_results.py is not in the install")?;
         let mut arena = ra2_render::collect_items(&script.to_string_lossy())
@@ -79,9 +87,15 @@ impl PrizeScene {
         camera.position = glam::Vec3::from(CAMERA_POSITION);
         camera.rotation = [CAMERA_ROTATION[0], CAMERA_ROTATION[1], 0.0];
         camera.fov = CAMERA_FOV;
+        let (robot_items, robot_world) = match robot {
+            Some(path) => place_robot(&script, &arena, path),
+            None => (Vec::new(), Mat4::IDENTITY),
+        };
         Ok(PrizeScene {
             arena,
             prize: prize_items,
+            robot: robot_items,
+            robot_world,
             camera,
         })
     }
@@ -114,6 +128,10 @@ impl PrizeScene {
                 items: &self.prize,
                 model: Mat4::IDENTITY,
             },
+            RenderGroup {
+                items: &self.robot,
+                model: self.robot_world,
+            },
         ];
         renderer
             .render_groups_to(&groups, view_proj, color, depth, format)
@@ -137,4 +155,59 @@ fn set_banner(arena: &mut [DrawItem], game: &Path, logo: Arc<Image>) {
             }
         }
     }
+}
+
+/// The team's robot standing on the arena's first start point: `FUN_0046e710`
+/// adds the entered robot as a real player of the running arena (the match's
+/// own spawn, `FUN_00439be0`), so it stands at `startpoint` 0 facing along the
+/// point's Z axis. The robot is dropped onto the floor under that point.
+fn place_robot(script: &Path, arena: &[DrawItem], bot: &Path) -> (Vec<DrawItem>, Mat4) {
+    let items = match ra2_render::collect_bot(&bot.to_string_lossy()) {
+        Ok(items) => items,
+        Err(_) => return (Vec::new(), Mat4::IDENTITY),
+    };
+    let starts = ra2_render::start_points(&script.to_string_lossy()).unwrap_or_default();
+    let Some((position, facing)) = starts.first().copied() else {
+        return (Vec::new(), Mat4::IDENTITY);
+    };
+    let floor = floor_under(arena, position).unwrap_or(0.0);
+    let (min, _) = ra2_render::bounds(&items);
+    let yaw = facing.x.atan2(facing.z);
+    let world = Mat4::from_translation(glam::Vec3::new(position.x, floor - min.y, position.z))
+        * Mat4::from_rotation_y(yaw);
+    (items, world)
+}
+
+/// The highest arena surface at or below `point` (a downward ray on the arena's
+/// triangles).
+fn floor_under(arena: &[DrawItem], point: glam::Vec3) -> Option<f32> {
+    let mut best: Option<f32> = None;
+    for item in arena {
+        for tri in item.vertices.as_chunks::<3>().0 {
+            let a = glam::Vec3::from(tri[0].pos);
+            let b = glam::Vec3::from(tri[1].pos);
+            let c = glam::Vec3::from(tri[2].pos);
+            let (p, q, r) = (
+                glam::Vec2::new(a.x, a.z),
+                glam::Vec2::new(b.x, b.z),
+                glam::Vec2::new(c.x, c.z),
+            );
+            let x = glam::Vec2::new(point.x, point.z);
+            let area = (q - p).perp_dot(r - p);
+            if area.abs() < 1e-9 {
+                continue;
+            }
+            let u = (q - x).perp_dot(r - x) / area;
+            let v = (r - x).perp_dot(p - x) / area;
+            let w = 1.0 - u - v;
+            if u < 0.0 || v < 0.0 || w < 0.0 {
+                continue;
+            }
+            let y = u * a.y + v * b.y + w * c.y;
+            if y <= point.y + 0.01 && best.is_none_or(|m| y > m) {
+                best = Some(y);
+            }
+        }
+    }
+    best
 }

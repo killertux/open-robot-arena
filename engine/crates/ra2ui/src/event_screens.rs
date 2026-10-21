@@ -42,6 +42,26 @@ fn find_mut_in<'a>(gib: &'a mut Gib, name: &str) -> Option<&'a mut Widget> {
     })
 }
 
+/// [`crate::workshop::find_mut`] that also looks inside attachment bodies.
+fn find_mut_attached<'a>(widget: &'a mut Widget, name: &str) -> Option<&'a mut Widget> {
+    if widget.name() == name {
+        return Some(widget);
+    }
+    for attachment in widget.attachments.iter_mut() {
+        if let Some(body) = attachment.body.as_deref_mut() {
+            if let Some(found) = find_mut_attached(body, name) {
+                return Some(found);
+            }
+        }
+    }
+    for child in widget.children.iter_mut() {
+        if let Some(found) = find_mut_attached(child, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn set_value_in(gib: &mut Gib, name: &str, value: &str) {
     if let Some(widget) = find_mut_in(gib, name) {
         match widget
@@ -130,8 +150,14 @@ pub fn bracket_screen_at(
         crate::input::set_field(image, "_Filename", &event.art);
     }
     // The arena's preview, not the shipped `sample_arena.bmp` placeholder.
-    if let Some(image) = find_mut_in(&mut gib, "background img") {
-        crate::input::set_field(image, "_Filename", &event.arena.1);
+    // (`background img` hangs in a `Background` attachment's body, which a
+    // plain child search never enters.)
+    for block in gib.blocks.iter_mut() {
+        if let Block::Widget(root) = block {
+            if let Some(image) = find_mut_attached(root, "background img") {
+                crate::input::set_field(image, "_Filename", &event.arena.1);
+            }
+        }
     }
     set_value_in(&mut gib, "event title", &event.name);
     set_first_display(&mut gib, &plain_text(&event.description));
