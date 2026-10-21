@@ -47,7 +47,7 @@ a decibel (0 = unity, -10000 = silent).
 
 | Call | Address | Notes |
 |---|---|---|
-| `Create(ret*, name, volume, is3D, ?, &pos, max, min)` | `0x4f0000` | ret 0x20; `name` is a std::string object (char* at +4); max/min distance 100.0/10.0 (floats at `0x6ab1cc/d0`) |
+| `Create(ret*, name, volume, is3D, ?, &pos, max, min)` | `0x4f0000` | ret 0x20; `name` is a std::string object (char* at +4); max/min distance 100.0/20.0 passed by every caller seen (the floats `0x42c80000`, `0x41a00000` of all 340 creates in section 13; the defaults at `0x6ab1cc/d0` are not what reaches `Create`) |
 | `Play(h, once, vol)` | `0x4f03b0` | `playSound` = (0,0), `playOnce` = (1,0) from the Python binding `0x4b7750` table |
 | `Loop(h)` | `0x4f0680` | |
 | `Stop(h)` | `0x4f05c0` | |
@@ -278,3 +278,51 @@ from a lost part in three of five fights). Impact volume mapping, the crowd's
 excitement thresholds and the motor level (-700, constant, no volume change in the
 log) were each checked against the log and are right; the input (hit sizes, part
 losses) is what differs.
+
+## 13. The mixer against the recordings: levels, 3D, pitch (fx-audio)
+
+Question: is the gap between our combat sounds and the original's in the *rules* (volume, pan,
+frequency, 3D) or in the *events* they are fed? New captures with two more hooks in
+`tools/oracle/frida/ra2_sounds.js` (`F` = `IDirectSoundBuffer::SetFrequency` wrapper `0x62c600`, `H` = the
+DirectSound3D position wrapper `0x629f90`): `audio-match-freq__live__000` and `audio-match-3d__live__000`
+(Combat Arena, Scout v ALARM, intro skipped, hazards on, 60 and 45 s of fight; WAV + call log), plus the
+older `audio-match-box-scout-alarm__live__000` and `audio-fight-scout-alarm__live__00*`.
+
+**What the exe does to a sound** (all three layers read live, not assumed):
+
+| Layer | Finding |
+|---|---|
+| `SoundWizard` volume -> buffer | `SetVolume(h, v, 0)` reaches `IDirectSoundBuffer::SetVolume` (`0x62c5a0`) unchanged: 98 / 151 / 176 of 98 / 151 / 177 `V` rows are followed by a `B` row of the same value. The wrapper walks the sound's **array of buffer instances** (`+0x04`, count `+0x10`) and sets each; `SetFrequency` (`0x62c600`) and `Play` likewise. No other attenuation is applied (`SoundVolume` does not reach effects: section 1). |
+| `SetPan` | Never called: the wrapper region holds only Play/Stop/SetVolume/SetFrequency/GetVolume/GetFrequency (`0x62c4a0..0x62c660`). |
+| 3D | `Create(.., is3D, ..)`: of 127 creates in `match-3d`, **only the six motor loops have the flag** (the 3D buffers), created at `(0, 0, 0)` with `max/min 100/20`; impacts, triggers, crowd, announcers are plain 2D buffers (their logged position, e.g. `(-3.7, -2.2, -5.2)` for an impact, is never used). The position wrapper `0x629f90` is called **zero** times in 330 s of matches; the listener is never touched. So every match sound is un-attenuated and centred: the recordings are exactly dual-mono. Ours: all match effects are flat (`AudioSystem::play_cues`), the motor loops too. |
+| Frequency | Only the motor loops: `SetFrequency` every game frame, `22050 * (0.5 + 0.5 r)` with `r = |omega| / max rate`, from 11 025 Hz (rest) **past** the file's rate when the motor overspeeds (live: 5 % of frames below 0.52, median 0.65, 95th percentile 1.14 of the file rate; 13 % at or above 0.98). `match_sounds::motor_pitch` is that formula and does not clamp at 1; ours, same fight window (time weighted, `RA2_AUDIO_TRACE` `audio-speed`): quartiles 0.55 / 0.63 / 0.76, 95th percentile 1.00, mean 0.68 against the original's 0.56 / 0.65 / 0.84 / 1.14, mean 0.72 (the rate ratio of a motor that spins up to its limit is the sim's, not the mixer's). Test `motor_frequency_follows_half_plus_half_the_rate_ratio`. |
+| Level rules | Per class, the level at every start (`play` / `loop`) in the first 60 s after the bell, original against ours (`tools/oracle/audio_levels.py`): impacts -1497..0 and -1499..0 (rule `impact_volume_hdb`), piston trigger 0 / 0, burst trigger -500 / -500, motor loops -700 / -700, crowd loops and one-shots 0 / 0. Every rule value is identical; only the **counts** differ. |
+
+**The mixing model reproduces the recording.** `ra2-audio`'s `replay` example mixes the original's own call
+log (every create / play / loop / stop / SetVolume / fade / SetFrequency at its logged time, files from
+`local/game/Sounds`) with the model our client uses (flat, centred, hundredths of a dB -> gain, loops, linear
+fades) and `tools/oracle/audio_replay_check.py` sets the result beside the WAV the game's own stream made:
+fight window bell + 5.5..55 s: recording -21.3 dB, replay -22.1 dB (per-second difference -0.76 dB, std 1.2 dB)
+on `match-freq`; -15.8 against -16.6 dB (std 2.3) on `match-3d`; older fight `fight-scout-alarm__000` within
+about 1 dB per ten seconds over 170 s. The ~0.5..1 dB the replay lacks is the resampler (linear 22.05 -> 48 kHz here against
+Wine's), not a gain rule. **So the combat-audio level gap lives in the events, not the rules.**
+
+**What was wrong on our side: the motor fades.** `AudioSystem::play_cues` faded every motor loop in over 250 ms
+and out over 250 ms ("rather than clicking"). The original has no fade: `Loop` at -700 and `Stop` (DirectSound
+cuts at once), the AI's one-second think stopping every handle and restarting it a median 0.127 s later
+(566 restarts, gaps 0.108..1.6 s; test `motor_handles_loop_and_stop_with_no_fade`). With a 0.13 s gap a 250 ms ramp
+each way took most of the loop's energy. Now: `set_script_volume(-700)` + `Loop`, `Stop` at once
+(`a_motor_loop_starts_at_its_level_and_stops_at_once`). Same scenario as section 10 (box, Scout v ALARM,
+hazards on, bell + 5.5..33.5 s): ours -19.4 dB -> **-19.1 dB** against the original's -19.2 dB; the six motors are
+on 112.8 s of the 168 handle-seconds of that window (original 122.8 s), 188 restarts against 220.
+
+Per-class counts, first 60 s of the fight (original `match-box` / `match-freq` / `match-3d` against ours):
+impacts 80 / 20 / 72 against 60 (the two new captures are 60 and 45 s of fight); piston triggers 81 / 67 / 57 against 58; burst-motor triggers
+2 / 30 / 4 against 37 (the original's own count swings from 2 to 30 between fights: it is AI timing, not a rule);
+motor loop starts 486 / 190 / 400 against 333. Fewer, softer hits are the combat side (section 12); nothing in the
+mixer to fix.
+
+Tools: `tools/oracle/audio_levels.py` (per-class levels, `RA2_AUDIO_TRACE=1` now prints `hdb=`, `loop` and `end=` per
+voice and the `audio-speed` profiles), `audio_window.py`, `audio_replay_check.py`, `audio_events.py` (new `freq` and
+`pos` rows), `capture_audio_match.py AT_MENU=1`. Open: the AI's restart cadence of the motor loops (ours 188 against
+220 per 28 s), the resampler's 0.5..1 dB.

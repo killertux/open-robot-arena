@@ -16,6 +16,8 @@
 //   N  mindist  [N,seq,ms,h,d]   0x4f10f0     M maxdist [M,seq,ms,h,d]  0x4f1130
 //   B  buffer volume [B,seq,ms,buf,vol]   0x62c5a0 IDirectSoundBuffer::SetVolume wrapper
 //   D  buffer play   [D,seq,ms,buf,pri,flags]  0x62c4a0
+//   F  frequency [F,seq,ms,this,hz]  0x62c600 IDirectSoundBuffer::SetFrequency wrapper (every buffer of the sound)
+//   H  3D position [H,seq,ms,this,x,y,z,mode,flag1c,flag1e]  0x62d270 (via 0x629f90, gated by the bytes at +0x1c/+0x1e)
 //   K  music folder [K,seq,ms,dir,shuffle?,fade]   0x4f1350 SetMusicFolder(dir, 1, 3.0) (+ the \*.mp3 playlist build)
 //   T  music track  [T,seq,ms,name,vol,flag]       0x4f12d0 play one playlist entry (starts the stream)
 //   R  music tick   [R,seq,ms]                     0x4f1620 end-of-track advance (once per track end)
@@ -82,6 +84,11 @@ Interceptor.attach(ptr('0x4f10a0'), { onEnter() {
 simple('0x4f10f0', 'N', 2, [2]);
 simple('0x4f1130', 'M', 2, [2]);
 Interceptor.attach(ptr('0x62c5a0'), { onEnter() { push(['B', ++seq, now(), this.context.ecx.toString(), a(this.context, 1).readS32()]); } });
+Interceptor.attach(ptr('0x62c600'), { onEnter() { push(['F', ++seq, now(), this.context.ecx.toString(), a(this.context, 1).readU32()]); } });
+Interceptor.attach(ptr('0x629f90'), { onEnter() {
+  const c = this.context.ecx;
+  let f1 = null, f2 = null; try { f1 = c.add(0x1c).readU8(); f2 = c.add(0x1e).readU8(); } catch (e) {}
+  push(['H', ++seq, now(), c.toString(), f(a(this.context, 2)), f(a(this.context, 3)), f(a(this.context, 4)), a(this.context, 5).readS32(), f1, f2]); } });
 Interceptor.attach(ptr('0x62c4a0'), { onEnter() { push(['D', ++seq, now(), this.context.ecx.toString(), a(this.context, 1).readS32(), a(this.context, 2).readS32()]); } });
 Interceptor.attach(ptr('0x6287e0'), { onEnter() {
   let n = null; try { n = a(this.context, 1).readPointer().readCString(); } catch (e) {}

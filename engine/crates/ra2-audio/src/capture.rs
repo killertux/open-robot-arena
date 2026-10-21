@@ -55,6 +55,11 @@ struct Voice {
     speed: Vec<(f32, f32)>,
 }
 
+/// A voice's start, path, looping flag, starting linear gain and stop time.
+pub type VoiceStart = (f32, PathBuf, bool, f32, Option<f32>);
+/// A voice's start, stop and `(time, rate)` pitch points.
+pub type SpeedProfile = (f32, Option<f32>, Vec<(f32, f32)>);
+
 /// The recorded timeline.
 #[derive(Clone, Debug, Default)]
 pub struct Capture {
@@ -161,6 +166,24 @@ impl Capture {
         self.voices
             .iter()
             .map(|v| (v.start, v.path.clone()))
+            .collect()
+    }
+
+    /// Start time, path, whether it loops, the linear gain a voice started
+    /// at and when it was stopped, for a report that sets levels beside the original's call log.
+    pub fn start_gains(&self) -> Vec<VoiceStart> {
+        self.voices
+            .iter()
+            .map(|v| (v.start, v.path.clone(), v.looping, v.gain[0].1, v.stop))
+            .collect()
+    }
+
+    /// Each voice's start, stop and `(time, rate)` pitch points (`SetFrequency`).
+    pub fn speed_profiles(&self) -> Vec<SpeedProfile> {
+        self.voices
+            .iter()
+            .filter(|v| !v.speed.is_empty())
+            .map(|v| (v.start, v.stop, v.speed.clone()))
             .collect()
     }
 

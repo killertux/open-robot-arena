@@ -244,3 +244,82 @@ fn the_crowd_is_bored_at_the_bell() {
         .count();
     assert_eq!(at_bell, 1);
 }
+
+const FREQ: &str = "audio-match-freq__live__000.events.tsv";
+
+/// A motor handle `Loop`s and `Stop`s with no fade: no volume call follows its
+/// creation at -700, every restart is a fresh `Loop` after a gap of at least one
+/// frame-and-a-bit (0.1 s: the AI's think), and every start in the log is at the
+/// handle's creation level (docs/35 section 13).
+#[test]
+fn motor_handles_loop_and_stop_with_no_fade() {
+    let Some(events) = load(FREQ) else { return };
+    let motors: Vec<i64> = events
+        .iter()
+        .filter(|e| e.kind == "create" && e.file == "motorloop2.wav")
+        .map(|e| e.handle)
+        .collect();
+    assert!(motors.len() >= 6, "{motors:?}");
+    let volume_calls = events
+        .iter()
+        .filter(|e| e.kind == "setvolume" && motors.contains(&e.handle))
+        .count();
+    // The one SetVolume each handle makes is the creation's own (the log's V row).
+    assert_eq!(volume_calls, motors.len(), "no fade, no level change");
+    assert!(events
+        .iter()
+        .filter(|e| e.kind == "setvolume" && motors.contains(&e.handle))
+        .all(|e| e.volume == Some(MOTOR_LOOP_HDB)));
+    let mut stopped: std::collections::HashMap<i64, f32> = Default::default();
+    let mut gaps = Vec::new();
+    for e in events.iter().filter(|e| motors.contains(&e.handle)) {
+        match e.kind.as_str() {
+            "stop" => {
+                stopped.insert(e.handle, e.t);
+            }
+            "loop" => {
+                if let Some(t) = stopped.remove(&e.handle) {
+                    gaps.push(e.t - t);
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(gaps.len() > 100, "{}", gaps.len());
+    assert!(gaps.iter().all(|g| *g > 0.09), "{gaps:?}");
+}
+
+/// `SetFrequency` of a motor loop, every game frame: the file's 22050 Hz rate times
+/// `0.5 + 0.5 r` with `r = |omega| / max rate` (`FUN_004f5b50`): never below an
+/// octave down, and past the file's own rate when the motor overspeeds.
+#[test]
+fn motor_frequency_follows_half_plus_half_the_rate_ratio() {
+    let Some(events) = load(FREQ) else { return };
+    let hz: Vec<f32> = events
+        .iter()
+        .filter(|e| e.kind == "freq" && e.file == "motorloop2.wav")
+        .filter_map(|e| e.volume.map(|v| v as f32))
+        .collect();
+    assert!(hz.len() > 1000, "{}", hz.len());
+    let low = hz.iter().cloned().fold(f32::MAX, f32::min);
+    let high = hz.iter().cloned().fold(0.0, f32::max);
+    assert!(low >= 11_025.0 - 1.0, "{low}");
+    assert!(high > 22_050.0, "{high}");
+    // Ours reproduces the same ratio for the same r (r = (hz / f - 0.5) * 2).
+    for h in hz.iter().step_by(37) {
+        let r = (h / 22_050.0 - 0.5) * 2.0;
+        let ours = ra2_app::match_sounds::motor_pitch(r * 10.0, 10.0);
+        assert!((ours - h / 22_050.0).abs() < 1e-4, "{h}: {ours}");
+    }
+}
+
+/// The wrapper's SetPosition is never called in a fight: every match effect is
+/// centred (the recordings are exactly dual-mono; docs/35 section 2).
+#[test]
+fn no_effect_is_ever_positioned_in_a_match() {
+    let Some(events) = load("audio-match-3d__live__000.events.tsv") else {
+        return;
+    };
+    assert!(events.iter().filter(|e| e.kind == "create").count() > 100);
+    assert_eq!(events.iter().filter(|e| e.kind == "pos").count(), 0);
+}

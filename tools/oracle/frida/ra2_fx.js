@@ -127,4 +127,6 @@ Interceptor.attach(ptr('0x51e6d0'), { onEnter() { if (!inHit) return; this.m = t
 Interceptor.attach(ptr('0x51e600'), { onEnter() { if (!inHit) return; this.m = this.context.ecx; this.o = this.context.esp.add(4).readPointer(); this.iv = v3(this.o); }, onLeave() {
   if (!this.m) return; send({ ev: 'rot2', t: now(), m: m12(this.m), in: this.iv, out: v3(this.o) }); } });
 Interceptor.attach(ptr('0x44cf00'), { onEnter() { if (!inHit) return; const sp = this.context.esp; send({ ev: 'veq', t: now(), a: v3(this.context.ecx), b: v3(sp.add(4).readPointer()) }); } });
-rpc.exports = { ping() { return now(); }, glob() { return v3(ptr('0x71abcc')); }, m12at(a) { return m12(ptr(a)); } };
+rpc.exports = { ping() { return now(); }, glob() { return v3(ptr('0x71abcc')); }, m12at(a) { return m12(ptr(a)); },
+  // Force the alpha (+0x1cec) of live DecalTrigger objects (docs/37 section 3): their look at full strength.
+  setalpha(addrs, v) { for (const a of addrs) ptr(a).add(0x1cec).writeFloat(v); return addrs.length; } };

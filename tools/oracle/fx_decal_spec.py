@@ -19,12 +19,16 @@ def main():
     rows = [json.loads(line) for line in open(sys.argv[1])]
     bots = sys.argv[2:4]
     poses = [r for r in rows if r["ev"] == "pose"]
-    if not poses:
-        sys.exit("no pose rows (POSE=1)")
+    dshots = [r for r in rows if r["ev"] == "dshot"]
+    if not poses and not dshots:
+        sys.exit("no pose rows (POSE=1) or dshot rows (DECAL_SHOTS=n)")
     # chassis addr -> player: the matrix translation nearest the player's location
-    first = poses[0]
+    first = (poses or dshots)[0]
     owner = {}
     for addr, m in first["chassis"].items():
+        if not poses:  # head-on decal shots: the decalled chassis is the second robot
+            owner[addr] = 1
+            continue
         best = None
         for p in poses:
             loc = eval(p["pose"])[0]
@@ -49,11 +53,19 @@ def main():
     for p in (0, 1):
         for line in marks[p][-25:]:
             print(line)
-    for k, p in enumerate(poses):
+    for p in dshots:
+        p["player"], p["name"] = 1, "%s%02d" % (p["tag"], p["k"])
+    for k, p in enumerate(poses + dshots):
+        p.setdefault("name", "pose%02d" % k)
         cam = eval(p["cam"])
         by_player = {owner[a]: m for a, m in p["chassis"].items()}
+        for pl in (0, 1):  # a robot that was never decalled has no logged matrix: park it far away
+            if pl not in by_player:
+                other = list(by_player[1 - pl])
+                other[9] += 30.0
+                by_player[pl] = other
         mats = " ".join("%.6f" % x for pl in (0, 1) for x in by_player[pl])
-        print("shot pose%02d %d %.6f %.6f %.6f %.6f %.6f %.4f %s" % (k, p["player"], *cam[0], cam[1], cam[2], p["fov"], mats))
+        print("shot %s %d %.6f %.6f %.6f %.6f %.6f %.4f %s" % (p["name"], p["player"], *cam[0], cam[1], cam[2], p["fov"], mats))
 
 
 if __name__ == "__main__":

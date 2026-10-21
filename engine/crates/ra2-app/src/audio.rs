@@ -227,11 +227,34 @@ impl AudioSystem {
         // own time, to line a render up against a recording by ear and eye.
         if std::env::var_os("RA2_AUDIO_TRACE").is_some() {
             println!("audio-trace speed points: {}", capture.speed_points());
-            for (t, file) in capture.starts() {
+            for (from, stop, points) in capture.speed_profiles() {
+                let list: Vec<String> = points
+                    .iter()
+                    .map(|(t, r)| format!("{:.3}:{r:.3}", t - start))
+                    .collect();
                 println!(
-                    "audio-trace {:8.3}s {}",
+                    "audio-speed {:.3} {} {}",
+                    from - start,
+                    stop.map_or("-".to_string(), |e| format!("{:.3}", e - start)),
+                    list.join(",")
+                );
+            }
+            for (t, file, looping, gain, stop) in capture.start_gains() {
+                // The gain in hundredths of a decibel, the unit of the original's
+                // call log (`tools/oracle/audio_levels.py` compares the two).
+                let hdb = if gain <= 0.0 {
+                    -10000.0
+                } else {
+                    2000.0 * gain.log10()
+                };
+                println!(
+                    "audio-trace {:8.3}s {} hdb={:.0}{}{}",
                     t - start,
-                    file.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+                    file.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                    hdb.clamp(-10000.0, 0.0),
+                    if looping { " loop" } else { "" },
+                    stop.map(|e| format!(" end={:.3}", e - start))
+                        .unwrap_or_default()
                 );
             }
         }
@@ -491,27 +514,25 @@ impl AudioSystem {
                     if on {
                         match ra2_audio::resolve_game_path(&self.game, &path) {
                             Some(file) => {
-                                // A motor fades up rather than clicking on, to the
-                                // level its handle is created at.
-                                self.audio.set_script_volume(key, -10_000);
+                                // `Loop` at the level the handle was created at
+                                // (-700): the original's call log has no fade
+                                // and no volume change (docs/35 section 13).
+                                self.audio
+                                    .set_script_volume(key, crate::match_sounds::MOTOR_LOOP_HDB);
                                 if let Err(error) = self
                                     .audio
                                     .play_script(key, &file, true, [0.0; 3], listener, 1.0)
                                 {
                                     self.problems.push(format!("motor: {error}"));
                                 }
-                                self.audio.fade_script_to(
-                                    key,
-                                    crate::match_sounds::MOTOR_LOOP_HDB,
-                                    250.0,
-                                );
                             }
                             None => self
                                 .problems
                                 .push(format!("motor: {path} is not in the game")),
                         }
                     } else {
-                        self.audio.fade_out_script(key, 250.0);
+                        // `Stop`: DirectSound cuts at once.
+                        self.audio.stop_script(key);
                     }
                 }
             }
@@ -982,6 +1003,39 @@ mod tests {
         assert_eq!(
             report.lines().filter(|l| l.starts_with("audio: ")).count(),
             1
+        );
+    }
+
+    /// The original's motor handle is `Loop`ed at its creation level and `Stop`ped
+    /// at once: no fade in, no fade out, no volume change (docs/35 section 13).
+    #[test]
+    fn a_motor_loop_starts_at_its_level_and_stops_at_once() {
+        let Some(game) = game_dir() else { return };
+        let mut audio = AudioSystem::new_capturing(&game, &cfg_with_unity_volumes());
+        let key = crate::match_sounds::motor_key(0, 3);
+        let motor = |on| crate::match_sounds::SoundCue::Motor {
+            key,
+            on,
+            path: "Sounds\\motorloop2.wav".into(),
+            position: [0.0; 3],
+        };
+        let ears = Listener::looking_forward([0.0; 3]);
+        audio.play_cues(vec![motor(true)], ears);
+        audio.audio.advance(0.5);
+        audio.play_cues(vec![motor(false)], ears);
+        audio.audio.advance(0.1);
+        let voices = audio.audio.capture().unwrap().start_gains();
+        assert_eq!(voices.len(), 1, "{voices:?}");
+        let (start, _, looping, gain, stop) = &voices[0];
+        assert!(*looping);
+        let hdb = 2000.0 * gain.log10();
+        assert!(
+            (hdb - crate::match_sounds::MOTOR_LOOP_HDB as f32).abs() < 1.0,
+            "{hdb}"
+        );
+        assert!(
+            (stop.expect("stopped") - start - 0.5).abs() < 1e-3,
+            "{stop:?}"
         );
     }
 }

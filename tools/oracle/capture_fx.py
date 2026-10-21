@@ -15,6 +15,7 @@ shortly after a decal / spark / smoke event (at most one per SHOT_GAP seconds).
 Writes OUT/fx-<NAME>__live__<seq>.jsonl (events) and ...-<k>.png (shots).
 """
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -84,6 +85,77 @@ def pose_shots(base, rows, sc):
             rows.append({"ev": "pose", "player": player, "az": az, "pose": pose, "cam": cam, "fov": fov,
                          "chassis": mats, "file": os.path.basename(path)})
             k += 1
+
+
+EYE_CODE = """
+import plus, math
+m = (%f, %f, %f)
+t = (%f, %f, %f)
+d = [t[0] - m[0], t[1] - m[1], t[2] - m[2]]
+L = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+d = [d[0] / L, d[1] / L, d[2] / L]
+yaw = math.atan2(d[0], d[2])
+pitch = -math.asin(d[1])
+plus.setCameraPosition(m[0], m[1], m[2])
+plus.setCameraRotation(pitch, yaw)
+plus.setCameraFOV(%f)
+out.write(repr((m, pitch, yaw)))
+"""
+
+
+def decal_shots(base, rows, sc, n, tag, forced=None):
+    """Photograph the `n` strongest live decals head-on, `DECAL_DIST` m off the face: the
+    camera sits along the decal's world normal, looking at its centre.  `forced` writes that
+    alpha into the live decals first (ALPHA_FORCE), so the same shot is taken twice, as built
+    and at full strength.  Logged as `dshot` rows (the camera and the chassis matrix)."""
+    dist = float(os.environ.get("DECAL_DIST", "0.9"))
+    fov = float(os.environ.get("POSE_FOV", "0.7"))
+    decals = [r for r in rows if r.get("ev") == "decal"][-25:]
+    addrs = sorted({r["addr"] for r in rows if r.get("ev") == "inv" and r.get("addr")})
+    if forced is not None:
+        print("alpha forced on", sc.exports_sync.setalpha([r["obj"] for r in decals], forced), "decals")
+    # the strongest decals whose camera stays inside the arena (a robot pinned at a wall has none)
+    inside = {}
+    for k, r in enumerate(decals):
+        owner = next((x["addr"] for x in reversed(rows[:rows.index(r)]) if x.get("ev") == "inv"), addrs[0])
+        m = sc.exports_sync.m12at(owner)
+        ax = [m[0:3], m[3:6], m[6:9]]
+        world = lambda v: [sum(v[j] * ax[j][i] for j in range(3)) for i in range(3)]
+        c = [a + b for a, b in zip(world(r["c"]), m[9:12])]
+        nw = world(r["u"])
+        ln = math.sqrt(sum(x * x for x in nw)) or 1.0
+        e = [c[i] + nw[i] / ln * dist for i in range(3)]
+        inside[k] = abs(e[0]) < 11.0 and abs(e[2]) < 11.0 and e[1] > -2.6
+    best = sorted((i for i in range(len(decals)) if inside[i]), key=lambda i: -decals[i]["alpha"])[:n]
+    print("decal shots:", sorted(best), "of", len(decals), "decals")
+    for k in sorted(best):
+        r = decals[k]
+        mats = {a: sc.exports_sync.m12at(a) for a in addrs}
+        # the decal's chassis is the one whose matrix is on its hit chain (`inv` row before it)
+        owner = next((x["addr"] for x in reversed(rows[:rows.index(r)]) if x.get("ev") == "inv"), addrs[0])
+        m = mats[owner]
+        ax = [m[0:3], m[3:6], m[6:9]]
+        world = lambda v: [sum(v[j] * ax[j][i] for j in range(3)) for i in range(3)]
+        c = [a + b for a, b in zip(world(r["c"]), m[9:12])]
+        nw = world(r["u"])
+        ln = math.sqrt(sum(x * x for x in nw)) or 1.0
+        eye = [c[i] + nw[i] / ln * dist for i in range(3)]
+        eye[1] += 0.05
+        cam = cd.py(EYE_CODE % (*eye, *c, fov)).strip()
+        time.sleep(0.4)
+        mats = {a: sc.exports_sync.m12at(a) for a in addrs}
+        path = f"{base}-{tag}{k:02d}.png"
+        ra2_drive.shot(DISPLAY, path)
+        rows.append({"ev": "dshot", "k": k, "tag": tag, "alpha": r["alpha"], "cam": cam, "fov": fov,
+                     "chassis": mats, "file": os.path.basename(path)})
+
+
+def neuter_and_settle():
+    print("neuter:", cd.py(cd.NEUTER))
+    time.sleep(float(os.environ.get("SETTLE", "7.0")))
+    subprocess.run(["python3", os.path.join(HERE, "..", "capture", "xtest.py"), "key", "F3"],
+                   env=dict(os.environ, DISPLAY=DISPLAY), check=False)
+    time.sleep(1.0)
 
 
 def main():
@@ -164,6 +236,16 @@ def main():
         t0 = time.time()
         while time.time() - t0 < secs:
             time.sleep(0.5)
+        if os.environ.get("DECAL_SHOTS"):
+            import math as _m  # noqa: F401
+            neuter_and_settle()
+            n = int(os.environ["DECAL_SHOTS"])
+            decal_shots(base, rows, sc, n, "dnat")
+            decal_shots(base, rows, sc, n, "dfull", forced=1.0)
+        elif os.environ.get("ALPHA_FORCE"):
+            # the last 25 decals of the chassis are the live ones: show them at full strength
+            objs = [r["obj"] for r in rows if r.get("ev") == "decal"][-25:]
+            print("alpha forced on", sc.exports_sync.setalpha(objs, float(os.environ["ALPHA_FORCE"])), "decals")
         if os.environ.get("POSE") == "1":
             pose_shots(base, rows, sc)
         sc.unload()
