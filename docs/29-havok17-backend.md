@@ -2418,3 +2418,102 @@ registrations were not captured (its colliding bodies are assumed registered
 as in the box and the Compressor). `AddXtra` and KOTH prize components are
 implemented from the code, not seen live. The crowd now also hears arena hits
 over 50 (as `FUN_004175b0` does), not checked against live audio.
+
+### 12p. FlapJack's wedge lies flat, and the Razor goes over (fx/razor)
+
+New live captures (two fresh sessions on `:7`, prefix sha256 checked before
+and after; manifest rows in `manifest-additions-2026-10-21-razor.tsv`):
+`arenahits-razor-flapjack-box__live__000..004` with
+`fightpos-razor-flapjack-box__live__000..004` (five 120 s box fights,
+`capture_fightpos_set.sh` with `AGENT=frida/ra2_arenahits.js`: every priced
+hit with both bodies, and every 6 frames both robots' location,
+`isUpsideDown`, last tactic, commands and sensor table) and
+`fightweapons-razor-flapjack-box__live__000` (`frida/ra2_weapons.js` over the
+same session); `flipfight-razor-flapjack-box__live__000..002` with
+`fightpos-razor-flapjack-box__live__005..007` (three more fights with the new
+`frida/ra2_flipfight.js`: `ra2_fightcontacts.js` plus every hinge motor
+setting, `M`, in one seq, so a stroke lines up with the contacts and the
+bodies). Diagnostic: with `RA2_H17_DUMP` ours now writes the `M` row at
+every burst phase change, so the live scripts read our strokes too.
+
+**The live fights end with the Razor on its back.** Razor (`Rammer`, the
+`Charge` tactic: no weapon to fire; its spike strips, piercing 0.8, Metal
+0.8, price `≈ 6.6 · rec0` per strike, as ours) lands 5, 2, 5, 1, 0, 0, 5, 6
+counted hits in the eight new fights (with `fight-...__live__000`'s 3: mean
+3.0, sd 2.2); FlapJack 0 in all eight (1 in `__000`). In every one of the
+eight FlapJack's flipper puts the Razor on its back, 5-35 s in (median 17 s,
+`fightpos`, `isUpsideDown`; lifted 0.3-0.7 m by 1-6 strokes first), the Razor's `Invert` tactic cannot right it, it creeps 0.3-6 m
+in the next 10 s and is counted out by the immobility rule (`immobility.rs`)
+20-38 s later: the brains fall idle at 27-64 s (mean 42). Ours before
+(`fidelity` 868d9ed): 116 s, 22 of 24 full length, and in the 23 strokes of a
+probed fight (`fightprobe`, warmup 0, first 60 s) the Razor never rose more
+than 0.15 m. So the Razor's surplus was the time it got to ram, not its
+strikes: per second before the flip live lands about 0.17 counted hits, ours
+0.12 per second of fight.
+
+**At rest FlapJack's nose was 4° up, its wedge stood on edge.** Live the
+resting FlapJack's chassis has its centre of mass at y -1.865 with its
+forward axis 0.016 below horizontal (`flipfight-...__live__001`, 458
+samples; the assembly capture's rest -1.866 / -0.011); ours sat at -1.835,
+0.061 nose up. Its flipper's floor contacts live lie at the two corners of
+the wedge's leading edge, x -0.30 and +0.24 in the chassis frame (the
+wedge's 0.54 m width across the robot), 0.33 m below the chassis' centre of
+mass and 1.40 m ahead; ours touched at one point on the centre line 0.50 m
+below. The flipper body's local inertia settles it (live `+0x19c`, the same
+in all three `flipfight` captures): 1.4788 about the vertical, 0.3827 along
+the arm, 1.1849 about the hinge, products 0.0531, -0.0055, 0.1686. Ours,
+with the wedge's object `TM` (a quarter turn about x) applied to its points,
+had the principal moments 1.434 about the hinge and 1.231 about the
+vertical: a plate 0.54 m tall. With the points unrotated it is
+1.1849 / 0.3827 / 1.4788 with the same products to four digits.
+
+**Own geometry ignores the object's rotation (verified live for the Small
+Wedge).** A rigid body that simulates its own object
+(`SIMULATION_GEOMETRY` 2, no proxy) collides with that object's points
+placed by the `TM`'s translation only; a proxy (`SIMULATION_GEOMETRY` 3)
+keeps its `TM`: the angle motors' `axle_collision` is also a quarter turn
+and the wheel bodies' spin moment 0.5569 (live, every wheel) is the rotated
+box's; unrotated it would be 0.5813. `rig::own_geometry_unrotated`,
+`HavokParts::from_scene`; test `mass_live::flapjacks_flipper_lies_flat`.
+Stock objects it turns: the Small Wedge, `flipper1.gmf`'s flipper (both
+`emergency` and `opponentgear`; EMERGENCY's) and `spinmotor1.gmf`'s `axle`
+and `motor` (no shipped AI robot uses it); the others have rotations below
+1e-6. The drawn wedge is unchanged (the scene nodes match live, §8); whether
+the original draws it flat was not captured. Which code drops the rotation
+was not located (the GMF reader's `*SIMULATION_GEOMETRY` table at `0x7077ac`
+was the start point).
+
+With it ours rests as live (-1.864, -0.018; the tip contacts at x -0.30 and
++0.24, 0.33 m down), and FlapJack's strokes lift the Razor: in the same
+probed fight three of the first four strokes raise it 0.7-1.2 m and the
+fourth puts it on its back at 17.5 s.
+
+**Validation.** Before = `fidelity` 868d9ed built from a clean tree (it
+reproduces §12o's after column to the digit), after = this branch.
+`FIDTRACE_WARMUP` ensembles as §12n (counted = `>= 10` on the other robot,
+robot hits only, mean (total), mean length, full-length runs):
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Razor v FlapJack, 24: Razor / FlapJack | 3.0 / 0.1 (9 fights, sd 2.2), match over at 27-64 s, 0/8 full | 13.8 (173) / 0.8, 116 s, 22/24 | 4.4 (133) / 0.5, 69 s, 3/24 |
+| ... Razor on its back | 8 of 8, 5-35 s (median 17) | 0 of 4 probed | 24 of 24, 4-40 s (median 10) |
+| box Scout v ALARM, 24: ALARM / Scout | 38.5 / 4.8 | 18.3 (80) / 3.8, 75 s, 6/24 | the same to the digit |
+| Compressor Sentinel v Wide Load, 12: Wide Load / Sentinel | 76 (283) / 5.3 | 52.8 (306) / 2.4, 92 s, 7/12 | the same |
+| Octagon Scout v ALARM, 24: ALARM / Scout | 24 (944) / 4 | 6.3 (40) / 1.6, 67 s, 4/24 | the same |
+
+AI suite (ten pairings, warmup 0): 10/10 deal damage before and after;
+Razor v FlapJack (box 16/1 → 4/0, FlapJack wins at 108 s; Parking Lot 18/1
+→ 2/1) changes as above, and Grog v Boxer (box and hill) and Tornado v
+Ripblade change by float noise (their own-geometry objects carry rotations of
+1e-7, now dropped); the other five are the same to the hit.
+
+**Still open.** After the flip ours ends later: 11 of 24 runs are over 20-38
+s after it, as live (20-38 s), but in the rest the Razor keeps being shoved
+(median 3.1 m in the 10 s after the flip, live 1.4 m) and FlapJack keeps
+firing at it (strokes at 25-35 s in the probed fight; probably the `Flipper`
+brain's `CanDriveUpsideDown`, which allows firing at an upside-down robot
+once it has moved 3 m within 10 s), so the immobility count restarts: 3 run
+the full 120 s, 10 others end 45-110 s after the flip. Ours also flips the
+Razor at the first meeting more often (9 of 24 within 5.4 s, live 2 of 8
+within 6.5 s; the two time bases may differ by about a second). Whether the original draws the Small Wedge flat;
+the code behind the own-geometry rule.

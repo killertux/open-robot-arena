@@ -379,7 +379,11 @@ impl HavokParts {
     /// Read a component's `.gmf` scene.
     pub fn from_scene(scene: &ra2fmt::gmi::GmiScene) -> HavokParts {
         type Geometry = (Vec<Vec3>, Vec<[u32; 3]>);
-        let objects: BTreeMap<String, Geometry> = scene
+        // Each object's points placed by its `TM`, and by the `TM`'s
+        // translation alone: a body that simulates its own geometry as
+        // `SIMULATION_GEOMETRY` 2 collides with the second (see
+        // [`own_geometry_unrotated`]).
+        let objects: BTreeMap<String, (Geometry, Vec<Vec3>)> = scene
             .objects
             .iter()
             .filter_map(|o| {
@@ -389,27 +393,37 @@ impl HavokParts {
                 }
                 let m = ra2_render::object_transform(o);
                 let n = mesh.points.len() as u32;
+                let at = m.w_axis.truncate();
                 Some((
                     o.name.to_ascii_lowercase(),
                     (
-                        mesh.points
-                            .iter()
-                            .map(|p| m.transform_point3(Vec3::from(*p)))
-                            .collect(),
-                        mesh.faces
-                            .iter()
-                            .map(|f| f.v)
-                            .filter(|v| v.iter().all(|&i| i < n))
-                            .collect(),
+                        (
+                            mesh.points
+                                .iter()
+                                .map(|p| m.transform_point3(Vec3::from(*p)))
+                                .collect(),
+                            mesh.faces
+                                .iter()
+                                .map(|f| f.v)
+                                .filter(|v| v.iter().all(|&i| i < n))
+                                .collect(),
+                        ),
+                        mesh.points.iter().map(|p| Vec3::from(*p) + at).collect(),
                     ),
                 ))
             })
             .collect();
         let geometry_of = |rb: &ra2fmt::gmi::RigidBody| -> Geometry {
-            objects
-                .get(&rb.collision_object().to_ascii_lowercase())
-                .cloned()
-                .unwrap_or_default()
+            let Some(((placed, faces), unrotated)) =
+                objects.get(&rb.collision_object().to_ascii_lowercase())
+            else {
+                return Geometry::default();
+            };
+            if own_geometry_unrotated(rb) {
+                (unrotated.clone(), faces.clone())
+            } else {
+                (placed.clone(), faces.clone())
+            }
         };
         // A motor's rotor (or a piston's rod): `axle`, `bmotor_axle`, `shaft`,
         // `slider` in every stock motor and piston `.gmf`.
@@ -490,6 +504,28 @@ fn smart_zone_mass(root: &std::path::Path, file: &str) -> HavokParts {
 
 /// A weapon's material float when its definition declares none (`0x502e5f`).
 pub const WEAPON_MATERIAL_SCALE: f32 = 0.8;
+
+/// Whether a rigid body's collision geometry ignores its object's rotation:
+/// one that simulates its own geometry (`SIMULATION_GEOMETRY` 2, no proxy).
+///
+/// Live (docs/29 §12p), FlapJack's Small Wedge (`small_wedge1.gmf`, object
+/// `TM` a quarter turn about x, translation 0) collides as its points with no
+/// rotation: its flipper body's local inertia is `1.4788 / 0.3827 / 1.1849`
+/// with products `0.0531, -0.0055, 0.1686` (`flipfight-razor-flapjack-box__live__000..002`,
+/// `+0x19c`), which the unrotated wedge reproduces to four digits (the rotated
+/// one gives principal moments 1.434 about the hinge and 1.231 about the
+/// vertical, live 1.219 and 1.481), and its floor contacts span the wedge's
+/// 0.54 m width across the robot, 0.33 m below the chassis' centre of mass
+/// (ours had stood the wedge on edge, 0.50 m below). A proxy's geometry
+/// (`SIMULATION_GEOMETRY` 3: the angle motors' `axle_collision`, also a
+/// quarter turn) keeps its rotation: the wheel bodies' spin moment 0.5569 is
+/// the rotated box's. The translation is kept: the stock own-geometry objects
+/// with a rotation (the Small Wedge, `flipper1.gmf`'s flipper) have none, and
+/// those with a translation (the steering unit's `base_collision`) no
+/// rotation, so which the original does with both is not exercised.
+pub fn own_geometry_unrotated(rb: &ra2fmt::gmi::RigidBody) -> bool {
+    rb.simulation_geometry == 2 && rb.collision_object().eq_ignore_ascii_case(&rb.name)
+}
 
 /// Whether Havok collides a rigid body with this `SIMULATION_GEOMETRY` as a
 /// triangle mesh (shape class `GEOMETRIC`, 4) rather than as a convex hull
