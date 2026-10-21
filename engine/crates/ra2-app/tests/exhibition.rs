@@ -378,6 +378,75 @@ fn the_time_dropdown_opens_its_list_and_a_row_sets_the_match_length() {
     assert_eq!(shell.time_text(), Some("4"));
 }
 
+/// The weight-class filter (`FUN_004733f0`'s `weight class optiongroup`):
+/// choosing a class empties every slot whose robot is of another class
+/// (`FUN_0047b320`) and the pickers then dim and refuse the robots outside it
+/// (`FUN_004ea040`: alpha 0.3, not selectable). `All Classes` allows everything.
+#[test]
+fn the_weight_class_filter_empties_slots_and_dims_the_pickers_robots() {
+    let Some(game) = game_dir() else { return };
+    let _guard = ra2script::lock();
+    let options = options(&game);
+    let (mut shell, _) = play_mode::select_setup(&options).expect("the click flow");
+    let class_of = |shell: &ra2_shell::Shell, slot: usize| -> Option<i32> {
+        let pick = shell.slot_pick(slot)?;
+        let side = if slot < 2 {
+            ra2ui::teams::Side::Player
+        } else {
+            ra2ui::teams::Side::Computer
+        };
+        let path = ra2ui::teams::bot_path(&game, side, pick.team, pick.bot);
+        ra2ui::teams::bot_info(&path).map(|(_, class)| class)
+    };
+    let (own, other) = (class_of(&shell, 0), class_of(&shell, 2));
+    assert!(own.is_some() && other.is_some(), "both slots hold a robot");
+    // Choose the class of the player's robot.
+    let (name, class) = match own.unwrap() {
+        0 => ("lightweight cb", 0),
+        1 => ("mediumweight cb", 1),
+        _ => ("heavyweight cb", 2),
+    };
+    shell.click_named("gametype button").expect("Game Settings");
+    shell.click_named(name).expect("the class");
+    assert_eq!(shell.weight_choice(), Some(class as u8));
+    assert!(shell.slot_pick(0).is_some(), "a robot of the class stays");
+    assert_eq!(
+        shell.slot_pick(2).is_some(),
+        other == Some(class),
+        "a robot of another class is ejected"
+    );
+    // The choice survives a tab trip.
+    shell.click_named("arena button").expect("Arena");
+    shell.click_named("gametype button").expect("Game Settings");
+    assert_eq!(shell.weight_choice(), Some(class as u8));
+    // The picker dims what the filter refuses.
+    shell.click_named("robots button").expect("Robots");
+    shell.click_region("player1 group").expect("the picker");
+    let dimmed = |shell: &ra2_shell::Shell| {
+        shell
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .filter(|p| {
+                p.widget.kind == ra2fmt::gib::WidgetKind::Image
+                    && p.widget.field("_ForeColor").map(|f| f.text()) == Some("1 1 1 0.3")
+            })
+            .count()
+    };
+    let allowed_somewhere = dimmed(&shell);
+    shell.click_named("cancel button").unwrap();
+    shell.click_named("gametype button").unwrap();
+    shell.click_named("all classes cb").unwrap();
+    assert_eq!(shell.weight_choice(), None);
+    shell.click_named("robots button").unwrap();
+    shell.click_region("player1 group").expect("the picker");
+    let baseline = dimmed(&shell);
+    assert!(
+        allowed_somewhere > baseline,
+        "the filter dims robots ({allowed_somewhere} images against {baseline} without it)"
+    );
+}
+
 /// The four `playerN group` slots all open the shipped pickers, and a BATTLE
 /// ROYAL carries all four robots on four distinct spawn points. The results
 /// screen lists the same four names in its four slots, and slot 1 is the driven

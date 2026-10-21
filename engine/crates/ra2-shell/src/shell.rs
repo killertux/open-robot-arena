@@ -44,6 +44,16 @@ struct Page {
     /// The match-time dropdown's value the player chose: a reloaded
     /// `gametype.gib` starts at the constructor's `3` and takes this back.
     time_text: Option<String>,
+    /// The weight filter's selection, re-applied when the tab reloads.
+    weight_choice: Option<u8>,
+}
+
+impl Page {
+    fn has_weight_group(&self) -> bool {
+        self.gib
+            .walk()
+            .any(|w| w.kind == WidgetKind::OptionGroup && w.name() == "weight class optiongroup")
+    }
 }
 
 /// One robot the exhibition picker chose: the team's record slot and the
@@ -72,6 +82,12 @@ struct Popup {
     robot: Option<usize>,
     /// The dropdown list's scroll offset.
     scroll: usize,
+    /// The weight class the setup screen allows (`FUN_004ea040` reads the
+    /// filter set it was opened with).
+    weight: Option<u8>,
+    /// Per robot ordinal of the selected team: outside the weight filter, so
+    /// dimmed and not selectable (`FUN_005ff960(0, slot, 0)`).
+    disabled: Vec<bool>,
 }
 
 enum Screen {
@@ -155,6 +171,10 @@ pub struct Shell {
     game_type_choice: Option<String>,
     /// The arena's `hazard checkbox`, when the loaded arena script has one.
     hazard_choice: Option<bool>,
+    /// The weight class the Game Settings filter allows (`lightweight cb` 0,
+    /// `mediumweight cb` 1, `heavyweight cb` 2); `None` is `all classes cb`
+    /// (the constructor's `ALLWEIGHT`, `FUN_004733f0`).
+    weight_choice: Option<u8>,
     /// The match-time dropdown's own visible text (`5 minutes`), and the
     /// seconds it states. `Some(None)` is a "No limit" value; `None` means the
     /// tab was never loaded.
@@ -288,6 +308,7 @@ impl Shell {
             arena_rows: None,
             arena_scroll: None,
             game_type_choice: None,
+            weight_choice: None,
             hazard_choice: None,
             time_text: None,
             time_seconds: None,
@@ -744,6 +765,11 @@ impl Shell {
 
     /// The game type the game-type tab selected, in the original's spelling
     /// (`DEATHMATCH`), or `None` when that tab has never been loaded.
+    pub fn weight_choice(&self) -> Option<u8> {
+        self.weight_choice
+    }
+
+    /// The setup screen's game type, in the original's spelling.
     pub fn game_type_choice(&self) -> Option<&str> {
         self.game_type_choice.as_deref()
     }
@@ -1611,6 +1637,7 @@ impl Shell {
         let key = "teamhq/event_bracket.gib";
         let page = Page {
             time_text: None,
+            weight_choice: None,
             key: key.to_string(),
             gib,
             content: Vec::new(),
@@ -1909,6 +1936,8 @@ impl Shell {
             team,
             robot: None,
             scroll: 0,
+            weight: self.weight_choice,
+            disabled: Vec::new(),
         };
         refresh_picker(&mut popup, &self.ui, &self.game, &mut self.previews)?;
         self.popup = Some(popup);
@@ -2036,7 +2065,7 @@ impl Shell {
                     .get(popup.team)
                     .map(|roster| roster.robots.len())
                     .unwrap_or(0);
-                if column < robots {
+                if column < robots && !popup.disabled.get(column).copied().unwrap_or(false) {
                     popup.robot = Some(column);
                     refresh_picker(&mut popup, &self.ui, &self.game, &mut self.previews)?;
                 }
@@ -2283,6 +2312,22 @@ impl Shell {
                 }
             }
         }
+        let mut weight_changed = false;
+        if let Some(group) = ra2ui::workshop::find(root, "weight class optiongroup")
+            .filter(|g| g.kind == ra2fmt::gib::WidgetKind::OptionGroup)
+        {
+            let weight = match ra2ui::input::field_of(group, "Selection") {
+                Some("lightweight cb") => Some(Some(0)),
+                Some("mediumweight cb") => Some(Some(1)),
+                Some("heavyweight cb") => Some(Some(2)),
+                Some("all classes cb") => Some(None),
+                _ => None,
+            };
+            if let Some(weight) = weight {
+                weight_changed = weight != self.weight_choice;
+                self.weight_choice = weight;
+            }
+        }
         if let Some(hazard) = ra2ui::workshop::find(root, "hazard checkbox") {
             if let Some(checked) = ra2ui::input::field_of(hazard, "Checked") {
                 self.hazard_choice = Some(checked == "true");
@@ -2311,6 +2356,40 @@ impl Shell {
                 page.time_text = Some(text);
             }
         }
+        if let Screen::Page(page) = &mut self.screen {
+            if page.has_weight_group() {
+                page.weight_choice = self.weight_choice;
+            }
+        }
+        if weight_changed {
+            self.eject_mismatched_robots();
+        }
+    }
+
+    /// `FUN_0047b320`, run when the weight class changes: every slot whose
+    /// robot is not of the chosen class is emptied (`FUN_0047b4b0(slot, -1, 0,
+    /// 4)`), the picks of the other classes being no longer allowed.
+    fn eject_mismatched_robots(&mut self) {
+        let Some(allowed) = self.weight_choice else {
+            return;
+        };
+        for slot in 0..4 {
+            let (Some(pick), Some(side)) = (self.slot_picks[slot], self.slot_sides[slot]) else {
+                continue;
+            };
+            let path = teams::bot_path(&self.game, side, pick.team, pick.bot);
+            let class = teams::bot_info(&path).map(|(_, class)| class);
+            if class.is_some_and(|class| class != i32::from(allowed)) {
+                self.slot_picks[slot] = None;
+                self.slot_sides[slot] = None;
+                match slot {
+                    0 => self.player_pick = None,
+                    2 => self.opponent_pick = None,
+                    _ => {}
+                }
+            }
+        }
+        let _ = self.refresh_robot_slots();
     }
 
     /// Click a named widget that is a *region* rather than a control (the
@@ -2523,6 +2602,7 @@ fn load_screen(ui: &Path, key: &str) -> Result<Screen, String> {
     ra2ui::inline_proxies_in(&mut gib, ui);
     Ok(Screen::Page(Page {
         time_text: None,
+        weight_choice: None,
         key,
         gib,
         content: Vec::new(),
@@ -2753,8 +2833,8 @@ fn load_into(
         return Err(format!("{} has no group called {slot:?}", page.key));
     }
     if key.eq_ignore_ascii_case("exhibition/gametype.gib") {
-        let time = page.time_text.clone();
-        default_game_settings(&mut page.gib, time.as_deref());
+        let (time, weight) = (page.time_text.clone(), page.weight_choice);
+        default_game_settings(&mut page.gib, time.as_deref(), weight);
     }
     if key.eq_ignore_ascii_case("exhibition/exhib_robots.gib") {
         show_slots_for(&mut page.gib, game_type);
@@ -2779,7 +2859,15 @@ fn load_into(
 /// minutes. The constructor fills the time dropdown with `No limit`, then
 /// `1 2 3 4 5 10 15 20`, and selects `3`; the file's `5 minutes` is an editor
 /// placeholder. The dropdown shows the bare number.
-fn default_game_settings(gib: &mut Gib, chosen: Option<&str>) {
+fn default_game_settings(gib: &mut Gib, chosen: Option<&str>, weight: Option<u8>) {
+    if let Some(class) = weight {
+        let member = ["lightweight cb", "mediumweight cb", "heavyweight cb"][usize::from(class.min(2))];
+        for block in gib.blocks.iter_mut() {
+            if let Block::Widget(root) = block {
+                ra2ui::input::select_option(root, "weight class optiongroup", member);
+            }
+        }
+    }
     for block in gib.blocks.iter_mut() {
         let Block::Widget(root) = block else { continue };
         let Some(dropdown) = workshop::find_mut(root, "time dropdown") else {
@@ -3027,10 +3115,27 @@ fn refresh_picker(
     let team = popup.team.min(popup.rosters.len().saturating_sub(1));
     popup.team = team;
     let roster = popup.rosters[team].clone();
+    // `FUN_004ea040`: a robot whose class the filter does not allow is dimmed
+    // to alpha 0.3 and cannot be selected.
+    popup.disabled = roster
+        .robots
+        .iter()
+        .map(|bot| {
+            let class = teams::bot_info(&teams::bot_path(game, popup.side, team, *bot))
+                .map(|(_, class)| class);
+            popup
+                .weight
+                .is_some_and(|allowed| class.is_some_and(|class| class != i32::from(allowed)))
+        })
+        .collect();
+    let first_allowed = popup.disabled.iter().position(|disabled| !disabled);
     if roster.robots.is_empty() {
         popup.robot = None;
-    } else if popup.robot.is_none_or(|robot| robot >= roster.robots.len()) {
-        popup.robot = Some(0);
+    } else if popup
+        .robot
+        .is_none_or(|robot| robot >= roster.robots.len() || popup.disabled[robot])
+    {
+        popup.robot = first_allowed;
     }
     let robot_name = popup
         .robot
@@ -3081,6 +3186,13 @@ fn refresh_picker(
                 ra2ui::cells::bind_art(&mut cell, "bot preview", &key);
                 previews.insert(key, snapshot);
             }
+            if popup.disabled.get(ordinal).copied().unwrap_or(false) {
+                for name in ["bot preview", "weight icon"] {
+                    if let Some(widget) = workshop::find_mut(&mut cell, name) {
+                        dim(widget);
+                    }
+                }
+            }
             if let Some((_, class)) = teams::bot_info(&path) {
                 let icon = match class {
                     0 => "exhibition/light_icon.bmp",
@@ -3109,6 +3221,16 @@ fn refresh_picker(
         }
     }
     Ok(())
+}
+
+/// Tint a cell's image to alpha 0.3 (`FUN_0061b4b0(1, 1, 1, 0.3)`, `0x3e99999a`).
+fn dim(widget: &mut Widget) {
+    if widget.kind == WidgetKind::Image {
+        ra2ui::input::set_field(widget, "_ForeColor", "1 1 1 0.3");
+    }
+    for child in widget.children.iter_mut() {
+        dim(child);
+    }
 }
 
 fn chain<'a>(roots: &'a [Placement<'a>], path: &[usize]) -> Vec<&'a Placement<'a>> {
