@@ -1822,8 +1822,7 @@ impl Shell {
         self.sync_list_viewports();
         // `Finish Later`: the entered event is committed to the team record.
         if step.hit_widget() == Some("later button") {
-            if let (Some((event, robot)), Some(hook)) = (self.entered_event, &mut self.later_hook)
-            {
+            if let (Some((event, robot)), Some(hook)) = (self.entered_event, &mut self.later_hook) {
                 hook(event, robot);
             }
         }
@@ -2880,7 +2879,8 @@ fn load_into(
 /// placeholder. The dropdown shows the bare number.
 fn default_game_settings(gib: &mut Gib, chosen: Option<&str>, weight: Option<u8>) {
     if let Some(class) = weight {
-        let member = ["lightweight cb", "mediumweight cb", "heavyweight cb"][usize::from(class.min(2))];
+        let member =
+            ["lightweight cb", "mediumweight cb", "heavyweight cb"][usize::from(class.min(2))];
         for block in gib.blocks.iter_mut() {
             if let Block::Widget(root) = block {
                 ra2ui::input::select_option(root, "weight class optiongroup", member);

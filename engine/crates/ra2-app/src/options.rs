@@ -164,7 +164,10 @@ impl Options {
     pub fn register_dropdowns(&self, shell: &mut Shell) {
         shell.set_dropdown_items(
             "resolution dropdown",
-            self.modes.iter().map(|m| format!("{}x{}", m[0], m[1])).collect(),
+            self.modes
+                .iter()
+                .map(|m| format!("{}x{}", m[0], m[1]))
+                .collect(),
         );
         shell.set_dropdown_items(
             "Camera dropdown",

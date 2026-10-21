@@ -70,9 +70,9 @@ impl PrizeScene {
         } else {
             Vec::new()
         };
-        if let Some(image) = ra2_render::resolve_ci(game, logo).and_then(|p| {
-            ra2_render::material::load_image(&p)
-        }) {
+        if let Some(image) =
+            ra2_render::resolve_ci(game, logo).and_then(|p| ra2_render::material::load_image(&p))
+        {
             set_banner(&mut arena, game, image);
         }
         let mut camera = SceneCamera::new(SceneCameraKind::Static);

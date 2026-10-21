@@ -2476,6 +2476,9 @@ mod tests {
             "ended at {} s, not at the limit",
             report.duration
         );
-        assert!(!session.end_for_judges(), "a finished match is not ended again");
+        assert!(
+            !session.end_for_judges(),
+            "a finished match is not ended again"
+        );
     }
 }

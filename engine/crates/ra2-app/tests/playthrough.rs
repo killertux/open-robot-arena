@@ -732,7 +732,10 @@ fn the_options_dropdowns_list_their_rows_and_a_row_sets_the_value() {
     shell
         .click(camera.x + camera.w - 8.0, camera.y + 9.0)
         .unwrap();
-    assert_eq!(rows(&shell, "Camera dropdown"), ["watch", "static", "orbit"]);
+    assert_eq!(
+        rows(&shell, "Camera dropdown"),
+        ["watch", "static", "orbit"]
+    );
     shell
         .click(camera.x + 20.0, camera.y + camera.h + 2.0 * 18.0 + 9.0)
         .unwrap();

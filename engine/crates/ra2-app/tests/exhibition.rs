@@ -356,7 +356,9 @@ fn the_time_dropdown_opens_its_list_and_a_row_sets_the_match_length() {
     shell.click(field.x + field.w - 8.0, field.y + 9.0).unwrap();
     assert_eq!(rows_of(&shell), ["No limit", "1", "2", "3", "4"]);
     // A click away closes it and changes nothing.
-    shell.click(field.x + field.w + 200.0, field.y + 9.0).unwrap();
+    shell
+        .click(field.x + field.w + 200.0, field.y + 9.0)
+        .unwrap();
     assert!(rows_of(&shell).is_empty());
     assert_eq!(shell.time_choice(), Some(Some(180.0)));
     // Open again and pick `No limit`, then `4`.

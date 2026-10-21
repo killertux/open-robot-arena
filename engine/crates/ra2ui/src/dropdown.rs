@@ -19,7 +19,7 @@
 //! * [`close`] puts all of that back and hides the list;
 //! * [`pick`] is [`close`] plus the chosen text in the field.
 
-use ra2fmt::gib::{AttachmentKind, Gib, Block, Widget, WidgetKind};
+use ra2fmt::gib::{AttachmentKind, Block, Gib, Widget, WidgetKind};
 
 use crate::input::{field_of, scroll_rows, select_cell, set_field, text_rows};
 use crate::{Placement, ScrollBar};
@@ -75,7 +75,9 @@ pub fn text(gib: &Gib, name: &str) -> Option<String> {
     let dropdown = gib
         .walk()
         .find(|w| w.kind == WidgetKind::DropDown && w.name() == name)?;
-    first_text(dropdown).and_then(|t| t.field("_Text")).map(|f| f.text().to_string())
+    first_text(dropdown)
+        .and_then(|t| t.field("_Text"))
+        .map(|f| f.text().to_string())
 }
 
 fn first_text(widget: &Widget) -> Option<&Widget> {
@@ -203,10 +205,9 @@ pub fn click_part(
     y: f32,
 ) -> Option<(String, Part)> {
     // The open dropdown, if any.
-    let open = placed
-        .iter()
-        .flat_map(|p| p.walk())
-        .find(|p| p.widget.kind == WidgetKind::DropDown && field_of(p.widget, "_Open") == Some("true"));
+    let open = placed.iter().flat_map(|p| p.walk()).find(|p| {
+        p.widget.kind == WidgetKind::DropDown && field_of(p.widget, "_Open") == Some("true")
+    });
     if let Some(open) = open {
         let name = open.widget.name().to_string();
         let list = open
@@ -222,8 +223,8 @@ pub fn click_part(
             if let Some(target) = scrollbar_target(list, x, y, top, count.saturating_sub(visible)) {
                 return Some((name, Part::Scroll(target)));
             }
-            let on_list = list.frame.contains_point(x, y)
-                && list.clip.is_none_or(|c| c.contains_point(x, y));
+            let on_list =
+                list.frame.contains_point(x, y) && list.clip.is_none_or(|c| c.contains_point(x, y));
             if on_list {
                 let height = crate::Grid::from_widget(list.widget)
                     .map(|g| g.row_height)
