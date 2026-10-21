@@ -113,6 +113,8 @@ pub const ACTION_NAMES: &[&str] = &[
     "Right",
     "Spin Clockwise",
     "Spin Counter-clockwise",
+    // `Button<Flamethrower>` (`FUN_00504080`); no stock bot has a Flamethrower.
+    "Fire burst",
 ];
 
 /// One wiring action.
@@ -133,6 +135,8 @@ pub enum Action {
     Retract,
     RepelOnOff,
     AttractOnOff,
+    /// `Fire burst`: a Flamethrower's button, a tenth of a second of flame.
+    FireBurst,
 }
 
 impl Action {
@@ -154,6 +158,7 @@ impl Action {
             Action::Retract => "Retract",
             Action::RepelOnOff => "Repel On/Off",
             Action::AttractOnOff => "Attract On/Off",
+            Action::FireBurst => "Fire burst",
         }
     }
 
@@ -181,6 +186,7 @@ impl Action {
                     Action::Right,
                     Action::SpinClockwise,
                     Action::SpinCounterClockwise,
+                    Action::FireBurst,
                 ][i]
             })
             .ok_or_else(|| WiringError::UnknownAction {
@@ -553,6 +559,10 @@ impl ControlBoard {
             (ControlKind::Analog | ControlKind::Button | ControlKind::Switch, "Magnet") => {
                 &[RepelOnOff, AttractOnOff][..]
             }
+            // `Analog<Flamethrower>` takes `Fire` (the jet while the control is
+            // non-zero), `Button<Flamethrower>` takes `Fire burst`.
+            (ControlKind::Analog, "Flamethrower") => &[Fire][..],
+            (ControlKind::Button, "Flamethrower") => &[FireBurst][..],
             _ => &[][..],
         }
     }

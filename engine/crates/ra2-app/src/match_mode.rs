@@ -1509,6 +1509,24 @@ pub fn run_camera_shots(options: Options, shots: &[String]) -> Result<(), String
     Ok(())
 }
 
+/// One frame of the session with its HUD over the 3D pass, written to `path`
+/// (what `--match` writes; the examples use it for scripted shots).
+pub fn write_session_frame(
+    session: &mut Session,
+    renderer: &Renderer,
+    ui: &UiRenderer,
+    size: [u32; 2],
+    path: &Path,
+) -> Result<(), String> {
+    let target = Target::new(renderer.device(), size[0], size[1]);
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "no file name".to_string())?;
+    write_frame(session, renderer, ui, &target, size, dir, name)
+}
+
 pub(crate) fn write_frame(
     session: &mut Session,
     renderer: &Renderer,

@@ -75,6 +75,16 @@ pub enum SoundCue {
     CrowdLoopShout { path: &'static str },
     /// The crowd's looped shout fades out over `ms`.
     CrowdFadeShout { ms: f32 },
+    /// A Flamethrower's `firesound` handle (`0x504a70`/`0x504790`): `Loop` when
+    /// the jet comes on while the power scales are up, `SetVolume` with each
+    /// call, `Stop` when it goes out. From rest the original never loops it
+    /// (docs/37 section 6), so these cues are rare.
+    Flame {
+        key: u64,
+        call: ra2sim::flame::Sound,
+        path: String,
+        position: [f32; 3],
+    },
     /// A running motor's loop changes pitch (`FUN_004f5b50`).
     MotorPitch { key: u64, speed: f32 },
     /// A motor started or stopped turning.
@@ -399,6 +409,23 @@ impl MatchSounds {
             }
         }
 
+        // Flamethrowers: the calls the component made on its `firesound` handle.
+        for (ri, robot) in matched.duel.robots.iter_mut().enumerate() {
+            let calls = robot.take_flame_sounds();
+            let p = robot.position(matched.duel.physics.as_ref());
+            for (component, call) in calls {
+                let Some(path) = robot.rig.components[component].sounds.fire.clone() else {
+                    continue;
+                };
+                cues.push(SoundCue::Flame {
+                    key: flame_key(ri, component),
+                    call,
+                    path,
+                    position: [p.x, p.y, p.z],
+                });
+            }
+        }
+
         // Motor loops: one handle per motor component, looping while the
         // motor's output command is non-zero (`FUN_004f59f0`) and silent when
         // it returns to zero or the match is over.
@@ -512,6 +539,11 @@ pub fn crowd_shot_key(n: u64) -> u64 {
 }
 
 /// The audio voice id of a robot's motor loop, clear of the script handles.
+/// The script-sound id of a Flamethrower's `firesound` handle.
+pub fn flame_key(robot: usize, component: usize) -> u64 {
+    (1 << 49) | ((robot as u64) << 16) | component as u64
+}
+
 pub fn motor_key(robot: usize, part: usize) -> u64 {
     (1 << 48) | ((robot as u64) << 16) | part as u64
 }

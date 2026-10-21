@@ -11,6 +11,7 @@ pub mod controls;
 pub mod drive;
 pub mod duel;
 pub mod energy;
+pub mod flame;
 pub mod havok17;
 pub mod hazards;
 pub mod immobility;

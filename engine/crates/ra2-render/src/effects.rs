@@ -287,6 +287,21 @@ impl Config {
     /// `FUN_004b5760` (`plus.AddParticleEmitter(location, velocity, variance)`):
     /// the flame hazard. The colour runs from blue to white over the second
     /// half of a life, so the orange texture comes up only as it fades in.
+    /// The spread of a Flamethrower's jet (the configuration `FUN_00504080`
+    /// builds; docs/37 section 6).
+    pub const JET_SPREAD: Vec3 = Vec3::new(0.5, 0.5, 0.5);
+
+    /// A Flamethrower's jet (`FUN_00504080`'s configuration, live emitter dump): the
+    /// hazard flame's with the colour and size ramps running over the whole life
+    /// (`fade_start` 0, the constructor's `local_154`), so the blue is gone by
+    /// the middle of the jet.
+    pub fn jet(velocity: Vec3) -> Config {
+        Config {
+            fade_start: 0.0,
+            ..Config::flame(velocity, Config::JET_SPREAD)
+        }
+    }
+
     pub fn flame(velocity: Vec3, variance: Vec3) -> Config {
         Config {
             rate: 80.0,
@@ -332,6 +347,9 @@ pub struct Emitter {
     emitting: bool,
     /// Seconds of emission left (`f32::INFINITY` for a standing emitter).
     emit_left: f32,
+    /// A Flamethrower's jet: each particle's step is cast against the world
+    /// (`0x5bdc00`), a hit scatters it and is reported (`0x504ca0`).
+    probe: bool,
 }
 
 impl Emitter {
@@ -343,6 +361,7 @@ impl Emitter {
             accumulator: 0.0,
             emitting,
             emit_left,
+            probe: false,
         }
     }
 
@@ -395,7 +414,15 @@ impl Emitter {
         n
     }
 
-    fn step(&mut self, dt: f32, rng: &mut Rng, textures: usize, collider: &Collider) {
+    fn step(
+        &mut self,
+        key: u64,
+        dt: f32,
+        rng: &mut Rng,
+        textures: usize,
+        collider: &Collider,
+        probe: &mut dyn FnMut(u64, Vec3, Vec3) -> Option<(Vec3, Vec3)>,
+    ) {
         if self.emitting {
             if self.emit_left.is_finite() {
                 self.emit_left -= dt;
@@ -420,6 +447,35 @@ impl Emitter {
             let from = p.pos;
             p.pos += p.vel * dt + 0.5 * c.gravity * dt * dt;
             p.vel += c.gravity * dt;
+            if self.probe {
+                // The nearest of the arena and whatever the caller's world has.
+                let mut hit = collider.hit(from, p.pos);
+                if let Some(other) = probe(key, from, p.pos) {
+                    if hit.is_none_or(|(h, _)| (other.0 - from).length() < (h - from).length()) {
+                        hit = Some(other);
+                    }
+                }
+                if let Some((point, normal)) = hit {
+                    // `0x5bdc00` without the reflect flag: the particle leaves the
+                    // surface in a random direction at its own speed (times the
+                    // elasticity, 1).
+                    let speed = p.vel.length() * c.elasticity;
+                    let mut dir = Vec3::new(
+                        rng.unit() * 2.0 - 1.0,
+                        rng.unit() * 2.0 - 1.0,
+                        rng.unit() * 2.0 - 1.0,
+                    )
+                    .normalize_or_zero();
+                    if dir == Vec3::ZERO {
+                        dir = normal;
+                    }
+                    if dir.dot(normal) < 0.0 {
+                        dir = -dir;
+                    }
+                    p.vel = dir * speed;
+                    p.pos = point + normal * 0.002;
+                }
+            }
             if c.collide && c.reflect {
                 if let Some((hit, normal)) = collider.hit(from, p.pos) {
                     let reflected = p.vel - 2.0 * p.vel.dot(normal) * normal;
@@ -666,6 +722,25 @@ impl Effects {
         self.standing_emitter(key, || Config::flame(velocity, variance), point, on);
     }
 
+    /// A Flamethrower's jet (`0x5048e0` places the emitter at the nozzle and
+    /// gives it the jet's velocity every step): `key` names the component,
+    /// `point` is the nozzle, `velocity` the jet's world velocity, `on` whether
+    /// the emitter is emitting. [`Effects::step_with`] casts its particles.
+    pub fn jet(&mut self, key: u64, point: Vec3, velocity: Vec3, on: bool) {
+        // Not gated on `GraphicEffects`: the flame is the weapon's damage.
+        if let Some((_, e)) = self.standing.iter_mut().find(|(k, _)| *k == key) {
+            e.pos = point;
+            e.cfg.velocity = velocity;
+            e.emitting = on;
+            return;
+        }
+        if on {
+            let mut e = Emitter::new(Config::jet(velocity), point, true, f32::INFINITY);
+            e.probe = true;
+            self.standing.push((key, e));
+        }
+    }
+
     fn standing_emitter(&mut self, key: u64, cfg: impl FnOnce() -> Config, point: Vec3, on: bool) {
         if !self.enabled {
             return;
@@ -707,6 +782,18 @@ impl Effects {
 
     /// Advance every emitter by `dt` seconds.
     pub fn step(&mut self, dt: f32) {
+        self.step_with(dt, &mut |_, _, _| None);
+    }
+
+    /// [`Effects::step`] with a world for the Flamethrowers' jets to hit:
+    /// `probe(key, from, to)` casts one particle's step and answers the nearest hit as
+    /// `(point, normal)`, the normal facing `from`. A hit scatters the particle,
+    /// like an arena surface does.
+    pub fn step_with(
+        &mut self,
+        dt: f32,
+        probe: &mut dyn FnMut(u64, Vec3, Vec3) -> Option<(Vec3, Vec3)>,
+    ) {
         if dt <= 0.0 {
             return;
         }
@@ -723,12 +810,12 @@ impl Effects {
         let rng = &mut self.rng;
         for e in &mut self.bursts {
             let n = e.cfg.textures.len();
-            e.step(dt, rng, n, &collider);
+            e.step(0, dt, rng, n, &collider, &mut |_, _, _| None);
         }
         self.bursts.retain(|e| !e.finished());
-        for (_, e) in &mut self.standing {
+        for (key, e) in &mut self.standing {
             let n = e.cfg.textures.len();
-            e.step(dt, rng, n, &collider);
+            e.step(*key, dt, rng, n, &collider, probe);
         }
     }
 
@@ -1063,7 +1150,7 @@ mod tests {
         let mut spawned_peak = 0;
         let steps = (seconds / (1.0 / 60.0)) as usize;
         for _ in 0..steps {
-            e.step(1.0 / 60.0, &mut rng, 1, &collider);
+            e.step(0, 1.0 / 60.0, &mut rng, 1, &collider, &mut |_, _, _| None);
             spawned_peak = spawned_peak.max(e.alive());
         }
         (e, spawned_peak)
@@ -1114,13 +1201,13 @@ mod tests {
         e.spawn(1, &mut rng, 1);
         let collider = Collider::default();
         for _ in 0..30 {
-            e.step(1.0 / 60.0, &mut rng, 1, &collider);
+            e.step(0, 1.0 / 60.0, &mut rng, 1, &collider, &mut |_, _, _| None);
         }
         // p = 0.5: still the start colour and size.
         assert_eq!(e.particles[0].color, [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(e.particles[0].size, 1.0);
         for _ in 0..15 {
-            e.step(1.0 / 60.0, &mut rng, 1, &collider);
+            e.step(0, 1.0 / 60.0, &mut rng, 1, &collider, &mut |_, _, _| None);
         }
         // p = 0.75: halfway through the fade.
         let p = &e.particles[0];
@@ -1142,7 +1229,7 @@ mod tests {
         e.spawn(1, &mut rng, 1);
         let collider = Collider::default();
         for _ in 0..60 {
-            e.step(1.0 / 60.0, &mut rng, 1, &collider);
+            e.step(0, 1.0 / 60.0, &mut rng, 1, &collider, &mut |_, _, _| None);
         }
         // y = -0.5 g t^2 (+ the discrete-step excess g dt t / 2).
         let y = e.particles[0].pos.y;
@@ -1354,5 +1441,53 @@ mod tests {
             fx.step(1.0 / 60.0);
         }
         assert_eq!(fx.standing[0].1.alive(), 0, "stopped, then burnt out");
+    }
+
+    /// A Flamethrower's jet (live `flame-open__live__005`, emitter `edump`): 80 a
+    /// second, 0.3 +- 0.075 s, a spread of 0.5, blue to white and 0.2 to 0.4; it
+    /// follows the nozzle, its particles are cast against the caller's world and
+    /// a hit scatters them.
+    #[test]
+    fn a_flamethrower_jet_follows_its_nozzle_and_scatters_on_a_hit() {
+        let mut fx = Effects::new(None);
+        fx.enabled = false; // the jet is the weapon: not gated on GraphicEffects
+        let key = 7;
+        let mut casts = 0;
+        let mut hits = 0;
+        for i in 0..60 {
+            fx.jet(
+                key,
+                Vec3::new(0.0, 0.0, i as f32 * 0.01),
+                Vec3::new(0.0, 0.0, -5.0),
+                true,
+            );
+            // a wall across the jet's path, 0.5 m ahead
+            fx.step_with(1.0 / 60.0, &mut |_, from, to| {
+                casts += 1;
+                let wall = -0.5;
+                (from.z > wall && to.z <= wall).then(|| {
+                    hits += 1;
+                    (Vec3::new(from.x, from.y, wall), Vec3::Z)
+                })
+            });
+        }
+        assert!(casts > 0 && hits > 0, "{casts} casts, {hits} hits");
+        let e = &fx.standing[0].1;
+        // nothing flies through the wall: scattered particles leave it on its near side
+        assert!(
+            e.particles.iter().all(|p| p.pos.z > -0.52),
+            "{:?}",
+            e.particles.iter().map(|p| p.pos.z).fold(0.0, f32::min)
+        );
+        assert_eq!(e.cfg.rate, 80.0);
+        assert_eq!(e.cfg.velocity_spread, Config::JET_SPREAD);
+        assert_eq!(e.cfg.color_start, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(e.cfg.color_end, [1.0; 4]);
+        // switched off, it stops emitting and the particles die out
+        fx.jet(key, Vec3::ZERO, Vec3::ZERO, false);
+        for _ in 0..60 {
+            fx.step(1.0 / 60.0);
+        }
+        assert_eq!(fx.standing[0].1.alive(), 0);
     }
 }

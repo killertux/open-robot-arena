@@ -180,7 +180,7 @@ A **weapon is never bound directly**. All 94 stock weapons are driven by the
 motor that carries them; the corpus' 31 `Fire` rows name a `BurstMotor` (25) or
 `BurstPiston` (6). A wheel is likewise driven through its spin motor, not its own
 row. A component with no template row (a weapon, a battery, a control board, a
-wheel, or an unrecovered `Flamethrower`/`Hovercraft` class) is refused with the
+wheel, or an unrecovered `Hovercraft` class; a `Flamethrower` takes `Fire` on an analog and `Fire burst` on a button, docs/37 section 6) is refused with the
 list of actions it *does* allow.
 
 For `Steering`, the slot is the player's key row, not the axis: the corpus has
