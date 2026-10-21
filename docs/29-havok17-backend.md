@@ -2291,3 +2291,130 @@ zero, which with 1/60 steps gives 16 and 36 (the motor's 36 is live); whether
 the components update per frame (1/30, which would explain the odd counts) was
 not traced. The event filter's surplus (§12m). The `+0x1c` id and the clock's
 time base (above).
+
+### 12o. The arena's hits on the robots, and the wheels' rubber (fx/wall-damage)
+
+New live captures (one fresh session on `:7`, prefix sha256 checked before
+and after; manifest rows in `manifest-additions-2026-10-21-wall-damage.tsv`):
+`arenahits-scout-alarm-box__live__000..001` and
+`arenahits-scout-alarm-octagon__live__000..001` (`frida/ra2_arenahits.js`
+through `capture_fight.py`, four 120 s Scout v ALARM fights: every
+`computeDamage` call with the attacking component, its piercing, concussion
+and material, the whole hit record and both sides' rigid bodies; every
+`0x417330` gate call with its point and normal). Diagnostic: `fidtrace`'s hit
+rows print `att -1`, `by "arena"` for an arena hit.
+
+**Who prices a contact with the arena (recovered, verified live).** The robot
+listener (`0x414d80`, registered per collidable by `FUN_00414cd0`) looks up
+the damageable object of both collidables. When the *other* one is not a
+robot component (type test `0x414e7d` against `0x415000`) it only lets this
+side price it and applies nothing (`0x414fb2`). When this side is not a robot
+component but the other is (`0x414ef3` → `0x414f62`), the struck robot
+component is the victim and `0x417330` is called with the player `-1` and no
+attacking component: a hit with no attacker. The arena manager registers the
+arena under one such object (`FUN_00415140`, called from the match set-up at
+`0x41597a` with the arena, `+0x48`): a `0xc`-byte wrapper (vtable `0x6a581c`)
+holding the arena's component, whose collidables it loops over. Live that
+component is the arena's `giPython::Arena_callback` (vtable `0x6aa52c`) with
+an **Arenium** material (vtable `0x6a5534`, float 0.5), piercing 0 and
+concussion 1, in the box and the Octagon (4492 priced calls). `AddXtra` props
+get a component of their own with the script's material (`0x403aa0`, from the
+Python binding `0x4b9e80`; the KOTH prize `0x46e610` is a metal one); not
+exercised by the stock arenas.
+
+**Which bodies.** All colliding bodies of the arena `.gmf`, fixed and movable:
+the box's four registrations (§12l) are `arena_collision`, `spikes1`,
+`spikes2` and `floorsaw`, the Compressor's nine its `Collision Box`, four
+spike zones and four smash arms. The floor is one of them (the box's floor is
+`arena_collision`): live most of the priced arena contacts have normals
+(0, ±1, 0), and floor hits of 11-17 hp land on the Scout's chassis when it
+comes down. The Octagon's start blocks (200 kg) and hazards price with their
+own mass.
+
+**The formula (recovered, verified live to 1e-7).** It is the robot one,
+`(piercing · rec0 · 10 + concussion · M) · scale`, with the arena's
+component striking: `damage = 0.5 · M`. In `M` (`FUN_0045a5a0`) the fixed
+body's mass (`+0x190`) is 0, which counts as an inverse mass of `0.08`, and its
+world inverse inertia (`+0x10c`) is zero, so `M = 0.5 · rec0 / (1/m_robot
+(at least 0.01) + 0.08 + (r × n)·I⁻¹(r × n))`: a fixed arena body weighs
+12.5 kg to the formula, not infinitely much. Recomputing every priced arena
+hit of the four captures from its record and the robot body's live mass,
+centre and inertia gives the gate's amount to a relative 1.2e-7 (726 non-zero
+hits). The hit then goes the robot way: the `>= 10` gate, the victim
+component's own damage (`FUN_00489620`), the crowd's excitement on the raw
+amount, no score and no "last damage done" (`FUN_004175b0` only fills that
+for a player `>= 0`). Arenium does nothing to Rubber, and every wheel is
+Rubber (below), so wheels take nothing from the floor.
+
+**The event filter.** Each arena collidable has one 1 s, threshold-0 entry
+(§12l), tried like a robot component's: a robot-arena point gets through on
+whichever side's list has a due entry. Ours merges the fixed bodies into one
+static collider; the gate tells them apart by the contact point (nearest
+triangle of each fixed body), and each movable arena body is one entry.
+
+**A wheel is Rubber (recovered, verified live).** The `Wheel` constructor
+(`0x507a65`, vtable `0x6ab8cc`) replaces the component's Metal with a new
+`Rubber` (`0x507aea` → `FUN_004899e0`, float 0); live all 4012 calls of a
+`Wheel` (ALARM's mini wheels and the Scout's) price with Rubber 0. Ours read
+the material from the definition only and gave wheels Metal 0.1: they priced
+the other robot at 0.1 (82 hits per box fight, 166 in the Compressor, none
+reaching 10) and took the floor's Arenium as damage. `rig` now gives a wheel
+without a `material` line Rubber 0.
+
+**Implementation.** `combat::ArenaBodies` (built by `duel::arena_bodies`:
+the static body with one triangle set per fixed `.gmf` body, every `.gmf`
+prop, `AddXtra` props with their own material), `EventGate::admit_with`,
+`combat::resolve_with(.., arena)` → `arena_hit`, `Impact::attacker =
+combat::NO_ATTACKER`, which `Duel::resolve_combat` applies with no attacker,
+so `Match::route_popups` shows the red number (docs/37 §7). Tests
+`duel::tests::a_robot_striking_the_arena_is_hit_by_its_arenium`,
+`duel::tests::an_arena_collidable_lets_one_point_through_a_second`.
+
+**Validation.** Arena hits on each robot per fight, by amount (non-zero only),
+and the applied ones (`>= 10`) per fight with their hitpoints; live = the four
+new captures and the older `fight-*` captures, whose `H` rows have them too:
+
+| | live: < 1, 1-2, 2-5, 5-10 / applied (hp) | ours after: same |
+|---|---|---|
+| box Scout (8 live, 24 ours) | 87, 29, 18, 4.7 / 4.2 (99) | 76, 31, 21, 5.5 / 4.7 (73) |
+| box ALARM | 33, 1.8, 2.9, 2.6 / 0.6 (15) | 26, 6.6, 4.7, 3.8 / 2.2 (47) |
+| Octagon Scout (3 live) | 121, 8.3, 11, 3.0 / 2.0 (31) | 49, 34, 17, 6.8 / 4.6 (65) |
+| Octagon ALARM | 62, 6.7, 5.3, 1.0 / 3.3 (100) | 27, 9.5, 13, 9.8 / 3.3 (47) |
+| Compressor Sentinel (8 live, 12 ours) | 95, 23, 14, 8.8 / 5.9 (178) | 78, 33, 26, 9.4 / 9.2 (180) |
+| Compressor Wide Load | 74, 42, 40, 14 / 4.8 (146) | 73, 49, 42, 11 / 1.8 (28) |
+| box Razor (1 live, 24 ours) | 187, 10, 3, 0 / 0 | 20, 10, 9, 3.4 / 4.0 (128) |
+| box FlapJack | 145, 1, 2, 0 / 1 (24) | 17, 32, 23, 2.6 / 2.0 (57) |
+
+Before = `fidelity` 8cfa6ae built from a clean tree (it reproduces §12n's
+after column to the digit), after = this branch; `FIDTRACE_WARMUP` ensembles
+as §12n (counted = `>= 10` on the other robot, robot hits only, mean (total),
+mean length, full-length runs):
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM, 24: ALARM / Scout | 38.5 / 4.8; 3/6 full | 16.0 (132) / 3.7, 71 s, 3/24 | 18.3 (80) / 3.8, 75 s, 6/24 |
+| Compressor Sentinel v Wide Load, 12: Wide Load / Sentinel | 76 (283) / 5.3 | 53.3 (316) / 2.6, 91 s, 7/12 | 52.8 (306) / 2.4, 92 s, 7/12 |
+| Octagon Scout v ALARM, 24: ALARM / Scout | 24 (944) / 4 | 8.3 (68) / 1.7, 70 s, 6/24 | 6.3 (40) / 1.6, 67 s, 4/24 |
+| box Razor v FlapJack, 24: Razor / FlapJack | 3 (40) / 1 (12) | 14.7 (230) / 0.6, 120 s, 23/24 | 13.8 (173) / 0.8, 116 s, 22/24 |
+
+AI suite (ten pairings, warmup 0): 10/10 deal damage before and after; three
+fights change (box Scout v ALARM 1/6 → 3/18 counted, Sentinel v Wide Load 2/17
+→ 0/21, Bushido v Devil 35/15 → 25/5), the others are the same to the hit.
+The totals fall because the wheels no longer price anything (none of their
+hits reached 10). The counted means move by less than one standard error
+(box ALARM's sd is 15, the Octagon's 7-14): the arena's hits take 50-180 hp a
+fight off a robot's components, which changes trajectories and the brains'
+damage readings from the first one on, so the runs decorrelate, but the hits
+the robots land on each other are not systematically more or fewer. The
+arena's sub-10 hits on the box Scout match live bin for bin; ALARM, the
+Octagon's robots and the Razor take more applied arena hits than live, the
+Compressor's Wide Load fewer: those follow how the robots move and land (the
+Razor's are its tumbles, ALARM's its falls onto its back, §12n), not the
+pricing, which reproduces live record by record.
+
+**Still open.** Which collidable is the event's A (the arena's list or the
+robot's first) is not traced; ours takes the physics' `a`. The Octagon's
+registrations were not captured (its colliding bodies are assumed registered
+as in the box and the Compressor). `AddXtra` and KOTH prize components are
+implemented from the code, not seen live. The crowd now also hears arena hits
+over 50 (as `FUN_004175b0` does), not checked against live audio.

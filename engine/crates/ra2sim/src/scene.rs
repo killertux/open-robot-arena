@@ -284,6 +284,10 @@ pub struct Prop {
     /// the centre of mass in the object's frame and the inertia tensor about
     /// it (see [`LIVE_MASS`]).
     pub live_mass: Option<(Vec3, glam::Mat3)>,
+    /// The material an `AddXtra` line gives the prop (its own component,
+    /// `FUN_00403aa0`); `None` for the arena `.gmf`'s own bodies, which the
+    /// arena's component prices (docs/29 §12o).
+    pub material: Option<String>,
 }
 
 /// Arena bodies whose mass properties are taken from the original as measured
@@ -381,6 +385,7 @@ pub fn load_props(
                     items,
                     mesh: None,
                     live_mass: None,
+                    material: Some(xtra.material.clone()),
                 });
             }
         }
@@ -418,6 +423,7 @@ pub fn load_havok_props(path: &str) -> Result<Vec<Prop>, Box<dyn std::error::Err
                 items: b.items.clone(),
                 live_mass: mesh.as_ref().and_then(|_| live_mass(&b.name, b.mass)),
                 mesh,
+                material: None,
             }
         })
         .collect())

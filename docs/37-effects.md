@@ -240,7 +240,9 @@ differ).
 
 **Gap found on the way.** The original prices the robot's contacts with the arena (walls) too, as a hit with no attacker:
 live 34-40 hp on a wall at about 10 m/s (`request id 0, amount 34.297, v2 (0, 0, 1)`), 12-19 on smaller bumps, each a red
-number. `combat::resolve` only prices robot against robot, so ours takes no wall damage and shows no such number. Open.
+number. Recovered and implemented in fx/wall-damage (docs/29 §12o): the arena's own component (Arenium 0.5, piercing 0,
+concussion 1) prices every robot contact with an arena collidable, floor included, through the same `computeDamage`;
+`combat::resolve_with` now returns those hits with no attacker, and `Match::route_popups` shows them red.
 
 **Open.** A green number was not captured (the human never landed a hit on ALARM in the live attempts; the attacker
 branch is from the disassembly: `FUN_004178a0(attacker, amount, ..., 1)`, colour and position code at `0x413d1f`); the
