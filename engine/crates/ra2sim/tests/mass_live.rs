@@ -391,3 +391,58 @@ fn berserkers_spinner_body_matches_the_original() {
         "spinner centre {ours}, live y 0.5975"
     );
 }
+
+/// FlapJack's flipper (Square Extender, Small Wedge and the burst motor's
+/// rotor, 27 kg) takes the wedge as its points with no object rotation: live
+/// its body's local inertia (`+0x19c`, `flipfight-razor-flapjack-box__live__000..002`)
+/// is 1.4788 about the vertical, 0.3827 along the arm and 1.1849 about the
+/// hinge, products 0.0531, -0.0055 and 0.1686. Ours has the hinge on x, the
+/// arm on y and the vertical on z. With the wedge's quarter-turn `TM` applied
+/// it stood on edge: 1.43 about the hinge, 1.23 about the vertical
+/// (docs/29 §12p).
+#[test]
+fn flapjacks_flipper_lies_flat() {
+    let Some(game) = game_dir() else {
+        eprintln!("skipped: no game data (set RA2_GAME)");
+        return;
+    };
+    if std::env::var("RA2_PHYSICS").is_ok_and(|b| b != "havok17") {
+        eprintln!("skipped: not the havok17 backend");
+        return;
+    }
+    let _scripts = ra2script::lock();
+    let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+    let setup = BotSetup {
+        path: game.join("AI/Team8/Bot0.bot").to_string_lossy().to_string(),
+        yaw_deg: None,
+        spawn: None,
+    };
+    let d = Duel::new(&arena, std::slice::from_ref(&setup)).expect("a duel");
+    let r = &d.robots[0];
+    let flipper = (1..r.rig.parts.len())
+        .find(|&p| {
+            r.rig.parts[p]
+                .joint
+                .is_some_and(|j| j.use_kind == ra2sim::rig::JointUse::Burst)
+        })
+        .expect("a flipper");
+    let (mass, _, inv) = d
+        .physics
+        .mass_properties(r.parts[flipper].body)
+        .expect("mass properties");
+    assert!((mass - 27.0).abs() < 0.01, "flipper {mass} kg, live 27");
+    let i = inv.inverse();
+    for (ours, live) in [
+        (i.x_axis.x, 1.1849f32),
+        (i.y_axis.y, 0.3827),
+        (i.z_axis.z, 1.4788),
+        (i.y_axis.x.abs(), 0.1686),
+        (i.z_axis.x.abs(), 0.0055),
+        (i.z_axis.y.abs(), 0.0531),
+    ] {
+        assert!(
+            (ours - live).abs() < 0.002,
+            "flipper inertia {i:?}, live {live}"
+        );
+    }
+}

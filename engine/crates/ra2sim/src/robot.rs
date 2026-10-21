@@ -2111,6 +2111,21 @@ impl Robot {
             }
         }
         let phase = self.burst[p];
+        if phase != before && crate::havok17::dumping() {
+            // The live `M` row (`frida/ra2_flipfight.js`): the motor's new
+            // velocity and torque, so the live scripts find our strokes.
+            let h = self.hinge[p];
+            crate::havok17::dump_line(format_args!(
+                "[\"M\",0,\"{}:{p}\",{},{}]",
+                self.rig.name.trim(),
+                if phase == BurstPhase::Firing {
+                    -h.speed
+                } else {
+                    h.speed
+                },
+                h.max_torque
+            ));
+        }
         if phase != before && std::env::var_os("RA2_BURST_DEBUG").is_some() {
             eprintln!(
                 "burst {} part {p}: {before:?} -> {phase:?} at {position:.3} (home {home:.3}, end {end:.3}) {:?}",
