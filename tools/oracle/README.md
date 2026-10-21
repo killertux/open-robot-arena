@@ -214,6 +214,8 @@ recorded it. All need `tools/capture/original_session.sh start` and write into
 | `survey_clicks.py NAME STEPS.tsv` | One attach, one click per line of `routes/click_survey.tsv`; `.clicks.tsv` says which click played `button_click.wav`. |
 | `audio_events.py LOG.jsonl` | Normalises a log into `t_s kind file volume handle note` lines. |
 | `audio_compare.py ORIG.events.tsv OURS.log` | The same match, original against `RA2_AUDIO_TRACE=1` of `ra2-app --match`, aligned on the bell. |
+| `audio_levels.py ORIG.events.tsv OURS.log` | Per-class level of every sound start (count, mean / min / max hundredths of a dB, share louder than -900), original against ours (`docs/35` section 13). |
+| `audio_window.py`, `audio_replay_check.py` | RMS of a WAV over a window aligned on the bell; the recording against `ra2-audio`'s `replay` example (the original's own call log mixed through our gain model). |
 | `frida/ra2_music_probe.js` | One-off: which music-layer calls run at a screen or match transition. |
 
 Limits found on the way (`docs/35` section 1): the DirectMusic UI clicks and

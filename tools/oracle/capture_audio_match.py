@@ -55,7 +55,8 @@ def main():
         marks.append({"t": int(time.time() * 1000), "label": label, **kw})
         print(label, kw, flush=True)
 
-    drive("click", "527", "746", "wait", "2")
+    if os.environ.get("AT_MENU") != "1":  # AT_MENU=1: the game is on the main menu (that click opens Credits there)
+        drive("click", "527", "746", "wait", "2")
     drive("-f", os.path.join(HERE, "routes", "exhibition_box_scout_alarm.steps"))
     cap = subprocess.Popen([PY, os.path.join(HERE, "capture_audio.py"), name, str(total)], env=dict(os.environ, OUT=out_dir))
     time.sleep(5)

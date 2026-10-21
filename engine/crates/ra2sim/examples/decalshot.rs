@@ -115,7 +115,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // DECALSHOT_ALPHA=1.0 shows every mark at one strength (the live run's ALPHA_FORCE).
+    let forced: Option<f32> = std::env::var("DECALSHOT_ALPHA")
+        .ok()
+        .and_then(|v| v.parse().ok());
     for (player, spec, alpha, projection) in marks {
+        let alpha = forced.unwrap_or(alpha);
         duel.push_mark(player, spec, alpha, projection);
     }
     println!(

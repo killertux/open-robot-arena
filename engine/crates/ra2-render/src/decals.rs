@@ -266,7 +266,9 @@ pub fn material(image: Arc<Image>, spec: &DecalSpec) -> Material {
             uv_set: 0,
         }],
         transparent: true,
-        no_alpha_test: true,
+        // The slashes (`SRCALPHA, ONE`) are alpha tested (`>= 16` of the texture's
+        // alpha times the vertex alpha); the dents blend with no test.
+        no_alpha_test: !spec.additive(),
         additive: spec.additive(),
         has_vertex_colors: true,
         lighting: true,
@@ -316,6 +318,19 @@ mod tests {
             0.25
         );
         assert!(DecalSpec::parse("").is_none());
+    }
+
+    /// Slashes are additive and alpha tested, dents blended and untested (`0x71fd78`).
+    #[test]
+    fn slashes_are_tested_and_dents_are_not() {
+        let image = Image::solid([255, 255, 255, 255]);
+        let slash = material(image.clone(), &spec());
+        assert!(slash.additive && slash.alpha_tested() && !slash.blended());
+        let dent = material(
+            image,
+            &DecalSpec::parse("batter02.tga 1 0 0 .5 .5 0").unwrap(),
+        );
+        assert!(!dent.additive && !dent.alpha_tested() && dent.blended());
     }
 
     /// A flat plate facing +Y is cut to the box: a `0.5 x 0.5` square, uv 0..1.

@@ -17,8 +17,11 @@ start of the WAV (the parec start); `kind` is one of
   music_play   music track start (0x4f12d0): file, volume
   ui_click     the UI one-shot (0x5e6070 -> 0x6287e0): file
   music_vol    global music volume (0x4f1600)
+  freq         IDirectSoundBuffer::SetFrequency (0x62c600): `volume` column = Hz; the handle is the one
+               whose SetVolume (V then B rows) named the same buffer wrapper
+  pos          the DirectSound3D position wrapper (0x629f90): `note` = `x y z mode flags`
 
-Buffer-level rows (B, D) and positions are dropped; they are in the raw log.
+Buffer-level volume/play rows (B, D) are dropped; they are in the raw log.
 """
 import json
 import os
@@ -38,6 +41,8 @@ def main():
     t0 = meta["parec_epoch_ms"]
     names = {}
     out = []
+    last_v = None
+    buf = {}
 
     def t(ms):
         return (ms - t0) / 1000.0
@@ -58,6 +63,7 @@ def main():
         elif tag == "S":
             out.append((t(r[2]), "stop", names.get(r[3], ""), "", r[3], ""))
         elif tag == "V":
+            last_v = r[3]
             out.append((t(r[2]), "setvolume", names.get(r[3], ""), r[4], r[3], r[5]))
         elif tag in "OQ":
             out.append((t(r[2]), "fadeout", names.get(r[3], ""), "", r[3], r[4]))
@@ -69,6 +75,14 @@ def main():
             out.append((t(r[2]), "music_play", base(r[3]), r[4], "", ""))
         elif tag == "U":
             out.append((t(r[2]), "ui_click", base(r[3]), "", "", ""))
+        elif tag == "B":
+            if last_v is not None:
+                buf.setdefault(r[3], last_v)
+        elif tag == "F":
+            h = buf.get(r[3], -1)
+            out.append((t(r[2]), "freq", names.get(h, ""), r[4], h, ""))
+        elif tag == "H":
+            out.append((t(r[2]), "pos", "", "", "", "%.2f %.2f %.2f %s %s %s" % (r[4], r[5], r[6], r[7], r[8], r[9])))
         elif tag == "G":
             out.append((t(r[2]), "music_vol", "", r[3], "", ""))
     out.sort(key=lambda x: x[0])

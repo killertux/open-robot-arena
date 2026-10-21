@@ -92,9 +92,7 @@ lighting on, vertex colour `(1, 1, 1, alpha)`, linear filter, CCW cull. `mode ==
 from our meshes the texture-coordinate extents agree to 0.003 and the area to within 8 % (test
 `decals_cut_from_the_chassis_match_the_live_footprints`). Photographs: `pose01..03` of the capture against
 `decalshot` frames (`DECALSHOT_CHASSIS_ONLY=1`) show the same jagged grey dent with the green cross-hatch
-(`batter01.tga`) on the same face; positions differ by the robots' pose drift while photographed. Not
-verified live: the slash decals' additive look (they are faint, `single_slash.tga` alpha <= 102) and the
-lighting factor.
+(`batter01.tga`) on the same face; positions differ by the robots' pose drift while photographed. Slash decals' look: section 8.
 
 Code: `ra2_render::decals` (parse, project, corners, material), `Duel::{mark_for, push_mark, mark_items}`,
 `Component::decal`, `ra2sim --example decalshot`.
@@ -110,7 +108,7 @@ Code: `ra2_render::decals` (parse, project, corners, material), `Duel::{mark_for
 
 The flame's hit rate against distance (section 6), the exact per-vertex normals and lighting of a decal (ours uses the face normal); the
 original's subdivided chassis mesh (decal polygons are the same shape, fewer fans); live look of the slash
-(additive) decals; `0x71abcc` (the camera-relative decal direction branch) is `(0, 0, 0)` and no stock
+(additive) decals (section 8); `0x71abcc` (the camera-relative decal direction branch) is `(0, 0, 0)` and no stock
 definition uses a zero direction, so that branch is not implemented.
 
 ## 6. The Flamethrower (`0x504080`, vtable `0x6ab664`, RTTI `Flamethrower`)
@@ -245,3 +243,38 @@ number. `combat::resolve` only prices robot against robot, so ours takes no wall
 **Open.** A green number was not captured (the human never landed a hit on ALARM in the live attempts; the attacker
 branch is from the disassembly: `FUN_004178a0(attacker, amount, ..., 1)`, colour and position code at `0x413d1f`); the
 original's multi-player (network) humans.
+
+## 8. Slash decals: the live look (fx-audio)
+
+The slashes (`single_slash.tga`, mode 1: additive `SRCALPHA, ONE`, alpha test `>= 16`) were the one decal look not seen
+live. Four live runs of `capture_fx.py` (`fx-axe-v-scout__live__000`, `-full__live__000`, `-head__live__000/001`;
+Backyard Ripper's axe against the stock Scout, hazards off, AIs held for the shots, the same `ra2_camera`-style scripted
+cameras as docs/37 section 3 and 6, 1024x768) logged 47 + 50 + 41 + 4 slash decals and photographed the Scout from eight
+sides at 1.9 m and head-on at the strongest decals. Findings:
+
+* **Natural strength.** `alpha = damage / 100`: of the 25 decals of `fx-axe-v-scout__live__000` 20 are below 0.06 and one above 0.5 (the forced run's 25 have four above 0.5). With a texture alpha of
+  at most 102/255 (0.4) and the vertex alpha multiplied in (`ALPHAOP = MODULATE`), a decal under about 0.16 never reaches
+  the `>= 16` test: **a slash is drawn only for a big hit and then as a faint grey streak** (texture colour <= 210 grey,
+  additive over a dark chassis). In no live frame at natural alpha is one visible (`fx-axe-v-scout__live__000-pose04..07`),
+  and ours shows none either at the same marks (`decalshot`, same chassis matrices and cameras).
+* **Forced to full strength.** `ra2_fx.js` `setalpha` writes 1.0 into the live `DecalTrigger` objects' alpha (`+0x1cec`,
+  the last 25 per chassis; `ALPHA_FORCE=1.0` / `DECAL_SHOTS=n` of `capture_fx.py`). At 1.0 the same `decalshot` frames (new
+  `DECALSHOT_ALPHA`) show a faint streak in three of eight poses (<= 41 / 255 against the same render with alpha 0); the
+  live frames at the matching poses show none **on the faces the camera can see**, because the slashes of these fights sit
+  on the Scout's low side rims and underside (decal normals `-y`, local `y` -0.1..-0.24, at the +x / +-z corners:
+  the axe cuts from the floor) and the held Scout ends the fight on its side, pinned to a wall, or hidden by the results
+  window (the match ends 40 to 120 s in). The head-on shots (`-head__live__000/001`, `dnat`/`dfull` pairs) put the
+  camera 0.7..0.9 m off a decal's normal: all but one are inside the wall or the axe robot's body, the one in the open shows
+  floor. **So the look is not established live beyond the draw state; no frame contradicts it.**
+* **One difference found and fixed: the alpha test.** The state object has an alpha test for the additive mode, ours drew
+  every slash fragment untested (`decals::material` had `no_alpha_test: true` for both blends). Now `no_alpha_test` is
+  `!additive`: slashes are alpha-tested batches (`>= 16` after the stage's MODULATE), dents stay blended and untested. Effect
+  on the eight poses of `fx-axe-v-scout` (natural alphas): at most 3 / 255 per channel over 667..11 486 pixels; at full strength
+  at most 5 / 255 (test `decals::tests::slashes_are_tested_and_dents_are_not`). Both are below visibility, which is the
+  point: the live game does not draw the faint ones either.
+
+Evidence (git-ignored, manifest rows): `fx-axe-v-scout__live__000`, `fx-axe-v-scout-full__live__000` (forced alpha 1.0, poses),
+`fx-axe-v-scout-head__live__000/001` (head-on). Side by side: scratchpad only. Tools: `capture_fx.py` `ALPHA_FORCE`,
+`DECAL_SHOTS`, `DECAL_DIST`, `fx_decal_spec.py` (accepts `dshot` rows and a robot with no logged matrix),
+`decalshot` `DECALSHOT_ALPHA`. Open: a live frame of a strong slash on a visible face (a held Scout hit by the axe from above, or
+a decal placed with a scripted hit).
