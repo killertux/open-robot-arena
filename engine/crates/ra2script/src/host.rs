@@ -300,6 +300,11 @@ impl ScriptHost {
         root: impl AsRef<Path>,
         arena_script: Option<&Path>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // A new match inherits no joint requests: an arena that was built but
+        // never stepped (a query, a failed start) leaves its `AddPrismatic`
+        // calls queued, and the next match's first step would build them a
+        // second time on the same parts, two sliders fighting over one spike.
+        crate::state().joints.clear();
         let host = ScriptHost::boot(root)?;
         Python::with_gil(|py| -> Result<(), Box<dyn std::error::Error>> {
             host.load_arenas(py)?;
