@@ -143,7 +143,8 @@ changes the sound.
 **The emitter** (`Arenas\particles\flame.tga`, named "Fire burst"; config dump of the live emitter): 80 a second,
 life 0.3 +- 0.075 s, velocity `(0, 0, -5) * scale` in the component's frame rotated to the world **plus the
 chassis' velocity**, spread `(0.5, 0.5, 0.5)`, no gravity, colour blue `(0, 0, 1, 1)` to white (green spread
-0.3), size 0.2 to 0.4, additive, collides with the world without reflecting, elasticity 1. It sits at
+0.3) and size 0.2 to 0.4 **over the whole life** (`fade_start` 0, not the default 0.5: the live dump has 0 at
+`+0x134`; `Config::jet`), additive, collides with the world without reflecting, elasticity 1. It sits at
 `component * (0, 0.176, -0.9)` (live world matrix: component at `(0, 0.0037, 0.5491)` in the robot's frame,
 rotation `diag(-1, 1, -1)`, nozzle `(0, 0.180, 1.449)`: our `ra2fmt::mount` placement agrees to 1e-3). With
 `angle = 0` the jet points out of the back of the chassis; the test robot uses half a turn. Config `ra2_render::
@@ -167,12 +168,18 @@ at off, but the `Loop` is gated on the power scales being above zero at the call
 jet's own draw has been asked for, so **a jet switched on from rest is silent** (no `Loop` in any live call).
 `ra2sim::flame::Sound`, `SoundCue::Flame`.
 
-**Look.** the side-by-sides (live left, ours right; not archived, they are renders of ours; `ra2-app --example flameshot`, same
-camera and HUD, hazards off as live, both AIs stopped): position, size, pink/white/blue colour and length match.
-(An earlier composite with a different arena state and no HUD looked wrong because of the comparison, not the
-flame.) The red cylinder and fork in both are the Scout's own `BurstMotor` and its arm. The original draws **no
-model** for the Flamethrower: with `RA2_FLAME_MODEL=1` ours draws the gun at the nose, covering the cylinder, and
-live shows the bare cylinder, so ours hides it (`rig.rs`).
+**Look.** Live (`flame-cam__live__000-02/03.png`) against ours (`ra2-app --example flameshot`, same camera, HUD,
+hazards off, AIs stopped); side-by-sides are kept in the scratchpad, not archived. The live camera was polled
+(`ra2_camera.js`: pitch 0.2326, FOV 0.8, no target, eye `a + 1.3 f + 1.9 r + 0.6 up`); ours uses the same formula and
+the same pitch. Pixels (1024x768, live / ours): cylinder tip `(148, 458)` / `(149, 454)`, cylinder rows 275-478 /
+274-478; first pink puff x 635 / 629; bright flame x from 721 / 695, rows 421-610 / 373-606, centroid `(890, 512)`
+/ `(890, 492)`; the Time box and the Scout/ALARM boxes are the same size. Remaining difference: ours spreads
+about 20-40 px more upward at the far end. The first comparison was wrong because of the comparison (hazards on,
+AIs running, HUD laid out for 1280x1005 and so drawn at 75%; `Session::set_layout` fixes that; the "Static 1" text
+is the 3 s camera-name label every camera switch shows in normal play, now switched off before the shot). The
+colour needed the `fade_start` 0 above. The red cylinder and fork are the Scout's own `BurstMotor` and its arm. The
+original draws **no model** for the Flamethrower: with `RA2_FLAME_MODEL=1` ours draws the gun at the nose, covering
+the cylinder, and live shows the bare cylinder, so ours hides it (`rig.rs`).
 
 **Code.** `ra2sim::flame` (state machine, tests), `controls::Action::{Flame, FlameBurst}`,
 `Robot::{flame_inputs, flame_update, flame_jets}`, `Duel::update_flamethrowers`; workshop wiring accepts

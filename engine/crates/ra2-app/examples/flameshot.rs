@@ -49,7 +49,10 @@ fn main() -> Result<(), String> {
     let renderer = Renderer::new().map_err(|e| e.to_string())?;
     let ui = UiRenderer::new_for(renderer.device(), wgpu::TextureFormat::Rgba8Unorm);
     let size = [1024u32, 768];
+    session.set_layout(size);
     session.skip_intro();
+    // the camera-name label shows for 3 s after a switch; switch during the countdown
+    session.enter_camera(DuelCamera::Static);
     let mut guard = 0;
     while session.matched.state() != MatchState::Fight {
         session.step();
@@ -59,7 +62,6 @@ fn main() -> Result<(), String> {
         }
     }
     let dt = session.matched.config.dt;
-    session.enter_camera(DuelCamera::Static);
     let frame_camera = |session: &mut Session| {
         let duel = &session.matched.duel;
         let r = &duel.robots[0];
@@ -86,6 +88,11 @@ fn main() -> Result<(), String> {
         cam.apply(CameraCommand::Position(m.into()));
         cam.apply(CameraCommand::Rotation([-d.y.asin(), d.x.atan2(d.z)]));
         cam.apply(CameraCommand::Fov(0.8));
+        eprintln!(
+            "CAM com {a:?} f {f:?} eye {m:?} pitch {} yaw {}",
+            -d.y.asin(),
+            d.x.atan2(d.z)
+        );
     };
     // the live robot crept along (Throttle 8) so the immobility rule left it be
     session.matched.duel.robots[0].apply_inputs(&[("Forward".into(), 0, 8.0)]);

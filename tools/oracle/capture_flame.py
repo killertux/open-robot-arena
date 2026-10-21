@@ -129,6 +129,9 @@ def main():
         sc = sess.create_script(open(os.path.join(HERE, "frida", "ra2_flame.js")).read())
         sc.on("message", on_msg)
         sc.load()
+        cam_sc = sess.create_script(open(os.path.join(HERE, "frida", "ra2_camera.js")).read())
+        cam_sc.on("message", lambda m, d: m.get("type") == "send" and on_msg({"type": "send", "payload": dict(m["payload"], ev="cam")}, d))
+        cam_sc.load()
         cd.drive(["-f", os.path.join(HERE, "routes", "exhibition_box_scout_alarm.steps")])
         cd.drive(["click", "176", "177", "wait", "1.5", "click", "322", "188", "wait", "1", "hide"])
         cd.drive(["click", "936", "647", "hide", "wait", "14", "click", "512", "735", "hide", "wait", "1"])
@@ -170,6 +173,9 @@ def main():
                 t0 = time.time()
                 for i in range(nshots):
                     camera(py, 0, 1.3, 1.9, 0.6, 1.3)
+                    sp = pose()
+                    with lock:
+                        rows.append({"ev": "shotpose", "pose": sp, "k": k, "host_t": time.time()})
                     shot(base, k, f"level{level}"); k += 1
                 time.sleep(max(0, t0 + hold - time.time()))
                 inp("Flame", 0)

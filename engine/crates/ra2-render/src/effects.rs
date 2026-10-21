@@ -291,6 +291,17 @@ impl Config {
     /// builds; docs/37 section 6).
     pub const JET_SPREAD: Vec3 = Vec3::new(0.5, 0.5, 0.5);
 
+    /// A Flamethrower's jet (`FUN_00504080`'s configuration, live emitter dump): the
+    /// hazard flame's with the colour and size ramps running over the whole life
+    /// (`fade_start` 0, the constructor's `local_154`), so the blue is gone by
+    /// the middle of the jet.
+    pub fn jet(velocity: Vec3) -> Config {
+        Config {
+            fade_start: 0.0,
+            ..Config::flame(velocity, Config::JET_SPREAD)
+        }
+    }
+
     pub fn flame(velocity: Vec3, variance: Vec3) -> Config {
         Config {
             rate: 80.0,
@@ -724,12 +735,7 @@ impl Effects {
             return;
         }
         if on {
-            let mut e = Emitter::new(
-                Config::flame(velocity, Config::JET_SPREAD),
-                point,
-                true,
-                f32::INFINITY,
-            );
+            let mut e = Emitter::new(Config::jet(velocity), point, true, f32::INFINITY);
             e.probe = true;
             self.standing.push((key, e));
         }
