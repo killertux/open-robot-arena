@@ -385,12 +385,11 @@ impl RigidBody {
     /// forms**: `DISPLAY_PROXY_NAME` — the mesh the body is *shown* as, which
     /// is normally a group node whose children are the real geometry.
     ///
-    /// The Octagon is what settles 5. Its `main_collision` declares `geom 5`
-    /// with display proxy `main_display`, and its own 65-vertex mesh is an
-    /// octagonal slab that stops 3.3 m short of the visible rim on the
-    /// diagonals: taking that mesh as the collider drops a robot that drives
-    /// there four metres into the slab's underside. The `main_display` group
-    /// contains the rim.
+    /// This names the display proxy for 5/6, but when the body has geometry
+    /// of its own the original collides with that instead (live, the
+    /// Octagon's collidable is `main_collision`'s own 65-vertex slab, not the
+    /// `main_display` group; `ra2_render::collect_havok` applies that, docs/29
+    /// section 12h).
     pub fn simulation_objects(&self) -> Vec<&str> {
         let source = match self.simulation_geometry {
             3 | 4 => self.geometry_proxy.as_str(),

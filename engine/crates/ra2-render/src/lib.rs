@@ -329,12 +329,28 @@ fn under_any(
 /// The geometry objects a body simulates (see
 /// [`gmi::RigidBody::simulation_objects`]), plus the children of any group node
 /// among them.
+///
+/// A display-proxy body (`SIMULATION_GEOMETRY` 5/6) with geometry of its own
+/// collides as that geometry: its display proxy is only what it is drawn as.
+/// Live, the arena collidable the robots touch is one mesh whose bounds are
+/// the body's own mesh grown by 0.05 — the Combat Arena's 8-vertex
+/// `arena_collision` box, the Octagon's 65-vertex `main_collision` slab, the
+/// Compressor's 88-vertex `collision box` — and the children of the display
+/// group (the box's raised hazard plates, its outer props 30 m away) are not
+/// in it (`colliders-*__live__000`, docs/29 section 12h).
 fn simulation_objects<'a>(
     scene: &'a gmi::GmiScene,
     rb: &gmi::RigidBody,
     ancestry: &std::collections::HashMap<String, String>,
 ) -> Vec<&'a gmi::SceneObject> {
-    let roots = rb.simulation_objects();
+    let own_geometry = scene
+        .find_object(&rb.name)
+        .and_then(|o| o.mesh.as_ref())
+        .is_some_and(|m| !m.points.is_empty() && !m.faces.is_empty());
+    let roots = match rb.simulation_geometry {
+        5 | 6 if own_geometry => vec![rb.name.as_str()],
+        _ => rb.simulation_objects(),
+    };
     scene
         .objects
         .iter()
@@ -403,9 +419,7 @@ pub fn collect_havok(input: &str) -> Result<Option<HavokArena>, Box<dyn std::err
         let to_body = transform.inverse();
         // Collision geometry is a triangle soup built from the mesh's faces (a
         // mesh's vertex list is not a triangle list). Which objects that comes
-        // from is `SIMULATION_GEOMETRY`'s job, and a display-proxy body names a
-        // *group* node whose children hold the real geometry — the Octagon's
-        // `main_collision` names `main_display`, which is 57 child objects.
+        // from is `SIMULATION_GEOMETRY`'s job (see `simulation_objects`).
         //
         // A *standalone* proxy is a shape the body reuses: one shared object,
         // named by every body that wants it, and the exporters leave it sitting
@@ -1598,14 +1612,13 @@ mod tests {
         assert!(items.iter().all(|i| i.scene_lights.is_some()));
     }
 
-    /// F5: an arena's main collider simulates its *display proxy*.
-    ///
-    /// The Octagon's `main_collision` has a 65-vertex mesh of its own and
-    /// declares `SIMULATION_GEOMETRY 5` with display proxy `main_display` — a
-    /// group of 57 child objects. Taking the body's own mesh instead throws most
-    /// of the arena away.
+    /// An arena's main collider is its own mesh: the Octagon's
+    /// `main_collision` declares `SIMULATION_GEOMETRY 5` with display proxy
+    /// `main_display` (57 child objects), and live the only fixed collidable
+    /// is its own 65-vertex slab (`colliders-octagon__live__000`, docs/29
+    /// section 12h). The display group is only drawn.
     #[test]
-    fn arena_collider_follows_the_display_proxy() {
+    fn arena_collider_is_the_bodys_own_mesh() {
         let Some(game) = game_root() else { return };
         let path = game.join("Arenas/octagon.py");
         let Some(havok) = collect_havok(&path.to_string_lossy()).unwrap() else {
@@ -1619,11 +1632,14 @@ mod tests {
         assert_eq!(main.simulation_geometry, 5);
         assert!(main.use_display_proxy);
         assert_eq!(main.display_object, "main_display");
-        // Its own mesh is 108 triangles; the group it names is far bigger.
+        // Its own slab, not the display group (which spans 34 m).
+        let (lo, hi) = main.points.iter().fold(
+            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+            |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+        );
         assert!(
-            main.points.len() / 3 > 350,
-            "only {} triangles from the display proxy",
-            main.points.len() / 3
+            (hi.x - 13.86).abs() < 0.02 && (lo.y + 4.03).abs() < 0.02 && (hi.y - 1.67).abs() < 0.02,
+            "collider bounds {lo:?}..{hi:?}, live (minus the 0.05 radius) ±13.86, -4.03..1.67"
         );
 
         // `topplane_collision` is a plane primitive: no mesh in the file, and

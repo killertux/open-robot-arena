@@ -25,7 +25,7 @@ import frida
 import capture_drive as cd
 import capture_magic as cm
 
-AGENT = os.path.join(cd.HERE, "frida", "ra2_contacts.js")
+AGENT = os.environ.get("AGENT", os.path.join(cd.HERE, "frida", "ra2_contacts.js"))
 HOST = os.environ.get("RA2_FRIDA_HOST", "127.0.0.1:27142")
 
 

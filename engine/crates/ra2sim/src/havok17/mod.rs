@@ -90,6 +90,38 @@ fn debug_body() -> Option<usize> {
     *WATCH.get_or_init(|| std::env::var("RA2_H17_DEBUG").ok()?.parse().ok())
 }
 
+/// `RA2_H17_DUMP=<file>` writes the rows `frida/ra2_contacts.js` captures in
+/// the original (`R` the contacts handed to the resolver, `B` every dynamic
+/// body, `A` each accepted step piece), so one script reads both.
+pub fn dump_line(line: std::fmt::Arguments) {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+    static DUMP: OnceLock<Option<Mutex<std::io::BufWriter<std::fs::File>>>> = OnceLock::new();
+    let Some(out) = DUMP.get_or_init(|| {
+        let path = std::env::var_os("RA2_H17_DUMP")?;
+        std::fs::File::create(path)
+            .ok()
+            .map(|f| Mutex::new(std::io::BufWriter::new(f)))
+    }) else {
+        return;
+    };
+    if let Ok(mut w) = out.lock() {
+        let _ = w.write_fmt(line);
+        let _ = w.write_all(b"\n");
+        let _ = w.flush();
+    }
+}
+
+pub fn dumping() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RA2_H17_DUMP").is_some())
+}
+
+fn dump_vec(v: Vec3) -> String {
+    format!("[{},{},{}]", v.x, v.y, v.z)
+}
+
 fn rv(v: Vec3) -> m::RVec3 {
     m::RVec3::new(v.x as m::Real, v.y as m::Real, v.z as m::Real)
 }
@@ -740,6 +772,50 @@ impl Havok17Backend {
         self.joints.get_mut(handle as usize).filter(|j| j.alive)
     }
 
+    /// The `R` and `B` rows of [`dump_line`].
+    fn dump_resolver_entry(&self) {
+        let contacts: Vec<String> = self
+            .contacts
+            .iter()
+            .map(|c| {
+                format!(
+                    "[\"h{}\",\"h{}\",{},{},{},{},{},{},{},\"h{}\",\"h{}\"]",
+                    c.a,
+                    c.b,
+                    dump_vec(c.normal),
+                    dump_vec(c.point),
+                    c.distance,
+                    c.friction,
+                    c.friction,
+                    c.restitution,
+                    c.restitution,
+                    c.a,
+                    c.b
+                )
+            })
+            .collect();
+        dump_line(format_args!(
+            "[\"R\",0,{TOLERANCE},[{}]]",
+            contacts.join(",")
+        ));
+        for (i, b) in self.bodies.iter().enumerate() {
+            if !b.is_dynamic() {
+                continue;
+            }
+            // The rotation column by column, as the original's body `+0xcc`
+            // holds it.
+            let r = Mat3::from_quat(b.rotation).to_cols_array();
+            dump_line(format_args!(
+                "[\"B\",0,\"h{i}\",{},{},{},{},{:?}]",
+                b.mass,
+                dump_vec(b.com),
+                dump_vec(b.velocity),
+                dump_vec(b.angular_velocity),
+                r
+            ));
+        }
+    }
+
     /// Switch a joint's motor to `velocity` (0 = off), starting the servo's
     /// target where the joint is.
     fn set_motor(&mut self, handle: JointHandle, velocity: f32) {
@@ -949,6 +1025,9 @@ impl PhysicsBackend for Havok17Backend {
             // 1-2: the events of the last detection, then their impulses. The
             // resolver works with the world's tolerance (`vt + 0x18`).
             self.fire_events();
+            if dumping() {
+                self.dump_resolver_entry();
+            }
             let contacts = std::mem::take(&mut self.contacts);
             resolver::resolve(&mut self.bodies, &contacts, TOLERANCE);
             self.contacts = contacts;
@@ -983,6 +1062,9 @@ impl PhysicsBackend for Havok17Backend {
                 break;
             }
             // 4: actions. The motors use the substep, not the piece.
+            if dumping() {
+                dump_line(format_args!("[\"A\",0,{h},{}]", self.backsteps));
+            }
             joints::solve(&mut self.bodies, &mut self.joints, dt);
             self.drag();
             done += h;

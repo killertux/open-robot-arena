@@ -43,3 +43,26 @@ fn every_stock_arena_starts_both_robots_above_the_pit() {
         }
     }
 }
+
+/// The Combat Arena collides as its `arena_collision` body's own box: live
+/// the only fixed collidable has that box's bounds (`colliders-box__live__000`),
+/// and wheels cross the spike and saw plates at floor height. So no surface
+/// stands above the floor inside the arena.
+#[test]
+fn the_combat_arena_collides_as_its_own_box() {
+    let Some(game) = game_dir() else {
+        eprintln!("skipped: no game data (set RA2_GAME)");
+        return;
+    };
+    let path = game.join("Arenas/box.py").to_string_lossy().to_string();
+    let scene = ra2sim::scene::load_arena(&path).expect("arena");
+    for t in &scene.triangles {
+        for v in t {
+            let inside = v.x.abs() < 12.6 && v.z > -12.3 && v.z < 12.9;
+            assert!(
+                !inside || v.y < -2.26 || v.y > 13.7,
+                "a collider vertex above the floor inside the arena: {v:?}"
+            );
+        }
+    }
+}

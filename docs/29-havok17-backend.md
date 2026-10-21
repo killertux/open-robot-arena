@@ -1364,3 +1364,158 @@ is immobilised). Traction survey: 45/45.
 which the original has not been seen to do; its straight drifts 0.30 rad
 against the original's 0.16-0.19; the live fights' ALARM lands 37-77 counted
 hits against our 12 on average.
+
+### 12h. The arena colliders, the rotors' mass, the heading drift and the tail-stand (fx/physics-drift)
+
+New live captures (all in `local/oracle/original` with manifest rows):
+`contacts-nohaz-alarm__live__003/004` and `contacts-nohaz-wideload__live__001`
+(drive-at straights; `frida/ra2_contacts.js` now also writes a `P` row per
+body, its raw floats once: `+0x30` centre of mass, `+0xcc` transform, `+0x190`
+mass, `+0x19c` local inertia), `fightcontacts-scout-alarm-box__live__001..003`
+with `aistate-scout-alarm-box__live__001..003` (three box fight starts, 31 s
+each, fresh session: contacts agent through `capture_fight.py AGENT=
+PREFIX=`, and `ra2_python.py --sample` of every brain's tactic, sensor table
+`(robot, contacts, chassis)` and the Flipper's `upTrack`), and
+`colliders-box/octagon/compressor__live__000` (every fixed collidable a
+resolver contact names, with its type and bounding box). Diagnostics:
+`RA2_H17_DUMP=<file>` makes havok17 write the same `R`/`B`/`A` rows as
+`ra2_contacts.js` (and `G` rows from `MagicAction`), so one script reads
+ours and the original's; `RA2_AI_TRACE` prints each sensor as
+`(contacts, chassis)`; `gmfdump` takes `GMFDUMP_POINTS`, `GMFDUMP_TM` and
+`GMFDUMP_MATERIALS`.
+
+**The arena collider is the body's own mesh (recovered live).** A body with
+`SIMULATION_GEOMETRY` 5 names a display proxy, and docs/06 F5 read that as
+"collide as the display group". Live, every arena contact names one fixed
+collidable whose bounds are the body's *own* mesh grown by the 0.05 radius:
+the Combat Arena's 8-vertex `arena_collision` box ((-12.75, -2.315, -12.447)
+to (12.75, 13.785, 13.053)), the Octagon's 65-vertex `main_collision` slab
+(±13.91, y -4.084..1.719; the display group spans ±34 m) and the
+Compressor's 88-vertex `collision box`; the collidable's header holds the
+vertex count (8, 65, 88). The display group's children are not collided
+with: in the box, about 780 wheel contacts in ten captures cross the spike
+and saw plates (`hazard01/02`, `floor saw plate`, 3-6 cm above the floor)
+at floor height, where ours climbed them (5-8 % of ALARM's wheel contacts
+had normals tilted up to 42°; live none of about 3000). `collect_havok` now
+takes the own mesh when there is one; the arena probe that guards against
+a collider without a floor casts from above the arena instead of 5 m over
+its lowest visible point (which put it under Hilltop's and Electric's own
+floors). Colliders: box 396 → 24 triangles, Octagon → 332, Compressor →
+448, Electric/Hilltop now their rigid bodies (were the visible meshes);
+FlexTop unchanged (visible). The colliders are closed boxes with a roof, so
+a robot placed at an arbitrary `(x, z)` (tests, `drive-at`) is now dropped
+from just above the start points' height rather than from above the arena.
+Tests `spawn::the_combat_arena_collides_as_its_own_box`,
+`ra2_render::tests::arena_collider_is_the_bodys_own_mesh`.
+
+**A motor rotor's mass sits where its open proxy puts it (recovered live).**
+The angle motors' and the Z-Tek's rotor proxies (`axle_collision`) are boxes
+with no inboard end face (8 points, 10 triangles). Live, every wheel body on
+such a rotor has its centre of mass further out along the axle than ours:
+9 mm on the Scout, ALARM, FlapJack and Razor (angle motor, live hubs |x|
+0.4431/0.4892, 0.522-0.556, ...), 11.2 mm on Wide Load's Z-Tek wheels; the
+AxleMount wheels (closed axle box) and every chassis already matched. The
+tetrahedra from the hinge pivot to the proxy's triangles (the solid the
+surface and the cone to the missing face bound) put the rotor's mass 3/8 of
+the box from its closed end: 9.1 mm and 11.8 mm (the closed face itself
+would give 11.4). The body's inertia stays the box's: live, ALARM's wheel
+spins with 0.5569 kg·m² and Wide Load's with 1.2935, exactly the closed
+box's, which the open solid would change (0.5601, 1.316). Transverse, live
+0.4281/0.4297 (ALARM) and 1.5039 (Wide Load): ours were 0.4981 and 1.7160
+and are now 0.4519/0.4502 and 1.5450 (+5 %, +3 %); the box inertia carried
+from the new mass point is the closest rule that keeps the axle moments.
+`robot::havok_part` (`MassPiece` carries the rotor's triangles), test
+`mass_live::alarms_wheel_bodies_match_the_original`; the Scout's fork arm,
+14 chassis and 18 wheel records are unchanged. The other open meshes
+(`rotatorbar`, the bracket wedge, the snowplows) are not rotors and keep
+their old rule; unverified.
+
+**The heading drift.** Section 12g's "+0.30 rad, stable under
+perturbations" came from starting the throttle during the spawn drop; the
+live straights start after 1.5 s at rest. With a rest of 0.3-3.5 s
+(`driftens`), ours turns +0.262 ± 0.047 (10 runs) against live +0.191 ±
+0.033 (five runs, `contacts-nohaz-alarm__live__000..004`: 0.181, 0.190,
+0.151, 0.192, 0.242). What is established:
+
+* `MagicAction` is right, also its yaw branch: the 145 N·m test reads the
+  first accumulator (`Σ p × drive`, stack `+0x124`; the asm also sums
+  `p × drag` at `+0x1e4` and `p × impulse` at `+0x1d4`, which nothing reads),
+  and with ALARM's live record points (-0.600, 0.564, 0.561, -0.614) the sum
+  is 175 N·m, so the torque *is* applied every step, live and ours (ours
+  173 in 94 of 96 throttle steps; the live G records' normals are flat, as
+  ours). Section 12g's "under the threshold" was wrong.
+* The drift scales with that torque (ours ×0 → -0.03, ×0.5 → +0.13, ×1 →
+  +0.26); chassis inertia ×1.5 hardly moves it (0.24): it is set by the
+  wheels' yaw resistance, which live is about 1.4 times ours.
+* Per wheel, live and ours agree on speed, spin (17, 23, 28, 35 rad/s at
+  0.25 s intervals), contacts per wheel (0.6-1.0 per step), contact
+  distances, forward slip (+1 → +4.5 m/s), toe/camber flex (±0.3-0.7°,
+  ±1-2°), friction 0.3 and restitution 0.09 (contact records `+0x58..0x64`
+  read 0.3 per side), and the resistance impulse's yaw torque (-40..-70
+  N·m in both, reconstructed from the chassis states).
+* Neither the rotor rule nor the plates move it (0.283, 0.247 in single
+  experiments; with both, 0.264). Not found.
+
+**The tail-stand and the Scout's sensor.** The live fight starts show the
+original doing what ours does: in run 2 ALARM stands on its tail from 15.1
+to 23.4 s, leans back to up.y -0.55 and at 23.5 s goes over onto its back
+(COM 0.47 m above the floor; ours 0.51), where the Scout pushes it around;
+in run 1 it is on its tail for 1 s and comes back. While ALARM stands on its
+tail the live Scout's `flip` zone reads its chassis (contacts 1-6, chassis 1)
+as ours does, so `Engage` aims rather than drives; but live the reading
+drops to `(0, 0)` in 25-45 % of the samples, and in those frames `Engage`
+drives and the Scout shoves ALARM. Ours reads a steady `(2-4, True)` for as
+long as 12 s (warmup 0, 24-36 s: no push, no fire) until the Flipper's
+`CanDriveUpsideDown` latch trips (ALARM more than 3 m from where it was first
+seen upside down within 10 s; live it tripped in run 2 too) and from then on
+the Scout fires on ALARM whenever it is in the zone. Our zone test agrees
+with an exact GJK distance on every reading in that fight, so the
+difference is in what the phantom reports, not in our separating-axis
+approximation; one candidate is that Havok's phantom loses a collidable that
+lies wholly inside it (a penetrating pair reports no points, section 10).
+Not verified. On frequency: live, ALARM ended on its back in one of seven
+fights or fight starts; ours still in five of six box runs (warmups
+0/7/13/19/26/31: back 71/51/54/0/86/94 % of the fight).
+
+**ALARM's hits.** All of ALARM's counted hits are its Hammer Head's, live
+(one attacking component: 62 of 63, 77 of 77, 37 of 37) and ours. Ours land
+them in the first 20-40 s and then none, because ALARM is on its back; live
+it stays upright and keeps landing 10-25 per 20 s. So the count follows the
+tail-stand above.
+
+**Validation.** Before = `fidelity` 597a227, after = this branch. Drive-at
+table (section 11d's runs, hazards off; the Sentinel rows rebuilt as
+`drive-at` from `magic-sentinel__live__002`'s pose (-10.036, 10.208, 2.427),
+1.98 s straight, and `__001`'s (-10.154, 10.319, 2.474), full throttle and
+`Turn(+100)` for 0.9 s):
+
+| robot | metric | original | before | after |
+|---|---|---:|---:|---:|
+| Scout | top / t90 / dist / coast / turn | 11.01 / 1.47 / 14.29 / 7.89 / 10.66 | 10.83 / 1.43 / 14.25 / 7.30 / 10.77 | 10.84 / 1.35 / 14.38 / 7.88 / 10.78 |
+| ALARM | top / t90 / dist / coast / turn | 13.85 / 1.22 / 14.15 / 11.15 / 12.1 | 14.00 / 1.27 / 14.11 / 9.20 / 11.30 | 14.05 / 1.25 / 14.09 / 9.62 / 11.28 |
+| ALARM | drift 0.5-1.5 s after a 0.3-3.5 s rest (10 runs) | +0.191 ± 0.033 (5 runs) | +0.262 ± 0.047 | +0.264 ± 0.069 |
+| FlapJack | top / t90 / dist / coast / turn | 10.31 / 1.45 / 12.41 / 6.78 / 10.16 | 10.25 / 1.48 / 11.67 / 6.61 / 10.01 | 10.47 / 1.48 / 11.93 / 6.94 / 10.11 |
+| Razor | top / t90 / dist / coast / turn | 17.50 / 1.52 / 23.07 / 5.72 / 12.2 | 16.68 / 1.35 / 22.46 / 7.83 / 12.50 | 17.30 / 1.53 / 22.63 / 7.58 / 12.47 |
+| Wide Load | top / t90 / dist / coast / turn | 13.90 / 1.55 / 19.49 / 8.61 / 12.37 | 13.36 / 1.65 / 17.79 / 9.53 / 13.19 | 13.21 / 1.58 / 17.91 / 9.14 / 13.19 |
+| Sentinel | straight top / t90 / dist / coast | 14.98 / 1.45 / 19.79 / 7.88 | 14.94 / 1.52 / 19.08 / 9.92 | 14.73 / 1.50 / 18.74 / 9.75 |
+| Sentinel | circle 0.9 s: heading / path / top | 1.43 / 4.54 / 8.46 | 1.45 / 4.61 / 8.57 | 1.42 / 4.58 / 8.59 |
+
+Fights as ensembles (six runs each, `FIDTRACE_WARMUP` 0/7/13/19/26/31; mean
+counted hits (mean total), mean length, runs that last 120 s):
+
+| fight | original | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 63, 77, 37 / 9, 6, 7 | 11.8 (650) / 4.0 (53), 72 s, 1/6 | 14.2 (765) / 4.5 (59), 82 s, 0/6 |
+| box Razor v FlapJack: Razor / FlapJack | 3 (40) / 1 (12) | 4.2 (91) / 0.7 (8), 102 s, 4/6 | 2.7 (58) / 1.0 (13), 107 s, 5/6 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 60 (1778) / 2 (23) | 33.0 (1057) / 1.2 (14), 99 s, 4/6 | 57.0 (1884) / 6.2 (84), 114 s, 5/6 |
+| Octagon Scout v ALARM: ALARM / Scout | 24 (944), Scout out at 67 s | 6.0 (344) / 1.8 (35), 53 s, 0/6 | 6.7 (403) / 2.0 (29), 61 s, 0/6 |
+
+AI suite (ten pairings, warmups 0/7/13): before 29/30 deal damage (warmup
+0: 10/10), after 29/30 (warmup 0: 10/10; Tornado v Ripblade at warmup 13 in
+both). Traction survey 45/45.
+
+**Still open.** The heading drift (ours 0.26, live 0.19, the yaw resistance
+of the wheel contacts); the Scout's sensor that never lets go of a
+tail-standing ALARM, and with it ALARM ending on its back in five of six box
+runs and its counted hits; the wheels' transverse inertia (+3-5 %); which
+other `.gmf` children or open meshes the original drops or treats as here.

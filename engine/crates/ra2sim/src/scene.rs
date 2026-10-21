@@ -68,19 +68,18 @@ fn ray_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f3
     (dist > 1e-4).then_some(dist)
 }
 
-/// Does a downward ray at `(x, z)` land on something within 10 m below `top`?
+/// Does a downward ray at `(x, z)`, cast from above everything (`above`),
+/// land on something lower than `below` (the arena's vertical middle, so a
+/// ceiling does not count as a floor)?
 ///
-/// `top` is the lowest point of the *visible* geometry, so an arena that sits
-/// well below the origin still probes its own floor. (The distance a ray reports
-/// is not a height; comparing the two — as this used to — only worked for
-/// arenas near y = 0 and rejected every arena dug deeper than 10 m, which is
-/// why `Hilltop`, `Clawtop`, `Electric` and `FlexTop` never used their own
-/// rigid-body collider.)
-fn has_floor(triangles: &[[Vec3; 3]], x: f32, z: f32, top: f32) -> bool {
-    let origin = Vec3::new(x, top + 5.0, z);
+/// It used to start 5 m above the lowest *visible* point, which for an arena
+/// with a deep pit (Hilltop's is 20 m down, Electric's 8 m) is under its own
+/// floor, so the ray never met it.
+fn has_floor(triangles: &[[Vec3; 3]], x: f32, z: f32, above: f32, below: f32) -> bool {
+    let origin = Vec3::new(x, above, z);
     triangles.iter().any(|t| {
         ray_triangle(origin, Vec3::NEG_Y, t[0], t[1], t[2])
-            .map(|d| origin.y - d > top - 10.0)
+            .map(|d| origin.y - d < below)
             .unwrap_or(false)
     })
 }
@@ -172,7 +171,13 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
         if mode == "auto" || mode == "rb" {
             if let Some(h) = &havok {
                 if !h.static_triangles.is_empty()
-                    && has_floor(&h.static_triangles, centre.x, centre.z, min.y)
+                    && has_floor(
+                        &h.static_triangles,
+                        centre.x,
+                        centre.z,
+                        max.y + 1.0,
+                        centre.y,
+                    )
                     && (mode == "rb" || supports_starts(&h.static_triangles, &starts))
                 {
                     source = "rigid bodies";
@@ -189,7 +194,7 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
             // centre has nothing under it we would drop robots through the world,
             // so fall back rather than trust it.
             match proxy {
-                Some(t) if has_floor(&t, centre.x, centre.z, min.y) => {
+                Some(t) if has_floor(&t, centre.x, centre.z, max.y + 1.0, centre.y) => {
                     source = "proxy";
                     raw = t;
                 }

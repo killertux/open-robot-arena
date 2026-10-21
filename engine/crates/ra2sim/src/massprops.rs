@@ -81,11 +81,42 @@ pub fn mesh_inertia(points: &[Vec3], triangles: &[[u32; 3]]) -> Option<(f32, Vec
 /// `det(A) A C0 Aᵀ` (with `C0` the unit tetrahedron's), and the inertia is
 /// `trace(C) I - C` once the covariance is moved to the centroid.
 fn solid_inertia(points: &[Vec3], triangles: &[[u32; 3]]) -> Option<(f32, Vec3, glam::Mat3)> {
-    use glam::{DMat3, DVec3};
     if points.is_empty() {
         return None;
     }
-    let reference = (points.iter().copied().sum::<Vec3>() / points.len() as f32).as_dvec3();
+    let reference = points.iter().copied().sum::<Vec3>() / points.len() as f32;
+    solid_inertia_from(points, triangles, reference)
+}
+
+/// A rigid body's mass properties from its geometry's own triangles: volume,
+/// centroid and inertia (about the centroid, unit density) of the tetrahedra
+/// from `reference` to every triangle as wound. For a closed surface the
+/// reference does not matter and this is the solid the surface bounds; for an
+/// open one (the stock motors' rotor proxies, boxes without their inboard end
+/// face) it is the solid the surface and the cone from `reference` bound.
+pub fn triangles_mass_from(
+    points: &[Vec3],
+    triangles: &[[u32; 3]],
+    reference: Vec3,
+) -> Option<(f32, Vec3, glam::Mat3)> {
+    if triangles.is_empty()
+        || triangles
+            .iter()
+            .flatten()
+            .any(|&i| i as usize >= points.len())
+    {
+        return None;
+    }
+    solid_inertia_from(points, triangles, reference)
+}
+
+fn solid_inertia_from(
+    points: &[Vec3],
+    triangles: &[[u32; 3]],
+    reference: Vec3,
+) -> Option<(f32, Vec3, glam::Mat3)> {
+    use glam::{DMat3, DVec3};
+    let reference = reference.as_dvec3();
     let c0 = DMat3::from_cols(
         DVec3::new(2.0, 1.0, 1.0),
         DVec3::new(1.0, 2.0, 1.0),
@@ -279,6 +310,51 @@ fn quickhull(points: &[Vec3]) -> Option<Vec<[usize; 3]>> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A box without its top face, integrated from the middle of its bottom,
+    /// puts its mass 3/8 of the way up (the solid is the box less the cone
+    /// from that point to the missing face); closed, it is the box's centre.
+    #[test]
+    fn an_open_box_from_its_closed_end_weighs_at_three_eighths() {
+        let p: Vec<Vec3> = (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 == 0 { -0.5 } else { 0.5 },
+                    if i & 2 == 0 { -0.5 } else { 0.5 },
+                    if i & 4 == 0 { 0.0 } else { 2.0 },
+                )
+            })
+            .collect();
+        // Outward-wound faces of the box, the z = 2 end last.
+        let sides = vec![
+            [0, 2, 3],
+            [3, 1, 0], // z = 0
+            [0, 1, 5],
+            [5, 4, 0], // y = -0.5
+            [1, 3, 7],
+            [7, 5, 1], // x = 0.5
+            [3, 2, 6],
+            [6, 7, 3], // y = 0.5
+            [2, 0, 4],
+            [4, 6, 2], // x = -0.5
+        ];
+        let open = triangles_mass_from(&p, &sides, Vec3::ZERO).expect("open");
+        assert!(
+            (open.1 - Vec3::new(0.0, 0.0, 0.75)).length() < 1e-5,
+            "{:?}",
+            open.1
+        );
+        let mut closed = sides.clone();
+        closed.extend([[4, 5, 7], [7, 6, 4]]);
+        let shut = triangles_mass_from(&p, &closed, Vec3::ZERO).expect("closed");
+        assert!(
+            (shut.1 - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5,
+            "{:?}",
+            shut.1
+        );
+        assert!((shut.0 - 2.0).abs() < 1e-5);
+    }
+
     use super::*;
 
     #[test]

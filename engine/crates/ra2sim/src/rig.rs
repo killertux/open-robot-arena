@@ -343,6 +343,10 @@ pub struct HavokParts {
     pub rotor_collision_mesh: Vec<Option<Vec<[u32; 3]>>>,
     /// Per piece of `rotor_collision`: its rigid body's own mass.
     pub rotor_piece_mass: Vec<f32>,
+    /// Per piece of `rotor_collision`: its triangles as the `.gmf` stores
+    /// them, which place the rotor's mass (the stock rotor proxies are boxes
+    /// open at their inboard end, docs/29 section 12h).
+    pub rotor_faces: Vec<Vec<[u32; 3]>>,
     /// Per phantom rigid body: its geometry and its own mass (it places that
     /// mass, though it collides with nothing).
     pub phantom_pieces: Vec<(Vec<Vec3>, f32)>,
@@ -409,8 +413,8 @@ impl HavokParts {
                 out.restitution = Some(rb.elasticity);
             }
             let (pts, faces) = geometry_of(rb);
-            let mesh =
-                (collides_as_mesh(rb.simulation_geometry) && !faces.is_empty()).then_some(faces);
+            let mesh = (collides_as_mesh(rb.simulation_geometry) && !faces.is_empty())
+                .then(|| faces.clone());
             if rb.disable_collisions {
                 if pts.len() >= 4 {
                     out.phantom_pieces.push((pts.clone(), rb.mass.max(0.0)));
@@ -425,6 +429,7 @@ impl HavokParts {
                     out.rotor_collision.push(pts);
                     out.rotor_collision_mesh.push(mesh);
                     out.rotor_piece_mass.push(rb.mass.max(0.0));
+                    out.rotor_faces.push(faces.clone());
                 }
                 continue;
             }

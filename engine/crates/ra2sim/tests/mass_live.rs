@@ -196,3 +196,62 @@ fn the_scout_fork_arm_matches_the_original() {
     let cap = r.hinge_settings(p).expect("fork controller").max_torque;
     assert!((cap - 462.4).abs() < 1.0, "load cap {cap}, live 462.4");
 }
+
+/// ALARM's wheel bodies (an angle motor's rotor plus a Mini wheel): live
+/// (`contacts-nohaz-alarm__live__003`, P rows) 27 kg with 0.5569 kg·m² about
+/// the axle and 0.4281 / 0.4297 across it, and at rest their centres of mass
+/// sit 0.522 / 0.529 / 0.555 / 0.556 m to the side of the chassis' (chassis
+/// frame, `contacts-nohaz-alarm__live__000..002`): the rotor's mass where its
+/// open proxy's triangles put it (docs/29 section 12h).
+#[test]
+fn alarms_wheel_bodies_match_the_original() {
+    let Some(game) = game_dir() else {
+        eprintln!("skipped: no game data (set RA2_GAME)");
+        return;
+    };
+    if std::env::var("RA2_PHYSICS").is_ok_and(|b| b != "havok17") {
+        eprintln!("skipped: not the havok17 backend");
+        return;
+    }
+    let _scripts = ra2script::lock();
+    let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+    let setup = BotSetup {
+        path: game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string(),
+        yaw_deg: None,
+        spawn: None,
+    };
+    let d = Duel::new(&arena, std::slice::from_ref(&setup)).expect("a duel");
+    let r = &d.robots[0];
+    let chassis = d.physics.state(r.parts[0].body).expect("chassis");
+    let chassis_com = d.physics.center_of_mass(r.parts[0].body).expect("com");
+    let mut sides = Vec::new();
+    for p in 1..r.rig.parts.len() {
+        let (mass, _, inv) = d
+            .physics
+            .mass_properties(r.parts[p].body)
+            .expect("mass properties");
+        if (mass - 27.0).abs() > 0.01 {
+            continue;
+        }
+        let mut e = principal(inv.inverse());
+        e.sort_by(f32::total_cmp);
+        assert!(
+            (e[2] - 0.5569).abs() < 0.002,
+            "axle moment {e:?}, live 0.5569"
+        );
+        assert!(
+            (e[0] - 0.429).abs() < 0.03 && (e[1] - 0.429).abs() < 0.03,
+            "transverse moments {e:?}, live 0.4281 / 0.4297"
+        );
+        let com = d.physics.center_of_mass(r.parts[p].body).expect("com");
+        sides.push((chassis.rotation.inverse() * (com - chassis_com)).x.abs());
+    }
+    sides.sort_by(f32::total_cmp);
+    assert_eq!(sides.len(), 4, "four wheel bodies");
+    for (ours, live) in sides.iter().zip([0.522f32, 0.529, 0.555, 0.556]) {
+        assert!(
+            (ours - live).abs() < 0.003,
+            "hub offsets {sides:?}, live (0.522, 0.529, 0.555, 0.556)"
+        );
+    }
+}

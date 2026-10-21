@@ -20,7 +20,10 @@ import frida
 
 import capture_drive as cd
 
-AGENT = os.path.join(cd.HERE, "frida", "ra2_fight_hits.js")
+# AGENT= another agent with A rows (e.g. frida/ra2_contacts.js), PREFIX= the
+# file name's prefix (default "fight").
+AGENT = os.environ.get("AGENT", os.path.join(cd.HERE, "frida", "ra2_fight_hits.js"))
+PREFIX = os.environ.get("PREFIX", "fight")
 HOST = os.environ.get("RA2_FRIDA_HOST", "127.0.0.1:27142")
 
 
@@ -56,9 +59,9 @@ def main():
     sc.unload()
     sess.detach()
     n = 0
-    while os.path.exists(os.path.join(out_dir, f"fight-{name}__live__{n:03d}.jsonl")):
+    while os.path.exists(os.path.join(out_dir, f"{PREFIX}-{name}__live__{n:03d}.jsonl")):
         n += 1
-    base = os.path.join(out_dir, f"fight-{name}__live__{n:03d}")
+    base = os.path.join(out_dir, f"{PREFIX}-{name}__live__{n:03d}")
     with open(base + ".jsonl", "w") as f:
         for r in rows:
             f.write(json.dumps(r, separators=(",", ":")) + "\n")

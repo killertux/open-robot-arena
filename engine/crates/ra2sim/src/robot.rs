@@ -104,22 +104,43 @@ const WHEEL_LATERAL_G: f32 = 0.5;
 /// where it meets the ground.
 const HULL_SKIN: f32 = 0.045;
 
-/// A body's piece: its points, its triangles when it collides as a mesh, and
-/// its own rigid body's mass.
-type MassPiece = (Vec<Vec3>, Option<Vec<[u32; 3]>>, f32);
+/// A body's piece: its points, its triangles when it collides as a mesh, its
+/// own rigid body's mass, and, for a motor's rotor, the triangles that place
+/// that mass.
+///
+/// The stock rotor proxies (`axle_collision` of the angle motors and the
+/// Z-Tek) are boxes without their inboard end face. Live, every wheel body on
+/// such a rotor has its centre of mass 9 mm (angle motor) and 11 mm (Z-Tek)
+/// further out along the axle than the proxy's box centre puts it, and no
+/// other body differs (`contacts-nohaz-*__live__*`, five robots); the mass
+/// sits where the tetrahedra from the hinge pivot to the proxy's triangles
+/// put it, 3/8 of the box from its closed end. The bodies' inertia stays the
+/// box's: live, ALARM's wheel spins with 0.5569 kg·m² and Wide Load's with
+/// 1.2935, exactly the box's (docs/29 section 12h).
+type MassPiece = (Vec<Vec3>, Option<Vec<[u32; 3]>>, f32, Option<Vec<[u32; 3]>>);
+
+/// Where an open piece's mass sits: its triangles' solid from `pivot`.
+fn open_centroid(pts: &[Vec3], tris: &[[u32; 3]], pivot: Vec3) -> Option<Vec3> {
+    massprops::triangles_mass_from(pts, tris, pivot).map(|(_, c, _)| c)
+}
 
 /// Where a component's mass sits in a Havok body (measured live on 14 stock
 /// robots, `assembly-*__live__000`, to 0.1 mm on the chassis bodies): each of
 /// its rigid bodies' mass at the centroid of the solid that body's geometry
-/// bounds (a mesh body's own triangles, a convex body's hull): their total
-/// mass and its centre, `None` for no mass or geometry.
-fn mass_point_weighted(pieces: &[MassPiece]) -> Option<(f32, Vec3)> {
+/// bounds (a mesh body's own triangles, a convex body's hull, a rotor's
+/// triangles from the hinge `pivot`): their total mass and its centre, `None`
+/// for no mass or geometry.
+fn mass_point_weighted(pieces: &[MassPiece], pivot: Vec3) -> Option<(f32, Vec3)> {
     let (w, at) = pieces
         .iter()
         .filter(|p| p.2 > 0.0)
-        .filter_map(|(pts, mesh, m)| {
-            mesh.as_ref()
-                .and_then(|tris| massprops::mesh_volume_centroid(pts, tris))
+        .filter_map(|(pts, mesh, m, open)| {
+            open.as_ref()
+                .and_then(|tris| open_centroid(pts, tris, pivot).map(|c| (0.0, c)))
+                .or_else(|| {
+                    mesh.as_ref()
+                        .and_then(|tris| massprops::mesh_volume_centroid(pts, tris))
+                })
                 .or_else(|| massprops::hull_volume_centroid(pts))
                 .map(|(_, c)| (*m, c))
         })
@@ -755,10 +776,10 @@ impl Robot {
                        tag: u32,
                        at: Vec3| {
             let mut placed = Vec::new();
-            for (pts, mesh, piece_mass) in pieces {
+            for (pts, mesh, piece_mass, open) in pieces {
                 let local: Vec<Vec3> = pts.iter().map(|q| m.transform_point3(*q)).collect();
                 if massprops::hull_volume_centroid(&local).is_some() {
-                    placed.push((local, mesh.clone(), *piece_mass));
+                    placed.push((local, mesh.clone(), *piece_mass, open.clone()));
                 }
             }
             let ghosts: Vec<Piece> = phantoms
@@ -768,6 +789,7 @@ impl Robot {
                         pts.iter().map(|q| m.transform_point3(*q)).collect(),
                         None,
                         *pm,
+                        None,
                     )
                 })
                 .collect();
@@ -781,26 +803,39 @@ impl Robot {
                 let mut all: Vec<Piece> = if own > 0.0 {
                     placed
                         .iter()
-                        .map(|(p, t, pm)| (p.clone(), t.clone(), pm * body_mass / own))
+                        .map(|(p, t, pm, o)| {
+                            (p.clone(), t.clone(), pm * body_mass / own, o.clone())
+                        })
                         .collect()
                 } else {
                     let vols: Vec<f32> = placed
                         .iter()
-                        .map(|(p, _, _)| massprops::hull_volume_centroid(p).map_or(0.0, |v| v.0))
+                        .map(|(p, _, _, _)| massprops::hull_volume_centroid(p).map_or(0.0, |v| v.0))
                         .collect();
                     let total: f32 = vols.iter().sum();
                     placed
                         .iter()
                         .zip(&vols)
-                        .map(|((p, t, _), v)| {
+                        .map(|((p, t, _, o), v)| {
                             let share = if total > 0.0 { v / total } else { 0.0 };
-                            (p.clone(), t.clone(), body_mass * share)
+                            (p.clone(), t.clone(), body_mass * share, o.clone())
                         })
                         .collect()
                 };
                 all.extend(ghosts.iter().cloned());
-                for (pts, mesh, pm) in &all {
+                for (pts, mesh, pm, open) in &all {
                     if *pm <= 0.0 {
+                        continue;
+                    }
+                    // A rotor: its box's inertia, carried from where its
+                    // triangles put its mass.
+                    if let Some(c) = open.as_ref().and_then(|tris| open_centroid(pts, tris, at)) {
+                        let props = crate::havok17::mass::of_shape(&ShapeDesc::ConvexHull {
+                            points: pts.clone(),
+                        });
+                        if props.volume > 0.0 {
+                            bodies_inertia.push((*pm, c, props.inertia * (*pm / props.volume)));
+                        }
                         continue;
                     }
                     // A mesh body's own triangles, as for its centre.
@@ -820,7 +855,7 @@ impl Robot {
                 }
                 // Nothing to collide: the rest of the mass sits at `at`.
                 let rest = if placed.is_empty() { body_mass } else { 0.0 };
-                match mass_point_weighted(&all) {
+                match mass_point_weighted(&all, at) {
                     Some((w, c)) if w + rest > 0.0 => (c * w + at * rest) / (w + rest),
                     _ => at,
                 }
@@ -835,8 +870,13 @@ impl Robot {
                     "mass: part body tag {tag} weight {weight:.3} at {centre:?} origin {at:?} pieces {}",
                     placed.len()
                 );
+                for (pts, _, _, _) in &placed {
+                    let lo = pts.iter().copied().fold(Vec3::splat(f32::MAX), Vec3::min);
+                    let hi = pts.iter().copied().fold(Vec3::splat(f32::MIN), Vec3::max);
+                    eprintln!("      piece {} points, box {lo:?}..{hi:?}", pts.len());
+                }
             }
-            for (pts, mesh, _) in placed {
+            for (pts, mesh, _, _) in placed {
                 let shape = match mesh {
                     Some(indices) => ShapeDesc::MeshHull {
                         points: pts,
@@ -871,6 +911,7 @@ impl Robot {
                         pts.clone(),
                         mesh.cloned().flatten(),
                         m.copied().unwrap_or(0.0),
+                        None,
                     )
                 };
             let pieces: Vec<Piece> = if !collides {
@@ -893,7 +934,7 @@ impl Robot {
                 }
                 v
             } else if !c.hull_points.is_empty() {
-                vec![(c.hull_points.clone(), None, 0.0)]
+                vec![(c.hull_points.clone(), None, 0.0, None)]
             } else {
                 Vec::new()
             };
@@ -949,6 +990,7 @@ impl Robot {
                         pts.clone(),
                         motor.havok.rotor_collision_mesh.get(k).cloned().flatten(),
                         motor.havok.rotor_piece_mass.get(k).copied().unwrap_or(0.0),
+                        motor.havok.rotor_faces.get(k).cloned(),
                     )
                 })
                 .collect();
@@ -956,7 +998,7 @@ impl Robot {
             let (rotor, rotor_mass) = if all.len() > 1 && motor.role == Role::Axle {
                 let near = all
                     .iter()
-                    .map(|(pts, _, _)| {
+                    .map(|(pts, _, _, _)| {
                         let pts: Vec<Vec3> = pts.iter().map(|q| m.transform_point3(*q)).collect();
                         massprops::hull_volume_centroid(&pts)
                             .map(|(_, c)| c.distance(pivot))

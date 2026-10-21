@@ -683,8 +683,22 @@ if _e is not None:\n    _w = list(_a.GetPath(_b.GetLocation(), plus.getLocation(
         "ai t={time:.3} bot={robot} {at} tactic={tactic} throttle={} turn={} route={route} sensors={} events={events}",
         attr("set_throttle"),
         attr("set_turn_throttle"),
-        attr("sensors"),
+        sensors_of(py, b),
     );
+}
+
+/// A brain's sensor table as `{robot: (contacts, chassis)}`.
+fn sensors_of(py: Python<'_>, b: &Bound<'_, PyAny>) -> String {
+    let locals = pyo3::types::PyDict::new(py);
+    let _ = locals.set_item("_b", b);
+    py.run(
+        c_str!("_s = dict((k, (v.contacts, v.chassis)) for k, v in _b.sensors.items())\n"),
+        None,
+        Some(&locals),
+    )
+    .and_then(|_| locals.get_item("_s"))
+    .map(|s| s.map(|s| s.to_string()).unwrap_or_default())
+    .unwrap_or_else(|e| format!("err {e}"))
 }
 
 /// Report a script fault once. A broken brain fails every tick, and a duel runs
