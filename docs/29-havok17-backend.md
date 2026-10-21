@@ -1043,7 +1043,9 @@ than live (in the robot frame, `y`: Scout 0.159 against 0.195, ALARM 0.238
 against 0.263, FlapJack 0.183 against 0.208); taking the chassis piece's box
 centre instead of its volume centroid closes half of `y` but moves `z` the
 wrong way, so the rule is not that either. A lower centre makes ours harder
-to flip, not easier. Traction survey: 45/45.
+to flip, not easier. Traction survey: 45/45. (Section 12f: the two weak
+substeps were a misreading of the capture; the centre of mass, inertia and
+wheel-record rules are recovered; the flip remains.)
 
 **FlapJack's spin-up** (task of section 11d): not the load cap — a grounded
 wheel's hinge motor is off. Part of it is the wheel records' hub offsets
@@ -1057,3 +1059,153 @@ assembled, and the chassis body's centre at that moment was not recovered.
 Our chassis centre of mass also sits 2.6 cm lower and 3.5 cm further forward
 than live ((0.003, 0.183, -0.053) against (-0.001, 0.209, -0.088) in the robot
 frame, `assembly-flapjack__live__000`).
+
+### 12f. Burst timing, the motor's target and the bodies' mass properties (fx/physics-flip)
+
+New live captures (fresh sessions): `firetiming-scout-alarm__live__000`
+(`frida/ra2_fire_timing.js` through `capture_weapons.py AGENT=`, hazards
+off, AIs neutered, the Scout fires twice), a second and a third box fight
+(`fight-scout-alarm-box__live__001` with `.pose.tsv` from `ra2_python.py
+--sample`; `fightpose-scout-alarm-box__live__000`, `frida/ra2_magic.js`: both
+chassis bodies every step). Diagnostics: `examples/comprobe.rs` (bodies' mass,
+centre and inertia; `RA2_MASS_DEBUG=1` prints every component's mass point),
+`forktrace.rs` (a burst motor's speed every substep), `fightprobe.rs` (both
+chassis' height and up vector in an AI fight), `fidtrace match` with
+`FIDTRACE_WARMUP=<n>` (n idle steps first: one fight as an ensemble).
+
+**How a step is split (verified live).** Per step piece the actions run in
+this order: the hinge controllers (`0x481450`), then the constraint solver
+(`0x535a50`). A static reading suggested the opposite, but the live capture
+shows the controllers first. A burst motor fires in the game update after a
+world step (`0x446810`): it unlocks (`Lock(0)`), and in the next substep its
+controller switches the motor on before the solver runs. A step that
+backsteps is two pieces (live: `h = 1/120` twice), and each solver call still
+uses `dt = 1/60` for the servo and the limit (live H rows); ours already
+does both. The limit is the predictive clamp of section 2, in the motor's own
+row. Factor 1, no softness, the motor not cut.
+
+The "two near-zero substeps" of section 12e came from a misreading: the H
+rows sample the bodies *before* each solver call. Live, the fork's speed
+entering the solver calls after the fire reads 1.2, 3.5, 18.4, 37.1, (split
+piece) 24.7, 13.1, 9.7, 0.2, then it locks at -1.18 rad. That is one weak
+call, its target 0 against an angle of -0.03, then the cap. Ours, after each
+substep: -1.9, 17.3, 35.3, 19.4, 9.3, then it locks: the same start, and the
+end one substep earlier. Live, the 37 rad/s substep splits (a contact
+backstep) and ours does not. Which contact that is was not identified.
+
+**The target angle is never reset (recovered, verified live).** When a
+motor comes on, the solver atom keeps its old target (`atom + 0x98`). It is 0
+from construction and only shifted by whole turns to within π of the angle
+(`0x5355a0`). Live: the fork locks with its target at -2.589, and the cocking
+motor starts 29 substeps later from -2.589 at an angle of -1.161. Ours used to
+reset the target to the current angle. It now keeps it
+(`Havok17Backend::set_motor`; test
+`a_motor_switched_back_on_keeps_its_old_target`).
+
+**Mass properties (recovered live, `tests/mass_live.rs`).** Each body is the
+sum of its components' rigid bodies, every one at its own mass:
+
+* **Where each rigid body's mass sits.** At the centroid of the solid its
+  geometry bounds: a mesh body's own triangles (`SIMULATION_GEOMETRY 6`, and
+  the chassis mesh, which is not convex for FlapJack), a convex body's hull.
+  The collision proxy counts when one is set.
+* **Components with nothing to collide count as well.** Power cells, the
+  control board and air tanks sit at their own geometry. A SmartZone's 2 kg
+  sits at its zone box: about a metre in front of the robot.
+* **How a component's mass is shared.** In proportion to its rigid bodies'
+  `.gmf` masses, or by volume when they store none (the stock wheels).
+  Phantoms keep their own masses.
+* **Steering hubs.** A `Steering` unit's `hub1`/`hub2` (5 kg each) belong to
+  the hub bodies, not the chassis. Live, Sentinel's hub bodies weigh 23 kg.
+* **Inertia.** Each rigid body's own inertia (its hull at uniform density,
+  scaled to its mass), carried to the body's centre of mass and summed
+  (`BodyDesc::inertia`, which havok17 takes as given). Live, the Scout's
+  chassis reads (23.2837, 39.0837, 21.2655) on the diagonal and (-0.2644,
+  1.2629, 0.3957) off it (`bodies-scout-alarm__live__000`, body `+0x19c`).
+  Ours now gives the same to four digits. The old one (the colliding hulls at
+  one density) read (23.36, 44.34, 27.32) on the diagonal.
+
+Chassis centre of mass in the robot frame, 14 robots
+(`assembly-*__live__000`):
+
+| | before | after |
+|---|---:|---:|
+| y error (all lower than live) | 1.6-3.6 cm | ≤ 5 mm |
+| largest error | 5.9 cm (Grog, z) | 6.2 mm (Tornado) |
+| robots within 0.5 mm | 1 (Coal Miner) | 10 |
+| Sentinel / BEAR chassis mass | +10 kg (hubs) | exact |
+
+Scout 0.159 → 0.195 m (live 0.195), ALARM 0.238 → 0.262 (0.263), FlapJack
+0.183 → 0.208 (0.208).
+
+**The wheel records (`AddWheel`, recovered live).** The record's offset
+(`+0x2c`) is the wheel's own mass point (its rigid bodies, without the
+motor's rotor it rides) less the chassis body's centre of mass at that moment
+of the build. That centre is the one of the chassis members that come before
+the wheel in the `.bot` (`0x4dc180` adds them in order). All 18 live records
+of FlapJack, Sentinel, Razor, Wide Load and ALARM (`magic-*__live__*`) agree
+to 0.5 mm; before, the error was up to 7 cm. FlapJack now turns at 10.09
+rad/s (live 10.16, before 9.25).
+
+**Still open.** The Scout's fork arm: live, its centre of mass is 1.8 cm
+nearer the pivot (load lever 0.288, ours 0.306). Its principal inertia is
+(0.171, 2.513, 2.573) live against (0.157, 2.719, 2.765) ours: the arm's mass
+is less spread out than our three bodies (extender 2 kg, fork 12, the motor's
+`bmotor_axle` 12) put it. Using the fork's display mesh or the proxies'
+transforms does not explain it.
+
+**Tipping in the original.** Ours flips ALARM, but the original tips robots
+too:
+
+* `fight-scout-alarm-box__live__001` (ALARM 77 counted hits, 2729):
+  `plus.isUpsideDown` reads ALARM upside down when the sampling starts (21.6 s
+  elapsed) and again from 22.9 to 24.7 s. Then it is upright again, and its
+  centre of mass sits 0.36 m higher upside down than upright.
+* `fightpose-scout-alarm-box__live__000`: the *Scout* goes onto its side at
+  17.4 s and stays there. ALARM parks from 38 s.
+
+So a fight that ends early is not a defect in itself. One run of a fight is
+chaotic. The difference that remains is that the original's ALARM has been
+seen to recover from upside down, and ours, once on its back or side, stays
+there. Ours rests 8 cm lower upside down in the box (centre of mass 0.67 m
+above the floor, live 0.75 m).
+
+**Validation.** Before = `fidelity` beb1249, after = this branch.
+
+Drive-at table (section 11d's runs, hazards off):
+
+| robot | metric | original | before | after |
+|---|---|---:|---:|---:|
+| Scout | top / t90 / dist / coast / turn | 11.01 / 1.47 / 14.29 / 7.89 / 10.66 | 10.92 / 1.47 / 14.25 / 7.24 / 10.68 | 10.82 / 1.45 / 14.25 / 7.21 / 10.77 |
+| ALARM | top / t90 / dist / coast / turn | 13.85 / 1.22 / 14.15 / 11.15 / 12.1 | 13.96 / 1.27 / 14.23 / 11.07 / 11.02 | 14.00 / 1.27 / 14.11 / 9.20 / 11.30 |
+| FlapJack | top / t90 / dist / coast / turn | 10.31 / 1.45 / 12.41 / 6.78 / 10.16 | 10.46 / 1.47 / 12.05 / 6.97 / 9.25 | 10.39 / 1.50 / 11.70 / 6.85 / **10.09** |
+| Razor | top / t90 / dist / coast / turn | 17.50 / 1.52 / 23.07 / 5.72 / 12.2 | 16.99 / 1.35 / 22.97 / 6.11 / 12.27 | 16.68 / 1.35 / 22.46 / 7.83 / 12.50 |
+| Wide Load | top / t90 / dist / coast / turn | 13.90 / 1.55 / 19.49 / 8.61 / 12.37 | 13.13 / 1.60 / 17.91 / 9.17 / 12.86 | 13.36 / 1.65 / 17.79 / 9.53 / 13.19 |
+| Sentinel | straight top / t90 / dist / coast | 14.98 / 1.45 / 19.79 / 7.88 | 14.49 / 1.50 / 18.88 / 10.26 | 14.55 / 1.47 / 19.36 / 9.29 |
+| Sentinel | circle 0.9 s: heading / path / top | 1.43 / 4.54 / 8.46 | 1.27 / 4.46 / 8.22 | 1.38 / 4.59 / 8.57 |
+
+The results are mixed: FlapJack's turn and Sentinel are closer, and ALARM's
+coast (-1.9 m) and Razor's coast are worse. Along the live capture's own
+straight (`magic-wideload__live__000`, from (10.0, -9.55) at -1.636 for 2 s),
+Wide Load now drifts 0.05 rad, against 0.55 rad with the old wheel records
+(live 0.01).
+
+Fights as ensembles (six runs each, `FIDTRACE_WARMUP` 0/7/13/19/26/31; mean
+counted hits (mean total), mean length, runs that last 120 s):
+
+| fight | original (one run each) | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM | 63 (2470); 77 (2729) | 17.3 (917), 67 s, 1/6 | 14.3 (715), 64 s, 1/6 |
+| box Scout v ALARM: Scout | 9 (121); 6 (71) | 5.2 (66) | 5.2 (71) |
+| box Razor v FlapJack: Razor / FlapJack | 3 (40) / 1 (12) | 6.2 (157) / 0.5 (6), 120 s, 6/6 | 2.8 (73) / 1.0 (16), 93 s, 2/6 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 60 (1778) / 2 (23) | 38.3 (1117) / 2.8 (40), 93 s, 4/6 | 46.2 (1476) / 2.8 (45), 113 s, 4/6 |
+| Octagon Scout v ALARM: ALARM / Scout | 24 (944) / -, Scout out at 67 s | 6.0 (352) / 1.5 (20), 47 s | 2.0 (143) / 1.2 (16), 27 s |
+
+The fork still flips ALARM: in the Octagon, after 6 s in every run. The
+ensembles did not improve on the whole: the Compressor is better, Razor v
+FlapJack and the Octagon are worse. AI suite (ten pairings, three warmups):
+before 29/30 runs deal damage (warmup 0: 10/10), after 28/30 (warmup 0: 9/10).
+Before, the failure was the Octagon's Scout v ALARM (warmup 7). After, the
+hellraiser throws BEAR out of the Octagon at 4.5 s (BEAR v Tornado, warmup 0),
+and Razor v FlapJack in the Parking Lot ends at 23 s (warmup 13). Traction
+survey: 45/45.

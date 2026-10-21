@@ -107,6 +107,9 @@ pub struct BodyDesc {
     pub restitution: f32,
     /// Explicit mass in kg; `None` lets the backend derive it from the shape.
     pub mass: Option<f32>,
+    /// Explicit inertia tensor (kg·m², about the centre of mass, body frame);
+    /// `None` lets the backend derive it from the shape at the body's mass.
+    pub inertia: Option<glam::Mat3>,
     pub linear_damping: f32,
     pub angular_damping: f32,
     /// Whether the backend may put this body to sleep when it settles.
@@ -139,6 +142,7 @@ impl BodyDesc {
             friction: 0.6,
             restitution: 0.1,
             mass: None,
+            inertia: None,
             linear_damping: 0.05,
             angular_damping: 0.2,
             allow_sleeping: true,
@@ -171,6 +175,11 @@ impl BodyDesc {
 
     pub fn with_mass(mut self, mass: f32) -> Self {
         self.mass = Some(mass);
+        self
+    }
+
+    pub fn with_inertia(mut self, inertia: glam::Mat3) -> Self {
+        self.inertia = Some(inertia);
         self
     }
 

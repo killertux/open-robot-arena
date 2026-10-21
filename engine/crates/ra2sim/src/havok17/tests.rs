@@ -290,3 +290,56 @@ fn a_mesh_plate_rests_on_the_floor_with_distinct_points() {
         }
     }
 }
+
+/// The hinge motor's target angle survives the motor being switched off and
+/// on (`0x5355a0` only moves it by whole turns): live, the Scout's fork locks
+/// at -1.18 rad with its target at -2.59 and the cocking motor starts from
+/// that same target 29 substeps later (`firetiming-scout-alarm__live__000`).
+#[test]
+fn a_motor_switched_back_on_keeps_its_old_target() {
+    let mut physics = Havok17Backend::new().unwrap();
+    let base = physics
+        .create_body(&BodyDesc::new(
+            MotionType::Static,
+            ShapeDesc::Box {
+                half_extents: Vec3::splat(0.1),
+            },
+        ))
+        .unwrap();
+    let arm = physics
+        .create_body(
+            &BodyDesc::new(
+                MotionType::Dynamic,
+                ShapeDesc::Box {
+                    half_extents: Vec3::new(0.5, 0.05, 0.05),
+                },
+            )
+            .at(Vec3::new(0.8, 0.0, 0.0))
+            .with_mass(10.0),
+        )
+        .unwrap();
+    let mut desc = HingeDesc::new(base, arm, Vec3::ZERO, Vec3::Y);
+    desc.anchor_b = Vec3::new(-0.8, 0.0, 0.0);
+    desc.max_torque = 200.0;
+    let hinge = physics.create_hinge(&desc).unwrap();
+    let target = |p: &Havok17Backend| p.joints[hinge as usize].target;
+    // Driven for half a second: the servo's target runs ahead of the arm.
+    physics.drive_hinge(hinge, 2.0);
+    for _ in 0..30 {
+        physics.step(1.0 / 60.0);
+    }
+    physics.drive_hinge(hinge, 0.0);
+    let parked = target(&physics);
+    // Off, the arm coasts and the target stays where it was.
+    for _ in 0..20 {
+        physics.step(1.0 / 60.0);
+    }
+    assert_eq!(target(&physics), parked);
+    let angle = physics.hinge_angle(hinge);
+    physics.drive_hinge(hinge, 2.0);
+    let resumed = target(&physics);
+    assert!(
+        (resumed - parked).abs() < 1e-6 && (resumed - angle).abs() > 1e-3,
+        "the target was reset: parked {parked}, resumed {resumed}, angle {angle}"
+    );
+}

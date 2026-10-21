@@ -120,8 +120,11 @@ fn a_spinner_spins_only_while_its_switch_is_on() {
     // The AI's Input call.
     d.robots[0].apply_inputs(&[("Spin".into(), 0, 1.0)]);
     step(&mut d, DriveInput::default(), 2.0);
+    // Clearly spinning (not its top speed: the load cap and the 72 kg bar's
+    // inertia, every rigid body's own carried to the centre, docs/29 section
+    // 12f, make it a slow starter: 13.5 rad/s after 2 s).
     let on = relative_spin(&d, p);
-    assert!(on > rate * 0.5, "the spinner reached {on} of {rate} rad/s");
+    assert!(on > rate * 0.25, "the spinner reached {on} of {rate} rad/s");
 
     // A release leaves the switch on; the next press turns it off (live,
     // docs/29 section 12c).

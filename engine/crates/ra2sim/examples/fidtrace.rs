@@ -101,6 +101,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .with_duration(Some(secs));
             let mut m = Match::new(cfg)?;
+            // `FIDTRACE_WARMUP=<n>`: n idle physics steps before the match
+            // starts, a perturbation for running a fight as an ensemble.
+            let warmup: usize = std::env::var("FIDTRACE_WARMUP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            for _ in 0..warmup {
+                let n = m.duel.robots.len();
+                m.duel
+                    .step_direct(&vec![ra2sim::sim::DriveInput::default(); n], DEFAULT_STEP);
+            }
             // `FIDTRACE_HITS=<path>`: every priced hit (both directions, before
             // the `>= 10` gate), in the shape `tools/oracle/fight_report.py`
             // reads from the original's captures.

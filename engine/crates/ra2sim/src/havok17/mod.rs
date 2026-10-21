@@ -750,8 +750,15 @@ impl Havok17Backend {
             if velocity == 0.0 {
                 j.motor = false;
             } else {
-                if !j.motor {
-                    j.target = position;
+                // The atom's target angle is never reset when a motor comes
+                // on: it keeps where the servo last left it (0 from the atom's
+                // construction, `0x5359d0`), a hinge's only moved by whole turns
+                // to within π of the angle (`0x5355a0`). Live
+                // (`firetiming-scout-alarm__live__000`): the Scout's fork locks
+                // at -1.18 rad with its target at -2.59, and 29 substeps later
+                // the cocking motor starts from that same -2.59.
+                if !j.motor && matches!(j.kind, Kind::Hinge { .. }) {
+                    j.target = position + joints::wrap(j.target - position);
                 }
                 j.motor = true;
             }
@@ -785,7 +792,11 @@ impl PhysicsBackend for Havok17Backend {
             .create_body(&shape, &settings)
             .map_err(|e| BackendError::Body(format!("{e:?}")))?;
         let (mass, com_local, inv_inertia) = if desc.motion == MotionType::Dynamic {
-            Self::mass_of(&desc.shape, desc.mass)
+            let (m, com, inv) = Self::mass_of(&desc.shape, desc.mass);
+            match desc.inertia.filter(|i| i.determinant().abs() > 1e-12) {
+                Some(i) => (m, com, i.inverse()),
+                None => (m, com, inv),
+            }
         } else {
             (0.0, mass::of_shape(&desc.shape).com, Mat3::ZERO)
         };
