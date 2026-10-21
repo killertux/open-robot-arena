@@ -54,6 +54,7 @@ pub mod build;
 pub mod chassis;
 pub mod library;
 pub mod paint;
+pub mod placement;
 pub mod stats;
 pub mod wiring;
 

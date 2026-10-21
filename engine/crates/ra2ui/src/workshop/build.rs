@@ -23,10 +23,10 @@
 //!   800"* (`FUN_0043ca70`, quoted in `docs/06-deferred-fidelity.md` F10). An
 //!   attach that would cross it is refused.
 //!
-//! Nothing here checks the size or overlap of a part on the baseplate: the game
-//! lets the player put a component anywhere inside the chassis outline, and the
-//! file records only the stored transform, so there is no recovered rule to
-//! enforce. That is named in `docs/15-workshop-model.md`.
+//! The model's own attach/place calls do not check the size or overlap of a
+//! part on the baseplate; the editor's drag rules (collision, size cap, fit
+//! inside the chassis, SHIFT/CTRL steps) are [`super::placement`], which
+//! judges a candidate before [`Build::attach_info`] adds it (docs/36 §9.18).
 
 use std::collections::BTreeMap;
 
@@ -827,6 +827,7 @@ fn chassis_info(chassis: &Chassis) -> ComponentInfo {
         hinge: None,
         mass: chassis.mass().max(5.0),
         has_hull: chassis.mesh.as_ref().is_some_and(|m| !m.points.is_empty()),
+        bounds: None,
         loaded: true,
     }
 }
@@ -877,6 +878,10 @@ pub enum BuildError {
     },
     UnknownComponent(String),
     CannotRemoveChassis,
+    /// The remove button's refusal (`FUN_0042f270`): other parts hang on it.
+    HasChildren {
+        index: usize,
+    },
     /// A placement edit named a component that is not a chassis child.
     NotChassisChild {
         index: usize,
@@ -924,6 +929,9 @@ impl std::fmt::Display for BuildError {
             ),
             BuildError::UnknownComponent(file) => write!(f, "no component definition for {file:?}"),
             BuildError::CannotRemoveChassis => write!(f, "the chassis cannot be removed"),
+            BuildError::HasChildren { .. } => {
+                write!(f, "You must delete the components attached to this first.")
+            }
             BuildError::NotChassisChild { index, count } => write!(
                 f,
                 "component {index} is not a chassis child ({count} components)"
@@ -1035,6 +1043,7 @@ mod tests {
             hinge: None,
             mass: 16.0,
             has_hull: true,
+            bounds: Some(([-0.1, 0.0, -0.1], [0.1, 0.3, 0.1])),
             loaded: true,
         }
     }
@@ -1053,6 +1062,7 @@ mod tests {
             hinge: None,
             mass: 8.0,
             has_hull: true,
+            bounds: Some(([-0.1, -0.1, -0.1], [0.1, 0.1, 0.1])),
             loaded: true,
         }
     }
