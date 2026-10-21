@@ -145,13 +145,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(f) = hits.as_mut() {
                     let t = m.clock();
                     for i in std::mem::take(&mut m.duel.impacts) {
-                        let name = |r: usize, c: usize| {
-                            m.duel.robots[r].rig.components[c].name.replace('"', "'")
+                        let name = |r: usize, c: usize| match m.duel.robots.get(r) {
+                            Some(robot) => robot.rig.components[c].name.replace('"', "'"),
+                            None => "arena".to_string(),
+                        };
+                        let att = if i.attacker == ra2sim::combat::NO_ATTACKER {
+                            -1
+                        } else {
+                            i.attacker as i64
                         };
                         writeln!(
                             f,
                             "{{\"t\": {t}, \"att\": {}, \"by\": \"{}\", \"vic\": {}, \"comp\": \"{}\", \"amount\": {}, \"speed\": {}}}",
-                            i.attacker,
+                            att,
                             name(i.attacker, i.by),
                             i.target,
                             name(i.target, i.component),

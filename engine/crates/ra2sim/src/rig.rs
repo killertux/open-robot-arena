@@ -1389,16 +1389,22 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
         // `fracture` is a per-category default too (extenders 15, mechanics and
         // mobility 20, weapons 20, extras 60) overridden by the definition.
         let fracture = type_fracture(def.as_ref());
+        // A wheel's constructor (`0x507a65`, vtable `0x6ab8cc`) gives it a
+        // `Rubber` material (`0x507aea` -> `FUN_004899e0`, float 0) where every
+        // other component starts with `Metal`: live every `Wheel` prices with
+        // Rubber 0 (`arenahits-*__live__*`, docs/29 §12o), so a wheel strikes
+        // nothing and the arena's Arenium does nothing to it.
         let material = def
             .as_ref()
             .and_then(|d| d.get("material"))
-            .map(|s| s.to_ascii_lowercase());
+            .map(|s| s.to_ascii_lowercase())
+            .or_else(|| (role == Role::Wheel).then(|| "rubber".to_string()));
         // A weapon's constructor (`FUN_00502e10`, `0x502e5f`) sets its Metal
         // material's float to 0.8; a `material` line still overrides it.
-        let undeclared = if role == Role::Weapon {
-            WEAPON_MATERIAL_SCALE
-        } else {
-            ra2fmt::component::DEFAULT_MATERIAL_SCALE
+        let undeclared = match role {
+            Role::Weapon => WEAPON_MATERIAL_SCALE,
+            Role::Wheel => 0.0,
+            _ => ra2fmt::component::DEFAULT_MATERIAL_SCALE,
         };
         let material_scale = def
             .as_ref()

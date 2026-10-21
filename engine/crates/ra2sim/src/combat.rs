@@ -47,6 +47,17 @@
 //! `> 10`); from `10.0` up it is applied to the victim (`FUN_004175b0` →
 //! `FUN_00489620` → vtable `+0x1c`) and scored. There is no damage from a
 //! sub-threshold bump, however long it lasts.
+//!
+//! ## The arena (docs/29 §12o)
+//!
+//! The arena manager registers every colliding body of the arena `.gmf` with
+//! the event filter under one component of its own (`FUN_00415140`, an
+//! `Arena_callback` with an `Arenium` material, float 0.5, piercing 0,
+//! concussion 1). A robot's contact with one of them is priced by that
+//! component as a hit on the robot's part, with no attacker: `0.5 · M`, where a
+//! fixed body's mass 0 counts as an inverse mass of `0.08` and adds no
+//! rotation term. Floor and walls alike; a wheel is `Rubber`, which Arenium
+//! does nothing to.
 
 use std::collections::HashMap;
 
@@ -86,9 +97,15 @@ const INV_MASS_UNKNOWN: f32 = 0.08;
 /// ... and the floor under every inverse mass.
 const INV_MASS_FLOOR: f32 = 0.01;
 
+/// [`Impact::attacker`] of a hit the arena landed: the robot listener's
+/// branch for a collidable that is not a robot component (`0x414f62`) hands
+/// `0x417330` the player `-1` and no component.
+pub const NO_ATTACKER: usize = usize::MAX;
+
 /// One hit: a component of `attacker` struck a component of `target`.
 #[derive(Clone, Copy, Debug)]
 pub struct Impact {
+    /// The attacking robot, [`NO_ATTACKER`] for the arena.
     pub attacker: usize,
     pub target: usize,
     /// Component index on the target.
@@ -473,11 +490,149 @@ fn registered_component(robot: &Robot, part: usize, state: &BodyState, p: Vec3) 
     best.map(|(i, _)| i)
 }
 
+/// How the arena prices what it strikes: the component the arena manager
+/// registers its collidables under (`FUN_00415140`), or an `AddXtra` prop's
+/// own (`FUN_00403aa0`). Its `computeDamage` is every component's
+/// (`FUN_00489470`), so a contact with the arena is priced as a hit by it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArenaStriker {
+    /// Material class, lower case.
+    pub material: String,
+    /// The material's float (`material + 4`).
+    pub scale: f32,
+    pub piercing: f32,
+    pub concussion: f32,
+}
+
+impl ArenaStriker {
+    /// The arena manager's own component: an `Arenium` component with the
+    /// constructor's defaults (piercing 0, concussion 1; see docs/29 §12o).
+    pub fn arena() -> Self {
+        ArenaStriker {
+            material: "arenium".to_string(),
+            scale: ARENIUM_SCALE,
+            piercing: 0.0,
+            concussion: 1.0,
+        }
+    }
+
+    /// An `AddXtra` prop's component: the script's material by name, with the
+    /// constructor's defaults.
+    pub fn of_material(material: &str) -> Self {
+        let class = material_class(Some(material)).to_ascii_lowercase();
+        let scale = ra2fmt::component::material_class_scale(&class).unwrap_or(0.1);
+        ArenaStriker {
+            material: class,
+            scale,
+            piercing: 0.0,
+            concussion: 1.0,
+        }
+    }
+
+    fn striker(&self) -> Striker<'_> {
+        Striker {
+            piercing: self.piercing,
+            concussion: self.concussion,
+            scale: self.scale,
+            material: &self.material,
+        }
+    }
+}
+
+/// `Arenium`'s material float (`0x402c50`).
+pub const ARENIUM_SCALE: f32 = 0.5;
+
+/// One arena body of the physics world.
+#[derive(Clone, Debug)]
+pub struct ArenaBody {
+    pub striker: ArenaStriker,
+    /// The original's collidables this body stands for, as world triangles:
+    /// ours merges every fixed arena body into one static body, the original
+    /// registers each with the event filter. Empty for a body that is one
+    /// collidable (a movable arena body, a prop).
+    pub parts: Vec<Vec<[Vec3; 3]>>,
+}
+
+impl ArenaBody {
+    /// The collidable of this body the world point `p` lies on.
+    pub fn part_at(&self, p: Vec3) -> usize {
+        let mut best = (0, f32::MAX);
+        for (i, tris) in self.parts.iter().enumerate() {
+            for t in tris {
+                let d = point_triangle_distance_sq(p, t);
+                if d < best.1 {
+                    best = (i, d);
+                }
+            }
+        }
+        best.0
+    }
+}
+
+/// The arena's bodies, by physics handle: what strikes a robot that touches
+/// them, and their registrations with the event filter (one 1 s entry per
+/// collidable: live, the box's four and the Compressor's nine arena
+/// collidables, `0x415227`).
+pub type ArenaBodies = HashMap<BodyHandle, ArenaBody>;
+
+/// The interval of an arena collidable's one registration.
+pub const ARENA_INTERVAL: f32 = 1.0;
+
+/// Squared distance from `p` to the triangle `t`.
+fn point_triangle_distance_sq(p: Vec3, t: &[Vec3; 3]) -> f32 {
+    let [a, b, c] = *t;
+    let (ab, ac, ap) = (b - a, c - a, p - a);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return ap.length_squared();
+    }
+    let bp = p - b;
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return bp.length_squared();
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3);
+        return (p - (a + ab * v)).length_squared();
+    }
+    let cp = p - c;
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return cp.length_squared();
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return (p - (a + ac * w)).length_squared();
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (p - (b + (c - b) * w)).length_squared();
+    }
+    let denom = 1.0 / (va + vb + vc);
+    let (v, w) = (vb * denom, vc * denom);
+    (p - (a + ab * v + ac * w)).length_squared()
+}
+
 impl EventGate {
-    /// The events of one step that get through, in order.
+    /// The events of one step that get through, in order (robots only).
     pub fn admit(
         &mut self,
         robots: &[Robot],
+        events: Vec<ContactEvent>,
+        now: f32,
+    ) -> Vec<ContactEvent> {
+        self.admit_with(robots, &ArenaBodies::new(), events, now)
+    }
+
+    /// [`EventGate::admit`] with the arena's registrations too: an arena
+    /// collidable's one entry lets a point through as a robot component's do.
+    pub fn admit_with(
+        &mut self,
+        robots: &[Robot],
+        arena: &ArenaBodies,
         events: Vec<ContactEvent>,
         now: f32,
     ) -> Vec<ContactEvent> {
@@ -493,6 +648,16 @@ impl EventGate {
         for e in events {
             let mut through = false;
             for (body, state) in [(e.a, &e.state_a), (e.b, &e.state_b)] {
+                if let Some(ab) = arena.get(&body) {
+                    let last = self.last.entry((body, ab.part_at(e.point))).or_default();
+                    last.resize(1, None);
+                    if last[0].is_none_or(|t| now - t >= ARENA_INTERVAL - 1e-4) {
+                        last[0] = Some(now);
+                        through = true;
+                        break;
+                    }
+                    continue;
+                }
                 let Some(&(r, p)) = owner.get(&body) else {
                     continue;
                 };
@@ -547,15 +712,18 @@ fn face_alignment(
 /// returned whatever its size, so the caller can apply the
 /// [`CombatConfig::apply_threshold`] gate the way `FUN_00417330` does.
 pub fn resolve(robots: &[Robot], events: &[ContactEvent], cfg: &CombatConfig) -> Vec<Impact> {
-    resolve_with(robots, events, cfg, &MassProps::new())
+    resolve_with(robots, events, cfg, &MassProps::new(), &ArenaBodies::new())
 }
 
-/// [`resolve`] with the physics backend's own mass properties ([`mass_props`]).
+/// [`resolve`] with the physics backend's own mass properties ([`mass_props`])
+/// and the arena's bodies: a robot's contact with one of those is priced as a
+/// hit on the robot by the arena's component ([`arena_hit`]).
 pub fn resolve_with(
     robots: &[Robot],
     events: &[ContactEvent],
     cfg: &CombatConfig,
     props: &MassProps,
+    arena: &ArenaBodies,
 ) -> Vec<Impact> {
     let mut owner: HashMap<BodyHandle, (usize, usize)> = HashMap::new();
     for (r, robot) in robots.iter().enumerate() {
@@ -567,6 +735,23 @@ pub fn resolve_with(
     }
     let mut out = Vec::new();
     for e in events {
+        let robot_side = |body: BodyHandle| owner.get(&body).copied();
+        match (
+            robot_side(e.a),
+            robot_side(e.b),
+            arena.get(&e.a),
+            arena.get(&e.b),
+        ) {
+            (Some(r), None, None, Some(ab)) => {
+                out.extend(arena_hit(robots, r, ab, e, true, cfg, props));
+                continue;
+            }
+            (None, Some(r), Some(ab), None) => {
+                out.extend(arena_hit(robots, r, ab, e, false, cfg, props));
+                continue;
+            }
+            _ => {}
+        }
         let (Some(&(ra, pa)), Some(&(rb, pb))) = (owner.get(&e.a), owner.get(&e.b)) else {
             continue;
         };
@@ -634,6 +819,95 @@ pub fn resolve_with(
         }
     }
     out
+}
+
+/// The hit of one contact between robot part `(r, part)` and an arena body
+/// (`robot_is_a`: the robot is the event's `a`).
+///
+/// The robot listener (`0x414d80`) gets the event on both collidables. On the
+/// robot's, the other side is not a robot component (`0x414e7d` → `0x414fb2`):
+/// the robot's part prices the arena and nothing is applied. On the arena's,
+/// the arena's component prices the robot's part through the same
+/// `computeDamage` (`FUN_00489470`) and the hit reaches `0x417330` with the
+/// player `-1` and no attacking component (`0x414f62`): the same `>= 10` gate,
+/// the victim component's own damage (`FUN_00489620`), no score, no "last
+/// damage done". The record is the usual one: `rec0` along the normal, the
+/// robot body's Havok mass, centre and inverse inertia, the arena body's own.
+/// A fixed body has mass 0 and no inverse inertia, which `FUN_0045a5a0` counts
+/// as an inverse mass of `0.08` (docs/29 §12o).
+#[allow(clippy::too_many_arguments)]
+fn arena_hit(
+    robots: &[Robot],
+    (r, part): (usize, usize),
+    arena: &ArenaBody,
+    e: &ContactEvent,
+    robot_is_a: bool,
+    cfg: &CombatConfig,
+    props: &MassProps,
+) -> Option<Impact> {
+    let robot = &robots[r];
+    let (body_r, state_r, body_x, state_x) = if robot_is_a {
+        (e.a, &e.state_a, e.b, &e.state_b)
+    } else {
+        (e.b, &e.state_b, e.a, &e.state_a)
+    };
+    let dyn_r = dynamics_of(robot, part, body_r, state_r, props);
+    let n = e.normal.normalize_or_zero();
+    if n == Vec3::ZERO || dyn_r.mass <= 0.0 {
+        return None;
+    }
+    // The arena body: a movable one has the backend's mass properties, a
+    // fixed one none (mass 0, no rotation term).
+    let (mass_x, com_x, inv_x) = match props.get(&body_x) {
+        Some(&(mass, com_local, inv_local)) => {
+            let rot = Mat3::from_quat(state_x.rotation);
+            (
+                mass,
+                state_x.position + state_x.rotation * com_local,
+                rot * inv_local * rot.transpose(),
+            )
+        }
+        None => (0.0, state_x.position, Mat3::ZERO),
+    };
+    let v_r = point_velocity(
+        state_r.linear_velocity,
+        state_r.angular_velocity,
+        dyn_r.com,
+        e.point,
+    );
+    let v_x = point_velocity(
+        state_x.linear_velocity,
+        state_x.angular_velocity,
+        com_x,
+        e.point,
+    );
+    let rec0 = (v_r - v_x).dot(n).abs();
+    let m = magnitude(
+        rec0,
+        dyn_r.mass,
+        mass_x,
+        angular_term(e.point - dyn_r.com, n, dyn_r.inv_inertia),
+        angular_term(e.point - com_x, n, inv_x),
+    );
+    let component = touched_component(robot, part, state_r, e.point)?;
+    let damage = hit_damage(
+        arena.striker.striker(),
+        material_class(robot.rig.components[component].material.as_deref()),
+        rec0,
+        m,
+        cfg,
+    );
+    (damage > 0.0 && damage.is_finite()).then_some(Impact {
+        attacker: NO_ATTACKER,
+        target: r,
+        component,
+        by: 0,
+        damage,
+        point: e.point,
+        // `n` points from `a` toward `b`: out of the robot when it is `a`.
+        normal: if robot_is_a { n } else { -n },
+        speed: rec0,
+    })
 }
 
 #[cfg(test)]
