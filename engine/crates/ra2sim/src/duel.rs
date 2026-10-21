@@ -33,6 +33,12 @@ pub struct BotSetup {
     pub spawn: Option<[f32; 2]>,
 }
 
+/// A SmartZone is a phantom, and a body is in it when it *overlaps* it: live,
+/// ALARM drives past the Octagon's `hellzone2` with its chassis within 0.1 m of
+/// it (the world's collision tolerance) and the hellraiser never rises (docs/29
+/// section 12d). The robots' own zones are the same phantoms (docs/29 §12g).
+const ZONE_TOLERANCE: f32 = 0.0;
+
 /// The handle a hidden prop's slot carries while its body is gone.
 ///
 /// A body handle is a `u32`, so the top value is free. `Arena.SetActive(name,
@@ -228,6 +234,8 @@ pub struct Duel {
     /// Which components of which robot were inside each brain zone last step,
     /// keyed `(robot, zone index, other robot, component)`.
     brain_zone_inside: std::collections::BTreeSet<(usize, usize, usize, usize)>,
+    /// Whether each reading in `brain_zone_inside` is the chassis body's.
+    brain_zone_chassis: std::collections::BTreeMap<(usize, usize, usize, usize), bool>,
     /// Each robot's components' attached flags and its alive flag as the
     /// brains last heard of them (`LostComponent`, `PlayerOut`).
     brain_known: Vec<(Vec<bool>, bool)>,
@@ -591,6 +599,7 @@ impl Duel {
             last_received: vec![ra2script::NO_DAMAGE; n],
             brain_zones,
             brain_zone_inside: std::collections::BTreeSet::new(),
+            brain_zone_chassis: std::collections::BTreeMap::new(),
             brain_known,
             brain_timer: 0.0,
             arena_path: arena_path.to_string(),
@@ -917,11 +926,6 @@ impl Duel {
     /// and `robot` counts from one — `Hazards.Electricity` immediately does
     /// `r = robot - 1`, and `AI.SuperAI.SmartZoneEvent` does the same.
     fn watch_zones(&mut self) {
-        // A SmartZone is a phantom, and a body is in it when it *overlaps* it:
-        // live, ALARM drives past the Octagon's `hellzone2` with its chassis
-        // within 0.1 m of it (the world's collision tolerance) and the
-        // hellraiser never rises (docs/29 section 12).
-        const ZONE_TOLERANCE: f32 = 0.0;
         if self.zones.is_empty() && self.phantoms.is_empty() {
             return;
         }
@@ -947,17 +951,7 @@ impl Duel {
                     // What the phantom can see: the component's collision
                     // pieces (a power cell or fitting collides with nothing).
                     let collides = c.role.is_physical() && c.role != crate::rig::Role::Power;
-                    let pieces: Vec<Vec3> = if !c.havok.collision.is_empty() {
-                        c.havok
-                            .collision
-                            .iter()
-                            .chain(c.havok.rotor_collision.iter())
-                            .flatten()
-                            .copied()
-                            .collect()
-                    } else {
-                        c.hull_points.clone()
-                    };
+                    let pieces = c.zone_points();
                     if collides && zone.touches_points(w[ci], &pieces, ZONE_TOLERANCE) {
                         inside = true;
                         by.get_or_insert(ci);
@@ -1052,6 +1046,7 @@ impl Duel {
         let mut contents: std::collections::BTreeMap<(i32, String), Vec<(i32, bool)>> =
             std::collections::BTreeMap::new();
         let mut now = std::collections::BTreeSet::new();
+        let mut chassis_of = std::collections::BTreeMap::new();
         let mut events: Vec<(usize, i32, i32, i32, bool)> = Vec::new();
         for r in 0..self.robots.len() {
             for &(k, id) in &self.brain_zones[r] {
@@ -1066,32 +1061,73 @@ impl Duel {
                 }
                 let frame = worlds[r][zone.component] * zone.offset;
                 let readings = contents.entry((r as i32, zone.name.clone())).or_default();
+                let to_zone = frame.inverse();
                 for (o, w) in worlds.iter().enumerate() {
                     if o == r || !self.robots[o].is_alive() {
                         continue;
                     }
-                    for (ci, c) in self.robots[o].rig.components.iter().enumerate() {
-                        if !self.robots[o].attached[ci] || c.hull_points.is_empty() {
+                    // One reading per collidable of the other robot that
+                    // overlaps the zone (`GetZoneContents` walks the zone's
+                    // overlapping pairs; live, ALARM's sensor counts up to six
+                    // for the Scout, `aistate-scout-alarm-box__live__000`),
+                    // `chassis` when it belongs to the chassis body. A motor's
+                    // rotor rides the body it drives.
+                    let other = &self.robots[o];
+                    for (ci, c) in other.rig.components.iter().enumerate() {
+                        if !other.attached[ci]
+                            || !c.role.is_physical()
+                            || c.role == crate::rig::Role::Power
+                        {
                             continue;
                         }
-                        let p = w[ci].transform_point3(c.center());
-                        if zone.touches(frame, p, c.radius()) {
-                            readings.push((o as i32 + 1, ci == 0));
-                            now.insert((r, k, o, ci));
-                            if !self.brain_zone_inside.contains(&(r, k, o, ci)) {
-                                events.push((r, 1, id, o as i32 + 1, ci == 0));
+                        let own_part = other.rig.part_of[ci];
+                        let rotor_part = other
+                            .rig
+                            .parts
+                            .iter()
+                            .position(|q| q.joint.is_some_and(|j| j.motor == ci))
+                            .unwrap_or(own_part);
+                        let pieces: Vec<(usize, &Vec<Vec3>)> =
+                            if c.havok.collision.is_empty() && c.havok.rotor_collision.is_empty() {
+                                vec![(own_part, &c.hull_points)]
+                            } else {
+                                c.havok
+                                    .collision
+                                    .iter()
+                                    .map(|p| (own_part, p))
+                                    .chain(c.havok.rotor_collision.iter().map(|p| (rotor_part, p)))
+                                    .collect()
+                            };
+                        for (k2, (part, pts)) in pieces.into_iter().enumerate() {
+                            if !crate::hazards::box_touches_points(
+                                to_zone * w[ci],
+                                zone.min,
+                                zone.max,
+                                pts,
+                                ZONE_TOLERANCE,
+                            ) {
+                                continue;
                             }
+                            let key = (r, k, o, ci * 64 + k2);
+                            readings.push((o as i32 + 1, part == 0));
+                            now.insert(key);
+                            if !self.brain_zone_inside.contains(&key) {
+                                events.push((r, 1, id, o as i32 + 1, part == 0));
+                            }
+                            chassis_of.insert(key, part == 0);
                         }
                     }
                 }
             }
         }
-        for &(r, k, o, ci) in self.brain_zone_inside.difference(&now) {
+        for key @ &(r, k, o, _) in self.brain_zone_inside.difference(&now) {
+            let chassis = self.brain_zone_chassis.remove(key).unwrap_or(false);
             if let Some(&(_, id)) = self.brain_zones[r].iter().find(|(kk, _)| *kk == k) {
-                events.push((r, -1, id, o as i32 + 1, ci == 0));
+                events.push((r, -1, id, o as i32 + 1, chassis));
             }
         }
         self.brain_zone_inside = now;
+        self.brain_zone_chassis.extend(chassis_of);
         ra2script::publish_robot_zones(contents);
         if let Some(ai) = self.script_ai.as_ref() {
             for (r, direction, id, other, chassis) in events {

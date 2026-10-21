@@ -83,6 +83,7 @@ const DEFAULT_DENSITY: f32 = 1000.0;
 const MAX_PIECES: u32 = 8;
 
 /// `RA2_H17_DEBUG=<body>` prints that body's state and contacts every step.
+/// `RA2_H17_BACKSTEPS=1` prints every backstep with the pairs that caused it.
 fn debug_body() -> Option<usize> {
     use std::sync::OnceLock;
     static WATCH: OnceLock<Option<usize>> = OnceLock::new();
@@ -963,6 +964,9 @@ impl PhysicsBackend for Havok17Backend {
                     && backsteps < MAX_BACKSTEPS
                     && pieces < MAX_PIECES
                 {
+                    if std::env::var_os("RA2_H17_BACKSTEPS").is_some() {
+                        eprintln!("backstep h {h:.5} tol {current_tol:.4} bad {bad:?}");
+                    }
                     self.restore(&saved);
                     h = (h * 0.5).max(MIN_STEP);
                     backsteps += 1;

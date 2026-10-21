@@ -799,8 +799,16 @@ impl Robot {
                         .collect()
                 };
                 all.extend(ghosts.iter().cloned());
-                for (pts, _, pm) in &all {
+                for (pts, mesh, pm) in &all {
                     if *pm <= 0.0 {
+                        continue;
+                    }
+                    // A mesh body's own triangles, as for its centre.
+                    if let Some((v, c, i)) = mesh
+                        .as_ref()
+                        .and_then(|tris| massprops::mesh_inertia(pts, tris))
+                    {
+                        bodies_inertia.push((*pm, c, i * (*pm / v)));
                         continue;
                     }
                     let props = crate::havok17::mass::of_shape(&ShapeDesc::ConvexHull {

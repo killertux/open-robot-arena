@@ -17,13 +17,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_duration(Some(secs));
     let mut m = Match::new(cfg)?;
+    // `FIDTRACE_WARMUP=<n>`: n idle physics steps first, as `fidtrace match`.
+    let warmup: usize = std::env::var("FIDTRACE_WARMUP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    for _ in 0..warmup {
+        let n = m.duel.robots.len();
+        m.duel.step_direct(
+            &vec![ra2sim::sim::DriveInput::default(); n],
+            ra2sim::DEFAULT_STEP,
+        );
+    }
     let window: Option<(f32, f32)> = a.get(4).and_then(|w| {
         let (x, y) = w.split_once('-')?;
         Some((x.parse().ok()?, y.parse().ok()?))
     });
     let mut next = 0.0f32;
     let mut steps = 0usize;
-    while m.state() != MatchState::Results && steps < (secs * 90.0) as usize {
+    while m.state() != MatchState::Results && m.clock() < secs && steps < (secs * 400.0) as usize {
         m.step();
         steps += 1;
         let t = m.clock();
@@ -33,10 +45,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for r in &m.duel.robots {
                 let s = m.duel.physics.state(r.parts[0].body).unwrap();
                 let up = s.rotation * glam::Vec3::Y;
+                let fwd = s.rotation * r.rig.forward();
                 line += &format!(
-                    " | y {:5.2} up {:5.2} v ({:5.1},{:5.1},{:5.1}) w {:5.1}",
+                    " | y {:5.2} up {:5.2} fwd {:5.2} v ({:5.1},{:5.1},{:5.1}) w {:5.1}",
                     s.position.y,
                     up.y,
+                    fwd.y,
                     s.linear_velocity.x,
                     s.linear_velocity.y,
                     s.linear_velocity.z,
@@ -59,9 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for r in &m.duel.robots {
                 let s = m.duel.physics.state(r.parts[0].body).unwrap();
                 let up = s.rotation * glam::Vec3::Y;
+                let fwd = s.rotation * r.rig.forward();
                 line += &format!(
-                    " | ({:6.2},{:6.2},{:6.2}) up.y {:5.2}",
-                    s.position.x, s.position.y, s.position.z, up.y
+                    " | ({:6.2},{:6.2},{:6.2}) up.y {:5.2} fwd.y {:5.2}",
+                    s.position.x, s.position.y, s.position.z, up.y, fwd.y
                 );
             }
             println!("{line}");

@@ -14,14 +14,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let game = std::path::PathBuf::from(&a[0]);
     let bot = a.get(1).cloned().unwrap_or("AI/Team0/Bot0.bot".into());
     let steps: usize = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(14);
+    // `FORKTRACE_SPAWN=x,z,yaw_deg` (default the box's centre, facing 270°);
+    // `FORKTRACE_SPAWN=arena` keeps the arena's own start point.
+    let spawn = std::env::var("FORKTRACE_SPAWN").unwrap_or_default();
+    let f: Vec<f32> = spawn.split(',').filter_map(|v| v.parse().ok()).collect();
     let setup = BotSetup {
         path: game.join(&bot).to_string_lossy().to_string(),
-        yaw_deg: Some(270.0),
-        spawn: Some([0.0, 0.0]),
+        yaw_deg: if spawn == "arena" {
+            None
+        } else {
+            Some(f.get(2).copied().unwrap_or(270.0))
+        },
+        spawn: if spawn == "arena" {
+            None
+        } else {
+            Some([
+                f.first().copied().unwrap_or(0.0),
+                f.get(1).copied().unwrap_or(0.0),
+            ])
+        },
     };
     let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
     let mut d = Duel::new(&arena, std::slice::from_ref(&setup))?;
-    for _ in 0..60 {
+    // `FORKTRACE_SETTLE=<steps>` at rest first (default 60).
+    let settle: usize = std::env::var("FORKTRACE_SETTLE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    for _ in 0..settle {
         d.step_direct(&[DriveInput::default()], DT);
     }
     let r = &d.robots[0];
@@ -56,9 +76,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .transform_vector3(info.axis);
         let w = (sb.angular_velocity - sa.angular_velocity).dot(axis.normalize_or(Vec3::Y));
         println!(
-            "step {i}: angle {:.3} speed {:.2}",
+            "step {i}: angle {:.3} speed {:.2} chassis w ({:.2},{:.2},{:.2}) y {:.4}",
             d.physics.hinge_angle(joint),
-            w
+            w,
+            sa.angular_velocity.x,
+            sa.angular_velocity.y,
+            sa.angular_velocity.z,
+            d.physics
+                .center_of_mass(r.parts[parent].body)
+                .unwrap_or_default()
+                .y
         );
     }
     Ok(())

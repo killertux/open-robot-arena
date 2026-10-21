@@ -53,31 +53,41 @@ impl Zone {
     /// original never raises the hellraiser (live, `HellRaiser.timer` never
     /// reset); its hull, chamfered at the corners, stays clear.
     pub fn touches_points(&self, world: Mat4, points: &[Vec3], tolerance: f32) -> bool {
-        if points.is_empty() {
-            return false;
-        }
-        let to_zone = self.inv * world;
-        let local: Vec<Vec3> = points
-            .iter()
-            .map(|p| to_zone.transform_point3(*p))
-            .collect();
-        let centre = (self.min + self.max) * 0.5;
-        let half = (self.max - self.min) * 0.5;
-        let mut axes = vec![Vec3::X, Vec3::Y, Vec3::Z];
-        for k in 1..24 {
-            let a = k as f32 * std::f32::consts::PI / 24.0;
-            axes.push(Vec3::new(a.cos(), 0.0, a.sin()));
-        }
-        axes.iter().all(|l| {
-            let c = centre.dot(*l);
-            let r = half.x * l.x.abs() + half.y * l.y.abs() + half.z * l.z.abs();
-            let (lo, hi) = local.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
-                let d = p.dot(*l);
-                (lo.min(d), hi.max(d))
-            });
-            lo <= c + r + tolerance && hi >= c - r - tolerance
-        })
+        box_touches_points(self.inv * world, self.min, self.max, points, tolerance)
     }
+}
+
+/// Whether the convex hull of `points` (carried into the box's frame by
+/// `to_box`) overlaps the box `min..max` within `tolerance`: separating axes
+/// along the box's own axes and 24 horizontal directions. Exact for the box's
+/// faces and within a few millimetres for convex pieces.
+pub fn box_touches_points(
+    to_box: Mat4,
+    min: Vec3,
+    max: Vec3,
+    points: &[Vec3],
+    tolerance: f32,
+) -> bool {
+    if points.is_empty() {
+        return false;
+    }
+    let local: Vec<Vec3> = points.iter().map(|p| to_box.transform_point3(*p)).collect();
+    let centre = (min + max) * 0.5;
+    let half = (max - min) * 0.5;
+    let mut axes = vec![Vec3::X, Vec3::Y, Vec3::Z];
+    for k in 1..24 {
+        let a = k as f32 * std::f32::consts::PI / 24.0;
+        axes.push(Vec3::new(a.cos(), 0.0, a.sin()));
+    }
+    axes.iter().all(|l| {
+        let c = centre.dot(*l);
+        let r = half.x * l.x.abs() + half.y * l.y.abs() + half.z * l.z.abs();
+        let (lo, hi) = local.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+            let d = p.dot(*l);
+            (lo.min(d), hi.max(d))
+        });
+        lo <= c + r + tolerance && hi >= c - r - tolerance
+    })
 }
 
 /// Resolve the zones a script registered against the arena's own geometry.
