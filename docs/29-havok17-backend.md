@@ -1951,31 +1951,44 @@ early. Section 12j's "both robots still run at 120 s" held for `__003` and
 counted (mean 76) with 116-590 priced hits (mean 283); Sentinel 2, 13, 7, 7,
 1, 3, 4 (mean 5.3).
 
+**Which components are registered.** The registration ids of the capture
+are handed out in component order (Sentinel's 13, then Wide Load's 23), and
+the doubled entries land exactly on the eight wheels and Sentinel's Powered
+Steering Unit on three collidables (the unit and its two hubs). The six ids
+without a registration are both robots' batteries and control boards, Wide
+Load's air tank and both SmartZones: those components have no collidable. The
+gate therefore takes the nearest component *with* a registration
+(`combat::registered_component`; no effect in the fights below, a contact
+point is practically never nearest an internal part). ALARM and the Scout
+were not captured; their Hammer Head and Forklift Arm are weapons like Wide
+Load's spikes, which are registered.
+
 **Validation.** Before = `fidelity` ce1aa67 (with alarm-tail's piston rule),
-after = this branch; ensembles are `FIDTRACE_WARMUP` runs, counted = `>= 10`
-on the other robot, total = every priced hit on it (live counts zero-amount
-hits too, ours drops them).
+after = this branch; ensembles are `FIDTRACE_WARMUP` runs (12 runs: 0, 7, 13,
+19, 26, 31, 37, 43, 50, 57, 64, 71; 24 runs add 2, 5, 9, 11, 16, 22, 28, 34,
+40, 47, 53, 60), counted = `>= 10` on the other robot, total = every priced
+hit on it (live counts zero-amount hits too, ours drops them). The two
+changes were also run one at a time (temporary switches, since removed):
 
-| fight | live | before | after |
-|---|---|---|---|
-| Compressor Sentinel v Wide Load, 12 runs (0..71): Wide Load / Sentinel | 76 (283) / 5.3, 4 of 7 end early | 77.3 (176) / 10.9 (179), 97 s, 7/12 full, flipped 12/12 | 93.9 (336) / 5.2 (350), 110 s, 10/12 full, flipped 6/12 |
-| same, six runs (0/7/13/19/26/31) | | 60.8 (116) / 8.7 | 111.7 (376) / 6.2, 113 s, 5/6 |
-| box Scout v ALARM, 24 runs: ALARM / Scout | 63, 77, 37 / 9, 6, 7 | 34.5 / 7.5, 73 s | 22.2 / 5.1, 84 s |
-| box Razor v FlapJack, six runs: Razor / FlapJack | 3 (40) / 1 (12) | 4.7 (151) / 1.0 (148), 106 s, 4/6 | 7.5 (165) / 1.3 (158), 105 s, 4/6 |
-| Octagon Scout v ALARM, six runs: ALARM / Scout | 24 (944), Scout out at 67 s | 14.2 (53) / 3.3, 48 s, 0/6 | 8.5 (48) / 2.5, 79 s, 2/6 |
+| fight | live | before | hinge fix only | gate only | after |
+|---|---|---|---|---|---|
+| Compressor Sentinel v Wide Load, 12 runs: Wide Load / Sentinel | 76 (283) / 5.3, 4 of 7 end early | 55.8 (114) / 7.3, 97 s, 7/12 full | | | 93.9 (336) / 5.2, 110 s, 10/12 full |
+| box Scout v ALARM, 24 runs: ALARM / Scout | 63, 77, 37 / 9, 6, 7 | 19.2 (126) / 4.6, 88 s, 6/24 | 20.2 / 4.7, 87 s | 21.2 / 4.8, 89 s | 22.2 (140) / 5.1, 83 s, 4/24 |
+| Octagon Scout v ALARM, 24 runs: ALARM / Scout | 24 (944), Scout out at 67 s | 12.2 (59) / 2.7, 74 s, 7/24 | 8.8 / 2.3, 67 s | 8.9 / 1.7, 67 s | 10.5 (55) / 2.7, 72 s, 4/24 |
+| box Razor v FlapJack, six runs: Razor / FlapJack | 3 (40) / 1 (12) | 3.8 (109) / 1.0 (106), 106 s, 4/6 | | | 7.5 (165) / 1.3 (158), 105 s, 4/6 |
 
-Separately (six runs): the hinge fix alone takes the Compressor from 60.8 /
-8.7 to 54.2 / 2.3 (four full fights in both), the gate alone (old hinge) has
-not been run. On one trajectory the new gate never prices fewer counted hits
-than the old (run alongside on the same contact stream: box 2-59 against 2-64
-per run, Compressor 2.2 times the impacts), yet the box ALARM's ensemble mean
-falls by a third over 24 runs, with more fights lasting; the trajectories part
-at the first step whose events differ (from 2.6 s in) and ALARM's outcome is
-mostly whether and when it goes onto its back (§12k). Not resolved.
+Across the Compressor's 12 runs a robot goes over in all 12 before and in 6
+after. The Octagon's two halves of 12 scatter more than the variants differ
+(ALARM 13.8 / 10.7 before, 9.4 / 11.6 after, 5.9 / 11.8 with the gate only).
+A first version of this table showed the box ALARM falling by a third: its
+"before" binary had been built with an experimental per-body gate left in the
+working tree, not ce1aa67; with the switches reproducing ce1aa67 bit for bit
+there is no drop.
 
 **Still open.** The live Compressor's flips and early ends (four of seven live
 fights; ours now 2 of 12 runs end early): how the robots go over (ledge falls,
 the wedge's lift) was not traced; ours rarely flips without the hinge bug.
-The box replay's 18 % surplus of events under the per-collidable rule. The
-box ALARM's lower ensemble mean with the new gate. The arena's hazard bodies
-are registered too (nine in the Compressor) and are not in ours.
+The box replay's 18 % surplus of events under the per-collidable rule (a live
+event-registration capture of Scout v ALARM would settle which of their
+components are registered). The arena's hazard bodies are registered too
+(nine in the Compressor) and are not in ours.

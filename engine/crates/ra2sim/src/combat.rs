@@ -434,12 +434,43 @@ pub struct EventGate {
 
 /// A component's registrations with the event filter: the interval of each
 /// entry (see [`EventGate`]).
+///
+/// Batteries, air tanks, control boards and SmartZones have no collidable and
+/// no registration (live: the five components of the two robots without one
+/// are their batteries, Wide Load's air tank and their control boards; the
+/// SmartZones' phantoms are not registered either).
 pub fn event_registrations(c: &crate::rig::Component) -> Vec<f32> {
     match (c.role, c.weapon.and_then(|w| w.frequency)) {
+        (Role::Power | Role::Control, _) => Vec::new(),
         (Role::Weapon, Some(f)) => vec![1.0 / f],
         (Role::Wheel, _) => vec![1.0, 1.0],
         _ => vec![1.0],
     }
+}
+
+/// The registered component of `part` nearest the point (as
+/// [`touched_component`], over the components that have a collidable).
+fn registered_component(robot: &Robot, part: usize, state: &BodyState, p: Vec3) -> Option<usize> {
+    let frame = Mat4::from_rotation_translation(state.rotation, state.position);
+    let zones: Vec<usize> = robot.rig.smart_zones.iter().map(|z| z.component).collect();
+    let mut best: Option<(usize, f32)> = None;
+    for &i in &robot.rig.parts[part].members {
+        let c = &robot.rig.components[i];
+        if !robot.attached[i]
+            || c.hull_points.is_empty()
+            || zones.contains(&i)
+            || event_registrations(c).is_empty()
+        {
+            continue;
+        }
+        let world = frame * robot.rig.part_local[i];
+        let local = world.inverse().transform_point3(p);
+        let d = (local - local.clamp(c.min, c.max)).length_squared();
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((i, d));
+        }
+    }
+    best.map(|(i, _)| i)
 }
 
 impl EventGate {
@@ -466,7 +497,7 @@ impl EventGate {
                     continue;
                 };
                 let robot = &robots[r];
-                let Some(c) = touched_component(robot, p, state, e.point) else {
+                let Some(c) = registered_component(robot, p, state, e.point) else {
                     continue;
                 };
                 let iv = event_registrations(&robot.rig.components[c]);
