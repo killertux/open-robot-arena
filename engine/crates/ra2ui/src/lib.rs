@@ -1420,12 +1420,16 @@ fn sized(
     } else {
         0.0
     };
-    // The original anchors in whole pixels: the offset is the truncated half
-    // (or whole) of the truncated size (`FUN_...` of the window class, measured:
+    // A `Group`/`Window` anchors in whole pixels: the offset is the truncated
+    // half (or whole) of the truncated size. Measured, not read from the exe:
     // the repair bench's `main group`, 0.9 of 1024 = 921.6 wide at `Position
-    // 0.5`, starts at 512 - 460 = 52, not 51.2; reference event-repairs).
+    // 0.5`, starts at 512 - 460 = 52 rather than 51.2 (reference event-repairs,
+    // every widget in it sits one pixel right of ours). Over the 104 fixtures this
+    // moved the exhibition (2.65 -> 2.45, 2.57 -> 2.36, ...), bot lab (-0.3), F1
+    // reminder, bracket (7.15 -> 6.21) and repairs (8.66 -> 5.63) toward the
+    // captures; `teamhq-events` (+0.45) and the event join window (+0.34) lost.
     let offset = |anchor: f32, size: f32| {
-        if std::env::var_os("RA2_SNAP").is_some() {
+        if matches!(widget.kind, WidgetKind::Group | WidgetKind::Window) {
             (anchor * size.trunc()).trunc()
         } else {
             anchor * size
@@ -1433,7 +1437,7 @@ fn sized(
     };
     Frame::new(
         parent.x + px - offset(anchor.h, w),
-        parent.y + py - offset(anchor.v, h) - ascent,
+        parent.y + py - anchor.v * h - ascent,
         w,
         h,
     )

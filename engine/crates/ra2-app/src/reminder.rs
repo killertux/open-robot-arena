@@ -86,7 +86,8 @@ impl Reminder {
             .find(|p| p.widget.name() == "control grid")
             .map(|p| p.frame);
         let (cell_w, cell_h) = grid_frame
-            .map(|f| (f.w / GRID[0] as f32, f.h / GRID[1] as f32))
+            // Whole pixels: the capture's lines are exactly 83 px apart.
+            .map(|f| ((f.w / GRID[0] as f32).floor(), (f.h / GRID[1] as f32).floor()))
             .unwrap_or((62.0, 70.0));
         for block in gib.blocks.iter_mut() {
             let Block::Widget(root) = block else { continue };
@@ -109,20 +110,27 @@ impl Reminder {
             // ones included (capture `match-f1`).
             for row in 0..GRID[1] {
                 for column in 0..GRID[0] {
+                    // One pixel line between neighbours, not two: the ring is
+                    // drawn outside the frame, so the frame spans from one
+                    // line to the next (capture: lines at x 388, 471, 554,
+                    // 637, a 83 px pitch).
                     let mut cell = empty_cell(
                         cell_w * column as f32 + 1.0,
                         cell_h * row as f32 + 1.0,
-                        cell_w - 2.0,
-                        cell_h - 2.0,
+                        cell_w - 1.0,
+                        cell_h - 1.0,
                     );
                     ra2ui::cells::add_border(grid, &mut cell, 1.0);
                     grid.children.push(cell);
                 }
             }
             for control in &self.board.controls {
-                let x = cell_w * control.cell[0] as f32 + 1.0;
+                // `BufferWidth 1`: a control's cell sits one pixel inside the
+                // line (the capture's key bars are 80 px wide in an 83 px
+                // pitch, one grey pixel either side).
+                let x = cell_w * control.cell[0] as f32 + 2.0;
                 let y = cell_h * control.cell[1] as f32 + 1.0;
-                let (cell_w, cell_h) = (cell_w - 2.0, cell_h - 2.0);
+                let (cell_w, cell_h) = (cell_w - 3.0, cell_h - 3.0);
                 for template in self.template.widgets() {
                     let mut cell = template.clone();
                     ra2ui::input::set_field(
@@ -140,7 +148,6 @@ impl Reminder {
                     ra2ui::cells::bind_art(&mut cell, "control img", art);
                     ra2ui::cells::bind_value(&mut cell, "control name", &control.name);
                     ra2ui::cells::bind_value(&mut cell, "control input", &control.key_label());
-                    ra2ui::cells::add_border(grid, &mut cell, 1.0);
                     grid.children.push(cell);
                 }
             }
