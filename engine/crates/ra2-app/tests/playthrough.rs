@@ -123,6 +123,7 @@ fn window_shell(game: &Path) -> Shell {
     shell.set_hq_view(hq_mode::shell_view(game).unwrap());
     shell.set_enter_hook(hq_mode::shell_enter_hook(game).unwrap());
     shell.set_team_hook(hq_mode::shell_team_hook(game));
+    shell.set_later_hook(hq_mode::shell_later_hook(game));
     shell
 }
 
@@ -738,6 +739,55 @@ fn the_options_dropdowns_list_their_rows_and_a_row_sets_the_value() {
     settings.absorb_picks(&shell.take_dropdown_picks());
     assert_eq!(settings.cfg().default_camera(), "orbit");
     std::fs::remove_file(&cfg).ok();
+}
+
+/// `Finish Later` before any round (`FUN_0046b9b0` -> `FUN_0046c720`): the
+/// event entered through the join window is committed to the team record, so a
+/// fresh shell on the same install shows it in progress and its bracket opens.
+#[test]
+fn finish_later_keeps_the_entered_event_in_the_team_record() {
+    let Some(scratch) = ScratchGame::new("later") else {
+        return;
+    };
+    let game = scratch.path();
+    let _guard = ra2script::lock();
+    let mut shell = window_shell(game);
+    for name in ["Team HQ button", "continue button", "events button"] {
+        shell.click_named(name).unwrap();
+    }
+    let grid = frame_of(&shell, ra2ui::hq::EVENT_GRID);
+    shell
+        .click(grid.x + grid.w / 6.0, grid.y + grid.h / 6.0)
+        .unwrap();
+    shell.click_named("enter event button").unwrap();
+    assert_eq!(shell.base_screen_id(), flow::BRACKET_SCREEN);
+    let before = ra2sim::career::Career::load(game).unwrap();
+    assert!(
+        matches!(before.phase, ra2sim::career::SeasonPhase::Schedule),
+        "entering writes nothing"
+    );
+    let (event, _) = shell.entered_event().unwrap();
+    shell.click_named("later button").unwrap();
+    assert_eq!(shell.base_screen_id(), "teamhq/teamhq.gib");
+
+    let saved = ra2sim::career::Career::load(game).unwrap();
+    assert_eq!(
+        saved.phase,
+        ra2sim::career::SeasonPhase::InEvent { event },
+        "the entered event is in the team record"
+    );
+    assert!(saved.history.is_empty(), "no round was played");
+    // A fresh shell (a restart): the event is the one in progress.
+    let view = hq_mode::shell_view(game).unwrap();
+    let row = view.events.iter().find(|row| row.id == event).unwrap();
+    assert_eq!(row.state, ra2ui::hq::EventState::InProgress);
+    // Leaving again changes nothing further.
+    let again = window_shell(game);
+    drop(again);
+    assert_eq!(
+        ra2sim::career::Career::load(game).unwrap().phase,
+        ra2sim::career::SeasonPhase::InEvent { event }
+    );
 }
 
 /// A robot built from an empty inventory selection joins the team when the

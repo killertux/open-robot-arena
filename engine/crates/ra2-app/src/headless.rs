@@ -81,6 +81,7 @@ pub fn run(
         shell.set_enter_hook(hook);
     }
     shell.set_team_hook(crate::hq_mode::shell_team_hook(game));
+    shell.set_later_hook(crate::hq_mode::shell_later_hook(game));
     println!(
         "booted {} from {} ({}x{})",
         shell.screen_id(),

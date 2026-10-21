@@ -365,6 +365,7 @@ impl App {
             shell.set_enter_hook(hook);
         }
         shell.set_team_hook(crate::hq_mode::shell_team_hook(game));
+        shell.set_later_hook(crate::hq_mode::shell_later_hook(game));
         shell.set_animate(true);
         let frames = FrameRenderer::open(game)?;
         let cfg = crate::options::read_cfg(game);

@@ -1616,6 +1616,36 @@ pub fn shell_enter_hook(game: &Path) -> Option<ra2_shell::shell::EnterHook> {
     }))
 }
 
+/// The bracket's `later button` (`FUN_0046b9b0`): `FUN_0046c720` stores the
+/// bracket's settings in the team's event record and broadcasts message 200,
+/// which writes `Teams/Teams.txt` (`FUN_00502720`, see 9.4). An event entered
+/// and left before any round is therefore still the team's current event next
+/// time. A career already in that event (a round was saved) is left as it is.
+pub fn shell_later_hook(game: &Path) -> ra2_shell::shell::LaterHook {
+    let game = game.to_path_buf();
+    Box::new(move |event, robot| {
+        let Ok(mut career) = fresh_career(&game) else {
+            return;
+        };
+        let in_it = matches!(
+            career.phase,
+            ra2sim::career::SeasonPhase::InEvent { event: current } if current == event
+        );
+        // An event already played this season is over (the shell's memory of
+        // the entry outlives the award).
+        let played = career.history.iter().any(|record| record.event == event);
+        if in_it || played || career.enter_event(event).is_err() {
+            return;
+        }
+        if let Some(slot) = career.player().robots.get(robot).copied() {
+            career.player_mut().event_robot = slot;
+        }
+        if let Err(error) = career.save(&game) {
+            eprintln!("finish later: {error}");
+        }
+    })
+}
+
 /// The `ra2ui::hq::View` for a career: the roster, standings, schedule, prizes
 /// and the team record's counters.
 pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, String> {

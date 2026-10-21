@@ -232,6 +232,7 @@ pub struct Shell {
     /// Enters an event in the application's career and returns the Team HQ's
     /// refreshed data (the bracket exists from then on).
     enter_hook: Option<EnterHook>,
+    later_hook: Option<LaterHook>,
     /// Opens the career of the team record the select screen's `continue
     /// button` chose and returns its Team HQ data (`FUN_004eba60`).
     team_hook: Option<TeamHook>,
@@ -254,6 +255,12 @@ pub const MAX_TEXT: usize = 32;
 /// `Events.txt` index and the join window's chosen robot column in, the Team
 /// HQ's data out.
 pub type EnterHook = Box<dyn FnMut(usize, Option<usize>) -> Option<ra2ui::hq::View>>;
+
+/// What the application does when the bracket's `later button` is pressed with
+/// an event entered (`FUN_0046b9b0` -> `FUN_0046c720`): the event and the
+/// robot column are committed to the team record and the team table is
+/// written (message 200, `FUN_00502720`).
+pub type LaterHook = Box<dyn FnMut(usize, usize)>;
 
 /// What the application does when the player continues to a team's HQ: the
 /// team's `Teams/Teams.txt` slot in, that team's Team HQ data out.
@@ -337,6 +344,7 @@ impl Shell {
             text_focus: None,
             entered_event: None,
             enter_hook: None,
+            later_hook: None,
             pending_message: None,
         })
     }
@@ -510,6 +518,10 @@ impl Shell {
             }
         }
         false
+    }
+
+    pub fn set_later_hook(&mut self, hook: LaterHook) {
+        self.later_hook = Some(hook);
     }
 
     pub fn set_enter_hook(&mut self, hook: EnterHook) {
@@ -1808,6 +1820,13 @@ impl Shell {
             self.text_focus = None;
         }
         self.sync_list_viewports();
+        // `Finish Later`: the entered event is committed to the team record.
+        if step.hit_widget() == Some("later button") {
+            if let (Some((event, robot)), Some(hook)) = (self.entered_event, &mut self.later_hook)
+            {
+                hook(event, robot);
+            }
+        }
         step.screen = self.screen_id();
         step.content = self.content_id();
         step.tab = self.tab().map(str::to_string);

@@ -447,6 +447,25 @@ fn the_weight_class_filter_empties_slots_and_dims_the_pickers_robots() {
     );
 }
 
+/// A duel leaves slots 2 and 4 `OPEN` (the lobby's `noplayer.gib` word); only
+/// BATTLE ROYAL and TEAM MATCH fill all four.
+#[test]
+fn a_duel_reports_slots_two_and_four_as_open() {
+    let Some(game) = game_dir() else { return };
+    let _guard = ra2script::lock();
+    let (shell, _) = play_mode::select_setup(&options(&game)).expect("the click flow");
+    let choice = play_mode::choice_from_shell(&game, &shell).expect("the choice");
+    assert!(choice.slot_line(0).starts_with("slot 1: player team"));
+    assert!(choice.slot_line(1).starts_with("slot 2: OPEN"));
+    assert!(choice.slot_line(2).starts_with("slot 3: computer team"));
+    assert!(choice.slot_line(3).starts_with("slot 4: OPEN"));
+    let mut royal = options(&game);
+    royal.game_type = Some(GameType::BattleRoyal);
+    let (shell, _) = play_mode::select_setup(&royal).expect("the four pickers");
+    let choice = play_mode::choice_from_shell(&game, &shell).expect("the choice");
+    assert!((0..4).all(|slot| !choice.slot_line(slot).contains("OPEN")));
+}
+
 /// The four `playerN group` slots all open the shipped pickers, and a BATTLE
 /// ROYAL carries all four robots on four distinct spawn points. The results
 /// screen lists the same four names in its four slots, and slot 1 is the driven
