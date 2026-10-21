@@ -285,6 +285,10 @@ fn magic_drive(physics: &dyn PhysicsBackend) -> bool {
     }
 }
 
+/// A piston rod's inertia: its housing body's, the diagonal scaled by this
+/// (measured live, see [`Robot::spawn`]).
+const ROD_INERTIA: f32 = 0.2;
+
 /// The game's raw torque unit: `SetPowerSettings` stores the definition's
 /// torque at `+0xb4` and ×40 of it at `+0xb8` (`FUN_004810e0`, `0x6a69f8`).
 const TORQUE_UNIT: f32 = 40.0;
@@ -455,11 +459,13 @@ impl Robot {
         // start angle, both already in the rig's rest pose.
         let mut parts = Vec::with_capacity(rig.parts.len());
         let mut mass_points: Vec<Vec<(usize, f32, Vec3)>> = Vec::new();
+        // Each body's inertia as built (body frame), for a piston rod's.
+        let mut built_inertia: Vec<Option<glam::Mat3>> = Vec::with_capacity(rig.parts.len());
         for (p, part) in rig.parts.iter().enumerate() {
             let world = bot * rig.components[part.root].local;
             let (_, rot, pos) = world.to_scale_rotation_translation();
             let (shape, mass, friction, restitution, phantom, inertia) = if havok {
-                let h = Self::havok_part(&rig, p);
+                let h = Self::havok_part(&rig, p, None);
                 mass_points.push(h.points);
                 (
                     h.shape,
@@ -486,6 +492,29 @@ impl Robot {
             };
             let natural = mass;
             let mass = (mass * mass_scale).max(0.2);
+            let mut inertia = inertia.map(|i| i * (mass / natural.max(1e-3)));
+            // A piston's rod takes its housing body's inertia with the
+            // diagonal scaled by `ROD_INERTIA` (measured live: ALARM's 33 kg
+            // hammer rod reads (9.830, 14.541, 7.282) against its chassis'
+            // (49.149, 72.705, 36.411), the products of inertia equal; Wide
+            // Load's 63 kg rod the same against its chassis;
+            // `fightcontacts-scout-alarm-box__live__001..003`,
+            // `contacts-nohaz-wideload__live__001`, P rows `+0x19c`). The code
+            // that sets it is not located.
+            if havok {
+                if let (Some(parent), Some(info)) = (part.parent, part.joint) {
+                    if info.slider {
+                        if let Some(Some(pi)) = built_inertia.get(parent) {
+                            let mut i = *pi;
+                            i.x_axis.x *= ROD_INERTIA;
+                            i.y_axis.y *= ROD_INERTIA;
+                            i.z_axis.z *= ROD_INERTIA;
+                            inertia = Some(i);
+                        }
+                    }
+                }
+            }
+            built_inertia.push(inertia);
             let mut desc = BodyDesc::new(MotionType::Dynamic, shape)
                 .at(pos)
                 .with_rotation(rot)
@@ -507,7 +536,7 @@ impl Robot {
                 desc = desc.with_phantom(phantom);
             }
             if let Some(inertia) = inertia {
-                desc = desc.with_inertia(inertia * (mass / natural.max(1e-3)));
+                desc = desc.with_inertia(inertia);
             }
             let body = physics.create_body(&desc)?;
             parts.push(PartState {
@@ -796,7 +825,10 @@ impl Robot {
     /// body's mass (phantoms included), the top rigid body's material — the
     /// chassis body is the game's own, with Havok's defaults (live 0.5 / 0.2) —
     /// and the wheels' traction phantoms.
-    fn havok_part(rig: &RobotRig, p: usize) -> HavokPart {
+    ///
+    /// `attached`: only the members still on the robot count (a body rebuilt
+    /// after a part came off or the chassis buckled); `None` takes them all.
+    fn havok_part(rig: &RobotRig, p: usize, attached: Option<&[bool]>) -> HavokPart {
         let part = &rig.parts[p];
         let frame = rig.components[part.root].local;
         // Which motors drive another part: their rotor belongs there.
@@ -937,6 +969,9 @@ impl Robot {
             }
         };
         for &i in &part.members {
+            if attached.is_some_and(|a| !a.get(i).copied().unwrap_or(true)) {
+                continue;
+            }
             let c = &rig.components[i];
             let m = rig.part_local[i];
             let h = &c.havok;
@@ -2314,6 +2349,7 @@ impl Robot {
         for (p, orig) in c.hull_points.iter_mut().zip(&c.rest_hull) {
             *p = crush(*orig);
         }
+
         self.rebuild_part(physics, 0);
     }
 
@@ -2484,6 +2520,35 @@ impl Robot {
             .copied()
             .filter(|&i| self.attached[i])
             .collect();
+        if physics.name() == "havok17" {
+            // The body as it was built (`havok_part`): its composite of rigid
+            // bodies, a rotor's mass with the body it drives, the inertia
+            // summed per rigid body. Rebuilding by the Jolt rule instead (the
+            // members' masses, the hull's inertia) gave the Scout's chassis
+            // 193.5 kg at its first buckle against the 163.5 kg it is built
+            // with and keeps live for the whole fight
+            // (`fightcontacts-scout-alarm-box__live__000..003`).
+            // Live, the Scout's chassis keeps its mass and centre through a
+            // fight, and the original's chassis collider does not crush: with
+            // 971 of its 1828 hitpoints gone (`fightcontacts-scout-alarm-box__live__006`,
+            // 20 s) a contact still lands on its top at y 0.359 above its
+            // centre of mass, the pristine height. So a body is rebuilt from
+            // its Havok parts as built (the chassis' collision mesh is the
+            // `.bot` mesh, which the crush does not move), less what came off.
+            let h = Self::havok_part(&self.rig, part, Some(&self.attached));
+            let natural = h.mass;
+            let mass = (natural * self.mass_scale).max(0.2);
+            let body = self.parts[part].body;
+            if let Err(e) = physics.set_body_shape(body, &h.shape, Some(mass)) {
+                eprintln!("ra2sim: rebuild failed: {e}");
+            }
+            // A piston rod keeps the inertia it was built with (see `spawn`).
+            let rod = self.rig.parts[part].joint.is_some_and(|j| j.slider);
+            if let (Some(inertia), false) = (h.inertia, rod) {
+                physics.set_body_inertia(body, inertia * (mass / natural.max(1e-3)));
+            }
+            return;
+        }
         let shape = Self::part_shape(&self.rig, &members);
         let mass = (members
             .iter()

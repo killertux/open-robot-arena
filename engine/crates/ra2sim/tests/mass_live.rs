@@ -256,6 +256,100 @@ fn alarms_wheel_bodies_match_the_original() {
     }
 }
 
+/// A piston's rod body: its housing body's inertia with the diagonal at 0.2
+/// and the products of inertia unchanged. Live, ALARM's 33 kg hammer rod reads
+/// (9.830, 14.541, 7.282) on the diagonal and (-0.1215, 0.0264, -0.8657) off
+/// it, its chassis (49.149, 72.705, 36.411) with the same products
+/// (`fightcontacts-scout-alarm-box__live__001`, body `+0x19c`; Wide Load's rod
+/// likewise, docs/29 section 12m).
+#[test]
+fn alarms_hammer_rod_takes_its_chassis_inertia() {
+    let Some(game) = game_dir() else {
+        eprintln!("skipped: no game data (set RA2_GAME)");
+        return;
+    };
+    if std::env::var("RA2_PHYSICS").is_ok_and(|b| b != "havok17") {
+        eprintln!("skipped: not the havok17 backend");
+        return;
+    }
+    let _scripts = ra2script::lock();
+    let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+    let setup = BotSetup {
+        path: game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string(),
+        yaw_deg: None,
+        spawn: None,
+    };
+    let d = Duel::new(&arena, std::slice::from_ref(&setup)).expect("a duel");
+    let r = &d.robots[0];
+    let rod = (1..r.rig.parts.len())
+        .find(|&p| r.rig.parts[p].joint.is_some_and(|j| j.slider))
+        .expect("a piston rod");
+    let (mass, _, inv) = d
+        .physics
+        .mass_properties(r.parts[rod].body)
+        .expect("mass properties");
+    assert!((mass - 33.0).abs() < 0.01, "rod {mass} kg, live 33");
+    let i = inv.inverse();
+    for (ours, live) in [
+        (i.x_axis.x, 9.830f32),
+        (i.y_axis.y, 14.541),
+        (i.z_axis.z, 7.282),
+        (i.y_axis.x, -0.1215),
+        (i.z_axis.x, 0.0264),
+        (i.z_axis.y, -0.8657),
+    ] {
+        assert!((ours - live).abs() < 0.01, "rod inertia {i:?}, live {live}");
+    }
+}
+
+/// A chassis that buckles keeps the body it was built with: live, the Scout's
+/// chassis stays 163.49 kg through a fight and its wheels keep their place
+/// about its centre of mass to 5 mm (`fightcontacts-scout-alarm-box__live__000`,
+/// 2.6 s and 60 s). The rebuild once took the members' plain masses (193.49
+/// kg: the fork motor's rotor counted twice) and the hull's inertia.
+#[test]
+fn a_buckled_chassis_keeps_its_mass_and_centre() {
+    let Some(game) = game_dir() else {
+        eprintln!("skipped: no game data (set RA2_GAME)");
+        return;
+    };
+    if std::env::var("RA2_PHYSICS").is_ok_and(|b| b != "havok17") {
+        eprintln!("skipped: not the havok17 backend");
+        return;
+    }
+    let _scripts = ra2script::lock();
+    let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+    let setup = BotSetup {
+        path: game.join("AI/Team0/Bot0.bot").to_string_lossy().to_string(),
+        yaw_deg: None,
+        spawn: None,
+    };
+    let mut d = Duel::new(&arena, std::slice::from_ref(&setup)).expect("a duel");
+    let body = d.robots[0].parts[0].body;
+    let (mass0, com0, inv0) = d.physics.mass_properties(body).expect("chassis");
+    let r = &mut d.robots[0];
+    r.health[0] *= 0.7;
+    r.buckle(&mut *d.physics);
+    let (mass1, com1, inv1) = d.physics.mass_properties(body).expect("chassis");
+    assert!(
+        (mass0 - 163.49).abs() < 0.05,
+        "built {mass0} kg, live 163.49"
+    );
+    assert!(
+        (mass1 - mass0).abs() < 0.01,
+        "buckled {mass1} kg, built {mass0}"
+    );
+    assert!(
+        (com1 - com0).length() < 0.005,
+        "centre moved {com0} -> {com1}"
+    );
+    let (a, b) = (inv0.inverse(), inv1.inverse());
+    assert!(
+        (a.x_axis.x - b.x_axis.x).abs() < 0.05 * a.x_axis.x,
+        "inertia {a:?} -> {b:?}"
+    );
+}
+
 /// Berserker's spinner body (`rotatorbar`, three angle connectors and three
 /// axe heads on the Z-Tek's rotor): live 72 kg with its centre of mass at
 /// robot-frame y 0.5975 (`assembly-berserker__live__000`); ours puts it

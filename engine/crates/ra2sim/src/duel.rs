@@ -4976,13 +4976,23 @@ mod tests {
             duel.step_direct(&[DriveInput::default()], dt);
         }
         let crushed = collider_top(&duel);
-        // The drawn top moves 0.1855 m at half damage; the collider must follow
-        // by most of that (the ray grid is finite, hence the 0.10 m floor).
+        // The drawn top moves 0.1855 m at half damage. On the Havok backend
+        // the collider stays as built, as the original's does (docs/29
+        // section 12m: a live Scout half way through its hitpoints is still
+        // touched at its pristine top); elsewhere it follows by most of that
+        // (the ray grid is finite, hence the 0.10 m floor).
         println!("chassis collider top: {pristine:.3} -> {crushed:.3} m");
-        assert!(
-            pristine - crushed > 0.10,
-            "the collider did not follow the crush: {pristine:.3} -> {crushed:.3} m"
-        );
+        if duel.physics.name() == "havok17" {
+            assert!(
+                (pristine - crushed).abs() < 0.02,
+                "the Havok collider moved with the crush: {pristine:.3} -> {crushed:.3} m"
+            );
+        } else {
+            assert!(
+                pristine - crushed > 0.10,
+                "the collider did not follow the crush: {pristine:.3} -> {crushed:.3} m"
+            );
+        }
         assert_eq!(
             duel.robots[0]
                 .parts
