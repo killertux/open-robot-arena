@@ -155,6 +155,30 @@ pub fn create_team(
     Ok(Some(slot))
 }
 
+/// The edit-team window's OK on an existing team: the record keeps its robots
+/// and career lines, and takes the new name, motto and logo.
+pub fn update_team(
+    game: &Path,
+    slot: usize,
+    name: &str,
+    motto: &str,
+    logo: &str,
+) -> Result<(), String> {
+    let path = game.join(Side::Player.table());
+    let mut table = team::read_table(&path)?;
+    let record = table
+        .teams
+        .get_mut(slot)
+        .filter(|t| t.is_named())
+        .ok_or_else(|| format!("{}: team slot {slot} is empty", path.display()))?;
+    record.name = name.to_string();
+    record.motto = motto.to_string();
+    record.logo = logo.to_string();
+    table
+        .write_to(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// A robot built in the workshop from an empty inventory selection joins
 /// the team: the record's `Robots:` line gains the first free slot number and
 /// the robot is `Teams/Team<team>/Bot<n>.bot`. The table is written at once.

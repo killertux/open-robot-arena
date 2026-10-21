@@ -465,6 +465,37 @@ fn a_new_team_is_typed_saved_selected_and_deleted() {
     assert_eq!(table.teams.len(), 16);
 }
 
+/// The HQ's `Edit Team` opens the same window as New Team, captioned `Edit
+/// Robotics Team` and filled from the HQ's team (capture `teamhq-editteam`);
+/// OK rewrites that record (name, motto, logo) and keeps its robots.
+#[test]
+fn edit_team_shows_the_teams_own_record_and_ok_rewrites_it() {
+    let Some(scratch) = ScratchGame::new("editteam") else {
+        return;
+    };
+    let game = scratch.path();
+    let mut shell = window_shell(game);
+    shell.click_named("Team HQ button").unwrap();
+    shell.click_named("continue button").unwrap();
+    assert_eq!(shell.base_screen_id(), "teamhq/teamhq.gib");
+    shell.click_named("edit team button").unwrap();
+    assert_eq!(shell.window_depth(), 1);
+    assert!(document_has_text(&shell, "Edit Robotics Team"));
+    assert!(document_has_text(&shell, "The Rookies"));
+    shell.click_named("name input textbox").unwrap();
+    for c in "!".chars() {
+        assert!(shell.type_char(c));
+    }
+    shell.click_named("ok button").unwrap();
+    assert_eq!(shell.window_depth(), 0);
+    let table = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap();
+    assert_eq!(table.teams[0].name, "The Rookies!");
+    assert!(
+        !table.teams[0].robots.is_empty(),
+        "the record keeps its robots"
+    );
+}
+
 /// Continuing with a team other than the first opens that team's HQ: its
 /// name, its roster, its career (`FUN_004eba60` selects the grid's team).
 #[test]
@@ -713,7 +744,14 @@ fn the_options_dropdowns_list_their_rows_and_a_row_sets_the_value() {
         .unwrap();
     assert_eq!(
         rows(&shell, "resolution dropdown"),
-        ["640x480", "1024x768", "1280x1024", "1920x1080"]
+        [
+            "640x480x32",
+            "1024x768x32",
+            "1280x1024x32",
+            "1920x1080x32",
+            "640x480x16",
+            "1024x768x16"
+        ]
     );
     // The fourth row.
     shell
@@ -734,10 +772,10 @@ fn the_options_dropdowns_list_their_rows_and_a_row_sets_the_value() {
         .unwrap();
     assert_eq!(
         rows(&shell, "Camera dropdown"),
-        ["watch", "static", "orbit"]
+        ["watch", "orbit", "static"]
     );
     shell
-        .click(camera.x + 20.0, camera.y + camera.h + 2.0 * 18.0 + 9.0)
+        .click(camera.x + 20.0, camera.y + camera.h + 1.0 * 18.0 + 9.0)
         .unwrap();
     settings.absorb_picks(&shell.take_dropdown_picks());
     assert_eq!(settings.cfg().default_camera(), "orbit");

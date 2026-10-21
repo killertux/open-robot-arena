@@ -117,6 +117,12 @@ pub const BINDINGS: &[Binding] = &[
         at: "FUN_004e4ab0(1)",
     },
     Binding {
+        screen: "teamhq/teamhq.gib",
+        name: "edit team button",
+        action: Action::Window("teamhq/editteam.gib"),
+        at: "teamhq.gib `edit team button` (Notes: click to open edit team window): the same EditTeamWindow as New Team, caption `Edit Robotics Team`, filled from the HQ's team (capture `teamhq-editteam`); OK updates the record",
+    },
+    Binding {
         screen: "exhibition/exhib_setup.gib",
         name: "Help button",
         action: Action::Help("help/help_exhibition.gib"),

@@ -559,6 +559,11 @@ fn set_scroller_visible(list: &mut Widget, visible: bool, offset: usize, max: us
     else {
         return;
     };
+    // A dropdown's list keeps its bar in a hidden wrapper (`Visible false`,
+    // `ClipMode 2`); the exe shows the wrapper with the bar.
+    if !visible || body.kind != WidgetKind::ScrollBar {
+        set_field(body, "Visible", if visible { "true" } else { "false" });
+    }
     let Some(bar) = scrollbar_in_mut(body) else {
         return;
     };

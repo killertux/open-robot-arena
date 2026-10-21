@@ -632,7 +632,19 @@ pub fn parse_table(text: &str) -> Result<TeamTable, String> {
                 ))
             }
         };
-        let extra = if has_history { 9 } else { 0 };
+        // The original's own save (a Teams.txt it wrote once the schedule was
+        // drawn) has the flag true and the nine ints on ONE line (with a
+        // trailing space), not nine lines. Nine lines are read only when the
+        // next line is a single value (the shape this crate wrote before).
+        let one_line = has_history
+            && lines
+                .get(start + 17)
+                .is_some_and(|l| l.split_whitespace().count() > 1);
+        let extra = match (has_history, one_line) {
+            (false, _) => 0,
+            (true, true) => 1,
+            (true, false) => 9,
+        };
         let need = base + 23 + extra;
         if i + need > lines.len() {
             return Err(format!("line {}: truncated team record", i + 1));
@@ -649,7 +661,15 @@ pub fn parse_table(text: &str) -> Result<TeamTable, String> {
         }
         state.push(parse_state_value(at(16), start + 17)?);
         let mut history = Vec::new();
-        if has_history {
+        if one_line {
+            for token in at(17).split_whitespace() {
+                history.push(
+                    token
+                        .parse::<i32>()
+                        .map_err(|_| format!("line {}: bad history value", start + 18))?,
+                );
+            }
+        } else if extra > 0 {
             for k in 0..9 {
                 history.push(
                     at(17 + k)
@@ -880,5 +900,16 @@ mod tests {
         assert_eq!(back.teams[0].name, "The Rookies");
         assert_eq!(back.teams[0].robots, vec![0, 1, 2, 3, 4, 5]);
         assert_eq!(back.teams.len(), 16);
+    }
+
+    /// A Teams.txt the original wrote after drawing the schedule: `+0xf4` is
+    /// true and the nine ints follow on ONE line, not nine lines.
+    #[test]
+    fn the_originals_own_save_with_a_schedule_parses_and_round_trips() {
+        let text = "0 \r\nThe Rookies\r\nJust getting started...\r\nTeams\\orange_skull.bmp\r\nRobots: 0 1 2 3 4 5\r\nRobot In Event: -1\r\n0\r\n1\r\n16\r\n0\r\n0\r\n0\r\n0\r\n0\r\n10000\r\ntrue\r\n0\r\ntrue\r\n2 6 12 9 13 15 5 22 20 \r\n0\r\n-1\r\n0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 \r\n0\r\n0\r\n0\r\n";
+        let table = parse_table(text).unwrap();
+        let team = &table.teams[0];
+        assert_eq!(team.history(), [2, 6, 12, 9, 13, 15, 5, 22, 20]);
+        assert!(team.has_history());
     }
 }

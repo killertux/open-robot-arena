@@ -104,9 +104,25 @@ impl Reminder {
             {
                 ra2ui::input::set_field(bar, "Visible", "false");
             }
+            // The grid draws its own cell lines (`BorderColor 0.4 0.4 0.4 1`,
+            // `BorderWidth 1`, `BufferWidth 1`) around all nine cells, empty
+            // ones included (capture `match-f1`).
+            for row in 0..GRID[1] {
+                for column in 0..GRID[0] {
+                    let mut cell = empty_cell(
+                        cell_w * column as f32 + 1.0,
+                        cell_h * row as f32 + 1.0,
+                        cell_w - 2.0,
+                        cell_h - 2.0,
+                    );
+                    ra2ui::cells::add_border(grid, &mut cell, 1.0);
+                    grid.children.push(cell);
+                }
+            }
             for control in &self.board.controls {
-                let x = cell_w * control.cell[0] as f32;
-                let y = cell_h * control.cell[1] as f32;
+                let x = cell_w * control.cell[0] as f32 + 1.0;
+                let y = cell_h * control.cell[1] as f32 + 1.0;
+                let (cell_w, cell_h) = (cell_w - 2.0, cell_h - 2.0);
                 for template in self.template.widgets() {
                     let mut cell = template.clone();
                     ra2ui::input::set_field(
@@ -124,11 +140,40 @@ impl Reminder {
                     ra2ui::cells::bind_art(&mut cell, "control img", art);
                     ra2ui::cells::bind_value(&mut cell, "control name", &control.name);
                     ra2ui::cells::bind_value(&mut cell, "control input", &control.key_label());
+                    ra2ui::cells::add_border(grid, &mut cell, 1.0);
                     grid.children.push(cell);
                 }
             }
         }
         gib
+    }
+}
+
+/// A cell with nothing in it: only the grid's ring is drawn around it.
+fn empty_cell(x: f32, y: f32, w: f32, h: f32) -> Widget {
+    let field = |name: &str, raw: &str| ra2fmt::gib::Field {
+        name: Some(name.to_string()),
+        raw: raw.to_string(),
+    };
+    Widget {
+        kind: ra2fmt::gib::WidgetKind::Rectangle,
+        implicit: false,
+        fields: vec![
+            field("Filled", "false"),
+            field("FillColor", "0 0 0 0"),
+            field("BorderWidth", "0"),
+            field("BorderColor", "0 0 0 0"),
+            field("Name", "reminder:empty"),
+            field("ID", "-1"),
+            field("Position", &format!("{x} 0 {y} 0")),
+            field("Size", &format!("{w} 0 {h} 0")),
+            field("Visible", "true"),
+            field("ChildOrder", "2"),
+            field("ClipMode", "0"),
+            field("NumChildren", "0"),
+        ],
+        attachments: Vec::new(),
+        children: Vec::new(),
     }
 }
 

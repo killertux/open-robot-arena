@@ -127,6 +127,43 @@ FIXTURES = [
          build="wiring"),
     dict(id="botlab-paint", ref="botlab-paint__1024x768__000.png",
          build="paint"),
+    # Round 4 (docs/36 section 9.20): states captured from the original with ra2_drive.py; the
+    # routes click the same pixels (`@x,y`) or widget names.  `hqsim=(row, file)` takes a frame of
+    # `ra2-app --hq --simulate-event ROW`; `matchquit=file` one of `--match --quit-at 18`.
+    dict(id="options-video", ref="options-video__1024x768__000.png", route=["Options button"]),
+    dict(id="options-audio", ref="options-audio__1024x768__000.png", route=["Options button", "audio tab"]),
+    dict(id="options-resolution-open", ref="options-resolution-open__1024x768__000.png",
+         route=["Options button", "@671,324"]),
+    dict(id="options-resolution-end", ref="options-resolution-end__1024x768__000.png",
+         route=["Options button", "@671,324"] + ["@672,406"] * 10),
+    dict(id="options-camera-open", ref="options-camera-open__1024x768__000.png",
+         route=["Options button", "@671,480"]),
+    dict(id="exhibition-time-open", ref="exhibition-time-open__1024x768__000.png",
+         route=["exhibition button", "@465,576"]),
+    dict(id="exhibition-weight-light", ref="exhibition-weight-light__1024x768__000.png",
+         route=["exhibition button", "@484,515"]),
+    dict(id="exhibition-pick-ai-light", ref="exhibition-pick-ai-light__1024x768__000.png",
+         route=["exhibition button", "@484,515", "robots button", "@441,249"]),
+    dict(id="teamhq-newteam", ref="teamhq-newteam__1024x768__000.png", route=["Team HQ button", "@329,664"]),
+    dict(id="teamhq-editteam", ref="teamhq-editteam__1024x768__000.png",
+         route=TEAMHQ + ["edit team button"]),
+    dict(id="teamhq-event-join", ref="teamhq-event-join__1024x768__000.png",
+         route=TEAMHQ + ["events button", "@430,370"]),
+    dict(id="teamhq-event-join-robot", ref="teamhq-event-join-robot__1024x768__000.png",
+         route=TEAMHQ + ["events button", "@430,370", "@288,455"]),
+    dict(id="event-bracket-tabletop", ref="event-bracket-tabletop__1024x768__000.png",
+         route=TEAMHQ + ["events button", "@430,370", "@288,455", "enter event button"],
+         note="the field's order is the original's own draw (not recoverable)"),
+    dict(id="event-bracket-duel-round1", ref="event-bracket-duel-round1__1024x768__000.png",
+         route=TEAMHQ + ["events button", "@617,370", "@288,455", "enter event button"]),
+    dict(id="event-repairs", ref="event-repairs__1024x768__000.png", hqsim=(0, "repairs-components.png"),
+         note="ours lists simulated damage and has no live 3D robot view; the original's robot was undamaged"),
+    dict(id="event-award-photo", ref="event-award-photo__1024x768__000.png", hqsim=(0, "award.png"),
+         note="ours is a simulated lost round (0/1, Fruity-Punch); the original won one of two (photo)"),
+    dict(id="match-pause", ref="match-pause__1024x768__000.png", matchquit="pause.png", box=(425, 270, 605, 500),
+         note="box = the dialog; the match behind it differs (live fight)"),
+    dict(id="match-f1", ref="match-f1__1024x768__000.png", matchquit="reminder.png", box=(360, 180, 680, 590),
+         note="box = the reminder; the original's robot is ALARM, ours is whichever robot is first"),
     dict(id="match-countdown", ref="match-countdown__1024x768__000.png", introshot=("box", 6.55),
          note="the reference is NOT a countdown frame: it shows the Combat Arena intro flight with the "
               "Skip Intro button and no COMPETITORS READY panel; ours is the box intro at the fitted "
@@ -353,6 +390,37 @@ def run_match_frames(tmp):
     return d if p.returncode == 0 else None
 
 
+_FRAMES = {}
+
+
+def hq_frame(fx, tmp):
+    """One `ra2-app --hq --simulate-event ROW` run (cached per row); the named frame or None."""
+    row, name = fx["hqsim"]
+    if ("hq", row) not in _FRAMES:
+        d = os.path.join(tmp, "hq%d" % row)
+        os.makedirs(d, exist_ok=True)
+        p = subprocess.run([APP, "--game", GAME, "--hq", "--simulate-event", str(row), "--out", d,
+                            "--size", "%dx%d" % SIZE],
+                           capture_output=True, text=True, env=env(), timeout=900)
+        _FRAMES[("hq", row)] = d if p.returncode == 0 else None
+    d = _FRAMES[("hq", row)]
+    return os.path.join(d, name) if d else None
+
+
+def quit_frame(fx, tmp):
+    """`ra2-app --match --quit-at 18` (cached): reminder.png and pause.png over a Scout v ALARM fight."""
+    if "quit" not in _FRAMES:
+        d = os.path.join(tmp, "quit")
+        os.makedirs(d, exist_ok=True)
+        bots = ",".join(os.path.join(GAME, "AI", "Team0", b) for b in ("Bot1.bot", "Bot0.bot"))
+        p = subprocess.run([APP, "--game", GAME, "--match", "--seconds", "30", "--quit-at", "18", "--out", d,
+                            "--size", "%dx%d" % SIZE, "--bots", bots],
+                           capture_output=True, text=True, env=env(), timeout=900)
+        _FRAMES["quit"] = d if p.returncode == 0 else None
+    d = _FRAMES["quit"]
+    return os.path.join(d, fx["matchquit"]) if d else None
+
+
 def run_play_frames(tmp):
     d = os.path.join(tmp, "play")
     os.makedirs(d, exist_ok=True)
@@ -373,8 +441,10 @@ def load(path):
     return im
 
 
-def measure(ours, ref, ref_path):
-    """MAE (and masked / over8 / lowfreq) between two same-size RGB images."""
+def measure(ours, ref, ref_path, box=None):
+    """MAE (and masked / over8 / lowfreq) between two same-size RGB images; `box` limits it to a rectangle."""
+    if box:
+        ours, ref = ours.crop(box), ref.crop(box)
     def mae(a, b, exclude=None):
         diff = ImageChops.difference(a, b)
         if exclude:
@@ -397,7 +467,7 @@ def measure(ours, ref, ref_path):
         pointer = scan["rect"] if scan else None
     res["pointer"] = pointer
     res["masked"] = mae(ours, ref, pointer) if pointer else res["mae"]
-    small = (SIZE[0] // 16, SIZE[1] // 16)
+    small = (max(1, ours.size[0] // 16), max(1, ours.size[1] // 16))
     res["lowfreq"] = mae(ours.resize(small, Image.BOX), ref.resize(small, Image.BOX))
     return res
 
@@ -503,6 +573,16 @@ def screens(args, out):
                 row["status"], row["reason"] = "render-failed", "ra2-app --match failed"
                 return row
             shutil.copy(src, out_png)
+        elif "hqsim" in fx or "matchquit" in fx:
+            if rd != "app":
+                row["status"] = "unreachable"
+                row["reason"] = "only ra2-app renders the event flow and the match"
+                return row
+            src = hq_frame(fx, tmp) if "hqsim" in fx else quit_frame(fx, tmp)
+            if not src:
+                row["status"], row["reason"] = "render-failed", "ra2-app frame run failed"
+                return row
+            shutil.copy(src, out_png)
         elif "play" in fx:
             if rd != "app":
                 row["status"] = "unreachable"
@@ -530,7 +610,7 @@ def screens(args, out):
         if ours.size != ref.size:
             ours = ours.resize(ref.size, Image.LANCZOS)
             row["resized"] = True
-        row.update(measure(ours, ref, ref_path))
+        row.update(measure(ours, ref, ref_path, fx.get("box")))
         side_by_side(ours, ref, os.path.join(out, "side", rd, fx["id"] + ".png"))
         row["status"] = "ok"
         return row

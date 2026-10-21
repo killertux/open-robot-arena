@@ -643,3 +643,142 @@ a_duel_reports_slots_two_and_four_as_open}`,
 `playthrough::{the_options_dropdowns_list_their_rows_and_a_row_sets_the_value,
 finish_later_keeps_the_entered_event_in_the_team_record}`.
 
+
+## 9.20 Round 4 (`fx/shellcap`, 2026-10-21): the screens of rounds 2-3 against the original
+
+Rounds 2 and 3 implemented the award scene, the options dropdowns, the pause
+menu, the F1 reminder, the event screens and Edit Team from code only. This round
+ran the original (flatpak Wine 9.0, Xephyr `:5`, 1024x768, `ra2_drive.py`) through
+every one of them, added the captures to `local/oracle/original` (33 rows,
+`manifest-additions-2026-10-21-shellcap.tsv` in `~/ra2-oracle-backup/oracle`) and
+compared ours with `tools/oracle/fidelity.py` (new rows in `FIXTURES`:
+`routes` for the click-driven states, `hqsim=(row, frame)` for the event flow,
+`matchquit=frame` + `box=` for the pause dialog and the reminder over a match).
+
+### Captures (`local/oracle/original/<id>__1024x768__000.png`)
+
+Options: `options-video`, `options-audio`, `options-resolution-open`,
+`options-resolution-end` (scrolled by ten arrow clicks), `options-camera-open`.
+Exhibition: `exhibition-time-open`, `exhibition-weight-light`,
+`exhibition-pick-ai-light` (the picker with LIGHTWEIGHT set), `exhibition-robots-filled`.
+Match: `match-pause`, `match-pause-options` (the Options window over the paused
+match), `match-f1`, `match-results-event`. Team: `teamhq-newteam`,
+`teamhq-editteam`, `teamhq-event-join`, `teamhq-event-join-robot`,
+`teamhq-events-in-progress`, `teamhq-events-one-event`, `teamhq-events-completed`,
+`teamhq-events-season2`, `teamhq-league-season2`, `teamhq-history-season1`.
+Event flow: `event-bracket-tabletop`, `event-bracket-tabletop-final`,
+`event-bracket-duel-round1`, `event-bracket-duel-round3`, `event-repairs`,
+`event-award-photo`, `event-award-plaque`, `event-award-plaque-2of2`,
+`event-award-trophy`, `season-golden-sawblade`. The whole season was played
+(nine events, 25 wins, eight titles) by eliminating every non-human player with
+`plus.eliminatePlayer` (`plus.isHuman` picks the human) and clicking through; the
+prefix's `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` were restored to their
+prior bytes afterwards (hash-checked).
+
+### What the original does that the code reading missed (and what was done)
+
+* **The award scene has the team's robot standing on the pad.** `FUN_0046e140`
+  also calls `FUN_0046e710`, which adds the entered robot as a real player of the
+  running `Event Results` arena (`FUN_00439be0`); it stands at start point 0 on
+  the orange rectangle and its yaw keeps changing from frame to frame (every
+  capture shows a different yaw), so it is not a still. Ours now places the
+  robot on start point 0 of `event_results.gmf` (`prize_scene::place_robot`,
+  floor found by a ray on the arena triangles); the yaw drift is **not**
+  reproduced (gap).
+* **The award window is laid out on the real screen.** The headless event run laid
+  it on 1280x1005 and resampled; the original's window is 250 px wide at 1024.
+  `hq_mode::run` now sets `set_layout(size)` (award MAE 8.57 -> 5.68 with the robot).
+* **Resolution list** (`FUN_004a00b0`): rows are `WxHxDepth` (`FUN_004192a0(w, 'x',
+  h, 'x', depth)`), orange (`FUN_0061b4b0(1.0, 0.5, 0, 1.0)` into `FUN_005f0f90`
+  before the rows are added), five 32-bit sizes (640x480, 800x600, 1024x768,
+  1280x1024, 1600x1200) then the same five at 16 bits, ten rows, five visible,
+  the bar's arrows and thumb drawn, the field `1024x768x32`. Camera list order is
+  **watch, orbit, static** (ours had static before orbit); rows orange.
+  `options.rs` (`mode_text`, `DEPTHS`, `CAMERAS`), `Shell::set_dropdown_row_color`,
+  `dropdown::set_row_color`.
+* **A dropdown's scroll bar** lives in a hidden wrapper (`Visible false`,
+  `ClipMode 2`) that the list's `+Scroller` carries; `input::set_scroller_visible`
+  showed the bar but not the wrapper, so no list ever had one (exhibition time,
+  resolution, logo list). Fixed.
+* **`TextBox Buffer N`** insets left-aligned text (the resolution field says
+  `Buffer 8`): `ra2ui::place_core`.
+* **Edit Team was unbound**: the HQ's `edit team button` fell through to a screen
+  `Goto` of `editteam.gib` (a black page with the placeholder window). It is now
+  the same modal as New Team, captioned `Edit Robotics Team`, filled from the HQ's
+  team (name, motto, logo selected and previewed), and OK rewrites the record
+  (`teams::update_team`; `playthrough::edit_team_shows_the_teams_own_record_and_ok_rewrites_it`).
+  The logo list shows its bar. MAE 56.6 -> 1.9.
+* **The bracket's background** is the event's arena preview
+  (`Arenas\flextop\tts_preview.bmp`, filtered); `background img` sits in a
+  `Background` attachment body, which the child-only search never entered, so the
+  placeholder `sample_arena.bmp` was always shown (`event_screens::find_mut_attached`).
+  MAE 26.8 -> 7.1.
+* **F1 reminder**: the 3x3 grid draws its cell lines (`BorderColor 0.4`,
+  `BorderWidth 1`, `BufferWidth 1`) around all nine cells, empty ones too
+  (`reminder::empty_cell`). F1 toggles as coded (shown, hidden, shown).
+* **`Teams.txt` written by the original could not be read.** After the schedule is
+  drawn the original writes `+0xf4` = true and the nine ints on **one line** with a
+  trailing space (`2 6 12 9 13 15 5 22 20 `), not nine lines; `team::parse_table`
+  rejected it (`bad history value`) so every career screen of a played-in install
+  failed to open. It now accepts both (`team::tests::the_originals_own_save_with_a_schedule_parses_and_round_trips`).
+* **Pixel snapping.** Comparing the exhibition panel's edges (original 256..986 x
+  120..607, ours 256..987 x 120..608) showed the original truncates both edges of
+  every box to whole pixels; our fractional frames put the lower and right parts
+  of fractional layouts one to two pixels out. `ra2_render::ui::scene` now snaps
+  every placed frame and clip to `floor(x), floor(x + w)` for drawing (hit tests keep
+  the exact frames). Mean over the 19 screens of the existing fixtures 3.66 -> 2.75
+  (main menu 0.59 -> 0.09, Team HQ history 2.45 -> 0.37, inventory 2.80 -> 1.85,
+  exhibition settings 4.07 -> 2.65, standings 6.02 -> 3.32, events 8.42 -> 6.96,
+  bot lab 5.1-6.6 -> 4.8-6.0). Tried and rejected: flooring the fractional lengths
+  (better exhibition, worse Team HQ), and both together (3.16).
+
+### MAE per screen (ours vs original, 1024x768; the "before" binary is `fidelity` 597a227)
+
+| screen | before | after |
+|---|---:|---:|
+| options-video / audio | 1.24 / 1.30 | 0.66 / 0.79 |
+| options-resolution-open / end | 1.53 / 1.75 | 0.72 / 0.75 |
+| options-camera-open | 1.51 | 0.89 |
+| exhibition-time-open | 4.28 | 2.78 |
+| exhibition-weight-light | 4.05 | 2.62 |
+| exhibition-pick-ai-light | 2.32 | 2.07 |
+| teamhq-newteam | 7.84 | 1.33 |
+| teamhq-editteam | 56.56 | 1.89 |
+| teamhq-event-join / -robot | 36.6 / 36.5 | 4.76 / 4.63 |
+| event-bracket-tabletop / duel-round1 | n/a (screen could not open) | 7.15 / 7.01 |
+| event-repairs | n/a | 10.04 |
+| event-award-photo | 8.57 (round 3 build, 1280 layout) | 5.29 |
+| match-pause (dialog box) | 5.64 | 5.64 (the dialog is pixel-identical; the box includes the live match) |
+| match-f1 (reminder box) | no frame | 9.31 (different robot, ALARM v Scout) |
+
+The "n/a"/36-56 rows of the "before" column are the Teams.txt reading bug above
+(the career screens did not open on the original's own file).
+
+### Gaps
+
+* The award robot's yaw drift; the bracket's entrant order (the original draws
+  its opponents from its own random state; ours is the oracle schedule); the
+  bracket's top and bottom black bands are fully opaque in the original.
+* **Repairs**: the original draws the robot top-down in the `3d view group`
+  (ours shows the dark placeholder), and the window's wood border is a 2 px tan
+  frame (ours a thin cream line). The headless run lists simulated damage; the
+  original's robot was undamaged.
+* **One event at a time**: clicking another event while one is in progress opens a
+  message box (caption `Robot Arena 2`, OK) whose body was empty in the capture,
+  and the original then stopped responding (CPU busy, no repaint) twice in a row
+  under Wine. Whether that is the Wine/Frida setup or the exe was not settled;
+  ours shows the recovered text (`ONE_EVENT_AT_A_TIME`).
+* The F1 reminder's key bars are inset 2-3 px per cell in the original.
+* Tool notes: after any `frida` timeout the next `ra2_drive.py` call works only
+  once `frida-server` is restarted; never `pkill -f frida` (it matches the shell
+  and kills the sandbox); a `flatpak enter` helper left from a killed attach keeps
+  the game ptrace-stopped.
+
+### 9.20 Gate
+
+`cargo fmt --all --check` and `cargo clippy --release --offline --workspace
+--all-targets -- -D warnings` clean; `cargo test --release --offline --workspace
+--no-fail-fast` **573 passed, 0 failed** (561 at the start of the round); `find
+../local/game -newer <stamp>` printed nothing. New tests: `team::tests::the_originals_own_save_with_a_schedule_parses_and_round_trips`,
+`playthrough::edit_team_shows_the_teams_own_record_and_ok_rewrites_it`; the options dropdown test
+now expects the `WxHxDepth` rows and the watch/orbit/static order.

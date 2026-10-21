@@ -938,10 +938,18 @@ impl Session {
                     .map(|(model, _)| model.clone())
                     .unwrap_or_default()
             };
+            // The entered robot stands on the pad (`FUN_0046e710`).
+            let robot_path = self.career.player().robots.iter().find_map(|slot| {
+                let path = player_robot_path(&self.game, self.career.player_slot, *slot);
+                read_bot(&path)
+                    .filter(|bot| bot.name == bot_name)
+                    .map(|_| path)
+            });
             let prize = crate::prize_scene::PrizeScene::load(
                 &self.game,
                 &model,
                 &self.career.player().logo,
+                robot_path.as_deref(),
             )
             .map(Box::new)
             .map_err(|e| eprintln!("award scene: {e}"))
@@ -2361,6 +2369,9 @@ pub fn run_headless(options: Options) -> Result<(), String> {
     let target = Target::new(renderer.device(), options.size[0], options.size[1]);
 
     let mut session = Session::open(&options.game)?;
+    // The original lays its windows out on the screen it runs at (1024x768 in
+    // the captures), not on a design canvas that is resampled afterwards.
+    session.set_layout(options.size);
     session.set_event_seconds(options.seconds);
     session.set_report_damage(options.report_damage);
     println!(
@@ -2532,7 +2543,7 @@ mod tests {
         let (w, h) = (320u32, 251u32);
         let target = Target::new(renderer.device(), w, h);
         let draw = |prize: &str, logo: &str| -> Vec<u8> {
-            let scene = crate::prize_scene::PrizeScene::load(&game, prize, logo).unwrap();
+            let scene = crate::prize_scene::PrizeScene::load(&game, prize, logo, None).unwrap();
             assert_eq!(scene.has_prize(), prize.ends_with(".gmf"), "{prize}");
             scene
                 .render(

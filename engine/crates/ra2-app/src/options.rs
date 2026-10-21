@@ -18,7 +18,7 @@
 //! | `music checkbox` | `MusicMuted` | checked = music on |
 //! | `intro off`/`intro on` | `ArenaIntros` | the shipped `Arena Introductions` group |
 //! | `fullscreen checkbox` | `FullScreen` | |
-//! | `Camera dropdown` | `DefaultCamera` | opens a list of the binary's `watch`/`static`/`orbit` (`ra2ui::dropdown`) |
+//! | `Camera dropdown` | `DefaultCamera` | opens a list of the binary's `watch`/`orbit`/`static` (`ra2ui::dropdown`) |
 //! | `effects off`/`effects on` | `GraphicEffects` | |
 //! | `damage off`/`damage on` | `GraphicMessages` | the screen's "damage" group is the status-message switch |
 //! | `2 player`/`4 player` | `EventNumBots` | |
@@ -90,12 +90,10 @@ pub fn display_size(cfg: &Cfg) -> [u32; 2] {
 }
 
 /// The display modes the video tab offers, smallest first.
-pub const RESOLUTIONS: [[u32; 2]; 7] = [
+pub const RESOLUTIONS: [[u32; 2]; 5] = [
     [640, 480],
     [800, 600],
     [1024, 768],
-    [1152, 864],
-    [1280, 960],
     [1280, 1024],
     [1600, 1200],
 ];
@@ -160,19 +158,24 @@ impl Options {
 
     /// Hand the shell the rows of the options window's two dropdowns
     /// (`resolution dropdown`: `WxH` per mode; `Camera dropdown`: the
-    /// executable's `watch`, `static`, `orbit`).
+    /// executable's `watch`, `orbit`, `static`).
     pub fn register_dropdowns(&self, shell: &mut Shell) {
         shell.set_dropdown_items(
             "resolution dropdown",
-            self.modes
+            DEPTHS
                 .iter()
-                .map(|m| format!("{}x{}", m[0], m[1]))
+                .flat_map(|depth| self.modes.iter().map(move |m| mode_text(*m, *depth)))
                 .collect(),
         );
+        // `FUN_004a00b0` sets the rows' colour before it fills them:
+        // `FUN_0061b4b0(1.0, 0.5, 0, 1.0)` (orange) into `FUN_005f0f90`; the
+        // camera list (`FUN_004a0400`) is orange too (capture).
+        shell.set_dropdown_row_color("resolution dropdown", ORANGE);
         shell.set_dropdown_items(
             "Camera dropdown",
             CAMERAS.iter().map(|c| c.to_string()).collect(),
         );
+        shell.set_dropdown_row_color("Camera dropdown", ORANGE);
     }
 
     /// Apply the rows the shell reports picked from the options window's
@@ -181,8 +184,11 @@ impl Options {
         let mut changes = Vec::new();
         for (name, text) in picks {
             if name == "resolution dropdown" {
-                let parsed = text
-                    .split_once('x')
+                // `WxHxDepth` (the capture lists `1024x768x32`).
+                let mut parts = text.split('x');
+                let parsed = parts
+                    .next()
+                    .zip(parts.next())
                     .and_then(|(w, h)| Some([w.trim().parse().ok()?, h.trim().parse().ok()?]));
                 if let Some(mode) = parsed {
                     self.set_mode(mode);
@@ -404,10 +410,9 @@ impl Options {
             if let Some(dropdown) = find_mut(root, "resolution dropdown") {
                 set_dropdown_text(
                     dropdown,
-                    &format!(
-                        "{}x{}",
-                        self.cfg.fs_display_width(),
-                        self.cfg.fs_display_height()
+                    &mode_text(
+                        [self.cfg.fs_display_width(), self.cfg.fs_display_height()],
+                        32,
                     ),
                 );
             }
@@ -471,18 +476,34 @@ pub fn volume_fraction(value: i32) -> f32 {
 }
 
 /// The config's three camera names, in the executable's order.
-pub const CAMERAS: [&str; 3] = ["watch", "static", "orbit"];
+pub const CAMERAS: [&str; 3] = ["watch", "orbit", "static"];
+
+/// The rows' colour (orange, `FUN_0061b4b0(1, 0.5, 0, 1)` in `FUN_004a00b0`).
+const ORANGE: &str = "1 0.5 0 1";
+
+/// A display mode as the list writes it: `WxHxDepth` (`FUN_004a00b0`
+/// formats the width, `x`, the height, `x`, the colour depth); the captured
+/// list shows 32-bit modes only.
+fn mode_text(mode: [u32; 2], depth: u32) -> String {
+    format!("{}x{}x{depth}", mode[0], mode[1])
+}
+
+/// The depths the device lists, each with every size (capture: five 32-bit
+/// rows, then the same five at 16 bits).
+const DEPTHS: [u32; 2] = [32, 16];
 
 /// The next camera name after `current`, or `watch` for a value the client does
 /// not know.
 pub fn next_camera(current: &str) -> &'static str {
+    // The C key's cycle (`watch`, `static`, `orbit`), not the dropdown's order.
+    const CYCLE: [&str; 3] = ["watch", "static", "orbit"];
     let current = current.trim();
-    match CAMERAS
+    match CYCLE
         .iter()
         .position(|name| name.eq_ignore_ascii_case(current))
     {
-        Some(index) => CAMERAS[(index + 1) % CAMERAS.len()],
-        None => CAMERAS[0],
+        Some(index) => CYCLE[(index + 1) % CYCLE.len()],
+        None => CYCLE[0],
     }
 }
 

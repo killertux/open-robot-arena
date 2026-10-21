@@ -151,6 +151,21 @@ pub fn open(gib: &mut Gib, name: &str, items: &[String], selected: usize) -> boo
     found && opened
 }
 
+/// Colour the open list's rows (`r g b a`).
+pub fn set_row_color(gib: &mut Gib, name: &str, color: &str) {
+    on_gib_chain_only(gib, name, &mut |dropdown| {
+        if let Some(list) = list_of(dropdown) {
+            for row in list
+                .children
+                .iter_mut()
+                .filter(|c| c.kind == WidgetKind::Text && c.field("_Font").is_some())
+            {
+                set_field(row, "_ForeColor", color);
+            }
+        }
+    });
+}
+
 /// Close the list and give back the clip and draw order [`open`] changed.
 pub fn close(gib: &mut Gib, name: &str) {
     on_gib_chain(gib, name, &mut |w| {
