@@ -6,6 +6,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Args {
     pub game: Option<PathBuf>,
+    /// `--save-dir DIR`: where careers, teams, designs and settings are written.
+    pub save_dir: Option<PathBuf>,
     pub offscreen: Option<PathBuf>,
     pub size: [u32; 2],
     /// Whether `--size` was given, so the startup `ra2.cfg` size may be used
@@ -88,6 +90,7 @@ impl Default for Args {
     fn default() -> Self {
         Args {
             game: None,
+            save_dir: None,
             offscreen: None,
             size: [1280, 1005],
             size_set: false,
@@ -168,6 +171,8 @@ pub fn usage() -> &'static str {
      build-paint.png and build-test.png.\n\
      \n\
        --game DIR       the install (default: RA2_GAME, else local/game)\n\
+       --save-dir DIR   careers, teams, designs, settings are written here, never to the\n\
+     \x20                 install (default: ORA_SAVE_DIR, else the platform data dir)\n\
        --offscreen PNG  render the final state and exit (the CI path)\n\
        --size WxH       window/target size (default 1280x1005; the shell stays 1280x1005)\n\
        --clicks SCRIPT  semicolon-separated x,y points, applied in order\n\
@@ -211,6 +216,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--game" => parsed.game = Some(PathBuf::from(next(&mut args, "--game")?)),
+            "--save-dir" => parsed.save_dir = Some(PathBuf::from(next(&mut args, "--save-dir")?)),
             "--offscreen" => {
                 parsed.offscreen = Some(PathBuf::from(next(&mut args, "--offscreen")?))
             }

@@ -973,7 +973,7 @@ impl Session {
             outcome.points,
             outcome.participation,
             outcome.bonus,
-            self.game.join("Teams").join("Teams.txt").display()
+            ra2sim::career::player_table_path(&self.game).display()
         );
         self.last_report = Some(report);
         self.last_round = Some(outcome.clone());
@@ -2119,16 +2119,12 @@ pub fn arena_game_type(script: &Path) -> Result<GameType, String> {
 
 /// `<game>/Teams/Team<slot>/Bot<robot>.bot` — the player's own roster.
 pub fn player_robot_path(game: &Path, team: usize, robot: i32) -> PathBuf {
-    game.join("Teams")
-        .join(format!("Team{team}"))
-        .join(format!("Bot{robot}.bot"))
+    ra2fmt::saves::resolve(game, format!("Teams/Team{team}/Bot{robot}.bot"))
 }
 
 /// `<game>/AI/Team<team>/Bot<robot>.bot` — an AI team's roster.
 pub fn ai_robot_path(game: &Path, team: usize, robot: i32) -> PathBuf {
-    game.join("AI")
-        .join(format!("Team{team}"))
-        .join(format!("Bot{robot}.bot"))
+    ra2fmt::saves::resolve(game, format!("AI/Team{team}/Bot{robot}.bot"))
 }
 
 /// The AI robot number the player's robot class selects: 0, 1 or 2 as they
@@ -2741,6 +2737,8 @@ mod tests {
                     _ => symlink(&from, &to),
                 }
             }
+            // The scratch install keeps its own saves, as before the save dir.
+            ra2fmt::saves::bind(&root, &root);
             Some(TestGame(root))
         }
 

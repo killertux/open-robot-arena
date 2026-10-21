@@ -46,6 +46,9 @@ pub const SHELL_SIZE: [f32; 2] = [1280.0, 1005.0];
 /// only entry point a test needs.
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     let args = cli::parse(args)?;
+    if args.save_dir.is_some() {
+        ra2fmt::saves::configure(args.save_dir.clone());
+    }
     if args.help {
         println!("{}", cli::usage());
         return Ok(());

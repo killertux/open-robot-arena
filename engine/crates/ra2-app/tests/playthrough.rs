@@ -75,6 +75,7 @@ impl ScratchGame {
                 _ => symlink(&from, &to),
             }
         }
+        ra2fmt::saves::bind(&root, &root);
         Some(ScratchGame(root))
     }
 

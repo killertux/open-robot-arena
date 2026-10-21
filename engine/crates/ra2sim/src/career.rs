@@ -1499,20 +1499,15 @@ impl Career {
         let player_path = player_table_path(game);
         let ai_path = ai_table_path(game);
         for (path, table) in [(&player_path, &player_table), (&ai_path, &self.ai_table)] {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("{}: {e}", parent.display()))?;
-            }
-            table
-                .write_to(path)
+            let out = ra2fmt::saves::prepare_write(game, path)
                 .map_err(|e| format!("{}: {e}", path.display()))?;
+            table
+                .write_to(&out)
+                .map_err(|e| format!("{}: {e}", out.display()))?;
         }
 
         let sidecar = sidecar_path_for(game, self.player_slot);
-        if let Some(parent) = sidecar.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-        }
-        std::fs::write(&sidecar, self.write_sidecar())
+        ra2fmt::saves::write(game, &sidecar, self.write_sidecar())
             .map_err(|e| format!("{}: {e}", sidecar.display()))?;
         Ok(())
     }
@@ -2061,12 +2056,12 @@ fn unescape(text: &str) -> String {
 
 /// `<game>/Teams/Teams.txt`.
 pub fn player_table_path(game: &Path) -> PathBuf {
-    game.join("Teams").join("Teams.txt")
+    ra2fmt::saves::resolve(game, "Teams/Teams.txt")
 }
 
 /// `<game>/AI/Teams.txt`.
 pub fn ai_table_path(game: &Path) -> PathBuf {
-    game.join("AI").join("Teams.txt")
+    ra2fmt::saves::resolve(game, "AI/Teams.txt")
 }
 
 /// `<game>/Events.txt`.
@@ -2076,7 +2071,7 @@ pub fn events_path(game: &Path) -> PathBuf {
 
 /// `<game>/Teams/career.dat` — the documented sidecar.
 pub fn sidecar_path(game: &Path) -> PathBuf {
-    game.join("Teams").join(SIDECAR_NAME)
+    ra2fmt::saves::resolve(game, Path::new("Teams").join(SIDECAR_NAME))
 }
 
 /// The sidecar of the team record at `slot`: `Teams/career.dat` for slot 0
@@ -2086,7 +2081,7 @@ pub fn sidecar_path_for(game: &Path, slot: usize) -> PathBuf {
     if slot == 0 {
         sidecar_path(game)
     } else {
-        game.join("Teams").join(format!("career{slot}.dat"))
+        ra2fmt::saves::resolve(game, Path::new("Teams").join(format!("career{slot}.dat")))
     }
 }
 
@@ -2110,6 +2105,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(path.join("Teams")).unwrap();
             std::fs::create_dir_all(path.join("AI")).unwrap();
+            ra2fmt::saves::bind(&path, &path);
             TestDir(path)
         }
 

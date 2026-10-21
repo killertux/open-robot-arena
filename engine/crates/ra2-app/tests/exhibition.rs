@@ -87,6 +87,7 @@ impl TestGame {
                 symlink(&from, &to);
             }
         }
+        ra2fmt::saves::bind(&root, &root);
         Some(TestGame(root))
     }
 

@@ -333,6 +333,17 @@ run above is main menu → TEAM HQ → team HQ); it prints the click trace and t
 final screen. `--size WxH` sets the window or PNG target, not the shell's
 layout.
 
+### Where saves go
+
+The install passed as `--game` is never written. Careers, teams, robot designs,
+custom textures and `ra2.cfg` go to a per-user save directory, in the original's
+own file formats and folder layout (so saves copy in and out of the original):
+`--save-dir DIR`, else `ORA_SAVE_DIR`, else `$XDG_DATA_HOME/open-robot-arena`
+(`~/.local/share/open-robot-arena`) on Linux, `%APPDATA%\open-robot-arena` on
+Windows, `~/Library/Application Support/open-robot-arena` on macOS. Reads look
+there first and then in the install; a deleted install file is hidden by a line
+in `deleted.txt`, never removed. See `docs/39-save-location.md`.
+
 ### The other modes
 
 ```bash

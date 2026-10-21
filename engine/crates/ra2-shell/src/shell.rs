@@ -2651,15 +2651,11 @@ impl Shell {
 /// The logos the edit-team window offers: every `Teams/*.bmp`, in the
 /// case-insensitive name order a Windows directory listing gives.
 fn team_logos(game: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(game.join("Teams"))
-        .map(|dir| {
-            dir.filter_map(|entry| entry.ok())
-                .filter(|entry| entry.path().is_file())
-                .filter_map(|entry| entry.file_name().into_string().ok())
-                .filter(|name| name.to_ascii_lowercase().ends_with(".bmp"))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut names: Vec<String> = ra2fmt::saves::list(game, "Teams")
+        .into_iter()
+        .filter(|name| name.to_ascii_lowercase().ends_with(".bmp"))
+        .filter(|name| ra2fmt::saves::resolve(game, format!("Teams/{name}")).is_file())
+        .collect();
     names.sort_by_key(|name| name.to_ascii_lowercase());
     names
 }

@@ -417,16 +417,20 @@ impl Builder {
                 let candidates = if path.is_absolute() {
                     vec![path.to_path_buf()]
                 } else {
-                    vec![game.join(path), game.join(DESIGNS).join(path)]
+                    vec![
+                        ra2fmt::saves::resolve(&game, path),
+                        ra2fmt::saves::resolve(&game, Path::new(DESIGNS).join(path)),
+                    ]
                 };
                 let path = candidates
                     .into_iter()
                     .find(|p| p.is_file())
                     .or_else(|| {
-                        let mut named = game.join(DESIGNS).join(path);
+                        let mut named = Path::new(DESIGNS).join(path);
                         if named.extension().is_none() {
                             named.set_extension("bot");
                         }
+                        let named = ra2fmt::saves::resolve(&game, named);
                         named.is_file().then_some(named)
                     })
                     .ok_or_else(|| format!("{} is not a .bot file", path.display()))?;
@@ -1702,6 +1706,8 @@ impl Builder {
         };
         let name = self.design_name();
         self.build.set_name(&name);
+        let path = ra2fmt::saves::prepare_write(&self.game, &path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         self.build
             .save_to(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1713,9 +1719,9 @@ impl Builder {
     pub fn save(&mut self) -> Result<PathBuf, String> {
         let name = self.design_name();
         self.build.set_name(&name);
-        std::fs::create_dir_all(&self.designs)
-            .map_err(|e| format!("{}: {e}", self.designs.display()))?;
-        let path = self.designs.join(format!("{name}.bot"));
+        let path =
+            ra2fmt::saves::prepare_write(&self.game, &self.designs.join(format!("{name}.bot")))
+                .map_err(|e| format!("{}: {e}", self.designs.display()))?;
         self.build
             .save_to(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1732,6 +1738,7 @@ impl Builder {
         if path.extension().is_none() {
             path.set_extension("bot");
         }
+        let path = self.read_path(&path);
         let build =
             Build::load(&self.library, &path).map_err(|e| format!("{}: {e}", path.display()))?;
         self.name_buffer = build.name().to_string();
@@ -1743,6 +1750,14 @@ impl Builder {
         self.style_file = None;
         self.status = format!("opened {}", path.display());
         self.refresh()
+    }
+
+    /// A path under the install, read through the save directory.
+    fn read_path(&self, path: &Path) -> PathBuf {
+        match path.strip_prefix(&self.game) {
+            Ok(rel) => ra2fmt::saves::resolve(&self.game, rel),
+            Err(_) => path.to_path_buf(),
+        }
     }
 
     /// Open the design just saved.
@@ -1760,7 +1775,8 @@ impl Builder {
             target.set_extension("bot");
         }
         if target != saved {
-            std::fs::copy(&saved, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+            ra2fmt::saves::copy(&self.game, &saved, &target)
+                .map_err(|e| format!("{}: {e}", target.display()))?;
         }
         self.status = format!("exported {}", target.display());
         Ok(target)
@@ -1768,12 +1784,16 @@ impl Builder {
 
     /// The import half of `importbot.gib`: the `.bot` files in `Robot Designs/`.
     pub fn designs(&self) -> Vec<String> {
-        list_folder(&self.designs, &["bot"])
+        list_folder(&self.game, DESIGNS, &["bot"])
     }
 
     /// `import_texture.gib`'s list: the player's own images in `Custom Textures/`.
     pub fn custom_texture_names(&self) -> Vec<String> {
-        list_folder(&self.custom_textures, &["bmp", "tga", "jpg", "jpeg", "png"])
+        list_folder(
+            &self.game,
+            CUSTOM_TEXTURES,
+            &["bmp", "tga", "jpg", "jpeg", "png"],
+        )
     }
 
     /// Export the current chassis skin into `Custom Textures/` — the shipped
@@ -1783,12 +1803,11 @@ impl Builder {
         if target.extension().is_none() {
             target.set_extension("tga");
         }
-        std::fs::create_dir_all(&self.custom_textures)
-            .map_err(|e| format!("{}: {e}", self.custom_textures.display()))?;
         let skin = self.build.paint().skin().ok_or_else(|| {
             "the chassis has no skin to export (a bot without a texture)".to_string()
         })?;
-        std::fs::write(&target, skin.to_tga()).map_err(|e| format!("{}: {e}", target.display()))?;
+        let target = ra2fmt::saves::write(&self.game, &target, skin.to_tga())
+            .map_err(|e| format!("{}: {e}", target.display()))?;
         self.status = format!("exported texture {}", target.display());
         Ok(target)
     }
@@ -1849,7 +1868,7 @@ impl Builder {
                 .ok_or_else(|| format!("custom texture {rest:?} is not listed"))?;
             let entry = TextureEntry {
                 name: name.clone(),
-                path: self.custom_textures.join(name),
+                path: ra2fmt::saves::resolve(&self.game, Path::new(CUSTOM_TEXTURES).join(name)),
             };
             self.selected_texture = Some(entry.clone());
             self.status = format!("custom texture {}", entry.name);
@@ -3874,25 +3893,18 @@ fn chain<'a>(roots: &'a [Placement<'a>], path: &[usize]) -> Vec<&'a Placement<'a
     out
 }
 
-fn list_folder(dir: &Path, extensions: &[&str]) -> Vec<String> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        if extensions.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
-            if let Some(name) = path.file_name() {
-                out.push(name.to_string_lossy().into_owned());
-            }
-        }
-    }
+fn list_folder(game: &Path, rel: &str, extensions: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = ra2fmt::saves::list(game, rel)
+        .into_iter()
+        .filter(|name| {
+            let path = ra2fmt::saves::resolve(game, Path::new(rel).join(name));
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|ext| extensions.iter().any(|e| ext.eq_ignore_ascii_case(e)))
+        })
+        .collect();
     out.sort_by_key(|a| a.to_ascii_lowercase());
     out
 }
@@ -4814,6 +4826,7 @@ mod tests {
         }
         std::fs::create_dir_all(dir.join(DESIGNS)).unwrap();
         std::fs::create_dir_all(dir.join(CUSTOM_TEXTURES)).unwrap();
+        ra2fmt::saves::bind(&dir, &dir);
 
         let out = std::env::temp_dir().join(format!("ra2-build-frames-{}", std::process::id()));
         std::fs::remove_dir_all(&out).ok();
