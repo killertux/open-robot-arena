@@ -396,8 +396,13 @@ impl Session {
         }
         let player = self.career.player();
         let path = player_robot_path(&self.game, self.career.player_slot, player.event_robot);
-        let library = ra2ui::workshop::library::GameLibrary::open(&self.game)
-            .map_err(|e| e.to_string())?;
+        if !path.is_file() {
+            // No robot entered (`event_robot` -1): the box keeps its backing.
+            self.repairs_view = None;
+            return Ok(());
+        }
+        let library =
+            ra2ui::workshop::library::GameLibrary::open(&self.game).map_err(|e| e.to_string())?;
         let build = ra2ui::workshop::build::Build::load(&library, &path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         self.repairs_view = crate::build_mode::robot_top_view(

@@ -127,8 +127,7 @@ pub fn run_build(options: crate::build_mode::Options, audio_report: bool) -> Res
     }
     let event_loop = EventLoop::new()
         .map_err(|e| format!("cannot open a window: {e}; use --build --out DIR"))?;
-    let mut builder =
-        crate::build_mode::Builder::open(&options.game, options.start.as_deref())?;
+    let mut builder = crate::build_mode::Builder::open(&options.game, options.start.as_deref())?;
     builder.apply_debug_panel_default()?;
     let size = options.size;
     let mut app = App::with_builder(&options.game, size, builder)?;

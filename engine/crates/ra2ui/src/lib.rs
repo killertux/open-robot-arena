@@ -1180,7 +1180,8 @@ fn place_core<'a>(
                     // size is the editor's canvas, the game stretches it over
                     // the widget (the capture's HQ panels are tinted edge to
                     // edge).
-                    (a.kind == AttachmentKind::Background).then_some(background_fill(widget, frame)),
+                    (a.kind == AttachmentKind::Background)
+                        .then_some(background_fill(widget, frame)),
                 ),
             })
         })
@@ -1420,8 +1421,8 @@ fn sized(
     } else {
         0.0
     };
-    // A `Group`/`Window` anchors in whole pixels: the offset is the truncated
-    // half (or whole) of the truncated size. Measured, not read from the exe:
+    // A centred `Group`/`Window` anchors in whole pixels: the offset is the
+    // truncated half of the truncated size (edge anchors keep the exact size). Measured, not read from the exe:
     // the repair bench's `main group`, 0.9 of 1024 = 921.6 wide at `Position
     // 0.5`, starts at 512 - 460 = 52 rather than 51.2 (reference event-repairs,
     // every widget in it sits one pixel right of ours). Over the 104 fixtures this
@@ -1429,7 +1430,10 @@ fn sized(
     // reminder, bracket (7.15 -> 6.21) and repairs (8.66 -> 5.63) toward the
     // captures; `teamhq-events` (+0.45) and the event join window (+0.34) lost.
     let offset = |anchor: f32, size: f32| {
-        if matches!(widget.kind, WidgetKind::Group | WidgetKind::Window) {
+        if matches!(widget.kind, WidgetKind::Group | WidgetKind::Window)
+            && anchor > 0.0
+            && anchor < 1.0
+        {
             (anchor * size.trunc()).trunc()
         } else {
             anchor * size

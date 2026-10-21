@@ -4393,6 +4393,20 @@ mod tests {
         }
     }
 
+    /// The player-facing lab draws no synthetic text panel (the original's has
+    /// none); the harness keeps it unless the player route is applied.
+    #[test]
+    fn the_player_route_hides_the_synthetic_panel_unless_asked() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        assert!(!builder.view_only, "the scripted harness keeps its panel");
+        set_debug_panel_default(false);
+        builder.apply_debug_panel_default().unwrap();
+        assert!(builder.view_only);
+        // The robot view fills the placeholder: no strip is cut off for rows.
+        assert_eq!(builder.panel.preview.w, builder.placeholder_frames().0.w);
+    }
+
     /// A palette click only selects the part; Attach plus a drag and a click
     /// adds exactly one component, and the model's undo reverses it.
     #[test]

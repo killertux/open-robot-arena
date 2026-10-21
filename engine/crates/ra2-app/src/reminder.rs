@@ -87,7 +87,12 @@ impl Reminder {
             .map(|p| p.frame);
         let (cell_w, cell_h) = grid_frame
             // Whole pixels: the capture's lines are exactly 83 px apart.
-            .map(|f| ((f.w / GRID[0] as f32).floor(), (f.h / GRID[1] as f32).floor()))
+            .map(|f| {
+                (
+                    (f.w / GRID[0] as f32).floor(),
+                    (f.h / GRID[1] as f32).floor(),
+                )
+            })
             .unwrap_or((62.0, 70.0));
         for block in gib.blocks.iter_mut() {
             let Block::Widget(root) = block else { continue };

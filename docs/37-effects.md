@@ -55,7 +55,8 @@ Both gate on `GraphicEffects == 1`, colour white fading to alpha 0, alpha blende
 (`Config::steering_smoke`) and `<=` (it was `<`). No smoke comes from a hurt chassis, a weapon or the robot as
 a whole. `Flamethrower` (`0x504080`) owns a flame emitter of its own (the hazard flame's configuration,
 80/s, 0.3 s, blue -> white, `flame.tga`, additive) positioned at its nozzle: **not implemented**, the weapon's
-gameplay is not in the sim.
+gameplay is not in the sim (re-checked in the polish round, docs/36 9.21: still
+not implemented; there is no firing state for an emitter to follow).
 
 ## 3. Decals (`DecalTrigger`, RTTI `0x6ef5e4`, constructor `0x5a0e00`, object `0x1cf4` bytes)
 
