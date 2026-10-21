@@ -1760,9 +1760,7 @@ impl Duel {
     fn resolve_combat(&mut self) {
         let events = self.physics.take_contacts();
         let props = combat::mass_props(&*self.physics, &self.robots);
-        let events = self
-            .event_gate
-            .admit(&self.robots, events, self.time, &props);
+        let events = self.event_gate.admit(&self.robots, events, self.time);
         let impacts = combat::resolve_with(&self.robots, &events, &self.combat, &props);
         if self.record_impacts {
             let props: Vec<(BodyHandle, &str, f32)> = self
@@ -4071,12 +4069,13 @@ mod tests {
     /// at all — the 1200 N·m only arrives in `Smash`, when a robot walks into the
     /// zone. A joint therefore has to be able to take a new drive strength after
     /// it is built, or the hammer swings as if it weighed nothing.
-    /// The collision-event filter (`FUN_0052d4f0`): two robot bodies pressed
-    /// together at one approaching point every step give one event per body
-    /// registration per second (1 Hz each, so two a second), and a point where
-    /// they part gives none.
+    /// The collision-event filter (`FUN_0052d4f0`): two robots touching at one
+    /// point every step give one event per collidable registration per second
+    /// (the two components there, 1 Hz each, so two a second), whether the
+    /// point approaches or parts (`FUN_0052d740` compares `|Δv · n|` with the
+    /// registrations' threshold 0).
     #[test]
-    fn robot_contacts_reach_the_pricing_once_a_second_per_body() {
+    fn robot_contacts_reach_the_pricing_once_a_second_per_component() {
         let Some(game) = game_dir() else { return };
         let _scripts = ra2script::lock();
         let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
@@ -4109,18 +4108,12 @@ mod tests {
         let mut through = Vec::new();
         for k in 0..120 {
             let t = k as f32 / 60.0;
-            let got = gate.admit(
-                &duel.robots,
-                vec![event(2.0), event(-2.0)],
-                t,
-                &combat::MassProps::new(),
-            );
-            assert!(got.iter().all(|e| e.state_a.linear_velocity.x > 0.0));
-            if !got.is_empty() {
+            let got = gate.admit(&duel.robots, vec![event(2.0), event(-2.0)], t);
+            for _ in &got {
                 through.push(k);
             }
         }
-        assert_eq!(through, vec![0, 1, 60, 61], "{through:?}");
+        assert_eq!(through, vec![0, 0, 60, 60], "{through:?}");
     }
 
     #[test]

@@ -248,18 +248,25 @@ impl Joint {
             return;
         }
         let m = 1.0 / k;
-        let mut position = self.position(bodies);
+        // The measured angle, in (-π, π]: what the limits are checked against.
+        // The servo measures its error the short way round (a target that has
+        // run more than half a turn ahead is a whole turn behind), but that
+        // turn is the target's, not the hinge's: a burst motor's target runs
+        // on at its speed past the stop it never reaches within the lock
+        // tolerance (Sentinel's wedge, 50 rad/s against a 1.67 rad travel),
+        // and moving the angle with it put the hinge a turn below its lower
+        // limit, whose correction then spun the wedge round at 160 rad/s
+        // (docs/29 section 12l).
+        let position = self.position(bodies);
         let mut lambda = 0.0f32;
         if self.motor {
             let mut err = self.target - position;
             if angular {
                 if err > std::f32::consts::PI {
                     err -= std::f32::consts::TAU;
-                    position += std::f32::consts::TAU;
                 }
                 if err < -std::f32::consts::PI {
                     err += std::f32::consts::TAU;
-                    position -= std::f32::consts::TAU;
                 }
             }
             let next = self.target + dt * self.target_velocity;

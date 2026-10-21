@@ -160,6 +160,59 @@ fn a_locked_hinge_holds_its_angle_and_releases() {
     );
 }
 
+/// A burst motor's stroke: the servo's target runs on at the motor's speed
+/// past the stop, and once it is more than half a turn ahead the servo pulls
+/// the short way round. The limit is the hinge's own angle all the same: the
+/// arm stays at its stop instead of being put a turn below the lower limit and
+/// spun round (Sentinel's wedge, 50 rad/s against 1.67 rad of travel; docs/29
+/// section 12l).
+#[test]
+fn a_hinge_driven_past_its_stop_stays_at_it() {
+    let mut physics = Havok17Backend::new().unwrap();
+    let base = physics
+        .create_body(&BodyDesc::new(
+            MotionType::Static,
+            ShapeDesc::Box {
+                half_extents: Vec3::splat(0.1),
+            },
+        ))
+        .unwrap();
+    let arm = physics
+        .create_body(
+            &BodyDesc::new(
+                MotionType::Dynamic,
+                ShapeDesc::Box {
+                    half_extents: Vec3::new(0.3, 0.05, 0.05),
+                },
+            )
+            .at(Vec3::new(0.6, 0.0, 0.0))
+            .with_mass(28.0),
+        )
+        .unwrap();
+    let mut desc = HingeDesc::new(base, arm, Vec3::ZERO, Vec3::Z);
+    desc.anchor_b = Vec3::new(-0.6, 0.0, 0.0);
+    desc.limits = [0.0, 1.67];
+    desc.max_torque = 3600.0;
+    let hinge = physics.create_hinge(&desc).unwrap();
+    physics.drive_hinge(hinge, 50.0);
+    let mut lo = f32::MAX;
+    let mut hi = f32::MIN;
+    for i in 0..60 {
+        physics.step(1.0 / 60.0);
+        let a = physics.hinge_angle(hinge);
+        if i > 8 {
+            lo = lo.min(a);
+            hi = hi.max(a);
+        }
+    }
+    // The limit impulse works on the arm's inertia about its centre, so it
+    // stops it softly (section 11's locked-hinge note); what it must not do is
+    // let it round past the lower stop.
+    assert!(lo > 0.5 && hi < 3.0, "the arm went round: {lo}..{hi}");
+    let w = physics.state(arm).unwrap().angular_velocity.length();
+    assert!(w < 10.0, "the arm spins at {w} rad/s");
+}
+
 /// The agents' points, not every corner near the floor: a box resting on a
 /// floor triangle is held by the corners that have been its closest point
 /// (the convex x mesh manifold), each once, all inside the tolerance.
