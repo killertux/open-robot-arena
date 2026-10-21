@@ -421,6 +421,10 @@ pub struct Match {
     player_teams: Vec<ra2fmt::team::Team>,
     /// The robots' own `.bot` snapshots, decoded once when the match is built.
     previews: Vec<Option<ra2ui::preview::Preview>>,
+    /// The floating damage numbers ([`crate::popup`]).
+    popups: crate::popup::DamageDisplay,
+    /// `GraphicMessages`: whether a flushed entry becomes a number.
+    damage_messages: bool,
 }
 
 impl Match {
@@ -493,6 +497,8 @@ impl Match {
             teams,
             player_teams,
             previews,
+            popups: crate::popup::DamageDisplay::new(),
+            damage_messages: true,
         })
     }
 
@@ -554,6 +560,7 @@ impl Match {
                 let idle = vec![DriveInput::default(); self.duel.robots.len()];
                 self.duel.step_direct(&idle, dt);
                 self.duel.take_score_hits();
+                self.duel.popups.clear();
                 if !ra2script::camera::intro_running() {
                     self.state = MatchState::Countdown;
                 }
@@ -568,6 +575,7 @@ impl Match {
                 // Nothing scores before the bell; a contact during the countdown
                 // is not a hit the match awards.
                 self.duel.take_score_hits();
+                self.duel.popups.clear();
                 self.countdown_left -= dt;
                 // `0x4775bc`: the number is drawn while `trunc(+0x1dc) > 0`;
                 // at zero `0x416360` begins the fight and `+0x1dc` is set to
@@ -584,6 +592,7 @@ impl Match {
             MatchState::Fight => {
                 self.duel.step_with(inputs, dt);
                 self.score_hits();
+                self.route_popups();
                 self.clock += dt;
                 if let Some(reason) = self.end_reason() {
                     self.finish(reason);
@@ -597,6 +606,7 @@ impl Match {
             }
             MatchState::Results => {}
         }
+        self.popups.step(dt, self.damage_messages);
     }
 
     /// End the match now, through `plus.eliminatePlayer`'s own request queue.
@@ -628,6 +638,54 @@ impl Match {
         self.duel
             .apply_hit(Some(attacker), victim, component, damage, point);
         self.score_hits();
+        self.route_popups();
+    }
+
+    /// Hand the hit requests of this step to the floating-number display, by the rules of
+    /// `FUN_004175b0`: nothing in King of the Hill; a hit with an attacker is a green number
+    /// for the attacker when the victim was still fighting and, in Team Match, is on another
+    /// team (the same test as the score); a hit without one (a hazard, a flame) is a red number
+    /// for the robot struck; and only a human player is shown a number
+    /// (`player.vtable[0x18]`).
+    fn route_popups(&mut self) {
+        let requests = std::mem::take(&mut self.duel.popups);
+        if self.config.game_type == GameType::KingOfTheHill {
+            return;
+        }
+        let human = self.duel.human_robot;
+        for r in requests {
+            match r.attacker {
+                Some(attacker) => {
+                    if !r.victim_alive || human != Some(attacker) {
+                        continue;
+                    }
+                    if self.config.game_type == GameType::TeamMatch {
+                        let team = |i: usize| self.duel.robots.get(i).map(|r| r.team);
+                        if team(attacker) == team(r.victim) {
+                            continue;
+                        }
+                    }
+                    self.popups
+                        .request(attacker, true, r.amount, r.point, r.normal);
+                }
+                None => {
+                    if human == Some(r.victim) {
+                        self.popups
+                            .request(r.victim, false, r.amount, r.point, r.normal);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The floating damage numbers alive now.
+    pub fn damage_numbers(&self) -> &[crate::popup::Number] {
+        self.popups.numbers()
+    }
+
+    /// `GraphicMessages` (the options window's "damage" switch).
+    pub fn set_damage_messages(&mut self, on: bool) {
+        self.damage_messages = on;
     }
 
     /// Turn this step's hits into points, with the rules `FUN_004175b0` applies.
@@ -1250,6 +1308,89 @@ mod tests {
             0,
             "King of the Hill's score is the zone script's, not damage"
         );
+    }
+
+    /// The floating damage numbers (docs/37 section 7): only a human player is shown one; a hit
+    /// with an attacker is a green number for the attacker (the damage that scores), a hit
+    /// without one (a hazard) a red number for the robot struck; none in King of the Hill, none
+    /// for a team-mate's hit in Team Match, none with `GraphicMessages` off.
+    #[test]
+    fn only_a_human_player_is_shown_numbers_by_the_scoring_rules() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+        let build = |game_type: GameType, teams: [usize; 2]| {
+            MatchConfig::new(
+                path(&game, "Arenas/box.py"),
+                game_type,
+                vec![
+                    RobotEntry::ai(teams[0], path(&game, "AI/Team1/Bot0.bot")),
+                    RobotEntry::ai(teams[1], path(&game, "AI/Team6/Bot2.bot")),
+                ],
+            )
+            .with_results_delay(0.0)
+        };
+        let texts = |m: &mut Match| {
+            // 0.15 s later the entries become numbers
+            for _ in 0..(0.25 / m.config.dt) as usize {
+                m.step();
+            }
+            m.damage_numbers()
+                .iter()
+                .map(|n| (n.player, n.green, n.text.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        // two AIs: nobody is shown anything
+        let mut m = Match::new(build(GameType::Deathmatch, [0, 1])).expect("a deathmatch");
+        countdown_over(&mut m);
+        m.hit(0, 1, 0, 40.0);
+        assert!(texts(&mut m).is_empty());
+
+        // robot 0 is the human: its own hit is a green number, truncated; a hit on it
+        // by a hazard (no attacker) is a red one; the AI's hit on it shows nothing
+        let mut m = Match::new(build(GameType::Deathmatch, [0, 1])).expect("a deathmatch");
+        m.duel.human_robot = Some(0);
+        countdown_over(&mut m);
+        m.hit(0, 1, 0, 40.9);
+        m.duel.apply_hit(None, 0, 0, 25.0, Vec3::ZERO);
+        m.hit(1, 0, 0, 33.0);
+        m.route_popups();
+        assert_eq!(
+            texts(&mut m),
+            vec![(0, true, "40".to_string()), (0, false, "25".to_string())]
+        );
+
+        // `GraphicMessages` off: the entries are made and no number comes of them
+        let mut m = Match::new(build(GameType::Deathmatch, [0, 1])).expect("a deathmatch");
+        m.duel.human_robot = Some(0);
+        m.set_damage_messages(false);
+        countdown_over(&mut m);
+        m.hit(0, 1, 0, 40.0);
+        assert!(texts(&mut m).is_empty());
+
+        // Team Match: a team-mate's hit shows nothing, an opponent's does
+        let mut team = Match::new(build(GameType::TeamMatch, [0, 1])).expect("a team match");
+        team.duel.human_robot = Some(0);
+        countdown_over(&mut team);
+        team.duel.robots[1].team = 0;
+        team.hit(0, 1, 0, 40.0);
+        assert_eq!(team.popups.pending(), 0);
+        team.duel.robots[1].team = 1;
+        team.hit(0, 1, 0, 40.0);
+        assert_eq!(team.popups.pending(), 1);
+        assert_eq!(texts(&mut team), vec![(0, true, "40".to_string())]);
+
+        // King of the Hill: no numbers at all, not even a hazard's
+        let mut koth = Match::new(build(GameType::KingOfTheHill, [0, 1])).expect("a koth match");
+        koth.duel.human_robot = Some(0);
+        countdown_over(&mut koth);
+        koth.hit(0, 1, 0, 40.0);
+        koth.duel.apply_hit(None, 0, 0, 25.0, Vec3::ZERO);
+        koth.route_popups();
+        assert!(texts(&mut koth).is_empty());
     }
 
     /// M11: the results rows carry the points a real DEATHMATCH landed.

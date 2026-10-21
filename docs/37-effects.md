@@ -190,4 +190,58 @@ a_burst_is_a_tenth_of_a_second_of_flame, the_jet_flies_forward_at_five_metres_a_
 ours with the live camera.
 
 **Open.** Hit rate against distance the scatter direction law; the `Loop` when other air
-draws keep the scales up; AI brains that fire it (none ship); the floating `2`.
+draws keep the scales up; AI brains that fire it (none ship); the floating `2` is section 7.
+
+## 7. Floating damage numbers (`ArenaManager::DamageDisplay`)
+
+Live: `tools/oracle/frida/ra2_numbers.js` via `tools/oracle/capture_numbers.py` (human C.R.U.S.H. against a
+stopped ALARM in the Combat Arena, hazards off; `plus.damage(0, 0, 25, point)` and wall hits; captures
+`numbers-hazard__live__000`, `numbers-hazard123__live__000`; a fast burst grabber, `xgrab.py`, takes ~20 frames a
+second). Code: `ra2sim::popup`, `Match::{route_popups, damage_numbers, set_damage_messages}`,
+`UiAssets::centered_text`, `Session::add_damage_numbers`; `--example numbershot` photographs ours.
+
+**Who sees one.** `FUN_004175b0` (the hit handler: contacts of 10 or more, `FUN_004148f0` for `plus.damage`, a flame
+and hazards) calls `FUN_004177e0` -> `FUN_004178a0`, which asks the display (`FUN_00417940`) only when the player
+object's `vtable[0x18]` is true: **a human player**. Live: a request for the AI (`id 1`) was logged and never accepted
+(`0x417940` not called), the human's were. Outside King of the Hill (the whole block is the not-KOTH branch):
+
+| case | player | colour | position |
+|---|---|---|---|
+| a hit with an attacker (the scoring hits: victim alive, not a team-mate in Team Match) | the attacker | green `(0, 0.8, 0)` | `point + 0.1 * normal` |
+| a hit with no attacker (hazard, `plus.damage`, flame, a wall) | the robot struck | red `(0.8, 0, 0)` | `point - 0.1 * normal` |
+
+`point` and `normal` are the hit record's (`param_6`, `param_7`); the normal points into the struck component (live:
+wall at x = 12.67 gave `(-1, 0, 0)`, at z = -12.4 `(0, 0, 1)`); a hazard's is zero. The amount is the **effective**
+damage (`FUN_00489620`) and the text its truncation (`__ftol`): `25` for 25, `34` for 34.297, `123` for 123.9.
+Not shown: `GraphicMessages = 0` (settings `+0x60`, the options window's "damage" switch; checked at the flush),
+King of the Hill, hits on or by AIs, damage of zero.
+
+**Merging** (`FUN_00417940`). A request joins an entry of the same player and colour that is younger than 0.15 s
+(`DAT_006ef568`) and whose point is closer than sqrt(2) m (`DAT_006ef56c = 2.0` on the squared distance), adding the
+amount; the entry keeps its first point and time. `FUN_00413b20` (once a frame, the game's dt) turns every entry older
+than 0.15 s into a number: live flush 0.17-0.2 s after the request.
+
+**The number** (`FUN_00413bd0`). A text object (`0x198` bytes, size `0x4b`, scale `2 / width`) of the face `fg_d20`
+(`s_fg_d20_006ef624`), drawn as screen text **1:1 in pixels** at the projection of its world point: the `25` is 21 x 13
+px of ink at 0.8 m and at 3.9 m alike. A mover (`0x5a3780(a, b, 0.25, 0.75)`) with `a` = the start above, `b = a + dir`,
+`dir = normalize((0, 6, 0) -/+ normal)` (red `-`, green `+`; `(0, 1, 0)` for a hazard): nothing moves until 0.25 s, then the
+text goes along `dir` at 2 m/s (the interpolation keeps extrapolating after 0.75 s; live y: -1.307 at 0.25 s, -0.307 at
+0.75 s, +0.276 at 1.05 s). A fader (`0x5a3c00((c, 1), (c, 0), 0.75, 1.0)`) keeps it opaque until 0.75 s and fades the alpha
+linearly to 0 at 1.0 s; the effect's duration is 1.0 s (`FUN_004141a0(1.0)`), then it is removed. It is a scene object
+without depth test: it shows over the robot it is on.
+
+**Anchor.** The projection is the camera's own (`eye`, `target`, the live FOV; the human's chase camera looks at its
+robot, which is why `setCameraRotation` alone did not predict it). Against the projected point the ink sits 1 px right and
+5.5 px up of a line box centred on it (`DAMAGE_NUMBER_OFFSET`): live ink x 471-491, y 200-212 for the point projecting to
+(480.0, 211.6); x 493-513, y 262-274 for (502.8, 272.9). `123` is centred the same way (ink x 465-495).
+Ours, same camera and point (`numbershot`): ink 470-490 x 206-218 before the offset (122 px of ink in both, the same
+glyph cells), 471-491 x 200-212 after. Side by side in the scratchpad (`ui-numbers-side.png`: live | ours, the robots
+differ).
+
+**Gap found on the way.** The original prices the robot's contacts with the arena (walls) too, as a hit with no attacker:
+live 34-40 hp on a wall at about 10 m/s (`request id 0, amount 34.297, v2 (0, 0, 1)`), 12-19 on smaller bumps, each a red
+number. `combat::resolve` only prices robot against robot, so ours takes no wall damage and shows no such number. Open.
+
+**Open.** A green number was not captured (the human never landed a hit on ALARM in the live attempts; the attacker
+branch is from the disassembly: `FUN_004178a0(attacker, amount, ..., 1)`, colour and position code at `0x413d1f`); the
+original's multi-player (network) humans.
