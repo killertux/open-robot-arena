@@ -218,6 +218,14 @@ pub struct PistonStats {
     /// A burst piston (`base = BurstPiston`): parked until something fires it,
     /// like a burst motor — see [`JointUse::Burst`].
     pub burst: bool,
+    /// The `prismatic` line's last number: the piston component's set-up
+    /// (`0x4b25f0`) reads the line's eight tokens in turn and hands the last
+    /// to its controller (`0x4b2b10`, controller `+0x84`), whose
+    /// initialisation (`0x4b4d4f..0x4b4de7`) gives the rod the housing's
+    /// inertia with the diagonal scaled by it when it is not zero
+    /// (`FUN_00404990`, `setInertiaTensor` `0x520200`). `burstpiston2`'s
+    /// `0.2` is the factor measured live on ALARM's and Wide Load's rods.
+    pub rod_inertia: f32,
 }
 
 /// One part of a robot.
@@ -641,6 +649,9 @@ pub struct JointInfo {
     pub fire: Option<[f32; 2]>,
     /// A wheel's own numbers (`None` for every other joint).
     pub wheel: Option<WheelDrive>,
+    /// A piston's rod inertia factor ([`PistonStats::rod_inertia`]); zero for
+    /// every other joint and for a piston that keeps its rod's own inertia.
+    pub rod_inertia: f32,
 }
 
 /// What a wheel joint needs to push the robot along.
@@ -885,6 +896,7 @@ fn piston_stats(def: &ra2fmt::component::ComponentDef, burst: bool) -> PistonSta
         speed: speed.unwrap_or(0.0),
         force: force.unwrap_or(0.0) * torque_unit(),
         burst,
+        rod_inertia: nums.get(5).copied().unwrap_or(0.0),
     }
 }
 
@@ -1137,6 +1149,7 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             pivot,
             axis,
             slider: piston.is_some(),
+            rod_inertia: piston.map(|p| p.rod_inertia).unwrap_or(0.0),
             use_kind,
             fire: motor.and_then(|m| m.fire).filter(|_| piston.is_none()),
             wheel: if use_kind == JointUse::Wheel {
@@ -1770,6 +1783,8 @@ mod tests {
         let p = piston_stats(&d, false);
         assert_eq!(p.axis, Vec3::Z);
         assert_eq!(p.limits, [-0.60, 0.8]);
+        // The line's last number is the rod's inertia factor (`0x4b29e7`).
+        assert_eq!(p.rod_inertia, 0.8);
         assert_eq!(p.speed, 60.0);
         assert_eq!(p.force, 100.0 * torque_unit());
         assert!(!p.burst);
@@ -1797,6 +1812,7 @@ mod tests {
             speed: 1.0,
             force: 1200.0,
             burst: false,
+            rod_inertia: 0.2,
         });
         let components = vec![
             part(0, None, Mat4::IDENTITY, false),

@@ -139,6 +139,23 @@ fn zone_pieces(
 /// Diagnostic: `RA2_ZONE_PHANTOMS=0` keeps the other robot's phantoms (its
 /// traction rings and SmartZones) out of a robot's zone readings, as before
 /// docs/29 section 12i.
+/// Advance each brain's tick clock by `dt` (`FUN_004011f0`) and say which
+/// brains tick this step: a clock past `tickInterval` ticks and keeps what
+/// is left over (see [`Duel::step_with`]).
+fn advance_brain_clocks(timers: &mut [f32], dt: f32) -> Vec<bool> {
+    timers
+        .iter_mut()
+        .map(|timer| {
+            *timer += dt;
+            let due = *timer > ra2script::AI_TICK_INTERVAL;
+            while *timer > ra2script::AI_TICK_INTERVAL {
+                *timer -= ra2script::AI_TICK_INTERVAL;
+            }
+            due
+        })
+        .collect()
+}
+
 fn zone_phantoms() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RA2_ZONE_PHANTOMS").map_or(true, |v| v != "0"))
@@ -430,7 +447,8 @@ pub struct Duel {
     /// brains last heard of them (`LostComponent`, `PlayerOut`).
     brain_known: Vec<(Vec<bool>, bool)>,
     /// Seconds until the brains are run again.
-    brain_timer: f32,
+    /// Each brain's tick clock (`AI + 0x44`, see [`Duel::step_with`]).
+    brain_timers: Vec<f32>,
     /// Where the arena came from, for the hazards' own lookups.
     arena_path: String,
     /// The hinges the model declares, by name (`GetHinge`).
@@ -797,7 +815,7 @@ impl Duel {
             brain_zone_inside: std::collections::BTreeSet::new(),
             brain_zone_chassis: std::collections::BTreeMap::new(),
             brain_known,
-            brain_timer: 0.0,
+            brain_timers: Vec::new(),
             arena_path: arena_path.to_string(),
             model_hinges,
             joints: Vec::new(),
@@ -894,15 +912,23 @@ impl Duel {
     pub fn step_with(&mut self, overrides: &[Option<DriveInput>], dt: f32) {
         // The game's own AI drives when it loaded; a robot the binding table
         // does not cover, or a run without the script layer, keeps the stand-in.
-        // Brains run on the game's own cadence — an eighth of a second per tick
-        // (`AI.SuperAI.Tick` refreshes its sensors after eight of them "once per
-        // second") — while the physics runs every step between them.
-        self.brain_timer -= dt;
-        let tick_brains = self.brain_timer <= 0.0;
-        if tick_brains {
-            self.brain_timer = ra2script::AI_TICK_INTERVAL;
+        // Each brain keeps its own clock (`FUN_004011f0`): the step's time is
+        // added to it, and while it exceeds `tickInterval` (`+0x3c`, an eighth
+        // of a second) the brain ticks and the interval is taken off, the
+        // remainder kept. `Activate` (`FUN_00401270`) starts the clock at
+        // `tickInterval · 0.25 · id` (`+0x1c`, the robot's index), so the
+        // brains tick a quarter interval apart: live, ALARM's commands change
+        // one frame before the Scout's, every 0.11-0.14 s
+        // (`fightcontacts-scout-alarm-box__live__000..003`, G rows;
+        // docs/29 section 12n).
+        let n = self.robots.len();
+        if self.brain_timers.len() != n {
+            self.brain_timers = (0..n)
+                .map(|i| ra2script::AI_TICK_INTERVAL * 0.25 * i as f32)
+                .collect();
         }
-        let mut brains = self.run_brains(dt, tick_brains);
+        let due = advance_brain_clocks(&mut self.brain_timers, dt);
+        let mut brains = self.run_brains(dt, &due);
         for i in 0..self.robots.len() {
             if !self.robots[i].is_alive() {
                 continue;
@@ -1280,7 +1306,7 @@ impl Duel {
                     // its wheels' traction rings and its SmartZones, all
                     // tagged non-chassis.
                     let other = &self.robots[o];
-                    let mut hits: Vec<(usize, bool)> = Vec::new();
+                    let mut hits: Vec<(usize, bool, bool)> = Vec::new();
                     for (ci, c) in other.rig.components.iter().enumerate() {
                         if !other.attached[ci]
                             || !c.role.is_physical()
@@ -1301,7 +1327,7 @@ impl Duel {
                         {
                             if crate::hazards::box_touches_piece(to, zone.min, zone.max, pts, mesh)
                             {
-                                hits.push((ci * 64 + k2, part == 0));
+                                hits.push((ci * 64 + k2, part == 0, false));
                             }
                         }
                         for (k2, (pts, _)) in c
@@ -1313,7 +1339,7 @@ impl Duel {
                         {
                             if crate::hazards::box_touches_piece(to, zone.min, zone.max, pts, None)
                             {
-                                hits.push((ci * 64 + 32 + k2, false));
+                                hits.push((ci * 64 + 32 + k2, false, true));
                             }
                         }
                     }
@@ -1335,12 +1361,24 @@ impl Duel {
                         let to = to_zone * w[z.component] * z.offset;
                         if crate::hazards::box_touches_piece(to, zone.min, zone.max, &corners, None)
                         {
-                            hits.push((usize::MAX - zi, false));
+                            hits.push((usize::MAX - zi, false, true));
                         }
                     }
-                    for (piece, chassis) in hits {
-                        let key = (r, k, o, piece);
+                    for (piece, chassis, phantom) in hits {
                         readings.push((o as i32 + 1, chassis));
+                        // The zone's events come from the phantom pair list's
+                        // changes (`0x549a..`: a pair new since the last
+                        // detection enters, a pair gone leaves), and the
+                        // listener (`0x4a4780`) calls a zone's callback only
+                        // when the other collidable is not a phantom itself
+                        // (`0x4a49b0`, collidable `+0x58`). So the other
+                        // robot's SmartZones and traction rings are in
+                        // `GetZoneContents` but never raise a
+                        // `SmartZoneEvent` (docs/29 section 12n).
+                        if phantom {
+                            continue;
+                        }
+                        let key = (r, k, o, piece);
                         now.insert(key);
                         if !self.brain_zone_inside.contains(&key) {
                             events.push((r, 1, id, o as i32 + 1, chassis));
@@ -1589,14 +1627,14 @@ impl Duel {
     /// The engine publishes before the drive is applied and the physics steps,
     /// so a brain sees the world as it was when the tick began — the same order
     /// the original's frame loop used.
-    fn run_brains(&mut self, dt: f32, tick: bool) -> Vec<Option<Vec<ra2script::InputEvent>>> {
+    fn run_brains(&mut self, dt: f32, due: &[bool]) -> Vec<Option<Vec<ra2script::InputEvent>>> {
         if self.script_ai.is_none() {
             return Vec::new();
         }
         self.publish_snapshots(dt);
         let n = self.robots.len();
         match self.script_ai.as_ref() {
-            Some(ai) if tick => ai.tick(n),
+            Some(ai) if due.iter().any(|&d| d) => ai.tick(n, due),
             Some(ai) => ai.drives(n),
             None => Vec::new(),
         }
@@ -4785,6 +4823,98 @@ mod tests {
     /// `GetZoneContents`), and the weapon brains press `Flip` / `Fire`.
     /// Measured: in contact 2.8 s into the fight, both zones see the other robot
     /// within 5 s, damage from about 6 s.
+    /// The brains tick an eighth of a second apart on average, keeping the
+    /// remainder, and the second robot's clock starts a quarter interval ahead
+    /// (`FUN_00401270`), so it ticks first.
+    #[test]
+    fn brains_tick_every_eighth_of_a_second_a_quarter_apart() {
+        let mut timers = vec![0.0, ra2script::AI_TICK_INTERVAL * 0.25];
+        let mut ticks: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+        for step in 1..=600 {
+            for (r, due) in advance_brain_clocks(&mut timers, 1.0 / 60.0)
+                .into_iter()
+                .enumerate()
+            {
+                if due {
+                    ticks[r].push(step);
+                }
+            }
+        }
+        assert_eq!(ticks[0][0], 8);
+        assert_eq!(ticks[1][0], 6);
+        for t in &ticks {
+            // 10 s at an eighth of a second, give or take the first.
+            assert!((79..=80).contains(&t.len()), "{}", t.len());
+            assert!(t.windows(2).all(|w| (7..=8).contains(&(w[1] - w[0]))));
+        }
+    }
+
+    /// The other robot's SmartZone is a phantom: a zone that overlaps it lists
+    /// it (`GetZoneContents` reads the phantom pair list) but gets no
+    /// `SmartZoneEvent` for it (the listener `0x4a4780` skips a pair whose
+    /// other collidable is a phantom, `0x4a49b0`; live, 94 phantom-phantom
+    /// pair events and not one callback, `zoneevents-scout-alarm-box__live__006`,
+    /// docs/29 section 12n). Head on, the Scout's and ALARM's zones overlap a
+    /// few decimetres before either touches the other's parts.
+    #[test]
+    fn another_robots_zone_is_listed_but_raises_no_smart_zone_event() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        ra2script::prepare_match("DEATHMATCH", vec![0, 1]);
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let path = |p: &str| game.join(p).to_string_lossy().to_string();
+        let setups = [
+            BotSetup {
+                path: path("AI/Team0/Bot0.bot"),
+                yaw_deg: Some(270.0),
+                spawn: Some([-4.0, 0.0]),
+            },
+            BotSetup {
+                path: path("AI/Team0/Bot1.bot"),
+                yaw_deg: Some(90.0),
+                spawn: Some([4.0, 0.0]),
+            },
+        ];
+        let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        assert!(duel.script_ai.is_some(), "the shipped AI did not load");
+        let idle = vec![DriveInput::default(); 2];
+        for _ in 0..30 {
+            duel.step_direct(&idle, crate::DEFAULT_STEP);
+        }
+        let bodies: Vec<_> = duel.robots[1].parts.iter().map(|p| p.body).collect();
+        let mut listed_only = 0;
+        let mut evented = 0;
+        for _ in 0..160 {
+            for &b in &bodies {
+                let s = duel.physics.state(b).unwrap();
+                duel.physics
+                    .set_transform(b, s.position - Vec3::X * 0.04, s.rotation);
+            }
+            duel.watch_brain_zones();
+            let zones = ra2script::state().robot_zones.clone();
+            for (r, other) in [(0i32, 2i32), (1, 1)] {
+                let listed = zones.iter().any(|((robot, _), readings)| {
+                    *robot == r && readings.iter().any(|x| x.0 == other)
+                });
+                let inside = duel
+                    .brain_zone_inside
+                    .iter()
+                    .any(|&(zr, _, _, _)| zr == r as usize);
+                if listed && !inside {
+                    listed_only += 1;
+                }
+                if inside {
+                    evented += 1;
+                }
+            }
+        }
+        assert!(
+            listed_only > 0,
+            "no step listed the other robot's zone alone"
+        );
+        assert!(evented > 0, "the zones never met the other robot's parts");
+    }
+
     #[test]
     fn the_shipped_ai_closes_sees_its_enemy_and_lands_blows() {
         let Some(game) = game_dir() else { return };

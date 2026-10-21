@@ -346,11 +346,18 @@ impl ScriptHost {
 
     /// Run every brain one tick and take the `Input` calls it made, `(robot,
     /// events)`.
-    pub fn tick_brains(&self) -> Vec<(usize, Vec<crate::plus::InputEvent>)> {
+    pub fn tick_brains(
+        &self,
+        due: &dyn Fn(usize) -> bool,
+    ) -> Vec<(usize, Vec<crate::plus::InputEvent>)> {
         Python::with_gil(|py| {
             self.brains
                 .iter()
                 .filter_map(|(i, brain)| {
+                    // A brain not due this step holds its controls.
+                    if !due(*i) {
+                        return Some((*i, Vec::new()));
+                    }
                     if let Err(e) = brain.bind(py).call_method0("Tick") {
                         report_once(&format!(
                             "brain {i} Tick failed: {}",
