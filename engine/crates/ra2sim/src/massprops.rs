@@ -48,18 +48,43 @@ pub fn mesh_volume_centroid(points: &[Vec3], triangles: &[[u32; 3]]) -> Option<(
         volume += v;
         moment += v * (a + b + c) / 4.0;
     }
-    (volume > 1e-9).then(|| (volume as f32, (moment / volume).as_vec3()))
+    (volume.abs() > 1e-9).then(|| (volume.abs() as f32, (moment / volume).as_vec3()))
 }
 
 /// Volume, volume-centroid and inertia tensor (about that centroid, at unit
 /// density) of the convex hull of `points`, or `None` for a degenerate set.
-///
-/// The hull is split into tetrahedra from a reference point; each contributes
-/// its covariance `det(A) A C0 Aᵀ` (with `C0` the unit tetrahedron's), and the
-/// inertia is `trace(C) I - C` once the covariance is moved to the centroid.
 pub fn hull_inertia(points: &[Vec3]) -> Option<(f32, Vec3, glam::Mat3)> {
-    use glam::{DMat3, DVec3};
     let faces = quickhull(points)?;
+    let tris: Vec<[u32; 3]> = faces
+        .iter()
+        .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
+        .collect();
+    solid_inertia(points, &tris)
+}
+
+/// [`hull_inertia`] for the solid a closed triangle mesh bounds, as Havok
+/// takes a mesh body's mass properties from its own triangles. A mesh wound
+/// inside out (the Scout's fork arm) bounds the same solid: the signs cancel.
+pub fn mesh_inertia(points: &[Vec3], triangles: &[[u32; 3]]) -> Option<(f32, Vec3, glam::Mat3)> {
+    if triangles
+        .iter()
+        .flatten()
+        .any(|&i| i as usize >= points.len())
+    {
+        return None;
+    }
+    solid_inertia(points, triangles)
+}
+
+/// The solid's volume, centroid and inertia: the triangles split into
+/// tetrahedra from a reference point; each contributes its covariance
+/// `det(A) A C0 Aᵀ` (with `C0` the unit tetrahedron's), and the inertia is
+/// `trace(C) I - C` once the covariance is moved to the centroid.
+fn solid_inertia(points: &[Vec3], triangles: &[[u32; 3]]) -> Option<(f32, Vec3, glam::Mat3)> {
+    use glam::{DMat3, DVec3};
+    if points.is_empty() {
+        return None;
+    }
     let reference = (points.iter().copied().sum::<Vec3>() / points.len() as f32).as_dvec3();
     let c0 = DMat3::from_cols(
         DVec3::new(2.0, 1.0, 1.0),
@@ -69,11 +94,11 @@ pub fn hull_inertia(points: &[Vec3]) -> Option<(f32, Vec3, glam::Mat3)> {
     let mut volume = 0.0f64;
     let mut moment = DVec3::ZERO;
     let mut cov = DMat3::ZERO;
-    for [a, b, c] in faces {
+    for t in triangles {
         let (a, b, c) = (
-            points[a].as_dvec3() - reference,
-            points[b].as_dvec3() - reference,
-            points[c].as_dvec3() - reference,
+            points[t[0] as usize].as_dvec3() - reference,
+            points[t[1] as usize].as_dvec3() - reference,
+            points[t[2] as usize].as_dvec3() - reference,
         );
         let m = DMat3::from_cols(a, b, c);
         let det = m.determinant();
@@ -85,6 +110,11 @@ pub fn hull_inertia(points: &[Vec3]) -> Option<(f32, Vec3, glam::Mat3)> {
         return None;
     }
     let centre = moment / volume;
+    let (volume, cov) = if volume < 0.0 {
+        (-volume, cov * -1.0)
+    } else {
+        (volume, cov)
+    };
     // Move the covariance from the reference point to the centroid.
     let shift = DMat3::from_cols(centre * centre.x, centre * centre.y, centre * centre.z);
     let cov = cov - shift * volume;

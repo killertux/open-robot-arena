@@ -117,3 +117,82 @@ fn chassis_bodies_and_wheel_records_match_the_original() {
         worst.0, worst.1
     );
 }
+
+/// Eigenvalues of a symmetric 3x3 matrix, ascending (Jacobi rotations).
+fn principal(m: glam::Mat3) -> [f32; 3] {
+    let mut a = m.to_cols_array_2d().map(|c| c.map(f64::from));
+    for _ in 0..64 {
+        let (mut p, mut q) = (0, 1);
+        for (i, j) in [(0, 2), (1, 2)] {
+            if a[i][j].abs() > a[p][q].abs() {
+                (p, q) = (i, j);
+            }
+        }
+        if a[p][q].abs() < 1e-12 {
+            break;
+        }
+        let th = 0.5 * (2.0 * a[p][q]).atan2(a[q][q] - a[p][p]);
+        let (c, s) = (th.cos(), th.sin());
+        for row in a.iter_mut() {
+            let (kp, kq) = (row[p], row[q]);
+            row[p] = c * kp - s * kq;
+            row[q] = s * kp + c * kq;
+        }
+        let (rp, rq) = (a[p], a[q]);
+        for k in 0..3 {
+            a[p][k] = c * rp[k] - s * rq[k];
+            a[q][k] = s * rp[k] + c * rq[k];
+        }
+    }
+    let mut e = [a[0][0] as f32, a[1][1] as f32, a[2][2] as f32];
+    e.sort_by(f32::total_cmp);
+    e
+}
+
+/// The Scout's fork arm (extender 2 kg, fork 12, the burst motor's rotor 12):
+/// live its body weighs 26 kg with principal moments (0.171, 2.513, 2.573)
+/// kg·m² and the fork controller's load cap is 462.4 N·m
+/// (`bodies-scout-alarm__live__000`, `hingectl-scout-alarm-box__live__000`).
+/// The fork's collision mesh is wound inside out; its solid still counts,
+/// centre and inertia from its own triangles (docs/29 §12g).
+#[test]
+fn the_scout_fork_arm_matches_the_original() {
+    let Some(game) = game_dir() else {
+        eprintln!("skipped: no game data (set RA2_GAME)");
+        return;
+    };
+    if std::env::var("RA2_PHYSICS").is_ok_and(|b| b != "havok17") {
+        eprintln!("skipped: not the havok17 backend");
+        return;
+    }
+    let _scripts = ra2script::lock();
+    let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+    let setup = BotSetup {
+        path: game.join("AI/Team0/Bot0.bot").to_string_lossy().to_string(),
+        yaw_deg: None,
+        spawn: None,
+    };
+    let d = Duel::new(&arena, std::slice::from_ref(&setup)).expect("a duel");
+    let r = &d.robots[0];
+    let p = (0..r.rig.parts.len())
+        .find(|&p| {
+            r.rig.parts[p]
+                .joint
+                .is_some_and(|j| j.use_kind == ra2sim::rig::JointUse::Burst)
+        })
+        .expect("the fork's body");
+    let (mass, _, inv) = d
+        .physics
+        .mass_properties(r.parts[p].body)
+        .expect("mass properties");
+    assert!((mass - 26.0).abs() < 0.01, "fork body {mass} kg");
+    let e = principal(inv.inverse());
+    for (ours, live) in e.iter().zip([0.171f32, 2.513, 2.573]) {
+        assert!(
+            (ours - live).abs() < 0.005,
+            "principal moments {e:?}, live (0.171, 2.513, 2.573)"
+        );
+    }
+    let cap = r.hinge_settings(p).expect("fork controller").max_torque;
+    assert!((cap - 462.4).abs() < 1.0, "load cap {cap}, live 462.4");
+}

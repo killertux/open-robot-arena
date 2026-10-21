@@ -71,7 +71,13 @@ pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
 
     BotSnapshot {
         alive: robot.is_alive(),
-        location: transform.w_axis.truncate(),
+        // `plus.getLocation` / `AI.GetLocation` read the chassis body's
+        // position, which in Havok is its centre of mass: live the resting
+        // Scout and ALARM report -1.884 / -1.811, their bot origins -2.086 /
+        // -2.074 (docs/26, docs/29 §12g).
+        location: physics
+            .center_of_mass(robot.body())
+            .unwrap_or(transform.w_axis.truncate()),
         direction: if flat == Vec3::ZERO {
             Vec3::NEG_Z
         } else {

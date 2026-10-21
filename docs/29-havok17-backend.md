@@ -1209,3 +1209,158 @@ Before, the failure was the Octagon's Scout v ALARM (warmup 7). After, the
 hellraiser throws BEAR out of the Octagon at 4.5 s (BEAR v Tornado, warmup 0),
 and Razor v FlapJack in the Parking Lot ends at 23 s (warmup 13). Traction
 survey: 45/45.
+
+### 12g. Recovering from upside down, the fork arm's body, the stroke's backstep and the coast (fx/physics-recover)
+
+New live captures (fresh sessions, all in `local/oracle/original` with
+manifest rows): `forkcontacts-scout-alarm__live__000` (`frida/ra2_contacts.js`
+through `capture_weapons.py AGENT=`: the Scout fires twice, every resolver
+contact, body and step piece), `contacts-nohaz-alarm__live__001/002` and
+`contacts-nohaz-razor__live__001` (repeats of the drive-at straights),
+`fight-scout-alarm-box__live__002` with `aistate-scout-alarm-box__live__000`
+(`ra2_python.py --sample`: per player `getLocation`, `isUpsideDown`, the
+brain's current tactic, its sensor table and `bImmobile`). Diagnostics:
+`examples/invertprobe.rs` (settle a robot, roll or pitch it over, watch it
+rest and optionally fire its weapons as an `InvertHandler` does),
+`fightprobe` now takes `FIDTRACE_WARMUP` and prints the forward axis,
+`forktrace` takes `FORKTRACE_SPAWN`/`FORKTRACE_SETTLE` and prints the chassis,
+`RA2_H17_BACKSTEPS=1` prints every backstep with the pairs that caused it.
+
+**How the original's ALARM "recovers".** The live poses (`fightpose-scout-
+alarm-box__live__000`, its body rotation rows; `fight-scout-alarm-box__live__001`)
+show ALARM *standing on its tail*, not on its back: the Scout's fork lifts its
+nose, it rotates back onto its rear wheels and the rear edge of its chassis
+(the rear wheels stand 0.215 m proud of the vertical rear face), leans 2-14°
+past vertical (`isUpsideDown` reads true, up.y -0.02..-0.24) with its centre
+of mass 0.9-1.0 m over the floor, and stays there. Both times it came back
+because the Scout drove into it and pushed it over forwards (Scout and ALARM
+1.5-1.7 m apart, moving together 2 m in 2 s). Its own `InvertHandler`
+(`Poker.py`: fire every second) only hops it 0.15 m. Ours can stand on its tail
+too (`invertprobe ... 90` with `INVERTPROBE_PITCH`: COM 0.86 m up, up.y -0.09,
+stable, the piston hops it 6-8 cm), but our Scout never pushed: two of the
+AI's answers were wrong.
+
+* **A robot's SmartZone sees collision geometry** (`GetZoneContents`,
+  `0x4014f0`): it walks the list of body pairs overlapping the zone's
+  phantom (`0x406d10/0x406d20`) and gives one `(robot << 4 | chassis)` tag per
+  entry (`0x414430`). Ours tested each component's *bounding sphere* against
+  the zone box; ALARM's chassis sphere is 1.2 m across, so the Scout saw
+  ALARM's chassis in its `flip` zone from 1.6 m, aimed (`AimToHeading`, no
+  throttle) instead of driving (`Engage`: drive while the chassis is not in
+  range), and did not fire because ALARM was upside down: a stalemate until
+  ALARM was immobilised. The zones now use the arena zones' separating-axis
+  overlap (section 12d, `hazards::box_touches_points`) on every collision
+  piece, one reading per overlapping piece, `chassis` for the chassis body's
+  pieces (a motor's rotor counts with the body it drives). Live, ALARM's sensor
+  on the side-lying Scout counts up to 6 contacts and reads `chassis = 0` while
+  only a non-chassis part is inside (`aistate-...__live__000`).
+* **`plus.getLocation` / `AI.GetLocation` are the chassis body's centre of
+  mass** (robot vtable slot 1 via `0x4cd4e0` / `0x4b8e20`; docs/26: the
+  resting Scout and ALARM read -1.884 / -1.811 against bot origins -2.086 /
+  -2.074). Ours gave the bot origin, which on a tail-standing ALARM is 0.26 m
+  from its centre. Every brain's distances, headings and `DriveToLocation`
+  targets read it.
+
+With both, ours recovers as the original does: in the box ALARM goes onto its
+tail and is pushed back onto its wheels (e.g. warmup 0: tail at 4 s, upright at
+6 s; warmup 13: tail at 8 s, upright at 10 s). What still differs is that ours
+also topples *backwards* off its tail onto its back (in 4 of 6 box runs, 1-2 s
+after reaching the tail, usually under the next fork stroke while up.y is
+still positive and the Scout's `Flipper` fires) and from there does not come
+back. Live it has not been seen on its back in four fights; the live Scout
+did end on its side against a wall once (`__002`) and was immobilised. On its back ours
+lies on its chassis top, COM 0.51 m over the floor (the chassis section is a
+trapezoid, 1.76 m wide at the bottom and 0.88 m at the top, so neither side is
+a resting face): a pose the original's ALARM was not seen in, so section
+12f's "8 cm lower upside down" compared two different poses.
+
+**The fork arm's body (recovered, verified live).** The fork's collision mesh
+is wound inside out: its signed volume is negative. `mesh_volume_centroid`
+refused it and the fork's 12 kg sat at its *hull* centroid. Havok takes the
+solid the triangles bound either way (the signs of the volume and of every
+moment cancel). With the mesh's own centroid and its own inertia (a mesh body's
+triangles, `massprops::mesh_inertia`, also used for the inertia of every
+mesh piece) the arm body reads lever `d = 0.289` (live 0.288), load cap
+462.18 N·m (live 462.4) and principal inertia (0.1712, 2.5127, 2.5735) kg·m²
+(live 0.171, 2.513, 2.573; the live local tensor's diagonal 2.417 / 0.267 /
+2.573 against ours 2.4216 / 0.2624 / 2.5734). Test
+`mass_live::the_scout_fork_arm_matches_the_original`; the 14 chassis centres
+and 18 wheel records are unchanged (worst 6.2 mm / 0.5 mm).
+
+**The stroke's backstep (identified live).** The contact that splits the
+37 rad/s substep is the Scout's **own chassis against the floor**: the fork's
+reaction pitches the chassis nose-down at 7.3 rad/s and its two front corners
+come within the tolerance (d 0.055-0.097, `forkcontacts-...__live__000`
+piece 321). Whether that happens inside one piece depends on millimetres: in
+the same capture the second stroke, with the chassis resting 6.5 mm lower,
+does **not** split (relative fork speed 17.8, 36.4, 11.4, 15.1, 0.8, against
+17.97, 36.71, [split] 32.2, 13.7, 9.6, 0.1 for the first). Ours does both too:
+after `forktrace`'s 1 s settle the Scout is still bouncing from its spawn drop
+and the stroke runs 19.0, 37.8, 9.5, 14.7, 0.55 (the corners already at 0.081
+from the step before: an ordinary new contact, no TOI); settled for 10 s
+(`FORKTRACE_SETTLE=600 FORKTRACE_SPAWN=arena`) it runs 18.27, 36.99,
+[backstep, pair chassis-floor] 13.58, 9.67, 0.11, the live first stroke.
+Nothing was changed for it.
+
+**The coast (explained, not changed).** Both coasts end *against a wall*, live
+and ours: ALARM's live straight ends at (-4.16, 11.88), ours at (-1.19, 11.26);
+Razor's live at the side wall at 13 m/s, ours in the corner. The "coast" is
+where the wall is along the drifted path, not rolling resistance: the path
+lengths agree (ALARM live 25.5 / 24.5 m in two good runs, ours 24.9; Razor live
+29.3 / 27.2, ours 30.7), the coast-down rate is the same (speed decays about
+1.2/s in both; `MagicAction`'s `-0.5 m v` per wheel and `-m v`), all four
+records touch throughout in both. The difference is the heading drift: from
+0.5 to 1.5 s after the start ALARM turns +0.19, +0.16 rad live and +0.30 rad
+ours (three perturbed start headings give 0.298-0.302); Razor turns -0.04 /
+-0.02 live and -0.04 ours. Section 12f's wheel records moved ALARM's drift (its
+coast fell from 11.07 to 9.20 m) although they now match the live records to
+0.5 mm; the yaw that remains is not from `MagicAction` (its yaw sum,
+4 · 1940 · 0.01 m, stays under the 145 N·m threshold) but from the contact
+dynamics during the pitching, bouncing start, and was not found.
+
+**Validation.** Before = `fidelity` d0dd0a3, after = this branch.
+
+Drive-at table (section 11d's runs, hazards off; "coast" ends at a wall, see
+above):
+
+| robot | metric | original | before | after |
+|---|---|---:|---:|---:|
+| Scout | top / t90 / dist / coast / turn | 11.01 / 1.47 / 14.29 / 7.89 / 10.66 | 10.82 / 1.45 / 14.25 / 7.21 / 10.77 | 10.83 / 1.43 / 14.25 / 7.30 / 10.77 |
+| ALARM | top / t90 / dist / coast / turn | 13.85 / 1.22 / 14.15 / 11.15 / 12.1 | 14.00 / 1.27 / 14.11 / 9.20 / 11.30 | unchanged |
+| ALARM | path to the wall / drift 0.5-1.5 s | 25.5, 24.5 / +0.19, +0.16 | 24.9 / +0.30 | unchanged |
+| FlapJack | top / t90 / dist / coast / turn | 10.31 / 1.45 / 12.41 / 6.78 / 10.16 | 10.39 / 1.50 / 11.70 / 6.85 / 10.09 | 10.25 / 1.48 / 11.67 / 6.61 / 10.01 |
+| Razor | top / t90 / dist / coast / turn | 17.50 / 1.52 / 23.07 / 5.72 / 12.2 | 16.68 / 1.35 / 22.46 / 7.83 / 12.50 | unchanged |
+| Razor | path to the wall / drift | 29.3, 27.2 / -0.04, -0.02 | 30.7 / -0.04 | unchanged |
+| Wide Load | top / t90 / dist / coast / turn | 13.90 / 1.55 / 19.49 / 8.61 / 12.37 | 13.36 / 1.65 / 17.79 / 9.53 / 13.19 | unchanged |
+
+(The Scout and FlapJack change through the inside-out meshes' centroids.)
+
+Fights as ensembles (six runs each, `FIDTRACE_WARMUP` 0/7/13/19/26/31; mean
+counted hits (mean total), mean length, runs that last 120 s). The original's
+box Scout v ALARM now has three runs: ALARM 63 (2470), 77 (2729), 37 (1810,
+`__002`, the Scout immobilised on its side by about 52 s); Scout 9, 6, 7.
+
+| fight | before | after |
+|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 14.3 (715) / 5.2 (71), 64 s, 1/6 | 11.8 (650) / 4.0 (53), 72 s, 1/6 |
+| box Razor v FlapJack: Razor / FlapJack (live 3 (40) / 1 (12)) | 2.8 (73) / 1.0 (16), 93 s, 2/6 | 4.2 (91) / 0.7 (8), 102 s, 4/6 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel (live 60 (1778) / 2 (23)) | 46.2 (1476) / 2.8 (45), 113 s, 4/6 | 33.0 (1057) / 1.2 (14), 99 s, 4/6 |
+| Octagon Scout v ALARM: ALARM / Scout (live 24 (944), Scout out at 67 s) | 2.0 (143) / 1.2 (16), 27 s, 0/6 | 6.0 (344) / 1.8 (35), 53 s, 0/6 |
+
+An intermediate build with one reading per *body* instead of per collidable
+gave box Scout v ALARM 19.2 (942) / 4.2, 77 s, 2/6 and the Compressor 54.8
+(2110) / 5.8, 107 s, 3/6: the two builds differ by about as much as six runs
+scatter (single runs end on LastRobot anywhere from 24 to 120 s), so the
+per-collidable reading, which the live sensor counts support, was kept. The
+Octagon fights last twice as long and ALARM lands three times the hits.
+
+AI suite (ten pairings, three warmups): before 28/30 runs deal damage (warmup
+0: 9/10, BEAR v Tornado), after 29/30 (warmup 0: 10/10; the one without is
+Tornado v Ripblade, warmup 13: Tornado parks against the north wall from 3 s
+as it does before the change, Ripblade climbs onto it and both sit until one
+is immobilised). Traction survey: 45/45.
+
+**Still open.** ALARM topples backwards off its tail onto its back in ours,
+which the original has not been seen to do; its straight drifts 0.30 rad
+against the original's 0.16-0.19; the live fights' ALARM lands 37-77 counted
+hits against our 12 on average.

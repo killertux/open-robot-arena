@@ -548,6 +548,22 @@ impl ComponentSounds {
 }
 
 impl Component {
+    /// What a phantom sees of this component: its collision pieces (rotor
+    /// included), or its hull when it has none.
+    pub fn zone_points(&self) -> Vec<Vec3> {
+        if !self.havok.collision.is_empty() {
+            self.havok
+                .collision
+                .iter()
+                .chain(self.havok.rotor_collision.iter())
+                .flatten()
+                .copied()
+                .collect()
+        } else {
+            self.hull_points.clone()
+        }
+    }
+
     /// Bounding radius about the component origin.
     pub fn radius(&self) -> f32 {
         ((self.max - self.min) * 0.5).length()
