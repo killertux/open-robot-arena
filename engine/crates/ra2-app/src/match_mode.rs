@@ -811,6 +811,21 @@ impl Session {
         println!("pause: {}", if self.paused { "on" } else { "off" });
     }
 
+    /// The dialog's `End Match` for an event match (`0x475ee0`, result 4 with
+    /// game type 2): the popup closes, the match resumes and the judges decide
+    /// on the points now (`FUN_00418770(1)`), so the round is played, scored
+    /// and awarded like a time-out.
+    pub fn end_for_judges(&mut self) -> bool {
+        if self.paused {
+            self.toggle_pause();
+        }
+        let ended = self.matched.end_by_judges();
+        if ended {
+            println!("end match: the judges decide on the points");
+        }
+        ended
+    }
+
     pub fn cycle_camera(&mut self) {
         let next = if self.player_controlled {
             // Driving starts in chase; `C` cycles chase → watch → orbit. The
@@ -2433,5 +2448,38 @@ mod tests {
         let report = session.report();
         assert_eq!(report.reason, Some(ra2sim::r#match::WinReason::Timeout));
         assert!(report.robots.iter().all(|r| !r.eliminated));
+    }
+
+    /// The pause dialog's `End Match` in an event (`0x475ee0`, result 4, game
+    /// type 2) runs the judges' decision at once, long before the clock would,
+    /// and the match goes on to its results; it cannot end an arena intro.
+    #[test]
+    fn end_match_in_an_event_hands_the_match_to_the_judges() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let mut session = player_fight(&game, 600.0);
+        session.toggle_pause();
+        assert!(session.paused);
+        let clock = session.matched.clock();
+        assert!(session.end_for_judges(), "a fight can be ended");
+        assert!(!session.paused, "the popup closed and the match resumed");
+        assert!(matches!(session.matched.state(), MatchState::Over));
+        let mut guard = 0;
+        while session.matched.state() != MatchState::Results && guard < 2000 {
+            session.step();
+            guard += 1;
+        }
+        assert_eq!(session.matched.state(), MatchState::Results);
+        let report = session.report();
+        assert_eq!(report.reason, Some(ra2sim::r#match::WinReason::Timeout));
+        assert!(
+            report.duration < 600.0 && (report.duration - clock).abs() < 1.0,
+            "ended at {} s, not at the limit",
+            report.duration
+        );
+        assert!(
+            !session.end_for_judges(),
+            "a finished match is not ended again"
+        );
     }
 }

@@ -156,8 +156,21 @@ pub struct Choice {
 }
 
 impl Choice {
+    /// Whether the game type uses slot `slot` (0-based): only BATTLE ROYAL and
+    /// TEAM MATCH use all four, every other type is slot 1 against slot 3
+    /// (`ra2-shell` removes the other two panels from the screen).
+    pub fn uses_slot(&self, slot: usize) -> bool {
+        !matches!(slot, 1 | 3)
+            || matches!(self.game_type, GameType::BattleRoyal | GameType::TeamMatch)
+    }
+
     /// One line per slot for the trace: the side, record, `.bot` slot and path.
+    /// A slot the game type does not use is `OPEN`, the word the lobby's
+    /// `noplayer.gib` cell shows for an empty slot.
     pub fn slot_line(&self, slot: usize) -> String {
+        if !self.uses_slot(slot) {
+            return format!("slot {}: OPEN (not used by {:?})", slot + 1, self.game_type);
+        }
         let choice = &self.slots[slot];
         format!(
             "slot {}: {} team {} ({} slot {}), robot {}: {} ({})",

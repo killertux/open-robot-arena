@@ -18,12 +18,12 @@
 //! | `music checkbox` | `MusicMuted` | checked = music on |
 //! | `intro off`/`intro on` | `ArenaIntros` | the shipped `Arena Introductions` group |
 //! | `fullscreen checkbox` | `FullScreen` | |
-//! | `Camera dropdown` | `DefaultCamera` | cycles the binary's `watch`/`static`/`orbit` |
+//! | `Camera dropdown` | `DefaultCamera` | opens a list of the binary's `watch`/`static`/`orbit` (`ra2ui::dropdown`) |
 //! | `effects off`/`effects on` | `GraphicEffects` | |
 //! | `damage off`/`damage on` | `GraphicMessages` | the screen's "damage" group is the status-message switch |
 //! | `2 player`/`4 player` | `EventNumBots` | |
 //! | `detail low`/`med`/`high` | `GraphicDetail` | `0`/`1`/`2` is **our numbering**; the screen's labels are the evidence, not the integers |
-//! | `resolution dropdown` | — | **read-only**: the screen says "fill with screen resolution options" but the data carries no list and the executable's list was not recovered. The current `FSDisplayWidth`×`FSDisplayHeight` is shown. |
+//! | `resolution dropdown` | `FSDisplayWidth`/`Height` (+ the `FS3D` pair) | opens the list of the display's modes (`FUN_004a00b0` walks the device's mode list and writes `WxH`); the window supplies them (`set_display_modes`) |
 //!
 //! `UpdateInterval`, `BitsPerPixel`, `FSDisplayWidth`/`FSDisplayHeight` and the
 //! keys that exist only in the graphics/input sections are not on the screen, so
@@ -107,6 +107,9 @@ pub struct Options {
     /// The exact bytes on disk when this instance opened, for `cancel`.
     original: String,
     existed: bool,
+    /// The display modes the resolution list offers (the device's list the
+    /// window reads at run time, `FUN_004a00b0`); [`RESOLUTIONS`] until set.
+    modes: Vec<[u32; 2]>,
 }
 
 impl Options {
@@ -141,7 +144,68 @@ impl Options {
             cfg,
             original,
             existed,
+            modes: RESOLUTIONS.to_vec(),
         }
+    }
+
+    /// The display modes of the screen the game runs on, in the order the
+    /// device lists them; the resolution dropdown's rows. An empty list keeps
+    /// the standard set.
+    pub fn set_display_modes(&mut self, modes: &[[u32; 2]]) {
+        if modes.is_empty() {
+            return;
+        }
+        self.modes = modes.to_vec();
+    }
+
+    /// Hand the shell the rows of the options window's two dropdowns
+    /// (`resolution dropdown`: `WxH` per mode; `Camera dropdown`: the
+    /// executable's `watch`, `static`, `orbit`).
+    pub fn register_dropdowns(&self, shell: &mut Shell) {
+        shell.set_dropdown_items(
+            "resolution dropdown",
+            self.modes
+                .iter()
+                .map(|m| format!("{}x{}", m[0], m[1]))
+                .collect(),
+        );
+        shell.set_dropdown_items(
+            "Camera dropdown",
+            CAMERAS.iter().map(|c| c.to_string()).collect(),
+        );
+    }
+
+    /// Apply the rows the shell reports picked from the options window's
+    /// dropdowns (`Shell::take_dropdown_picks`). Returns the changes made.
+    pub fn absorb_picks(&mut self, picks: &[(String, String)]) -> Vec<String> {
+        let mut changes = Vec::new();
+        for (name, text) in picks {
+            if name == "resolution dropdown" {
+                let parsed = text
+                    .split_once('x')
+                    .and_then(|(w, h)| Some([w.trim().parse().ok()?, h.trim().parse().ok()?]));
+                if let Some(mode) = parsed {
+                    self.set_mode(mode);
+                    changes.push(format!("FSDisplay={}x{}", mode[0], mode[1]));
+                }
+            } else if name == "Camera dropdown" {
+                if let Some(camera) = CAMERAS.iter().find(|c| c.eq_ignore_ascii_case(text)) {
+                    self.cfg.set_default_camera(camera);
+                    changes.push(format!("DefaultCamera={camera}"));
+                }
+            }
+        }
+        changes
+    }
+
+    /// Write a chosen display mode: both the 2D and 3D keys.
+    fn set_mode(&mut self, mode: [u32; 2]) {
+        self.cfg.set_fs_display_width(mode[0]);
+        self.cfg.set_fs_display_height(mode[1]);
+        self.cfg
+            .set_or_insert("FS3DDisplayWidth", &mode[0].to_string());
+        self.cfg
+            .set_or_insert("FS3DDisplayHeight", &mode[1].to_string());
     }
 
     /// The staged values, including any change not yet written.
@@ -256,33 +320,6 @@ impl Options {
             };
             self.cfg.set_graphic_detail(value);
             return Some(Self::changed(format!("GraphicDetail={value}")));
-        }
-        // The resolution dropdown lists the display modes. The binary asks the
-        // D3D device for its modes at run time (they depend on the adapter), so
-        // the list here is the standard 4:3 and 5:4 set a 2003 adapter reports;
-        // a click steps to the next mode and writes both the 2D and 3D keys.
-        if any("resolution dropdown") {
-            let current = [self.cfg.fs_display_width(), self.cfg.fs_display_height()];
-            let next = RESOLUTIONS
-                .iter()
-                .position(|mode| *mode == current)
-                .map(|i| RESOLUTIONS[(i + 1) % RESOLUTIONS.len()])
-                .unwrap_or(RESOLUTIONS[0]);
-            self.cfg.set_fs_display_width(next[0]);
-            self.cfg.set_fs_display_height(next[1]);
-            self.cfg
-                .set_or_insert("FS3DDisplayWidth", &next[0].to_string());
-            self.cfg
-                .set_or_insert("FS3DDisplayHeight", &next[1].to_string());
-            return Some(Self::changed(format!("FSDisplay={}x{}", next[0], next[1])));
-        }
-        // A click on either half of the camera dropdown cycles the binary's
-        // three config modes. The screen's note says "fill with camera
-        // options"; the values are the executable's own three strings.
-        if any("Camera dropdown") {
-            let next = next_camera(self.cfg.default_camera());
-            self.cfg.set_default_camera(next);
-            return Some(Self::changed(format!("DefaultCamera={next}")));
         }
         None
     }
@@ -579,7 +616,7 @@ mod tests {
             names: vec!["music volume slider".into()],
             slider: Some(("music volume slider".into(), 0.55)),
         });
-        options.click(&hit(&["Camera dropdown", "Down Button"]));
+        options.absorb_picks(&[("Camera dropdown".to_string(), "static".to_string())]);
         options.save().unwrap();
 
         let reread = Options::open(&path);
@@ -690,9 +727,9 @@ mod tests {
         assert_eq!(volume.as_deref(), Some("SoundVolume=-600"));
 
         assert_eq!(
-            options.click(&hit(&["resolution dropdown", "Down Button"])),
-            Some("FSDisplay=1600x1200".to_string()),
-            "the resolution dropdown steps to the next display mode"
+            options.absorb_picks(&[("resolution dropdown".to_string(), "1600x1200".to_string())]),
+            vec!["FSDisplay=1600x1200".to_string()],
+            "a picked row is the display mode"
         );
 
         options.save().unwrap();
@@ -718,7 +755,7 @@ mod tests {
             names: vec!["music volume slider".into()],
             slider: Some(("music volume slider".into(), 0.7)),
         });
-        options.click(&hit(&["Camera dropdown", "Down Button"]));
+        options.absorb_picks(&[("Camera dropdown".to_string(), "static".to_string())]);
         options.save().unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();

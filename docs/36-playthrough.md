@@ -1,7 +1,8 @@
 # 36 — Playthrough: the rewrite as a game, flow by flow
 
 **Measured 2026-10-19 on `fx/playthrough` (based on `fidelity` 50a779f);
-round 2 on `fx/play2` (based on `fidelity` beb1249), 2026-10-20, see §9.**
+round 2 on `fx/play2` (based on `fidelity` beb1249), 2026-10-20, see §9;
+round 3 on `fx/play3` (based on `fidelity` f55f0be), 2026-10-20, see §9.11.**
 This is the master list of what a player can and cannot do in the windowed
 client today. Each flow was played through the real player path: the windowed
 `ra2-app` (no mode flags) on a private Xephyr display (`:7`, 1280×1024, no
@@ -84,8 +85,8 @@ Options, F1 reminder, select-another-team, network multiplayer), plus the
 * **works** Options is the modal `options win`: Video and Audio tabs, radios,
   sliders and checkboxes edit the user `ra2.cfg`; Cancel restores the file
   byte-for-byte (checked with `diff`). (`50-options.png`, `52-audio.png`)
-* **differs** The resolution "dropdown" steps through modes on each click; the
-  original opens a list (the list comes from the D3D device at run time).
+* **fixed (round 3)** The resolution and camera dropdowns open a list and a
+  row sets the value (§9.12); before, a click stepped to the next mode.
 * **fixed (round 2)** Options' radio rows: the `Low`/`Medium`/`High` and
   `Off`/`On` labels were clipped away, which made the Graphic Detail row's three
   radios look misplaced; they now sit on their baselines (§9.9).
@@ -128,13 +129,14 @@ with the default robots and the keyboard (`m21.png`, `m23.png`).
   paused match; F1 shows the robot controls reminder (§9.1, §9.2).
 * **differs** `Space` is a drive key when the robot is wired to it, so it
   cannot skip the intro in a player match (Esc and the button do).
-* **differs** The time dropdown shows `3` and does not open (its list is not in
-  the data; the exe fills it). The weight-class filter is not applied.
+* **fixed (round 3)** The time dropdown opens its list (`No limit`, 1, 2, 3, 4,
+  5, 10, 15, 20) and a row is the match length; the weight-class filter empties
+  the slots of other classes and dims the pickers' robots outside it (§9.12,
+  §9.13).
 * **fixed (round 2)** A match the player plays that times out goes to the
   judges' decision (`FUN_00418770`), not the evidence rule (§9.6).
-* **differs** With a deathmatch, slot 2 shows the same robot as slot 1 in the
-  log (`slot 2: … robot 1: Sting Ray`) — unused, but the original leaves the
-  slot `OPEN`.
+* **fixed (round 3)** A duel's unused slots 2 and 4 are reported `OPEN`, the
+  word of the lobby's `noplayer.gib` cell (§9.14).
 * **differs** In the first run the player robot was pinned by the AI and
   declared IMMOBILIZED within ~25 s of not being driven; that is the
   immobility rule, not a fault.
@@ -201,16 +203,18 @@ Play Next Round! → intro → fight (driving) → results → event award → C
   session's match time (§9.5).
 * **fixed (round 2)** The event flow screens and the event match are laid out
   natively at the window size; the bracket is the original's graphic
-  (`FUN_0046ad60`, §9.8). **differs** The award still draws the arena preview
-  instead of the 3D prize scene.
+  (`FUN_0046ad60`, §9.8). **fixed (round 3)** The award is drawn over the
+  event-results 3D scene with the prize model on its spot (§9.11).
 * **not reproduced (round 2)** The join window's notebook shift: at the
   native 1280×1024 layout the schedule's frames are identical with and without
   the window (measured headlessly), and the round-2 capture shows no shift.
-* **differs** An event entered and left with `Finish Later` before any round
-  is played is kept for the session only (nothing is written until a round is
-  awarded); the original keeps the entered event in its team record.
-* **differs** `End Match` in an event leaves the round unplayed (our choice;
-  the original's result-4 path for events was not recovered).
+* **fixed (round 3)** An event entered and left with `Finish Later` before any
+  round is played is committed to the team record, as the original does
+  (§9.15).
+* **fixed (round 3)** `End Match` in an event hands the match to the judges
+  (`FUN_00418770(1)`) and the round goes on to its results and award (§9.16).
+* **fixed (round 3)** The AI teams bring the robot of the player's weight
+  class (§9.17).
 
 ## 5. Bot Lab
 
@@ -263,25 +267,26 @@ changed (`md5sum`) → an exhibition `--play --team 0 --bot 1` spawns the
   (option-group labels are baseline-placed, §9.9); the create screen opens on
   its `mpc_settings.gib` tab.
 
-## 7. What remains for a working game (ordered, after round 2)
+## 7. What remains for a working game (ordered, after round 3)
 
 1. **A save location**: the career and the workshop write into the install
    (`Teams/`, `Robot Designs/`), as the original does; a read-only or shared
    install needs a per-user copy.
-2. **Event details**: the AI team's robot choice per event (robot 0 is used),
-   `Finish Later` before a round is played (kept for the session only), the
-   event `End Match` result-4 path, the award's 3D prize scene.
-3. **Shell lists the exe fills at run time**: the resolution and match-time
-   dropdown lists, the weight-class filter.
-4. **A capture of the original's bracket and options windows** to confirm the
-   recovered layouts (§9.8, §9.9).
-5. Multiplayer networking (Join/Refresh/Start) if ever in scope.
+2. **Workshop drag placement**: new parts are placed at a fixed spread, the
+   original places them by mouse (§9.18).
+3. **A capture of the original's bracket, options, award and dropdown
+   windows** to confirm the recovered layouts (§9.8, §9.11, §9.12). Round 3
+   read everything from the exe; the original was not run.
+4. Multiplayer networking (Join/Refresh/Start) if ever in scope.
 
-Done in round 2 (§9): team selection and persistent teams, the event's own
-field and match length, pause Options and F1, the judges at time-out, Esc on
-shell screens, native event flow and workshop with the bracket graphic,
-option-group labels, the workshop panel rows, the create-game tab, the new
-workshop robot on the roster.
+Done in round 3 (§9.11 to §9.17): the award's 3D prize scene, the resolution,
+camera and match-time dropdown lists, the weight-class filter, the duel's open
+slots, `Finish Later` before a round, the event `End Match` path and the AI
+teams' robot choice. Done in round 2 (§9): team selection and persistent teams,
+the event's own field and match length, pause Options and F1, the judges at
+time-out, Esc on shell screens, native event flow and workshop with the bracket
+graphic, option-group labels, the workshop panel rows, the create-game tab, the
+new workshop robot on the roster.
 
 ## 8. Tests added this round
 
@@ -318,8 +323,8 @@ read from `Robot Arena 2.exe` (addresses given).
 | 5 | Event format: robots per match, game type, match length, bracket | **fixed** (match length: see 9.5) |
 | 6 | Time-out decided by the judges | **fixed** |
 | 7 | Esc on shell screens | **fixed** (ignored, as in the original) |
-| 8 | Event screens and workshop native; bracket graphic | **fixed** (award's 3D prize scene still open) |
-| 9 | Smaller items | 7 fixed, 1 not reproduced, rest open (9.9) |
+| 8 | Event screens and workshop native; bracket graphic | **fixed** (the award's 3D prize scene: round 3, 9.11) |
+| 9 | Smaller items | 7 fixed, 1 not reproduced; the rest were closed in round 3 (9.11-9.17) except the lab's drag placement (9.18) |
 
 ### 9.1 Pause → Options (`FUN_00476700`)
 
@@ -444,10 +449,11 @@ Not verified against a capture of the original (none exists).
 * **fixed** Edit-team logo list (9.4).
 * **fixed** A round's field without repeats (9.5).
 * **not reproduced** The join-window notebook shift (§4).
-* **open** Resolution dropdown list, time dropdown list, weight-class filter,
-  deathmatch slot 2 label, `Finish Later` before a round (session only), event
-  `End Match` result-4 path, the award's 3D prize scene, drag placement in the
-  lab, the original's AI robot choice per team in an event (robot 0 is used).
+* **closed in round 3** Resolution dropdown list, time dropdown list,
+  weight-class filter, deathmatch slot 2 label, `Finish Later` before a round,
+  event `End Match` result-4 path, the award's 3D prize scene, the original's
+  AI robot choice per team in an event (§9.11-§9.17). **open** drag placement
+  in the lab (§9.18).
 
 ### 9.10 Gate (round 2)
 
@@ -456,3 +462,184 @@ Not verified against a capture of the original (none exists).
 --workspace --no-fail-fast` **551 passed, 0 failed** (538 at the start of the
 round); `find ../local/game -newer <stamp>` printed nothing (every test that
 writes a team, a career or a robot runs on a scratch install).
+
+## 9.11 Round 3 (`fx/play3`, 2026-10-20): the award's 3D prize scene
+
+Everything in 9.11-9.17 is read from `Robot Arena 2.exe`; the original was not
+run this round (no capture was added to `local/oracle`).
+
+The award is the event-winner window opened by `FUN_00416960`, called from the
+bracket's round hook `FUN_004164a0` when the event is over (`FUN_0046ce50`).
+It builds `teamhq/event_winner.gib` as `EventResultsWindow` (`FUN_0046def0`,
+0x184 bytes; its vtable `0x6a73ac` has only the destructor `0x46e110` of its
+own, so nothing runs per frame) and calls `FUN_0046e140(1, ...)`, which starts
+the **`Event Results` arena** under the window and fills it in:
+
+* `FUN_0046e610`: `AddXtra("prize", <model>, "metal")` on the running arena.
+  `<model>` is the event record's tier string: the record keeps its `tiers + 1`
+  model/message pairs from `+0x6c` in 0x10-byte slots (`FUN_0046e6e0`), the
+  window's `+0x178` picks the slot (`FUN_004164a0`: the rounds the team won,
+  one more, the trophy, when it won the event).
+* `FUN_0046eb70`: finds the arena object `banner Instance` and its `banner`
+  batch, empties its texture stages (`FUN_005b2270`) and adds one whose texture
+  is the team's logo (`FUN_00494a10` is the team's `+0x28` string,
+  `FUN_005b1e60` adds the stage). The window's `+0x17c` is that team.
+* `FUN_0046e8f0`, `FUN_0046e9c0`, `FUN_0046ea70`, `FUN_0046eb10`: the window's
+  own controls (`team name`, `bot name`, `rounds won`, `team points`, `event
+  img`, `prize description`); these were already in `hq_mode::award_screen`.
+
+The scene is `Arenas/event_results.py`: `event_results.gmf`, black back colour,
+DEATHMATCH only, `AddStaticCamera("fixed cam", (0, 3.95, -11.88), (0.206, 0),
+45 * .015)`. Its two omni lights come with the model. The prize `.gmf` files are
+authored in place (`Gold_Cup_Trophy.gmf`'s node sits at 2.31, 0.27, -1.89, on
+the arena's winner spot), so `AddXtra` needs no placement, and no per-frame code
+exists: the prize does **not** turn; the scene is a still. Implemented as
+`ra2-app::prize_scene::PrizeScene` (arena items + prize items drawn with the
+match's own `SceneCamera`: near 1, far 125, `d3d_pixel_centers`), held by
+`hq_mode::Screen::Award`, drawn under the UI (`Session::render_3d`, the
+window's `three_d` path). Without the install's scene the old arena-preview
+backdrop remains as a fallback. Test
+`hq_mode::the_award_scene_shows_the_prize_and_the_teams_logo` (the prize, the
+banner logo and the scene each change the picture); a frame is
+`--hq --simulate-event 0 --out DIR` (`award.png`: a six-pack of Fruity-Punch on
+its plinth, the team's skull banner, the results window over it).
+**Not verified against the original:** the prize's `Trophy_Collision` body may
+settle after the arena starts (a static still is drawn), and the banner's team
+is the player's team (the window's `+0x17c`, `FUN_00416940`).
+
+## 9.12 Dropdown lists (`ra2ui::dropdown`)
+
+A shipped `DropDown` is a 20-pixel field with an empty `ListBox`; the exe fills
+the list when the owning window is built and opens it from the field or its
+arrow. `ra2ui::dropdown` keeps the open state in the document itself (fields on
+the dropdown and on the widgets it lifts: no clip, drawn above its siblings),
+`Shell::click_dropdown` drives it for any registered dropdown (the rows are
+`Shell::set_dropdown_items`; picks come back from `take_dropdown_picks`); the
+scroll bar is the list's own `+Scroller`.
+
+* **Match time** (`FUN_004733f0`): `No limit` (value 0) then 1, 2, 3, 4, 5, 10,
+  15, 20 (the value of an item is its number, minutes), `3` selected
+  (`FUN_005f1160`); the selection handler `FUN_00474330` stores the value in
+  the global game object (`FUN_00414230`: `+0xdc`, flag `+0xd8`). The choice
+  survives a trip to the arena tab. Test
+  `exhibition::the_time_dropdown_opens_its_list_and_a_row_sets_the_match_length`.
+* **Resolution** (`FUN_004a00b0`, called by the video tab's loader
+  `FUN_0049f5f0`): one row per display mode the D3D device lists, text `WxH`
+  (`0x6f5274` is `x`; with several colour depths for one size the row would also
+  carry the depth, not reproduced). The device is the window's monitor here:
+  `window::display_modes` reads winit's video modes at start (each size once,
+  smallest first) and falls back to the standard 4:3/5:4 set when the platform
+  lists none. A row writes `FSDisplayWidth/Height` and the `FS3D` pair.
+* **Camera**: `watch`, `static`, `orbit` (the exe's three strings).
+  Test `playthrough::the_options_dropdowns_list_their_rows_and_a_row_sets_the_value`;
+  frames `dd-res.png`, `dd-time.png` (offscreen, see §0 for the route).
+
+## 9.13 Weight-class filter
+
+`weight class optiongroup` has `lightweight cb`, `mediumweight cb`,
+`heavyweight cb` and `all classes cb` (the constructor's `ALLWEIGHT`).
+`Shell::weight_choice` follows it (and survives the tab reload). Two effects
+are in the exe:
+
+* `FUN_0047b320` (run when the weight set changes, `FUN_0047ae70`): every slot
+  whose robot's class differs from a chosen class is emptied
+  (`FUN_0047b4b0(slot, -1, 0, 4)`). `Shell::eject_mismatched_robots`.
+* `FUN_004ea040` (the picker's robot cells): a robot outside the filter is drawn
+  at alpha 0.3 (`FUN_0061b4b0(1, 1, 1, 0.3)`, two images) and cannot be selected
+  (`FUN_005ff960(0, cell, 0)`); the class is the `.bot`'s `Class:` (0 light, 1
+  medium, 2 heavy). The picker opens on its first allowed robot.
+Test `exhibition::the_weight_class_filter_empties_slots_and_dims_the_pickers_robots`.
+
+## 9.14 A duel's open slots
+
+Only BATTLE ROYAL and TEAM MATCH use all four slots; a duel shows slots 1 and 3.
+The setup trace now says `slot 2: OPEN` / `slot 4: OPEN` for the others (the
+lobby's `noplayer.gib` word `OPEN`) instead of repeating slot 1's robot
+(`Choice::uses_slot`, `slot_line`). Test
+`exhibition::a_duel_reports_slots_two_and_four_as_open`.
+
+## 9.15 Finish Later before any round
+
+The bracket's `later button` is `FUN_0046b9b0`: it calls `FUN_0046c720`, which
+(when the team has a current event, `FUN_00416940 != -1`) copies the bracket's
+settings (robots per match, advancing, game type, round data) into the team's
+event record (`FUN_0046c3f0`, `FUN_004f9df0`) and broadcasts message 200 (the
+same message as New Team, 9.4), which writes `Teams/Teams.txt`. So an event
+entered and left at once is the team's current event next time. `Shell` calls
+a later hook on `later button` with an entered event
+(`hq_mode::shell_later_hook`): it enters the event in a fresh career and saves
+(`Career::save`, `Teams.txt` plus the sidecar); a career already in that event,
+or an event already played this season, is left as it is. Entering still writes
+nothing. Test `playthrough::finish_later_keeps_the_entered_event_in_the_team_record`
+(scratch install: the saved phase is `InEvent`, a fresh view shows it in
+progress).
+
+## 9.16 Event End Match (result 4)
+
+The pause dialog's `end match button` (`0x476830`) closes the dialog with result
+4; the Esc handler `0x475ee0` then switches on the game type (`FUN_004145f0`):
+1 (multiplayer) goes to `prematch win`, **2 (event) runs `FUN_00418770(1)`**,
+anything else shows `exhibition_setup_win` (`FUN_00475540`). `FUN_00418770` is
+the judges' decision (9.6; the parameter only requires the robots' `+0x1c`
+ids to be set, which every robot's is), so End Match in an event ends the match
+on points at once and it goes on to its results and the award; it is no longer
+an abandoned round. `Match::end_by_judges`, `match_mode::Session::end_for_judges`,
+the window's `end match button`. Quit (result 8) runs the same function and then
+leaves the game. Test
+`match_mode::end_match_in_an_event_hands_the_match_to_the_judges`.
+
+## 9.17 Which robot an AI team brings
+
+The bracket's play handler `FUN_0046bb70` loops over the opponents and passes
+each AI team (`FUN_004699b0`: entrant `i` of the bracket, a team of the AI
+table) and the number `Team+0x118` of the player's team to `FUN_0046c090` ->
+`FUN_004fa890`, which builds `AI\Team<N>\Bot<number>.bot`. `Team+0x118`
+(`FUN_004faad0`; set by `FUN_004faac0`) is stored by `FUN_0046aa50` when the
+bracket opens, from the `.bot` of the robot entered (`Teams\Team<N>\Bot<in
+event>.bot` opened and parsed there), and the play handler clamps it to 0..=2
+(`0x46be9e`-`0x46beb5`). Every shipped AI team's `Bot0`, `Bot1` and `Bot2` are
+its light, medium and heavy robot (`Class: 0/1/2`), so the AI brings the robot
+of **the player's weight class**. `hq_mode::match_config` now reads the entered
+robot's class (`ai_bot_for_class`); it was `Bot0`. Test
+`hq_mode::the_ai_teams_bring_the_robot_of_the_players_weight_class`.
+
+## 9.18 Workshop drag placement: not done, what was found
+
+Not implemented this round (lowest priority). The leads, from the exe: the
+components tab (`FUN_0042ac20`, class `BotLabComponents`) loads
+`botlab/components.gib` and `botlab/comp_preview.gib` (`component preview
+group`: the part's name, `component 3d preview`, a `style dropdown group`
+labelled `Component option:` and the `attach button`, whose note says *"click to
+begin attachment dragging for placement"*). The palette click only selects the
+part and shows that preview; the green attachment-point boxes
+(`UI\BotLab\AP_box_selected.gmf` / `AP_box_unselected.gmf`, loaded by
+`FUN_0042e650`) choose the mount, and the instruction tip strings (`0x6f07f4`:
+*"Click the Attach button to place a component."*, `0x6f0828`: *"Click a green
+box to change the component's attachment point. Then click the Attach button to
+place a component."*) describe the order: pick the part, pick a green box, click
+Attach. The Attach handler is `0x42c3a0`: it first applies the editor's mass
+check ("Total mass of robot must not exceed 800 kg.", `FUN_0043ca70` /
+`FUN_004df0b0`, already in `Build`) and then starts the placement drag. This
+client attaches on the palette click at the panel's selected mount and places
+chassis children with a click on the preview (`Build::place_on_baseplate`); the
+`comp_preview` panel, the `Component option:` style list, the Attach button
+and the drag itself (the part follows the mouse over the baseplate until a
+click, with `heading_arrow.gmf` for the SHIFT rotation, `FUN_00437770`) are
+the missing pieces. The drag's handlers were not traced.
+
+## 9.19 Gate (round 3)
+
+`cargo fmt --all --check` and `cargo clippy --release --offline --workspace
+--all-targets -- -D warnings` clean; `cargo test --release --offline --workspace
+--no-fail-fast` **561 passed, 0 failed** (551 at the start of the round);
+`find ../local/game -newer <stamp>` printed nothing (every test that writes a
+team, a career or a robot runs on a scratch install, and the options tests write
+a temporary `.cfg`). New tests: `hq_mode::the_award_scene_shows_the_prize_and_the_teams_logo`,
+`hq_mode::the_ai_teams_bring_the_robot_of_the_players_weight_class`,
+`match_mode::end_match_in_an_event_hands_the_match_to_the_judges`,
+`exhibition::{the_time_dropdown_opens_its_list_and_a_row_sets_the_match_length,
+the_weight_class_filter_empties_slots_and_dims_the_pickers_robots,
+a_duel_reports_slots_two_and_four_as_open}`,
+`playthrough::{the_options_dropdowns_list_their_rows_and_a_row_sets_the_value,
+finish_later_keeps_the_entered_event_in_the_team_record}`.
+

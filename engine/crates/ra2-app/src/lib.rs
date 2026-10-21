@@ -27,6 +27,7 @@ pub mod match_mode;
 pub mod match_sounds;
 pub mod options;
 pub mod play_mode;
+pub mod prize_scene;
 pub mod reminder;
 pub mod viewport;
 pub mod window;

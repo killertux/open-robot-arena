@@ -295,6 +295,9 @@ enum Screen {
     Match(Box<match_mode::Session>),
     Award {
         gib: Gib,
+        /// The event-results 3D scene under the window (`FUN_0046e140`);
+        /// `None` for the season's end screen.
+        prize: Option<Box<crate::prize_scene::PrizeScene>>,
     },
     /// `teamhq/repairs.gib`: the between-rounds repair bench.
     Repairs(Box<Repairs>),
@@ -436,16 +439,6 @@ impl Session {
             self.career.save(&self.game)?;
         }
         self.return_to_hq()
-    }
-
-    /// The pause dialog's `End Match` in an event: the round is not played
-    /// and nothing is recorded; the bracket comes back with the same opponent.
-    pub fn abandon_match(&mut self) -> Result<(), String> {
-        if !matches!(self.screen, Screen::Match(_)) {
-            return Err("no match is on screen".to_string());
-        }
-        ra2script::set_paused(false);
-        refresh_event_screen(self)
     }
 
     /// Add `damage` to the player's match report before the career award. This
@@ -935,6 +928,24 @@ impl Session {
                     .map(|(_, message)| message.clone())
                     .unwrap_or_default()
             };
+            // The prize model: the tier the rounds won pick, the trophy for a
+            // won event (docs/36 section 9.11).
+            let model = if record.won {
+                event.trophy.0.clone()
+            } else {
+                self.career
+                    .prize_for_rounds(event_id, record.rounds_won as usize)
+                    .map(|(model, _)| model.clone())
+                    .unwrap_or_default()
+            };
+            let prize = crate::prize_scene::PrizeScene::load(
+                &self.game,
+                &model,
+                &self.career.player().logo,
+            )
+            .map(Box::new)
+            .map_err(|e| eprintln!("award scene: {e}"))
+            .ok();
             let gib = award_screen(
                 &self.game.join("UI"),
                 &event,
@@ -942,13 +953,14 @@ impl Session {
                 &bot_name,
                 &record,
                 &description,
+                prize.is_none(),
             )?;
             println!(
                 "award: {} event points, won {}, rounds {}/{}",
                 record.points, record.won, record.rounds_won, record.rounds_lost
             );
             self.last_record = Some(record);
-            self.screen = Screen::Award { gib };
+            self.screen = Screen::Award { gib, prize };
         } else {
             self.last_record = None;
             if self.career.repairs.is_empty() {
@@ -1002,6 +1014,9 @@ impl Session {
             Screen::Match(session) => {
                 session.render_3d(renderer, color, depth, format, width, height)
             }
+            Screen::Award {
+                prize: Some(prize), ..
+            } => prize.render(renderer, color, depth, format, width, height),
             _ => Ok(()),
         }
     }
@@ -1082,7 +1097,11 @@ impl Session {
                 let placed = hq.placements(*layout, Some(assets.faces()));
                 Ok((assets.scene(&placed, size), false))
             }
-            Screen::Event { gib, .. } | Screen::Award { gib, .. } | Screen::SeasonEnd { gib } => {
+            Screen::Award { gib, prize } => {
+                let placed = ra2ui::resolve_with(gib, *layout, Some(assets.faces()));
+                Ok((assets.scene(&placed, size), prize.is_some()))
+            }
+            Screen::Event { gib, .. } | Screen::SeasonEnd { gib } => {
                 let placed = ra2ui::resolve_with(gib, *layout, Some(assets.faces()));
                 Ok((assets.scene(&placed, size), false))
             }
@@ -1142,10 +1161,7 @@ impl Session {
     ) -> Result<(), String> {
         let (scene, three_d) = self.scene()?;
         if three_d {
-            let Screen::Match(session) = &self.screen else {
-                return Err("a 3D frame without a match".to_string());
-            };
-            session.render_3d(
+            self.render_3d(
                 renderer,
                 &target.color_view,
                 &target.depth_view,
@@ -1223,7 +1239,7 @@ impl Session {
             capture(self, "season-final.png")?;
             let view = self.view()?;
             let gib = season_end_screen(&self.game.join("UI"), &view)?;
-            self.screen = Screen::Award { gib };
+            self.screen = Screen::Award { gib, prize: None };
             capture(self, "champion.png")?;
         }
         println!(
@@ -1590,6 +1606,36 @@ pub fn shell_enter_hook(game: &Path) -> Option<ra2_shell::shell::EnterHook> {
     }))
 }
 
+/// The bracket's `later button` (`FUN_0046b9b0`): `FUN_0046c720` stores the
+/// bracket's settings in the team's event record and broadcasts message 200,
+/// which writes `Teams/Teams.txt` (`FUN_00502720`, see 9.4). An event entered
+/// and left before any round is therefore still the team's current event next
+/// time. A career already in that event (a round was saved) is left as it is.
+pub fn shell_later_hook(game: &Path) -> ra2_shell::shell::LaterHook {
+    let game = game.to_path_buf();
+    Box::new(move |event, robot| {
+        let Ok(mut career) = fresh_career(&game) else {
+            return;
+        };
+        let in_it = matches!(
+            career.phase,
+            ra2sim::career::SeasonPhase::InEvent { event: current } if current == event
+        );
+        // An event already played this season is over (the shell's memory of
+        // the entry outlives the award).
+        let played = career.history.iter().any(|record| record.event == event);
+        if in_it || played || career.enter_event(event).is_err() {
+            return;
+        }
+        if let Some(slot) = career.player().robots.get(robot).copied() {
+            career.player_mut().event_robot = slot;
+        }
+        if let Err(error) = career.save(&game) {
+            eprintln!("finish later: {error}");
+        }
+    })
+}
+
 /// The `ra2ui::hq::View` for a career: the roster, standings, schedule, prizes
 /// and the team record's counters.
 pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, String> {
@@ -1918,8 +1964,18 @@ pub fn match_config(
         .bots_per_match()
         .map(|bots| bots.max(2) as usize)
         .unwrap_or(2);
+    // The AI team brings the robot of the player's weight class: the play
+    // handler (`FUN_0046bb70`) passes `Team+0x118`, the class of the robot in
+    // the event (stored by `FUN_0046aa50` with `FUN_004faac0` when the bracket
+    // opens), clamped to 0..=2, as the bot number of each opponent team
+    // (`FUN_004fa890` builds `AI\Team<N>\Bot<class>.bot`). Every shipped AI
+    // team's Bot0/Bot1/Bot2 are its light, medium and heavy robot.
+    let class = ai_bot_for_class(read_bot(&player).map(|bot| bot.class).unwrap_or(0));
     for slot in opponents.into_iter().take(wanted - 1) {
-        let opponent = ai_robot_path(game, slot, 0);
+        let mut opponent = ai_robot_path(game, slot, class);
+        if !opponent.is_file() {
+            opponent = ai_robot_path(game, slot, 0);
+        }
         if !opponent.is_file() {
             return Err(format!("{} is not a .bot file", opponent.display()));
         }
@@ -1972,6 +2028,16 @@ pub fn ai_robot_path(game: &Path, team: usize, robot: i32) -> PathBuf {
         .join(format!("Bot{robot}.bot"))
 }
 
+/// The AI robot number the player's robot class selects: 0, 1 or 2 as they
+/// are, anything else 0 (`0x46be9e`..`0x46beb5`).
+pub fn ai_bot_for_class(class: i32) -> i32 {
+    if (0..=2).contains(&class) {
+        class
+    } else {
+        0
+    }
+}
+
 fn read_bot(path: &Path) -> Option<ra2fmt::bot::Bot> {
     let bytes = std::fs::read(path).ok()?;
     ra2fmt::bot::parse(&bytes).ok()
@@ -2018,17 +2084,20 @@ pub fn award_screen(
     bot: &str,
     record: &EventRecord,
     description: &str,
+    preview_backdrop: bool,
 ) -> Result<Gib, String> {
     let mut gib = ra2ui::hq::load(ui_root, "teamhq/event_winner.gib")?;
     ra2ui::hq::fit_splits_in(&mut gib);
     // The award is a modal: the shipped window has no full-screen background,
-    // because the original draws it over the event-results 3D scene. This port
-    // composes the event's own arena preview behind it instead of leaving the
-    // frame black.
-    gib.blocks.insert(
-        0,
-        Block::Widget(full_screen_image("arena preview", &event.arena.1)),
-    );
+    // because the original draws it over the event-results 3D scene
+    // (`prize_scene`). Without that scene (a missing model or install) the
+    // event's own arena preview stands behind it instead of a black frame.
+    if preview_backdrop {
+        gib.blocks.insert(
+            0,
+            Block::Widget(full_screen_image("arena preview", &event.arena.1)),
+        );
+    }
     if let Some(image) = find_mut_in(&mut gib, "event img") {
         ra2ui::input::set_field(image, "_Filename", &event.art);
     }
@@ -2451,6 +2520,43 @@ mod tests {
         assert_eq!(shell.base_screen_id(), "teamhq/event_bracket.gib");
     }
 
+    /// The award's 3D scene (`FUN_0046e140`): the event-results arena through the
+    /// `fixed cam`, the tier's prize model on the winner spot and the team's logo
+    /// on the banner. Each of the three changes the picture.
+    #[test]
+    fn the_award_scene_shows_the_prize_and_the_teams_logo() {
+        let Some(game) = game_dir() else { return };
+        let Ok(renderer) = Renderer::new() else {
+            return;
+        };
+        let (w, h) = (320u32, 251u32);
+        let target = Target::new(renderer.device(), w, h);
+        let draw = |prize: &str, logo: &str| -> Vec<u8> {
+            let scene = crate::prize_scene::PrizeScene::load(&game, prize, logo).unwrap();
+            assert_eq!(scene.has_prize(), prize.ends_with(".gmf"), "{prize}");
+            scene
+                .render(
+                    &renderer,
+                    &target.color_view,
+                    &target.depth_view,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    w,
+                    h,
+                )
+                .unwrap();
+            renderer.read_texture(&target.color, w, h).unwrap()
+        };
+        let trophy = "Arenas\\event_results\\prizes\\Gold_Cup_Trophy\\Gold_Cup_Trophy.gmf";
+        let logo = "Teams\\orange_skull.bmp";
+        let with = draw(trophy, logo);
+        let bare = draw("", logo);
+        let other = draw(trophy, "Teams\\Atom.bmp");
+        assert!(with.iter().any(|&b| b != 0), "the scene is not black");
+        let differing = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
+        assert!(differing(&with, &bare) > 500, "the prize is on the spot");
+        assert!(differing(&with, &other) > 500, "the banner takes the logo");
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2602,6 +2708,41 @@ mod tests {
             config.robots.len(),
             events[id].bots_per_match().unwrap() as usize
         );
+    }
+
+    /// The AI teams bring the robot of the player's weight class
+    /// (`FUN_0046bb70` -> `FUN_004fa890`, bot number = `Team+0x118`, the class
+    /// of the robot in the event): a light, medium or heavy entry meets Bot0,
+    /// Bot1 or Bot2 of each AI team, and the class numbers match the files.
+    #[test]
+    fn the_ai_teams_bring_the_robot_of_the_players_weight_class() {
+        let Some(game) = game_dir() else { return };
+        let events = ra2ui::events::all(&game).unwrap();
+        let id = events
+            .iter()
+            .position(|event| event.name == "F.O.R.C.E. Tournament")
+            .expect("a duel event");
+        let mut seen = std::collections::BTreeSet::new();
+        let career = entered(&game, id);
+        for &slot in &career.player().robots.clone() {
+            let mut career = entered(&game, id);
+            career.player_mut().event_robot = slot;
+            let player = player_robot_path(&game, career.player_slot, slot);
+            let class = read_bot(&player).map(|bot| bot.class).unwrap();
+            let config = match_config(&game, &events[id], &career, 1.0).unwrap();
+            let opponent = &config.robots[1].bot_path;
+            assert!(
+                opponent.ends_with(&format!("Bot{}.bot", ai_bot_for_class(class))),
+                "a class {class} robot meets {opponent}"
+            );
+            let brought = read_bot(Path::new(opponent)).unwrap();
+            assert_eq!(brought.class, class, "the AI robot is of the same class");
+            seen.insert(class);
+        }
+        assert!(!seen.is_empty());
+        assert_eq!(ai_bot_for_class(7), 0);
+        assert_eq!(ai_bot_for_class(-1), 0);
+        assert_eq!(ai_bot_for_class(2), 2);
     }
 
     /// A career in event `id` (put on its schedule first).
@@ -2811,9 +2952,10 @@ mod tests {
             "",
             &career.history[8],
             "",
+            true,
         )
         .unwrap();
-        session.screen = Screen::Award { gib };
+        session.screen = Screen::Award { gib, prize: None };
         let point = session.control_point(&["continue button"]).unwrap();
         session.click(point).unwrap();
         assert!(matches!(session.screen, Screen::SeasonEnd { .. }));

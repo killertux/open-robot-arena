@@ -795,6 +795,20 @@ impl Match {
         None
     }
 
+    /// The pause dialog's `End Match` in an event (result 4, handler
+    /// `0x476830`; the Esc handler `0x475ee0` runs `FUN_00418770(1)` when the
+    /// game type, `FUN_004145f0`, is 2): the judges decide on the points now,
+    /// exactly as at a time-out (the parameter only asks the robots' `+0x1c`
+    /// ids to be set, which every robot's is), and the match goes on to its
+    /// results. Only a match in its countdown or fight can be ended.
+    pub fn end_by_judges(&mut self) -> bool {
+        if !matches!(self.state, MatchState::Countdown | MatchState::Fight) {
+            return false;
+        }
+        self.finish(WinReason::Timeout);
+        true
+    }
+
     fn finish(&mut self, reason: WinReason) {
         self.reason = Some(reason);
         self.winners = self.decide_winners(reason);

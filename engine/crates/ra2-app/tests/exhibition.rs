@@ -311,6 +311,163 @@ fn the_time_dropdowns_displayed_value_is_the_match_length() {
     );
 }
 
+/// The time dropdown opens its list (`No limit`, 1-5, 10, 15, 20: the
+/// constructor `FUN_004733f0`), a row picks the match length, a click elsewhere
+/// closes the list without changing it, and the choice survives a trip to the
+/// arena tab and back.
+#[test]
+fn the_time_dropdown_opens_its_list_and_a_row_sets_the_match_length() {
+    let Some(game) = game_dir() else { return };
+    let _guard = ra2script::lock();
+    let mut options = options(&game);
+    options.arena_script = Some("box.py".to_string());
+    let (mut shell, _) = play_mode::select_setup(&options).expect("the click flow");
+    shell.click_named("gametype button").expect("Game Settings");
+    let frame_of = |shell: &ra2_shell::Shell, name: &str| {
+        let placed = shell.placements();
+        placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == name)
+            .map(|p| p.frame)
+            .unwrap_or_else(|| panic!("no {name}"))
+    };
+    let rows_of = |shell: &ra2_shell::Shell| -> Vec<String> {
+        let placed = shell.placements();
+        let dropdown = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "time dropdown")
+            .expect("the dropdown");
+        let list = dropdown
+            .walk()
+            .find(|p| p.widget.kind == ra2fmt::gib::WidgetKind::ListBox)
+            .expect("its list");
+        list.widget
+            .children
+            .iter()
+            .filter(|c| c.kind == ra2fmt::gib::WidgetKind::Text && c.visible())
+            .filter_map(|c| c.field("_Text").map(|f| f.text().to_string()))
+            .collect()
+    };
+    assert!(rows_of(&shell).is_empty(), "closed: no rows");
+    let field = frame_of(&shell, "time dropdown");
+    // The arrow opens the list; the rows are the constructor's, five shown.
+    shell.click(field.x + field.w - 8.0, field.y + 9.0).unwrap();
+    assert_eq!(rows_of(&shell), ["No limit", "1", "2", "3", "4"]);
+    // A click away closes it and changes nothing.
+    shell
+        .click(field.x + field.w + 200.0, field.y + 9.0)
+        .unwrap();
+    assert!(rows_of(&shell).is_empty());
+    assert_eq!(shell.time_choice(), Some(Some(180.0)));
+    // Open again and pick `No limit`, then `4`.
+    for (row, expected) in [(0usize, None), (4, Some(240.0))] {
+        shell.click(field.x + field.w - 8.0, field.y + 9.0).unwrap();
+        let rowh = 18.0;
+        shell
+            .click(field.x + 20.0, field.y + field.h + rowh * row as f32 + 9.0)
+            .unwrap();
+        assert!(rows_of(&shell).is_empty(), "a pick closes the list");
+        assert_eq!(shell.time_choice(), Some(expected));
+    }
+    assert_eq!(shell.time_text(), Some("4"));
+    let choice = play_mode::choice_from_shell(&game, &shell).expect("the choice");
+    assert_eq!(choice.time_seconds, Some(240.0));
+    // The arena tab replaces the tab; the choice is still the player's.
+    shell.click_named("arena button").expect("Arena tab");
+    shell.click_named("gametype button").expect("Game Settings");
+    assert_eq!(shell.time_text(), Some("4"));
+}
+
+/// The weight-class filter (`FUN_004733f0`'s `weight class optiongroup`):
+/// choosing a class empties every slot whose robot is of another class
+/// (`FUN_0047b320`) and the pickers then dim and refuse the robots outside it
+/// (`FUN_004ea040`: alpha 0.3, not selectable). `All Classes` allows everything.
+#[test]
+fn the_weight_class_filter_empties_slots_and_dims_the_pickers_robots() {
+    let Some(game) = game_dir() else { return };
+    let _guard = ra2script::lock();
+    let options = options(&game);
+    let (mut shell, _) = play_mode::select_setup(&options).expect("the click flow");
+    let class_of = |shell: &ra2_shell::Shell, slot: usize| -> Option<i32> {
+        let pick = shell.slot_pick(slot)?;
+        let side = if slot < 2 {
+            ra2ui::teams::Side::Player
+        } else {
+            ra2ui::teams::Side::Computer
+        };
+        let path = ra2ui::teams::bot_path(&game, side, pick.team, pick.bot);
+        ra2ui::teams::bot_info(&path).map(|(_, class)| class)
+    };
+    let (own, other) = (class_of(&shell, 0), class_of(&shell, 2));
+    assert!(own.is_some() && other.is_some(), "both slots hold a robot");
+    // Choose the class of the player's robot.
+    let (name, class) = match own.unwrap() {
+        0 => ("lightweight cb", 0),
+        1 => ("mediumweight cb", 1),
+        _ => ("heavyweight cb", 2),
+    };
+    shell.click_named("gametype button").expect("Game Settings");
+    shell.click_named(name).expect("the class");
+    assert_eq!(shell.weight_choice(), Some(class as u8));
+    assert!(shell.slot_pick(0).is_some(), "a robot of the class stays");
+    assert_eq!(
+        shell.slot_pick(2).is_some(),
+        other == Some(class),
+        "a robot of another class is ejected"
+    );
+    // The choice survives a tab trip.
+    shell.click_named("arena button").expect("Arena");
+    shell.click_named("gametype button").expect("Game Settings");
+    assert_eq!(shell.weight_choice(), Some(class as u8));
+    // The picker dims what the filter refuses.
+    shell.click_named("robots button").expect("Robots");
+    shell.click_region("player1 group").expect("the picker");
+    let dimmed = |shell: &ra2_shell::Shell| {
+        shell
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .filter(|p| {
+                p.widget.kind == ra2fmt::gib::WidgetKind::Image
+                    && p.widget.field("_ForeColor").map(|f| f.text()) == Some("1 1 1 0.3")
+            })
+            .count()
+    };
+    let allowed_somewhere = dimmed(&shell);
+    shell.click_named("cancel button").unwrap();
+    shell.click_named("gametype button").unwrap();
+    shell.click_named("all classes cb").unwrap();
+    assert_eq!(shell.weight_choice(), None);
+    shell.click_named("robots button").unwrap();
+    shell.click_region("player1 group").expect("the picker");
+    let baseline = dimmed(&shell);
+    assert!(
+        allowed_somewhere > baseline,
+        "the filter dims robots ({allowed_somewhere} images against {baseline} without it)"
+    );
+}
+
+/// A duel leaves slots 2 and 4 `OPEN` (the lobby's `noplayer.gib` word); only
+/// BATTLE ROYAL and TEAM MATCH fill all four.
+#[test]
+fn a_duel_reports_slots_two_and_four_as_open() {
+    let Some(game) = game_dir() else { return };
+    let _guard = ra2script::lock();
+    let (shell, _) = play_mode::select_setup(&options(&game)).expect("the click flow");
+    let choice = play_mode::choice_from_shell(&game, &shell).expect("the choice");
+    assert!(choice.slot_line(0).starts_with("slot 1: player team"));
+    assert!(choice.slot_line(1).starts_with("slot 2: OPEN"));
+    assert!(choice.slot_line(2).starts_with("slot 3: computer team"));
+    assert!(choice.slot_line(3).starts_with("slot 4: OPEN"));
+    let mut royal = options(&game);
+    royal.game_type = Some(GameType::BattleRoyal);
+    let (shell, _) = play_mode::select_setup(&royal).expect("the four pickers");
+    let choice = play_mode::choice_from_shell(&game, &shell).expect("the choice");
+    assert!((0..4).all(|slot| !choice.slot_line(slot).contains("OPEN")));
+}
+
 /// The four `playerN group` slots all open the shipped pickers, and a BATTLE
 /// ROYAL carries all four robots on four distinct spawn points. The results
 /// screen lists the same four names in its four slots, and slot 1 is the driven

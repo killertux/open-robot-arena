@@ -81,6 +81,7 @@ pub fn run(
         shell.set_enter_hook(hook);
     }
     shell.set_team_hook(crate::hq_mode::shell_team_hook(game));
+    shell.set_later_hook(crate::hq_mode::shell_later_hook(game));
     println!(
         "booted {} from {} ({}x{})",
         shell.screen_id(),
@@ -184,6 +185,11 @@ fn finish_step(
 ) -> Result<(), String> {
     println!("{}", crate::describe(step));
     audio.shell_step(step);
+    settings.register_dropdowns(shell);
+    for change in settings.absorb_picks(&shell.take_dropdown_picks()) {
+        println!("options: {change}");
+        settings.save()?;
+    }
     match step.note.as_deref() {
         Some(crate::options::OPEN_NOTE) => {
             if let Err(error) = settings.reload() {

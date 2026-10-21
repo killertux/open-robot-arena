@@ -17,7 +17,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ra2fmt::gib::{AttachmentKind, Block, Gib, Widget, WidgetKind};
+use ra2fmt::gib::{Block, Gib, Widget, WidgetKind};
+use ra2ui::dropdown::scrollbar_target;
 use ra2ui::teams::{self, Roster, Side};
 use ra2ui::workshop::{self, BotLab};
 use ra2ui::{Fonts, Placement};
@@ -40,6 +41,19 @@ struct Page {
     /// The scroll offset of each single-column list, by widget name. It is
     /// view state, not a record the writer owns.
     scroll: BTreeMap<String, usize>,
+    /// The match-time dropdown's value the player chose: a reloaded
+    /// `gametype.gib` starts at the constructor's `3` and takes this back.
+    time_text: Option<String>,
+    /// The weight filter's selection, re-applied when the tab reloads.
+    weight_choice: Option<u8>,
+}
+
+impl Page {
+    fn has_weight_group(&self) -> bool {
+        self.gib
+            .walk()
+            .any(|w| w.kind == WidgetKind::OptionGroup && w.name() == "weight class optiongroup")
+    }
 }
 
 /// One robot the exhibition picker chose: the team's record slot and the
@@ -68,6 +82,12 @@ struct Popup {
     robot: Option<usize>,
     /// The dropdown list's scroll offset.
     scroll: usize,
+    /// The weight class the setup screen allows (`FUN_004ea040` reads the
+    /// filter set it was opened with).
+    weight: Option<u8>,
+    /// Per robot ordinal of the selected team: outside the weight filter, so
+    /// dimmed and not selectable (`FUN_005ff960(0, slot, 0)`).
+    disabled: Vec<bool>,
 }
 
 enum Screen {
@@ -151,11 +171,22 @@ pub struct Shell {
     game_type_choice: Option<String>,
     /// The arena's `hazard checkbox`, when the loaded arena script has one.
     hazard_choice: Option<bool>,
+    /// The weight class the Game Settings filter allows (`lightweight cb` 0,
+    /// `mediumweight cb` 1, `heavyweight cb` 2); `None` is `all classes cb`
+    /// (the constructor's `ALLWEIGHT`, `FUN_004733f0`).
+    weight_choice: Option<u8>,
     /// The match-time dropdown's own visible text (`5 minutes`), and the
     /// seconds it states. `Some(None)` is a "No limit" value; `None` means the
     /// tab was never loaded.
     time_text: Option<String>,
     time_seconds: Option<Option<f32>>,
+    /// The rows of each dropdown the exe fills at run time, by widget name
+    /// (`time dropdown` from the Game Settings constructor; the options
+    /// window's lists are registered by the application).
+    dropdown_items: BTreeMap<String, Vec<String>>,
+    /// `(dropdown, text)` for each row picked since the last
+    /// [`Shell::take_dropdown_picks`].
+    dropdown_picks: Vec<(String, String)>,
     /// The robots the player and the computer picked, from the shipped
     /// `selectbot_player.gib`/`selectbot_computer.gib` windows. `None` means
     /// the robots tab was not used; the caller's defaults apply.
@@ -201,6 +232,7 @@ pub struct Shell {
     /// Enters an event in the application's career and returns the Team HQ's
     /// refreshed data (the bracket exists from then on).
     enter_hook: Option<EnterHook>,
+    later_hook: Option<LaterHook>,
     /// Opens the career of the team record the select screen's `continue
     /// button` chose and returns its Team HQ data (`FUN_004eba60`).
     team_hook: Option<TeamHook>,
@@ -223,6 +255,12 @@ pub const MAX_TEXT: usize = 32;
 /// `Events.txt` index and the join window's chosen robot column in, the Team
 /// HQ's data out.
 pub type EnterHook = Box<dyn FnMut(usize, Option<usize>) -> Option<ra2ui::hq::View>>;
+
+/// What the application does when the bracket's `later button` is pressed with
+/// an event entered (`FUN_0046b9b0` -> `FUN_0046c720`): the event and the
+/// robot column are committed to the team record and the team table is
+/// written (message 200, `FUN_00502720`).
+pub type LaterHook = Box<dyn FnMut(usize, usize)>;
 
 /// What the application does when the player continues to a team's HQ: the
 /// team's `Teams/Teams.txt` slot in, that team's Team HQ data out.
@@ -277,9 +315,15 @@ impl Shell {
             arena_rows: None,
             arena_scroll: None,
             game_type_choice: None,
+            weight_choice: None,
             hazard_choice: None,
             time_text: None,
             time_seconds: None,
+            dropdown_items: BTreeMap::from([(
+                "time dropdown".to_string(),
+                TIME_ITEMS.iter().map(|t| t.to_string()).collect(),
+            )]),
+            dropdown_picks: Vec::new(),
             player_pick: None,
             opponent_pick: None,
             slot_picks: [None; 4],
@@ -300,6 +344,7 @@ impl Shell {
             text_focus: None,
             entered_event: None,
             enter_hook: None,
+            later_hook: None,
             pending_message: None,
         })
     }
@@ -473,6 +518,10 @@ impl Shell {
             }
         }
         false
+    }
+
+    pub fn set_later_hook(&mut self, hook: LaterHook) {
+        self.later_hook = Some(hook);
     }
 
     pub fn set_enter_hook(&mut self, hook: EnterHook) {
@@ -728,6 +777,11 @@ impl Shell {
 
     /// The game type the game-type tab selected, in the original's spelling
     /// (`DEATHMATCH`), or `None` when that tab has never been loaded.
+    pub fn weight_choice(&self) -> Option<u8> {
+        self.weight_choice
+    }
+
+    /// The setup screen's game type, in the original's spelling.
     pub fn game_type_choice(&self) -> Option<&str> {
         self.game_type_choice.as_deref()
     }
@@ -1069,6 +1123,10 @@ impl Shell {
         if self.popup.is_some() {
             return self.click_popup(x, y);
         }
+        if let Some(hit) = self.click_dropdown(x, y) {
+            step.hit = hit;
+            return Ok(self.finish(step));
+        }
         // The arena list's own scroll bar: clicking its arrows moves one row,
         // and clicking the track jumps to that fraction. The bar is the
         // document's `+Scroller` attachment, so it is not a `hit_control`.
@@ -1187,6 +1245,52 @@ impl Shell {
         self.refresh_arena_detail();
         self.fill_hq()?;
         Ok(self.finish(step))
+    }
+
+    /// Register the rows a dropdown lists (the exe fills them when the window
+    /// is built: `FUN_004a00b0` the resolutions, `FUN_004a0400` the cameras).
+    pub fn set_dropdown_items(&mut self, name: &str, items: Vec<String>) {
+        self.dropdown_items.insert(name.to_string(), items);
+    }
+
+    /// The rows picked from dropdown lists since the last call.
+    pub fn take_dropdown_picks(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.dropdown_picks)
+    }
+
+    /// A click on a registered dropdown (or anywhere while one is open): the
+    /// field or arrow toggles the list, a row picks it, the list's scroll bar
+    /// scrolls it and a click elsewhere closes it, consumed. Returns the name
+    /// the step reports, or `None` when the click is not a dropdown's.
+    fn click_dropdown(&mut self, x: f32, y: f32) -> Option<String> {
+        use ra2ui::dropdown::{self, Part};
+        let (name, part) = {
+            let placed = self.placements();
+            let hit = ra2ui::input::hit_control(&placed, x, y);
+            dropdown::click_part(&placed, hit.as_deref(), x, y)?
+        };
+        let items = self.dropdown_items.get(&name)?.clone();
+        let gib = self.document_mut()?;
+        let open = dropdown::is_open(gib, &name);
+        match part {
+            Part::Field if open => dropdown::close(gib, &name),
+            Part::Field => {
+                let current = dropdown::text(gib, &name).unwrap_or_default();
+                let selected = items
+                    .iter()
+                    .position(|item| item.eq_ignore_ascii_case(current.trim()))
+                    .unwrap_or(0);
+                dropdown::open(gib, &name, &items, selected);
+            }
+            Part::Row(row) => {
+                if let Some(text) = dropdown::pick(gib, &name, &items, row) {
+                    self.dropdown_picks.push((name.clone(), text));
+                }
+            }
+            Part::Scroll(top) => dropdown::scroll(gib, &name, top),
+            Part::Outside => dropdown::close(gib, &name),
+        }
+        Some(name)
     }
 
     /// The exhibition setup opens on its `Game Settings` tab: the button is
@@ -1544,6 +1648,8 @@ impl Shell {
     fn show_bracket(&mut self, gib: Gib) {
         let key = "teamhq/event_bracket.gib";
         let page = Page {
+            time_text: None,
+            weight_choice: None,
             key: key.to_string(),
             gib,
             content: Vec::new(),
@@ -1714,6 +1820,12 @@ impl Shell {
             self.text_focus = None;
         }
         self.sync_list_viewports();
+        // `Finish Later`: the entered event is committed to the team record.
+        if step.hit_widget() == Some("later button") {
+            if let (Some((event, robot)), Some(hook)) = (self.entered_event, &mut self.later_hook) {
+                hook(event, robot);
+            }
+        }
         step.screen = self.screen_id();
         step.content = self.content_id();
         step.tab = self.tab().map(str::to_string);
@@ -1842,6 +1954,8 @@ impl Shell {
             team,
             robot: None,
             scroll: 0,
+            weight: self.weight_choice,
+            disabled: Vec::new(),
         };
         refresh_picker(&mut popup, &self.ui, &self.game, &mut self.previews)?;
         self.popup = Some(popup);
@@ -1969,7 +2083,7 @@ impl Shell {
                     .get(popup.team)
                     .map(|roster| roster.robots.len())
                     .unwrap_or(0);
-                if column < robots {
+                if column < robots && !popup.disabled.get(column).copied().unwrap_or(false) {
                     popup.robot = Some(column);
                     refresh_picker(&mut popup, &self.ui, &self.game, &mut self.previews)?;
                 }
@@ -2216,6 +2330,22 @@ impl Shell {
                 }
             }
         }
+        let mut weight_changed = false;
+        if let Some(group) = ra2ui::workshop::find(root, "weight class optiongroup")
+            .filter(|g| g.kind == ra2fmt::gib::WidgetKind::OptionGroup)
+        {
+            let weight = match ra2ui::input::field_of(group, "Selection") {
+                Some("lightweight cb") => Some(Some(0)),
+                Some("mediumweight cb") => Some(Some(1)),
+                Some("heavyweight cb") => Some(Some(2)),
+                Some("all classes cb") => Some(None),
+                _ => None,
+            };
+            if let Some(weight) = weight {
+                weight_changed = weight != self.weight_choice;
+                self.weight_choice = weight;
+            }
+        }
         if let Some(hazard) = ra2ui::workshop::find(root, "hazard checkbox") {
             if let Some(checked) = ra2ui::input::field_of(hazard, "Checked") {
                 self.hazard_choice = Some(checked == "true");
@@ -2239,6 +2369,45 @@ impl Shell {
                 self.time_seconds = parse_match_time(&text);
             }
         }
+        if let Some(text) = self.time_text.clone() {
+            if let Screen::Page(page) = &mut self.screen {
+                page.time_text = Some(text);
+            }
+        }
+        if let Screen::Page(page) = &mut self.screen {
+            if page.has_weight_group() {
+                page.weight_choice = self.weight_choice;
+            }
+        }
+        if weight_changed {
+            self.eject_mismatched_robots();
+        }
+    }
+
+    /// `FUN_0047b320`, run when the weight class changes: every slot whose
+    /// robot is not of the chosen class is emptied (`FUN_0047b4b0(slot, -1, 0,
+    /// 4)`), the picks of the other classes being no longer allowed.
+    fn eject_mismatched_robots(&mut self) {
+        let Some(allowed) = self.weight_choice else {
+            return;
+        };
+        for slot in 0..4 {
+            let (Some(pick), Some(side)) = (self.slot_picks[slot], self.slot_sides[slot]) else {
+                continue;
+            };
+            let path = teams::bot_path(&self.game, side, pick.team, pick.bot);
+            let class = teams::bot_info(&path).map(|(_, class)| class);
+            if class.is_some_and(|class| class != i32::from(allowed)) {
+                self.slot_picks[slot] = None;
+                self.slot_sides[slot] = None;
+                match slot {
+                    0 => self.player_pick = None,
+                    2 => self.opponent_pick = None,
+                    _ => {}
+                }
+            }
+        }
+        let _ = self.refresh_robot_slots();
     }
 
     /// Click a named widget that is a *region* rather than a control (the
@@ -2450,6 +2619,8 @@ fn load_screen(ui: &Path, key: &str) -> Result<Screen, String> {
     let mut gib = ra2fmt::gib::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     ra2ui::inline_proxies_in(&mut gib, ui);
     Ok(Screen::Page(Page {
+        time_text: None,
+        weight_choice: None,
         key,
         gib,
         content: Vec::new(),
@@ -2680,7 +2851,8 @@ fn load_into(
         return Err(format!("{} has no group called {slot:?}", page.key));
     }
     if key.eq_ignore_ascii_case("exhibition/gametype.gib") {
-        default_game_settings(&mut page.gib);
+        let (time, weight) = (page.time_text.clone(), page.weight_choice);
+        default_game_settings(&mut page.gib, time.as_deref(), weight);
     }
     if key.eq_ignore_ascii_case("exhibition/exhib_robots.gib") {
         show_slots_for(&mut page.gib, game_type);
@@ -2705,7 +2877,16 @@ fn load_into(
 /// minutes. The constructor fills the time dropdown with `No limit`, then
 /// `1 2 3 4 5 10 15 20`, and selects `3`; the file's `5 minutes` is an editor
 /// placeholder. The dropdown shows the bare number.
-fn default_game_settings(gib: &mut Gib) {
+fn default_game_settings(gib: &mut Gib, chosen: Option<&str>, weight: Option<u8>) {
+    if let Some(class) = weight {
+        let member =
+            ["lightweight cb", "mediumweight cb", "heavyweight cb"][usize::from(class.min(2))];
+        for block in gib.blocks.iter_mut() {
+            if let Block::Widget(root) = block {
+                ra2ui::input::select_option(root, "weight class optiongroup", member);
+            }
+        }
+    }
     for block in gib.blocks.iter_mut() {
         let Block::Widget(root) = block else { continue };
         let Some(dropdown) = workshop::find_mut(root, "time dropdown") else {
@@ -2713,11 +2894,17 @@ fn default_game_settings(gib: &mut Gib) {
         };
         for child in dropdown.children.iter_mut() {
             if child.kind == WidgetKind::TextBox {
-                set_text(child, "3");
+                set_text(child, chosen.unwrap_or(DEFAULT_TIME));
             }
         }
     }
 }
+
+/// The match-time list the Game Settings constructor fills (`FUN_004733f0`:
+/// `No limit` with value 0, then 1, 2, 3, 4, 5, 10, 15 and 20 minutes, each
+/// item's value being its number) and the one it selects.
+pub const TIME_ITEMS: [&str; 9] = ["No limit", "1", "2", "3", "4", "5", "10", "15", "20"];
+const DEFAULT_TIME: &str = "3";
 
 /// Only BATTLE ROYAL and TEAM MATCH use all four robot slots. A duel shows
 /// two panels side by side in the top row (the original's DEATHMATCH setup):
@@ -2947,10 +3134,27 @@ fn refresh_picker(
     let team = popup.team.min(popup.rosters.len().saturating_sub(1));
     popup.team = team;
     let roster = popup.rosters[team].clone();
+    // `FUN_004ea040`: a robot whose class the filter does not allow is dimmed
+    // to alpha 0.3 and cannot be selected.
+    popup.disabled = roster
+        .robots
+        .iter()
+        .map(|bot| {
+            let class = teams::bot_info(&teams::bot_path(game, popup.side, team, *bot))
+                .map(|(_, class)| class);
+            popup
+                .weight
+                .is_some_and(|allowed| class.is_some_and(|class| class != i32::from(allowed)))
+        })
+        .collect();
+    let first_allowed = popup.disabled.iter().position(|disabled| !disabled);
     if roster.robots.is_empty() {
         popup.robot = None;
-    } else if popup.robot.is_none_or(|robot| robot >= roster.robots.len()) {
-        popup.robot = Some(0);
+    } else if popup
+        .robot
+        .is_none_or(|robot| robot >= roster.robots.len() || popup.disabled[robot])
+    {
+        popup.robot = first_allowed;
     }
     let robot_name = popup
         .robot
@@ -3001,6 +3205,13 @@ fn refresh_picker(
                 ra2ui::cells::bind_art(&mut cell, "bot preview", &key);
                 previews.insert(key, snapshot);
             }
+            if popup.disabled.get(ordinal).copied().unwrap_or(false) {
+                for name in ["bot preview", "weight icon"] {
+                    if let Some(widget) = workshop::find_mut(&mut cell, name) {
+                        dim(widget);
+                    }
+                }
+            }
             if let Some((_, class)) = teams::bot_info(&path) {
                 let icon = match class {
                     0 => "exhibition/light_icon.bmp",
@@ -3031,39 +3242,14 @@ fn refresh_picker(
     Ok(())
 }
 
-/// The offset a click inside a list's `+Scroller` bar asks for.
-///
-/// The bar is the attachment's `ScrollBar`: its own `Less`/`More` buttons are
-/// the first and last parts, and the track between them is the third. A click
-/// on an arrow moves one row; a click on the track jumps to that fraction of
-/// the content. `None` when the point is not on this list's bar.
-fn scrollbar_target(list: &Placement<'_>, x: f32, y: f32, top: usize, max: usize) -> Option<usize> {
-    let bar = list
-        .attachments
-        .iter()
-        .find(|a| a.attachment.kind == AttachmentKind::Scroller)?
-        .body
-        .walk()
-        .find(|p| p.widget.kind == WidgetKind::ScrollBar)?;
-    if !bar.frame.contains_point(x, y) || !bar.widget.visible() {
-        return None;
+/// Tint a cell's image to alpha 0.3 (`FUN_0061b4b0(1, 1, 1, 0.3)`, `0x3e99999a`).
+fn dim(widget: &mut Widget) {
+    if widget.kind == WidgetKind::Image {
+        ra2ui::input::set_field(widget, "_ForeColor", "1 1 1 0.3");
     }
-    let model = ra2ui::ScrollBar::from_widget(bar.widget);
-    let less = bar.children.get(model.less)?.frame;
-    let more = bar.children.get(model.more)?.frame;
-    let parts = model.parts(bar.frame, less, more);
-    let track = parts[2];
-    if y < track.y {
-        return Some(top.saturating_sub(1));
+    for child in widget.children.iter_mut() {
+        dim(child);
     }
-    if y >= track.bottom() {
-        return Some((top + 1).min(max));
-    }
-    if track.h <= 0.0 {
-        return Some(top);
-    }
-    let fraction = ((y - track.y) / track.h).clamp(0.0, 1.0);
-    Some((fraction * max as f32).round() as usize)
 }
 
 fn chain<'a>(roots: &'a [Placement<'a>], path: &[usize]) -> Vec<&'a Placement<'a>> {

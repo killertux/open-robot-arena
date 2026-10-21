@@ -123,6 +123,7 @@ fn window_shell(game: &Path) -> Shell {
     shell.set_hq_view(hq_mode::shell_view(game).unwrap());
     shell.set_enter_hook(hq_mode::shell_enter_hook(game).unwrap());
     shell.set_team_hook(hq_mode::shell_team_hook(game));
+    shell.set_later_hook(hq_mode::shell_later_hook(game));
     shell
 }
 
@@ -663,6 +664,133 @@ fn the_match_options_window_is_a_shell_modal() {
     shell.click_named("cancel button").unwrap();
     assert_eq!(shell.window_depth(), 0);
     assert_eq!(shell.base_screen_id(), base);
+}
+
+/// The options window's resolution and camera dropdowns open lists (the
+/// display's modes; `watch`/`static`/`orbit`) and a picked row is the setting:
+/// the file's `FSDisplay*`/`FS3DDisplay*` pair and `DefaultCamera`.
+#[test]
+fn the_options_dropdowns_list_their_rows_and_a_row_sets_the_value() {
+    let Some(game) = game_dir() else { return };
+    let cfg = std::env::temp_dir().join(format!("ra2-options-dd-{}.cfg", std::process::id()));
+    std::fs::copy(game.join("ra2.cfg"), &cfg).unwrap();
+    let mut settings = ra2_app::options::Options::open(&cfg);
+    settings.set_display_modes(&[[640, 480], [1024, 768], [1280, 1024], [1920, 1080]]);
+    let mut shell = Shell::boot(&game, WINDOW).unwrap();
+    shell.click_named("exhibition button").unwrap();
+    shell.open_modal("common/options.gib").unwrap();
+    settings.register_dropdowns(&mut shell);
+    let field = |shell: &Shell, name: &str| {
+        let placed = shell.placements();
+        placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == name)
+            .map(|p| p.frame)
+            .unwrap_or_else(|| panic!("no {name}"))
+    };
+    let rows = |shell: &Shell, name: &str| -> Vec<String> {
+        let placed = shell.placements();
+        let dropdown = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == name)
+            .expect("the dropdown");
+        let list = dropdown
+            .walk()
+            .find(|p| p.widget.kind == ra2fmt::gib::WidgetKind::ListBox)
+            .expect("its list");
+        list.widget
+            .children
+            .iter()
+            .filter(|c| c.kind == ra2fmt::gib::WidgetKind::Text && c.visible())
+            .filter_map(|c| c.field("_Text").map(|f| f.text().to_string()))
+            .collect()
+    };
+    let resolution = field(&shell, "resolution dropdown");
+    shell
+        .click(resolution.x + resolution.w - 8.0, resolution.y + 9.0)
+        .unwrap();
+    assert_eq!(
+        rows(&shell, "resolution dropdown"),
+        ["640x480", "1024x768", "1280x1024", "1920x1080"]
+    );
+    // The fourth row.
+    shell
+        .click(
+            resolution.x + 20.0,
+            resolution.y + resolution.h + 3.0 * 18.0 + 9.0,
+        )
+        .unwrap();
+    assert!(rows(&shell, "resolution dropdown").is_empty());
+    let changes = settings.absorb_picks(&shell.take_dropdown_picks());
+    assert_eq!(changes, ["FSDisplay=1920x1080"]);
+    assert_eq!(settings.cfg().fs_display_width(), 1920);
+    assert_eq!(settings.cfg().fs_display_height(), 1080);
+    // The camera list.
+    let camera = field(&shell, "Camera dropdown");
+    shell
+        .click(camera.x + camera.w - 8.0, camera.y + 9.0)
+        .unwrap();
+    assert_eq!(
+        rows(&shell, "Camera dropdown"),
+        ["watch", "static", "orbit"]
+    );
+    shell
+        .click(camera.x + 20.0, camera.y + camera.h + 2.0 * 18.0 + 9.0)
+        .unwrap();
+    settings.absorb_picks(&shell.take_dropdown_picks());
+    assert_eq!(settings.cfg().default_camera(), "orbit");
+    std::fs::remove_file(&cfg).ok();
+}
+
+/// `Finish Later` before any round (`FUN_0046b9b0` -> `FUN_0046c720`): the
+/// event entered through the join window is committed to the team record, so a
+/// fresh shell on the same install shows it in progress and its bracket opens.
+#[test]
+fn finish_later_keeps_the_entered_event_in_the_team_record() {
+    let Some(scratch) = ScratchGame::new("later") else {
+        return;
+    };
+    let game = scratch.path();
+    let _guard = ra2script::lock();
+    let mut shell = window_shell(game);
+    for name in ["Team HQ button", "continue button", "events button"] {
+        shell.click_named(name).unwrap();
+    }
+    let grid = frame_of(&shell, ra2ui::hq::EVENT_GRID);
+    shell
+        .click(grid.x + grid.w / 6.0, grid.y + grid.h / 6.0)
+        .unwrap();
+    shell.click_named("enter event button").unwrap();
+    assert_eq!(shell.base_screen_id(), flow::BRACKET_SCREEN);
+    let before = ra2sim::career::Career::load(game).unwrap();
+    assert!(
+        matches!(before.phase, ra2sim::career::SeasonPhase::Schedule),
+        "entering writes nothing"
+    );
+    let (event, _) = shell.entered_event().unwrap();
+    shell.click_named("later button").unwrap();
+    assert_eq!(shell.base_screen_id(), "teamhq/teamhq.gib");
+
+    let saved = ra2sim::career::Career::load(game).unwrap();
+    assert_eq!(
+        saved.phase,
+        ra2sim::career::SeasonPhase::InEvent { event },
+        "the entered event is in the team record"
+    );
+    assert!(saved.history.is_empty(), "no round was played");
+    // A fresh shell (a restart): the event is the one in progress.
+    let view = hq_mode::shell_view(game).unwrap();
+    let row = view.events.iter().find(|row| row.id == event).unwrap();
+    assert_eq!(row.state, ra2ui::hq::EventState::InProgress);
+    // Leaving again changes nothing further.
+    let again = window_shell(game);
+    drop(again);
+    assert_eq!(
+        ra2sim::career::Career::load(game).unwrap().phase,
+        ra2sim::career::SeasonPhase::InEvent { event }
+    );
 }
 
 /// A robot built from an empty inventory selection joins the team when the
