@@ -285,10 +285,6 @@ fn magic_drive(physics: &dyn PhysicsBackend) -> bool {
     }
 }
 
-/// A piston rod's inertia: its housing body's, the diagonal scaled by this
-/// (measured live, see [`Robot::spawn`]).
-const ROD_INERTIA: f32 = 0.2;
-
 /// The game's raw torque unit: `SetPowerSettings` stores the definition's
 /// torque at `+0xb4` and ×40 of it at `+0xb8` (`FUN_004810e0`, `0x6a69f8`).
 const TORQUE_UNIT: f32 = 40.0;
@@ -494,21 +490,22 @@ impl Robot {
             let mass = (mass * mass_scale).max(0.2);
             let mut inertia = inertia.map(|i| i * (mass / natural.max(1e-3)));
             // A piston's rod takes its housing body's inertia with the
-            // diagonal scaled by `ROD_INERTIA` (measured live: ALARM's 33 kg
-            // hammer rod reads (9.830, 14.541, 7.282) against its chassis'
-            // (49.149, 72.705, 36.411), the products of inertia equal; Wide
-            // Load's 63 kg rod the same against its chassis;
-            // `fightcontacts-scout-alarm-box__live__001..003`,
-            // `contacts-nohaz-wideload__live__001`, P rows `+0x19c`). The code
-            // that sets it is not located.
+            // diagonal scaled by the definition's factor
+            // ([`crate::rig::PistonStats::rod_inertia`]: the `prismatic` line's
+            // last number, `0x4b4d4f..0x4b4de7`), the products of inertia
+            // unchanged. Measured live: ALARM's 33 kg hammer rod reads
+            // (9.830, 14.541, 7.282) against its chassis' (49.149, 72.705,
+            // 36.411); Wide Load's 63 kg rod the same against its chassis
+            // (`fightcontacts-scout-alarm-box__live__001..003`,
+            // `contacts-nohaz-wideload__live__001`, P rows `+0x19c`).
             if havok {
                 if let (Some(parent), Some(info)) = (part.parent, part.joint) {
-                    if info.slider {
+                    if info.slider && info.rod_inertia != 0.0 {
                         if let Some(Some(pi)) = built_inertia.get(parent) {
                             let mut i = *pi;
-                            i.x_axis.x *= ROD_INERTIA;
-                            i.y_axis.y *= ROD_INERTIA;
-                            i.z_axis.z *= ROD_INERTIA;
+                            i.x_axis.x *= info.rod_inertia;
+                            i.y_axis.y *= info.rod_inertia;
+                            i.z_axis.z *= info.rod_inertia;
                             inertia = Some(i);
                         }
                     }

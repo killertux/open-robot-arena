@@ -2150,3 +2150,144 @@ onto its back three times as often (the rod's inertia lowers the first and
 raises the second); the 0.2 of the rod's inertia in the code; what Havok calls the event filter for (a hook on `0x52d4f0` with the contacts settles it); the
 live piston's out stroke ends after 6-7 or 15 substeps, ours after a fixed
 0.25 s; the items of §12l.
+
+### 12n. The first meeting: what ALARM's lift comes from, the zones' events, the brains' clocks, the rod's inertia factor (fx/first-meet)
+
+New live captures (fresh sessions on `:7`, prefix sha256 checked before and
+after; manifest rows in `manifest-additions-2026-10-21-first-meet.tsv`):
+`zoneevents-scout-alarm-box__live__000..005` (`frida/ra2_zoneevents.js`
+through `capture_fight.py`, about 12 s of box fight each: every
+`SmartZoneEvent` the C++ side hands a brain with both chassis, every call of
+the event filter `0x52d4f0` with its callers) and `__006..007` (20 s each, the
+same plus every phantom-pair event the zone listener receives). Diagnostic:
+`examples/meetprobe.rs` puts both robots at the bodies' states of a live
+`fightcontacts` snapshot (each body moved rigidly onto the live chassis, the
+live wheels' and fork's velocities) and steps them with the live drive
+commands (the MagicAction thrusts of the G rows turned back into throttle and
+steer) and each weapon fired at a given time; `RA2_H17_DUMP` writes the
+capture's rows, so the live scripts read both.
+
+**From the same state the first meeting lifts ALARM as live.** Replayed from
+`fightcontacts-scout-alarm-box__live__003` at 3.90 s (0.03 s before the first
+contact, the hammer fired 0.0-0.03 s and the fork 0.05 s later, as live):
+ALARM's chassis rises at 1.39-1.63 m/s within 0.7 s (live 1.46), nose up 0.53
+(0.50), up.y down to 0.83-0.85 (0.87); the Scout's fork shoves the rod 0.24 m
+in past its home (live 0.29) and the limit sends it back out at 13 m/s (live
+17.4 = 0.29 · 60, the joint's stop at the neutral point, §12b). From
+`__000` at 5.05 s the bodies follow live for 0.2 s step by step (hammer speed
+13.2 against 13.8 m/s, ALARM 0.84 against 0.69); then the fork's stroke
+catches the extended hammer head from below where live it meets the Scout's
+chassis, and ALARM rises at 1.47 m/s (live 1.07). Fired a few substeps
+earlier or later the same states give 0.3-2.9 m/s: the lift is set by *when*
+each weapon fires relative to the contact (a fork that rises 0.03-0.07 s
+before it meets ALARM lifts it at 2.5-2.9 m/s), not by the contact solver.
+The resolver, its restitution (`eA eB`) and friction (`sqrt(µA µB)`, chassis
+0.5/0.2, components 0.3/0.3 on both sides, the live contact records carry them)
+and the push-out (`0x5598f0`: `10 tol f²` per body after each impulse,
+recovered again) are as §2 has them.
+
+**What the ensembles did differently: both weapons fired before the robots
+met.** In 15 of our 24 first meetings both brains got a `SmartZoneEvent` with
+the robots' centres 3.0-3.2 m apart, where the two SmartZones overlap and
+nothing else does, and in six of them both weapons fired there (2.3-2.8 m
+apart, before any contact; those six include the four biggest lifts, 2.6-3.4
+m/s). Live (`aistate-*`, `fightpos-*`, `zoneevents-*`) ALARM's zone first
+sees one of the Scout's parts (its fork, not the chassis) 2.6-3.0 m apart and
+the Scout's sees ALARM at 1.9-2.4 m, never both at once, and in the four
+captured first meetings both weapons fire 0-0.11 s after the contact.
+
+**A SmartZone's events skip phantoms (recovered, verified live).** The zone's
+events are not its readings. `GetZoneContents` lists every pair of the
+detector's phantom list (§12i), the other robot's SmartZone and traction rings
+included. The events come from that list's *changes*: `0x5499..0x549b9f`
+compares the list with the last detection's (`det + 0x100` against `+ 0x110`),
+and sends each new pair as an entering and each vanished one as a leaving event
+(type `DAT_006abf6c`) down the world's listener chain. The zone listener
+(`0x4a4780`, the registry `RegisterSmartZone`, `0x401340`, fills per zone
+collidable through `0x4a45c0`) calls the callbacks registered on the pair's
+first collidable with the second as the other, then those on the second with
+the first, and each only when the *other* collidable is not a phantom
+(`0x4a49b0` returns collidable `+0x58`). So the other robot's zone and its
+wheels' traction rings never raise a `SmartZoneEvent`. Live
+(`zoneevents-...__live__006`, 20 s): 842 pair events, 94 of them between two
+phantoms, and not one of those is followed by a callback; 406 callbacks, all
+for a pair with a solid other side. `duel::watch_brain_zones` keeps the
+phantoms in the published contents and no longer turns them into events
+(test `duel::tests::another_robots_zone_is_listed_but_raises_no_smart_zone_event`).
+At the first meeting ours now fires both weapons 0-0.15 s after the contact in
+all 24 runs, as live.
+
+**Each brain keeps its own clock, a quarter interval apart (recovered).** The
+AI's update (`FUN_004011f0`) adds the frame's time to `+0x44` and, while it
+exceeds `tickInterval` (`+0x3c`, 0.125), calls `Tick` and takes the interval
+off, keeping the remainder; `Activate` (`FUN_00401270`) starts the clock at
+`tickInterval · 0.25 · +0x1c`. Live the brains' commands change every 0.11-0.14
+s (four frames, sometimes three) and ALARM's one frame before the Scout's
+(`fightcontacts-scout-alarm-box__live__000..003`, G rows). Ours ticked every
+brain together every 8 substeps (0.133 s, the remainder dropped); now each
+robot's clock starts at a quarter interval times its index and keeps the
+remainder (`duel::advance_brain_clocks`, test
+`duel::tests::brains_tick_every_eighth_of_a_second_a_quarter_apart`). That the
+`+0x1c` id is the robot's index is inferred from the live order; whether the
+clock runs per frame or per substep was not traced (ours: per substep).
+
+**The piston rod's inertia factor is the `prismatic` line's last number
+(recovered).** The piston component's set-up (`0x4b25f0`) reads the line's
+eight tokens in turn (`body, shaft, ax, ay, az, neutral, lower, upper`) and
+hands the last to its prismatic controller (`0x4b29e7` → `0x4b2b10`,
+controller `+0x84`); the controller's initialisation (`0x4b4d4f..0x4b4de7`)
+then, when it is not zero, gives the rod (`+0x5c`) the housing's (`+0x60`)
+inertia scaled by it (`FUN_00404990`, `setInertiaTensor` `0x520200`). Every
+burst piston style but the 60 cm one says `0.2` (§12m's measured factor); the
+60 cm `burstpiston1` says `.8`, the linear actuators `0.3`. The travel stays
+`[lower, neutral]`: the joint's stop is at the neutral point (the live
+correction above). `rig::PistonStats::rod_inertia`, `JointInfo::rod_inertia`
+replace the constant.
+
+**Who calls the event filter (recovered).** `0x549c30`, the events stage at the
+head of `World::stepTo` (`0x52aba8`), walks the detector's contact list
+(`det + 0x144..0x148`, the very list `0x52e7b0` hands the resolver) and sends
+every point as a type-2 event to the listener chain `0x554c70`, whose first
+link is the filter `0x52d4f0` (it passes the event on when the filter returns
+0). Live, every one of the filter's first 400 calls in each capture came from
+there. So the events are the resolver's points, once per step piece, as ours;
+§12m's surplus of 77 events (345 against 268) is not explained by the caller.
+
+**Validation.** Before = `fidelity` 6262ad8 built from a clean tree (it
+reproduces §12m's after column to the digit); "zones" = this branch's zone and
+rod rules without the brains' clocks; after = this branch. First meeting, 24
+runs (`fightprobe` dumps, ALARM's chassis within 0.7 s of the first contact):
+
+| | live (4) | before | zones | after |
+|---|---|---|---|---|
+| ALARM's rise, mean (median) | 1.07, 1.10, 0.28, 1.46 | 1.76 (1.42) m/s | 1.38 (1.29) | 1.61 (1.59) |
+| nose below up.y 0.5 | 0 | 6 | 1 | 3 |
+| weapons fired before the contact | 0 | 6 | 0 | 0 |
+
+`FIDTRACE_WARMUP` ensembles as §12m (counted = `>= 10` on the other robot, mean
+(total), mean length, full-length runs):
+
+| fight | live | before | zones | after |
+|---|---|---|---|---|
+| box Scout v ALARM, 24: ALARM / Scout | 38.5 / 4.8; 3/6 full | 17.4 (137) / 3.2, 77 s, 7/24 | 19.6 (135) / 5.5, 71 s, 4/24 | 16.0 (132) / 3.7, 71 s, 3/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 19/24 | 14/24 | 15/24 |
+| Compressor Sentinel v Wide Load, 12: Wide Load / Sentinel | 76 (283) / 5.3 | 82.3 (349) / 4.8, 106 s, 9/12 | 76.0 (366) / 3.2, 108 s, 8/12 | 53.3 (316) / 2.6, 91 s, 7/12 |
+| Octagon Scout v ALARM, 24: ALARM / Scout | 24 (944) / 4 | 11.0 (72) / 2.3, 73 s, 6/24 | 8.5 (70) / 2.0, 72 s, 4/24 | 8.3 (68) / 1.7, 70 s, 6/24 |
+| box Razor v FlapJack, 24: Razor / FlapJack | 3 (40) / 1 (12) | 12.7 (202) / 1.4, 110 s, 21/24 | 12.5 (198) / 1.7, 107 s, 20/24 | 14.7 (230) / 0.6, 120 s, 23/24 |
+
+AI suite (ten pairings, warmup 0): 10/10 deal damage before and after. The
+box ALARM's falls move later (by 9 s in 8 of 24 runs after, 10 before) but it
+still ends on its back three times as often as live. The 24-run means scatter
+by about 3 counted hits (box, Octagon) and the Compressor's 12 by about 10; the
+Compressor's drop with the brains' clocks is twice that and not traced.
+
+**Still open.** ALARM still goes over three times as often as live, the falls
+now mostly after the first meeting; the Razor's surplus; the live piston's
+firing phase lasts 15 substeps (13 or 17 at times, from the one-shot push to
+the first return push, `fightweapons-scout-alarm-box__live__000`), ours 16:
+both the piston (`0x448650`) and the burst motor (`0x446670`) set their timer in
+the fire call and take the first `dt` off in the same call, expiring below
+zero, which with 1/60 steps gives 16 and 36 (the motor's 36 is live); whether
+the components update per frame (1/30, which would explain the odd counts) was
+not traced. The event filter's surplus (§12m). The `+0x1c` id and the clock's
+time base (above).

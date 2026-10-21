@@ -124,11 +124,15 @@ impl ScriptAi {
         self.host.brain_count()
     }
 
-    /// Run every brain for one tick; `Some(events)` for each robot a brain
-    /// drives, `events` being the `Input` calls it made, and `None` where the
-    /// robot has no brain.
-    pub fn tick(&self, count: usize) -> Vec<Option<Vec<ra2script::InputEvent>>> {
-        Self::collect(count, self.host.tick_brains())
+    /// Run the brains of the robots `due` says, for one tick each; `Some(events)`
+    /// for each robot a brain drives, `events` being the `Input` calls it made
+    /// (none for a brain not due), and `None` where the robot has no brain.
+    pub fn tick(&self, count: usize, due: &[bool]) -> Vec<Option<Vec<ra2script::InputEvent>>> {
+        Self::collect(
+            count,
+            self.host
+                .tick_brains(&|i| due.get(i).copied().unwrap_or(false)),
+        )
     }
 
     /// Tell the arena script that a robot entered or left one of its zones.
