@@ -168,6 +168,13 @@ pub struct ScoreHit {
     pub damage: f32,
 }
 
+/// One battle mark on a chassis: the clipped decal and its image.
+#[derive(Clone)]
+pub struct Mark {
+    pub decal: ra2_render::decals::Decal,
+    pub image: Option<std::sync::Arc<ra2_render::Image>>,
+}
+
 /// A duel: physics world, arena, two robots, debris and the damage model.
 pub struct Duel {
     pub physics: Box<dyn PhysicsBackend>,
@@ -256,6 +263,11 @@ pub struct Duel {
     pub scene_camera: crate::camera::SceneCamera,
     /// The match's particle effects (sparks, debris, motor smoke, flames).
     pub fx: ra2_render::effects::Effects,
+    /// The battle marks on each robot's chassis, oldest first (`DecalTrigger`,
+    /// at most [`ra2_render::decals::MAX_DECALS`]; docs/37-effects.md).
+    pub marks: Vec<Vec<Mark>>,
+    /// Decal images by file name (`Arenas/decals/`), loaded once.
+    decal_images: std::collections::HashMap<String, Option<std::sync::Arc<ra2_render::Image>>>,
     /// The arena's shadow light and receiver triangles, read from the script
     /// layer once the arena script has declared them.
     shadow: Option<(Vec3, Vec<[Vec3; 3]>)>,
@@ -551,6 +563,7 @@ impl Duel {
         }
         let model_hinges = hazards::hinges(arena_path);
         let damage_taken = vec![0.0; robots.len()];
+        let marks = vec![Vec::new(); robots.len()];
         Ok(Duel {
             physics,
             arena,
@@ -595,6 +608,8 @@ impl Duel {
             fx: ra2_render::effects::Effects::new(
                 ra2_render::find_game_root(std::path::Path::new(arena_path)).as_deref(),
             ),
+            marks,
+            decal_images: std::collections::HashMap::new(),
             shadow: None,
             human_robot: None,
         })
@@ -1508,7 +1523,9 @@ impl Duel {
                 let worlds =
                     (!smoking.is_empty()).then(|| self.robots[r].component_worlds(&*self.physics));
                 for i in 0..self.robots[r].rig.components.len() {
-                    if self.robots[r].rig.components[i].role != crate::rig::Role::Motor {
+                    let component = &self.robots[r].rig.components[i];
+                    let steering = component.steer_power.is_some();
+                    if component.role != crate::rig::Role::Motor && !steering {
                         continue;
                     }
                     let key = ((r as u64) << 16) | i as u64;
@@ -1516,7 +1533,11 @@ impl Duel {
                     let at = worlds
                         .as_ref()
                         .map_or(Vec3::ZERO, |w| w[i].transform_point3(Vec3::ZERO));
-                    self.fx.motor_smoke(key, at, on);
+                    if steering {
+                        self.fx.steering_smoke(key, at, on);
+                    } else {
+                        self.fx.motor_smoke(key, at, on);
+                    }
                 }
             }
             let flames: Vec<_> = ra2script::state().emitters.clone();
@@ -1558,6 +1579,7 @@ impl Duel {
         }
         for imp in &impacts {
             self.sparks_for(imp);
+            self.mark_for(imp);
             self.apply_hit_by(
                 Some((imp.attacker, imp.by)),
                 imp.target,
@@ -1570,11 +1592,18 @@ impl Duel {
 
     /// The sparks of one priced contact (`FUN_0045f3a0` → `FUN_004a2a50`):
     /// only above `10` damage, only when a metal part is in the contact and no
-    /// rubber one is, `int(damage)` of them leaving along the contact normal.
+    /// rubber one is, [`ra2_render::effects::hit_count`] of them leaving along the
+    /// hit record's normal. A hit on a chassis also throws the debris of
+    /// `FUN_0044ee70` (a quarter as many, six times the speed), metal or not.
+    ///
+    /// The original's record normal points *into* the struck component (live: 30
+    /// of 30 chassis hits had `normal . (point - chassis origin) < 0`), while
+    /// [`combat::Impact::normal`] points out of it, so the effects get `-normal`.
     fn sparks_for(&mut self, imp: &combat::Impact) {
         if imp.damage <= 10.0 || !self.fx.enabled {
             return;
         }
+        let into = -imp.normal;
         let class = |robot: usize, component: usize| {
             self.robots
                 .get(robot)
@@ -1588,8 +1617,161 @@ impl Duel {
         let metal = classes.iter().flatten().any(|c| c == "metal");
         let rubber = classes.iter().flatten().any(|c| c == "rubber");
         if metal && !rubber {
-            self.fx.sparks(imp.damage, imp.point, imp.normal);
+            self.fx.sparks(imp.damage, imp.point, into);
         }
+        if imp.component == 0 {
+            self.fx.debris(imp.damage, imp.point, into);
+        }
+    }
+
+    /// The battle mark of one priced contact on a chassis (`FUN_0044ee70`, the
+    /// `DecalTrigger` of `FUN_005a0e00`; docs/37-effects.md): when the attacking
+    /// component's definition has a `decal` line, a decal box is placed at the
+    /// contact point in the chassis' frame and cut out of the chassis mesh. The
+    /// effect has no damage gate; its alpha is `damage / 100`.
+    fn mark_for(&mut self, imp: &combat::Impact) {
+        use ra2_render::decals;
+        if !self.fx.enabled || imp.component != 0 {
+            return;
+        }
+        let Some(spec) = self
+            .robots
+            .get(imp.attacker)
+            .and_then(|r| r.rig.components.get(imp.by))
+            .and_then(|c| c.decal.clone())
+        else {
+            return;
+        };
+        let Some(victim) = self.robots.get(imp.target) else {
+            return;
+        };
+        let inv = victim.component_worlds(&*self.physics)[0].inverse();
+        let weapon = self.robots[imp.attacker].component_worlds(&*self.physics)[imp.by];
+        let projection = decals::Projection {
+            center: inv.transform_point3(imp.point),
+            // out of the chassis: the original's `-record normal`
+            normal: inv.transform_vector3(imp.normal),
+            // the weapon's decal direction, carried by its orientation
+            axis: inv.transform_vector3(weapon.transform_vector3(spec.direction)),
+            width: spec.width,
+            height: spec.height,
+        };
+        let alpha = (imp.damage / 100.0).clamp(0.0, 1.0);
+        self.push_mark(imp.target, spec, alpha, projection);
+    }
+
+    /// Cut a decal out of `robot`'s chassis mesh with `projection` (in the
+    /// chassis' frame) and keep it, dropping the oldest past
+    /// [`ra2_render::decals::MAX_DECALS`]. An empty decal still counts, as in the
+    /// original.
+    pub fn push_mark(
+        &mut self,
+        robot: usize,
+        spec: ra2_render::decals::DecalSpec,
+        alpha: f32,
+        projection: ra2_render::decals::Projection,
+    ) {
+        use ra2_render::decals;
+        let Some(item) = self
+            .robots
+            .get(robot)
+            .and_then(|r| r.rig.components.first())
+            .and_then(|c| c.items.first())
+        else {
+            return;
+        };
+        // The chassis builder winds its triangles `(a, c, b)` against the file's
+        // index order, which is the order the original works in.
+        let triangles = item.vertices.as_chunks::<3>().0.iter().map(|t| {
+            [
+                Vec3::from(t[0].pos),
+                Vec3::from(t[2].pos),
+                Vec3::from(t[1].pos),
+            ]
+        });
+        let decal = decals::project(&spec, alpha, &projection, triangles);
+        let image = match self.decal_images.get(&spec.file) {
+            Some(image) => image.clone(),
+            None => {
+                let image = self
+                    .fx
+                    .game_dir()
+                    .and_then(|game| decals::load(game, &spec.file));
+                self.decal_images.insert(spec.file.clone(), image.clone());
+                image
+            }
+        };
+        let marks = &mut self.marks[robot];
+        marks.push(Mark { decal, image });
+        if marks.len() > decals::MAX_DECALS {
+            marks.remove(0);
+        }
+    }
+
+    /// The draw items of the battle marks, in the world: one per image and
+    /// blend. A mark's corners are re-evaluated on the chassis mesh as it is now.
+    fn mark_items(&self) -> Vec<DrawItem> {
+        use ra2_render::{decals, Vertex};
+        type Group = (
+            String,
+            bool,
+            decals::DecalSpec,
+            std::sync::Arc<ra2_render::Image>,
+            Vec<Vertex>,
+        );
+        let mut groups: Vec<Group> = Vec::new();
+        for (r, marks) in self.marks.iter().enumerate() {
+            let robot = &self.robots[r];
+            if marks.is_empty() || !robot.attached[0] {
+                continue;
+            }
+            let Some(item) = robot.rig.components.first().and_then(|c| c.items.first()) else {
+                continue;
+            };
+            let world = robot.component_worlds(&*self.physics)[0];
+            let tri = |i: u32| {
+                let v = item.vertices.get(3 * i as usize..3 * i as usize + 3)?;
+                Some([
+                    Vec3::from(v[0].pos),
+                    Vec3::from(v[2].pos),
+                    Vec3::from(v[1].pos),
+                ])
+            };
+            for mark in marks {
+                let Some(image) = &mark.image else { continue };
+                let corners = mark.decal.corners(tri);
+                if corners.is_empty() {
+                    continue;
+                }
+                let key = (mark.decal.spec.file.clone(), mark.decal.spec.additive());
+                let slot = match groups.iter().position(|g| (&g.0, g.1) == (&key.0, key.1)) {
+                    Some(i) => i,
+                    None => {
+                        groups.push((
+                            key.0,
+                            key.1,
+                            mark.decal.spec.clone(),
+                            image.clone(),
+                            Vec::new(),
+                        ));
+                        groups.len() - 1
+                    }
+                };
+                for (p, n, uv) in corners {
+                    groups[slot].4.push(Vertex {
+                        pos: world.transform_point3(p).into(),
+                        nrm: world.transform_vector3(n).normalize_or_zero().into(),
+                        uv,
+                        uv2: uv,
+                        color: [1.0, 1.0, 1.0, mark.decal.alpha],
+                    });
+                }
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(_, _, spec, image, vertices)| decals::item(image, &spec, vertices))
+            .collect()
     }
 
     /// Apply one damage event, and remember whether it is a scoring hit.
@@ -1695,7 +1877,6 @@ impl Duel {
             return true;
         }
         if applied.detach {
-            self.fx.debris(damage, point, Vec3::Y);
             self.break_off(victim, component, point);
             true
         } else {
@@ -1919,6 +2100,7 @@ impl Duel {
                 *light, receivers, &casters,
             ));
         }
+        out.extend(self.mark_items());
         if !self.fx.is_empty() {
             let (right, up) = ra2_render::effects::camera_axes(view_proj);
             out.extend(self.fx.items(right, up));
@@ -3321,8 +3503,8 @@ mod tests {
     }
 
     /// `FUN_0045f3a0` / `FUN_004a2a50`: a hit over 10 on metal throws sparks
-    /// (`int(damage)` of them, along the contact normal), a hit of 10 or less
-    /// does not, and neither does one that touches rubber.
+    /// ([`ra2_render::effects::hit_count`] of them, along the record's normal), a
+    /// hit of 10 or less does not, and neither does one that touches rubber.
     #[test]
     fn sparks_follow_the_impact_rule() {
         let Some(game) = game_dir() else { return };
@@ -3338,10 +3520,11 @@ mod tests {
             &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
         )
         .expect("a duel");
+        // A part that is not the chassis (the chassis also throws debris).
         let hit = |damage: f32| combat::Impact {
             attacker: 1,
             target: 0,
-            component: 0,
+            component: 1,
             by: 0,
             damage,
             point: Vec3::new(0.0, 1.0, 0.0),
@@ -3364,6 +3547,217 @@ mod tests {
         }
         duel.sparks_for(&hit(40.0));
         assert!(duel.fx.is_empty(), "rubber on the contact: no sparks");
+    }
+
+    /// `FUN_0044ee70`: a hit on a chassis over 10 also throws debris (a quarter of
+    /// the sparks, truncated, rubber or not); the same hit on another part does not.
+    #[test]
+    fn a_chassis_hit_throws_debris() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        for r in &mut duel.robots {
+            for c in &mut r.rig.components {
+                c.material = Some("rubber(0)".into());
+            }
+        }
+        let hit = |component: usize, damage: f32| combat::Impact {
+            attacker: 1,
+            target: 0,
+            component,
+            by: 0,
+            damage,
+            point: Vec3::new(0.0, 1.0, 0.0),
+            normal: Vec3::Y,
+            speed: 3.0,
+        };
+        // 12.3 of damage is 3.4 sparks and 0.86 of a piece of debris: none.
+        duel.sparks_for(&hit(0, 12.3));
+        assert!(duel.fx.is_empty());
+        // 40 of damage is 8.7 sparks and 2.17 of debris: two pieces.
+        duel.sparks_for(&hit(1, 40.0));
+        assert!(duel.fx.is_empty(), "rubber part: no sparks, no debris");
+        duel.sparks_for(&hit(0, 40.0));
+        assert!(!duel.fx.is_empty(), "the chassis throws debris");
+    }
+
+    /// `DecalTrigger` (`FUN_005a0e00`): decal boxes the original built, as logged live
+    /// (`tools/oracle/frida/ra2_fx.js`, centre / normal / width axis in the chassis'
+    /// frame), cut out of our chassis mesh cover the footprint it clipped: the
+    /// same texture-coordinate extents (to 0.003) and about the same area (within 8 %: the
+    /// original's mesh is subdivided for the crush, ours is not, so the polygon
+    /// counts differ).
+    #[test]
+    fn decals_cut_from_the_chassis_match_the_live_footprints() {
+        use ra2_render::decals::{project, DecalSpec, Projection};
+        let Some(game) = game_dir() else { return };
+        type Case = (&'static str, [f32; 3], [f32; 3], [f32; 3], f32, [f32; 4]);
+        let cases: [Case; 5] = [
+            (
+                "AI/Team13/Bot1.bot",
+                [-0.53608, -0.30513, -0.63774],
+                [-0.83470, 0.22570, -0.50232],
+                [0.38388, 0.60090, 0.70110],
+                0.01102,
+                [0.93134, 0.59080, 1.00000, 1.00000],
+            ),
+            (
+                "AI/Team13/Bot1.bot",
+                [-0.69735, -0.31570, 0.39907],
+                [-0.22316, -0.00154, 0.97478],
+                [0.66949, 0.71738, -0.19275],
+                0.00341,
+                [0.95918, 0.83130, 1.00000, 1.00000],
+            ),
+            (
+                "AI/Team13/Bot1.bot",
+                [0.31659, -0.33311, 0.73640],
+                [0.37881, -0.48115, 0.79057],
+                [-0.06927, 0.66208, -0.74623],
+                0.04497,
+                [0.90968, 0.62766, 1.00000, 0.84153],
+            ),
+            (
+                "AI/Team14/Bot2.bot",
+                [-0.30637, -0.22455, -1.08376],
+                [0.00000, 0.68595, -0.72765],
+                [-0.50506, -0.45668, 0.73237],
+                0.13643,
+                [0.01728, 0.66908, 1.00000, 1.00000],
+            ),
+            (
+                "AI/Team14/Bot2.bot",
+                [-0.90186, -0.11639, -0.93116],
+                [-0.55718, 0.63259, -0.53794],
+                [-0.76101, -0.12978, 0.63562],
+                0.03520,
+                [0.00000, 0.74858, 0.79092, 1.00000],
+            ),
+        ];
+        let spec = DecalSpec::parse("single_slash.tga 0 0 1 .5 .5 1").unwrap();
+        for (bot, c, n, a, area, uv) in cases {
+            let rig = rig::load(&game.join(bot).to_string_lossy()).expect("a robot");
+            let item = &rig.components[0].items[0];
+            let tris: Vec<[Vec3; 3]> = item
+                .vertices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|t| {
+                    [
+                        Vec3::from(t[0].pos),
+                        Vec3::from(t[2].pos),
+                        Vec3::from(t[1].pos),
+                    ]
+                })
+                .collect();
+            let p = Projection {
+                center: c.into(),
+                normal: n.into(),
+                axis: a.into(),
+                width: 0.5,
+                height: 0.5,
+            };
+            let decal = project(&spec, 1.0, &p, tris.iter().copied());
+            let corners = decal.corners(|i| tris.get(i as usize).copied());
+            let ours: f32 = corners
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|t| 0.5 * (t[1].0 - t[0].0).cross(t[2].0 - t[0].0).length())
+                .sum();
+            assert!(
+                (ours - area).abs() < 0.08 * area + 1e-4,
+                "{bot}: area {ours} vs {area}"
+            );
+            let mut lo = [f32::MAX; 2];
+            let mut hi = [f32::MIN; 2];
+            for q in &decal.points {
+                for k in 0..2 {
+                    lo[k] = lo[k].min(q.uv[k]);
+                    hi[k] = hi[k].max(q.uv[k]);
+                }
+            }
+            for (got, want) in [lo[0], lo[1], hi[0], hi[1]].iter().zip(uv) {
+                assert!((got - want).abs() < 0.003, "{bot}: uv {got} vs {want}");
+            }
+        }
+    }
+
+    /// A priced hit by a weapon with a `decal` line on a chassis leaves a mark, no
+    /// damage gate; a chassis keeps 25 and the oldest goes; a part that is not the
+    /// chassis, a weapon without a decal and `GraphicEffects` off leave none.
+    #[test]
+    fn a_decal_weapon_marks_the_chassis_it_hits() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team14/Bot2.bot"), bot("AI/Team13/Bot1.bot")],
+        )
+        .expect("a duel");
+        let axe = duel.robots[0]
+            .rig
+            .components
+            .iter()
+            .position(|c| c.decal.is_some())
+            .expect("the axe robot has a decal weapon");
+        assert_eq!(
+            duel.robots[0].rig.components[axe]
+                .decal
+                .as_ref()
+                .unwrap()
+                .file,
+            "single_slash.tga"
+        );
+        let top = duel.robots[1].rig.components[0].items[0]
+            .vertices
+            .iter()
+            .map(|v| v.pos[1])
+            .fold(f32::MIN, f32::max);
+        let world = duel.robots[1].component_worlds(&*duel.physics)[0];
+        let hit = |component: usize, by: usize, damage: f32| combat::Impact {
+            attacker: 0,
+            target: 1,
+            component,
+            by,
+            damage,
+            point: world.transform_point3(Vec3::new(0.0, top, 0.0)),
+            normal: world.transform_vector3(Vec3::Y),
+            speed: 3.0,
+        };
+        duel.mark_for(&hit(0, axe, 0.2));
+        assert_eq!(duel.marks[1].len(), 1, "no damage gate");
+        assert!((duel.marks[1][0].decal.alpha - 0.002).abs() < 1e-6);
+        duel.mark_for(&hit(1, axe, 30.0));
+        assert_eq!(duel.marks[1].len(), 1, "only the chassis is marked");
+        duel.mark_for(&hit(0, 0, 30.0));
+        assert_eq!(duel.marks[1].len(), 1, "the chassis is not a decal weapon");
+        for _ in 0..40 {
+            duel.mark_for(&hit(0, axe, 50.0));
+        }
+        assert_eq!(duel.marks[1].len(), ra2_render::decals::MAX_DECALS);
+        assert!(duel.marks[0].is_empty());
+        duel.fx.enabled = false;
+        let before = duel.marks[1].len();
+        duel.mark_for(&hit(0, axe, 50.0));
+        assert_eq!(duel.marks[1].len(), before, "GraphicEffects off");
     }
 
     /// `ShadowWizard`: the arena's declared light and receivers reach the

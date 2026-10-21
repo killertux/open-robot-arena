@@ -2179,17 +2179,19 @@ impl Robot {
         out
     }
 
-    /// Whether a component is smoking: a motor under half its hitpoints turns
-    /// its smoke emitter on (`FUN_0048e0d0` → `FUN_0048e0b0` / `FUN_0048dc50`).
+    /// Whether a component is smoking: a motor, or a car-steering unit
+    /// (`FUN_004f6dd0`, the emitter `FUN_004f6a10`), at or under half its
+    /// hitpoints turns its smoke emitter on (`FUN_0048e0d0` → `FUN_0048e0b0` /
+    /// `FUN_0048dc50`).
     /// The renderer may draw the particles; the simulation only keeps the state.
     pub fn smoking(&self, index: usize) -> bool {
         let Some(c) = self.rig.components.get(index) else {
             return false;
         };
-        c.role == Role::Motor
+        (c.role == Role::Motor || c.steer_power.is_some())
             && self.attached[index]
             && c.hitpoints > 0.0
-            && self.health[index] < 0.5 * c.hitpoints
+            && self.health[index] <= 0.5 * c.hitpoints
     }
 
     /// Break `component` (and anything welded past it) off the robot.

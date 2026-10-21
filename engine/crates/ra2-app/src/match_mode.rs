@@ -462,6 +462,7 @@ impl Session {
         // `FUN_0046e5e0() == 1`: sparks and motor smoke are the `GraphicEffects`
         // option's.
         matched.duel.fx.enabled = cfg.graphic_effects();
+        matched.duel.fx.detail = cfg.graphic_detail();
         let mut camera = default_camera;
         let mut camera_name = None;
         if cfg.arena_intros() && std::env::var("RA2_ARENA_INTROS").as_deref() != Ok("0") {

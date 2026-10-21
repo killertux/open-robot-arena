@@ -271,6 +271,9 @@ pub struct Component {
     /// The sound names the definition carries (`damagesounds`, `motorsound`,
     /// `firesound`, `runsequence`).
     pub sounds: ComponentSounds,
+    /// The mark this component leaves on a chassis it hits (`decal = <file> <dir>
+    /// <w> <h> <mode>`, the weapon at `+0x80..+0xac`; docs/37-effects.md).
+    pub decal: Option<ra2_render::decals::DecalSpec>,
     pub role: Role,
     pub weapon: Option<WeaponStats>,
     pub motor: Option<MotorStats>,
@@ -1490,6 +1493,10 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             material_scale,
             damageable,
             sounds,
+            decal: def
+                .as_ref()
+                .and_then(|d| d.get("decal"))
+                .and_then(ra2_render::decals::DecalSpec::parse),
             role,
             weapon,
             motor,
@@ -1842,6 +1849,7 @@ mod tests {
             material_scale: ra2fmt::component::DEFAULT_MATERIAL_SCALE,
             damageable: true,
             sounds: ComponentSounds::default(),
+            decal: None,
             role: if motor { Role::Motor } else { Role::Structure },
             weapon: None,
             motor: motor.then_some(MotorStats {

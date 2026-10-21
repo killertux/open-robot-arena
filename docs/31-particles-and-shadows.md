@@ -1,5 +1,7 @@
 # Particles and shadows
 
+> Corrections from the live hit log (docs/37): the spark count is `ftol(remap(damage))`, not `int(damage)`; debris is thrown by chassis hits at `normal * 6`, not on detach; the record normal points into the struck component.
+
 What the original draws as particles and projected shadows, as recovered from
 `Robot Arena 2.exe`, and where it lives here (`ra2-render/src/effects.rs`, hooks
 in `ra2sim/src/duel.rs`, `ra2script/src/plus.rs`).
