@@ -229,9 +229,26 @@ pub struct HavokArena {
     /// Lot's trap doors, for one, are disabled against every fixed body around
     /// them, so they swing through the pit's rim.
     pub disabled_pairs: Vec<(String, String)>,
+    /// The file's point-to-point constraints (`GMID_HAVOK_POINTTOPOINT`):
+    /// FlexTop hangs its table (`floor_collision`) from the fixed `anchor03`
+    /// by one.
+    pub point_to_points: Vec<gmi::PointToPoint>,
+    /// The file's angular dashpots (`GMID_HAVOK_ANGULAR_DASHPOT`): FlexTop's
+    /// two hold its table level.
+    pub dashpots: Vec<gmi::AngularDashpot>,
 }
 
 impl HavokArena {
+    /// Whether a constraint or a dashpot of the file holds the named body: a
+    /// movable body that does not fall, like FlexTop's table.
+    pub fn is_suspended(&self, name: &str) -> bool {
+        let is = |a: &str| a.eq_ignore_ascii_case(name);
+        self.point_to_points
+            .iter()
+            .any(|p| is(&p.body_a) || is(&p.body_b))
+            || self.dashpots.iter().any(|d| is(&d.body_a) || is(&d.body_b))
+    }
+
     /// Fixed collision triangles belonging to a single static body.
     pub fn static_triangles_of(&self, name: &str) -> Vec<[Vec3; 3]> {
         let mut out = Vec::new();
@@ -403,6 +420,8 @@ pub fn collect_havok(input: &str) -> Result<Option<HavokArena>, Box<dyn std::err
             .iter()
             .flat_map(|o| o.disabled_pairs.iter().cloned())
             .collect(),
+        point_to_points: scene.point_to_points.clone(),
+        dashpots: scene.dashpots.clone(),
         ..Default::default()
     };
 

@@ -1,4 +1,4 @@
-# Live chassis bodies and wheel records (docs/29 sections 12f, 12i). Generated from
+# Live chassis bodies and wheel records (docs/29 sections 12f, 12i, 12j: Berserker, 6.9 mm). Generated from
 # local/oracle/original/assembly-*__live__000.json (chassis: mass, centre of mass in the
 # robot frame at rest) and magic-*__live__*.jsonl (AddWheel record +0x2c, chassis frame).
 # kind	bot	index	mass	x	y	z
@@ -37,3 +37,4 @@ wheel	AI/Team0/Bot1.bot	3	232.12	-0.6137	-0.1893	-0.5924
 chassis	AI/Team11/Bot1.bot	0	179.35	0.0091	0.2511	-0.0866
 chassis	AI/Team11/Bot2.bot	0	421.01	-0.0035	0.2703	0.0800
 chassis	AI/Team7/Bot2.bot	0	356.75	-0.0035	0.2728	0.1118
+chassis	AI/Team10/Bot0.bot	0	117.74	0.0032	0.2465	0.0379

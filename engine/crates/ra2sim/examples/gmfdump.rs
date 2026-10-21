@@ -8,6 +8,15 @@ fn main() {
     if let Some(s) = &scene.simulation {
         println!("simulation: {s:?}");
     }
+    for h in &scene.hinges {
+        println!("hinge {h:?}");
+    }
+    for d in &scene.dashpots {
+        println!("angular dashpot {d:?}");
+    }
+    for p in &scene.point_to_points {
+        println!("point-to-point {p:?}");
+    }
     if std::env::var_os("GMFDUMP_MATERIALS").is_some() {
         for (i, m) in scene.materials.iter().enumerate() {
             println!(
