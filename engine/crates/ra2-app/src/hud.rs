@@ -81,11 +81,15 @@ pub const DOTS: [&str; 3] = ["green dot", "yellow dot", "red dot"];
 /// What a defeated robot's meters are drawn with (`FUN_004b3850`, constant `0x3e99999a`).
 pub const DEFEATED_TINT: &str = "0.3 0.3 0.3 1";
 /// The widgets `FUN_004b3850` tints (the status meter's `+0xcc..+0xe8`).
-const DIMMED: [&str; 7] = [
+///
+/// Not `armor bar` (`+0xd8`): live, its tint stays [`ARMOR_TINT`] after the panel is dimmed (a
+/// dump of the status meter's widgets after the out state: the air bar's `+0xbc..+0xc4` went to 0.3,
+/// the armour bar's stayed `(1, 0.5, 0.25)`), so a robot put out with armour left shows its bar at
+/// full brightness among the dimmed meters.
+const DIMMED: [&str; 6] = [
     "main background",
     "battery bar",
     "air bar",
-    "armor bar",
     "green dot",
     "yellow dot",
     "red dot",
@@ -105,6 +109,12 @@ fn tint_named(widget: &mut Widget, name: &str, tint: &str) {
         tint_named(child, name, tint);
     }
 }
+
+/// The armour bar's and its remainder's tint, `(1, 0.5, 0.25, 1)`: live full armour reads
+/// `redbar.bmp` rows `(193, 43, 22)..(255, 31, 0)` as `(193, 21, 5)..(255, 15, 0)`, G halved and B
+/// quartered (`FUN_0061b4b0(1, 0.5, 0.25, 1)`, the colour `FUN_004b2f20` gives the remainder; the
+/// armour widget `+0xd8` holds the same value at `+0xbc..+0xc8` in every dumped state).
+pub const ARMOR_TINT: &str = "1 0.5 0.25 1";
 
 /// The bars and their widths in `statusmeters.gib`.
 pub const BARS: [(&str, f32); 3] = [
@@ -228,6 +238,8 @@ pub fn hud(
             set_bar(group, BARS[1].0, BARS[1].1, robot.air),
             set_bar(group, BARS[2].0, BARS[2].1, robot.armor),
         ];
+        tint_named(group, "armor bar", ARMOR_TINT);
+        set_armor_remainder(group, widths[2], !robot.defeated);
         // `FUN_00476bf0` -> `FUN_004b3850(1)` (from `FUN_00418040`, every kind of "out"): the
         // meters dim to 0.3 grey (`0x3e99999a`) on the background art, the three bars and the
         // three dots; the name and the points text keep their colour.
@@ -327,14 +339,27 @@ fn chat_display_mut(screen: &mut Widget) -> Option<&mut Widget> {
 /// The HUD clock: `m:ss`.
 ///
 /// With a configured match length the box counts down from it (`time counts
-/// down here`, the file's own note); with "No limit" it counts up. The remaining
-/// seconds are rounded up so the first frame shows the full length.
+/// down here`, the file's own note); with "No limit" it counts up.
+///
+/// `FUN_004772f0(remaining)` (called every frame from `FUN_00412fc0` once the
+/// timed match runs) writes `minutes = __ftol(remaining * 0x6a7c5c)` (the float
+/// 1/60, `0x3c888889`) and `seconds = __ftol(remaining - 60 * minutes)`, both
+/// truncating, the seconds padded with a `0` under 10 (`0x6f36f4`), joined by
+/// `:` (`0x6f36f8`). So 166.9 s left reads `2:46` and the last second reads
+/// `0:00` only at zero; the full `3:00` shows only before the first update.
 pub fn clock_text(clock: f32, limit: Option<f32>) -> String {
-    let seconds = match limit {
-        Some(limit) => (limit - clock).max(0.0).ceil() as u32,
-        None => clock.max(0.0).floor() as u32,
+    let (minutes, seconds) = match limit {
+        Some(limit) => {
+            let remaining = (limit - clock).max(0.0);
+            let minutes = (remaining * f32::from_bits(0x3c88_8889)) as u32;
+            (minutes, (remaining - (minutes * 60) as f32) as u32)
+        }
+        None => {
+            let s = clock.max(0.0).floor() as u32;
+            (s / 60, s % 60)
+        }
     };
-    format!("{}:{:02}", seconds / 60, seconds % 60)
+    format!("{minutes}:{seconds:02}")
 }
 
 /// The countdown number: `trunc` of the 4.0 s timer, while positive.
@@ -374,6 +399,55 @@ fn set_bar(group: &mut Widget, name: &str, base_width: f32, fraction: f32) -> f3
     width
 }
 
+/// The armour bar's remainder, `+0xdc` of the status meter: `FUN_004b2f20` makes an image of
+/// `common\whitebar.bmp` (26 x 4 at (75, 39)) tinted `(1, 0.5, 0.25, 1)` (`FUN_0061b4b0`) and adds it
+/// to `status group` after the bars; the armour setter `0x4b35a0` gives it `x = 49 + w` and
+/// width `26 - w` for a coloured fill of `w`. Live it is not drawn once the robot is out: a dimmed
+/// panel with armour 0 shows the empty track of `status_meters.tga` (rows `(72, 60, 59)..(97, 77, 75)`
+/// at 0.3, `(21, 18, 18)..(29, 23, 22)`), not the orange remainder of an undimmed panel with armour 0.
+pub const ARMOR_REMAINDER: &str = "armor remainder";
+const WHITEBAR_FILE: &str = "common\\whitebar.bmp";
+
+fn set_armor_remainder(group: &mut Widget, fill: f32, shown: bool) {
+    if ra2ui::workshop::find_mut(group, ARMOR_REMAINDER).is_none() {
+        let Some(parent) = parent_of_mut(group, "armor bar") else {
+            return;
+        };
+        let Some(bar) = parent.children.iter().find(|c| c.name() == "armor bar") else {
+            return;
+        };
+        let mut white = bar.clone();
+        ra2ui::input::set_field(&mut white, "Name", ARMOR_REMAINDER);
+        ra2ui::input::set_field(&mut white, "_Filename", WHITEBAR_FILE);
+        ra2ui::input::set_field(&mut white, "_ForeColor", ARMOR_TINT);
+        ra2ui::input::set_field(&mut white, "_Size", "26 0 4 0");
+        parent.children.push(white);
+    }
+    if let Some(white) = ra2ui::workshop::find_mut(group, ARMOR_REMAINDER) {
+        ra2ui::input::set_field(white, "Position", &format!("{} 0 39 0", 49.0 + fill));
+        ra2ui::input::set_field(white, "Size", &format!("{} 0 4 0", 26.0 - fill));
+        ra2ui::input::set_field(
+            white,
+            "Visible",
+            if shown && fill < 26.0 {
+                "true"
+            } else {
+                "false"
+            },
+        );
+    }
+}
+
+fn parent_of_mut<'a>(widget: &'a mut Widget, name: &str) -> Option<&'a mut Widget> {
+    if widget.children.iter().any(|c| c.name() == name) {
+        return Some(widget);
+    }
+    widget
+        .children
+        .iter_mut()
+        .find_map(|c| parent_of_mut(c, name))
+}
+
 fn set_visible(root: &mut Widget, name: &str, visible: bool) {
     if let Some(widget) = ra2ui::workshop::find_mut(root, name) {
         let value = if visible { "true" } else { "false" };
@@ -395,8 +469,49 @@ fn set_visible(root: &mut Widget, name: &str, visible: bool) {
 pub const IMMOBILE_COUNTDOWN: &str = "common/immobility_countdown.gib";
 /// The text box of [`IMMOBILE_COUNTDOWN`] that carries the number.
 pub const IMMOBILE_NUMBER: &str = "immobile countdown";
-/// The card `FUN_00418040` shows over a robot's status group when it is immobilized
-/// (`UI\common\immobile.tga`, 104 x 32), for [`IMMOBILE_CARD_SECONDS`].
+/// The card `FUN_00418040` shows over a robot's status group when it goes out, by the state it
+/// is called with: 1 a destroyed chassis (the third critical, `FUN_00417cc0`), 2 immobilized
+/// (`FUN_00412fc0` at 20 s), 3 eliminated (`plus.eliminatePlayer`, `0x4b9c40`). The three images
+/// are loaded by `FUN_004749c0` into `+0x258` (`0x477930`), `+0x268` (`0x477940`) and `+0x248`
+/// (`0x477920`) per slot, and shown for [`IMMOBILE_CARD_SECONDS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutCard {
+    ControlBoardDestroyed,
+    Immobile,
+    Eliminated,
+}
+
+impl OutCard {
+    /// The card for a robot's state (`FUN_00413810`): 1, 2 or 3; 0 has none.
+    pub fn for_state(state: u8) -> Option<OutCard> {
+        match state {
+            1 => Some(OutCard::ControlBoardDestroyed),
+            2 => Some(OutCard::Immobile),
+            3 => Some(OutCard::Eliminated),
+            _ => None,
+        }
+    }
+
+    /// The `UI` image the original loads (`0x6f334c`, `0x6f3318`, `0x6f3330`).
+    pub fn file(self) -> &'static str {
+        match self {
+            OutCard::ControlBoardDestroyed => "common\\controlboard_destroyed.tga",
+            OutCard::Immobile => IMMOBILE_CARD,
+            OutCard::Eliminated => "common\\eliminated.tga",
+        }
+    }
+
+    /// The image's own size in pixels.
+    pub fn size(self) -> [f32; 2] {
+        match self {
+            OutCard::ControlBoardDestroyed => [112.0, 64.0],
+            OutCard::Immobile => IMMOBILE_CARD_SIZE,
+            OutCard::Eliminated => [116.0, 32.0],
+        }
+    }
+}
+
+/// `UI\common\immobile.tga`, 104 x 32.
 pub const IMMOBILE_CARD: &str = "common\\immobile.tga";
 pub const IMMOBILE_CARD_SIZE: [f32; 2] = [104.0, 32.0];
 /// How long the card stays (`0x6a5784`, the time `0x4e2660` gives the popup list at `+0x100`,
@@ -437,19 +552,17 @@ pub fn immobile_counter(base: &Gib, n: i32, at: [f32; 2]) -> Gib {
     gib
 }
 
-/// The `IMMOBILE!` card with its top-left at `at`.
-pub fn immobile_card(base: &Gib, at: [f32; 2]) -> Gib {
+/// An out card with its top-left at `at`.
+pub fn out_card(base: &Gib, card: OutCard, at: [f32; 2]) -> Gib {
     let mut gib = base.clone();
     if let Some(root) = immobile_root(&mut gib) {
-        let size = format!(
-            "{} 0 {} 0",
-            IMMOBILE_CARD_SIZE[0] as i32, IMMOBILE_CARD_SIZE[1] as i32
-        );
+        let [w, h] = card.size();
+        let size = format!("{} 0 {} 0", w as i32, h as i32);
         place(root, at);
         ra2ui::input::set_field(root, "Size", &size);
         root.children.retain(|c| c.kind == WidgetKind::Image);
         for image in root.children.iter_mut() {
-            ra2ui::input::set_field(image, "_Filename", IMMOBILE_CARD);
+            ra2ui::input::set_field(image, "_Filename", card.file());
             ra2ui::input::set_field(image, "_Size", &size);
             ra2ui::input::set_field(image, "Size", &size);
         }
@@ -457,12 +570,23 @@ pub fn immobile_card(base: &Gib, at: [f32; 2]) -> Gib {
     gib
 }
 
-/// Where the card goes for a status group at `frame` (x, y, w, h): centred on it in whole
-/// pixels, as `FUN_00418040` does it (`pos - (card - group) / 2`, truncating).
-pub fn immobile_card_at(group: [f32; 4]) -> [f32; 2] {
-    let dx = ((IMMOBILE_CARD_SIZE[0] - group[2]) as i32 / 2) as f32;
-    let dy = ((IMMOBILE_CARD_SIZE[1] - group[3]) as i32 / 2) as f32;
+/// The `IMMOBILE!` card with its top-left at `at`.
+pub fn immobile_card(base: &Gib, at: [f32; 2]) -> Gib {
+    out_card(base, OutCard::Immobile, at)
+}
+
+/// Where a card goes for a status group at `frame` (x, y, w, h): centred on it in whole
+/// pixels, as `FUN_00418040` does it (`pos - (card - group) / 2`, each half truncating).
+pub fn out_card_at(card: OutCard, group: [f32; 4]) -> [f32; 2] {
+    let [w, h] = card.size();
+    let dx = ((w - group[2]) as i32 / 2) as f32;
+    let dy = ((h - group[3]) as i32 / 2) as f32;
     [group[0] - dx, group[1] - dy]
+}
+
+/// [`out_card_at`] for the `IMMOBILE!` card.
+pub fn immobile_card_at(group: [f32; 4]) -> [f32; 2] {
+    out_card_at(OutCard::Immobile, group)
 }
 
 /// Set the text a `TextBox` draws. The visible value is its `Text` child's
@@ -557,7 +681,14 @@ mod tests {
     #[test]
     fn the_clock_counts_down_from_the_configured_length() {
         assert_eq!(clock_text(0.0, Some(10.0)), "0:10");
-        assert_eq!(clock_text(9.5, Some(10.0)), "0:01");
+        assert_eq!(
+            clock_text(9.5, Some(10.0)),
+            "0:00",
+            "truncated, not rounded up"
+        );
+        assert_eq!(clock_text(8.5, Some(10.0)), "0:01");
+        assert_eq!(clock_text(13.1, Some(180.0)), "2:46");
+        assert_eq!(clock_text(120.0, Some(180.0)), "1:00");
         assert_eq!(clock_text(10.0, Some(10.0)), "0:00");
         assert_eq!(clock_text(65.0, Some(300.0)), "3:55");
         // "No limit" counts up (but the time group is hidden; see below).
@@ -707,7 +838,46 @@ mod tests {
             (armor.frame.x - first.frame.x - 49.0).abs() < 0.01,
             "49 is the armour bar's own left edge"
         );
+        // The remainder (`+0xdc`): `49 + w` wide `26 - w`, here 68..75 of the group. The robot
+        // is in, so it shows; the robot that is out (slot 2) hides it and keeps the armour bar
+        // at its own tint while the panel dims (live dump).
+        let rest = first.find(ARMOR_REMAINDER).expect("the armour remainder");
+        assert!((rest.frame.w - 7.0).abs() < 0.01, "26 - 19");
+        assert!(
+            (rest.frame.x - first.frame.x - 68.0).abs() < 0.01,
+            "49 + 19"
+        );
+        assert!(rest.widget.visible());
+        let out = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "player2 status")
+            .unwrap();
+        assert!(!out.find(ARMOR_REMAINDER).unwrap().widget.visible());
+        let tint = |p: &ra2ui::Placement, name: &str| {
+            p.find(name)
+                .and_then(|w| w.widget.field("_ForeColor").map(|f| f.raw.clone()))
+        };
+        assert_eq!(tint(out, "armor bar").as_deref(), Some(ARMOR_TINT));
+        assert_eq!(tint(out, "air bar").as_deref(), Some(DEFEATED_TINT));
+        assert_eq!(tint(first, "air bar").as_deref(), Some("1 1 1 1"));
         let _ = assets.scene(&placed, [1280, 1005]);
+    }
+
+    #[test]
+    fn the_out_cards_sit_centred_on_the_status_group_by_their_own_size() {
+        let group = [11.0, 16.0, 84.0, 64.0];
+        // 112 x 64 (`controlboard_destroyed`): (112 - 84) / 2 = 14 left, level.
+        assert_eq!(
+            out_card_at(OutCard::ControlBoardDestroyed, group),
+            [-3.0, 16.0]
+        );
+        // 116 x 32 (`eliminated`): 16 left, (32 - 64) / 2 = -16 so 16 down.
+        assert_eq!(out_card_at(OutCard::Eliminated, group), [-5.0, 32.0]);
+        assert_eq!(OutCard::for_state(1), Some(OutCard::ControlBoardDestroyed));
+        assert_eq!(OutCard::for_state(2), Some(OutCard::Immobile));
+        assert_eq!(OutCard::for_state(3), Some(OutCard::Eliminated));
+        assert_eq!(OutCard::for_state(0), None);
     }
 
     fn four_report() -> MatchReport {

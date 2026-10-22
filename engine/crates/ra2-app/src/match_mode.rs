@@ -222,9 +222,9 @@ pub struct Session {
     chat_lines: Vec<(String, f32)>,
     /// Entries the player sent (Enter), waiting for the network layer.
     chat_outbox: Vec<String>,
-    /// The `IMMOBILE!` cards: seconds left on each robot's card (`FUN_00418040`, state 2),
-    /// and whether the robot was already immobilized last step.
-    immobile_cards: Vec<(f32, bool)>,
+    /// The out cards (`FUN_00418040`: `controlboard_destroyed`, `IMMOBILE!`, `eliminated`):
+    /// seconds left on each robot's card, the card, and the state the robot was in last step.
+    immobile_cards: Vec<(f32, Option<hud::OutCard>, u8)>,
     /// `immobility_countdown.gib`, loaded on first use.
     immobile_gib: Option<Gib>,
     /// The pause dialog's widgets, loaded once.
@@ -1102,7 +1102,7 @@ impl Session {
         let dt = self.matched.config.dt;
         let robots = self.matched.duel.robots.len();
         if self.immobile_cards.len() < robots {
-            self.immobile_cards.resize(robots, (0.0, false));
+            self.immobile_cards.resize(robots, (0.0, None, 0));
         }
         for (card, robot) in self
             .immobile_cards
@@ -1110,10 +1110,21 @@ impl Session {
             .zip(&self.matched.duel.robots)
         {
             card.0 = (card.0 - dt).max(0.0);
-            if robot.immobilized && !card.1 {
+            // `FUN_00413810`: the robot's state, which `FUN_00418040` changes once (0 to 1, 2 or 3).
+            let state = if robot.eliminated {
+                3
+            } else if robot.immobilized {
+                2
+            } else if robot.destroyed {
+                1
+            } else {
+                0
+            };
+            if state != 0 && state != card.2 {
                 card.0 = hud::IMMOBILE_CARD_SECONDS;
+                card.1 = hud::OutCard::for_state(state);
             }
-            card.1 = robot.immobilized;
+            card.2 = state;
         }
     }
 
@@ -1121,12 +1132,12 @@ impl Session {
     /// their status groups (docs/32 section 6), above the HUD like the original's popups.
     fn add_immobility(&mut self, scene: &mut UiScene) {
         let warnings = self.matched.duel.immobility_warnings();
-        let cards: Vec<usize> = self
+        let cards: Vec<(usize, hud::OutCard)> = self
             .immobile_cards
             .iter()
             .enumerate()
             .filter(|(_, c)| c.0 > 0.0)
-            .map(|(i, _)| i)
+            .filter_map(|(i, c)| c.1.map(|card| (i, card)))
             .collect();
         if warnings.is_empty() && cards.is_empty() {
             return;
@@ -1170,7 +1181,7 @@ impl Session {
                 self.presentation.layout,
                 Some(self.presentation.assets.faces()),
             );
-            for robot in cards {
+            for (robot, card) in cards {
                 let Some(name) = hud::PLAYERS.get(robot) else {
                     continue;
                 };
@@ -1181,9 +1192,10 @@ impl Session {
                     continue;
                 }
                 let f = group.frame;
-                overlays.push(hud::immobile_card(
+                overlays.push(hud::out_card(
                     base,
-                    hud::immobile_card_at([f.x, f.y, f.w, f.h]),
+                    card,
+                    hud::out_card_at(card, [f.x, f.y, f.w, f.h]),
                 ));
             }
         }

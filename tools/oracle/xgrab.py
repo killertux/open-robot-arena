@@ -44,3 +44,4 @@ while run:
     raw = root.get_image(0, 0, g.width, g.height, Xlib.X.ZPixmap, 0xffffffff)
     with open(os.path.join(out, "%.4f.bgrx" % t), "wb") as fh:
         fh.write(raw.data)
+    time.sleep(float(os.environ.get("XGRAB_INTERVAL", "0")))
