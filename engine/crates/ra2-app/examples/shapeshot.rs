@@ -120,6 +120,32 @@ fn main() -> Result<(), String> {
                 guard += 1;
             }
         }
+        // `RA2_SHAPE_OUT=slot:eliminate|destroy`: put that robot out before the first shot, as
+        // `plus.eliminatePlayer` (state 3) or a third critical (state 1) does, and step half a
+        // second so the out card is up (docs/32 section 7).
+        if k == 0 {
+            if let Ok(spec) = std::env::var("RA2_SHAPE_OUT") {
+                let mut it = spec.split(':');
+                let slot: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                match it.next() {
+                    Some("destroy") => session.matched.duel.robots[slot].destroyed = true,
+                    _ => session.matched.eliminate(slot),
+                }
+                for _ in 0..(0.5 / session.matched.config.dt) as usize {
+                    session.step();
+                }
+            }
+        }
+        // `RA2_SHAPE_EXTRA=s`: keep stepping `s` more seconds before the shot (the out cards last
+        // 3 s; a dimmed status group without its card is photographed after them).
+        if let Some(extra) = std::env::var("RA2_SHAPE_EXTRA")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            for _ in 0..(extra / session.matched.config.dt) as usize {
+                session.step();
+            }
+        }
         let duel = &session.matched.duel;
         let r = &duel.robots[p];
         let a = duel

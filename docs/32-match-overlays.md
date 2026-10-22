@@ -135,6 +135,63 @@ label top at y 368 vs 367, x within 8 px, which is the 0.06-0.12 m the resting r
 status group in the top-left corner at 21 s agree to 0.65 MAE over the 200 x 100 corner. Test:
 `an_idle_robot_shows_the_counter_then_the_card` (8/5/2, the card for 3 s, Scout out and ALARM the winner).
 
-**Open**: the clock text shows `2:47` where live shows `2:46` at the same warning count (ours rounds the remaining
-time up, `hud::clock_text`; the live capture's clock rounding was not re-measured); the armour bar of a dimmed
-panel is pinker in live (the `whitebar.bmp` overlay, `+0xdc`, is not drawn by this port); the other two out cards.
+**Open**: closed by section 7 (clock, armour bar, the other two cards).
+
+## 7. Clock text, the armour bar's tint and remainder, the other out cards, the green number (hud-cards)
+
+**Clock** (`FUN_004772f0(remaining)`, called each frame from `FUN_00412fc0` for a timed match): `minutes =
+__ftol(remaining * 0x6a7c5c)` (the float 1/60, `0x3c888889`), `seconds = __ftol(remaining - 60 * minutes)`, both
+**truncating**, the seconds padded to two digits (`0x6f36f4`, `:` is `0x6f36f8`). 166.9 s left reads `2:46` (ours rounded
+up: `2:47`), the last second reads `0:00` and the full `3:00` shows only before the first update. `hud::clock_text`
+now truncates. Live frames (`hudcards-green__live__000-001..003`) read `Time: 2:56` a few seconds in.
+
+**Armour bar tint** (found while chasing the "pinker" dimmed bar). Live full armour reads `redbar.bmp`'s rows
+`(193,43,22)..(255,31,0)` as `(193,21,5)..(255,15,0)`: the widget `+0xd8` carries the tint `(1, 0.5, 0.25, 1)`
+(memory dump of the status meter, `hudcards-destroy__live__000` poll rows, `+0xbc..+0xc8`), in every state. `FUN_004b3850`
+dims the others (air `+0xbc..+0xc4` 1 -> 0.3 in the dump) but the armour widget keeps its tint, so a robot that is out
+with armour left shows a full-brightness red bar among the dimmed meters. Ours drew the bar untinted and dimmed it;
+now `ARMOR_TINT` is set every frame and `armor bar` is not in `DIMMED`.
+Check: the 21 s `IMMOBILE!` frame, bar rows 54..57 at x 70: live `(232,167,161) (238,165,159) (243,148,141) (255,118,109)`,
+ours the same; undimmed full armour live `(193,21,5) (211,20,4) (229,18,2) (255,15,0)`, ours the same.
+
+**Remainder** (`+0xdc`, `FUN_004b2f20`): an image of `common\whitebar.bmp` (grey 193..255 rows, 4 x 4) tinted
+`(1, 0.5, 0.25, 1)`, 26 x 4 at (75, 39), added to `status group` after the bars; the armour setter `0x4b35a0`
+puts it at `x = 49 + w`, width `26 - w` for a fill of `w = trunc(26 * armour)`. Live, armour 0 undimmed: the whole
+track is orange `(193,96,48)..(255,127,63)`; armour 0 **dimmed** (after the out state): the empty track of
+`status_meters.tga` at 0.3 (`(21,18,18)..(29,23,22)` = rows `(72,60,59)..(97,77,75)` x 0.3), no remainder. So it is
+hidden once the robot is out (the dump's flag byte at `+0x74` of the widget goes `0x101 -> 0x100`; the code that does it
+was not located). Ours: `ARMOR_REMAINDER`, a clone of the armour bar placed by `set_armor_remainder`.
+
+**The three out cards** (`FUN_00418040(robot, state)`; each shown at the status group's top-left minus
+`(card - group) / 2` (truncating per axis) and for 3.0 s by the popup list, like `IMMOBILE!`):
+
+| state | when | image (slot array, accessor) | size |
+|---|---|---|---|
+| 1 | the chassis's third critical hit: `0x4df120` -> `FUN_00417cc0` (which also plays `critical_hit.wav`) | `controlboard_destroyed.tga`, `+0x258`, `0x477930` | 112 x 64 |
+| 2 | 20 s immobile (`FUN_00412fc0`) | `immobile.tga`, `+0x268`, `0x477940` | 104 x 32 |
+| 3 | `plus.eliminatePlayer` (`0x4b9c40`: tabletop fall-out, electric zone) and the network `0x13a` | `eliminated.tga`, `+0x248`, `0x477920` | 116 x 32 |
+
+All three also dim the meters (`FUN_00476bf0`). A pushed-out / pit death is not a state of its own: it reaches 3 only
+through an arena script's `eliminatePlayer`, or 1 if the chassis is destroyed. A time-out calls `FUN_00418770`
+and shows no card. Live: `plus.damage(1, 0, 20000, ...)` x4 on ALARM gave the `CONTROL BOARD DESTROYED! ROBOT
+ELIMINATED` card (`hudcards-destroy__live__000`), `plus.eliminatePlayer(1)` the `ELIMINATED!` card
+(`hudcards-green__live__000-038..049`, and an earlier run); after the card the panel stays dimmed (frames `-050..055`:
+bars dark, the armour bar bright red). Ours: `hud::OutCard`, `out_card_at`; `Session` keeps `(seconds, card, last state)`
+per robot (`eliminated` > `immobilized` > `destroyed`). Side by side (scratchpad `hc/sbs_cards.png`, live left, ours
+right; ours from `shapeshot` with `RA2_SHAPE_OUT=1:destroy|eliminate`): the red text boxes and the icon sit at the
+same pixels (x 926-1016 / 923-1020, y 52-62 / 42-52; icon x 929-950, y 24-46); MAE 8.9 / 9.5 over the 144 x 130 corner,
+which is the different arena behind the translucent glow.
+
+**The green number is live.** `hudcards-green__live__000`: C.R.U.S.H. (human) and a charging ALARM; the human's contacts
+gave `request id 0, amount 10.24` and `16.75` with the attacker flag (`p5 = 1`), accepted, flushed 0.23-0.33 s later:
+`colour (0, 0.8, 0, 1)`, mover `a = point + 0.1 * normal` (checked to 1e-4), `b - a` along `normalize((0,6,0) + normal)`,
+fader 0.75 s to 1.0 s, duration 1.0 s, shown `10` and `16` (ink 21 x 14 px, `(0,204,0)`, frames `-001..-004`,
+`-016..-017`). ALARM's own attacker hits (`id 1`, 73.4 and 77.5) are requested and never accepted, as the AI is not a human.
+The red/green table of docs/37 section 7 stands unchanged; the attacker side is now observed. The earlier attempts failed
+because the human never made contact; a charging ALARM (`AI.running_ai[0].Throttle(100)`) plus the human driving at it did.
+
+**Tools**: `tools/oracle/capture_cards.py` (`STAGE=elim|destroy|green`, joined with `+`), `frida/ra2_cards.js`
+(meter memory dump via `rpc.poll`; its hooks on `0x418040`, `0x4df120`, `0x4b3850` never reported, so the states above come
+from the frames and the dump), `xgrab.py` `XGRAB_INTERVAL`, `shapeshot` `RA2_SHAPE_OUT` and `RA2_SHAPE_EXTRA`.
+**Open**: what hides the remainder when a robot is out; the cards of a robot put out in a 3+ robot match (the panel
+dim without the match ending) were seen live only through the eliminated run's later frames.
