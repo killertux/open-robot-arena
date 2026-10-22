@@ -12,7 +12,8 @@
 //! * non-guaranteed messages: one frame, delivered on arrival, never resent
 //!   (a message larger than a frame goes guaranteed);
 //! * keep-alives while idle, a timeout when the peer falls silent or a frame
-//!   exhausts its retries, and `HARD_DISCONNECT`.
+//!   exhausts its retries while the peer is still talking, and
+//!   `HARD_DISCONNECT`.
 //!
 //! DirectPlay 8 does the same jobs inside `dpnet.dll` (the original only sees
 //! its callback messages); the defaults below are ours, not DirectPlay's.
@@ -27,7 +28,11 @@ use crate::frame::*;
 pub struct LinkConfig {
     /// First retransmission timeout.
     pub rto: Duration,
-    /// Retransmissions of one frame before the link is declared dead.
+    /// Retransmissions of one frame, each made after the peer was heard from
+    /// again without acknowledging it, before the link is declared dead. A
+    /// peer that is silent altogether (busy loading a match: DirectPlay acks
+    /// from its own threads, our links are pumped by the game loop) is left
+    /// to `timeout`.
     pub max_retries: u32,
     /// Send a keep-alive after this long without sending anything.
     pub keepalive: Duration,
@@ -90,6 +95,9 @@ struct InFlight {
     payload: Vec<u8>,
     sent: Instant,
     retries: u32,
+    /// Retransmissions made although the peer had been heard from since the
+    /// previous one: it is alive and still has not acknowledged the frame.
+    strikes: u32,
 }
 
 #[derive(Debug)]
@@ -252,6 +260,7 @@ impl Link {
                 payload,
                 sent: now,
                 retries: 0,
+                strikes: 0,
             };
             self.transmit(&frame, false, now);
             self.in_flight.push_back(frame);
@@ -455,6 +464,9 @@ impl Link {
                     let backoff = rto * 2u32.pow(f.retries.min(4));
                     if now.duration_since(f.sent) >= backoff {
                         f.retries += 1;
+                        if self.last_heard > f.sent {
+                            f.strikes += 1;
+                        }
                         f.sent = now;
                         resend.push(i);
                     }
@@ -462,7 +474,7 @@ impl Link {
                 if self
                     .in_flight
                     .iter()
-                    .any(|f| f.retries > self.config.max_retries)
+                    .any(|f| f.strikes > self.config.max_retries)
                 {
                     self.state = LinkState::Closed(CloseReason::Timeout);
                     return std::mem::take(&mut self.out);
@@ -645,6 +657,67 @@ mod tests {
             p.b.receive(&d, p.now);
         }
         assert_eq!(p.b.state, LinkState::Closed(CloseReason::Remote));
+    }
+
+    /// A peer that stops answering altogether (it is loading a match and
+    /// nothing pumps its link) keeps the link until the silence timeout,
+    /// however many times a guaranteed frame was resent meanwhile; then the
+    /// frame arrives.
+    #[test]
+    fn a_silent_peer_is_left_to_the_timeout_not_to_the_retries() {
+        let mut p = Pair::new(0);
+        p.run(5);
+        p.a.send(b"prepare", false, true, p.now);
+        // 8 s of b not polling: a resends far more than `max_retries` times.
+        let mut now = p.now;
+        let mut held = Vec::new();
+        for _ in 0..800 {
+            now += Duration::from_millis(10);
+            held.extend(p.a.poll(now));
+        }
+        assert!(p.a.is_connected(), "{:?}", p.a.state);
+        p.now = now;
+        for d in held {
+            p.b.receive(&d, p.now);
+        }
+        let (_, got) = p.run(20);
+        assert!(p.a.is_connected() && p.b.is_connected());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].payload, b"prepare");
+        assert!(p.a.is_idle());
+        // Past the timeout the silence rule still closes it.
+        p.a.send(b"again", false, true, p.now);
+        let mut now = p.now;
+        for _ in 0..1100 {
+            now += Duration::from_millis(10);
+            p.a.poll(now);
+        }
+        assert_eq!(p.a.state, LinkState::Closed(CloseReason::Timeout));
+    }
+
+    /// A peer that keeps talking (its inputs, every step) but never
+    /// acknowledges a frame (nothing from us reaches it) is dropped on the
+    /// retries: the silence rule never fires, since it is heard all along.
+    #[test]
+    fn a_talking_peer_that_never_acknowledges_runs_out_the_retries() {
+        let mut p = Pair::new(0);
+        p.run(5);
+        p.a.send(b"lost", false, true, p.now);
+        let mut steps = 0;
+        while p.a.is_connected() && steps < 3000 {
+            steps += 1;
+            p.now += Duration::from_millis(10);
+            p.a.poll(p.now); // everything a sends is lost
+            p.b.send(b"input", false, false, p.now);
+            for d in p.b.poll(p.now) {
+                p.a.receive(&d, p.now);
+            }
+        }
+        assert_eq!(
+            p.a.state,
+            LinkState::Closed(CloseReason::Timeout),
+            "{steps}"
+        );
     }
 
     #[test]

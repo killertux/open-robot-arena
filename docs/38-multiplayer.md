@@ -127,6 +127,13 @@ selective mask, piggy-backed or a delayed SACK), retransmitted with backoff,
 fragmented above 1200 bytes; non-guaranteed ones go once and are delivered on
 arrival (DirectPlay also sequences those; we do not). Keep-alives every 1 s
 while idle, a link times out after 10 s of silence or 12 failed retries.
+A retry counts against the 12 only when the peer was heard from since the
+previous one (it is alive and still has not acknowledged): DirectPlay services
+its links on its own threads, so a peer busy loading a match still acks, while
+ours are pumped by the game loop and a loading peer is silent. Counting those
+resends dropped a peer that loaded a few seconds slower than the host (seen
+under load: `link retries exhausted ... heard 14.6 s ago`); a silent peer is
+left to the silence timeout.
 
 Session-core messages (ours, `USER_1` frames): `0xC1` connect info (name,
 password, connect data), `0xC2` accept (your id, host id, player table),
@@ -185,6 +192,14 @@ Game type, weight class and arena travel as `0x134`/`0x136`/`0x133`. Ready is
 `0x12f`; chat `0x65` (shown in `chat messages`). The start (dispatcher cases):
 `0x12e` prepare → every peer loads (`0x132` loading, `0x13f` loaded) → `0x130`
 begin and `0x13c` count-down; `0x13e` closes the results window, `0x131` ends.
+The port follows it (`NetPlay::match_begun`): a joiner or spectator sends
+`0x13f` once its match is built, the host sends `0x130` + `0x13c` once every
+peer in the lobby has, and nobody's countdown runs before that. Without the
+gate each peer started its fight when its own load finished; under load the
+loads differ by seconds, so the host's scripted blows reached a peer still
+loading. On the host a remote human's robot is driven by its inputs only and
+stands still until the first one arrives (it had fallen to the AI, whose
+blows then scored: `points=42,131,0,18` instead of `42,45,0,0`).
 `AllowNonStandardMultiplayer` in `ra2.cfg` exists; its use was not traced.
 
 ## 6. In the match

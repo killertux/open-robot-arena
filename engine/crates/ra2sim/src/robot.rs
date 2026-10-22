@@ -882,10 +882,14 @@ impl Robot {
                        tag: u32,
                        at: Vec3| {
             let mut placed = Vec::new();
+            // Each placed piece's points in the component's own frame (where
+            // the original keeps a mesh's geometry).
+            let mut raws = Vec::new();
             for (pts, mesh, piece_mass, open) in pieces {
                 let local: Vec<Vec3> = pts.iter().map(|q| m.transform_point3(*q)).collect();
                 if massprops::hull_volume_centroid(&local).is_some() {
                     placed.push((local, mesh.clone(), *piece_mass, open.clone()));
+                    raws.push(pts.clone());
                 }
             }
             let ghosts: Vec<Piece> = phantoms
@@ -982,11 +986,12 @@ impl Robot {
                     eprintln!("      piece {} points, box {lo:?}..{hi:?}", pts.len());
                 }
             }
-            for (pts, mesh, _, _) in placed {
+            for ((pts, mesh, _, _), raw) in placed.into_iter().zip(raws) {
                 let shape = match mesh {
                     Some(indices) => ShapeDesc::MeshHull {
                         points: pts,
                         indices,
+                        raw,
                     },
                     None => ShapeDesc::ConvexHull { points: pts },
                 };

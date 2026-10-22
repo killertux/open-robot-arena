@@ -1468,7 +1468,10 @@ impl ApplicationHandler for App {
             }
             if let Some(session) = &mut self.session {
                 self.net.before_step(session);
-                session.advance(UPDATE.as_secs_f32());
+                // A network match holds until every peer has loaded it.
+                if self.net.match_begun() {
+                    session.advance(UPDATE.as_secs_f32());
+                }
                 self.net.after_step(session, UPDATE.as_secs_f32());
             }
             if let Some(hq) = &mut self.hq {

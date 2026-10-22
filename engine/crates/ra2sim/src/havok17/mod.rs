@@ -30,6 +30,7 @@ pub mod deactivation;
 pub mod joints;
 pub mod mass;
 pub mod narrow;
+pub mod obbtree;
 pub mod resolver;
 
 use std::collections::HashMap;
@@ -167,6 +168,10 @@ struct WorldPiece {
     vertices: Vec<Vec3>,
     radius: f32,
     bounds: Aabb,
+    /// Its box in the broadphase (`+0x20`/`+0x30`, without the tolerance):
+    /// a moving collidable's the cube around its bounding sphere, a fixed
+    /// one's its box.
+    sweep: Aabb,
 }
 
 /// What a body looked like before a step piece, for rolling back.
@@ -404,6 +409,16 @@ impl Havok17Backend {
                         mesh.bounds.transformed(pose.position, pose.rotation),
                     ),
                 };
+                let sweep = if b.moves() {
+                    let c = pose.apply(p.sphere.0);
+                    let r = Vec3::splat(p.sphere.1);
+                    Aabb {
+                        min: c - r,
+                        max: c + r,
+                    }
+                } else {
+                    bounds
+                };
                 out.push(WorldPiece {
                     body: i,
                     piece: k as u32,
@@ -412,6 +427,7 @@ impl Havok17Backend {
                     vertices,
                     radius,
                     bounds,
+                    sweep,
                 });
             }
         }
@@ -427,13 +443,19 @@ impl Havok17Backend {
     /// pairs with the active ones after it, then with the inactive ones, then
     /// with the fixed ones, each in its list's order (`0x55a750` keeps those
     /// whose boxes overlap). Live (`twobody-scout-alarm-box__live__001`, a
-    /// rest): the floor's contacts come wheel by wheel in ascending x.
+    /// rest): the floor's contacts come wheel by wheel in ascending x. A
+    /// moving collidable's box is the cube around its smallest bounding
+    /// sphere (ours `WorldPiece::sweep`), so it does not turn with the body; a
+    /// fixed one's is its box (live `X` rows, docs/29 section 12u). The lists
+    /// are rebuilt from the collidables every detection and sorted afresh
+    /// (`0x559c20` projects, `0x559ec0` sorts: insertion sort up to 16
+    /// entries), so a woken or new pair has no insertion order of its own.
     fn broadphase_pairs(
         &self,
         pieces: &[WorldPiece],
         level: &[Option<u32>],
     ) -> Vec<(usize, usize)> {
-        let key = |k: &usize| (pieces[*k].bounds.min.x, *k);
+        let key = |k: &usize| (pieces[*k].sweep.min.x, *k);
         let sorted = |mut v: Vec<usize>| {
             v.sort_by(|a, b| {
                 key(a)
@@ -456,9 +478,9 @@ impl Havok17Backend {
         let tol = TOLERANCE;
         let mut out = Vec::new();
         for (n, &a) in active.iter().enumerate() {
-            let ba = pieces[a].bounds.grown(tol);
+            let ba = pieces[a].sweep.grown(tol);
             for &b in active[n + 1..].iter().chain(&inactive).chain(&fixed) {
-                if ba.overlaps(&pieces[b].bounds) {
+                if ba.overlaps(&pieces[b].sweep) {
                     out.push((a, b));
                 }
             }
@@ -492,12 +514,17 @@ impl Havok17Backend {
         let mut pass = 0u32;
         loop {
             for (ia, ib) in self.broadphase_pairs(&pieces, &level) {
-                // The agent sees the pair as before: the moving body first, the
-                // lower handle first when both move.
+                // The pair's A is the collidable made later (`0x55a750`: the
+                // greater shape type first, a convex piece before a mesh, which
+                // the agents below see to; between equal types the greater
+                // `+0x50`, the collidables' creation count, live
+                // `ord-scout-alarm-box__live__000`): ours, the greater body
+                // handle and piece (the arena's bodies come first, then the
+                // robots in order). The resolver does not see the order (the
+                // impulse and the push-out are the same either way round).
                 let (pa, pb) = {
                     let (a, b) = (&pieces[ia], &pieces[ib]);
-                    let (ma, mb) = (self.bodies[a.body].moves(), self.bodies[b.body].moves());
-                    if !ma || (mb && b.body < a.body) {
+                    if (b.body, b.piece) > (a.body, a.piece) {
                         (b, a)
                     } else {
                         (a, b)
@@ -582,9 +609,13 @@ impl Havok17Backend {
                             );
                         }
                         (true, true) => {
-                            // Mesh x mesh (`FUN_0054a2a0`).
+                            // Mesh x mesh: a fixed mesh (its MOPP) is A
+                            // (`FUN_0054a2a0`); two moving meshes keep the
+                            // pair's order (`FUN_00549d00`).
+                            swap = !self.bodies[pb.body].moves();
+                            let (ma, mb) = if swap { (pb, pa) } else { (pa, pb) };
                             penetrating =
-                                self.mesh_mesh(pa, pb, tol, &out, &mut triangles, &mut points);
+                                self.mesh_mesh(ma, mb, tol, &out, &mut triangles, &mut points);
                         }
                     }
                     let friction = (friction_i * friction_j).max(0.0).sqrt();
@@ -607,8 +638,13 @@ impl Havok17Backend {
                         } else {
                             bad.push(key);
                         }
-                        if !penetrating_bodies.contains(&(i, j)) {
-                            penetrating_bodies.push((i, j));
+                        let pair = if self.bodies[i].moves() {
+                            (i, j)
+                        } else {
+                            (j, i)
+                        };
+                        if !penetrating_bodies.contains(&pair) {
+                            penetrating_bodies.push(pair);
                         }
                     } else if out[first..].iter().any(|c| c.distance < current_tol) {
                         bad.push(key);
@@ -687,6 +723,12 @@ impl Havok17Backend {
         let local =
             Aabb::of(cx.vertices.iter().map(|v| ms.pose.inverse_apply(*v))).grown(cx.radius + tol);
         mesh.query(&local, triangles);
+        // The agent meets the triangles in the order its query gives them: a
+        // moving mesh's tree depth first (`FUN_00550560`), a fixed mesh's
+        // MOPP (ours: ascending, the MOPP is not recovered).
+        if self.bodies[ms.body].moves() {
+            triangles.sort_by_key(|&t| mesh.tree.rank[t as usize]);
+        }
         let m = self
             .mesh_manifolds
             .entry(key)
@@ -721,12 +763,24 @@ impl Havok17Backend {
         false
     }
 
-    /// The mesh x mesh agent (`FUN_0054a2a0`, a fixed mesh; `FUN_00549d00`,
-    /// two moving ones): every pair of triangles, one
-    /// of each mesh, within the tolerance of each other gives the midpoint of
-    /// their closest points, unless a point already reported in this
-    /// detection lies within `sqrt(0.001)` tolerances of it. No manifold is
-    /// kept. `true` when two triangles touch (`d < 1e-5`).
+    /// The mesh x mesh agents (`pa` is the pair's A, the normals point from B
+    /// toward it): every pair of triangles, one of each mesh, within the
+    /// tolerance of each other gives the midpoint of their closest points,
+    /// unless a point already reported in this detection lies within
+    /// `sqrt(0.001)` tolerances of it. No manifold is kept. `true` when two
+    /// triangles touch (`d < 1e-5`).
+    ///
+    /// The order the pairs of triangles come in (docs/29 section 12u): with a
+    /// fixed mesh as A (`FUN_0054a2a0`), B's tree is walked depth first
+    /// (`FUN_0054a080`) and each of its triangles near A's MOPP brings A's
+    /// triangles near it in the MOPP's order (ours: ascending; the MOPP is
+    /// compiled at load and not recovered); between two moving meshes
+    /// (`FUN_00549d00`) the two trees are walked together (`FUN_00550100`,
+    /// [`obbtree::ObbTree::pairs`]). Either walk keeps every pair of
+    /// triangles within the tolerance: the two-tree walk tests each pair of
+    /// boxes with both grown by half the tolerance (`FUN_00557870`), so a
+    /// whole tolerance between them (ours: the first's box grown by the
+    /// whole tolerance against the other's).
     fn mesh_mesh(
         &self,
         pa: &WorldPiece,
@@ -740,46 +794,49 @@ impl Havok17Backend {
             return false;
         };
         let same = (tol * tol) * narrow::MESH_DUPLICATE;
-        // The candidate triangles: within the tolerance of a fixed mesh's
-        // (its MOPP query, `FUN_0054a080`); between two moving meshes the two
-        // trees are walked together (`FUN_00549d00` → `FUN_00550100`) and a
-        // pair of boxes is kept unless the separating-axis test
-        // (`FUN_00557870`) parts them with *each* box's half extents grown by
-        // half the tolerance: a whole tolerance between them, as here. No
-        // pair of triangles within the tolerance is left out either way.
-        let margin = tol;
-        for ta in &ma.triangles {
-            let tri_a = ta.map(|v| pa.pose.apply(ma.vertices[v as usize]));
-            let local = Aabb::of(tri_a.iter().map(|v| pb.pose.inverse_apply(*v))).grown(margin);
-            mb.query(&local, triangles);
-            for &t in triangles.iter() {
+        let mut candidates: Vec<(u32, u32)> = Vec::new();
+        if !self.bodies[pa.body].moves() {
+            let mut order: Vec<u32> = (0..mb.triangles.len() as u32).collect();
+            order.sort_by_key(|&t| mb.tree.rank[t as usize]);
+            for tb in order {
                 let tri_b =
-                    mb.triangles[t as usize].map(|v| pb.pose.apply(mb.vertices[v as usize]));
-                let (d, on_a, on_b) = narrow::triangle_closest(&tri_a, &tri_b);
-                if d < 1e-5 {
-                    return true;
-                }
-                if d >= tol {
-                    continue;
-                }
-                let point = (on_a + on_b) * 0.5;
-                if reported
-                    .iter()
-                    .any(|c| c.point.distance_squared(point) < same)
-                    || points
-                        .iter()
-                        .any(|p| p.point.distance_squared(point) < same)
-                {
-                    continue;
-                }
-                points.push(narrow::Point {
-                    normal: (on_a - on_b) / d,
-                    point,
-                    distance: d,
-                    local_a: pa.body_pose.inverse_apply(on_a),
-                    local_b: pb.body_pose.inverse_apply(on_b),
-                });
+                    mb.triangles[tb as usize].map(|v| pb.pose.apply(mb.vertices[v as usize]));
+                let local = Aabb::of(tri_b.iter().map(|v| pa.pose.inverse_apply(*v))).grown(tol);
+                ma.query(&local, triangles);
+                candidates.extend(triangles.iter().map(|&ta| (ta, tb)));
             }
+        } else {
+            let rot = Mat3::from_quat(pa.pose.rotation.inverse() * pb.pose.rotation);
+            let pos = pa.pose.inverse_apply(pb.pose.position);
+            obbtree::ObbTree::pairs(&ma.tree, &mb.tree, (rot, pos), tol, &mut candidates);
+        }
+        for (ta, tb) in candidates {
+            let tri_a = ma.triangles[ta as usize].map(|v| pa.pose.apply(ma.vertices[v as usize]));
+            let tri_b = mb.triangles[tb as usize].map(|v| pb.pose.apply(mb.vertices[v as usize]));
+            let (d, on_a, on_b) = narrow::triangle_closest(&tri_a, &tri_b);
+            if d < 1e-5 {
+                return true;
+            }
+            if d >= tol {
+                continue;
+            }
+            let point = (on_a + on_b) * 0.5;
+            if reported
+                .iter()
+                .any(|c| c.point.distance_squared(point) < same)
+                || points
+                    .iter()
+                    .any(|p| p.point.distance_squared(point) < same)
+            {
+                continue;
+            }
+            points.push(narrow::Point {
+                normal: (on_a - on_b) / d,
+                point,
+                distance: d,
+                local_a: pa.body_pose.inverse_apply(on_a),
+                local_b: pb.body_pose.inverse_apply(on_b),
+            });
         }
         false
     }
@@ -1208,6 +1265,30 @@ impl PhysicsBackend for Havok17Backend {
             pieces: narrow::pieces_of(&desc.shape),
         }));
         self.phantom_touch.push(None);
+        if std::env::var_os("RA2_H17_PIECES").is_some() {
+            // Diagnostics: every piece of the body, as `frida/ra2_order.js`'s `C` rows.
+            let g = self.geometry[handle].as_ref().unwrap();
+            for (k, p) in g.pieces.iter().enumerate() {
+                let (kind, v, t, leaves): (&str, Vec<Vec3>, Vec<[u32; 3]>, Vec<usize>) =
+                    match &p.shape {
+                        PieceShape::Convex { vertices, .. } => {
+                            ("convex", vertices.clone(), Vec::new(), Vec::new())
+                        }
+                        PieceShape::Mesh(m) => {
+                            let mut l: Vec<usize> = (0..m.triangles.len()).collect();
+                            l.sort_by_key(|&t| m.tree.rank[t]);
+                            ("mesh", m.vertices.clone(), m.triangles.clone(), l)
+                        }
+                    };
+                eprintln!(
+                    "PIECE h{handle} {k} {kind} pos {:?} rot {:?} verts {:?} tris {:?} leaves {leaves:?}",
+                    p.position.to_array(),
+                    p.rotation.to_array(),
+                    v.iter().map(|x| x.to_array()).collect::<Vec<_>>(),
+                    t
+                );
+            }
+        }
         Ok(handle as BodyHandle)
     }
 
@@ -1699,6 +1780,14 @@ impl PhysicsBackend for Havok17Backend {
             sys.bodies.push(i);
         }
         self.systems.push(sys);
+    }
+
+    fn detect_now(&mut self) {
+        let (contacts, _) = self.detect(TOLERANCE * 0.5);
+        self.contacts = contacts;
+        if dumping() {
+            self.dump_resolver_entry();
+        }
     }
 
     fn is_active(&self, handle: BodyHandle) -> bool {

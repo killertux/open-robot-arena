@@ -251,6 +251,14 @@ pub struct NetPlay {
     sounds: Vec<NetSound>,
     /// Host: the end of the match has been sent.
     end_sent: bool,
+    /// This end has finished loading the match (a joiner has sent its
+    /// `giPeerDataLoadedMessage`).
+    loaded_sent: bool,
+    /// Host: the peers that reported their match loaded.
+    loaded: std::collections::BTreeSet<PlayerId>,
+    /// The match has begun: the host has every peer loaded and sent
+    /// `giBeginMatchMessage` / `giStartCountDownMessage`; a joiner heard them.
+    begun: bool,
 }
 
 impl Default for NetPlay {
@@ -281,6 +289,9 @@ impl NetPlay {
             last_sent: None,
             sounds: Vec::new(),
             end_sent: false,
+            loaded_sent: false,
+            loaded: Default::default(),
+            begun: false,
         }
     }
 
@@ -339,7 +350,7 @@ impl NetPlay {
         };
         self.game = Some(NetGame::join(config).map_err(|e| format!("join: {e}"))?);
         self.connecting = Some(Instant::now());
-        self.end_sent = false;
+        self.reset_match();
         self.status = "Connecting to Server     10".to_string();
         Ok(())
     }
@@ -366,8 +377,50 @@ impl NetPlay {
         self.game = Some(NetGame::host(config, speed).map_err(|e| format!("host: {e}"))?);
         self.robot_of.clear();
         self.robot_of.insert(ra2net::session::HOST_ID, 0);
-        self.end_sent = false;
+        self.reset_match();
         Ok(())
+    }
+
+    fn reset_match(&mut self) {
+        self.end_sent = false;
+        self.loaded_sent = false;
+        self.loaded.clear();
+        self.begun = false;
+    }
+
+    /// Whether the match may run, asked before each step once the match is
+    /// loaded (docs/38 §5): the first call reports this end loaded (a joiner
+    /// sends `giPeerDataLoadedMessage`, `0x13f`); the host begins the match
+    /// (`giBeginMatchMessage` `0x130`, `giStartCountDownMessage` `0x13c`) once
+    /// every peer in the lobby has reported, and a joiner runs once it hears
+    /// them. Until then the match holds before its countdown, so no peer's
+    /// fight starts while another is still loading.
+    pub fn match_begun(&mut self) -> bool {
+        let Some(game) = &mut self.game else {
+            return true;
+        };
+        if self.begun {
+            return true;
+        }
+        if !self.loaded_sent {
+            self.loaded_sent = true;
+            if !game.is_host() {
+                game.report_loaded();
+            }
+        }
+        if game.is_host() {
+            let me = game.local();
+            let everyone = game
+                .lobby
+                .slots
+                .iter()
+                .all(|s| Some(s.player) == me || self.loaded.contains(&s.player));
+            if everyone {
+                game.begin_match();
+                self.begun = true;
+            }
+        }
+        self.begun
     }
 
     pub fn leave(&mut self) {
@@ -378,6 +431,7 @@ impl NetPlay {
         self.connecting = None;
         self.robot_of.clear();
         self.remote.clear();
+        self.reset_match();
     }
 
     /// React to a shell click on a multiplayer screen. `screen` is the screen
@@ -493,9 +547,14 @@ impl NetPlay {
                             .map(|(i, s)| (s.player, i))
                             .collect();
                         game.set_schema(schema());
-                        game.report_loaded();
+                        // Loaded is reported once the match is built
+                        // ([`NetPlay::match_begun`]).
                         action = NetAction::StartMatch { arena };
                     }
+                    GameEvent::Loaded { player } => {
+                        self.loaded.insert(player);
+                    }
+                    GameEvent::Begin | GameEvent::CountDown => self.begun = true,
                     GameEvent::RemoteInput { from, input, .. } => {
                         if let Some(&robot) = self.robot_of.get(&from) {
                             apply_input(self.remote.entry(robot).or_default(), &input);
@@ -692,8 +751,15 @@ impl NetPlay {
             }
         }
         if game.is_host() {
-            for (&robot, &drive) in &self.remote {
-                session.set_remote_drive(robot, Some(drive));
+            // A remote human's robot is driven by its inputs alone (the
+            // host's `HumanRemote`): it stands still until the first one
+            // arrives, never handed to the AI.
+            let me = game.local();
+            for (&player, &robot) in &self.robot_of {
+                if Some(player) != me {
+                    let drive = self.remote.get(&robot).copied().unwrap_or_default();
+                    session.set_remote_drive(robot, Some(drive));
+                }
             }
         } else if self
             .robot_of
@@ -759,6 +825,9 @@ impl NetPlay {
                             apply_input(self.remote.entry(robot).or_default(), &input);
                         }
                     }
+                    GameEvent::Loaded { player } => {
+                        self.loaded.insert(player);
+                    }
                     GameEvent::Chat { text, .. } => session.push_chat_line(text),
                     _ => {}
                 }
@@ -768,6 +837,7 @@ impl NetPlay {
             for event in game.poll() {
                 match event {
                     GameEvent::Snapshot(state) => newest = Some(state),
+                    GameEvent::Begin | GameEvent::CountDown => self.begun = true,
                     GameEvent::Chat { text, .. } => session.push_chat_line(text),
                     GameEvent::Message { from, message } if from == ra2net::session::HOST_ID => {
                         match message {

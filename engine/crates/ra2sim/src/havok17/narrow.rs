@@ -36,6 +36,10 @@ pub struct Piece {
     pub position: Vec3,
     pub rotation: Quat,
     pub shape: PieceShape,
+    /// The smallest sphere around the piece (its centre in the piece's
+    /// frame, its radius): a moving collidable's broadphase box is this
+    /// sphere's (docs/29 section 12u).
+    pub sphere: (Vec3, f32),
 }
 
 #[derive(Clone, Debug)]
@@ -128,14 +132,24 @@ fn collect(shape: &ShapeDesc, position: Vec3, rotation: Quat, out: &mut Vec<Piec
         ShapeDesc::TriMesh { vertices, indices } => {
             PieceShape::Mesh(Mesh::new(vertices.clone(), indices.clone()))
         }
-        ShapeDesc::MeshHull { points, indices } => {
-            PieceShape::Mesh(Mesh::new(points.clone(), indices.clone()))
+        ShapeDesc::MeshHull {
+            points,
+            indices,
+            raw,
+        } => PieceShape::Mesh(Mesh::with_frame(points.clone(), indices.clone(), raw)),
+    };
+    let sphere = match &shape {
+        PieceShape::Convex { vertices, radius } => {
+            let (c, r) = bounding_sphere(vertices);
+            (c, r + radius)
         }
+        PieceShape::Mesh(m) => bounding_sphere(&m.vertices),
     };
     out.push(Piece {
         position,
         rotation,
         shape,
+        sphere,
     });
 }
 
@@ -210,6 +224,8 @@ pub struct Mesh {
     /// Triangle indices in tree order.
     order: Vec<u32>,
     pub bounds: Aabb,
+    /// Havok's own tree over the triangles (the order its walks meet them in).
+    pub tree: super::obbtree::ObbTree,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -225,6 +241,13 @@ const LEAF_SIZE: usize = 4;
 
 impl Mesh {
     pub fn new(vertices: Vec<Vec3>, triangles: Vec<[u32; 3]>) -> Mesh {
+        Mesh::with_frame(vertices, triangles, &[])
+    }
+
+    /// A mesh whose vertices the original keeps as `raw` (the same vertices
+    /// in its geometry's own frame; empty: as `vertices`): Havok's tree is
+    /// built there.
+    pub fn with_frame(vertices: Vec<Vec3>, triangles: Vec<[u32; 3]>, raw: &[Vec3]) -> Mesh {
         // Each triangle once: the arena soup carries every triangle in both
         // windings (Jolt's mesh is solid from the front only), while Havok's
         // closest-point agent is two-sided and the game's meshes hold each
@@ -295,12 +318,19 @@ impl Mesh {
             stack.push((left + 1, mid, hi));
         }
         let bounds = nodes[0].bounds;
+        let raw = if raw.len() == vertices.len() {
+            raw
+        } else {
+            &vertices[..]
+        };
+        let tree = super::obbtree::ObbTree::build(raw, &vertices, &triangles);
         Mesh {
             vertices,
             triangles,
             nodes,
             order,
             bounds,
+            tree,
         }
     }
 
@@ -770,6 +800,72 @@ pub struct Point {
     pub local_b: Vec3,
 }
 
+/// The smallest sphere holding every point (Welzl's algorithm), as its
+/// centre and radius. The original bounds a moving collidable so: live
+/// (`ord-scout-alarm-box__live__000`, `X` rows) every moving collidable's
+/// broadphase box is a cube of half side this radius plus half the
+/// tolerance, about a point fixed in its body.
+pub fn bounding_sphere(points: &[Vec3]) -> (Vec3, f32) {
+    fn sphere_of(r: &[DVec3]) -> (DVec3, f64) {
+        match r.len() {
+            0 => (DVec3::ZERO, -1.0),
+            1 => (r[0], 0.0),
+            2 => ((r[0] + r[1]) * 0.5, r[0].distance(r[1]) * 0.5),
+            3 => {
+                let (a, b, c) = (r[0], r[1], r[2]);
+                let (ab, ac) = (b - a, c - a);
+                let n = ab.cross(ac);
+                let nn = n.length_squared();
+                if nn < 1e-24 {
+                    let pairs = [(a, b), (a, c), (b, c)];
+                    let (p, q) = pairs
+                        .into_iter()
+                        .max_by(|x, y| x.0.distance(x.1).total_cmp(&y.0.distance(y.1)))
+                        .unwrap();
+                    return ((p + q) * 0.5, p.distance(q) * 0.5);
+                }
+                let o = (n.cross(ab) * ac.length_squared() + ac.cross(n) * ab.length_squared())
+                    / (2.0 * nn);
+                (a + o, o.length())
+            }
+            _ => {
+                let a = r[0];
+                let m = glam::DMat3::from_cols(r[1] - a, r[2] - a, r[3] - a).transpose();
+                let rhs = DVec3::new(
+                    (r[1] - a).length_squared(),
+                    (r[2] - a).length_squared(),
+                    (r[3] - a).length_squared(),
+                ) * 0.5;
+                if m.determinant().abs() < 1e-24 {
+                    return sphere_of(&r[..3]);
+                }
+                let o = m.inverse() * rhs;
+                (a + o, o.length())
+            }
+        }
+    }
+    fn welzl(p: &[DVec3], r: &mut Vec<DVec3>) -> (DVec3, f64) {
+        if p.is_empty() || r.len() == 4 {
+            return sphere_of(r);
+        }
+        let (last, rest) = p.split_last().unwrap();
+        let s = welzl(rest, r);
+        if s.1 >= 0.0 && s.0.distance(*last) <= s.1 * (1.0 + 1e-12) + 1e-12 {
+            return s;
+        }
+        r.push(*last);
+        let s = welzl(rest, r);
+        r.pop();
+        s
+    }
+    if points.is_empty() {
+        return (Vec3::ZERO, 0.0);
+    }
+    let p: Vec<DVec3> = points.iter().map(|v| v.as_dvec3()).collect();
+    let (c, r) = welzl(&p, &mut Vec::new());
+    (c.as_vec3(), r as f32)
+}
+
 /// A rigid pose: body origin and orientation.
 #[derive(Clone, Copy, Debug)]
 pub struct Pose {
@@ -950,6 +1046,27 @@ mod tests {
             }
         }
         v
+    }
+
+    /// The smallest sphere, not the box's: a long thin triangle's is the
+    /// circle on its longest side; the live boxes of the Scout's chassis
+    /// (1.0377 m) and ALARM's (1.1072 m, more than half its longest span)
+    /// come out so too.
+    #[test]
+    fn the_bounding_sphere_is_the_smallest() {
+        let (c, r) = bounding_sphere(&[
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.2, 0.0),
+        ]);
+        assert!(
+            c.distance(Vec3::ZERO) < 1e-6 && (r - 1.0).abs() < 1e-6,
+            "{c} {r}"
+        );
+        let cube = cube(Vec3::new(1.0, 2.0, 3.0), 0.5);
+        let (c, r) = bounding_sphere(&cube);
+        assert!(c.distance(Vec3::new(1.0, 2.0, 3.0)) < 1e-5, "{c}");
+        assert!((r - 0.75f32.sqrt()).abs() < 1e-5, "{r}");
     }
 
     #[test]
