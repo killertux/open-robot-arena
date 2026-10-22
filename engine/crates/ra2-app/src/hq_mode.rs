@@ -894,7 +894,13 @@ impl Session {
             return Err("no event is in progress".to_string());
         };
         let event = self.career.events[event_id].clone();
-        let config = match_config(&self.game, &event, &self.career, self.event_limit)?;
+        let mut config = match_config(&self.game, &event, &self.career, self.event_limit)?;
+        if self.player_drives {
+            // the player's robot is entry 0 (`with_match_player`)
+            if let Some(first) = config.robots.first_mut() {
+                first.controller = ra2sim::r#match::Controller::Human;
+            }
+        }
         let game_type = config.game_type;
         let arena = config.arena.clone();
         // The presentation's deterministic run turns the shipped hazards off;

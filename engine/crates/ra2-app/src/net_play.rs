@@ -841,7 +841,8 @@ impl NetPlay {
             } else {
                 game.join(FALLBACK[i])
             };
-            entries.push(ra2sim::r#match::RobotEntry::ai(
+            // every lobby player is a person, this end's or a remote one
+            entries.push(ra2sim::r#match::RobotEntry::human(
                 i,
                 path.to_string_lossy().to_string(),
             ));

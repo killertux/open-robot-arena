@@ -781,6 +781,16 @@ fn script_ai_for(arena_path: &str, robots: &[Robot]) -> Option<ScriptAi> {
 impl Duel {
     /// Build the world and spawn the robots facing each other.
     pub fn new(arena_path: &str, bots: &[BotSetup]) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_humans(arena_path, bots, &[])
+    }
+
+    /// [`Duel::new`] with the robots in `humans` driven by people: they have no brain, so their heading
+    /// is the `.bot`'s own and not the brain's `nose` (docs/34 section 11.5).
+    pub fn new_with_humans(
+        arena_path: &str,
+        bots: &[BotSetup],
+        humans: &[usize],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         // Absolute from the outset: the script layer changes the process's
         // working directory to the game root, after which a relative arena path
         // no longer resolves.
@@ -853,13 +863,17 @@ impl Duel {
         for (i, setup) in bots.iter().enumerate() {
             let mut rig = rig::load(&setup.path)?;
             // A brain's `nose` is the robot's heading (see `scriptai::bindings_nose`): the 1.07 robots
-            // have no heading of their own.
-            if let Some(nose) = ra2_render::find_game_root(std::path::Path::new(arena_path))
-                .and_then(|root| {
-                    crate::scriptai::bindings_nose(&root, &crate::scriptai::bot_name(&rig))
-                })
-            {
-                rig.heading = nose;
+            // have no heading of their own. Only a robot with a brain: a human-driven one has no `AI`
+            // object to push it (the setter `0x401170` is reached through the `AI` and `AI_callback`
+            // vtables only) and keeps what the loader left, the file's heading or 0.
+            if !humans.contains(&i) {
+                if let Some(nose) = ra2_render::find_game_root(std::path::Path::new(arena_path))
+                    .and_then(|root| {
+                        crate::scriptai::bindings_nose(&root, &crate::scriptai::bot_name(&rig))
+                    })
+                {
+                    rig.heading = nose;
+                }
             }
             let angle = i as f32 * std::f32::consts::TAU / n as f32;
             if let Some(at) = setup.spawn {
@@ -6349,5 +6363,37 @@ mod tests {
         assert_eq!(nose("LugNut"), Some(-std::f32::consts::FRAC_PI_2));
         assert_eq!(nose("Scout"), Some(0.0));
         assert_eq!(nose("No Such Robot"), None);
+    }
+
+    /// Only a robot with a brain takes the brain's `nose` as its heading; a human-driven Iceberg (a v1.07
+    /// file with no heading) keeps 0 (docs/34 section 11.5).
+    #[test]
+    fn a_human_driven_robot_keeps_its_files_heading() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bots = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let setups = [bots("AI/Team7/Bot1.bot"), bots("AI/Team0/Bot1.bot")];
+        let brain = Duel::new_with_humans(&arena, &setups, &[]).expect("a duel");
+        assert!((brain.robots[0].rig.heading - std::f32::consts::PI).abs() < 1e-5);
+        let human = Duel::new_with_humans(&arena, &setups, &[0]).expect("a duel");
+        assert_eq!(human.robots[0].rig.heading, 0.0, "a human's Iceberg");
+        assert_eq!(human.robots[1].rig.heading, 0.0);
+        // a human's front is the file's: Iceberg's chassis `+Z` faces where the start point says
+        let f = |d: &Duel| {
+            let r = &d.robots[0];
+            d.physics
+                .state(r.body())
+                .map(|s| s.rotation * r.rig.forward())
+        };
+        let (fb, fh) = (f(&brain).unwrap(), f(&human).unwrap());
+        assert!(
+            fb.dot(fh) > 0.99,
+            "both face the start point's way: {fb:?} {fh:?}"
+        );
     }
 }

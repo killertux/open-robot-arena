@@ -574,7 +574,7 @@ v1.07 and carry none, and the original gives them theirs through the AI callback
 file only, so these three faced the wrong way round (and the spawn yaw `front - heading` was off by the same angle).
 
 Fix: `scriptai::bindings_nose` reads the `nose` of the robot's `Bindings.py` entry and `Duel::new` sets the rig's
-heading to it when the table lists the robot (a robot with a brain; our human-driven robots in a match share the rule).
+heading to it when the table lists the robot and the robot has a brain. A human-driven robot (`Controller::Human`: the local player's, set by `Session::{new_player, exhibition}` and the Team HQ's driven robot, and every network lobby player) keeps the file's heading: the original pushes the nose through the `AI` and `AI_callback` objects only (the two vtables holding `0x401150`, `RTTI .?AVAI` and `.?AUAI_callback@giPython`), a human robot has none, and the loader leaves `+0xac` 0 for a 1.07 file, so a human's Iceberg faces `+Z` (checked in the binary, not live). Test `a_human_driven_robot_keeps_its_files_heading`.
 Shots (`robot_audit.py` against the new live reshoot, 4 valid shots of Iceberg): MAE 14.67 / 8.57 / 14.93 / 19.90
 -> **2.87 / 2.71 / 6.67 / 3.92** (mean 14.5 -> 4.0); Tornado (4 shots) 6.5 / 6.3 / 11.6 / 7.7, LugNut 3.8 / 6.7 / 11.8 /
 4.9 (the table's 10.45 and 8.38 before). Test `the_old_robots_take_their_heading_from_the_brains_nose`. Side-by-sides:

@@ -239,8 +239,10 @@ ALARM's rigid bodies (every Havok substep, `0x52aa60`) at a chosen place. Side-b
 | 3.38 m | 2.3 | 0.03 | 10 | 0.5 |
 | 3.77 m | 0 | 0 | 0 | 0 |
 
-  Ours (box cast, jet aimed dead at ALARM, matched centres) gave 118.6 / 84.1 / 29.1 / 5.5 a second; the collision shapes
-  and the live headings bring the far end into line (the reach ends between 3.4 and 3.8 m live), but **the near
+  The pre-change box cast (7a4208c's `ray_box_entry`, same live poses) gave **110.5 / 80.0 / 6.8 / 0** a second, the collision
+  shapes 104.5 / 51.4 / 0.5 / 0 against live 41.8 / 32.6 / 2.3 / 0: ratios to live 2.6 / 2.5 / 3.0 / - (boxes) and 2.5 / 1.6 / 0.2 / - (shapes), so
+  the shapes moved the middle distance toward live and the 3.4 m one past it. (Boxes, jet aimed dead at ALARM, matched centres: 118.6 / 84.1 / 29.1 / 5.5.) The live
+  headings and the shapes put the reach where live has it (between 3.4 and 3.8 m), but **the near
   chassis hits are still 3x too many** (194 against 65 in 2.2 s) and the Hammer Head too few (21 against 33). Not the
   particle law, the nozzle (live along 0.90 m, height -0.05 m, lateral 0.02 m from the centre of mass: ours 0.92 / -0.05 /
   0.02), the emitter's velocity (live 5.0 m/s, pitched 2-6 degrees down) or the frame dt (`FLAME_DT=0.046` gives 87

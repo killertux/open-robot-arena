@@ -29,7 +29,7 @@ use ra2_render::ui::{UiAssets, UiRenderer, UiScene};
 use ra2_render::Renderer;
 use ra2fmt::gib::{Block, Gib, Widget};
 use ra2sim::camera::SceneCameraKind;
-use ra2sim::r#match::{Match, MatchConfig, MatchReport, MatchState, RobotEntry};
+use ra2sim::r#match::{Controller, Match, MatchConfig, MatchReport, MatchState, RobotEntry};
 use ra2sim::{DriveInput, Duel, DuelCamera, GameType};
 
 use crate::hud;
@@ -424,7 +424,11 @@ impl Session {
     /// own wiring.
     pub fn new_player(options: &Options) -> Result<Session, String> {
         std::env::set_var("RA2_HAZARDS", "0");
-        let matched = Match::new(options.match_config()).map_err(|e| e.to_string())?;
+        let mut config = options.match_config();
+        if let Some(first) = config.robots.first_mut() {
+            first.controller = Controller::Human;
+        }
+        let matched = Match::new(config).map_err(|e| e.to_string())?;
         let mut session = Session::with_match_controlled(&options.game, matched, true)?;
         session.set_layout(options.size);
         Ok(session)
@@ -471,6 +475,13 @@ impl Session {
             Some(true) => std::env::set_var("RA2_HAZARDS", "1"),
             Some(false) => std::env::set_var("RA2_HAZARDS", "0"),
             None => {}
+        }
+        // the driven robot is a person's: entry 0, unless the caller already named the humans (network play)
+        let mut entries = entries;
+        if !entries.iter().any(|e| e.controller == Controller::Human) {
+            if let Some(first) = entries.first_mut() {
+                first.controller = Controller::Human;
+            }
         }
         let config = MatchConfig::new(arena.to_string_lossy().to_string(), game_type, entries)
             .with_duration(seconds);
