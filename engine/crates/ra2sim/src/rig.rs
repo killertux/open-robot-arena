@@ -671,6 +671,12 @@ pub struct JointInfo {
     pub limits: [f32; 2],
     /// The joint's pivot in bot space: the parent's mount point.
     pub pivot: Vec3,
+    /// Where the constraint holds the two bodies together, in bot space: the
+    /// `.gmf` hinge's pivot on the same line as [`Self::pivot`] for a motor
+    /// that declares one (docs/29 section 12w), else the pivot. Only the
+    /// constraint's anchors use it; the rotor's mass and the load cap keep
+    /// the mount point.
+    pub anchor: Vec3,
     /// The joint's rotation axis in bot space: the mount point's Z — the same
     /// axis the placement rule turns a child about (F1).
     pub axis: Vec3,
@@ -1105,6 +1111,28 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             ),
             None => (pivot, axis),
         };
+        // Any other motor's constraint holds at its `.gmf` hinge's pivot,
+        // a point on the same line as the mount point (docs/29 section 12w:
+        // the angle motor's `Hinge01` sits 0.156 m in from its `axle_m`
+        // point, inside the motor). The axis keeps the mount point's sense.
+        let anchor = match comps[parent].hinge.as_ref() {
+            Some(h)
+                if gmf_hinge.is_none()
+                    && piston.is_none()
+                    && motor.is_some()
+                    && std::env::var_os("RA2_HINGE_MOUNT_PIVOT").is_none() =>
+            {
+                let p = parent_local.transform_point3(h.pivot);
+                // Only a point on the mount's own line: the hinge is that line.
+                let off = p - pivot;
+                if (off - axis * off.dot(axis)).length() < 0.01 {
+                    p
+                } else {
+                    pivot
+                }
+            }
+            _ => pivot,
+        };
         // A burst motor is a limited hinge; everything else swings freely. The
         // original builds its rotor at the start angle and then re-creates the
         // hinge there (`FUN_00480c60`), so the rest pose is the hinge's zero;
@@ -1183,6 +1211,7 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             friction_torque,
             limits,
             pivot,
+            anchor,
             axis,
             slider: piston.is_some(),
             rod_inertia: piston.map(|p| p.rod_inertia).unwrap_or(0.0),

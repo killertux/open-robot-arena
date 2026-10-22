@@ -170,20 +170,31 @@ impl Joint {
         };
         let gap = pb - pa;
         match &self.kind {
-            Kind::Hinge { axis_a, axis_b, .. } => {
+            Kind::Hinge {
+                axis_a,
+                axis_b,
+                ref_a,
+                ..
+            } => {
                 let axis = (a.rotation * *axis_a).normalize();
                 let along_b = (b.rotation * *axis_b).normalize();
-                let b1 = perpendicular(along_b);
-                let b2 = along_b.cross(b1);
                 let mut rows: Vec<Row> = [Vec3::X, Vec3::Y, Vec3::Z]
                     .into_iter()
                     .map(|e| linear(e, gap.dot(e)))
                     .collect();
-                // C = a · b_k, dC/dt = (ωB - ωA) · (b_k × a).
-                for bk in [b1, b2] {
-                    let dir = bk.cross(axis);
-                    rows.push(angular(dir, axis.dot(bk)));
-                }
+                // The two angular rows turn about A's own perpendiculars, its
+                // reference `u1` and `u2 = u1 × a` (`0x535a50`, rows 3 and 4),
+                // and their errors are B's axis along them: `u2 · b` about
+                // `u1` and `-(u1 · b)` about `u2`. To first order this is the
+                // misalignment about each; unlike the gradient of `a · b_k`
+                // (ours before) it keeps pulling B's axis towards A's however
+                // far apart they are, so an axis half a turn out comes back
+                // rather than settling reversed (docs/29 section 12w).
+                let u1 = a.rotation * *ref_a;
+                let u1 = (u1 - axis * u1.dot(axis)).normalize_or(perpendicular(axis));
+                let u2 = u1.cross(axis);
+                rows.push(angular(u1, u2.dot(along_b)));
+                rows.push(angular(u2, -u1.dot(along_b)));
                 rows
             }
             Kind::Slider { axis_a, rest } => {
@@ -459,11 +470,12 @@ pub fn solve(bodies: &mut [Body], joints: &mut [Joint], dt: f32) {
             && bodies[j.a].alive
             && bodies[j.b].alive
             && (bodies[j.a].is_dynamic() || bodies[j.b].is_dynamic())
-            // A constraint with an inactive moving body is left alone (live,
-            // docs/29 section 12t: a frozen wheel's velocity does not change
-            // while its chassis is active again).
-            && !bodies[j.a].asleep()
-            && !bodies[j.b].asleep()
+            // A constraint with an inactive body is left alone (live, docs/29
+            // section 12t: a frozen wheel's velocity does not change while its
+            // chassis is active again; section 12w: nor does a robot's on its
+            // start point while its fixed chassis is still inactive).
+            && bodies[j.a].active
+            && bodies[j.b].active
     };
     let mut blocks: Vec<(usize, Vec<Row>)> = Vec::new();
     for (i, joint) in joints.iter_mut().enumerate() {
@@ -606,5 +618,34 @@ mod tests {
         let va = bodies[0].point_velocity(pa);
         let vb = bodies[1].point_velocity(pb);
         assert!((va - vb).length() < 1e-3, "{va:?} {vb:?}");
+    }
+
+    /// A hinge's two angular rows are A's perpendiculars and their errors B's
+    /// axis along them (`0x535a50`): an axis turned 135 degrees away comes
+    /// back to A's, not on to the reversed axis the gradient of `a . b_k`
+    /// would settle on (docs/29 section 12w).
+    #[test]
+    fn a_hinge_turned_most_of_a_half_turn_comes_back_the_short_way() {
+        let mut bodies = vec![
+            body(MotionType::Static, 0.0, 1.0),
+            body(MotionType::Dynamic, 27.0, 0.5),
+        ];
+        // B turned 135 degrees about the vertical: its axis 45 degrees short
+        // of A's reversed.
+        bodies[1].rotation = Quat::from_rotation_y(135f32.to_radians());
+        bodies[1].refresh_inertia();
+        let mut joints = vec![Joint {
+            motor: false,
+            ..hinge(0.0, 0.0)
+        }];
+        let dt = 1.0 / 60.0;
+        for _ in 0..30 {
+            solve(&mut bodies, &mut joints, dt);
+            let b = &mut bodies[1];
+            b.rotation = (Quat::from_scaled_axis(b.angular_velocity * dt) * b.rotation).normalize();
+            b.refresh_inertia();
+        }
+        let axis_b = bodies[1].rotation * Vec3::X;
+        assert!(axis_b.dot(Vec3::X) > 0.999, "B's axis {axis_b:?}");
     }
 }

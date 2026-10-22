@@ -577,7 +577,7 @@ impl Robot {
             let (Some(parent), Some(info)) = (rig.parts[p].parent, rig.parts[p].joint) else {
                 continue;
             };
-            let child_pivot = info.pivot;
+            let child_pivot = info.anchor;
             let joint = if info.slider {
                 Self::make_slider(physics, &rig, &parts, parent, p, info, child_pivot)?
             } else {
@@ -659,6 +659,19 @@ impl Robot {
             rig,
         };
         robot.cap_loads(physics);
+        // A burst device is built locked where it stands: live the Scout's
+        // burst motor hinge is limited to `[0, 0]` from its first set-up
+        // (`spinup-*__live__000` `H` rows), and ALARM's burst piston rod comes
+        // back to its rest point when the match pulls the robot round onto
+        // its start point (docs/29 section 12w). The first tick keeps it so
+        // (`burst_locked`).
+        for (p, part) in robot.rig.parts.iter().enumerate() {
+            if let (Some(info), Some(joint)) = (part.joint, robot.parts[p].joint) {
+                if info.use_kind == JointUse::Burst {
+                    physics.lock_joint(joint, true);
+                }
+            }
+        }
         Ok(robot)
     }
 
@@ -675,6 +688,31 @@ impl Robot {
             to_b.transform_vector3(motor::reference_perpendicular(info.axis))
                 .normalize_or_zero(),
         )
+    }
+
+    /// Take the parked joints' friction (ours: what an undriven motor or axle
+    /// resists its motion with, see `havok17::joints::Joint::friction`) off
+    /// (`false`) or put it back (`true`). While the match places a robot
+    /// (`duel::turn_into_place`) nothing holds a hinge in the original: live
+    /// a wheel pulled round onto its start point keeps turning at 0.4-0.6
+    /// rad/s, slowing by under 1 % a substep, until its robot freezes
+    /// (docs/29 section 12w). A burst motor's or piston's joint keeps its
+    /// friction (the game's `Lock`).
+    pub fn joint_friction(&self, physics: &mut dyn PhysicsBackend, on: bool) {
+        for (p, part) in self.rig.parts.iter().enumerate() {
+            let (Some(info), Some(joint)) = (part.joint, self.parts[p].joint) else {
+                continue;
+            };
+            if info.slider || info.use_kind == JointUse::Burst || info.friction_torque <= 0.0 {
+                continue;
+            }
+            let strength = match info.use_kind {
+                JointUse::Passive => 0.0,
+                _ => self.motor_torque[p],
+            };
+            let friction = if on { info.friction_torque } else { 0.0 };
+            physics.set_joint_strength(joint, strength, friction);
+        }
     }
 
     /// Cap every hinge controller of the robot by the load it carries
@@ -1546,7 +1584,7 @@ impl Robot {
         // The joint's pivot and axis are the parent's mount point, in bot space;
         // both bodies express them in their own space (they coincide in the rest
         // pose, which is where the hinge is created).
-        let (pivot_bot, axis_bot) = (info.pivot, info.axis);
+        let (pivot_bot, axis_bot) = (info.anchor, info.axis);
         let frame_a = rig.components[rig.parts[parent].root].local;
         let frame_b = rig.components[rig.parts[p].root].local;
 
