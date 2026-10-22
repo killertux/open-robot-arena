@@ -61,6 +61,9 @@ pub struct Applied {
 /// the stock bots, whose wiring drives the two sides of a robot with opposite
 /// `Spin Clockwise`/`Spin Counter-clockwise` wires.
 const CLOCKWISE: f32 = -1.0;
+/// The game's frame (`FUN_004ac1d0`: two Havok substeps of 1/60 s): its
+/// components tick once a frame with the frame's time.
+pub const FRAME: f32 = 1.0 / 30.0;
 
 /// How far under a wheel the ground still counts as touching it (m): the
 /// `tolerance` of 0.1 the game's `.gmf` hands Havok (`SimulationObject`).
@@ -381,6 +384,17 @@ pub struct Robot {
     burst_timer: Vec<f32>,
     /// Per slider part: the prismatic controller's direction (`+0x80`).
     slider_dir: Vec<f32>,
+    /// Per burst part: a `Fire` press not yet taken by the component's tick
+    /// (`+0x284/+0x285` on a piston, `+0x288/+0x289` on a burst motor).
+    burst_pending: Vec<bool>,
+    /// Per burst part: whether its joint is locked. A lock holds until the
+    /// device unlocks it (`Lock(0)` at the fire and at the end of the
+    /// stroke); arriving at a stop locks it (`0x481450`, `0x4b5240`), and
+    /// nothing in between unlocks it.
+    burst_locked: Vec<bool>,
+    /// Game time since the components last ticked: they tick once a frame
+    /// ([`FRAME`]), not every substep.
+    frame_clock: f32,
     /// Per part: how long a burst device still draws power (`0.6 s` after a
     /// burst motor is triggered, `0.25 s` for a piston: `0x446916`, `0x44880d`).
     burst_draw: Vec<f32>,
@@ -615,6 +629,9 @@ impl Robot {
                 .collect(),
             burst_timer: vec![0.0; rig.parts.len()],
             slider_dir: vec![0.0; rig.parts.len()],
+            burst_pending: vec![false; rig.parts.len()],
+            burst_locked: vec![true; rig.parts.len()],
+            frame_clock: FRAME,
             burst_draw: vec![0.0; rig.parts.len()],
             fire_events: Vec::new(),
             flames: rig
@@ -1676,6 +1693,16 @@ impl Robot {
         // The power step (`0x4dc3f0`): what the motors may use this step. A robot
         // with no source on a channel (a hand-built test rig) is not throttled.
         let dt = physics.last_dt();
+        // The components' own update (`0x448650`, `0x446670`) runs once a
+        // frame, between the frame's two Havok substeps, with the frame's
+        // time; see [`Robot::drive_burst`].
+        let tick = if self.frame_clock >= FRAME - 1e-6 {
+            self.frame_clock -= FRAME;
+            Some(FRAME)
+        } else {
+            None
+        };
+        self.frame_clock += dt;
         self.flame_inputs();
         let (elec_demand, air_demand) = self.power_demand(dt);
         let budgets = self
@@ -1712,7 +1739,7 @@ impl Robot {
                 JointUse::Passive => {}
                 JointUse::Burst => {
                     let scale = if info.slider { air_scale } else { elec_scale };
-                    self.drive_burst(physics, p, info, joint, scale)
+                    self.drive_burst(physics, p, info, joint, scale, tick)
                 }
                 JointUse::Wheel if info.wheel.is_some() && !legacy_wheels() => {
                     let command = self
@@ -1736,7 +1763,7 @@ impl Robot {
                     let dir = self.scaled_percent(info.motor, command, air_scale) as f32;
                     self.slider_dir[p] = dir;
                     let stops = (info.limits[0], info.limits[1]);
-                    self.drive_prismatic(physics, p, info, joint, dir, stops, true);
+                    self.drive_prismatic(physics, p, info, joint, dir, stops, true, false);
                 }
                 JointUse::Spun | JointUse::Wheel | JointUse::Piston => {
                     let command = self
@@ -2051,6 +2078,18 @@ impl Robot {
     /// (`0x4b5180`). The controller pushes with `|direction| · F` (the
     /// definition's raw force) up to the rod speed `S`
     /// ([`PrismaticSettings::force`]).
+    ///
+    /// Both ticks run once a frame (`tick`, the frame's time), between the
+    /// frame's two Havok substeps: a press waits for the next tick, which
+    /// fires and takes its frame off the timer at once, and the stroke ends
+    /// at the tick that takes it below zero; the prismatic controller still
+    /// pushes every substep. Live (docs/29 section 12r, `frida` on `0x448650`,
+    /// `0x446670`, `0x4b51b0`, `0x4815c0`): the ticks come between the
+    /// substep pairs with the frame's time (1/30 s, less when a frame was
+    /// short), and from the one-shot push to the return push the piston
+    /// takes 15 substeps (17 after a short frame), the burst motor from its
+    /// firing setting to its cocking one 34 (36): 0.25 and 0.6 s counted in
+    /// whole frames. Counted every substep they took 17 and 36.
     fn drive_burst(
         &mut self,
         physics: &mut dyn PhysicsBackend,
@@ -2058,11 +2097,17 @@ impl Robot {
         info: JointInfo,
         joint: JointHandle,
         scale: f32,
+        tick: Option<f32>,
     ) {
-        let dt = physics.last_dt();
         // The health factor `f` (`0x45fa90`) as a multiplier.
         let hf = self.motor_factor(info.motor);
-        let fired = self.control.fired(&self.rig.wiring, info.motor);
+        // A press waits for the component's tick, which takes it whatever the
+        // device is doing (`0x448650`: the flags are cleared, then `0x448750`
+        // fires only when cocked).
+        if self.control.fired(&self.rig.wiring, info.motor) {
+            self.burst_pending[p] = true;
+        }
+        let fired = tick.is_some() && std::mem::take(&mut self.burst_pending[p]);
         let position = if info.slider {
             physics.slider_offset(joint)
         } else {
@@ -2089,7 +2134,11 @@ impl Robot {
             BurstPhase::Cocked => {
                 if fired {
                     self.burst[p] = BurstPhase::Firing;
-                    self.burst_timer[p] = if info.slider { 0.25 } else { 0.6 };
+                    self.burst_locked[p] = false;
+                    // Set in the fire call; the same tick then takes its
+                    // frame off (`0x4486a0`, `0x4466c4`).
+                    self.burst_timer[p] =
+                        if info.slider { 0.25 } else { 0.6 } - tick.unwrap_or(0.0);
                     if info.slider {
                         self.slider_dir[p] = (FULL * scale * hf).trunc();
                         // The one-shot push toward the far stop
@@ -2104,10 +2153,13 @@ impl Robot {
                 }
             }
             BurstPhase::Firing => {
-                self.burst_timer[p] -= dt;
-                if self.burst_timer[p] <= 0.0 {
+                if let Some(dt) = tick {
+                    self.burst_timer[p] -= dt;
+                }
+                if tick.is_some() && self.burst_timer[p] <= 0.0 {
                     self.burst_timer[p] = 0.0;
                     self.burst[p] = BurstPhase::Cocking;
+                    self.burst_locked[p] = false;
                     if info.slider {
                         self.slider_dir[p] = (-FULL * hf).trunc();
                     } else {
@@ -2117,7 +2169,7 @@ impl Robot {
                 }
             }
             BurstPhase::Cocking => {
-                if at_home {
+                if tick.is_some() && at_home {
                     self.burst[p] = BurstPhase::Cocked;
                 }
             }
@@ -2159,16 +2211,21 @@ impl Robot {
                 dir,
                 (end, home),
                 phase != BurstPhase::Firing,
+                true,
             );
             return;
         }
-        // The hinge: locked while cocked, and on arriving at the end it is
-        // driven toward (`0x481450`, auto-lock at the stops).
-        let locked = match phase {
-            BurstPhase::Cocked => true,
-            BurstPhase::Firing => at_end,
-            BurstPhase::Cocking => at_home,
-        };
+        // The hinge: on arriving at the end it is driven toward it locks
+        // (`0x481450`, auto-lock at the stops), and stays locked until the
+        // next `Lock(0)`.
+        // Cocked is only reached by arriving home, which locks it.
+        if (phase == BurstPhase::Firing && at_end)
+            || (phase == BurstPhase::Cocking && at_home)
+            || phase == BurstPhase::Cocked
+        {
+            self.burst_locked[p] = true;
+        }
+        let locked = self.burst_locked[p];
         let dir = if end < home { -1.0 } else { 1.0 };
         let percent = match phase {
             BurstPhase::Firing => 100,
@@ -2211,6 +2268,7 @@ impl Robot {
         dir: f32,
         stops: (f32, f32),
         auto_lock: bool,
+        burst: bool,
     ) {
         let position = physics.slider_offset(joint);
         let arrived = (dir > 0.0 && (position - stops.0).abs() < 0.05)
@@ -2219,7 +2277,16 @@ impl Robot {
         // The motor is never used: the controller is a force. A backend without
         // the lock holds the rod on the definition's force as friction.
         physics.drive_slider(joint, 0.0);
-        let locked = hold && auto_lock;
+        // A burst piston's lock is the device's own: set on arrival, cleared
+        // only by its `Lock(0)` ([`Robot::drive_burst`]).
+        let locked = if burst {
+            if hold && auto_lock {
+                self.burst_locked[p] = true;
+            }
+            self.burst_locked[p]
+        } else {
+            hold && auto_lock
+        };
         let lock_supported = physics.lock_joint(joint, locked);
         let friction = if locked && !lock_supported {
             info.friction_torque
