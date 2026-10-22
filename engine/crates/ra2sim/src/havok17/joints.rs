@@ -315,6 +315,50 @@ impl Joint {
         }
     }
 
+    /// A slider's limit again, in each solve pass, before its block
+    /// (`0x555960` → `0x555cc0`, the prismatic atom's pass, vtable
+    /// `0x6ac524 + 0x28`): with the pass's `tau`, an impulse along the axis
+    /// that brings the predicted position `position + rel · dt` back onto the
+    /// stop it would pass, `-(predicted - bound) / dt · tau · m` (the atom's
+    /// limit factor `+0x30` is 1). The hinge's pass (`0x5361e0`) has no such
+    /// step: its limit acts once, at the set-up. The pass also re-runs the
+    /// atom's motor, which our sliders do not use (the game drives a piston's
+    /// rod and the hazards' sliders with forces, docs/29 section 12r).
+    fn limit_pass(&self, bodies: &mut [Body], dt: f32, tau: f32) {
+        if !self.limited || !matches!(self.kind, Kind::Slider { .. }) {
+            return;
+        }
+        let Some((axis, false)) = self.free_axis(bodies) else {
+            return;
+        };
+        let (a, b) = (&bodies[self.a], &bodies[self.b]);
+        let (pa, pb) = self.anchors(bodies);
+        let (ra, rb) = (pa - a.com, pb - b.com);
+        let part = |body: &Body, r: Vec3| {
+            if body.is_dynamic() {
+                body.inv_mass + r.cross(axis).dot(body.inv_inertia_world * r.cross(axis))
+            } else {
+                0.0
+            }
+        };
+        let k = part(a, ra) + part(b, rb);
+        if k <= 1e-12 {
+            return;
+        }
+        let rel = axis.dot(b.point_velocity(pb) - a.point_velocity(pa));
+        let predicted = rel * dt + self.position(bodies);
+        let bound = if predicted > self.limits[1] {
+            self.limits[1]
+        } else if predicted < self.limits[0] {
+            self.limits[0]
+        } else {
+            return;
+        };
+        let lambda = -(predicted - bound) / dt * tau / k;
+        bodies[self.b].apply_impulse_at(axis * lambda, pb);
+        bodies[self.a].apply_impulse_at(-axis * lambda, pa);
+    }
+
     /// Solve the locked block once with the pass factors.
     fn solve_block(&self, bodies: &mut [Body], rows: &[Row], dt: f32, tau: f32, damping: f32) {
         let (a, b) = (&bodies[self.a], &bodies[self.b]);
@@ -428,6 +472,7 @@ pub fn solve(bodies: &mut [Body], joints: &mut [Joint], dt: f32) {
     }
     for (tau, damping) in PASSES {
         for (i, rows) in &blocks {
+            joints[*i].limit_pass(bodies, dt, tau);
             joints[*i].solve_block(bodies, rows, dt, tau, damping);
         }
     }

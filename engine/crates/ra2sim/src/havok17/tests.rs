@@ -396,3 +396,80 @@ fn a_motor_switched_back_on_keeps_its_old_target() {
         "the target was reset: parked {parked}, resumed {resumed}, angle {angle}"
     );
 }
+
+/// `Lock(1)` stops the driven body dead in the world (`0x480e66..0x480e89`:
+/// its velocity and angular velocity set to the zero vector), not only
+/// relative to its parent (docs/29 section 12r).
+#[test]
+fn a_lock_stops_the_driven_body_in_the_world() {
+    let mut physics = Havok17Backend::new().unwrap();
+    let base = physics
+        .create_body(&BodyDesc::new(
+            MotionType::Static,
+            ShapeDesc::Box {
+                half_extents: Vec3::splat(0.1),
+            },
+        ))
+        .unwrap();
+    let arm = physics
+        .create_body(
+            &BodyDesc::new(
+                MotionType::Dynamic,
+                ShapeDesc::Box {
+                    half_extents: Vec3::new(0.5, 0.05, 0.05),
+                },
+            )
+            .at(Vec3::new(0.8, 0.0, 0.0))
+            .with_mass(10.0),
+        )
+        .unwrap();
+    let mut desc = HingeDesc::new(base, arm, Vec3::ZERO, Vec3::Z);
+    desc.anchor_b = Vec3::new(-0.8, 0.0, 0.0);
+    let hinge = physics.create_hinge(&desc).unwrap();
+    for _ in 0..10 {
+        physics.step(1.0 / 60.0);
+    }
+    let swinging = physics.state(arm).unwrap();
+    assert!(swinging.angular_velocity.length() > 0.5, "the arm swings");
+    physics.lock_joint(hinge, true);
+    let held = physics.state(arm).unwrap();
+    assert_eq!(held.linear_velocity, Vec3::ZERO);
+    assert_eq!(held.angular_velocity, Vec3::ZERO);
+    // Locking again while locked changes nothing; unlocking leaves it as is.
+    physics.set_velocity(arm, Vec3::X, Vec3::ZERO);
+    physics.lock_joint(hinge, true);
+    assert_eq!(physics.state(arm).unwrap().linear_velocity, Vec3::X);
+}
+
+/// A phantom is listed only while it overlaps (docs/29 sections 12d, 12i,
+/// 12r): a sphere 5 cm above the floor touches nothing, inside the 0.1 m
+/// tolerance or not; let down 5 cm into it, it touches.
+#[test]
+fn a_phantom_touches_only_what_it_overlaps() {
+    let mut physics = Havok17Backend::new().unwrap();
+    floor(&mut physics);
+    let make = |physics: &mut Havok17Backend, x: f32, y: f32| {
+        physics
+            .create_body(
+                &BodyDesc::new(
+                    MotionType::Static,
+                    ShapeDesc::Box {
+                        half_extents: Vec3::splat(0.05),
+                    },
+                )
+                .at(Vec3::new(x, y, 0.0))
+                .with_phantom(ShapeDesc::Sphere { radius: 0.5 }),
+            )
+            .unwrap()
+    };
+    let above = make(&mut physics, -3.0, 0.55);
+    let into = make(&mut physics, 3.0, 0.45);
+    physics.step(1.0 / 60.0);
+    assert_eq!(
+        physics.phantom_touch(above),
+        None,
+        "5 cm clear of the floor"
+    );
+    let n = physics.phantom_touch(into).expect("5 cm into the floor");
+    assert!(n.y.abs() > 0.9, "the floor's normal: {n}");
+}

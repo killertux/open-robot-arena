@@ -12,6 +12,15 @@ use crate::scene::{self, ArenaScene, USER_ARENA, USER_PROP};
 use crate::scriptai::ScriptAi;
 use crate::sim::{DriveInput, DriveTuning, PropEntity, BOT_FORWARD};
 
+/// How high above the floor under its start point a robot's origin (the
+/// `.bot`'s, its chassis body's) is held through the intro and let go at the
+/// bell. Live (docs/29 section 12r, `spawn-*__live__000`): Scout, ALARM, Razor
+/// and FlapJack in the Combat Arena, Scout and ALARM in the Compressor, all
+/// at the floor plus 0.3975 m to the millimetre whatever their shape, so each
+/// falls 0.20-0.21 m onto its wheels. The code that places them was not
+/// located (a constant of the arena's floor, not of the start point's height).
+pub const SPAWN_ABOVE_FLOOR: f32 = 0.3975;
+
 /// A part that has been knocked off a robot.
 pub struct Debris {
     pub body: BodyHandle,
@@ -697,7 +706,7 @@ impl Duel {
                 // `Collision Box`, docs/29 section 12h) has a roof to land on.
                 let above = starts.first().map(|(p, _)| p.y + 1.0);
                 let floor = Self::floor_at(&*physics, &arena, at[0], at[1], above);
-                let position = Vec3::new(at[0], floor + 0.06 - rig.min.y, at[1]);
+                let position = Vec3::new(at[0], floor + SPAWN_ABOVE_FLOOR, at[1]);
                 // `yaw_deg` is where the robot's *front* points, as `-Z` turned
                 // by it; the front itself is `+Z` turned by the `.bot` heading
                 // ([`rig::RobotRig::forward`]).
@@ -728,7 +737,7 @@ impl Duel {
                 ),
             };
             let floor = Self::floor_at(&*physics, &arena, x, z, start_y);
-            let position = Vec3::new(x, floor + 0.06 - rig.min.y, z);
+            let position = Vec3::new(x, floor + SPAWN_ABOVE_FLOOR, z);
 
             // Face where the start point says, else the centre of the arena.
             let to_centre = Vec3::new(centre.x - x, 0.0, centre.z - z);

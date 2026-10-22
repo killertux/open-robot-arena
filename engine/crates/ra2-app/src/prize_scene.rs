@@ -42,9 +42,11 @@ use ra2sim::{BotSetup, DriveInput, Duel};
 const STEP: f32 = 1.0 / 60.0;
 /// How much higher the original drops the pad robot from than the duel's own
 /// spawn (docs/36 section 9.23): live, the chassis starts 0.226 m above where
-/// it rests, ours 0.104 m (the same measure; the match spawn is lower by about
-/// as much, which is open).
-const SPAWN_LIFT: f32 = 0.122;
+/// it rests. The duel now spawns a robot's origin at the floor plus
+/// [`ra2sim::duel::SPAWN_ABOVE_FLOOR`] (the match rule, docs/29 section 12r),
+/// from which C.R.U.S.H. falls 0.160 m; the pad drop was not captured with
+/// the floor in view, so the remainder is kept as it was measured.
+const SPAWN_LIFT: f32 = 0.066;
 
 /// `Arenas/event_results.py`: `AddStaticCamera("fixed cam", ...)`.
 pub const CAMERA_POSITION: [f32; 3] = [0.0, 3.95, -11.88];

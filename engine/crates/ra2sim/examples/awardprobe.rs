@@ -31,7 +31,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n = (secs / dt) as usize;
     for i in 0..=n {
         let s = duel.physics.state(duel.robots[0].body()).unwrap();
-        if i % 1200 == 0 {
+        let every: usize = std::env::var("EVERY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1200);
+        if i % every == 0 {
             let fwd = s.rotation * Vec3::Z;
             println!(
                 "{:6.2} h={:.4} pos=({:.3} {:.3} {:.3}) v=({:.3} {:.3} {:.3})",

@@ -307,3 +307,69 @@ fn a_spinner_spins_up_to_the_live_plateau() {
     d.step_direct(&[DriveInput::default()], DT);
     assert_eq!(cmd(&d), 0.0);
 }
+
+/// ALARM's hammer rod, fired: pushed out, it lands on its stop and stays there
+/// (the prismatic atom re-solves its limit in every solver pass, `0x555960` →
+/// `0x555cc0`), and it starts back 14 substeps after it started out (the
+/// piston's tick runs once a frame, `0x448650`). Live (docs/29 section 12r,
+/// `tipab-alarm-box-hammer__live__000`, ALARM on its tail): out at 5.4, 10.2,
+/// 15.0, 12.8 m/s and dead at the stop, 0.000-0.001 m from it, until the
+/// return; the rod's first step back 14 substeps after its first step out
+/// (the return push 15 after the one-shot push).
+#[test]
+fn alarms_rod_stops_dead_at_its_stop_for_a_frame_counted_stroke() {
+    let game = game!();
+    let _scripts = ra2script::lock();
+    let mut d = duel(&game, "AI/Team0/Bot1.bot", 60);
+    let p = parts_of(&d, JointUse::Burst)[0];
+    let joint = d.robots[0].parts[p].joint.unwrap();
+    let name = control_of(&d, p);
+    d.robots[0].apply_inputs(&[(name, 0, 1.0)]);
+    let offsets: Vec<f32> = (0..40)
+        .map(|_| {
+            d.step_direct(&[DriveInput::default()], DT);
+            d.physics.slider_offset(joint)
+        })
+        .collect();
+    let out = offsets.iter().position(|o| *o < -0.005).expect("it fires");
+    let end = offsets
+        .iter()
+        .position(|o| *o < -0.725)
+        .expect("it reaches its stop");
+    let back = (end..offsets.len())
+        .find(|&i| offsets[i] > -0.725)
+        .expect("it returns");
+    for o in &offsets[end..back] {
+        assert!((o + 0.73).abs() < 0.002, "off its stop: {offsets:?}");
+    }
+    assert_eq!(back - out, 14, "the stroke in substeps: {offsets:?}");
+}
+
+/// The Scout's fork: from its firing setting to its cocking one, 34 substeps,
+/// 0.6 s counted in whole frames by the burst motor's tick (`0x446670`). Live
+/// (docs/29 section 12r, `0x4815c0` against the substeps): 34 or 36 (36 after
+/// a short frame). Counted every substep it took 36.
+#[test]
+fn the_scouts_fork_cocks_two_frames_short_of_counting_substeps() {
+    let game = game!();
+    let _scripts = ra2script::lock();
+    let mut d = duel(&game, "AI/Team0/Bot0.bot", 60);
+    let p = parts_of(&d, JointUse::Burst)[0];
+    let name = control_of(&d, p);
+    let speed = |d: &Duel| d.robots[0].hinge_settings(p).unwrap().velocity(100);
+    let cocked = speed(&d);
+    d.robots[0].apply_inputs(&[(name, 0, 1.0)]);
+    let mut fired_at = None;
+    let mut cocked_at = None;
+    for i in 0..60 {
+        d.step_direct(&[DriveInput::default()], DT);
+        let s = speed(&d);
+        if fired_at.is_none() && s != cocked {
+            fired_at = Some(i);
+        } else if fired_at.is_some() && cocked_at.is_none() && s == cocked {
+            cocked_at = Some(i);
+        }
+    }
+    let (f, c) = (fired_at.expect("it fires"), cocked_at.expect("it cocks"));
+    assert_eq!(c - f, 34, "fired at {f}, cocking at {c}");
+}

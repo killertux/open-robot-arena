@@ -700,8 +700,14 @@ impl Havok17Backend {
     }
 
     /// Which surfaces the bodies' phantoms touch now (the phantom events at the
-    /// end of `stepTo`). A phantom is a collidable flagged `DISABLE_COLLISIONS`:
-    /// detected like any other, within the tolerance, but never resolved.
+    /// end of `stepTo`). A phantom is a collidable flagged `DISABLE_COLLISIONS`,
+    /// never resolved, and its pair is listed only while it overlaps: at a
+    /// negative distance, as a SmartZone's (docs/29 sections 12d, 12i), not
+    /// within the tolerance a solid pair is detected at. Live (section 12r):
+    /// ALARM on its tail, its rear wheels' traction rings 0.07-0.09 m off the
+    /// floor, has none of its wheels touching and so no thrust, and a robot
+    /// rolling back onto its wheels finds each wheel touching only once its
+    /// ring reaches the floor.
     fn detect_phantoms(&mut self) {
         for i in 0..self.bodies.len() {
             self.phantom_touch[i] = None;
@@ -713,8 +719,7 @@ impl Havok17Backend {
                 continue;
             };
             let id = self.geometry[i].as_ref().map(|g| g.id);
-            let query = CollideShape::new(phantom, rv(b.origin()), jq(b.rotation))
-                .max_separation_distance(TOLERANCE);
+            let query = CollideShape::new(phantom, rv(b.origin()), jq(b.rotation));
             let filter = match id {
                 Some(id) => QueryFilter::new().exclude_body(id),
                 None => QueryFilter::new(),
@@ -732,7 +737,7 @@ impl Havok17Backend {
                     continue;
                 }
                 let n = un_v(hit.normal);
-                if n.length_squared() < 0.5 || -hit.penetration_depth >= TOLERANCE {
+                if n.length_squared() < 0.5 || hit.penetration_depth < 0.0 {
                     continue;
                 }
                 if best.is_none_or(|(d, _)| hit.penetration_depth > d) {
@@ -1402,6 +1407,19 @@ impl PhysicsBackend for Havok17Backend {
                 j.limited = true;
                 j.motor = false;
                 j.target_velocity = 0.0;
+                // And the driven body stops dead, in the world, not relative
+                // to its parent: both locks set its velocity and angular
+                // velocity (`+0x54`, `+0x64`) to the zero vector `0x71abcc`
+                // (`0x480e66..0x480e89`, `0x4b5110..0x4b513d`). Live
+                // (docs/29 section 12r): ALARM's rod, locked home while the
+                // robot falls at 3.3 m/s, leaves its stop at +3.30 m/s.
+                let b = j.b;
+                if let Some(body) = self.bodies.get_mut(b) {
+                    if body.is_dynamic() {
+                        body.velocity = Vec3::ZERO;
+                        body.angular_velocity = Vec3::ZERO;
+                    }
+                }
             }
             (false, Some((limits, limited))) => {
                 j.limits = limits;

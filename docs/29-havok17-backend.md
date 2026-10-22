@@ -2650,3 +2650,180 @@ as before.
 **Still open.** Why our ALARM tips over in half its tips where live recovers
 from five in seven (above); the wheels' transverse moments; Sentinel's wheels
 sag 6-11 mm less on their hinges than live under its 296 kg chassis.
+
+### 12r. Controlled tips against live; the piston's limit, locks and ticks, the wheels' traction phantoms, the spawn height (fx/tip-ab)
+
+Fight ensembles are too chaotic to say why our ALARM ends on its back so
+often, so this round compares the two engines from identical states, one
+mechanism at a time.
+
+**The experiment.** New agent `frida/ra2_tipab.js` with
+`tools/oracle/capture_tipab.py` (a box match, both AIs neutered, hazards off;
+the immobility rule's 20 s raised in the process's memory only, `0x6a57f0`, so
+the match is not ended by a robot standing still): at the head of every
+`World::stepTo` (`0x52aa60`) it holds every body of a robot 1 m up and still
+for 30 substeps (so no contact of the old pose is left), then turns the rest
+pose rigidly about the chassis' centre of mass, sets the centre, and gives each
+body `v + w × r` and `w`, writing the body's centre (`+0x30`), quaternion
+(`+0x40` w, `+0x44` x y z), velocity (`+0x54`) and angular velocity (`+0x64`)
+and calling the body's own sync (`0x520750`: the rotation matrix `+0xcc` from
+the quaternion, `+0xf0` from the centre, the world inverse inertia `+0x10c`,
+the version count `+0x25c`). The integrator state is exactly these
+(`0x520fb0` packs centre, quaternion, `m v`, `ω`; `0x521160`, the
+derivative: `ω` integrates as `0.5 ω ⊗ q`, `dω = I_w⁻¹ τ`, no gyroscopic term,
+as §2). The weapon is fired, and the robot driven, through its AI
+(`Input("Fire")`, `Throttle`, `Turn`); when that landed shows in the rows.
+`examples/tipprobe.rs` places ours from the live placed state (`X` row) and
+steps it the same way (`TIPPROBE_DRIVE`, fire time, `TIPPROBE_PHASE`). The
+robot rests and is placed at its rest heights from our solid geometry (the
+wheels' hull points include the traction rings, 0.0975 m below the solid
+wheel).
+
+New live captures (three fresh sessions on `:7`, prefix sha256 checked before
+and after each; manifest rows in `manifest-additions-2026-10-21-tip-ab.tsv`):
+`tipab-alarm-box__live__000..002`, `tipab-alarm-box-hammer__live__000`,
+`tipab-alarm-box-drive__live__000`, `tipab-scout-box-fork__live__000`,
+`spawn-scout-alarm-box__live__000`, `spawn-scout-alarm-compressor__live__000`,
+`spawn-razor-flapjack-box__live__000`, `burstticks-scout-alarm-box__live__000..001`.
+
+**Tips, no weapon, no drive: the same.** 46 trials (pitch over the tail from
+-60, -90, -110 and -120 degrees, roll to either side from 45, 60, 70 and 75,
+`w` 0-4 rad/s about the same axis, drops of 0.3 m at 10-20 degrees): every
+outcome agrees (on the wheels, on the tail, on the back), and so does `up.y`
+at 0.25-4 s to 0.01-0.05, the contact points in the chassis frame to the
+centimetre and `w` step by step until the robot lands. The thresholds: from
+-90 (on the tail) ALARM goes over at 4 rad/s and recovers at 3 in both; from
+-110 it goes over with 2 rad/s and recovers with 1; a roll from 60 degrees
+recovers at 2 rad/s and falls at 3-4. Near the threshold our roll loses
+0.2-0.4 rad/s more on the side edge, so ours is, if anything, the steadier. In
+the first set (`__000`) the placement put the chassis' side edge 2 mm into the
+floor: live that pair produced no contact at all and the robot sank 11 cm
+into the floor until its wheels caught it, ours held it at the overlap; not
+followed (a placement artefact; a fight reaches it only after a bad step).
+
+**The hammer (`tipab-alarm-box-hammer__live__000`): three differences.**
+Fired on its tail, on its back and on its side, step by step (ALARM on its
+tail, hopping):
+
+| step | live rod (chassis frame) | ours before | ours after |
+|---|---|---|---|
+| out | 5.4, 10.2, 15.0, 12.8 m/s, then 0.000 at the stop | 13.5, then +0.45 past the stop, back in at -0.7 m/s | as live |
+| held out | at the stop to the millimetre for 10 substeps | drifts 6 cm in; pushed out again at +3.8 (+0.55 m/s to the robot) | as live |
+| back | 14 substeps after it started out | 16 | 14 |
+| home | +3.30 then -3.32 m/s, the robot falling at -3.30 | stops dead | as live |
+
+* *A prismatic's limit is re-solved in every solver pass (recovered).* The
+  prismatic atom (vtable `0x6ac524`: set-up `+0x24` `0x555080`, pass `+0x28`
+  `0x555960`) re-runs its motor and limit (`0x555cc0`) in each of the four
+  passes before its block, with the pass's `tau`: an impulse that brings the
+  predicted position `x + v_rel · dt` back onto the stop it would pass,
+  `-(predicted - bound) / dt · tau · m` (the atom's limit factor `+0x30` is
+  1). The hinge's pass (`0x5361e0`) does not; its limit acts at the set-up
+  only, as ours. Ours set the slider's limit once, and the hinges' passes on
+  the wheels then moved the chassis under it: the rod overshot by 5-12 mm and
+  the correction threw it back in. `joints::Joint::limit_pass`. The atom's
+  pass also re-runs its motor, which advances the motor's target in every pass
+  (`0x555ea1..0x555eb9`); our sliders do not use the motor (a piston's rod and
+  the hazards' sliders are driven by forces in the game), so it is not built.
+* *A lock stops the driven body in the world (recovered).* `Lock(1)` of the
+  hinge (`0x480e20`) and the prismatic controller (`0x4b50c0`) collapse the
+  limits onto the joint's position and set the driven body's velocity and
+  angular velocity to the zero vector `0x71abcc` (`0x480f00`, `0x480ef0`):
+  absolute, not relative to the parent. So the rod, locked home while ALARM
+  falls at 3.3 m/s, leaves its stop at +3.30 m/s. A lock holds until the
+  device's own `Lock(0)` (the fire, `0x448750`/`0x446810`, and the end of the
+  stroke, `0x4486c4`/`0x4466f4`); arriving at the stop it is driven toward
+  locks it (`0x4b5240`, `0x481450`) and nothing in between unlocks it. Ours
+  unlocked whenever the joint was 0.05 off the stop. `lock_joint` zeroes the
+  child; `Robot::burst_locked`.
+* *A burst device ticks once a frame (verified live).* `burstticks-*`: the
+  piston's and the burst motor's ticks (`0x448650`, `0x446670`) come between
+  the frame's two substeps with the frame's time (1/30 s, less when a frame
+  was short: 0.009-0.033 live), the fire is taken at the tick (the press flags
+  `+0x284/+0x285`) which takes its frame off the new timer at once, and the
+  prismatic controller pushes every substep. From the one-shot push to the
+  return push the piston takes 15 substeps (17 after a short frame, six
+  firings), the fork from its firing setting to its cocking one 34 (36, six
+  firings): 0.25 and 0.6 s in whole frames. Ours ticked every substep, 17 and
+  36. `Robot::frame_clock`, `FRAME`; the fork's stroke then matches live step
+  for step (`tipab-scout-box-fork__live__000`: -18.7, -10.5 rad/s, at rest
+  from the fourth substep, cocking 34 substeps after the fire).
+
+**Driving while tipped: the wheels' traction phantoms touch only when they
+overlap (verified live).** `tipab-alarm-box-drive__live__000` drives ALARM at
+rest, on its tail and while it tips (`G` rows: each wheel's thrust and
+touching flag). Live, ALARM on its tail at `up.y` -0.39 with full throttle has
+no wheel touching and so no thrust, until it settles to `up.y` -0.19; ours had
+both rear wheels touching from the start, so the thrust drove it 3 m off and
+back onto its wheels where live stayed on its tail. Our rear rings were
+0.07-0.09 m off the floor there: ours listed a phantom's pair within the 0.1 m
+tolerance, as a solid pair. A SmartZone's pair is listed only at a negative
+distance (§12d, §12i), and so is a wheel's: rolling back onto its wheels live
+each wheel turns touching within a frame of its ring reaching the floor, ours
+up to 0.1 m before. `Havok17Backend::detect_phantoms` now asks for overlap.
+After it the drive trials follow live (on the tail at 1.5 s, `up.y` -0.10 /
+-0.06; the wheels' touching flags within a few substeps of live); ours then
+wheelies about 10 % faster (live's battery had run down: thrust 1802-1822,
+ours 1940) and comes down at 2.5-3 s where live keeps the wheelie to 4 s.
+
+**The spawn height (verified live; coordinator's lead).** `spawn-*__live__000`
+(the agent loaded before Start Game): each robot is put at its start point,
+lowered, held still through the intro and let go at the bell. Its origin (the
+`.bot`'s, our chassis body's) is then at the floor under the start point plus
+0.3975 m, for Scout, ALARM, Razor and FlapJack in the Combat Arena and Scout
+and ALARM in the Compressor alike (the start points stand 1.75 and 1.30 m over
+those floors, so it is the floor, not the start point); each falls 0.20-0.21 m
+(-2.2 m/s at the floor), and ours fell 0.12 (FlapJack 0.16). `SPAWN_ABOVE_FLOOR`
+now puts all six to 0.2 mm. The code that places them was not located (a
+`0.4` near a `0.03` and a `5` at `0x403d83` was looked at, not followed). The
+award scene's extra lift (`prize_scene::SPAWN_LIFT`, docs/36 §9.23) is reduced
+to keep its measured 0.226 m drop.
+
+**The mirror lead (coordinator's).** No sign or handedness error shows in the
+tips: both roll directions, both pitch directions and the drops agree to
+0.03 in `up.y`, and the post-landing yaw drift differs by a few degrees either
+way. A 10 s rest creep of ALARM (`tipab-alarm-box-hammer__live__000` trial 0)
+wanders +4 degrees live and ±1 ours, too short to call. The award scene's
+Atom Smasher still turns +0.0157 rad/s (live -0.0145) after this round; not
+followed.
+
+**Fights.** With all of it, our ALARM still tips more often than live and goes
+over more often when it tips. Live box fights with bodies
+(`fightcontacts-...__live__000..006`, 277 s): 7 tips (`up.y` through 0.5), 1 to
+the back, all with the Scout in contact; ours (12 runs, 46 s, 552 s): 18 tips,
+8 to the back, all with the Scout in contact, 10 of them rolls, several at 4-6
+rad/s after the Scout's fork has gone under ALARM's side (live one roll, at 2
+rad/s).
+In the tips we read, ALARM's brain keeps its `Engage` tactic for up to a
+second after it is past vertical (tactics are re-evaluated once a second,
+`SuperAI.Tick`), turning or driving on its tail: live the same mechanism, with
+the evaluation landing earlier in the live cases. The fork's own stroke now
+matches live; what the fork does to ALARM's side was not isolated.
+
+**Validation.** Before = `fidelity` bed66ad built from a clean tree (it
+reproduces §12q's after column to the digit), after = this branch.
+`FIDTRACE_WARMUP` ensembles, 24 runs each, counted = `>= 10` on the other
+robot, robot hits only, mean (total), mean length, full-length runs:
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6) | 21.4 (71) sd 22 / 4.1, 67 s, 2/24 | 20.0 (139) sd 15 / 3.6, 94 s, 10/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 14/24 | 15/24 |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 4.4 (133) / 0.5, 69 s, 3/24 | 5.7 (99) / 0.9, 58 s, 2/24 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 67.9 (278) sd 41 / 3.9, 98 s, 14/24 | 71.2 (295) sd 36 / 3.9, 97 s, 16/24 |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 12.5 (56) sd 15 / 2.2, 68 s, 4/24 | 16.5 (64) sd 17 / 2.6, 78 s, 5/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | | 19/24 | 18/24 |
+
+AI suite (ten pairings, warmup 0): 10/10 deal damage before and after; every
+pairing changes (the spawn moves every opening). Within the ensembles' scatter
+(a 24-run mean moves by about one standard error, 3-4 counted hits, and the
+on-its-back count by 2-3) nothing moved beyond it except the box fights'
+length (67 → 94 s, 2 → 10 full): ALARM's falls are not what these mechanisms
+were, though each of them is what the original does.
+
+**Still open.** What the Scout's fork does to ALARM's side (a two-robot
+placement, the next controlled experiment); the prismatic atom's motor
+re-run per pass (unused by our sliders); the hazards' sliders still use our
+velocity motor and our own arrival lock (not the sticky lock above); the
+placing code of the spawn; the initially overlapping pair; the award scene's
+Atom Smasher creep.
