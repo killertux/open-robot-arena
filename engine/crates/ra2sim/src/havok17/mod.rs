@@ -620,13 +620,13 @@ impl Havok17Backend {
         };
         let same = (tol * tol) * narrow::MESH_DUPLICATE;
         // The candidate triangles: within the tolerance of a fixed mesh's
-        // (its MOPP query, `FUN_0054a080`), within half of it between two
-        // moving meshes' trees (`FUN_00549d00` → `FUN_00550100`).
-        let margin = if self.bodies[pb.body].moves() {
-            tol * 0.5
-        } else {
-            tol
-        };
+        // (its MOPP query, `FUN_0054a080`); between two moving meshes the two
+        // trees are walked together (`FUN_00549d00` → `FUN_00550100`) and a
+        // pair of boxes is kept unless the separating-axis test
+        // (`FUN_00557870`) parts them with *each* box's half extents grown by
+        // half the tolerance: a whole tolerance between them, as here. No
+        // pair of triangles within the tolerance is left out either way.
+        let margin = tol;
         for ta in &ma.triangles {
             let tri_a = ta.map(|v| pa.pose.apply(ma.vertices[v as usize]));
             let local = Aabb::of(tri_a.iter().map(|v| pb.pose.inverse_apply(*v))).grown(margin);
@@ -822,6 +822,20 @@ impl Havok17Backend {
                 dump_vec(b.angular_velocity),
                 r
             ));
+        }
+    }
+
+    /// The `V` rows of [`dump_line`]: every dynamic body as the resolver
+    /// leaves it (with the `B` rows, each body's contact impulse).
+    fn dump_resolver_exit(&self) {
+        for (i, b) in self.bodies.iter().enumerate() {
+            if b.is_dynamic() {
+                dump_line(format_args!(
+                    "[\"V\",0,\"h{i}\",{},{}]",
+                    dump_vec(b.velocity),
+                    dump_vec(b.angular_velocity)
+                ));
+            }
         }
     }
 
@@ -1040,6 +1054,9 @@ impl PhysicsBackend for Havok17Backend {
             let contacts = std::mem::take(&mut self.contacts);
             resolver::resolve(&mut self.bodies, &contacts, TOLERANCE);
             self.contacts = contacts;
+            if dumping() {
+                self.dump_resolver_exit();
+            }
             // 3: integrate and detect, halving the step on a bad detection.
             let saved = self.save();
             let mut backsteps = 0;

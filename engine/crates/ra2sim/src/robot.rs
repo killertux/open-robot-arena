@@ -395,6 +395,9 @@ pub struct Robot {
     /// Game time since the components last ticked: they tick once a frame
     /// ([`FRAME`]), not every substep.
     frame_clock: f32,
+    /// A diagnostic's schedule of component ticks ([`Robot::set_tick_schedule`]):
+    /// per drive step from now, the tick's time or none.
+    tick_schedule: std::collections::VecDeque<Option<f32>>,
     /// Per part: how long a burst device still draws power (`0.6 s` after a
     /// burst motor is triggered, `0.25 s` for a piston: `0x446916`, `0x44880d`).
     burst_draw: Vec<f32>,
@@ -632,6 +635,7 @@ impl Robot {
             burst_pending: vec![false; rig.parts.len()],
             burst_locked: vec![true; rig.parts.len()],
             frame_clock: FRAME,
+            tick_schedule: std::collections::VecDeque::new(),
             burst_draw: vec![0.0; rig.parts.len()],
             fire_events: Vec::new(),
             flames: rig
@@ -1655,6 +1659,19 @@ impl Robot {
             .set_drive(&self.rig.wiring, input.throttle, input.steer);
     }
 
+    /// Whether the components tick ([`FRAME`]) at the next drive step.
+    pub fn tick_due(&self) -> bool {
+        self.frame_clock >= FRAME - 1e-6
+    }
+
+    /// Tick the components on the coming drive steps as a live capture did
+    /// (diagnostics replaying the original's irregular frames): one entry per
+    /// drive step, the tick's time or none; after the schedule the frame
+    /// clock takes over again.
+    pub fn set_tick_schedule(&mut self, ticks: impl IntoIterator<Item = Option<f32>>) {
+        self.tick_schedule = ticks.into_iter().collect();
+    }
+
     /// The AI's `Input(name, slot, value)` calls, in order.
     pub fn apply_inputs(&mut self, events: &[(String, i32, f32)]) {
         for (name, slot, value) in events {
@@ -1696,13 +1713,18 @@ impl Robot {
         // The components' own update (`0x448650`, `0x446670`) runs once a
         // frame, between the frame's two Havok substeps, with the frame's
         // time; see [`Robot::drive_burst`].
-        let tick = if self.frame_clock >= FRAME - 1e-6 {
-            self.frame_clock -= FRAME;
-            Some(FRAME)
+        let tick = if let Some(t) = self.tick_schedule.pop_front() {
+            t
         } else {
-            None
+            let t = if self.frame_clock >= FRAME - 1e-6 {
+                self.frame_clock -= FRAME;
+                Some(FRAME)
+            } else {
+                None
+            };
+            self.frame_clock += dt;
+            t
         };
-        self.frame_clock += dt;
         self.flame_inputs();
         let (elec_demand, air_demand) = self.power_demand(dt);
         let budgets = self

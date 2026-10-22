@@ -344,6 +344,64 @@ fn a_mesh_plate_rests_on_the_floor_with_distinct_points() {
     }
 }
 
+/// A thin box as a mesh collidable on a moving body, centred at `at`.
+fn mesh_slab(physics: &mut Havok17Backend, at: Vec3) -> BodyHandle {
+    let mut points = Vec::new();
+    for x in [-0.5, 0.5] {
+        for y in [-0.05, 0.05] {
+            for z in [-0.5, 0.5] {
+                points.push(Vec3::new(x, y, z));
+            }
+        }
+    }
+    let quads = [
+        [0, 1, 3, 2],
+        [4, 6, 7, 5],
+        [0, 4, 5, 1],
+        [2, 3, 7, 6],
+        [0, 2, 6, 4],
+        [1, 5, 7, 3],
+    ];
+    let indices: Vec<[u32; 3]> = quads
+        .iter()
+        .flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]])
+        .collect();
+    physics
+        .create_body(
+            &BodyDesc::new(MotionType::Dynamic, ShapeDesc::MeshHull { points, indices })
+                .at(at)
+                .with_mass(30.0),
+        )
+        .unwrap()
+}
+
+/// Two moving meshes whose nearest edges are 0.08 m apart along a diagonal,
+/// their triangles' boxes 0.057 m apart on two axes: the original walks both
+/// trees with each box grown by half the tolerance (`FUN_00557870` called
+/// from `FUN_00550100` with `0.5 · tol`), a whole tolerance between them, and
+/// reports the pair. Grown by half the tolerance in all, the pair was lost:
+/// the Scout's fork arm lost ALARM's side edge at 0.088-0.096 m, where the
+/// live resolver kept pushing on it (docs/29 section 12s).
+#[test]
+fn two_moving_meshes_meet_within_a_whole_tolerance() {
+    let mut physics = Havok17Backend::new().unwrap();
+    let off = 0.08 / 2f32.sqrt();
+    let a = mesh_slab(&mut physics, Vec3::ZERO);
+    let b = mesh_slab(&mut physics, Vec3::new(1.0 + off, 0.1 + off, 0.0));
+    let (contacts, bad) = physics.detect(TOLERANCE * 0.5);
+    assert!(bad.is_empty());
+    let pair: Vec<_> = contacts
+        .iter()
+        .filter(|k| {
+            (k.a, k.b) == (a as usize, b as usize) || (k.a, k.b) == (b as usize, a as usize)
+        })
+        .collect();
+    assert!(!pair.is_empty(), "no contact between the slabs");
+    for k in &pair {
+        assert!((k.distance - 0.08).abs() < 1e-3, "{k:?}");
+    }
+}
+
 /// The hinge motor's target angle survives the motor being switched off and
 /// on (`0x5355a0` only moves it by whole turns): live, the Scout's fork locks
 /// at -1.18 rad with its target at -2.59 and the cocking motor starts from
