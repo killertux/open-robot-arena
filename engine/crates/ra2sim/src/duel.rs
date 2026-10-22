@@ -485,6 +485,15 @@ pub struct Duel {
     /// begins (`FUN_00412fc0` requires `+0x8e`, "fighting").
     pub immobility_active: bool,
     immobility: crate::immobility::Tracker,
+    /// Network play: which end of the match this duel is (docs/38 §6.1). A
+    /// joiner prices nothing itself: its own hits, immobility rule and script
+    /// eliminations are discarded and the host's scoring events are applied
+    /// instead ([`Duel::apply_remote_hit`] and friends).
+    pub net_role: crate::netevent::NetRole,
+    /// Host: the scoring events not yet sent.
+    pub net_events: Vec<crate::netevent::NetEvent>,
+    /// A host hit is being applied on this joiner.
+    net_applying: bool,
     /// Per-robot AI state (the stand-in driver).
     ai: Vec<AiState>,
     /// The game's own AI, when its scripts loaded and the bots are known to it.
@@ -869,6 +878,9 @@ impl Duel {
             impacts: Vec::new(),
             material_contacts: Vec::new(),
             immobility: crate::immobility::Tracker::default(),
+            net_role: crate::netevent::NetRole::Local,
+            net_events: Vec::new(),
+            net_applying: false,
             ai: bots.iter().map(|_| AiState::new()).collect(),
             script_ai,
             last_done: vec![ra2script::NO_DAMAGE; n],
@@ -1789,8 +1801,16 @@ impl Duel {
                     // (`flextop.py:188`, `clawtop.py:249`), the Skull pit and
                     // the Octagon all reach this through `plus.eliminatePlayer`.
                     if let Ok(bot) = usize::try_from(bot) {
-                        if bot < self.robots.len() && !self.robots[bot].eliminated {
+                        if self.net_role == crate::netevent::NetRole::Joiner {
+                            // The host's `giPlayerOutMessage` eliminates.
+                        } else if bot < self.robots.len() && !self.robots[bot].eliminated {
                             self.robots[bot].eliminated = true;
+                            if self.net_role == crate::netevent::NetRole::Host {
+                                self.net_events.push(crate::netevent::NetEvent::Out {
+                                    robot: bot,
+                                    reason: crate::netevent::out::ELIMINATED,
+                                });
+                            }
                             let name = self.robots[bot].rig.name.clone();
                             self.log
                                 .push(format!("t={:.1}s  {name} eliminated", self.time));
@@ -2311,6 +2331,11 @@ impl Duel {
         point: Vec3,
         normal: Vec3,
     ) -> bool {
+        if self.net_role == crate::netevent::NetRole::Joiner && !self.net_applying {
+            // The joiner's own copy of the physics prices nothing: the host's
+            // `giBotDamageMessage` is the hit (docs/38 §6.1).
+            return false;
+        }
         let by = attacker.map(|(_, by)| by);
         let attacker = attacker.map(|(a, _)| a);
         if victim >= self.robots.len()
@@ -2325,6 +2350,16 @@ impl Duel {
             return false;
         }
         let victim_was_alive = self.robots[victim].is_alive();
+        if self.net_role == crate::netevent::NetRole::Host {
+            self.net_events.push(crate::netevent::NetEvent::Hit {
+                attacker: attacker.zip(by),
+                victim,
+                component,
+                damage,
+                point,
+                normal,
+            });
+        }
         let applied = self.robots[victim].damage(component, damage);
         if applied.effective > 0.0 {
             self.popups.push(crate::popup::Request {
@@ -2381,6 +2416,12 @@ impl Duel {
         }
         if applied.destroyed {
             self.robots[victim].destroyed = true;
+            if self.net_role == crate::netevent::NetRole::Host {
+                self.net_events.push(crate::netevent::NetEvent::Out {
+                    robot: victim,
+                    reason: crate::netevent::out::DESTROYED,
+                });
+            }
             self.log
                 .push(format!("t={:.1}s  {name} chassis destroyed", self.time));
             return true;
@@ -2394,6 +2435,51 @@ impl Duel {
                 self.buckle_chassis(victim);
             }
             false
+        }
+    }
+
+    /// Joiner: apply a host-priced hit (`giBotDamageMessage`, handler
+    /// `FUN_00417ae0`). The host already applied its gate, so the damage goes
+    /// in whole; the joiner's popups, damage dealt and victim state follow
+    /// from it exactly as on the host.
+    pub fn apply_remote_hit(
+        &mut self,
+        attacker: Option<(usize, usize)>,
+        victim: usize,
+        component: usize,
+        damage: f32,
+        point: Vec3,
+        normal: Vec3,
+    ) -> bool {
+        self.net_applying = true;
+        let broke = self.apply_hit_normal(0.0, attacker, victim, component, damage, point, normal);
+        self.net_applying = false;
+        broke
+    }
+
+    /// Joiner: a robot is out because the host said so (`giPlayerOutMessage`,
+    /// `FUN_00418040`). A destroyed chassis normally follows from the hits
+    /// already applied; this settles any difference.
+    pub fn apply_remote_out(&mut self, robot: usize, reason: u32) {
+        let Some(r) = self.robots.get_mut(robot) else {
+            return;
+        };
+        match reason {
+            crate::netevent::out::DESTROYED => r.destroyed = true,
+            crate::netevent::out::IMMOBILIZED => r.immobilized = true,
+            _ => r.eliminated = true,
+        }
+        let name = r.rig.name.clone();
+        self.log.push(format!(
+            "t={:.1}s  {name} out (host, reason {reason})",
+            self.time
+        ));
+    }
+
+    /// Joiner: the host's immobility warning for a robot, as the brains hear it.
+    pub fn apply_remote_immobile(&mut self, robot: usize, on: bool) {
+        if let Some(ai) = self.script_ai.as_ref() {
+            ai.immobility_warning(robot as i32, on);
         }
     }
 
@@ -2463,7 +2549,7 @@ impl Duel {
     /// sphere for 10 s is warned (`ImmobilityWarning(id, 1)` to every brain) and
     /// at 20 s it is IMMOBILIZED (state 2).
     fn update_immobility(&mut self, dt: f32) {
-        if !self.immobility_active {
+        if !self.immobility_active || self.net_role == crate::netevent::NetRole::Joiner {
             return;
         }
         let positions: Vec<Option<Vec3>> = (0..self.robots.len())
@@ -2476,12 +2562,22 @@ impl Duel {
         for event in self.immobility.update(dt, &positions) {
             match event {
                 crate::immobility::Event::Warning(id, on) => {
+                    if self.net_role == crate::netevent::NetRole::Host {
+                        self.net_events
+                            .push(crate::netevent::NetEvent::Immobile { robot: id, on });
+                    }
                     if let Some(ai) = self.script_ai.as_ref() {
                         ai.immobility_warning(id as i32, on);
                     }
                 }
                 crate::immobility::Event::Immobilized(id) => {
                     self.robots[id].immobilized = true;
+                    if self.net_role == crate::netevent::NetRole::Host {
+                        self.net_events.push(crate::netevent::NetEvent::Out {
+                            robot: id,
+                            reason: crate::netevent::out::IMMOBILIZED,
+                        });
+                    }
                     let name = self.robots[id].rig.name.clone();
                     self.log
                         .push(format!("t={:.1}s  {name} immobilized", self.time));

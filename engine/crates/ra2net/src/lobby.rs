@@ -7,6 +7,12 @@
 //! kinds have a robot loaded (`FUN_0047d120` draws the robot preview for 1 and
 //! 3) and 4 is a slot whose player left. The mapping of kinds to "human" and
 //! "computer" is inferred from the two counts the host reports (docs/38 §5).
+//!
+//! **Spectators** (docs/38 §10, inferred): `prematch.gib` has a `spectator
+//! list` ("list of the spectators (joined but not in the match)"), and a new
+//! peer plays `spectator_joined.wav` (event `0x64`, handler `0x492ef0`). A
+//! peer beyond the four player panels is such a spectator here: kind
+//! [`kind::SPECTATOR`], no robot, no ready flag, no robot index in the match.
 
 use crate::dpn::RaHostData;
 use crate::message::{GroupInfo, Message};
@@ -19,7 +25,17 @@ pub mod kind {
     pub const COMPUTER: u32 = 2;
     pub const COMPUTER_WITH_ROBOT: u32 = 3;
     pub const LEFT: u32 = 4;
+    /// Ours: a connected peer with no player panel, who watches the match.
+    pub const SPECTATOR: u32 = 5;
 }
+
+/// The player panels of `prematch.gib` (`player1 group`..`player4 group`).
+pub const PLAYER_SLOTS: usize = 4;
+/// Spectators a host takes besides its four players (ours; DirectPlay's
+/// `dwMaxPlayers` of the original was not traced).
+pub const MAX_SPECTATORS: usize = 4;
+/// Peers a session admits: the players and their spectators.
+pub const SESSION_MAX: u32 = (PLAYER_SLOTS + MAX_SPECTATORS) as u32;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Slot {
@@ -35,6 +51,10 @@ pub struct Slot {
 }
 
 impl Slot {
+    pub fn is_spectator(&self) -> bool {
+        self.kind == kind::SPECTATOR
+    }
+
     pub fn has_robot(&self) -> bool {
         self.kind == kind::HUMAN_WITH_ROBOT || self.kind == kind::COMPUTER_WITH_ROBOT
     }
@@ -98,20 +118,59 @@ impl Lobby {
         self.slots.iter_mut().find(|s| s.player == player)
     }
 
-    /// A human joined (host side, on the session's player-joined).
+    /// A human joined (host side, on the session's player-joined). The first
+    /// four peers take a player panel; later ones are spectators.
     pub fn join(&mut self, player: PlayerId, name: &str) {
         if self.slot(player).is_none() {
+            let kind = if self.players().count() < PLAYER_SLOTS {
+                kind::HUMAN
+            } else {
+                kind::SPECTATOR
+            };
             self.slots.push(Slot {
                 player,
-                kind: kind::HUMAN,
+                kind,
                 name: name.to_string(),
                 ..Slot::default()
             });
         }
     }
 
+    /// The slots with a player panel, in panel order (the robots of the
+    /// match).
+    pub fn players(&self) -> impl Iterator<Item = &Slot> {
+        self.slots.iter().filter(|s| !s.is_spectator())
+    }
+
+    /// The spectators, in the order they joined (`spectator list`).
+    pub fn spectators(&self) -> impl Iterator<Item = &Slot> {
+        self.slots.iter().filter(|s| s.is_spectator())
+    }
+
+    /// The match robot index of a player: its place among the player panels;
+    /// `None` for a spectator or a stranger.
+    pub fn robot_index(&self, player: PlayerId) -> Option<usize> {
+        self.players().position(|s| s.player == player)
+    }
+
     pub fn leave(&mut self, player: PlayerId) {
         self.slots.retain(|s| s.player != player);
+    }
+
+    /// Host: while a player panel is free, the longest-waiting spectator takes
+    /// it (inferred: a spectator is a peer "joined but not in the match").
+    /// Returns whether anyone moved.
+    pub fn promote_spectators(&mut self) -> bool {
+        let mut moved = false;
+        while self.players().count() < PLAYER_SLOTS {
+            let Some(spectator) = self.slots.iter_mut().find(|s| s.is_spectator()) else {
+                break;
+            };
+            spectator.kind = kind::HUMAN;
+            spectator.ready = false;
+            moved = true;
+        }
+        moved
     }
 
     /// Every human with a robot is ready, and there are at least two robots.
@@ -177,6 +236,11 @@ impl Lobby {
                 let mut slot = Slot::from_group_info(g);
                 match self.slot_mut(g.player) {
                     Some(old) => {
+                        if from != host && old.is_spectator() {
+                            // A spectator has no panel to describe; only the
+                            // host promotes one.
+                            return None;
+                        }
                         if from != host {
                             // A joiner does not set its own ready flag by slot.
                             slot.ready = old.ready;
@@ -195,6 +259,9 @@ impl Lobby {
                     return None;
                 }
                 let slot = self.slot_mut(*player)?;
+                if slot.is_spectator() {
+                    return None;
+                }
                 slot.ready = *ready;
                 Some(LobbyChange::Ready {
                     player: *player,
@@ -251,6 +318,40 @@ mod tests {
                 slots_01: 2
             }
         );
+    }
+
+    #[test]
+    fn peers_beyond_four_panels_are_spectators_until_a_panel_frees() {
+        let mut lobby = Lobby::default();
+        for (i, n) in ["A", "B", "C", "D", "E", "F"].iter().enumerate() {
+            lobby.join(i as u32 + 1, n);
+        }
+        assert_eq!(lobby.players().count(), 4);
+        let names: Vec<_> = lobby.spectators().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["E", "F"]);
+        assert_eq!(lobby.robot_index(4), Some(3));
+        assert_eq!(lobby.robot_index(5), None);
+        // A spectator neither readies nor describes a panel; a host's word
+        // promotes.
+        let ready = Message::PlayerReady {
+            player: 5,
+            ready: true,
+        };
+        assert_eq!(lobby.apply(5, 1, &ready), None);
+        let own = Message::GroupInfo(GroupInfo {
+            player: 5,
+            state: kind::HUMAN_WITH_ROBOT,
+            ..GroupInfo::default()
+        });
+        assert_eq!(lobby.apply(5, 1, &own), None);
+        assert!(lobby.slot(5).unwrap().is_spectator());
+        lobby.leave(2);
+        assert!(lobby.promote_spectators());
+        assert_eq!(lobby.slot(5).unwrap().kind, kind::HUMAN);
+        assert!(lobby.slot(6).unwrap().is_spectator());
+        assert_eq!(lobby.players().count(), 4);
+        // Spectators are not counted in the enumeration reply.
+        assert_eq!(lobby.host_data().slots_01, 4);
     }
 
     #[test]

@@ -153,6 +153,89 @@ pub struct BotDamage {
     pub last: u32,
 }
 
+impl BotDamage {
+    /// The word an absent attacker or part carries (`-1`, as `FUN_004148f0`
+    /// passes it for a hazard's hit).
+    pub const NONE: u32 = u32::MAX;
+
+    /// A priced hit, in the wire order the constructor `0x4d0f10` fixes:
+    /// attacker robot `+0x1c`, victim robot `+0x20`, attacker component
+    /// `+0x24`, victim component `+0x28`, the effective damage `+0x2c`, the
+    /// hit point `+0x30` and the hit normal `+0x40` (the two vectors' roles
+    /// are inferred from `FUN_004175b0` handing them to the floating number).
+    pub fn new(
+        attacker: Option<(u32, u32)>,
+        victim: (u32, u32),
+        damage: f32,
+        point: [f32; 3],
+        normal: [f32; 3],
+    ) -> BotDamage {
+        let (a, a_part) = attacker.unwrap_or((Self::NONE, Self::NONE));
+        BotDamage {
+            // Wire order: +0x1c, +0x24, +0x20, +0x28, +0x2c.
+            words: [a, a_part, victim.0, victim.1, damage.to_bits()],
+            a: point,
+            b: normal,
+            last: 0,
+        }
+    }
+
+    /// (robot, component) of the attacker; `None` for a hazard.
+    pub fn attacker(&self) -> Option<(u32, u32)> {
+        (self.words[0] != Self::NONE).then_some((self.words[0], self.words[1]))
+    }
+
+    /// (robot, component) that was struck.
+    pub fn victim(&self) -> (u32, u32) {
+        (self.words[2], self.words[3])
+    }
+
+    /// The effective damage.
+    pub fn damage(&self) -> f32 {
+        f32::from_bits(self.words[4])
+    }
+}
+
+impl AddPoints {
+    /// `giAddPointsMessage` as `FUN_004177e0` builds it: the player, the
+    /// points as a float, the two vectors and the two flags (`flags[0]`: the
+    /// points are added to the score, `FUN_004178a0`'s fifth parameter;
+    /// `flags[1]`: its sixth, which lets the floating text show for a player
+    /// who is not the local one). The port sets `flags[1]` for an arena
+    /// script's integer `plus.addPoints` (ours; the original passes the same
+    /// 0 it does for a hit).
+    pub fn new(player: u32, points: f32, at: [f32; 3], script: bool) -> AddPoints {
+        AddPoints {
+            player,
+            points: points.to_bits(),
+            a: at,
+            b: [0.0; 3],
+            flags: [true, script],
+        }
+    }
+
+    pub fn points_f32(&self) -> f32 {
+        f32::from_bits(self.points)
+    }
+}
+
+impl BotImmobile {
+    /// `FUN_00412fc0`'s call: the robot, where it sits, whether it is now
+    /// flagged immobile and the seconds it has not moved (a float).
+    pub fn new(robot: u32, at: [f32; 3], immobile: bool, seconds: f32) -> BotImmobile {
+        BotImmobile {
+            robot,
+            at,
+            immobile,
+            value: seconds.to_bits(),
+        }
+    }
+
+    pub fn seconds(&self) -> f32 {
+        f32::from_bits(self.value)
+    }
+}
+
 /// `giFractureMessage` (`0x140`, vtable `0x6aa740`, read `0x4d1240`, write
 /// `0x4d13d0`): a robot's broken-off pieces, fourteen words each.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -575,6 +658,30 @@ mod tests {
         let bytes = msg.encode();
         assert_eq!(Message::decode(&bytes).unwrap(), msg, "{msg:?}");
         bytes
+    }
+
+    /// The scoring helpers keep the wire order `FUN_004d0f10` fixes.
+    #[test]
+    fn scoring_messages_carry_their_meaning() {
+        let hit = BotDamage::new(Some((2, 5)), (1, 7), 12.5, [1.0, 2.0, 3.0], [0.0, 1.0, 0.0]);
+        // Wire words: attacker +0x1c, its part +0x24, victim +0x20, its part
+        // +0x28, damage +0x2c.
+        assert_eq!(hit.words[..4], [2, 5, 1, 7]);
+        let back = match Message::decode(&Message::BotDamage(hit).encode()).unwrap() {
+            Message::BotDamage(d) => d,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(back.attacker(), Some((2, 5)));
+        assert_eq!(back.victim(), (1, 7));
+        assert_eq!(back.damage(), 12.5);
+        let hazard = BotDamage::new(None, (0, 0), 25.0, [0.0; 3], [0.0; 3]);
+        assert_eq!(hazard.attacker(), None);
+        assert_eq!(hazard.words[0], u32::MAX);
+        let points = AddPoints::new(1, 12.7, [0.0; 3], false);
+        assert_eq!(points.points_f32(), 12.7);
+        assert_eq!(points.flags, [true, false]);
+        let imm = BotImmobile::new(3, [1.0, 0.0, 2.0], true, 10.0);
+        assert_eq!(imm.seconds(), 10.0);
     }
 
     #[test]

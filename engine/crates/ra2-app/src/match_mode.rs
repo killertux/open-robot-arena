@@ -211,9 +211,17 @@ pub struct Session {
     /// The camera the match settles on once the intro is over: the config's
     /// `DefaultCamera` (or the chase frame when a player is driving).
     default_camera: DuelCamera,
-    /// The chat group is open (backslash). Local only; nothing is sent.
+    /// The chat group is open (backslash). Only a network match has chat
+    /// (`0x475ee0` acts on the key when the game type, `FUN_004145f0`, is 1,
+    /// multiplayer): see [`Session::enable_chat`].
     chat_open: bool,
     chat_entry: String,
+    /// Whether the chat key does anything: set for a network match.
+    chat_enabled: bool,
+    /// The lines `chat displaybox` shows, each with the seconds it has left.
+    chat_lines: Vec<(String, f32)>,
+    /// Entries the player sent (Enter), waiting for the network layer.
+    chat_outbox: Vec<String>,
     /// The pause dialog's widgets, loaded once.
     pub dialog: Gib,
     presentation: Presentation,
@@ -243,6 +251,14 @@ pub enum Escape {
     Ignored,
 }
 
+/// How long a line stays in `chat displaybox`. The gib's note says "display a
+/// few lines of chats here and clear after a few seconds"; the timer itself was
+/// not traced, so the number is ours (docs/38 §11).
+pub const CHAT_LINE_SECONDS: f32 = 8.0;
+/// How many lines the box holds: its 100 px height over `fg_mcn14`'s line
+/// (ours, from the gib's size).
+pub const CHAT_LINES: usize = 6;
+
 /// Where the damage number's line box sits against the projected point, in pixels: measured
 /// against the original's frames (docs/37 section 7): the `25` of a hazard hit at the projection
 /// `(480.0, 211.6)` has its ink at x 471-491, y 200-212; at `(502.8, 272.9)` x 493-513,
@@ -254,6 +270,8 @@ struct ScreenBind {
     show_camera: bool,
     chat_open: bool,
     chat_entry: String,
+    /// The lines `chat displaybox` shows now, oldest first.
+    chat_lines: Vec<String>,
 }
 
 struct Presentation {
@@ -307,7 +325,7 @@ impl Presentation {
         };
         let bound = hud::hud(root, report, state, clock, countdown_left);
         hud::set_camera(root, &bind.camera, bind.show_camera);
-        hud::set_chat(root, bind.chat_open, &bind.chat_entry);
+        hud::set_chat(root, bind.chat_open, &bind.chat_entry, &bind.chat_lines);
         let placed = ra2ui::resolve_with(&self.hud, self.layout, Some(self.assets.faces()));
         // The scene's coordinates are the design screen, not the target: the
         // renderer's `fit` is then the identity (layout == target).
@@ -364,7 +382,7 @@ impl Presentation {
         };
         hud::hud(root, report, state, clock, countdown_left);
         hud::set_camera(root, &bind.camera, bind.show_camera);
-        hud::set_chat(root, bind.chat_open, &bind.chat_entry);
+        hud::set_chat(root, bind.chat_open, &bind.chat_entry, &bind.chat_lines);
         let mut placed = ra2ui::resolve_with(&self.hud, self.layout, Some(self.assets.faces()));
         let dialog_placed = ra2ui::resolve_with(dialog, self.layout, Some(self.assets.faces()));
         placed.extend(dialog_placed);
@@ -447,6 +465,24 @@ impl Session {
         Session::with_match_controlled(game, matched, true)
     }
 
+    /// Network play, a spectator's end of the match (docs/38 §10): the arena
+    /// and the players' robots, none of them driven from here, on the
+    /// config's own camera (`Watch` by default). The host's snapshots and
+    /// scoring messages are all it follows.
+    pub fn spectate(
+        game: &Path,
+        arena: &Path,
+        game_type: GameType,
+        entries: Vec<RobotEntry>,
+    ) -> Result<Session, String> {
+        let config = MatchConfig::new(arena.to_string_lossy().to_string(), game_type, entries);
+        let matched = Match::new(config).map_err(|e| e.to_string())?;
+        let mut session = Session::with_match_controlled(game, matched, false)?;
+        // Not the evidence runs: nothing here settles the fight for the host.
+        session.evidence_decision = false;
+        Ok(session)
+    }
+
     fn with_match_controlled(
         game: &Path,
         matched: Match,
@@ -525,6 +561,9 @@ impl Session {
             default_camera,
             chat_open: false,
             chat_entry: String::new(),
+            chat_enabled: false,
+            chat_lines: Vec::new(),
+            chat_outbox: Vec::new(),
             dialog,
             presentation,
             match_sounds: crate::match_sounds::MatchSounds::new(),
@@ -674,6 +713,13 @@ impl Session {
         if self.camera_label_left > 0.0 {
             let dt = self.matched.config.dt;
             self.camera_label_left = (self.camera_label_left - dt).max(0.0);
+        }
+        {
+            let dt = self.matched.config.dt;
+            for line in self.chat_lines.iter_mut() {
+                line.1 -= dt;
+            }
+            self.chat_lines.retain(|(_, left)| *left > 0.0);
         }
         if self.evidence_decision && self.matched.state() == MatchState::Fight {
             let dt = self.matched.config.dt;
@@ -894,16 +940,20 @@ impl Session {
         self.chat_open
     }
 
+    /// Network play: turn the chat key on. The original acts on `\` only when
+    /// the game type is multiplayer (`0x475ee0`, `FUN_004145f0() == 1`).
+    pub fn enable_chat(&mut self) {
+        self.chat_enabled = true;
+    }
+
     /// Open or close the chat group. `0x475ee0` opens it on `\` during play
-    /// (`+0x1b4` visible, `+0x1b8` focused). The text is local; nothing is
-    /// sent.
+    /// in a multiplayer match (`+0x1b4` visible, `+0x1b8` focused).
     pub fn toggle_chat(&mut self) {
-        if self.matched.state() == MatchState::Results || self.frozen() {
+        if !self.chat_enabled || self.matched.state() == MatchState::Results || self.frozen() {
             return;
         }
         self.chat_open = !self.chat_open;
         self.chat_entry.clear();
-        println!("chat: {}", if self.chat_open { "open" } else { "closed" });
     }
 
     /// Append a typed character to the chat entry.
@@ -920,21 +970,48 @@ impl Session {
         }
     }
 
-    /// Close the chat entry on Enter or Escape and log the line. The file's
-    /// `chat displaybox` is a `DisplayBox`; drawing its history is not part of
-    /// this minimum.
+    /// Enter in the chat entry: the line goes to the network layer
+    /// ([`Session::take_chat_outbox`]) and the group closes with the entry
+    /// cleared (`FUN_00475240` sets the entry to the empty string and hides
+    /// `+0x1b4`); an empty entry sends nothing.
     pub fn chat_submit(&mut self) {
         if !self.chat_open {
             return;
         }
         if !self.chat_entry.is_empty() {
-            println!("chat (local): {}", self.chat_entry);
-            // `Sounds\chat.wav`: the match object makes it with the countdown
-            // beep and the critical hit (`0x415849`).
-            self.cues.push(crate::match_sounds::SoundCue::Chat);
-            self.chat_entry.clear();
+            let line = std::mem::take(&mut self.chat_entry);
+            self.chat_outbox.push(line);
         }
         self.chat_open = false;
+    }
+
+    /// Escape in the chat entry: close it and drop what was typed. (The
+    /// original's Escape opens the pause popup whatever has focus; this port
+    /// lets the open entry take it instead, as it always has.)
+    pub fn chat_cancel(&mut self) {
+        self.chat_open = false;
+        self.chat_entry.clear();
+    }
+
+    /// The entries sent since the last call.
+    pub fn take_chat_outbox(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.chat_outbox)
+    }
+
+    /// A chat line arrived (`0x76`, via the event `0x70` to the match window)
+    /// or was sent by this player (the original gets its own copy back through
+    /// DirectPlay's loopback): it joins `chat displaybox`, lives
+    /// [`CHAT_LINE_SECONDS`] and plays `Sounds\chat.wav`.
+    pub fn push_chat_line(&mut self, line: String) {
+        self.chat_lines.push((line, CHAT_LINE_SECONDS));
+        let extra = self.chat_lines.len().saturating_sub(CHAT_LINES);
+        self.chat_lines.drain(..extra);
+        self.cues.push(crate::match_sounds::SoundCue::Chat);
+    }
+
+    /// The lines `chat displaybox` shows now, oldest first.
+    pub fn chat_lines(&self) -> Vec<&str> {
+        self.chat_lines.iter().map(|(l, _)| l.as_str()).collect()
     }
 
     fn screen_bind(&self) -> ScreenBind {
@@ -943,6 +1020,7 @@ impl Session {
             show_camera: self.show_camera_label(),
             chat_open: self.chat_open,
             chat_entry: self.chat_entry.clone(),
+            chat_lines: self.chat_lines.iter().map(|(l, _)| l.clone()).collect(),
         }
     }
 
@@ -2086,6 +2164,7 @@ mod tests {
             show_camera: true,
             chat_open: false,
             chat_entry: String::new(),
+            chat_lines: Vec::new(),
         };
         let (_, scene) = presentation
             .hud_scene(&report(), MatchState::Countdown, 0.0, 2.5, &bind)
@@ -2447,6 +2526,51 @@ mod tests {
             session.step();
         }
         session
+    }
+
+    /// In-match chat (docs/38 §11): the key does nothing outside a network
+    /// match; in one, Enter hands the line to the network layer and closes the
+    /// group, Escape drops it, a received line shows in the box with the chat
+    /// cue and clears after its time.
+    #[test]
+    fn chat_is_a_network_match_feature_with_a_timed_display() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let mut session = player_fight(&game, 30.0);
+        session.toggle_chat();
+        assert!(!session.chat_open(), "no chat key outside multiplayer");
+        session.enable_chat();
+        session.toggle_chat();
+        assert!(session.chat_open());
+        "hi there".chars().for_each(|c| session.chat_type(c));
+        session.chat_submit();
+        assert!(!session.chat_open());
+        assert_eq!(session.take_chat_outbox(), vec!["hi there".to_string()]);
+        session.toggle_chat();
+        session.chat_type('x');
+        session.chat_cancel();
+        assert!(session.take_chat_outbox().is_empty());
+        session.toggle_chat();
+        session.chat_submit();
+        assert!(session.take_chat_outbox().is_empty(), "empty sends nothing");
+
+        session.take_cues();
+        for i in 0..8 {
+            session.push_chat_line(format!("[A] line {i}"));
+        }
+        assert_eq!(session.chat_lines().len(), CHAT_LINES);
+        assert_eq!(session.chat_lines()[0], "[A] line 2");
+        assert!(session
+            .take_cues()
+            .contains(&crate::match_sounds::SoundCue::Chat));
+        let steps = (CHAT_LINE_SECONDS / session.matched.config.dt) as usize + 2;
+        for _ in 0..steps {
+            session.step();
+        }
+        assert!(
+            session.chat_lines().is_empty(),
+            "the lines clear on their own"
+        );
     }
 
     /// The floating damage number (docs/37 section 7) reaches the HUD scene as two `fg_d20` cells in

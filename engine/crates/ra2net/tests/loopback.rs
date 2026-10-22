@@ -145,8 +145,12 @@ fn join_lobby_ready_and_chat() {
     );
 
     // Chat both ways.
-    guest.chat("good luck");
-    host.chat("you too");
+    assert_eq!(
+        guest.chat("good luck").as_deref(),
+        Some("[Guest] good luck")
+    );
+    assert_eq!(host.chat("you too").as_deref(), Some("[Host] you too"));
+    assert_eq!(guest.chat(""), None, "an empty entry sends nothing");
     let (eh, eg) = pump(&mut host, &mut guest, |h, g| {
         h.iter()
             .any(|e| matches!(e, GameEvent::Lobby(LobbyChange::Chat { .. })))
@@ -155,11 +159,11 @@ fn join_lobby_ready_and_chat() {
     });
     assert!(eh.contains(&GameEvent::Lobby(LobbyChange::Chat {
         from: me,
-        text: "good luck".into()
+        text: "[Guest] good luck".into()
     })));
     assert!(eg.contains(&GameEvent::Lobby(LobbyChange::Chat {
         from: HOST_ID,
-        text: "you too".into()
+        text: "[Host] you too".into()
     })));
 }
 
@@ -481,4 +485,124 @@ fn a_joiner_can_address_another_joiner_through_the_host() {
             message: Message::CriticalHit { robot: 3 }
         }]
     );
+}
+
+/// Spectators (docs/38 §10): peers beyond the four player panels sit in the
+/// `spectator list`, cannot take a robot or a ready flag, are told everything a
+/// player is told, and take a panel when one frees up.
+#[test]
+fn a_fifth_peer_is_a_spectator_who_takes_a_freed_panel() {
+    use ra2net::lobby::{kind, SESSION_MAX};
+    let mut host = NetGame::host(host_config(SESSION_MAX), ConnectionSpeed::Lan).unwrap();
+    let addr = host.session.local_addr().unwrap();
+    let mut guests: Vec<NetGame> = Vec::new();
+    let start = Instant::now();
+    // One at a time, so the join order is the panel order.
+    for name in ["A", "B", "C", "Watcher"] {
+        guests.push(NetGame::join(join_config(addr, name)).unwrap());
+        let want = guests.len() + 1;
+        while host.lobby.slots.len() < want && start.elapsed() < Duration::from_secs(8) {
+            host.poll();
+            for g in guests.iter_mut() {
+                g.poll();
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    let settled = |host: &NetGame, guests: &[NetGame]| {
+        host.lobby.slots.len() == 5 && guests.iter().all(|g| g.lobby.slots.len() == 5)
+    };
+    while !settled(&host, &guests) && start.elapsed() < Duration::from_secs(8) {
+        host.poll();
+        for g in guests.iter_mut() {
+            g.poll();
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(settled(&host, &guests), "{:?}", host.lobby.slots);
+    let watcher = guests[3].local().unwrap();
+    for lobby in std::iter::once(&host.lobby).chain(guests.iter().map(|g| &g.lobby)) {
+        assert_eq!(lobby.players().count(), 4);
+        let spectators: Vec<_> = lobby.spectators().map(|s| s.name.as_str()).collect();
+        assert_eq!(spectators, ["Watcher"]);
+        assert_eq!(lobby.robot_index(watcher), None);
+        assert_eq!(lobby.robot_index(guests[2].local().unwrap()), Some(3));
+    }
+
+    // A spectator cannot take a robot or be ready.
+    guests[3].choose_robot("T", "Razor", "razor.bot", vec![1]);
+    guests[3].set_ready(true);
+    for _ in 0..50 {
+        host.poll();
+        for g in guests.iter_mut() {
+            g.poll();
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let slot = host.lobby.slot(watcher).unwrap();
+    assert!(slot.is_spectator() && !slot.ready && !slot.has_robot());
+    assert_eq!(slot.kind, kind::SPECTATOR);
+
+    // A player leaves: the spectator takes the panel on every end.
+    guests[0].close();
+    let start = Instant::now();
+    while !(host.lobby.slot(watcher).is_some_and(|s| !s.is_spectator())
+        && guests[3]
+            .lobby
+            .slot(watcher)
+            .is_some_and(|s| !s.is_spectator()))
+        && start.elapsed() < Duration::from_secs(8)
+    {
+        host.poll();
+        for g in guests.iter_mut().skip(1) {
+            g.poll();
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(host.lobby.spectators().count(), 0);
+    assert_eq!(host.lobby.players().count(), 4);
+    assert_eq!(guests[3].lobby.robot_index(watcher), Some(3));
+}
+
+/// The in-match chat line: `"[name] text"` as a `0x76` text to everyone,
+/// nothing for an empty entry (`FUN_00475240`).
+#[test]
+fn match_chat_reaches_the_host_the_joiner_and_a_spectator() {
+    let mut host = NetGame::host(host_config(8), ConnectionSpeed::Lan).unwrap();
+    let addr = host.session.local_addr().unwrap();
+    let mut guest = NetGame::join(join_config(addr, "Guest")).unwrap();
+    let mut watcher = NetGame::join(join_config(addr, "Watcher")).unwrap();
+    let start = Instant::now();
+    while !(guest.lobby.slots.len() == 3 && watcher.lobby.slots.len() == 3)
+        && start.elapsed() < Duration::from_secs(5)
+    {
+        host.poll();
+        guest.poll();
+        watcher.poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    for g in [&mut host, &mut guest, &mut watcher] {
+        g.set_schema(SyncSchema::default());
+    }
+    assert_eq!(guest.chat("gg").as_deref(), Some("[Guest] gg"));
+    assert_eq!(host.chat(""), None);
+    let mut seen = (false, false);
+    let start = Instant::now();
+    while seen != (true, true) && start.elapsed() < Duration::from_secs(5) {
+        for e in host.poll() {
+            if let GameEvent::Chat { text, .. } = e {
+                assert_eq!(text, "[Guest] gg");
+                seen.0 = true;
+            }
+        }
+        guest.poll();
+        for e in watcher.poll() {
+            if let GameEvent::Chat { text, .. } = e {
+                assert_eq!(text, "[Guest] gg");
+                seen.1 = true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(seen, (true, true));
 }

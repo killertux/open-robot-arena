@@ -38,6 +38,7 @@ use std::path::Path;
 use glam::Vec3;
 
 use crate::duel::{BotSetup, Duel};
+use crate::netevent::{NetEvent, NetRole};
 use crate::sim::DriveInput;
 
 /// The pre-fight countdown timer, in seconds: `0x4759c0` writes `+0x1dc` to
@@ -698,7 +699,22 @@ impl Match {
     /// modes the rule has no team test, so a teammate hit still scores.
     fn score_hits(&mut self) {
         let hits = self.duel.take_score_hits();
-        if self.config.game_type == GameType::KingOfTheHill {
+        let role = self.duel.net_role;
+        if role == NetRole::Host {
+            // An arena script's `plus.addPoints` is the host's award to send.
+            for (player, amount) in ra2script::take_script_points() {
+                if let Ok(player) = usize::try_from(player) {
+                    self.duel.net_events.push(NetEvent::Points {
+                        player,
+                        points: amount as f32,
+                        script: true,
+                    });
+                }
+            }
+        }
+        if role == NetRole::Joiner || self.config.game_type == GameType::KingOfTheHill {
+            // A joiner awards nothing (`FUN_004177e0` is the host's); its
+            // scores come from the host's `giAddPointsMessage`s.
             return;
         }
         for hit in hits {
@@ -716,7 +732,83 @@ impl Match {
             // `FUN_004178a0`'s `fild score; fadd damage; __ftol; store`
             // (`0x417918`): the effective damage is added and truncated per hit.
             ra2script::add_points_float(hit.attacker as i32, hit.damage);
+            if role == NetRole::Host && hit.damage > 0.0 && hit.damage.is_finite() {
+                self.duel.net_events.push(NetEvent::Points {
+                    player: hit.attacker,
+                    points: hit.damage,
+                    script: false,
+                });
+            }
         }
+    }
+
+    /// Network play: make this match the host's or a joiner's end
+    /// (docs/38 §6.1). Call it right after [`Match::new`].
+    pub fn set_net_role(&mut self, role: NetRole) {
+        self.duel.net_role = role;
+        ra2script::set_net_role(role);
+    }
+
+    /// Host: the scoring events decided since the last call, to send.
+    pub fn take_net_events(&mut self) -> Vec<NetEvent> {
+        // The script awards of a step with no hits still need draining.
+        if self.duel.net_role == NetRole::Host {
+            for (player, amount) in ra2script::take_script_points() {
+                if let Ok(player) = usize::try_from(player) {
+                    self.duel.net_events.push(NetEvent::Points {
+                        player,
+                        points: amount as f32,
+                        script: true,
+                    });
+                }
+            }
+        }
+        std::mem::take(&mut self.duel.net_events)
+    }
+
+    /// Joiner: show what the host decided. Hits are applied whole (the joiner's
+    /// HUD numbers, damage dealt and component state follow from them), points
+    /// are added exactly as the host added them, and a robot the host put out
+    /// is out here.
+    pub fn apply_net_event(&mut self, event: &NetEvent) {
+        match event {
+            NetEvent::Hit {
+                attacker,
+                victim,
+                component,
+                damage,
+                point,
+                normal,
+            } => {
+                self.duel
+                    .apply_remote_hit(*attacker, *victim, *component, *damage, *point, *normal);
+                self.duel.take_score_hits();
+                self.route_popups();
+            }
+            NetEvent::Points {
+                player,
+                points,
+                script,
+            } => {
+                if *script {
+                    ra2script::add_points_remote(*player as i32, *points as i32);
+                } else {
+                    ra2script::add_points_float(*player as i32, *points);
+                }
+            }
+            NetEvent::Immobile { robot, on } => self.duel.apply_remote_immobile(*robot, *on),
+            NetEvent::Out { robot, reason } => self.duel.apply_remote_out(*robot, *reason),
+        }
+    }
+
+    /// Joiner: the host ended the match (`giMatchWinMessage`, `0x137`): finish
+    /// now if the local copy has not, naming the host's winners.
+    pub fn net_finish(&mut self, winners: Vec<usize>) {
+        if matches!(self.state, MatchState::Over | MatchState::Results) {
+            return;
+        }
+        self.finish(WinReason::LastRobot);
+        self.winners = winners;
     }
 
     /// The match's current result. Valid in every state; the numbers are live.
@@ -1308,6 +1400,121 @@ mod tests {
             0,
             "King of the Hill's score is the zone script's, not damage"
         );
+    }
+
+    /// Network play (docs/38 §6.1): the host prices the hit, scores it and
+    /// reports it; a joiner discards its own pricing and shows the host's
+    /// hit and points once, so nothing is counted twice.
+    #[test]
+    fn the_host_prices_and_the_joiner_shows_what_it_is_told() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+        let build = || {
+            Match::new(
+                MatchConfig::new(
+                    path(&game, "Arenas/box.py"),
+                    GameType::Deathmatch,
+                    vec![
+                        RobotEntry::ai(0, path(&game, "AI/Team1/Bot0.bot")),
+                        RobotEntry::ai(1, path(&game, "AI/Team6/Bot2.bot")),
+                    ],
+                )
+                .with_results_delay(0.0),
+            )
+            .expect("a deathmatch")
+        };
+
+        // Host: the hit lands, scores, and is reported as a hit then points.
+        let mut host = build();
+        host.set_net_role(NetRole::Host);
+        countdown_over(&mut host);
+        host.take_net_events();
+        host.hit(0, 1, 0, 12.7);
+        let events = host.take_net_events();
+        assert_eq!(ra2script::points(0), 12);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(matches!(
+            events[0],
+            NetEvent::Hit { attacker: Some((0, 0)), victim: 1, component: 0, damage, .. } if damage == 12.7
+        ));
+        assert_eq!(
+            events[1],
+            NetEvent::Points {
+                player: 0,
+                points: 12.7,
+                script: false
+            }
+        );
+        let host_taken = host.duel.damage_taken[1];
+        // A script's own award is the host's to send too.
+        ra2script::add_points(1, 5);
+        let events = host.take_net_events();
+        assert_eq!(
+            events,
+            vec![NetEvent::Points {
+                player: 1,
+                points: 5.0,
+                script: true
+            }]
+        );
+        assert_eq!(ra2script::points(1), 5);
+
+        // Joiner: its own copy of the same blow prices nothing and scores
+        // nothing; the host's two events do, once.
+        let mut joiner = build();
+        joiner.set_net_role(NetRole::Joiner);
+        countdown_over(&mut joiner);
+        joiner.hit(0, 1, 0, 12.7);
+        assert_eq!(joiner.duel.damage_taken[1], 0.0, "no local pricing");
+        assert_eq!(ra2script::points(0), 0, "no local score");
+        assert!(joiner.take_net_events().is_empty());
+        ra2script::add_points(0, 9);
+        assert_eq!(
+            ra2script::points(0),
+            0,
+            "a joiner ignores its own script award"
+        );
+        for e in [
+            NetEvent::Hit {
+                attacker: Some((0, 0)),
+                victim: 1,
+                component: 0,
+                damage: 12.7,
+                point: Vec3::ZERO,
+                normal: Vec3::ZERO,
+            },
+            NetEvent::Points {
+                player: 0,
+                points: 12.7,
+                script: false,
+            },
+            NetEvent::Points {
+                player: 1,
+                points: 5.0,
+                script: true,
+            },
+        ] {
+            joiner.apply_net_event(&e);
+        }
+        assert_eq!(joiner.duel.damage_taken[1], host_taken, "the host's number");
+        assert_eq!(ra2script::points(0), 12);
+        assert_eq!(ra2script::points(1), 5);
+        assert!(
+            joiner.take_net_events().is_empty(),
+            "a joiner reports nothing"
+        );
+        // The host says robot 1 is out: it is, and the match can end.
+        joiner.apply_net_event(&NetEvent::Out {
+            robot: 1,
+            reason: crate::netevent::out::DESTROYED,
+        });
+        assert!(!joiner.duel.robots[1].is_alive());
+        joiner.net_finish(vec![0]);
+        assert_eq!(joiner.state(), MatchState::Over);
+        assert_eq!(joiner.report().winners, vec![0]);
     }
 
     /// The floating damage numbers (docs/37 section 7): only a human player is shown one; a hit

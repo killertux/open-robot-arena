@@ -268,3 +268,268 @@ fn a_synced_duel_follows_the_host() {
     host.leave();
     guest.leave();
 }
+
+// ---------------------------------------------------------------------------
+// A scripted match across five processes (docs/38 §6.1, §10, §11).
+//
+// The script layer is process-global, so the host, three players and a
+// spectator each run in their own process (this test binary again, told its
+// role by RA2_NETTEST_ROLE) and talk over loopback. The host lands scripted
+// blows; a joiner lands one of its own that must count for nothing; chat goes
+// out from a player, the host and the spectator. Every process reports what it
+// ended with, and they must agree.
+// ---------------------------------------------------------------------------
+
+const SCRIPT_TEST: &str = "a_scripted_match_across_five_processes_counts_every_hit_once";
+
+fn report(line: String) {
+    println!("NETTEST {line}");
+}
+
+fn child(role: &str) {
+    use std::io::BufRead;
+    let game = game_dir().expect("the game install");
+    let _scripts = ra2script::lock();
+    let port: u16 = std::env::var("RA2_NETTEST_PORT").unwrap().parse().unwrap();
+    let (name, expect) = match role {
+        "host" => ("Host", 1),
+        "p1" => ("Guest1", 2),
+        "p2" => ("Guest2", 3),
+        "p3" => ("Guest3", 4),
+        _ => ("Watcher", 5),
+    };
+    let mut net = loopback(name);
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    if role == "host" {
+        net.host_port = port;
+        net.host("Scripted", None, ConnectionSpeed::Lan).unwrap();
+        report("LISTENING".into());
+    } else {
+        net.join(addr).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let lobby_len = |net: &NetPlay| net.game.as_ref().map_or(0, |g| g.lobby.slots.len());
+    while lobby_len(&net) < expect && Instant::now() < deadline {
+        net.game.as_mut().unwrap().poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(lobby_len(&net) >= expect, "{role}: never joined");
+    report(format!("JOINED {role}"));
+
+    // The host waits for the parent's START; everyone else for Prepare.
+    let arena = "Arenas/box.py";
+    if role == "host" {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = std::io::stdin().lock().read_line(&mut line);
+            let _ = tx.send(());
+        });
+        while rx.try_recv().is_err() && Instant::now() < deadline {
+            net.game.as_mut().unwrap().poll();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let game_net = net.game.as_mut().unwrap();
+        game_net.set_settings("DEATHMATCH", "Heavyweight", arena);
+        game_net.start_match(arena);
+        game_net.set_schema(net_play::schema());
+        net.assign_robots();
+    } else {
+        let mut prepared = false;
+        while !prepared && Instant::now() < deadline {
+            for e in net.game.as_mut().unwrap().poll() {
+                if let GameEvent::Prepare { .. } = e {
+                    prepared = true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(prepared, "{role}: no Prepare");
+        let g = net.game.as_mut().unwrap();
+        g.set_schema(net_play::schema());
+        g.report_loaded();
+        net.assign_robots();
+    }
+    let spectating = net.is_spectator();
+    assert_eq!(spectating, role == "watch", "{role}");
+    let mut session = net.match_session(&game, arena).unwrap();
+    session.skip_intro();
+    let dt = session.matched.config.dt;
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut fight = 0u32;
+    let mut after_end = 0u32;
+    let mut ended = false;
+    while Instant::now() < deadline + Duration::from_secs(60) {
+        let fighting = session.matched.state() == ra2sim::r#match::MatchState::Fight;
+        if fighting {
+            fight += 1;
+        }
+        // The script, by fight step.
+        match (role, fight, fighting) {
+            ("host", 30, true) => session.matched.hit(0, 1, 0, 30.0),
+            ("host", 60, true) => session.matched.hit(1, 0, 0, 45.5),
+            ("host", 90, true) => session.matched.hit(0, 1, 0, 12.7),
+            ("host", 100, true) => {
+                session.toggle_chat();
+                "good luck".chars().for_each(|c| session.chat_type(c));
+                session.chat_submit();
+            }
+            ("host", 120, true) => {
+                // A hazard's blow: no attacker, no points.
+                let at = glam::Vec3::ZERO;
+                session.matched.duel.apply_hit(None, 2, 0, 25.0, at);
+            }
+            // A joiner's own pricing of a blow: it must count for nothing.
+            ("p2", 40, true) => session.matched.hit(2, 0, 0, 100.0),
+            ("p1", 45, true) => {
+                session.toggle_chat();
+                "gg".chars().for_each(|c| session.chat_type(c));
+                session.chat_submit();
+            }
+            ("watch", 70, true) => {
+                session.toggle_chat();
+                "nice fight".chars().for_each(|c| session.chat_type(c));
+                session.chat_submit();
+            }
+            ("host", 400, true) => {
+                assert!(session.matched.end_by_judges());
+            }
+            _ => {}
+        }
+        net.before_step(&mut session);
+        std::thread::sleep(Duration::from_millis(3));
+        session.step();
+        net.after_step(&mut session, dt);
+        for line in session.chat_lines() {
+            seen.insert(line.to_string());
+        }
+        let over = matches!(
+            session.matched.state(),
+            ra2sim::r#match::MatchState::Over | ra2sim::r#match::MatchState::Results
+        );
+        if over {
+            ended = true;
+        }
+        if ended {
+            after_end += 1;
+            if after_end > 150 {
+                break;
+            }
+        }
+    }
+    let report_data = session.matched.report();
+    let points: Vec<String> = (0..4).map(|i| ra2script::points(i).to_string()).collect();
+    let taken: Vec<String> = session
+        .matched
+        .duel
+        .damage_taken
+        .iter()
+        .map(|d| format!("{d:.2}"))
+        .collect();
+    report(format!(
+        "FINAL {role} ended={ended} points={} taken={} winners={:?} chat={}",
+        points.join(","),
+        taken.join(","),
+        report_data.winners,
+        seen.into_iter().collect::<Vec<_>>().join("|")
+    ));
+    net.leave();
+}
+
+#[test]
+fn a_scripted_match_across_five_processes_counts_every_hit_once() {
+    if let Ok(role) = std::env::var("RA2_NETTEST_ROLE") {
+        child(&role);
+        return;
+    }
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    let Some(_game) = game_dir() else { return };
+    let port = {
+        let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        s.local_addr().unwrap().port()
+    };
+    let save = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("netplay-save");
+    std::fs::create_dir_all(&save).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let (tx, rx) = mpsc::channel::<(String, String)>();
+    let mut children = Vec::new();
+    let spawn = |role: &str, children: &mut Vec<std::process::Child>| {
+        let mut c = Command::new(&exe)
+            .args(["--exact", SCRIPT_TEST, "--nocapture", "--test-threads=1"])
+            .env("RA2_NETTEST_ROLE", role)
+            .env("RA2_NETTEST_PORT", port.to_string())
+            .env("ORA_SAVE_DIR", &save)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let out = c.stdout.take().unwrap();
+        let tx = tx.clone();
+        let role = role.to_string();
+        std::thread::spawn(move || {
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                // libtest may have started the line with "test name ... ".
+                if let Some((_, rest)) = line.split_once("NETTEST ") {
+                    let _ = tx.send((role.clone(), rest.to_string()));
+                }
+            }
+        });
+        children.push(c);
+    };
+    let wait_for = |what: &str, role: &str| {
+        let end = Instant::now() + Duration::from_secs(90);
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            let (r, line) = rx.recv_timeout(left).unwrap_or_else(|_| {
+                panic!("timed out waiting for {role} {what}");
+            });
+            if r == role && line.starts_with(what) {
+                return line;
+            }
+        }
+    };
+    spawn("host", &mut children);
+    wait_for("LISTENING", "host");
+    for role in ["p1", "p2", "p3", "watch"] {
+        spawn(role, &mut children);
+        wait_for("JOINED", role);
+    }
+    children[0]
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"START\n")
+        .unwrap();
+    let mut finals = std::collections::BTreeMap::new();
+    let end = Instant::now() + Duration::from_secs(150);
+    while finals.len() < 5 {
+        let left = end.saturating_duration_since(Instant::now());
+        let (role, line) = rx.recv_timeout(left).expect("every process reports");
+        if let Some(rest) = line.strip_prefix("FINAL ") {
+            finals.insert(role, rest.to_string());
+        }
+    }
+    for c in children.iter_mut() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    // Everything after "FINAL <role> " must agree across the five.
+    let body = |s: &String| s.split_once(' ').unwrap().1.to_string();
+    let host = body(&finals["host"]);
+    println!("host ended with: {host}");
+    for (role, line) in &finals {
+        assert_eq!(body(line), host, "{role} disagrees with the host");
+    }
+    assert!(host.contains("ended=true"), "{host}");
+    // 30 + 12 (12.7 truncated) for robot 0, 45 (45.5 truncated) for robot 1;
+    // the hazard scores nobody; the joiner's own 100 counts for nothing.
+    assert!(host.contains("points=42,45,0,0"), "{host}");
+    assert!(host.contains("taken=45.50,42.70,25.00,0.00"), "{host}");
+    assert!(host.contains("winners=[1]"), "{host}");
+    for line in ["[Guest1] gg", "[Host] good luck", "[Watcher] nice fight"] {
+        assert!(host.contains(line), "{line} missing: {host}");
+    }
+}

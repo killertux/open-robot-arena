@@ -71,6 +71,12 @@ pub enum GameEvent {
     },
     /// Joiner: a snapshot newer than the last one applied.
     Snapshot(SyncState),
+    /// An in-match chat line (`0x76`, "second text class"; the sender has
+    /// already put its `[name] ` in front, `FUN_00475240`).
+    Chat {
+        from: PlayerId,
+        text: String,
+    },
     /// Any other game message.
     Message {
         from: PlayerId,
@@ -162,6 +168,10 @@ impl NetGame {
                 Event::PlayerLeft { id, reason } => {
                     self.lobby.leave(id);
                     if self.is_host() {
+                        // A freed player panel goes to the first spectator.
+                        if self.schema.is_none() {
+                            self.lobby.promote_spectators();
+                        }
                         self.broadcast_lobby();
                     }
                     out.push(GameEvent::PlayerLeft { id, reason });
@@ -229,16 +239,48 @@ impl NetGame {
                     out.push(GameEvent::Snapshot(state));
                 }
             }
+            Message::SystemText(text) => out.push(GameEvent::Chat {
+                from,
+                text: text.clone(),
+            }),
             _ => out.push(GameEvent::Message { from, message }),
         }
     }
 
-    /// Say something to everyone.
-    pub fn chat(&mut self, text: &str) {
+    /// Whether the match has started on this end (the sync schema is set).
+    pub fn in_match(&self) -> bool {
+        self.schema.is_some()
+    }
+
+    /// The local player's name.
+    pub fn local_name(&self) -> String {
+        self.local()
+            .and_then(|id| self.lobby.slot(id))
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Say something to everyone. Both chat boxes build the line the same way
+    /// (`FUN_00475240` in the match, `0x492bc0` in the lobby): nothing for an
+    /// empty entry, else `"[" + player name + "] " + text`, sent with flags 0
+    /// to all. In the lobby it is a `0x65` text and shows in `chat messages`;
+    /// in the match it is a `0x76` text and shows in `chat displaybox`. The
+    /// original's own copy comes back through its loopback; here the line is
+    /// returned (and kept in the lobby's chat) for the caller to show.
+    pub fn chat(&mut self, text: &str) -> Option<String> {
+        if text.is_empty() {
+            return None;
+        }
         let me = self.local().unwrap_or(HOST_ID);
-        self.lobby.chat.push((me, text.to_string()));
-        self.session
-            .send(Target::All, &Message::Text(text.to_string()));
+        let line = format!("[{}] {}", self.local_name(), text);
+        if self.in_match() {
+            self.session
+                .send(Target::All, &Message::SystemText(line.clone()));
+        } else {
+            self.lobby.chat.push((me, line.clone()));
+            self.session.send(Target::All, &Message::Text(line.clone()));
+        }
+        Some(line)
     }
 
     /// Choose the local player's robot (name, file and design stream).
@@ -248,6 +290,9 @@ impl NetGame {
             return;
         };
         let slot = &mut self.lobby.slots[index];
+        if slot.is_spectator() {
+            return;
+        }
         slot.kind = kind::HUMAN_WITH_ROBOT;
         slot.team = team.to_string();
         slot.robot = robot.to_string();
@@ -266,6 +311,9 @@ impl NetGame {
     pub fn set_ready(&mut self, ready: bool) {
         let Some(me) = self.local() else { return };
         if let Some(slot) = self.lobby.slot_mut(me) {
+            if slot.is_spectator() {
+                return;
+            }
             slot.ready = ready;
         }
         let m = Message::PlayerReady { player: me, ready };
@@ -347,6 +395,14 @@ impl NetGame {
     /// Host: send a message (scoring, win, end) to everyone.
     pub fn broadcast(&mut self, message: &Message) {
         self.session.send(Target::All, message);
+    }
+
+    /// Host: send a message that must arrive (the scoring messages: a lost
+    /// `giBotDamageMessage` would leave the joiners' scores behind the host's;
+    /// the original sends them with flags `0x28`, guaranteed, while its
+    /// guarantee switch is on).
+    pub fn broadcast_guaranteed(&mut self, message: &Message) {
+        self.session.send_with(Target::All, message, true);
     }
 
     /// The pacing interval.

@@ -930,13 +930,12 @@ impl ApplicationHandler for App {
                 let ctrl = self.modifiers.control_key();
                 // The chat entry owns the keyboard while it is open
                 // (`0x475ee0` opens it on `\`; the text field consumes the
-                // rest). Enter/Escape close it; nothing is sent anywhere.
+                // rest). Enter sends the line and closes it; Escape closes it.
                 if let Some(session) = self.live_match_mut() {
                     if session.chat_open() {
                         match event.physical_key {
-                            PhysicalKey::Code(KeyCode::Escape | KeyCode::Enter) => {
-                                session.chat_submit();
-                            }
+                            PhysicalKey::Code(KeyCode::Enter) => session.chat_submit(),
+                            PhysicalKey::Code(KeyCode::Escape) => session.chat_cancel(),
                             PhysicalKey::Code(KeyCode::Backspace) => session.chat_backspace(),
                             _ if !ctrl => {
                                 if let Some(text) = &event.text {
@@ -1459,6 +1458,13 @@ impl ApplicationHandler for App {
             match self.net.tick(&mut self.shell) {
                 Ok(action) => self.net_action(action),
                 Err(error) => eprintln!("network: {error}"),
+            }
+            for sound in self.net.take_sounds() {
+                match sound {
+                    crate::net_play::NetSound::SpectatorJoined => {
+                        self.audio.ui(crate::audio::UiSound::SpectatorJoined)
+                    }
+                }
             }
             if let Some(session) = &mut self.session {
                 self.net.before_step(session);

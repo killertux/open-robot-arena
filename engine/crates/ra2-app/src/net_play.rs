@@ -18,6 +18,15 @@
 //!   `ready checkbox` toggles ready, `disconnect button` leaves, the host's
 //!   `begin match button` starts.
 //!
+//! In the match (docs/38 §6.1, §10, §11): the host prices every hit and awards
+//! the points, and sends them as `giBotDamageMessage` / `giAddPointsMessage` /
+//! `giBotImmobileMessage` / `giPlayerOutMessage` ([`event_message`]); a joiner
+//! shows them ([`message_event`]) and prices nothing of its own. Peers beyond
+//! the four player panels are spectators: they load the arena, follow the
+//! snapshots and the scoring messages, and have no robot. `\` opens the chat
+//! entry (multiplayer matches only) and a line goes to everyone as a `0x76`
+//! text.
+//!
 //! What is ours: the LAN refresh also queries the addresses in
 //! `RA2_NET_HOSTS` (comma-separated `host:port`) besides the broadcast; the
 //! remote-input key words name our drive axes, not a `.bot` control binding
@@ -32,11 +41,13 @@ use ra2fmt::gib::{Block, Gib, Widget, WidgetKind};
 use ra2net::dpn;
 use ra2net::game::{GameEvent, NetGame};
 use ra2net::link::LinkConfig;
-use ra2net::message::BotInput;
+use ra2net::lobby::{self, SESSION_MAX};
+use ra2net::message::{AddPoints, BotDamage, BotImmobile, BotInput, Message};
 use ra2net::session::{Browser, HostConfig, HostEntry, JoinConfig, PlayerId};
 use ra2net::sync::{BodySync, ConnectionSpeed, SyncSchema, SyncState};
 use ra2sim::duel::Duel;
 use ra2sim::sim::DriveInput;
+use ra2sim::{NetEvent, NetRole};
 
 pub const BROWSER_SCREEN: &str = "multiplayer/multiplayer.gib";
 pub const CREATE_SCREEN: &str = "multiplayer/mp_create.gib";
@@ -196,6 +207,15 @@ pub fn parse_address(text: &str) -> Option<SocketAddr> {
     with_port.to_socket_addrs().ok()?.find(|a| a.is_ipv4())
 }
 
+/// A sound the network layer asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetSound {
+    /// `Sounds\spectator_joined.wav` (`0x492f11`): a peer was created
+    /// (event `0x64`, handler `FUN_00492ef0`, registered by the prematch
+    /// window).
+    SpectatorJoined,
+}
+
 /// What the application should do after a network step.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetAction {
@@ -228,6 +248,9 @@ pub struct NetPlay {
     pub robot_of: BTreeMap<PlayerId, usize>,
     remote: BTreeMap<usize, DriveInput>,
     last_sent: Option<(DriveInput, Instant)>,
+    sounds: Vec<NetSound>,
+    /// Host: the end of the match has been sent.
+    end_sent: bool,
 }
 
 impl Default for NetPlay {
@@ -256,7 +279,34 @@ impl NetPlay {
             robot_of: BTreeMap::new(),
             remote: BTreeMap::new(),
             last_sent: None,
+            sounds: Vec::new(),
+            end_sent: false,
         }
+    }
+
+    /// The sounds asked for since the last call.
+    pub fn take_sounds(&mut self) -> Vec<NetSound> {
+        std::mem::take(&mut self.sounds)
+    }
+
+    /// Whether the local player is a spectator (no player panel).
+    pub fn is_spectator(&self) -> bool {
+        self.game.as_ref().is_some_and(|g| {
+            g.local()
+                .and_then(|me| g.lobby.slot(me))
+                .is_some_and(|s| s.is_spectator())
+        })
+    }
+
+    /// Which robot each player drives: the place among the player panels.
+    pub fn assign_robots(&mut self) {
+        let Some(game) = &self.game else { return };
+        self.robot_of = game
+            .lobby
+            .players()
+            .enumerate()
+            .map(|(i, s)| (s.player, i))
+            .collect();
     }
 
     fn bind(&self, port: u16) -> SocketAddr {
@@ -289,6 +339,7 @@ impl NetPlay {
         };
         self.game = Some(NetGame::join(config).map_err(|e| format!("join: {e}"))?);
         self.connecting = Some(Instant::now());
+        self.end_sent = false;
         self.status = "Connecting to Server     10".to_string();
         Ok(())
     }
@@ -308,13 +359,14 @@ impl NetPlay {
                 name.to_string()
             },
             player_name: self.player_name.clone(),
-            max_players: 4,
+            max_players: SESSION_MAX,
             password,
             link: self.link,
         };
         self.game = Some(NetGame::host(config, speed).map_err(|e| format!("host: {e}"))?);
         self.robot_of.clear();
         self.robot_of.insert(ra2net::session::HOST_ID, 0);
+        self.end_sent = false;
         Ok(())
     }
 
@@ -389,9 +441,7 @@ impl NetPlay {
                         };
                         game.start_match(&arena);
                         game.set_schema(schema());
-                        for (i, slot) in game.lobby.slots.iter().enumerate() {
-                            self.robot_of.insert(slot.player, i);
-                        }
+                        self.assign_robots();
                         return Ok(NetAction::StartMatch { arena });
                     }
                 }
@@ -414,6 +464,7 @@ impl NetPlay {
         if let Some(game) = &mut self.game {
             for event in game.poll() {
                 match event {
+                    GameEvent::PlayerJoined { .. } => self.sounds.push(NetSound::SpectatorJoined),
                     GameEvent::Joined { .. } => {
                         self.connecting = None;
                         self.status.clear();
@@ -433,11 +484,11 @@ impl NetPlay {
                         action = NetAction::Ended("The host ended the session.".to_string());
                     }
                     GameEvent::Prepare { arena } => {
-                        // The robots are the lobby's, in slot order.
+                        // The robots are the lobby's player panels, in order;
+                        // a spectator has none.
                         self.robot_of = game
                             .lobby
-                            .slots
-                            .iter()
+                            .players()
                             .enumerate()
                             .map(|(i, s)| (s.player, i))
                             .collect();
@@ -519,9 +570,15 @@ impl NetPlay {
             .map(|(_, t)| t.clone())
             .collect();
         set_text(doc, "chat messages", &chat.join("\n"));
-        for i in 0..4 {
+        // The peers beyond the four panels, in the order they joined.
+        let spectators: Vec<String> = lobby.spectators().map(|s| s.name.clone()).collect();
+        if let Some(list) = find_mut(doc, "spectator list") {
+            ra2ui::input::text_rows(list, &spectators);
+        }
+        let players: Vec<&ra2net::lobby::Slot> = lobby.players().collect();
+        for i in 0..lobby::PLAYER_SLOTS {
             let panel = format!("player{} group", i + 1);
-            let cell = match lobby.slots.get(i) {
+            let cell = match players.get(i).copied() {
                 Some(slot) => active
                     .as_ref()
                     .and_then(|g| g.widgets().next().cloned())
@@ -552,9 +609,11 @@ impl NetPlay {
         }
     }
 
-    /// The match a lobby starts: the arena, one robot per slot in slot order
-    /// (the slot's robot file when it names a design in the install, else a
-    /// shipped AI robot), the local player's robot driven from the keyboard.
+    /// The match a lobby starts: the arena, one robot per player panel in
+    /// order (the slot's robot file when it names a design in the install,
+    /// else a shipped AI robot), the local player's robot driven from the
+    /// keyboard. A spectator drives nothing and watches (`Watch` camera). Both
+    /// ends know their part in the scoring ([`NetRole`]) and have the chat key.
     pub fn match_session(
         &self,
         game: &std::path::Path,
@@ -570,7 +629,7 @@ impl NetPlay {
             "AI/Team2/Bot0.bot",
         ];
         let mut entries = Vec::new();
-        for (i, slot) in net.lobby.slots.iter().take(4).enumerate() {
+        for (i, slot) in net.lobby.players().take(4).enumerate() {
             let file = game.join(&slot.robot_file);
             let path = if !slot.robot_file.is_empty() && file.is_file() {
                 file
@@ -590,35 +649,56 @@ impl NetPlay {
             ));
         }
         let arena_path = game.join(arena);
-        let mut session = crate::match_mode::Session::exhibition(
-            game,
-            &arena_path,
-            ra2sim::r#match::GameType::Deathmatch,
-            entries,
-            None,
-            None,
-        )?;
         let me = net.local().unwrap_or(ra2net::session::HOST_ID);
-        let robot = net
-            .lobby
-            .slots
-            .iter()
-            .position(|s| s.player == me)
-            .unwrap_or(0);
-        session.player_robot = robot;
-        session.matched.duel.human_robot = Some(robot);
+        let robot = net.lobby.robot_index(me);
+        let mut session = if robot.is_some() {
+            crate::match_mode::Session::exhibition(
+                game,
+                &arena_path,
+                ra2sim::r#match::GameType::Deathmatch,
+                entries,
+                None,
+                None,
+            )?
+        } else {
+            crate::match_mode::Session::spectate(
+                game,
+                &arena_path,
+                ra2sim::r#match::GameType::Deathmatch,
+                entries,
+            )?
+        };
+        if let Some(robot) = robot {
+            session.player_robot = robot;
+            session.matched.duel.human_robot = Some(robot);
+        }
+        session.matched.set_net_role(if net.is_host() {
+            NetRole::Host
+        } else {
+            NetRole::Joiner
+        });
+        session.enable_chat();
         Ok(session)
     }
 
     /// In the match, before each fixed step: the host drives the remote
-    /// humans' robots from their inputs; a joiner sends its own drive.
+    /// humans' robots from their inputs; a joiner sends its own drive (a
+    /// spectator has none); a chat line the player entered goes out.
     pub fn before_step(&mut self, session: &mut crate::match_mode::Session) {
         let Some(game) = &mut self.game else { return };
+        for text in session.take_chat_outbox() {
+            if let Some(line) = game.chat(&text) {
+                session.push_chat_line(line);
+            }
+        }
         if game.is_host() {
             for (&robot, &drive) in &self.remote {
                 session.set_remote_drive(robot, Some(drive));
             }
-        } else {
+        } else if self
+            .robot_of
+            .contains_key(&game.local().unwrap_or_default())
+        {
             let drive = session.drive();
             // Inputs are not guaranteed (flags 0x20); resend a held drive
             // every quarter second so a lost one does not stick.
@@ -643,25 +723,70 @@ impl NetPlay {
         }
     }
 
-    /// After each fixed step: the host paces snapshots; a joiner applies the
-    /// newest snapshot it has.
+    /// After each fixed step: the host paces snapshots and sends what it
+    /// decided (hits, points, immobility, who is out, the end); a joiner or a
+    /// spectator applies the newest snapshot it has and shows the host's
+    /// scoring messages.
     pub fn after_step(&mut self, session: &mut crate::match_mode::Session, dt: f32) {
         let Some(game) = &mut self.game else { return };
         if game.is_host() {
             let duel = &session.matched.duel;
             game.tick_sync(dt, || capture(duel));
+            let events = session.matched.take_net_events();
+            for event in &events {
+                let message = event_message(event, &session.matched.duel);
+                game.broadcast_guaranteed(&message);
+            }
+            if !self.end_sent
+                && matches!(
+                    session.matched.state(),
+                    ra2sim::r#match::MatchState::Over | ra2sim::r#match::MatchState::Results
+                )
+            {
+                self.end_sent = true;
+                let winners = session.matched.report().winners;
+                let id = |i: usize| winners.get(i).map_or(u32::MAX, |w| *w as u32);
+                game.broadcast_guaranteed(&Message::MatchWin {
+                    first: id(0),
+                    second: id(1),
+                });
+                game.broadcast_guaranteed(&Message::EndMatch);
+            }
             for event in game.poll() {
-                if let GameEvent::RemoteInput { from, input, .. } = event {
-                    if let Some(&robot) = self.robot_of.get(&from) {
-                        apply_input(self.remote.entry(robot).or_default(), &input);
+                match event {
+                    GameEvent::RemoteInput { from, input, .. } => {
+                        if let Some(&robot) = self.robot_of.get(&from) {
+                            apply_input(self.remote.entry(robot).or_default(), &input);
+                        }
                     }
+                    GameEvent::Chat { text, .. } => session.push_chat_line(text),
+                    _ => {}
                 }
             }
         } else {
             let mut newest = None;
             for event in game.poll() {
-                if let GameEvent::Snapshot(state) = event {
-                    newest = Some(state);
+                match event {
+                    GameEvent::Snapshot(state) => newest = Some(state),
+                    GameEvent::Chat { text, .. } => session.push_chat_line(text),
+                    GameEvent::Message { from, message } if from == ra2net::session::HOST_ID => {
+                        match message {
+                            Message::MatchWin { first, second } => {
+                                let winners = [first, second]
+                                    .into_iter()
+                                    .filter(|w| *w != u32::MAX)
+                                    .map(|w| w as usize)
+                                    .collect();
+                                session.matched.net_finish(winners);
+                            }
+                            other => {
+                                if let Some(event) = message_event(&other) {
+                                    session.matched.apply_net_event(&event);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             if let Some(state) = newest {
@@ -669,6 +794,86 @@ impl NetPlay {
             }
         }
     }
+}
+
+/// The wire form of a host decision (`FUN_00417330` and friends): a hit is a
+/// `giBotDamageMessage`, points a `giAddPointsMessage`, the immobility warning
+/// a `giBotImmobileMessage` (with where the robot sits), a robot going out a
+/// `giPlayerOutMessage`.
+pub fn event_message(event: &NetEvent, duel: &Duel) -> Message {
+    match event {
+        NetEvent::Hit {
+            attacker,
+            victim,
+            component,
+            damage,
+            point,
+            normal,
+        } => Message::BotDamage(BotDamage::new(
+            attacker.map(|(a, by)| (a as u32, by as u32)),
+            (*victim as u32, *component as u32),
+            *damage,
+            point.to_array(),
+            normal.to_array(),
+        )),
+        NetEvent::Points {
+            player,
+            points,
+            script,
+        } => Message::AddPoints(AddPoints::new(*player as u32, *points, [0.0; 3], *script)),
+        NetEvent::Immobile { robot, on } => {
+            let at = duel
+                .robots
+                .get(*robot)
+                .map(|r| r.position(&*duel.physics).to_array())
+                .unwrap_or_default();
+            // The seconds the robot has sat still: the warning is at 10.
+            Message::BotImmobile(BotImmobile::new(
+                *robot as u32,
+                at,
+                *on,
+                if *on { 10.0 } else { 0.0 },
+            ))
+        }
+        NetEvent::Out { robot, reason } => Message::PlayerOut {
+            player: *robot as u32,
+            reason: *reason,
+        },
+    }
+}
+
+/// What a joiner makes of a host's scoring message (the handlers of
+/// `FUN_004ce940`: `0x135` -> `FUN_00417ae0`, `0x139` -> `FUN_004178a0`,
+/// `0x13b` -> `FUN_004120e0`, `0x13a` -> `FUN_00418040`).
+pub fn message_event(message: &Message) -> Option<NetEvent> {
+    use glam::Vec3;
+    Some(match message {
+        Message::BotDamage(d) => {
+            let (victim, component) = d.victim();
+            NetEvent::Hit {
+                attacker: d.attacker().map(|(a, by)| (a as usize, by as usize)),
+                victim: victim as usize,
+                component: component as usize,
+                damage: d.damage(),
+                point: Vec3::from_array(d.a),
+                normal: Vec3::from_array(d.b),
+            }
+        }
+        Message::AddPoints(p) => NetEvent::Points {
+            player: p.player as usize,
+            points: p.points_f32(),
+            script: p.flags[1],
+        },
+        Message::BotImmobile(b) => NetEvent::Immobile {
+            robot: b.robot as usize,
+            on: b.immobile,
+        },
+        Message::PlayerOut { player, reason } => NetEvent::Out {
+            robot: *player as usize,
+            reason: *reason,
+        },
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -684,6 +889,77 @@ mod tests {
         }
         assert_eq!((back.throttle, back.steer), (drive.throttle, drive.steer));
         assert_eq!(drive_inputs(drive)[1].value as i32, -50);
+    }
+
+    /// The host's decisions survive the wire: an event becomes the message
+    /// the exe's constructor builds and a joiner reads the same event back.
+    #[test]
+    fn scoring_events_round_trip_through_their_messages() {
+        use glam::Vec3;
+        let hit = NetEvent::Hit {
+            attacker: Some((2, 1)),
+            victim: 0,
+            component: 3,
+            damage: 33.25,
+            point: Vec3::new(1.0, 2.0, 3.0),
+            normal: Vec3::Y,
+        };
+        let hazard = NetEvent::Hit {
+            attacker: None,
+            victim: 1,
+            component: 0,
+            damage: 25.0,
+            point: Vec3::ZERO,
+            normal: Vec3::ZERO,
+        };
+        let points = NetEvent::Points {
+            player: 2,
+            points: 33.25,
+            script: false,
+        };
+        let script = NetEvent::Points {
+            player: 1,
+            points: 5.0,
+            script: true,
+        };
+        let out = NetEvent::Out {
+            robot: 3,
+            reason: ra2sim::netevent::out::IMMOBILIZED,
+        };
+        let immobile = NetEvent::Immobile { robot: 1, on: true };
+        for event in [hit, hazard, points, script, out] {
+            let message = match &event {
+                NetEvent::Hit {
+                    attacker,
+                    victim,
+                    component,
+                    damage,
+                    point,
+                    normal,
+                } => Message::BotDamage(BotDamage::new(
+                    attacker.map(|(a, b)| (a as u32, b as u32)),
+                    (*victim as u32, *component as u32),
+                    *damage,
+                    point.to_array(),
+                    normal.to_array(),
+                )),
+                NetEvent::Points {
+                    player,
+                    points,
+                    script,
+                } => Message::AddPoints(AddPoints::new(*player as u32, *points, [0.0; 3], *script)),
+                NetEvent::Out { robot, reason } => Message::PlayerOut {
+                    player: *robot as u32,
+                    reason: *reason,
+                },
+                NetEvent::Immobile { .. } => unreachable!(),
+            };
+            let wire = Message::decode(&message.encode()).unwrap();
+            assert_eq!(message_event(&wire), Some(event));
+        }
+        let wire = Message::BotImmobile(BotImmobile::new(1, [0.0; 3], true, 10.0));
+        assert_eq!(message_event(&wire), Some(immobile));
+        assert_eq!(message_event(&Message::StartCountDown), None);
     }
 
     #[test]
