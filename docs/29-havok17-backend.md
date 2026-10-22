@@ -1707,8 +1707,38 @@ test `tests/flextop_live.rs`):
 | 60 | (-0.070, 0.022, -0.060) | (-0.071, 0.022, -0.068) | (0.12, 0.09, 0.59) | (0.15, 0.09, 0.63) |
 | 120 | (-0.045, -0.028, -0.133) | (-0.045, -0.029, -0.137) | (-0.31, -0.02, -0.15) | (-0.29, -0.01, -0.13) |
 
-Ours swings 3-6 % wider, in phase after 2 s. Live, the table freezes once the
-match is over (its velocity stays, its pose stops); not modelled.
+Ours swings 3-6 % wider, in phase after 2 s.
+
+**The freeze (fx/loose-ends).** Live the table does stop, but **not when the
+match ends**. `frida/ra2_flexend.js` (`flexend-*__live__*`) hooks the match
+end (`0x4170e0`, `0x416450` which calls the arena's `Activate(0)` through the
+Python shim at `0x4c9000`, `0x4172d0`), the arena's `SetPinned`/`SetActive`
+wrappers (`0x405050`, `0x405010`), and per step the table body's first 0x200
+bytes at the dashpot call. In six fights and drives the match ended at steps
+281-1222 and the table kept swinging for 20+ s afterwards, while in three
+drives where *both* robots had left the table (`flexend-off__live__002/003`,
+the old `flextable-...__000`) it stopped at step ~1470 / 1503 / 915; the
+`SetPinned` wrapper was never called (`flextop.py` pins `floor_collision` only
+when the hazards are off). What stops is **the table body itself**: its
+flag word at `+0x1c` goes from `0x22` to `0x20` (bit 1, the active bit; the
+movable test `0x4812c0` reads bits 0 and 2 and stays true), the integrator skips it,
+the two dashpots and the step actions keep being called and change nothing
+(they apply only to movable bodies), and the velocity words keep their last
+values. That is Havok's deactivator (`flextop.gmf`'s simulation object has
+`include_deactivator`, `short_freq` 5, `long_freq` 0.1). The criterion is
+**not recovered**: it needs no robot on the table (never with one touching it,
+even an idle one), but the delay after the last robot left was ~10.5, ~3 and
+~14.5 s in the three drives, the table was still swinging at 0.2-0.6 m/s and
+5-10 cm per 0.2 s, and no window of its motion separates the frozen from the
+earlier steps. Ours: `Duel::update_deactivation` (`RestWatch`) puts the body
+that the file's dashpots hold to rest when no robot part has touched it for 10 s
+(`DEACTIVATION_SECONDS`, 1/`long_freq`) and wakes it on a touch; it matters in
+a FlexTop match only after both robots are off the table (the match is over
+by then). Test `tests/flextop_live.rs::the_flextop_table_freezes_once_no_robot_has_touched_it_for_ten_seconds`;
+`fightprobe` prints `FROZEN`. Open: the real criterion (hook the writer of the flag:
+the tests of bit 1 are at `0x52c1a9`, `0x52eb44`, `0x530341`, `0x531282`,
+`0x53ccd6`, `0x548bb0..0x549429`, `0x55a9c6`, `0x55aa48`; no immediate `or`/`and`
+writes it, and Stalker-following the physics thread crashes the game).
 
 FlexTop Scout v ALARM (Deathmatch in ours, Tabletop live; six warmups; the
 fight ends when the first robot is off the table, y < -6):
@@ -2478,10 +2508,24 @@ box's; unrotated it would be 0.5813. `rig::own_geometry_unrotated`,
 Stock objects it turns: the Small Wedge, `flipper1.gmf`'s flipper (both
 `emergency` and `opponentgear`; EMERGENCY's) and `spinmotor1.gmf`'s `axle`
 and `motor` (no shipped AI robot uses it); the others have rotations below
-1e-6. The drawn wedge is unchanged (the scene nodes match live, §8); whether
-the original draws it flat was not captured. Which code drops the rotation
-was not located (the GMF reader's `*SIMULATION_GEOMETRY` table at `0x7077ac`
-was the start point).
+1e-6. **The original draws it flat too (live, fx/loose-ends).** `capture_shape.py`
+(`shape-flapjack-emergency__live__000-0{0..7}.png` and `.jsonl`: FlapJack and
+EMERGENCY standing in the Combat Arena, hazards off, both AIs neutered, the
+docs/37 §6 camera at eight robot-relative positions) against `ra2-app
+--example shapeshot` (same cameras): before, ours stood FlapJack's Small Wedge
+and EMERGENCY's two flipper plates on edge like vertical boards; live they are
+the low ramps lying on the floor (the wedge's thin edge at the floor, the
+striped plates sloping down to it). The drawn object is now placed like the
+collider: an object that is a rigid body's own mesh (`SIMULATION_GEOMETRY` 2,
+no proxy) is drawn by its `TM`'s translation alone
+(`GmiScene::object_is_own_geometry`, `RigidBody::simulates_own_mesh`, used by
+`ra2_render::scene_items` and the bot loader, not by arena scenery, whose own-mesh
+bodies with a rotation (barrels, the Silver Cup, the hilltop spike) are
+drawn as before). After the change the side-by-sides agree in
+shape and place. Test
+`ra2_render::tests::a_component_that_is_its_own_collision_mesh_is_drawn_unrotated`.
+Which code drops the rotation was not located (the GMF reader's
+`*SIMULATION_GEOMETRY` table at `0x7077ac` was the start point).
 
 With it ours rests as live (-1.864, -0.018; the tip contacts at x -0.30 and
 +0.24, 0.33 m down), and FlapJack's strokes lift the Razor: in the same

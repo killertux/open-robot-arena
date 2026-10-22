@@ -251,6 +251,24 @@ pub fn set_chat(screen: &mut Widget, open: bool, entry: &str, lines: &[String]) 
     }
 }
 
+/// The size of `chat displaybox` (`gamewindow.gib`: 200x100 at (10, 110)).
+pub const CHAT_BOX: [f32; 2] = [200.0, 100.0];
+
+/// The chat lines as `chat displaybox` shows them: each wrapped to the box's
+/// width and, when they make more rows than the 100 px box holds, only the
+/// newest rows (the box is `Scrollable`; the exact rule of the original's
+/// display box was not recovered, so this keeps the tail, as a chat does).
+pub fn fit_chat_lines(font: &ra2fmt::Font, lines: &[String]) -> Vec<String> {
+    let pitch = (font.ascent as f32).max(1.0);
+    let fit = (((CHAT_BOX[1] - font.line_height() as f32) / pitch).floor() as usize + 1).max(1);
+    let rows: Vec<String> = lines
+        .iter()
+        .flat_map(|l| ra2ui::wrap_lines(font, l, CHAT_BOX[0]))
+        .collect();
+    let skip = rows.len().saturating_sub(fit);
+    rows.into_iter().skip(skip).collect()
+}
+
 /// `chat displaybox`: the file's one `Glyph` (the box's paragraph, dressed by
 /// the `DisplayBox`). The widget the file names `chat displaybox` has no name of
 /// its own in the reader, so it is found by its class and its `DisplayBox`.
@@ -717,6 +735,26 @@ mod tests {
             .unwrap();
         assert!(markup.starts_with("<text font fg_mcn14>"), "{markup}");
         assert!(markup.contains("[A] one\n[B] two"), "{markup}");
+    }
+
+    /// `chat displaybox` is 200x100: lines wrap at 200 px and only the newest
+    /// rows that fit in 100 px stay (docs/38 section 11; `chatshot`).
+    #[test]
+    fn the_chat_box_wraps_at_its_width_and_keeps_the_newest_rows_that_fit() {
+        let Some(game) = game_dir() else { return };
+        let fonts = ra2ui::Fonts::load(&game.join("RA2.cfz")).unwrap();
+        let font = fonts.get("fg_mcn14").expect("fg_mcn14");
+        let long = "[A] one two three four five six seven eight nine ten eleven twelve";
+        let rows = fit_chat_lines(font, &[long.to_string()]);
+        assert!(rows.len() >= 2, "{rows:?}");
+        assert!(rows.iter().all(|r| font.extent(r).0 as f32 <= CHAT_BOX[0]));
+        let many: Vec<String> = (0..8).map(|i| format!("[{i}] {long}")).collect();
+        let rows = fit_chat_lines(font, &many);
+        let pitch = font.ascent as f32;
+        let last = (rows.len() - 1) as f32 * pitch + font.line_height() as f32;
+        assert!(last <= CHAT_BOX[1], "{} rows reach {last}", rows.len());
+        assert!(rows.last().unwrap().contains("twelve"), "newest kept");
+        assert!(rows.first().unwrap().starts_with("[7]") || !rows[0].starts_with("[0]"));
     }
 
     /// A "No limit" match never shows the time group: `0x416360` calls

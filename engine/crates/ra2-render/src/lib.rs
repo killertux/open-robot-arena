@@ -783,7 +783,7 @@ pub fn bot_smart_zones(
 /// Visual batches for a scene in `world` space (skipping collision proxies).
 pub fn scene_items(scene: &gmi::GmiScene, world: Mat4, dir: &Path, label: &str) -> Vec<DrawItem> {
     let mut items = Vec::new();
-    push_scene(scene, world, dir, label, &mut items);
+    push_scene(scene, world, dir, label, &mut items, true);
     items
 }
 
@@ -845,7 +845,7 @@ pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Err
     // attached components
     for (i, lc) in loaded.iter().enumerate().skip(1) {
         let Some(lc) = lc else { continue };
-        push_scene(&lc.scene, world[i], &lc.dir, &lc.label, &mut items);
+        push_scene(&lc.scene, world[i], &lc.dir, &lc.label, &mut items, true);
     }
     Ok(items)
 }
@@ -1047,11 +1047,7 @@ fn physics_only_objects(scene: &gmi::GmiScene) -> std::collections::HashSet<Stri
 /// Build render vertices for a `.gmf` scene, grouped by resolved material so
 /// each group can use the correct texture (needed for `Multi/Sub-Object` arenas
 /// where each face selects a sub-material).
-fn scene_material_groups(scene: &gmi::GmiScene, world: Mat4, dir: &Path) -> Vec<SceneGroup> {
-    scene_material_groups_opts(scene, world, dir, None, false)
-}
-
-/// Like [`scene_material_groups`] but optionally limited to one object and/or
+/// Material groups of a scene, optionally limited to one object and/or
 /// emitted in object-local space (for props that move independently).
 fn scene_material_groups_opts(
     scene: &gmi::GmiScene,
@@ -1059,6 +1055,7 @@ fn scene_material_groups_opts(
     dir: &Path,
     only_object: Option<&str>,
     object_local: bool,
+    flat_own: bool,
 ) -> Vec<SceneGroup> {
     let mut index: HashMap<u64, usize> = HashMap::new();
     let mut groups: Vec<SceneGroup> = Vec::new();
@@ -1085,7 +1082,13 @@ fn scene_material_groups_opts(
         let obj_world = if object_local {
             world
         } else {
-            world * node_world(scene, o)
+            let mut node = node_world(scene, o);
+            if flat_own && scene.object_is_own_geometry(o) {
+                // docs/29 section 12p: the original draws a body that is its own
+                // mesh without the object's rotation, as it collides.
+                node = Mat4::from_translation(node.w_axis.truncate());
+            }
+            world * node
         };
         let pts: Vec<Vec3> = mesh
             .points
@@ -1193,10 +1196,11 @@ fn push_scene(
     dir: &Path,
     label: &str,
     items: &mut Vec<DrawItem>,
+    flat_own: bool,
 ) {
     let lights = scene_lights(scene, world);
     let lights = (!lights.is_empty()).then(|| Arc::new(lights));
-    for (material, verts) in scene_material_groups(scene, world, dir) {
+    for (material, verts) in scene_material_groups_opts(scene, world, dir, None, false, flat_own) {
         if verts.is_empty() {
             continue;
         }
@@ -1223,11 +1227,18 @@ fn object_items_opts(
     dir: &Path,
     object_local: bool,
 ) -> Vec<DrawItem> {
-    scene_material_groups_opts(scene, Mat4::IDENTITY, dir, Some(object_name), object_local)
-        .into_iter()
-        .filter(|(_, verts)| !verts.is_empty())
-        .map(|(material, verts)| DrawItem::new(verts, material, object_name))
-        .collect()
+    scene_material_groups_opts(
+        scene,
+        Mat4::IDENTITY,
+        dir,
+        Some(object_name),
+        object_local,
+        false,
+    )
+    .into_iter()
+    .filter(|(_, verts)| !verts.is_empty())
+    .map(|(material, verts)| DrawItem::new(verts, material, object_name))
+    .collect()
 }
 
 /// Every mesh point of a scene in scene space (object transforms applied).
@@ -1285,7 +1296,14 @@ fn add_gmi(
     let data = std::fs::read(path)?;
     let scene = gmi::parse(&data)?;
     let dir = path.parent().unwrap_or(Path::new("."));
-    push_scene(&scene, world, dir, &path.display().to_string(), items);
+    push_scene(
+        &scene,
+        world,
+        dir,
+        &path.display().to_string(),
+        items,
+        false,
+    );
     Ok(())
 }
 
@@ -1854,5 +1872,51 @@ mod tests {
             (plus < 1e-2) ^ (minus < 1e-2),
             "expected exactly one winding to line the arms up, got +1:{plus} -1:{minus}"
         );
+    }
+
+    /// docs/29 section 12p: a body that is its own mesh is drawn without the
+    /// object's rotation, as the original does (live: FlapJack's Small Wedge
+    /// and EMERGENCY's flipper lie flat; `shapeshot` against `capture_shape.py`).
+    #[test]
+    fn a_component_that_is_its_own_collision_mesh_is_drawn_unrotated() {
+        let Some(game) = stock_bots().first().and_then(|b| {
+            b.ancestors()
+                .find(|d| d.join("Components").is_dir())
+                .map(|d| d.to_path_buf())
+        }) else {
+            return;
+        };
+        for file in ["small_wedge/small_wedge1.gmf", "emergency/flipper1.gmf"] {
+            let path = game.join("Components").join(file);
+            let Ok(data) = std::fs::read(&path) else {
+                continue;
+            };
+            let scene = gmi::parse(&data).unwrap();
+            let obj = scene
+                .objects
+                .iter()
+                .find(|o| o.mesh.is_some() && scene.object_is_own_geometry(o))
+                .expect("an own-geometry object");
+            let raw = obj.mesh.as_ref().unwrap().points.clone();
+            let items = scene_items(&scene, Mat4::IDENTITY, path.parent().unwrap(), file);
+            let extent = |pts: &mut dyn Iterator<Item = [f32; 3]>| {
+                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for p in pts {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                }
+                [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]
+            };
+            let want = extent(&mut raw.iter().copied());
+            let got = extent(&mut items.iter().flat_map(|i| i.vertices.iter().map(|v| v.pos)));
+            for k in 0..3 {
+                assert!(
+                    (want[k] - got[k]).abs() < 1e-4,
+                    "{file}: {want:?} vs {got:?}"
+                );
+            }
+        }
     }
 }

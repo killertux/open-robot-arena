@@ -388,7 +388,25 @@ pub struct RigidBody {
     pub children: Vec<RigidBody>,
 }
 
+impl GmiScene {
+    /// Whether geometry object `o` is a rigid body that simulates its own mesh
+    /// (`SIMULATION_GEOMETRY` 2, no proxy): the original places such an object
+    /// by its `TM`'s translation alone, both for collision and for drawing
+    /// (docs/29 section 12p).
+    pub fn object_is_own_geometry(&self, o: &SceneObject) -> bool {
+        self.rigid_bodies()
+            .iter()
+            .any(|rb| rb.simulates_own_mesh() && rb.name.eq_ignore_ascii_case(&o.name))
+    }
+}
+
 impl RigidBody {
+    /// `SIMULATION_GEOMETRY` 2 with no proxy: the body collides as its own
+    /// display mesh.
+    pub fn simulates_own_mesh(&self) -> bool {
+        self.simulation_geometry == 2 && self.collision_object().eq_ignore_ascii_case(&self.name)
+    }
+
     /// The geometry object this body simulates: the proxy when set, else the
     /// body's own name.
     pub fn collision_object(&self) -> &str {

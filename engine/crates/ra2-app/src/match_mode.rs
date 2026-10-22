@@ -320,12 +320,16 @@ impl Presentation {
         countdown_left: f32,
         bind: &ScreenBind,
     ) -> Result<(hud::Hud, UiScene), String> {
+        let chat_lines = match self.assets.faces().get("fg_mcn14") {
+            Some(font) => hud::fit_chat_lines(font, &bind.chat_lines),
+            None => bind.chat_lines.clone(),
+        };
         let Some(root) = self.root_mut() else {
             return Err("gamewindow.gib has no root widget".into());
         };
         let bound = hud::hud(root, report, state, clock, countdown_left);
         hud::set_camera(root, &bind.camera, bind.show_camera);
-        hud::set_chat(root, bind.chat_open, &bind.chat_entry, &bind.chat_lines);
+        hud::set_chat(root, bind.chat_open, &bind.chat_entry, &chat_lines);
         let placed = ra2ui::resolve_with(&self.hud, self.layout, Some(self.assets.faces()));
         // The scene's coordinates are the design screen, not the target: the
         // renderer's `fit` is then the identity (layout == target).
@@ -377,12 +381,16 @@ impl Presentation {
         bind: &ScreenBind,
         dialog: &Gib,
     ) -> Result<UiScene, String> {
+        let chat_lines = match self.assets.faces().get("fg_mcn14") {
+            Some(font) => hud::fit_chat_lines(font, &bind.chat_lines),
+            None => bind.chat_lines.clone(),
+        };
         let Some(root) = self.root_mut() else {
             return Err("gamewindow.gib has no root widget".into());
         };
         hud::hud(root, report, state, clock, countdown_left);
         hud::set_camera(root, &bind.camera, bind.show_camera);
-        hud::set_chat(root, bind.chat_open, &bind.chat_entry, &bind.chat_lines);
+        hud::set_chat(root, bind.chat_open, &bind.chat_entry, &chat_lines);
         let mut placed = ra2ui::resolve_with(&self.hud, self.layout, Some(self.assets.faces()));
         let dialog_placed = ra2ui::resolve_with(dialog, self.layout, Some(self.assets.faces()));
         placed.extend(dialog_placed);
