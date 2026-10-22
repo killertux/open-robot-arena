@@ -58,6 +58,101 @@ fn lower_onto_floor(physics: &mut dyn PhysicsBackend, robot: &Robot) -> bool {
     true
 }
 
+/// The substeps a placed robot's chassis stays inactive (see
+/// [`turn_into_place`]).
+const SPAWN_FROZEN_SUBSTEPS: usize = 2;
+
+/// How many substeps the world takes between a robot's placement on its start
+/// point and its lowering (see [`turn_into_place`]).
+fn spawn_settle_steps(index: usize) -> usize {
+    let key = if index == 0 {
+        "RA2_SPAWN_SETTLE0"
+    } else {
+        "RA2_SPAWN_SETTLE1"
+    };
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(58)
+}
+
+/// How the original puts a robot built at the arena's origin onto its start
+/// point (`0x4dcff0`, docs/29 section 12w): the chassis body is turned to the
+/// start point's heading about its own centre and moved there, and every
+/// other body of the robot is only moved by the chassis' displacement, keeping
+/// its built orientation and its unturned offset. The world then steps with
+/// the chassis held, and the joints pull the other bodies round into place,
+/// turning each about its hinge as the solver leaves it, before the robot is
+/// lowered. `robot` is given here fully placed (every body turned with the
+/// chassis): the other bodies are put back to where the original has them.
+/// Every body in `others` keeps its state through the steps.
+fn turn_into_place(
+    physics: &mut dyn PhysicsBackend,
+    robot: &Robot,
+    turn: Quat,
+    others: &[BodyHandle],
+    steps: usize,
+) {
+    let chassis = robot.body();
+    let Some(centre) = physics.center_of_mass(chassis) else {
+        return;
+    };
+    let back = turn.inverse();
+    for p in robot.parts.iter().skip(1) {
+        if let Some(s) = physics.state(p.body) {
+            physics.set_transform(
+                p.body,
+                centre + back * (s.position - centre),
+                back * s.rotation,
+            );
+        }
+    }
+    if steps == 0 {
+        return;
+    }
+    let saved: Vec<(BodyHandle, crate::backend::BodyState)> = others
+        .iter()
+        .filter_map(|&b| physics.state(b).map(|s| (b, s)))
+        .collect();
+    let _ = physics.set_motion_type(chassis, MotionType::Static);
+    robot.joint_friction(physics, false);
+    // Live the chassis is turned while its robot is frozen and stays inactive
+    // (`+0x1c` 4) until its system wakes it at the end of that frame: the
+    // other bodies, moved and so awake, fall freely for two substeps before
+    // the joints take hold.
+    physics.set_active(chassis, false);
+    let debug = std::env::var_os("RA2_SPAWN_DEBUG").is_some();
+    for k in 0..steps {
+        if k == SPAWN_FROZEN_SUBSTEPS {
+            physics.set_active(chassis, true);
+        }
+        physics.step(crate::DEFAULT_STEP);
+        if debug {
+            for (p, part) in robot.parts.iter().enumerate() {
+                if let Some(s) = physics.state(part.body) {
+                    eprintln!(
+                        "spawn step {k} part {p} at {:.4?} angle {:.4} v {:.3?} w {:.3?} active {}",
+                        s.position,
+                        part.joint.map_or(0.0, |j| physics.hinge_angle(j)),
+                        s.linear_velocity,
+                        s.angular_velocity,
+                        physics.is_active(part.body)
+                    );
+                }
+            }
+        }
+    }
+    physics.set_active(chassis, true);
+    robot.joint_friction(physics, true);
+    let _ = physics.set_motion_type(chassis, MotionType::Dynamic);
+    physics.set_velocity(chassis, Vec3::ZERO, Vec3::ZERO);
+    for (b, s) in saved {
+        physics.set_transform(b, s.position, s.rotation);
+        physics.set_velocity(b, s.linear_velocity, s.angular_velocity);
+    }
+    physics.take_contacts();
+}
+
 /// A part that has been knocked off a robot.
 pub struct Debris {
     pub body: BodyHandle,
@@ -837,6 +932,20 @@ impl Duel {
             )?;
             let mut position = position;
             if lowered {
+                if std::env::var_os("RA2_SPAWN_RIGID").is_none() {
+                    let others: Vec<BodyHandle> = robots
+                        .iter()
+                        .flat_map(|r: &Robot| r.parts.iter().map(|p| p.body))
+                        .chain(props.iter().map(|p| p.body))
+                        .collect();
+                    turn_into_place(
+                        &mut *physics,
+                        &robot,
+                        Quat::from_rotation_y(yaw),
+                        &others,
+                        spawn_settle_steps(i),
+                    );
+                }
                 if !lower_onto_floor(&mut *physics, &robot) {
                     let dy = floor + SPAWN_ABOVE_FLOOR - position.y;
                     for p in &robot.parts {

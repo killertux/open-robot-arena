@@ -3615,3 +3615,199 @@ whether the phantoms count in the spawn test because of the query or because
 the wheels' traction collidables are not flagged as phantoms there (`+0x58` read
 0 on the stopping record); a primitive the MOPP compiler would cut in two (none
 in the stock arenas).
+
+### 12w. How a match turns a robot onto its start point; the hinge's rows and anchor (fx/wheel-axle)
+
+Section 12v left open which turn about its axle the original gives each wheel:
+the spawn heights of six robots, the wheels' point counts against the floor and
+probably the landing bounces and yaws hang on it. This round finds that the
+turn is not built in: the match makes it, when it puts the robot on its start
+point, and the original's hinge constraint decides it.
+
+New live captures (three sessions on `:7`, the prefix's `AI/`, `Teams/`,
+`Robot Designs/` and `ra2.cfg` sha256-identical before and after each; manifest
+rows in `manifest-additions-2026-10-21-wheel-axle.tsv`): new agent
+`frida/ra2_spinup.js` loaded before Start Game through `capture_rest.py`
+(`WATCH_AGENT=ra2_spinup.js`): from the match load every robot body every
+substep (`B`), each robot system (`Y`, in the later sessions with each body's
+local inertia and first `0x200` bytes), the start-point placement (`P`,
+`0x4dcff0`) and the lowering (`L`, `0x418b90`), and every hinge set-up's
+motor/limit state (`H`) and atom (`J`, the first `0xa0` bytes, every call while
+a robot is being placed); each followed by the usual `ra2_deact.js` rows from
+the bell (`spinup-deact-*`). `spinup-scout-alarm-box__live__000..001`, and
+`__000` of `sentinel-berserker`, `revenge-raptor` (and `__001`),
+`stinger-tornado`, `emergency-mad`, `dementia-lmf`, `miniberg-iceberg` and
+`razor-flapjack` (and `__001`). `tools/oracle/spincmp.py` takes each robot's
+bodies from such a capture (as built, the substep before the placement, and as
+held, the substep after the lowering) and prints every body's turn in the
+robot's frame; `examples/spinprobe.rs` prints ours the same way (and with
+`LAND=` every body's height through the landing).
+
+**The placement (recovered, verified live).** A robot is built at the arena's
+origin, frozen (chassis `+0x1c` = 4, the others 0). When the countdown begins
+`0x4dcff0` turns the *chassis body* to the start point's heading about its own
+centre and moves it there (`0x4dcfb0` → `0x4b0af0`, then `0x4dced0`), and moves
+every other body of the robot by the chassis' displacement only: each keeps its
+built orientation and its unturned offset (`spawnwatch-*` rows 29-34: the
+Scout's chassis turned 135°, its wheels moved 9.8 m with their quaternions
+unchanged). Then `0x4dee20(1.0, 1/30)` steps the world to one second in thirtieths
+(58 substeps live in every capture), and only then is the robot lowered
+(`0x418b90`, §12v) and held. In those steps the chassis stays fixed and, for the
+first two substeps, inactive (`+0x1c` 4 → 6 at its system's end-of-frame wake),
+so the other bodies fall freely for two substeps; then the joints pull them
+round onto their hinges in two or three substeps (the Scout's wheel at 8.5 m/s,
+40-60 rad/s about the vertical), and a wheel comes out of it spinning about its
+axle (0.6 rad/s on the Scout's left wheel, 6.9 on ALARM's front left, 21 on two
+of REVENGE's), slowing by under 1 % a substep, until the robot freezes or the
+lowering zeroes it. The angle it has turned by then is the turn §12v was after:
+live the Scout's wheels 14.5° and 2.1°, ALARM's 66.8°, 10.6°, 85.7°, 10.5° —
+the angles `assembly-*__live__000`'s `first` scene showed in section 8 ("the
+rotors have already turned by the first physics step"). Nothing holds a hinge
+meanwhile: the spin motors' hinges have their motor off and no limit (`H` rows),
+the burst motor's hinge is limited to `[0, 0]` from its first set-up and ALARM's
+burst piston rod snaps back to its rest point.
+
+Ours (`duel::turn_into_place`): the robot is spawned turned, its other bodies
+are put back unturned at the chassis' displacement, the chassis is made fixed and
+inactive (`PhysicsBackend::set_active`, new) for two substeps and active for the
+remaining 56, with every other body of the world kept as it was, and the robot
+is then lowered as before. The parked joints' friction (ours) is off for these
+steps (`Robot::joint_friction`); a burst device's joint is locked where it is
+built (`Robot::spawn`, as its first tick already did). `RA2_SPAWN_RIGID=1` gives
+the old rigid placement back; `RA2_SPAWN_SETTLE0/1` the substep counts.
+
+**The hinge's angular rows (recovered from `0x535a50`, verified live).** The
+block's rows 3 and 4 turn about A's own perpendiculars, its reference `u1`
+(atom `+0x58` in A's frame) and `u2 = u1 × a`, and their errors are B's axis
+along them: `u2 · b` for `u1`, `-(u1 · b)` for `u2` (`0x535940` dot products of
+`0x535b8c`'s vectors, stored `·1/dt` at `+0xc`, `+0x10`). To first order this is
+what ours had (the gradient of `a · b_k` over B's perpendiculars), but far from
+aligned the two part: from 135° out ours settled on the reversed axis, the
+original comes back the short way (`joints::tests::a_hinge_turned_most_of_a_half_turn_comes_back_the_short_way`).
+
+**The hinge's anchor (recovered, verified live).** A spin motor's constraint
+holds the bodies at its `.gmf` `Hinge01` pivot, which lies on the mount point's
+line but not at it: the Reversible Angle Motor's 0.156 m in from its `axle_m`
+point, inside the motor, the mirrored model's 0.019 m out. Along a free axle the
+anchor does not matter, but it sets the lever of every pull across it, and so
+the spin a wheel takes from the placement: with the mount point the kick that
+aligns ALARM's front left wheel gave it 0.1 rad/s about its axle, with the
+hinge's pivot 3.0 (live 3.1), and its velocities in the next substeps follow live
+to 1-4 % (`(-15.46, 0.12, -32.44)` m/s and `(3.0, -42.4, 3.0)` rad/s against
+live `(-15.46, 0.08, -32.73)`, `(3.1, -42.4, 3.1)`). `JointInfo::anchor` (only
+the constraint's anchors use it; the rotor's mass, which section 12h puts where
+its proxy's triangles from the mount point put it, and the load cap keep the
+mount point: with the anchor in the mass too, the wheels' transverse moments
+went from 0.450 to 0.485, live 0.428). `RA2_HINGE_MOUNT_PIVOT=1` for the old
+anchor.
+
+**The turns, ours against live** (degrees about the axle, robot frame; the
+bodies whose first substep after the placement was a whole one, see below):
+
+| robot | wheels: live / ours |
+|---|---|
+| Scout | 14.52 / 14.15, 2.14 / 2.54 (fork 0.81 / 0.55) |
+| ALARM | 66.75 / 68.51, 10.57 / 10.47, 85.71 / 87.24, 10.50 / 10.40 (rod at its rest point in both) |
+| Raptor | 173.64 / 173.62, 4.22 / 4.22, 39.59 / 39.57, 137.99 / 137.98 |
+| Sentinel (rear) | 29.23 / 29.22, 72.53 / 72.54 |
+| Dementia | 150.82 / 143.88, 41.73 / 41.40, 107.94 / 107.20, 7.26 / 1.35 |
+| MiniBerg | 10.76 / 10.13, 117.58 / 127.25, 159.25 / 165.78, 10.97 / 10.32 |
+| Razor, FlapJack | 12.47 / 6.48, 10.38 / 10.19; 97.96 / 101.57 |
+| Berserker | 23.20 / 20.30 (spinner 45.00 / 45.00) |
+
+Before this round every one was 0 in ours. Test `tests/spin_live.rs` (Scout,
+ALARM, Raptor to 2.5°).
+
+**Not reproduced.** (1) Live, some bodies take only part of the first substep
+after the placement: their vertical speed after it is -0.024 to -0.114 m/s
+instead of -0.2 (gravity 12 m/s², one substep), reproducibly per robot (REVENGE's
+four wheels -0.074 in two sessions, its blade -0.2; the Scout's fork -0.092 in one
+session, -0.2 in the other), so they fall less before the joints take them and
+spin otherwise: REVENGE's wheels 161.8° and 175.9° live against 81.9° and -18.5°
+ours (its other two, also partial, within 1.5°), M.A.D.'s two, Razor's and
+FlapJack's front pair. What splits that substep is not recovered (a piece of a
+backstepped substep, `0x52aa60`, is the suspect). (2) The steered hubs (Sentinel's
+two 23 kg bodies, live 109° and 113°, ours -172° and 55°): the steering unit's
+wheel constraint (`FUN_00553af0`) is not the hinge above. (3) **Tornado and Iceberg
+face the wrong way**: live their chassis are turned +45° and 134° at their start
+point, ours -45° (90° and 180° off; Stinger, the same start point, -45° in both).
+Both are 1.07 `.bot`s, which store no forward heading (`RobotRig::heading` falls back to 0); what the
+original takes as their front is not recovered. This is what keeps Tornado one
+lowering step high (section 12v) and makes its turns incomparable.
+
+**The spawn heights** (chassis centre at the bell, box): 13 of 16 stock robots now
+where live holds them, to 0.1 mm (§12v: 10): EMERGENCY, Sentinel, Raptor,
+Dementia, MiniBerg come down to live's step now; Scout, ALARM, Razor, M.A.D.,
+REVENGE, Little Metal Friend, Stinger, Iceberg stay right. Wrong: Tornado (+0.05,
+its heading), and two the turns moved: Berserker and FlapJack one step low
+(-0.05; FlapJack's lowest traction phantom ends 0.1002 m above the floor, 0.2 mm
+past the tolerance; both have partial-substep wheels, (1)). Compressor Scout and
+ALARM unchanged. `spawn_live` lets FlapJack be a step low.
+
+**The wheels' points against the floor.** `orderprobe` now also takes `FRAME`
+lines (`spincmp.py frames <spinup capture>`): every live body as built, so each
+body's turn from the original's frame to ours comes from the build, where no
+wheel has turned yet, instead of from a rest pose of another session (whose
+wheels had turned otherwise). Over `contacts-{alarm,scout}-straightturn__live__000`
+the robots' wheel × floor entries whose point count differs: with the rest
+poses 891 and 1237, with the build frames 354 and 207 (ALARM's wheels 19-31 of
+about 460 entries each, the Scout's 13-28 of 510-545; the §12v note had ALARM
+with two points where ours had one in 1050 of 2400). One wheel stays apart: the
+Scout's right wheel in both captures (113-256 of 480-520 differ, 46-80 with points far
+apart), whose live build frame alone carries a 0.9° tilt; not resolved.
+
+**The landing** (box, from the hold: lowest drop / rebound after it within 0.5 s /
+yaw at 0.5 s; live from `rest-*__live__000`; before = `fidelity` cc6fe23):
+
+| robot | live | before | after |
+|---|---|---|---|
+| Raptor | 0.296 / 0.153 / -0.142 | 0.217 / 0.072 / +0.041 | 0.274 / 0.089 / -0.065 |
+| M.A.D. | 0.228 / 0.024 / +0.056 | 0.227 / 0.025 / -0.035 | 0.227 / 0.021 / +0.006 |
+| Scout | 0.249 / 0.048 / -0.007 | 0.251 / 0.073 / -0.007 | 0.245 / 0.033 / -0.032 |
+| ALARM | 0.236 / 0.040 / -0.039 | 0.240 / 0.077 / +0.003 | 0.234 / 0.045 / +0.028 |
+
+Raptor's bounce and yaw move most of the way and its yaw takes live's sense; the
+Scout's and ALARM's rebounds come to live's, their yaws move away. Live, Raptor's
+chassis stops first and its wheels, pulled down through their hinges at up to
+4.6 m/s (ours 3.7), then throw it back up at 1.9 m/s (ours 1.2): the rest of the
+bounce is in that exchange. The resolver is not it: `0x559720` turns inelastic
+once more than 100 impulses are spent in an island (`N < count`), as ours
+(`spent > 100`), every wheel and the chassis being islands of their own against
+the floor, and the restitution is `eA eB` (§12m).
+
+**Validation.** Before = `fidelity` cc6fe23 (section 12v's after column),
+after = this branch. `FIDTRACE_WARMUP` ensembles, 24 runs each, counted = `>= 10`
+on the other robot, robot hits only, mean (total), mean length, full-length runs:
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6) | 32.2 (118) sd 26 / 5.5, 80 s, 5/24 | 39.9 (161) sd 31 / 5.1, 89 s, 9/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 10/24 | 7/24 |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 4.2 (112) / 0.8, 52 s, 2/24 | 4.5 (146) / 0.9, 65 s, 3/24 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 72.5 (309) sd 33 / 4.1, 103 s, 13/24 | 83.3 (301) sd 52 / 3.9, 98 s, 16/24 |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 20.5 (109) sd 21 / 3.7, 93 s, 10/24 | 17.7 (101) sd 15 / 3.6, 85 s, 7/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | | 10/24 | 11/24 |
+| box Tornado v RipBlade, 9 warmups: full length | | 9 of 9 | 8 of 9 (warmup 0 ends at 44 s, RipBlade last) |
+
+Section 12s's replays of the live placements (`twoprobe`): set 1 (20 trials)
+ALARM on its back at some point / at the end 4 / 3 before, 3 / 2 after (live
+1 / 1), mean peak |ω| 3.9 → 3.4 rad/s (live 3.1), both chassis' end centres
+from live, median 1.45 → 1.62 m (worse); set 2 (17) never on the back, median
+0.33 → 0.31 m.
+
+AI suite (ten pairings, warmup 0), counted hits each way before → after: Scout v
+ALARM 2/24 → 6/32, Tornado v RipBlade 124/38 (120 s) → 18/1 (Tornado out at 44 s),
+Grog v Boxer 62/119 → 66/171, Razor v FlapJack 6/0 → 9/2 (120 s), Sentinel v Wide
+Load 3/118 → 0/116, Bear v Tornado 45/75 → 44/58, Grog v Boxer hill 17/22 → 10/12,
+Octagon Scout v ALARM 9/31 → 8/53, Razor v FlapJack park 4/0 → 3/0, Bushido v
+Devil 38/8 → 21/9; every pairing still has damage dealt (Sentinel and the park's
+FlapJack deal none of their own, as the park's FlapJack before).
+The box fight's ALARM count comes to live's (32.2 → 39.9, live 38.5) and its
+falls drop (10 → 7 of 24, live about 5 of 19); the Octagon's ALARM moves toward
+live (20.5 → 17.7, live 13.6); the Compressor's Wide Load moves away (72.5 →
+83.3, live 73.6, sd 52), within about one standard error.
+
+**Still open.** The partial first substep after a placement (above, (1)); the
+steering unit's hubs; the 1.07 robots' heading (Tornado, Iceberg; also LugNut and
+the other 1.07 `.bot`s); the Scout's right wheel in the point-count probe; the
+rest of the landing bounce (the wheels' pull-down through their hinges).

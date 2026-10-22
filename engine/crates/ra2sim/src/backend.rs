@@ -626,6 +626,14 @@ pub trait PhysicsBackend {
         true
     }
 
+    /// Set a body active or inactive by hand (havok17's `setActive`): an
+    /// inactive body is not integrated and the constraint solver leaves its
+    /// joints alone, a fixed body as well (docs/29 section 12w: a robot's
+    /// chassis turned onto its start point stays inactive until its system
+    /// wakes it at the end of the frame). Backends without deactivation
+    /// ignore it.
+    fn set_active(&mut self, _handle: BodyHandle, _active: bool) {}
+
     fn set_joint_strength(&mut self, _handle: JointHandle, _strength: f32, _friction: f32) {}
 
     /// Lock a joint where it is, or release it — the game's `Lock`.

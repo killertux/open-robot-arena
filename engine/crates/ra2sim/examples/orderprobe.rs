@@ -85,12 +85,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(&a[3])?;
     let mut frames: Vec<(String, Vec<Live>)> = Vec::new();
     let mut live_rest: Vec<(Vec3, Quat)> = Vec::new();
+    // `FRAME dx dy dz qw qx qy qz`: a live body as the robot was built (at
+    // the arena's origin, chassis unturned): its centre from its chassis'
+    // and its rotation (`tools/oracle/spincmp.py frames`). With these the
+    // turn from a live body frame to ours is taken from the build, where
+    // no body has turned about its hinge yet (docs/29 section 12w).
+    let mut live_build: Vec<(Vec3, Quat)> = Vec::new();
     for l in text.lines() {
         let w: Vec<&str> = l.split_whitespace().collect();
         match w.first().copied() {
             Some("REST") => {
                 let v: Vec<f32> = w[1..].iter().map(|x| x.parse().unwrap()).collect();
                 live_rest.push((
+                    Vec3::new(v[0], v[1], v[2]),
+                    Quat::from_xyzw(v[4], v[5], v[6], v[3]).normalize(),
+                ));
+            }
+            Some("FRAME") => {
+                let v: Vec<f32> = w[1..].iter().map(|x| x.parse().unwrap()).collect();
+                live_build.push((
                     Vec3::new(v[0], v[1], v[2]),
                     Quat::from_xyzw(v[4], v[5], v[6], v[3]).normalize(),
                 ));
@@ -141,6 +154,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect()
         })
         .collect();
+    let turn: Vec<Vec<Quat>> = if live_build.is_empty() {
+        turn
+    } else {
+        duel.robots
+            .iter()
+            .zip(&rest)
+            .map(|(robot, rr)| {
+                let built = |p: usize| {
+                    let (_, q, _) = robot.rig.components[robot.rig.parts[p].root]
+                        .local
+                        .to_scale_rotation_translation();
+                    q
+                };
+                // The robot's frame now, to put our centres in it.
+                let frame = rr[0].rot * built(0).inverse();
+                (0..rr.len())
+                    .map(|p| {
+                        if p == 0 {
+                            // Live, the chassis is built unturned.
+                            return built(0);
+                        }
+                        let d = frame.inverse() * (rr[p].com - rr[0].com);
+                        live_build
+                            .iter()
+                            .min_by(|x, y| x.0.distance(d).total_cmp(&y.0.distance(d)))
+                            .filter(|l| l.0.distance(d) < 0.15)
+                            .map_or(Quat::IDENTITY, |l| l.1.inverse() * built(p))
+                    })
+                    .collect()
+            })
+            .collect()
+    };
     for (r, robot) in turn.iter().enumerate() {
         for (p, t) in robot.iter().enumerate() {
             println!("TURN {r} {p} {:.3} rad", t.angle_between(Quat::IDENTITY));

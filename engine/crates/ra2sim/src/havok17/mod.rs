@@ -1908,6 +1908,15 @@ impl PhysicsBackend for Havok17Backend {
             .is_none_or(|b| b.motion != MotionType::Dynamic || b.active)
     }
 
+    fn set_active(&mut self, handle: BodyHandle, active: bool) {
+        if let Some(b) = self.body_mut(handle) {
+            if active && !b.active {
+                b.freeze.forget();
+            }
+            b.active = active;
+        }
+    }
+
     fn set_joint_strength(&mut self, handle: JointHandle, strength: f32, friction: f32) {
         if let Some(j) = self.joint_mut(handle) {
             j.max_torque = strength;
