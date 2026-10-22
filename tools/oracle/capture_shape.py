@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -43,7 +44,7 @@ d = [d[0] / L, d[1] / L, d[2] / L]
 plus.setCameraPosition(m[0], m[1], m[2])
 plus.setCameraRotation(-math.asin(d[1]), math.atan2(d[0], d[2]))
 plus.setCameraFOV(0.8)
-out.write(repr((a, h, m)))
+out.write(repr((a, h, m, plus.getTimeElapsed())))
 """
 
 # FlapJack: its wedge from the front corner, from the side, from the front; EMERGENCY from the
@@ -53,6 +54,34 @@ SHOTS = [
     (1, 3.2, 1.8, 1.2, 0.5), (1, 3.2, -1.8, 1.2, 0.5), (1, -3.2, 1.8, 1.2, -0.5),
     (1, -3.2, -1.8, 1.2, -0.5), (1, 0.0, 3.4, 1.0, 0.0),
 ]
+# SHAPE_SET=audit (docs/34 section 11): any two stock robots, four cameras each (front-right corner, left
+# side, back-left corner, front), the same list on both sides (examples/shapeshot.rs, RA2_SHAPE_SET=audit)
+AUDIT_VIEWS = [(3.4, 2.0, 1.3, 0.5), (0.0, -3.4, 1.0, 0.0), (-3.4, -2.0, 1.4, -0.5), (3.6, 0.0, 1.0, 1.0)]
+AUDIT = [(p,) + v for p in (0, 1) for v in AUDIT_VIEWS]
+if os.environ.get("SHAPE_SET") == "audit":
+    SHOTS = AUDIT
+
+
+def start_match_early(arena_y="188", tries=3):
+    """capture_drive.start_match with the AIs neutered while the intro is still up (SHAPE_EARLY=1), so the
+    robots stand at their spawn points when the fight starts (docs/34 section 11): the late neuter of
+    docs/34 section 10 lets them drive for the first seconds, a different place every run."""
+    for _ in range(tries):
+        cd.drive(["click", "176", "177", "wait", "1.5", "click", "322", arena_y, "wait", "1.5", "hide",
+                  "wait", "1", "click", "936", "647", "hide", "wait", "14"])
+        print("early neuter:", cd.py(cd.NEUTER), flush=True)
+        cd.drive(["click", "512", "735", "hide", "wait", "2"])
+        # the fight clock starts after the countdown; the shots must finish inside the immobility
+        # warning (about 12 s into the fight for two stopped robots)
+        for _ in range(40):
+            r = cd.py("import plus; out.write(repr(plus.getTimeElapsed()))").strip()
+            try:
+                if float(r) > 0.2:
+                    return
+            except ValueError:
+                pass
+        time.sleep(10)
+    sys.exit("start_match_early: the match did not start")
 
 
 def sha(p):
@@ -60,6 +89,11 @@ def sha(p):
 
 
 def main():
+    # a hung game must not leave the prefix's robots swapped: SIGTERM and a watchdog end the run through
+    # the `finally` below, which puts the bots back (and checks their sha256)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(2))
+    signal.signal(signal.SIGALRM, lambda *_: sys.exit("capture_shape: watchdog (SHAPE_WATCHDOG s) expired"))
+    signal.alarm(int(os.environ.get("SHAPE_WATCHDOG", "420")))
     name = os.environ.get("NAME", "shape")
     out_dir = os.environ.get("OUT", cd.ORIG)
     bots = [os.environ.get("SHAPE_BOT0", "AI/Team8/Bot0.bot"), os.environ.get("SHAPE_BOT1", "AI/Team5/Bot2.bot")]
@@ -75,11 +109,14 @@ def main():
             if b:  # empty SHAPE_BOTn keeps the prefix's own robot (Scout / ALARM)
                 shutil.copy2(os.path.join(SRC, b), p)
         cd.drive(["-f", os.path.join(HERE, "routes", "exhibition_box_scout_alarm.steps")])
-        cd.start_match("188")
-        print("neuter:", cd.py(cd.NEUTER), flush=True)
+        if os.environ.get("SHAPE_EARLY"):
+            start_match_early("188")
+        else:
+            cd.start_match("188")
+            print("neuter:", cd.py(cd.NEUTER), flush=True)
         hook = None
         if os.environ.get("SHAPE_HOOK"):  # docs/34 section 10: dump the D3D8 state while the shots are taken
-            hook = subprocess.Popen([cd.PY, os.path.join(HERE, "ra2_hook.py"), os.path.join(HERE, "frida", "ra2_d3dstate.js"),
+            hook = subprocess.Popen([cd.PY, os.path.join(HERE, "ra2_hook.py"), os.path.join(HERE, "frida", os.environ.get("SHAPE_HOOK_JS", "ra2_d3dstate.js")),
                                      "--seconds", os.environ.get("SHAPE_HOOK_SECONDS", "14")],
                                     stdout=open(os.environ["SHAPE_HOOK"], "w"))
             time.sleep(3.0)
@@ -88,10 +125,10 @@ def main():
             n += 1
         base = os.path.join(out_dir, f"{name}__live__{n:03d}")
         os.makedirs(out_dir, exist_ok=True)
-        time.sleep(1.0)
+        time.sleep(0.3 if os.environ.get("SHAPE_EARLY") else 1.0)
         for k, (p, fwd, side, up, look) in enumerate(SHOTS):
             r = cd.py(CAM % dict(p=p, fwd=fwd, side=side, up=up, look=look))
-            time.sleep(0.5)
+            time.sleep(float(os.environ.get("SHAPE_SETTLE", "0.5")))
             path = f"{base}-{k:02d}.png"
             ra2_drive.shot(DISPLAY, path)
             rows.append({"ev": "shot", "file": os.path.basename(path), "player": p, "fwd": fwd, "side": side,

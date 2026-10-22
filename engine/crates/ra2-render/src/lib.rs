@@ -55,6 +55,36 @@ pub fn bounds(items: &[DrawItem]) -> (Vec3, Vec3) {
 
 /// Print per-part bounds when `RA2_DEBUG` is set.
 pub fn debug_print_items(items: &[DrawItem]) {
+    // RA2_DUMP_ITEMS=<file>: one JSON line per part with its vertices (position, normal, uv), to compare with
+    // the original's vertex buffers (`tools/oracle/frida/ra2_vbdump.js`, docs/34 section 11).
+    if let Some(path) = std::env::var_os("RA2_DUMP_ITEMS") {
+        let mut out = String::new();
+        for it in items {
+            let v: Vec<String> = it
+                .vertices
+                .iter()
+                .map(|v| {
+                    format!(
+                        "[{},{},{},{},{},{},{},{}]",
+                        v.pos[0],
+                        v.pos[1],
+                        v.pos[2],
+                        v.nrm[0],
+                        v.nrm[1],
+                        v.nrm[2],
+                        v.uv[0],
+                        v.uv[1]
+                    )
+                })
+                .collect();
+            out.push_str(&format!(
+                "{{\"label\":{:?},\"v\":[{}]}}\n",
+                it.label,
+                v.join(",")
+            ));
+        }
+        let _ = std::fs::write(path, out);
+    }
     if std::env::var("RA2_DEBUG").is_err() {
         return;
     }
@@ -66,7 +96,7 @@ pub fn debug_print_items(items: &[DrawItem]) {
             b = b.max(p);
         }
         eprintln!(
-            "  part {:26} verts={:5} bbox=({:.3},{:.3},{:.3})..({:.3},{:.3},{:.3}) tex={}x{}{}",
+            "  part {:26} verts={:5} bbox=({:.3},{:.3},{:.3})..({:.3},{:.3},{:.3}) tex={}x{} mat(dif {:.2} amb {:.2} spc {:.2} pow {}){}",
             it.label,
             it.vertices.len(),
             a.x,
@@ -77,6 +107,10 @@ pub fn debug_print_items(items: &[DrawItem]) {
             b.z,
             it.tex_size().0,
             it.tex_size().1,
+            it.material.diffuse[0],
+            it.material.ambient[0],
+            it.material.specular[0],
+            it.material.power,
             if it.material.transparent {
                 if it.material.additive {
                     " additive"
@@ -815,7 +849,18 @@ pub fn chassis_items(bot: &botfmt::Bot, world: Mat4) -> Vec<DrawItem> {
         .and_then(decode_image)
         .map(|(rgba, w, h)| Image::from_rgba(rgba, w, h))
         .unwrap_or_else(|| Image::solid([120, 120, 125, 255]));
-    vec![DrawItem::new(verts, Material::textured(image), "chassis")]
+    // The armour row after the armour line (`r g b a power`) is the chassis' D3D material specular and
+    // power: live (`ra2_vbdump.js`) Scout's titanium chassis draws with specular 0.40 0.50 0.63 power 60 and
+    // ALARM's steel one with 0.33 0.30 0.30 power 10 (docs/34 section 11).
+    let [sr, sg, sb, sa, power] = ch
+        .armour_material
+        .unwrap_or_else(|| ch.armour.unwrap_or_default().material_row());
+    let material = Material {
+        specular: [sr, sg, sb, sa],
+        power,
+        ..Material::textured(image)
+    };
+    vec![DrawItem::new(verts, material, "chassis")]
 }
 
 pub fn collect_bot(input: &str) -> Result<Vec<DrawItem>, Box<dyn std::error::Error>> {
@@ -911,6 +956,27 @@ pub fn component_assembly_mounted(
         },
     )
 }
+/// The chassis' vertex normals: the sum of the (area-weighted) normals of the triangles that use the
+/// vertex index, normalised (`D3DXComputeNormals` on a mesh whose faces keep their own points).  The side
+/// quads of a tapered chassis are not planar; flat per-triangle normals showed their diagonal as a brightness
+/// seam that the original does not have.  The original subdivides every face into a grid of cells (ALARM's 12
+/// triangles are 70, FlapJack's 28 are 116 in the live vertex buffers) and gives each cell its own flat normal,
+/// which varies gently across a bent quad; averaging at the shared points approximates that (docs/34
+/// section 11).
+pub fn smooth_vertex_normals(pts: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
+    let mut sum = vec![Vec3::ZERO; pts.len()];
+    for tri in indices.as_chunks::<3>().0 {
+        let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+        if a >= pts.len() || b >= pts.len() || c >= pts.len() {
+            continue;
+        }
+        let n = (pts[b] - pts[a]).cross(pts[c] - pts[a]);
+        sum[a] += n;
+        sum[b] += n;
+        sum[c] += n;
+    }
+    sum.into_iter().map(|n| n.normalize_or_zero()).collect()
+}
 
 /// Build the chassis' render vertices from the file's **face groups** (F10).
 ///
@@ -956,13 +1022,13 @@ fn chassis_mesh_vertices(ch: &ra2fmt::bot::Chassis, world: Mat4) -> Vec<Vertex> 
         .iter()
         .map(|p| world.transform_point3(Vec3::from(*p)))
         .collect();
+    let vertex_normals = smooth_vertex_normals(&pts, &mesh.indices);
     for tri in mesh.indices.as_chunks::<3>().0 {
         let (a, b, cc) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
         if a >= pts.len() || b >= pts.len() || cc >= pts.len() {
             continue;
         }
         let (pa, pb, pc) = (pts[a], pts[b], pts[cc]);
-        let n = (pb - pa).cross(pc - pa).normalize_or_zero();
         // The first group that owns all three vertices dresses this triangle.
         let group_uv = groups
             .iter()
@@ -981,10 +1047,14 @@ fn chassis_mesh_vertices(ch: &ra2fmt::bot::Chassis, world: Mat4) -> Vec<Vertex> 
         // The chassis builder's triangles are the opposite way round to the
         // arenas' data; swap two corners so the one culling rule holds for
         // robots too.
-        for (pos, uv) in [(pa, group_uv[0]), (pc, group_uv[2]), (pb, group_uv[1])] {
+        for (pos, uv, nrm) in [
+            (pa, group_uv[0], vertex_normals[a]),
+            (pc, group_uv[2], vertex_normals[cc]),
+            (pb, group_uv[1], vertex_normals[b]),
+        ] {
             out.push(Vertex {
                 pos: pos.into(),
-                nrm: n.into(),
+                nrm: nrm.into(),
                 uv,
                 uv2: uv,
                 color: [1.0, 1.0, 1.0, 1.0],
@@ -1457,6 +1527,62 @@ pub fn perspective_lh(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
 
 #[cfg(test)]
 mod tests {
+    /// Live (`tools/oracle/frida/ra2_vbdump.js`): Scout's titanium chassis draws with D3D material specular
+    /// (0.40, 0.50, 0.63) and power 60, ALARM's steel one with (0.33, 0.30, 0.30) and power 10 - the armour
+    /// row of the `.bot`, `r g b a power`.  Without it the lit faces of every chassis were too dark.
+    #[test]
+    fn a_chassis_carries_its_armour_rows_specular_and_power() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local/game/AI/Team0");
+        for (file, spec, power) in [
+            ("Bot0.bot", [0.40035, 0.4998, 0.63325], 60.0),
+            ("Bot1.bot", [0.3332, 0.30005, 0.30005], 10.0),
+        ] {
+            let Ok(data) = std::fs::read(root.join(file)) else {
+                return;
+            };
+            let bot = botfmt::parse(&data).unwrap();
+            let items = chassis_items(&bot, Mat4::IDENTITY);
+            let m = &items[0].material;
+            assert_eq!(m.power, power, "{file}");
+            for (k, want) in spec.iter().enumerate() {
+                assert!((m.specular[k] - want).abs() < 1e-4, "{file} {k}");
+            }
+            assert!(m.specular_enabled());
+        }
+    }
+
+    /// The side quads of a tapered chassis are not planar: the two triangles of a quad have different
+    /// face normals, and the vertices on the diagonal take the average (no brightness seam), while the
+    /// corners off the diagonal keep (nearly) their own triangle's normal and another face's points
+    /// (other indices) never mix in.
+    #[test]
+    fn chassis_vertex_normals_are_smooth_within_a_face_and_hard_between_faces() {
+        let pts = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.3), // not in the plane of the others
+            Vec3::new(0.0, 1.0, 0.0),
+            // a second face with its own copies of two of the points
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.3),
+            Vec3::new(2.0, 0.0, 1.0),
+        ];
+        let idx = [0, 1, 2, 0, 2, 3, 4, 5, 6];
+        let n = smooth_vertex_normals(&pts, &idx);
+        assert!(n.iter().all(|v| (v.length() - 1.0).abs() < 1e-5));
+        let t1 = (pts[1] - pts[0]).cross(pts[2] - pts[0]).normalize();
+        let t2 = (pts[2] - pts[0]).cross(pts[3] - pts[0]).normalize();
+        assert!(t1.dot(t2) < 0.999, "the quad must be bent");
+        // the shared diagonal (0 and 2) lies between the two face normals
+        assert!(n[0].dot(t1) > t1.dot(t2) && n[0].dot(t2) > t1.dot(t2));
+        // the off-diagonal corners keep their own triangle's normal
+        assert!((n[1] - t1).length() < 1e-5 && (n[3] - t2).length() < 1e-5);
+        // the second face's copies of the same positions are not smoothed with the first face
+        let t3 = (pts[5] - pts[4]).cross(pts[6] - pts[4]).normalize();
+        assert!((n[4] - t3).length() < 1e-5);
+    }
+
     use super::*;
 
     /// Every stock `.bot`, when the (uncommitted) game data is present.

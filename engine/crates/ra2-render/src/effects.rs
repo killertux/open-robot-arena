@@ -1037,7 +1037,112 @@ pub fn shadow_item(
     if vertices.is_empty() {
         return None;
     }
-    let material = Material {
+    let material = shadow_material();
+    Some(DrawItem::new(vertices, material, "shadows"))
+}
+
+/// One shadow caster: a robot's chassis mesh.
+pub struct ShadowCaster {
+    /// The mesh's first triangle: the light ray runs through its first vertex and its plane takes part in
+    /// the receiver test.
+    pub first: [Vec3; 3],
+    /// The triangles that are projected: the ones facing the light.  The original draws all of them (28 fans
+    /// for FlapJack's 28 triangles) and still lays one layer of `rgba (0,0,0,0.3)` on the floor, measured
+    /// live: under the shadow (43,36,109) where the floor is (51,39,143) = `0.7 * floor + 0.3 * 38`, not the
+    /// two layers that the overlapping top and bottom faces would give; the faces turned away from the
+    /// light only cover what the front faces cover, so they are left out.
+    pub tris: Vec<[Vec3; 3]>,
+}
+
+/// The original's `ShadowWizard` rules for one caster (docs/34 section 11, live-checked with
+/// `tools/oracle/frida/ra2_shadow.js`): the caster is the robot's chassis *mesh*, the light ray runs
+/// through the first vertex of its first triangle, a receiver is skipped unless
+/// `dot(ray, receiver normal) >= 0.3` (the normal as the declared triangle winds, `(p1-p0) x (p2-p0)`) and a
+/// receiver whose plane the ray reaches more than `0.3` before the caster's first-triangle plane is skipped
+/// too (`FUN_004ee700`, `0x6fe914` and `0x6fe918` are both 0.3).
+pub fn shadow_item_triangles(
+    light: Vec3,
+    receivers: &[[Vec3; 3]],
+    casters: &[ShadowCaster],
+) -> Option<DrawItem> {
+    let mut vertices = Vec::new();
+    for caster in casters {
+        let first = &caster.first;
+        let dir = (first[0] - light).normalize_or_zero();
+        if dir == Vec3::ZERO {
+            continue;
+        }
+        let cn = (first[1] - first[0])
+            .cross(first[2] - first[0])
+            .normalize_or_zero();
+        let denom_c = cn.dot(dir);
+        // The ray's parameter at the caster's first-triangle plane.
+        let t_caster = (denom_c != 0.0).then(|| cn.dot(first[0] - light) / denom_c);
+        for tri in receivers {
+            let centre = (tri[0] + tri[1] + tri[2]) / 3.0;
+            let raw = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
+            if raw == Vec3::ZERO || dir.dot(raw) < 0.3 {
+                continue;
+            }
+            let denom_r = raw.dot(dir);
+            let t_recv = raw.dot(centre - light) / denom_r;
+            if let Some(tc) = t_caster {
+                if tc > 0.0 && t_recv > 0.0 && tc > 0.3 + t_recv {
+                    continue;
+                }
+            }
+            // The shadow is lifted to the side the light is on.
+            let n = if raw.dot(light - centre) < 0.0 {
+                -raw
+            } else {
+                raw
+            };
+            let helper = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+            let bu = n.cross(helper).normalize();
+            let bv = n.cross(bu);
+            let to2 = |p: Vec3| [bu.dot(p - centre), bv.dot(p - centre)];
+            let tri2 = [to2(tri[0]), to2(tri[1]), to2(tri[2])];
+            for t in &caster.tris {
+                let mut pts = Vec::with_capacity(3);
+                for &p in t {
+                    let d = p - light;
+                    let denom = raw.dot(d);
+                    if denom.abs() < 1e-6 {
+                        break;
+                    }
+                    let k = raw.dot(centre - light) / denom;
+                    if k < 1.0 {
+                        break; // the point is behind the receiver
+                    }
+                    pts.push(to2(light + d * k));
+                }
+                if pts.len() < 3 {
+                    continue;
+                }
+                let clipped = clip_to_triangle(&pts, &tri2);
+                if clipped.len() < 3 {
+                    continue;
+                }
+                let lift = |q: [f32; 2]| centre + bu * q[0] + bv * q[1] + n * SHADOW_LIFT;
+                let f0 = lift(clipped[0]);
+                for w in 1..clipped.len() - 1 {
+                    for pos in [f0, lift(clipped[w]), lift(clipped[w + 1])] {
+                        let mut v = Vertex::new(pos, n, [0.0, 0.0]);
+                        v.color = SHADOW_RGBA;
+                        vertices.push(v);
+                    }
+                }
+            }
+        }
+    }
+    if vertices.is_empty() {
+        return None;
+    }
+    Some(DrawItem::new(vertices, shadow_material(), "shadows"))
+}
+
+fn shadow_material() -> Material {
+    Material {
         stages: vec![Stage {
             image: Image::solid([255; 4]),
             kind: StageKind::Modulate,
@@ -1051,8 +1156,7 @@ pub fn shadow_item(
         z_write: false,
         cull: false,
         ..Material::default()
-    };
-    Some(DrawItem::new(vertices, material, "shadows"))
+    }
 }
 
 /// Andrew's monotone chain, counter-clockwise.
@@ -1337,6 +1441,75 @@ mod tests {
             Vec3::new(0.0, 20.0, 10.0),
         ];
         assert!(shadow_item(light, &[behind], &[vec![Vec3::new(0.0, 1.0, 0.0); 4]]).is_none());
+    }
+
+    /// A floor wound as `Arenas/box.py` declares it: `(p1 - p0) x (p2 - p0)` points down.
+    fn declared_floor() -> [Vec3; 3] {
+        [
+            Vec3::new(-20.0, 0.0, 20.0),
+            Vec3::new(-20.0, 0.0, -20.0),
+            Vec3::new(20.0, 0.0, 20.0),
+        ]
+    }
+
+    fn caster_of(tris: Vec<[Vec3; 3]>) -> ShadowCaster {
+        ShadowCaster {
+            first: tris[0],
+            tris,
+        }
+    }
+
+    fn tri_at(y: f32, x: f32) -> [Vec3; 3] {
+        [
+            Vec3::new(x, y, 0.0),
+            Vec3::new(x + 1.0, y, 0.0),
+            Vec3::new(x, y, 1.0),
+        ]
+    }
+
+    /// Live (`ra2_shadow.js`): FlapJack's 28 chassis triangles made 28 fans, one per triangle, on the
+    /// floor; the caster is the chassis mesh and each triangle is projected on its own.
+    #[test]
+    fn a_chassis_casts_one_projected_triangle_per_triangle() {
+        let light = Vec3::new(0.653, 6.894, -0.418);
+        let caster = caster_of(
+            (0..28)
+                .map(|i| tri_at(0.03, -9.0 + 0.01 * i as f32))
+                .collect(),
+        );
+        let item = shadow_item_triangles(light, &[declared_floor()], &[caster]).expect("a shadow");
+        assert_eq!(item.vertices.len(), 28 * 3);
+        assert!(item.material.blended());
+        assert!(item.vertices.iter().all(|v| v.color == SHADOW_RGBA));
+        // Lifted to the side the light is on.
+        assert!(item
+            .vertices
+            .iter()
+            .all(|v| (v.pos[1] - SHADOW_LIFT).abs() < 1e-4));
+    }
+
+    /// `FUN_004ee700`: `dot(ray, receiver normal) >= 0.3`, the normal as the receiver is wound.  The box's
+    /// declared walls pass or fail by it (live: the walls on the caster's far side passed, the others not).
+    #[test]
+    fn a_receiver_facing_away_from_the_ray_is_skipped() {
+        let light = Vec3::new(0.0, 10.0, 0.0);
+        let caster = || caster_of(vec![tri_at(0.5, -3.0)]);
+        // The same floor wound the other way: its normal points up, against a ray that runs down.
+        let [a, b, c] = declared_floor();
+        assert!(shadow_item_triangles(light, &[[a, c, b]], &[caster()]).is_none());
+        assert!(shadow_item_triangles(light, &[[a, b, c]], &[caster()]).is_some());
+    }
+
+    /// The second test: a receiver the ray reaches more than 0.3 before the caster's first-triangle plane
+    /// is skipped (the caster is behind it), one within 0.3 is drawn.
+    #[test]
+    fn a_receiver_well_before_the_casters_first_plane_is_skipped() {
+        let light = Vec3::new(0.0, 10.0, 0.0);
+        let floor = declared_floor();
+        // (a first triangle `depth` under the floor, then one above it)
+        let below = |depth: f32| caster_of(vec![tri_at(-depth, -3.0), tri_at(0.5, -3.0)]);
+        assert!(shadow_item_triangles(light, &[floor], &[below(1.0)]).is_none());
+        assert!(shadow_item_triangles(light, &[floor], &[below(0.2)]).is_some());
     }
 
     #[test]

@@ -373,3 +373,178 @@ So the floor, walls and lightmap path need no change; compare robot shots only w
 at the same place (record `plus.getLocation`, which the jsonl has) or use the spawn poses on both
 sides. Test: `the_box_floor_is_tile_times_a_lightmap_with_lighting_off` (ra2-render, needs the game
 data). Scratchpad side-by-sides: `lt/sbs_pose_*_live-left-ours-right.png`, `lt/sbs_spawn_*`.
+
+
+## 11. How robots are drawn: the stock-robot audit (shadows, chassis specular, viewer vector)
+
+**The defect.** In `shape-flapjack-emergency` ours drew faint grey triangles on both sides of FlapJack's wedge,
+from the chassis' bottom corners down to the plate; live shows floor there. They were **our shadow**, not a mesh
+fault: `shadow_item` projected the convex hull of *every attached component's* hull points, and FlapJack's
+bottom face and wheels put a big translucent polygon under the robot's front. Live (`ra2_shadow.js`, below) the
+shadow is cast by the **chassis mesh only**, and from the spawn camera it falls behind the robot.
+
+### 11.1 `ShadowWizard::Update` (`FUN_004ee700`), recovered from a live per-frame trace
+
+`tools/oracle/frida/ra2_shadow.js` logs the plane builds, receiver tests, ray/plane tests and fan draws of one
+frame (`shadowwiz-flapjack-emergency__live__000.jsonl`, FlapJack v EMERGENCY at the spawn points):
+
+* **One caster per robot, its chassis mesh**: 28 fans for FlapJack (28 chassis triangles in the `.bot`), 52 for
+  EMERGENCY (52). Each triangle is projected on its own; a projected triangle that lies inside a receiver is one
+  fan triangle, so `draws` = triangle count.
+* The light ray goes through **the first vertex of the first chassis triangle**: logged direction
+  `(-0.5869,-0.5421,0.6014)` is `normalize(p0 - light)` with `p0 = (-9.0701,-2.0874,9.5467)`, hit parameter on
+  that triangle's plane `t = 16.5681` (the ray's origin is the light `(0.653,6.894,-0.418)`).
+* **Receiver test 1**: `dot(ray, receiver normal) >= 0.3` (`0x6fe914`), the normal as the declared triangle winds
+  (`(p1-p0) x (p2-p0)`, `FUN_0061d9c0`). On `box.py` the floor `(0,-1,0)`, the `+z` wall and the `-x` wall passed for
+  FlapJack, the `-z` and `+x` walls for EMERGENCY.
+* **Receiver test 2**: the ray's parameter at the caster's first-triangle plane may exceed the receiver plane's
+  by at most `0.3` (`0x6fe918`): `t_caster <= t_receiver + 0.3` (a caster plane behind the receiver rejects it).
+* **Single layer.** The original draws all the triangles with `rgba (0,0,0,0.3)` and still ends with **one** layer:
+  under the shadow the floor is `(43,36,109)` where unshadowed `(51,39,143)` is `0.7 x floor + 0.3 x 38`, not the two
+  layers the overlapping top and bottom faces would give (`(39,34,84)` = ours before). We project only the
+  triangles facing the light (for a closed mesh they tile the silhouette exactly once). After the change the same
+  pixels read `(45,38,110)` vs live `(49,40,111)`.
+
+Code: `ra2_render::effects::{ShadowCaster, shadow_item_triangles}`, `Duel::effect_items`; tests
+`a_chassis_casts_one_projected_triangle_per_triangle`, `a_receiver_facing_away_from_the_ray_is_skipped`,
+`a_receiver_well_before_the_casters_first_plane_is_skipped`. The old hull-based `shadow_item` stays for the unit
+tests of the maths it shares.
+
+### 11.2 The chassis is drawn with its armour row's specular colour and power
+
+Live vertex-buffer/material dump (`ra2_vbdump.js`, `vbdump-*__live__000.jsonl`): the chassis' D3D material is
+`dif 1, amb 1, spc = armour row r g b, power = armour row power`: Scout (titanium) `spc 0.4004 0.4998 0.6332`,
+power 60; ALARM (steel) `0.3332 0.30 0.30`, power 10; FlapJack titanium. Ours built chassis with the default
+material (power 0), so every lit chassis face read too dark next to live (ALARM's red-striped front plate 150 v 190;
+Razor's plate; EMERGENCY's body). `chassis_items` now reads `ch.armour_material` (`r g b a power`, the row after the
+armour line; the armour type's `material_row()` when the file has none). Test
+`a_chassis_carries_its_armour_rows_specular_and_power`.
+
+### 11.3 Other findings from the dumps
+
+* **`D3DRS_LOCALVIEWER` is 0 in every draw** (`d3dstate-scout-alarm__live__000.jsonl`): the specular half vector
+  uses the camera's `-forward` as the viewer direction for every vertex, not the direction to the eye. The vertex
+  shader now does that (`renderer.rs`); the chassis frames improve slightly (ALARM shot 6 8.7 -> 8.2).
+* The live chassis is a **subdivided mesh** (ALARM 12 triangles in the file, 70 drawn; Scout 20 -> 79; FlapJack 28 ->
+  116) with **flat unit normals per cell**; the cells of a bent quad have slightly different normals (FlapJack's side
+  quads are not planar), so the shading changes gently across the face. Our 2-triangle quads with flat per-triangle
+  normals showed the quad's diagonal as a brightness seam (FlapJack, left front face). The chassis vertex normals are
+  now the average at the shared vertex index (`smooth_vertex_normals`, test
+  `chassis_vertex_normals_are_smooth_within_a_face_and_hard_between_faces`), which keeps the hard edges between faces
+  (faces do not share indices) and removes the seam. **Not done:** the exact subdivision (the grid per face and the
+  inset top plate of the `buckling`/`top_corners` data); it only matters for the Gouraud sampling of highlights.
+* Components: vertices, normals and uv of ALARM's BurstPiston and Hammer Head are identical to the live buffers; the
+  D3D materials of the component parts are the ones `Material::from_gmi` builds (amb 0.59 / spc 0.56 / pow 10, wheel
+  amb 0.21, forklift arm 0.62 / 0.22, round extender 0.85 / 0.60, ...).
+
+### 11.4 The audit
+
+Method. `tools/oracle/capture_shape.py` with `SHAPE_SET=audit SHAPE_EARLY=1` copies two stock bots over the prefix's
+`AI/Team0/Bot0/Bot1.bot` (restored and sha256-checked; a SIGTERM/watchdog now goes through the restore), starts the
+Combat Arena exhibition (hazards off) and **neuters the AIs while the intro is still up**, so both robots stand at
+their spawn points when the fight starts (the late neuter of section 10 let them drive a different distance every
+run). Four cameras per robot (front-right corner 3.4 fwd / 2.0 right / 1.3 up, left side, back-left corner, front)
+from docs/37's `CAM`; the shots are taken inside the first ~12 s before the immobility rule ends the match.
+`shapeshot` (`RA2_SHAPE_SET=audit`) puts the same cameras on our robots at their own spawn points, hazards off, AIs
+held (no `RA2_SHAPE_POSES`: the camera follows each side's own robot, so a small yaw or position difference of the
+resting robot does not move the robot inside the frame). `tools/oracle/robot_audit.py` measures (HUD clock and the two
+HUD cards masked) the whole-frame MAE and the MAE of the central 640 x 424 window the robot fills, writes the
+side-by-sides and per-robot montages (live left, ours right), and reports the yaw difference of the resting robots.
+`poses_from_jsonl.py` turns a capture's jsonl into `RA2_SHAPE_POSES` when the live poses are wanted instead.
+
+All 45 stock AI robots (`AI/Team*/Bot*.bot`: Scout, ALARM, Sentinel, Roly Poly, SaberTooth, Grog, CatFish, Mud Runner,
+BEAR, Ninja, Bushido, Ronin, BOT-204, Devil, Coal Miner, JACKPOT!, The Boxer, EMERGENCY, M.A.D., Dementia, Little Metal
+Friend, MiniBerg, Iceberg, SnowJob, FlapJack, BackSlash, Wide Load, Flame Chopper, LugNut, Hanky Panky, Berserker,
+Razor, Eye Poker, Lil' Dog, Da Dog, Big Dog, Civil Disobedience, REVENGE, Raptor, Stinger, Tornado, DEADBEAT, Arc
+Pounder, Ripblade, Backyard Ripper) were photographed live in 23 matches (`robots-<pair>__live__000-NN.png`, plus the
+reshoots), 4 shots each; frames in which the match-results screen already covers the arena (Big Dog shot 3, MiniBerg
+5-7, SnowJob 3) are left out of the means. MAE per robot, mean of its valid shots, **before** (hull shadow, default
+chassis material, local viewer) and **after**:
+
+| robot | bot | shots | MAE before | MAE after | centre before | centre after | yaw ours-live (rad) |
+|---|---|---|---|---|---|---|---|
+| ALARM | AI/Team0/Bot1.bot | 4 | 6.88 | 5.46 | 10.51 | 6.60 | -0.03 |
+| Arc Pounder | AI/Team14/Bot0.bot | 4 | 5.01 | 4.58 | 6.31 | 5.66 | +0.03 |
+| BEAR | AI/Team2/Bot2.bot | 4 | 8.06 | 7.31 | 10.65 | 9.18 | +0.05 |
+| BOT-204 | AI/Team4/Bot0.bot | 4 | 6.02 | 5.80 | 8.22 | 7.79 | +0.07 |
+| BackSlash | AI/Team8/Bot1.bot | 4 | 5.62 | 5.50 | 6.46 | 6.16 | -0.10 |
+| Backyard Ripper | AI/Team14/Bot2.bot | 4 | 12.22 | 11.82 | 19.47 | 18.89 | -0.04 |
+| Berserker | AI/Team10/Bot0.bot | 4 | 12.20 | 11.97 | 18.82 | 18.47 | +0.21 |
+| Big Dog | AI/Team11/Bot2.bot | 3 | 8.17 | 7.10 | 13.10 | 10.29 | -0.00 |
+| Bushido | AI/Team3/Bot1.bot | 4 | 7.75 | 6.64 | 11.33 | 8.46 | -0.11 |
+| CatFish | AI/Team2/Bot0.bot | 4 | 3.85 | 3.13 | 6.05 | 4.05 | +0.02 |
+| Civil Disobedience | AI/Team12/Bot0.bot | 4 | 6.71 | 6.50 | 8.24 | 7.78 | -0.10 |
+| Coal Miner | AI/Team4/Bot2.bot | 4 | 5.98 | 5.74 | 7.19 | 6.76 | +0.08 |
+| DEADBEAT | AI/Team13/Bot2.bot | 4 | 7.65 | 6.66 | 11.34 | 9.28 | -0.10 |
+| Da Dog | AI/Team11/Bot1.bot | 4 | 3.42 | 2.59 | 4.73 | 2.47 | +0.01 |
+| Dementia | AI/Team6/Bot1.bot | 4 | 8.19 | 7.81 | 10.41 | 9.65 | -0.15 |
+| Devil | AI/Team4/Bot1.bot | 4 | 4.35 | 2.86 | 7.27 | 4.22 | -0.00 |
+| EMERGENCY | AI/Team5/Bot2.bot | 4 | 5.80 | 3.43 | 10.76 | 4.80 | -0.01 |
+| Eye Poker | AI/Team10/Bot2.bot | 4 | 9.99 | 7.86 | 17.03 | 11.17 | +0.12 |
+| Flame Chopper | AI/Team9/Bot0.bot | 4 | 5.40 | 5.18 | 5.87 | 5.40 | +0.10 |
+| FlapJack | AI/Team8/Bot0.bot | 4 | 3.97 | 3.52 | 5.13 | 3.87 | +0.04 |
+| Grog, The Warrior | AI/Team1/Bot2.bot | 4 | 8.58 | 7.98 | 10.57 | 9.82 | -0.14 |
+| Hanky Panky | AI/Team9/Bot2.bot | 4 | 7.80 | 6.76 | 12.58 | 9.75 | +0.02 |
+| Iceberg | AI/Team7/Bot1.bot | 5 | 15.17 | 15.12 | 30.19 | 30.17 | +0.03 |
+| JACKPOT! | AI/Team5/Bot0.bot | 4 | 4.45 | 3.95 | 5.72 | 4.68 | -0.04 |
+| Lil' Dog | AI/Team11/Bot0.bot | 4 | 4.60 | 4.53 | 4.82 | 4.62 | +0.00 |
+| Little Metal Friend | AI/Team6/Bot2.bot | 4 | 8.70 | 7.06 | 10.53 | 6.85 | -0.07 |
+| LugNut | AI/Team9/Bot1.bot | 4 | 8.22 | 8.38 | 15.15 | 15.64 | +0.03 |
+| M.A.D. | AI/Team6/Bot0.bot | 4 | 11.57 | 10.92 | 15.52 | 13.77 | -0.36 |
+| MiniBerg | AI/Team7/Bot0.bot | 7 | 5.49 | 5.34 | 6.10 | 5.82 | +0.05 |
+| Mud Runner | AI/Team2/Bot1.bot | 4 | 9.67 | 8.85 | 13.51 | 11.72 | -0.01 |
+| Ninja | AI/Team3/Bot0.bot | 4 | 7.21 | 7.01 | 9.18 | 8.61 | +0.11 |
+| REVENGE | AI/Team12/Bot1.bot | 4 | 6.90 | 6.37 | 10.06 | 8.66 | -0.09 |
+| Raptor | AI/Team12/Bot2.bot | 4 | 12.48 | 10.53 | 18.95 | 13.73 | +0.17 |
+| Razor | AI/Team10/Bot1.bot | 4 | 5.72 | 4.07 | 9.21 | 4.66 | +0.04 |
+| Ripblade | AI/Team14/Bot1.bot | 4 | 7.45 | 6.13 | 12.05 | 8.98 | +0.01 |
+| Roly Poly | AI/Team1/Bot0.bot | 4 | 4.45 | 4.22 | 4.46 | 3.88 | -0.06 |
+| Ronin | AI/Team3/Bot2.bot | 4 | 4.96 | 4.81 | 7.05 | 6.86 | -0.04 |
+| SaberTooth | AI/Team1/Bot1.bot | 4 | 3.96 | 2.93 | 5.34 | 4.02 | -0.01 |
+| Scout | AI/Team0/Bot0.bot | 8 | 7.84 | 7.60 | 9.49 | 8.80 | -0.17 |
+| Sentinel | AI/Team0/Bot2.bot | 4 | 7.82 | 5.90 | 13.89 | 8.97 | -0.06 |
+| SnowJob | AI/Team7/Bot2.bot | 3 | 6.38 | 5.73 | 7.19 | 6.14 | +0.08 |
+| Stinger | AI/Team13/Bot0.bot | 4 | 5.41 | 4.88 | 7.87 | 6.52 | -0.03 |
+| The Boxer | AI/Team5/Bot1.bot | 4 | 7.70 | 7.06 | 11.52 | 9.88 | +0.09 |
+| Tornado | AI/Team13/Bot1.bot | 4 | 10.62 | 10.45 | 19.23 | 19.00 | +0.08 |
+| Wide Load | AI/Team8/Bot2.bot | 4 | 5.76 | 5.44 | 8.13 | 7.65 | +0.01 |
+| **mean (45 robots)** | | | **7.25** | **6.52** | **10.60** | **8.89** | |
+
+(The central-window column is the robot's own area; the whole-frame column includes a background that shifts when the
+resting robot's yaw differs.)
+
+What the shots show, robot by robot:
+
+* **No missing, extra, mis-oriented, mis-textured or mis-painted part** in the montages read in full (Scout, ALARM,
+  Sentinel, Berserker, Razor, Eye Poker, Lil' Dog, Civil Disobedience, Coal Miner, Tornado, Backyard Ripper, Roly
+  Poly, Mud Runner, M.A.D., Dementia, JACKPOT!, Iceberg, EMERGENCY, FlapJack); the other 26 were screened by the MAE
+  table above (none above 9 after the changes apart from Iceberg, Berserker, Backyard Ripper, M.A.D., Raptor and Tornado) and sampled. Component geometry, textures, paints
+  and transparency agree (side-by-sides in the scratchpad `robot-look/after/`, the same before the changes in
+  `robot-look/before/`).
+* **Shadow differences** (the reported defect and the doubled layer) and **chassis lighting/specular differences**
+  (every chassis with a lit face looking at the light: ALARM, Sentinel, Razor, Eye Poker, EMERGENCY, Devil, Da Dog,
+  SaberTooth ...) are what the changes above fix: MAE 7.25 -> 6.52 on the whole frame and 10.60 -> 8.89 in the
+  robot's window; the robots with the biggest gains (ALARM, EMERGENCY, Razor, Eye Poker, Sentinel, Raptor, Devil)
+  are those with large bright lit faces.
+* What is left in the table is **not rendering**: (a) animated parts that are at another angle in live (the spinning
+  blades of Berserker, Backyard Ripper, Ripblade, Arc Pounder, Coal Miner, the pickaxe of Iceberg, wheel hubs that
+  rolled); (b) resting yaw/position differences of the physics (`yaw ours-live` column: M.A.D. -0.36 rad, Berserker
+  +0.21, Raptor +0.17, Dementia -0.15, Grog -0.14; Tornado and Iceberg turn by a lot in live because of their weapons
+  torque), which shift the background and the light on the robot; (c) the live **HUD** draws an `IMMOBILITY WARNING`
+  counter over a robot that has not moved for ~10 s and an `IMMOBILE!` card, ours shows neither in these frames (not
+  a robot-drawing item); (d) `Eye Poker`'s top domes and Dementia's wheel-hub nuts are brighter in ours; the
+  materials are identical to the dump, the facets differ with the rolled/yawed part, so this is (a)/(b), not a
+  material difference.
+* Open: the exact chassis subdivision; Iceberg's chassis shading (its mesh has inward-wound triangles and ours
+  differs on its left face) is the largest remaining robot-shape residual.
+
+Per-draw state check (`ra2_d3dstate.js` on Scout v ALARM, 56 signatures): every robot draw is `LIGHTING` 1, one point
+light, `SPECULARENABLE` 1, `LOCALVIEWER` 0, `CULL_CCW`, `COLORVERTEX` 1 with diffuse from the vertex colour (absent in
+the vertex format, so the material), stage 0 MODULATE (texture, diffuse) with linear filters on the chassis and
+components, point on a few small parts; no fog, no blending except the translucent extenders. Nothing else differs
+from what `Material` builds.
+
+Tools: `tools/oracle/robot_audit.py`, `tools/oracle/poses_from_jsonl.py`, `frida/ra2_shadow.js`,
+`frida/ra2_vbdump.js`; `capture_shape.py` env `SHAPE_SET`, `SHAPE_EARLY`, `SHAPE_SETTLE`, `SHAPE_HOOK_JS`,
+`SHAPE_WATCHDOG`; `RA2_DUMP_ITEMS=<file>` (with `ra2-render`) writes our part vertices as JSON for comparison with
+`vbdump-*`. Scratchpad before/after of the defect: `robot-look/shadow/flapjack_{before,after}/`.
