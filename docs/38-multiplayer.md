@@ -515,6 +515,89 @@ the prematch lobby, Begin Match. Both drove forward; chat both ways showed on bo
 (Scout immobilized, The Boxer winner with 39). With the unfixed build the clicks never
 reached the lobby (exhibition match) and the joiner's keys never moved its robot.
 
-**Open.** A remote human that leaves mid-match leaves its robot standing (no AI takeover,
+**Open (closed in section 13).** A remote human that leaves mid-match leaves its robot standing (no AI takeover,
 no `PlayerOut`); `EndMatch` (`0x131`) is sent but a joiner ends on `MatchWin` alone;
 chat keeps the sender's lobby name, which defaults to `Player` for both ends.
+
+## 13. Leaving, ending and names (fx/net-leave)
+
+The four items section 12 left open, recovered from the binary (`objdump` listing of the exe, Ghidra via REA; the
+original's multiplayer lobby does not open under Wine, so nothing here is live).
+
+**The dispatcher.** The network callback `FUN_004ce940` (registered by `FUN_004ce7e0`, called from the create-game
+handler `0x49a81e`) switches on `message id - 0x65` through the byte table `0x4cfce8` and the jump table `0x4cfc60`.
+Cases of note: `0x6e` player created (listener vtable `+0x10`/`+0x30`), `0x6f` **player destroyed** (`0x4cfa0e`),
+`0x73` remote input (`0x4cedea` -> the game window's `FUN_00416da0`, no state change), `0x75` session terminated
+(`0x4cf20f`, posts UI event `0x6c`), `0x131` end match (`0x4cf510`).
+
+### (a) A remote human leaves mid-match
+
+`0x6f` calls the listener's `+0x10` and `+0xc` slots (`0x4d0020`, `0x4d00b0`): they post UI events `0x67` and
+`0x64` (`FUN_005882f0`) carrying the player's name and id. The only consumer of `0x67` is the **prematch window**:
+its constructor registers `0x4930a0` for it (`0x490fff`-`0x49103a`, next to `0x64` -> `0x492ef0`). `0x4930a0`
+removes the player from the window's list (`+0x1f0`, `0x495c90`) and, **on the host, while the prematch window's
+"in progress" byte (`+0x1a8`, `0x491d60`) is set**, removes the player's entry from the session's slot list
+(`FUN_0047f840`: erases the 0x14-byte entry with that id from the list at `+0xa8` and decrements `+0x9c`). Nothing
+reaches the game window: no `FUN_00418040`, no `giPlayerOutMessage`, no AI handed the robot (a robot's driver is
+the `HumanRemote` control, and the last keys received stay). So the original's answer is: **the leaver's robot
+stands (or keeps rolling on its last keys) until the ordinary rules end it** (immobility after 20 s, a destroyed
+chassis, the clock), and the host's lobby loses the slot. That is what this port already did; the new test
+`a_remote_human_who_leaves_leaves_the_robot_standing` pins it (host and joiner in two processes, the joiner drops at
+fight step 40; 400 steps later the host's lobby has one slot, robot 1 is still driven from outside, moved less than
+0.3 m, is neither immobilized nor out).
+
+### (b) `giEndMatchMessage` (`0x131`)
+
+Case `0x131` finds the window `prematch win` (`0x6ef844`) and calls its method **`FUN_00495250`**: if the game
+window's `+0x8e` ("fighting", set by `FUN_00416360`, cleared by the end routine around `0x4168ab`) is set, it closes
+`in game popup win` when the match is over (`+0x74`) and calls the `Game Window`'s vtable `+0xd0` with 0
+(`FUN_00475c30`: `Show(0)`, which brings `prematch win` back); then, always, `FUN_004d0200(1)`: the **game phase**
+object (`0x71607c`, phase at `+0x18`, protected by the critical section `0x716040`) goes back to phase 1, the lobby's
+(`0` idle, `1` lobby, `2` loading, `3` loaded, `4`/`5` begun, `6` ending; a phase may only advance one step, phase 1
+is always allowed) and it resets the lobby's ready flags (`FUN_0047bbb0`). The results window is its own popup
+(`0x13e` closes it on every end), so a finished match's results stay up on the joiner after `0x131`.
+
+Port: a joiner's `after_step` takes the host's `EndMatch`: if its match is still running it sets
+`NetPlay::take_leave_match` (the window drops the session and returns to the lobby, `end_match`), and in every case
+`NetGame::end_match` (the session stops syncing, the lobby phase). A host that quits its match before the end was
+sent (`NetPlay::end_match` with a session still running) broadcasts `EndMatch` itself, so the joiners are not left
+in a match nobody hosts. Tests: `a_joiner_leaves_the_match_when_the_host_ends_it_early`,
+`a_finished_match_keeps_the_joiners_results_after_the_end_message`.
+
+### (c) The player name
+
+The network object's constructor (`0x621e84`-`0x621f7a`) copies the literal **`Default Player`** (`0x709644`) into
+its name string (`+0x244`) and `Generic Network Session` (`0x709654`) as the session name; the game port is `0x263f`
+(9791). `FUN_006229e0` (called at `0x622941` when the object is built) reads `ra2.cfg`'s
+`[Begin Multiplayer Config]` section: `PlayerName=` (a non-empty value goes through `FUN_00622660`, the name setter)
+and `Port=`; `FUN_00622a90` writes them back. Neither the registry (`SOFTWARE\Gabriel Interactive\Robot Arena 2` is the
+install path) nor the career profile is used. The prematch window then puts the name in the editable `screen name`
+box (`0x49105a`-`0x491085`; `prematch.gib`'s own sample text is `Mister Roboto`, never shown) and its edit handler
+`FUN_004931a0` sets the name again (`FUN_00622660`), refreshes the peer info (`FUN_00623580`) and updates the lobby
+entry (`FUN_0047f8a0`). So in the original two players with no `PlayerName=` are **both** `Default Player` until one
+edits the box, which is what this port now does by default (`DEFAULT_PLAYER_NAME`; `NetPlay::load_config` reads
+`PlayerName=` and `Port=` from the install's `ra2.cfg`; `show_lobby` fills `screen name`). Test:
+`the_default_player_name_is_the_originals_and_ra2_cfg_replaces_it`. **Open**: editing the `screen name` box does
+not rename the player on the network (the net layer has no rename message; the original's `FUN_004931a0` also sends
+one message, `0x6f4620`/`0x6f4358`, not decoded).
+
+### (d) Which robot each end follows and drives
+
+`Session::exhibition` builds the match for robot 0: the chase camera, `human_robot` (which the watch and orbit cameras
+follow, `FUN_004014b0(0)`) and the F1 reminder all named robot 0, and `match_session` only changed `player_robot` and
+`human_robot` afterwards. So the **joiner's chase camera followed the host's robot** (robot 0, the red one of the two
+panels) while its keys drove robot 1: the "host camera shows the red robot" of the two-window loopback match was this
+(the host's own camera was right; the joiner's pointed at the host). Fixed with `Session::set_player_robot`
+(chase camera, default camera after the intro, human robot, reminder), called by `match_session`. Test
+`each_player_drives_and_follows_their_own_robot`: after both hold forward from fight step 20, the host reports
+`chase=0 human=0 driven=0`, the joiner `chase=1 human=1 driven=1`, and on the host both robots have moved (the joiner's
+keys drive robot 1 there). Before the fix the same test reported `chase=0` on the joiner.
+
+**Live, two windowed processes** (Xephyr :31/:32, own scratch `ORA_SAVE_DIR` and hard-linked game copy each,
+loopback, XTEST input; screenshots in the session scratchpad `nl/`): host Create Game -> Start Game, joiner IP Address
+127.0.0.1 -> Connect; both lobbies list two `Default Player` panels and a `Chat Alias`/`screen name` of `Default Player`
+(the original's default, (c)); Begin Match, Skip Intro; the host's chase camera follows Scout (robot 0, the `RED ZONE`
+team: this is the "red robot" of the earlier report, and it is the host's own), the joiner's follows The Boxer
+(robot 1); both holding `W` drove their own robot (the scenery slides in both windows). Killing the joiner's process
+mid-match: the host's window keeps running, its robot stands (no AI, no banner) and 10 s later the HUD shows
+`IMMOBILITY WARNING 7` over it (docs/32 section 6).

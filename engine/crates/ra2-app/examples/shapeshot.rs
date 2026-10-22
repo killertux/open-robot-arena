@@ -106,7 +106,20 @@ fn main() -> Result<(), String> {
     } else {
         SHOTS
     };
+    let times: Vec<f32> = std::env::var("RA2_SHAPE_TIMES")
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_default();
     for (k, &(p, fwd, side, up, look)) in shots.iter().enumerate() {
+        if let Some(&until) = times.get(k) {
+            let mut guard = 0;
+            while session.matched.clock() < until
+                && session.matched.state() == MatchState::Fight
+                && guard < 20000
+            {
+                session.step();
+                guard += 1;
+            }
+        }
         let duel = &session.matched.duel;
         let r = &duel.robots[p];
         let a = duel

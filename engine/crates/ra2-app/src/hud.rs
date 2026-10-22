@@ -78,6 +78,34 @@ pub const CAMERA_BOX: &str = "camera textbox";
 /// The status dots, in the order `FUN_004b3640` lights them (`0x4b313c`,
 /// `0x4b3187`, `0x4b31ce` bind them to `+0xe0`, `+0xe4`, `+0xe8`).
 pub const DOTS: [&str; 3] = ["green dot", "yellow dot", "red dot"];
+/// What a defeated robot's meters are drawn with (`FUN_004b3850`, constant `0x3e99999a`).
+pub const DEFEATED_TINT: &str = "0.3 0.3 0.3 1";
+/// The widgets `FUN_004b3850` tints (the status meter's `+0xcc..+0xe8`).
+const DIMMED: [&str; 7] = [
+    "main background",
+    "battery bar",
+    "air bar",
+    "armor bar",
+    "green dot",
+    "yellow dot",
+    "red dot",
+];
+/// Set `_ForeColor` on every widget called `name` under `widget`, including the bodies of its
+/// attachments (`main background` is the `Image` of the status group's `Background`).
+fn tint_named(widget: &mut Widget, name: &str, tint: &str) {
+    if widget.name() == name {
+        ra2ui::input::set_field(widget, "_ForeColor", tint);
+    }
+    for attachment in widget.attachments.iter_mut() {
+        if let Some(body) = attachment.body.as_mut() {
+            tint_named(body, name, tint);
+        }
+    }
+    for child in widget.children.iter_mut() {
+        tint_named(child, name, tint);
+    }
+}
+
 /// The bars and their widths in `statusmeters.gib`.
 pub const BARS: [(&str, f32); 3] = [
     ("battery bar", 52.0),
@@ -200,6 +228,17 @@ pub fn hud(
             set_bar(group, BARS[1].0, BARS[1].1, robot.air),
             set_bar(group, BARS[2].0, BARS[2].1, robot.armor),
         ];
+        // `FUN_00476bf0` -> `FUN_004b3850(1)` (from `FUN_00418040`, every kind of "out"): the
+        // meters dim to 0.3 grey (`0x3e99999a`) on the background art, the three bars and the
+        // three dots; the name and the points text keep their colour.
+        let tint = if robot.defeated {
+            DEFEATED_TINT
+        } else {
+            "1 1 1 1"
+        };
+        for name in DIMMED {
+            tint_named(group, name, tint);
+        }
         // `FUN_004b3640`: exactly one of the three dots shows.
         for (i, name) in DOTS.iter().enumerate() {
             set_visible(group, name, i == usize::from(robot.dot.min(2)));
@@ -349,6 +388,81 @@ fn set_visible(root: &mut Widget, name: &str, visible: bool) {
             }
         }
     }
+}
+
+/// The immobility warning's group, the one the original hangs over a robot that has not
+/// moved (`FUN_004749c0` loads it per slot, `FUN_00412390` writes its number).
+pub const IMMOBILE_COUNTDOWN: &str = "common/immobility_countdown.gib";
+/// The text box of [`IMMOBILE_COUNTDOWN`] that carries the number.
+pub const IMMOBILE_NUMBER: &str = "immobile countdown";
+/// The card `FUN_00418040` shows over a robot's status group when it is immobilized
+/// (`UI\common\immobile.tga`, 104 x 32), for [`IMMOBILE_CARD_SECONDS`].
+pub const IMMOBILE_CARD: &str = "common\\immobile.tga";
+pub const IMMOBILE_CARD_SIZE: [f32; 2] = [104.0, 32.0];
+/// How long the card stays (`0x6a5784`, the time `0x4e2660` gives the popup list at `+0x100`,
+/// which `FUN_00416210` counts down by `dt` and hides at zero).
+pub const IMMOBILE_CARD_SECONDS: f32 = 3.0;
+/// The counter hangs `60.0` px above the projected point (`0x6aece8`, `0x5dc5cb`), centred on it.
+pub const IMMOBILE_COUNTER_RISE: f32 = 60.0;
+
+/// The number the counter shows after `seconds` of stillness: `FUN_00412390` writes
+/// `trunc(10 - (seconds - 10))` capped at 10, and hides the group at 0 or less.
+pub fn immobile_number(seconds: f32) -> Option<i32> {
+    let n = (20.0 - seconds) as i32;
+    (n > 0).then_some(n.min(10))
+}
+
+fn immobile_root(gib: &mut Gib) -> Option<&mut Widget> {
+    gib.blocks.iter_mut().find_map(|b| match b {
+        ra2fmt::gib::Block::Widget(w) => Some(w),
+        _ => None,
+    })
+}
+
+fn place(widget: &mut Widget, at: [f32; 2]) {
+    ra2ui::input::set_field(
+        widget,
+        "Position",
+        &format!("{} 0 {} 0", at[0] as i32, at[1] as i32),
+    );
+}
+
+/// The counter group showing `n`, with its top-left at `at` (screen pixels).
+pub fn immobile_counter(base: &Gib, n: i32, at: [f32; 2]) -> Gib {
+    let mut gib = base.clone();
+    if let Some(root) = immobile_root(&mut gib) {
+        place(root, at);
+        set_text(root, IMMOBILE_NUMBER, &n.to_string());
+    }
+    gib
+}
+
+/// The `IMMOBILE!` card with its top-left at `at`.
+pub fn immobile_card(base: &Gib, at: [f32; 2]) -> Gib {
+    let mut gib = base.clone();
+    if let Some(root) = immobile_root(&mut gib) {
+        let size = format!(
+            "{} 0 {} 0",
+            IMMOBILE_CARD_SIZE[0] as i32, IMMOBILE_CARD_SIZE[1] as i32
+        );
+        place(root, at);
+        ra2ui::input::set_field(root, "Size", &size);
+        root.children.retain(|c| c.kind == WidgetKind::Image);
+        for image in root.children.iter_mut() {
+            ra2ui::input::set_field(image, "_Filename", IMMOBILE_CARD);
+            ra2ui::input::set_field(image, "_Size", &size);
+            ra2ui::input::set_field(image, "Size", &size);
+        }
+    }
+    gib
+}
+
+/// Where the card goes for a status group at `frame` (x, y, w, h): centred on it in whole
+/// pixels, as `FUN_00418040` does it (`pos - (card - group) / 2`, truncating).
+pub fn immobile_card_at(group: [f32; 4]) -> [f32; 2] {
+    let dx = ((IMMOBILE_CARD_SIZE[0] - group[2]) as i32 / 2) as f32;
+    let dy = ((IMMOBILE_CARD_SIZE[1] - group[3]) as i32 / 2) as f32;
+    [group[0] - dx, group[1] - dy]
 }
 
 /// Set the text a `TextBox` draws. The visible value is its `Text` child's

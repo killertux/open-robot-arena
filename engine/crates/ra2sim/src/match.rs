@@ -796,7 +796,15 @@ impl Match {
                     ra2script::add_points_float(*player as i32, *points);
                 }
             }
-            NetEvent::Immobile { robot, on } => self.duel.apply_remote_immobile(*robot, *on),
+            NetEvent::Immobile {
+                robot,
+                on,
+                at,
+                seconds,
+            } => {
+                self.duel
+                    .apply_remote_immobile(*robot, *on, glam::Vec3::from_array(*at), *seconds)
+            }
             NetEvent::Out { robot, reason } => self.duel.apply_remote_out(*robot, *reason),
         }
     }
