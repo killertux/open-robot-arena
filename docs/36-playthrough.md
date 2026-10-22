@@ -804,7 +804,7 @@ prior bytes afterwards (hash-checked).
   capture shows a different yaw), so it is not a still. Ours now places the
   robot on start point 0 of `event_results.gmf` (`prize_scene::place_robot`,
   floor found by a ray on the arena triangles); the yaw drift is **not**
-  reproduced (gap).
+  reproduced (gap; see 9.23: the robot is a free physics body).
 * **The award window is laid out on the real screen.** The headless event run laid
   it on 1280x1005 and resampled; the original's window is 250 px wide at 1024.
   `hq_mode::run` now sets `set_layout(size)` (award MAE 8.57 -> 5.68 with the robot).
@@ -878,7 +878,7 @@ The "n/a"/36-56 rows of the "before" column are the Teams.txt reading bug above
 
 * The award robot's yaw drift; the bracket's entrant order (the original draws
   its opponents from its own random state; ours is the oracle schedule); both are
-  still open after 9.21 (the black bands turned out to be already equal).
+  still open after 9.21 (both done in 9.23) (the black bands turned out to be already equal).
 * **Repairs** (see 9.21): the robot view, the border and the undamaged state are done.
 * **One event at a time**: clicking another event while one is in progress opens a
   message box (caption `Robot Arena 2`, OK) whose body was empty in the capture,
@@ -988,3 +988,89 @@ ffcae47, after = this branch. Nothing new was captured for the shell.
   is 333); the capture's `Right TB split` / content group heights sit about 3 px under ours (420 against 422.9) and the
   vertical chain is not recovered. The join window's robot row still differs by a selected robot (ours has C.R.U.S.H.
   selected, the capture none).
+
+## 9.23 Round 7 (`fx/shell-order`, 2026-10-21): the award robot is a free body; the bracket is the engine LCG's draw
+
+Live runs on display :9 (flatpak Wine 9.0, `ra2_drive.py` plus the new agents `tools/oracle/frida/ra2_lcg.js` /
+`tools/oracle/capture_lcg.py` and `tools/oracle/capture_award.py`; the prefix's `Teams/`, `AI/`, `Robot Designs/` and
+`ra2.cfg` hash-checked identical afterwards). Captures added to `local/oracle/original` (20 rows,
+`manifest-additions-2026-10-21-shell-order.tsv` in `~/ra2-oracle-backup/oracle`): `event-bracket-lcg-blade`,
+`event-bracket-lcg-final`, `event-results-lcg-final`, `event-results-lcg-sawblade-r1/-r2`, `event-award-atom-t4/-t20/-t40/-t58`,
+`lcg-bracket-blade`, `lcg-advance-blade`, `lcg-bracket-sawblade`, `lcg-advance-sawblade`, `lcg-match-start`, `lcg-idle-menus`,
+`awardpose-crush-pad` (000-002), `awardpose-crush-drop`, `awardpose-atom-pad`.
+
+### The award robot (task 1)
+
+* **It is not turned by anything.** `plus.getHeading/getLocation/getDirection/getSpeed` of the award arena's player 0, every UI frame
+  for 50-60 s in six award scenes: the heading starts at **2.7925 rad = 160 degrees exactly** (start point 0's facing, the
+  pad's `+Z` turned by the point's transform) and the body starts at the start point's xz, **0.226 m above where it rests**
+  (C.R.U.S.H.: y 0.675 -> 0.449 in 0.35 s, a bounce to 0.394 and back), then creeps. No hinge motor is ever set in the scene
+  (`ra2_hinge_motor.js`: no `0x4815c0` call, no motor-on atom) and `Arenas/event_results.py` only counts a timer: the robot
+  is a player of the running arena that nothing drives, standing on free wheels, and the arena's physics runs on. The camera
+  does not move. The speed column jitters by +-0.2 m/s (solver noise on the wheels) in every scene.
+* **What it does depends on the robot.** C.R.U.S.H. (four wheels, flat): heading 2.78 +- 0.02 for 50 s in one scene, +0.1 rad
+  in 50 s in two others (0.002 rad/s), x drifting 0.1 m. Atom Smasher (nose heavy, rests tilted on its bumpers): a steady
+  **-0.0145 rad/s** (-0.83 degrees/s; 2.79 -> 1.98 in 56 s, 47 degrees a minute), x drifting +0.3 m in 56 s. The earlier
+  captures' "different yaw every time" are scenes sampled at unknown times: the 2-of-2 plaque frame (robot turned to the
+  camera) is simply several minutes in.
+* **Implemented:** `prize_scene::PrizeScene` now holds a `ra2sim::Duel` of the Event Results arena with the entered robot on
+  start point 0 (the match spawn), lifted by `SPAWN_LIFT` 0.122 m so it falls the 0.226 m live shows (the duel's own spawn
+  is 0.06 m above the floor: ours falls 0.104 m; **matches spawn at 0.19 m live** (four robots, flextop: y 0.381 -> 0.19), so the
+  duel's spawn height is too low for every match; left alone here, the reference fights depend on it), and steps it with the
+  window's 50 ms tick (`HqSession::advance` -> `PrizeScene::advance`, 60 Hz steps, no driver, free wheels). The still render
+  (`--hq ... --out`) advances 3 s first so the robot has landed. `Duel::robot_groups` is the new shared draw call. Test
+  `prize_scene::tests::the_award_robot_drops_settles_and_creeps` (start heading, a fall of more than 0.15 m, creep below
+  0.03 rad/s, stays on the pad).
+* **What does not match.** Our free body creeps at the same order (C.R.U.S.H. random +-0.1 rad a minute, Atom Smasher
+  **+0.0145 rad/s**, steady, in all four lifts tried) but the Atom Smasher turns the **other way** and drifts to -x where
+  the original drifts to +x: a mirror image of the live motion, which says a sign or a handedness is wrong in the
+  free-wheel/contact physics of an asymmetric robot (not in the award code). It was not chased (the Havok side belongs to
+  the physics rounds). The creep is chaotic in both (the original's three C.R.U.S.H. runs differ), so a frame match at a
+  given time is only possible to a few hundredths of a radian at the start. Timed frames: live `event-award-atom-t4..t58`
+  against ours is a robot turning one way against the other; `event-award-photo` (C.R.U.S.H., ours 3 s in) **4.11 -> 3.99**
+  (the robot is now on the floor the physics finds, not the visual floor).
+
+### The bracket's random draw (task 2)
+
+* **The generator.** `FUN_00419220` (`0x419220`): `s = s * 0x41c64e6d + 0x3039` on the 32-bit global at `0x726d58`;
+  `FUN_00419190(n)` = `floor((s & 0x7fffffff) / 2^31 * n)` (`0x419200`; `2^31` is the double at `0x6a5850`), clamped to
+  `n-1`. `ra2sim::lcg::Lcg` (`step`, `range`; tests against the live trace). `FUN_00500120`'s schedule draw
+  (`draw_schedule`) is the same.
+* **Seeding and consumers (Frida: every store to `0x726d58`, 27 sites, in `ra2_lcg.js`).** Seeds: `GetTickCount()`, twice, when the
+  main menu is built (`0x4e456a`/`0x4e4575`) and `time(0)` at start-up (`0x61bb3a`). Draws: the shared step (called only from
+  `FUN_00419190`'s 12 callers, among them the bracket `0x4696d1`, the winners `0x46ce18/37`, the schedule `0x50016c`), and
+  inline copies of the step in the particle/effect code (`0x59ec56`, `0x5bb77f`, `0x5bc2ea`..`0x5be167`). **The menus, the Team
+  HQ, the schedule, the event picker and the bracket draw nothing while idle** (75 s logged: no draw), but a match draws
+  thousands (**6700** in the ~15 s from Play Next Round to the countdown: 5600 from `0x5bb77f`, the rest from the particle
+  sites; per frame, so it scales with the time spent). So the state at a
+  bracket is the clock's seed advanced by whatever the effects drew before: **not reproducible across sessions** (the
+  first bracket after a fresh team is not the schedule's stream either: the state that gave the captured tabletop field
+  is 1.87e9 draws from the schedule's). Within a session it is a function of the state only: setting the state to the
+  same value (`setstate`) gave a bit-identical 46-draw sequence twice.
+* **The bracket (`FUN_004695a0`), verified live.** One call draws every round. Round `r` has `16 / bots^(r+1)` matches of
+  `bots` slots (the `16.0` / `+0x110/+0x10c` loop at `0x4695c9`); every slot but match 0's first is `FUN_00419190(15)`, redrawn
+  while the team is in **that round's** list (`FUN_005014d0` on a list that starts empty each round). From state 4037340146
+  the Blade Tournament (4 bots, 2 rounds) took exactly **46** draws = 15 + 3 accepted + 28 repeats, giving
+  `[P 4 13 3 | 9 2 8 10 | 6 1 7 12 | 0 5 11 14]`, the 16 icons of `event-bracket-lcg-blade`; Sawblade Elite (2 bots, 4 rounds)
+  **59** = 15 + 7 + 3 + 1 accepted. Only round 1's field survives.
+* **Advancing (`FUN_0046c830`, `FUN_0046cde0`).** The next round has one slot per match of this one; slot 0 is the
+  player (no draw), slot `k` is entrant `FUN_00419190(bots)` of match `k`: 3 draws after the Blade's round 1 (picks
+  2, 1, 3 of 4 -> High Voltage, Prehistoric, The Scrappers = the final's opponents on `event-results-lcg-final`), 7 after
+  Sawblade's (picks `1 0 1 0 1 0 0` -> round 2's opponent Team Dragon, `event-results-lcg-sawblade-r2`). A lost player
+  makes slot 0 a winner other than entrant 0 (`FUN_0046cde0`'s second mode, redrawn while 0); that branch is from the code,
+  not seen live. Between the creation and the advance a match draws thousands of numbers, so a later round's opponents
+  depend on how long the match ran: **timing-dependent in the original**; ours continues the stream without that gap.
+* **Implemented (`ra2sim::career`).** `EventBracket` draws and advances with `Lcg` exactly so (`draw_field`, `advance_field`,
+  `replay_to` for a reload); `Career::enter_event` hands the bracket the session's state (`Career::seed`, now the engine
+  state) and keeps the state after its draws, so the next event's bracket differs and the same session actions give the
+  same brackets. The state at the start is `hq_mode::SEED` (7) unless **`RA2_LCG_STATE`** names one (the live state read by
+  Frida reproduces the live bracket). The old per-round hash RNG is gone. Tests
+  `career::tests::{the_engine_lcg_draws_the_bracket_the_original_drew_live, the_two_bot_bracket_and_its_winners_match_the_live_draws,
+  a_session_state_gives_the_same_brackets_again}`, `lcg::tests`. Fidelity (`--renderer app`): `event-bracket-lcg-blade` **5.97 -> 2.67**
+  (state 4037340146); the older `event-bracket-tabletop` **5.82 -> 2.68** with state 1361071406, the (only, up to the top bit)
+  state whose 15 draws give its captured order, found by search over all 2^32 states: a fit, but an algorithm that were wrong
+  would have had no solution (about 0.3 % chance for a random 15-team order). `duel-round1` is unchanged (unknown state, ~5.7).
+* **Tools.** `tools/oracle/capture_lcg.py --out F.jsonl <drive steps with mark LABEL / setstate N>` logs the draws with one frida
+  client (two concurrent clients wedged frida-server and once killed the game); `capture_award.py` samples the pad robot every UI
+  frame while taking screenshots. `fidelity.py` fixtures take `env=`; `RA2_BIN` picks the binaries.
+
