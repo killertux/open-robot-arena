@@ -237,15 +237,34 @@ pub fn set_camera(screen: &mut Widget, name: &str, visible: bool) {
     set_visible(screen, CAMERA_BOX, visible);
 }
 
-/// Show or hide the chat group and put the typed line in `chat entry`.
+/// Show or hide the chat group, put the typed line in `chat entry` and the
+/// lines in `chat displaybox`.
 ///
-/// The original opens it on `\` (`0x475ee0`: show `+0x1b4`, focus `+0x1b8`).
-/// The file's `chat displaybox` is a `DisplayBox`, not a widget this port's
-/// tree sets text on; the last submitted line is only logged. Nothing is sent
-/// anywhere.
-pub fn set_chat(screen: &mut Widget, open: bool, entry: &str) {
+/// The original opens the group on `\` (`0x475ee0`: show `+0x1b4`, focus
+/// `+0x1b8`). `chat displaybox` is a `Glyph` dressed by a `DisplayBox` whose
+/// markup is `<text font fg_mcn14>`; its text is the lines, one per row.
+pub fn set_chat(screen: &mut Widget, open: bool, entry: &str, lines: &[String]) {
     set_visible(screen, "chat group", open);
     set_text(screen, "chat entry", entry);
+    if let Some(display) = chat_display_mut(screen) {
+        ra2ui::cells::bind_prose(display, &lines.join("\n"));
+    }
+}
+
+/// `chat displaybox`: the file's one `Glyph` (the box's paragraph, dressed by
+/// the `DisplayBox`). The widget the file names `chat displaybox` has no name of
+/// its own in the reader, so it is found by its class and its `DisplayBox`.
+#[cfg(test)]
+fn chat_display(screen: &Widget) -> Option<&Widget> {
+    screen.children.iter().find(|c| {
+        c.kind == WidgetKind::Glyph && ra2ui::cells::display_box(&c.attachments).is_some()
+    })
+}
+
+fn chat_display_mut(screen: &mut Widget) -> Option<&mut Widget> {
+    screen.children.iter_mut().find(|c| {
+        c.kind == WidgetKind::Glyph && ra2ui::cells::display_box(&c.attachments).is_some()
+    })
 }
 
 /// The HUD clock: `m:ss`.
@@ -678,14 +697,26 @@ mod tests {
             })
             .unwrap();
         assert!(!ra2ui::workshop::find(root, "chat group").unwrap().visible());
-        set_chat(root, true, "hello");
+        set_chat(root, true, "hello", &[]);
         assert!(ra2ui::workshop::find(root, "chat group").unwrap().visible());
         assert_eq!(
             text_of_widget(ra2ui::workshop::find(root, "chat entry").unwrap()),
             "hello"
         );
-        set_chat(root, false, "");
+        set_chat(root, false, "", &[]);
         assert!(!ra2ui::workshop::find(root, "chat group").unwrap().visible());
+
+        // `chat displaybox` carries the lines, one per row, in its own
+        // `<text font fg_mcn14>` markup.
+        let lines = ["[A] one".to_string(), "[B] two".to_string()];
+        set_chat(root, false, "", &lines);
+        let display = chat_display(root).expect("the chat display glyph");
+        let markup = ra2ui::cells::display_box(&display.attachments)
+            .and_then(|a| a.field("Display"))
+            .map(|f| f.text().to_string())
+            .unwrap();
+        assert!(markup.starts_with("<text font fg_mcn14>"), "{markup}");
+        assert!(markup.contains("[A] one\n[B] two"), "{markup}");
     }
 
     /// A "No limit" match never shows the time group: `0x416360` calls

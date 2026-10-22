@@ -567,6 +567,13 @@ pub struct State {
     /// *adds* to it (`fild [robot+0x20]; fadd amount`); the match shell zeroes
     /// it at the start of a match (`0x415a75`).
     pub scores: Vec<i32>,
+    /// Network play: which end of a match this process is. The original's
+    /// score writes (`FUN_004177e0`) run only on the host or in a local match
+    /// and the host sends the result as `giAddPointsMessage`s (docs/38 §6.1).
+    pub net_role: NetRole,
+    /// Host: the script-origin point awards (`plus.addPoints`) since the match
+    /// last drained them, to be sent as scoring messages.
+    pub script_points: Vec<(i32, i32)>,
     /// The script layer's sound handles and the play/stop/loop requests they
     /// produced, in call order.
     pub sounds: SoundQueue,
@@ -606,6 +613,8 @@ impl State {
             players: Vec::new(),
             game_type: String::new(),
             scores: Vec::new(),
+            net_role: NetRole::Local,
+            script_points: Vec::new(),
             sounds: SoundQueue::new(),
             deferred: Vec::new(),
             log: Vec::new(),
@@ -639,7 +648,24 @@ impl State {
     }
 
     /// `plus.addPoints` — the write at `0x417918`: take what is there and add.
+    ///
+    /// A script's award is the host's to make: a joiner ignores its own copy of
+    /// the arena script's `addPoints` (`FUN_004177e0` does nothing unless the
+    /// process is the host or the match is local) and takes the host's
+    /// `giAddPointsMessage` instead ([`State::add_points_remote`]); the host
+    /// logs the award so the match can send it.
     pub fn add_points(&mut self, bot: i32, amount: i32) {
+        match self.net_role {
+            NetRole::Joiner => return,
+            NetRole::Host => self.script_points.push((bot, amount)),
+            NetRole::Local => {}
+        }
+        self.add_points_remote(bot, amount);
+    }
+
+    /// Add to a score without the network rules: the write itself, and what a
+    /// joiner does with a host's script-origin `giAddPointsMessage`.
+    pub fn add_points_remote(&mut self, bot: i32, amount: i32) {
         let Ok(bot) = usize::try_from(bot) else {
             return;
         };
@@ -668,6 +694,18 @@ impl State {
         }
         self.scores[bot] += amount.trunc() as i32;
     }
+}
+
+/// Which end of a network match this process is (docs/38 §6.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NetRole {
+    /// Not a network match: every rule runs here.
+    #[default]
+    Local,
+    /// The authoritative end: prices hits, awards points, sends the results.
+    Host,
+    /// Follows the host's scoring messages; prices and awards nothing itself.
+    Joiner,
 }
 
 static STATE: Mutex<State> = Mutex::new(State::new());
@@ -713,6 +751,8 @@ pub fn prepare_match(game_type: &str, players: Vec<i32>) {
     st.game_type = game_type.to_string();
     st.players = players;
     st.scores.clear();
+    st.net_role = NetRole::Local;
+    st.script_points.clear();
     st.paused = false;
     st.over = false;
     st.zone_contents.clear();
@@ -782,6 +822,22 @@ pub fn add_points(bot: i32, amount: i32) {
 /// per-event truncation (`0x417918`; see [`State::add_points_float`]).
 pub fn add_points_float(bot: i32, amount: f32) {
     state().add_points_float(bot, amount);
+}
+
+/// Network play: which end of the match this process is. Set after
+/// [`prepare_match`] (which resets it to [`NetRole::Local`]).
+pub fn set_net_role(role: NetRole) {
+    state().net_role = role;
+}
+
+/// Host: take the script-origin point awards made since the last call.
+pub fn take_script_points() -> Vec<(i32, i32)> {
+    std::mem::take(&mut state().script_points)
+}
+
+/// Joiner: apply a host's script-origin point award.
+pub fn add_points_remote(bot: i32, amount: i32) {
+    state().add_points_remote(bot, amount);
 }
 
 /// Take the requests the scripts queued during the last tick.

@@ -21,6 +21,7 @@ pub mod massprops;
 pub mod r#match;
 pub mod montage;
 pub mod motor;
+pub mod netevent;
 pub mod popup;
 pub mod rig;
 pub mod robot;
@@ -39,6 +40,7 @@ pub use combat::{CombatConfig, Impact};
 pub use duel::{BotSetup, Debris, Duel, DuelCamera};
 pub use jolt::JoltBackend;
 pub use lcg::Lcg;
+pub use netevent::{NetEvent, NetRole};
 pub use r#match::{
     countdown_number, event_num_bots, ComponentDamage, Controller, GameType, Match, MatchConfig,
     MatchReport, MatchState, RobotEntry, RobotReport, WinReason, COUNTDOWN_END_SECONDS,

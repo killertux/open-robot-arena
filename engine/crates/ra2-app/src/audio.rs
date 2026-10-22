@@ -62,6 +62,9 @@ pub enum UiSound {
     /// `ui-click-survey`: created and played at the Select Computer Robot
     /// dialog's OK, one `SoundWizard` one-shot, 0 hundredths of a dB).
     PlayerJoined,
+    /// `Sounds\spectator_joined.wav` (`0x492f11`, `FUN_00492ef0`): a peer was
+    /// created in the multiplayer lobby.
+    SpectatorJoined,
 }
 
 impl UiSound {
@@ -81,6 +84,7 @@ impl UiSound {
             UiSound::CriticalHit => "Sounds/critical_hit.wav",
             UiSound::ImmobileWarning => "Sounds/immobile_countdown.wav",
             UiSound::PlayerJoined => "Sounds/player_joined.wav",
+            UiSound::SpectatorJoined => "Sounds/spectator_joined.wav",
         };
         Some(name.to_string())
     }

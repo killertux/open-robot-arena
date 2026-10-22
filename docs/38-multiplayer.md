@@ -220,8 +220,8 @@ begin and `0x13c` count-down; `0x13e` closes the results window, `0x131` ends.
   designs (`ra2net::sync::SyncSchema`). Errors the reader prints: "ERROR: Bad
   Rigid Body ID in SyncList", "Bad Controller ID", "Sync ignored - not in
   game yet".
-* **Scoring** comes from the host as `0x135`/`0x139`/`0x13b`/`0x140`/`0x141`,
-  the end as `0x137` (winner ids) then `0x131`.
+* **Scoring** comes from the host as `0x135`/`0x139`/`0x13b`/`0x13a`/`0x140`/
+  `0x141`, the end as `0x137` (winner ids) then `0x131`; how, in §6.1.
 
 This port: `net_play::capture` writes every live robot part body
 (id = robot << 16 | part) with empty robot/controller/device lists;
@@ -296,8 +296,132 @@ nothing in the port talks to a master server.
   input on the host, ends where the host's snapshot puts it.
 
 Open: the DirectPlay core/reliable byte layouts; voice; host migration
-(DirectPlay supports it, RA2's use not traced); spectators (the prematch's
-`spectator list` and "spectator_joined.wav" `0x492f11`); the scoring messages'
-use in the port's match (the joiner's own damage still runs locally between
-snapshots); the GameSpy `\secure\` validation reply; the meaning of several
-fields marked inferred.
+(DirectPlay supports it, RA2's use not traced); the GameSpy `\secure\`
+validation reply; the meaning of several fields marked inferred; the
+fracture (`0x140`) and critical-hit (`0x141`) messages in the port's match
+(the joiner derives both from the same hits); the chat display's retention
+timer and the exact spectator admission rule (§10, §11).
+
+## 6.1 Who prices a hit, who scores it, what a joiner shows
+
+Recovered from `FUN_00417330` (the contact-damage entry), `FUN_004148f0`
+(`plus.damage`, flames), `FUN_004175b0` (the hit record and the points rule),
+`FUN_00417510` (the apply), `FUN_004177e0`/`FUN_004178a0` (the points),
+`FUN_00412fc0` (the per-frame immobility rule), `FUN_00418040` (a robot out)
+and the dispatcher cases of `FUN_004ce940`. The match object keeps `+0x8c`
+"network match", `+0x8d` "host", `+0x8e` "fighting", `+0x8f` "over".
+
+* **A hit** (`FUN_00417330(attacker, atk part, victim, vic part, damage,
+  point, normal, ...)`): ignored when the match is over, the damage is 0 or
+  either part is flagged off (`FUN_00401860`). From 10.0 up (the apply
+  threshold, `10.0 <= param_5`), on the host or in a local match: the host
+  builds a **`giBotDamageMessage`** (`0x4d0f10`, fields: attacker robot
+  `+0x1c`, victim robot `+0x20`, attacker part `+0x24`, victim part `+0x28`,
+  effective damage `+0x2c`, two vec3 at `+0x30`/`+0x40`, a word `+0x50`),
+  sends it, and runs the record `FUN_004175b0` itself. `FUN_004148f0`
+  (flames, `plus.damage`) skips the threshold and sends the same message with
+  attacker -1.
+* **The apply** (`FUN_00417510` -> the victim part's vtable `+0x6c`) runs on
+  **every** machine from the same call, so in the original each end
+  prices and applies its own physics' contacts, and only the *record* is
+  the host's. The joiner reaches the record through the message: `0x135` ->
+  `FUN_00417ae0` (joiner and network only) -> `FUN_004175b0`, which writes
+  the damage list entry (`FUN_004177d0`, merged within a window for the same
+  attacker), plays the hit sound for big hits (>50: 5, >100: 10, >300: 20,
+  `FUN_004d53e0`) and draws the damage number.
+* **Points** (`FUN_004175b0`, not King of the Hill; in Team Match only
+  across teams) call `FUN_004177e0(attacker, damage, vec, vec, 1, 0)`, which
+  does anything only on the host or in a local match: it runs `FUN_004178a0`
+  (floating score text, then `score += (int)damage`) and, on the host,
+  sends a **`giAddPointsMessage`** (`0x4d3620`: player, float points, two
+  vec3, bool "adds to the score", bool "show for any player"). The joiner's
+  `0x139` -> `FUN_004178a0` adds the same number. The arena script's
+  `plus.addPoints` is the same function, so it too is the host's.
+* **Immobility** (`FUN_00412fc0`, host or local, once the fight is on):
+  under 10 s of stillness a flagged robot is cleared (`FUN_00412240(r, 0)`,
+  **`giBotImmobileMessage`** `(robot, position, 0, 0)`); from 10 s it is
+  flagged and the message carries `(robot, position, 1, seconds)`; from 20 s
+  `FUN_00418040(robot, 2)` puts it out. The joiner's `0x13b` -> `FUN_004120e0`
+  flags it and shows the icon.
+* **Out** (`FUN_00418040(robot, reason)`, 1 destroyed, 2 immobilised, 3 the
+  third branch): shows the banner, and on the host sends a
+  **`giPlayerOutMessage`** (`0x4d3800`) and, when one robot or team is left,
+  `FUN_004170e0` -> `giMatchWinMessage`. The joiner's `0x13a` -> the same
+  function; it only follows (`FUN_004170e0` runs only on the host or locally).
+
+**This port** goes one step further than the original on damage, as asked:
+the host is authoritative for damage as well as score. A joiner's own contact
+and hazard pricing is discarded (`Duel::net_role == Joiner`), and its immobility rule,
+its arena script's eliminations and its script's `addPoints` are off;
+everything it shows is a host event (`ra2sim::NetEvent`, converted by
+`ra2-app/net_play::{event_message, message_event}`): a hit is applied whole to
+the same component with the host's number (so the HUD numbers, damage dealt
+and component state match), points are added exactly as the host added
+them (truncated float add, or the integer script add), out/immobile follow.
+The host sends them guaranteed (`broadcast_guaranteed`: a lost
+`giBotDamageMessage` would leave a score behind for good), and the end as
+`0x137` winner robot ids then `0x131`; a joiner not yet finished finishes
+with the host's winners. Inferred and ours: robot index stands for the
+player id in `0x13a`; the immobile "seconds" are the 10 s warning point;
+`0x139`'s second flag marks a script-origin integer add; the vec3 roles
+(point, normal); `0x140`/`0x141` are not sent (a joiner's break-offs follow
+from the same hits). Tests: `ra2sim` `the_host_prices_and_the_joiner_shows_what_it_is_told`;
+`ra2-app/tests/netplay.rs` `a_scripted_match_across_five_processes_counts_every_hit_once`
+(five processes, scripted blows, a joiner's own blow that must count for nothing).
+
+## 10. Spectators
+
+Evidence: `prematch.gib` has `spectators label` and `spectator list` ("list of
+the spectators (joined but not in the match)"); the prematch window registers
+the event `0x64` (a peer was created) with `FUN_00492ef0`, which plays
+`Sounds\spectator_joined.wav` (`0x492f11`) and then, on the host, adds the
+peer to the lobby (`FUN_0047f760`); `0x67` (peer gone) is `FUN_004930a0` ->
+`FUN_0047f840`. `FUN_0047c560(player)` writes the `spectator [TextBox]` of that
+player's cell (`activeplayer.gib`, "Spectator"). The results window has its own
+"Spectator" text box (`0x487686`). No message type is specific to spectators.
+
+So a spectator is **a peer without a player panel**: it joins like anyone
+(same admission, same `0x64` sound on every end), is listed in `spectator
+list`, and takes part in the session's broadcasts. What the exe does not say
+(and no live capture is possible) is what makes a peer a spectator and what it
+sees in the match; this port's reading:
+
+* The first four peers take `player1..4 group`; later ones are spectators
+  (lobby slot kind 5, ours; the session admits 8). A spectator cannot choose a
+  robot or be ready and does not count for the start; when a player leaves,
+  the host gives the free panel to the longest-waiting spectator.
+* At the start every peer gets `0x12e` and loads; spectators get no robot
+  (`robot_of` lacks them, the match has one entry per panel), send no
+  `0x73`, follow the snapshots and all scoring messages, and end with the
+  host's `0x137`.
+* Their view is the AI-versus-AI one: no driven robot, no chase camera, the
+  config's `DefaultCamera` (`watch`) and `C`/`F2`-`F4` to change it, the
+  four status panels, damage numbers only for a human player (so none).
+  They can chat (below).
+
+## 11. In-match chat
+
+`gamewindow.gib`: `chat group` (note: *show/hide this group using the "chat"
+key (backslash?)*), its `chat entry` (TextBox) and `chat displaybox`
+(`Glyph` + `DisplayBox`, `<text font fg_mcn14>`, 200x100 at (10, 110); note:
+*display a few lines of chats here and clear after a few seconds*). Recovered:
+
+* `0x475ee0` opens the group on `\` only when `FUN_004145f0()` is 1 (the game
+  type "multiplayer"), so chat is a network-match feature.
+* The entry's Enter handler is `FUN_00475240`: nothing for an empty text,
+  else `"[" + name + "] " + text` (`0x6f3520`, `0x6f351c`), built as a
+  **`0x76`** message (`0x621920`), sent with flags 0 to everyone
+  (`0x6218c0` -> `FUN_00621190`), the entry cleared and the group hidden.
+  The prematch's chat (`0x492bc0`) is the same code with the `0x65` text.
+* The receiver (`0x4ce940` case `0x76`) posts the event `0x70`, which the match
+  window registers (ctor `0x4749c0`) for the display box; `chat.wav` is one of
+  the nine sounds the match preloads (`0x415849`).
+
+Implemented: `\` (multiplayer matches only) opens the group; Enter sends
+`[name] text` as `0x76` to all and closes it; Escape closes it unsent (the
+original's Escape opens the pause popup whatever has focus; ours lets the open
+entry take it); every line that arrives, ours included (the original gets its
+copy through loopback), joins the box, plays `chat.wav`, and is drawn in the
+box's own font and place. Ours, not recovered: a line lives 8 s and the box
+holds 6 lines (the retention timer of the original was not traced). The lobby
+chat now uses the same `[name] text` format.
