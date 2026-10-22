@@ -2517,3 +2517,136 @@ the full 120 s, 10 others end 45-110 s after the flip. Ours also flips the
 Razor at the first meeting more often (9 of 24 within 5.4 s, live 2 of 8
 within 6.5 s; the two time bases may differ by about a second). Whether the original draws the Small Wedge flat;
 the code behind the own-geometry rule.
+
+### 12q. Every body of the four robots against live; the piston rod's frame (fx/alarm-back)
+
+Diagnostic: `examples/bodycmp.rs` prints every rigid body of each robot as
+built (mass; local inertia, its products and principal moments; centre of
+mass, inertia and rotation in the chassis body's frame; the collision points'
+extent per body and component), and with `BODYCMP_SETTLE=<s>` the chassis' rest
+pose after standing that long with no input. The live side is the `P` rows
+(`+0x190` mass, `+0x19c` local inertia, rows of four floats) and `B` rows
+(`+0x30` centre, `+0xcc` rotation, stored by columns) of the existing
+`fightcontacts-scout-alarm-box__live__000..006` and
+`contacts-nohaz-wideload__live__001`, the `assembly-*__live__000` bodies and
+the `contacts-nohaz-*` rest poses. New agent `frida/ra2_alarmfight.js`:
+`ra2_flipfight.js` plus every prismatic `SetPowerSettings` (`0x4b2af0`, `K`
+rows), so a hammer stroke lines up with the contacts and the bodies.
+
+**What matches (Scout, ALARM, Wide Load, Sentinel).** Every chassis body's
+mass and full local inertia to four digits, products included (Scout 23.284 /
+39.084 / 21.266, -0.264 / 1.263 / 0.396; ALARM 49.149 / 72.705 / 36.411;
+Wide Load 44.308 / 108.785 / 86.579); every wheel body's mass, centre of mass
+in the chassis frame (Scout and ALARM to 0.1 mm as built, all four robots to
+1-5 mm after settling, where live and ours sag the same 10-20 mm on the
+hinges; Sentinel's wheels sag 6-11 mm less in ours) and spin moment; the
+Scout's fork arm in the chassis frame (2.573 / 2.327 / 0.357, product 0.633,
+live 2.573 / 2.327 / 0.357, 0.633); the chassis' contact extents (§12k, the
+0.05 tolerance included); and the rest poses on the box floor:
+
+| chassis centre y, forward.y | live | ours (3 s, no input) |
+|---|---|---|
+| Scout (`contacts-nohaz-scout__live__000`) | -1.886, -0.045 | -1.885, -0.035 |
+| ALARM (`contacts-nohaz-alarm__live__000/003`) | -1.810, -0.004 | -1.810, -0.003 |
+| Wide Load (`contacts-nohaz-wideload__live__000`) | -1.766, +0.055 | -1.761, +0.053 |
+| Sentinel (`assembly-sentinel__live__000`) | -1.800, -0.017 | -1.796, -0.012..-0.018 |
+
+The geometry types of every component these robots use agree with §12g/§12p:
+the motors' and pistons' bodies and rotors, the extenders, connectors, tips,
+hammer, tanks and the control board are proxies (`SIMULATION_GEOMETRY` 3),
+the batteries, wheels' groups, the axle mount's display and the SmartZone
+their own geometry (2, none of them rotated), the fork arm and the bracket
+wedge meshes (6), the steering hubs 0 (convex). No other body field of the
+chassis, wheels or fork (`+0x0..+0x1fc`) carries a damping or limit ours lacks
+(`+0x194/+0x198` are restitution and friction, 0.2 / 0.5 on the chassis).
+
+**A piston rod's inertia is in the piston's frame (bug, fixed).** Section 12n
+gives the rod its housing's local inertia with the diagonal scaled
+(`0x4b4d4f..0x4b4de7`), and our rod had it, in its *body* frame. But live the
+rod body's frame is the piston's: ALARM's rod is its chassis turned half a
+turn about y (`B` rows, every sample of `__live__001`), as its Burst Piston,
+and Wide Load's rod has its chassis' frame, as its piston
+(`contacts-nohaz-wideload__live__001`). Ours took the frame of the part bolted
+on (the Hammer Head, a quarter turn about y; Wide Load's T connector, a
+quarter turn about two axes), so the same numbers lay on the wrong axes: in
+the chassis frame ALARM's rod had 7.28 about the pitch axis and 9.83 about the
+roll axis (live 9.83 and 7.28), Wide Load's 17.32 / 8.86 / 21.76 (live 8.86 /
+21.76 / 17.32): its 63 kg spike assembly 2× too stiff in pitch and 2.5× too
+loose in yaw. `Robot::spawn` now turns the scaled tensor from the piston's
+frame into the rod body's; test
+`mass_live::piston_rods_take_their_chassis_inertia_in_the_pistons_frame`
+(both robots, in the chassis frame, to 0.01).
+
+**Not matched: the wheels' transverse moments.** Live a Mini wheel on a
+Reversible Angle Motor (27 kg) has 0.4281 / 0.4297 across the axle, ours
+0.4502 / 0.4519 (+0.022, the spin moment 0.5569 and the centre exact); on an
+Axle Mount (26 kg) live 0.4619, ours 0.4631; the N-12 wheel on a Z-Tek (32 kg)
+live 1.5039, ours 1.545 / 1.548 (+0.042). The surplus follows the rotors whose
+open proxies put their mass off their box's centre (angle motor 2.5 cm, Z-Tek
+3.8 cm; the axle mount's is centred). The open solid's own inertia from the
+pivot (tried) gives 0.444 and moves the spin moment to 0.560; not recovered.
+Against a robot's 70-130 kg·m² it is below 0.1 %.
+
+**Sentinel (new capture).** `alarmfight-sentinel-wideload-compressor__live__000`
+gives Sentinel's bodies for the first time: the chassis 296.394 kg,
+78.859 / 122.523 / 59.195, products 0.2417 / 1.521 / -0.1238 (ours the same to
+four digits); the rear SlipperBottom wheels 28 kg, 0.9129 about the axle and
+1.2766 across, the steered ones 23 kg, 0.9181 / 0.6103 / 0.6111 (ours the
+same); the Bracket Wedge's principal moments 1.0498 / 2.2472 / 3.1564 (ours
+1.0507 / 2.2464 / 3.1565). Wide Load's bodies in the same capture repeat
+`contacts-nohaz-wideload__live__001` to the digit.
+
+New live captures (three fresh sessions on `:7`, prefix sha256 checked before
+and after each; manifest rows in `manifest-additions-2026-10-21-alarm-back.tsv`):
+`alarmfight-scout-alarm-octagon__live__000..001` with
+`fightpos-scout-alarm-octagon__live__000..001` (two Octagon fights; a second
+fight of the first session did not start and was not retried there) and
+`alarmfight-sentinel-wideload-compressor__live__000` with
+`fightpos-sentinel-wideload-compressor__live__003`. The live Octagon set is
+now five fights (`fight-...__live__000`, `arenahits-...__live__000..001`, the
+two new): ALARM 24, 13, 20, 7, 4 counted (mean 13.6), the Scout 4, 5, 4, 3, 0.
+In the first new one an Octagon hazard throws ALARM 3.6 m up at 13.3 s and it
+lands on its back for good; in the second ALARM lands 4. The Compressor set is
+eight: Wide Load 60, 118, 158, 136, 8, 32, 23, 54 (mean 73.6), Sentinel 2, 13,
+7, 7, 1, 3, 4, 5.
+
+**ALARM's falls, again.** With every body as live, our box ALARM still goes
+onto its back ≥ 5 s by 45 s in 14 of 24 runs. Classified from `fightprobe`
+(24 runs, 46 s, up vector every 0.5 s): 35 tips from upright (up.y < 0.5), 16
+back onto the wheels and 19 onto the back, 11 of those within 1 s; by the
+forward axis at the tip, 20 pitch over the tail (10 to the back) and 15 roll
+over a side (9 to the back); before the fix 23 / 9, 13 and 5 to the back.
+Live the box captures with bodies (`fightcontacts-...__live__000..006`) hold
+seven tips, two to the back: one pitch, a 9 s tail-stand with the hammer
+hopping ALARM (`__002`, 14.5-24 s, up.y between +0.2 and -0.48 resting on its
+rear edge, 0.73 m behind the centre), one roll at 3.4 rad/s about the forward
+axis that rests 0.5 s on the side edge (x -0.92) and goes on (`__005`, 28.4 s).
+In the recovered tips ALARM had climbed onto the Scout and stood on its tail
+on the Scout's chassis. What tips ours over so much more often is not found;
+the bodies, contact extents and the hammer's kick (§12k) are not it.
+
+**Validation.** Before = `fidelity` a1d2abd built from a clean tree (it
+reproduces §12o/§12p's box and Octagon rows to the digit), after = this
+branch. `FIDTRACE_WARMUP` ensembles, 24 runs each (the Compressor's 24 now
+too), counted = `>= 10` on the other robot, robot hits only, mean (total), mean
+length, full-length runs:
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6) | 18.3 (80) sd 15 / 3.8, 75 s, 6/24 | 21.4 (71) sd 22 / 4.1, 67 s, 2/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 15/24 | 14/24 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 55.8 (268) sd 39 / 2.7, 93 s, 15/24 | 67.9 (278) sd 41 / 3.9, 98 s, 14/24 |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 6.3 (40) sd 7 / 1.6, 67 s, 4/24 | 12.5 (56) sd 15 / 2.2, 68 s, 4/24 |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 4.4 (133) / 0.5, 69 s, 3/24 | the same to the digit |
+
+AI suite (ten pairings, warmup 0): 10/10 deal damage before and after; the
+pairings with a piston change (box Scout v ALARM 3/18 → 5/13, Octagon 0/5 →
+1/13, Sentinel v Wide Load 0/21 → 5/75, Grog v Boxer box 62/98 → 71/202 and
+hill 32/42 → 25/41), the other five are the same to the hit. The Octagon and
+the Compressor move to within a standard error of live; the box ALARM's
+counted hits stay at about half of live, because it is on its back as often
+as before.
+
+**Still open.** Why our ALARM tips over in half its tips where live recovers
+from five in seven (above); the wheels' transverse moments; Sentinel's wheels
+sag 6-11 mm less on their hinges than live under its 296 kg chassis.

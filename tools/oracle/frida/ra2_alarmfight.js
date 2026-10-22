@@ -2,7 +2,8 @@
 // (one seq), to follow ALARM's hammer strokes against the bodies (docs/29
 // section 12q).  Rows as ra2_flipfight.js, plus
 //   K  [K,seq,controller,speed,force,caller]  0x4b2af0 prismatic SetPowerSettings
-//      (as ra2_weapons.js's Q rows; a burst piston's fire and return)
+//      (as ra2_weapons.js's Q rows). No K row came in the three captures of
+//      docs/29 section 12q: a burst piston's stroke does not go through it.
 // Frida agent: ra2_fightcontacts.js plus every hinge motor setting (one seq),
 // to follow a flipper's strokes against the bodies it strikes (docs/29
 // section 12p).  Rows as ra2_fightcontacts.js, plus
