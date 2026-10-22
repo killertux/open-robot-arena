@@ -3,6 +3,9 @@
 //! (the substeps its chassis is inactive) and its chassis' yaw and centre.
 //!
 //! Usage: `deactprobe <arena.py> <bot>... [-- seconds]`
+//! `TRACE=<seconds>` also prints `T <t> <robot> <heading> <x> <y> <z>` every
+//! that many seconds: the chassis' heading as `plus.getHeading` gives it
+//! (`atan2` of the forward's x and z) and its centre of mass.
 //! Prints `F <step> <robot> <inactive bodies>/<bodies>` whenever a robot has
 //! an inactive body, then per robot the freezes (chassis inactive), the mean
 //! interval between them and the yaw and centre drift.
@@ -37,7 +40,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut was = vec![true; n];
     let steps = (secs / DEFAULT_STEP) as usize;
     let inputs = vec![DriveInput::default(); n];
+    for r in 0..n {
+        let m = duel
+            .physics
+            .mass_properties(duel.robots[r].body())
+            .map_or(0.0, |m| m.0);
+        println!("M {r} {m:.1}");
+    }
+    let trace: Option<usize> = std::env::var("TRACE")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map(|t| ((t / DEFAULT_STEP).round() as usize).max(1));
     for i in 0..steps {
+        if let Some(every) = trace {
+            if i % every == 0 {
+                for r in 0..n {
+                    let rb = &duel.robots[r];
+                    let s = duel.physics.state(rb.body()).unwrap();
+                    let f = s.rotation * rb.rig.forward();
+                    let c = duel.physics.center_of_mass(rb.body()).unwrap();
+                    println!(
+                        "T {:.3} {r} {:+.4} {:.4} {:.4} {:.4}",
+                        i as f32 * DEFAULT_STEP,
+                        f.x.atan2(f.z),
+                        c.x,
+                        c.y,
+                        c.z
+                    );
+                    // `PARTS=1`: every body's mass and angular speed as well.
+                    if std::env::var_os("PARTS").is_some() {
+                        let w: Vec<String> = rb
+                            .parts
+                            .iter()
+                            .filter_map(|p| {
+                                let m = duel.physics.mass_properties(p.body)?.0;
+                                let s = duel.physics.state(p.body)?;
+                                Some(format!("{m:.0}:{:.1}", s.angular_velocity.length()))
+                            })
+                            .collect();
+                        println!("W {:.3} {r} {}", i as f32 * DEFAULT_STEP, w.join(" "));
+                    }
+                }
+            }
+        }
         duel.step_direct(&inputs, DEFAULT_STEP);
         for r in 0..n {
             let parts: Vec<_> = duel.robots[r]

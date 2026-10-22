@@ -478,6 +478,9 @@ impl Match {
         for (robot, entry) in duel.robots.iter_mut().zip(&config.robots) {
             robot.team = entry.team;
         }
+        // The original holds every robot where it lowered it onto its start
+        // point until the bell (docs/29 section 12v).
+        duel.hold_robots(true);
 
         let teams = team_table(&config.arena);
         let player_teams = player_team_table(&config.arena);
@@ -585,6 +588,8 @@ impl Match {
                 if countdown_number(self.countdown_left).is_none() {
                     self.countdown_left = 0.0;
                     self.state = MatchState::Fight;
+                    // The robots are let go at the bell (docs/29 section 12v).
+                    self.duel.hold_robots(false);
                     // `FUN_00412fc0` runs its immobility rule only while the
                     // fight is on (`+0x8e`).
                     self.duel.immobility_active = true;

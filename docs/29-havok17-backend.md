@@ -255,11 +255,12 @@ on the default tree).
    Still not modelled: the Havok wheel constraint's suspension (the hub is
    our hinge with its axle turned, not a type-5 constraint), deactivation
    (2 s / 2 s).
-5. ~~Narrowphase~~: Havok's agents (section 10). Still not reproduced: the
-   MOPP's triangle order, Havok's tie-breaking in GJK (its support search
-   hill-climbs from the last support vertex, `0x55b000`), the arena's fixed
-   convex bodies (merged into one mesh here), `SIMULATION_GEOMETRY 0`
-   (not observed live; collided as convex).
+5. ~~Narrowphase~~: Havok's agents (section 10); the MOPP's triangle order
+   and the arena's fixed bodies as collidables of their own (section 12v).
+   Still not reproduced: Havok's tie-breaking in GJK (its support search
+   hill-climbs from the last support vertex, `0x55b000`), the fixed bodies'
+   own frictions, `SIMULATION_GEOMETRY 0` (not observed live; collided as
+   convex).
 6. The weapon test (`weapon-alarm-vs-inert-scout__live__000`) is not compared
    yet; ALARM's hammer is now where the original has it.
 
@@ -3363,3 +3364,254 @@ often as the reverse; the probe's wheel spin is approximate, so this needs a
 controlled check); the original's body frames for hinged parts (the fork, the
 rod, the wheels are turned against ours by a fixed rotation: harmless to the
 physics, which is frame-free, but the probe has to correct for it).
+
+### 12v. The MOPP's order, the arena's bodies one by one, the spawn and the hold (fx/wall-mopp)
+
+Section 12u left a fixed mesh's triangles in ascending order (the arena's floor
+and walls: Havok compiles them into a MOPP at load and the queries return them
+in the MOPP's order) and the wheels' point counts against the floor open. A
+pose-matched visual audit (docs/34 §11.4) had the robots resting at other yaws
+than live before any fight (ours minus live: M.A.D. -0.36 rad, Berserker +0.21,
+Raptor +0.17, Dementia -0.15). This round recovers the MOPP compiler, splits the
+arena collider into the original's bodies, and recovers how a match places and
+holds the robots.
+
+New live captures (four sessions on `:7`, the prefix's `AI/`, `Teams/`, `Robot
+Designs/` and `ra2.cfg` sha256-identical before and after each; one more session
+crashed the game 24 s into a match and is not kept; manifest rows in
+`manifest-additions-2026-10-21-wall-mopp.tsv`):
+`mopp-scout-alarm-arenas__live__000` (new agent `frida/ra2_mopp.js` through the
+new `tools/oracle/capture_mopp.py`: the eight arenas of the Arena list loaded in
+turn; every fixed mesh's geometry as it is compiled (`G`, `0x536a10`), the
+primitive list the tree builder starts from (`I`), the built tree node by node
+with the raw node memory (`T`), and every MOPP query's triangles (`Q`, 553 000
+queries)), `fightcontacts-scout-alarm-octagon__live__000` (`ra2_fightcontacts.js`,
+40.8 s of a Scout v ALARM AI fight in the Octagon), `contacts-{scout,alarm}-straightturn__live__000`
+(`capture_contacts.py PLAN=straightturn`: from the spawn pose, 2 s straight at
+full throttle, 3 s turning in place, 2 s arcing), and for seven pairs of stock
+robots (EMERGENCY v M.A.D., Sentinel v Berserker, REVENGE v Raptor, Dementia v
+Little Metal Friend, Stinger v Tornado, MiniBerg v Iceberg, Scout v ALARM;
+Combat Arena, hazards off, AIs neutered while the intro is up; new
+`tools/oracle/capture_rest.py`) `rest-<pair>-box__live__000..002` (`ra2_deact.js`:
+every body of both robots every substep from the hold through the bell to 15 s
+of rest), `spawnwatch-<pair>-box__live__000..001` (new `frida/ra2_spawnwatch.js`:
+every body moved outside the integrator, with its callers) and
+`spawnq-<pair>-box__live__000` (new `frida/ra2_spawnq.js`: the start-point
+lowering's contact test, every query and its results).
+
+**The MOPP compiler (recovered, verified live).** `0x536a10` compiles a fixed
+mesh's geometry with Havok's MOPP compiler (`0x565fd0`): a mediator serves the
+triangles in index order (`0x565a00`, `0x536d60`), the tree builder
+(`0x56a770` → `0x56a150`) builds a binary tree with one triangle per leaf, and the
+assembler flattens it into byte code. The query (`0x566a80` → `0x5661a0`, the
+same VM as `0x566ad0`) walks the code depth first and visits the lower side of
+every split first, so whatever box is asked for the triangles come back in the
+tree's leaf order, the lower child's leaves before the upper child's. What the
+builder does (`havok17::mopp`, written from this account):
+
+* There are 13 splitting directions with costs (`0x5673e0`, table `0x71cef8`):
+  the axes (cost 0), the six face diagonals (0.2, then 0.25 for (0,1,-1),
+  (1,0,-1), (1,-1,0)), (1,1,1) at 0.3, (1,1,-1) and (1,-1,-1) at 0.32 and
+  (1,-1,-1) again at 0.34 (the table repeats it where (1,-1,1) would be).
+* A node first tries the three axes, the longest of its parent's extents first
+  (an extent the parent was split along counts 0.66 of its length; the other two
+  by length), each needing room for `0.8 (1 - len/longest)^3` (`0x569fe0`); once
+  the best cost so far is below an axis's cost plus that room the remaining axes
+  only get their extents measured. Then the diagonals in table order until the
+  best cost is below a direction's own cost.
+* A direction is tried by projecting every triangle on it (its corners'
+  `[min, max]`, `(x nx + y ny) + z nz`, `0x565680`), sorting by `min` with
+  Havok's quicksort (`0x56a8a0`: middle pivot, Hoare scan, not stable) and
+  sweeping (`0x569840`): before triangle `i` is weighed the open triangles (those
+  before it, kept by decreasing `max`, at most 51) whose `max` lies below its
+  `min` are closed. Triangle `i`'s `min` is the upper child's lower bound; the
+  lower child's upper bound is the `max` of open triangle `j` (so `j` triangles
+  would straddle) or of the last closed one when none is open; `j` is tried in a
+  window of two either way of the last best (`0x569670`). The candidate's cost is
+  the direction's cost (less 0.03 while the triangle numbers swept so far span
+  less than 16) plus penalties for a split off the node's centre on either side
+  (`2.9 x^2 + 3 x^4 + 1500 x^8`, half a node allowed off centre near the root,
+  `0x56aa40`), for unbalanced counts (`((|i - n_upper|/n - 0.75) 6)^4` near the
+  root), for straddlers (`5 j / n`) and for the overlap of the two children
+  relative to the node's extent (`0x56ab10`). The cheapest candidate wins, the
+  first of equals.
+* The triangles are dealt out (`0x5699f0`): below the upper child's bound and
+  within the lower child's go lower, the reverse upper, those that fit both are
+  sorted along the node's longest axis other than the split's and dealt to keep
+  a 4:1 balance; a triangle fitting neither would be cut in two (no stock
+  arena's tree has one; ours sends it upper). The original moves the entries
+  in its buffer in a particular way, and that decides which of two triangles
+  with equal `min` the unstable sort meets first further down: ours follows the
+  moves. The upper child is built first, the lower one is walked first.
+* The settings are the game's (`0x536a10`: 50 straddlers weighed, a window of
+  two, room for 1000 cut pieces, cost weights 1 and 0.5), and the arithmetic is
+  single precision: the game runs with the x87 unit at 24 bits. With 53- or
+  64-bit intermediates the Metal Skull's root split falls one ulp the other way
+  (two candidates whose costs round to the same float in single precision) and
+  its tree differs; in single precision every tree is the original's.
+
+Checked against every tree the original built for the eight arenas (21 fixed
+meshes, 12 to 168 triangles): every one is the original's leaf for leaf, and
+every one of the 553 000 live queries returns its triangles in that order (the
+252 distinct multi-triangle answers are all subsequences of it). The geometry
+is the body's own (its `.gmf` points in the body's frame, in face order); the
+original's triangles are ours to 2 mm. Tests
+`havok17::tests::the_combat_arenas_mopp_returns_its_triangles_in_the_live_order`
+and `tests/mopp_live.rs` (all 21, against `tests/data/mopp_live.tsv`).
+
+**The arena's fixed bodies are collidables of their own (recovered, verified
+live).** The original makes each fixed rigid body of the arena its own
+collidable, and compiles a MOPP for exactly those with `SIMULATION_GEOMETRY` 5
+(live it compiled the Octagon's `main_collision` and `outerfloor_collision` and
+not its `hammerplate`s, the Half Circle's `Collision Box` and `Hammer Stop Zone`
+and not its six spike plates, the Parking Lot's scaffolds and not its barrels;
+those are `SIMULATION_GEOMETRY` 2, collided as convex hulls like a robot part's,
+§12p). Ours merged every fixed body into one mesh. The arena is now one static
+body with a child per fixed body (`ArenaScene::colliders`, `collider_shape`): a
+mesh for 5 (and 6), the convex hull of its points for 2 and 3, the two large
+triangles of a plane; each mesh orders its triangles by its MOPP
+(`narrow::Mesh::mopp`, used by the convex x mesh agent and by the fixed mesh x
+moving mesh walk). `RA2_ARENA_MERGED=1` gives the merged mesh back and
+`RA2_H17_MOPP=0` the ascending order (diagnostics). The bodies still share the
+strongest friction of them (open).
+
+Measured with every body at its live pose (`orderprobe`; `ordercmp.py` has a new
+`-r` that leaves out the pairs of two unmapped bodies, the arena with a hazard,
+which the probe does not place; `orderprobe` now takes a part only within
+0.5 m of where its chassis carries it, since the Scout's and ALARM's wheels both
+weigh 27 kg):
+
+| fight | before: point order same / different | after |
+|---|---|---|
+| Octagon (`fightcontacts-scout-alarm-octagon__live__000`, 2511 entries) | 1033 / 83 | 1114 / 3 |
+| ... Scout chassis x floor | 257 / 75 | 332 / 0 |
+| box `__000`, `__004`, `__006` | 1554 / 126, 3649 / 82, 833 / 39 | the same |
+
+In the box the MOPP's order (10, 0, 11, 8, 9, 3, 1, 6, 5, 2, 4, 7: the floor is
+0 and 1, the -x wall 10 and 11, the +z wall 8 and 9) differs from the ascending
+one only where a piece is within the tolerance of the floor and the -x or +z
+wall at once, or of two walls; the three fights give the same lists either way.
+
+**The wheels' point counts against the floor (the controlled check).** In
+`contacts-{scout,alarm}-straightturn__live__000` the counts differ as in the
+fights, and as much at rest as when driving: ALARM, standing still while the
+Scout drives, has two points on a wheel where ours has one in 1050 of about
+2400 wheel entries, three where ours has one in 293 more, and ours two where
+live has one in 61. The points are on the wheel
+hubs 0.09-0.10 m from the floor (the robot stands on other pieces), at the
+tolerance's edge, so a few millimetres decide whether a second point is kept;
+and for some wheels live's points lie up to 0.14 m from ours along the floor
+(ALARM's second wheel) where the first wheel's agree to 1 cm. The original turns
+some wheels about their axles otherwise than ours (the hub is an octagon prism):
+the same shows at the spawn, where Sentinel's four wheels stopped the lowering
+at 0.051, 0.073, 0.079 and 0.088 m live and all four sit alike in ours. Which
+turn the original gives each wheel is not recovered.
+
+**Where a match puts the robots (recovered, verified live).** The robots are
+made at the arena's origin and, when the countdown begins (`0x415bd3`,
+`0x416126`), each is set at its start point (`0x4dcff0`: the start point's turn,
+then its position, `0x4dced0` moving every body by the difference, `0x4a6f70`)
+and lowered (`FUN_00418b90`): every body moves down 0.05 m (`0x4dce70`), and for
+each body of the robot a collision query (`0x4adfd0` → `0x542a70`: the
+broadphase, then the agents of every pair with the body) is asked whether it
+finds anything (`0x542a70`'s pair and contact lists, the detector's list at
+`+0xe0`); at the first yes the robot moves back up 0.05 m and the loop ends (at
+most 100 moves). Live (`spawnq-*`) only the contact records ever answer, and the
+record that stops it is a wheel's at the distance its traction phantom is from
+the floor (M.A.D. 0.0859 m live and 0.0847 ours, the Scout 0.0962 and 0.0955,
+ALARM 0.0978 and 0.0956, Berserker 0.0982 and 0.0956, Iceberg 0.079-0.081 and
+0.0788): the phantoms count in this test though they hold nothing up in a step.
+The robot then stays where it is to the bit, with no velocity, the chassis
+flagged `+0x1c` = 4 and its other bodies inactive, until the bell, and falls the
+last 0.15-0.30 m onto its wheels as the fight begins (`rest-*`). Ours
+(`duel::lower_onto_floor`, `PhysicsBackend::spawn_touch`, the phantoms tested
+within the tolerance as well; `Duel::hold_robots`, held as fixed bodies by the
+match until the bell and let go with no velocity) put the robots at a constant
+0.3975 m over the floor and let them fall at once, so they had landed and
+settled during the countdown. `RA2_SPAWN_FLOOR=1` gives the old placement back.
+
+| chassis centre held through the countdown (box) | live | before | after |
+|---|---|---|---|
+| Scout, ALARM, Razor, FlapJack, M.A.D., Berserker, REVENGE | | the same as live | the same |
+| Little Metal Friend / Stinger / Iceberg | -1.6962 / -1.6939 / -1.4942 | +0.050 | the same |
+| EMERGENCY / Sentinel / Raptor / Dementia | -1.5614 / -1.5779 / -1.5672 / -1.6459 | +0.050 / -0.050 / -0.050 / +0.050 | -0.050 each |
+| Tornado / MiniBerg | -1.6018 / -1.6253 | +0.050 | +0.050 |
+
+Ten of the sixteen robots now start where live has them (seven before); the
+six others are one step off, the wheels' turn above.
+
+**The resting yaws.** The audit's column compares ours 1.5 s after the bell,
+having landed during the countdown, with live's shots taken 2 to 14 s after the
+bell, while the robots creep: live they creep reproducibly (M.A.D. +0.165 and
++0.170 rad 9 s after the bell in two runs, at about +0.018 rad/s; EMERGENCY
+-0.017 and -0.027), so most of M.A.D.'s -0.36 is the time of the shots. With
+the AIs neutered before the bell no weapon turns live (Berserker's, Tornado's
+and Iceberg's weapon bodies at most 0.4-0.7 rad/s), so the large turns of
+Tornado and Iceberg in the audit came from their weapons running there, not
+from the rest. Measured from the release, live against ours (`deactprobe
+TRACE=0.5`, the chassis' yaw change, rad), the creep is of the same size and
+mostly the same sense, but not the same robot by robot, and the new spawn
+heights do not bring it closer:
+
+| yaw change at 1 / 4 / 9 s | live | before (old spawn) | after |
+|---|---|---|---|
+| M.A.D. | +0.051 / +0.082 / +0.165 | +0.038 / +0.065 / +0.119 | +0.030 / +0.053 / +0.106 |
+| Raptor | -0.195 / -0.253 / -0.284 | -0.016 / -0.006 / +0.005 | -0.088 / -0.035 / -0.043 |
+| REVENGE | +0.112 / +0.146 / +0.169 | -0.005 / +0.039 / +0.074 | -0.022 / +0.029 / +0.067 |
+| Dementia | -0.015 / -0.034 / -0.118 | -0.090 / -0.103 / -0.140 | -0.001 / +0.024 / +0.028 |
+| Berserker | -0.023 / -0.125 / +0.025 | +0.022 / +0.010 / +0.010 | +0.054 / +0.101 / +0.094 |
+| mean of \|ours - live\| over the 14 robots | | 0.055 / 0.062 / 0.063 | 0.056 / 0.070 / 0.071 |
+
+Live, the robots with the largest landing yaw (Raptor -0.14 rad within 0.5 s,
+REVENGE +0.10, Stinger +0.11) bounce: Raptor's chassis falls 0.30 m, comes back
+up 0.15 m and lands again, with its wheels spun to 4-10 rad/s at the impact;
+ours (0.05 m lower then, 0.21 m drop) came back up 0.08 m. The wheels' turn about
+their axles (above) changes how a polygonal wheel meets the floor, and is the
+first suspect for the rest of it.
+
+**Ensembles.** `fidtrace`'s and `fightprobe`'s `FIDTRACE_WARMUP` ran idle steps
+before the match; with the robots held until the bell they would not move and
+every run would be the same fight (all 24 box runs ended with the Scout out at
+28-32 s). The warmup now lets the robots go for its steps and holds them where
+they come to rest; the warmup-0 run falls at the bell as live.
+
+**Validation.** Before = `fidelity` f1b84b9 built from a clean tree (it
+reproduces section 12u's after column to the digit); MOPP = this branch with the
+MOPP's order and the arena's bodies only (no spawn or hold change); after = this
+branch. `FIDTRACE_WARMUP` ensembles, 24 runs each, counted = `>= 10` on the
+other robot, robot hits only, mean (total), mean length, full-length runs:
+
+| fight | live | before | MOPP | after |
+|---|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6) | 35.3 (154) sd 30 / 5.2, 86 s, 5/24 | 38.2 (142) sd 28 / 6.0, 82 s, 2/24 | 32.2 (118) sd 26 / 5.5, 80 s, 5/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 12/24 | 11/24 | 10/24 |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 3.9 (112) / 0.9, 54 s, 2/24 | 4.2 (107) / 1.0, 52 s, 0/24 | 4.2 (112) / 0.8, 52 s, 2/24 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 81.2 (258) sd 43 / 4.8, 95 s, 12/24 | 82.3 (320) sd 45 / 4.7, 102 s, 16/24 | 72.5 (309) sd 33 / 4.1, 103 s, 13/24 |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 22.5 (112) sd 22 / 3.3, 86 s, 8/24 | 19.0 (93) sd 20 / 3.3, 78 s, 4/24 | 20.5 (109) sd 21 / 3.7, 93 s, 10/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | | 10/24 | 13/24 | 10/24 |
+| box Tornado v RipBlade, 9 warmups: stuck at 22 s / full length | | 1 of 9 (0) / 7 | 1 of 9 (0) / 7 | 0 of 9 / 9 |
+
+Section 12s's replays of the live placements (`twoprobe`): set 1 (20 trials)
+ALARM on its back at some point / at the end 5 / 4 before and with the MOPP's
+order (the same to the digit: the replays stay clear of the walls), 4 / 3 after
+(live 1 / 1), mean peak |ω| 3.2 → 3.9 rad/s (live 3.1), both chassis' end
+centres from live, median 1.32 → 1.45 m; set 2 (17) never on the back, median
+0.35 → 0.33 m. The after column moves because `twoprobe` settles the robots
+from their spawn for 60 substeps before it learns their rest frames, and they
+now start at other heights; the trials are chaotic within a few substeps.
+
+AI suite (ten pairings, warmup 0): 10/10 deal damage before and after; every
+pairing changes (the robots now fall at the bell). Tornado v RipBlade no longer
+sticks on the wall near its start: it ran the full 120 s (124 / 38 counted; it
+ended at 22 s before and with the MOPP's order alone). The box fight's falls go
+12 → 10 of 24 (live about 5 of 19) and the Compressor's Wide Load 81.2 → 72.5
+(live 73.6); the Octagon's ALARM count stays high (22.5 → 20.5, live 13.6). All
+of these are within about one standard error.
+
+**Still open.** Which turn about its axle the original gives each wheel (the
+spawn heights of six robots, the wheels' point counts, and likely the landing
+yaws); the fixed bodies' own frictions (ours still takes the strongest);
+whether the phantoms count in the spawn test because of the query or because
+the wheels' traction collidables are not flagged as phantoms there (`+0x58` read
+0 on the stopping record); a primitive the MOPP compiler would cut in two (none
+in the stock arenas).

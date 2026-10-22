@@ -33,12 +33,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    for _ in 0..warmup {
-        let n = m.duel.robots.len();
-        m.duel.step_direct(
-            &vec![ra2sim::sim::DriveInput::default(); n],
-            ra2sim::DEFAULT_STEP,
-        );
+    // The match holds the robots until the bell (docs/29 section 12v): they
+    // are let go for the warmup and held again where it leaves them.
+    if warmup > 0 {
+        m.duel.hold_robots(false);
+        for _ in 0..warmup {
+            let n = m.duel.robots.len();
+            m.duel.step_direct(
+                &vec![ra2sim::sim::DriveInput::default(); n],
+                ra2sim::DEFAULT_STEP,
+            );
+        }
+        m.duel.hold_robots(true);
     }
     let window: Option<(f32, f32)> = a.get(4).and_then(|w| {
         let (x, y) = w.split_once('-')?;

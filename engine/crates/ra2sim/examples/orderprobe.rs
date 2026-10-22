@@ -179,7 +179,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            if let Some((d, r, p)) = best {
+            // A part is taken only near where its chassis carries it: both
+            // robots may have parts of one mass (the Scout's and ALARM's
+            // 27 kg wheels), and a robot's chassis may not be seen yet.
+            if let Some((d, r, p)) = best.filter(|b| b.0 < 0.5) {
                 map.insert(l.ptr.clone(), (r, p));
                 let lc = chassis[r].unwrap();
                 let ours = rest[r][0].rot.inverse() * rest[r][p].rot;

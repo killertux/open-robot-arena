@@ -29,6 +29,7 @@ pub mod dashpot;
 pub mod deactivation;
 pub mod joints;
 pub mod mass;
+pub mod mopp;
 pub mod narrow;
 pub mod obbtree;
 pub mod resolver;
@@ -93,6 +94,14 @@ fn debug_body() -> Option<usize> {
     *WATCH.get_or_init(|| std::env::var("RA2_H17_DEBUG").ok()?.parse().ok())
 }
 
+/// Whether a fixed mesh's triangles come in its MOPP's order (`RA2_H17_MOPP=0`:
+/// ascending, as before docs/29 section 12v; a diagnostic).
+fn mopp_order() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_H17_MOPP").map_or(true, |v| v != "0"))
+}
+
 /// `RA2_H17_DUMP=<file>` writes the rows `frida/ra2_contacts.js` captures in
 /// the original (`R` the contacts handed to the resolver, `B` every dynamic
 /// body, `A` each accepted step piece), so one script reads both.
@@ -153,6 +162,9 @@ struct Geometry {
     phantom: Option<Shape>,
     /// The body's collidables, body-local (what [`narrow`] collides).
     pieces: Vec<Piece>,
+    /// The phantom's pieces, body-local (the start-point lowering's test sees
+    /// them, [`Havok17Backend::spawn_touch`]).
+    phantom_pieces: Vec<Piece>,
 }
 
 /// A pair of collidables: (body, piece) of A, then of B.
@@ -725,9 +737,11 @@ impl Havok17Backend {
         mesh.query(&local, triangles);
         // The agent meets the triangles in the order its query gives them: a
         // moving mesh's tree depth first (`FUN_00550560`), a fixed mesh's
-        // MOPP (ours: ascending, the MOPP is not recovered).
+        // MOPP's leaves (`havok17::mopp`).
         if self.bodies[ms.body].moves() {
             triangles.sort_by_key(|&t| mesh.tree.rank[t as usize]);
+        } else if mopp_order() {
+            triangles.sort_by_key(|&t| mesh.mopp[t as usize]);
         }
         let m = self
             .mesh_manifolds
@@ -773,8 +787,8 @@ impl Havok17Backend {
     /// The order the pairs of triangles come in (docs/29 section 12u): with a
     /// fixed mesh as A (`FUN_0054a2a0`), B's tree is walked depth first
     /// (`FUN_0054a080`) and each of its triangles near A's MOPP brings A's
-    /// triangles near it in the MOPP's order (ours: ascending; the MOPP is
-    /// compiled at load and not recovered); between two moving meshes
+    /// triangles near it in the MOPP's order ([`super::mopp`]); between two
+    /// moving meshes
     /// (`FUN_00549d00`) the two trees are walked together (`FUN_00550100`,
     /// [`obbtree::ObbTree::pairs`]). Either walk keeps every pair of
     /// triangles within the tolerance: the two-tree walk tests each pair of
@@ -803,6 +817,9 @@ impl Havok17Backend {
                     mb.triangles[tb as usize].map(|v| pb.pose.apply(mb.vertices[v as usize]));
                 let local = Aabb::of(tri_b.iter().map(|v| pa.pose.inverse_apply(*v))).grown(tol);
                 ma.query(&local, triangles);
+                if mopp_order() {
+                    triangles.sort_by_key(|&t| ma.mopp[t as usize]);
+                }
                 candidates.extend(triangles.iter().map(|&ta| (ta, tb)));
             }
         } else {
@@ -1263,6 +1280,11 @@ impl PhysicsBackend for Havok17Backend {
             shape,
             phantom,
             pieces: narrow::pieces_of(&desc.shape),
+            phantom_pieces: desc
+                .phantom
+                .as_ref()
+                .map(narrow::pieces_of)
+                .unwrap_or_default(),
         }));
         self.phantom_touch.push(None);
         if std::env::var_os("RA2_H17_PIECES").is_some() {
@@ -1780,6 +1802,97 @@ impl PhysicsBackend for Havok17Backend {
             sys.bodies.push(i);
         }
         self.systems.push(sys);
+    }
+
+    fn spawn_touch(&mut self, bodies: &[BodyHandle]) -> Option<bool> {
+        // `FUN_00542a70` for each body: the broadphase, then the agents of
+        // every pair with the body, and any contact record counts. Live
+        // (`spawnq-...__live__000`) the record that stops the lowering is a
+        // wheel's within the tolerance of the floor at the distance its
+        // traction phantom is (M.A.D. 0.0859 m live, 0.0847 ours; the Scout
+        // 0.0962, 0.0955): the phantoms count here although they hold
+        // nothing up in a step.
+        let set: Vec<usize> = bodies
+            .iter()
+            .filter(|&&h| self.body(h).is_some())
+            .map(|&h| h as usize)
+            .collect();
+        // The test leaves the world as it found it (ours: the agents' kept
+        // points, the excused pairs and the bodies' activity are put back).
+        let kept = (
+            self.convex_manifolds.clone(),
+            self.mesh_manifolds.clone(),
+            self.excused.clone(),
+            self.detections,
+            self.bodies.iter().map(|b| b.active).collect::<Vec<_>>(),
+        );
+        let (contacts, _) = self.detect(TOLERANCE * 0.5);
+        let (convex, mesh, excused, detections, active) = kept;
+        self.convex_manifolds = convex;
+        self.mesh_manifolds = mesh;
+        self.excused = excused;
+        self.detections = detections;
+        for (b, a) in self.bodies.iter_mut().zip(active) {
+            b.active = a;
+        }
+        if contacts
+            .iter()
+            .any(|c| set.contains(&c.a) || set.contains(&c.b))
+        {
+            return Some(true);
+        }
+        let pieces = self.world_pieces();
+        for &i in &set {
+            let Some(g) = self.geometry[i].as_ref() else {
+                continue;
+            };
+            let pose = Pose {
+                position: self.bodies[i].origin(),
+                rotation: self.bodies[i].rotation,
+            };
+            for ph in &g.phantom_pieces {
+                let PieceShape::Convex { vertices, radius } = &ph.shape else {
+                    continue;
+                };
+                let at = Pose {
+                    position: pose.apply(ph.position),
+                    rotation: pose.rotation * ph.rotation,
+                };
+                let v: Vec<Vec3> = vertices.iter().map(|p| at.apply(*p)).collect();
+                let reach = Aabb::of(v.iter().copied()).grown(radius + TOLERANCE);
+                for w in &pieces {
+                    if w.body == i || self.same_group(i, w.body) || !reach.overlaps(&w.bounds) {
+                        continue;
+                    }
+                    let near = match self.geometry[w.body]
+                        .as_ref()
+                        .and_then(|g| g.pieces.get(w.piece as usize))
+                        .map(|p| &p.shape)
+                    {
+                        Some(PieceShape::Mesh(mesh)) => {
+                            let local = Aabb::of(v.iter().map(|p| w.pose.inverse_apply(*p)))
+                                .grown(radius + TOLERANCE);
+                            let mut tris = Vec::new();
+                            mesh.query(&local, &mut tris);
+                            tris.iter().any(|&t| {
+                                let tri = mesh.triangles[t as usize]
+                                    .map(|k| w.pose.apply(mesh.vertices[k as usize]));
+                                narrow::closest(&v, &tri).distance - radius < TOLERANCE
+                            })
+                        }
+                        Some(PieceShape::Convex { .. }) => {
+                            narrow::closest(&v, &w.vertices).distance - radius - w.radius
+                                < TOLERANCE
+                        }
+                        None => false,
+                    };
+                    if near {
+                        return Some(true);
+                    }
+                }
+            }
+        }
+        Some(false)
     }
 
     fn detect_now(&mut self) {

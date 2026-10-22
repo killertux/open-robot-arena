@@ -14,6 +14,11 @@ pub const USER_PROP: u64 = 3;
 pub struct ArenaScene {
     pub items: Vec<DrawItem>,
     pub triangles: Vec<[Vec3; 3]>,
+    /// The fixed collision bodies one by one, when the collider is the
+    /// arena's own rigid bodies (empty for a proxy or visible-geometry
+    /// collider): the original gives each its own collidable, a mesh with
+    /// its own MOPP or a convex hull (docs/29 section 12v).
+    pub colliders: Vec<FixedCollider>,
     pub center: Vec3,
     pub min: Vec3,
     pub max: Vec3,
@@ -28,10 +33,81 @@ pub struct ArenaScene {
     pub background: [f32; 3],
 }
 
+/// How the original collides a fixed body (docs/29 section 12v).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FixedKind {
+    /// A triangle mesh compiled into a MOPP (`SIMULATION_GEOMETRY` 5 or 6:
+    /// the original compiles a MOPP for each such body at load, and for no
+    /// other, `mopp-...__live__000`).
+    Mesh,
+    /// The convex hull of the body's points (`SIMULATION_GEOMETRY` 2 or 3,
+    /// as a robot part's: §12g, §12p).
+    Convex,
+    /// An endless plane (`HAVOK_GEO_TYPE` 1), here two large triangles.
+    Plane,
+}
+
+/// One fixed collision body of the arena, in its own frame.
+#[derive(Clone, Debug)]
+pub struct FixedCollider {
+    pub name: String,
+    pub kind: FixedKind,
+    pub position: Vec3,
+    pub rotation: Quat,
+    /// Triangle corners in the body's frame (three per triangle, in the
+    /// file's face order: the order the original's geometry keeps).
+    pub points: Vec<Vec3>,
+}
+
 /// Gravity every shipped arena but the practice arena declares.
 pub const STOCK_GRAVITY: Vec3 = Vec3::new(0.0, -9.809_98, 0.0);
 
 impl ArenaScene {
+    /// The static arena body's shape: one child per fixed body when the
+    /// collider is the arena's own rigid bodies (`RA2_ARENA_MERGED=1`: the
+    /// one merged mesh it used to be), else the triangle soup as one mesh.
+    pub fn collider_shape(&self) -> crate::backend::ShapeDesc {
+        use crate::backend::{CompoundChild, ShapeDesc};
+        let merged = std::env::var("RA2_ARENA_MERGED").is_ok_and(|v| v == "1");
+        if self.colliders.is_empty() || merged {
+            let (vertices, indices) = self.triangle_soup();
+            return ShapeDesc::TriMesh { vertices, indices };
+        }
+        let children = self
+            .colliders
+            .iter()
+            .enumerate()
+            .map(|(k, c)| {
+                let shape = match c.kind {
+                    FixedKind::Convex => ShapeDesc::ConvexHull {
+                        points: c.points.clone(),
+                    },
+                    FixedKind::Mesh | FixedKind::Plane => {
+                        // Both windings, as the soup: a mesh with no volume
+                        // is solid from either side (havok17 keeps the first).
+                        let mut vertices = Vec::with_capacity(c.points.len() * 2);
+                        let mut indices = Vec::with_capacity(c.points.len() / 3 * 2);
+                        for t in c.points.as_chunks::<3>().0 {
+                            for tri in [[t[0], t[2], t[1]], [t[0], t[1], t[2]]] {
+                                let b = vertices.len() as u32;
+                                vertices.extend_from_slice(&tri);
+                                indices.push([b, b + 1, b + 2]);
+                            }
+                        }
+                        ShapeDesc::TriMesh { vertices, indices }
+                    }
+                };
+                CompoundChild {
+                    local_position: c.position,
+                    local_rotation: c.rotation,
+                    shape,
+                    tag: k as u32,
+                }
+            })
+            .collect();
+        ShapeDesc::Compound(children)
+    }
+
     /// Non-indexed triangle soup for a mesh collider.
     pub fn triangle_soup(&self) -> (Vec<Vec3>, Vec<[u32; 3]>) {
         let mut verts = Vec::with_capacity(self.triangles.len() * 3);
@@ -121,6 +197,32 @@ fn with_suspended(h: &ra2_render::HavokArena) -> Vec<[Vec3; 3]> {
     out
 }
 
+/// The arena's fixed colliding bodies, each in its own frame (the body's
+/// placement's scale, if any, baked into its points).
+fn fixed_colliders(h: &ra2_render::HavokArena) -> Vec<FixedCollider> {
+    h.bodies
+        .iter()
+        .filter(|b| b.is_static() && b.collides() && b.points.len() >= 3)
+        .map(|b| {
+            let (scale, rotation, position) = b.transform.to_scale_rotation_translation();
+            let kind = if b.is_plane() {
+                FixedKind::Plane
+            } else if matches!(b.simulation_geometry, 2 | 3) {
+                FixedKind::Convex
+            } else {
+                FixedKind::Mesh
+            };
+            FixedCollider {
+                name: b.name.clone(),
+                kind,
+                position,
+                rotation,
+                points: b.points.iter().map(|p| *p * scale).collect(),
+            }
+        })
+        .collect()
+}
+
 /// Load an arena (`.py` script or `.gmf`) into visuals + collision triangles.
 ///
 /// The collider prefers the arena's **own Havok rigid bodies** (the geometry the
@@ -189,6 +291,7 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
     let mode = mode.to_ascii_lowercase();
     let mut source = "visible";
     let mut raw = visible.clone();
+    let mut colliders = Vec::new();
     if mode != "visible" {
         let mut taken = false;
         if mode == "auto" || mode == "rb" {
@@ -205,6 +308,7 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
                 {
                     source = "rigid bodies";
                     raw = h.static_triangles.clone();
+                    colliders = fixed_colliders(h);
                     taken = true;
                 } else if !h.static_triangles.is_empty() {
                     eprintln!("  rigid-body collider does not cover the floor");
@@ -252,6 +356,7 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
     Ok(ArenaScene {
         items,
         triangles,
+        colliders,
         center: centre,
         min,
         max,

@@ -545,3 +545,45 @@ fn a_phantom_touches_only_what_it_overlaps() {
     let n = physics.phantom_touch(into).expect("5 cm into the floor");
     assert!(n.y.abs() > 0.9, "the floor's normal: {n}");
 }
+
+/// The Combat Arena's collision box as the original's geometry holds it, and
+/// the order the MOPP the original compiles from it returns its triangles in
+/// (live, `mopp-scout-alarm-arenas__live__000`; docs/29 section 12v).
+#[test]
+fn the_combat_arenas_mopp_returns_its_triangles_in_the_live_order() {
+    let (x, y0, y1, z0, z1) = (
+        12.7f32,
+        -2.264_982_2f32,
+        13.735_018f32,
+        -12.397_295f32,
+        13.002_705f32,
+    );
+    let v = [
+        Vec3::new(-x, y0, z0),
+        Vec3::new(x, y0, z0),
+        Vec3::new(-x, y0, z1),
+        Vec3::new(x, y0, z1),
+        Vec3::new(-x, y1, z0),
+        Vec3::new(x, y1, z0),
+        Vec3::new(-x, y1, z1),
+        Vec3::new(x, y1, z1),
+    ];
+    let tris = [
+        [0, 2, 3],
+        [3, 1, 0],
+        [4, 5, 7],
+        [7, 6, 4],
+        [0, 1, 5],
+        [5, 4, 0],
+        [1, 3, 7],
+        [7, 5, 1],
+        [3, 2, 6],
+        [6, 7, 3],
+        [2, 0, 4],
+        [4, 6, 2],
+    ];
+    assert_eq!(
+        mopp::leaf_order(&v, &tris),
+        vec![10, 0, 11, 8, 9, 3, 1, 6, 5, 2, 4, 7]
+    );
+}
