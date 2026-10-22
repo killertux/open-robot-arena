@@ -1026,7 +1026,9 @@ Live runs on display :9 (flatpak Wine 9.0, `ra2_drive.py` plus the new agents `t
   the original drifts to +x: a mirror image of the live motion, which says a sign or a handedness is wrong in the
   free-wheel/contact physics of an asymmetric robot (not in the award code). It was not chased (the Havok side belongs to
   the physics rounds). The creep is chaotic in both (the original's three C.R.U.S.H. runs differ), so a frame match at a
-  given time is only possible to a few hundredths of a radian at the start. Timed frames: live `event-award-atom-t4..t58`
+  given time is only possible to a few hundredths of a radian at the start.
+  *Resolved (docs/29 section 12t):* the sign came from the order our resolver met the contacts in; with the
+  broadphase's order (sorted along x) the Atom Smasher turns -0.0145 rad/s and drifts +x, as live. Timed frames: live `event-award-atom-t4..t58`
   against ours is a robot turning one way against the other; `event-award-photo` (C.R.U.S.H., ours 3 s in) **4.11 -> 3.99**
   (the robot is now on the floor the physics finds, not the visual floor).
 

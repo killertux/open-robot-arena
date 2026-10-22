@@ -107,10 +107,15 @@ fn the_flextop_table_swings_on_its_pivot_as_live() {
 }
 
 /// Live (`flexend-off__live__*`, `frida/ra2_flexend.js`) the table stops where it
-/// is once nothing has touched it for a while: its active flag goes, so it is no
-/// longer integrated and the dashpots change nothing. Until then it keeps swinging.
+/// is a few to 15 s after the robots left it, still swinging: its active flag goes,
+/// so it is no longer integrated and the dashpots change nothing. The table is
+/// a deactivation system of its own (`deact-scout-alarm-flextop-off__live__001`,
+/// docs/29 section 12t): a long check every 10 s freezes it once its centre is
+/// within 1 m and its orientation within 2 / r (r = 17.6 m, its box's half
+/// diagonal) of where they were at the last check that failed, which a swing
+/// of 5-10 degrees passes.
 #[test]
-fn the_flextop_table_freezes_once_no_robot_has_touched_it_for_ten_seconds() {
+fn the_flextop_table_freezes_at_the_first_long_check_once_left_alone() {
     let Some(game) = game_dir() else {
         eprintln!("skipped: no game data (set RA2_GAME)");
         return;
@@ -128,7 +133,7 @@ fn the_flextop_table_freezes_once_no_robot_has_touched_it_for_ten_seconds() {
         .find(|p| p.prop.name == "floor_collision")
         .map(|p| p.body)
         .expect("FlexTop's table is a movable body");
-    assert_eq!(duel.rest_watch.len(), 1, "the dashpots hold the table");
+    assert_eq!(duel.suspended, vec![table], "the dashpots hold the table");
     let pivot = Vec3::new(0.0, 0.202_458_58, 0.0);
     let on_table = Vec3::new(0.0, 0.119_571_24, 0.0);
     let rot = Quat::from_scaled_axis(Vec3::from(LIVE[0].1));
@@ -136,22 +141,25 @@ fn the_flextop_table_freezes_once_no_robot_has_touched_it_for_ten_seconds() {
         .set_transform(table, pivot - rot * on_table, rot);
     duel.physics
         .set_velocity(table, Vec3::ZERO, Vec3::from(LIVE[0].2));
+    let mut frozen_at = None;
+    for i in 0..30 * 60 {
+        duel.step_direct(&[], ra2sim::DEFAULT_STEP);
+        if !duel.physics.is_active(table) {
+            frozen_at = Some(i);
+            break;
+        }
+    }
+    let at = frozen_at.expect("frozen within 30 s");
+    eprintln!("the table froze after {:.2} s", at as f32 / 60.0);
+    assert!(
+        (9 * 60..=11 * 60).contains(&at),
+        "at the long check 10 s in: {at}"
+    );
     let steps = |duel: &mut Duel, n: usize| {
         for _ in 0..n {
             duel.step_direct(&[], ra2sim::DEFAULT_STEP);
         }
     };
-    steps(&mut duel, 9 * 60);
-    let before = duel.physics.state(table).expect("state");
-    steps(&mut duel, 20);
-    let moving = duel.physics.state(table).expect("state");
-    assert!(
-        (moving.rotation.dot(before.rotation) - 1.0).abs() > 1e-9,
-        "still swinging at 9 s"
-    );
-    assert!(!duel.rest_watch[0].frozen);
-    steps(&mut duel, 2 * 60);
-    assert!(duel.rest_watch[0].frozen, "frozen after 10 s alone");
     let a = duel.physics.state(table).expect("state");
     steps(&mut duel, 60);
     let b = duel.physics.state(table).expect("state");

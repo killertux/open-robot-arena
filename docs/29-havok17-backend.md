@@ -1731,7 +1731,8 @@ values. That is Havok's deactivator (`flextop.gmf`'s simulation object has
 even an idle one), but the delay after the last robot left was ~10.5, ~3 and
 ~14.5 s in the three drives, the table was still swinging at 0.2-0.6 m/s and
 5-10 cm per 0.2 s, and no window of its motion separates the frozen from the
-earlier steps. Ours: `Duel::update_deactivation` (`RestWatch`) puts the body
+earlier steps (the criterion is recovered in section 12t: the table is a
+deactivation system of its own). Ours *at the time*: `Duel::update_deactivation` (`RestWatch`) puts the body
 that the file's dashpots hold to rest when no robot part has touched it for 10 s
 (`DEACTIVATION_SECONDS`, 1/`long_freq`) and wakes it on a touch; it matters in
 a FlexTop match only after both robots are off the table (the match is over
@@ -3011,3 +3012,183 @@ scatter.
 fires the fork's stroke a substep apart from live when the tick schedules
 agree (the replay aligns the presses by the fork's onset); the award scene's
 creep.
+
+### 12t. The deactivators, and the contacts' order (fx/deactivate)
+
+Live, every robot body goes inactive (`+0x1c` bit 1 clear) for a substep or two
+about every 0.4 s whenever the robot is slow, and FlexTop's table freezes 3-15 s
+after the robots leave it while it still swings (sections 12j, 12s). This round
+recovers what does it, from the binary first and then with Frida, and puts it in
+havok17 (`havok17/deactivation.rs`); and finds why a free robot at rest creeps
+the other way round from live (the award scene's Atom Smasher): the order of the
+contacts.
+
+New live captures (two sessions on `:7`, the prefix's `AI/`, `Teams/`, `Robot
+Designs/` and `ra2.cfg` sha256-identical before and after each; manifest rows in
+`manifest-additions-2026-10-21-deactivate.tsv`): `deact-scout-alarm-box-rest__live__000`
+(new agent `frida/ra2_deact.js` with `tools/oracle/capture_deact.py`; box Scout v
+ALARM after `capture_tipab.py setup`: 15 s at rest, ALARM at throttle 20, rest,
+the Scout at 30, rest, ALARM turning, rest; every substep's phase markers and
+every robot body, every system step, every `CheckFreeze` with its references,
+every `setActive` with its caller, every detector wake, every world-deactivator
+call), `deact-scout-alarm-flextop-off__live__000..001` (the same agent, `NO_DRIVE=1`,
+alongside `capture_flexfreeze.py` in a Tabletop FlexTop match: Game Settings
+`TABLETOP` at (492, 390), FlexTop the arena list's second row, y 188) with their
+drives `flexend-scout-alarm-flextop-off-deact__live__000..001`.
+
+**Who deactivates (recovered).** The `include_deactivator`/`short_freq`/`long_freq`
+strings belong to the `.gmf` writer only (`0x5c5584`); the game does not read
+them. Two deactivators run, both once a frame (after the frame's second
+substep; live the calls come between a frame's last `Q` and the next `T`):
+
+* *The world's.* The world's constructor (`0x529700`) builds a deactivator
+  (`0x53cad0(5, 0.1)`, vtable `0x6ac39c`) and adds it to its listeners
+  (`0x529c70`); the game's world setup (`0x4ac2e0`) then sets both of its
+  frequencies to 0.5 Hz (`0x4acab0`/`0x4acb00` with 0.5), so it checks every
+  2 s (live `D` rows: `+0x20 = +0x24 = 2`, the timers stepping 102, 104, ...).
+  Its step (`0x53cc00`): every entity of the subspace that is active and in no
+  system is checked with the default thresholds and, when the check passes,
+  `setActive(0, 1)`.
+* *The systems'.* Every robot is a system (`0x5236e0` builds one through
+  `0x533c80`, vtable `0x6ac2a8`, and scales its thresholds by 10, `0x533db0`),
+  holding all its bodies (live: the Scout's four, ALARM's six; `+0x20` of each
+  body counts its systems, `0x531e90`). FlexTop's table is one too, alone
+  (live `G` rows of `deact-...-flextop-off__live__001`: thresholds 0.1, 0.05, 1,
+  2). The system's step (`0x533fd0` → `0x534050`): while active, a short check
+  every 0.2 s and a long one every 10 s (`+0x50`, `+0x5c`; due when strictly
+  more has passed, so 7 frames, sometimes 6 or 8); when every body passes it
+  sets all of them `setActive(0, 1)` and itself inactive, and skips its actions
+  (a robot's list is empty live). While inactive it does nothing until one of
+  its bodies is active again, then sets all of them `setActive(1, 1)`.
+
+**The check** (`CheckFreeze`, `0x522cb0`): the first one only stores the
+references (centre `+0x30` and quaternion `+0x40` into `+0x1fc` long and
+`+0x220` short) and `r²`, the squared half diagonal of the body's collidables'
+bounding box as it is then (`+0x244`; live 1.27 for the Scout's chassis, 1.47
+ALARM's, 0.019 a wheel, 310.5 FlexTop's table). A short check passes when
+`|Δc|² < t0²` and `|Δq|² r² < t1²` (`Δq` the four components' difference),
+a long one with `t2`, `t3`; a passing short check returns at once, a failing
+one takes the pose as its reference, then the long check likewise. Defaults
+(`0x6abdf4`, `0x7021b4`): 0.01 m, 0.005, 0.1 m, 0.2; a robot's and the table's
+0.1, 0.05, 1, 2. So a robot freezes when its chassis moved less than 0.1 m
+and turned less than about 0.1 / r rad in the last 0.2 s.
+
+**Who wakes.** `setActive(1, 1)` on a rigid body (`0x523230`) also writes
+`FLT_MAX` into both references' centres, so the next checks fail; the
+detector's wake (`0x548da0` → `0x548ef0`: an inactive movable body in a
+detected pair) is `setActive(1, 0)` and keeps them. The game's force, torque
+and impulse wrappers (`0x4b0860`, `0x4b0950`, `0x4b0a10`) wake the body first
+(`0x45ebc0` reads bit 1): live (`A` rows, caller `0x4b0a38`, from the
+MagicAction at `0x485b9f`) a robot at rest is frozen at a frame's end, its
+traction push wakes the chassis in the next substep's actions, and its system
+wakes the rest at the next frame's end (`0x5341cb`). A dashpot with one active
+end wakes the other (`0x52cc3e`, `0x52cc65`); a hinge controller's settings
+(`0x4815c0`) do not.
+
+**What inactive means (live).** Not integrated: the centre stays to the bit,
+the velocity is kept (the integrator's active list `+0x38` is rebuilt from
+bit 1, `0x531240`), gravity is added only to listed bodies (`0x52eb30`). The
+contacts detected before the freeze are still resolved in the next substep
+and reach the inactive body (the wheels' velocities change by 0.8 m/s in that
+substep, the floor holding them up); after that no pair between two inactive
+bodies, or an inactive one and a fixed one, is detected (the broadphase keeps
+active, inactive and fixed collidables in three lists and only pairs the
+active ones, `0x559d30`). The constraint solver leaves a constraint alone while
+one of its moving bodies is inactive: a frozen wheel's velocity does not
+change while its chassis is active again, and the chassis falls freely for
+that substep (`v_y` -0.2 m/s, one substep of gravity). So a robot at rest
+loses one integration of its chassis and two of its other bodies every 12-14
+frames (live intervals 0.400, 0.433, 0.467 s).
+
+**Ours.** `Body::active`, `Freeze` (the references), one `System` per robot
+(its collision group) and one for the arena's held bodies
+(`PhysicsBackend::deactivation_system`, FlexTop's table; `Duel::suspended`
+replaces `RestWatch`), the world deactivator for every other dynamic body.
+The deactivators run at the start of every second substep (after the game's
+pushes of the frame's last step, as live), on Havok's clock arithmetic
+(`Clock`). Integration, the drag and the joints skip inactive bodies, the
+detector pairs only active bodies and wakes an inactive one it meets (its
+pairs then detected in the same detection, as `0x542db0`'s second run), a
+dashpot wakes its other end, `add_force`/`add_torque`/the impulses/`set_velocity`
+wake with the references forgotten. `RA2_H17_DEACTIVATION=0` turns it off,
+`RA2_H17_DEACT_DEBUG` prints every check. `examples/deactprobe.rs`: robots left
+alone in an arena, their freezes and drift.
+
+| at rest, box Scout v ALARM, 15 s | live | ours |
+|---|---|---|
+| bodies per system | Scout 4, ALARM 6 | 4, 6 |
+| chassis inactive, substeps per freeze | 1 | 1 |
+| other bodies inactive | 2 | 2 |
+| interval between freezes | 24-28 substeps (12-14 frames) | 24-28, mean 27 |
+
+FlexTop's table (`deact-...-flextop-off__live__001`): frozen many times while
+the robots stood still on it (short checks, |Δc| 0.003-0.005 m, |Δq| r
+0.02-0.05) and woken by them each time; frozen for good 8.3 s after the last
+robot fell off, by a long check (|Δq| r 0.35 against 2). Ours from the live
+swinging state (`tests/flextop_live.rs`): frozen at the first long check, 10.0 s
+(live delays 10.5, 3, 14.5 and 8.3 s).
+
+**The creep's sign: the contacts' order (recovered, verified live).** With the
+deactivator in, the award scene's Atom Smasher still turned +0.0155 rad/s
+(live -0.0145): the deactivator takes about a tenth off the creep and does not
+turn it. What does is the order the resolver meets the contacts in (one
+impulse at a time, round-robin from the first, `0x559720`): reversing our list
+turned the creep to -0.0167 rad/s with the robot drifting +x, as live. The
+order is the broadphase's (`FUN_00559d30`, every detection): collidables are
+kept in three lists, active, inactive and fixed, each sorted by its box's lower
+bound along the sweep axis (`0x5411f0`: `+0x1d4 = (1, 0, 0)`, the world's x;
+`0x559c20` projects, `0x559ec0` sorts); for every active collidable in that
+order come its pairs with the active ones after it, then the inactive ones,
+then the fixed ones (`0x55a750` keeps the overlapping ones and appends them to
+`+0x58`), and the narrowphase appends each pair's points in that order
+(`0x542db0`). Live at rest (`twobody-...__live__001`) the floor's contacts come
+wheel by wheel in ascending x; in the fork trials (`twobody-...__live__000`
+trial 0, substeps 3-8) the pair sequence is ALARM's chassis-fork, then ALARM's
+wheels 1, 4, 2, the fork on the floor, ALARM's wheel 3, the Scout's wheels 2,
+1, and ours now gives exactly that sequence (it was body creation order).
+`Havok17Backend::broadphase_pairs`. Atom Smasher now turns **-0.0145 rad/s**
+and drifts +0.30 m in x in 50 s (live -0.0145, +0.3 m in 56 s); C.R.U.S.H.
+-0.017 rad in 25 s (live ±0.1 in 50 s). No sign or handedness error was
+needed. The pairs' A/B orientation (`0x55a750`: `+0x18`, then `+0x50`) is not
+modelled: it flips a normal, which the resolver's impulse does not see.
+
+The rest creeps of the box robots stay chaotic: live (15 s from spawn) Scout
++0.044, ALARM -0.029 rad; ours -0.014, -0.037; the twobody rest (trial 16)
+ends within 0.05 and 0.07 m of live for the two chassis.
+
+**Validation.** Before = `fidelity` 97bef36 built from a clean tree (it
+reproduces section 12s's after column to the digit), after = this branch.
+`FIDTRACE_WARMUP` ensembles, 24 runs each, counted = `>= 10` on the other
+robot, robot hits only, mean (total), mean length, full-length runs:
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6) | 31.8 (111) sd 25 / 5.6, 85 s, 7/24 | 30.8 (130) sd 23 / 5.5, 76 s, 7/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 8/24 | 8/24 |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 4.2 (75) / 0.9, 53 s, 1/24 | 4.5 (146) / 0.6, 63 s, 5/24 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 73.0 (291) sd 33 / 4.0, 99 s, 14/24 | 79.0 (275) sd 53 / 4.6, 88 s, 12/24 |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 18.7 (88) sd 16 / 3.5, 84 s, 8/24 | 23.5 (123) sd 23 / 3.5, 93 s, 9/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | | 12/24 | 12/24 |
+
+Section 12s's replays of the live placements: set 1 (20 trials) ALARM on its
+back at some point / at the end 3 / 2 before, 6 / 6 after (live 1 / 1; with
+the deactivator off as well, 6 on its back: the contacts' order, not the
+freezes; the trials that go over differ), mean peak |ω| 3.8 → 3.6 rad/s (live
+3.0), both chassis' end centres from live, median 1.39 → 1.46 m; set 2 (17)
+never on the back in either, median 0.27 → 0.24 m.
+
+AI suite (ten pairings, warmup 0): 10/10 deal damage before and after. Every
+pairing changes (the contacts' order changes every fight); two end early:
+Tornado v RipBlade at 22 s (Tornado stuck against the wall near its start and
+taken by the immobility rule, as in 2 of 9 warmups after, 0 of 9 before; with
+the deactivator off too, so it is the order) and Sentinel v Wide Load at 58 s.
+The ensembles move within about one standard error (Octagon's ALARM 18.7 →
+23.5 with sd 16-23, away from live's 13.6; the Compressor's Wide Load 73 → 79,
+live 73.6).
+
+**Still open.** The narrowphase's point order within a pair (the convex x mesh
+manifold's, live keeps its old points first), the pairs' A/B orientation, the
+broadphase's insertion order of the woken pairs (ours re-sorts them), which
+other arena objects get systems (the box's arena has an empty system with
+thresholds times 100); whether the original's hazards ever freeze with their
+motors on (a hinge controller's settings do not wake a body).
