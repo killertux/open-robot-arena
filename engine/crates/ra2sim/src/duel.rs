@@ -2768,23 +2768,33 @@ impl Duel {
     pub fn effect_items(&self, view_proj: Mat4) -> Vec<DrawItem> {
         let mut out = Vec::new();
         if let Some((light, receivers)) = &self.shadow {
-            // One caster per attached component, as `ShadowWizard` has one per
-            // object: its hull points in the world.
-            let mut casters: Vec<Vec<Vec3>> = Vec::new();
+            // One caster per robot, its chassis mesh (the live `ShadowWizard` log: 28 fans for FlapJack's
+            // 28 chassis triangles, 52 for EMERGENCY's 52); only the triangles facing the light are
+            // projected, which is what one layer of shadow needs (see `ShadowCaster`).
+            let mut casters: Vec<ra2_render::effects::ShadowCaster> = Vec::new();
             for r in self.robots.iter().filter(|r| r.parts[0].alive) {
                 let worlds = r.component_worlds(&*self.physics);
-                for (i, c) in r.rig.components.iter().enumerate() {
-                    if r.attached[i] && !c.hull_points.is_empty() {
-                        casters.push(
-                            c.hull_points
-                                .iter()
-                                .map(|p| worlds[i].transform_point3(*p))
-                                .collect(),
-                        );
-                    }
-                }
+                let Some(c) = r.rig.components.first() else {
+                    continue;
+                };
+                // (the drawn triangles wind the other way round to the mesh's: the outward normal is
+                // `(t2 - t0) x (t1 - t0)`)
+                let all: Vec<[Vec3; 3]> = c
+                    .items
+                    .iter()
+                    .flat_map(|it| it.vertices.as_chunks::<3>().0.iter())
+                    .map(|t| [0, 1, 2].map(|k| worlds[0].transform_point3(Vec3::from(t[k].pos))))
+                    .collect();
+                let Some(&first) = all.first() else {
+                    continue;
+                };
+                let tris: Vec<[Vec3; 3]> = all
+                    .into_iter()
+                    .filter(|t| (t[2] - t[0]).cross(t[1] - t[0]).dot(*light - t[0]) > 0.0)
+                    .collect();
+                casters.push(ra2_render::effects::ShadowCaster { first, tris });
             }
-            out.extend(ra2_render::effects::shadow_item(
+            out.extend(ra2_render::effects::shadow_item_triangles(
                 *light, receivers, &casters,
             ));
         }

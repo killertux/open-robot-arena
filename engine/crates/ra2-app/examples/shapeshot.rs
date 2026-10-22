@@ -37,6 +37,19 @@ const SHOTS: [(usize, f32, f32, f32, f32); 8] = [
     (1, 0.0, 3.4, 1.0, 0.0),
 ];
 
+/// `RA2_SHAPE_SET=audit`: the four-camera list of `capture_shape.py`'s `AUDIT` (front-right corner,
+/// left side, back-left corner, front, for both robots).
+const AUDIT: [(usize, f32, f32, f32, f32); 8] = [
+    (0, 3.4, 2.0, 1.3, 0.5),
+    (0, 0.0, -3.4, 1.0, 0.0),
+    (0, -3.4, -2.0, 1.4, -0.5),
+    (0, 3.6, 0.0, 1.0, 1.0),
+    (1, 3.4, 2.0, 1.3, 0.5),
+    (1, 0.0, -3.4, 1.0, 0.0),
+    (1, -3.4, -2.0, 1.4, -0.5),
+    (1, 3.6, 0.0, 1.0, 1.0),
+];
+
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 {
@@ -88,7 +101,12 @@ fn main() -> Result<(), String> {
                 .collect()
         })
         .unwrap_or_default();
-    for (k, &(p, fwd, side, up, look)) in SHOTS.iter().enumerate() {
+    let shots = if std::env::var("RA2_SHAPE_SET").as_deref() == Ok("audit") {
+        AUDIT
+    } else {
+        SHOTS
+    };
+    for (k, &(p, fwd, side, up, look)) in shots.iter().enumerate() {
         let duel = &session.matched.duel;
         let r = &duel.robots[p];
         let a = duel

@@ -191,7 +191,9 @@ fn vs_main(i: VsIn) -> VsOut {
     if (has_vc && (d.flags.x & 4u) != 0u) { ma = i.color; }
     var c = ma.rgb * frame.ambient.rgb;
     var sp = vec3<f32>(0.0);
-    let to_eye = normalize(d.eye.xyz - wp);
+    // D3DRS_LOCALVIEWER is FALSE in the original (live state dump, every draw): the viewer vector is the
+    // camera's -forward for every vertex, not the direction to the eye.
+    let to_eye = -normalize(d.cam_fwd.xyz);
     for (var k = 0u; k < frame.count.x; k = k + 1u) {
       let l = frame.lights[k];
       let to = l.pos.xyz - wp;
