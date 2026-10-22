@@ -459,6 +459,11 @@ pub fn solve(bodies: &mut [Body], joints: &mut [Joint], dt: f32) {
             && bodies[j.a].alive
             && bodies[j.b].alive
             && (bodies[j.a].is_dynamic() || bodies[j.b].is_dynamic())
+            // A constraint with an inactive moving body is left alone (live,
+            // docs/29 section 12t: a frozen wheel's velocity does not change
+            // while its chassis is active again).
+            && !bodies[j.a].asleep()
+            && !bodies[j.b].asleep()
     };
     let mut blocks: Vec<(usize, Vec<Row>)> = Vec::new();
     for (i, joint) in joints.iter_mut().enumerate() {
@@ -508,6 +513,9 @@ mod tests {
             torque: Vec3::ZERO,
             friction: 0.5,
             restitution: 0.2,
+            active: true,
+            freeze: Default::default(),
+            system: None,
         };
         b.refresh_inertia();
         b

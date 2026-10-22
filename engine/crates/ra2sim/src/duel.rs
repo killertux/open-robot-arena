@@ -217,8 +217,8 @@ pub(crate) fn spawn_prop(
 /// section 12j). A fixed end (`anchor03`, a massless body that collides with
 /// nothing) is the static arena body, whose frame is the world's.
 ///
-/// Returns the movable bodies that got a dashpot (the ones Havok's deactivator
-/// can freeze, see [`RestWatch`]).
+/// Returns the movable bodies that got a dashpot (FlexTop's table; Havok's
+/// world deactivator freezes it once it is still enough, docs/29 section 12t).
 pub(crate) fn suspend_props(
     physics: &mut dyn PhysicsBackend,
     arena_path: &str,
@@ -286,30 +286,6 @@ pub(crate) fn suspend_props(
         }
     }
     held
-}
-
-/// Seconds a suspended body is left alone before it is deactivated: the
-/// reciprocal of the arena's `long_freq` (0.1 in `flextop.gmf`'s simulation
-/// object, `include_deactivator` on).
-pub const DEACTIVATION_SECONDS: f32 = 10.0;
-
-/// Havok's deactivator on a body the file's dashpots hold (FlexTop's table,
-/// docs/29 section 12j).
-///
-/// Live, once both robots have left the table it stops where it is a few to
-/// 15 seconds later: its `+0x1c` flag word loses bit 1 (0x22 to 0x20, the active
-/// bit the integrator and the dashpot's movable test read), the dashpots keep
-/// being called and change nothing, the match ending changes nothing (the
-/// arena's `Activate(0)` is a no-op for it), and while any robot touches the
-/// table it never happens. The criterion itself is not recovered (the table
-/// still swings by 5-10 cm a step when it goes), so this approximates it: no
-/// robot part has touched the body for [`DEACTIVATION_SECONDS`]; a touch wakes it.
-#[derive(Clone, Copy, Debug)]
-pub struct RestWatch {
-    pub body: BodyHandle,
-    /// Seconds since a robot last touched it.
-    pub idle: f32,
-    pub frozen: bool,
 }
 
 /// The arena's bodies as the robots' contact pricing sees them (docs/29 §12o):
@@ -584,8 +560,8 @@ pub struct Duel {
     /// The `SetPinned` wishes already applied, so the reconciliation below only
     /// talks to the physics when the script actually changed its mind.
     applied_pinned: std::collections::BTreeMap<String, bool>,
-    /// The suspended bodies the deactivator may freeze ([`RestWatch`]).
-    pub rest_watch: Vec<RestWatch>,
+    /// The bodies the arena's dashpots hold (FlexTop's table).
+    pub suspended: Vec<BodyHandle>,
     /// The arena's disabled collision pairs as they apply to our bodies (see
     /// [`no_collide_pairs`]), and the merged static collider they may name.
     no_collide: Vec<(String, Option<String>)>,
@@ -711,14 +687,13 @@ impl Duel {
         }
         let no_collide = no_collide_pairs(arena_path);
         apply_no_collide(&mut *physics, &props, arena_body, &no_collide);
-        let rest_watch = suspend_props(&mut *physics, arena_path, arena_body, &props)
-            .into_iter()
-            .map(|body| RestWatch {
-                body,
-                idle: 0.0,
-                frozen: false,
-            })
-            .collect();
+        let suspended = suspend_props(&mut *physics, arena_path, arena_body, &props);
+        // The arena's held bodies are a deactivation system of their own, as a
+        // robot's are (live, `deact-scout-alarm-flextop-off__live__001`:
+        // FlexTop's table, thresholds 10 times the defaults, docs/29 section 12t).
+        if !suspended.is_empty() {
+            physics.deactivation_system(&suspended, crate::havok17::deactivation::SYSTEM_SCALE);
+        }
 
         if std::env::var("RA2_DEBUG").is_ok() {
             for p in &props {
@@ -953,7 +928,7 @@ impl Duel {
             arena_tick_error: None,
             arena_timer: 0.0,
             applied_pinned: std::collections::BTreeMap::new(),
-            rest_watch,
+            suspended,
             no_collide,
             arena_body,
             scene_camera: crate::camera::SceneCamera::default(),
@@ -1913,7 +1888,6 @@ impl Duel {
             eprintln!("ra2sim: step at t={:.2}s dropped contacts", self.time);
         }
 
-        self.update_deactivation(dt);
         self.resolve_combat();
         self.update_effects(dt);
         self.update_immobility(dt);
@@ -1924,33 +1898,6 @@ impl Duel {
         // `eliminatePlayer`. It belongs to the step, not to whichever driver ran
         // it, so an arena hazard reaches the robots however the robots are driven.
         self.service_requests(dt);
-    }
-
-    /// Freeze a suspended body nothing has touched for [`DEACTIVATION_SECONDS`]
-    /// and wake it when a robot touches it again ([`RestWatch`]).
-    fn update_deactivation(&mut self, dt: f32) {
-        for i in 0..self.rest_watch.len() {
-            let body = self.rest_watch[i].body;
-            let touched = self.robots.iter().any(|r| {
-                r.parts
-                    .iter()
-                    .any(|p| p.alive && self.physics.in_contact(body, p.body))
-            });
-            let w = &mut self.rest_watch[i];
-            if touched {
-                w.idle = 0.0;
-                if w.frozen {
-                    w.frozen = false;
-                    let _ = self.physics.set_motion_type(body, MotionType::Dynamic);
-                }
-            } else {
-                w.idle += dt;
-                if !w.frozen && w.idle >= DEACTIVATION_SECONDS {
-                    w.frozen = true;
-                    let _ = self.physics.set_motion_type(body, MotionType::Static);
-                }
-            }
-        }
     }
 
     /// Advance the particle effects: the motors that smoke, the arena's flames,

@@ -237,6 +237,9 @@ mod tests {
             torque: Vec3::ZERO,
             friction: 0.5,
             restitution: 0.2,
+            active: true,
+            freeze: Default::default(),
+            system: None,
         };
         b.refresh_inertia();
         b

@@ -55,6 +55,18 @@ impl AngularDashpot {
         if !a.alive || !b.alive || (!a.is_dynamic() && !b.is_dynamic()) {
             return;
         }
+        // An active body wakes the other end (`0x52cc00..0x52cc69`, through
+        // `setActive(1, 1)`); with neither end active the action does nothing.
+        if !a.awake() && !b.awake() {
+            return;
+        }
+        for i in [self.a, self.b] {
+            if bodies[i].asleep() {
+                bodies[i].active = true;
+                bodies[i].freeze.forget();
+            }
+        }
+        let (a, b) = (&bodies[self.a], &bodies[self.b]);
         let f = TIME_FACTOR * h;
         let target = a.rotation * self.rest;
         let error = rotation_vector(target * b.rotation.inverse());
@@ -96,6 +108,9 @@ mod tests {
             torque: Vec3::ZERO,
             friction: 0.4,
             restitution: 0.3,
+            active: true,
+            freeze: Default::default(),
+            system: None,
         };
         if motion == MotionType::Static {
             b.inv_inertia_world = Mat3::ZERO;

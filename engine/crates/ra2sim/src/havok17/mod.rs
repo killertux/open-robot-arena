@@ -26,6 +26,7 @@
 
 mod body;
 pub mod dashpot;
+pub mod deactivation;
 pub mod joints;
 pub mod mass;
 pub mod narrow;
@@ -33,7 +34,7 @@ pub mod resolver;
 
 use std::collections::HashMap;
 
-use glam::{Mat3, Quat, Vec3};
+use glam::{Mat3, Quat, Vec3, Vec4};
 use oxijolt::prelude::math as m;
 use oxijolt::prelude::{
     Activation, BodyId, BodySettings, PhysicsWorld, QueryFilter, RayCast, Shape, WorldSettings,
@@ -209,6 +210,16 @@ pub struct Havok17Backend {
     /// Diagnostics: step pieces and backsteps since the world was made.
     pub pieces: u64,
     pub backsteps: u64,
+    /// The robots' systems ([`deactivation`]), one per collision group.
+    systems: Vec<deactivation::System>,
+    /// The world deactivator's timers.
+    world_deactivator: deactivation::WorldDeactivator,
+    /// The world's time, as the deactivators read it.
+    clock: deactivation::Clock,
+    /// Substeps run.
+    substeps: u64,
+    /// `RA2_H17_DEACTIVATION=0` turns the deactivators off (diagnostics).
+    deactivation: bool,
 }
 
 impl Havok17Backend {
@@ -233,6 +244,11 @@ impl Havok17Backend {
             disabled: Default::default(),
             pieces: 0,
             backsteps: 0,
+            systems: Vec::new(),
+            world_deactivator: Default::default(),
+            clock: Default::default(),
+            substeps: 0,
+            deactivation: std::env::var("RA2_H17_DEACTIVATION").map_or(true, |v| v != "0"),
         })
     }
 
@@ -314,7 +330,9 @@ impl Havok17Backend {
     /// `I⁻¹ τ` (no gyroscopic term: the state carries ω, `FUN_00521330`).
     fn integrate(&mut self, h: f32) {
         for b in &mut self.bodies {
-            if !b.moves() {
+            // An inactive body is not integrated and keeps its accumulators
+            // for when it wakes (`0x52f090` integrates the active list only).
+            if !b.moves() || b.asleep() {
                 continue;
             }
             let w = b.angular_velocity;
@@ -400,6 +418,54 @@ impl Havok17Backend {
         out
     }
 
+    /// The candidate pairs in the order the broadphase lists them
+    /// (`FUN_00559d30`), which is the order the narrowphase appends their
+    /// contacts and so the resolver's: the collidables are kept in three lists
+    /// (active, inactive, fixed), each sorted by its box's lower bound along
+    /// the sweep axis, the world's x (`0x5411f0`: `+0x1d4 = (1, 0, 0)`;
+    /// `0x559c20`, `0x559ec0`); for every active collidable in turn come its
+    /// pairs with the active ones after it, then with the inactive ones, then
+    /// with the fixed ones, each in its list's order (`0x55a750` keeps those
+    /// whose boxes overlap). Live (`twobody-scout-alarm-box__live__001`, a
+    /// rest): the floor's contacts come wheel by wheel in ascending x.
+    fn broadphase_pairs(
+        &self,
+        pieces: &[WorldPiece],
+        level: &[Option<u32>],
+    ) -> Vec<(usize, usize)> {
+        let key = |k: &usize| (pieces[*k].bounds.min.x, *k);
+        let sorted = |mut v: Vec<usize>| {
+            v.sort_by(|a, b| {
+                key(a)
+                    .partial_cmp(&key(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            v
+        };
+        let (mut active, mut inactive, mut fixed) = (Vec::new(), Vec::new(), Vec::new());
+        for (k, p) in pieces.iter().enumerate() {
+            if !self.bodies[p.body].moves() {
+                fixed.push(k);
+            } else if level[p.body].is_some() {
+                active.push(k);
+            } else {
+                inactive.push(k);
+            }
+        }
+        let (active, inactive, fixed) = (sorted(active), sorted(inactive), sorted(fixed));
+        let tol = TOLERANCE;
+        let mut out = Vec::new();
+        for (n, &a) in active.iter().enumerate() {
+            let ba = pieces[a].bounds.grown(tol);
+            for &b in active[n + 1..].iter().chain(&inactive).chain(&fixed) {
+                if ba.overlaps(&pieces[b].bounds) {
+                    out.push((a, b));
+                }
+            }
+        }
+        out
+    }
+
     /// Collision detection (`FUN_00542810`): every pair of collidables within
     /// the tolerance gets its agent's contact points (see [`narrow`]). Returns
     /// the contacts and the pairs that make this a bad step (`detector +
@@ -416,105 +482,154 @@ impl Havok17Backend {
         let mut excused_seen: std::collections::HashSet<PairKey> = Default::default();
         let mut penetrating_bodies: Vec<(usize, usize)> = Vec::new();
         let mut triangles = Vec::new();
-        for pa in &pieces {
-            let i = pa.body;
-            let bi = &self.bodies[i];
-            if !bi.moves() {
-                continue;
-            }
-            let (dynamic_i, friction_i, restitution_i) =
-                (bi.is_dynamic(), bi.friction, bi.restitution);
-            for pb in &pieces {
-                let j = pb.body;
-                if j == i {
-                    continue;
-                }
-                let bj = &self.bodies[j];
-                // A pair of moving bodies is seen from both sides; keep one.
-                if bj.moves() && j < i {
-                    continue;
-                }
-                if !dynamic_i && !bj.is_dynamic() {
-                    continue;
-                }
-                let (friction_j, restitution_j) = (bj.friction, bj.restitution);
-                if self.same_group(i, j) {
-                    continue;
-                }
-                if !pa.bounds.grown(tol).overlaps(&pb.bounds) {
-                    continue;
-                }
-                let key: PairKey = (i, pa.piece, j, pb.piece);
-                let first = out.len();
-                let mut penetrating = false;
-                let mut points: Vec<narrow::Point> = Vec::new();
-                // Whether the pair's agent sees the bodies the other way round
-                // (A is the convex piece of a convex x mesh pair).
-                let mut swap = false;
-                match (pa.vertices.is_empty(), pb.vertices.is_empty()) {
-                    (false, false) => {
-                        // Convex x convex (`FUN_00544820`).
-                        match narrow::convex_point(
-                            &pa.vertices,
-                            pa.radius,
-                            &pb.vertices,
-                            pb.radius,
-                            &pa.body_pose,
-                            &pb.body_pose,
-                        ) {
-                            None => penetrating = true,
-                            Some((p, c)) if p.distance < tol => {
-                                let m = self.convex_manifolds.entry(key).or_default();
-                                m.seen = stamp;
-                                let kept =
-                                    m.update(p, c.persists(), tol, &pa.body_pose, &pb.body_pose);
-                                points.push(p);
-                                points.extend(kept);
+        // Only pairs with an active body are detected (the broadphase keeps
+        // the inactive collidables apart, `0x55a9a0`). A detected pair whose
+        // other body is inactive wakes it (`0x548da0`), and its own pairs are
+        // then detected in the same detection (`0x542db0` runs again): `level`
+        // is the pass a body became active in.
+        let mut level: Vec<Option<u32>> =
+            self.bodies.iter().map(|b| b.awake().then_some(0)).collect();
+        let mut pass = 0u32;
+        loop {
+            for (ia, ib) in self.broadphase_pairs(&pieces, &level) {
+                // The agent sees the pair as before: the moving body first, the
+                // lower handle first when both move.
+                let (pa, pb) = {
+                    let (a, b) = (&pieces[ia], &pieces[ib]);
+                    let (ma, mb) = (self.bodies[a.body].moves(), self.bodies[b.body].moves());
+                    if !ma || (mb && b.body < a.body) {
+                        (b, a)
+                    } else {
+                        (a, b)
+                    }
+                };
+                let i = pa.body;
+                let bi = &self.bodies[i];
+                let (dynamic_i, friction_i, restitution_i) =
+                    (bi.is_dynamic(), bi.friction, bi.restitution);
+                {
+                    let j = pb.body;
+                    if j == i {
+                        continue;
+                    }
+                    let bj = &self.bodies[j];
+                    if !dynamic_i && !bj.is_dynamic() {
+                        continue;
+                    }
+                    let (friction_j, restitution_j) = (bj.friction, bj.restitution);
+                    if self.same_group(i, j) {
+                        continue;
+                    }
+                    let first_awake = match (level[i], level[j]) {
+                        (Some(a), Some(b)) => a.min(b),
+                        (Some(a), None) | (None, Some(a)) => a,
+                        (None, None) => continue,
+                    };
+                    if first_awake != pass {
+                        continue;
+                    }
+                    if !pa.bounds.grown(tol).overlaps(&pb.bounds) {
+                        continue;
+                    }
+                    let key: PairKey = (i, pa.piece, j, pb.piece);
+                    let first = out.len();
+                    let mut penetrating = false;
+                    let mut points: Vec<narrow::Point> = Vec::new();
+                    // Whether the pair's agent sees the bodies the other way round
+                    // (A is the convex piece of a convex x mesh pair).
+                    let mut swap = false;
+                    match (pa.vertices.is_empty(), pb.vertices.is_empty()) {
+                        (false, false) => {
+                            // Convex x convex (`FUN_00544820`).
+                            match narrow::convex_point(
+                                &pa.vertices,
+                                pa.radius,
+                                &pb.vertices,
+                                pb.radius,
+                                &pa.body_pose,
+                                &pb.body_pose,
+                            ) {
+                                None => penetrating = true,
+                                Some((p, c)) if p.distance < tol => {
+                                    let m = self.convex_manifolds.entry(key).or_default();
+                                    m.seen = stamp;
+                                    let kept = m.update(
+                                        p,
+                                        c.persists(),
+                                        tol,
+                                        &pa.body_pose,
+                                        &pb.body_pose,
+                                    );
+                                    points.push(p);
+                                    points.extend(kept);
+                                }
+                                Some(_) => {}
                             }
-                            Some(_) => {}
+                        }
+                        (false, true) | (true, false) => {
+                            // Convex x mesh (`FUN_00545b50`), the convex piece as A.
+                            swap = pa.vertices.is_empty();
+                            let (cx, ms) = if swap { (pb, pa) } else { (pa, pb) };
+                            let key = (cx.body, cx.piece, ms.body, ms.piece);
+                            penetrating = self.convex_mesh(
+                                key,
+                                cx,
+                                ms,
+                                tol,
+                                stamp,
+                                &mut triangles,
+                                &mut points,
+                            );
+                        }
+                        (true, true) => {
+                            // Mesh x mesh (`FUN_0054a2a0`).
+                            penetrating =
+                                self.mesh_mesh(pa, pb, tol, &out, &mut triangles, &mut points);
                         }
                     }
-                    (false, true) | (true, false) => {
-                        // Convex x mesh (`FUN_00545b50`), the convex piece as A.
-                        swap = pa.vertices.is_empty();
-                        let (cx, ms) = if swap { (pb, pa) } else { (pa, pb) };
-                        let key = (cx.body, cx.piece, ms.body, ms.piece);
-                        penetrating =
-                            self.convex_mesh(key, cx, ms, tol, stamp, &mut triangles, &mut points);
+                    let friction = (friction_i * friction_j).max(0.0).sqrt();
+                    let restitution = restitution_i * restitution_j;
+                    let (ca, cb) = if swap { (j, i) } else { (i, j) };
+                    for p in points {
+                        out.push(Contact {
+                            a: ca,
+                            b: cb,
+                            normal: p.normal,
+                            point: p.point,
+                            distance: p.distance,
+                            friction,
+                            restitution,
+                        });
                     }
-                    (true, true) => {
-                        // Mesh x mesh (`FUN_0054a2a0`).
-                        penetrating =
-                            self.mesh_mesh(pa, pb, tol, &out, &mut triangles, &mut points);
-                    }
-                }
-                let friction = (friction_i * friction_j).max(0.0).sqrt();
-                let restitution = restitution_i * restitution_j;
-                let (ca, cb) = if swap { (j, i) } else { (i, j) };
-                for p in points {
-                    out.push(Contact {
-                        a: ca,
-                        b: cb,
-                        normal: p.normal,
-                        point: p.point,
-                        distance: p.distance,
-                        friction,
-                        restitution,
-                    });
-                }
-                if penetrating {
-                    if self.excused.contains(&key) {
-                        excused_seen.insert(key);
-                    } else {
+                    if penetrating {
+                        if self.excused.contains(&key) {
+                            excused_seen.insert(key);
+                        } else {
+                            bad.push(key);
+                        }
+                        if !penetrating_bodies.contains(&(i, j)) {
+                            penetrating_bodies.push((i, j));
+                        }
+                    } else if out[first..].iter().any(|c| c.distance < current_tol) {
                         bad.push(key);
                     }
-                    if !penetrating_bodies.contains(&(i, j)) {
-                        penetrating_bodies.push((i, j));
-                    }
-                } else if out[first..].iter().any(|c| c.distance < current_tol) {
-                    bad.push(key);
                 }
             }
+            let mut woke = false;
+            for c in &out {
+                for k in [c.a, c.b] {
+                    if level[k].is_none() && self.bodies[k].asleep() {
+                        // `0x548ef0`: `setActive(1, 0)`, the references kept.
+                        self.bodies[k].active = true;
+                        level[k] = Some(pass + 1);
+                        woke = true;
+                    }
+                }
+            }
+            if !woke {
+                break;
+            }
+            pass += 1;
         }
         // Ours: Havok reports nothing for overlapping shapes and backsteps
         // until they are apart; when the step is accepted overlapping anyway,
@@ -522,8 +637,14 @@ impl Havok17Backend {
         for (i, j) in penetrating_bodies {
             out.extend(self.overlap_contacts(i, j));
         }
-        self.mesh_manifolds.retain(|_, m| m.seen == stamp);
-        self.convex_manifolds.retain(|_, m| m.seen == stamp);
+        // A pair between two inactive bodies keeps its agent (the frozen
+        // pairs, `0x548ab0`) for when one of them wakes.
+        let bodies = &self.bodies;
+        let frozen = |k: &PairKey| !bodies[k.0].awake() && !bodies[k.2].awake();
+        self.mesh_manifolds
+            .retain(|k, m| m.seen == stamp || frozen(k));
+        self.convex_manifolds
+            .retain(|k, m| m.seen == stamp || frozen(k));
         if bad.is_empty() {
             self.excused.retain(|k| excused_seen.contains(k));
         }
@@ -766,11 +887,153 @@ impl Havok17Backend {
     /// The world's drag action.
     fn drag(&mut self) {
         for b in &mut self.bodies {
-            if b.is_dynamic() {
+            if b.is_dynamic() && b.active {
                 b.force -= b.velocity * DRAG_LINEAR;
                 b.torque -= b.angular_velocity * DRAG_ANGULAR;
             }
         }
+    }
+
+    /// The game pushed `handle` (its force, torque and impulse wrappers wake
+    /// the body first, `0x4b0860`/`0x4b0950`/`0x4b0a10`).
+    fn wake_pushed(&mut self, handle: BodyHandle) {
+        if let Some(b) = self.bodies.get_mut(handle as usize) {
+            if b.asleep() {
+                b.active = true;
+                b.freeze.forget();
+            }
+        }
+    }
+
+    /// The squared half diagonal of body `i`'s collidables' bounding box
+    /// where they are now (`0x522cb0`'s first check).
+    fn bounding_radius2(&self, i: usize) -> f32 {
+        let mut bounds: Option<Aabb> = None;
+        for w in self.world_pieces().iter().filter(|w| w.body == i) {
+            bounds = Some(match bounds {
+                Some(b) => b.union(w.bounds),
+                None => w.bounds,
+            });
+        }
+        if std::env::var_os("RA2_H17_DEACT_DEBUG").is_some() {
+            for w in self.world_pieces().iter().filter(|w| w.body == i) {
+                eprintln!(
+                    "deact bounds body {i} piece {} {:?} {:?}",
+                    w.piece, w.bounds.min, w.bounds.max
+                );
+            }
+        }
+        bounds.map_or(0.0, |b| ((b.max - b.min) * 0.5).length_squared())
+    }
+
+    /// The world's deactivator and the robots' systems, once a frame
+    /// ([`deactivation`]).
+    fn run_deactivators(&mut self) {
+        use deactivation::{
+            SYSTEM_LONG_PERIOD, SYSTEM_SHORT_PERIOD, THRESHOLDS, WORLD_LONG_PERIOD,
+            WORLD_SHORT_PERIOD,
+        };
+        let now = self.clock;
+        // The world's (`0x53cc00`): entities in no system.
+        let w = self.world_deactivator;
+        let short = WORLD_SHORT_PERIOD < now.since(&w.last_short);
+        let long = WORLD_LONG_PERIOD < now.since(&w.last_long);
+        if short || long {
+            for i in 0..self.bodies.len() {
+                let b = &self.bodies[i];
+                if !b.alive || b.motion != MotionType::Dynamic || !b.active || b.system.is_some() {
+                    continue;
+                }
+                if self.freeze_check(i, short, long, &THRESHOLDS) {
+                    self.bodies[i].active = false;
+                }
+            }
+            if short {
+                self.world_deactivator.last_short = now;
+            }
+            if long {
+                self.world_deactivator.last_long = now;
+            }
+        }
+        // The systems' (`0x534050`).
+        for s in 0..self.systems.len() {
+            let bodies: Vec<usize> = self.systems[s]
+                .bodies
+                .iter()
+                .copied()
+                .filter(|&i| self.bodies[i].alive)
+                .collect();
+            if bodies.is_empty() {
+                continue;
+            }
+            if !self.systems[s].active {
+                if bodies.iter().any(|&i| self.bodies[i].active) {
+                    self.systems[s].active = true;
+                    for &i in &bodies {
+                        let b = &mut self.bodies[i];
+                        b.active = true;
+                        b.freeze.forget();
+                    }
+                }
+                continue;
+            }
+            let sys = &self.systems[s];
+            let short = SYSTEM_SHORT_PERIOD < now.since(&sys.last_short);
+            let long = SYSTEM_LONG_PERIOD < now.since(&sys.last_long);
+            if !short && !long {
+                continue;
+            }
+            if short {
+                self.systems[s].last_short = now;
+            }
+            if long {
+                self.systems[s].last_long = now;
+            }
+            let t = self.systems[s].thresholds;
+            let mut all = true;
+            for &i in &bodies {
+                all &= self.freeze_check(i, short, long, &t);
+            }
+            if all {
+                self.systems[s].active = false;
+                for &i in &bodies {
+                    self.bodies[i].active = false;
+                }
+            }
+        }
+    }
+
+    fn freeze_check(&mut self, i: usize, short: bool, long: bool, t: &[f32; 4]) -> bool {
+        let r2 = if self.bodies[i].freeze.radius2.is_none() {
+            self.bounding_radius2(i)
+        } else {
+            0.0
+        };
+        let b = &mut self.bodies[i];
+        let (com, rotation) = (b.com, b.rotation);
+        let before = b.freeze;
+        let frozen = b.freeze.check(com, rotation, || r2, short, long, t);
+        if std::env::var_os("RA2_H17_DEACT_DEBUG").is_some() {
+            let d = |r: Option<(Vec3, Quat)>| {
+                r.map(|(c, q)| {
+                    let dq = Vec4::from(q) - Vec4::from(rotation);
+                    format!(
+                        "{:.4}/{:.4}",
+                        (c - com).length(),
+                        dq.length() * before.radius2.unwrap_or(r2).sqrt()
+                    )
+                })
+                .unwrap_or_else(|| "-".into())
+            };
+            eprintln!(
+                "deact t={:.3} body {i} short {short} long {long} r2 {:.4} s {} l {} -> {frozen}",
+                self.clock.since(&Default::default()),
+                b.freeze.radius2.unwrap_or(0.0),
+                d(before.short),
+                d(before.long)
+            );
+        }
+        frozen
     }
 
     fn joint(&self, handle: JointHandle) -> Option<&Joint> {
@@ -918,9 +1181,24 @@ impl PhysicsBackend for Havok17Backend {
             torque: Vec3::ZERO,
             friction: desc.friction,
             restitution: desc.restitution,
+            active: true,
+            freeze: Default::default(),
+            system: None,
         };
         body.set_origin(desc.position, desc.rotation);
         let handle = self.bodies.len();
+        // Every robot is a system of its bodies (`0x5236e0`).
+        if let (Some(g), MotionType::Dynamic) = (desc.collision_group, desc.motion) {
+            let s = match self.systems.iter().position(|s| s.group == g.group) {
+                Some(s) => s,
+                None => {
+                    self.systems.push(deactivation::System::new(g.group));
+                    self.systems.len() - 1
+                }
+            };
+            self.systems[s].bodies.push(handle);
+            body.system = Some(s);
+        }
         self.bodies.push(body);
         self.lookup.insert(id.to_raw(), handle);
         self.geometry.push(Some(Geometry {
@@ -966,6 +1244,7 @@ impl PhysicsBackend for Havok17Backend {
     }
 
     fn apply_impulse(&mut self, handle: BodyHandle, impulse: Vec3) {
+        self.wake_pushed(handle);
         if let Some(b) = self.body_mut(handle) {
             let com = b.com;
             b.apply_impulse_at(impulse, com);
@@ -973,18 +1252,21 @@ impl PhysicsBackend for Havok17Backend {
     }
 
     fn apply_impulse_at(&mut self, handle: BodyHandle, impulse: Vec3, point: Vec3) {
+        self.wake_pushed(handle);
         if let Some(b) = self.body_mut(handle) {
             b.apply_impulse_at(impulse, point);
         }
     }
 
     fn apply_angular_impulse(&mut self, handle: BodyHandle, torque_impulse: Vec3) {
+        self.wake_pushed(handle);
         if let Some(b) = self.body_mut(handle) {
             b.apply_angular_impulse(torque_impulse);
         }
     }
 
     fn set_velocity(&mut self, handle: BodyHandle, linear: Vec3, angular: Vec3) {
+        self.wake_pushed(handle);
         if let Some(b) = self.body_mut(handle) {
             if b.motion != MotionType::Static {
                 b.velocity = linear;
@@ -1012,12 +1294,14 @@ impl PhysicsBackend for Havok17Backend {
     }
 
     fn add_force(&mut self, handle: BodyHandle, force: Vec3) {
+        self.wake_pushed(handle);
         if let Some(b) = self.body_mut(handle) {
             b.force += force;
         }
     }
 
     fn add_torque(&mut self, handle: BodyHandle, torque: Vec3) {
+        self.wake_pushed(handle);
         if let Some(b) = self.body_mut(handle) {
             b.torque += torque;
         }
@@ -1034,6 +1318,12 @@ impl PhysicsBackend for Havok17Backend {
     fn step(&mut self, dt: f32) -> StepInfo {
         self.last_dt = dt;
         self.events.clear();
+        // The deactivators run once a frame of two substeps, after the
+        // frame's last actions (ours: the game's pushes of this step are in).
+        if self.deactivation && self.substeps % 2 == 1 {
+            self.run_deactivators();
+        }
+        self.substeps += 1;
         let mut done = 0.0f32;
         let mut pieces = 0;
         let mut complete = true;
@@ -1118,6 +1408,7 @@ impl PhysicsBackend for Havok17Backend {
             }
         }
         self.detect_phantoms();
+        self.clock.advance(dt);
         if let Some(watch) = debug_body() {
             if let Some(b) = self.bodies.get(watch) {
                 let mine: Vec<String> = self
@@ -1380,6 +1671,7 @@ impl PhysicsBackend for Havok17Backend {
         }
         let b = &mut self.bodies[i];
         b.motion = motion;
+        b.active = true;
         if motion != MotionType::Dynamic {
             b.force = Vec3::ZERO;
             b.torque = Vec3::ZERO;
@@ -1389,6 +1681,29 @@ impl PhysicsBackend for Havok17Backend {
             b.angular_velocity = Vec3::ZERO;
         }
         Ok(())
+    }
+
+    fn deactivation_system(&mut self, bodies: &[BodyHandle], scale: f32) {
+        let s = self.systems.len();
+        let mut sys = deactivation::System::new(u32::MAX);
+        sys.thresholds = deactivation::THRESHOLDS.map(|t| t * scale);
+        for &h in bodies {
+            let i = h as usize;
+            let Some(b) = self.bodies.get_mut(i).filter(|b| b.alive) else {
+                continue;
+            };
+            if let Some(old) = b.system {
+                self.systems[old].bodies.retain(|&k| k != i);
+            }
+            b.system = Some(s);
+            sys.bodies.push(i);
+        }
+        self.systems.push(sys);
+    }
+
+    fn is_active(&self, handle: BodyHandle) -> bool {
+        self.body(handle)
+            .is_none_or(|b| b.motion != MotionType::Dynamic || b.active)
     }
 
     fn set_joint_strength(&mut self, handle: JointHandle, strength: f32, friction: f32) {

@@ -36,6 +36,13 @@ pub struct Body {
     pub torque: Vec3,
     pub friction: f32,
     pub restitution: f32,
+    /// `+0x1c` bit 1: whether the body takes part in the simulation now
+    /// ([`super::deactivation`]). A fixed body is never moved either way.
+    pub active: bool,
+    /// The deactivation check's references.
+    pub freeze: super::deactivation::Freeze,
+    /// The robot system the body belongs to (`+0x20`, the count of systems).
+    pub system: Option<usize>,
 }
 
 impl Body {
@@ -49,6 +56,23 @@ impl Body {
     /// Whether the body moves at all (a keyframed body has a velocity).
     pub fn moves(&self) -> bool {
         self.alive && self.motion != MotionType::Static
+    }
+
+    /// Whether the body counts as active for the detector and the solver: a
+    /// dynamic body while it is not deactivated, a keyframed body always, a
+    /// fixed body never.
+    pub fn awake(&self) -> bool {
+        self.alive
+            && match self.motion {
+                MotionType::Static => false,
+                MotionType::Dynamic => self.active,
+                _ => true,
+            }
+    }
+
+    /// A dynamic body the deactivators have frozen.
+    pub fn asleep(&self) -> bool {
+        self.alive && self.motion == MotionType::Dynamic && !self.active
     }
 
     pub fn origin(&self) -> Vec3 {

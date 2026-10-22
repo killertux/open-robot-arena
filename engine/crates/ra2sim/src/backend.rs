@@ -594,6 +594,17 @@ pub trait PhysicsBackend {
     /// when a robot steps into its zone, and `HellRaiser` throttles itself down
     /// again on the way back up. A parked joint is held by the friction, the way
     /// a parked piston is (F8).
+    /// Make `bodies` one deactivation system (havok17, docs/29 section 12t):
+    /// they freeze and wake together, with the default thresholds times
+    /// `scale`. A robot's bodies are one already (its collision group).
+    fn deactivation_system(&mut self, _bodies: &[BodyHandle], _scale: f32) {}
+
+    /// Whether the body is active: not frozen by the backend's deactivation
+    /// (havok17, docs/29 section 12t). Backends without one always say yes.
+    fn is_active(&self, _handle: BodyHandle) -> bool {
+        true
+    }
+
     fn set_joint_strength(&mut self, _handle: JointHandle, _strength: f32, _friction: f32) {}
 
     /// Lock a joint where it is, or release it — the game's `Lock`.
