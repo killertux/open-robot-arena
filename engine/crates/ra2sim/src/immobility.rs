@@ -49,6 +49,15 @@ pub struct Tracker {
 }
 
 impl Tracker {
+    /// A robot's standing warning: the seconds it has sat still and where it stopped (the
+    /// anchor, which is where the HUD's counter hangs, `FUN_00413900` -> `FUN_00412220`).
+    pub fn warning(&self, id: usize) -> Option<(f32, Vec3)> {
+        match self.entries.get(id) {
+            Some(Some(e)) if e.warned => Some((e.time, e.anchor)),
+            _ => None,
+        }
+    }
+
     /// Advance by `dt`; `positions[i]` is `None` for a robot not in state 0.
     pub fn update(&mut self, dt: f32, positions: &[Option<Vec3>]) -> Vec<Event> {
         self.acc += dt;

@@ -912,7 +912,7 @@ impl NetPlay {
             game.tick_sync(dt, || capture(duel));
             let decided = session.matched.take_net_events();
             for event in &decided {
-                let message = event_message(event, &session.matched.duel);
+                let message = event_message(event);
                 game.broadcast_guaranteed(&message);
             }
             if !self.end_sent
@@ -972,7 +972,7 @@ impl NetPlay {
 /// `giBotDamageMessage`, points a `giAddPointsMessage`, the immobility warning
 /// a `giBotImmobileMessage` (with where the robot sits), a robot going out a
 /// `giPlayerOutMessage`.
-pub fn event_message(event: &NetEvent, duel: &Duel) -> Message {
+pub fn event_message(event: &NetEvent) -> Message {
     match event {
         NetEvent::Hit {
             attacker,
@@ -993,20 +993,12 @@ pub fn event_message(event: &NetEvent, duel: &Duel) -> Message {
             points,
             script,
         } => Message::AddPoints(AddPoints::new(*player as u32, *points, [0.0; 3], *script)),
-        NetEvent::Immobile { robot, on } => {
-            let at = duel
-                .robots
-                .get(*robot)
-                .map(|r| r.position(&*duel.physics).to_array())
-                .unwrap_or_default();
-            // The seconds the robot has sat still: the warning is at 10.
-            Message::BotImmobile(BotImmobile::new(
-                *robot as u32,
-                at,
-                *on,
-                if *on { 10.0 } else { 0.0 },
-            ))
-        }
+        NetEvent::Immobile {
+            robot,
+            on,
+            at,
+            seconds,
+        } => Message::BotImmobile(BotImmobile::new(*robot as u32, *at, *on, *seconds)),
         NetEvent::Out { robot, reason } => Message::PlayerOut {
             player: *robot as u32,
             reason: *reason,
@@ -1039,6 +1031,8 @@ pub fn message_event(message: &Message) -> Option<NetEvent> {
         Message::BotImmobile(b) => NetEvent::Immobile {
             robot: b.robot as usize,
             on: b.immobile,
+            at: b.at,
+            seconds: b.seconds(),
         },
         Message::PlayerOut { player, reason } => NetEvent::Out {
             robot: *player as usize,
@@ -1124,7 +1118,12 @@ mod tests {
             robot: 3,
             reason: ra2sim::netevent::out::IMMOBILIZED,
         };
-        let immobile = NetEvent::Immobile { robot: 1, on: true };
+        let immobile = NetEvent::Immobile {
+            robot: 1,
+            on: true,
+            at: [1.0, 0.0, 2.0],
+            seconds: 10.0,
+        };
         for event in [hit, hazard, points, script, out] {
             let message = match &event {
                 NetEvent::Hit {
@@ -1155,7 +1154,7 @@ mod tests {
             let wire = Message::decode(&message.encode()).unwrap();
             assert_eq!(message_event(&wire), Some(event));
         }
-        let wire = Message::BotImmobile(BotImmobile::new(1, [0.0; 3], true, 10.0));
+        let wire = Message::BotImmobile(BotImmobile::new(1, [1.0, 0.0, 2.0], true, 10.0));
         assert_eq!(message_event(&wire), Some(immobile));
         assert_eq!(message_event(&Message::StartCountDown), None);
     }

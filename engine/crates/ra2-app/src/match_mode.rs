@@ -222,6 +222,11 @@ pub struct Session {
     chat_lines: Vec<(String, f32)>,
     /// Entries the player sent (Enter), waiting for the network layer.
     chat_outbox: Vec<String>,
+    /// The `IMMOBILE!` cards: seconds left on each robot's card (`FUN_00418040`, state 2),
+    /// and whether the robot was already immobilized last step.
+    immobile_cards: Vec<(f32, bool)>,
+    /// `immobility_countdown.gib`, loaded on first use.
+    immobile_gib: Option<Gib>,
     /// The pause dialog's widgets, loaded once.
     pub dialog: Gib,
     presentation: Presentation,
@@ -572,6 +577,8 @@ impl Session {
             chat_enabled: false,
             chat_lines: Vec::new(),
             chat_outbox: Vec::new(),
+            immobile_cards: Vec::new(),
+            immobile_gib: None,
             dialog,
             presentation,
             match_sounds: crate::match_sounds::MatchSounds::new(),
@@ -760,6 +767,7 @@ impl Session {
         }
         let before = self.matched.state();
         self.matched.step_with(&inputs);
+        self.step_immobile_cards();
         if before == MatchState::Intro && self.matched.state() != MatchState::Intro {
             // `plus.introComplete()`: the match camera takes over.
             let camera = self.default_camera;
@@ -1064,7 +1072,108 @@ impl Session {
                 .map(|(_, scene)| scene)?
         };
         self.add_damage_numbers(&mut scene);
+        self.add_immobility(&mut scene);
         Ok(scene)
+    }
+
+    /// `FUN_00418040` (state 2) puts the card up when a robot becomes immobilized; the popup
+    /// list (`FUN_00416210`) takes it down 3.0 s later.
+    fn step_immobile_cards(&mut self) {
+        let dt = self.matched.config.dt;
+        let robots = self.matched.duel.robots.len();
+        if self.immobile_cards.len() < robots {
+            self.immobile_cards.resize(robots, (0.0, false));
+        }
+        for (card, robot) in self.immobile_cards.iter_mut().zip(&self.matched.duel.robots) {
+            card.0 = (card.0 - dt).max(0.0);
+            if robot.immobilized && !card.1 {
+                card.0 = hud::IMMOBILE_CARD_SECONDS;
+            }
+            card.1 = robot.immobilized;
+        }
+    }
+
+    /// The immobility warning counters hung over the robots and the `IMMOBILE!` cards over
+    /// their status groups (docs/37 section 12), above the HUD like the original's popups.
+    fn add_immobility(&mut self, scene: &mut UiScene) {
+        let warnings = self.matched.duel.immobility_warnings();
+        let cards: Vec<usize> = self
+            .immobile_cards
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.0 > 0.0)
+            .map(|(i, _)| i)
+            .collect();
+        if warnings.is_empty() && cards.is_empty() {
+            return;
+        }
+        if self.immobile_gib.is_none() {
+            match ra2ui::workshop::load(&self.presentation.ui_root, hud::IMMOBILE_COUNTDOWN) {
+                Ok(gib) => self.immobile_gib = Some(gib),
+                Err(error) => {
+                    eprintln!("immobility hud: {error}");
+                    return;
+                }
+            }
+        }
+        let Some(base) = self.immobile_gib.as_ref() else {
+            return;
+        };
+        let [w, h] = scene.size;
+        let mut overlays: Vec<Gib> = Vec::new();
+        if !warnings.is_empty() {
+            let view_proj = self.matched.duel.view_proj(&self.camera, w, h);
+            for (_, seconds, at) in warnings {
+                let Some(n) = hud::immobile_number(seconds) else {
+                    continue;
+                };
+                let clip = view_proj * at.extend(1.0);
+                if clip.w <= 0.0 {
+                    continue;
+                }
+                let x = (clip.x / clip.w * 0.5 + 0.5) * w as f32;
+                let y = (0.5 - clip.y / clip.w * 0.5) * h as f32;
+                overlays.push(hud::immobile_counter(
+                    base,
+                    n,
+                    [x - 40.0, y - hud::IMMOBILE_COUNTER_RISE],
+                ));
+            }
+        }
+        if !cards.is_empty() {
+            let placed = ra2ui::resolve_with(
+                &self.presentation.hud,
+                self.presentation.layout,
+                Some(self.presentation.assets.faces()),
+            );
+            for robot in cards {
+                let Some(name) = hud::PLAYERS.get(robot) else {
+                    continue;
+                };
+                let Some(group) = placed.iter().find_map(|p| p.find(name)) else {
+                    continue;
+                };
+                if !group.widget.visible() {
+                    continue;
+                }
+                let f = group.frame;
+                overlays.push(hud::immobile_card(
+                    base,
+                    hud::immobile_card_at([f.x, f.y, f.w, f.h]),
+                ));
+            }
+        }
+        for gib in &overlays {
+            let placed = ra2ui::resolve_with(
+                gib,
+                self.presentation.layout,
+                Some(self.presentation.assets.faces()),
+            );
+            let part = self.presentation.assets.scene(&placed, scene.size);
+            scene.quads.extend(part.quads);
+            scene.textures = part.textures;
+            scene.missing.extend(part.missing);
+        }
     }
 
     /// The floating damage numbers (`ArenaManager::DamageDisplay`, docs/37 section 7): text drawn
@@ -1809,6 +1918,89 @@ mod tests {
                 return None;
             }
         }
+    }
+
+    /// Two robots left alone in the Combat Arena, as the live `robots-*` captures: Scout is warned
+    /// at 10 s of stillness with a counter that reads 20 minus the seconds (live: 8, 5, 2 at
+    /// 13.5, 16.5 and 19.5 s), and put out at 20 s with the `IMMOBILE!` card on its status group;
+    /// ALARM, reaching 20 s in the same sample, stays in and wins (`FUN_00418040` returns once the
+    /// match is over).
+    #[test]
+    fn an_idle_robot_shows_the_counter_then_the_card() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bots = ["AI/Team0/Bot0.bot", "AI/Team0/Bot1.bot"];
+        let cfg = MatchConfig::new(
+            arena,
+            GameType::Deathmatch,
+            (0..2)
+                .map(|i| RobotEntry::ai(i, game.join(bots[i]).to_string_lossy().to_string()))
+                .collect(),
+        )
+        .with_duration(Some(180.0));
+        let matched = Match::new(cfg).expect("the match");
+        let mut session = Session::with_match_player(&game, matched).expect("the session");
+        session.set_remote_drive(0, Some(DriveInput::default()));
+        session.set_remote_drive(1, Some(DriveInput::default()));
+        session.set_layout([1024, 768]);
+        session.skip_intro();
+        session.enter_camera(DuelCamera::Static);
+        let mut guard = 0;
+        while session.matched.state() != MatchState::Fight && guard < 6000 {
+            session.step();
+            guard += 1;
+        }
+        assert_eq!(session.matched.state(), MatchState::Fight);
+        let quads = |s: &mut Session| s.scene().expect("scene").quads.len();
+        let until = |s: &mut Session, t: f32| {
+            while s.matched.clock() < t && s.matched.state() == MatchState::Fight {
+                s.step();
+            }
+        };
+        until(&mut session, 5.5);
+        assert!(session.matched.duel.immobility_warnings().is_empty());
+        let plain = quads(&mut session);
+        for (at, expect) in [(13.5, 8), (16.5, 5), (19.5, 2)] {
+            until(&mut session, at);
+            let warnings = session.matched.duel.immobility_warnings();
+            assert_eq!(warnings.len(), 2, "both robots stand still at {at} s");
+            for (_, seconds, _) in &warnings {
+                assert_eq!(hud::immobile_number(*seconds), Some(expect), "at {at} s");
+            }
+        }
+        // `scene()` clones the HUD and hangs one group per warning in the draw list: they only
+        // lift the quad count when the project's art is there.
+        let counters = quads(&mut session);
+        assert!(counters > plain, "the counters draw ({counters} vs {plain})");
+        until(&mut session, 21.05);
+        assert_eq!(session.matched.state(), MatchState::Over);
+        let report = session.matched.report();
+        assert!(report.robots[0].immobilized && !report.robots[1].immobilized);
+        assert_eq!(report.winners, vec![1]);
+        assert!(session.immobile_cards[0].0 > 2.5, "the card is up");
+        assert!(session.immobile_cards[1].0 == 0.0);
+        let with_card = quads(&mut session);
+        assert!(with_card > plain);
+        // 3.0 s later the popup list has taken it down.
+        for _ in 0..(3.1 / session.matched.config.dt) as usize {
+            session.step();
+        }
+        assert!(session.immobile_cards[0].0 == 0.0);
+    }
+
+    #[test]
+    fn the_immobility_counter_and_card_geometry_are_the_binarys() {
+        assert_eq!(hud::immobile_number(10.0), Some(10));
+        assert_eq!(hud::immobile_number(12.0), Some(8));
+        assert_eq!(hud::immobile_number(19.0), Some(1));
+        assert_eq!(hud::immobile_number(19.5), None, "trunc(0.5) is 0: hidden");
+        assert_eq!(hud::immobile_number(20.0), None);
+        // 104 x 32 card centred in the 84 x 64 status group: x - 10, y + 16.
+        assert_eq!(
+            hud::immobile_card_at([11.0, 16.0, 84.0, 64.0]),
+            [1.0, 32.0]
+        );
     }
 
     #[test]

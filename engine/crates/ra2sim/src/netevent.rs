@@ -45,8 +45,14 @@ pub enum NetEvent {
         points: f32,
         script: bool,
     },
-    /// The immobility warning on or off (`giBotImmobileMessage`).
-    Immobile { robot: usize, on: bool },
+    /// The immobility warning on or off (`giBotImmobileMessage`): where the
+    /// robot sits and the seconds it has not moved (the counter's source).
+    Immobile {
+        robot: usize,
+        on: bool,
+        at: [f32; 3],
+        seconds: f32,
+    },
     /// A robot is out (`giPlayerOutMessage`), with an [`out`] reason.
     Out { robot: usize, reason: u32 },
 }

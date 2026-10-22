@@ -507,6 +507,8 @@ pub struct Duel {
     /// begins (`FUN_00412fc0` requires `+0x8e`, "fighting").
     pub immobility_active: bool,
     immobility: crate::immobility::Tracker,
+    /// Joiner: the host's standing immobility warnings, `(seconds, position)` per robot.
+    remote_immobile: Vec<Option<(f32, Vec3)>>,
     /// Network play: which end of the match this duel is (docs/38 §6.1). A
     /// joiner prices nothing itself: its own hits, immobility rule and script
     /// eliminations are discarded and the host's scoring events are applied
@@ -908,6 +910,7 @@ impl Duel {
             impacts: Vec::new(),
             material_contacts: Vec::new(),
             immobility: crate::immobility::Tracker::default(),
+            remote_immobile: Vec::new(),
             net_role: crate::netevent::NetRole::Local,
             net_events: Vec::new(),
             net_applying: false,
@@ -2508,10 +2511,36 @@ impl Duel {
     }
 
     /// Joiner: the host's immobility warning for a robot, as the brains hear it.
-    pub fn apply_remote_immobile(&mut self, robot: usize, on: bool) {
+    ///
+    /// `FUN_004120e0` (docs/38 section 13) stores the message's seconds and position in the
+    /// robot's warning record and flags it; the joiner does not run the rule itself, so the
+    /// counter stays at what the host sent.
+    pub fn apply_remote_immobile(&mut self, robot: usize, on: bool, at: Vec3, seconds: f32) {
+        if self.remote_immobile.len() <= robot {
+            self.remote_immobile.resize(robot + 1, None);
+        }
+        self.remote_immobile[robot] = on.then_some((seconds, at));
         if let Some(ai) = self.script_ai.as_ref() {
             ai.immobility_warning(robot as i32, on);
         }
+    }
+
+    /// The robots with a standing immobility warning, as `(robot, seconds still, where it sits)`:
+    /// the HUD's `IMMOBILITY WARNING` counters (`FUN_00412390`, docs/37). On the host or in a
+    /// local match they come from the rule's trackers (the anchor is where the robot stopped);
+    /// on a joiner from the host's `0x13b` messages.
+    pub fn immobility_warnings(&self) -> Vec<(usize, f32, Vec3)> {
+        if self.net_role == crate::netevent::NetRole::Joiner {
+            return self
+                .remote_immobile
+                .iter()
+                .enumerate()
+                .filter_map(|(i, w)| w.map(|(t, at)| (i, t, at)))
+                .collect();
+        }
+        (0..self.robots.len())
+            .filter_map(|i| self.immobility.warning(i).map(|(t, at)| (i, t, at)))
+            .collect()
     }
 
     /// Take the hits the match has not scored yet.
@@ -2575,6 +2604,16 @@ impl Duel {
             .push(format!("t={:.1}s  {name}: {part} knocked off", self.time));
     }
 
+    /// The point the immobility rule follows: the robot's centre of mass. The live captures
+    /// (`robots-*`) draw the warning counter at the resting centre of mass, 0.26 m above the
+    /// body origin that [`Robot::position`] returns (docs/37 section 12).
+    fn robot_centre(&self, i: usize) -> Vec3 {
+        let r = &self.robots[i];
+        self.physics
+            .center_of_mass(r.body())
+            .unwrap_or_else(|| r.position(&*self.physics))
+    }
+
     /// The immobility rule (`FUN_00412fc0`, block `0x4133b8`), sampled once a
     /// second while the fight is on: a robot that has not left a sqrt(2) m
     /// sphere for 10 s is warned (`ImmobilityWarning(id, 1)` to every brain) and
@@ -2587,15 +2626,26 @@ impl Duel {
             .map(|i| {
                 self.robots[i]
                     .is_alive()
-                    .then(|| self.robots[i].position(&*self.physics))
+                    .then(|| self.robot_centre(i))
             })
             .collect();
+        // `FUN_00418040` returns at once once the match is over (`+0x8f`): when the first
+        // immobilized robot leaves one robot (or team) standing, a robot that reaches 20 s in the
+        // same sample is not put out (live: Scout got the card, ALARM stayed in and won).
+        let mut decided = false;
         for event in self.immobility.update(dt, &positions) {
             match event {
+                crate::immobility::Event::Immobilized(_) if decided => {}
                 crate::immobility::Event::Warning(id, on) => {
                     if self.net_role == crate::netevent::NetRole::Host {
-                        self.net_events
-                            .push(crate::netevent::NetEvent::Immobile { robot: id, on });
+                        let at = self.robot_centre(id);
+                        let seconds = self.immobility.warning(id).map_or(0.0, |(t, _)| t);
+                        self.net_events.push(crate::netevent::NetEvent::Immobile {
+                            robot: id,
+                            on,
+                            at: at.to_array(),
+                            seconds,
+                        });
                     }
                     if let Some(ai) = self.script_ai.as_ref() {
                         ai.immobility_warning(id as i32, on);
@@ -2603,6 +2653,15 @@ impl Duel {
                 }
                 crate::immobility::Event::Immobilized(id) => {
                     self.robots[id].immobilized = true;
+                    let mut teams: Vec<usize> = self
+                        .robots
+                        .iter()
+                        .filter(|r| r.is_alive())
+                        .map(|r| r.team)
+                        .collect();
+                    teams.sort_unstable();
+                    teams.dedup();
+                    decided = teams.len() <= 1;
                     if self.net_role == crate::netevent::NetRole::Host {
                         self.net_events.push(crate::netevent::NetEvent::Out {
                             robot: id,
