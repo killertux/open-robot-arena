@@ -560,8 +560,9 @@ reported; kept points die as above, are reported with the *new* normal and
 keeps the new point out of the manifold.
 
 **Mesh x mesh** (`FUN_0054a2a0` fixed mesh, `FUN_00549d00` two moving ones):
-every pair of triangles within the tolerance (moving pairs' trees are queried
-with half of it) gives the midpoint of their closest points
+every pair of triangles within the tolerance (two moving meshes' trees are
+walked together with each box grown by half of it, a whole tolerance between
+them: section 12s) gives the midpoint of their closest points
 (`FUN_0055e950` → `FUN_00561410`; `< 1e-5` is an overlap), unless a point
 already in the detection's list lies within `sqrt(0.001)` tolerances; no
 manifold.
@@ -2827,3 +2828,142 @@ re-run per pass (unused by our sliders); the hazards' sliders still use our
 velocity motor and our own arrival lock (not the sticky lock above); the
 placing code of the spawn; the initially overlapping pair; the award scene's
 Atom Smasher creep.
+
+### 12s. Two robots placed against live; the mesh x mesh trees' tolerance (fx/fork-side)
+
+Section 12r's single-robot tips agree with live, yet in fights our ALARM tipped
+about twice as often and went over more (box, 12 runs of 46 s: 21 tips, 7 to
+the back, 12 of them rolls, seven at 4.6-5.6 rad/s; live 7 tips in 277 s, one
+to the back, one roll at 2 rad/s). This round places *both* robots.
+
+**The experiment.** New agent `frida/ra2_twobody.js` with
+`tools/oracle/capture_twobody.py` (after `capture_tipab.py setup`: box,
+hazards off, AIs neutered): at the head of `World::stepTo` both robots' bodies
+are held 1 m above their rest poses for 30 substeps, then written at poses the
+script computes (ALARM's rest pose moved to the arena's centre; the Scout
+turned about the vertical to face one of ALARM's faces, its fork arm's lowest
+front edge `gap` m from it, `lat` along it, `yaw` off square, every body of it
+at `speed`), with the throttles set through the AIs before the hold. Every
+substep the rows give every body as the resolver gets it (`B`, with the
+`+0x1c` flags in the second set) and as the resolver leaves it (`V`: with `B`,
+each body's contact impulse of the piece), the contacts (`R`), the pieces
+(`A`), the wheel records (`G`), the weapons' settings (`M` hinge
+`SetPowerSettings`, `F` prismatic pushes) and the components' ticks with their
+frame time (`TM`/`TP`). `examples/twoprobe.rs` replays a trial in ours: the
+live placed state (`X` row; each chassis at its live pose, the other bodies
+carried rigidly with it, every body at the live velocities), the throttles
+from the start of the hold, the live ticks with their times
+(`Robot::set_tick_schedule`, a diagnostic hook: live frames are irregular,
+0.006-0.033 s, and two ticks may fall between two substeps) and every fire the
+live rows show. The neutered AIs still fire on their weapon zones (in the first set
+the Scout's fork fired in all 20 trials, in 9 with no press from the script,
+and ALARM's hammer in 5, twice unasked), so the replay takes the fires from
+the `M`/`F` rows, not the grid.
+The scratch scripts that build the replay and compare are
+`tools/oracle/twobody/` (`mkours.py`, `cmp.py`, `detail.py`).
+
+New live captures (one session on `:7`, prefix sha256 checked before and
+after; manifest rows in `manifest-additions-2026-10-21-fork-side.tsv`):
+`twobody-scout-alarm-box__live__000` (20 trials: the Scout driving into
+ALARM's side at 1-3 m/s at 0.05 m, at three offsets and both sides, already
+under it, coasting, head-on with both driving, the hammer fired onto the
+Scout at three gaps, from behind) and `__001` (17 trials: gap 0.1, approaches
+20-30 degrees off square, ALARM driving or reversing across the fork, a lift
+of 0.05, a 10 s rest).
+
+**The first divergence: the fork loses ALARM's side edge.** In the first set
+live ALARM is lifted on the fork and comes back onto its wheels in 19 of 20
+trials (lowest `up.y` 0.62-0.85 in the side trials; the one exception is the
+head-on trial with both driving, -0.16 in both engines); ours rolled it onto
+its back in 15 (11 of them stayed there), at up to 6.7 rad/s where live
+peaked at 2-4. Step by step (trial 0, the Scout at 1 m/s into ALARM's +x
+side): the fork tip reaches the side edge at substep 5. Live the resolver gets
+5-9 points between the fork arm and ALARM's chassis every substep from there
+on, at 0.055-0.098 m, and pushes 20-110 N·s a substep; ours got two, then at
+substeps 7-11 none, so the fork swung in unloaded and struck the chassis at
+0.013-0.035 m with 180-220 N·s in one piece, and ALARM's chassis rose at
+4.7 m/s where live rose at 1.5. Counting every pair of triangles within the
+tolerance, ours had 12-20 such pairs at those substeps and its tree query let
+none of them through.
+
+**Two moving meshes' trees are walked with each box grown by half the
+tolerance (recovered).** The fork arm and ALARM's chassis are both meshes on
+moving bodies, so the pair goes to `FUN_00549d00`, which walks the two
+bounding-box trees together (`FUN_00550100`) and passes `0.5 · tol` to the
+oriented-box overlap test `FUN_00557870`; that test adds the margin to the
+half extents of *both* boxes before every separating axis, so two boxes are
+dropped only when more than a whole tolerance separates them. Ours grew one
+side's box by half the tolerance in all, so any pair of triangles more than
+0.05 m apart along an axis was never measured. Since the separation along an
+axis never exceeds the distance, the original's walk keeps every pair of
+triangles within the tolerance, and so does ours now (each triangle's box
+grown by the whole tolerance against the other mesh's tree;
+`Havok17Backend::mesh_mesh`); test
+`havok17::tests::two_moving_meshes_meet_within_a_whole_tolerance` (two slabs
+whose edges are 0.08 m apart on a diagonal, their boxes 0.057 m apart on two
+axes). Section 10's "half of it" read the call's argument, not what the test
+does with it. A fixed mesh (the arena) was already queried with the whole
+tolerance.
+
+| replays of the live placements (ALARM's chassis) | live | ours before | ours after |
+|---|---|---|---|
+| set 1: on its back at some point / at the end (20) | 1 / 1 | 15 / 11 | 3 / 2 |
+| set 1: mean of the trials' peak \|ω\| | 2.6 rad/s | 5.1 | 3.4 |
+| set 1: both chassis' end centres from live, median (40) | | 2.42 m | 1.39 m |
+| set 2: lowest `up.y` (17) | ≥ 0.99 | ≥ 0.93 | ≥ 0.90 |
+| set 2: both chassis' end centres from live, median (34) | | 1.81 m | 0.27 m |
+
+In set 2 the Scout only pushes ALARM (the fork does not fire at 0.1 m), and
+the pushes now end where live's do: the pair's points slid off and came back
+before, so the Scout drove 1-2 m further. In set 1 the first 20 substeps of
+trial 0 follow live to 2-6 cm with the same points and normals; the trials
+still part later where the fork's stroke meets ALARM a substep earlier or
+later (ours fires within a substep of live's tick, and a fork that starts
+loaded or not then differs).
+
+**The robots deactivate (verified live; not modelled).** The coordinator's
+lead: in `__001` every body of both robots shows `+0x1c` = 2 (active) except
+for one substep (the chassis) or two (wheels, fork, rod) about every 24
+substeps (0.4 s) whenever a robot is slow, at rest or creeping at up to
+0.4 m/s and 0.6 rad/s on the chassis (wheels spinning at 1-4 rad/s): flag 0,
+the body's centre unchanged from the substep before, its velocity kept, and
+active again at the next substep (the robot's own actions or contacts wake
+it). During the hold (written still) it happens too. So the original's
+deactivator freezes a slow robot for a substep in every 24; ours never does.
+It acts only on slow robots, so it cannot be what tipped ALARM (4-6 rad/s); a
+10 s rest of both robots (`__001` trial 16) yaws the Scout +0.066 rad live and
++0.034 ours, ALARM -0.017 live and +0.029 ours (the rest creep of the award
+scene's Atom Smasher has its sign flipped the same way). The criterion (and
+whether the freeze is what turns the creep) is not recovered.
+
+**Validation.** Before = `fidelity` 1b5ac27 built from a clean tree (it
+reproduces §12r's after column to the digit), after = this branch.
+`FIDTRACE_WARMUP` ensembles, 24 runs each, counted = `>= 10` on the other
+robot, robot hits only, mean (total), mean length, full-length runs:
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6) | 20.0 (139) sd 15 / 3.6, 94 s, 10/24 | 31.8 (111) sd 25 / 5.6, 85 s, 7/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 (2 of 13, §12j) | 15/24 | 8/24 |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 5.7 (99) / 0.9, 58 s, 2/24 | 4.2 (75) / 0.9, 53 s, 1/24 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 71.2 (295) sd 36 / 3.9, 97 s, 16/24 | 73.0 (291) sd 33 / 4.0, 99 s, 14/24 |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 16.5 (64) sd 17 / 2.6, 78 s, 5/24 | 18.7 (88) sd 16 / 3.5, 84 s, 8/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | | 18/24 | 12/24 |
+
+ALARM's tips in box fights (`fightprobe`, 12 runs of 46 s, `up.y` through
+0.5; live `fightcontacts-...__live__000..006`, 277 s): live 7, one to the
+back, one roll; before 21, 7 to the back, 12 rolls (seven at 4.6-5.6 rad/s);
+after 16 (8.0 per 277 s), 3 to the back, 4 rolls at 1.0-3.1 rad/s, all with
+the Scout in contact. AI suite (ten pairings, warmup 0): 10/10 deal damage
+before and after; the pairings with two robots' meshes meeting change
+(box Scout v ALARM 13/45 → 4/12, Octagon 5/21 → 1/19, Bushido v Devil 19/7 →
+31/18, Bear v Tornado 54/54 → 49/61, Grog v Boxer hill 12/18 → 13/23, Razor v
+FlapJack 2/1 → 4/1, Sentinel v Wide Load 7/102 → 5/100), the other three are
+the same to the hit. The box fight's ALARM hits move by about one standard
+error toward live and its falls halve; the other ensembles stay within their
+scatter.
+
+**Still open.** The deactivator's criterion for robots (above); why ours
+fires the fork's stroke a substep apart from live when the tick schedules
+agree (the replay aligns the presses by the fork's onset); the award scene's
+creep.
