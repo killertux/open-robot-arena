@@ -16,6 +16,7 @@ pub mod havok17;
 pub mod hazards;
 pub mod immobility;
 pub mod jolt;
+pub mod lcg;
 pub mod massprops;
 pub mod r#match;
 pub mod montage;
@@ -37,6 +38,7 @@ pub use career::{
 pub use combat::{CombatConfig, Impact};
 pub use duel::{BotSetup, Debris, Duel, DuelCamera};
 pub use jolt::JoltBackend;
+pub use lcg::Lcg;
 pub use r#match::{
     countdown_number, event_num_bots, ComponentDamage, Controller, GameType, Match, MatchConfig,
     MatchReport, MatchState, RobotEntry, RobotReport, WinReason, COUNTDOWN_END_SECONDS,

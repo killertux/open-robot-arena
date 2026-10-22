@@ -2646,6 +2646,14 @@ impl Duel {
                 model: self.body_model(d.body),
             });
         }
+        groups.extend(self.robot_groups());
+        groups
+    }
+
+    /// The robots' draw groups alone (one per attached component), for a scene
+    /// that draws its own arena around the simulated robots.
+    pub fn robot_groups(&self) -> Vec<RenderGroup<'_>> {
+        let mut groups = Vec::new();
         for r in &self.robots {
             if r.parts[0].alive {
                 let worlds = r.component_worlds(&*self.physics);

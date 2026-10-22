@@ -25,16 +25,26 @@
 //! 0.27, -1.89), so an `AddXtra` needs no placement of its own, and the
 //! window's class overrides no per-frame function (its vtable `0x6a73ac` holds
 //! only the destructor `0x46e110` of its own), the script's `Tick` only counts
-//! a timer: the prize does not turn. The scene is therefore a still. Lighting
+//! a timer: the prize does not turn. The scene is a still but for the team's
+//! robot, a free physics body (see [`PrizeScene::advance`]). Lighting
 //! is the arena model's two omni lights, read by the renderer from the first
 //! batch.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use ra2_render::{DrawItem, Image, RenderGroup, Renderer};
 use ra2sim::camera::{SceneCamera, SceneCameraKind};
+use ra2sim::{BotSetup, DriveInput, Duel};
+
+/// The physics step of the standing robot (the duel's own, 60 Hz).
+const STEP: f32 = 1.0 / 60.0;
+/// How much higher the original drops the pad robot from than the duel's own
+/// spawn (docs/36 section 9.23): live, the chassis starts 0.226 m above where
+/// it rests, ours 0.104 m (the same measure; the match spawn is lower by about
+/// as much, which is open).
+const SPAWN_LIFT: f32 = 0.122;
 
 /// `Arenas/event_results.py`: `AddStaticCamera("fixed cam", ...)`.
 pub const CAMERA_POSITION: [f32; 3] = [0.0, 3.95, -11.88];
@@ -47,9 +57,11 @@ pub const CAMERA_FOV: f32 = 45.0 * 0.015;
 pub struct PrizeScene {
     arena: Vec<DrawItem>,
     prize: Vec<DrawItem>,
-    /// The team's robot on the winner's pad, with its world transform.
-    robot: Vec<DrawItem>,
-    robot_world: Mat4,
+    /// The team's robot on the winner's pad: a free body of the running arena
+    /// (see [`PrizeScene::advance`]).
+    duel: Option<Box<Duel>>,
+    /// Wall-clock seconds not yet stepped.
+    pending: f32,
     camera: SceneCamera,
 }
 
@@ -87,17 +99,40 @@ impl PrizeScene {
         camera.position = glam::Vec3::from(CAMERA_POSITION);
         camera.rotation = [CAMERA_ROTATION[0], CAMERA_ROTATION[1], 0.0];
         camera.fov = CAMERA_FOV;
-        let (robot_items, robot_world) = match robot {
-            Some(path) => place_robot(&script, &arena, path),
-            None => (Vec::new(), Mat4::IDENTITY),
-        };
+        let duel = robot.and_then(|path| drop_robot(&script, path));
         Ok(PrizeScene {
             arena,
             prize: prize_items,
-            robot: robot_items,
-            robot_world,
+            duel,
+            pending: 0.0,
             camera,
         })
+    }
+
+    /// Advance the pad robot by wall-clock seconds. The robot is a player of the
+    /// running `Event Results` arena (`FUN_0046e710`); nothing drives it, so it
+    /// drops onto the pad and then rocks on its free wheels, its yaw wandering
+    /// by a few hundredths of a radian a minute: live, 50 s samples of the
+    /// award robot's heading moved by 0.0 to 0.1 rad (docs/36 section 9.23).
+    pub fn advance(&mut self, seconds: f32) {
+        let Some(duel) = self.duel.as_mut() else {
+            return;
+        };
+        self.pending += seconds.clamp(0.0, 0.5);
+        while self.pending >= STEP {
+            self.pending -= STEP;
+            duel.step_direct(&[DriveInput::default()], STEP);
+        }
+    }
+
+    /// The robot's chassis heading (`atan2(x, z)` of its forward axis), as
+    /// `plus.getHeading`, and its position; `None` without a robot.
+    pub fn robot_pose(&self) -> Option<(f32, Vec3)> {
+        let duel = self.duel.as_ref()?;
+        let robot = duel.robots.first()?;
+        let state = duel.physics.state(robot.body())?;
+        let forward = state.rotation * Vec3::Z;
+        Some((forward.x.atan2(forward.z), state.position))
     }
 
     /// Whether a prize model is on the spot.
@@ -119,7 +154,7 @@ impl PrizeScene {
         renderer.set_background([0.0, 0.0, 0.0]);
         let view_proj = self.camera.view_proj(w as f32 / h as f32);
         let view_proj = ra2_render::d3d_pixel_centers(view_proj, w, h);
-        let groups = [
+        let mut groups = vec![
             RenderGroup {
                 items: &self.arena,
                 model: Mat4::IDENTITY,
@@ -128,11 +163,10 @@ impl PrizeScene {
                 items: &self.prize,
                 model: Mat4::IDENTITY,
             },
-            RenderGroup {
-                items: &self.robot,
-                model: self.robot_world,
-            },
         ];
+        if let Some(duel) = &self.duel {
+            groups.extend(duel.robot_groups());
+        }
         renderer
             .render_groups_to(&groups, view_proj, color, depth, format)
             .map_err(|e| e.to_string())
@@ -157,57 +191,94 @@ fn set_banner(arena: &mut [DrawItem], game: &Path, logo: Arc<Image>) {
     }
 }
 
-/// The team's robot standing on the arena's first start point: `FUN_0046e710`
+/// The team's robot dropped onto the arena's first start point: `FUN_0046e710`
 /// adds the entered robot as a real player of the running arena (the match's
 /// own spawn, `FUN_00439be0`), so it stands at `startpoint` 0 facing along the
-/// point's Z axis. The robot is dropped onto the floor under that point.
-fn place_robot(script: &Path, arena: &[DrawItem], bot: &Path) -> (Vec<DrawItem>, Mat4) {
-    let items = match ra2_render::collect_bot(&bot.to_string_lossy()) {
-        Ok(items) => items,
-        Err(_) => return (Vec::new(), Mat4::IDENTITY),
-    };
-    let starts = ra2_render::start_points(&script.to_string_lossy()).unwrap_or_default();
-    let Some((position, facing)) = starts.first().copied() else {
-        return (Vec::new(), Mat4::IDENTITY);
-    };
-    let floor = floor_under(arena, position).unwrap_or(0.0);
-    let (min, _) = ra2_render::bounds(&items);
-    let yaw = facing.x.atan2(facing.z);
-    let world = Mat4::from_translation(glam::Vec3::new(position.x, floor - min.y, position.z))
-        * Mat4::from_rotation_y(yaw);
-    (items, world)
+/// point's Z axis (live: heading 2.7925 = 160 degrees at the first frame) and
+/// then lives in the arena's physics. `None` when the robot cannot be built.
+fn drop_robot(script: &Path, bot: &Path) -> Option<Box<Duel>> {
+    let mut duel = Duel::new(
+        &script.to_string_lossy(),
+        &[BotSetup {
+            path: bot.to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        }],
+    )
+    .ok()?;
+    let bodies: Vec<_> = duel.robots.first()?.parts.iter().map(|p| p.body).collect();
+    for body in bodies {
+        let state = duel.physics.state(body)?;
+        duel.physics.set_transform(
+            body,
+            state.position + Vec3::new(0.0, SPAWN_LIFT, 0.0),
+            state.rotation,
+        );
+    }
+    Some(Box::new(duel))
 }
 
-/// The highest arena surface at or below `point` (a downward ray on the arena's
-/// triangles).
-fn floor_under(arena: &[DrawItem], point: glam::Vec3) -> Option<f32> {
-    let mut best: Option<f32> = None;
-    for item in arena {
-        for tri in item.vertices.as_chunks::<3>().0 {
-            let a = glam::Vec3::from(tri[0].pos);
-            let b = glam::Vec3::from(tri[1].pos);
-            let c = glam::Vec3::from(tri[2].pos);
-            let (p, q, r) = (
-                glam::Vec2::new(a.x, a.z),
-                glam::Vec2::new(b.x, b.z),
-                glam::Vec2::new(c.x, c.z),
-            );
-            let x = glam::Vec2::new(point.x, point.z);
-            let area = (q - p).perp_dot(r - p);
-            if area.abs() < 1e-9 {
-                continue;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn game_dir() -> Option<PathBuf> {
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            let candidate = dir.join("local/game");
+            if candidate.is_dir() {
+                return Some(candidate);
             }
-            let u = (q - x).perp_dot(r - x) / area;
-            let v = (r - x).perp_dot(p - x) / area;
-            let w = 1.0 - u - v;
-            if u < 0.0 || v < 0.0 || w < 0.0 {
-                continue;
-            }
-            let y = u * a.y + v * b.y + w * c.y;
-            if y <= point.y + 0.01 && best.is_none_or(|m| y > m) {
-                best = Some(y);
+            if !dir.pop() {
+                return None;
             }
         }
     }
-    best
+
+    /// Live (docs/36 section 9.23): the pad robot starts at the start point's
+    /// heading (2.7925 rad, 160 degrees), falls onto the pad about 0.22 m and
+    /// settles; nothing drives it, so it creeps on its free wheels: live the
+    /// heading of C.R.U.S.H. moved by 0.0 to 0.1 rad in 50 s and Atom Smasher's by
+    /// -0.0145 rad/s steadily. It never turns fast and stays on the pad.
+    #[test]
+    fn the_award_robot_drops_settles_and_creeps() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let bot = game.join("Robot Designs/XTRA_Atom Smasher.bot");
+        if !bot.is_file() {
+            return;
+        }
+        let mut scene = PrizeScene::load(&game, "Arenas\\event_results\\prizes", "", Some(&bot))
+            .expect("the scene loads");
+        let (heading, start) = scene.robot_pose().expect("a robot is on the pad");
+        assert!((heading - 2.7925).abs() < 0.001, "start heading {heading}");
+        for _ in 0..180 {
+            scene.advance(1.0 / 60.0);
+        }
+        let (_, rest) = scene.robot_pose().unwrap();
+        assert!(
+            start.y - rest.y > 0.15,
+            "it drops about 0.22 m: {} -> {}",
+            start.y,
+            rest.y
+        );
+        let before = scene.robot_pose().unwrap().0;
+        let seconds = 30;
+        for _ in 0..(seconds * 60) {
+            scene.advance(1.0 / 60.0);
+        }
+        // The turn over the window, wrapped (the heading sits near pi).
+        let turned = (scene.robot_pose().unwrap().0 - before + std::f32::consts::PI)
+            .rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
+        let creep = turned.abs() / seconds as f32;
+        assert!(creep < 0.03, "it creeps by {creep} rad/s at most");
+        let (_, end) = scene.robot_pose().unwrap();
+        assert!((end.y - rest.y).abs() < 0.05, "it stays on the pad");
+        assert!(
+            (Vec3::new(end.x, 0.0, end.z) - Vec3::new(rest.x, 0.0, rest.z)).length() < 0.5,
+            "it stays on the spot"
+        );
+    }
 }

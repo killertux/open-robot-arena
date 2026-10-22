@@ -50,6 +50,7 @@ use std::path::{Path, PathBuf};
 use ra2fmt::event::Event;
 use ra2fmt::team::{self, Team, TeamTable};
 
+use crate::lcg::Lcg;
 use crate::r#match::MatchReport;
 
 /// The sidecar's file name under `<game>/Teams/`.
@@ -159,10 +160,17 @@ impl BracketStatus {
 /// * `Events.txt`'s settings line carries that bots-per-match value: every
 ///   four-tier event has setting 2, every two-tier event has setting 4.
 ///
-/// The original re-draws the next round's field when the player advances
-/// (`FUN_0046c830`), drawing each non-player slot from the fifteen AI teams
-/// with `FUN_00419190(0xf)`; this model does the same with an explicit,
-/// deterministic seed. Duplicates are possible in both.
+/// The field is the original's, drawn from the engine LCG ([`Lcg`]): the bracket
+/// is built in one go (`FUN_004695a0`: for each round, every slot but match 0's
+/// first is `FUN_00419190(15)`, redrawn while the team is already in that
+/// round's list), and when the player wins, the next round's field is the
+/// winners of this round's matches (`FUN_0046c830`/`FUN_0046cde0`: slot 0 is the
+/// player, slot `k` is entrant `FUN_00419190(bots)` of match `k`). Live (docs/36
+/// section 9.23) the first draw of the Blade Tournament bracket from state
+/// 4037340146 gave the 16 teams the screen showed, and the three winner draws
+/// after round 1 the three opponents of the final. The state a session reaches
+/// the bracket with depends on the clock and on every draw the effects made
+/// before, so `seed` is explicit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventBracket {
     /// The event's `Events.txt` index.
@@ -175,8 +183,10 @@ pub struct EventBracket {
     pub rounds: usize,
     /// The zero-based round the player is in.
     pub round: usize,
-    /// The draw's seed; the original's RNG/seed are not recovered.
+    /// The engine LCG state the bracket was drawn from ([`Lcg`]).
     pub seed: u64,
+    /// The state now: after the creation draws, and after each round's winners.
+    lcg: Lcg,
     pub status: BracketStatus,
     /// The current round's field. `opponents` is slot 1 onward of the player's
     /// match (match 0), i.e. the next bots to beat.
@@ -202,6 +212,7 @@ impl EventBracket {
             rounds,
             round: 0,
             seed,
+            lcg: Lcg(seed as u32),
             status: BracketStatus::Playing,
             current: BracketRound {
                 matches: Vec::new(),
@@ -210,8 +221,23 @@ impl EventBracket {
             results: Vec::new(),
             champion: None,
         };
-        bracket.draw_round();
+        bracket.draw_field();
         Ok(bracket)
+    }
+
+    /// The engine state after the draws made so far.
+    pub fn lcg_state(&self) -> u32 {
+        self.lcg.0
+    }
+
+    /// Replay the advancement to `round` (a reloaded bracket): the winner draws
+    /// do not depend on how the player fared.
+    pub fn replay_to(&mut self, round: usize) {
+        while self.round < round && self.round + 1 < self.rounds {
+            self.round += 1;
+            self.advance_field(true);
+        }
+        self.round = round;
     }
 
     /// The event's round label: `"Final Match"` in the last round, `"Round N"`
@@ -235,44 +261,88 @@ impl EventBracket {
         (self.entrants / divisor.max(1)).max(1) / self.bots_per_match.max(1)
     }
 
-    /// Draw the current round's field. Match 0, slot 0 is the player; every
-    /// other slot is `FUN_00419190(0xf) % 15`, with repeats (the original does
-    /// not de-duplicate within a match). The draw is seeded by the bracket
-    /// seed, the event and the round, so a replay is reproducible.
-    fn draw_round(&mut self) {
-        let matches = self.matches_in_round(self.round);
-        let mut rng = RoundRng::new(self.seed, self.event, self.round);
-        let mut round = BracketRound {
-            matches: Vec::with_capacity(matches),
-        };
-        // `FUN_004695a0`: every slot but match 0's first (the player) is
-        // drawn again (`FUN_00419190`) while the team is already in this
-        // round's list (`FUN_005014d0`), so a round's field has no repeats.
-        let mut drawn: Vec<usize> = Vec::new();
-        for m in 0..matches {
-            let mut entrants = Vec::with_capacity(self.bots_per_match);
-            for slot in 0..self.bots_per_match {
-                if m == 0 && slot == 0 {
-                    entrants.push(Entrant::Player);
-                } else {
-                    let mut team = (rng.next() as usize) % BRACKET_AI_TEAMS;
-                    if drawn.len() < BRACKET_AI_TEAMS {
-                        while drawn.contains(&team) {
-                            team = (rng.next() as usize) % BRACKET_AI_TEAMS;
-                        }
+    /// `FUN_004695a0`: draw the whole bracket from the engine LCG. Every round
+    /// has `16 / bots^(round + 1)` matches of `bots` slots; every slot but match
+    /// 0's first is `FUN_00419190(15)`, redrawn while the team is in this round's
+    /// list (`FUN_005014d0`; the list starts empty each round). Only round 0's
+    /// field is kept: the later rounds' slots are overwritten with the winners
+    /// ([`EventBracket::advance_field`]), but their draws are made, so the state
+    /// ends where the original's does. Live: 46 draws for the Blade Tournament
+    /// (15 + 3 accepted, 28 repeats).
+    fn draw_field(&mut self) {
+        let mut first = None;
+        for round in 0..self.rounds {
+            let matches = self.matches_in_round(round);
+            let mut drawn: Vec<usize> = Vec::new();
+            let mut field = BracketRound {
+                matches: Vec::with_capacity(matches),
+            };
+            for m in 0..matches {
+                let mut entrants = Vec::with_capacity(self.bots_per_match);
+                for slot in 0..self.bots_per_match {
+                    if m == 0 && slot == 0 {
+                        entrants.push(Entrant::Player);
+                        continue;
+                    }
+                    let mut team = self.lcg.range(BRACKET_AI_TEAMS);
+                    // The original loops until the team is new; a field wider
+                    // than the AI table (a mod's) would never end, so it stops.
+                    while drawn.len() < BRACKET_AI_TEAMS && drawn.contains(&team) {
+                        team = self.lcg.range(BRACKET_AI_TEAMS);
                     }
                     drawn.push(team);
                     entrants.push(Entrant::Ai(team));
                 }
+                field.matches.push(BracketMatch { entrants });
             }
-            round.matches.push(BracketMatch { entrants });
+            if first.is_none() {
+                first = Some(field);
+            }
         }
-        self.opponents = round
+        self.current = first.unwrap_or(BracketRound {
+            matches: Vec::new(),
+        });
+        self.refresh_opponents();
+    }
+
+    /// `FUN_0046c830`: the next round's field when the round is over. The new
+    /// round has one slot per match of this one; slot 0 is the player while the
+    /// player is alive (no draw), every other slot `k` is entrant
+    /// `FUN_00419190(bots)` of this round's match `k` (`FUN_0046cde0`). With the
+    /// player out (`player_alive` false), slot 0 is a winner of match 0 other than
+    /// the player: redrawn while it is entrant 0 (`FUN_0046cde0`'s second mode;
+    /// from the code, not seen live).
+    fn advance_field(&mut self, player_alive: bool) {
+        let bots = self.bots_per_match;
+        let winners: Vec<Entrant> = (0..self.current.matches.len())
+            .map(|k| {
+                if k == 0 && player_alive {
+                    return Entrant::Player;
+                }
+                let mut pick = self.lcg.range(bots);
+                while k == 0 && pick == 0 && bots > 1 {
+                    pick = self.lcg.range(bots);
+                }
+                self.current.matches[k].entrants[pick]
+            })
+            .collect();
+        let matches = winners
+            .chunks(bots.max(1))
+            .map(|c| BracketMatch {
+                entrants: c.to_vec(),
+            })
+            .collect();
+        self.current = BracketRound { matches };
+        self.refresh_opponents();
+    }
+
+    fn refresh_opponents(&mut self) {
+        self.opponents = self
+            .current
             .matches
             .first()
             .map(|m| m.entrants.iter().skip(1).copied().collect())
             .unwrap_or_default();
-        self.current = round;
     }
 
     /// Replace the current round's draw with a saved field. The saved
@@ -320,7 +390,7 @@ impl EventBracket {
         for round in first..self.rounds {
             let saved_round = self.round;
             self.round = round;
-            self.draw_round();
+            self.advance_field(false);
             for m in &self.current.matches {
                 for entrant in &m.entrants {
                     if let Entrant::Ai(slot) = entrant {
@@ -348,9 +418,8 @@ impl EventBracket {
             }
             self.round = saved_round;
         }
-        let mut rng = RoundRng::new(self.seed ^ 0x5eed, self.event, self.rounds);
         if !finalists.is_empty() {
-            let champion = finalists[rng.next() as usize % finalists.len()];
+            let champion = finalists[self.lcg.range(finalists.len())];
             self.champion = Some(Entrant::Ai(champion));
             if champion < league.len() {
                 // The final winner's extra share (`FUN_0046ca90`'s last
@@ -392,27 +461,6 @@ pub fn event_shape(event: &Event) -> Result<(usize, usize), String> {
         _ => 4,
     });
     Ok((rounds, bots))
-}
-
-/// A small deterministic PRNG for the draw. The original uses `FUN_00419190`;
-/// its algorithm and seed were not recovered, so the seed is explicit config.
-struct RoundRng(u64);
-
-impl RoundRng {
-    fn new(seed: u64, event: usize, round: usize) -> Self {
-        let mixed = seed
-            ^ ((event as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15))
-            ^ ((round as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9));
-        RoundRng(mixed | 1)
-    }
-
-    fn next(&mut self) -> u32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        (self.0 >> 33) as u32
-    }
 }
 
 /// The engine-LCG state (`0x726d58`) whose nine draws give the season-1 schedule the
@@ -925,7 +973,11 @@ impl Career {
             .events
             .get(event)
             .ok_or_else(|| format!("event {event} is not in Events.txt"))?;
-        self.bracket = Some(EventBracket::new(event, data, self.seed)?);
+        let bracket = EventBracket::new(event, data, self.seed)?;
+        // The session's engine state moves on with the draws, so the next
+        // event's bracket is another one.
+        self.seed = u64::from(bracket.lcg_state());
+        self.bracket = Some(bracket);
         self.phase = SeasonPhase::InEvent { event };
         self.rounds_won = 0;
         self.rounds_lost = 0;
@@ -1283,7 +1335,7 @@ impl Career {
                     bracket.champion = Some(Entrant::Player);
                     (true, bracket.champion, Vec::new())
                 } else {
-                    bracket.draw_round();
+                    bracket.advance_field(true);
                     (false, None, bracket.opponents.clone())
                 }
             } else {
@@ -1957,7 +2009,7 @@ impl Career {
                 bracket.entrants = entrants;
                 bracket.bots_per_match = bots;
                 bracket.rounds = rounds;
-                bracket.round = round;
+                bracket.replay_to(round);
                 bracket.status = match status.as_str() {
                     "playing" => BracketStatus::Playing,
                     "eliminated" => BracketStatus::Eliminated { round },
@@ -1966,9 +2018,7 @@ impl Career {
                 };
                 bracket.champion = champion;
                 bracket.results = bracket_results.unwrap_or_default();
-                if round < rounds {
-                    bracket.draw_round();
-                } else {
+                if round >= rounds {
                     bracket.current = BracketRound {
                         matches: Vec::new(),
                     };
@@ -2600,6 +2650,119 @@ mod tests {
         assert_eq!(events.iter().filter(|e| e.tiers.len() == 2).count(), 11);
     }
 
+    /// The bracket the original drew live (docs/36 section 9.23): the engine
+    /// state set to 4037340146 before "Enter Event!" on the Blade Tournament gave
+    /// 46 draws (15 + 3 accepted, 28 repeats) and the 16 teams the screen showed;
+    /// after round 1 the three winner draws (the states 3422776833, 1052791974,
+    /// 4027764455 followed) picked the final's opponents High Voltage (8),
+    /// Prehistoric (1) and The Scrappers (14).
+    #[test]
+    fn the_engine_lcg_draws_the_bracket_the_original_drew_live() {
+        let Some(game) = game_dir() else { return };
+        let text = ra2fmt::event::read(&game.join("Events.txt")).unwrap();
+        let events = ra2fmt::event::parse(&text).unwrap();
+        let blade = events
+            .iter()
+            .position(|e| e.name.to_ascii_lowercase().contains("blade"))
+            .expect("the Blade Tournament");
+        let mut bracket = EventBracket::new(blade, &events[blade], 4_037_340_146).unwrap();
+        let field = |bracket: &EventBracket| -> Vec<Vec<Entrant>> {
+            bracket
+                .current
+                .matches
+                .iter()
+                .map(|m| m.entrants.clone())
+                .collect()
+        };
+        let ai =
+            |teams: [usize; 4]| -> Vec<Entrant> { teams.iter().map(|t| Entrant::Ai(*t)).collect() };
+        let mut want = vec![
+            vec![
+                Entrant::Player,
+                Entrant::Ai(4),
+                Entrant::Ai(13),
+                Entrant::Ai(3),
+            ],
+            ai([9, 2, 8, 10]),
+            ai([6, 1, 7, 12]),
+            ai([0, 5, 11, 14]),
+        ];
+        assert_eq!(field(&bracket), want);
+        assert_eq!(bracket.lcg_state(), 3_012_094_436, "46 draws, as logged");
+        // The winners: the state before the logged draws is the inverse step of
+        // the first one.
+        bracket.lcg = Lcg(210_106_344);
+        bracket.advance_field(true);
+        want = vec![vec![
+            Entrant::Player,
+            Entrant::Ai(8),
+            Entrant::Ai(1),
+            Entrant::Ai(14),
+        ]];
+        assert_eq!(field(&bracket), want);
+        assert_eq!(bracket.lcg_state(), 4_027_764_455);
+    }
+
+    /// The two-bot variant, live: the Sawblade Elite bracket from the same state
+    /// took 59 draws (round 1's 15 teams, then 7, 3 and 1 more for the later
+    /// rounds, 33 repeats); round 1's opponent was Black Storm (4); after the win
+    /// the seven winner draws (the states 3993866673 ... 15792307) gave round 2's
+    /// opponent Team Dragon (3), as the results screen showed.
+    #[test]
+    fn the_two_bot_bracket_and_its_winners_match_the_live_draws() {
+        let Some(game) = game_dir() else { return };
+        let text = ra2fmt::event::read(&game.join("Events.txt")).unwrap();
+        let events = ra2fmt::event::parse(&text).unwrap();
+        let sawblade = events
+            .iter()
+            .position(|e| e.name.to_ascii_lowercase().contains("sawblade"))
+            .expect("Sawblade Elite");
+        let mut bracket = EventBracket::new(sawblade, &events[sawblade], 4_037_340_146).unwrap();
+        assert_eq!((bracket.rounds, bracket.bots_per_match), (4, 2));
+        let first: Vec<_> = bracket
+            .current
+            .matches
+            .iter()
+            .map(|m| m.entrants.clone())
+            .collect();
+        assert_eq!(first[0], vec![Entrant::Player, Entrant::Ai(4)]);
+        assert_eq!(first[1], vec![Entrant::Ai(13), Entrant::Ai(3)]);
+        assert_eq!(first[7], vec![Entrant::Ai(11), Entrant::Ai(14)]);
+        assert_eq!(bracket.lcg_state(), 3_572_834_689, "59 draws, as logged");
+        bracket.lcg = Lcg(863_542_360);
+        bracket.advance_field(true);
+        assert_eq!(bracket.opponents(), &[Entrant::Ai(3)]);
+        let round2: Vec<_> = bracket
+            .current
+            .matches
+            .iter()
+            .map(|m| m.entrants.clone())
+            .collect();
+        assert_eq!(round2[1], vec![Entrant::Ai(9), Entrant::Ai(10)]);
+        assert_eq!(round2[3], vec![Entrant::Ai(0), Entrant::Ai(11)]);
+        assert_eq!(bracket.lcg_state(), 15_792_307);
+    }
+
+    /// A session's bracket follows from its engine state: the same state gives the
+    /// same field, the next event's bracket another one, and the saved state
+    /// carries on.
+    #[test]
+    fn a_session_state_gives_the_same_brackets_again() {
+        let draw = |seed: u64| {
+            let mut career = synthetic_career();
+            career.seed = seed;
+            let first = career.schedule[0];
+            career.enter_event(first).unwrap();
+            let a = career.bracket().unwrap().current.clone();
+            let state = career.seed;
+            (a, state)
+        };
+        let (a, state) = draw(1234);
+        assert_eq!(draw(1234).0, a, "same state, same bracket");
+        assert_ne!(draw(1235).0, a);
+        assert_ne!(state, 1234, "the draws moved the session state on");
+    }
+
     /// The season ends after nine events and the next one starts clean.
     #[test]
     fn nine_events_complete_the_season_and_the_next_one_resets_it() {
@@ -2818,7 +2981,11 @@ mod tests {
         career.save(dir.path()).unwrap();
 
         let loaded = Career::load(dir.path()).unwrap();
-        assert_eq!(loaded.seed, 77);
+        // The session state moved on with the bracket's draws; the bracket kept
+        // the state it was drawn from.
+        assert_eq!(loaded.seed, career.seed);
+        assert_ne!(loaded.seed, 77);
+        assert_eq!(loaded.bracket().unwrap().seed, 77);
         assert_eq!(loaded.phase, SeasonPhase::InEvent { event });
         assert_eq!(loaded.bracket.as_ref(), Some(&expected_bracket));
         assert_eq!(loaded.next_opponents(), expected_opponents.as_slice());

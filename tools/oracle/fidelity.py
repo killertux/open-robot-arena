@@ -100,7 +100,7 @@ def scratch_install(src):
             os.symlink(s, d)
     return dst
 
-BIN = os.path.join(ROOT, "engine", "target", "release")
+BIN = os.environ.get("RA2_BIN") or os.path.join(ROOT, "engine", "target", "release")
 APP = os.path.join(BIN, "ra2-app")
 SHELL = os.path.join(BIN, "ra2-shell")
 FIDTRACE = os.path.join(BIN, "examples", "fidtrace")
@@ -173,7 +173,14 @@ FIXTURES = [
          route=TEAMHQ + ["events button", "@430,370", "@288,455"]),
     dict(id="event-bracket-tabletop", ref="event-bracket-tabletop__1024x768__000.png",
          route=TEAMHQ + ["events button", "@430,370", "@288,455", "enter event button"],
-         note="the field's order is the original's own draw (not recoverable)"),
+         env={"RA2_LCG_STATE": "1361071406"},
+         note="the engine state the original had is unknown; 1361071406 is the (one, up to the top bit) "
+              "state whose 15 draws give the captured order, found by search over the 2^32 states "
+              "(docs/36 section 9.23); a fit, not a rule"),
+    dict(id="event-bracket-lcg-blade", ref="event-bracket-lcg-blade__1024x768__000.png",
+         route=TEAMHQ + ["events button", "@430,370", "@288,455", "enter event button"],
+         env={"RA2_LCG_STATE": "4037340146"},
+         note="the engine LCG state read live (4037340146) before the draw: the field is the original's own"),
     dict(id="event-bracket-duel-round1", ref="event-bracket-duel-round1__1024x768__000.png",
          route=TEAMHQ + ["events button", "@617,370", "@288,455", "enter event button"]),
     dict(id="event-repairs", ref="event-repairs__1024x768__000.png", hqsim=(0, "repairs-components.png"),
@@ -336,8 +343,9 @@ def run_live_shots(arena, tmp):
 # Rendering ours
 # --------------------------------------------------------------------------
 
-def env():
+def env(extra=None):
     e = dict(os.environ)
+    e.update(extra or {})
     e["RA2_GAME"] = GAME
     # Saves land in the scratch install itself, never in the user's save dir.
     e["ORA_SAVE_DIR"] = GAME
@@ -362,7 +370,7 @@ def render_app(fx, out_png):
     cmd = [APP, "--game", GAME, "--offscreen", out_png, "--size", "%dx%d" % SIZE]
     if fx["route"]:
         cmd += ["--click-names", ";".join(fx["route"])]
-    p = subprocess.run(cmd, capture_output=True, text=True, env=env(), timeout=180)
+    p = subprocess.run(cmd, capture_output=True, text=True, env=env(fx.get("env")), timeout=180)
     if p.returncode or not os.path.exists(out_png):
         return (p.stderr or p.stdout).strip().splitlines()[-1:] or ["failed"]
     return None

@@ -60,6 +60,16 @@ pub const SEED: u64 = 7;
 /// [`ra2sim::career::ORACLE_SCHEDULE_STATE`]). A saved schedule wins.
 fn fresh_career(game: &Path) -> Result<Career, String> {
     let mut career = Career::new_team(game, SEED, CareerPolicy::default(), selected_team(game))?;
+    // The engine LCG state the session's brackets are drawn from. The original's
+    // is the clock plus every draw its effects made (docs/36 section 9.23), so ours
+    // is the explicit `SEED`; `RA2_LCG_STATE` sets it (a live bracket is then
+    // reproduced from the state the Frida agent read).
+    if let Some(state) = std::env::var("RA2_LCG_STATE")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+    {
+        career.seed = u64::from(state);
+    }
     if career.history.is_empty() && std::env::var_os("RA2_RANDOM_SCHEDULE").is_none() {
         let n = career.events.len();
         let ids = ra2sim::career::draw_schedule(n, 9, ra2sim::career::ORACLE_SCHEDULE_STATE);
@@ -1095,8 +1105,12 @@ impl Session {
 
     /// Advance a live match by wall-clock seconds (the window's fixed tick).
     pub fn advance(&mut self, seconds: f32) {
-        if let Screen::Match(session) = &mut self.screen {
-            session.advance(seconds);
+        match &mut self.screen {
+            Screen::Match(session) => session.advance(seconds),
+            Screen::Award {
+                prize: Some(prize), ..
+            } => prize.advance(seconds),
+            _ => {}
         }
     }
 
@@ -1262,6 +1276,16 @@ impl Session {
         name: &str,
     ) -> Result<(), String> {
         self.prepare_repairs(renderer)?;
+        if let Screen::Award {
+            prize: Some(prize), ..
+        } = &mut self.screen
+        {
+            // A still of the award is taken three seconds in: the robot has dropped
+            // and settled on the pad.
+            for _ in 0..6 {
+                prize.advance(0.5);
+            }
+        }
         let (scene, three_d) = self.scene()?;
         if three_d {
             self.render_3d(
