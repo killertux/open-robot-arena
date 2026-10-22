@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 
@@ -71,10 +72,17 @@ def main():
     rows = []
     try:
         for p, b in zip(paths, bots):
-            shutil.copy2(os.path.join(SRC, b), p)
+            if b:  # empty SHAPE_BOTn keeps the prefix's own robot (Scout / ALARM)
+                shutil.copy2(os.path.join(SRC, b), p)
         cd.drive(["-f", os.path.join(HERE, "routes", "exhibition_box_scout_alarm.steps")])
         cd.start_match("188")
         print("neuter:", cd.py(cd.NEUTER), flush=True)
+        hook = None
+        if os.environ.get("SHAPE_HOOK"):  # docs/34 section 10: dump the D3D8 state while the shots are taken
+            hook = subprocess.Popen([cd.PY, os.path.join(HERE, "ra2_hook.py"), os.path.join(HERE, "frida", "ra2_d3dstate.js"),
+                                     "--seconds", os.environ.get("SHAPE_HOOK_SECONDS", "14")],
+                                    stdout=open(os.environ["SHAPE_HOOK"], "w"))
+            time.sleep(3.0)
         n = 0
         while os.path.exists(os.path.join(out_dir, f"{name}__live__{n:03d}.jsonl")):
             n += 1
@@ -92,6 +100,8 @@ def main():
             for r in rows:
                 fh.write(json.dumps(r, separators=(",", ":")) + "\n")
         print("wrote", base, len(rows))
+        if hook:
+            hook.wait(timeout=60)
         cd.py("import plus; plus.eliminatePlayer(1)")
         time.sleep(6)
         cd.drive(["click", "717", "575", "hide", "wait", "3", "click", "527", "745", "hide", "wait", "3"])
