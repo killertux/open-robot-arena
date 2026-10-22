@@ -1215,6 +1215,8 @@ impl ApplicationHandler for App {
                     ra2script::set_paused(false);
                     let report = self.session.as_ref().map(|s| s.report());
                     self.session = None;
+                    // A network match: back in the lobby, ready for a rematch.
+                    self.net.end_match();
                     if let (Some(builder), Some(report)) = (&mut self.builder, report) {
                         builder.set_report(report);
                     }
@@ -1399,7 +1401,12 @@ impl ApplicationHandler for App {
                         // The exhibition screen's own `start game button` note
                         // says "start the game"; it is not a shell link. Build
                         // the match from the choices the screen has selected.
-                        if step.hit_widget() == Some(crate::play_mode::START_BUTTON) {
+                        // The multiplayer create screen has a control of the same
+                        // name; that one is the network's (`NetPlay::on_step`
+                        // opened the lobby), never an exhibition.
+                        if step.hit_widget() == Some(crate::play_mode::START_BUTTON)
+                            && clicked_on.to_ascii_lowercase().starts_with("exhibition/")
+                        {
                             match crate::play_mode::session_from_shell(
                                 self.shell.game(),
                                 &self.shell,

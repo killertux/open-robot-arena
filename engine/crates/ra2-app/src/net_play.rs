@@ -57,6 +57,23 @@ pub const IP_WINDOW: &str = "multiplayer/ip_connect.gib";
 /// `giRemoteInputMessage` key words for our drive axes.
 pub const AXIS_THROTTLE: u32 = 0;
 pub const AXIS_STEER: u32 = 1;
+/// The scan codes the player holds (0..96), as three words: the key words
+/// `[AXIS_KEYS, 0..32, 32..64]` and the value `64..96`. A windowed player
+/// drives with keys, which the host's wiring turns into controls for the
+/// remote robot; the whole held set goes out each time, so a lost update
+/// is repaired by the next.
+pub const AXIS_KEYS: u32 = 2;
+
+/// The held scan codes below 96 as three words.
+pub fn key_words(keys: &ra2sim::controls::KeySet) -> [u32; 3] {
+    let mut words = [0u32; 3];
+    for code in 0..96 {
+        if keys.contains(code) {
+            words[code as usize / 32] |= 1 << (code % 32);
+        }
+    }
+    words
+}
 
 /// A body's id in a snapshot: robot index and part index.
 pub fn body_id(robot: usize, part: usize) -> u32 {
@@ -129,7 +146,7 @@ pub fn apply(duel: &mut Duel, state: &SyncState) -> usize {
 
 /// The two key events a drive becomes (values in percent, as a control's
 /// value is).
-pub fn drive_inputs(drive: DriveInput) -> [BotInput; 2] {
+pub fn drive_inputs(drive: DriveInput) -> [BotInput; 3] {
     let pct = |v: f32| (v.clamp(-1.0, 1.0) * 100.0).round() as i32 as u32;
     [
         BotInput {
@@ -140,6 +157,13 @@ pub fn drive_inputs(drive: DriveInput) -> [BotInput; 2] {
             key: [AXIS_STEER, 0, 0],
             value: pct(drive.steer),
         },
+        {
+            let [a, b, c] = key_words(&drive.keys);
+            BotInput {
+                key: [AXIS_KEYS, a, b],
+                value: c,
+            }
+        },
     ]
 }
 
@@ -149,6 +173,14 @@ pub fn apply_input(drive: &mut DriveInput, input: &BotInput) {
     match input.key[0] {
         AXIS_THROTTLE => drive.throttle = v,
         AXIS_STEER => drive.steer = v,
+        AXIS_KEYS => {
+            let words = [input.key[1], input.key[2], input.value];
+            for code in 0..96 {
+                drive
+                    .keys
+                    .set(code, words[code as usize / 32] >> (code % 32) & 1 == 1);
+            }
+        }
         _ => {}
     }
 }
@@ -259,6 +291,11 @@ pub struct NetPlay {
     /// The match has begun: the host has every peer loaded and sent
     /// `giBeginMatchMessage` / `giStartCountDownMessage`; a joiner heard them.
     begun: bool,
+    /// Events polled from the session and not yet consumed. `tick` (screens,
+    /// lobby, match state) and `after_step` (snapshots, chat, scoring
+    /// messages, which need the match) both run every frame in the windowed
+    /// app; each takes only what it owns, so no event is dropped or seen twice.
+    inbox: Vec<GameEvent>,
 }
 
 impl Default for NetPlay {
@@ -292,6 +329,45 @@ impl NetPlay {
             loaded_sent: false,
             loaded: Default::default(),
             begun: false,
+            inbox: Vec::new(),
+        }
+    }
+
+    /// Poll the session once into the inbox. Snapshots are superseded by the
+    /// newest one (they carry whole states), everything else keeps its order.
+    fn pump(&mut self) {
+        let Some(game) = &mut self.game else { return };
+        for event in game.poll() {
+            if matches!(event, GameEvent::Snapshot(_)) {
+                self.inbox.retain(|e| !matches!(e, GameEvent::Snapshot(_)));
+            }
+            self.inbox.push(event);
+        }
+    }
+
+    /// Take the inbox events `owns` accepts, in order; the rest stay.
+    fn take_events(&mut self, owns: impl Fn(&GameEvent) -> bool) -> Vec<GameEvent> {
+        let (taken, kept) = std::mem::take(&mut self.inbox)
+            .into_iter()
+            .partition(|e| owns(e));
+        self.inbox = kept;
+        taken
+    }
+
+    /// The match-state events, which need no session: a joiner's inputs, a
+    /// peer loaded, the begin gate.
+    fn absorb_state(&mut self, event: &GameEvent) {
+        match event {
+            GameEvent::Loaded { player } => {
+                self.loaded.insert(*player);
+            }
+            GameEvent::Begin | GameEvent::CountDown => self.begun = true,
+            GameEvent::RemoteInput { from, input, .. } => {
+                if let Some(&robot) = self.robot_of.get(from) {
+                    apply_input(self.remote.entry(robot).or_default(), input);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -386,6 +462,7 @@ impl NetPlay {
         self.loaded_sent = false;
         self.loaded.clear();
         self.begun = false;
+        self.inbox.clear();
     }
 
     /// Whether the match may run, asked before each step once the match is
@@ -421,6 +498,18 @@ impl NetPlay {
             }
         }
         self.begun
+    }
+
+    /// The local match is over (results closed) and this end is back in the
+    /// lobby: a rematch starts from a clean gate, the session stops syncing,
+    /// and match events nobody consumed are dropped.
+    pub fn end_match(&mut self) {
+        self.reset_match();
+        self.remote.clear();
+        self.last_sent = None;
+        if let Some(game) = &mut self.game {
+            game.end_match();
+        }
     }
 
     pub fn leave(&mut self) {
@@ -495,6 +584,7 @@ impl NetPlay {
                         };
                         game.start_match(&arena);
                         game.set_schema(schema());
+                        self.reset_match();
                         self.assign_robots();
                         return Ok(NetAction::StartMatch { arena });
                     }
@@ -515,8 +605,22 @@ impl NetPlay {
                 self.status = format!("{} game(s) found.", self.rows.len());
             }
         }
-        if let Some(game) = &mut self.game {
-            for event in game.poll() {
+        self.pump();
+        // The scoring, snapshot and chat events wait for `after_step`.
+        let events = self.take_events(|e| {
+            !matches!(
+                e,
+                GameEvent::Snapshot(_) | GameEvent::Chat { .. } | GameEvent::Message { .. }
+            )
+        });
+        if self.game.is_some() {
+            for event in events {
+                // In order: a `Begin` that follows its `Prepare` in one batch
+                // must survive the new match's reset.
+                if let GameEvent::Prepare { .. } = event {
+                    self.reset_match();
+                }
+                self.absorb_state(&event);
                 match event {
                     GameEvent::PlayerJoined { .. } => self.sounds.push(NetSound::SpectatorJoined),
                     GameEvent::Joined { .. } => {
@@ -540,25 +644,13 @@ impl NetPlay {
                     GameEvent::Prepare { arena } => {
                         // The robots are the lobby's player panels, in order;
                         // a spectator has none.
-                        self.robot_of = game
-                            .lobby
-                            .players()
-                            .enumerate()
-                            .map(|(i, s)| (s.player, i))
-                            .collect();
-                        game.set_schema(schema());
+                        self.assign_robots();
+                        if let Some(game) = &mut self.game {
+                            game.set_schema(schema());
+                        }
                         // Loaded is reported once the match is built
                         // ([`NetPlay::match_begun`]).
                         action = NetAction::StartMatch { arena };
-                    }
-                    GameEvent::Loaded { player } => {
-                        self.loaded.insert(player);
-                    }
-                    GameEvent::Begin | GameEvent::CountDown => self.begun = true,
-                    GameEvent::RemoteInput { from, input, .. } => {
-                        if let Some(&robot) = self.robot_of.get(&from) {
-                            apply_input(self.remote.entry(robot).or_default(), &input);
-                        }
                     }
                     _ => {}
                 }
@@ -570,6 +662,7 @@ impl NetPlay {
         }
         if let NetAction::Ended(_) = action {
             self.game = None;
+            self.reset_match();
             if !shell.base_screen_id().eq_ignore_ascii_case(BROWSER_SCREEN) {
                 shell.goto(BROWSER_SCREEN)?;
             }
@@ -770,7 +863,8 @@ impl NetPlay {
             // every quarter second so a lost one does not stick.
             let due = match self.last_sent {
                 Some((last, at)) => {
-                    (last.throttle, last.steer) != (drive.throttle, drive.steer)
+                    (last.throttle, last.steer, key_words(&last.keys))
+                        != (drive.throttle, drive.steer, key_words(&drive.keys))
                         || at.elapsed() >= Duration::from_millis(250)
                 }
                 None => true,
@@ -794,12 +888,30 @@ impl NetPlay {
     /// spectator applies the newest snapshot it has and shows the host's
     /// scoring messages.
     pub fn after_step(&mut self, session: &mut crate::match_mode::Session, dt: f32) {
+        self.pump();
+        // Match events, and the session-free match state `tick` may not have
+        // reached yet; screen and lobby events stay for `tick`.
+        let events = self.take_events(|e| {
+            matches!(
+                e,
+                GameEvent::Snapshot(_)
+                    | GameEvent::Chat { .. }
+                    | GameEvent::Message { .. }
+                    | GameEvent::Loaded { .. }
+                    | GameEvent::Begin
+                    | GameEvent::CountDown
+                    | GameEvent::RemoteInput { .. }
+            )
+        });
+        for event in &events {
+            self.absorb_state(event);
+        }
         let Some(game) = &mut self.game else { return };
         if game.is_host() {
             let duel = &session.matched.duel;
             game.tick_sync(dt, || capture(duel));
-            let events = session.matched.take_net_events();
-            for event in &events {
+            let decided = session.matched.take_net_events();
+            for event in &decided {
                 let message = event_message(event, &session.matched.duel);
                 game.broadcast_guaranteed(&message);
             }
@@ -818,26 +930,16 @@ impl NetPlay {
                 });
                 game.broadcast_guaranteed(&Message::EndMatch);
             }
-            for event in game.poll() {
-                match event {
-                    GameEvent::RemoteInput { from, input, .. } => {
-                        if let Some(&robot) = self.robot_of.get(&from) {
-                            apply_input(self.remote.entry(robot).or_default(), &input);
-                        }
-                    }
-                    GameEvent::Loaded { player } => {
-                        self.loaded.insert(player);
-                    }
-                    GameEvent::Chat { text, .. } => session.push_chat_line(text),
-                    _ => {}
+            for polled in events {
+                if let GameEvent::Chat { text, .. } = polled {
+                    session.push_chat_line(text);
                 }
             }
         } else {
             let mut newest = None;
-            for event in game.poll() {
+            for event in events {
                 match event {
                     GameEvent::Snapshot(state) => newest = Some(state),
-                    GameEvent::Begin | GameEvent::CountDown => self.begun = true,
                     GameEvent::Chat { text, .. } => session.push_chat_line(text),
                     GameEvent::Message { from, message } if from == ra2net::session::HOST_ID => {
                         match message {
@@ -949,6 +1051,32 @@ pub fn message_event(message: &Message) -> Option<NetEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_keys_travel_whole_and_a_release_clears_them() {
+        let mut drive = DriveInput::default();
+        for code in [17, 30, 57, 82] {
+            drive.keys.set(code, true);
+        }
+        let mut back = DriveInput::default();
+        // A stale key on the receiving end is cleared by the full set.
+        back.keys.set(32, true);
+        for input in drive_inputs(drive) {
+            apply_input(&mut back, &input);
+        }
+        for code in 0..96 {
+            assert_eq!(
+                back.keys.contains(code),
+                drive.keys.contains(code),
+                "{code}"
+            );
+        }
+        drive.keys.set(17, false);
+        for input in drive_inputs(drive) {
+            apply_input(&mut back, &input);
+        }
+        assert!(!back.keys.contains(17) && back.keys.contains(30));
+    }
 
     #[test]
     fn drives_become_percent_key_events_and_back() {

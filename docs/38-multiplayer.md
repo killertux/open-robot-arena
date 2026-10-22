@@ -456,3 +456,65 @@ Multiplayer -> Create Game -> Start Game (Local network only, Deathmatch, Combat
 does nothing (no DirectPlay host under Wine), so the prematch window with its
 `chat messages` box never opened. The layout is therefore checked against
 `gamewindow.gib` only.
+
+## 12. Who consumes the session's events (fx/net-events)
+
+**The bug.** The windowed app runs, every update (`window.rs about_to_wait`):
+`NetPlay::tick` (screens and lobby), then `before_step`, the step, then
+`after_step` (the in-match half). Both used to call `NetGame::poll`, which drains
+the session. `tick` ran first, handled the lobby and gate events, and threw the
+rest away in a `_ => {}`: snapshots, chat lines and the host's scoring messages
+(`0x135`/`0x139`/`0x13b`/`0x13a`/`0x137`) that arrived in the idle time between
+the last `after_step` and the next `tick` (nearly all of them: the app idles
+between 60 Hz updates, and `after_step` only sees what lands during the step).
+`after_step` also dropped lobby/session events it polled (a `Terminated` or
+`PlayerLeft` that landed during the step). The headless tests never saw it
+because their loops call `after_step` without `tick`, with no idle time between.
+Seen with the new test: a joiner finished the scripted match with `ended=false
+points=42,0,0,0 taken=0.00,42.70,...` (the host: `ended=true points=42,45,0,0`)
+and the host missed the joiners' chat.
+
+**The fix.** `NetPlay` owns an `inbox`. `pump()` polls the session once into it
+(only the newest snapshot is kept); `tick` takes the screen, lobby and gate events,
+`after_step` takes snapshots, chat, host messages and the session-free match state
+(`Loaded`, `Begin`, `CountDown`, `RemoteInput`, via the shared `absorb_state`).
+Each event is taken by exactly one consumer, in order, whichever runs first.
+
+**Same class, found on the way.**
+- *Keys never reached the host.* The window records the held scan codes
+  (`DriveInput::keys`); `before_step` sent only the abstract throttle/steer axes, so a
+  windowed joiner's robot never moved on the host. The held set (scan codes 0..96) now
+  goes out as a third remote-input event, `[AXIS_KEYS, w0, w1]` + value `w2` (ours,
+  like the axes: the original's key words name a `.bot` control binding), whole each
+  time so a lost update is repaired by the next, and the host folds it into the remote
+  robot's `keys`.
+- *The multiplayer Start Game button started an exhibition match.* `window.rs` treated
+  every click on a widget named `start game button` as the exhibition's; the multiplayer
+  create screen has one of the same name, so the host went straight into an AI match
+  instead of the lobby. It now requires the clicked screen to be in `exhibition/`.
+- *A second match in the same lobby started on stale state.* `begun`, `loaded`,
+  `end_sent` and the `in_match` switch were only reset by `leave()`, so a rematch ran
+  without waiting for the joiners, never sent its end, and lobby chat went out as match
+  chat. `NetPlay::end_match` (called when the results are closed) and `NetGame::end_match`
+  (schema off, host accepts joiners again) clear them; a `Prepare` (joiner) and the host's
+  begin click also reset the gate, in event order. Left-over match events are dropped
+  with them, and a session that ends (`Terminated`, refused) clears the inbox.
+
+**Tests.** `tests/netplay.rs`: `the_windowed_frame_order_delivers_every_event_once`
+(five processes, each running tick / before_step / step / after_step with the idle
+between frames; failed before the fix, passes after, also with 16 busy loops on 8
+cores), `a_rematch_in_the_same_lobby_starts_from_a_clean_gate`, the existing
+five-process test; unit test `held_keys_travel_whole_and_a_release_clears_them`.
+
+**Live, two windowed processes** (Xephyr :21/:22, one scratch `ORA_SAVE_DIR` and game copy
+each, loopback, input injected with XTEST; screenshots in the session scratchpad
+`netev/`): host Create Game -> Start Game, joiner IP Address 127.0.0.1 -> Connect, both in
+the prematch lobby, Begin Match. Both drove forward; chat both ways showed on both
+(`[Player] hello from joiner`, `[Player] hi from host`); the host's robot points went 13 ->
+26 -> 39 on both HUDs (the joiner a step behind) and both ended on the same Match Results
+(Scout immobilized, The Boxer winner with 39). With the unfixed build the clicks never
+reached the lobby (exhibition match) and the joiner's keys never moved its robot.
+
+**Open.** A remote human that leaves mid-match leaves its robot standing (no AI takeover,
+no `PlayerOut`); `EndMatch` (`0x131`) is sent but a joiner ends on `MatchWin` alone;
+chat keeps the sender's lobby name, which defaults to `Player` for both ends.
