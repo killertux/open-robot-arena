@@ -281,12 +281,15 @@ fn a_synced_duel_follows_the_host() {
 // ---------------------------------------------------------------------------
 
 const SCRIPT_TEST: &str = "a_scripted_match_across_five_processes_counts_every_hit_once";
+/// The same match, each process pumping the network the way the windowed app
+/// does every frame: `tick`, `before_step`, the step, `after_step`.
+const WINDOW_TEST: &str = "the_windowed_frame_order_delivers_every_event_once";
 
 fn report(line: String) {
     println!("NETTEST {line}");
 }
 
-fn child(role: &str) {
+fn child(role: &str, window: bool) {
     use std::io::BufRead;
     let game = game_dir().expect("the game install");
     let _scripts = ra2script::lock();
@@ -354,6 +357,7 @@ fn child(role: &str) {
     session.skip_intro();
     let dt = session.matched.config.dt;
     let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut shell = Shell::boot(&game, [800.0, 600.0]).unwrap();
     let mut fight = 0u32;
     let mut after_end = 0u32;
     let mut ended = false;
@@ -394,6 +398,10 @@ fn child(role: &str) {
             }
             _ => {}
         }
+        // The windowed app's frame (`about_to_wait`): the network tick first.
+        if window {
+            net.tick(&mut shell).unwrap();
+        }
         net.before_step(&mut session);
         std::thread::sleep(Duration::from_millis(3));
         // Loaded is reported here; nobody's countdown runs until the host
@@ -402,6 +410,11 @@ fn child(role: &str) {
             session.step();
         }
         net.after_step(&mut session, dt);
+        if window {
+            // The event loop idles until the next update; packets land here,
+            // where the next frame's `tick` meets them before `after_step`.
+            std::thread::sleep(Duration::from_millis(8));
+        }
         for line in session.chat_lines() {
             seen.insert(line.to_string());
         }
@@ -440,8 +453,17 @@ fn child(role: &str) {
 
 #[test]
 fn a_scripted_match_across_five_processes_counts_every_hit_once() {
+    five_processes(SCRIPT_TEST, false);
+}
+
+#[test]
+fn the_windowed_frame_order_delivers_every_event_once() {
+    five_processes(WINDOW_TEST, true);
+}
+
+fn five_processes(test: &str, window: bool) {
     if let Ok(role) = std::env::var("RA2_NETTEST_ROLE") {
-        child(&role);
+        child(&role, window);
         return;
     }
     use std::io::{BufRead, BufReader, Write};
@@ -459,7 +481,7 @@ fn a_scripted_match_across_five_processes_counts_every_hit_once() {
     let mut children = Vec::new();
     let spawn = |role: &str, children: &mut Vec<std::process::Child>| {
         let mut c = Command::new(&exe)
-            .args(["--exact", SCRIPT_TEST, "--nocapture", "--test-threads=1"])
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
             .env("RA2_NETTEST_ROLE", role)
             .env("RA2_NETTEST_PORT", port.to_string())
             .env("ORA_SAVE_DIR", &save)
@@ -534,4 +556,86 @@ fn a_scripted_match_across_five_processes_counts_every_hit_once() {
     for line in ["[Guest1] gg", "[Host] good luck", "[Watcher] nice fight"] {
         assert!(host.contains(line), "{line} missing: {host}");
     }
+}
+
+/// Lobby -> match -> results -> lobby -> a second match: the begin gate, the
+/// loaded set and the sync switch start clean each time (docs/38 §12).
+#[test]
+fn a_rematch_in_the_same_lobby_starts_from_a_clean_gate() {
+    use ra2_app::net_play::NetAction;
+    let Some(game) = game_dir() else { return };
+    let size = [800.0, 600.0];
+    let mut host_shell = Shell::boot(&game, size).unwrap();
+    let mut guest_shell = Shell::boot(&game, size).unwrap();
+    let mut host = loopback("Host");
+    let mut guest = loopback("Guest");
+    host.host("Rematch", None, ConnectionSpeed::Lan).unwrap();
+    host_shell.goto(PREMATCH_SCREEN).unwrap();
+    let addr = host.game.as_ref().unwrap().session.local_addr().unwrap();
+    guest.join(addr).unwrap();
+    let pump = |host: &mut NetPlay, guest: &mut NetPlay, hs: &mut Shell, gs: &mut Shell| {
+        host.tick(hs).unwrap();
+        let action = guest.tick(gs).unwrap();
+        std::thread::sleep(Duration::from_millis(3));
+        action
+    };
+    let start = Instant::now();
+    while host.game.as_ref().unwrap().lobby.slots.len() < 2
+        && start.elapsed() < Duration::from_secs(5)
+    {
+        pump(&mut host, &mut guest, &mut host_shell, &mut guest_shell);
+    }
+    assert_eq!(host.game.as_ref().unwrap().lobby.slots.len(), 2);
+    let begin = ra2_shell::Step {
+        command: String::new(),
+        hit: "Button \"begin match button\"".into(),
+        note: None,
+        screen: PREMATCH_SCREEN.into(),
+        content: None,
+        tab: None,
+        step: None,
+        point: [0.0, 0.0],
+    };
+
+    for round in 1..=2 {
+        let action = host
+            .on_step(&mut host_shell, PREMATCH_SCREEN, &begin)
+            .unwrap();
+        assert!(matches!(action, NetAction::StartMatch { .. }), "{round}");
+        // The joiner's tick hears Prepare (and keeps the in-match events for
+        // `after_step`).
+        let start = Instant::now();
+        let mut prepared = false;
+        while !prepared && start.elapsed() < Duration::from_secs(5) {
+            prepared = matches!(
+                pump(&mut host, &mut guest, &mut host_shell, &mut guest_shell),
+                NetAction::StartMatch { .. }
+            );
+        }
+        assert!(prepared, "round {round}: no Prepare");
+        // Neither end may run before the host has heard the joiner loaded.
+        assert!(
+            !host.match_begun(),
+            "round {round}: the host began before the joiner loaded"
+        );
+        assert!(
+            !guest.match_begun(),
+            "round {round}: the joiner began before the host's go"
+        );
+        let start = Instant::now();
+        while !(host.match_begun() && guest.match_begun())
+            && start.elapsed() < Duration::from_secs(5)
+        {
+            pump(&mut host, &mut guest, &mut host_shell, &mut guest_shell);
+        }
+        assert!(host.match_begun() && guest.match_begun(), "round {round}");
+        assert!(guest.game.as_ref().unwrap().in_match());
+        // The results are closed: back in the lobby.
+        host.end_match();
+        guest.end_match();
+        assert!(!guest.game.as_ref().unwrap().in_match(), "round {round}");
+        assert!(!host.game.as_ref().unwrap().in_match(), "round {round}");
+    }
+    host.leave();
+    guest.leave();
 }

@@ -360,6 +360,17 @@ impl NetGame {
         self.last_clock = None;
     }
 
+    /// Both ends: the match is over and the players are back in the lobby.
+    /// Snapshots stop (`in_match` is false again, so a lobby chat line goes out
+    /// as a lobby text), and a host takes joiners and spectators again.
+    pub fn end_match(&mut self) {
+        self.schema = None;
+        self.last_clock = None;
+        if self.is_host() {
+            self.session.set_accepting(true);
+        }
+    }
+
     /// Joiner: report loading progress to the host.
     pub fn report_loaded(&mut self) {
         let Some(me) = self.local() else { return };
