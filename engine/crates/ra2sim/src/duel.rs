@@ -12,14 +12,51 @@ use crate::scene::{self, ArenaScene, USER_ARENA, USER_PROP};
 use crate::scriptai::ScriptAi;
 use crate::sim::{DriveInput, DriveTuning, PropEntity, BOT_FORWARD};
 
-/// How high above the floor under its start point a robot's origin (the
-/// `.bot`'s, its chassis body's) is held through the intro and let go at the
-/// bell. Live (docs/29 section 12r, `spawn-*__live__000`): Scout, ALARM, Razor
-/// and FlapJack in the Combat Arena, Scout and ALARM in the Compressor, all
-/// at the floor plus 0.3975 m to the millimetre whatever their shape, so each
-/// falls 0.20-0.21 m onto its wheels. The code that places them was not
-/// located (a constant of the arena's floor, not of the start point's height).
+/// How high above the floor a robot's origin (the `.bot`'s, its chassis
+/// body's) is put when there is no start point to lower it from, or the
+/// backend cannot test for contacts ([`lower_onto_floor`]). Live (docs/29
+/// section 12r, `spawn-*__live__000`): Scout, ALARM, Razor and FlapJack in the
+/// Combat Arena, Scout and ALARM in the Compressor come down to the floor
+/// plus 0.3975 m, each falling 0.20-0.21 m onto its wheels at the bell.
 pub const SPAWN_ABOVE_FLOOR: f32 = 0.3975;
+
+/// How the original lowers a robot onto its start point (`FUN_00418b90`,
+/// recovered; docs/29 section 12v): with the robot's origin at the start
+/// point, every body is moved down 0.05 m at a time (at most 100 times) until
+/// a collision detection finds any of them in contact with something (a
+/// point within the tolerance, `FUN_004adfd0` → `FUN_00542a70`); it is then
+/// moved back up 0.05 m and held there until the bell. A robot therefore
+/// comes to rest between one and two steps above its first contact, which
+/// for the stock box robots is the floor plus 0.3975 m but not for all
+/// (`rest-...__live__000`: EMERGENCY one step lower than M.A.D.).
+/// `false` when the backend cannot test for contacts (the caller places the
+/// robot as before).
+fn lower_onto_floor(physics: &mut dyn PhysicsBackend, robot: &Robot) -> bool {
+    const STEP: f32 = 0.05;
+    let bodies: Vec<BodyHandle> = robot.parts.iter().map(|p| p.body).collect();
+    let shift = |physics: &mut dyn PhysicsBackend, dy: f32| {
+        for &b in &bodies {
+            if let Some(s) = physics.state(b) {
+                physics.set_transform(b, s.position + Vec3::new(0.0, dy, 0.0), s.rotation);
+            }
+        }
+    };
+    for _ in 0..100 {
+        shift(physics, -STEP);
+        match physics.spawn_touch(&bodies) {
+            None => {
+                shift(physics, STEP);
+                return false;
+            }
+            Some(true) => {
+                shift(physics, STEP);
+                return true;
+            }
+            Some(false) => {}
+        }
+    }
+    true
+}
 
 /// A part that has been knocked off a robot.
 pub struct Debris {
@@ -668,18 +705,11 @@ impl Duel {
         prop_defs.extend(scene::load_havok_props(arena_path)?);
 
         let mut physics: Box<dyn PhysicsBackend> = crate::backend::create_backend(arena.gravity)?;
-        let (verts, indices) = arena.triangle_soup();
         let arena_body = physics.create_body(
-            &BodyDesc::new(
-                MotionType::Static,
-                ShapeDesc::TriMesh {
-                    vertices: verts,
-                    indices,
-                },
-            )
-            .with_friction(arena.friction)
-            .with_restitution(arena.restitution)
-            .with_user_data(USER_ARENA),
+            &BodyDesc::new(MotionType::Static, arena.collider_shape())
+                .with_friction(arena.friction)
+                .with_restitution(arena.restitution)
+                .with_user_data(USER_ARENA),
         )?;
 
         let mut props = Vec::new();
@@ -769,7 +799,14 @@ impl Duel {
                 ),
             };
             let floor = Self::floor_at(&*physics, &arena, x, z, start_y);
-            let position = Vec3::new(x, floor + SPAWN_ABOVE_FLOOR, z);
+            // Lowered from the start point when the backend can tell when it
+            // touches ([`lower_onto_floor`]), else put at the floor plus
+            // [`SPAWN_ABOVE_FLOOR`].
+            let lowered = start_y.is_some() && std::env::var("RA2_SPAWN_FLOOR").is_err();
+            let position = match start_y {
+                Some(y) if lowered => Vec3::new(x, y, z),
+                _ => Vec3::new(x, floor + SPAWN_ABOVE_FLOOR, z),
+            };
 
             // Face where the start point says, else the centre of the arena.
             let to_centre = Vec3::new(centre.x - x, 0.0, centre.z - z);
@@ -798,6 +835,22 @@ impl Duel {
                 Quat::from_rotation_y(yaw),
                 mass_scale,
             )?;
+            let mut position = position;
+            if lowered {
+                if !lower_onto_floor(&mut *physics, &robot) {
+                    let dy = floor + SPAWN_ABOVE_FLOOR - position.y;
+                    for p in &robot.parts {
+                        if let Some(s) = physics.state(p.body) {
+                            physics.set_transform(
+                                p.body,
+                                s.position + Vec3::new(0.0, dy, 0.0),
+                                s.rotation,
+                            );
+                        }
+                    }
+                }
+                position = robot.position(&*physics);
+            }
             println!(
                 "  robot {i}: {:?} at ({:.2},{:.2},{:.2}) facing {:.0}deg, {:.0} kg, {} parts",
                 robot.rig.name,
@@ -957,6 +1010,31 @@ impl Duel {
     /// surface it belongs to, so the ray begins there. Casting from the arena
     /// centre instead starts *inside* a raised platform (the Metal Skull's
     /// plateaus) and lands on the floor beneath it.
+    /// Hold every robot still where it is (`true`), or let it go (`false`).
+    ///
+    /// The original puts each robot at its start point and lowers it there
+    /// (see [`lower_onto_floor`]) when the countdown begins, and the robots do
+    /// not move until the bell: live (`rest-...__live__000`, docs/29 section
+    /// 12v) every robot body keeps its place to the bit and has no velocity
+    /// through the countdown (the chassis with flag `+0x1c` = 4, the others
+    /// inactive), and falls the last 0.15-0.30 m onto its wheels when the
+    /// fight starts. Ours holds them as fixed bodies and lets them go with no
+    /// velocity and their deactivation references forgotten.
+    pub fn hold_robots(&mut self, hold: bool) {
+        let motion = if hold {
+            MotionType::Static
+        } else {
+            MotionType::Dynamic
+        };
+        for r in &self.robots {
+            for p in r.parts.iter().filter(|p| p.alive) {
+                if self.physics.set_motion_type(p.body, motion).is_ok() && !hold {
+                    self.physics.set_velocity(p.body, Vec3::ZERO, Vec3::ZERO);
+                }
+            }
+        }
+    }
+
     fn floor_at(
         physics: &dyn PhysicsBackend,
         arena: &ArenaScene,

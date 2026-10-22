@@ -605,6 +605,15 @@ pub trait PhysicsBackend {
     /// `scale`. A robot's bodies are one already (its collision group).
     fn deactivation_system(&mut self, _bodies: &[BodyHandle], _scale: f32) {}
 
+    /// Whether any of `bodies` has a contact (a point within the collision
+    /// tolerance, or an overlap) with anything, the collision detection run
+    /// where the bodies are now: the test the original lowers a robot onto its
+    /// start point with (`FUN_00418b90`, docs/29 section 12v). `None` for a
+    /// backend without one.
+    fn spawn_touch(&mut self, _bodies: &[BodyHandle]) -> Option<bool> {
+        None
+    }
+
     /// Diagnostic: run the collision detection where the bodies are now, as at
     /// the end of a step piece, and keep its contacts for the next resolver
     /// (havok17 writes them as an `R` row under `RA2_H17_DUMP`;

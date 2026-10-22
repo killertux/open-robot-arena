@@ -1,8 +1,9 @@
 # ordercmp.py: the contacts our detection gives with every body at its live pose
 # (examples/orderprobe.rs), against the live resolver's list (docs/29 section 12u).
 #   ordercmp.py poses <live.jsonl> <poses.txt> [from] [to]   the orderprobe input (R rows by ordinal)
-#   ordercmp.py cmp <live.jsonl> <ours.dump> <ours.out> [-v N] [-t] summary; -v: the first N mismatches
-#   of each kind in full; -t: per pair type
+#   ordercmp.py cmp <live.jsonl> <ours.dump> <ours.out> [-v N] [-t] [-r] summary; -v: the first N mismatches
+#   of each kind in full; -t: per pair type; -r: robots' pairs only (drop the pairs of two unmapped
+#   bodies: the arena with a hazard, which the probe does not place)
 # Live rows: every `R` row (one per resolver entry) followed by its `B` rows.
 import sys, json, math
 from collections import Counter, defaultdict
@@ -36,7 +37,7 @@ def poses(live, dst, lo=0, hi=10**9):
 def sub(a, b): return [x - y for x, y in zip(a, b)]
 def norm(a): return math.sqrt(sum(x * x for x in a))
 
-def cmp(live, dump, out, verbose=0, bytype=False):
+def cmp(live, dump, out, verbose=0, bytype=False, robots=False):
     lmap = {}; omap = {}
     for l in open(out):
         p = l.split()
@@ -53,6 +54,8 @@ def cmp(live, dump, out, verbose=0, bytype=False):
         g = []
         for c in R:
             key = (lab(m, c[0]), lab(m, c[1]))
+            if robots and key == ('W', 'W'):
+                continue
             if g and g[-1][0] == key: g[-1][1].append(c)
             else: g.append((key, [c]))
         return g
@@ -112,4 +115,4 @@ if __name__ == '__main__':
         poses(a[1], a[2], *(int(x) for x in a[3:5]))
     else:
         v = int(a[a.index('-v') + 1]) if '-v' in a else 0
-        cmp(a[1], a[2], a[3], v, '-t' in a)
+        cmp(a[1], a[2], a[3], v, '-t' in a, '-r' in a)

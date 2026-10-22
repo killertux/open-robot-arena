@@ -9,7 +9,7 @@
 use glam::{Mat4, Quat, Vec3};
 use ra2_render::{RenderGroup, Renderer};
 
-use crate::backend::{BodyDesc, BodyHandle, MotionType, PhysicsBackend, ShapeDesc};
+use crate::backend::{BodyDesc, BodyHandle, MotionType, PhysicsBackend};
 use crate::rig::{self, RobotRig};
 use crate::robot::Robot;
 use crate::scene::{self, ArenaScene, Prop, USER_ARENA};
@@ -142,17 +142,10 @@ impl Sandbox {
         let mut physics: Box<dyn PhysicsBackend> = crate::backend::create_backend(arena.gravity)?;
 
         // Static arena geometry.
-        let (verts, indices) = arena.triangle_soup();
-        let arena_desc = BodyDesc::new(
-            MotionType::Static,
-            ShapeDesc::TriMesh {
-                vertices: verts,
-                indices,
-            },
-        )
-        .with_friction(arena.friction)
-        .with_restitution(arena.restitution)
-        .with_user_data(USER_ARENA);
+        let arena_desc = BodyDesc::new(MotionType::Static, arena.collider_shape())
+            .with_friction(arena.friction)
+            .with_restitution(arena.restitution)
+            .with_user_data(USER_ARENA);
         let arena_body = physics.create_body(&arena_desc)?;
 
         // Spawn the robot with its lowest point just above the floor.

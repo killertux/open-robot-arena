@@ -102,15 +102,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_duration(Some(secs));
             let mut m = Match::new(cfg)?;
             // `FIDTRACE_WARMUP=<n>`: n idle physics steps before the match
-            // starts, a perturbation for running a fight as an ensemble.
+            // starts, a perturbation for running a fight as an ensemble. The
+            // match holds the robots until the bell (docs/29 section 12v), so
+            // they are let go for the warmup and held again where it leaves
+            // them; with no warmup they fall at the bell, as live.
             let warmup: usize = std::env::var("FIDTRACE_WARMUP")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
-            for _ in 0..warmup {
-                let n = m.duel.robots.len();
-                m.duel
-                    .step_direct(&vec![ra2sim::sim::DriveInput::default(); n], DEFAULT_STEP);
+            if warmup > 0 {
+                m.duel.hold_robots(false);
+                for _ in 0..warmup {
+                    let n = m.duel.robots.len();
+                    m.duel
+                        .step_direct(&vec![ra2sim::sim::DriveInput::default(); n], DEFAULT_STEP);
+                }
+                m.duel.hold_robots(true);
             }
             // `FIDTRACE_HITS=<path>`: every priced hit (both directions, before
             // the `>= 10` gate), in the shape `tools/oracle/fight_report.py`

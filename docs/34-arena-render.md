@@ -538,6 +538,11 @@ What the shots show, robot by robot:
 * Open: the exact chassis subdivision; Iceberg's chassis shading (its mesh has inward-wound triangles and ours
   differs on its left face) is the largest remaining robot-shape residual.
 
+The `yaw ours-live` column compares ours 1.5 s after the bell (our robots had landed during the countdown) with live
+shots taken 2-14 s after it, while the live robots creep, and in some of the live captures the spinners' weapons ran;
+docs/29 section 12v measures the rest from the bell on both sides (and recovers how a match lowers the robots onto
+their start points and holds them until the bell).
+
 Per-draw state check (`ra2_d3dstate.js` on Scout v ALARM, 56 signatures): every robot draw is `LIGHTING` 1, one point
 light, `SPECULARENABLE` 1, `LOCALVIEWER` 0, `CULL_CCW`, `COLORVERTEX` 1 with diffuse from the vertex colour (absent in
 the vertex format, so the material), stage 0 MODULATE (texture, diffuse) with linear filters on the chassis and

@@ -7,7 +7,8 @@ loads frida/ra2_contacts.js and drives robot PLAYER (env, default 0 = Scout;
 1 = ALARM): turn 3 s, coast 1.5 s, aim at the longest free line, straight
 STRAIGHT s (default 2.1), stop 3 s.  PLAN=straight drives straight from where
 the robot stands (its spawn pose in a fresh match: the `fidtrace drive-at`
-tests) after 1.5 s at rest.  The match is ended afterwards (the other robot
+tests) after 1.5 s at rest; PLAN=straightturn (with AIM=0) then turns in place 3 s
+and arcs 2 s (docs/29 section 12v).  The match is ended afterwards (the other robot
 eliminated) and the results dismissed, so the next capture starts a new one.  Writes into OUT (default
 local/oracle/original):
   contacts-<bot>__live__<seq>.jsonl   raw rows (see the agent's header)
@@ -66,6 +67,11 @@ def main():
             straight, stop]
     if os.environ.get("PLAN") == "straight":
         plan = [plan[0], straight, stop]
+    elif os.environ.get("PLAN") == "straightturn":
+        # docs/29 section 12v: straight from the spawn pose (run with AIM=0),
+        # then a turn in place, then an arc (throttle and turn together)
+        plan = [plan[0], straight, plan[1],
+                ("arc", f"{ai}.Throttle(100)\nAI.running_ai[{player}].Turn(60)", 2.0), stop]
     marks = []
     for mark, code, hold in plan:
         if mark == "straight" and os.environ.get("AIM", "1") == "1" and len(plan) > 3:

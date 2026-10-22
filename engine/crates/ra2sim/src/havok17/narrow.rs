@@ -226,6 +226,9 @@ pub struct Mesh {
     pub bounds: Aabb,
     /// Havok's own tree over the triangles (the order its walks meet them in).
     pub tree: super::obbtree::ObbTree,
+    /// Per triangle, its place in the order a MOPP compiled from this mesh
+    /// returns it (a fixed mesh's queries, docs/29 section 12v).
+    pub mopp: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -324,6 +327,7 @@ impl Mesh {
             &vertices[..]
         };
         let tree = super::obbtree::ObbTree::build(raw, &vertices, &triangles);
+        let mopp = super::mopp::rank(raw, &triangles);
         Mesh {
             vertices,
             triangles,
@@ -331,10 +335,12 @@ impl Mesh {
             order,
             bounds,
             tree,
+            mopp,
         }
     }
 
-    /// The triangles whose bounds overlap `query` (mesh frame), ascending.
+    /// The triangles whose bounds overlap `query` (mesh frame), ascending
+    /// (the callers put them in the order Havok's query gives).
     pub fn query(&self, query: &Aabb, out: &mut Vec<u32>) {
         out.clear();
         if self.triangles.is_empty() {
