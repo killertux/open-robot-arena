@@ -801,9 +801,10 @@ impl Match {
                 on,
                 at,
                 seconds,
-            } => self
-                .duel
-                .apply_remote_immobile(*robot, *on, glam::Vec3::from_array(*at), *seconds),
+            } => {
+                self.duel
+                    .apply_remote_immobile(*robot, *on, glam::Vec3::from_array(*at), *seconds)
+            }
             NetEvent::Out { robot, reason } => self.duel.apply_remote_out(*robot, *reason),
         }
     }

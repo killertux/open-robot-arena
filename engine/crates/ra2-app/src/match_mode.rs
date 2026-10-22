@@ -595,6 +595,20 @@ impl Session {
         })
     }
 
+    /// Network play: this end's player drives robot `robot` (the host's is 0, a joiner's its panel's
+    /// place). The robot's keys, the chase camera, the watch and orbit cameras (they follow the
+    /// human player), the F1 reminder and the camera the match settles on after the intro all
+    /// name it. `Session::exhibition` made them for robot 0.
+    pub fn set_player_robot(&mut self, game: &Path, robot: usize) {
+        self.player_robot = robot;
+        self.matched.duel.human_robot = Some(robot);
+        self.default_camera = chase_camera(&self.matched.duel, robot);
+        if matches!(self.camera, DuelCamera::Chase { .. }) {
+            self.camera = self.default_camera;
+        }
+        self.load_reminder(game);
+    }
+
     /// Build the F1 reminder for the robot the player drives.
     fn load_reminder(&mut self, game: &Path) {
         let Some(entry) = self.matched.config.robots.get(self.player_robot) else {
@@ -695,6 +709,12 @@ impl Session {
     /// player-controlled session feeds robot 0; an AI-only session ignores it.
     pub fn set_drive(&mut self, input: DriveInput) {
         self.player_input = input;
+    }
+
+    /// Whether `robot` is driven from outside the AI (a remote human's inputs, or a stand-in
+    /// driver): the AI never takes such a robot over.
+    pub fn is_driven_from_outside(&self, robot: usize) -> bool {
+        self.remote_inputs.get(robot).is_some_and(|d| d.is_some())
     }
 
     /// Network play, host side: drive `robot` from a remote player's input
@@ -1084,7 +1104,11 @@ impl Session {
         if self.immobile_cards.len() < robots {
             self.immobile_cards.resize(robots, (0.0, false));
         }
-        for (card, robot) in self.immobile_cards.iter_mut().zip(&self.matched.duel.robots) {
+        for (card, robot) in self
+            .immobile_cards
+            .iter_mut()
+            .zip(&self.matched.duel.robots)
+        {
             card.0 = (card.0 - dt).max(0.0);
             if robot.immobilized && !card.1 {
                 card.0 = hud::IMMOBILE_CARD_SECONDS;
@@ -1094,7 +1118,7 @@ impl Session {
     }
 
     /// The immobility warning counters hung over the robots and the `IMMOBILE!` cards over
-    /// their status groups (docs/37 section 12), above the HUD like the original's popups.
+    /// their status groups (docs/32 section 6), above the HUD like the original's popups.
     fn add_immobility(&mut self, scene: &mut UiScene) {
         let warnings = self.matched.duel.immobility_warnings();
         let cards: Vec<usize> = self
@@ -1972,7 +1996,10 @@ mod tests {
         // `scene()` clones the HUD and hangs one group per warning in the draw list: they only
         // lift the quad count when the project's art is there.
         let counters = quads(&mut session);
-        assert!(counters > plain, "the counters draw ({counters} vs {plain})");
+        assert!(
+            counters > plain,
+            "the counters draw ({counters} vs {plain})"
+        );
         until(&mut session, 21.05);
         assert_eq!(session.matched.state(), MatchState::Over);
         let report = session.matched.report();
@@ -1997,10 +2024,7 @@ mod tests {
         assert_eq!(hud::immobile_number(19.5), None, "trunc(0.5) is 0: hidden");
         assert_eq!(hud::immobile_number(20.0), None);
         // 104 x 32 card centred in the 84 x 64 status group: x - 10, y + 16.
-        assert_eq!(
-            hud::immobile_card_at([11.0, 16.0, 84.0, 64.0]),
-            [1.0, 32.0]
-        );
+        assert_eq!(hud::immobile_card_at([11.0, 16.0, 84.0, 64.0]), [1.0, 32.0]);
     }
 
     #[test]

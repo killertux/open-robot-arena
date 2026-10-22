@@ -406,7 +406,11 @@ impl App {
             hover: None,
             next_update: Instant::now(),
             error: None,
-            net: crate::net_play::NetPlay::new(),
+            net: {
+                let mut net = crate::net_play::NetPlay::new();
+                net.load_config(game);
+                net
+            },
         })
     }
 
@@ -1480,6 +1484,12 @@ impl ApplicationHandler for App {
                     session.advance(UPDATE.as_secs_f32());
                 }
                 self.net.after_step(session, UPDATE.as_secs_f32());
+            }
+            if self.session.is_some() && self.net.take_leave_match() {
+                // The host ended the match under this end: back to the lobby.
+                ra2script::set_paused(false);
+                self.session = None;
+                self.net.end_match();
             }
             if let Some(hq) = &mut self.hq {
                 hq.advance(UPDATE.as_secs_f32());

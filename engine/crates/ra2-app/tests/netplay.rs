@@ -639,3 +639,421 @@ fn a_rematch_in_the_same_lobby_starts_from_a_clean_gate() {
     host.leave();
     guest.leave();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Two processes, one host and one joiner, for what happens at the edges of a match (docs/38 §13):
+// who drives and who is followed, a joiner that leaves, a host that ends the match.
+// ---------------------------------------------------------------------------------------------
+
+const EDGE_TESTS: [&str; 4] = [
+    "each_player_drives_and_follows_their_own_robot",
+    "a_remote_human_who_leaves_leaves_the_robot_standing",
+    "a_joiner_leaves_the_match_when_the_host_ends_it_early",
+    "a_finished_match_keeps_the_joiners_results_after_the_end_message",
+];
+
+/// Run `test` as a host process and a joiner process; return what each reported on its `RESULT` line.
+fn edge_processes(test: &str) -> Option<(String, String)> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    let _game = game_dir()?;
+    let port = {
+        let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        s.local_addr().unwrap().port()
+    };
+    let save = |role: &str| {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("netplay-edge-{role}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+    let exe = std::env::current_exe().unwrap();
+    let (tx, rx) = mpsc::channel::<(String, String)>();
+    let mut children = Vec::new();
+    let mut backlog = Vec::new();
+    for role in ["host", "guest"] {
+        let mut c = Command::new(&exe)
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env("RA2_NETTEST_ROLE", role)
+            .env("RA2_NETTEST_PORT", port.to_string())
+            .env("ORA_SAVE_DIR", save(role))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let out = c.stdout.take().unwrap();
+        let tx = tx.clone();
+        let who = role.to_string();
+        std::thread::spawn(move || {
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                if let Some((_, rest)) = line.split_once("NETTEST ") {
+                    let _ = tx.send((who.clone(), rest.to_string()));
+                }
+            }
+        });
+        children.push(c);
+        if role == "host" {
+            // The joiner dials a listening host.
+            loop {
+                let (r, line) = rx
+                    .recv_timeout(Duration::from_secs(60))
+                    .expect("host listens");
+                if r == "host" && line.starts_with("LISTENING") {
+                    break;
+                }
+                backlog.push((r, line));
+            }
+        }
+    }
+    let mut results = std::collections::BTreeMap::new();
+    let mut started = false;
+    let end = Instant::now() + Duration::from_secs(150);
+    while results.len() < 2 {
+        let (role, line) = match backlog.pop() {
+            Some(x) => x,
+            None => {
+                let left = end.saturating_duration_since(Instant::now());
+                rx.recv_timeout(left).unwrap_or_else(|_| {
+                    for c in children.iter_mut() {
+                        let _ = c.kill();
+                    }
+                    panic!("timed out; got {results:?}");
+                })
+            }
+        };
+        if line.starts_with("JOINED guest") && !started {
+            started = true;
+            children[0]
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"START\n")
+                .unwrap();
+        }
+        if let Some(rest) = line.strip_prefix("RESULT ") {
+            results.insert(role, rest.to_string());
+        }
+    }
+    for c in children.iter_mut() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    Some((results["host"].clone(), results["guest"].clone()))
+}
+
+/// What one end of an edge scenario does; the parent reads its `RESULT` line.
+fn edge_child(test: &str, role: &str) {
+    use ra2sim::r#match::MatchState;
+    use std::io::BufRead;
+    let game = game_dir().expect("the game install");
+    let _scripts = ra2script::lock();
+    let port: u16 = std::env::var("RA2_NETTEST_PORT").unwrap().parse().unwrap();
+    let host = role == "host";
+    let mut net = loopback(if host { "Host" } else { "Guest" });
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    if host {
+        net.host_port = port;
+        net.host("Edges", None, ConnectionSpeed::Lan).unwrap();
+        report("LISTENING".into());
+    } else {
+        net.join(addr).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let lobby_len = |net: &NetPlay| net.game.as_ref().map_or(0, |g| g.lobby.slots.len());
+    while lobby_len(&net) < 2 && Instant::now() < deadline {
+        net.game.as_mut().unwrap().poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(lobby_len(&net), 2, "{role}: never joined");
+    report(format!("JOINED {role}"));
+    let arena = "Arenas/box.py";
+    if host {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = std::io::stdin().lock().read_line(&mut line);
+            let _ = tx.send(());
+        });
+        while rx.try_recv().is_err() && Instant::now() < deadline {
+            net.game.as_mut().unwrap().poll();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let g = net.game.as_mut().unwrap();
+        g.set_settings("DEATHMATCH", "Heavyweight", arena);
+        g.start_match(arena);
+        g.set_schema(net_play::schema());
+        net.assign_robots();
+    } else {
+        let mut prepared = false;
+        while !prepared && Instant::now() < deadline {
+            for e in net.game.as_mut().unwrap().poll() {
+                if let GameEvent::Prepare { .. } = e {
+                    prepared = true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(prepared, "{role}: no Prepare");
+        net.game.as_mut().unwrap().set_schema(net_play::schema());
+        net.assign_robots();
+    }
+    let mut session = net.match_session(&game, arena).unwrap();
+    session.skip_intro();
+    let dt = session.matched.config.dt;
+    let mut shell = Shell::boot(&game, [800.0, 600.0]).unwrap();
+    let mine = if host { 0 } else { 1 };
+
+    // What this end follows and drives (before anything moves).
+    let chase = match session.camera {
+        ra2sim::DuelCamera::Chase { robot, .. } => robot as i64,
+        _ => -1,
+    };
+    let human = session.matched.duel.human_robot.map_or(-1, |r| r as i64);
+    let driven = session.player_robot;
+    let mut fight = 0u32;
+    let mut quit_at: Option<u32> = None;
+    let mut start_pos = [glam::Vec3::ZERO; 2];
+    let mut left_at = None;
+    let mut keys_from = 0u32;
+    let mut over_at = None;
+    let mut frames = 0u32;
+    // The windowed app's frame order (`about_to_wait`), with its idle.
+    let out: String = loop {
+        frames += 1;
+        assert!(
+            Instant::now() < deadline + Duration::from_secs(80),
+            "{role}: the scenario did not finish (fight {fight})"
+        );
+        let fighting = session.matched.state() == MatchState::Fight;
+        if fighting {
+            fight += 1;
+        }
+        if fighting && fight == 1 {
+            for (i, p) in start_pos.iter_mut().enumerate() {
+                *p = session.robot_position(i).unwrap();
+            }
+        }
+        match (test, role) {
+            (t, _) if t == EDGE_TESTS[0] && fighting && fight == 20 => {
+                // Both hold forward.
+                keys_from = fight;
+                session.set_drive(DriveInput::new(1.0, 0.0));
+            }
+            (t, "guest") if t == EDGE_TESTS[1] && fighting && fight == 40 => {
+                net.leave();
+                break "LEFT".to_string();
+            }
+            (t, "host") if t == EDGE_TESTS[2] && fighting && fight == 40 => {
+                // The host quits its match (the pause dialog's `End Match`) and is back in the
+                // lobby, still running its session.
+                net.end_match();
+                quit_at = Some(frames);
+            }
+            (t, "host") if t == EDGE_TESTS[3] && fighting && fight == 40 => {
+                assert!(session.matched.end_by_judges());
+            }
+            _ => {}
+        }
+        net.tick(&mut shell).unwrap();
+        if let Some(at) = quit_at {
+            // The host's lobby: only the session runs.
+            std::thread::sleep(Duration::from_millis(10));
+            if frames > at + 150 {
+                break format!("QUIT host_state={:?}", session.matched.state());
+            }
+            continue;
+        }
+        net.before_step(&mut session);
+        std::thread::sleep(Duration::from_millis(3));
+        if net.match_begun() {
+            session.step();
+        }
+        net.after_step(&mut session, dt);
+        std::thread::sleep(Duration::from_millis(8));
+        let over = matches!(
+            session.matched.state(),
+            MatchState::Over | MatchState::Results
+        );
+        if !host && (test == EDGE_TESTS[2] || test == EDGE_TESTS[3]) {
+            let in_match = net.game.as_ref().is_some_and(|g| g.in_match());
+            if net.take_leave_match() {
+                break format!(
+                    "LEAVE state={:?} in_match={in_match}",
+                    session.matched.state()
+                );
+            }
+            if test == EDGE_TESTS[3] && over {
+                let first = *over_at.get_or_insert(frames);
+                if !in_match && frames > first + 30 {
+                    break format!(
+                        "OVER state={:?} in_match={in_match} winners={:?}",
+                        session.matched.state(),
+                        session.matched.report().winners
+                    );
+                }
+            }
+        }
+        if host && test == EDGE_TESTS[3] && over {
+            let first = *over_at.get_or_insert(frames);
+            if frames > first + 200 {
+                break format!("HOST over state={:?}", session.matched.state());
+            }
+        }
+        if test == EDGE_TESTS[0] && keys_from > 0 && fight >= keys_from + 150 {
+            let moved: Vec<String> = (0..2)
+                .map(|i| {
+                    format!(
+                        "{:.2}",
+                        (session.robot_position(i).unwrap() - start_pos[i]).length()
+                    )
+                })
+                .collect();
+            break format!(
+                "DRIVE chase={chase} human={human} driven={driven} mine={mine} moved={}",
+                moved.join(",")
+            );
+        }
+        if host && test == EDGE_TESTS[1] {
+            match left_at {
+                None => {
+                    if net.game.as_ref().is_some_and(|g| g.lobby.slots.len() == 1) {
+                        left_at = Some(fight);
+                        start_pos[1] = session.robot_position(1).unwrap();
+                    }
+                }
+                Some(at) if fight >= at + 400 => {
+                    let moved = (session.robot_position(1).unwrap() - start_pos[1]).length();
+                    let d = &session.matched.duel;
+                    break format!(
+                        "STANDING slots=1 moved={moved:.2} state={:?} out={},{} outside={}",
+                        session.matched.state(),
+                        d.robots[1].immobilized,
+                        d.robots[1].destroyed || d.robots[1].eliminated,
+                        session.is_driven_from_outside(1),
+                    );
+                }
+                Some(_) => {}
+            }
+        }
+    };
+    report(format!("RESULT {out}"));
+    net.leave();
+}
+
+fn edge_role(test: &str) -> bool {
+    match std::env::var("RA2_NETTEST_ROLE") {
+        Ok(role) => {
+            edge_child(test, &role);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The host follows and drives robot 0, the joiner robot 1: its chase camera, the human player the
+/// watch and orbit cameras follow, the robot its keys drive, and the keys it sent move that robot
+/// on the host.
+#[test]
+fn each_player_drives_and_follows_their_own_robot() {
+    if edge_role(EDGE_TESTS[0]) {
+        return;
+    }
+    let Some((host, guest)) = edge_processes(EDGE_TESTS[0]) else {
+        return;
+    };
+    println!("host: {host}\nguest: {guest}");
+    assert!(host.contains("chase=0 human=0 driven=0 mine=0"), "{host}");
+    assert!(guest.contains("chase=1 human=1 driven=1 mine=1"), "{guest}");
+    let moved = |s: &str| -> Vec<f32> {
+        s.split("moved=")
+            .nth(1)
+            .unwrap()
+            .split(',')
+            .map(|v| v.trim().parse().unwrap())
+            .collect()
+    };
+    let h = moved(&host);
+    assert!(h[0] > 1.0, "the host's robot drives: {host}");
+    assert!(
+        h[1] > 1.0,
+        "the joiner's keys drive robot 1 on the host: {host}"
+    );
+    let g = moved(&guest);
+    assert!(g[1] > 1.0, "the joiner's own robot drives: {guest}");
+}
+
+/// A joiner that goes mid-match: the host's lobby loses the slot, the robot stays where it was
+/// (no AI takes it over, no `PlayerOut` is sent): the original's `DESTROY_PLAYER` is a lobby event
+/// (`0x4930a0`, docs/38 section 13).
+#[test]
+fn a_remote_human_who_leaves_leaves_the_robot_standing() {
+    if edge_role(EDGE_TESTS[1]) {
+        return;
+    }
+    let Some((host, guest)) = edge_processes(EDGE_TESTS[1]) else {
+        return;
+    };
+    println!("host: {host}\nguest: {guest}");
+    assert!(guest.starts_with("LEFT"), "{guest}");
+    assert!(host.starts_with("STANDING slots=1"), "{host}");
+    let moved: f32 = host
+        .split("moved=")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(moved < 0.3, "the robot was driven off: {host}");
+    assert!(host.contains("out=false,false"), "{host}");
+    assert!(host.contains("outside=true"), "{host}");
+}
+
+/// The host quits its match early: `giEndMatchMessage` sends the joiner back to the lobby.
+#[test]
+fn a_joiner_leaves_the_match_when_the_host_ends_it_early() {
+    if edge_role(EDGE_TESTS[2]) {
+        return;
+    }
+    let Some((host, guest)) = edge_processes(EDGE_TESTS[2]) else {
+        return;
+    };
+    println!("host: {host}\nguest: {guest}");
+    assert!(host.starts_with("QUIT"), "{host}");
+    assert!(guest.starts_with("LEAVE"), "{guest}");
+    assert!(guest.contains("in_match=false"), "{guest}");
+}
+
+/// The normal end: `0x137` then `0x131`; the joiner's match is over with the host's winners, its
+/// session is back in the lobby phase, and the window is not asked to leave (the results stay).
+#[test]
+fn a_finished_match_keeps_the_joiners_results_after_the_end_message() {
+    if edge_role(EDGE_TESTS[3]) {
+        return;
+    }
+    let Some((_host, guest)) = edge_processes(EDGE_TESTS[3]) else {
+        return;
+    };
+    println!("guest: {guest}");
+    assert!(guest.starts_with("OVER"), "{guest}");
+    assert!(guest.contains("in_match=false"), "{guest}");
+}
+
+/// The name a player has by default is the original's (`Default Player`) and `ra2.cfg`'s
+/// `[Multiplayer Config]` may replace it and the port.
+#[test]
+fn the_default_player_name_is_the_originals_and_ra2_cfg_replaces_it() {
+    let mut net = NetPlay::new();
+    assert_eq!(net.player_name, "Default Player");
+    net.apply_config(&ra2fmt::cfg::Cfg::parse(
+        "[Begin Multiplayer Config]\r\nPlayerName=Wedge\r\nPort=4242\r\n[End Multiplayer Config]\r\n",
+    ));
+    assert_eq!(net.player_name, "Wedge");
+    assert_eq!(net.host_port, 4242);
+    // An empty name keeps the default.
+    let mut net = NetPlay::new();
+    net.apply_config(&ra2fmt::cfg::Cfg::parse("PlayerName=\r\n"));
+    assert_eq!(net.player_name, "Default Player");
+}

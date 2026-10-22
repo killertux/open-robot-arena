@@ -261,6 +261,14 @@ pub enum NetAction {
     Ended(String),
 }
 
+/// The name a player has until `ra2.cfg` or the lobby's `screen name` box says otherwise: the
+/// network object's constructor copies `Default Player` (`0x709644`, `0x621ec9`) into its name
+/// string (`+0x244`), and the prematch constructor shows it in `screen name` (`0x49105a`-`0x491085`).
+/// `FUN_006229e0` (`0x622941`) replaces it with `PlayerName=` of `ra2.cfg`'s
+/// `[Begin Multiplayer Config]` section (`FUN_00622660` sets it) and the game port, 9791 (`0x263f`),
+/// with `Port=`.
+pub const DEFAULT_PLAYER_NAME: &str = "Default Player";
+
 /// The multiplayer screens' network state.
 pub struct NetPlay {
     pub game: Option<NetGame>,
@@ -296,6 +304,9 @@ pub struct NetPlay {
     /// messages, which need the match) both run every frame in the windowed
     /// app; each takes only what it owns, so no event is dropped or seen twice.
     inbox: Vec<GameEvent>,
+    /// Joiner: the host's `giEndMatchMessage` (`0x131`) arrived while this end's match was still
+    /// running; the window leaves it for the lobby ([`NetPlay::take_leave_match`]).
+    leave_match: bool,
 }
 
 impl Default for NetPlay {
@@ -319,7 +330,7 @@ impl NetPlay {
             bind_ip: "0.0.0.0".parse().expect("an address"),
             host_port: dpn::DEFAULT_PORT,
             extra_hosts,
-            player_name: "Player".to_string(),
+            player_name: DEFAULT_PLAYER_NAME.to_string(),
             link: LinkConfig::default(),
             robot_of: BTreeMap::new(),
             remote: BTreeMap::new(),
@@ -330,6 +341,28 @@ impl NetPlay {
             loaded: Default::default(),
             begun: false,
             inbox: Vec::new(),
+            leave_match: false,
+        }
+    }
+
+    /// Read the install's `ra2.cfg` multiplayer keys: `PlayerName=` (a name that is not empty)
+    /// and `Port=` (`FUN_006229e0`).
+    pub fn load_config(&mut self, game: &std::path::Path) {
+        let cfg = crate::options::read_cfg(game);
+        self.apply_config(&cfg);
+    }
+
+    /// [`NetPlay::load_config`] on a parsed file.
+    pub fn apply_config(&mut self, cfg: &ra2fmt::cfg::Cfg) {
+        if let Some(name) = cfg
+            .get("PlayerName")
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            self.player_name = name.to_string();
+        }
+        if let Some(port) = cfg.get("Port").and_then(|p| p.trim().parse::<u16>().ok()) {
+            self.host_port = port;
         }
     }
 
@@ -458,6 +491,7 @@ impl NetPlay {
     }
 
     fn reset_match(&mut self) {
+        self.leave_match = false;
         self.end_sent = false;
         self.loaded_sent = false;
         self.loaded.clear();
@@ -500,10 +534,24 @@ impl NetPlay {
         self.begun
     }
 
+    /// Joiner: the host ended the match while this end's was still on (an `End Match` from the
+    /// pause dialog, a host that gave up): the window leaves the match for the lobby, as the
+    /// original's `Game Window` `Show(0)` does (docs/38 section 13). Taken once.
+    pub fn take_leave_match(&mut self) -> bool {
+        std::mem::take(&mut self.leave_match)
+    }
+
     /// The local match is over (results closed) and this end is back in the
     /// lobby: a rematch starts from a clean gate, the session stops syncing,
     /// and match events nobody consumed are dropped.
     pub fn end_match(&mut self) {
+        // A host that leaves its match before the end was sent ends it for the joiners too
+        // (`giEndMatchMessage`): they return to the lobby (`take_leave_match`).
+        if let Some(game) = &mut self.game {
+            if game.is_host() && game.in_match() && !self.end_sent {
+                game.broadcast_guaranteed(&Message::EndMatch);
+            }
+        }
         self.reset_match();
         self.remote.clear();
         self.last_sent = None;
@@ -711,6 +759,11 @@ impl NetPlay {
         let Some(doc) = shell.document_mut() else {
             return;
         };
+        // The prematch constructor puts the network name in `screen name` (the box's own sample
+        // text is "Mister Roboto").
+        if let Some(me) = me.and_then(|m| lobby.slot(m)) {
+            set_text(doc, "screen name", &me.name);
+        }
         set_text(doc, "arena name", &lobby.arena);
         set_text(doc, "game type", &lobby.game_type);
         let chat: Vec<String> = lobby
@@ -821,8 +874,7 @@ impl NetPlay {
             )?
         };
         if let Some(robot) = robot {
-            session.player_robot = robot;
-            session.matched.duel.human_robot = Some(robot);
+            session.set_player_robot(game, robot);
         }
         session.matched.set_net_role(if net.is_host() {
             NetRole::Host
@@ -943,6 +995,22 @@ impl NetPlay {
                     GameEvent::Chat { text, .. } => session.push_chat_line(text),
                     GameEvent::Message { from, message } if from == ra2net::session::HOST_ID => {
                         match message {
+                            // `giEndMatchMessage` -> the prematch window's `0x495250`: when the
+                            // match is still on, the in-game popup closes and the game window
+                            // hides (back to the lobby, `FUN_00475c30(0)`); either way the game
+                            // phase is back at 1 (`FUN_004d0200(1)`), the lobby's again: the
+                            // session stops syncing and accepts joiners. A finished match keeps
+                            // its results window until it is closed.
+                            Message::EndMatch => {
+                                use ra2sim::r#match::MatchState;
+                                if !matches!(
+                                    session.matched.state(),
+                                    MatchState::Over | MatchState::Results
+                                ) {
+                                    self.leave_match = true;
+                                }
+                                game.end_match();
+                            }
                             Message::MatchWin { first, second } => {
                                 let winners = [first, second]
                                     .into_iter()

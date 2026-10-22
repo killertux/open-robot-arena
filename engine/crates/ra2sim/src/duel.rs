@@ -2606,7 +2606,7 @@ impl Duel {
 
     /// The point the immobility rule follows: the robot's centre of mass. The live captures
     /// (`robots-*`) draw the warning counter at the resting centre of mass, 0.26 m above the
-    /// body origin that [`Robot::position`] returns (docs/37 section 12).
+    /// body origin that [`Robot::position`] returns (docs/32 section 6).
     fn robot_centre(&self, i: usize) -> Vec3 {
         let r = &self.robots[i];
         self.physics
@@ -2623,11 +2623,7 @@ impl Duel {
             return;
         }
         let positions: Vec<Option<Vec3>> = (0..self.robots.len())
-            .map(|i| {
-                self.robots[i]
-                    .is_alive()
-                    .then(|| self.robot_centre(i))
-            })
+            .map(|i| self.robots[i].is_alive().then(|| self.robot_centre(i)))
             .collect();
         // `FUN_00418040` returns at once once the match is over (`+0x8f`): when the first
         // immobilized robot leaves one robot (or team) standing, a robot that reaches 20 s in the
