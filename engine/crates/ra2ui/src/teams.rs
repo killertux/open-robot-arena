@@ -98,7 +98,7 @@ impl Roster {
 
 /// Every record of one side, empty player slots included.
 pub fn rosters(game: &Path, side: Side) -> Result<Vec<Roster>, String> {
-    let path = game.join(side.table());
+    let path = ra2fmt::saves::resolve(game, side.table());
     let table = team::read_table(&path)?;
     Ok(table
         .teams
@@ -121,6 +121,15 @@ pub fn empty_player_record() -> Team {
         .unwrap_or_default()
 }
 
+/// Write a team table to the save directory (never into the install).
+fn write_table(game: &Path, table: &team::TeamTable, read_from: &Path) -> Result<(), String> {
+    let out = ra2fmt::saves::prepare_write(game, read_from)
+        .map_err(|e| format!("{}: {e}", read_from.display()))?;
+    table
+        .write_to(&out)
+        .map_err(|e| format!("{}: {e}", out.display()))
+}
+
 /// `New Team`'s OK (`FUN_004ebd40`, result 1): the first empty slot of
 /// `Teams/Teams.txt` becomes the team (`FUN_00502680(slot, 1)` marks it
 /// used), and the table is written at once: the dialog broadcasts message 200
@@ -135,7 +144,7 @@ pub fn create_team(
     motto: &str,
     logo: &str,
 ) -> Result<Option<usize>, String> {
-    let path = game.join(Side::Player.table());
+    let path = ra2fmt::saves::resolve(game, Side::Player.table());
     let mut table = team::read_table(&path)?;
     let Some(slot) = table.teams.iter().position(|t| !t.is_named()) else {
         return Ok(None);
@@ -147,10 +156,9 @@ pub fn create_team(
     record.motto = motto.to_string();
     record.logo = logo.to_string();
     table.teams[slot] = record;
-    table
-        .write_to(&path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    write_table(game, &table, &path)?;
     let folder = game.join(Side::Player.root()).join(format!("Team{slot}"));
+    let folder = ra2fmt::saves::redirect(game, &folder);
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     Ok(Some(slot))
 }
@@ -164,7 +172,7 @@ pub fn update_team(
     motto: &str,
     logo: &str,
 ) -> Result<(), String> {
-    let path = game.join(Side::Player.table());
+    let path = ra2fmt::saves::resolve(game, Side::Player.table());
     let mut table = team::read_table(&path)?;
     let record = table
         .teams
@@ -174,9 +182,7 @@ pub fn update_team(
     record.name = name.to_string();
     record.motto = motto.to_string();
     record.logo = logo.to_string();
-    table
-        .write_to(&path)
-        .map_err(|e| format!("{}: {e}", path.display()))
+    write_table(game, &table, &path)
 }
 
 /// A robot built in the workshop from an empty inventory selection joins
@@ -184,7 +190,7 @@ pub fn update_team(
 /// the robot is `Teams/Team<team>/Bot<n>.bot`. The table is written at once.
 /// Returns the new robot's path.
 pub fn add_robot(game: &Path, team: usize) -> Result<PathBuf, String> {
-    let path = game.join(Side::Player.table());
+    let path = ra2fmt::saves::resolve(game, Side::Player.table());
     let mut table = team::read_table(&path)?;
     let record = table
         .teams
@@ -193,12 +199,14 @@ pub fn add_robot(game: &Path, team: usize) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{}: team slot {team} is empty", path.display()))?;
     let folder = game.join(Side::Player.root()).join(format!("Team{team}"));
     let slot = (0..)
-        .find(|n: &i32| !record.robots.contains(n) && !folder.join(format!("Bot{n}.bot")).exists())
+        .find(|n: &i32| {
+            !record.robots.contains(n)
+                && !ra2fmt::saves::resolve(game, format!("Teams/Team{team}/Bot{n}.bot")).exists()
+        })
         .expect("a free robot slot");
     record.robots.push(slot);
-    table
-        .write_to(&path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    write_table(game, &table, &path)?;
+    let folder = ra2fmt::saves::redirect(game, &folder);
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     Ok(folder.join(format!("Bot{slot}.bot")))
 }
@@ -208,7 +216,7 @@ pub fn add_robot(game: &Path, team: usize) -> Result<PathBuf, String> {
 /// same message-200 listener. The robots' files are left where they are; the
 /// slot simply lists none.
 pub fn delete_team(game: &Path, slot: usize) -> Result<(), String> {
-    let path = game.join(Side::Player.table());
+    let path = ra2fmt::saves::resolve(game, Side::Player.table());
     let mut table = team::read_table(&path)?;
     let Some(existing) = table.teams.get(slot) else {
         return Err(format!("{}: no team slot {slot}", path.display()));
@@ -217,19 +225,16 @@ pub fn delete_team(game: &Path, slot: usize) -> Result<(), String> {
     let mut record = empty_player_record();
     record.line_ending = ending;
     table.teams[slot] = record;
-    table
-        .write_to(&path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    write_table(game, &table, &path)?;
     // The client's own per-team career sidecar (`ra2sim::career::
     // sidecar_path_for`) goes with the record.
+    // A file only the install has is hidden, never removed.
     let sidecar = if slot == 0 {
-        game.join("Teams").join("career.dat")
+        "Teams/career.dat".to_string()
     } else {
-        game.join("Teams").join(format!("career{slot}.dat"))
+        format!("Teams/career{slot}.dat")
     };
-    if sidecar.is_file() {
-        std::fs::remove_file(&sidecar).map_err(|e| format!("{}: {e}", sidecar.display()))?;
-    }
+    ra2fmt::saves::remove(game, &sidecar).map_err(|e| format!("{sidecar}: {e}"))?;
     Ok(())
 }
 
@@ -241,9 +246,12 @@ pub fn career_player_slot(rosters: &[Roster]) -> Option<usize> {
 
 /// `<game>/Teams/Team<slot>/Bot<bot>.bot` or `<game>/AI/Team<slot>/Bot<bot>.bot`.
 pub fn bot_path(game: &Path, side: Side, team: usize, bot: i32) -> PathBuf {
-    game.join(side.root())
-        .join(format!("Team{team}"))
-        .join(format!("Bot{bot}.bot"))
+    ra2fmt::saves::resolve(
+        game,
+        Path::new(side.root())
+            .join(format!("Team{team}"))
+            .join(format!("Bot{bot}.bot")),
+    )
 }
 
 /// A `.bot` file's own name and weight class, for the picker's labels and

@@ -339,6 +339,8 @@ def run_live_shots(arena, tmp):
 def env():
     e = dict(os.environ)
     e["RA2_GAME"] = GAME
+    # Saves land in the scratch install itself, never in the user's save dir.
+    e["ORA_SAVE_DIR"] = GAME
     return e
 
 

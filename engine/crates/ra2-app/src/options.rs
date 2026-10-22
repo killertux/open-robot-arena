@@ -60,24 +60,15 @@ pub fn read_cfg(game: &Path) -> Cfg {
         .unwrap_or_else(|_| Cfg::parse(""))
 }
 
-/// Where the client keeps the player's settings: the user's own config
-/// directory (`RA2_CONFIG` overrides the file), never the install, which is
+/// Where the client keeps the player's settings: `ra2.cfg` in the save
+/// directory ([`ra2fmt::saves`]; `RA2_CONFIG` overrides the file), never the install, which is
 /// read-only data. The first read falls back to the install's shipped
 /// `ra2.cfg`; the first change creates this file from it.
-pub fn settings_path(_game: &Path) -> PathBuf {
+pub fn settings_path(game: &Path) -> PathBuf {
     if let Some(path) = std::env::var_os("RA2_CONFIG") {
         return PathBuf::from(path);
     }
-    let base = if cfg!(windows) {
-        std::env::var_os("APPDATA").map(PathBuf::from)
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-    };
-    base.unwrap_or_else(std::env::temp_dir)
-        .join("open-robot-arena")
-        .join("ra2.cfg")
+    ra2fmt::saves::target(game, "ra2.cfg")
 }
 
 /// The initial window size from `FSDisplayWidth`/`FSDisplayHeight`, with zero

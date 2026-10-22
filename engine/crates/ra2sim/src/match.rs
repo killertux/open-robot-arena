@@ -1024,7 +1024,7 @@ fn player_team_table(arena: &str) -> Vec<ra2fmt::team::Team> {
     let Some(root) = ra2_render::find_game_root(Path::new(arena)) else {
         return Vec::new();
     };
-    std::fs::read_to_string(root.join("Teams").join("Teams.txt"))
+    std::fs::read_to_string(ra2fmt::saves::resolve(&root, "Teams/Teams.txt"))
         .ok()
         .and_then(|text| ra2fmt::team::parse_table(&text).ok())
         .map(|table| table.teams)
@@ -1037,7 +1037,7 @@ fn team_table(arena: &str) -> Vec<ra2fmt::team::Team> {
     let Some(root) = ra2_render::find_game_root(Path::new(arena)) else {
         return Vec::new();
     };
-    std::fs::read_to_string(root.join("AI").join("Teams.txt"))
+    std::fs::read_to_string(ra2fmt::saves::resolve(&root, "AI/Teams.txt"))
         .map(|text| ra2fmt::team::parse(&text))
         .unwrap_or_default()
 }

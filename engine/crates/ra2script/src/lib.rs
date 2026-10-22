@@ -725,6 +725,11 @@ pub fn prepare_match(game_type: &str, players: Vec<i32>) {
     st.camera_commands.clear();
     st.intro_running = false;
     st.emitters.clear();
+    // Nor does it inherit the last one's queued engine requests (a damage or
+    // force call made after the last step, or by an arena never stepped) or its
+    // list of calls deferred to a later milestone.
+    st.requests.clear();
+    st.deferred.clear();
 }
 
 /// Set the game-type string the scripts read (`plus.getGameType`).
@@ -1094,6 +1099,28 @@ mod tests {
             assert_eq!(interval, crate::ARENA_TICK_INTERVAL);
             assert_eq!(interval, 0.25);
         });
+        crate::prepare_match("", Vec::new());
+    }
+
+    /// A new match starts with empty per-match queues: engine requests and
+    /// joint requests an earlier arena left behind are dropped.
+    #[test]
+    fn a_new_match_drops_the_last_ones_queues() {
+        let _guard = super::lock();
+        {
+            let mut st = crate::state();
+            st.requests.push(crate::Request::Zap {
+                bot: 1,
+                amount: 1.0,
+                radius: 1.0,
+            });
+            st.defer("something");
+        }
+        crate::prepare_match("DEATHMATCH", vec![0, 1]);
+        let st = crate::state();
+        assert!(st.requests.is_empty(), "requests carried over");
+        assert!(st.deferred.is_empty(), "deferred carried over");
+        drop(st);
         crate::prepare_match("", Vec::new());
     }
 

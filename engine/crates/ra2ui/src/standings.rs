@@ -74,8 +74,8 @@ pub struct Standing {
 /// loads them (`FUN_00502150`). The manager has sixteen slots; the AI table
 /// fills the player's empty slots, so a full table is sixteen teams.
 pub fn roster(game: &Path) -> Result<Vec<Team>, String> {
-    let player = ra2fmt::team::read(&game.join("Teams").join("Teams.txt"))?;
-    let ai = ra2fmt::team::read(&game.join("AI").join("Teams.txt"))?;
+    let player = ra2fmt::team::read(&ra2fmt::saves::resolve(game, "Teams/Teams.txt"))?;
+    let ai = ra2fmt::team::read(&ra2fmt::saves::resolve(game, "AI/Teams.txt"))?;
     let mut teams = player;
     teams.extend(ai);
     teams.truncate(SLOTS);
