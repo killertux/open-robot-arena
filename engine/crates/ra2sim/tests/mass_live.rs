@@ -257,13 +257,19 @@ fn alarms_wheel_bodies_match_the_original() {
 }
 
 /// A piston's rod body: its housing body's inertia with the diagonal at 0.2
-/// and the products of inertia unchanged. Live, ALARM's 33 kg hammer rod reads
-/// (9.830, 14.541, 7.282) on the diagonal and (-0.1215, 0.0264, -0.8657) off
-/// it, its chassis (49.149, 72.705, 36.411) with the same products
-/// (`fightcontacts-scout-alarm-box__live__001`, body `+0x19c`; Wide Load's rod
-/// likewise, docs/29 section 12m).
+/// and the products of inertia unchanged, in the *piston's* frame. Live,
+/// ALARM's 33 kg hammer rod reads (9.830, 14.541, 7.282) on the diagonal and
+/// (-0.1215, 0.0264, -0.8657) off it, its chassis (49.149, 72.705, 36.411)
+/// with the same products (`fightcontacts-scout-alarm-box__live__001`, body
+/// `+0x19c`), and its body frame is the chassis' turned half a turn about y,
+/// as its Burst Piston (`B` rows): in the chassis frame (9.830, 14.541,
+/// 7.282) / (0.1215, 0.0264, 0.8657). Wide Load's 63 kg rod has its chassis'
+/// frame, as its piston: (8.8616, 21.757, 17.3158) / (-0.4313, -0.2685,
+/// 0.9815) (`contacts-nohaz-wideload__live__001`; docs/29 sections 12m, 12q).
+/// Ours had put the tensor in the hammer head's (and the T connector's)
+/// frame, a quarter turn off.
 #[test]
-fn alarms_hammer_rod_takes_its_chassis_inertia() {
+fn piston_rods_take_their_chassis_inertia_in_the_pistons_frame() {
     let Some(game) = game_dir() else {
         eprintln!("skipped: no game data (set RA2_GAME)");
         return;
@@ -274,31 +280,49 @@ fn alarms_hammer_rod_takes_its_chassis_inertia() {
     }
     let _scripts = ra2script::lock();
     let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
-    let setup = BotSetup {
-        path: game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string(),
-        yaw_deg: None,
-        spawn: None,
-    };
-    let d = Duel::new(&arena, std::slice::from_ref(&setup)).expect("a duel");
-    let r = &d.robots[0];
-    let rod = (1..r.rig.parts.len())
-        .find(|&p| r.rig.parts[p].joint.is_some_and(|j| j.slider))
-        .expect("a piston rod");
-    let (mass, _, inv) = d
-        .physics
-        .mass_properties(r.parts[rod].body)
-        .expect("mass properties");
-    assert!((mass - 33.0).abs() < 0.01, "rod {mass} kg, live 33");
-    let i = inv.inverse();
-    for (ours, live) in [
-        (i.x_axis.x, 9.830f32),
-        (i.y_axis.y, 14.541),
-        (i.z_axis.z, 7.282),
-        (i.y_axis.x, -0.1215),
-        (i.z_axis.x, 0.0264),
-        (i.z_axis.y, -0.8657),
+    for (bot, mass_live, live) in [
+        (
+            "AI/Team0/Bot1.bot",
+            33.0f32,
+            [9.830f32, 14.541, 7.282, 0.1215, 0.0264, 0.8657],
+        ),
+        (
+            "AI/Team8/Bot2.bot",
+            63.0,
+            [8.8616, 21.757, 17.3158, -0.4313, -0.2685, 0.9815],
+        ),
     ] {
-        assert!((ours - live).abs() < 0.01, "rod inertia {i:?}, live {live}");
+        let setup = BotSetup {
+            path: game.join(bot).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let d = Duel::new(&arena, std::slice::from_ref(&setup)).expect("a duel");
+        let r = &d.robots[0];
+        let rod = (1..r.rig.parts.len())
+            .find(|&p| r.rig.parts[p].joint.is_some_and(|j| j.slider))
+            .expect("a piston rod");
+        let (mass, _, inv) = d
+            .physics
+            .mass_properties(r.parts[rod].body)
+            .expect("mass properties");
+        assert!(
+            (mass - mass_live).abs() < 0.01,
+            "{bot}: rod {mass} kg, live {mass_live}"
+        );
+        let chassis = d.physics.state(r.parts[0].body).expect("chassis").rotation;
+        let body = d.physics.state(r.parts[rod].body).expect("rod").rotation;
+        let q = glam::Mat3::from_quat(chassis.inverse() * body);
+        let i = q * inv.inverse() * q.transpose();
+        let ours = [
+            i.x_axis.x, i.y_axis.y, i.z_axis.z, i.y_axis.x, i.z_axis.x, i.z_axis.y,
+        ];
+        for (o, l) in ours.iter().zip(live) {
+            assert!(
+                (o - l).abs() < 0.01,
+                "{bot}: rod inertia in the chassis frame {ours:?}, live {live:?}"
+            );
+        }
     }
 }
 
