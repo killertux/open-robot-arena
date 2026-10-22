@@ -345,9 +345,7 @@ fn child(role: &str) {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(prepared, "{role}: no Prepare");
-        let g = net.game.as_mut().unwrap();
-        g.set_schema(net_play::schema());
-        g.report_loaded();
+        net.game.as_mut().unwrap().set_schema(net_play::schema());
         net.assign_robots();
     }
     let spectating = net.is_spectator();
@@ -398,7 +396,11 @@ fn child(role: &str) {
         }
         net.before_step(&mut session);
         std::thread::sleep(Duration::from_millis(3));
-        session.step();
+        // Loaded is reported here; nobody's countdown runs until the host
+        // has heard every peer and begun the match (docs/38 §5).
+        if net.match_begun() {
+            session.step();
+        }
         net.after_step(&mut session, dt);
         for line in session.chat_lines() {
             seen.insert(line.to_string());

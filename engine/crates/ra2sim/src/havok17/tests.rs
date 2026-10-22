@@ -315,11 +315,18 @@ fn a_mesh_plate_rests_on_the_floor_with_distinct_points() {
         .collect();
     let plate = physics
         .create_body(
-            &BodyDesc::new(MotionType::Dynamic, ShapeDesc::MeshHull { points, indices })
-                .at(Vec3::new(0.0, 0.14, 0.0))
-                .with_mass(30.0)
-                .with_friction(0.5)
-                .with_restitution(0.0),
+            &BodyDesc::new(
+                MotionType::Dynamic,
+                ShapeDesc::MeshHull {
+                    points,
+                    indices,
+                    raw: Vec::new(),
+                },
+            )
+            .at(Vec3::new(0.0, 0.14, 0.0))
+            .with_mass(30.0)
+            .with_friction(0.5)
+            .with_restitution(0.0),
         )
         .unwrap();
     for _ in 0..120 {
@@ -368,9 +375,16 @@ fn mesh_slab(physics: &mut Havok17Backend, at: Vec3) -> BodyHandle {
         .collect();
     physics
         .create_body(
-            &BodyDesc::new(MotionType::Dynamic, ShapeDesc::MeshHull { points, indices })
-                .at(at)
-                .with_mass(30.0),
+            &BodyDesc::new(
+                MotionType::Dynamic,
+                ShapeDesc::MeshHull {
+                    points,
+                    indices,
+                    raw: Vec::new(),
+                },
+            )
+            .at(at)
+            .with_mass(30.0),
         )
         .unwrap()
 }

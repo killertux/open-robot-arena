@@ -3192,3 +3192,174 @@ broadphase's insertion order of the woken pairs (ours re-sorts them), which
 other arena objects get systems (the box's arena has an empty system with
 thresholds times 100); whether the original's hazards ever freeze with their
 motors on (a hinge controller's settings do not wake a body).
+
+### 12u. The contacts' order, the rest of it (fx/contact-order)
+
+Section 12t put the broadphase's pair order in and three ensembles moved away
+from live (Octagon ALARM 18.7 → 23.5, live 13.6; the §12s set-1 replays 3/2 →
+6/6 on the back, live 1/1; Tornado v RipBlade stuck on a wall in 2 of 9
+warmups). This round recovers the rest of the order from the binary, checks
+each part live with Frida, and compares the contact list substep by substep
+over whole fights with every body where live had it.
+
+New live captures (three sessions on `:7`, the prefix's `AI/`, `Teams/`,
+`Robot Designs/` and `ra2.cfg` sha256-identical before and after each; the
+first, 40 s, lost its agent at the first broadphase call and is not kept;
+manifest rows in `manifest-additions-2026-10-21-contact-order.tsv`):
+`ord-scout-alarm-box__live__000` and `__001` (new agent `frida/ra2_order.js`,
+run with `ra2_hook.py`; box Scout v ALARM with the shipped AIs, hazards off,
+40 s and 25 s): every collidable in the broadphase (`C`: shape type `+0x18`,
+`+0x50`, body, geometry, the OBB tree's leaves depth first), the projected lists
+(`L`), every pair offered (`P`, `0x55a750`), every MOPP query's result (`Q`,
+`0x566a80`), every resolver entry (`R`, `0x53ed80`) and island (`I`, `0x559720`),
+and in `__001` every 50th call each listed collidable's box with its body (`X`).
+
+**The tool.** `examples/orderprobe.rs` (`PhysicsBackend::detect_now`, a
+diagnostic: one detection where the bodies are) places every body of both
+robots at its live pose at every resolver entry of a capture (the
+`fightcontacts-...` `R`/`B` rows: 2000-3800 entries a fight) and runs our
+detection, so our manifolds age with live's poses; `tools/oracle/twobody/
+ordercmp.py` compares the two lists entry by entry (pair set, pair order, A/B
+orientation, point count, point order). The original's body frames are not
+ours for the wheels, the fork and the rod (a fixed turn, up to 2.1 rad); the
+probe takes each body's turn relative to its chassis from the live rest poses
+(`twobody-...__live__000` `REST`), which leaves a wheel's spin about its axle
+a few hundredths off. `seqcmp.py` does the same for the §12s replays (their
+first divergence per trial).
+
+**(c) The broadphase's lists (recovered, verified live).** There is no
+insertion order: every detection the active list is projected afresh from the
+active collidables (`0x559c20`) and sorted (`0x559ec0`: insertion sort up to 16
+entries, quicksort above), the inactive list likewise whenever a body changed
+state (flag `+0x1d1`), and the fixed list is projected when it is built. So a
+woken or new pair falls where its box puts it. What §12t missed is the box:
+live (`X` rows) a moving collidable's box is a cube, the same size whatever the
+body's attitude, of half side `r + tol/2` about a point fixed in its body, `r`
+the smallest sphere around the collidable's vertices (Welzl; every one of 41
+moving collidables of both robots to 0.0002 m, the Scout's chassis 1.0377 m,
+ALARM's 1.1072 m, more than half its longest span 1.100 m); a fixed one's is
+its box plus `tol/2`. Ours sorted moving collidables by their turning box, so
+the Scout's two wheels swapped places whenever it turned. Now
+`narrow::bounding_sphere`, `Piece::sphere`, `WorldPiece::sweep`.
+
+**(b) A and B (recovered, verified live).** `0x55a750` puts first the
+collidable with the greater shape type (`+0x18`: convex `0x400` before mesh `4`)
+and between equal types the greater `+0x50`, which is the collidables' creation
+count (live 0 for the arena, 1-6 its props, then the robots' pieces in the
+order the game builds them: ALARM's after the Scout's). The convex x mesh agent
+(`0x545b50`) keeps the convex piece as A; a fixed mesh against a moving one goes
+to `0x54a2a0` with the fixed (MOPP) mesh as A whatever the pair said; two moving
+meshes keep the pair's order (`0x549d00`). Ours put the moving body first and
+the lower handle first (ALARM's chassis was B against the Scout's in 573 of 611
+live entries); now A is the greater (body handle, piece), which is the creation
+order for the arena and the two robots, and the agents swap as the original's.
+The resolver does not see it: flipping A, B and the normal negates `u`, `n` and
+the impulse exactly, `K_A + K_B` is the same sum, so the velocities come out
+bit for bit the same. It matters to the mesh agents, whose walks start from A.
+
+**(a) The order within a pair (recovered, verified live).** The convex x mesh
+manifold (`0x545b50`) is ours already: the kept points are re-measured from the
+last, a dropped one replaced by the last and the list shortened; each triangle's
+point that persists replaces the first kept point within the tolerance whose
+normal agrees to `0.8`, else is appended; one that does not persist is reported
+at once; the kept points follow, in their order. Live keeps old points first
+because new ones are appended. What decides the order is the triangles': the
+agent meets them in the order its query returns them, and ours were ascending
+by index. A moving mesh's query walks Havok's OBB tree (`+0x1c8`, a struct whose
+first word is the root) depth first, first child first (`0x550560`; the same in
+`0x54a080` and `0x550100`). The tree (`0x53a700`, built over the triangles in
+index order, `0x5371c0`) splits a set of more than one triangle by its
+triangles' centroids: their mean and variance per axis of the geometry's frame
+(`0x53ac00`, single precision), the axis of the largest variance (x only when
+strictly the largest, then y, else z), centroids below the mean to the first
+child, the rest to the second, each in order, and when a side is empty the
+other's last triangle moves over. Every node also gets a box from the
+triangles' area-weighted covariance (`0x557320` → `0x680650`, its eigenvectors
+`0x556e70`, the extents `0x556fc0`). Ours (`havok17/obbtree.rs`) gives the live
+leaf order of all three moving meshes exactly (the Scout's chassis, 20
+triangles, its fork arm, 20, ALARM's chassis, 12). The geometry's frame is the
+component's own, not the body's: the fork arm's vertices live are ours turned
+(x = -y, y = -z, z = x) and moved, so `ShapeDesc::MeshHull` now carries `raw`,
+the vertices before the component is placed (`robot.rs`), and the tree splits
+there.
+
+Two moving meshes are walked together (`0x550100`): at each pair of nodes the
+one with the bigger box (`8 hx hy hz`) is split, A's when B's is a leaf and B's
+when A's is, first child first (`ObbTree::pairs`). A fixed mesh against a moving
+one (`0x54a2a0` → `0x54a080`): B's tree depth first, and for each of its
+triangles A's MOPP's triangles near it. The MOPP is compiled at load
+(`0x536a10`, Havok's MOPP compiler, `0x565xxx`), and its order is not
+recovered: live (`Q` rows of `__000`, 184 000 queries of the box arena's 12 triangles) every
+query returns its triangles in one fixed order (10, 0, 8, 9, 1, 6, 4, 7, with
+11 somewhere after 0), which is neither the index order nor ours; ours keeps the
+ascending order for a fixed mesh.
+
+**(d) The resolver's walk (verified live).** `0x559720` as section 10 has it:
+the cursor starts at the island's first contact, moves past the contact it
+pushes, a lap without an approaching contact ends the island, 400 impulses at
+most, inelastic after 100; ours matches. The islands keep the detection's order
+(`0x5589f0` copies an island's contacts by ascending index): live 13 784 of 13 791
+islands are a subsequence of their resolver entry's list (the 7 others hold the
+same point twice).
+
+**Measured with every body at its live pose** (`orderprobe`, fight
+`fightcontacts-scout-alarm-box__live__000`, 3780 resolver entries; before = this
+round's start; entries where both lists hold the same pairs):
+
+| | before | after |
+|---|---|---|
+| pair order the same / different | 1243 / 75 | 1628 / 2 |
+| A/B orientation different (pairs) | 1625 | 3 |
+| Scout chassis x floor: point order same / different | 127 / 464 | 815 / 0 |
+| chassis x chassis: point order same / different | 55 / 34 | 129 / 0 |
+| fork x floor: point order same / different | 33 / 50 | 51 / 0 |
+| wheels x floor: point order same / different | 451 / 122 | 514 / 124 |
+
+The other five fights with the robots mapped (`__001`-`__004`, `__006`; in
+`__005` the probe cannot place ALARM) give 0-6 different pair orders each (of 1919-2498 entries). What
+is left differs in the wheels (the MOPP's order and, in this probe, the
+wheels' spin): the wheels' point counts differ in a third of the entries, live
+with two points where ours has one twice as often as the other way round
+(2383 against 1245). In the §12s replays the first substep where the pair
+sequence differs over the same pairs moves from 3-161 in 9 of 20 trials to 3-85
+in 6, every one after the robots' states have parted (trial 13, substep 3: ALARM's
+wheel 0.1 m from live's), and the orientation no longer differs anywhere (it
+did in all 20 from substep 2-24).
+
+**Validation.** Before = `fidelity` 10e7ab4 (the pre-built binary; it
+reproduces section 12t's after column to the digit), after = this branch.
+`FIDTRACE_WARMUP` ensembles, 24 runs each, counted = `>= 10` on the other robot,
+robot hits only, mean (total), mean length, full-length runs:
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6) | 30.8 (130) sd 23 / 5.5, 76 s, 7/24 | 35.3 (154) sd 30 / 5.2, 86 s, 5/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 8/24 | 12/24 |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 4.5 (146) / 0.6, 63 s, 5/24 | 3.9 (112) / 0.9, 54 s, 2/24 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 79.0 (275) sd 53 / 4.6, 88 s, 12/24 | 81.2 (258) sd 43 / 4.8, 95 s, 12/24 |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 23.5 (123) sd 23 / 3.5, 93 s, 9/24 | 22.5 (112) sd 22 / 3.3, 86 s, 8/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | | 12/24 | 10/24 |
+| box Tornado v RipBlade, 9 warmups (0, 7, ... 50): stuck at 22 s | | 2 of 9 (0, 26) | 1 of 9 (0) |
+
+Section 12s's replays of the live placements: set 1 (20 trials) ALARM on its
+back at some point / at the end 6 / 6 before, 5 / 4 after (live 1 / 1), mean
+peak |ω| 3.6 → 3.2 rad/s (live 3.0), both chassis' end centres from live,
+median 1.46 → 1.32 m; set 2 (17) never on the back, median 0.24 → 0.35 m
+(worse).
+
+AI suite (ten pairings, warmup 0): 10/10 deal damage before and after; every
+pairing changes, Tornado v RipBlade still ends at 22 s (Tornado stuck against
+the wall near its start; the walls are a fixed mesh, whose MOPP order is
+still ours). Every ensemble moved within about one standard error; the
+contact order, now matching live in the probe almost everywhere it can be
+compared, is not what keeps the Octagon's ALARM count (22.5, live 13.6) and
+the box's falls (12/24, live about 5 of 19) away from live. The box falls went
+from 8 to 12 of 24 with the order now right.
+
+**Still open.** The MOPP's order (a fixed mesh's triangles: the arena's floor
+and walls; the compiler is Havok's own, run at load); the wheels' point
+counts against the floor (live has two points where ours has one about twice as
+often as the reverse; the probe's wheel spin is approximate, so this needs a
+controlled check); the original's body frames for hinged parts (the fork, the
+rod, the wheels are turned against ours by a fixed rotation: harmless to the
+physics, which is frame-free, but the probe has to correct for it).

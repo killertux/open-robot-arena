@@ -56,6 +56,12 @@ pub enum ShapeDesc {
     MeshHull {
         points: Vec<Vec3>,
         indices: Vec<[u32; 3]>,
+        /// The same vertices in the frame the original keeps the mesh's
+        /// geometry in (the component's own, before it is placed in the body;
+        /// empty: the same as `points`). Havok 1.x builds its tree over the
+        /// triangles in that frame, and the tree orders the contacts (havok17,
+        /// docs/29 section 12u).
+        raw: Vec<Vec3>,
     },
     /// Triangle mesh (static/kinematic only in most engines).
     TriMesh {
@@ -598,6 +604,12 @@ pub trait PhysicsBackend {
     /// they freeze and wake together, with the default thresholds times
     /// `scale`. A robot's bodies are one already (its collision group).
     fn deactivation_system(&mut self, _bodies: &[BodyHandle], _scale: f32) {}
+
+    /// Diagnostic: run the collision detection where the bodies are now, as at
+    /// the end of a step piece, and keep its contacts for the next resolver
+    /// (havok17 writes them as an `R` row under `RA2_H17_DUMP`;
+    /// `examples/orderprobe.rs`). Backends without one do nothing.
+    fn detect_now(&mut self) {}
 
     /// Whether the body is active: not frozen by the backend's deactivation
     /// (havok17, docs/29 section 12t). Backends without one always say yes.

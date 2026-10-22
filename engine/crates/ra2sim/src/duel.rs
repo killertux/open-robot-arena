@@ -186,6 +186,7 @@ pub(crate) fn spawn_prop(
         Some(indices) => ShapeDesc::MeshHull {
             points: p.hull_points.clone(),
             indices: indices.clone(),
+            raw: Vec::new(),
         },
         None => ShapeDesc::ConvexHull {
             points: p.hull_points.clone(),
