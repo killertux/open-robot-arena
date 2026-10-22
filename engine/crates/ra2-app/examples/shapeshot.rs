@@ -9,6 +9,11 @@
 //! ```
 //!
 //! Frames `shape_<k>.png`, `k` the index in the script's list.
+//!
+//! `RA2_SHAPE_POSES="x,y,z,heading;..."` (one entry per shot) replaces the robot's position and
+//! heading in the camera formula by the ones a live capture's jsonl recorded (`pose`: location,
+//! heading), so the camera sits where the original's did even though the robots there had moved
+//! on from their spawn points; the robots themselves stay where ours stand.
 
 use std::path::PathBuf;
 
@@ -73,6 +78,16 @@ fn main() -> Result<(), String> {
     for _ in 0..(1.5 / dt) as usize {
         session.step();
     }
+    let poses: Vec<[f32; 4]> = std::env::var("RA2_SHAPE_POSES")
+        .map(|v| {
+            v.split(';')
+                .filter_map(|e| {
+                    let n: Vec<f32> = e.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    (n.len() == 4).then(|| [n[0], n[1], n[2], n[3]])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     for (k, &(p, fwd, side, up, look)) in SHOTS.iter().enumerate() {
         let duel = &session.matched.duel;
         let r = &duel.robots[p];
@@ -85,7 +100,12 @@ fn main() -> Result<(), String> {
             .state(r.body())
             .map(|s| s.rotation * r.rig.forward())
             .unwrap_or(Vec3::Z);
-        let f = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+        let mut f = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+        let mut a = a;
+        if let Some(pose) = poses.get(k) {
+            a = Vec3::new(pose[0], pose[1], pose[2]);
+            f = Vec3::new(pose[3].sin(), 0.0, pose[3].cos());
+        }
         let (rx, rz) = (f.z, -f.x);
         let m = Vec3::new(
             a.x + fwd * f.x + side * rx,

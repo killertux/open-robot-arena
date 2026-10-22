@@ -338,3 +338,38 @@ the 69 references shows one.
 
 Tests added: `the_session_key_includes_the_texture_path` (ra2-render), `a_countdown_left_shot_parses`
 (ra2-app).
+
+## 10. The Combat Arena floor "greyer than ours" (checked live: no render difference)
+
+Report: in the `shape-flapjack-emergency` captures the original's floor is a grey-lavender (about
+88,79,122) where ours is a saturated blue-purple (about 65,52,142), while the flame captures matched.
+**Cause: the robots were not where ours were, so the camera looked at another part of a baked lightmap.**
+The floor is `floor_tile.bmp` (stage 0) times `boxfloor_lm.bmp` (stage 1, UV set 2), lighting off; the
+lightmap is a bright neutral disc (255,255,233) at the arena centre and saturated blue (R 0.7, B 1.0)
+at the four corners. The old live run had FlapJack at (-5.6,-1.5) heading 1.01 (the capture was taken
+after the robots had driven from their spawn points before the AIs were stopped) and looked at the
+centre disc; `shapeshot` put ours at the spawn point (-9.9,10.1), in the blue corner.
+
+Evidence:
+
+* `tools/oracle/frida/ra2_d3dstate.js` dumps the D3D8 state at every `DrawIndexedPrimitive` (device
+  `*[0x71f58c]`; render states, material, enabled lights, stage states, world matrix). 9285 draws over
+  eight shots gave 65 distinct state signatures: `D3DRS_FOGENABLE` 0, one point light (colour 1,1,1,
+  specular 1,1,1, range 10000, attenuation 1,0,0, at -9.383,11.262,-3.519 = the arena's `Omni01`),
+  ambient 0xff262626, `SPECULARENABLE` 1. The three floor batches (8/12/20 vertices) have
+  `LIGHTING` 0, stage 0 MODULATE (texture, current), stage 1 MODULATE (texture, current) on texcoord
+  set 1, stage 2 off, mag/min filter linear (point on the rim). This is what `Material::from_gmi`
+  builds; nothing about fog, a spotlight, per-pixel lighting, a second light or a gamma ramp differs.
+* A fresh live run with the robots at their spawn points (`capture_shape.py`, now `SHAPE_HOOK=<file>`
+  starts the dump during the shots, `SHAPE_BOT0=""` keeps the prefix's robot) is the blue-purple floor:
+  live 57,48,140 / 64,52,145 / 67,53,141 against ours at the same poses 58,48,143 / 69,53,146 /
+  67,53,141 (within 5 counts over 24 floor samples, eight shots, second run the same).
+* `shapeshot` with `RA2_SHAPE_POSES` (the camera formula fed the old run's recorded location and
+  heading) at the old live camera poses: floor samples live/ours 86,79,123 / 86,79,122; 88,78,126 /
+  88,79,126; 90,83,127 / 90,83,127; 94,82,130 / 94,81,130; 68,61,95 / 67,61,95 (all 8 shots, at most
+  1 count apart on every floor pixel not covered by a robot).
+
+So the floor, walls and lightmap path need no change; compare robot shots only with the robots
+at the same place (record `plus.getLocation`, which the jsonl has) or use the spawn poses on both
+sides. Test: `the_box_floor_is_tile_times_a_lightmap_with_lighting_off` (ra2-render, needs the game
+data). Scratchpad side-by-sides: `lt/sbs_pose_*_live-left-ours-right.png`, `lt/sbs_spawn_*`.

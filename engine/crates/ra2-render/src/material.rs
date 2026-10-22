@@ -551,6 +551,67 @@ mod tests {
         assert!(!m.lighting && m.has_vertex_colors && m.vertex_color_ambient);
     }
 
+    /// docs/34 section 10: the Combat Arena's floor is its tile bitmap times a baked
+    /// lightmap on UV set 2, lighting off (the original's draw state, dumped live with
+    /// `ra2_d3dstate.js`: `LIGHTING` 0, stage 0 MODULATE, stage 1 MODULATE on set 1, no fog).
+    /// The lightmap is bright and neutral at the arena's centre and blue at the corners, so
+    /// the floor reads lavender grey in the middle and saturated blue-purple towards the
+    /// corners; the same colour at the same place is what the live captures show.
+    #[test]
+    fn the_box_floor_is_tile_times_a_lightmap_with_lighting_off() {
+        let Some(game) = std::env::var_os("RA2_GAME").map(PathBuf::from).or_else(|| {
+            let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            loop {
+                if d.join("local/game").is_dir() {
+                    return Some(d.join("local/game"));
+                }
+                if !d.pop() {
+                    return None;
+                }
+            }
+        }) else {
+            return;
+        };
+        let dir = game.join("Arenas/box");
+        let Ok(bytes) = std::fs::read(dir.join("boxarena.gmf")) else {
+            return;
+        };
+        let scene = gmi::parse(&bytes).expect("box arena parses");
+        let floor = scene
+            .materials
+            .iter()
+            .find(|m| m.name == "floor with lm")
+            .expect("floor material");
+        let tile = floor
+            .sub_materials
+            .iter()
+            .find(|m| m.name == "tile")
+            .unwrap();
+        let mat = Material::from_gmi(tile, &mesh(), &dir);
+        assert!(!mat.lighting, "lightmapped floor is unlit");
+        assert_eq!(mat.stages.len(), 2);
+        assert_eq!(mat.stages[0].kind, StageKind::Modulate);
+        assert_eq!(mat.stages[1].kind, StageKind::LightMap);
+        assert_eq!(mat.stages[1].uv_set, 1);
+        let lm = &mat.stages[1].image;
+        let at = |fx: f32, fy: f32| {
+            let (x, y) = ((lm.w as f32 * fx) as usize, (lm.h as f32 * fy) as usize);
+            let i = (y * lm.w as usize + x) * 4;
+            [
+                lm.rgba[i] as i32,
+                lm.rgba[i + 1] as i32,
+                lm.rgba[i + 2] as i32,
+            ]
+        };
+        let centre = at(0.5, 0.5);
+        assert!(
+            centre[0] > 245 && centre[1] > 245 && centre[2] > 220,
+            "{centre:?}"
+        );
+        let corner = at(0.04, 0.04);
+        assert!(corner[2] - corner[0] > 60, "{corner:?}");
+    }
+
     #[test]
     fn an_unloadable_bitmap_keeps_its_stage_and_samples_black() {
         let gm = gmi::Material {
