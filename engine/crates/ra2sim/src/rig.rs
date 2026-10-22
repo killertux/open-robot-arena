@@ -524,7 +524,7 @@ pub const WEAPON_MATERIAL_SCALE: f32 = 0.8;
 /// those with a translation (the steering unit's `base_collision`) no
 /// rotation, so which the original does with both is not exercised.
 pub fn own_geometry_unrotated(rb: &ra2fmt::gmi::RigidBody) -> bool {
-    rb.simulation_geometry == 2 && rb.collision_object().eq_ignore_ascii_case(&rb.name)
+    rb.simulates_own_mesh()
 }
 
 /// Whether Havok collides a rigid body with this `SIMULATION_GEOMETRY` as a

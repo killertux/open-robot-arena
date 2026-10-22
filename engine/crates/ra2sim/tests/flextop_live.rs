@@ -105,3 +105,56 @@ fn the_flextop_table_swings_on_its_pivot_as_live() {
         assert!((held - pivot).length() < 0.01, "step {at}: pivot at {held}");
     }
 }
+
+/// Live (`flexend-off__live__*`, `frida/ra2_flexend.js`) the table stops where it
+/// is once nothing has touched it for a while: its active flag goes, so it is no
+/// longer integrated and the dashpots change nothing. Until then it keeps swinging.
+#[test]
+fn the_flextop_table_freezes_once_no_robot_has_touched_it_for_ten_seconds() {
+    let Some(game) = game_dir() else {
+        eprintln!("skipped: no game data (set RA2_GAME)");
+        return;
+    };
+    if std::env::var("RA2_PHYSICS").is_ok_and(|b| b != "havok17") {
+        eprintln!("skipped: not the havok17 backend");
+        return;
+    }
+    let _scripts = ra2script::lock();
+    let arena = game.join("Arenas/flextop.py").to_string_lossy().to_string();
+    let mut duel = Duel::new(&arena, &[]).expect("a duel");
+    let table = duel
+        .props
+        .iter()
+        .find(|p| p.prop.name == "floor_collision")
+        .map(|p| p.body)
+        .expect("FlexTop's table is a movable body");
+    assert_eq!(duel.rest_watch.len(), 1, "the dashpots hold the table");
+    let pivot = Vec3::new(0.0, 0.202_458_58, 0.0);
+    let on_table = Vec3::new(0.0, 0.119_571_24, 0.0);
+    let rot = Quat::from_scaled_axis(Vec3::from(LIVE[0].1));
+    duel.physics
+        .set_transform(table, pivot - rot * on_table, rot);
+    duel.physics
+        .set_velocity(table, Vec3::ZERO, Vec3::from(LIVE[0].2));
+    let steps = |duel: &mut Duel, n: usize| {
+        for _ in 0..n {
+            duel.step_direct(&[], ra2sim::DEFAULT_STEP);
+        }
+    };
+    steps(&mut duel, 9 * 60);
+    let before = duel.physics.state(table).expect("state");
+    steps(&mut duel, 20);
+    let moving = duel.physics.state(table).expect("state");
+    assert!(
+        (moving.rotation.dot(before.rotation) - 1.0).abs() > 1e-9,
+        "still swinging at 9 s"
+    );
+    assert!(!duel.rest_watch[0].frozen);
+    steps(&mut duel, 2 * 60);
+    assert!(duel.rest_watch[0].frozen, "frozen after 10 s alone");
+    let a = duel.physics.state(table).expect("state");
+    steps(&mut duel, 60);
+    let b = duel.physics.state(table).expect("state");
+    assert_eq!(a.position, b.position);
+    assert_eq!(a.rotation, b.rotation);
+}

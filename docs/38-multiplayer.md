@@ -425,3 +425,19 @@ copy through loopback), joins the box, plays `chat.wav`, and is drawn in the
 box's own font and place. Ours, not recovered: a line lives 8 s and the box
 holds 6 lines (the retention timer of the original was not traced). The lobby
 chat now uses the same `[name] text` format.
+
+**Rendered and checked (fx/loose-ends).** `ra2-app --example chatshot` renders the
+match HUD with chat lines and the open entry (frames `chat_lines.png`,
+`chat_open.png`, scratchpad): white `fg_mcn14` text from (10, 110), wrapped at
+200 px, the `CHAT:` label and entry below. The box is 100 px tall and the paragraph
+renderer does not clip, so with more rows than fit (11 rows after wrapping) the text
+ran 100 px past the box; `hud::fit_chat_lines` now wraps the lines itself and keeps
+the newest rows that fit (5 rows at fg_mcn14's 18 px pitch; the original's rule for a
+full box was not recovered, the file only says `Scrollable` and "clear after a few
+seconds"). Test `hud::tests::the_chat_box_wraps_at_its_width_and_keeps_the_newest_rows_that_fit`.
+**No original reference could be taken:** no capture in `local/oracle/original` shows
+chat text, and the original's lobby is not reachable offline in the Wine oracle:
+Multiplayer -> Create Game -> Start Game (Local network only, Deathmatch, Combat Arena)
+does nothing (no DirectPlay host under Wine), so the prematch window with its
+`chat messages` box never opened. The layout is therefore checked against
+`gamewindow.gib` only.

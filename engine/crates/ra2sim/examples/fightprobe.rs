@@ -145,6 +145,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         c.y,
                         c.z
                     );
+                    if m.duel
+                        .rest_watch
+                        .iter()
+                        .any(|w| w.body == p.body && w.frozen)
+                    {
+                        line += " FROZEN";
+                    }
                 }
             }
             println!("{line}");
