@@ -150,6 +150,106 @@ def decal_shots(base, rows, sc, n, tag, forced=None):
                      "chassis": mats, "file": os.path.basename(path)})
 
 
+def decal_pairs(base, rows, sc, n):
+    """DECAL_PAIRS=n: for each of the `n` strongest decals in the open, two shots of the same frame
+    0.35 s apart from the same camera, one as built and one with that decal forced to alpha 1.0
+    (restored afterwards), so the difference of the pair is the decal alone.  `dpair` rows."""
+    dist = float(os.environ.get("DECAL_DIST", "0.9"))
+    fov = float(os.environ.get("POSE_FOV", "0.7"))
+    decals = [r for r in rows if r.get("ev") == "decal"][-25:]
+    addrs = sorted({r["addr"] for r in rows if r.get("ev") == "inv" and r.get("addr")})
+    best = []
+    for k, r in enumerate(decals):
+        owner = next((x["addr"] for x in reversed(rows[:rows.index(r)]) if x.get("ev") == "inv"), addrs[0])
+        m = sc.exports_sync.m12at(owner)
+        ax = [m[0:3], m[3:6], m[6:9]]
+        world = lambda v: [sum(v[j] * ax[j][i] for j in range(3)) for i in range(3)]
+        c = [a + b for a, b in zip(world(r["c"]), m[9:12])]
+        nw = world(r["u"])
+        ln = math.sqrt(sum(x * x for x in nw)) or 1.0
+        e = [c[i] + nw[i] / ln * dist for i in range(3)]
+        if abs(e[0]) < 11.0 and abs(e[2]) < 11.0 and e[1] > -2.6 and nw[1] / ln > -0.5:
+            best.append((r["alpha"], k, owner, c, nw, ln))
+    best.sort(key=lambda t: -t[0])
+    for alpha, k, owner, c, nw, ln in best[:n]:
+        r = decals[k]
+        eye = [c[i] + nw[i] / ln * dist for i in range(3)]
+        eye[1] += 0.05
+        cam = cd.py(EYE_CODE % (*eye, *c, fov)).strip()
+        time.sleep(0.3)
+        mats = {a: sc.exports_sync.m12at(a) for a in addrs}
+        pa = f"{base}-pa{k:02d}.png"
+        ra2_drive.shot(DISPLAY, pa)
+        sc.exports_sync.setalpha([r["obj"]], 1.0)
+        time.sleep(0.15)
+        mats2 = {a: sc.exports_sync.m12at(a) for a in addrs}
+        pb = f"{base}-pb{k:02d}.png"
+        ra2_drive.shot(DISPLAY, pb)
+        sc.exports_sync.setalpha([r["obj"]], r["alpha"])
+        rows.append({"ev": "dpair", "k": k, "alpha": r["alpha"], "cam": cam, "fov": fov, "chassis": mats,
+                     "chassis_b": mats2, "a": os.path.basename(pa), "b": os.path.basename(pb)})
+        print("pair", k, "alpha", r["alpha"], "normal y", nw[1] / ln, flush=True)
+
+
+def synth_decals(base, rows, sc, damages, offsets):
+    """SYNTH=1 (docs/37 section 8): decals placed on purpose.  After the fight both robots are held at their
+    poses (frida/ra2_pin.js) and, for each damage in `damages`, the component-hit routine is run again on the
+    most-struck part with the last real contact record, the point moved onto the held robot's flank (the local
+    centre and normal of one of its real decals, shifted `offsets[i]` m along the decal's height axis) and the
+    normal into the part.  A shot from `DECAL_DIST` m off the face is taken before and after each hit and
+    again `LATE` seconds after the last.  `spair` rows carry the camera, the chassis matrix and the new decal."""
+    dist = float(os.environ.get("DECAL_DIST", "0.9"))
+    fov = float(os.environ.get("POSE_FOV", "0.7"))
+    hits = [r for r in rows if r.get("ev") == "hit" and r.get("flag")]
+    import collections
+    target = collections.Counter(r["ecx"] for r in hits).most_common(1)[0][0]
+    first = next(i for i, r in enumerate(rows) if r.get("ev") == "hit" and r.get("flag") and r["ecx"] == target)
+    owner = next(x["addr"] for x in rows[first:] if x.get("ev") == "inv")
+    decs = [r for r in rows[first:] if r.get("ev") == "decal"]
+    side = [r for r in decs if abs(r["u"][1]) < 0.5] or decs
+    base_decal = side[len(side) // 2]
+    m = sc.exports_sync.m12at(owner)
+    print("target part", target, "chassis matrix at", owner, "decal basis alpha", base_decal["alpha"], "u", base_decal["u"], flush=True)
+    for i, (dmg, off) in enumerate(zip(damages, offsets)):
+        m = sc.exports_sync.m12at(owner)
+        ax = [m[0:3], m[3:6], m[6:9]]
+        world = lambda v: [sum(v[j] * ax[j][k] for j in range(3)) for k in range(3)]
+        c_loc = [base_decal["c"][k] + off * base_decal["v"][k] for k in range(3)]
+        c = [a + b for a, b in zip(world(c_loc), m[9:12])]
+        nw = world(base_decal["u"])
+        ln = math.sqrt(sum(x * x for x in nw)) or 1.0
+        nw = [x / ln for x in nw]
+        eye = [c[k] + nw[k] * dist for k in range(3)]
+        eye[1] += 0.05
+        cam = cd.py(EYE_CODE % (*eye, *c, fov)).strip()
+        time.sleep(0.4)
+        pa = f"{base}-s{i}a.png"
+        ra2_drive.shot(DISPLAY, pa)
+        n_before = len([r for r in rows if r.get("ev") == "decal"])
+        ticket = sc.exports_sync.synth(target, dmg, c, [-x for x in nw])
+        ok = None
+        for _ in range(100):
+            ok = sc.exports_sync.synthdone(ticket)
+            if ok is not None:
+                break
+            time.sleep(0.05)
+        time.sleep(0.5)
+        new = [r for r in rows if r.get("ev") == "decal"][n_before:]
+        mats = {owner: sc.exports_sync.m12at(owner)}
+        pb = f"{base}-s{i}b.png"
+        ra2_drive.shot(DISPLAY, pb)
+        rows.append({"ev": "spair", "i": i, "damage": dmg, "ok": ok, "point": c, "normal": nw, "cam": cam, "fov": fov,
+                     "owner": owner, "chassis": mats, "a": os.path.basename(pa), "b": os.path.basename(pb),
+                     "decal": new[-1] if new else None})
+        print("synth", i, dmg, ok, "new decals", len(new), flush=True)
+    late = float(os.environ.get("LATE", "0"))
+    if late:
+        time.sleep(late)
+        pc = f"{base}-late.png"
+        ra2_drive.shot(DISPLAY, pc)
+        rows.append({"ev": "late", "after": late, "file": os.path.basename(pc)})
+
+
 def neuter_and_settle():
     print("neuter:", cd.py(cd.NEUTER))
     time.sleep(float(os.environ.get("SETTLE", "7.0")))
@@ -236,7 +336,43 @@ def main():
         t0 = time.time()
         while time.time() - t0 < secs:
             time.sleep(0.5)
-        if os.environ.get("DECAL_SHOTS"):
+        if os.environ.get("SYNTH"):
+            print("neuter:", cd.py(cd.NEUTER))
+            time.sleep(1.0)
+            pinsc = sess.create_script(open(os.path.join(HERE, "frida", "ra2_pin.js")).read())
+            pinsc.load()
+            time.sleep(0.5)
+            ch = pinsc.exports_sync.chassis()
+            bodies = []
+            for c0 in ch:
+                a0 = int(c0[0], 16)
+                near = [b for b in pinsc.exports_sync.scan(hex(a0 - 0x100000), hex(a0 + 0x100000))
+                        if b[1] > 0 and math.dist(b[2], c0[2]) < 1.6]
+                bodies += [c0] + [b for b in near if b[0] != c0[0]]
+            seen, uniq = set(), []
+            for b in bodies:
+                if b[0] not in seen:
+                    seen.add(b[0])
+                    uniq.append(b)
+            st = pinsc.exports_sync.states([b[0] for b in uniq])
+            pinsc.exports_sync.pin([[b[0], s_[0], s_[1]] for b, s_ in zip(uniq, st)])
+            print("pinned", len(uniq), "bodies", flush=True)
+            pinsc.exports_sync.noImmobility()
+            subprocess.run(["python3", os.path.join(HERE, "..", "capture", "xtest.py"), "key", "F3"],
+                           env=dict(os.environ, DISPLAY=DISPLAY), check=False)
+            time.sleep(1.0)
+            synth_decals(base, rows, sc, [float(x) for x in os.environ.get("SYNTH_DAMAGES", "100,60,25").split(",")],
+                         [float(x) for x in os.environ.get("SYNTH_OFFSETS", "0,0.35,-0.35").split(",")])
+            pinsc.exports_sync.unpin()
+            pinsc.unload()
+        elif os.environ.get("DECAL_PAIRS"):
+            print("neuter:", cd.py(cd.NEUTER))
+            time.sleep(float(os.environ.get("SETTLE", "1.5")))
+            subprocess.run(["python3", os.path.join(HERE, "..", "capture", "xtest.py"), "key", "F3"],
+                           env=dict(os.environ, DISPLAY=DISPLAY), check=False)
+            time.sleep(1.0)
+            decal_pairs(base, rows, sc, int(os.environ["DECAL_PAIRS"]))
+        elif os.environ.get("DECAL_SHOTS"):
             import math as _m  # noqa: F401
             neuter_and_settle()
             n = int(os.environ["DECAL_SHOTS"])

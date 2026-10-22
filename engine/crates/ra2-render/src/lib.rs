@@ -1215,7 +1215,12 @@ fn scene_material_groups_opts(
             let stored = |slot: usize| -> Option<Vec3> {
                 mesh.normals
                     .get(fi * 4 + slot)
-                    .map(|n| (normal_mat * Vec3::from(*n)).normalize_or_zero())
+                    // the direction follows the node's transform, the length stays the file's: the original
+                    // never normalises (`D3DRS_NORMALIZENORMALS` 0) and the Buzzard wheel's hub parts store
+                    // normals 0.586 long (docs/34 section 11.5)
+                    .map(|n| {
+                        (normal_mat * Vec3::from(*n)).normalize_or_zero() * Vec3::from(*n).length()
+                    })
                     .filter(|n| *n != Vec3::ZERO)
             };
             let fallback =
@@ -1584,6 +1589,35 @@ mod tests {
     }
 
     use super::*;
+
+    /// The Buzzard wheel's hub parts store normals 0.586 long and the original draws them as they are
+    /// (`D3DRS_NORMALIZENORMALS` 0, live vertex buffers of Dementia, FlapJack and Razor): they were too
+    /// bright in ours while the loader normalised them (docs/34 section 11.5).
+    #[test]
+    fn the_buzzard_wheels_hub_normals_keep_their_file_length() {
+        let bot = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/game/AI/Team6/Bot1.bot");
+        let Ok(items) = collect_bot(&bot.to_string_lossy()) else {
+            return;
+        };
+        let short = |it: &DrawItem| {
+            it.vertices
+                .iter()
+                .all(|v| (Vec3::from(v.nrm).length() - 0.586).abs() < 0.01)
+        };
+        let n = items
+            .iter()
+            .filter(|it| it.label.starts_with("Wheel") && short(it))
+            .count();
+        assert!(n >= 8, "{n} wheel parts with 0.586 normals");
+        assert!(items
+            .iter()
+            .filter(|it| !it.label.starts_with("Wheel"))
+            .all(|it| it
+                .vertices
+                .iter()
+                .all(|v| (Vec3::from(v.nrm).length() - 1.0).abs() < 0.01)));
+    }
 
     /// Every stock `.bot`, when the (uncommitted) game data is present.
     fn stock_bots() -> Vec<std::path::PathBuf> {

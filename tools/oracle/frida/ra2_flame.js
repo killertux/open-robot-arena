@@ -6,6 +6,9 @@
 //   dmg    0x4175b0 entry  the damage sink (as ra2_damage.js)
 //   energy 0x504c50 entry  the per-step draw (dt in [esp+4]); out pointers [esp+8], [esp+12]
 //   emit   0x5bab60 entry  emitter constructor, config dump
+//   upd    0x5bc8f0 entry  the emitter's per-frame update (dt, spawn accumulator, alive count), docs/37 section 6
+//   spawn  0x5bc250 entry/leave  the particles spawned (position, velocity, colour, size, life)
+//   draw   0x5bcf70 entry  a snapshot of every live particle at the moment the emitter is drawn
 //   tick   every 50 ms: the Flamethrower object's fields 0x280.. and the emitter's emitting flag
 'use strict';
 const t0 = Date.now();
@@ -105,7 +108,41 @@ setInterval(() => {
     }
   } catch (e) { send({ ev: 'err', name: 'tick', e: String(e) }); }
 }, 50);
+// The jet's emitter: the particle hooks log only it.  The particle (0x84 bytes): +0 alive, +4 position, +0x10
+// velocity, +0x24 colour, +0x44 size, +0x4c life, +0x50 remaining, +0x7c next; the emitter's +0x31c is the head
+// of the live list (a spawn pushes at the head), +0x27c the count, +0x320 the spawn accumulator.
+const isJet = (ecx) => { try { return flame && ecx.equals(flame.add(0x2a4).readPointer()); } catch (e) { return false; } };
+const r4 = (v) => +v.toFixed(4);
+function part(p) {
+  return [r4(f(p, 4)), r4(f(p, 8)), r4(f(p, 12)), r4(f(p, 0x10)), r4(f(p, 0x14)), r4(f(p, 0x18)), r4(f(p, 0x24)), r4(f(p, 0x28)), r4(f(p, 0x2c)),
+    r4(f(p, 0x30)), r4(f(p, 0x44)), r4(f(p, 0x4c)), r4(f(p, 0x50))];
+}
+let partLog = true;
+Interceptor.attach(ptr('0x5bc8f0'), { onEnter(args) {
+  if (!partLog || !isJet(this.context.ecx)) return;
+  const em = this.context.ecx;
+  send({ ev: 'upd', t: now(), wall: Date.now(), dt: r4(f(this.context.esp.add(4).readPointer(), 0)), acc: r4(f(em, 0x320)), alive: em.add(0x27c).readS32(), emitting: em.add(0x324).readU8(),
+    pos: vec(em.add(0x7c)), vel: vec(em.add(0x180)) });
+} });
+Interceptor.attach(ptr('0x5bc250'), {
+  onEnter(args) { this.jet = partLog && isJet(this.context.ecx); this.em = this.context.ecx; this.n = this.context.esp.add(4).readS32(); },
+  onLeave(ret) {
+    if (!this.jet) return;
+    const got = ret.toInt32(); const out = [];
+    let p = this.em.add(0x31c).readPointer();
+    for (let i = 0; i < got && !p.isNull(); i++) { out.push(part(p)); p = p.add(0x7c).readPointer(); }
+    send({ ev: 'spawn', t: now(), wall: Date.now(), want: this.n, got: got, p: out });
+  }
+});
+Interceptor.attach(ptr('0x5bcf70'), { onEnter() {
+  if (!partLog || !isJet(this.context.ecx)) return;
+  const em = this.context.ecx; const out = [];
+  let p = em.add(0x31c).readPointer();
+  for (let i = 0; i < 400 && !p.isNull(); i++) { if (p.readU8()) out.push(part(p)); p = p.add(0x7c).readPointer(); }
+  send({ ev: 'draw', t: now(), wall: Date.now(), n: out.length, p: out });
+} });
 rpc.exports = {
+  partlog(on) { partLog = !!on; },
   flame() { return flame ? flame.toString() : null; },
   fire(on, level) { fireFn(flame, on, level); },
   burst(on, level) { burstFn(flame, on, level); },

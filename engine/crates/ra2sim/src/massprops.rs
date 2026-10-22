@@ -193,6 +193,15 @@ pub fn hull_vertices(points: &[Vec3]) -> Vec<Vec3> {
     out
 }
 
+/// The outward-wound triangles of the convex hull of `points` (indices into `points`), for ray casts.
+pub fn hull_triangles(points: &[Vec3]) -> Option<Vec<[u32; 3]>> {
+    quickhull(points).map(|f| {
+        f.into_iter()
+            .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
+            .collect()
+    })
+}
+
 /// Outward-wound triangles of the convex hull (indices into `points`).
 fn quickhull(points: &[Vec3]) -> Option<Vec<[usize; 3]>> {
     let n = points.len();

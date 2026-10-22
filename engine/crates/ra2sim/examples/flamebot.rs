@@ -22,12 +22,20 @@ fn main() {
     let idx = b.components.len() as i32 - 1;
     // the jet draws air as well as current: without a tank its emitter never starts
     // (`0x504790` wants both power scales above zero)
+    // (FLAME_TANKS=n fits n tanks, 800 units each, for the long live runs of docs/37 section 6)
     if std::env::var("FLAME_NO_TANK").is_err() {
-        let mut t = ra2fmt::mount::chassis_child([0.3, 0.1], 0.0, 0.0);
-        t.own_mount = 1;
-        t.class = "AirTank".into();
-        t.file = "Components\\airtank.txt".into();
-        b.components.push(t);
+        let tanks: usize = std::env::var("FLAME_TANKS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        for k in 0..tanks {
+            let x = if k % 2 == 0 { 0.3 } else { -0.3 };
+            let mut t = ra2fmt::mount::chassis_child([x, 0.1 - 0.35 * (k / 2) as f32], 0.0, 0.0);
+            t.own_mount = 1;
+            t.class = "AirTank".into();
+            t.file = "Components\\airtank.txt".into();
+            b.components.push(t);
+        }
     }
     b.controllers.push(Controller {
         name: "Flame".into(),

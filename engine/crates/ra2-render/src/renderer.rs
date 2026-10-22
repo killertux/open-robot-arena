@@ -181,7 +181,10 @@ fn vs_main(i: VsIn) -> VsOut {
   o.uv0 = i.uv;
   o.uv1 = i.uv2;
   let wp = (d.model * vec4<f32>(i.pos, 1.0)).xyz;
-  let n = normalize((d.model * vec4<f32>(i.nrm, 0.0)).xyz);
+  // D3DRS_NORMALIZENORMALS is 0 in every lit draw of the original (live state dump): the normal keeps the
+  // length the file gave it (the Buzzard wheel's hub parts and the slipper wheel are 0.586 long, so
+  // they light 0.586 as bright; docs/34 section 11.5).
+  let n = (d.model * vec4<f32>(i.nrm, 0.0)).xyz;
   let has_vc = (d.flags.x & 2u) != 0u;
   // D3DRS_DIFFUSEMATERIALSOURCE stays COLOR1: the vertex colour when the
   // vertex has one, else the material.
@@ -921,7 +924,10 @@ impl Renderer {
             for v in &it.vertices[t.first..t.first + 3] {
                 let mut w = *v;
                 w.pos = model.transform_point3(Vec3::from(v.pos)).into();
-                w.nrm = (normal_mat * Vec3::from(v.nrm)).normalize_or_zero().into();
+                // the direction follows the model, the length stays the file's (NORMALIZENORMALS is off)
+                w.nrm = ((normal_mat * Vec3::from(v.nrm)).normalize_or_zero()
+                    * Vec3::from(v.nrm).length())
+                .into();
                 blend_verts.push(w);
             }
             if let Some(last) = runs.last_mut() {
