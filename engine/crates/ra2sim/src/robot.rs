@@ -506,7 +506,19 @@ impl Robot {
                             i.x_axis.x *= info.rod_inertia;
                             i.y_axis.y *= info.rod_inertia;
                             i.z_axis.z *= info.rod_inertia;
-                            inertia = Some(i);
+                            // The rod's body has the piston's frame, not the
+                            // frame of the part bolted to it: live ALARM's rod
+                            // is its chassis turned half a turn about y, as
+                            // its Burst Piston, and Wide Load's is its
+                            // chassis' frame, as its piston (`B` rows of
+                            // `fightcontacts-scout-alarm-box__live__001`,
+                            // `contacts-nohaz-wideload__live__001`; docs/29
+                            // §12q). Ours is the root component's, so the
+                            // tensor is turned into it.
+                            let (_, piston, _) = (bot * rig.components[info.motor].local)
+                                .to_scale_rotation_translation();
+                            let q = glam::Mat3::from_quat(rot.inverse() * piston);
+                            inertia = Some(q * i * q.transpose());
                         }
                     }
                 }
