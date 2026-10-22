@@ -30,6 +30,51 @@ pub fn bot_name(rig: &crate::rig::RobotRig) -> String {
         .to_string()
 }
 
+/// The `nose` a brain is built with in `AI/Bindings.py` (radians), if the table lists `name` with one.
+///
+/// A robot driven by a brain has its forward heading set from the brain's `nose` (the AI callback's
+/// field `+0x40`, pushed into the robot's `+0xac` by the vtable call at `0x415a6e` when the match is
+/// set up), whatever the `.bot` says; the loader (`0x4de450`) reads a heading from the file only for
+/// versions from 1.1, so the three stock 1.07 robots (Iceberg `pi`, Tornado and LugNut `-pi/2`) get
+/// theirs from here (docs/34 section 11.5, checked live on all three). Every other stock robot's
+/// `nose` equals its file's heading. A bot the table lists without `nose` has `0`.
+pub fn bindings_nose(root: &Path, name: &str) -> Option<f32> {
+    let text = std::fs::read_to_string(root.join("AI").join("Bindings.py")).ok()?;
+    let key = format!("(\"{name}\"");
+    let line = text.lines().find(|l| l.contains(&key))?;
+    let Some(at) = line.find("'nose'") else {
+        return Some(0.0);
+    };
+    let rest = line[at + 6..].trim_start().strip_prefix(':')?;
+    let expr = rest.split([',', '}']).next()?.trim();
+    parse_angle(expr)
+}
+
+/// `math.pi`, `-math.pi / 2`, `math.pi * 0.5` or a plain number.
+fn parse_angle(expr: &str) -> Option<f32> {
+    let (neg, body) = match expr.strip_prefix('-') {
+        Some(b) => (true, b.trim()),
+        None => (false, expr),
+    };
+    let (head, tail) = match body.find(['/', '*']) {
+        Some(i) => (
+            body[..i].trim(),
+            Some((body.as_bytes()[i], body[i + 1..].trim())),
+        ),
+        None => (body, None),
+    };
+    let mut v = if head == "math.pi" {
+        std::f32::consts::PI
+    } else {
+        head.parse::<f32>().ok()?
+    };
+    if let Some((op, n)) = tail {
+        let n: f32 = n.parse().ok()?;
+        v = if op == b'/' { v / n } else { v * n };
+    }
+    Some(if neg { -v } else { v })
+}
+
 /// What the scripts get to see about one robot.
 pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
     let transform = robot.transform(physics);
@@ -211,4 +256,19 @@ impl ScriptAi {
 /// The game installation holding an arena script.
 pub fn game_root_for(arena_path: &Path) -> Option<PathBuf> {
     ra2_render::find_game_root(arena_path)
+}
+
+#[cfg(test)]
+mod nose_tests {
+    use super::parse_angle;
+    use std::f32::consts::PI;
+
+    #[test]
+    fn nose_expressions_of_bindings_py_parse() {
+        assert_eq!(parse_angle("math.pi"), Some(PI));
+        assert_eq!(parse_angle("-math.pi / 2"), Some(-PI / 2.0));
+        assert_eq!(parse_angle("math.pi * 0.5"), Some(PI * 0.5));
+        assert_eq!(parse_angle("0.0"), Some(0.0));
+        assert_eq!(parse_angle("north"), None);
+    }
 }

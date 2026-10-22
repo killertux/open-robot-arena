@@ -534,9 +534,9 @@ What the shots show, robot by robot:
   counter over a robot that has not moved for ~10 s and an `IMMOBILE!` card, ours shows neither in these frames (not
   a robot-drawing item); (d) `Eye Poker`'s top domes and Dementia's wheel-hub nuts are brighter in ours; the
   materials are identical to the dump, the facets differ with the rolled/yawed part, so this is (a)/(b), not a
-  material difference.
-* Open: the exact chassis subdivision; Iceberg's chassis shading (its mesh has inward-wound triangles and ours
-  differs on its left face) is the largest remaining robot-shape residual.
+  material difference (but see 11.5: the Buzzard wheel's hub parts were also too bright for another reason).
+* Open: the exact chassis subdivision. (Iceberg's shading, the largest residual of this table, was a heading, not a
+  mesh: section 11.5.)
 
 The `yaw ours-live` column compares ours 1.5 s after the bell (our robots had landed during the countdown) with live
 shots taken 2-14 s after it, while the live robots creep, and in some of the live captures the spinners' weapons ran;
@@ -553,3 +553,45 @@ Tools: `tools/oracle/robot_audit.py`, `tools/oracle/poses_from_jsonl.py`, `frida
 `frida/ra2_vbdump.js`; `capture_shape.py` env `SHAPE_SET`, `SHAPE_EARLY`, `SHAPE_SETTLE`, `SHAPE_HOOK_JS`,
 `SHAPE_WATCHDOG`; `RA2_DUMP_ITEMS=<file>` (with `ra2-render`) writes our part vertices as JSON for comparison with
 `vbdump-*`. Scratchpad before/after of the defect: `robot-look/shadow/flapjack_{before,after}/`.
+
+### 11.5 Iceberg: a heading; and the hub nuts: normals that are not unit length (flame-look)
+
+**Iceberg (MAE 15.1).** Not the mesh. A live vertex-buffer dump of Iceberg v MiniBerg (`vbdump-iceberg__live__000`) shows
+its chassis as a 145-vertex, 132-triangle record whose outline, wall normals and bottom face are exactly the file's 36
+triangles (same 10 outline points, the walls cut into two rows of cells, the top plate with its inset ring of crush
+points 0.1 m inside the outline), and every live triangle's winding agrees with its vertex normal (the geometric
+normal and the stored one have a positive dot for all 132). Ours stores its triangles the other way round by
+construction (`chassis_mesh_vertices` swaps two corners; the earlier "inward-wound" reading was that uniform
+convention, our normals come from the winding): all consistent, no face is culled wrongly. What differs is **which
+side of the mesh faces the camera**. The shots' camera is placed from `plus.getHeading`, and the robot object's
+heading (`+0xac`) is `pi` for Iceberg, `-pi/2` for Tornado and LugNut (`heading - body yaw` from `bodyyaw-*__live__000`,
+exact to 1e-3; `heading-old-bots__live__000`): the camera stood at the chassis' `-Z` end, where ours still put it at
+`+Z`. The loader (`0x4de450`) reads a heading from the file only from version 1.1 (`1.1 <= version`); these three are
+v1.07 and carry none, and the original gives them theirs through the AI callback: the vtable call at `0x415a6e` runs
+`0x401150` (`0x401170`: `robot+0xac = callback+0x40`), the brain's `fNoseOffset`, the `nose` of `AI/Bindings.py`
+(Iceberg `math.pi`, Tornado and LugNut `-math.pi / 2`). For the 42 robots whose files have a heading it equals the
+`nose` (checked for all 45 stock robots: the three above are the only differences). Ours reads the heading from the
+file only, so these three faced the wrong way round (and the spawn yaw `front - heading` was off by the same angle).
+
+Fix: `scriptai::bindings_nose` reads the `nose` of the robot's `Bindings.py` entry and `Duel::new` sets the rig's
+heading to it when the table lists the robot and the robot has a brain. A human-driven robot (`Controller::Human`: the local player's, set by `Session::{new_player, exhibition}` and the Team HQ's driven robot, and every network lobby player) keeps the file's heading: the original pushes the nose through the `AI` and `AI_callback` objects only (the two vtables holding `0x401150`, `RTTI .?AVAI` and `.?AUAI_callback@giPython`), a human robot has none, and the loader leaves `+0xac` 0 for a 1.07 file, so a human's Iceberg faces `+Z` (checked in the binary, not live). Test `a_human_driven_robot_keeps_its_files_heading`.
+Shots (`robot_audit.py` against the new live reshoot, 4 valid shots of Iceberg): MAE 14.67 / 8.57 / 14.93 / 19.90
+-> **2.87 / 2.71 / 6.67 / 3.92** (mean 14.5 -> 4.0); Tornado (4 shots) 6.5 / 6.3 / 11.6 / 7.7, LugNut 3.8 / 6.7 / 11.8 /
+4.9 (the table's 10.45 and 8.38 before). Test `the_old_robots_take_their_heading_from_the_brains_nose`. Side-by-sides:
+scratchpad `fl/final/iceberg_after_sbs/`, `tornado_lugnut_after_sbs/`.
+
+**Hub nuts and domes.** The Buzzard wheel's parts that are not the tyre (`wheel3.gmf` `wheel3_display`, and
+`wheel_slipperbottom.gmf`) store **normals 0.586 long** and the live vertex buffers carry them as they are (Dementia,
+FlapJack and Razor dumps: the 44-, 22- and 7-vertex records have length 0.586 exactly), while the state dump has
+`D3DRS_NORMALIZENORMALS` 0 on every lit draw: the original lights them at 0.586 times the diffuse term (and a smaller
+`N.H`). Our loader and shader normalised, so the hub nuts and the wheel's inner parts came out too bright. The loader now
+keeps the stored length (`stored()`: direction from the node's transform, length from the file) and the vertex shader no
+longer normalises (all lit draws, translucent ones included). Only these two parts and `rotatorbar1.gmf` (1.5) are not unit
+in the shipped scenes. Dementia (4 shots): MAE 2.01 / 3.17 / 3.92 / 2.61 -> **1.59 / 2.91 / 3.83 / 2.37** (central window
+3.01 / 4.67 / 4.74 / 3.16 -> 2.11 / 4.23 / 4.51 / 2.71); Eye Poker (it carries the same wheels) 5.74 / 8.20 / 11.96 / 4.86 ->
+5.53 / 7.64 / 11.67 / 4.61. Test `the_buzzard_wheels_hub_normals_keep_their_file_length`. The Eye Poker domes themselves
+are the file's meshes with the dump's materials; what is left of its shots is the resting yaw and the HUD card
+(section 11.4 (b), (c)). Side-by-sides: `fl/final/dementia_eyepoker/`.
+
+Tools: `frida/ra2_heading.js` (`robots(n)`: each robot's `+0xac` and `GetHeading`; hooks the loader, `0x401170` and
+`0x401150` with backtraces), `capture_shape.py` + `SHAPE_HOOK_JS=ra2_vbdump.js` (Iceberg v MiniBerg, Tornado v LugNut).

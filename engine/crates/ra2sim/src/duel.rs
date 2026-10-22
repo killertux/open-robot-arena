@@ -177,6 +177,91 @@ fn flame_owner(key: u64) -> usize {
     ((key >> 16) & 0xffff) as usize
 }
 
+/// A component's collision as the flame's cast sees it: each piece's points and triangles, component-local
+/// (a mesh piece's own triangles; a convex piece's hull faces, outward wound), `convex` telling which.
+/// The original's particle cast (`0x5bdc00`) is a world ray cast against the collision shapes, not against a
+/// box around the part; docs/37 section 6.
+pub(crate) type FlameShape = (Vec<Vec3>, Vec<[u32; 3]>, bool);
+
+fn flame_shapes(c: &crate::rig::Component) -> Vec<FlameShape> {
+    let h = &c.havok;
+    let mut out = Vec::new();
+    let mut add = |points: &[Vec3], mesh: Option<&[[u32; 3]]>| match mesh {
+        Some(t) if !t.is_empty() => out.push((points.to_vec(), t.to_vec(), false)),
+        _ => {
+            if let Some(t) = crate::massprops::hull_triangles(points) {
+                out.push((points.to_vec(), t, true));
+            }
+        }
+    };
+    if h.collision.is_empty() && h.rotor_collision.is_empty() {
+        add(&c.hull_points, None);
+    }
+    for (k, p) in h.collision.iter().enumerate() {
+        add(p, h.collision_mesh.get(k).and_then(|m| m.as_deref()));
+    }
+    for (k, p) in h.rotor_collision.iter().enumerate() {
+        add(p, h.rotor_collision_mesh.get(k).and_then(|m| m.as_deref()));
+    }
+    out
+}
+
+/// The nearest entry of the segment `origin + u t`, `t` in `(0, len]`, into any of `shapes` carried by
+/// `world`: `(t, outward normal)`. A convex piece is entered only through a face the ray runs against (a cast
+/// that starts inside hits nothing); a mesh piece is two-sided.
+fn ray_shapes(
+    origin: Vec3,
+    u: Vec3,
+    len: f32,
+    world: glam::Mat4,
+    shapes: &[FlameShape],
+) -> Option<(f32, Vec3)> {
+    let inv = world.inverse();
+    let o = inv.transform_point3(origin);
+    let d = inv.transform_vector3(u);
+    let mut best: Option<(f32, Vec3)> = None;
+    for (pts, tris, convex) in shapes {
+        for t in tris {
+            let (Some(&a), Some(&b), Some(&c)) = (
+                pts.get(t[0] as usize),
+                pts.get(t[1] as usize),
+                pts.get(t[2] as usize),
+            ) else {
+                continue;
+            };
+            let (e1, e2) = (b - a, c - a);
+            let n = e1.cross(e2);
+            let denom = n.dot(d);
+            if denom.abs() < 1e-12 || (*convex && denom > 0.0) {
+                continue;
+            }
+            let s = (a - o).dot(n) / denom;
+            if s <= 0.0 || s > len || best.is_some_and(|(b, _)| s >= b) {
+                continue;
+            }
+            let hit = o + d * s;
+            let (v0, v1, v2) = (hit - a, e1, e2);
+            let (d00, d01, d11) = (v1.dot(v1), v1.dot(v2), v2.dot(v2));
+            let (d20, d21) = (v0.dot(v1), v0.dot(v2));
+            let det = d00 * d11 - d01 * d01;
+            if det.abs() < 1e-20 {
+                continue;
+            }
+            let bu = (d11 * d20 - d01 * d21) / det;
+            let bv = (d00 * d21 - d01 * d20) / det;
+            if bu < 0.0 || bv < 0.0 || bu + bv > 1.0 {
+                continue;
+            }
+            let mut nn = n.normalize_or_zero();
+            if nn.dot(d) > 0.0 {
+                nn = -nn;
+            }
+            best = Some((s, world.transform_vector3(nn).normalize_or_zero()));
+        }
+    }
+    best
+}
+
 /// Where a ray enters an oriented box from outside, and the face it enters by
 /// (the normal facing the ray's origin). A ray that starts inside meets nothing:
 /// the original's cast does not hit a body it begins within.
@@ -620,6 +705,12 @@ pub struct Duel {
     /// Damage each robot has landed on another, summed over the match. Arena
     /// hazards' damage has no attacker and is only in `damage_taken`.
     pub damage_dealt: Vec<f32>,
+    /// Flame particle hits applied so far (docs/37 section 6: the hit rate against distance).
+    pub flame_hits: usize,
+    /// The last flame hits `(robot, component, point)`, for the diagnostics (capped).
+    pub flame_hit_log: Vec<(usize, usize, Vec3)>,
+    /// Collision shapes the flame's cast uses, per `(robot, component)`, built on first use.
+    flame_shapes: std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<FlameShape>>>,
     /// Hits that the match has not scored yet. The duel knows the damage and the
     /// attacker; the game type and teams are the match's, so it drains this.
     score_hits: Vec<ScoreHit>,
@@ -785,6 +876,16 @@ fn script_ai_for(arena_path: &str, robots: &[Robot]) -> Option<ScriptAi> {
 impl Duel {
     /// Build the world and spawn the robots facing each other.
     pub fn new(arena_path: &str, bots: &[BotSetup]) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_humans(arena_path, bots, &[])
+    }
+
+    /// [`Duel::new`] with the robots in `humans` driven by people: they have no brain, so their heading
+    /// is the `.bot`'s own and not the brain's `nose` (docs/34 section 11.5).
+    pub fn new_with_humans(
+        arena_path: &str,
+        bots: &[BotSetup],
+        humans: &[usize],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         // Absolute from the outset: the script layer changes the process's
         // working directory to the game root, after which a relative arena path
         // no longer resolves.
@@ -855,7 +956,20 @@ impl Duel {
         let n = bots.len().max(1);
         let mut robots = Vec::new();
         for (i, setup) in bots.iter().enumerate() {
-            let rig = rig::load(&setup.path)?;
+            let mut rig = rig::load(&setup.path)?;
+            // A brain's `nose` is the robot's heading (see `scriptai::bindings_nose`): the 1.07 robots
+            // have no heading of their own. Only a robot with a brain: a human-driven one has no `AI`
+            // object to push it (the setter `0x401170` is reached through the `AI` and `AI_callback`
+            // vtables only) and keeps what the loader left, the file's heading or 0.
+            if !humans.contains(&i) {
+                if let Some(nose) = ra2_render::find_game_root(std::path::Path::new(arena_path))
+                    .and_then(|root| {
+                        crate::scriptai::bindings_nose(&root, &crate::scriptai::bot_name(&rig))
+                    })
+                {
+                    rig.heading = nose;
+                }
+            }
             let angle = i as f32 * std::f32::consts::TAU / n as f32;
             if let Some(at) = setup.spawn {
                 // Probe from just above the play surface (the start points'
@@ -1064,6 +1178,9 @@ impl Duel {
             log: Vec::new(),
             damage_taken,
             damage_dealt: vec![0.0; n],
+            flame_hits: 0,
+            flame_hit_log: Vec::new(),
+            flame_shapes: std::collections::HashMap::new(),
             score_hits: Vec::new(),
             popups: Vec::new(),
             damage_events: Vec::new(),
@@ -2181,11 +2298,27 @@ impl Duel {
             return;
         }
         // The parts the flames can hit, once for the step: every robot's
-        // components as oriented boxes, and whose they are.
-        let targets: Vec<Vec<(Vec3, Vec3, glam::Quat, bool)>> = self
+        // components (box, world matrix, collision shapes) and whose they are.
+        for (r, robot) in self.robots.iter().enumerate() {
+            for (i, c) in robot.rig.components.iter().enumerate() {
+                self.flame_shapes
+                    .entry((r, i))
+                    .or_insert_with(|| std::sync::Arc::new(flame_shapes(c)));
+            }
+        }
+        type Target = (
+            Vec3,
+            Vec3,
+            glam::Quat,
+            bool,
+            Mat4,
+            std::sync::Arc<Vec<FlameShape>>,
+        );
+        let targets: Vec<Vec<Target>> = self
             .robots
             .iter()
-            .map(|robot| {
+            .enumerate()
+            .map(|(r, robot)| {
                 let alive = robot.is_alive();
                 let worlds = robot.component_worlds(&*self.physics);
                 (0..robot.rig.components.len())
@@ -2196,6 +2329,8 @@ impl Duel {
                             robot.rig.components[i].half_extents(),
                             rotation,
                             alive && robot.attached[i],
+                            worlds[i],
+                            self.flame_shapes[&(r, i)].clone(),
                         )
                     })
                     .collect()
@@ -2216,11 +2351,17 @@ impl Duel {
                 if v == owner {
                     continue;
                 }
-                for (c, (centre, half, rotation, live)) in boxes.iter().enumerate() {
+                for (c, (centre, half, rotation, live, world, shapes)) in boxes.iter().enumerate() {
                     if !live {
                         continue;
                     }
-                    if let Some((t, n)) = ray_box_entry(from, u, len, *centre, *half, *rotation) {
+                    // the part's own collision shapes; a part with none keeps the box around it
+                    let entry = if shapes.is_empty() {
+                        ray_box_entry(from, u, len, *centre, *half, *rotation)
+                    } else {
+                        ray_shapes(from, u, len, *world, shapes)
+                    };
+                    if let Some((t, n)) = entry {
                         if best.is_none_or(|(b, ..)| t < b) {
                             best = Some((t, v, c, n));
                         }
@@ -2233,6 +2374,10 @@ impl Duel {
             Some((point, n))
         });
         for (v, c, point) in hits {
+            self.flame_hits += 1;
+            if self.flame_hit_log.len() < 20_000 {
+                self.flame_hit_log.push((v, c, point));
+            }
             self.apply_hit_with(0.0, None, v, c, FLAME_DAMAGE, point);
         }
     }
@@ -6286,5 +6431,78 @@ mod tests {
         assert_eq!(through(&mut gate, 0.0), 2);
         assert_eq!(through(&mut gate, 0.5), 0);
         assert_eq!(through(&mut gate, 1.0), 2);
+    }
+
+    /// The flame's cast is a ray against the part's collision shape (`0x504b90` -> the world cast `0x4a3a90`):
+    /// a convex piece is entered from outside through a face the ray runs against, and a ray that starts
+    /// inside hits nothing (docs/37 section 6).
+    #[test]
+    fn a_flame_ray_enters_a_convex_piece_from_outside_only() {
+        let cube: Vec<Vec3> = (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 == 0 { -0.5 } else { 0.5 },
+                    if i & 2 == 0 { -0.5 } else { 0.5 },
+                    if i & 4 == 0 { -0.5 } else { 0.5 },
+                )
+            })
+            .collect();
+        let tris = crate::massprops::hull_triangles(&cube).expect("a hull");
+        let shapes: Vec<FlameShape> = vec![(cube, tris, true)];
+        let world = Mat4::from_translation(Vec3::new(0.0, 0.0, 3.0));
+        let hit = ray_shapes(Vec3::ZERO, Vec3::Z, 5.0, world, &shapes).expect("a hit");
+        assert!((hit.0 - 2.5).abs() < 1e-4, "{hit:?}");
+        assert!(
+            hit.1.dot(-Vec3::Z) > 0.99,
+            "the normal faces the ray: {hit:?}"
+        );
+        // too short to reach it, and starting inside
+        assert!(ray_shapes(Vec3::ZERO, Vec3::Z, 2.0, world, &shapes).is_none());
+        assert!(ray_shapes(Vec3::new(0.0, 0.0, 3.0), Vec3::Z, 5.0, world, &shapes).is_none());
+    }
+
+    /// A robot driven by a brain takes the brain's `nose` as its heading, so the 1.07 robots (whose files carry
+    /// none) face the way live shows them: Iceberg `pi`, Tornado and LugNut `-pi/2` (docs/34 section 11.5).
+    #[test]
+    fn the_old_robots_take_their_heading_from_the_brains_nose() {
+        let Some(game) = game_dir() else { return };
+        let nose = |name: &str| crate::scriptai::bindings_nose(&game, name);
+        assert_eq!(nose("Iceberg"), Some(std::f32::consts::PI));
+        assert_eq!(nose("Tornado"), Some(-std::f32::consts::FRAC_PI_2));
+        assert_eq!(nose("LugNut"), Some(-std::f32::consts::FRAC_PI_2));
+        assert_eq!(nose("Scout"), Some(0.0));
+        assert_eq!(nose("No Such Robot"), None);
+    }
+
+    /// Only a robot with a brain takes the brain's `nose` as its heading; a human-driven Iceberg (a v1.07
+    /// file with no heading) keeps 0 (docs/34 section 11.5).
+    #[test]
+    fn a_human_driven_robot_keeps_its_files_heading() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bots = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let setups = [bots("AI/Team7/Bot1.bot"), bots("AI/Team0/Bot1.bot")];
+        let brain = Duel::new_with_humans(&arena, &setups, &[]).expect("a duel");
+        assert!((brain.robots[0].rig.heading - std::f32::consts::PI).abs() < 1e-5);
+        let human = Duel::new_with_humans(&arena, &setups, &[0]).expect("a duel");
+        assert_eq!(human.robots[0].rig.heading, 0.0, "a human's Iceberg");
+        assert_eq!(human.robots[1].rig.heading, 0.0);
+        // a human's front is the file's: Iceberg's chassis `+Z` faces where the start point says
+        let f = |d: &Duel| {
+            let r = &d.robots[0];
+            d.physics
+                .state(r.body())
+                .map(|s| s.rotation * r.rig.forward())
+        };
+        let (fb, fh) = (f(&brain).unwrap(), f(&human).unwrap());
+        assert!(
+            fb.dot(fh) > 0.99,
+            "both face the start point's way: {fb:?} {fh:?}"
+        );
     }
 }

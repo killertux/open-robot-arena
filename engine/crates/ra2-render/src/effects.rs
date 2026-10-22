@@ -615,6 +615,8 @@ pub struct Effects {
     textures: Mutex<HashMap<&'static str, Arc<Image>>>,
     collider: Collider,
     bolts: Vec<(i32, Bolt)>,
+    /// Particles drawn as given, in order, never stepped (`Effects::replay`).
+    replay: Option<Emitter>,
 }
 
 impl Effects {
@@ -631,7 +633,35 @@ impl Effects {
             textures: Mutex::new(HashMap::new()),
             collider: Collider::default(),
             bolts: Vec::new(),
+            replay: None,
         }
+    }
+
+    /// Draw exactly these flame particles `(position, half-size, rgba)` as the next frame's jet, in the
+    /// order given, and nothing else of the jet's: the live
+    /// frames of `tools/oracle/capture_flame_look.py` carry every particle the original drew, which
+    /// lets the draw be compared pixel for pixel (docs/37 section 6). `None` clears them.
+    pub fn replay(&mut self, particles: Option<&[(Vec3, f32, [f32; 4])]>) {
+        self.replay = particles.map(|list| {
+            let mut e = Emitter::new(Config::jet(Vec3::ZERO), Vec3::ZERO, false, 0.0);
+            for &(pos, size, color) in list {
+                e.particles.push(Particle {
+                    pos,
+                    vel: Vec3::ZERO,
+                    total: 1.0,
+                    remaining: 1.0,
+                    color,
+                    color_start: color,
+                    size,
+                    size_start: size,
+                    angle: 0.0,
+                    texture: 0,
+                    anim: 0.0,
+                    alive: true,
+                });
+            }
+            e
+        });
     }
 
     /// The game directory the textures come from, if any.
@@ -653,6 +683,7 @@ impl Effects {
     pub fn is_empty(&self) -> bool {
         self.bursts.is_empty()
             && self.standing.is_empty()
+            && self.replay.is_none()
             && !self.bolts.iter().any(|(_, b)| b.visible)
     }
 
@@ -827,6 +858,7 @@ impl Effects {
             .bursts
             .iter()
             .chain(self.standing.iter().map(|(_, e)| e))
+            .chain(self.replay.iter())
         {
             if e.particles.is_empty() {
                 continue;
@@ -935,6 +967,10 @@ fn particle_material(image: Arc<Image>, additive: bool) -> Material {
         additive,
         has_vertex_colors: true,
         lighting: false,
+        // The original's state dump has `ZWRITEENABLE` 1 for the jet's draws, yet its live frames show every
+        // overlapping quad adding: replaying a live frame's particles gives a mean MAE of 6.2 over the flame
+        // region without depth writes and 31.8 with them (docs/37 section 6). The quads are tested against
+        // the scene and do not hide one another.
         z_write: false,
         cull: false,
         ..Material::default()
@@ -1662,5 +1698,25 @@ mod tests {
             fx.step(1.0 / 60.0);
         }
         assert_eq!(fx.standing[0].1.alive(), 0);
+    }
+
+    /// `Effects::replay` draws exactly the particles it is given, never stepped (the live frames of the
+    /// Flamethrower, docs/37 section 6).
+    #[test]
+    fn a_replayed_frame_draws_its_particles_as_given() {
+        let dir = std::env::var_os("RA2_GAME").map(std::path::PathBuf::from);
+        let mut fx = Effects::new(dir.as_deref());
+        assert!(fx.is_empty());
+        let list = [
+            (Vec3::new(1.0, 2.0, 3.0), 0.25, [1.0, 0.5, 0.0, 1.0]),
+            (Vec3::new(4.0, 5.0, 6.0), 0.35, [0.0, 0.5, 1.0, 1.0]),
+        ];
+        fx.replay(Some(&list));
+        assert!(!fx.is_empty());
+        fx.step(1.0);
+        let e = fx.replay.as_ref().expect("replay");
+        assert_eq!(e.alive(), 2, "a replay is not stepped");
+        fx.replay(None);
+        assert!(fx.is_empty());
     }
 }

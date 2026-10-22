@@ -53,6 +53,7 @@ hook('0x4a3380', 'add', 6);
 hook('0x48dc50', 'msmoke', 2);
 hook('0x4f6a10', 'smoke2', 1);
 hook('0x4b5760', 'flame', 6);
+let lastHit = null;
 Interceptor.attach(ptr('0x44ee70'), { onEnter() {
   try {
     const sp = this.context.esp;
@@ -64,6 +65,7 @@ Interceptor.attach(ptr('0x44ee70'), { onEnter() {
       o.w = w.toString(); o.flag = w.add(0x80).readU8(); o.file = str(w.add(0x84));
       o.dir = vec(w.add(0x94)); o.size = [f(w, 0xa4), f(w, 0xa8)]; o.mode = w.add(0xac).readS32();
     }
+    if (o.flag) lastHit = { ecx: this.context.ecx, damage: damage, rec: rec.readByteArray(0x100) };
     send(o);
   } catch (e) { send({ ev: 'err', name: 'hit', e: String(e) }); }
 } });
@@ -127,6 +129,29 @@ Interceptor.attach(ptr('0x51e6d0'), { onEnter() { if (!inHit) return; this.m = t
 Interceptor.attach(ptr('0x51e600'), { onEnter() { if (!inHit) return; this.m = this.context.ecx; this.o = this.context.esp.add(4).readPointer(); this.iv = v3(this.o); }, onLeave() {
   if (!this.m) return; send({ ev: 'rot2', t: now(), m: m12(this.m), in: this.iv, out: v3(this.o) }); } });
 Interceptor.attach(ptr('0x44cf00'), { onEnter() { if (!inHit) return; const sp = this.context.esp; send({ ev: 'veq', t: now(), a: v3(this.context.ecx), b: v3(sp.add(4).readPointer()) }); } });
-rpc.exports = { ping() { return now(); }, glob() { return v3(ptr('0x71abcc')); }, m12at(a) { return m12(ptr(a)); },
+// A hit of our own (docs/37 section 8): the last real decal-carrying hit's contact record, with the contact point
+// (+0) and normal (+0x10, into the struck part) replaced, handed to the component-hit routine again.
+const hitFn = new NativeFunction(ptr('0x44ee70'), 'void', ['pointer', 'float', 'pointer'], { abi: 'thiscall' });
+// The call runs on the game's main thread, at the start of its per-frame update (FUN_005e4e30), as
+// ra2_python.js does: from this agent's own thread it crashes the game (it builds a vertex buffer).
+const synthQueue = [];
+const synthDone = {};
+let synthTicket = 0;
+Interceptor.attach(ptr('0x5e4e30'), { onEnter() {
+  while (synthQueue.length) {
+    const j = synthQueue.shift();
+    try { hitFn(ptr(j.ecx || lastHit.ecx.toString()), j.damage, j.buf); synthDone[j.t] = 1; } catch (e) { synthDone[j.t] = String(e); }
+  }
+} });
+function synth(ecx, damage, p, n) {
+  if (!lastHit) return -1;
+  const buf = Memory.alloc(0x100);
+  buf.writeByteArray(lastHit.rec);
+  for (let i = 0; i < 3; i++) { buf.add(4 * i).writeFloat(p[i]); buf.add(0x10 + 4 * i).writeFloat(n[i]); }
+  const t = ++synthTicket;
+  synthQueue.push({ t: t, ecx: ecx, damage: damage, buf: buf });
+  return t;
+}
+rpc.exports = { synth(ecx, damage, p, n) { return synth(ecx, damage, p, n); }, synthdone(t) { return synthDone[t] === undefined ? null : synthDone[t]; }, lasthit() { return lastHit ? lastHit.ecx.toString() : null; }, ping() { return now(); }, glob() { return v3(ptr('0x71abcc')); }, m12at(a) { return m12(ptr(a)); },
   // Force the alpha (+0x1cec) of live DecalTrigger objects (docs/37 section 3): their look at full strength.
   setalpha(addrs, v) { for (const a of addrs) ptr(a).add(0x1cec).writeFloat(v); return addrs.length; } };

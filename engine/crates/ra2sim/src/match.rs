@@ -151,11 +151,13 @@ pub fn event_num_bots(raw: usize) -> usize {
     }
 }
 
-/// Who drives a robot. The match is headless, so AI is the only controller now;
-/// the original's other case is the local player.
+/// Who drives a robot: a brain (`AI/Bindings.py`) or a human player (the local one, or a network
+/// player's). A robot with a brain takes its heading from the brain's `nose` (docs/34 section 11.5);
+/// a human-driven one has no `AI` object and keeps the `.bot`'s own heading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Controller {
     Ai,
+    Human,
 }
 
 /// One entry in the event's robot list.
@@ -169,6 +171,15 @@ pub struct RobotEntry {
 }
 
 impl RobotEntry {
+    /// An entry a human player drives (no brain is built for it).
+    pub fn human(team: usize, bot_path: impl Into<String>) -> Self {
+        RobotEntry {
+            team,
+            bot_path: bot_path.into(),
+            controller: Controller::Human,
+        }
+    }
+
     pub fn ai(team: usize, bot_path: impl Into<String>) -> Self {
         RobotEntry {
             team,
@@ -474,7 +485,14 @@ impl Match {
                 spawn: None,
             })
             .collect();
-        let mut duel = Duel::new(&config.arena, &setups)?;
+        let humans: Vec<usize> = config
+            .robots
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.controller == Controller::Human)
+            .map(|(i, _)| i)
+            .collect();
+        let mut duel = Duel::new_with_humans(&config.arena, &setups, &humans)?;
         for (robot, entry) in duel.robots.iter_mut().zip(&config.robots) {
             robot.team = entry.team;
         }
