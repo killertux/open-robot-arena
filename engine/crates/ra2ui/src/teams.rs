@@ -185,11 +185,12 @@ pub fn update_team(
     write_table(game, &table, &path)
 }
 
-/// A robot built in the workshop from an empty inventory selection joins
-/// the team: the record's `Robots:` line gains the first free slot number and
-/// the robot is `Teams/Team<team>/Bot<n>.bot`. The table is written at once.
-/// Returns the new robot's path.
-pub fn add_robot(game: &Path, team: usize) -> Result<PathBuf, String> {
+/// A robot built in the workshop joins the team: the lab was opened on the inventory's selected cell
+/// (`FUN_00439650` keeps the team and the cell number, `DAT_007184a4`/`DAT_007184a8`, and the robot is
+/// `Teams/Team<team>/Bot<cell>.bot`), so `slot` is that cell: the `Robots:` line gains it (kept in cell
+/// order) and a file left there by a scrapped robot is overwritten. With no cell (`None`) the first
+/// number not on the roster is used. The table is written at once. Returns the new robot's path.
+pub fn add_robot(game: &Path, team: usize, slot: Option<usize>) -> Result<PathBuf, String> {
     let path = ra2fmt::saves::resolve(game, Side::Player.table());
     let mut table = team::read_table(&path)?;
     let record = table
@@ -198,13 +199,16 @@ pub fn add_robot(game: &Path, team: usize) -> Result<PathBuf, String> {
         .filter(|t| t.is_named())
         .ok_or_else(|| format!("{}: team slot {team} is empty", path.display()))?;
     let folder = game.join(Side::Player.root()).join(format!("Team{team}"));
-    let slot = (0..)
-        .find(|n: &i32| {
-            !record.robots.contains(n)
-                && !ra2fmt::saves::resolve(game, format!("Teams/Team{team}/Bot{n}.bot")).exists()
-        })
-        .expect("a free robot slot");
-    record.robots.push(slot);
+    let slot = match slot {
+        Some(cell) => cell as i32,
+        None => (0..)
+            .find(|n: &i32| !record.robots.contains(n))
+            .expect("a free robot slot"),
+    };
+    if !record.robots.contains(&slot) {
+        record.robots.push(slot);
+        record.robots.sort_unstable();
+    }
     write_table(game, &table, &path)?;
     let folder = ra2fmt::saves::redirect(game, &folder);
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;

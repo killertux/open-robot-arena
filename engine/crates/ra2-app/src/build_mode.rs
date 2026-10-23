@@ -249,7 +249,7 @@ pub struct Builder {
     team_target: Option<PathBuf>,
     /// The team a robot built from an empty inventory selection joins when
     /// the lab is left (`FUN_004fee90` opens the lab for the HQ's team).
-    team_new: Option<usize>,
+    team_new: Option<(usize, Option<usize>)>,
 }
 
 /// Where a scripted drag drops its part.
@@ -1688,15 +1688,23 @@ impl Builder {
     /// inventory opened). `None` when the session edits no team robot.
     /// A new robot (no inventory robot was selected) joins team `team`'s
     /// roster when the lab is left, if anything was built or named.
-    pub fn set_team_new(&mut self, team: usize) {
-        self.team_new = Some(team);
+    pub fn set_team_new(&mut self, team: usize, slot: Option<usize>) {
+        self.team_new = Some((team, slot));
+        if slot.is_some() {
+            // The name box of a new robot reads `Enter Bot Name` (live `workshop-newbot`; `FUN_00439650`).
+            self.name_buffer = "Enter Bot Name".to_string();
+            self.refresh_panel();
+        }
     }
 
     pub fn save_to_team(&mut self) -> Result<Option<PathBuf>, String> {
         if self.team_target.is_none() {
-            if let Some(team) = self.team_new {
-                if self.build.can_undo() || self.name_edited {
-                    let path = ra2ui::teams::add_robot(&self.game, team)?;
+            if let Some((team, slot)) = self.team_new {
+                // A new robot in a selected `New Robot` cell is saved whatever was done (live: Back to HQ
+                // with nothing built wrote `Bot<cell>.bot`, 127 bytes, named `Enter Bot Name`, and the
+                // cell joined the roster); without a cell it only joins when something was built.
+                if slot.is_some() || self.build.can_undo() || self.name_edited {
+                    let path = ra2ui::teams::add_robot(&self.game, team, slot)?;
                     self.team_target = Some(path);
                 }
             }
@@ -1704,7 +1712,11 @@ impl Builder {
         let Some(path) = self.team_target.clone() else {
             return Ok(None);
         };
-        let name = self.design_name();
+        let name = if self.name_buffer.trim().is_empty() {
+            "Enter Bot Name".to_string()
+        } else {
+            self.design_name()
+        };
         self.build.set_name(&name);
         let path = ra2fmt::saves::prepare_write(&self.game, &path)
             .map_err(|e| format!("{}: {e}", path.display()))?;

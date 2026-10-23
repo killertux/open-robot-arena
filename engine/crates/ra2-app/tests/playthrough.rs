@@ -844,7 +844,7 @@ fn finish_later_keeps_the_entered_event_in_the_team_record() {
 
 /// A robot built from an empty inventory selection joins the team when the
 /// lab is left: a free `Bot<n>.bot` slot is written and the record's
-/// `Robots:` line lists it. Leaving without building adds nothing.
+/// `Robots:` line lists it (the selected cell, even when nothing was built).
 #[test]
 fn a_new_workshop_robot_joins_the_roster() {
     let Some(scratch) = ScratchGame::new("newbot") else {
@@ -882,16 +882,23 @@ fn a_new_workshop_robot_joins_the_roster() {
         )
         .unwrap();
     shell.click_named("workshop button").unwrap();
-    let mut builder = flow::open_workshop(game, None).unwrap();
+    let mut builder = flow::open_workshop(game, Some(free as usize)).unwrap();
     assert!(builder.team_target().is_none());
     builder.click_named("back button").unwrap();
-    assert_eq!(
-        flow::close_workshop(&mut builder, &mut shell).unwrap(),
-        None
+    // Live: leaving with nothing built still saves the selected cell (`Bot<cell>.bot`, `Enter Bot Name`).
+    let empty = flow::close_workshop(&mut builder, &mut shell)
+        .unwrap()
+        .expect("an empty new robot is saved too");
+    assert!(
+        empty.ends_with(format!("Teams/Team0/Bot{free}.bot")),
+        "{}",
+        empty.display()
     );
+    let bot = ra2fmt::bot::parse(&std::fs::read(&empty).unwrap()).unwrap();
+    assert_eq!(bot.name, "Enter Bot Name");
     shell.click_named("back button").unwrap();
 
-    // A part attached: the robot joins at the first free slot (the cell is still selected).
+    // A part attached to it (the cell is selected again, now a robot's).
     shell
         .click(
             grid.x + grid.w * (column as f32 + 0.5) / 2.0,
@@ -899,20 +906,14 @@ fn a_new_workshop_robot_joins_the_roster() {
         )
         .unwrap();
     shell.click_named("workshop button").unwrap();
-    let mut builder = flow::open_workshop(game, None).unwrap();
+    let mut builder = flow::open_workshop(game, Some(free as usize)).unwrap();
     builder.click_named("components button").unwrap();
     builder.click_named("mechanics button").unwrap();
     builder
         .place_component_free("Components\\ztek1.txt")
         .unwrap();
     builder.click_named("back button").unwrap();
-    // (A scrapped slot's `.bot` stays on disk, so the first slot whose file is free is the next one:
-    // the workshop does not yet save into the selected `New Robot` cell itself.)
-    let free = (0..)
-        .find(|n| {
-            !game.join(format!("Teams/Team0/Bot{n}.bot")).is_file() && !roster_before.contains(n)
-        })
-        .unwrap();
+    // The robot lands in the selected cell, over the scrapped robot's file that stayed on disk.
     let saved = flow::close_workshop(&mut builder, &mut shell)
         .unwrap()
         .expect("the new robot is saved to the team");

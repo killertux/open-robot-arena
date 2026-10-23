@@ -78,7 +78,7 @@ pub fn open_workshop(game: &Path, robot: Option<usize>) -> Result<Builder, Strin
         Some(path) => builder.set_team_target(path),
         None => {
             if let Ok(career) = hq_mode::load_career(game) {
-                builder.set_team_new(career.player_slot);
+                builder.set_team_new(career.player_slot, robot);
             }
         }
     }
