@@ -1523,7 +1523,7 @@ impl Duel {
                     .map(|m| m.to_scale_rotation_translation().1)
                     .unwrap_or(glam::Quat::IDENTITY);
                 let axis = host_rot * Vec3::from(req.axis);
-                let limits = hazards::slider_limits(req.neutral, req.lower, req.upper);
+                let limits = hazards::slider_limits(req.neutral, req.lower);
                 let Some(anchor) = self.anchor_body(state.position) else {
                     continue;
                 };
@@ -1555,6 +1555,7 @@ impl Duel {
                             strength: cap,
                             friction: cap,
                             limits,
+                            stops: [req.neutral, req.lower],
                         });
                     }
                     Err(e) => self.log.push(format!("hazard joint {:?}: {e}", req.child)),
@@ -1618,6 +1619,7 @@ impl Duel {
                             strength: cap,
                             friction: hinge.friction,
                             limits,
+                            stops: limits,
                         });
                     }
                     Err(e) => self.log.push(format!("hazard hinge {:?}: {e}", req.child)),
@@ -2053,6 +2055,10 @@ impl Duel {
     /// one-shot impulses applied along the joint's own axis or about it.
     fn drive_joints(&mut self, dt: f32) {
         for j in &mut self.joints {
+            if j.slider {
+                Self::drive_arena_slider(&mut *self.physics, j, dt);
+                continue;
+            }
             // How far along its own travel the joint is, for the auto-lock test.
             // Read through the physics (a disjoint field) so the mutable borrow
             // of `self.joints` this loop holds is untouched.
@@ -2134,6 +2140,78 @@ impl Duel {
                 self.physics
                     .apply_angular_impulse(j.body, j.axis * torque * dt);
             }
+        }
+    }
+
+    /// An arena slider's prismatic controller (`0x4b5240`, every substep,
+    /// skipped while locked): a **force**, as a robot's piston
+    /// ([`crate::robot::Robot`]'s `drive_prismatic`), not a speed motor. With
+    /// no direction, or within 0.05 of the stop its direction drives it to
+    /// (the second stop for a positive one, `+0x70`, the first for a negative
+    /// one, `+0x6c`), it locks if it auto-locks (`0x4b50c0(1)`: the limits
+    /// collapse onto it, its body stops, the direction is cleared); otherwise
+    /// it pushes `-(dir · F)` along the axis for the substep (`0x4b51b0`, the
+    /// moving body only), unless it already moves the commanded way at the
+    /// speed `S` or faster (`SetPowerSettings(S, F)`, raw). The Octagon's pit
+    /// floors (`(.2, 2000)`, direction 1) slide toward -3.8 and lock there
+    /// (live `slider-octagon__live__000`, docs/29 section 12y); ours drove
+    /// them as a motor at +0.2 m/s into the stop they already sat on.
+    fn drive_arena_slider(physics: &mut dyn PhysicsBackend, j: &mut LiveJoint, dt: f32) {
+        let pos = physics.slider_offset(j.handle);
+        let (push, force, locked, hold) = {
+            let mut d = j.drive.lock().unwrap_or_else(|e| e.into_inner());
+            let mut push = None;
+            if !d.locked {
+                let dir = d.direction;
+                let stop = if dir > 0.0 { j.stops[1] } else { j.stops[0] };
+                if dir == 0.0 || (pos - stop).abs() < 0.05 {
+                    if d.auto_lock_stops {
+                        d.locked = true;
+                        d.direction = 0.0;
+                    }
+                } else {
+                    let v = physics
+                        .state(j.body)
+                        .map(|s| s.linear_velocity)
+                        .unwrap_or(Vec3::ZERO);
+                    // The moving body's speed in the sense a positive
+                    // direction drives it (toward `-axis`); the anchor is
+                    // the motionless arena.
+                    let along = -v.dot(j.axis);
+                    let settings = crate::motor::PrismaticSettings {
+                        speed: d.speed,
+                        force: d.torque,
+                    };
+                    push = settings.force(dir, along, v.length());
+                }
+            }
+            (
+                push,
+                d.take_force(),
+                d.locked,
+                (d.torque.abs() * 40.0).max(1.0),
+            )
+        };
+        // A backend without the lock holds the joint on friction instead.
+        let supported = physics.lock_joint(j.handle, locked);
+        let friction = if locked && !supported { hold } else { 0.0 };
+        if j.strength != 0.0 || (j.friction - friction).abs() > 1e-3 {
+            physics.set_joint_strength(j.handle, 0.0, friction);
+            j.strength = 0.0;
+            j.friction = friction;
+        }
+        physics.drive_slider(j.handle, 0.0);
+        if std::env::var_os("RA2_SLIDER_DEBUG").is_some() {
+            eprintln!(
+                "slider h{} pos {pos:.4} locked {locked} push {push:?} stops {:?}",
+                j.handle, j.stops
+            );
+        }
+        if let Some(f) = push {
+            physics.add_force(j.body, j.axis * -f);
+        }
+        if force != 0.0 {
+            physics.apply_impulse(j.body, j.axis * force * dt);
         }
     }
 
@@ -4213,7 +4291,7 @@ mod tests {
             anchor_b: Vec3::ZERO,
             axis_a: Vec3::Y,
             axis_b: Vec3::Y,
-            limits: hazards::slider_limits(0.0, 0.8, 0.0),
+            limits: hazards::slider_limits(0.0, 0.8),
             max_force: 1.0,
             friction_force: 1.0,
         };
@@ -4226,7 +4304,7 @@ mod tests {
             physics.step(1.0 / 60.0);
             peak = peak.max(physics.state(body).unwrap().position.y);
         }
-        let travel = hazards::slider_limits(0.0, 0.8, 0.0)[1];
+        let travel = hazards::slider_limits(0.0, 0.8)[1];
         assert!(
             peak > travel - 0.05,
             "the body never reached its travel: peak {peak}, travel {travel}"
@@ -4487,6 +4565,73 @@ mod tests {
                 duel.log
             );
         }
+    }
+
+    /// The pit floors are pushed open, not motored (docs/29 section 12y): the
+    /// script unlocks them with direction 1 and power `(.2, 2000)`, and the
+    /// controller (`0x4b5240`) pushes each 200 kg floor with 2000 N until it
+    /// moves at 0.2 m/s toward its second stop (-3.8), then lets it run there
+    /// and locks it. Live (`slider-octagon__live__000`, AIs neutered) the two
+    /// floors with no robot on them take two pushes and lock 679 substeps
+    /// after the unlock.
+    #[test]
+    fn a_pit_floor_slides_open_once_its_script_lets_it_go() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/octagon.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team0/Bot0.bot"), bot("AI/Team0/Bot1.bot")],
+        )
+        .expect("a duel");
+        let idle = [DriveInput::default(), DriveInput::default()];
+        let dt = 1.0 / 60.0;
+        duel.step_direct(&idle, dt);
+        let floors: Vec<usize> = (0..duel.joints.len())
+            .filter(|&i| duel.joints[i].slider)
+            .collect();
+        assert_eq!(floors.len(), 4);
+        let locked = |duel: &Duel, i: usize| {
+            duel.joints[i]
+                .drive
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .locked
+        };
+        let mut opened = vec![None; 4];
+        let mut closed = vec![None; 4];
+        for step in 0..(70.0 / dt) as usize {
+            duel.step_direct(&idle, dt);
+            for (k, &i) in floors.iter().enumerate() {
+                let l = locked(&duel, i);
+                if !l && opened[k].is_none() {
+                    opened[k] = Some(step);
+                }
+                if l && opened[k].is_some() && closed[k].is_none() {
+                    closed[k] = Some(step);
+                }
+            }
+        }
+        let mut quick = 0;
+        for (k, &i) in floors.iter().enumerate() {
+            let (Some(a), Some(b)) = (opened[k], closed[k]) else {
+                panic!("floor {k} never slid open: {opened:?} {closed:?}");
+            };
+            let off = duel.physics.slider_offset(duel.joints[i].handle);
+            assert!((off + 3.8).abs() < 0.06, "floor {k} locked at {off}");
+            if (b - a).abs_diff(679) <= 5 {
+                quick += 1;
+            }
+        }
+        assert!(
+            quick >= 2,
+            "the free floors' slide, {opened:?} -> {closed:?}"
+        );
     }
 
     /// F9: the crush moves through the file's own movable region.
