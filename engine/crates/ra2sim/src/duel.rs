@@ -181,9 +181,9 @@ fn flame_owner(key: u64) -> usize {
 /// (a mesh piece's own triangles; a convex piece's hull faces, outward wound), `convex` telling which.
 /// The original's particle cast (`0x5bdc00`) is a world ray cast against the collision shapes, not against a
 /// box around the part; docs/37 section 6.
-pub(crate) type FlameShape = (Vec<Vec3>, Vec<[u32; 3]>, bool);
+pub type FlameShape = (Vec<Vec3>, Vec<[u32; 3]>, bool);
 
-fn flame_shapes(c: &crate::rig::Component) -> Vec<FlameShape> {
+pub fn flame_shapes(c: &crate::rig::Component, drives: bool) -> Vec<FlameShape> {
     let h = &c.havok;
     let mut out = Vec::new();
     let mut add = |points: &[Vec3], mesh: Option<&[[u32; 3]]>| match mesh {
@@ -200,8 +200,28 @@ fn flame_shapes(c: &crate::rig::Component) -> Vec<FlameShape> {
     for (k, p) in h.collision.iter().enumerate() {
         add(p, h.collision_mesh.get(k).and_then(|m| m.as_deref()));
     }
+    // a motor's rotor rides the part below the joint when the motor drives one, else its own body
+    if !drives {
+        for (k, p) in h.rotor_collision.iter().enumerate() {
+            add(p, h.rotor_collision_mesh.get(k).and_then(|m| m.as_deref()));
+        }
+    }
+    out
+}
+
+/// The rotor pieces of a motor that drives a joint: they ride the part hung from it (docs/37 section 6.2).
+pub fn flame_rotor_shapes(c: &crate::rig::Component) -> Vec<FlameShape> {
+    let h = &c.havok;
+    let mut out = Vec::new();
     for (k, p) in h.rotor_collision.iter().enumerate() {
-        add(p, h.rotor_collision_mesh.get(k).and_then(|m| m.as_deref()));
+        match h.rotor_collision_mesh.get(k).and_then(|m| m.as_deref()) {
+            Some(t) if !t.is_empty() => out.push((p.to_vec(), t.to_vec(), false)),
+            _ => {
+                if let Some(t) = crate::massprops::hull_triangles(p) {
+                    out.push((p.to_vec(), t, true));
+                }
+            }
+        }
     }
     out
 }
@@ -260,6 +280,61 @@ fn ray_shapes(
         }
     }
     best
+}
+
+/// One part a flame particle can hit: sphere centre, half extents, rotation, whether it is live, world
+/// matrix, collision shapes.
+pub type FlameTarget = (
+    usize,
+    Vec3,
+    Vec3,
+    glam::Quat,
+    bool,
+    Mat4,
+    std::sync::Arc<Vec<FlameShape>>,
+);
+
+/// `(robot, component, point, outward normal, distance)` of a flame cast's entry.
+pub type FlameEntry = (usize, usize, Vec3, Vec3, f32);
+
+/// The nearest part, of any robot but `owner`, that the segment `from -> to` enters:
+/// `(robot, component, point, outward normal, distance)`. (The jet's own robot is skipped, `0x504b90`.)
+pub(crate) fn flame_cast(
+    targets: &[Vec<FlameTarget>],
+    owner: usize,
+    from: Vec3,
+    to: Vec3,
+) -> Option<FlameEntry> {
+    let d = to - from;
+    let len = d.length();
+    if len <= 1e-6 {
+        return None;
+    }
+    let u = d / len;
+    let mut best: Option<(f32, usize, usize, Vec3)> = None;
+    for (v, boxes) in targets.iter().enumerate() {
+        if v == owner {
+            continue;
+        }
+        for (c, centre, half, rotation, live, world, shapes) in boxes.iter() {
+            if !live {
+                continue;
+            }
+            // the part's own collision shapes; a part with none keeps the box around it
+            let entry = if shapes.is_empty() {
+                ray_box_entry(from, u, len, *centre, *half, *rotation)
+            } else {
+                ray_shapes(from, u, len, *world, shapes)
+            };
+            if let Some((t, n)) = entry {
+                if best.is_none_or(|(b, ..)| t < b) {
+                    best = Some((t, v, *c, n));
+                }
+            }
+        }
+    }
+    let (t, v, c, n) = best?;
+    Some((v, c, from + u * t, n, t))
 }
 
 /// Where a ray enters an oriented box from outside, and the face it enters by
@@ -711,6 +786,7 @@ pub struct Duel {
     pub flame_hit_log: Vec<(usize, usize, Vec3)>,
     /// Collision shapes the flame's cast uses, per `(robot, component)`, built on first use.
     flame_shapes: std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<FlameShape>>>,
+    flame_rotors: std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<FlameShape>>>,
     /// Hits that the match has not scored yet. The duel knows the damage and the
     /// attacker; the game type and teams are the match's, so it drains this.
     score_hits: Vec<ScoreHit>,
@@ -1181,6 +1257,7 @@ impl Duel {
             flame_hits: 0,
             flame_hit_log: Vec::new(),
             flame_shapes: std::collections::HashMap::new(),
+            flame_rotors: std::collections::HashMap::new(),
             score_hits: Vec::new(),
             popups: Vec::new(),
             damage_events: Vec::new(),
@@ -2278,6 +2355,113 @@ impl Duel {
         self.update_flamethrowers(dt);
     }
 
+    /// The parts the flames can hit, for one step: every robot's components (box, world matrix, collision
+    /// shapes).
+    pub fn flame_targets(&mut self) -> Vec<Vec<FlameTarget>> {
+        use std::sync::Arc;
+        for (r, robot) in self.robots.iter().enumerate() {
+            let drives: Vec<usize> = robot
+                .rig
+                .parts
+                .iter()
+                .filter_map(|q| q.joint.map(|j| j.motor))
+                .collect();
+            for (i, c) in robot.rig.components.iter().enumerate() {
+                self.flame_shapes
+                    .entry((r, i))
+                    .or_insert_with(|| Arc::new(flame_shapes(c, drives.contains(&i))));
+                self.flame_rotors
+                    .entry((r, i))
+                    .or_insert_with(|| Arc::new(flame_rotor_shapes(c)));
+            }
+        }
+        self.robots
+            .iter()
+            .enumerate()
+            .map(|(r, robot)| {
+                let alive = robot.is_alive();
+                let worlds = robot.component_worlds(&*self.physics);
+                let mut out: Vec<FlameTarget> = Vec::new();
+                for i in 0..robot.rig.components.len() {
+                    let c = &robot.rig.components[i];
+                    // a part with no collidable (a battery, a board, a tank inside the chassis) is no obstacle
+                    if !(c.role.is_physical() && c.role != crate::rig::Role::Power) {
+                        continue;
+                    }
+                    let (_, rotation, _) = worlds[i].to_scale_rotation_translation();
+                    out.push((
+                        i,
+                        robot.component_sphere(&worlds, i).0,
+                        c.half_extents(),
+                        rotation,
+                        alive && robot.attached[i],
+                        worlds[i],
+                        self.flame_shapes[&(r, i)].clone(),
+                    ));
+                }
+                // the rotors the joints carry: the part below the joint, the rotor built at its rest angle
+                for (p, part) in robot.rig.parts.iter().enumerate() {
+                    let Some(info) = part.joint else { continue };
+                    let shapes = self.flame_rotors[&(r, info.motor)].clone();
+                    if shapes.is_empty() {
+                        continue;
+                    }
+                    let frame = robot.rig.components[part.root].local;
+                    let world = robot.part_world_of(&*self.physics, p)
+                        * (frame.inverse() * robot.rig.components[info.motor].rotor_local);
+                    out.push((
+                        info.motor,
+                        world.transform_point3(Vec3::ZERO),
+                        Vec3::ZERO,
+                        glam::Quat::IDENTITY,
+                        alive && robot.attached[info.motor],
+                        world,
+                        shapes,
+                    ));
+                }
+                out
+            })
+            .collect()
+    }
+
+    /// Run robot `owner`'s jet through the original's logged emitter frames `(dt, nozzle, velocity)` against the
+    /// parts as they stand (no robot or physics step): the particle law and the cast of
+    /// [`Duel::update_flamethrowers`] with the live emitter's motion. Returns every hit `(robot, component, point)`
+    /// with the frame it fell in (docs/37 section 6.2).
+    pub fn replay_jet(
+        &mut self,
+        owner: usize,
+        frames: &[(f32, Vec3, Vec3)],
+    ) -> Vec<(usize, usize, usize, Vec3)> {
+        let targets = self.flame_targets();
+        let key = flame_key(owner, 0);
+        let mut out = Vec::new();
+        for (n, &(dt, at, velocity)) in frames.iter().enumerate() {
+            self.fx.jet(key, at, velocity, true);
+            self.fx.step_with(dt, &mut |k, from, to| {
+                let (v, c, point, normal, _) = flame_cast(&targets, flame_owner(k), from, to)?;
+                out.push((n, v, c, point));
+                Some((point, normal))
+            });
+        }
+        out
+    }
+
+    /// Cast a list of particle steps `(from, to)` as the jet of robot `owner` would, against the parts as they stand
+    /// now (no step is taken): `(robot, component, point, normal, distance)` of the nearest entry. For the
+    /// diagnostics that replay the original's logged casts (docs/37 section 6.2).
+    pub fn flame_cast_all(
+        &mut self,
+        owner: usize,
+        steps: &[(Vec3, Vec3)],
+    ) -> Vec<Option<FlameEntry>> {
+        let targets = self.flame_targets();
+        steps
+            .iter()
+            .map(|&(from, to)| flame_cast(&targets, owner, from, to))
+            .collect()
+    }
+
     /// The Flamethrowers' jets: each robot's emitters follow their nozzles, the
     /// particles step, and every segment a flame particle covered is cast
     /// against the other robots' components (`FUN_005bdc00` casts it, `0x504b90`
@@ -2297,79 +2481,11 @@ impl Duel {
             self.fx.step(dt);
             return;
         }
-        // The parts the flames can hit, once for the step: every robot's
-        // components (box, world matrix, collision shapes) and whose they are.
-        for (r, robot) in self.robots.iter().enumerate() {
-            for (i, c) in robot.rig.components.iter().enumerate() {
-                self.flame_shapes
-                    .entry((r, i))
-                    .or_insert_with(|| std::sync::Arc::new(flame_shapes(c)));
-            }
-        }
-        type Target = (
-            Vec3,
-            Vec3,
-            glam::Quat,
-            bool,
-            Mat4,
-            std::sync::Arc<Vec<FlameShape>>,
-        );
-        let targets: Vec<Vec<Target>> = self
-            .robots
-            .iter()
-            .enumerate()
-            .map(|(r, robot)| {
-                let alive = robot.is_alive();
-                let worlds = robot.component_worlds(&*self.physics);
-                (0..robot.rig.components.len())
-                    .map(|i| {
-                        let (_, rotation, _) = worlds[i].to_scale_rotation_translation();
-                        (
-                            robot.component_sphere(&worlds, i).0,
-                            robot.rig.components[i].half_extents(),
-                            rotation,
-                            alive && robot.attached[i],
-                            worlds[i],
-                            self.flame_shapes[&(r, i)].clone(),
-                        )
-                    })
-                    .collect()
-            })
-            .collect();
+        let targets = self.flame_targets();
         // `0x504b90` skips the jet's own robot; every other part is cast.
         let mut hits: Vec<(usize, usize, Vec3)> = Vec::new();
         self.fx.step_with(dt, &mut |key, from, to| {
-            let owner = flame_owner(key);
-            let d = to - from;
-            let len = d.length();
-            if len <= 1e-6 {
-                return None;
-            }
-            let u = d / len;
-            let mut best: Option<(f32, usize, usize, Vec3)> = None;
-            for (v, boxes) in targets.iter().enumerate() {
-                if v == owner {
-                    continue;
-                }
-                for (c, (centre, half, rotation, live, world, shapes)) in boxes.iter().enumerate() {
-                    if !live {
-                        continue;
-                    }
-                    // the part's own collision shapes; a part with none keeps the box around it
-                    let entry = if shapes.is_empty() {
-                        ray_box_entry(from, u, len, *centre, *half, *rotation)
-                    } else {
-                        ray_shapes(from, u, len, *world, shapes)
-                    };
-                    if let Some((t, n)) = entry {
-                        if best.is_none_or(|(b, ..)| t < b) {
-                            best = Some((t, v, c, n));
-                        }
-                    }
-                }
-            }
-            let (t, v, c, n) = best?;
-            let point = from + u * t;
+            let (v, c, point, n, _) = flame_cast(&targets, flame_owner(key), from, to)?;
             hits.push((v, c, point));
             Some((point, n))
         });
@@ -6253,6 +6369,86 @@ mod tests {
         // the nozzle is ahead of the robot's nose
         let origin = duel.robots[0].position(&*duel.physics);
         assert!((jet.position - origin).dot(forward) > 1.0);
+    }
+
+    /// docs/37 section 6.2: six particle steps the original cast at ALARM
+    /// (`flamecast__live__000`, 2.6 m ahead of the flame robot, ALARM's bodies held), mapped from ALARM's
+    /// chassis pose then to ours at rest. The nearest entry is the Hammer Head's collision piece (hits a
+    /// metre ahead of the chassis, 3 mm off the original's point) or the chassis' mesh (3 mm), and the
+    /// original's hammer is at its rest pose when ALARM's brain is stopped.
+    #[test]
+    fn a_flame_cast_meets_alarm_where_the_original_did() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string();
+        let mut duel = Duel::new(
+            &arena,
+            &[BotSetup {
+                path: bot,
+                yaw_deg: Some(0.0),
+                spawn: Some([0.0, 0.0]),
+            }],
+        )
+        .expect("a duel");
+        for _ in 0..180 {
+            duel.step_direct(&[DriveInput::default()], 1.0 / 60.0);
+        }
+        // the original's chassis (centre of mass, orientation w x y z) and ours
+        let live_com = Vec3::new(-7.964_266, -1.791_886, 8.207_194);
+        let live_q = glam::Quat::from_xyzw(-0.000_46, -0.402_927_8, 0.020_075_6, 0.915_011_5);
+        let body = duel.robots[0].body();
+        let our_com = duel.physics.center_of_mass(body).unwrap();
+        let our_q = duel.physics.state(body).unwrap().rotation;
+        let map = |p: [f32; 3]| our_com + our_q * (live_q.inverse() * (Vec3::from(p) - live_com));
+        // (from, to, the original's hit point, the part)
+        type Cast = ([f32; 3], [f32; 3], [f32; 3], &'static str);
+        let casts: [Cast; 6] = [
+            (
+                [-8.98748, -1.96623, 9.17844],
+                [-8.79702, -1.97762, 8.97655],
+                [-8.80108, -1.97737, 8.98085],
+                "Hammer Head",
+            ),
+            (
+                [-8.97643, -1.95344, 9.16788],
+                [-8.79044, -1.97044, 8.97132],
+                [-8.80037, -1.96953, 8.98181],
+                "Hammer Head",
+            ),
+            (
+                [-8.97832, -1.81611, 9.16356],
+                [-8.77927, -1.78594, 8.95955],
+                [-8.8026, -1.78948, 8.98345],
+                "Hammer Head",
+            ),
+            (
+                [-8.96302, -1.7227, 9.1244],
+                [-8.76784, -1.66576, 8.90175],
+                [-8.82253, -1.68172, 8.96414],
+                "Hammer Head",
+            ),
+            (
+                [-8.61468, -2.01612, 8.78531],
+                [-8.42616, -2.02435, 8.58478],
+                [-8.45895, -2.02292, 8.61966],
+                "Chassis",
+            ),
+            (
+                [-8.4399, -2.04497, 8.64362],
+                [-8.2522, -2.0586, 8.4553],
+                [-8.4323, -2.04553, 8.636],
+                "Chassis",
+            ),
+        ];
+        let steps: Vec<(Vec3, Vec3)> = casts.iter().map(|c| (map(c.0), map(c.1))).collect();
+        let hits = duel.flame_cast_all(usize::MAX, &steps);
+        for (c, h) in casts.iter().zip(&hits) {
+            let (v, i, point, _, _) = h.unwrap_or_else(|| panic!("no hit for {c:?}"));
+            assert_eq!(duel.robots[v].rig.components[i].name, c.3, "{c:?}");
+            let err = (point - map(c.2)).length();
+            assert!(err < 0.01, "{c:?}: {err} m off the original's hit");
+        }
     }
 
     /// A probe, not a check: how many flame hits an ALARM standing `d` metres

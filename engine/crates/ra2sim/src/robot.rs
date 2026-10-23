@@ -1648,6 +1648,10 @@ impl Robot {
     }
 
     /// World transform of one assembled body.
+    pub fn part_world_of(&self, physics: &dyn PhysicsBackend, part: usize) -> Mat4 {
+        self.part_world(physics, part)
+    }
+
     fn part_world(&self, physics: &dyn PhysicsBackend, part: usize) -> Mat4 {
         match physics.state(self.parts[part].body) {
             Some(s) => Mat4::from_rotation_translation(s.rotation, s.position),

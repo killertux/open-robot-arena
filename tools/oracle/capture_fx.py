@@ -235,12 +235,17 @@ def synth_decals(base, rows, sc, damages, offsets):
             time.sleep(0.05)
         time.sleep(0.5)
         new = [r for r in rows if r.get("ev") == "decal"][n_before:]
+        # the constructor hook cannot see a call made inside a hook: find the new object in memory (docs/37 section 8.1)
+        known = [r["obj"] for r in rows if r.get("ev") == "decal"]
+        vt = sc.exports_sync.vtbl(known[-1])
+        found = sc.exports_sync.finddecals("0x%x" % vt, dmg / 100.0, known)
+        print("synth", i, "found decal objects", len(found), flush=True)
         mats = {owner: sc.exports_sync.m12at(owner)}
         pb = f"{base}-s{i}b.png"
         ra2_drive.shot(DISPLAY, pb)
         rows.append({"ev": "spair", "i": i, "damage": dmg, "ok": ok, "point": c, "normal": nw, "cam": cam, "fov": fov,
                      "owner": owner, "chassis": mats, "a": os.path.basename(pa), "b": os.path.basename(pb),
-                     "decal": new[-1] if new else None})
+                     "decal": new[-1] if new else None, "found": found})
         print("synth", i, dmg, ok, "new decals", len(new), flush=True)
     late = float(os.environ.get("LATE", "0"))
     if late:

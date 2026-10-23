@@ -128,7 +128,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         duel.marks.iter().map(|m| m.len()).collect::<Vec<_>>()
     );
     let renderer = Renderer::new()?;
-    let (w, h) = (1024u32, 768u32);
+    // DECALSHOT_SIZE=1024x544: the live synth run's 3D viewport (docs/37 section 8.1)
+    let (w, h) = std::env::var("DECALSHOT_SIZE")
+        .ok()
+        .and_then(|v| {
+            let (a, b) = v.split_once('x')?;
+            Some((a.parse().ok()?, b.parse().ok()?))
+        })
+        .unwrap_or((1024u32, 768u32));
     duel.scene_camera
         .select(ra2sim::camera::SceneCameraKind::Static);
     for (name, v) in shots {
