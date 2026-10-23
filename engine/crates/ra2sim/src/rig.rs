@@ -1181,16 +1181,28 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
                 },
             )
         } else if axle {
-            // A free axle: the wheel spins on it, nothing drives it here.
+            // A free axle: the wheel spins on it, nothing drives it here. A
+            // `Steering` unit's hub is held by Havok's wheel constraint, whose
+            // set-up has no motor and no friction about the axle (`0x553c30`,
+            // `+0x21` off; live, Sentinel driving and steering: the atom's
+            // velocity change about the axle is ours without friction to 0.003
+            // rad/s, where 8 N·m would be 0.15 a substep,
+            // `wheel-sentinel-miniberg-box__live__000`, docs/29 section 12y).
+            let steering = comps[parent].class.eq_ignore_ascii_case("steering")
+                && std::env::var_os("RA2_STEER_FRICTION").is_none();
             (
                 0.0,
                 0.0,
                 [-std::f32::consts::PI, std::f32::consts::PI],
-                comps[root]
-                    .wheel
-                    .as_ref()
-                    .map(|w| w.resistance * torque_unit())
-                    .unwrap_or(0.0),
+                if steering {
+                    0.0
+                } else {
+                    comps[root]
+                        .wheel
+                        .as_ref()
+                        .map(|w| w.resistance * torque_unit())
+                        .unwrap_or(0.0)
+                },
                 JointUse::Passive,
             )
         } else {

@@ -1073,10 +1073,12 @@ pub struct JointRequest {
     pub child: String,
     /// The slide axis, in the host's space (`AddPrismatic`'s `ax, ay, az`).
     pub axis: [f32; 3],
+    /// A slider's two stops, as `AddPrismatic` passes them (`0x404800` →
+    /// `0x4b47b0`): `neutral` is the one a negative direction drives it to
+    /// (the controller's `+0x6c`), `lower` the one a positive direction does
+    /// (`+0x70`); the travel is between them. `upper` is the script's last
+    /// number, a start offset (nonzero in no stock arena) the engine ignores.
     pub neutral: f32,
-    /// Travel limits. The scripts pass them unordered — `box.py` asks for
-    /// `(0, .8, 0)`, which is `neutral`, then `0.8`, then `0` — so the engine
-    /// takes the min and the max.
     pub lower: f32,
     pub upper: f32,
     pub drive: Arc<Mutex<Drive>>,
@@ -1092,8 +1094,12 @@ fn register_joint(
     lower: f32,
     upper: f32,
 ) -> Arc<Mutex<Drive>> {
+    // A prismatic controller starts locked with power settings `(1, 60)`
+    // (`0x4b47b0`: `+0x74 = 1`, `+0x78 = 60`, then `Lock(1)`).
     let drive = Arc::new(Mutex::new(Drive {
         locked: true,
+        speed: if slider { 1.0 } else { 0.0 },
+        torque: if slider { 60.0 } else { 0.0 },
         ..Drive::default()
     }));
     crate::state().joints.push(JointRequest {
@@ -1136,12 +1142,19 @@ impl PrismaticController {
         d.torque = torque;
     }
 
+    /// `SetDirection(d)`: the controller keeps it as an integer (`+0x80`).
     fn SetDirection(&self, direction: f32) {
-        self.d().direction = direction;
+        self.d().direction = direction.trunc();
     }
 
+    /// `Lock(on)` (`0x4b50c0`): locking also zeroes the direction, so the
+    /// script gives it one again after unlocking.
     fn Lock(&self, on: bool) {
-        self.d().locked = on;
+        let mut d = self.d();
+        d.locked = on;
+        if on {
+            d.direction = 0.0;
+        }
     }
 
     fn SetAutoLock(&self, on: bool) {

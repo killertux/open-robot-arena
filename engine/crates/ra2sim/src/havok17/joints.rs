@@ -510,6 +510,113 @@ fn solve_dense(k: &mut [[f32; 6]; 6], rhs: &mut [f32; 6], n: usize) -> Option<[f
     x.iter().all(|v| v.is_finite()).then_some(x)
 }
 
+/// One body's state for [`replay_wheel`]: centre of mass, orientation,
+/// velocity, angular velocity, inverse mass and world inverse inertia, as a
+/// live capture reads them (`+0x30`, `+0x40`, `+0x54`, `+0x64`, `+0x98`,
+/// `+0x10c`).
+#[derive(Clone, Copy, Debug)]
+pub struct ReplayBody {
+    pub com: Vec3,
+    pub rotation: Quat,
+    pub velocity: Vec3,
+    pub angular_velocity: Vec3,
+    pub inv_mass: f32,
+    pub inv_inertia_world: glam::Mat3,
+}
+
+/// Diagnostic (docs/29 section 12y, `examples/wheelreplay`): one wheel
+/// constraint's set-up and passes on two bodies as a live capture had them,
+/// with the live atom's geometry (`anchors` from each body's centre of mass and
+/// `axes` in each body's frame: A's steered axle `+0x78` and B's `+0x88`;
+/// `suspension` in A's frame, `+0xc8`). Returns the velocities `[vA, wA, vB,
+/// wB]` after the set-up and after each pass, every pass starting from the
+/// velocities given for it (the live ones at its entry), with the rows of the
+/// set-up's poses.
+pub fn replay_wheel(
+    bodies: [ReplayBody; 2],
+    anchors: [Vec3; 2],
+    axes: [Vec3; 2],
+    suspension: Vec3,
+    dt: f32,
+    passes: &[(f32, f32, [Vec3; 4])],
+) -> Vec<[Vec3; 4]> {
+    use crate::backend::MotionType;
+    let make = |r: &ReplayBody| Body {
+        alive: true,
+        motion: MotionType::Dynamic,
+        sensor: false,
+        group: None,
+        com: r.com,
+        rotation: r.rotation,
+        velocity: r.velocity,
+        angular_velocity: r.angular_velocity,
+        com_local: Vec3::ZERO,
+        mass: if r.inv_mass > 0.0 {
+            1.0 / r.inv_mass
+        } else {
+            0.0
+        },
+        inv_mass: r.inv_mass,
+        inv_inertia_local: glam::Mat3::ZERO,
+        inv_inertia_world: r.inv_inertia_world,
+        force: Vec3::ZERO,
+        torque: Vec3::ZERO,
+        friction: 0.0,
+        restitution: 0.0,
+        active: true,
+        freeze: Default::default(),
+        system: None,
+    };
+    let mut bodies = vec![make(&bodies[0]), make(&bodies[1])];
+    let axis_a = axes[0].normalize_or_zero();
+    let ref_a = perpendicular(axis_a);
+    let ref_b = bodies[1].rotation.inverse() * (bodies[0].rotation * ref_a);
+    let joint = Joint {
+        alive: true,
+        a: 0,
+        b: 1,
+        anchor_a: anchors[0],
+        anchor_b: anchors[1],
+        kind: Kind::Hinge {
+            axis_a,
+            axis_b: axes[1].normalize_or_zero(),
+            ref_a,
+            ref_b,
+        },
+        limits: [-std::f32::consts::PI, std::f32::consts::PI],
+        limited: false,
+        motor: false,
+        max_torque: 0.0,
+        target_velocity: 0.0,
+        target: 0.0,
+        friction: 0.0,
+        saved_limits: None,
+        steer_rest: None,
+        suspension: Some(suspension.normalize_or_zero()),
+    };
+    let state = |b: &[Body]| {
+        [
+            b[0].velocity,
+            b[0].angular_velocity,
+            b[1].velocity,
+            b[1].angular_velocity,
+        ]
+    };
+    joint.suspension_limit(&mut bodies, dt);
+    let rows = joint.rows(&bodies);
+    joint.solve_block(&mut bodies, &rows, dt, 1.0, 1.0);
+    let mut out = vec![state(&bodies)];
+    for (tau, damping, v) in passes {
+        bodies[0].velocity = v[0];
+        bodies[0].angular_velocity = v[1];
+        bodies[1].velocity = v[2];
+        bodies[1].angular_velocity = v[3];
+        joint.solve_block(&mut bodies, &rows, dt, *tau, *damping);
+        out.push(state(&bodies));
+    }
+    out
+}
+
 /// One constraint-solver action: set up every joint (motor, limits, one block
 /// solve), then the four passes. `dt` is the substep length.
 pub fn solve(bodies: &mut [Body], joints: &mut [Joint], dt: f32) {
@@ -549,6 +656,107 @@ mod tests {
     use super::*;
     use crate::backend::MotionType;
     use glam::Mat3;
+
+    /// Sentinel's right steering hub turned 30 degrees, driving
+    /// (`wheel-sentinel-miniberg-box__live__000`, substep 6967, atom
+    /// 0x1ad7200, docs/29 section 12y): the live set-up and its four passes
+    /// from the bodies at their entries. Ours answers the passes to the live
+    /// digits and the set-up within 3 % of the change it makes.
+    #[test]
+    fn a_steered_wheel_constraint_answers_as_the_live_atom() {
+        let rows = |r: [f32; 9]| {
+            Mat3::from_cols(
+                Vec3::new(r[0], r[1], r[2]),
+                Vec3::new(r[3], r[4], r[5]),
+                Vec3::new(r[6], r[7], r[8]),
+            )
+            .transpose()
+        };
+        let a = ReplayBody {
+            com: Vec3::new(10.804056, -1.806363, -5.166171),
+            rotation: Quat::from_xyzw(-0.011724, -0.78657, 0.008471, -0.617332).normalize(),
+            velocity: Vec3::new(3.421872, -0.054565, -1.503589),
+            angular_velocity: Vec3::new(-0.641695, 1.172567, 0.416358),
+            inv_mass: 0.003374,
+            inv_inertia_world: rows([
+                0.016809, -0.000226, -0.000683, -0.000226, 0.008168, 3.5e-05, -0.000683, 3.5e-05,
+                0.012775,
+            ]),
+        };
+        let b = ReplayBody {
+            com: Vec3::new(10.791889, -1.871626, -6.15254),
+            rotation: Quat::from_xyzw(0.100008, -0.591698, 0.683223, 0.416051).normalize(),
+            velocity: Vec3::new(2.265696, -0.211295, -1.445996),
+            angular_velocity: Vec3::new(-5.311299, 1.409579, -5.440205),
+            inv_mass: 0.043478,
+            inv_inertia_world: rows([
+                1.379791, 0.017337, -0.273668, 0.017337, 1.637356, 0.01834, -0.273668, 0.01834,
+                1.349049,
+            ]),
+        };
+        let v = |x: [f32; 12]| {
+            [
+                Vec3::new(x[0], x[1], x[2]),
+                Vec3::new(x[3], x[4], x[5]),
+                Vec3::new(x[6], x[7], x[8]),
+                Vec3::new(x[9], x[10], x[11]),
+            ]
+        };
+        // Each pass's entry (the other constraints ran in between) and exit.
+        let passes = [
+            (
+                1.0,
+                v([
+                    3.403109, 0.037678, -1.507354, -0.170013, 1.16427, 0.39785, 2.367192,
+                    -1.297943, -1.268611, -6.631832, 1.652721, -4.111535,
+                ]),
+                v([
+                    3.402574, 0.037694, -1.50779, -0.169866, 1.165617, 0.397734, 2.374091,
+                    -1.298149, -1.262988, -6.621076, 1.635303, -4.122355,
+                ]),
+            ),
+            (
+                0.8,
+                v([
+                    3.401998, 0.037028, -1.508842, -0.169716, 1.168362, 0.398714, 2.370943,
+                    -1.298057, -1.264043, -6.621518, 1.638048, -4.122011,
+                ]),
+                v([
+                    3.401999, 0.037028, -1.508843, -0.169716, 1.168361, 0.398715, 2.370936,
+                    -1.298057, -1.26403, -6.621526, 1.638062, -4.122005,
+                ]),
+            ),
+        ];
+        let out = replay_wheel(
+            [a, b],
+            [
+                Vec3::new(0.83615, -0.102333, 0.294237),
+                Vec3::new(0.000108, -0.138632, 0.0),
+            ],
+            [Vec3::new(0.866023, 1e-6, -0.500003), Vec3::Y],
+            Vec3::Y,
+            0.016667,
+            &passes.map(|(t, entry, _)| (t, t, entry)),
+        );
+        // The set-up: B's angular velocity goes from (-5.31, 1.41, -5.44)
+        // to (-6.63, 1.65, -4.11) live.
+        let live_w = Vec3::new(-6.631832, 1.652721, -4.111535);
+        let change = (live_w - b.angular_velocity).length();
+        let miss = (out[0][3] - live_w).length();
+        assert!(
+            miss < 0.03 * change,
+            "set-up: ours {:?}, live {live_w:?}",
+            out[0][3]
+        );
+        for (k, (_, _, exit)) in passes.iter().enumerate() {
+            for (o, l) in out[k + 1].iter().zip(exit) {
+                assert!(
+                    (*o - *l).length() < 2e-3,
+                    "pass {k}: ours {o:?}, live {l:?}"
+                );
+            }
+        }
+    }
 
     fn body(motion: MotionType, mass: f32, inertia: f32) -> Body {
         let dynamic = motion == MotionType::Dynamic;

@@ -4019,3 +4019,162 @@ steering hubs' remaining turn on one side; the Scout's right wheel in the
 point-count probe; the Compressor's Wide Load count with the wheel
 constraint's rows; Raptor's weapon motor takes hold in the third substep after
 the bell live (ours: the first).
+
+### 12y. The steering hubs in motion, the arenas' sliders, the build's late wakes (fx/compressor)
+
+Section 12x left the Compressor's Wide Load count above live (89.2, live 73.6),
+the Octagon's ALARM count above live since section 12t (23.4, live 13.6), the
+build's late wakes (caller `0x548f09`) unrecovered and the steering hubs' turn
+at the hold open on one side.
+
+New live captures (three sessions on `:7`, the prefix's `AI/`, `Teams/`,
+`Robot Designs/` and `ra2.cfg` copied before each and sha256-identical after;
+manifest rows in `manifest-additions-2026-10-21-compressor.tsv`):
+`wheel-sentinel-miniberg-box__live__000` and `wheel-iceberg-tornado-box__live__000`
+with their `deact-wheel-*` (new agent `frida/ra2_wheel.js` through
+`tools/oracle/capture_wheel.py`: box, hazards off, AIs neutered, robot 0 driven
+by `capture_deact.py` phases, straight at 60, driving and turning, coasting,
+reversing and turning, steering at rest; from the bell every wheel-constraint
+set-up `0x553c30` and pass `0x5547d0` with both bodies at entry and exit, every
+`0x553af0`; from the load every `0x548ef0` with the detector's held-back pairs),
+`slider-octagon__live__000`, `slider-metalskull__live__000`,
+`slider-box__live__000` (new agent `frida/ra2_slider.js` through
+`tools/oracle/capture_slider.py`: every prismatic controller update `0x4b5240`,
+push `0x4b51b0` and `Lock` `0x4b50c0`, with the moving body; the box's saw and
+spike driven through `ra2_python.py`).
+
+**The wheel constraint in motion matches ours (verified live).**
+`tools/oracle/wheelcmp.py` turns a `wheel-*` capture into one block per solver
+call (a `stepTo` may run more than one) and `examples/wheelreplay` runs ours on
+the live bodies and atom (`havok17::joints::replay_wheel`): the set-up from
+its entry, each pass from its own entry. Over Sentinel's 4808 calls of both
+hubs (driving, steering to ±30°, a wall hit), the four passes agree to the
+live digits (mean miss 7e-5 rad/s against a 0.17 rad/s mean change in the
+first), the set-up to a median 2.4 % of its change (90th percentile 12 %; the
+largest misses come in the substeps of the wall hit). Every alternative tried
+is worse: no suspension limit (3.8× the miss), the limit after the block, the
+limit and the block from the same entry, the linear rows' lever arms both at
+A's or B's pivot or the midpoint, the limit's effective mass without the
+angular terms, the bodies' frames a substep stale. The steering itself is as
+ours: `0x553af0` (called from `0x508a45`) rebuilds the axle as
+`cos θ b + sin θ (b × st)` from the unsteered axle `+0xb8` and the steering
+axis `+0x98`, `θ` moving 4 rad/s to at most `π/6` (live steps of 0.0667 a
+substep, half steps when a frame ran two calls).
+
+**No friction about the axle (recovered, verified live).** The atom's motor
+flag is off throughout and nothing else in the set-up acts about the axle: the
+live change of a hub's angular velocity along its axle is ours *without*
+friction to 0.002 rad/s (mean over the 2032 calls with the hub turning faster
+than 1 rad/s relative to the chassis, signed by its spin), where the 8 N·m
+ours gave a passive axle (the wheel's `resistance` × 40) would take 0.145 a
+substep. A `Steering` unit's hubs now have none (`rig.rs`, the axle branch;
+`RA2_STEER_FRICTION=1` puts it back). Other passive axles keep theirs: their
+constraint is not this atom and was not captured. Test
+`havok17::joints::tests::a_steered_wheel_constraint_answers_as_the_live_atom`.
+
+**The arenas' sliders are pushed, not motored (recovered, verified live).**
+`AddPrismatic(host, child, ax, ay, az, s1, s2, offset)` (`0x404800` →
+`0x4b47b0`) keeps `s1` as the stop a negative direction drives to (`+0x6c`),
+`s2` as the positive one's (`+0x70`), the travel `[min, max]` of the two
+(`+0x64`/`+0x68`), power `(1, 60)` and starts locked; `Lock(1)` (`0x4b50c0`)
+collapses the travel onto the position, stops the body and clears the
+direction. Its update (`0x4b5240`, every substep while unlocked) is the robot
+piston's (section 12b): with no direction or within 0.05 of its stop it locks
+if it auto-locks; otherwise it pushes `-(dir · F)` along the axis for one
+substep (`0x4b51b0`) unless the body already moves the commanded way at `S`
+or faster. Ours drove arena sliders as a speed motor at `speed · sign(dir)`
+(the pit floors' `+0.2` pointed at the stop they sat on, so they never
+opened), took the travel relative to the first number (the box's floor saw
+`[0, 0.56]` for `[-0.1, 0.46]`), and kept `Lock`'s direction.
+`Duel::drive_arena_slider` now runs the controller (`motor::PrismaticSettings`,
+as `Robot::drive_prismatic`); `hazards::slider_limits(s1, s2)`,
+`LiveJoint::stops`; the controller's default power and `Lock`'s cleared
+direction in `ra2script`.
+
+| slider | live | ours |
+|---|---|---|
+| Octagon pit floor, free (200 kg, `(.2, 2000)`) | 2 pushes of 2000 N, locked at -3.8 679 substeps after the unlock | 2 pushes, 679 substeps |
+| Octagon pit floor, a robot on it | 1031-1032 substeps | (a robot leaves it in a fight) |
+| Metal Skull grate (100 kg, `(.3, -400)`) | pushed +400 every substep (moving with a negative force is never capped), at +5 after 95 substeps, locked | 97 substeps |
+| box floor saw (100 kg, `(2, -2000)`) | rises in about 20 substeps and bobs under its stop, pushed 155 times in 7 s; down in 10 pushes | pushed, as live (not compared step by step) |
+| box spike (40 kg) | defaults `(1, 60)`; `FireTeeth` 40000 N for a substep, 16.5 m/s | as live |
+
+Test `duel::tests::a_pit_floor_slides_open_once_its_script_lets_it_go`.
+
+**What made the Octagon's ALARM count high.** Live, the Octagon's hazards end
+ALARM's attack: robots fall into the opened pits (two of the five live fights:
+`fight-scout-alarm-octagon__live__000` at 65 s, `alarmfight-...__live__001` at
+27 s) or a hellraiser throws ALARM (arena hits 27, 68, 62 at (-4.8, 0.3, -0.4)
+in `arenahits-...__live__001`; 107 in `alarmfight-...__live__000`). Per hit and
+in the first 30 s ours matched live (amount 42, live 47; 7.9 and 3.4 counted
+hits in 0-15 and 15-30 s, live 6.8 and 3.6); the surplus was every hit after
+that, in fights that ran on because no pit ever opened (0 of 24 runs below
+y -1.5). With the pits pushed open, 6 of 24 runs end with the Scout in a pit
+and 6 with ALARM. Our hellraisers do fire (`hellzone1` entered by ALARM's
+hammer head: `Hinge01` up to its 1.2 rad stop at 79 rad/s and back at -3),
+but no arena hit on ALARM reaches 50 in 24 runs (live 61-170 in four of five
+fights): not resolved.
+
+**The build's late wakes (recovered in part).** The detector wakes a body
+(`0x548ed0` → `0x548ef0`, `setActive(1, 0)`, caller `0x548f09`) and then
+goes through the pairs its broadphase held back for it (the detector's list
+`+0x78..+0x7c`, two collidables each), creating their agents and waking the
+partner if it is inactive (`0x524180`, the recursive call returns to
+`0x54918b`). During the build every component first appears as a body of its
+own at the arena's origin, in its own frame (live: the Iceberg's battery at
+(0.091, 0.183, 0.001), its Ice Pick at (0, 0.066, 0)), active, and is moved
+onto the robot 58 substeps later (the chassis' `0x531ef7` wake). The late
+wakes are the held-back pairs of that first activation: Iceberg's at
+substep 1734, its Ice Pick (component 13) with the wheel on its second motor
+(two pairs); Tornado's at 3416, its Nifty battery (component 10) with the
+spinner (one pair). So a component wakes the sleeping robot bodies its
+collidables overlap where it first appears, just before it is added. Our
+per-piece bounding boxes (`examples/buildwakes`) give Iceberg's (13 only,
+though against the other wheel) and Tornado's 10, but also Tornado's 9, 12
+and 13, MiniBerg's 8 and 12 (live 3, 4, 10 and 14) and the Scout's 6 only
+(live 6 and 7): what the broadphase's boxes are for a body built while
+asleep is not recovered, so ours still does not model these wakes.
+
+**The steering hubs' turn at the hold.** Unchanged (live 109.2 / 113.2 deg,
+ours 117.4 / 57.9). Live the hubs ride the unit's build body at the origin
+until they are re-targeted to the chassis (section 12x), and that body turns
+154-155 deg about a skew axis during the build
+(`spinup-sentinel-berserker-box__live__000`, robot 0); ours builds the hubs on
+the chassis, so their turn before the placement is not modelled.
+
+**Validation.** Before = `fidelity` a5810c0 (reproduces section 12x's after
+column to the digit), after = this branch. `FIDTRACE_WARMUP` ensembles, 24
+runs each, counted = `>= 10` on the other robot, robot hits only, mean
+(total), mean length, full-length runs:
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6) | 36.2 (160) sd 28 / 4.8, 90 s, 12/24 | 34.2 (151) sd 28 / 4.8, 86 s, 11/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 10/24 | 10/24 |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 3.8 (96) / 1.0, 58 s, 1/24 | 3.5 (81) / 1.0, 52 s, 2/24 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 89.2 (328) sd 41 / 5.0, 104 s, 16/24 | 70.5 (262) sd 53 / 3.9, 86 s, 9/24 |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 23.4 (98) sd 23 / 4.1, 75 s, 3/24 | 17.8 (85) sd 17 / 3.4, 59 s, 1/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | | 10/24 | 8/24 |
+
+The Compressor's change is the hubs' friction alone (with
+`RA2_STEER_FRICTION=1` the after build gives 89.2 again); the box's and
+Razor's are the box's saws and spikes under the new slider drive; the
+Octagon's are its pits.
+
+Section 12s's replays of the live placements (`twoprobe`): set 1 (20 trials)
+ALARM on its back at some point / at the end 2 / 2 both (live 1 / 1), mean
+peak |ω| 3.15 both (live 3.05), end-centre median 1.31 m both; set 2 (17)
+never on its back, median 0.23 m both, mean peak |ω| 1.62 → 1.64 (live 1.40).
+
+AI suite (ten pairings, warmup 0), counted hits each way and length, before →
+after: Scout v ALARM 5/68 100 s → 5/40 55 s, Tornado v RipBlade 119/40 116 s
+(both), Grog v Boxer 53/176 120 s (both), Razor v FlapJack 5/1 43 s (both),
+Sentinel v Wide Load 4/57 120 s → 6/40 55 s, Bear v Tornado 60/82 82 s →
+49/69 71 s, Grog v Boxer hill 8/28 39 s (both), Octagon Scout v ALARM 8/68
+112 s → 5/59 69 s, Razor v FlapJack park 3/1 73 s (both), Bushido v Devil
+32/6 120 s (both); every pairing still has damage dealt each way.
+
+**Still open.** The bounding boxes behind the build's late wakes (hence
+MiniBerg's and Tornado's spawn heights); the hellraisers' hits on ALARM; the
+steering hubs' turn before the placement (the unit's build body); the
+set-up's residual 2-12 % against live in a wall hit.

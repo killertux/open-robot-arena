@@ -269,17 +269,13 @@ pub fn hinge_limits(model: [f32; 2]) -> [f32; 2] {
     [lo.clamp(-PI, 0.0), hi.clamp(0.0, PI)]
 }
 
-/// The travel a slider is given, in the rest-pose-relative form Jolt wants.
-///
-/// The scripts write the limits unordered — `box.py` asks for `(neutral, 0.8,
-/// 0)`, and the spikes rise 0.8 m — so the engine takes the min and the max,
-/// relative to the neutral pose the joint is created at.
-pub fn slider_limits(neutral: f32, lower: f32, upper: f32) -> [f32; 2] {
-    let (a, b) = (lower.min(upper), lower.max(upper));
-    let lo = a - neutral;
-    let hi = b - neutral;
-    // Jolt requires `min <= 0 <= max`; the rest pose is the neutral one.
-    [lo.min(0.0), hi.max(0.0)]
+/// The travel a slider is given: `AddPrismatic`'s two stops, as the original
+/// keeps them (`0x4b47b0`: the first in the controller's `+0x6c`, the second in
+/// `+0x70`, the joint's travel `[min, max]` of the two in `+0x64`/`+0x68`),
+/// measured from the pose the joint is created in. Jolt also requires `min <=
+/// 0 <= max`, which every stock arena's stops satisfy.
+pub fn slider_limits(first: f32, second: f32) -> [f32; 2] {
+    [first.min(second).min(0.0), first.max(second).max(0.0)]
 }
 
 /// The settings a hazard drives its joint with, as the engine reads them.
@@ -303,6 +299,9 @@ pub struct LiveJoint {
     pub friction: f32,
     /// The joint's own travel, for `SetAutoLock`'s "has it arrived" test.
     pub limits: [f32; 2],
+    /// A slider's stops: where a negative direction drives it (the
+    /// controller's `+0x6c`) and where a positive one does (`+0x70`).
+    pub stops: [f32; 2],
 }
 
 #[cfg(test)]
