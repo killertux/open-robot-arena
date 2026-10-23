@@ -661,6 +661,12 @@ pub trait PhysicsBackend {
     /// `GMID_HAVOK_DIS_COLLISION_PAIRS`. A backend may ignore it.
     fn disable_collision(&mut self, _a: BodyHandle, _b: BodyHandle) {}
 
+    /// Never collide body `a` with the piece `piece` (a child of its
+    /// compound, in order) of body `b`: a pair the arena disables between a
+    /// movable body and one of the fixed bodies merged into the static
+    /// collider. A backend may ignore it.
+    fn disable_collision_piece(&mut self, _a: BodyHandle, _b: BodyHandle, _piece: u32) {}
+
     /// Set a dynamic body's inertia tensor about its centre of mass (body
     /// frame), as [`BodyDesc::with_inertia`] does at creation. A backend may
     /// ignore it.

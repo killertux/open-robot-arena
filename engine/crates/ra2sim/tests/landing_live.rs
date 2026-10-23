@@ -181,3 +181,65 @@ fn a_steering_unit_holds_its_hubs_at_its_wheel_constraints_pivots() {
     }
     assert_eq!(seen, 2, "two hubs");
 }
+
+/// The build's late wakes (docs/29 section 12z): the components whose first
+/// appearance at the arena's origin wakes their frozen robot through the
+/// detector's held-back pairs, as `build-*-box__live__000` (`frida/ra2_build.js`)
+/// shows them for nine stock robots (`0x548ab0` holds a pair, `0x548ef0`
+/// wakes the partner through `0x54918b`). The model also takes four spikes to
+/// pair with a wheel that live they do not; of those only Iceberg's Pole
+/// Spike changes a weight, and it is left out here.
+#[test]
+fn the_builds_late_wakes_are_the_live_ones() {
+    let Some(game) = game_dir() else {
+        eprintln!("skipping: no local/game (set RA2_GAME)");
+        return;
+    };
+    let cases: [(&str, &[usize]); 9] = [
+        ("Team7/Bot0", &[3, 4, 10, 14]),
+        ("Team13/Bot1", &[10]),
+        ("Team0/Bot0", &[6, 7]),
+        ("Team12/Bot1", &[]),
+        ("Team12/Bot2", &[]),
+        ("Team0/Bot2", &[]),
+        ("Team8/Bot2", &[6, 7, 12]),
+        ("Team1/Bot2", &[14, 15]),
+        ("Team5/Bot1", &[14]),
+    ];
+    for (bot, want) in cases {
+        let path = game.join(format!("AI/{bot}.bot"));
+        let rig = ra2sim::rig::load(&path.to_string_lossy()).expect("a robot");
+        assert_eq!(rig.late_wakes(), want, "{bot} ({})", rig.name);
+    }
+}
+
+/// With its late wakes MiniBerg's burst arm carries all of its 28 kg into the
+/// placement (live: the battery's wake at substep 1846 of
+/// `build-team7bot0-team7bot1-box__live__000` weighs it at 28 kg), and Tornado and
+/// MiniBerg come down to live's height (docs/29 section 12z).
+#[test]
+fn a_late_wake_gives_a_body_its_full_weight() {
+    let Some(game) = game_dir() else {
+        eprintln!("skipping: no local/game (set RA2_GAME)");
+        return;
+    };
+    if !havok17() {
+        return;
+    }
+    let _scripts = ra2script::lock();
+    let d = duel(&game, "Team7/Bot0", "Team7/Bot1");
+    let r = &d.robots[0];
+    let arm = r
+        .parts
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, part)| (d.physics.mass(part.body).unwrap_or(0.0) - 28.0).abs() < 0.5)
+        .map(|(p, _)| p)
+        .expect("MiniBerg's 28 kg arm");
+    assert!(
+        (r.build_share[arm] - 1.0).abs() < 1e-6,
+        "{:?}",
+        r.build_share
+    );
+}

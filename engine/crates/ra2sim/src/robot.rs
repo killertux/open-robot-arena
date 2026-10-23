@@ -1251,12 +1251,24 @@ impl Robot {
     /// `spinup-*__live__000`), so a body that grew after the robot's last wake
     /// keeps the weight of its smaller self until it is next integrated: the
     /// first substep after the placement. Its share is the mass of its members
-    /// that come no later in the `.bot` than the last body-bringing component.
+    /// that come no later in the `.bot` than the robot's last wake: the last
+    /// body-bringing component, or the build's last late wake
+    /// ([`RobotRig::late_wakes`], docs/29 section 12z), which comes as the
+    /// component that causes it first appears and so counts the members before
+    /// it (live, MiniBerg's battery wakes it with its top at 28 of 28 kg,
+    /// Iceberg's Ice Pick with its top at 22 of 38).
+    /// `RA2_NO_LATE_WAKES=1` leaves the late wakes out.
     fn build_shares(rig: &RobotRig, mass_points: &[Vec<(usize, f32, Vec3)>]) -> Vec<f32> {
+        let late = if std::env::var_os("RA2_NO_LATE_WAKES").is_some() {
+            Vec::new()
+        } else {
+            rig.late_wakes()
+        };
         let last = rig
             .parts
             .iter()
             .filter_map(|q| q.joint.map(|j| j.motor))
+            .chain(late.iter().map(|&k| k - 1))
             .max();
         (0..rig.parts.len())
             .map(|p| {

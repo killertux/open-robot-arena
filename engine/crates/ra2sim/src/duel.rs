@@ -722,6 +722,46 @@ fn apply_no_collide(
     }
 }
 
+/// The arena's disabled pairs between a movable body and *some* of the fixed
+/// bodies: the static collider keeps each fixed body as its own piece
+/// ([`ArenaScene::colliders`], in order), so the pair is kept off that piece
+/// alone. The Octagon's hammers are disabled against `main_collision`, the
+/// top plane and the outer floor but not the two hammer plates they strike;
+/// live (`hazard-octagon__live__000`) a hammer swings through the housing it
+/// is hinged in, smashing at 17 rad/s, where ours hit `main_collision` at 0.4
+/// rad and stalled (docs/29 section 12z).
+fn apply_fixed_piece_filter(
+    physics: &mut dyn PhysicsBackend,
+    arena_path: &str,
+    arena: &ArenaScene,
+    props: &[PropEntity],
+    arena_body: BodyHandle,
+) {
+    if arena.colliders.is_empty() || std::env::var("RA2_ARENA_MERGED").is_ok_and(|v| v == "1") {
+        return;
+    }
+    let Ok(Some(havok)) = ra2_render::collect_havok(arena_path) else {
+        return;
+    };
+    let is = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    for (a, b) in &havok.disabled_pairs {
+        for (m, f) in [(a, b), (b, a)] {
+            let Some(body) = props
+                .iter()
+                .find(|p| is(&p.prop.name, m) && p.body != HIDDEN_PROP)
+                .map(|p| p.body)
+            else {
+                continue;
+            };
+            for (k, c) in arena.colliders.iter().enumerate() {
+                if is(&c.name, f) {
+                    physics.disable_collision_piece(body, arena_body, k as u32);
+                }
+            }
+        }
+    }
+}
+
 /// The damage below which a hit is not applied at all.
 ///
 /// `FUN_00417330` gates the damage event on `10.0 <= param_5` before it calls
@@ -1003,6 +1043,7 @@ impl Duel {
         }
         let no_collide = no_collide_pairs(arena_path);
         apply_no_collide(&mut *physics, &props, arena_body, &no_collide);
+        apply_fixed_piece_filter(&mut *physics, arena_path, &arena, &props, arena_body);
         let suspended = suspend_props(&mut *physics, arena_path, arena_body, &props);
         // The arena's held bodies are a deactivation system of their own, as a
         // robot's are (live, `deact-scout-alarm-flextop-off__live__001`:
@@ -1396,6 +1437,25 @@ impl Duel {
             })
     }
 
+    /// The hazard joints the arena scripts built: `(joint, moving body,
+    /// slider)`, in the order the scripts asked for them (diagnostics).
+    pub fn hazard_joints(&self) -> Vec<(crate::backend::JointHandle, BodyHandle, bool)> {
+        self.joints
+            .iter()
+            .map(|j| (j.handle, j.body, j.slider))
+            .collect()
+    }
+
+    /// Run Python in the arena scripts' interpreter (diagnostics:
+    /// `Arenas.currentArena.Hell1.RaiseHell()`); an error if the duel has no
+    /// script layer or the code raises.
+    pub fn run_script(&self, code: &str) -> Result<(), String> {
+        match self.script_ai.as_ref() {
+            Some(ai) => ai.host.run_python(code),
+            None => Err("no script layer".into()),
+        }
+    }
+
     /// Whether any body of robot `a` touches any body of robot `b`.
     ///
     /// A robot is several hinged bodies, so the two root bodies are not enough:
@@ -1556,6 +1616,8 @@ impl Duel {
                             friction: cap,
                             limits,
                             stops: [req.neutral, req.lower],
+                            sense: 1.0,
+                            motor: 1.0,
                         });
                     }
                     Err(e) => self.log.push(format!("hazard joint {:?}: {e}", req.child)),
@@ -1586,11 +1648,32 @@ impl Duel {
                 let Some(anchor) = self.anchor_body(pivot) else {
                     continue;
                 };
-                let limits = hazards::hinge_limits(
-                    hinge
-                        .limits
-                        .unwrap_or([-std::f32::consts::PI, std::f32::consts::PI]),
-                );
+                // Havok's body B is the model's `*BODY2`; its frame is the
+                // part's own, or the arena's when the scenery is B.
+                let moving_is_b = props.get(&hinge.body_b) == Some(&moving);
+                let b_rotation = if moving_is_b {
+                    state.rotation
+                } else {
+                    static_transforms
+                        .get(&hinge.body_b)
+                        .map(|m| m.to_scale_rotation_translation().1)
+                        .unwrap_or(glam::Quat::IDENTITY)
+                };
+                let (sense, motor) =
+                    hazards::arena_hinge_sense(moving_is_b, b_rotation.inverse() * axis);
+                let limits = hazards::arena_hinge_limits(hinge.limits, sense);
+                let stops = hinge
+                    .limits
+                    .unwrap_or([-std::f32::consts::PI, std::f32::consts::PI]);
+                if std::env::var_os("RA2_HINGE_DEBUG").is_some() {
+                    eprintln!(
+                        "hinge {:?}: a {:?} b {:?} axis {axis:?} in B {:?} sense {sense} motor {motor} limits {limits:?}",
+                        req.child,
+                        hinge.body_a,
+                        hinge.body_b,
+                        b_rotation.inverse() * axis,
+                    );
+                }
                 let desc = HingeDesc {
                     body_a: anchor,
                     body_b: moving,
@@ -1619,7 +1702,9 @@ impl Duel {
                             strength: cap,
                             friction: hinge.friction,
                             limits,
-                            stops: limits,
+                            stops,
+                            sense,
+                            motor,
                         });
                     }
                     Err(e) => self.log.push(format!("hazard hinge {:?}: {e}", req.child)),
@@ -2037,6 +2122,13 @@ impl Duel {
                             self.arena_body,
                             &self.no_collide,
                         );
+                        apply_fixed_piece_filter(
+                            &mut *self.physics,
+                            &self.arena_path,
+                            &self.arena,
+                            &self.props,
+                            self.arena_body,
+                        );
                     }
                     None => self.log.push(format!("SetActive({name:?}): body failed")),
                 }
@@ -2059,54 +2151,38 @@ impl Duel {
                 Self::drive_arena_slider(&mut *self.physics, j, dt);
                 continue;
             }
-            // How far along its own travel the joint is, for the auto-lock test.
-            // Read through the physics (a disjoint field) so the mutable borrow
-            // of `self.joints` this loop holds is untouched.
-            let pos = if j.slider {
-                self.physics.slider_offset(j.handle)
-            } else {
-                self.physics.hinge_angle(j.handle)
-            };
+            // The controller's own angle (`0x481190`), for its auto-lock test.
+            let angle = j.sense * self.physics.hinge_angle(j.handle);
             let (target, force, torque, strength, friction, held) = {
                 let mut d = j.drive.lock().unwrap_or_else(|e| e.into_inner());
                 // The script's torque is the *limit* on the drive, and it can
                 // change at any time — a hammer parked with `Lock(True)` only
                 // asks for its 1200 when a robot walks in.
                 let strength = (d.torque.abs() * 40.0).max(1.0);
-                // `Lock(True)` parks the joint, and so does the engine's own
-                // `SetAutoLock`: with no motor it holds where it is, on friction,
-                // the way a parked piston does (F8). The original does exactly
-                // this in the joint's own update — it locks when the motor is
-                // stopped, and again when the joint arrives at the end of its
-                // travel, which is why the Octagon's pit floors stay up under the
-                // robots until their script gives them a direction.
-                // "Arrived" is at the stop the joint is being driven toward
-                // (`FUN_00481450`: the end for a positive command, the start for
-                // a negative one, within 0.05). The command's sense is the
-                // motor's velocity, speed sign included: the Compressor's left
-                // arms are given a negative speed with the same direction as
-                // the right ones, and must not count as home at the other stop.
-                let heading = if d.locked { 0.0 } else { d.speed * d.direction };
-                let arrived = if heading > 0.0 {
-                    (pos - j.limits[1]).abs() < 0.05
-                } else if heading < 0.0 {
-                    (pos - j.limits[0]).abs() < 0.05
-                } else {
-                    false
-                };
-                let held = d.locked
-                    || (arrived && d.auto_lock_stops)
-                    || (d.direction == 0.0 && d.auto_lock_idle);
-                // A hinge runs at `trunc(direction · 0.01 · speed)` (the hinge
-                // controller, [`crate::motor::hinge_velocity`]): live the
-                // Octagon's hammer smashes at 94 for its 95 and retracts at -2
-                // for its 3. A slider keeps the velocity motor.
+                // The hinge controller's update (`0x481450`, every substep):
+                // with no percentage it locks if it auto-locks when idle
+                // (`+0x64`); with one it locks if it auto-locks at its stops
+                // (`+0x65`) and its angle is within 0.05 of the stop the
+                // percentage's sign drives to (`+0x74` for a positive one,
+                // `+0x70` for a negative one; the speed's sign plays no
+                // part: the Compressor's right arms smash with `-95` and
+                // `p = 100` and lock at the upper stop, live). `Lock(1)`
+                // (`0x480e20`) holds until the script unlocks it.
+                let p = d.direction;
+                let arrived = (p > 0.0 && (angle - j.stops[1]).abs() < 0.05)
+                    || (p < 0.0 && (angle - j.stops[0]).abs() < 0.05);
+                if !d.locked && ((p == 0.0 && d.auto_lock_idle) || (arrived && d.auto_lock_stops)) {
+                    d.locked = true;
+                }
+                let held = d.locked;
+                // The motor runs at `trunc(p · 0.01 · S)` ([`crate::motor::
+                // hinge_velocity`]: live the Octagon's hammer smashes at 94 for
+                // its 95 and retracts at -2 for its 3), in ours' sense
+                // ([`hazards::arena_hinge_sense`]).
                 let target = if held {
                     0.0
-                } else if j.slider {
-                    d.target_velocity()
                 } else {
-                    crate::motor::hinge_velocity(d.direction as i32, d.speed)
+                    j.motor * crate::motor::hinge_velocity(p as i32, d.speed)
                 };
                 let friction = if held { strength } else { 0.0 };
                 (
@@ -2128,11 +2204,7 @@ impl Duel {
                 j.strength = strength;
                 j.friction = friction;
             }
-            if j.slider {
-                self.physics.drive_slider(j.handle, target);
-            } else {
-                self.physics.drive_hinge(j.handle, target);
-            }
+            self.physics.drive_hinge(j.handle, target);
             if force != 0.0 {
                 self.physics.apply_impulse(j.body, j.axis * force * dt);
             }
@@ -4444,17 +4516,26 @@ mod tests {
             .iter()
             .map(|h| duel.physics.hinge_angle(*h))
             .collect();
-        for _ in 0..120 {
+        // Idle, the arms rest at their lower stop, locked by the Retract their
+        // `__init__` asks for (live, `hazard-compressor__live__000`: the
+        // controller angle 0 until a robot is in the zone).
+        assert!(before.iter().all(|a| a.abs() < 0.05), "{before:?}");
+        // Smashing, both of the pair close and lock at the upper stop (live:
+        // the controller angle 0.235, 18 substeps after the command).
+        duel.run_script("import Arenas\nArenas.currentArena.Smasher1.Smash()")
+            .expect("the smasher fires");
+        for _ in 0..40 {
             duel.step_direct(&idle, dt);
         }
         let after: Vec<f32> = swings
             .iter()
             .map(|h| duel.physics.hinge_angle(*h))
             .collect();
-        assert!(
-            before.iter().zip(&after).any(|(a, b)| (b - a).abs() > 0.05),
-            "no smash arm moved: {before:?} -> {after:?}"
-        );
+        let closed = after
+            .iter()
+            .filter(|a| (a.abs() - 0.235).abs() < 0.03)
+            .count();
+        assert_eq!(closed, 2, "the smash arms: {before:?} -> {after:?}");
     }
 
     /// M4/F13: `plus.force` is a force, so one step of it is `force * dt`.
@@ -5253,6 +5334,51 @@ mod tests {
             }
         }
         assert_eq!(through, vec![0, 0, 60, 60], "{through:?}");
+    }
+
+    /// docs/29 section 12z: the Octagon's hinges turn the way live does
+    /// (`hazard-octagon__live__000`): a raised hellraiser rises (its 100 kg
+    /// plate's centre from y -0.38 up to +0.47 at the 70 degree stop) and a
+    /// smashing hammer swings toward the arena's centre, 1.6 rad/s faster
+    /// every substep, to 17.2 rad/s.
+    #[test]
+    fn the_octagons_hellraiser_rises_and_its_hammer_swings_inward() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/octagon.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team0/Bot0.bot"), bot("AI/Team0/Bot1.bot")],
+        )
+        .expect("a duel");
+        let idle = [DriveInput::default(), DriveInput::default()];
+        let dt = 1.0 / 60.0;
+        duel.step_direct(&idle, dt);
+        let joints = duel.hazard_joints();
+        // Pits, then Hinge01/02 (hellraisers), then the two hammers.
+        let (_, hell2, _) = joints[5];
+        let (_, hammer1, _) = joints[6];
+        let com = |d: &Duel, b| d.physics.center_of_mass(b).unwrap();
+        let (h0, m0) = (com(&duel, hell2), com(&duel, hammer1));
+        duel.run_script("import Arenas\nArenas.currentArena.Hell2.RaiseHell()\nArenas.currentArena.Hammer1.Smash()")
+            .expect("the hazards fire");
+        let mut peak: f32 = 0.0;
+        for _ in 0..20 {
+            duel.step_direct(&idle, dt);
+            peak = peak.max(duel.physics.state(hammer1).unwrap().angular_velocity.x);
+        }
+        let (h1, m1) = (com(&duel, hell2), com(&duel, hammer1));
+        assert!(h1.y > h0.y + 0.6, "the hellraiser went {h0:?} -> {h1:?}");
+        assert!(m1.z > m0.z + 1.5, "the hammer went {m0:?} -> {m1:?}");
+        assert!(
+            (peak - 17.2).abs() < 1.0,
+            "the hammer peaked at {peak} rad/s"
+        );
     }
 
     #[test]

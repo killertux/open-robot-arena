@@ -251,22 +251,54 @@ pub fn hinges(arena_path: &str) -> BTreeMap<String, ModelHinge> {
     out
 }
 
-/// The travel a hinge is given, from the model's own `*ANGLE_LIMITS`.
+/// How an arena hinge's controller and Havok's hinge see the joint ours
+/// builds between the motionless anchor (`a`) and the part that swings (`b`),
+/// whose angle grows with `(ω_b - ω_a) · axis`, the model's `*SPIN_AXIS` in
+/// the world (docs/29 section 12z).
 ///
-/// Jolt measures a hinge's angle from where the two frames coincide and insists
-/// on `-π ≤ min ≤ 0 ≤ max ≤ π`. The models state theirs in their own frame, with
-/// the two sides exported at the hinge's *lower stop* — the Octagon's hellraiser
-/// arms ship `[1°, 70°]`, which Jolt refuses outright — so the travel is taken
-/// from that stop: `[0, max - min]`. The Compressor's smash arms already say
-/// `[0, 0.27]` and are unchanged. A range a full turn wide is Jolt's "no limits".
-pub fn hinge_limits(model: [f32; 2]) -> [f32; 2] {
-    use std::f32::consts::PI;
-    let (lo, hi) = (model[0].min(model[1]), model[0].max(model[1]));
-    if hi - lo >= 2.0 * PI {
-        return [-PI, PI];
+/// * The controller's angle (`0x481190`, what its limits `+0x70`/`+0x74` and
+///   its "arrived" test read) grows the other way when the part that swings is
+///   Havok's body B (the model's `*BODY2`, `0x4a7340` → `0x5257a0(BODY1,
+///   BODY2)`): `sense` is `-1` then, `+1` when it is body A (the Parking
+///   Lot's trap doors, `*BODY1`).
+/// * The motor (`0x481450`): `trunc(p · 0.01 · S)`, negated when any
+///   component of the axis in body B's frame (`+0x60..+0x68`) is below `-0.5`
+///   (`axis_flip`), drives `(ω_B - ω_A) · axis` to that value. Live
+///   (`hazard-octagon__live__000`, `hazard-compressor__live__000`): the
+///   hellraisers (axis `(0, 0, -1)` in B) rise with `ω_z` +25 rad/s for
+///   `p = 100`, the hammers (`(-1, 0, 0)` in B) swing toward the centre, the
+///   Compressor's right arms (`(0, 1, 0)`, speed `-95`) and left arms
+///   (`(0, -1, 0)`, `95`) close alike, each with its controller angle
+///   growing from 0 to its upper limit.
+///
+/// Returns `(sense, motor)`: the controller's angle is `sense ·` ours, and
+/// ours drives at `motor · trunc(p · 0.01 · S)`.
+pub fn arena_hinge_sense(moving_is_b: bool, axis_in_b: Vec3) -> (f32, f32) {
+    let flip = if axis_in_b.x < -0.5 || axis_in_b.y < -0.5 || axis_in_b.z < -0.5 {
+        -1.0
+    } else {
+        1.0
+    };
+    if moving_is_b {
+        (-1.0, flip)
+    } else {
+        (1.0, -flip)
     }
-    let (lo, hi) = if lo > 0.0 { (0.0, hi - lo) } else { (lo, hi) };
-    [lo.clamp(-PI, 0.0), hi.clamp(0.0, PI)]
+}
+
+/// An arena hinge's travel in ours ([`arena_hinge_sense`]): the model's
+/// `*ANGLE_LIMITS` are the controller's (and Havok's) angles, 0 where the
+/// model was exported; ours measures from the same pose, with `sense`. The
+/// rest pose is kept inside the travel: live the hellraisers lie at a
+/// controller angle of -0.013 to 0.006 against their 1 degree lower limit.
+/// An unlimited hinge is free.
+pub fn arena_hinge_limits(model: Option<[f32; 2]>, sense: f32) -> [f32; 2] {
+    use std::f32::consts::PI;
+    let Some([lo, hi]) = model else {
+        return [-PI, PI];
+    };
+    let (a, b) = (sense * lo, sense * hi);
+    [a.min(b).clamp(-PI, 0.0), a.max(b).clamp(0.0, PI)]
 }
 
 /// The travel a slider is given: `AddPrismatic`'s two stops, as the original
@@ -300,8 +332,15 @@ pub struct LiveJoint {
     /// The joint's own travel, for `SetAutoLock`'s "has it arrived" test.
     pub limits: [f32; 2],
     /// A slider's stops: where a negative direction drives it (the
-    /// controller's `+0x6c`) and where a positive one does (`+0x70`).
+    /// controller's `+0x6c`) and where a positive one does (`+0x70`). A
+    /// hinge's: its controller's limits (`+0x70`, `+0x74`), in the
+    /// controller's own angle.
     pub stops: [f32; 2],
+    /// A hinge's controller angle is `sense ·` ours, and its motor drives
+    /// ours at `motor ·` the controller's velocity ([`arena_hinge_sense`]);
+    /// `1` for a slider.
+    pub sense: f32,
+    pub motor: f32,
 }
 
 #[cfg(test)]
@@ -398,20 +437,43 @@ mod tests {
         assert!(!box_touches_piece(at(1.35), zmin, zmax, &pts, None));
     }
 
+    /// docs/29 section 12z, live `hazard-octagon__live__000` and
+    /// `hazard-compressor__live__000`: every arena hinge's controller angle
+    /// grows from 0 toward its upper limit as `p = 100` drives it, so ours
+    /// turns the part the way live does and keeps its travel on that side.
     #[test]
-    fn hinge_travel_is_taken_from_the_models_lower_stop() {
-        assert_eq!(hinge_limits([0.0, 0.27052602]), [0.0, 0.27052602]);
-
-        let hellraiser = hinge_limits([1.0f32.to_radians(), 70.0f32.to_radians()]);
-        assert_eq!(hellraiser[0], 0.0);
-        assert!(
-            (hellraiser[1] - 69.0f32.to_radians()).abs() < 1e-5,
-            "{hellraiser:?}"
+    fn an_arena_hinge_turns_the_way_its_controller_drives_it() {
+        // The hellraisers and hammers: axis negative in body B, which swings.
+        assert_eq!(
+            arena_hinge_sense(true, Vec3::new(0.0, 0.0, -1.0)),
+            (-1.0, -1.0)
+        );
+        assert_eq!(
+            arena_hinge_sense(true, Vec3::new(-1.0, 0.0, 0.0)),
+            (-1.0, -1.0)
+        );
+        // The Compressor's right arms: axis +y in B.
+        assert_eq!(arena_hinge_sense(true, Vec3::Y), (-1.0, 1.0));
+        // The Parking Lot's trap doors swing as body A.
+        assert_eq!(
+            arena_hinge_sense(false, Vec3::new(-1.0, 0.0, 0.0)),
+            (1.0, 1.0)
         );
 
-        // A full turn is Jolt's "no limits", and nothing can express more.
-        assert_eq!(hinge_limits([-PI, PI]), [-PI, PI]);
-        assert_eq!(hinge_limits([-4.0, 4.0]), [-PI, PI]);
-        assert_eq!(hinge_limits([-PI, 5.0]), [-PI, PI]);
+        let hellraiser = arena_hinge_limits(Some([1f32.to_radians(), 70f32.to_radians()]), -1.0);
+        assert!(
+            (hellraiser[0] + 70f32.to_radians()).abs() < 1e-6,
+            "{hellraiser:?}"
+        );
+        assert_eq!(hellraiser[1], 0.0);
+        assert_eq!(
+            arena_hinge_limits(Some([0.0, 0.270526]), -1.0),
+            [-0.270526, 0.0]
+        );
+        assert_eq!(
+            arena_hinge_limits(Some([-PI / 2.0, PI / 2.0]), 1.0),
+            [-PI / 2.0, PI / 2.0]
+        );
+        assert_eq!(arena_hinge_limits(None, -1.0), [-PI, PI]);
     }
 }

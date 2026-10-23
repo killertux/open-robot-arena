@@ -484,6 +484,18 @@ impl ScriptHost {
         })
     }
 
+    /// Run a piece of Python in the scripts' interpreter (`__main__`'s
+    /// namespace), for diagnostics that drive a hazard the way
+    /// `tools/oracle/ra2_python.py` does in the original
+    /// (`Arenas.currentArena.Hell1.RaiseHell()`).
+    pub fn run_python(&self, code: &str) -> Result<(), String> {
+        let src = std::ffi::CString::new(code).map_err(|e| e.to_string())?;
+        Python::with_gil(|py| {
+            py.run(&src, None, None)
+                .map_err(|e| describe_python_error(py, e))
+        })
+    }
+
     /// Tell the arena a robot entered or left one of its zones, without the
     /// caller needing the GIL.
     pub fn send_zone_event(&self, direction: i32, zone: i32, robot: i32, chassis: bool) -> bool {

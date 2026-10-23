@@ -4178,3 +4178,221 @@ Sentinel v Wide Load 4/57 120 s → 6/40 55 s, Bear v Tornado 60/82 82 s →
 MiniBerg's and Tornado's spawn heights); the hellraisers' hits on ALARM; the
 steering hubs' turn before the placement (the unit's build body); the
 set-up's residual 2-12 % against live in a wall hit.
+
+### 12z. The arenas' hinges turn the way live does; the build's late wakes (fx/hazards)
+
+Section 12y left the hellraisers' hits on ALARM open (live 61-170 in four of
+five Octagon fights, ours never above 50 in 24 runs) and the build's late
+wakes unrecovered (MiniBerg and Tornado 0.05 m high at the hold).
+
+New live captures (three sessions on `:7`, the prefix's `AI/`, `Teams/`,
+`Robot Designs/` and `ra2.cfg` copied before each and sha256-identical after;
+manifest rows in `manifest-additions-2026-10-21-hazards.tsv`):
+`hazard-{octagon,compressor,halfcircle,parkinglot}__live__000` and
+`hazard-{octagon,compressor}__live__001` (new agent `frida/ra2_hazard.js`, with
+`frida/ra2_twobody.js` for placements, through new
+`tools/oracle/capture_hazard.py`: every update `0x481450` of a hinge
+controller with a fixed body, with its percentage `+0x7c`, limits
+`+0x70`/`+0x74`, power `+0xb0..+0xbc`, auto-locks `+0x64`/`+0x65`, the
+constraint's vectors `+0x50..+0x80`, motor flag `+0x91` and velocity `+0xa4`,
+the controller's own angle (`0x481190`, called from the hook) and the moving
+body; the hinge atoms `0x535a50` with a fixed body; `SetPowerSettings`,
+`Lock` and the motor sets; the priced hits as `ra2_arenahits.js`); the Octagon
+with ALARM placed on hellraiser 1 (twice) and 2 and then
+`Hammer1.Smash()`, `Hammer2.Smash()`, `Hell2.RaiseHell()` through
+`ra2_python.py`; ALARM placed under hammer 1 (`__001`); the Compressor's two
+smashers, the Half Circle's hammer and the Parking Lot's trap doors fired
+from Python. And `build-{team7bot0-team7bot1,team13bot1-team0bot0,
+team12bot1-team12bot2,team0bot2-team8bot2,team1bot2-team5bot1,
+team9bot2-team10bot2}-box__live__000` with their `deact-build-*` (new agent
+`frida/ra2_build.js` through `capture_rest.py` `WATCH_AGENT=ra2_build.js`:
+from the load, every `setActive`, every body going inactive `0x548ab0` with
+its pairs in the detector's contact list, every wake `0x548ef0` with the
+held-back pairs it goes through).
+
+**An arena hinge's sense (recovered, verified live).** A `.gmf` hinge (record
+47, `0x4a7340`) is built as `0x5257a0(BODY1, BODY2)`, so Havok's body A is
+`*BODY1` (the scenery, except the Parking Lot's trap doors) and B `*BODY2`;
+its pivot is the record's `+0x80`, its axis `+0x90` (`*SPIN_AXIS`), its limits
+`+0xa8`/`+0xac` when `+0xa0` is set. The controller (`0x481450`) drives the
+motor at `trunc(p · 0.01 · S)`, negated when any component of the axis in body
+B's frame (`+0x60..+0x68`) is below -0.5, and again when `+0x74 < +0x70`
+(never: the limits are kept as min, max); the motor then turns
+`(ω_B - ω_A) · axis` that way and the controller's angle (`0x481190`) grows,
+0 where the model was exported. Live every arena hinge's controller angle
+grows from 0 to its upper limit for `p = 100`: the hellraisers (axis
+`(0, 0, -1)` in B) rise, `ω_z` +9.8, +19.5, +22.9, +24.7 rad/s with ALARM on
+the plate, +21.5 unloaded, reaching 1.33 and 1.63 rad (past the 70° stop) and
+settling at 1.21; the hammers (`(-1, 0, 0)` in B, both: hammer 2's body is
+turned half a turn) swing toward the centre, 1.6 rad/s faster every substep
+to 17.2 rad/s at 1.46 rad and strike at 2.0; the Compressor's right arms
+(speed -95, axis `+y`) and left arms (95, `-y`) close alike, 0.6 then 1.16
+then 1.36 rad/s, lock at 0.235 (auto-lock at the stop the percentage's sign
+drives to: `+0x74` for `p > 0`, whatever the speed's sign) and retract at -11
+to lock at 0.047; the Half Circle's hammer gains 0.86 rad/s a substep to 11.6
+at its 1.63 rad stop; the trap doors (default power `(5, 1)`) fall at 0.114
+rad/s a substep to 3.66 and come to rest at -1.03 and -1.35.
+
+Ours drove every arena hinge at `trunc(p · 0.01 · S)` about the model's axis
+with the moving body as `b`: the hellraisers swung down into the pits under
+them at 25 rad/s (that was the "79 rad/s to its 1.2 rad stop" of section
+12y), the hammers away from the centre, and of each Compressor pair one arm
+stayed at its stop when smashing and opened when retracting. Now
+`hazards::arena_hinge_sense` (the controller's sense and the motor's sign
+from which body is B and the axis in B's frame), `hazards::arena_hinge_limits`
+(the model's limits in ours' sense, the rest pose kept inside: live the
+hellraisers lie at a controller angle of -0.013 to 0.006 against their 1°
+lower limit), the controller's auto-lock on the percentage's sign in its own
+angle, and a `Lock(1)` that holds until the script unlocks (`Duel::
+drive_joints`). Ours against live, every substep: hellraiser +10.9, +21.5,
++25.6 rad/s, peak 1.67 rad; hammer 1.55, 3.16, 4.76, ... 17.2 at 1.45 rad,
+striking at 2.0 and resting at 1.85-1.89 (live 1.87-1.97); smash arms 0.5,
+0.83, 1.09, 1.27, 1.35, locked at 0.235 and retracted to 0.047 (live 0.0466);
+Half Circle hammer 0.86 a step to 11.6 at 1.6 rad (live 11.62 at 1.608); trap
+door to 3.70 and back to -1.04 (live 3.66, -1.03). Tests
+`hazards::tests::an_arena_hinge_turns_the_way_its_controller_drives_it`,
+`duel::tests::the_octagons_hellraiser_rises_and_its_hammer_swings_inward`,
+`duel::tests::the_models_own_hinges_are_driven_by_the_script` (now fires a
+smasher: idle, the arms stay locked at their lower stop, as live).
+
+**Disabled pairs with one fixed body.** The Octagon's hammers are disabled
+against `main_collision`, the top plane and the outer floor but not against
+the two hammer plates they strike. Ours merges every fixed body into the
+static collider and kept a movable body off it only when the file disables
+it against all of them, so the hammers struck `main_collision` at 0.4 rad and
+stalled. The static collider keeps each fixed body as its own piece, and a
+pair the file disables now keeps the movable body off that piece alone
+(`PhysicsBackend::disable_collision_piece`, `duel::apply_fixed_piece_filter`).
+
+**The hazards' hits.** Placed as live (`twoprobe` on the `X` 'place' rows,
+`tools/oracle/hazstate.py`): ALARM on a hellraiser is thrown out of the arena
+onto the outer floor, as live, its first hit priced 52.2, 52.2, 54.0 (live
+71.1, 52.9, 93.0 for the same placements; live's two identical placements
+differ by 18, its closing speeds 21.4, 18.0, 31.0 against ours' 17.6-18.3);
+before, no arena hit of 10 or more. ALARM under hammer 1: per strike ours
+257 + 111, 266 + 88, 269 + ... (live 437 + 177, 448 + 140, 407 + 82,
+425 + 222, ...); before, none. The hellraiser hits price as section 12o's
+formula with both bodies' masses and rotation terms (live records within the
+7 % the robot side's later reading of the bodies gives on floor hits too);
+the hammer's do not: live's are about 1.35 times what that formula gives from
+their records, and leaving out either body's rotation term fits some strikes
+and not others. Not resolved: ours prices a strike at about 0.6 of live.
+
+**The other arenas.** One firing of each hinge hazard against live is above;
+the sliders (the Octagon's pits, the Metal Skull's grate, the Combat Arena's
+saw and spikes) were section 12y's; King of the Hill's teeth and the Hilltop's
+spikes are the same slider hazard (`Spikes`, `FireTeeth`) as the Combat
+Arena's; the Clawtop's claws (an unlimited hinge on a speed) were not
+captured; no stock arena has a spinner of its own.
+
+**The build's late wakes (recovered, verified live in nine robots).** The
+original creates every component's body at the arena's origin in its own
+frame (live, the component's own centre and rotation; ours' component frame,
+to 1 mm) and frees none of them, all at one substep (`setActive(0)`, caller
+`0x531ef7`), then places the components in `.bot` order 116 substeps apart; 58
+substeps before a component is placed its body is activated at the origin and
+frozen again. When a body goes inactive (`0x52b290(X, 0)` → `0x548ab0`) the
+detector goes through its contact list (`+0x144`, the records of the last
+detection) and holds back every pair of X's whose other body is inactive;
+when either body is next activated (`0x52b290(X, 1)` → `0x548ed0` →
+`0x548ef0`) the held pairs with it are gone through: their agents are made
+again, a partner whose flags `+0x1c` have bits 0..2 clear is woken (a robot's
+chassis and the bodies at the origin are not), and the pair is dropped. So a
+robot body that froze within the contact list's reach of a component still at
+the origin is woken, and its system with it, when that component's body first
+appears. The `HB` rows give the pairs and their distances: MiniBerg's wheel
+bodies hold its control board at 0.031 and 0.047 m and its battery at 0.038
+and 0.051; ours, the hulls' distance (GJK) with the robot built at the origin
+too, gives 0.031, 0.047, 0.038, 0.051. A pair is held when the shapes come
+within the collision tolerance (0.1) without overlapping (overlapping
+shapes make no points), counting a wheel's traction ring (a collidable of its
+body: without it the 0.047 reads 0.147) and each triangle of a mesh piece.
+What else live shows: a wheel at the origin never holds a pair; a component
+never pairs with the body it will be welded into (Wide Load's piston rod with
+its connectors and tips, Grog's arm with its extender, Sentinel's burst arm
+with its wedge; why is not recovered); a body that has a component welded
+into it is rebuilt and drops its held pairs (Tornado's spinner held pairs with
+its sledge hammers and was not woken by them after its extender was welded
+on); the component that just woke the robot is in no list at the next freeze.
+
+`RobotRig::late_wakes` runs that build: the robot freezes after every
+body-bringing component and after every late wake, every robot body but the
+chassis holding the components still at the origin within reach of its
+members so far. Live late wakes (components, `.bot` order) and ours:
+MiniBerg 3, 4, 10, 14 (both), Tornado 10 (both), the Scout 6, 7 (both),
+REVENGE, Raptor, Sentinel none (both), Wide Load 6, 7, 12 (both), Grog 14, 15
+(both), the Boxer 14 (both), Hanky Panky 9, 10, 11, 17 (ours also 15), Eye
+Poker 10, 15 (ours also 13, 14), Iceberg 13 (ours also 16). Every live late
+wake is found; the four extra are spikes (three Pole Spikes and an Iron
+Spike) taken to pair with a wheel that live they do not, though ours puts them
+0.012-0.07 m from it; not resolved. A late wake weighs the robot with the
+members placed before the component that causes it, so
+`Robot::build_shares` counts the members up to the last body-bringing
+component or the last late wake's predecessor (`RA2_NO_LATE_WAKES=1` leaves
+them out). Of the extra wakes only Iceberg's Pole Spike moves a weight (its
+top: ours 38 of 38 kg, live 22 of 38; before 12). Tests
+`tests/landing_live.rs` (`the_builds_late_wakes_are_the_live_ones`,
+`a_late_wake_gives_a_body_its_full_weight`), `tests/spawn_live.rs` (Tornado,
+Stinger, MiniBerg, Iceberg). `examples/buildwakes` (`LATE=1`, `DIST=`,
+`PHANTOM=1`, `NOOVERLAP=1`, `COMS=1`, `PTS=1`) prints the model's steps.
+
+The spawn heights (chassis centre at the bell, box, live from the `spinup-*`
+captures): 15 of 16 stock robots at live's, to 0.5 mm (before 13 of 16):
+Tornado -1.5520 → -1.6020 (live -1.6018), MiniBerg -1.5750 → -1.6250 (live
+-1.6253); Dementia stays a step low (live differs between sessions, 12x).
+Turns about the axle at the hold (`spincmp.py`, ours, live): the Scout's
+right wheel 2.88 → 2.54 (2.15), Tornado's 10 kg wheel 8.39 → 11.76 (10.75),
+MiniBerg's 10 kg wheel 7.49 → 10.89 (10.97); the rest unchanged, among them
+Iceberg's wheels (-9.80 and 85.05 against 5.02 and 99.19) and Sentinel's
+steering hubs (117.38 and 57.87 against 109.22 and 113.22): the hubs ride the
+unit's 40 kg build body, which live tumbles about at the origin through the
+whole build (its hubs turn 154° and 155°) while ours builds them on the
+chassis; that build body is not modelled.
+
+**Validation.** Before = `fidelity` 50862c3 (section 12y's after column, to the
+digit), after = this branch. `FIDTRACE_WARMUP` ensembles, 24 runs each:
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6) | 34.2 (151) sd 28 / 4.8, 86 s, 11/24 | 33.0 (111) sd 24 / 5.7, 69 s, 2/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 10/24 | 8/24 |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 3.5 (81) / 1.0, 52 s, 2/24 | the same |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 70.5 (262) sd 53 / 3.9, 86 s, 9/24 | 76.7 (311) sd 43 / 5.0, 97 s, 14/24 |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 17.8 (85) sd 17 / 3.4, 59 s, 1/24 | 10.2 (54) sd 9 / 2.5, 47 s, 1/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | | 8/24 | 11/24 |
+| ... an arena hit over 50 on ALARM | 4 of 5 fights | 0/24 | 6/24 |
+| ... ending in a pit (Scout + ALARM) | 2 of 5 | 6 + 6 | 1 + 4 |
+
+The hinges alone give the box, Razor and Compressor numbers unchanged (no
+hinge fires in those fights) and the Octagon 11.9 (70) sd 12 / 2.7, 58 s,
+with 5/24 runs taking an arena hit over 50; the rest is the late wakes, which
+change the Scout's, Wide Load's and Grog's build weights: the box fights end
+sooner (ALARM loses 8 of 24 runs, before 3; live 3 of 6 fights ran full
+length), a live-checked change moving that count away from live;
+Wide Load's count comes to live's.
+
+Section 12s's replays (`twoprobe`): set 1 (20 trials) ALARM on its back at some
+point / at the end 2 / 2 → 3 / 3 (live 1 / 1), mean peak |ω| 3.15 → 3.34
+(live 3.05), end-centre median 1.31 → 1.22 m; set 2 (17) never on its back,
+peak 1.64 → 1.55 (live 1.40), median 0.23 → 0.22 m.
+
+AI suite (ten pairings, warmup 0), counted hits each way and length, before →
+after: Scout v ALARM 5/40 55 s → 2/7 106 s, Tornado v RipBlade 119/40 116 s
+→ 92/32 75 s, Grog v Boxer 53/176 120 s (both), Razor v FlapJack 5/1 43 s
+(both), Sentinel v Wide Load 6/40 55 s → 3/38 90 s, Bear v Tornado 49/69 71 s
+→ 7/14 26 s, Grog v Boxer hill 8/28 39 s (both), Octagon Scout v ALARM 5/59
+69 s → 8/22 34 s, Razor v FlapJack park 3/1 73 s (both), Bushido v Devil 32/6
+120 s (both); every pairing still has damage dealt each way.
+
+Tools: `examples/hazprobe` (an arena's hazards fired from Python, every
+joint's angle and body each step, the priced hits), `twoprobe`'s new `HJ` and
+`H` rows, `Duel::run_script` and `Duel::hazard_joints` (diagnostics),
+`tools/oracle/hazstate.py` (a capture's placements as `twoprobe` state
+files).
+
+**Still open.** The hammer's strikes priced at about 0.6 of live (the formula
+for a movable arena body); the hellraiser hits 52-54 against live's 53-93;
+four spikes taken to pair with a wheel at the build that live do not (Iceberg's
+top weight); why a component does not pair with the body it will join; the
+steering unit's build body (Sentinel's hubs at the hold); the Clawtop's claws
+not captured.
