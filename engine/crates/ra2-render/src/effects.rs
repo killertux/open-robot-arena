@@ -335,6 +335,8 @@ struct Particle {
     texture: usize,
     anim: f32,
     alive: bool,
+    /// A jet's particle that has already hit something: it is not cast again (docs/37 section 6.2).
+    spent: bool,
 }
 
 /// One live emitter.
@@ -409,6 +411,7 @@ impl Emitter {
                 texture,
                 anim: 0.0,
                 alive: true,
+                spent: false,
             });
         }
         n
@@ -447,7 +450,7 @@ impl Emitter {
             let from = p.pos;
             p.pos += p.vel * dt + 0.5 * c.gravity * dt * dt;
             p.vel += c.gravity * dt;
-            if self.probe {
+            if self.probe && !p.spent {
                 // The nearest of the arena and whatever the caller's world has.
                 let mut hit = collider.hit(from, p.pos);
                 if let Some(other) = probe(key, from, p.pos) {
@@ -474,6 +477,7 @@ impl Emitter {
                     }
                     p.vel = dir * speed;
                     p.pos = point + normal * 0.002;
+                    p.spent = true;
                 }
             }
             if c.collide && c.reflect {
@@ -658,6 +662,7 @@ impl Effects {
                     texture: 0,
                     anim: 0.0,
                     alive: true,
+                    spent: false,
                 });
             }
             e
@@ -1412,6 +1417,7 @@ mod tests {
             texture: 0,
             anim: 0.0,
             alive: true,
+            spent: false,
         };
         let mut v = Vec::new();
         quad(&mut v, &p, Vec3::X, Vec3::Y);
@@ -1698,6 +1704,31 @@ mod tests {
             fx.step(1.0 / 60.0);
         }
         assert_eq!(fx.standing[0].1.alive(), 0);
+    }
+
+    /// A jet's particle is cast until it hits something and then not again: live, none of 98 particles that hit
+    /// (73 a robot, 25 the floor; `flamecast__live__000`) was cast to a second hit, and ours hit 1.3 times a
+    /// particle before (docs/37 section 6.2).
+    #[test]
+    fn a_jet_particle_hits_once() {
+        let mut fx = Effects::new(None);
+        fx.enabled = false;
+        let mut hits = 0;
+        for i in 0..60 {
+            fx.jet(
+                3,
+                Vec3::new(0.0, 0.0, i as f32 * 0.01),
+                Vec3::new(0.0, 0.0, -5.0),
+                true,
+            );
+            // a world that is hit by every segment, wherever it starts
+            fx.step_with(1.0 / 60.0, &mut |_, from, _| {
+                hits += 1;
+                Some((from, Vec3::Z))
+            });
+        }
+        // 80 a second for one second: one hit each, not one a step of every particle alive
+        assert!((70..=82).contains(&hits), "{hits} hits");
     }
 
     /// `Effects::replay` draws exactly the particles it is given, never stepped (the live frames of the

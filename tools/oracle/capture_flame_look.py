@@ -98,6 +98,7 @@ def main():
 
         sc = load(sess, "ra2_flame.js", on_msg)
         pin = load(sess, "ra2_pin.js", on_msg)
+        cast = load(sess, "ra2_flamecast.js", on_msg) if os.environ.get("CASTLOG") else None  # docs/37 section 6.2
         cam_sc = load(sess, "ra2_camera.js", lambda m, d: m.get("type") == "send" and log(dict(m["payload"], ev="cam")))
         cd.drive(["-f", os.path.join(HERE, "routes", "exhibition_box_scout_alarm.steps")])
         cd.drive(["click", "176", "177", "wait", "1.5", "click", "322", "188", "wait", "1", "hide"])
@@ -172,9 +173,14 @@ def main():
                 if grab_k:
                     grab.start()
                     time.sleep(0.3)
+                if cast:
+                    cast.exports_sync.on(True)
                 inp(True)
                 time.sleep(range_secs)
                 inp(False)
+                if cast:
+                    time.sleep(0.4)
+                    cast.exports_sync.on(False)
                 if grab_k:
                     time.sleep(0.5)
                     grab.stop()

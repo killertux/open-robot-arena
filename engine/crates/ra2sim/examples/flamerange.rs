@@ -113,8 +113,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_STEP);
             let n = (secs / dt) as usize;
-            for _ in 0..n {
+            let trace = std::env::var("FLAME_TRACE").is_ok();
+            for step in 0..n {
                 duel.step_direct(&still, dt);
+                if trace && step % 15 == 0 {
+                    for j in duel.robots[0].flame_jets(&*duel.physics) {
+                        println!(
+                            "TRACE t {:.2} nozzle {:.3} {:.3} {:.3} vel {:.2} {:.2} {:.2}",
+                            step as f32 * dt,
+                            j.position.x,
+                            j.position.y,
+                            j.position.z,
+                            j.velocity.x,
+                            j.velocity.y,
+                            j.velocity.z
+                        );
+                    }
+                }
             }
             duel.robots[0].apply_inputs(&[("Flame".into(), 0, 0.0)]);
             if std::env::var("FLAME_LOG").is_ok() {

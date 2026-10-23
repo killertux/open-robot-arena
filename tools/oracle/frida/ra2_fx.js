@@ -152,6 +152,34 @@ function synth(ecx, damage, p, n) {
   synthQueue.push({ t: t, ecx: ecx, damage: damage, buf: buf });
   return t;
 }
-rpc.exports = { synth(ecx, damage, p, n) { return synth(ecx, damage, p, n); }, synthdone(t) { return synthDone[t] === undefined ? null : synthDone[t]; }, lasthit() { return lastHit ? lastHit.ecx.toString() : null; }, ping() { return now(); }, glob() { return v3(ptr('0x71abcc')); }, m12at(a) { return m12(ptr(a)); },
+// The decal objects the game holds now (docs/37 section 8.1): every heap object whose first word is `vtbl` and whose
+// alpha (+0x1cec) is `alpha`, not in `known`, with the cut polygon (positions, uvs) the way the constructor hook logs it.
+function finddecals(vtbl, alpha, known) {
+  const want = new Set(known); const out = [];
+  const v = parseInt(vtbl, 16);
+  const m = [v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >>> 24) & 255].map(x => ('0' + x.toString(16)).slice(-2)).join(' ');
+  for (const r of Process.enumerateRanges('rw-')) {
+    if (r.size < 0x1cf4) continue;
+    let hits = [];
+    try { hits = Memory.scanSync(r.base, r.size, m); } catch (e) { continue; }
+    for (const h of hits) {
+      if (want.has(h.address.toString())) continue;
+      try {
+        const d = h.address;
+        const a = d.add(0x1cec).readFloat();
+        if (Math.abs(a - alpha) > 1e-4) continue;
+        const nv = d.add(0x170).readS32(); if (nv < 3 || nv > 89 || d.add(0x174).readS32() !== nv - 2) continue;
+        const o = { obj: d.toString(), alpha: a, nv: nv, nt: d.add(0x174).readS32(), pos: [], uv: [] };
+        for (let i = 0; i < nv; i++) {
+          o.pos.push([f(d, 0x178 + 12 * i), f(d, 0x17c + 12 * i), f(d, 0x180 + 12 * i)]);
+          o.uv.push([f(d, 0x1258 + 8 * i), f(d, 0x125c + 8 * i)]);
+        }
+        out.push(o);
+      } catch (e) {}
+    }
+  }
+  return out;
+}
+rpc.exports = { finddecals(vtbl, alpha, known) { return finddecals(vtbl, alpha, known); }, vtbl(a) { return ptr(a).readU32(); }, synth(ecx, damage, p, n) { return synth(ecx, damage, p, n); }, synthdone(t) { return synthDone[t] === undefined ? null : synthDone[t]; }, lasthit() { return lastHit ? lastHit.ecx.toString() : null; }, ping() { return now(); }, glob() { return v3(ptr('0x71abcc')); }, m12at(a) { return m12(ptr(a)); },
   // Force the alpha (+0x1cec) of live DecalTrigger objects (docs/37 section 3): their look at full strength.
   setalpha(addrs, v) { for (const a of addrs) ptr(a).add(0x1cec).writeFloat(v); return addrs.length; } };
