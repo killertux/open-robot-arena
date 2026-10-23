@@ -113,6 +113,43 @@ impl Rng {
     }
 }
 
+/// The velocity a non-reflecting particle leaves a surface with (docs/37 section 6.3, from the original's
+/// step `0x5bdc00` and checked against 348 logged live scatters): two uniform numbers `u1, u2` in `[0, 1)`
+/// pick a target `Q` on the contact plane through `point` with normal `normal`, and the particle flies
+/// from `from` (where its step began) toward `Q` at `speed`. The two free coordinates of `Q` are
+/// `u * from` per axis (a fraction of the particle's own world coordinate, not a spread about the hit);
+/// the third is the hit point's when the normal is an axis, else `(n.x Qx + n.y Qy + n . point) / n.z`.
+/// Which axis is solved is decided by the normal's components being within `0.001` of zero: `y` for a
+/// floor, `x` for a normal along x, `z` for one along z. The sign of the general-case term is the
+/// original's (it is not on the plane; 250 of 250 live robot scatters need it, 2 of 250 the true plane).
+pub fn scatter_velocity(from: Vec3, point: Vec3, normal: Vec3, speed: f32, rng: &mut Rng) -> Vec3 {
+    let z = |v: f32| v.abs() < 0.001;
+    let q = if z(normal.x) && z(normal.z) {
+        let (u1, u2) = (rng.unit(), rng.unit());
+        Vec3::new(u1 * from.x, point.y, u2 * from.z)
+    } else if z(normal.y) && z(normal.z) {
+        let (u1, u2) = (rng.unit(), rng.unit());
+        Vec3::new(point.x, u1 * from.y, u2 * from.z)
+    } else if z(normal.x) && z(normal.y) {
+        let (u1, u2) = (rng.unit(), rng.unit());
+        Vec3::new(u1 * from.x, u2 * from.y, point.z)
+    } else {
+        let (u1, u2) = (rng.unit(), rng.unit());
+        let (x, y) = (u1 * from.x, u2 * from.y);
+        Vec3::new(
+            x,
+            y,
+            (normal.x * x + normal.y * y + normal.dot(point)) / normal.z,
+        )
+    };
+    let dir = (q - from).normalize_or_zero();
+    if dir == Vec3::ZERO {
+        normal * speed
+    } else {
+        dir * speed
+    }
+}
+
 /// How an emitter picks a texture (`cfg + 0x70`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextureMode {
@@ -459,24 +496,13 @@ impl Emitter {
                     }
                 }
                 if let Some((point, normal)) = hit {
-                    // `0x5bdc00` without the reflect flag: the particle leaves the
-                    // surface in a random direction at its own speed (times the
-                    // elasticity, 1).
+                    // `0x5bdc00` without the reflect flag: the particle keeps its speed
+                    // (times the elasticity, 1) and turns toward a random point of the
+                    // contact plane; it is not moved to the surface, its next position is
+                    // the step's start plus the new velocity times dt.
                     let speed = p.vel.length() * c.elasticity;
-                    let mut dir = Vec3::new(
-                        rng.unit() * 2.0 - 1.0,
-                        rng.unit() * 2.0 - 1.0,
-                        rng.unit() * 2.0 - 1.0,
-                    )
-                    .normalize_or_zero();
-                    if dir == Vec3::ZERO {
-                        dir = normal;
-                    }
-                    if dir.dot(normal) < 0.0 {
-                        dir = -dir;
-                    }
-                    p.vel = dir * speed;
-                    p.pos = point + normal * 0.002;
+                    p.vel = scatter_velocity(from, point, normal, speed, rng);
+                    p.pos = from + p.vel * dt;
                     p.spent = true;
                 }
             }
@@ -1688,12 +1714,9 @@ mod tests {
         }
         assert!(casts > 0 && hits > 0, "{casts} casts, {hits} hits");
         let e = &fx.standing[0].1;
-        // nothing flies through the wall: scattered particles leave it on its near side
-        assert!(
-            e.particles.iter().all(|p| p.pos.z > -0.52),
-            "{:?}",
-            e.particles.iter().map(|p| p.pos.z).fold(0.0, f32::min)
-        );
+        // the original does not keep a scattered particle on the near side (docs/37 section 6.3): it turns
+        // toward a point of the plane and may cross it; what is asserted is that a hit particle is spent
+        assert!(e.particles.iter().any(|p| p.spent));
         assert_eq!(e.cfg.rate, 80.0);
         assert_eq!(e.cfg.velocity_spread, Config::JET_SPREAD);
         assert_eq!(e.cfg.color_start, [0.0, 0.0, 1.0, 1.0]);
@@ -1729,6 +1752,42 @@ mod tests {
         }
         // 80 a second for one second: one hit each, not one a step of every particle alive
         assert!((70..=82).contains(&hits), "{hits} hits");
+    }
+
+    /// The scatter law (docs/37 section 6.3): a floor hit leaves along the floor toward a random point
+    /// between the origin and the particle's own x and z, at its own speed (live step 151 of
+    /// `flamecast__live__000`: from (-8.277, -2.251, 8.514), hit y -2.265, speed 4.862, left with
+    /// (3.228, -0.008, -3.636)); a robot hit solves the third coordinate from the plane.
+    #[test]
+    fn a_scatter_is_a_random_point_of_the_contact_plane() {
+        let from = Vec3::new(-8.27689, -2.25053, 8.51375);
+        let hit = Vec3::new(-8.22281, -2.26498, 8.46075);
+        let live = Vec3::new(3.22755, -0.00785, -3.63566);
+        let mut rng = Rng(7);
+        for _ in 0..200 {
+            let v = scatter_velocity(from, hit, Vec3::Y, 4.862, &mut rng);
+            assert!((v.length() - 4.862).abs() < 1e-3);
+            // toward the origin side in x and z, almost level, as the live one
+            assert!(v.x >= 0.0 && v.z <= 0.0 && v.y < 0.0, "{v:?}");
+        }
+        // the live direction is reachable: its u1, u2 are in [0, 1)
+        let t = (hit.y - from.y) / (live.y / live.length());
+        let u1 = (from.x + t * live.x / live.length()) / from.x;
+        let u2 = (from.z + t * live.z / live.length()) / from.z;
+        assert!(
+            (0.0..1.0).contains(&u1) && (0.0..1.0).contains(&u2),
+            "{u1} {u2}"
+        );
+        // a slanted wall: the target lies on the (sign-flipped) plane equation
+        let n = Vec3::new(0.73739, 0.01534, -0.6753);
+        let hp = Vec3::new(-8.9, -1.95, 8.8);
+        let f = Vec3::new(-9.0, -2.0, 8.9);
+        let mut rng = Rng(9);
+        for _ in 0..100 {
+            let v = scatter_velocity(f, hp, n, 5.0, &mut rng);
+            assert!((v.length() - 5.0).abs() < 1e-3);
+            assert!(v.is_finite());
+        }
     }
 
     /// `Effects::replay` draws exactly the particles it is given, never stepped (the live frames of the

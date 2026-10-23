@@ -136,6 +136,49 @@ pub fn shell_scrap_hook(game: &Path) -> ra2_shell::shell::ScrapHook {
     })
 }
 
+/// The robot design the original writes for the inventory's Export Bot and Import Bot: the `.bot` loaded and
+/// saved again in the current format (`ra2fmt::bot::Bot::upgraded`, docs/36 section 9.25).
+fn resave_bot(from: &Path) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    let bot = ra2fmt::bot::parse(&bytes).map_err(|e| format!("{}: {e:?}", from.display()))?;
+    Ok(bot.upgraded().write())
+}
+
+/// The shell's export hook (the inventory's `export button`, `FUN_00500690`, and the window's OK
+/// `FUN_00471620`): the robot of cell `slot` is saved as `Robot Designs/<name>.bot` in the save directory,
+/// overwriting a design of that name without asking (live).
+pub fn shell_export_hook(game: &Path) -> ra2_shell::shell::ExportHook {
+    let game = game.to_path_buf();
+    Box::new(move |slot, name| {
+        let career = fresh_career(&game)?;
+        let from = player_robot_path(&game, career.player_slot, slot as i32);
+        let bytes = resave_bot(&from)?;
+        let to = game.join("Robot Designs").join(format!("{name}.bot"));
+        ra2fmt::saves::write(&game, &to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+        Ok(())
+    })
+}
+
+/// The shell's import hook (the import window's OK `FUN_00470b40`): the design `Robot Designs/<design>` is
+/// saved as the team's `Bot<slot>.bot` (current format), the slot joins the roster and `Teams/Teams.txt` is
+/// written (the save directory's copy).
+pub fn shell_import_hook(game: &Path) -> ra2_shell::shell::ImportHook {
+    let game = game.to_path_buf();
+    Box::new(move |slot, design| {
+        let mut career = fresh_career(&game).ok()?;
+        let from = ra2fmt::saves::resolve(&game, format!("Robot Designs/{design}"));
+        let bytes = resave_bot(&from).ok()?;
+        let to = game
+            .join("Teams")
+            .join(format!("Team{}", career.player_slot))
+            .join(format!("Bot{slot}.bot"));
+        ra2fmt::saves::write(&game, &to, bytes).ok()?;
+        career.import_robot(slot).ok()?;
+        career.save(&game).ok()?;
+        build_view(&career, &game).ok()
+    })
+}
+
 /// One click of the repairs screen's clock. The original advances a progress
 /// bar over time (`FUN_004d6e10`) against the shipped 30-minute clock
 /// (`FUN_0058b150(0x1e,1)` → `00:30:00`); this headless/UI tick is six

@@ -126,6 +126,8 @@ fn window_shell(game: &Path) -> Shell {
     shell.set_enter_hook(hq_mode::shell_enter_hook(game).unwrap());
     shell.set_team_hook(hq_mode::shell_team_hook(game));
     shell.set_scrap_hook(hq_mode::shell_scrap_hook(game));
+    shell.set_export_hook(hq_mode::shell_export_hook(game));
+    shell.set_import_hook(hq_mode::shell_import_hook(game));
     shell.set_later_hook(hq_mode::shell_later_hook(game));
     shell
 }
@@ -329,6 +331,10 @@ fn a_robot_edited_in_the_workshop_is_saved_to_its_slot_and_fights() {
     let point = [grid.x + grid.w * 0.25, grid.y + grid.h * 0.5];
     let pick = flow::inventory_cell_at(&shell, point);
     assert_eq!(pick, Some(1));
+    // Workshop is dim until a cell is selected (docs/36 9.25).
+    shell.click_named("workshop button").unwrap();
+    assert!(shell.lab().is_none());
+    shell.click(point[0], point[1]).unwrap();
     shell.click_named("workshop button").unwrap();
     assert!(shell.lab().is_some());
 
@@ -850,13 +856,31 @@ fn a_new_workshop_robot_joins_the_roster() {
     for name in ["Team HQ button", "continue button"] {
         shell.click_named(name).unwrap();
     }
+    // The inventory has six cells: scrap a robot so that a `New Robot` cell exists.
+    let first = ra2fmt::team::read_table(&game.join("Teams/Teams.txt"))
+        .unwrap()
+        .teams[0]
+        .robots[0] as usize;
+    flow::scrap_prompt(&mut shell, Some(first)).unwrap();
+    shell.click_named("yes button").unwrap();
     let roster_before = ra2fmt::team::read_table(&game.join("Teams/Teams.txt"))
         .unwrap()
         .teams[0]
         .robots
         .clone();
 
-    // Nothing built: nothing added.
+    // Nothing built: nothing added. The Workshop needs a cell: the first `New Robot` one.
+    let free = (0..6_i32)
+        .find(|slot| !roster_before.contains(slot))
+        .expect("a free slot");
+    let grid = frame_of(&shell, ra2ui::hq::ROBOT_GRID);
+    let (column, row) = (free / 3, free % 3);
+    shell
+        .click(
+            grid.x + grid.w * (column as f32 + 0.5) / 2.0,
+            grid.y + grid.h * (row as f32 + 0.5) / 3.0,
+        )
+        .unwrap();
     shell.click_named("workshop button").unwrap();
     let mut builder = flow::open_workshop(game, None).unwrap();
     assert!(builder.team_target().is_none());
@@ -867,7 +891,13 @@ fn a_new_workshop_robot_joins_the_roster() {
     );
     shell.click_named("back button").unwrap();
 
-    // A part attached: the robot joins at the first free slot.
+    // A part attached: the robot joins at the first free slot (the cell is still selected).
+    shell
+        .click(
+            grid.x + grid.w * (column as f32 + 0.5) / 2.0,
+            grid.y + grid.h * (row as f32 + 0.5) / 3.0,
+        )
+        .unwrap();
     shell.click_named("workshop button").unwrap();
     let mut builder = flow::open_workshop(game, None).unwrap();
     builder.click_named("components button").unwrap();
@@ -876,10 +906,16 @@ fn a_new_workshop_robot_joins_the_roster() {
         .place_component_free("Components\\ztek1.txt")
         .unwrap();
     builder.click_named("back button").unwrap();
+    // (A scrapped slot's `.bot` stays on disk, so the first slot whose file is free is the next one:
+    // the workshop does not yet save into the selected `New Robot` cell itself.)
+    let free = (0..)
+        .find(|n| {
+            !game.join(format!("Teams/Team0/Bot{n}.bot")).is_file() && !roster_before.contains(n)
+        })
+        .unwrap();
     let saved = flow::close_workshop(&mut builder, &mut shell)
         .unwrap()
         .expect("the new robot is saved to the team");
-    let free = (0..).find(|n| !roster_before.contains(n)).unwrap();
     assert!(
         saved.ends_with(format!("Teams/Team0/Bot{free}.bot")),
         "{}",
@@ -969,4 +1005,100 @@ fn scrapping_a_robot_unlists_it_and_keeps_the_file() {
     // The other robots keep their slots; the scrapped cell is empty.
     assert_eq!(shell.hq_robot_name(slot), None);
     assert!(shell.hq_robot_name(before[0] as usize).is_some());
+}
+
+/// The inventory's Export Bot and Import Bot (docs/36 9.25). Export writes `Robot Designs/<name>.bot`, the robot
+/// loaded and saved again as 1.12 (byte-identical to the live exports `teamhq-export-*`); Import puts a design
+/// into an empty cell as `Bot<slot>.bot`, the same re-save, and the slot rejoins `Robots:`. The buttons dim by
+/// selection (live: none selected, all four dim; a robot, Import dim; a `New Robot` cell, Export and Scrap dim).
+#[test]
+fn export_and_import_bot_resave_the_design_and_the_buttons_follow_the_selection() {
+    let Some(scratch) = ScratchGame::new("exportimport") else {
+        return;
+    };
+    let game = scratch.path();
+    let mut shell = window_shell(game);
+    shell.click_named("Team HQ button").unwrap();
+    shell.click_named("continue button").unwrap();
+    let dimmed = |shell: &Shell, name: &str| {
+        let placed = ra2ui::resolve(shell.document(), shell.size());
+        let widget = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == name)
+            .unwrap()
+            .widget;
+        ra2ui::input::button_dimmed(widget)
+    };
+    let buttons = |shell: &Shell| {
+        [
+            "workshop button",
+            "scrap button",
+            "export button",
+            "import button",
+        ]
+        .map(|name| dimmed(shell, name))
+    };
+    assert_eq!(buttons(&shell), [true; 4], "nothing selected: all dim");
+
+    // Select robot slot 4 (cell column 1, row 1): Import dims, the others light.
+    let cell = frame_of(&shell, "robot grid");
+    let point = |slot: usize| {
+        let (column, row) = (slot / 3, slot % 3);
+        [
+            cell.x + cell.w * (column as f32 + 0.5) / 2.0,
+            cell.y + cell.h * (row as f32 + 0.5) / 3.0,
+        ]
+    };
+    let p = point(4);
+    shell.click(p[0], p[1]).unwrap();
+    assert_eq!(buttons(&shell), [false, false, false, true]);
+
+    // Export: the window's file name is the robot's name; OK writes the re-saved design.
+    let name = shell.hq_robot_name(4).unwrap().to_string();
+    shell.ask_export(4).unwrap();
+    assert_eq!(shell.window_depth(), 1);
+    shell.click_named("ok button").unwrap();
+    assert_eq!(shell.window_depth(), 0);
+    let exported = game.join("Robot Designs").join(format!("{name}.bot"));
+    let source = hq_mode::player_robot_path(game, 0, 4);
+    let expect = ra2fmt::bot::parse(&std::fs::read(&source).unwrap())
+        .unwrap()
+        .upgraded()
+        .write();
+    assert_eq!(std::fs::read(&exported).unwrap(), expect);
+    assert!(std::fs::read(&exported).unwrap().starts_with(b"1.12\n"));
+
+    // Scrap it, select the empty cell: Export and Scrap dim, Workshop and Import light.
+    flow::scrap_prompt(&mut shell, Some(4)).unwrap();
+    shell.click_named("yes button").unwrap();
+    assert_eq!(buttons(&shell), [true; 4], "a refill clears the selection");
+    shell.click(p[0], p[1]).unwrap();
+    assert_eq!(buttons(&shell), [false, true, true, false]);
+
+    // Import the exported design (the list is the designs in byte order) into the empty cell.
+    shell.ask_import(4).unwrap();
+    assert_eq!(shell.window_depth(), 1);
+    let list = frame_of(&shell, "file list");
+    let designs = ra2fmt::saves::list(game, "Robot Designs");
+    let mut designs: Vec<_> = designs
+        .into_iter()
+        .filter(|n| n.ends_with(".bot"))
+        .collect();
+    designs.sort();
+    let row = designs
+        .iter()
+        .position(|n| *n == format!("{name}.bot"))
+        .unwrap();
+    shell
+        .click(list.x + 20.0, list.y + 18.0 * row as f32 + 9.0)
+        .unwrap();
+    shell.click_named("ok button").unwrap();
+    assert_eq!(shell.window_depth(), 0);
+    assert_eq!(shell.hq_robot_name(4), Some(name.as_str()));
+    let table = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap();
+    assert!(table.teams[0].robots.windows(2).all(|w| w[0] < w[1]));
+    assert!(table.teams[0].robots.contains(&4));
+    assert_eq!(std::fs::read(&source).unwrap(), expect);
+    assert_eq!(buttons(&shell), [true; 4]);
 }

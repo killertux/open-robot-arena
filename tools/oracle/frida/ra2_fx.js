@@ -167,7 +167,7 @@ function finddecals(vtbl, alpha, known) {
       try {
         const d = h.address;
         const a = d.add(0x1cec).readFloat();
-        if (Math.abs(a - alpha) > 1e-4) continue;
+        if (alpha >= 0 && Math.abs(a - alpha) > 1e-4) continue;
         const nv = d.add(0x170).readS32(); if (nv < 3 || nv > 89 || d.add(0x174).readS32() !== nv - 2) continue;
         const o = { obj: d.toString(), alpha: a, nv: nv, nt: d.add(0x174).readS32(), pos: [], uv: [] };
         for (let i = 0; i < nv; i++) {

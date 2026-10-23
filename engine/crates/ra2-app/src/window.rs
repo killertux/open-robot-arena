@@ -369,6 +369,8 @@ impl App {
         }
         shell.set_team_hook(crate::hq_mode::shell_team_hook(game));
         shell.set_scrap_hook(crate::hq_mode::shell_scrap_hook(game));
+        shell.set_export_hook(crate::hq_mode::shell_export_hook(game));
+        shell.set_import_hook(crate::hq_mode::shell_import_hook(game));
         shell.set_later_hook(crate::hq_mode::shell_later_hook(game));
         shell.set_animate(true);
         let frames = FrameRenderer::open(game)?;

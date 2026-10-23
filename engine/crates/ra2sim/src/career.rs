@@ -871,6 +871,20 @@ impl Career {
         Ok(())
     }
 
+    /// The Team HQ inventory's `import button` (`FUN_00500860` -> the import window's OK `FUN_00470b40`): robot
+    /// slot `slot` (an empty cell) joins the team's `Robots:` list (`FUN_0043b180(cell, 1)` sets its flag). The
+    /// list is the flags in cell order, so the slot takes its place in the ascending list (live: after
+    /// importing into cell 4 `Robots:` read `0 1 2 3 4 5`).
+    pub fn import_robot(&mut self, slot: usize) -> Result<(), String> {
+        if self.player().robots.contains(&(slot as i32)) {
+            return Err(format!("slot {slot} already holds a robot"));
+        }
+        let robots = &mut self.player_mut().robots;
+        robots.push(slot as i32);
+        robots.sort_unstable();
+        Ok(())
+    }
+
     /// The fifteen AI records that carry identity (empty slots are skipped).
     pub fn ai_teams(&self) -> impl Iterator<Item = &Team> {
         self.ai_table.teams.iter().filter(|t| t.is_named())

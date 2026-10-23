@@ -520,7 +520,11 @@ impl Hq {
 
     fn fill_tab(&mut self) -> Result<(), String> {
         match self.tab {
-            "robots button" => self.fill_robots()?,
+            "robots button" => {
+                self.fill_robots()?;
+                let view = self.view.clone();
+                sync_inventory_buttons(&mut self.document, &view);
+            }
             "league button" => self.fill_league()?,
             "events button" => self.fill_events()?,
             "history button" => self.fill_history()?,
@@ -821,6 +825,57 @@ impl Hq {
 }
 
 /// Hide the selection and highlight bars of a freshly filled grid.
+/// The inventory's four buttons, by name (`FUN_004fd380` keeps them at the window's `+0x170`
+/// workshop, `+0x174` scrap, `+0x178` export, `+0x17c` import).
+pub const INVENTORY_BUTTONS: [&str; 4] = [
+    "workshop button",
+    "scrap button",
+    "export button",
+    "import button",
+];
+
+/// What the inventory grid has selected, as the buttons see it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InventoryPick {
+    /// No cell: all four dim (a fresh window, a refill after a scrap or import; pixel-measured live: the four
+    /// labels at 0.5 tint, max 127 of 255, in `teamhq-buttons-none`).
+    Nothing,
+    /// A robot's cell: Workshop, Scrap and Export, no Import.
+    Robot,
+    /// A `New Robot` cell: Workshop and Import (`FUN_004ff2e0`: the selected cell's flag `+0x16c`).
+    Empty,
+}
+
+impl InventoryPick {
+    /// Which buttons are enabled: `[workshop, scrap, export, import]`.
+    pub fn enabled(self) -> [bool; 4] {
+        match self {
+            Self::Nothing => [false, false, false, false],
+            Self::Robot => [true, true, true, false],
+            Self::Empty => [true, false, false, true],
+        }
+    }
+}
+
+/// Dim or light the inventory's buttons for the grid's current selection (`FUN_004ff2e0`, the
+/// grid's select handler, and the refill `FUN_004ff570`). The selected cell is slot
+/// `column * rows + row`; it is a robot when the view has that slot.
+pub fn sync_inventory_buttons(document: &mut Gib, view: &View) {
+    let pick = match find_mut_in_gib(document, ROBOT_GRID).and_then(|grid| {
+        let rows = Grid::from_widget(grid)?.rows.max(1) as usize;
+        crate::input::selected_cell(grid).map(|(row, column)| column * rows + row)
+    }) {
+        None => InventoryPick::Nothing,
+        Some(slot) if view.robots.iter().any(|r| r.slot == slot) => InventoryPick::Robot,
+        Some(_) => InventoryPick::Empty,
+    };
+    for (name, on) in INVENTORY_BUTTONS.iter().zip(pick.enabled()) {
+        if let Some(button) = find_mut_in_gib(document, name) {
+            crate::input::set_button_enabled(button, on);
+        }
+    }
+}
+
 fn clear_bars(grid: &mut Widget) {
     crate::input::clear_selection(grid);
     if let Some(id) = Grid::from_widget(grid).and_then(|g| g.highlight) {

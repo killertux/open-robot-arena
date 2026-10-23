@@ -309,6 +309,33 @@ Code: `Duel::{flame_hits, flame_hit_log}`, `flame_shapes`/`ray_shapes` (test
 `a_replayed_frame_draws_its_particles_as_given`), examples `flamerange` (ours at the live poses), `flamereplay` (the live
 frames), `flamebot` (`FLAME_TANKS`).
 
+### 6.3 The scatter law (fx-scatter)
+
+Recovered from the step `0x5bdc00` (the non-reflect branch `0x5bdf08..0x5be28f`, flag `+0x1d6` = 0; `0x5be380` is the cast wrapper that calls `[emitter+0x334]`
+= `0x504b90`) and checked against every velocity change in `flamecast__live__000/001` (348 scatters: 98 floor, 250 robot parts; the log carries the step's
+`from`, the velocity before and after, and the cast's hit point and normal). What the code does, in words:
+
+* The cast returns a hit point `p` and a normal `n` (facing `from`). `D3DXPlaneFromPointNormal(p, n)` (the import behind `0x50eaff`) gives the plane `(a, b, c, d)`.
+* Two numbers `u1, u2` come from the engine LCG (`0x726d58`, the same `(s & 0x7fffffff) / 2^31` as the spawn jitter), **consecutively** (u1 first).
+* A target point `Q` on the contact plane is built from them and **from the particle's own world position `F`** (the step's start), not from the hit point:
+  by the normal (components within 0.001 of zero): `n = (0, +-1, 0)` (floor) `Q = (u1 Fx, p.y, u2 Fz)`; `n` along x `Q = (p.x, u1 Fy, u2 Fz)`; `n` along z
+  `Q = (u1 Fx, u2 Fy, p.z)`; otherwise `Q = (u1 Fx, u2 Fy, (a Qx + b Qy - d) / c)` with `d = -n . p`, i.e. `(n.x Qx + n.y Qy + n . p) / n.z`. That is
+  **not** on the plane (the sign is the original's); with the true plane 2 of 250 live scatters fit the `[0, 1)` range of `u`, with this one 250 of 250.
+* The new velocity is `normalize(Q - F) * |v| * elasticity` (`[emitter+0x1d8]`, 1 for the jet): the speed is kept to the last digit (348 of 348), the direction
+  points from the particle toward a random point between the world origin and itself on each free axis, so scattered particles drift toward the origin's side
+  (live floor hits at `(-8.3, -2.25, 8.5)` leave with `+x`, `-z`), and tangent to the floor because `Q.y` is the floor's height and `F.y` is 0.01-0.03 above
+  it: the vertical component is -0.002..-0.02 of the speed, 0 to the eye).
+* Only the velocity is written. **Position, life and size are untouched** (the live particle's life and `0.2 + 0.2 p` size go on); the particle is moved on by the
+  caller to `F + v_new * dt`, **not** to the surface: 225 of the 244 live scatters whose particle was found again (a later step within 5 cm) had its next position at that point, to 3e-5 m (the
+  particle ends a little inside the floor or the robot and is not cast again, section 6.2). Ours put it at the hit point plus 2 mm; now `F + v_new * dt`.
+
+Distribution check (u recovered from each live scatter by intersecting the new direction with the construction above): floor `u1` mean 0.57 (KS 0.16, n 98),
+`u2` mean 0.52 (KS 0.065); robot parts `u1` 0.51 (KS 0.039, n 250), `u2` 0.49 (KS 0.047); uniform on `[0, 1)` at the 5 % level (KS critical 0.086 / 0.137) except the floor's `u1` (98 scatters from one arena corner and the LCG pairing). Not a hemisphere, not about the normal: a robot hit at `(-8.9, -2.0, 8.8)` with the
+normal `(0.74, 0.015, -0.68)` leaves with a direction of `Q - F` where `Q` is a point of the plane tilted by the `+n.p` term, which is why some leave into
+the surface (cos to the normal -0.7..0.6, section 6.2). `effects::scatter_velocity` (test `a_scatter_is_a_random_point_of_the_contact_plane`).
+The old half-sphere draw is gone; `flamerange` hit rates are unchanged (a scatter marks the particle spent, section 6.2). Open: the
+`0x1dc` branch (`0x5be690`, a callback after a hit when the emitter has one; the jet has none), and the reflect branch is as before.
+
 ## 7. Floating damage numbers (`ArenaManager::DamageDisplay`)
 
 Live: `tools/oracle/frida/ra2_numbers.js` via `tools/oracle/capture_numbers.py` (human C.R.U.S.H. against a
@@ -444,3 +471,24 @@ a decal placed with a scripted hit: done above, its width-axis orientation and a
   calls did not leave a located decal and the fight was lit by a fire hazard, so only the 25 % decal (invisible by section 8) exists. Four further runs
   (`SECS` 40-70) hit nothing with a decal flag and stopped before the synthetic calls. What is established: the placement rule, the axis
   fit above, the letterbox. Open: one run that gives a visible decal (damage 100) with `found` and a camera calibration at that run's viewport height, then the pixel difference at the measured theta.
+
+### 8.2 Slash decals: six more live runs, one located decal at damage 100 (fx-scatter)
+
+`capture_fx.py SYNTH=1` again (Backyard Ripper v ALARM, 40-60 s fights, hit routine rerun at damage 100 and friends; runs `slash-a..h`, scratch). New in the tool:
+`finddecals` accepts alpha -1 (every unknown `DecalTrigger`, listed when the exact-alpha search finds none), `SYNTH_ON_HITS=1` stands on a decal the game itself cut
+for a hit on the target part (the decal row after a hit row, slash file preferred) instead of the median decal of all parts, `PERLATE=n` takes a third shot `n` s
+after each hit (sparks and debris gone), per-call.
+
+* **Result.** Of 24 synthetic calls at damage 60-100 in eight runs **one** left a located decal: `fx-slash-synth3__live__000` (kept), call 2 (damage 100, alpha 1.0
+  exactly, offset -0.1 on a decal the game had cut), a **3-vertex** polygon, width axis **theta 51.86 degrees** (`decal_axis.py`: in-plane length 0.882, V at 140.83 degrees,
+  residual 3e-16): so theta is not a constant (134.26 in section 8.1, 51.86 here; the pinned axe's orientation differs per run), as section 8.1 said. The other 23 calls
+  made sparks and debris and no `DecalTrigger` (heap scan for any alpha: none, or an older one), whatever the offset, the damage (100, 80, 60) or the base decal;
+  the same parameters again (`g`, `h`) did not reproduce the one that worked. What decides it is not found: the decal is cut against the struck part's triangles, so a
+  point off the part's surface makes none (the pinned chassis matrix the camera is aimed by is also sometimes not where ALARM is drawn: `slash-a` looks at bare floor).
+* **Viewport.** The 3D view of this run is **616 rows** (row 616 on is black plus the previous frame's leftovers), 1024 x 616: after 544 (`synth`) and 590 (`synth2`) the third
+  height, so the height is a property of the run (it follows the HUD/window layout the fight started with), and a camera calibration is needed per run.
+* **Pixel comparison: still not obtained.** The one located decal is a sliver (3 vertices) and its before/after pair (`...-s2a/s2b.png`) differs by sparks and debris over
+  17 k pixels, none separable as the decal (`PERLATE` frames were not taken in that run). No side-by-side with ours exists for it; `decalshot` with theta 51.86 would
+  need a camera fit on this run's 616-row view, which has no recognisable fixed feature to fit against. Open as before: one run with a visible decal on a flat face
+  and `PERLATE` frames. The geometry of the decal (its cut polygon and uvs) is exact in the capture, so the cut itself is checkable once ours is run on the same mesh.
+
