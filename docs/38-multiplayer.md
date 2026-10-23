@@ -577,9 +577,7 @@ box (`0x49105a`-`0x491085`; `prematch.gib`'s own sample text is `Mister Roboto`,
 entry (`FUN_0047f8a0`). So in the original two players with no `PlayerName=` are **both** `Default Player` until one
 edits the box, which is what this port now does by default (`DEFAULT_PLAYER_NAME`; `NetPlay::load_config` reads
 `PlayerName=` and `Port=` from the install's `ra2.cfg`; `show_lobby` fills `screen name`). Test:
-`the_default_player_name_is_the_originals_and_ra2_cfg_replaces_it`. **Open**: editing the `screen name` box does
-not rename the player on the network (the net layer has no rename message; the original's `FUN_004931a0` also sends
-one message, `0x6f4620`/`0x6f4358`, not decoded).
+`the_default_player_name_is_the_originals_and_ra2_cfg_replaces_it`. Editing the box now renames the player on the network: see 13.1.
 
 ### (d) Which robot each end follows and drives
 
@@ -601,3 +599,34 @@ team: this is the "red robot" of the earlier report, and it is the host's own), 
 (robot 1); both holding `W` drove their own robot (the scenery slides in both windows). Killing the joiner's process
 mid-match: the host's window keeps running, its robot stands (no AI, no banner) and 10 s later the HUD shows
 `IMMOBILITY WARNING 7` over it (docs/32 section 6).
+
+### 13.1 The `screen name` edit handler `FUN_004931a0` (fx/shell-polish)
+
+Recovered from the binary (Ghidra via REA, `objdump`); the lobby does not open under Wine, so nothing here is live.
+
+* **Registration.** The prematch constructor binds the `screen name` box's handler with the same box call as the chat
+  entry's `0x492b90` (`0x490c40` `mov eax,0x4931a0` ... `0x490c67` `push 3` / `call 0x5ea170`, against `0x490baa` for the chat box):
+  event 3 of an edit box, the one that fires when the text is entered (Enter).
+* **The handler.** With the box present (`+0x1f8`) it reads the box's text (`FUN_00412500`), then `FUN_00623150` (the network
+  object, `DAT_0072e0a4`), `FUN_00622660` (`0x622660`, the name setter: copies the string into the object's name at `+0x248`; an
+  empty string clears it), `FUN_00623580` (`0x623580`), and, when the session exists (`FUN_0047ba50`), the lobby is in progress
+  (`FUN_00491d60`) and the network object is up (`FUN_004cfdf0`), `FUN_0047f8a0` (walks the lobby's 0x14-byte entries and
+  replaces the one whose id matches, i.e. our own entry). The `0x6f4620` / `0x6f4358` of the earlier note are string
+  addresses, not message ids (`"create mp game win"`).
+* **The message.** `FUN_00623580(name)` builds a DirectPlay 8 `DPN_PLAYER_INFO` on the stack (`dwSize` `0x18`, `dwInfoFlags` `1` =
+  `DPNINFO_NAME`, `pwszName` = the name widened with `MultiByteToWideChar(0, 1, ..., 0x80)`) and calls the peer interface's
+  vtable `+0x50` (`SetPeerInfo`) with `pvAsyncContext` 0, no handle and flags `0x80000000` (`DPNOP_SYNC`). So the wire
+  message is DirectPlay's own peer-info update, not a game message.
+* **The receivers.** The network callback `FUN_00623720` has a case `0xffff0010` (`DPN_MSGID_PEER_INFO`): it calls `GetPeerInfo`
+  (vtable `+0x54`) for the sender's id, converts the name to ANSI (`WideCharToMultiByte`, 0x80), and queues a record of class
+  `0x72` (`FUN_00621a80(0x72)` at `0x6239a1`; the create-player case queues `0x6e`, destroy `0x6f`) carrying the id (`+0xc`) and the
+  name (`+0x20`). The game dispatcher `FUN_004ce940` routes `0x72` (byte table `0x4cfce8`, jump `0x4cf99d`) to the listener's
+  vtable `+0x28` with the name. (What that listener slot does with it was not followed further; the port renames the lobby
+  entry and the player list, the only things a name shows in.)
+* **Port.** `ra2net::Session::set_name` (joiner: `CORE_SET_NAME` to the host; the host answers every player with
+  `CORE_PEER_INFO`, id and name; the host's own change is sent straight out), `Event::PlayerRenamed`,
+  `GameEvent::PlayerRenamed` (the lobby slot is renamed), `NetGame::rename` (our own slot, then the session). `NetPlay::commit_screen_name`
+  is called by the window on Enter in the focused `screen name` box (an empty box is ignored; the original would clear the name), and the box
+  is not overwritten from the lobby while it has the focus. Test `ra2net/tests/loopback.rs::renaming_a_player_reaches_the_other_end`
+  (host and joiner on loopback: the joiner's rename reaches the host's lobby and session table; the host's reaches the joiner).
+  **Open:** the original also writes the name back to `ra2.cfg`'s `PlayerName=` (`FUN_00622a90`) at some point (not found to be tied to this handler).

@@ -1076,3 +1076,65 @@ Live runs on display :9 (flatpak Wine 9.0, `ra2_drive.py` plus the new agents `t
   client (two concurrent clients wedged frida-server and once killed the game); `capture_award.py` samples the pad robot every UI
   frame while taking screenshots. `fidelity.py` fixtures take `env=`; `RA2_BIN` picks the binaries.
 
+## 9.24 Round 8 (`fx/shell-polish`, 2026-10-22): the schedule's third row, the duel bracket, Scrap Bot
+
+Live on display :9 (flatpak Wine 9.0, `ra2_drive.py`, `capture_lcg.py`); the prefix's `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` were
+hash-checked afterwards: all identical except `Teams/Team0/Bot0.bot` (see "Process note"). New captures (manifest rows and backup
+`manifest-additions-2026-10-22-shell-polish.tsv`): `event-bracket-lcg-duel`, `lcg-bracket-duel` (jsonl), `teamhq-scrap-selected`,
+`teamhq-scrap-box`, `teamhq-scrap-done`. Numbers are `fidelity.py --renderer app`, MAE.
+
+### The schedule grid (1 px short)
+
+The live grid is 333 px tall (lines at 318, 429, 540, 651; a fresh capture of the Events tab gave the same four rows); ours was 334 (541). The
+chain: the calendar group is 0.95, its split 0.9 and the title row 26 px of the Events pane, so a 420 px pane (the live content group,
+against ours 422.9) gives 399 -> 359 -> 333, and 422 gives 334. The chain of splits above the content group is still not recovered, so the
+fit is on the events pane only: `Hq::fill_events` sets `events group` to 0.99325 of its slot (420.0 of 422.9). Lines now 318/429/540/651, grid 333.1.
+`teamhq-events` **3.20 -> 1.39**, event join 3.25 -> **2.62**, join robot 3.12 -> **2.49** (all pixel lines now agree). Test
+`hq::tests::the_schedule_grid_has_shared_lines_and_art_inside_them` pins the rows.
+
+### The duel bracket (`duel-round1`)
+
+The state was unknown; it was read live. Enter Event! on Strategic Engineering (16 entrants, 2 bots, 4 rounds) with Frida logging every engine-LCG
+draw: the state before the click was **4124306675**, the bracket (`FUN_004695a0`) took **53** draws from it. Ours with `RA2_LCG_STATE=4124306675`:
+`event-bracket-lcg-duel` **2.69** (the same as the Blade/tabletop fits 2.67/2.68); the old `event-bracket-duel-round1` fixture (state 7) stays 5.74. The
+draw is the `Lcg` of 9.23, so this also confirms the algorithm for a 4-round duel (field `[P ... ]` equal to the capture's 16 icons).
+
+### Scrap Bot (the original's only robot deletion)
+
+There is no way to delete a design in the *Robot Designs* list (no `delete` control in any botlab screen; the only `.gib`s with a delete are
+`select_team` (Delete Team), `hq_robots` (`scrap button`) and the wiring editor's input control). The deletion the original has is the Team HQ
+inventory's **Scrap Bot** (`hq_robots.gib`, note "click to delete selected bot"), handler `FUN_004ff0c0` (`0x4ff0c0`):
+
+* with the robot entered in the current event (`FUN_004d63b0` = `+0xc0`, compared with `DAT_007184a8`) it only shows the OK box `Robot Arena 2` /
+  "This robot is currently entered in an event. In order to scrap it, you must either complete or forfeit the current event.";
+* otherwise the box `Team HQ` / "Are you sure you want to scrap <name>?" (`FUN_005e5e40`, style `0xc`, Yes/No). Yes: `FUN_0043b180(column * 3 + row, 0)`
+  clears the slot's flag in the window's map (`+0x1ec`), message 200 (the table write, as the bracket's Later) and the grid refills (`FUN_004ff560` ->
+  `FUN_004ff570`).
+* **Nothing is removed from disk.** Live: after Yes, `Teams.txt` read `Robots: 0 1 2 3 5` (was `0 1 2 3 4 5`) and `Teams/Team0/Bot4.bot` was still
+  there with its old date. The only callers of the CRT `remove` (`0x63c2d8`, over `DeleteFileA`) are `0x4e5610`/`0x592fb0` (table/temp-file writes),
+  `0x5d5570` and `0x622a90` (`ra2.cfg`): no code removes a `.bot` or a design. So the port does not tombstone anything (docs/39): the roster entry is
+  removed and the file stays, as with Delete Team.
+* **The grid is slot-indexed.** Cell `i` (down each column first) is slot `i`: the scrapped cell becomes the `nobot_cell.gib` cell (`New Robot`,
+  silhouette) and the other robots keep their cells (`teamhq-scrap-done`). Ours filled only as many cells as robots and shifted; now six cells, robot or
+  `New Robot` (`RobotRow::slot`), a selection frame that is a whole cell (live: the blue frame of `teamhq-scrap-selected`; `_EvenCells`), picks are slots
+  (`flow::inventory_robot_path`, `robot_in_event`).
+* The message box's body draws **blank** in the original (as `teamhq-events-one-event`); ours does too (the body is handed to the box and not drawn).
+* Port: `Career::scrap_robot(slot)`, `Shell::ask_scrap` / `set_scrap_hook`, `flow::scrap_prompt` / `inventory_click` (shared by the window and the
+  `--offscreen --click-names` route), `hq_mode::shell_scrap_hook` (writes through the save dir). Test `playthrough::scrapping_a_robot_unlists_it_and_keeps_the_file`.
+  Fidelity: `teamhq-scrap-selected` 3.17 -> **1.96**, `teamhq-scrap-box` 3.02 -> **2.23**, `teamhq-scrap-done` 2.49 -> **1.78** (the first numbers are before the
+  selection frame and the slot-indexed refill). **Open:** the three buttons' enabled state (live: nothing selected -> Export and Scrap dim, Import enabled;
+  selected -> Export and Scrap enabled, Import dim) is not drawn; Export Bot and Import Bot have no action in the port.
+
+### Tests and the save directory
+
+`ra2fmt::saves::isolate_for_tests()` gives every test that opens the real install an empty save directory of its own process (never created unless something
+writes; a binding or `--save-dir` still wins; it ignores `ORA_SAVE_DIR` and the platform default). All `game_dir()` / `ui_root()` helpers of the test code call it,
+so results do not depend on `~/.local/share/open-robot-arena` (docs/39). Checked by running the workspace tests with `ORA_SAVE_DIR` and `XDG_DATA_HOME`
+pointing at poisoned directories (a garbage `Teams/Teams.txt` and a `deleted.txt` hiding `Teams` and `AI`).
+
+### Process note
+
+`Teams/Team0/Bot0.bot` of the Wine prefix was re-saved by the game (Finish Later saves the entered robot) before I had backed it up (only hashes were taken);
+it was rebuilt by running the game's own workshop open/close on the install's Bot0 (same size, 333003 bytes, but a different sha256: `9c711db4...` against
+`c8763932...`). Everything else was restored byte for byte (`Teams.txt` by undoing its one line; sha equal).
+

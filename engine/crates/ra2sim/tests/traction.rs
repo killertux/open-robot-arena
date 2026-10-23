@@ -24,6 +24,7 @@ const SECONDS: f32 = 3.0;
 const PASS_M: f32 = 2.0;
 
 fn game_dir() -> Option<PathBuf> {
+    ra2fmt::saves::isolate_for_tests();
     if let Some(dir) = std::env::var_os("RA2_GAME") {
         return Some(PathBuf::from(dir));
     }

@@ -76,6 +76,10 @@ pub const TABS: [Tab; 4] = [
 /// The robot inventory's grid and the cell the binary fills it with.
 pub const ROBOT_GRID: &str = "robot grid";
 pub const ROBOT_TEMPLATE: &str = "teamhq/bot_cell.gib";
+/// The cell of a slot with no robot (`FUN_004ff570`: `UI\teamhq\nobot_cell.gib`, `New Robot`).
+pub const NO_ROBOT_TEMPLATE: &str = "teamhq/nobot_cell.gib";
+/// The inventory shows six cells: three rows of two columns, filled down each column first.
+pub const INVENTORY_CELLS: usize = 6;
 /// The cell's own binding points.
 pub const BOT_NAME: &str = "bot name";
 pub const BOT_CLASS: &str = "weight class";
@@ -117,6 +121,10 @@ pub const TEAM_LOGO: &str = "hq logo img";
 /// One robot in the inventory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RobotRow {
+    /// The team folder's robot slot (`Bot<slot>.bot`, an entry of the record's `Robots:` line).
+    /// The inventory's cell `i` shows slot `i`; a slot with no robot (never made, or scrapped)
+    /// is the `nobot_cell.gib` cell, `New Robot`.
+    pub slot: usize,
     pub name: String,
     /// The class the `.bot` records, as the cell's own note asks for it.
     pub class: String,
@@ -523,18 +531,28 @@ impl Hq {
 
     fn fill_robots(&mut self) -> Result<(), String> {
         let template = load(&self.ui_root, ROBOT_TEMPLATE)?;
+        let empty = load(&self.ui_root, NO_ROBOT_TEMPLATE)?
+            .widgets()
+            .next()
+            .cloned();
         let rows = &self.view.robots;
         let Some(grid) = find_mut_in(&mut self.document, ROBOT_GRID) else {
             return Ok(());
         };
-        let made = crate::cells::fill(grid, &template, rows.len());
+        // `FUN_004ff570` makes six cells; cell `i` is slot `i` (a robot cell when the team has
+        // that slot, else the `New Robot` cell). A refill (after a scrap) starts from the bars.
+        grid.children
+            .retain(|c| matches!(c.name(), "Sel Bar" | "High Bar"));
+        let made = crate::cells::fill(grid, &template, INVENTORY_CELLS);
         let bars = grid.children.len() - made;
         // Nothing is selected until the player clicks a robot (the shipped bar
         // positions are the author's leftovers).
         clear_bars(grid);
         // The inventory grid divides its own rectangle evenly into `Rows` x
         // `Columns` cells (the capture's cells are 341 x 119 px in a 683 x 357
-        // grid, not the file's 213 x 70) and fills down each column first.
+        // grid, not the file's 213 x 70) and fills down each column first; its
+        // selection frame is a whole cell (`_EvenCells`, read by `input::select_cell`).
+        crate::input::set_field(grid, "_EvenCells", "true");
         if let Some(geometry) = Grid::from_widget(grid) {
             let (cols, rws) = (
                 geometry.columns.max(1) as usize,
@@ -554,11 +572,26 @@ impl Hq {
                 crate::input::set_field(cell, "Size", &format!("{w} 1 {h} 1"));
             }
         }
-        for (cell, row) in grid.children[bars..].iter_mut().zip(rows) {
-            crate::cells::bind_value(cell, BOT_NAME, &row.name);
-            crate::cells::bind_value(cell, BOT_CLASS, &row.class);
-            if !row.preview.is_empty() {
-                crate::cells::bind_art(cell, BOT_SNAPSHOT, &row.preview);
+        for (slot, cell) in grid.children[bars..].iter_mut().enumerate() {
+            match rows.iter().find(|r| r.slot == slot) {
+                Some(row) => {
+                    crate::cells::bind_value(cell, BOT_NAME, &row.name);
+                    crate::cells::bind_value(cell, BOT_CLASS, &row.class);
+                    if !row.preview.is_empty() {
+                        crate::cells::bind_art(cell, BOT_SNAPSHOT, &row.preview);
+                    }
+                }
+                None => {
+                    if let Some(root) = &empty {
+                        let mut none = root.clone();
+                        for field in ["Position", "Size"] {
+                            if let Some(v) = cell.field(field).map(|f| f.raw.clone()) {
+                                crate::input::set_field(&mut none, field, &v);
+                            }
+                        }
+                        *cell = none;
+                    }
+                }
             }
         }
         Ok(())
@@ -588,6 +621,13 @@ impl Hq {
     fn fill_events(&mut self) -> Result<(), String> {
         let rows = self.view.events.clone();
         let ui_root = self.ui_root.clone();
+        // The live content group is 420 px tall at 1024x768 where ours is 422.9 (the chain of
+        // splits above it is not recovered, docs/36 9.22); the schedule needs the 420 (the
+        // calendar 0.95 of it = 399, its split 0.9 = 359, minus the 26 px title = the grid's
+        // 333, three rows of 111). A fit of the events pane only, as a fraction so it scales.
+        if let Some(group) = find_mut_in(&mut self.document, "events group") {
+            crate::input::set_field(group, "Size", "1 1 0.99325 1");
+        }
         let Some(grid) = find_mut_in(&mut self.document, EVENT_GRID) else {
             return Ok(());
         };
@@ -1375,6 +1415,7 @@ mod tests {
     use super::*;
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         if let Some(dir) = std::env::var_os("RA2_GAME") {
             let dir = PathBuf::from(dir);
             return dir.is_dir().then_some(dir);
@@ -1399,12 +1440,14 @@ mod tests {
             team: teams[0].clone(),
             robots: vec![
                 RobotRow {
+                    slot: 0,
                     name: "Big Fat Robot".into(),
                     class: "Heavy".into(),
                     preview: String::new(),
                     preview_image: None,
                 },
                 RobotRow {
+                    slot: 1,
                     name: "Tiny".into(),
                     class: "Light".into(),
                     preview: String::new(),
@@ -1504,7 +1547,15 @@ mod tests {
             })
             .unwrap();
         let grid = find(root, ROBOT_GRID).unwrap();
-        assert_eq!(grid.children.len(), 4, "two bars and two robots");
+        assert_eq!(
+            grid.children.len(),
+            8,
+            "two bars, two robots and four New Robot cells (six cells, cell i is slot i)"
+        );
+        assert_eq!(
+            text_of(&grid.children[4], BOT_NAME).as_deref(),
+            Some("New Robot")
+        );
         assert_eq!(
             text_of(&grid.children[2], BOT_NAME).as_deref(),
             Some("Big Fat Robot")
@@ -1655,6 +1706,11 @@ mod tests {
         assert_eq!(line("grid line column 1").w, 1.0);
         assert_eq!(line("grid line row 0").y.floor(), 318.0);
         assert_eq!(line("grid line row 0").w.round(), 552.0);
+        assert_eq!(grid.frame.h.floor(), 333.0, "three rows of 111 (live)");
+        let ys: Vec<f32> = (0..4)
+            .map(|r| line(&format!("grid line row {r}")).y.floor())
+            .collect();
+        assert_eq!(ys, [318.0, 429.0, 540.0, 651.0], "live lines");
         assert_eq!(
             all.iter()
                 .filter(|p| p.widget.name().starts_with("grid line row"))

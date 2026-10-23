@@ -250,6 +250,14 @@ pub struct Shell {
     entered_event: Option<(usize, usize)>,
     /// A message box waiting to open: `(caption, body)` (`FUN_005e5e40`).
     pending_message: Option<(String, String)>,
+    /// A Yes/No box waiting to open for the inventory's `scrap button`: the
+    /// roster entry and the question (`FUN_004ff0c0`).
+    pending_scrap_box: Option<(usize, String)>,
+    /// The roster entry the open scrap box is about.
+    pending_scrap: Option<usize>,
+    /// Scraps a roster entry in the application's career and returns the Team
+    /// HQ's refreshed data.
+    scrap_hook: Option<ScrapHook>,
 }
 
 /// The longest text a shell edit field takes.
@@ -269,6 +277,10 @@ pub type LaterHook = Box<dyn FnMut(usize, usize)>;
 /// What the application does when the player continues to a team's HQ: the
 /// team's `Teams/Teams.txt` slot in, that team's Team HQ data out.
 pub type TeamHook = Box<dyn FnMut(usize) -> Option<ra2ui::hq::View>>;
+
+/// What the application does when the player confirms the inventory's scrap
+/// box: the roster entry in, the Team HQ's data out.
+pub type ScrapHook = Box<dyn FnMut(usize) -> Option<ra2ui::hq::View>>;
 
 /// `FUN_005e5ba0`'s screen switch: black overlays of 0.2 s each way. On a
 /// screen's first visit `FUN_004e6bd0` first shows the `common/loading.gib`
@@ -352,6 +364,9 @@ impl Shell {
             enter_hook: None,
             later_hook: None,
             pending_message: None,
+            pending_scrap_box: None,
+            pending_scrap: None,
+            scrap_hook: None,
         })
     }
 
@@ -532,6 +547,35 @@ impl Shell {
 
     pub fn set_enter_hook(&mut self, hook: EnterHook) {
         self.enter_hook = Some(hook);
+    }
+
+    /// The name of the robot in inventory cell (slot) `slot` in the Team HQ's data.
+    pub fn hq_robot_name(&self, slot: usize) -> Option<&str> {
+        self.hq_view
+            .as_ref()?
+            .robots
+            .iter()
+            .find(|r| r.slot == slot)
+            .map(|r| r.name.as_str())
+    }
+
+    /// The slot of the robot the join window entered into the current event (its grid
+    /// column is a position in the HQ's robot list).
+    pub fn entered_event_slot(&self) -> Option<usize> {
+        let (_, column) = self.entered_event?;
+        self.hq_view.as_ref()?.robots.get(column).map(|r| r.slot)
+    }
+
+    pub fn set_scrap_hook(&mut self, hook: ScrapHook) {
+        self.scrap_hook = Some(hook);
+    }
+
+    /// The inventory's `scrap button` (`FUN_004ff0c0`) with a robot that may go:
+    /// the Yes/No box `Team HQ` / `Are you sure you want to scrap <name>?`. Yes
+    /// calls the scrap hook with `index` and refreshes the HQ's data.
+    pub fn ask_scrap(&mut self, index: usize, name: &str) -> Result<(), String> {
+        self.pending_scrap_box = Some((index, format!("Are you sure you want to scrap {name}?")));
+        self.open_window("common/messagebox.gib")
     }
 
     pub fn set_team_hook(&mut self, hook: TeamHook) {
@@ -1371,6 +1415,13 @@ impl Shell {
             if let Some(slot) = self.pending_delete.take() {
                 teams::delete_team(&self.game, slot)?;
             }
+            if let Some(index) = self.pending_scrap.take() {
+                if let Some(hook) = &mut self.scrap_hook {
+                    if let Some(view) = hook(index) {
+                        self.set_hq_view(view);
+                    }
+                }
+            }
         } else if window.key.eq_ignore_ascii_case("teamhq/joinevent.gib") {
             return self.enter_event(window);
         } else if window.key.eq_ignore_ascii_case("teamhq/editteam.gib") {
@@ -1594,14 +1645,39 @@ impl Shell {
                 self.pending_message.take(),
             ) {
                 // `FUN_005e5e40(caption, text, 1)`: an OK-only box.
+                self.pending_scrap = None;
                 for block in page.gib.blocks.iter_mut() {
                     let Block::Widget(root) = block else { continue };
-                    for (name, text) in [("caption bar", &caption), ("text box", &body)] {
-                        if let Some(w) = workshop::find_mut(root, name) {
-                            set_text(w, text);
-                        }
+                    if let Some(w) = workshop::find_mut(root, "caption bar") {
+                        set_text(w, &caption);
+                    }
+                    if let Some(w) = workshop::find_mut(root, "text box") {
+                        set_text(w, &body);
                     }
                     for name in ["yes button", "no button", "cancel button"] {
+                        if let Some(w) = workshop::find_mut(root, name) {
+                            ra2ui::input::set_field(w, "Visible", "false");
+                        }
+                    }
+                }
+                self.windows.push(page);
+                return Ok(());
+            }
+            if let (true, Some((index, body))) = (
+                target.eq_ignore_ascii_case("common/messagebox.gib"),
+                self.pending_scrap_box.take(),
+            ) {
+                // `FUN_005e5e40(<question>, "Team HQ", 0xc)`: Yes/No only.
+                self.pending_scrap = Some(index);
+                for block in page.gib.blocks.iter_mut() {
+                    let Block::Widget(root) = block else { continue };
+                    if let Some(w) = workshop::find_mut(root, "caption bar") {
+                        set_text(w, "Team HQ");
+                    }
+                    if let Some(w) = workshop::find_mut(root, "text box") {
+                        set_text(w, &body);
+                    }
+                    for name in ["ok button", "cancel button"] {
                         if let Some(w) = workshop::find_mut(root, name) {
                             ra2ui::input::set_field(w, "Visible", "false");
                         }
@@ -1638,18 +1714,18 @@ impl Shell {
                 let rosters = team_rosters(&self.game);
                 let team = selected.and_then(|row| rosters.get(row));
                 self.pending_delete = team.map(|t| t.slot);
+                self.pending_scrap = None;
                 let body = format!(
                     "Are you sure you want to delete {}?",
                     team.map(|t| t.name.as_str()).unwrap_or("this team")
                 );
                 for block in page.gib.blocks.iter_mut() {
                     let Block::Widget(root) = block else { continue };
-                    for (name, text) in
-                        [("caption bar", "Delete Team"), ("text box", body.as_str())]
-                    {
-                        if let Some(w) = workshop::find_mut(root, name) {
-                            set_text(w, text);
-                        }
+                    if let Some(w) = workshop::find_mut(root, "caption bar") {
+                        set_text(w, "Delete Team");
+                    }
+                    if let Some(w) = workshop::find_mut(root, "text box") {
+                        set_text(w, &body);
                     }
                     for name in ["ok button", "cancel button"] {
                         if let Some(w) = workshop::find_mut(root, name) {
@@ -2828,6 +2904,19 @@ fn click_page(
                 let grid = ra2ui::Grid::from_widget(list.widget)?;
                 if grid.row_height <= 0.0 {
                     return None;
+                }
+                if ra2ui::input::field_of(list.widget, "_EvenCells") == Some("true") {
+                    // An evenly divided list (the Team HQ inventory): the cell is the
+                    // fraction of its rectangle, down each column first.
+                    let (cols, rows) = (grid.columns.max(1) as usize, grid.rows.max(1) as usize);
+                    let col = (((x - list.frame.x) / list.frame.w) * cols as f32).floor();
+                    let row = (((y - list.frame.y) / list.frame.h) * rows as f32).floor();
+                    let (col, row) = (col.max(0.0) as usize, row.max(0.0) as usize);
+                    return (col < cols && row < rows).then_some((
+                        list.widget.name().to_string(),
+                        row,
+                        col,
+                    ));
                 }
                 let top = ra2ui::input::field_of(list.widget, "_ScrollTop")
                     .and_then(|value| value.parse::<usize>().ok())

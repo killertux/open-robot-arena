@@ -850,6 +850,27 @@ impl Career {
         &mut self.player_table.teams[self.player_slot]
     }
 
+    /// The Team HQ inventory's `scrap button` (`FUN_004ff0c0`, `0x4ff0c0`): robot slot `slot`
+    /// (the grid's cell number, `column * 3 + row`) leaves the team's `Robots:` list
+    /// (`FUN_0043b180(cell, 0)` clears its flag); the other robots keep their slots and the
+    /// cell shows `New Robot`. The robot entered in the current event cannot be scrapped.
+    /// Nothing is deleted from disk, live too: `Teams/Team0/Bot4.bot` stayed after its slot
+    /// was scrapped, and no code path of the executable removes a `.bot` (the CRT `remove`
+    /// is reached only from the table and `ra2.cfg` writers).
+    pub fn scrap_robot(&mut self, slot: usize) -> Result<(), String> {
+        let position = self
+            .player()
+            .robots
+            .iter()
+            .position(|s| *s == slot as i32)
+            .ok_or_else(|| format!("no robot in slot {slot}"))?;
+        if self.entered_event().is_some() && slot as i32 == self.player().event_robot {
+            return Err(SCRAP_IN_EVENT.to_string());
+        }
+        self.player_mut().robots.remove(position);
+        Ok(())
+    }
+
     /// The fifteen AI records that carry identity (empty slots are skipped).
     pub fn ai_teams(&self) -> impl Iterator<Item = &Team> {
         self.ai_table.teams.iter().filter(|t| t.is_named())
@@ -2171,6 +2192,7 @@ mod tests {
     }
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         if let Some(dir) = std::env::var_os("RA2_GAME") {
             let dir = PathBuf::from(dir);
             return dir.is_dir().then_some(dir);
@@ -3181,6 +3203,9 @@ mod tests {
         }
     }
 }
+
+/// The box text `FUN_004ff0c0` shows when the robot to scrap is the one entered in an event.
+pub const SCRAP_IN_EVENT: &str = "This robot is currently entered in an event. In order to scrap it, you must either complete or forfeit the current event.";
 
 /// `FUN_00500120`'s draw: `want` distinct events out of `n`, from LCG state `state`.
 pub fn draw_schedule(n: usize, want: usize, mut state: u32) -> Vec<usize> {

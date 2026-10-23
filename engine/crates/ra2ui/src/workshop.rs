@@ -530,6 +530,7 @@ mod tests {
     use crate::{resolve, DESIGN_SCREEN};
 
     fn ui_root() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game/UI");

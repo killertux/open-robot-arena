@@ -223,6 +223,7 @@ mod tests {
     ];
 
     fn shipped_bytes(name: &str) -> Option<Vec<u8>> {
+        crate::saves::isolate_for_tests();
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let cfz = dir.join("local/game/RA2.cfz");

@@ -181,6 +181,16 @@ FIXTURES = [
          route=TEAMHQ + ["events button", "@430,370", "@288,455", "enter event button"],
          env={"RA2_LCG_STATE": "4037340146"},
          note="the engine LCG state read live (4037340146) before the draw: the field is the original's own"),
+    dict(id="event-bracket-lcg-duel", ref="event-bracket-lcg-duel__1024x768__000.png",
+         route=TEAMHQ + ["events button", "@617,370", "@288,455", "enter event button"],
+         env={"RA2_LCG_STATE": "4124306675"},
+         note="the engine LCG state read live (4124306675, lcg-bracket-duel) before the draw: the field is the original's own"),
+    dict(id="teamhq-scrap-selected", ref="teamhq-scrap-selected__1024x768__000.png",
+         route=TEAMHQ + ["@750,415"]),
+    dict(id="teamhq-scrap-box", ref="teamhq-scrap-box__1024x768__000.png",
+         route=TEAMHQ + ["@750,415", "scrap button"]),
+    dict(id="teamhq-scrap-done", ref="teamhq-scrap-done__1024x768__000.png",
+         route=TEAMHQ + ["@750,415", "scrap button", "yes button"], env={"ORA_SAVE_DIR": "@tmp"}),
     dict(id="event-bracket-duel-round1", ref="event-bracket-duel-round1__1024x768__000.png",
          route=TEAMHQ + ["events button", "@617,370", "@288,455", "enter event button"]),
     dict(id="event-repairs", ref="event-repairs__1024x768__000.png", hqsim=(0, "repairs-components.png"),
@@ -345,10 +355,14 @@ def run_live_shots(arena, tmp):
 
 def env(extra=None):
     e = dict(os.environ)
-    e.update(extra or {})
     e["RA2_GAME"] = GAME
     # Saves land in the scratch install itself, never in the user's save dir.
     e["ORA_SAVE_DIR"] = GAME
+    e.update(extra or {})
+    # A fixture that saves (the inventory's scrap) writes into its own empty save dir, which
+    # reads fall back from to the scratch install, so no other fixture sees the change.
+    if e.get("ORA_SAVE_DIR") == "@tmp":
+        e["ORA_SAVE_DIR"] = tempfile.mkdtemp(prefix="ra2-fidelity-save-")
     return e
 
 

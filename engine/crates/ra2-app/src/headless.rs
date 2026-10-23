@@ -81,6 +81,7 @@ pub fn run(
         shell.set_enter_hook(hook);
     }
     shell.set_team_hook(crate::hq_mode::shell_team_hook(game));
+    shell.set_scrap_hook(crate::hq_mode::shell_scrap_hook(game));
     shell.set_later_hook(crate::hq_mode::shell_later_hook(game));
     println!(
         "booted {} from {} ({}x{})",
@@ -95,11 +96,14 @@ pub fn run(
     let mut settings = crate::options::Options::open_game(game);
 
     let mut steps = Vec::new();
+    let mut pick = None;
     if click_names.is_empty() {
         for &point in clicks {
             stage_options(&shell, &mut settings, &mut audio, point)?;
+            let cell = crate::flow::inventory_cell_at(&shell, point);
             steps.push(shell.click(point[0], point[1])?);
             let step = steps.last().unwrap().clone();
+            crate::flow::inventory_click(&mut shell, &mut pick, cell, &step)?;
             finish_step(&mut shell, &mut settings, &mut audio, &step)?;
         }
     } else {
@@ -114,11 +118,13 @@ pub fn run(
                 None => shell.point_for(name)?,
             };
             stage_options(&shell, &mut settings, &mut audio, point)?;
+            let cell = crate::flow::inventory_cell_at(&shell, point);
             steps.push(match at {
                 Some(point) => shell.click(point[0], point[1])?,
                 None => shell.click_named(name)?,
             });
             let step = steps.last().unwrap().clone();
+            crate::flow::inventory_click(&mut shell, &mut pick, cell, &step)?;
             finish_step(&mut shell, &mut settings, &mut audio, &step)?;
         }
     }
@@ -224,6 +230,7 @@ mod tests {
     use crate::SHELL_SIZE;
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");

@@ -1735,6 +1735,7 @@ mod tests {
     /// (`0x502e5f`), and strikes with its -X face (`normal = false -1 0 0`).
     #[test]
     fn the_hammer_head_keeps_the_constructors_defaults() {
+        ra2fmt::saves::isolate_for_tests();
         let Some(game) = std::env::var_os("RA2_GAME")
             .map(std::path::PathBuf::from)
             .or_else(|| {

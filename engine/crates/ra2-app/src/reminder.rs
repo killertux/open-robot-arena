@@ -203,6 +203,7 @@ mod tests {
     use super::*;
 
     fn game() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         crate::find_game(None).ok()
     }
 

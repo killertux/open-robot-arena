@@ -26,6 +26,7 @@ pub const ENV: &str = "ORA_SAVE_DIR";
 
 static BINDINGS: Mutex<Vec<(PathBuf, PathBuf)>> = Mutex::new(Vec::new());
 static CONFIGURED: Mutex<Option<PathBuf>> = Mutex::new(None);
+static ISOLATED: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 fn key(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
@@ -43,6 +44,18 @@ pub fn bind(game: &Path, save: &Path) {
 /// Set the save directory used for installs with no binding (`--save-dir`).
 pub fn configure(save: Option<PathBuf>) {
     *CONFIGURED.lock().unwrap() = save;
+}
+
+/// For tests that read the real install: use an empty save directory of this
+/// process (never created unless something writes to it) instead of
+/// `ORA_SAVE_DIR` or the user's platform default, so a result does not depend on
+/// the player's saves. A binding ([`bind`]) or `--save-dir` ([`configure`]) still
+/// wins. Idempotent; call it from the test's install lookup.
+pub fn isolate_for_tests() {
+    let mut iso = ISOLATED.lock().unwrap();
+    if iso.is_none() {
+        *iso = Some(std::env::temp_dir().join(format!("ora-test-save-{}", std::process::id())));
+    }
 }
 
 /// The platform default save directory.
@@ -69,6 +82,9 @@ pub fn save_dir(game: &Path) -> PathBuf {
         return save.clone();
     }
     if let Some(dir) = CONFIGURED.lock().unwrap().clone() {
+        return dir;
+    }
+    if let Some(dir) = ISOLATED.lock().unwrap().clone() {
         return dir;
     }
     if let Some(dir) = std::env::var_os(ENV).filter(|v| !v.is_empty()) {
@@ -293,5 +309,19 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "x");
         remove(&game, "Teams/Teams.txt").unwrap();
         assert!(!p.exists());
+    }
+
+    #[test]
+    fn isolated_tests_ignore_the_env_and_the_platform_default() {
+        let game = std::env::temp_dir().join(format!("ra2saves-{}-iso/game", std::process::id()));
+        isolate_for_tests();
+        let dir = save_dir(&game);
+        assert!(dir.starts_with(std::env::temp_dir()));
+        assert_ne!(dir, default_dir());
+        assert!(!dir.exists(), "isolation must not create the directory");
+        // an explicit --save-dir still wins
+        configure(Some(PathBuf::from("/explicit")));
+        assert_eq!(save_dir(&game), PathBuf::from("/explicit"));
+        configure(None);
     }
 }

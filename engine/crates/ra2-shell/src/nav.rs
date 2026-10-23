@@ -220,6 +220,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn ui_root() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game/UI");

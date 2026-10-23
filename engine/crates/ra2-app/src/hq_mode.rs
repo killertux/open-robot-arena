@@ -122,6 +122,20 @@ pub fn shell_team_hook(game: &Path) -> ra2_shell::shell::TeamHook {
     })
 }
 
+/// The shell's scrap hook (the inventory's `scrap button`, `FUN_004ff0c0`): the
+/// roster entry leaves the team's robot list, `Teams/Teams.txt` is written
+/// (the save directory's copy) and the HQ's data answers. The `.bot` file
+/// stays where it is: the executable never deletes one.
+pub fn shell_scrap_hook(game: &Path) -> ra2_shell::shell::ScrapHook {
+    let game = game.to_path_buf();
+    Box::new(move |index| {
+        let mut career = fresh_career(&game).ok()?;
+        career.scrap_robot(index).ok()?;
+        career.save(&game).ok()?;
+        build_view(&career, &game).ok()
+    })
+}
+
 /// One click of the repairs screen's clock. The original advances a progress
 /// bar over time (`FUN_004d6e10`) against the shipped 30-minute clock
 /// (`FUN_0058b150(0x1e,1)` → `00:30:00`); this headless/UI tick is six
@@ -1801,6 +1815,7 @@ pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, Strin
                         .map(|picture| picture.key(&format!("hq-{slot}")))
                         .unwrap_or_else(|| "teamhq\\nobot.bmp".to_string());
                     ra2ui::hq::RobotRow {
+                        slot: *slot as usize,
                         name: bot.name.clone(),
                         class: ra2ui::workshop::stats::WeightClass::from_file(bot.class)
                             .full_label()
@@ -1812,6 +1827,7 @@ pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, Strin
                     }
                 }
                 None => ra2ui::hq::RobotRow {
+                    slot: *slot as usize,
                     name: format!("Bot {slot}"),
                     class: String::new(),
                     preview: "teamhq\\nobot.bmp".to_string(),
@@ -2696,6 +2712,7 @@ mod tests {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         if let Some(dir) = std::env::var_os("RA2_GAME") {
             let dir = PathBuf::from(dir);
             return dir.is_dir().then_some(dir);

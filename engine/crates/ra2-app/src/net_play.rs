@@ -560,6 +560,21 @@ impl NetPlay {
         }
     }
 
+    /// The lobby's `screen name` box was committed (Enter; the same box event the chat entry
+    /// uses, `0x5ea170(3)` at `0x490c67`): the handler `FUN_004931a0` sets the network name,
+    /// sends it to the other players (`SetPeerInfo`) and renames our lobby entry. An empty
+    /// box is ignored here (the original would clear the name).
+    pub fn commit_screen_name(&mut self, text: &str) {
+        let name = text.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.player_name = name.to_string();
+        if let Some(game) = &mut self.game {
+            game.rename(name);
+        }
+    }
+
     pub fn leave(&mut self) {
         if let Some(game) = &mut self.game {
             game.close();
@@ -756,13 +771,17 @@ impl NetPlay {
         let ui = shell.game().join("UI");
         let active = ra2ui::workshop::load(&ui, "multiplayer/activeplayer.gib").ok();
         let empty = ra2ui::workshop::load(&ui, "multiplayer/noplayer.gib").ok();
+        let editing_name = shell.text_focus() == Some("screen name");
         let Some(doc) = shell.document_mut() else {
             return;
         };
         // The prematch constructor puts the network name in `screen name` (the box's own sample
         // text is "Mister Roboto").
+        // (Not while the player is typing in it.)
         if let Some(me) = me.and_then(|m| lobby.slot(m)) {
-            set_text(doc, "screen name", &me.name);
+            if !editing_name {
+                set_text(doc, "screen name", &me.name);
+            }
         }
         set_text(doc, "arena name", &lobby.arena);
         set_text(doc, "game type", &lobby.game_type);
