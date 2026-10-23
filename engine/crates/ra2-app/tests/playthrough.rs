@@ -844,7 +844,7 @@ fn finish_later_keeps_the_entered_event_in_the_team_record() {
 
 /// A robot built from an empty inventory selection joins the team when the
 /// lab is left: a free `Bot<n>.bot` slot is written and the record's
-/// `Robots:` line lists it. Leaving without building adds nothing.
+/// `Robots:` line lists it (the selected cell, even when nothing was built).
 #[test]
 fn a_new_workshop_robot_joins_the_roster() {
     let Some(scratch) = ScratchGame::new("newbot") else {
@@ -882,16 +882,23 @@ fn a_new_workshop_robot_joins_the_roster() {
         )
         .unwrap();
     shell.click_named("workshop button").unwrap();
-    let mut builder = flow::open_workshop(game, None).unwrap();
+    let mut builder = flow::open_workshop(game, Some(free as usize)).unwrap();
     assert!(builder.team_target().is_none());
     builder.click_named("back button").unwrap();
-    assert_eq!(
-        flow::close_workshop(&mut builder, &mut shell).unwrap(),
-        None
+    // Live: leaving with nothing built still saves the selected cell (`Bot<cell>.bot`, `Enter Bot Name`).
+    let empty = flow::close_workshop(&mut builder, &mut shell)
+        .unwrap()
+        .expect("an empty new robot is saved too");
+    assert!(
+        empty.ends_with(format!("Teams/Team0/Bot{free}.bot")),
+        "{}",
+        empty.display()
     );
+    let bot = ra2fmt::bot::parse(&std::fs::read(&empty).unwrap()).unwrap();
+    assert_eq!(bot.name, "Enter Bot Name");
     shell.click_named("back button").unwrap();
 
-    // A part attached: the robot joins at the first free slot (the cell is still selected).
+    // A part attached to it (the cell is selected again, now a robot's).
     shell
         .click(
             grid.x + grid.w * (column as f32 + 0.5) / 2.0,
@@ -899,20 +906,14 @@ fn a_new_workshop_robot_joins_the_roster() {
         )
         .unwrap();
     shell.click_named("workshop button").unwrap();
-    let mut builder = flow::open_workshop(game, None).unwrap();
+    let mut builder = flow::open_workshop(game, Some(free as usize)).unwrap();
     builder.click_named("components button").unwrap();
     builder.click_named("mechanics button").unwrap();
     builder
         .place_component_free("Components\\ztek1.txt")
         .unwrap();
     builder.click_named("back button").unwrap();
-    // (A scrapped slot's `.bot` stays on disk, so the first slot whose file is free is the next one:
-    // the workshop does not yet save into the selected `New Robot` cell itself.)
-    let free = (0..)
-        .find(|n| {
-            !game.join(format!("Teams/Team0/Bot{n}.bot")).is_file() && !roster_before.contains(n)
-        })
-        .unwrap();
+    // The robot lands in the selected cell, over the scrapped robot's file that stayed on disk.
     let saved = flow::close_workshop(&mut builder, &mut shell)
         .unwrap()
         .expect("the new robot is saved to the team");
@@ -1101,4 +1102,301 @@ fn export_and_import_bot_resave_the_design_and_the_buttons_follow_the_selection(
     assert!(table.teams[0].robots.contains(&4));
     assert_eq!(std::fs::read(&source).unwrap(), expect);
     assert_eq!(buttons(&shell), [true; 4]);
+}
+
+/// Click the cell of inventory slot `slot` (down each column first).
+fn click_inventory_slot(shell: &mut Shell, slot: usize) {
+    let grid = frame_of(shell, "robot grid");
+    let (column, row) = (slot / 3, slot % 3);
+    shell
+        .click(
+            grid.x + grid.w * (column as f32 + 0.5) / 2.0,
+            grid.y + grid.h * (row as f32 + 0.5) / 3.0,
+        )
+        .unwrap();
+}
+
+/// The whole career, scripted: a new team, a robot imported into its empty cell and one built in the
+/// workshop, an event joined with it and fought round by round with the player's keys, the result
+/// awarded and saved, the app restarted on the saved files (the event is still open), a second event
+/// refused until the first is done, the first forfeited, and the next one entered.
+#[test]
+fn a_whole_career_new_team_to_forfeit_survives_a_restart() {
+    let Some(scratch) = ScratchGame::new("career") else {
+        return;
+    };
+    let game = scratch.path();
+    let _guard = ra2script::lock();
+    std::env::set_var("RA2_ARENA_INTROS", "0");
+
+    // New team.
+    let mut shell = window_shell(game);
+    shell.click_named("Team HQ button").unwrap();
+    shell.click_named("new team button").unwrap();
+    shell.click_named("name input textbox").unwrap();
+    for c in "Career Crew".chars() {
+        shell.type_char(c);
+    }
+    shell.click_named("ok button").unwrap();
+    shell.click_named("continue button").unwrap();
+    let table = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap();
+    let slot = table
+        .teams
+        .iter()
+        .position(|t| t.name == "Career Crew")
+        .unwrap();
+    assert_eq!(shell.team_slot(), Some(slot));
+    assert!(
+        table.teams[slot].robots.is_empty(),
+        "a new team owns no robot"
+    );
+
+    // Robot Inventory: import a design into cell 0, build another in cell 1.
+    let design = ra2fmt::saves::list(game, "Robot Designs")
+        .into_iter()
+        .filter(|n| n.to_ascii_lowercase().ends_with(".bot"))
+        .min()
+        .expect("a shipped design");
+    click_inventory_slot(&mut shell, 0);
+    shell.ask_import(0).unwrap();
+    let mut designs: Vec<_> = ra2fmt::saves::list(game, "Robot Designs")
+        .into_iter()
+        .filter(|n| n.to_ascii_lowercase().ends_with(".bot"))
+        .collect();
+    designs.sort();
+    let row = designs.iter().position(|n| *n == design).unwrap();
+    let list = frame_of(&shell, "file list");
+    shell
+        .click(list.x + 20.0, list.y + 18.0 * row as f32 + 9.0)
+        .unwrap();
+    shell.click_named("ok button").unwrap();
+    let table = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap();
+    assert_eq!(
+        table.teams[slot].robots,
+        vec![0],
+        "the import joins the roster"
+    );
+    assert!(hq_mode::player_robot_path(game, slot, 0).is_file());
+
+    click_inventory_slot(&mut shell, 1);
+    shell.click_named("workshop button").unwrap();
+    assert!(shell.lab().is_some());
+    let mut builder = flow::open_workshop(game, Some(1)).unwrap();
+    builder.click_named("back button").unwrap();
+    let saved = flow::close_workshop(&mut builder, &mut shell)
+        .unwrap()
+        .unwrap();
+    assert!(saved.is_file());
+    shell.click_named("back button").unwrap();
+    let table = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap();
+    assert_eq!(table.teams[slot].robots, vec![0, 1]);
+
+    drop(shell);
+
+    // Event A: joined with the imported robot, fought with the keys held; whatever the result, the
+    // round is awarded and saved.
+    let mut shell = hq_shell(game, slot);
+    let a = join_event(&mut shell, 0, 0);
+    assert_eq!(shell.entered_event().map(|e| e.0), Some(a));
+    let played = fight_event(game, &mut shell, None);
+    let career = hq_mode::load_career(game).unwrap();
+    eprintln!(
+        "A: {played:?} history {} points {}",
+        career.history.len(),
+        career.season_points()
+    );
+
+    // A restart: the same career, event A completed, nothing in progress.
+    let mut shell = hq_shell(game, slot);
+    let view = hq_mode::shell_view(game).unwrap();
+    let state =
+        |view: &ra2ui::hq::View, id: usize| view.events.iter().find(|r| r.id == id).unwrap().state;
+    assert_eq!(state(&view, a), ra2ui::hq::EventState::Completed);
+
+    // Upgrade in the workshop between events: a part on the imported robot, written back to its slot.
+    click_inventory_slot(&mut shell, 0);
+    shell.click_named("workshop button").unwrap();
+    let mut builder = flow::open_workshop(game, Some(0)).unwrap();
+    let before = builder.build().components().len();
+    builder.click_named("components button").unwrap();
+    builder.click_named("mechanics button").unwrap();
+    builder
+        .place_component_free("Components\\ztek1.txt")
+        .unwrap();
+    assert_eq!(builder.build().components().len(), before + 1);
+    builder.click_named("back button").unwrap();
+    flow::close_workshop(&mut builder, &mut shell)
+        .unwrap()
+        .unwrap();
+    shell.click_named("back button").unwrap();
+    let upgraded =
+        ra2fmt::bot::parse(&std::fs::read(hq_mode::player_robot_path(game, slot, 0)).unwrap())
+            .unwrap();
+    eprintln!(
+        "upgraded robot has {} components",
+        upgraded.components.len()
+    );
+
+    // Event B: won round by round (the harness forces the result), `Finish Later` in between,
+    // resumed after a restart, to the trophy.
+    let b = join_event(&mut shell, 1, 0);
+    let first = fight_event(game, &mut shell, Some(true));
+    assert!(
+        first.is_none(),
+        "a won round 1 of event B leaves rounds to play"
+    );
+    let career = hq_mode::load_career(game).unwrap();
+    assert_eq!(
+        career.phase,
+        ra2sim::career::SeasonPhase::InEvent { event: b }
+    );
+    assert_eq!(career.history.len(), 1);
+
+    // `Finish Later`, quit, boot again: B is in progress, every other event is disabled.
+    shell.click_named("later button").unwrap();
+    assert_eq!(shell.base_screen_id(), "teamhq/teamhq.gib");
+    drop(shell);
+    let mut shell = hq_shell(game, slot);
+    let view = hq_mode::shell_view(game).unwrap();
+    assert_eq!(state(&view, b), ra2ui::hq::EventState::InProgress);
+    let open = view
+        .events
+        .iter()
+        .filter(|r| r.state == ra2ui::hq::EventState::Available)
+        .count();
+    assert_eq!(open, 0, "no other event can be joined while B is open");
+    // The robot of an open event cannot be edited or scrapped.
+    assert!(flow::robot_in_event(game, 0));
+
+    // Resume B from the schedule and fight on, winning, until the trophy.
+    shell.click_named("events button").unwrap();
+    click_event_cell(
+        &mut shell,
+        view.events.iter().position(|r| r.id == b).unwrap(),
+    );
+    assert_eq!(
+        shell.base_screen_id(),
+        flow::BRACKET_SCREEN,
+        "an open event opens its bracket"
+    );
+    let mut record = None;
+    for _ in 0..8 {
+        record = fight_event(game, &mut shell, Some(true));
+        if record.is_some() {
+            break;
+        }
+    }
+    let record = record.expect("winning every round decides the event");
+    assert!(record.won, "{record:?}");
+    let career = hq_mode::load_career(game).unwrap();
+    assert_eq!(career.history.len(), 2);
+    assert_eq!(career.phase, ra2sim::career::SeasonPhase::Schedule);
+    assert!(!career.prizes.is_empty(), "a won event earns its trophy");
+    assert!(
+        career.season_points() > 80,
+        "points {}",
+        career.season_points()
+    );
+    eprintln!(
+        "B won: {record:?}; prizes {:?}; points {}",
+        career.prizes,
+        career.season_points()
+    );
+
+    // Event C is joined and forfeited from the bracket: it closes as a loss, the robot is free again.
+    let mut shell = hq_shell(game, slot);
+    let c = join_event(&mut shell, 2, 0);
+    let step = shell.click_named("forfeit button").unwrap();
+    assert_eq!(step.hit_widget(), Some("forfeit button"));
+    flow::forfeit_event(game, shell.entered_event()).unwrap();
+    let career = hq_mode::load_career(game).unwrap();
+    assert_eq!(career.history.len(), 3);
+    assert_eq!(career.history.last().map(|r| r.event), Some(c));
+    assert!(!career.history.last().unwrap().won);
+    assert_eq!(career.phase, ra2sim::career::SeasonPhase::Schedule);
+    assert!(!flow::robot_in_event(game, 0));
+    eprintln!("C forfeited; points {}", career.season_points());
+}
+
+/// A freshly booted shell opened on team `slot`'s Team HQ (a restart of the app).
+fn hq_shell(game: &Path, slot: usize) -> Shell {
+    let mut shell = window_shell(game);
+    shell.click_named("Team HQ button").unwrap();
+    // A boot lists the first team selected; the player picks theirs.
+    let table = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap();
+    let row = table.teams[..slot].iter().filter(|t| t.is_named()).count();
+    click_select_row(&mut shell, row);
+    shell.click_named("continue button").unwrap();
+    assert_eq!(shell.team_slot(), Some(slot));
+    shell
+}
+
+/// Click the schedule grid's `row`-th cell (row-major, as the HQ numbers them).
+fn click_event_cell(shell: &mut Shell, row: usize) {
+    let placed = ra2ui::resolve(shell.document(), shell.size());
+    let grid = placed
+        .iter()
+        .flat_map(|p| p.walk())
+        .find(|p| p.widget.name() == ra2ui::hq::EVENT_GRID)
+        .unwrap();
+    let geometry = ra2ui::Grid::from_widget(grid.widget).unwrap();
+    let (columns, rows) = (
+        geometry.columns.max(1) as usize,
+        geometry.rows.max(1) as usize,
+    );
+    let (x, y) = (
+        grid.frame.x + grid.frame.w * ((row % columns) as f32 + 0.5) / columns as f32,
+        grid.frame.y + grid.frame.h * ((row / columns) as f32 + 0.5) / rows as f32,
+    );
+    shell.click(x, y).unwrap();
+}
+
+/// Join the schedule's event `row` with the join window's robot `column`; the bracket opens.
+fn join_event(shell: &mut Shell, row: usize, column: usize) -> usize {
+    shell.click_named("events button").unwrap();
+    click_event_cell(shell, row);
+    assert_eq!(shell.window_depth(), 1, "the join window opens");
+    let robots = frame_of(shell, "robot grid");
+    shell
+        .click(
+            robots.x + robots.w * (column as f32 + 0.5) / 6.0,
+            robots.y + robots.h / 2.0,
+        )
+        .unwrap();
+    shell.click_named("enter event button").unwrap();
+    assert_eq!(shell.base_screen_id(), flow::BRACKET_SCREEN);
+    shell.entered_event().unwrap().0
+}
+
+/// Fight the entered event's next round (the player holds W for four seconds), award it, and walk the
+/// award/repair screens back to the HQ or the bracket. Returns the event's record when the round decided it.
+fn fight_event(
+    game: &Path,
+    shell: &mut Shell,
+    forced: Option<bool>,
+) -> Option<ra2sim::career::EventRecord> {
+    let mut hq = flow::start_event_match(game, shell.entered_event(), 4.0).unwrap();
+    hq.set_forced_win(forced);
+    {
+        let session = hq.match_session_mut().unwrap();
+        session.skip_intro();
+        let mut input = DriveInput::default();
+        input.keys.set(ra2sim::controls::dik::W, true);
+        session.set_drive(input);
+        let mut guard = 0;
+        while session.matched.state() != MatchState::Results && guard < 400 {
+            session.advance(0.05);
+            guard += 1;
+        }
+        assert_eq!(session.matched.state(), MatchState::Results);
+    }
+    hq.finish_match().unwrap();
+    let over = hq.decided_event().cloned();
+    let mut guard = 0;
+    while !hq.on_hq_screen() && !hq.on_event_screen() && guard < 8 {
+        let point = continue_point(&mut hq);
+        hq.click(point).unwrap();
+        guard += 1;
+    }
+    over
 }

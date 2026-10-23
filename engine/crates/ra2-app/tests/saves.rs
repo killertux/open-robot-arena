@@ -145,7 +145,7 @@ fn career_team_and_robot_saves_leave_a_read_only_install_untouched() {
     assert!(named(ra2ui::teams::Side::Player).contains(&"Renamed".to_string()));
 
     // A robot saved into the new team: the file lands in the save directory.
-    let path = ra2ui::teams::add_robot(&install, slot).unwrap();
+    let path = ra2ui::teams::add_robot(&install, slot, None).unwrap();
     assert!(path.starts_with(&save), "{}", path.display());
     let bot = std::fs::read(real.join("Teams/Team0/Bot0.bot"))
         .or_else(|_| std::fs::read(real.join("AI/Team1/Bot0.bot")));

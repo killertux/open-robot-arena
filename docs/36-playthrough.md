@@ -72,6 +72,10 @@ Screenshots referenced below are in the session scratchpad
 | Workshop `Test Robot` | AI drives the player's robot | fixed (player drives) |
 | Multiplayer: Create Game, IP Address, Help | **dead** | fixed (navigation only) |
 | Multiplayer: Join, Refresh, Start Game | dead | fixed (netplay, docs/38; our transport) |
+| Workshop from an empty cell: robot saved into that cell (§9.26) | first free file, nothing saved when untouched | fixed (round 9) |
+| Inventory grid deselect (message 2) | unknown | recovered, matches (§9.26) |
+| Career end to end: new team, import, event, forfeit, restart (§9.26) | untested as one flow | works (`a_whole_career_new_team_to_forfeit_survives_a_restart`) |
+| Shell message boxes: blank body, Yes left (§9.26) | template text, No first | fixed |
 
 Counts: 26 rows; **16 fixed this round** (2 of them crashes/dead ends that
 closed or stranded the client), 6 worked already, 4 still broken (pause
@@ -1182,4 +1186,53 @@ the window closes. The list is in **byte order** (the third of the six `XTRA_` d
 
 Fidelity (`--renderer app`, MAE): `teamhq-buttons-none` 1.49, `teamhq-buttons-empty` 1.53, `teamhq-export-dialog` 1.90, `teamhq-import-dialog` 1.96 (4.15 before the scroll bar and the blank preview were fixed),
 `teamhq-import-row` 1.87, `teamhq-import-done` 1.82.
+
+## 9.26 Career run end to end, the workshop's new robot, the grid's deselect (`fx/career`, 2026-10-23)
+
+Live on display :9 (flatpak Wine 9.0, `ra2_drive.py`; `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` of the prefix copied before the session, rsync'ed back after it, sha256 list equal to
+the one taken before). New captures (manifest rows, backup `manifest-additions-2026-10-21-career.tsv`): `teamhq-newbot-empty` (PNG and the `.bot` the game wrote), `workshop-newbot`.
+
+### Workshop into a selected cell (`FUN_004fee90`, the lab's init `FUN_00439650`)
+
+The Workshop button (after the entered-robot guard, `Loading...`, `botlab\botlabwin.gib`) calls `FUN_00439650(cellEmpty = +0x16c, info = +0x15c, DAT_007184a4, DAT_007184a8)`: the lab keeps
+**the team and the selected cell number** (`+0x1f4`, `+0x1f8`; `DAT_007184a8` is the slot, the same global the guard compares with `Robot In Event`). For an empty cell it builds a blank lab:
+the four tabs `6..9` (Components, Wiring, Paint Shop, Test Robot) are disabled, the name box reads `Enter Bot Name` (`0x6f101c`, `FUN_004db260`), no robot in the view (`workshop-newbot`:
+weight 0.0, Classification `None`, `No Robot Preview`). There is **no search for a free file**: the design belongs to the selected cell. Live, with Atom Smasher scrapped (cell 4) and its
+`Bot4.bot` still on disk: Workshop on the `New Robot` cell, nothing touched, `Back to HQ` -> **`Teams/Team0/Bot4.bot` was overwritten** (127 bytes, `1.12`, `Name: Enter Bot Name`, no parts, a garbage
+`Class:` value from uninitialised memory), `Robots: 0 1 2 3 4 5` again, the cell reads `No Robot Preview` / `Enter Bot Name` / `None` and nothing is selected (`teamhq-newbot-empty`). So a new robot
+is saved **even when nothing was built**, and opening an existing robot and leaving re-saves it (`Bot0.bot` took a new mtime from a view-only visit).
+
+Ours took the first slot whose file did not exist and only when something had been built, so a scrapped slot's file stayed and the robot landed beyond the six cells. Now `ra2ui::teams::add_robot(game,
+team, Some(cell))` puts the robot in the selected cell (roster kept ascending), `Builder::set_team_new(team, slot)`, `flow::open_workshop` passes the pick, the name box starts as `Enter Bot Name` and an
+untouched new robot is saved under that name (as live). Without a cell (`--build` from the menu) the first number not on the roster is used and only a built/named robot joins. The main-menu Bot Lab has no
+team: it writes `Robot Designs/<name>.bot` only (Save As), unchanged. Test `playthrough::a_new_workshop_robot_joins_the_roster`.
+**Differs (open):** the original's new robot starts with *no chassis* (a blank lab, the Chassis tab picks one); ours starts from the stock chassis, so an untouched new robot is a 1-part lightweight where
+the original's is an empty `None` class design, and the HQ cell shows `Lightweight` not `None`.
+
+### Message 2 of the robot grid (`FUN_004ff2e0`)
+
+The window constructor (`0x4fd380`) registers `FUN_004ff2e0` on `robot grid` (`+0x190`) twice with `FUN_005ea170(grid, id)` (`0x4fd8f9`: message 1, `0x4fd925`: message 2). Message 1 is the grid's own
+selection event. **Message 2 is only sent by the grid's programmatic clear**: the refill `FUN_004ff570` starts with `grid->vtable[0xe8](0)` (clear the selection), disables Scrap and Workshop itself
+(`+0x174`, `+0x170`) and then fills the six cells. The refill runs when the window is built, after a scrap's Yes and after an import. Live: clicking the selected cell again, a click beside the grid, a right
+click and Escape all leave the selection (and the lit buttons) as they were. Ours already behaved this way (the selection is dropped by the same three events, and a fresh page after `Back to HQ`);
+no change except the doc.
+
+### The career, scripted (`playthrough::a_whole_career_new_team_to_forfeit_survives_a_restart`, 7 s)
+
+New team `Career Crew` (typed name, OK, Continue) -> empty inventory -> Import Bot into cell 0 (a shipped design) -> Workshop on cell 1 (new robot, saved empty) -> restart -> Event Schedule, join event
+A with the imported robot, `Play Next Round!` (the player holds W, 4 s match) -> loss, award, saved (history 1, 80 points) -> restart (a boot lists the first team selected; the player picks theirs) ->
+event A is `Completed` -> Workshop on the robot (a part added, written back to `Bot0.bot`) -> join event B, **forced wins** (`Session::set_forced_win`, a harness knob like `--report-damage`) through
+its rounds with `Finish Later` and a restart in the middle (the open event shows `In Progress`, every other cell is disabled, the entered robot cannot be edited, `Play` resumes the saved bracket) -> final
+win: trophy in `Teams.txt`, history 2, points 240 -> join event C and `Forfeit Event` -> closes as a loss, history 3, the robot is free again. Saves go to the test's scratch install only.
+There is **no money** in the original (no cash field, `ra2fmt::team`; `Career::money` is ours and stays 0): "earning" is event points, trophies and the rank.
+
+### Found broken or different, in the order fixed
+
+1. The workshop's new robot went to the first free file instead of the selected cell, and an untouched one was dropped (above). **fixed**
+2. `ra2ui::input::select_cell` printed `DBG bar [...]` to stderr on every list click (debug left in 9.25). **fixed**
+3. The message boxes of the shell (scrap, delete team, OK boxes) drew the template's `This is a message.` and listed `No` before `Yes`; the live box has an empty body and `Yes` on the left
+   (`teamhq-scrap-box`, `teamhq-events-one-event`; 9.24 had claimed ours drew blank). Now `Shell::open_window` blanks the template text and trades the two buttons' names and labels (`yes_left`, `blank_message_body`); `teamhq-scrap-box` 1.93 -> **1.84**. **fixed**
+4. A team with no robot: the join window opens and `Enter Event` does nothing; not checked live. **open**
+5. New-robot lab starts from a stock chassis, `Class` shown as `Lightweight` for an empty design (above). **open**
+6. A fresh boot's Select Team lists the first team selected (not the one last played): matches the earlier live notes for the select screen, not re-checked for a restart. **unverified**
 
