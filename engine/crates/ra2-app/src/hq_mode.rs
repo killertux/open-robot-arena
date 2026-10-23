@@ -396,6 +396,8 @@ pub struct Session {
     last_round: Option<RoundOutcome>,
     /// Evidence/test damage added to the player's report before the award.
     report_damage: f32,
+    /// Harness knob: the round's result is forced (`Some(true)` = the entered robot wins).
+    forced_win: Option<bool>,
     /// See [`Options::bench_undamaged`].
     bench_undamaged: bool,
     /// The repair bench was opened between rounds: `finished button` returns to
@@ -432,6 +434,7 @@ impl Session {
             last_report: None,
             last_round: None,
             report_damage: 0.0,
+            forced_win: None,
             bench_undamaged: false,
             repairs_after_round: false,
             player_drives: false,
@@ -570,6 +573,17 @@ impl Session {
         if damage.is_finite() && damage >= 0.0 {
             self.report_damage = damage;
         }
+    }
+
+    /// The record of the event the last round decided (a final win or a loss); `None` while rounds remain.
+    pub fn decided_event(&self) -> Option<&EventRecord> {
+        self.last_record.as_ref()
+    }
+
+    /// Force the next rounds' results (a test knob, like `set_report_damage`): `Some(true)` makes the
+    /// entered robot the match's only winner, `Some(false)` removes it from the winners.
+    pub fn set_forced_win(&mut self, win: Option<bool>) {
+        self.forced_win = win;
     }
 
     /// Lay the HQ's screens out natively on a target of `size` pixels, as the
@@ -1029,6 +1043,11 @@ impl Session {
                     );
                 }
             }
+        }
+        match self.forced_win {
+            Some(true) => report.winners = vec![0],
+            Some(false) => report.winners.retain(|w| *w != 0),
+            None => {}
         }
         let outcome = self.career.play_round(&report, 0)?;
         self.career.save(&self.game)?;

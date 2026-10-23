@@ -294,13 +294,6 @@ pub fn select_row(list: &mut Widget, row: usize) -> bool {
     };
     set_field(bar, "Position", &format!("0 0 {y} 0"));
     set_field(bar, "Visible", "true");
-    eprintln!(
-        "DBG bar {:?}",
-        bar.fields
-            .iter()
-            .map(|f| (f.name.clone(), f.raw.clone()))
-            .collect::<Vec<_>>()
-    );
     set_field(list, "_SelectedRow", &row.to_string());
     true
 }

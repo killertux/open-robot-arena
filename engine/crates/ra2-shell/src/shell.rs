@@ -1778,6 +1778,8 @@ impl Shell {
                     if let Some(w) = workshop::find_mut(root, "text box") {
                         set_text(w, &body);
                     }
+                    // The original draws the body blank (captures `teamhq-scrap-box`, `teamhq-events-one-event`).
+                    blank_message_body(root);
                     for name in ["yes button", "no button", "cancel button"] {
                         if let Some(w) = workshop::find_mut(root, name) {
                             ra2ui::input::set_field(w, "Visible", "false");
@@ -1801,11 +1803,15 @@ impl Shell {
                     if let Some(w) = workshop::find_mut(root, "text box") {
                         set_text(w, &body);
                     }
+                    // The original draws the body blank (captures `teamhq-scrap-box`, `teamhq-events-one-event`).
+                    blank_message_body(root);
                     for name in ["ok button", "cancel button"] {
                         if let Some(w) = workshop::find_mut(root, name) {
                             ra2ui::input::set_field(w, "Visible", "false");
                         }
                     }
+                    // Yes on the left, No on the right (live `teamhq-scrap-box`; the template has No first).
+                    yes_left(root);
                 }
                 self.windows.push(page);
                 return Ok(());
@@ -1891,6 +1897,8 @@ impl Shell {
                     if let Some(w) = workshop::find_mut(root, "text box") {
                         set_text(w, &body);
                     }
+                    // The original draws the body blank (captures `teamhq-scrap-box`, `teamhq-events-one-event`).
+                    blank_message_body(root);
                     for name in ["ok button", "cancel button"] {
                         if let Some(w) = workshop::find_mut(root, name) {
                             ra2ui::input::set_field(w, "Visible", "false");
@@ -3665,6 +3673,60 @@ fn bind_description(widget: &mut ra2fmt::gib::Widget, text: &str) {
     }
     for child in widget.children.iter_mut() {
         bind_description(child, text);
+    }
+}
+
+/// Put the `Yes` button on the left and `No` on the right, as the original's style-0xc boxes do: the
+/// two buttons trade names and labels (the template lists No first, and its labels are separate
+/// widgets that keep their own positions).
+fn yes_left(root: &mut ra2fmt::gib::Widget) {
+    fn relabel(widget: &mut ra2fmt::gib::Widget) {
+        match ra2ui::input::field_of(widget, "_Text") {
+            Some("No") => ra2ui::input::set_field(widget, "_Text", "Yes"),
+            Some("Yes") => ra2ui::input::set_field(widget, "_Text", "No"),
+            _ => {}
+        }
+        for attachment in widget.attachments.iter_mut() {
+            if let Some(body) = attachment.body.as_deref_mut() {
+                relabel(body);
+            }
+        }
+        for child in widget.children.iter_mut() {
+            relabel(child);
+        }
+    }
+    for (from, to) in [
+        ("no button", "tmp yes"),
+        ("yes button", "no button"),
+        ("tmp yes", "yes button"),
+    ] {
+        if let Some(w) = workshop::find_mut(root, from) {
+            ra2ui::input::set_field(w, "Name", to);
+        }
+    }
+    // The labels were swapped with the names, so swap the strings back to where the eye sees them.
+    relabel(root);
+}
+
+/// Blank the template's `This is a message.` wherever it sits (a Glyph's or Text's `_Text`, a DisplayBox's
+/// markup, an attachment's body): the original's message boxes draw their body blank.
+fn blank_message_body(widget: &mut ra2fmt::gib::Widget) {
+    const TEMPLATE: &str = "This is a message.";
+    if ra2ui::input::field_of(widget, "_Text").is_some_and(|t| t.trim() == TEMPLATE) {
+        ra2ui::input::set_field(widget, "_Text", "");
+    }
+    for attachment in widget.attachments.iter_mut() {
+        if attachment.kind == ra2fmt::gib::AttachmentKind::DisplayBox {
+            if let Some(field) = attachment.field_mut("Display") {
+                field.raw = ra2ui::cells::markup_with_text(&field.raw, "");
+            }
+        }
+        if let Some(body) = attachment.body.as_deref_mut() {
+            blank_message_body(body);
+        }
+    }
+    for child in widget.children.iter_mut() {
+        blank_message_body(child);
     }
 }
 
