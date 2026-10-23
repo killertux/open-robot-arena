@@ -632,6 +632,25 @@ fn strip_label(line: &str, label: &str) -> String {
 // Writer
 
 impl Bot {
+    /// The robot as the original's Team HQ **Export Bot** and **Import Bot** write it (docs/36 section 9.25): the
+    /// design loaded and saved again in the current format, 1.12, whatever it was. The default-texture flag is added
+    /// as `1` to a file that has none (1.07 to 1.11), and the key codes of a 1.07/1.08 remote control, which stored three,
+    /// get their new second code, 0 (`a b c` becomes `a 0 b c`). Checked byte for byte against four live exports
+    /// (1.08, 1.11, 1.12) and one import (1.07).
+    pub fn upgraded(&self) -> Bot {
+        let mut bot = self.clone();
+        if parse_version(&bot.version) <= (1, 8) {
+            for control in &mut bot.controllers {
+                for code in &mut control.bindings {
+                    *code = [code[0], 0, code[1], code[2]];
+                }
+            }
+        }
+        bot.version = "1.12".into();
+        bot.default_texture.get_or_insert(true);
+        bot
+    }
+
     /// Write the robot in the game's own text form.
     ///
     /// The file-format version is [`Bot::version`]; a default `Bot` is 1.12.
@@ -1233,5 +1252,40 @@ mod tests {
             ch.armour_material,
             Some([0.3332, 0.30005, 0.30005, 0.85, 10.0])
         );
+    }
+
+    /// The original's Export Bot / Import Bot re-save (`Bot::upgraded`) against the live files kept in
+    /// `local/oracle/original` (skipped when the captures or the install are not there).
+    #[test]
+    fn an_upgraded_bot_is_what_the_original_exports() {
+        let mut root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        while !root.join("local/oracle/original").is_dir() {
+            if !root.pop() {
+                return;
+            }
+        }
+        for (source, live) in [
+            (
+                "local/game/Teams/Team0/Bot4.bot",
+                "teamhq-export-atom-smasher__live__000.bot",
+            ), // 1.11
+            (
+                "local/game/Teams/Team0/Bot3.bot",
+                "teamhq-export-forkie__live__000.bot",
+            ), // 1.08
+            (
+                "local/game/Robot Designs/XTRA_BarberShop Chop.bot", // 1.07
+                "teamhq-import-barbershop__live__000.bot",
+            ),
+        ] {
+            let (Ok(src), Ok(out)) = (
+                std::fs::read(root.join(source)),
+                std::fs::read(root.join("local/oracle/original").join(live)),
+            ) else {
+                continue;
+            };
+            let bot = parse(&src).unwrap();
+            assert!(bot.upgraded().write() == out, "{source} against {live}");
+        }
     }
 }

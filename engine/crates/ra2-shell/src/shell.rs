@@ -258,6 +258,15 @@ pub struct Shell {
     /// Scraps a roster entry in the application's career and returns the Team
     /// HQ's refreshed data.
     scrap_hook: Option<ScrapHook>,
+    /// The roster entry the open export window is about (`FUN_00500690`).
+    export_slot: Option<usize>,
+    /// Writes `Robot Designs/<name>.bot` for a roster entry.
+    export_hook: Option<ExportHook>,
+    /// The empty roster entry the open import window fills (`FUN_00500860`) and the designs it lists.
+    import_slot: Option<usize>,
+    import_designs: Vec<String>,
+    /// Copies a design into an empty roster entry.
+    import_hook: Option<ImportHook>,
 }
 
 /// The longest text a shell edit field takes.
@@ -281,6 +290,14 @@ pub type TeamHook = Box<dyn FnMut(usize) -> Option<ra2ui::hq::View>>;
 /// What the application does when the player confirms the inventory's scrap
 /// box: the roster entry in, the Team HQ's data out.
 pub type ScrapHook = Box<dyn FnMut(usize) -> Option<ra2ui::hq::View>>;
+
+/// What the application does when the player confirms the inventory's export window: the roster entry
+/// (the grid's cell number) and the file name in (`Robot Designs/<name>.bot` is written).
+pub type ExportHook = Box<dyn FnMut(usize, &str) -> Result<(), String>>;
+
+/// What the application does when the player confirms the inventory's import window: the empty roster
+/// entry and the chosen design file in, the Team HQ's data out.
+pub type ImportHook = Box<dyn FnMut(usize, &str) -> Option<ra2ui::hq::View>>;
 
 /// `FUN_005e5ba0`'s screen switch: black overlays of 0.2 s each way. On a
 /// screen's first visit `FUN_004e6bd0` first shows the `common/loading.gib`
@@ -367,6 +384,11 @@ impl Shell {
             pending_scrap_box: None,
             pending_scrap: None,
             scrap_hook: None,
+            export_slot: None,
+            export_hook: None,
+            import_slot: None,
+            import_designs: Vec::new(),
+            import_hook: None,
         })
     }
 
@@ -559,6 +581,28 @@ impl Shell {
             .map(|r| r.name.as_str())
     }
 
+    /// The inventory grid's selected cell (`column * rows + row`, the slot): `Some(None)` when the Robot
+    /// Inventory tab is showing with nothing selected, `None` when the grid is not on screen.
+    pub fn inventory_selection(&self) -> Option<Option<usize>> {
+        if !self.windows.is_empty() {
+            return None;
+        }
+        let Screen::Page(page) = &self.screen else {
+            return None;
+        };
+        if !page.key.eq_ignore_ascii_case(ra2ui::hq::SCREEN) {
+            return None;
+        }
+        page.gib.blocks.iter().find_map(|b| match b {
+            Block::Widget(root) => {
+                let grid = workshop::find(root, ra2ui::hq::ROBOT_GRID)?;
+                let rows = ra2ui::Grid::from_widget(grid)?.rows.max(1) as usize;
+                Some(ra2ui::input::selected_cell(grid).map(|(row, column)| column * rows + row))
+            }
+            _ => None,
+        })
+    }
+
     /// The slot of the robot the join window entered into the current event (its grid
     /// column is a position in the HQ's robot list).
     pub fn entered_event_slot(&self) -> Option<usize> {
@@ -576,6 +620,42 @@ impl Shell {
     pub fn ask_scrap(&mut self, index: usize, name: &str) -> Result<(), String> {
         self.pending_scrap_box = Some((index, format!("Are you sure you want to scrap {name}?")));
         self.open_window("common/messagebox.gib")
+    }
+
+    pub fn set_export_hook(&mut self, hook: ExportHook) {
+        self.export_hook = Some(hook);
+    }
+
+    pub fn set_import_hook(&mut self, hook: ImportHook) {
+        self.import_hook = Some(hook);
+    }
+
+    /// The inventory's `export button` (`FUN_00500690`) with the robot of cell `index` selected: the
+    /// `Export Robot Design` window, its file name the robot's name (live: `Atom Smasher`), the robot's
+    /// snapshot beside it. OK writes `Robot Designs/<name>.bot`.
+    pub fn ask_export(&mut self, index: usize) -> Result<(), String> {
+        if self.hq_robot_name(index).is_none() {
+            return Ok(());
+        }
+        self.export_slot = Some(index);
+        self.open_window("botlab/exportbot.gib")
+    }
+
+    /// The inventory's `import button` (`FUN_00500860`) with the empty cell `index` selected: the
+    /// `Import Robot Design` window listing `Robot Designs/*.bot`. A cell that holds a robot does
+    /// nothing (the handler returns when the selected cell's name is not empty).
+    pub fn ask_import(&mut self, index: usize) -> Result<(), String> {
+        if self.hq_robot_name(index).is_some() {
+            return Ok(());
+        }
+        self.import_slot = Some(index);
+        self.import_designs = ra2fmt::saves::list(&self.game, "Robot Designs")
+            .into_iter()
+            .filter(|n| n.to_ascii_lowercase().ends_with(".bot"))
+            .collect();
+        // byte order: live the third of the six XTRA designs was `XTRA_BarberShop Chop`, after `XTRA_BOT-CHOY`
+        self.import_designs.sort();
+        self.open_window("botlab/importbot.gib")
     }
 
     pub fn set_team_hook(&mut self, hook: TeamHook) {
@@ -639,6 +719,16 @@ impl Shell {
             if let Some(view) = hook(slot) {
                 self.set_hq_view(view);
             }
+        }
+    }
+
+    /// Dim or light the inventory's buttons for the grid's selection (`FUN_004ff2e0`).
+    fn sync_inventory_buttons(&mut self) {
+        let (Some(view), Screen::Page(page)) = (&self.hq_view, &mut self.screen) else {
+            return;
+        };
+        if page.key.eq_ignore_ascii_case(ra2ui::hq::SCREEN) {
+            ra2ui::hq::sync_inventory_buttons(&mut page.gib, view);
         }
     }
 
@@ -1257,6 +1347,7 @@ impl Shell {
             }
             self.refresh_join_window();
             self.refresh_edit_team_logo();
+            self.refresh_import_preview();
             return Ok(self.finish(step));
         }
         let transition = match &mut self.screen {
@@ -1294,6 +1385,7 @@ impl Shell {
         self.refresh_robot_slots()?;
         self.refresh_arena_detail();
         self.fill_hq()?;
+        self.sync_inventory_buttons();
         Ok(self.finish(step))
     }
 
@@ -1420,6 +1512,38 @@ impl Shell {
                     if let Some(view) = hook(index) {
                         self.set_hq_view(view);
                     }
+                }
+            }
+        } else if window.key.eq_ignore_ascii_case("botlab/exportbot.gib") {
+            // `FUN_00471620`: `Robot Designs\<file name>.bot`, the selected robot saved there.
+            let name = window
+                .gib
+                .blocks
+                .iter()
+                .find_map(|b| match b {
+                    Block::Widget(root) => workshop::find(root, "file name").map(text_of),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if let (Some(slot), Some(hook)) = (self.export_slot.take(), &mut self.export_hook) {
+                if !name.trim().is_empty() {
+                    hook(slot, name.trim())?;
+                }
+            }
+        } else if window.key.eq_ignore_ascii_case("botlab/importbot.gib") {
+            // `FUN_00470b40`: the selected row's design goes into the slot; no row, nothing.
+            let row = window.gib.blocks.iter().find_map(|b| match b {
+                Block::Widget(root) => {
+                    workshop::find(root, "file list").and_then(ra2ui::input::selected_row)
+                }
+                _ => None,
+            });
+            let design = row.and_then(|r| self.import_designs.get(r).cloned());
+            if let (Some(slot), Some(design), Some(hook)) =
+                (self.import_slot.take(), design, &mut self.import_hook)
+            {
+                if let Some(view) = hook(slot, &design) {
+                    self.set_hq_view(view);
                 }
             }
         } else if window.key.eq_ignore_ascii_case("teamhq/joinevent.gib") {
@@ -1686,6 +1810,46 @@ impl Shell {
                 self.windows.push(page);
                 return Ok(());
             }
+            if target.eq_ignore_ascii_case("botlab/exportbot.gib") {
+                let row = self.export_slot.and_then(|slot| {
+                    self.hq_view
+                        .as_ref()?
+                        .robots
+                        .iter()
+                        .find(|r| r.slot == slot)
+                });
+                if let Some(row) = row {
+                    let (name, preview) = (row.name.clone(), row.preview.clone());
+                    for block in page.gib.blocks.iter_mut() {
+                        let Block::Widget(root) = block else { continue };
+                        if let Some(w) = workshop::find_mut(root, "file name") {
+                            set_text(w, &name);
+                        }
+                        if let Some(w) = workshop::find_mut(root, "export snapshot") {
+                            ra2ui::input::set_field(w, "_Filename", &preview);
+                        }
+                    }
+                    self.text_focus = Some("file name".to_string());
+                }
+            }
+            if target.eq_ignore_ascii_case("botlab/importbot.gib") {
+                let designs = self.import_designs.clone();
+                for block in page.gib.blocks.iter_mut() {
+                    let Block::Widget(root) = block else { continue };
+                    if let Some(list) = workshop::find_mut(root, "file list") {
+                        ra2ui::input::text_rows(list, &designs);
+                        ra2ui::input::clear_selection(list);
+                        // live: eight blank rows and no scroll bar for a short list
+                        if designs.len() <= ra2ui::input::visible_rows(list) {
+                            ra2ui::input::show_scroller(list, false);
+                        }
+                    }
+                    // no design chosen yet: no preview
+                    if let Some(w) = workshop::find_mut(root, "export snapshot") {
+                        ra2ui::input::set_field(w, "Visible", "false");
+                    }
+                }
+            }
             if target.eq_ignore_ascii_case("teamhq/joinevent.gib") {
                 if let (Some(view), Some(index)) = (&self.hq_view, self.join_event) {
                     if let Some(row) = view.events.get(index) {
@@ -1843,6 +2007,43 @@ impl Shell {
                 (&logo, workshop::find_mut(root, "logo image preview"))
             {
                 ra2ui::input::set_field(preview, "_Filename", logo);
+            }
+        }
+    }
+
+    /// The import window's preview follows the file list's selection: the design's own snapshot.
+    fn refresh_import_preview(&mut self) {
+        let Some(window) = self.windows.last_mut() else {
+            return;
+        };
+        if !window.key.eq_ignore_ascii_case("botlab/importbot.gib") {
+            return;
+        }
+        let row = window.gib.blocks.iter().find_map(|b| match b {
+            Block::Widget(root) => {
+                workshop::find(root, "file list").and_then(ra2ui::input::selected_row)
+            }
+            _ => None,
+        });
+        let Some(name) = row.and_then(|r| self.import_designs.get(r)) else {
+            return;
+        };
+        let path = ra2fmt::saves::resolve(&self.game, format!("Robot Designs/{name}"));
+        let Some(picture) = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| ra2fmt::bot::parse(&bytes).ok())
+            .and_then(|bot| bot.snapshot)
+            .and_then(|tga| ra2ui::preview::Preview::decode_tga(&tga))
+        else {
+            return;
+        };
+        let key = picture.key(&format!("import-{name}"));
+        self.previews.insert(key.clone(), picture);
+        for block in window.gib.blocks.iter_mut() {
+            let Block::Widget(root) = block else { continue };
+            if let Some(w) = workshop::find_mut(root, "export snapshot") {
+                ra2ui::input::set_field(w, "_Filename", &key);
+                ra2ui::input::set_field(w, "Visible", "true");
             }
         }
     }
@@ -2815,6 +3016,10 @@ fn plan_page(page: &Page, fonts: &Fonts, size: [f32; 2], x: f32, y: f32, step: &
     };
     let chain = chain(&placed, &path);
     step.hit = chain.last().map(|p| describe(p)).unwrap_or_default();
+    // A dimmed button (the inventory's, `FUN_005ec4e0(0)`) takes no click.
+    if chain.iter().any(|p| ra2ui::input::button_dimmed(p.widget)) {
+        return Plan::Nothing;
+    }
     // The executable's own handler bindings, by widget name, come first; the
     // `Notes` strings only answer for widgets no recovered binding covers.
     let bound = chain

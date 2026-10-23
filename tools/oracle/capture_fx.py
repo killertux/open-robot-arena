@@ -208,8 +208,23 @@ def synth_decals(base, rows, sc, damages, offsets):
     decs = [r for r in rows[first:] if r.get("ev") == "decal"]
     side = [r for r in decs if abs(r["u"][1]) < 0.5] or decs
     base_decal = side[len(side) // 2]
+    # SYNTH_ON_HITS=1: stand on a decal the game itself cut for a hit on the target part (the decal row that
+    # follows such a hit row, preferring the slash file), so the point lies on geometry the cut accepts
+    if os.environ.get("SYNTH_ON_HITS"):
+        own = []
+        for i, r in enumerate(rows):
+            if r.get("ev") == "hit" and r.get("flag") and r["ecx"] == target:
+                nxt = next((x for x in rows[i + 1:i + 6] if x.get("ev") == "decal"), None)
+                if nxt:
+                    own.append(nxt)
+        slash = [d for d in own if "slash" in d.get("file", "")]
+        pick = slash or own
+        if pick:
+            base_decal = max(pick, key=lambda d: d["alpha"])
+            print("synth on own decal", base_decal["file"], "alpha", base_decal["alpha"], flush=True)
     m = sc.exports_sync.m12at(owner)
     print("target part", target, "chassis matrix at", owner, "decal basis alpha", base_decal["alpha"], "u", base_decal["u"], flush=True)
+    anyseen = []
     for i, (dmg, off) in enumerate(zip(damages, offsets)):
         m = sc.exports_sync.m12at(owner)
         ax = [m[0:3], m[3:6], m[6:9]]
@@ -240,9 +255,20 @@ def synth_decals(base, rows, sc, damages, offsets):
         vt = sc.exports_sync.vtbl(known[-1])
         found = sc.exports_sync.finddecals("0x%x" % vt, dmg / 100.0, known)
         print("synth", i, "found decal objects", len(found), flush=True)
+        if not found:
+            # none with alpha damage / 100: list every unknown DecalTrigger (alpha < 0 = any) to see what the call made
+            anyobj = sc.exports_sync.finddecals("0x%x" % vt, -1.0, known + [o["obj"] for o in anyseen])
+            anyseen += anyobj
+            found = [dict(o, anyalpha=True) for o in anyobj][-40:]
+            print("synth", i, "any-alpha decal objects", len(anyobj), [round(o["alpha"], 3) for o in anyobj][-40:], flush=True)
         mats = {owner: sc.exports_sync.m12at(owner)}
         pb = f"{base}-s{i}b.png"
         ra2_drive.shot(DISPLAY, pb)
+        # PERLATE=n: a third shot n s after the hit, once the sparks and debris are gone and only a decal is left
+        perlate = float(os.environ.get("PERLATE", "0"))
+        if perlate:
+            time.sleep(perlate)
+            ra2_drive.shot(DISPLAY, f"{base}-s{i}c.png")
         rows.append({"ev": "spair", "i": i, "damage": dmg, "ok": ok, "point": c, "normal": nw, "cam": cam, "fov": fov,
                      "owner": owner, "chassis": mats, "a": os.path.basename(pa), "b": os.path.basename(pb),
                      "decal": new[-1] if new else None, "found": found})

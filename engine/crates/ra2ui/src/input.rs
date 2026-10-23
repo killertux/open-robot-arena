@@ -190,6 +190,38 @@ pub fn set_state(widget: &mut Widget, selected: bool) -> bool {
     changed
 }
 
+/// Enable or disable a `Button` (`FUN_005ec4e0(enabled)`): a disabled button shows its last state image
+/// (`StateImage 3`, the dimmed one: the shipped `*_button_n.bmp` tinted `0.5 0.5 0.5`), an enabled one its
+/// first. Returns whether anything changed. A button with one state image only is left alone.
+pub fn set_button_enabled(widget: &mut Widget, enabled: bool) -> bool {
+    if widget.kind != WidgetKind::Button || widget.children.len() < 2 {
+        return false;
+    }
+    let want = if enabled {
+        0
+    } else {
+        widget.children.len() - 1
+    };
+    let mut changed = false;
+    for (index, child) in widget.children.iter_mut().enumerate() {
+        let show = index == want;
+        if child.visible() != show {
+            set_field(child, "Visible", if show { "true" } else { "false" });
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Whether a button shows its dimmed state (see [`set_button_enabled`]): the first state image is
+/// hidden and the last is shown. Anything else, including a widget that is not a button, is enabled.
+pub fn button_dimmed(widget: &Widget) -> bool {
+    widget.kind == WidgetKind::Button
+        && widget.children.len() >= 2
+        && widget.children.first().is_some_and(|c| !c.visible())
+        && widget.children.last().is_some_and(|c| c.visible())
+}
+
 /// Select `child` in the option group called `group`: the group's `Selection`
 /// is set, and every `CheckBox` under it is put into its selected or unselected
 /// state.
@@ -262,6 +294,13 @@ pub fn select_row(list: &mut Widget, row: usize) -> bool {
     };
     set_field(bar, "Position", &format!("0 0 {y} 0"));
     set_field(bar, "Visible", "true");
+    eprintln!(
+        "DBG bar {:?}",
+        bar.fields
+            .iter()
+            .map(|f| (f.name.clone(), f.raw.clone()))
+            .collect::<Vec<_>>()
+    );
     set_field(list, "_SelectedRow", &row.to_string());
     true
 }
@@ -483,6 +522,17 @@ pub fn select_cell(list: &mut Widget, row: usize, column: usize) -> bool {
     if even {
         // The list divides its rectangle evenly (the Team HQ inventory); the frame is the cell.
         let (w, h) = (1.0 / cols_n, 1.0 / rows_n);
+        // The bar's `Lines` frame is drawn in the file's 213 x 70 pixels; the original's frame is the whole
+        // cell (live `teamhq-scrap-selected`: 618..957 x 373..493 at 1024x768), so its points become
+        // fractions of the bar.
+        let native = bar
+            .field("Size")
+            .map(|f| f.numbers())
+            .filter(|n| n.len() >= 4 && n[1] == 0.0 && n[3] == 0.0 && n[0] > 0.0 && n[2] > 0.0)
+            .map(|n| (n[0], n[2]));
+        if let Some((nw, nh)) = native {
+            relative_points(bar, nw, nh);
+        }
         set_field(
             bar,
             "Position",
@@ -517,6 +567,25 @@ pub fn select_cell(list: &mut Widget, row: usize, column: usize) -> bool {
         }
     }
     true
+}
+
+/// Turn the absolute `Point`s of every `Lines` under `widget` into fractions of a `nw` x `nh` box.
+fn relative_points(widget: &mut Widget, nw: f32, nh: f32) {
+    if widget.kind == WidgetKind::Lines {
+        for field in widget
+            .fields
+            .iter_mut()
+            .filter(|f| f.name.as_deref() == Some("Point"))
+        {
+            let n = field.numbers();
+            if n.len() >= 4 && n[1] == 0.0 && n[3] == 0.0 {
+                field.raw = format!("{} 1 {} 1", n[0] / nw, n[2] / nh);
+            }
+        }
+    }
+    for child in widget.children.iter_mut() {
+        relative_points(child, nw, nh);
+    }
 }
 
 /// The selected cell of a list: `(row, column)`, or `(row, 0)` for a

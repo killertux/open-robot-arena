@@ -1122,8 +1122,7 @@ inventory's **Scrap Bot** (`hq_robots.gib`, note "click to delete selected bot")
 * Port: `Career::scrap_robot(slot)`, `Shell::ask_scrap` / `set_scrap_hook`, `flow::scrap_prompt` / `inventory_click` (shared by the window and the
   `--offscreen --click-names` route), `hq_mode::shell_scrap_hook` (writes through the save dir). Test `playthrough::scrapping_a_robot_unlists_it_and_keeps_the_file`.
   Fidelity: `teamhq-scrap-selected` 3.17 -> **1.96**, `teamhq-scrap-box` 3.02 -> **2.23**, `teamhq-scrap-done` 2.49 -> **1.78** (the first numbers are before the
-  selection frame and the slot-indexed refill). **Open:** the three buttons' enabled state (live: nothing selected -> Export and Scrap dim, Import enabled;
-  selected -> Export and Scrap enabled, Import dim) is not drawn; Export Bot and Import Bot have no action in the port.
+  selection frame and the slot-indexed refill). **Open (closed in 9.25):** the four buttons' enabled state and Export Bot / Import Bot.
 
 ### Tests and the save directory
 
@@ -1137,4 +1136,50 @@ pointing at poisoned directories (a garbage `Teams/Teams.txt` and a `deleted.txt
 `Teams/Team0/Bot0.bot` of the Wine prefix was re-saved by the game (Finish Later saves the entered robot) before I had backed it up (only hashes were taken);
 it was rebuilt by running the game's own workshop open/close on the install's Bot0 (same size, 333003 bytes, but a different sha256: `9c711db4...` against
 `c8763932...`). Everything else was restored byte for byte (`Teams.txt` by undoing its one line; sha equal).
+
+## 9.25 Team HQ inventory: button states, Export Bot, Import Bot (`fx/fx-scatter`, 2026-10-23)
+
+Live on display :9 (flatpak Wine 9.0, `ra2_drive.py`; the prefix's `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` were copied before the first session and
+rsync'ed back after each one, sha256 equal to the pre-session list every time). New captures (manifest rows, backup `manifest-additions-2026-10-21-fx-scatter.tsv`):
+`teamhq-buttons-none`, `teamhq-buttons-empty`, `teamhq-export-dialog`, `teamhq-import-dialog`, `teamhq-import-row`, `teamhq-import-done` (PNG), and the files the original wrote:
+`teamhq-export-atom-smasher__live__000.bot`, `teamhq-export-forkie__live__000.bot`, `teamhq-import-barbershop__live__000.bot`.
+
+### Which buttons are lit (`FUN_004ff2e0`, the robot grid's select handler; `0x4fd380` builds the window)
+
+The window keeps `workshop` (`+0x170`), `scrap` (`+0x174`), `export` (`+0x178`) and `import` (`+0x17c`) buttons (`FUN_005ec4e0(enabled)`; a disabled button shows its
+fourth state image, `export_button_n.bmp` tinted 0.5 0.5 0.5). Message 2 (no selection) disables all four; message 1 (a cell selected: `FUN_00501420` fills the cell's
+info, byte 0 = the cell is empty) enables Workshop; Scrap = robot present; Export = robot present; Import = cell empty. Measured on the four labels (brightness max 127 against 217 lit):
+
+| selection | Workshop | Scrap | Export | Import |
+|---|---|---|---|---|
+| none (fresh window, after a scrap or an import) | dim | dim | dim | **dim** |
+| a robot | lit | lit | lit | dim |
+| a `New Robot` cell | lit | dim | dim | lit |
+
+(9.24 had Import lit with nothing selected: wrong, the capture `teamhq-scrap-done` has it dim.) A dim button takes no click (live: Import with nothing selected: nothing happens).
+Ours: `ra2ui::hq::sync_inventory_buttons` / `InventoryPick`, `input::{set_button_enabled, button_dimmed}`, the shell ignores a click on a dimmed button, `Shell::inventory_selection`
+is the pick (an empty cell is a selection now). The selection frame's `Lines` were absolute 213 x 70 px; they are fractions of the bar now, so the frame is the whole cell
+(`teamhq-scrap-selected` 1.86 -> 1.65, `teamhq-scrap-box` 2.13 -> 1.93).
+
+### Export Bot (`FUN_00500690`, window `ExportBotWindow` `0x4711e0`, `botlab\exportbot.gib`, OK `FUN_00471620`)
+
+Opens `Export Robot Design`: the `file name` box holds the selected robot's name (`Atom Smasher`, focused), the robot's snapshot beside it, the text "Exported bot designs will be
+saved in the 'Robot Designs' folder in your game directory." OK writes **`Robot Designs/<file name>.bot`** (`.bot` appended whatever the name, `C.R.U.S.H..bot`), **silently overwriting** a
+file of that name (live: a second export of the same robot raised no box); the window closes; the HQ is unchanged (selection kept). Cancel closes it. The box refuses `\/:?"<>|`
+(`0x6f2fec`). **The file is not a copy but the robot loaded and saved again in the current format**: 1.12, the default-texture line `1` after `Class:` added to a 1.07-1.11 file, and for a
+1.07/1.08 remote control the key codes `a b c` become `a 0 b c`. Checked **byte for byte** against three live files (source `Bot4.bot` 1.11 -> 333 295 B; `Bot3.bot` 1.08; the 1.12 `Bot0.bot`;
+the 1.11 `Bot1.bot`): `ra2fmt::bot::Bot::upgraded` (`write()` of it equals every live file; example `exportcmp`, test `an_upgraded_bot_is_what_the_original_exports`).
+Port: `Shell::ask_export`, `hq_mode::shell_export_hook` (writes through the save directory). The `.bot` goes to `Robot Designs/`, never into `Teams/`.
+
+### Import Bot (`FUN_00500860`, `ImportBotWindow` `0x470730`, `botlab\importbot.gib`, OK `FUN_00470b40`)
+
+Needs an **empty cell selected** (the handler returns for a cell with a robot; with nothing selected the button is dim). Opens `Import Robot Design`: `file list` = `Robot Designs\*.bot`
+(the live rows draw **no text**: `_Font System` is not available under Wine, as the other `System.giff` screens; eight blank 18 px rows, no scroll bar for a short list), a preview of the selected
+design's snapshot (it kept the previous dialog's picture at first; ours shows none until a row is chosen). OK with a row selected: `Robot Designs\<row>` is loaded and saved as the cell's
+**`Teams/Team<n>/Bot<slot>.bot`** (the same re-save: 1.07 `XTRA_BarberShop Chop.bot` -> `Bot4.bot`, 334 725 B, equal to `Bot::upgraded().write()`), the slot's flag is set (`FUN_0043b180(slot, 1)`:
+`Robots: 0 1 2 3 4 5`, ascending), the table is written (messages 200, `0xcd`, `0xc9`) and the grid refills (`FUN_004fe0c0`); the new robot shows in the cell and nothing is selected. No row: nothing,
+the window closes. The list is in **byte order** (the third of the six `XTRA_` designs was `XTRA_BarberShop Chop`, after `XTRA_BOT-CHOY`: `O` before `a`), ours sorts the same. Port: `Shell::ask_import`, `hq_mode::shell_import_hook`, `Career::import_robot`. Test `playthrough::export_and_import_bot_resave_the_design_and_the_buttons_follow_the_selection`.
+
+Fidelity (`--renderer app`, MAE): `teamhq-buttons-none` 1.49, `teamhq-buttons-empty` 1.53, `teamhq-export-dialog` 1.90, `teamhq-import-dialog` 1.96 (4.15 before the scroll bar and the blank preview were fixed),
+`teamhq-import-row` 1.87, `teamhq-import-done` 1.82.
 

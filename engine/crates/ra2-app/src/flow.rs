@@ -111,12 +111,12 @@ pub fn inventory_click(
     cell: Option<usize>,
     step: &ra2_shell::Step,
 ) -> Result<(), String> {
-    if cell.is_some() {
-        *pick = cell;
-    }
-    if pick.is_some_and(|i| shell.hq_robot_name(i).is_none()) {
-        // A scrapped robot's cell is gone (`New Robot` is not a selection).
-        *pick = None;
+    // The grid's own selection is the pick: a robot's cell or a `New Robot` cell (Workshop and Import
+    // work on it), none after a refill (a scrap, an import).
+    match shell.inventory_selection() {
+        Some(selection) => *pick = selection,
+        None if cell.is_some() => *pick = cell,
+        None => {}
     }
     if step.hit_widget() == Some("scrap button")
         && shell
@@ -125,6 +125,20 @@ pub fn inventory_click(
         && shell.window_depth() == 0
     {
         scrap_prompt(shell, *pick)?;
+    }
+    if shell
+        .base_screen_id()
+        .eq_ignore_ascii_case(ra2ui::hq::SCREEN)
+        && shell.window_depth() == 0
+    {
+        // `FUN_00500690` / `FUN_00500860`: the selected cell's export or import window. A dimmed
+        // button never reaches here with a selection it cannot use (`ask_export` wants a robot,
+        // `ask_import` an empty cell).
+        match (step.hit_widget(), *pick) {
+            (Some("export button"), Some(index)) => shell.ask_export(index)?,
+            (Some("import button"), Some(index)) => shell.ask_import(index)?,
+            _ => {}
+        }
     }
     Ok(())
 }

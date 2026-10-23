@@ -76,6 +76,8 @@ pub const WINDOWS: &[&str] = &[
     "common/credits.gib",
     "common/messagebox.gib",
     "teamhq/editteam.gib",
+    "botlab/exportbot.gib",
+    "botlab/importbot.gib",
     "teamhq/joinevent.gib",
     "help/helpframe.gib",
     "multiplayer/ip_connect.gib",
@@ -242,6 +244,30 @@ pub const BINDINGS: &[Binding] = &[
         name: "cancel button",
         action: Action::Close,
         at: "EditTeamWindow: cancel",
+    },
+    Binding {
+        screen: "botlab/exportbot.gib",
+        name: "ok button",
+        action: Action::Confirm,
+        at: "ExportBotWindow 0x4711e0 binds ok button to FUN_00471620: Robot Designs\\<file name>.bot is written, the window closes",
+    },
+    Binding {
+        screen: "botlab/exportbot.gib",
+        name: "cancel button",
+        action: Action::Close,
+        at: "ExportBotWindow 0x4711e0 binds cancel button to 0x468a60 (close)",
+    },
+    Binding {
+        screen: "botlab/importbot.gib",
+        name: "ok button",
+        action: Action::Confirm,
+        at: "ImportBotWindow 0x470730 binds ok button to FUN_00470b40: the selected design goes into the empty slot, the HQ refills",
+    },
+    Binding {
+        screen: "botlab/importbot.gib",
+        name: "cancel button",
+        action: Action::Close,
+        at: "ImportBotWindow 0x470730 binds cancel button to 0x468a60 (close)",
     },
     // The modal windows' own buttons close them. The executable binds these in
     // the window classes' constructors; the names are the shipped records'.
