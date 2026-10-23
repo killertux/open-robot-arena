@@ -58,6 +58,13 @@
 //! fixed body's mass 0 counts as an inverse mass of `0.08` and adds no
 //! rotation term. Floor and walls alike; a wheel is `Rubber`, which Arenium
 //! does nothing to.
+//!
+//! That component's own `computeDamage` (`0x405090`) first looks the arena's
+//! collidable up among the sub-materials the script registered
+//! (`SetSubMaterialSound(name, material, factor, sound)`: the hammers, saws,
+//! spikes and smash arms). Such a collidable prices the hit at `factor · M`,
+//! whatever the victim is made of (a wheel too); only the others go through
+//! `FUN_00489470` with the Arenium (docs/29 §12aa).
 
 use std::collections::HashMap;
 
@@ -492,8 +499,9 @@ fn registered_component(robot: &Robot, part: usize, state: &BodyState, p: Vec3) 
 
 /// How the arena prices what it strikes: the component the arena manager
 /// registers its collidables under (`FUN_00415140`), or an `AddXtra` prop's
-/// own (`FUN_00403aa0`). Its `computeDamage` is every component's
-/// (`FUN_00489470`), so a contact with the arena is priced as a hit by it.
+/// own (`FUN_00403aa0`). Where the struck collidable has no sub-material its
+/// `computeDamage` (`0x405090`) falls through to every component's
+/// (`FUN_00489470`), so such a contact is priced as a hit by it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArenaStriker {
     /// Material class, lower case.
@@ -551,9 +559,65 @@ pub struct ArenaBody {
     /// registers each with the event filter. Empty for a body that is one
     /// collidable (a movable arena body, a prop).
     pub parts: Vec<Vec<[Vec3; 3]>>,
+    /// The `.gmf` rigid body name of each collidable: one per [`parts`]
+    /// entry, or the one name of a body that is one collidable.
+    ///
+    /// [`parts`]: ArenaBody::parts
+    pub names: Vec<String>,
+    /// The factor of the sub-material the arena's script gave each of
+    /// [`names`] (`SetSubMaterialSound(name, material, factor, sound)`), if
+    /// any; see [`ArenaBody::sub_material_at`].
+    ///
+    /// [`names`]: ArenaBody::names
+    pub sub_materials: Vec<Option<f32>>,
 }
 
 impl ArenaBody {
+    /// A body with no sub-materials yet: `names` are its collidables'.
+    pub fn new(striker: ArenaStriker, parts: Vec<Vec<[Vec3; 3]>>, names: Vec<String>) -> Self {
+        let sub_materials = vec![None; names.len()];
+        ArenaBody {
+            striker,
+            parts,
+            names,
+            sub_materials,
+        }
+    }
+
+    /// Give each collidable named in `registered` (`(name, factor)`, as the
+    /// script registered them, a later one for the same name winning) its
+    /// sub-material factor.
+    pub fn set_sub_materials(&mut self, registered: &[(String, f32)]) {
+        self.sub_materials = self
+            .names
+            .iter()
+            .map(|n| {
+                registered
+                    .iter()
+                    .rev()
+                    .find(|(r, _)| r.eq_ignore_ascii_case(n))
+                    .map(|&(_, f)| f)
+            })
+            .collect();
+    }
+
+    /// The sub-material factor of the collidable the world point `p` lies on.
+    ///
+    /// The arena component's `computeDamage` (`0x405090`, slot `+0x18` of
+    /// `Arena_callback`'s vtable `0x6aa52c`) looks the arena side's collidable
+    /// up in the sub-materials the script registered (`0x404cc0`: a material
+    /// made by name, `FUN_004893c0`, its float set to the factor, for every
+    /// collidable of the named body). When it finds one the hit is
+    /// `factor · M` (`FUN_0045a5a0`), whatever the victim is made of; only
+    /// otherwise does it fall through to every component's `computeDamage`
+    /// (`FUN_00489470`) with its Arenium (docs/29 §12aa).
+    pub fn sub_material_at(&self, p: Vec3) -> Option<f32> {
+        if self.parts.is_empty() {
+            return self.sub_materials.first().copied().flatten();
+        }
+        self.sub_materials.get(self.part_at(p)).copied().flatten()
+    }
+
     /// The collidable of this body the world point `p` lies on.
     pub fn part_at(&self, p: Vec3) -> usize {
         let mut best = (0, f32::MAX);
@@ -834,7 +898,9 @@ pub fn resolve_with(
 /// damage done". The record is the usual one: `rec0` along the normal, the
 /// robot body's Havok mass, centre and inverse inertia, the arena body's own.
 /// A fixed body has mass 0 and no inverse inertia, which `FUN_0045a5a0` counts
-/// as an inverse mass of `0.08` (docs/29 §12o).
+/// as an inverse mass of `0.08` (docs/29 §12o). A collidable with a
+/// sub-material is priced at its factor times `M` instead
+/// ([`ArenaBody::sub_material_at`], docs/29 §12aa).
 #[allow(clippy::too_many_arguments)]
 fn arena_hit(
     robots: &[Robot],
@@ -890,13 +956,16 @@ fn arena_hit(
         angular_term(e.point - com_x, n, inv_x),
     );
     let component = touched_component(robot, part, state_r, e.point)?;
-    let damage = hit_damage(
-        arena.striker.striker(),
-        material_class(robot.rig.components[component].material.as_deref()),
-        rec0,
-        m,
-        cfg,
-    );
+    let damage = match arena.sub_material_at(e.point) {
+        Some(factor) => factor * m,
+        None => hit_damage(
+            arena.striker.striker(),
+            material_class(robot.rig.components[component].material.as_deref()),
+            rec0,
+            m,
+            cfg,
+        ),
+    };
     (damage > 0.0 && damage.is_finite()).then_some(Impact {
         attacker: NO_ATTACKER,
         target: r,

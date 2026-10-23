@@ -4396,3 +4396,167 @@ four spikes taken to pair with a wheel at the build that live do not (Iceberg's
 top weight); why a component does not pair with the body it will join; the
 steering unit's build body (Sentinel's hubs at the hold); the Clawtop's claws
 not captured.
+
+### 12aa. What the arena's hazards strike with: the sub-materials (fx/hazard-price)
+
+Section 12z left the Octagon hammer's strikes priced at about 0.6 of live
+(ALARM under hammer 1: live 437 + 177, 448 + 140, ...; ours 257 + 111,
+266 + 88, ...), the hellraisers' hits at 52-54 against live's 53-93, the box
+fights shorter since the build's late wakes, four spikes that pair with a
+wheel during the build where live they do not, and the steering unit's build
+body.
+
+No new live session: the per-contact records of the existing captures
+(`hazard-octagon__live__000..001`, `hazard-compressor__live__000..001`,
+`hazard-halfcircle__live__000`, `hazard-parkinglot__live__000`,
+`arenahits-scout-alarm-{box,octagon}__live__000..001`,
+`arenahits-razor-flapjack-box__live__000..004`; every `0x417330` gate call
+with the record a `computeDamage` call of the same contact logged) settle it.
+
+**The arena's `computeDamage` (recovered, verified live).** Slot `+0x18` of
+`Arena_callback`'s vtable `0x6aa52c` is `0x405090`, not every component's
+`0x489470`. It takes the arena side's collidable from the record (`+0x24` or
+`+0x28` by the flag `+0x34`), and looks it up in the sub-materials the script
+registered: `SetSubMaterialSound(name, material, factor, sound)`
+(`0x4bbc17` → `0x404cc0`) makes a material by name (`FUN_004893c0`), sets its
+float (`+4`) to `factor`, finds the `.gmf` body by its rigid-body name
+(`0x4a6b20`) and enters each of its collidables with that material and sound
+(`+0xd8` of the arena component). A collidable found there prices the hit at
+
+```
+damage = factor · M          (M = FUN_0045a5a0, the record's magnitude)
+```
+
+with no piercing term and no material classes: whatever the struck part is
+made of, a Rubber wheel too, and the same value plays the sub-material's sound
+when above 0.5 (docs/35). Only a collidable with no sub-material falls through
+to `0x489470` with the Arenium (section 12o). `FUN_0045a5a0` itself
+(`0x45a5a0`) is as section 12o has it, read off its code: the two masses are
+the record's (`+0x2c`, `+0x30`; 0 or less counts as 0.08, no inverse mass
+below 0.01), the centres the bodies' `+0x30` (`0x4cfe70` on the collidable's
+body `+0x1c`, `0x402c40`), the rotation terms `n · ((I⁻¹ (r × n)) × r)` with
+each body's world inverse inertia `+0x10c` (`0x45a7f0`, `0x45a780`,
+`0x45a730`, `0x535940`), the result `0.5 · rec0 / (Σ)`. So the hammer's body
+is an ordinary movable body to the formula (its own 100 kg and inertia), and
+no motor or limit impulse enters it: the record's closing speed is the
+bodies' state before the solver (section 11c).
+
+The stock arenas register: the box's `floorsaw` (0.8) and `spikes1`/`spikes2`
+(0.7); the Octagon's `hammer1`/`hammer2` (0.8); the Compressor's four
+`Spike*_Zone` (0.7) and four smash arms (0.9); the Half Circle's six spike
+zones, both kill saws and its hammer (0.8); King of the Hill's teeth and the
+Hilltop's spikes (0.7); the Parking Lot's cinderblocks (1.0). All from
+`HazardsOn(True)`, so none of it with hazards off. The hellraisers have none
+(Arenium 0.5).
+
+Live, every priced arena hit of those captures against the formula on its own
+record (new `tools/oracle/arenaprice.py`, from the `Q`/`H` rows of
+`ra2_arenahits.js` and `ra2_hazard.js`): 2304 at 0.5, 15 at 0.7 and 214 at 0.8 (the
+Octagon's 24 hammer strikes, the box's saw and spikes), each to a relative
+2e-6 or better; 8 of the sub-material hits land on a wheel (42.9, 13.6, 10.1,
+...), which Arenium never prices. Before, ours priced every arena collidable
+as Arenium.
+
+**Implementation.** `combat::ArenaBody` keeps each collidable's `.gmf` name
+(one per piece of the merged static collider, the name of a movable body or a
+prop) and its sub-material factor (`ArenaBody::set_sub_materials`,
+`sub_material_at`); `combat::arena_hit` prices `factor · M` where there is
+one. `Duel` gives the arena bodies the script's registrations whenever their
+number grows (`Duel::refresh_sub_materials`, at the head of
+`resolve_combat`, since `HazardsOn` may come after the duel is built). Test
+`duel::tests::a_sub_material_prices_a_hit_at_its_factor_even_on_a_wheel`.
+
+The hammer, ALARM under hammer 1 placed as live (`twoprobe` on
+`hazstate.py`'s `hazard-octagon__live__001` states), per strike, the first two
+priced contacts:
+
+| strike | live (2 trials) | before | after |
+|---|---|---|---|
+| 1 | 437 + 177, 423 + 237 | 257 + 111 | 411 + 178 |
+| 2 | 448 + 140, 425 + 236 | 266 + 88 | 426 + 141 |
+| 3 | 407 + 82, 414 + 153 | 269 + 81 | 431 + 129 |
+| 4 | 425 + 222, 407 + 234 | 250 + 100 | 401 + 160 |
+
+The strikes come 121-135 substeps apart in both. The rest is the strike's
+closing speed (ours 36.6-41.4 m/s, live 38.5-40.2).
+
+**The hellraisers.** Priced as Arenium live (180 Octagon hits at 0.5, none
+otherwise), so their first hits on ALARM (ours 52.2, 52.2, 54.0; live 71.1,
+52.9, 93.0) differ in the record, not the price: live's closing speeds 21.4,
+18.0, 31.0 m/s with the plate at 18.8, 13.1, 23.0 rad/s when it meets ALARM,
+ours 17.6-18.3 at about 20.5 rad/s. Live's two identical placements differ by
+5.6 rad/s in when the plate meets ALARM; not resolved.
+
+**The box fights and the Scout's build weights (checked, no change).** The
+Scout's bodies' weight at the build's last wake, live
+(`pieces-scout-alarm-box__live__000`, `Y` rows and `M` rows: wakes at 339,
+455, 687 on its fork arm and wheels, late wakes at 859 and 975, 57-58
+substeps after its right wheel (801) and its battery (917) were added):
+fork arm 12 of 26 kg, both wheels 27 of 27; ours (`spinprobe`) 0.462, 1.000,
+1.000. ALARM's: wheels 27 of 27, piston rod 8 of 33; ours 1.000 ×4, 0.242.
+Section 12z's late wakes gave the Scout's right wheel its live weight (before:
+10 of 27), so the shorter box fights come from a live-checked change, and no
+build rule of the Scout or ALARM is left that differs from live.
+
+**The spikes' pairs (not resolved).** Of the four extra late wakes, the live
+build captures give: Eye Poker's Pole Spikes at the origin (`8ad80`, `8b300`
+of `build-team9bot2-team10bot2-box__live__000`) are activated with no held
+pair, and its left rear wheel `894c0` has nothing in the detector's contact
+list at the freeze before (3528), though ours puts them 0.046 m from that
+wheel's inner face; Iceberg's Pole Spike likewise (`97c80`, 0.012 m from ours'
+left front wheel). The geometry is not the reason: live holds Iceberg's Ice
+Pick with its right front wheel at 0.0447 and 0.052 m (`HB` 3370, the wheel's
+hull and traction ring, boxes the cube about each piece's smallest sphere
+grown by 0.05), ours 0.045 and 0.052; MiniBerg's left wheel holds its battery
+and board through its ring at 0.0509 and 0.0465, ours 0.051, 0.047. Spikes on
+the chassis pair with a wheel in ours and never live; what keeps them apart is
+not found (neither the wheel's side, its weld while asleep, nor the
+distance).
+
+**The steering unit's build body.** Not attempted.
+
+**Validation.** Before = `fidelity` 062ee38 (section 12z's after column, to the
+digit), after = this branch; `FIDTRACE_WARMUP` ensembles, 24 runs each:
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6) | 33.0 (111) sd 24 / 5.7, 69 s, 2/24 | 33.7 (114) sd 25 / 5.8, 72 s, 2/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 8/24 | 8/24 |
+| ... arena hits applied on Scout / ALARM, per fight (hp) | 4.2 (99) / 0.6 (15) | 2.9 (45) / 2.0 (62) | 3.0 (52) / 2.5 (87) |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 3.5 (81) / 1.0, 52 s, 2/24 | the same to the digit |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 76.7 (311) sd 43 / 5.0, 97 s, 14/24 | 77.1 (306) sd 43 / 5.1, 95 s, 15/24 |
+| ... arena hits applied on Sentinel / Wide Load (hp) | 5.9 (178) / 4.8 (146) | 6.2 (131) / 3.5 (53) | 7.1 (189) / 5.2 (153) |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 10.2 (54) sd 9 / 2.5, 47 s, 1/24 | the same, every run to the hit |
+| ... ALARM on its back ≥ 5 s by 45 s / an arena hit over 50 / pit endings (Scout + ALARM) | – / 4 of 5 / 2 of 5 | 11/24, 6/24, 1 + 4 | the same |
+
+No fight of the Octagon ensemble has a robot meet a hammer (nor any live
+Octagon fight: every priced arena hit of `arenahits-scout-alarm-octagon` is
+Arenium), so it is unchanged. In the box and the Compressor the saws, spikes
+and smash arms now strike at 0.7-0.9 and wheels take their hits: the
+Compressor's arena hits come to live's (Wide Load 53 → 153 hp a fight, live
+146), the box ALARM's move away from it (62 → 87, live 15; ALARM's falls onto
+its back, section 12o). The robot-on-robot counts move by less than a standard
+error.
+
+Section 12s's replays: set 1 (20 trials) ALARM on its back at some point / at
+the end 3 / 3 (live 1 / 1), mean peak |ω| 3.34 (live 3.05), end-centre median
+1.22 m; set 2 (17) never on its back, peak 1.55 (live 1.40), median 0.22 m;
+both as before (the box's hazards are not met there).
+
+AI suite (ten pairings, warmup 0), counted hits each way and length, before →
+after: Scout v ALARM 2/7 106 s → 2/7 120 s, Grog v Boxer 53/176 120 s →
+53/168 112 s, Sentinel v Wide Load 3/38 90 s → 7/43 36 s; Tornado v RipBlade
+92/32 75 s, Razor v FlapJack 5/1 43 s, Bear v Tornado 7/14 26 s, Grog v Boxer
+hill 8/28 39 s, Octagon Scout v ALARM 8/22 34 s, Razor v FlapJack park 3/1
+73 s, Bushido v Devil 32/6 120 s unchanged; every pairing still deals damage
+each way.
+
+**Still open.** The hellraisers' closing speed at the first hit; why spikes on
+the chassis never pair with a wheel during the build (Iceberg's top weight);
+why a component does not pair with the body it will join; the steering unit's
+build body (Sentinel's hubs at the hold); the Clawtop's claws not captured;
+the `+0xb8` list `0x405090` tries first (entries matched to the struck
+component by `0x4a5c40`, priced `M` times the float of `0x405240`'s material)
+is not exercised by the stock arenas and not modelled; ours' material sounds
+(`combat::material_contacts`) still leave the prop's rotation term out of `M`
+and make none for the static collider's named pieces.

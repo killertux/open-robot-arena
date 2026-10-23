@@ -604,13 +604,14 @@ fn arena_bodies(
     props: &[PropEntity],
 ) -> combat::ArenaBodies {
     let mut out = combat::ArenaBodies::new();
-    let parts = match ra2_render::collect_havok(arena_path) {
+    let (parts, names) = match ra2_render::collect_havok(arena_path) {
         Ok(Some(havok)) => havok
             .bodies
             .iter()
             .filter(|b| b.is_static() && b.collides() && !b.points.is_empty())
             .map(|b| {
-                b.points
+                let tris = b
+                    .points
                     .as_chunks::<3>()
                     .0
                     .iter()
@@ -621,17 +622,15 @@ fn arena_bodies(
                             b.transform.transform_point3(t[2]),
                         ]
                     })
-                    .collect()
+                    .collect();
+                (tris, b.name.clone())
             })
-            .collect(),
-        _ => Vec::new(),
+            .unzip(),
+        _ => (Vec::new(), Vec::new()),
     };
     out.insert(
         arena_body,
-        combat::ArenaBody {
-            striker: combat::ArenaStriker::arena(),
-            parts,
-        },
+        combat::ArenaBody::new(combat::ArenaStriker::arena(), parts, names),
     );
     for p in props.iter().filter(|p| p.body != HIDDEN_PROP) {
         let striker = match &p.prop.material {
@@ -640,10 +639,7 @@ fn arena_bodies(
         };
         out.insert(
             p.body,
-            combat::ArenaBody {
-                striker,
-                parts: Vec::new(),
-            },
+            combat::ArenaBody::new(striker, Vec::new(), vec![p.prop.name.clone()]),
         );
     }
     out
@@ -822,6 +818,9 @@ pub struct Duel {
     /// The arena's bodies: what prices a robot's contact with them, and their
     /// registrations with the event filter (docs/29 §12o).
     pub arena_bodies: combat::ArenaBodies,
+    /// How many of the script's `SetSubMaterialSound` registrations
+    /// [`Duel::arena_bodies`] have been given.
+    sub_materials_seen: usize,
     /// Scales each robot's natural mass.
     pub mass_scale: f32,
     /// Human-readable event log (hits that broke something, KOs, ...).
@@ -1302,6 +1301,7 @@ impl Duel {
             combat: CombatConfig::default(),
             event_gate: Default::default(),
             arena_bodies,
+            sub_materials_seen: 0,
             mass_scale,
             log: Vec::new(),
             damage_taken,
@@ -2674,6 +2674,29 @@ impl Duel {
         }
     }
 
+    /// Give the arena's collidables the sub-materials its script has
+    /// registered so far (`SetSubMaterialSound`, most of them from
+    /// `HazardsOn`), whenever that list has grown.
+    fn refresh_sub_materials(&mut self) {
+        let registered: Vec<(String, f32)> = match ra2script::state().arena.as_ref() {
+            Some(a) => {
+                let d = a.lock().unwrap_or_else(|e| e.into_inner());
+                if d.sub_materials.len() == self.sub_materials_seen {
+                    return;
+                }
+                d.sub_materials
+                    .iter()
+                    .map(|(name, _, factor, _)| (name.clone(), *factor))
+                    .collect()
+            }
+            None => return,
+        };
+        self.sub_materials_seen = registered.len();
+        for body in self.arena_bodies.values_mut() {
+            body.set_sub_materials(&registered);
+        }
+    }
+
     /// Turn the step's contact points into damage.
     ///
     /// The contact points the event filter lets through ([`combat::EventGate`])
@@ -2681,6 +2704,7 @@ impl Duel {
     /// through [`Duel::apply_hit`],
     /// whose `>= 10` gate is the arena's (`FUN_00417330`).
     fn resolve_combat(&mut self) {
+        self.refresh_sub_materials();
         let events = self.physics.take_contacts();
         let props = combat::mass_props(&*self.physics, &self.robots);
         let mut props = props;
@@ -6888,6 +6912,94 @@ mod tests {
             &duel.arena_bodies,
         );
         assert!(none.is_empty(), "{none:?}");
+    }
+
+    /// docs/29 §12aa: a collidable the script gave a sub-material
+    /// (`SetSubMaterialSound("floorsaw", "metal", .8, ...)` in the box's
+    /// `HazardsOn`) prices a hit at `factor · M` (`0x405090`), whatever it
+    /// strikes: live (`arenahits-razor-flapjack-box__live__000`,
+    /// `hazard-octagon__live__001`) every such hit is 0.8 or 0.7 of `M` to
+    /// 1e-3, wheels included.
+    #[test]
+    fn a_sub_material_prices_a_hit_at_its_factor_even_on_a_wheel() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string();
+        let setups = [BotSetup {
+            path: bot,
+            yaw_deg: Some(0.0),
+            spawn: Some([0.0, 0.0]),
+        }];
+        let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        duel.refresh_sub_materials();
+        let (&saw, body) = duel
+            .arena_bodies
+            .iter()
+            .find(|(_, b)| b.names == ["floorsaw"])
+            .expect("the box's floor saw is an arena body");
+        assert_eq!(body.sub_material_at(Vec3::ZERO), Some(0.8));
+        let floor = &duel.arena_bodies[&duel.arena_body];
+        assert!(floor.names.iter().any(|n| n == "arena_collision"));
+        assert!(floor.sub_materials.iter().all(|f| f.is_none()));
+        let robot = &duel.robots[0];
+        let wheel_part = (0..robot.parts.len())
+            .find(|&p| {
+                robot.rig.parts[p]
+                    .members
+                    .iter()
+                    .any(|&c| robot.rig.components[c].role == crate::rig::Role::Wheel)
+            })
+            .expect("ALARM has wheels");
+        let wheel = robot.parts[wheel_part].body;
+        let mut props = combat::mass_props(&*duel.physics, &duel.robots);
+        props.insert(saw, duel.physics.mass_properties(saw).unwrap());
+        let wstate = crate::backend::BodyState {
+            linear_velocity: Vec3::new(0.0, -6.0, 0.0),
+            angular_velocity: Vec3::ZERO,
+            ..duel.physics.state(wheel).unwrap()
+        };
+        let sstate = crate::backend::BodyState {
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+            ..duel.physics.state(saw).unwrap()
+        };
+        let point = wstate.position;
+        let hits = combat::resolve_with(
+            &duel.robots,
+            &[crate::backend::ContactEvent {
+                a: saw,
+                b: wheel,
+                normal: Vec3::Y,
+                point,
+                state_a: sstate,
+                state_b: wstate,
+            }],
+            &duel.combat,
+            &props,
+            &duel.arena_bodies,
+        );
+        assert_eq!(hits.len(), 1, "a wheel is struck by the saw: {hits:?}");
+        let ang = |body, state: &crate::backend::BodyState| {
+            let (_, com_local, inv_local) = props[&body];
+            let r = glam::Mat3::from_quat(state.rotation);
+            let com = state.position + state.rotation * com_local;
+            combat::angular_term(point - com, Vec3::Y, r * inv_local * r.transpose())
+        };
+        let m = combat::magnitude(
+            6.0,
+            props[&wheel].0,
+            props[&saw].0,
+            ang(wheel, &wstate),
+            ang(saw, &sstate),
+        );
+        assert!(
+            (hits[0].damage - 0.8 * m).abs() < 1e-3 * m,
+            "{} vs {}",
+            hits[0].damage,
+            0.8 * m
+        );
+        assert_eq!(hits[0].attacker, combat::NO_ATTACKER);
     }
 
     /// docs/29 §12o: each arena collidable has one 1 s registration with the
