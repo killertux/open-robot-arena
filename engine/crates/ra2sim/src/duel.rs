@@ -3677,6 +3677,7 @@ mod tests {
     }
 
     fn game_dir() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         if let Some(dir) = std::env::var_os("RA2_GAME") {
             return Some(std::path::PathBuf::from(dir));
         }

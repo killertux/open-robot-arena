@@ -199,6 +199,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn game_dir() -> Option<PathBuf> {
+        crate::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");

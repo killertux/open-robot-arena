@@ -23,6 +23,7 @@ use ra2sim::DriveInput;
 const WINDOW: [f32; 2] = [1280.0, 1024.0];
 
 fn game_dir() -> Option<PathBuf> {
+    ra2fmt::saves::isolate_for_tests();
     if let Some(dir) = std::env::var_os("RA2_GAME") {
         let dir = PathBuf::from(dir);
         return dir.is_dir().then_some(dir);
@@ -124,6 +125,7 @@ fn window_shell(game: &Path) -> Shell {
     shell.set_hq_view(hq_mode::shell_view(game).unwrap());
     shell.set_enter_hook(hq_mode::shell_enter_hook(game).unwrap());
     shell.set_team_hook(hq_mode::shell_team_hook(game));
+    shell.set_scrap_hook(hq_mode::shell_scrap_hook(game));
     shell.set_later_hook(hq_mode::shell_later_hook(game));
     shell
 }
@@ -918,4 +920,53 @@ fn the_robot_in_an_event_is_not_editable() {
     assert_eq!(shell.window_depth(), 1);
     shell.click_named("ok button").unwrap();
     assert_eq!(shell.window_depth(), 0);
+}
+
+/// The inventory's `scrap button` (`FUN_004ff0c0`, docs/36 9.24): the question is Yes/No,
+/// No keeps the robot, Yes takes it off the team's list in `Teams.txt` and leaves its `.bot`
+/// file where it was; the robot entered in an event only gets the OK box.
+#[test]
+fn scrapping_a_robot_unlists_it_and_keeps_the_file() {
+    let Some(scratch) = ScratchGame::new("scrap") else {
+        return;
+    };
+    let game = scratch.path();
+    let mut shell = window_shell(game);
+    shell.click_named("Team HQ button").unwrap();
+    shell.click_named("continue button").unwrap();
+    let before = ra2fmt::team::read_table(&game.join("Teams/Teams.txt"))
+        .unwrap()
+        .teams[0]
+        .robots
+        .clone();
+    assert!(before.len() >= 2, "the team has robots to scrap");
+    let slot = before[1] as usize;
+    let name = shell.hq_robot_name(slot).unwrap().to_string();
+    assert!(!name.is_empty());
+    let file = hq_mode::player_robot_path(game, 0, before[1]);
+    assert!(file.is_file());
+
+    // No: nothing changes.
+    flow::scrap_prompt(&mut shell, Some(slot)).unwrap();
+    assert_eq!(shell.window_depth(), 1);
+    // (The box's body draws blank, as in the original's capture `scrap-box`; the question is
+    // the text handed to the box.)
+    assert!(document_has_text(&shell, "Team HQ"));
+    shell.click_named("no button").unwrap();
+    assert_eq!(shell.window_depth(), 0);
+    let table = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap();
+    assert_eq!(table.teams[0].robots, before);
+
+    // Yes: the roster entry is gone, the file stays.
+    flow::scrap_prompt(&mut shell, Some(slot)).unwrap();
+    shell.click_named("yes button").unwrap();
+    assert_eq!(shell.window_depth(), 0);
+    let table = ra2fmt::team::read_table(&game.join("Teams/Teams.txt")).unwrap();
+    let mut expect = before.clone();
+    expect.remove(1);
+    assert_eq!(table.teams[0].robots, expect);
+    assert!(file.is_file(), "the .bot stays on disk");
+    // The other robots keep their slots; the scrapped cell is empty.
+    assert_eq!(shell.hq_robot_name(slot), None);
+    assert!(shell.hq_robot_name(before[0] as usize).is_some());
 }

@@ -542,6 +542,7 @@ UpdateInterval=0.050000\r\n\
 [End Multiplayer Config]\r\n";
 
     fn game_dir() -> Option<PathBuf> {
+        crate::saves::isolate_for_tests();
         if let Some(dir) = std::env::var_os("RA2_GAME_DIR") {
             let dir = PathBuf::from(dir);
             if dir.join("ra2.cfg").is_file() {

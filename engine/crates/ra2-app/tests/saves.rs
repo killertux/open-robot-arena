@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 fn game_dir() -> Option<PathBuf> {
+    ra2fmt::saves::isolate_for_tests();
     if let Some(dir) = std::env::var_os("RA2_GAME") {
         let dir = PathBuf::from(dir);
         return dir.is_dir().then_some(dir);

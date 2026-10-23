@@ -50,6 +50,7 @@ mod tests {
     use ra2fmt::gib::Block;
 
     fn game_dir() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");

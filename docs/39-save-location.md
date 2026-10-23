@@ -38,8 +38,8 @@ clears the team's record in `Teams/Teams.txt` and writes the table; the team's
 robot files stay on disk, merely unlisted. The port does the same, so Delete
 Team writes a new `Teams.txt` into the save directory and the install's
 file is shadowed; only the client's own `career<slot>.dat` sidecar is removed
-(tombstoned if it exists only in the install). The port has no Delete Robot
-action; `saves::remove` is the path one would use.
+(tombstoned if it exists only in the install). The inventory's Scrap Bot (`FUN_004ff0c0`, docs/36 9.24) does the same for a robot: it removes the slot from the record's `Robots:` line and
+never deletes the `.bot`, so the port has no robot-file deletion either; `saves::remove` stays the path one would use.
 
 ## Write paths rerouted
 
@@ -71,3 +71,10 @@ mtime-identical.
 (damage/force/zap) and the `deferred` list, besides the camera, emitter and
 zone state it already reset; `ScriptHost::boot` clears the joint requests
 (the flaky-spikes fix).
+
+## Tests and the save directory
+
+Tests that open the real install call `ra2fmt::saves::isolate_for_tests()` (from their `game_dir()`/`ui_root()` helper): the process then has an empty save
+directory of its own (`$TMP/ora-test-save-<pid>`, never created unless written), ahead of `ORA_SAVE_DIR` and the platform default, behind a binding or
+`--save-dir`. So a test result never depends on the user's `~/.local/share/open-robot-arena`, and the gate's check that this directory is never created
+is unchanged.

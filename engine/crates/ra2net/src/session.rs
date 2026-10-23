@@ -125,6 +125,9 @@ pub enum Event {
     /// Joiner: no answer within the connect timeout.
     ConnectFailed,
     PlayerJoined(PlayerInfo),
+    /// A player changed its name (the original's `0x72` message, from
+    /// DirectPlay's `DPN_MSGID_PEER_INFO`).
+    PlayerRenamed(PlayerInfo),
     PlayerLeft {
         id: PlayerId,
         reason: LeaveReason,
@@ -192,6 +195,10 @@ const CORE_TERMINATE: u8 = 0xc6;
 const CORE_RELAY: u8 = 0xc7;
 /// Host -> joiner: a game message relayed from `from`.
 const CORE_FROM: u8 = 0xc8;
+/// Joiner -> host: this player's name is now `name` (`SetPeerInfo`).
+const CORE_SET_NAME: u8 = 0xc9;
+/// Host -> joiners: player `id` is now called `name` (DirectPlay's PEER_INFO).
+const CORE_PEER_INFO: u8 = 0xca;
 
 fn put_str(out: &mut Vec<u8>, s: &str) {
     let b = s.as_bytes();
@@ -591,6 +598,7 @@ impl Session {
         }
         // Connected players: messages, relays, departures.
         let mut relays: Vec<(PlayerId, u32, Vec<u8>, bool)> = Vec::new();
+        let mut renames: Vec<(PlayerId, String)> = Vec::new();
         let mut left = Vec::new();
         for (id, (_, link)) in peers.iter_mut() {
             for d in link.take_delivered() {
@@ -598,6 +606,10 @@ impl Session {
                     if d.payload.first() == Some(&CORE_RELAY) && d.payload.len() >= 5 {
                         let to = u32::from_le_bytes(d.payload[1..5].try_into().expect("4 bytes"));
                         relays.push((*id, to, d.payload[5..].to_vec(), true));
+                    } else if d.payload.first() == Some(&CORE_SET_NAME) {
+                        if let Some(name) = Cursor(&d.payload[1..]).str() {
+                            renames.push((*id, name));
+                        }
                     }
                     continue;
                 }
@@ -616,6 +628,20 @@ impl Session {
                     },
                 ));
             }
+        }
+        for (id, name) in renames {
+            let Some(p) = self.players.get_mut(&id) else {
+                continue;
+            };
+            p.name = name;
+            let info = p.clone();
+            let mut out = vec![CORE_PEER_INFO];
+            out.extend(id.to_le_bytes());
+            put_str(&mut out, &info.name);
+            for (_, link) in peers.values_mut() {
+                link.send(&out, true, true, now);
+            }
+            self.events.push(Event::PlayerRenamed(info));
         }
         for (from, to, payload, guaranteed) in relays {
             let mut out = vec![CORE_FROM];
@@ -726,6 +752,13 @@ impl Session {
                         self.events.push(Event::PlayerJoined(info));
                     }
                 }
+                Some(CORE_PEER_INFO) => {
+                    if let (Some(id), Some(name)) = (c.u32(), c.str()) {
+                        let info = PlayerInfo { id, name };
+                        self.players.insert(id, info.clone());
+                        self.events.push(Event::PlayerRenamed(info));
+                    }
+                }
                 Some(CORE_PLAYER_LEFT) => {
                     if let Some(id) = c.u32() {
                         self.players.remove(&id);
@@ -795,6 +828,44 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Change our own name (`FUN_00623580`, `IDirectPlay8Peer::SetPeerInfo`
+    /// with a `DPN_PLAYER_INFO` of size 0x18, `DPNINFO_NAME`, synchronous): every
+    /// other player hears a PEER_INFO and renames the entry. A joiner tells the
+    /// host, which tells everyone; the host tells everyone itself.
+    pub fn set_name(&mut self, name: &str) {
+        let now = Instant::now();
+        match &mut self.role {
+            Role::Host { peers, .. } => {
+                if let Some(p) = self.players.get_mut(&HOST_ID) {
+                    p.name = name.to_string();
+                }
+                let mut out = vec![CORE_PEER_INFO];
+                out.extend(HOST_ID.to_le_bytes());
+                put_str(&mut out, name);
+                for (_, link) in peers.values_mut() {
+                    link.send(&out, true, true, now);
+                }
+            }
+            Role::Joiner {
+                link,
+                local,
+                config,
+                ..
+            } => {
+                config.player_name = name.to_string();
+                if let Some(me) = *local {
+                    if let Some(p) = self.players.get_mut(&me) {
+                        p.name = name.to_string();
+                    }
+                    let mut out = vec![CORE_SET_NAME];
+                    put_str(&mut out, name);
+                    link.send(&out, true, true, now);
+                }
+            }
+        }
+        self.flush(now);
     }
 
     /// Host: drop one player (the lobby's eject). Joiner: ignored.

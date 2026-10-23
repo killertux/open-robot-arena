@@ -1537,6 +1537,7 @@ mod tests {
     /// row of the `.bot`, `r g b a power`.  Without it the lit faces of every chassis were too dark.
     #[test]
     fn a_chassis_carries_its_armour_rows_specular_and_power() {
+        ra2fmt::saves::isolate_for_tests();
         let root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local/game/AI/Team0");
         for (file, spec, power) in [
@@ -1595,6 +1596,7 @@ mod tests {
     /// bright in ours while the loader normalised them (docs/34 section 11.5).
     #[test]
     fn the_buzzard_wheels_hub_normals_keep_their_file_length() {
+        ra2fmt::saves::isolate_for_tests();
         let bot = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../local/game/AI/Team6/Bot1.bot");
         let Ok(items) = collect_bot(&bot.to_string_lossy()) else {

@@ -747,6 +747,7 @@ mod tests {
     use super::*;
 
     fn game_dir() -> Option<std::path::PathBuf> {
+        crate::saves::isolate_for_tests();
         if let Some(dir) = std::env::var_os("RA2_GAME") {
             let dir = std::path::PathBuf::from(dir);
             return dir.is_dir().then_some(dir);

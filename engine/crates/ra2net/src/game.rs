@@ -47,6 +47,11 @@ pub enum GameEvent {
         id: PlayerId,
         reason: LeaveReason,
     },
+    /// A player changed its name (the original's `0x72`, PEER_INFO).
+    PlayerRenamed {
+        id: PlayerId,
+        name: String,
+    },
     Lobby(LobbyChange),
     /// `giPrepareMatchMessage`.
     Prepare {
@@ -165,6 +170,15 @@ impl NetGame {
                         name: p.name,
                     });
                 }
+                Event::PlayerRenamed(p) => {
+                    if let Some(slot) = self.lobby.slot_mut(p.id) {
+                        slot.name = p.name.clone();
+                    }
+                    out.push(GameEvent::PlayerRenamed {
+                        id: p.id,
+                        name: p.name,
+                    });
+                }
                 Event::PlayerLeft { id, reason } => {
                     self.lobby.leave(id);
                     if self.is_host() {
@@ -250,6 +264,17 @@ impl NetGame {
     /// Whether the match has started on this end (the sync schema is set).
     pub fn in_match(&self) -> bool {
         self.schema.is_some()
+    }
+
+    /// The lobby's `screen name` box was edited (`FUN_004931a0`): set our name
+    /// (`FUN_00622660`), tell the other players (`FUN_00623580`, `SetPeerInfo`)
+    /// and update our own lobby entry (`FUN_0047f8a0`).
+    pub fn rename(&mut self, name: &str) {
+        let Some(me) = self.local() else { return };
+        if let Some(slot) = self.lobby.slot_mut(me) {
+            slot.name = name.to_string();
+        }
+        self.session.set_name(name);
     }
 
     /// The local player's name.

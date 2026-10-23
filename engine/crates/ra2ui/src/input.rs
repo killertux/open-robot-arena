@@ -475,10 +475,23 @@ pub fn select_cell(list: &mut Widget, row: usize, column: usize) -> bool {
     let column = if grid.row_select { 0 } else { column };
     let y = grid.row_height * row as f32;
     let x = grid.column_x(column as i32);
+    let even = field_of(list, "_EvenCells") == Some("true");
+    let (rows_n, cols_n) = (grid.rows.max(1) as f32, columns as f32);
     let Some(bar) = selection_bar_mut(list, &grid) else {
         return false;
     };
-    set_field(bar, "Position", &format!("{x} 0 {y} 0"));
+    if even {
+        // The list divides its rectangle evenly (the Team HQ inventory); the frame is the cell.
+        let (w, h) = (1.0 / cols_n, 1.0 / rows_n);
+        set_field(
+            bar,
+            "Position",
+            &format!("{} 1 {} 1", column as f32 * w, row as f32 * h),
+        );
+        set_field(bar, "Size", &format!("{w} 1 {h} 1"));
+    } else {
+        set_field(bar, "Position", &format!("{x} 0 {y} 0"));
+    }
     set_field(bar, "Visible", "true");
     set_field(list, "_SelectedRow", &row.to_string());
     set_field(list, "_SelectedColumn", &column.to_string());
@@ -669,6 +682,7 @@ mod tests {
     use ra2fmt::gib::Gib;
 
     fn ui_root() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game/UI");

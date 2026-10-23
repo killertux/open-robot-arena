@@ -606,3 +606,50 @@ fn match_chat_reaches_the_host_the_joiner_and_a_spectator() {
     }
     assert_eq!(seen, (true, true));
 }
+
+#[test]
+fn renaming_a_player_reaches_the_other_end() {
+    let mut host = NetGame::host(host_config(4), ConnectionSpeed::Lan).unwrap();
+    let addr = host.session.local_addr().unwrap();
+    let mut guest = NetGame::join(join_config(addr, "Guest")).unwrap();
+    pump(&mut host, &mut guest, |_, g| {
+        g.iter().any(|e| matches!(e, GameEvent::Joined { .. }))
+    });
+    let start = Instant::now();
+    while guest.lobby.slots.len() < 2 && start.elapsed() < Duration::from_secs(3) {
+        host.poll();
+        guest.poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let me = guest.local().unwrap();
+
+    // The joiner edits its `screen name` box: the host's lobby entry follows.
+    guest.rename("Mister Roboto");
+    let (eh, _) = pump(&mut host, &mut guest, |h, _| {
+        h.iter()
+            .any(|e| matches!(e, GameEvent::PlayerRenamed { .. }))
+    });
+    assert!(eh.contains(&GameEvent::PlayerRenamed {
+        id: me,
+        name: "Mister Roboto".into()
+    }));
+    assert_eq!(host.lobby.slot(me).unwrap().name, "Mister Roboto");
+    assert_eq!(guest.local_name(), "Mister Roboto");
+    assert!(host
+        .session
+        .players()
+        .iter()
+        .any(|p| p.id == me && p.name == "Mister Roboto"));
+
+    // And the host's edit reaches the joiner.
+    host.rename("Boss");
+    let (_, eg) = pump(&mut host, &mut guest, |_, g| {
+        g.iter()
+            .any(|e| matches!(e, GameEvent::PlayerRenamed { .. }))
+    });
+    assert!(eg.contains(&GameEvent::PlayerRenamed {
+        id: HOST_ID,
+        name: "Boss".into()
+    }));
+    assert_eq!(guest.lobby.slot(HOST_ID).unwrap().name, "Boss");
+}

@@ -368,6 +368,7 @@ impl App {
             shell.set_enter_hook(hook);
         }
         shell.set_team_hook(crate::hq_mode::shell_team_hook(game));
+        shell.set_scrap_hook(crate::hq_mode::shell_scrap_hook(game));
         shell.set_later_hook(crate::hq_mode::shell_later_hook(game));
         shell.set_animate(true);
         let frames = FrameRenderer::open(game)?;
@@ -960,6 +961,15 @@ impl ApplicationHandler for App {
                 if !in_match && self.hq.is_none() && self.shell.text_focus().is_some() {
                     // A focused shell text box (New Team's name and motto)
                     // takes the typing.
+                    if matches!(event.physical_key, PhysicalKey::Code(KeyCode::Enter))
+                        && self.shell.text_focus() == Some("screen name")
+                    {
+                        if let Some(text) = self.shell.focused_text() {
+                            self.net.commit_screen_name(&text);
+                            self.request_redraw();
+                        }
+                        return;
+                    }
                     let typed = match event.physical_key {
                         PhysicalKey::Code(KeyCode::Backspace) => self.shell.backspace(),
                         PhysicalKey::Code(KeyCode::Escape) => false,
@@ -1357,12 +1367,19 @@ impl ApplicationHandler for App {
                                 self.shell.set_hq_view(view);
                             }
                         }
+                        if let Err(error) = crate::flow::inventory_click(
+                            &mut self.shell,
+                            &mut self.inventory_pick,
+                            None,
+                            &step,
+                        ) {
+                            eprintln!("scrap: {error}");
+                        }
                         let locked = self.shell.lab().is_some()
                             && self.builder.is_none()
                             && self.inventory_pick.is_some_and(|index| {
                                 crate::flow::robot_in_event(self.shell.game(), index)
-                                    || self.shell.entered_event().map(|(_, robot)| robot)
-                                        == Some(index)
+                                    || self.shell.entered_event_slot() == Some(index)
                             });
                         if locked {
                             // `FUN_004fee90`: the entered robot is not editable;

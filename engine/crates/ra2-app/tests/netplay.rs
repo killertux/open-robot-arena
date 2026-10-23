@@ -13,6 +13,7 @@ use ra2net::sync::ConnectionSpeed;
 use ra2sim::sim::DriveInput;
 
 fn game_dir() -> Option<PathBuf> {
+    ra2fmt::saves::isolate_for_tests();
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
         let candidate = dir.join("local/game");

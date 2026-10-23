@@ -57,7 +57,12 @@ pub fn inventory_cell_at(shell: &Shell, point: [f32; 2]) -> Option<usize> {
 /// The `.bot` of roster entry `index` of the career's team.
 pub fn inventory_robot_path(game: &Path, index: usize) -> Option<PathBuf> {
     let career = hq_mode::load_career(game).ok()?;
-    let slot = *career.player().robots.get(index)?;
+    // The inventory's cell `index` is robot slot `index` (empty cells have no robot).
+    let slot = *career
+        .player()
+        .robots
+        .iter()
+        .find(|slot| **slot == index as i32)?;
     let path = hq_mode::player_robot_path(game, career.player_slot, slot);
     path.is_file().then_some(path)
 }
@@ -92,11 +97,50 @@ pub fn robot_in_event(game: &Path, index: usize) -> bool {
         return false;
     };
     career.entered_event().is_some()
-        && career
-            .player()
-            .robots
-            .get(index)
-            .is_some_and(|slot| *slot == career.player().event_robot)
+        && career.player().event_robot == index as i32
+        && career.player().robots.contains(&(index as i32))
+}
+
+/// What a click on the Team HQ's inventory does besides the shell's own step: the clicked
+/// cell becomes the selection (the cell number is the robot slot), a selection whose robot is
+/// gone (scrapped) is dropped, and the `scrap button` asks its question. `cell` is
+/// [`inventory_cell_at`] taken before the click.
+pub fn inventory_click(
+    shell: &mut Shell,
+    pick: &mut Option<usize>,
+    cell: Option<usize>,
+    step: &ra2_shell::Step,
+) -> Result<(), String> {
+    if cell.is_some() {
+        *pick = cell;
+    }
+    if pick.is_some_and(|i| shell.hq_robot_name(i).is_none()) {
+        // A scrapped robot's cell is gone (`New Robot` is not a selection).
+        *pick = None;
+    }
+    if step.hit_widget() == Some("scrap button")
+        && shell
+            .base_screen_id()
+            .eq_ignore_ascii_case(ra2ui::hq::SCREEN)
+        && shell.window_depth() == 0
+    {
+        scrap_prompt(shell, *pick)?;
+    }
+    Ok(())
+}
+
+/// The inventory's `scrap button` (`FUN_004ff0c0`) with robot `pick` selected: the
+/// robot entered in the current event only gets the OK box; any other asks
+/// `Are you sure you want to scrap <name>?` (Yes/No). Nothing selected: nothing.
+pub fn scrap_prompt(shell: &mut Shell, pick: Option<usize>) -> Result<(), String> {
+    let Some(index) = pick else { return Ok(()) };
+    let Some(name) = shell.hq_robot_name(index).map(str::to_string) else {
+        return Ok(());
+    };
+    if robot_in_event(shell.game(), index) || shell.entered_event_slot() == Some(index) {
+        return shell.show_message("Robot Arena 2", ra2sim::career::SCRAP_IN_EVENT);
+    }
+    shell.ask_scrap(index, &name)
 }
 
 /// The workshop is being left (`Back to HQ`, `Main Menu`): write a team robot
