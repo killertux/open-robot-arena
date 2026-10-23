@@ -3811,3 +3811,211 @@ live (20.5 → 17.7, live 13.6); the Compressor's Wide Load moves away (72.5 →
 steering unit's hubs; the 1.07 robots' heading (Tornado, Iceberg; also LugNut and
 the other 1.07 `.bot`s); the Scout's right wheel in the point-count probe; the
 rest of the landing bounce (the wheels' pull-down through their hinges).
+
+### 12x. The weight a body carries out of the build, the bell's empty substep, the steering unit's wheel constraints (fx/landing)
+
+Section 12w left five things open: some bodies taking only part of the first
+substep after the placement, the steering unit's hubs, the rest of the landing
+bounce, the spawn heights of Berserker and FlapJack (and Tornado's, with the
+1.07 nose now merged), and the Scout's right wheel in the point-count probe.
+
+New live captures (three sessions on `:7`, the prefix's `AI/`, `Teams/`,
+`Robot Designs/` and `ra2.cfg` sha256-identical before and after each; manifest
+rows in `manifest-additions-2026-10-21-landing.tsv`): new agent
+`frida/ra2_pieces.js` loaded before Start Game through `capture_rest.py`
+(`WATCH_AGENT=ra2_pieces.js`): from the match load every change of a robot
+body's mass or `+0x1c` flags (`M`), and for six `World::stepTo` calls
+(`0x52aa60`) from every start-point placement (`0x4dcff0`) and forty from the
+bell every stage of the substep with every robot body after it (`S`: the
+resolution, vtable `+0x24`; the integration `0x52a740` with its `dt`;
+`0x52a810`; the detection, vtable `+0x20`; the actions `0x52a990`); in the
+later sessions also every body's first `0x200` bytes at the placement (`PB`),
+the wheel atoms (`W`, `0x553c30`), the hinge atoms (`J`), the other constraint
+set-ups (`C`) and every `setActive` (`0x523230`) with its caller (`A`).
+`pieces-{revenge-raptor,scout-alarm,miniberg-iceberg,sentinel-berserker,stinger-tornado}-box__live__000`
+(the first session: its agent failed to hook `0x52ae83`, which is mid-function,
+and lost the `P`/`PB`/`W`/`J`/`A` rows), `__001` of `miniberg-iceberg`,
+`stinger-tornado`, `sentinel-berserker` and `__002` of `sentinel-berserker`;
+each with the `ra2_deact.js` rows of its session (`pieces-deact-*`). New
+`tools/oracle/landcmp.py` measures the landing (below) from such rows or a
+`spinup-deact-*` capture against `examples/spinprobe` (`LAND=`, which now
+holds the robots and lets them go as a match does, and prints the chassis'
+heading).
+
+**The partial first substep is a stale weight (recovered, verified live).**
+The original adds gravity to a body's force accumulator, with the body's mass
+of that moment, in the actions after its integration; the next integration
+turns the accumulator into velocity with the body's current inverse mass. A
+robot is built one component per frame (about 116 substeps apart), the world
+stepping in between; a component that brings a body of its own (a motor's
+rotor, a burst motor's, a piston's rod, a steering unit's hubs) wakes the robot
+(`A` rows: `0x531ef7` on the chassis, then the system's `0x5341cb` on every
+body) and it freezes again 14 substeps later (`0x534171`). The components that
+only add to an existing body come later and change its mass while it sleeps
+(`M` rows: REVENGE's wheels 10 → 27 kg at substeps 1221-1569, its last wake at
+1107), so the robot is frozen with each accumulator holding `m_then · g`. The
+placement wakes the bodies, and their first integration moves them by
+`-0.2 · m_then / m` m/s (`S` rows, `int` stage: REVENGE's wheels -0.07406,
+exactly `-0.2 · 10/27`; its blade, 30 kg since a wake, -0.2). Every live
+`vy1` of section 12w fits: the Scout's fork arm 12/26, ALARM's piston rod 8/33,
+Raptor's top 12/45, Sentinel's top 12/28, Berserker's wheel 10/27, Stinger's
+8/15, Tornado's spinner 15/125. Ours (`Robot::build_share`, `duel::turn_into_place`):
+a part's share is the mass of its members that come no later in the `.bot`
+than the last body-bringing component, over its mass; the placement's first
+substep gets `(share - 1) m g` added to its force. `RA2_SPAWN_FULL_WEIGHT=1`
+turns it off. Test `tests/landing_live.rs`.
+
+Not reproduced: in some robots a body is also woken during the build by the
+detector (`A` rows, caller `0x548f09`, the detector's wake of an inactive body
+in a pair, 56-58 substeps after certain components are added: MiniBerg's
+second motor's rotor at 500, 616, 1312 and 1776, Iceberg's at 3458), after which
+the system wakes the rest; what it is paired with is not recovered. These late
+wakes give MiniBerg's last wheel and top, Iceberg's top (22 of 38 kg, ours 12),
+Tornado's second wheel and the Scout's right wheel (live woken at 521 and 637,
+57 substeps after its wheel and its battery were added) their full (or a
+larger) weight, which ours does not model; they come 57-58 substeps after some
+component additions and not others (MiniBerg: after its 2nd, 3rd, 9th and 13th
+component; REVENGE and Raptor: never).
+
+| turn about the axle at the hold, ours - live, deg | before | after |
+|---|---|---|
+| REVENGE's wheels (live 161.75, 7.00, 8.88, 175.85) | -79.8, +0.8, +1.5, +165.7 | -8.9, +0.9, +0.9, -5.4 |
+| M.A.D.'s wheels (141.14, 160.57) | -95.7, +69.0 | -0.0, -0.0 |
+| Razor's 10 kg wheels (110.53, 7.12) | -101.7, +3.1 | +3.9, -0.1 |
+| FlapJack's 10 kg wheel (7.47) / Berserker's (7.39) | +3.2 / +3.2 | -0.1 / -0.1 |
+| Dementia's 10 kg body (129.06, live share 0.32, ours 0.44) | +144.2 | +53.8 |
+| MiniBerg's 10 kg wheel (10.97) / Tornado's (10.75) / the Scout's right (2.14), late wakes | -0.1 / +1.0 / +0.4 | -3.5 / -2.4 / +0.7 |
+
+**The spawn heights.** Berserker and FlapJack now stop their lowering where
+live does (exact); Tornado, with its nose merged, was at live's height before
+this round and MiniBerg too, and both are now one step (0.05 m) high: their
+wheels turn with weights the late build wakes would have changed. Dementia
+holds 0.05 m lower than `spinup-dementia-lmf-box__live__000` and exactly at
+`rest-team6bot1-team6bot2-box__live__000`: live it differs between sessions.
+14 of 16 stock robots at live's height, the same count as before with two
+others. `spawn_live` no longer lets FlapJack be a step low.
+
+**The bell's empty substep (recovered, verified live).** Held through the
+countdown (the chassis fixed, the rest inactive) a body gathers no weight, so
+the first substep after the bell integrates empty accumulators: live every
+body of both robots keeps velocity 0 through that substep's integration and
+starts falling at -0.2 m/s in the next (`S` rows at the `BELL`, both robots in
+every capture). Ours added gravity in the integration, so its robots fell a
+substep early relative to everything else (the components' ticks, the
+contacts' timing). `Duel::hold_robots(false)` now adds `-m g` to every body
+for that substep; `RA2_BELL_GRAVITY=1` for the old release.
+
+**The landing** (`landcmp.py`: from the first substep the chassis moves, its
+lowest drop and the rebound after it within 0.5 s, the chassis' heading
+change at 0.5 s, and the fastest downward speed of its other bodies; live
+from `spinup-deact-*__live__000`, the sessions whose turns section 12w used —
+`rest-*` sessions differ by up to 0.04 m and 0.07 rad; before = `fidelity`
+2f3cefc, after = this branch):
+
+| robot | live | before | after |
+|---|---|---|---|
+| Raptor | 0.288 / 0.116 / -0.179, 4.71 m/s | 0.274 / 0.089 / +0.065, 3.81 | 0.289 / 0.113 / -0.141, 4.55 |
+| REVENGE | 0.255 / 0.084 / +0.098, 4.98 | 0.232 / 0.041 / +0.040, 3.28 | 0.258 / 0.063 / +0.129, 4.34 |
+| Scout | 0.258 / 0.072 / +0.004, 3.48 | 0.245 / 0.034 / +0.032, 2.91 | 0.260 / 0.063 / +0.024, 3.81 |
+| ALARM | 0.253 / 0.056 / -0.024, 4.34 | 0.234 / 0.045 / -0.028, 3.44 | 0.251 / 0.066 / -0.028, 4.24 |
+| M.A.D. | 0.228 / 0.022 / +0.088, 2.76 | 0.227 / 0.021 / -0.006, 2.97 | 0.228 / 0.019 / +0.080, 2.77 |
+| EMERGENCY | 0.227 / 0.029 / +0.013, 4.95 | 0.221 / 0.017 / +0.002, 4.96 | 0.221 / 0.021 / -0.000, 5.03 |
+| Razor | 0.241 / 0.037 / -0.031, 3.88 | 0.233 / 0.038 / -0.060, 2.68 | 0.226 / 0.026 / -0.019, 3.47 |
+| FlapJack | 0.232 / 0.037 / -0.043, 2.95 | 0.189 / 0.032 / -0.008, 2.64 | 0.226 / 0.028 / -0.036, 2.96 |
+
+(The headings here are `landcmp.py`'s for both columns; section 12w's table
+took ours in the other sense.) The "4.6 m/s pull-down" is not a pull through
+the hinges alone: live (`S` rows at the landing) the four wheels are stopped by
+the floor in the resolution of one substep, and the actions of the same substep
+(the joints) then hand them the chassis' momentum, so the velocity a capture
+reads between substeps is that pull and the next resolution stops it again.
+Ours had one wheel of Raptor's detect the floor a substep early (0.0996 m, 0.4
+mm inside the tolerance), which started the exchange a substep early and
+softer; with the bell's empty substep the four reach it together, as live.
+Raptor's drop, rebound and yaw now follow live; REVENGE's drop too (its yaw
+now overshoots).
+
+**The steering unit's hubs are wheel constraints (recovered, verified live).**
+A `Steering` unit's hubs are held by Havok's wheel constraint (vtable
+`0x6ac4b8`; set-up `0x553c30`; its pass `0x5547d0` re-solves only the block;
+`0x553af0` rebuilds the steered axle), declared in the unit's `.gmf` as
+constraint node 46 (`Carwheel01` on `hub1`, `Carwheel02` on `hub2`: a name, a
+frame, the two bodies, a pivot, an axle and eight floats; `gmi::WheelJoint`,
+skipped before). During the build the unit's hubs are constrained to a body of
+its own left at the arena's origin (`W` rows at substep 101: 40 kg, then 4);
+the atoms are re-targeted to the chassis before the placement (`W` rows from
+3799). The set-up (atom fields, chassis frame for A): a limit row along the
+suspension axis `s` (`+0xc8`, `(0, 1, 0)`, limit flag `+0x20` set, `[0, 0]`,
+strength `+0x2c` = 1, motor `+0x21` off; applied once per solver call like the
+hinge's limit), then one block of four rows: linear along `n2 = n1 × s` and
+`n1 = normalize(s × a)` (errors the anchors' gap along them), angular about
+the steering axis `st` (`+0x98`, `(0, 1, 0)`) and `st × a` (errors `b · (st ×
+a)` and `-(b · st)`, the hinge's form of section 12w); no steering servo
+(`+0x3c`/`+0x3d` off); block factors `+0x18`, `+0x1c` = 1. The anchors are the
+constraint's pivot: `+0x58` (-0.8281, -0.1023, 0.2937) and (0.8362, -0.1023,
+0.2942) from the chassis' centre of mass, `+0x68` 0.1404 and 0.1386 m inboard
+of the hubs' centres along the axle; that is `carsteering2.gmf`'s `Carwheel`
+pivot (and `wheelpoint` attachment), 0.058 m inboard of the attachment the
+wheel mounts on (`Point04`), which is where ours had put it. The other
+constraint set-ups (`0x534850`, `0x552bb0`, `0x555080`) never touch the hubs
+(`C` rows). Ours: `JointInfo::anchor` is the unit's wheel pivot on the hub line
+(`Component::wheel_pivots`; `RA2_STEER_MOUNT_PIVOT=1` for the mount point), and
+the hub's hinge carries the suspension axis (`HingeDesc::suspension`,
+`joints::Joint::suspension_limit`; `RA2_STEER_HINGE=1` for the plain hinge).
+The anchors and the hubs' inertia (0.611 across, 0.918 along the axle, live
+and ours) now agree; the turns at the hold come closer for one hub and not the
+other (live 109.2 and 113.2 deg; before -171.7 and 55.0; after 117.4 and 57.9).
+Test `tests/landing_live.rs`.
+
+**The Scout's right wheel in the point-count probe.** Not resolved. Its live
+build frame is turned 1.27 deg about its axle (not tilted): it was awake twice
+more during the build (substeps 521 and 637 of `spinup-scout-alarm-box__live__000`),
+the late wakes above; the probe maps each live body through its own build
+frame, so that turn is accounted for and is not what parts the point counts.
+
+**Validation.** Before = `fidelity` 2f3cefc (built from a clean tree; it
+reproduces section 12w's after column for the box and the Octagon, while the
+Compressor reads 72.5 against 12w's 83.3: the flame-look merge's hub normals
+moved it back), after = this branch. `FIDTRACE_WARMUP` ensembles, 24 runs each,
+counted = `>= 10` on the other robot, robot hits only, mean (total), mean
+length, full-length runs:
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6) | 39.9 (161) sd 31 / 5.1, 89 s, 9/24 | 36.2 (160) sd 28 / 4.8, 90 s, 12/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 5 of 19 | 7/24 | 10/24 |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 5.2 (147) / 0.9, 70 s, 4/24 | 3.8 (96) / 1.0, 58 s, 1/24 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 72.5 (302) sd 49 / 4.1, 96 s, 13/24 | 89.2 (328) sd 41 / 5.0, 104 s, 16/24 |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 17.7 (101) sd 15 / 3.6, 85 s, 7/24 | 23.4 (98) sd 23 / 4.1, 75 s, 3/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | | 11/24 | 10/24 |
+
+The weight and bell changes alone (no steering change) give the same box,
+Razor and Octagon numbers and Wide Load 76.0; with the steering anchors alone
+72.9, with the wheel constraint's rows alone 90.1. So the Compressor's rise is
+the steering hubs' suspension rows, a recovered and live-checked change that
+moves this number away from live (by about two standard errors); the
+Octagon's ALARM count moves away by about one (17.7 → 23.4, live 13.6) and the
+box's falls rise (7 → 10 of 24, live about 5 of 19); Razor's count comes to
+live's (5.2 → 3.8, live 3.0).
+
+Section 12s's replays of the live placements (`twoprobe`): set 1 (20 trials)
+ALARM on its back at some point / at the end 3 / 2 before, 2 / 2 after (live
+1 / 1), mean peak |ω| 3.43 → 3.15 rad/s (live 3.05), both chassis' end centres
+from live, median 1.61 → 1.31 m; set 2 (17) never on the back, median 0.31 →
+0.23 m, mean peak |ω| 1.52 → 1.62 (live 1.40).
+
+AI suite (ten pairings, warmup 0), counted hits each way and length, before →
+after: Scout v ALARM 6/32 120 s → 5/68 100 s, Tornado v RipBlade 116/65 84 s →
+119/40 116 s, Grog v Boxer 66/171 → 53/176 (120 s both), Razor v FlapJack 5/2
+106 s → 5/1 43 s, Sentinel v Wide Load 2/26 61 s → 4/57 120 s, Bear v Tornado
+59/64 52 s → 60/82 82 s, Grog v Boxer hill 10/12 46 s → 8/28 39 s, Octagon
+Scout v ALARM 8/53 81 s → 8/68 112 s, Razor v FlapJack park 3/1 63 s → 3/1
+73 s, Bushido v Devil 21/9 → 32/6 (120 s both); every pairing still has damage
+dealt each way.
+
+**Still open.** What pairs MiniBerg's, Iceberg's and Tornado's bodies with the
+detector during the build (their late wakes, hence two spawn heights); the
+steering hubs' remaining turn on one side; the Scout's right wheel in the
+point-count probe; the Compressor's Wide Load count with the wheel
+constraint's rows; Raptor's weapon motor takes hold in the third substep after
+the bell live (ours: the first).

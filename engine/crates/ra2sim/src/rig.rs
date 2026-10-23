@@ -257,6 +257,9 @@ pub struct Component {
     pub rotor_local: Mat4,
     /// The motor hinge its `.gmf` declares (component space), if any.
     pub hinge: Option<ra2fmt::mount::RotorHinge>,
+    /// The pivots of the wheel constraints its `.gmf` declares (a `Steering`
+    /// unit's `Carwheel01`/`Carwheel02`), in component space.
+    pub wheel_pivots: Vec<Vec3>,
     /// Visual batches (component-local).
     pub items: Vec<DrawItem>,
     /// Visual batches for the motor's rotating hub, if it has one.
@@ -1133,6 +1136,25 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             }
             _ => pivot,
         };
+        // A `Steering` unit holds each hub with a wheel constraint, at that
+        // constraint's own pivot on the hub's axle line, not at the point the
+        // wheel mounts on (live, Sentinel's wheel atoms, `0x553c30` `+0x58`,
+        // hold the hubs 0.058 m inboard of their wheels' mount points:
+        // `pieces-sentinel-berserker-box__live__001`, docs/29 section 12x).
+        let anchor = if axle && std::env::var_os("RA2_STEER_MOUNT_PIVOT").is_none() {
+            comps[parent]
+                .wheel_pivots
+                .iter()
+                .map(|w| parent_local.transform_point3(*w))
+                .filter(|p| {
+                    let off = *p - pivot;
+                    (off - axis * off.dot(axis)).length() < 0.01
+                })
+                .min_by(|a, b| a.distance(pivot).total_cmp(&b.distance(pivot)))
+                .unwrap_or(anchor)
+        } else {
+            anchor
+        };
         // A burst motor is a limited hinge; everything else swings freely. The
         // original builds its rotor at the start angle and then re-creates the
         // hinge there (`FUN_00480c60`), so the rest pose is the hinge's zero;
@@ -1578,6 +1600,17 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 .get(i)
                 .and_then(|l| l.as_ref())
                 .and_then(|lc| ra2fmt::mount::rotor_hinge(&lc.scene)),
+            wheel_pivots: loaded
+                .get(i)
+                .and_then(|l| l.as_ref())
+                .map(|lc| {
+                    lc.scene
+                        .wheels
+                        .iter()
+                        .map(|w| Vec3::from(w.point))
+                        .collect()
+                })
+                .unwrap_or_default(),
             // The original draws no Flamethrower model: live, a camera 1.3 m ahead of
             // and 1.9 m beside a robot with one shows its nose and the flame only
             // (docs/37 section 6).
@@ -1945,6 +1978,7 @@ mod tests {
             local,
             rotor_local: local,
             hinge: None,
+            wheel_pivots: Vec::new(),
             items: Vec::new(),
             rotor_items: Vec::new(),
             hull_points: Vec::new(),

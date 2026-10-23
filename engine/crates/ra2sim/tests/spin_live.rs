@@ -73,7 +73,7 @@ fn wheels_turn_about_their_axles_as_the_original_places_them() {
     };
     // (robots, robot, [(part, live degrees)])
     type Case<'a> = (&'a str, &'a str, usize, &'a [(usize, f32)]);
-    let cases: [Case; 3] = [
+    let cases: [Case; 5] = [
         ("Team0/Bot0", "Team0/Bot1", 0, &[(1, 14.52), (2, 2.14)]),
         (
             "Team0/Bot0",
@@ -87,6 +87,11 @@ fn wheels_turn_about_their_axles_as_the_original_places_them() {
             1,
             &[(1, 4.22), (2, 173.64), (3, 137.99), (4, 39.59)],
         ),
+        // Bodies whose first substep after the placement carries the weight
+        // of their build (docs/29 section 12x): M.A.D.'s wheels, Berserker's
+        // lighter wheel.
+        ("Team5/Bot2", "Team6/Bot0", 1, &[(1, 160.57), (2, 141.14)]),
+        ("Team0/Bot2", "Team10/Bot0", 1, &[(3, 7.39)]),
     ];
     let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
     for (a, b, robot, want) in cases {

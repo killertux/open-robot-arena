@@ -335,6 +335,12 @@ pub struct HingeDesc {
     /// frictionless. A wheel's rolling resistance is this — the game's `SetLimits`
     /// pair for a hinge, and the wheel definitions' `resistance`.
     pub friction_torque: f32,
+    /// Havok's wheel constraint (a `Steering` unit's hubs, `0x553c30`)
+    /// rather than the hinge: B may move along this axis (A's space, the
+    /// unit's up) within a limit of `[0, 0]`, which acts once per solver call
+    /// like a hinge's limit, and the block locks only the two directions
+    /// across it.
+    pub suspension: Option<Vec3>,
 }
 
 impl HingeDesc {
@@ -350,6 +356,7 @@ impl HingeDesc {
             limits: [-std::f32::consts::PI, std::f32::consts::PI],
             max_torque: 0.0,
             friction_torque: 0.0,
+            suspension: None,
         }
     }
 

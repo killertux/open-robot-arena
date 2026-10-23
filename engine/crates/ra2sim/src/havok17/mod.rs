@@ -1628,6 +1628,10 @@ impl PhysicsBackend for Havok17Backend {
             friction: desc.friction_torque,
             saved_limits: None,
             steer_rest: None,
+            suspension: desc
+                .suspension
+                .map(|s| s.normalize_or_zero())
+                .filter(|s| *s != Vec3::ZERO),
         });
         Ok((self.joints.len() - 1) as JointHandle)
     }
@@ -1661,6 +1665,7 @@ impl PhysicsBackend for Havok17Backend {
             friction: 0.0,
             saved_limits: None,
             steer_rest: None,
+            suspension: None,
         });
         Ok((self.joints.len() - 1) as JointHandle)
     }
@@ -1712,6 +1717,7 @@ impl PhysicsBackend for Havok17Backend {
             friction: desc.friction_force,
             saved_limits: None,
             steer_rest: None,
+            suspension: None,
         });
         Ok((self.joints.len() - 1) as JointHandle)
     }
