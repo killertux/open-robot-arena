@@ -24,6 +24,9 @@ pub struct GmiScene {
     /// The point-to-point constraints (`*GMID_HAVOK_POINTTOPOINT`, node 53)
     /// the file's constraint solvers declare.
     pub point_to_points: Vec<PointToPoint>,
+    /// The wheel constraints (node 46) the file's constraint solvers declare:
+    /// a `Steering` unit's `Carwheel01`/`Carwheel02`.
+    pub wheels: Vec<WheelJoint>,
     /// The scene's static background colour (RGB 0..1).
     pub background: [f32; 3],
     /// The scene's static ambient colour as stored. The original engine does
@@ -79,6 +82,26 @@ pub struct AngularDashpot {
     pub damping: f32,
     pub allow_interpenetrations: bool,
     pub rotation: [f32; 4],
+}
+
+/// A wheel constraint (node 46) from a constraint list: a `Steering` unit
+/// holds each hub with one (`Carwheel01` on `hub1`, `Carwheel02` on `hub2`).
+/// Live, the game's wheel atom (`0x553c30`) holds the hub at `point` (in
+/// Sentinel's `carsteering2.gmf` 0.058 m inboard of the attachment the wheel
+/// mounts on, the `wheelpoint` the file also carries), docs/29 section 12x.
+#[derive(Clone, Debug, Default)]
+pub struct WheelJoint {
+    pub name: String,
+    pub frame: [[f32; 3]; 4],
+    pub body_a: String,
+    pub body_b: String,
+    /// The pivot, in the model's space.
+    pub point: [f32; 3],
+    /// The second vector the node stores (the axle, `(0, 0, 1)` in the stock
+    /// units).
+    pub axle: [f32; 3],
+    /// The eight trailing floats, not decoded.
+    pub extra: [f32; 8],
 }
 
 /// A point-to-point (ball-and-socket) constraint from a constraint list.
@@ -644,6 +667,7 @@ pub fn parse(data: &[u8]) -> Result<GmiScene, Error> {
         r: Reader::new(data),
         pending_hinges: Vec::new(),
         pending_p2p: Vec::new(),
+        pending_wheels: Vec::new(),
         dashpots: Vec::new(),
     }
     .parse()
@@ -731,6 +755,8 @@ struct Parser<'a> {
     pending_hinges: Vec<HingeJoint>,
     /// Point-to-point constraints read from the constraint list being parsed.
     pending_p2p: Vec<PointToPoint>,
+    /// Wheel constraints read from the constraint list being parsed.
+    pending_wheels: Vec<WheelJoint>,
     dashpots: Vec<AngularDashpot>,
 }
 
@@ -883,6 +909,7 @@ impl<'a> Parser<'a> {
                     scene.objects.push(solver);
                     scene.hinges.append(&mut self.pending_hinges);
                     scene.point_to_points.append(&mut self.pending_p2p);
+                    scene.wheels.append(&mut self.pending_wheels);
                 }
                 49 => scene.objects.push(self.read_angular_dashpot()?),
                 other => scene.objects.push(SceneObject {
@@ -1162,6 +1189,7 @@ impl<'a> Parser<'a> {
     fn read_constraint_solver(&mut self) -> Result<SceneObject, Error> {
         self.pending_hinges.clear();
         self.pending_p2p.clear();
+        self.pending_wheels.clear();
         let name = self.r.string()?;
         self.r.f32()?; // threshold
         self.r.string()?; // rigid body collection name
@@ -1184,17 +1212,26 @@ impl<'a> Parser<'a> {
             let (cid, _cflags, _) = self.r.node()?;
             match cid {
                 46 => {
-                    // A constraint with eight trailing floats. No stock arena
-                    // uses one; skipped by structure.
-                    let _ = self.r.string()?;
-                    let _ = self.read_tm_node()?;
-                    let _ = self.r.string()?;
-                    let _ = self.r.string()?;
-                    let _ = self.r.vec3()?;
-                    let _ = self.r.vec3()?;
-                    for _ in 0..8 {
-                        self.r.f32()?;
+                    // A wheel constraint (a steering unit's hubs).
+                    let name = self.r.string()?;
+                    let frame = self.read_tm_node()?;
+                    let body_a = self.r.string()?;
+                    let body_b = self.r.string()?;
+                    let point = self.r.vec3()?;
+                    let axle = self.r.vec3()?;
+                    let mut extra = [0.0; 8];
+                    for e in &mut extra {
+                        *e = self.r.f32()?;
                     }
+                    self.pending_wheels.push(WheelJoint {
+                        name,
+                        frame,
+                        body_a,
+                        body_b,
+                        point,
+                        axle,
+                        extra,
+                    });
                 }
                 47 => {
                     // A hinge: its name, its frame, the two bodies it joins and

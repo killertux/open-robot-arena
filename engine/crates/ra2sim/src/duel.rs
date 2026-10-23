@@ -121,6 +121,17 @@ fn turn_into_place(
     // other bodies, moved and so awake, fall freely for two substeps before
     // the joints take hold.
     physics.set_active(chassis, false);
+    // A body that grew after the build last woke the robot is first integrated
+    // with the weight it had then (`Robot::build_shares`).
+    if std::env::var_os("RA2_SPAWN_FULL_WEIGHT").is_none() {
+        let g = physics.gravity();
+        for (p, part) in robot.parts.iter().enumerate().skip(1) {
+            let share = robot.build_share.get(p).copied().unwrap_or(1.0);
+            if let Some(m) = physics.mass(part.body).filter(|_| share < 1.0) {
+                physics.add_force(part.body, g * (m * (share - 1.0)));
+            }
+        }
+    }
     let debug = std::env::var_os("RA2_SPAWN_DEBUG").is_some();
     for k in 0..steps {
         if k == SPAWN_FROZEN_SUBSTEPS {
@@ -1329,10 +1340,24 @@ impl Duel {
         } else {
             MotionType::Dynamic
         };
+        let g = self.physics.gravity();
+        let weightless = std::env::var_os("RA2_BELL_GRAVITY").is_none();
         for r in &self.robots {
             for p in r.parts.iter().filter(|p| p.alive) {
                 if self.physics.set_motion_type(p.body, motion).is_ok() && !hold {
                     self.physics.set_velocity(p.body, Vec3::ZERO, Vec3::ZERO);
+                    // Held, a body gathers no weight: Havok adds gravity to a
+                    // body's force accumulator in the actions after its
+                    // integration, so the first substep after the bell
+                    // integrates an empty accumulator and nothing moves (live,
+                    // `spinup-*__live__000` S rows: every body of both robots
+                    // keeps its velocity 0 through that substep's
+                    // integration and starts falling at -0.2 m/s in the next).
+                    if weightless {
+                        if let Some(m) = self.physics.mass(p.body) {
+                            self.physics.add_force(p.body, -g * m);
+                        }
+                    }
                 }
             }
         }
@@ -1578,6 +1603,7 @@ impl Duel {
                     limits,
                     max_torque: cap,
                     friction_torque: hinge.friction,
+                    suspension: None,
                 };
                 match self.physics.create_hinge(&desc) {
                     Ok(handle) => {

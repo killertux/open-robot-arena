@@ -331,6 +331,10 @@ pub struct PartState {
 /// One robot in the world.
 pub struct Robot {
     pub rig: RobotRig,
+    /// Per part, the share of its mass it had the last time the original's
+    /// build woke the robot ([`Robot::build_shares`]); 1 for the chassis and
+    /// for every part complete by then.
+    pub build_share: Vec<f32>,
     pub team: usize,
     /// One entry per [`crate::rig::Part`].
     pub parts: Vec<PartState>,
@@ -588,9 +592,11 @@ impl Robot {
 
         let magic = magic_drive(physics)
             .then(|| Self::magic_records(physics, &rig, &parts, &mass_points, rotation));
+        let build_share = Self::build_shares(&rig, &mass_points);
 
         let mut robot = Robot {
             magic,
+            build_share,
             health: rig.components.iter().map(|c| c.hitpoints).collect(),
             attached: vec![true; n],
             fractured: vec![false; n],
@@ -1230,6 +1236,51 @@ impl Robot {
         }
     }
 
+    /// What each part weighed, as a share of its mass, the last time the
+    /// original's build had the robot awake (docs/29 section 12x).
+    ///
+    /// The original builds a robot one component per frame, stepping the world
+    /// in between. A component that brings a body of its own (a motor's rotor,
+    /// a steering unit's hubs) wakes the robot; it falls asleep again some 14
+    /// substeps later, and from then on the components it carries only add
+    /// their mass to it (a wheel onto its motor's rotor). Havok adds gravity to
+    /// a body's force accumulator with its mass of the moment, as an action
+    /// after the integration (live, the placement's first substep moves
+    /// REVENGE's 27 kg wheels by `-0.2 · 10 / 27` m/s, the Scout's fork arm by
+    /// `-0.2 · 12 / 26`, ALARM's piston rod by `-0.2 · 8 / 33`:
+    /// `spinup-*__live__000`), so a body that grew after the robot's last wake
+    /// keeps the weight of its smaller self until it is next integrated: the
+    /// first substep after the placement. Its share is the mass of its members
+    /// that come no later in the `.bot` than the last body-bringing component.
+    fn build_shares(rig: &RobotRig, mass_points: &[Vec<(usize, f32, Vec3)>]) -> Vec<f32> {
+        let last = rig
+            .parts
+            .iter()
+            .filter_map(|q| q.joint.map(|j| j.motor))
+            .max();
+        (0..rig.parts.len())
+            .map(|p| {
+                let (Some(last), Some(pts)) = (last, mass_points.get(p)) else {
+                    return 1.0;
+                };
+                if p == 0 {
+                    return 1.0;
+                }
+                let total: f32 = pts.iter().map(|(_, m, _)| m).sum();
+                let then: f32 = pts
+                    .iter()
+                    .filter(|(i, _, _)| *i <= last)
+                    .map(|(_, m, _)| m)
+                    .sum();
+                if total > 0.0 {
+                    then / total
+                } else {
+                    1.0
+                }
+            })
+            .collect()
+    }
+
     /// The robot's wheel records (`AddWheel`, `FUN_00485490` from
     /// `FUN_004dc180`): every wheel on a `SpinMotor` or an `AxleMount`, with its
     /// hub centre and axle in the chassis frame, `grip` and `resistance`.
@@ -1603,8 +1654,29 @@ impl Robot {
             limits: info.limits,
             max_torque,
             friction_torque: info.friction_torque,
+            suspension: Self::steering_up(rig, &info)
+                .map(|up| frame_a.inverse().transform_vector3(up).normalize_or_zero())
+                .filter(|_| std::env::var_os("RA2_STEER_HINGE").is_none()),
         };
         physics.create_hinge(&desc)
+    }
+
+    /// A `Steering` unit's up, its mount point's `-Z`, in bot space (`None`
+    /// for any other motor): its wheel constraints' steering and suspension
+    /// axis (live, Sentinel's wheel atoms read `(0, 1, 0)` for both in the
+    /// chassis frame, `0x553c30` `+0x98` and `+0xc8`).
+    fn steering_up(rig: &RobotRig, info: &JointInfo) -> Option<Vec3> {
+        let unit = &rig.components[info.motor];
+        if !unit.class.eq_ignore_ascii_case("steering") {
+            return None;
+        }
+        let mount_z = unit
+            .attachments
+            .get(&unit.own_mount)
+            .map(|a| Vec3::from(a.transform[2]))
+            .filter(|z| *z != Vec3::ZERO)
+            .unwrap_or(Vec3::Z);
+        Some((-unit.local.transform_vector3(mount_z)).normalize_or(Vec3::Y))
     }
 
     /// The same placement rule as a hinge, on a prismatic joint (F8): a piston's

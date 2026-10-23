@@ -79,6 +79,10 @@ pub struct Joint {
     /// (Havok's wheel constraint keeps the unsteered axle, `+0xb8`, and
     /// rebuilds the steered one from it, `FUN_00553af0`).
     pub steer_rest: Option<(Vec3, Vec3)>,
+    /// A wheel constraint's suspension axis in A's frame (`0x553c30`): the
+    /// block then locks only the two directions across it, and a limit of
+    /// `[0, 0]` holds B along it once per solver call.
+    pub suspension: Option<Vec3>,
 }
 
 /// A row of a block: the Jacobian against each body's linear and angular
@@ -178,10 +182,22 @@ impl Joint {
             } => {
                 let axis = (a.rotation * *axis_a).normalize();
                 let along_b = (b.rotation * *axis_b).normalize();
-                let mut rows: Vec<Row> = [Vec3::X, Vec3::Y, Vec3::Z]
-                    .into_iter()
-                    .map(|e| linear(e, gap.dot(e)))
-                    .collect();
+                let mut rows: Vec<Row> = match self.suspension {
+                    // The wheel constraint's two linear rows: across the
+                    // suspension axis `s`, `n1 = s × a` and `n2 = n1 × s`
+                    // (`0x553c30`, block rows 0 and 1, errors the anchors'
+                    // gap along them).
+                    Some(s_local) => {
+                        let s = (a.rotation * s_local).normalize_or_zero();
+                        let n1 = s.cross(axis).normalize_or(perpendicular(s));
+                        let n2 = n1.cross(s);
+                        vec![linear(n2, gap.dot(n2)), linear(n1, gap.dot(n1))]
+                    }
+                    None => [Vec3::X, Vec3::Y, Vec3::Z]
+                        .into_iter()
+                        .map(|e| linear(e, gap.dot(e)))
+                        .collect(),
+                };
                 // The two angular rows turn about A's own perpendiculars, its
                 // reference `u1` and `u2 = u1 × a` (`0x535a50`, rows 3 and 4),
                 // and their errors are B's axis along them: `u2 · b` about
@@ -324,6 +340,38 @@ impl Joint {
             bodies[self.b].apply_impulse_at(axis * lambda, pb);
             bodies[self.a].apply_impulse_at(-axis * lambda, pa);
         }
+    }
+
+    /// A wheel constraint's suspension limit (`0x553c30`, before its block):
+    /// B's travel along the axis, predicted a substep on, is brought back onto
+    /// `[0, 0]` with the limit's full strength (`+0x2c` = 1 live).
+    fn suspension_limit(&self, bodies: &mut [Body], dt: f32) {
+        let Some(s_local) = self.suspension else {
+            return;
+        };
+        let (a, b) = (&bodies[self.a], &bodies[self.b]);
+        let axis = (a.rotation * s_local).normalize_or_zero();
+        if axis == Vec3::ZERO {
+            return;
+        }
+        let (pa, pb) = self.anchors(bodies);
+        let (ra, rb) = (pa - a.com, pb - b.com);
+        let part = |body: &Body, r: Vec3| {
+            if body.is_dynamic() {
+                body.inv_mass + r.cross(axis).dot(body.inv_inertia_world * r.cross(axis))
+            } else {
+                0.0
+            }
+        };
+        let k = part(a, ra) + part(b, rb);
+        if k <= 1e-12 {
+            return;
+        }
+        let rel = axis.dot(b.point_velocity(pb) - a.point_velocity(pa));
+        let predicted = rel * dt + (pb - pa).dot(axis);
+        let lambda = -predicted / dt / k;
+        bodies[self.b].apply_impulse_at(axis * lambda, pb);
+        bodies[self.a].apply_impulse_at(-axis * lambda, pa);
     }
 
     /// A slider's limit again, in each solve pass, before its block
@@ -482,6 +530,7 @@ pub fn solve(bodies: &mut [Body], joints: &mut [Joint], dt: f32) {
         if !live(joint, bodies) {
             continue;
         }
+        joint.suspension_limit(bodies, dt);
         joint.drive(bodies, dt);
         let rows = joint.rows(bodies);
         joint.solve_block(bodies, &rows, dt, 1.0, 1.0);
@@ -555,6 +604,7 @@ mod tests {
             friction: 0.0,
             saved_limits: None,
             steer_rest: None,
+            suspension: None,
         }
     }
 

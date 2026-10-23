@@ -26,11 +26,9 @@ fn game_dir() -> Option<PathBuf> {
 
 /// The chassis' centre of mass at the bell, live (box: Scout -1.6729,
 /// ALARM -1.6052, Razor -1.6431, FlapJack -1.6590; Compressor: Scout 5.5445,
-/// ALARM 5.6123). FlapJack comes down one lowering step (0.05 m) further in
-/// ours: the turns its wheels get on its start point (docs/29 section 12w)
-/// leave its traction phantoms a few tenths of a millimetre on the other side
-/// of the tolerance; live some of its bodies take only part of the first
-/// substep after the placement, which ours does not model.
+/// ALARM 5.6123). FlapJack's wheels turn on its start point with the weight
+/// their build left them (docs/29 section 12x), which puts its traction
+/// phantoms where live stops its lowering.
 #[test]
 fn robots_start_where_the_original_holds_them() {
     let Some(game) = game_dir() else {
@@ -57,18 +55,13 @@ fn robots_start_where_the_original_holds_them() {
         )
         .expect("a duel");
         for (r, want) in [(0, ya), (1, yb)] {
-            let step = if arena == "box.py" && b == "Team8/Bot0" && r == 1 {
-                0.05
-            } else {
-                0.0
-            };
             let y = d
                 .physics
                 .center_of_mass(d.robots[r].parts[0].body)
                 .unwrap()
                 .y;
             assert!(
-                (y - want).abs() < 0.002 || (y - (want - step)).abs() < 0.002,
+                (y - want).abs() < 0.002,
                 "{arena} robot {r}: {y} (live {want})"
             );
         }

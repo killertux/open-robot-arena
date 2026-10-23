@@ -161,7 +161,7 @@ def read_ours(path):
             k = w.index("chassis") if "chassis" in w else -1
             chassis[int(w[1])] = float(w[k + 1]) if k >= 0 else 0.0
         if w and w[0] == "P":
-            v = [float(x) for x in w[3:]]
+            v = [float(x) for x in w[3:11]]
             out.append({"robot": int(w[1]), "part": int(w[2]), "mass": v[0], "d": v[1:4], "angle": v[4],
                         "axis": v[5:8], "chassis": chassis.get(int(w[1]), 0.0)})
     return out

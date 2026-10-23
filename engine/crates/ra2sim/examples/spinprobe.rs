@@ -38,7 +38,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         for (p, part) in r.rig.parts.iter().enumerate().skip(1) {
             let s = duel.physics.state(r.parts[p].body).unwrap();
-            let (m, _, _) = duel.physics.mass_properties(r.parts[p].body).unwrap();
+            let (m, _, inertia) = duel.physics.mass_properties(r.parts[p].body).unwrap();
+            if std::env::var_os("SPIN_INERTIA").is_some() {
+                // The body's inertia in its own frame (the backend hands
+                // its inverse).
+                let local = inertia.inverse();
+                eprintln!("I {ri} {p} {:.3?}", local.to_cols_array_2d());
+            }
             let com = duel.physics.center_of_mass(r.parts[p].body).unwrap();
             let local = r.rig.components[part.root].local;
             let (_, built, _) = local.to_scale_rotation_translation();
@@ -48,8 +54,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let signed = if ax.dot(hinge) < 0.0 { -ang } else { ang };
             let d = frame.inverse() * (com - ccom);
             println!(
-                "P {ri} {p} {m:.2} {:.3} {:.3} {:.3} {:.4} {:.3} {:.3} {:.3}",
-                d.x, d.y, d.z, signed, ax.x, ax.y, ax.z
+                "P {ri} {p} {m:.2} {:.3} {:.3} {:.3} {:.4} {:.3} {:.3} {:.3} share {:.3}",
+                d.x,
+                d.y,
+                d.z,
+                signed,
+                ax.x,
+                ax.y,
+                ax.z,
+                r.build_share.get(p).copied().unwrap_or(1.0)
             );
         }
     }
@@ -61,6 +74,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse::<usize>().ok())
     {
         let idle = vec![ra2sim::DriveInput::default(); duel.robots.len()];
+        // As a match does: held through the countdown, let go at the bell.
+        duel.hold_robots(true);
+        duel.hold_robots(false);
         for k in 0..n {
             for (ri, r) in duel.robots.iter().enumerate() {
                 let cells: Vec<String> = r
@@ -73,6 +89,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     })
                     .collect();
                 println!("L {k} {ri} {}", cells.join(" "));
+                if let Some(s) = duel.physics.state(r.body()) {
+                    // The chassis' heading: its +z axis about the vertical.
+                    let f = s.rotation * Vec3::Z;
+                    println!("Q {k} {ri} {:.5}", f.x.atan2(f.z));
+                }
             }
             duel.step_direct(&idle, ra2sim::DEFAULT_STEP);
         }
