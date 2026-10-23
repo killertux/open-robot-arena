@@ -45,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     let mut duel = Duel::new(&a[0], &setups)?;
+    duel.record_impacts = true;
     let steps: usize = a[4].parse()?;
     let mut live = Vec::new();
     let mut throttle = [0.0f32; 2];
@@ -145,6 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
     }
+    duel.impacts.clear();
     // Place every body at the live state.
     for (r, robot) in rest.iter().enumerate() {
         let lv: Vec<&LiveBody> = live.iter().filter(|l| l.robot == r).collect();
@@ -246,6 +248,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         duel.step_direct(&command, DEFAULT_STEP);
+        // The arena's hazard joints (`HJ <step> <joint> <angle or offset> w
+        // <x y z>`) and every priced hit (`H <step> <attacker, -1 the arena>
+        // <victim> <amount> <speed>`), docs/29 section 12z.
+        for (k, (j, body, slider)) in duel.hazard_joints().into_iter().enumerate() {
+            let x = if slider {
+                duel.physics.slider_offset(j)
+            } else {
+                duel.physics.hinge_angle(j)
+            };
+            let w = duel.physics.state(body).unwrap().angular_velocity;
+            println!("HJ {i} {k} {x:.4} w {:.3} {:.3} {:.3}", w.x, w.y, w.z);
+        }
+        for h in std::mem::take(&mut duel.impacts) {
+            let att = if h.attacker == ra2sim::combat::NO_ATTACKER {
+                -1
+            } else {
+                h.attacker as i64
+            };
+            println!(
+                "H {i} {att} {} {:.3} {:.3} p {:.3} {:.3} {:.3}",
+                h.target, h.damage, h.speed, h.point.x, h.point.y, h.point.z
+            );
+        }
     }
     Ok(())
 }

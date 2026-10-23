@@ -41,6 +41,11 @@ fn robots_start_where_the_original_holds_them() {
         ("box.py", "Team0/Bot0", "Team0/Bot1", -1.6729, -1.6052),
         ("box.py", "Team10/Bot1", "Team8/Bot0", -1.6431, -1.6590),
         ("compressor.py", "Team0/Bot0", "Team0/Bot1", 5.5445, 5.6123),
+        // With the build's late wakes (docs/29 section 12z), live
+        // `spinup-stinger-tornado-box__live__000` and
+        // `spinup-miniberg-iceberg-box__live__000`.
+        ("box.py", "Team13/Bot0", "Team13/Bot1", -1.6939, -1.6018),
+        ("box.py", "Team7/Bot0", "Team7/Bot1", -1.6253, -1.4942),
     ] {
         let setup = |bot: &str| BotSetup {
             path: game

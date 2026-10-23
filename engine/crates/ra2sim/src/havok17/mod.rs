@@ -224,6 +224,8 @@ pub struct Havok17Backend {
     last_dt: f32,
     /// Body pairs (lower handle first) that never collide.
     disabled: std::collections::HashSet<(usize, usize)>,
+    /// `(body, other body, other's piece)` pairs that never collide.
+    disabled_pieces: std::collections::HashSet<(usize, usize, u32)>,
     /// Diagnostics: step pieces and backsteps since the world was made.
     pub pieces: u64,
     pub backsteps: u64,
@@ -259,6 +261,7 @@ impl Havok17Backend {
             phantom_touch: Vec::new(),
             last_dt: 1.0 / 60.0,
             disabled: Default::default(),
+            disabled_pieces: Default::default(),
             pieces: 0,
             backsteps: 0,
             systems: Vec::new(),
@@ -556,7 +559,10 @@ impl Havok17Backend {
                         continue;
                     }
                     let (friction_j, restitution_j) = (bj.friction, bj.restitution);
-                    if self.same_group(i, j) {
+                    if self.same_group(i, j)
+                        || self.disabled_pieces.contains(&(i, j, pb.piece))
+                        || self.disabled_pieces.contains(&(j, i, pa.piece))
+                    {
                         continue;
                     }
                     let first_awake = match (level[i], level[j]) {
@@ -1928,6 +1934,10 @@ impl PhysicsBackend for Havok17Backend {
             j.max_torque = strength;
             j.friction = friction;
         }
+    }
+
+    fn disable_collision_piece(&mut self, a: BodyHandle, b: BodyHandle, piece: u32) {
+        self.disabled_pieces.insert((a as usize, b as usize, piece));
     }
 
     fn disable_collision(&mut self, a: BodyHandle, b: BodyHandle) {

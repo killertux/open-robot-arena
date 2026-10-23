@@ -791,6 +791,163 @@ impl SmartZone {
 }
 
 impl RobotRig {
+    /// The components whose first appearance wakes the robot while it is
+    /// frozen: the build's late wakes (docs/29 section 12z).
+    ///
+    /// The original creates every component's body at the arena's origin in
+    /// its own frame, inactive, when the robot's build starts (live
+    /// `build-*-box__live__000` with `frida/ra2_build.js`: `setActive(0)` on every
+    /// body of both robots at one substep), then places the components in
+    /// `.bot` order, 116 substeps apart; 58 substeps before a component is
+    /// placed its body is activated at the origin and frozen again
+    /// (`0x531ef7`). A component that brings a body of its own wakes the
+    /// robot's system when it is placed, and the system freezes 14 substeps
+    /// later. When a body goes inactive (`0x52b290(X, 0)` → `0x548ab0`), the
+    /// detector holds back every pair of its in the contact list whose other
+    /// body is inactive; when either body is next activated (`0x548ed0` →
+    /// `0x548ef0`) the held pairs are gone through, a wakeable partner woken
+    /// (flags `+0x1c` bits 0..2 clear: a robot's chassis and the bodies at
+    /// the origin are not) and the pairs dropped. So a robot body that froze
+    /// within the contact list's reach of a component still at the origin is
+    /// woken, and its system with it, when that component's body first
+    /// appears: live MiniBerg's control board and battery wake its wheel
+    /// bodies (contact distances 0.031 and 0.047), Iceberg's Ice Pick a wheel,
+    /// Tornado's battery its spinner, the Scout's battery and control board
+    /// its fork arm and wheels; none of REVENGE's or Raptor's do.
+    ///
+    /// A pair is in the contact list when the narrowphase finds points within
+    /// the collision tolerance (0.1 m) and the shapes do not overlap (overlapping
+    /// shapes make no points): the robot body with every member it had when it
+    /// froze, at the robot's pose (the robot is built at the origin too), and the
+    /// component's colliding and phantom pieces (a wheel's traction ring is a
+    /// collidable of its body: live distances match ours to 1 mm with it). A
+    /// wheel at the origin never holds one live (no body at a wheel's origin
+    /// pose appears in any contact list of `build-team7bot0-team7bot1-box`,
+    /// `build-team13bot1-team0bot0-box`, `build-team12bot1-team12bot2-box`), and a body
+    /// that has a component welded into it is rebuilt, which drops its held
+    /// pairs (live, Tornado's spinner held pairs with its sledge hammers at the
+    /// origin and was not woken by them after its extender was welded on). A
+    /// component destined for a body never pairs with that body (live, in
+    /// three robots); why is not recovered. Over nine stock robots built live
+    /// (`build-*-box__live__000` of docs/29 section 12z) every late wake is found;
+    /// four spikes are taken to pair with a wheel that live they do not (only
+    /// Iceberg's Pole Spike changes a weight).
+    pub fn late_wakes(&self) -> Vec<usize> {
+        use crate::havok17::narrow::closest;
+        let n = self.components.len();
+        let body_bringing: Vec<usize> = self
+            .parts
+            .iter()
+            .filter_map(|q| q.joint.map(|j| j.motor))
+            .collect();
+        // A piece as the narrowphase sees it: a convex hull, or each
+        // triangle of a mesh (a mesh's hull reaches where it does not).
+        let split = |pts: &[Vec3], mesh: Option<&Vec<[u32; 3]>>| -> Vec<Vec<Vec3>> {
+            match mesh {
+                Some(tris) => tris
+                    .iter()
+                    .map(|t| t.iter().map(|&v| pts[v as usize]).collect())
+                    .collect(),
+                None => vec![pts.to_vec()],
+            }
+        };
+        let own = |i: usize| -> Vec<Vec<Vec3>> {
+            let h = &self.components[i].havok;
+            let mut v: Vec<Vec<Vec3>> = Vec::new();
+            for (k, pts) in h.collision.iter().enumerate() {
+                v.extend(split(pts, h.collision_mesh.get(k).and_then(|m| m.as_ref())));
+            }
+            v.extend(h.phantom_pieces.iter().map(|(p, _)| p.clone()));
+            v.retain(|p| !p.is_empty());
+            v
+        };
+        // A part's pieces at the robot's pose with its members up to `upto`.
+        let body = |p: usize, upto: usize| -> Vec<Vec<Vec3>> {
+            let part = &self.parts[p];
+            let mut v = Vec::new();
+            for &i in part.members.iter().filter(|&&i| i <= upto) {
+                let m = self.components[i].local;
+                for pc in own(i) {
+                    v.push(pc.iter().map(|q| m.transform_point3(*q)).collect());
+                }
+            }
+            if let Some(j) = part.joint.filter(|j| j.motor <= upto) {
+                let c = &self.components[j.motor];
+                let h = &c.havok;
+                for (k, pts) in h.rotor_collision.iter().enumerate() {
+                    let mesh = h.rotor_collision_mesh.get(k).and_then(|m| m.as_ref());
+                    for pc in split(pts, mesh) {
+                        v.push(
+                            pc.iter()
+                                .map(|q| c.rotor_local.transform_point3(*q))
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            v.retain(|p: &Vec<Vec3>| !p.is_empty());
+            v
+        };
+        let reach = crate::havok17::TOLERANCE;
+        let touches = |a: &[Vec<Vec3>], b: &[Vec<Vec3>]| {
+            a.iter().any(|pa| {
+                b.iter().any(|pb| {
+                    let c = closest(pa, pb);
+                    !c.overlap && c.distance < reach
+                })
+            })
+        };
+        let at_origin = |k: usize| self.components[k].wheel.is_none() && !own(k).is_empty();
+        // The pairs every robot body holds when the system freezes with the
+        // components up to `upto` placed.
+        let freeze = |upto: usize, from: usize| -> Vec<Vec<usize>> {
+            (0..self.parts.len())
+                .map(|p| {
+                    if p == 0 {
+                        return Vec::new();
+                    }
+                    let mine = body(p, upto);
+                    if mine.is_empty() {
+                        return Vec::new();
+                    }
+                    // A component that will be welded into this very body
+                    // never holds a pair with it (live: Wide Load's piston rod
+                    // with its connectors and tips, Grog's arm with its
+                    // extender, Sentinel's burst arm with its wedge).
+                    let held: Vec<usize> = (from..n)
+                        .filter(|&k| !self.parts[p].members.contains(&k))
+                        .filter(|&k| at_origin(k) && touches(&mine, &own(k)))
+                        .collect();
+                    if std::env::var_os("RA2_LATE_DEBUG").is_some() && !held.is_empty() {
+                        eprintln!("freeze upto {upto}: part {p} holds {held:?}");
+                    }
+                    held
+                })
+                .collect()
+        };
+        let mut held: Vec<Vec<usize>> = vec![Vec::new(); self.parts.len()];
+        let mut out = Vec::new();
+        for k in 1..n {
+            // 58 substeps before it is placed, at the origin.
+            if held.iter().any(|h| h.contains(&k)) {
+                out.push(k);
+                // The robot freezes again; the component that woke it has
+                // been through its pairs (live, MiniBerg's control board
+                // is in no list at the freeze after its wake).
+                held = freeze(k - 1, k + 1);
+            }
+            // Placed.
+            if body_bringing.contains(&k) {
+                held = freeze(k, k + 1);
+            } else if let Some(p) =
+                (1..self.parts.len()).find(|&p| self.parts[p].members.contains(&k))
+            {
+                held[p].clear();
+            }
+        }
+        out
+    }
+
     /// The robot's front in its own frame: `+Z` turned by [`RobotRig::heading`]
     /// (see there).
     pub fn forward(&self) -> Vec3 {
