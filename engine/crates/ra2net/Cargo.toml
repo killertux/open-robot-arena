@@ -7,3 +7,7 @@ description = "Robot Arena 2 multiplayer: the giNetwork message layer, DirectPla
 
 [dependencies]
 flate2 = "1.1.10"
+
+[dev-dependencies]
+flate2 = "1.1.10"
+ra2fmt = { path = "../ra2fmt" }

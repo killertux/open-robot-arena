@@ -97,6 +97,9 @@ pub struct NetGame {
     pacer: Pacer,
     clock: u32,
     last_clock: Option<u32>,
+    /// When set, every `giSyncMessage` that arrives is also kept here, whole
+    /// (the tools that record the original's snapshots read it).
+    pub tap_sync: Option<Vec<SyncMessage>>,
 }
 
 impl NetGame {
@@ -113,6 +116,7 @@ impl NetGame {
             pacer: Pacer::new(speed),
             clock: 0,
             last_clock: None,
+            tap_sync: None,
         })
     }
 
@@ -125,6 +129,7 @@ impl NetGame {
             pacer: Pacer::new(ConnectionSpeed::Lan),
             clock: 0,
             last_clock: None,
+            tap_sync: None,
         })
     }
 
@@ -136,11 +141,42 @@ impl NetGame {
         self.session.local_id()
     }
 
-    fn broadcast_lobby(&mut self) {
-        for m in self.lobby.group_infos() {
-            self.session.send_with(Target::All, &m, true);
+    /// Host: tell the peers the panels that changed since `before`.
+    /// DirectPlay's mesh delivers a peer's message to the others directly and
+    /// never back to its sender (`DPNSEND_NOLOOPBACK`, flags `0x20` on the
+    /// original's `giGroupInfoMessage`); this host relays, so a panel the
+    /// `claimant` itself just described does not go back to it. A peer is the
+    /// authority of its own panel: the original takes a `giGroupInfoMessage`
+    /// that names its own panel for a remote one (the panel loses its Eject,
+    /// Ready and change-robot controls; live, docs/38 section 15).
+    fn publish_lobby(&mut self, before: &[crate::lobby::Slot], claimant: Option<PlayerId>) {
+        let me = self.local();
+        let peers: Vec<PlayerId> = self
+            .session
+            .players()
+            .into_iter()
+            .map(|p| p.id)
+            .filter(|id| Some(*id) != me)
+            .collect();
+        for slot in self.lobby.slots.clone() {
+            if slot.is_spectator() || before.contains(&slot) {
+                continue;
+            }
+            let m = Message::GroupInfo(slot.to_group_info());
+            for p in &peers {
+                if Some(*p) != claimant || slot.player != *p {
+                    self.session.send_with(Target::Player(*p), &m, true);
+                }
+            }
         }
         self.session.set_host_data(self.lobby.host_data());
+    }
+
+    /// Host: a newcomer is told every panel, its own default one included.
+    fn send_lobby_to(&mut self, to: PlayerId) {
+        for m in self.lobby.group_infos() {
+            self.session.send_with(Target::Player(to), &m, true);
+        }
     }
 
     /// Pump the session.
@@ -167,13 +203,15 @@ impl NetGame {
                         self.lobby.add_watcher(p.id, &p.name);
                     }
                     if self.is_host() {
+                        let before = self.lobby.slots.clone();
                         self.lobby.join(p.id, &p.name);
                         // The newcomer needs the settings and every slot;
                         // the others need the new slot.
                         for m in self.lobby.settings() {
                             self.session.send_with(Target::Player(p.id), &m, true);
                         }
-                        self.broadcast_lobby();
+                        self.send_lobby_to(p.id);
+                        self.publish_lobby(&before, Some(p.id));
                     }
                     out.push(GameEvent::PlayerJoined {
                         id: p.id,
@@ -191,13 +229,14 @@ impl NetGame {
                     });
                 }
                 Event::PlayerLeft { id, reason } => {
+                    let before = self.lobby.slots.clone();
                     self.lobby.leave(id);
                     if self.is_host() {
                         // A freed player panel goes to the first spectator.
                         if self.schema.is_none() {
                             self.lobby.promote_spectators();
                         }
-                        self.broadcast_lobby();
+                        self.publish_lobby(&before, None);
                     }
                     out.push(GameEvent::PlayerLeft { id, reason });
                 }
@@ -221,12 +260,24 @@ impl NetGame {
             | Message::ChangeWeightClass(_)
             | Message::ArenaPreview(_)
             | Message::Text(_) => {
+                let before = self.lobby.slots.clone();
                 if let Some(change) = self.lobby.apply(from, host, &message) {
                     if self.is_host() {
                         match &message {
-                            Message::GroupInfo(_) => self.broadcast_lobby(),
+                            Message::GroupInfo(_) => self.publish_lobby(&before, Some(from)),
                             Message::PlayerReady { .. } => {
-                                self.session.send_with(Target::All, &message, true);
+                                // Not back to the sender (see `publish_lobby`).
+                                let me = self.local();
+                                let peers: Vec<PlayerId> = self
+                                    .session
+                                    .players()
+                                    .into_iter()
+                                    .map(|p| p.id)
+                                    .filter(|id| Some(*id) != me && *id != from)
+                                    .collect();
+                                for p in peers {
+                                    self.session.send_with(Target::Player(p), &message, true);
+                                }
                             }
                             _ => {}
                         }
@@ -251,6 +302,9 @@ impl NetGame {
                 }
             }
             Message::Sync(sync) => {
+                if let Some(tap) = &mut self.tap_sync {
+                    tap.push(sync.clone());
+                }
                 // "ERROR: Sync ignored - not in game yet".
                 let Some(schema) = &self.schema else {
                     return;
@@ -328,6 +382,20 @@ impl NetGame {
     /// a joiner of the original's lobby, where everyone starts without one);
     /// with none free it stays a spectator.
     pub fn choose_robot(&mut self, team: &str, robot: &str, logo: &str, design: Vec<u8>) {
+        self.claim_panel(None, team, robot, logo, design);
+    }
+
+    /// [`NetGame::choose_robot`] for a panel the player picked: the original's
+    /// lobby offers each open panel's join button (`noplayer.gib`), and the
+    /// claim names that panel.
+    pub fn claim_panel(
+        &mut self,
+        panel: Option<u32>,
+        team: &str,
+        robot: &str,
+        logo: &str,
+        design: Vec<u8>,
+    ) {
         let Some(me) = self.local() else { return };
         let name = self
             .lobby
@@ -337,8 +405,9 @@ impl NetGame {
             .map(|(_, n)| n.clone())
             .or_else(|| self.lobby.slot(me).map(|s| s.name.clone()))
             .unwrap_or_default();
-        let index = match self.lobby.slot(me) {
-            Some(s) if s.is_human() => s.index,
+        let index = match (panel, self.lobby.slot(me)) {
+            (Some(i), _) => i,
+            (None, Some(s)) if s.is_human() => s.index,
             _ => match self.lobby.free_panel() {
                 Some(i) => i,
                 None => return,
@@ -355,11 +424,12 @@ impl NetGame {
             ready: self.lobby.slot(me).is_some_and(|s| s.is_human() && s.ready),
             design: Some(design),
         };
+        let before = self.lobby.slots.clone();
         self.lobby.set_panel(slot.clone());
         let slot = &slot;
         let info = Message::GroupInfo(slot.to_group_info());
         if self.is_host() {
-            self.broadcast_lobby();
+            self.publish_lobby(&before, None);
         } else {
             self.session
                 .send_with(Target::Player(self.host), &info, true);

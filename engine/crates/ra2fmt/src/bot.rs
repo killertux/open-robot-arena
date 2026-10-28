@@ -342,7 +342,7 @@ pub fn parse(data: &[u8]) -> Result<Bot, Error> {
         }
     };
     let snapshot = if snap {
-        Some(lines.take_tga(Some((128, 128)))?.to_vec())
+        Some(lines.take_tga(Some((128, 128)))?.into_owned())
     } else {
         None
     };
@@ -509,7 +509,7 @@ fn parse_chassis(lines: &mut Lines, ver: (i32, i32)) -> Result<Chassis, Error> {
     if has_model {
         ch.mesh = Some(parse_3d_data(lines)?);
         if lines.line() == b"true" {
-            ch.texture_tga = Some(lines.take_tga(Some((256, 256)))?.to_vec());
+            ch.texture_tga = Some(lines.take_tga(Some((256, 256)))?.into_owned());
         }
         // The "unknown section" flag exists from 1.08 onward (absent in 1.07).
         if ver > (1, 7) && lines.line() == b"true" {
@@ -664,8 +664,26 @@ impl Bot {
     /// buckle points, buckle model, heading) are emitted for the versions that
     /// have them, so an old file written back stays an old file.
     pub fn write(&self) -> Vec<u8> {
+        self.write_with(false)
+    }
+
+    /// The robot as a multiplayer peer sends it (`giAddArenaBotMessage`): the
+    /// current format, 1.12, and each picture in the wire form (type `0x17`,
+    /// a zlib stream; `docs/38` section 15).
+    pub fn write_wire(&self) -> Vec<u8> {
+        self.upgraded().write_with(true)
+    }
+
+    /// The robot's preview picture in the wire form: what a lobby panel's
+    /// `giGroupInfoMessage` carries as the robot's design (type `0x17`).
+    pub fn snapshot_wire(&self) -> Option<Vec<u8>> {
+        self.snapshot.as_deref().map(tga_to_wire)
+    }
+
+    fn write_with(&self, wire: bool) -> Vec<u8> {
         let ver = parse_version(&self.version);
         let mut w = Writer::new(self.line_ending);
+        w.wire = wire;
 
         w.line(&self.version);
         w.line(&format!("Name: {}", self.name));
@@ -679,7 +697,7 @@ impl Bot {
             "false"
         });
         if let Some(snapshot) = &self.snapshot {
-            w.bytes(snapshot);
+            w.tga(snapshot);
         }
         w.line(&self.components.len().to_string());
 
@@ -774,7 +792,7 @@ impl Writer<'_> {
                 "false"
             });
             if let Some(tex) = &ch.texture_tga {
-                self.bytes(tex);
+                self.tga(tex);
             }
             if ver > (1, 7) {
                 // The reader cannot decode a present unknown section, and no
@@ -863,6 +881,8 @@ impl Writer<'_> {
 struct Writer<'a> {
     out: Vec<u8>,
     e: &'a str,
+    /// Pictures go out in the wire form (multiplayer's robot copy).
+    wire: bool,
 }
 
 impl<'a> Writer<'a> {
@@ -870,16 +890,23 @@ impl<'a> Writer<'a> {
         Writer {
             out: Vec::new(),
             e: line_ending.s(),
+            wire: false,
+        }
+    }
+
+    /// A picture: plain, or in the wire form.
+    fn tga(&mut self, tga: &[u8]) {
+        if self.wire {
+            let packed = tga_to_wire(tga);
+            self.out.extend_from_slice(&packed);
+        } else {
+            self.out.extend_from_slice(tga);
         }
     }
 
     fn line(&mut self, s: &str) {
         self.out.extend_from_slice(s.as_bytes());
         self.out.extend_from_slice(self.e.as_bytes());
-    }
-
-    fn bytes(&mut self, b: &[u8]) {
-        self.out.extend_from_slice(b);
     }
 
     fn floats(&mut self, v: &[f32]) {
@@ -1029,7 +1056,15 @@ impl<'a> Lines<'a> {
     }
 
     /// Return the raw bytes of a TGA at the cursor, advancing past it.
-    fn take_tga(&mut self, expect: Option<(u16, u16)>) -> Result<&'a [u8], Error> {
+    ///
+    /// A file holds plain TGAs (type 2 or 3). The copy of a robot that travels
+    /// in a multiplayer `giAddArenaBotMessage` stores each as type `0x17`: the
+    /// same header, then the compressed size (u32) and a zlib stream of the
+    /// pixels (`docs/38` section 15); it is returned as the plain type-2 TGA.
+    fn take_tga(
+        &mut self,
+        expect: Option<(u16, u16)>,
+    ) -> Result<std::borrow::Cow<'a, [u8]>, Error> {
         let h = self
             .d
             .get(self.p..self.p + 18)
@@ -1042,7 +1077,7 @@ impl<'a> Lines<'a> {
         let w = u16::from_le_bytes([h[12], h[13]]);
         let ht = u16::from_le_bytes([h[14], h[15]]);
         let bpp = h[16] as usize;
-        if itype != 2 && itype != 3 {
+        if itype != 2 && itype != 3 && itype != WIRE_TGA_TYPE {
             return Err(Error::Structure(format!("unsupported TGA type {itype}")));
         }
         if let Some((ew, eh)) = expect {
@@ -1050,7 +1085,34 @@ impl<'a> Lines<'a> {
                 return Err(Error::Structure(format!("TGA {w}x{ht} != {ew}x{eh}")));
             }
         }
-        let size = 18 + idlen + (w as usize) * (ht as usize) * (bpp / 8);
+        let pixels = (w as usize) * (ht as usize) * (bpp / 8);
+        if itype == WIRE_TGA_TYPE {
+            let at = self.p + 18 + idlen;
+            let len = self
+                .d
+                .get(at..at + 4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+                .ok_or(Error::UnexpectedEof { at, wanted: 4 })?;
+            let packed = self
+                .d
+                .get(at + 4..at + 4 + len)
+                .ok_or(Error::UnexpectedEof {
+                    at: at + 4,
+                    wanted: len,
+                })?;
+            let mut out = self.d[self.p..at].to_vec();
+            out[2] = 2;
+            let mut z =
+                std::io::Read::take(flate2::read::ZlibDecoder::new(packed), pixels as u64 + 1);
+            std::io::Read::read_to_end(&mut z, &mut out)
+                .map_err(|e| Error::Structure(format!("TGA zlib stream: {e}")))?;
+            if out.len() != at - self.p + pixels {
+                return Err(Error::Structure("TGA zlib stream of the wrong size".into()));
+            }
+            self.p = at + 4 + len;
+            return Ok(std::borrow::Cow::Owned(out));
+        }
+        let size = 18 + idlen + pixels;
         let bytes = self
             .d
             .get(self.p..self.p + size)
@@ -1059,8 +1121,31 @@ impl<'a> Lines<'a> {
                 wanted: size,
             })?;
         self.p += size;
-        Ok(bytes)
+        Ok(std::borrow::Cow::Borrowed(bytes))
     }
+}
+
+/// The TGA image type a robot's pictures carry on the wire.
+const WIRE_TGA_TYPE: u8 = 0x17;
+
+/// A plain TGA (type 2, 32 bits) as the wire form: type `0x17`, the compressed
+/// size, the zlib stream (default level, zlib 1.1.3's `compress`).
+fn tga_to_wire(tga: &[u8]) -> Vec<u8> {
+    let Some(head) = tga.get(..18).filter(|h| h[2] == 2 || h[2] == 3) else {
+        return tga.to_vec();
+    };
+    let at = 18 + head[0] as usize;
+    let Some(pixels) = tga.get(at..) else {
+        return tga.to_vec();
+    };
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut z, pixels).expect("a Vec writes");
+    let packed = z.finish().expect("a Vec writes");
+    let mut out = tga[..at].to_vec();
+    out[2] = WIRE_TGA_TYPE;
+    out.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+    out.extend_from_slice(&packed);
+    out
 }
 
 #[cfg(test)]
