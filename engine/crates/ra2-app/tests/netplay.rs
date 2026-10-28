@@ -26,6 +26,55 @@ fn game_dir() -> Option<PathBuf> {
     }
 }
 
+const LOGO: &str = "Teams\\orange_skull.bmp";
+
+/// Take `panel` with a stand-in robot (the lobby's picker does this with a
+/// real `.bot`; the match tests only need the panel).
+fn claim(net: &mut NetPlay, panel: u32) {
+    let game = net.game.as_mut().unwrap();
+    assert!(game.claim_panel(
+        Some(panel),
+        "Team",
+        &format!("Bot{panel}"),
+        LOGO,
+        vec![1, 2, 3]
+    ));
+}
+
+/// Pump both ends until `done` (5 s at most).
+fn wait_for(
+    a: (&mut NetPlay, &mut Shell),
+    b: (&mut NetPlay, &mut Shell),
+    done: impl Fn(&NetPlay, &NetPlay) -> bool,
+) {
+    let (a, ash) = a;
+    let (b, bsh) = b;
+    let start = Instant::now();
+    while !done(a, b) && start.elapsed() < Duration::from_secs(5) {
+        a.tick(ash).unwrap();
+        b.tick(bsh).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(done(a, b), "timed out");
+}
+
+/// A player's click on a lobby panel's button, then (for the two join
+/// buttons and the change-robot button) the shipped picker: the robot in
+/// `column` of the team the picker opens on, OK.
+fn panel_click(shell: &mut Shell, net: &mut NetPlay, slot: usize, button: &str, column: usize) {
+    let step = shell.click_panel_button(slot, button).unwrap();
+    assert_eq!(step.hit_widget(), Some(button));
+    net.on_step(shell, PREMATCH_SCREEN, &step).unwrap();
+    if button == "eject button" || button == "ready checkbox" {
+        return;
+    }
+    assert!(shell.popup_id().is_some(), "{button}: the picker opens");
+    shell.click_popup_robot(column).unwrap();
+    let step = shell.click_named("ok button").unwrap();
+    net.on_step(shell, PREMATCH_SCREEN, &step).unwrap();
+    assert!(shell.popup_id().is_none());
+}
+
 fn loopback(name: &str) -> NetPlay {
     let mut net = NetPlay::new();
     net.bind_ip = "127.0.0.1".parse().unwrap();
@@ -117,10 +166,135 @@ fn refresh_join_and_the_prematch_lobby_through_the_screens() {
     assert_eq!(lobby.slots[1].name, "Guest");
     assert_eq!(host.game.as_ref().unwrap().lobby.slots.len(), 2);
 
-    // Ready on the guest's screen reaches the host.
-    let step = ra2_shell::Step {
+    // Nobody has a panel on arrival: the host lists itself and the guest
+    // under Spectators, and every panel is OPEN.
+    let me = guest.game.as_ref().unwrap().local().unwrap();
+    for net in [&host, &guest] {
+        let lobby = &net.game.as_ref().unwrap().lobby;
+        assert_eq!(lobby.players().count(), 0);
+        assert_eq!(lobby.members.len(), 2);
+    }
+    host_shell
+        .click_panel_button(0, "human player button")
+        .unwrap();
+    let request = host_shell.take_panel_request().unwrap();
+    assert_eq!(
+        (request.slot, request.button),
+        (0, ra2_shell::PanelButton::Join)
+    );
+    // The app opens the picker; cancelling it picks nothing.
+    host_shell
+        .open_lobby_picker(0, ra2ui::teams::Side::Player)
+        .unwrap();
+    assert!(host_shell.popup_id().is_some());
+    host_shell.click_named("cancel button").unwrap();
+    assert!(host_shell.take_lobby_pick().is_none());
+    assert!(host.game.as_ref().unwrap().lobby.panel(0).is_none());
+
+    // The host joins panel 0 with a robot of the Select Player Robot window
+    // and adds a computer robot in panel 1 (Select Computer Robot).
+    panel_click(&mut host_shell, &mut host, 0, "human player button", 0);
+    panel_click(&mut host_shell, &mut host, 1, "computer player button", 1);
+    let lobby = &host.game.as_ref().unwrap().lobby;
+    let (p0, p1) = (lobby.panel(0).unwrap(), lobby.panel(1).unwrap());
+    assert_eq!(p0.kind, ra2net::lobby::kind::HUMAN_WITH_ROBOT);
+    assert_eq!(p1.kind, ra2net::lobby::kind::COMPUTER_WITH_ROBOT);
+    assert!(!p0.robot.is_empty() && !p1.robot.is_empty());
+    assert!(p0.team_logo.starts_with("Teams\\") && p1.design.is_some());
+    let picked = host.picked_robot(0).expect("the host's pick is kept");
+    assert!(picked.path.is_file() && picked.path.extension().is_some_and(|e| e == "bot"));
+    assert_eq!(picked.robot, p0.robot);
+    assert_eq!(picked.bot.snapshot_wire(), p0.design);
+    assert_eq!(
+        host.picked_robot(1).unwrap().side,
+        ra2ui::teams::Side::Computer
+    );
+    assert!(host.picked_robot(2).is_none());
+    // Neither panel has the exhibition's art: the lobby draws them.
+    assert!(host_shell.slot_pick(0).is_none());
+
+    // The guest joins panel 2; the host's panels reach it as remote ones.
+    wait_for(
+        (&mut host, &mut host_shell),
+        (&mut guest, &mut guest_shell),
+        |_, g| g.game.as_ref().unwrap().lobby.panel(1).is_some(),
+    );
+    panel_click(&mut guest_shell, &mut guest, 2, "human player button", 2);
+    wait_for(
+        (&mut host, &mut host_shell),
+        (&mut guest, &mut guest_shell),
+        |h, _| h.game.as_ref().unwrap().lobby.panel(2).is_some(),
+    );
+    let lobby = &host.game.as_ref().unwrap().lobby;
+    assert_eq!(lobby.panel(2).unwrap().player, me);
+    assert_eq!(
+        lobby.panel(2).unwrap().kind,
+        ra2net::lobby::kind::HUMAN_WITH_ROBOT
+    );
+    assert!(guest.picked_robot(2).is_some());
+    assert!(
+        guest.picked_robot(0).is_none(),
+        "the host's pick is not ours"
+    );
+
+    // What each end's panels show depends on their kind (`FUN_0047c020`).
+    wait_for(
+        (&mut host, &mut host_shell),
+        (&mut guest, &mut guest_shell),
+        |_, g| g.game.as_ref().unwrap().lobby.players().count() == 3,
+    );
+    host.tick(&mut host_shell).unwrap();
+    guest.tick(&mut guest_shell).unwrap();
+    let look = |shell: &Shell, panel: usize| {
+        let doc = shell.document();
+        let name = format!("player{} group", panel + 1);
+        let group = doc
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                ra2fmt::gib::Block::Widget(root) => ra2ui::workshop::find(root, &name),
+                _ => None,
+            })
+            .expect("a panel group");
+        let shown = |name: &str| {
+            ra2ui::workshop::find(group, name)
+                .map(|w| ra2ui::input::field_of(w, "Visible") != Some("false"))
+                .unwrap_or(false)
+        };
+        let icon = ra2ui::workshop::find(group, "player icon img")
+            .and_then(|w| ra2ui::input::field_of(w, "_Filename"))
+            .unwrap_or("")
+            .to_string();
+        (
+            icon,
+            shown("change robot button"),
+            shown("eject button"),
+            shown("ready checkbox"),
+        )
+    };
+    let (local, remote, computer) = (
+        "multiplayer\\local_player_icon.bmp",
+        "multiplayer\\remote_player_icon.bmp",
+        "multiplayer\\computer_player_icon.bmp",
+    );
+    // The host: its own human panel (kind 0), a computer it set up (kind 2),
+    // and the guest's panel (kind 1: eject only, as the host).
+    assert_eq!(look(&host_shell, 0), (local.into(), true, true, true));
+    assert_eq!(look(&host_shell, 1), (computer.into(), true, true, false));
+    assert_eq!(look(&host_shell, 2), (remote.into(), false, true, true));
+    // The guest: the host's panel (kind 1) and computer (kind 3) have no
+    // change and no eject; its own is kind 0.
+    assert_eq!(look(&guest_shell, 0), (remote.into(), false, false, true));
+    assert_eq!(
+        look(&guest_shell, 1),
+        (computer.into(), false, false, false)
+    );
+    assert_eq!(look(&guest_shell, 2), (local.into(), true, true, true));
+
+    // Ready: begin waits for every human; the checkbox is the owner's flag.
+    let begin = ra2_shell::Step {
         command: String::new(),
-        hit: "CheckBox \"ready checkbox\"".into(),
+        hit: "Button \"begin match button\"".into(),
         note: None,
         screen: PREMATCH_SCREEN.into(),
         content: None,
@@ -128,19 +302,52 @@ fn refresh_join_and_the_prematch_lobby_through_the_screens() {
         step: None,
         point: [0.0, 0.0],
     };
-    guest
-        .on_step(&mut guest_shell, PREMATCH_SCREEN, &step)
+    let action = host
+        .on_step(&mut host_shell, PREMATCH_SCREEN, &begin)
         .unwrap();
-    let start = Instant::now();
-    let me = guest.game.as_ref().unwrap().local().unwrap();
-    while !host.game.as_ref().unwrap().lobby.slot(me).unwrap().ready
-        && start.elapsed() < Duration::from_secs(5)
-    {
-        host.tick(&mut host_shell).unwrap();
-        guest.tick(&mut guest_shell).unwrap();
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    assert_eq!(action, net_play::NetAction::None, "nobody is ready");
+    panel_click(&mut guest_shell, &mut guest, 2, "ready checkbox", 0);
+    wait_for(
+        (&mut host, &mut host_shell),
+        (&mut guest, &mut guest_shell),
+        |h, _| h.game.as_ref().unwrap().lobby.slot(me).unwrap().ready,
+    );
     assert!(host.game.as_ref().unwrap().lobby.slot(me).unwrap().ready);
+    // The host, not ready yet, cannot begin; ready, it can (not run here).
+    assert!(!host.game.as_ref().unwrap().lobby.all_ready());
+    panel_click(&mut host_shell, &mut host, 0, "ready checkbox", 0);
+    assert!(host.game.as_ref().unwrap().lobby.all_ready());
+
+    // Change robot: the guest's panel keeps its place and its ready flag.
+    let before = guest.picked_robot(2).unwrap().robot.clone();
+    panel_click(&mut guest_shell, &mut guest, 2, "change robot button", 3);
+    assert_ne!(guest.picked_robot(2).unwrap().robot, before);
+    wait_for(
+        (&mut host, &mut host_shell),
+        (&mut guest, &mut guest_shell),
+        |h, g| {
+            h.game.as_ref().unwrap().lobby.panel(2).unwrap().robot
+                == g.picked_robot(2).unwrap().robot
+        },
+    );
+    assert!(host.game.as_ref().unwrap().lobby.panel(2).unwrap().ready);
+    // The host ejects the guest's panel: it waits as a spectator again.
+    panel_click(&mut host_shell, &mut host, 2, "eject button", 0);
+    wait_for(
+        (&mut host, &mut host_shell),
+        (&mut guest, &mut guest_shell),
+        |_, g| g.game.as_ref().unwrap().lobby.panel(2).is_none(),
+    );
+    assert!(guest.is_spectator());
+    assert!(guest.picked_robot(2).is_none());
+    // The host's computer panel goes with an eject too.
+    panel_click(&mut host_shell, &mut host, 1, "eject button", 0);
+    assert!(host.game.as_ref().unwrap().lobby.panel(1).is_none());
+    wait_for(
+        (&mut host, &mut host_shell),
+        (&mut guest, &mut guest_shell),
+        |_, g| g.game.as_ref().unwrap().lobby.panel(1).is_none(),
+    );
 
     // Lobby chat from the guest's entry (Enter): `[Guest] hello` reaches the
     // host's `chat messages` box (a DisplayBox: its markup carries the text),
@@ -178,13 +385,15 @@ fn refresh_join_and_the_prematch_lobby_through_the_screens() {
         .base_screen_id()
         .eq_ignore_ascii_case(BROWSER_SCREEN));
     let start = Instant::now();
-    while host.game.as_ref().unwrap().lobby.slots.len() > 1
+    while host.game.as_ref().unwrap().lobby.members.len() > 1
         && start.elapsed() < Duration::from_secs(5)
     {
         host.tick(&mut host_shell).unwrap();
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(host.game.as_ref().unwrap().lobby.slots.len(), 1);
+    assert_eq!(host.game.as_ref().unwrap().lobby.members.len(), 1);
+    // The host's panel 0 is still its own.
+    assert!(host.picked_robot(0).is_some());
     host.leave();
 }
 
@@ -209,24 +418,25 @@ fn a_synced_duel_follows_the_host() {
         guest.game.as_mut().unwrap().poll();
         std::thread::sleep(Duration::from_millis(2));
     }
+    // The host takes panel 0, the guest panel 1.
+    claim(&mut host, 0);
+    claim(&mut guest, 1);
+    let start = Instant::now();
+    while !(host.game.as_ref().unwrap().lobby.players().count() == 2
+        && guest.game.as_ref().unwrap().lobby.players().count() == 2)
+        && start.elapsed() < Duration::from_secs(5)
+    {
+        host.game.as_mut().unwrap().poll();
+        guest.game.as_mut().unwrap().poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
     host.game
         .as_mut()
         .unwrap()
         .set_settings("DEATHMATCH", "Heavyweight", "Arenas/box.py");
     host.game.as_mut().unwrap().start_match("Arenas/box.py");
     host.game.as_mut().unwrap().set_schema(net_play::schema());
-    for (i, slot) in host
-        .game
-        .as_ref()
-        .unwrap()
-        .lobby
-        .slots
-        .clone()
-        .iter()
-        .enumerate()
-    {
-        host.robot_of.insert(slot.player, i);
-    }
+    host.assign_robots();
     // The guest hears Prepare.
     let start = Instant::now();
     let mut prepared = false;
@@ -240,9 +450,7 @@ fn a_synced_duel_follows_the_host() {
     }
     assert!(prepared);
     guest.game.as_mut().unwrap().set_schema(net_play::schema());
-    guest
-        .robot_of
-        .insert(guest.game.as_ref().unwrap().local().unwrap(), 1);
+    guest.assign_robots();
 
     let mut host_match = host.match_session(&game, "Arenas/box.py").unwrap();
     let mut guest_match = guest.match_session(&game, "Arenas/box.py").unwrap();
@@ -349,6 +557,18 @@ fn child(role: &str, window: bool) {
     }
     assert!(lobby_len(&net) >= expect, "{role}: never joined");
     report(format!("JOINED {role}"));
+    // Each player takes the panel of its join order; the watcher stays a
+    // spectator.
+    let panel = match role {
+        "host" => Some(0),
+        "p1" => Some(1),
+        "p2" => Some(2),
+        "p3" => Some(3),
+        _ => None,
+    };
+    if let Some(panel) = panel {
+        claim(&mut net, panel);
+    }
 
     // The host waits for the parent's START; everyone else for Prepare.
     let arena = "Arenas/box.py";
@@ -360,6 +580,11 @@ fn child(role: &str, window: bool) {
             let _ = tx.send(());
         });
         while rx.try_recv().is_err() && Instant::now() < deadline {
+            net.game.as_mut().unwrap().poll();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Every player's panel has reached the host.
+        while net.game.as_ref().unwrap().lobby.players().count() < 4 && Instant::now() < deadline {
             net.game.as_mut().unwrap().poll();
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -618,6 +843,16 @@ fn a_rematch_in_the_same_lobby_starts_from_a_clean_gate() {
         pump(&mut host, &mut guest, &mut host_shell, &mut guest_shell);
     }
     assert_eq!(host.game.as_ref().unwrap().lobby.slots.len(), 2);
+    // Begin needs two robots and every human ready.
+    claim(&mut host, 0);
+    claim(&mut guest, 1);
+    host.game.as_mut().unwrap().set_ready(true);
+    guest.game.as_mut().unwrap().set_ready(true);
+    let start = Instant::now();
+    while !host.game.as_ref().unwrap().lobby.all_ready() && start.elapsed() < Duration::from_secs(5)
+    {
+        pump(&mut host, &mut guest, &mut host_shell, &mut guest_shell);
+    }
     let begin = ra2_shell::Step {
         command: String::new(),
         hit: "Button \"begin match button\"".into(),
@@ -800,6 +1035,7 @@ fn edge_child(test: &str, role: &str) {
     }
     assert_eq!(lobby_len(&net), 2, "{role}: never joined");
     report(format!("JOINED {role}"));
+    claim(&mut net, if host { 0 } else { 1 });
     let arena = "Arenas/box.py";
     if host {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -809,6 +1045,10 @@ fn edge_child(test: &str, role: &str) {
             let _ = tx.send(());
         });
         while rx.try_recv().is_err() && Instant::now() < deadline {
+            net.game.as_mut().unwrap().poll();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        while net.game.as_ref().unwrap().lobby.players().count() < 2 && Instant::now() < deadline {
             net.game.as_mut().unwrap().poll();
             std::thread::sleep(Duration::from_millis(2));
         }

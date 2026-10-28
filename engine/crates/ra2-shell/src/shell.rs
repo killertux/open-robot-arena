@@ -64,6 +64,44 @@ pub struct Pick {
     pub bot: i32,
 }
 
+/// The pre-match lobby screen (`MultiplayerPrematchWnd`).
+pub const PREMATCH: &str = "multiplayer/prematch.gib";
+
+/// A button of a lobby panel (`noplayer.gib` / `activeplayer.gib`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelButton {
+    /// `human player button`: join the match in this slot.
+    Join,
+    /// `computer player button`: the host adds a computer robot.
+    AddComputer,
+    /// `change robot button`: reopen the picker for the panel.
+    Change,
+    /// `eject button`: remove the panel's player.
+    Eject,
+    /// `ready checkbox`.
+    Ready,
+}
+
+/// A click on a pre-match lobby panel, for the application to act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PanelRequest {
+    /// The panel, 0-based (`player1 group` is 0).
+    pub slot: usize,
+    pub button: PanelButton,
+}
+
+/// A robot the picker accepted over the pre-match lobby.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LobbyPick {
+    /// The panel it was picked for, 0-based.
+    pub slot: usize,
+    /// The table it came from: the player's teams or the computer's.
+    pub side: Side,
+    /// The team's record slot and the `.bot` slot number
+    /// ([`ra2ui::teams::bot_path`] names the file).
+    pub pick: Pick,
+}
+
 /// The shipped robot picker window, open over the setup screen.
 struct Popup {
     side: Side,
@@ -270,6 +308,10 @@ pub struct Shell {
     import_designs: Vec<String>,
     /// Copies a design into an empty roster entry.
     import_hook: Option<ImportHook>,
+    /// The last click on a pre-match lobby panel's button, not yet taken.
+    panel_request: Option<PanelRequest>,
+    /// The robot the picker accepted over the lobby, not yet taken.
+    lobby_pick: Option<LobbyPick>,
 }
 
 /// The longest text a shell edit field takes.
@@ -393,6 +435,8 @@ impl Shell {
             import_slot: None,
             import_designs: Vec::new(),
             import_hook: None,
+            panel_request: None,
+            lobby_pick: None,
         })
     }
 
@@ -974,6 +1018,11 @@ impl Shell {
             })
     }
 
+    /// Register a picture under a synthetic key (a lobby panel's robot).
+    pub fn add_preview(&mut self, key: String, preview: ra2ui::preview::Preview) {
+        self.previews.insert(key, preview);
+    }
+
     /// The pictures the screen's `bot img` widgets name by synthetic key.
     pub fn previews(&self) -> &BTreeMap<String, ra2ui::preview::Preview> {
         &self.previews
@@ -1266,6 +1315,18 @@ impl Shell {
         };
         if self.popup.is_some() {
             return self.click_popup(x, y);
+        }
+        // The pre-match lobby's panel buttons belong to the application
+        // (the lobby is the network's, not the exhibition's setup screen).
+        if self.on_lobby() {
+            if let Some((request, hit)) = self.lobby_panel_at(x, y) {
+                self.panel_request = Some(request);
+                step.hit = hit;
+                // The ready checkbox also toggles as any check box does.
+                if request.button != PanelButton::Ready {
+                    return Ok(self.finish(step));
+                }
+            }
         }
         if let Some(hit) = self.click_dropdown(x, y) {
             step.hit = hit;
@@ -1624,6 +1685,8 @@ impl Shell {
     pub fn goto(&mut self, target: &str) -> Result<(), String> {
         self.windows.clear();
         self.popup = None;
+        self.panel_request = None;
+        self.lobby_pick = None;
         self.fade = None;
         let screen = load_screen(&self.ui, target)?;
         self.switch_to(screen, target);
@@ -2306,6 +2369,58 @@ impl Shell {
         )))
     }
 
+    /// Whether the pre-match lobby is the screen on display.
+    fn on_lobby(&self) -> bool {
+        self.windows.is_empty()
+            && matches!(&self.screen, Screen::Page(page) if page.key.eq_ignore_ascii_case(PREMATCH))
+    }
+
+    /// The panel button under a point on the lobby, and the trace text of
+    /// the widget.
+    fn lobby_panel_at(&self, x: f32, y: f32) -> Option<(PanelRequest, String)> {
+        let placed = self.placements();
+        let path = ra2ui::input::hit_control(&placed, x, y)?;
+        let chain = chain(&placed, &path);
+        let (button, widget) = chain.iter().rev().find_map(|p| {
+            let button = match p.widget.name() {
+                "human player button" => PanelButton::Join,
+                "computer player button" => PanelButton::AddComputer,
+                "change robot button" => PanelButton::Change,
+                "eject button" => PanelButton::Eject,
+                "ready checkbox" => PanelButton::Ready,
+                _ => return None,
+            };
+            Some((button, *p))
+        })?;
+        let slot = chain.iter().find_map(|p| panel_slot(p.widget.name()))?;
+        Some((PanelRequest { slot, button }, describe(widget)))
+    }
+
+    /// The last click on a lobby panel's button (once).
+    pub fn take_panel_request(&mut self) -> Option<PanelRequest> {
+        self.panel_request.take()
+    }
+
+    /// Open the shipped robot picker (`Select Player Robot` or `Select
+    /// Computer Robot`) over the lobby for panel `slot` (0-based).
+    pub fn open_lobby_picker(&mut self, slot: usize, side: Side) -> Result<(), String> {
+        if slot >= 4 {
+            return Err(format!("panel {slot} is not one of the four"));
+        }
+        self.open_picker(side, format!("player{} group", slot + 1), 0.0, 0.0)?;
+        if let Some(popup) = &mut self.popup {
+            // The lobby's weight class is the host's, not the exhibition's.
+            popup.weight = None;
+            refresh_picker(popup, &self.ui, &self.game, &mut self.previews)?;
+        }
+        Ok(())
+    }
+
+    /// The robot the picker accepted over the lobby (once).
+    pub fn take_lobby_pick(&mut self) -> Option<LobbyPick> {
+        self.lobby_pick.take()
+    }
+
     /// The 0-based slot whose `eject button` is under the point.
     fn eject_slot_at(&self, x: f32, y: f32) -> Option<usize> {
         let placed = self.placements();
@@ -2413,7 +2528,16 @@ impl Shell {
                         bot,
                     })
             });
-            if let Some(pick) = pick {
+            if let (Some(pick), true) = (pick, self.on_lobby()) {
+                // Over the pre-match lobby the application takes the pick;
+                // the exhibition's panel art is not drawn.
+                self.lobby_pick = Some(LobbyPick {
+                    slot: popup.slot,
+                    side: popup.side,
+                    pick,
+                });
+                self.popup = None;
+            } else if let Some(pick) = pick {
                 if let Some(slot) = self.slot_picks.get_mut(popup.slot) {
                     *slot = Some(pick);
                 }
@@ -2843,6 +2967,47 @@ impl Shell {
             found.ok_or_else(|| format!("no visible part of {name:?} is clickable"))?
         };
         self.click(x, y)
+    }
+
+    /// Click the control called `name` inside lobby panel `slot` (0-based,
+    /// `player{slot+1} group`): `human player button`, `eject button`, ...
+    pub fn click_panel_button(&mut self, slot: usize, name: &str) -> Result<Step, String> {
+        let group = format!("player{} group", slot + 1);
+        let (x, y) = {
+            let placed = self.placements();
+            let scope = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == group)
+                .ok_or_else(|| format!("no {group:?} on {}", self.screen_id()))?;
+            let target = scope
+                .walk()
+                .find(|p| p.widget.name() == name)
+                .ok_or_else(|| format!("no {name:?} in {group:?}"))?;
+            let frame = target.frame;
+            let mut found = None;
+            'search: for iy in 1..8 {
+                for ix in 1..10 {
+                    let x = frame.x + frame.w * ix as f32 / 10.0;
+                    let y = frame.y + frame.h * iy as f32 / 8.0;
+                    if let Some(path) = ra2ui::input::hit_control(&placed, x, y) {
+                        let c = chain(&placed, &path);
+                        if c.iter().any(|p| p.widget.name() == name)
+                            && c.iter().any(|p| p.widget.name() == group)
+                        {
+                            found = Some((x, y));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            found.ok_or_else(|| format!("no click reaches {name:?} in {group:?}"))?
+        };
+        let step = self.click(x, y)?;
+        if let Some(last) = self.trace.last_mut() {
+            last.command = format!("click {name:?} of {group:?}");
+        }
+        Ok(step)
     }
 
     /// Click the named widget, at a point found by hit-testing where the layout

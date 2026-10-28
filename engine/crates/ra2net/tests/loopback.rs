@@ -117,8 +117,8 @@ fn join_lobby_ready_and_chat() {
 
     // Robot choice (with a design stream bigger than one frame) and ready.
     let design: Vec<u8> = (0..3000u32).map(|i| (i * 7) as u8).collect();
-    guest.choose_robot("Guests", "Razor", "razor.bot", design.clone());
-    host.choose_robot("Hosts", "Tank", "tank.bot", vec![1, 2, 3]);
+    guest.claim_panel(Some(1), "Guests", "Razor", "razor.bot", design.clone());
+    host.claim_panel(Some(0), "Hosts", "Tank", "tank.bot", vec![1, 2, 3]);
     guest.set_ready(true);
     host.set_ready(true);
     let start = Instant::now();
@@ -487,18 +487,18 @@ fn a_joiner_can_address_another_joiner_through_the_host() {
     );
 }
 
-/// Spectators (docs/38 §10): peers beyond the four player panels sit in the
-/// `spectator list`, cannot take a robot or a ready flag, are told everything a
-/// player is told, and take a panel when one frees up.
+/// Spectators (docs/38 section 10): everyone arrives without a panel and sits
+/// in the `spectator list`; a claim takes a panel on every end, a fifth peer
+/// stays a spectator when the four panels are taken, and a leaver's panel is
+/// free again.
 #[test]
-fn a_fifth_peer_is_a_spectator_who_takes_a_freed_panel() {
+fn peers_are_spectators_until_they_claim_a_panel() {
     use ra2net::lobby::{kind, SESSION_MAX};
     let mut host = NetGame::host(host_config(SESSION_MAX), ConnectionSpeed::Lan).unwrap();
     let addr = host.session.local_addr().unwrap();
     let mut guests: Vec<NetGame> = Vec::new();
     let start = Instant::now();
-    // One at a time, so the join order is the panel order.
-    for name in ["A", "B", "C", "Watcher"] {
+    for name in ["A", "B", "C", "D", "Watcher"] {
         guests.push(NetGame::join(join_config(addr, name)).unwrap());
         let want = guests.len() + 1;
         while host.lobby.slots.len() < want && start.elapsed() < Duration::from_secs(8) {
@@ -509,48 +509,67 @@ fn a_fifth_peer_is_a_spectator_who_takes_a_freed_panel() {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+    let step = |host: &mut NetGame, guests: &mut [NetGame]| {
+        host.poll();
+        for g in guests.iter_mut() {
+            g.poll();
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
     let settled = |host: &NetGame, guests: &[NetGame]| {
-        host.lobby.slots.len() == 5 && guests.iter().all(|g| g.lobby.slots.len() == 5)
+        host.lobby.slots.len() == 6 && guests.iter().all(|g| g.lobby.slots.len() == 6)
     };
     while !settled(&host, &guests) && start.elapsed() < Duration::from_secs(8) {
-        host.poll();
-        for g in guests.iter_mut() {
-            g.poll();
-        }
-        std::thread::sleep(Duration::from_millis(2));
+        step(&mut host, &mut guests);
     }
     assert!(settled(&host, &guests), "{:?}", host.lobby.slots);
-    let watcher = guests[3].local().unwrap();
+    // Nobody has a panel, the host included.
     for lobby in std::iter::once(&host.lobby).chain(guests.iter().map(|g| &g.lobby)) {
-        assert_eq!(lobby.players().count(), 4);
-        let spectators: Vec<_> = lobby.spectators().map(|s| s.name.as_str()).collect();
-        assert_eq!(spectators, ["Watcher"]);
-        assert_eq!(lobby.robot_index(watcher), None);
-        assert_eq!(lobby.robot_index(guests[2].local().unwrap()), Some(3));
+        assert_eq!(lobby.players().count(), 0);
+        assert_eq!(lobby.spectators().count(), 6);
+        assert_eq!(lobby.members.len(), 6);
     }
 
-    // A spectator cannot take a robot or be ready.
-    guests[3].choose_robot("T", "Razor", "razor.bot", vec![1]);
-    guests[3].set_ready(true);
+    // A, B, C claim panels 0, 1, 3; the host takes 2 with a computer robot.
+    for (i, panel) in [0u32, 1, 3].into_iter().enumerate() {
+        assert!(guests[i].claim_panel(Some(panel), "T", "Razor", "razor.bot", vec![1]));
+    }
+    assert!(host.add_computer_panel(2, "AI", "Bot", "ai.bot", vec![2]));
+    let all_four = |host: &NetGame, guests: &[NetGame]| {
+        std::iter::once(&host.lobby)
+            .chain(guests.iter().map(|g| &g.lobby))
+            .all(|l| l.players().count() == 4)
+    };
+    while !all_four(&host, &guests) && start.elapsed() < Duration::from_secs(8) {
+        step(&mut host, &mut guests);
+    }
+    assert!(all_four(&host, &guests), "{:?}", host.lobby.slots);
+    let watcher = guests[4].local().unwrap();
+    let c = guests[2].local().unwrap();
+    for lobby in std::iter::once(&host.lobby).chain(guests.iter().map(|g| &g.lobby)) {
+        let spectators: Vec<_> = lobby.spectators().map(|s| s.name.as_str()).collect();
+        assert_eq!(spectators, ["Host", "D", "Watcher"]);
+        assert_eq!(lobby.panel(2).unwrap().kind, kind::COMPUTER_WITH_ROBOT);
+        assert_eq!(lobby.panel(2).unwrap().player, HOST_ID);
+        assert_eq!(lobby.robot_index(watcher), None);
+        // Panel order: A, B, the host's computer, C.
+        assert_eq!(lobby.robot_index(c), Some(3));
+    }
+
+    // A fifth claim finds no free panel and a spectator cannot ready.
+    assert!(!guests[4].claim_panel(None, "T", "Razor", "razor.bot", vec![1]));
+    guests[4].set_ready(true);
     for _ in 0..50 {
-        host.poll();
-        for g in guests.iter_mut() {
-            g.poll();
-        }
-        std::thread::sleep(Duration::from_millis(2));
+        step(&mut host, &mut guests);
     }
     let slot = host.lobby.slot(watcher).unwrap();
     assert!(slot.is_spectator() && !slot.ready && !slot.has_robot());
     assert_eq!(slot.kind, kind::SPECTATOR);
 
-    // A player leaves: the spectator takes the panel on every end.
+    // A player leaves: the panel is free again on every end (no promotion).
     guests[0].close();
     let start = Instant::now();
-    while !(host.lobby.slot(watcher).is_some_and(|s| !s.is_spectator())
-        && guests[3]
-            .lobby
-            .slot(watcher)
-            .is_some_and(|s| !s.is_spectator()))
+    while !(host.lobby.players().count() == 3 && guests[4].lobby.players().count() == 3)
         && start.elapsed() < Duration::from_secs(8)
     {
         host.poll();
@@ -559,12 +578,132 @@ fn a_fifth_peer_is_a_spectator_who_takes_a_freed_panel() {
         }
         std::thread::sleep(Duration::from_millis(2));
     }
-    assert_eq!(host.lobby.spectators().count(), 0);
-    assert_eq!(host.lobby.players().count(), 4);
-    // Panels are positions (`GroupInfo::slot`): the watcher takes the panel A
-    // left, the second one.
-    assert_eq!(guests[3].lobby.robot_index(watcher), Some(1));
-    assert_eq!(host.lobby.slot(watcher).unwrap().index, 1);
+    assert_eq!(host.lobby.players().count(), 3);
+    assert_eq!(host.lobby.free_panel(), Some(0));
+    assert!(guests[4].lobby.slot(watcher).unwrap().is_spectator());
+}
+
+/// A joiner's claim is relayed by the host to the other peers and never
+/// echoed back to the claimant (DirectPlay's mesh sends with
+/// `DPNSEND_NOLOOPBACK`; told of its own panel the original shows it as a
+/// remote one). The host then sees the joiner's panel, its ready flag and an
+/// eject; the host's own panels reach the joiner.
+#[test]
+fn a_claim_reaches_the_others_but_is_not_echoed_to_the_claimant() {
+    use ra2net::lobby::kind;
+    let mut host = NetGame::host(host_config(8), ConnectionSpeed::Lan).unwrap();
+    let addr = host.session.local_addr().unwrap();
+    let mut a = NetGame::join(join_config(addr, "A")).unwrap();
+    let mut b = NetGame::join(join_config(addr, "B")).unwrap();
+    let start = Instant::now();
+    while !(host.lobby.slots.len() == 3 && a.lobby.slots.len() == 3 && b.lobby.slots.len() == 3)
+        && start.elapsed() < Duration::from_secs(5)
+    {
+        host.poll();
+        a.poll();
+        b.poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let (ida, idb) = (a.local().unwrap(), b.local().unwrap());
+    assert!(a.claim_panel(Some(0), "The A Team", "Razor", "Teams\\a.bmp", vec![9; 40]));
+    let (mut a_lobby_events, mut b_lobby_events) = (0, 0);
+    let start = Instant::now();
+    while !(host.lobby.panel(0).is_some() && b.lobby.panel(0).is_some())
+        && start.elapsed() < Duration::from_secs(5)
+    {
+        host.poll();
+        a_lobby_events += a
+            .poll()
+            .iter()
+            .filter(|e| matches!(e, GameEvent::Lobby(_)))
+            .count();
+        b_lobby_events += b
+            .poll()
+            .iter()
+            .filter(|e| matches!(e, GameEvent::Lobby(_)))
+            .count();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // A little longer, to catch an echo that would trail.
+    for _ in 0..100 {
+        host.poll();
+        a_lobby_events += a
+            .poll()
+            .iter()
+            .filter(|e| matches!(e, GameEvent::Lobby(_)))
+            .count();
+        b_lobby_events += b
+            .poll()
+            .iter()
+            .filter(|e| matches!(e, GameEvent::Lobby(_)))
+            .count();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let p = host.lobby.panel(0).expect("the host sees the claim");
+    assert_eq!(
+        (p.player, p.kind, p.team.as_str()),
+        (ida, kind::HUMAN_WITH_ROBOT, "The A Team")
+    );
+    assert_eq!(p.design.as_deref(), Some(&[9u8; 40][..]));
+    assert_eq!(b.lobby.panel(0).unwrap().player, ida);
+    assert_eq!(
+        a_lobby_events, 0,
+        "the claimant is not told of its own panel"
+    );
+    assert!(b_lobby_events >= 1);
+
+    // The claimant readies; the host's computer panel reaches both.
+    a.set_ready(true);
+    assert!(host.add_computer_panel(1, "AI", "Bot", "ai.bot", vec![3]));
+    let start = Instant::now();
+    while !(host.lobby.panel(0).is_some_and(|p| p.ready) && a.lobby.panel(1).is_some())
+        && start.elapsed() < Duration::from_secs(5)
+    {
+        host.poll();
+        a.poll();
+        b.poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(host.lobby.panel(0).unwrap().ready);
+    assert_eq!(a.lobby.panel(1).unwrap().kind, kind::COMPUTER_WITH_ROBOT);
+
+    // B takes the host's computer panel? No: it is held. Host ejects A's panel.
+    assert!(!b.claim_panel(Some(1), "T", "R", "l", vec![1]));
+    assert!(host.eject_panel(0));
+    let start = Instant::now();
+    while !(a.lobby.panel(0).is_none() && b.lobby.panel(0).is_none())
+        && start.elapsed() < Duration::from_secs(5)
+    {
+        host.poll();
+        a.poll();
+        b.poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(a.lobby.slot(ida).unwrap().is_spectator());
+    assert!(b.lobby.slot(ida).unwrap().is_spectator());
+    assert!(host.lobby.slot(ida).unwrap().is_spectator());
+    // B claims and ejects its own panel: the host and A follow.
+    assert!(b.claim_panel(Some(0), "T", "R", "l", vec![1]));
+    let start = Instant::now();
+    while host.lobby.panel(0).is_none() && start.elapsed() < Duration::from_secs(5) {
+        host.poll();
+        a.poll();
+        b.poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(b.eject_panel(0));
+    assert!(!b.eject_panel(1), "not B's panel");
+    let start = Instant::now();
+    while !(host.lobby.panel(0).is_none() && a.lobby.panel(0).is_none())
+        && start.elapsed() < Duration::from_secs(5)
+    {
+        host.poll();
+        a.poll();
+        b.poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(host.lobby.slot(idb).unwrap().is_spectator());
+    assert!(a.lobby.slot(idb).unwrap().is_spectator());
 }
 
 /// The in-match chat line: `"[name] text"` as a `0x76` text to everyone,
