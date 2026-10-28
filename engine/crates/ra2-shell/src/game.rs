@@ -15,32 +15,108 @@ pub const REQUIRED: [&str; 3] = ["RA2.cfz", "UI", "Scripts"];
 /// The environment variable that overrides the search.
 pub const ENV: &str = "RA2_GAME_DIR";
 
-/// Check that a path is a game installation the shell can boot from.
-pub fn check(path: &Path) -> Result<(), String> {
-    let mut missing = Vec::new();
-    for name in REQUIRED {
-        if !path.join(name).exists() {
-            missing.push(name);
+/// The install's executable. The port never runs it, but it is the file a
+/// player recognises their install folder by, so the messages name it.
+pub const EXE: &str = "Robot Arena 2.exe";
+
+fn has(dir: &Path, name: &str) -> bool {
+    dir.join(name).exists()
+}
+
+fn is_install(dir: &Path) -> bool {
+    REQUIRED.iter().all(|name| has(dir, name))
+}
+
+/// Where a Windows or Wine install usually is, for the "did you mean" hint and
+/// the last-resort search.
+fn usual_places() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut prefixes = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        prefixes.push(home.join(".wine/drive_c"));
+        prefixes.push(home.join(".var/app/org.winehq.Wine/data/wine/drive_c"));
+        prefixes.push(home.join(".local/share/wineprefixes/default/drive_c"));
+    }
+    prefixes.push(PathBuf::from("C:\\"));
+    for prefix in prefixes {
+        for programs in ["Program Files (x86)", "Program Files"] {
+            for vendor in ["", "Infogrames", "Gabriel Interactive"] {
+                let mut dir = prefix.join(programs);
+                if !vendor.is_empty() {
+                    dir = dir.join(vendor);
+                }
+                out.push(dir.join("Robot Arena 2"));
+            }
         }
     }
-    if missing.is_empty() {
+    out
+}
+
+/// Check that a path is a game installation the shell can boot from. The
+/// message says what is wrong (no such folder, a file, the wrong level of the
+/// tree, or the files that are missing) and how to point the port at the
+/// install.
+pub fn check(path: &Path) -> Result<(), String> {
+    let shown = path.display();
+    let how = format!(
+        "Point the port at the folder that holds {EXE}, {}, {} and {} \
+         with --game DIR or the {ENV} environment variable.",
+        REQUIRED[0], REQUIRED[1], REQUIRED[2]
+    );
+    if !path.exists() {
+        return Err(format!("{shown} does not exist. {how}"));
+    }
+    if path.is_file() {
+        let parent = path.parent().filter(|p| is_install(p));
+        return Err(match parent {
+            Some(dir) => format!(
+                "{shown} is a file, not the install folder. Use its folder instead: {}",
+                dir.display()
+            ),
+            None => format!("{shown} is a file, not the install folder. {how}"),
+        });
+    }
+    if is_install(path) {
         return Ok(());
     }
+    let missing: Vec<&str> = REQUIRED.iter().copied().filter(|n| !has(path, n)).collect();
+    let mut hint = String::new();
+    // One level down (the folder that contains the install) or up (a subfolder of it).
+    let below = std::fs::read_dir(path).ok().and_then(|entries| {
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && is_install(p))
+            .collect();
+        dirs.sort();
+        dirs.into_iter().next()
+    });
+    if let Some(inner) = below {
+        hint = format!(" The install is one level down: {}.", inner.display());
+    } else if let Some(parent) = path.parent().filter(|p| is_install(p)) {
+        hint = format!(" The install is one level up: {}.", parent.display());
+    }
+    let exe = if has(path, EXE) {
+        String::new()
+    } else {
+        format!(" ({EXE} is not there either.)")
+    };
     Err(format!(
-        "{} is not a Robot Arena 2 install the shell can boot: missing {}",
-        path.display(),
+        "{shown} is not a Robot Arena 2 install the shell can boot: missing {}.{exe}{hint} {how}",
         missing.join(", ")
     ))
 }
 
 /// The game directory: `RA2_GAME_DIR`, else `local/game` above the working
-/// directory or this crate, else a clear error.
+/// directory or this crate, else the places a Windows/Wine install usually
+/// lives, else a clear error naming every place tried.
 pub fn find() -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os(ENV) {
         let dir = PathBuf::from(dir);
-        check(&dir)?;
+        check(&dir).map_err(|e| format!("{ENV}: {e}"))?;
         return Ok(dir);
     }
+    let mut tried: Vec<PathBuf> = Vec::new();
     let mut starts = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         starts.push(cwd);
@@ -53,16 +129,41 @@ pub fn find() -> Result<PathBuf, String> {
             if candidate.is_dir() && check(&candidate).is_ok() {
                 return Ok(candidate);
             }
+            if !tried.contains(&candidate) {
+                tried.push(candidate);
+            }
             match dir.parent() {
                 Some(parent) => dir = parent,
                 None => break,
             }
         }
     }
+    let usual = usual_places();
+    for candidate in &usual {
+        if candidate.is_dir() && is_install(candidate) {
+            return Ok(candidate.clone());
+        }
+    }
+    // The upward walk repeats itself per level; show only the nearest few.
+    let near: Vec<String> = tried
+        .iter()
+        .take(3)
+        .map(|p| format!("  {}", p.display()))
+        .collect();
+    let usual: Vec<String> = usual
+        .iter()
+        .take(2)
+        .map(|p| format!("  {}", p.display()))
+        .collect();
     Err(format!(
-        "no Robot Arena 2 install found (set {ENV}). The shell needs a directory holding {}, UI/ and Scripts/; \
-         the repository's usual place is local/game beside the workspace.",
-        REQUIRED[0]
+        "no Robot Arena 2 install found. The port needs your own copy of the game: a folder holding \
+         {EXE}, {}, {}/ and {}/. Tell it where with --game DIR or {ENV}=DIR. \
+         Looked in: {ENV} (not set), local/game above the working directory, e.g.\n{}\n and the usual Windows/Wine places, e.g.\n{}",
+        REQUIRED[0],
+        REQUIRED[1],
+        REQUIRED[2],
+        near.join("\n"),
+        usual.join("\n")
     ))
 }
 

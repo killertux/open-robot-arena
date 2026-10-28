@@ -278,12 +278,15 @@ pub const SELECT_GRID: &str = "select team grid";
 pub const SELECT_CELL: &str = "teamhq/team_cell.gib";
 
 /// Fill the select-team grid with a cell per named team (`FUN_004ec2c0` /
-/// `FUN_004ec310` fill it from `Teams/Teams.txt`) and select the first row,
-/// which is what the screen opens with.
+/// `FUN_004ec310` fill it from `Teams/Teams.txt`) and select row `select`.
+/// A window that was never used selects the LAST team (`FUN_004ec2c0`: the
+/// grid's selection is -1, so it selects count - 1; live, docs/36 9.28), so
+/// `None` means the last row; a used window keeps the row it had.
 pub fn fill_select_grid(
     ui_root: &Path,
     document: &mut ra2fmt::gib::Gib,
     rosters: &[Roster],
+    select: Option<usize>,
 ) -> Result<usize, String> {
     use ra2fmt::gib::Block;
     let template = crate::cells::template(ui_root, SELECT_CELL)?;
@@ -303,7 +306,8 @@ pub fn fill_select_grid(
         }
         crate::input::clear_selection(grid);
         if !named.is_empty() {
-            crate::input::select_cell(grid, 0, 0);
+            let row = select.unwrap_or(named.len() - 1).min(named.len() - 1);
+            crate::input::select_cell(grid, row, 0);
         }
         // The bars span the grid (the file's 444 px is the editor's canvas).
         for bar in grid.children.iter_mut() {

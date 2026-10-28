@@ -355,6 +355,37 @@ fn the_game_directory_error_names_what_the_shell_needs() {
     }
 }
 
+/// A wrong `--game` is explained, not just rejected: a missing folder, a file
+/// (the exe), a folder one level too high, each says what to do.
+#[test]
+fn a_wrong_game_path_says_what_to_do() {
+    let root = std::env::temp_dir().join(format!("ra2-shell-wrong-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let install = root.join("Robot Arena 2");
+    std::fs::create_dir_all(install.join("UI")).unwrap();
+    std::fs::create_dir_all(install.join("Scripts")).unwrap();
+    std::fs::write(install.join("RA2.cfz"), b"x").unwrap();
+    std::fs::write(install.join("Robot Arena 2.exe"), b"x").unwrap();
+
+    let missing = game::check(&root.join("nope")).unwrap_err();
+    assert!(
+        missing.contains("does not exist") && missing.contains("--game"),
+        "{missing}"
+    );
+    let exe = game::check(&install.join("Robot Arena 2.exe")).unwrap_err();
+    assert!(
+        exe.contains("is a file") && exe.contains(&*install.to_string_lossy()),
+        "{exe}"
+    );
+    let above = game::check(&root).unwrap_err();
+    assert!(
+        above.contains("one level down") && above.contains("RA2.cfz"),
+        "{above}"
+    );
+    game::check(&install).unwrap();
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// The arena tab's description is the selected arena's class docstring, in the
 /// `Glyph` that carries the `DisplayBox` on `description grp`'s child (the
 /// file's own "hammers" text is only the editor's placeholder).

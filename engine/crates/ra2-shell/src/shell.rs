@@ -242,6 +242,9 @@ pub struct Shell {
     team_hook: Option<TeamHook>,
     /// The player team slot the HQ is showing (`Teams/Teams.txt` record).
     team_slot: Option<usize>,
+    /// The select-team grid's selected row, kept while the client runs (the original's window is
+    /// cached); `None` until a team is picked, when the screen opens on the last team.
+    select_row: Option<usize>,
     /// The text box the last click landed on (on the top window, or the
     /// screen when no window is open): typed characters go there.
     text_focus: Option<String>,
@@ -375,6 +378,7 @@ impl Shell {
             edit_team: None,
             team_hook: None,
             team_slot: None,
+            select_row: None,
             join_event: None,
             text_focus: None,
             entered_event: None,
@@ -679,7 +683,7 @@ impl Shell {
         if !page.key.eq_ignore_ascii_case("teamhq/select_team.gib") {
             return;
         }
-        let _ = teams::fill_select_grid(&self.ui, &mut page.gib, &rosters);
+        let _ = teams::fill_select_grid(&self.ui, &mut page.gib, &rosters, Some(0));
         if let Some(row) = row {
             for block in page.gib.blocks.iter_mut() {
                 let Block::Widget(root) = block else { continue };
@@ -1338,7 +1342,14 @@ impl Shell {
                 // under it is the one it was opened from.
                 Some(Transition::Close | Transition::Replace(_)) => {
                     if let Some(window) = self.windows.pop() {
-                        if confirmed {
+                        // `FUN_00481f20` does nothing without a chosen robot: the join
+                        // window stays open (live, a team with no robots, docs/36 9.28).
+                        if confirmed
+                            && window.key.eq_ignore_ascii_case("teamhq/joinevent.gib")
+                            && join_chosen(&window).is_none()
+                        {
+                            self.windows.push(window);
+                        } else if confirmed {
                             self.confirm_window(&window)?;
                         }
                     }
@@ -1482,7 +1493,7 @@ impl Shell {
             // The select-team screen fills its grid with the player's teams.
             if page.key.eq_ignore_ascii_case("teamhq/select_team.gib") {
                 let rosters = team_rosters(&self.game);
-                let _ = teams::fill_select_grid(&self.ui, &mut page.gib, &rosters);
+                let _ = teams::fill_select_grid(&self.ui, &mut page.gib, &rosters, self.select_row);
             }
             // The Team HQ's constructor loads the Robot Inventory tab (its
             // button is the one drawn selected).
@@ -1600,7 +1611,7 @@ impl Shell {
         let rosters = team_rosters(&self.game);
         if let Screen::Page(page) = &mut self.screen {
             if page.key.eq_ignore_ascii_case("teamhq/select_team.gib") {
-                let _ = teams::fill_select_grid(&self.ui, &mut page.gib, &rosters);
+                let _ = teams::fill_select_grid(&self.ui, &mut page.gib, &rosters, Some(0));
             }
         }
         Ok(())
@@ -1859,7 +1870,8 @@ impl Shell {
             if target.eq_ignore_ascii_case("teamhq/joinevent.gib") {
                 if let (Some(view), Some(index)) = (&self.hq_view, self.join_event) {
                     if let Some(row) = view.events.get(index) {
-                        let selected = (!view.robots.is_empty()).then_some(0);
+                        // Live (`teamhq-event-join`): no robot is chosen when the window opens.
+                        let selected = None;
                         ra2ui::event_screens::fill_join_window(
                             &self.ui,
                             &mut page.gib,
@@ -2089,15 +2101,14 @@ impl Shell {
     /// bracket opens for the event; the event is now the one in progress.
     fn enter_event(&mut self, window: &Page) -> Result<(), String> {
         use ra2ui::hq::EventState;
-        let chosen = window.gib.blocks.iter().find_map(|b| match b {
-            Block::Widget(root) => workshop::find(root, "robot grid")
-                .and_then(|g| ra2ui::input::field_of(g, "_SelectedColumn"))
-                .and_then(|v| v.parse::<usize>().ok()),
-            _ => None,
-        });
-        let (Some(index), Some(robot)) = (self.join_event.take(), chosen) else {
+        let chosen = join_chosen(window);
+        // `FUN_00481f20` tests the window's chosen robot (`+0x16c`, -1 at construction) first
+        // and does nothing at all when there is none: the window stays open and a robot picked
+        // afterwards still enters.
+        let (Some(index), Some(robot)) = (self.join_event, chosen) else {
             return Ok(());
         };
+        self.join_event = None;
         let Some(view) = &mut self.hq_view else {
             return Ok(());
         };
@@ -2195,6 +2206,18 @@ impl Shell {
             self.text_focus = None;
         }
         self.sync_list_viewports();
+        if let Screen::Page(page) = &self.screen {
+            if page.key.eq_ignore_ascii_case("teamhq/select_team.gib") {
+                let row = page.gib.blocks.iter().find_map(|b| match b {
+                    Block::Widget(root) => workshop::find(root, teams::SELECT_GRID)
+                        .and_then(ra2ui::input::selected_row),
+                    _ => None,
+                });
+                if row.is_some() {
+                    self.select_row = row;
+                }
+            }
+        }
         // `Finish Later`: the entered event is committed to the team record.
         if step.hit_widget() == Some("later button") {
             if let (Some((event, robot)), Some(hook)) = (self.entered_event, &mut self.later_hook) {
@@ -3754,4 +3777,14 @@ fn option_in(chain: &[&Placement<'_>]) -> Option<(String, String)> {
         }
     }
     Some((group?, member?))
+}
+
+/// The robot chosen in the join window's grid (`+0x16c`; none is -1).
+fn join_chosen(window: &Page) -> Option<usize> {
+    window.gib.blocks.iter().find_map(|b| match b {
+        Block::Widget(root) => workshop::find(root, "robot grid")
+            .and_then(|g| ra2ui::input::field_of(g, "_SelectedColumn"))
+            .and_then(|v| v.parse::<usize>().ok()),
+        _ => None,
+    })
 }

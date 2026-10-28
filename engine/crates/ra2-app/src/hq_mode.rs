@@ -2715,6 +2715,19 @@ mod tests {
         assert_eq!(shell.window_depth(), 0);
         // Enter Event: the bracket of that event.
         shell.click(430.0, 376.0).unwrap();
+        // No robot is chosen yet (live): Enter Event does nothing, the window stays.
+        shell.click_named("enter event button").unwrap();
+        assert_eq!(shell.window_depth(), 1);
+        let robots = shell
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "robot grid")
+            .map(|p| p.frame)
+            .expect("the join window's robot grid");
+        shell
+            .click(robots.x + robots.w / 12.0, robots.y + robots.h / 2.0)
+            .unwrap();
         shell.click_named("enter event button").unwrap();
         assert_eq!(shell.window_depth(), 0);
         assert_eq!(shell.base_screen_id(), "teamhq/event_bracket.gib");

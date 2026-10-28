@@ -252,12 +252,23 @@ pub fn find_game(explicit: Option<&Path>) -> Result<PathBuf, String> {
             .map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    // The player may name the exe itself; its folder is the install.
+    fn named(path: &Path) -> &Path {
+        let is_exe = path.is_file()
+            && path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("exe"));
+        match path.parent() {
+            Some(parent) if is_exe && !parent.as_os_str().is_empty() => parent,
+            _ => path,
+        }
+    }
     if let Some(dir) = explicit {
-        return check(dir);
+        return check(named(dir)).map_err(|e| format!("--game: {e}"));
     }
     for key in ["RA2_GAME", "RA2_GAME_DIR"] {
         if let Some(dir) = std::env::var_os(key) {
-            return check(Path::new(&dir));
+            return check(named(Path::new(&dir))).map_err(|e| format!("{key}: {e}"));
         }
     }
     let mut starts = Vec::new();
