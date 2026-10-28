@@ -872,14 +872,14 @@ seconds as an f32; `PlayerOut {robot, 2}` and `MatchWin` follow 30 s of immobili
 * **Original hosts, port joins**: the port lists it (`1/2`: current players over the deathmatch's two), joins,
   shows the original's panel with its picture, takes a panel with the picker, readies; the original's Begin: the
   port builds the original's C.R.U.S.H. from its `.bot` and runs with `Time: 2:50`; the results arrive
-  (winner, immobilised robot).
+  (winner, immobilised robot). With the port window focused (the synthetic keys need it) W drove the port's
+  Sting Ray into the original's C.R.U.S.H.: 33 points on the original, 44 on the port, the robots side by side
+  on both (`mp-match-host-port-app-joiner`). The original asks "Confirm Begin Match" (text empty) at times, Yes
+  starts (`mp-confirm-begin-host`; cause not traced).
 * The harnesses: the original as host with a headless port joiner through whole matches (12 other robots).
 
 ### 15.7 Open
 
-* A port joiner's keys during a live original-hosted match were not seen to move its robot under
-  Xephyr (the window had no focus under the test's synthetic keys; the loopback tests
-  `each_player_drives_and_follows_their_own_robot` pass).
 * The results screen's team of a robot received as `.bot` (the port shows the Red Zone team for the
   original's C.R.U.S.H.); the original's host shows 0 points in its results where the port host's fight
   scored 321.
