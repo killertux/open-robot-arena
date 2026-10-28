@@ -316,6 +316,8 @@ struct App {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     cursor: Option<PhysicalPosition<f64>>,
+    /// The middle button is down over the lab's 3D view: its drag turns the camera.
+    lab_orbiting: bool,
     /// The hover hook: the shell has no hover state yet, so the mapped point is
     /// kept here for the cursor pass (M7.8) and changes nothing.
     #[allow(dead_code)]
@@ -406,6 +408,7 @@ impl App {
             window: None,
             gpu: None,
             cursor: None,
+            lab_orbiting: false,
             hover: None,
             next_update: Instant::now(),
             error: None,
@@ -886,6 +889,19 @@ impl ApplicationHandler for App {
                     window.request_redraw();
                 }
             }
+            // The lab's practice arena: the robot's own keys, pressed and released.
+            WindowEvent::KeyboardInput { event, .. }
+                if self.session.is_none()
+                    && self.builder.as_ref().is_some_and(|b| b.arena_active())
+                    && is_drive_key(&event.physical_key) =>
+            {
+                let pressed = event.state == ElementState::Pressed;
+                if let Some(builder) = &mut self.builder {
+                    let mut input = builder.drive();
+                    apply_drive_key(&event.physical_key, pressed, &mut input);
+                    builder.set_drive(input);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if self.builder.is_some() && self.session.is_none() {
                     let ctrl = self.modifiers.control_key();
@@ -1078,8 +1094,19 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                let before = self.cursor;
                 self.cursor = Some(position);
                 let point = self.map_cursor(position);
+                if self.lab_orbiting {
+                    if let (Some(builder), Some(before)) = (&mut self.builder, before) {
+                        // Mouse counts: the window's own pixels.
+                        builder.lab_orbit(
+                            (position.x - before.x) as f32,
+                            (position.y - before.y) as f32,
+                        );
+                        self.request_redraw();
+                    }
+                }
                 if let (Some(builder), Some(point)) = (&mut self.builder, point) {
                     builder.mouse_moved(point[0], point[1]);
                     if builder.dragging() {
@@ -1101,7 +1128,22 @@ impl ApplicationHandler for App {
                     session.orbit_wheel(notches);
                     return;
                 }
-                if self.hq.is_some() || self.builder.is_some() {
+                if self.builder.is_some() {
+                    // The lab's wheel zooms its 3D view (`FUN_005a6260`, mode 2).
+                    let notches = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(position) => position.y as f32 / 40.0,
+                    };
+                    let point = self.cursor.and_then(|c| self.map_cursor(c));
+                    if let (Some(builder), Some(point)) = (&mut self.builder, point) {
+                        if builder.over_view(point[0], point[1]) {
+                            builder.lab_wheel(notches);
+                            self.request_redraw();
+                        }
+                    }
+                    return;
+                }
+                if self.hq.is_some() {
                     return;
                 }
                 let Some(cursor) = self.cursor else {
@@ -1136,6 +1178,19 @@ impl ApplicationHandler for App {
                         window.request_redraw();
                     }
                 }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                // The lab turns its camera with the middle button held over the 3D view.
+                let over = self
+                    .cursor
+                    .and_then(|c| self.map_cursor(c))
+                    .zip(self.builder.as_ref())
+                    .is_some_and(|(p, b)| b.over_view(p[0], p[1]));
+                self.lab_orbiting = state == ElementState::Pressed && over;
             }
             WindowEvent::MouseInput {
                 state: ElementState::Released,
@@ -1546,6 +1601,7 @@ impl ApplicationHandler for App {
                 hq.advance(UPDATE.as_secs_f32());
             }
             if let Some(builder) = &mut self.builder {
+                builder.advance(UPDATE.as_secs_f32());
                 for sound in builder.take_sounds() {
                     self.audio.ui(sound);
                 }

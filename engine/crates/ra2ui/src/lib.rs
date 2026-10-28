@@ -66,15 +66,15 @@
 //!   `ScrollBar` 30, `Slider` 41, `TextBox` 331, `Button` 193, `CheckBox` 69,
 //!   `DropDown` 12, `Placeholder` 12 — and only two `Image`s in the whole game
 //!   bother.
-//! * **2** — clipped to the *parent's* frame instead. There are sixty, and
-//!   **twenty-three of them are placed so that they stick out of the parent**: the two
-//!   `robots grid`s (anchored at the parent's *bottom* edge), the five bot-lab
-//!   `selected label`s, `botlabwin.gib`'s `wires grp` at `x = -1.0`, and
-//!   `event_bracket.gib`'s heading textbox at `y = -20` with a height of 24. A
-//!   self-clip would leave those where they are; only a clip by the parent
-//!   explains the author wanting one. The rest that are inside at authoring time
-//!   are chrome that *moves*: the two selection bars, which the container
-//!   repositions down its rows, and `comp_properties.gib`'s tabs.
+//! * **2** — clipped to what the *parent* was clipped by (not to the parent's own frame, which
+//!   would hide the ones that lie outside it). There are sixty, and **twenty-three of them
+//!   are placed so that they stick out of the parent**: the two `robots grid`s (anchored at the
+//!   parent's *bottom* edge), the five bot-lab `selected label`s, `botlabwin.gib`'s `wires grp`
+//!   at `x = -1.0`, and `event_bracket.gib`'s heading textbox at `y = -20` with a height of 24.
+//!   Live (the Bot Lab frames, docs/36 9.27b) the `selected label` under the Paint Shop's 64 px
+//!   swatch group and both `wires grp`s are drawn whole, so the parent's frame is not the clip; the
+//!   rest that are inside at authoring time are chrome that *moves*: the two selection bars, which
+//!   the container repositions down its rows, and `comp_properties.gib`'s tabs.
 //!
 //! [`Placement::clip`] carries the result: the rectangle the widget draws
 //! inside, already intersected with everything above it.
@@ -988,7 +988,7 @@ pub fn place(widget: &Widget, parent: Frame) -> Placement<'_> {
 
 /// Place one widget inside `parent`, sizing an unmeasured label from its text.
 pub fn place_with<'a>(widget: &'a Widget, parent: Frame, fonts: Option<&Fonts>) -> Placement<'a> {
-    place_at(widget, parent, None, fonts, false)
+    place_at(widget, parent, None, None, fonts, false)
 }
 
 /// Place one widget, carrying down the clip its ancestors impose.
@@ -1003,10 +1003,13 @@ fn place_at<'a>(
     widget: &'a Widget,
     parent: Frame,
     inherited: Option<Frame>,
+    outer: Option<Frame>,
     fonts: Option<&Fonts>,
     baseline: bool,
 ) -> Placement<'a> {
-    place_core(widget, parent, inherited, fonts, baseline, None, None)
+    place_core(
+        widget, parent, inherited, outer, fonts, baseline, None, None,
+    )
 }
 
 /// The rectangle a `Background` stretches over: the owner's frame, grown by
@@ -1037,10 +1040,12 @@ fn background_fill(widget: &Widget, frame: Frame) -> Frame {
 /// `top slot` states 418 px of height and is the whole 87% pane), while the
 /// other axis keeps the child's own rules (`content slot`'s `0.9` of the height
 /// of a horizontal split).
+#[allow(clippy::too_many_arguments)]
 fn place_core<'a>(
     widget: &'a Widget,
     parent: Frame,
     inherited: Option<Frame>,
+    outer: Option<Frame>,
     fonts: Option<&Fonts>,
     baseline: bool,
     forced: Option<(Frame, bool)>,
@@ -1073,18 +1078,27 @@ fn place_core<'a>(
             frame.h = pane.h;
         }
     }
+    // The Bot Lab's two `wires grp`s are the cables that run out of the tab strip's button group
+    // to the window's edges; live they are drawn whole although both lie outside that group's
+    // 630 px frame, which clips everything else in it. They take the clip the group itself had.
+    let inherited = if widget.name().starts_with("wires grp") {
+        outer.or(inherited)
+    } else {
+        inherited
+    };
     let clip = match ClipMode::from_value(widget.clip_mode()) {
         ClipMode::None => inherited,
         ClipMode::SelfFrame => Some(intersect(inherited, frame)),
-        // A clip by a parent that is larger than the widget has nothing to do;
-        // a clip by a parent that is smaller is the whole point of the mode.
-        ClipMode::ParentFrame => Some(intersect(inherited, parent)),
+        // Clipped by the parent's clip: what the *parent* was placed inside, not the parent's own
+        // frame. Live (the Bot Lab), the `Selected Color` label hangs below its 64 px swatch group
+        // and `wires grp` lies left of its button group, both fully drawn.
+        ClipMode::ParentFrame => outer.or(inherited),
     };
     let children = match widget.kind {
         // A split frame hands its children panes rather than its own rectangle.
-        WidgetKind::SplitFrame => split_children(widget, frame, clip, fonts),
+        WidgetKind::SplitFrame => split_children(widget, frame, clip, inherited, fonts),
         // A scroll bar puts its parts at its two ends and between them.
-        WidgetKind::ScrollBar => scroll_children(widget, frame, clip, fonts),
+        WidgetKind::ScrollBar => scroll_children(widget, frame, clip, inherited, fonts),
         _ => {
             // Explicit text inside a box or a group is positioned by its
             // baseline, and so is a caption's: a button's `Caption` body is a
@@ -1106,7 +1120,7 @@ fn place_core<'a>(
             let mut placed: Vec<Placement> = widget
                 .children
                 .iter()
-                .map(|c| place_at(c, frame, clip, fonts, baseline_text))
+                .map(|c| place_at(c, frame, clip, inherited, fonts, baseline_text))
                 .collect();
             // A `TextBox`'s `Alignment` is its text's: with the centre bit
             // (2 of the horizontal nibble: 18, 10, 34) the string is centred
@@ -1119,6 +1133,22 @@ fn place_core<'a>(
                 {
                     if let Some((w, _)) = measured(child.widget, fonts) {
                         child.frame.x = frame.x + (frame.w - w) / 2.0;
+                    }
+                }
+            }
+            // A right-aligned `TextBox` ends its text at the box's right edge: the Paint Shop's
+            // `tint label` is authored at `_Position 315` for a 338 px slider and sits on the 237 px
+            // one's right end (live: `Tint` ends at the slider's last pixel). Only a string the
+            // authored position pushes past the edge is moved.
+            if widget.kind == WidgetKind::TextBox && text_box_right(widget) {
+                for child in placed
+                    .iter_mut()
+                    .filter(|c| c.widget.kind == WidgetKind::Text)
+                {
+                    if let Some((w, _)) = measured(child.widget, fonts) {
+                        if child.frame.x + w > frame.x + frame.w {
+                            child.frame.x = frame.x + frame.w - w;
+                        }
                     }
                 }
             }
@@ -1153,11 +1183,14 @@ fn place_core<'a>(
     // A widget that clips to itself clips its attachments too: botlab's
     // `3d grp` has a stray 296-px dark Background at (12, 24), which the capture
     // never shows outside the 3D view's square.
-    let attachment_clip = if widget.kind == WidgetKind::Group
+    // A widget that clips to its parent's clip dresses itself the same way (botlab's `wires grp`
+    // lies left of its button group and is drawn out to the window's edge).
+    let attachment_clip = if (widget.kind == WidgetKind::Group
         && ClipMode::from_value(widget.clip_mode()) == ClipMode::SelfFrame
         && widget
             .field("AspectSetting")
-            .is_some_and(|f| f.text().trim() != "0")
+            .is_some_and(|f| f.text().trim() != "0"))
+        || ClipMode::from_value(widget.clip_mode()) == ClipMode::ParentFrame
     {
         clip
     } else {
@@ -1173,6 +1206,7 @@ fn place_core<'a>(
                     body,
                     parent,
                     attachment_clip,
+                    inherited,
                     fonts,
                     false,
                     None,
@@ -1289,13 +1323,14 @@ fn scroll_children<'a>(
     widget: &'a Widget,
     frame: Frame,
     clip: Option<Frame>,
+    inherited: Option<Frame>,
     fonts: Option<&Fonts>,
 ) -> Vec<Placement<'a>> {
     let bar = ScrollBar::from_widget(widget);
     let mut placed: Vec<Placement<'a>> = widget
         .children
         .iter()
-        .map(|c| place_at(c, frame, clip, fonts, false))
+        .map(|c| place_at(c, frame, clip, inherited, fonts, false))
         .collect();
     let zero = Frame::new(frame.x, frame.y, 0.0, 0.0);
     let less = placed.get(bar.less).map(|p| p.frame).unwrap_or(zero);
@@ -1523,6 +1558,7 @@ fn split_children<'a>(
     widget: &'a Widget,
     frame: Frame,
     clip: Option<Frame>,
+    inherited: Option<Frame>,
     fonts: Option<&Fonts>,
 ) -> Vec<Placement<'a>> {
     let horizontal = widget
@@ -1568,7 +1604,16 @@ fn split_children<'a>(
         .enumerate()
         .map(|(i, c)| {
             let pane = panes[i.min(1)];
-            place_core(c, pane, clip, fonts, false, Some((pane, horizontal)), None)
+            place_core(
+                c,
+                pane,
+                clip,
+                inherited,
+                fonts,
+                false,
+                Some((pane, horizontal)),
+                None,
+            )
         })
         .collect()
 }

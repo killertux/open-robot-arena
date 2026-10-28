@@ -484,7 +484,8 @@ pub fn load_props(
                     hull_points,
                     position,
                     rotation,
-                    mass: if rb.mass > 0.0 { rb.mass } else { 20.0 },
+                    // A rigid body of mass 0 is Havok's fixed body (the practice arena's ramps).
+                    mass: rb.mass.max(0.0),
                     friction: rb.friction.max(0.05),
                     restitution: rb.elasticity.clamp(0.0, 1.0),
                     items,

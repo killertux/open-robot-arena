@@ -29,6 +29,8 @@ pub enum DialogKind {
         name: String,
         /// The DirectInput code of each input box.
         keys: [Option<i32>; 2],
+        /// A double click on a control opened it: OK renames and re-keys that control.
+        editing: bool,
     },
     /// A control wired to a component.
     Wire {

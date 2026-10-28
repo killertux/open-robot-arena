@@ -231,30 +231,7 @@ pub fn hud(
         let Some(group) = ra2ui::workshop::find_mut(screen, group) else {
             continue;
         };
-        set_text(group, "name", &robot.bot_name);
-        set_text(group, "points", &robot.points.to_string());
-        let widths = [
-            set_bar(group, BARS[0].0, BARS[0].1, robot.battery),
-            set_bar(group, BARS[1].0, BARS[1].1, robot.air),
-            set_bar(group, BARS[2].0, BARS[2].1, robot.armor),
-        ];
-        tint_named(group, "armor bar", ARMOR_TINT);
-        set_armor_remainder(group, widths[2], !robot.defeated);
-        // `FUN_00476bf0` -> `FUN_004b3850(1)` (from `FUN_00418040`, every kind of "out"): the
-        // meters dim to 0.3 grey (`0x3e99999a`) on the background art, the three bars and the
-        // three dots; the name and the points text keep their colour.
-        let tint = if robot.defeated {
-            DEFEATED_TINT
-        } else {
-            "1 1 1 1"
-        };
-        for name in DIMMED {
-            tint_named(group, name, tint);
-        }
-        // `FUN_004b3640`: exactly one of the three dots shows.
-        for (i, name) in DOTS.iter().enumerate() {
-            set_visible(group, name, i == usize::from(robot.dot.min(2)));
-        }
+        let widths = bind_status(group, robot, &robot.points.to_string());
         players.push(HudPlayer {
             slot,
             name: robot.bot_name.clone(),
@@ -275,6 +252,41 @@ pub fn hud(
         show_countdown,
         players,
     }
+}
+
+/// Bind one robot's status meters (name, points text, the three bars, the dots) inside `group`, the
+/// widget that holds them (a player group of the match HUD, or the lab's `status group`). Returns
+/// the drawn bar widths.
+pub fn bind_status(
+    group: &mut Widget,
+    robot: &ra2sim::r#match::RobotReport,
+    points: &str,
+) -> [f32; 3] {
+    set_text(group, "name", &robot.bot_name);
+    set_text(group, "points", points);
+    let widths = [
+        set_bar(group, BARS[0].0, BARS[0].1, robot.battery),
+        set_bar(group, BARS[1].0, BARS[1].1, robot.air),
+        set_bar(group, BARS[2].0, BARS[2].1, robot.armor),
+    ];
+    tint_named(group, "armor bar", ARMOR_TINT);
+    set_armor_remainder(group, widths[2], !robot.defeated);
+    // `FUN_00476bf0` -> `FUN_004b3850(1)` (from `FUN_00418040`, every kind of "out"): the
+    // meters dim to 0.3 grey (`0x3e99999a`) on the background art, the three bars and the
+    // three dots; the name and the points text keep their colour.
+    let tint = if robot.defeated {
+        DEFEATED_TINT
+    } else {
+        "1 1 1 1"
+    };
+    for name in DIMMED {
+        tint_named(group, name, tint);
+    }
+    // `FUN_004b3640`: exactly one of the three dots shows.
+    for (i, name) in DOTS.iter().enumerate() {
+        set_visible(group, name, i == usize::from(robot.dot.min(2)));
+    }
+    widths
 }
 
 /// Put the camera's name in `camera textbox` and show or hide the box.

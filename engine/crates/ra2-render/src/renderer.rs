@@ -845,6 +845,7 @@ impl Renderer {
         };
 
         let mut opaque: Vec<Call> = Vec::new();
+        let mut early: Vec<Call> = Vec::new();
         // (depth, call) for whole alpha-tested batches.
         let mut tested: Vec<(f32, Call)> = Vec::new();
         // Blended triangles: (depth, item ref, first vertex).
@@ -861,7 +862,7 @@ impl Renderer {
                     continue;
                 }
                 let m = &it.material;
-                if m.blended() {
+                if m.blended() && !m.early {
                     for (t, c) in it.vertices.as_chunks::<3>().0.iter().enumerate() {
                         let p =
                             (Vec3::from(c[0].pos) + Vec3::from(c[1].pos) + Vec3::from(c[2].pos))
@@ -884,7 +885,9 @@ impl Renderer {
                     key: key_of(m),
                     slot: push_uniform(group.model, m),
                 };
-                if m.alpha_tested() {
+                if m.early {
+                    early.push(call);
+                } else if m.alpha_tested() {
                     // Back to front by the batch's centre.
                     let mut c = Vec3::ZERO;
                     for v in &it.vertices {
@@ -1060,7 +1063,7 @@ impl Renderer {
                 }
                 rp.draw(c.first..c.first + c.count, 0..1);
             };
-            for c in &opaque {
+            for c in early.iter().chain(opaque.iter()) {
                 run(&mut rp, c);
             }
             for (_, c) in &tested {

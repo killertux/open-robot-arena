@@ -1533,6 +1533,12 @@ fn a_robot_built_from_nothing_is_wired_saved_and_fights() {
 
     // Select the control, click each motor in the 3D view, pick Spin Clockwise on both inputs.
     b.click(cell[0], cell[1]).unwrap();
+    // The lab's camera starts level; the player turns it (the middle button) to look down at the parts.
+    b.set_lab_cam(ra2_app::build_mode::LabCam {
+        pitch: -std::f32::consts::FRAC_PI_2,
+        yaw: 0.0,
+        dist: 5.0,
+    });
     for motor in &motors {
         let at = b.part_point(*motor).unwrap();
         b.click(at[0], at[1]).unwrap();
@@ -1557,6 +1563,24 @@ fn a_robot_built_from_nothing_is_wired_saved_and_fights() {
 
     // Name it on the Overview and leave.
     b.click_named("overview button").unwrap();
+    // Live: a key reaches the name box after a click on it and is added to the text there, so the
+    // placeholder `Enter Bot Name` is rubbed out first.
+    b.type_char('x');
+    assert_eq!(
+        b.name_text(),
+        "Enter Bot Name",
+        "a key before the click goes nowhere"
+    );
+    b.click_named("bot name textbox").unwrap();
+    b.type_char('!');
+    assert_eq!(
+        b.name_text(),
+        "Enter Bot Name!",
+        "the first key is added, not a replacement"
+    );
+    for _ in 0.."Enter Bot Name!".len() {
+        b.backspace();
+    }
     for c in "Bolt".chars() {
         b.type_char(c);
     }
@@ -1662,4 +1686,81 @@ fn select_team_opens_on_the_last_team_and_keeps_the_pick_within_a_run() {
     assert_eq!(selected(&shell), Some(1));
     shell.click_named("continue button").unwrap();
     assert_eq!(shell.team_slot(), Some(1));
+}
+
+/// The lab's `Test Robot` tab (docs/36 9.27): the robot alone in the practice arena, driven by its own
+/// wiring, with the `Obstacles` list and RESET; leaving the tab drops the arena and entering it builds a
+/// new one.
+#[test]
+fn the_test_robot_tab_is_a_practice_arena_with_obstacles_and_reset() {
+    let Some(scratch) = ScratchGame::new("practice") else {
+        return;
+    };
+    let game = scratch.path();
+    let _guard = ra2script::lock();
+    let mut b = flow::open_workshop(game, Some(0)).unwrap();
+    b.set_size([1024.0, 768.0]).unwrap();
+    let run = |b: &mut ra2_app::build_mode::Builder, seconds: f32| {
+        let mut left = seconds;
+        while left > 0.0 {
+            b.advance(left.min(1.0 / 60.0));
+            left -= 1.0 / 60.0;
+        }
+    };
+    let at = |b: &mut ra2_app::build_mode::Builder| {
+        let arena = b.arena_mut().expect("the practice arena is up");
+        arena.matched.duel.robots[0].position(&*arena.matched.duel.physics)
+    };
+    assert!(!b.arena_active(), "no arena outside the tab");
+    b.click_named("test robot button").unwrap();
+    run(&mut b, 2.0);
+    assert!(b.arena_active());
+    let start = at(&mut b);
+    // The model's start point (0.306, 2.163, -0.948): the robot has dropped onto the floor there.
+    assert!(
+        (start.x - 0.3).abs() < 0.3 && (start.z + 0.95).abs() < 0.3,
+        "{start:?}"
+    );
+    assert!(start.y < 0.6, "{start:?}");
+    // The frame is the arena's 3D view under the status box and the Obstacles list.
+    let scene = b.scene([1024, 768]).unwrap();
+    assert!(scene
+        .textures
+        .iter()
+        .any(|t| t.label == "lab practice arena"));
+
+    // W is the robot's forward key: it runs for the far wall (live: z 16.4 in about 1.6 s).
+    let mut keys = b.drive();
+    keys.keys.set(17, true);
+    b.set_drive(keys);
+    run(&mut b, 1.8);
+    let far = at(&mut b);
+    assert!(far.z > 8.0, "held W: {far:?}");
+
+    keys.keys.set(17, false);
+    b.set_drive(keys);
+    // The Obstacles list builds a new arena (robot back on its start point); so does RESET.
+    b.click_named("blocks cb").unwrap();
+    assert_eq!(b.arena_mut().unwrap().obstacle(), "blocks");
+    run(&mut b, 0.5);
+    let again = at(&mut b);
+    assert!((again.z + 0.95).abs() < 0.5, "{again:?}");
+    run(&mut b, 1.0);
+    b.click_named("reset button").unwrap();
+    run(&mut b, 0.5);
+    let reset = at(&mut b);
+    assert!((reset.z + 0.95).abs() < 0.5, "{reset:?}");
+    assert_eq!(
+        b.arena_mut().unwrap().obstacle(),
+        "blocks",
+        "RESET keeps the obstacle"
+    );
+
+    // Leaving the tab drops it; coming back starts over with no obstacle.
+    b.click_named("overview button").unwrap();
+    b.advance(0.1);
+    assert!(!b.arena_active());
+    b.click_named("test robot button").unwrap();
+    run(&mut b, 0.2);
+    assert_eq!(b.arena_mut().unwrap().obstacle(), "none");
 }

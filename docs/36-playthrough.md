@@ -81,6 +81,10 @@ Screenshots referenced below are in the session scratchpad
 | Bot Lab wiring: drag SWITCH / BUTTON / ANALOG onto the controller, properties window, click a part in the 3D view for the connection window (§9.27) | only the debug panel could wire a robot (player-facing lab had no way) | fixed (`lab_dialog`) |
 | Weight class from the weight: light < 249, heavy >= 399 (`FUN_004df080`); a shapeless robot reads `None` (§9.27) | 250 / 400, `Lightweight` | fixed |
 | Whole build from nothing, wired, named, saved, driven (§9.27) | untested | works (`a_robot_built_from_nothing_is_wired_saved_and_fights`) |
+| Bot Lab 3D view: level 45 degree orbit camera per tab (middle button turns, wheel zooms 2..11 / 4..9), camera headlight, Components / Wiring baseplate + additive ghost + outline lines (§9.27b) | flat top-down view, 0.3 alpha ghost, one light | fixed (within 1 - 4 grey levels of the live frames) |
+| Bot Lab wiring graphics: floating control icon, blue stem, green wires; double click edits a control (§9.27b) | none | fixed (wire geometry from the live strips) |
+| Test Robot: practice arena, one robot, Obstacles list, RESET, static camera at (-4.2, 2.5, 9.5) (§9.27b) | the shipped AI in the box arena | fixed |
+| Bot Lab name box takes keys after a click and adds to the text; Paint Shop labels, swatch and picker; the tab strip's cables (§9.27b) | first key replaced the name, labels / cables clipped away | fixed |
 
 Counts: 26 rows; **16 fixed this round** (2 of them crashes/dead ends that
 closed or stranded the client), 6 worked already, 4 still broken (pause
@@ -1283,17 +1287,71 @@ cell 5 scrapped and a new robot built there, the `Bot5.bot` the game wrote copie
    (`dik_for_char`, arrows via `key_named`). **fixed**
 5. The palette's last, half-visible cell counted as shown (`ceil`), so a click on it missed at 1024 px. Now whole cells only. **fixed**
 6. The class came from the file and never changed; the lab now writes the class its weight gives and the HQ prints `None` for a shapeless robot. The class cut-offs were 250 / 400; now 249 / 399. **fixed**
-7. The name box showed the design's stored name; typing on Overview now edits it (and Back to HQ saves it). Typing elsewhere does nothing. **fixed**, but the live behaviour of the name box (does the first key replace `Enter Bot Name`?) was not
-   captured. **unverified**
-8. The 3D view of the lab is a top-down flat shaded mesh; the original's is a perspective view with the textured chassis (white skin = white) and a teal ghost on the Components / Wiring tabs; ours is a 0.3-alpha ghost. The wire graphics above
-   the tab strip and the tip line with its icon (`tip.bmp` and the text under the content) are not drawn by our lab. **open** (visual)
-9. Wire lines in the 3D view (the floating control icon and its green / blue lines) and the control's own edit window (double click) are not implemented; a connection window's default rows for a new control were not captured (ours starts at `<none>`). **open**
-10. Test Robot: the original's single-robot practice arena with the obstacle list; ours still fights the shipped AI in the box arena (as in section 5). **open**
+7. The name box showed the design's stored name; typing on Overview edited it, the first key replacing it, with no click needed. Live (`botlab-name-box-*`): a key goes nowhere until the box is clicked, and then it is
+   added to the text that is there (`Enter Bot Name` + `x` reads `Enter Bot Namex`; four BackSpaces leave `Enter Bot Nam`; the saved name of a robot left that way is `Enter Bot Nam`, as the HQ cell showed). Now
+   `name_focus` and `type_char` / `backspace` in the player-facing lab. **fixed**
+8. The 3D view of the lab was a top-down flat shaded mesh. It is the original's orbit camera (below). **fixed** (the lab's tip line with its `tip.bmp` icon and its per-state text is still not drawn: open)
+9. Wire lines in the 3D view (the floating control icon and its green / blue lines), the control's own edit window (double click) and the connection window's rows for a new control. **fixed** (below)
+10. Test Robot fought the shipped AI in the box arena. It is the practice arena with one robot (below). **fixed**
+
+### 9.27b The lab's 3D view, Test Robot and wiring graphics (`fx/lab-view`, 2026-10-28)
+
+Live on display :7 (flatpak Wine 9.0, `ra2_drive.py`, Frida; `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` of the prefix copied before and restored after, sha256 list equal; Team 0's cell 5 was scrapped and a blank
+robot saved for the name-box test; the original crashed once (the Wine "serious problem" box) when a workshop was opened right after leaving that blank lab, nothing else). Captures (manifest rows, backup
+`manifest-additions-2026-10-21-lab-view.tsv`): `botlab-view-*` (the lab camera on every tab, the wires), `botlab-wiring-*` (edit windows, the new control's connection window), `botlab-test-*` (the practice arena, its
+obstacles, state and trajectory dumps), `botlab-name-box-*`, `botlab-paint-default`. The camera states were written through Frida into the tab's camera object; the angles are in each row.
+Side-by-sides, ours against live, are in the scratchpad (`cmp4.png` Overview at three camera states, `cmp7.png` wiring, `cmp5.png` components, `cmp8.png` rotated wiring / components, `obst2.png` / `obst3.png` obstacles,
+`cmp10.png` Test Robot, `paint-cmp.png`, `strip.png`).
+
+* **The camera is not top-down.** Every tab has its own camera object (`FUN_005a6260`, `+0xf8 = 2`, the orbit mode; five distinct objects were seen, one per tab). It is a 45 degree (`+0x180`) perspective on the robot's
+  **origin**, `+0x224` = 5 m behind it, level: the robot's up is the screen's up, the hammer arm stands, the wheels are seen end on; pitch is `+0x1e0`, yaw `+0x1e4`. The matrix `+0xfc..0x124` is the rotation about x
+  by pitch then about y by yaw (live at pitch 0.5, yaw 0.7: rows `(0.765, -0.309, 0.565) (0, 0.878, 0.479) (-0.644, -0.367, 0.671)`), the forward axis is column 3, the eye is `-distance * forward` (`+0x1c8..0x1d0`;
+  `z = -d cos(pitch)`), up is column 2. Positive pitch lowers the eye (the underside shows). The viewport is 471 x 471 (`+0x190/0x194`), far plane 2000 (`+0x18c`). Controls (`0x48d130`, the lab's per-frame mouse
+  read; `FUN_00476b00(this+0x398)` is button 2): the **middle button** drags (yaw += dx * 0.01, pitch -= dy * 0.01, pitch held to +-pi/2; `0x6a69cc` = 0.01, `0x6af2b8` = pi/2), the **wheel** zooms (distance -= wheel * 0.01,
+  120 per notch = 1.2 m), within `+0x230..+0x23c` = **2..11** on Overview / Chassis and **4..9** on Components / Wiring / Paint Shop. `0x48d1a0` also zooms on Page Up / Page Down (`0xc9` / `0xd1`, the dinput codes): the
+  earlier note that those rotate was wrong. Ours: `LabCam`, `Builder::lab_wheel` / `lab_orbit`, the middle button and wheel in `window.rs`; one camera per tab, a new lab starts at pitch 0, yaw 0, 5 m.
+* **Light and ground state** (`ra2_d3dstate.js`): one white point light on the camera (type 1, diffuse and specular 1, range 1000, attenuation 1 / 0 / 0, at the eye), ambient `0xff262626`, background 0.15 grey. The
+  Overview / Chassis / Paint Shop draw the robot as is. **Components and Wiring** draw first the **baseplate**: the chassis' bottom polygon opaque, textured with `botlab/baseplate_grid.bmp` (a teal 16 px tile, uv = x, z
+  * 8), diffuse 0.5, no culling, normal up (so it is nearly black from below); then the chassis as a **ghost**: the whole mesh unlit-grey, `SRCALPHA / ONE` blend, no z write, no texture, diffuse (0.625, 0.625, 0.625, 0.14),
+  drawn before the parts (which cover it); then the parts; then 2 px grey (`0xff828282`) ribbon lines along the chassis' face outlines (the bottom and top rings and each side face's loop), z-tested. Constant on-screen
+  line widths: 2 px (outline), 4 px (wires). The legend (`mouse instructions grp`), the SHIFT / CTRL tips and REMOVE (Components only) are children of the 3D group, drawn over the view. Ours: `preview_pixels`
+  (`set_lights`, `Material::early` for the baseplate and ghost, which the renderer draws before the opaque pass), `lab_view::{ribbon, outline_edges, baseplate}`; against live frames the Overview is within 1 grey level
+  (mean abs difference over the view 1.0), Components 0.8 - 2.2, Wiring 1.9 - 4.1 (the larger ones are 1 px of line placement and the fence of tips).
+* **Wiring graphics** (`DrawPrimitive` triangle strips with `XYZ | DIFFUSE`, world space, lighting off): with a control selected the view shows its **icon** (the 32 x 28 `ctrl_icon_<kind>.bmp`, 0.262 x 0.23 m, centred
+  1.6 m above the robot's **control board** part, facing the camera at the start), a blue stem (`0xff0000ff`) from the floor to 1.0 m, and for each part the control is bound to a green (`0xff00ff00`) wire: down from the
+  icon's centre to y = 1.0, across at y = 1.0 to the part's `(x, z)`, down to the floor (bends are filled by the strip's joint pairs). Forward (4 wheel motors), LeftRight (2) and Fire (the burst motor) were dumped; a
+  control with no part shows icon and stem only; the anchor is the same for every control. Ours: `lab_view::wire_scene`, `Builder::wire_anchor`.
+* **Double click on a control** opens its own window: `Analog Control` / `Switch Control` / `Button Control` (the properties windows) with the control's name and keys in it; typing adds to the name (`Forwardz`); OK
+  renames and re-keys it and keeps its wires. Ours: `DialogKind::Props { editing }`, `open_edit_dialog`. A **new control's connection window** starts with both rows at `<none>` (`botlab-wiring-new-connection`),
+  as ours did; a bound one shows the stored rows. Delete Control opens a modal `Wiring` window with `Yes` / `No` whose text did not draw live (`botlab-wiring-delete-confirm`); ours still deletes at once. **open**
+* **Test Robot** = `Scripts/Practice.py`: the `Practice Arena` (`Arenas/practice arena/practice_arena.gmf`, gravity -12.753, friction 0.5) with **one** robot, a DEATHMATCH to the scripts (`plus.getGameType`), no countdown,
+  no end, the robot let go on the model's start point `(0.306, 2.163, -0.948)` (live: it drops, settles at `(0.26, 0.45, -1.0)` and keeps rocking by a centimetre). The camera is the scene camera's mode 0 (our `Watch`): eye
+  fixed at **(-4.2, 2.5, 9.5)** looking at the robot, its FOV following the distance (`+0x290..0x2a0`: distance 2..20, FOV 0.8976 .. 0.3491; 0.6047 at 11.6 m), the lights the model's two `Omni` points plus the white
+  camera headlight. `Obstacles` (`setObstacle`, `AddXtra` meshes `crates`, `cinderblocks`, `barrels`, `cones`, `ramps`; the first four are dynamic Havok bodies of the files' masses, the ramps mass 0 = fixed) replaces the
+  props; RESET puts the robot and the obstacles back; leaving the tab drops the arena (the clock stops) and entering it builds a new one with `None` picked. The robot is driven by its own wiring (W held 1.6 s: z -1.1 to
+  16.4, the far wall; ours reaches the same wall in about the same time, `botlab-test-trajectory-drive`). The status box shows the robot's name, the three meters and `POINTS: N/A`. Ours: `Match` with `MatchConfig::practice`
+  (one robot, no countdown or hold, never ends), `lab_arena::LabArena` (the practice `Duel`, the camera, the headlight, frames read back into the `test arena placeholder`'s place between its black background and its
+  children), `Builder::{advance, set_drive, arena_quad, bind_arena_hud}`, `hud::bind_status`. Mass-0 xtras are static bodies (`spawn_prop`) and the movable obstacles rest as one deactivation system until hit
+  (`new_with_humans`), which keeps the block pyramid standing as live. Open: how the live pile falls when hit was not checked; our pile settles a few centimetres on its first frames; the fence's alpha is a
+  shade lighter than live; the robot's idle rocking is not reproduced.
+* **Paint Shop** against `botlab-paint-default`: the panel was missing the `Selected Color` label under the swatch, the `Tint` label, the swatch colour and the slider thumb, and drew the SHIFT / CTRL tips. The labels were clipped away:
+  `ClipMode 2` was read as "clip to the parent's frame", but live the five bot-lab `selected label`s hang below their 64 px group and are drawn (now: clipped by what the parent was clipped by); the `tint label` is right
+  aligned in a box narrower than its authored position (`text_box_right`); `wires grp` / `wires grp 2` (the cables left and right of the tab strip, outside their group's 630 px frame) are drawn out to the window's edge
+  (they were missing from every lab frame). The Color Fill state is the live one: swatch = HSL(x * 360, 1 - y, thumb) of the picker target and the thumb (target 0.184 / 0.253, thumb 0.4 give `(161, 176, 25)` as live);
+  the first captures (`botlab-paint`) showed `(185, 150, 18)` with the same target, so the start colour is not a function of the target (not traced; ours starts at the first captures' value). Clicks on the picker and
+  slider move them, clicks on the chassis and `Paint Entire Chassis` fill with the swatch, `Undo` undoes (`Texture::solid`). The weight in the Overview of C.R.U.S.H. read **395.2** live against 387.209 from
+  `plus.getWeight` and 387.2 in ours (8.0 kg unexplained, the lab's own sum, `FUN_0042f7d0`): **open**. The 1 px lower placement of the lab's content (the 3D frame's top border is at y 147 live, 148 ours) is open.
+
+Tests: `playthrough::the_test_robot_tab_is_a_practice_arena_with_obstacles_and_reset` (arena up on the tab, start point, the frame, W reaches the far wall, obstacle and RESET, leaving drops it),
+`the_lab_camera_matches_the_live_matrices`, `the_paint_swatch_is_the_pickers_hue_and_saturation_at_the_sliders_lightness`, `lab_view` (outline edges, constant-pixel ribbons), the playthrough's name step (a key
+before the click does nothing, the first key adds). Addresses verified: `0x5a6260` (camera input / orbit), `0x48d130` (the lab's mouse read; button index `+0x398` = 2), `0x48d1a0` (Page Up / Down), `0x6a69cc`
+(0.01), `0x6af2b8` (pi/2), `0x6a84e0` / `0x6a84e4` (-1000 / 1000), `0x42662c` / `FUN_00426590` (Color Fill's constructor: `lum slider`, `color picker img`, `picker target`, `selected color img`, `paint entire`),
+`0x71f58c` (the D3D device the dumps read).
 
 Test: `playthrough::a_robot_built_from_nothing_is_wired_saved_and_fights` (blank lab on a scrapped cell, dim tab ignored, square drawn and closed, step 2, Finished: 94.1 kg, board, two motors with wheels, analog control W-S dragged on,
 both motors wired through the connection window, named `Bolt`, Back to HQ, `Bot5.bot` read back, then a match in which the new robot drives more than 0.5 m). Unit tests: `workshop::extrude` (6), `stats::weight_classes_use_the_games_thresholds`.
 Addresses: `FUN_00439650` (blank lab), `FUN_004deff0` / `FUN_004df080` / `FUN_0046c710` (class text, class from weight, the lab's class field), `FUN_0042f7d0` (weight / weightclass boxes), `FUN_004f7b30` (control board test enabling Wiring),
-`FUN_0042c850` (the drag judge, verified live on the new chassis), `FUN_0048d130` / `FUN_0048d1c3` (the 3D view's mouse reads: buttons 0xc9 / 0xd1 rotate and zoom), `0x6aa9e8` / `0x6aa9ec` / `0x6aa9a4` (399, 249, 800).
+`FUN_0042c850` (the drag judge, verified live on the new chassis), `FUN_0048d130` / `FUN_0048d1c3` (the 3D view's input: see 9.27b, the middle button rotates and the wheel zooms; 0xc9 / 0xd1 are the Page Up / Down keys), `0x6aa9e8` / `0x6aa9ec` / `0x6aa9a4` (399, 249, 800).
 
 ## 9.28 Release check: Enter Event without a robot, Select Team after a restart (`fx/release`, 2026-10-28)
 
