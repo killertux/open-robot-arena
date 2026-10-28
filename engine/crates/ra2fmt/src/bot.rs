@@ -1148,9 +1148,38 @@ fn tga_to_wire(tga: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The inverse of the wire form of a picture: a type `0x17` TGA (compressed
+/// size, zlib stream) back to the plain type 2 TGA. `None` for anything else.
+pub fn wire_to_tga(wire: &[u8]) -> Option<Vec<u8>> {
+    let head = wire.get(..18).filter(|h| h[2] == WIRE_TGA_TYPE)?;
+    let at = 18 + head[0] as usize;
+    let size = u32::from_le_bytes(wire.get(at..at + 4)?.try_into().ok()?) as usize;
+    let packed = wire.get(at + 4..at + 4 + size)?;
+    let mut pixels = Vec::new();
+    std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(packed), &mut pixels).ok()?;
+    let mut out = wire[..at].to_vec();
+    out[2] = 2;
+    out.extend_from_slice(&pixels);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wire_picture_turns_back_into_its_tga() {
+        let mut tga = vec![0u8; 18];
+        tga[2] = 2;
+        tga[12] = 2;
+        tga[14] = 2;
+        tga[16] = 32;
+        tga.extend((0..16u8).map(|i| i * 3));
+        let wire = tga_to_wire(&tga);
+        assert_eq!(wire[2], WIRE_TGA_TYPE);
+        assert_eq!(wire_to_tga(&wire), Some(tga));
+        assert_eq!(wire_to_tga(&[0; 30]), None);
+    }
 
     /// The game files live outside the repository; CI has none.
     fn game_dir() -> Option<std::path::PathBuf> {

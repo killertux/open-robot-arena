@@ -186,7 +186,7 @@ impl NetGame {
         self.session.set_host_data(self.lobby.host_data());
     }
 
-    /// Host: a newcomer is told every panel, its own default one included.
+    /// Host: a newcomer is told every panel.
     fn send_lobby_to(&mut self, to: PlayerId) {
         for m in self.lobby.group_infos() {
             self.session.send_with(Target::Player(to), &m, true);
@@ -246,10 +246,6 @@ impl NetGame {
                     let before = self.lobby.slots.clone();
                     self.lobby.leave(id);
                     if self.is_host() {
-                        // A freed player panel goes to the first spectator.
-                        if self.schema.is_none() {
-                            self.lobby.promote_spectators();
-                        }
                         self.publish_lobby(&before, None);
                     }
                     out.push(GameEvent::PlayerLeft { id, reason });
@@ -277,6 +273,21 @@ impl NetGame {
                 if let Some(change) = self.lobby.apply(from, host, &message) {
                     if self.is_host() {
                         match &message {
+                            // A panel emptied by its owner goes to the others.
+                            Message::GroupInfo(g) if g.state == kind::LEFT => {
+                                let me = self.local();
+                                let peers: Vec<PlayerId> = self
+                                    .session
+                                    .players()
+                                    .into_iter()
+                                    .map(|p| p.id)
+                                    .filter(|id| Some(*id) != me && *id != from)
+                                    .collect();
+                                for p in peers {
+                                    self.session.send_with(Target::Player(p), &message, true);
+                                }
+                                self.session.set_host_data(self.lobby.host_data());
+                            }
                             Message::GroupInfo(_) => self.publish_lobby(&before, Some(from)),
                             Message::PlayerReady { .. } => {
                                 // Not back to the sender (see `publish_lobby`).
@@ -415,8 +426,10 @@ impl NetGame {
         robot: &str,
         logo: &str,
         design: Vec<u8>,
-    ) {
-        let Some(me) = self.local() else { return };
+    ) -> bool {
+        let Some(me) = self.local() else {
+            return false;
+        };
         let name = self
             .lobby
             .members
@@ -430,9 +443,19 @@ impl NetGame {
             (None, Some(s)) if s.is_human() => s.index,
             _ => match self.lobby.free_panel() {
                 Some(i) => i,
-                None => return,
+                None => return false,
             },
         };
+        // Not a panel somebody else holds with a robot (the host's word is
+        // final), and not beyond the four.
+        if index as usize >= crate::lobby::PLAYER_SLOTS
+            || self
+                .lobby
+                .panel(index)
+                .is_some_and(|p| p.player != me && p.kind != kind::HUMAN)
+        {
+            return false;
+        }
         let slot = crate::lobby::Slot {
             index,
             player: me,
@@ -454,6 +477,89 @@ impl NetGame {
             self.session
                 .send_with(Target::Player(self.host), &info, true);
         }
+        true
+    }
+
+    /// Host: set up a computer panel (`computer player button`, then the
+    /// Select Computer Robot window): kind `COMPUTER_WITH_ROBOT`, owned by
+    /// the host, told to every peer. A panel a human holds is not taken.
+    pub fn add_computer_panel(
+        &mut self,
+        panel: u32,
+        team: &str,
+        robot: &str,
+        logo: &str,
+        design: Vec<u8>,
+    ) -> bool {
+        let Some(me) = self.local() else {
+            return false;
+        };
+        if !self.is_host()
+            || panel as usize >= crate::lobby::PLAYER_SLOTS
+            || self
+                .lobby
+                .panel(panel)
+                .is_some_and(|p| p.is_human() && p.kind != kind::HUMAN)
+        {
+            return false;
+        }
+        let name = self.local_name();
+        let slot = crate::lobby::Slot {
+            index: panel,
+            player: me,
+            kind: kind::COMPUTER_WITH_ROBOT,
+            name,
+            team: team.to_string(),
+            team_logo: logo.to_string(),
+            robot: robot.to_string(),
+            ready: false,
+            design: Some(design),
+        };
+        let before = self.lobby.slots.clone();
+        self.lobby.set_panel(slot);
+        self.publish_lobby(&before, None);
+        true
+    }
+
+    /// Empty a panel. The host may eject any panel (a human peer then waits
+    /// as a spectator); a joiner only its own, which it asks the host for.
+    /// Everyone is told with a `GroupInfo` in state `LEFT` for the panel
+    /// (inferred: the original's wire for an eject was not traced). Returns
+    /// whether a panel went.
+    pub fn eject_panel(&mut self, panel: u32) -> bool {
+        let Some(me) = self.local() else {
+            return false;
+        };
+        let Some(old) = self.lobby.panel(panel).cloned() else {
+            return false;
+        };
+        let m = Message::GroupInfo(crate::message::GroupInfo {
+            slot: panel,
+            owner: old.player,
+            state: kind::LEFT,
+            ..Default::default()
+        });
+        if self.is_host() {
+            self.lobby.remove_panel(panel);
+            let peers: Vec<PlayerId> = self
+                .session
+                .players()
+                .into_iter()
+                .map(|p| p.id)
+                .filter(|id| *id != me)
+                .collect();
+            for p in peers {
+                self.session.send_with(Target::Player(p), &m, true);
+            }
+            self.session.set_host_data(self.lobby.host_data());
+            true
+        } else if old.player == me {
+            self.lobby.remove_panel(panel);
+            self.session.send_with(Target::Player(self.host), &m, true);
+            true
+        } else {
+            false
+        }
     }
 
     /// Toggle the local player's ready flag: it is the panel's `giGroupInfoMessage`
@@ -464,7 +570,8 @@ impl NetGame {
         let Some(slot) = self.lobby.slot_mut(me) else {
             return;
         };
-        if slot.is_spectator() {
+        // Only a human panel with a robot has a ready flag.
+        if !slot.is_human() || !slot.has_robot() {
             return;
         }
         slot.ready = ready;

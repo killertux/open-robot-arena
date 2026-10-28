@@ -769,3 +769,52 @@ played by the AI.
   (Scout, The Boxer), not the host's designs.
 * The server list's Players column (0/8 for a port host with one human panel), the
   other four `TimeSync` words, the `AddArenaBot` words, voice and host migration.
+
+### 15.9 The port's lobby robot choice (fx/mp-lobby)
+
+The port's pre-match lobby takes a robot the way the original's does (§14, live
+captures `mp-lobby-*`).
+
+* **No automatic panels.** `Lobby::join` makes the peer a spectator
+  (`kind::SPECTATOR`, listed under `Spectators:`), the host included. A panel
+  exists once somebody claims it; `Lobby::promote_spectators` is gone. A panel
+  with a state-0 human and no robot draws as OPEN.
+* **Shell.** On `multiplayer/prematch.gib` a click on `human player button`,
+  `computer player button`, `change robot button`, `eject button` or `ready
+  checkbox` is recorded for the application (`Shell::take_panel_request() ->
+  PanelRequest { slot, button }`) and nothing else happens (the exhibition's
+  eject/picker code does not run there). The application opens the shipped modal
+  window with `Shell::open_lobby_picker(slot, Side::Player | Side::Computer)`
+  (`selectbot_player.gib` / `selectbot_computer.gib`, the exhibition's
+  `click_popup`); OK is read back with `Shell::take_lobby_pick() -> LobbyPick
+  { slot, side, pick: Pick { team, bot } }` and draws no exhibition panel art.
+* **App (`NetPlay`).** `panel_events` (run by `on_step` and `tick`) turns the pick into
+  `NetGame::claim_panel` (human; also the re-claim of "change robot", which keeps the
+  ready flag) or, for the host, `NetGame::add_computer_panel` (kind
+  `COMPUTER_WITH_ROBOT`, owner the host). The robot is read from the install
+  (`PickedRobot::load`: `ra2ui::teams::bot_path`, `ra2fmt::bot::parse`, team name and
+  logo from the roster, design = `Bot::snapshot_wire`) and kept per panel
+  (`NetPlay::picked_robot(panel)`, only while the lobby still shows the panel as this
+  end's). Eject: the host removes any panel, a player its own (`NetGame::eject_panel`,
+  a `GroupInfo` for the panel in state `LEFT`, relayed by the host to the others, never
+  echoed to the sender); the ejected human is a spectator again. The original's
+  confirmation dialog on a player's own eject is skipped, and so is its wire form
+  (inferred, not traced). Join is offered on an open panel to a player with no
+  panel yet (one panel per human, inferred); Ready only on the own human panel with a
+  robot. Begin Match needs `Lobby::all_ready` (at least two robots, every human panel
+  ready and with a robot).
+* **What a panel shows** (`show_lobby`, per `FUN_0047c020`, kind from this end): my
+  human panel (0): `local_player_icon`, change, eject, ready; another peer's (1):
+  `remote_player_icon`, no change, eject only on the host, owner name in the small
+  label; my computer panel (2, host): `computer_player_icon`, change, eject, no ready;
+  a remote computer panel (3): computer icon, no change, eject only on the host.
+  `bot img` is the design stream decoded back to a picture (`ra2fmt::bot::wire_to_tga`).
+  A joiner's open panels offer no computer button.
+* **Not done:** the deathmatch lobby shows four panels (the original closes 3 and 4,
+  `closedplayer.gib`); the match still builds its robots from stand-ins (the host reads
+  `picked_robot` for that).
+* **Verified** headlessly over loopback only (no Wine session): `ra2-shell` test
+  `lobby_panels`, `ra2-app` test `refresh_join_and_the_prematch_lobby_through_the_screens`
+  (two shells and two `NetPlay`: picks, computer robot, kinds shown, ready, change,
+  eject), `ra2net` tests `a_claim_reaches_the_others_but_is_not_echoed_to_the_claimant`
+  and `peers_are_spectators_until_they_claim_a_panel`.

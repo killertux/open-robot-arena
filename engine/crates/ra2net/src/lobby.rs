@@ -11,8 +11,10 @@
 //! **Spectators** (docs/38 §10, inferred): `prematch.gib` has a `spectator
 //! list` ("list of the spectators (joined but not in the match)"), and a new
 //! peer plays `spectator_joined.wav` (event `0x64`, handler `0x492ef0`). A
-//! peer beyond the four player panels is such a spectator here: kind
+//! peer without a player panel is such a spectator here: kind
 //! [`kind::SPECTATOR`], no robot, no ready flag, no robot index in the match.
+//! Every peer, the host included, arrives as one and takes a panel by
+//! claiming it (live: nobody has a panel on arrival).
 
 use crate::dpn::RaHostData;
 use crate::message::{GroupInfo, Message};
@@ -228,29 +230,42 @@ impl Lobby {
         }
     }
 
-    /// A human joined (host side, on the session's player-joined). The first
-    /// four peers take a player panel; later ones are spectators.
+    /// Someone joined the session (host side, on the session's player-joined).
+    /// Nobody has a panel on arrival (the original's lobby lists the host and
+    /// every peer under `Spectators:` until they take one, live): the peer is
+    /// a spectator until [`Lobby::apply`] or the local claim gives it a panel.
     pub fn join(&mut self, player: PlayerId, name: &str) {
-        self.add_member(player, name);
-        if self.slot(player).is_none() {
-            let slot = Slot {
-                player,
-                name: name.to_string(),
+        self.add_watcher(player, name);
+    }
+
+    /// Take the panel at `index` away (an eject, a player leaving its panel).
+    /// A human who is still in the session goes back to the spectators.
+    pub fn remove_panel(&mut self, index: u32) -> Option<Slot> {
+        let at = self
+            .slots
+            .iter()
+            .position(|s| !s.is_spectator() && s.index == index)?;
+        let old = self.slots.remove(at);
+        if old.is_human()
+            && self.members.iter().any(|(id, _)| *id == old.player)
+            && !self
+                .slots
+                .iter()
+                .any(|s| s.player == old.player && s.is_human())
+            && !self
+                .slots
+                .iter()
+                .any(|s| s.player == old.player && s.is_spectator())
+        {
+            self.slots.push(Slot {
+                index: NO_PANEL,
+                player: old.player,
+                kind: kind::SPECTATOR,
+                name: old.name.clone(),
                 ..Slot::default()
-            };
-            match self.free_panel() {
-                Some(index) => self.put_panel(Slot {
-                    index,
-                    kind: kind::HUMAN,
-                    ..slot
-                }),
-                None => self.slots.push(Slot {
-                    index: NO_PANEL,
-                    kind: kind::SPECTATOR,
-                    ..slot
-                }),
-            }
+            });
         }
+        Some(old)
     }
 
     /// The slots with a player panel, in panel order (the robots of the
@@ -259,39 +274,27 @@ impl Lobby {
         self.slots.iter().filter(|s| !s.is_spectator())
     }
 
+    /// The panels that hold a robot, in panel order: the robots of the match.
+    pub fn contestants(&self) -> impl Iterator<Item = &Slot> {
+        self.slots.iter().filter(|s| s.has_robot())
+    }
+
     /// The spectators, in the order they joined (`spectator list`).
     pub fn spectators(&self) -> impl Iterator<Item = &Slot> {
         self.slots.iter().filter(|s| s.is_spectator())
     }
 
-    /// The match robot index of a player: its place among the player panels;
+    /// The match robot index of a player: its place among the panels that
+    /// hold a robot (a human panel; a computer's belongs to the host);
     /// `None` for a spectator or a stranger.
     pub fn robot_index(&self, player: PlayerId) -> Option<usize> {
-        self.players().position(|s| s.player == player)
+        self.contestants()
+            .position(|s| s.player == player && s.is_human())
     }
 
     pub fn leave(&mut self, player: PlayerId) {
         self.slots.retain(|s| s.player != player);
         self.members.retain(|(id, _)| *id != player);
-    }
-
-    /// Host: while a player panel is free, the longest-waiting spectator takes
-    /// it (inferred: a spectator is a peer "joined but not in the match").
-    /// Returns whether anyone moved.
-    pub fn promote_spectators(&mut self) -> bool {
-        let mut moved = false;
-        while let Some(index) = self.free_panel() {
-            let Some(at) = self.slots.iter().position(|s| s.is_spectator()) else {
-                break;
-            };
-            let mut slot = self.slots.remove(at);
-            slot.index = index;
-            slot.kind = kind::HUMAN;
-            slot.ready = false;
-            self.put_panel(slot);
-            moved = true;
-        }
-        moved
     }
 
     /// Every human with a robot is ready, and there are at least two robots.
@@ -351,6 +354,15 @@ impl Lobby {
                 if g.slot as usize >= PLAYER_SLOTS || g.state == kind::SPECTATOR {
                     return None;
                 }
+                if from != host && g.state == kind::LEFT {
+                    // A joiner empties its own panel.
+                    let own = self.panel(g.slot).is_some_and(|p| p.player == from);
+                    if !own || g.owner != from {
+                        return None;
+                    }
+                    self.remove_panel(g.slot);
+                    return Some(LobbyChange::Slots);
+                }
                 if from != host {
                     // A joiner speaks for a panel of its own, as a human,
                     // and does not set its ready flag that way.
@@ -397,7 +409,7 @@ impl Lobby {
                     return Some(LobbyChange::Slots);
                 }
                 if g.state == kind::LEFT {
-                    self.slots.retain(|s| s.is_spectator() || s.index != g.slot);
+                    self.remove_panel(g.slot);
                     return Some(LobbyChange::Slots);
                 }
                 let slot = self.with_kept_design(Slot::from_group_info(g));
@@ -409,7 +421,8 @@ impl Lobby {
                     return None;
                 }
                 let slot = self.slot_mut(*player)?;
-                if slot.is_spectator() {
+                // Only a human panel with a robot has a ready flag.
+                if !slot.is_human() || !slot.has_robot() {
                     return None;
                 }
                 slot.ready = *ready;
@@ -446,15 +459,46 @@ impl Lobby {
 mod tests {
     use super::*;
 
+    fn panel(index: u32, player: PlayerId, kind: u32, name: &str) -> Slot {
+        Slot {
+            index,
+            player,
+            kind,
+            name: name.into(),
+            robot: "Razor".into(),
+            ..Slot::default()
+        }
+    }
+
+    fn claim(slot: u32, owner: PlayerId, ready: bool) -> Message {
+        Message::GroupInfo(GroupInfo {
+            slot,
+            owner,
+            state: kind::HUMAN_WITH_ROBOT,
+            strings: [
+                "The Rookies".into(),
+                "Teams\\orange_skull.bmp".into(),
+                "C.R.U.S.H.".into(),
+                "Default Player".into(),
+            ],
+            flag: ready,
+            value: 1,
+            robot: None,
+        })
+    }
+
     #[test]
     fn group_infos_round_trip_a_lobby() {
         let mut host = Lobby::default();
         host.join(1, "Host");
         host.join(2, "Guest");
-        host.slots[1].kind = kind::HUMAN_WITH_ROBOT;
-        host.slots[1].robot = "Razor".into();
-        host.slots[1].design = Some(vec![1, 2, 3]);
+        let mut guest_panel = panel(1, 2, kind::HUMAN_WITH_ROBOT, "Guest");
+        guest_panel.design = Some(vec![1, 2, 3]);
+        host.set_panel(guest_panel);
+        host.set_panel(panel(0, 1, kind::COMPUTER_WITH_ROBOT, "Host"));
         let mut guest = Lobby::default();
+        guest.add_watcher(1, "Host");
+        guest.add_watcher(2, "Guest");
         for m in host.group_infos() {
             let bytes = m.encode();
             let m = Message::decode(&bytes).unwrap();
@@ -464,84 +508,86 @@ mod tests {
         assert_eq!(
             host.host_data(),
             RaHostData {
-                slots_23: 0,
-                slots_01: 2
+                slots_23: 1,
+                slots_01: 1
             }
         );
     }
 
+    /// Nobody has a panel on arrival (the original's host lists itself and
+    /// every peer under `Spectators:`); a claim takes one.
     #[test]
-    fn peers_beyond_four_panels_are_spectators_until_a_panel_frees() {
+    fn peers_arrive_as_spectators_and_a_claim_takes_a_panel() {
         let mut lobby = Lobby::default();
         for (i, n) in ["A", "B", "C", "D", "E", "F"].iter().enumerate() {
             lobby.join(i as u32 + 1, n);
         }
-        assert_eq!(lobby.players().count(), 4);
-        let names: Vec<_> = lobby.spectators().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["E", "F"]);
-        assert_eq!(lobby.robot_index(4), Some(3));
-        assert_eq!(lobby.robot_index(5), None);
-        // A spectator neither readies nor describes a panel; a host's word
-        // promotes.
+        assert_eq!(lobby.players().count(), 0);
+        assert_eq!(lobby.spectators().count(), 6);
+        assert_eq!(lobby.members.len(), 6);
+        // A spectator neither readies nor owns a robot.
         let ready = Message::PlayerReady {
             player: 5,
             ready: true,
         };
         assert_eq!(lobby.apply(5, 1, &ready), None);
-        let own = Message::GroupInfo(GroupInfo {
-            slot: 0,
+        assert_eq!(lobby.robot_index(5), None);
+        // E claims panel 2: it leaves the spectators.
+        assert_eq!(
+            lobby.apply(5, 1, &claim(2, 5, false)),
+            Some(LobbyChange::Slots)
+        );
+        assert!(!lobby.slot(5).unwrap().is_spectator());
+        assert_eq!(lobby.spectators().count(), 5);
+        assert_eq!(lobby.robot_index(5), Some(0));
+        // A panel with a robot is not taken by another.
+        assert_eq!(lobby.apply(6, 1, &claim(2, 6, false)), None);
+        assert!(lobby.slot(6).unwrap().is_spectator());
+        // Ready needs the robot.
+        assert!(lobby.apply(5, 1, &ready).is_some());
+        assert_eq!(lobby.host_data().slots_01, 1);
+        // The claimant empties its own panel (a joiner's eject).
+        let left = Message::GroupInfo(GroupInfo {
+            slot: 2,
             owner: 5,
-            state: kind::HUMAN_WITH_ROBOT,
+            state: kind::LEFT,
             ..GroupInfo::default()
         });
-        // Panel 0 holds A's robot: not to be taken.
-        lobby.slots[0].kind = kind::HUMAN_WITH_ROBOT;
-        assert_eq!(lobby.apply(5, 1, &own), None);
+        assert_eq!(lobby.apply(6, 1, &left), None, "not F's panel");
+        assert_eq!(lobby.apply(5, 1, &left), Some(LobbyChange::Slots));
         assert!(lobby.slot(5).unwrap().is_spectator());
-        lobby.slots[0].kind = kind::HUMAN;
-        lobby.leave(2);
-        assert!(lobby.promote_spectators());
-        assert_eq!(lobby.slot(5).unwrap().kind, kind::HUMAN);
-        assert!(lobby.slot(6).unwrap().is_spectator());
-        assert_eq!(lobby.players().count(), 4);
-        // Spectators are not counted in the enumeration reply.
-        assert_eq!(lobby.host_data().slots_01, 4);
+        assert_eq!(lobby.players().count(), 0);
+        // The host's word removes any panel, a computer's too.
+        lobby.set_panel(panel(3, 1, kind::COMPUTER_WITH_ROBOT, "A"));
+        let left = Message::GroupInfo(GroupInfo {
+            slot: 3,
+            owner: 1,
+            state: kind::LEFT,
+            ..GroupInfo::default()
+        });
+        assert_eq!(lobby.apply(1, 1, &left), Some(LobbyChange::Slots));
+        assert_eq!(lobby.players().count(), 0);
+        assert_eq!(lobby.spectators().count(), 6);
     }
 
     /// The original's joiner takes the host's open panel 0 with its robot
-    /// (live, docs/38 §14): it gets the panel and its ready flag counts, the
-    /// host's open panel moves to the next free one.
+    /// (live, docs/38 section 14): it gets the panel and its ready flag counts.
     #[test]
     fn an_original_joiner_claims_an_open_panel_with_its_group_info() {
         let mut lobby = Lobby::default();
         lobby.join(0x10001, "Host");
         lobby.join(0x10002, "Default Player");
-        let claim = |ready| {
-            Message::GroupInfo(GroupInfo {
-                slot: 0,
-                owner: 0x10002,
-                state: kind::HUMAN_WITH_ROBOT,
-                strings: [
-                    "The Rookies".into(),
-                    "Teams\\orange_skull.bmp".into(),
-                    "C.R.U.S.H.".into(),
-                    "Default Player".into(),
-                ],
-                flag: ready,
-                value: 1,
-                robot: None,
-            })
-        };
         assert_eq!(
-            lobby.apply(0x10002, 0x10001, &claim(false)),
+            lobby.apply(0x10002, 0x10001, &claim(0, 0x10002, false)),
             Some(LobbyChange::Slots)
         );
         let p0 = lobby.panel(0).unwrap();
         assert_eq!((p0.player, p0.robot.as_str()), (0x10002, "C.R.U.S.H."));
-        assert_eq!(lobby.slot(0x10001).unwrap().index, 1);
-        assert_eq!(lobby.players().count(), 2);
+        // The host holds no panel.
+        assert!(lobby.slot(0x10001).unwrap().is_spectator());
+        assert_eq!(lobby.players().count(), 1);
         // Ready is the panel's flag.
-        lobby.apply(0x10002, 0x10001, &claim(true));
+        lobby.apply(0x10002, 0x10001, &claim(0, 0x10002, true));
         assert!(lobby.panel(0).unwrap().ready);
     }
 
@@ -550,6 +596,8 @@ mod tests {
         let mut lobby = Lobby::default();
         lobby.join(1, "Host");
         lobby.join(2, "Guest");
+        lobby.set_panel(panel(0, 1, kind::HUMAN_WITH_ROBOT, "Host"));
+        lobby.set_panel(panel(1, 2, kind::HUMAN_WITH_ROBOT, "Guest"));
         let forged = Message::PlayerReady {
             player: 1,
             ready: true,
@@ -572,12 +620,16 @@ mod tests {
         let mut lobby = Lobby::default();
         lobby.join(1, "Host");
         lobby.join(2, "Guest");
-        for s in &mut lobby.slots {
-            s.kind = kind::HUMAN_WITH_ROBOT;
-        }
+        lobby.set_panel(panel(0, 1, kind::HUMAN_WITH_ROBOT, "Host"));
+        assert!(!lobby.all_ready());
+        lobby.set_panel(panel(1, 2, kind::HUMAN_WITH_ROBOT, "Guest"));
         assert!(!lobby.all_ready());
         lobby.slots[0].ready = true;
+        assert!(!lobby.all_ready());
         lobby.slots[1].ready = true;
         assert!(lobby.all_ready());
+        // A human who has not picked a robot holds the match back.
+        lobby.set_panel(panel(2, 3, kind::HUMAN, "Third"));
+        assert!(!lobby.all_ready());
     }
 }
