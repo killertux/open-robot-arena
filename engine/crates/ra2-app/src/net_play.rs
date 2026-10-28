@@ -782,6 +782,8 @@ impl NetPlay {
             game.begin_match();
         }
         self.start = Start::Idle;
+        // The match is on from here (chat, lobby state); its snapshot lists follow once it is built.
+        game.set_schema(schema());
         self.assign_robots();
         NetAction::StartMatch { arena }
     }

@@ -461,7 +461,7 @@ fn a_synced_duel_follows_the_host() {
     host_match.skip_intro();
     guest_match.skip_intro();
     let start_pos = host_match.robot_position(1).unwrap();
-    guest_match.set_drive(DriveInput::new(1.0, 0.0));
+    guest_match.set_drive(forward());
     let dt = host_match.matched.config.dt;
     for _ in 0..480 {
         guest.before_step(&mut guest_match);
@@ -846,9 +846,17 @@ fn a_rematch_in_the_same_lobby_starts_from_a_clean_gate() {
         pump(&mut host, &mut guest, &mut host_shell, &mut guest_shell);
     }
     assert_eq!(host.game.as_ref().unwrap().lobby.slots.len(), 2);
-    // Begin needs two robots and every human ready.
-    claim(&mut host, 0);
-    claim(&mut guest, 1);
+    // Begin needs two robots and every human ready; the robots are the install's, which is what
+    // the peers swap at the start.
+    for (net, panel, robot) in [(&mut host, 0, "C.R.U.S.H."), (&mut guest, 1, "Sting Ray")] {
+        assert!(net.game.as_mut().unwrap().claim_panel(
+            Some(panel),
+            "The Rookies",
+            robot,
+            LOGO,
+            vec![1, 2, 3]
+        ));
+    }
     host.game.as_mut().unwrap().set_ready(true);
     guest.game.as_mut().unwrap().set_ready(true);
     let start = Instant::now();
@@ -871,17 +879,23 @@ fn a_rematch_in_the_same_lobby_starts_from_a_clean_gate() {
         let action = host
             .on_step(&mut host_shell, PREMATCH_SCREEN, &begin)
             .unwrap();
-        assert!(matches!(action, NetAction::StartMatch { .. }), "{round}");
-        // The joiner's tick hears Prepare (and keeps the in-match events for
-        // `after_step`).
+        // The host sends its robot and waits for the joiner's before it builds the match.
+        assert!(matches!(action, NetAction::None), "{round}");
+        // Both ends hear Prepare, swap their robots and are told to build the match.
         let start = Instant::now();
-        let mut prepared = false;
-        while !prepared && start.elapsed() < Duration::from_secs(5) {
-            prepared = matches!(
-                pump(&mut host, &mut guest, &mut host_shell, &mut guest_shell),
+        let (mut prepared, mut host_built) = (false, false);
+        while !(prepared && host_built) && start.elapsed() < Duration::from_secs(5) {
+            host_built |= matches!(
+                host.tick(&mut host_shell).unwrap(),
                 NetAction::StartMatch { .. }
             );
+            prepared |= matches!(
+                guest.tick(&mut guest_shell).unwrap(),
+                NetAction::StartMatch { .. }
+            );
+            std::thread::sleep(Duration::from_millis(3));
         }
+        assert!(host_built, "round {round}: the host never built");
         assert!(prepared, "round {round}: no Prepare");
         // Neither end may run before the host has heard the joiner loaded.
         assert!(
@@ -1115,7 +1129,7 @@ fn edge_child(test: &str, role: &str) {
             (t, _) if t == EDGE_TESTS[0] && fighting && fight == 20 => {
                 // Both hold forward.
                 keys_from = fight;
-                session.set_drive(DriveInput::new(1.0, 0.0));
+                session.set_drive(forward());
             }
             (t, "guest") if t == EDGE_TESTS[1] && fighting && fight == 40 => {
                 net.leave();
@@ -1419,4 +1433,11 @@ fn the_snapshot_of_two_robots_has_the_ids_the_originals_has() {
     // The chassis are awake in full, the other bodies by position and rotation.
     assert!(state.partial);
     assert!(state.bodies.iter().all(|b| b.awake == (b.id & 0x3ff == 0)));
+}
+
+/// "Forward" held: the W key, the way a remote player's key events carry it.
+fn forward() -> DriveInput {
+    let mut drive = DriveInput::default();
+    drive.keys.set(ra2sim::controls::dik::W, true);
+    drive
 }
