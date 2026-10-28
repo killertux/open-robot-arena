@@ -561,7 +561,10 @@ fn a_fifth_peer_is_a_spectator_who_takes_a_freed_panel() {
     }
     assert_eq!(host.lobby.spectators().count(), 0);
     assert_eq!(host.lobby.players().count(), 4);
-    assert_eq!(guests[3].lobby.robot_index(watcher), Some(3));
+    // Panels are positions (`GroupInfo::slot`): the watcher takes the panel A
+    // left, the second one.
+    assert_eq!(guests[3].lobby.robot_index(watcher), Some(1));
+    assert_eq!(host.lobby.slot(watcher).unwrap().index, 1);
 }
 
 /// The in-match chat line: `"[name] text"` as a `0x76` text to everyone,

@@ -37,14 +37,22 @@ pub const MAX_SPECTATORS: usize = 4;
 /// Peers a session admits: the players and their spectators.
 pub const SESSION_MAX: u32 = (PLAYER_SLOTS + MAX_SPECTATORS) as u32;
 
+/// [`Slot::index`] of a spectator: no player panel.
+pub const NO_PANEL: u32 = u32::MAX;
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Slot {
+    /// The player panel (`GroupInfo::slot`), [`NO_PANEL`] for a spectator.
+    pub index: u32,
+    /// Who controls it (`GroupInfo::owner`).
     pub player: PlayerId,
     pub kind: u32,
+    /// The owner's player name.
     pub name: String,
     pub team: String,
+    /// The team logo (`Teams\orange_skull.bmp`).
+    pub team_logo: String,
     pub robot: String,
-    pub robot_file: String,
     pub ready: bool,
     /// The robot design stream, when one is chosen.
     pub design: Option<Vec<u8>>,
@@ -59,32 +67,40 @@ impl Slot {
         self.kind == kind::HUMAN_WITH_ROBOT || self.kind == kind::COMPUTER_WITH_ROBOT
     }
 
-    pub fn to_group_info(&self, index: usize) -> GroupInfo {
+    pub fn is_human(&self) -> bool {
+        self.kind == kind::HUMAN || self.kind == kind::HUMAN_WITH_ROBOT
+    }
+
+    /// The panel as the original writes it (field order from the live
+    /// messages, docs/38 §14): panel, owner, state, team, team logo, robot,
+    /// owner name, ready, 1 for a human panel, the design.
+    pub fn to_group_info(&self) -> GroupInfo {
         GroupInfo {
-            player: self.player,
-            group: index as u32,
+            slot: self.index,
+            owner: self.player,
             state: self.kind,
             strings: [
-                self.name.clone(),
                 self.team.clone(),
+                self.team_logo.clone(),
                 self.robot.clone(),
-                self.robot_file.clone(),
+                self.name.clone(),
             ],
             flag: self.ready,
-            value: 0,
+            value: self.is_human() as u32,
             robot: self.design.clone(),
         }
     }
 
     fn from_group_info(g: &GroupInfo) -> Slot {
-        let [name, team, robot, robot_file] = g.strings.clone();
+        let [team, team_logo, robot, name] = g.strings.clone();
         Slot {
-            player: g.player,
+            index: g.slot,
+            player: g.owner,
             kind: g.state,
             name,
             team,
+            team_logo,
             robot,
-            robot_file,
             ready: g.flag,
             design: g.robot.clone(),
         }
@@ -105,34 +121,124 @@ pub struct Lobby {
     pub slots: Vec<Slot>,
     pub game_type: String,
     pub weight_class: String,
+    /// The `ArenaPreview` text: `Arenas/<preview>:<name>` from the
+    /// original (`Arenas/bridge/bridge_preview.bmp:Bridge of Doom`, live).
     pub arena: String,
     pub chat: Vec<(PlayerId, String)>,
+    /// Everyone in the session, in join order (the prematch `Spectators:`
+    /// list shows them all: the original host listed itself and the joiner
+    /// while both also held panels, live).
+    pub members: Vec<(PlayerId, String)>,
+}
+
+/// The arena name of an `ArenaPreview` text (after the last `:`), or the
+/// text itself.
+pub fn arena_name(preview: &str) -> &str {
+    preview.rsplit_once(':').map_or(preview, |(_, name)| name)
 }
 
 impl Lobby {
+    /// The player's slot: its human panel, else its spectator entry, else a
+    /// computer panel it set up.
     pub fn slot(&self, player: PlayerId) -> Option<&Slot> {
-        self.slots.iter().find(|s| s.player == player)
+        let i = self.slot_position(player)?;
+        Some(&self.slots[i])
     }
 
     pub fn slot_mut(&mut self, player: PlayerId) -> Option<&mut Slot> {
-        self.slots.iter_mut().find(|s| s.player == player)
+        let i = self.slot_position(player)?;
+        Some(&mut self.slots[i])
+    }
+
+    fn slot_position(&self, player: PlayerId) -> Option<usize> {
+        let owned =
+            |f: &dyn Fn(&Slot) -> bool| self.slots.iter().position(|s| s.player == player && f(s));
+        owned(&|s| s.is_human())
+            .or_else(|| owned(&|s| s.is_spectator()))
+            .or_else(|| owned(&|_| true))
+    }
+
+    /// The panel at `index`.
+    pub fn panel(&self, index: u32) -> Option<&Slot> {
+        self.slots
+            .iter()
+            .find(|s| s.index == index && !s.is_spectator())
+    }
+
+    /// The lowest panel nobody holds.
+    pub fn free_panel(&self) -> Option<u32> {
+        (0..PLAYER_SLOTS as u32).find(|&i| self.panel(i).is_none())
+    }
+
+    /// Put `slot` in its panel (replacing what was there).
+    pub fn set_panel(&mut self, slot: Slot) {
+        self.put_panel(slot);
+    }
+
+    /// Put `slot` in its panel (replacing what was there), panels in index
+    /// order before the spectators.
+    fn put_panel(&mut self, slot: Slot) {
+        self.slots
+            .retain(|s| s.is_spectator() || s.index != slot.index);
+        if slot.is_human() {
+            // The owner is no longer waiting without a panel.
+            self.slots
+                .retain(|s| !(s.is_spectator() && s.player == slot.player));
+        }
+        let at = self
+            .slots
+            .iter()
+            .position(|s| s.is_spectator() || s.index > slot.index)
+            .unwrap_or(self.slots.len());
+        self.slots.insert(at, slot);
+    }
+
+    /// A joiner's view of someone in the session: a member, and a spectator
+    /// until the host's `GroupInfo` gives it a panel.
+    pub fn add_watcher(&mut self, player: PlayerId, name: &str) {
+        self.add_member(player, name);
+        if self.slot(player).is_none() {
+            self.slots.push(Slot {
+                index: NO_PANEL,
+                player,
+                kind: kind::SPECTATOR,
+                name: name.to_string(),
+                ..Slot::default()
+            });
+        }
+    }
+
+    /// Someone is in the session (both ends; the host also gives a panel
+    /// with [`Lobby::join`]).
+    pub fn add_member(&mut self, player: PlayerId, name: &str) {
+        match self.members.iter_mut().find(|(id, _)| *id == player) {
+            Some(m) => m.1 = name.to_string(),
+            None => self.members.push((player, name.to_string())),
+        }
     }
 
     /// A human joined (host side, on the session's player-joined). The first
     /// four peers take a player panel; later ones are spectators.
     pub fn join(&mut self, player: PlayerId, name: &str) {
+        self.add_member(player, name);
         if self.slot(player).is_none() {
-            let kind = if self.players().count() < PLAYER_SLOTS {
-                kind::HUMAN
-            } else {
-                kind::SPECTATOR
-            };
-            self.slots.push(Slot {
+            let slot = Slot {
                 player,
-                kind,
                 name: name.to_string(),
                 ..Slot::default()
-            });
+            };
+            match self.free_panel() {
+                Some(index) => self.put_panel(Slot {
+                    index,
+                    kind: kind::HUMAN,
+                    ..slot
+                }),
+                None => self.slots.push(Slot {
+                    index: NO_PANEL,
+                    kind: kind::SPECTATOR,
+                    ..slot
+                }),
+            }
         }
     }
 
@@ -155,6 +261,7 @@ impl Lobby {
 
     pub fn leave(&mut self, player: PlayerId) {
         self.slots.retain(|s| s.player != player);
+        self.members.retain(|(id, _)| *id != player);
     }
 
     /// Host: while a player panel is free, the longest-waiting spectator takes
@@ -162,12 +269,15 @@ impl Lobby {
     /// Returns whether anyone moved.
     pub fn promote_spectators(&mut self) -> bool {
         let mut moved = false;
-        while self.players().count() < PLAYER_SLOTS {
-            let Some(spectator) = self.slots.iter_mut().find(|s| s.is_spectator()) else {
+        while let Some(index) = self.free_panel() {
+            let Some(at) = self.slots.iter().position(|s| s.is_spectator()) else {
                 break;
             };
-            spectator.kind = kind::HUMAN;
-            spectator.ready = false;
+            let mut slot = self.slots.remove(at);
+            slot.index = index;
+            slot.kind = kind::HUMAN;
+            slot.ready = false;
+            self.put_panel(slot);
             moved = true;
         }
         moved
@@ -198,12 +308,13 @@ impl Lobby {
         }
     }
 
-    /// The `giGroupInfoMessage`s that describe the whole lobby.
+    /// The `giGroupInfoMessage`s that describe the panels (spectators have
+    /// none: the session's player list names them).
     pub fn group_infos(&self) -> Vec<Message> {
         self.slots
             .iter()
-            .enumerate()
-            .map(|(i, s)| Message::GroupInfo(s.to_group_info(i)))
+            .filter(|s| !s.is_spectator())
+            .map(|s| Message::GroupInfo(s.to_group_info()))
             .collect()
     }
 
@@ -226,32 +337,58 @@ impl Lobby {
     ) -> Option<LobbyChange> {
         match message {
             Message::GroupInfo(g) => {
-                if from != host && g.player != from {
+                if g.slot as usize >= PLAYER_SLOTS || g.state == kind::SPECTATOR {
                     return None;
                 }
-                if g.state == kind::LEFT {
-                    self.leave(g.player);
-                    return Some(LobbyChange::Slots);
-                }
-                let mut slot = Slot::from_group_info(g);
-                match self.slot_mut(g.player) {
-                    Some(old) => {
-                        if from != host && old.is_spectator() {
-                            // A spectator has no panel to describe; only the
-                            // host promotes one.
+                if from != host {
+                    // A joiner speaks for a panel of its own, as a human,
+                    // and does not set its ready flag that way.
+                    let human = g.state == kind::HUMAN || g.state == kind::HUMAN_WITH_ROBOT;
+                    if g.owner != from || !human {
+                        return None;
+                    }
+                    // The original's joiner takes a panel by sending its
+                    // `GroupInfo` (to everyone, live): its own panel, a free
+                    // one, or one still open (state 0 draws as OPEN on the
+                    // original), and sets its ready flag the same way.
+                    let displaced = match self.panel(g.slot) {
+                        Some(old) if old.player == from => None,
+                        Some(old) if old.kind == kind::HUMAN => Some(old.clone()),
+                        None => None,
+                        Some(_) => return None,
+                    };
+                    let had = self
+                        .slots
+                        .iter()
+                        .position(|s| s.player == from && s.is_human() && s.index != g.slot);
+                    if let Some(at) = had {
+                        if self.slots[at].kind == kind::HUMAN_WITH_ROBOT {
                             return None;
                         }
-                        if from != host {
-                            // A joiner does not set its own ready flag by slot.
-                            slot.ready = old.ready;
+                        self.slots.remove(at);
+                    }
+                    self.put_panel(Slot::from_group_info(g));
+                    if let Some(mut moved) = displaced {
+                        // Whoever held the open panel waits for another.
+                        match self.free_panel() {
+                            Some(i) => {
+                                moved.index = i;
+                                self.put_panel(moved);
+                            }
+                            None => {
+                                moved.index = NO_PANEL;
+                                moved.kind = kind::SPECTATOR;
+                                self.slots.push(moved);
+                            }
                         }
-                        *old = slot;
                     }
-                    None => {
-                        let at = (g.group as usize).min(self.slots.len());
-                        self.slots.insert(at, slot);
-                    }
+                    return Some(LobbyChange::Slots);
                 }
+                if g.state == kind::LEFT {
+                    self.slots.retain(|s| s.is_spectator() || s.index != g.slot);
+                    return Some(LobbyChange::Slots);
+                }
+                self.put_panel(Slot::from_group_info(g));
                 Some(LobbyChange::Slots)
             }
             Message::PlayerReady { player, ready } => {
@@ -339,12 +476,16 @@ mod tests {
         };
         assert_eq!(lobby.apply(5, 1, &ready), None);
         let own = Message::GroupInfo(GroupInfo {
-            player: 5,
+            slot: 0,
+            owner: 5,
             state: kind::HUMAN_WITH_ROBOT,
             ..GroupInfo::default()
         });
+        // Panel 0 holds A's robot: not to be taken.
+        lobby.slots[0].kind = kind::HUMAN_WITH_ROBOT;
         assert_eq!(lobby.apply(5, 1, &own), None);
         assert!(lobby.slot(5).unwrap().is_spectator());
+        lobby.slots[0].kind = kind::HUMAN;
         lobby.leave(2);
         assert!(lobby.promote_spectators());
         assert_eq!(lobby.slot(5).unwrap().kind, kind::HUMAN);
@@ -352,6 +493,43 @@ mod tests {
         assert_eq!(lobby.players().count(), 4);
         // Spectators are not counted in the enumeration reply.
         assert_eq!(lobby.host_data().slots_01, 4);
+    }
+
+    /// The original's joiner takes the host's open panel 0 with its robot
+    /// (live, docs/38 §14): it gets the panel and its ready flag counts, the
+    /// host's open panel moves to the next free one.
+    #[test]
+    fn an_original_joiner_claims_an_open_panel_with_its_group_info() {
+        let mut lobby = Lobby::default();
+        lobby.join(0x10001, "Host");
+        lobby.join(0x10002, "Default Player");
+        let claim = |ready| {
+            Message::GroupInfo(GroupInfo {
+                slot: 0,
+                owner: 0x10002,
+                state: kind::HUMAN_WITH_ROBOT,
+                strings: [
+                    "The Rookies".into(),
+                    "Teams\\orange_skull.bmp".into(),
+                    "C.R.U.S.H.".into(),
+                    "Default Player".into(),
+                ],
+                flag: ready,
+                value: 1,
+                robot: None,
+            })
+        };
+        assert_eq!(
+            lobby.apply(0x10002, 0x10001, &claim(false)),
+            Some(LobbyChange::Slots)
+        );
+        let p0 = lobby.panel(0).unwrap();
+        assert_eq!((p0.player, p0.robot.as_str()), (0x10002, "C.R.U.S.H."));
+        assert_eq!(lobby.slot(0x10001).unwrap().index, 1);
+        assert_eq!(lobby.players().count(), 2);
+        // Ready is the panel's flag.
+        lobby.apply(0x10002, 0x10001, &claim(true));
+        assert!(lobby.panel(0).unwrap().ready);
     }
 
     #[test]

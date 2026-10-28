@@ -15,7 +15,10 @@
 //! * [`lobby`]: the pre-match lobby kept in step with `giGroupInfoMessage`s.
 //! * [`game`]: host and joiner drivers tying the session, lobby and sync.
 //! * [`gamespy`]: the GameSpy query replies an Internet host gives.
+//! * [`bridge`]: the session side of `tools/dpnet`, the DirectPlay 8
+//!   replacement that lets the original under Wine play the port.
 
+pub mod bridge;
 pub mod dpn;
 pub mod frame;
 pub mod game;

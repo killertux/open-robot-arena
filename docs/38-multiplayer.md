@@ -54,11 +54,12 @@ network data.
   occupied lobby slots of kind 2|3 and of kind 0|1 (computer and human, by the
   kinds `FUN_0047d120` draws; inferred). The joiner turns a reply into a
   `giAddHostMessage` (`0x78`, `0x4d3b40`) — a server-list row.
-* **Connect** (`FUN_00626260`): `Connect` with user connect data `"01.00\0"`
-  (`0x6f3914`, 6 bytes). A 1 s timer (`0x6267a0`) counts
+* **Connect** (`FUN_00626260`): `Connect` with user connect data `"1.20\0"`
+  (`0x6f3914`, 5 bytes: the file holds `01.00` there, but `0x4e36e0` prints the
+  version over it at startup; live, §14). A 1 s timer (`0x6267a0`) counts
   `Connecting to Server     %d` from 10 (`DAT_00709860`) and cancels at 0.
 * **Admission** (`INDICATE_CONNECT`, callback case `0xffff000e`): connect data
-  ≠ `01.00` → refuse with reply word **900**; lobby not taking players (the
+  ≠ `1.20` → refuse with reply word **900**; lobby not taking players (the
   interface's `+0x38`) → refuse with **901**. The joiner's `CONNECT_COMPLETE`
   (case `0xffff0005`) maps them to "Connection refused.  Incompatible
   versions." (`0x709728`) and "Connection refused.  Game already in
@@ -153,9 +154,9 @@ The type is the constructor's argument to `FUN_00620d20`.
 | type | class (vtable) | read / write | fields after the type |
 |---|---|---|---|
 | `0x65` | chat text (`0x6b17a8`) | `0x621bc0`/`0x621bf0` | string |
-| `0x71` | `giGroupInfoMessage` (`0x6aa77c`) | `0x4d17a0`/`0x4d18b0` | u32 player, u32 group, u32 state, 4 strings (name, team, robot, robot file — inferred), bool flag (ready, inferred), u32, bool has-robot, then the robot design stream to the end (written by the design's own `+0x4c`, read by `FUN_005b52d0`) |
+| `0x71` | `giGroupInfoMessage` (`0x6aa77c`) | `0x4d17a0`/`0x4d18b0` | u32 panel, u32 owner id, u32 state, 4 strings (team, team logo, robot, owner name), bool ready, u32 (1 human panel / 0 computer), bool has-robot, then the robot design stream to the end (written by the design's own `+0x4c`, read by `FUN_005b52d0`) — live, §14 |
 | `0x73` | `giRemoteInputMessage` (`0x6aa7f4`) | `0x4d23d0`/`0x4d2400` | u32 robot, then `Bot::Input` (`0x4819a0`): three key words (`+4`, `+8`, `+0xc`, matched together by `0x508ca0`) and the value (`+0x10`); a reader for a peer older than 1.11 skips `+8` (`0x481a34`) |
-| `0x74` | `giSyncMessage` (`0x6aa808`) | `0x4d25d0`/`0x4d2b60` | f32 snapshot size, u32 packed size, zlib 1.1.3 stream (§6) |
+| `0x74` | `giSyncMessage` (`0x6aa808`) | `0x4d25d0`/`0x4d2b60` | u32 snapshot size (a word: live `11 00 00 00`, §14), u32 packed size, zlib 1.1.3 stream (§6) |
 | `0x76` | second text class (`0x6b17b8`) | as `0x65` | string |
 | `0x12d` | `giAddArenaBotMessage` (`0x6aa7e0`) | `0x4d2050`/`0x4d2100` | 3 u32, then (when the sender holds one) an AI design to the end |
 | `0x12e` | `giPrepareMatchMessage` (`0x6aa7cc`) | `0x4d1f50`/`0x4d1f80` | bool, string |
@@ -256,7 +257,8 @@ original would not understand each other's inputs.
   DLL"; its trace strings mark most interface methods `stub` or
   `Semi-stub`), which does not implement the DirectPlay 8 protocol, so the
   original under Wine has no DirectPlay frames to sniff; Microsoft's `dpnet`
-  would need a download (not done).
+  would need a download (not done). §14 replaces that `dpnet` with our own and records what
+  the original then sent.
 * **Wire-compatible** with the original: the game-message payloads (§4) and
   the snapshot layout, the GameSpy query replies (§8), the enumeration frames
   as far as the specification goes (§2).
@@ -278,7 +280,7 @@ and `\list\cmp\gamename\robotarena2\where\gamemode='openstaging'\final\`
 texts (`0x6f3990`, `0x6f3a50`, `0x6f3a40`, `0x6f3a80`, `0x6f3ab0`):
 
 ```
-basic   \gamename\robotarena2\gamever\01.00\location\0\final\\queryid\N.1
+basic   \gamename\robotarena2\gamever\1.20\location\0\final\\queryid\N.1
 info    \hostname\%s\hostport\%d\hostip\%s\mapname\%s\gametype\%s\numplayers\%d\maxplayers\%d\gamemode\%s\programversion\%s\hostspeed\%s\final\\queryid\N.1
 rules   \cl_weightclass\%s\cl_hazards\%d\cl_pword\%s\password\%d\final\\queryid\N.1
 players \player_%d\%s\\ ... \final\\queryid\N.1
@@ -630,3 +632,140 @@ Recovered from the binary (Ghidra via REA, `objdump`); the lobby does not open u
   is not overwritten from the lobby while it has the focus. Test `ra2net/tests/loopback.rs::renaming_a_player_reaches_the_other_end`
   (host and joiner on loopback: the joiner's rename reaches the host's lobby and session table; the host's reaches the joiner).
   **Open:** the original also writes the name back to `ra2.cfg`'s `PlayerName=` (`FUN_00622a90`) at some point (not found to be tied to this handler).
+
+## 14. The original under Wine: a replacement `dpnet`, and what it sent (fx/dplay)
+
+### 14.1 Why the original's lobby does not open under Wine
+
+Live, flatpak Wine 9.0, `WINEDEBUG=+dpnet` and Frida hooks on the `IDirectPlay8Peer`
+vtable (capture `mp-dpnet-builtin`): entering Multiplayer creates the peer
+(`CoCreateInstance` `0x623442`, `Initialize`, `EnumServiceProviders(TCPIP)`) and
+starts `EnumHosts` — Wine: `fixme:dpnet:IDirectPlay8PeerImpl_EnumHosts ... stub`.
+Create Game → Start Game (`FUN_006268b0`) builds the device address (`SetSP`
+TCP/IP, `AddComponent port 9791`), calls `SetPeerInfo` (Wine: `Semi-stub`) and
+`Host` — Wine: `fixme:dpnet:IDirectPlay8PeerImpl_Host ... stub`, **returning
+`0x80004005` (E_FAIL)** (Frida, return value). `FUN_006268b0` returns 0 on any
+failure and the screen stays: that is "Start Game does nothing". Wine's `Connect`
+is a stub too (its trace string `(%p)->(%p,%p,%p,%p,%p,%p,%lx,%p,%p,%p,%lx): stub`).
+Nothing in Wine's builtin puts a DirectPlay frame on the wire, so there is no
+override to switch on: the builtin is the only `dpnet` in the prefix and the
+runtime (no native `dpnet.dll` on this machine), and Microsoft's would be a
+download (not allowed here).
+
+### 14.2 The replacement: `tools/dpnet` and `ora-dpnet-bridge`
+
+`tools/dpnet/ora_dpnet.c` is a `dpnet.dll` written from the public DirectPlay 8
+interface (method order, structures, message ids, flags, result codes of
+`dplay8.h`/`dpaddr.h`): `IDirectPlay8Peer`, `IDirectPlay8Address` and their class
+factory, freestanding C built with the host's `gcc -m32` and GNU ld's `i386pe`
+(`tools/dpnet/build.sh`, imports from Wine's own `kernel32`/`ws2_32`). It keeps
+what the game reads back at once (the player table for `GetPeerInfo`, the
+application description, addresses) and forwards the rest over a loopback TCP pipe
+to `ora-dpnet-bridge` (`engine/crates/ra2net/src/bridge.rs`, binary
+`src/bin/ora-dpnet-bridge.rs`), which runs a `Session` in bridge mode — **this
+port's transport and session core (§3)**. The game's own decisions travel back:
+`INDICATE_CONNECT`'s verdict and reply word, `ENUM_HOSTS_QUERY`'s 8 bytes.
+
+What the game needs from DirectPlay, as the callback `FUN_00623720` and the call
+sites use it (all observed working live):
+
+* `Host` delivers `CREATE_PLAYER` for the local player (flags `LOCAL|HOST`, read
+  back through `GetPeerInfo`: size query → `DPNERR_BUFFERTOOSMALL` `0x80158100`,
+  then `DPN_PLAYER_INFO` with the name after it) before it returns.
+* `Connect` (synchronous in RA2's Join): `CREATE_PLAYER` for every player, then
+  `CONNECT_COMPLETE`; a refusal is `DPNERR_HOSTREJECTEDCONNECTION` `0x80158260`
+  with the host's 4-byte reply (900/901).
+* `RECEIVE` returns `DPNSUCCESS_PENDING` (`0x0015800e`): the buffer stays the
+  game's until `ReturnBuffer`.
+* `SendTo` is asynchronous with a handle the game files (`FUN_006253e0`);
+  `SEND_COMPLETE` with 0 dequeues it, any other result makes giNetwork cancel and
+  resend ("PLost! Resent!", `FUN_00625600`). A send to everyone without
+  `NOLOOPBACK` (chat, flags 0) comes back to the sender: that is how the
+  original shows its own chat line.
+* `ENUM_HOSTS_QUERY` / `INDICATE_CONNECT` reply buffers come back through
+  `RETURN_BUFFER` (the game frees context 1, keeps `&DAT_0072e0a8`).
+* `ENUM_HOSTS_RESPONSE`: the sender address answers `GetComponentByName
+  ("hostname")`; the description's instance GUID keys the row.
+
+Use: `tools/dpnet/build.sh OUT.dll`; back up the prefix's
+`drive_c/windows/syswow64/dpnet.dll`, copy `OUT.dll` over it, start
+`ora-dpnet-bridge [127.0.0.1:27160] [--dump FILE]` and run the game with
+`WINEDLLOVERRIDES=dpnet=n` (optional `ORA_DPNET_BRIDGE=host:port`,
+`ORA_DPNET_LOG=<windows path>`); restore the file afterwards. Two originals each
+with the replacement play each other the same way. **The wire is ours, not
+DirectPlay 8's**: an original on Windows with Microsoft's DirectPlay does not
+speak to it (§14.5).
+
+Tests: `ra2net/src/bridge.rs` (the pipe codec), `ra2net/tests/bridge.rs` (the
+bridge as host and as joiner against port sessions: admission through the
+verdict, 901 refusal, enumeration answered with the game's bytes, loopback of a
+flags-0 send, the pipe over TCP).
+
+### 14.3 What the original sent (live; captures `mp-payloads-*`)
+
+`ora-dpnet-bridge --dump` records each `SendTo` payload of the original
+(`mp-payloads-host__live__000/001`, `mp-payloads-joiner__live__000`, 6467
+payloads, 15 message types). **Every one decodes with `ra2net::message` and
+re-encodes to the same bytes** (`tests/original_payloads.rs`). What they changed:
+
+| item | was (static reading) | live |
+|---|---|---|
+| connect data / version | `01.00\0` (the file's bytes at `0x6f3914`) | `1.20\0`: `0x4e36e0` prints `"%d.%02d"` (1, `0x14`) over it at startup; read back at run time `31 2e 32 30 00`. The original refused a joiner sending `01.00` with 900. Also GameSpy `gamever`/`programversion`. `dpn::VERSION`, `dpn::CONNECT_DATA` |
+| session name | the server name | six `:`-ended fields: `New Exhibition Match:DEATHMATCH:Bridge of Doom:ALLWEIGHT:1.20:512K LAN:` — server, game type, arena name, weight class, version, speed tag (`0x6f447c..0x6f44b4` by the speed dropdown, jump table `0x48f7c8`). The joiner fills its columns from it and its Join refuses another version ("Cannot Join Game" / "Incompatible Program Versions", `0x49a228`). `dpn::SessionName`, `ConnectionSpeed::session_tag` |
+| `GroupInfo` (`0x71`) | player, group, state, name/team/robot/file | **panel index**, **owner id** (the host owns its computer robots' panels), state (1 own robot, 3 computer robot; **0 draws as OPEN**), team, team logo, robot, owner name, **ready**, 1 for a human panel / 0 computer, design. Our panels re-encode byte for byte |
+| taking a panel | joiner sends its slot to the host | the joiner sends `PlayerLoading {panel}` (`0x132`) then its `GroupInfo` for the panel **to everyone, flags `0x20`** (not guaranteed); it took the port host's state-0 panel 0 |
+| ready | `PlayerReady` (`0x12f`) | the panel's `GroupInfo` flag (re-sent with the flag set, no design); `0x12f {0, 0}` is sent every 10 s by a joiner while "Loading Robot Data..." |
+| spectator list | peers without a panel | everyone in the session (the host listed itself and the joiner while both held panels) |
+| `ArenaPreview` (`0x133`) | arena | `Arenas/bridge/bridge_preview.bmp:Bridge of Doom` (preview path `:` name), sent to the newcomer; game type and weight class to everyone |
+| `PrepareMatch` (`0x12e`) | arena script | `{1, "Bridge of Doom"}` — the arena's name; `BeginMatch` (`0x130`) right after it |
+| loading | — | the host sends its own `PeerDataLoaded` (`0x13f`, its id) about every 300 ms until every peer's arrives, then `StartCountDown` (`0x13c`) |
+| `TimeSync` (`0x138`) | u32 + 4 words | first word the match time left as a float (`0x4333fb8d` 179.98 s), about once a second; the other four words unexplained |
+| `giSyncMessage` size | f32 | **u32** (`11 00 00 00`): the reader `0x4d25d0` takes two words. `SyncMessage::raw_size` is a `u32` now |
+| snapshots | bodies of every robot | in both recorded matches (a joiner with no panel) every snapshot is the empty 17-byte one (clocks 0, no robot, no body), at about 22 Hz on "LAN" |
+| robot data | the `GroupInfo` design | after `PrepareMatch` the joiner sends `AddArenaBot` (`0x12d`, words `1 0 0`) carrying its robot as **`.bot` text** (`1.12\nName: C.R.U.S.H.\n...`) and waits in "Loading Robot Data..." |
+
+The port follows these: `1.20`, the six-field session name (host) and its columns
+(server list), panels by index with team names, a joiner's claim of an open or
+free panel and its ready flag (`Lobby::apply`, test
+`an_original_joiner_claims_an_open_panel_with_its_group_info`), arenas by name
+(`net_play::MatchArena`: `PrepareMatch` names it, `ArenaPreview` is
+`Arenas/<preview>:<name>`), the spectator list from the session members, lobby
+chat from the `chat textbox` (Enter) into the `chat messages` DisplayBox (test
+in `refresh_join_and_the_prematch_lobby_through_the_screens`), computer panels
+played by the AI.
+
+### 14.4 What works, live (flatpak Wine 9.0 + replacement `dpnet`, port on Xephyr, loopback)
+
+* **Original hosts, port joins** (IP Address 127.0.0.1): the port is admitted by
+  the original's own `INDICATE_CONNECT`, its prematch shows DEATHMATCH / Bridge of
+  Doom / ALL CLASSES, the two members and the host's two panels (C.R.U.S.H.,
+  Scout); the port's chat line appears in the original's chat box
+  (`mp-lobby-host-chat`); the original's chat reaches the port (on the wire); Begin
+  Match: the port loads Bridge of Doom, sends its `0x13f`, the original counts down
+  and both run the match (`mp-match-host`); End Match on the original returns both
+  to the lobby.
+* **Port hosts, original joins**: Refresh List on the original lists the port's
+  game with its columns (`mp-list-lan`), Join enters the port's lobby
+  (`mp-lobby-joiner`), the original takes panel 1 with C.R.U.S.H., readies and chats
+  (`mp-lobby-joiner-panel`).
+
+### 14.5 Open
+
+* **DirectPlay 8 on the wire.** Without a DirectPlay 8 that works under Wine, the
+  original's real frames can't be captured here, and the specification is not on
+  this machine. A transport byte-compatible with Microsoft's DirectPlay (for an
+  original on Windows) is not built; the frames of §3 are shaped after it, not
+  equal to it.
+* **Port host → original joiner stops at "Loading Robot Data..."**
+  (`mp-lobby-joiner-loading`): the joiner sent its `.bot` in `AddArenaBot` and
+  waits, presumably for the other robots' data from the host; the port does not
+  answer (it has no `.bot` for its panels: the design stream is not a `.bot`, and
+  the port lobby has no robot picker).
+* **The match itself across the two**: the snapshots the original sent were empty
+  (no remote player robot), so the full snapshot layout with robots, controllers
+  and devices is still the static reading of §6; the remote input key words (§6);
+  the port runs its arena intro before the count-down (about 27 s behind the
+  original) and does not use `TimeSync`; robots on the port joiner are stand-ins
+  (Scout, The Boxer), not the host's designs.
+* The server list's Players column (0/8 for a port host with one human panel), the
+  other four `TimeSync` words, the `AddArenaBot` words, voice and host migration.

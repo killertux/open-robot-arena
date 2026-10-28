@@ -72,11 +72,65 @@ pub const ENUM_PORT: u16 = 6073;
 /// from `0x6b17e8` = `0x263f` at `0x49a846`); `ra2.cfg` may override it.
 pub const DEFAULT_PORT: u16 = 9791;
 
+/// The game's version string: `0x4e36e0` (startup) prints it into `0x6f3914`
+/// with `"%d.%02d"` (`0x6fdc28`) from 1 and `0x14`, over the `01.00` the file
+/// holds there; read back live as `31 2e 32 30 00` (docs/38 §14). It is the
+/// connect data, the GameSpy `gamever` and the `:1.20:` of the session name.
+pub const VERSION: &str = "1.20";
+
+/// The session name the original's host registers: six fields, each ended by
+/// `:` (the separator `0x6f36f8`), built by the create screen (`0x48ee..`)
+/// and split by the joiner's `ENUM_HOSTS_RESPONSE` case into the server-list
+/// columns. Live, from the original's `Host`:
+/// `New Exhibition Match:DEATHMATCH:Bridge of Doom:ALLWEIGHT:1.20:512K LAN:`.
+/// The joiner's Join compares the version field with its own (`0x49a228`)
+/// and shows "Cannot Join Game" / "Incompatible Program Versions" on a
+/// mismatch: a plain name (what this port used to register) cannot be joined
+/// by the original.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionName {
+    pub server: String,
+    pub game_type: String,
+    /// The arena's display name (`Bridge of Doom`).
+    pub arena: String,
+    pub weight_class: String,
+    pub version: String,
+    /// [`crate::sync::ConnectionSpeed::session_tag`].
+    pub speed: String,
+}
+
+impl SessionName {
+    pub fn encode(&self) -> String {
+        format!(
+            "{}:{}:{}:{}:{}:{}:",
+            self.server, self.game_type, self.arena, self.weight_class, self.version, self.speed
+        )
+    }
+
+    /// The six fields, or `None` for a name without them.
+    pub fn parse(name: &str) -> Option<SessionName> {
+        let f: Vec<&str> = name.split(':').collect();
+        if f.len() < 7 {
+            return None;
+        }
+        Some(SessionName {
+            server: f[0].to_string(),
+            game_type: f[1].to_string(),
+            arena: f[2].to_string(),
+            weight_class: f[3].to_string(),
+            version: f[4].to_string(),
+            speed: f[5].to_string(),
+        })
+    }
+}
+
 /// The connect data a joining player sends, which the host's
-/// `INDICATE_CONNECT` case (`FUN_00623720`, `0xffff000e`) compares with its own: the version
-/// string `01.00` at `0x6f3914`, NUL included (the `Connect` in `FUN_00626260`
-/// passes `strlen + 1` bytes).
-pub const CONNECT_DATA: &[u8] = b"01.00\0";
+/// `INDICATE_CONNECT` case (`FUN_00623720`, `0xffff000e`) compares with its own:
+/// [`VERSION`] as `0x6f3914` holds it at run time, NUL included (the `Connect`
+/// in `FUN_00626260` passes `strlen + 1` bytes). The static `01.00` the file
+/// has there is overwritten at startup: a joiner that sent it was refused
+/// with 900 by the original under the replacement `dpnet` (live, docs/38 §14).
+pub const CONNECT_DATA: &[u8] = b"1.20\0";
 
 /// Reply data of a refused connect (`INDICATE_CONNECT` returns
 /// `DPNERR_HOSTREJECTEDCONNECTION` with a four-byte reply): the joiner's
@@ -285,6 +339,19 @@ pub fn is_enum_frame(b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_session_name_is_the_original_hosts_six_fields() {
+        let live = "New Exhibition Match:DEATHMATCH:Bridge of Doom:ALLWEIGHT:1.20:512K LAN:";
+        let n = SessionName::parse(live).unwrap();
+        assert_eq!(n.server, "New Exhibition Match");
+        assert_eq!(n.arena, "Bridge of Doom");
+        assert_eq!(n.version, VERSION);
+        assert_eq!(n.speed, crate::sync::ConnectionSpeed::Lan.session_tag());
+        assert_eq!(n.encode(), live);
+        assert_eq!(SessionName::parse("Default Server"), None);
+        assert_eq!(CONNECT_DATA, b"1.20\0");
+    }
 
     #[test]
     fn the_app_guid_is_the_exes_bytes() {

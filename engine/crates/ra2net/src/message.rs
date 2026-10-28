@@ -117,20 +117,26 @@ pub struct BotInput {
 /// `0x4d18b0`): one slot of the pre-match lobby.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct GroupInfo {
-    /// `+0x1c`: the player's DirectPlay id (the prematch window's `FUN_0047d120`
-    /// matches its rows on it).
-    pub player: u32,
-    /// `+0x20`.
-    pub group: u32,
+    /// `+0x1c`: the player panel this describes (0..), as the original host
+    /// sent it for its two panels (`00000000`, `01000000`; live, docs/38 §14).
+    pub slot: u32,
+    /// `+0x20`: the DirectPlay id of the player who controls the panel; a
+    /// computer robot's panel belongs to whoever set it up (the host's
+    /// `0x10001` for both of its panels, live).
+    pub owner: u32,
     /// `+0x24`: the slot state (`FUN_0047d120` treats 1 and 3 as "has a
-    /// robot", 4 as "left").
+    /// robot", 4 as "left"; live: 1 for the host's own robot, 3 for a
+    /// computer robot).
     pub state: u32,
-    /// `+0x28`, `+0x38`, `+0x48`, `+0x58`: the slot's four strings (player,
-    /// team, robot, robot file — inferred).
+    /// `+0x28`, `+0x38`, `+0x48`, `+0x58`: team name, team logo, robot name,
+    /// the owner's player name — live: `The Rookies`,
+    /// `Teams\orange_skull.bmp`, `C.R.U.S.H.`, `Default Player` and
+    /// `Red Zone`, `AI\red_zone.bmp`, `Scout`, `Default Player`.
     pub strings: [String; 4],
-    /// `+0x68`.
+    /// `+0x68`: the ready flag (0 for both panels before anyone was ready).
     pub flag: bool,
-    /// `+0x6c`.
+    /// `+0x6c`: 1 for the human panel, 0 for the computer one (live; the
+    /// meaning beyond that is inferred).
     pub value: u32,
     /// `+0x69` and `+0x70`: the robot design, written by the design object's
     /// own `+0x4c` writer and read by `FUN_005b52d0`. It is not length
@@ -387,7 +393,7 @@ impl Message {
                 w.string(s);
             }
             Message::GroupInfo(g) => {
-                w.u32(g.player).u32(g.group).u32(g.state);
+                w.u32(g.slot).u32(g.owner).u32(g.state);
                 for s in &g.strings {
                     w.string(s);
                 }
@@ -493,8 +499,8 @@ impl Message {
             TEXT => Message::Text(r.string()?),
             SYSTEM_TEXT => Message::SystemText(r.string()?),
             GROUP_INFO => {
-                let player = r.u32()?;
-                let group = r.u32()?;
+                let slot = r.u32()?;
+                let owner = r.u32()?;
                 let state = r.u32()?;
                 let strings = [r.string()?, r.string()?, r.string()?, r.string()?];
                 let flag = r.bool()?;
@@ -505,8 +511,8 @@ impl Message {
                     None
                 };
                 Message::GroupInfo(GroupInfo {
-                    player,
-                    group,
+                    slot,
+                    owner,
                     state,
                     strings,
                     flag,
@@ -759,21 +765,21 @@ mod tests {
     #[test]
     fn group_info_ends_with_the_unframed_robot_stream() {
         let slot = GroupInfo {
-            player: 0x1234,
-            group: 1,
+            slot: 1,
+            owner: 0x1234,
             state: 3,
             strings: [
-                "Bruno".into(),
                 "Team".into(),
+                "Teams\\logo.bmp".into(),
                 "Bot".into(),
-                "bot.bot".into(),
+                "Bruno".into(),
             ],
             flag: true,
             value: 2,
             robot: Some(vec![0xde, 0xad]),
         };
         let bytes = round_trip(Message::GroupInfo(slot.clone()));
-        let mut want = le(&[0x71, 0x1234, 1, 3]);
+        let mut want = le(&[0x71, 1, 0x1234, 3]);
         for s in &slot.strings {
             want.extend((s.len() as u32).to_le_bytes());
             want.extend(s.as_bytes());

@@ -470,20 +470,39 @@ impl NetPlay {
         name: &str,
         password: Option<String>,
         speed: ConnectionSpeed,
+        arena: &MatchArena,
     ) -> Result<(), String> {
-        let config = HostConfig {
-            bind: self.bind(self.host_port),
-            session_name: if name.is_empty() {
+        // The original's six-field session name: its joiners read the
+        // columns and the version from it (docs/38 §14).
+        let session_name = dpn::SessionName {
+            server: if name.is_empty() {
                 "Default Server".to_string()
             } else {
                 name.to_string()
             },
+            game_type: DEFAULT_GAME_TYPE.to_string(),
+            arena: arena.name.clone(),
+            weight_class: DEFAULT_WEIGHT_CLASS.to_string(),
+            version: dpn::VERSION.to_string(),
+            speed: speed.session_tag().to_string(),
+        };
+        let config = HostConfig {
+            bind: self.bind(self.host_port),
+            session_name: session_name.encode(),
             player_name: self.player_name.clone(),
             max_players: SESSION_MAX,
             password,
             link: self.link,
         };
-        self.game = Some(NetGame::host(config, speed).map_err(|e| format!("host: {e}"))?);
+        let mut game = NetGame::host(config, speed).map_err(|e| format!("host: {e}"))?;
+        // What the original's host tells each newcomer (live: the arena
+        // preview, the game type and the weight class).
+        game.set_settings(
+            DEFAULT_GAME_TYPE,
+            DEFAULT_WEIGHT_CLASS,
+            &arena.preview_text(),
+        );
+        self.game = Some(game);
         self.robot_of.clear();
         self.robot_of.insert(ra2net::session::HOST_ID, 0);
         self.reset_match();
@@ -564,6 +583,19 @@ impl NetPlay {
     /// uses, `0x5ea170(3)` at `0x490c67`): the handler `FUN_004931a0` sets the network name,
     /// sends it to the other players (`SetPeerInfo`) and renames our lobby entry. An empty
     /// box is ignored here (the original would clear the name).
+    /// Enter in the lobby's `chat textbox`: the line goes to everyone as
+    /// `[name] text` (a `0x65` text, flags 0) and the entry empties.
+    pub fn commit_lobby_chat(&mut self, shell: &mut Shell) {
+        let text = shell.focused_text().unwrap_or_default();
+        if let Some(game) = &mut self.game {
+            game.chat(text.trim());
+        }
+        if let Some(doc) = shell.document_mut() {
+            set_text(doc, "chat textbox", "");
+        }
+        self.show(shell);
+    }
+
     pub fn commit_screen_name(&mut self, text: &str) {
         let name = text.trim();
         if name.is_empty() {
@@ -620,7 +652,8 @@ impl NetPlay {
                 let speed = text_of(doc, "connection dropdown")
                     .and_then(|t| ConnectionSpeed::from_label(&t))
                     .unwrap_or(ConnectionSpeed::Lan);
-                self.host(&name, password, speed)?;
+                let arena = MatchArena::find(shell.game(), DEFAULT_ARENA);
+                self.host(&name, password, speed, &arena)?;
                 shell.goto(PREMATCH_SCREEN)?;
             }
             (s, "disconnect button") if s.eq_ignore_ascii_case(PREMATCH_SCREEN) => {
@@ -640,12 +673,13 @@ impl NetPlay {
             (s, "begin match button") if s.eq_ignore_ascii_case(PREMATCH_SCREEN) => {
                 if let Some(game) = &mut self.game {
                     if game.is_host() {
-                        let arena = if game.lobby.arena.is_empty() {
-                            "Arenas/box.py".to_string()
-                        } else {
-                            game.lobby.arena.clone()
-                        };
-                        game.start_match(&arena);
+                        let picked = MatchArena::find(
+                            shell.game(),
+                            ra2net::lobby::arena_name(&game.lobby.arena),
+                        );
+                        let arena = picked.script.clone();
+                        // PrepareMatch names the arena (`Bridge of Doom`, live).
+                        game.start_match(&picked.name);
                         game.set_schema(schema());
                         self.reset_match();
                         self.assign_robots();
@@ -705,6 +739,7 @@ impl NetPlay {
                         action = NetAction::Ended("The host ended the session.".to_string());
                     }
                     GameEvent::Prepare { arena } => {
+                        let arena = MatchArena::find(shell.game(), &arena).script;
                         // The robots are the lobby's player panels, in order;
                         // a spectator has none.
                         self.assign_robots();
@@ -742,10 +777,19 @@ impl NetPlay {
                 .rows
                 .iter()
                 .map(|h| {
+                    // The original's name carries the columns (docs/38 §14).
+                    let (server, detail) = match dpn::SessionName::parse(&h.session_name) {
+                        Some(n) => (
+                            n.server,
+                            format!("  {}  {}  {}", n.game_type, n.arena, n.speed),
+                        ),
+                        None => (h.session_name.clone(), String::new()),
+                    };
                     format!(
-                        "{}{}  {}/{}  {} ms",
+                        "{}{}{}  {}/{}  {} ms",
                         if h.password { "* " } else { "" },
-                        h.session_name,
+                        server,
+                        detail,
                         h.current_players,
                         h.max_players,
                         h.ping.as_millis()
@@ -772,18 +816,31 @@ impl NetPlay {
         let active = ra2ui::workshop::load(&ui, "multiplayer/activeplayer.gib").ok();
         let empty = ra2ui::workshop::load(&ui, "multiplayer/noplayer.gib").ok();
         let editing_name = shell.text_focus() == Some("screen name");
+        let editing_chat = shell.text_focus() == Some("chat textbox");
         let Some(doc) = shell.document_mut() else {
             return;
         };
         // The prematch constructor puts the network name in `screen name` (the box's own sample
         // text is "Mister Roboto").
         // (Not while the player is typing in it.)
-        if let Some(me) = me.and_then(|m| lobby.slot(m)) {
+        let my_name = me.and_then(|m| {
+            lobby
+                .members
+                .iter()
+                .find(|(id, _)| *id == m)
+                .map(|(_, n)| n.clone())
+                .or_else(|| lobby.slot(m).map(|s| s.name.clone()))
+        });
+        if let Some(name) = my_name {
             if !editing_name {
-                set_text(doc, "screen name", &me.name);
+                set_text(doc, "screen name", &name);
             }
         }
-        set_text(doc, "arena name", &lobby.arena);
+        // The box's sample line is not shown by the original (an empty entry).
+        if !editing_chat && text_of(doc, "chat textbox").as_deref() == Some(CHAT_SAMPLE) {
+            set_text(doc, "chat textbox", "");
+        }
+        set_text(doc, "arena name", ra2net::lobby::arena_name(&lobby.arena));
         set_text(doc, "game type", &lobby.game_type);
         let chat: Vec<String> = lobby
             .chat
@@ -794,20 +851,34 @@ impl NetPlay {
             .map(|(_, t)| t.clone())
             .collect();
         set_text(doc, "chat messages", &chat.join("\n"));
+        // The box is the body of a `DisplayBox` attachment: the lines live in
+        // the attachment's markup, on the widget that carries it.
+        set_display_box(doc, "chat messages", &chat.join("\n"));
         // The peers beyond the four panels, in the order they joined.
-        let spectators: Vec<String> = lobby.spectators().map(|s| s.name.clone()).collect();
+        // The original lists everyone in the session there (live).
+        let spectators: Vec<String> = if lobby.members.is_empty() {
+            lobby.spectators().map(|s| s.name.clone()).collect()
+        } else {
+            lobby.members.iter().map(|(_, n)| n.clone()).collect()
+        };
         if let Some(list) = find_mut(doc, "spectator list") {
             ra2ui::input::text_rows(list, &spectators);
         }
-        let players: Vec<&ra2net::lobby::Slot> = lobby.players().collect();
         for i in 0..lobby::PLAYER_SLOTS {
             let panel = format!("player{} group", i + 1);
-            let cell = match players.get(i).copied() {
+            // Panels are positions (`GroupInfo::slot`).
+            let cell = match lobby.panel(i as u32) {
                 Some(slot) => active
                     .as_ref()
                     .and_then(|g| g.widgets().next().cloned())
                     .map(|mut cell| {
-                        ra2ui::cells::bind_value(&mut cell, "team name", &slot.name);
+                        // The original writes the team there (`The Rookies`).
+                        let team = if slot.team.is_empty() {
+                            &slot.name
+                        } else {
+                            &slot.team
+                        };
+                        ra2ui::cells::bind_value(&mut cell, "team name", team);
                         ra2ui::cells::bind_value(&mut cell, "bot name", &slot.robot);
                         ra2ui::cells::bind_art(
                             &mut cell,
@@ -854,17 +925,16 @@ impl NetPlay {
         ];
         let mut entries = Vec::new();
         for (i, slot) in net.lobby.players().take(4).enumerate() {
-            let file = game.join(&slot.robot_file);
-            let path = if !slot.robot_file.is_empty() && file.is_file() {
-                file
+            // The design stream is not a `.bot` file (open, docs/38 §14): a
+            // shipped robot stands in for it.
+            let path = game.join(FALLBACK[i]).to_string_lossy().to_string();
+            // A human panel is a person, this end's or a remote one; a
+            // computer panel (the original's host sets those up) is the AI.
+            entries.push(if slot.is_human() {
+                ra2sim::r#match::RobotEntry::human(i, path)
             } else {
-                game.join(FALLBACK[i])
-            };
-            // every lobby player is a person, this end's or a remote one
-            entries.push(ra2sim::r#match::RobotEntry::human(
-                i,
-                path.to_string_lossy().to_string(),
-            ));
+                ra2sim::r#match::RobotEntry::ai(i, path)
+            });
         }
         while entries.len() < 2 {
             let i = entries.len();
@@ -1260,4 +1330,97 @@ mod tests {
         assert_eq!(parse_address(""), None);
         assert_eq!(body_id(2, 5), 0x0002_0005);
     }
+}
+
+/// The arena a new multiplayer game starts on (`Combat Arena`, the box).
+pub const DEFAULT_ARENA: &str = "Arenas/box.py";
+/// The game type and weight class a new game announces (the original's
+/// defaults, live: `DEATHMATCH`, `ALLWEIGHT`).
+pub const DEFAULT_GAME_TYPE: &str = "DEATHMATCH";
+pub const DEFAULT_WEIGHT_CLASS: &str = "ALLWEIGHT";
+
+/// An arena as the multiplayer messages name it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchArena {
+    /// The script, relative to the install (`Arenas/box.py`).
+    pub script: String,
+    /// The display name (`Combat Arena`), what `PrepareMatch` and the session
+    /// name carry.
+    pub name: String,
+    /// The preview art relative to `Arenas` (`box/box_preview.bmp`).
+    pub preview: String,
+}
+
+impl MatchArena {
+    /// The `ArenaPreview` text: `Arenas/<preview>:<name>` (live:
+    /// `Arenas/bridge/bridge_preview.bmp:Bridge of Doom`).
+    pub fn preview_text(&self) -> String {
+        format!("Arenas/{}:{}", self.preview, self.name)
+    }
+
+    /// The arena a script path or a display name names, case-insensitively;
+    /// the box when nothing matches.
+    pub fn find(game: &std::path::Path, key: &str) -> MatchArena {
+        let all = ra2ui::arenas::all(game).unwrap_or_default();
+        let key = key.trim();
+        let script_of = |a: &ra2ui::arenas::Arena| format!("Arenas/{}", a.script);
+        let hit = all
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(key) || script_of(a).eq_ignore_ascii_case(key));
+        let hit = hit.or_else(|| {
+            all.iter()
+                .find(|a| script_of(a).eq_ignore_ascii_case(DEFAULT_ARENA))
+        });
+        match hit {
+            Some(a) => MatchArena {
+                script: script_of(a),
+                name: a.name.clone(),
+                preview: a.preview.clone(),
+            },
+            None => MatchArena {
+                script: DEFAULT_ARENA.to_string(),
+                name: "Combat Arena".to_string(),
+                preview: "box/box_preview.bmp".to_string(),
+            },
+        }
+    }
+}
+
+/// `prematch.gib`'s sample text in `chat textbox`.
+const CHAT_SAMPLE: &str = "This is a chat message.";
+
+/// Set the text of the `DisplayBox` whose body is named `name` (the
+/// attachment sits on another widget, so the search looks for the widget that
+/// carries it).
+fn set_display_box(gib: &mut Gib, name: &str, text: &str) -> bool {
+    fn owner<'a>(w: &'a mut Widget, name: &str) -> Option<&'a mut Widget> {
+        let carries = w
+            .attachments
+            .iter()
+            .any(|a| a.body.as_ref().is_some_and(|b| b.name() == name));
+        if carries {
+            return Some(w);
+        }
+        for c in w.children.iter_mut() {
+            if let Some(hit) = owner(c, name) {
+                return Some(hit);
+            }
+        }
+        for a in w.attachments.iter_mut() {
+            if let Some(b) = &mut a.body {
+                if let Some(hit) = owner(b, name) {
+                    return Some(hit);
+                }
+            }
+        }
+        None
+    }
+    for b in gib.blocks.iter_mut() {
+        if let Block::Widget(root) = b {
+            if let Some(w) = owner(root, name) {
+                return crate::hq_mode::set_display(w, text);
+            }
+        }
+    }
+    false
 }
