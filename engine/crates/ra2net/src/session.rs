@@ -8,7 +8,7 @@
 //!   a player limit and an optional password. It answers enumeration queries
 //!   on that port (and, through DPNSVR, on [`crate::dpn::ENUM_PORT`]).
 //! * A joiner (`Join` or `IP Address`, `FUN_00626260`) connects with the
-//!   connect data `"01.00\0"`. The host's `INDICATE_CONNECT` refuses a
+//!   connect data `"1.20\0"`. The host's `INDICATE_CONNECT` refuses a
 //!   mismatch with reply word 900 and, while the lobby does not take players
 //!   (the interface's `+0x38` is false), with 901 ([`crate::dpn`]).
 //! * Each side learns the players from DirectPlay's create/destroy-player
@@ -143,6 +143,51 @@ pub enum Event {
         from: PlayerId,
         error: DecodeError,
     },
+    /// Bridge mode ([`Session::set_bridge`]): a game payload, undecoded.
+    Raw {
+        from: PlayerId,
+        data: Vec<u8>,
+    },
+    /// Bridge mode, host: a player asks to join; answer with [`Session::admit`].
+    ConnectRequest {
+        token: u32,
+        name: String,
+        connect_data: Vec<u8>,
+        addr: SocketAddr,
+    },
+    /// Bridge mode, host: an enumeration query; answer with
+    /// [`Session::answer_enum`] (or leave it unanswered).
+    EnumQuery {
+        token: u32,
+        from: SocketAddr,
+        user_data: Vec<u8>,
+    },
+}
+
+/// A game payload as an event: decoded, or raw in bridge mode.
+fn game_event(raw: bool, from: PlayerId, payload: &[u8]) -> Event {
+    if raw {
+        return Event::Raw {
+            from,
+            data: payload.to_vec(),
+        };
+    }
+    match Message::decode(payload) {
+        Ok(message) => Event::Message { from, message },
+        Err(error) => Event::BadMessage { from, error },
+    }
+}
+
+/// Bridge mode state: what the host waits for the application to decide.
+#[derive(Default)]
+struct Bridge {
+    next_token: u32,
+    /// Connect requests: token -> (address, name).
+    admissions: HashMap<u32, (SocketAddr, String)>,
+    /// Admitted or refused by the application, applied on the next tick.
+    decided: Vec<(SocketAddr, String, Result<(), Refusal>)>,
+    /// Enumeration queries: token -> (from, payload, asked at).
+    queries: HashMap<u32, (SocketAddr, u16, Instant)>,
 }
 
 /// Host settings (`DPN_APPLICATION_DESC` plus the game's connect rules).
@@ -268,6 +313,8 @@ pub struct Session {
     players: BTreeMap<PlayerId, PlayerInfo>,
     events: Vec<Event>,
     buf: Vec<u8>,
+    /// `Some` in bridge mode ([`Session::set_bridge`]).
+    bridge: Option<Bridge>,
 }
 
 fn session_id(now: Instant, addr: SocketAddr) -> u32 {
@@ -309,6 +356,7 @@ impl Session {
             players,
             events: Vec::new(),
             buf: vec![0; 65536],
+            bridge: None,
         })
     }
 
@@ -332,6 +380,7 @@ impl Session {
             players: BTreeMap::new(),
             events: Vec::new(),
             buf: vec![0; 65536],
+            bridge: None,
         })
     }
 
@@ -388,35 +437,101 @@ impl Session {
     pub fn send_with(&mut self, to: Target, message: &Message, guaranteed: bool) {
         let bytes = message.encode();
         let now = Instant::now();
+        self.queue(to, &bytes, guaranteed, now);
+        self.flush(now);
+    }
+
+    fn queue(&mut self, to: Target, bytes: &[u8], guaranteed: bool, now: Instant) {
         match &mut self.role {
             Role::Host { peers, .. } => {
                 for (id, (_, link)) in peers.iter_mut() {
                     if to == Target::All || to == Target::Player(*id) {
-                        link.send(&bytes, false, guaranteed, now);
+                        link.send(bytes, false, guaranteed, now);
                     }
                 }
             }
             Role::Joiner { link, host, .. } => match to {
-                Target::Player(id) if Some(id) == *host => {
-                    link.send(&bytes, false, guaranteed, now)
-                }
+                Target::Player(id) if Some(id) == *host => link.send(bytes, false, guaranteed, now),
                 Target::Player(id) => {
                     let mut out = vec![CORE_RELAY];
                     out.extend(id.to_le_bytes());
-                    out.extend(&bytes);
+                    out.extend(bytes);
                     link.send(&out, true, guaranteed, now);
                 }
                 Target::All => {
                     // To the host directly, and relayed to the others.
-                    link.send(&bytes, false, guaranteed, now);
+                    link.send(bytes, false, guaranteed, now);
                     let mut out = vec![CORE_RELAY];
                     out.extend(0u32.to_le_bytes());
-                    out.extend(&bytes);
+                    out.extend(bytes);
                     link.send(&out, true, guaranteed, now);
                 }
             },
         }
+    }
+
+    /// Bridge mode: another program (the `dpnet` replacement for the
+    /// original, docs/38 §14) makes the application's decisions. Game payloads
+    /// arrive as [`Event::Raw`]; the host asks before admitting a player
+    /// ([`Event::ConnectRequest`]) and before answering an enumeration
+    /// ([`Event::EnumQuery`]).
+    pub fn set_bridge(&mut self, on: bool) {
+        self.bridge = on.then(Bridge::default);
+    }
+
+    /// Send a game payload as it is (bridge mode's `SendTo`).
+    pub fn send_raw(&mut self, to: Target, bytes: &[u8], guaranteed: bool) {
+        let now = Instant::now();
+        self.queue(to, bytes, guaranteed, now);
         self.flush(now);
+    }
+
+    /// Bridge mode, host: the application's answer to a
+    /// [`Event::ConnectRequest`].
+    pub fn admit(&mut self, token: u32, verdict: Result<(), Refusal>) {
+        if let Some(b) = &mut self.bridge {
+            if let Some((addr, name)) = b.admissions.remove(&token) {
+                b.decided.push((addr, name, verdict));
+            }
+        }
+        let now = Instant::now();
+        self.tick(now);
+        self.flush(now);
+    }
+
+    /// Bridge mode, host: answer an [`Event::EnumQuery`] with the
+    /// application's reply data.
+    pub fn answer_enum(&mut self, token: u32, app_reply: &[u8]) {
+        let Some((from, payload, _)) = self.bridge.as_mut().and_then(|b| b.queries.remove(&token))
+        else {
+            return;
+        };
+        if let Some(reply) = self.enum_response(payload, app_reply.to_vec()) {
+            let _ = self.socket.send_to(&reply.encode(), from);
+        }
+    }
+
+    fn enum_response(&self, payload: u16, app_reply: Vec<u8>) -> Option<EnumResponse> {
+        let Role::Host {
+            config, instance, ..
+        } = &self.role
+        else {
+            return None;
+        };
+        Some(EnumResponse {
+            payload,
+            flags: if config.password.is_some() {
+                dpn::SESSION_REQUIRE_PASSWORD
+            } else {
+                0
+            },
+            max_players: config.max_players,
+            current_players: self.players.len() as u32,
+            instance: *instance,
+            app: dpn::APP_GUID,
+            session_name: config.session_name.clone(),
+            app_reply,
+        })
     }
 
     /// Read the socket, run the timers, send what is due; returns what
@@ -491,6 +606,20 @@ impl Session {
         if query.app.is_some_and(|g| g != dpn::APP_GUID) {
             return;
         }
+        if let Some(b) = &mut self.bridge {
+            let now = Instant::now();
+            b.queries
+                .retain(|_, (_, _, at)| now.duration_since(*at) < Duration::from_secs(5));
+            b.next_token = b.next_token.wrapping_add(1);
+            let token = b.next_token;
+            b.queries.insert(token, (from, query.payload, now));
+            self.events.push(Event::EnumQuery {
+                token,
+                from,
+                user_data: query.user_data,
+            });
+            return;
+        }
         let reply = EnumResponse {
             payload: query.payload,
             flags: if config.password.is_some() {
@@ -542,13 +671,27 @@ impl Session {
                 else {
                     continue;
                 };
+                let full = self.players.len() as u32 + admitted.len() as u32 >= config.max_players;
+                let wrong_password = config.password.as_deref().is_some_and(|p| p != password);
+                if let (Some(b), false, false) = (&mut self.bridge, full, wrong_password) {
+                    // The application decides (its INDICATE_CONNECT).
+                    b.next_token = b.next_token.wrapping_add(1);
+                    b.admissions.insert(b.next_token, (*addr, name.clone()));
+                    self.events.push(Event::ConnectRequest {
+                        token: b.next_token,
+                        name,
+                        connect_data: data,
+                        addr: *addr,
+                    });
+                    continue;
+                }
                 let refusal = if data != dpn::CONNECT_DATA {
                     Some(Refusal::IncompatibleVersion)
                 } else if !*accepting {
                     Some(Refusal::InProgress)
-                } else if self.players.len() as u32 + admitted.len() as u32 >= config.max_players {
+                } else if full {
                     Some(Refusal::SessionFull)
-                } else if config.password.as_deref().is_some_and(|p| p != password) {
+                } else if wrong_password {
                     Some(Refusal::WrongPassword)
                 } else {
                     None
@@ -564,6 +707,23 @@ impl Session {
             }
             if link.is_closed() {
                 gone.push(*addr);
+            }
+        }
+        for (addr, name, verdict) in self
+            .bridge
+            .as_mut()
+            .map(|b| std::mem::take(&mut b.decided))
+            .unwrap_or_default()
+        {
+            match verdict {
+                Ok(()) => admitted.push((addr, name)),
+                Err(r) => {
+                    if let Some(link) = pending.get_mut(&addr) {
+                        let mut out = vec![CORE_REFUSE, r.code()];
+                        out.extend(r.reply_word().unwrap_or(0).to_le_bytes());
+                        link.send(&out, true, true, now);
+                    }
+                }
             }
         }
         for addr in gone {
@@ -613,10 +773,8 @@ impl Session {
                     }
                     continue;
                 }
-                match Message::decode(&d.payload) {
-                    Ok(message) => self.events.push(Event::Message { from: *id, message }),
-                    Err(error) => self.events.push(Event::BadMessage { from: *id, error }),
-                }
+                self.events
+                    .push(game_event(self.bridge.is_some(), *id, &d.payload));
             }
             if let LinkState::Closed(reason) = link.state {
                 left.push((
@@ -653,10 +811,8 @@ impl Session {
                 }
             }
             if to == HOST_ID {
-                match Message::decode(&payload) {
-                    Ok(message) => self.events.push(Event::Message { from, message }),
-                    Err(error) => self.events.push(Event::BadMessage { from, error }),
-                }
+                self.events
+                    .push(game_event(self.bridge.is_some(), from, &payload));
             }
         }
         for (id, reason) in left {
@@ -699,16 +855,11 @@ impl Session {
         }
         for d in link.take_delivered() {
             if !d.core {
-                match Message::decode(&d.payload) {
-                    Ok(message) => self.events.push(Event::Message {
-                        from: host.unwrap_or(HOST_ID),
-                        message,
-                    }),
-                    Err(error) => self.events.push(Event::BadMessage {
-                        from: host.unwrap_or(HOST_ID),
-                        error,
-                    }),
-                }
+                self.events.push(game_event(
+                    self.bridge.is_some(),
+                    host.unwrap_or(HOST_ID),
+                    &d.payload,
+                ));
                 continue;
             }
             let mut c = Cursor(&d.payload);
@@ -775,10 +926,8 @@ impl Session {
                 }
                 Some(CORE_FROM) => {
                     if let Some(from) = c.u32() {
-                        match Message::decode(c.0) {
-                            Ok(message) => self.events.push(Event::Message { from, message }),
-                            Err(error) => self.events.push(Event::BadMessage { from, error }),
-                        }
+                        self.events
+                            .push(game_event(self.bridge.is_some(), from, c.0));
                     }
                 }
                 _ => {}
@@ -941,6 +1090,11 @@ pub struct HostEntry {
     pub password: bool,
     pub data: RaHostData,
     pub ping: Duration,
+    /// The session's instance GUID (the original's server list keys its
+    /// rows on it, `FUN_00623720` case `0xffff000b`).
+    pub instance: Guid,
+    /// The application reply as it came (RA2's eight bytes).
+    pub reply: Vec<u8>,
 }
 
 /// The LAN tab's Refresh: send enumeration queries and collect the replies.
@@ -1006,6 +1160,8 @@ impl Browser {
                         password: r.flags & dpn::SESSION_REQUIRE_PASSWORD != 0,
                         data: RaHostData::decode(&r.app_reply).unwrap_or_default(),
                         ping,
+                        instance: r.instance,
+                        reply: r.app_reply,
                     };
                     match self.hosts.iter_mut().find(|h| h.addr == from) {
                         Some(h) => *h = entry,

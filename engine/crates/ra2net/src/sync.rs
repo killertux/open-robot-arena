@@ -22,7 +22,7 @@
 //!
 //! ```text
 //! u32  0x74
-//! f32  the snapshot's byte count (computed alongside the writes, as a float)
+//! u32  the snapshot's byte count
 //! u32  the compressed byte count
 //! ...  the zlib stream
 //! ```
@@ -87,6 +87,20 @@ impl ConnectionSpeed {
             ConnectionSpeed::Cable => "Cable (384K/s)",
             ConnectionSpeed::Dsl256 => "DSL (256K/s)",
             ConnectionSpeed::Dsl128 => "DSL (128K/s)",
+        }
+    }
+
+    /// The tag the host puts in its session name (`FUN_0048ed..`: the
+    /// dropdown index picks one of `0x6f447c..0x6f44b4` through the jump table
+    /// `0x48f7c8`; index 5, ` 56K Dialup`, has no row here). The original
+    /// host on LAN sent `512K LAN` (live, docs/38 §14).
+    pub fn session_tag(self) -> &'static str {
+        match self {
+            ConnectionSpeed::Lan => "512K LAN",
+            ConnectionSpeed::T1 => "512K T1",
+            ConnectionSpeed::Cable => "384K Cable",
+            ConnectionSpeed::Dsl256 => "256K DSL",
+            ConnectionSpeed::Dsl128 => "128K DSL",
         }
     }
 
@@ -367,8 +381,10 @@ impl SyncState {
 /// `giSyncMessage` on the wire: the snapshot size and the zlib stream.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyncMessage {
-    /// The snapshot's byte count, as the float the writer sends.
-    pub raw_size: f32,
+    /// The snapshot's byte count. A word: the reader (`0x4d25d0`) takes it with
+    /// the word reader `0x58a1d0`, and the original sent `11 00 00 00` for its
+    /// 17-byte snapshots (live, docs/38 §14), not the float 17.0.
+    pub raw_size: u32,
     /// The zlib stream.
     pub packed: Vec<u8>,
 }
@@ -382,14 +398,14 @@ impl SyncMessage {
         let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         z.write_all(&raw).expect("writing to a Vec");
         SyncMessage {
-            raw_size: raw.len() as f32,
+            raw_size: raw.len() as u32,
             packed: z.finish().expect("writing to a Vec"),
         }
     }
 
     pub fn unpack(&self, schema: &SyncSchema) -> Result<SyncState, StreamError> {
         let want = self.raw_size as usize;
-        if !(0.0..=MAX_SNAPSHOT as f32).contains(&self.raw_size) {
+        if want > MAX_SNAPSHOT {
             return Err(StreamError::Invalid("snapshot size"));
         }
         let mut raw = Vec::with_capacity(want);
@@ -404,13 +420,13 @@ impl SyncMessage {
     }
 
     pub(crate) fn write(&self, w: &mut Writer) {
-        w.f32(self.raw_size)
+        w.u32(self.raw_size)
             .u32(self.packed.len() as u32)
             .raw(&self.packed);
     }
 
     pub(crate) fn read(r: &mut Reader) -> Result<SyncMessage, StreamError> {
-        let raw_size = r.f32()?;
+        let raw_size = r.u32()?;
         let n = r.u32()? as usize;
         Ok(SyncMessage {
             raw_size,
@@ -498,7 +514,7 @@ mod tests {
     fn a_sync_message_round_trips_through_zlib() {
         let state = sample();
         let msg = SyncMessage::pack(&state);
-        assert_eq!(msg.raw_size, state.to_bytes().len() as f32);
+        assert_eq!(msg.raw_size, state.to_bytes().len() as u32);
         let bytes = Message::Sync(msg.clone()).encode();
         assert_eq!(&bytes[..4], &0x74u32.to_le_bytes());
         assert_eq!(&bytes[4..8], &msg.raw_size.to_le_bytes());

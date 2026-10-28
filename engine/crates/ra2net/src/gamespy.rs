@@ -97,7 +97,10 @@ impl Responder {
     /// `0x47f940`.
     fn basic(&mut self) -> String {
         let tail = self.game_queryid(true);
-        format!("\\gamename\\robotarena2\\gamever\\01.00\\location\\0{tail}")
+        format!(
+            "\\gamename\\robotarena2\\gamever\\{}\\location\\0{tail}",
+            crate::dpn::VERSION
+        )
     }
 
     /// `0x47f3a0`.
@@ -202,7 +205,7 @@ mod tests {
             numplayers: 2,
             maxplayers: 4,
             gamemode: GAMEMODE_STAGING.into(),
-            programversion: "01.00".into(),
+            programversion: crate::dpn::VERSION.into(),
             hostspeed: "LAN".into(),
             weightclass: "Heavyweight".into(),
             hazards: true,
@@ -218,7 +221,7 @@ mod tests {
         let out = r.respond("\\basic\\");
         assert_eq!(
             out,
-            ["\\gamename\\robotarena2\\gamever\\01.00\\location\\0\\final\\\\queryid\\1.1\\final\\\\queryid\\1.1"]
+            ["\\gamename\\robotarena2\\gamever\\1.20\\location\\0\\final\\\\queryid\\1.1\\final\\\\queryid\\1.1"]
         );
         // The next query bumps both counters.
         let out = r.respond("\\basic\\");
@@ -244,7 +247,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{key} after {at} in {s}"));
             at += found;
         }
-        assert!(s.contains("\\gamemode\\openstaging\\programversion\\01.00\\hostspeed\\LAN"));
+        assert!(s.contains("\\gamemode\\openstaging\\programversion\\1.20\\hostspeed\\LAN"));
         assert!(s.contains("\\password\\0"));
         assert!(s.ends_with("\\final\\\\queryid\\1.1"));
     }

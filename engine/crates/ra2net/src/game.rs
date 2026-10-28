@@ -148,14 +148,24 @@ impl NetGame {
         let mut out = Vec::new();
         for event in self.session.poll() {
             match event {
-                Event::Connected { local, host, .. } => {
+                Event::Connected {
+                    local,
+                    host,
+                    players,
+                } => {
                     self.host = host;
+                    for p in &players {
+                        self.lobby.add_watcher(p.id, &p.name);
+                    }
                     out.push(GameEvent::Joined { local });
                 }
                 Event::Refused(r) => out.push(GameEvent::Refused(r)),
                 Event::ConnectFailed => out.push(GameEvent::ConnectFailed),
                 Event::SessionTerminated => out.push(GameEvent::Terminated),
                 Event::PlayerJoined(p) => {
+                    if !self.is_host() {
+                        self.lobby.add_watcher(p.id, &p.name);
+                    }
                     if self.is_host() {
                         self.lobby.join(p.id, &p.name);
                         // The newcomer needs the settings and every slot;
@@ -171,9 +181,10 @@ impl NetGame {
                     });
                 }
                 Event::PlayerRenamed(p) => {
-                    if let Some(slot) = self.lobby.slot_mut(p.id) {
+                    for slot in self.lobby.slots.iter_mut().filter(|s| s.player == p.id) {
                         slot.name = p.name.clone();
                     }
+                    self.lobby.add_member(p.id, &p.name);
                     out.push(GameEvent::PlayerRenamed {
                         id: p.id,
                         name: p.name,
@@ -190,7 +201,11 @@ impl NetGame {
                     }
                     out.push(GameEvent::PlayerLeft { id, reason });
                 }
-                Event::BadMessage { .. } => {}
+                // Bridge mode only (the `dpnet` replacement); a NetGame never sets it.
+                Event::BadMessage { .. }
+                | Event::Raw { .. }
+                | Event::ConnectRequest { .. }
+                | Event::EnumQuery { .. } => {}
                 Event::Message { from, message } => self.on_message(from, message, &mut out),
             }
         }
@@ -308,22 +323,41 @@ impl NetGame {
         Some(line)
     }
 
-    /// Choose the local player's robot (name, file and design stream).
-    pub fn choose_robot(&mut self, team: &str, robot: &str, file: &str, design: Vec<u8>) {
+    /// Choose the local player's robot (team, team logo, robot name and
+    /// design stream). A player without a panel takes the first free one (as
+    /// a joiner of the original's lobby, where everyone starts without one);
+    /// with none free it stays a spectator.
+    pub fn choose_robot(&mut self, team: &str, robot: &str, logo: &str, design: Vec<u8>) {
         let Some(me) = self.local() else { return };
-        let Some(index) = self.lobby.slots.iter().position(|s| s.player == me) else {
-            return;
+        let name = self
+            .lobby
+            .members
+            .iter()
+            .find(|(id, _)| *id == me)
+            .map(|(_, n)| n.clone())
+            .or_else(|| self.lobby.slot(me).map(|s| s.name.clone()))
+            .unwrap_or_default();
+        let index = match self.lobby.slot(me) {
+            Some(s) if s.is_human() => s.index,
+            _ => match self.lobby.free_panel() {
+                Some(i) => i,
+                None => return,
+            },
         };
-        let slot = &mut self.lobby.slots[index];
-        if slot.is_spectator() {
-            return;
-        }
-        slot.kind = kind::HUMAN_WITH_ROBOT;
-        slot.team = team.to_string();
-        slot.robot = robot.to_string();
-        slot.robot_file = file.to_string();
-        slot.design = Some(design);
-        let info = Message::GroupInfo(slot.to_group_info(index));
+        let slot = crate::lobby::Slot {
+            index,
+            player: me,
+            kind: kind::HUMAN_WITH_ROBOT,
+            name,
+            team: team.to_string(),
+            team_logo: logo.to_string(),
+            robot: robot.to_string(),
+            ready: self.lobby.slot(me).is_some_and(|s| s.is_human() && s.ready),
+            design: Some(design),
+        };
+        self.lobby.set_panel(slot.clone());
+        let slot = &slot;
+        let info = Message::GroupInfo(slot.to_group_info());
         if self.is_host() {
             self.broadcast_lobby();
         } else {

@@ -2399,7 +2399,7 @@ fn set_first_display(gib: &mut Gib, text: &str) -> bool {
     false
 }
 
-fn set_display(widget: &mut Widget, text: &str) -> bool {
+pub(crate) fn set_display(widget: &mut Widget, text: &str) -> bool {
     // A `DisplayBox` is attached to the record that draws its body. On
     // `event_winner.gib` that is the unnamed child of `prize description`, not
     // the named group, so the search goes through the subtree.

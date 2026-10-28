@@ -997,6 +997,13 @@ impl ApplicationHandler for App {
                     // A focused shell text box (New Team's name and motto)
                     // takes the typing.
                     if matches!(event.physical_key, PhysicalKey::Code(KeyCode::Enter))
+                        && self.shell.text_focus() == Some("chat textbox")
+                    {
+                        self.net.commit_lobby_chat(&mut self.shell);
+                        self.request_redraw();
+                        return;
+                    }
+                    if matches!(event.physical_key, PhysicalKey::Code(KeyCode::Enter))
                         && self.shell.text_focus() == Some("screen name")
                     {
                         if let Some(text) = self.shell.focused_text() {

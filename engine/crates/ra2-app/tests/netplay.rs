@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ra2_app::net_play::{self, NetPlay, BROWSER_SCREEN, PREMATCH_SCREEN};
+use ra2_app::net_play::{self, MatchArena, NetPlay, BROWSER_SCREEN, PREMATCH_SCREEN};
 use ra2_shell::Shell;
 use ra2net::game::GameEvent;
 use ra2net::link::LinkConfig;
@@ -78,8 +78,12 @@ fn refresh_join_and_the_prematch_lobby_through_the_screens() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(guest.rows.len(), 1);
-    // The create screen's own `server name textbox` default.
-    assert_eq!(guest.rows[0].session_name, "New Exhibition Match");
+    // The create screen's own `server name textbox` default, in the
+    // original's six-field session name (docs/38 §14).
+    assert_eq!(
+        guest.rows[0].session_name,
+        "New Exhibition Match:DEATHMATCH:Combat Arena:ALLWEIGHT:1.20:512K LAN:"
+    );
     assert_eq!(guest.rows[0].addr, addr);
 
     // Select it and Join.
@@ -138,6 +142,30 @@ fn refresh_join_and_the_prematch_lobby_through_the_screens() {
     }
     assert!(host.game.as_ref().unwrap().lobby.slot(me).unwrap().ready);
 
+    // Lobby chat from the guest's entry (Enter): `[Guest] hello` reaches the
+    // host's `chat messages` box (a DisplayBox: its markup carries the text),
+    // and the box's sample lines are gone.
+    guest_shell.click_named("chat textbox").unwrap();
+    for c in "hello".chars() {
+        guest_shell.type_char(c);
+    }
+    guest.commit_lobby_chat(&mut guest_shell);
+    let shown = |shell: &Shell| display_text(shell.document(), "chat messages");
+    let start = Instant::now();
+    while !shown(&host_shell).contains("[Guest] hello") && start.elapsed() < Duration::from_secs(5)
+    {
+        host.tick(&mut host_shell).unwrap();
+        guest.tick(&mut guest_shell).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        shown(&host_shell).contains("[Guest] hello"),
+        "{}",
+        shown(&host_shell)
+    );
+    assert!(!shown(&host_shell).contains("Perry"));
+    assert!(shown(&guest_shell).contains("[Guest] hello"));
+
     // Disconnect: the guest is back on the server list, the host sees it go.
     let step = ra2_shell::Step {
         hit: "Button \"disconnect button\"".into(),
@@ -169,7 +197,8 @@ fn a_synced_duel_follows_the_host() {
     let _scripts = ra2script::lock();
     let mut host = loopback("Host");
     let mut guest = loopback("Guest");
-    host.host("Sync", None, ConnectionSpeed::Lan).unwrap();
+    host.host("Sync", None, ConnectionSpeed::Lan, &box_arena())
+        .unwrap();
     let addr = host.game.as_ref().unwrap().session.local_addr().unwrap();
     guest.join(addr).unwrap();
     let start = Instant::now();
@@ -306,7 +335,8 @@ fn child(role: &str, window: bool) {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     if role == "host" {
         net.host_port = port;
-        net.host("Scripted", None, ConnectionSpeed::Lan).unwrap();
+        net.host("Scripted", None, ConnectionSpeed::Lan, &box_arena())
+            .unwrap();
         report("LISTENING".into());
     } else {
         net.join(addr).unwrap();
@@ -570,7 +600,8 @@ fn a_rematch_in_the_same_lobby_starts_from_a_clean_gate() {
     let mut guest_shell = Shell::boot(&game, size).unwrap();
     let mut host = loopback("Host");
     let mut guest = loopback("Guest");
-    host.host("Rematch", None, ConnectionSpeed::Lan).unwrap();
+    host.host("Rematch", None, ConnectionSpeed::Lan, &box_arena())
+        .unwrap();
     host_shell.goto(PREMATCH_SCREEN).unwrap();
     let addr = host.game.as_ref().unwrap().session.local_addr().unwrap();
     guest.join(addr).unwrap();
@@ -755,7 +786,8 @@ fn edge_child(test: &str, role: &str) {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     if host {
         net.host_port = port;
-        net.host("Edges", None, ConnectionSpeed::Lan).unwrap();
+        net.host("Edges", None, ConnectionSpeed::Lan, &box_arena())
+            .unwrap();
         report("LISTENING".into());
     } else {
         net.join(addr).unwrap();
@@ -1057,4 +1089,28 @@ fn the_default_player_name_is_the_originals_and_ra2_cfg_replaces_it() {
     let mut net = NetPlay::new();
     net.apply_config(&ra2fmt::cfg::Cfg::parse("PlayerName=\r\n"));
     assert_eq!(net.player_name, "Default Player");
+}
+
+/// Combat Arena as the messages name it (without reading an install).
+fn box_arena() -> MatchArena {
+    MatchArena {
+        script: net_play::DEFAULT_ARENA.to_string(),
+        name: "Combat Arena".to_string(),
+        preview: "box/box_preview.bmp".to_string(),
+    }
+}
+
+/// The markup of the `DisplayBox` whose body is `name`.
+fn display_text(gib: &ra2fmt::gib::Gib, name: &str) -> String {
+    let mut out = String::new();
+    for w in gib.walk() {
+        for a in &w.attachments {
+            if a.body.as_ref().is_some_and(|b| b.name() == name) {
+                if let Some(f) = a.field("Display") {
+                    out.push_str(&f.raw);
+                }
+            }
+        }
+    }
+    out
 }

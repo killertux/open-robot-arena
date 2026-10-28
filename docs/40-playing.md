@@ -100,8 +100,12 @@ Known differences and open items:
   does not repeat the original's one.
 * **Slash decals.** The marks cutting weapons leave on the floor are not drawn.
 * **Multiplayer.** The original used Microsoft DirectPlay; that is not
-  compatible. The port has its own LAN mode (`docs/38-multiplayer.md`) that
-  talks to other copies of this port only, never to the original.
+  compatible. The port has its own LAN mode (`docs/38-multiplayer.md`). The
+  original running under Wine can join it (and host for it) with the
+  replacement `dpnet.dll` in `tools/dpnet` plus `ora-dpnet-bridge`
+  (`docs/38-multiplayer.md` §14): listing, joining, lobby chat and a match
+  hosted by the original work; a match hosted by the port stops when the
+  original loads its robot data.
 * The workshop's shift-mouse rotation and outline-to-mesh extrusion, the
   event's 3D prize scene, and a new empty robot in the workshop starting from a
   stock chassis (the original starts with none) are open.
