@@ -243,131 +243,181 @@ impl ArenaData {
         true
     }
 
-    /// A point near `p` that the robot's circle fits at: march from `p` toward
-    /// each vantage point in half-radius steps and take the first stop that is
-    /// clear (`FUN_00405c30`, which `GetPath` runs over the POVs for a start or
-    /// goal pressed against a wall).
-    fn free_point_near(&self, p: [f32; 2], radius: f32) -> [f32; 2] {
-        let step = radius * 0.5;
-        if step <= 0.0 {
-            return p;
-        }
-        for pov in &self.povs {
-            let d = [pov.location[0] - p[0], pov.location[1] - p[1]];
-            let length = (d[0] * d[0] + d[1] * d[1]).sqrt();
-            if length <= 0.0 {
-                continue;
-            }
-            let n = (length / step) as i32;
-            let dir = [d[0] / length * step, d[1] / length * step];
-            let mut q = p;
-            for _ in 0..n {
-                if !self.blocked_at(q, radius) {
-                    return q;
-                }
-                q = [q[0] + dir[0], q[1] + dir[1]];
-            }
-        }
-        p
+    /// The march of `FUN_00405720` (and of the A* graph's edges): stops from
+    /// `a` toward `b` in steps of half the search radius, `trunc(length /
+    /// step)` of them starting at `a` itself, `b` not tested; clear when no
+    /// stop's circle crosses a collision line.
+    fn march_clear(&self, a: [f32; 2], b: [f32; 2], radius: f32) -> bool {
+        self.straight_clear_2d(a, b, radius)
+    }
+
+    /// The vantage points as the route sees them: the `AddPOV` locations cut
+    /// to whole numbers toward zero (live, POV 11 at `(1.5, -5.3)` is the
+    /// waypoint `(1, -5)`, POV 3 at `(-5, 5.5)` is `(-5, 5)`), with their own
+    /// neighbour lists as indices into the list.
+    fn route_povs(&self) -> Vec<([f32; 2], Vec<usize>)> {
+        self.povs
+            .iter()
+            .map(|p| {
+                let at = [p.location[0].trunc(), p.location[1].trunc()];
+                let nb = p
+                    .neighbours
+                    .iter()
+                    .filter_map(|&n| self.povs.iter().position(|q| q.index == n))
+                    .collect();
+                (at, nb)
+            })
+            .collect()
     }
 
     /// `GetPath(from, to, ignore_hazards)` (`FUN_00405990`), as world `(x, z)`
-    /// waypoints — the "grid" of the scripts is the world plane: `ToGrid` is
-    /// `(x, z)` and `FromGrid` puts the map's floor height back.
+    /// waypoints from `from` to `to` — the "grid" of the scripts is the world
+    /// plane: `ToGrid` is `(x, z)` and `FromGrid` puts the map's floor height
+    /// back. Recovered, and every one of 2994 live calls in six box fights
+    /// reproduced (`boxfight-scout-alarm-box__live__*`, docs/29 §12ab):
     ///
-    /// * A straight run that clears every collision line is the whole route:
-    ///   `[from, to]`.
-    /// * Otherwise a start or goal pressed against a line is moved to a clear
-    ///   point toward a vantage point, and the route runs over the arena's
-    ///   `AddPOV` graph (each POV's own neighbour list; the ends join every POV
-    ///   they can see).
-    /// * When no route exists the answer is still `[from, to]`, never empty: the
-    ///   AI then drives straight at its target.
+    /// * The straight test marches from `to` toward `from` (`to` tested,
+    ///   `from` not); clear, the route is `[from, to]`.
+    /// * Otherwise a `from` whose own circle crosses a line is moved: the march
+    ///   from it toward each vantage point in turn, the first clear stop.
+    ///   (The same is attempted for `to`, but the found point is written into
+    ///   the vantage point's temporary, so `to` never moves.)
+    /// * The route is an A* (`FUN_004067b0`, `FUN_00407330`, at most 1000
+    ///   expansions) from `to` to the moved `from` over the vantage points cut
+    ///   to whole numbers ([`Self::route_povs`]), with *squared* distances for
+    ///   the steps and the estimate (`FUN_00407890`). A free point's
+    ///   successors are the vantage points its march reaches; a vantage
+    ///   point's are `from` when its march reaches it, then its own
+    ///   neighbours; the parent is skipped (`FUN_00407680`). The open list is
+    ///   a binary heap on `f` ([`AStarHeap`]), which settles ties.
+    /// * When the A* fails the route is `[moved from, to]`: the AI then drives
+    ///   straight at its target.
     pub fn path(&self, from: Vec3, to: Vec3, radius: f32) -> Vec<[f32; 2]> {
         let (s, g) = ([from.x, from.z], [to.x, to.z]);
-        if self.straight_clear_2d(s, g, radius) {
+        if self.march_clear(g, s, radius) {
             return vec![s, g];
         }
-        let s2 = if self.blocked_at(s, radius) {
-            self.free_point_near(s, radius)
-        } else {
-            s
-        };
-        let g2 = if self.blocked_at(g, radius) {
-            self.free_point_near(g, radius)
-        } else {
-            g
-        };
-        self.pov_route(s2, g2, radius).unwrap_or_else(|| vec![s, g])
+        let povs = self.route_povs();
+        let mut s2 = s;
+        if self.blocked_at(s, radius) {
+            for (at, _) in &povs {
+                if let Some(q) = self.first_clear_stop(s, *at, radius) {
+                    s2 = q;
+                    break;
+                }
+            }
+        }
+        self.astar(g, s2, radius, &povs)
+            .unwrap_or_else(|| vec![s2, g])
     }
 
-    /// Shortest route from `s` to `g` over the vantage graph (Dijkstra; the
-    /// graph is a dozen nodes).
-    fn pov_route(&self, s: [f32; 2], g: [f32; 2], radius: f32) -> Option<Vec<[f32; 2]>> {
-        if self.povs.is_empty() {
+    /// `FUN_00405c30`: march from `p` toward `toward` in half-radius steps
+    /// (`trunc(length / step)` stops, `p` itself first) and answer the first
+    /// stop whose circle crosses no line.
+    fn first_clear_stop(&self, p: [f32; 2], toward: [f32; 2], radius: f32) -> Option<[f32; 2]> {
+        let step = radius * 0.5;
+        let d = [toward[0] - p[0], toward[1] - p[1]];
+        let length = (d[0] * d[0] + d[1] * d[1]).sqrt();
+        if step <= 0.0 || length <= 0.0 {
             return None;
         }
-        let n = self.povs.len();
-        // Nodes: the POVs, then the start (n) and the goal (n + 1).
-        let at = |k: usize| -> [f32; 2] {
-            if k < n {
-                self.povs[k].location
-            } else if k == n {
-                s
-            } else {
-                g
+        let n = (length / step) as i32;
+        let dir = [d[0] / length * step, d[1] / length * step];
+        let mut q = p;
+        for _ in 0..n {
+            if !self.blocked_at(q, radius) {
+                return Some(q);
             }
+            q = [q[0] + dir[0], q[1] + dir[1]];
+        }
+        None
+    }
+
+    /// The A* of `GetPath` from `start` (the route's target) to `goal` (the
+    /// robot): the waypoints from `goal` back to `start`, or `None`.
+    fn astar(
+        &self,
+        start: [f32; 2],
+        goal: [f32; 2],
+        radius: f32,
+        povs: &[([f32; 2], Vec<usize>)],
+    ) -> Option<Vec<[f32; 2]>> {
+        // A node is a vantage point (by index) or a free point.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Node {
+            Pov(usize),
+            Free([f32; 2]),
+        }
+        let pos = |n: Node| match n {
+            Node::Pov(k) => povs[k].0,
+            Node::Free(p) => p,
         };
-        let dist =
-            |a: [f32; 2], b: [f32; 2]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
-        let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n + 2];
-        for (k, pov) in self.povs.iter().enumerate() {
-            for &nb in &pov.neighbours {
-                if let Some(j) = self.povs.iter().position(|p| p.index == nb) {
-                    if j != k && !edges[k].contains(&j) {
-                        edges[k].push(j);
+        let d2 = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2);
+        let mut nodes: Vec<(Node, f32, f32, Option<usize>)> = Vec::new(); // node, g, f, parent
+        nodes.push((Node::Free(start), 0.0, d2(start, goal), None));
+        let mut open = AStarHeap::default();
+        open.push(0, nodes[0].2);
+        let mut closed: Vec<usize> = Vec::new();
+        for _ in 0..1000 {
+            let cur = open.pop()?;
+            let (node, g_cur, _, parent) = nodes[cur];
+            if node == Node::Free(goal) {
+                let mut route = Vec::new();
+                let mut k = Some(cur);
+                while let Some(i) = k {
+                    route.push(pos(nodes[i].0));
+                    k = nodes[i].3;
+                }
+                return Some(route);
+            }
+            let parent_node = parent.map(|p| nodes[p].0);
+            let mut succ: Vec<Node> = Vec::new();
+            match node {
+                Node::Free(p) => {
+                    for (k, (at, _)) in povs.iter().enumerate() {
+                        if parent_node != Some(Node::Pov(k)) && self.march_clear(p, *at, radius) {
+                            succ.push(Node::Pov(k));
+                        }
                     }
-                    if j != k && !edges[j].contains(&k) {
-                        edges[j].push(k);
+                }
+                Node::Pov(k) => {
+                    if self.march_clear(povs[k].0, goal, radius) {
+                        succ.push(Node::Free(goal));
+                    }
+                    for &j in &povs[k].1 {
+                        if parent_node != Some(Node::Pov(j)) {
+                            succ.push(Node::Pov(j));
+                        }
                     }
                 }
             }
-            if self.straight_clear_2d(s, pov.location, radius) {
-                edges[n].push(k);
-            }
-            if self.straight_clear_2d(pov.location, g, radius) {
-                edges[k].push(n + 1);
-            }
-        }
-        let mut best = vec![f32::INFINITY; n + 2];
-        let mut came = vec![usize::MAX; n + 2];
-        let mut done = vec![false; n + 2];
-        best[n] = 0.0;
-        loop {
-            let u = (0..n + 2)
-                .filter(|&k| !done[k] && best[k].is_finite())
-                .min_by(|&a, &b| best[a].total_cmp(&best[b]))?;
-            if u == n + 1 {
-                break;
-            }
-            done[u] = true;
-            for &v in &edges[u] {
-                let c = best[u] + dist(at(u), at(v));
-                if c < best[v] {
-                    best[v] = c;
-                    came[v] = u;
+            for c in succ {
+                let g = g_cur + d2(pos(node), pos(c));
+                let in_open = open.find(|i| nodes[i].0 == c);
+                if let Some(i) = in_open {
+                    if nodes[i].1 <= g {
+                        continue;
+                    }
                 }
+                let in_closed = closed.iter().position(|&i| nodes[i].0 == c);
+                if let Some(ci) = in_closed {
+                    if nodes[closed[ci]].1 <= g {
+                        continue;
+                    }
+                }
+                if let Some(ci) = in_closed {
+                    closed.remove(ci);
+                }
+                if let Some(i) = in_open {
+                    open.remove(i);
+                }
+                let f = g + d2(pos(c), goal);
+                nodes.push((c, g, f, Some(cur)));
+                open.push(nodes.len() - 1, f);
             }
+            closed.push(cur);
         }
-        let mut route = vec![g];
-        let mut k = came[n + 1];
-        while k != usize::MAX && k != n {
-            route.push(at(k));
-            k = came[k];
-        }
-        route.push(s);
-        route.reverse();
-        Some(route)
+        None
     }
 
     /// The map's floor under a world point, for `FromGrid`.
@@ -1298,5 +1348,79 @@ impl ParticleEmitter {
     #[setter(emitting)]
     fn set_emitting_attr(&mut self, on: bool) {
         self.SetEmitting(on);
+    }
+}
+
+/// The open list of `GetPath`'s A*: a binary heap kept with the standard
+/// library's heap algorithms of the original's compiler (push sifts the new
+/// entry up past every parent it beats; pop moves the hole at the top down
+/// along the better child to the bottom and pushes the last entry into it),
+/// with the lowest `f` on top. Its order is what breaks ties between routes
+/// of equal cost (live: from the box's north the route goes round the west
+/// side, POV 3, not the east).
+#[derive(Default)]
+struct AStarHeap {
+    items: Vec<(usize, f32)>,
+}
+
+impl AStarHeap {
+    /// `a` ranks below `b`.
+    fn below(a: (usize, f32), b: (usize, f32)) -> bool {
+        a.1 > b.1
+    }
+
+    fn sift_up(&mut self, mut i: usize, v: (usize, f32)) {
+        while i > 0 {
+            let p = (i - 1) / 2;
+            if Self::below(self.items[p], v) {
+                self.items[i] = self.items[p];
+                i = p;
+            } else {
+                break;
+            }
+        }
+        self.items[i] = v;
+    }
+
+    fn push(&mut self, id: usize, f: f32) {
+        self.items.push((id, f));
+        let i = self.items.len() - 1;
+        self.sift_up(i, (id, f));
+    }
+
+    fn pop(&mut self) -> Option<usize> {
+        let n = self.items.len().checked_sub(1)?;
+        let top = self.items[0];
+        let v = self.items[n];
+        self.items[n] = top;
+        let (mut i, mut c) = (0usize, 2usize);
+        while c < n {
+            if Self::below(self.items[c], self.items[c - 1]) {
+                c -= 1;
+            }
+            self.items[i] = self.items[c];
+            i = c;
+            c = 2 * c + 2;
+        }
+        if c == n {
+            self.items[i] = self.items[c - 1];
+            i = c - 1;
+        }
+        self.sift_up(i, v);
+        self.items.pop();
+        Some(top.0)
+    }
+
+    fn find(&self, pred: impl Fn(usize) -> bool) -> Option<usize> {
+        self.items.iter().find(|e| pred(e.0)).map(|e| e.0)
+    }
+
+    /// Take entry `id` out and rebuild the heap from what is left, in order.
+    fn remove(&mut self, id: usize) {
+        let rest: Vec<(usize, f32)> = self.items.iter().copied().filter(|e| e.0 != id).collect();
+        self.items.clear();
+        for (i, f) in rest {
+            self.push(i, f);
+        }
     }
 }

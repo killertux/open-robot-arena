@@ -128,26 +128,36 @@ pub struct Impact {
     pub speed: f32,
 }
 
-/// A robot part touching a named arena prop (a hazard, a hammer, a cinder
-/// block): what the arena's sub-material sound rule reads (`0x405090`,
+/// A robot part touching an arena collidable with a sub-material: what the
+/// arena's sub-material sound rule reads (`0x405090`,
 /// `docs/35-audio-events.md`). The robot-versus-robot [`resolve`] ignores it.
 #[derive(Clone, Debug)]
 pub struct MaterialContact {
-    /// The prop's name, as the arena script spells its sub-material
-    /// (`SetSubMaterialSound(name, ...)`).
+    /// The collidable's `.gmf` body name, as the arena script spells its
+    /// sub-material (`SetSubMaterialSound(name, ...)`).
     pub prop: String,
     pub robot: usize,
     pub point: Vec3,
-    /// `FUN_0045a5a0` for this contact: half the closing speed over the
-    /// effective inverse mass (an unknown prop mass counts as `0.08`).
+    /// `FUN_0045a5a0` for this contact, the `M` the hit's damage `factor · M`
+    /// is made of: both bodies' masses and rotation terms (docs/29 §12aa).
     pub magnitude: f32,
 }
 
-/// The contacts of one step between a robot's body and a named prop body.
+/// The contacts of one step between a robot's body and an arena collidable
+/// the script gave a sub-material.
+///
+/// The sound and the damage are one computation: the arena's
+/// `computeDamage` (`0x405090`) finds the struck collidable among the
+/// registrations `SetSubMaterialSound` made (`0x404cc0`: every collidable of
+/// the named `.gmf` body, the static arena's named pieces included), forms
+/// `v = factor · M` and both prices the hit with it and, above 0.5, plays the
+/// registration's sound (call site `0x4051b0`). So a contact makes a material
+/// sound exactly when [`arena_hit`] prices it with a sub-material.
 pub fn material_contacts(
     robots: &[Robot],
-    props: &[(BodyHandle, &str, f32)],
+    arena: &ArenaBodies,
     events: &[ContactEvent],
+    props: &MassProps,
 ) -> Vec<MaterialContact> {
     let mut owner: HashMap<BodyHandle, (usize, usize)> = HashMap::new();
     for (r, robot) in robots.iter().enumerate() {
@@ -159,53 +169,32 @@ pub fn material_contacts(
     }
     let mut out = Vec::new();
     for e in events {
-        // `a` and `b` in either order: one is a robot part, the other a prop.
-        let (robot_side, prop_side, robot_is_a) = match (
+        let (robot_side, ab, robot_is_a) = match (
             owner.get(&e.a),
             owner.get(&e.b),
-            props.iter().find(|p| p.0 == e.a),
-            props.iter().find(|p| p.0 == e.b),
+            arena.get(&e.a),
+            arena.get(&e.b),
         ) {
-            (Some(&o), None, _, Some(p)) => (o, p, true),
-            (None, Some(&o), Some(p), _) => (o, p, false),
+            (Some(&o), None, None, Some(ab)) => (o, ab, true),
+            (None, Some(&o), Some(ab), None) => (o, ab, false),
             _ => continue,
         };
-        let (r, part) = robot_side;
-        let (state_r, state_p) = if robot_is_a {
-            (&e.state_a, &e.state_b)
+        let k = if ab.parts.is_empty() {
+            0
         } else {
-            (&e.state_b, &e.state_a)
+            ab.part_at(e.point)
         };
-        let dyn_r = body_dynamics(&robots[r], part, state_r);
-        let n = e.normal.normalize_or_zero();
-        if n == Vec3::ZERO || dyn_r.mass <= 0.0 {
+        if ab.sub_materials.get(k).copied().flatten().is_none() {
             continue;
         }
-        let v_r = point_velocity(
-            state_r.linear_velocity,
-            state_r.angular_velocity,
-            dyn_r.com,
-            e.point,
-        );
-        let v_p = point_velocity(
-            state_p.linear_velocity,
-            state_p.angular_velocity,
-            state_p.position,
-            e.point,
-        );
-        let rec0 = (v_r - v_p).dot(n).abs();
-        let magnitude = magnitude(
-            rec0,
-            dyn_r.mass,
-            prop_side.2,
-            angular_term(e.point - dyn_r.com, n, dyn_r.inv_inertia),
-            0.0,
-        );
+        let Some((_, m, _)) = arena_record(robots, robot_side, e, robot_is_a, props) else {
+            continue;
+        };
         out.push(MaterialContact {
-            prop: prop_side.1.to_string(),
-            robot: r,
+            prop: ab.names.get(k).cloned().unwrap_or_default(),
+            robot: robot_side.0,
             point: e.point,
-            magnitude,
+            magnitude: m,
         });
     }
     out
@@ -902,15 +891,13 @@ pub fn resolve_with(
 /// sub-material is priced at its factor times `M` instead
 /// ([`ArenaBody::sub_material_at`], docs/29 §12aa).
 #[allow(clippy::too_many_arguments)]
-fn arena_hit(
+fn arena_record(
     robots: &[Robot],
     (r, part): (usize, usize),
-    arena: &ArenaBody,
     e: &ContactEvent,
     robot_is_a: bool,
-    cfg: &CombatConfig,
     props: &MassProps,
-) -> Option<Impact> {
+) -> Option<(f32, f32, usize)> {
     let robot = &robots[r];
     let (body_r, state_r, body_x, state_x) = if robot_is_a {
         (e.a, &e.state_a, e.b, &e.state_b)
@@ -956,6 +943,23 @@ fn arena_hit(
         angular_term(e.point - com_x, n, inv_x),
     );
     let component = touched_component(robot, part, state_r, e.point)?;
+    Some((rec0, m, component))
+}
+
+/// The hit of one contact between robot part `(r, part)` and an arena body
+/// (`robot_is_a`: the robot is the event's `a`): see [`arena_record`].
+fn arena_hit(
+    robots: &[Robot],
+    (r, part): (usize, usize),
+    arena: &ArenaBody,
+    e: &ContactEvent,
+    robot_is_a: bool,
+    cfg: &CombatConfig,
+    props: &MassProps,
+) -> Option<Impact> {
+    let robot = &robots[r];
+    let (rec0, m, component) = arena_record(robots, (r, part), e, robot_is_a, props)?;
+    let n = e.normal.normalize_or_zero();
     let damage = match arena.sub_material_at(e.point) {
         Some(factor) => factor * m,
         None => hit_damage(

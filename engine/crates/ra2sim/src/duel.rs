@@ -905,8 +905,9 @@ pub struct Duel {
     /// The first `Tick` failure, kept so a broken arena is reported once but
     /// remains visible in the match report's log.
     pub arena_tick_error: Option<String>,
-    /// Whether each robot was inside each zone last step.
-    zone_inside: Vec<Vec<bool>>,
+    /// The collidables of each robot inside each zone last step:
+    /// `(component, piece, chassis)`.
+    zone_inside: Vec<Vec<Vec<(usize, usize, bool)>>>,
     /// Seconds until the arena's own `Tick` runs again.
     arena_timer: f32,
     /// The `SetPinned` wishes already applied, so the reconciliation below only
@@ -1334,7 +1335,7 @@ impl Duel {
             arena_path: arena_path.to_string(),
             model_hinges,
             joints: Vec::new(),
-            zone_inside: vec![vec![false; n]; zones.len()],
+            zone_inside: vec![vec![Vec::new(); n]; zones.len()],
             zones,
             phantoms,
             arena_tick_error: None,
@@ -1765,59 +1766,88 @@ impl Duel {
         for (zi, zone) in self.zones.iter().enumerate() {
             let mut inside_robots: Vec<(i32, bool)> = Vec::new();
             for (robot, w) in worlds.iter().enumerate() {
+                let r = &self.robots[robot];
                 let mut inside = false;
-                let mut by: Option<usize> = None;
                 let mut chassis = false;
-                for (ci, c) in self.robots[robot].rig.components.iter().enumerate() {
-                    if !self.robots[robot].attached[ci] {
+                // One key per collidable overlapping the zone: (component,
+                // piece), with whether it is the chassis body's (its tag's
+                // low bit).
+                let mut now: Vec<(usize, usize, bool)> = Vec::new();
+                for (ci, c) in r.rig.components.iter().enumerate() {
+                    if !r.attached[ci] {
                         continue;
                     }
                     // What the phantom can see: the component's collision
                     // pieces (a power cell or fitting collides with nothing).
                     let collides = c.role.is_physical() && c.role != crate::rig::Role::Power;
+                    if !collides {
+                        continue;
+                    }
+                    let own_part = r.rig.part_of[ci];
+                    let rotor_part = r
+                        .rig
+                        .parts
+                        .iter()
+                        .position(|q| q.joint.is_some_and(|j| j.motor == ci))
+                        .unwrap_or(own_part);
                     let to_zone = zone.inv * w[ci];
-                    if collides
-                        && zone_pieces(c, 0, 0).into_iter().any(|(_, pts, mesh)| {
-                            crate::hazards::box_touches_piece(
-                                to_zone, zone.min, zone.max, pts, mesh,
-                            )
-                        })
+                    for (k, (part, pts, mesh)) in
+                        zone_pieces(c, own_part, rotor_part).into_iter().enumerate()
                     {
-                        inside = true;
-                        by.get_or_insert(ci);
-                        if ci == 0 {
-                            chassis = true;
+                        if crate::hazards::box_touches_piece(to_zone, zone.min, zone.max, pts, mesh)
+                        {
+                            inside = true;
+                            chassis |= part == 0;
+                            now.push((ci, k, part == 0));
                         }
                     }
                 }
                 if inside {
                     inside_robots.push((robot as i32 + 1, chassis));
                 }
-                let was = self.zone_inside[zi][robot];
-                if inside != was {
-                    let direction = if inside { 1 } else { -1 };
-                    if let Some(host) = self.script_ai.as_ref() {
-                        host.zone_event(direction, zone.id, robot as i32 + 1, chassis);
+                // The arena's `RegisterZone` (`0x4044d0`) registers the
+                // zone's collidable with the same listener as a robot's
+                // SmartZone (`0x4a45c0`), and the listener (`0x4a4780`)
+                // calls the callback once per phantom-pair change whose other
+                // collidable is solid; the callback (`0x412050` -> the
+                // arena's `0x4c9050`) hands Python `ZoneEvent(direction, id,
+                // robot, chassis)` as it is. So every collidable entering or
+                // leaving is an event of its own (the spikes' `refcount`
+                // counts collidables, and each entering one restarts their
+                // timer), not one per robot.
+                let was = std::mem::take(&mut self.zone_inside[zi][robot]);
+                let mut events: Vec<(i32, bool, usize)> = Vec::new();
+                for &(ci, k, ch) in &was {
+                    if !now.iter().any(|&(c2, k2, _)| (c2, k2) == (ci, k)) {
+                        events.push((-1, ch, ci));
                     }
-                    self.zone_inside[zi][robot] = inside;
+                }
+                for &(ci, k, ch) in &now {
+                    if !was.iter().any(|&(c2, k2, _)| (c2, k2) == (ci, k)) {
+                        events.push((1, ch, ci));
+                    }
+                }
+                for (direction, ch, ci) in events {
+                    if let Some(host) = self.script_ai.as_ref() {
+                        host.zone_event(direction, zone.id, robot as i32 + 1, ch);
+                    }
                     self.log.push(format!(
-                        "zone {:?} ({}) robot {} {}{}",
+                        "zone {:?} ({}) robot {} {} {:?} at {:?}",
                         zone.name,
                         zone.id,
                         robot + 1,
-                        if inside { "entered" } else { "left" },
-                        by.map(|c| format!(
-                            " by {:?} at {:?}",
-                            self.robots[robot].rig.components[c].name,
-                            zone.inv.transform_point3(
-                                w[c].transform_point3(
-                                    self.robots[robot].rig.components[c].center()
-                                )
-                            )
-                        ))
-                        .unwrap_or_default()
+                        if direction > 0 {
+                            "entered by"
+                        } else {
+                            "left by"
+                        },
+                        self.robots[robot].rig.components[ci].name,
+                        zone.inv.transform_point3(
+                            w[ci].transform_point3(self.robots[robot].rig.components[ci].center())
+                        )
                     ));
                 }
+                self.zone_inside[zi][robot] = now;
             }
             contents.insert(zone.name.clone(), inside_robots);
         }
@@ -2724,13 +2754,12 @@ impl Duel {
             &self.arena_bodies,
         );
         if self.record_impacts {
-            let props: Vec<(BodyHandle, &str, f32)> = self
-                .props
-                .iter()
-                .map(|p| (p.body, p.prop.name.as_str(), p.prop.mass))
-                .collect();
-            self.material_contacts
-                .extend(combat::material_contacts(&self.robots, &props, &events));
+            self.material_contacts.extend(combat::material_contacts(
+                &self.robots,
+                &self.arena_bodies,
+                &events,
+                &props,
+            ));
             self.impacts.extend(impacts.iter().copied());
         }
         for imp in &impacts {
@@ -3929,12 +3958,13 @@ mod tests {
         }
     }
 
-    /// A robot part touching a named prop is a material contact, priced with
-    /// `FUN_0045a5a0`'s magnitude (half the closing speed over the effective
-    /// inverse mass); a contact with no prop in it, or between two robots, is
-    /// not (`docs/35-audio-events.md`, the arena sub-material sounds).
+    /// A robot part touching an arena collidable with a sub-material is a
+    /// material contact with the hit's own `M` (both bodies' masses and
+    /// rotation terms, `FUN_0045a5a0`), a named piece of the static arena
+    /// included; a collidable with no sub-material, or a contact between two
+    /// robots, is not (`0x405090`, `docs/35-audio-events.md`).
     #[test]
-    fn a_robot_touching_a_named_prop_is_a_material_contact() {
+    fn a_robot_touching_a_sub_material_is_a_material_contact() {
         let Some(game) = game_dir() else { return };
         let _scripts = ra2script::lock();
         let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
@@ -3954,7 +3984,34 @@ mod tests {
         let duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
         let robot_body = duel.robots[0].parts[0].body;
         let other_body = duel.robots[1].parts[0].body;
-        let prop: BodyHandle = BodyHandle::MAX - 1;
+        let spike: BodyHandle = BodyHandle::MAX - 1;
+        let ground: BodyHandle = BodyHandle::MAX - 2;
+        let tri = |x: f32| {
+            [[
+                Vec3::new(x, 0.0, -1.0),
+                Vec3::new(x + 1.0, 0.0, -1.0),
+                Vec3::new(x, 0.0, 1.0),
+            ]]
+            .to_vec()
+        };
+        let mut bodies = combat::ArenaBodies::new();
+        let mut moving_arena = combat::ArenaBody::new(
+            combat::ArenaStriker::arena(),
+            Vec::new(),
+            vec!["spikes1".to_string()],
+        );
+        moving_arena.set_sub_materials(&[("spikes1".to_string(), 0.7)]);
+        bodies.insert(spike, moving_arena);
+        let mut fixed = combat::ArenaBody::new(
+            combat::ArenaStriker::arena(),
+            vec![tri(-0.2), tri(5.0)],
+            vec!["floorsaw".to_string(), "arena_collision".to_string()],
+        );
+        fixed.set_sub_materials(&[("floorsaw".to_string(), 0.8)]);
+        bodies.insert(ground, fixed);
+        let inv = glam::Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0));
+        let mut props = combat::MassProps::new();
+        props.insert(spike, (40.0, Vec3::new(0.3, 0.0, 0.0), inv));
         let moving = crate::backend::BodyState {
             position: Vec3::ZERO,
             rotation: glam::Quat::IDENTITY,
@@ -3965,38 +4022,41 @@ mod tests {
             linear_velocity: Vec3::ZERO,
             ..moving
         };
-        let event = |a, b, state_a, state_b| crate::backend::ContactEvent {
+        let event = |a, b, state_a, state_b, x: f32| crate::backend::ContactEvent {
             a,
             b,
             normal: Vec3::Y,
-            point: Vec3::ZERO,
+            point: Vec3::new(x, 0.0, 0.0),
             state_a,
             state_b,
         };
-        let props = [(prop, "spikes1", 0.0_f32)];
-        // Robot as `a`, prop as `b`; and the other way round (normal flipped by
-        // the caller's convention: the closing speed is an absolute value).
         let hits = combat::material_contacts(
             &duel.robots,
-            &props,
+            &bodies,
             &[
-                event(robot_body, prop, moving, still),
-                event(prop, robot_body, still, moving),
+                event(robot_body, spike, moving, still, 0.0),
+                event(spike, robot_body, still, moving, 0.0),
+                // The static arena's named piece with a sub-material...
+                event(robot_body, ground, moving, still, 0.1),
+                // ... and one without.
+                event(robot_body, ground, moving, still, 5.2),
                 // Two robots: not a material contact.
-                event(robot_body, other_body, moving, still),
-                // A body that is neither: ignored.
-                event(robot_body, prop - 1, moving, still),
+                event(robot_body, other_body, moving, still, 0.0),
             ],
+            &props,
         );
-        assert_eq!(hits.len(), 2, "{hits:?}");
-        assert!(hits.iter().all(|h| h.prop == "spikes1" && h.robot == 0));
+        assert_eq!(hits.len(), 3, "{hits:?}");
+        assert!(hits[..2]
+            .iter()
+            .all(|h| h.prop == "spikes1" && h.robot == 0));
+        assert_eq!(hits[2].prop, "floorsaw");
         let dyn_r = combat::body_dynamics(&duel.robots[0], 0, &moving);
         let expected = combat::magnitude(
             6.0,
             dyn_r.mass,
-            0.0,
+            40.0,
             combat::angular_term(Vec3::ZERO - dyn_r.com, Vec3::Y, dyn_r.inv_inertia),
-            0.0,
+            combat::angular_term(Vec3::new(-0.3, 0.0, 0.0), Vec3::Y, inv),
         );
         assert!(expected > 0.0);
         assert!(
@@ -6912,6 +6972,45 @@ mod tests {
             &duel.arena_bodies,
         );
         assert!(none.is_empty(), "{none:?}");
+    }
+
+    /// docs/29 §12ab: the arena's zones speak per collidable. `RegisterZone`
+    /// (`0x4044d0`) registers with the same listener as a SmartZone
+    /// (`0x4a45c0`), which calls the arena's `ZoneEvent` (`0x412050` ->
+    /// `0x4c9050`) once for every solid collidable whose pair with the zone
+    /// appears or goes (live: the hellraiser's `RaiseHell` 15 times in one
+    /// substep as ALARM settles into `hellzone1`, `hazard-octagon__live__000`).
+    /// ALARM set down on the box's saw enters `saw_zone` with several of its
+    /// parts, each an event of its own.
+    #[test]
+    fn an_arena_zone_hears_every_collidable_that_enters() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string();
+        let setups = [BotSetup {
+            path: bot,
+            yaw_deg: Some(0.0),
+            spawn: Some([-0.1, 5.4]),
+        }];
+        let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        for _ in 0..90 {
+            duel.step_direct(&[DriveInput::default()], crate::DEFAULT_STEP);
+        }
+        let entered: Vec<&String> = duel
+            .log
+            .iter()
+            .filter(|l| l.starts_with("zone \"saw_zone\"") && l.contains("entered by"))
+            .collect();
+        assert!(entered.len() >= 2, "{:?}", duel.log);
+        let mut parts: Vec<&str> = entered
+            .iter()
+            .filter_map(|l| l.split("entered by ").nth(1))
+            .map(|r| r.split(" at ").next().unwrap_or(""))
+            .collect();
+        parts.sort();
+        parts.dedup();
+        assert!(parts.len() >= 2, "one event per collidable: {entered:?}");
     }
 
     /// docs/29 §12aa: a collidable the script gave a sub-material

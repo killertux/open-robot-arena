@@ -4560,3 +4560,162 @@ component by `0x4a5c40`, priced `M` times the float of `0x405240`'s material)
 is not exercised by the stock arenas and not modelled; ours' material sounds
 (`combat::material_contacts`) still leave the prop's rotation term out of `M`
 and make none for the static collider's named pieces.
+
+### 12ab. What puts a robot on a hazard: the AI's routes and the zones' events (fx/box-fight)
+
+Section 12aa left the box Scout v ALARM fight with ALARM taking 2.5 applied
+arena hits a fight (87 hp; live 0.6, 15 hp) and the Scout 3.0 (52; live 4.2,
+99), 2 of 24 runs going full length (live 3 of 6), the hellraisers' closing
+speed at the first hit below live's, and ours' material sounds outside the
+hit's pricing.
+
+New live captures (one session on `:7`, the prefix's `AI/`, `Teams/`,
+`Robot Designs/` and `ra2.cfg` copied before and sha256-identical after;
+manifest rows in `manifest-additions-2026-10-21-box-fight.tsv`):
+`boxfight-scout-alarm-box__live__000..005` with
+`fightpos-scout-alarm-box__live__003..008` (new agent `frida/ra2_boxfight.js`
+through `capture_fightpos_set.sh AGENT=`: six 120 s fights, shipped AIs,
+hazards on; every damage-gate call with its point, every zone-listener pair
+event `0x4a4780`, every arena `ZoneEvent` handed to Python `0x4c9050`, every
+prismatic push `0x4b51b0`, the chassis poses every 8 pieces, and every
+`GetPath` call `0x405990` with its two points, the search radius `+0x118`
+and the waypoints it returned; with the AI samples of `ra2_python.py`).
+Diagnostic: `fidtrace`'s hit rows now carry the contact point (`"p"`), and
+`twoprobe` prints the duel's log lines under `TWOPROBE_LOG=1`.
+
+**Where the arena's damage comes from.** Each applied arena hit sorted by
+its point: inside one of the box's hazard boxes (`AddCollisionLine`
+rectangles, grown 0.3 m) or not; per fight, applied count (hp):
+
+| | live (14 fights) | before (24) | after (24) |
+|---|---|---|---|
+| ALARM: spikes 1 + 2 | 0 (0) | 1.21 (62) | 1.00 (48) |
+| ALARM: saw | 0.36 (6) | 0.12 (3) | 0.58 (11) |
+| ALARM: walls / floor | 0.29 (8) / 0.14 (3) | 1.08 (21) / 0.04 (1) | 1.04 (16) / 0.12 (1) |
+| Scout: spikes 1 + 2 | 0.86 (50) | 0.29 (14) | 0.20 (13) |
+| Scout: saw | 0.36 (7) | 0.04 (1) | 1.21 (23) |
+| Scout: walls / floor | 0.50 (7) / 1.64 (22) | 0.38 (6) / 2.33 (32) | 1.21 (18) / 5.12 (73) |
+
+Ours' surplus on ALARM is the spikes, and every one of those runs is the same
+scene: ALARM on its back, the Scout pushing it (`Engage` drives at the enemy
+until its chassis is in the fork's SmartZone) across a spike box, the spike
+firing every 1.25 s into it, 50-120 hp a strike at 16 m/s. A spike's strike
+is priced as live (the Scout on spikes 1 in `fight-scout-alarm-box__live__004`
+takes 70, 29, 33, 99, 124) and live robots stay on a spike as long; live ALARM
+lies on its back as often (28 % of the time, ours 29 %) and is pushed about as
+far (13 and 16 m in `aistate-...__live__002`, `__006`; in
+`boxfight-...__live__000` it lies on the saw for 93 s and takes 180 small
+hits there). What differed was where the Scout pushed it from.
+
+**`GetPath` (recovered, verified live on all 4948 calls).** The AI's route
+(`0x405990`; docs/33 §2): the straight test marches from `to` back to `from`
+(`0x405720`, `to` tested, `from` not); a blocked `from` is moved to the first
+clear stop of its march toward the first vantage point that has one
+(`0x405c30`), a blocked `to` never (the found point is written into the
+vantage point's temporary); the route is an A* (`0x4067b0`, `0x407330`, 1000
+expansions) from `to` to the moved `from` over the `AddPOV` points *cut to
+whole numbers* (live waypoints `(1, -5)` for POV 11 at `(1.5, -5.3)`,
+`(-5, 5)` for POV 3), with squared distances for steps and estimate
+(`0x407890`), the successors of `0x407680` and a binary-heap open list whose
+order breaks ties; a failed search answers `[moved from, to]`. Ours marched
+from `from`, moved a blocked `to` toward a vantage point and ran Dijkstra on
+the exact POVs: against the live calls 183/342 and 1238/1434 in two fights,
+now every call in all six (`examples/pyprobe` on the `GP`/`GR` rows). Near a
+spike box the old route sent the Scout round over POV 8 or 11 to a moved goal
+and in at the enemy from the far side. `ArenaData::path`; test
+`ra2script::tests::get_path_answers_the_live_calls`.
+
+**The arena's zones speak per collidable (recovered, verified live).**
+`RegisterZone` (`0x4044d0`) registers the zone's collidable with the same
+listener as a robot's SmartZone (`0x4a45c0`); the listener (`0x4a4780`) calls
+the callback for every phantom-pair change whose other collidable is solid,
+and the callback (`0x412050` -> the arena's `0x4c9050`) hands Python
+`ZoneEvent(direction, id, robot, chassis)` unchanged. Live, the arena's
+`ZoneEvent` calls equal the solid pair events of its zones, 490 of 490 in
+the six fights (the 123 with a phantom, a traction ring or SmartZone, make
+none), and no arena body ever pairs with a zone; in `hazard-octagon__live__000`
+ALARM settling on hellraiser 1 runs `RaiseHell` 15 times in one substep. So
+the spikes' `refcount` counts collidables and every collidable that enters
+restarts their timer. Ours raised one event per robot. `Duel::watch_zones`
+now keys the zone's contents by (component, collision piece), the chassis
+flag being whether the piece is the chassis body's; test
+`duel::tests::an_arena_zone_hears_every_collidable_that_enters`. Alone it
+leaves the Compressor's ensemble unchanged to the digit (its smashers'
+`refcount` only gates the first entry and the last exit) and moves the others
+by about a standard error: box ALARM / Scout 33.2 (123) / 5.2, 78 s, 5/24
+full, arena hits 3.8 (64) / 2.7 (93); Razor v FlapJack 3.6 / 1.0, 53 s;
+Octagon 11.8 (53) / 2.5, 45 s.
+
+**The hellraisers' closing speed (not a model difference).** Replayed as
+section 12z (`hazard-octagon__live__000` trials 0-2): the power (`(80, 1500)`,
+60000 N·m, 79 rad/s), the motor's kick per solver call (about +9.7 rad/s,
+also in a backstepped piece) and the first contact's point (live
+(-3.833, -0.092, 0.376), ours (-3.832, -0.109, 0.376)) agree; the record's
+closing speed is the bodies' velocities at the resolver entry of the piece
+the chassis contact first appears in, live 18.75 rad/s of the plate (after
+two kicks with only ALARM's rear wheels near the plate) and ours 14.2 (ALARM's
+front wheels, still within the 0.1 tolerance from the placement's bounce,
+took the first kick, 10.1 -> 4.0). The difference is when the plate starts
+relative to that bounce: live `RaiseHell` comes one substep after the
+placement (`SetPowerSettings(80, 1500)` at `n = 83`), the controller's first
+update a substep later and the motor's first solve another later (plate
+still at -0.6 rad/s at `n = 85`, 9.8 at 86); ours raises in the placement's
+substep and moves the plate one later. Delaying ours' zone events by 0, 1, 2,
+3 substeps gives first-hit closing speeds 17.6/17.6/18.3, 18.0/18.0/18.2,
+19.2/19.2/21.0, 26.2/26.2/23.3 (live 21.4, 18.0, 31.0; live's two identical
+placements differ by 3.4): the first hit is a steep function of the bounce's
+phase. Which substep the original's phantom detection and the controller's
+first update fall in was not traced; nothing is changed.
+
+**Material sounds.** `combat::material_contacts` now goes through the same
+record as `arena_hit` (`combat::arena_record`): a contact sounds when its
+collidable has a sub-material (a movable arena body or a named piece of the
+static collider), with the hit's own `M` (both rotation terms); docs/35.
+
+**Validation.** Before = `fidelity` aac2d4e (section 12aa's after column to
+the digit), after = this branch. `FIDTRACE_WARMUP` ensembles, 24 runs each:
+
+| fight | live | before | after |
+|---|---|---|---|
+| box Scout v ALARM: ALARM / Scout | 38.5 / 4.8 (6); 38.9 / 5.4 with the six new | 33.7 (114) sd 25 / 5.8, 72 s, 2/24 | 34.7 (161) sd 19 / 5.4, 94 s, 11/24 |
+| ... ALARM on its back ≥ 5 s by 45 s | about 7 of 25 | 8/24 | 5/24 |
+| ... arena hits applied on Scout / ALARM (hp) | 3.4 (85) / 0.8 (17), 14 fights | 3.0 (52) / 2.5 (87) | 7.8 (127) / 2.8 (77) |
+| box Razor v FlapJack: Razor / FlapJack | 3.0 / 0.1 | 3.5 (81) / 1.0, 52 s, 2/24 | 4.4 (119) / 1.0, 60 s, 2/24 |
+| Compressor Sentinel v Wide Load: Wide Load / Sentinel | 73.6 / 5.3 (8) | 77.1 (306) sd 43 / 5.1, 95 s, 15/24 | 73.2 (273) sd 52 / 4.4, 96 s, 14/24 |
+| ... arena hits applied on Sentinel / Wide Load (hp) | 5.9 (178) / 4.8 (146) | 7.1 (189) / 5.2 (153) | 15.3 (345) / 8.7 (273) |
+| Octagon Scout v ALARM: ALARM / Scout | 13.6 / 3.2 (5) | 10.2 (54) sd 9 / 2.5, 47 s, 1/24 | 11.1 (57) sd 7 / 2.5, 48 s, 0/24 |
+| ... on its back / arena hit over 50 / pit endings (Scout + ALARM) | – / 4 of 5 / 2 of 5 | 11/24, 6/24, 1 + 4 | 10/24, 6/24, 7 + 5 |
+
+The rest of the change is `GetPath`'s. The box fight comes to live in length (11
+of 24 full, live 3 of 6), ALARM's time on its back and its counted hits; its
+arena damage is lower but still five times live's (the spikes 48 hp a fight,
+none live in 14 fights), and the Scout's doubles, mostly landings on the
+floor (5.1 applied a fight, live 1.6) in the longer fights: both away from or
+still off live. The Compressor's arena hits double, away from live, with the
+robot counts closer; the Octagon's pit endings rise (7 + 5, live 2 of 5).
+These follow from a route recovered on every live call; they are reported,
+not tuned.
+
+Section 12s's replays (`twoprobe`, no brains): unchanged to the digit (set 1
+ALARM on its back at some point / at the end 3 / 3, live 1 / 1, peak |ω|
+3.34, live 3.05, end-centre median 1.22 m; set 2 0 / 0, peak 1.55, live 1.40,
+median 0.22 m).
+
+AI suite (ten pairings, warmup 0), counted hits each way and length, before →
+after: Scout v ALARM 2/7 120 s → 9/60 74 s, Tornado v RipBlade 92/32 75 s →
+89/26 70 s, Grog v Boxer 53/168 112 s → 46/166 120 s, Razor v FlapJack 5/1
+43 s → 4/0 97 s, Sentinel v Wide Load 7/43 36 s → 0/0 28 s (Sentinel turns
+over at 11 s and stays there; a single trajectory, the ensemble above deals
+damage both ways), Bear v Tornado 7/14 26 s → 36/53 46 s, Grog v Boxer hill
+8/28 39 s → 32/29 49 s, Octagon Scout v ALARM 8/22 34 s → 5/17 38 s, Razor v
+FlapJack park 3/1 73 s (both), Bushido v Devil 32/6 120 s → 10/5 82 s.
+Two pairings no longer deal damage both ways in this one run (Sentinel v
+Wide Load, Razor v FlapJack's 4/0).
+
+**Still open.** ALARM's spike damage in the box (ours 48 hp a fight, live
+none in 14 fights) and the Scout's floor landings; the Compressor's arena
+hits; the substep the original's arena zone events and a controller's first
+update fall in (the hellraiser's first hit); `IsStraightPathClear`'s march
+direction (docs/33 §7); the items section 12aa left (the spikes' build
+pairs, the steering unit's build body, the Clawtop's claws, the `+0xb8`
+list).

@@ -160,12 +160,19 @@ volume = CRect2(v): v in 0.5..100 -> -300..0    (0x6a57a0 floor, 0x6a5798 top; F
 Live: `hzd_spike_hit.wav` x65 (b) and `sawblade_hits_loop.wav` x37 (c), created
 per contact at -137..-298, about 1 Hz per body like the collision-event gate. The
 first rectangle (`+0x04`, 4..100 -> -1500..0) is the impact one. `ra2_audio::rules::material_volume_hdb`
-is the rule; `ra2sim::combat::material_contacts` finds the contacts (a robot part against
-a named prop body); `MatchSounds` looks the prop name up in the arena's registrations
-(`ra2script` `ArenaData::sub_materials`). Not recovered: `AddXtraSound` (no shipped arena
-registers one with audio), and how the arena's static mesh (not a prop) is
-matched to a sub-material name: a hit on the merged static collider makes no material
-sound in our sim.
+is the rule; `ra2sim::combat::material_contacts` finds the contacts and
+`MatchSounds` looks the collidable's name up in the arena's registrations
+(`ra2script` `ArenaData::sub_materials`). The sound and the damage are one
+computation in `0x405090`, so ours makes them one too (docs/29 §12ab): a
+contact sounds exactly when `combat::arena_hit` prices it with a sub-material,
+on the same collidable (`ArenaBody::sub_material_at`: a movable body's name,
+or the named piece of the merged static collider the point lies on — the
+box's `floorsaw`, `spikes1`, `spikes2` and the Compressor's arms, which are
+fixed or movable alike) and with the same `M` (both bodies' masses and
+rotation terms, the prop's world inverse inertia included). Before, the
+contacts were looked up among the movable props only, with `M` missing the
+prop's rotation term, and a named piece of the static collider made no sound.
+Not recovered: `AddXtraSound` (no shipped arena registers one with audio).
 
 ## 7. Weapons and motors
 
@@ -208,7 +215,7 @@ play `med_burstcheer` (seen at 2 s steps once the hits start).
 | trigger sounds, levels | `Robot::take_fire_events`, `SoundCue::Fire` | `duel::a_trigger_press_makes_one_fire_event...`, `weapon_triggers_sound_once_per_press`, `audio_events::motor_and_weapon_levels...` |
 | motor loops from the command, -700 | `MatchSounds::observe`, `MOTOR_LOOP_HDB` | `audio_events::motor_and_weapon_levels...` |
 | component loss: `frc` + burst cheer; destruction: burst cheer only | `MatchSounds::observe` | live comparison (section 10) |
-| arena material sounds | `rules::material_volume_hdb`, `combat::material_contacts`, `SoundCue::Material` | `rules::arena_material_sounds...`, `duel::a_robot_touching_a_named_prop...`, `audio_events::arena_material_sounds_use_the_second_rectangle` |
+| arena material sounds | `rules::material_volume_hdb`, `combat::material_contacts`, `SoundCue::Material` | `rules::arena_material_sounds...`, `duel::a_robot_touching_a_sub_material_is_a_material_contact`, `audio_events::arena_material_sounds_use_the_second_rectangle` |
 | click only for `Button`; `player_joined`, `snapshot` | `plays_click`, `AudioSystem::shell_step` | `audio::only_push_buttons_click`, `headless::the_named_route...` |
 | music: unmapped screens keep the track; cut + gap | `AudioSystem::on_screen`, `with_music_gap`, `tick_music` | `audio::another_area_cuts_the_track...`, `audio::a_screen_change_switches_music...` |
 | intro schedule follows `box.py` | scripts | `audio_events::the_intro_and_countdown_follow_the_box_script` |
