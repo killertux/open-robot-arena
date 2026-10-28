@@ -170,7 +170,8 @@ pub fn usage() -> &'static str {
      build-parts.png, build-wiring.png, wiring-add.png, wiring-bound.png,\n\
      build-paint.png and build-test.png.\n\
      \n\
-       --game DIR       the install (default: RA2_GAME, else local/game)\n\
+       --game DIR       your Robot Arena 2 folder (the one with RA2.cfz, UI/, Scripts/); default:\n\
+     \x20                 RA2_GAME_DIR, else local/game, else the usual Windows/Wine places\n\
        --save-dir DIR   careers, teams, designs, settings are written here, never to the\n\
      \x20                 install (default: ORA_SAVE_DIR, else the platform data dir)\n\
        --offscreen PNG  render the final state and exit (the CI path)\n\

@@ -453,10 +453,12 @@ fn a_new_team_is_typed_saved_selected_and_deleted() {
     assert!(document_has_text(&shell, "Robo Rats"));
     assert!(!document_has_text(&shell, "The Rookies"));
 
-    // A fresh boot lists it; the first row is still The Rookies' HQ.
+    // A fresh boot lists it, selected (the last team, as the original does); the first row is
+    // still The Rookies' HQ.
     let mut shell = window_shell(game);
     shell.click_named("Team HQ button").unwrap();
     assert_eq!(select_rows(&shell), rows_before + 1);
+    click_select_row(&mut shell, 0);
     shell.click_named("continue button").unwrap();
     assert_eq!(shell.team_slot(), Some(0));
     assert!(document_has_text(&shell, "The Rookies"));
@@ -810,6 +812,13 @@ fn finish_later_keeps_the_entered_event_in_the_team_record() {
     let grid = frame_of(&shell, ra2ui::hq::EVENT_GRID);
     shell
         .click(grid.x + grid.w / 6.0, grid.y + grid.h / 6.0)
+        .unwrap();
+    // No robot is chosen when the window opens (live): Enter does nothing until one is clicked.
+    shell.click_named("enter event button").unwrap();
+    assert_ne!(shell.base_screen_id(), flow::BRACKET_SCREEN);
+    let robots = frame_of(&shell, "robot grid");
+    shell
+        .click(robots.x + robots.w / 12.0, robots.y + robots.h / 2.0)
         .unwrap();
     shell.click_named("enter event button").unwrap();
     assert_eq!(shell.base_screen_id(), flow::BRACKET_SCREEN);
@@ -1399,4 +1408,73 @@ fn fight_event(
         guard += 1;
     }
     over
+}
+
+/// A team with no robots: the join window opens, and `Enter Event!` does nothing
+/// (`FUN_00481f20` returns at once while its chosen robot, `+0x16c`, is -1; the
+/// constructor `0x481b60` leaves it -1 and shows no message). The window stays open and the
+/// event is not entered.
+#[test]
+fn enter_event_without_a_robot_does_nothing() {
+    let Some(scratch) = ScratchGame::new("norobots") else {
+        return;
+    };
+    let game = scratch.path();
+    let _guard = ra2script::lock();
+    ra2ui::teams::create_team(game, "Empty Team", "Motto", "Teams\\star.bmp")
+        .unwrap()
+        .expect("an empty slot");
+    let mut shell = window_shell(game);
+    shell.click_named("Team HQ button").unwrap();
+    click_select_row(&mut shell, 1);
+    shell.click_named("continue button").unwrap();
+    shell.click_named("events button").unwrap();
+    click_event_cell(&mut shell, 0);
+    assert_eq!(shell.window_depth(), 1, "the join window opens");
+    let base = shell.base_screen_id().to_string();
+    for _ in 0..2 {
+        shell.click_named("enter event button").unwrap();
+        assert_eq!(shell.window_depth(), 1, "the window stays open, no box");
+        assert_eq!(shell.base_screen_id(), base);
+        assert!(shell.entered_event().is_none());
+    }
+    shell.click_named("cancel button").unwrap();
+    assert_eq!(shell.window_depth(), 0);
+}
+
+/// A fresh Select Team window selects the LAST team, whichever team was played
+/// before (live after a restart of the original: nothing is saved, `FUN_004ec2c0`
+/// selects count - 1 while the grid's selection is -1); within a run the window
+/// keeps the row it had.
+#[test]
+fn select_team_opens_on_the_last_team_and_keeps_the_pick_within_a_run() {
+    let Some(scratch) = ScratchGame::new("selectlast") else {
+        return;
+    };
+    let game = scratch.path();
+    ra2ui::teams::create_team(game, "Second Team", "Motto", "Teams\\star.bmp")
+        .unwrap()
+        .expect("an empty slot");
+    let selected = |shell: &Shell| -> Option<usize> {
+        shell.document().blocks.iter().find_map(|b| match b {
+            Block::Widget(root) => ra2ui::workshop::find(root, ra2ui::teams::SELECT_GRID)
+                .and_then(ra2ui::input::selected_row),
+            _ => None,
+        })
+    };
+    let mut shell = window_shell(game);
+    shell.click_named("Team HQ button").unwrap();
+    assert_eq!(selected(&shell), Some(1), "a fresh window: the last team");
+    // Play the first team, come back: the pick is kept while the client runs.
+    click_select_row(&mut shell, 0);
+    shell.click_named("continue button").unwrap();
+    assert_eq!(shell.team_slot(), Some(0));
+    shell.click_named("select team button").unwrap();
+    assert_eq!(selected(&shell), Some(0));
+    // A restart forgets it (the original writes nothing): the last team again.
+    let mut shell = window_shell(game);
+    shell.click_named("Team HQ button").unwrap();
+    assert_eq!(selected(&shell), Some(1));
+    shell.click_named("continue button").unwrap();
+    assert_eq!(shell.team_slot(), Some(1));
 }

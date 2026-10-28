@@ -10,6 +10,8 @@ by the user.
 
 ## Status
 
+*Playing it: [`docs/40-playing.md`](docs/40-playing.md) (what you need, your saves, keys, known differences).*
+
 **M1–M10 have landed as measured, with the named residues below; M11 is a
 fidelity pass (see Validation below for what was and was not measured against the original) and M12 is Linux-complete, with macOS and Windows
 unverified.** The engine is a Rust workspace that reads the original `.gmf`,
@@ -249,25 +251,52 @@ Measured, not aspirational.
 * Title boxes authored narrower than the shifted advance table, which clip as
   the data says. The other faces' glyph cells are the page's own runs; both
   former O fragments are whole.
-* Network play, mods beyond the game's own directories, an update feed and
-  localisation.
+* Multiplayer with the original: its DirectPlay is not compatible (the port's
+  own LAN mode, `docs/38-multiplayer.md`, talks to other copies of this port
+  only). Slash decals, physics fine-tuning, a gamepad, mods beyond the game's
+  own directories, an update feed and localisation. The player's view of all
+  this is [`docs/40-playing.md`](docs/40-playing.md).
 
 ## Run it
 
+**New here? Start with [`docs/40-playing.md`](docs/40-playing.md)**: what you need,
+how to point the port at your install, where your saves go, the keys, and what
+differs from the original.
+
 **The game is not included.** You need a Robot Arena 2 installation; point the
-tools at the directory that directly contains `RA2.cfz`, `UI/` and `Scripts/`
-(the complete install, not its parent):
+tools at the directory that directly contains `Robot Arena 2.exe`, `RA2.cfz`,
+`UI/` and `Scripts/` (the complete install, not its parent):
 
 ```bash
-export RA2_GAME_DIR="/path/to/Robot Arena 2"
+export RA2_GAME_DIR="/path/to/Robot Arena 2"      # or pass --game DIR to ra2-app
 ```
 
-`RA2_GAME_DIR` wins; `ra2-app` otherwise looks for `RA2_GAME`/`RA2_GAME_DIR`,
-then `local/game` above the working directory and the crate, and the packaged
-launcher adds the XDG data directory, `game/` beside itself,
+`ra2-app` takes `--game DIR` first, then `RA2_GAME`/`RA2_GAME_DIR`, then
+`local/game` above the working directory and the crate, then the usual
+Windows/Wine locations (`~/.wine/drive_c/Program Files (x86)/Robot Arena 2`);
+the packaged launcher adds the XDG data directory, `game/` beside itself,
 `/usr/local/share`, `/usr/share` and `/opt`. A candidate is accepted only when
-all three names are present, and the error lists the names and every path
-tried.
+`RA2.cfz`, `UI/` and `Scripts/` are all present. The error says what is wrong
+(no such folder, a file, the parent of the install, which names are missing)
+and, with nothing found, where it looked.
+
+### Build it
+
+Linux x86_64, Rust stable and, on Debian/Ubuntu:
+
+```bash
+sudo apt install build-essential cmake pkg-config python3.12-dev libasound2-dev \
+                 libvulkan1 mesa-vulkan-drivers
+cd engine
+cargo build --release        # add CARGO_NET_OFFLINE=true --offline with no network
+```
+
+Jolt is built from source with CMake, and the binaries link CPython 3.12
+(`libpython3.12.so.1.0`) at run time, so the 3.12 runtime must be installed.
+With no network, set `CARGO_NET_OFFLINE=true` (and `--offline`): without it the
+physics crate's build script tries to download a prebuilt archive with `curl`;
+with it, it builds the vendored sources. The client is then
+`engine/target/release/ra2-app`.
 
 ### One command, offline
 

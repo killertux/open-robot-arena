@@ -1232,7 +1232,37 @@ There is **no money** in the original (no cash field, `ra2fmt::team`; `Career::m
 2. `ra2ui::input::select_cell` printed `DBG bar [...]` to stderr on every list click (debug left in 9.25). **fixed**
 3. The message boxes of the shell (scrap, delete team, OK boxes) drew the template's `This is a message.` and listed `No` before `Yes`; the live box has an empty body and `Yes` on the left
    (`teamhq-scrap-box`, `teamhq-events-one-event`; 9.24 had claimed ours drew blank). Now `Shell::open_window` blanks the template text and trades the two buttons' names and labels (`yes_left`, `blank_message_body`); `teamhq-scrap-box` 1.93 -> **1.84**. **fixed**
-4. A team with no robot: the join window opens and `Enter Event` does nothing; not checked live. **open**
+4. A team with no robot: the join window opens and `Enter Event` does nothing (checked live and in the exe, §9.28). **fixed** (ours closed the window)
 5. New-robot lab starts from a stock chassis, `Class` shown as `Lightweight` for an empty design (above). **open**
-6. A fresh boot's Select Team lists the first team selected (not the one last played): matches the earlier live notes for the select screen, not re-checked for a restart. **unverified**
+6. A fresh boot's Select Team: the original selects the LAST team, whichever was played (§9.28). **fixed** (ours selected the first)
 
+## 9.28 Release check: Enter Event without a robot, Select Team after a restart (`fx/release`, 2026-10-28)
+
+Live on display :9 (flatpak Wine 9.0, `ra2_drive.py`; the prefix's `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` copied before the session and restored after it, sha256 list equal). New captures
+(manifest rows, backup `manifest-additions-2026-10-21-release.tsv`): `teamhq-event-join-norobots`, `teamhq-select-restart-last`.
+
+### Enter Event with no robot (`FUN_00481f20`)
+
+The join window always opens (`FUN_00500c40` builds `joinevent.gib` whatever the roster is). `FUN_00481f20` starts with `if (-1 < *(int *)(this + 0x16c))`: the window's chosen robot, which the
+constructor `0x481b60` sets to -1 (`in_ECX[0x5b]`), and which only the `robot grid` handler `FUN_00482590` changes. With no robot chosen it returns at once: no box, no sound of its own, the window stays open.
+Live on a new team (no robots: six `New Robot` cells): Event Schedule -> Pit of Destruction -> `Enter Event!` (clicked twice) -> unchanged (`teamhq-event-join-norobots`, the grid
+is six empty cells and the name box empty). Ours matched the "nothing happens" half but **closed the window** (it popped the window on any confirm) and dropped the pending event, so a robot picked afterwards could not
+enter either. Now the confirm keeps the window when no robot is chosen (`Shell::click`, `join_chosen`), and `enter_event` no longer clears the pending event first. Also from `teamhq-event-join`
+(The Rookies, six robots): **no robot is chosen when the window opens**; ours preselected the first robot (listed open in 9.22). Now none. Tests `playthrough::enter_event_without_a_robot_does_nothing`,
+`finish_later_keeps_the_entered_event_in_the_team_record` (clicks a robot first).
+
+### Select Team after a restart (`FUN_004ec2c0`)
+
+The window's init reads the grid's selection (`+0xfc`), refills the grid (`FUN_004ec310`), then selects that row, or **count - 1 (the last team)** when it is -1 (`FUN_0043c930` = `+0xcc`, the row count).
+The window is cached by name, so within a run it keeps the row last picked (live: pick the second team, Main Menu, Team HQ -> second team selected). Nothing is persisted: `Teams/Teams.txt` is
+byte-identical after Continue (its head line `0 1 ` is the list of used slots, not a selection), `ra2.cfg` has no such key and the registry key `SOFTWARE\Gabriel Interactive\Robot Arena 2` holds only the install path.
+Live with two teams, The Rookies (row 0) played, game restarted: the **last row** (the new team) is selected (`teamhq-select-restart-last`); after creating a team it is selected as well. Ours always selected row 0
+(`fill_select_grid` takes the row now; `Shell::select_row` remembers it). Test `playthrough::select_team_opens_on_the_last_team_and_keeps_the_pick_within_a_run`.
+
+### Release check as a new player (windowed `ra2-app`, scratch install, `ORA_SAVE_DIR` scratch, Xephyr :19 1280x1024, XTEST)
+
+Empty save dir -> main menu -> Exhibition (defaults: Deathmatch, Combat Arena, C.R.U.S.H. vs Roly Poly, 3 min) -> Skip Intro -> W/A driving -> results (`Match Results`, Continue) -> Main Menu -> Team HQ -> New Team (typed
+name) -> Continue -> Import Bot (the list's rows draw no text, as in the original: `teamhq-import-dialog`) -> Event Schedule -> join window -> Enter Event! -> bracket -> Finish Later -> Options (Audio: mute, music
+slider; Video: resolution list 640x480..1280x1024, OK) -> Quit. Restart: the window opens at the saved 1024x768, Select Team lists both teams with the new one selected, and the Event Schedule shows
+`E1/9 R1` with Blade Tournament in progress. The save dir holds `ra2.cfg`, `AI/Teams.txt`, `Teams/Teams.txt`, `Teams/career1.dat`, `Teams/Team1/Bot0.bot`; the install copy and `local/game` were not written,
+`~/.local/share/open-robot-arena` was never created. A resolution change applies at the next start (the window is not resized live). No gamepad exists. Error messages for a wrong `--game`: `game::check`.
