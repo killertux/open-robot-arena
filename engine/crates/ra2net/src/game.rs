@@ -662,6 +662,10 @@ impl NetGame {
     /// as a lobby text), and a host takes joiners and spectators again.
     pub fn end_match(&mut self) {
         self.schema = None;
+        // The ready flags are cleared for the next match (live: the original's lobby, both ends).
+        for slot in &mut self.lobby.slots {
+            slot.ready = false;
+        }
         if self.is_host() {
             self.session.set_accepting(true);
         }

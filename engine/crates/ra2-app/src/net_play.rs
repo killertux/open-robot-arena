@@ -1105,11 +1105,20 @@ impl NetPlay {
         let ui = shell.game().join("UI");
         let active = ra2ui::workshop::load(&ui, "multiplayer/activeplayer.gib").ok();
         let empty = ra2ui::workshop::load(&ui, "multiplayer/noplayer.gib").ok();
+        let closed = ra2ui::workshop::load(&ui, "multiplayer/closedplayer.gib").ok();
         let editing_name = shell.text_focus() == Some("screen name");
         let editing_chat = shell.text_focus() == Some("chat textbox");
         let Some(doc) = shell.document_mut() else {
             return;
         };
+        // Only the host begins the match (and changes its settings).
+        if !host {
+            for name in ["begin match button", "settings button"] {
+                if let Some(w) = find_mut(doc, name) {
+                    ra2ui::input::set_field(w, "Visible", "false");
+                }
+            }
+        }
         // The prematch constructor puts the network name in `screen name` (the box's own sample
         // text is "Mister Roboto").
         // (Not while the player is typing in it.)
@@ -1161,7 +1170,10 @@ impl NetPlay {
                 .panel_art
                 .get(&(i as u32))
                 .and_then(|(_, key)| key.clone());
+            // A deathmatch has two panels; the others are closed (`closedplayer.gib`, live).
+            let is_closed = lobby.game_type.eq_ignore_ascii_case(DEFAULT_GAME_TYPE) && i >= 2;
             let cell = match lobby.panel(i as u32) {
+                _ if is_closed => closed.as_ref().and_then(|g| g.widgets().next().cloned()),
                 Some(slot) if slot.has_robot() => active
                     .as_ref()
                     .and_then(|g| g.widgets().next().cloned())
@@ -1302,7 +1314,8 @@ impl NetPlay {
                     &arena_path,
                     ra2sim::r#match::GameType::Deathmatch,
                     entries,
-                    None,
+                    // The deathmatch's three minutes (`TimeSync`'s 179.98 s, live).
+                    Some(180.0),
                     None,
                 )
                 .map_err(|e| e.to_string())

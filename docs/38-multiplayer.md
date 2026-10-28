@@ -770,6 +770,124 @@ played by the AI.
 * The server list's Players column (0/8 for a port host with one human panel), the
   other four `TimeSync` words, the `AddArenaBot` words, voice and host migration.
 
+## 15. A port-hosted match with an original joiner, and the original's match wire (fx/mp-host)
+
+Everything below is live (flatpak Wine 9.0 + the replacement `dpnet`, §14), from the original as host and as
+joiner against the port's app and two headless harnesses (`ra2net` examples `mphost` and `mpjoin`), and from
+the exe (`FUN_004ce940` dispatcher, `FUN_00494060`/`FUN_00494480`/`FUN_00494870` start, `FUN_004d03b0` state
+machine, `FUN_004d2b60` writer, `FUN_004d25d0` reader, `FUN_004f7c00` apply, `FUN_0047b4b0`/`FUN_0047c020`
+panels). Captures `mp-*` of 2026-10-28 (the manifest rows are in the backup's `manifest-additions-...-mp-host.tsv`).
+
+### 15.1 Flags, and why a host must not echo a claim
+
+`DPNSEND_*` values: `NONSEQUENTIAL 0x10`, **`NOLOOPBACK 0x20`**, `GUARANTEED 0x08`. So `giGroupInfoMessage`
+(flags `0x20`) never comes back to its sender, and `giAddArenaBotMessage` (`0x38`) is guaranteed, unordered,
+no loopback. In DirectPlay's mesh the other peers get it directly; this port relays through the host, which
+used to send a joiner's claim back to it. The original then took its own panel for a remote one (Frida on
+`FUN_0047b4b0`: the echo calls it with mode 3, "remote"; the panel lost Eject, Ready and the change-robot
+button, the icon got the remote dots and the owner label showed). Fix: `NetGame::publish_lobby` sends the
+panels that changed to every peer but the claimant for its own panel (a peer is the authority of its own
+panel: a stale copy would also undo its ready flag). Frida facts: the local id is at `giNetwork+0x274`
+(`FUN_00622710`, set by `CREATE_PLAYER` with the LOCAL flag), a panel record is `0x98` bytes (`+0x54` kind,
+`+0x58` owner, `+0x5c`/`+0x60` team and robot index).
+
+Ready is the panel's `GroupInfo` flag (the 95-byte message without the picture). `0x12f` is not the lobby's
+ready: it is the match start's report `{panel, flag}` (§15.2).
+
+### 15.2 The start, as the original's host and joiner do it
+
+Host: Begin Match, `0x12e PrepareMatch {1, "Bridge of Doom"}`, `AddArenaBot` for each of its panels (+0.5 s),
+`0x130 BeginMatch` (+0.5 s), its own `0x13f` about every 300 ms, `0x13c StartCountDown` once every other
+peer's `0x13f` is in (spectators too), `TimeSync` from the count-down plus 3 s (179.98 s left), once a second.
+Joiner: on Prepare it sends its robot (`AddArenaBot [1, panel, 0]`) and `0x12f {panel, 0}`; "Loading Robot
+Data..." advances by one robot per `AddArenaBot` received (`FUN_00494870`, `Add_Bot_to_Match`); it **waits for
+`0x130`** (the port host used to send Begin only after everyone had loaded: the deadlock of §14.5), loads the
+match, then sends `0x13f` about every 300 ms and `0x12f {panel, 1}` until the count-down arrives. The host's
+`FUN_004d03b0` state machine: 2 loading arena and robots, 3 bots in, 4 begun, 5 fighting.
+
+`AddArenaBot` (`0x12d`, read `0x4d2050`): `[kind, panel, team]` (kind 1 human, 3 computer; team 0 for the
+Rookies) then the robot as `.bot` text: the 1.12 format with every picture as TGA type `0x17` (the 18-byte header,
+the compressed size as u32, a zlib stream of the pixels; `ra2fmt::bot::Bot::write_wire`, parsed by
+`ra2fmt::bot::parse`; 88717 bytes for C.R.U.S.H., test `wire_bot`: the capture equals the shipped file in
+1.12 form apart from the preview, drawn again with alpha 255). The `GroupInfo` design field is that preview
+picture alone (`snapshot_wire`). `TimeSync`: the first word is the time left as an f32, the other four are
+stack garbage (zero here). Port: `NetGame::{start_match, send_arena_bot, begin_match, count_down,
+report_panel, report_loaded, send_time_sync}`, `NetPlay` `Start::{Host, Joiner}` (the robots are the install's
+files named by the lobby's team and robot names, `robot_file`; a peer's arrive as `.bot` and are written to the
+save folder `Net/panelN.bot`), the match is built when every panel's robot is in, with the deathmatch's 180 s, no
+arena intro (`skip_intro`) and the joiner's clock following `TimeSync` (`Match::net_time_left`). A host
+sends `giEndMatchMessage` when it closes its results window, not at the win; the ready flags clear on both ends.
+
+### 15.3 Remote input (`0x73`)
+
+`[robot = the panel, key words 0, 0, DirectInput scan code, value 1 or 0]`, one message per key change:
+W is `0x11`, A `0x1e` (the first three words of the control's binding in the `.bot`, upgraded to four). Not
+guaranteed (flags `0x20`). `net_match::{key_event, key_events, apply_key}`; the port's old axis words are gone.
+
+### 15.4 The snapshot (`0x74`), pinned down
+
+The first two header words are counts, not clocks (the previous reading), so a reader needs only the robots'
+component counts (`SyncSchema`). Layout (`ra2net::sync`): `u32` controllers, `u32` devices, `u32` bodies, `u8`
+full/partial, `u32` robots; per robot `u32` id (the panel) and one `f32` hitpoint per component (the count
+of the *reader's* copy of the design); per controller `u32` id, `f32` (a battery's or air tank's energy: 52000,
+7000, 800); per device `u32` id, `u8` kind, `1: u8, 4 x f32` (a motor: locked flag, command, hinge angle, rate,
+torque / 40), `4: f32` (a `Steering` unit's two wheels, ids `+0`, `+1`), `5: u8, u32, 3 x f32` (a burst
+piston: flag, 0, position, rate, torque / 40); per body `u32` id, `u8` awake, position (3), rotation (4,
+scalar first), and for an awake body linear and angular velocity (3 + 3). Two kinds alternate by time
+(`FUN_004d2470`): the all-bodies snapshot (`1`; every body, part bodies only by position and rotation) and the chassis
+bodies in full (`0`). The reader skips what it does not know ("Bad Rigid Body ID in Sync"), applies the rest
+**as a correction**: every peer simulates (the original joiner's robot drove on W with no snapshot at all), the
+snapshot reconciles (`FUN_004f7c00`: a small error is eased, a large one snapped).
+
+Ids: robot base `(panel + 1) << 10`; component `i` is `base + 4 i`; a body is its owner component's id plus a
+sub-index. Chassis: the chassis id. Every other body belongs to the motor that joins it: a spin motor, burst
+motor, servo or axle mount `+0`; a steering motor (`anglemotor*.txt`) and a burst piston's rod `+1`; a
+`Steering` unit's two wheels `+0`, `+1` in part order (the order is by the port's parts, not checked against
+geometry). Controllers: every battery and air tank in component order. Devices: spin, burst and servo motors and
+axle mounts (kind 1), burst pistons (5), steering units (4), in component order. Recorded: C.R.U.S.H. against
+twelve robots (119 snapshots, `mp-snapshots-host__live__000`; `ra2net/tests/original_snapshots.rs` decodes each
+against the two designs and writes it back byte for byte; `the_snapshot_of_two_robots_has_the_ids_the_originals_has`
+builds the port's duel for C.R.U.S.H. and Sting Ray and gets the original's nine body ids, four batteries, seven
+motors and the hitpoints 1226 and 926).
+Open: the hinge angle and the command of the motors, the piston position, the steering angle go out as 0; the
+hitpoints and energies are not applied by a port joiner (the scoring messages do that); a robot class this
+data lacked (a `Flamethrower`) has no device entry.
+
+### 15.5 Scoring ids
+
+`BotDamage`, `AddPoints`, `BotImmobile`, `PlayerOut` and `MatchWin` name a robot by its **panel** (the original
+host's `MatchWin {1}` with Sting Ray on panel 1; the port used the match robot index): `event_message` and
+`message_event` map through `NetPlay::panels`. `BotImmobile` repeats once a second for each immobile robot with the
+seconds as an f32; `PlayerOut {robot, 2}` and `MatchWin` follow 30 s of immobility.
+
+### 15.6 What works, live
+
+* **Port hosts, original joins** (app on Xephyr, original under Wine): the original lists the game, joins
+  (`mp-lobby-joiner-port-ready`), takes a panel and readies; the port host picks C.R.U.S.H. with the lobby's picker;
+  Begin Match: the original loads the port's robot (sent as `.bot`) and fights: C.R.U.S.H. against Sting Ray
+  on Combat Arena, `Time: 2:56` from the port's `TimeSync` (`mp-match-joiner-port-start`); both drove, the
+  score and the immobility warning agree (Sting Ray 321 points on both,
+  `mp-match-joiner-port-fight`), the match ends on both with the same winner (`mp-results-joiner-port`) and
+  the port's Continue returns the original to the lobby (`mp-lobby-joiner-port-after`).
+* **Original hosts, port joins**: the port lists it (`1/2`: current players over the deathmatch's two), joins,
+  shows the original's panel with its picture, takes a panel with the picker, readies; the original's Begin: the
+  port builds the original's C.R.U.S.H. from its `.bot` and runs with `Time: 2:50`; the results arrive
+  (winner, immobilised robot).
+* The harnesses: the original as host with a headless port joiner through whole matches (12 other robots).
+
+### 15.7 Open
+
+* A port joiner's keys during a live original-hosted match were not seen to move its robot under
+  Xephyr (the window had no focus under the test's synthetic keys; the loopback tests
+  `each_player_drives_and_follows_their_own_robot` pass).
+* The results screen's team of a robot received as `.bot` (the port shows the Red Zone team for the
+  original's C.R.U.S.H.); the original's host shows 0 points in its results where the port host's fight
+  scored 321.
+* The server list's Players: the original shows `current / max` with the session's players (a lone host `1`) and, for the
+  original's own hosts, a maximum of 2 (the deathmatch's panels; the port advertises 8 and admits spectators).
+* Snapshot fields in 15.4 that go out as 0; the second-wheel order of a `Steering` unit; the original's eject
+  message; voice and host migration.
+
 ### 15.9 The port's lobby robot choice (fx/mp-lobby)
 
 The port's pre-match lobby takes a robot the way the original's does (§14, live
@@ -810,9 +928,8 @@ captures `mp-lobby-*`).
   a remote computer panel (3): computer icon, no change, eject only on the host.
   `bot img` is the design stream decoded back to a picture (`ra2fmt::bot::wire_to_tga`).
   A joiner's open panels offer no computer button.
-* **Not done:** the deathmatch lobby shows four panels (the original closes 3 and 4,
-  `closedplayer.gib`); the match still builds its robots from stand-ins (the host reads
-  `picked_robot` for that).
+* **Not done:** the match builds its robots from the install's files named by the panel (§15.2), not
+  from `picked_robot`. The deathmatch lobby closes panels 3 and 4 (`closedplayer.gib`, §15).
 * **Verified** headlessly over loopback only (no Wine session): `ra2-shell` test
   `lobby_panels`, `ra2-app` test `refresh_join_and_the_prematch_lobby_through_the_screens`
   (two shells and two `NetPlay`: picks, computer robot, kinds shown, ready, change,
