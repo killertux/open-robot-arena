@@ -10,6 +10,7 @@ resolves the sandbox's libc against the host's).
 Steps are given on the command line or one per line in a file (``-f``):
 
     click X Y [BUTTON] [HOLD]   UI click at game pixels (BUTTON 0=left)
+    drag X0 Y0 X1 Y1 [BUTTON] [STEPS]   press, move over STEPS frames, release
     move X Y                    pin the UI cursor at X Y
     hide                        park the cursor off-screen (for fixtures)
     wait SECONDS
@@ -89,6 +90,15 @@ def run(api, display, steps):
                     hold = int(arg())
             api.click(x, y, b, hold)
             wait_frames(api, hold + 4)
+        elif op == "drag":
+            x0, y0, x1, y1 = (int(arg()) for _ in range(4))
+            b, n = 0, 10
+            if i < len(steps) and steps[i].isdigit():
+                b = int(arg())
+                if i < len(steps) and steps[i].isdigit():
+                    n = int(arg())
+            api.drag(x0, y0, x1, y1, b, n)
+            wait_frames(api, n + 6)
         elif op == "move":
             api.setpos(int(arg()), int(arg())); wait_frames(api, 2)
         elif op == "hide":

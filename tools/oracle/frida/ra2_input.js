@@ -29,6 +29,7 @@ Interceptor.attach(UI_UPDATE, { onEnter() {
   if (pinned) { m.writeS32(pinned[0]); m.add(4).writeS32(pinned[1]); }
   if (forceMouse) m.add(0x1a).writeU8(1);
   const ev = frameEvents.length ? frameEvents.shift() : null;
+  if (ev && ev.pos) { pinned = ev.pos; m.writeS32(pinned[0]); m.add(4).writeS32(pinned[1]); }
   if (ev && ev.button >= 0) {
     m.add(0x14 + ev.button).writeU8(ev.down ? 1 : 0);
     m.add(0x17 + ev.button).writeU8(1);
@@ -83,6 +84,17 @@ rpc.exports = {
     frameEvents.push({ button: -1 }, { button: -1 });
     frameEvents.push({ button: b, down: true });
     for (let i = 0; i < hold; i++) frameEvents.push({ button: -1 });
+    frameEvents.push({ button: b, down: false });
+    return frameEvents.length;
+  },
+  // press button b at (x0,y0), move to (x1,y1) over `steps` frames with it held, release
+  drag(x0, y0, x1, y1, b, steps) {
+    b = b | 0; steps = steps || 10;
+    frameEvents.push({ button: -1, pos: [x0 | 0, y0 | 0] }, { button: -1 });
+    frameEvents.push({ button: b, down: true });
+    for (let i = 1; i <= steps; i++)
+      frameEvents.push({ button: -1, pos: [Math.round(x0 + (x1 - x0) * i / steps), Math.round(y0 + (y1 - y0) * i / steps)] });
+    frameEvents.push({ button: -1 });
     frameEvents.push({ button: b, down: false });
     return frameEvents.length;
   },

@@ -23,6 +23,7 @@ pub mod frame;
 pub mod headless;
 pub mod hq_mode;
 pub mod hud;
+pub mod lab_dialog;
 pub mod match_mode;
 pub mod match_sounds;
 pub mod net_play;

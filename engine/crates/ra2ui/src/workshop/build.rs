@@ -111,6 +111,9 @@ pub struct Build {
     limits: BuildLimits,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    /// Whether this session's extrusion made the chassis (so a height change rebuilds it whole
+    /// rather than scaling a stock mesh).
+    extruded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +152,78 @@ impl Build {
             limits: BuildLimits::default(),
             undo: Vec::new(),
             redo: Vec::new(),
+            extruded: false,
         }
+    }
+
+    /// The robot a new design starts as in the original: a chassis with no shape yet (no outlines,
+    /// no mesh, height 1, aluminium armour), no parts and no controls. Live, an untouched new robot
+    /// saved as `1.12 / Name: Enter Bot Name / ... / Chassis / / 0 / 0 / 1 0 / false / 0 /
+    /// 1 12 0 200 0 / false / 0 / 0 / 0` (`teamhq-newbot-empty__live__000.bot`).
+    pub fn blank(name: impl Into<String>) -> Self {
+        Build::new(
+            name,
+            Chassis {
+                height: 1.0,
+                armour: Some(ra2fmt::bot::Armour {
+                    type_id: 1,
+                    weight: 12.0,
+                    hardness: 200.0,
+                }),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Whether the chassis has no shape yet (a blank robot, or a design whose outline is not
+    /// extruded): weight 0, no 3D view, no parts can be placed.
+    pub fn is_blank(&self) -> bool {
+        self.chassis()
+            .is_none_or(|c| c.mesh.as_ref().is_none_or(|m| m.points.is_empty()))
+    }
+
+    /// Whether the design has a control board (the lab's Wiring tab needs one: `FUN_004f7b30`).
+    pub fn has_control_board(&self) -> bool {
+        self.bot
+            .components
+            .iter()
+            .any(|c| c.class == "ControlBoard")
+    }
+
+    /// Extrude the chassis from its outlines (`super::extrude`): the original does it when the
+    /// player goes to step 2 and when the structure design is finished. A chassis with no shape
+    /// starts at the default height with its top outline copied from the baseplate; one that
+    /// already has a shape is rebuilt only when its outlines no longer match the mesh. Returns
+    /// whether the chassis has a shape afterwards.
+    pub fn extrude_chassis(&mut self) -> Result<bool, BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        let fresh = chassis.mesh.is_none();
+        if !fresh
+            && chassis.top.len() == chassis.bottom.len()
+            && super::chassis::rings_match(&chassis)
+        {
+            return Ok(true);
+        }
+        if chassis.bottom.len() < 3 {
+            return Ok(!fresh);
+        }
+        if fresh {
+            chassis.height = super::extrude::DEFAULT_HEIGHT;
+            chassis.top = chassis.bottom.clone();
+            chassis
+                .armour_material
+                .get_or_insert([1.0, 1.0, 1.0, 1.0, 0.0]);
+        } else if chassis.top.len() != chassis.bottom.len() {
+            chassis.top = chassis.bottom.clone();
+        }
+        let ok = super::extrude::rebuild(&mut chassis);
+        self.commit_chassis(chassis);
+        if ok && self.paint.skin().is_none() {
+            let chassis = self.chassis_copy()?;
+            self.paint = Paint::from_chassis(&chassis);
+        }
+        self.extruded = true;
+        Ok(ok)
     }
 
     /// Start with the four stock controls (`Forward`, `LeftRight`, `Fire`,
@@ -203,6 +277,7 @@ impl Build {
             limits: BuildLimits::default(),
             undo: Vec::new(),
             redo: Vec::new(),
+            extruded: false,
         })
     }
 
@@ -558,6 +633,12 @@ impl Build {
 
     pub fn set_chassis_height(&mut self, height: f32) -> Result<(), BuildError> {
         let mut chassis = self.chassis_copy()?;
+        if self.extruded && chassis.bottom.len() >= 3 && !(height <= 0.0 || !height.is_finite()) {
+            chassis.height = height;
+            super::extrude::rebuild(&mut chassis);
+            self.commit_chassis(chassis);
+            return Ok(());
+        }
         super::chassis::set_height(&mut chassis, height)?;
         // The saved buckle model is a copy of the old geometry; `commit_chassis`
         // drops it, as the game does when the shape is rebuilt.
@@ -726,6 +807,19 @@ impl Build {
     /// The bot as it would be saved: the board and the painted chassis applied.
     pub fn to_bot(&self) -> Bot {
         let mut bot = self.bot.clone();
+        // The lab writes the class its weight gives (`FUN_0046c710` after every mass change), not
+        // the one the file was opened with.
+        bot.class = if self.is_blank() {
+            // A robot with no shape has no class: the original writes whatever its field held and
+            // the inventory prints `None` for it.
+            3
+        } else {
+            match self.stats().computed_class {
+                super::stats::WeightClass::Light => 0,
+                super::stats::WeightClass::Medium => 1,
+                super::stats::WeightClass::Heavy => 2,
+            }
+        };
         self.board.apply_to(&mut bot);
         if let Some(chassis) = bot.components.first_mut().and_then(|c| c.chassis.as_mut()) {
             self.paint.apply_to(chassis);

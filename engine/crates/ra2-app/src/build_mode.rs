@@ -59,6 +59,7 @@ use ra2ui::workshop::wiring::{Control, ControlKind};
 use ra2ui::workshop::{self};
 use ra2ui::{Frame, Placement};
 
+use crate::lab_dialog::{self, DialogKind, Focus, LabDialog};
 use crate::SHELL_SIZE;
 
 /// The stock chassis a new build starts from: a shipped AI bot whose chassis
@@ -212,6 +213,8 @@ pub struct Builder {
     /// analog`/`new switch`/`new button` buttons set it), and the control and
     /// binding target the player has picked.
     wire_placing: Option<ControlKind>,
+    /// The wiring window in front of the lab, if one is open.
+    dialog: Option<LabDialog>,
     wire_control: Option<[i32; 2]>,
     wire_component: Option<usize>,
     /// The palette row on top (the grid is a one-row window of a longer list).
@@ -226,6 +229,8 @@ pub struct Builder {
     draw_style: DrawStyle,
     draw_centre: Option<[i32; 2]>,
     draw_point: Option<usize>,
+    /// Whether the baseplate polygon was closed by a click on its first point.
+    outline_closed: bool,
     draw_snap: bool,
     shape_radius: i32,
     shape_length: i32,
@@ -394,6 +399,22 @@ impl Builder {
         start: Option<&Path>,
         size: [f32; 2],
     ) -> Result<Builder, String> {
+        Self::open_with(game, start, size, false)
+    }
+
+    /// The lab as the original opens it on an empty inventory cell (`FUN_00439650`): a blank
+    /// robot with no chassis shape, Components, Wiring, Paint Shop and Test Robot dim, the name
+    /// box reading `Enter Bot Name` (docs/36 section 9.27).
+    pub fn open_blank(game: &Path, size: [f32; 2]) -> Result<Builder, String> {
+        Self::open_with(game, None, size, true)
+    }
+
+    fn open_with(
+        game: &Path,
+        start: Option<&Path>,
+        size: [f32; 2],
+        blank: bool,
+    ) -> Result<Builder, String> {
         let game = game
             .canonicalize()
             .map_err(|e| format!("{}: {e}", game.display()))?;
@@ -436,6 +457,7 @@ impl Builder {
                     .ok_or_else(|| format!("{} is not a .bot file", path.display()))?;
                 Build::load(&library, &path).map_err(|e| format!("{}: {e}", path.display()))?
             }
+            None if blank => Build::blank("Enter Bot Name"),
             None => {
                 let stock =
                     GameLibrary::read_bot(&game.join(STOCK_BOT)).map_err(|e| e.to_string())?;
@@ -476,6 +498,7 @@ impl Builder {
             comp_key: None,
             selected_part: None,
             wire_placing: None,
+            dialog: None,
             wire_control: None,
             wire_component: None,
             palette_scroll: 0,
@@ -488,6 +511,7 @@ impl Builder {
             draw_style: DrawStyle::Freeform,
             draw_centre: None,
             draw_point: None,
+            outline_closed: false,
             draw_snap: true,
             shape_radius: 300,
             shape_length: 600,
@@ -565,6 +589,9 @@ impl Builder {
             return Ok(());
         }
         self.cursor = Some([x, y]);
+        if self.dialog.is_some() {
+            return self.dialog_click(x, y);
+        }
         if self.drag.is_some() && !self.panel.preview.contains_point(x, y) {
             // Any other click ends the drag, as the category and tab buttons
             // do (`FUN_0042c280`).
@@ -587,13 +614,72 @@ impl Builder {
         if self.tab() == Some("components button") && self.comp_click(x, y) {
             return Ok(());
         }
+        if self.disabled_control_at(x, y) {
+            // A dim tab or the dim Armor button takes no click (`FUN_005ec4e0(0)`).
+            return Ok(());
+        }
         let category = self.category_click(x, y);
+        let was_step_one = self.tab() == Some("chassis button") && self.structure_step() == 1;
         self.shell.click(x, y)?;
         if category {
             self.palette_scroll = 0;
         }
+        if was_step_one && self.tab() == Some("chassis button") && self.structure_step() == 2 {
+            // Step 2 shows the baseplate extruded (`Adjust Top Outline`): the mesh is made here.
+            if let Err(e) = self.build.extrude_chassis() {
+                self.status = e.to_string();
+            }
+        }
         self.take_style_pick();
         self.refresh()
+    }
+
+    /// Whether the point is on a control the lab has dimmed: the Components, Wiring, Paint Shop and
+    /// Test Robot tabs (`FUN_00439650` and the chassis' finish enable them) and the Armor button.
+    fn disabled_control_at(&self, x: f32, y: f32) -> bool {
+        let placed = self.shell.placements();
+        let Some(path) = ra2ui::input::hit(&placed, x, y) else {
+            return false;
+        };
+        let chain = chain(&placed, &path);
+        chain.iter().any(|p| {
+            matches!(
+                p.widget.name(),
+                "components button"
+                    | "wiring button"
+                    | "paintshop button"
+                    | "test robot button"
+                    | "armor button"
+            ) && (ra2ui::input::checkbox_dimmed(p.widget) || ra2ui::input::button_dimmed(p.widget))
+        })
+    }
+
+    /// Dim the tabs the original dims: a blank robot has only Overview and Chassis; the Wiring
+    /// tab waits for a control board; the Armor button waits for a chassis shape.
+    fn refresh_tabs(&mut self) {
+        let blank = self.build.is_blank();
+        let wiring = !blank && self.build.has_control_board();
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            for (name, on) in [
+                ("components button", !blank),
+                ("wiring button", wiring),
+                ("paintshop button", !blank),
+                ("test robot button", !blank),
+            ] {
+                if let Some(w) = workshop::find_mut(root, name) {
+                    ra2ui::input::set_checkbox_enabled(w, on);
+                }
+            }
+            if let Some(w) = workshop::find_mut(root, "armor button") {
+                ra2ui::input::set_button_enabled(w, !blank);
+            }
+        }
     }
 
     /// The screen point for an outline coordinate on the shipped `Editing Area`
@@ -605,9 +691,10 @@ impl Builder {
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "Editing Area")
             .ok_or_else(|| "the current screen has no Editing Area".to_string())?;
+        let grid = blueprint_grid(area.frame);
         Ok([
-            area.frame.x + point[0] as f32 / 1000.0 * area.frame.w,
-            area.frame.y + point[1] as f32 / 1000.0 * area.frame.h,
+            grid.x + point[0] as f32 / 1000.0 * grid.w,
+            grid.y + point[1] as f32 / 1000.0 * grid.h,
         ])
     }
     fn preview_click(&mut self, x: f32, y: f32) -> Option<Result<(), String>> {
@@ -616,6 +703,7 @@ impl Builder {
         match tab.as_str() {
             "components button" => Some(self.place_at_preview(x, y)),
             "paintshop button" => Some(self.paint_at_preview(x, y)),
+            "wiring button" => Some(self.wire_at_preview(x, y)),
             _ => None,
         }
     }
@@ -1441,8 +1529,9 @@ impl Builder {
         if !area.frame.contains_point(x, y) {
             return None;
         }
-        let u = ((x - area.frame.x) / area.frame.w * 1000.0).clamp(0.0, 1000.0) as i32;
-        let v = ((y - area.frame.y) / area.frame.h * 1000.0).clamp(0.0, 1000.0) as i32;
+        let grid = blueprint_grid(area.frame);
+        let u = ((x - grid.x) / grid.w * 1000.0).round().clamp(0.0, 1000.0) as i32;
+        let v = ((y - grid.y) / grid.h * 1000.0).round().clamp(0.0, 1000.0) as i32;
         Some(format!("m9:draw:{u}:{v}"))
     }
 
@@ -1551,7 +1640,7 @@ impl Builder {
             .unwrap_or_else(|| g.column_x(1).max(1.0));
         (
             horizontal,
-            ((grid.frame.w / stride).ceil() as usize).max(1),
+            ((grid.frame.w / stride).floor() as usize).max(1),
             stride,
         )
     }
@@ -1613,7 +1702,15 @@ impl Builder {
 
     /// Type one character into the filename box.
     pub fn type_char(&mut self, c: char) {
+        if self.dialog.is_some() {
+            self.dialog_type(c);
+            return;
+        }
         if !(c.is_ascii_graphic() || c == ' ') {
+            return;
+        }
+        if self.view_only && self.tab() != Some("overview button") {
+            // The name box lives on the Overview tab; elsewhere typing goes nowhere.
             return;
         }
         if self.name_buffer.chars().count() >= 48 {
@@ -1630,13 +1727,22 @@ impl Builder {
         }
         self.name_buffer.push(c);
         self.refresh_panel();
+        self.refresh_overview();
     }
 
     /// Backspace in the filename box.
     pub fn backspace(&mut self) {
+        if self.dialog.is_some() {
+            self.dialog_backspace();
+            return;
+        }
+        if self.view_only && self.tab() != Some("overview button") {
+            return;
+        }
         self.name_buffer.pop();
         self.name_edited = true;
         self.refresh_panel();
+        self.refresh_overview();
     }
 
     /// Enter saves under the name in the box (Save As).
@@ -1970,28 +2076,22 @@ impl Builder {
                 Outline::Bottom
             };
             self.build.clear_chassis_outline(which);
+            self.outline_closed = false;
             self.status = format!("cleared the {} outline", which.label());
             return self.refresh();
         }
         if action == "m9:finished" {
-            let chassis = self.build.chassis().cloned().unwrap_or_default();
-            let step = self.structure_step();
-            let (points, outline) = if step == 2 {
-                (chassis.top.clone(), Outline::Top)
+            // `Finished` (live): the structure design is done, the chassis page is shown again, and
+            // an outline of three points or more has been extruded; with fewer the robot stays blank.
+            let shaped = self.build.extrude_chassis().map_err(|e| e.to_string())?;
+            self.status = if shaped {
+                "chassis finished".into()
             } else {
-                (chassis.bottom.clone(), Outline::Bottom)
+                "the baseplate outline needs three points".into()
             };
-            self.status = match chassis::validate_outline(&points) {
-                Ok(()) => format!(
-                    "{} outline finished: {} point(s), height {:.2} m (the mesh is not rebuilt)",
-                    outline.label(),
-                    points.len(),
-                    chassis.height
-                ),
-                Err(e) => format!("{} outline: {e}", outline.label()),
-            };
-            self.refresh_panel();
-            return Ok(());
+            self.draw_point = None;
+            self.shell.click_named("chassis button")?;
+            return self.refresh();
         }
         if let Some(rest) = action.strip_prefix("m9:snap:") {
             self.draw_snap = rest == "on";
@@ -2074,7 +2174,11 @@ impl Builder {
                 x.parse().map_err(|_| format!("bad cell column {x:?}"))?,
                 y.parse().map_err(|_| format!("bad cell row {y:?}"))?,
             ];
-            self.place_control(cell);
+            if self.view_only {
+                self.open_props_dialog(cell);
+            } else {
+                self.place_control(cell);
+            }
             return Ok(());
         }
         if let Some(rest) = action.strip_prefix("m9:wirectl:") {
@@ -2299,6 +2403,21 @@ impl Builder {
         }
         match self.draw_style {
             DrawStyle::Freeform => {
+                // A click on the first point of an outline of three or more closes it (live: the
+                // fourth click of a square on its first corner leaves four points); a closed
+                // outline takes no more points.
+                if self.outline_closed {
+                    return Ok(());
+                }
+                if let Some(first) = self.build.chassis().and_then(|c| c.bottom.first().copied()) {
+                    let near = (first[0] - point[0]).pow(2) + (first[1] - point[1]).pow(2);
+                    if self.build.chassis().is_some_and(|c| c.bottom.len() >= 3) && near < 60 * 60 {
+                        self.outline_closed = true;
+                        self.status = "baseplate outline closed".into();
+                        self.refresh_panel();
+                        return Ok(());
+                    }
+                }
                 match self
                     .build
                     .add_chassis_outline_point(Outline::Bottom, point, self.draw_snap)
@@ -2342,6 +2461,32 @@ impl Builder {
                 );
                 self.refresh()
             }
+        }
+    }
+
+    /// Put the height slider's thumb where `fraction` (0 at the bottom of the track) says.
+    fn sync_height_thumb(&mut self, fraction: f32) {
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            let Some(slider) = workshop::find_mut(root, "height slider") else {
+                continue;
+            };
+            let track = slider.size().map(|s| s.second.amount).unwrap_or(121.0);
+            let Some(thumb) = slider
+                .children
+                .iter_mut()
+                .find(|c| c.kind == WidgetKind::Image)
+            else {
+                continue;
+            };
+            let thumb_h = thumb.size().map(|s| s.second.amount).unwrap_or(16.0);
+            let y = ((1.0 - fraction.clamp(0.0, 1.0)) * (track - thumb_h).max(0.0)).max(0.0);
+            ra2ui::input::set_field(thumb, "Position", &format!("0 0 {y} 0"));
         }
     }
 
@@ -2397,11 +2542,13 @@ impl Builder {
                 }
             }
             "height" => {
-                let height = 0.1 + (1.0 - fraction) * 1.1;
+                // Live: the thumb at the top gives 1.32 m, at the bottom 0.436364 (docs/36 section 9.27).
+                let height = ra2ui::workshop::extrude::height_for_fraction(fraction);
                 self.build
                     .set_chassis_height(height)
                     .map_err(|e| e.to_string())?;
                 self.status = format!("chassis height {height:.2} m");
+                self.sync_height_thumb(fraction);
                 return self.refresh();
             }
             other => return Err(format!("unknown slider {other:?}")),
@@ -2436,6 +2583,12 @@ impl Builder {
             return Some("m9:remove".into());
         }
         if self.tab() == Some("wiring button") {
+            // The controller's picture is laid over the strip of icons above it; the control
+            // under the point is what is clicked.
+            let chain = match ra2ui::input::hit_control(&placed, x, y) {
+                Some(path) => self::chain(&placed, &path),
+                None => chain.clone(),
+            };
             for (button, action) in [
                 ("new analog", "m9:new:analog"),
                 ("new switch", "m9:new:switch"),
@@ -2548,6 +2701,7 @@ impl Builder {
     pub fn refresh(&mut self) -> Result<(), String> {
         self.revision = self.revision.wrapping_add(1);
         self.refresh_overview();
+        self.refresh_tabs();
         self.refresh_effects();
         self.refresh_palette();
         self.refresh_comp_preview();
@@ -2562,9 +2716,24 @@ impl Builder {
     /// snapshot the `.bot` carries.
     fn refresh_overview(&mut self) {
         let stats = self.build.stats();
-        let name = self.build.name().to_string();
-        let mass = format!("{:.1}", stats.mass);
-        let class = ra2ui::workshop::stats::WeightClass::of_mass(stats.mass).full_label();
+        let name = if self.name_edited {
+            self.name_buffer.clone()
+        } else {
+            self.build.name().to_string()
+        };
+        // A blank robot has no weight and the class label has not been computed yet (live: `0.0` /
+        // `None`; the label is only written when a part or the chassis changes the mass).
+        let blank = self.build.is_blank();
+        let mass = if blank {
+            "0.0".to_string()
+        } else {
+            format!("{:.1}", stats.mass)
+        };
+        let class = if blank {
+            "None"
+        } else {
+            ra2ui::workshop::stats::WeightClass::of_mass(stats.mass).full_label()
+        };
         let snapshot = self
             .build
             .to_bot()
@@ -3523,6 +3692,20 @@ impl Builder {
                 }
             }
         }
+        self.chassis_overlay(&mut scene);
+        if let Some(dialog) = &self.dialog {
+            let placed = ra2ui::resolve_with(&dialog.gib, self.size, Some(self.assets.faces()));
+            let over = self
+                .assets
+                .scene(&placed, [self.size[0] as u32, self.size[1] as u32]);
+            let offset = scene.textures.len();
+            scene.textures.extend(over.textures);
+            for mut quad in over.quads {
+                quad.texture += offset;
+                scene.quads.push(quad);
+            }
+            scene.missing.extend(over.missing);
+        }
         if self.view_only {
             return Ok(scene);
         }
@@ -3539,6 +3722,180 @@ impl Builder {
         }
         scene.missing.extend(panel_scene.missing);
         Ok(scene)
+    }
+
+    /// The blueprint's grid, outline and points drawn over the chassis steps' `Editing Area`
+    /// (live: eleven 1 px lines of (112,112,127) 45 px apart, the outline white, each point a
+    /// small ring, the selected one brighter).
+    fn chassis_overlay(&self, scene: &mut UiScene) {
+        if self.tab() == Some("wiring button") {
+            self.controller_lines(scene);
+        }
+        if self.tab() != Some("chassis button") {
+            return;
+        }
+        let placed = self.shell.placements();
+        let Some(area) = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "Editing Area")
+        else {
+            return;
+        };
+        let grid = blueprint_grid(area.frame);
+        let texture = scene.textures.len();
+        scene.textures.push(UiTexture {
+            label: "m9 ink".into(),
+            width: 1,
+            height: 1,
+            rgba: vec![255, 255, 255, 255],
+        });
+        let mut ink = Ink {
+            scene,
+            texture,
+            clip: area.frame,
+        };
+        let line_color = [112.0 / 255.0, 112.0 / 255.0, 127.0 / 255.0, 1.0];
+        for k in 0..=10 {
+            let t = k as f32 * grid.w / 10.0;
+            ink.line(
+                [grid.x + t, grid.y],
+                [grid.x + t, grid.y + grid.h],
+                1.0,
+                line_color,
+            );
+            ink.line(
+                [grid.x, grid.y + t],
+                [grid.x + grid.w, grid.y + t],
+                1.0,
+                line_color,
+            );
+        }
+        let step = self.structure_step();
+        let Some(chassis) = self.build.chassis() else {
+            return;
+        };
+        let (points, closed) = if step == 2 {
+            (&chassis.top, true)
+        } else {
+            (&chassis.bottom, self.outline_closed)
+        };
+        let at = |p: &[i32; 2]| {
+            [
+                grid.x + p[0] as f32 / 1000.0 * grid.w,
+                grid.y + p[1] as f32 / 1000.0 * grid.h,
+            ]
+        };
+        let white = [1.0, 1.0, 1.0, 1.0];
+        for i in 0..points.len() {
+            if i + 1 < points.len() || (closed && points.len() >= 3) {
+                let (a, b) = (at(&points[i]), at(&points[(i + 1) % points.len()]));
+                ink.line(a, b, 2.0, white);
+            }
+        }
+        for (i, p) in points.iter().enumerate() {
+            let selected = step == 2 && self.draw_point == Some(i);
+            ink.ring(
+                at(p),
+                6.0,
+                if selected { 2.0 } else { 1.0 },
+                if selected {
+                    white
+                } else {
+                    [0.78, 0.78, 0.82, 1.0]
+                },
+            );
+        }
+    }
+
+    /// The controller's grid rules (live: 1 px, (102,102,102), between the three columns and rows).
+    fn controller_lines(&self, scene: &mut UiScene) {
+        let Some((frame, _)) = self.control_grid() else {
+            return;
+        };
+        let texture = scene.textures.len();
+        scene.textures.push(UiTexture {
+            label: "m9 ink".into(),
+            width: 1,
+            height: 1,
+            rgba: vec![255, 255, 255, 255],
+        });
+        let mut ink = Ink {
+            scene,
+            texture,
+            clip: frame,
+        };
+        let (w, h) = control_cell_size(frame);
+        let color = [0.4, 0.4, 0.4, 1.0];
+        for k in 1..3 {
+            let x = frame.x + w * k as f32;
+            ink.line([x, frame.y], [x, frame.y + frame.h], 1.0, color);
+            let y = frame.y + h * k as f32;
+            ink.line([frame.x, y], [frame.x + frame.w, y], 1.0, color);
+        }
+    }
+
+    /// A harness shortcut: the baseplate drawn as the 600-unit square the live runs used and
+    /// extruded (what clicking four corners, the first one again, step 2 and Finished does).
+    pub fn draw_square_chassis(&mut self) -> Result<(), String> {
+        self.build
+            .set_chassis_rectangle(Outline::Bottom, [500, 500], 600, 600)
+            .map_err(|e| e.to_string())?;
+        self.build.extrude_chassis().map_err(|e| e.to_string())?;
+        self.refresh()
+    }
+
+    /// The screen point of a widget on the lab's own screen, for a scripted click.
+    pub fn point_of(&self, name: &str) -> Result<[f32; 2], String> {
+        self.shell.point_for(name)
+    }
+
+    /// The screen point of a placed part in the 3D view (its mesh's centre), for a scripted click.
+    pub fn part_point(&mut self, index: usize) -> Result<[f32; 2], String> {
+        let world = self.build.transforms();
+        let info = self
+            .build
+            .component_info(index)
+            .ok_or_else(|| format!("no component {index}"))?;
+        let centre = info
+            .bounds
+            .map(|(lo, hi)| (Vec3::from(lo) + Vec3::from(hi)) * 0.5)
+            .unwrap_or(Vec3::ZERO);
+        let at = world[index].transform_point3(centre);
+        self.preview_point_of(at)
+    }
+
+    /// The screen point of row `row` (0 = first item) of the open connection window's dropdown list.
+    pub fn dialog_list_point(&self, row: usize) -> Option<[f32; 2]> {
+        let dialog = self.dialog.as_ref()?;
+        let placed = ra2ui::resolve_with(&dialog.gib, self.size, Some(self.assets.faces()));
+        let list = placed.iter().flat_map(|p| p.walk()).find(|p| {
+            p.widget.kind == WidgetKind::ListBox
+                && ra2ui::input::field_of(p.widget, "Visible") == Some("true")
+                && p.frame.w > 0.0
+        })?;
+        let height = ra2ui::Grid::from_widget(list.widget)
+            .map(|g| g.row_height)
+            .filter(|h| *h > 0.0)
+            .unwrap_or(18.0);
+        Some([
+            list.frame.x + list.frame.w * 0.5,
+            list.frame.y + height * (row as f32 + 0.5),
+        ])
+    }
+
+    /// The screen point of a widget in the open wiring window, for a scripted click.
+    pub fn dialog_point_for(&self, name: &str) -> Option<[f32; 2]> {
+        let dialog = self.dialog.as_ref()?;
+        let placed = ra2ui::resolve_with(&dialog.gib, self.size, Some(self.assets.faces()));
+        let found = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == name)?;
+        Some([
+            found.frame.x + found.frame.w * 0.5,
+            found.frame.y + found.frame.h * 0.5,
+        ])
     }
 
     /// Write the current frame through the same UI pipeline the window uses.
@@ -3575,7 +3932,20 @@ impl Builder {
         }
         let bot = self.build.to_bot();
         let world = self.build.transforms();
-        let chassis = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
+        let mut chassis = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
+        if matches!(
+            self.tab(),
+            Some("components button") | Some("wiring button")
+        ) {
+            // Live, the chassis is a ghost while parts are placed and wired, so the parts under
+            // its top panel can be seen from above.
+            for item in chassis.iter_mut() {
+                item.material.transparent = true;
+                item.material.no_alpha_test = true;
+                item.material.z_write = false;
+                item.material.diffuse[3] = 0.3;
+            }
+        }
         let mut owned: Vec<(usize, Vec<DrawItem>)> = Vec::new();
         for i in 1..bot.components.len() {
             let Some(info) = self.build.component_info(i) else {
@@ -3757,6 +4127,79 @@ pub fn robot_top_view(
         .render_groups(&groups, proj * view, width, height)
         .map(Some)
         .map_err(|e| e.to_string())
+}
+
+/// Solid-colour strokes drawn into a scene from a one-pixel white texture.
+struct Ink<'a> {
+    scene: &'a mut UiScene,
+    texture: usize,
+    clip: Frame,
+}
+
+impl Ink<'_> {
+    fn quad(&mut self, rect: Frame, corners: Option<[[f32; 2]; 4]>, color: [f32; 4]) {
+        self.scene.quads.push(UiQuad {
+            rect,
+            corners,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            color,
+            texture: self.texture,
+            alpha: true,
+            clip: Some(self.clip),
+        });
+    }
+
+    /// A stroke `width` px wide between two points.
+    fn line(&mut self, a: [f32; 2], b: [f32; 2], width: f32, color: [f32; 4]) {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 0.01 {
+            return;
+        }
+        if dy.abs() < 0.01 || dx.abs() < 0.01 {
+            let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
+            let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+            let rect = if dy.abs() < 0.01 {
+                Frame::new(x0, y0 - width * 0.5 + 0.5, x1 - x0, width)
+            } else {
+                Frame::new(x0 - width * 0.5 + 0.5, y0, width, y1 - y0)
+            };
+            self.quad(rect, None, color);
+            return;
+        }
+        let (nx, ny) = (-dy / len * width * 0.5, dx / len * width * 0.5);
+        let corners = [
+            [a[0] + nx, a[1] + ny],
+            [b[0] + nx, b[1] + ny],
+            [b[0] - nx, b[1] - ny],
+            [a[0] - nx, a[1] - ny],
+        ];
+        let rect = Frame::new(a[0].min(b[0]), a[1].min(b[1]), dx.abs(), dy.abs());
+        self.quad(rect, Some(corners), color);
+    }
+
+    /// A ring of radius `r`, drawn as twelve strokes.
+    fn ring(&mut self, c: [f32; 2], r: f32, width: f32, color: [f32; 4]) {
+        let at = |i: usize| {
+            let t = std::f32::consts::TAU * i as f32 / 12.0;
+            [c[0] + r * t.cos(), c[1] + r * t.sin()]
+        };
+        for i in 0..12 {
+            self.line(at(i), at(i + 1), width, color);
+        }
+    }
+}
+
+/// The blueprint's drawing grid inside the `Editing Area` (live, 1024x768: the area is 466 px
+/// square at (31.8, 141.5) and the grid's eleven lines run 39..489 across and 148..598 down, 45 px
+/// apart: the `0..1000` outline range is 450 px).
+fn blueprint_grid(area: Frame) -> Frame {
+    Frame::new(
+        area.x + area.w * 0.015_45,
+        area.y + area.h * 0.013_95,
+        area.w * 0.9657,
+        area.h * 0.9657,
+    )
 }
 
 /// The control grid's cell size: the board is three cells across and three
@@ -4183,6 +4626,8 @@ pub fn script(
 
     // 3. The wiring tab: add an analog control at a free cell, then bind it to
     // the motor's spin action. Click-to-place, then click-to-bind.
+    builder.click_named("power button")?;
+    builder.place_component_free("Components\\controlboard.txt")?;
     builder.click_named("wiring button")?;
     builder.click_named("new analog")?;
     builder.click_control_cell([2, 1])?;
@@ -4392,6 +4837,359 @@ pub fn script(
     // game, so its `Robot Designs/` is a temp directory.
     std::fs::remove_file(&path).ok();
     Ok(())
+}
+
+// -- The wiring windows (docs/36 section 9.27) --------------------------------------------------
+
+impl Builder {
+    /// Whether a wiring window is open (it takes every click and key).
+    pub fn dialog_open(&self) -> bool {
+        self.dialog.is_some()
+    }
+
+    /// The control kind whose strip icon the press at `(x, y)` is on, for a drag.
+    pub fn control_icon_at(&self, x: f32, y: f32) -> Option<ControlKind> {
+        if self.tab() != Some("wiring button") {
+            return None;
+        }
+        let placed = self.shell.placements();
+        let path = ra2ui::input::hit(&placed, x, y)?;
+        let chain = chain(&placed, &path);
+        [
+            ("new analog", ControlKind::Analog),
+            ("new switch", ControlKind::Switch),
+            ("new button", ControlKind::Button),
+        ]
+        .into_iter()
+        .find(|(name, _)| chain.iter().any(|p| p.widget.name() == *name))
+        .map(|(_, kind)| kind)
+    }
+
+    /// The button is released at a point: a control icon being dragged that lands on a free cell
+    /// of the controller opens its properties window.
+    pub fn mouse_released(&mut self, x: f32, y: f32) {
+        if self.dialog.is_some() || self.tab() != Some("wiring button") {
+            return;
+        }
+        if self.wire_placing.is_some() {
+            if let Some(cell) = self.control_cell_at(x, y) {
+                if self.build.board().control_at(cell).is_none() {
+                    self.open_props_dialog(cell);
+                }
+            }
+        }
+    }
+
+    fn open_props_dialog(&mut self, cell: [i32; 2]) {
+        let Some(kind) = self.wire_placing.take() else {
+            self.status = "pick SWITCH, BUTTON or ANALOG first".into();
+            return;
+        };
+        let Ok(mut gib) = workshop::load(&self.ui, lab_dialog::props_file(kind)) else {
+            return;
+        };
+        let name = lab_dialog::default_name(kind).to_string();
+        lab_dialog::set_text(&mut gib, "control name", &name);
+        // The input boxes start empty; the file's own `W` / `S` is a design-time sample.
+        lab_dialog::set_text(&mut gib, "input1", "");
+        lab_dialog::set_text(&mut gib, "input2", "");
+        self.dialog = Some(LabDialog {
+            gib,
+            kind: DialogKind::Props {
+                kind,
+                cell,
+                name,
+                keys: [None, None],
+            },
+            focus: Focus::None,
+        });
+    }
+
+    /// A click on a component in the 3D view of the Wiring tab: with a control selected it
+    /// opens that control's connection window for the part.
+    fn wire_at_preview(&mut self, x: f32, y: f32) -> Result<(), String> {
+        let Some(cell) = self.wire_control else {
+            return Ok(());
+        };
+        let Some((origin, direction)) = self.bot_ray(x, y) else {
+            return Ok(());
+        };
+        let Some(component) = self.build.pick_part(origin, direction) else {
+            return Ok(());
+        };
+        self.open_wire_dialog(component, cell);
+        Ok(())
+    }
+
+    fn open_wire_dialog(&mut self, component: usize, cell: [i32; 2]) {
+        let Some(control) = self.build.board().control_at(cell).cloned() else {
+            return;
+        };
+        let class = self
+            .build
+            .components()
+            .get(component)
+            .map(|c| c.class.clone())
+            .unwrap_or_default();
+        let actions: Vec<_> =
+            ra2ui::workshop::wiring::ControlBoard::actions_for(control.kind, &class, 0).to_vec();
+        if actions.is_empty() {
+            // A part this kind of control cannot drive takes no window.
+            self.status = format!("a {} control cannot drive a {class}", control.kind.label());
+            return;
+        }
+        let Ok(mut gib) = workshop::load(&self.ui, lab_dialog::wire_file(control.kind)) else {
+            return;
+        };
+        let (name, art) = self
+            .build
+            .component_info(component)
+            .map(|i| (i.name.clone(), i.file.clone()))
+            .unwrap_or_default();
+        lab_dialog::set_text(&mut gib, "component name", &name);
+        if let Some(c) = self
+            .palette
+            .iter()
+            .find(|c| c.file.eq_ignore_ascii_case(&art))
+        {
+            for block in gib.blocks.iter_mut() {
+                if let ra2fmt::gib::Block::Widget(root) = block {
+                    ra2ui::cells::bind_art(root, "component image", &c.art);
+                }
+            }
+        }
+        let slots = control.kind.slots();
+        let items: Vec<String> = std::iter::once("<none>".to_string())
+            .chain(actions.iter().map(|a| a.name().to_string()))
+            .collect();
+        let mut picks = [0usize; 2];
+        for slot in 0..slots {
+            let bound = self
+                .build
+                .board()
+                .bindings
+                .iter()
+                .find(|b| {
+                    b.component == component as i32 && b.control == [cell[0], cell[1], slot as i32]
+                })
+                .and_then(|b| actions.iter().position(|a| a.name() == b.action));
+            picks[slot] = bound.map(|i| i + 1).unwrap_or(0);
+            lab_dialog::set_text(&mut gib, &format!("input{} key", slot + 1), "");
+            ra2ui::dropdown::set_text(&mut gib, lab_dialog::DROPDOWNS[slot], &items[picks[slot]]);
+            let key = control
+                .keys
+                .get(slot)
+                .map(|row| ra2ui::workshop::wiring::dik_name(Control::key_code(row)))
+                .unwrap_or_default();
+            lab_dialog::set_text(&mut gib, &format!("input{} key", slot + 1), &key);
+        }
+        self.dialog = Some(LabDialog {
+            gib,
+            kind: DialogKind::Wire {
+                kind: control.kind,
+                cell,
+                component,
+                actions,
+                picks,
+            },
+            focus: Focus::None,
+        });
+    }
+
+    /// The rows a connection window's dropdown lists.
+    fn dialog_items(&self) -> Vec<String> {
+        match self.dialog.as_ref().map(|d| &d.kind) {
+            Some(DialogKind::Wire { actions, .. }) => std::iter::once("<none>".to_string())
+                .chain(actions.iter().map(|a| a.name().to_string()))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn dialog_click(&mut self, x: f32, y: f32) -> Result<(), String> {
+        use ra2ui::dropdown::{self, Part};
+        let Some(dialog) = self.dialog.as_ref() else {
+            return Ok(());
+        };
+        let placed = ra2ui::resolve_with(&dialog.gib, self.size, Some(self.assets.faces()));
+        let hit = ra2ui::input::hit_control(&placed, x, y);
+        // A dropdown first (an open list takes every click).
+        if matches!(dialog.kind, DialogKind::Wire { .. }) {
+            if let Some((name, part)) = dropdown::click_part(&placed, hit.as_deref(), x, y) {
+                let items = self.dialog_items();
+                let slot = lab_dialog::DROPDOWNS.iter().position(|d| *d == name);
+                let dialog = self.dialog.as_mut().expect("a dialog");
+                let gib = &mut dialog.gib;
+                let open = dropdown::is_open(gib, &name);
+                match part {
+                    Part::Field if open => dropdown::close(gib, &name),
+                    Part::Field => {
+                        let current = dropdown::text(gib, &name).unwrap_or_default();
+                        let selected = items
+                            .iter()
+                            .position(|i| i.eq_ignore_ascii_case(current.trim()))
+                            .unwrap_or(0);
+                        dropdown::open(gib, &name, &items, selected);
+                    }
+                    Part::Row(row) => {
+                        if dropdown::pick(gib, &name, &items, row).is_some() {
+                            if let (Some(slot), DialogKind::Wire { picks, .. }) =
+                                (slot, &mut dialog.kind)
+                            {
+                                picks[slot] = row;
+                            }
+                        }
+                    }
+                    Part::Scroll(top) => dropdown::scroll(gib, &name, top),
+                    Part::Outside => dropdown::close(gib, &name),
+                }
+                return Ok(());
+            }
+        }
+        let names: Vec<String> = hit
+            .map(|path| {
+                chain(&placed, &path)
+                    .iter()
+                    .map(|p| p.widget.name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let has = |n: &str| names.iter().any(|c| c == n);
+        if has("cancel button") {
+            self.dialog = None;
+            return self.refresh();
+        }
+        if has("ok button") {
+            return self.dialog_ok();
+        }
+        if let Some(dialog) = self.dialog.as_mut() {
+            if matches!(dialog.kind, DialogKind::Props { .. }) {
+                dialog.focus = if has("control name") {
+                    Focus::Name
+                } else if has("input1") {
+                    Focus::Key(0)
+                } else if has("input2") {
+                    Focus::Key(1)
+                } else {
+                    dialog.focus
+                };
+            }
+        }
+        Ok(())
+    }
+
+    fn dialog_ok(&mut self) -> Result<(), String> {
+        let Some(dialog) = self.dialog.take() else {
+            return Ok(());
+        };
+        match dialog.kind {
+            DialogKind::Props {
+                kind,
+                cell,
+                name,
+                keys,
+            } => {
+                let rows: Vec<[i32; 4]> = keys
+                    .iter()
+                    .take(kind.slots())
+                    .map(|k| [0, 0, k.unwrap_or(0), 0])
+                    .collect();
+                let control = Control::new(name.trim(), cell, kind).with_keys(rows);
+                match self.build.board_mut().add(control) {
+                    Ok(()) => {
+                        self.wire_control = Some(cell);
+                        self.wire_component = None;
+                        self.status = format!("added {}", name.trim());
+                    }
+                    Err(e) => self.status = e.to_string(),
+                }
+            }
+            DialogKind::Wire {
+                cell,
+                component,
+                actions,
+                picks,
+                kind,
+            } => {
+                for (slot, pick) in picks.iter().enumerate().take(kind.slots()) {
+                    self.build.board_mut().unbind(component, cell, slot);
+                    if *pick > 0 {
+                        if let Some(action) = actions.get(pick - 1).copied() {
+                            if let Err(e) = self.build.bind_action(component, action, cell, slot) {
+                                self.status = e.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.refresh()
+    }
+
+    fn dialog_type(&mut self, c: char) {
+        let Some(dialog) = self.dialog.as_mut() else {
+            return;
+        };
+        let focus = dialog.focus;
+        let DialogKind::Props { name, keys, .. } = &mut dialog.kind else {
+            return;
+        };
+        match focus {
+            Focus::Name => {
+                if (c.is_ascii_graphic() || c == ' ') && name.chars().count() < 24 {
+                    name.push(c);
+                    let shown = name.clone();
+                    lab_dialog::set_text(&mut dialog.gib, "control name", &shown);
+                }
+            }
+            Focus::Key(slot) => {
+                if let Some(code) = lab_dialog::dik_for_char(c) {
+                    keys[slot] = Some(code);
+                    let label = ra2ui::workshop::wiring::dik_name(code);
+                    lab_dialog::set_text(&mut dialog.gib, &format!("input{}", slot + 1), &label);
+                }
+            }
+            Focus::None => {}
+        }
+    }
+
+    fn dialog_backspace(&mut self) {
+        let Some(dialog) = self.dialog.as_mut() else {
+            return;
+        };
+        let focus = dialog.focus;
+        let DialogKind::Props { name, keys, .. } = &mut dialog.kind else {
+            return;
+        };
+        match focus {
+            Focus::Name => {
+                name.pop();
+                let shown = name.clone();
+                lab_dialog::set_text(&mut dialog.gib, "control name", &shown);
+            }
+            Focus::Key(slot) => {
+                keys[slot] = None;
+                lab_dialog::set_text(&mut dialog.gib, &format!("input{}", slot + 1), "");
+            }
+            Focus::None => {}
+        }
+    }
+
+    /// A named key that has no character (the arrows): it fills a focused input box.
+    pub fn key_named(&mut self, name: &str) {
+        let Some(code) = lab_dialog::dik_for_name(name) else {
+            return;
+        };
+        let Some(dialog) = self.dialog.as_mut() else {
+            return;
+        };
+        let focus = dialog.focus;
+        if let (Focus::Key(slot), DialogKind::Props { keys, .. }) = (focus, &mut dialog.kind) {
+            keys[slot] = Some(code);
+            let label = ra2ui::workshop::wiring::dik_name(code);
+            lab_dialog::set_text(&mut dialog.gib, &format!("input{}", slot + 1), &label);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4708,6 +5506,10 @@ mod tests {
             .place_component("Components\\ztek1.txt", PlaceOn::Baseplate([0.2, 0.2]))
             .unwrap();
         assert_eq!(builder.build.components()[1].class, "SpinMotor");
+        builder.click_named("power button").unwrap();
+        builder
+            .place_component_free("Components\\controlboard.txt")
+            .unwrap();
         builder.click_named("wiring button").unwrap();
         let before = builder.build.board().controls.len();
         builder.click_named("new analog").unwrap();

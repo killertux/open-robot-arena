@@ -1879,8 +1879,7 @@ pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, Strin
                     ra2ui::hq::RobotRow {
                         slot: *slot as usize,
                         name: bot.name.clone(),
-                        class: ra2ui::workshop::stats::WeightClass::from_file(bot.class)
-                            .full_label()
+                        class: ra2ui::workshop::stats::WeightClass::file_label(bot.class)
                             .to_string(),
                         // The `.bot`'s own snapshot is the picture the original
                         // draws; `nobot.bmp` is only the empty-slot silhouette.

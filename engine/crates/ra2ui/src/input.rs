@@ -213,6 +213,40 @@ pub fn set_button_enabled(widget: &mut Widget, enabled: bool) -> bool {
     changed
 }
 
+/// Enable or disable a `CheckBox` (`FUN_005ec4e0` on one of the lab's tabs): its fourth state image
+/// (`StateImage 3`, the shipped `_n` art tinted alpha 0.3) is the disabled look. Enabling puts back
+/// the selected or the normal image. Returns whether anything changed.
+pub fn set_checkbox_enabled(widget: &mut Widget, enabled: bool) -> bool {
+    if widget.kind != WidgetKind::CheckBox || widget.children.len() < 4 {
+        return false;
+    }
+    let count = widget.children.len();
+    let selected = field_of(widget, "Checked").is_some_and(|c| c == "true");
+    let want = if !enabled {
+        count - 1
+    } else if selected {
+        count - 2
+    } else {
+        0
+    };
+    let mut changed = false;
+    for (index, child) in widget.children.iter_mut().enumerate() {
+        let show = index == want;
+        if child.visible() != show {
+            set_field(child, "Visible", if show { "true" } else { "false" });
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Whether a `CheckBox` shows its disabled image (see [`set_checkbox_enabled`]).
+pub fn checkbox_dimmed(widget: &Widget) -> bool {
+    widget.kind == WidgetKind::CheckBox
+        && widget.children.len() >= 4
+        && widget.children.last().is_some_and(|c| c.visible())
+}
+
 /// Whether a button shows its dimmed state (see [`set_button_enabled`]): the first state image is
 /// hidden and the last is shown. Anything else, including a widget that is not a button, is enabled.
 pub fn button_dimmed(widget: &Widget) -> bool {
