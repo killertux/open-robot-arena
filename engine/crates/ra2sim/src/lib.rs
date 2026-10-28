@@ -1,6 +1,7 @@
 //! `ra2sim` — Robot Arena 2 physics simulation (M2 sandbox).
 //!
-//! Talks to a swappable [`backend::PhysicsBackend`] (Jolt today) and builds
+//! Talks to a swappable [`backend::PhysicsBackend`] (the Havok-1.7-faithful
+//! [`havok17`] by default, Jolt behind the `jolt` feature) and builds
 //! bodies from the game's own `.gmf`/`.bot`/arena-script data.
 
 pub mod backend;
@@ -15,6 +16,7 @@ pub mod flame;
 pub mod havok17;
 pub mod hazards;
 pub mod immobility;
+#[cfg(feature = "jolt")]
 pub mod jolt;
 pub mod lcg;
 pub mod massprops;
@@ -38,6 +40,7 @@ pub use career::{
 };
 pub use combat::{CombatConfig, Impact};
 pub use duel::{BotSetup, Debris, Duel, DuelCamera};
+#[cfg(feature = "jolt")]
 pub use jolt::JoltBackend;
 pub use lcg::Lcg;
 pub use netevent::{NetEvent, NetRole};

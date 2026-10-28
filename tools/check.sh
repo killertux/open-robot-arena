@@ -26,7 +26,9 @@
 # here.
 #
 # No network: cargo runs --offline and CARGO_NET_OFFLINE=true is exported so
-# build scripts (oxijolt's optional prebuilt archive) do not fetch either. The
+# build scripts do not fetch either (the default build runs none that
+# does; it matters only for `--features jolt`, whose oxijolt build script
+# would download a prebuilt archive). The
 # game is never read from the package; local/game (or RA2_GAME_DIR) is read in
 # place by the smoke test. The game must be present: the corpus tests skip
 # without it and the smoke cannot run.

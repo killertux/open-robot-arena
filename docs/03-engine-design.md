@@ -21,7 +21,7 @@ that runs *Robot Arena 2* using the player's own game data.
 | Graphics | **wgpu** (Vulkan/Metal/D3D12) | The original is fixed-function D3D8; we emulate its look with modern shaders. |
 | Window/input | `winit` | Cross-platform. |
 | Audio | `rodio` / `kira` | Plays the original `.wav`/`.mp3`. |
-| Physics | **`havok17`** (default; Havok 1.7 dynamics written from the recovered spec, Jolt as its geometry engine) or **Jolt** (`RA2_PHYSICS=jolt`, via the safe `oxijolt` bindings) | See `docs/29-havok17-backend.md`. Hidden behind `ra2sim`'s `PhysicsBackend` trait so it can be swapped (e.g. Rapier) without touching the sandbox. The original is **Havok Hardcore 1.7.1** — see `docs/05-validation-report.md` for the mapping and the differences that matter (friction combination, torque-driven motors). |
+| Physics | **`havok17`** (default; Havok 1.7 dynamics written from the recovered spec, with its own geometry queries, no Jolt) or **Jolt** (opt-in cargo feature `jolt`, then `RA2_PHYSICS=jolt`, via the safe `oxijolt` bindings) | See `docs/29-havok17-backend.md`. Hidden behind `ra2sim`'s `PhysicsBackend` trait so it can be swapped (e.g. Rapier) without touching the sandbox. The original is **Havok Hardcore 1.7.1** — see `docs/05-validation-report.md` for the mapping and the differences that matter (friction combination, torque-driven motors). |
 | Math | `glam` | |
 | Format parsing | our own crates | GMI, BOT, CFL3, GIB, TGA/BMP. |
 
@@ -31,7 +31,7 @@ that runs *Robot Arena 2* using the player's own game data.
 engine/
   crates/
     ra2fmt/      # pure data: GMI(.gmf), GMA(ascii), BOT, CFL3(.cfz), GIB, textures
-    ra2sim/      # physics (Jolt behind a PhysicsBackend trait), scene assembly, sim
+    ra2sim/      # physics (havok17; Jolt behind the `jolt` feature) behind a PhysicsBackend trait, scene assembly, sim
     ra2script/   # the plus/Arenas/AI object model on an embedded CPython 3
     ra2ui/       # the shell's layout model: .gib widget trees -> rectangles
     ra2-render/  # wgpu renderer: meshes, and the shell's 2D screens (`ui`)

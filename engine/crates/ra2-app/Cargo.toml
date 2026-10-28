@@ -9,6 +9,11 @@ description = "The interactive Robot Arena 2 shell: a winit window and a headles
 name = "ra2-app"
 path = "src/main.rs"
 
+[features]
+default = []
+# The old Jolt backend (`RA2_PHYSICS=jolt`), see ra2sim's `jolt` feature.
+jolt = ["ra2sim/jolt"]
+
 [dependencies]
 glam = "0.34.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }

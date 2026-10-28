@@ -40,6 +40,11 @@ pub struct Piece {
     /// frame, its radius): a moving collidable's broadphase box is this
     /// sphere's (docs/29 section 12u).
     pub sphere: (Vec3, f32),
+    /// For a mesh built from a `MeshHull`: the corners of its convex hull.
+    /// The geometry queries of [`super::query`] (overlap depths, phantoms,
+    /// ray casts) see such a piece as that hull, as the Jolt query world they
+    /// replace did; the agents above collide the mesh itself.
+    pub hull: Option<Vec<Vec3>>,
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +67,7 @@ pub fn pieces_of(shape: &ShapeDesc) -> Vec<Piece> {
 
 fn collect(shape: &ShapeDesc, position: Vec3, rotation: Quat, out: &mut Vec<Piece>) {
     let convex = |vertices: Vec<Vec3>, radius: f32| PieceShape::Convex { vertices, radius };
+    let mut desc_hull: Option<&[Vec3]> = None;
     let shape = match shape {
         ShapeDesc::Compound(children) => {
             for c in children {
@@ -136,7 +142,17 @@ fn collect(shape: &ShapeDesc, position: Vec3, rotation: Quat, out: &mut Vec<Piec
             points,
             indices,
             raw,
-        } => PieceShape::Mesh(Mesh::with_frame(points.clone(), indices.clone(), raw)),
+        } => {
+            desc_hull = Some(points);
+            PieceShape::Mesh(Mesh::with_frame(points.clone(), indices.clone(), raw))
+        }
+    };
+    let hull = match desc_hull {
+        Some(points) => {
+            let v = crate::massprops::hull_vertices(points);
+            (v.len() >= 2).then_some(v)
+        }
+        None => None,
     };
     let sphere = match &shape {
         PieceShape::Convex { vertices, radius } => {
@@ -150,6 +166,7 @@ fn collect(shape: &ShapeDesc, position: Vec3, rotation: Quat, out: &mut Vec<Piec
         rotation,
         shape,
         sphere,
+        hull,
     });
 }
 
@@ -339,6 +356,81 @@ impl Mesh {
         }
     }
 
+    /// The nearest triangle a ray meets, from either side: its distance
+    /// along `dir` (unit, mesh frame) within `max` and its index.
+    pub fn ray(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<(f32, u32)> {
+        if self.triangles.is_empty() {
+            return None;
+        }
+        let (o, d) = (origin.as_dvec3(), dir.as_dvec3());
+        let inv = DVec3::new(1.0 / d.x, 1.0 / d.y, 1.0 / d.z);
+        let mut best = max as f64;
+        let mut found = None;
+        let slab = |b: &Aabb, best: f64| -> bool {
+            let (lo, hi) = (b.min.as_dvec3(), b.max.as_dvec3());
+            let mut t0 = 0.0f64;
+            let mut t1 = best;
+            for k in 0..3 {
+                if d[k] == 0.0 {
+                    if o[k] < lo[k] || o[k] > hi[k] {
+                        return false;
+                    }
+                    continue;
+                }
+                let (mut a, mut b2) = ((lo[k] - o[k]) * inv[k], (hi[k] - o[k]) * inv[k]);
+                if a > b2 {
+                    std::mem::swap(&mut a, &mut b2);
+                }
+                t0 = t0.max(a);
+                t1 = t1.min(b2);
+                if t0 > t1 {
+                    return false;
+                }
+            }
+            true
+        };
+        let mut stack = vec![0usize];
+        while let Some(n) = stack.pop() {
+            let node = self.nodes[n];
+            if !slab(&node.bounds.grown(1e-5), best) {
+                continue;
+            }
+            if node.count > 0 {
+                let (a, b) = (node.first as usize, (node.first + node.count) as usize);
+                for &t in &self.order[a..b] {
+                    let tri = self.triangles[t as usize];
+                    let v = tri.map(|i| self.vertices[i as usize].as_dvec3());
+                    // Moller-Trumbore, two-sided.
+                    let (e1, e2) = (v[1] - v[0], v[2] - v[0]);
+                    let p = d.cross(e2);
+                    let det = e1.dot(p);
+                    if det.abs() < 1e-14 {
+                        continue;
+                    }
+                    let s = o - v[0];
+                    let u = s.dot(p) / det;
+                    if !(-1e-9..=1.0 + 1e-9).contains(&u) {
+                        continue;
+                    }
+                    let q = s.cross(e1);
+                    let w = d.dot(q) / det;
+                    if w < -1e-9 || u + w > 1.0 + 1e-9 {
+                        continue;
+                    }
+                    let t_hit = e2.dot(q) / det;
+                    if t_hit >= 0.0 && t_hit <= best {
+                        best = t_hit;
+                        found = Some((t_hit as f32, t));
+                    }
+                }
+            } else {
+                stack.push(node.first as usize);
+                stack.push(node.first as usize + 1);
+            }
+        }
+        found
+    }
+
     /// The triangles whose bounds overlap `query` (mesh frame), ascending
     /// (the callers put them in the order Havok's query gives).
     pub fn query(&self, query: &Aabb, out: &mut Vec<u32>) {
@@ -407,12 +499,12 @@ impl Closest {
 }
 
 #[derive(Clone, Copy)]
-struct SimplexPoint {
-    w: DVec3,
-    a: DVec3,
-    b: DVec3,
-    ia: u16,
-    ib: u16,
+pub(super) struct SimplexPoint {
+    pub(super) w: DVec3,
+    pub(super) a: DVec3,
+    pub(super) b: DVec3,
+    pub(super) ia: u16,
+    pub(super) ib: u16,
 }
 
 fn dv(v: Vec3) -> DVec3 {
@@ -423,7 +515,7 @@ fn fv(v: DVec3) -> Vec3 {
     Vec3::new(v.x as f32, v.y as f32, v.z as f32)
 }
 
-fn support(points: &[DVec3], d: DVec3) -> usize {
+pub(super) fn support(points: &[DVec3], d: DVec3) -> usize {
     let mut best = 0;
     let mut best_dot = f64::MIN;
     for (k, p) in points.iter().enumerate() {
@@ -438,7 +530,7 @@ fn support(points: &[DVec3], d: DVec3) -> usize {
 
 /// The point of segment / triangle / tetrahedron `s` closest to the origin,
 /// keeping in `s` only the points that support it (with their weights).
-fn reduce(s: &mut Vec<SimplexPoint>, lambda: &mut Vec<f64>) -> Option<DVec3> {
+pub(super) fn reduce(s: &mut Vec<SimplexPoint>, lambda: &mut Vec<f64>) -> Option<DVec3> {
     match s.len() {
         1 => {
             *lambda = vec![1.0];

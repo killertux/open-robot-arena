@@ -1,7 +1,7 @@
 //! Backend-neutral physics types and the [`PhysicsBackend`] trait.
 //!
-//! The sandbox talks only to this interface, so the concrete engine (Jolt
-//! today) can be swapped for another by adding an implementation. All values
+//! The sandbox talks only to this interface, so the concrete engine ([`crate::havok17`],
+//! with Jolt as an opt-in fallback behind the `jolt` feature) can be swapped for another by adding an implementation. All values
 //! are in RA2 world units, treated as metres, in the engine's Y-up frame.
 
 use glam::{Mat3, Quat, Vec3};
@@ -400,11 +400,25 @@ impl std::error::Error for BackendError {}
 
 /// Which physics engine a world runs on: `RA2_PHYSICS=havok17` (the
 /// Havok-1.7-faithful dynamics of [`crate::havok17`], the default) or `jolt`
-/// (Jolt Physics, kept as an opt-in fallback).
+/// (Jolt Physics, an opt-in fallback that exists only in a build with the
+/// `jolt` cargo feature). Without the feature `RA2_PHYSICS=jolt` is refused
+/// with a message on stderr (once) and the world runs on `havok17`.
 pub fn backend_kind() -> &'static str {
     match std::env::var("RA2_PHYSICS") {
         Ok(v) if v.eq_ignore_ascii_case("havok17") || v.eq_ignore_ascii_case("havok") => "havok17",
+        #[cfg(feature = "jolt")]
         Ok(v) if v.eq_ignore_ascii_case("jolt") => "jolt",
+        #[cfg(not(feature = "jolt"))]
+        Ok(v) if v.eq_ignore_ascii_case("jolt") => {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "RA2_PHYSICS=jolt: this build has no Jolt backend (it is the opt-in cargo \
+                     feature `jolt`: build with `--features jolt`); using havok17"
+                );
+            });
+            DEFAULT_BACKEND
+        }
         _ => DEFAULT_BACKEND,
     }
 }
@@ -417,8 +431,12 @@ pub const DEFAULT_BACKEND: &str = "havok17";
 /// instead (see [`crate::havok17::GRAVITY`]).
 pub fn create_backend(gravity: Vec3) -> Result<Box<dyn PhysicsBackend>, BackendError> {
     Ok(match backend_kind() {
-        "havok17" => Box::new(crate::havok17::Havok17Backend::new()?),
-        _ => Box::new(crate::jolt::JoltBackend::new(gravity)?),
+        #[cfg(feature = "jolt")]
+        "jolt" => Box::new(crate::jolt::JoltBackend::new(gravity)?),
+        _ => {
+            let _ = gravity;
+            Box::new(crate::havok17::Havok17Backend::new()?)
+        }
     })
 }
 

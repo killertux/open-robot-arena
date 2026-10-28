@@ -17,7 +17,8 @@ fidelity pass (see Validation below for what was and was not measured against th
 unverified.** The engine is a Rust workspace that reads the original `.gmf`,
 `.bot`, CFL3, `.gib` and `.giff` data and runs the shipped Python 2.2 arenas and
 AI on an embedded CPython 3.12. It renders with `wgpu` (window or headless) and
-simulates with Jolt.
+simulates with its own re-implementation of the original's Havok 1.7 dynamics
+(Jolt Physics is an opt-in fallback behind the `jolt` cargo feature).
 
 The client, `ra2-app`, now boots the shipped shell, opens a real match from the
 exhibition screen with the players' own team/robot and game-type/arena choices,
@@ -47,7 +48,8 @@ live in that file; they are not re-measured here.
 
 A robot drops into an arena, drives on a scripted input timeline, collides with
 walls and movable props, and the run renders to a frame strip. The physics sits
-behind a `PhysicsBackend` trait; Jolt is the implementation. On the measured
+behind a `PhysicsBackend` trait; Jolt was the first implementation (now the
+opt-in `jolt` feature; the default is `havok17`). On the measured
 45-bot box-arena survey with the game's own friction law, **37 of 45 stock robots travel 2 m or more**. Caveat:
 the eight that remain are rest-pose weapons/props, two F1 wheel-height
 residuals and one curved path, not the motor law or a global speed constant
@@ -285,18 +287,27 @@ and, with nothing found, where it looked.
 Linux x86_64, Rust stable and, on Debian/Ubuntu:
 
 ```bash
-sudo apt install build-essential cmake pkg-config python3.12-dev libasound2-dev \
+sudo apt install build-essential pkg-config python3.12-dev libasound2-dev \
                  libvulkan1 mesa-vulkan-drivers
 cd engine
-cargo build --release        # add CARGO_NET_OFFLINE=true --offline with no network
+cargo build --release
 ```
 
-Jolt is built from source with CMake, and the binaries link CPython 3.12
-(`libpython3.12.so.1.0`) at run time, so the 3.12 runtime must be installed.
-With no network, set `CARGO_NET_OFFLINE=true` (and `--offline`): without it the
-physics crate's build script tries to download a prebuilt archive with `curl`;
-with it, it builds the vendored sources. The client is then
+The default build needs no network once the crates are fetched (`cargo build
+--release --offline` works from a vendored or already-populated registry) and
+no CMake: the physics (`havok17`) is plain Rust, with its own geometry queries
+(`docs/29-havok17-backend.md` section 12ac), and no Jolt code is built or
+linked. The binaries link CPython 3.12 (`libpython3.12.so.1.0`) at run time,
+so the 3.12 runtime must be installed. The client is
 `engine/target/release/ra2-app`.
+
+The old Jolt Physics backend is an opt-in cargo feature, `--features jolt`
+(`cargo build --release -p ra2-app --features jolt`, then `RA2_PHYSICS=jolt`
+to run it; without the feature that setting prints a message and runs
+`havok17`). It pulls in the `oxijolt` crate, whose build script downloads a
+prebuilt Jolt archive with `curl` (needs the network); with
+`CARGO_NET_OFFLINE=true` it instead builds the vendored Jolt sources, which
+needs `cmake` and a C++ compiler (`sudo apt install cmake`).
 
 ### One command, offline
 
@@ -482,7 +493,7 @@ ra2-duel "local/game/Arenas/octagon.py" \
 ```
 
 Linux x86_64 is the tested artifact. The macOS and modern Windows path — the
-toolchain, the Jolt C++ build, `libpython3.12.dylib`/`python3.12.dll`, the wgpu
+toolchain, the optional Jolt C++ build, `libpython3.12.dylib`/`python3.12.dll`, the wgpu
 backend and the package shape — is in
 [`docs/09-platforms.md`](docs/09-platforms.md), with what is unverified and what
 would verify it. It is not a claim that those builds exist.

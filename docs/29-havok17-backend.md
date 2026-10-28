@@ -4,12 +4,15 @@
 (`engine/crates/ra2sim/src/havok17/`) whose dynamics follow the Havok 1.7.1
 subset *Robot Arena 2* ships, written from the recovered specification (the
 map in the `havok-scope` study, the decompiles cited below and live
-measurements of the original). Jolt is kept only as a geometry engine: it holds
-every body's shape at its pose and answers closest-point queries and ray casts;
-Jolt's solver never runs in this backend.
+measurements of the original). It had used Jolt as a geometry engine (every
+body's shape at its pose, for deep-overlap depths, phantoms and ray casts);
+since section 12ac those queries are our own (`havok17/query.rs`) and the
+backend does not touch Jolt at all.
 
 Selection: `havok17` is the default (`backend::DEFAULT_BACKEND`);
-`RA2_PHYSICS=jolt` selects the Jolt fallback. The game's drive model
+`RA2_PHYSICS=jolt` selects the Jolt fallback, which exists only in a build with
+the `jolt` cargo feature (without it the setting prints a message and runs
+`havok17`). The game's drive model
 (section 3) runs with `havok17` by default; `RA2_DRIVE=magic|interim`
 overrides it for either backend (Jolt defaults to the interim wheels).
 `RA2_H17_DEBUG=<body>` prints one body's state and contacts every step.
@@ -98,9 +101,9 @@ point-to-point (three rows) blocks follow the hinge's scheme; their own atoms
 **Narrowphase** (`narrow.rs`, recovered, section 10): Havok's own collision
 agents — GJK closest points per convex piece against each nearby mesh
 triangle or against another convex piece, each pair with its persistent
-manifold, and triangle-pair closest points between two meshes. Jolt is only
-asked for ray casts, phantoms and, when a step is accepted overlapping, the
-depth of the overlap. Mesh triangle order (the MOPP's) is not reproduced.
+manifold, and triangle-pair closest points between two meshes. Ray casts,
+phantoms and, when a step is accepted overlapping, the depth of the overlap are
+`query.rs`'s (section 12ac; they were Jolt's until then). Mesh triangle order (the MOPP's) is not reproduced.
 
 **Phantoms**: a body may carry a phantom shape (a wheel's `wheel_traction`,
 `DISABLE_COLLISIONS` in its `.gmf`), detected like any collidable within the
@@ -578,8 +581,8 @@ or when any new point is closer than the current tolerance (`0x542db0`). A bad
 detection rolls back and halves the step; after 30 the step is accepted and
 its pairs excused (`0x542760`). Before this the detection itself used the
 halved tolerance, the resolver too, and only a newly overlapping pair counted
-as bad. Ours additionally gives an accepted overlapping pair Jolt's deepest
-points so it separates (Havok reports none for it).
+as bad. Ours additionally gives an accepted overlapping pair its deepest
+points (`query.rs`) so it separates (Havok reports none for it).
 
 The arena soup carries each triangle in both windings for Jolt; havok17 keeps
 each once (live contact lists hold no repeated point).
@@ -4719,3 +4722,99 @@ update fall in (the hellraiser's first hit); `IsStraightPathClear`'s march
 direction (docs/33 §7); the items section 12aa left (the spikes' build
 pairs, the steering unit's build body, the Clawtop's claws, the `+0xb8`
 list).
+
+### 12ac. No Jolt: the backend's own geometry queries (fx/no-jolt)
+
+The default build needed Jolt for three queries beyond the collision agents and
+so compiled it (and, on a fresh build, downloaded its prebuilt archive). They
+are now ours (`havok17/query.rs`, over the same `narrow::Piece`s the agents
+collide) and Jolt is the opt-in cargo feature `jolt` on `ra2sim` (forwarded by
+`ra2-app`): `cargo tree -p ra2-app` shows no `oxijolt` by default and the
+default build runs no `oxijolt-sys` build script. `RA2_PHYSICS=jolt` without
+the feature prints one line on stderr and runs `havok17`; with it, `JoltBackend`
+is unchanged.
+
+* **Overlap contacts** (a pair accepted overlapping after 30 backsteps):
+  `query::collide`, one hit per overlapping pair of collidables and per
+  overlapped triangle of a mesh. Convex x convex is the penetration depth of the
+  Minkowski difference (GJK for the gap, then an expanding polytope started from
+  the support points in 14 directions), plus the radii of spheres and capsules.
+  Hits under 1e-4 m are dropped (Jolt's collision tolerance). A `MeshHull` body
+  is its convex hull here, as it was in Jolt (`Piece::hull`).
+* **Phantoms**: the same `collide`, the deepest hit's normal, filters as before.
+* **Rays**: the Gilbert-Bergen-Wiseman advancement on the support function for
+  convex pieces (radius included), a bounding-box walk and Moller-Trumbore for
+  meshes, nearest hit over all bodies but the excluded one.
+* The Jolt query world (`create_body`/`remove_body`/`sync`/`set_shape`) is gone.
+  `create_body` no longer fails on a shape Jolt could not build.
+
+**Differential test** (`havok17/query_diff.rs`, `--features jolt`; shapes are
+those `Duel::new` creates for Scout/ALARM (box), Razor/FlapJack (Octagon),
+Sentinel/Wide Load (Compressor), Grog/Boxer (Hill Top); the robots' rigid groups
+scattered at random over the arena, 40 poses each):
+
+| query | pairs | result |
+|---|---|---|
+| rays (24000) | 21656 hit | hit/miss and body identical; distance within 0.2 mm (p99 0.01 mm); normals on the same line (p99 0.02 degrees; the one 88 degree case is a ray along an edge) |
+| phantoms (1040) | 59 touching | touching sets identical; normals p90 0 degrees, p99 25 degrees (3 hits, below) |
+| overlaps (27960 pairs) | 443 pairs hit | native finds every pair Jolt does (and 5 more, shallow); matched hits: depth within 0.9 mm, normal within 0.7 degrees; the contact point differs for a face on a face (any point of the patch is a deepest point; EPA faces differ), 3.9 m at p90 on an arena-sized triangle |
+
+Where they differ, native is the exact one: moved along its axis by its depth
+the shapes just touch (unit test
+`the_overlap_depth_of_random_hulls_is_the_minimum_translation`: 300 random hull
+pairs, no sampled direction clears sooner); Jolt's depth and axis for a hull deep
+in a hull (the 3 phantom cases) or a box deep in the floor (0.4082 against the
+true 0.4331 m, axis 0.6 degrees off) do not separate the shapes. Native lists a
+coplanar neighbour triangle's hit that Jolt (active edges) leaves out.
+
+**In real fights** (live check inside `detect_phantoms`, 40 s fights): 15492 /
+14226 / 20656 phantom checks on the box / Octagon / Compressor; the phantom
+reports differ in 1.2 / 5.5 / 2.6 % of the touching frames (`native touching,
+Jolt none`, mostly at the floor and shallow) and the normals by more than a
+degree in 0.3 / 2 / 3 %, about a quarter of those **exactly opposite** ((0, -1,
+0) for the floor). A wheel's thrust is `-(axle x n)`, so Jolt reversed it in
+those frames: a sign glitch of Jolt's
+penetration axis for a ring cutting a thin floor triangle, not behaviour of the
+original (the live `G` rows carry no normal, so this is not checked against it).
+Overlap contacts are rare (26 / 19 / 96 calls in 40 s).
+
+**Ensembles**, `FIDTRACE_WARMUP` x 48 (the usual 24 of section 12ab and 24 more:
+1 3 4 6 8 10 12 14 15 17 18 20 21 23 24 25 27 29 30 32 33 35 36 38), counted =
+`>= 10`, before = `fidelity` b591511 (first 24 reproduce section 12ab's after
+column to the digit), after = this branch, same machine:
+
+| fight | live | before (24 + 24 = 48) | after |
+|---|---|---|---|
+| box ALARM / Scout | 38.5 / 4.8 | 34.7 + 39.7 = 37.2 / 5.9, 24/48 full, 5 + 4 on back | 33.8 + 22.1 = 28.0 / 5.1, 18/48 full, 7 + 11 |
+| box Razor v FlapJack | 3.0 / 0.1 | 1.0 + 1.5 / 5.1 | 0.9 + 0.8 / 4.5 |
+| Compressor Wide Load / Sentinel | 73.6 / 5.3 | 73.2 + 87.7 = 80.5 / 4.5 | 79.1 + 72.3 = 75.7 / 4.2 |
+| Octagon ALARM / Scout | 13.6 / 3.2 | 11.1 + 16.2 = 13.6 / 3.0 | 10.5 + 13.6 = 12.1 / 2.6 |
+
+The first batch alone moves within noise (box 34.7 -> 33.8, Scout 5.4 -> 5.6,
+11/24 full both, Compressor 73.2 -> 79.1, Octagon 11.1 -> 10.5), the second
+batch lowers the box ALARM (39.7 -> 22.1); pooled it is -9.2 with a standard
+error of 4.5 (every arena's damage moves down, none past 1.1 sigma but the
+box). Attribution by hybrid builds (Jolt answering one query inside the new
+code; a hybrid with both reproduces `before` bit for bit, traces identical):
+Jolt's phantoms alone restore `before` (batch 1: Razor v FlapJack identical to
+the digit, box ALARM 37.8, Compressor 67.5, Octagon 11.5; batch 2: box 40.6,
+Razor 1.5, Octagon 16.2), Jolt's overlaps alone leave `after` (Razor identical
+to the digit, box 34.4 / 22.7). Within the phantom difference, over 48 box
+runs: Jolt's status with our normal 33.4, our status with Jolt's normal 32.6,
+Jolt's status with its normal flipped up 28.9 (ours 28.0, Jolt's 37.2): the
+flipped normals, not the touching sets, carry most of it, though each variant
+has a standard error of 3.5. So the shift is Jolt's thrust reversals going
+away, which the physics never specified; box ALARM then sits 10 below live
+where the Jolt glitch had put it at live by chance. Reported, not tuned.
+
+AI suite (ten pairings, warmup 0), counted hits each way and length, before ->
+after (single trajectories; they diverge from the first sample by 1e-7 and the
+rest is chaos): Scout v ALARM 9/60 -> 2/8, Tornado v RipBlade 89/26 -> 105/38,
+Grog v Boxer 46/166 -> 48/111, Razor v FlapJack 4/0 -> 4/1, Sentinel v Wide Load
+0/0 -> 2/16, Bear v Tornado 36/53 -> 65/63, Grog v Boxer hill 32/29 -> 67/189,
+Octagon Scout v ALARM 5/17 -> 0/0, Razor v FlapJack park 3/1 -> 4/1, Bushido v
+Devil 10/5 -> 35/2.
+
+**Open.** What the original's phantom normal is when a ring cuts a thin floor
+triangle (and whether it ever flips): `0x508080` was not decompiled here. The
+second batch's box ALARM (22.1).

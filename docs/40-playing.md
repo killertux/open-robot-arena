@@ -14,11 +14,13 @@ your install.
   `RA2.cfz`, `UI/` and `Scripts/`. The `.exe` itself is never run.
 * CPython 3.12 with its shared library (`python3.12 libpython3.12` on
   Debian/Ubuntu); a Vulkan driver (Mesa's software one works) and a display.
-* To build from source: a Rust toolchain (stable), `cmake` and a C++ compiler
-  (Jolt is built from source), `python3.12-dev`, `pkg-config`, and the ALSA
-  development headers for audio. Set `CARGO_NET_OFFLINE=true` if you have no
-  network: otherwise a build script tries to download a prebuilt physics
-  archive (see the README).
+* To build from source: a Rust toolchain (stable), a C compiler, `python3.12-dev`,
+  `pkg-config`, and the ALSA development headers for audio. No internet is
+  needed beyond fetching the crates (`cargo build --release --offline` once they
+  are fetched), and no CMake or C++ compiler: the physics is Rust, and Jolt is
+  not built unless you ask for it with `--features jolt` (that old fallback
+  backend downloads a prebuilt archive, or with `CARGO_NET_OFFLINE=true` builds
+  Jolt's sources, which needs `cmake` and a C++ compiler; see the README).
 
 ## Start it
 
@@ -95,7 +97,7 @@ brackets; sounds and music cues; the team and robot save formats.
 Known differences and open items:
 
 * **Physics fine-tuning.** The physics is a re-implementation of the original's
-  Havok 1.7 behaviour on Jolt, matched to live traces but not bit-exact: a few
+  Havok 1.7 behaviour, matched to live traces but not bit-exact: a few
   stock robots still drive, tip or fight slightly differently, and a long fight
   does not repeat the original's one.
 * **Slash decals.** The marks cutting weapons leave on the floor are not drawn.
