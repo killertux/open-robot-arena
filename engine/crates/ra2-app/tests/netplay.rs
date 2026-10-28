@@ -246,6 +246,8 @@ fn a_synced_duel_follows_the_host() {
 
     let mut host_match = host.match_session(&game, "Arenas/box.py").unwrap();
     let mut guest_match = guest.match_session(&game, "Arenas/box.py").unwrap();
+    host.on_match_built(&mut host_match);
+    guest.on_match_built(&mut guest_match);
     assert_eq!(host_match.player_robot, 0);
     assert_eq!(guest_match.player_robot, 1);
     host_match.skip_intro();
@@ -385,6 +387,7 @@ fn child(role: &str, window: bool) {
     let spectating = net.is_spectator();
     assert_eq!(spectating, role == "watch", "{role}");
     let mut session = net.match_session(&game, arena).unwrap();
+    net.on_match_built(&mut session);
     session.skip_intro();
     let dt = session.matched.config.dt;
     let mut seen: std::collections::BTreeSet<String> = Default::default();
@@ -832,6 +835,7 @@ fn edge_child(test: &str, role: &str) {
         net.assign_robots();
     }
     let mut session = net.match_session(&game, arena).unwrap();
+    net.on_match_built(&mut session);
     session.skip_intro();
     let dt = session.matched.config.dt;
     let mut shell = Shell::boot(&game, [800.0, 600.0]).unwrap();
@@ -1113,4 +1117,66 @@ fn display_text(gib: &ra2fmt::gib::Gib, name: &str) -> String {
         }
     }
     out
+}
+
+/// The snapshot of a match is the one the original's host wrote for the same two robots (docs/38
+/// section 15; recorded live, C.R.U.S.H. as panel 0 against Sting Ray as panel 1): the same bodies
+/// under the same ids, hitpoints, batteries and motors.
+#[test]
+fn the_snapshot_of_two_robots_has_the_ids_the_originals_has() {
+    use ra2net::sync::DeviceSync;
+    let Some(game) = game_dir() else { return };
+    let _scripts = ra2script::lock();
+    let entries = vec![
+        ra2sim::r#match::RobotEntry::human(
+            0,
+            game.join("Teams/Team0/Bot0.bot")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        ra2sim::r#match::RobotEntry::human(
+            1,
+            game.join("Teams/Team0/Bot1.bot")
+                .to_string_lossy()
+                .to_string(),
+        ),
+    ];
+    let session = ra2_app::match_mode::Session::exhibition(
+        &game,
+        &game.join("Arenas/Bridge.py"),
+        ra2sim::r#match::GameType::Deathmatch,
+        entries,
+        None,
+        None,
+    );
+    let Ok(session) = session else { return };
+    let state = ra2_app::net_match::capture(&session.matched.duel, &[0, 1]);
+    let mut ids: Vec<u32> = state.bodies.iter().map(|b| b.id).collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        [0x400, 0x404, 0x408, 0x40c, 0x410, 0x424, 0x800, 0x805, 0x809]
+    );
+    assert_eq!(state.robots[0].components.len(), 14);
+    assert_eq!(state.robots[1].components.len(), 15);
+    assert_eq!(state.robots[0].components[0], 1226.0);
+    assert_eq!(state.robots[1].components[0], 926.0);
+    let controllers: Vec<u32> = state.controllers.iter().map(|c| c.0).collect();
+    assert_eq!(controllers, [0x42c, 0x824, 0x828, 0x82c]);
+    assert_eq!(state.controllers[0].1, 52000.0);
+    assert_eq!(state.controllers[1].1, 7000.0);
+    let devices: Vec<u32> = state
+        .devices
+        .iter()
+        .map(|d| match d {
+            DeviceSync::One { id, .. }
+            | DeviceSync::Four { id, .. }
+            | DeviceSync::Five { id, .. } => *id,
+            DeviceSync::Other { id, .. } => *id,
+        })
+        .collect();
+    assert_eq!(devices, [0x404, 0x408, 0x40c, 0x410, 0x424, 0x804, 0x808]);
+    // The chassis are awake in full, the other bodies by position and rotation.
+    assert!(state.partial);
+    assert!(state.bodies.iter().all(|b| b.awake == (b.id & 0x3ff == 0)));
 }

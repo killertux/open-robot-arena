@@ -11,7 +11,10 @@ fn main() {
             bot.bindings.len()
         );
         for (i, c) in bot.components.iter().enumerate() {
-            println!("  {i:2} parent {:2} {} {}", c.parent, c.class, c.file);
+            println!(
+                "  {i:2} parent {:2} {} {} at {:?}",
+                c.parent, c.class, c.file, c.translation
+            );
         }
         for c in &bot.controllers {
             println!("  ctl {} {:?} {:?}", c.name, c.position, c.bindings);

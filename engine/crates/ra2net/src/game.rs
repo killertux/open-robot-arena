@@ -61,6 +61,26 @@ pub enum GameEvent {
     Loading {
         player: PlayerId,
     },
+    /// `giAddArenaBotMessage` (`0x12d`): a peer's robot for one panel as `.bot`
+    /// text. `words` are the robot's kind (1 human, 3 computer), the panel and
+    /// the team (docs/38 section 15).
+    ArenaBot {
+        from: PlayerId,
+        words: [u32; 3],
+        design: Vec<u8>,
+    },
+    /// `giPlayerReadyMessage` (`0x12f`) during the match start: a panel's robot
+    /// is loaded (`flag` false: the bots are in) or the match is loaded (`flag`
+    /// true).
+    PanelReport {
+        from: PlayerId,
+        panel: u32,
+        flag: bool,
+    },
+    /// `giTimeSyncMessage` (`0x138`): the host's match time left, in seconds.
+    TimeSync {
+        left: f32,
+    },
     Loaded {
         player: PlayerId,
     },
@@ -95,8 +115,6 @@ pub struct NetGame {
     host: PlayerId,
     schema: Option<SyncSchema>,
     pacer: Pacer,
-    clock: u32,
-    last_clock: Option<u32>,
     /// When set, every `giSyncMessage` that arrives is also kept here, whole
     /// (the tools that record the original's snapshots read it).
     pub tap_sync: Option<Vec<SyncMessage>>,
@@ -114,8 +132,6 @@ impl NetGame {
             host: HOST_ID,
             schema: None,
             pacer: Pacer::new(speed),
-            clock: 0,
-            last_clock: None,
             tap_sync: None,
         })
     }
@@ -127,8 +143,6 @@ impl NetGame {
             host: HOST_ID,
             schema: None,
             pacer: Pacer::new(ConnectionSpeed::Lan),
-            clock: 0,
-            last_clock: None,
             tap_sync: None,
         })
     }
@@ -255,7 +269,6 @@ impl NetGame {
         let host = self.host;
         match &message {
             Message::GroupInfo(_)
-            | Message::PlayerReady { .. }
             | Message::ChangeGameType(_)
             | Message::ChangeWeightClass(_)
             | Message::ArenaPreview(_)
@@ -285,6 +298,19 @@ impl NetGame {
                     out.push(GameEvent::Lobby(change));
                 }
             }
+            Message::AddArenaBot { words, design } => out.push(GameEvent::ArenaBot {
+                from,
+                words: *words,
+                design: design.clone(),
+            }),
+            Message::PlayerReady { player, ready } => out.push(GameEvent::PanelReport {
+                from,
+                panel: *player,
+                flag: *ready,
+            }),
+            Message::TimeSync { word, .. } => out.push(GameEvent::TimeSync {
+                left: f32::from_bits(*word),
+            }),
             Message::PrepareMatch { arena, .. } => out.push(GameEvent::Prepare {
                 arena: arena.clone(),
             }),
@@ -313,12 +339,6 @@ impl NetGame {
                     return;
                 }
                 if let Ok(state) = sync.unpack(schema) {
-                    // Non-guaranteed snapshots may arrive out of order: keep
-                    // only newer ones.
-                    if self.last_clock.is_some_and(|c| state.clock <= c) {
-                        return;
-                    }
-                    self.last_clock = Some(state.clock);
                     out.push(GameEvent::Snapshot(state));
                 }
             }
@@ -436,20 +456,25 @@ impl NetGame {
         }
     }
 
-    /// Toggle the local player's ready flag.
+    /// Toggle the local player's ready flag: it is the panel's `giGroupInfoMessage`
+    /// flag, sent again without the picture (the original's 95-byte message).
     pub fn set_ready(&mut self, ready: bool) {
         let Some(me) = self.local() else { return };
-        if let Some(slot) = self.lobby.slot_mut(me) {
-            if slot.is_spectator() {
-                return;
-            }
-            slot.ready = ready;
+        let before = self.lobby.slots.clone();
+        let Some(slot) = self.lobby.slot_mut(me) else {
+            return;
+        };
+        if slot.is_spectator() {
+            return;
         }
-        let m = Message::PlayerReady { player: me, ready };
+        slot.ready = ready;
+        let mut info = slot.to_group_info();
+        info.robot = None;
         if self.is_host() {
-            self.session.send_with(Target::All, &m, true);
+            self.publish_lobby(&before, None);
         } else {
-            self.session.send_with(Target::Player(self.host), &m, true);
+            self.session
+                .send_with(Target::Player(self.host), &Message::GroupInfo(info), true);
         }
     }
 
@@ -474,19 +499,55 @@ impl NetGame {
         self.session.send_with(Target::All, &m, true);
     }
 
-    /// Host: everyone is loaded; go.
+    /// Host: the robots are in; the peers load the match (`giBeginMatchMessage`).
     pub fn begin_match(&mut self) {
         self.session
             .send_with(Target::All, &Message::BeginMatch, true);
+    }
+
+    /// Host: every peer reported its match loaded (`giPeerDataLoadedMessage`):
+    /// the count-down starts (`giStartCountDownMessage`).
+    pub fn count_down(&mut self) {
         self.session
             .send_with(Target::All, &Message::StartCountDown, true);
+    }
+
+    /// Everyone: this end's robot for one panel, as `.bot` text, to the others
+    /// (`giAddArenaBotMessage`, flags `0x38`: guaranteed, no loopback).
+    pub fn send_arena_bot(&mut self, kind: u32, panel: u32, team: u32, design: Vec<u8>) {
+        let m = Message::AddArenaBot {
+            words: [kind, panel, team],
+            design,
+        };
+        self.session.send_with(Target::All, &m, true);
+    }
+
+    /// Everyone: a panel's report during the start (`giPlayerReadyMessage`):
+    /// `false` once the bots are in, `true` once the match is loaded.
+    pub fn report_panel(&mut self, panel: u32, loaded: bool) {
+        let m = Message::PlayerReady {
+            player: panel,
+            ready: loaded,
+        };
+        self.session.send_with(Target::All, &m, false);
+    }
+
+    /// Host: the match time left, once a second (`giTimeSyncMessage`; the other
+    /// four words of the message are stack garbage in the original).
+    pub fn send_time_sync(&mut self, left: f32) {
+        self.session.send(
+            Target::All,
+            &Message::TimeSync {
+                word: left.to_bits(),
+                times: [0; 4],
+            },
+        );
     }
 
     /// Both ends: the shared lists the snapshots are written against (known
     /// once the match is loaded).
     pub fn set_schema(&mut self, schema: SyncSchema) {
         self.schema = Some(schema);
-        self.last_clock = None;
     }
 
     /// Both ends: the match is over and the players are back in the lobby.
@@ -494,7 +555,6 @@ impl NetGame {
     /// as a lobby text), and a host takes joiners and spectators again.
     pub fn end_match(&mut self) {
         self.schema = None;
-        self.last_clock = None;
         if self.is_host() {
             self.session.set_accepting(true);
         }
@@ -524,9 +584,7 @@ impl NetGame {
         if !self.is_host() || !self.pacer.tick(dt) {
             return false;
         }
-        let mut state = capture();
-        self.clock = self.clock.wrapping_add(1).max(state.clock);
-        state.clock = self.clock;
+        let state = capture();
         let message = Message::Sync(SyncMessage::pack(&state));
         self.session.send(Target::All, &message);
         true

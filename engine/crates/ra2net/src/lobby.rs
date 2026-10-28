@@ -158,6 +158,17 @@ impl Lobby {
             .or_else(|| owned(&|_| true))
     }
 
+    /// A panel's message without the picture (the ready flag toggling, 95
+    /// bytes in the original) keeps the picture its owner sent before.
+    fn with_kept_design(&self, mut slot: Slot) -> Slot {
+        if slot.design.is_none() {
+            if let Some(old) = self.panel(slot.index).filter(|o| o.player == slot.player) {
+                slot.design = old.design.clone();
+            }
+        }
+        slot
+    }
+
     /// The panel at `index`.
     pub fn panel(&self, index: u32) -> Option<&Slot> {
         self.slots
@@ -367,7 +378,8 @@ impl Lobby {
                         }
                         self.slots.remove(at);
                     }
-                    self.put_panel(Slot::from_group_info(g));
+                    let slot = self.with_kept_design(Slot::from_group_info(g));
+                    self.put_panel(slot);
                     if let Some(mut moved) = displaced {
                         // Whoever held the open panel waits for another.
                         match self.free_panel() {
@@ -388,7 +400,8 @@ impl Lobby {
                     self.slots.retain(|s| s.is_spectator() || s.index != g.slot);
                     return Some(LobbyChange::Slots);
                 }
-                self.put_panel(Slot::from_group_info(g));
+                let slot = self.with_kept_design(Slot::from_group_info(g));
+                self.put_panel(slot);
                 Some(LobbyChange::Slots)
             }
             Message::PlayerReady { player, ready } => {

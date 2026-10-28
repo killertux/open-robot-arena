@@ -33,7 +33,8 @@ fn main() {
         .expect("a bot");
     let out = std::path::PathBuf::from(out.expect("--out DIR"));
     std::fs::create_dir_all(&out).expect("the output directory");
-    let mut raw = std::fs::File::create(out.join("sync.bin")).expect("sync.bin");
+    let mut matches = 0u32;
+    let mut raw = std::fs::File::create(out.join("sync0.bin")).expect("sync0.bin");
     let mut log = std::fs::File::create(out.join("messages.txt")).expect("messages.txt");
     let config = JoinConfig::new(
         ([127, 0, 0, 1], 0).into(),
@@ -43,6 +44,7 @@ fn main() {
     let mut game = NetGame::join(config).expect("join");
     game.tap_sync = Some(Vec::new());
     let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let tx_self = tx.clone();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
             let _ = tx.send(line);
@@ -57,12 +59,16 @@ fn main() {
     let mut panel = 1u32;
     let mut begun_at: Option<Instant> = None;
     let mut next_loaded = Instant::now();
+    let mut ready_again: Option<Instant> = None;
     loop {
         for event in game.poll() {
             match &event {
                 GameEvent::Snapshot(_) => {}
                 GameEvent::Prepare { arena } => {
                     say(format!("Prepare {arena}"));
+                    matches += 1;
+                    raw = std::fs::File::create(out.join(format!("sync{matches}.bin")))
+                        .expect("sync file");
                     let m = Message::AddArenaBot {
                         words: [1, panel, 0],
                         design: bot.write_wire(),
@@ -86,8 +92,12 @@ fn main() {
                 GameEvent::Message { from, message } => {
                     let text = format!("{message:?}");
                     say(format!("from {from:#x}: {}", &text[..text.len().min(160)]));
+                    if matches!(message, Message::EndMatch) {
+                        begun_at = None;
+                        ready_again = Some(Instant::now() + Duration::from_secs(2));
+                    }
                     if let Message::AddArenaBot { words, design } = message {
-                        let name = format!("bot_{}_{}.bot", from, words[1]);
+                        let name = format!("bot_{}_{}_{}.bot", matches, from, words[1]);
                         let _ = std::fs::write(out.join(name), design);
                     }
                 }
@@ -123,6 +133,10 @@ fn main() {
                 false,
             );
         }
+        if ready_again.is_some_and(|t| Instant::now() >= t) {
+            ready_again = None;
+            let _ = tx_self.send("ready".to_string());
+        }
         while let Ok(cmd) = rx.try_recv() {
             let w: Vec<&str> = cmd.split_whitespace().collect();
             match w.as_slice() {
@@ -153,6 +167,18 @@ fn main() {
                         }
                     }
                     say("ready".into());
+                }
+                ["key", code, value] => {
+                    // A key event of the original's remote input: the binding's
+                    // first three words and 1 (down) or 0 (up).
+                    let m = Message::RemoteInput {
+                        robot: panel,
+                        input: ra2net::message::BotInput {
+                            key: [0, 0, code.parse().unwrap_or(0)],
+                            value: value.parse().unwrap_or(0),
+                        },
+                    };
+                    game.session.send_with(Target::All, &m, false);
                 }
                 ["quit"] => return,
                 _ => say(format!("? {cmd}")),

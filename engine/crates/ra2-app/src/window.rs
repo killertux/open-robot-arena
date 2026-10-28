@@ -427,8 +427,9 @@ impl App {
             crate::net_play::NetAction::None => {}
             crate::net_play::NetAction::StartMatch { arena } => {
                 match self.net.match_session(self.shell.game(), &arena) {
-                    Ok(session) => {
+                    Ok(mut session) => {
                         ra2script::set_paused(false);
+                        self.net.on_match_built(&mut session);
                         self.session = Some(session);
                     }
                     Err(error) => eprintln!("network match: {error}"),

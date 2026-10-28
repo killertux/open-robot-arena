@@ -28,6 +28,7 @@ pub mod lab_dialog;
 pub mod lab_view;
 pub mod match_mode;
 pub mod match_sounds;
+pub mod net_match;
 pub mod net_play;
 pub mod options;
 pub mod play_mode;

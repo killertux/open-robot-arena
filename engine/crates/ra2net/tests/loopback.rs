@@ -267,8 +267,6 @@ impl World {
 
     fn snapshot(&self) -> SyncState {
         SyncState {
-            clock: 0,
-            clock2: 100,
             partial: true,
             bodies: self.bodies.clone(),
             ..SyncState::default()
@@ -303,6 +301,7 @@ fn a_short_synced_match_then_disconnect() {
     });
     assert!(eh.contains(&GameEvent::Loaded { player: me }));
     host.begin_match();
+    host.count_down();
     pump(&mut host, &mut guest, |_, g| {
         g.contains(&GameEvent::Begin) && g.contains(&GameEvent::CountDown)
     });
