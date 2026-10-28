@@ -39,12 +39,13 @@ pub enum WeightClass {
 
 impl WeightClass {
     pub fn of_mass(mass: f32) -> WeightClass {
-        if mass < 250.0 {
+        // `FUN_004df080`: below `DAT_006aa9ec` (249) light, from `DAT_006aa9e8` (399) heavy.
+        if mass < 249.0 {
             WeightClass::Light
-        } else if mass <= 400.0 {
-            WeightClass::Medium
-        } else {
+        } else if mass >= 399.0 {
             WeightClass::Heavy
+        } else {
+            WeightClass::Medium
         }
     }
 
@@ -53,6 +54,16 @@ impl WeightClass {
             1 => WeightClass::Medium,
             2 => WeightClass::Heavy,
             _ => WeightClass::Light,
+        }
+    }
+
+    /// The class text for a `Class:` value as the inventory prints it (`FUN_004deff0`): the three
+    /// names for 0, 1 and 2 and `None` (`0x6f1f10`) for anything else, which is what a robot that
+    /// was saved before it had a shape carries (live `teamhq-newbot-empty`).
+    pub fn file_label(class: i32) -> &'static str {
+        match class {
+            0..=2 => Self::from_file(class).full_label(),
+            _ => "None",
         }
     }
 
@@ -238,10 +249,11 @@ mod tests {
 
     #[test]
     fn weight_classes_use_the_games_thresholds() {
-        assert_eq!(WeightClass::of_mass(249.9), WeightClass::Light);
-        assert_eq!(WeightClass::of_mass(250.0), WeightClass::Medium);
-        assert_eq!(WeightClass::of_mass(400.0), WeightClass::Medium);
-        assert_eq!(WeightClass::of_mass(400.1), WeightClass::Heavy);
+        // The exe's own cut-offs (`FUN_004df080`: 249 and 399), not the round numbers.
+        assert_eq!(WeightClass::of_mass(248.9), WeightClass::Light);
+        assert_eq!(WeightClass::of_mass(249.0), WeightClass::Medium);
+        assert_eq!(WeightClass::of_mass(398.9), WeightClass::Medium);
+        assert_eq!(WeightClass::of_mass(399.0), WeightClass::Heavy);
     }
 
     #[test]

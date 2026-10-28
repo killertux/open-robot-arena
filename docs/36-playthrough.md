@@ -76,6 +76,11 @@ Screenshots referenced below are in the session scratchpad
 | Inventory grid deselect (message 2) | unknown | recovered, matches (§9.26) |
 | Career end to end: new team, import, event, forfeit, restart (§9.26) | untested as one flow | works (`a_whole_career_new_team_to_forfeit_survives_a_restart`) |
 | Shell message boxes: blank body, Yes left (§9.26) | template text, No first | fixed |
+| Bot Lab: a new robot starts with no chassis; Components / Wiring / Paint Shop / Test Robot and Armor dim until it has a shape / a control board (§9.27) | started from a stock chassis, every tab live | fixed |
+| Bot Lab chassis: freeform outline closed on its first point, step 2 and Finished extrude it (mesh, atlas, height slider 0.436364..1.32) (§9.27) | outline stored, mesh not rebuilt, stock 1.1 m scale | fixed (new `workshop::extrude`, byte-checked on 8 live files) |
+| Bot Lab wiring: drag SWITCH / BUTTON / ANALOG onto the controller, properties window, click a part in the 3D view for the connection window (§9.27) | only the debug panel could wire a robot (player-facing lab had no way) | fixed (`lab_dialog`) |
+| Weight class from the weight: light < 249, heavy >= 399 (`FUN_004df080`); a shapeless robot reads `None` (§9.27) | 250 / 400, `Lightweight` | fixed |
+| Whole build from nothing, wired, named, saved, driven (§9.27) | untested | works (`a_robot_built_from_nothing_is_wired_saved_and_fights`) |
 
 Counts: 26 rows; **16 fixed this round** (2 of them crashes/dead ends that
 closed or stranded the client), 6 worked already, 4 still broken (pause
@@ -1233,6 +1238,58 @@ There is **no money** in the original (no cash field, `ra2fmt::team`; `Career::m
 3. The message boxes of the shell (scrap, delete team, OK boxes) drew the template's `This is a message.` and listed `No` before `Yes`; the live box has an empty body and `Yes` on the left
    (`teamhq-scrap-box`, `teamhq-events-one-event`; 9.24 had claimed ours drew blank). Now `Shell::open_window` blanks the template text and trades the two buttons' names and labels (`yes_left`, `blank_message_body`); `teamhq-scrap-box` 1.93 -> **1.84**. **fixed**
 4. A team with no robot: the join window opens and `Enter Event` does nothing; not checked live. **open**
-5. New-robot lab starts from a stock chassis, `Class` shown as `Lightweight` for an empty design (above). **open**
+5. New-robot lab starts from a stock chassis, `Class` shown as `Lightweight` for an empty design (above). **fixed** in 9.27
 6. A fresh boot's Select Team lists the first team selected (not the one last played): matches the earlier live notes for the select screen, not re-checked for a restart. **unverified**
 
+
+## 9.27 Building a robot from nothing in the Bot Lab (`fx/botlab`, 2026-10-23..28)
+
+Live on display :9 (flatpak Wine 9.0, `ra2_drive.py`; `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` of the prefix copied before the sessions, rsync'ed back after each, sha256 list equal; Team 0 had its
+cell 5 scrapped and a new robot built there, the `Bot5.bot` the game wrote copied out). Captures (manifest rows, backup `manifest-additions-2026-10-21-botlab.tsv`): `botlab-flow-*` (13 frames) and the
+`botlab-newbot-*` `.bot` files (8). Side-by-sides, ours against live, are in the scratchpad (`sbs_w0.png`, `sbs_b2.png`, `sbs_c.png`). New driver steps in `ra2_drive.py`: `drag X0 Y0 X1 Y1 [BUTTON] [STEPS]`.
+`labshot` (ra2-app example) replays the same clicks on our lab; `tools/labgame.sh` makes the scratch install.
+
+### The flow as the original runs it
+
+* **Blank robot** (`FUN_00439650` with the empty-cell flag): Components, Wiring, Paint Shop, Test Robot (`FUN_0043ef60(6..9)`, `FUN_005ec4e0(0)`) are dim and take no click; Overview shows `Enter Bot Name`, weight
+  `0.0`, Classification `None` (`FUN_004deff0` prints `None` (`0x6f1f10`) for a class outside 0..2) and `No Robot Preview`. The Chassis tab's `Armor` button is dim too. Tip: `Click the Chassis button to start your robot`.
+* **Chassis, step 1** (`chassis_structure1.gib`): a 10x10 blueprint, `Draw Freeform` / `Circle` / `Rectangle`. Points snap to the 100-unit grid and the grid is 450 px of the 466 px `Editing Area` at 1024x768
+  (lines at x 39..489, y 148..598); clicking the first point of an outline of 3 or more closes it. A square drawn from (200,200) is `4 / 200 200 / 800 200 / 800 800 / 200 800`.
+* **Step 2** (`chassis_structure2.gib`, `Adjust Top Outline`): going to step 2 **extrudes** the baseplate (`274 24 36 12`, height `0.825`, top outline = bottom outline); the Components, Paint Shop and Test Robot tabs light
+  (Wiring stays dim) and the height slider moves the whole mesh: thumb at the top 1.32 m, at the bottom 0.436364 (the file's `height` and every vertex `y`). **Finished** returns to the Chassis page (`Structure Design`, `Armor`).
+* **Armor**: Plastic 8/80, Aluminum 12/100 (default, selected), Titanium 16/150, Steel 20/175; the new chassis is aluminium: `1 12 0 200 0` (hardness stored doubled, as stock files).
+* **Overview after Finished**: the square at aluminium weighs 94.1 (area 7.84 m2 x 12), `Lightweight`; a triangle (200,200) (800,200) (500,800) is 3 + 3 faces and 6 + 3 skin groups.
+* **Components**: the first palette part (Robot Control Board 4.0 kg) is selected; weight 98.1 after the board. The board lights **Wiring** (`FUN_004f7b30`). The 3D view draws the chassis as a ghost.
+* **Wiring**: a 3x3 controller (1 px rules, (102,102,102)), `SWITCH` / `BUTTON` / `ANALOG` above it. Dragging one onto a cell opens **`Analog Control`** (`ctrl_analog_props.gib`, `Control Name New Analog`, `Positive Axis` /
+  `Negative Axis` boxes that take the next key) or `Switch Control` / `Button Control` (`New Switch`, `New Button`, one box); OK adds the control (`W - S` after pressing W then S), Cancel does not. With a control
+  selected the 3D view shows it as a floating icon with green wires to the parts it drives; clicking a part opens its **connection window** (`wiring_connection_*.gib`: the part's name and picture, the control's keys,
+  one dropdown per input listing `<none>` then the actions: `Spin Clockwise`, `Spin Counter-clockwise` for a motor). The windows are modal.
+* **Paint Shop**: `Effect: Color Fill`, `Paint Entire Chassis`, `Undo`, `Export Paint Template`, `Import Custom Paint` (as before). **Test Robot**: the practice arena with `Obstacles` None/Crates/Blocks/Barrels/Cones/Ramps and RESET.
+* **Saving**: **Back to HQ** writes the robot into the selected cell. The file: `Class:` is the class its weight gives (`FUN_0046c710` after each mass change, `FUN_004df080`: < 249 light, >= 399 heavy; the constants
+  are 249.0 and 399.0, not 250 / 400); chassis `bottom` / `top` outlines, the mesh with a bottom ring (normal -y), a top ring (+y) and one quad per edge, the atlas (`face groups`), 12-px-wide skin groups, a white
+  256x256 skin, one crush-corner row per top vertex (`index 3 a b c`), no buckle points. Ear-clipped plate triangles `(v, prev, next)` with the last reversed; the top plate reversed on the top ring; side `(v1 v2 v0)(v2 v3 v0)`.
+  The atlas packs the cells from v = 246 downwards, 10 px in from the left, 9 px apart at 0.15 px per outline unit, and again at 0.9 of the scale until it fits (800-unit plates: 0.135; 1.19 m: 0.1215).
+
+### What ours did and now does
+
+1. Opened every new robot on a 1.1 m stock chassis with every tab live. Now `Build::blank` (no outline, no mesh, height 1, aluminium), `Builder::open_blank`, dim tabs (`set_checkbox_enabled`, `refresh_tabs`) and `0.0` / `None`. **fixed**
+2. The outline was stored but never extruded, and the mesh a player drew was never made. Now `workshop::extrude` (ear clipping, quads, atlas packing, crush corners) reproduces four of the live `.bot` files' (square, big square, triangle, tall) point lists, indices,
+   corners and atlas rows (unit tests on the square, the small and the big square, the triangle, the tall one); step 2 and Finished extrude, the height slider rebuilds. The writer and reader handle the shapeless chassis' extra `0` line
+   (`teamhq-newbot-empty`). **fixed**; open: a 100-unit-wide group and a concave outline's ear order (the L's triangle order, the 100 px groups' wider gap) are not byte-equal.
+3. The blueprint grid, the outline strokes and its points were not drawn, and the click mapping used the whole 466 px area instead of the 450 px grid. Now `blueprint_grid`, `chassis_overlay`. **fixed**
+4. **Blocker**: the player-facing lab could not wire a robot at all (the SWITCH / BUTTON / ANALOG icons sat under the controller's picture, so a click never reached them; binding lived in the debug panel only). Now the icons take
+   the click (`hit_control`), a drag or click-then-click opens the properties window, a click on a part opens the connection window (`lab_dialog`, `Builder::mouse_released`, `wire_at_preview`); keys come from the keyboard
+   (`dik_for_char`, arrows via `key_named`). **fixed**
+5. The palette's last, half-visible cell counted as shown (`ceil`), so a click on it missed at 1024 px. Now whole cells only. **fixed**
+6. The class came from the file and never changed; the lab now writes the class its weight gives and the HQ prints `None` for a shapeless robot. The class cut-offs were 250 / 400; now 249 / 399. **fixed**
+7. The name box showed the design's stored name; typing on Overview now edits it (and Back to HQ saves it). Typing elsewhere does nothing. **fixed**, but the live behaviour of the name box (does the first key replace `Enter Bot Name`?) was not
+   captured. **unverified**
+8. The 3D view of the lab is a top-down flat shaded mesh; the original's is a perspective view with the textured chassis (white skin = white) and a teal ghost on the Components / Wiring tabs; ours is a 0.3-alpha ghost. The wire graphics above
+   the tab strip and the tip line with its icon (`tip.bmp` and the text under the content) are not drawn by our lab. **open** (visual)
+9. Wire lines in the 3D view (the floating control icon and its green / blue lines) and the control's own edit window (double click) are not implemented; a connection window's default rows for a new control were not captured (ours starts at `<none>`). **open**
+10. Test Robot: the original's single-robot practice arena with the obstacle list; ours still fights the shipped AI in the box arena (as in section 5). **open**
+
+Test: `playthrough::a_robot_built_from_nothing_is_wired_saved_and_fights` (blank lab on a scrapped cell, dim tab ignored, square drawn and closed, step 2, Finished: 94.1 kg, board, two motors with wheels, analog control W-S dragged on,
+both motors wired through the connection window, named `Bolt`, Back to HQ, `Bot5.bot` read back, then a match in which the new robot drives more than 0.5 m). Unit tests: `workshop::extrude` (6), `stats::weight_classes_use_the_games_thresholds`.
+Addresses: `FUN_00439650` (blank lab), `FUN_004deff0` / `FUN_004df080` / `FUN_0046c710` (class text, class from weight, the lab's class field), `FUN_0042f7d0` (weight / weightclass boxes), `FUN_004f7b30` (control board test enabling Wiring),
+`FUN_0042c850` (the drag judge, verified live on the new chassis), `FUN_0048d130` / `FUN_0048d1c3` (the 3D view's mouse reads: buttons 0xc9 / 0xd1 rotate and zoom), `0x6aa9e8` / `0x6aa9ec` / `0x6aa9a4` (399, 249, 800).

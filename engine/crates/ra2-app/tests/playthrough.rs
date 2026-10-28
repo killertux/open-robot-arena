@@ -907,6 +907,8 @@ fn a_new_workshop_robot_joins_the_roster() {
         .unwrap();
     shell.click_named("workshop button").unwrap();
     let mut builder = flow::open_workshop(game, Some(free as usize)).unwrap();
+    // A blank robot's later tabs are dim until it has a chassis shape.
+    builder.draw_square_chassis().unwrap();
     builder.click_named("components button").unwrap();
     builder.click_named("mechanics button").unwrap();
     builder
@@ -1399,4 +1401,187 @@ fn fight_event(
         guard += 1;
     }
     over
+}
+
+/// A robot built from nothing in the Bot Lab (docs/36 section 9.27): the lab opens blank on an empty
+/// cell (no chassis, weight 0.0, Classification `None`, Components, Wiring, Paint Shop and Test Robot
+/// dim), the baseplate outline is drawn and closed on the blueprint, step 2 and Finished extrude it,
+/// the tabs light, a control board, two motors and their wheels are placed, an analog control is
+/// dragged onto the controller (W and S), the motors are wired to it in the connection window, the
+/// robot is named, saved by Back to HQ into the selected cell, and then it drives in a match.
+#[test]
+fn a_robot_built_from_nothing_is_wired_saved_and_fights() {
+    use ra2_app::build_mode::PlaceOn;
+    let Some(scratch) = ScratchGame::new("fromnothing") else {
+        return;
+    };
+    let game = scratch.path();
+    let _guard = ra2script::lock();
+    let mut shell = window_shell(game);
+    for name in ["Team HQ button", "continue button"] {
+        shell.click_named(name).unwrap();
+    }
+    let first = ra2fmt::team::read_table(&game.join("Teams/Teams.txt"))
+        .unwrap()
+        .teams[0]
+        .robots[0] as usize;
+    flow::scrap_prompt(&mut shell, Some(first)).unwrap();
+    shell.click_named("yes button").unwrap();
+    let free = first;
+    let mut b = flow::open_workshop(game, Some(free)).unwrap();
+    b.set_size([1024.0, 768.0]).unwrap();
+
+    // Blank: nothing built, the later tabs dim and deaf.
+    assert!(b.build().is_blank());
+    assert_eq!(b.build().stats().mass, 1.0);
+    b.click_named("components button").unwrap();
+    assert_eq!(b.tab(), Some("overview button"), "a dim tab takes no click");
+
+    // Chassis: Structure Design, step 1, a square drawn and closed, step 2, Finished.
+    b.click_named("chassis button").unwrap();
+    b.click_named("structure design button").unwrap();
+    for p in [[200, 200], [800, 200], [800, 800], [200, 800], [200, 200]] {
+        let at = b.outline_point_for(p).unwrap();
+        b.click(at[0], at[1]).unwrap();
+    }
+    assert_eq!(b.build().chassis().unwrap().bottom.len(), 4);
+    b.click_named("step 2 button").unwrap();
+    assert!(!b.build().is_blank(), "step 2 extrudes the outline");
+    b.click_named("finished button").unwrap();
+    assert_eq!(b.tab(), Some("chassis button"));
+    let mass = b.build().stats().mass;
+    assert!((mass - 94.1).abs() < 0.2, "aluminium square chassis {mass}");
+
+    // Components: board, battery, two motors on the baseplate, a wheel on each axle.
+    b.click_named("components button").unwrap();
+    b.place_component(
+        "Components\\controlboard.txt",
+        PlaceOn::Baseplate([0.0, 0.3]),
+    )
+    .unwrap_or_else(|_| {
+        b.click_named("power button").unwrap();
+        b.place_component_free("Components\\controlboard.txt")
+            .unwrap()
+    });
+    let mut motors = Vec::new();
+    for x in [-0.55f32, 0.55] {
+        b.click_named("mechanics button").unwrap();
+        let motor = b
+            .place_component("Components\\ztek1.txt", PlaceOn::Baseplate([x, -0.2]))
+            .or_else(|_| b.place_component_free("Components\\ztek1.txt"))
+            .unwrap();
+        let axle = b
+            .build()
+            .component_info(motor)
+            .and_then(|i| {
+                i.mounts
+                    .iter()
+                    .find(|(_, a)| a.types.iter().any(|t| t == "axle_m"))
+                    .map(|(id, _)| *id)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "a motor axle: component {motor} of {:?}",
+                    b.build()
+                        .components()
+                        .iter()
+                        .map(|c| c.file.clone())
+                        .collect::<Vec<_>>()
+                )
+            });
+        b.click_named("mobility button").unwrap();
+        b.place_component(
+            "Components\\miniwheel.txt",
+            PlaceOn::Mount {
+                parent: motor,
+                mount: axle,
+            },
+        )
+        .unwrap();
+        motors.push(motor);
+    }
+    assert!(b.build().has_control_board());
+
+    // Wiring: drag ANALOG onto a cell, type the keys, OK.
+    b.click_named("wiring button").unwrap();
+    assert_eq!(b.tab(), Some("wiring button"), "the board lights Wiring");
+    let icon = b.point_of("new analog").unwrap();
+    b.click(icon[0], icon[1]).unwrap();
+    let cell = b.control_cell_point([0, 0]).unwrap();
+    b.mouse_released(cell[0], cell[1]);
+    assert!(b.dialog_open(), "the drop opens the Analog Control window");
+    for (field, key) in [("input1", 'w'), ("input2", 's')] {
+        let at = b.dialog_point_for(field).unwrap();
+        b.click(at[0], at[1]).unwrap();
+        b.type_char(key);
+    }
+    let ok = b.dialog_point_for("ok button").unwrap();
+    b.click(ok[0], ok[1]).unwrap();
+    assert!(!b.dialog_open());
+    let control = b.build().board().control_at([0, 0]).unwrap().clone();
+    assert_eq!(control.name, "New Analog");
+    assert_eq!(control.key_label(), "W - S");
+
+    // Select the control, click each motor in the 3D view, pick Spin Clockwise on both inputs.
+    b.click(cell[0], cell[1]).unwrap();
+    for motor in &motors {
+        let at = b.part_point(*motor).unwrap();
+        b.click(at[0], at[1]).unwrap();
+        assert!(
+            b.dialog_open(),
+            "a click on the motor opens its connection window"
+        );
+        for (field, row) in [("input1 map", 1usize), ("input2 map", 2)] {
+            let at = b.dialog_point_for(field).unwrap();
+            b.click(at[0], at[1]).unwrap();
+            let rows = b.dialog_list_point(row).unwrap();
+            b.click(rows[0], rows[1]).unwrap();
+        }
+        let ok = b.dialog_point_for("ok button").unwrap();
+        b.click(ok[0], ok[1]).unwrap();
+    }
+    assert!(
+        b.build().board().bindings.len() >= 4,
+        "{:?}",
+        b.build().board().bindings
+    );
+
+    // Name it on the Overview and leave.
+    b.click_named("overview button").unwrap();
+    for c in "Bolt".chars() {
+        b.type_char(c);
+    }
+    b.click_named("back button").unwrap();
+    let saved = flow::close_workshop(&mut b, &mut shell).unwrap().unwrap();
+    assert!(saved.ends_with(format!("Teams/Team0/Bot{free}.bot")));
+    let bot = ra2fmt::bot::parse(&std::fs::read(&saved).unwrap()).unwrap();
+    assert_eq!(bot.name, "Bolt");
+    assert_eq!(bot.class, 0);
+    assert!(bot.components.len() >= 6);
+    assert!(bot.bindings.len() >= 4);
+    assert_eq!(bot.controllers.len(), 1);
+
+    // It fights: robot 0 is the new robot, driven forward through its own wiring.
+    let options = ra2_app::play_mode::Options {
+        game: game.to_path_buf(),
+        drive: "0-3:1,0".into(),
+        seconds: 4.0,
+        out: std::env::temp_dir().join(format!("ra2-fromnothing-{}", std::process::id())),
+        size: [1280, 1005],
+        arena_script: Some("box.py".into()),
+        arena_index: None,
+        game_type: None,
+        team: Some(0),
+        bot: Some(free as i32),
+        opponent_team: None,
+        opponent_bot: None,
+        time: None,
+    };
+    let outcome = ra2_app::play_mode::run_headless(&options).expect("the play run completes");
+    assert_eq!(outcome.player_bot, "Bolt");
+    assert!(
+        outcome.distance > 0.5,
+        "the built robot drove {:.2} m",
+        outcome.distance
+    );
 }

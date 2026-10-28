@@ -576,6 +576,12 @@ fn parse_chassis(lines: &mut Lines, ver: (i32, i32)) -> Result<Chassis, Error> {
             ]);
         }
     }
+    if !has_model && lines.peek() == b"0" {
+        // A chassis with no shape yet (a blank robot's) carries one `0` line
+        // before its armour row (live: the original's untouched new robot,
+        // `teamhq-newbot-empty__live__000.bot`).
+        lines.line();
+    }
     // Armour: a type row, plus an extra row when a 3D model is present.
     //
     //   <type> <weight per square unit> 0 <hardness> 0
@@ -803,6 +809,9 @@ impl Writer<'_> {
                 self.line(&format!("{} 3 {} {} {} ", c[0], c[1], c[2], c[3]));
             }
         }
+        if ch.mesh.is_none() {
+            self.line("0");
+        }
         let armour = ch.armour.unwrap_or_default();
         self.line(&format!(
             "{} {} 0 {} 0",
@@ -934,6 +943,17 @@ struct Lines<'a> {
 }
 
 impl<'a> Lines<'a> {
+    /// The next line, without consuming it.
+    fn peek(&self) -> &'a [u8] {
+        let rest = &self.d[self.p..];
+        let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+        let mut s = &rest[..end];
+        if s.last() == Some(&b'\r') {
+            s = &s[..s.len() - 1];
+        }
+        s
+    }
+
     fn line(&mut self) -> &'a [u8] {
         let start = self.p;
         let end = match self.d[self.p..].iter().position(|&b| b == b'\n') {

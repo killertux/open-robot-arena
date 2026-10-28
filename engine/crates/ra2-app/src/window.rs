@@ -901,7 +901,24 @@ impl ApplicationHandler for App {
                         }
                         PhysicalKey::Code(KeyCode::Enter) => {
                             if let Some(builder) = &mut self.builder {
-                                action = Some(builder.enter());
+                                if !builder.dialog_open() {
+                                    action = Some(builder.enter());
+                                }
+                            }
+                        }
+                        PhysicalKey::Code(
+                            code @ (KeyCode::ArrowUp
+                            | KeyCode::ArrowDown
+                            | KeyCode::ArrowLeft
+                            | KeyCode::ArrowRight),
+                        ) => {
+                            if let Some(builder) = &mut self.builder {
+                                builder.key_named(match code {
+                                    KeyCode::ArrowUp => "Up",
+                                    KeyCode::ArrowDown => "Down",
+                                    KeyCode::ArrowLeft => "Left",
+                                    _ => "Right",
+                                });
                             }
                         }
                         PhysicalKey::Code(KeyCode::KeyZ) if ctrl => {
@@ -1117,6 +1134,21 @@ impl ApplicationHandler for App {
                 if rows != 0 && self.shell.scroll_at(point[0], point[1], rows) {
                     if let Some(window) = &self.window {
                         window.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // A control icon dragged from the Wiring strip lands where the button comes up.
+                if self.session.is_none() && self.builder.is_some() {
+                    if let Some(point) = self.cursor.and_then(|c| self.map_cursor(c)) {
+                        if let Some(builder) = self.builder.as_mut() {
+                            builder.mouse_released(point[0], point[1]);
+                        }
+                        self.request_redraw();
                     }
                 }
             }

@@ -72,7 +72,11 @@ pub fn inventory_robot_path(game: &Path, index: usize) -> Option<PathBuf> {
 /// or a new robot from the stock chassis when none is selected.
 pub fn open_workshop(game: &Path, robot: Option<usize>) -> Result<Builder, String> {
     let path = robot.and_then(|index| inventory_robot_path(game, index));
-    let mut builder = Builder::open(game, path.as_deref())?;
+    // An empty cell opens the original's blank robot (no chassis shape yet); a robot opens as it is.
+    let mut builder = match path {
+        Some(_) => Builder::open(game, path.as_deref())?,
+        None => Builder::open_blank(game, crate::SHELL_SIZE)?,
+    };
     builder.apply_debug_panel_default()?;
     match path {
         Some(path) => builder.set_team_target(path),

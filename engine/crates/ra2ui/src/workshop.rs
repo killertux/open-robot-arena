@@ -52,6 +52,7 @@ use crate::{input, Fonts, Placement};
 
 pub mod build;
 pub mod chassis;
+pub mod extrude;
 pub mod library;
 pub mod paint;
 pub mod placement;
