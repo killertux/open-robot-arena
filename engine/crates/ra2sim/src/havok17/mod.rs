@@ -4,10 +4,9 @@
 //!
 //! Our own code does everything Havok does to a body — integration, the
 //! collision resolver, the constraint solver with its motors, the drag action,
-//! backstepping — in Havok's order. Jolt is used only as a geometry engine: it
-//! holds every body's shape at its current pose and answers closest-point
-//! queries ("which surfaces are within the tolerance of this shape") and ray
-//! casts; Jolt's own solver never runs.
+//! backstepping — in Havok's order. Nothing else is needed: the geometry
+//! queries beyond the collision agents (deep overlaps, phantoms, ray casts) are
+//! our own, in [`query`], over the same pieces the agents collide.
 //!
 //! One [`PhysicsBackend::step`] is one Havok substep. The game steps its world
 //! at a fixed 1/30 s split in two substeps (`FUN_004ac1d0`: `+0x4 = 1/30`,
@@ -32,23 +31,17 @@ pub mod mass;
 pub mod mopp;
 pub mod narrow;
 pub mod obbtree;
+pub mod query;
 pub mod resolver;
 
 use std::collections::HashMap;
-
-use glam::{Mat3, Quat, Vec3, Vec4};
-use oxijolt::prelude::math as m;
-use oxijolt::prelude::{
-    Activation, BodyId, BodySettings, PhysicsWorld, QueryFilter, RayCast, Shape, WorldSettings,
-};
-use oxijolt::CollideShape;
 
 use crate::backend::{
     BackendError, BodyDesc, BodyHandle, BodyState, ContactEvent, HingeDesc, JointHandle,
     MotionType, PhysicsBackend, RayHit, ShapeDesc, SliderDesc, StepInfo,
 };
-use crate::jolt::JoltBackend;
 use body::Body;
+use glam::{Mat3, Quat, Vec3, Vec4};
 use joints::{Joint, Kind};
 use narrow::{Aabb, ConvexManifold, MeshManifold, Piece, PieceShape, Pose};
 use resolver::Contact;
@@ -134,32 +127,8 @@ fn dump_vec(v: Vec3) -> String {
     format!("[{},{},{}]", v.x, v.y, v.z)
 }
 
-fn rv(v: Vec3) -> m::RVec3 {
-    m::RVec3::new(v.x as m::Real, v.y as m::Real, v.z as m::Real)
-}
-
-fn jv(v: Vec3) -> m::Vec3 {
-    m::Vec3::new(v.x, v.y, v.z)
-}
-
-#[allow(clippy::unnecessary_cast)]
-fn un_rv(v: m::RVec3) -> Vec3 {
-    Vec3::new(v.x as f32, v.y as f32, v.z as f32)
-}
-
-fn un_v(v: m::Vec3) -> Vec3 {
-    Vec3::new(v.x, v.y, v.z)
-}
-
-fn jq(q: Quat) -> m::Quat {
-    m::Quat::from_xyzw(q.x, q.y, q.z, q.w)
-}
-
-/// A body's geometry in the Jolt query world.
+/// A body's geometry.
 struct Geometry {
-    id: BodyId,
-    shape: Shape,
-    phantom: Option<Shape>,
     /// The body's collidables, body-local (what [`narrow`] collides).
     pieces: Vec<Piece>,
     /// The phantom's pieces, body-local (the start-point lowering's test sees
@@ -199,11 +168,8 @@ struct Saved {
 
 /// The Havok-1.7-faithful backend.
 pub struct Havok17Backend {
-    world: PhysicsWorld,
     bodies: Vec<Body>,
     geometry: Vec<Option<Geometry>>,
-    /// Jolt body id (raw) → our handle.
-    lookup: HashMap<u32, usize>,
     joints: Vec<Joint>,
     /// The angular dashpots (actions, run before the constraint solver).
     dashpots: Vec<dashpot::AngularDashpot>,
@@ -243,13 +209,9 @@ pub struct Havok17Backend {
 
 impl Havok17Backend {
     pub fn new() -> Result<Self, BackendError> {
-        let world = PhysicsWorld::new(WorldSettings::default().gravity(jv(GRAVITY)))
-            .map_err(|e| BackendError::World(format!("{e:?}")))?;
         Ok(Self {
-            world,
             bodies: Vec::new(),
             geometry: Vec::new(),
-            lookup: HashMap::new(),
             joints: Vec::new(),
             dashpots: Vec::new(),
             contacts: Vec::new(),
@@ -299,37 +261,6 @@ impl Havok17Backend {
             Mat3::from_diagonal(Vec3::splat(1.0 / (m * 0.01)))
         };
         (m, props.com, inv)
-    }
-
-    /// Put every moving body's geometry where the body is.
-    fn sync(&mut self) {
-        for (i, b) in self.bodies.iter().enumerate() {
-            if !b.moves() {
-                continue;
-            }
-            if let Some(g) = &self.geometry[i] {
-                if let Ok(mut body) = self.world.body_mut(g.id) {
-                    let _ = body.set_position_and_rotation(
-                        rv(b.origin()),
-                        jq(b.rotation),
-                        Activation::DontActivate,
-                    );
-                }
-            }
-        }
-    }
-
-    fn sync_one(&mut self, i: usize) {
-        let b = &self.bodies[i];
-        if let Some(g) = &self.geometry[i] {
-            if let Ok(mut body) = self.world.body_mut(g.id) {
-                let _ = body.set_position_and_rotation(
-                    rv(b.origin()),
-                    jq(b.rotation),
-                    Activation::DontActivate,
-                );
-            }
-        }
     }
 
     /// Whether two bodies never collide: parts of one robot, or a pair the
@@ -509,7 +440,6 @@ impl Havok17Backend {
     /// 0x130`, `FUN_00542db0`): a pair whose shapes overlap, unless an earlier
     /// bad step excused it, and a pair with a point closer than `current_tol`.
     fn detect(&mut self, current_tol: f32) -> (Vec<Contact>, Vec<PairKey>) {
-        self.sync();
         self.detections += 1;
         let stamp = self.detections;
         let tol = TOLERANCE;
@@ -687,9 +617,12 @@ impl Havok17Backend {
         }
         // Ours: Havok reports nothing for overlapping shapes and backsteps
         // until they are apart; when the step is accepted overlapping anyway,
-        // the deepest points Jolt finds for the pair push it apart.
+        // the deepest points [`query`] finds for the pair push it apart.
         for (i, j) in penetrating_bodies {
-            out.extend(self.overlap_contacts(i, j));
+            let contacts = self.overlap_contacts(i, j);
+            #[cfg(all(test, feature = "jolt"))]
+            query_diff::live_overlap(self, i, j, &contacts);
+            out.extend(contacts);
         }
         // A pair between two inactive bodies keeps its agent (the frozen
         // pairs, `0x548ab0`) for when one of them wakes.
@@ -864,38 +797,57 @@ impl Havok17Backend {
         false
     }
 
-    /// The overlap of bodies `i` and `j` as Jolt measures it: one point per
-    /// overlapping pair of sub-shapes, at negative distance.
+    /// A piece of body `b` where the body is now.
+    fn piece_pose(b: &Body, p: &Piece) -> Pose {
+        let body = Pose {
+            position: b.origin(),
+            rotation: b.rotation,
+        };
+        Pose {
+            position: body.apply(p.position),
+            rotation: body.rotation * p.rotation,
+        }
+    }
+
+    /// Whether the bounding spheres of two pieces (at their poses) overlap.
+    fn spheres_meet(a: &Piece, pa: &Pose, b: &Piece, pb: &Pose) -> bool {
+        let ca = pa.apply(a.sphere.0);
+        let cb = pb.apply(b.sphere.0);
+        let reach = a.sphere.1 + b.sphere.1 + 1e-3;
+        ca.distance_squared(cb) <= reach * reach
+    }
+
+    /// The overlap of bodies `i` and `j`: one point per overlapping pair of
+    /// collidables (and per overlapped triangle of a mesh), at negative
+    /// distance ([`query::collide`]).
     fn overlap_contacts(&self, i: usize, j: usize) -> Vec<Contact> {
         let (bi, bj) = (&self.bodies[i], &self.bodies[j]);
-        let Some(g) = &self.geometry[i] else {
-            return Vec::new();
-        };
-        let Some(target) = self.geometry[j].as_ref().map(|g| g.id) else {
-            return Vec::new();
-        };
-        let query = CollideShape::new(&g.shape, rv(bi.origin()), jq(bi.rotation));
-        let Ok(hits) = self
-            .world
-            .collide_shape(&query, &QueryFilter::new().exclude_body(g.id))
-        else {
+        let (Some(gi), Some(gj)) = (&self.geometry[i], &self.geometry[j]) else {
             return Vec::new();
         };
         let friction = (bi.friction * bj.friction).max(0.0).sqrt();
         let restitution = bi.restitution * bj.restitution;
+        let mut hits = Vec::new();
+        let mut scratch = Vec::new();
+        for pi in &gi.pieces {
+            let qpose = Self::piece_pose(bi, pi);
+            for pj in &gj.pieces {
+                let opose = Self::piece_pose(bj, pj);
+                if Self::spheres_meet(pi, &qpose, pj, &opose) {
+                    query::collide(pi, &qpose, pj, &opose, &mut scratch, &mut hits);
+                }
+            }
+        }
         hits.into_iter()
-            .filter(|h| h.body == target && h.penetration_depth > 0.0)
-            .filter_map(|h| {
-                let n = un_v(h.normal);
-                (n.length_squared() > 0.5).then(|| Contact {
-                    a: i,
-                    b: j,
-                    normal: n.normalize(),
-                    point: (un_rv(h.point_on_shape) + un_rv(h.point_on_body)) * 0.5,
-                    distance: -h.penetration_depth,
-                    friction,
-                    restitution,
-                })
+            .filter(|h| h.depth > 0.0)
+            .map(|h| Contact {
+                a: i,
+                b: j,
+                normal: h.normal,
+                point: (h.on_query + h.on_obstacle) * 0.5,
+                distance: -h.depth,
+                friction,
+                restitution,
             })
             .collect()
     }
@@ -910,43 +862,52 @@ impl Havok17Backend {
     /// rolling back onto its wheels finds each wheel touching only once its
     /// ring reaches the floor.
     fn detect_phantoms(&mut self) {
+        let mut hits = Vec::new();
+        let mut scratch = Vec::new();
         for i in 0..self.bodies.len() {
             self.phantom_touch[i] = None;
             let b = &self.bodies[i];
             if !b.alive {
                 continue;
             }
-            let Some(Some(phantom)) = self.geometry[i].as_ref().map(|g| g.phantom.as_ref()) else {
-                continue;
-            };
-            let id = self.geometry[i].as_ref().map(|g| g.id);
-            let query = CollideShape::new(phantom, rv(b.origin()), jq(b.rotation));
-            let filter = match id {
-                Some(id) => QueryFilter::new().exclude_body(id),
-                None => QueryFilter::new(),
-            };
-            let Ok(hits) = self.world.collide_shape(&query, &filter) else {
+            let Some(g) = self.geometry[i]
+                .as_ref()
+                .filter(|g| !g.phantom_pieces.is_empty())
+            else {
                 continue;
             };
             let mut best: Option<(f32, Vec3)> = None;
-            for hit in hits {
-                let Some(&j) = self.lookup.get(&hit.body.to_raw()) else {
-                    continue;
-                };
-                if j == i || !self.bodies[j].alive || self.bodies[j].sensor || self.same_group(i, j)
-                {
-                    continue;
-                }
-                let n = un_v(hit.normal);
-                if n.length_squared() < 0.5 || hit.penetration_depth < 0.0 {
-                    continue;
-                }
-                if best.is_none_or(|(d, _)| hit.penetration_depth > d) {
-                    best = Some((hit.penetration_depth, n.normalize()));
+            for ph in &g.phantom_pieces {
+                let qpose = Self::piece_pose(b, ph);
+                for (j, other) in self.bodies.iter().enumerate() {
+                    if j == i || !other.alive || other.sensor || self.same_group(i, j) {
+                        continue;
+                    }
+                    let Some(gj) = &self.geometry[j] else {
+                        continue;
+                    };
+                    for pj in &gj.pieces {
+                        let opose = Self::piece_pose(other, pj);
+                        if !Self::spheres_meet(ph, &qpose, pj, &opose) {
+                            continue;
+                        }
+                        hits.clear();
+                        query::collide(ph, &qpose, pj, &opose, &mut scratch, &mut hits);
+                        for h in &hits {
+                            if h.depth < 0.0 || h.normal.length_squared() < 0.5 {
+                                continue;
+                            }
+                            if best.is_none_or(|(d, _)| h.depth > d) {
+                                best = Some((h.depth, h.normal));
+                            }
+                        }
+                    }
                 }
             }
             self.phantom_touch[i] = best.map(|(_, n)| n);
         }
+        #[cfg(all(test, feature = "jolt"))]
+        query_diff::live_check(self);
     }
 
     /// The collision events of the contacts about to be resolved: one per
@@ -1216,24 +1177,6 @@ impl PhysicsBackend for Havok17Backend {
     }
 
     fn create_body(&mut self, desc: &BodyDesc) -> Result<BodyHandle, BackendError> {
-        let shape = JoltBackend::build_shape(&desc.shape)?;
-        let phantom = desc
-            .phantom
-            .as_ref()
-            .map(JoltBackend::build_shape)
-            .transpose()?;
-        let settings = match desc.motion {
-            MotionType::Static => BodySettings::new_static(),
-            _ => BodySettings::new_kinematic(),
-        }
-        .position(rv(desc.position))
-        .rotation(jq(desc.rotation))
-        .allow_sleeping(false)
-        .user_data(desc.user_data);
-        let id = self
-            .world
-            .create_body(&shape, &settings)
-            .map_err(|e| BackendError::Body(format!("{e:?}")))?;
         let (mass, com_local, inv_inertia) = if desc.motion == MotionType::Dynamic {
             let (m, com, inv) = Self::mass_of(&desc.shape, desc.mass);
             match desc.inertia.filter(|i| i.determinant().abs() > 1e-12) {
@@ -1243,6 +1186,8 @@ impl PhysicsBackend for Havok17Backend {
         } else {
             (0.0, mass::of_shape(&desc.shape).com, Mat3::ZERO)
         };
+        #[cfg(all(test, feature = "jolt"))]
+        query_diff::RECORDED.with(|r| r.borrow_mut().push(desc.clone()));
         let mut body = Body {
             alive: true,
             motion: desc.motion,
@@ -1280,11 +1225,7 @@ impl PhysicsBackend for Havok17Backend {
             body.system = Some(s);
         }
         self.bodies.push(body);
-        self.lookup.insert(id.to_raw(), handle);
         self.geometry.push(Some(Geometry {
-            id,
-            shape,
-            phantom,
             pieces: narrow::pieces_of(&desc.shape),
             phantom_pieces: desc
                 .phantom
@@ -1326,10 +1267,7 @@ impl PhysicsBackend for Havok17Backend {
             return;
         };
         b.alive = false;
-        if let Some(g) = self.geometry[i].take() {
-            let _ = self.world.remove_body(g.id);
-            self.lookup.remove(&g.id.to_raw());
-        }
+        self.geometry[i] = None;
         self.contacts.retain(|c| c.a != i && c.b != i);
         self.mesh_manifolds.retain(|k, _| k.0 != i && k.2 != i);
         self.convex_manifolds.retain(|k, _| k.0 != i && k.2 != i);
@@ -1348,7 +1286,6 @@ impl PhysicsBackend for Havok17Backend {
     fn set_transform(&mut self, handle: BodyHandle, position: Vec3, rotation: Quat) {
         if let Some(b) = self.body_mut(handle) {
             b.set_origin(position, rotation);
-            self.sync_one(handle as usize);
         }
     }
 
@@ -1572,31 +1509,40 @@ impl PhysicsBackend for Havok17Backend {
         max_distance: f32,
         exclude: BodyHandle,
     ) -> Option<RayHit> {
-        let dir = direction.normalize_or_zero() * max_distance;
-        if dir == Vec3::ZERO {
+        let dir = direction.normalize_or_zero();
+        if dir == Vec3::ZERO || max_distance <= 0.0 {
             return None;
         }
-        let ray = RayCast::new(rv(origin), jv(dir));
-        let skip = self
-            .geometry
-            .get(exclude as usize)
-            .and_then(|g| g.as_ref())
-            .map(|g| g.id);
-        let filter = match skip {
-            Some(id) => QueryFilter::new().exclude_body(id),
-            None => QueryFilter::default(),
-        };
-        let hit = self.world.cast_ray(&ray, &filter).ok()??;
-        Some(RayHit {
-            body: self
-                .lookup
-                .get(&hit.body.to_raw())
-                .map(|&h| h as BodyHandle)
-                .unwrap_or(u32::MAX),
-            distance: hit.distance,
-            point: origin + direction.normalize_or_zero() * hit.distance,
-            normal: un_v(hit.normal),
-        })
+        let mut best: Option<RayHit> = None;
+        for (i, (b, g)) in self.bodies.iter().zip(&self.geometry).enumerate() {
+            let Some(g) = g else { continue };
+            if i == exclude as usize || !b.alive {
+                continue;
+            }
+            for p in &g.pieces {
+                let pose = Self::piece_pose(b, p);
+                // Past the nearest hit already, or the bounding sphere is missed.
+                let reach = best.as_ref().map_or(max_distance, |h| h.distance);
+                let c = pose.apply(p.sphere.0);
+                let along = (c - origin).dot(dir);
+                let off2 = (c - origin).length_squared() - along * along;
+                let r = p.sphere.1 + 1e-3;
+                if off2 > r * r || along < -r || along - r > reach {
+                    continue;
+                }
+                if let Some((distance, normal)) = query::ray_piece(p, &pose, origin, dir, reach) {
+                    if best.as_ref().is_none_or(|h| distance < h.distance) {
+                        best = Some(RayHit {
+                            body: i as BodyHandle,
+                            distance,
+                            point: origin + dir * distance,
+                            normal,
+                        });
+                    }
+                }
+            }
+        }
+        best
     }
 
     fn create_hinge(&mut self, desc: &HingeDesc) -> Result<JointHandle, BackendError> {
@@ -2012,13 +1958,7 @@ impl PhysicsBackend for Havok17Backend {
         if self.body(handle).is_none() {
             return Err(BackendError::Body("set_shape on a missing body".into()));
         }
-        let built = JoltBackend::build_shape(shape)?;
         if let Some(g) = &mut self.geometry[i] {
-            if let Ok(mut body) = self.world.body_mut(g.id) {
-                body.set_shape(&built, None, Activation::DontActivate)
-                    .map_err(|e| BackendError::Body(format!("set_shape: {e:?}")))?;
-            }
-            g.shape = built;
             g.pieces = narrow::pieces_of(shape);
         }
         let b = &mut self.bodies[i];
@@ -2037,5 +1977,8 @@ impl PhysicsBackend for Havok17Backend {
     }
 }
 
+#[cfg(all(test, feature = "jolt"))]
+#[allow(clippy::needless_range_loop)]
+mod query_diff;
 #[cfg(test)]
 mod tests;

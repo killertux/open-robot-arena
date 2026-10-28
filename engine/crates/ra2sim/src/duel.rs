@@ -4444,6 +4444,7 @@ mod tests {
     /// and the script's own 40000 push. `FireTeeth` is one push over one step,
     /// so the spike shoots up its whole travel and then falls back under
     /// gravity until the next punch — which is why this measures the peak.
+    #[cfg(feature = "jolt")]
     #[test]
     fn a_slider_lets_its_body_rise() {
         let mut physics: Box<dyn PhysicsBackend> =
