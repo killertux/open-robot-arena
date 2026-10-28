@@ -191,6 +191,9 @@ pub struct Material {
     pub lighting: bool,
     pub z_write: bool,
     pub z_test: bool,
+    /// Drawn first, in order, with its blend state, instead of joining the sorted blended pass
+    /// (the lab's chassis ghost goes down before the parts inside it, which then cover it).
+    pub early: bool,
     /// `CULL_CCW` (true) or none.
     pub cull: bool,
     /// `D3DMATERIAL8` diffuse, ambient, specular (RGBA) and power.
@@ -326,6 +329,7 @@ impl Default for Material {
             lighting: true,
             z_write: true,
             z_test: true,
+            early: false,
             cull: true,
             diffuse: [1.0; 4],
             ambient: [1.0; 4],

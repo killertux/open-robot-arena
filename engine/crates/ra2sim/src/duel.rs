@@ -505,7 +505,13 @@ pub(crate) fn spawn_prop(
             inertia = Some(i);
         }
     }
-    let mut desc = BodyDesc::new(MotionType::Dynamic, shape)
+    // Mass 0 is a fixed body.
+    let motion = if p.mass > 0.0 {
+        MotionType::Dynamic
+    } else {
+        MotionType::Static
+    };
+    let mut desc = BodyDesc::new(motion, shape)
         .at(p.position)
         .with_rotation(p.rotation)
         .with_friction(p.friction)
@@ -1025,6 +1031,10 @@ impl Duel {
         let arena = scene::load_arena(arena_path)?;
         std::env::remove_var("RA2_OBSTACLE");
         let mut prop_defs = scene::load_props(arena_path, &obstacle)?;
+        // The script's own obstacles (the practice arena's crates, blocks, barrels, cones) rest
+        // as one deactivation system until something hits them: live, the block pyramid stands
+        // for as long as it is left alone.
+        let xtra_count = prop_defs.len();
         prop_defs.extend(scene::load_havok_props(arena_path)?);
 
         let mut physics: Box<dyn PhysicsBackend> = crate::backend::create_backend(arena.gravity)?;
@@ -1036,9 +1046,19 @@ impl Duel {
         )?;
 
         let mut props = Vec::new();
-        for p in prop_defs {
+        let mut xtra_bodies = Vec::new();
+        for (i, p) in prop_defs.into_iter().enumerate() {
             if let Some(body) = spawn_prop(&mut *physics, &p) {
+                if i < xtra_count && p.mass > 0.0 {
+                    xtra_bodies.push(body);
+                }
                 props.push(PropEntity { body, prop: p });
+            }
+        }
+        if !xtra_bodies.is_empty() {
+            physics.deactivation_system(&xtra_bodies, crate::havok17::deactivation::SYSTEM_SCALE);
+            for &body in &xtra_bodies {
+                physics.set_active(body, false);
             }
         }
         let no_collide = no_collide_pairs(arena_path);

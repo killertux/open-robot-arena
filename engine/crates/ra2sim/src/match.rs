@@ -210,6 +210,9 @@ pub struct MatchConfig {
     pub results_delay: f32,
     /// Physics step.
     pub dt: f32,
+    /// The Bot Lab's `Test Robot`: one robot alone in the practice arena. No countdown, no
+    /// robot held on its start point, no judges or last-robot rule: the match never ends.
+    pub practice: bool,
 }
 
 impl MatchConfig {
@@ -225,7 +228,14 @@ impl MatchConfig {
             countdown: COUNTDOWN_SECONDS,
             results_delay: DEFAULT_RESULTS_DELAY,
             dt: DEFAULT_STEP,
+            practice: false,
         }
+    }
+
+    /// One robot alone in the practice arena (the lab's `Test Robot`).
+    pub fn with_practice(mut self) -> Self {
+        self.practice = true;
+        self
     }
 
     /// Apply the config file's `EventNumBots` with the original's clamp.
@@ -450,7 +460,11 @@ impl Match {
             GameType::BattleRoyal => config.bot_count,
             _ => config.robots.len(),
         };
-        if !(2..=4).contains(&spawn_count) {
+        if config.practice {
+            if spawn_count != 1 {
+                return Err(format!("a practice run has one robot, got {spawn_count}").into());
+            }
+        } else if !(2..=4).contains(&spawn_count) {
             return Err(
                 format!("a match needs 2 to 4 robots, the event asks for {spawn_count}").into(),
             );
@@ -498,7 +512,9 @@ impl Match {
         }
         // The original holds every robot where it lowered it onto its start
         // point until the bell (docs/29 section 12v).
-        duel.hold_robots(true);
+        if !config.practice {
+            duel.hold_robots(true);
+        }
 
         let teams = team_table(&config.arena);
         let player_teams = player_team_table(&config.arena);
@@ -507,11 +523,20 @@ impl Match {
             .iter()
             .map(|entry| bot_preview(&entry.bot_path))
             .collect();
+        let state = if config.practice {
+            MatchState::Fight
+        } else {
+            MatchState::Countdown
+        };
         Ok(Match {
-            countdown_left: config.countdown,
+            countdown_left: if config.practice {
+                0.0
+            } else {
+                config.countdown
+            },
             config,
             duel,
-            state: MatchState::Countdown,
+            state,
             clock: 0.0,
             over_left: 0.0,
             reason: None,
@@ -947,6 +972,9 @@ impl Match {
     /// `isMatchOver` byte, so the last-robot/team check later in the same
     /// update is skipped. The time-out therefore wins a tie at the boundary.
     fn end_reason(&self) -> Option<WinReason> {
+        if self.config.practice {
+            return None;
+        }
         let alive: Vec<usize> = (0..self.duel.robots.len())
             .filter(|&i| self.duel.robots[i].is_alive())
             .collect();

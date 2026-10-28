@@ -37,6 +37,69 @@ fn main() -> Result<(), String> {
                 builder.mouse_moved(num(&args[i + 1])?, num(&args[i + 2])?);
                 i += 3;
             }
+            "cam" => {
+                builder.set_lab_cam(ra2_app::build_mode::LabCam {
+                    pitch: num(&args[i + 1])?,
+                    yaw: num(&args[i + 2])?,
+                    dist: num(&args[i + 3])?,
+                });
+                i += 4;
+            }
+            "hit" => {
+                for line in builder.debug_hit(num(&args[i + 1])?, num(&args[i + 2])?) {
+                    println!("{line}");
+                }
+                i += 3;
+            }
+            "tick" => {
+                // `tick SECONDS`: the practice arena runs that much wall time in 1/60 s slices.
+                let seconds = num(&args[i + 1])?;
+                let mut left = seconds;
+                while left > 0.0 {
+                    let slice = left.min(1.0 / 60.0);
+                    builder.advance(slice);
+                    left -= slice;
+                }
+                i += 2;
+            }
+            "keys" => {
+                // `keys DOWN|UP SCANCODE`: a robot key (W 17, A 30, S 31, D 32, Space 57).
+                let mut input = builder.drive();
+                input.keys.set(
+                    args[i + 2].parse::<i32>().map_err(|e| e.to_string())?,
+                    args[i + 1] == "down",
+                );
+                builder.set_drive(input);
+                i += 3;
+            }
+            "arenashot" => {
+                let size = [1024u32, 580];
+                let pixels = builder.arena_frame(size)?;
+                image::RgbaImage::from_raw(size[0], size[1], pixels)
+                    .ok_or("bad frame")?
+                    .save(&args[i + 1])
+                    .map_err(|e| e.to_string())?;
+                i += 2;
+            }
+            "where" => {
+                if let Some(arena) = builder.arena_mut() {
+                    let robot = &arena.matched.duel.robots[0];
+                    let p = robot.position(&*arena.matched.duel.physics);
+                    println!(
+                        "robot at {:.3} {:.3} {:.3} t={:.2}",
+                        p.x,
+                        p.y,
+                        p.z,
+                        arena.matched.clock()
+                    );
+                    let c = &arena.matched.duel.scene_camera;
+                    println!(
+                        "camera {:?} eye {:?} rot {:?} fov {:.4} range {:?}",
+                        c.kind, c.position, c.rotation, c.fov, c.fov_range
+                    );
+                }
+                i += 1;
+            }
             "shot" => {
                 builder.shot(Path::new(&args[i + 1]), [1024, 768])?;
                 i += 2;

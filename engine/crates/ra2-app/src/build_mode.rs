@@ -42,6 +42,7 @@
 //! click-to-place then click-to-bind (the grid's note says drag; the model call
 //! is the same `ControlBoard::add`).
 
+use std::f32::consts::FRAC_PI_2;
 use std::path::{Path, PathBuf};
 
 use glam::{Mat4, Vec3};
@@ -144,6 +145,86 @@ impl DrawStyle {
     }
 }
 
+/// The Paint Shop's Color Fill state (`colorfill.gib`, live captures of the Paint Shop): the picker's
+/// target (fractions of the `hue group`), the shade / tint slider (0 dark .. 1 white) and the colour
+/// the swatch shows. Live the swatch starts as a colour of its own (`(185, 150, 18)` in the first
+/// captures, `(161, 176, 25)` in another run) with the target at 0.18 / 0.26 and the thumb at 0.4;
+/// the first click on the picker or the slider makes it the target's hue and saturation at the
+/// thumb's lightness (measured: target 0.184 / 0.253, thumb 0.40 gives `(161, 176, 25)`).
+#[derive(Clone, Copy, Debug)]
+pub struct PaintColor {
+    pub marker: [f32; 2],
+    pub lum: f32,
+    pub rgb: [u8; 3],
+    drag: Option<PaintDrag>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaintDrag {
+    Picker,
+    Slider,
+}
+
+impl Default for PaintColor {
+    fn default() -> Self {
+        PaintColor {
+            marker: [0.184, 0.253],
+            lum: 0.4,
+            rgb: [185, 150, 18],
+            drag: None,
+        }
+    }
+}
+
+impl PaintColor {
+    /// The colour the picker's target (`x` = hue, `1 - y` = saturation) and the slider choose: HSL.
+    pub fn picked(&self) -> [u8; 3] {
+        let h = self.marker[0].clamp(0.0, 1.0) * 360.0;
+        let s = (1.0 - self.marker[1]).clamp(0.0, 1.0);
+        let l = self.lum.clamp(0.0, 1.0);
+        let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+        let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+        let m = l - c / 2.0;
+        let (r, g, b) = match (h / 60.0) as u32 {
+            0 => (c, x, 0.0),
+            1 => (x, c, 0.0),
+            2 => (0.0, c, x),
+            3 => (0.0, x, c),
+            4 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+        let byte = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+        [byte(r), byte(g), byte(b)]
+    }
+}
+
+/// The lab's orbit camera (`FUN_005a6260`, mode 2): one per tab, 5 m from the robot's origin to
+/// start, pitch and yaw 0, the wheel zooming within the tab's limits and the middle button
+/// turning it (0.01 rad per mouse count).
+#[derive(Clone, Copy, Debug)]
+pub struct LabCam {
+    pub pitch: f32,
+    pub yaw: f32,
+    pub dist: f32,
+}
+
+impl LabCam {
+    pub const START: LabCam = LabCam {
+        pitch: 0.0,
+        yaw: 0.0,
+        dist: 5.0,
+    };
+
+    /// The eye and up vector in the robot's own space, looking at its origin.
+    pub fn eye_up(&self) -> (Vec3, Vec3) {
+        let (sp, cp) = self.pitch.sin_cos();
+        let (sy, cy) = self.yaw.sin_cos();
+        let eye = -self.dist * Vec3::new(sy * cp, sp, cy * cp);
+        let up = Vec3::new(-sp * sy, cp, -sp * cy);
+        (eye, up)
+    }
+}
+
 /// The camera the last preview frame used, so a click can be unprojected back
 /// into the bot's own space. The framing is ours; the geometry is the model's.
 #[derive(Clone, Copy, Debug)]
@@ -221,6 +302,7 @@ pub struct Builder {
     palette_scroll: usize,
     selected_texture: Option<TextureEntry>,
     paint_mode: PaintMode,
+    paint_color: PaintColor,
     selected_decal: Option<TextureEntry>,
     selected_group: Option<usize>,
     decal_at: [f32; 2],
@@ -236,6 +318,9 @@ pub struct Builder {
     shape_length: i32,
     shape_width: i32,
     name_buffer: String,
+    /// The Overview's `bot name textbox` has the focus: live, a key goes to the box only after a
+    /// click on it, and it is added to the text that is there (`Enter Bot Name` included).
+    name_focus: bool,
     name_edited: bool,
     designs: PathBuf,
     custom_textures: PathBuf,
@@ -244,6 +329,15 @@ pub struct Builder {
     revision: u64,
     preview: Option<(u64, Vec<u8>, u32, u32)>,
     preview_camera: Option<PreviewCamera>,
+    preview_view_key: String,
+    /// The control cell and the time of the last click on one, for the double click that opens it.
+    last_control_click: Option<(std::time::Instant, [i32; 2])>,
+    /// The practice arena of the `Test Robot` tab while that tab is on screen.
+    arena: Option<crate::lab_arena::LabArena>,
+    /// The `Obstacles` radio the player last picked (`none` after a visit starts over).
+    arena_obstacle: &'static str,
+    /// The lab camera of each tab.
+    lab_cams: std::collections::HashMap<String, LabCam>,
     test_requested: bool,
     test_seconds: f32,
     last_report: Option<ra2sim::r#match::MatchReport>,
@@ -504,6 +598,7 @@ impl Builder {
             palette_scroll: 0,
             selected_texture: None,
             paint_mode: PaintMode::Fill,
+            paint_color: PaintColor::default(),
             selected_decal: None,
             selected_group: None,
             decal_at: [0.5, 0.5],
@@ -517,6 +612,7 @@ impl Builder {
             shape_length: 600,
             shape_width: 400,
             name_buffer,
+            name_focus: false,
             name_edited: false,
             designs,
             custom_textures,
@@ -531,6 +627,11 @@ impl Builder {
             revision: 0,
             preview: None,
             preview_camera: None,
+            preview_view_key: String::new(),
+            last_control_click: None,
+            arena: None,
+            arena_obstacle: "none",
+            lab_cams: std::collections::HashMap::new(),
             test_requested: false,
             sounds: Vec::new(),
             test_seconds: 4.0,
@@ -580,6 +681,161 @@ impl Builder {
         self.shell.tab()
     }
 
+    /// Whether the `Test Robot` tab's practice arena is on screen.
+    pub fn arena_active(&self) -> bool {
+        self.view_only && self.arena.is_some()
+    }
+
+    /// The practice arena exists exactly while the `Test Robot` tab is on screen: entering the tab
+    /// builds a new one (live: the clock starts at 0 and the robot on its start point) and leaving
+    /// drops it.
+    fn sync_arena(&mut self) {
+        let wanted = self.view_only && self.tab() == Some("test robot button");
+        if !wanted {
+            if self.arena.take().is_some() {
+                // The temporary copy of the robot the arena loaded.
+                let _ = std::fs::remove_file(
+                    std::env::temp_dir().join(format!("ora-lab-test-{}.bot", std::process::id())),
+                );
+            }
+            self.arena_obstacle = "none";
+            return;
+        }
+        if self.arena.is_some() {
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("ora-lab-test-{}.bot", std::process::id()));
+        let saved = match std::env::var_os("ORA_LAB_BOT") {
+            Some(own) => std::fs::copy(own, &path).map(|_| ()),
+            None => self.build.save_to(&path),
+        };
+        match saved {
+            Ok(()) => match crate::lab_arena::LabArena::new(&self.game, &path, self.arena_obstacle)
+            {
+                Ok(arena) => self.arena = Some(arena),
+                Err(error) => self.status = format!("test robot: {error}"),
+            },
+            Err(error) => self.status = format!("test robot: {}: {error}", path.display()),
+        }
+    }
+
+    /// The `status group` of `testarena.gib` shows the robot's name and meters (the match HUD's own
+    /// widgets); the points read `N/A`.
+    fn bind_arena_hud(&mut self) {
+        let Some(arena) = &self.arena else {
+            return;
+        };
+        let report = arena.matched.report();
+        let Some(robot) = report.robots.first() else {
+            return;
+        };
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            if let Some(group) = workshop::find_mut(root, "status group") {
+                crate::hud::bind_status(group, robot, "N/A");
+            }
+        }
+    }
+
+    /// One tick of wall time: the practice arena runs its fixed steps.
+    pub fn advance(&mut self, seconds: f32) {
+        self.sync_arena();
+        if let Some(arena) = &mut self.arena {
+            arena.advance(seconds);
+        }
+    }
+
+    /// The robot's held keys for the practice arena.
+    pub fn set_drive(&mut self, input: ra2sim::DriveInput) {
+        if let Some(arena) = &mut self.arena {
+            arena.set_drive(input);
+        }
+    }
+
+    pub fn drive(&self) -> ra2sim::DriveInput {
+        self.arena.as_ref().map(|a| a.drive()).unwrap_or_default()
+    }
+
+    /// The practice arena's own 3D frame at `size`, for scripted runs.
+    pub fn arena_frame(&mut self, size: [u32; 2]) -> Result<Vec<u8>, String> {
+        let arena = self
+            .arena
+            .as_mut()
+            .ok_or_else(|| "no practice arena".to_string())?;
+        arena.frame(&self.renderer, size)
+    }
+
+    /// The practice arena, for scripted runs.
+    pub fn arena_mut(&mut self) -> Option<&mut crate::lab_arena::LabArena> {
+        self.arena.as_mut()
+    }
+
+    fn lab_cam(&self) -> LabCam {
+        let key = self.tab().unwrap_or("").to_string();
+        self.lab_cams.get(&key).copied().unwrap_or(LabCam::START)
+    }
+
+    /// The distance limits of the tab's camera: 2..11 on Overview and Chassis, 4..9 elsewhere.
+    fn lab_cam_limits(&self) -> (f32, f32) {
+        match self.tab() {
+            Some("overview button") | Some("chassis button") | None => (2.0, 11.0),
+            _ => (4.0, 9.0),
+        }
+    }
+
+    /// Where the selected control's icon floats: over the `(x, z)` of the robot's control board
+    /// (the first `ControlBoard` part), or the chassis origin without one.
+    fn wire_anchor(&self, world: &[Mat4]) -> [f32; 2] {
+        let comps = self.build.components();
+        for (i, c) in comps.iter().enumerate().skip(1) {
+            if c.class.eq_ignore_ascii_case("ControlBoard") {
+                if let Some(m) = world.get(i) {
+                    let p = crate::lab_view::origin_of(*m);
+                    return [p.x, p.z];
+                }
+            }
+        }
+        [0.0, 0.0]
+    }
+
+    /// The mouse wheel over the 3D view: `notches` of 120 units, 0.01 m each, wheel up closer.
+    pub fn lab_wheel(&mut self, notches: f32) {
+        let (min, max) = self.lab_cam_limits();
+        let mut cam = self.lab_cam();
+        cam.dist = (cam.dist - notches * 1.2).clamp(min, max);
+        let key = self.tab().unwrap_or("").to_string();
+        self.lab_cams.insert(key, cam);
+        self.preview = None;
+    }
+
+    /// The middle button dragged over the 3D view by `dx`, `dy` mouse counts: 0.01 rad each, the
+    /// pitch held to +-pi/2.
+    pub fn lab_orbit(&mut self, dx: f32, dy: f32) {
+        let mut cam = self.lab_cam();
+        cam.yaw += dx * 0.01;
+        cam.pitch = (cam.pitch - dy * 0.01).clamp(-FRAC_PI_2, FRAC_PI_2);
+        let key = self.tab().unwrap_or("").to_string();
+        self.lab_cams.insert(key, cam);
+        self.preview = None;
+    }
+
+    /// The pointer is over the 3D view's rectangle.
+    pub fn over_view(&self, x: f32, y: f32) -> bool {
+        self.panel.preview.contains_point(x, y)
+    }
+
+    /// Set the lab camera directly (scripted comparisons).
+    pub fn set_lab_cam(&mut self, cam: LabCam) {
+        let key = self.tab().unwrap_or("").to_string();
+        self.lab_cams.insert(key, cam);
+        self.preview = None;
+    }
+
     /// A click at a point in the design screen. The panel and the screens'
     /// model-driving controls are checked first; anything else is the shell's
     /// own navigation.
@@ -592,14 +848,43 @@ impl Builder {
         if self.dialog.is_some() {
             return self.dialog_click(x, y);
         }
+        if self.view_only {
+            self.name_focus = self.tab() == Some("overview button")
+                && self.hit_names(x, y).iter().any(|n| n == "bot name textbox");
+        }
         if self.drag.is_some() && !self.panel.preview.contains_point(x, y) {
             // Any other click ends the drag, as the category and tab buttons
             // do (`FUN_0042c280`).
             self.cancel_drag();
         }
+        if self.paint_pick(x, y, true) {
+            return Ok(());
+        }
         if self.panel.preview.contains_point(x, y) {
             if let Some(result) = self.preview_click(x, y) {
                 return result;
+            }
+        }
+        if self.tab() == Some("wiring button") {
+            let cell = self.hit_names(x, y).iter().find_map(|n| {
+                let rest = n.strip_prefix("m9:ctl:")?;
+                let (c, r) = rest.split_once(':')?;
+                Some([c.parse().ok()?, r.parse().ok()?])
+            });
+            match cell {
+                Some(cell) => {
+                    let now = std::time::Instant::now();
+                    let double = self.last_control_click.is_some_and(|(t, c)| {
+                        c == cell && now.duration_since(t) < std::time::Duration::from_millis(500)
+                    });
+                    self.last_control_click = Some((now, cell));
+                    if double {
+                        self.last_control_click = None;
+                        self.open_edit_dialog(cell);
+                        return Ok(());
+                    }
+                }
+                None => self.last_control_click = None,
             }
         }
         if let Some(action) = self.panel_action(x, y) {
@@ -620,7 +905,35 @@ impl Builder {
         }
         let category = self.category_click(x, y);
         let was_step_one = self.tab() == Some("chassis button") && self.structure_step() == 1;
+        // The `Test Robot` tab's own controls: an obstacle radio or RESET.
+        let arena_pick: Option<Option<&'static str>> = if self.arena.is_some() {
+            let names = self.hit_names(x, y);
+            if names.iter().any(|n| n == "reset button") {
+                Some(None)
+            } else {
+                names
+                    .iter()
+                    .find_map(|n| crate::lab_arena::obstacle_for(n))
+                    .map(Some)
+            }
+        } else {
+            None
+        };
         self.shell.click(x, y)?;
+        match (arena_pick, self.arena.as_mut()) {
+            (Some(Some(obstacle)), Some(arena)) => {
+                self.arena_obstacle = obstacle;
+                if let Err(error) = arena.set_obstacle(obstacle) {
+                    self.status = format!("test robot: {error}");
+                }
+            }
+            (Some(None), Some(arena)) => {
+                if let Err(error) = arena.reset() {
+                    self.status = format!("test robot: {error}");
+                }
+            }
+            _ => {}
+        }
         if category {
             self.palette_scroll = 0;
         }
@@ -958,6 +1271,9 @@ impl Builder {
     /// (`0x42b6b4`: the larger of |dx| and |dy|, signed).
     pub fn mouse_moved(&mut self, x: f32, y: f32) {
         let last = self.cursor.replace([x, y]);
+        if self.paint_color.drag.is_some() {
+            self.paint_pick(x, y, false);
+        }
         let Some(active) = self.drag.as_mut() else {
             return;
         };
@@ -1344,6 +1660,19 @@ impl Builder {
     /// [`Builder::mouse_moved`] and the clicks through [`Builder::click`], as
     /// the window's events do. Returns the new component's index.
     pub fn place_component(&mut self, file: &str, over: PlaceOn) -> Result<usize, String> {
+        // Scripted drops aim through the preview: look straight down for the gesture.
+        let saved = self.lab_cam();
+        self.set_lab_cam(LabCam {
+            pitch: -FRAC_PI_2,
+            yaw: 0.0,
+            dist: saved.dist,
+        });
+        let result = self.place_component_aimed(file, over);
+        self.set_lab_cam(saved);
+        result
+    }
+
+    fn place_component_aimed(&mut self, file: &str, over: PlaceOn) -> Result<usize, String> {
         let before = self.build.components().len();
         self.click_palette_file(file)?;
         let attach = self.attach_point()?;
@@ -1364,6 +1693,20 @@ impl Builder {
     /// [`Builder::place_component`] at the first baseplate spot (a 10 cm grid)
     /// the drag accepts, for a robot whose free room is not known.
     pub fn place_component_free(&mut self, file: &str) -> Result<usize, String> {
+        // The scan needs the baseplate in view: look straight down for its length (the lab camera
+        // starts level, and the player turns it with the middle button).
+        let saved = self.lab_cam();
+        self.set_lab_cam(LabCam {
+            pitch: -FRAC_PI_2,
+            yaw: 0.0,
+            dist: saved.dist,
+        });
+        let result = self.place_component_scan(file);
+        self.set_lab_cam(saved);
+        result
+    }
+
+    fn place_component_scan(&mut self, file: &str) -> Result<usize, String> {
         let before = self.build.components().len();
         self.click_palette_file(file)?;
         let attach = self.attach_point()?;
@@ -1422,6 +1765,16 @@ impl Builder {
         self.decal_at = at;
         match self.paint_mode {
             PaintMode::Fill | PaintMode::Layer => {
+                // The player-facing Paint Shop is Color Fill: the swatch's colour, no texture.
+                if self.view_only && self.selected_texture.is_none() {
+                    let texture = self.paint_solid();
+                    self.build
+                        .paint_mut()
+                        .fill_group(group, &texture)
+                        .map_err(|e| e.to_string())?;
+                    self.status = format!("color fill face group {group}");
+                    return self.refresh();
+                }
                 let Some(entry) = self.selected_texture.clone() else {
                     self.status = "pick a texture first".into();
                     self.refresh_panel();
@@ -1709,8 +2062,8 @@ impl Builder {
         if !(c.is_ascii_graphic() || c == ' ') {
             return;
         }
-        if self.view_only && self.tab() != Some("overview button") {
-            // The name box lives on the Overview tab; elsewhere typing goes nowhere.
+        if self.view_only && (self.tab() != Some("overview button") || !self.name_focus) {
+            // The name box lives on the Overview tab and takes keys after a click on it.
             return;
         }
         if self.name_buffer.chars().count() >= 48 {
@@ -1721,13 +2074,18 @@ impl Builder {
         if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
             return;
         }
-        if !self.name_edited {
+        if !self.name_edited && !self.view_only {
             self.name_buffer.clear();
-            self.name_edited = true;
         }
+        self.name_edited = true;
         self.name_buffer.push(c);
         self.refresh_panel();
         self.refresh_overview();
+    }
+
+    /// The text the Overview's name box holds.
+    pub fn name_text(&self) -> &str {
+        &self.name_buffer
     }
 
     /// Backspace in the filename box.
@@ -1736,7 +2094,7 @@ impl Builder {
             self.dialog_backspace();
             return;
         }
-        if self.view_only && self.tab() != Some("overview button") {
+        if self.view_only && (self.tab() != Some("overview button") || !self.name_focus) {
             return;
         }
         self.name_buffer.pop();
@@ -2192,6 +2550,7 @@ impl Builder {
             self.wire_placing = None;
             self.wire_control = Some(cell);
             self.wire_component = None;
+            self.preview = None;
             let name = self
                 .build
                 .board()
@@ -2263,6 +2622,15 @@ impl Builder {
             return self.refresh();
         }
         match action {
+            "m9:paintall" => {
+                let texture = self.paint_solid();
+                self.build
+                    .paint_mut()
+                    .fill_all(&texture)
+                    .map_err(|e| e.to_string())?;
+                self.status = "painted the entire chassis".into();
+                return self.refresh();
+            }
             "m9:undo" => {
                 if !self.undo() {
                     self.status = "nothing to undo".into();
@@ -2570,6 +2938,47 @@ impl Builder {
         })
     }
 
+    /// The names of the widgets under a point, outermost first.
+    fn hit_names(&self, x: f32, y: f32) -> Vec<String> {
+        let placed = self.shell.placements();
+        ra2ui::input::hit(&placed, x, y)
+            .map(|p| {
+                chain(&placed, &p)
+                    .iter()
+                    .map(|n| n.widget.name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The widget names under a point, outermost first (`hit` and `hit_control`), for scripted
+    /// diagnosis.
+    pub fn debug_hit(&self, x: f32, y: f32) -> Vec<String> {
+        let placed = self.shell.placements();
+        let mut out = Vec::new();
+        for control_only in [false, true] {
+            let path = if control_only {
+                ra2ui::input::hit_control(&placed, x, y)
+            } else {
+                ra2ui::input::hit(&placed, x, y)
+            };
+            let names: Vec<String> = path
+                .map(|p| {
+                    chain(&placed, &p)
+                        .iter()
+                        .map(|n| n.widget.name().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.push(format!(
+                "{}: {}",
+                if control_only { "control" } else { "hit" },
+                names.join(" > ")
+            ));
+        }
+        out
+    }
+
     /// The action a click on a shipped list cell names, if any: a component
     /// palette cell, the remove button, or an armour cell.
     fn widget_action(&self, x: f32, y: f32) -> Option<String> {
@@ -2582,9 +2991,18 @@ impl Builder {
         if chain.iter().any(|p| p.widget.name() == "remove button") {
             return Some("m9:remove".into());
         }
+        if self.tab() == Some("paintshop button") {
+            if chain.iter().any(|p| p.widget.name() == "paint entire") {
+                return Some("m9:paintall".into());
+            }
+            if chain.iter().any(|p| p.widget.name() == "undo button") {
+                return Some("m9:undo".into());
+            }
+        }
         if self.tab() == Some("wiring button") {
             // The controller's picture is laid over the strip of icons above it; the control
             // under the point is what is clicked.
+            let plain = chain.clone();
             let chain = match ra2ui::input::hit_control(&placed, x, y) {
                 Some(path) => self::chain(&placed, &path),
                 None => chain.clone(),
@@ -2599,8 +3017,11 @@ impl Builder {
                     return Some(action.into());
                 }
             }
+            // The control's picture is not a "control" widget, so a click on it is found in the
+            // plain hit chain (live: the whole cell selects).
             if let Some(name) = chain
                 .iter()
+                .chain(plain.iter())
                 .find_map(|p| p.widget.name().strip_prefix("m9:ctl:"))
             {
                 return Some(format!("m9:wirectl:{name}"));
@@ -2804,6 +3225,128 @@ impl Builder {
                 }
             }
         }
+        self.sync_paint_widgets();
+    }
+
+    /// Put the swatch, the picker's target and the slider's thumb where the colour state says,
+    /// and let `Selected Color` hang below the swatch (live it is drawn outside the 64 px group).
+    fn sync_paint_widgets(&mut self) {
+        let color = self.paint_color;
+        let placed = self.shell.placements();
+        let hue = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "hue group")
+            .map(|p| p.frame);
+        let slider = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "lum slider")
+            .map(|p| p.frame);
+        drop(placed);
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            if let Some(group) = workshop::find_mut(root, "selected color group") {
+                ra2ui::input::set_field(group, "ClipMode", "0");
+                if let Some(label) = workshop::find_mut(group, "selected label") {
+                    ra2ui::input::set_field(label, "ClipMode", "0");
+                }
+            }
+            if let Some(image) = workshop::find_mut(root, "selected color img") {
+                let [r, g, b] = color.rgb;
+                ra2ui::input::set_field(
+                    image,
+                    "_ForeColor",
+                    &format!(
+                        "{} {} {} 1",
+                        f32::from(r) / 255.0,
+                        f32::from(g) / 255.0,
+                        f32::from(b) / 255.0
+                    ),
+                );
+            }
+            if let (Some(target), Some(frame)) = (workshop::find_mut(root, "picker target"), hue) {
+                let x = color.marker[0] * frame.w - 4.0;
+                let y = color.marker[1] * frame.h - 4.0;
+                ra2ui::input::set_field(target, "Position", &format!("{x} 0 {y} 0"));
+            }
+            if let (Some(slider_widget), Some(frame)) =
+                (workshop::find_mut(root, "lum slider"), slider)
+            {
+                if let Some(thumb) = slider_widget
+                    .children
+                    .iter_mut()
+                    .find(|c| c.kind == WidgetKind::Image)
+                {
+                    let thumb_w = thumb.size().map(|s| s.first.amount).unwrap_or(12.0);
+                    let x = color.lum * (frame.w - thumb_w).max(0.0);
+                    ra2ui::input::set_field(thumb, "Position", &format!("{x} 0 0 0"));
+                }
+            }
+        }
+    }
+
+    /// A press or drag on the Paint Shop's picker or slider: the target or the thumb goes to the
+    /// pointer and the swatch takes the colour they choose. `Some(start)` begins a drag.
+    fn paint_pick(&mut self, x: f32, y: f32, start: bool) -> bool {
+        if self.tab() != Some("paintshop button") {
+            return false;
+        }
+        let placed = self.shell.placements();
+        let frame_of = |name: &str| {
+            placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == name)
+                .map(|p| p.frame)
+        };
+        let hue = frame_of("hue group");
+        let slider = frame_of("lum slider");
+        drop(placed);
+        let which = if start {
+            if hue.is_some_and(|f| f.contains_point(x, y)) {
+                Some(PaintDrag::Picker)
+            } else if slider.is_some_and(|f| f.contains_point(x, y)) {
+                Some(PaintDrag::Slider)
+            } else {
+                None
+            }
+        } else {
+            self.paint_color.drag
+        };
+        let Some(which) = which else {
+            return false;
+        };
+        match (which, hue, slider) {
+            (PaintDrag::Picker, Some(f), _) => {
+                self.paint_color.marker = [
+                    ((x - f.x) / f.w.max(1.0)).clamp(0.0, 1.0),
+                    ((y - f.y) / f.h.max(1.0)).clamp(0.0, 1.0),
+                ];
+            }
+            (PaintDrag::Slider, _, Some(f)) => {
+                self.paint_color.lum = ((x - f.x) / f.w.max(1.0)).clamp(0.0, 1.0);
+            }
+            _ => return false,
+        }
+        if start {
+            self.paint_color.drag = Some(which);
+        }
+        self.paint_color.rgb = self.paint_color.picked();
+        self.sync_paint_widgets();
+        self.status = format!("color {:?}", self.paint_color.rgb);
+        true
+    }
+
+    /// The solid texture the Paint Shop's Color Fill paints with.
+    fn paint_solid(&self) -> Texture {
+        let [r, g, b] = self.paint_color.rgb;
+        Texture::solid(16, 16, [r, g, b, 255])
     }
 
     fn refresh_palette(&mut self) {
@@ -3625,6 +4168,8 @@ impl Builder {
     /// Build the frame: the shell's own draw list, the preview composited into
     /// the 3D placeholder, then the synthetic panel over it.
     pub fn scene(&mut self, _target: [u32; 2]) -> Result<UiScene, String> {
+        self.sync_arena();
+        self.bind_arena_hud();
         let mut scene = {
             let placed = self.shell.placements();
             self.assets
@@ -3648,6 +4193,36 @@ impl Builder {
                 alpha: false,
                 clip: Some(preview_rect),
             });
+        }
+        self.sync_arena();
+        self.arena_quad(&mut scene)?;
+        // The mouse legend and the SHIFT / CTRL tips sit inside the 3D view's own group: the
+        // original draws the view first and these over it.
+        {
+            let placed = self.shell.placements();
+            let overlay: Vec<&Placement> = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .filter(|n| {
+                    let name = n.widget.name();
+                    // Live: the SHIFT / CTRL tips and REMOVE belong to the Components tab only.
+                    name == "mouse instructions grp"
+                        || (self.tab() == Some("components button")
+                            && matches!(name, "tips group" | "remove button"))
+                })
+                .collect();
+            for group in overlay {
+                let over = self.assets.scene(
+                    std::slice::from_ref(group),
+                    [self.size[0] as u32, self.size[1] as u32],
+                );
+                let offset = scene.textures.len();
+                scene.textures.extend(over.textures);
+                for mut quad in over.quads {
+                    quad.texture += offset;
+                    scene.quads.push(quad);
+                }
+            }
         }
         if self.tab() == Some("components button") {
             if let Some(rect) = self.comp_rect() {
@@ -3706,6 +4281,25 @@ impl Builder {
             }
             scene.missing.extend(over.missing);
         }
+        if let Some(spec) = std::env::var_os("ORA_DEBUG_RECT") {
+            // `x0,y0,x1,y1`: the quads that touch that rectangle, for diagnosing the lab's screens.
+            let v: Vec<f32> = spec
+                .to_string_lossy()
+                .split(',')
+                .filter_map(|t| t.trim().parse().ok())
+                .collect();
+            if let [x0, y0, x1, y1] = v[..] {
+                for (i, q) in scene.quads.iter().enumerate() {
+                    let r = q.rect;
+                    if r.x < x1 && r.x + r.w > x0 && r.y < y1 && r.y + r.h > y0 {
+                        eprintln!(
+                            "quad {i}: {r:?} tex {} color {:?} clip {:?}",
+                            q.texture, q.color, q.clip
+                        );
+                    }
+                }
+            }
+        }
         if self.view_only {
             return Ok(scene);
         }
@@ -3722,6 +4316,75 @@ impl Builder {
         }
         scene.missing.extend(panel_scene.missing);
         Ok(scene)
+    }
+
+    /// The practice arena's frame in `test arena placeholder`, under the widgets that are the
+    /// placeholder's children (the `Obstacles` list, RESET and the status box).
+    fn arena_quad(&mut self, scene: &mut UiScene) -> Result<(), String> {
+        if self.arena.is_none() {
+            return Ok(());
+        }
+        let placed = self.shell.placements();
+        let Some(rect) = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "test arena placeholder")
+            .map(|p| p.frame)
+        else {
+            return Ok(());
+        };
+        let size = [
+            rect.w.round().max(16.0) as u32,
+            rect.h.round().max(16.0) as u32,
+        ];
+        let pixels = match self.arena.as_mut() {
+            Some(arena) => arena.frame(&self.renderer, size)?,
+            None => return Ok(()),
+        };
+        let texture = scene.textures.len();
+        scene.textures.push(UiTexture {
+            label: "lab practice arena".into(),
+            width: size[0],
+            height: size[1],
+            rgba: pixels,
+        });
+        let quad = UiQuad {
+            rect,
+            corners: None,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            texture,
+            alpha: false,
+            clip: Some(rect),
+        };
+        // Right after the background that covers the placeholder.
+        let at = scene
+            .quads
+            .iter()
+            .position(|q| {
+                q.color == [0.0, 0.0, 0.0, 1.0]
+                    && (q.rect.x - rect.x).abs() < 1.5
+                    && (q.rect.y - rect.y).abs() < 1.5
+                    && (q.rect.w - rect.w).abs() < 1.5
+                    && (q.rect.h - rect.h).abs() < 1.5
+            })
+            .map_or(0, |i| i + 1);
+        if std::env::var_os("ORA_DEBUG_QUADS").is_some() {
+            eprintln!("arena rect {rect:?} inserted at {at}");
+            for (i, q) in scene
+                .quads
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| q.rect.w > 400.0)
+            {
+                eprintln!(
+                    "  quad {i}: {:?} tex {} color {:?}",
+                    q.rect, q.texture, q.color
+                );
+            }
+        }
+        scene.quads.insert(at, quad);
+        Ok(())
     }
 
     /// The blueprint's grid, outline and points drawn over the chassis steps' `Editing Area`
@@ -3925,11 +4588,29 @@ impl Builder {
     fn preview_pixels(&mut self, rect: Frame) -> Result<Option<(Vec<u8>, u32, u32)>, String> {
         let width = rect.w.round().max(16.0) as u32;
         let height = rect.h.round().max(16.0) as u32;
+        // What else the frame depends on besides the model: the lab camera, the tab and the
+        // selected control.
+        let view_key = {
+            let cam = self.lab_cam();
+            format!(
+                "{:?}|{:?}|{:?}|{:?}|{:?}",
+                self.tab(),
+                self.wire_control,
+                cam.pitch.to_bits(),
+                cam.yaw.to_bits(),
+                cam.dist.to_bits()
+            )
+        };
         if let Some((revision, pixels, w, h)) = &self.preview {
-            if *revision == self.revision && *w == width && *h == height {
+            if *revision == self.revision
+                && *w == width
+                && *h == height
+                && self.preview_view_key == view_key
+            {
                 return Ok(Some((pixels.clone(), *w, *h)));
             }
         }
+        self.preview_view_key = view_key;
         let bot = self.build.to_bot();
         let world = self.build.transforms();
         let mut chassis = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
@@ -3939,11 +4620,90 @@ impl Builder {
         ) {
             // Live, the chassis is a ghost while parts are placed and wired, so the parts under
             // its top panel can be seen from above.
+            // (`D3DRS_ALPHABLENDENABLE` with SRCALPHA / ONE, no z write, no culling, no texture,
+            // diffuse (0.625, 0.625, 0.625, 0.14): the live state of the chassis' draw.)
+            let plate =
+                crate::lab_view::baseplate(&chassis, &self.ui.join("botlab/baseplate_grid.bmp"));
             for item in chassis.iter_mut() {
+                item.material.stages.clear();
                 item.material.transparent = true;
+                item.material.additive = true;
                 item.material.no_alpha_test = true;
                 item.material.z_write = false;
-                item.material.diffuse[3] = 0.3;
+                item.material.early = true;
+                item.material.cull = false;
+                item.material.diffuse = [0.625, 0.625, 0.625, 0.14];
+            }
+            if let Some(plate) = plate {
+                chassis.insert(0, plate);
+            }
+        }
+        // The lines the original draws over the ghost chassis, and a selected control's graphics.
+        let mut overlay: Vec<DrawItem> = Vec::new();
+        if self.view_only
+            && !world.is_empty()
+            && matches!(
+                self.tab(),
+                Some("components button") | Some("wiring button")
+            )
+        {
+            let (eye, _) = self.lab_cam().eye_up();
+            let cam = crate::lab_view::Cam::new(
+                eye,
+                Vec3::ZERO,
+                std::f32::consts::FRAC_PI_4,
+                height as f32,
+            );
+            let plain = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
+            let edges: Vec<(Vec3, Vec3)> = crate::lab_view::outline_edges(&plain)
+                .into_iter()
+                .map(|(a, b)| (world[0].transform_point3(a), world[0].transform_point3(b)))
+                .collect();
+            let lines = crate::lab_view::ribbon(
+                &cam,
+                &edges,
+                crate::lab_view::EDGE_COLOR,
+                crate::lab_view::EDGE_PIXELS,
+            );
+            if !lines.is_empty() {
+                overlay.push(DrawItem::new(
+                    lines,
+                    ra2_render::Material {
+                        lighting: false,
+                        has_vertex_colors: true,
+                        cull: false,
+                        ..ra2_render::Material::default()
+                    },
+                    "lab chassis edges",
+                ));
+            }
+            if self.tab() == Some("wiring button") {
+                if let Some(cell) = self.wire_control {
+                    if let Some(control) = self.build.board().control_at(cell) {
+                        let mut parts: Vec<[f32; 2]> = Vec::new();
+                        for b in &self.build.board().bindings {
+                            if [b.control[0], b.control[1]] != cell {
+                                continue;
+                            }
+                            let Some(m) = world.get(b.component as usize) else {
+                                continue;
+                            };
+                            let p = crate::lab_view::origin_of(*m);
+                            if !parts.contains(&[p.x, p.z]) {
+                                parts.push([p.x, p.z]);
+                            }
+                        }
+                        let anchor = self.wire_anchor(&world);
+                        let file = self.ui.join(format!(
+                            "botlab/ctrl_icon_{}.bmp",
+                            control.kind.label().to_lowercase()
+                        ));
+                        let scene = crate::lab_view::wire_scene(&cam, anchor, &parts, &file);
+                        // The wires are drawn over the icon (live: a wire crosses its label).
+                        overlay.push(scene.icon);
+                        overlay.push(scene.lines);
+                    }
+                }
             }
         }
         let mut owned: Vec<(usize, Vec<DrawItem>)> = Vec::new();
@@ -3996,6 +4756,13 @@ impl Builder {
                 }
             }
         }
+        // The lab's own graphics are not part of the framing either.
+        if !overlay.is_empty() {
+            groups.push(RenderGroup {
+                items: &overlay,
+                model: Mat4::IDENTITY,
+            });
+        }
         // The dragged part rides on top of the robot; it is not part of the
         // framing, or the camera would chase the mouse.
         if let Some(active) = self.drag.as_ref() {
@@ -4013,23 +4780,40 @@ impl Builder {
         }
         let center = (min + max) * 0.5;
         let radius = ((max - min).length() * 0.5).max(0.6);
+        let _ = (center, radius);
         let (eye, up) = if self.view_only {
-            // The original's lab looks straight down at the robot, nose up the
-            // screen, over the 3D view's 0.15 grey.
+            // The original's lab camera (`FUN_005a6260` mode 2, one object per tab): a 45 degree
+            // perspective at `dist` from the robot's origin, orbiting with the middle button.
             self.renderer.set_background([0.15; 3]);
-            (center + Vec3::new(0.0, radius * 3.0, 0.0), Vec3::Z)
+            let cam = self.lab_cam();
+            let (eye, up) = cam.eye_up();
+            // The lab lights the robot with one white point light on the camera (live `D3DLIGHT8`:
+            // type 1, diffuse and specular 1, range 1000, attenuation 1 / 0 / 0, at the eye),
+            // over the usual 38/255 ambient.
+            self.renderer.set_lights(&[ra2_render::material::Light {
+                position: eye,
+                range: 1000.0,
+                diffuse: [1.0; 3],
+                specular: [1.0; 3],
+                attenuation: [1.0, 0.0, 0.0],
+            }]);
+            (eye, up)
         } else {
             (
                 center + Vec3::new(radius * 1.9, radius * 1.2, radius * 2.1),
                 Vec3::Y,
             )
         };
-        let view = ra2_render::look_at_lh(eye, center, up);
+        let view = ra2_render::look_at_lh(eye, Vec3::ZERO, up);
         let proj = ra2_render::perspective_lh(
             45f32.to_radians(),
             width as f32 / height as f32,
             0.05,
-            radius * 30.0,
+            if self.view_only {
+                2000.0
+            } else {
+                radius * 30.0
+            },
         );
         let view_proj = proj * view;
         self.preview_camera = Some(PreviewCamera {
@@ -4868,6 +5652,8 @@ impl Builder {
     /// The button is released at a point: a control icon being dragged that lands on a free cell
     /// of the controller opens its properties window.
     pub fn mouse_released(&mut self, x: f32, y: f32) {
+        let _ = (x, y);
+        self.paint_color.drag = None;
         if self.dialog.is_some() || self.tab() != Some("wiring button") {
             return;
         }
@@ -4900,6 +5686,42 @@ impl Builder {
                 cell,
                 name,
                 keys: [None, None],
+                editing: false,
+            },
+            focus: Focus::None,
+        });
+    }
+
+    /// A double click on a control opens its own window (live: the same `Analog Control` /
+    /// `Switch Control` / `Button Control` window with the control's name and keys in it).
+    fn open_edit_dialog(&mut self, cell: [i32; 2]) {
+        let Some(control) = self.build.board().control_at(cell).cloned() else {
+            return;
+        };
+        let Ok(mut gib) = workshop::load(&self.ui, lab_dialog::props_file(control.kind)) else {
+            return;
+        };
+        lab_dialog::set_text(&mut gib, "control name", &control.name);
+        let mut keys = [None, None];
+        for (slot, row) in control.keys.iter().enumerate().take(2) {
+            let code = Control::key_code(row);
+            let label = if code > 0 {
+                keys[slot] = Some(code);
+                ra2ui::workshop::wiring::dik_name(code)
+            } else {
+                String::new()
+            };
+            lab_dialog::set_text(&mut gib, ["input1", "input2"][slot], &label);
+        }
+        self.wire_control = Some(cell);
+        self.dialog = Some(LabDialog {
+            gib,
+            kind: DialogKind::Props {
+                kind: control.kind,
+                cell,
+                name: control.name.clone(),
+                keys,
+                editing: true,
             },
             focus: Focus::None,
         });
@@ -5088,12 +5910,28 @@ impl Builder {
                 cell,
                 name,
                 keys,
+                editing,
             } => {
                 let rows: Vec<[i32; 4]> = keys
                     .iter()
                     .take(kind.slots())
                     .map(|k| [0, 0, k.unwrap_or(0), 0])
                     .collect();
+                if editing {
+                    // The control keeps its cell and its bindings; the name and keys change.
+                    if let Some(existing) = self
+                        .build
+                        .board_mut()
+                        .controls
+                        .iter_mut()
+                        .find(|c| c.cell == cell)
+                    {
+                        existing.name = name.trim().to_string();
+                        existing.keys = rows;
+                        self.status = format!("edited {}", name.trim());
+                    }
+                    return self.refresh();
+                }
                 let control = Control::new(name.trim(), cell, kind).with_keys(rows);
                 match self.build.board_mut().add(control) {
                     Ok(()) => {
@@ -5678,5 +6516,40 @@ mod tests {
         }
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&out).ok();
+    }
+
+    /// The lab camera against the live matrices (`FUN_005a6260` mode 2, dumped through Frida): at
+    /// pitch 0.5 / yaw 0.7 the camera's forward axis was `(0.565, 0.479, 0.671)` and its up
+    /// `(-0.309, 0.878, -0.367)`; the eye sits `distance` behind the forward axis.
+    #[test]
+    fn the_lab_camera_matches_the_live_matrices() {
+        let cam = LabCam {
+            pitch: 0.5,
+            yaw: 0.7,
+            dist: 5.0,
+        };
+        let (eye, up) = cam.eye_up();
+        let forward = -eye / 5.0;
+        assert!(
+            (forward - Vec3::new(0.565, 0.479, 0.671)).length() < 0.002,
+            "{forward:?}"
+        );
+        assert!(
+            (up - Vec3::new(-0.309, 0.878, -0.367)).length() < 0.002,
+            "{up:?}"
+        );
+        let (eye, up) = LabCam::START.eye_up();
+        assert_eq!((eye, up), (Vec3::new(0.0, 0.0, -5.0), Vec3::Y));
+    }
+
+    /// The Paint Shop's picker and slider: the live swatch was `(161, 176, 25)` with the target at
+    /// 0.184 / 0.253 of the picker and the thumb at 0.4.
+    #[test]
+    fn the_paint_swatch_is_the_pickers_hue_and_saturation_at_the_sliders_lightness() {
+        let color = PaintColor::default();
+        let [r, g, b] = color.picked();
+        assert!((i32::from(r) - 161).abs() <= 3, "{r}");
+        assert!((i32::from(g) - 176).abs() <= 3, "{g}");
+        assert!((i32::from(b) - 25).abs() <= 3, "{b}");
     }
 }
