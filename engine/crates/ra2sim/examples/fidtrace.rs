@@ -163,13 +163,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         writeln!(
                             f,
-                            "{{\"t\": {t}, \"att\": {}, \"by\": \"{}\", \"vic\": {}, \"comp\": \"{}\", \"amount\": {}, \"speed\": {}}}",
+                            "{{\"t\": {t}, \"att\": {}, \"by\": \"{}\", \"vic\": {}, \"comp\": \"{}\", \"amount\": {}, \"speed\": {}, \"p\": [{}, {}, {}]}}",
                             att,
                             name(i.attacker, i.by),
                             i.target,
                             name(i.target, i.component),
                             i.damage,
-                            i.speed
+                            i.speed,
+                            i.point.x,
+                            i.point.y,
+                            i.point.z
                         )?;
                     }
                 }

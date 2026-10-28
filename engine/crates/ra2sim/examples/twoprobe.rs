@@ -247,7 +247,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        let logged = duel.log.len();
         duel.step_direct(&command, DEFAULT_STEP);
+        // `TWOPROBE_LOG=1`: the duel's log lines (zones, hazards) as `L <step> <line>`.
+        if std::env::var_os("TWOPROBE_LOG").is_some() {
+            for line in duel.log.iter().skip(logged) {
+                println!("L {i} {line}");
+            }
+        }
         // The arena's hazard joints (`HJ <step> <joint> <angle or offset> w
         // <x y z>`) and every priced hit (`H <step> <attacker, -1 the arena>
         // <victim> <amount> <speed>`), docs/29 section 12z.

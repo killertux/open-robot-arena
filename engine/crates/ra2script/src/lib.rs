@@ -1333,6 +1333,103 @@ mod tests {
         });
     }
 
+    /// `GetPath` answers what the original answered on the same inputs
+    /// (`FUN_00405990`, docs/29 §12ab): six of the 4948 calls of
+    /// `boxfight-scout-alarm-box__live__000..005`, every one of which ours
+    /// reproduces: a clear straight run; a goal pressed against the spikes'
+    /// box (never moved: the route is the straight pair); a blocked robot
+    /// moved toward POV 0; a tie between the west and east sides of the saw
+    /// (the open list's heap order picks the west, POV 3); a route longer than
+    /// the shortest by distance (the A* sums *squared* steps); and the
+    /// vantage points cut to whole numbers (POV 11 at `(1.5, -5.3)` is
+    /// `(1, -5)`).
+    #[test]
+    fn get_path_answers_the_live_calls() {
+        let Some((host, _guard)) = boot() else { return };
+        type Call = (f32, [f32; 3], [f32; 3], &'static [(f32, f32)]);
+        let calls: [Call; 6] = [
+            (
+                1.0,
+                [4.558_77, -1.887_298, 0.158_163],
+                [2.386_454, -1.810_962, 1.661_918],
+                &[(4.558_77, 0.158_163), (2.386_454, 1.661_918)],
+            ),
+            (
+                1.0,
+                [4.932_025, -1.670_659, -0.577_162],
+                [4.345_862, -1.675_974, -3.053_4],
+                &[(4.932_025, -0.577_162), (4.345_862, -3.053_4)],
+            ),
+            (
+                1.0,
+                [4.269_823, -1.695_945, -3.468_657],
+                [4.974_682, -1.723_287, -0.494_908],
+                &[
+                    (3.967_625, -2.515_411),
+                    (5.0, -1.0),
+                    (4.974_682, -0.494_908),
+                ],
+            ),
+            (
+                1.0,
+                [-1.520_514, -1.795_521, 3.584_71],
+                [0.168_005, -1.773_078, 2.453_674],
+                &[
+                    (-0.482_702, 7.963_401),
+                    (0.0, 10.0),
+                    (-5.0, 5.0),
+                    (0.0, 1.0),
+                    (0.168_005, 2.453_674),
+                ],
+            ),
+            (
+                1.0,
+                [3.908_594, -1.809_474, -2.803_91],
+                [4.281_578, -1.877_397, -7.726_392],
+                &[
+                    (3.908_594, -2.803_91),
+                    (1.0, -5.0),
+                    (0.0, -5.0),
+                    (4.281_578, -7.726_392),
+                ],
+            ),
+            (
+                1.0,
+                [4.917_491, -1.699_764, -6.727_954],
+                [3.014_581, -1.803_76, -3.941_527],
+                &[
+                    (3.789_352, -2.890_338),
+                    (1.0, -5.0),
+                    (3.014_581, -3.941_527),
+                ],
+            ),
+        ];
+        with_py(|py| {
+            host.load_arenas(py).unwrap();
+            let arena = host.create_arena(py, "Combat Arena").unwrap();
+            assert!(host.hazards_on(py, true).unwrap());
+            let a = arena.bind(py);
+            for (radius, from, to, live) in calls {
+                a.call_method1("SetSearchRadius", (radius,)).unwrap();
+                let route: Vec<(f32, f32)> = a
+                    .call_method1(
+                        "GetPath",
+                        ((from[0], from[1], from[2]), (to[0], to[1], to[2]), false),
+                    )
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                assert_eq!(route.len(), live.len(), "{from:?} -> {to:?}: {route:?}");
+                for (o, l) in route.iter().zip(live) {
+                    assert!(
+                        (o.0 - l.0).abs() < 2e-3 && (o.1 - l.1).abs() < 2e-3,
+                        "{from:?} -> {to:?}: {route:?} against {live:?}"
+                    );
+                }
+            }
+        });
+    }
+
     /// `GetLastDamageReceived`/`Done` are the original's 5-tuples
     /// (`FUN_004b9050`: component, amount, time, player, player's component), and
     /// the shipped `Spinner.RobotInRange` reads the player at index 3. A 3-tuple
