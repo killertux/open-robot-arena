@@ -4911,3 +4911,150 @@ not resolved here.
 Compressor's arena hits (12ab). The callback's `+0` (a speed) was not
 decoded, nor the argument of the robots' damage callback `0x414d80` (a hook
 reading it as the wheel callback's faulted).
+
+### 12ae. Where ALARM goes over: the solver checked entry by entry, the wheels' invented friction, the brains' frame clock (fx/phys-flip)
+
+Section 12ad left the box ALARM going upside down (`isUpsideDown`, `up.y < 0`
+held 3 s) in 17 of 24 fights, nine before 13 s (live 5 of 13, the first at
+13-38 s), and section 12s's controlled replays rolling it onto its back in 3
+trials where live did once. This round takes the step apart against the §12s
+captures (`twobody-scout-alarm-box__live__000`, `__001`: 8393 resolver
+entries with every body's state before (`B`) and after (`V`) the resolver,
+the contacts (`R`) and each body's struct (`P`, inertia at `+0x19c`)), stage
+by stage, from the live state. No new live session was needed.
+
+**The resolver is exact (verified live, every entry).** `resolvecmp.py`
+replays §2's resolver (`resolver_core.py`, the same walk, impulse, cone and
+push-out as `resolver.rs`) on every live entry: the live contacts, the live
+`B` states and each body's live inertia, compared with the live `V` rows.
+Over 40 898 body samples that the resolver moved, the velocities agree to
+p99 6.6e-7 m/s and 4.4e-6 rad/s (the largest relative error 0.002, a wheel
+taking a 1 m/s change). So given its contacts, the original's resolution is
+ours to float precision.
+
+**So is the detection, at the live poses.** `orderprobe` (§12u) with the
+build frames (`FRAME` lines from `spinup-scout-alarm-box__live__000`; with the
+rest-pose turns ALARM's rod and two wheels are placed a quarter turn off and
+their contacts are wrong) gives, per pair of body kinds over `__000`
+(`pairstats.py`): chassis x floor, chassis x chassis, fork x floor and wheels x
+floor point for point (distance differences 0, normals within 0.1°); fork x
+ALARM's chassis 4241 points against 4475 live, every matched one within
+0.1°. Ours' contacts fed to the same resolver from the live states
+(`resolveours.py`) give both chassis' velocities to p90 0.000 m/s and 0.001
+rad/s; what is left is the rod against the fork (255 points where live has
+450, p90 0.4 m/s on the 33 kg rod) and the Scout's right wheel, whose live
+build frame carries the 0.9° tilt of §12w.
+
+**And the rest of the step, from the live state (`examples/stepprobe.rs`).**
+The probe runs a trial as `twoprobe` does (hold, placement, the live ticks and
+fires), then before every substep puts every body where the live resolver
+entry had it (pose and velocities, the build frames' turns), detects there and
+steps once; what our step and the next driving make of it is compared with the
+next live entry (`mkposes.py`, `runstep.sh`, `stepcmp.py`). The joints'
+controllers keep their own errors across a placement (servo target and lock
+bound about the moved position, `PhysicsBackend::joint_errors`; their state is
+not in the capture). Diagnostics: `Duel::step_direct_with`,
+`STEPPROBE_EVERY=<k>` (place every `k` substeps), `STEPPROBE_FREE=<n>`.
+ALARM's chassis: one-substep error p50 0.027, p90 0.12 rad/s against live
+changes of p50 0.18, with no bias along its rotation (-0.004 rad/s) in either
+set, and no bias in `d(up.y)/dt` after 1-10 free substeps either (the error
+grows from 0.019 to 0.088 with no sign). The fork's stroke follows live to
+0.2 rad/s of its 18-26 rad/s every substep but the one it starts in. The
+wheels did not:
+
+**The wheels' joint friction is ours (bug, fixed).** An idle robot's wheel
+lost 0.10 rad/s more spin every substep than live: `spinerr.py` over ALARM's
+wheels with its throttle at 0, the one-step error about the axle is -0.106,
+-0.097, -0.098, -0.104 rad/s in the air and -0.06 to -0.09 on the floor. That
+is `0.1 · 40 = 4` N·m on 0.557 kg·m²: ours gave a wheel's hinge its
+definition's `resistance` times 40 as a friction torque whenever its motor
+was off (F4's "rolling resistance", Jolt's `max_friction_torque`). The original
+has none: the hinge controller turns the motor off at a zero percentage
+(`0x481450` → `0x481590`: `atom + 0x91 = 0`), `SetPercent` (`0x4f5800`) sets
+that percentage whenever the wheel is down (`0x507ff0`), and live a wheel so
+left turns with nothing but the drag on it (below); a wheel's `resistance` is
+`MagicAction`'s sideways grip (§3). Without it the errors are +0.003,
++0.001, +0.000, +0.005 in the air and -0.013..+0.014 on the floor (mean |error|
+0.12 → 0.035 rad/s in the air). Since a touching wheel's motor is always off,
+every wheel on the floor was braked: pushed, ALARM resisted rolling and the
+fork got under it. `rig::wheel_friction` (0; `RA2_WHEEL_FRICTION=1` puts back
+the old torque), for a driven wheel and a free axle alike (§12y found the
+steering hubs free too); test
+`duel::tests::an_undriven_wheel_spins_down_at_the_worlds_drag_alone`.
+
+**What is left is timing, not the solver.** In the free replays one substep of
+the fork's fire moves ALARM a lot: `mkours.py` `SHIFT` 0 / 1 / 2 (the fire one
+substep later, as §12s aligned it, one earlier), every body at its live state
+at the start (`STEPPROBE_FREE=0`): on its back at some point 1 / 2 / 5 of 20,
+mean lowest `up.y` 0.63 / 0.51 / 0.28 (live 0.70). A fork that rises a substep
+early catches ALARM's edge lower and rolls it at up to 4.4 rad/s (an early flip
+of ours, warmup 35: the fork fires 0.03 s after the first point, under ALARM's
+front corner from 1.5 m ahead, and ALARM rolls about its forward axis onto its
+side and back).
+
+**The brains tick once a frame (recovered, verified live).** Section 12n left
+open whether a brain's clock (`FUN_004011f0`, a virtual method: the time it is
+handed is added to `+0x44`) is fed every substep or every frame. Live the
+shipped AIs' commands (the `G` rows' thrusts) change after an even number of
+substeps in more than 99 % of the changes (`fightcontacts-scout-alarm-box__live__000..003`:
+8 substeps 398, 265, 179, 255 times, 6 substeps 121, 110, 82, 118, an odd
+count 0.6, 0, 0, 0.5 %): every 4 or 3 frames of 1/30 s, as a clock fed 1/30
+a frame against the 0.125 s interval gives (3.75 frames). Fed every substep it
+alternates 7 and 8, which ours did. `Duel::step_with` now feeds the clocks the
+frame's time when the components tick (`Robot::tick_due`), before the
+robots' driving takes the presses (`RA2_BRAINS_PER_SUBSTEP=1` for the old
+clock); tests `duel::tests::brains_tick_every_eighth_of_a_second_a_quarter_apart`
+(by frames now), `duel::tests::the_brains_tick_with_the_frame`. Which comes
+first within the original's frame update, the brains or the components, was
+not traced (ours: the brains, so a press is taken in the same update).
+
+**The airborne wheels turn the other way on one side of each pair (found, not
+fixed).** At the first substep after a placement with the throttle at 100 (the
+wheels in the air, motors on), live spins the wheels relative to the chassis
+about its `x` at +19.8 (Scout left), -16.2 (right), +20.1, -16.0, +20.0, -16.0
+(ALARM front left, front right, back right, back left); ours at -20.2..-20.6
+every one. The controller's velocity `trunc(-p · 0.01 · S)` is negated when a
+component of the axle in body B's frame (`atom + 0x60`) is below -0.5
+(`0x4814e1..0x48151a`, §12z's arena rule); live (`hingectl-scout-alarm-box__live__000`
+`L` rows) that vector is `(0, 1, 0)` for the Scout's left and ALARM's front
+left and back right wheels and `(0, 0, -0.8)` for the other three, exactly the
+ones that spin `-x`, each side with its own wire's sign. Ours has no such
+negation, and the rule cannot be applied as it stands: B is the wheel, and the
+original's wheel body frames are not ours (the axle is `(0, 0, -1)` in every
+one of our wheel frames; the build frames differ by quarter turns that are not
+about the axle, §12u's open item). It only matters to a driven wheel off the
+floor.
+
+**Validation.** Before = `fidelity` 776b943 (it reproduces section 12ad's after
+column to the digit), wheels = the wheels' friction alone, after = this
+branch, same machine. `FIDTRACE_WARMUP` x 48 (section 12ac's set), counted
+`>= 10`, mean ± standard error:
+
+| fight | live | before | wheels | after |
+|---|---|---|---|---|
+| box ALARM / Scout | 41.1 ± 6.5 / 6.0 ± 1.0 (15) | 31.6 ± 4.0 / 5.2 ± 0.6, 80 s, 15/48 full | 34.3 ± 3.6 / 5.8 ± 0.6, 83 s, 13/48 | 29.9 ± 3.8 / 4.9 ± 0.6, 84 s, 16/48 |
+| ... upside down (3 s), all / before 13 s | 5 of 13 / 0 | 25 / 13 of 48 (first 24: 17 / 9) | 25 / 9 (14 / 5) | 24 / 10 (13 / 7) |
+| ... on its back 5 s by 45 s | | 16/48 | 12/48 | 18/48 |
+| ... first meeting: ALARM's rise in 0.7 s, mean (median); `up.y < 0.5` | 0.98 (1.07, 1.10, 0.28, 1.46); 0 of 4 | 1.56 (1.54) m/s; 6 of 48 | 1.34 (1.29); 3 | 1.31 (1.17); 3 |
+| box Razor v FlapJack | 3.0 / 0.1 | 1.3 ± 0.3 / 4.6 ± 0.4 | 1.0 ± 0.1 / 4.6 ± 0.4 | 1.2 ± 0.1 / 4.0 ± 0.4 |
+| Compressor Wide Load / Sentinel | 73.6 / 5.3 | 78.6 ± 6.4 / 3.9 ± 0.5, 30/48 full | 79.0 ± 6.6 / 4.8 ± 0.6, 29/48 | 80.0 ± 7.1 / 4.4 ± 0.6, 35/48 |
+| Octagon ALARM / Scout | 13.6 / 3.2 | 14.4 ± 1.9 / 2.9 ± 0.3 | 12.2 ± 1.8 / 2.1 ± 0.3 | 13.2 ± 1.9 / 3.4 ± 0.4 |
+
+(First meeting: the first point between the robots in 15 s fights with
+`RA2_H17_DUMP`; the fork fires a median 0.08 / 0.07 / 0.07 s after it, before
+it in 0 / 0 / 2 runs.) Section 12s's replays (`twoprobe`, no brains, so the
+same in wheels and after): set 1 ALARM on its back at some point / at the end
+3 / 3 → 1 / 0 (live 1 / 1), mean lowest `up.y` 0.44 → 0.60 (live 0.70), both
+chassis' end centres from live, median 1.01 → 0.78 m, peak |ω| 3.33 → 3.29
+(live 3.05); set 2 0 / 0 both, 0.23 → 0.24 m, peak 1.46 → 1.59 (live 1.40).
+Every ensemble stays within about one standard error of before; the box's
+early falls (before 13 s) go from 13 to 9-10 of 48 and its first-meeting lift
+from 1.56 to 1.31 m/s, toward live, while its falls over the whole fight stay
+at about half the runs (live 5 of 13): the fire's timing against the contact
+(above) is not settled. The box ALARM sits 11.2 ± 7.5 below live.
+
+**Open.** The fire's substep against the contacts, and whether the original's
+brains run before its components in a frame (above); the airborne
+wheels' sense, which needs the original's wheel body frames (above, §12u); the
+rod against the fork (fewer points than live); the Scout's right wheel's build
+tilt (§12w).
