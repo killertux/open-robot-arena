@@ -4,7 +4,7 @@
 //! to [`PhysicsBackend`].
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use glam::{Quat, Vec3};
 use oxijolt::prelude::math as m;
@@ -39,10 +39,52 @@ pub fn havok_combined_friction(a: f32, b: f32) -> f32 {
 /// fixed for the duration of a step; the callbacks only read it.
 struct HavokFriction {
     friction: Arc<RwLock<HashMap<u32, f32>>>,
+    /// Whether to replace Jolt's friction with Havok's law.
+    havok: bool,
+    /// Every contact point of the step, for the damage model.
+    log: Arc<Mutex<Vec<RawContact>>>,
+}
+
+/// One contact manifold as Jolt reported it, before it is matched to bodies'
+/// pre-step states. Havok's event manager fires once per contact point per
+/// step (`FUN_00549c30`); the damage pipeline wants the same stream.
+struct RawContact {
+    body1: u32,
+    body2: u32,
+    normal: Vec3,
+    penetration: f32,
+    points: Vec<Vec3>,
 }
 
 impl HavokFriction {
+    fn record(&self, manifold: &ContactManifold) {
+        let points = manifold
+            .points
+            .iter()
+            .map(|p| {
+                let a = JoltBackend::un_rv(p.point_on1);
+                let b = JoltBackend::un_rv(p.point_on2);
+                (a + b) * 0.5
+            })
+            .collect();
+        if let Ok(mut log) = self.log.lock() {
+            if log.len() < 65_536 {
+                log.push(RawContact {
+                    body1: manifold.pair.body1.to_raw(),
+                    body2: manifold.pair.body2.to_raw(),
+                    normal: JoltBackend::un_v(manifold.normal),
+                    penetration: manifold.penetration_depth,
+                    points,
+                });
+            }
+        }
+    }
+
     fn combine(&self, manifold: &ContactManifold, settings: &mut ContactSettings) {
+        self.record(manifold);
+        if !self.havok {
+            return;
+        }
         let Ok(table) = self.friction.read() else {
             return;
         };
@@ -70,9 +112,12 @@ impl ContactListener for HavokFriction {
 }
 
 use crate::backend::{
-    BackendError, BodyDesc, BodyHandle, BodyState, HingeDesc, JointHandle, MotionType,
-    PhysicsBackend, RayHit, ShapeDesc, SliderDesc, StepInfo,
+    BackendError, BodyDesc, BodyHandle, BodyState, ContactEvent, HingeDesc, JointHandle,
+    MotionType, PhysicsBackend, RayHit, ShapeDesc, SliderDesc, StepInfo,
 };
+
+/// How far apart (m) a contact may be and still count as touching.
+const CONTACT_TOLERANCE: f32 = 0.01;
 
 /// The description of one joint, kept so a body can be re-shaped without
 /// losing its constraints (F9). The motor's *state* is here too: recreating a
@@ -118,6 +163,16 @@ pub struct JoltBackend {
     /// Each body's own friction coefficient, by raw Jolt body id, for the
     /// Havok friction-combination listener (F6). Jolt has no getter for it.
     friction: Arc<RwLock<HashMap<u32, f32>>>,
+    /// The contact points the listener logged during the last step.
+    contact_log: Arc<Mutex<Vec<RawContact>>>,
+    /// Every body's state at the start of the last step (raw id), which is what
+    /// Havok's collision events see: they fire before the step resolves.
+    pre_step: HashMap<u32, BodyState>,
+    /// The length of the last step.
+    last_dt: f32,
+    /// Each body's centre of mass in its own frame (by handle), from the
+    /// shape's own volume distribution (`havok17::mass`).
+    com_local: Vec<Vec3>,
 }
 
 impl JoltBackend {
@@ -130,19 +185,21 @@ impl JoltBackend {
         // events recorded, only the settings callback; oxijolt installs the
         // native contact listener whenever one is set.
         let friction = Arc::new(RwLock::new(HashMap::new()));
-        // The game's own combine law is the default; `RA2_FRICTION_LAW=jolt`
-        // opts into Jolt's `sqrt(µ₁·µ₂)` for comparison. With Havok's law the
-        // 45-bot survey measures 38/45 against 39/45 under Jolt's: the two
-        // losses are a ~2 cm-low wheel on two bots (F1 mount residual), not
-        // the law. See F6/F1 in `docs/06-deferred-fidelity.md`.
+        // The recovered combine law (the Havok resolver's `computeImpulse`,
+        // `0x540820`: `mu = sqrt(muA * muB)`) is Jolt's own default, so the
+        // listener leaves it alone. `RA2_FRICTION_LAW=sum` opts into the older
+        // `sqrt(muA^2 + muB^2)` the Xtra documentation states, for comparison.
         let havok = std::env::var("RA2_FRICTION_LAW")
-            .map(|v| !v.eq_ignore_ascii_case("jolt"))
-            .unwrap_or(true);
-        if havok {
-            world.set_contact_listener(Some(Arc::new(HavokFriction {
-                friction: Arc::clone(&friction),
-            })));
-        }
+            .map(|v| v.eq_ignore_ascii_case("sum"))
+            .unwrap_or(false);
+        // The listener is always installed: it also logs every contact point for
+        // the damage model, and only applies the friction law when asked to.
+        let contact_log = Arc::new(Mutex::new(Vec::new()));
+        world.set_contact_listener(Some(Arc::new(HavokFriction {
+            friction: Arc::clone(&friction),
+            havok,
+            log: Arc::clone(&contact_log),
+        })));
         Ok(Self {
             world,
             ids: Vec::new(),
@@ -151,6 +208,10 @@ impl JoltBackend {
             joints: Vec::new(),
             collision_tables: HashMap::new(),
             friction,
+            contact_log,
+            pre_step: HashMap::new(),
+            last_dt: 1.0 / 60.0,
+            com_local: Vec::new(),
         })
     }
 
@@ -181,7 +242,7 @@ impl JoltBackend {
         Quat::from_xyzw(q.x, q.y, q.z, q.w)
     }
 
-    fn build_shape(shape: &ShapeDesc) -> Result<Shape, BackendError> {
+    pub(crate) fn build_shape(shape: &ShapeDesc) -> Result<Shape, BackendError> {
         // Compounds recurse, so they are handled before the leaf closure.
         if let ShapeDesc::Compound(children) = shape {
             let built: Vec<Shape> = children
@@ -200,6 +261,11 @@ impl JoltBackend {
                 .collect();
             return Shape::new_compound(&refs).map_err(|e| BackendError::Shape(format!("{e:?}")));
         }
+        if let ShapeDesc::OffsetCenterOfMass { shape, offset } = shape {
+            let inner = Self::build_shape(shape)?;
+            return Shape::new_offset_center_of_mass(&inner, Self::v(*offset))
+                .map_err(|e| BackendError::Shape(format!("{e:?}")));
+        }
         let build = || -> Result<Shape, oxijolt::prelude::ShapeError> {
             Ok(match shape {
                 ShapeDesc::Box { half_extents } => Shape::new_box(Self::v(*half_extents))?,
@@ -212,7 +278,7 @@ impl JoltBackend {
                     half_height,
                     radius,
                 } => Shape::new_capsule(*half_height, *radius)?,
-                ShapeDesc::ConvexHull { points } => {
+                ShapeDesc::ConvexHull { points } | ShapeDesc::MeshHull { points, .. } => {
                     let pts: Vec<m::Vec3> = points.iter().map(|p| Self::v(*p)).collect();
                     Shape::new_convex_hull(&pts)?
                 }
@@ -222,10 +288,41 @@ impl JoltBackend {
                     mesh
                 }
                 // Handled above; a compound never reaches this closure.
-                ShapeDesc::Compound(_) => unreachable!("compound handled before this closure"),
+                ShapeDesc::Compound(_) | ShapeDesc::OffsetCenterOfMass { .. } => {
+                    unreachable!("handled before this closure")
+                }
             })
         };
         build().map_err(|e| BackendError::Shape(format!("{e:?}")))
+    }
+
+    fn ray_filtered(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+        exclude: Option<BodyId>,
+    ) -> Option<RayHit> {
+        let dir = direction.normalize_or_zero() * max_distance;
+        if dir == Vec3::ZERO {
+            return None;
+        }
+        let ray = RayCast::new(Self::rv(origin), Self::v(dir));
+        let filter = match exclude {
+            Some(id) => QueryFilter::new().exclude_body(id),
+            None => QueryFilter::default(),
+        };
+        let hit = self.world.cast_ray(&ray, &filter).ok()??;
+        Some(RayHit {
+            body: self
+                .lookup
+                .get(&hit.body.to_raw())
+                .copied()
+                .unwrap_or(u32::MAX),
+            distance: hit.distance,
+            point: origin + direction.normalize_or_zero() * hit.distance,
+            normal: Self::un_v(hit.normal),
+        })
     }
 
     fn id(&self, handle: BodyHandle) -> Option<BodyId> {
@@ -292,6 +389,8 @@ impl PhysicsBackend for JoltBackend {
         self.shapes.push(shape);
         let handle = self.ids.len() as BodyHandle;
         self.ids.push(Some(id));
+        self.com_local
+            .push(crate::havok17::mass::of_shape(&desc.shape).com);
         self.lookup.insert(id.to_raw(), handle);
         if let Ok(mut table) = self.friction.write() {
             table.insert(id.to_raw(), desc.friction);
@@ -378,7 +477,55 @@ impl PhysicsBackend for JoltBackend {
         Self::un_v(self.world.gravity())
     }
 
+    fn mass(&self, handle: BodyHandle) -> Option<f32> {
+        self.world.body(self.id(handle)?).ok()?.mass()
+    }
+
+    fn center_of_mass(&self, handle: BodyHandle) -> Option<Vec3> {
+        let s = self.state(handle)?;
+        let local = self
+            .com_local
+            .get(handle as usize)
+            .copied()
+            .unwrap_or(Vec3::ZERO);
+        Some(s.position + s.rotation * local)
+    }
+
+    fn add_force(&mut self, handle: BodyHandle, force: Vec3) {
+        if let Some(id) = self.id(handle) {
+            if let Ok(mut body) = self.world.body_mut(id) {
+                body.activate();
+                let _ = body.add_force(Self::v(force));
+            }
+        }
+    }
+
+    fn add_torque(&mut self, handle: BodyHandle, torque: Vec3) {
+        if let Some(id) = self.id(handle) {
+            if let Ok(mut body) = self.world.body_mut(id) {
+                body.activate();
+                let _ = body.add_torque(Self::v(torque));
+            }
+        }
+    }
+
+    fn last_dt(&self) -> f32 {
+        self.last_dt
+    }
+
     fn step(&mut self, dt: f32) -> StepInfo {
+        self.last_dt = dt;
+        // The collision events of this step see the bodies as they are now.
+        self.pre_step.clear();
+        if let Ok(mut log) = self.contact_log.lock() {
+            log.clear();
+        }
+        for handle in 0..self.ids.len() {
+            let handle = handle as BodyHandle;
+            if let (Some(id), Some(state)) = (self.id(handle), self.state(handle)) {
+                self.pre_step.insert(id.to_raw(), state);
+            }
+        }
         match self.world.step(dt) {
             Ok(report) => StepInfo {
                 complete: report.is_complete(),
@@ -390,6 +537,49 @@ impl PhysicsBackend for JoltBackend {
         }
     }
 
+    fn take_contacts(&mut self) -> Vec<ContactEvent> {
+        let raw = match self.contact_log.lock() {
+            Ok(mut log) => std::mem::take(&mut *log),
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for c in raw {
+            // Havok keeps only points closer than its tolerance; Jolt also
+            // reports speculative contacts before the bodies touch.
+            if c.penetration < -CONTACT_TOLERANCE {
+                continue;
+            }
+            let (Some(&a), Some(&b)) = (self.lookup.get(&c.body1), self.lookup.get(&c.body2))
+            else {
+                continue;
+            };
+            let (Some(&state_a), Some(&state_b)) =
+                (self.pre_step.get(&c.body1), self.pre_step.get(&c.body2))
+            else {
+                continue;
+            };
+            for point in c.points {
+                out.push(ContactEvent {
+                    a,
+                    b,
+                    normal: c.normal,
+                    point,
+                    state_a,
+                    state_b,
+                });
+            }
+        }
+        // Jolt's job threads report contacts in no fixed order.
+        out.sort_by(|x, y| {
+            (x.a, x.b)
+                .cmp(&(y.a, y.b))
+                .then(x.point.x.total_cmp(&y.point.x))
+                .then(x.point.y.total_cmp(&y.point.y))
+                .then(x.point.z.total_cmp(&y.point.z))
+        });
+        out
+    }
+
     fn in_contact(&self, a: BodyHandle, b: BodyHandle) -> bool {
         match (self.id(a), self.id(b)) {
             (Some(ia), Some(ib)) => self.world.were_bodies_in_contact(ia, ib).unwrap_or(false),
@@ -398,22 +588,17 @@ impl PhysicsBackend for JoltBackend {
     }
 
     fn ray_cast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<RayHit> {
-        let dir = direction.normalize_or_zero() * max_distance;
-        if dir == Vec3::ZERO {
-            return None;
-        }
-        let ray = RayCast::new(Self::rv(origin), Self::v(dir));
-        let hit = self.world.cast_ray(&ray, &QueryFilter::default()).ok()??;
-        Some(RayHit {
-            body: self
-                .lookup
-                .get(&hit.body.to_raw())
-                .copied()
-                .unwrap_or(u32::MAX),
-            distance: hit.distance,
-            point: origin + direction.normalize_or_zero() * hit.distance,
-            normal: Self::un_v(hit.normal),
-        })
+        self.ray_filtered(origin, direction, max_distance, None)
+    }
+
+    fn ray_cast_excluding(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+        exclude: BodyHandle,
+    ) -> Option<RayHit> {
+        self.ray_filtered(origin, direction, max_distance, self.id(exclude))
     }
 
     fn create_hinge(&mut self, desc: &HingeDesc) -> Result<JointHandle, BackendError> {
@@ -601,6 +786,9 @@ impl PhysicsBackend for JoltBackend {
             return Err(BackendError::Body("set_shape on a missing body".into()));
         };
         let built = Self::build_shape(shape)?;
+        if let Some(c) = self.com_local.get_mut(handle as usize) {
+            *c = crate::havok17::mass::of_shape(shape).com;
+        }
 
         // Jolt refuses `set_shape` while a constraint uses the body
         // (`UsedByConstraint`). Every stock chassis is hinged to its wheels, so
@@ -979,7 +1167,11 @@ mod tests {
                     (ground.to_raw(), 0.3),
                     (body.to_raw(), 0.3),
                 ])));
-                world.set_contact_listener(Some(Arc::new(HavokFriction { friction: table })));
+                world.set_contact_listener(Some(Arc::new(HavokFriction {
+                    friction: table,
+                    havok: true,
+                    log: Arc::new(Mutex::new(Vec::new())),
+                })));
             }
             for _ in 0..60 {
                 let _ = world.step(1.0 / 60.0);

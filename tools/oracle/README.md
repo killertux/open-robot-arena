@@ -157,3 +157,69 @@ in the JSON.
 1.45**). It is not part of `tools/check.sh`: CI has no game files and no
 captured originals, so this is a local, game-required gate. Without the
 reference frame it exits 2 (skip), naming the missing path.
+
+## The fidelity harness (`fidelity.py`) and the capture scripts
+
+`tools/oracle/fidelity.py` is the comparison harness; `compare.py`/`check.sh` above are the historic
+single-screen gate. Baseline numbers: `docs/26-fidelity-baseline.md`.
+
+```sh
+cd engine && cargo build --release --offline \
+  && cargo build --release --offline -p ra2sim --example fidtrace
+RA2_GAME=local/game python3 tools/oracle/fidelity.py                 # screens, both renderers
+python3 tools/oracle/fidelity.py --only botlab,teamhq --renderer shell
+python3 tools/oracle/fidelity.py --gameplay                          # + traces vs the original's live traces
+python3 tools/oracle/fidelity.py --gameplay-only | --list
+```
+
+Per fixture and renderer (`app` = `ra2-app --offscreen`, `shell` = `ra2-shell` laid out natively at
+1024x768) it writes `ours/`, `side/` (original | ours | |diff| x4) and `summary.md/json` under
+`local/oracle/fidelity/latest/` (`--out` overrides): MAE, pointer-masked MAE, fraction of pixels >8
+off, and a 16x16 low-frequency MAE. Unreachable fixtures are listed with the reason, never invented. Fixtures
+and their named-click routes are the `FIXTURES` table at the top of the file; add one by adding a row (and the
+capture with `add_fixture.py`). `--gameplay` runs `engine/crates/ra2sim/examples/fidtrace.rs`
+(`fidtrace match|drive`, writes traces in the original's format: time, per-player location, heading
+`atan2(fx,fz)`, speed, hitpoints, health) and compares per-robot speed distribution, path length,
+hitpoints, damage events/s and magnitude histogram, plus the drive test (turn rate, top speed, time to 90%,
+distances) when `original/drive-*.tsv` exists.
+
+Capture scripts (all need `tools/capture/original_session.sh start`; one at a time, only one agent may run
+the original):
+
+| script | what |
+|---|---|
+| `capture_arenas.py [--rows 0-7]` | per stock arena: picker, intro, countdown, F2/F3/F3/F4 cameras into `original/arena-<id>-*` + manifest |
+| `capture_drive.py` | in-game Python neuters both AI brains, drives Scout (turn / coast / throttle / stop), samples ~13 Hz incl. the commanded values; writes `original/drive-*.tsv/.json` |
+| `capture_weapon.py` | inert Scout vs ALARM's own AI with the damage hook and a sampler with per-component health |
+| `capture_repro.py --pin none|seed --runs N` | reproducibility experiment (see `docs/26`); `frida/ra2_seed.js` pins the C `rand()` |
+
+Gotchas learnt the hard way: loading a match takes 5-20 s and running in-game Python during the load can leave a
+black screen (wait blind, then check `plus.getPlayers()`); F1 in a match opens the controls-reminder overlay,
+which swallows later key presses and the Continue click (use F2/F3/F4 only); a client killed mid-RPC wedges
+frida-server (`kill -9 $(pgrep -x frida-server)`, restart the session); Python 2.2 inside the game rejects a
+`try/except: break` in a nested `for` under the wrapper (use list comprehensions); the Select Computer Robot team
+drop-down does not open with injected clicks.
+
+## Audio captures (M-audio3)
+
+`docs/35-audio-events.md` is the recovered behaviour; these are the tools that
+recorded it. All need `tools/capture/original_session.sh start` and write into
+`local/oracle/original/` (git-ignored) with a `manifest.tsv` row per file.
+
+| Tool | What it does |
+|---|---|
+| `frida/ra2_sounds.js` | Hooks every `SoundWizard` call (create, play, loop, stop, volume, fades; `0x4f0000`..`0x4f1130`), the music layer (`0x4f1350` folder, `0x4f12d0` track, `0x4f1620`) and the DirectMusic UI one-shot (`0x6287e0`). Rows carry `Date.now()`. |
+| `capture_audio.py NAME SECONDS` | `parec --monitor-stream` of the game's own sink input (48 kHz stereo) plus the agent's log, side by side; line 1 of the `.jsonl` is the host epoch of the WAV start. |
+| `capture_audio_match.py` | A whole Scout v ALARM exhibition match on the Combat Arena: intro, countdown, fight, results (`SKIP_INTRO=1`, `FIGHT_SECONDS`, `RESULT_SECONDS`). |
+| `survey_clicks.py NAME STEPS.tsv` | One attach, one click per line of `routes/click_survey.tsv`; `.clicks.tsv` says which click played `button_click.wav`. |
+| `audio_events.py LOG.jsonl` | Normalises a log into `t_s kind file volume handle note` lines. |
+| `audio_compare.py ORIG.events.tsv OURS.log` | The same match, original against `RA2_AUDIO_TRACE=1` of `ra2-app --match`, aligned on the bell. |
+| `audio_levels.py ORIG.events.tsv OURS.log` | Per-class level of every sound start (count, mean / min / max hundredths of a dB, share louder than -900), original against ours (`docs/35` section 13). |
+| `audio_window.py`, `audio_replay_check.py` | RMS of a WAV over a window aligned on the bell; the recording against `ra2-audio`'s `replay` example (the original's own call log mixed through our gain model). |
+| `frida/ra2_music_probe.js` | One-off: which music-layer calls run at a screen or match transition. |
+
+Limits found on the way (`docs/35` section 1): the DirectMusic UI clicks and
+(apparently) the in-match music request are not audible through Wine, so for them
+the call log is the evidence, not the WAV; repeated `frida` attaches wedge
+`frida-server` (restart it, and prefer one attach per script);
+`pkill -f` patterns match your own shell command line.

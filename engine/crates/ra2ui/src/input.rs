@@ -190,6 +190,72 @@ pub fn set_state(widget: &mut Widget, selected: bool) -> bool {
     changed
 }
 
+/// Enable or disable a `Button` (`FUN_005ec4e0(enabled)`): a disabled button shows its last state image
+/// (`StateImage 3`, the dimmed one: the shipped `*_button_n.bmp` tinted `0.5 0.5 0.5`), an enabled one its
+/// first. Returns whether anything changed. A button with one state image only is left alone.
+pub fn set_button_enabled(widget: &mut Widget, enabled: bool) -> bool {
+    if widget.kind != WidgetKind::Button || widget.children.len() < 2 {
+        return false;
+    }
+    let want = if enabled {
+        0
+    } else {
+        widget.children.len() - 1
+    };
+    let mut changed = false;
+    for (index, child) in widget.children.iter_mut().enumerate() {
+        let show = index == want;
+        if child.visible() != show {
+            set_field(child, "Visible", if show { "true" } else { "false" });
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Enable or disable a `CheckBox` (`FUN_005ec4e0` on one of the lab's tabs): its fourth state image
+/// (`StateImage 3`, the shipped `_n` art tinted alpha 0.3) is the disabled look. Enabling puts back
+/// the selected or the normal image. Returns whether anything changed.
+pub fn set_checkbox_enabled(widget: &mut Widget, enabled: bool) -> bool {
+    if widget.kind != WidgetKind::CheckBox || widget.children.len() < 4 {
+        return false;
+    }
+    let count = widget.children.len();
+    let selected = field_of(widget, "Checked").is_some_and(|c| c == "true");
+    let want = if !enabled {
+        count - 1
+    } else if selected {
+        count - 2
+    } else {
+        0
+    };
+    let mut changed = false;
+    for (index, child) in widget.children.iter_mut().enumerate() {
+        let show = index == want;
+        if child.visible() != show {
+            set_field(child, "Visible", if show { "true" } else { "false" });
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Whether a `CheckBox` shows its disabled image (see [`set_checkbox_enabled`]).
+pub fn checkbox_dimmed(widget: &Widget) -> bool {
+    widget.kind == WidgetKind::CheckBox
+        && widget.children.len() >= 4
+        && widget.children.last().is_some_and(|c| c.visible())
+}
+
+/// Whether a button shows its dimmed state (see [`set_button_enabled`]): the first state image is
+/// hidden and the last is shown. Anything else, including a widget that is not a button, is enabled.
+pub fn button_dimmed(widget: &Widget) -> bool {
+    widget.kind == WidgetKind::Button
+        && widget.children.len() >= 2
+        && widget.children.first().is_some_and(|c| !c.visible())
+        && widget.children.last().is_some_and(|c| c.visible())
+}
+
 /// Select `child` in the option group called `group`: the group's `Selection`
 /// is set, and every `CheckBox` under it is put into its selected or unselected
 /// state.
@@ -374,6 +440,10 @@ pub fn visible_rows(list: &Widget) -> usize {
     let Some(grid) = Grid::from_widget(list) else {
         return 0;
     };
+    // The viewport the shell measured from the laid-out scroller.
+    if let Some(rows) = field_of(list, "_ViewRows").and_then(|v| v.parse::<usize>().ok()) {
+        return rows;
+    }
     if grid.rows > 1 {
         return grid.rows as usize;
     }
@@ -413,10 +483,18 @@ pub fn scroll_rows(list: &mut Widget, offset: usize) -> usize {
             continue;
         }
         let shown = ordinal >= offset && ordinal < offset + visible;
+        let (dx, dy) = if child.kind == WidgetKind::Text {
+            (ROW_TEXT_X, ROW_TEXT_Y)
+        } else {
+            (0.0, 0.0)
+        };
         set_field(
             child,
             "Position",
-            &format!("0 0 {} 0", (ordinal as f32 - offset as f32) * height),
+            &format!(
+                "{dx} 0 {} 0",
+                (ordinal as f32 - offset as f32) * height + dy
+            ),
         );
         set_field(child, "Visible", if shown { "true" } else { "false" });
         ordinal += 1;
@@ -463,10 +541,34 @@ pub fn select_cell(list: &mut Widget, row: usize, column: usize) -> bool {
     let column = if grid.row_select { 0 } else { column };
     let y = grid.row_height * row as f32;
     let x = grid.column_x(column as i32);
+    let even = field_of(list, "_EvenCells") == Some("true");
+    let (rows_n, cols_n) = (grid.rows.max(1) as f32, columns as f32);
     let Some(bar) = selection_bar_mut(list, &grid) else {
         return false;
     };
-    set_field(bar, "Position", &format!("{x} 0 {y} 0"));
+    if even {
+        // The list divides its rectangle evenly (the Team HQ inventory); the frame is the cell.
+        let (w, h) = (1.0 / cols_n, 1.0 / rows_n);
+        // The bar's `Lines` frame is drawn in the file's 213 x 70 pixels; the original's frame is the whole
+        // cell (live `teamhq-scrap-selected`: 618..957 x 373..493 at 1024x768), so its points become
+        // fractions of the bar.
+        let native = bar
+            .field("Size")
+            .map(|f| f.numbers())
+            .filter(|n| n.len() >= 4 && n[1] == 0.0 && n[3] == 0.0 && n[0] > 0.0 && n[2] > 0.0)
+            .map(|n| (n[0], n[2]));
+        if let Some((nw, nh)) = native {
+            relative_points(bar, nw, nh);
+        }
+        set_field(
+            bar,
+            "Position",
+            &format!("{} 1 {} 1", column as f32 * w, row as f32 * h),
+        );
+        set_field(bar, "Size", &format!("{w} 1 {h} 1"));
+    } else {
+        set_field(bar, "Position", &format!("{x} 0 {y} 0"));
+    }
     set_field(bar, "Visible", "true");
     set_field(list, "_SelectedRow", &row.to_string());
     set_field(list, "_SelectedColumn", &column.to_string());
@@ -492,6 +594,25 @@ pub fn select_cell(list: &mut Widget, row: usize, column: usize) -> bool {
         }
     }
     true
+}
+
+/// Turn the absolute `Point`s of every `Lines` under `widget` into fractions of a `nw` x `nh` box.
+fn relative_points(widget: &mut Widget, nw: f32, nh: f32) {
+    if widget.kind == WidgetKind::Lines {
+        for field in widget
+            .fields
+            .iter_mut()
+            .filter(|f| f.name.as_deref() == Some("Point"))
+        {
+            let n = field.numbers();
+            if n.len() >= 4 && n[1] == 0.0 && n[3] == 0.0 {
+                field.raw = format!("{} 1 {} 1", n[0] / nw, n[2] / nh);
+            }
+        }
+    }
+    for child in widget.children.iter_mut() {
+        relative_points(child, nw, nh);
+    }
 }
 
 /// The selected cell of a list: `(row, column)`, or `(row, 0)` for a
@@ -532,6 +653,11 @@ fn scrollbar_in_mut(widget: &mut Widget) -> Option<&mut Widget> {
 }
 
 /// Show or hide the list's scrollbar, and place its thumb at `offset / max`.
+/// Show or hide a list's `Scroller` bar (the original hides it while every row fits).
+pub fn show_scroller(list: &mut Widget, visible: bool) {
+    set_scroller_visible(list, visible, 0, 0);
+}
+
 fn set_scroller_visible(list: &mut Widget, visible: bool, offset: usize, max: usize) {
     let track = list.size().map(|s| s.second.amount).unwrap_or(0.0);
     let Some(body) = list
@@ -542,6 +668,11 @@ fn set_scroller_visible(list: &mut Widget, visible: bool, offset: usize, max: us
     else {
         return;
     };
+    // A dropdown's list keeps its bar in a hidden wrapper (`Visible false`,
+    // `ClipMode 2`); the exe shows the wrapper with the bar.
+    if !visible || body.kind != WidgetKind::ScrollBar {
+        set_field(body, "Visible", if visible { "true" } else { "false" });
+    }
     let Some(bar) = scrollbar_in_mut(body) else {
         return;
     };
@@ -581,6 +712,11 @@ fn thumb(slider: &mut Widget, offset: usize, max: usize, track: f32) {
     );
 }
 
+/// Where a row's text sits inside its row box, measured against the original's
+/// arena list (best shift of our render onto the capture: 2 px right, 5 px up).
+pub(crate) const ROW_TEXT_X: f32 = 2.0;
+pub(crate) const ROW_TEXT_Y: f32 = -5.0;
+
 /// Fill a single-column list with text rows, in the face the arena picker uses.
 ///
 /// The row height and width are the list's own `Sel Bar` (`159 0 18 0` for the
@@ -613,11 +749,13 @@ pub fn text_rows(list: &mut Widget, texts: &[String]) -> usize {
             fields: vec![
                 field("Name", ""),
                 field("ID", "-1"),
-                field("Position", &format!("0 0 {y} 0")),
+                field("Position", &format!("{ROW_TEXT_X} 0 {} 0", y + ROW_TEXT_Y)),
                 field("Size", &format!("{width} 0 {height} 0")),
                 field("Visible", "true"),
-                field("ChildOrder", "-1"),
-                field("ClipMode", "1"),
+                // In front of the file's own bars (`ChildOrder` 3 and 4), as the
+                // capture draws the selected row's text white over its bar.
+                field("ChildOrder", "10"),
+                field("ClipMode", "0"),
                 field("NumChildren", "0"),
                 field("_Font", &face),
                 field("_Text", text),
@@ -640,6 +778,7 @@ mod tests {
     use ra2fmt::gib::Gib;
 
     fn ui_root() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game/UI");
@@ -711,7 +850,7 @@ mod tests {
         };
         let roots = resolve(&gib, DESIGN_SCREEN);
         // `chassis button` is the second tab, placed at 431,37 100x24.
-        let path = hit(&roots, 437.0, 45.0).expect("a click on the chassis tab");
+        let path = hit(&roots, 437.0, 120.0).expect("a click on the chassis tab");
         let widget = at_roots(&roots, &path).unwrap();
         assert!(
             widget.kind == WidgetKind::Image || widget.kind == WidgetKind::CheckBox,
@@ -808,7 +947,7 @@ mod tests {
         assert!(rows[..5].iter().all(|row| !row.visible()));
         assert!(rows[5..11].iter().all(|row| row.visible()));
         assert!(!rows[11].visible(), "row 11 is past the six-row viewport");
-        assert_eq!(rows[5].position().unwrap().second.amount, 0.0);
+        assert_eq!(rows[5].position().unwrap().second.amount, ROW_TEXT_Y);
         assert!(select_cell(list, 10, 0));
         assert_eq!(selected_row(list), Some(10));
         assert_eq!(selected_cell(list), Some((10, 0)));

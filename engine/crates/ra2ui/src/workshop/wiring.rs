@@ -113,6 +113,8 @@ pub const ACTION_NAMES: &[&str] = &[
     "Right",
     "Spin Clockwise",
     "Spin Counter-clockwise",
+    // `Button<Flamethrower>` (`FUN_00504080`); no stock bot has a Flamethrower.
+    "Fire burst",
 ];
 
 /// One wiring action.
@@ -133,6 +135,8 @@ pub enum Action {
     Retract,
     RepelOnOff,
     AttractOnOff,
+    /// `Fire burst`: a Flamethrower's button, a tenth of a second of flame.
+    FireBurst,
 }
 
 impl Action {
@@ -154,6 +158,7 @@ impl Action {
             Action::Retract => "Retract",
             Action::RepelOnOff => "Repel On/Off",
             Action::AttractOnOff => "Attract On/Off",
+            Action::FireBurst => "Fire burst",
         }
     }
 
@@ -181,6 +186,7 @@ impl Action {
                     Action::Right,
                     Action::SpinClockwise,
                     Action::SpinCounterClockwise,
+                    Action::FireBurst,
                 ][i]
             })
             .ok_or_else(|| WiringError::UnknownAction {
@@ -245,13 +251,26 @@ impl Control {
         self
     }
 
-    /// `"W / S"`-style input label, as `botlab/control_cell.gib` shows it.
+    /// The DirectInput code of a binding row: 1.07/1.08 files write three
+    /// numbers (`0 57 0`, the code second), newer ones four (code third) — the
+    /// same rule the simulator's wiring reader applies.
+    pub fn key_code(row: &[i32; 4]) -> i32 {
+        if row[2] != 0 {
+            row[2]
+        } else {
+            row[1]
+        }
+    }
+
+    /// `"W - S"`-style input label, as `botlab/control_cell.gib` shows it: the
+    /// keys joined with `" - "` (the string at `0x6f1cc0` that the exe's
+    /// control-cell filler `FUN_004451b0` puts between them).
     pub fn key_label(&self) -> String {
         self.keys
             .iter()
-            .map(|row| dik_name(row[2]))
+            .map(|row| dik_name(Self::key_code(row)))
             .collect::<Vec<_>>()
-            .join(" / ")
+            .join(" - ")
     }
 
     fn from_controller(c: &Controller) -> Result<Self, WiringError> {
@@ -540,6 +559,10 @@ impl ControlBoard {
             (ControlKind::Analog | ControlKind::Button | ControlKind::Switch, "Magnet") => {
                 &[RepelOnOff, AttractOnOff][..]
             }
+            // `Analog<Flamethrower>` takes `Fire` (the jet while the control is
+            // non-zero), `Button<Flamethrower>` takes `Fire burst`.
+            (ControlKind::Analog, "Flamethrower") => &[Fire][..],
+            (ControlKind::Button, "Flamethrower") => &[FireBurst][..],
             _ => &[][..],
         }
     }
@@ -772,6 +795,20 @@ pub fn dik_name(code: i32) -> String {
         50 => "M",
         54 => "RShift",
         57 => "Space",
+        2 => "1",
+        3 => "2",
+        4 => "3",
+        5 => "4",
+        6 => "5",
+        7 => "6",
+        8 => "7",
+        9 => "8",
+        10 => "9",
+        11 => "0",
+        200 => "Up Arrow",
+        208 => "Down Arrow",
+        203 => "Left Arrow",
+        205 => "Right Arrow",
         59 => "F1",
         60 => "F2",
         61 => "F3",
@@ -836,8 +873,8 @@ mod tests {
         assert_eq!(board.names(), ["Forward", "LeftRight", "Fire", "Spin"]);
         let forward = board.control_at([1, 0]).unwrap();
         assert_eq!(forward.kind, ControlKind::Analog);
-        assert_eq!(forward.key_label(), "W / S");
-        assert_eq!(board.control_at([2, 0]).unwrap().key_label(), "A / D");
+        assert_eq!(forward.key_label(), "W - S");
+        assert_eq!(board.control_at([2, 0]).unwrap().key_label(), "A - D");
         assert_eq!(board.control_at([0, 0]).unwrap().key_label(), "Space");
     }
 

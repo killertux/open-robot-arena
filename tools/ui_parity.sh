@@ -1,5 +1,7 @@
 #!/bin/sh
-# The two-renderer check: draw each shell screen twice and measure the gap.
+# The two-renderer SELF-CONSISTENCY check: draw each shell screen twice and
+# measure the gap.  NOT fidelity to the original: both renderers use our parser's
+# glyphs and layout assumptions.  Fidelity is tools/oracle/fidelity.py.
 #
 #   tools/ui_parity.sh [--check] [--threshold N] [screen.gib ...]
 #

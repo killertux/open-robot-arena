@@ -37,7 +37,7 @@ use ra2fmt::gib::{Block, Field, Gib, Widget, WidgetKind};
 use ra2fmt::team::Team;
 
 use crate::standings::Standing;
-use crate::{Fonts, Grid, Placement};
+use crate::{Fonts, Frame, Grid, Placement};
 
 /// The team HQ window.
 pub const SCREEN: &str = "teamhq/teamhq.gib";
@@ -76,6 +76,10 @@ pub const TABS: [Tab; 4] = [
 /// The robot inventory's grid and the cell the binary fills it with.
 pub const ROBOT_GRID: &str = "robot grid";
 pub const ROBOT_TEMPLATE: &str = "teamhq/bot_cell.gib";
+/// The cell of a slot with no robot (`FUN_004ff570`: `UI\teamhq\nobot_cell.gib`, `New Robot`).
+pub const NO_ROBOT_TEMPLATE: &str = "teamhq/nobot_cell.gib";
+/// The inventory shows six cells: three rows of two columns, filled down each column first.
+pub const INVENTORY_CELLS: usize = 6;
 /// The cell's own binding points.
 pub const BOT_NAME: &str = "bot name";
 pub const BOT_CLASS: &str = "weight class";
@@ -117,6 +121,10 @@ pub const TEAM_LOGO: &str = "hq logo img";
 /// One robot in the inventory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RobotRow {
+    /// The team folder's robot slot (`Bot<slot>.bot`, an entry of the record's `Robots:` line).
+    /// The inventory's cell `i` shows slot `i`; a slot with no robot (never made, or scrapped)
+    /// is the `nobot_cell.gib` cell, `New Robot`.
+    pub slot: usize,
     pub name: String,
     /// The class the `.bot` records, as the cell's own note asks for it.
     pub class: String,
@@ -159,6 +167,8 @@ pub enum EventState {
 pub struct BracketSlot {
     pub name: String,
     pub player: bool,
+    /// The team's logo (`Teams\\orange_skull.bmp`), the bracket's picture.
+    pub logo: String,
 }
 
 /// One match of a round, as `event_bracket.gib`'s generated bracket shows it.
@@ -387,9 +397,8 @@ impl Hq {
             .find(|p| p.widget.name() == EVENT_GRID)?;
         let geometry = Grid::from_widget(grid.widget)?;
         let columns = geometry.columns.max(1) as usize;
-        let row = (index / columns) as i32;
-        let column = (index % columns) as i32;
-        let cell = geometry.cell(grid.frame, row, column);
+        let rows = geometry.rows.max(1) as usize;
+        let cell = schedule_cell(grid.frame, rows, columns, index / columns, index % columns);
         Some([cell.x + cell.w / 2.0, cell.y + cell.h / 2.0])
     }
 
@@ -413,7 +422,7 @@ impl Hq {
         let rows = geometry.rows.max(1) as usize;
         for row in 0..rows {
             for column in 0..columns {
-                let cell = geometry.cell(grid.frame, row as i32, column as i32);
+                let cell = schedule_cell(grid.frame, rows, columns, row, column);
                 if cell.contains_point(point[0], point[1]) {
                     return Some(row * columns + column);
                 }
@@ -511,7 +520,11 @@ impl Hq {
 
     fn fill_tab(&mut self) -> Result<(), String> {
         match self.tab {
-            "robots button" => self.fill_robots()?,
+            "robots button" => {
+                self.fill_robots()?;
+                let view = self.view.clone();
+                sync_inventory_buttons(&mut self.document, &view);
+            }
             "league button" => self.fill_league()?,
             "events button" => self.fill_events()?,
             "history button" => self.fill_history()?,
@@ -522,17 +535,67 @@ impl Hq {
 
     fn fill_robots(&mut self) -> Result<(), String> {
         let template = load(&self.ui_root, ROBOT_TEMPLATE)?;
+        let empty = load(&self.ui_root, NO_ROBOT_TEMPLATE)?
+            .widgets()
+            .next()
+            .cloned();
         let rows = &self.view.robots;
         let Some(grid) = find_mut_in(&mut self.document, ROBOT_GRID) else {
             return Ok(());
         };
-        let made = crate::cells::fill(grid, &template, rows.len());
+        // `FUN_004ff570` makes six cells; cell `i` is slot `i` (a robot cell when the team has
+        // that slot, else the `New Robot` cell). A refill (after a scrap) starts from the bars.
+        grid.children
+            .retain(|c| matches!(c.name(), "Sel Bar" | "High Bar"));
+        let made = crate::cells::fill(grid, &template, INVENTORY_CELLS);
         let bars = grid.children.len() - made;
-        for (cell, row) in grid.children[bars..].iter_mut().zip(rows) {
-            crate::cells::bind_value(cell, BOT_NAME, &row.name);
-            crate::cells::bind_value(cell, BOT_CLASS, &row.class);
-            if !row.preview.is_empty() {
-                crate::cells::bind_art(cell, BOT_SNAPSHOT, &row.preview);
+        // Nothing is selected until the player clicks a robot (the shipped bar
+        // positions are the author's leftovers).
+        clear_bars(grid);
+        // The inventory grid divides its own rectangle evenly into `Rows` x
+        // `Columns` cells (the capture's cells are 341 x 119 px in a 683 x 357
+        // grid, not the file's 213 x 70) and fills down each column first; its
+        // selection frame is a whole cell (`_EvenCells`, read by `input::select_cell`).
+        crate::input::set_field(grid, "_EvenCells", "true");
+        if let Some(geometry) = Grid::from_widget(grid) {
+            let (cols, rws) = (
+                geometry.columns.max(1) as usize,
+                geometry.rows.max(1) as usize,
+            );
+            for (i, cell) in grid.children[bars..].iter_mut().enumerate() {
+                let (col, row) = (i / rws, i % rws);
+                if col >= cols {
+                    break;
+                }
+                let (w, h) = (1.0 / cols as f32, 1.0 / rws as f32);
+                crate::input::set_field(
+                    cell,
+                    "Position",
+                    &format!("{} 1 {} 1", col as f32 * w, row as f32 * h),
+                );
+                crate::input::set_field(cell, "Size", &format!("{w} 1 {h} 1"));
+            }
+        }
+        for (slot, cell) in grid.children[bars..].iter_mut().enumerate() {
+            match rows.iter().find(|r| r.slot == slot) {
+                Some(row) => {
+                    crate::cells::bind_value(cell, BOT_NAME, &row.name);
+                    crate::cells::bind_value(cell, BOT_CLASS, &row.class);
+                    if !row.preview.is_empty() {
+                        crate::cells::bind_art(cell, BOT_SNAPSHOT, &row.preview);
+                    }
+                }
+                None => {
+                    if let Some(root) = &empty {
+                        let mut none = root.clone();
+                        for field in ["Position", "Size"] {
+                            if let Some(v) = cell.field(field).map(|f| f.raw.clone()) {
+                                crate::input::set_field(&mut none, field, &v);
+                            }
+                        }
+                        *cell = none;
+                    }
+                }
             }
         }
         Ok(())
@@ -545,6 +608,7 @@ impl Hq {
             return Ok(());
         };
         crate::standings::fill_league(grid, &template, &rows);
+        clear_bars(grid);
         bind_value_in(
             &mut self.document,
             "season",
@@ -561,6 +625,13 @@ impl Hq {
     fn fill_events(&mut self) -> Result<(), String> {
         let rows = self.view.events.clone();
         let ui_root = self.ui_root.clone();
+        // The live content group is 420 px tall at 1024x768 where ours is 422.9 (the chain of
+        // splits above it is not recovered, docs/36 9.22); the schedule needs the 420 (the
+        // calendar 0.95 of it = 399, its split 0.9 = 359, minus the 26 px title = the grid's
+        // 333, three rows of 111). A fit of the events pane only, as a fraction so it scales.
+        if let Some(group) = find_mut_in(&mut self.document, "events group") {
+            crate::input::set_field(group, "Size", "1 1 0.99325 1");
+        }
         let Some(grid) = find_mut_in(&mut self.document, EVENT_GRID) else {
             return Ok(());
         };
@@ -569,7 +640,9 @@ impl Hq {
         };
         let columns = geometry.columns.max(1) as usize;
         let width = geometry.col_widths.first().copied().unwrap_or(0.0);
-        grid.children.retain(|c| c.name() != "event cell group");
+        grid.children
+            .retain(|c| c.name() != "event cell group" && !c.name().starts_with("grid line"));
+        clear_bars(grid);
         for (index, row) in rows.iter().enumerate() {
             let relative = match row.state {
                 EventState::Completed => EVENT_COMPLETED,
@@ -581,15 +654,29 @@ impl Hq {
             let Some(root) = template.widgets().next().cloned() else {
                 continue;
             };
-            let (r, c) = ((index / columns) as i32, (index % columns) as i32);
-            let x = geometry.column_x(c);
-            let y = geometry.row_height * r as f32;
+            // Like the inventory, the schedule divides its own rectangle evenly
+            // into `Rows` x `Columns` cells.
+            let (r, c) = (index / columns, index % columns);
+            let rows_n = geometry.rows.max(1) as f32;
+            let (cw, ch) = (1.0 / columns as f32, 1.0 / rows_n);
+            // The art sits inside the slot's left/top line and `BufferWidth 2`: it starts
+            // `1 + 2` px in and stops 2 px short of the next slot's line (live, 1024x768: slot
+            // 184 x 111, lines at 341/525/709 and 318/429/540/651, art 344..522 x 321..426).
+            // Fractions of the 184 x 111 slot, so they hold at the other sizes too.
             let mut cell = root;
-            crate::input::set_field(&mut cell, "Position", &format!("{x} 0 {y} 0"));
+            crate::input::set_field(
+                &mut cell,
+                "Position",
+                &format!(
+                    "{} 1 {} 1",
+                    c as f32 * cw + 3.0 / 184.0 * cw,
+                    r as f32 * ch + 3.0 / 111.0 * ch
+                ),
+            );
             crate::input::set_field(
                 &mut cell,
                 "Size",
-                &format!("{width} 0 {} 0", geometry.row_height),
+                &format!("{} 1 {} 1", cw * 179.0 / 184.0, ch * 106.0 / 111.0),
             );
             crate::cells::bind_art(&mut cell, "preview img", &row.event.art);
             let (label, color) = match row.state {
@@ -632,6 +719,25 @@ impl Hq {
             }
             grid.children.push(cell);
         }
+        // The grid's own lines (`BorderColor 0 0 0 1`, `BorderWidth 1`), one pixel each and shared
+        // between neighbours: a vertical line at the left of every column and a horizontal one at
+        // the top of every row and under the last (live: no line at the right edge).
+        let rows_n = geometry.rows.max(1) as usize;
+        let tall = 1.0 + 1.0 / (rows_n as f32 * 111.0);
+        for c in 0..columns {
+            grid.children.push(grid_line(
+                &format!("grid line column {c}"),
+                [c as f32 / columns as f32, 1.0, 0.0, 1.0],
+                [1.0, 0.0, tall, 1.0],
+            ));
+        }
+        for r in 0..=rows_n {
+            grid.children.push(grid_line(
+                &format!("grid line row {r}"),
+                [0.0, 1.0, r as f32 / rows_n as f32, 1.0],
+                [1.0, 1.0, 1.0, 0.0],
+            ));
+        }
         // The schedule's own title states the season; the bracket state is the
         // short `E<n>/9 R<n>` suffix, which fits the title box's one line.
         if let Some(title) = find_mut_in(&mut self.document, "schedule title") {
@@ -648,7 +754,7 @@ impl Hq {
             };
             set_value(
                 title,
-                &format!("Event Schedule - S{}{bracket}", self.view.season + 1),
+                &format!("Event Schedule - Season {}{bracket}", self.view.season + 1),
             );
             title
                 .children
@@ -718,6 +824,106 @@ impl Hq {
     }
 }
 
+/// Hide the selection and highlight bars of a freshly filled grid.
+/// The inventory's four buttons, by name (`FUN_004fd380` keeps them at the window's `+0x170`
+/// workshop, `+0x174` scrap, `+0x178` export, `+0x17c` import).
+pub const INVENTORY_BUTTONS: [&str; 4] = [
+    "workshop button",
+    "scrap button",
+    "export button",
+    "import button",
+];
+
+/// What the inventory grid has selected, as the buttons see it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InventoryPick {
+    /// No cell: all four dim (a fresh window, a refill after a scrap or import; pixel-measured live: the four
+    /// labels at 0.5 tint, max 127 of 255, in `teamhq-buttons-none`).
+    Nothing,
+    /// A robot's cell: Workshop, Scrap and Export, no Import.
+    Robot,
+    /// A `New Robot` cell: Workshop and Import (`FUN_004ff2e0`: the selected cell's flag `+0x16c`).
+    Empty,
+}
+
+impl InventoryPick {
+    /// Which buttons are enabled: `[workshop, scrap, export, import]`.
+    pub fn enabled(self) -> [bool; 4] {
+        match self {
+            Self::Nothing => [false, false, false, false],
+            Self::Robot => [true, true, true, false],
+            Self::Empty => [true, false, false, true],
+        }
+    }
+}
+
+/// Dim or light the inventory's buttons for the grid's current selection (`FUN_004ff2e0`, the
+/// grid's select handler, and the refill `FUN_004ff570`). The selected cell is slot
+/// `column * rows + row`; it is a robot when the view has that slot.
+pub fn sync_inventory_buttons(document: &mut Gib, view: &View) {
+    let pick = match find_mut_in_gib(document, ROBOT_GRID).and_then(|grid| {
+        let rows = Grid::from_widget(grid)?.rows.max(1) as usize;
+        crate::input::selected_cell(grid).map(|(row, column)| column * rows + row)
+    }) {
+        None => InventoryPick::Nothing,
+        Some(slot) if view.robots.iter().any(|r| r.slot == slot) => InventoryPick::Robot,
+        Some(_) => InventoryPick::Empty,
+    };
+    for (name, on) in INVENTORY_BUTTONS.iter().zip(pick.enabled()) {
+        if let Some(button) = find_mut_in_gib(document, name) {
+            crate::input::set_button_enabled(button, on);
+        }
+    }
+}
+
+fn clear_bars(grid: &mut Widget) {
+    crate::input::clear_selection(grid);
+    if let Some(id) = Grid::from_widget(grid).and_then(|g| g.highlight) {
+        for child in grid.children.iter_mut() {
+            if crate::input::field_of(child, "ID").and_then(|v| v.trim().parse::<i32>().ok())
+                == Some(id)
+            {
+                crate::input::set_field(child, "Visible", "false");
+            }
+        }
+    }
+}
+
+/// Fill an already composed `teamhq.gib` document (the shell's own page, whose
+/// content group holds the tab's screen) from a [`View`]: the team header and
+/// the tab named by `button`. This is what the shell calls after it loads a tab
+/// into `hq content group`.
+pub fn fill_document(
+    ui_root: &Path,
+    document: &mut Gib,
+    button: &str,
+    view: &View,
+) -> Result<(), String> {
+    let Some(tab) = tab(button) else {
+        return Ok(());
+    };
+    let taken = std::mem::replace(
+        document,
+        Gib {
+            version: String::new(),
+            blocks: Vec::new(),
+        },
+    );
+    let mut hq = Hq {
+        ui_root: ui_root.to_path_buf(),
+        document: taken,
+        tab: tab.button,
+        view: view.clone(),
+        slot_own: 0,
+        slot_ready: false,
+        screen_at: 0,
+    };
+    fill_team(&mut hq.document, view);
+    let result = hq.fill_tab();
+    *document = hq.document;
+    result
+}
+
 /// Make every `SplitFrame`'s children fill their pane. See [`Hq::open`] for why
 /// the HQ needs this; it is applied only to the screens loaded into the content
 /// group, never to the shipped screen's own left/right split.
@@ -731,9 +937,39 @@ pub fn fit_splits_in(gib: &mut Gib) {
 
 fn fit_splits(widget: &mut Widget) {
     if widget.kind == WidgetKind::SplitFrame {
+        // The pane fills along the split; across it the child keeps its own authored extent
+        // (the calendar's `Slot1` is `Size 0.95 1 198 0` in a top/bottom split: 0.95 of the
+        // pane wide, which is the schedule's 552 px at 1024x768, not the pane's 583).
+        let horizontal = widget
+            .field("Horizontal")
+            .and_then(|f| f.flag())
+            .unwrap_or(true);
         for child in widget.children.iter_mut() {
-            crate::input::set_field(child, "Position", "0 0 0 0");
-            crate::input::set_field(child, "Size", "1 1 1 1");
+            let pair = |name: &str, second: bool, fallback: &str| -> String {
+                let n = child
+                    .field(name)
+                    .map(|f| f.numbers())
+                    .filter(|n| n.len() == 4)
+                    .unwrap_or_default();
+                match (n.is_empty(), second) {
+                    (true, _) => fallback.to_string(),
+                    (false, false) => format!("{} {}", n[0], n[1]),
+                    (false, true) => format!("{} {}", n[2], n[3]),
+                }
+            };
+            let (position, size) = if horizontal {
+                (
+                    format!("0 0 {}", pair("Position", true, "0 0")),
+                    format!("1 1 {}", pair("Size", true, "1 1")),
+                )
+            } else {
+                (
+                    format!("{} 0 0", pair("Position", false, "0 0")),
+                    format!("{} 1 1", pair("Size", false, "1 1")),
+                )
+            };
+            crate::input::set_field(child, "Position", &position);
+            crate::input::set_field(child, "Size", &size);
         }
     }
     for child in widget.children.iter_mut() {
@@ -884,12 +1120,8 @@ fn text_widget(name: &str, text: &str, rect: [f32; 4], font: &str, color: &str) 
     text_widget_with(name, text, rect, font, color, false)
 }
 
-/// The same `Text` record with fractional coordinates: the bracket group is a
-/// fraction of the screen, so its generated columns are too.
-fn text_widget_frac(name: &str, text: &str, rect: [f32; 4], font: &str, color: &str) -> Widget {
-    text_widget_with(name, text, rect, font, color, true)
-}
-
+/// A `Text` record in pixels (`fractional = false`) or in fractions of its
+/// parent.
 fn text_widget_with(
     name: &str,
     text: &str,
@@ -927,91 +1159,310 @@ fn text_widget_with(
     }
 }
 
-/// Fill `event_bracket.gib`'s `bracket group` from the career's bracket.
-///
-/// The binary builds a column per round (`FUN_0046ad60`'s
-/// `FUN_00406d20() + 1` loop), draws the first round's `16 / bots` matches and
-/// puts `UI\teamhq\questionmark.bmp` in the rounds that have not been reached
-/// (`0x46adf…`). This composes the same columns from plain `Text` records; the
-/// player's match and the next opponents are the visible part.
+/// The entrants of a 16-team bracket (`FUN_0046ad60`'s `16.0`).
+pub const BRACKET_ENTRANTS: usize = 16;
+/// The art of a bracket cell not drawn yet (`UI\teamhq\questionmark.bmp`).
+pub const QUESTION_MARK: &str = "teamhq\\questionmark.bmp";
+
+/// Fill `event_bracket.gib`'s `bracket group` from the career's bracket, laid
+/// out for a 1280x1024 screen (the cells are fractions of the group, so the
+/// picture scales with the window).
 pub fn fill_bracket(gib: &mut Gib, bracket: &BracketView) {
+    fill_bracket_at(gib, bracket, [1280.0, 1024.0]);
+}
+
+/// The bracket graphic the bracket window builds (`FUN_0046ad60`), for a
+/// screen of `screen` pixels:
+///
+/// * one row per round plus the champion's (`FUN_00406d20() + 1`), 16 team
+///   pictures in the first row, each next row `advance / bots` of the one
+///   above (`FUN_004698f0`);
+/// * the picture size is `min((w - 192) / 16, (h - 15 * rows) / rows)` of
+///   the group less 6 px; the 16 first-row pictures spread over the width
+///   (`(w - 16 * size) / 15` apart), the rows over the height;
+/// * a later row's pictures sit centred under the match they come from;
+/// * each match is joined to the next row by the bracket lines of
+///   `FUN_0046b4d0` (4 px, black): a 13 px drop from its first and last
+///   picture, the bar between them, and a 13 px stem down from its centre;
+/// * a picture is the entrant team's logo (`FUN_004699b0` -> the team's
+///   `+0x28`) up to the current round, `questionmark.bmp` beyond it;
+/// * the player's picture in the current round has a 2 px blue frame 3 px
+///   out (`FUN_0046b720`, colour `0 0 1 1`).
+pub fn fill_bracket_at(gib: &mut Gib, bracket: &BracketView, screen: [f32; 2]) {
+    let frame = crate::resolve(gib, screen)
+        .iter()
+        .flat_map(|p| p.walk())
+        .find(|p| p.widget.name() == BRACKET_GROUP)
+        .map(|p| p.frame);
     let Some(group) = find_mut_in(gib, BRACKET_GROUP) else {
         return;
     };
     group.children.clear();
-    group.children.push(text_widget_frac(
-        "bracket status",
-        &bracket.status,
-        [0.02, 0.055, 0.96, 0.10],
-        "fg_mcn14",
-        if bracket.can_play {
-            "0.4 1 0.6 1"
-        } else {
-            "0.85 0.85 0.85 1"
-        },
-    ));
-    for (index, round) in bracket.rounds.iter().enumerate() {
-        let y = 0.13 + 0.17 * index as f32;
-        let player = round
-            .matches
-            .iter()
-            .find(|matched| matched.player_match)
-            .cloned()
-            .unwrap_or(BracketMatchView {
-                slots: Vec::new(),
-                player_match: true,
-                won: None,
-            });
-        let opponents = player
-            .slots
-            .iter()
-            .filter(|slot| !slot.player)
-            .map(|slot| {
-                if slot.name.is_empty() {
-                    "?".to_string()
-                } else {
-                    slot.name.clone()
-                }
-            })
-            .collect::<Vec<_>>();
-        let opposition = if opponents.is_empty() || opponents.iter().all(|name| name == "?") {
-            "?".to_string()
-        } else {
-            opponents.join(", ")
-        };
-        let result = if round.played {
-            match player.won {
-                Some(true) => " — WON",
-                Some(false) => " — LOST",
-                None => "",
-            }
-        } else if round.current {
-            " — NEXT"
-        } else {
-            " — not drawn"
-        };
-        let line = format!("{}: You vs {}{}", round.label, opposition, result);
-        let color = if round.current {
-            "1 0.95 0.55 1"
-        } else if round.played {
-            if player.won == Some(true) {
-                "0.6 1 0.6 1"
-            } else {
-                "1 0.6 0.6 1"
-            }
-        } else {
-            "0.65 0.65 0.65 1"
-        };
-        group.children.push(text_widget_frac(
-            &format!("round {index} line"),
-            &line,
-            [0.03, y, 0.94, 0.13],
-            "fg_mcn16",
-            color,
-        ));
+    let Some(frame) = frame.filter(|f| f.w > 10.0 && f.h > 10.0) else {
+        return;
+    };
+    for widget in bracket_widgets(bracket, frame.w, frame.h) {
+        group.children.push(widget);
     }
     let children = group.children.len().to_string();
     crate::input::set_field(group, "NumChildren", &children);
+}
+
+/// One placed bracket picture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BracketCell {
+    pub row: usize,
+    pub index: usize,
+    /// Left, top and edge, in the group's pixels.
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+}
+
+/// Where `FUN_0046ad60` puts every picture for a bracket of `rounds` rounds
+/// with `bots` robots per match and `advance` going on, in a group of
+/// `w` x `h` pixels.
+pub fn bracket_cells(
+    rounds: usize,
+    bots: usize,
+    advance: usize,
+    w: f32,
+    h: f32,
+) -> Vec<BracketCell> {
+    let bots = bots.max(1);
+    let advance = advance.clamp(1, bots);
+    let (w, h) = (w - 6.0, h - 6.0);
+    let rows = rounds + 1;
+    let size = ((w - 192.0) / BRACKET_ENTRANTS as f32)
+        .min((h - rows as f32 * 15.0) / rows as f32)
+        .max(4.0);
+    let vgap = if rows > 1 {
+        (h - size * rows as f32) / (rows as f32 - 1.0)
+    } else {
+        0.0
+    };
+    let hgap = (w - size * BRACKET_ENTRANTS as f32) / (BRACKET_ENTRANTS as f32 - 1.0);
+    let mut cells = Vec::new();
+    // Row 0: the sixteen, centred.
+    let n = BRACKET_ENTRANTS as f32;
+    let x0 = w * 0.5 - size * n * 0.5 - (n * 0.5 - 0.5) * hgap;
+    let mut previous: Vec<f32> = (0..BRACKET_ENTRANTS)
+        .map(|i| x0 + i as f32 * (size + hgap))
+        .collect();
+    for (index, x) in previous.iter().enumerate() {
+        cells.push(BracketCell {
+            row: 0,
+            index,
+            x: 3.0 + x,
+            y: 3.0,
+            size,
+        });
+    }
+    for row in 1..rows {
+        let y = 3.0 + row as f32 * (size + vgap);
+        let gap = hgap.min(size * 0.5);
+        let mut next = Vec::new();
+        for chunk in previous.chunks(bots) {
+            let left = chunk[0];
+            let right = chunk[chunk.len() - 1] + size;
+            let span = size * advance as f32 + gap * (advance as f32 - 1.0);
+            let start = (left + right) * 0.5 - span * 0.5;
+            for k in 0..advance {
+                next.push(start + k as f32 * (size + gap));
+            }
+        }
+        for (index, x) in next.iter().enumerate() {
+            cells.push(BracketCell {
+                row,
+                index,
+                x: 3.0 + x,
+                y,
+                size,
+            });
+        }
+        previous = next;
+    }
+    cells
+}
+
+fn bracket_widgets(bracket: &BracketView, w: f32, h: f32) -> Vec<Widget> {
+    let rounds = bracket.rounds.len().max(1);
+    let bots = bracket
+        .rounds
+        .iter()
+        .flat_map(|r| r.matches.iter())
+        .map(|m| m.slots.len())
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    let cells = bracket_cells(rounds, bots, 1, w, h);
+    let frac = |x: f32, y: f32, cw: f32, ch: f32| [x / w, y / h, cw / w, ch / h];
+    let mut out = Vec::new();
+    // Bracket lines first, so the pictures draw over their ends.
+    for row in 0..rounds {
+        let these: Vec<&BracketCell> = cells.iter().filter(|c| c.row == row).collect();
+        let below = cells.iter().find(|c| c.row == row + 1);
+        let Some(below) = below else { continue };
+        for (m, chunk) in these.chunks(bots).enumerate() {
+            let first = chunk[0];
+            let last = chunk[chunk.len() - 1];
+            let half = first.size * 0.5;
+            let mid = (first.y + first.size + below.y) * 0.5;
+            let left = first.x;
+            let right = last.x + last.size;
+            let centre = (left + right) * 0.5;
+            let line =
+                |name: String, r: [f32; 4]| bracket_line(&name, frac(r[0], r[1], r[2], r[3]));
+            out.push(line(
+                format!("bracket line {row}:{m}:a"),
+                [left + half + 2.0 - 2.0, mid - 13.0, 4.0, 13.0],
+            ));
+            out.push(line(
+                format!("bracket line {row}:{m}:b"),
+                [left + half, mid - 2.0, (right - half) - (left + half), 4.0],
+            ));
+            out.push(line(
+                format!("bracket line {row}:{m}:c"),
+                [right - half - 2.0 - 2.0, mid - 13.0, 4.0, 13.0],
+            ));
+            out.push(line(
+                format!("bracket line {row}:{m}:d"),
+                [centre - 2.0, mid, 4.0, 13.0],
+            ));
+        }
+    }
+    let current = bracket.round;
+    for cell in &cells {
+        let slot = bracket.rounds.get(cell.row).and_then(|round| {
+            let m = cell.index / bots;
+            let k = cell.index % bots;
+            if round.matches.len() == 1 && !round.current {
+                // A played round keeps only the player's match (match 0).
+                (m == 0).then(|| round.matches[0].slots.get(k)).flatten()
+            } else {
+                round
+                    .matches
+                    .get(m)
+                    .and_then(|matched| matched.slots.get(k))
+            }
+        });
+        let champion = cell.row == rounds
+            && bracket.rounds.last().is_some_and(|r| r.played)
+            && bracket
+                .rounds
+                .last()
+                .and_then(|r| r.matches.first())
+                .is_some_and(|m| m.won == Some(true));
+        let art = if champion {
+            bracket
+                .rounds
+                .first()
+                .and_then(|r| r.matches.first())
+                .and_then(|m| m.slots.iter().find(|s| s.player))
+                .map(|s| s.logo.clone())
+                .unwrap_or_else(|| QUESTION_MARK.to_string())
+        } else if cell.row <= current {
+            slot.filter(|s| !s.logo.is_empty())
+                .map(|s| s.logo.clone())
+                .unwrap_or_else(|| QUESTION_MARK.to_string())
+        } else {
+            QUESTION_MARK.to_string()
+        };
+        let mut image = image_widget(
+            &format!("bracket cell {}:{}", cell.row, cell.index),
+            &art,
+            0.0,
+            0.0,
+            cell.size,
+            cell.size,
+        );
+        let [x, y, cw, ch] = frac(cell.x, cell.y, cell.size, cell.size);
+        crate::input::set_field(&mut image, "Position", &format!("{x} 1 {y} 1"));
+        crate::input::set_field(&mut image, "Size", &format!("{cw} 1 {ch} 1"));
+        crate::input::set_field(&mut image, "ChildOrder", "5");
+        out.push(image);
+    }
+    // The player's frame on the current round (match 0, slot 0).
+    if bracket.can_play {
+        if let Some(cell) = cells.iter().find(|c| c.row == current && c.index == 0) {
+            let (x0, y0) = (cell.x - 3.0, cell.y - 3.0);
+            let e = cell.size + 6.0;
+            for (i, r) in [
+                [x0, y0, e, 2.0],
+                [x0, y0 + e - 2.0, e, 2.0],
+                [x0, y0, 2.0, e],
+                [x0 + e - 2.0, y0, 2.0, e],
+            ]
+            .iter()
+            .enumerate()
+            {
+                let mut edge =
+                    bracket_line(&format!("player frame {i}"), frac(r[0], r[1], r[2], r[3]));
+                crate::input::set_field(&mut edge, "FillColor", "0 0 1 1");
+                crate::input::set_field(&mut edge, "ChildOrder", "6");
+                out.push(edge);
+            }
+        }
+    }
+    out
+}
+
+/// A one-pixel black grid line: `pos` and `size` are `[x, mode, y, mode]` (mode 1 is a fraction
+/// of the grid, 0 pixels).
+fn grid_line(name: &str, pos: [f32; 4], size: [f32; 4]) -> Widget {
+    let mut line = bracket_line(name, [0.0; 4]);
+    crate::input::set_field(
+        &mut line,
+        "Position",
+        &format!("{} {} {} {}", pos[0], pos[1] as i32, pos[2], pos[3] as i32),
+    );
+    crate::input::set_field(
+        &mut line,
+        "Size",
+        &format!(
+            "{} {} {} {}",
+            size[0], size[1] as i32, size[2], size[3] as i32
+        ),
+    );
+    line
+}
+
+/// A filled black bar at a fraction of the bracket group.
+fn bracket_line(name: &str, rect: [f32; 4]) -> Widget {
+    let field = |name: &str, raw: &str| Field {
+        name: Some(name.to_string()),
+        raw: raw.to_string(),
+    };
+    let [x, y, w, h] = rect;
+    Widget {
+        kind: WidgetKind::Rectangle,
+        implicit: false,
+        fields: vec![
+            field("Filled", "true"),
+            field("FillColor", "0 0 0 1"),
+            field("BorderWidth", "0"),
+            field("BorderColor", "0 0 0 0"),
+            field("Name", name),
+            field("ID", "-1"),
+            field("Position", &format!("{x} 1 {y} 1")),
+            field("Size", &format!("{w} 1 {h} 1")),
+            field("Visible", "true"),
+            field("ChildOrder", "4"),
+            field("ClipMode", "0"),
+            field("NumChildren", "0"),
+        ],
+        attachments: Vec::new(),
+        children: Vec::new(),
+    }
+}
+
+/// A schedule cell: the grid divides its own rectangle evenly into `Rows` x
+/// `Columns` (the cells are laid out that way in [`Hq`]'s fill), so the hit
+/// test and the drawing agree at every screen size, not the file's
+/// design-time `RowHeight`/`ColWidths`.
+fn schedule_cell(frame: Frame, rows: usize, columns: usize, row: usize, column: usize) -> Frame {
+    let (w, h) = (frame.w / columns as f32, frame.h / rows as f32);
+    Frame::new(frame.x + column as f32 * w, frame.y + row as f32 * h, w, h)
 }
 
 #[cfg(test)]
@@ -1019,6 +1470,7 @@ mod tests {
     use super::*;
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         if let Some(dir) = std::env::var_os("RA2_GAME") {
             let dir = PathBuf::from(dir);
             return dir.is_dir().then_some(dir);
@@ -1043,12 +1495,14 @@ mod tests {
             team: teams[0].clone(),
             robots: vec![
                 RobotRow {
+                    slot: 0,
                     name: "Big Fat Robot".into(),
                     class: "Heavy".into(),
                     preview: String::new(),
                     preview_image: None,
                 },
                 RobotRow {
+                    slot: 1,
                     name: "Tiny".into(),
                     class: "Light".into(),
                     preview: String::new(),
@@ -1148,7 +1602,15 @@ mod tests {
             })
             .unwrap();
         let grid = find(root, ROBOT_GRID).unwrap();
-        assert_eq!(grid.children.len(), 4, "two bars and two robots");
+        assert_eq!(
+            grid.children.len(),
+            8,
+            "two bars, two robots and four New Robot cells (six cells, cell i is slot i)"
+        );
+        assert_eq!(
+            text_of(&grid.children[4], BOT_NAME).as_deref(),
+            Some("New Robot")
+        );
         assert_eq!(
             text_of(&grid.children[2], BOT_NAME).as_deref(),
             Some("Big Fat Robot")
@@ -1267,6 +1729,58 @@ mod tests {
         );
     }
 
+    /// The schedule's grid at 1024x768 is the original's: 552 px wide (`Slot1` is 0.95 of the split
+    /// pane, whole pixels), one pixel line at the left of each column (x 341, 525, 709 live) and at
+    /// the top of each row, and the art 3 px in from the line, 179 px wide (344..522).
+    #[test]
+    fn the_schedule_grid_has_shared_lines_and_art_inside_them() {
+        let Some(game) = game_dir() else { return };
+        let ui = game.join("UI");
+        let events = crate::events::all(&game).unwrap();
+        let mut hq_view = view(&game);
+        hq_view.events = events
+            .iter()
+            .take(9)
+            .enumerate()
+            .map(|(id, e)| EventRow {
+                id,
+                event: e.clone(),
+                state: EventState::Available,
+            })
+            .collect();
+        let hq = Hq::open_on(&ui, hq_view, "events button").unwrap();
+        let placed = hq.placements([1024.0, 768.0], None);
+        let all: Vec<_> = placed.iter().flat_map(|p| p.walk()).collect();
+        let grid = all.iter().find(|p| p.widget.name() == EVENT_GRID).unwrap();
+        assert_eq!(grid.frame.w, 552.0);
+        let line = |name: &str| all.iter().find(|p| p.widget.name() == name).unwrap().frame;
+        let xs: Vec<f32> = (0..3)
+            .map(|c| line(&format!("grid line column {c}")).x.floor())
+            .collect();
+        assert_eq!(xs, [341.0, 525.0, 709.0]);
+        assert_eq!(line("grid line column 1").w, 1.0);
+        assert_eq!(line("grid line row 0").y.floor(), 318.0);
+        assert_eq!(line("grid line row 0").w.round(), 552.0);
+        assert_eq!(grid.frame.h.floor(), 333.0, "three rows of 111 (live)");
+        let ys: Vec<f32> = (0..4)
+            .map(|r| line(&format!("grid line row {r}")).y.floor())
+            .collect();
+        assert_eq!(ys, [318.0, 429.0, 540.0, 651.0], "live lines");
+        assert_eq!(
+            all.iter()
+                .filter(|p| p.widget.name().starts_with("grid line row"))
+                .count(),
+            4,
+            "a line under the last row too, none at the right edge"
+        );
+        let cell = all
+            .iter()
+            .find(|p| p.widget.name() == "event cell group")
+            .unwrap();
+        assert_eq!(cell.frame.x.floor(), 344.0, "line + BufferWidth 2");
+        assert_eq!(cell.frame.w.round(), 179.0);
+    }
+
     /// The history screen binds the career's counters and draws the prize art
     /// it stores, most recent first.
     #[test]
@@ -1355,10 +1869,12 @@ mod tests {
                             BracketSlot {
                                 name: "The Rookies".into(),
                                 player: true,
+                                logo: "Teams\\orange_skull.bmp".into(),
                             },
                             BracketSlot {
                                 name: "Red Zone".into(),
                                 player: false,
+                                logo: "AI\\redX.bmp".into(),
                             },
                         ],
                         player_match: true,
@@ -1374,10 +1890,12 @@ mod tests {
                             BracketSlot {
                                 name: "The Rookies".into(),
                                 player: true,
+                                logo: "Teams\\orange_skull.bmp".into(),
                             },
                             BracketSlot {
                                 name: "Blue Fury".into(),
                                 player: false,
+                                logo: "AI\\star.bmp".into(),
                             },
                         ],
                         player_match: true,
@@ -1393,26 +1911,59 @@ mod tests {
         fill_bracket(&mut gib, &view);
         let root = gib.widgets().next().unwrap();
         let group = find(root, BRACKET_GROUP).expect("the bracket group");
-        assert!(group.children.len() >= 3, "status + one line per round");
-        assert!(group.children.iter().any(|c| c.name() == "bracket status"));
-        let first = group
+        let cell = |name: &str| {
+            group
+                .children
+                .iter()
+                .find(|c| c.name() == name)
+                .and_then(|c| c.field("_Filename"))
+                .map(|f| f.text().to_string())
+        };
+        // Two rounds of 2-bot matches would be 16 + 8 + 4 pictures; the
+        // view's widest match decides the bots (2) and its rounds the rows.
+        let pictures = group
             .children
             .iter()
-            .find(|c| c.name() == "round 0 line")
-            .unwrap();
+            .filter(|c| c.name().starts_with("bracket cell "))
+            .count();
+        assert_eq!(pictures, 16 + 8 + 4);
+        // Round 1 (played): the player's match keeps its two logos; the
+        // rest of the row is unknown here.
         assert_eq!(
-            first.field("_Text").map(|f| f.text()),
-            Some("Round 1: You vs Red Zone — WON")
+            cell("bracket cell 0:0").as_deref(),
+            Some("Teams\\orange_skull.bmp")
         );
-        let player = group
+        assert_eq!(cell("bracket cell 0:1").as_deref(), Some("AI\\redX.bmp"));
+        assert_eq!(cell("bracket cell 0:2").as_deref(), Some(QUESTION_MARK));
+        // The current round shows its field; beyond it, question marks.
+        assert_eq!(cell("bracket cell 1:1").as_deref(), Some("AI\\star.bmp"));
+        assert_eq!(cell("bracket cell 2:0").as_deref(), Some(QUESTION_MARK));
+        assert!(group.children.iter().any(|c| c.name() == "player frame 0"));
+        assert!(group
             .children
             .iter()
-            .find(|c| c.name() == "round 1 line")
-            .unwrap();
-        assert_eq!(
-            player.field("_Text").map(|f| f.text()),
-            Some("Final Match: You vs Blue Fury — NEXT")
-        );
+            .any(|c| c.name() == "bracket line 0:0:b"));
+    }
+
+    /// `FUN_0046ad60`'s geometry: sixteen pictures across, each next row
+    /// centred under its match, a 4-bot two-round bracket ending in one.
+    #[test]
+    fn the_bracket_cells_follow_the_recovered_layout() {
+        let cells = bracket_cells(2, 4, 1, 1000.0, 400.0);
+        let row = |r: usize| cells.iter().filter(|c| c.row == r).collect::<Vec<_>>();
+        assert_eq!(row(0).len(), 16);
+        assert_eq!(row(1).len(), 4);
+        assert_eq!(row(2).len(), 1);
+        let size = row(0)[0].size;
+        assert!((size - ((994.0 - 192.0) / 16.0f32).min((394.0 - 45.0) / 3.0)).abs() < 1e-3);
+        // The first row spans the width less 6 px.
+        let last = row(0)[15];
+        assert!((last.x + last.size - (3.0 + 994.0)).abs() < 0.5);
+        // A next-row picture is centred under its match of four.
+        let m0 = (row(0)[0].x + row(0)[3].x + size) / 2.0;
+        assert!((row(1)[0].x + size / 2.0 - m0).abs() < 0.5);
+        // The final's winner sits in the middle.
+        assert!((row(2)[0].x + size / 2.0 - 500.0).abs() < 0.5);
     }
 
     #[test]

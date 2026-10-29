@@ -6,6 +6,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Args {
     pub game: Option<PathBuf>,
+    /// `--save-dir DIR`: where careers, teams, designs and settings are written.
+    pub save_dir: Option<PathBuf>,
     pub offscreen: Option<PathBuf>,
     pub size: [u32; 2],
     /// Whether `--size` was given, so the startup `ra2.cfg` size may be used
@@ -63,14 +65,32 @@ pub struct Args {
     pub start: Option<PathBuf>,
     /// `--save-as NAME`: the design name the headless `--build` run types.
     pub save_as: Option<String>,
+    /// `--build-view TAB`: open the bot lab, show one tab and write one frame.
+    pub build_view: Option<String>,
+    /// `--bench-undamaged`: `--hq` harness knob, the repair bench opens empty.
+    pub bench_undamaged: bool,
+    /// `--debug-panel`: draw the workshop's synthetic edit panel (harness aid).
+    pub debug_panel: bool,
     /// `--audio-report`: print every play call (path, kind, gain, position).
     pub audio_report: bool,
+    /// `--match --out DIR --camera-shots intro@2.5,countdown,f2@13,f3,f3b,f4`:
+    /// one PNG per camera moment (`cam-<name>.png`), see
+    /// [`crate::match_mode::run_camera_shots`].
+    pub camera_shots: Vec<String>,
+    /// `--earlier-arenas a.py,b.py`: arenas loaded earlier in the same session,
+    /// in order. The original's texture manager keeps the first file loaded
+    /// under a bitmap name for the whole session
+    /// ([`ra2_render::material::session_bitmap`]), so what an arena shows
+    /// depends on which arenas came before it; the oracle stills were captured
+    /// one after another in one session.
+    pub earlier_arenas: Vec<PathBuf>,
 }
 
 impl Default for Args {
     fn default() -> Self {
         Args {
             game: None,
+            save_dir: None,
             offscreen: None,
             size: [1280, 1005],
             size_set: false,
@@ -99,7 +119,12 @@ impl Default for Args {
             build_mode: false,
             start: None,
             save_as: None,
+            build_view: None,
+            debug_panel: false,
+            bench_undamaged: false,
             audio_report: false,
+            camera_shots: Vec::new(),
+            earlier_arenas: Vec::new(),
         }
     }
 }
@@ -109,6 +134,8 @@ pub fn usage() -> &'static str {
      \x20                [--click-names \"Name;Name;...\"] [--audio-report]\n\
      \x20      ra2-app --match [--seconds N] [--out DIR] [--quit-at N]\n\
      \x20                [--bots A.bot,B.bot] [--arena PATH] [--audio-report]\n\
+     \x20                [--camera-shots intro@2.5,countdown,f2@13,f3@17,f3b@20,f4@24]\n\
+     \x20                [--earlier-arenas A.py,B.py]\n\
      \x20      ra2-app --play --drive \"0-2:1,0;2-4:1,1\" [--seconds N] [--out DIR]\n\
      \x20                [--team N --bot N] [--opponent-team N --opponent-bot N]\n\
      \x20                [--gametype deathmatch|battle-royal|team-match|tabletop|king-of-hill]\n\
@@ -143,7 +170,10 @@ pub fn usage() -> &'static str {
      build-parts.png, build-wiring.png, wiring-add.png, wiring-bound.png,\n\
      build-paint.png and build-test.png.\n\
      \n\
-       --game DIR       the install (default: RA2_GAME, else local/game)\n\
+       --game DIR       your Robot Arena 2 folder (the one with RA2.cfz, UI/, Scripts/); default:\n\
+     \x20                 RA2_GAME_DIR, else local/game, else the usual Windows/Wine places\n\
+       --save-dir DIR   careers, teams, designs, settings are written here, never to the\n\
+     \x20                 install (default: ORA_SAVE_DIR, else the platform data dir)\n\
        --offscreen PNG  render the final state and exit (the CI path)\n\
        --size WxH       window/target size (default 1280x1005; the shell stays 1280x1005)\n\
        --clicks SCRIPT  semicolon-separated x,y points, applied in order\n\
@@ -161,6 +191,9 @@ pub fn usage() -> &'static str {
        --time SECONDS   --play: the setup screen's match length\n\
        --build          open the workshop (bot lab) as an editor\n\
        --start BOT      the .bot to open in --build (default: a stock chassis)\n\
+       --build-view TAB overview|chassis|components|wiring|paint: with --build --out,\n\
+     \x20                  write build-view-TAB.png of that tab on --start's design and exit\n\
+       --debug-panel    draw the workshop's synthetic text panel (the original has none)\n\
        --save-as NAME   the design name the headless --build run types and saves\n\
        --seconds N      fight length for --match/--play; test length for --build\n\
        --simulate-event N  --hq: play schedule row N's whole event headlessly\n\
@@ -170,6 +203,10 @@ pub fn usage() -> &'static str {
        --quit-at N      pause at N fight seconds, quit to the menu, write pause/menu PNGs\n\
        --bots A,B       two .bot paths for --match\n\
        --arena PATH     arena script for --match/--play (default Arenas/box.py)\n\
+       --camera-shots L --match --out: one cam-<name>.png per entry of L; intro@T is T\n\
+                        seconds into the arena intro, countdown@N the countdown showing N,\n\
+                        cd@R the first countdown frame with R of 4 s left,\n\
+                        f2|f3|f3b|f4@S presses that camera key at S fight seconds\n\
        -h, --help       this text"
 }
 
@@ -180,6 +217,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--game" => parsed.game = Some(PathBuf::from(next(&mut args, "--game")?)),
+            "--save-dir" => parsed.save_dir = Some(PathBuf::from(next(&mut args, "--save-dir")?)),
             "--offscreen" => {
                 parsed.offscreen = Some(PathBuf::from(next(&mut args, "--offscreen")?))
             }
@@ -277,9 +315,27 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
                     .map(PathBuf::from)
                     .collect();
             }
+            "--earlier-arenas" => {
+                parsed.earlier_arenas = next(&mut args, "--earlier-arenas")?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+            }
+            "--camera-shots" => {
+                parsed.camera_shots = next(&mut args, "--camera-shots")?
+                    .split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+            }
             "--arena" => parsed.arena = Some(PathBuf::from(next(&mut args, "--arena")?)),
             "--build" => parsed.build_mode = true,
             "--start" => parsed.start = Some(PathBuf::from(next(&mut args, "--start")?)),
+            "--bench-undamaged" => parsed.bench_undamaged = true,
+            "--debug-panel" => parsed.debug_panel = true,
+            "--build-view" => parsed.build_view = Some(next(&mut args, "--build-view")?),
             "--save-as" => parsed.save_as = Some(next(&mut args, "--save-as")?),
             "-h" | "--help" => parsed.help = true,
             other => return Err(format!("unknown argument {other:?}\n{}", usage())),

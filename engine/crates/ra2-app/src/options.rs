@@ -18,12 +18,12 @@
 //! | `music checkbox` | `MusicMuted` | checked = music on |
 //! | `intro off`/`intro on` | `ArenaIntros` | the shipped `Arena Introductions` group |
 //! | `fullscreen checkbox` | `FullScreen` | |
-//! | `Camera dropdown` | `DefaultCamera` | cycles the binary's `watch`/`static`/`orbit` |
+//! | `Camera dropdown` | `DefaultCamera` | opens a list of the binary's `watch`/`orbit`/`static` (`ra2ui::dropdown`) |
 //! | `effects off`/`effects on` | `GraphicEffects` | |
 //! | `damage off`/`damage on` | `GraphicMessages` | the screen's "damage" group is the status-message switch |
 //! | `2 player`/`4 player` | `EventNumBots` | |
 //! | `detail low`/`med`/`high` | `GraphicDetail` | `0`/`1`/`2` is **our numbering**; the screen's labels are the evidence, not the integers |
-//! | `resolution dropdown` | — | **read-only**: the screen says "fill with screen resolution options" but the data carries no list and the executable's list was not recovered. The current `FSDisplayWidth`×`FSDisplayHeight` is shown. |
+//! | `resolution dropdown` | `FSDisplayWidth`/`Height` (+ the `FS3D` pair) | opens the list of the display's modes (`FUN_004a00b0` walks the device's mode list and writes `WxH`); the window supplies them (`set_display_modes`) |
 //!
 //! `UpdateInterval`, `BitsPerPixel`, `FSDisplayWidth`/`FSDisplayHeight` and the
 //! keys that exist only in the graphics/input sections are not on the screen, so
@@ -54,8 +54,21 @@ pub const CANCEL_NOTE: &str = "click to close options window but NOT apply chang
 /// Read the install's `ra2.cfg`; a missing file (or key) keeps the documented
 /// defaults. This never writes.
 pub fn read_cfg(game: &Path) -> Cfg {
-    let path = game.join("ra2.cfg");
-    Cfg::read(&path).unwrap_or_else(|_| Cfg::parse(""))
+    let path = settings_path(game);
+    Cfg::read(&path)
+        .or_else(|_| Cfg::read(&game.join("ra2.cfg")))
+        .unwrap_or_else(|_| Cfg::parse(""))
+}
+
+/// Where the client keeps the player's settings: `ra2.cfg` in the save
+/// directory ([`ra2fmt::saves`]; `RA2_CONFIG` overrides the file), never the install, which is
+/// read-only data. The first read falls back to the install's shipped
+/// `ra2.cfg`; the first change creates this file from it.
+pub fn settings_path(game: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("RA2_CONFIG") {
+        return PathBuf::from(path);
+    }
+    ra2fmt::saves::target(game, "ra2.cfg")
 }
 
 /// The initial window size from `FSDisplayWidth`/`FSDisplayHeight`, with zero
@@ -67,6 +80,15 @@ pub fn display_size(cfg: &Cfg) -> [u32; 2] {
     ]
 }
 
+/// The display modes the video tab offers, smallest first.
+pub const RESOLUTIONS: [[u32; 2]; 5] = [
+    [640, 480],
+    [800, 600],
+    [1024, 768],
+    [1280, 1024],
+    [1600, 1200],
+];
+
 /// The staged settings and the file they came from.
 pub struct Options {
     path: PathBuf,
@@ -74,12 +96,28 @@ pub struct Options {
     /// The exact bytes on disk when this instance opened, for `cancel`.
     original: String,
     existed: bool,
+    /// The display modes the resolution list offers (the device's list the
+    /// window reads at run time, `FUN_004a00b0`); [`RESOLUTIONS`] until set.
+    modes: Vec<[u32; 2]>,
 }
 
 impl Options {
-    /// Open `<game>/ra2.cfg`.
+    /// Open the player's settings (see [`settings_path`]), starting from the
+    /// install's `ra2.cfg` when the player has none yet. The install is only
+    /// ever read.
     pub fn open_game(game: &Path) -> Options {
-        Options::open(game.join("ra2.cfg"))
+        let path = settings_path(game);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if !path.is_file() {
+            if let Ok(shipped) = std::fs::read_to_string(game.join("ra2.cfg")) {
+                // Seed with the shipped values; `cancel` on a fresh install
+                // then restores exactly these bytes.
+                let _ = std::fs::write(&path, shipped);
+            }
+        }
+        Options::open(path)
     }
 
     /// Open a settings file. A missing file starts from the documented
@@ -95,7 +133,76 @@ impl Options {
             cfg,
             original,
             existed,
+            modes: RESOLUTIONS.to_vec(),
         }
+    }
+
+    /// The display modes of the screen the game runs on, in the order the
+    /// device lists them; the resolution dropdown's rows. An empty list keeps
+    /// the standard set.
+    pub fn set_display_modes(&mut self, modes: &[[u32; 2]]) {
+        if modes.is_empty() {
+            return;
+        }
+        self.modes = modes.to_vec();
+    }
+
+    /// Hand the shell the rows of the options window's two dropdowns
+    /// (`resolution dropdown`: `WxH` per mode; `Camera dropdown`: the
+    /// executable's `watch`, `orbit`, `static`).
+    pub fn register_dropdowns(&self, shell: &mut Shell) {
+        shell.set_dropdown_items(
+            "resolution dropdown",
+            DEPTHS
+                .iter()
+                .flat_map(|depth| self.modes.iter().map(move |m| mode_text(*m, *depth)))
+                .collect(),
+        );
+        // `FUN_004a00b0` sets the rows' colour before it fills them:
+        // `FUN_0061b4b0(1.0, 0.5, 0, 1.0)` (orange) into `FUN_005f0f90`; the
+        // camera list (`FUN_004a0400`) is orange too (capture).
+        shell.set_dropdown_row_color("resolution dropdown", ORANGE);
+        shell.set_dropdown_items(
+            "Camera dropdown",
+            CAMERAS.iter().map(|c| c.to_string()).collect(),
+        );
+        shell.set_dropdown_row_color("Camera dropdown", ORANGE);
+    }
+
+    /// Apply the rows the shell reports picked from the options window's
+    /// dropdowns (`Shell::take_dropdown_picks`). Returns the changes made.
+    pub fn absorb_picks(&mut self, picks: &[(String, String)]) -> Vec<String> {
+        let mut changes = Vec::new();
+        for (name, text) in picks {
+            if name == "resolution dropdown" {
+                // `WxHxDepth` (the capture lists `1024x768x32`).
+                let mut parts = text.split('x');
+                let parsed = parts
+                    .next()
+                    .zip(parts.next())
+                    .and_then(|(w, h)| Some([w.trim().parse().ok()?, h.trim().parse().ok()?]));
+                if let Some(mode) = parsed {
+                    self.set_mode(mode);
+                    changes.push(format!("FSDisplay={}x{}", mode[0], mode[1]));
+                }
+            } else if name == "Camera dropdown" {
+                if let Some(camera) = CAMERAS.iter().find(|c| c.eq_ignore_ascii_case(text)) {
+                    self.cfg.set_default_camera(camera);
+                    changes.push(format!("DefaultCamera={camera}"));
+                }
+            }
+        }
+        changes
+    }
+
+    /// Write a chosen display mode: both the 2D and 3D keys.
+    fn set_mode(&mut self, mode: [u32; 2]) {
+        self.cfg.set_fs_display_width(mode[0]);
+        self.cfg.set_fs_display_height(mode[1]);
+        self.cfg
+            .set_or_insert("FS3DDisplayWidth", &mode[0].to_string());
+        self.cfg
+            .set_or_insert("FS3DDisplayHeight", &mode[1].to_string());
     }
 
     /// The staged values, including any change not yet written.
@@ -211,18 +318,6 @@ impl Options {
             self.cfg.set_graphic_detail(value);
             return Some(Self::changed(format!("GraphicDetail={value}")));
         }
-        // The resolution dropdown is read-only: the screen names no options.
-        if any("resolution dropdown") {
-            return None;
-        }
-        // A click on either half of the camera dropdown cycles the binary's
-        // three config modes. The screen's note says "fill with camera
-        // options"; the values are the executable's own three strings.
-        if any("Camera dropdown") {
-            let next = next_camera(self.cfg.default_camera());
-            self.cfg.set_default_camera(next);
-            return Some(Self::changed(format!("DefaultCamera={next}")));
-        }
         None
     }
 
@@ -306,10 +401,9 @@ impl Options {
             if let Some(dropdown) = find_mut(root, "resolution dropdown") {
                 set_dropdown_text(
                     dropdown,
-                    &format!(
-                        "{}x{}",
-                        self.cfg.fs_display_width(),
-                        self.cfg.fs_display_height()
+                    &mode_text(
+                        [self.cfg.fs_display_width(), self.cfg.fs_display_height()],
+                        32,
                     ),
                 );
             }
@@ -373,18 +467,34 @@ pub fn volume_fraction(value: i32) -> f32 {
 }
 
 /// The config's three camera names, in the executable's order.
-pub const CAMERAS: [&str; 3] = ["watch", "static", "orbit"];
+pub const CAMERAS: [&str; 3] = ["watch", "orbit", "static"];
+
+/// The rows' colour (orange, `FUN_0061b4b0(1, 0.5, 0, 1)` in `FUN_004a00b0`).
+const ORANGE: &str = "1 0.5 0 1";
+
+/// A display mode as the list writes it: `WxHxDepth` (`FUN_004a00b0`
+/// formats the width, `x`, the height, `x`, the colour depth); the captured
+/// list shows 32-bit modes only.
+fn mode_text(mode: [u32; 2], depth: u32) -> String {
+    format!("{}x{}x{depth}", mode[0], mode[1])
+}
+
+/// The depths the device lists, each with every size (capture: five 32-bit
+/// rows, then the same five at 16 bits).
+const DEPTHS: [u32; 2] = [32, 16];
 
 /// The next camera name after `current`, or `watch` for a value the client does
 /// not know.
 pub fn next_camera(current: &str) -> &'static str {
+    // The C key's cycle (`watch`, `static`, `orbit`), not the dropdown's order.
+    const CYCLE: [&str; 3] = ["watch", "static", "orbit"];
     let current = current.trim();
-    match CAMERAS
+    match CYCLE
         .iter()
         .position(|name| name.eq_ignore_ascii_case(current))
     {
-        Some(index) => CAMERAS[(index + 1) % CAMERAS.len()],
-        None => CAMERAS[0],
+        Some(index) => CYCLE[(index + 1) % CYCLE.len()],
+        None => CYCLE[0],
     }
 }
 
@@ -463,6 +573,7 @@ mod tests {
     }
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -518,7 +629,7 @@ mod tests {
             names: vec!["music volume slider".into()],
             slider: Some(("music volume slider".into(), 0.55)),
         });
-        options.click(&hit(&["Camera dropdown", "Down Button"]));
+        options.absorb_picks(&[("Camera dropdown".to_string(), "static".to_string())]);
         options.save().unwrap();
 
         let reread = Options::open(&path);
@@ -629,9 +740,9 @@ mod tests {
         assert_eq!(volume.as_deref(), Some("SoundVolume=-600"));
 
         assert_eq!(
-            options.click(&hit(&["resolution dropdown", "Down Button"])),
-            None,
-            "the resolution list is not in the data"
+            options.absorb_picks(&[("resolution dropdown".to_string(), "1600x1200".to_string())]),
+            vec!["FSDisplay=1600x1200".to_string()],
+            "a picked row is the display mode"
         );
 
         options.save().unwrap();
@@ -657,7 +768,7 @@ mod tests {
             names: vec!["music volume slider".into()],
             slider: Some(("music volume slider".into(), 0.7)),
         });
-        options.click(&hit(&["Camera dropdown", "Down Button"]));
+        options.absorb_picks(&[("Camera dropdown".to_string(), "static".to_string())]);
         options.save().unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();

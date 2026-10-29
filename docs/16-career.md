@@ -142,7 +142,7 @@ the bracket's last index and `"Round N"` otherwise.
   `golden_sawblade.gib`) shows the champion and `FUN_004e84b0` stores
   `teamhq\golden_sawblade.tga` as a prize.
 
-**Not established:** the RNG (`FUN_00419190`) and its seed, whether the draw
+**Not established** (the RNG itself is recovered since docs/36 section 9.23: the engine LCG, its seeds and consumers; only its state at a bracket is session-dependent): the RNG (`FUN_00419190`) and its seed, whether the draw
 is filtered by season or tier, and the writer that advances `+0x98`/resets the
 league for the next season. The model exposes `Career::next_season(seed)` as
 explicit behaviour rather than pretending to reproduce an unread path.
@@ -186,15 +186,17 @@ not distinguish from `160 / robots`.
 
 ### How the model draws it
 
-`EventBracket::new(event, data, seed)` uses the event's tier count and
-`settings[0]`/the 16-entrant constant, then `draw_round` fills match 0 slot 0
-with `Entrant::Player` and every other slot with a deterministic
-`Ai(u32 % 15)`. `Career::play_round` awards the round, advances on a win (and
-draws the next round), ends the event on a loss (simulating the remaining
-rounds for AI points), and calls `finish_event` only at that point. The RNG
-algorithm and seed were not recovered; the seed is explicit
-(`Career::seed`, sidecar `seed`), and the same seed, event and round always
-draw the same field.
+`EventBracket::new(event, data, state)` uses the event's tier count and
+`settings[0]`/the 16-entrant constant and draws the whole bracket from the engine
+LCG exactly as `FUN_004695a0` does (docs/36 section 9.23: match 0 slot 0 is the
+player, every other slot `FUN_00419190(15)` redrawn while it repeats in the round);
+`Career::play_round` awards the round, advances on a win (the next round is the
+winners of this round's matches, `FUN_0046c830`), ends the event on a loss
+(simulating the remaining rounds for AI points), and calls `finish_event` only at
+that point. The state is explicit (`Career::seed`, sidecar `seed`; the bracket keeps
+the state it was drawn from) because the original's is the clock plus every effect
+draw; the same state always draws the same bracket, and the session state moves on
+with each bracket.
 
 ---
 

@@ -1,0 +1,494 @@
+# 37 — Per-hit effects: sparks, debris, decals, smoke (fx3)
+
+What the original does visually when a robot is hit, from `Robot Arena 2.exe` (file VAs), a live
+Frida log of a 80 s AI-vs-AI fight (`tools/oracle/frida/ra2_fx.js`, driver `tools/oracle/capture_fx.py`)
+and photographs of the result. Evidence (git-ignored, backed up, manifest rows
+`fx-axe-v-spikehammer`): `local/oracle/original/fx-axe-v-spikehammer__live__000.jsonl` (every hook row),
+`...-pose00..07.png` (scripted camera, 1.9 m from each robot, AI stopped), `....spec.txt` (the decals and
+poses in the form `ra2sim --example decalshot` reads). Particle internals (emitters, spawn, draw) are in
+docs/31; this adds what the log corrected and the decal system, which docs/31 did not have.
+
+## 1. The hit chain
+
+A priced contact runs the struck component's virtual `+0x6c` (`FUN_00417510`, before the `>= 10` damage gate
+of docs/35): `FUN_0045f3a0` (sparks + sound) for every class, overridden by
+
+| class | function | extra |
+|---|---|---|
+| Chassis | `FUN_0044ee70` | base, then debris (below), then the decal (section 3) |
+| Bracket | `FUN_00503e40` | base, then `bracket_hit.wav` |
+
+`FUN_004a2a50(count, other material, record, debris flag)` is the only caller of the spark (`0x4a2c10`) and
+debris (`0x4a2e60`) effects. The log of 52 chassis hits (hit record `rec`, `rec+0x2c` = the other
+component):
+
+* **Count.** Sparks and debris are only thrown when `damage > 10` and `GraphicEffects == 1`. The spark
+  count is `ftol(FUN_0045f9f0(damage))`: a linear map of `10..100` to `3..hi`, clamped, `hi = 20` at
+  `GraphicDetail = 2` and `10` at 0 or 1 (settings object `0x7164f8`: `+0x54` detail, `+0x58` effects).
+  Logged damage -> count: 12.34 -> 3.44, 16.70 -> 4.27, 38.39 -> 8.36, 71.06 -> 14.53, 115.1 and 133.6 -> 20.
+  docs/31 said `int(damage)`; that was wrong.
+* **Sparks** (`0x4a2c10`): only if a metal part and no rubber part is in the contact; velocity `2 * rec.normal`,
+  spread `(1, 1, 1)`, colour white, texture `spark.tga`, additive (`FUN_004a3380`, entry type 0).
+* **Debris** (`0x4a2e60`, entry type 4): thrown by the **chassis** handler only (the second `4a2a50` call has
+  the debris flag), metal or not, `int(0.25 * count)` pieces (0 to 5; `0x6a54c0`), velocity **`6 * rec.normal`**
+  (the chooser scales its vector in place by 2 and then 3; docs/31's `3` was wrong), spread `(1, 1, 1)`,
+  gravity `(0, -13, 0)`, random texture of `metal`, `metalslice`, `metal_nutbolt`. Nothing else calls
+  the debris effect: the "debris when a part comes off" that `ra2sim` had is removed.
+* **Direction.** `rec.normal` points *into* the struck component: `normal . (point - chassis origin) < 0` in
+  52 of 52 chassis hits. `combat::Impact::normal` points out of it, so the sparks and debris take `-normal`.
+
+Code: `ra2_render::effects::hit_count`, `Effects::{sparks, debris}` (`Effects::detail` from `GraphicDetail`),
+`Duel::sparks_for`. Tests `the_hit_count_follows_the_live_log`, `a_chassis_hit_throws_debris`.
+
+## 2. Smoke
+
+Only two classes own a smoke emitter, both created by their `Init(2)` and switched on the first hit that
+leaves them at or under half their hitpoints (`hp / max <= 0.5`; `FUN_0048e0d0` for motors, `FUN_004f6dd0`
+for car steering, then `FUN_0048e0b0` = `SetEmitting(1)`; the emitter follows the component):
+
+| class | creator | texture | velocity | spread | rate | life | size |
+|---|---|---|---|---|---|---|---|
+| Motor (spin, servo, burst) | `0x48dc50` | `smoke`, `smoke2`, `smoke3` (random) | `(0, 2, 0)` | `(.5, 0, .5)` | 5/s | 0.7 | 0.2 -> 0.6 |
+| Steering (`carsteering*`) | `0x4f6a10` | `smoke` | `(0, 0.7, 0)` | `(.3, 0, .3)` | 5/s | 0.7 | 0.2 -> 0.6 |
+
+Both gate on `GraphicEffects == 1`, colour white fading to alpha 0, alpha blended. New: the steering smoke
+(`Config::steering_smoke`) and `<=` (it was `<`). No smoke comes from a hurt chassis, a weapon or the robot as
+a whole. The `Flamethrower` component's flame is section 6.
+
+## 3. Decals (`DecalTrigger`, RTTI `0x6ef5e4`, constructor `0x5a0e00`, object `0x1cf4` bytes)
+
+The loader reference `0x44f105` is `FUN_0044ee70`'s `Arenas\decals\` + file name. The decals are **battle
+marks on the struck chassis**, not scorch marks on the arena. A weapon definition's
+`decal = <file> <dx dy dz> <w> <h> <mode>` (the weapon at `+0x80` flag, `+0x84` file, `+0x94` direction,
+`+0xa4/+0xa8` size, `+0xac` mode; parsed by `0x503190`) selects it: 33 stock definitions (axes and blades
+`single_slash`/`double_slash` mode 1 or 0, spikes `pierce01/02`, hammers `batter01/02`, ...; `fire.tga` ships
+but nothing references it). Files `Arenas/decals/*.tga`, 32x32 RGBA.
+
+**Placement** (chain captured live: `0x51eb00` rigid inverse, `0x51e650` point, `0x51e6d0` / `0x51e600`
+rotations, constructor arguments):
+
+* no damage gate and no spark gate; only `GraphicEffects != 0` and a weapon with the flag;
+* `c = inv(chassis object matrix) * contact point (rec + 0)`; `N = rotate(inv, -rec.normal)` (out of the
+  chassis); `A = rotate(inv, weapon body orientation * direction)` (the width axis; not made
+  perpendicular to `N`); half sizes `w/2`, `h/2`, depth `0.5` (`0x6f20c0`); height axis `V = N x A`;
+* alpha (`+0x1cec`) `= clamp(damage / 100, 0, 1)` (`FUN_004194f0` over `0..100 -> 0..1`);
+  logged 0.1234 for damage 12.34.
+
+**Cut** (`FUN_005a1700` over the chassis' mesh object 0): each triangle whose unit face normal `n` (index
+order `(p1-p0) x (p2-p0)`) has `n . N > 0.25` (`0x705f48`) is pushed `0.0005` (`0x6f20c4`) along `n`, clipped
+by Sutherland-Hodgman against `A, -A, V, -V, N, -N` (`FUN_005a1970`/`FUN_005a1a80`) and appended as a fan
+(`0, i-1, i`); a polygon that would pass 89 points ends the walk. Each point keeps its source triangle's three
+indices and barycentric weights (sub-areas over the triangle's area, so pushed points sum a little over 1);
+UV `= ((p-c).A / w + .5, (p-c).V / h + .5)`. `FUN_005a1ee0` re-evaluates positions from the mesh every frame,
+so a decal rides a buckling chassis. An empty decal (box off the mesh) still counts. At most **25** per
+chassis (`0x6f20c8`), the oldest removed first.
+
+**Draw** (`FUN_005a2620`/`FUN_005a2240`, state object `0x71fd78`): alpha blending on, depth write off,
+lighting on, vertex colour `(1, 1, 1, alpha)`, linear filter, CCW cull. `mode == 1` (slashes): `SRCALPHA, ONE`
+(additive) with alpha test `>= 16`; any other mode: `SRCALPHA, INVSRCALPHA`, no alpha test (the dark dents).
+
+**Evidence.** The original's chassis mesh is subdivided for the crush (84 / 206 triangles for chassis that are
+12 / 52 in the `.bot`), so polygon counts differ; what matches is the footprint: for five logged boxes cut
+from our meshes the texture-coordinate extents agree to 0.003 and the area to within 8 % (test
+`decals_cut_from_the_chassis_match_the_live_footprints`). Photographs: `pose01..03` of the capture against
+`decalshot` frames (`DECALSHOT_CHASSIS_ONLY=1`) show the same jagged grey dent with the green cross-hatch
+(`batter01.tga`) on the same face; positions differ by the robots' pose drift while photographed. Slash decals' look: section 8.
+
+Code: `ra2_render::decals` (parse, project, corners, material), `Duel::{mark_for, push_mark, mark_items}`,
+`Component::decal`, `ra2sim --example decalshot`.
+
+## 4. Other per-hit visuals found
+
+* Hit sounds: docs/35. `FUN_0045f4c0` volume `> -1500` gates the sound, not a visual.
+* Chassis crush: F9 (docs/06), the decals follow it.
+* The hit does **not** call `plus.emitSmoke` (`FUN_004a3120`) or the flame; `emitSmoke` stays script-only.
+* Hazard flames and lightning: docs/31, docs/34.
+
+## 5. Gaps
+
+The flame's hit rate against distance (section 6), the exact per-vertex normals and lighting of a decal (ours uses the face normal); the
+original's subdivided chassis mesh (decal polygons are the same shape, fewer fans); live look of the slash
+(additive) decals (section 8); `0x71abcc` (the camera-relative decal direction branch) is `(0, 0, 0)` and no stock
+definition uses a zero direction, so that branch is not implemented.
+
+## 6. The Flamethrower (`0x504080`, vtable `0x6ab664`, RTTI `Flamethrower`)
+
+Live: `tools/oracle/frida/ra2_flame.js` via `tools/oracle/capture_flame.py` (captures `flame-open__live__000`,
+`flame-wait__live__000/001`, side-by-sides kept outside the oracle directory), driven by a test robot made
+with `ra2sim --example flamebot` (a Scout, a Flamethrower on its nose turned half a turn so it points forward, a
+CO2 tank, an analog `Flame` wired to `Fire`, a button `FlameBurst` wired to `Fire burst`). **No stock robot,
+AI or team has one** (`Flame Chopper` in `AI/Bindings.py` is only a name); the definition is
+`Components\flamethrower.txt`: `base = Flamethrower`, `standard = 0`, `hidden = 2`,
+`firesound = sounds\flame_thrower.wav`, `airmaxinoutrate = -100`, `elecmaxinoutrate = -100`.
+
+**Controls.** The constructor registers two handlers: analog `Fire` (`0x504a70(on, level)`, scale 1) and
+button `Fire burst` (`0x504b60`, scale 100). `Fire` switches the jet on while the control is non-zero, `level`
+being its value; `Fire burst` is `Fire(1, 100)` plus `burst = 1` and a `0.1 s` timer, and a release does nothing.
+The step (`0x504790`) counts the timer down and, when it has run out and the emitter is on, switches it off.
+Live: a burst's emitter was on 0.10-0.20 s (the original steps at 1/30 s; ours at 1/60 s gives 0.10-0.12 s).
+(`AI.Input` from the in-game Python reaches the wires, but a call made inside another Frida hook's callback is
+invisible to the hooks, so the live handler calls were made from the agent's own thread.)
+
+**Power.** The jet draws `airmaxinoutrate` and `elecmaxinoutrate` times `dt` (100 each a second, **whatever the
+level**) while it is on or its burst timer runs (`0x504c50`). The emitter starts only while both published
+power scales (`0x714a6c` air, `0x714a70` electric, docs/30 section 3) are above zero, and its speed scale is
+`level * 0.01 * air scale`, **fixed when it starts**. Consequences, all live: with no air tank the emitter never
+starts (the tankless Scout: ticks with `firing = 1`, `emitting = 0`); with a CO2 tank (800, 120 a second) the
+first jet has scale 1.0 and, as the tank runs down, later starts had 0.44 (level 50), 0.30 (level 20) and 0.24
+(a burst), so one tank is about eight seconds of full flame and then a weak one. A level change while on only
+changes the sound.
+
+**The emitter** (`Arenas\particles\flame.tga`, named "Fire burst"; config dump of the live emitter): 80 a second,
+life 0.3 +- 0.075 s, velocity `(0, 0, -5) * scale` in the component's frame rotated to the world **plus the
+chassis' velocity**, spread `(0.5, 0.5, 0.5)`, no gravity, colour blue `(0, 0, 1, 1)` to white (green spread
+0.3) and size 0.2 to 0.4 **over the whole life** (`fade_start` 0, not the default 0.5: the live dump has 0 at
+`+0x134`; `Config::jet`), additive, collides with the world without reflecting, elasticity 1. It sits at
+`component * (0, 0.176, -0.9)` (live world matrix: component at `(0, 0.0037, 0.5491)` in the robot's frame,
+rotation `diag(-1, 1, -1)`, nozzle `(0, 0.180, 1.449)`: our `ra2fmt::mount` placement agrees to 1e-3). With
+`angle = 0` the jet points out of the back of the chassis; the test robot uses half a turn. Config `ra2_render::
+effects::Config::{flame, JET_SPREAD}`, `Effects::{jet, step_with}`.
+
+**Damage.** Each particle's step is cast against the world (`0x5bdc00`; `0x504b90` skips the jet's own robot);
+a hit calls `0x504ca0`, which for a robot's part is `FUN_004148f0(robot, component, 2.0)` (the hazard path: no
+attacker, no score, a floating `2` shown): **2.0 hitpoints a hit**, applied below the 10-point gate of a contact
+because `0x4148f0` reaches `0x4175b0` directly. The particle then leaves the surface in a random direction at
+its own speed (the non-reflect branch of `0x5bdc00`). Live (`flame-wait__live__000`, ALARM driven into the jet
+3.3 m away, level 100): 16 damage events, all `amount 2.0`, `attacker -1`, from `0x4149b3`, in clusters of 2-3
+a frame while ALARM was in reach; ALARM lost 22 hitpoints (component materials scale a hit). With ALARM at
+2.1 m, so that the nozzle was inside it, only 1-2 hits (a cast that starts inside a body hits nothing; ours
+likewise: `duel::ray_box_entry`). Ours (`Duel::update_flamethrowers`, `apply_hit_with`) gives 1.75 hits a 60 Hz
+step at 3.3 m against about 2.6 a frame live: the right order, **the rate against distance is not
+calibrated** (the live robots would not hold still at a chosen range).
+
+**Sound.** The handle is created in `Init(0)`: `sounds\flame_thrower.wav` at volume 0, 3D, 100/20. Every `Fire`
+call does `SetVolume(20 * level - 2000)` hundredths of a dB (0, -1000, -1600 at 100, 50, 20: live) and `Stop`
+at off, but the `Loop` is gated on the power scales being above zero at the call, which they are not until the
+jet's own draw has been asked for, so **a jet switched on from rest is silent** (no `Loop` in any live call).
+`ra2sim::flame::Sound`, `SoundCue::Flame`.
+
+**Look.** Live (`flame-cam__live__000-02/03.png`) against ours (`ra2-app --example flameshot`, same camera, HUD,
+hazards off, AIs stopped); side-by-sides are kept in the scratchpad, not archived. The live camera was polled
+(`ra2_camera.js`: pitch 0.2326, FOV 0.8, no target, eye `a + 1.3 f + 1.9 r + 0.6 up`); ours uses the same formula and
+the same pitch. Pixels (1024x768, live / ours): cylinder tip `(148, 458)` / `(149, 454)`, cylinder rows 275-478 /
+274-478; first pink puff x 635 / 629; bright flame x from 721 / 695, rows 421-610 / 373-606, centroid `(890, 512)`
+/ `(890, 492)`; the Time box and the Scout/ALARM boxes are the same size. Remaining difference: ours spreads
+about 20-40 px more upward at the far end. The first comparison was wrong because of the comparison (hazards on,
+AIs running, HUD laid out for 1280x1005 and so drawn at 75%; `Session::set_layout` fixes that; the "Static 1" text
+is the 3 s camera-name label every camera switch shows in normal play, now switched off before the shot). The
+colour needed the `fade_start` 0 above. The red cylinder and fork are the Scout's own `BurstMotor` and its arm. The
+original draws **no model** for the Flamethrower: with `RA2_FLAME_MODEL=1` ours draws the gun at the nose, covering
+the cylinder, and live shows the bare cylinder, so ours hides it (`rig.rs`).
+
+**Code.** `ra2sim::flame` (state machine, tests), `controls::Action::{Flame, FlameBurst}`,
+`Robot::{flame_inputs, flame_update, flame_jets}`, `Duel::update_flamethrowers`; workshop wiring accepts
+`Fire` on an analog and `Fire burst` on a button for a Flamethrower. Tests: `flame::tests::*`,
+`duel::tests::{a_flamethrower_with_no_air_tank_never_lights, a_jet_burns_the_other_robot_for_two_a_hit_and_scores_nothing,
+a_burst_is_a_tenth_of_a_second_of_flame, the_jet_flies_forward_at_five_metres_a_second_at_level_100}`,
+`effects::tests::a_flamethrower_jet_follows_its_nozzle_and_scatters_on_a_hit`. `--example flameshot` photographs
+ours with the live camera.
+
+**Open.** The `Loop` when other air draws keep the scales up; AI brains that fire it (none ship); the floating `2` is
+section 7; the hit rate against distance is measured in section 6.1 and 6.2: a particle hits once, ours was 2.5x too high on ALARM before that.
+
+### 6.1 The jet frame by frame and its hit rate (flame-look)
+
+Live: `tools/oracle/capture_flame_look.py` (`flamelook__live__000`, `d3dstate-flame__live__000`), a `flamebot` with two
+CO2 tanks (`FLAME_TANKS=2`) against ALARM, hazards off, AIs stopped; `frida/ra2_flame.js` now logs every emitter
+update (`0x5bc8f0`: dt, spawn accumulator, live count), every spawn (`0x5bc250`: the new particles' position,
+velocity, colour, size, life) and every draw (`0x5bcf70`: all live particles in list order); `frida/ra2_pin.js` holds
+ALARM's rigid bodies (every Havok substep, `0x52aa60`) at a chosen place. Side-by-sides: scratchpad `fl/final/sbs_d*.png`
+(live left, ours right).
+
+* **Emission.** The update runs once per rendered frame with the frame's own dt (live 25-65 ms, mean 46 ms: Wine on
+  Xephyr runs at about 22 fps; 924 updates in 20 s). `acc += rate * dt` (80 a second), `n = ftol(acc)` particles are
+  spawned **all at the emitter's position at that frame** (no sub-frame spread), the accumulator keeps the fraction
+  (spawn calls of 2..9, mean 3.7), and the new particles take this frame's step too. Ours is the same law
+  (`Emitter::step`), stepped at the sim's 1/60 s.
+* **Velocity** (874 spawned particles): the emitter's velocity (the nozzle's `scale * 5 m/s` jet direction plus the
+  chassis') **plus an independent uniform `+-0.25` m/s per world axis** (deviation widths 0.500 / 0.497 / 0.496, standard
+  deviation 0.145 = `0.5 / sqrt(12)`), the config's `(0.5, 0.5, 0.5)` spread. Source: the engine LCG (`0x726d58`),
+  `v + spread * (r - 0.5)` per axis, the emitter's matrix (`+0x4c`) identity. Life `0.3 +- 0.075` (0.225..0.375 live).
+  That is a narrow beam: at the end of a life the particles are within `+-0.075 m` of the jet's line.
+* **Size and colour** at four ages of one frame's particles: size `0.2 + 0.2 p` and the colour `(0, g, 1, 1)` going
+  linearly to `(1, 1, 1, 1)` (`g` the 0.3-spread jitter) are exact (`fade_start` 0).
+* **Texture, blend, sort.** `flame.tga`; the jet's draws are `SRCALPHA, ONE`, `ZENABLE 1`, `ZWRITEENABLE 1`, no alpha
+  test, CCW cull, stage 0 `MODULATE` (`d3dstate-flame__live__000`). The list is walked newest first (a spawn pushes at the
+  head) and **not sorted**. Replaying the particles of seven live draws (`flamereplay`: our scene, the live camera, the
+  live particle list through `Effects::replay`) against the burst grabs gives a mean absolute error of **2.0-2.2** over
+  the flame region with our material (no depth writes), but **31.8** when the quads write depth like the state dump
+  says: the live frames show every overlapping quad adding, so `z_write` stays off.
+* **Why the live puffs look more distinct than ours.** Not the look of a particle (that matches to 2/255) but the frame
+  rate: at 46 ms a frame puts 3.7 quads on one point, 0.23 m apart from the previous frame's, so the jet is a string of
+  blobs. Ours steps at 1/60 s (1.3 quads a step, 0.08 m apart) and is smoother; at the original's own 60 fps it would
+  look the same. No code change; the replay shows the renderer is right.
+* **Scatter.** All 69 particles whose velocity changed in a frame next to ALARM moved away from it (speed 5.09 m/s, their
+  own), as ours does; a particle scatters about once (96 of 175 seen in the 2.6 m phase never hit anything, 62 hit once,
+  17 more than once).
+* **The cast** is `0x504b90`: the world cast `0x4a3a90` (Havok, against the collision shapes), then `0x416e30` finds
+  whose body it hit and the jet's own robot is skipped. Ours now casts each particle's step against every other part's
+  **collision pieces** (a mesh piece's triangles, a convex piece's hull faces; `ray_shapes`, a start inside hits
+  nothing) instead of a box around the part.
+* **Hit rate against distance** (jet at level 100 for 2.2-2.4 s, both robots held; centre-of-mass distances 2.70 / 3.02 /
+  3.38 / 3.77 m; the flame robot's heading was 5 degrees off ALARM's axis at the nearest and drifted further, which in a
+  `+-0.075 m` beam matters; `flamerange` places ours on the same poses):
+
+| distance | live damage events a second | live hits a spawned particle | ALARM chassis hp lost | ours (shape cast) |
+|---|---|---|---|---|
+| 2.70 m | 41.8 (100 events, 33 on the Hammer Head, 65 on the chassis) | 0.54 | 130 | 104.5 (chassis 194, Hammer Head 21) |
+| 3.02 m | 32.6 | 0.43 | 108 | 51.4 (chassis 65, wheels 48) |
+| 3.38 m | 2.3 | 0.03 | 10 | 0.5 |
+| 3.77 m | 0 | 0 | 0 | 0 |
+
+  The pre-change box cast (7a4208c's `ray_box_entry`, same live poses) gave **110.5 / 80.0 / 6.8 / 0** a second, the collision
+  shapes 104.5 / 51.4 / 0.5 / 0 against live 41.8 / 32.6 / 2.3 / 0: ratios to live 2.6 / 2.5 / 3.0 / - (boxes) and 2.5 / 1.6 / 0.2 / - (shapes), so
+  the shapes moved the middle distance toward live and the 3.4 m one past it. (Boxes, jet aimed dead at ALARM, matched centres: 118.6 / 84.1 / 29.1 / 5.5.) The live
+  headings and the shapes put the reach where live has it (between 3.4 and 3.8 m), but **the near
+  chassis hits are still 3x too many** (194 against 65 in 2.2 s) and the Hammer Head too few (21 against 33). Not the
+  particle law, the nozzle (live along 0.90 m, height -0.05 m, lateral 0.02 m from the centre of mass: ours 0.92 / -0.05 /
+  0.02), the emitter's velocity (live 5.0 m/s, pitched 2-6 degrees down) or the frame dt (`FLAME_DT=0.046` gives 87
+  against 104); open: what the live cast sees of ALARM's front (the Hammer Head may swing when the Scout is in its zone even with
+  the brain stopped; not checked) and of a body held by `ra2_pin.js`.
+
+### 6.2 Why the near-range hit rate was 2.5x: every cast logged, replayed particle by particle (flame-hits)
+
+Live: `frida/ra2_flamecast.js` (loaded by `capture_flame_look.py` with `CASTLOG=1`) logs, for every step of the jet's particles, the
+step `0x5bdc00` (stack args `dt`, velocity, position), the wrapper `0x5be380`, the callback `0x504b90`, the world cast `0x4a3a90`,
+`0x416e30` (body to robot) and `0x414800` (body to component), with the arguments in and out. Captures `flamecast__live__000`
+(2.6 m) and `__001` (2.6 / 3.0 / 3.4 / 3.8 m), the flamebot against ALARM with ALARM's bodies held; 1114 and 5000 particle steps.
+`tools/oracle/flamecast_text.py` turns a phase into text and `ra2sim --example flamecasts` replays it (ALARM's bodies carried by the
+live chassis pose; the live nozzle and dt frame by frame through our particle law, `Duel::replay_jet`).
+
+* **What the cast tests.** `0x5be380` calls `[emitter+0x334]` (`0x504b90`) with the segment `from = position`, `to = position + velocity * dt`
+  (the whole step, 0.05 s live = 0.2-0.3 m) and gets `1` when the particle hit something to scatter from: the floor, or a robot part
+  (`0x504ca0` then does the 2.0 damage). The world cast `0x4a3a90` is a nearest-hit ray cast against Havok collision shapes; a hit
+  on the **jet's own robot** is skipped (`0x504b90` returns 0: no damage, no scatter, the particle flies on; 10 of 233 particles live) and, being the
+  nearest hit, hides what lies behind it. Hits are on the chassis' mesh piece with the outward normal and on a convex piece (the
+  Hammer Head) with the normal reported along the ray; ours matches both (below). Filter, collision groups and phantoms: no
+  SmartZone or phantom volume was hit; every robot hit was a collision piece of the chassis or the Hammer Head (nearest triangle of our pieces: 0.003 m for 21 and 52 hits).
+* **Ours against every live step** (same segment, ALARM at the live pose; `live B` = a robot part hit with damage):
+
+| phase | live steps | live B / ours B | live B ours miss | live none ours B |
+|---|---|---|---|---|
+| 2.6 m (000) | 1114 | 71 / 71 | 2 | 2 |
+| 2.6 m (001) | 870 | 90 / 90 | 0 | 0 |
+| 3.0 m | 598 | 59 / 59 | 0 | 1 |
+| 3.4 m | 620 | 28 / 27 | 1 | 4 |
+| 3.8 m | 412 | 0 / 0 | 0 | 1 |
+
+  The disagreements are steps ending 1-2 mm before or after a surface (the live hit comes the next step). The cast was right;
+  placing ALARM's hammer arm by the live body orientation was not (see below).
+* **A particle hits once.** Following each live particle by its velocity (constant between hits) through the logs: of 174 particles in
+  `000`, 73 hit a robot and 25 the floor, **none hit a second time** (their later steps all returned no hit, flying on with the scattered
+  velocity, speed unchanged), though ours, scattered at the surface, hit again at once: 1.3 hits a particle (233 hits in 2.2 s from 176
+  spawned) against live 0.54. Replaying the live emitter (nozzle, velocity, dt) through our law: **132-158 hits without the rule,
+  71-72 with it, live 73** (chassis 21-26 against 21, Hammer Head 45-50 against 52). `Particle::spent`: a jet particle that has hit
+  (floor or robot) is not cast again; test `effects::tests::a_jet_particle_hits_once`.
+* **Where the live scatter goes** (not fitted): speed kept; off the floor along it (the vertical component 0, 25 of 25); off a robot part
+  at various angles to the reported normal (cos -0.7..0.6), so it is not the "random half sphere" ours uses, and some go into the Hammer
+  Head's hull, where a cast from inside hits nothing. The code at `0x5bdf08..0x5be28f` picks a random point on the contact plane (the
+  tangent basis from `0x50eaff`) and aims at it; ours still draws a random direction on the normal's side.
+* **ALARM's hammer** does not swing with the brain stopped: its body is at the same orientation in `flamelook` and `flamecast`
+  (quaternion 135.9 degrees from the chassis'), the rest pose. Its body frame is the rotor's (the Burst Piston's start angle, 90 degrees about
+  `y`) not the component's: setting our body to the live quaternion put every Hammer Head hit 0.200-0.214 m off, while carrying the whole robot by the
+  chassis pose alone puts all 52 at 0.003 m. Nothing is wrong with a pinned body: `ra2_pin.js` writes position and orientation every substep and the
+  cast sees the pinned shapes (the collision world follows `0x520750`).
+* **Pieces fixed on the way** (`Duel::flame_targets`): a motor's rotor pieces ride the part hung from its joint, at the rotor's rest frame
+  (`part world * frame^-1 * rotor_local`), not the motor's own world matrix; parts with no collidable (power cells, boards, SmartZone) are no obstacle.
+  Test `duel::tests::a_flame_cast_meets_alarm_where_the_original_did` casts six live steps into ALARM at rest: Hammer Head and chassis within 10 mm of the live points.
+* **Live frame time.** With no screen grabs the frames were 17-55 ms (35-45 updates in 2.2 s), so the 0.05 s step puts a particle's first cast 0.25 m
+  from the nozzle; the cast is the whole segment, so the hit count does not depend on the step (replay above, 1/60 s steps).
+
+Hit events a second, before and after (`flamerange` at the flamelook poses): 2.7 m **104.5 -> 69.5**, 3.0 m **51.4 -> 33.2**, 3.4 m 0.5 -> 0.5, 3.8 m 0 -> 0, against live
+41.8 / 32.6 / 2.3 / 0 (the two captures of this section: 41 / 28 / 14 / 0 a second at 2.6 / 3.0 / 3.4 / 3.8). What is left at the nearest pose is the flame robot's nozzle height against
+ALARM's hammer (0.07 m higher in ours than live at the first frame, live -2.015 against ours -1.947; the live Scout also rocks, its nozzle
+rising to -1.71 over 1.4 s, ours stays): replaying the live emitter shifted up 0.07 m gives 105-122 hits instead of 71-72, down 0.05 m 61-66.
+Open: why the live flamebot sits 3 degrees more nose-down (and rocks) than ours; the scatter law; occlusion by the jet's own robot (ours skips it).
+
+Code: `Duel::{flame_hits, flame_hit_log}`, `flame_shapes`/`ray_shapes` (test
+`a_flame_ray_enters_a_convex_piece_from_outside_only`), `Effects::replay` (test
+`a_replayed_frame_draws_its_particles_as_given`), examples `flamerange` (ours at the live poses), `flamereplay` (the live
+frames), `flamebot` (`FLAME_TANKS`).
+
+### 6.3 The scatter law (fx-scatter)
+
+Recovered from the step `0x5bdc00` (the non-reflect branch `0x5bdf08..0x5be28f`, flag `+0x1d6` = 0; `0x5be380` is the cast wrapper that calls `[emitter+0x334]`
+= `0x504b90`) and checked against every velocity change in `flamecast__live__000/001` (348 scatters: 98 floor, 250 robot parts; the log carries the step's
+`from`, the velocity before and after, and the cast's hit point and normal). What the code does, in words:
+
+* The cast returns a hit point `p` and a normal `n` (facing `from`). `D3DXPlaneFromPointNormal(p, n)` (the import behind `0x50eaff`) gives the plane `(a, b, c, d)`.
+* Two numbers `u1, u2` come from the engine LCG (`0x726d58`, the same `(s & 0x7fffffff) / 2^31` as the spawn jitter), **consecutively** (u1 first).
+* A target point `Q` on the contact plane is built from them and **from the particle's own world position `F`** (the step's start), not from the hit point:
+  by the normal (components within 0.001 of zero): `n = (0, +-1, 0)` (floor) `Q = (u1 Fx, p.y, u2 Fz)`; `n` along x `Q = (p.x, u1 Fy, u2 Fz)`; `n` along z
+  `Q = (u1 Fx, u2 Fy, p.z)`; otherwise `Q = (u1 Fx, u2 Fy, (a Qx + b Qy - d) / c)` with `d = -n . p`, i.e. `(n.x Qx + n.y Qy + n . p) / n.z`. That is
+  **not** on the plane (the sign is the original's); with the true plane 2 of 250 live scatters fit the `[0, 1)` range of `u`, with this one 250 of 250.
+* The new velocity is `normalize(Q - F) * |v| * elasticity` (`[emitter+0x1d8]`, 1 for the jet): the speed is kept to the last digit (348 of 348), the direction
+  points from the particle toward a random point between the world origin and itself on each free axis, so scattered particles drift toward the origin's side
+  (live floor hits at `(-8.3, -2.25, 8.5)` leave with `+x`, `-z`), and tangent to the floor because `Q.y` is the floor's height and `F.y` is 0.01-0.03 above
+  it: the vertical component is -0.002..-0.02 of the speed, 0 to the eye).
+* Only the velocity is written. **Position, life and size are untouched** (the live particle's life and `0.2 + 0.2 p` size go on); the particle is moved on by the
+  caller to `F + v_new * dt`, **not** to the surface: 225 of the 244 live scatters whose particle was found again (a later step within 5 cm) had its next position at that point, to 3e-5 m (the
+  particle ends a little inside the floor or the robot and is not cast again, section 6.2). Ours put it at the hit point plus 2 mm; now `F + v_new * dt`.
+
+Distribution check (u recovered from each live scatter by intersecting the new direction with the construction above): floor `u1` mean 0.57 (KS 0.16, n 98),
+`u2` mean 0.52 (KS 0.065); robot parts `u1` 0.51 (KS 0.039, n 250), `u2` 0.49 (KS 0.047); uniform on `[0, 1)` at the 5 % level (KS critical 0.086 / 0.137) except the floor's `u1` (98 scatters from one arena corner and the LCG pairing). Not a hemisphere, not about the normal: a robot hit at `(-8.9, -2.0, 8.8)` with the
+normal `(0.74, 0.015, -0.68)` leaves with a direction of `Q - F` where `Q` is a point of the plane tilted by the `+n.p` term, which is why some leave into
+the surface (cos to the normal -0.7..0.6, section 6.2). `effects::scatter_velocity` (test `a_scatter_is_a_random_point_of_the_contact_plane`).
+The old half-sphere draw is gone; `flamerange` hit rates are unchanged (a scatter marks the particle spent, section 6.2). Open: the
+`0x1dc` branch (`0x5be690`, a callback after a hit when the emitter has one; the jet has none), and the reflect branch is as before.
+
+## 7. Floating damage numbers (`ArenaManager::DamageDisplay`)
+
+Live: `tools/oracle/frida/ra2_numbers.js` via `tools/oracle/capture_numbers.py` (human C.R.U.S.H. against a
+stopped ALARM in the Combat Arena, hazards off; `plus.damage(0, 0, 25, point)` and wall hits; captures
+`numbers-hazard__live__000`, `numbers-hazard123__live__000`; a fast burst grabber, `xgrab.py`, takes ~20 frames a
+second). Code: `ra2sim::popup`, `Match::{route_popups, damage_numbers, set_damage_messages}`,
+`UiAssets::centered_text`, `Session::add_damage_numbers`; `--example numbershot` photographs ours.
+
+**Who sees one.** `FUN_004175b0` (the hit handler: contacts of 10 or more, `FUN_004148f0` for `plus.damage`, a flame
+and hazards) calls `FUN_004177e0` -> `FUN_004178a0`, which asks the display (`FUN_00417940`) only when the player
+object's `vtable[0x18]` is true: **a human player**. Live: a request for the AI (`id 1`) was logged and never accepted
+(`0x417940` not called), the human's were. Outside King of the Hill (the whole block is the not-KOTH branch):
+
+| case | player | colour | position |
+|---|---|---|---|
+| a hit with an attacker (the scoring hits: victim alive, not a team-mate in Team Match) | the attacker | green `(0, 0.8, 0)` | `point + 0.1 * normal` |
+| a hit with no attacker (hazard, `plus.damage`, flame, a wall) | the robot struck | red `(0.8, 0, 0)` | `point - 0.1 * normal` |
+
+`point` and `normal` are the hit record's (`param_6`, `param_7`); the normal points into the struck component (live:
+wall at x = 12.67 gave `(-1, 0, 0)`, at z = -12.4 `(0, 0, 1)`); a hazard's is zero. The amount is the **effective**
+damage (`FUN_00489620`) and the text its truncation (`__ftol`): `25` for 25, `34` for 34.297, `123` for 123.9.
+Not shown: `GraphicMessages = 0` (settings `+0x60`, the options window's "damage" switch; checked at the flush),
+King of the Hill, hits on or by AIs, damage of zero.
+
+**Merging** (`FUN_00417940`). A request joins an entry of the same player and colour that is younger than 0.15 s
+(`DAT_006ef568`) and whose point is closer than sqrt(2) m (`DAT_006ef56c = 2.0` on the squared distance), adding the
+amount; the entry keeps its first point and time. `FUN_00413b20` (once a frame, the game's dt) turns every entry older
+than 0.15 s into a number: live flush 0.17-0.2 s after the request.
+
+**The number** (`FUN_00413bd0`). A text object (`0x198` bytes, size `0x4b`, scale `2 / width`) of the face `fg_d20`
+(`s_fg_d20_006ef624`), drawn as screen text **1:1 in pixels** at the projection of its world point: the `25` is 21 x 13
+px of ink at 0.8 m and at 3.9 m alike. A mover (`0x5a3780(a, b, 0.25, 0.75)`) with `a` = the start above, `b = a + dir`,
+`dir = normalize((0, 6, 0) -/+ normal)` (red `-`, green `+`; `(0, 1, 0)` for a hazard): nothing moves until 0.25 s, then the
+text goes along `dir` at 2 m/s (the interpolation keeps extrapolating after 0.75 s; live y: -1.307 at 0.25 s, -0.307 at
+0.75 s, +0.276 at 1.05 s). A fader (`0x5a3c00((c, 1), (c, 0), 0.75, 1.0)`) keeps it opaque until 0.75 s and fades the alpha
+linearly to 0 at 1.0 s; the effect's duration is 1.0 s (`FUN_004141a0(1.0)`), then it is removed. It is a scene object
+without depth test: it shows over the robot it is on.
+
+**Anchor.** The projection is the camera's own (`eye`, `target`, the live FOV; the human's chase camera looks at its
+robot, which is why `setCameraRotation` alone did not predict it). Against the projected point the ink sits 1 px right and
+5.5 px up of a line box centred on it (`DAMAGE_NUMBER_OFFSET`): live ink x 471-491, y 200-212 for the point projecting to
+(480.0, 211.6); x 493-513, y 262-274 for (502.8, 272.9). `123` is centred the same way (ink x 465-495).
+Ours, same camera and point (`numbershot`): ink 470-490 x 206-218 before the offset (122 px of ink in both, the same
+glyph cells), 471-491 x 200-212 after. Side by side in the scratchpad (`ui-numbers-side.png`: live | ours, the robots
+differ).
+
+**Gap found on the way.** The original prices the robot's contacts with the arena (walls) too, as a hit with no attacker:
+live 34-40 hp on a wall at about 10 m/s (`request id 0, amount 34.297, v2 (0, 0, 1)`), 12-19 on smaller bumps, each a red
+number. Recovered and implemented in fx/wall-damage (docs/29 §12o): the arena's own component (Arenium 0.5, piercing 0,
+concussion 1) prices every robot contact with an arena collidable, floor included, through the same `computeDamage`;
+`combat::resolve_with` now returns those hits with no attacker, and `Match::route_popups` shows them red.
+
+**Open.** A green number was not captured (the human never landed a hit on ALARM in the live attempts; the attacker
+branch is from the disassembly: `FUN_004178a0(attacker, amount, ..., 1)`, colour and position code at `0x413d1f`); the
+original's multi-player (network) humans.
+
+## 8. Slash decals: the live look (fx-audio)
+
+The slashes (`single_slash.tga`, mode 1: additive `SRCALPHA, ONE`, alpha test `>= 16`) were the one decal look not seen
+live. Four live runs of `capture_fx.py` (`fx-axe-v-scout__live__000`, `-full__live__000`, `-head__live__000/001`;
+Backyard Ripper's axe against the stock Scout, hazards off, AIs held for the shots, the same `ra2_camera`-style scripted
+cameras as docs/37 section 3 and 6, 1024x768) logged 47 + 50 + 41 + 4 slash decals and photographed the Scout from eight
+sides at 1.9 m and head-on at the strongest decals. Findings:
+
+* **Natural strength.** `alpha = damage / 100`: of the 25 decals of `fx-axe-v-scout__live__000` 20 are below 0.06 and one above 0.5 (the forced run's 25 have four above 0.5). With a texture alpha of
+  at most 102/255 (0.4) and the vertex alpha multiplied in (`ALPHAOP = MODULATE`), a decal under about 0.16 never reaches
+  the `>= 16` test: **a slash is drawn only for a big hit and then as a faint grey streak** (texture colour <= 210 grey,
+  additive over a dark chassis). In no live frame at natural alpha is one visible (`fx-axe-v-scout__live__000-pose04..07`),
+  and ours shows none either at the same marks (`decalshot`, same chassis matrices and cameras).
+* **Forced to full strength.** `ra2_fx.js` `setalpha` writes 1.0 into the live `DecalTrigger` objects' alpha (`+0x1cec`,
+  the last 25 per chassis; `ALPHA_FORCE=1.0` / `DECAL_SHOTS=n` of `capture_fx.py`). At 1.0 the same `decalshot` frames (new
+  `DECALSHOT_ALPHA`) show a faint streak in three of eight poses (<= 41 / 255 against the same render with alpha 0); the
+  live frames at the matching poses show none **on the faces the camera can see**, because the slashes of these fights sit
+  on the Scout's low side rims and underside (decal normals `-y`, local `y` -0.1..-0.24, at the +x / +-z corners:
+  the axe cuts from the floor) and the held Scout ends the fight on its side, pinned to a wall, or hidden by the results
+  window (the match ends 40 to 120 s in). The head-on shots (`-head__live__000/001`, `dnat`/`dfull` pairs) put the
+  camera 0.7..0.9 m off a decal's normal: all but one are inside the wall or the axe robot's body, the one in the open shows
+  floor. **So the look is not established live beyond the draw state; no frame contradicts it.**
+* **One difference found and fixed: the alpha test.** The state object has an alpha test for the additive mode, ours drew
+  every slash fragment untested (`decals::material` had `no_alpha_test: true` for both blends). Now `no_alpha_test` is
+  `!additive`: slashes are alpha-tested batches (`>= 16` after the stage's MODULATE), dents stay blended and untested. Effect
+  on the eight poses of `fx-axe-v-scout` (natural alphas): at most 3 / 255 per channel over 667..11 486 pixels; at full strength
+  at most 5 / 255 (test `decals::tests::slashes_are_tested_and_dents_are_not`). Both are below visibility, which is the
+  point: the live game does not draw the faint ones either.
+
+**Live strong slashes** (`fx-slash-synth__live__000`, `capture_fx.py SYNTH=1`; the earlier fights never put a strong one on a
+visible face). A Backyard Ripper v ALARM fight leaves hit records; then both robots are held (`ra2_pin.js`) and the
+component-hit routine `0x44ee70` is run again, **on the game's main thread at the start of its per-frame update**
+(`0x5e4e30`; from the agent's own thread it crashes the game), on ALARM's most-struck part with the last real contact
+record, the point moved onto its front face (`+0` = point, `+0x10` = normal into the part) and the damage set
+to 100, 60 and 25 (`ra2_fx.js synth`). Shots from 0.9 m (`DECAL_DIST`, FOV 0.7) before and after:
+
+* the slash is **a thin pale curved streak across the face**, a few pixels wide and about the footprint's diagonal long
+  (the 0.5 x 0.5 m box), brighter than the grey plate it lies on: at damage 100 (alpha 1.0) the difference image of the two
+  shots changes pixels by up to 255 / 255 along the line (8.6 k pixels changed by more than 8, mean change 29), at 60 a
+  visible but fainter line, at 25 (alpha 0.25) nothing (mean difference of the whole frame 0.01 / 255);
+* **no fade with time**: the same two streaks are there 8 s after the last (`...-late.png`), as the alpha is fixed at
+  `damage / 100` and the oldest decal goes only when a 26th arrives;
+* placement is the contact point and normal handed in (the decal rides the chassis: the later frames, taken after the
+  held robot's chassis matrix was re-read, keep it on the same face); the width axis (`A = weapon orientation *
+  direction`) is not observable here, so ours (`slash_spec.py`, `decalshot`) draws the same kind of streak but its
+  orientation is not fitted. Natural hits do reach strength: in the Ripper v ALARM fights decals of alpha 1.0, 0.86, 0.66
+  and 0.56 were logged, so a big axe blow gives a full-strength streak.
+
+Evidence (git-ignored, manifest rows): `fx-axe-v-scout__live__000`, `fx-axe-v-scout-full__live__000` (forced alpha 1.0, poses),
+`fx-axe-v-scout-head__live__000/001` (head-on). Side by side: scratchpad only. Tools: `capture_fx.py` `ALPHA_FORCE`,
+`DECAL_SHOTS`, `DECAL_DIST`, `fx_decal_spec.py` (accepts `dshot` rows and a robot with no logged matrix),
+`decalshot` `DECALSHOT_ALPHA`. Open: a live frame of a strong slash on a visible face (a held Scout hit by the axe from above, or
+a decal placed with a scripted hit: done above, its width-axis orientation and a pixel comparison against ours remain open).
+
+### 8.1 Slash decals: framing and the width axis (flame-hits)
+
+* **Framing of `fx-slash-synth__live__000`.** Its frames are 1024x768 screenshots whose 3D view is only the **top 544 rows** (rows 545-745 black, HUD
+  and "Time" at their usual places); the second run (`fx-slash-synth2`) has 590 rows and the other fx captures (`pose04`, flame) the full 768, so the
+  viewport height is a property of the run, not of the camera call. Our shot rendered the full 768 rows and showed the face 1.4x too large.
+  `decalshot` now takes `DECALSHOT_SIZE=1024x544` (render size; the frame is the top of a 1024x768 picture). Chassis-only renders against the live
+  plate (grey mask, rows 40-544): best match at vertical FOV 0.95 against the commanded 0.7 (intersection over union 0.66 over 0.85-1.15, flat
+  between 0.93 and 0.98; the rest of the live frame is other parts of ALARM that decalshot does not pose, so this is a fit, not an
+  identity). The 0.7 -> 0.95 ratio (1.36) is close to 768/544 = 1.41, so the original keeps the full-frame projection scale of
+  a 768-row view in a shorter viewport rather than rescaling, but a second run at another height would be needed to say so; open.
+* **Width axis, measured.** The constructor hook cannot see a call made inside another hook, so the synthetic decals were never logged.
+  `ra2_fx.js finddecals` now scans the heap for `DecalTrigger` objects (vtable of a logged one, alpha `+0x1cec` = damage / 100, `nv >= 3`, `nt = nv - 2`) after each
+  call and `capture_fx.py` stores them in the `spair` row (`found`). In `fx-slash-synth2__live__000` the damage 25 call left a 10-vertex decal. With
+  `uv = ((p - c) . A / w + .5, (p - c) . V / h + .5)` the cut positions and uvs fit **exactly** (residual 3e-8; `tools/oracle/decal_axis.py`): in the
+  plane of the decal the width axis is at **theta = 134.26 degrees** about the normal from `e1 = (0,1,0) x N` (`slash_spec.py`'s convention), in-plane
+  length 0.986 (A is a unit vector turned 9.6 degrees out of the face: `A . N = 0.166`, so A is not made perpendicular to N, as section 3 says),
+  V in-plane at -134.8 degrees, length 0.970 (`N x A`; the difference from 0.986 is the face not being the plane through `c`), A and V orthogonal to 0.9 degrees.
+  theta is the weapon body's orientation times the definition's direction (the pinned axe), so it is a property of that pose, not a constant;
+  `slash_spec.py` takes it as the `theta` argument.
+* **Pixel comparison: not obtained.** Neither run gives one. In run 1 (damage 100, the decal that shows) the axis was not read, and scanning `theta` in 15
+  degree steps at FOV 0.95 gives at best a normalised correlation of 0.19 between the live difference image (streak from (395, 280) up and right past the top edge, about 40 degrees
+  from horizontal) and ours (a 110 px streak, near vertical at theta 0): scale and place disagree before the angle does. In run 2 the damage 100 and 60
+  calls did not leave a located decal and the fight was lit by a fire hazard, so only the 25 % decal (invisible by section 8) exists. Four further runs
+  (`SECS` 40-70) hit nothing with a decal flag and stopped before the synthetic calls. What is established: the placement rule, the axis
+  fit above, the letterbox. Open: one run that gives a visible decal (damage 100) with `found` and a camera calibration at that run's viewport height, then the pixel difference at the measured theta.
+
+### 8.2 Slash decals: six more live runs, one located decal at damage 100 (fx-scatter)
+
+`capture_fx.py SYNTH=1` again (Backyard Ripper v ALARM, 40-60 s fights, hit routine rerun at damage 100 and friends; runs `slash-a..h`, scratch). New in the tool:
+`finddecals` accepts alpha -1 (every unknown `DecalTrigger`, listed when the exact-alpha search finds none), `SYNTH_ON_HITS=1` stands on a decal the game itself cut
+for a hit on the target part (the decal row after a hit row, slash file preferred) instead of the median decal of all parts, `PERLATE=n` takes a third shot `n` s
+after each hit (sparks and debris gone), per-call.
+
+* **Result.** Of 24 synthetic calls at damage 60-100 in eight runs **one** left a located decal: `fx-slash-synth3__live__000` (kept), call 2 (damage 100, alpha 1.0
+  exactly, offset -0.1 on a decal the game had cut), a **3-vertex** polygon, width axis **theta 51.86 degrees** (`decal_axis.py`: in-plane length 0.882, V at 140.83 degrees,
+  residual 3e-16): so theta is not a constant (134.26 in section 8.1, 51.86 here; the pinned axe's orientation differs per run), as section 8.1 said. The other 23 calls
+  made sparks and debris and no `DecalTrigger` (heap scan for any alpha: none, or an older one), whatever the offset, the damage (100, 80, 60) or the base decal;
+  the same parameters again (`g`, `h`) did not reproduce the one that worked. What decides it is not found: the decal is cut against the struck part's triangles, so a
+  point off the part's surface makes none (the pinned chassis matrix the camera is aimed by is also sometimes not where ALARM is drawn: `slash-a` looks at bare floor).
+* **Viewport.** The 3D view of this run is **616 rows** (row 616 on is black plus the previous frame's leftovers), 1024 x 616: after 544 (`synth`) and 590 (`synth2`) the third
+  height, so the height is a property of the run (it follows the HUD/window layout the fight started with), and a camera calibration is needed per run.
+* **Pixel comparison: still not obtained.** The one located decal is a sliver (3 vertices) and its before/after pair (`...-s2a/s2b.png`) differs by sparks and debris over
+  17 k pixels, none separable as the decal (`PERLATE` frames were not taken in that run). No side-by-side with ours exists for it; `decalshot` with theta 51.86 would
+  need a camera fit on this run's 616-row view, which has no recognisable fixed feature to fit against. Open as before: one run with a visible decal on a flat face
+  and `PERLATE` frames. The geometry of the decal (its cut polygon and uvs) is exact in the capture, so the cut itself is checkable once ours is run on the same mesh.
+

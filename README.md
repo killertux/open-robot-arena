@@ -10,12 +10,15 @@ by the user.
 
 ## Status
 
+*Playing it: [`docs/40-playing.md`](docs/40-playing.md) (what you need, your saves, keys, known differences).*
+
 **M1–M10 have landed as measured, with the named residues below; M11 is a
-measured fidelity pass and M12 is Linux-complete, with macOS and Windows
+fidelity pass (see Validation below for what was and was not measured against the original) and M12 is Linux-complete, with macOS and Windows
 unverified.** The engine is a Rust workspace that reads the original `.gmf`,
 `.bot`, CFL3, `.gib` and `.giff` data and runs the shipped Python 2.2 arenas and
 AI on an embedded CPython 3.12. It renders with `wgpu` (window or headless) and
-simulates with Jolt.
+simulates with its own re-implementation of the original's Havok 1.7 dynamics
+(Jolt Physics is an opt-in fallback behind the `jolt` cargo feature).
 
 The client, `ra2-app`, now boots the shipped shell, opens a real match from the
 exhibition screen with the players' own team/robot and game-type/arena choices,
@@ -45,7 +48,8 @@ live in that file; they are not re-measured here.
 
 A robot drops into an arena, drives on a scripted input timeline, collides with
 walls and movable props, and the run renders to a frame strip. The physics sits
-behind a `PhysicsBackend` trait; Jolt is the implementation. On the measured
+behind a `PhysicsBackend` trait; Jolt was the first implementation (now the
+opt-in `jolt` feature; the default is `havok17`). On the measured
 45-bot box-arena survey with the game's own friction law, **37 of 45 stock robots travel 2 m or more**. Caveat:
 the eight that remain are rest-pose weapons/props, two F1 wheel-height
 residuals and one curved path, not the motor law or a global speed constant
@@ -87,7 +91,7 @@ hit-tested clicks. `ra2-shell` boots the shipped `Scripts/Main.py`, opens the
 data's main menu and walks two routes: main menu → team picker → team HQ →
 robot inventory → bot lab → chassis step (7 frames), and main menu → exhibition
 setup → arena picker (3 frames). Two renderers written the other way round —
-`ra2-render`'s wgpu path and `tools/ui_compose.py` on the CPU — agree to a mean
+`ra2-render`'s wgpu path and `tools/ui_compose.py` on the CPU — agree with each other (a self-consistency check, not fidelity to the original) to a mean
 per-channel difference of **0.453/255** on `mainmenu.gib`, **0.235/255** on
 `matchresults.gib` and **0.0001/255** on `statusmeters.gib`; the residue is
 glyph rasterisation, not layout. Caveats: the font's record rects and page are
@@ -233,8 +237,11 @@ Measured, not aspirational.
 * The event's 3D prize scene (`event_results.py`), the repairs screen's 3D
   placeholder, and the match-side writer that fills `Team+0x12c`/`+0x13c` (the
   bench reads and writes them; the match inserts a report-derived list).
-* Physical audio playback was not exercised; the click-sound call site is our
-  mapping. Crowd fades are recorded, not performed.
+* Physical audio playback was not exercised. The click rule (push buttons only),
+  the `Begin_*` line, weapon triggers, motor loops and the music policy are from the
+  original's own sound-call log (`docs/35-audio-events.md`); open there: the
+  in-match music request, `AddXtraSound`, the damage scale that sets the impact
+  loudness and the crowd's excitement.
 * macOS and Windows builds — documented, unverified. arm64, musl, static
   linking, Flatpak and AppImage are not built. Signing and notarisation are
   absent.
@@ -246,25 +253,61 @@ Measured, not aspirational.
 * Title boxes authored narrower than the shifted advance table, which clip as
   the data says. The other faces' glyph cells are the page's own runs; both
   former O fragments are whole.
-* Network play, mods beyond the game's own directories, an update feed and
-  localisation.
+* Multiplayer with the original: its DirectPlay is not compatible (the port's
+  own LAN mode, `docs/38-multiplayer.md`, talks to other copies of this port
+  only). Slash decals, physics fine-tuning, a gamepad, mods beyond the game's
+  own directories, an update feed and localisation. The player's view of all
+  this is [`docs/40-playing.md`](docs/40-playing.md).
 
 ## Run it
 
+**New here? Start with [`docs/40-playing.md`](docs/40-playing.md)**: what you need,
+how to point the port at your install, where your saves go, the keys, and what
+differs from the original.
+
 **The game is not included.** You need a Robot Arena 2 installation; point the
-tools at the directory that directly contains `RA2.cfz`, `UI/` and `Scripts/`
-(the complete install, not its parent):
+tools at the directory that directly contains `Robot Arena 2.exe`, `RA2.cfz`,
+`UI/` and `Scripts/` (the complete install, not its parent):
 
 ```bash
-export RA2_GAME_DIR="/path/to/Robot Arena 2"
+export RA2_GAME_DIR="/path/to/Robot Arena 2"      # or pass --game DIR to ra2-app
 ```
 
-`RA2_GAME_DIR` wins; `ra2-app` otherwise looks for `RA2_GAME`/`RA2_GAME_DIR`,
-then `local/game` above the working directory and the crate, and the packaged
-launcher adds the XDG data directory, `game/` beside itself,
+`ra2-app` takes `--game DIR` first, then `RA2_GAME`/`RA2_GAME_DIR`, then
+`local/game` above the working directory and the crate, then the usual
+Windows/Wine locations (`~/.wine/drive_c/Program Files (x86)/Robot Arena 2`);
+the packaged launcher adds the XDG data directory, `game/` beside itself,
 `/usr/local/share`, `/usr/share` and `/opt`. A candidate is accepted only when
-all three names are present, and the error lists the names and every path
-tried.
+`RA2.cfz`, `UI/` and `Scripts/` are all present. The error says what is wrong
+(no such folder, a file, the parent of the install, which names are missing)
+and, with nothing found, where it looked.
+
+### Build it
+
+Linux x86_64, Rust stable and, on Debian/Ubuntu:
+
+```bash
+sudo apt install build-essential pkg-config python3.12-dev libasound2-dev \
+                 libvulkan1 mesa-vulkan-drivers
+cd engine
+cargo build --release
+```
+
+The default build needs no network once the crates are fetched (`cargo build
+--release --offline` works from a vendored or already-populated registry) and
+no CMake: the physics (`havok17`) is plain Rust, with its own geometry queries
+(`docs/29-havok17-backend.md` section 12ac), and no Jolt code is built or
+linked. The binaries link CPython 3.12 (`libpython3.12.so.1.0`) at run time,
+so the 3.12 runtime must be installed. The client is
+`engine/target/release/ra2-app`.
+
+The old Jolt Physics backend is an opt-in cargo feature, `--features jolt`
+(`cargo build --release -p ra2-app --features jolt`, then `RA2_PHYSICS=jolt`
+to run it; without the feature that setting prints a message and runs
+`havok17`). It pulls in the `oxijolt` crate, whose build script downloads a
+prebuilt Jolt archive with `curl` (needs the network); with
+`CARGO_NET_OFFLINE=true` it instead builds the vendored Jolt sources, which
+needs `cmake` and a C++ compiler (`sudo apt install cmake`).
 
 ### One command, offline
 
@@ -330,6 +373,17 @@ run above is main menu → TEAM HQ → team HQ); it prints the click trace and t
 final screen. `--size WxH` sets the window or PNG target, not the shell's
 layout.
 
+### Where saves go
+
+The install passed as `--game` is never written. Careers, teams, robot designs,
+custom textures and `ra2.cfg` go to a per-user save directory, in the original's
+own file formats and folder layout (so saves copy in and out of the original):
+`--save-dir DIR`, else `ORA_SAVE_DIR`, else `$XDG_DATA_HOME/open-robot-arena`
+(`~/.local/share/open-robot-arena`) on Linux, `%APPDATA%\open-robot-arena` on
+Windows, `~/Library/Application Support/open-robot-arena` on macOS. Reads look
+there first and then in the install; a deleted install file is hidden by a line
+in `deleted.txt`, never removed. See `docs/39-save-location.md`.
+
 ### The other modes
 
 ```bash
@@ -365,9 +419,10 @@ cargo run -q --release -p ra2-app -- --game ../local/game \
 `--bots`, `--quit-at` and `--size` shape a match; `--simulate-event N` picks a
 schedule row. Every mode runs headless with `--out` and in a window without it.
 
-### The two-renderer check
+### The two-renderer check (self-consistency, not fidelity)
 
-Two independent drawings of the same screen; they share no code or algorithm.
+Two drawings of the same screen from the same parsed layout and glyph tables;
+they agree with each other, which says nothing about the original.
 The first uses wgpu, the second composites on the CPU from its own resolver and
 the game's own art. `tools/ui_parity.sh` renders ten screens with both and
 reports the per-screen mean absolute difference:
@@ -380,8 +435,7 @@ The measured numbers are in
 [`docs/05-validation-report.md`](docs/05-validation-report.md) §4.22: the
 images land on the same rectangles and the remaining difference is text
 rasterisation (0.0001 for `statusmeters`, 0.235 for `matchresults`, 0.453 for
-`mainmenu`), not layout. The original-vs-ours check is `tools/oracle/check.sh`
-at **1.439/255** on the main menu.
+`mainmenu`), not layout. The original-vs-ours measurements are in Validation below.
 
 ### The portable Linux package
 
@@ -439,7 +493,7 @@ ra2-duel "local/game/Arenas/octagon.py" \
 ```
 
 Linux x86_64 is the tested artifact. The macOS and modern Windows path — the
-toolchain, the Jolt C++ build, `libpython3.12.dylib`/`python3.12.dll`, the wgpu
+toolchain, the optional Jolt C++ build, `libpython3.12.dylib`/`python3.12.dll`, the wgpu
 backend and the package shape — is in
 [`docs/09-platforms.md`](docs/09-platforms.md), with what is unverified and what
 would verify it. It is not a claim that those builds exist.
@@ -459,6 +513,35 @@ engine/    The native engine (Rust workspace: ra2fmt, ra2-cli, ra2-render,
 dist/      (git-ignored) portable tarballs built by tools/package.sh
 local/     (git-ignored) original game files and extracted data
 ```
+
+## Validation
+
+Fidelity to the original is measured only against **genuine captures of the
+original game** run under Wine (`local/oracle/original/`, git-ignored), never
+against our own reconstructions:
+
+```bash
+tools/oracle/fidelity.py                 # every reachable screen, ours vs original (MAE, diff, side-by-side)
+tools/oracle/fidelity.py --gameplay      # + our simulation traces vs the original's live traces
+```
+
+The current numbers are in [`docs/26-fidelity-baseline.md`](docs/26-fidelity-baseline.md);
+the tools that drive and record the original are in
+[`tools/capture/README.md`](tools/capture/README.md) and
+[`tools/oracle/README.md`](tools/oracle/README.md).
+
+What earlier text called "measured" but was **self-referential**:
+
+* `tools/ui_parity.sh` / `tools/ui_compose.py` and `local/parity/*__compose.png`
+  (MAEs of 0.0001-0.45): both renderers use the Rust parser's glyphs and layout
+  assumptions. They check that two drawings agree, not that either matches the game.
+* Statements that the original cannot receive input (`docs/12-oracle.md` §3.4,
+  `docs/25-windowed.md` §4) were wrong; input works through Frida.
+* The only original-vs-ours number before this harness was the main menu at
+  1.439/255 (rendered natively at 1024x768 by `uishot`); the shipped app path and
+  every other screen were not compared. Physics/AI/damage "measured" claims were
+  checked against Havok/binary constants and our own tests, not against traces of
+  the original, until `--gameplay`.
 
 ## Legal
 

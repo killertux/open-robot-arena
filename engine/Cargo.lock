@@ -1849,6 +1849,7 @@ dependencies = [
  "ra2-render",
  "ra2-shell",
  "ra2fmt",
+ "ra2net",
  "ra2script",
  "ra2sim",
  "ra2ui",
@@ -1903,6 +1904,14 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "glam",
+]
+
+[[package]]
+name = "ra2net"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "ra2fmt",
 ]
 
 [[package]]

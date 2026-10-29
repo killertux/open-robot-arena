@@ -11,8 +11,11 @@
 //! * **Sound** — `createSound`, `playSound`, `loopSound`, `stopSound` and
 //!   `removeSound` are a real handle table and an ordered queue
 //!   ([`crate::SoundQueue`]); a caller drains it into `ra2-audio`.
-//! * **Presentation still deferred** — particles and the camera are recorded so
-//!   a run reports exactly what it dropped rather than silently ignoring it.
+//! * **Particles** — `AddParticleEmitter` registers a flame emitter in
+//!   [`crate::State::emitters`] (`SetEmitting` flips it); the match's particle
+//!   system draws it.
+//! * **Presentation still deferred** — the camera calls are recorded so a run
+//!   reports exactly what it dropped rather than silently ignoring it.
 
 use std::collections::BTreeMap;
 
@@ -135,7 +138,9 @@ fn is_match_paused() -> bool {
 
 #[pyfunction]
 #[pyo3(name = "introComplete")]
-fn intro_complete() {}
+fn intro_complete() {
+    crate::state().intro_running = false;
+}
 
 #[pyfunction]
 #[pyo3(name = "getPlayers")]
@@ -452,66 +457,97 @@ fn remove_sound(sound: u64) -> PyResult<()> {
     Ok(())
 }
 
+/// `plus.setVolume(handle, volume, ?)` — the handle's level in DirectSound
+/// hundredths of a decibel (`0` is unity, `-10000` silence). Every shipped call
+/// is `(handle, 0, 0)`; the second integer is a time in milliseconds in the
+/// same two-integer binding as `fadeInToLoop`, so it is accepted and unused
+/// (a level of 0 needs no ramp).
 #[pyfunction]
 #[pyo3(name = "setVolume")]
-fn set_volume(_sound: u64, _a: f32, _b: f32) {
-    defer("audio (M5)");
+fn set_volume(sound: u64, volume: f32, _ms: f32) -> PyResult<()> {
+    crate::state()
+        .sounds
+        .set_volume(crate::SoundId(sound), volume.round() as i32)
+        .map_err(PyValueError::new_err)
 }
 
+/// `plus.fadeInToLoop(handle, volume, ms)` — start the sound looping from
+/// silence and ramp it to `volume` (hundredths of a decibel) over `ms`.
 #[pyfunction]
 #[pyo3(name = "fadeInToLoop")]
-fn fade_in_to_loop(_sound: u64, _volume: f32, _ms: f32) {
-    defer("audio (M5)");
+fn fade_in_to_loop(sound: u64, volume: f32, ms: f32) -> PyResult<()> {
+    crate::state()
+        .sounds
+        .fade_in_to_loop(crate::SoundId(sound), volume.round() as i32, ms)
+        .map_err(PyValueError::new_err)
 }
 
+/// `plus.fadeOutLoop(handle, ms)` — ramp to silence over `ms`, then stop.
 #[pyfunction]
 #[pyo3(name = "fadeOutLoop")]
-fn fade_out_loop(_sound: u64, _ms: f32) {
-    defer("audio (M5)");
+fn fade_out_loop(sound: u64, ms: f32) -> PyResult<()> {
+    // Like `stopSound`: an arena's teardown may fade a handle that is gone.
+    let mut st = crate::state();
+    if let Err(message) = st.sounds.fade_out_loop(crate::SoundId(sound), ms) {
+        st.log.push(message);
+    }
+    Ok(())
 }
 
 #[pyfunction]
 #[pyo3(name = "setBackColor")]
 fn set_back_color(r: f32, g: f32, b: f32) {
-    let _ = (r, g, b);
-    defer("camera/backdrop (M5)");
+    crate::state().back_color = Some([r, g, b].map(|c| c.clamp(0.0, 1.0)));
 }
 
 #[pyfunction]
 #[pyo3(name = "setCameraPosition")]
 fn set_camera_position(x: f32, y: f32, z: f32) {
-    let _ = (x, y, z);
-    defer("camera/backdrop (M5)");
+    crate::state()
+        .camera_commands
+        .push(crate::camera::CameraCommand::Position([x, y, z]));
 }
 
 #[pyfunction]
 #[pyo3(name = "setCameraRotation")]
-fn set_camera_rotation(x: f32, y: f32) {
-    let _ = (x, y);
-    defer("camera/backdrop (M5)");
+fn set_camera_rotation(pitch: f32, yaw: f32) {
+    crate::state()
+        .camera_commands
+        .push(crate::camera::CameraCommand::Rotation([pitch, yaw]));
 }
 
 #[pyfunction]
 #[pyo3(name = "setCameraFOV")]
 fn set_camera_fov(fov: f32) {
-    let _ = fov;
-    defer("camera/backdrop (M5)");
+    crate::state()
+        .camera_commands
+        .push(crate::camera::CameraCommand::Fov(fov));
 }
 
 #[pyfunction]
 #[pyo3(name = "setCameraFOVRange")]
-fn set_camera_fov_range(a: f32, b: f32, c: f32, d: f32) {
-    let _ = (a, b, c, d);
-    defer("camera/backdrop (M5)");
+fn set_camera_fov_range(min_distance: f32, max_distance: f32, fov_near: f32, fov_far: f32) {
+    crate::state()
+        .camera_commands
+        .push(crate::camera::CameraCommand::FovRange([
+            min_distance,
+            max_distance,
+            fov_near,
+            fov_far,
+        ]));
 }
 
-/// `animateCamera(from_pos, from_rot, from_fov, to_pos, to_rot, to_fov, ?,
-/// seconds)` — the intro fly-throughs and the hazard showcase shots.
+/// `animateCamera(pos0, rot0, fov0, pos1, rot1, fov1, t0, t1)` — the intro
+/// fly-throughs and the hazard showcase shots. See [`crate::camera`].
 #[pyfunction]
-#[pyo3(signature = (*_args))]
+#[pyo3(signature = (*args))]
 #[pyo3(name = "animateCamera")]
-fn animate_camera(_args: &Bound<'_, PyTuple>) {
-    defer("camera/backdrop (M5)");
+fn animate_camera(args: &Bound<'_, PyTuple>) -> PyResult<()> {
+    let animation = crate::camera::parse_animation(args)?;
+    crate::state()
+        .camera_commands
+        .push(crate::camera::CameraCommand::Animate(animation));
+    Ok(())
 }
 
 #[pyfunction]
@@ -528,12 +564,15 @@ fn add_particle_emitter(
     velocity: (f32, f32, f32),
     variance: (f32, f32, f32),
 ) -> ParticleEmitter {
-    defer("particles (M5)");
-    ParticleEmitter {
+    let mut st = crate::state();
+    st.emitters.push(crate::arena::EmitterState {
         location: [location.0, location.1, location.2],
         velocity: [velocity.0, velocity.1, velocity.2],
         variance: [variance.0, variance.1, variance.2],
         emitting: false,
+    });
+    ParticleEmitter {
+        id: st.emitters.len() - 1,
     }
 }
 
@@ -597,33 +636,24 @@ fn get_points(bot: i32) -> i32 {
     crate::points(bot)
 }
 
-/// The `Forward`/`LeftRight` channels a brain has set, as `(throttle, steer)`
-/// in `[-1, 1]` — what `Robot::drive` takes.
+/// One `Input(name, slot, value)` call a brain made: the control's name, its
+/// binding slot and the value.
+pub type InputEvent = (String, i32, f32);
+
+/// Take the `Input` calls a brain has made since the last call, in order.
 ///
-/// `SuperAI.Turn` sets `LeftRight` 0 and 1 opposite (`-turning` and `turning`),
-/// so the steer is their difference; `Throttle` sets `Forward` 0.
-///
-/// The scripts' `Turn` is positive for a *positive* heading error (`AimToHeading`
-/// turns by `dir = sign(heading)`), while `Robot::drive` applies
-/// `yaw = -steer * rate` — the stand-in driver compensates by negating the error,
-/// and so does this.
-pub fn read_drive(brain: &Py<PyAny>, py: Python<'_>) -> Option<(f32, f32)> {
+/// The original delivers every call to the matching controls as an event (a
+/// non-zero value is a press, zero a release; `0x4012f0` -> `0x4dd5f0` ->
+/// `0x508ce0`), so a burst device fires on each press even when the level does
+/// not change. The levels stay available to the script through
+/// `GetInputStatus`. The wiring (which wires listen to `Forward`, `LeftRight`,
+/// `Spin`, `Fire!` ...) is the robot's own and is applied by the simulator, which
+/// keeps the `LeftRight` slots 0 and 1 apart instead of collapsing them.
+pub fn take_input_events(brain: &Py<PyAny>, py: Python<'_>) -> Option<Vec<InputEvent>> {
     let obj = brain.bind(py);
     let ai = obj.downcast::<Ai>().ok()?;
-    let ai = ai.borrow();
-    let channel = |name: &str, index: i32| {
-        ai.inputs
-            .get(&(name.to_string(), index))
-            .copied()
-            .unwrap_or(0.0)
-    };
-    let forward = channel("Forward", 0);
-    let left = channel("LeftRight", 0);
-    let right = channel("LeftRight", 1);
-    Some((
-        (forward / 100.0).clamp(-1.0, 1.0),
-        ((left - right) / 200.0).clamp(-1.0, 1.0),
-    ))
+    let mut ai = ai.borrow_mut();
+    Some(std::mem::take(&mut ai.events))
 }
 
 /// The zones a brain asked to be told about.
@@ -655,8 +685,12 @@ pub struct Ai {
     pub active: bool,
     /// The control board's inputs, `(name, index) -> value`.
     pub inputs: BTreeMap<(String, i32), f32>,
+    /// Every `Input` call since the simulator last took them.
+    pub events: Vec<InputEvent>,
     /// SmartZones this brain asked to be told about, `(name, id)`.
     pub zones: Vec<(String, i32)>,
+    /// `fNoseOffset`.
+    pub nose: f32,
 }
 
 impl Ai {
@@ -734,10 +768,13 @@ impl Ai {
 
     /// `Input(name, index, value)` — a control-board channel.
     ///
-    /// `Forward` and `LeftRight` are the drive; anything else (a `Spin` or a paw
-    /// trigger the bot's own AI names) is read back by those scripts.
+    /// The name is a control on the bot's own board (`Forward`, `LeftRight`,
+    /// `Spin`, `Fire!`, `Lefthook` ...), the index its binding slot. The call is
+    /// queued as an event for the simulator and the level kept for
+    /// `GetInputStatus`.
     fn Input(&mut self, name: &str, index: i32, value: f32) {
         self.inputs.insert((name.to_string(), index), value);
+        self.events.push((name.to_string(), index, value));
     }
 
     fn GetInputStatus(&self, name: &str, index: i32) -> f32 {
@@ -841,13 +878,16 @@ impl Ai {
         .unwrap_or(0.0)
     }
 
-    /// `(component, amount, time)` of the last hit we landed.
-    fn GetLastDamageDone(&self) -> (i32, f32, f32) {
-        with_bot(self.bot, |b| b.last_damage_done).unwrap_or((0, 0.0, 0.0))
+    /// `(component, amount, time, victim, victim component)` of the last hit
+    /// we landed (see [`crate::DamageRecord`]).
+    fn GetLastDamageDone(&self) -> crate::DamageRecord {
+        with_bot(self.bot, |b| b.last_damage_done).unwrap_or(crate::NO_DAMAGE)
     }
 
-    fn GetLastDamageReceived(&self) -> (i32, f32, f32) {
-        with_bot(self.bot, |b| b.last_damage_received).unwrap_or((0, 0.0, 0.0))
+    /// `(component, amount, time, attacker, attacker component)` of the last
+    /// hit we took. `AI/Spinner.py` reads index 3, so a 3-tuple raises.
+    fn GetLastDamageReceived(&self) -> crate::DamageRecord {
+        with_bot(self.bot, |b| b.last_damage_received).unwrap_or(crate::NO_DAMAGE)
     }
 
     /// `RegisterSmartZone(name, id)` — "tell me when a robot enters this zone".
@@ -857,16 +897,76 @@ impl Ai {
         }
     }
 
-    /// The robots inside a named zone, as `(robot, chassis)` readings.
+    /// The robots inside one of *this robot's* SmartZones, as `(1-based
+    /// robot, chassis)` readings (`FUN_004014f0`: the robot's SmartZone
+    /// component whose name matches, then every body its phantom overlaps,
+    /// decoded from the body's tag `robot << 4 | chassis`).
     fn GetZoneContents(&self, zone: &str) -> Vec<(i32, bool)> {
         crate::state()
-            .zone_contents
-            .get(zone)
+            .robot_zones
+            .get(&(self.bot, zone.to_string()))
             .cloned()
             .unwrap_or_default()
     }
 
     fn ResetComponents(&self) {}
+
+    // The engine's notifications. `AI.SuperAI` and the brains override them
+    // and call up into these base versions (`AI.SuperAI.LostComponent(self,
+    // id)` in every weapon brain), so each must exist and answer `True`, as
+    // the C++ defaults bound at `0x4bba00` do.
+
+    /// `SmartZoneEvent(direction, id, robot, chassis)` — a robot entered (`1`)
+    /// or left (`-1`) one of our registered SmartZones.
+    #[pyo3(signature = (_direction, _id, _robot, _chassis))]
+    fn SmartZoneEvent(&self, _direction: i32, _id: i32, _robot: i32, _chassis: bool) -> bool {
+        true
+    }
+
+    /// `LostComponent(id)` — one of our components came off or was destroyed.
+    fn LostComponent(&self, _id: i32) -> bool {
+        true
+    }
+
+    /// `FractureEvent()` — a part broke loose somewhere; time to refresh.
+    fn FractureEvent(&self) -> bool {
+        true
+    }
+
+    /// `CriticalHit(...)` — unused by the shipped brains.
+    #[pyo3(signature = (*_args))]
+    fn CriticalHit(&self, _args: &Bound<'_, PyTuple>) -> bool {
+        true
+    }
+
+    /// `PlayerOut(id)` — a robot is out of the match.
+    fn PlayerOut(&self, _id: i32) -> bool {
+        true
+    }
+
+    /// `ReThink()` — re-evaluate now.
+    fn ReThink(&self) -> bool {
+        true
+    }
+
+    /// `Winner(...)` — the match is decided.
+    #[pyo3(signature = (*_args))]
+    fn Winner(&self, _args: &Bound<'_, PyTuple>) -> bool {
+        true
+    }
+
+    /// `fNoseOffset` — the brain's `nose` constructor argument (`AI+0x40`,
+    /// bound read/write next to `tickInterval`). The shipped scripts only store
+    /// it, and none of the C++ queries the AI uses reads it.
+    #[getter]
+    fn fNoseOffset(&self) -> f32 {
+        self.nose
+    }
+
+    #[setter]
+    fn set_fNoseOffset(&mut self, nose: f32) {
+        self.nose = nose;
+    }
 }
 
 #[cfg(test)]
@@ -953,6 +1053,43 @@ plus.removeSound(intro)\n",
             !st.deferred.iter().any(|what| what.contains("audio")),
             "sounds are no longer deferred: {:?}",
             st.deferred
+        );
+    }
+
+    /// `Hazards.Flame` makes its emitter with `plus.AddParticleEmitter` and
+    /// flips it with `SetEmitting`; the engine side reads the switch from the
+    /// script state (`FUN_004b5760` builds the emitter, `FUN_0048e0b0` is the
+    /// switch).
+    #[test]
+    fn a_flame_emitter_is_registered_and_switched() {
+        let _guard = crate::lock();
+        crate::state().emitters.clear();
+        Python::with_gil(|py| {
+            crate::plus::register(py).expect("register plus");
+            py.run(
+                c"import plus\n\
+e = plus.AddParticleEmitter((1.0, 2.0, 3.0), (0.0, 0.5, 0.0), (0.1, 0.0, 0.1))\n\
+f = plus.AddParticleEmitter((4.0, 5.0, 6.0), (0.0, 1.0, 0.0), (0.0, 0.0, 0.0))\n\
+assert e.emitting == False\n\
+e.SetEmitting(True)\n\
+assert e.emitting == True and f.emitting == False\n\
+f.emitting = True\n\
+e.SetEmitting(False)\n",
+                None,
+                None,
+            )
+            .expect("the flame hazard's calls run");
+        });
+        let st = crate::state();
+        assert_eq!(st.emitters.len(), 2);
+        assert_eq!(st.emitters[0].location, [1.0, 2.0, 3.0]);
+        assert_eq!(st.emitters[0].velocity, [0.0, 0.5, 0.0]);
+        assert_eq!(st.emitters[0].variance, [0.1, 0.0, 0.1]);
+        assert!(!st.emitters[0].emitting);
+        assert!(st.emitters[1].emitting, "the attribute is the switch too");
+        assert!(
+            !st.deferred.iter().any(|what| what.contains("particles")),
+            "particles are no longer deferred"
         );
     }
 

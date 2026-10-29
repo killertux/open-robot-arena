@@ -9,9 +9,11 @@
 //! - a [`Build`] for the current robot, a [`GameLibrary`] and the lists the
 //!   screens' own `Notes` say to fill (the component palette, the armour grid,
 //!   the wiring control grid);
-//! - the palette click attaches the selected component through
-//!   [`Build::attach`] (the F1 mount rule), and the model's parts, mounts and
-//!   stats are drawn in a panel in the screen's own 3D placeholder;
+//! - the palette click selects a component and the shipped `comp_preview`
+//!   group shows it; the Attach button starts a drag that ends in
+//!   [`Build::drop_part`] (the F1 mount rule, `ra2ui::workshop::placement`,
+//!   docs/36 §9.18), and the model's parts and stats are drawn in a panel in
+//!   the screen's own 3D placeholder;
 //! - a live preview built from `Build::transforms()` and `ra2-render`'s item
 //!   loader (`chassis_items` + `scene_items`), composited into that placeholder;
 //! - paint, save/open, import/export and `Test Robot` (M8's [`Match`]).
@@ -21,10 +23,10 @@
 //! The panel is a synthetic `.gib` in the 3D placeholder: the shipped screens
 //! have no slot for a part list, a mount chooser or a face-group list, so one is
 //! added there and named in `docs/17-workshop-ui.md`. New parts on the chassis
-//! baseplate are placed at a fixed spread because there is no mouse-drag
-//! placement tool yet; a component-to-component mount uses the model's F1 rule
-//! and needs no placement at all. The camera framing is ours; the geometry and
-//! transforms are the model's and the renderer's.
+//! baseplate and on other parts are placed by the original's drag (select,
+//! Attach, drag, click; SHIFT turns, CTRL raises). The camera framing, the pick
+//! radius and the overlap test are ours; the geometry and transforms are the
+//! model's and the renderer's.
 //!
 //! ## Interaction that the shipped screen already has
 //!
@@ -40,6 +42,7 @@
 //! click-to-place then click-to-bind (the grid's note says drag; the model call
 //! is the same `ControlBoard::add`).
 
+use std::f32::consts::FRAC_PI_2;
 use std::path::{Path, PathBuf};
 
 use glam::{Mat4, Vec3};
@@ -48,14 +51,16 @@ use ra2_render::{DrawItem, RenderGroup, Renderer};
 use ra2_shell::Shell;
 use ra2fmt::gib::{Field, Gib, Widget, WidgetKind};
 use ra2ui::components::Component as PaletteComponent;
-use ra2ui::workshop::build::{Build, Placement as BuildPlacement};
+use ra2ui::workshop::build::{Build, BuildError};
 use ra2ui::workshop::chassis::{self, Outline};
-use ra2ui::workshop::library::{GameLibrary, TextureEntry};
+use ra2ui::workshop::library::{ComponentInfo, GameLibrary, TextureEntry};
 use ra2ui::workshop::paint::Texture;
+use ra2ui::workshop::placement::{self, Candidate, Drag, Hover, Refusal};
 use ra2ui::workshop::wiring::{Control, ControlKind};
 use ra2ui::workshop::{self};
 use ra2ui::{Frame, Placement};
 
+use crate::lab_dialog::{self, DialogKind, Focus, LabDialog};
 use crate::SHELL_SIZE;
 
 /// The stock chassis a new build starts from: a shipped AI bot whose chassis
@@ -70,6 +75,17 @@ pub const DESIGNS: &str = "Robot Designs";
 /// The game's own custom-texture folder.
 pub const CUSTOM_TEXTURES: &str = "Custom Textures";
 
+/// `--debug-panel`: draw the synthetic edit panel (a text list of parts, mass
+/// and the save name) under the robot view. The original's lab has no such
+/// list, so the player-facing screens leave it off; the scripted harness runs
+/// keep it because they drive the model through its rows.
+static DEBUG_PANEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turn the synthetic panel on for the player-facing screens (`--debug-panel`).
+pub fn set_debug_panel_default(on: bool) {
+    DEBUG_PANEL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// `--build` options that the window and the offscreen runner share.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -79,12 +95,18 @@ pub struct Options {
     pub out: Option<PathBuf>,
     pub size: [u32; 2],
     pub seconds: f32,
+    /// Show one tab on the `--start` design, write its frame and stop.
+    pub view: Option<String>,
 }
 
 /// The row-height and face of the synthetic panel. `fg_mcn12` is the shell's
 /// small face; 12-pixel rows fit the placeholder's lower half.
 const ROW_FACE: &str = "fg_mcn12";
 const ROW_HEIGHT: f32 = 13.0;
+/// A `Text` in a group is placed by its baseline (`ra2ui::place`), so a
+/// row's text is written one ascent of `fg_mcn12` below the row's top; at
+/// the top it was drawn above its own clip and showed only its lower half.
+const ROW_BASELINE: f32 = 10.0;
 
 /// Which paint operation the Paint Shop is in. The three shipped screens are
 /// `texturefill.gib`, `surfacelayer.gib` and `decals.gib`.
@@ -123,6 +145,86 @@ impl DrawStyle {
     }
 }
 
+/// The Paint Shop's Color Fill state (`colorfill.gib`, live captures of the Paint Shop): the picker's
+/// target (fractions of the `hue group`), the shade / tint slider (0 dark .. 1 white) and the colour
+/// the swatch shows. Live the swatch starts as a colour of its own (`(185, 150, 18)` in the first
+/// captures, `(161, 176, 25)` in another run) with the target at 0.18 / 0.26 and the thumb at 0.4;
+/// the first click on the picker or the slider makes it the target's hue and saturation at the
+/// thumb's lightness (measured: target 0.184 / 0.253, thumb 0.40 gives `(161, 176, 25)`).
+#[derive(Clone, Copy, Debug)]
+pub struct PaintColor {
+    pub marker: [f32; 2],
+    pub lum: f32,
+    pub rgb: [u8; 3],
+    drag: Option<PaintDrag>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaintDrag {
+    Picker,
+    Slider,
+}
+
+impl Default for PaintColor {
+    fn default() -> Self {
+        PaintColor {
+            marker: [0.184, 0.253],
+            lum: 0.4,
+            rgb: [185, 150, 18],
+            drag: None,
+        }
+    }
+}
+
+impl PaintColor {
+    /// The colour the picker's target (`x` = hue, `1 - y` = saturation) and the slider choose: HSL.
+    pub fn picked(&self) -> [u8; 3] {
+        let h = self.marker[0].clamp(0.0, 1.0) * 360.0;
+        let s = (1.0 - self.marker[1]).clamp(0.0, 1.0);
+        let l = self.lum.clamp(0.0, 1.0);
+        let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+        let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+        let m = l - c / 2.0;
+        let (r, g, b) = match (h / 60.0) as u32 {
+            0 => (c, x, 0.0),
+            1 => (x, c, 0.0),
+            2 => (0.0, c, x),
+            3 => (0.0, x, c),
+            4 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+        let byte = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+        [byte(r), byte(g), byte(b)]
+    }
+}
+
+/// The lab's orbit camera (`FUN_005a6260`, mode 2): one per tab, 5 m from the robot's origin to
+/// start, pitch and yaw 0, the wheel zooming within the tab's limits and the middle button
+/// turning it (0.01 rad per mouse count).
+#[derive(Clone, Copy, Debug)]
+pub struct LabCam {
+    pub pitch: f32,
+    pub yaw: f32,
+    pub dist: f32,
+}
+
+impl LabCam {
+    pub const START: LabCam = LabCam {
+        pitch: 0.0,
+        yaw: 0.0,
+        dist: 5.0,
+    };
+
+    /// The eye and up vector in the robot's own space, looking at its origin.
+    pub fn eye_up(&self) -> (Vec3, Vec3) {
+        let (sp, cp) = self.pitch.sin_cos();
+        let (sy, cy) = self.yaw.sin_cos();
+        let eye = -self.dist * Vec3::new(sy * cp, sp, cy * cp);
+        let up = Vec3::new(-sp * sy, cp, -sp * cy);
+        (eye, up)
+    }
+}
+
 /// The camera the last preview frame used, so a click can be unprojected back
 /// into the bot's own space. The framing is ours; the geometry is the model's.
 #[derive(Clone, Copy, Debug)]
@@ -145,22 +247,19 @@ impl PreviewCamera {
         let far = self.inv_view_proj.project_point3(Vec3::new(nx, ny, 1.0));
         Some((near, far - near))
     }
-
-    /// Where the ray meets a plane (`point`, `normal`) in world space.
-    fn plane(&self, rect: Frame, x: f32, y: f32, point: Vec3, normal: Vec3) -> Option<Vec3> {
-        let (origin, direction) = self.ray(rect, x, y)?;
-        let denom = direction.dot(normal);
-        if denom.abs() < 1e-6 {
-            return None;
-        }
-        let t = (point - origin).dot(normal) / denom;
-        (t >= 0.0).then_some(origin + direction * t)
-    }
 }
 
 /// The live workshop: the shell, the model, and the panel drawn over the 3D
 /// placeholder.
 pub struct Builder {
+    /// The size the shell is laid out at (1280x1005 for the window; the
+    /// harness lays it out natively at the capture's size).
+    size: [f32; 2],
+    /// The fidelity harness's view: the 3D view fills its placeholder and the
+    /// synthetic edit panel is not drawn.
+    view_only: bool,
+    /// Workshop sounds waiting for the audio drain (attach, removal).
+    sounds: Vec<crate::audio::UiSound>,
     game: PathBuf,
     ui: PathBuf,
     library: GameLibrary,
@@ -171,35 +270,57 @@ pub struct Builder {
     palette: Vec<PaletteComponent>,
     shown: Vec<PaletteComponent>,
     selected: Option<PaletteComponent>,
-    /// `(parent component, parent mount)` the next palette click attaches to.
-    target: (usize, i32),
+    /// The green box chosen in the component preview: the selected part's own
+    /// attachment point (`FUN_0042e650` marks the first one).
+    own_mount: i32,
+    /// The style (`Components\Styles\...`) picked in the `Component option`
+    /// dropdown; the palette's own definition when `None`.
+    style_file: Option<String>,
+    /// The part being dragged after the Attach button (`FUN_0042c3a0`).
+    drag: Option<ActiveDrag>,
+    /// The last mouse position, and the SHIFT/CTRL state the window reports.
+    cursor: Option<[f32; 2]>,
+    shift: bool,
+    ctrl: bool,
+    /// The `comp_preview` panel's 3D view: the part and its green boxes.
+    comp_preview: Option<CompPreview>,
+    /// The definition the loaded `comp_preview` group was filled for: the
+    /// group is rebuilt only when it changes, so an open style list survives
+    /// the refresh after its own click.
+    comp_key: Option<String>,
     /// The component a part row or the remove button acts on.
     selected_part: Option<usize>,
     /// The control kind waiting for a free grid cell (the shipped `new
     /// analog`/`new switch`/`new button` buttons set it), and the control and
     /// binding target the player has picked.
     wire_placing: Option<ControlKind>,
+    /// The wiring window in front of the lab, if one is open.
+    dialog: Option<LabDialog>,
     wire_control: Option<[i32; 2]>,
     wire_component: Option<usize>,
     /// The palette row on top (the grid is a one-row window of a longer list).
     palette_scroll: usize,
     selected_texture: Option<TextureEntry>,
     paint_mode: PaintMode,
+    paint_color: PaintColor,
     selected_decal: Option<TextureEntry>,
     selected_group: Option<usize>,
     decal_at: [f32; 2],
     decal_scale: f32,
-    /// The baseplate point a palette click should attach to (the last preview
-    /// click), and the current chassis-drawing state.
-    place_point: [f32; 2],
+    /// The current chassis-drawing state.
     draw_style: DrawStyle,
     draw_centre: Option<[i32; 2]>,
     draw_point: Option<usize>,
+    /// Whether the baseplate polygon was closed by a click on its first point.
+    outline_closed: bool,
     draw_snap: bool,
     shape_radius: i32,
     shape_length: i32,
     shape_width: i32,
     name_buffer: String,
+    /// The Overview's `bot name textbox` has the focus: live, a key goes to the box only after a
+    /// click on it, and it is added to the text that is there (`Enter Bot Name` included).
+    name_focus: bool,
     name_edited: bool,
     designs: PathBuf,
     custom_textures: PathBuf,
@@ -208,9 +329,127 @@ pub struct Builder {
     revision: u64,
     preview: Option<(u64, Vec<u8>, u32, u32)>,
     preview_camera: Option<PreviewCamera>,
+    preview_view_key: String,
+    /// The control cell and the time of the last click on one, for the double click that opens it.
+    last_control_click: Option<(std::time::Instant, [i32; 2])>,
+    /// The practice arena of the `Test Robot` tab while that tab is on screen.
+    arena: Option<crate::lab_arena::LabArena>,
+    /// The `Obstacles` radio the player last picked (`none` after a visit starts over).
+    arena_obstacle: &'static str,
+    /// The lab camera of each tab.
+    lab_cams: std::collections::HashMap<String, LabCam>,
     test_requested: bool,
     test_seconds: f32,
     last_report: Option<ra2sim::r#match::MatchReport>,
+    /// The team robot this workshop session edits (`Teams/Team<N>/Bot<M>.bot`)
+    /// when it was opened from the Team HQ's inventory: leaving the lab writes
+    /// the design back there, so the HQ, the event join window and the
+    /// exhibition pickers all see the edited robot.
+    team_target: Option<PathBuf>,
+    /// The team a robot built from an empty inventory selection joins when
+    /// the lab is left (`FUN_004fee90` opens the lab for the HQ's team).
+    team_new: Option<(usize, Option<usize>)>,
+}
+
+/// Where a scripted drag drops its part.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlaceOn {
+    /// A bot-local `(x, z)` on the baseplate, in metres.
+    Baseplate([f32; 2]),
+    /// A free attachment point of a placed part.
+    Mount { parent: usize, mount: i32 },
+}
+
+/// Write a paragraph into a widget that carries it twice: its `Glyph`'s `_Text`
+/// and the markup of the `DisplayBox` that dresses it (and that box's body).
+fn set_prose(widget: &mut Widget, text: &str) {
+    if widget.field("_Text").is_some() {
+        ra2ui::input::set_field(widget, "_Text", text);
+    }
+    for attachment in widget.attachments.iter_mut() {
+        if attachment.kind == ra2fmt::gib::AttachmentKind::DisplayBox {
+            if let Some(field) = attachment.field_mut("Display") {
+                field.raw = ra2ui::cells::markup_with_text(&field.raw, text);
+            }
+            if let Some(body) = attachment.body.as_mut() {
+                set_prose(body, text);
+            }
+        }
+    }
+    for child in widget.children.iter_mut() {
+        set_prose(child, text);
+    }
+}
+
+/// Write a paragraph into the `Glyph` whose `DisplayBox` body is called `name`
+/// (the box is the named record: its frame is the paragraph's rectangle).
+fn set_prose_named(widget: &mut Widget, name: &str, text: &str) -> bool {
+    if widget
+        .attachments
+        .iter()
+        .any(|a| a.body.as_ref().is_some_and(|b| b.name() == name))
+    {
+        set_prose(widget, text);
+        return true;
+    }
+    for child in widget.children.iter_mut() {
+        if set_prose_named(child, name, text) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The part's meshes with every vertex tinted red (`FUN_0042c780`'s `1 0 0
+/// 0.3` overlay while the part cannot be dropped).
+fn tinted(items: &[DrawItem]) -> Vec<DrawItem> {
+    items
+        .iter()
+        .map(|item| {
+            let vertices = item
+                .vertices
+                .iter()
+                .map(|v| ra2_render::Vertex {
+                    color: [1.0, 0.25, 0.25, 1.0],
+                    ..*v
+                })
+                .collect();
+            let mut out = DrawItem::new(vertices, item.material.clone(), item.label.clone());
+            out.material.has_vertex_colors = true;
+            out.scene_lights = item.scene_lights.clone();
+            out
+        })
+        .collect()
+}
+
+/// A part being dragged (`BotLabComponents` `+0xd4`, with `+0xd8`/`+0xd9`:
+/// whether it may be dropped and whether it is over anything).
+struct ActiveDrag {
+    drag: Drag,
+    /// The part's meshes, and the same tinted red for a refused spot
+    /// (`FUN_0042c780` paints the part red while it cannot be dropped).
+    items: Vec<DrawItem>,
+    red: Vec<DrawItem>,
+    /// Where the mouse last was in the preview, so SHIFT/CTRL re-judge the
+    /// part in place.
+    at: [f32; 2],
+    hover: Option<Hover>,
+    candidate: Option<Candidate>,
+    refusal: Option<Refusal>,
+    /// Where the part floats when nothing is under the mouse: 3 m along the
+    /// ray (`FUN_0042c850`'s `0x40400000`).
+    floating: Mat4,
+}
+
+/// The component preview's last frame and its camera, to unproject a click
+/// onto a green box.
+struct CompPreview {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    rect: Frame,
+    camera: PreviewCamera,
+    key: String,
 }
 
 /// The synthetic panel in the 3D placeholder.
@@ -220,14 +459,61 @@ struct Panel {
 }
 
 impl Builder {
+    /// The workshop sounds the clicks since the last call made.
+    pub fn take_sounds(&mut self) -> Vec<crate::audio::UiSound> {
+        std::mem::take(&mut self.sounds)
+    }
+
     /// Boot the shell and reach the bot lab, then open `start` (or build from
     /// the stock chassis).
     pub fn open(game: &Path, start: Option<&Path>) -> Result<Builder, String> {
+        Self::open_sized(game, start, SHELL_SIZE)
+    }
+
+    /// Lay the lab out natively at `size` (the window's), as the shell's
+    /// other screens are (docs/28 §1). The panel and the 3D view follow the
+    /// new layout.
+    pub fn set_size(&mut self, size: [f32; 2]) -> Result<(), String> {
+        if size == self.size || size[0] < 1.0 || size[1] < 1.0 {
+            return Ok(());
+        }
+        self.size = size;
+        self.shell.set_size(size);
+        self.refresh()
+    }
+
+    /// The screen the lab is laid out on; clicks are in this space.
+    pub fn size(&self) -> [f32; 2] {
+        self.size
+    }
+
+    /// [`Builder::open`] with the shell laid out natively at `size`.
+    pub fn open_sized(
+        game: &Path,
+        start: Option<&Path>,
+        size: [f32; 2],
+    ) -> Result<Builder, String> {
+        Self::open_with(game, start, size, false)
+    }
+
+    /// The lab as the original opens it on an empty inventory cell (`FUN_00439650`): a blank
+    /// robot with no chassis shape, Components, Wiring, Paint Shop and Test Robot dim, the name
+    /// box reading `Enter Bot Name` (docs/36 section 9.27).
+    pub fn open_blank(game: &Path, size: [f32; 2]) -> Result<Builder, String> {
+        Self::open_with(game, None, size, true)
+    }
+
+    fn open_with(
+        game: &Path,
+        start: Option<&Path>,
+        size: [f32; 2],
+        blank: bool,
+    ) -> Result<Builder, String> {
         let game = game
             .canonicalize()
             .map_err(|e| format!("{}: {e}", game.display()))?;
         let library = GameLibrary::open(&game).map_err(|e| e.to_string())?;
-        let mut shell = Shell::boot(&game, SHELL_SIZE)?;
+        let mut shell = Shell::boot(&game, size)?;
         // The shipped route, exactly as `ra2-shell`'s botlab route walks it.
         shell.click_named("Team HQ button")?;
         shell.click_named("continue button")?;
@@ -246,21 +532,26 @@ impl Builder {
                 let candidates = if path.is_absolute() {
                     vec![path.to_path_buf()]
                 } else {
-                    vec![game.join(path), game.join(DESIGNS).join(path)]
+                    vec![
+                        ra2fmt::saves::resolve(&game, path),
+                        ra2fmt::saves::resolve(&game, Path::new(DESIGNS).join(path)),
+                    ]
                 };
                 let path = candidates
                     .into_iter()
                     .find(|p| p.is_file())
                     .or_else(|| {
-                        let mut named = game.join(DESIGNS).join(path);
+                        let mut named = Path::new(DESIGNS).join(path);
                         if named.extension().is_none() {
                             named.set_extension("bot");
                         }
+                        let named = ra2fmt::saves::resolve(&game, named);
                         named.is_file().then_some(named)
                     })
                     .ok_or_else(|| format!("{} is not a .bot file", path.display()))?;
                 Build::load(&library, &path).map_err(|e| format!("{}: {e}", path.display()))?
             }
+            None if blank => Build::blank("Enter Bot Name"),
             None => {
                 let stock =
                     GameLibrary::read_bot(&game.join(STOCK_BOT)).map_err(|e| e.to_string())?;
@@ -279,6 +570,8 @@ impl Builder {
         let designs = game.join(DESIGNS);
         let custom_textures = game.join(CUSTOM_TEXTURES);
         let mut builder = Builder {
+            size,
+            view_only: false,
             ui: game.join("UI"),
             game,
             library,
@@ -289,27 +582,37 @@ impl Builder {
             palette,
             shown: Vec::new(),
             selected: None,
-            target: (0, 0),
+            own_mount: 0,
+            style_file: None,
+            drag: None,
+            cursor: None,
+            shift: false,
+            ctrl: false,
+            comp_preview: None,
+            comp_key: None,
             selected_part: None,
             wire_placing: None,
+            dialog: None,
             wire_control: None,
             wire_component: None,
             palette_scroll: 0,
             selected_texture: None,
             paint_mode: PaintMode::Fill,
+            paint_color: PaintColor::default(),
             selected_decal: None,
             selected_group: None,
             decal_at: [0.5, 0.5],
             decal_scale: 0.5,
-            place_point: [0.0, 0.0],
             draw_style: DrawStyle::Freeform,
             draw_centre: None,
             draw_point: None,
+            outline_closed: false,
             draw_snap: true,
             shape_radius: 300,
             shape_length: 600,
             shape_width: 400,
             name_buffer,
+            name_focus: false,
             name_edited: false,
             designs,
             custom_textures,
@@ -324,9 +627,17 @@ impl Builder {
             revision: 0,
             preview: None,
             preview_camera: None,
+            preview_view_key: String::new(),
+            last_control_click: None,
+            arena: None,
+            arena_obstacle: "none",
+            lab_cams: std::collections::HashMap::new(),
             test_requested: false,
+            sounds: Vec::new(),
             test_seconds: 4.0,
             last_report: None,
+            team_target: None,
+            team_new: None,
         };
         builder.refresh()?;
         Ok(builder)
@@ -370,6 +681,161 @@ impl Builder {
         self.shell.tab()
     }
 
+    /// Whether the `Test Robot` tab's practice arena is on screen.
+    pub fn arena_active(&self) -> bool {
+        self.view_only && self.arena.is_some()
+    }
+
+    /// The practice arena exists exactly while the `Test Robot` tab is on screen: entering the tab
+    /// builds a new one (live: the clock starts at 0 and the robot on its start point) and leaving
+    /// drops it.
+    fn sync_arena(&mut self) {
+        let wanted = self.view_only && self.tab() == Some("test robot button");
+        if !wanted {
+            if self.arena.take().is_some() {
+                // The temporary copy of the robot the arena loaded.
+                let _ = std::fs::remove_file(
+                    std::env::temp_dir().join(format!("ora-lab-test-{}.bot", std::process::id())),
+                );
+            }
+            self.arena_obstacle = "none";
+            return;
+        }
+        if self.arena.is_some() {
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("ora-lab-test-{}.bot", std::process::id()));
+        let saved = match std::env::var_os("ORA_LAB_BOT") {
+            Some(own) => std::fs::copy(own, &path).map(|_| ()),
+            None => self.build.save_to(&path),
+        };
+        match saved {
+            Ok(()) => match crate::lab_arena::LabArena::new(&self.game, &path, self.arena_obstacle)
+            {
+                Ok(arena) => self.arena = Some(arena),
+                Err(error) => self.status = format!("test robot: {error}"),
+            },
+            Err(error) => self.status = format!("test robot: {}: {error}", path.display()),
+        }
+    }
+
+    /// The `status group` of `testarena.gib` shows the robot's name and meters (the match HUD's own
+    /// widgets); the points read `N/A`.
+    fn bind_arena_hud(&mut self) {
+        let Some(arena) = &self.arena else {
+            return;
+        };
+        let report = arena.matched.report();
+        let Some(robot) = report.robots.first() else {
+            return;
+        };
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            if let Some(group) = workshop::find_mut(root, "status group") {
+                crate::hud::bind_status(group, robot, "N/A");
+            }
+        }
+    }
+
+    /// One tick of wall time: the practice arena runs its fixed steps.
+    pub fn advance(&mut self, seconds: f32) {
+        self.sync_arena();
+        if let Some(arena) = &mut self.arena {
+            arena.advance(seconds);
+        }
+    }
+
+    /// The robot's held keys for the practice arena.
+    pub fn set_drive(&mut self, input: ra2sim::DriveInput) {
+        if let Some(arena) = &mut self.arena {
+            arena.set_drive(input);
+        }
+    }
+
+    pub fn drive(&self) -> ra2sim::DriveInput {
+        self.arena.as_ref().map(|a| a.drive()).unwrap_or_default()
+    }
+
+    /// The practice arena's own 3D frame at `size`, for scripted runs.
+    pub fn arena_frame(&mut self, size: [u32; 2]) -> Result<Vec<u8>, String> {
+        let arena = self
+            .arena
+            .as_mut()
+            .ok_or_else(|| "no practice arena".to_string())?;
+        arena.frame(&self.renderer, size)
+    }
+
+    /// The practice arena, for scripted runs.
+    pub fn arena_mut(&mut self) -> Option<&mut crate::lab_arena::LabArena> {
+        self.arena.as_mut()
+    }
+
+    fn lab_cam(&self) -> LabCam {
+        let key = self.tab().unwrap_or("").to_string();
+        self.lab_cams.get(&key).copied().unwrap_or(LabCam::START)
+    }
+
+    /// The distance limits of the tab's camera: 2..11 on Overview and Chassis, 4..9 elsewhere.
+    fn lab_cam_limits(&self) -> (f32, f32) {
+        match self.tab() {
+            Some("overview button") | Some("chassis button") | None => (2.0, 11.0),
+            _ => (4.0, 9.0),
+        }
+    }
+
+    /// Where the selected control's icon floats: over the `(x, z)` of the robot's control board
+    /// (the first `ControlBoard` part), or the chassis origin without one.
+    fn wire_anchor(&self, world: &[Mat4]) -> [f32; 2] {
+        let comps = self.build.components();
+        for (i, c) in comps.iter().enumerate().skip(1) {
+            if c.class.eq_ignore_ascii_case("ControlBoard") {
+                if let Some(m) = world.get(i) {
+                    let p = crate::lab_view::origin_of(*m);
+                    return [p.x, p.z];
+                }
+            }
+        }
+        [0.0, 0.0]
+    }
+
+    /// The mouse wheel over the 3D view: `notches` of 120 units, 0.01 m each, wheel up closer.
+    pub fn lab_wheel(&mut self, notches: f32) {
+        let (min, max) = self.lab_cam_limits();
+        let mut cam = self.lab_cam();
+        cam.dist = (cam.dist - notches * 1.2).clamp(min, max);
+        let key = self.tab().unwrap_or("").to_string();
+        self.lab_cams.insert(key, cam);
+        self.preview = None;
+    }
+
+    /// The middle button dragged over the 3D view by `dx`, `dy` mouse counts: 0.01 rad each, the
+    /// pitch held to +-pi/2.
+    pub fn lab_orbit(&mut self, dx: f32, dy: f32) {
+        let mut cam = self.lab_cam();
+        cam.yaw += dx * 0.01;
+        cam.pitch = (cam.pitch - dy * 0.01).clamp(-FRAC_PI_2, FRAC_PI_2);
+        let key = self.tab().unwrap_or("").to_string();
+        self.lab_cams.insert(key, cam);
+        self.preview = None;
+    }
+
+    /// The pointer is over the 3D view's rectangle.
+    pub fn over_view(&self, x: f32, y: f32) -> bool {
+        self.panel.preview.contains_point(x, y)
+    }
+
+    /// Set the lab camera directly (scripted comparisons).
+    pub fn set_lab_cam(&mut self, cam: LabCam) {
+        let key = self.tab().unwrap_or("").to_string();
+        self.lab_cams.insert(key, cam);
+        self.preview = None;
+    }
+
     /// A click at a point in the design screen. The panel and the screens'
     /// model-driving controls are checked first; anything else is the shell's
     /// own navigation.
@@ -378,9 +844,47 @@ impl Builder {
             self.shell.click(x, y)?;
             return Ok(());
         }
+        self.cursor = Some([x, y]);
+        if self.dialog.is_some() {
+            return self.dialog_click(x, y);
+        }
+        if self.view_only {
+            self.name_focus = self.tab() == Some("overview button")
+                && self.hit_names(x, y).iter().any(|n| n == "bot name textbox");
+        }
+        if self.drag.is_some() && !self.panel.preview.contains_point(x, y) {
+            // Any other click ends the drag, as the category and tab buttons
+            // do (`FUN_0042c280`).
+            self.cancel_drag();
+        }
+        if self.paint_pick(x, y, true) {
+            return Ok(());
+        }
         if self.panel.preview.contains_point(x, y) {
             if let Some(result) = self.preview_click(x, y) {
                 return result;
+            }
+        }
+        if self.tab() == Some("wiring button") {
+            let cell = self.hit_names(x, y).iter().find_map(|n| {
+                let rest = n.strip_prefix("m9:ctl:")?;
+                let (c, r) = rest.split_once(':')?;
+                Some([c.parse().ok()?, r.parse().ok()?])
+            });
+            match cell {
+                Some(cell) => {
+                    let now = std::time::Instant::now();
+                    let double = self.last_control_click.is_some_and(|(t, c)| {
+                        c == cell && now.duration_since(t) < std::time::Duration::from_millis(500)
+                    });
+                    self.last_control_click = Some((now, cell));
+                    if double {
+                        self.last_control_click = None;
+                        self.open_edit_dialog(cell);
+                        return Ok(());
+                    }
+                }
+                None => self.last_control_click = None,
             }
         }
         if let Some(action) = self.panel_action(x, y) {
@@ -392,12 +896,103 @@ impl Builder {
         if let Some(action) = self.widget_action(x, y) {
             return self.apply(&action);
         }
+        if self.tab() == Some("components button") && self.comp_click(x, y) {
+            return Ok(());
+        }
+        if self.disabled_control_at(x, y) {
+            // A dim tab or the dim Armor button takes no click (`FUN_005ec4e0(0)`).
+            return Ok(());
+        }
         let category = self.category_click(x, y);
+        let was_step_one = self.tab() == Some("chassis button") && self.structure_step() == 1;
+        // The `Test Robot` tab's own controls: an obstacle radio or RESET.
+        let arena_pick: Option<Option<&'static str>> = if self.arena.is_some() {
+            let names = self.hit_names(x, y);
+            if names.iter().any(|n| n == "reset button") {
+                Some(None)
+            } else {
+                names
+                    .iter()
+                    .find_map(|n| crate::lab_arena::obstacle_for(n))
+                    .map(Some)
+            }
+        } else {
+            None
+        };
         self.shell.click(x, y)?;
+        match (arena_pick, self.arena.as_mut()) {
+            (Some(Some(obstacle)), Some(arena)) => {
+                self.arena_obstacle = obstacle;
+                if let Err(error) = arena.set_obstacle(obstacle) {
+                    self.status = format!("test robot: {error}");
+                }
+            }
+            (Some(None), Some(arena)) => {
+                if let Err(error) = arena.reset() {
+                    self.status = format!("test robot: {error}");
+                }
+            }
+            _ => {}
+        }
         if category {
             self.palette_scroll = 0;
         }
+        if was_step_one && self.tab() == Some("chassis button") && self.structure_step() == 2 {
+            // Step 2 shows the baseplate extruded (`Adjust Top Outline`): the mesh is made here.
+            if let Err(e) = self.build.extrude_chassis() {
+                self.status = e.to_string();
+            }
+        }
+        self.take_style_pick();
         self.refresh()
+    }
+
+    /// Whether the point is on a control the lab has dimmed: the Components, Wiring, Paint Shop and
+    /// Test Robot tabs (`FUN_00439650` and the chassis' finish enable them) and the Armor button.
+    fn disabled_control_at(&self, x: f32, y: f32) -> bool {
+        let placed = self.shell.placements();
+        let Some(path) = ra2ui::input::hit(&placed, x, y) else {
+            return false;
+        };
+        let chain = chain(&placed, &path);
+        chain.iter().any(|p| {
+            matches!(
+                p.widget.name(),
+                "components button"
+                    | "wiring button"
+                    | "paintshop button"
+                    | "test robot button"
+                    | "armor button"
+            ) && (ra2ui::input::checkbox_dimmed(p.widget) || ra2ui::input::button_dimmed(p.widget))
+        })
+    }
+
+    /// Dim the tabs the original dims: a blank robot has only Overview and Chassis; the Wiring
+    /// tab waits for a control board; the Armor button waits for a chassis shape.
+    fn refresh_tabs(&mut self) {
+        let blank = self.build.is_blank();
+        let wiring = !blank && self.build.has_control_board();
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            for (name, on) in [
+                ("components button", !blank),
+                ("wiring button", wiring),
+                ("paintshop button", !blank),
+                ("test robot button", !blank),
+            ] {
+                if let Some(w) = workshop::find_mut(root, name) {
+                    ra2ui::input::set_checkbox_enabled(w, on);
+                }
+            }
+            if let Some(w) = workshop::find_mut(root, "armor button") {
+                ra2ui::input::set_button_enabled(w, !blank);
+            }
+        }
     }
 
     /// The screen point for an outline coordinate on the shipped `Editing Area`
@@ -409,9 +1004,10 @@ impl Builder {
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "Editing Area")
             .ok_or_else(|| "the current screen has no Editing Area".to_string())?;
+        let grid = blueprint_grid(area.frame);
         Ok([
-            area.frame.x + point[0] as f32 / 1000.0 * area.frame.w,
-            area.frame.y + point[1] as f32 / 1000.0 * area.frame.h,
+            grid.x + point[0] as f32 / 1000.0 * grid.w,
+            grid.y + point[1] as f32 / 1000.0 * grid.h,
         ])
     }
     fn preview_click(&mut self, x: f32, y: f32) -> Option<Result<(), String>> {
@@ -420,6 +1016,7 @@ impl Builder {
         match tab.as_str() {
             "components button" => Some(self.place_at_preview(x, y)),
             "paintshop button" => Some(self.paint_at_preview(x, y)),
+            "wiring button" => Some(self.wire_at_preview(x, y)),
             _ => None,
         }
     }
@@ -461,59 +1058,697 @@ impl Builder {
         ])
     }
 
-    /// The bot-local point under a preview click, on the chassis' mounting
-    /// plane (the baseplate). The plane is the chassis' own `y = 0`; the point
-    /// is clamped to the blueprint sheet.
-    fn baseplate_at(&mut self, x: f32, y: f32) -> Option<[f32; 2]> {
+    /// A click on the preview. While a part is being dragged it is the drop
+    /// (`FUN_0042d4b0`); otherwise it selects the placed part under the mouse
+    /// (`FUN_0042d280`), or nothing.
+    fn place_at_preview(&mut self, x: f32, y: f32) -> Result<(), String> {
+        if self.drag.is_some() {
+            return self.drop_click();
+        }
+        let Some((origin, direction)) = self.bot_ray(x, y) else {
+            return Ok(());
+        };
+        self.selected_part = self.build.pick_part(origin, direction);
+        self.status = match self.selected_part {
+            Some(i) => format!(
+                "selected component {i}: {}",
+                self.build
+                    .component_info(i)
+                    .map(|info| info.name.clone())
+                    .unwrap_or_default()
+            ),
+            None => String::new(),
+        };
+        self.refresh_panel();
+        Ok(())
+    }
+
+    // -- The placement drag (docs/36 §9.18) ----------------------------------
+
+    /// The selected part and the definition the Attach button would place: the
+    /// style picked in the `Component option` list, else the palette's own.
+    fn selected_info(&self) -> Option<(ComponentInfo, String)> {
+        let component = self.selected.as_ref()?;
+        let file = self
+            .style_file
+            .clone()
+            .unwrap_or_else(|| component.file.clone());
+        let info = self.library.component_info_by_file(&file);
+        info.loaded.then(|| {
+            let name = if info.name.is_empty() {
+                component.name.clone()
+            } else {
+                info.name.clone()
+            };
+            (info, name)
+        })
+    }
+
+    /// The part's styles as the `Component option` list shows them: the
+    /// definition's `styles = Label, file.txt, Label, file.txt, ...` line (the
+    /// first label is the palette's own definition, then a file and its label
+    /// per style; a lone `Default` is no choice). `FUN_0042e650` reads them
+    /// through `FUN_0042f050`/`FUN_00462ec0` and loads `Components\Styles\<file>`.
+    fn style_list(&self) -> Vec<(String, Option<String>)> {
+        let Some(component) = &self.selected else {
+            return Vec::new();
+        };
+        let base = self.library.component_info_by_file(&component.file);
+        let Some(styles) = base.def.as_ref().and_then(|d| d.get("styles")) else {
+            return Vec::new();
+        };
+        let tokens: Vec<&str> = styles.split(',').map(str::trim).collect();
+        if tokens.len() < 3 {
+            return Vec::new();
+        }
+        let mut out = vec![(tokens[0].to_string(), None)];
+        for pair in tokens[1..].chunks(2) {
+            if let [file, label] = pair {
+                out.push((
+                    label.to_string(),
+                    Some(format!("Components\\Styles\\{file}")),
+                ));
+            }
+        }
+        out
+    }
+
+    /// A palette click: it only selects the part and shows its preview
+    /// (`FUN_0042e650`); nothing is attached until the Attach button.
+    fn select_component(&mut self, component: PaletteComponent) {
+        self.cancel_drag();
+        self.style_file = None;
+        self.selected = Some(component);
+        self.comp_preview = None;
+        if let Some((info, _)) = self.selected_info() {
+            self.own_mount = placement::default_own_mount(&info);
+            self.status = placement::preview_tip(&info).into();
+        }
+    }
+
+    /// The part's meshes, placed at its own origin.
+    fn part_items(&self, info: &ComponentInfo) -> Vec<DrawItem> {
+        let Some(def) = info.def.as_ref() else {
+            return Vec::new();
+        };
+        let Some(scene) = self.library.load_component_mesh(def) else {
+            return Vec::new();
+        };
+        let dir = self
+            .library
+            .component_mesh_path(def)
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| self.game.join("Components"));
+        ra2_render::scene_items(&scene, Mat4::IDENTITY, &dir, &info.name)
+    }
+
+    /// The Attach button (`FUN_0042c3a0`): the mass check first, then the drag.
+    fn attach_pressed(&mut self) -> Result<(), String> {
+        self.cancel_drag();
+        let Some((info, name)) = self.selected_info() else {
+            self.status = "Pick a component in the palette first.".into();
+            self.refresh_panel();
+            return Ok(());
+        };
+        if let Err(e) = self.build.check_attach_mass(&info) {
+            self.status = match e {
+                BuildError::OverWeight { limit, .. } => placement::mass_message(limit),
+                other => other.to_string(),
+            };
+            self.refresh_panel();
+            return Ok(());
+        }
+        let items = self.part_items(&info);
+        let red = tinted(&items);
+        self.drag = Some(ActiveDrag {
+            drag: Drag::new(info, name, self.own_mount),
+            items,
+            red,
+            at: self.cursor.unwrap_or([0.0, 0.0]),
+            hover: None,
+            candidate: None,
+            refusal: None,
+            floating: Mat4::IDENTITY,
+        });
+        self.status = placement::TIP_DRAG.into();
+        // `FUN_0042c6b0`: the part is placed where the mouse already is.
+        if let Some([x, y]) = self.cursor {
+            self.drag_to(x, y);
+        }
+        self.preview = None;
+        self.refresh_panel();
+        Ok(())
+    }
+
+    /// End the drag without adding anything (`FUN_0042c280`).
+    fn cancel_drag(&mut self) {
+        if self.drag.take().is_some() {
+            self.preview = None;
+            if self.status == placement::TIP_DRAG
+                || self.status == Refusal::Intersects.message()
+                || self.status == Refusal::TooLarge.message()
+                || self.status == Refusal::OutsideChassis.message()
+            {
+                self.status.clear();
+            }
+        }
+    }
+
+    /// The mouse ray in the robot's own space, when the preview has been drawn.
+    fn bot_ray(&mut self, x: f32, y: f32) -> Option<(Vec3, Vec3)> {
         self.ensure_preview();
         let camera = self.preview_camera?;
+        let (origin, direction) = camera.ray(self.panel.preview, x, y)?;
         let world = self
             .build
             .transforms()
             .first()
             .copied()
             .unwrap_or(Mat4::IDENTITY);
-        let point = world.transform_point3(Vec3::ZERO);
-        let normal = world.transform_vector3(Vec3::Y).normalize_or_zero();
-        let hit = camera.plane(self.panel.preview, x, y, point, normal)?;
-        let local = world.inverse().transform_point3(hit);
-        Some(ra2fmt::mount::clamp_baseplate([local.x, local.z]))
+        let inverse = world.inverse();
+        Some((
+            inverse.transform_point3(origin),
+            inverse.transform_vector3(direction),
+        ))
     }
 
-    /// A palette click, or a preview click, places a chassis child at the
-    /// clicked baseplate point. A selected chassis child is moved; otherwise a
-    /// selected palette component is attached there.
-    fn place_at_preview(&mut self, x: f32, y: f32) -> Result<(), String> {
-        let Some(point) = self.baseplate_at(x, y) else {
-            self.status = "the preview does not meet the baseplate here".into();
+    /// Re-judge the dragged part at the mouse (`FUN_0042c850`).
+    fn drag_to(&mut self, x: f32, y: f32) {
+        let Some(mut active) = self.drag.take() else {
+            return;
+        };
+        active.at = [x, y];
+        let ray = if self.panel.preview.contains_point(x, y) {
+            self.bot_ray(x, y)
+        } else {
+            None
+        };
+        active.hover = ray.and_then(|(o, d)| self.build.pick(&active.drag, o, d));
+        active.candidate = active
+            .hover
+            .as_ref()
+            .and_then(|h| self.build.plan(&active.drag, h));
+        active.refusal = active
+            .candidate
+            .as_ref()
+            .and_then(|c| self.build.judge(&active.drag, c));
+        if let Some((o, d)) = ray {
+            active.floating = Mat4::from_translation(o + d.normalize_or_zero() * 3.0)
+                * Mat4::from_rotation_y(active.drag.angle());
+        }
+        let hovering = active.candidate.is_some();
+        self.status = match (&active.refusal, hovering) {
+            (Some(r), _) => r.message().to_string(),
+            _ => placement::TIP_DRAG.to_string(),
+        };
+        self.drag = Some(active);
+        self.preview = None;
+        self.refresh_panel();
+    }
+
+    /// The mouse moved. With a part on the drag the part follows it; SHIFT turns
+    /// it and CTRL raises it by the dominant axis of the movement
+    /// (`0x42b6b4`: the larger of |dx| and |dy|, signed).
+    pub fn mouse_moved(&mut self, x: f32, y: f32) {
+        let last = self.cursor.replace([x, y]);
+        if self.paint_color.drag.is_some() {
+            self.paint_pick(x, y, false);
+        }
+        let Some(active) = self.drag.as_mut() else {
+            return;
+        };
+        let (dx, dy) = last.map(|l| (x - l[0], y - l[1])).unwrap_or((0.0, 0.0));
+        let delta = if dx.abs() > dy.abs() { dx } else { dy };
+        if self.shift {
+            active.drag.rotate(delta);
+            let [ax, ay] = active.at;
+            self.drag_to(ax, ay);
+        } else if self.ctrl {
+            let ceiling = self.build.chassis_height();
+            active.drag.raise(delta, ceiling);
+            let [ax, ay] = active.at;
+            self.drag_to(ax, ay);
+        } else {
+            self.drag_to(x, y);
+        }
+    }
+
+    /// SHIFT and CTRL as the window reports them.
+    pub fn set_modifiers(&mut self, shift: bool, ctrl: bool) {
+        self.shift = shift;
+        self.ctrl = ctrl;
+    }
+
+    /// Whether a part is on the drag.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// The click while dragging (`FUN_0042d4b0`): drop the part if it is over
+    /// something and not refused; a refused part stays in the drag; over
+    /// nothing, the drag ends.
+    fn drop_click(&mut self) -> Result<(), String> {
+        let Some(active) = self.drag.as_ref() else {
+            return Ok(());
+        };
+        let Some(hover) = active.hover else {
+            self.cancel_drag();
             self.refresh_panel();
             return Ok(());
         };
-        if let Some(index) = self.selected_part {
-            if let Some(component) = self.build.components().get(index) {
-                if index > 0 && component.parent == 0 {
-                    let (angle, height) = (component.angle, component.height);
-                    self.build
-                        .place_on_baseplate(index, point, angle, height)
-                        .map_err(|e| e.to_string())?;
-                    self.status = format!(
-                        "placed component {index} at {:.2}, {:.2} m",
-                        point[0], point[1]
+        if active.candidate.is_none() || active.refusal.is_some() {
+            return Ok(());
+        }
+        let drag = active.drag.clone();
+        match self.build.drop_part(&drag, &hover) {
+            Ok(index) => {
+                let attach = drag
+                    .info
+                    .def
+                    .as_ref()
+                    .and_then(|d| d.get("attachsound"))
+                    .map(|p| p.trim().to_string());
+                self.sounds
+                    .push(crate::audio::UiSound::ComponentAttached(attach));
+                self.drag = None;
+                self.selected_part = None;
+                self.status = format!("attached {} (component {index})", drag.name);
+                self.refresh()
+            }
+            Err(e) => {
+                self.status = e.to_string();
+                self.refresh_panel();
+                Ok(())
+            }
+        }
+    }
+
+    /// A click in the component preview picks the green box nearest to it.
+    fn comp_click(&mut self, x: f32, y: f32) -> bool {
+        self.ensure_comp_preview();
+        let Some(cp) = &self.comp_preview else {
+            return false;
+        };
+        if !cp.rect.contains_point(x, y) {
+            return false;
+        }
+        let Some((info, _)) = self.selected_info() else {
+            return false;
+        };
+        let mut best: Option<(f32, i32)> = None;
+        for id in placement::selectable_mounts(&info) {
+            let Some(point) = info.mounts.get(&id) else {
+                continue;
+            };
+            let at = ra2_render::tm_mat4(&point.transform).transform_point3(Vec3::ZERO);
+            let clip = cp.camera.view_proj * at.extend(1.0);
+            if clip.w <= 0.0 {
+                continue;
+            }
+            let ndc = clip.truncate() / clip.w;
+            let sx = cp.rect.x + (ndc.x * 0.5 + 0.5) * cp.rect.w;
+            let sy = cp.rect.y + (0.5 - ndc.y * 0.5) * cp.rect.h;
+            let d = ((sx - x).powi(2) + (sy - y).powi(2)).sqrt();
+            if d < 30.0 && best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, id));
+            }
+        }
+        if let Some((_, id)) = best {
+            self.own_mount = id;
+            self.comp_preview = None;
+            self.refresh_panel();
+        }
+        true
+    }
+
+    /// The screen point of a green box in the component preview, for a scripted
+    /// click.
+    pub fn box_point(&mut self, mount: i32) -> Result<[f32; 2], String> {
+        self.ensure_comp_preview();
+        let cp = self
+            .comp_preview
+            .as_ref()
+            .ok_or_else(|| "the component preview is not on screen".to_string())?;
+        let (info, _) = self
+            .selected_info()
+            .ok_or_else(|| "no component is selected".to_string())?;
+        let point = info
+            .mounts
+            .get(&mount)
+            .ok_or_else(|| format!("the part has no point {mount}"))?;
+        let at = ra2_render::tm_mat4(&point.transform).transform_point3(Vec3::ZERO);
+        let clip = cp.camera.view_proj * at.extend(1.0);
+        let ndc = clip.truncate() / clip.w;
+        Ok([
+            cp.rect.x + (ndc.x * 0.5 + 0.5) * cp.rect.w,
+            cp.rect.y + (0.5 - ndc.y * 0.5) * cp.rect.h,
+        ])
+    }
+
+    /// The component preview's rectangle: the shipped `component 3d preview`
+    /// placeholder of the `comp_preview` group, when it is loaded.
+    fn comp_rect(&self) -> Option<Frame> {
+        self.shell
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "component 3d preview")
+            .map(|p| p.frame)
+    }
+
+    fn ensure_comp_preview(&mut self) {
+        if let Some(rect) = self.comp_rect() {
+            if rect.w > 0.0 && rect.h > 0.0 {
+                let _ = self.comp_preview_pixels(rect);
+            }
+        }
+    }
+
+    /// Load the `comp_preview` group into the screen's `component content
+    /// group` for the selected part (`FUN_0042f440` mode 1 hands it the group)
+    /// and fill its name, weight and description boxes and the style list
+    /// (`FUN_0042e650`).
+    fn refresh_comp_preview(&mut self) {
+        if self.shell.tab() != Some("components button") {
+            return;
+        }
+        let selected = self.selected_info();
+        let styles = self.style_list();
+        let fragment = workshop::load(&self.ui, "botlab/comp_preview.gib").ok();
+        let labels: Vec<String> = styles.iter().map(|(label, _)| label.clone()).collect();
+        let current = self
+            .style_file
+            .as_ref()
+            .and_then(|f| styles.iter().find(|(_, file)| file.as_ref() == Some(f)))
+            .or_else(|| styles.first())
+            .map(|(label, _)| label.clone())
+            .unwrap_or_default();
+        if let Some(lab) = self.shell.lab_mut() {
+            for block in lab.document.blocks.iter_mut() {
+                let ra2fmt::gib::Block::Widget(root) = block else {
+                    continue;
+                };
+                let Some(slot) = workshop::find_mut(root, "component content group") else {
+                    continue;
+                };
+                let key = selected.as_ref().map(|(info, _)| info.file.clone());
+                if !slot.children.is_empty() && self.comp_key == key {
+                    continue;
+                }
+                slot.children.clear();
+                self.comp_key = key;
+                let (Some((info, name)), Some(fragment)) = (&selected, &fragment) else {
+                    continue;
+                };
+                workshop::load_into(root, fragment, "component content group");
+                let description = info
+                    .def
+                    .as_ref()
+                    .and_then(|d| d.get("description"))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let weight = format!("{:.1}", info.mass);
+                for (widget, text) in [
+                    ("component name textbox", name.as_str()),
+                    ("component weight textbox", weight.as_str()),
+                ] {
+                    if let Some(w) = workshop::find_mut(root, widget) {
+                        ra2ui::input::set_field(w, "_Text", text);
+                        for child in w.children.iter_mut() {
+                            if child.kind == WidgetKind::Text {
+                                ra2ui::input::set_field(child, "_Text", text);
+                            }
+                        }
+                    }
+                }
+                set_prose_named(root, "component description", &description);
+                // `FUN_0042e650` hides the style group for a part with no
+                // alternatives, and titles it `Component options (N)`.
+                if let Some(group) = workshop::find_mut(root, "style dropdown group") {
+                    ra2ui::input::set_field(
+                        group,
+                        "Visible",
+                        if labels.is_empty() { "false" } else { "true" },
                     );
-                    return self.refresh();
+                    if let Some(label) = workshop::find_mut(group, "model label") {
+                        let text = format!("Component options ({})", labels.len());
+                        ra2ui::input::set_field(label, "_Text", &text);
+                        for child in label.children.iter_mut() {
+                            ra2ui::input::set_field(child, "_Text", &text);
+                        }
+                    }
+                    if let Some(drop) = workshop::find_mut(group, "component option") {
+                        ra2ui::input::set_field(drop, "_Text", &current);
+                        for child in drop.children.iter_mut() {
+                            if child.kind == WidgetKind::TextBox {
+                                for text in child.children.iter_mut() {
+                                    ra2ui::input::set_field(text, "_Text", &current);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-        self.place_point = point;
-        if self.selected.is_some() {
-            return self.attach_selected();
+        self.shell.set_dropdown_items("component option", labels);
+    }
+
+    /// A style row was picked in the `Component option` list: the preview and
+    /// the part Attach places are that style's definition.
+    fn take_style_pick(&mut self) {
+        let picks = self.shell.take_dropdown_picks();
+        for (name, text) in picks {
+            if name != "component option" {
+                continue;
+            }
+            let styles = self.style_list();
+            if let Some((_, file)) = styles
+                .iter()
+                .find(|(label, _)| label.eq_ignore_ascii_case(text.trim()))
+            {
+                self.cancel_drag();
+                self.style_file = file.clone();
+                self.comp_preview = None;
+                if let Some((info, _)) = self.selected_info() {
+                    self.own_mount = placement::default_own_mount(&info);
+                }
+            }
         }
-        self.status = format!(
-            "placement point {:.2}, {:.2} m: pick a component, then click here",
-            point[0], point[1]
+    }
+
+    /// The part and its green boxes, rendered into `rect`: `AP_box_selected`
+    /// on the chosen point, `AP_box_unselected` on the others
+    /// (`UI\BotLab\AP_box_*.gmf`, placed by the attachment's own frame).
+    fn comp_preview_pixels(&mut self, rect: Frame) -> Option<()> {
+        let (info, _) = self.selected_info()?;
+        let width = rect.w.round().max(16.0) as u32;
+        let height = rect.h.round().max(16.0) as u32;
+        let key = format!("{}|{}|{width}x{height}", info.file, self.own_mount);
+        if self.comp_preview.as_ref().is_some_and(|c| c.key == key) {
+            return Some(());
+        }
+        let part = self.part_items(&info);
+        let boxes = placement::selectable_mounts(&info);
+        let ap_dir = ra2fmt::find_ci(&self.ui, "botlab")?;
+        let load = |file: &str| -> Vec<DrawItem> {
+            let Some(path) = ra2fmt::find_ci(&ap_dir, file) else {
+                return Vec::new();
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                return Vec::new();
+            };
+            let Ok(scene) = ra2fmt::gmi::parse(&bytes) else {
+                return Vec::new();
+            };
+            ra2_render::scene_items(&scene, Mat4::IDENTITY, &ap_dir, file)
+        };
+        let selected_box = load("AP_box_selected.gmf");
+        let unselected_box = load("AP_box_unselected.gmf");
+        let mut groups: Vec<RenderGroup<'_>> = vec![RenderGroup {
+            items: &part,
+            model: Mat4::IDENTITY,
+        }];
+        for id in &boxes {
+            let Some(point) = info.mounts.get(id) else {
+                continue;
+            };
+            groups.push(RenderGroup {
+                items: if *id == self.own_mount {
+                    &selected_box
+                } else {
+                    &unselected_box
+                },
+                model: ra2_render::tm_mat4(&point.transform),
+            });
+        }
+        let (mn, mx) = info.bounds.unwrap_or(([-0.2; 3], [0.2; 3]));
+        let (mn, mx) = (Vec3::from(mn), Vec3::from(mx));
+        let center = (mn + mx) * 0.5;
+        let radius = ((mx - mn).length() * 0.5).max(0.15);
+        let eye = center + Vec3::new(radius * 1.9, radius * 1.4, radius * 2.2);
+        let view = ra2_render::look_at_lh(eye, center, Vec3::Y);
+        let proj = ra2_render::perspective_lh(
+            45f32.to_radians(),
+            width as f32 / height as f32,
+            0.02,
+            radius * 30.0,
         );
-        self.refresh_panel();
-        Ok(())
+        let view_proj = proj * view;
+        let pixels = self
+            .renderer
+            .render_groups(&groups, view_proj, width, height)
+            .ok()?;
+        self.comp_preview = Some(CompPreview {
+            pixels,
+            width,
+            height,
+            rect,
+            camera: PreviewCamera {
+                view_proj,
+                inv_view_proj: view_proj.inverse(),
+                width,
+                height,
+            },
+            key,
+        });
+        Some(())
+    }
+
+    /// The screen point of a world point in the main preview, for a scripted
+    /// drag.
+    pub fn preview_point_of(&mut self, world: Vec3) -> Result<[f32; 2], String> {
+        self.ensure_preview();
+        let camera = self
+            .preview_camera
+            .ok_or_else(|| "the preview has not been rendered".to_string())?;
+        let rect = self.panel.preview;
+        let clip = camera.view_proj * world.extend(1.0);
+        if clip.w.abs() < 1e-6 {
+            return Err("the point is behind the preview camera".into());
+        }
+        let ndc = clip.truncate() / clip.w;
+        Ok([
+            rect.x + (ndc.x * 0.5 + 0.5) * rect.w,
+            rect.y + (0.5 - ndc.y * 0.5) * rect.h,
+        ])
+    }
+
+    /// The screen point that drops a part on `over`, for a scripted drag.
+    pub fn drag_point(&mut self, over: PlaceOn) -> Result<[f32; 2], String> {
+        let world = match over {
+            PlaceOn::Baseplate(point) => Vec3::new(point[0], 0.0, point[1]),
+            PlaceOn::Mount { parent, mount } => {
+                let worlds = self.build.transforms();
+                let info = self
+                    .build
+                    .component_info(parent)
+                    .ok_or_else(|| format!("component {parent} does not exist"))?;
+                let point = info
+                    .mounts
+                    .get(&mount)
+                    .ok_or_else(|| format!("component {parent} has no point {mount}"))?;
+                (worlds[parent] * ra2_render::tm_mat4(&point.transform))
+                    .transform_point3(Vec3::ZERO)
+            }
+        };
+        self.preview_point_of(world)
+    }
+
+    /// The harness's whole gesture: select `file` in the open category, press
+    /// Attach, move the mouse to `over` and click. The mouse moves go through
+    /// [`Builder::mouse_moved`] and the clicks through [`Builder::click`], as
+    /// the window's events do. Returns the new component's index.
+    pub fn place_component(&mut self, file: &str, over: PlaceOn) -> Result<usize, String> {
+        // Scripted drops aim through the preview: look straight down for the gesture.
+        let saved = self.lab_cam();
+        self.set_lab_cam(LabCam {
+            pitch: -FRAC_PI_2,
+            yaw: 0.0,
+            dist: saved.dist,
+        });
+        let result = self.place_component_aimed(file, over);
+        self.set_lab_cam(saved);
+        result
+    }
+
+    fn place_component_aimed(&mut self, file: &str, over: PlaceOn) -> Result<usize, String> {
+        let before = self.build.components().len();
+        self.click_palette_file(file)?;
+        let attach = self.attach_point()?;
+        self.mouse_moved(attach[0], attach[1]);
+        self.click(attach[0], attach[1])?;
+        if self.drag.is_none() {
+            return Err(format!("the drag did not start ({})", self.status));
+        }
+        let at = self.drag_point(over)?;
+        self.mouse_moved(at[0], at[1]);
+        self.click(at[0], at[1])?;
+        if self.build.components().len() != before + 1 {
+            return Err(format!("the drop did not attach ({})", self.status));
+        }
+        Ok(before)
+    }
+
+    /// [`Builder::place_component`] at the first baseplate spot (a 10 cm grid)
+    /// the drag accepts, for a robot whose free room is not known.
+    pub fn place_component_free(&mut self, file: &str) -> Result<usize, String> {
+        // The scan needs the baseplate in view: look straight down for its length (the lab camera
+        // starts level, and the player turns it with the middle button).
+        let saved = self.lab_cam();
+        self.set_lab_cam(LabCam {
+            pitch: -FRAC_PI_2,
+            yaw: 0.0,
+            dist: saved.dist,
+        });
+        let result = self.place_component_scan(file);
+        self.set_lab_cam(saved);
+        result
+    }
+
+    fn place_component_scan(&mut self, file: &str) -> Result<usize, String> {
+        let before = self.build.components().len();
+        self.click_palette_file(file)?;
+        let attach = self.attach_point()?;
+        self.mouse_moved(attach[0], attach[1]);
+        self.click(attach[0], attach[1])?;
+        for gx in -9..=9 {
+            for gz in -9..=9 {
+                let at = self.drag_point(PlaceOn::Baseplate([gx as f32 * 0.1, gz as f32 * 0.1]))?;
+                self.mouse_moved(at[0], at[1]);
+                let free = self
+                    .drag
+                    .as_ref()
+                    .is_some_and(|a| a.candidate.is_some() && a.refusal.is_none());
+                if free {
+                    self.click(at[0], at[1])?;
+                    return if self.build.components().len() == before + 1 {
+                        Ok(before)
+                    } else {
+                        Err(format!("the drop did not attach ({})", self.status))
+                    };
+                }
+            }
+        }
+        self.cancel_drag();
+        Err("no free spot on the baseplate".into())
+    }
+
+    /// The screen point of the Attach button: the shipped `attach button` of
+    /// the `comp_preview` group when it is loaded, else the panel's row.
+    pub fn attach_point(&self) -> Result<[f32; 2], String> {
+        let placed = self.shell.placements();
+        if let Some(button) = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "attach button")
+        {
+            return Ok([
+                button.frame.x + button.frame.w * 0.5,
+                button.frame.y + button.frame.h * 0.5,
+            ]);
+        }
+        Err("the component preview (and its Attach button) is not on screen".into())
     }
 
     /// Paint the face group under a preview click. Fill and layer use the
@@ -530,6 +1765,16 @@ impl Builder {
         self.decal_at = at;
         match self.paint_mode {
             PaintMode::Fill | PaintMode::Layer => {
+                // The player-facing Paint Shop is Color Fill: the swatch's colour, no texture.
+                if self.view_only && self.selected_texture.is_none() {
+                    let texture = self.paint_solid();
+                    self.build
+                        .paint_mut()
+                        .fill_group(group, &texture)
+                        .map_err(|e| e.to_string())?;
+                    self.status = format!("color fill face group {group}");
+                    return self.refresh();
+                }
                 let Some(entry) = self.selected_texture.clone() else {
                     self.status = "pick a texture first".into();
                     self.refresh_panel();
@@ -637,8 +1882,9 @@ impl Builder {
         if !area.frame.contains_point(x, y) {
             return None;
         }
-        let u = ((x - area.frame.x) / area.frame.w * 1000.0).clamp(0.0, 1000.0) as i32;
-        let v = ((y - area.frame.y) / area.frame.h * 1000.0).clamp(0.0, 1000.0) as i32;
+        let grid = blueprint_grid(area.frame);
+        let u = ((x - grid.x) / grid.w * 1000.0).round().clamp(0.0, 1000.0) as i32;
+        let v = ((y - grid.y) / grid.h * 1000.0).round().clamp(0.0, 1000.0) as i32;
         Some(format!("m9:draw:{u}:{v}"))
     }
 
@@ -664,7 +1910,7 @@ impl Builder {
 
     /// Click the synthetic panel row carrying `action`.
     pub fn click_action(&mut self, action: &str) -> Result<(), String> {
-        let placed = ra2ui::resolve_with(&self.panel.gib, SHELL_SIZE, Some(self.assets.faces()));
+        let placed = ra2ui::resolve_with(&self.panel.gib, self.size, Some(self.assets.faces()));
         let row = placed
             .iter()
             .flat_map(|p| p.walk())
@@ -694,13 +1940,62 @@ impl Builder {
                         .join(", ")
                 )
             })?;
-        let columns = self.palette_columns();
-        let row = index / columns.max(1);
-        if row != self.palette_scroll {
-            self.palette_scroll = row;
+        let (horizontal, visible, _) = self.palette_window();
+        let scroll = if horizontal {
+            // One long row, scrolled by cell: bring the cell into the window.
+            if index < self.palette_scroll {
+                index
+            } else if index >= self.palette_scroll + visible {
+                index + 1 - visible
+            } else {
+                self.palette_scroll
+            }
+        } else {
+            index / self.palette_columns().max(1)
+        };
+        if scroll != self.palette_scroll {
+            self.palette_scroll = scroll;
             self.refresh_palette();
         }
         self.click_palette(index)
+    }
+
+    /// Whether the palette is one horizontally scrolled row (`components.gib`'s
+    /// grid is `Rows 1` under a horizontal `Scroller`, `PermScrolls true`), and
+    /// how many whole cells the grid's frame shows.
+    fn palette_window(&self) -> (bool, usize, f32) {
+        let placed = self.shell.placements();
+        let Some(grid) = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "components grid")
+        else {
+            return (false, 4, 78.0);
+        };
+        let Some(g) = ra2ui::Grid::from_widget(grid.widget) else {
+            return (false, 4, 78.0);
+        };
+        let horizontal = g.rows == 1
+            && grid
+                .widget
+                .attachments
+                .iter()
+                .any(|a| a.kind == ra2fmt::gib::AttachmentKind::Scroller);
+        // The cells are the art's own width apart.
+        let stride = grid
+            .widget
+            .children
+            .iter()
+            .find(|c| c.filename().is_some_and(|f| f.starts_with("Components")))
+            .and_then(|c| c.size())
+            .map(|s| s.first.amount)
+            .filter(|w| *w > 0.0)
+            .unwrap_or_else(|| g.column_x(1).max(1.0));
+        (
+            horizontal,
+            ((grid.frame.w / stride).floor() as usize).max(1),
+            stride,
+        )
     }
 
     /// The palette grid's column count (`components.gib` says `Columns 4`).
@@ -760,7 +2055,15 @@ impl Builder {
 
     /// Type one character into the filename box.
     pub fn type_char(&mut self, c: char) {
+        if self.dialog.is_some() {
+            self.dialog_type(c);
+            return;
+        }
         if !(c.is_ascii_graphic() || c == ' ') {
+            return;
+        }
+        if self.view_only && (self.tab() != Some("overview button") || !self.name_focus) {
+            // The name box lives on the Overview tab and takes keys after a click on it.
             return;
         }
         if self.name_buffer.chars().count() >= 48 {
@@ -771,19 +2074,33 @@ impl Builder {
         if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
             return;
         }
-        if !self.name_edited {
+        if !self.name_edited && !self.view_only {
             self.name_buffer.clear();
-            self.name_edited = true;
         }
+        self.name_edited = true;
         self.name_buffer.push(c);
         self.refresh_panel();
+        self.refresh_overview();
+    }
+
+    /// The text the Overview's name box holds.
+    pub fn name_text(&self) -> &str {
+        &self.name_buffer
     }
 
     /// Backspace in the filename box.
     pub fn backspace(&mut self) {
+        if self.dialog.is_some() {
+            self.dialog_backspace();
+            return;
+        }
+        if self.view_only && (self.tab() != Some("overview button") || !self.name_focus) {
+            return;
+        }
         self.name_buffer.pop();
         self.name_edited = true;
         self.refresh_panel();
+        self.refresh_overview();
     }
 
     /// Enter saves under the name in the box (Save As).
@@ -820,13 +2137,67 @@ impl Builder {
         done
     }
 
+    /// Edit a team robot in place: [`Builder::save_to_team`] writes the design
+    /// to `path` (the inventory slot the workshop was opened on).
+    pub fn set_team_target(&mut self, path: PathBuf) {
+        self.team_target = Some(path);
+    }
+
+    /// The team robot file this session writes back to, if any.
+    pub fn team_target(&self) -> Option<&Path> {
+        self.team_target.as_deref()
+    }
+
+    /// Write the design back to its team slot (`Back to HQ` from a robot the
+    /// inventory opened). `None` when the session edits no team robot.
+    /// A new robot (no inventory robot was selected) joins team `team`'s
+    /// roster when the lab is left, if anything was built or named.
+    pub fn set_team_new(&mut self, team: usize, slot: Option<usize>) {
+        self.team_new = Some((team, slot));
+        if slot.is_some() {
+            // The name box of a new robot reads `Enter Bot Name` (live `workshop-newbot`; `FUN_00439650`).
+            self.name_buffer = "Enter Bot Name".to_string();
+            self.refresh_panel();
+        }
+    }
+
+    pub fn save_to_team(&mut self) -> Result<Option<PathBuf>, String> {
+        if self.team_target.is_none() {
+            if let Some((team, slot)) = self.team_new {
+                // A new robot in a selected `New Robot` cell is saved whatever was done (live: Back to HQ
+                // with nothing built wrote `Bot<cell>.bot`, 127 bytes, named `Enter Bot Name`, and the
+                // cell joined the roster); without a cell it only joins when something was built.
+                if slot.is_some() || self.build.can_undo() || self.name_edited {
+                    let path = ra2ui::teams::add_robot(&self.game, team, slot)?;
+                    self.team_target = Some(path);
+                }
+            }
+        }
+        let Some(path) = self.team_target.clone() else {
+            return Ok(None);
+        };
+        let name = if self.name_buffer.trim().is_empty() {
+            "Enter Bot Name".to_string()
+        } else {
+            self.design_name()
+        };
+        self.build.set_name(&name);
+        let path = ra2fmt::saves::prepare_write(&self.game, &path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.build
+            .save_to(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.status = format!("saved {}", path.display());
+        Ok(Some(path))
+    }
+
     /// Save As to `Robot Designs/<name>.bot`.
     pub fn save(&mut self) -> Result<PathBuf, String> {
         let name = self.design_name();
         self.build.set_name(&name);
-        std::fs::create_dir_all(&self.designs)
-            .map_err(|e| format!("{}: {e}", self.designs.display()))?;
-        let path = self.designs.join(format!("{name}.bot"));
+        let path =
+            ra2fmt::saves::prepare_write(&self.game, &self.designs.join(format!("{name}.bot")))
+                .map_err(|e| format!("{}: {e}", self.designs.display()))?;
         self.build
             .save_to(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -843,6 +2214,7 @@ impl Builder {
         if path.extension().is_none() {
             path.set_extension("bot");
         }
+        let path = self.read_path(&path);
         let build =
             Build::load(&self.library, &path).map_err(|e| format!("{}: {e}", path.display()))?;
         self.name_buffer = build.name().to_string();
@@ -850,9 +2222,18 @@ impl Builder {
         self.build = build;
         self.selected = None;
         self.selected_part = None;
-        self.target = (0, 0);
+        self.cancel_drag();
+        self.style_file = None;
         self.status = format!("opened {}", path.display());
         self.refresh()
+    }
+
+    /// A path under the install, read through the save directory.
+    fn read_path(&self, path: &Path) -> PathBuf {
+        match path.strip_prefix(&self.game) {
+            Ok(rel) => ra2fmt::saves::resolve(&self.game, rel),
+            Err(_) => path.to_path_buf(),
+        }
     }
 
     /// Open the design just saved.
@@ -870,7 +2251,8 @@ impl Builder {
             target.set_extension("bot");
         }
         if target != saved {
-            std::fs::copy(&saved, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+            ra2fmt::saves::copy(&self.game, &saved, &target)
+                .map_err(|e| format!("{}: {e}", target.display()))?;
         }
         self.status = format!("exported {}", target.display());
         Ok(target)
@@ -878,12 +2260,16 @@ impl Builder {
 
     /// The import half of `importbot.gib`: the `.bot` files in `Robot Designs/`.
     pub fn designs(&self) -> Vec<String> {
-        list_folder(&self.designs, &["bot"])
+        list_folder(&self.game, DESIGNS, &["bot"])
     }
 
     /// `import_texture.gib`'s list: the player's own images in `Custom Textures/`.
     pub fn custom_texture_names(&self) -> Vec<String> {
-        list_folder(&self.custom_textures, &["bmp", "tga", "jpg", "jpeg", "png"])
+        list_folder(
+            &self.game,
+            CUSTOM_TEXTURES,
+            &["bmp", "tga", "jpg", "jpeg", "png"],
+        )
     }
 
     /// Export the current chassis skin into `Custom Textures/` — the shipped
@@ -893,12 +2279,11 @@ impl Builder {
         if target.extension().is_none() {
             target.set_extension("tga");
         }
-        std::fs::create_dir_all(&self.custom_textures)
-            .map_err(|e| format!("{}: {e}", self.custom_textures.display()))?;
         let skin = self.build.paint().skin().ok_or_else(|| {
             "the chassis has no skin to export (a bot without a texture)".to_string()
         })?;
-        std::fs::write(&target, skin.to_tga()).map_err(|e| format!("{}: {e}", target.display()))?;
+        let target = ra2fmt::saves::write(&self.game, &target, skin.to_tga())
+            .map_err(|e| format!("{}: {e}", target.display()))?;
         self.status = format!("exported texture {}", target.display());
         Ok(target)
     }
@@ -959,7 +2344,7 @@ impl Builder {
                 .ok_or_else(|| format!("custom texture {rest:?} is not listed"))?;
             let entry = TextureEntry {
                 name: name.clone(),
-                path: self.custom_textures.join(name),
+                path: ra2fmt::saves::resolve(&self.game, Path::new(CUSTOM_TEXTURES).join(name)),
             };
             self.selected_texture = Some(entry.clone());
             self.status = format!("custom texture {}", entry.name);
@@ -1049,43 +2434,27 @@ impl Builder {
                 Outline::Bottom
             };
             self.build.clear_chassis_outline(which);
+            self.outline_closed = false;
             self.status = format!("cleared the {} outline", which.label());
             return self.refresh();
         }
         if action == "m9:finished" {
-            let chassis = self.build.chassis().cloned().unwrap_or_default();
-            let step = self.structure_step();
-            let (points, outline) = if step == 2 {
-                (chassis.top.clone(), Outline::Top)
+            // `Finished` (live): the structure design is done, the chassis page is shown again, and
+            // an outline of three points or more has been extruded; with fewer the robot stays blank.
+            let shaped = self.build.extrude_chassis().map_err(|e| e.to_string())?;
+            self.status = if shaped {
+                "chassis finished".into()
             } else {
-                (chassis.bottom.clone(), Outline::Bottom)
+                "the baseplate outline needs three points".into()
             };
-            self.status = match chassis::validate_outline(&points) {
-                Ok(()) => format!(
-                    "{} outline finished: {} point(s), height {:.2} m (the mesh is not rebuilt)",
-                    outline.label(),
-                    points.len(),
-                    chassis.height
-                ),
-                Err(e) => format!("{} outline: {e}", outline.label()),
-            };
-            self.refresh_panel();
-            return Ok(());
+            self.draw_point = None;
+            self.shell.click_named("chassis button")?;
+            return self.refresh();
         }
         if let Some(rest) = action.strip_prefix("m9:snap:") {
             self.draw_snap = rest == "on";
             self.status = format!("snap to grid {}", if self.draw_snap { "on" } else { "off" });
             self.refresh_panel();
-            return Ok(());
-        }
-        if let Some(rest) = action.strip_prefix("m9:rot:") {
-            let delta: f32 = rest.parse().map_err(|_| format!("bad rotation {rest:?}"))?;
-            self.rotate_selected(delta)?;
-            return Ok(());
-        }
-        if let Some(rest) = action.strip_prefix("m9:lift:") {
-            let delta: f32 = rest.parse().map_err(|_| format!("bad lift {rest:?}"))?;
-            self.lift_selected(delta)?;
             return Ok(());
         }
         if let Some(rest) = action.strip_prefix("m9:palette:") {
@@ -1097,24 +2466,30 @@ impl Builder {
                 .get(index)
                 .cloned()
                 .ok_or_else(|| format!("palette cell {index} is not filled"))?;
-            self.selected = Some(component.clone());
-            self.attach_selected()?;
+            self.select_component(component);
+            return self.refresh();
+        }
+        if action == "m9:attach" {
+            return self.attach_pressed();
+        }
+        if let Some(rest) = action.strip_prefix("m9:box:") {
+            let id: i32 = rest.parse().map_err(|_| format!("bad box {rest:?}"))?;
+            self.own_mount = id;
+            self.refresh_panel();
             return Ok(());
         }
         if action == "m9:remove" {
-            let index = self
-                .selected_part
-                .or_else(|| self.build.components().len().checked_sub(1))
-                .unwrap_or(0);
-            if index == 0 {
-                self.status = "the chassis cannot be removed".into();
+            // `FUN_0042f270`: only the selected placed part, and only a leaf.
+            let Some(index) = self.selected_part else {
+                self.status = "Select a placed component to remove.".into();
                 self.refresh_panel();
                 return Ok(());
-            }
-            match self.build.remove(index) {
-                Ok(removed) => {
+            };
+            match self.build.remove_leaf(index) {
+                Ok(()) => {
+                    self.sounds.push(crate::audio::UiSound::ComponentRemoved);
                     self.selected_part = None;
-                    self.status = format!("removed {removed} component(s)");
+                    self.status = format!("removed component {index}");
                     return self.refresh();
                 }
                 Err(e) => {
@@ -1123,19 +2498,6 @@ impl Builder {
                     return Ok(());
                 }
             }
-        }
-        if let Some(rest) = action.strip_prefix("m9:mount:") {
-            let (parent, mount) = rest
-                .split_once(':')
-                .ok_or_else(|| format!("bad mount row {rest:?}"))?;
-            let parent: usize = parent
-                .parse()
-                .map_err(|_| format!("bad parent {parent:?}"))?;
-            let mount: i32 = mount.parse().map_err(|_| format!("bad mount {mount:?}"))?;
-            self.target = (parent, mount);
-            self.status = format!("attach to component {parent} mount {mount}");
-            self.refresh_panel();
-            return Ok(());
         }
         if let Some(rest) = action.strip_prefix("m9:part:") {
             let index: usize = rest.parse().map_err(|_| format!("bad part row {rest:?}"))?;
@@ -1170,7 +2532,11 @@ impl Builder {
                 x.parse().map_err(|_| format!("bad cell column {x:?}"))?,
                 y.parse().map_err(|_| format!("bad cell row {y:?}"))?,
             ];
-            self.place_control(cell);
+            if self.view_only {
+                self.open_props_dialog(cell);
+            } else {
+                self.place_control(cell);
+            }
             return Ok(());
         }
         if let Some(rest) = action.strip_prefix("m9:wirectl:") {
@@ -1184,6 +2550,7 @@ impl Builder {
             self.wire_placing = None;
             self.wire_control = Some(cell);
             self.wire_component = None;
+            self.preview = None;
             let name = self
                 .build
                 .board()
@@ -1255,6 +2622,15 @@ impl Builder {
             return self.refresh();
         }
         match action {
+            "m9:paintall" => {
+                let texture = self.paint_solid();
+                self.build
+                    .paint_mut()
+                    .fill_all(&texture)
+                    .map_err(|e| e.to_string())?;
+                self.status = "painted the entire chassis".into();
+                return self.refresh();
+            }
             "m9:undo" => {
                 if !self.undo() {
                     self.status = "nothing to undo".into();
@@ -1293,63 +2669,6 @@ impl Builder {
         }
         self.refresh_panel();
         Ok(())
-    }
-
-    /// Attach the selected palette component at [`Builder::target`].
-    ///
-    /// The child's own mount is chosen from its attachment types so the model's
-    /// socket rule (`Build::attach`) accepts it: the parent mount's type list
-    /// must accept one of the child's. Chassis children get a fixed spread
-    /// because there is no placement tool; component-to-component links use the
-    /// model's F1 mount rule and `Placement::default()`.
-    fn attach_selected(&mut self) -> Result<(), String> {
-        let Some(component) = self.selected.clone() else {
-            self.status = "pick a component in the palette".into();
-            self.refresh_panel();
-            return Ok(());
-        };
-        let info = self.library.component_info_by_file(&component.file);
-        if !info.loaded {
-            self.status = format!("{} did not load", component.file);
-            self.refresh_panel();
-            return Ok(());
-        }
-        let (parent, parent_mount) = self.target;
-        let own_mount = choose_own_mount(&info, self.build.component_info(parent), parent_mount);
-        let placement = if parent == 0 {
-            // Chassis children use the game's stored transform: the last
-            // preview point (the blueprint's centre until the player clicks),
-            // `y = 0`, the corpus' quarter turn, no yaw and no lift.
-            BuildPlacement::on_baseplate(self.place_point, 0.0, 0.0)
-        } else {
-            BuildPlacement::default()
-        };
-        let before = self.build.components().len();
-        match self.build.attach(
-            &self.library,
-            &component.file,
-            parent,
-            parent_mount,
-            own_mount,
-            placement,
-        ) {
-            Ok(attached) => {
-                self.selected_part = Some(attached);
-                self.status = format!(
-                    "attached {} to {parent} mount {parent_mount} (component {attached})",
-                    component.name
-                );
-                self.refresh()
-            }
-            Err(e) => {
-                self.status = e.to_string();
-                if self.build.components().len() != before {
-                    return Err("a refused attach changed the component list".into());
-                }
-                self.refresh_panel();
-                Ok(())
-            }
-        }
     }
 
     /// Apply the current paint mode to a face group (a panel row or a preview
@@ -1452,6 +2771,21 @@ impl Builder {
         }
         match self.draw_style {
             DrawStyle::Freeform => {
+                // A click on the first point of an outline of three or more closes it (live: the
+                // fourth click of a square on its first corner leaves four points); a closed
+                // outline takes no more points.
+                if self.outline_closed {
+                    return Ok(());
+                }
+                if let Some(first) = self.build.chassis().and_then(|c| c.bottom.first().copied()) {
+                    let near = (first[0] - point[0]).pow(2) + (first[1] - point[1]).pow(2);
+                    if self.build.chassis().is_some_and(|c| c.bottom.len() >= 3) && near < 60 * 60 {
+                        self.outline_closed = true;
+                        self.status = "baseplate outline closed".into();
+                        self.refresh_panel();
+                        return Ok(());
+                    }
+                }
                 match self
                     .build
                     .add_chassis_outline_point(Outline::Bottom, point, self.draw_snap)
@@ -1495,6 +2829,32 @@ impl Builder {
                 );
                 self.refresh()
             }
+        }
+    }
+
+    /// Put the height slider's thumb where `fraction` (0 at the bottom of the track) says.
+    fn sync_height_thumb(&mut self, fraction: f32) {
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            let Some(slider) = workshop::find_mut(root, "height slider") else {
+                continue;
+            };
+            let track = slider.size().map(|s| s.second.amount).unwrap_or(121.0);
+            let Some(thumb) = slider
+                .children
+                .iter_mut()
+                .find(|c| c.kind == WidgetKind::Image)
+            else {
+                continue;
+            };
+            let thumb_h = thumb.size().map(|s| s.second.amount).unwrap_or(16.0);
+            let y = ((1.0 - fraction.clamp(0.0, 1.0)) * (track - thumb_h).max(0.0)).max(0.0);
+            ra2ui::input::set_field(thumb, "Position", &format!("0 0 {y} 0"));
         }
     }
 
@@ -1550,11 +2910,13 @@ impl Builder {
                 }
             }
             "height" => {
-                let height = 0.1 + (1.0 - fraction) * 1.1;
+                // Live: the thumb at the top gives 1.32 m, at the bottom 0.436364 (docs/36 section 9.27).
+                let height = ra2ui::workshop::extrude::height_for_fraction(fraction);
                 self.build
                     .set_chassis_height(height)
                     .map_err(|e| e.to_string())?;
                 self.status = format!("chassis height {height:.2} m");
+                self.sync_height_thumb(fraction);
                 return self.refresh();
             }
             other => return Err(format!("unknown slider {other:?}")),
@@ -1563,48 +2925,9 @@ impl Builder {
         Ok(())
     }
 
-    fn selected_chassis_child(&self) -> Option<(usize, f32, f32, [f32; 2])> {
-        let index = self.selected_part?;
-        let component = self.build.components().get(index)?;
-        (index > 0 && component.parent == 0).then_some((
-            index,
-            component.angle,
-            component.height,
-            [component.translation[0], component.translation[2]],
-        ))
-    }
-
-    fn rotate_selected(&mut self, delta: f32) -> Result<(), String> {
-        let Some((index, angle, height, point)) = self.selected_chassis_child() else {
-            self.status = "select a chassis-mounted part first".into();
-            self.refresh_panel();
-            return Ok(());
-        };
-        let angle = (angle + delta).rem_euclid(std::f32::consts::TAU);
-        self.build
-            .place_on_baseplate(index, point, angle, height)
-            .map_err(|e| e.to_string())?;
-        self.status = format!("component {index} angle {:.1} deg", angle.to_degrees());
-        self.refresh()
-    }
-
-    fn lift_selected(&mut self, delta: f32) -> Result<(), String> {
-        let Some((index, angle, height, point)) = self.selected_chassis_child() else {
-            self.status = "select a chassis-mounted part first".into();
-            self.refresh_panel();
-            return Ok(());
-        };
-        let height = (height + delta).clamp(0.0, 1.0);
-        self.build
-            .place_on_baseplate(index, point, angle, height)
-            .map_err(|e| e.to_string())?;
-        self.status = format!("component {index} height {height:.2} m");
-        self.refresh()
-    }
-
     /// The action a click on the synthetic panel names, if any.
     fn panel_action(&self, x: f32, y: f32) -> Option<String> {
-        let placed = ra2ui::resolve_with(&self.panel.gib, SHELL_SIZE, Some(self.assets.faces()));
+        let placed = ra2ui::resolve_with(&self.panel.gib, self.size, Some(self.assets.faces()));
         let path = ra2ui::input::hit(&placed, x, y)?;
         let chain = chain(&placed, &path);
         chain.iter().rev().find_map(|p| {
@@ -1615,16 +2938,75 @@ impl Builder {
         })
     }
 
+    /// The names of the widgets under a point, outermost first.
+    fn hit_names(&self, x: f32, y: f32) -> Vec<String> {
+        let placed = self.shell.placements();
+        ra2ui::input::hit(&placed, x, y)
+            .map(|p| {
+                chain(&placed, &p)
+                    .iter()
+                    .map(|n| n.widget.name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The widget names under a point, outermost first (`hit` and `hit_control`), for scripted
+    /// diagnosis.
+    pub fn debug_hit(&self, x: f32, y: f32) -> Vec<String> {
+        let placed = self.shell.placements();
+        let mut out = Vec::new();
+        for control_only in [false, true] {
+            let path = if control_only {
+                ra2ui::input::hit_control(&placed, x, y)
+            } else {
+                ra2ui::input::hit(&placed, x, y)
+            };
+            let names: Vec<String> = path
+                .map(|p| {
+                    chain(&placed, &p)
+                        .iter()
+                        .map(|n| n.widget.name().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.push(format!(
+                "{}: {}",
+                if control_only { "control" } else { "hit" },
+                names.join(" > ")
+            ));
+        }
+        out
+    }
+
     /// The action a click on a shipped list cell names, if any: a component
     /// palette cell, the remove button, or an armour cell.
     fn widget_action(&self, x: f32, y: f32) -> Option<String> {
         let placed = self.shell.placements();
         let path = ra2ui::input::hit(&placed, x, y)?;
         let chain = chain(&placed, &path);
+        if chain.iter().any(|p| p.widget.name() == "attach button") {
+            return Some("m9:attach".into());
+        }
         if chain.iter().any(|p| p.widget.name() == "remove button") {
             return Some("m9:remove".into());
         }
+        if self.tab() == Some("paintshop button") {
+            if chain.iter().any(|p| p.widget.name() == "paint entire") {
+                return Some("m9:paintall".into());
+            }
+            if chain.iter().any(|p| p.widget.name() == "undo button") {
+                return Some("m9:undo".into());
+            }
+        }
         if self.tab() == Some("wiring button") {
+            // The controller's picture is laid over the strip of icons above it; the control
+            // under the point is what is clicked.
+            let plain = chain.clone();
+            let chain = match ra2ui::input::hit_control(&placed, x, y) {
+                Some(path) => self::chain(&placed, &path),
+                None => chain.clone(),
+            };
             for (button, action) in [
                 ("new analog", "m9:new:analog"),
                 ("new switch", "m9:new:switch"),
@@ -1635,8 +3017,11 @@ impl Builder {
                     return Some(action.into());
                 }
             }
+            // The control's picture is not a "control" widget, so a click on it is found in the
+            // plain hit chain (live: the whole cell selects).
             if let Some(name) = chain
                 .iter()
+                .chain(plain.iter())
                 .find_map(|p| p.widget.name().strip_prefix("m9:ctl:"))
             {
                 return Some(format!("m9:wirectl:{name}"));
@@ -1650,6 +3035,14 @@ impl Builder {
             }
         }
         if self.tab() == Some("chassis button") {
+            // The step layer's group (`steps and snap group`, 46% x 70 px in
+            // the content corner) lies over the tools pane's lower-left
+            // buttons by design; the control under the point is what the
+            // player clicks, not the container drawn over it.
+            let chain = match ra2ui::input::hit_control(&placed, x, y) {
+                Some(path) => self::chain(&placed, &path),
+                None => chain.clone(),
+            };
             if chain
                 .iter()
                 .any(|p| p.widget.name() == "clear outline button")
@@ -1707,21 +3100,253 @@ impl Builder {
         let rank: usize = match hit {
             Some(hit) => hit.parse().ok()?,
             // The selection bar is the grid's own first cell background.
-            None if chain.iter().any(|p| p.widget.name() == "Sel Bar") => 0,
+            None if chain.iter().any(|p| p.widget.name() == "Sel Bar")
+                && chain.iter().any(|p| p.widget.name() == "components grid") =>
+            {
+                0
+            }
             None => return None,
         };
         Some(format!("m9:palette:{rank}"))
     }
 
     /// Recompute the panel and every list the current screen asks for.
+    /// The player-facing lab: the robot view fills the screen's own 3D
+    /// placeholder and no synthetic panel is drawn, unless `--debug-panel`.
+    pub fn apply_debug_panel_default(&mut self) -> Result<(), String> {
+        self.view_only = !DEBUG_PANEL.load(std::sync::atomic::Ordering::Relaxed);
+        self.preview = None;
+        self.refresh()
+    }
+
     pub fn refresh(&mut self) -> Result<(), String> {
         self.revision = self.revision.wrapping_add(1);
+        self.refresh_overview();
+        self.refresh_tabs();
+        self.refresh_effects();
         self.refresh_palette();
+        self.refresh_comp_preview();
         self.refresh_armour();
         self.refresh_controls();
-        self.normalize_target();
         self.refresh_panel();
         Ok(())
+    }
+
+    /// The tabs that show the open design's numbers (overview, components) take
+    /// its name, mass and weight class; the overview's snapshot box takes the
+    /// snapshot the `.bot` carries.
+    fn refresh_overview(&mut self) {
+        let stats = self.build.stats();
+        let name = if self.name_edited {
+            self.name_buffer.clone()
+        } else {
+            self.build.name().to_string()
+        };
+        // A blank robot has no weight and the class label has not been computed yet (live: `0.0` /
+        // `None`; the label is only written when a part or the chassis changes the mass).
+        let blank = self.build.is_blank();
+        let mass = if blank {
+            "0.0".to_string()
+        } else {
+            format!("{:.1}", stats.mass)
+        };
+        let class = if blank {
+            "None"
+        } else {
+            ra2ui::workshop::stats::WeightClass::of_mass(stats.mass).full_label()
+        };
+        let snapshot = self
+            .build
+            .to_bot()
+            .snapshot
+            .as_deref()
+            .and_then(ra2ui::preview::Preview::decode_tga);
+        let key = snapshot.as_ref().map(|p| p.key("lab-snapshot"));
+        if let (Some(key), Some(snapshot)) = (&key, &snapshot) {
+            self.assets.add_preview(key, snapshot);
+        }
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            for (widget, text) in [
+                ("bot name textbox", name.as_str()),
+                ("weight", mass.as_str()),
+                ("weightclass", class),
+            ] {
+                if let Some(w) = workshop::find_mut(root, widget) {
+                    ra2ui::input::set_field(w, "_Text", text);
+                    for child in w.children.iter_mut() {
+                        if child.kind == WidgetKind::Text {
+                            ra2ui::input::set_field(child, "_Text", text);
+                        }
+                    }
+                }
+            }
+            if let Some(key) = &key {
+                ra2ui::cells::bind_art(root, "snapshot img", key);
+            }
+        }
+    }
+
+    /// The Paint Shop opens on its first effect, Color Fill: the dropdown names
+    /// it and `colorfill.gib` is loaded into `effect settings group` (the
+    /// group's own note: "load individual effects gibs here").
+    fn refresh_effects(&mut self) {
+        if self.shell.tab() != Some("paintshop button") {
+            return;
+        }
+        let Ok(fragment) = workshop::load(&self.ui, "botlab/colorfill.gib") else {
+            return;
+        };
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            if let Some(dropdown) = workshop::find_mut(root, "effect dropdown") {
+                if let Some(text) = dropdown
+                    .children
+                    .iter_mut()
+                    .find(|c| c.kind == WidgetKind::TextBox)
+                    .and_then(|b| b.children.iter_mut().find(|c| c.kind == WidgetKind::Text))
+                {
+                    ra2ui::input::set_field(text, "_Text", "Color Fill");
+                }
+            }
+            if let Some(slot) = workshop::find_mut(root, "effect settings group") {
+                if slot.children.is_empty() {
+                    workshop::load_into(root, &fragment, "effect settings group");
+                }
+            }
+        }
+        self.sync_paint_widgets();
+    }
+
+    /// Put the swatch, the picker's target and the slider's thumb where the colour state says,
+    /// and let `Selected Color` hang below the swatch (live it is drawn outside the 64 px group).
+    fn sync_paint_widgets(&mut self) {
+        let color = self.paint_color;
+        let placed = self.shell.placements();
+        let hue = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "hue group")
+            .map(|p| p.frame);
+        let slider = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "lum slider")
+            .map(|p| p.frame);
+        drop(placed);
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            if let Some(group) = workshop::find_mut(root, "selected color group") {
+                ra2ui::input::set_field(group, "ClipMode", "0");
+                if let Some(label) = workshop::find_mut(group, "selected label") {
+                    ra2ui::input::set_field(label, "ClipMode", "0");
+                }
+            }
+            if let Some(image) = workshop::find_mut(root, "selected color img") {
+                let [r, g, b] = color.rgb;
+                ra2ui::input::set_field(
+                    image,
+                    "_ForeColor",
+                    &format!(
+                        "{} {} {} 1",
+                        f32::from(r) / 255.0,
+                        f32::from(g) / 255.0,
+                        f32::from(b) / 255.0
+                    ),
+                );
+            }
+            if let (Some(target), Some(frame)) = (workshop::find_mut(root, "picker target"), hue) {
+                let x = color.marker[0] * frame.w - 4.0;
+                let y = color.marker[1] * frame.h - 4.0;
+                ra2ui::input::set_field(target, "Position", &format!("{x} 0 {y} 0"));
+            }
+            if let (Some(slider_widget), Some(frame)) =
+                (workshop::find_mut(root, "lum slider"), slider)
+            {
+                if let Some(thumb) = slider_widget
+                    .children
+                    .iter_mut()
+                    .find(|c| c.kind == WidgetKind::Image)
+                {
+                    let thumb_w = thumb.size().map(|s| s.first.amount).unwrap_or(12.0);
+                    let x = color.lum * (frame.w - thumb_w).max(0.0);
+                    ra2ui::input::set_field(thumb, "Position", &format!("{x} 0 0 0"));
+                }
+            }
+        }
+    }
+
+    /// A press or drag on the Paint Shop's picker or slider: the target or the thumb goes to the
+    /// pointer and the swatch takes the colour they choose. `Some(start)` begins a drag.
+    fn paint_pick(&mut self, x: f32, y: f32, start: bool) -> bool {
+        if self.tab() != Some("paintshop button") {
+            return false;
+        }
+        let placed = self.shell.placements();
+        let frame_of = |name: &str| {
+            placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == name)
+                .map(|p| p.frame)
+        };
+        let hue = frame_of("hue group");
+        let slider = frame_of("lum slider");
+        drop(placed);
+        let which = if start {
+            if hue.is_some_and(|f| f.contains_point(x, y)) {
+                Some(PaintDrag::Picker)
+            } else if slider.is_some_and(|f| f.contains_point(x, y)) {
+                Some(PaintDrag::Slider)
+            } else {
+                None
+            }
+        } else {
+            self.paint_color.drag
+        };
+        let Some(which) = which else {
+            return false;
+        };
+        match (which, hue, slider) {
+            (PaintDrag::Picker, Some(f), _) => {
+                self.paint_color.marker = [
+                    ((x - f.x) / f.w.max(1.0)).clamp(0.0, 1.0),
+                    ((y - f.y) / f.h.max(1.0)).clamp(0.0, 1.0),
+                ];
+            }
+            (PaintDrag::Slider, _, Some(f)) => {
+                self.paint_color.lum = ((x - f.x) / f.w.max(1.0)).clamp(0.0, 1.0);
+            }
+            _ => return false,
+        }
+        if start {
+            self.paint_color.drag = Some(which);
+        }
+        self.paint_color.rgb = self.paint_color.picked();
+        self.sync_paint_widgets();
+        self.status = format!("color {:?}", self.paint_color.rgb);
+        true
+    }
+
+    /// The solid texture the Paint Shop's Color Fill paints with.
+    fn paint_solid(&self) -> Texture {
+        let [r, g, b] = self.paint_color.rgb;
+        Texture::solid(16, 16, [r, g, b, 255])
     }
 
     fn refresh_palette(&mut self) {
@@ -1731,6 +3356,7 @@ impl Builder {
         }
         let mut category = None;
         let scroll = self.palette_scroll;
+        let (horizontal, visible, stride) = self.palette_window();
         if let Some(lab) = self.shell.lab_mut() {
             for block in lab.document.blocks.iter_mut() {
                 let ra2fmt::gib::Block::Widget(root) = block else {
@@ -1766,6 +3392,37 @@ impl Builder {
                                 )
                             });
                             for (rank, &ci) in order.iter().enumerate() {
+                                if horizontal {
+                                    let cell = &mut grid.children[ci];
+                                    ra2ui::input::set_field(
+                                        cell,
+                                        "Name",
+                                        &format!("m9:cell:{rank}"),
+                                    );
+                                    let shown = rank >= scroll && rank < scroll + visible;
+                                    ra2ui::input::set_field(
+                                        cell,
+                                        "Visible",
+                                        if shown { "true" } else { "false" },
+                                    );
+                                    if shown {
+                                        // `fill_grid` put the cell at its own column;
+                                        // the scroll moves the row left by cells.
+                                        let at = cell
+                                            .field("Position")
+                                            .map(|f| f.numbers())
+                                            .unwrap_or_default();
+                                        let x = at.first().copied().unwrap_or(0.0)
+                                            - stride * scroll as f32;
+                                        let y = at.get(2).copied().unwrap_or(0.0);
+                                        ra2ui::input::set_field(
+                                            cell,
+                                            "Position",
+                                            &format!("{x} 0 {y} 0"),
+                                        );
+                                    }
+                                    continue;
+                                }
                                 let row = rank / columns;
                                 let cell = &mut grid.children[ci];
                                 ra2ui::input::set_field(cell, "Name", &format!("m9:cell:{rank}"));
@@ -1849,6 +3506,11 @@ impl Builder {
             return;
         };
         let board = self.build.board().clone();
+        let Some((frame, _)) = self.control_grid() else {
+            return;
+        };
+        let (cell_w, cell_h) = control_cell_size(frame);
+        let selected = self.wire_control;
         if let Some(lab) = self.shell.lab_mut() {
             for block in lab.document.blocks.iter_mut() {
                 let ra2fmt::gib::Block::Widget(root) = block else {
@@ -1858,12 +3520,28 @@ impl Builder {
                     continue;
                 };
                 grid.children.retain(|c| !c.name().starts_with("m9:ctl:"));
-                let Some(g) = ra2ui::Grid::from_widget(grid) else {
-                    return;
-                };
+                // The grid's selection bar shows only on a selected control.
+                for bar in grid.children.iter_mut().filter(|c| c.name() == "Sel Bar") {
+                    match selected {
+                        Some(cell) => {
+                            ra2ui::input::set_field(
+                                bar,
+                                "Position",
+                                &format!(
+                                    "{} 0 {} 0",
+                                    cell_w * cell[0] as f32,
+                                    cell_h * cell[1] as f32
+                                ),
+                            );
+                            ra2ui::input::set_field(bar, "Size", &format!("{cell_w} 0 {cell_h} 0"));
+                            ra2ui::input::set_field(bar, "Visible", "true");
+                        }
+                        None => ra2ui::input::set_field(bar, "Visible", "false"),
+                    }
+                }
                 for control in &board.controls {
-                    let x = g.column_x(control.cell[0]);
-                    let y = g.row_height * control.cell[1] as f32;
+                    let x = cell_w * control.cell[0] as f32;
+                    let y = cell_h * control.cell[1] as f32;
                     for root in template.widgets() {
                         let mut cell = root.clone();
                         ra2ui::input::set_field(
@@ -1875,11 +3553,7 @@ impl Builder {
                         ra2ui::input::set_field(
                             &mut cell,
                             "Size",
-                            &format!(
-                                "{} 0 {} 0",
-                                g.col_widths.first().copied().unwrap_or(66.0),
-                                g.row_height
-                            ),
+                            &format!("{cell_w} 0 {cell_h} 0"),
                         );
                         let art = match control.kind {
                             ControlKind::Analog => "botlab\\ctrl_analog.bmp",
@@ -1887,15 +3561,6 @@ impl Builder {
                             ControlKind::Button => "botlab\\ctrl_button.bmp",
                         };
                         ra2ui::cells::bind_art(&mut cell, "control img", art);
-                        // `control_cell.gib` was authored at 415×273 and its
-                        // art files are 60×40; the renderer honours `_Size`, so
-                        // without this the cell draws the top-left corner of a
-                        // 415-pixel image and reads as a white square.
-                        if let Some(img) = workshop::find_mut(&mut cell, "control img") {
-                            ra2ui::input::set_field(img, "Position", "3 0 15 0");
-                            ra2ui::input::set_field(img, "Size", "60 0 40 0");
-                            ra2ui::input::set_field(img, "_Size", "60 0 40 0");
-                        }
                         ra2ui::cells::bind_value(&mut cell, "control name", &control.name);
                         ra2ui::cells::bind_value(&mut cell, "control input", &control.key_label());
                         grid.children.push(cell);
@@ -1903,33 +3568,6 @@ impl Builder {
                 }
                 return;
             }
-        }
-    }
-
-    fn normalize_target(&mut self) {
-        let n = self.build.components().len();
-        let (parent, mount) = self.target;
-        if parent >= n {
-            self.target = (0, 0);
-            return;
-        }
-        if parent == 0 {
-            if mount != 0 {
-                self.target = (0, 0);
-            }
-            return;
-        }
-        let used = self
-            .build
-            .components()
-            .iter()
-            .any(|c| c.parent == parent as i32 && c.parent_mount == mount);
-        let exists = self
-            .build
-            .component_info(parent)
-            .is_some_and(|info| info.has_mount(mount));
-        if used || !exists {
-            self.target = (0, 0);
         }
     }
 
@@ -1950,22 +3588,24 @@ impl Builder {
         let (frame, grid) = self
             .control_grid()
             .ok_or_else(|| "the wiring tab's control grid is not on screen".to_string())?;
-        let rect = grid.cell(frame, cell[1], cell[0]);
-        Ok([rect.x + rect.w / 2.0, rect.y + rect.h / 2.0])
+        let _ = grid;
+        let (w, h) = control_cell_size(frame);
+        Ok([
+            frame.x + w * (cell[0] as f32 + 0.5),
+            frame.y + h * (cell[1] as f32 + 0.5),
+        ])
     }
 
     /// The cell a point inside the shipped `control grid` names, or `None` when
-    /// it is outside the authors' `Rows`/`Columns` (3×4).
+    /// it is outside the board's 3x3 cells ([`control_cell_size`]).
     fn control_cell_at(&self, x: f32, y: f32) -> Option<[i32; 2]> {
-        let (frame, grid) = self.control_grid()?;
-        for row in 0..grid.rows {
-            for column in 0..grid.columns {
-                if grid.cell(frame, row, column).contains_point(x, y) {
-                    return Some([column, row]);
-                }
-            }
+        let (frame, _) = self.control_grid()?;
+        if !frame.contains_point(x, y) {
+            return None;
         }
-        None
+        let (w, h) = control_cell_size(frame);
+        let (column, row) = (((x - frame.x) / w) as i32, ((y - frame.y) / h) as i32);
+        (column < 3 && row < 3).then_some([column, row])
     }
 
     /// Add the pending control kind at a free cell. The shipped grid holds one
@@ -2059,30 +3699,6 @@ impl Builder {
         }
     }
 
-    fn free_mounts(&self, parent: usize) -> Vec<(i32, String)> {
-        let Some(info) = self.build.component_info(parent) else {
-            return Vec::new();
-        };
-        info.mounts
-            .iter()
-            .filter(|(mount, _)| {
-                !self
-                    .build
-                    .components()
-                    .iter()
-                    .any(|c| c.parent == parent as i32 && c.parent_mount == **mount)
-            })
-            .map(|(mount, a)| {
-                let types = if a.types.is_empty() {
-                    "-".to_string()
-                } else {
-                    a.types.join(" ")
-                };
-                (*mount, types)
-            })
-            .collect()
-    }
-
     /// Rebuild the synthetic panel: a background and one `Text` row per line,
     /// framed from the screen's own 3D placeholder.
     fn refresh_panel(&mut self) {
@@ -2135,7 +3751,7 @@ impl Builder {
                     "Parts (click to select)".into(),
                     [0.6, 0.8, 1.0, 1.0],
                 ));
-                for (i, c) in self.build.components().iter().enumerate().take(3) {
+                for (i, c) in self.build.components().iter().enumerate().take(4) {
                     let info = self.build.component_info(i);
                     let name = info
                         .map(|i| i.name.clone())
@@ -2148,78 +3764,42 @@ impl Builder {
                     };
                     rows.push((format!("m9:part:{i}"), label, [0.9, 0.9, 0.9, 1.0]));
                 }
-                rows.push((String::new(), "Attach to".into(), [0.6, 0.8, 1.0, 1.0]));
-                let (parent, mount) = self.target;
-                rows.push((
-                    "m9:mount:0:0".into(),
-                    format!(
-                        "{}chassis baseplate 0:0",
-                        if (parent, mount) == (0, 0) { "> " } else { "" }
-                    ),
-                    [0.9, 1.0, 0.7, 1.0],
-                ));
-                for (i, c) in self.build.components().iter().enumerate().skip(1).take(1) {
-                    let info = self.build.component_info(i);
-                    let name = info
-                        .map(|i| i.name.clone())
-                        .unwrap_or_else(|| c.class.clone());
-                    for (mount, types) in self.free_mounts(i).into_iter().take(3) {
-                        rows.push((
-                            format!("m9:mount:{i}:{mount}"),
-                            format!(
-                                "{}{i}: {name} mount {mount} ({types})",
-                                if (parent, mount) == (i, mount) {
-                                    "> "
-                                } else {
-                                    ""
-                                }
-                            ),
-                            [0.9, 1.0, 0.7, 1.0],
-                        ));
-                    }
-                }
                 rows.push((
                     "m9:undo".into(),
                     "undo last attach (Ctrl+Z)".into(),
                     [0.9, 0.8, 0.5, 1.0],
                 ));
-                if let Some((index, angle, height, point)) = self.selected_chassis_child() {
+                rows.push((
+                    "m9:remove".into(),
+                    match self.selected_part {
+                        Some(i) => format!("remove component {i} (the shipped remove button)"),
+                        None => "remove: click a placed part first".into(),
+                    },
+                    [0.9, 0.8, 0.5, 1.0],
+                ));
+                if let Some((info, name)) = self.selected_info() {
+                    // The shipped `comp_preview` group is the real panel; these
+                    // rows are the same controls for the harness frame.
                     rows.push((
-                        String::new(),
-                        format!(
-                            "place {index}: click the preview ({:.2}, {:.2} m, {:.0} deg, +{:.2})",
-                            point[0],
-                            point[1],
-                            angle.to_degrees(),
-                            height
-                        ),
-                        [0.7, 0.9, 0.7, 1.0],
+                        "m9:attach".into(),
+                        format!("[ Attach ] {name} ({:.1} kg)", info.mass),
+                        [0.7, 1.0, 0.7, 1.0],
                     ));
-                    rows.push((
-                        "m9:rot:-1.5707964".into(),
-                        "rotate -90 deg".into(),
-                        [0.9, 0.8, 0.5, 1.0],
-                    ));
-                    rows.push((
-                        "m9:rot:1.5707964".into(),
-                        "rotate +90 deg".into(),
-                        [0.9, 0.8, 0.5, 1.0],
-                    ));
-                    rows.push((
-                        "m9:lift:0.05".into(),
-                        "lift +0.05 m".into(),
-                        [0.9, 0.8, 0.5, 1.0],
-                    ));
-                }
-                if let Some(component) = &self.selected {
-                    rows.push((
-                        String::new(),
-                        format!(
-                            "next: {} -> click a mount, then a palette cell",
-                            component.name
-                        ),
-                        [0.7, 0.9, 0.7, 1.0],
-                    ));
+                    for id in placement::selectable_mounts(&info) {
+                        let types = info
+                            .mounts
+                            .get(&id)
+                            .map(|a| a.types.join(" "))
+                            .unwrap_or_default();
+                        rows.push((
+                            format!("m9:box:{id}"),
+                            format!(
+                                "{}green box {id} ({types})",
+                                if id == self.own_mount { "> " } else { "  " }
+                            ),
+                            [0.9, 1.0, 0.7, 1.0],
+                        ));
+                    }
                 }
             }
             "wiring button" => {
@@ -2517,7 +4097,7 @@ impl Builder {
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "common buts")
             .map(|p| p.frame.y)
-            .unwrap_or(SHELL_SIZE[1]);
+            .unwrap_or(self.size[1]);
         if !has_3d {
             // Chassis step 1 has no 3D view: its shipped `Editing Area` is the
             // drawing surface. The panel becomes a three-row strip along the
@@ -2530,7 +4110,7 @@ impl Builder {
                     p.widget.name() == "blueprint" || p.widget.name() == workshop::CONTENT_SLOT
                 })
                 .map(|p| p.frame)
-                .unwrap_or(Frame::new(0.0, 0.0, SHELL_SIZE[0], SHELL_SIZE[1]));
+                .unwrap_or(Frame::new(0.0, 0.0, self.size[0], self.size[1]));
             let height = 44.0;
             let y = (content.bottom() - height - 2.0).max(content.y);
             let frame = Frame::new(content.x + 2.0, y, (content.w - 4.0).max(10.0), height);
@@ -2552,12 +4132,24 @@ impl Builder {
                     .find(|p| p.widget.name() == workshop::CONTENT_SLOT)
                     .map(|p| p.frame)
             })
-            .unwrap_or(Frame::new(0.0, 0.0, SHELL_SIZE[0], SHELL_SIZE[1]));
+            .unwrap_or(Frame::new(0.0, 0.0, self.size[0], self.size[1]));
         // The shell's own bottom bar is drawn over the content area; a panel
         // that ran under it would be unreadable and unclickable.
+        if self.view_only {
+            return (
+                placeholder,
+                Frame::new(placeholder.x, placeholder.y, 0.0, 0.0),
+            );
+        }
         let bottom = placeholder.bottom().min(nav_top - 2.0);
         let height = (bottom - placeholder.y).max(40.0);
-        let preview_h = (height * 0.28).max(40.0);
+        // The Components tab needs room to drag a part about; its rows are few.
+        let share = if self.shell.tab() == Some("components button") {
+            0.6
+        } else {
+            0.28
+        };
+        let preview_h = (height * share).max(40.0);
         let preview = Frame::new(
             placeholder.x + 2.0,
             placeholder.y + 2.0,
@@ -2576,9 +4168,12 @@ impl Builder {
     /// Build the frame: the shell's own draw list, the preview composited into
     /// the 3D placeholder, then the synthetic panel over it.
     pub fn scene(&mut self, _target: [u32; 2]) -> Result<UiScene, String> {
+        self.sync_arena();
+        self.bind_arena_hud();
         let mut scene = {
             let placed = self.shell.placements();
-            self.assets.scene(&placed, [1280, 1005])
+            self.assets
+                .scene(&placed, [self.size[0] as u32, self.size[1] as u32])
         };
         let preview_rect = self.panel.preview;
         if let Some((pixels, width, height)) = self.preview_pixels(preview_rect)? {
@@ -2599,9 +4194,120 @@ impl Builder {
                 clip: Some(preview_rect),
             });
         }
+        self.sync_arena();
+        self.arena_quad(&mut scene)?;
+        // The mouse legend and the SHIFT / CTRL tips sit inside the 3D view's own group: the
+        // original draws the view first and these over it.
+        {
+            let placed = self.shell.placements();
+            let overlay: Vec<&Placement> = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .filter(|n| {
+                    let name = n.widget.name();
+                    // Live: the SHIFT / CTRL tips and REMOVE belong to the Components tab only.
+                    name == "mouse instructions grp"
+                        || (self.tab() == Some("components button")
+                            && matches!(name, "tips group" | "remove button"))
+                })
+                .collect();
+            for group in overlay {
+                let over = self.assets.scene(
+                    std::slice::from_ref(group),
+                    [self.size[0] as u32, self.size[1] as u32],
+                );
+                let offset = scene.textures.len();
+                scene.textures.extend(over.textures);
+                for mut quad in over.quads {
+                    quad.texture += offset;
+                    scene.quads.push(quad);
+                }
+            }
+        }
+        if self.tab() == Some("components button") {
+            if let Some(rect) = self.comp_rect() {
+                if self.comp_preview_pixels(rect).is_some() {
+                    if let Some(cp) = &self.comp_preview {
+                        let texture = scene.textures.len();
+                        scene.textures.push(UiTexture {
+                            label: "m9 component preview".into(),
+                            width: cp.width,
+                            height: cp.height,
+                            rgba: cp.pixels.clone(),
+                        });
+                        scene.quads.push(UiQuad {
+                            rect,
+                            corners: None,
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                            color: [1.0, 1.0, 1.0, 1.0],
+                            texture,
+                            alpha: false,
+                            clip: Some(rect),
+                        });
+                    }
+                    // The Attach button is a child of the preview's placeholder,
+                    // so the 3D view is drawn under it.
+                    let placed = self.shell.placements();
+                    if let Some(group) = placed.iter().flat_map(|p| p.walk()).find(|n| {
+                        n.children
+                            .iter()
+                            .any(|c| c.widget.name() == "attach button")
+                    }) {
+                        let over = self.assets.scene(
+                            std::slice::from_ref(group),
+                            [self.size[0] as u32, self.size[1] as u32],
+                        );
+                        let offset = scene.textures.len();
+                        scene.textures.extend(over.textures);
+                        for mut quad in over.quads {
+                            quad.texture += offset;
+                            scene.quads.push(quad);
+                        }
+                    }
+                }
+            }
+        }
+        self.chassis_overlay(&mut scene);
+        if let Some(dialog) = &self.dialog {
+            let placed = ra2ui::resolve_with(&dialog.gib, self.size, Some(self.assets.faces()));
+            let over = self
+                .assets
+                .scene(&placed, [self.size[0] as u32, self.size[1] as u32]);
+            let offset = scene.textures.len();
+            scene.textures.extend(over.textures);
+            for mut quad in over.quads {
+                quad.texture += offset;
+                scene.quads.push(quad);
+            }
+            scene.missing.extend(over.missing);
+        }
+        if let Some(spec) = std::env::var_os("ORA_DEBUG_RECT") {
+            // `x0,y0,x1,y1`: the quads that touch that rectangle, for diagnosing the lab's screens.
+            let v: Vec<f32> = spec
+                .to_string_lossy()
+                .split(',')
+                .filter_map(|t| t.trim().parse().ok())
+                .collect();
+            if let [x0, y0, x1, y1] = v[..] {
+                for (i, q) in scene.quads.iter().enumerate() {
+                    let r = q.rect;
+                    if r.x < x1 && r.x + r.w > x0 && r.y < y1 && r.y + r.h > y0 {
+                        eprintln!(
+                            "quad {i}: {r:?} tex {} color {:?} clip {:?}",
+                            q.texture, q.color, q.clip
+                        );
+                    }
+                }
+            }
+        }
+        if self.view_only {
+            return Ok(scene);
+        }
         let panel_placed =
-            ra2ui::resolve_with(&self.panel.gib, SHELL_SIZE, Some(self.assets.faces()));
-        let panel_scene = self.assets.scene(&panel_placed, [1280, 1005]);
+            ra2ui::resolve_with(&self.panel.gib, self.size, Some(self.assets.faces()));
+        let panel_scene = self
+            .assets
+            .scene(&panel_placed, [self.size[0] as u32, self.size[1] as u32]);
         let offset = scene.textures.len();
         scene.textures.extend(panel_scene.textures);
         for mut quad in panel_scene.quads {
@@ -2612,13 +4318,256 @@ impl Builder {
         Ok(scene)
     }
 
+    /// The practice arena's frame in `test arena placeholder`, under the widgets that are the
+    /// placeholder's children (the `Obstacles` list, RESET and the status box).
+    fn arena_quad(&mut self, scene: &mut UiScene) -> Result<(), String> {
+        if self.arena.is_none() {
+            return Ok(());
+        }
+        let placed = self.shell.placements();
+        let Some(rect) = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "test arena placeholder")
+            .map(|p| p.frame)
+        else {
+            return Ok(());
+        };
+        let size = [
+            rect.w.round().max(16.0) as u32,
+            rect.h.round().max(16.0) as u32,
+        ];
+        let pixels = match self.arena.as_mut() {
+            Some(arena) => arena.frame(&self.renderer, size)?,
+            None => return Ok(()),
+        };
+        let texture = scene.textures.len();
+        scene.textures.push(UiTexture {
+            label: "lab practice arena".into(),
+            width: size[0],
+            height: size[1],
+            rgba: pixels,
+        });
+        let quad = UiQuad {
+            rect,
+            corners: None,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            texture,
+            alpha: false,
+            clip: Some(rect),
+        };
+        // Right after the background that covers the placeholder.
+        let at = scene
+            .quads
+            .iter()
+            .position(|q| {
+                q.color == [0.0, 0.0, 0.0, 1.0]
+                    && (q.rect.x - rect.x).abs() < 1.5
+                    && (q.rect.y - rect.y).abs() < 1.5
+                    && (q.rect.w - rect.w).abs() < 1.5
+                    && (q.rect.h - rect.h).abs() < 1.5
+            })
+            .map_or(0, |i| i + 1);
+        if std::env::var_os("ORA_DEBUG_QUADS").is_some() {
+            eprintln!("arena rect {rect:?} inserted at {at}");
+            for (i, q) in scene
+                .quads
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| q.rect.w > 400.0)
+            {
+                eprintln!(
+                    "  quad {i}: {:?} tex {} color {:?}",
+                    q.rect, q.texture, q.color
+                );
+            }
+        }
+        scene.quads.insert(at, quad);
+        Ok(())
+    }
+
+    /// The blueprint's grid, outline and points drawn over the chassis steps' `Editing Area`
+    /// (live: eleven 1 px lines of (112,112,127) 45 px apart, the outline white, each point a
+    /// small ring, the selected one brighter).
+    fn chassis_overlay(&self, scene: &mut UiScene) {
+        if self.tab() == Some("wiring button") {
+            self.controller_lines(scene);
+        }
+        if self.tab() != Some("chassis button") {
+            return;
+        }
+        let placed = self.shell.placements();
+        let Some(area) = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "Editing Area")
+        else {
+            return;
+        };
+        let grid = blueprint_grid(area.frame);
+        let texture = scene.textures.len();
+        scene.textures.push(UiTexture {
+            label: "m9 ink".into(),
+            width: 1,
+            height: 1,
+            rgba: vec![255, 255, 255, 255],
+        });
+        let mut ink = Ink {
+            scene,
+            texture,
+            clip: area.frame,
+        };
+        let line_color = [112.0 / 255.0, 112.0 / 255.0, 127.0 / 255.0, 1.0];
+        for k in 0..=10 {
+            let t = k as f32 * grid.w / 10.0;
+            ink.line(
+                [grid.x + t, grid.y],
+                [grid.x + t, grid.y + grid.h],
+                1.0,
+                line_color,
+            );
+            ink.line(
+                [grid.x, grid.y + t],
+                [grid.x + grid.w, grid.y + t],
+                1.0,
+                line_color,
+            );
+        }
+        let step = self.structure_step();
+        let Some(chassis) = self.build.chassis() else {
+            return;
+        };
+        let (points, closed) = if step == 2 {
+            (&chassis.top, true)
+        } else {
+            (&chassis.bottom, self.outline_closed)
+        };
+        let at = |p: &[i32; 2]| {
+            [
+                grid.x + p[0] as f32 / 1000.0 * grid.w,
+                grid.y + p[1] as f32 / 1000.0 * grid.h,
+            ]
+        };
+        let white = [1.0, 1.0, 1.0, 1.0];
+        for i in 0..points.len() {
+            if i + 1 < points.len() || (closed && points.len() >= 3) {
+                let (a, b) = (at(&points[i]), at(&points[(i + 1) % points.len()]));
+                ink.line(a, b, 2.0, white);
+            }
+        }
+        for (i, p) in points.iter().enumerate() {
+            let selected = step == 2 && self.draw_point == Some(i);
+            ink.ring(
+                at(p),
+                6.0,
+                if selected { 2.0 } else { 1.0 },
+                if selected {
+                    white
+                } else {
+                    [0.78, 0.78, 0.82, 1.0]
+                },
+            );
+        }
+    }
+
+    /// The controller's grid rules (live: 1 px, (102,102,102), between the three columns and rows).
+    fn controller_lines(&self, scene: &mut UiScene) {
+        let Some((frame, _)) = self.control_grid() else {
+            return;
+        };
+        let texture = scene.textures.len();
+        scene.textures.push(UiTexture {
+            label: "m9 ink".into(),
+            width: 1,
+            height: 1,
+            rgba: vec![255, 255, 255, 255],
+        });
+        let mut ink = Ink {
+            scene,
+            texture,
+            clip: frame,
+        };
+        let (w, h) = control_cell_size(frame);
+        let color = [0.4, 0.4, 0.4, 1.0];
+        for k in 1..3 {
+            let x = frame.x + w * k as f32;
+            ink.line([x, frame.y], [x, frame.y + frame.h], 1.0, color);
+            let y = frame.y + h * k as f32;
+            ink.line([frame.x, y], [frame.x + frame.w, y], 1.0, color);
+        }
+    }
+
+    /// A harness shortcut: the baseplate drawn as the 600-unit square the live runs used and
+    /// extruded (what clicking four corners, the first one again, step 2 and Finished does).
+    pub fn draw_square_chassis(&mut self) -> Result<(), String> {
+        self.build
+            .set_chassis_rectangle(Outline::Bottom, [500, 500], 600, 600)
+            .map_err(|e| e.to_string())?;
+        self.build.extrude_chassis().map_err(|e| e.to_string())?;
+        self.refresh()
+    }
+
+    /// The screen point of a widget on the lab's own screen, for a scripted click.
+    pub fn point_of(&self, name: &str) -> Result<[f32; 2], String> {
+        self.shell.point_for(name)
+    }
+
+    /// The screen point of a placed part in the 3D view (its mesh's centre), for a scripted click.
+    pub fn part_point(&mut self, index: usize) -> Result<[f32; 2], String> {
+        let world = self.build.transforms();
+        let info = self
+            .build
+            .component_info(index)
+            .ok_or_else(|| format!("no component {index}"))?;
+        let centre = info
+            .bounds
+            .map(|(lo, hi)| (Vec3::from(lo) + Vec3::from(hi)) * 0.5)
+            .unwrap_or(Vec3::ZERO);
+        let at = world[index].transform_point3(centre);
+        self.preview_point_of(at)
+    }
+
+    /// The screen point of row `row` (0 = first item) of the open connection window's dropdown list.
+    pub fn dialog_list_point(&self, row: usize) -> Option<[f32; 2]> {
+        let dialog = self.dialog.as_ref()?;
+        let placed = ra2ui::resolve_with(&dialog.gib, self.size, Some(self.assets.faces()));
+        let list = placed.iter().flat_map(|p| p.walk()).find(|p| {
+            p.widget.kind == WidgetKind::ListBox
+                && ra2ui::input::field_of(p.widget, "Visible") == Some("true")
+                && p.frame.w > 0.0
+        })?;
+        let height = ra2ui::Grid::from_widget(list.widget)
+            .map(|g| g.row_height)
+            .filter(|h| *h > 0.0)
+            .unwrap_or(18.0);
+        Some([
+            list.frame.x + list.frame.w * 0.5,
+            list.frame.y + height * (row as f32 + 0.5),
+        ])
+    }
+
+    /// The screen point of a widget in the open wiring window, for a scripted click.
+    pub fn dialog_point_for(&self, name: &str) -> Option<[f32; 2]> {
+        let dialog = self.dialog.as_ref()?;
+        let placed = ra2ui::resolve_with(&dialog.gib, self.size, Some(self.assets.faces()));
+        let found = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == name)?;
+        Some([
+            found.frame.x + found.frame.w * 0.5,
+            found.frame.y + found.frame.h * 0.5,
+        ])
+    }
+
     /// Write the current frame through the same UI pipeline the window uses.
     pub fn shot(&mut self, path: &Path, size: [u32; 2]) -> Result<(), String> {
         let scene = self.scene(size)?;
         let renderer = &self.renderer;
         let ui = UiRenderer::new(renderer.device());
         let pixels = ui
-            .render(renderer.device(), renderer.queue(), &scene)
+            .render_at(renderer.device(), renderer.queue(), &scene, size)
             .map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -2639,14 +4588,124 @@ impl Builder {
     fn preview_pixels(&mut self, rect: Frame) -> Result<Option<(Vec<u8>, u32, u32)>, String> {
         let width = rect.w.round().max(16.0) as u32;
         let height = rect.h.round().max(16.0) as u32;
+        // What else the frame depends on besides the model: the lab camera, the tab and the
+        // selected control.
+        let view_key = {
+            let cam = self.lab_cam();
+            format!(
+                "{:?}|{:?}|{:?}|{:?}|{:?}",
+                self.tab(),
+                self.wire_control,
+                cam.pitch.to_bits(),
+                cam.yaw.to_bits(),
+                cam.dist.to_bits()
+            )
+        };
         if let Some((revision, pixels, w, h)) = &self.preview {
-            if *revision == self.revision && *w == width && *h == height {
+            if *revision == self.revision
+                && *w == width
+                && *h == height
+                && self.preview_view_key == view_key
+            {
                 return Ok(Some((pixels.clone(), *w, *h)));
             }
         }
+        self.preview_view_key = view_key;
         let bot = self.build.to_bot();
         let world = self.build.transforms();
-        let chassis = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
+        let mut chassis = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
+        if matches!(
+            self.tab(),
+            Some("components button") | Some("wiring button")
+        ) {
+            // Live, the chassis is a ghost while parts are placed and wired, so the parts under
+            // its top panel can be seen from above.
+            // (`D3DRS_ALPHABLENDENABLE` with SRCALPHA / ONE, no z write, no culling, no texture,
+            // diffuse (0.625, 0.625, 0.625, 0.14): the live state of the chassis' draw.)
+            let plate =
+                crate::lab_view::baseplate(&chassis, &self.ui.join("botlab/baseplate_grid.bmp"));
+            for item in chassis.iter_mut() {
+                item.material.stages.clear();
+                item.material.transparent = true;
+                item.material.additive = true;
+                item.material.no_alpha_test = true;
+                item.material.z_write = false;
+                item.material.early = true;
+                item.material.cull = false;
+                item.material.diffuse = [0.625, 0.625, 0.625, 0.14];
+            }
+            if let Some(plate) = plate {
+                chassis.insert(0, plate);
+            }
+        }
+        // The lines the original draws over the ghost chassis, and a selected control's graphics.
+        let mut overlay: Vec<DrawItem> = Vec::new();
+        if self.view_only
+            && !world.is_empty()
+            && matches!(
+                self.tab(),
+                Some("components button") | Some("wiring button")
+            )
+        {
+            let (eye, _) = self.lab_cam().eye_up();
+            let cam = crate::lab_view::Cam::new(
+                eye,
+                Vec3::ZERO,
+                std::f32::consts::FRAC_PI_4,
+                height as f32,
+            );
+            let plain = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
+            let edges: Vec<(Vec3, Vec3)> = crate::lab_view::outline_edges(&plain)
+                .into_iter()
+                .map(|(a, b)| (world[0].transform_point3(a), world[0].transform_point3(b)))
+                .collect();
+            let lines = crate::lab_view::ribbon(
+                &cam,
+                &edges,
+                crate::lab_view::EDGE_COLOR,
+                crate::lab_view::EDGE_PIXELS,
+            );
+            if !lines.is_empty() {
+                overlay.push(DrawItem::new(
+                    lines,
+                    ra2_render::Material {
+                        lighting: false,
+                        has_vertex_colors: true,
+                        cull: false,
+                        ..ra2_render::Material::default()
+                    },
+                    "lab chassis edges",
+                ));
+            }
+            if self.tab() == Some("wiring button") {
+                if let Some(cell) = self.wire_control {
+                    if let Some(control) = self.build.board().control_at(cell) {
+                        let mut parts: Vec<[f32; 2]> = Vec::new();
+                        for b in &self.build.board().bindings {
+                            if [b.control[0], b.control[1]] != cell {
+                                continue;
+                            }
+                            let Some(m) = world.get(b.component as usize) else {
+                                continue;
+                            };
+                            let p = crate::lab_view::origin_of(*m);
+                            if !parts.contains(&[p.x, p.z]) {
+                                parts.push([p.x, p.z]);
+                            }
+                        }
+                        let anchor = self.wire_anchor(&world);
+                        let file = self.ui.join(format!(
+                            "botlab/ctrl_icon_{}.bmp",
+                            control.kind.label().to_lowercase()
+                        ));
+                        let scene = crate::lab_view::wire_scene(&cam, anchor, &parts, &file);
+                        // The wires are drawn over the icon (live: a wire crosses its label).
+                        overlay.push(scene.icon);
+                        overlay.push(scene.lines);
+                    }
+                }
+            }
+        }
         let mut owned: Vec<(usize, Vec<DrawItem>)> = Vec::new();
         for i in 1..bot.components.len() {
             let Some(info) = self.build.component_info(i) else {
@@ -2697,15 +4756,64 @@ impl Builder {
                 }
             }
         }
+        // The lab's own graphics are not part of the framing either.
+        if !overlay.is_empty() {
+            groups.push(RenderGroup {
+                items: &overlay,
+                model: Mat4::IDENTITY,
+            });
+        }
+        // The dragged part rides on top of the robot; it is not part of the
+        // framing, or the camera would chase the mouse.
+        if let Some(active) = self.drag.as_ref() {
+            let (items, model) = match &active.candidate {
+                Some(c) if active.refusal.is_none() => (&active.items, c.world),
+                Some(c) => (&active.red, c.world),
+                None => (&active.red, active.floating),
+            };
+            if !items.is_empty() {
+                groups.push(RenderGroup {
+                    items: items.as_slice(),
+                    model,
+                });
+            }
+        }
         let center = (min + max) * 0.5;
         let radius = ((max - min).length() * 0.5).max(0.6);
-        let eye = center + Vec3::new(radius * 1.9, radius * 1.2, radius * 2.1);
-        let view = ra2_render::look_at_rh(eye, center, Vec3::Y);
-        let proj = ra2_render::perspective_rh(
+        let _ = (center, radius);
+        let (eye, up) = if self.view_only {
+            // The original's lab camera (`FUN_005a6260` mode 2, one object per tab): a 45 degree
+            // perspective at `dist` from the robot's origin, orbiting with the middle button.
+            self.renderer.set_background([0.15; 3]);
+            let cam = self.lab_cam();
+            let (eye, up) = cam.eye_up();
+            // The lab lights the robot with one white point light on the camera (live `D3DLIGHT8`:
+            // type 1, diffuse and specular 1, range 1000, attenuation 1 / 0 / 0, at the eye),
+            // over the usual 38/255 ambient.
+            self.renderer.set_lights(&[ra2_render::material::Light {
+                position: eye,
+                range: 1000.0,
+                diffuse: [1.0; 3],
+                specular: [1.0; 3],
+                attenuation: [1.0, 0.0, 0.0],
+            }]);
+            (eye, up)
+        } else {
+            (
+                center + Vec3::new(radius * 1.9, radius * 1.2, radius * 2.1),
+                Vec3::Y,
+            )
+        };
+        let view = ra2_render::look_at_lh(eye, Vec3::ZERO, up);
+        let proj = ra2_render::perspective_lh(
             45f32.to_radians(),
             width as f32 / height as f32,
             0.05,
-            radius * 30.0,
+            if self.view_only {
+                2000.0
+            } else {
+                radius * 30.0
+            },
         );
         let view_proj = proj * view;
         self.preview_camera = Some(PreviewCamera {
@@ -2721,6 +4829,169 @@ impl Builder {
         self.preview = Some((self.revision, pixels.clone(), width, height));
         Ok(Some((pixels, width, height)))
     }
+}
+
+/// A robot seen straight down, nose up the screen, over `background`: the
+/// original's "3d view group" on the repair bench (`repairs.gib`, `3d view
+/// group` holding `repairs 3d placeholder`) and the lab's own view. Pixels are
+/// RGBA, `width x height`; `None` when the design has nothing to draw.
+pub fn robot_top_view(
+    renderer: &Renderer,
+    game: &Path,
+    build: &Build,
+    background: [f32; 3],
+    width: u32,
+    height: u32,
+) -> Result<Option<Vec<u8>>, String> {
+    let library = GameLibrary::open(game).map_err(|e| e.to_string())?;
+    let bot = build.to_bot();
+    let world = build.transforms();
+    let chassis = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
+    let mut owned: Vec<(usize, Vec<DrawItem>)> = Vec::new();
+    for i in 1..bot.components.len() {
+        let Some(info) = build.component_info(i) else {
+            continue;
+        };
+        let Some(def) = info.def.as_ref() else {
+            continue;
+        };
+        let Some(scene) = library.load_component_mesh(def) else {
+            continue;
+        };
+        let dir = library
+            .component_mesh_path(def)
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| game.join("Components"));
+        owned.push((
+            i,
+            ra2_render::scene_items(&scene, Mat4::IDENTITY, &dir, &info.name),
+        ));
+    }
+    let mut groups: Vec<RenderGroup<'_>> = Vec::new();
+    if !chassis.is_empty() && !world.is_empty() {
+        groups.push(RenderGroup {
+            items: &chassis,
+            model: world[0],
+        });
+    }
+    for (i, items) in &owned {
+        if let Some(model) = world.get(*i) {
+            groups.push(RenderGroup {
+                items,
+                model: *model,
+            });
+        }
+    }
+    if groups.is_empty() {
+        return Ok(None);
+    }
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for group in &groups {
+        for item in group.items {
+            for v in &item.vertices {
+                let p = group.model.transform_point3(Vec3::from(v.pos));
+                min = min.min(p);
+                max = max.max(p);
+            }
+        }
+    }
+    let center = (min + max) * 0.5;
+    let radius = ((max - min).length() * 0.5).max(0.6);
+    let eye = center + Vec3::new(0.0, radius * 3.0, 0.0);
+    let view = ra2_render::look_at_lh(eye, center, Vec3::Z);
+    let proj = ra2_render::perspective_lh(
+        45f32.to_radians(),
+        width as f32 / height as f32,
+        0.05,
+        radius * 30.0,
+    );
+    renderer.set_background(background);
+    renderer
+        .render_groups(&groups, proj * view, width, height)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// Solid-colour strokes drawn into a scene from a one-pixel white texture.
+struct Ink<'a> {
+    scene: &'a mut UiScene,
+    texture: usize,
+    clip: Frame,
+}
+
+impl Ink<'_> {
+    fn quad(&mut self, rect: Frame, corners: Option<[[f32; 2]; 4]>, color: [f32; 4]) {
+        self.scene.quads.push(UiQuad {
+            rect,
+            corners,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            color,
+            texture: self.texture,
+            alpha: true,
+            clip: Some(self.clip),
+        });
+    }
+
+    /// A stroke `width` px wide between two points.
+    fn line(&mut self, a: [f32; 2], b: [f32; 2], width: f32, color: [f32; 4]) {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 0.01 {
+            return;
+        }
+        if dy.abs() < 0.01 || dx.abs() < 0.01 {
+            let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
+            let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+            let rect = if dy.abs() < 0.01 {
+                Frame::new(x0, y0 - width * 0.5 + 0.5, x1 - x0, width)
+            } else {
+                Frame::new(x0 - width * 0.5 + 0.5, y0, width, y1 - y0)
+            };
+            self.quad(rect, None, color);
+            return;
+        }
+        let (nx, ny) = (-dy / len * width * 0.5, dx / len * width * 0.5);
+        let corners = [
+            [a[0] + nx, a[1] + ny],
+            [b[0] + nx, b[1] + ny],
+            [b[0] - nx, b[1] - ny],
+            [a[0] - nx, a[1] - ny],
+        ];
+        let rect = Frame::new(a[0].min(b[0]), a[1].min(b[1]), dx.abs(), dy.abs());
+        self.quad(rect, Some(corners), color);
+    }
+
+    /// A ring of radius `r`, drawn as twelve strokes.
+    fn ring(&mut self, c: [f32; 2], r: f32, width: f32, color: [f32; 4]) {
+        let at = |i: usize| {
+            let t = std::f32::consts::TAU * i as f32 / 12.0;
+            [c[0] + r * t.cos(), c[1] + r * t.sin()]
+        };
+        for i in 0..12 {
+            self.line(at(i), at(i + 1), width, color);
+        }
+    }
+}
+
+/// The blueprint's drawing grid inside the `Editing Area` (live, 1024x768: the area is 466 px
+/// square at (31.8, 141.5) and the grid's eleven lines run 39..489 across and 148..598 down, 45 px
+/// apart: the `0..1000` outline range is 450 px).
+fn blueprint_grid(area: Frame) -> Frame {
+    Frame::new(
+        area.x + area.w * 0.015_45,
+        area.y + area.h * 0.013_95,
+        area.w * 0.9657,
+        area.h * 0.9657,
+    )
+}
+
+/// The control grid's cell size: the board is three cells across and three
+/// down, each a third of the grid's frame (capture: rules at x 556, 698, 840,
+/// 982 and y 386, 499, 612 on a 426 x 339 px grid). The file's own
+/// `Columns 4`/`ColWidths 66`/`RowHeight 70` are the editor's canvas.
+fn control_cell_size(frame: Frame) -> (f32, f32) {
+    (frame.w / 3.0, frame.h / 3.0)
 }
 
 /// One line of the synthetic panel.
@@ -2770,14 +5041,16 @@ fn make_panel(frame: Frame, preview: Frame, rows: &[(String, String, [f32; 4])])
                 field("_Position", "0 0 0 0"),
                 field("Name", action),
                 field("ID", "-1"),
-                field("Position", &format!("4 0 {y} 0")),
+                field("Position", &format!("4 0 {} 0", y + ROW_BASELINE)),
                 field(
                     "Size",
                     &format!("{} 0 {} 0", (frame.w - 8.0).max(10.0), ROW_HEIGHT),
                 ),
                 field("Visible", "true"),
                 field("ChildOrder", "0"),
-                field("ClipMode", "1"),
+                // The row's box is its hit area; the text is not clipped to
+                // it (its descenders and baseline fall below the ascent).
+                field("ClipMode", "0"),
                 field("NumChildren", "0"),
             ],
             attachments: Vec::new(),
@@ -2814,33 +5087,6 @@ fn make_panel(frame: Frame, preview: Frame, rows: &[(String, String, [f32; 4])])
         },
         preview,
     }
-}
-
-/// The child's own mount for a link: one the parent's mount accepts; else the
-/// component's `base_f` when it has one; else its first mount. A missing type
-/// list means "the data does not say", the same reading the model uses.
-fn choose_own_mount(
-    child: &ra2ui::workshop::library::ComponentInfo,
-    parent: Option<&ra2ui::workshop::library::ComponentInfo>,
-    parent_mount: i32,
-) -> i32 {
-    if let Some(point) = parent.and_then(|p| p.mounts.get(&parent_mount)) {
-        if let Some((id, _)) = child
-            .mounts
-            .iter()
-            .find(|(_, a)| a.types.iter().any(|t| point.accepts(t)))
-        {
-            return *id;
-        }
-    }
-    if let Some((id, _)) = child
-        .mounts
-        .iter()
-        .find(|(_, a)| a.types.iter().any(|t| t.eq_ignore_ascii_case("base_f")))
-    {
-        return *id;
-    }
-    child.mounts.keys().next().copied().unwrap_or(0)
 }
 
 /// Möller–Trumbore: the ray's distance and barycentric `u, v` of a hit.
@@ -2886,25 +5132,18 @@ fn chain<'a>(roots: &'a [Placement<'a>], path: &[usize]) -> Vec<&'a Placement<'a
     out
 }
 
-fn list_folder(dir: &Path, extensions: &[&str]) -> Vec<String> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        if extensions.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
-            if let Some(name) = path.file_name() {
-                out.push(name.to_string_lossy().into_owned());
-            }
-        }
-    }
+fn list_folder(game: &Path, rel: &str, extensions: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = ra2fmt::saves::list(game, rel)
+        .into_iter()
+        .filter(|name| {
+            let path = ra2fmt::saves::resolve(game, Path::new(rel).join(name));
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|ext| extensions.iter().any(|e| ext.eq_ignore_ascii_case(e)))
+        })
+        .collect();
     out.sort_by_key(|a| a.to_ascii_lowercase());
     out
 }
@@ -2920,6 +5159,29 @@ pub fn run_headless(options: &Options) -> Result<(), String> {
         .as_ref()
         .ok_or_else(|| "--build --out DIR is the offscreen path".to_string())?;
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    if let Some(view) = &options.view {
+        let mut builder = Builder::open_sized(
+            &options.game,
+            options.start.as_deref(),
+            [options.size[0] as f32, options.size[1] as f32],
+        )?;
+        builder.view_only = true;
+        builder.refresh()?;
+        // The harness path: the bot lab as the player sees it after opening a
+        // design from the inventory and clicking one tab, no editing.
+        let button = match view.as_str() {
+            "overview" => "overview button",
+            "chassis" => "chassis button",
+            "components" => "components button",
+            "wiring" => "wiring button",
+            "paint" => "paintshop button",
+            other => return Err(format!("unknown --build-view {other:?}")),
+        };
+        if view != "overview" {
+            builder.click_named(button)?;
+        }
+        return builder.shot(&out.join(format!("build-view-{view}.png")), options.size);
+    }
     let mut builder = Builder::open(&options.game, options.start.as_deref())?;
     script(
         &mut builder,
@@ -3042,24 +5304,43 @@ pub fn script(
     builder.click_named("mechanics button")?;
     let motor_file = "Components\\ztek1.txt";
     let motor = builder.build.components().len();
+    // Pick the part: it is only selected, and the comp_preview group shows it.
     builder.click_palette_file(motor_file)?;
-    if builder.build.components().len() != motor + 1 {
+    if builder.build.components().len() != motor {
+        return Err("a palette click attached a part; only Attach may".into());
+    }
+    if frames {
+        builder.shot(&out.join("component-selected.png"), target)?;
+    }
+    // Attach, then drag the part over the baseplate and click.
+    let attach = builder.attach_point()?;
+    builder.mouse_moved(attach[0], attach[1]);
+    builder.click(attach[0], attach[1])?;
+    if !builder.dragging() {
         return Err(format!(
-            "the palette click attached {} components, not one",
-            builder.build.components().len() - motor
+            "Attach did not start a drag ({})",
+            builder.status()
         ));
     }
-    // Place the motor on the baseplate with a click on the live preview. The
-    // model writes the file's stored transform; the click is the point.
-    let place = builder.preview_point_at([0.37, -0.22])?;
+    let place = builder.drag_point(PlaceOn::Baseplate([0.37, -0.22]))?;
+    builder.mouse_moved(place[0], place[1]);
+    if frames {
+        builder.shot(&out.join("component-drag.png"), target)?;
+    }
     builder.click(place[0], place[1])?;
+    if builder.build.components().len() != motor + 1 {
+        return Err(format!(
+            "the drop did not attach the motor ({})",
+            builder.status()
+        ));
+    }
     let placed = builder.build.components()[motor].clone();
     if (placed.translation[0] - 0.37).abs() > 0.03
         || (placed.translation[2] + 0.22).abs() > 0.03
         || placed.translation[1] != 0.0
     {
         return Err(format!(
-            "the preview click did not place the motor on the baseplate: {:?}",
+            "the drop did not place the motor on the baseplate: {:?}",
             placed.translation
         ));
     }
@@ -3070,21 +5351,42 @@ pub fn script(
     if frames {
         builder.shot(&out.join("placement.png"), target)?;
     }
-    // The motor's axle mount is the parent the wheel hangs off. Click the panel
-    // row, as a player would.
+    if frames {
+        // A refused spot: the part is drawn red and the tip says why. Clicking
+        // over nothing ends the drag.
+        builder.click_palette_file(motor_file)?;
+        let attach = builder.attach_point()?;
+        builder.click(attach[0], attach[1])?;
+        let over = builder.drag_point(PlaceOn::Baseplate([0.40, -0.22]))?;
+        builder.mouse_moved(over[0], over[1]);
+        builder.shot(&out.join("component-refused.png"), target)?;
+        println!("  refused drop: {}", builder.status());
+        let corner = [builder.panel.preview.x + 3.0, builder.panel.preview.y + 3.0];
+        builder.mouse_moved(corner[0], corner[1]);
+        builder.click(corner[0], corner[1])?;
+        if builder.dragging() {
+            return Err("a click over nothing did not end the drag".into());
+        }
+    }
+    // The motor's axle point is the socket the wheel's drag snaps to.
     let axle = builder
-        .free_mounts(motor)
-        .into_iter()
-        .find(|(_, types)| {
-            types
-                .split_whitespace()
-                .any(|t| t.eq_ignore_ascii_case("axle_m"))
+        .build
+        .component_info(motor)
+        .and_then(|info| {
+            info.mounts
+                .iter()
+                .find(|(_, a)| a.types.iter().any(|t| t == "axle_m"))
+                .map(|(id, _)| *id)
         })
-        .map(|(mount, _)| mount)
         .ok_or_else(|| "the motor has no free axle_M mount".to_string())?;
-    builder.click_action(&format!("m9:mount:{motor}:{axle}"))?;
     builder.click_named("mobility button")?;
-    builder.click_palette_file("Components\\miniwheel.txt")?;
+    builder.place_component(
+        "Components\\miniwheel.txt",
+        PlaceOn::Mount {
+            parent: motor,
+            mount: axle,
+        },
+    )?;
     if builder.build.components().len() != motor + 2 {
         return Err(format!(
             "the wheel did not attach to the motor: {} components",
@@ -3108,18 +5410,20 @@ pub fn script(
 
     // 3. The wiring tab: add an analog control at a free cell, then bind it to
     // the motor's spin action. Click-to-place, then click-to-bind.
+    builder.click_named("power button")?;
+    builder.place_component_free("Components\\controlboard.txt")?;
     builder.click_named("wiring button")?;
     builder.click_named("new analog")?;
-    builder.click_control_cell([3, 1])?;
-    if builder.build.board().control_at([3, 1]).is_none() {
+    builder.click_control_cell([2, 1])?;
+    if builder.build.board().control_at([2, 1]).is_none() {
         return Err("the New Analog button plus a free cell did not add a control".into());
     }
     println!(
-        "  wiring: added {} at cell 3,1",
+        "  wiring: added {} at cell 2,1",
         builder
             .build
             .board()
-            .control_at([3, 1])
+            .control_at([2, 1])
             .map(|c| c.name.clone())
             .unwrap_or_default()
     );
@@ -3130,7 +5434,7 @@ pub fn script(
     builder.click_action("m9:wireact:0:0")?;
     let wired = builder.build().board().bindings.clone();
     let expected = wired.iter().any(|binding| {
-        binding.component == 1 && binding.control == [3, 1, 0] && binding.action == "Spin Clockwise"
+        binding.component == 1 && binding.control == [2, 1, 0] && binding.action == "Spin Clockwise"
     });
     if !expected {
         return Err(format!("the bind click did not wire the motor: {wired:?}"));
@@ -3141,7 +5445,7 @@ pub fn script(
         builder
             .build()
             .board()
-            .control_at([3, 1])
+            .control_at([2, 1])
             .map(|c| c.name.as_str())
     );
     if frames {
@@ -3319,6 +5623,413 @@ pub fn script(
     Ok(())
 }
 
+// -- The wiring windows (docs/36 section 9.27) --------------------------------------------------
+
+impl Builder {
+    /// Whether a wiring window is open (it takes every click and key).
+    pub fn dialog_open(&self) -> bool {
+        self.dialog.is_some()
+    }
+
+    /// The control kind whose strip icon the press at `(x, y)` is on, for a drag.
+    pub fn control_icon_at(&self, x: f32, y: f32) -> Option<ControlKind> {
+        if self.tab() != Some("wiring button") {
+            return None;
+        }
+        let placed = self.shell.placements();
+        let path = ra2ui::input::hit(&placed, x, y)?;
+        let chain = chain(&placed, &path);
+        [
+            ("new analog", ControlKind::Analog),
+            ("new switch", ControlKind::Switch),
+            ("new button", ControlKind::Button),
+        ]
+        .into_iter()
+        .find(|(name, _)| chain.iter().any(|p| p.widget.name() == *name))
+        .map(|(_, kind)| kind)
+    }
+
+    /// The button is released at a point: a control icon being dragged that lands on a free cell
+    /// of the controller opens its properties window.
+    pub fn mouse_released(&mut self, x: f32, y: f32) {
+        let _ = (x, y);
+        self.paint_color.drag = None;
+        if self.dialog.is_some() || self.tab() != Some("wiring button") {
+            return;
+        }
+        if self.wire_placing.is_some() {
+            if let Some(cell) = self.control_cell_at(x, y) {
+                if self.build.board().control_at(cell).is_none() {
+                    self.open_props_dialog(cell);
+                }
+            }
+        }
+    }
+
+    fn open_props_dialog(&mut self, cell: [i32; 2]) {
+        let Some(kind) = self.wire_placing.take() else {
+            self.status = "pick SWITCH, BUTTON or ANALOG first".into();
+            return;
+        };
+        let Ok(mut gib) = workshop::load(&self.ui, lab_dialog::props_file(kind)) else {
+            return;
+        };
+        let name = lab_dialog::default_name(kind).to_string();
+        lab_dialog::set_text(&mut gib, "control name", &name);
+        // The input boxes start empty; the file's own `W` / `S` is a design-time sample.
+        lab_dialog::set_text(&mut gib, "input1", "");
+        lab_dialog::set_text(&mut gib, "input2", "");
+        self.dialog = Some(LabDialog {
+            gib,
+            kind: DialogKind::Props {
+                kind,
+                cell,
+                name,
+                keys: [None, None],
+                editing: false,
+            },
+            focus: Focus::None,
+        });
+    }
+
+    /// A double click on a control opens its own window (live: the same `Analog Control` /
+    /// `Switch Control` / `Button Control` window with the control's name and keys in it).
+    fn open_edit_dialog(&mut self, cell: [i32; 2]) {
+        let Some(control) = self.build.board().control_at(cell).cloned() else {
+            return;
+        };
+        let Ok(mut gib) = workshop::load(&self.ui, lab_dialog::props_file(control.kind)) else {
+            return;
+        };
+        lab_dialog::set_text(&mut gib, "control name", &control.name);
+        let mut keys = [None, None];
+        for (slot, row) in control.keys.iter().enumerate().take(2) {
+            let code = Control::key_code(row);
+            let label = if code > 0 {
+                keys[slot] = Some(code);
+                ra2ui::workshop::wiring::dik_name(code)
+            } else {
+                String::new()
+            };
+            lab_dialog::set_text(&mut gib, ["input1", "input2"][slot], &label);
+        }
+        self.wire_control = Some(cell);
+        self.dialog = Some(LabDialog {
+            gib,
+            kind: DialogKind::Props {
+                kind: control.kind,
+                cell,
+                name: control.name.clone(),
+                keys,
+                editing: true,
+            },
+            focus: Focus::None,
+        });
+    }
+
+    /// A click on a component in the 3D view of the Wiring tab: with a control selected it
+    /// opens that control's connection window for the part.
+    fn wire_at_preview(&mut self, x: f32, y: f32) -> Result<(), String> {
+        let Some(cell) = self.wire_control else {
+            return Ok(());
+        };
+        let Some((origin, direction)) = self.bot_ray(x, y) else {
+            return Ok(());
+        };
+        let Some(component) = self.build.pick_part(origin, direction) else {
+            return Ok(());
+        };
+        self.open_wire_dialog(component, cell);
+        Ok(())
+    }
+
+    fn open_wire_dialog(&mut self, component: usize, cell: [i32; 2]) {
+        let Some(control) = self.build.board().control_at(cell).cloned() else {
+            return;
+        };
+        let class = self
+            .build
+            .components()
+            .get(component)
+            .map(|c| c.class.clone())
+            .unwrap_or_default();
+        let actions: Vec<_> =
+            ra2ui::workshop::wiring::ControlBoard::actions_for(control.kind, &class, 0).to_vec();
+        if actions.is_empty() {
+            // A part this kind of control cannot drive takes no window.
+            self.status = format!("a {} control cannot drive a {class}", control.kind.label());
+            return;
+        }
+        let Ok(mut gib) = workshop::load(&self.ui, lab_dialog::wire_file(control.kind)) else {
+            return;
+        };
+        let (name, art) = self
+            .build
+            .component_info(component)
+            .map(|i| (i.name.clone(), i.file.clone()))
+            .unwrap_or_default();
+        lab_dialog::set_text(&mut gib, "component name", &name);
+        if let Some(c) = self
+            .palette
+            .iter()
+            .find(|c| c.file.eq_ignore_ascii_case(&art))
+        {
+            for block in gib.blocks.iter_mut() {
+                if let ra2fmt::gib::Block::Widget(root) = block {
+                    ra2ui::cells::bind_art(root, "component image", &c.art);
+                }
+            }
+        }
+        let slots = control.kind.slots();
+        let items: Vec<String> = std::iter::once("<none>".to_string())
+            .chain(actions.iter().map(|a| a.name().to_string()))
+            .collect();
+        let mut picks = [0usize; 2];
+        for slot in 0..slots {
+            let bound = self
+                .build
+                .board()
+                .bindings
+                .iter()
+                .find(|b| {
+                    b.component == component as i32 && b.control == [cell[0], cell[1], slot as i32]
+                })
+                .and_then(|b| actions.iter().position(|a| a.name() == b.action));
+            picks[slot] = bound.map(|i| i + 1).unwrap_or(0);
+            lab_dialog::set_text(&mut gib, &format!("input{} key", slot + 1), "");
+            ra2ui::dropdown::set_text(&mut gib, lab_dialog::DROPDOWNS[slot], &items[picks[slot]]);
+            let key = control
+                .keys
+                .get(slot)
+                .map(|row| ra2ui::workshop::wiring::dik_name(Control::key_code(row)))
+                .unwrap_or_default();
+            lab_dialog::set_text(&mut gib, &format!("input{} key", slot + 1), &key);
+        }
+        self.dialog = Some(LabDialog {
+            gib,
+            kind: DialogKind::Wire {
+                kind: control.kind,
+                cell,
+                component,
+                actions,
+                picks,
+            },
+            focus: Focus::None,
+        });
+    }
+
+    /// The rows a connection window's dropdown lists.
+    fn dialog_items(&self) -> Vec<String> {
+        match self.dialog.as_ref().map(|d| &d.kind) {
+            Some(DialogKind::Wire { actions, .. }) => std::iter::once("<none>".to_string())
+                .chain(actions.iter().map(|a| a.name().to_string()))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn dialog_click(&mut self, x: f32, y: f32) -> Result<(), String> {
+        use ra2ui::dropdown::{self, Part};
+        let Some(dialog) = self.dialog.as_ref() else {
+            return Ok(());
+        };
+        let placed = ra2ui::resolve_with(&dialog.gib, self.size, Some(self.assets.faces()));
+        let hit = ra2ui::input::hit_control(&placed, x, y);
+        // A dropdown first (an open list takes every click).
+        if matches!(dialog.kind, DialogKind::Wire { .. }) {
+            if let Some((name, part)) = dropdown::click_part(&placed, hit.as_deref(), x, y) {
+                let items = self.dialog_items();
+                let slot = lab_dialog::DROPDOWNS.iter().position(|d| *d == name);
+                let dialog = self.dialog.as_mut().expect("a dialog");
+                let gib = &mut dialog.gib;
+                let open = dropdown::is_open(gib, &name);
+                match part {
+                    Part::Field if open => dropdown::close(gib, &name),
+                    Part::Field => {
+                        let current = dropdown::text(gib, &name).unwrap_or_default();
+                        let selected = items
+                            .iter()
+                            .position(|i| i.eq_ignore_ascii_case(current.trim()))
+                            .unwrap_or(0);
+                        dropdown::open(gib, &name, &items, selected);
+                    }
+                    Part::Row(row) => {
+                        if dropdown::pick(gib, &name, &items, row).is_some() {
+                            if let (Some(slot), DialogKind::Wire { picks, .. }) =
+                                (slot, &mut dialog.kind)
+                            {
+                                picks[slot] = row;
+                            }
+                        }
+                    }
+                    Part::Scroll(top) => dropdown::scroll(gib, &name, top),
+                    Part::Outside => dropdown::close(gib, &name),
+                }
+                return Ok(());
+            }
+        }
+        let names: Vec<String> = hit
+            .map(|path| {
+                chain(&placed, &path)
+                    .iter()
+                    .map(|p| p.widget.name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let has = |n: &str| names.iter().any(|c| c == n);
+        if has("cancel button") {
+            self.dialog = None;
+            return self.refresh();
+        }
+        if has("ok button") {
+            return self.dialog_ok();
+        }
+        if let Some(dialog) = self.dialog.as_mut() {
+            if matches!(dialog.kind, DialogKind::Props { .. }) {
+                dialog.focus = if has("control name") {
+                    Focus::Name
+                } else if has("input1") {
+                    Focus::Key(0)
+                } else if has("input2") {
+                    Focus::Key(1)
+                } else {
+                    dialog.focus
+                };
+            }
+        }
+        Ok(())
+    }
+
+    fn dialog_ok(&mut self) -> Result<(), String> {
+        let Some(dialog) = self.dialog.take() else {
+            return Ok(());
+        };
+        match dialog.kind {
+            DialogKind::Props {
+                kind,
+                cell,
+                name,
+                keys,
+                editing,
+            } => {
+                let rows: Vec<[i32; 4]> = keys
+                    .iter()
+                    .take(kind.slots())
+                    .map(|k| [0, 0, k.unwrap_or(0), 0])
+                    .collect();
+                if editing {
+                    // The control keeps its cell and its bindings; the name and keys change.
+                    if let Some(existing) = self
+                        .build
+                        .board_mut()
+                        .controls
+                        .iter_mut()
+                        .find(|c| c.cell == cell)
+                    {
+                        existing.name = name.trim().to_string();
+                        existing.keys = rows;
+                        self.status = format!("edited {}", name.trim());
+                    }
+                    return self.refresh();
+                }
+                let control = Control::new(name.trim(), cell, kind).with_keys(rows);
+                match self.build.board_mut().add(control) {
+                    Ok(()) => {
+                        self.wire_control = Some(cell);
+                        self.wire_component = None;
+                        self.status = format!("added {}", name.trim());
+                    }
+                    Err(e) => self.status = e.to_string(),
+                }
+            }
+            DialogKind::Wire {
+                cell,
+                component,
+                actions,
+                picks,
+                kind,
+            } => {
+                for (slot, pick) in picks.iter().enumerate().take(kind.slots()) {
+                    self.build.board_mut().unbind(component, cell, slot);
+                    if *pick > 0 {
+                        if let Some(action) = actions.get(pick - 1).copied() {
+                            if let Err(e) = self.build.bind_action(component, action, cell, slot) {
+                                self.status = e.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.refresh()
+    }
+
+    fn dialog_type(&mut self, c: char) {
+        let Some(dialog) = self.dialog.as_mut() else {
+            return;
+        };
+        let focus = dialog.focus;
+        let DialogKind::Props { name, keys, .. } = &mut dialog.kind else {
+            return;
+        };
+        match focus {
+            Focus::Name => {
+                if (c.is_ascii_graphic() || c == ' ') && name.chars().count() < 24 {
+                    name.push(c);
+                    let shown = name.clone();
+                    lab_dialog::set_text(&mut dialog.gib, "control name", &shown);
+                }
+            }
+            Focus::Key(slot) => {
+                if let Some(code) = lab_dialog::dik_for_char(c) {
+                    keys[slot] = Some(code);
+                    let label = ra2ui::workshop::wiring::dik_name(code);
+                    lab_dialog::set_text(&mut dialog.gib, &format!("input{}", slot + 1), &label);
+                }
+            }
+            Focus::None => {}
+        }
+    }
+
+    fn dialog_backspace(&mut self) {
+        let Some(dialog) = self.dialog.as_mut() else {
+            return;
+        };
+        let focus = dialog.focus;
+        let DialogKind::Props { name, keys, .. } = &mut dialog.kind else {
+            return;
+        };
+        match focus {
+            Focus::Name => {
+                name.pop();
+                let shown = name.clone();
+                lab_dialog::set_text(&mut dialog.gib, "control name", &shown);
+            }
+            Focus::Key(slot) => {
+                keys[slot] = None;
+                lab_dialog::set_text(&mut dialog.gib, &format!("input{}", slot + 1), "");
+            }
+            Focus::None => {}
+        }
+    }
+
+    /// A named key that has no character (the arrows): it fills a focused input box.
+    pub fn key_named(&mut self, name: &str) {
+        let Some(code) = lab_dialog::dik_for_name(name) else {
+            return;
+        };
+        let Some(dialog) = self.dialog.as_mut() else {
+            return;
+        };
+        let focus = dialog.focus;
+        if let (Focus::Key(slot), DialogKind::Props { keys, .. }) = (focus, &mut dialog.kind) {
+            keys[slot] = Some(code);
+            let label = ra2ui::workshop::wiring::dik_name(code);
+            lab_dialog::set_text(&mut dialog.gib, &format!("input{}", slot + 1), &label);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3326,6 +6037,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         if let Some(dir) = std::env::var_os("RA2_GAME") {
             let dir = PathBuf::from(dir);
             return dir.is_dir().then_some(dir);
@@ -3342,20 +6054,281 @@ mod tests {
         }
     }
 
-    /// A click on a palette row attaches exactly one component, and the model's
-    /// undo reverses it.
+    /// The player-facing lab draws no synthetic text panel (the original's has
+    /// none); the harness keeps it unless the player route is applied.
     #[test]
-    fn a_palette_click_attaches_one_component_and_undo_reverses_it() {
+    fn the_player_route_hides_the_synthetic_panel_unless_asked() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        assert!(!builder.view_only, "the scripted harness keeps its panel");
+        set_debug_panel_default(false);
+        builder.apply_debug_panel_default().unwrap();
+        assert!(builder.view_only);
+        // The robot view fills the placeholder: no strip is cut off for rows.
+        assert_eq!(builder.panel.preview.w, builder.placeholder_frames().0.w);
+    }
+
+    /// A palette click only selects the part; Attach plus a drag and a click
+    /// adds exactly one component, and the model's undo reverses it.
+    #[test]
+    fn a_palette_click_selects_and_only_a_drag_attaches_one_component() {
         let Some(game) = game_dir() else { return };
         let mut builder = Builder::open(&game, None).unwrap();
         builder.click_named("components button").unwrap();
         builder.click_named("mechanics button").unwrap();
         let before = builder.build.components().len();
         builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        assert_eq!(
+            builder.build.components().len(),
+            before,
+            "a palette click attaches nothing"
+        );
+        assert_eq!(builder.status(), ra2ui::workshop::placement::TIP_BOXES);
+        let index = builder
+            .place_component("Components\\ztek1.txt", PlaceOn::Baseplate([0.2, 0.1]))
+            .unwrap();
+        assert_eq!(index, before);
         assert_eq!(builder.build.components().len(), before + 1);
         assert!(builder.build.can_undo());
         assert!(builder.undo());
         assert_eq!(builder.build.components().len(), before);
+    }
+
+    /// Open the lab on the Mechanics palette with the Z-Tek selected and the
+    /// drag started, the mouse on the Attach button.
+    fn dragging_ztek(game: &Path) -> Builder {
+        let mut builder = Builder::open(game, None).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        let attach = builder.attach_point().unwrap();
+        builder.mouse_moved(attach[0], attach[1]);
+        builder.click(attach[0], attach[1]).unwrap();
+        assert!(builder.dragging(), "Attach starts the drag");
+        assert_eq!(builder.status(), placement::TIP_DRAG);
+        builder
+    }
+
+    /// SHIFT turns the part by the dominant axis of the mouse movement in ten
+    /// degree steps and CTRL raises it in five centimetre steps, and the
+    /// drop stores both in the file's own `angle` and `height`.
+    #[test]
+    fn shift_and_control_turn_and_raise_the_dragged_part() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = dragging_ztek(&game);
+        let at = builder.drag_point(PlaceOn::Baseplate([0.1, 0.0])).unwrap();
+        builder.mouse_moved(at[0], at[1]);
+        // Hold SHIFT and move 12 px right and 3 down: dominant axis +12, so
+        // 12 * 0.2 = 2.4 steps, which truncates to 2 = 20 degrees.
+        builder.set_modifiers(true, false);
+        builder.mouse_moved(at[0] + 12.0, at[1] + 3.0);
+        // Hold CTRL and move 10 px: 2 steps = 0.10 m.
+        builder.set_modifiers(false, true);
+        builder.mouse_moved(at[0] + 12.0, at[1] + 13.0);
+        builder.set_modifiers(false, false);
+        // The part stayed where it was while the modifiers were held.
+        builder.mouse_moved(at[0], at[1]);
+        builder.click(at[0], at[1]).unwrap();
+        let part = builder.build.components().last().unwrap().clone();
+        assert!(
+            (part.angle - 20f32.to_radians()).abs() < 1e-3,
+            "angle {}",
+            part.angle
+        );
+        assert!((part.height - 0.10).abs() < 1e-4, "height {}", part.height);
+        assert!((part.translation[0] - 0.1).abs() < 0.03);
+        // The dropped robot is the game's own file: the writer's bytes read
+        // back to the same components and write back to the same bytes.
+        let bytes = builder.build.save();
+        let back = ra2fmt::bot::parse(&bytes).unwrap();
+        assert_eq!(back.components, builder.build.to_bot().components);
+        assert_eq!(back.write(), bytes);
+        assert_eq!(back.components.last().unwrap().angle, part.angle);
+    }
+
+    /// A refused spot keeps the part in the drag with the exe's text; a click
+    /// over nothing ends it; and nothing was attached either way.
+    #[test]
+    fn a_refused_spot_keeps_the_drag_and_a_click_over_nothing_ends_it() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        builder
+            .place_component("Components\\ztek1.txt", PlaceOn::Baseplate([0.0, 0.0]))
+            .unwrap();
+        let count = builder.build.components().len();
+        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        let attach = builder.attach_point().unwrap();
+        builder.click(attach[0], attach[1]).unwrap();
+        // Onto the first motor.
+        let over = builder.drag_point(PlaceOn::Baseplate([0.03, 0.0])).unwrap();
+        builder.mouse_moved(over[0], over[1]);
+        assert_eq!(
+            builder.status(),
+            "Components should not intersect the chassis or other components."
+        );
+        builder.click(over[0], over[1]).unwrap();
+        assert!(builder.dragging(), "a refused part stays in the drag");
+        assert_eq!(builder.build.components().len(), count);
+        // Off the baseplate sheet altogether: over nothing.
+        let nothing = [builder.panel.preview.x + 3.0, builder.panel.preview.y + 3.0];
+        builder.mouse_moved(nothing[0], nothing[1]);
+        builder.click(nothing[0], nothing[1]).unwrap();
+        assert!(!builder.dragging(), "a click over nothing cancels");
+        assert_eq!(builder.build.components().len(), count);
+    }
+
+    /// Mass check on the Attach button: a robot at the limit refuses the part
+    /// with the exe's sentence and no drag starts.
+    #[test]
+    fn attach_refuses_a_part_that_would_pass_the_mass_limit() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder
+            .build
+            .set_limits(ra2ui::workshop::build::BuildLimits { max_mass: 60.0 });
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        let attach = builder.attach_point().unwrap();
+        builder.click(attach[0], attach[1]).unwrap();
+        assert!(!builder.dragging());
+        assert_eq!(
+            builder.status(),
+            "Total mass of robot must not exceed 60 kg."
+        );
+    }
+
+    /// A placed part is selected by clicking it, there is no move, and the
+    /// remove button refuses a part that still has children.
+    #[test]
+    fn a_click_selects_a_placed_part_and_remove_refuses_one_with_children() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        let motor = builder
+            .place_component("Components\\ztek1.txt", PlaceOn::Baseplate([0.0, 0.0]))
+            .unwrap();
+        let axle = builder
+            .build
+            .component_info(motor)
+            .and_then(|i| {
+                i.mounts
+                    .iter()
+                    .find(|(_, a)| a.types.iter().any(|t| t == "axle_m"))
+                    .map(|(id, _)| *id)
+            })
+            .unwrap();
+        builder.click_named("mobility button").unwrap();
+        builder
+            .place_component(
+                "Components\\miniwheel.txt",
+                PlaceOn::Mount {
+                    parent: motor,
+                    mount: axle,
+                },
+            )
+            .unwrap();
+        // Click the motor in the preview: it is selected.
+        let at = builder.drag_point(PlaceOn::Baseplate([0.0, 0.0])).unwrap();
+        builder.click(at[0], at[1]).unwrap();
+        assert_eq!(builder.selected_part, Some(motor));
+        builder.click_action("m9:remove").unwrap();
+        assert_eq!(
+            builder.status(),
+            "You must delete the components attached to this first."
+        );
+        assert_eq!(builder.build.components().len(), 3);
+        // The wheel is a leaf: select it by row and remove it, then the motor.
+        builder.click_action("m9:part:2").unwrap();
+        builder.click_action("m9:remove").unwrap();
+        assert_eq!(builder.build.components().len(), 2);
+        builder.click_action("m9:part:1").unwrap();
+        builder.click_action("m9:remove").unwrap();
+        assert_eq!(builder.build.components().len(), 1);
+    }
+
+    /// The green boxes: a click on a box in the component preview chooses the
+    /// part's own mount, and the drag uses it.
+    #[test]
+    fn a_click_on_a_green_box_chooses_the_parts_own_mount() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        let (info, _) = builder.selected_info().unwrap();
+        let boxes = placement::selectable_mounts(&info);
+        assert!(boxes.len() >= 2, "the Z-Tek has two base faces: {boxes:?}");
+        let first = builder.own_mount;
+        let other = *boxes.iter().find(|b| **b != first).unwrap();
+        let at = builder.box_point(other).unwrap();
+        builder.click(at[0], at[1]).unwrap();
+        assert_eq!(builder.own_mount, other);
+        let attach = builder.attach_point().unwrap();
+        builder.click(attach[0], attach[1]).unwrap();
+        let place = builder.drag_point(PlaceOn::Baseplate([0.2, 0.2])).unwrap();
+        builder.mouse_moved(place[0], place[1]);
+        builder.click(place[0], place[1]).unwrap();
+        assert_eq!(builder.build.components().last().unwrap().own_mount, other);
+    }
+
+    /// `styles = Standard, ztek2.txt, High Power`: the list has both labels and
+    /// picking the second places `Components\Styles\ztek2.txt`.
+    #[test]
+    fn the_style_list_swaps_the_definition_the_part_is_placed_with() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        let styles = builder.style_list();
+        assert_eq!(
+            styles
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>(),
+            ["Standard", "High Power"]
+        );
+        // Open the dropdown and click its second row.
+        let field = builder
+            .shell()
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "component option")
+            .map(|p| p.frame)
+            .unwrap();
+        builder
+            .click(field.x + 10.0, field.y + field.h * 0.5)
+            .unwrap();
+        let list = builder
+            .shell()
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| {
+                p.widget.kind == WidgetKind::ListBox && p.frame.h > 0.0 && p.frame.y >= field.y
+            })
+            .map(|p| p.frame)
+            .unwrap();
+        // Rows are 18 px: the second one.
+        builder.click(list.x + 10.0, list.y + 27.0).unwrap();
+        assert_eq!(
+            builder.style_file.as_deref(),
+            Some("Components\\Styles\\ztek2.txt")
+        );
+        let attach = builder.attach_point().unwrap();
+        builder.click(attach[0], attach[1]).unwrap();
+        let place = builder.drag_point(PlaceOn::Baseplate([0.2, 0.2])).unwrap();
+        builder.mouse_moved(place[0], place[1]);
+        builder.click(place[0], place[1]).unwrap();
+        assert_eq!(
+            builder.build.components().last().unwrap().file,
+            "Components\\Styles\\ztek2.txt"
+        );
     }
 
     /// M9.3's flow: the shipped `new analog` button, a free `control grid`
@@ -3367,14 +6340,20 @@ mod tests {
         let mut builder = Builder::open(&game, None).unwrap();
         builder.click_named("components button").unwrap();
         builder.click_named("mechanics button").unwrap();
-        builder.click_palette_file("Components\\ztek1.txt").unwrap();
+        builder
+            .place_component("Components\\ztek1.txt", PlaceOn::Baseplate([0.2, 0.2]))
+            .unwrap();
         assert_eq!(builder.build.components()[1].class, "SpinMotor");
+        builder.click_named("power button").unwrap();
+        builder
+            .place_component_free("Components\\controlboard.txt")
+            .unwrap();
         builder.click_named("wiring button").unwrap();
         let before = builder.build.board().controls.len();
         builder.click_named("new analog").unwrap();
-        builder.click_control_cell([3, 1]).unwrap();
+        builder.click_control_cell([2, 1]).unwrap();
         assert_eq!(builder.build.board().controls.len(), before + 1);
-        let added = builder.build.board().control_at([3, 1]).unwrap().clone();
+        let added = builder.build.board().control_at([2, 1]).unwrap().clone();
         assert_eq!(added.kind, ControlKind::Analog);
         assert_eq!(added.name, "New Analog");
 
@@ -3385,7 +6364,7 @@ mod tests {
             Some(&ra2fmt::bot::Binding {
                 component: 1,
                 action: "Spin Clockwise".into(),
-                control: [3, 1, 0],
+                control: [2, 1, 0],
             })
         );
         assert!(builder.build.wiring_errors().is_empty());
@@ -3398,7 +6377,7 @@ mod tests {
         // An invalid action for this kind is the model's own refusal.
         let err = builder
             .build
-            .bind_action(1, Action::OnOffClockwise, [3, 1], 0)
+            .bind_action(1, Action::OnOffClockwise, [2, 1], 0)
             .unwrap_err();
         assert!(
             matches!(
@@ -3476,17 +6455,9 @@ mod tests {
         let points = builder.build.chassis().unwrap().bottom.len();
         assert!(points > 4, "the freeform click added a point: {points}");
 
-        let clear = builder
-            .shell()
-            .placements()
-            .iter()
-            .flat_map(|p| p.walk())
-            .find(|p| p.widget.name() == "clear outline button")
-            .map(|p| p.frame)
-            .expect("the shipped clear outline button");
-        builder
-            .click(clear.x + clear.w * 0.5, clear.y + clear.h * 0.5)
-            .unwrap();
+        // The button's centre can sit under the steps group's row at some
+        // sizes; `click_named` finds a point that actually reaches it.
+        builder.click_named("clear outline button").unwrap();
         assert!(builder.build.chassis().unwrap().bottom.is_empty());
     }
 
@@ -3508,6 +6479,7 @@ mod tests {
         }
         std::fs::create_dir_all(dir.join(DESIGNS)).unwrap();
         std::fs::create_dir_all(dir.join(CUSTOM_TEXTURES)).unwrap();
+        ra2fmt::saves::bind(&dir, &dir);
 
         let out = std::env::temp_dir().join(format!("ra2-build-frames-{}", std::process::id()));
         std::fs::remove_dir_all(&out).ok();
@@ -3519,6 +6491,7 @@ mod tests {
             out: Some(out.clone()),
             size: [640, 502],
             seconds: 0.6,
+            view: None,
         };
         run_headless(&options).expect("the scripted build runs");
         for name in [
@@ -3543,5 +6516,40 @@ mod tests {
         }
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&out).ok();
+    }
+
+    /// The lab camera against the live matrices (`FUN_005a6260` mode 2, dumped through Frida): at
+    /// pitch 0.5 / yaw 0.7 the camera's forward axis was `(0.565, 0.479, 0.671)` and its up
+    /// `(-0.309, 0.878, -0.367)`; the eye sits `distance` behind the forward axis.
+    #[test]
+    fn the_lab_camera_matches_the_live_matrices() {
+        let cam = LabCam {
+            pitch: 0.5,
+            yaw: 0.7,
+            dist: 5.0,
+        };
+        let (eye, up) = cam.eye_up();
+        let forward = -eye / 5.0;
+        assert!(
+            (forward - Vec3::new(0.565, 0.479, 0.671)).length() < 0.002,
+            "{forward:?}"
+        );
+        assert!(
+            (up - Vec3::new(-0.309, 0.878, -0.367)).length() < 0.002,
+            "{up:?}"
+        );
+        let (eye, up) = LabCam::START.eye_up();
+        assert_eq!((eye, up), (Vec3::new(0.0, 0.0, -5.0), Vec3::Y));
+    }
+
+    /// The Paint Shop's picker and slider: the live swatch was `(161, 176, 25)` with the target at
+    /// 0.184 / 0.253 of the picker and the thumb at 0.4.
+    #[test]
+    fn the_paint_swatch_is_the_pickers_hue_and_saturation_at_the_sliders_lightness() {
+        let color = PaintColor::default();
+        let [r, g, b] = color.picked();
+        assert!((i32::from(r) - 161).abs() <= 3, "{r}");
+        assert!((i32::from(g) - 176).abs() <= 3, "{g}");
+        assert!((i32::from(b) - 25).abs() <= 3, "{b}");
     }
 }

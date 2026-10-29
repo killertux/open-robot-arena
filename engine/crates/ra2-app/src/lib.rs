@@ -17,13 +17,23 @@
 pub mod audio;
 pub mod build_mode;
 pub mod cli;
+pub mod crowd;
+pub mod flow;
 pub mod frame;
 pub mod headless;
 pub mod hq_mode;
 pub mod hud;
+pub mod lab_arena;
+pub mod lab_dialog;
+pub mod lab_view;
 pub mod match_mode;
+pub mod match_sounds;
+pub mod net_match;
+pub mod net_play;
 pub mod options;
 pub mod play_mode;
+pub mod prize_scene;
+pub mod reminder;
 pub mod viewport;
 pub mod window;
 
@@ -40,6 +50,9 @@ pub const SHELL_SIZE: [f32; 2] = [1280.0, 1005.0];
 /// only entry point a test needs.
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     let args = cli::parse(args)?;
+    if args.save_dir.is_some() {
+        ra2fmt::saves::configure(args.save_dir.clone());
+    }
     if args.help {
         println!("{}", cli::usage());
         return Ok(());
@@ -55,6 +68,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     } else {
         configured_size
     };
+    build_mode::set_debug_panel_default(args.debug_panel);
     if args.build_mode {
         let options = build_mode::Options {
             game: game.clone(),
@@ -67,6 +81,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
                 window_size
             },
             seconds: args.seconds.unwrap_or(4.0),
+            view: args.build_view.clone(),
         };
         return match options.out {
             Some(_) => build_mode::run_headless(&options),
@@ -87,6 +102,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
             args.report_damage,
         )?;
         options.simulate_season = args.simulate_season;
+        options.bench_undamaged = args.bench_undamaged;
         return match options.out {
             Some(_) => hq_mode::run_headless(options),
             None => window::run_hq(options, args.audio_report),
@@ -141,6 +157,17 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         return play_mode::run_headless(&options).map(|_| ());
     }
     if args.match_mode {
+        for earlier in &args.earlier_arenas {
+            // Load (and drop) the earlier arenas' models: only the session's
+            // texture manager keeps anything from them.
+            let path = if earlier.is_absolute() || earlier.exists() {
+                earlier.clone()
+            } else {
+                game.join(earlier)
+            };
+            ra2_render::collect_items(&path.to_string_lossy())
+                .map_err(|e| format!("--earlier-arenas {}: {e}", path.display()))?;
+        }
         let options = match_mode::Options::new(
             &game,
             args.arena.clone(),
@@ -154,6 +181,9 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
                 window_size
             },
         )?;
+        if !args.camera_shots.is_empty() {
+            return match_mode::run_camera_shots(options, &args.camera_shots);
+        }
         return match options.out {
             Some(_) => match_mode::run_headless(options, args.audio_report).map(|_| ()),
             None => window::run_match(options, args.audio_report),
@@ -180,6 +210,19 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
 /// which is why this is not "the screen changed".
 pub fn activated(step: &Step) -> bool {
     !step.hit.is_empty() && step.hit != "nothing"
+}
+
+/// Whether a click plays `Sounds\\button_click.wav`.
+///
+/// The original plays it from the push-button class's mouse-up handler
+/// (`0x5ec1e0`) and from nowhere else: a tab, a checkbox, a radio group member,
+/// a slider, a scroll bar and a list row are silent. Live (`ui-click-survey`):
+/// the main-menu buttons, Options, OK, Cancel, Main Menu, Continue, Workshop
+/// and Back to HQ click; the exhibition tabs, the arena list, the options
+/// checkboxes, radios and sliders do not. The shell names the widget class first
+/// in `Step::hit` (`Button "start game button"`).
+pub fn plays_click(step: &Step) -> bool {
+    activated(step) && (step.hit.starts_with("Button") || step.hit == "eject button")
 }
 
 /// A click's one-line trace, the same shape `ra2-shell` prints.
@@ -212,12 +255,23 @@ pub fn find_game(explicit: Option<&Path>) -> Result<PathBuf, String> {
             .map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    // The player may name the exe itself; its folder is the install.
+    fn named(path: &Path) -> &Path {
+        let is_exe = path.is_file()
+            && path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("exe"));
+        match path.parent() {
+            Some(parent) if is_exe && !parent.as_os_str().is_empty() => parent,
+            _ => path,
+        }
+    }
     if let Some(dir) = explicit {
-        return check(dir);
+        return check(named(dir)).map_err(|e| format!("--game: {e}"));
     }
     for key in ["RA2_GAME", "RA2_GAME_DIR"] {
         if let Some(dir) = std::env::var_os(key) {
-            return check(Path::new(&dir));
+            return check(named(Path::new(&dir))).map_err(|e| format!("{key}: {e}"));
         }
     }
     let mut starts = Vec::new();

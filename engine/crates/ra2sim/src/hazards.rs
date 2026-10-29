@@ -39,6 +39,138 @@ impl Zone {
         let r = Vec3::splat(radius);
         (p.cmpge(self.min - r) & p.cmple(self.max + r)).all()
     }
+
+    /// Whether a convex body — `points` in the frame `world` puts in the world
+    /// (a component's collision pieces) — comes within `tolerance` of the zone.
+    ///
+    /// The original's SmartZone is a Havok phantom: a body is in it when the
+    /// collision detection finds it within the world's tolerance (0.1). This is
+    /// a separating-axis test on the zone's three axes and on 24 directions
+    /// around its vertical, which is exact for the upright boxes the stock
+    /// zones are and within a few millimetres for the robots' convex pieces. A
+    /// bounding sphere, or even a component's box, is too generous: ALARM's
+    /// chassis box grazed the Octagon's `hellzone2` as it drove past where the
+    /// original never raises the hellraiser (live, `HellRaiser.timer` never
+    /// reset); its hull, chamfered at the corners, stays clear.
+    pub fn touches_points(&self, world: Mat4, points: &[Vec3], tolerance: f32) -> bool {
+        box_touches_points(self.inv * world, self.min, self.max, points, tolerance)
+    }
+}
+
+/// Whether the convex hull of `points` (carried into the box's frame by
+/// `to_box`) overlaps the box `min..max` within `tolerance`: separating axes
+/// along the box's own axes and 24 horizontal directions. Exact for the box's
+/// faces and within a few millimetres for convex pieces.
+pub fn box_touches_points(
+    to_box: Mat4,
+    min: Vec3,
+    max: Vec3,
+    points: &[Vec3],
+    tolerance: f32,
+) -> bool {
+    if points.is_empty() {
+        return false;
+    }
+    let local: Vec<Vec3> = points.iter().map(|p| to_box.transform_point3(*p)).collect();
+    let centre = (min + max) * 0.5;
+    let half = (max - min) * 0.5;
+    let mut axes = vec![Vec3::X, Vec3::Y, Vec3::Z];
+    for k in 1..24 {
+        let a = k as f32 * std::f32::consts::PI / 24.0;
+        axes.push(Vec3::new(a.cos(), 0.0, a.sin()));
+    }
+    axes.iter().all(|l| {
+        let c = centre.dot(*l);
+        let r = half.x * l.x.abs() + half.y * l.y.abs() + half.z * l.z.abs();
+        let (lo, hi) = local.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+            let d = p.dot(*l);
+            (lo.min(d), hi.max(d))
+        });
+        lo <= c + r + tolerance && hi >= c - r - tolerance
+    })
+}
+
+/// Whether a collision piece is in a zone the way Havok's phantom finds it.
+///
+/// The phantom's list (`det + 0x100`, cleared with the contacts every
+/// detection, `0x542660`) only takes a pair whose closest-point query comes
+/// out *negative*: the convex agent (`0x544820`) and the convex-mesh agent
+/// (`0x545b50`) push a pair with a phantom on either side there when the GJK
+/// distance is below zero, and report nothing for one merely within the
+/// tolerance. The convex-mesh agent runs that query per *triangle* the MOPP
+/// finds near the convex piece, so a mesh piece (a chassis, a
+/// `SIMULATION_GEOMETRY 6` part) is in the zone only while one of its
+/// triangles crosses it: a zone wholly inside a mesh body's volume sees
+/// nothing of it. A convex piece is its hull.
+pub fn box_touches_piece(
+    to_box: Mat4,
+    min: Vec3,
+    max: Vec3,
+    points: &[Vec3],
+    mesh: Option<&[[u32; 3]]>,
+) -> bool {
+    match mesh {
+        Some(tris) if !tris.is_empty() => box_touches_triangles(to_box, min, max, points, tris),
+        _ => box_touches_points(to_box, min, max, points, 0.0),
+    }
+}
+
+/// Whether any of the triangles (indices into `points`, carried into the
+/// box's frame by `to_box`) overlaps the box `min..max`: the separating-axis
+/// test on the box's three axes, the triangle's normal and the nine edge
+/// crossings, exact for a triangle against a box.
+pub fn box_touches_triangles(
+    to_box: Mat4,
+    min: Vec3,
+    max: Vec3,
+    points: &[Vec3],
+    tris: &[[u32; 3]],
+) -> bool {
+    let centre = (min + max) * 0.5;
+    let half = (max - min) * 0.5;
+    let local: Vec<Vec3> = points
+        .iter()
+        .map(|p| to_box.transform_point3(*p) - centre)
+        .collect();
+    let separated = |axis: Vec3, v: &[Vec3; 3]| -> bool {
+        if axis.length_squared() < 1e-12 {
+            return false;
+        }
+        let r = half.x * axis.x.abs() + half.y * axis.y.abs() + half.z * axis.z.abs();
+        let d = [axis.dot(v[0]), axis.dot(v[1]), axis.dot(v[2])];
+        let lo = d[0].min(d[1]).min(d[2]);
+        let hi = d[0].max(d[1]).max(d[2]);
+        lo > r || hi < -r
+    };
+    tris.iter().any(|t| {
+        let Some(v) = (|| {
+            Some([
+                *local.get(t[0] as usize)?,
+                *local.get(t[1] as usize)?,
+                *local.get(t[2] as usize)?,
+            ])
+        })() else {
+            return false;
+        };
+        let e = [v[1] - v[0], v[2] - v[1], v[0] - v[2]];
+        if [Vec3::X, Vec3::Y, Vec3::Z]
+            .iter()
+            .any(|&a| separated(a, &v))
+        {
+            return false;
+        }
+        if separated(e[0].cross(e[1]), &v) {
+            return false;
+        }
+        for a in [Vec3::X, Vec3::Y, Vec3::Z] {
+            for ed in e {
+                if separated(a.cross(ed), &v) {
+                    return false;
+                }
+            }
+        }
+        true
+    })
 }
 
 /// Resolve the zones a script registered against the arena's own geometry.
@@ -119,35 +251,63 @@ pub fn hinges(arena_path: &str) -> BTreeMap<String, ModelHinge> {
     out
 }
 
-/// The travel a hinge is given, from the model's own `*ANGLE_LIMITS`.
+/// How an arena hinge's controller and Havok's hinge see the joint ours
+/// builds between the motionless anchor (`a`) and the part that swings (`b`),
+/// whose angle grows with `(ω_b - ω_a) · axis`, the model's `*SPIN_AXIS` in
+/// the world (docs/29 section 12z).
 ///
-/// Jolt measures a hinge's angle from where the two frames coincide and insists
-/// on `-π ≤ min ≤ 0 ≤ max ≤ π`. The models state theirs in their own frame, with
-/// the two sides exported at the hinge's *lower stop* — the Octagon's hellraiser
-/// arms ship `[1°, 70°]`, which Jolt refuses outright — so the travel is taken
-/// from that stop: `[0, max - min]`. The Compressor's smash arms already say
-/// `[0, 0.27]` and are unchanged. A range a full turn wide is Jolt's "no limits".
-pub fn hinge_limits(model: [f32; 2]) -> [f32; 2] {
-    use std::f32::consts::PI;
-    let (lo, hi) = (model[0].min(model[1]), model[0].max(model[1]));
-    if hi - lo >= 2.0 * PI {
-        return [-PI, PI];
+/// * The controller's angle (`0x481190`, what its limits `+0x70`/`+0x74` and
+///   its "arrived" test read) grows the other way when the part that swings is
+///   Havok's body B (the model's `*BODY2`, `0x4a7340` → `0x5257a0(BODY1,
+///   BODY2)`): `sense` is `-1` then, `+1` when it is body A (the Parking
+///   Lot's trap doors, `*BODY1`).
+/// * The motor (`0x481450`): `trunc(p · 0.01 · S)`, negated when any
+///   component of the axis in body B's frame (`+0x60..+0x68`) is below `-0.5`
+///   (`axis_flip`), drives `(ω_B - ω_A) · axis` to that value. Live
+///   (`hazard-octagon__live__000`, `hazard-compressor__live__000`): the
+///   hellraisers (axis `(0, 0, -1)` in B) rise with `ω_z` +25 rad/s for
+///   `p = 100`, the hammers (`(-1, 0, 0)` in B) swing toward the centre, the
+///   Compressor's right arms (`(0, 1, 0)`, speed `-95`) and left arms
+///   (`(0, -1, 0)`, `95`) close alike, each with its controller angle
+///   growing from 0 to its upper limit.
+///
+/// Returns `(sense, motor)`: the controller's angle is `sense ·` ours, and
+/// ours drives at `motor · trunc(p · 0.01 · S)`.
+pub fn arena_hinge_sense(moving_is_b: bool, axis_in_b: Vec3) -> (f32, f32) {
+    let flip = if axis_in_b.x < -0.5 || axis_in_b.y < -0.5 || axis_in_b.z < -0.5 {
+        -1.0
+    } else {
+        1.0
+    };
+    if moving_is_b {
+        (-1.0, flip)
+    } else {
+        (1.0, -flip)
     }
-    let (lo, hi) = if lo > 0.0 { (0.0, hi - lo) } else { (lo, hi) };
-    [lo.clamp(-PI, 0.0), hi.clamp(0.0, PI)]
 }
 
-/// The travel a slider is given, in the rest-pose-relative form Jolt wants.
-///
-/// The scripts write the limits unordered — `box.py` asks for `(neutral, 0.8,
-/// 0)`, and the spikes rise 0.8 m — so the engine takes the min and the max,
-/// relative to the neutral pose the joint is created at.
-pub fn slider_limits(neutral: f32, lower: f32, upper: f32) -> [f32; 2] {
-    let (a, b) = (lower.min(upper), lower.max(upper));
-    let lo = a - neutral;
-    let hi = b - neutral;
-    // Jolt requires `min <= 0 <= max`; the rest pose is the neutral one.
-    [lo.min(0.0), hi.max(0.0)]
+/// An arena hinge's travel in ours ([`arena_hinge_sense`]): the model's
+/// `*ANGLE_LIMITS` are the controller's (and Havok's) angles, 0 where the
+/// model was exported; ours measures from the same pose, with `sense`. The
+/// rest pose is kept inside the travel: live the hellraisers lie at a
+/// controller angle of -0.013 to 0.006 against their 1 degree lower limit.
+/// An unlimited hinge is free.
+pub fn arena_hinge_limits(model: Option<[f32; 2]>, sense: f32) -> [f32; 2] {
+    use std::f32::consts::PI;
+    let Some([lo, hi]) = model else {
+        return [-PI, PI];
+    };
+    let (a, b) = (sense * lo, sense * hi);
+    [a.min(b).clamp(-PI, 0.0), a.max(b).clamp(0.0, PI)]
+}
+
+/// The travel a slider is given: `AddPrismatic`'s two stops, as the original
+/// keeps them (`0x4b47b0`: the first in the controller's `+0x6c`, the second in
+/// `+0x70`, the joint's travel `[min, max]` of the two in `+0x64`/`+0x68`),
+/// measured from the pose the joint is created in. Jolt also requires `min <=
+/// 0 <= max`, which every stock arena's stops satisfy.
+pub fn slider_limits(first: f32, second: f32) -> [f32; 2] {
+    [first.min(second).min(0.0), first.max(second).max(0.0)]
 }
 
 /// The settings a hazard drives its joint with, as the engine reads them.
@@ -171,6 +331,16 @@ pub struct LiveJoint {
     pub friction: f32,
     /// The joint's own travel, for `SetAutoLock`'s "has it arrived" test.
     pub limits: [f32; 2],
+    /// A slider's stops: where a negative direction drives it (the
+    /// controller's `+0x6c`) and where a positive one does (`+0x70`). A
+    /// hinge's: its controller's limits (`+0x70`, `+0x74`), in the
+    /// controller's own angle.
+    pub stops: [f32; 2],
+    /// A hinge's controller angle is `sense ·` ours, and its motor drives
+    /// ours at `motor ·` the controller's velocity ([`arena_hinge_sense`]);
+    /// `1` for a slider.
+    pub sense: f32,
+    pub motor: f32,
 }
 
 #[cfg(test)]
@@ -182,20 +352,128 @@ mod tests {
     /// a range containing zero, so the travel is taken from the model's lower
     /// stop. The Octagon's hellraiser arms ship `[1°, 70°]`, which Jolt refuses
     /// outright; the Compressor's smash arms already say `[0, 0.27]`.
+    /// The Octagon's `hellzone2` (x 3.1..4.0, z -1.4..0.9) and ALARM's chassis
+    /// (about 1.5 x 1.1 m) at (2.56, -2.28) heading the diagonal, as it drives
+    /// past live without raising the hellraiser: its bounding sphere reached the
+    /// zone, its box does not.
     #[test]
-    fn hinge_travel_is_taken_from_the_models_lower_stop() {
-        assert_eq!(hinge_limits([0.0, 0.27052602]), [0.0, 0.27052602]);
+    fn a_zone_is_touched_by_a_body_not_its_bounding_sphere() {
+        let zone = Zone {
+            name: "hellzone2".into(),
+            id: 2,
+            inv: Mat4::IDENTITY,
+            min: Vec3::new(3.1, -0.1, -1.4),
+            max: Vec3::new(4.0, 0.6, 0.9),
+        };
+        // A 1.5 x 0.4 x 1.1 m box.
+        let (min, max) = (Vec3::new(-0.75, -0.2, -0.55), Vec3::new(0.75, 0.2, 0.55));
+        let corners: Vec<Vec3> = (0..8)
+            .map(|k| {
+                Vec3::new(
+                    if k & 1 == 0 { min.x } else { max.x },
+                    if k & 2 == 0 { min.y } else { max.y },
+                    if k & 4 == 0 { min.z } else { max.z },
+                )
+            })
+            .collect();
+        let at = |x: f32, z: f32, yaw: f32| {
+            Mat4::from_rotation_translation(glam::Quat::from_rotation_y(yaw), Vec3::new(x, 0.2, z))
+        };
+        // Driving past diagonally, a metre off: the sphere reaches, the body
+        // does not.
+        let past = at(2.56, -2.28, -0.77);
+        assert!(zone.touches(
+            past.transform_point3(Vec3::ZERO),
+            ((max - min) * 0.5).length()
+        ));
+        assert!(!zone.touches_points(past, &corners, 0.1));
+        // On the plate it is in.
+        assert!(zone.touches_points(at(3.5, -0.2, 0.3), &corners, 0.1));
+        // Within the tolerance of a face counts; beyond it does not.
+        assert!(zone.touches_points(at(2.31, 0.0, 0.0), &corners, 0.1));
+        assert!(!zone.touches_points(at(2.2, 0.0, 0.0), &corners, 0.1));
+        assert!(!zone.touches_points(at(3.5, 0.0, 0.0), &[], 0.1));
+    }
 
-        let hellraiser = hinge_limits([1.0f32.to_radians(), 70.0f32.to_radians()]);
-        assert_eq!(hellraiser[0], 0.0);
-        assert!(
-            (hellraiser[1] - 69.0f32.to_radians()).abs() < 1e-5,
-            "{hellraiser:?}"
+    /// Havok's phantom sees a mesh piece only where one of its triangles
+    /// crosses the zone (`0x545b50`): a zone wholly inside a closed mesh sees
+    /// nothing of it, while the same piece as a convex hull fills the zone.
+    #[test]
+    fn a_zone_inside_a_mesh_body_sees_none_of_its_triangles() {
+        let (lo, hi) = (Vec3::splat(-1.0), Vec3::splat(1.0));
+        let pts: Vec<Vec3> = (0..8)
+            .map(|k| {
+                Vec3::new(
+                    if k & 1 == 0 { lo.x } else { hi.x },
+                    if k & 2 == 0 { lo.y } else { hi.y },
+                    if k & 4 == 0 { lo.z } else { hi.z },
+                )
+            })
+            .collect();
+        // The cube's twelve triangles.
+        let quads = [
+            [0, 1, 3, 2],
+            [4, 6, 7, 5],
+            [0, 4, 5, 1],
+            [2, 3, 7, 6],
+            [0, 2, 6, 4],
+            [1, 5, 7, 3],
+        ];
+        let tris: Vec<[u32; 3]> = quads
+            .iter()
+            .flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]])
+            .collect();
+        let (zmin, zmax) = (Vec3::splat(-0.3), Vec3::splat(0.3));
+        let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+        // Inside: the hull fills the zone, no triangle reaches it.
+        assert!(box_touches_piece(at(0.0), zmin, zmax, &pts, None));
+        assert!(!box_touches_piece(at(0.0), zmin, zmax, &pts, Some(&tris)));
+        // Across a face: both.
+        assert!(box_touches_piece(at(1.1), zmin, zmax, &pts, Some(&tris)));
+        assert!(box_touches_piece(at(1.1), zmin, zmax, &pts, None));
+        // Clear of it: neither, also not within a tolerance (a pair only
+        // enters the list overlapping).
+        assert!(!box_touches_piece(at(1.35), zmin, zmax, &pts, Some(&tris)));
+        assert!(!box_touches_piece(at(1.35), zmin, zmax, &pts, None));
+    }
+
+    /// docs/29 section 12z, live `hazard-octagon__live__000` and
+    /// `hazard-compressor__live__000`: every arena hinge's controller angle
+    /// grows from 0 toward its upper limit as `p = 100` drives it, so ours
+    /// turns the part the way live does and keeps its travel on that side.
+    #[test]
+    fn an_arena_hinge_turns_the_way_its_controller_drives_it() {
+        // The hellraisers and hammers: axis negative in body B, which swings.
+        assert_eq!(
+            arena_hinge_sense(true, Vec3::new(0.0, 0.0, -1.0)),
+            (-1.0, -1.0)
+        );
+        assert_eq!(
+            arena_hinge_sense(true, Vec3::new(-1.0, 0.0, 0.0)),
+            (-1.0, -1.0)
+        );
+        // The Compressor's right arms: axis +y in B.
+        assert_eq!(arena_hinge_sense(true, Vec3::Y), (-1.0, 1.0));
+        // The Parking Lot's trap doors swing as body A.
+        assert_eq!(
+            arena_hinge_sense(false, Vec3::new(-1.0, 0.0, 0.0)),
+            (1.0, 1.0)
         );
 
-        // A full turn is Jolt's "no limits", and nothing can express more.
-        assert_eq!(hinge_limits([-PI, PI]), [-PI, PI]);
-        assert_eq!(hinge_limits([-4.0, 4.0]), [-PI, PI]);
-        assert_eq!(hinge_limits([-PI, 5.0]), [-PI, PI]);
+        let hellraiser = arena_hinge_limits(Some([1f32.to_radians(), 70f32.to_radians()]), -1.0);
+        assert!(
+            (hellraiser[0] + 70f32.to_radians()).abs() < 1e-6,
+            "{hellraiser:?}"
+        );
+        assert_eq!(hellraiser[1], 0.0);
+        assert_eq!(
+            arena_hinge_limits(Some([0.0, 0.270526]), -1.0),
+            [-0.270526, 0.0]
+        );
+        assert_eq!(
+            arena_hinge_limits(Some([-PI / 2.0, PI / 2.0]), 1.0),
+            [-PI / 2.0, PI / 2.0]
+        );
+        assert_eq!(arena_hinge_limits(None, -1.0), [-PI, PI]);
     }
 }

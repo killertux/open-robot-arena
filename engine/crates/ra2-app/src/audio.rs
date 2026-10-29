@@ -29,6 +29,67 @@ use ra2fmt::cfg::Cfg;
 /// it are this client's mapping (see the module docs).
 pub const CLICK_SOUND: &str = "Sounds/button_click.wav";
 
+/// A UI or match cue with a fixed file, named by the exe (`Sounds\\...wav`).
+///
+/// Each name is a string in `Robot Arena 2.exe`; where the call site was traced
+/// the address is given, and where it was not the mapping is this client's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UiSound {
+    /// `Sounds\button_click.wav` (`0x5ec275`, the button class).
+    Click,
+    /// `Sounds\cmp_removal.wav` (`0x42f2be`): a component taken off a bot.
+    ComponentRemoved,
+    /// A component's own `attachsound` (`cmp_generic.wav`, `cmp_wheels.wav`, ...)
+    /// when it is attached in the workshop.
+    ComponentAttached(Option<String>),
+    /// `Sounds\snapshot.wav` (`0x43b8f2`, `0x5d7a67`): the workshop snapshot.
+    Snapshot,
+    /// `Sounds\point_plotted.wav` (`0x478fdf`, `0x47905d`): a graph point.
+    PointPlotted,
+    /// `Sounds\eject.wav` (`0x47d3f2`, `0x4d0791`).
+    Eject,
+    /// `Sounds\chat.wav` (`0x415849`): a chat line in a match.
+    Chat,
+    /// `Sounds\match_countdown.wav` (`0x4158bc`): a countdown number.
+    CountdownBeep,
+    /// `Sounds\match_countdown_high.wav` (`0x6f36fc`): the bell.
+    CountdownGo,
+    /// `Sounds\critical_hit.wav` (`0x4157d6`): a chassis critical hit.
+    CriticalHit,
+    /// `Sounds\immobile_countdown.wav` (`0x415763`): the immobility warning.
+    ImmobileWarning,
+    /// `Sounds\player_joined.wav`: a robot is put in an exhibition slot (live,
+    /// `ui-click-survey`: created and played at the Select Computer Robot
+    /// dialog's OK, one `SoundWizard` one-shot, 0 hundredths of a dB).
+    PlayerJoined,
+    /// `Sounds\spectator_joined.wav` (`0x492f11`, `FUN_00492ef0`): a peer was
+    /// created in the multiplayer lobby.
+    SpectatorJoined,
+}
+
+impl UiSound {
+    /// The file, or `None` for an attach with no sound named.
+    pub fn path(&self) -> Option<String> {
+        let name = match self {
+            UiSound::Click => "Sounds/button_click.wav",
+            UiSound::ComponentRemoved => "Sounds/cmp_removal.wav",
+            UiSound::ComponentAttached(Some(path)) => return Some(path.clone()),
+            UiSound::ComponentAttached(None) => return None,
+            UiSound::Snapshot => "Sounds/snapshot.wav",
+            UiSound::PointPlotted => "Sounds/point_plotted.wav",
+            UiSound::Eject => "Sounds/eject.wav",
+            UiSound::Chat => "Sounds/chat.wav",
+            UiSound::CountdownBeep => "Sounds/match_countdown.wav",
+            UiSound::CountdownGo => "Sounds/match_countdown_high.wav",
+            UiSound::CriticalHit => "Sounds/critical_hit.wav",
+            UiSound::ImmobileWarning => "Sounds/immobile_countdown.wav",
+            UiSound::PlayerJoined => "Sounds/player_joined.wav",
+            UiSound::SpectatorJoined => "Sounds/spectator_joined.wav",
+        };
+        Some(name.to_string())
+    }
+}
+
 /// The client's audio system and its report.
 pub struct AudioSystem {
     game: PathBuf,
@@ -43,6 +104,29 @@ pub struct AudioSystem {
     problems: Vec<String>,
     /// Music start/stop lines, which the `PlayLog` does not record.
     events: Vec<String>,
+    /// The script host's match time at the last drain, for the audio clock.
+    last_match_time: Option<f32>,
+    /// How many crowd one-shots have been started (their ring of voice ids).
+    crowd_shots: u64,
+    /// Whether a screen change leaves the silent gap the original does (the
+    /// windowed client; the offscreen runners start the next track at once).
+    music_gap: bool,
+    /// The next track, waiting out the gap.
+    pending_music: Option<PendingTrack>,
+}
+
+/// Seconds between the old track being cut and the new one being heard when
+/// the shell moves between the main menu, the Team HQ and the workshop. Live
+/// (`ui-click-survey`): the old track stops at the click (80.25 s, 95.2 s), the
+/// screen builds and the music folder is set about 1.1 s later, and the new
+/// track is audible 1.2 to 2.0 s after that.
+pub const MUSIC_GAP_SECONDS: f32 = 2.5;
+
+#[derive(Clone, Debug)]
+struct PendingTrack {
+    left: f32,
+    track: Track,
+    path: PathBuf,
 }
 
 impl AudioSystem {
@@ -68,6 +152,394 @@ impl AudioSystem {
             listener: None,
             problems: Vec::new(),
             events: Vec::new(),
+            last_match_time: None,
+            crowd_shots: 0,
+            music_gap: false,
+            pending_music: None,
+        }
+    }
+
+    /// Leave the original's silent gap between one area's track and the next
+    /// (see [`MUSIC_GAP_SECONDS`]); the windowed client turns this on and calls
+    /// [`AudioSystem::tick_music`] with real time.
+    pub fn with_music_gap(mut self, on: bool) -> AudioSystem {
+        self.music_gap = on;
+        self
+    }
+
+    /// Advance the music gap by `dt` real seconds and start the waiting track
+    /// when it is over.
+    pub fn tick_music(&mut self, dt: f32) {
+        let Some(pending) = self.pending_music.as_mut() else {
+            return;
+        };
+        pending.left -= dt;
+        if pending.left <= 0.0 {
+            if let Some(PendingTrack { track, path, .. }) = self.pending_music.take() {
+                self.start_track(track, path);
+            }
+        }
+    }
+
+    /// The same policy over a capturing [`Audio`]: no device, but every start,
+    /// stop and fade is timed so [`AudioSystem::render_wav`] can write what the
+    /// client would have played.
+    pub fn new_capturing(game: impl AsRef<Path>, cfg: &Cfg) -> AudioSystem {
+        Self::with_audio(game, cfg, Audio::capturing())
+    }
+
+    /// A capturing system when `RA2_AUDIO_WAV` names an output file, otherwise
+    /// the silent one. The offscreen runners use this so any of them can write
+    /// the audio the client would have played (see [`AudioSystem::finish_capture`]).
+    pub fn new_offscreen(game: impl AsRef<Path>, cfg: &Cfg) -> AudioSystem {
+        if std::env::var_os("RA2_AUDIO_WAV").is_some() {
+            Self::new_capturing(game, cfg)
+        } else {
+            Self::new_silent(game, cfg)
+        }
+    }
+
+    /// Write the captured audio to `RA2_AUDIO_WAV`, if that is set and this
+    /// system is capturing. `RA2_AUDIO_MUSIC_OFFSET` (seconds) starts every
+    /// music track that far into its file, to line a render up with a recording
+    /// that began mid-track. `seconds` is the length to render.
+    pub fn finish_capture(&mut self, seconds: f32) -> Result<(), String> {
+        let Some(path) = std::env::var_os("RA2_AUDIO_WAV") else {
+            return Ok(());
+        };
+        if self.audio.capture().is_none() {
+            return Ok(());
+        }
+        if let Some(offset) = std::env::var("RA2_AUDIO_MUSIC_OFFSET")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            if let Some(capture) = self.audio.capture_mut() {
+                capture.set_music_offset(offset);
+            }
+        }
+        // `RA2_AUDIO_START` drops the first seconds of the render, so a match
+        // render can start where the recording does (the end of the countdown).
+        let start = std::env::var("RA2_AUDIO_START")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0)
+            .max(0.0);
+        let path = std::path::PathBuf::from(path);
+        let capture = self.audio.capture().ok_or("not capturing")?;
+        // `RA2_AUDIO_TRACE=1` lists every voice with its start in the render's
+        // own time, to line a render up against a recording by ear and eye.
+        if std::env::var_os("RA2_AUDIO_TRACE").is_some() {
+            println!("audio-trace speed points: {}", capture.speed_points());
+            for (from, stop, points) in capture.speed_profiles() {
+                let list: Vec<String> = points
+                    .iter()
+                    .map(|(t, r)| format!("{:.3}:{r:.3}", t - start))
+                    .collect();
+                println!(
+                    "audio-speed {:.3} {} {}",
+                    from - start,
+                    stop.map_or("-".to_string(), |e| format!("{:.3}", e - start)),
+                    list.join(",")
+                );
+            }
+            for (t, file, looping, gain, stop) in capture.start_gains() {
+                // The gain in hundredths of a decibel, the unit of the original's
+                // call log (`tools/oracle/audio_levels.py` compares the two).
+                let hdb = if gain <= 0.0 {
+                    -10000.0
+                } else {
+                    2000.0 * gain.log10()
+                };
+                println!(
+                    "audio-trace {:8.3}s {} hdb={:.0}{}{}",
+                    t - start,
+                    file.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                    hdb.clamp(-10000.0, 0.0),
+                    if looping { " loop" } else { "" },
+                    stop.map(|e| format!(" end={:.3}", e - start))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        let mut samples = capture.render(start + seconds);
+        samples.drain(
+            ..((start * ra2_audio::capture::RENDER_RATE as f32) as usize * 2).min(samples.len()),
+        );
+        ra2_audio::capture::write_wav(&path, &samples)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        println!(
+            "audio: wrote {} ({seconds:.2} s from {start:.2} s; {} voices)",
+            path.display(),
+            capture.voice_count()
+        );
+        Ok(())
+    }
+
+    /// Advance the audio clock by `dt` seconds (fades, capture timestamps).
+    pub fn advance(&mut self, dt: f32) {
+        self.audio.advance(dt);
+    }
+
+    /// Mix the captured timeline into a 48 kHz stereo WAV, `seconds` long.
+    pub fn render_wav(&self, path: &Path, seconds: f32) -> Result<(), String> {
+        let capture = self
+            .audio
+            .capture()
+            .ok_or("render_wav needs AudioSystem::new_capturing")?;
+        let samples = capture.render(seconds);
+        ra2_audio::capture::write_wav(path, &samples)
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Play a fixed UI/match sound through the SFX category (2D, unity).
+    pub fn ui(&mut self, sound: UiSound) {
+        let Some(name) = sound.path() else { return };
+        match ra2_audio::resolve_game_path(&self.game, &name) {
+            Some(path) => {
+                if let Err(error) = self.audio.play_2d(&path, 1.0) {
+                    self.problems.push(format!("ui sound: {error}"));
+                }
+            }
+            None => self.problems.push(format!(
+                "ui sound: {name} is not in {}",
+                self.game.display()
+            )),
+        }
+    }
+
+    /// Play what a match step sounded like, heard from `listener`.
+    pub fn play_cues(&mut self, cues: Vec<crate::match_sounds::SoundCue>, listener: Listener) {
+        use crate::match_sounds::SoundCue;
+        for cue in cues {
+            match cue {
+                SoundCue::Impact {
+                    path,
+                    position,
+                    hundredths_db,
+                } => {
+                    let gain = ra2_audio::hundredths_db_to_gain(hundredths_db);
+                    // The original's match audio is centred (left == right), so an
+                    // impact is a flat sound at its volume, not a positioned one;
+                    // the position stays in the cue for a future spatial model.
+                    let _ = (position, listener);
+                    match ra2_audio::resolve_game_path(&self.game, &path) {
+                        Some(file) => {
+                            if let Err(error) = self.audio.play_2d(&file, gain) {
+                                self.problems.push(format!("impact: {error}"));
+                            }
+                        }
+                        None => self
+                            .problems
+                            .push(format!("impact: {path} is not in the game")),
+                    }
+                }
+                SoundCue::Beep { go } => self.ui(if go {
+                    UiSound::CountdownGo
+                } else {
+                    UiSound::CountdownBeep
+                }),
+                SoundCue::Critical { .. } => self.ui(UiSound::CriticalHit),
+                SoundCue::Chat => self.ui(UiSound::Chat),
+                SoundCue::Material {
+                    path,
+                    position,
+                    hundredths_db,
+                } => {
+                    // Centred like every match effect (see `Impact`).
+                    let _ = position;
+                    let gain = ra2_audio::hundredths_db_to_gain(hundredths_db);
+                    match ra2_audio::resolve_game_path(&self.game, &path) {
+                        Some(file) => {
+                            if let Err(error) = self.audio.play_2d(&file, gain) {
+                                self.problems.push(format!("material: {error}"));
+                            }
+                        }
+                        None => self
+                            .problems
+                            .push(format!("material: {path} is not in the game")),
+                    }
+                }
+                SoundCue::Announce { path } => {
+                    match ra2_audio::resolve_game_path(&self.game, path) {
+                        Some(file) => {
+                            if let Err(error) = self.audio.play_2d(&file, 1.0) {
+                                self.problems.push(format!("announcer: {error}"));
+                            }
+                        }
+                        None => self
+                            .problems
+                            .push(format!("announcer: {path} is not in the game")),
+                    }
+                }
+                SoundCue::Fire {
+                    path,
+                    position,
+                    hundredths_db,
+                } => {
+                    // Centred like every match effect (see `Impact`).
+                    let _ = position;
+                    let gain = ra2_audio::hundredths_db_to_gain(hundredths_db);
+                    match ra2_audio::resolve_game_path(&self.game, &path) {
+                        Some(file) => {
+                            if let Err(error) = self.audio.play_2d(&file, gain) {
+                                self.problems.push(format!("fire: {error}"));
+                            }
+                        }
+                        None => self
+                            .problems
+                            .push(format!("fire: {path} is not in the game")),
+                    }
+                }
+                SoundCue::Force { path } => match ra2_audio::resolve_game_path(&self.game, path) {
+                    Some(file) => {
+                        if let Err(error) = self.audio.play_2d(&file, 1.0) {
+                            self.problems.push(format!("force: {error}"));
+                        }
+                    }
+                    None => self
+                        .problems
+                        .push(format!("force: {path} is not in the game")),
+                },
+                SoundCue::ImmobileTick => self.ui(UiSound::ImmobileWarning),
+                SoundCue::MotorPitch { key, speed } => self.audio.set_script_speed(key, speed),
+                SoundCue::CrowdStop => {
+                    for mood in 0..crate::crowd::LOOPS.len() as u8 {
+                        let key = crate::match_sounds::crowd_key(mood);
+                        if self.audio.script_is_live(key) {
+                            self.audio.fade_out_script(key, 1000.0);
+                        }
+                    }
+                    let key = crate::match_sounds::crowd_shout_key();
+                    if self.audio.script_is_live(key) {
+                        self.audio.fade_out_script(key, 1000.0);
+                    }
+                }
+                SoundCue::CrowdLoop { mood, on } => {
+                    let key = crate::match_sounds::crowd_key(mood);
+                    if on {
+                        let Some(name) = crate::crowd::LOOPS.get(mood as usize) else {
+                            continue;
+                        };
+                        match ra2_audio::resolve_game_path(&self.game, name) {
+                            Some(file) => {
+                                self.audio.set_script_volume(key, 0);
+                                if let Err(error) = self
+                                    .audio
+                                    .play_script(key, &file, true, [0.0; 3], listener, 1.0)
+                                {
+                                    self.problems.push(format!("crowd: {error}"));
+                                }
+                            }
+                            None => self.problems.push(format!("crowd: {name} is missing")),
+                        }
+                    } else {
+                        // A short fade keeps the cut from clicking.
+                        self.audio.fade_out_script(key, 50.0);
+                    }
+                }
+                SoundCue::CrowdOneShot { path } => {
+                    match ra2_audio::resolve_game_path(&self.game, path) {
+                        Some(file) => {
+                            self.crowd_shots += 1;
+                            let key = crate::match_sounds::crowd_shot_key(self.crowd_shots);
+                            self.audio.set_script_volume(key, 0);
+                            if let Err(error) = self
+                                .audio
+                                .play_script(key, &file, false, [0.0; 3], listener, 1.0)
+                            {
+                                self.problems.push(format!("crowd: {error}"));
+                            }
+                        }
+                        None => self.problems.push(format!("crowd: {path} is missing")),
+                    }
+                }
+                SoundCue::CrowdLoopShout { path } => {
+                    match ra2_audio::resolve_game_path(&self.game, path) {
+                        Some(file) => {
+                            let key = crate::match_sounds::crowd_shout_key();
+                            self.audio.set_script_volume(key, 0);
+                            if let Err(error) = self
+                                .audio
+                                .play_script(key, &file, true, [0.0; 3], listener, 1.0)
+                            {
+                                self.problems.push(format!("crowd: {error}"));
+                            }
+                        }
+                        None => self.problems.push(format!("crowd: {path} is missing")),
+                    }
+                }
+                SoundCue::CrowdFadeShout { ms } => {
+                    let key = crate::match_sounds::crowd_shout_key();
+                    if self.audio.script_is_live(key) {
+                        self.audio.fade_out_script(key, ms);
+                    }
+                }
+                SoundCue::Flame {
+                    key,
+                    call,
+                    path,
+                    position: _,
+                } => match call {
+                    ra2sim::flame::Sound::Loop => {
+                        match ra2_audio::resolve_game_path(&self.game, &path) {
+                            // Created at volume 0 (full): `0x6ab1d4` is 0.0.
+                            Some(file) => {
+                                self.audio.set_script_volume(key, 0);
+                                if let Err(error) = self
+                                    .audio
+                                    .play_script(key, &file, true, [0.0; 3], listener, 1.0)
+                                {
+                                    self.problems.push(format!("flame: {error}"));
+                                }
+                            }
+                            None => self
+                                .problems
+                                .push(format!("flame: {path} is not in the game")),
+                        }
+                    }
+                    ra2sim::flame::Sound::Volume(hundredths_db) => {
+                        if self.audio.script_is_live(key) {
+                            self.audio.set_script_volume(key, hundredths_db);
+                        }
+                    }
+                    ra2sim::flame::Sound::Stop => {
+                        if self.audio.script_is_live(key) {
+                            self.audio.stop_script(key);
+                        }
+                    }
+                },
+                SoundCue::Motor {
+                    key,
+                    on,
+                    path,
+                    position: _,
+                } => {
+                    if on {
+                        match ra2_audio::resolve_game_path(&self.game, &path) {
+                            Some(file) => {
+                                // `Loop` at the level the handle was created at
+                                // (-700): the original's call log has no fade
+                                // and no volume change (docs/35 section 13).
+                                self.audio
+                                    .set_script_volume(key, crate::match_sounds::MOTOR_LOOP_HDB);
+                                if let Err(error) = self
+                                    .audio
+                                    .play_script(key, &file, true, [0.0; 3], listener, 1.0)
+                                {
+                                    self.problems.push(format!("motor: {error}"));
+                                }
+                            }
+                            None => self
+                                .problems
+                                .push(format!("motor: {path} is not in the game")),
+                        }
+                    } else {
+                        // `Stop`: DirectSound cuts at once.
+                        self.audio.stop_script(key);
+                    }
+                }
+            }
         }
     }
 
@@ -84,24 +556,50 @@ impl AudioSystem {
     /// Switch to the screen group's track, or stop when the group is not one
     /// the shipped music directories establish.
     pub fn on_screen(&mut self, screen: &str) {
+        // A modal window (options, credits) opens over the screen and leaves
+        // its music running: the executable's modal loop never touches it.
+        if ra2_shell::bindings::is_window(screen) {
+            return;
+        }
         // The same screen on a re-render is not a transition. Updating the
         // stored id is still harmless, and it keeps the report's "screen" name
         // accurate when two screens share a track.
         let same_screen = self.current_screen.as_deref() == Some(screen);
         self.current_screen = Some(screen.to_string());
 
+        // A screen outside the three areas (the exhibition setup, help, the
+        // options window) does not touch the music: live, the track playing
+        // when the exhibition opened kept playing through its screens.
         let Some(track) = music_for_screen(screen) else {
-            self.stop_music(&format!("{screen} has no established track"));
             return;
         };
         let path = track.in_game_dir(&self.game);
-        if self.current_music.as_deref() == Some(path.as_path()) {
+        if self.current_music.as_deref() == Some(path.as_path())
+            || self.pending_music.as_ref().is_some_and(|p| p.path == path)
+        {
             return;
         }
         if same_screen {
             return;
         }
-        self.start_track(track, path);
+        // Another area: the old track is cut at once, the new one follows.
+        if self.current_music.take().is_some() {
+            self.audio.stop_music();
+            self.events.push("music: stop (another area)".to_string());
+        }
+        if self.music_gap {
+            self.events.push(format!(
+                "music: {} in {MUSIC_GAP_SECONDS} s",
+                track.relative_path()
+            ));
+            self.pending_music = Some(PendingTrack {
+                left: MUSIC_GAP_SECONDS,
+                track,
+                path,
+            });
+        } else {
+            self.start_track(track, path);
+        }
     }
 
     /// The same switch for a caller that already mapped the screen, or `None`
@@ -139,6 +637,7 @@ impl AudioSystem {
         // The next `on_screen` must start a track again even if it is the same
         // screen that was playing before the stop (a match interrupted it).
         self.current_screen = None;
+        self.pending_music = None;
         if self.current_music.take().is_some() {
             self.audio.stop_music();
             self.events.push(format!("music: stop ({reason})"));
@@ -148,16 +647,28 @@ impl AudioSystem {
     /// Play the shipped UI click at unity. The effective gain is the SFX
     /// category's (`SoundVolume`, `SoundMuted`), because it is a 2D sound.
     pub fn click(&mut self) {
-        match ra2_audio::resolve_game_path(&self.game, CLICK_SOUND) {
-            Some(path) => {
-                if let Err(error) = self.audio.play_2d(&path, 1.0) {
-                    self.problems.push(format!("click: {error}"));
-                }
-            }
-            None => self.problems.push(format!(
-                "click: {CLICK_SOUND} is not in {}",
-                self.game.display()
-            )),
+        self.ui(UiSound::Click);
+    }
+
+    /// The sounds a shell click makes: the button class's click when a push
+    /// button was hit (`crate::plays_click`), and the control's own sound on top.
+    /// Today only the lobby's `eject button` has one (`eject.wav`, `0x47d3f2`);
+    /// the snapshot and point-plotted sounds wait for screens that do not
+    /// exist yet.
+    pub fn shell_step(&mut self, step: &ra2_shell::Step) {
+        if crate::plays_click(step) {
+            self.click();
+        }
+        if step.hit == "eject button" || step.hit_widget() == Some("eject button") {
+            self.ui(UiSound::Eject);
+        }
+        // The workshop's snapshot button (`snapshot button`, `overview.gib`).
+        if step.hit_widget() == Some("snapshot button") {
+            self.ui(UiSound::Snapshot);
+        }
+        // A robot accepted into an exhibition slot: the selection dialog's OK.
+        if step.hit_widget() == Some("ok button") && step.screen.starts_with("exhibition/") {
+            self.ui(UiSound::PlayerJoined);
         }
     }
 
@@ -168,6 +679,15 @@ impl AudioSystem {
     /// and `stopSound` against it, so both halves stay the script layer's.
     pub fn drain_match(&mut self, listener: Listener) {
         self.listener = Some(listener);
+        // The audio clock follows the script host's match time, so fades and
+        // capture timestamps are in match seconds whatever the tick rate.
+        let now = ra2script::state().time;
+        if let Some(last) = self.last_match_time {
+            if now > last {
+                self.audio.advance(now - last);
+            }
+        }
+        self.last_match_time = Some(now);
         let requests = ra2script::take_sound_requests();
         if requests.is_empty() {
             return;
@@ -257,6 +777,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -303,16 +824,129 @@ mod tests {
         assert!(paths[1].ends_with("Music/Team HQ/Robot Tribal Dance.mp3"));
         assert!(paths[2].ends_with("Music/Workshop/Deep inside the Bot Lab.mp3"));
 
+        // A screen outside the three areas leaves the track playing: live, the
+        // exhibition setup, help and the options window do not touch the music.
         audio.on_screen("help/help.gib");
-        assert!(audio.audio.music_path().is_none(), "unmapped screen stops");
+        audio.on_screen("exhibition/exhib_setup.gib");
+        assert!(
+            audio.audio.music_path().is_some(),
+            "unmapped screen keeps it"
+        );
+        assert_eq!(audio.audio.play_log().len(), 3, "and starts nothing");
         let report = audio.report(true);
-        assert!(report.contains("music: stop"), "{report}");
+        assert!(report.contains("music: stop (another area)"), "{report}");
 
         // A match stops the shell music without changing the screen; when the
         // shell comes back to the same screen it must start again.
         audio.stop_music("the match is on screen");
         audio.on_screen("botlab/botlabwin.gib");
         assert_eq!(audio.audio.play_log().len(), 4, "the track restarts");
+    }
+
+    /// Moving to another area cuts the old track at once and the new one is
+    /// heard only after a silent gap (live: cut at the click, folder set about
+    /// 1.1 s later, audible 1.2 to 2.0 s after that); the same area keeps its
+    /// track and a screen outside the areas does not touch it.
+    #[test]
+    fn another_area_cuts_the_track_and_the_next_follows_after_the_gap() {
+        let Some(game) = game_dir() else { return };
+        let mut audio =
+            AudioSystem::new_silent(&game, &cfg_with_unity_volumes()).with_music_gap(true);
+        audio.on_screen("mainmenu/mainmenu.gib");
+        assert!(
+            audio.audio.music_path().is_none(),
+            "the first track waits too"
+        );
+        audio.tick_music(MUSIC_GAP_SECONDS + 0.01);
+        assert!(audio
+            .audio
+            .music_path()
+            .unwrap()
+            .ends_with("Enter the Battlefield.mp3"));
+
+        // The exhibition does not touch it.
+        audio.on_screen("exhibition/exhib_setup.gib");
+        assert!(audio
+            .audio
+            .music_path()
+            .unwrap()
+            .ends_with("Enter the Battlefield.mp3"));
+        // The Team HQ cuts it at the click and starts later.
+        audio.on_screen("teamhq/teamhq.gib");
+        assert!(audio.audio.music_path().is_none(), "cut at once");
+        audio.tick_music(MUSIC_GAP_SECONDS - 0.5);
+        assert!(audio.audio.music_path().is_none(), "still in the gap");
+        // The same screen asked again does not restart the wait.
+        audio.on_screen("teamhq/select_team.gib");
+        audio.tick_music(0.6);
+        assert!(audio
+            .audio
+            .music_path()
+            .unwrap()
+            .ends_with("Robot Tribal Dance.mp3"));
+        // Inside the area (workshop tabs set the same folder again): no restart.
+        let starts = audio.audio.play_log().len();
+        audio.on_screen("teamhq/teamhq.gib");
+        audio.tick_music(10.0);
+        assert_eq!(audio.audio.play_log().len(), starts);
+        // A match stops everything, including a track still waiting.
+        audio.on_screen("botlab/botlabwin.gib");
+        audio.stop_music("the match is on screen");
+        audio.tick_music(10.0);
+        assert!(audio.audio.music_path().is_none());
+    }
+
+    /// Only the push-button class clicks (`0x5ec1e0`): tabs, check boxes, radio
+    /// groups, sliders and list rows are silent; the snapshot button also plays
+    /// `snapshot.wav` and the exhibition's slot OK plays `player_joined.wav`.
+    #[test]
+    fn only_push_buttons_click() {
+        let Some(game) = game_dir() else { return };
+        let mut audio = AudioSystem::new_silent(&game, &cfg_with_unity_volumes());
+        let step = |hit: &str, screen: &str| ra2_shell::Step {
+            command: "click".into(),
+            hit: hit.into(),
+            note: None,
+            screen: screen.into(),
+            content: None,
+            tab: None,
+            step: None,
+            point: [0.0, 0.0],
+        };
+        let played = |audio: &AudioSystem| -> Vec<String> {
+            audio
+                .audio
+                .play_log()
+                .entries()
+                .iter()
+                .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
+                .collect()
+        };
+        for hit in [
+            "OptionGroup \"arena button\"",
+            "CheckBox \"hazard checkbox\"",
+            "Slider \"effects volume slider\"",
+            "ScrollBar",
+            "nothing",
+        ] {
+            audio.shell_step(&step(hit, "exhibition/exhib_setup.gib"));
+        }
+        assert!(played(&audio).is_empty(), "{:?}", played(&audio));
+        audio.shell_step(&step(
+            "Button \"exhibition button\"",
+            "exhibition/exhib_setup.gib",
+        ));
+        assert_eq!(played(&audio), ["button_click.wav"]);
+        audio.shell_step(&step("Button \"snapshot button\"", "botlab/botlabwin.gib"));
+        assert_eq!(
+            played(&audio),
+            ["button_click.wav", "button_click.wav", "snapshot.wav"]
+        );
+        audio.shell_step(&step("Button \"ok button\"", "exhibition/exhib_setup.gib"));
+        assert_eq!(
+            &played(&audio)[3..],
+            ["button_click.wav", "player_joined.wav"]
+        );
     }
 
     #[test]
@@ -336,6 +970,33 @@ mod tests {
     }
 
     #[test]
+    fn an_eject_click_plays_the_click_and_the_eject_sound() {
+        let Some(game) = game_dir() else { return };
+        let mut audio = AudioSystem::new_silent(&game, &cfg_with_unity_volumes());
+        let step = |hit: &str| ra2_shell::Step {
+            command: "click".into(),
+            hit: hit.into(),
+            note: None,
+            screen: "exhibition/exhib_setup.gib".into(),
+            content: None,
+            tab: None,
+            step: None,
+            point: [0.0, 0.0],
+        };
+        audio.shell_step(&step("nothing"));
+        assert!(audio.audio.play_log().is_empty());
+        audio.shell_step(&step("eject button"));
+        let paths: Vec<_> = audio
+            .audio
+            .play_log()
+            .entries()
+            .iter()
+            .map(|e| e.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(paths, ["button_click.wav", "eject.wav"]);
+    }
+
+    #[test]
     fn the_report_always_says_what_the_device_state_is() {
         let Some(game) = game_dir() else { return };
         let audio = AudioSystem::new_silent(&game, &cfg_with_unity_volumes());
@@ -347,6 +1008,39 @@ mod tests {
         assert_eq!(
             report.lines().filter(|l| l.starts_with("audio: ")).count(),
             1
+        );
+    }
+
+    /// The original's motor handle is `Loop`ed at its creation level and `Stop`ped
+    /// at once: no fade in, no fade out, no volume change (docs/35 section 13).
+    #[test]
+    fn a_motor_loop_starts_at_its_level_and_stops_at_once() {
+        let Some(game) = game_dir() else { return };
+        let mut audio = AudioSystem::new_capturing(&game, &cfg_with_unity_volumes());
+        let key = crate::match_sounds::motor_key(0, 3);
+        let motor = |on| crate::match_sounds::SoundCue::Motor {
+            key,
+            on,
+            path: "Sounds\\motorloop2.wav".into(),
+            position: [0.0; 3],
+        };
+        let ears = Listener::looking_forward([0.0; 3]);
+        audio.play_cues(vec![motor(true)], ears);
+        audio.audio.advance(0.5);
+        audio.play_cues(vec![motor(false)], ears);
+        audio.audio.advance(0.1);
+        let voices = audio.audio.capture().unwrap().start_gains();
+        assert_eq!(voices.len(), 1, "{voices:?}");
+        let (start, _, looping, gain, stop) = &voices[0];
+        assert!(*looping);
+        let hdb = 2000.0 * gain.log10();
+        assert!(
+            (hdb - crate::match_sounds::MOTOR_LOOP_HDB as f32).abs() < 1.0,
+            "{hdb}"
+        );
+        assert!(
+            (stop.expect("stopped") - start - 0.5).abs() < 1e-3,
+            "{stop:?}"
         );
     }
 }

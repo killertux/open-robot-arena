@@ -8,9 +8,10 @@
 //!
 //! The binary in `src/main.rs` is a thin runner over these.
 
+pub mod bindings;
 pub mod game;
 pub mod nav;
 pub mod script;
 pub mod shell;
 
-pub use shell::{Pick, Shell, Shot, Step};
+pub use shell::{LobbyPick, PanelButton, PanelRequest, Pick, Shell, Shot, Step, PREMATCH};

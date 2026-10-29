@@ -27,8 +27,10 @@ No network was used: `cargo build/test/clippy` run with `--offline`, and the
 package script downloads nothing. `tools/package.sh`, `tools/smoke_package.sh`
 and `tools/check.sh` also export `CARGO_NET_OFFLINE=true`: `--offline` tells
 Cargo, but not a Cargo *build script*, and `oxijolt-sys`'s optional `prebuilt`
-archive is fetched with `curl`. With the variable set, a fresh build takes the
-vendored CMake path instead.
+archive is fetched with `curl`. Since the Jolt backend became the opt-in `jolt`
+feature (docs/29 section 12ac) the default build has no such script and the
+variable only matters for `--features jolt`, where it takes the vendored CMake
+path.
 
 ## 1. Layout
 
@@ -381,8 +383,8 @@ flatpak override --user --filesystem="/path/to/Robot Arena 2:ro" \
 `cargo/vendor`). flatpak-builder extracts them; the manifest sets
 `CARGO_HOME=/run/build/ra2-open-robot-arena/cargo` and
 `CARGO_NET_OFFLINE=true`, which also stops `oxijolt-sys`'s build script from
-fetching its optional prebuilt Jolt archive, so Jolt 5.6.0 is built from the
-vendored CMake sources. Regenerate with `gen-cargo-sources.py` (and check with
+fetching its optional prebuilt Jolt archive (only built with `--features jolt`;
+the default build has no Jolt and needs no CMake). Regenerate with `gen-cargo-sources.py` (and check with
 `--check`) after a lockfile change.
 
 Commands where the tools and network exist:

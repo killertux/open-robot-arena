@@ -80,10 +80,16 @@ pub struct ComponentInfo {
     pub def: Option<ComponentDef>,
     /// The component's own mount points, keyed by the id a `.bot` names.
     pub mounts: BTreeMap<i32, Attachment>,
+    /// The motor hinge its mesh declares (a burst motor's rotor is built at
+    /// its start angle about it; see [`ra2fmt::mount::burst_rotor`]).
+    pub hinge: Option<ra2fmt::mount::RotorHinge>,
     /// Mass in kg, by the simulator's rule.
     pub mass: f32,
     /// Whether the mesh has geometry (and so counts toward the robot's mass).
     pub has_hull: bool,
+    /// The mesh's bounding box in the component's own space (`min`, `max`), the
+    /// box the placement drag's overlap test uses.
+    pub bounds: Option<([f32; 3], [f32; 3])>,
     /// Whether the definition *and* mesh loaded.
     pub loaded: bool,
 }
@@ -339,12 +345,13 @@ impl GameLibrary {
             return ComponentInfo::unloaded(class, file);
         };
         let mounts = scene.attachment_table();
+        let hinge = ra2fmt::mount::rotor_hinge(&scene);
         let points = scene_points(&scene);
         let mass = def.number("mass").unwrap_or_else(|| {
             let sum: f32 = scene
-                .objects
+                .rigid_bodies()
                 .iter()
-                .flat_map(|o| &o.rigid_bodies)
+                .filter(|rb| !rb.disable_collisions)
                 .map(|rb| rb.mass)
                 .sum();
             if sum > 0.0 {
@@ -363,8 +370,10 @@ impl GameLibrary {
             base: def.class.clone(),
             def: Some(def),
             mounts,
+            hinge,
             mass,
             has_hull: !points.is_empty(),
+            bounds: (!points.is_empty()).then(|| bounds(&points)),
             loaded: true,
         }
     }
@@ -516,8 +525,8 @@ mod tests {
         assert!(wheel.loaded, "the mini wheel should load");
         assert_eq!(wheel.base, "Wheel");
         assert!(
-            (wheel.mass - 8.0).abs() < 0.5,
-            "the mini wheel is the 8 kg anchor, got {}",
+            (wheel.mass - 9.0).abs() < 0.01,
+            "the mini wheel is its hub's 9 kg (the traction ring is a massless phantom), got {}",
             wheel.mass
         );
         assert!(wheel.has_hull);

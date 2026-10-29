@@ -221,6 +221,17 @@ impl Chassis {
         let area = self.mesh.as_ref().map(|m| m.surface_area()).unwrap_or(0.0);
         area * self.armour.unwrap_or_default().weight
     }
+
+    /// Chassis hitpoints: `trunc(surface area × armour hardness)`, recovered
+    /// from `FUN_0044d710` (0x44d86d..0x44d8d2; area summed over the chassis
+    /// triangles, hardness = the 4th number of the armour row). A stock Scout
+    /// is 6.09342 × 300 = 1828, ALARM 7.6058 × 350 = 2662, the values the
+    /// original reports live.
+    pub fn hitpoints(&self) -> Option<f32> {
+        let armour = self.armour?;
+        let area = self.mesh.as_ref().map(|m| m.surface_area()).unwrap_or(0.0);
+        Some((area * armour.hardness).trunc())
+    }
 }
 
 /// A mesh embedded directly in a `.bot` (chassis shape or buckle model).
@@ -331,7 +342,7 @@ pub fn parse(data: &[u8]) -> Result<Bot, Error> {
         }
     };
     let snapshot = if snap {
-        Some(lines.take_tga(Some((128, 128)))?.to_vec())
+        Some(lines.take_tga(Some((128, 128)))?.into_owned())
     } else {
         None
     };
@@ -498,7 +509,7 @@ fn parse_chassis(lines: &mut Lines, ver: (i32, i32)) -> Result<Chassis, Error> {
     if has_model {
         ch.mesh = Some(parse_3d_data(lines)?);
         if lines.line() == b"true" {
-            ch.texture_tga = Some(lines.take_tga(Some((256, 256)))?.to_vec());
+            ch.texture_tga = Some(lines.take_tga(Some((256, 256)))?.into_owned());
         }
         // The "unknown section" flag exists from 1.08 onward (absent in 1.07).
         if ver > (1, 7) && lines.line() == b"true" {
@@ -565,6 +576,12 @@ fn parse_chassis(lines: &mut Lines, ver: (i32, i32)) -> Result<Chassis, Error> {
             ]);
         }
     }
+    if !has_model && lines.peek() == b"0" {
+        // A chassis with no shape yet (a blank robot's) carries one `0` line
+        // before its armour row (live: the original's untouched new robot,
+        // `teamhq-newbot-empty__live__000.bot`).
+        lines.line();
+    }
     // Armour: a type row, plus an extra row when a 3D model is present.
     //
     //   <type> <weight per square unit> 0 <hardness> 0
@@ -621,6 +638,25 @@ fn strip_label(line: &str, label: &str) -> String {
 // Writer
 
 impl Bot {
+    /// The robot as the original's Team HQ **Export Bot** and **Import Bot** write it (docs/36 section 9.25): the
+    /// design loaded and saved again in the current format, 1.12, whatever it was. The default-texture flag is added
+    /// as `1` to a file that has none (1.07 to 1.11), and the key codes of a 1.07/1.08 remote control, which stored three,
+    /// get their new second code, 0 (`a b c` becomes `a 0 b c`). Checked byte for byte against four live exports
+    /// (1.08, 1.11, 1.12) and one import (1.07).
+    pub fn upgraded(&self) -> Bot {
+        let mut bot = self.clone();
+        if parse_version(&bot.version) <= (1, 8) {
+            for control in &mut bot.controllers {
+                for code in &mut control.bindings {
+                    *code = [code[0], 0, code[1], code[2]];
+                }
+            }
+        }
+        bot.version = "1.12".into();
+        bot.default_texture.get_or_insert(true);
+        bot
+    }
+
     /// Write the robot in the game's own text form.
     ///
     /// The file-format version is [`Bot::version`]; a default `Bot` is 1.12.
@@ -628,8 +664,26 @@ impl Bot {
     /// buckle points, buckle model, heading) are emitted for the versions that
     /// have them, so an old file written back stays an old file.
     pub fn write(&self) -> Vec<u8> {
+        self.write_with(false)
+    }
+
+    /// The robot as a multiplayer peer sends it (`giAddArenaBotMessage`): the
+    /// current format, 1.12, and each picture in the wire form (type `0x17`,
+    /// a zlib stream; `docs/38` section 15).
+    pub fn write_wire(&self) -> Vec<u8> {
+        self.upgraded().write_with(true)
+    }
+
+    /// The robot's preview picture in the wire form: what a lobby panel's
+    /// `giGroupInfoMessage` carries as the robot's design (type `0x17`).
+    pub fn snapshot_wire(&self) -> Option<Vec<u8>> {
+        self.snapshot.as_deref().map(tga_to_wire)
+    }
+
+    fn write_with(&self, wire: bool) -> Vec<u8> {
         let ver = parse_version(&self.version);
         let mut w = Writer::new(self.line_ending);
+        w.wire = wire;
 
         w.line(&self.version);
         w.line(&format!("Name: {}", self.name));
@@ -643,7 +697,7 @@ impl Bot {
             "false"
         });
         if let Some(snapshot) = &self.snapshot {
-            w.bytes(snapshot);
+            w.tga(snapshot);
         }
         w.line(&self.components.len().to_string());
 
@@ -738,7 +792,7 @@ impl Writer<'_> {
                 "false"
             });
             if let Some(tex) = &ch.texture_tga {
-                self.bytes(tex);
+                self.tga(tex);
             }
             if ver > (1, 7) {
                 // The reader cannot decode a present unknown section, and no
@@ -772,6 +826,9 @@ impl Writer<'_> {
                 // line with a space, as the game does.
                 self.line(&format!("{} 3 {} {} {} ", c[0], c[1], c[2], c[3]));
             }
+        }
+        if ch.mesh.is_none() {
+            self.line("0");
         }
         let armour = ch.armour.unwrap_or_default();
         self.line(&format!(
@@ -824,6 +881,8 @@ impl Writer<'_> {
 struct Writer<'a> {
     out: Vec<u8>,
     e: &'a str,
+    /// Pictures go out in the wire form (multiplayer's robot copy).
+    wire: bool,
 }
 
 impl<'a> Writer<'a> {
@@ -831,16 +890,23 @@ impl<'a> Writer<'a> {
         Writer {
             out: Vec::new(),
             e: line_ending.s(),
+            wire: false,
+        }
+    }
+
+    /// A picture: plain, or in the wire form.
+    fn tga(&mut self, tga: &[u8]) {
+        if self.wire {
+            let packed = tga_to_wire(tga);
+            self.out.extend_from_slice(&packed);
+        } else {
+            self.out.extend_from_slice(tga);
         }
     }
 
     fn line(&mut self, s: &str) {
         self.out.extend_from_slice(s.as_bytes());
         self.out.extend_from_slice(self.e.as_bytes());
-    }
-
-    fn bytes(&mut self, b: &[u8]) {
-        self.out.extend_from_slice(b);
     }
 
     fn floats(&mut self, v: &[f32]) {
@@ -904,6 +970,17 @@ struct Lines<'a> {
 }
 
 impl<'a> Lines<'a> {
+    /// The next line, without consuming it.
+    fn peek(&self) -> &'a [u8] {
+        let rest = &self.d[self.p..];
+        let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+        let mut s = &rest[..end];
+        if s.last() == Some(&b'\r') {
+            s = &s[..s.len() - 1];
+        }
+        s
+    }
+
     fn line(&mut self) -> &'a [u8] {
         let start = self.p;
         let end = match self.d[self.p..].iter().position(|&b| b == b'\n') {
@@ -979,7 +1056,15 @@ impl<'a> Lines<'a> {
     }
 
     /// Return the raw bytes of a TGA at the cursor, advancing past it.
-    fn take_tga(&mut self, expect: Option<(u16, u16)>) -> Result<&'a [u8], Error> {
+    ///
+    /// A file holds plain TGAs (type 2 or 3). The copy of a robot that travels
+    /// in a multiplayer `giAddArenaBotMessage` stores each as type `0x17`: the
+    /// same header, then the compressed size (u32) and a zlib stream of the
+    /// pixels (`docs/38` section 15); it is returned as the plain type-2 TGA.
+    fn take_tga(
+        &mut self,
+        expect: Option<(u16, u16)>,
+    ) -> Result<std::borrow::Cow<'a, [u8]>, Error> {
         let h = self
             .d
             .get(self.p..self.p + 18)
@@ -992,7 +1077,7 @@ impl<'a> Lines<'a> {
         let w = u16::from_le_bytes([h[12], h[13]]);
         let ht = u16::from_le_bytes([h[14], h[15]]);
         let bpp = h[16] as usize;
-        if itype != 2 && itype != 3 {
+        if itype != 2 && itype != 3 && itype != WIRE_TGA_TYPE {
             return Err(Error::Structure(format!("unsupported TGA type {itype}")));
         }
         if let Some((ew, eh)) = expect {
@@ -1000,7 +1085,34 @@ impl<'a> Lines<'a> {
                 return Err(Error::Structure(format!("TGA {w}x{ht} != {ew}x{eh}")));
             }
         }
-        let size = 18 + idlen + (w as usize) * (ht as usize) * (bpp / 8);
+        let pixels = (w as usize) * (ht as usize) * (bpp / 8);
+        if itype == WIRE_TGA_TYPE {
+            let at = self.p + 18 + idlen;
+            let len = self
+                .d
+                .get(at..at + 4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+                .ok_or(Error::UnexpectedEof { at, wanted: 4 })?;
+            let packed = self
+                .d
+                .get(at + 4..at + 4 + len)
+                .ok_or(Error::UnexpectedEof {
+                    at: at + 4,
+                    wanted: len,
+                })?;
+            let mut out = self.d[self.p..at].to_vec();
+            out[2] = 2;
+            let mut z =
+                std::io::Read::take(flate2::read::ZlibDecoder::new(packed), pixels as u64 + 1);
+            std::io::Read::read_to_end(&mut z, &mut out)
+                .map_err(|e| Error::Structure(format!("TGA zlib stream: {e}")))?;
+            if out.len() != at - self.p + pixels {
+                return Err(Error::Structure("TGA zlib stream of the wrong size".into()));
+            }
+            self.p = at + 4 + len;
+            return Ok(std::borrow::Cow::Owned(out));
+        }
+        let size = 18 + idlen + pixels;
         let bytes = self
             .d
             .get(self.p..self.p + size)
@@ -1009,16 +1121,69 @@ impl<'a> Lines<'a> {
                 wanted: size,
             })?;
         self.p += size;
-        Ok(bytes)
+        Ok(std::borrow::Cow::Borrowed(bytes))
     }
+}
+
+/// The TGA image type a robot's pictures carry on the wire.
+const WIRE_TGA_TYPE: u8 = 0x17;
+
+/// A plain TGA (type 2, 32 bits) as the wire form: type `0x17`, the compressed
+/// size, the zlib stream (default level, zlib 1.1.3's `compress`).
+fn tga_to_wire(tga: &[u8]) -> Vec<u8> {
+    let Some(head) = tga.get(..18).filter(|h| h[2] == 2 || h[2] == 3) else {
+        return tga.to_vec();
+    };
+    let at = 18 + head[0] as usize;
+    let Some(pixels) = tga.get(at..) else {
+        return tga.to_vec();
+    };
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut z, pixels).expect("a Vec writes");
+    let packed = z.finish().expect("a Vec writes");
+    let mut out = tga[..at].to_vec();
+    out[2] = WIRE_TGA_TYPE;
+    out.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+    out.extend_from_slice(&packed);
+    out
+}
+
+/// The inverse of the wire form of a picture: a type `0x17` TGA (compressed
+/// size, zlib stream) back to the plain type 2 TGA. `None` for anything else.
+pub fn wire_to_tga(wire: &[u8]) -> Option<Vec<u8>> {
+    let head = wire.get(..18).filter(|h| h[2] == WIRE_TGA_TYPE)?;
+    let at = 18 + head[0] as usize;
+    let size = u32::from_le_bytes(wire.get(at..at + 4)?.try_into().ok()?) as usize;
+    let packed = wire.get(at + 4..at + 4 + size)?;
+    let mut pixels = Vec::new();
+    std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(packed), &mut pixels).ok()?;
+    let mut out = wire[..at].to_vec();
+    out[2] = 2;
+    out.extend_from_slice(&pixels);
+    Some(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_wire_picture_turns_back_into_its_tga() {
+        let mut tga = vec![0u8; 18];
+        tga[2] = 2;
+        tga[12] = 2;
+        tga[14] = 2;
+        tga[16] = 32;
+        tga.extend((0..16u8).map(|i| i * 3));
+        let wire = tga_to_wire(&tga);
+        assert_eq!(wire[2], WIRE_TGA_TYPE);
+        assert_eq!(wire_to_tga(&wire), Some(tga));
+        assert_eq!(wire_to_tga(&[0; 30]), None);
+    }
+
     /// The game files live outside the repository; CI has none.
     fn game_dir() -> Option<std::path::PathBuf> {
+        crate::saves::isolate_for_tests();
         if let Some(dir) = std::env::var_os("RA2_GAME") {
             let dir = std::path::PathBuf::from(dir);
             return dir.is_dir().then_some(dir);
@@ -1221,5 +1386,40 @@ mod tests {
             ch.armour_material,
             Some([0.3332, 0.30005, 0.30005, 0.85, 10.0])
         );
+    }
+
+    /// The original's Export Bot / Import Bot re-save (`Bot::upgraded`) against the live files kept in
+    /// `local/oracle/original` (skipped when the captures or the install are not there).
+    #[test]
+    fn an_upgraded_bot_is_what_the_original_exports() {
+        let mut root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        while !root.join("local/oracle/original").is_dir() {
+            if !root.pop() {
+                return;
+            }
+        }
+        for (source, live) in [
+            (
+                "local/game/Teams/Team0/Bot4.bot",
+                "teamhq-export-atom-smasher__live__000.bot",
+            ), // 1.11
+            (
+                "local/game/Teams/Team0/Bot3.bot",
+                "teamhq-export-forkie__live__000.bot",
+            ), // 1.08
+            (
+                "local/game/Robot Designs/XTRA_BarberShop Chop.bot", // 1.07
+                "teamhq-import-barbershop__live__000.bot",
+            ),
+        ] {
+            let (Ok(src), Ok(out)) = (
+                std::fs::read(root.join(source)),
+                std::fs::read(root.join("local/oracle/original").join(live)),
+            ) else {
+                continue;
+            };
+            let bot = parse(&src).unwrap();
+            assert!(bot.upgraded().write() == out, "{source} against {live}");
+        }
     }
 }

@@ -9,20 +9,36 @@
 use glam::{Mat4, Quat, Vec3};
 use ra2_render::{RenderGroup, Renderer};
 
-use crate::backend::{BodyDesc, BodyHandle, MotionType, PhysicsBackend, ShapeDesc};
-use crate::jolt::JoltBackend;
+use crate::backend::{BodyDesc, BodyHandle, MotionType, PhysicsBackend};
 use crate::rig::{self, RobotRig};
 use crate::robot::Robot;
-use crate::scene::{self, ArenaScene, Prop, USER_ARENA, USER_PROP};
+use crate::scene::{self, ArenaScene, Prop, USER_ARENA};
 
 /// Forward is -Z in RA2 model space.
 pub const BOT_FORWARD: Vec3 = Vec3::new(0.0, 0.0, -1.0);
 
-/// Driver input for one instant, each in `[-1, 1]`.
+/// Driver input for one instant.
+///
+/// `throttle` and `steer` (each in `[-1, 1]`) are a stand-in driver's
+/// `Forward`/`LeftRight` keys; `keys` are the DirectInput scan codes a human
+/// holds, which the robot's own wiring maps to controls. Both reach the motors
+/// only through the bot's wiring (see [`crate::controls`]).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DriveInput {
     pub throttle: f32,
     pub steer: f32,
+    pub keys: crate::controls::KeySet,
+}
+
+impl DriveInput {
+    /// A stand-in driver's `throttle`/`steer` with no keys held.
+    pub fn new(throttle: f32, steer: f32) -> Self {
+        DriveInput {
+            throttle,
+            steer,
+            keys: Default::default(),
+        }
+    }
 }
 
 /// A single time-segment of a scripted drive.
@@ -74,10 +90,7 @@ impl DriveScript {
     pub fn at(&self, t: f32) -> DriveInput {
         for k in &self.keys {
             if t < k.until {
-                return DriveInput {
-                    throttle: k.throttle,
-                    steer: k.steer,
-                };
+                return DriveInput::new(k.throttle, k.steer);
             }
         }
         DriveInput::default()
@@ -85,21 +98,12 @@ impl DriveScript {
 }
 
 /// Tuning for the drive that is not a property of the parts themselves.
-#[derive(Clone, Copy, Debug)]
-pub struct DriveTuning {
-    /// Yaw rate the steering input asks for (rad/s).
-    ///
-    /// A robot's top speed is its own motors' (`power` in the component
-    /// definitions), so only steering is left here: the original steers through
-    /// its `Steering` components and the control wiring, which is not modelled.
-    pub max_yaw_rate: f32,
-}
-
-impl Default for DriveTuning {
-    fn default() -> Self {
-        DriveTuning { max_yaw_rate: 2.2 }
-    }
-}
+///
+/// Nothing is left: a robot's speed is its motors' (`power` in the component
+/// definitions) and it turns because its wiring drives the sides differently.
+/// The struct stays so a future tuning has a place to go.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DriveTuning {}
 
 /// A movable prop (crate, barrel, ...) placed in the world.
 pub struct PropEntity {
@@ -135,21 +139,14 @@ impl Sandbox {
         let mass_scale = mass_scale(rig.mass);
         let (components, parts) = (rig.components.len(), rig.parts.len());
 
-        let mut physics: Box<dyn PhysicsBackend> = Box::new(JoltBackend::new(arena.gravity)?);
+        let mut physics: Box<dyn PhysicsBackend> = crate::backend::create_backend(arena.gravity)?;
 
         // Static arena geometry.
-        let (verts, indices) = arena.triangle_soup();
-        let arena_desc = BodyDesc::new(
-            MotionType::Static,
-            ShapeDesc::TriMesh {
-                vertices: verts,
-                indices,
-            },
-        )
-        .with_friction(arena.friction)
-        .with_restitution(arena.restitution)
-        .with_user_data(USER_ARENA);
-        physics.create_body(&arena_desc)?;
+        let arena_desc = BodyDesc::new(MotionType::Static, arena.collider_shape())
+            .with_friction(arena.friction)
+            .with_restitution(arena.restitution)
+            .with_user_data(USER_ARENA);
+        let arena_body = physics.create_body(&arena_desc)?;
 
         // Spawn the robot with its lowest point just above the floor.
         let spawn = Self::find_spawn(&*physics, &arena, &rig);
@@ -170,23 +167,12 @@ impl Sandbox {
         // Movable props (arena obstacles with embedded rigid bodies).
         let mut props = Vec::new();
         for p in prop_defs {
-            let desc = BodyDesc::new(
-                MotionType::Dynamic,
-                ShapeDesc::ConvexHull {
-                    points: p.hull_points.clone(),
-                },
-            )
-            .at(p.position)
-            .with_rotation(p.rotation)
-            .with_friction(p.friction)
-            .with_restitution(p.restitution)
-            .with_mass(p.mass)
-            .with_user_data(USER_PROP);
-            match physics.create_body(&desc) {
-                Ok(body) => props.push(PropEntity { body, prop: p }),
-                Err(e) => eprintln!("ra2sim: prop {} skipped: {e}", p.name),
+            match crate::duel::spawn_prop(&mut *physics, &p) {
+                Some(body) => props.push(PropEntity { body, prop: p }),
+                None => eprintln!("ra2sim: prop {} skipped", p.name),
             }
         }
+        crate::duel::suspend_props(&mut *physics, arena_path, arena_body, &props);
 
         println!(
             "sandbox: backend={} arena_tris={} props={} components={} parts={} mass={:.0}kg spawn={:.2},{:.2},{:.2}",
@@ -307,7 +293,7 @@ impl Sandbox {
         let target = self.bot_position();
         let fwd = self
             .bot_transform()
-            .transform_vector3(BOT_FORWARD)
+            .transform_vector3(self.robot.rig.forward())
             .normalize_or_zero();
 
         let (eye, aim) = match *camera {
@@ -321,8 +307,8 @@ impl Sandbox {
             CameraMode::Top { height } => (target + Vec3::new(0.02, height, 0.02), target),
         };
 
-        let view = ra2_render::look_at_rh(eye, aim, Vec3::Y);
-        let proj = ra2_render::perspective_rh(55f32.to_radians(), w as f32 / h as f32, 0.05, 800.0);
+        let view = ra2_render::look_at_lh(eye, aim, Vec3::Y);
+        let proj = ra2_render::perspective_lh(55f32.to_radians(), w as f32 / h as f32, 0.05, 800.0);
         let view_proj = proj * view;
 
         let mut groups = vec![RenderGroup {

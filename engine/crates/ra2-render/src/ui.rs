@@ -235,17 +235,64 @@ impl UiAssets {
 
     /// Build the draw list for a placed screen.
     pub fn scene(&mut self, roots: &[Placement<'_>], screen: [u32; 2]) -> UiScene {
+        // The exe lays its windows out in whole pixels: both edges of a box
+        // are truncated (capture comparison: the exhibition panel's right and
+        // bottom edges and everything hung from them sat one pixel further
+        // out with fractional edges). The placed tree keeps its exact frames
+        // for hit tests; the draw list snaps them.
+        let snapped: Vec<Placement<'_>> = roots.iter().map(snap_placement).collect();
+        let roots = &snapped[..];
         let mut quads = Vec::new();
-        for (p, parent) in ra2ui::draw_order_parented(roots) {
+        // A `Border` is drawn over the widget it dresses and everything inside
+        // it, so it is emitted when the walk leaves that widget's subtree.
+        let order = ra2ui::draw_order_parented(roots);
+        let addr = |p: &Placement<'_>| p as *const Placement<'_> as usize;
+        let parents: HashMap<usize, Option<usize>> = order
+            .iter()
+            .map(|(p, parent)| (addr(p), parent.map(addr)))
+            .collect();
+        let inside = |mut node: Option<usize>, ancestor: usize| {
+            while let Some(n) = node {
+                if n == ancestor {
+                    return true;
+                }
+                node = parents.get(&n).copied().flatten();
+            }
+            false
+        };
+        let mut borders: Vec<(&Placement<'_>, Option<Frame>)> = Vec::new();
+        for (p, parent) in order.iter().map(|(p, parent)| (*p, *parent)) {
+            while let Some(&(owner, clip)) = borders.last() {
+                if inside(Some(addr(p)), addr(owner)) {
+                    break;
+                }
+                border_quads(owner, clip, &mut quads);
+                borders.pop();
+            }
             if !p.widget.visible() {
                 continue;
+            }
+            if p.widget.attachment("Border").is_some() {
+                // The ring lies outside the frame, so it is not clipped to the
+                // widget's own `ClipMode`, only to what holds it.
+                borders.push((p, parent.and_then(|q| q.clip)));
             }
             let clip = p.clip;
             if clip.is_some_and(|c| c.w <= 0.0 || c.h <= 0.0) {
                 continue;
             }
             if p.widget.kind == ra2fmt::gib::WidgetKind::Text {
-                self.text_quads(p, clip, &mut quads);
+                // A `MultiLine` text box wraps its text to its own width.
+                let wrap = parent
+                    .filter(|q| {
+                        q.widget.kind == ra2fmt::gib::WidgetKind::TextBox
+                            && q.widget
+                                .field("MultiLine")
+                                .and_then(|f| f.flag())
+                                .unwrap_or(false)
+                    })
+                    .map(|q| (q.frame.right() - p.frame.x).max(1.0));
+                self.text_quads(p, clip, wrap, &mut quads);
                 continue;
             }
             if p.widget.kind == ra2fmt::gib::WidgetKind::Glyph {
@@ -260,6 +307,34 @@ impl UiAssets {
                 if let Some(fill) = rectangle_quad(p, clip) {
                     quads.push(fill);
                 }
+            }
+            if p.widget.kind == ra2fmt::gib::WidgetKind::Placeholder
+                && p.widget.name().to_ascii_lowercase().starts_with("3d")
+            {
+                // The 3D view's slot: the engine draws the scene over a 0.15 grey
+                // clear (the capture's panel is (38,38,38)); the 3D pass composites
+                // over this fill where there is a model.
+                quads.push(UiQuad {
+                    rect: p.frame,
+                    corners: None,
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                    color: [0.15, 0.15, 0.15, 1.0],
+                    texture: 0,
+                    alpha: true,
+                    clip,
+                });
+            }
+            if p.widget.kind == ra2fmt::gib::WidgetKind::Image
+                && p.widget.filename().is_some_and(|f| f.is_empty())
+                && parent.is_some_and(|q| {
+                    q.widget.kind == ra2fmt::gib::WidgetKind::Rectangle
+                        && matches!(q.widget.id(), 100 | 101)
+                        && q.widget.field("Filled").and_then(|f| f.flag()) == Some(true)
+                })
+            {
+                // A list's selection/highlight bar: its `Rectangle` already fills
+                // the colour; stacking the image's identical fill doubles it.
+                continue;
             }
             if p.widget.kind == ra2fmt::gib::WidgetKind::Image {
                 // An `Image` with a blank `_Filename` is a **colour fill**: the
@@ -278,6 +353,9 @@ impl UiAssets {
                 quads.push(quad);
             }
         }
+        while let Some((owner, clip)) = borders.pop() {
+            border_quads(owner, clip, &mut quads);
+        }
         UiScene {
             size: screen,
             // Cloned, not taken: an interactive client draws the same assets
@@ -288,6 +366,54 @@ impl UiAssets {
             missing: std::mem::take(&mut self.missing),
             tiles: std::mem::take(&mut self.tiles),
         }
+    }
+
+    /// The quads of one run of text drawn outside any layout (the floating damage numbers):
+    /// `face`'s own glyph cells, one pixel to a texel, the text's line box centred on `center`
+    /// (scene pixels), tinted `color`. The scene's texture list is refreshed, so a face first
+    /// used here is in `scene.textures`.
+    pub fn centered_text(
+        &mut self,
+        scene: &mut UiScene,
+        face: &str,
+        text: &str,
+        center: [f32; 2],
+        color: [f32; 4],
+    ) {
+        let Some(font) = self.faces.get(face).cloned() else {
+            return;
+        };
+        let Some(texture) = self.glyph_page(face, &font) else {
+            return;
+        };
+        let (w, h) = font.extent(text);
+        let frame = Frame::new(
+            (center[0] - w as f32 / 2.0).floor(),
+            (center[1] - h as f32 / 2.0).floor(),
+            w as f32,
+            h as f32,
+        );
+        let (pw, ph) = (font.page_width as f32, font.page_height as f32);
+        for glyph in ra2ui::text_run(&font, frame, text) {
+            if glyph.cell[2] <= 0 || glyph.cell[3] <= 0 {
+                continue;
+            }
+            scene.quads.push(UiQuad {
+                rect: glyph.rect,
+                corners: None,
+                uv: [
+                    glyph.cell[0] as f32 / pw,
+                    glyph.cell[1] as f32 / ph,
+                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
+                ],
+                color,
+                texture,
+                alpha: true,
+                clip: None,
+            });
+        }
+        scene.textures = self.textures.clone();
     }
 
     /// The quad a widget's `_Filename` draws, if it names art this build can
@@ -340,14 +466,11 @@ impl UiAssets {
         // is 512x76 and its rect starts at u0 = 0.15625: sampling at the rect
         // draws the middle of the logo.
         //
-        // An `Image` also states its own `_Size`, which is the size the art is
-        // *drawn* at when it differs from the box the layout gave the widget:
-        // a scroll bar's thumb is `Size 1 1 1 1` inside its track and `_Size
-        // 16 0 30 0`. (A tile ignores it: a pattern fills its frame.)
-        let rect = match stated_size(p.widget.field("_Size")) {
-            Some((w, h)) => Frame::new(p.frame.x, p.frame.y, w, h),
-            None => p.frame,
-        };
+        // The widget's layout `Size` governs what is drawn, as in the original:
+        // `_Size` is only the size the art was authored at (`exhib_setup.gib`'s
+        // cement is `Size 1 1 1 1` over a `_Size 640 0 480 0` and fills the
+        // screen; a scroll thumb is `Size 1 1 1 1` too and its bar sizes it).
+        let rect = p.frame;
         Some(UiQuad {
             rect,
             corners: None,
@@ -360,7 +483,13 @@ impl UiAssets {
     }
 
     /// The quads a label draws: one per glyph's cell, tinted by `_ForeColor`.
-    fn text_quads(&mut self, p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
+    fn text_quads(
+        &mut self,
+        p: &Placement<'_>,
+        clip: Option<Frame>,
+        wrap: Option<f32>,
+        out: &mut Vec<UiQuad>,
+    ) {
         let (Some(text), Some(face)) = (p.widget.text(), p.widget.font()) else {
             return;
         };
@@ -375,24 +504,37 @@ impl UiAssets {
         };
         let color = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
         let (pw, ph) = (font.page_width as f32, font.page_height as f32);
-        for glyph in ra2ui::text_run(&font, p.frame, text) {
+        let glyphs: Vec<ra2ui::PlacedGlyph> = match wrap {
+            // The exe advances a wrapped line by the face's ascent.
+            Some(width) => ra2ui::wrap_lines(&font, text, width)
+                .iter()
+                .enumerate()
+                .flat_map(|(i, line)| {
+                    let at = Frame::new(
+                        p.frame.x,
+                        p.frame.y + i as f32 * font.ascent as f32,
+                        p.frame.w,
+                        p.frame.h,
+                    );
+                    ra2ui::text_run(&font, at, line)
+                })
+                .collect(),
+            None => ra2ui::text_run(&font, p.frame, text),
+        };
+        for glyph in glyphs {
             if glyph.cell[2] <= 0 || glyph.cell[3] <= 0 {
                 continue;
             }
             out.push(UiQuad {
                 rect: glyph.rect,
                 corners: None,
-                // The face's page is stored **bottom-up only**. `v` is swapped
-                // (the page's first row is the glyph's last); `u` is not: flipped
-                // vertically, the page's row reads `E F G H I J K L M N O P Q R
-                // S T U` upright and in order, so swapping `u` would mirror every
-                // glyph. It did, for a while — see the module note in
-                // `ra2fmt::giff`.
+                // The page is stored in texture order (`ra2fmt::giff` turns the
+                // file's bottom-up TGA over), so the cell's top row is `v0`.
                 uv: [
                     glyph.cell[0] as f32 / pw,
-                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
-                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
                     glyph.cell[1] as f32 / ph,
+                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
                 ],
                 color,
                 texture,
@@ -413,43 +555,84 @@ impl UiAssets {
     /// by its margin against whatever holds it — so the box is `_Margin` at the
     /// widget's own frame origin.
     fn glyph_quads(&mut self, p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
-        let (Some(text), Some(face)) = (p.widget.text(), p.widget.font()) else {
+        let Some(mut box_) = glyph_box(p) else {
             return;
         };
-        if text.is_empty() {
-            return;
-        }
-        let Some(box_) = glyph_box(p) else {
-            return;
-        };
-        let Some(font) = self.faces.get(face).cloned() else {
-            return;
-        };
-        let Some(texture) = self.glyph_page(face, &font) else {
-            return;
-        };
-        let color = p.widget.fore_color().unwrap_or([1.0, 1.0, 1.0, 1.0]);
-        let (pw, ph) = (font.page_width as f32, font.page_height as f32);
-        for glyph in ra2ui::paragraph_run(&font, box_, text, box_.w) {
-            if glyph.cell[2] <= 0 || glyph.cell[3] <= 0 {
+        // A glyph is one or more runs (`Params 2` in `chassis.gib`: a heading in
+        // `fg_d18` ending in a line break, then the paragraph in `fg_mcn14`);
+        // each run's lines start where the one before ended.
+        let faces: Vec<String> = p
+            .widget
+            .fields_named("_Font")
+            .map(|f| f.text().to_string())
+            .collect();
+        let texts: Vec<String> = p
+            .widget
+            .fields_named("_Text")
+            .map(|f| f.text().to_string())
+            .collect();
+        let colors: Vec<[f32; 4]> = p
+            .widget
+            .fields_named("_ForeColor")
+            .map(|f| {
+                let n = f.numbers();
+                [
+                    n.first().copied().unwrap_or(1.0),
+                    n.get(1).copied().unwrap_or(1.0),
+                    n.get(2).copied().unwrap_or(1.0),
+                    n.get(3).copied().unwrap_or(1.0),
+                ]
+            })
+            .collect();
+        for (i, face) in faces.iter().enumerate() {
+            let Some(text) = texts.get(i) else { break };
+            // A `DisplayBox`'s markup spells a line break as the two characters
+            // `\n` (the credits window's names are one string with seven of them).
+            let text = text.replace("\\n", "\n");
+            let color = colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            let Some(font) = self.faces.get(face.as_str()).cloned() else {
                 continue;
+            };
+            if !text.is_empty() {
+                let Some(texture) = self.glyph_page(face, &font) else {
+                    continue;
+                };
+                let (pw, ph) = (font.page_width as f32, font.page_height as f32);
+                // The capture draws a paragraph's first line half an ascent
+                // above where the face's own baseline rule puts it (9 px for
+                // fg_mcn14, 12 for fg_d18: the arena description and chassis.gib's
+                // heading and body), so each run is lifted by `ascent / 2`.
+                let lifted = Frame::new(
+                    box_.x,
+                    box_.y - (font.ascent as f32 / 2.0).round(),
+                    box_.w,
+                    box_.h,
+                );
+                for glyph in ra2ui::paragraph_run(&font, lifted, &text, box_.w) {
+                    if glyph.cell[2] <= 0 || glyph.cell[3] <= 0 {
+                        continue;
+                    }
+                    out.push(UiQuad {
+                        rect: glyph.rect,
+                        corners: None,
+                        // Texture order, as in `text_quads`.
+                        uv: [
+                            glyph.cell[0] as f32 / pw,
+                            glyph.cell[1] as f32 / ph,
+                            (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
+                            (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
+                        ],
+                        color,
+                        texture,
+                        alpha: true,
+                        clip,
+                    });
+                }
             }
-            out.push(UiQuad {
-                rect: glyph.rect,
-                corners: None,
-                // The page is stored bottom-up only: swap `v`, not `u`. See
-                // `text_quads`.
-                uv: [
-                    glyph.cell[0] as f32 / pw,
-                    (glyph.cell[1] + glyph.cell[3]) as f32 / ph,
-                    (glyph.cell[0] + glyph.cell[2]) as f32 / pw,
-                    glyph.cell[1] as f32 / ph,
-                ],
-                color,
-                texture,
-                alpha: true,
-                clip,
-            });
+            // The next run starts below this one's finished lines.
+            let lines = ra2ui::wrap_lines(&font, &text, box_.w);
+            let finished = lines.len().saturating_sub(1);
+            box_.y += finished as f32 * font.ascent as f32;
         }
     }
 
@@ -460,10 +643,7 @@ impl UiAssets {
         if let Some(found) = self.index.get(&key) {
             return *found;
         }
-        // `Font::page` and `Glyph::rect` already agree: the ink for a glyph
-        // sits at the rows the rect names, first row first. (Measured: drawn
-        // the other way up, an `M` comes out an `M` mirrored, which is the `V`
-        // that `MULTIPLAYER` used to read as.)
+        // `Font::page` is in texture order, the rows `Glyph::rect` names.
         let mut rgba = Vec::with_capacity(font.page.len() * 4);
         for i in 0..font.page.len() {
             rgba.extend_from_slice(&[255, 255, 255, font.page[i]]);
@@ -517,12 +697,47 @@ impl UiAssets {
     }
 }
 
+/// A box with both edges truncated to whole pixels.
+fn snap_frame(f: Frame) -> Frame {
+    let (x0, y0) = (f.x.floor(), f.y.floor());
+    Frame::new(x0, y0, (f.x + f.w).floor() - x0, (f.y + f.h).floor() - y0)
+}
+
+fn snap_placement<'a>(p: &Placement<'a>) -> Placement<'a> {
+    Placement {
+        widget: p.widget,
+        frame: snap_frame(p.frame),
+        clip: p.clip.map(snap_frame),
+        children: p.children.iter().map(snap_placement).collect(),
+        attachments: p
+            .attachments
+            .iter()
+            .map(|a| ra2ui::PlacedAttachment {
+                attachment: a.attachment,
+                body: snap_placement(&a.body),
+            })
+            .collect(),
+    }
+}
+
 /// A `Glyph`'s paragraph box: the `_Margin` triple `x w h`, hung from the
 /// widget's own frame origin.
 fn glyph_box(p: &Placement<'_>) -> Option<Frame> {
     let m = p.widget.field("_Margin")?.numbers();
     if m.len() < 3 {
         return None;
+    }
+    // A glyph that carries a `DisplayBox` is the box's body: its text wraps to
+    // the frame the layout gives it, the stored `_Margin` width being the
+    // editor's leftover (arena.gib states 234 for a 376 px description box,
+    // and the capture wraps at the frame).
+    if p.widget.attachment("DisplayBox").is_some() && p.frame.w > 0.0 {
+        return Some(Frame::new(
+            p.frame.x + m[0],
+            p.frame.y,
+            p.frame.w,
+            m[2].max(p.frame.h),
+        ));
     }
     Some(Frame::new(p.frame.x + m[0], p.frame.y, m[1], m[2]))
 }
@@ -654,6 +869,54 @@ fn rectangle_quad(p: &Placement<'_>, clip: Option<Frame>) -> Option<UiQuad> {
     })
 }
 
+/// The quads of a widget's `Border` attachment: `Width` rings just *outside*
+/// the widget's frame (measured: the original's 1280x1024 capture has the
+/// button's dark line one pixel beyond its frame on every side), the outermost
+/// in `Outer` and the innermost in `Inner`, the ones between blended.
+fn border_quads(p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
+    let Some(border) = p.widget.attachment("Border") else {
+        return;
+    };
+    let width = border.number("Width").unwrap_or(0.0).round() as i32;
+    let (Some(inner), Some(outer)) = (border.four("Inner"), border.four("Outer")) else {
+        return;
+    };
+    let f = p.frame;
+    for ring in 0..width.max(0) {
+        // Every ring is `Outer`: the original's 2-pixel wood frame on the repair
+        // bench (`Width 2`, `Inner 1 1 1 1`, `Outer 0.55 0.45 0.3`) is two pixels
+        // of (140, 114, 76) with no white one (reference event-repairs).
+        let t = 0.0;
+        let color: [f32; 4] = std::array::from_fn(|i| outer[i] + (inner[i] - outer[i]) * t);
+        if color[3] <= 0.0 {
+            continue;
+        }
+        // Ring 0 is the outermost, `width` pixels out; the last is adjacent.
+        let e = (width - ring) as f32;
+        let (x, y, w, h) = (f.x - e, f.y - e, f.w + 2.0 * e, f.h + 2.0 * e);
+        let sides = [
+            Frame::new(x, y, w, 1.0),
+            Frame::new(x, y + h - 1.0, w, 1.0),
+            Frame::new(x, y + 1.0, 1.0, h - 2.0),
+            Frame::new(x + w - 1.0, y + 1.0, 1.0, h - 2.0),
+        ];
+        for rect in sides {
+            if rect.w <= 0.0 || rect.h <= 0.0 {
+                continue;
+            }
+            out.push(UiQuad {
+                rect,
+                corners: None,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                color,
+                texture: 0,
+                alpha: true,
+                clip,
+            });
+        }
+    }
+}
+
 /// A blank-named `Image`'s fill: the game draws `_ForeColor` over the widget's
 /// frame.
 ///
@@ -695,28 +958,6 @@ fn image_fill_quad(
 }
 
 /// Decode art. A `.bmp` or `.tga` the image crate can read, or nothing.
-/// The `_Size` the editor writes when the designer never gave a piece of art a
-/// size: the design canvas itself, 1280×1005. **Eighteen fields in fourteen
-/// files** carry it — `teamhq/event_cell.gib` and the three `eventcell_*.gib`
-/// among them — and a 140×80 event logo drawn at the canvas would be stretched
-/// across the screen. The game draws such art in the box the layout gave it, so
-/// the canvas value is read as *unset*.
-///
-/// Anything else is a real size and overrides the box: a scroll thumb's
-/// `16 0 30 0` inside a 973-pixel track, an armour icon's `88 0 72 0`.
-const UNSET_SIZE: [f32; 2] = [1280.0, 1005.0];
-
-/// The size a widget's `_Size` states, or nothing when it states the editor's
-/// unset.
-fn stated_size(field: Option<&ra2fmt::gib::Field>) -> Option<(f32, f32)> {
-    let axes = field.and_then(ra2fmt::gib::Axes::parse)?;
-    if axes.first.fraction || axes.second.fraction {
-        return None;
-    }
-    let size = (axes.first.amount, axes.second.amount);
-    (size != (UNSET_SIZE[0], UNSET_SIZE[1])).then_some(size)
-}
-
 fn decode_art(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     crate::decode_image(bytes)
 }
@@ -1229,30 +1470,10 @@ fn scissor_of(clip: Option<Frame>, width: u32, height: u32) -> Option<[u32; 4]> 
 
 #[cfg(test)]
 mod tests {
-    use ra2fmt::gib::Field;
-
-    fn size(raw: &str) -> Option<(f32, f32)> {
-        stated_size(Some(&Field {
-            name: Some("_Size".into()),
-            raw: raw.to_string(),
-        }))
-    }
-
-    /// A `_Size` is the art's own size, and the canvas value is the editor's
-    /// unset rather than a size.
-    #[test]
-    fn the_canvas_size_is_not_a_size() {
-        assert_eq!(size("16 0 30 0"), Some((16.0, 30.0)));
-        assert_eq!(size("88 0 72 0"), Some((88.0, 72.0)));
-        assert_eq!(size("1280 0 1005 0"), None);
-        // A fractional axis is not a pixel size either.
-        assert_eq!(size("1 1 1 1"), None);
-        assert_eq!(stated_size(None), None);
-    }
-
     use super::*;
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -1275,11 +1496,8 @@ mod tests {
         assets.scene(&placed, [1280, 1005])
     }
 
-    /// The long-label smear was the shipped cell, not the length. A character's
-    /// cell is the same in a two-character label as in the 44-character help
-    /// line: the parser now derives the cell from the page's own glyph run, so
-    /// the cell is the glyph (its packed width) and not a slice of a different
-    /// packing. A long label is not a different font or a different measurement.
+    /// A character's cell is the same in a two-character label as in the
+    /// 44-character help line: it is the glyph's record, whatever the run.
     #[test]
     fn a_glyphs_cell_does_not_depend_on_the_label_length() {
         use ra2ui::Frame;
@@ -1299,9 +1517,8 @@ mod tests {
         assert_eq!(short[1].cell, long[1].cell, "the 't' cell");
         assert_eq!(short[0].rect.x, long[0].rect.x);
         assert_eq!(short[1].rect.x, long[1].rect.x);
-        // The cell is the page's glyph run: a real width inside the page, and
-        // the same for both labels. It may be wider or narrower than the
-        // advance — the page's ink is not the advance table.
+        // The cell is a real width inside the page, and the same for both
+        // labels. It may be wider or narrower than the advance.
         for c in ['A', 't', 'h', 'n'] {
             let glyph = font.glyph(c);
             let (_, _, w, _) = glyph.rect(font.page_width, font.page_height);
@@ -1312,14 +1529,27 @@ mod tests {
         }
     }
 
-    /// **The page is bottom-up only; the glyph quad swaps `v`, not `u`.** The
-    /// page's row at y 233 flipped vertically reads `E F G H I J K L M N O P Q R
-    /// S T U V` upright and in order, so a quad whose left edge samples the
-    /// cell's right edge (`u0 > u1`) mirrors every letter. This pins the
-    /// measured orientation: the left vertex's `u` is the cell's left, and only
-    /// the vertical pair is swapped (the page's first row is the glyph's last).
+    /// An image is drawn in the box its layout `Size` gives it, not at its
+    /// `_Size`: `exhibition/exhib_setup.gib`'s cement is `Size 1 1 1 1` with a
+    /// `_Size 640 0 480 0` and covers the whole screen in the original.
     #[test]
-    fn a_glyph_quad_swaps_v_and_not_u() {
+    fn an_image_fills_its_layout_size_not_its_art_size() {
+        let Some(game) = game_dir() else { return };
+        let scene = scene_of(&game, "exhibition/exhib_setup.gib");
+        assert!(
+            scene
+                .quads
+                .iter()
+                .any(|q| q.texture != 0 && q.rect.w >= 1279.0 && q.rect.h >= 1004.0),
+            "a full-screen image quad"
+        );
+    }
+
+    /// A glyph quad samples its cell top to bottom, left to right: the page is
+    /// kept in texture order, so `v` rises down the quad and `u` rises across it.
+    /// (Swapping either mirrors every letter.)
+    #[test]
+    fn a_glyph_quad_samples_its_cell_upright() {
         let Some(game) = game_dir() else { return };
         let scene = scene_of(&game, "help/help_ws_overview.gib");
         let quad = scene
@@ -1334,8 +1564,8 @@ mod tests {
             quad.uv[2]
         );
         assert!(
-            quad.uv[1] > quad.uv[3],
-            "v must fall top to bottom (cell bottom {}, top {})",
+            quad.uv[1] < quad.uv[3],
+            "v must rise top to bottom (cell top {}, bottom {})",
             quad.uv[1],
             quad.uv[3]
         );
@@ -1540,5 +1770,56 @@ mod tests {
             assert!(quad.uv[2] > 1.0 || quad.uv[3] > 1.0, "{label} repeats");
         }
         assert!(checked > 0, "the trough was drawn");
+    }
+
+    /// The floating damage number is the face's own cells, one pixel to a texel, centred on the
+    /// point: `fg_d20`'s `25` is 22 wide and its ink 21 (live: ink x 471-491).
+    #[test]
+    fn a_centred_number_is_the_faces_own_cells_around_the_point() {
+        let Some(game) = game_dir() else { return };
+        let mut assets = UiAssets::open(&game).unwrap();
+        let mut scene = assets.scene(&[], [1024, 768]);
+        assets.centered_text(
+            &mut scene,
+            "fg_d20",
+            "25",
+            [481.0, 206.0],
+            [0.8, 0.0, 0.0, 1.0],
+        );
+        assert_eq!(scene.quads.len(), 2, "one quad a digit");
+        let left = scene
+            .quads
+            .iter()
+            .map(|q| q.rect.x)
+            .fold(f32::MAX, f32::min);
+        let right = scene
+            .quads
+            .iter()
+            .map(|q| q.rect.x + q.rect.w)
+            .fold(f32::MIN, f32::max);
+        let top = scene
+            .quads
+            .iter()
+            .map(|q| q.rect.y)
+            .fold(f32::MAX, f32::min);
+        let bottom = scene
+            .quads
+            .iter()
+            .map(|q| q.rect.y + q.rect.h)
+            .fold(f32::MIN, f32::max);
+        // the cells (11 + 12 wide, 15 tall) sit inside the 22 x 40 line box centred there
+        assert_eq!((right - left, bottom - top), (23.0, 15.0));
+        assert_eq!(
+            left, 471.0,
+            "the line box starts 11 left of the centre, the cell a pixel in"
+        );
+        assert!(scene
+            .quads
+            .iter()
+            .all(|q| q.color == [0.8, 0.0, 0.0, 1.0] && q.clip.is_none()));
+        assert!(
+            scene.textures.iter().any(|t| t.label == "#fg_d20"),
+            "the face's page is in the scene"
+        );
     }
 }

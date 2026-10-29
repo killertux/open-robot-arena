@@ -65,6 +65,8 @@ pub const IMMOBILIZED: &str = "immobilized text";
 pub const WINNER: &str = "winner text";
 pub const SPECTATOR: &str = "Spectator [TextBox]";
 
+pub const QUIT_SESSION: &str = "Quit Session button";
+
 /// The shipped placeholder a bot without a snapshot keeps.
 pub const PLACEHOLDER: &str = "exhibition\\sample_bot.bmp";
 
@@ -96,6 +98,10 @@ pub struct MatchResult {
 /// Returns how many slots were filled. Slots with no result are left as the file
 /// writes them; the match only supplies as many results as there were bots.
 pub fn fill(screen: &mut Widget, template: &Gib, results: &[MatchResult]) -> usize {
+    // `Quit Session button` belongs to the multiplayer branch of the screen's
+    // builder (`FUN_00488120` tests `FUN_00401260` before `prematch_win`); a
+    // single-machine match shows only `continue button`.
+    set_visible(screen, QUIT_SESSION, false);
     let Some(cell) = template.widgets().find(|w| w.name() == CELL) else {
         return 0;
     };
@@ -141,6 +147,7 @@ mod tests {
     use ra2fmt::gib::Block;
 
     fn game_dir() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");

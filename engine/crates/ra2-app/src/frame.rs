@@ -36,9 +36,21 @@ impl FrameRenderer {
     /// scene itself stays in the shell's coordinates and the renderer scales it.
     pub fn frame(&mut self, shell: &mut Shell, target: [u32; 2]) -> Frame {
         let [width, height] = shell.size();
+        for (key, preview) in shell.previews() {
+            self.assets.add_preview(key, preview);
+        }
         let placed = shell.placements();
         let scene = self.assets.scene(&placed, [width as u32, height as u32]);
         let viewport = fit([width, height], [target[0] as f32, target[1] as f32]);
         Frame { scene, viewport }
+    }
+
+    /// Only the shell's open windows, at the shell's size: what the match
+    /// draws over its own frame when the pause dialog opened the options
+    /// window.
+    pub fn windows_scene(&mut self, shell: &Shell) -> UiScene {
+        let [width, height] = shell.size();
+        let placed = shell.window_placements();
+        self.assets.scene(&placed, [width as u32, height as u32])
     }
 }

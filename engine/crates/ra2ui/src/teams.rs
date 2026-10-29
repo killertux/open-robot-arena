@@ -98,7 +98,7 @@ impl Roster {
 
 /// Every record of one side, empty player slots included.
 pub fn rosters(game: &Path, side: Side) -> Result<Vec<Roster>, String> {
-    let path = game.join(side.table());
+    let path = ra2fmt::saves::resolve(game, side.table());
     let table = team::read_table(&path)?;
     Ok(table
         .teams
@@ -106,6 +106,140 @@ pub fn rosters(game: &Path, side: Side) -> Result<Vec<Roster>, String> {
         .enumerate()
         .map(|(slot, team)| Roster::from_team(slot, team))
         .collect())
+}
+
+/// The record an empty player slot holds: blank identity lines, no robots,
+/// and the reset counters (`FUN_004fa230` clears the record to these; the
+/// shipped table's fifteen empty slots are exactly this record).
+const EMPTY_RECORD: &str = "0\r\n\r\n\r\n\r\nRobots:\r\nRobot In Event: -1\r\n0\r\n16\r\n16\r\n0\r\n0\r\n0\r\n0\r\n0\r\n10000\r\ntrue\r\n0\r\nfalse\r\n0\r\n-1\r\n0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 \r\n0\r\n0\r\n0\r\n";
+
+/// A fresh empty player record.
+pub fn empty_player_record() -> Team {
+    team::parse_table(EMPTY_RECORD)
+        .ok()
+        .and_then(|table| table.teams.into_iter().next())
+        .unwrap_or_default()
+}
+
+/// Write a team table to the save directory (never into the install).
+fn write_table(game: &Path, table: &team::TeamTable, read_from: &Path) -> Result<(), String> {
+    let out = ra2fmt::saves::prepare_write(game, read_from)
+        .map_err(|e| format!("{}: {e}", read_from.display()))?;
+    table
+        .write_to(&out)
+        .map_err(|e| format!("{}: {e}", out.display()))
+}
+
+/// `New Team`'s OK (`FUN_004ebd40`, result 1): the first empty slot of
+/// `Teams/Teams.txt` becomes the team (`FUN_00502680(slot, 1)` marks it
+/// used), and the table is written at once: the dialog broadcasts message 200
+/// (`FUN_005882f0`), whose listener, registered by the player table's
+/// constructor at `0x502173`, is `FUN_00502720` -> `FUN_005024e0`
+/// (`Teams\Teams.txt`). The team's robot folder `Teams/Team<slot>/` is made
+/// for its robots. Returns the slot, or `None` when every slot is taken
+/// (the dialog's "There are no empty team slots." case).
+pub fn create_team(
+    game: &Path,
+    name: &str,
+    motto: &str,
+    logo: &str,
+) -> Result<Option<usize>, String> {
+    let path = ra2fmt::saves::resolve(game, Side::Player.table());
+    let mut table = team::read_table(&path)?;
+    let Some(slot) = table.teams.iter().position(|t| !t.is_named()) else {
+        return Ok(None);
+    };
+    let ending = table.teams[slot].line_ending;
+    let mut record = empty_player_record();
+    record.line_ending = ending;
+    record.name = name.to_string();
+    record.motto = motto.to_string();
+    record.logo = logo.to_string();
+    table.teams[slot] = record;
+    write_table(game, &table, &path)?;
+    let folder = game.join(Side::Player.root()).join(format!("Team{slot}"));
+    let folder = ra2fmt::saves::redirect(game, &folder);
+    std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    Ok(Some(slot))
+}
+
+/// The edit-team window's OK on an existing team: the record keeps its robots
+/// and career lines, and takes the new name, motto and logo.
+pub fn update_team(
+    game: &Path,
+    slot: usize,
+    name: &str,
+    motto: &str,
+    logo: &str,
+) -> Result<(), String> {
+    let path = ra2fmt::saves::resolve(game, Side::Player.table());
+    let mut table = team::read_table(&path)?;
+    let record = table
+        .teams
+        .get_mut(slot)
+        .filter(|t| t.is_named())
+        .ok_or_else(|| format!("{}: team slot {slot} is empty", path.display()))?;
+    record.name = name.to_string();
+    record.motto = motto.to_string();
+    record.logo = logo.to_string();
+    write_table(game, &table, &path)
+}
+
+/// A robot built in the workshop joins the team: the lab was opened on the inventory's selected cell
+/// (`FUN_00439650` keeps the team and the cell number, `DAT_007184a4`/`DAT_007184a8`, and the robot is
+/// `Teams/Team<team>/Bot<cell>.bot`), so `slot` is that cell: the `Robots:` line gains it (kept in cell
+/// order) and a file left there by a scrapped robot is overwritten. With no cell (`None`) the first
+/// number not on the roster is used. The table is written at once. Returns the new robot's path.
+pub fn add_robot(game: &Path, team: usize, slot: Option<usize>) -> Result<PathBuf, String> {
+    let path = ra2fmt::saves::resolve(game, Side::Player.table());
+    let mut table = team::read_table(&path)?;
+    let record = table
+        .teams
+        .get_mut(team)
+        .filter(|t| t.is_named())
+        .ok_or_else(|| format!("{}: team slot {team} is empty", path.display()))?;
+    let folder = game.join(Side::Player.root()).join(format!("Team{team}"));
+    let slot = match slot {
+        Some(cell) => cell as i32,
+        None => (0..)
+            .find(|n: &i32| !record.robots.contains(n))
+            .expect("a free robot slot"),
+    };
+    if !record.robots.contains(&slot) {
+        record.robots.push(slot);
+        record.robots.sort_unstable();
+    }
+    write_table(game, &table, &path)?;
+    let folder = ra2fmt::saves::redirect(game, &folder);
+    std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    Ok(folder.join(format!("Bot{slot}.bot")))
+}
+
+/// `Delete Team`'s Yes (`FUN_004ec110`, result 4): the record is cleared
+/// (`FUN_00502680(slot, 0)`, `FUN_004fa230`) and the table written through the
+/// same message-200 listener. The robots' files are left where they are; the
+/// slot simply lists none.
+pub fn delete_team(game: &Path, slot: usize) -> Result<(), String> {
+    let path = ra2fmt::saves::resolve(game, Side::Player.table());
+    let mut table = team::read_table(&path)?;
+    let Some(existing) = table.teams.get(slot) else {
+        return Err(format!("{}: no team slot {slot}", path.display()));
+    };
+    let ending = existing.line_ending;
+    let mut record = empty_player_record();
+    record.line_ending = ending;
+    table.teams[slot] = record;
+    write_table(game, &table, &path)?;
+    // The client's own per-team career sidecar (`ra2sim::career::
+    // sidecar_path_for`) goes with the record.
+    // A file only the install has is hidden, never removed.
+    let sidecar = if slot == 0 {
+        "Teams/career.dat".to_string()
+    } else {
+        format!("Teams/career{slot}.dat")
+    };
+    ra2fmt::saves::remove(game, &sidecar).map_err(|e| format!("{sidecar}: {e}"))?;
+    Ok(())
 }
 
 /// The default player team: the career's team, which is the first named record
@@ -116,9 +250,12 @@ pub fn career_player_slot(rosters: &[Roster]) -> Option<usize> {
 
 /// `<game>/Teams/Team<slot>/Bot<bot>.bot` or `<game>/AI/Team<slot>/Bot<bot>.bot`.
 pub fn bot_path(game: &Path, side: Side, team: usize, bot: i32) -> PathBuf {
-    game.join(side.root())
-        .join(format!("Team{team}"))
-        .join(format!("Bot{bot}.bot"))
+    ra2fmt::saves::resolve(
+        game,
+        Path::new(side.root())
+            .join(format!("Team{team}"))
+            .join(format!("Bot{bot}.bot")),
+    )
 }
 
 /// A `.bot` file's own name and weight class, for the picker's labels and
@@ -135,11 +272,63 @@ pub fn fill_team_list(list: &mut Widget, rosters: &[Roster]) -> usize {
     crate::input::text_rows(list, &rows)
 }
 
+/// The select-team screen's grid (`select_team.gib`), and the cell the binary
+/// loads into it for each team (`team_cell.gib`'s own note).
+pub const SELECT_GRID: &str = "select team grid";
+pub const SELECT_CELL: &str = "teamhq/team_cell.gib";
+
+/// Fill the select-team grid with a cell per named team (`FUN_004ec2c0` /
+/// `FUN_004ec310` fill it from `Teams/Teams.txt`) and select row `select`.
+/// A window that was never used selects the LAST team (`FUN_004ec2c0`: the
+/// grid's selection is -1, so it selects count - 1; live, docs/36 9.28), so
+/// `None` means the last row; a used window keeps the row it had.
+pub fn fill_select_grid(
+    ui_root: &Path,
+    document: &mut ra2fmt::gib::Gib,
+    rosters: &[Roster],
+    select: Option<usize>,
+) -> Result<usize, String> {
+    use ra2fmt::gib::Block;
+    let template = crate::cells::template(ui_root, SELECT_CELL)?;
+    let named: Vec<&Roster> = rosters.iter().filter(|r| r.named).collect();
+    for block in document.blocks.iter_mut() {
+        let Block::Widget(root) = block else { continue };
+        let Some(grid) = crate::workshop::find_mut(root, SELECT_GRID) else {
+            continue;
+        };
+        grid.children.retain(|c| c.name() != "team cell");
+        let made = crate::cells::fill(grid, &template, named.len());
+        let bars = grid.children.len() - made;
+        for (cell, roster) in grid.children[bars..].iter_mut().zip(&named) {
+            crate::cells::bind_value(cell, "team name textbox", &roster.name);
+            crate::cells::bind_value(cell, "team motto textbox", &roster.motto);
+            crate::cells::bind_art(cell, "logo img", &roster.logo);
+        }
+        crate::input::clear_selection(grid);
+        if !named.is_empty() {
+            let row = select.unwrap_or(named.len() - 1).min(named.len() - 1);
+            crate::input::select_cell(grid, row, 0);
+        }
+        // The bars span the grid (the file's 444 px is the editor's canvas).
+        for bar in grid.children.iter_mut() {
+            if bar.name() == "Sel Bar" || bar.name() == "High Bar" {
+                crate::input::set_field(bar, "Size", "1 1 80 0");
+            }
+        }
+        // The scroll bar only shows when there are more teams than rows.
+        let rows = crate::Grid::from_widget(grid).map_or(0, |g| g.rows.max(0) as usize);
+        crate::input::show_scroller(grid, named.len() > rows);
+        return Ok(made);
+    }
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");

@@ -20,6 +20,7 @@ pub mod gib;
 pub mod giff;
 pub mod gmi;
 pub mod mount;
+pub mod saves;
 pub mod team;
 
 pub use arena::ArenaScript;

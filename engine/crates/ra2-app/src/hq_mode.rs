@@ -55,6 +55,130 @@ use crate::SHELL_SIZE;
 /// (`docs/16-career.md` §3), so the schedule is explicit; the value is ours.
 pub const SEED: u64 = 7;
 
+/// The career the shell and the HQ open: the shipped team with the schedule the
+/// oracle capture showed (the original draws it at random; see
+/// [`ra2sim::career::ORACLE_SCHEDULE_STATE`]). A saved schedule wins.
+fn fresh_career(game: &Path) -> Result<Career, String> {
+    let mut career = Career::new_team(game, SEED, CareerPolicy::default(), selected_team(game))?;
+    // The engine LCG state the session's brackets are drawn from. The original's
+    // is the clock plus every draw its effects made (docs/36 section 9.23), so ours
+    // is the explicit `SEED`; `RA2_LCG_STATE` sets it (a live bracket is then
+    // reproduced from the state the Frida agent read).
+    if let Some(state) = std::env::var("RA2_LCG_STATE")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+    {
+        career.seed = u64::from(state);
+    }
+    if career.history.is_empty() && std::env::var_os("RA2_RANDOM_SCHEDULE").is_none() {
+        let n = career.events.len();
+        let ids = ra2sim::career::draw_schedule(n, 9, ra2sim::career::ORACLE_SCHEDULE_STATE);
+        let _ = career.set_schedule(&ids);
+    }
+    Ok(career)
+}
+
+/// The team record the player continued to from the select-team screen,
+/// per install (`FUN_004eba60` hands the grid's team to the `team hq win`;
+/// the original keeps it in memory for the session, and so does this). The
+/// shell, the event flow and the workshop all open this team's career.
+static SELECTED_TEAM: std::sync::Mutex<std::collections::BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Make `slot` the install's current team.
+pub fn select_team(game: &Path, slot: usize) {
+    if let Ok(mut map) = SELECTED_TEAM.lock() {
+        map.insert(game.to_path_buf(), slot);
+    }
+}
+
+/// The install's current team, when the player chose one this session
+/// (otherwise the first named record).
+pub fn selected_team(game: &Path) -> Option<usize> {
+    SELECTED_TEAM
+        .lock()
+        .ok()
+        .and_then(|map| map.get(game).copied())
+        .filter(|slot| {
+            ra2ui::teams::rosters(game, ra2ui::teams::Side::Player)
+                .ok()
+                .and_then(|rosters| rosters.get(*slot).map(|r| r.named))
+                .unwrap_or(false)
+        })
+}
+
+/// The current team's saved career, as the event flow and the HQ reload it.
+pub fn load_career(game: &Path) -> Result<Career, String> {
+    Career::load_team(game, CareerPolicy::default(), selected_team(game))
+}
+
+/// The shell's team hook: continuing to a team's HQ makes it the current
+/// team and answers with its Team HQ data.
+pub fn shell_team_hook(game: &Path) -> ra2_shell::shell::TeamHook {
+    let game = game.to_path_buf();
+    Box::new(move |slot| {
+        select_team(&game, slot);
+        shell_view(&game)
+    })
+}
+
+/// The shell's scrap hook (the inventory's `scrap button`, `FUN_004ff0c0`): the
+/// roster entry leaves the team's robot list, `Teams/Teams.txt` is written
+/// (the save directory's copy) and the HQ's data answers. The `.bot` file
+/// stays where it is: the executable never deletes one.
+pub fn shell_scrap_hook(game: &Path) -> ra2_shell::shell::ScrapHook {
+    let game = game.to_path_buf();
+    Box::new(move |index| {
+        let mut career = fresh_career(&game).ok()?;
+        career.scrap_robot(index).ok()?;
+        career.save(&game).ok()?;
+        build_view(&career, &game).ok()
+    })
+}
+
+/// The robot design the original writes for the inventory's Export Bot and Import Bot: the `.bot` loaded and
+/// saved again in the current format (`ra2fmt::bot::Bot::upgraded`, docs/36 section 9.25).
+fn resave_bot(from: &Path) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    let bot = ra2fmt::bot::parse(&bytes).map_err(|e| format!("{}: {e:?}", from.display()))?;
+    Ok(bot.upgraded().write())
+}
+
+/// The shell's export hook (the inventory's `export button`, `FUN_00500690`, and the window's OK
+/// `FUN_00471620`): the robot of cell `slot` is saved as `Robot Designs/<name>.bot` in the save directory,
+/// overwriting a design of that name without asking (live).
+pub fn shell_export_hook(game: &Path) -> ra2_shell::shell::ExportHook {
+    let game = game.to_path_buf();
+    Box::new(move |slot, name| {
+        let career = fresh_career(&game)?;
+        let from = player_robot_path(&game, career.player_slot, slot as i32);
+        let bytes = resave_bot(&from)?;
+        let to = game.join("Robot Designs").join(format!("{name}.bot"));
+        ra2fmt::saves::write(&game, &to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+        Ok(())
+    })
+}
+
+/// The shell's import hook (the import window's OK `FUN_00470b40`): the design `Robot Designs/<design>` is
+/// saved as the team's `Bot<slot>.bot` (current format), the slot joins the roster and `Teams/Teams.txt` is
+/// written (the save directory's copy).
+pub fn shell_import_hook(game: &Path) -> ra2_shell::shell::ImportHook {
+    let game = game.to_path_buf();
+    Box::new(move |slot, design| {
+        let mut career = fresh_career(&game).ok()?;
+        let from = ra2fmt::saves::resolve(&game, format!("Robot Designs/{design}"));
+        let bytes = resave_bot(&from).ok()?;
+        let to = game
+            .join("Teams")
+            .join(format!("Team{}", career.player_slot))
+            .join(format!("Bot{slot}.bot"));
+        ra2fmt::saves::write(&game, &to, bytes).ok()?;
+        career.import_robot(slot).ok()?;
+        career.save(&game).ok()?;
+        build_view(&career, &game).ok()
+    })
+}
+
 /// One click of the repairs screen's clock. The original advances a progress
 /// bar over time (`FUN_004d6e10`) against the shipped 30-minute clock
 /// (`FUN_0058b150(0x1e,1)` → `00:30:00`); this headless/UI tick is six
@@ -76,6 +200,9 @@ pub struct Options {
     /// Evidence/test knob: damage added to the player's match report before the
     /// career award. Zero by default; see `cli::Args::report_damage`.
     pub report_damage: f32,
+    /// Harness knob (`--bench-undamaged`): the repair bench opens with no
+    /// pending repairs, as the original's did for an undamaged robot.
+    pub bench_undamaged: bool,
 }
 
 impl Options {
@@ -105,6 +232,7 @@ impl Options {
             size,
             seconds,
             report_damage,
+            bench_undamaged: false,
         })
     }
 }
@@ -238,9 +366,17 @@ enum Screen {
     Match(Box<match_mode::Session>),
     Award {
         gib: Gib,
+        /// The event-results 3D scene under the window (`FUN_0046e140`);
+        /// `None` for the season's end screen.
+        prize: Option<Box<crate::prize_scene::PrizeScene>>,
     },
     /// `teamhq/repairs.gib`: the between-rounds repair bench.
     Repairs(Box<Repairs>),
+    /// The season's last screen after the ninth event's award: the golden
+    /// sawblade for the champion, `season_results.gib` otherwise.
+    SeasonEnd {
+        gib: Gib,
+    },
 }
 
 /// The HQ and the event flow as live state.
@@ -260,15 +396,29 @@ pub struct Session {
     last_round: Option<RoundOutcome>,
     /// Evidence/test damage added to the player's report before the award.
     report_damage: f32,
+    /// Harness knob: the round's result is forced (`Some(true)` = the entered robot wins).
+    forced_win: Option<bool>,
+    /// See [`Options::bench_undamaged`].
+    bench_undamaged: bool,
     /// The repair bench was opened between rounds: `finished button` returns to
     /// the bracket, not the HQ.
     repairs_after_round: bool,
+    /// The player drives the entered robot in the event's matches (the
+    /// window). The headless season simulation leaves it off and lets the
+    /// shipped AI drive both robots.
+    player_drives: bool,
+    /// The screen the windows are laid out on (the window's size; the
+    /// 1280x1005 design size for the headless evidence frames).
+    layout: [f32; 2],
+    /// The repair bench's robot, drawn straight down for the `3d view group`
+    /// (`prepare_repairs`): width, height, RGBA pixels.
+    repairs_view: Option<(u32, u32, Vec<u8>)>,
 }
 
 impl Session {
     /// Load the career and open the HQ on the robots tab.
     pub fn open(game: &Path) -> Result<Session, String> {
-        let career = Career::new_with_policy(game, SEED, CareerPolicy::default())?;
+        let career = fresh_career(game)?;
         let assets = UiAssets::open(game).map_err(|e| e.to_string())?;
         let view = build_view(&career, game)?;
         let hq = ra2ui::hq::Hq::open(&game.join("UI"), view)?;
@@ -284,8 +434,136 @@ impl Session {
             last_report: None,
             last_round: None,
             report_damage: 0.0,
+            forced_win: None,
+            bench_undamaged: false,
             repairs_after_round: false,
+            player_drives: false,
+            layout: SHELL_SIZE,
+            repairs_view: None,
         })
+    }
+
+    /// Draw the robot needing repairs, straight down on black, for the bench's
+    /// `3d view group` (`repairs.gib`: `repairs 3d placeholder`, "show bot
+    /// needing repairs here"). The renderer is the caller's, so call this
+    /// before [`Session::scene`] on the bench; it is a no-op elsewhere and
+    /// when the view is already drawn at this size.
+    pub fn prepare_repairs(&mut self, renderer: &Renderer) -> Result<(), String> {
+        let Screen::Repairs(screen) = &self.screen else {
+            return Ok(());
+        };
+        let placed = screen.placements(self.layout, Some(self.assets.faces()));
+        let Some(frame) = repairs::placeholder_frame(&placed) else {
+            return Ok(());
+        };
+        let (w, h) = (
+            (frame.x + frame.w).floor() as u32 - frame.x.floor() as u32,
+            (frame.y + frame.h).floor() as u32 - frame.y.floor() as u32,
+        );
+        if w < 8 || h < 8 || matches!(&self.repairs_view, Some((vw, vh, _)) if (*vw, *vh) == (w, h))
+        {
+            return Ok(());
+        }
+        let player = self.career.player();
+        let path = player_robot_path(&self.game, self.career.player_slot, player.event_robot);
+        if !path.is_file() {
+            // No robot entered (`event_robot` -1): the box keeps its backing.
+            self.repairs_view = None;
+            return Ok(());
+        }
+        let library =
+            ra2ui::workshop::library::GameLibrary::open(&self.game).map_err(|e| e.to_string())?;
+        let build = ra2ui::workshop::build::Build::load(&library, &path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.repairs_view = crate::build_mode::robot_top_view(
+            renderer,
+            &self.game,
+            &build,
+            [25.0 / 255.0; 3], // the reference's backing is (25, 25, 25)
+            w,
+            h,
+        )?
+        .map(|pixels| (w, h, pixels));
+        Ok(())
+    }
+
+    /// Let the player drive the entered robot in the event's matches, as the
+    /// original does: an event match is the player's own fight.
+    pub fn set_player_drives(&mut self, on: bool) {
+        self.player_drives = on;
+    }
+
+    /// Pick up the event the saved career is in (`Robot In Event`, the
+    /// sidecar's bracket) and show its bracket. This is how the shell's Team
+    /// HQ hands an entered event to the match flow: the career on disk is the
+    /// shared state.
+    pub fn resume_event(&mut self) -> Result<(), String> {
+        let event = match self.career.phase {
+            ra2sim::career::SeasonPhase::InEvent { event } => event,
+            _ => return Err("the saved career is not in an event".to_string()),
+        };
+        self.current_event = Some(event);
+        refresh_event_screen(self)
+    }
+
+    /// The bracket of event `event` with roster column `robot` entered: a saved
+    /// career already in that event resumes it (rounds played are kept),
+    /// otherwise the event is entered now, as the join window did.
+    pub fn enter_or_resume(&mut self, event: usize, robot: Option<usize>) -> Result<(), String> {
+        let in_it = matches!(
+            self.career.phase,
+            ra2sim::career::SeasonPhase::InEvent { event: current } if current == event
+        );
+        if !in_it {
+            self.career.enter_event(event)?;
+            if let Some(slot) =
+                robot.and_then(|column| self.career.player().robots.get(column).copied())
+            {
+                self.career.player_mut().event_robot = slot;
+            }
+        }
+        self.resume_event()
+    }
+
+    /// The live event match, when one is on screen.
+    pub fn match_session(&self) -> Option<&match_mode::Session> {
+        match &self.screen {
+            Screen::Match(session) => Some(session.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// The live event match, mutably (keys, pause, camera).
+    pub fn match_session_mut(&mut self) -> Option<&mut match_mode::Session> {
+        match &mut self.screen {
+            Screen::Match(session) => Some(session.as_mut()),
+            _ => None,
+        }
+    }
+
+    /// Whether the flow is back on the HQ's own screen (the event was left or
+    /// finished and the award/repairs are behind it).
+    pub fn on_hq_screen(&self) -> bool {
+        matches!(self.screen, Screen::Hq(_))
+    }
+
+    /// Whether the event bracket is on screen.
+    pub fn on_event_screen(&self) -> bool {
+        matches!(self.screen, Screen::Event { .. })
+    }
+
+    /// `Forfeit Event`: the event ends here as a loss with the rounds won so
+    /// far (`Career::finish_event`), the career is saved and the HQ comes back.
+    pub fn forfeit_event(&mut self) -> Result<(), String> {
+        if self.current_event.is_some() || self.career.bracket().is_some() {
+            let record = self.career.finish_event(false)?;
+            println!(
+                "forfeit: event #{} closed, {} event points, rounds {}/{}",
+                record.event, record.points, record.rounds_won, record.rounds_lost
+            );
+            self.career.save(&self.game)?;
+        }
+        self.return_to_hq()
     }
 
     /// Add `damage` to the player's match report before the career award. This
@@ -297,9 +575,46 @@ impl Session {
         }
     }
 
+    /// The record of the event the last round decided (a final win or a loss); `None` while rounds remain.
+    pub fn decided_event(&self) -> Option<&EventRecord> {
+        self.last_record.as_ref()
+    }
+
+    /// Force the next rounds' results (a test knob, like `set_report_damage`): `Some(true)` makes the
+    /// entered robot the match's only winner, `Some(false)` removes it from the winners.
+    pub fn set_forced_win(&mut self, win: Option<bool>) {
+        self.forced_win = win;
+    }
+
+    /// Lay the HQ's screens out natively on a target of `size` pixels, as the
+    /// original lays every window out at the display resolution (docs/28
+    /// §1): the bracket, award, repairs and season screens and the event
+    /// match's HUD. Points passed to [`Session::click`] are in this space.
+    pub fn set_layout(&mut self, size: [u32; 2]) {
+        let layout = [size[0].max(1) as f32, size[1].max(1) as f32];
+        let changed = layout != self.layout;
+        self.layout = layout;
+        match &mut self.screen {
+            Screen::Match(session) => session.set_layout(size),
+            // The bracket graphic is built for the screen it is drawn on.
+            Screen::Event { .. } if changed && self.current_event.is_some() => {
+                if let Err(error) = refresh_event_screen(self) {
+                    eprintln!("bracket: {error}");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The screen the HQ's windows are laid out on.
+    pub fn layout(&self) -> [f32; 2] {
+        self.layout
+    }
+
     /// The match length this session uses for an event.
     pub fn set_event_seconds(&mut self, seconds: f32) {
-        if seconds.is_finite() && seconds > 0.0 {
+        // Infinity is the exhibition's "No limit", which carries over.
+        if seconds > 0.0 {
             self.event_limit = seconds;
         }
     }
@@ -375,12 +690,21 @@ impl Session {
     /// Open `teamhq/repairs.gib` from the career's current pending list. A
     /// healthy roster opens the screen's own empty state (no rows, `0:00`).
     pub fn open_repairs(&mut self) -> Result<(), String> {
+        if self.bench_undamaged {
+            self.career.repairs.clear();
+        }
         let selected = self
             .repairs()
             .map(|screen| screen.selected())
             .unwrap_or_default();
         let rows = self.repair_rows();
-        let clock = self.repair_clock();
+        // An empty bench still shows the policy's 30-minute clock when it
+        // opens (the original's reference frame reads 30:00 with no rows).
+        let clock = if self.career.repairs.is_empty() {
+            repairs::format_time(30.0 * 60.0)
+        } else {
+            self.repair_clock()
+        };
         let mut screen = Repairs::open(&self.game.join("UI"), "Round 1 Repairs", rows, &clock)?;
         screen.set_selected(selected);
         self.screen = Screen::Repairs(Box::new(screen));
@@ -443,7 +767,7 @@ impl Session {
         let Some(hq) = self.hq() else {
             return Err("the HQ is not on screen".to_string());
         };
-        hq.event_point(row, SHELL_SIZE, Some(self.assets.faces()))
+        hq.event_point(row, self.layout, Some(self.assets.faces()))
             .ok_or_else(|| format!("the event grid has no row {row}"))
     }
 
@@ -454,11 +778,16 @@ impl Session {
         match &mut self.screen {
             Screen::Hq(_) => {
                 let clicked = {
-                    let Session { assets, screen, .. } = self;
+                    let Session {
+                        assets,
+                        screen,
+                        layout,
+                        ..
+                    } = self;
                     let Screen::Hq(hq) = screen else {
                         unreachable!()
                     };
-                    hq.click(point, SHELL_SIZE, Some(assets.faces()))?
+                    hq.click(point, *layout, Some(assets.faces()))?
                 };
                 let Some(clicked) = clicked else {
                     return Ok(false);
@@ -477,10 +806,11 @@ impl Session {
                     self.start_match()?;
                     return Ok(true);
                 }
-                if names
-                    .iter()
-                    .any(|n| n == "forfeit button" || n == "later button")
-                {
+                if names.iter().any(|n| n == "forfeit button") {
+                    self.forfeit_event()?;
+                    return Ok(true);
+                }
+                if names.iter().any(|n| n == "later button") {
                     self.return_to_hq()?;
                     return Ok(true);
                 }
@@ -502,7 +832,13 @@ impl Session {
                     // match left something to repair; a healthy roster goes
                     // straight back to the HQ.
                     self.repairs_after_round = false;
-                    if self.career.repairs.is_empty() {
+                    if matches!(self.career.phase, ra2sim::career::SeasonPhase::Complete) {
+                        // `FUN_0046e2b0`: the last event's award leads to the
+                        // season's end screen.
+                        let view = self.view()?;
+                        let gib = season_end_screen(&self.game.join("UI"), &view)?;
+                        self.screen = Screen::SeasonEnd { gib };
+                    } else if self.career.repairs.is_empty() {
                         self.return_to_hq()?;
                     } else {
                         self.open_repairs()?;
@@ -511,13 +847,31 @@ impl Session {
                 }
                 Ok(false)
             }
+            Screen::SeasonEnd { .. } => {
+                let names = self.names_at(point);
+                if names.iter().any(|n| n == "continue button") {
+                    // The next season starts on a new schedule; the career
+                    // keeps its prizes and history.
+                    self.career.next_season(SEED)?;
+                    self.career.save(&self.game)?;
+                    println!("season {} begins", self.career.season() + 1);
+                    self.return_to_hq()?;
+                    return Ok(true);
+                }
+                Ok(false)
+            }
             Screen::Repairs(_) => {
                 let clicked = {
-                    let Session { assets, screen, .. } = self;
+                    let Session {
+                        assets,
+                        screen,
+                        layout,
+                        ..
+                    } = self;
                     let Screen::Repairs(screen) = screen else {
                         unreachable!()
                     };
-                    screen.click(point, SHELL_SIZE, Some(assets.faces()))
+                    screen.click(point, *layout, Some(assets.faces()))
                 };
                 match clicked {
                     Some(RepairClick::Row(index)) => {
@@ -573,7 +927,12 @@ impl Session {
         self.career.player_mut().event_robot = robot;
         let event = self.career.events[id].clone();
         let bracket = bracket_view(&self.career);
-        let gib = event_screen(&self.game.join("UI"), &event, bracket.as_ref())?;
+        let gib = ra2ui::event_screens::bracket_screen_at(
+            &self.game.join("UI"),
+            &event,
+            bracket.as_ref(),
+            self.layout,
+        )?;
         self.current_event = Some(id);
         self.screen = Screen::Event { gib };
         let opponents = self
@@ -606,14 +965,24 @@ impl Session {
             return Err("no event is in progress".to_string());
         };
         let event = self.career.events[event_id].clone();
-        let config = match_config(&self.game, &event, &self.career, self.event_limit)?;
+        let mut config = match_config(&self.game, &event, &self.career, self.event_limit)?;
+        if self.player_drives {
+            // the player's robot is entry 0 (`with_match_player`)
+            if let Some(first) = config.robots.first_mut() {
+                first.controller = ra2sim::r#match::Controller::Human;
+            }
+        }
         let game_type = config.game_type;
         let arena = config.arena.clone();
         // The presentation's deterministic run turns the shipped hazards off;
         // the environment is read while the world is built.
         std::env::set_var("RA2_HAZARDS", "0");
         let matched = Match::new(config).map_err(|e| e.to_string())?;
-        let session = match_mode::Session::with_match(&self.game, matched)?;
+        let session = if self.player_drives {
+            match_mode::Session::with_match_player(&self.game, matched)?
+        } else {
+            match_mode::Session::with_match(&self.game, matched)?
+        };
         println!(
             "event match: {:?} at {} — {} ({})",
             event.name,
@@ -624,6 +993,8 @@ impl Session {
                 .map(|b| b.round_label())
                 .unwrap_or_default()
         );
+        let mut session = session;
+        session.set_layout([self.layout[0] as u32, self.layout[1] as u32]);
         self.screen = Screen::Match(Box::new(session));
         Ok(())
     }
@@ -673,6 +1044,11 @@ impl Session {
                 }
             }
         }
+        match self.forced_win {
+            Some(true) => report.winners = vec![0],
+            Some(false) => report.winners.retain(|w| *w != 0),
+            None => {}
+        }
         let outcome = self.career.play_round(&report, 0)?;
         self.career.save(&self.game)?;
         let event = self.career.events[event_id].clone();
@@ -689,7 +1065,7 @@ impl Session {
             outcome.points,
             outcome.participation,
             outcome.bonus,
-            self.game.join("Teams").join("Teams.txt").display()
+            ra2sim::career::player_table_path(&self.game).display()
         );
         self.last_report = Some(report);
         self.last_round = Some(outcome.clone());
@@ -708,6 +1084,32 @@ impl Session {
                     .map(|(_, message)| message.clone())
                     .unwrap_or_default()
             };
+            // The prize model: the tier the rounds won pick, the trophy for a
+            // won event (docs/36 section 9.11).
+            let model = if record.won {
+                event.trophy.0.clone()
+            } else {
+                self.career
+                    .prize_for_rounds(event_id, record.rounds_won as usize)
+                    .map(|(model, _)| model.clone())
+                    .unwrap_or_default()
+            };
+            // The entered robot stands on the pad (`FUN_0046e710`).
+            let robot_path = self.career.player().robots.iter().find_map(|slot| {
+                let path = player_robot_path(&self.game, self.career.player_slot, *slot);
+                read_bot(&path)
+                    .filter(|bot| bot.name == bot_name)
+                    .map(|_| path)
+            });
+            let prize = crate::prize_scene::PrizeScene::load(
+                &self.game,
+                &model,
+                &self.career.player().logo,
+                robot_path.as_deref(),
+            )
+            .map(Box::new)
+            .map_err(|e| eprintln!("award scene: {e}"))
+            .ok();
             let gib = award_screen(
                 &self.game.join("UI"),
                 &event,
@@ -715,13 +1117,14 @@ impl Session {
                 &bot_name,
                 &record,
                 &description,
+                prize.is_none(),
             )?;
             println!(
                 "award: {} event points, won {}, rounds {}/{}",
                 record.points, record.won, record.rounds_won, record.rounds_lost
             );
             self.last_record = Some(record);
-            self.screen = Screen::Award { gib };
+            self.screen = Screen::Award { gib, prize };
         } else {
             self.last_record = None;
             if self.career.repairs.is_empty() {
@@ -752,7 +1155,7 @@ impl Session {
     /// is what proves the save: the next frames are drawn from what was read
     /// back, not from the in-memory career.
     pub fn return_to_hq(&mut self) -> Result<(), String> {
-        self.career = Career::load(&self.game)?;
+        self.career = load_career(&self.game)?;
         let view = build_view(&self.career, &self.game)?;
         let hq = ra2ui::hq::Hq::open(&self.game.join("UI"), view)?;
         self.current_event = None;
@@ -775,14 +1178,21 @@ impl Session {
             Screen::Match(session) => {
                 session.render_3d(renderer, color, depth, format, width, height)
             }
+            Screen::Award {
+                prize: Some(prize), ..
+            } => prize.render(renderer, color, depth, format, width, height),
             _ => Ok(()),
         }
     }
 
     /// Advance a live match by wall-clock seconds (the window's fixed tick).
     pub fn advance(&mut self, seconds: f32) {
-        if let Screen::Match(session) = &mut self.screen {
-            session.advance(seconds);
+        match &mut self.screen {
+            Screen::Match(session) => session.advance(seconds),
+            Screen::Award {
+                prize: Some(prize), ..
+            } => prize.advance(seconds),
+            _ => {}
         }
     }
 
@@ -810,6 +1220,14 @@ impl Session {
         }
     }
 
+    /// The sounds the live match's steps made since the last call.
+    pub fn take_cues(&mut self) -> Vec<crate::match_sounds::SoundCue> {
+        match &mut self.screen {
+            Screen::Match(session) => session.take_cues(),
+            _ => Vec::new(),
+        }
+    }
+
     fn match_clock(&self) -> Option<f32> {
         match &self.screen {
             Screen::Match(session) => Some(session.matched.clock()),
@@ -827,8 +1245,14 @@ impl Session {
     /// The scene for the current screen. `three_d` says whether the match's 3D
     /// pass must be drawn under it.
     pub fn scene(&mut self) -> Result<(UiScene, bool), String> {
-        let size = [SHELL_SIZE[0] as u32, SHELL_SIZE[1] as u32];
-        let Session { assets, screen, .. } = self;
+        let size = [self.layout[0].round() as u32, self.layout[1].round() as u32];
+        let Session {
+            assets,
+            screen,
+            layout,
+            repairs_view,
+            ..
+        } = self;
         match screen {
             Screen::Hq(hq) => {
                 // The inventory's cells carry the robots' own snapshots under
@@ -839,29 +1263,83 @@ impl Session {
                         assets.add_preview(&row.preview, preview);
                     }
                 }
-                let placed = hq.placements(SHELL_SIZE, Some(assets.faces()));
+                let placed = hq.placements(*layout, Some(assets.faces()));
                 Ok((assets.scene(&placed, size), false))
             }
-            Screen::Event { gib, .. } | Screen::Award { gib, .. } => {
-                let placed = ra2ui::resolve_with(gib, SHELL_SIZE, Some(assets.faces()));
+            Screen::Award { gib, prize } => {
+                let placed = ra2ui::resolve_with(gib, *layout, Some(assets.faces()));
+                Ok((assets.scene(&placed, size), prize.is_some()))
+            }
+            Screen::Event { gib, .. } | Screen::SeasonEnd { gib } => {
+                let placed = ra2ui::resolve_with(gib, *layout, Some(assets.faces()));
                 Ok((assets.scene(&placed, size), false))
             }
             Screen::Repairs(screen) => {
-                let placed = screen.placements(SHELL_SIZE, Some(assets.faces()));
-                Ok((assets.scene(&placed, size), false))
+                let placed = screen.placements(*layout, Some(assets.faces()));
+                let mut scene = assets.scene(&placed, size);
+                if let (Some((w, h, pixels)), Some(frame)) =
+                    (repairs_view.as_ref(), repairs::placeholder_frame(&placed))
+                {
+                    // The robot sits in the placeholder, over its black backing
+                    // and under the group's one-pixel border (drawn last).
+                    let rect = ra2ui::Frame::new(
+                        frame.x.floor(),
+                        frame.y.floor(),
+                        (frame.x + frame.w).floor() - frame.x.floor(),
+                        (frame.y + frame.h).floor() - frame.y.floor(),
+                    );
+                    let texture = scene.textures.len();
+                    scene.textures.push(ra2_render::ui::UiTexture {
+                        label: "repairs robot".into(),
+                        width: *w,
+                        height: *h,
+                        rgba: pixels.clone(),
+                    });
+                    scene.quads.push(ra2_render::ui::UiQuad {
+                        rect,
+                        corners: None,
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                        color: [1.0, 1.0, 1.0, 1.0],
+                        texture,
+                        alpha: false,
+                        clip: Some(rect),
+                    });
+                }
+                Ok((scene, false))
             }
             Screen::Match(session) => Ok((session.scene()?, true)),
         }
+    }
+
+    /// The centre of the first widget named one of `wanted` on the current
+    /// bracket, award, season-end or repairs screen (in the shell's design
+    /// coordinates, where [`Session::click`] takes points).
+    pub fn control_point(&self, wanted: &[&str]) -> Option<[f32; 2]> {
+        let faces = Some(self.assets.faces());
+        let placed = match &self.screen {
+            Screen::Event { gib, .. } | Screen::Award { gib, .. } | Screen::SeasonEnd { gib } => {
+                ra2ui::resolve_with(gib, self.layout, faces)
+            }
+            Screen::Repairs(screen) => screen.placements(self.layout, faces),
+            _ => return None,
+        };
+        placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| wanted.contains(&p.widget.name()))
+            .map(|p| [p.frame.x + p.frame.w / 2.0, p.frame.y + p.frame.h / 2.0])
     }
 
     /// The names of the widgets a control click passes through on the current
     /// event/award screen.
     fn names_at(&self, point: [f32; 2]) -> Vec<String> {
         let gib = match &self.screen {
-            Screen::Event { gib, .. } | Screen::Award { gib, .. } => gib,
+            Screen::Event { gib, .. } | Screen::Award { gib, .. } | Screen::SeasonEnd { gib } => {
+                gib
+            }
             _ => return Vec::new(),
         };
-        let placed = ra2ui::resolve_with(gib, SHELL_SIZE, Some(self.assets.faces()));
+        let placed = ra2ui::resolve_with(gib, self.layout, Some(self.assets.faces()));
         let Some(path) = ra2ui::input::hit_control(&placed, point[0], point[1]) else {
             return Vec::new();
         };
@@ -879,12 +1357,20 @@ impl Session {
         out: &Path,
         name: &str,
     ) -> Result<(), String> {
+        self.prepare_repairs(renderer)?;
+        if let Screen::Award {
+            prize: Some(prize), ..
+        } = &mut self.screen
+        {
+            // A still of the award is taken three seconds in: the robot has dropped
+            // and settled on the pad.
+            for _ in 0..6 {
+                prize.advance(0.5);
+            }
+        }
         let (scene, three_d) = self.scene()?;
         if three_d {
-            let Screen::Match(session) = &self.screen else {
-                return Err("a 3D frame without a match".to_string());
-            };
-            session.render_3d(
+            self.render_3d(
                 renderer,
                 &target.color_view,
                 &target.depth_view,
@@ -962,7 +1448,7 @@ impl Session {
             capture(self, "season-final.png")?;
             let view = self.view()?;
             let gib = season_end_screen(&self.game.join("UI"), &view)?;
-            self.screen = Screen::Award { gib };
+            self.screen = Screen::Award { gib, prize: None };
             capture(self, "champion.png")?;
         }
         println!(
@@ -998,11 +1484,16 @@ impl Session {
         }
         let point = self.event_point(row)?;
         let index = {
-            let Session { assets, screen, .. } = self;
+            let Session {
+                assets,
+                screen,
+                layout,
+                ..
+            } = self;
             let Screen::Hq(hq) = screen else {
                 return Err("the HQ is not on screen".to_string());
             };
-            hq.event_at(point, SHELL_SIZE, Some(assets.faces()))
+            hq.event_at(point, *layout, Some(assets.faces()))
         };
         let named = self
             .view()?
@@ -1269,7 +1760,7 @@ impl Session {
             Screen::Event { gib, .. } | Screen::Award { gib, .. } => gib,
             _ => return None,
         };
-        let placed = ra2ui::resolve_with(gib, SHELL_SIZE, Some(self.assets.faces()));
+        let placed = ra2ui::resolve_with(gib, self.layout, Some(self.assets.faces()));
         for name in names {
             let found = placed
                 .iter()
@@ -1293,6 +1784,65 @@ impl Session {
         }
         None
     }
+}
+
+/// The Team HQ's data for the shell: the team record in the game's own
+/// `Teams/`, as last saved.
+pub fn shell_view(game: &Path) -> Option<ra2ui::hq::View> {
+    let career = fresh_career(game).ok()?;
+    build_view(&career, game).ok()
+}
+
+/// The shell's event hook: it enters the event the player chose with the robot
+/// the join window selected and answers with the HQ's new data (the bracket).
+pub fn shell_enter_hook(game: &Path) -> Option<ra2_shell::shell::EnterHook> {
+    // The career is read from the game's own files on every entry, so rounds
+    // played since (saved by the event flow) are the ones entered from.
+    fresh_career(game).ok()?;
+    let game = game.to_path_buf();
+    Some(Box::new(move |event, robot| {
+        let mut career = fresh_career(&game).ok()?;
+        career.enter_event(event).ok()?;
+        // `FUN_00481f20`: the robot chosen in the join window's grid is the
+        // team's `Robot In Event`.
+        if let Some(slot) = robot.and_then(|column| career.player().robots.get(column).copied()) {
+            career.player_mut().event_robot = slot;
+        }
+        // Nothing is written here: the event flow enters the same event (or
+        // resumes a saved one) when the bracket's `play button` starts the
+        // round, and saves when the round is awarded.
+        build_view(&career, &game).ok()
+    }))
+}
+
+/// The bracket's `later button` (`FUN_0046b9b0`): `FUN_0046c720` stores the
+/// bracket's settings in the team's event record and broadcasts message 200,
+/// which writes `Teams/Teams.txt` (`FUN_00502720`, see 9.4). An event entered
+/// and left before any round is therefore still the team's current event next
+/// time. A career already in that event (a round was saved) is left as it is.
+pub fn shell_later_hook(game: &Path) -> ra2_shell::shell::LaterHook {
+    let game = game.to_path_buf();
+    Box::new(move |event, robot| {
+        let Ok(mut career) = fresh_career(&game) else {
+            return;
+        };
+        let in_it = matches!(
+            career.phase,
+            ra2sim::career::SeasonPhase::InEvent { event: current } if current == event
+        );
+        // An event already played this season is over (the shell's memory of
+        // the entry outlives the award).
+        let played = career.history.iter().any(|record| record.event == event);
+        if in_it || played || career.enter_event(event).is_err() {
+            return;
+        }
+        if let Some(slot) = career.player().robots.get(robot).copied() {
+            career.player_mut().event_robot = slot;
+        }
+        if let Err(error) = career.save(&game) {
+            eprintln!("finish later: {error}");
+        }
+    })
 }
 
 /// The `ra2ui::hq::View` for a career: the roster, standings, schedule, prizes
@@ -1327,9 +1877,9 @@ pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, Strin
                         .map(|picture| picture.key(&format!("hq-{slot}")))
                         .unwrap_or_else(|| "teamhq\\nobot.bmp".to_string());
                     ra2ui::hq::RobotRow {
+                        slot: *slot as usize,
                         name: bot.name.clone(),
-                        class: ra2ui::workshop::stats::WeightClass::from_file(bot.class)
-                            .label()
+                        class: ra2ui::workshop::stats::WeightClass::file_label(bot.class)
                             .to_string(),
                         // The `.bot`'s own snapshot is the picture the original
                         // draws; `nobot.bmp` is only the empty-slot silhouette.
@@ -1338,6 +1888,7 @@ pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, Strin
                     }
                 }
                 None => ra2ui::hq::RobotRow {
+                    slot: *slot as usize,
                     name: format!("Bot {slot}"),
                     class: String::new(),
                     preview: "teamhq\\nobot.bmp".to_string(),
@@ -1419,6 +1970,19 @@ pub fn build_view(career: &Career, game: &Path) -> Result<ra2ui::hq::View, Strin
 /// The bracket screen's plain data, from the career's bracket and the names in
 /// the AI table. Future rounds are placeholders (`?`), as the binary draws them
 /// with `UI\teamhq\questionmark.bmp`.
+/// A bracket entrant's picture: the team record's logo (`FUN_004699b0`
+/// returns the team, whose `+0x28` is its logo path).
+fn entrant_logo(career: &Career, entrant: Entrant) -> String {
+    match entrant {
+        Entrant::Player => career.player().logo.clone(),
+        Entrant::Ai(slot) => career
+            .ai_teams()
+            .nth(slot)
+            .map(|team| team.logo.clone())
+            .unwrap_or_default(),
+    }
+}
+
 pub fn bracket_view(career: &Career) -> Option<ra2ui::hq::BracketView> {
     let bracket = career.bracket()?;
     let mut rounds = Vec::with_capacity(bracket.rounds);
@@ -1443,6 +2007,7 @@ pub fn bracket_view(career: &Career) -> Option<ra2ui::hq::BracketView> {
                         .map(|entrant| ra2ui::hq::BracketSlot {
                             name: career.entrant_name(*entrant),
                             player: *entrant == Entrant::Player,
+                            logo: entrant_logo(career, *entrant),
                         })
                         .collect(),
                     player_match: m == 0,
@@ -1453,6 +2018,7 @@ pub fn bracket_view(career: &Career) -> Option<ra2ui::hq::BracketView> {
             let mut slots = vec![ra2ui::hq::BracketSlot {
                 name: career.team_name().to_string(),
                 player: true,
+                logo: entrant_logo(career, Entrant::Player),
             }];
             slots.extend(
                 result
@@ -1461,6 +2027,7 @@ pub fn bracket_view(career: &Career) -> Option<ra2ui::hq::BracketView> {
                     .map(|entrant| ra2ui::hq::BracketSlot {
                         name: career.entrant_name(*entrant),
                         player: false,
+                        logo: entrant_logo(career, *entrant),
                     }),
             );
             vec![ra2ui::hq::BracketMatchView {
@@ -1481,6 +2048,11 @@ pub fn bracket_view(career: &Career) -> Option<ra2ui::hq::BracketView> {
                                 String::new()
                             },
                             player: m == 0 && slot == 0,
+                            logo: if m == 0 && slot == 0 {
+                                entrant_logo(career, Entrant::Player)
+                            } else {
+                                String::new()
+                            },
                         })
                         .collect(),
                     player_match: m == 0,
@@ -1539,8 +2111,15 @@ pub fn bracket_view(career: &Career) -> Option<ra2ui::hq::BracketView> {
     })
 }
 
-/// The event's match: the arena script and game type from the data, the player's
-/// first robot against the first AI team's first robot. One match.
+/// The event's match, as the bracket's `play button` sets it up
+/// (`FUN_0046c720`): the event's arena, its game type code (`Events.txt`
+/// `+0x118`, see [`ra2fmt::event::Event::game_type_name`]) and its robots per
+/// match (`+0x10c`): the player's entered robot against every opponent the
+/// bracket put in the player's match, so a 4-bot event is a 4-robot match.
+/// `seconds` is the match length; the bracket sets none (only the exhibition
+/// time dropdown, `FUN_00474330` -> `FUN_00414230`, writes it on the global
+/// game object), so an event match lasts the constructor's 3 minutes
+/// (`0x41276d`) unless the player changed the exhibition time this session.
 pub fn match_config(
     game: &Path,
     event: &Event,
@@ -1558,34 +2137,65 @@ pub fn match_config(
             )
         })?;
     let script = game.join("Arenas").join(&arena.script);
-    let game_type = arena_game_type(&script)?;
-    let slot = career
-        .player()
-        .robots
-        .first()
-        .copied()
-        .ok_or_else(|| "the team has no robots".to_string())?;
+    let game_type = match event.game_type_name().and_then(GameType::parse) {
+        Some(game_type) => game_type,
+        None => arena_game_type(&script)?,
+    };
+    // `Robot In Event`: the robot the join window entered, when it is still on
+    // the roster; otherwise the first roster slot.
+    let entered = career.player().event_robot;
+    let slot = if entered >= 0 && career.player().robots.contains(&entered) {
+        entered
+    } else {
+        career
+            .player()
+            .robots
+            .first()
+            .copied()
+            .ok_or_else(|| "the team has no robots".to_string())?
+    };
     let player = player_robot_path(game, career.player_slot, slot);
     if !player.is_file() {
         return Err(format!("{} is not a .bot file", player.display()));
     }
-    let ai_slot = match career.next_opponents().first() {
-        Some(Entrant::Ai(slot)) => *slot,
-        _ => 0,
-    };
-    let opponent = ai_robot_path(game, ai_slot, 0);
-    if !opponent.is_file() {
-        return Err(format!("{} is not a .bot file", opponent.display()));
+    let mut robots = vec![RobotEntry::ai(0, player.to_string_lossy().to_string())];
+    let mut opponents: Vec<usize> = career
+        .next_opponents()
+        .iter()
+        .filter_map(|entrant| match entrant {
+            Entrant::Ai(slot) => Some(*slot),
+            Entrant::Player => None,
+        })
+        .collect();
+    if opponents.is_empty() {
+        opponents.push(0);
     }
-    Ok(MatchConfig::new(
-        script.to_string_lossy().to_string(),
-        game_type,
-        vec![
-            RobotEntry::ai(0, player.to_string_lossy().to_string()),
-            RobotEntry::ai(1, opponent.to_string_lossy().to_string()),
-        ],
+    let wanted = event
+        .bots_per_match()
+        .map(|bots| bots.max(2) as usize)
+        .unwrap_or(2);
+    // The AI team brings the robot of the player's weight class: the play
+    // handler (`FUN_0046bb70`) passes `Team+0x118`, the class of the robot in
+    // the event (stored by `FUN_0046aa50` with `FUN_004faac0` when the bracket
+    // opens), clamped to 0..=2, as the bot number of each opponent team
+    // (`FUN_004fa890` builds `AI\Team<N>\Bot<class>.bot`). Every shipped AI
+    // team's Bot0/Bot1/Bot2 are its light, medium and heavy robot.
+    let class = ai_bot_for_class(read_bot(&player).map(|bot| bot.class).unwrap_or(0));
+    for slot in opponents.into_iter().take(wanted - 1) {
+        let mut opponent = ai_robot_path(game, slot, class);
+        if !opponent.is_file() {
+            opponent = ai_robot_path(game, slot, 0);
+        }
+        if !opponent.is_file() {
+            return Err(format!("{} is not a .bot file", opponent.display()));
+        }
+        let team = robots.len();
+        robots.push(RobotEntry::ai(team, opponent.to_string_lossy().to_string()));
+    }
+    Ok(
+        MatchConfig::new(script.to_string_lossy().to_string(), game_type, robots)
+            .with_duration(Some(seconds)),
     )
-    .with_duration(Some(seconds)))
 }
 
 /// The game type an arena declares in its own `game_types` list. The list is the
@@ -1616,16 +2226,22 @@ pub fn arena_game_type(script: &Path) -> Result<GameType, String> {
 
 /// `<game>/Teams/Team<slot>/Bot<robot>.bot` — the player's own roster.
 pub fn player_robot_path(game: &Path, team: usize, robot: i32) -> PathBuf {
-    game.join("Teams")
-        .join(format!("Team{team}"))
-        .join(format!("Bot{robot}.bot"))
+    ra2fmt::saves::resolve(game, format!("Teams/Team{team}/Bot{robot}.bot"))
 }
 
 /// `<game>/AI/Team<team>/Bot<robot>.bot` — an AI team's roster.
 pub fn ai_robot_path(game: &Path, team: usize, robot: i32) -> PathBuf {
-    game.join("AI")
-        .join(format!("Team{team}"))
-        .join(format!("Bot{robot}.bot"))
+    ra2fmt::saves::resolve(game, format!("AI/Team{team}/Bot{robot}.bot"))
+}
+
+/// The AI robot number the player's robot class selects: 0, 1 or 2 as they
+/// are, anything else 0 (`0x46be9e`..`0x46beb5`).
+pub fn ai_bot_for_class(class: i32) -> i32 {
+    if (0..=2).contains(&class) {
+        class
+    } else {
+        0
+    }
 }
 
 fn read_bot(path: &Path) -> Option<ra2fmt::bot::Bot> {
@@ -1640,36 +2256,7 @@ pub fn event_screen(
     event: &Event,
     bracket: Option<&ra2ui::hq::BracketView>,
 ) -> Result<Gib, String> {
-    let mut gib = ra2ui::hq::load(ui_root, "teamhq/event_bracket.gib")?;
-    ra2ui::hq::fit_splits_in(&mut gib);
-    if let Some(image) = find_mut_in(&mut gib, "event graphic") {
-        ra2ui::input::set_field(image, "_Filename", &event.art);
-    }
-    // The preview the bracket's own note names is the arena's, not the shipped
-    // `sample_arena.bmp` placeholder. `_Size` is the editor's unset canvas
-    // (1280×1005), which lets the renderer use the layout's full-screen frame
-    // rather than the 640×480 the placeholder was authored at.
-    if let Some(image) = find_mut_in(&mut gib, "background img") {
-        ra2ui::input::set_field(image, "_Filename", &event.arena.1);
-        ra2ui::input::set_field(image, "_Size", "1280 0 1005 0");
-    }
-    set_value_in(&mut gib, "event title", &event.name);
-    set_first_display(&mut gib, &plain_text(&event.description));
-    if let Some(bracket) = bracket {
-        set_value_in(&mut gib, "round heading textbox", &bracket.round_label);
-        ra2ui::hq::fill_bracket(&mut gib, bracket);
-        if let Some(button) = find_mut_in(&mut gib, "play button") {
-            ra2ui::input::set_field(
-                button,
-                "Visible",
-                if bracket.can_play { "true" } else { "false" },
-            );
-        }
-        set_value_in(&mut gib, "bracket status", &bracket.status);
-    } else {
-        set_value_in(&mut gib, "round heading textbox", "ROUND 1");
-    }
-    Ok(gib)
+    ra2ui::event_screens::bracket_screen(ui_root, event, bracket)
 }
 
 /// Rebuild the bracket screen from the live career. A round win returns here
@@ -1685,7 +2272,12 @@ pub fn refresh_event_screen(session: &mut Session) -> Result<(), String> {
         .ok_or_else(|| format!("event {event} is not in Events.txt"))?
         .clone();
     let bracket = bracket_view(&session.career);
-    let gib = event_screen(&session.game.join("UI"), &data, bracket.as_ref())?;
+    let gib = ra2ui::event_screens::bracket_screen_at(
+        &session.game.join("UI"),
+        &data,
+        bracket.as_ref(),
+        session.layout,
+    )?;
     session.screen = Screen::Event { gib };
     Ok(())
 }
@@ -1698,17 +2290,20 @@ pub fn award_screen(
     bot: &str,
     record: &EventRecord,
     description: &str,
+    preview_backdrop: bool,
 ) -> Result<Gib, String> {
     let mut gib = ra2ui::hq::load(ui_root, "teamhq/event_winner.gib")?;
     ra2ui::hq::fit_splits_in(&mut gib);
     // The award is a modal: the shipped window has no full-screen background,
-    // because the original draws it over the event-results 3D scene. This port
-    // composes the event's own arena preview behind it instead of leaving the
-    // frame black.
-    gib.blocks.insert(
-        0,
-        Block::Widget(full_screen_image("arena preview", &event.arena.1)),
-    );
+    // because the original draws it over the event-results 3D scene
+    // (`prize_scene`). Without that scene (a missing model or install) the
+    // event's own arena preview stands behind it instead of a black frame.
+    if preview_backdrop {
+        gib.blocks.insert(
+            0,
+            Block::Widget(full_screen_image("arena preview", &event.arena.1)),
+        );
+    }
     if let Some(image) = find_mut_in(&mut gib, "event img") {
         ra2ui::input::set_field(image, "_Filename", &event.art);
     }
@@ -1804,7 +2399,7 @@ fn set_first_display(gib: &mut Gib, text: &str) -> bool {
     false
 }
 
-fn set_display(widget: &mut Widget, text: &str) -> bool {
+pub(crate) fn set_display(widget: &mut Widget, text: &str) -> bool {
     // A `DisplayBox` is attached to the record that draws its body. On
     // `event_winner.gib` that is the unnamed child of `prize description`, not
     // the named group, so the search goes through the subtree.
@@ -1958,6 +2553,9 @@ impl Target {
 /// The offscreen run: open the HQ, optionally play one event, and write the
 /// named frames.
 pub fn run_headless(options: Options) -> Result<(), String> {
+    // The events it plays drive the process-global script layer; everything that
+    // runs a scripted match serializes on this lock.
+    let _guard = ra2script::lock();
     let out = options
         .out
         .clone()
@@ -1969,8 +2567,12 @@ pub fn run_headless(options: Options) -> Result<(), String> {
     let target = Target::new(renderer.device(), options.size[0], options.size[1]);
 
     let mut session = Session::open(&options.game)?;
+    // The original lays its windows out on the screen it runs at (1024x768 in
+    // the captures), not on a design canvas that is resampled afterwards.
+    session.set_layout(options.size);
     session.set_event_seconds(options.seconds);
     session.set_report_damage(options.report_damage);
+    session.bench_undamaged = options.bench_undamaged;
     println!(
         "HQ: {:?}, season {} (zero-based), {} points, rank {}, {} prizes",
         session.career.team_name(),
@@ -2082,12 +2684,109 @@ fn damage_report_components(robot: &mut ra2sim::r#match::RobotReport, damage: f3
 
 #[cfg(test)]
 mod tests {
+    /// The shell's first season is the schedule the original showed in the oracle
+    /// capture (`FUN_00500120`'s draw from the recovered LCG state).
+    #[test]
+    fn the_shell_schedule_is_the_captured_season_one() {
+        let Some(game) = game_dir() else { return };
+        let view = shell_view(&game).expect("the career view");
+        let ids: Vec<usize> = view.events.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![2, 6, 12, 9, 13, 15, 5, 22, 20]);
+        assert_eq!(view.events[0].event.name, "Blade Tournament");
+    }
+
+    /// `FUN_00500c40` (bound to the schedule at 0x4fdc4e): a click on an event
+    /// cell with no event in progress opens the join window; Enter Event opens
+    /// the bracket; with an event in progress another cell only says so.
+    #[test]
+    fn an_event_cell_click_follows_the_exe_handler() {
+        let Some(game) = game_dir() else { return };
+        let mut shell = ra2_shell::Shell::boot(&game, [1024.0, 768.0]).unwrap();
+        shell.set_hq_view(shell_view(&game).unwrap());
+        shell.set_enter_hook(shell_enter_hook(&game).unwrap());
+        for name in ["Team HQ button", "continue button", "events button"] {
+            shell.click_named(name).unwrap();
+        }
+        // The first cell, then Cancel: nothing changes.
+        shell.click(430.0, 376.0).unwrap();
+        assert_eq!(shell.window_depth(), 1);
+        assert_eq!(shell.base_screen_id(), "teamhq/teamhq.gib");
+        shell.click_named("cancel button").unwrap();
+        assert_eq!(shell.window_depth(), 0);
+        // Enter Event: the bracket of that event.
+        shell.click(430.0, 376.0).unwrap();
+        // No robot is chosen yet (live): Enter Event does nothing, the window stays.
+        shell.click_named("enter event button").unwrap();
+        assert_eq!(shell.window_depth(), 1);
+        let robots = shell
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "robot grid")
+            .map(|p| p.frame)
+            .expect("the join window's robot grid");
+        shell
+            .click(robots.x + robots.w / 12.0, robots.y + robots.h / 2.0)
+            .unwrap();
+        shell.click_named("enter event button").unwrap();
+        assert_eq!(shell.window_depth(), 0);
+        assert_eq!(shell.base_screen_id(), "teamhq/event_bracket.gib");
+        // Back to the HQ: another cell is refused with the exe's message box.
+        shell.click_named("later button").unwrap();
+        shell.click_named("events button").unwrap();
+        shell.click(560.0, 376.0).unwrap();
+        assert_eq!(shell.window_depth(), 1);
+        assert_eq!(shell.base_screen_id(), "teamhq/teamhq.gib");
+        // The event in progress opens its bracket again.
+        shell.click_named("ok button").unwrap();
+        shell.click(430.0, 376.0).unwrap();
+        assert_eq!(shell.base_screen_id(), "teamhq/event_bracket.gib");
+    }
+
+    /// The award's 3D scene (`FUN_0046e140`): the event-results arena through the
+    /// `fixed cam`, the tier's prize model on the winner spot and the team's logo
+    /// on the banner. Each of the three changes the picture.
+    #[test]
+    fn the_award_scene_shows_the_prize_and_the_teams_logo() {
+        let Some(game) = game_dir() else { return };
+        let Ok(renderer) = Renderer::new() else {
+            return;
+        };
+        let (w, h) = (320u32, 251u32);
+        let target = Target::new(renderer.device(), w, h);
+        let draw = |prize: &str, logo: &str| -> Vec<u8> {
+            let scene = crate::prize_scene::PrizeScene::load(&game, prize, logo, None).unwrap();
+            assert_eq!(scene.has_prize(), prize.ends_with(".gmf"), "{prize}");
+            scene
+                .render(
+                    &renderer,
+                    &target.color_view,
+                    &target.depth_view,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    w,
+                    h,
+                )
+                .unwrap();
+            renderer.read_texture(&target.color, w, h).unwrap()
+        };
+        let trophy = "Arenas\\event_results\\prizes\\Gold_Cup_Trophy\\Gold_Cup_Trophy.gmf";
+        let logo = "Teams\\orange_skull.bmp";
+        let with = draw(trophy, logo);
+        let bare = draw("", logo);
+        let other = draw(trophy, "Teams\\Atom.bmp");
+        assert!(with.iter().any(|&b| b != 0), "the scene is not black");
+        let differing = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
+        assert!(differing(&with, &bare) > 500, "the prize is on the spot");
+        assert!(differing(&with, &other) > 500, "the banner takes the logo");
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         if let Some(dir) = std::env::var_os("RA2_GAME") {
             let dir = PathBuf::from(dir);
             return dir.is_dir().then_some(dir);
@@ -2129,8 +2828,13 @@ mod tests {
                         for child in std::fs::read_dir(&from).unwrap() {
                             let child = child.unwrap();
                             let child_to = to.join(child.file_name());
+                            let name = child.file_name().to_string_lossy().to_lowercase();
                             if child.file_name() == "Teams.txt" {
                                 std::fs::copy(child.path(), child_to).unwrap();
+                            } else if name.starts_with("career") && name.ends_with(".dat") {
+                                // A career sidecar in the real install is
+                                // never linked: the test's save would write
+                                // through the link into the install.
                             } else {
                                 symlink(&child.path(), &child_to);
                             }
@@ -2154,6 +2858,8 @@ mod tests {
                     _ => symlink(&from, &to),
                 }
             }
+            // The scratch install keeps its own saves, as before the save dir.
+            ra2fmt::saves::bind(&root, &root);
             Some(TestGame(root))
         }
 
@@ -2196,25 +2902,88 @@ mod tests {
         assert_eq!(view.stats.current_rank, career.rank());
     }
 
-    /// The event's arena and game type are the data's: `Events.txt` names the
-    /// arena, and the arena script declares its own `game_types`.
+    /// The event's match is the data's: `Events.txt` names the arena, its
+    /// game type code (`+0x118`: 0 battle royal, 1 deathmatch, 2 king of the
+    /// hill, 3 tabletop) and its robots per match (`+0x10c`), and the player
+    /// meets every opponent the bracket put in the match.
     #[test]
-    fn the_event_arena_and_game_type_come_from_the_data() {
+    fn the_event_match_takes_its_game_type_and_field_from_the_data() {
         let Some(game) = game_dir() else { return };
-        let career = Career::new(&game, SEED).unwrap();
         let events = ra2ui::events::all(&game).unwrap();
-        for (index, expected) in [
-            ("F.O.R.C.E. Tournament", GameType::Deathmatch),
-            ("Blade Tournament", GameType::Tabletop),
-            ("Robo-Depot", GameType::KingOfTheHill),
+        for (name, expected, robots) in [
+            ("F.O.R.C.E. Tournament", GameType::Deathmatch, 2),
+            ("Blade Tournament", GameType::Tabletop, 4),
+            ("Robo-Depot", GameType::KingOfTheHill, 4),
         ] {
-            let event = events
+            let id = events
                 .iter()
-                .find(|event| event.name == index)
-                .unwrap_or_else(|| panic!("no event {index:?}"));
-            let config = match_config(&game, event, &career, 1.0).unwrap();
-            assert_eq!(config.game_type, expected, "{index}");
+                .position(|event| event.name == name)
+                .unwrap_or_else(|| panic!("no event {name:?}"));
+            let career = entered(&game, id);
+            let config = match_config(&game, &events[id], &career, 1.0).unwrap();
+            assert_eq!(config.game_type, expected, "{name}");
+            assert_eq!(config.robots.len(), robots, "{name}");
+            let teams: std::collections::BTreeSet<usize> =
+                config.robots.iter().map(|r| r.team).collect();
+            assert_eq!(teams.len(), robots, "{name}: one team per robot");
         }
+        // A battle royal event (The Octagon, code 0).
+        let id = events
+            .iter()
+            .position(|event| event.game_type_code() == Some(0))
+            .expect("a battle royal event");
+        let career = entered(&game, id);
+        let config = match_config(&game, &events[id], &career, 1.0).unwrap();
+        assert_eq!(config.game_type, GameType::BattleRoyal);
+        assert_eq!(
+            config.robots.len(),
+            events[id].bots_per_match().unwrap() as usize
+        );
+    }
+
+    /// The AI teams bring the robot of the player's weight class
+    /// (`FUN_0046bb70` -> `FUN_004fa890`, bot number = `Team+0x118`, the class
+    /// of the robot in the event): a light, medium or heavy entry meets Bot0,
+    /// Bot1 or Bot2 of each AI team, and the class numbers match the files.
+    #[test]
+    fn the_ai_teams_bring_the_robot_of_the_players_weight_class() {
+        let Some(game) = game_dir() else { return };
+        let events = ra2ui::events::all(&game).unwrap();
+        let id = events
+            .iter()
+            .position(|event| event.name == "F.O.R.C.E. Tournament")
+            .expect("a duel event");
+        let mut seen = std::collections::BTreeSet::new();
+        let career = entered(&game, id);
+        for &slot in &career.player().robots.clone() {
+            let mut career = entered(&game, id);
+            career.player_mut().event_robot = slot;
+            let player = player_robot_path(&game, career.player_slot, slot);
+            let class = read_bot(&player).map(|bot| bot.class).unwrap();
+            let config = match_config(&game, &events[id], &career, 1.0).unwrap();
+            let opponent = &config.robots[1].bot_path;
+            assert!(
+                opponent.ends_with(&format!("Bot{}.bot", ai_bot_for_class(class))),
+                "a class {class} robot meets {opponent}"
+            );
+            let brought = read_bot(Path::new(opponent)).unwrap();
+            assert_eq!(brought.class, class, "the AI robot is of the same class");
+            seen.insert(class);
+        }
+        assert!(!seen.is_empty());
+        assert_eq!(ai_bot_for_class(7), 0);
+        assert_eq!(ai_bot_for_class(-1), 0);
+        assert_eq!(ai_bot_for_class(2), 2);
+    }
+
+    /// A career in event `id` (put on its schedule first).
+    fn entered(game: &Path, id: usize) -> Career {
+        let mut career = Career::new(game, SEED).unwrap();
+        let mut ids: Vec<usize> = vec![id];
+        ids.extend((0..career.events.len()).filter(|e| *e != id).take(8));
+        career.set_schedule(&ids).unwrap();
+        career.enter_event(id).unwrap();
+        career
     }
 
     /// The season's bracket data reaches the UI: the round count is the
@@ -2250,8 +3019,12 @@ mod tests {
 
     #[test]
     fn a_click_on_the_event_row_enters_that_event() {
-        let Some(game) = game_dir() else { return };
-        let mut session = Session::open(&game).unwrap();
+        // Entering an event saves the career: a scratch install, never the
+        // real one.
+        let Some(game) = TestGame::new("click") else {
+            return;
+        };
+        let mut session = Session::open(game.path()).unwrap();
         session.select_tab("events button").unwrap();
         let expected = session.career.schedule[2];
         let point = session.event_point(2).unwrap();
@@ -2401,6 +3174,33 @@ mod tests {
         assert_eq!(career.phase, ra2sim::career::SeasonPhase::Complete);
         assert_eq!(career.schedule.len(), 9);
         std::fs::remove_dir_all(&dir).ok();
+
+        // The window's flow from the last award: `continue button` shows the
+        // season's end screen (`FUN_0046e2b0`), whose own `continue button`
+        // starts the next season and returns to the HQ.
+        let season = career.season();
+        let mut session = Session::open(game.path()).unwrap();
+        let gib = award_screen(
+            &game.path().join("UI"),
+            &session.career.events[career.schedule[8]],
+            session.career.team_name(),
+            "",
+            &career.history[8],
+            "",
+            true,
+        )
+        .unwrap();
+        session.screen = Screen::Award { gib, prize: None };
+        let point = session.control_point(&["continue button"]).unwrap();
+        session.click(point).unwrap();
+        assert!(matches!(session.screen, Screen::SeasonEnd { .. }));
+        let point = session.control_point(&["continue button"]).unwrap();
+        session.click(point).unwrap();
+        assert!(session.on_hq_screen());
+        let next = Career::load(game.path()).unwrap();
+        assert_eq!(next.season(), season + 1);
+        assert_eq!(next.phase, ra2sim::career::SeasonPhase::Schedule);
+        assert_eq!(next.schedule.len(), 9);
     }
 
     /// Two damaged components on one robot become two repairs-screen rows; the
@@ -2433,6 +3233,7 @@ mod tests {
             battery: 1.0,
             air: 1.0,
             armor: 1.0,
+            dot: 0,
             defeated: false,
             eliminated: false,
             winner: false,

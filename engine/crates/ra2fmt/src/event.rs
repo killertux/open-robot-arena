@@ -6,7 +6,7 @@
 //! file and can say so:
 //!
 //! ```text
-//! 0                                       <- the file's own header
+//! 0                                       <- the event's id
 //! F.O.R.C.E. Tournament                   <- name
 //! <text font fg_mcn14>…</text>            <- description, as `DisplayBox` markup
 //! 4                                       <- how many losing tiers follow
@@ -19,20 +19,29 @@
 //! UI\teamhq\events\ev_force.bmp                                    <- the event's art
 //! Combat Arena                                                     <- the arena
 //! Arenas\box\box_preview.bmp                                       <- its preview
-//! 2                                                                <- four numbers
-//! 1
-//! 1
-//! 1
+//! 2                                                                <- bots per match
+//! 1                                                                <- advance per match
+//! 1                                                                <- game type
+//! 1                                                                <- the next event's id
 //! ```
 //!
-//! So a record is `3 + 2 × tiers + 8` lines, and the four numbers at the end are
-//! the event's own settings. The description and the messages are the same markup
+//! The reader is `FUN_00469350` (one record per 0x140-byte event object, built
+//! by `FUN_0046d980` for `Events.txt` and `Events_2Player.txt`): the id into
+//! `+4`, name and description, the tier count into `+8` and `count + 1`
+//! model/message pairs (the last is the trophy's), four strings (trophy art,
+//! event art, arena, preview), then three numbers: `+0x10c` the robots in each
+//! match, `+0x110` the robots of a match that go on to the next round, and
+//! `+0x118` the game type. So a record is `4 + 2 × tiers + 9` lines, and the
+//! "fourth number" of earlier readings is the next record's id: the last
+//! record is not one short. The description and the messages are the same markup The description and the messages are the same markup
 //! the shell's `DisplayBox`es carry, which is what lets a cell show them without
 //! re-wording anything.
 
 /// One event, as `Events.txt` states it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
+    /// The record's own id line (`+4`): the shipped file numbers them 0..24.
+    pub id: i32,
     /// The event's name — `F.O.R.C.E. Tournament`.
     pub name: String,
     /// Its description, as markup.
@@ -45,10 +54,43 @@ pub struct Event {
     pub art: String,
     /// The arena it is fought in, and that arena's preview.
     pub arena: (String, String),
-    /// The numbers that close the record. Four in every shipped event, and three
-    /// in the last — `Events.txt` ends one line early, which is a property of the
-    /// file rather than of the shape.
+    /// The three numbers that close the record: robots per match (`+0x10c`),
+    /// robots advancing from each match (`+0x110`), game type (`+0x118`).
     pub settings: Vec<i32>,
+}
+
+impl Event {
+    /// Robots in each of the event's matches (`+0x10c`, getter `0x469990`):
+    /// 2 or 4 in the shipped file.
+    pub fn bots_per_match(&self) -> Option<i32> {
+        self.settings.first().copied()
+    }
+
+    /// Robots of a match that go on to the next round (`+0x110`, getter
+    /// `0x4699a0`; `FUN_004698f0` sizes the next round as `advance / bots`
+    /// of this one). 1 in every shipped event.
+    pub fn advancing_per_match(&self) -> Option<i32> {
+        self.settings.get(1).copied()
+    }
+
+    /// The game type code (`+0x118`, getter `0x46bfe0`). The bracket window
+    /// maps it through the jump table at `0x46bfa4` to the match's game type
+    /// string: 0 `BATTLE ROYAL`, 1 `DEATHMATCH`, 2 `KING OF THE HILL`,
+    /// 3 `TABLETOP`.
+    pub fn game_type_code(&self) -> Option<i32> {
+        self.settings.get(2).copied()
+    }
+
+    /// [`Event::game_type_code`] as the match's game type string.
+    pub fn game_type_name(&self) -> Option<&'static str> {
+        match self.game_type_code()? {
+            0 => Some("BATTLE ROYAL"),
+            1 => Some("DEATHMATCH"),
+            2 => Some("KING OF THE HILL"),
+            3 => Some("TABLETOP"),
+            _ => None,
+        }
+    }
 }
 
 /// Read the file.
@@ -85,16 +127,21 @@ fn take(lines: &[&str], at: &mut usize, what: &str) -> Result<String, String> {
 pub fn parse(text: &str) -> Result<Vec<Event>, String> {
     let lines: Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r')).collect();
     let mut at = 0;
-    // The header is a single number, and it is zero in the shipped file.
-    let header: i32 = take(&lines, &mut at, "the header")?
-        .trim()
-        .parse()
-        .map_err(|_| format!("line 1: {:?} is not the header", lines.first()))?;
-    if header != 0 {
-        return Err(format!("header is {header}, not 0"));
-    }
     let mut out = Vec::new();
     while at < lines.len() {
+        if lines[at..].iter().all(|line| line.trim().is_empty()) {
+            break;
+        }
+        let id_line = at + 1;
+        let id: i32 = take(&lines, &mut at, "the event id")?
+            .trim()
+            .parse()
+            .map_err(|_| {
+                format!(
+                    "line {id_line}: {:?} is not an event id",
+                    lines.get(id_line - 1)
+                )
+            })?;
         let name = take(&lines, &mut at, "the name")?;
         let description = take(&lines, &mut at, "the description")?;
         let count_line = at + 1;
@@ -118,22 +165,21 @@ pub fn parse(text: &str) -> Result<Vec<Event>, String> {
             take(&lines, &mut at, "the arena")?,
             take(&lines, &mut at, "the arena preview")?,
         );
-        // The settings are the run of numbers that follows, up to four: a name
-        // is never a number, so the run ends where the next record begins — or
-        // where the file does, which is what makes the last record three.
         let mut settings = Vec::new();
-        while settings.len() < 4 {
-            let next = lines.get(at).map(|line| line.trim()).unwrap_or("");
-            let Ok(number) = next.parse::<i32>() else {
-                break;
-            };
+        for what in [
+            "the robots per match",
+            "the advancing robots",
+            "the game type",
+        ] {
+            let line = at + 1;
+            let number: i32 = take(&lines, &mut at, what)?
+                .trim()
+                .parse()
+                .map_err(|_| format!("line {line}: {what} of {name:?} is not a number"))?;
             settings.push(number);
-            at += 1;
-        }
-        if settings.is_empty() {
-            return Err(format!("line {}: no settings for {name:?}", at + 1));
         }
         out.push(Event {
+            id,
             name,
             description,
             tiers: prize,
@@ -153,6 +199,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn game_dir() -> Option<PathBuf> {
+        crate::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -206,9 +253,8 @@ mod tests {
             assert!(!event.arena.0.is_empty(), "{}", event.name);
         }
 
-        // The three places the shipped file is not itself regular, named rather
-        // than smoothed over: one prize model left as the prizes directory, and
-        // the last event one number short because the file ends.
+        // The one place the shipped file is not itself regular, named rather
+        // than smoothed over: one prize model left as the prizes directory.
         let unfinished: Vec<&str> = events
             .iter()
             .flat_map(|e| {
@@ -220,10 +266,21 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         assert_eq!(unfinished, ["Robo-Depot"]);
-        assert!(events[..events.len() - 1]
-            .iter()
-            .all(|e| e.settings.len() == 4));
-        assert_eq!(events.last().unwrap().settings.len(), 3);
+        assert!(events.iter().all(|e| e.settings.len() == 3));
+        // The ids run 0..24 in file order.
+        assert!(events.iter().enumerate().all(|(i, e)| e.id == i as i32));
+        // Bots and game type agree with the arenas: a deathmatch is always
+        // one against one (Half Circle Arena's 2-bot event is a battle
+        // royal), and one robot of each match advances.
+        for e in &events {
+            assert_eq!(e.advancing_per_match(), Some(1), "{}", e.name);
+            let bots = e.bots_per_match().unwrap();
+            let kind = e.game_type_name().unwrap();
+            assert!(bots == 2 || bots == 4, "{}", e.name);
+            if kind == "DEATHMATCH" {
+                assert_eq!(bots, 2, "{}", e.name);
+            }
+        }
 
         // And the one high byte in the file is an apostrophe, not `U+0092`.
         assert!(events

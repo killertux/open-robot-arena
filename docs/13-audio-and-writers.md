@@ -126,7 +126,7 @@ money, the closing lines and the line ending.
 - **Shell music.** `ra2-app::audio::AudioSystem::on_screen` maps
   `Shell::screen_id` through `music_for_screen`. A re-render of the same screen
   does no work; two screens in one group (the team picker and the HQ) keep the
-  same track; an unmapped screen stops the music. The three shipped tracks are
+  same track; an unmapped screen leaves the music alone (`docs/35`). The three shipped tracks are
   the only ones started.
 - **UI click.** Every shell click whose `Step.hit` is not `"nothing"` plays
   `Sounds/button_click.wav` at unity through the SFX category, so

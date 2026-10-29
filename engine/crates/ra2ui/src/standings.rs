@@ -74,8 +74,8 @@ pub struct Standing {
 /// loads them (`FUN_00502150`). The manager has sixteen slots; the AI table
 /// fills the player's empty slots, so a full table is sixteen teams.
 pub fn roster(game: &Path) -> Result<Vec<Team>, String> {
-    let player = ra2fmt::team::read(&game.join("Teams").join("Teams.txt"))?;
-    let ai = ra2fmt::team::read(&game.join("AI").join("Teams.txt"))?;
+    let player = ra2fmt::team::read(&ra2fmt::saves::resolve(game, "Teams/Teams.txt"))?;
+    let ai = ra2fmt::team::read(&ra2fmt::saves::resolve(game, "AI/Teams.txt"))?;
     let mut teams = player;
     teams.extend(ai);
     teams.truncate(SLOTS);
@@ -164,6 +164,7 @@ mod tests {
     use ra2fmt::gib::Block;
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -279,10 +280,27 @@ mod tests {
             .find(|p| p.widget.name() == LEAGUE_GRID)
             .unwrap();
         assert_eq!(grid.children.len(), 2 + rows.len());
+        // The scroll bar stands flush inside the right edge of the scroller body
+        // (capture: bar at x 924..940, grid from 293), not at the authored x 591.
+        let scroller = grid
+            .attachments
+            .iter()
+            .find(|a| a.attachment.kind == ra2fmt::gib::AttachmentKind::Scroller)
+            .expect("the grid's scroller");
+        let bar = scroller
+            .body
+            .walk()
+            .find(|p| p.widget.kind == ra2fmt::gib::WidgetKind::ScrollBar)
+            .expect("the scroll bar");
+        assert_eq!(bar.frame.right(), scroller.body.frame.right());
+        assert_eq!(grid.frame.w, scroller.body.frame.w);
         for (i, cell) in grid.children.iter().skip(2).enumerate() {
             assert_eq!(cell.frame.x, grid.frame.x, "row {i}");
             assert_eq!(cell.frame.y, grid.frame.y + 70.0 * i as f32, "row {i}");
-            assert_eq!(cell.frame.w, 388.0, "row {i}");
+            assert_eq!(
+                cell.frame.w, grid.frame.w,
+                "row {i}: the cell runs to the scroll bar"
+            );
             assert_eq!(cell.frame.h, 70.0, "row {i}");
             assert_eq!(cell.widget.name(), "league cell split");
         }
@@ -373,7 +391,7 @@ mod tests {
             .unwrap();
         for (i, cell) in grid.children.iter().skip(2).enumerate() {
             assert_eq!(cell.frame.y, grid.frame.y + 36.0 * i as f32, "row {i}");
-            assert_eq!(cell.frame.w, 201.0, "row {i}");
+            assert_eq!(cell.frame.w, grid.frame.w, "row {i}");
         }
         assert_eq!(
             grid.children[2]

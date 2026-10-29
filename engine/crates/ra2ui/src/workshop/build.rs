@@ -23,10 +23,10 @@
 //!   800"* (`FUN_0043ca70`, quoted in `docs/06-deferred-fidelity.md` F10). An
 //!   attach that would cross it is refused.
 //!
-//! Nothing here checks the size or overlap of a part on the baseplate: the game
-//! lets the player put a component anywhere inside the chassis outline, and the
-//! file records only the stored transform, so there is no recovered rule to
-//! enforce. That is named in `docs/15-workshop-model.md`.
+//! The model's own attach/place calls do not check the size or overlap of a
+//! part on the baseplate; the editor's drag rules (collision, size cap, fit
+//! inside the chassis, SHIFT/CTRL steps) are [`super::placement`], which
+//! judges a candidate before [`Build::attach_info`] adds it (docs/36 §9.18).
 
 use std::collections::BTreeMap;
 
@@ -111,6 +111,9 @@ pub struct Build {
     limits: BuildLimits,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    /// Whether this session's extrusion made the chassis (so a height change rebuilds it whole
+    /// rather than scaling a stock mesh).
+    extruded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +152,78 @@ impl Build {
             limits: BuildLimits::default(),
             undo: Vec::new(),
             redo: Vec::new(),
+            extruded: false,
         }
+    }
+
+    /// The robot a new design starts as in the original: a chassis with no shape yet (no outlines,
+    /// no mesh, height 1, aluminium armour), no parts and no controls. Live, an untouched new robot
+    /// saved as `1.12 / Name: Enter Bot Name / ... / Chassis / / 0 / 0 / 1 0 / false / 0 /
+    /// 1 12 0 200 0 / false / 0 / 0 / 0` (`teamhq-newbot-empty__live__000.bot`).
+    pub fn blank(name: impl Into<String>) -> Self {
+        Build::new(
+            name,
+            Chassis {
+                height: 1.0,
+                armour: Some(ra2fmt::bot::Armour {
+                    type_id: 1,
+                    weight: 12.0,
+                    hardness: 200.0,
+                }),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Whether the chassis has no shape yet (a blank robot, or a design whose outline is not
+    /// extruded): weight 0, no 3D view, no parts can be placed.
+    pub fn is_blank(&self) -> bool {
+        self.chassis()
+            .is_none_or(|c| c.mesh.as_ref().is_none_or(|m| m.points.is_empty()))
+    }
+
+    /// Whether the design has a control board (the lab's Wiring tab needs one: `FUN_004f7b30`).
+    pub fn has_control_board(&self) -> bool {
+        self.bot
+            .components
+            .iter()
+            .any(|c| c.class == "ControlBoard")
+    }
+
+    /// Extrude the chassis from its outlines (`super::extrude`): the original does it when the
+    /// player goes to step 2 and when the structure design is finished. A chassis with no shape
+    /// starts at the default height with its top outline copied from the baseplate; one that
+    /// already has a shape is rebuilt only when its outlines no longer match the mesh. Returns
+    /// whether the chassis has a shape afterwards.
+    pub fn extrude_chassis(&mut self) -> Result<bool, BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        let fresh = chassis.mesh.is_none();
+        if !fresh
+            && chassis.top.len() == chassis.bottom.len()
+            && super::chassis::rings_match(&chassis)
+        {
+            return Ok(true);
+        }
+        if chassis.bottom.len() < 3 {
+            return Ok(!fresh);
+        }
+        if fresh {
+            chassis.height = super::extrude::DEFAULT_HEIGHT;
+            chassis.top = chassis.bottom.clone();
+            chassis
+                .armour_material
+                .get_or_insert([1.0, 1.0, 1.0, 1.0, 0.0]);
+        } else if chassis.top.len() != chassis.bottom.len() {
+            chassis.top = chassis.bottom.clone();
+        }
+        let ok = super::extrude::rebuild(&mut chassis);
+        self.commit_chassis(chassis);
+        if ok && self.paint.skin().is_none() {
+            let chassis = self.chassis_copy()?;
+            self.paint = Paint::from_chassis(&chassis);
+        }
+        self.extruded = true;
+        Ok(ok)
     }
 
     /// Start with the four stock controls (`Forward`, `LeftRight`, `Fire`,
@@ -203,6 +277,7 @@ impl Build {
             limits: BuildLimits::default(),
             undo: Vec::new(),
             redo: Vec::new(),
+            extruded: false,
         })
     }
 
@@ -558,6 +633,12 @@ impl Build {
 
     pub fn set_chassis_height(&mut self, height: f32) -> Result<(), BuildError> {
         let mut chassis = self.chassis_copy()?;
+        if self.extruded && chassis.bottom.len() >= 3 && !(height <= 0.0 || !height.is_finite()) {
+            chassis.height = height;
+            super::extrude::rebuild(&mut chassis);
+            self.commit_chassis(chassis);
+            return Ok(());
+        }
         super::chassis::set_height(&mut chassis, height)?;
         // The saved buckle model is a copy of the old geometry; `commit_chassis`
         // drops it, as the game does when the shape is rebuilt.
@@ -681,23 +762,20 @@ impl Build {
         Ok(removed)
     }
 
-    /// The F1 world transform of every component.
+    /// The world transform of every component, by the original's mount rule
+    /// ([`ra2fmt::mount`]), the same the renderer and the simulator use.
     pub fn transforms(&self) -> Vec<Mat4> {
-        let maps: Vec<BTreeMap<i32, Mat4>> = self
+        let tables: Vec<Option<BTreeMap<i32, ra2fmt::gmi::Attachment>>> = self
             .info
             .iter()
-            .map(|info| {
-                info.mounts
-                    .iter()
-                    .map(|(id, a)| (*id, mount::tm_mat4(&a.transform)))
-                    .collect()
-            })
+            .map(|info| Some(info.mounts.clone()))
             .collect();
+        let hinges = self.info.iter().map(|info| info.hinge.clone()).collect();
         mount::worlds(
             &self.bot,
-            &MountFrames::from_maps(maps),
+            &MountFrames::from_tables(&tables).with_hinges(hinges),
             MountOptions {
-                mode: MountMode::FramesFlipped,
+                mode: MountMode::Game,
                 chassis_plane: 0.0,
             },
         )
@@ -729,6 +807,19 @@ impl Build {
     /// The bot as it would be saved: the board and the painted chassis applied.
     pub fn to_bot(&self) -> Bot {
         let mut bot = self.bot.clone();
+        // The lab writes the class its weight gives (`FUN_0046c710` after every mass change), not
+        // the one the file was opened with.
+        bot.class = if self.is_blank() {
+            // A robot with no shape has no class: the original writes whatever its field held and
+            // the inventory prints `None` for it.
+            3
+        } else {
+            match self.stats().computed_class {
+                super::stats::WeightClass::Light => 0,
+                super::stats::WeightClass::Medium => 1,
+                super::stats::WeightClass::Heavy => 2,
+            }
+        };
         self.board.apply_to(&mut bot);
         if let Some(chassis) = bot.components.first_mut().and_then(|c| c.chassis.as_mut()) {
             self.paint.apply_to(chassis);
@@ -827,8 +918,10 @@ fn chassis_info(chassis: &Chassis) -> ComponentInfo {
         base: "Chassis".into(),
         def: None,
         mounts: BTreeMap::new(),
+        hinge: None,
         mass: chassis.mass().max(5.0),
         has_hull: chassis.mesh.as_ref().is_some_and(|m| !m.points.is_empty()),
+        bounds: None,
         loaded: true,
     }
 }
@@ -879,6 +972,10 @@ pub enum BuildError {
     },
     UnknownComponent(String),
     CannotRemoveChassis,
+    /// The remove button's refusal (`FUN_0042f270`): other parts hang on it.
+    HasChildren {
+        index: usize,
+    },
     /// A placement edit named a component that is not a chassis child.
     NotChassisChild {
         index: usize,
@@ -926,6 +1023,9 @@ impl std::fmt::Display for BuildError {
             ),
             BuildError::UnknownComponent(file) => write!(f, "no component definition for {file:?}"),
             BuildError::CannotRemoveChassis => write!(f, "the chassis cannot be removed"),
+            BuildError::HasChildren { .. } => {
+                write!(f, "You must delete the components attached to this first.")
+            }
             BuildError::NotChassisChild { index, count } => write!(
                 f,
                 "component {index} is not a chassis child ({count} components)"
@@ -1034,8 +1134,10 @@ mod tests {
             base: "SpinMotor".into(),
             def: None,
             mounts,
+            hinge: None,
             mass: 16.0,
             has_hull: true,
+            bounds: Some(([-0.1, 0.0, -0.1], [0.1, 0.3, 0.1])),
             loaded: true,
         }
     }
@@ -1051,8 +1153,10 @@ mod tests {
             base: "Wheel".into(),
             def: None,
             mounts,
+            hinge: None,
             mass: 8.0,
             has_hull: true,
+            bounds: Some(([-0.1, -0.1, -0.1], [0.1, 0.1, 0.1])),
             loaded: true,
         }
     }
@@ -1104,7 +1208,8 @@ mod tests {
     }
 
     /// F1's chassis branch: a baseplate placement writes the file's own stored
-    /// transform and nothing else, and undo restores it.
+    /// fields and nothing else, the part's own mount point lands on them (the
+    /// original's rule, docs/29 section 8), and undo restores it.
     #[test]
     fn a_baseplate_placement_uses_the_stored_rule_and_undo_restores_it() {
         let mut build = Build::new("Place", chassis());
@@ -1120,9 +1225,15 @@ mod tests {
         assert_eq!(placed.rotation, mount::CHASSIS_CHILD_ROTATION);
         assert_eq!(placed.angle, 0.7);
         assert_eq!(placed.height, 0.1);
-        // The renderer and the rig read these fields through `component_local`,
-        // and the chassis has no mount frame to change that.
-        assert_eq!(build.transforms()[motor], mount::component_local(&placed));
+        // The renderer, the rig and the workshop read these fields through the
+        // same rule: the motor's own point (mount 0) sits on the translation,
+        // `height` above the baseplate.
+        let own = mount::tm_mat4(&motor_info().mounts[&0].transform);
+        let at = (build.transforms()[motor] * own).transform_point3(glam::Vec3::ZERO);
+        assert!(
+            at.abs_diff_eq(glam::Vec3::new(0.37, 0.1, -0.22), 1e-5),
+            "{at:?}"
+        );
         assert!(build.undo());
         assert_eq!(build.components()[motor], before);
         assert!(build.redo());

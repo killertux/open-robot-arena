@@ -1,0 +1,20 @@
+# Main menu -> Exhibition -> DEATHMATCH, slot 1 the HUMAN player robot C.R.U.S.H. (The Rookies),
+# slot 2 AI Red Zone ALARM.  1024x768 game pixels.  (The floating damage numbers are only shown for
+# a human player: docs/37 section 7.)
+click 514 346   # MAIN MENU: EXHIBITION
+wait 3
+click 383 214   # Game Settings: DEATHMATCH
+wait 1
+click 176 221   # Robots tab
+wait 1.5
+click 441 221   # slot 1: human icon -> Select Player Robot (first robot: C.R.U.S.H.)
+wait 2.5
+click 648 548   # OK
+wait 4
+click 805 249   # slot 2: computer icon
+wait 2.5
+click 519 462   # medium bot: ALARM
+wait 0.5
+click 648 548   # OK
+wait 4
+hide

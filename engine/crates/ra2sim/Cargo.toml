@@ -3,7 +3,7 @@ name = "ra2sim"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Physics simulation (Jolt) for Robot Arena 2 — the M2 sandbox."
+description = "Physics simulation for Robot Arena 2 (the Havok 1.7 backend; Jolt as an opt-in fallback)."
 
 [[bin]]
 name = "ra2-sim"
@@ -13,10 +13,23 @@ path = "src/main.rs"
 name = "ra2-duel"
 path = "src/bin/ra2-duel.rs"
 
+[features]
+default = []
+# The old Jolt Physics backend (`RA2_PHYSICS=jolt`), kept as an opt-in fallback.
+# Off by default: oxijolt-sys downloads a prebuilt Jolt archive in its build
+# script (or builds Jolt from source with CMake and a C++ compiler when its
+# `prebuilt` feature is off), so the default build needs neither the network
+# nor a C++ toolchain.
+jolt = ["dep:oxijolt"]
+
+[[example]]
+name = "asmcheck"
+required-features = ["jolt"]
+
 [dependencies]
 glam = "0.34.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-oxijolt = "1.1.0"
+oxijolt = { version = "1.1.0", optional = true }
 ra2fmt = { path = "../ra2fmt" }
 ra2-render = { path = "../ra2-render" }
 ra2script = { path = "../ra2script" }

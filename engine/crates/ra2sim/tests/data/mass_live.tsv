@@ -1,0 +1,40 @@
+# Live chassis bodies and wheel records (docs/29 sections 12f, 12i, 12j: Berserker, 6.9 mm). Generated from
+# local/oracle/original/assembly-*__live__000.json (chassis: mass, centre of mass in the
+# robot frame at rest) and magic-*__live__*.jsonl (AddWheel record +0x2c, chassis frame).
+# kind	bot	index	mass	x	y	z
+chassis	AI/Team0/Bot1.bot	0	232.12	-0.0100	0.2623	0.0245
+chassis	AI/Team2/Bot2.bot	0	250.02	-0.0029	0.2377	-0.1402
+chassis	AI/Team5/Bot1.bot	0	268.91	-0.1095	0.2820	0.0209
+chassis	AI/Team4/Bot2.bot	0	280.26	-0.0121	0.2515	0.0626
+chassis	AI/Team8/Bot0.bot	0	163.09	-0.0010	0.2084	-0.0875
+chassis	AI/Team1/Bot2.bot	0	349.96	0.1352	0.3130	0.0310
+chassis	AI/Team6/Bot2.bot	0	324.83	0.0071	0.2212	-0.0496
+chassis	AI/Team2/Bot1.bot	0	220.61	-0.0105	0.1321	-0.0900
+chassis	AI/Team10/Bot1.bot	0	212.52	-0.0086	0.2233	0.0044
+chassis	AI/Team14/Bot1.bot	0	316.48	0.0078	0.3177	-0.2280
+chassis	AI/Team0/Bot0.bot	0	163.49	-0.0268	0.1946	-0.0579
+chassis	AI/Team0/Bot2.bot	0	296.39	-0.0004	0.2396	-0.3195
+chassis	AI/Team13/Bot1.bot	0	238.39	0.0093	0.3102	-0.0032
+chassis	AI/Team8/Bot2.bot	0	226.67	-0.0054	0.3356	-0.2375
+wheel	AI/Team8/Bot0.bot	0	163.09	0.4654	-0.1518	-0.4046
+wheel	AI/Team8/Bot0.bot	1	163.09	-0.4504	-0.1453	-0.3944
+wheel	AI/Team0/Bot2.bot	0	296.39	-1.0445	-0.1374	-0.5521
+wheel	AI/Team0/Bot2.bot	1	296.39	1.0351	-0.1374	-0.5514
+wheel	AI/Team0/Bot2.bot	2	296.39	0.9995	-0.1057	0.3454
+wheel	AI/Team0/Bot2.bot	3	296.39	-1.0081	-0.1058	0.3449
+wheel	AI/Team8/Bot2.bot	0	226.67	-1.3530	-0.1193	-0.1543
+wheel	AI/Team8/Bot2.bot	1	226.67	1.3336	-0.1193	-0.1459
+wheel	AI/Team8/Bot2.bot	2	226.67	0.3817	-0.2706	0.6056
+wheel	AI/Team8/Bot2.bot	3	226.67	-0.3787	-0.2706	0.6047
+wheel	AI/Team10/Bot1.bot	0	212.52	0.7706	-0.1644	-0.5511
+wheel	AI/Team10/Bot1.bot	1	212.52	0.7353	-0.1585	0.5578
+wheel	AI/Team10/Bot1.bot	2	212.52	-0.7751	-0.1482	0.5655
+wheel	AI/Team10/Bot1.bot	3	212.52	-0.7859	-0.1482	-0.5606
+wheel	AI/Team0/Bot1.bot	0	232.12	-0.6000	-0.2082	0.4855
+wheel	AI/Team0/Bot1.bot	1	232.12	0.5638	-0.2014	0.4758
+wheel	AI/Team0/Bot1.bot	2	232.12	0.5606	-0.1952	-0.6102
+wheel	AI/Team0/Bot1.bot	3	232.12	-0.6137	-0.1893	-0.5924
+chassis	AI/Team11/Bot1.bot	0	179.35	0.0091	0.2511	-0.0866
+chassis	AI/Team11/Bot2.bot	0	421.01	-0.0035	0.2703	0.0800
+chassis	AI/Team7/Bot2.bot	0	356.75	-0.0035	0.2728	0.1118
+chassis	AI/Team10/Bot0.bot	0	117.74	0.0032	0.2465	0.0379

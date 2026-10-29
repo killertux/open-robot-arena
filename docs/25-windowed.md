@@ -132,70 +132,38 @@ the music was playing, and the screens match the existing deterministic
 1280×1024 frame has the game's own cursor at `(0,19)…(10,33)`, which is why its
 A/B row uses a manual 12×18 pointer mask.
 
-**Not captured:** `botlab-chassis-step1`, `exhibition-arena`,
-`match-countdown`, `match-hud`, `match-results`, `koth-hud`. No screen after the
-main menu was reached, so none is claimed. The click route was attempted at the
+**Not captured at the time of this section** (all but `koth-hud` have since
+been captured with the Frida route below; see `local/oracle/manifest.tsv`):
+`botlab-chassis-step1`, `exhibition-arena`, `match-countdown`, `match-hud`,
+`match-results`, `koth-hud`. The click route was attempted at the
 known menu coordinates and the result is recorded in
 `mainmenu__1024x768__003.click-failed.txt`: the two captures are byte-identical
 (MAE 0.0).
 
-### What was tried for the original's mouse
+### What was tried for the original's mouse, and what finally worked
+
+> **Correction (2026-10-18).** The conclusion originally written here, that no
+> synthetic input can reach the original's non-boot screens, is **wrong**.
+> The attempts below are kept as a record of what does *not* work; the fix is
+> at the end of this section.
 
 The startup dialogs are dismissed by **XTEST keyboard** events, which reach the
-game through Wine's normal keyboard path. The mouse is different. DirectInput8
-is opened with `SetCooperativeLevel(..., flags 0x5)` = **exclusive |
-foreground**, and the game polls it every frame. `WINEDEBUG=+dinput` shows:
+game. The mouse did not respond to any X-side or Wine-side injection:
+XTEST motion/button, `XWarpPointer`, `XSendEvent`, `XTestFakeDevice*`, the host
+pointer through Xephyr, a PE32 helper calling `SetCursorPos`/`mouse_event`, a
+`/dev/uinput` device, and a window manager (Metacity, which also blanks the
+D3D surface). Each reached the X server (or Wine) and still left DirectInput's
+exclusive mouse with 0 queued events. That part is a faithful record.
 
-```text
-dinput_device_SetCooperativeLevel hwnd 0001005C, flags 0x5
-dinput_device_Acquire ...
-dinput_device_GetDeviceData ... Returning 0 events queued
-```
-
-The following were tried, in order, and **none** moved the game's cursor or
-activated a button:
-
-1. **XTEST** `XTestFakeMotionEvent` / `XTestFakeRelativeMotionEvent` /
-   `XTestFakeButtonEvent`, after `XSetInputFocus` and `XRaiseWindow`, and with
-   the X pointer confirmed over the game's window. Motion reaches the X server;
-   dinput still queues 0 events. This is the documented 2026-10-17 result,
-   re-measured.
-2. **`XWarpPointer`** and **`XSendEvent`** with `MotionNotify`, `ButtonPress`
-   and `ButtonRelease` sent to the game window (both `send_event` and direct
-   client delivery). No change; dinput still queues 0.
-3. **`XTestFakeDevice*`** against the Xephyr virtual-mouse slave device. The
-   client library's device-event encoding produced `BadLength` for this server,
-   and the core events did not move dinput either.
-4. **The host pointer through Xephyr.** `:3`'s Xephyr virtual mouse did receive
-   the host motion (`xinput test` printed `motion a[0]=578 a[1]=396`), and the
-   nested pointer moved, but Wine's exclusive dinput mouse ignored it as well.
-5. **Wine-side input.** `tools/capture/wininput.py` builds a PE32 whose
-   `FindWindowA`, `SetForegroundWindow`, `SetCursorPos` and `mouse_event` calls
-   succeed (confirmed with `WINEDEBUG=+relay`: `SetCursorPos` and both
-   `mouse_event` calls return 1). The game's cursor did not move;
-   `wininput`'s own re-check after the game exited shows `SetCursorPos` works
-   when no exclusive dinput grab is held, so the grab is what blocks it.
-6. **A real evdev device.** `/dev/uinput` is writable by this user via an ACL.
-   `tools/capture/uinput_mouse.py` created `ra2-capture-mouse` before Wine
-   started; X saw it (`xinput` id 17, events received in `xinput test`), but
-   dinput's exclusive mouse still returned 0 events. The device is unrelated to
-   which X display the game uses.
-7. **A window manager, to give Wine a foreground window.** Metacity on the
-   nested display made the game's fullscreen D3D surface draw a blank frame
-   (both fullscreen and windowed), and did not make dinput accept clicks.
-   Windowed mode without a WM also rendered blank under llvmpipe.
-8. **The screensaver/focus state.** The host session's screensaver was active
-   and its fullscreen backup-locker window initially sat over Xephyr; dismissing
-   it with `cinnamon-screensaver-command`/DBus made host pointer events reach
-   Xephyr, but dinput still ignored them.
-
-The conclusion is specific to this environment: **Wine 9.0's DirectInput8
-exclusive mouse does not accept synthetic input from XTEST, XSendEvent,
-XWarpPointer, the host pointer, SetCursorPos/mouse_event, or a uinput device**;
-only a physical device event appears to feed it. Therefore the original's
-non-boot screens remain a human-driven capture step, exactly as `docs/12` §3.4
-said, now with a measured reason rather than a guess. `original.sh` captures the
-menu and records the failed click without pretending otherwise.
+What those experiments missed is that the game does not need a *device* event:
+its UI update (`FUN_005e4e30`) reads a mouse-state object at `0x716428+0x14`
+(x, y, button, per-frame moved/changed flags) and ignores window mouse
+messages. **Writing that object from a Frida agent** (frida-server inside the
+flatpak sandbox, once per UI frame) drives every menu: see
+`tools/capture/original_session.sh` and `tools/oracle/ra2_drive.py`. All the
+non-boot captures in `local/oracle/original/` (exhibition, Team HQ, bot lab,
+matches) were taken this way, and `tools/oracle/ra2_python.py` runs Python
+inside the game to read live match state.
 
 ## 5. A/B measurement
 
@@ -250,9 +218,7 @@ timing oracle (`docs/12` §4).
 
 ## 7. What remains impossible here
 
-- **Original post-menu screens by automation.** No synthetic mouse path reaches
-  DirectInput8 exclusive on this Wine build (§4). A physical pointer at the
-  display, or a Wine build whose dinput accepts injected events, is required.
+- ~~Original post-menu screens by automation~~: solved with Frida (§4 correction).
 - **Original windowed rendering.** Fullscreen under a window manager (Metacity)
   draws a blank D3D surface under llvmpipe; windowed mode is blank too. The
   original captures therefore stay fullscreen, 1024×768 and 1280×1024.

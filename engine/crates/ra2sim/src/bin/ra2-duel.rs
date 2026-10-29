@@ -117,6 +117,7 @@ fn run(
 
     let mut frames: Vec<PathBuf> = Vec::new();
     let mut log_at = 0usize;
+    let mut events_at = 0usize;
     // Diagnostic: render the chassis crushed to a given fraction (F9), so the
     // deformation can be looked at without fighting a bout into it.
     if let Ok(v) = std::env::var("RA2_BUCKLE") {
@@ -142,6 +143,7 @@ fn run(
             .map(|_| ra2sim::DriveInput {
                 throttle: 1.0,
                 steer: 0.0,
+                ..Default::default()
             })
             .collect()
     } else {
@@ -155,36 +157,21 @@ fn run(
                 duel.step_direct(&direct, dt);
             }
         }
+        // Report each damage event as it lands (`FUN_004175b0`'s stream).
+        while events_at < duel.damage_events.len() {
+            let e = duel.damage_events[events_at];
+            println!(
+                "    hit t={:.2}s  {} -> robot {} comp {}  {:.1}",
+                e.time, e.attacker, e.victim, e.component, e.amount
+            );
+            events_at += 1;
+        }
         // Report new breakage.
         while log_at < duel.log.len() {
             println!("  {}", duel.log[log_at]);
             log_at += 1;
         }
         if step % every == 0 || step == total {
-            if std::env::var("RA2_DEBUG").is_ok() && duel.robots.len() >= 2 {
-                for row in ra2sim::combat::report(&*duel.physics, &duel.robots, 0, 1, &duel.combat)
-                {
-                    println!("    {row}");
-                }
-                // Which bodies of A actually touch which of B? The damage model
-                // asks about the two robots' *root* bodies only, and a robot is
-                // several hinged parts, so this is the check that matters.
-                let (a, b) = (&duel.robots[0], &duel.robots[1]);
-                let mut hits = Vec::new();
-                for (i, pa) in a.parts.iter().enumerate() {
-                    for (j, pb) in b.parts.iter().enumerate() {
-                        if duel.physics.in_contact(pa.body, pb.body) {
-                            hits.push(format!("{i}x{j}"));
-                        }
-                    }
-                }
-                println!(
-                    "    parts: a={} b={} touching: [{}]",
-                    a.parts.len(),
-                    b.parts.len(),
-                    hits.join(" ")
-                );
-            }
             let png = duel.render(&renderer, &cam, w, h)?;
             let path = out.join(format!("frame_{:03}.png", frames.len()));
             montage::save_png(&path, &png, w, h)?;
@@ -234,6 +221,21 @@ fn run(
         }
     }
 
+    {
+        let n = duel.damage_events.len();
+        let amounts: Vec<f32> = duel.damage_events.iter().map(|e| e.amount).collect();
+        if n > 0 {
+            let max = amounts.iter().cloned().fold(0.0f32, f32::max);
+            let mean = amounts.iter().sum::<f32>() / n as f32;
+            println!(
+                "damage events: {n} in {:.1}s ({:.2}/s)  mean {mean:.1}  max {max:.1}",
+                duel.time,
+                n as f32 / duel.time.max(1e-3)
+            );
+        } else {
+            println!("damage events: none");
+        }
+    }
     let strip = out.join("strip.png");
     montage::montage(&frames, &strip, 4, 2)?;
     println!("wrote {} frames + {}", frames.len(), strip.display());

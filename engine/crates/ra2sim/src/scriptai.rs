@@ -16,7 +16,6 @@ use ra2script::{BotSnapshot, ScriptHost};
 
 use crate::backend::PhysicsBackend;
 use crate::robot::Robot;
-use crate::sim::{DriveInput, BOT_FORWARD};
 
 /// A robot's name as the AI's binding table spells it.
 ///
@@ -31,10 +30,55 @@ pub fn bot_name(rig: &crate::rig::RobotRig) -> String {
         .to_string()
 }
 
+/// The `nose` a brain is built with in `AI/Bindings.py` (radians), if the table lists `name` with one.
+///
+/// A robot driven by a brain has its forward heading set from the brain's `nose` (the AI callback's
+/// field `+0x40`, pushed into the robot's `+0xac` by the vtable call at `0x415a6e` when the match is
+/// set up), whatever the `.bot` says; the loader (`0x4de450`) reads a heading from the file only for
+/// versions from 1.1, so the three stock 1.07 robots (Iceberg `pi`, Tornado and LugNut `-pi/2`) get
+/// theirs from here (docs/34 section 11.5, checked live on all three). Every other stock robot's
+/// `nose` equals its file's heading. A bot the table lists without `nose` has `0`.
+pub fn bindings_nose(root: &Path, name: &str) -> Option<f32> {
+    let text = std::fs::read_to_string(root.join("AI").join("Bindings.py")).ok()?;
+    let key = format!("(\"{name}\"");
+    let line = text.lines().find(|l| l.contains(&key))?;
+    let Some(at) = line.find("'nose'") else {
+        return Some(0.0);
+    };
+    let rest = line[at + 6..].trim_start().strip_prefix(':')?;
+    let expr = rest.split([',', '}']).next()?.trim();
+    parse_angle(expr)
+}
+
+/// `math.pi`, `-math.pi / 2`, `math.pi * 0.5` or a plain number.
+fn parse_angle(expr: &str) -> Option<f32> {
+    let (neg, body) = match expr.strip_prefix('-') {
+        Some(b) => (true, b.trim()),
+        None => (false, expr),
+    };
+    let (head, tail) = match body.find(['/', '*']) {
+        Some(i) => (
+            body[..i].trim(),
+            Some((body.as_bytes()[i], body[i + 1..].trim())),
+        ),
+        None => (body, None),
+    };
+    let mut v = if head == "math.pi" {
+        std::f32::consts::PI
+    } else {
+        head.parse::<f32>().ok()?
+    };
+    if let Some((op, n)) = tail {
+        let n: f32 = n.parse().ok()?;
+        v = if op == b'/' { v / n } else { v * n };
+    }
+    Some(if neg { -v } else { v })
+}
+
 /// What the scripts get to see about one robot.
 pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
     let transform = robot.transform(physics);
-    let forward = transform.transform_vector3(BOT_FORWARD);
+    let forward = transform.transform_vector3(robot.rig.forward());
     // The scripts think in a heading whose `(sin, cos)` is the facing, so the
     // direction is flattened: a robot on its back still has a heading.
     let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
@@ -72,7 +116,13 @@ pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
 
     BotSnapshot {
         alive: robot.is_alive(),
-        location: transform.w_axis.truncate(),
+        // `plus.getLocation` / `AI.GetLocation` read the chassis body's
+        // position, which in Havok is its centre of mass: live the resting
+        // Scout and ALARM report -1.884 / -1.811, their bot origins -2.086 /
+        // -2.074 (docs/26, docs/29 §12g).
+        location: physics
+            .center_of_mass(robot.body())
+            .unwrap_or(transform.w_axis.truncate()),
         direction: if flat == Vec3::ZERO {
             Vec3::NEG_Z
         } else {
@@ -85,8 +135,8 @@ pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
         components,
         spheres,
         boxes,
-        last_damage_done: (0, 0.0, 0.0),
-        last_damage_received: (0, 0.0, 0.0),
+        last_damage_done: ra2script::NO_DAMAGE,
+        last_damage_received: ra2script::NO_DAMAGE,
         eliminated: robot.eliminated,
     }
 }
@@ -119,14 +169,53 @@ impl ScriptAi {
         self.host.brain_count()
     }
 
-    /// Run every brain for one tick; `None` where the robot has no brain.
-    pub fn tick(&self, count: usize) -> Vec<Option<DriveInput>> {
-        Self::collect(count, self.host.tick_brains())
+    /// Run the brains of the robots `due` says, for one tick each; `Some(events)`
+    /// for each robot a brain drives, `events` being the `Input` calls it made
+    /// (none for a brain not due), and `None` where the robot has no brain.
+    pub fn tick(&self, count: usize, due: &[bool]) -> Vec<Option<Vec<ra2script::InputEvent>>> {
+        Self::collect(
+            count,
+            self.host
+                .tick_brains(&|i| due.get(i).copied().unwrap_or(false)),
+        )
     }
 
     /// Tell the arena script that a robot entered or left one of its zones.
     pub fn zone_event(&self, direction: i32, zone: i32, robot: i32, chassis: bool) -> bool {
         self.host.send_zone_event(direction, zone, robot, chassis)
+    }
+
+    /// The SmartZones robot `robot`'s brain registered, `(name, id)`.
+    pub fn brain_smart_zones(&self, robot: usize) -> Vec<(String, i32)> {
+        self.host.brain_smart_zones(robot)
+    }
+
+    /// `SmartZoneEvent(direction, id, other + 1, chassis)` to `robot`'s brain.
+    pub fn smart_zone_event(
+        &self,
+        robot: usize,
+        direction: i32,
+        id: i32,
+        other: i32,
+        chassis: bool,
+    ) {
+        self.host
+            .send_smart_zone_event(robot, direction, id, other, chassis);
+    }
+
+    /// `LostComponent(component)` to `robot`'s brain.
+    pub fn lost_component(&self, robot: usize, component: i32) {
+        self.host.send_lost_component(robot, component);
+    }
+
+    /// `PlayerOut(id)` to every brain.
+    pub fn player_out(&self, id: i32) {
+        self.host.send_player_out(id);
+    }
+
+    /// `ImmobilityWarning(id, on)` to every brain (`FUN_00412fc0`).
+    pub fn immobility_warning(&self, id: i32, on: bool) {
+        self.host.send_immobility_warning(id, on);
     }
 
     /// Run the arena's own `Tick`, which the game did four times a second.
@@ -137,16 +226,27 @@ impl ScriptAi {
         self.host.run_arena_tick(dt)
     }
 
-    /// The controls each brain last set, without running one.
-    pub fn drives(&self, count: usize) -> Vec<Option<DriveInput>> {
-        Self::collect(count, self.host.read_drives())
+    /// The robots a brain drives, without running one: the controls simply
+    /// hold between ticks, so there are no new events.
+    pub fn drives(&self, count: usize) -> Vec<Option<Vec<ra2script::InputEvent>>> {
+        Self::collect(
+            count,
+            self.host
+                .brain_robots()
+                .into_iter()
+                .map(|i| (i, Vec::new()))
+                .collect(),
+        )
     }
 
-    fn collect(count: usize, raw: Vec<(usize, (f32, f32))>) -> Vec<Option<DriveInput>> {
+    fn collect(
+        count: usize,
+        raw: Vec<(usize, Vec<ra2script::InputEvent>)>,
+    ) -> Vec<Option<Vec<ra2script::InputEvent>>> {
         let mut out = vec![None; count];
-        for (i, (throttle, steer)) in raw {
+        for (i, events) in raw {
             if i < out.len() {
-                out[i] = Some(DriveInput { throttle, steer });
+                out[i] = Some(events);
             }
         }
         out
@@ -156,4 +256,19 @@ impl ScriptAi {
 /// The game installation holding an arena script.
 pub fn game_root_for(arena_path: &Path) -> Option<PathBuf> {
     ra2_render::find_game_root(arena_path)
+}
+
+#[cfg(test)]
+mod nose_tests {
+    use super::parse_angle;
+    use std::f32::consts::PI;
+
+    #[test]
+    fn nose_expressions_of_bindings_py_parse() {
+        assert_eq!(parse_angle("math.pi"), Some(PI));
+        assert_eq!(parse_angle("-math.pi / 2"), Some(-PI / 2.0));
+        assert_eq!(parse_angle("math.pi * 0.5"), Some(PI * 0.5));
+        assert_eq!(parse_angle("0.0"), Some(0.0));
+        assert_eq!(parse_angle("north"), None);
+    }
 }

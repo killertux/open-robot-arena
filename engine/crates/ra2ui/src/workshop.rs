@@ -52,8 +52,10 @@ use crate::{input, Fonts, Placement};
 
 pub mod build;
 pub mod chassis;
+pub mod extrude;
 pub mod library;
 pub mod paint;
+pub mod placement;
 pub mod stats;
 pub mod wiring;
 
@@ -529,6 +531,7 @@ mod tests {
     use crate::{resolve, DESIGN_SCREEN};
 
     fn ui_root() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game/UI");
@@ -666,7 +669,9 @@ mod tests {
         let info = at("Info Display");
         assert_eq!(info.h, 18.0);
         assert_eq!(info.w, 1024.0);
-        assert!(info.y + info.h <= at(CONTENT_SLOT).y, "{info:?}");
+        // The strip is the bottom pane of `lowersplit`, under the content.
+        let content = at(CONTENT_SLOT);
+        assert!(info.y >= content.y + content.h, "{info:?}");
         // The bottom bar the window proxies.
         let bar = at("common buts");
         assert_eq!(bar.w, 256.0);
@@ -689,7 +694,7 @@ mod tests {
         assert_eq!(root_name(&lab), "overview split");
 
         // The chassis tab's frame is 431,37 100x24 in `botlabwin.gib`.
-        let hit = lab.click(437.0, 45.0, DESIGN_SCREEN, None).unwrap();
+        let hit = lab.click(437.0, 120.0, DESIGN_SCREEN, None).unwrap();
         assert_eq!(hit.map(|t| t.button), Some("chassis button"));
         assert_eq!(lab.tab, "chassis button");
         assert_eq!(root_name(&lab), "chassis intro split");
@@ -724,7 +729,7 @@ mod tests {
 
         // A click on a tab that is already selected changes nothing.
         assert_eq!(
-            lab.click(437.0, 45.0, DESIGN_SCREEN, None)
+            lab.click(437.0, 120.0, DESIGN_SCREEN, None)
                 .unwrap()
                 .map(|t| t.button),
             Some("chassis button")
@@ -898,7 +903,8 @@ mod tests {
             (layer.y + layer.h - (slot.y + slot.h)).abs() < 0.5,
             "{layer:?}"
         );
-        assert!((layer.w - slot.w * 0.46).abs() < 0.5, "{layer:?}");
+        // (a group is whole pixels wide: the 46% is truncated)
+        assert!((layer.w - slot.w * 0.46).abs() < 1.0, "{layer:?}");
         assert_eq!(layer.h, 70.0, "{layer:?}");
 
         // The armor step has none: its screen fills the slot on its own.

@@ -72,6 +72,15 @@ fn main() -> ExitCode {
     }
 }
 
+/// One texture as `bitmap{slot,invert,filter,channel}` (slot 1 diffuse, 5
+/// self-illumination, 6 opacity, 9 reflect).
+fn texture_label(t: &gmi::Texture) -> String {
+    format!(
+        "{}{{slot {} inv {} filt {} ch {}}}",
+        t.bitmap, t.kind, t.invert, t.filter, t.channel
+    )
+}
+
 /// Print a font's metrics, one glyph a line, and optionally its page as a PGM.
 fn font(cfz: &str, name: &str, rest: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     use std::fmt::Write;
@@ -86,23 +95,19 @@ fn font(cfz: &str, name: &str, rest: &[&str]) -> Result<(), Box<dyn std::error::
     let _ = writeln!(out, "font {name}");
     let _ = writeln!(out, "ascent {}", font.ascent);
     let _ = writeln!(out, "descent {}", font.descent);
-    let _ = writeln!(out, "leading {}", font.leading);
+    let _ = writeln!(out, "extent {}", font.extent);
     let _ = writeln!(out, "line {}", font.line_height());
     let _ = writeln!(out, "page {} {}", font.page_width, font.page_height);
     for (i, g) in font.glyphs.iter().enumerate() {
-        // The record for a character is `(c - FIRST_CHAR) * 28`, so label each
-        // record with the character it belongs to rather than its index. The
-        // advance is the **effective** one (`Font::advance` reads the table two
-        // records ahead of the page table), because that is what a run is spaced
-        // by and what `tools/ui_compose.py` must draw with.
+        // The record for a character is `(c - 0x20) * 28`.
         let c = char::from_u32(ra2fmt::giff::FIRST_CHAR + i as u32).unwrap_or('?');
         let _ = writeln!(
             out,
             "glyph {} {} {} {} {} {} {} {}",
             c as u32,
             font.advance(c),
-            g.bearing,
-            g.third,
+            g.bearing_x,
+            g.bearing_y,
             g.u0,
             g.v0,
             g.u1,
@@ -284,12 +289,7 @@ fn info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     for m in &scene.materials {
-        let tex: Vec<&str> = m
-            .textures
-            .iter()
-            .map(|t| t.bitmap.as_str())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let tex: Vec<String> = m.textures.iter().map(texture_label).collect();
         println!(
             "    mat {:?} class={:?} trans={:.2} tex=[{}]",
             m.name,
@@ -298,12 +298,7 @@ fn info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
             tex.join(", ")
         );
         for sm in &m.sub_materials {
-            let stex: Vec<&str> = sm
-                .textures
-                .iter()
-                .map(|t| t.bitmap.as_str())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let stex: Vec<String> = sm.textures.iter().map(texture_label).collect();
             println!(
                 "      sub {:?} trans={:.2} tex=[{}]",
                 sm.name,

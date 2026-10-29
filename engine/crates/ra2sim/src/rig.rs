@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::controls::Wiring;
 use glam::{Mat4, Vec3};
 use ra2_render::DrawItem;
 use ra2fmt::gmi::Attachment;
@@ -19,11 +20,25 @@ pub enum Role {
     Motor,
     /// A linear actuator (servo/burst piston).
     Piston,
+    /// A free axle a wheel turns on: an `AxleMount` (its `.gmf` declares the
+    /// hinge) or a `Steering` unit's two hubs. The original makes each its own
+    /// rigid body (live, Sentinel's `hub1`/`hub2` and Ripblade's axles are
+    /// bodies of their own, `assembly-*__live__000.json`).
+    Axle,
     Weapon,
     Control,
     Power,
     /// Extenders, anchors, plates — anything structural.
     Structure,
+}
+
+impl Component {
+    /// Whether this is a `Flamethrower` (class `Flamethrower`; the definition's
+    /// `base` says the same).
+    pub fn is_flamethrower(&self) -> bool {
+        self.class.eq_ignore_ascii_case("Flamethrower")
+            || self.base.eq_ignore_ascii_case("Flamethrower")
+    }
 }
 
 impl Role {
@@ -32,7 +47,7 @@ impl Role {
     /// A motor turns its subtree about the mount axis; a piston *slides* it along
     /// that axis (F8). Both split the child off into its own body.
     pub fn drives(self) -> bool {
-        matches!(self, Role::Motor | Role::Piston)
+        matches!(self, Role::Motor | Role::Piston | Role::Axle)
     }
 
     pub fn of(class: &str, base: &str) -> Role {
@@ -41,6 +56,7 @@ impl Role {
             "Wheel" => Role::Wheel,
             "SpinMotor" | "ServoMotor" | "BurstMotor" => Role::Motor,
             "BurstPiston" | "ServoPiston" => Role::Piston,
+            "AxleMount" | "Steering" => Role::Axle,
             "Weapon" => Role::Weapon,
             "ControlBoard" => Role::Control,
             "Battery" | "AirTank" => Role::Power,
@@ -48,6 +64,7 @@ impl Role {
                 "Weapon" => Role::Weapon,
                 "SpinMotor" | "ServoMotor" | "BurstMotor" => Role::Motor,
                 "ServoPiston" | "BurstPiston" => Role::Piston,
+                "AxleMount" | "Steering" => Role::Axle,
                 "Wheel" => Role::Wheel,
                 "ControlBoard" => Role::Control,
                 _ => Role::Structure,
@@ -62,6 +79,7 @@ impl Role {
             Role::Weapon => 600.0,
             Role::Motor => 350.0,
             Role::Piston => 350.0,
+            Role::Axle => 350.0,
             Role::Wheel => 250.0,
             Role::Structure => 300.0,
             Role::Control => 200.0,
@@ -82,10 +100,61 @@ pub struct WeaponStats {
     pub concussion: f32,
     /// Cutting damage factor (`piercing`).
     pub piercing: f32,
-    /// Blade spin frequency from the definition (used for the damage rate).
-    pub frequency: f32,
+    /// The definition's `frequency`: the weapon's bodies get their collision
+    /// events at most this often per second (`0x502f7a` registers them with
+    /// the event filter, `FUN_004ad500`); without one they keep the robot's
+    /// 1 Hz ([`crate::combat::EventGate`]).
+    pub frequency: Option<f32>,
     /// Blade reach (component bounding radius), in metres.
     pub reach: f32,
+    /// The striking faces (`normal = <abs> x y z [x y z ...]`), component
+    /// frame: `Weapon::computeDamage` (`FUN_005032f0`) scales the hit by
+    /// `min(1, Σ max(n·f, 0))` over them (`|n·f|` when `abs`), `n` the contact
+    /// normal toward the victim. None listed: the hit is not scaled.
+    pub faces: [Vec3; 4],
+    pub face_count: usize,
+    pub faces_abs: bool,
+}
+
+impl WeaponStats {
+    /// How squarely a contact with normal `n` (component frame, toward the
+    /// victim) meets the striking faces (`FUN_005032f0`).
+    pub fn alignment(&self, n: Vec3) -> f32 {
+        if self.face_count == 0 {
+            return 1.0;
+        }
+        let sum: f32 = self.faces[..self.face_count]
+            .iter()
+            .map(|f| {
+                let d = n.dot(*f);
+                if self.faces_abs {
+                    d.abs()
+                } else {
+                    d.max(0.0)
+                }
+            })
+            .sum();
+        sum.min(1.0)
+    }
+}
+
+/// The weapon's `normal` line: `<abs> x y z [x y z ...]`.
+fn weapon_faces(def: Option<&ra2fmt::component::ComponentDef>) -> ([Vec3; 4], usize, bool) {
+    let mut faces = [Vec3::ZERO; 4];
+    let Some(line) = def.and_then(|d| d.get("normal")) else {
+        return (faces, 0, true);
+    };
+    let mut words = line.split_whitespace();
+    let abs = !words
+        .next()
+        .is_some_and(|w| w.eq_ignore_ascii_case("false") || w == "0");
+    let nums: Vec<f32> = words.filter_map(|w| w.parse().ok()).collect();
+    let mut n = 0;
+    for c in nums.as_chunks::<3>().0.iter().take(4) {
+        faces[n] = Vec3::new(c[0], c[1], c[2]);
+        n += 1;
+    }
+    (faces, n, abs)
 }
 
 /// Motor behaviour from the component definition.
@@ -98,6 +167,16 @@ pub struct MotorStats {
     pub torque: f32,
     /// Burst motor travel, radians (`start`, `end`).
     pub burst: Option<[f32; 2]>,
+    /// A burst motor's firing power: the last two numbers of its definition's
+    /// `burst = <n> <speed> <torque>` line (`burst motor.txt`: `0 50 90`). The
+    /// motor fires with these and cocks again with `power` (live: the Scout's
+    /// fork is set `SetPowerSettings(50, 90)` when it fires, `(5, 35)` when it
+    /// cocks; `0x4468fa`, `0x446737`). The torque is raw, before the ×40.
+    pub fire: Option<[f32; 2]>,
+    /// A `ServoMotor`: holds its position at a zero command instead of
+    /// coasting. (Ours: the binary's auto-lock flag, `motor+0x64`, is set
+    /// through `SetAutoLocks` and its default for a servo is not recovered.)
+    pub servo: bool,
 }
 
 /// Wheel behaviour from the component definition.
@@ -109,8 +188,8 @@ pub struct WheelStats {
     pub contact: Option<String>,
     /// `grip` — friction of that surface.
     pub grip: f32,
-    /// `resistance` — rolling resistance, in torque units; becomes the joint's
-    /// friction torque.
+    /// `resistance` — `MagicAction`'s sideways grip (`Wheel + 0x2ac`, docs/29
+    /// section 3); not a torque on the wheel's hinge (section 12ae).
     pub resistance: f32,
 }
 
@@ -139,6 +218,14 @@ pub struct PistonStats {
     /// A burst piston (`base = BurstPiston`): parked until something fires it,
     /// like a burst motor — see [`JointUse::Burst`].
     pub burst: bool,
+    /// The `prismatic` line's last number: the piston component's set-up
+    /// (`0x4b25f0`) reads the line's eight tokens in turn and hands the last
+    /// to its controller (`0x4b2b10`, controller `+0x84`), whose
+    /// initialisation (`0x4b4d4f..0x4b4de7`) gives the rod the housing's
+    /// inertia with the diagonal scaled by it when it is not zero
+    /// (`FUN_00404990`, `setInertiaTensor` `0x520200`). `burstpiston2`'s
+    /// `0.2` is the factor measured live on ALARM's and Wide Load's rods.
+    pub rod_inertia: f32,
 }
 
 /// One part of a robot.
@@ -162,8 +249,19 @@ pub struct Component {
     pub base: String,
     /// Display name from the definition.
     pub name: String,
+    /// The `.bot`'s definition file (`Components\\anglemotor1.txt`).
+    pub file: String,
     /// Bot-local transform in the rest pose.
     pub local: Mat4,
+    /// The component frame as its rotor carries it, in the rest pose: `local`
+    /// except for a burst motor, whose rotor the original builds turned to its
+    /// start angle ([`ra2fmt::mount::burst_rotor`]).
+    pub rotor_local: Mat4,
+    /// The motor hinge its `.gmf` declares (component space), if any.
+    pub hinge: Option<ra2fmt::mount::RotorHinge>,
+    /// The pivots of the wheel constraints its `.gmf` declares (a `Steering`
+    /// unit's `Carwheel01`/`Carwheel02`), in component space.
+    pub wheel_pivots: Vec<Vec3>,
     /// Visual batches (component-local).
     pub items: Vec<DrawItem>,
     /// Visual batches for the motor's rotating hub, if it has one.
@@ -176,6 +274,10 @@ pub struct Component {
     pub mass: f32,
     /// Structural hitpoints.
     pub hitpoints: f32,
+    /// The definition's `electotal`/`elecmaxinoutrate`/`airtotal`/`airmaxinoutrate`
+    /// (a negative rate is a draw): the capacity of a battery or tank, the draw
+    /// of a burst device. See [`crate::energy`].
+    pub power: crate::energy::PowerDef,
     /// `fracture` from the component definition (or its category default).
     pub fracture: f32,
     /// `material` from the component definition (`metal`, `rubber`, …).
@@ -188,12 +290,21 @@ pub struct Component {
     pub material_scale: f32,
     /// `false` when the definition says `damageable = false`.
     pub damageable: bool,
+    /// The sound names the definition carries (`damagesounds`, `motorsound`,
+    /// `firesound`, `runsequence`).
+    pub sounds: ComponentSounds,
+    /// The mark this component leaves on a chassis it hits (`decal = <file> <dir>
+    /// <w> <h> <mode>`, the weapon at `+0x80..+0xac`; docs/37-effects.md).
+    pub decal: Option<ra2_render::decals::DecalSpec>,
     pub role: Role,
     pub weapon: Option<WeaponStats>,
     pub motor: Option<MotorStats>,
     pub wheel: Option<WheelStats>,
     /// Linear stats when this component is a piston (F8).
     pub piston: Option<PistonStats>,
+    /// A `Steering` unit's drive torque: its definition's `power` (`+0x2e0`,
+    /// read at `0x4f637b`; the constructor's default is `1.0`, `0x4f5fdb`).
+    pub steer_power: Option<f32>,
     /// The chassis' buckle model (F9): the positions the bot file marks as
     /// movable, which the original shifts "down and in" as the chassis is hit.
     /// Only the chassis has one.
@@ -210,6 +321,296 @@ pub struct Component {
     pub rest_items: Vec<Vec<Vec3>>,
     /// Children component indices (motor-driven subtree).
     pub children: Vec<usize>,
+    /// The component's Havok rigid bodies, as the original builds them.
+    pub havok: HavokParts,
+}
+
+/// What the original's Havok simulation makes of one component, read from the
+/// `.gmf`'s rigid bodies (the `havok17` backend builds its bodies from this;
+/// the Jolt backend keeps the whole-scene hull).
+///
+/// * Only bodies without `DISABLE_COLLISIONS` collide, each with its own
+///   collision object (`GEOMETRY_PROXY_NAME` when set). A wheel's
+///   `wheel_traction` is a *phantom*: the game counts what it touches to know
+///   the wheel is on the ground (`Wheel` factory `0x507c00`), it holds nothing
+///   up. The mini wheel's hub that does is 0.2 m across the flats' corners,
+///   the traction ring 0.33 m.
+/// * Every rigid body has mass, phantoms included: live, the Scout's wheel
+///   bodies weigh 27 kg = mini wheel 9 + its traction phantom 8 + the motor's
+///   `axle` 10 (`havok-step`, body `+0x190`).
+/// * A motor's `.gmf` has two bodies: the housing stays on the body the motor
+///   is bolted to and the rotor (`axle`, `bmotor_axle`) goes with what it
+///   drives. Live, the Scout's chassis body weighs 163.49 kg (its chassis plus
+///   the motor housings, battery and board) and its fork arm 26 kg (extender 2
+///   + fork 12 + `bmotor_axle` 12).
+#[derive(Clone, Debug, Default)]
+pub struct HavokParts {
+    /// One piece per colliding rigid body, component-local.
+    pub collision: Vec<Vec<Vec3>>,
+    /// Per piece of `collision`: the triangles (into its points) when Havok
+    /// collides it as a mesh rather than as a convex hull
+    /// ([`collides_as_mesh`]).
+    pub collision_mesh: Vec<Option<Vec<[u32; 3]>>>,
+    /// Per piece of `collision`: its rigid body's own mass.
+    pub collision_mass: Vec<f32>,
+    /// The phantom geometry (all of it, component-local).
+    pub phantom: Vec<Vec3>,
+    /// All the rigid bodies' mass, phantoms included, and the phantoms' share.
+    pub mass: f32,
+    pub phantom_mass: f32,
+    /// A motor's rotor: its mass and collision pieces, which belong to the
+    /// driven body.
+    pub rotor_mass: f32,
+    pub rotor_collision: Vec<Vec<Vec3>>,
+    pub rotor_collision_mesh: Vec<Option<Vec<[u32; 3]>>>,
+    /// Per piece of `rotor_collision`: its rigid body's own mass.
+    pub rotor_piece_mass: Vec<f32>,
+    /// Per piece of `rotor_collision`: its triangles as the `.gmf` stores
+    /// them, which place the rotor's mass (the stock rotor proxies are boxes
+    /// open at their inboard end, docs/29 section 12h).
+    pub rotor_faces: Vec<Vec<[u32; 3]>>,
+    /// Per phantom rigid body: its geometry and its own mass (it places that
+    /// mass, though it collides with nothing).
+    pub phantom_pieces: Vec<(Vec<Vec3>, f32)>,
+    /// Geometry (component-local) that places the mass of a component with
+    /// nothing to collide: a SmartZone's zone.
+    pub mass_points: Vec<Vec3>,
+    /// The top rigid body's material.
+    pub friction: Option<f32>,
+    pub restitution: Option<f32>,
+}
+
+impl HavokParts {
+    /// Read a component's `.gmf` scene.
+    pub fn from_scene(scene: &ra2fmt::gmi::GmiScene) -> HavokParts {
+        type Geometry = (Vec<Vec3>, Vec<[u32; 3]>);
+        // Each object's points placed by its `TM`, and by the `TM`'s
+        // translation alone: a body that simulates its own geometry as
+        // `SIMULATION_GEOMETRY` 2 collides with the second (see
+        // [`own_geometry_unrotated`]).
+        let objects: BTreeMap<String, (Geometry, Vec<Vec3>)> = scene
+            .objects
+            .iter()
+            .filter_map(|o| {
+                let mesh = o.mesh.as_ref()?;
+                if mesh.points.is_empty() {
+                    return None;
+                }
+                let m = ra2_render::object_transform(o);
+                let n = mesh.points.len() as u32;
+                let at = m.w_axis.truncate();
+                Some((
+                    o.name.to_ascii_lowercase(),
+                    (
+                        (
+                            mesh.points
+                                .iter()
+                                .map(|p| m.transform_point3(Vec3::from(*p)))
+                                .collect(),
+                            mesh.faces
+                                .iter()
+                                .map(|f| f.v)
+                                .filter(|v| v.iter().all(|&i| i < n))
+                                .collect(),
+                        ),
+                        mesh.points.iter().map(|p| Vec3::from(*p) + at).collect(),
+                    ),
+                ))
+            })
+            .collect();
+        let geometry_of = |rb: &ra2fmt::gmi::RigidBody| -> Geometry {
+            let Some(((placed, faces), unrotated)) =
+                objects.get(&rb.collision_object().to_ascii_lowercase())
+            else {
+                return Geometry::default();
+            };
+            if own_geometry_unrotated(rb) {
+                (unrotated.clone(), faces.clone())
+            } else {
+                (placed.clone(), faces.clone())
+            }
+        };
+        // A motor's rotor (or a piston's rod): `axle`, `bmotor_axle`, `shaft`,
+        // `slider` in every stock motor and piston `.gmf`.
+        let bodies = scene.rigid_bodies();
+        let is_rotor = |rb: &ra2fmt::gmi::RigidBody| {
+            let n = rb.name.to_ascii_lowercase();
+            // A `Steering` unit's `hub1`/`hub2` (5 kg each) ride its hubs: live
+            // Sentinel's hub bodies weigh 23 kg (wheel 18 + hub 5).
+            (n.ends_with("axle") || n == "shaft" || n == "slider" || n == "hub1" || n == "hub2")
+                && !n.contains("collision")
+        };
+        let has_rotor = bodies.len() > 1 && bodies.iter().any(|rb| is_rotor(rb));
+        let mut out = HavokParts::default();
+        for rb in &bodies {
+            out.mass += rb.mass.max(0.0);
+            if out.friction.is_none() {
+                out.friction = Some(rb.friction);
+                out.restitution = Some(rb.elasticity);
+            }
+            let (pts, faces) = geometry_of(rb);
+            let mesh = (collides_as_mesh(rb.simulation_geometry) && !faces.is_empty())
+                .then(|| faces.clone());
+            if rb.disable_collisions {
+                if pts.len() >= 4 {
+                    out.phantom_pieces.push((pts.clone(), rb.mass.max(0.0)));
+                }
+                out.phantom.extend(pts);
+                out.phantom_mass += rb.mass.max(0.0);
+                continue;
+            }
+            if has_rotor && is_rotor(rb) {
+                out.rotor_mass += rb.mass.max(0.0);
+                if pts.len() >= 4 {
+                    out.rotor_collision.push(pts);
+                    out.rotor_collision_mesh.push(mesh);
+                    out.rotor_piece_mass.push(rb.mass.max(0.0));
+                    out.rotor_faces.push(faces.clone());
+                }
+                continue;
+            }
+            if pts.len() >= 4 {
+                out.collision.push(pts);
+                out.collision_mesh.push(mesh);
+                out.collision_mass.push(rb.mass.max(0.0));
+            }
+        }
+        out
+    }
+}
+
+/// What a SmartZone adds to the body it is bolted to: its `.gmf` rigid body's
+/// mass, a phantom (`DISABLE_COLLISIONS`, 2 kg in every stock SmartZone) the
+/// renderer's loader skips. Live, the Scout's, ALARM's, FlapJack's and Wide
+/// Load's chassis bodies weigh exactly 2 kg more than their other members
+/// (163.49 against 161.49 kg; Razor, which has none, 212.52 on both). Only the
+/// mass is kept: the zone itself is the game's own, not a collidable.
+fn smart_zone_mass(root: &std::path::Path, file: &str) -> HavokParts {
+    let cfl = ra2fmt::Cfl::open_path(&root.join("Components.cfz")).ok();
+    let text = cfl
+        .as_ref()
+        .and_then(|cf| cf.get_text(file))
+        .or_else(|| std::fs::read_to_string(root.join(file.replace('\\', "/"))).ok());
+    let Some(text) = text else {
+        return HavokParts::default();
+    };
+    let def = ra2fmt::component::parse(&text);
+    let path = root.join("Components").join(def.mesh_rel_path());
+    let Some(Ok(scene)) = std::fs::read(path).ok().map(|b| ra2fmt::gmi::parse(&b)) else {
+        return HavokParts::default();
+    };
+    let h = HavokParts::from_scene(&scene);
+    HavokParts {
+        mass: h.mass,
+        phantom_mass: h.mass,
+        ..HavokParts::default()
+    }
+}
+
+/// A weapon's material float when its definition declares none (`0x502e5f`).
+pub const WEAPON_MATERIAL_SCALE: f32 = 0.8;
+
+/// Whether a rigid body's collision geometry ignores its object's rotation:
+/// one that simulates its own geometry (`SIMULATION_GEOMETRY` 2, no proxy).
+///
+/// Live (docs/29 §12p), FlapJack's Small Wedge (`small_wedge1.gmf`, object
+/// `TM` a quarter turn about x, translation 0) collides as its points with no
+/// rotation: its flipper body's local inertia is `1.4788 / 0.3827 / 1.1849`
+/// with products `0.0531, -0.0055, 0.1686` (`flipfight-razor-flapjack-box__live__000..002`,
+/// `+0x19c`), which the unrotated wedge reproduces to four digits (the rotated
+/// one gives principal moments 1.434 about the hinge and 1.231 about the
+/// vertical, live 1.219 and 1.481), and its floor contacts span the wedge's
+/// 0.54 m width across the robot, 0.33 m below the chassis' centre of mass
+/// (ours had stood the wedge on edge, 0.50 m below). A proxy's geometry
+/// (`SIMULATION_GEOMETRY` 3: the angle motors' `axle_collision`, also a
+/// quarter turn) keeps its rotation: the wheel bodies' spin moment 0.5569 is
+/// the rotated box's. The translation is kept: the stock own-geometry objects
+/// with a rotation (the Small Wedge, `flipper1.gmf`'s flipper) have none, and
+/// those with a translation (the steering unit's `base_collision`) no
+/// rotation, so which the original does with both is not exercised.
+pub fn own_geometry_unrotated(rb: &ra2fmt::gmi::RigidBody) -> bool {
+    rb.simulates_own_mesh()
+}
+
+/// Whether Havok collides a rigid body with this `SIMULATION_GEOMETRY` as a
+/// triangle mesh (shape class `GEOMETRIC`, 4) rather than as a convex hull
+/// (`CXGEOMETRIC`, 0x400).
+///
+/// Live (the agent dispatch `FUN_00543370`, collidable `+0x18`, Scout and
+/// ALARM): the mini wheel (2), the extender, motor housings and rotors, the
+/// control board (3) are convex; the fork arm (6) is a mesh, as are the
+/// chassis bodies the game builds. 6 is used by the fork arm, the bracket
+/// wedge and the two snowplows; 0 (angler, ram plate, steering hubs) was not
+/// observed and stays convex.
+pub fn collides_as_mesh(simulation_geometry: i32) -> bool {
+    simulation_geometry == 6
+}
+
+/// The sound keys of a component definition (`Components.cfz`).
+///
+/// `damagesounds` is a comma-separated list the original picks from at random
+/// when the component is hit (`FUN_0045cad0` takes a random element of the
+/// victim's list); the chassis takes its list from its armour material. The
+/// rest are played by the motor/weapon: `motorsound` loops while a motor runs,
+/// `runsequence` is spin-up / loop / spin-down, `firesound` plays when the
+/// device fires. Paths are as the definition spells them (`sounds\\x.wav`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ComponentSounds {
+    pub damage: Vec<String>,
+    pub motor: Option<String>,
+    pub fire: Option<String>,
+    pub run_sequence: Vec<String>,
+}
+
+impl ComponentSounds {
+    /// Read the sound keys from a definition.
+    pub fn from_def(def: Option<&ra2fmt::component::ComponentDef>) -> ComponentSounds {
+        let Some(def) = def else {
+            return ComponentSounds::default();
+        };
+        let list = |key: &str| -> Vec<String> {
+            def.get(key)
+                .map(|v| {
+                    v.split(',')
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        ComponentSounds {
+            damage: list("damagesounds"),
+            motor: list("motorsound").into_iter().next(),
+            fire: list("firesound").into_iter().next(),
+            run_sequence: list("runsequence"),
+        }
+    }
+
+    /// The chassis' impact sounds by armour type (`chassis_plast`, `_alum`,
+    /// `_steel`, `_tit` in `Components.cfz`): 0 plastic, 1 aluminium, 2 steel,
+    /// 3 titanium.
+    pub fn chassis(armour_type: i32) -> ComponentSounds {
+        let damage: &[&str] = match armour_type {
+            0 => &[
+                "sounds\\plastic_collision.wav",
+                "sounds\\plastic_collision.wav",
+            ],
+            1 => &[
+                "sounds\\aluminum_collision.wav",
+                "sounds\\aluminum_collision2.wav",
+                "sounds\\aluminum_collision3.wav",
+            ],
+            2 => &[
+                "sounds\\steel_collision.wav",
+                "sounds\\steel_collision2.wav",
+            ],
+            _ => &["sounds\\titanium_hit.wav", "sounds\\titanium_hit2.wav"],
+        };
+        ComponentSounds {
+            damage: damage.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
 }
 
 impl Component {
@@ -275,16 +676,51 @@ pub struct JointInfo {
     pub limits: [f32; 2],
     /// The joint's pivot in bot space: the parent's mount point.
     pub pivot: Vec3,
+    /// Where the constraint holds the two bodies together, in bot space: the
+    /// `.gmf` hinge's pivot on the same line as [`Self::pivot`] for a motor
+    /// that declares one (docs/29 section 12w), else the pivot. Only the
+    /// constraint's anchors use it; the rotor's mass and the load cap keep
+    /// the mount point.
+    pub anchor: Vec3,
     /// The joint's rotation axis in bot space: the mount point's Z — the same
     /// axis the placement rule turns a child about (F1).
     pub axis: Vec3,
-    /// Rolling resistance: torque in N·m the joint's friction may resist an
-    /// undriven rotation with (a wheel's `resistance`).
+    /// Torque in N·m the joint's friction may resist an undriven rotation
+    /// with: a parked burst motor's or servo's own torque; 0 for a wheel
+    /// ([`wheel_friction`]).
     pub friction_torque: f32,
     /// A prismatic joint (a piston's rod) rather than a revolute one. Its
     /// `limits` are metres of travel, `rate` is m/s and the torques are forces.
     pub slider: bool,
     pub use_kind: JointUse,
+    /// A burst motor's firing pair (speed, raw torque): [`MotorStats::fire`].
+    pub fire: Option<[f32; 2]>,
+    /// A wheel's own numbers (`None` for every other joint).
+    pub wheel: Option<WheelDrive>,
+    /// A piston's rod inertia factor ([`PistonStats::rod_inertia`]); zero for
+    /// every other joint and for a piston that keeps its rod's own inertia.
+    pub rod_inertia: f32,
+}
+
+/// What a wheel joint needs to push the robot along.
+///
+/// The original's wheels are **not** friction-limited: the Scout's own drive
+/// trace accelerates at 13.8 m/s² (1.4 g) at full throttle from a rest pose in
+/// which its wheels are not carrying its weight (the rest height matches a
+/// robot sitting on its battery and its tail, wheels clear of the floor), and
+/// its pitch does not change while it does so. A velocity motor and Coulomb
+/// friction cannot do that, so a wheel here is a *thrust* and a *drag*: see
+/// [`crate::robot::Robot`]'s `drive_wheel`.
+#[derive(Clone, Copy, Debug)]
+pub struct WheelDrive {
+    /// Rolling radius in metres: the farthest the wheel's collision hull reaches
+    /// from its axle (for the stock mini wheel, the 0.33 m `wheel_traction`
+    /// ring).
+    pub radius: f32,
+    /// The definition's `grip`.
+    pub grip: f32,
+    /// The definition's `resistance`.
+    pub resistance: f32,
 }
 
 /// One rigid body of the assembled robot: components welded together. A motor
@@ -316,9 +752,211 @@ pub struct RobotRig {
     pub part_of: Vec<usize>,
     /// Component index → transform within its part.
     pub part_local: Vec<Mat4>,
+    /// The bot's control board: which controls drive which components.
+    pub wiring: Wiring,
+    /// The `.bot`'s forward heading (radians, `0` or `PI` in every stock bot):
+    /// the direction the robot's front faces in its own frame, as a rotation of
+    /// `+Z` about `Y` — the original's `GetHeading` (`0x4df320`) turns
+    /// `(0, 0, 1)` by the quaternion about `Y` of robot `+0xac` and then by the
+    /// chassis. The stock bots with a `PI` heading drive toward `-Z` on `W`
+    /// (`magic-razor__live__000`: 16.4 m/s along the chassis' `-Z`).
+    pub heading: f32,
+    /// The AI's sensor volumes (`SmartZone` components), see [`SmartZone`].
+    pub smart_zones: Vec<SmartZone>,
+}
+
+/// A `SmartZone` component: the box a brain watches for enemies
+/// (`RegisterSmartZone` / `GetZoneContents`, `0x401340` / `0x4014f0`).
+///
+/// The component itself has no body; the box rides on whatever part its
+/// component is mounted to.
+#[derive(Clone, Debug)]
+pub struct SmartZone {
+    /// The SmartZone component's index.
+    pub component: usize,
+    /// Its name line (`weapon`, `flip`, ...), what the brains ask for.
+    pub name: String,
+    /// The zone's frame relative to the component's own world transform (the
+    /// component's stored `local` places it without its own mount point).
+    pub offset: Mat4,
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl SmartZone {
+    /// Whether a sphere of `radius` at `centre` touches the box whose frame is
+    /// `world` (the zone component's world transform times [`Self::offset`]).
+    pub fn touches(&self, world: Mat4, centre: Vec3, radius: f32) -> bool {
+        let p = world.inverse().transform_point3(centre);
+        let r = Vec3::splat(radius);
+        (p.cmpge(self.min - r) & p.cmple(self.max + r)).all()
+    }
 }
 
 impl RobotRig {
+    /// The components whose first appearance wakes the robot while it is
+    /// frozen: the build's late wakes (docs/29 section 12z).
+    ///
+    /// The original creates every component's body at the arena's origin in
+    /// its own frame, inactive, when the robot's build starts (live
+    /// `build-*-box__live__000` with `frida/ra2_build.js`: `setActive(0)` on every
+    /// body of both robots at one substep), then places the components in
+    /// `.bot` order, 116 substeps apart; 58 substeps before a component is
+    /// placed its body is activated at the origin and frozen again
+    /// (`0x531ef7`). A component that brings a body of its own wakes the
+    /// robot's system when it is placed, and the system freezes 14 substeps
+    /// later. When a body goes inactive (`0x52b290(X, 0)` → `0x548ab0`), the
+    /// detector holds back every pair of its in the contact list whose other
+    /// body is inactive; when either body is next activated (`0x548ed0` →
+    /// `0x548ef0`) the held pairs are gone through, a wakeable partner woken
+    /// (flags `+0x1c` bits 0..2 clear: a robot's chassis and the bodies at
+    /// the origin are not) and the pairs dropped. So a robot body that froze
+    /// within the contact list's reach of a component still at the origin is
+    /// woken, and its system with it, when that component's body first
+    /// appears: live MiniBerg's control board and battery wake its wheel
+    /// bodies (contact distances 0.031 and 0.047), Iceberg's Ice Pick a wheel,
+    /// Tornado's battery its spinner, the Scout's battery and control board
+    /// its fork arm and wheels; none of REVENGE's or Raptor's do.
+    ///
+    /// A pair is in the contact list when the narrowphase finds points within
+    /// the collision tolerance (0.1 m) and the shapes do not overlap (overlapping
+    /// shapes make no points): the robot body with every member it had when it
+    /// froze, at the robot's pose (the robot is built at the origin too), and the
+    /// component's colliding and phantom pieces (a wheel's traction ring is a
+    /// collidable of its body: live distances match ours to 1 mm with it). A
+    /// wheel at the origin never holds one live (no body at a wheel's origin
+    /// pose appears in any contact list of `build-team7bot0-team7bot1-box`,
+    /// `build-team13bot1-team0bot0-box`, `build-team12bot1-team12bot2-box`), and a body
+    /// that has a component welded into it is rebuilt, which drops its held
+    /// pairs (live, Tornado's spinner held pairs with its sledge hammers at the
+    /// origin and was not woken by them after its extender was welded on). A
+    /// component destined for a body never pairs with that body (live, in
+    /// three robots); why is not recovered. Over nine stock robots built live
+    /// (`build-*-box__live__000` of docs/29 section 12z) every late wake is found;
+    /// four spikes are taken to pair with a wheel that live they do not (only
+    /// Iceberg's Pole Spike changes a weight).
+    pub fn late_wakes(&self) -> Vec<usize> {
+        use crate::havok17::narrow::closest;
+        let n = self.components.len();
+        let body_bringing: Vec<usize> = self
+            .parts
+            .iter()
+            .filter_map(|q| q.joint.map(|j| j.motor))
+            .collect();
+        // A piece as the narrowphase sees it: a convex hull, or each
+        // triangle of a mesh (a mesh's hull reaches where it does not).
+        let split = |pts: &[Vec3], mesh: Option<&Vec<[u32; 3]>>| -> Vec<Vec<Vec3>> {
+            match mesh {
+                Some(tris) => tris
+                    .iter()
+                    .map(|t| t.iter().map(|&v| pts[v as usize]).collect())
+                    .collect(),
+                None => vec![pts.to_vec()],
+            }
+        };
+        let own = |i: usize| -> Vec<Vec<Vec3>> {
+            let h = &self.components[i].havok;
+            let mut v: Vec<Vec<Vec3>> = Vec::new();
+            for (k, pts) in h.collision.iter().enumerate() {
+                v.extend(split(pts, h.collision_mesh.get(k).and_then(|m| m.as_ref())));
+            }
+            v.extend(h.phantom_pieces.iter().map(|(p, _)| p.clone()));
+            v.retain(|p| !p.is_empty());
+            v
+        };
+        // A part's pieces at the robot's pose with its members up to `upto`.
+        let body = |p: usize, upto: usize| -> Vec<Vec<Vec3>> {
+            let part = &self.parts[p];
+            let mut v = Vec::new();
+            for &i in part.members.iter().filter(|&&i| i <= upto) {
+                let m = self.components[i].local;
+                for pc in own(i) {
+                    v.push(pc.iter().map(|q| m.transform_point3(*q)).collect());
+                }
+            }
+            if let Some(j) = part.joint.filter(|j| j.motor <= upto) {
+                let c = &self.components[j.motor];
+                let h = &c.havok;
+                for (k, pts) in h.rotor_collision.iter().enumerate() {
+                    let mesh = h.rotor_collision_mesh.get(k).and_then(|m| m.as_ref());
+                    for pc in split(pts, mesh) {
+                        v.push(
+                            pc.iter()
+                                .map(|q| c.rotor_local.transform_point3(*q))
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            v.retain(|p: &Vec<Vec3>| !p.is_empty());
+            v
+        };
+        let reach = crate::havok17::TOLERANCE;
+        let touches = |a: &[Vec<Vec3>], b: &[Vec<Vec3>]| {
+            a.iter().any(|pa| {
+                b.iter().any(|pb| {
+                    let c = closest(pa, pb);
+                    !c.overlap && c.distance < reach
+                })
+            })
+        };
+        let at_origin = |k: usize| self.components[k].wheel.is_none() && !own(k).is_empty();
+        // The pairs every robot body holds when the system freezes with the
+        // components up to `upto` placed.
+        let freeze = |upto: usize, from: usize| -> Vec<Vec<usize>> {
+            (0..self.parts.len())
+                .map(|p| {
+                    if p == 0 {
+                        return Vec::new();
+                    }
+                    let mine = body(p, upto);
+                    if mine.is_empty() {
+                        return Vec::new();
+                    }
+                    // A component that will be welded into this very body
+                    // never holds a pair with it (live: Wide Load's piston rod
+                    // with its connectors and tips, Grog's arm with its
+                    // extender, Sentinel's burst arm with its wedge).
+                    let held: Vec<usize> = (from..n)
+                        .filter(|&k| !self.parts[p].members.contains(&k))
+                        .filter(|&k| at_origin(k) && touches(&mine, &own(k)))
+                        .collect();
+                    if std::env::var_os("RA2_LATE_DEBUG").is_some() && !held.is_empty() {
+                        eprintln!("freeze upto {upto}: part {p} holds {held:?}");
+                    }
+                    held
+                })
+                .collect()
+        };
+        let mut held: Vec<Vec<usize>> = vec![Vec::new(); self.parts.len()];
+        let mut out = Vec::new();
+        for k in 1..n {
+            // 58 substeps before it is placed, at the origin.
+            if held.iter().any(|h| h.contains(&k)) {
+                out.push(k);
+                // The robot freezes again; the component that woke it has
+                // been through its pairs (live, MiniBerg's control board
+                // is in no list at the freeze after its wake).
+                held = freeze(k - 1, k + 1);
+            }
+            // Placed.
+            if body_bringing.contains(&k) {
+                held = freeze(k, k + 1);
+            } else if let Some(p) =
+                (1..self.parts.len()).find(|&p| self.parts[p].members.contains(&k))
+            {
+                held[p].clear();
+            }
+        }
+        out
+    }
+
+    /// The robot's front in its own frame: `+Z` turned by [`RobotRig::heading`]
+    /// (see there).
+    pub fn forward(&self) -> Vec3 {
+        Vec3::new(self.heading.sin(), 0.0, self.heading.cos())
+    }
+
     /// Animated bot-local transform of every component for a set of motor
     /// angles. A motor turns its rotor about the local +Z axis (RA2's axle
     /// direction), carrying its whole attached subtree.
@@ -415,6 +1053,26 @@ fn torque_unit() -> f32 {
     })
 }
 
+/// What a wheel's hinge resists an undriven turn with: nothing. The original's
+/// hinge controller turns its motor off at a zero percentage (`0x481450`) and
+/// `SetPercent` turns it off whenever the wheel is down (`0x4f5800`); a motor
+/// that is off leaves the constraint with no motor and no friction about the
+/// axle. Live, an undriven wheel spins down at the world's angular drag alone
+/// (`twobody-scout-alarm-box__live__000`, ALARM idle: 3.75 -> 3.57 rad/s in 9
+/// substeps, `0.3 ω / I` gives 0.03 a substep where ours' 4 N·m took 0.13;
+/// docs/29 section 12ae). A wheel's `resistance` is `MagicAction`'s sideways
+/// grip ([`crate::drive`]), not a torque. `RA2_WHEEL_FRICTION=1` puts back the
+/// old guess (`resistance` x 40 N·m) for comparison.
+fn wheel_friction(c: &Component) -> f32 {
+    if std::env::var_os("RA2_WHEEL_FRICTION").is_none() {
+        return 0.0;
+    }
+    c.wheel
+        .as_ref()
+        .map(|w| w.resistance * torque_unit())
+        .unwrap_or(0.0)
+}
+
 /// The two numbers of a definition's `power = <speed> <torque>` line.
 /// A piston's travel and power, from its definition (F8).
 ///
@@ -441,7 +1099,15 @@ fn piston_stats(def: &ra2fmt::component::ComponentDef, burst: bool) -> PistonSta
     } else {
         Vec3::Z
     };
-    let limits = if nums.len() >= 6 {
+    let limits = if nums.len() >= 6 && burst {
+        // A burst piston's controller stops are its neutral point and its
+        // lower travel (live, ALARM's: `+0x6c = 0`, `+0x70 = -0.73`), and the
+        // rod comes back to rest exactly at the neutral point: its travel is
+        // `[lower, neutral]`, the `upper` number unused
+        // (`weapons-scout-alarm__live__000`, docs/29 section 12).
+        let lower = nums[4] - nums[3];
+        [lower.min(0.0), lower.max(0.0)]
+    } else if nums.len() >= 6 {
         [nums[4], nums[5]]
     } else {
         // No usable travel: a barely-moving rod still beats a weld, and keeps
@@ -455,6 +1121,7 @@ fn piston_stats(def: &ra2fmt::component::ComponentDef, burst: bool) -> PistonSta
         speed: speed.unwrap_or(0.0),
         force: force.unwrap_or(0.0) * torque_unit(),
         burst,
+        rod_inertia: nums.get(5).copied().unwrap_or(0.0),
     }
 }
 
@@ -466,17 +1133,41 @@ fn power_pair(def: &ra2fmt::component::ComponentDef) -> (Option<f32>, Option<f32
     (it.next(), it.next())
 }
 
+/// A burst motor's firing pair: the second and third numbers of its `burst`
+/// line (the first is not used for the power).
+fn burst_power(def: &ra2fmt::component::ComponentDef) -> Option<[f32; 2]> {
+    let v = def.get("burst")?;
+    let n: Vec<f32> = v
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter_map(|t| t.parse::<f32>().ok())
+        .collect();
+    (n.len() >= 3).then(|| [n[1], n[2]])
+}
+
 fn num(def: &ra2fmt::component::ComponentDef, key: &str) -> Option<f32> {
     def.number(key)
 }
 
 /// The maximum hitpoints: the definition's `hitpoints`, else the factory's
-/// category table, else the role's fallback (an unloaded component).
+/// category table, else **100**.
+///
+/// The component constructor (`FUN_0045cc10`, `0x45cc8e`) stores a maximum of
+/// `0x64` before the factory's `type` switch (`FUN_0045cf40`, `0x45d09e`..) runs,
+/// so a component whose `type` is none of the six categories keeps 100 — not an
+/// invented per-role number. Only a component with no definition at all (never
+/// the case in the game) falls back to the role's guess.
 fn type_hitpoints(def: Option<&ra2fmt::component::ComponentDef>, role: Role) -> f32 {
-    def.and_then(|d| d.number("hitpoints"))
-        .or_else(|| ra2fmt::component::category_hitpoints(def))
-        .unwrap_or_else(|| role.default_hitpoints())
+    match def {
+        Some(d) => d
+            .number("hitpoints")
+            .or_else(|| ra2fmt::component::category_hitpoints(def))
+            .unwrap_or(COMPONENT_DEFAULT_HITPOINTS),
+        None => role.default_hitpoints(),
+    }
 }
+
+/// The maximum hitpoints the component constructor stores (`mov [esi+0xe8], 0x64`).
+const COMPONENT_DEFAULT_HITPOINTS: f32 = 100.0;
 
 /// The `fracture` default the same factory sets per category.
 fn type_fracture(def: Option<&ra2fmt::component::ComponentDef>) -> f32 {
@@ -554,7 +1245,8 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
         // mount axis, a piston slides it along that axis (F8).
         let piston = comps[parent].piston;
         let motor = comps[parent].motor;
-        if motor.is_none() && piston.is_none() {
+        let axle = comps[parent].role == Role::Axle;
+        if motor.is_none() && piston.is_none() && !axle {
             // A split that carries no joint data of its own: weld the child group
             // back on rather than leave it floating.
             part.parent = None;
@@ -587,12 +1279,70 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             None => axis,
         };
         let axis = if axis == Vec3::ZERO { Vec3::Z } else { axis };
-        // A burst motor is a limited hinge; everything else swings freely. Its
-        // `[start, end]` are the axle's absolute angles, and the rest pose
-        // leaves the axle at `start`, so the constraint has to allow the travel
-        // from there to `end`. Jolt measures the hinge angle from the pose the
-        // constraint is created in and requires the range to straddle zero, so
-        // the limits are that travel, split about zero.
+        // A burst motor's and an axle mount's hinge is the one their `.gmf`
+        // declares (`Hinge01`, housing to rotor): a burst motor's mount point
+        // on the rotor faces along the arm, not along the axle, and its start
+        // and travel are angles about that hinge's spin axis.
+        let gmf_hinge = comps[parent]
+            .hinge
+            .as_ref()
+            .filter(|_| piston.is_none() && (axle || motor.and_then(|m| m.burst).is_some()));
+        let (pivot, axis) = match gmf_hinge {
+            Some(h) => (
+                parent_local.transform_point3(h.pivot),
+                parent_local.transform_vector3(h.axis).normalize_or(axis),
+            ),
+            None => (pivot, axis),
+        };
+        // Any other motor's constraint holds at its `.gmf` hinge's pivot,
+        // a point on the same line as the mount point (docs/29 section 12w:
+        // the angle motor's `Hinge01` sits 0.156 m in from its `axle_m`
+        // point, inside the motor). The axis keeps the mount point's sense.
+        let anchor = match comps[parent].hinge.as_ref() {
+            Some(h)
+                if gmf_hinge.is_none()
+                    && piston.is_none()
+                    && motor.is_some()
+                    && std::env::var_os("RA2_HINGE_MOUNT_PIVOT").is_none() =>
+            {
+                let p = parent_local.transform_point3(h.pivot);
+                // Only a point on the mount's own line: the hinge is that line.
+                let off = p - pivot;
+                if (off - axis * off.dot(axis)).length() < 0.01 {
+                    p
+                } else {
+                    pivot
+                }
+            }
+            _ => pivot,
+        };
+        // A `Steering` unit holds each hub with a wheel constraint, at that
+        // constraint's own pivot on the hub's axle line, not at the point the
+        // wheel mounts on (live, Sentinel's wheel atoms, `0x553c30` `+0x58`,
+        // hold the hubs 0.058 m inboard of their wheels' mount points:
+        // `pieces-sentinel-berserker-box__live__001`, docs/29 section 12x).
+        let anchor = if axle && std::env::var_os("RA2_STEER_MOUNT_PIVOT").is_none() {
+            comps[parent]
+                .wheel_pivots
+                .iter()
+                .map(|w| parent_local.transform_point3(*w))
+                .filter(|p| {
+                    let off = *p - pivot;
+                    (off - axis * off.dot(axis)).length() < 0.01
+                })
+                .min_by(|a, b| a.distance(pivot).total_cmp(&b.distance(pivot)))
+                .unwrap_or(anchor)
+        } else {
+            anchor
+        };
+        // A burst motor is a limited hinge; everything else swings freely. The
+        // original builds its rotor at the start angle and then re-creates the
+        // hinge there (`FUN_00480c60`), so the rest pose is the hinge's zero;
+        // the second number is the travel (`FUN_00480dd0` sets the limits to
+        // `0` and `-end` in the game's own angle sense, which is the opposite
+        // of the right-handed turn about the spin axis the start angle is
+        // measured in — Scout's fork swings up, Grog's axe down). Jolt wants
+        // the range to straddle zero.
         //
         // A piston's travel comes straight from its definition, already in that
         // shape (metres either side of the rest pose).
@@ -610,26 +1360,36 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
                     JointUse::Piston
                 },
             )
+        } else if axle {
+            // A free axle: the wheel spins on it, nothing drives it here. A
+            // `Steering` unit's hub is held by Havok's wheel constraint, whose
+            // set-up has no motor and no friction about the axle (`0x553c30`,
+            // `+0x21` off; live, Sentinel driving and steering: the atom's
+            // velocity change about the axle is ours without friction to 0.003
+            // rad/s, where 8 N·m would be 0.15 a substep,
+            // `wheel-sentinel-miniberg-box__live__000`, docs/29 section 12y).
+            (
+                0.0,
+                0.0,
+                [-std::f32::consts::PI, std::f32::consts::PI],
+                wheel_friction(&comps[root]),
+                JointUse::Passive,
+            )
         } else {
             let m = motor.expect("checked above");
             let limits = match m.burst {
-                Some([start, end]) => {
-                    let d = (end - start).clamp(-std::f32::consts::PI, std::f32::consts::PI);
+                Some([_start, travel]) => {
+                    let d = travel.clamp(-std::f32::consts::PI, std::f32::consts::PI);
                     [d.min(0.0), d.max(0.0)]
                 }
                 None => [-std::f32::consts::PI, std::f32::consts::PI],
             };
-            // A wheel's `resistance` is rolling resistance: the torque the
-            // joint's friction may oppose an undriven rotation with. A parked
-            // burst motor is held by the same friction at its own torque — the
-            // scripts' `Lock(True)`.
+            // A wheel's hinge has no friction ([`wheel_friction`]). A parked
+            // burst motor is held by a friction at its own torque — the
+            // scripts' `Lock(True)` on a backend without the lock.
             let friction_torque = if is_wheel {
-                comps[root]
-                    .wheel
-                    .as_ref()
-                    .map(|w| w.resistance * torque_unit())
-                    .unwrap_or(0.0)
-            } else if m.burst.is_some() {
+                wheel_friction(&comps[root])
+            } else if m.burst.is_some() || m.servo {
                 m.torque
             } else {
                 0.0
@@ -650,9 +1410,31 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             friction_torque,
             limits,
             pivot,
+            anchor,
             axis,
             slider: piston.is_some(),
+            rod_inertia: piston.map(|p| p.rod_inertia).unwrap_or(0.0),
             use_kind,
+            fire: motor.and_then(|m| m.fire).filter(|_| piston.is_none()),
+            wheel: if use_kind == JointUse::Wheel {
+                comps[root].wheel.as_ref().map(|w| {
+                    let radius = comps[root]
+                        .hull_points
+                        .iter()
+                        .map(|p| {
+                            let rel = comps[root].local.transform_point3(*p) - pivot;
+                            (rel - axis * rel.dot(axis)).length()
+                        })
+                        .fold(0.0f32, f32::max);
+                    WheelDrive {
+                        radius: radius.max(0.05),
+                        grip: w.grip,
+                        resistance: w.resistance,
+                    }
+                })
+            } else {
+                None
+            },
         });
     }
 
@@ -691,9 +1473,20 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
 
 /// Load a `.bot` into a component tree (no physics yet).
 pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
-    let (bot, _root, loaded) = ra2_render::load_bot_components(path)?;
-    let rest =
-        ra2_render::component_worlds_mounted(&bot, &loaded, ra2_render::MountMode::from_env());
+    let (bot, root, loaded) = ra2_render::load_bot_components(path)?;
+    let (rest, carried) =
+        ra2_render::component_assembly_mounted(&bot, &loaded, ra2_render::MountMode::from_env());
+    let smart_zones: Vec<SmartZone> =
+        ra2_render::bot_smart_zones(&bot, &root, &loaded, ra2_render::MountMode::from_env())
+            .into_iter()
+            .map(|z| SmartZone {
+                component: z.component,
+                name: z.name,
+                offset: rest[z.component].inverse() * z.local,
+                min: z.min,
+                max: z.max,
+            })
+            .collect();
     let mut components: Vec<Component> = Vec::with_capacity(bot.components.len());
 
     // The chassis' crush cage (F9) is the bot's, not a component definition's.
@@ -709,6 +1502,44 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             Some(c.parent as usize)
         } else {
             None
+        };
+
+        // The Havok bodies the original makes of it (the chassis' is built by
+        // the game itself from its own mesh).
+        let havok = if i == 0 {
+            // The chassis the game builds is one mesh collidable (live: a
+            // `GEOMETRIC` collidable on every chassis body): the `.bot`'s own
+            // chassis mesh, triangles and all.
+            bot.components
+                .first()
+                .and_then(|c| c.chassis.as_ref())
+                .and_then(|ch| ch.mesh.as_ref())
+                .map(|m| {
+                    let n = m.points.len() as u32;
+                    let tris: Vec<[u32; 3]> = m
+                        .indices
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .copied()
+                        .filter(|t| t.iter().all(|&v| v < n))
+                        .collect();
+                    HavokParts {
+                        collision: vec![m.points.iter().map(|p| Vec3::from(*p)).collect()],
+                        collision_mesh: vec![(!tris.is_empty()).then_some(tris)],
+                        ..HavokParts::default()
+                    }
+                })
+                .filter(|h| h.collision[0].len() >= 4)
+                .unwrap_or_default()
+        } else if c.class == "SmartZone" {
+            smart_zone_mass(&root, &c.file)
+        } else {
+            loaded
+                .get(i)
+                .and_then(|l| l.as_ref())
+                .map(|lc| HavokParts::from_scene(&lc.scene))
+                .unwrap_or_default()
         };
 
         // Chassis geometry is embedded in the `.bot`; everything else comes from
@@ -742,11 +1573,15 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             let mass = if let Some(m) = num(&lc.def, "mass") {
                 m
             } else {
+                // Every rigid body of the file, children included: a wheel's
+                // `wheelgroup` is a zero-mass parent whose `miniwheel` (9) and
+                // `wheel_traction` (8, a phantom: `DISABLE_COLLISIONS`, no mass in the
+                // simulation) children; only the hub's 9 kg counts.
                 let sum: f32 = lc
                     .scene
-                    .objects
+                    .rigid_bodies()
                     .iter()
-                    .flat_map(|o| &o.rigid_bodies)
+                    .filter(|rb| !rb.disable_collisions)
                     .map(|rb| rb.mass)
                     .sum();
                 if sum > 0.0 {
@@ -799,63 +1634,91 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             max = Vec3::ZERO;
         }
 
-        // Chassis hitpoints are the armour hardness the bot file records. Every
+        // Chassis hitpoints are trunc(surface area x armour hardness) (FUN_0044d710). Every
         // other component's come from the game's own rule: the component factory
         // (`FUN_0045cf40`) switches on the definition's `type` and stores a
         // default maximum, then a `hitpoints =` line in the definition overrides
         // it. Recovered from the binary: power 400, extenders 100, mechanics 400,
         // mobility 400, weapons 1000, extras 1000 — see F7.
-        let chassis_armour = bot
+        let chassis_hp = bot
             .components
             .first()
             .and_then(|c| c.chassis.as_ref())
-            .and_then(|c| c.armour);
+            .and_then(|c| c.hitpoints());
         let hitpoints = if i == 0 {
-            chassis_armour
-                .map(|a| a.hardness)
-                .unwrap_or_else(|| role.default_hitpoints())
+            chassis_hp.unwrap_or_else(|| role.default_hitpoints())
         } else {
             type_hitpoints(def.as_ref(), role)
         };
         // `fracture` is a per-category default too (extenders 15, mechanics and
         // mobility 20, weapons 20, extras 60) overridden by the definition.
         let fracture = type_fracture(def.as_ref());
+        // A wheel's constructor (`0x507a65`, vtable `0x6ab8cc`) gives it a
+        // `Rubber` material (`0x507aea` -> `FUN_004899e0`, float 0) where every
+        // other component starts with `Metal`: live every `Wheel` prices with
+        // Rubber 0 (`arenahits-*__live__*`, docs/29 §12o), so a wheel strikes
+        // nothing and the arena's Arenium does nothing to it.
         let material = def
             .as_ref()
             .and_then(|d| d.get("material"))
-            .map(|s| s.to_ascii_lowercase());
+            .map(|s| s.to_ascii_lowercase())
+            .or_else(|| (role == Role::Wheel).then(|| "rubber".to_string()));
+        // A weapon's constructor (`FUN_00502e10`, `0x502e5f`) sets its Metal
+        // material's float to 0.8; a `material` line still overrides it.
+        let undeclared = match role {
+            Role::Weapon => WEAPON_MATERIAL_SCALE,
+            Role::Wheel => 0.0,
+            _ => ra2fmt::component::DEFAULT_MATERIAL_SCALE,
+        };
         let material_scale = def
             .as_ref()
+            .filter(|d| d.get("material").is_some())
             .map(|d| d.material().scale)
-            .unwrap_or(ra2fmt::component::DEFAULT_MATERIAL_SCALE);
+            .unwrap_or(undeclared);
         let damageable = def
             .as_ref()
             .map(|d| !flag_false(d, "damageable"))
             .unwrap_or(true);
+        let mut sounds = ComponentSounds::from_def(def.as_ref());
+        if i == 0 && sounds.damage.is_empty() {
+            let armour_type = bot
+                .components
+                .first()
+                .and_then(|c| c.chassis.as_ref())
+                .and_then(|c| c.armour)
+                .map(|a| a.type_id)
+                .unwrap_or(2);
+            sounds = ComponentSounds::chassis(armour_type);
+        }
         let piston = (role == Role::Piston).then(|| {
             piston_stats(
                 def.as_ref().expect("a piston has a definition"),
                 base.eq_ignore_ascii_case("BurstPiston"),
             )
         });
+        let (faces, face_count, faces_abs) = weapon_faces(def.as_ref());
         let weapon = (role == Role::Weapon).then(|| WeaponStats {
-            // Neither parameter has a default. The engine's factory leaves both
-            // at zero unless the definition declares them, and **every stock
-            // weapon does** (`Components.cfz`: the blade is `concussion = .8`,
-            // `piercing = .3`, the sawblade `.9`/`.1`) while a chassis declares
-            // neither — which is exactly what makes a spinner bite and a bare
-            // chassis only ram. Inventing 0.5 here as this used to would price
-            // every part as a half-decent weapon.
+            // The component constructor's defaults (`FUN_00489110`: `+0x68`
+            // piercing 0, `+0x6c` concussion 1.0), which the weapon constructor
+            // keeps: the Hammer Head, Sledge Hammer, Iron Fist, Saw Blade, Ninja
+            // Star and ChewBlade declare neither. Live
+            // (`fight-scout-alarm-box__live__000`), ALARM's Hammer Head prices
+            // its hits at up to exactly 8× what the Scout part it strikes
+            // prices the same record at (0.8 / 0.1 material, concussion 1 on
+            // both sides).
             concussion: def
                 .as_ref()
                 .and_then(|d| num(d, "concussion"))
-                .unwrap_or(0.0),
+                .unwrap_or(1.0),
             piercing: def.as_ref().and_then(|d| num(d, "piercing")).unwrap_or(0.0),
             frequency: def
                 .as_ref()
                 .and_then(|d| num(d, "frequency"))
-                .unwrap_or(4.0),
+                .filter(|f| *f > 0.0),
             reach: ((max - min) * 0.5).length().max(0.1),
+            faces,
+            face_count,
+            faces_abs,
         });
 
         let motor = (role == Role::Motor).then(|| {
@@ -867,6 +1730,8 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
                 speed: speed.unwrap_or(20.0),
                 torque: torque.unwrap_or(20.0) * torque_unit(),
                 burst: bot.components[i].burst_angles,
+                fire: def.as_ref().and_then(burst_power),
+                servo: bot.components[i].class.eq_ignore_ascii_case("ServoMotor"),
             }
         });
 
@@ -906,23 +1771,61 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             class: c.class.clone(),
             base,
             name,
+            file: c.file.clone(),
             local: rest[i],
-            items,
+            rotor_local: carried[i],
+            hinge: loaded
+                .get(i)
+                .and_then(|l| l.as_ref())
+                .and_then(|lc| ra2fmt::mount::rotor_hinge(&lc.scene)),
+            wheel_pivots: loaded
+                .get(i)
+                .and_then(|l| l.as_ref())
+                .map(|lc| {
+                    lc.scene
+                        .wheels
+                        .iter()
+                        .map(|w| Vec3::from(w.point))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            // The original draws no Flamethrower model: live, a camera 1.3 m ahead of
+            // and 1.9 m beside a robot with one shows its nose and the flame only
+            // (docs/37 section 6).
+            items: if c.class.eq_ignore_ascii_case("Flamethrower")
+                && std::env::var_os("RA2_FLAME_MODEL").is_none()
+            {
+                Vec::new()
+            } else {
+                items
+            },
             rotor_items,
             hull_points,
             min,
             max,
             mass,
             hitpoints,
+            power: crate::energy::PowerDef::from_def(def.as_ref()),
             fracture,
             material,
             material_scale,
             damageable,
+            sounds,
+            decal: def
+                .as_ref()
+                .and_then(|d| d.get("decal"))
+                .and_then(ra2_render::decals::DecalSpec::parse),
             role,
             weapon,
             motor,
             wheel,
             piston,
+            steer_power: (c.class.eq_ignore_ascii_case("Steering")
+                || def
+                    .as_ref()
+                    .and_then(|d| d.get("base"))
+                    .is_some_and(|b| b.trim().eq_ignore_ascii_case("Steering")))
+            .then(|| def.as_ref().and_then(|d| num(d, "power")).unwrap_or(1.0)),
             // The chassis' crush cage (F9). Its points name the chassis mesh's
             // own space, which for component 0 is bot space.
             buckle: if i == 0 {
@@ -934,7 +1837,26 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             rest_hull,
             rest_items,
             children: Vec::new(),
+            havok,
         });
+    }
+
+    // A SmartZone's mass sits at its zone's centre (the zone box in the
+    // component's frame).
+    for z in &smart_zones {
+        if let Some(c) = components.get_mut(z.component) {
+            let (lo, hi) = (z.min, z.max);
+            c.havok.mass_points = (0..8)
+                .map(|k| {
+                    let p = Vec3::new(
+                        if k & 1 == 0 { lo.x } else { hi.x },
+                        if k & 2 == 0 { lo.y } else { hi.y },
+                        if k & 4 == 0 { lo.z } else { hi.z },
+                    );
+                    z.offset.transform_point3(p)
+                })
+                .collect();
+        }
     }
 
     // Link children.
@@ -980,12 +1902,75 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
         parts,
         part_of,
         part_local,
+        wiring: Wiring::from_bot(&bot),
+        heading: bot.heading.unwrap_or(0.0),
+        smart_zones,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Weapon::computeDamage` (`FUN_005032f0`): the hit scales with how
+    /// squarely the contact meets the listed faces, `min(1, Σ max(n·f, 0))`
+    /// (`|n·f|` for `normal = true ...`).
+    #[test]
+    fn a_weapon_prices_by_its_striking_faces() {
+        let w = WeaponStats {
+            concussion: 1.0,
+            piercing: 0.0,
+            frequency: None,
+            reach: 0.3,
+            faces: [Vec3::NEG_X, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO],
+            face_count: 1,
+            faces_abs: false,
+        };
+        assert_eq!(w.alignment(Vec3::NEG_X), 1.0);
+        assert_eq!(w.alignment(Vec3::X), 0.0);
+        assert!((w.alignment(Vec3::new(-0.6, 0.8, 0.0)) - 0.6).abs() < 1e-6);
+        let both = WeaponStats {
+            faces: [Vec3::X, Vec3::Y, Vec3::ZERO, Vec3::ZERO],
+            face_count: 2,
+            faces_abs: true,
+            ..w
+        };
+        assert!((both.alignment(Vec3::new(-0.6, -0.8, 0.0)) - 1.0).abs() < 1e-6);
+        let none = WeaponStats { face_count: 0, ..w };
+        assert_eq!(none.alignment(Vec3::X), 1.0);
+    }
+
+    /// The Hammer Head declares neither `concussion`, `piercing` nor
+    /// `material`: it keeps the component constructor's concussion 1
+    /// (`FUN_00489110`) and the weapon constructor's 0.8 material
+    /// (`0x502e5f`), and strikes with its -X face (`normal = false -1 0 0`).
+    #[test]
+    fn the_hammer_head_keeps_the_constructors_defaults() {
+        ra2fmt::saves::isolate_for_tests();
+        let Some(game) = std::env::var_os("RA2_GAME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let p =
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local/game");
+                p.exists().then_some(p)
+            })
+        else {
+            return;
+        };
+        let rig = load(&game.join("AI/Team0/Bot1.bot").to_string_lossy()).expect("ALARM");
+        let hammer = rig
+            .components
+            .iter()
+            .find(|c| c.name == "Hammer Head")
+            .expect("ALARM's hammer");
+        let w = hammer.weapon.expect("a weapon");
+        assert_eq!((w.piercing, w.concussion), (0.0, 1.0));
+        assert_eq!(hammer.material_scale, WEAPON_MATERIAL_SCALE);
+        assert_eq!(
+            (w.face_count, w.faces_abs, w.faces[0]),
+            (1, false, Vec3::NEG_X)
+        );
+    }
 
     /// F12: a `.gmf` body with `mass = 0` is priced by the room it takes up.
     ///
@@ -1041,6 +2026,9 @@ mod tests {
         assert_eq!(hp("type = mobility\n"), 400.0);
         assert_eq!(hp("type = weapons\n"), 1000.0);
         assert_eq!(hp("type = extras\n"), 1000.0);
+        // No category: the constructor's 100, not a per-role guess.
+        assert_eq!(hp("name = x\n"), 100.0);
+        assert_eq!(hp("type = whatever\n"), 100.0);
         // A declared value wins (the ramplate declares 1000, a disc 500).
         assert_eq!(hp("type = weapons\nhitpoints = 500\n"), 500.0);
         // `fracture` has category defaults of its own.
@@ -1066,18 +2054,25 @@ mod tests {
     ///
     /// The definition's `prismatic` line carries the travel, and the axis is in
     /// the piston's own space — `burstpiston1.txt` says
-    /// `body, shaft, 0, 0, 1, 0.0, -0.60, .8`, which is a rod that slides along
-    /// its local +Z from 0.60 back to 0.80 out.
+    /// `body, shaft, 0, 0, 1, 0.0, -0.60, .8`. A servo piston slides from
+    /// -0.60 to 0.80 about its neutral point; a burst piston only between its
+    /// lower stop and the neutral point it rests at (live, ALARM's
+    /// `burstpiston2`: stops 0 and -0.73).
     #[test]
     fn piston_travel_comes_from_the_prismatic_line() {
         let d = ra2fmt::component::parse(
             "prismatic = body, shaft, 0, 0, 1, 0.0, -0.60, .8\npower = 60 100\n",
         );
-        let p = piston_stats(&d, true);
+        let p = piston_stats(&d, false);
         assert_eq!(p.axis, Vec3::Z);
         assert_eq!(p.limits, [-0.60, 0.8]);
+        // The line's last number is the rod's inertia factor (`0x4b29e7`).
+        assert_eq!(p.rod_inertia, 0.8);
         assert_eq!(p.speed, 60.0);
         assert_eq!(p.force, 100.0 * torque_unit());
+        assert!(!p.burst);
+        let p = piston_stats(&d, true);
+        assert_eq!(p.limits, [-0.60, 0.0]);
         assert!(p.burst);
 
         // No usable line at all still yields a joint, and one that moves.
@@ -1100,6 +2095,7 @@ mod tests {
             speed: 1.0,
             force: 1200.0,
             burst: false,
+            rod_inertia: 0.2,
         });
         let components = vec![
             part(0, None, Mat4::IDENTITY, false),
@@ -1158,27 +2154,38 @@ mod tests {
             class: String::new(),
             base: String::new(),
             name: String::new(),
+            file: String::new(),
             local,
+            rotor_local: local,
+            hinge: None,
+            wheel_pivots: Vec::new(),
             items: Vec::new(),
             rotor_items: Vec::new(),
             hull_points: Vec::new(),
+            havok: HavokParts::default(),
             min: Vec3::ZERO,
             max: Vec3::ZERO,
             mass: 1.0,
             hitpoints: 1.0,
+            power: crate::energy::PowerDef::default(),
             fracture: 0.0,
             material: None,
             material_scale: ra2fmt::component::DEFAULT_MATERIAL_SCALE,
             damageable: true,
+            sounds: ComponentSounds::default(),
+            decal: None,
             role: if motor { Role::Motor } else { Role::Structure },
             weapon: None,
             motor: motor.then_some(MotorStats {
+                servo: false,
                 speed: 10.0,
                 torque: 400.0,
                 burst: None,
+                fire: None,
             }),
             wheel: None,
             piston: None,
+            steer_power: None,
             buckle: Vec::new(),
             buckle_fraction: 0.0,
             rest_hull: Vec::new(),
@@ -1210,6 +2217,9 @@ mod tests {
             parts,
             part_of,
             part_local,
+            wiring: Wiring::default(),
+            heading: 0.0,
+            smart_zones: Vec::new(),
         };
         rig.components[1].children = vec![2];
 

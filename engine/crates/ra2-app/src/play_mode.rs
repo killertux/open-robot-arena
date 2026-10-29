@@ -156,8 +156,21 @@ pub struct Choice {
 }
 
 impl Choice {
+    /// Whether the game type uses slot `slot` (0-based): only BATTLE ROYAL and
+    /// TEAM MATCH use all four, every other type is slot 1 against slot 3
+    /// (`ra2-shell` removes the other two panels from the screen).
+    pub fn uses_slot(&self, slot: usize) -> bool {
+        !matches!(slot, 1 | 3)
+            || matches!(self.game_type, GameType::BattleRoyal | GameType::TeamMatch)
+    }
+
     /// One line per slot for the trace: the side, record, `.bot` slot and path.
+    /// A slot the game type does not use is `OPEN`, the word the lobby's
+    /// `noplayer.gib` cell shows for an empty slot.
     pub fn slot_line(&self, slot: usize) -> String {
+        if !self.uses_slot(slot) {
+            return format!("slot {}: OPEN (not used by {:?})", slot + 1, self.game_type);
+        }
         let choice = &self.slots[slot];
         format!(
             "slot {}: {} team {} ({} slot {}), robot {}: {} ({})",
@@ -412,11 +425,7 @@ pub fn choice_from_shell(game: &Path, shell: &Shell) -> Result<Choice, String> {
     let defaults = default_slot_picks(game)?;
     let mut slots = Vec::with_capacity(4);
     for (slot, default) in defaults.iter().enumerate() {
-        let side = if slot < 2 {
-            ra2ui::teams::Side::Player
-        } else {
-            ra2ui::teams::Side::Computer
-        };
+        let side = shell.slot_side(slot);
         slots.push(robot_choice(
             game,
             side,
@@ -634,6 +643,15 @@ pub fn select_setup(options: &Options) -> Result<(Shell, Vec<ra2_shell::Step>), 
     let picks = options.picks()?;
     steps.push(shell.click_named("robots button")?);
     for (slot, pick) in picks.iter().enumerate() {
+        // A duel shows slots 1 and 3 only.
+        if matches!(slot, 1 | 3)
+            && !matches!(
+                options.game_type,
+                Some(GameType::BattleRoyal) | Some(GameType::TeamMatch)
+            )
+        {
+            continue;
+        }
         let panel = SLOT_PANELS[slot];
         let side = if slot < 2 {
             ra2ui::teams::Side::Player
@@ -670,13 +688,14 @@ pub fn select_setup(options: &Options) -> Result<(Shell, Vec<ra2_shell::Step>), 
         steps.push(shell.click_named("ok button")?);
     }
 
-    // The arena picker: the list is filtered when Game Settings was opened
-    // first, otherwise it offers all twelve. `--arena-index` clicks the row
+    // The arena picker: the list is the game type's own `enumAvailable` set. The
+    // setup screen opens on DEATHMATCH (`FUN_004733f0`), so without an explicit
+    // type the list is the eight DEATHMATCH arenas, as in the original. `--arena-index` clicks the row
     // after the list scrolls it into view.
     steps.push(shell.click_named("arena button")?);
     let arena_list = match options.game_type {
         Some(game_type) => ra2ui::arenas::available(&options.game, game_type.as_str())?,
-        None => ra2ui::arenas::all(&options.game)?,
+        None => ra2ui::arenas::available(&options.game, GameType::Deathmatch.as_str())?,
     };
     let row = if let Some(index) = options.arena_index {
         if index >= arena_list.len() {

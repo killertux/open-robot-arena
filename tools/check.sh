@@ -12,6 +12,12 @@
 #   5. tools/package.sh --no-smoke   (stage the portable Linux tarball)
 #   6. tools/smoke_package.sh        (unpack it and use it as a player would)
 #
+# NOTE: a pass here means the code builds, the tests pass and the package works.
+# It does NOT mean we match the original game: the render comparison below is a
+# self-consistency check (our own renderers/layout against each other). Fidelity
+# to the original is measured only by tools/oracle/fidelity.py (needs the game
+# and the git-ignored captures; see docs/26-fidelity-baseline.md).
+#
 # The smoke test is the headless render check: it runs the packaged client
 # (`ra2-app --offscreen`) to the main menu, compares that frame byte for byte
 # with an independent `uishot` render of mainmenu.gib, and keeps one
@@ -20,7 +26,9 @@
 # here.
 #
 # No network: cargo runs --offline and CARGO_NET_OFFLINE=true is exported so
-# build scripts (oxijolt's optional prebuilt archive) do not fetch either. The
+# build scripts do not fetch either (the default build runs none that
+# does; it matters only for `--features jolt`, whose oxijolt build script
+# would download a prebuilt archive). The
 # game is never read from the package; local/game (or RA2_GAME_DIR) is read in
 # place by the smoke test. The game must be present: the corpus tests skip
 # without it and the smoke cannot run.
@@ -103,4 +111,4 @@ smoke_state=ok
 
 done=1
 echo
-echo "check: PASS — ${tests} tests passed, ${tests_failed} failed; ${botlab_frames} botlab frames written; ra2-app boot frame ${app_frame}; launcher ok; package smoke ok"
+echo "check: PASS — ${tests} tests passed, ${tests_failed} failed; ${botlab_frames} botlab frames written; ra2-app boot frame ${app_frame}; launcher ok; package smoke ok (self-consistency only: run tools/oracle/fidelity.py for fidelity to the original)"

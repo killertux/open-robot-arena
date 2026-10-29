@@ -1,6 +1,6 @@
 # Game data is archived abandonware and is NOT redistributed by this project.
 # Keep all original/shared game files local and out of version control.
-/local/
+/local
 /downloads/
 /out/
 

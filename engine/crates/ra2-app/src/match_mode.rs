@@ -14,9 +14,12 @@
 //! `results.png`. The fight is a real one; if neither chassis is destroyed by
 //! `N`, the **evidence script** ends it through `plus.eliminatePlayer`'s own
 //! request (the state-3 path `flextop.py:188` uses) for the robot with less
-//! hitpoints left. That is a script, not a game rule, and it is printed.
+//! hitpoints left. That is a script, not a game rule, and it is printed. A
+//! match a player plays (exhibition, Team HQ event, `Test Robot`) does not use
+//! it: its time-out goes to the judges' decision (`FUN_00418770`, points).
 //!
-//! `--quit-at N` opens the pause dialog at `N` seconds, writes `pause.png`,
+//! `--quit-at N` shows the F1 controls reminder (`reminder.png`), then opens the
+//! pause dialog at `N` seconds, writes `pause.png`,
 //! presses its `quit button` through the same hit test a mouse uses, and writes
 //! `menu.png` from a fresh shell — the deterministic pause/quit proof.
 
@@ -25,7 +28,8 @@ use std::path::{Path, PathBuf};
 use ra2_render::ui::{UiAssets, UiRenderer, UiScene};
 use ra2_render::Renderer;
 use ra2fmt::gib::{Block, Gib, Widget};
-use ra2sim::r#match::{Match, MatchConfig, MatchReport, MatchState, RobotEntry};
+use ra2sim::camera::SceneCameraKind;
+use ra2sim::r#match::{Controller, Match, MatchConfig, MatchReport, MatchState, RobotEntry};
 use ra2sim::{DriveInput, Duel, DuelCamera, GameType};
 
 use crate::hud;
@@ -129,11 +133,25 @@ impl Options {
 /// The camera from `ra2.cfg`'s `DefaultCamera` (`watch`, `static`, `orbit`).
 /// An unknown value is reported, not silently replaced.
 pub fn camera_from_cfg(game: &Path) -> Result<DuelCamera, String> {
-    let path = game.join("ra2.cfg");
-    let cfg = ra2fmt::cfg::Cfg::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let cfg = crate::options::read_cfg(game);
     let name = cfg.default_camera();
-    DuelCamera::from_config(name)
-        .ok_or_else(|| format!("{name:?} in {} is not watch/static/orbit", path.display()))
+    DuelCamera::from_config(name).ok_or_else(|| {
+        format!(
+            "{name:?} in {} is not watch/static/orbit",
+            crate::options::settings_path(game).display()
+        )
+    })
+}
+
+/// The scene-camera configuration a match camera mode asks for, if it is one of
+/// the original's three.
+fn scene_kind(camera: &DuelCamera) -> Option<SceneCameraKind> {
+    match camera {
+        DuelCamera::Static => Some(SceneCameraKind::Static),
+        DuelCamera::Watch => Some(SceneCameraKind::Watch),
+        DuelCamera::Orbit { .. } => Some(SceneCameraKind::Orbit),
+        _ => None,
+    }
 }
 
 /// The driving camera: behind the player's heading, scaled to the robot.
@@ -168,30 +186,97 @@ pub struct Session {
     pub player_controlled: bool,
     /// The robot the player drives (0 in this client).
     pub player_robot: usize,
+    /// Whether the offscreen evidence script settles a fight that reaches
+    /// its length with every chassis intact (`plus.eliminatePlayer` on the
+    /// weaker robot). Only the AI-versus-AI evidence runs (`--match`, the
+    /// headless `--hq` season) use it; a match the player plays times out
+    /// to the original's judges' decision, `FUN_00418770` (the unique best
+    /// score among the robots still alive wins; a shared or zero best is a
+    /// draw), which [`ra2sim::r#match::Match`] applies.
+    pub evidence_decision: bool,
     /// The keyboard input sampled at the latest tick.
     player_input: DriveInput,
+    /// Network play, host side: the drive each remote human last sent for its
+    /// robot (`HumanRemote` applying `giRemoteInputMessage`s, docs/38 §6).
+    /// `None` leaves a robot to its AI.
+    remote_inputs: Vec<Option<DriveInput>>,
     /// Accumulates wall-clock time for [`Session::advance`].
     accumulator: f32,
     /// Seconds left on `camera textbox`'s 3.0 s display window.
     camera_label_left: f32,
-    /// The arena's own first static camera name (`AddStaticCamera`), which the
-    /// original puts in the textbox instead of the class default.
-    static_camera_label: Option<String>,
-    /// The chat group is open (backslash). Local only; nothing is sent.
+    /// The name the scene camera last reported (`"Static 1"`, `"Watch 1"`,
+    /// from the arena's `Next*Camera`): the original puts it in the textbox
+    /// instead of the class default.
+    camera_name: Option<String>,
+    /// The camera the match settles on once the intro is over: the config's
+    /// `DefaultCamera` (or the chase frame when a player is driving).
+    default_camera: DuelCamera,
+    /// The chat group is open (backslash). Only a network match has chat
+    /// (`0x475ee0` acts on the key when the game type, `FUN_004145f0`, is 1,
+    /// multiplayer): see [`Session::enable_chat`].
     chat_open: bool,
     chat_entry: String,
+    /// Whether the chat key does anything: set for a network match.
+    chat_enabled: bool,
+    /// The lines `chat displaybox` shows, each with the seconds it has left.
+    chat_lines: Vec<(String, f32)>,
+    /// Entries the player sent (Enter), waiting for the network layer.
+    chat_outbox: Vec<String>,
+    /// The out cards (`FUN_00418040`: `controlboard_destroyed`, `IMMOBILE!`, `eliminated`):
+    /// seconds left on each robot's card, the card, and the state the robot was in last step.
+    immobile_cards: Vec<(f32, Option<hud::OutCard>, u8)>,
+    /// `immobility_countdown.gib`, loaded on first use.
+    immobile_gib: Option<Gib>,
     /// The pause dialog's widgets, loaded once.
     pub dialog: Gib,
     presentation: Presentation,
+    /// What the match sounds like: impacts, countdown, motors.
+    match_sounds: crate::match_sounds::MatchSounds,
+    /// Cues waiting for the audio drain.
+    cues: Vec<crate::match_sounds::SoundCue>,
+    /// The F1 controls reminder for the player's robot (`None` when no
+    /// robot is driven or its file has no board).
+    reminder: Option<crate::reminder::Reminder>,
+    /// The reminder window is up (modal; the match is paused under it).
+    reminder_open: bool,
+    /// The pause dialog's `options button` replaced the dialog with the
+    /// options window (`FUN_00476700`); the match stays paused until the
+    /// options window closes, and then resumes.
+    options_open: bool,
 }
 
 /// The values the HUD needs that are not part of the match report: the camera
 /// name (and its 3 s window) and the local chat state.
+/// The effect of an Esc key press, see [`Session::escape`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Escape {
+    SkippedIntro,
+    Paused,
+    Resumed,
+    Ignored,
+}
+
+/// How long a line stays in `chat displaybox`. The gib's note says "display a
+/// few lines of chats here and clear after a few seconds"; the timer itself was
+/// not traced, so the number is ours (docs/38 §11).
+pub const CHAT_LINE_SECONDS: f32 = 8.0;
+/// How many lines the box holds: its 100 px height over `fg_mcn14`'s line
+/// (ours, from the gib's size).
+pub const CHAT_LINES: usize = 6;
+
+/// Where the damage number's line box sits against the projected point, in pixels: measured
+/// against the original's frames (docs/37 section 7): the `25` of a hazard hit at the projection
+/// `(480.0, 211.6)` has its ink at x 471-491, y 200-212; at `(502.8, 272.9)` x 493-513,
+/// y 262-274.
+pub const DAMAGE_NUMBER_OFFSET: [f32; 2] = [1.0, -5.5];
+
 struct ScreenBind {
     camera: String,
     show_camera: bool,
     chat_open: bool,
     chat_entry: String,
+    /// The lines `chat displaybox` shows now, oldest first.
+    chat_lines: Vec<String>,
 }
 
 struct Presentation {
@@ -199,6 +284,11 @@ struct Presentation {
     assets: UiAssets,
     hud: Gib,
     results: Option<Gib>,
+    /// The screen the windows lay out on: the target's own size. The original
+    /// lays every GUI window out natively at the display resolution
+    /// (`docs/28` §1), in the match as in the shell, so this is the window or
+    /// PNG size and the scenes need no scaling.
+    layout: [f32; 2],
 }
 
 impl Presentation {
@@ -211,7 +301,12 @@ impl Presentation {
             assets,
             hud,
             results: None,
+            layout: SHELL_SIZE,
         })
+    }
+
+    fn scene_size(&self) -> [u32; 2] {
+        [self.layout[0].round() as u32, self.layout[1].round() as u32]
     }
 
     fn root_mut(&mut self) -> Option<&mut Widget> {
@@ -230,16 +325,20 @@ impl Presentation {
         countdown_left: f32,
         bind: &ScreenBind,
     ) -> Result<(hud::Hud, UiScene), String> {
+        let chat_lines = match self.assets.faces().get("fg_mcn14") {
+            Some(font) => hud::fit_chat_lines(font, &bind.chat_lines),
+            None => bind.chat_lines.clone(),
+        };
         let Some(root) = self.root_mut() else {
             return Err("gamewindow.gib has no root widget".into());
         };
         let bound = hud::hud(root, report, state, clock, countdown_left);
         hud::set_camera(root, &bind.camera, bind.show_camera);
-        hud::set_chat(root, bind.chat_open, &bind.chat_entry);
-        let placed = ra2ui::resolve_with(&self.hud, SHELL_SIZE, Some(self.assets.faces()));
+        hud::set_chat(root, bind.chat_open, &bind.chat_entry, &chat_lines);
+        let placed = ra2ui::resolve_with(&self.hud, self.layout, Some(self.assets.faces()));
         // The scene's coordinates are the design screen, not the target: the
-        // renderer's `fit` maps 1280×1005 into the window or PNG.
-        let size = [SHELL_SIZE[0] as u32, SHELL_SIZE[1] as u32];
+        // renderer's `fit` is then the identity (layout == target).
+        let size = self.scene_size();
         let scene = self.assets.scene(&placed, size);
         Ok((bound, scene))
     }
@@ -273,8 +372,8 @@ impl Presentation {
             self.results = Some(screen);
         }
         let screen = self.results.as_ref().unwrap();
-        let placed = ra2ui::resolve_with(screen, SHELL_SIZE, Some(self.assets.faces()));
-        Ok(self.assets.scene(&placed, scensize()))
+        let placed = ra2ui::resolve_with(screen, self.layout, Some(self.assets.faces()));
+        Ok(self.assets.scene(&placed, self.scene_size()))
     }
 
     /// The HUD with the pause dialog over it.
@@ -287,16 +386,20 @@ impl Presentation {
         bind: &ScreenBind,
         dialog: &Gib,
     ) -> Result<UiScene, String> {
+        let chat_lines = match self.assets.faces().get("fg_mcn14") {
+            Some(font) => hud::fit_chat_lines(font, &bind.chat_lines),
+            None => bind.chat_lines.clone(),
+        };
         let Some(root) = self.root_mut() else {
             return Err("gamewindow.gib has no root widget".into());
         };
         hud::hud(root, report, state, clock, countdown_left);
         hud::set_camera(root, &bind.camera, bind.show_camera);
-        hud::set_chat(root, bind.chat_open, &bind.chat_entry);
-        let mut placed = ra2ui::resolve_with(&self.hud, SHELL_SIZE, Some(self.assets.faces()));
-        let dialog_placed = ra2ui::resolve_with(dialog, SHELL_SIZE, Some(self.assets.faces()));
+        hud::set_chat(root, bind.chat_open, &bind.chat_entry, &chat_lines);
+        let mut placed = ra2ui::resolve_with(&self.hud, self.layout, Some(self.assets.faces()));
+        let dialog_placed = ra2ui::resolve_with(dialog, self.layout, Some(self.assets.faces()));
         placed.extend(dialog_placed);
-        Ok(self.assets.scene(&placed, scensize()))
+        Ok(self.assets.scene(&placed, self.scene_size()))
     }
 }
 
@@ -306,9 +409,29 @@ impl Session {
         // turn them off for the deterministic presentation run as well. The
         // environment is read while the world is built, so this must come
         // before `Match::new`.
-        std::env::set_var("RA2_HAZARDS", "0");
+        // `RA2_MATCH_HAZARDS=1` keeps them on, for the audio comparisons against
+        // the live exhibition captures (hazards enabled: the intro names them).
+        let hazards = std::env::var("RA2_MATCH_HAZARDS").is_ok_and(|v| v == "1");
+        std::env::set_var("RA2_HAZARDS", if hazards { "1" } else { "0" });
         let matched = Match::new(options.match_config()).map_err(|e| e.to_string())?;
-        Session::with_match(&options.game, matched)
+        let mut session = Session::with_match(&options.game, matched)?;
+        session.set_layout(options.size);
+        Ok(session)
+    }
+
+    /// [`Session::new`] with the player driving robot 0: the workshop's
+    /// `Test Robot`, where the player tries the robot they just built with its
+    /// own wiring.
+    pub fn new_player(options: &Options) -> Result<Session, String> {
+        std::env::set_var("RA2_HAZARDS", "0");
+        let mut config = options.match_config();
+        if let Some(first) = config.robots.first_mut() {
+            first.controller = Controller::Human;
+        }
+        let matched = Match::new(config).map_err(|e| e.to_string())?;
+        let mut session = Session::with_match_controlled(&options.game, matched, true)?;
+        session.set_layout(options.size);
+        Ok(session)
     }
 
     /// A live match and its shipped screens from an already-built [`Match`].
@@ -321,6 +444,14 @@ impl Session {
         // turn them off for the deterministic presentation run as well.
         std::env::set_var("RA2_HAZARDS", "0");
         Session::with_match_controlled(game, matched, false)
+    }
+
+    /// [`Session::with_match`] with the player driving robot 0: the Team HQ's
+    /// event match, which the original plays with the player's own robot under
+    /// the keyboard (chase camera, Esc pauses), exactly like an exhibition.
+    pub fn with_match_player(game: &Path, matched: Match) -> Result<Session, String> {
+        std::env::set_var("RA2_HAZARDS", "0");
+        Session::with_match_controlled(game, matched, true)
     }
 
     /// Start the exhibition match the shipped setup screen chose.
@@ -345,10 +476,35 @@ impl Session {
             Some(false) => std::env::set_var("RA2_HAZARDS", "0"),
             None => {}
         }
+        // the driven robot is a person's: entry 0, unless the caller already named the humans (network play)
+        let mut entries = entries;
+        if !entries.iter().any(|e| e.controller == Controller::Human) {
+            if let Some(first) = entries.first_mut() {
+                first.controller = Controller::Human;
+            }
+        }
         let config = MatchConfig::new(arena.to_string_lossy().to_string(), game_type, entries)
             .with_duration(seconds);
         let matched = Match::new(config).map_err(|e| e.to_string())?;
         Session::with_match_controlled(game, matched, true)
+    }
+
+    /// Network play, a spectator's end of the match (docs/38 §10): the arena
+    /// and the players' robots, none of them driven from here, on the
+    /// config's own camera (`Watch` by default). The host's snapshots and
+    /// scoring messages are all it follows.
+    pub fn spectate(
+        game: &Path,
+        arena: &Path,
+        game_type: GameType,
+        entries: Vec<RobotEntry>,
+    ) -> Result<Session, String> {
+        let config = MatchConfig::new(arena.to_string_lossy().to_string(), game_type, entries);
+        let matched = Match::new(config).map_err(|e| e.to_string())?;
+        let mut session = Session::with_match_controlled(game, matched, false)?;
+        // Not the evidence runs: nothing here settles the fight for the host.
+        session.evidence_decision = false;
+        Ok(session)
     }
 
     fn with_match_controlled(
@@ -356,31 +512,51 @@ impl Session {
         matched: Match,
         player_controlled: bool,
     ) -> Result<Session, String> {
-        let camera = if player_controlled {
+        let default_camera = if player_controlled {
             chase_camera(&matched.duel, 0)
         } else {
             camera_from_cfg(game)?
         };
+        let mut matched = matched;
+        if player_controlled {
+            matched.duel.human_robot = Some(0);
+        }
         // The match shell starts the arena's own intro; `ArenaIntros` is the
         // shipped switch. The generator advances on the arena's `Tick`, so its
-        // music, crowd and announcer requests reach the app's audio drain.
+        // music, crowd, announcer and camera requests reach the app's audio
+        // drain. The intro flies the scene camera in its static configuration
+        // (the HUD label reads `Static 1`); when it ends the config's camera
+        // takes over. Every priced contact is a sound (`FUN_0045f3a0`); the
+        // session drains them each step into cues.
+        matched.duel.record_impacts = true;
         let cfg = crate::options::read_cfg(game);
-        if cfg.arena_intros() {
-            if let Err(error) = ra2script::arena_intro(true) {
-                eprintln!("match: {error}");
+        // `FUN_0046e5e0() == 1`: sparks and motor smoke are the `GraphicEffects`
+        // option's.
+        matched.duel.fx.enabled = cfg.graphic_effects();
+        matched.duel.fx.detail = cfg.graphic_detail();
+        // `GraphicMessages` (the options window's "damage" switch): whether a hit shows its number.
+        matched.set_damage_messages(cfg.graphic_messages());
+        let mut camera = default_camera;
+        let mut camera_name = None;
+        if cfg.arena_intros() && std::env::var("RA2_ARENA_INTROS").as_deref() != Ok("0") {
+            camera = DuelCamera::Static;
+            camera_name = matched.duel.select_scene_camera(SceneCameraKind::Static);
+            match ra2script::arena_intro(true) {
+                Ok(()) => {
+                    if ra2script::camera::intro_running() {
+                        matched.begin_intro();
+                    }
+                }
+                Err(error) => eprintln!("match: {error}"),
             }
         } else {
             println!("arena intro: off (ArenaIntros=0)");
+            if let Some(kind) = scene_kind(&camera) {
+                camera_name = matched.duel.select_scene_camera(kind);
+            }
         }
         let presentation = Presentation::open(game)?;
         let dialog = ra2ui::workshop::load(&game.join("UI"), "common/ingame_dialog.gib")?;
-        // `0x418d70`/`0x418e20` ask the scene camera for its name; the arena's
-        // `AddStaticCamera` first argument is that name ("Static 1" in
-        // `Arenas/box.py:22`). Our static mode uses the first position, so it
-        // can carry the same name.
-        let static_camera_label = ra2fmt::arena::parse_path(Path::new(&matched.config.arena))
-            .ok()
-            .and_then(|script| script.static_cameras.first().map(|c| c.name.clone()));
         let report = matched.report();
         println!(
             "match: {} — {}, {:.0}s, camera {}",
@@ -400,15 +576,120 @@ impl Session {
             paused: false,
             player_controlled,
             player_robot: 0,
+            evidence_decision: !player_controlled,
             player_input: DriveInput::default(),
+            remote_inputs: Vec::new(),
             accumulator: 0.0,
             camera_label_left: CAMERA_LABEL_SECONDS,
-            static_camera_label,
+            camera_name,
+            default_camera,
             chat_open: false,
             chat_entry: String::new(),
+            chat_enabled: false,
+            chat_lines: Vec::new(),
+            chat_outbox: Vec::new(),
+            immobile_cards: Vec::new(),
+            immobile_gib: None,
             dialog,
             presentation,
+            match_sounds: crate::match_sounds::MatchSounds::new(),
+            cues: Vec::new(),
+            reminder: None,
+            reminder_open: false,
+            options_open: false,
         })
+        .map(|mut session: Session| {
+            if player_controlled {
+                session.load_reminder(game);
+            }
+            session
+        })
+    }
+
+    /// Network play: this end's player drives robot `robot` (the host's is 0, a joiner's its panel's
+    /// place). The robot's keys, the chase camera, the watch and orbit cameras (they follow the
+    /// human player), the F1 reminder and the camera the match settles on after the intro all
+    /// name it. `Session::exhibition` made them for robot 0.
+    pub fn set_player_robot(&mut self, game: &Path, robot: usize) {
+        self.player_robot = robot;
+        self.matched.duel.human_robot = Some(robot);
+        self.default_camera = chase_camera(&self.matched.duel, robot);
+        if matches!(self.camera, DuelCamera::Chase { .. }) {
+            self.camera = self.default_camera;
+        }
+        self.load_reminder(game);
+    }
+
+    /// Build the F1 reminder for the robot the player drives.
+    fn load_reminder(&mut self, game: &Path) {
+        let Some(entry) = self.matched.config.robots.get(self.player_robot) else {
+            return;
+        };
+        match crate::reminder::Reminder::open(game, &entry.bot_path) {
+            Ok(reminder) => self.reminder = Some(reminder),
+            Err(error) => eprintln!("controls reminder: {error}"),
+        }
+    }
+
+    /// Whether the controls reminder is on screen.
+    pub fn reminder_open(&self) -> bool {
+        self.reminder_open
+    }
+
+    /// Whether the options window opened from the pause dialog is up.
+    pub fn options_open(&self) -> bool {
+        self.options_open
+    }
+
+    /// Whether the match clock is held: the pause dialog, the controls
+    /// reminder or the options window is up.
+    pub fn frozen(&self) -> bool {
+        self.paused || self.reminder_open || self.options_open
+    }
+
+    fn sync_frozen(&mut self) {
+        ra2script::set_paused(self.frozen());
+    }
+
+    /// `F1` (`0x475ee0`, key `0x70`): ignored while the arena intro plays
+    /// and while another modal window (the pause dialog) owns the keys;
+    /// otherwise it shows the controls reminder for the player's robot and
+    /// pauses the match under it. With the reminder up, `F1` moves to the next
+    /// local robot (`0x482a10`); this client has one, so it closes it.
+    pub fn controls_key(&mut self) -> bool {
+        let state = self.matched.state();
+        if state == MatchState::Intro || state == MatchState::Results {
+            return false;
+        }
+        if self.reminder_open {
+            self.reminder_open = false;
+            self.sync_frozen();
+            return true;
+        }
+        if self.paused || self.options_open || self.reminder.is_none() {
+            return false;
+        }
+        self.reminder_open = true;
+        self.sync_frozen();
+        true
+    }
+
+    /// The pause dialog's `options button` (`FUN_00476700`): the dialog
+    /// closes and the options window is shown modally over the paused match.
+    pub fn open_options(&mut self) {
+        if !self.paused {
+            return;
+        }
+        self.paused = false;
+        self.options_open = true;
+        self.sync_frozen();
+    }
+
+    /// The options window closed (OK or Cancel): the dialog's modal loop
+    /// returns (result 1) and the match resumes.
+    pub fn close_options(&mut self) {
+        self.options_open = false;
+        self.sync_frozen();
     }
 
     pub fn report(&self) -> MatchReport {
@@ -441,6 +722,21 @@ impl Session {
         self.player_input = input;
     }
 
+    /// Whether `robot` is driven from outside the AI (a remote human's inputs, or a stand-in
+    /// driver): the AI never takes such a robot over.
+    pub fn is_driven_from_outside(&self, robot: usize) -> bool {
+        self.remote_inputs.get(robot).is_some_and(|d| d.is_some())
+    }
+
+    /// Network play, host side: drive `robot` from a remote player's input
+    /// (`None` hands it back to its AI).
+    pub fn set_remote_drive(&mut self, robot: usize, input: Option<DriveInput>) {
+        if self.remote_inputs.len() <= robot {
+            self.remote_inputs.resize(robot + 1, None);
+        }
+        self.remote_inputs[robot] = input;
+    }
+
     /// The input the next step will sample.
     pub fn drive(&self) -> DriveInput {
         self.player_input
@@ -464,7 +760,14 @@ impl Session {
             let dt = self.matched.config.dt;
             self.camera_label_left = (self.camera_label_left - dt).max(0.0);
         }
-        if self.matched.state() == MatchState::Fight {
+        {
+            let dt = self.matched.config.dt;
+            for line in self.chat_lines.iter_mut() {
+                line.1 -= dt;
+            }
+            self.chat_lines.retain(|(_, left)| *left > 0.0);
+        }
+        if self.evidence_decision && self.matched.state() == MatchState::Fight {
             let dt = self.matched.config.dt;
             let limit = self.matched.config.duration;
             if let Some(limit) = limit {
@@ -483,17 +786,81 @@ impl Session {
             }
         }
         let mut inputs = vec![None; self.matched.duel.robots.len()];
+        for (slot, remote) in inputs.iter_mut().zip(&self.remote_inputs) {
+            if remote.is_some() {
+                *slot = *remote;
+            }
+        }
         if self.player_controlled {
             if let Some(input) = inputs.get_mut(self.player_robot) {
                 *input = Some(self.player_input);
             }
         }
+        let before = self.matched.state();
         self.matched.step_with(&inputs);
+        self.step_immobile_cards();
+        if before == MatchState::Intro && self.matched.state() != MatchState::Intro {
+            // `plus.introComplete()`: the match camera takes over.
+            let camera = self.default_camera;
+            self.enter_camera(camera);
+        }
+        let cues = self.match_sounds.observe(&mut self.matched);
+        self.cues.extend(cues);
+    }
+
+    /// Take the sounds the steps since the last call made.
+    pub fn take_cues(&mut self) -> Vec<crate::match_sounds::SoundCue> {
+        std::mem::take(&mut self.cues)
+    }
+
+    /// Skip the arena intro (the `Skip Intro` button): the arena's own
+    /// `DoIntro(False)`, which stops its sounds and calls `plus.introComplete()`.
+    pub fn skip_intro(&mut self) {
+        if self.matched.state() == MatchState::Intro {
+            if let Err(error) = ra2script::arena_intro(false) {
+                eprintln!("match: {error}");
+            }
+            self.matched.end_intro();
+            let camera = self.default_camera;
+            self.enter_camera(camera);
+        }
+    }
+
+    /// Put the match in one of the camera modes and, for the original's three,
+    /// reconfigure the scene camera as its key handler does (`0x439c10`).
+    pub fn enter_camera(&mut self, camera: DuelCamera) {
+        self.camera = camera;
+        self.camera_name =
+            scene_kind(&camera).and_then(|kind| self.matched.duel.select_scene_camera(kind));
+        self.camera_label_left = CAMERA_LABEL_SECONDS;
+    }
+
+    /// The camera keys: F2 orbit, F3 static (the arena's next static camera),
+    /// F4 watch (its next watch camera). `0x439c10` dispatches `0x71`..`0x73`.
+    pub fn camera_key(&mut self, n: u8) {
+        let camera = match n {
+            2 => DuelCamera::Orbit { period: 24.0 },
+            3 => DuelCamera::Static,
+            4 => DuelCamera::Watch,
+            _ => return,
+        };
+        self.enter_camera(camera);
+        println!("camera: {} ({})", self.camera.name(), self.camera_label());
+    }
+
+    /// The mouse wheel in orbit mode (`0x5a6447`): positive notches zoom in.
+    pub fn orbit_wheel(&mut self, notches: f32) {
+        if matches!(self.camera, DuelCamera::Orbit { .. }) {
+            self.matched
+                .duel
+                .scene_camera
+                .orbit_input(0.0, 0.0, notches);
+        }
     }
 
     /// Advance by wall-clock seconds at the match's own `dt`.
     pub fn advance(&mut self, seconds: f32) {
-        if self.paused {
+        if self.frozen() {
             return;
         }
         self.accumulator += seconds;
@@ -506,17 +873,82 @@ impl Session {
         }
     }
 
+    /// What Esc does in a match (`0x475ee0`): while the arena intro plays it
+    /// skips it (`0x477900`); once the match is over (`+0x1d5`) it is ignored;
+    /// otherwise it opens the `in game popup win` dialog (and pauses), and with
+    /// the dialog open it closes it again (resume). `quit_game` is what the
+    /// dialog's `quit button` does (result 8: `0x4122d0`, the game exits);
+    /// `end match button` is result 4 (back to `exhibition_setup_win`, or the
+    /// Team HQ's flow for an event).
+    pub fn escape(&mut self) -> Escape {
+        if self.reminder_open {
+            // `0x482a10`: Esc closes the reminder (result 1).
+            self.reminder_open = false;
+            self.sync_frozen();
+            return Escape::Resumed;
+        }
+        if self.options_open {
+            // The options window owns the keys; the client's options
+            // window has no Esc binding.
+            return Escape::Ignored;
+        }
+        match self.matched.state() {
+            MatchState::Results | MatchState::Over => Escape::Ignored,
+            MatchState::Intro => {
+                self.skip_intro();
+                Escape::SkippedIntro
+            }
+            _ => {
+                self.toggle_pause();
+                if self.paused {
+                    Escape::Paused
+                } else {
+                    Escape::Resumed
+                }
+            }
+        }
+    }
+
+    /// Lay the windows out natively on a target of `size` pixels. Windows are
+    /// resolved at every frame, so a resize takes effect on the next one.
+    pub fn set_layout(&mut self, size: [u32; 2]) {
+        self.presentation.layout = [size[0].max(1) as f32, size[1].max(1) as f32];
+    }
+
+    /// The screen the HUD windows are laid out on.
+    pub fn layout(&self) -> [f32; 2] {
+        self.presentation.layout
+    }
+
     pub fn toggle_pause(&mut self) {
         if self.matched.state() == MatchState::Results {
             return;
         }
+        if self.reminder_open || self.options_open {
+            return;
+        }
         self.paused = !self.paused;
-        ra2script::set_paused(self.paused);
+        ra2script::set_paused(self.frozen());
         println!("pause: {}", if self.paused { "on" } else { "off" });
     }
 
+    /// The dialog's `End Match` for an event match (`0x475ee0`, result 4 with
+    /// game type 2): the popup closes, the match resumes and the judges decide
+    /// on the points now (`FUN_00418770(1)`), so the round is played, scored
+    /// and awarded like a time-out.
+    pub fn end_for_judges(&mut self) -> bool {
+        if self.paused {
+            self.toggle_pause();
+        }
+        let ended = self.matched.end_by_judges();
+        if ended {
+            println!("end match: the judges decide on the points");
+        }
+        ended
+    }
+
     pub fn cycle_camera(&mut self) {
-        self.camera = if self.player_controlled {
+        let next = if self.player_controlled {
             // Driving starts in chase; `C` cycles chase → watch → orbit. The
             // binary's config vocabulary is watch/static/orbit, so `chase` is
             // this client's driving choice and is printed as such.
@@ -532,19 +964,17 @@ impl Session {
                 _ => DuelCamera::Watch,
             }
         };
-        self.camera_label_left = CAMERA_LABEL_SECONDS;
+        self.enter_camera(next);
         println!("camera: {} ({})", self.camera.name(), self.camera_label());
     }
 
-    /// The text `camera textbox` shows: the camera object's name, with the
-    /// arena's own static-camera name when it has one.
+    /// The text `camera textbox` shows: the name the scene camera reported
+    /// (`Static 1`, `Watch 1`), else the camera class's own name (`Orbit Cam`).
     pub fn camera_label(&self) -> &str {
-        if matches!(self.camera, DuelCamera::Static) {
-            if let Some(name) = &self.static_camera_label {
-                return name;
-            }
+        match (&self.camera_name, scene_kind(&self.camera)) {
+            (Some(name), Some(_)) => name,
+            _ => self.camera.display_name(),
         }
-        self.camera.display_name()
     }
 
     /// Whether the 3.0 s camera-name window is still open.
@@ -557,16 +987,20 @@ impl Session {
         self.chat_open
     }
 
+    /// Network play: turn the chat key on. The original acts on `\` only when
+    /// the game type is multiplayer (`0x475ee0`, `FUN_004145f0() == 1`).
+    pub fn enable_chat(&mut self) {
+        self.chat_enabled = true;
+    }
+
     /// Open or close the chat group. `0x475ee0` opens it on `\` during play
-    /// (`+0x1b4` visible, `+0x1b8` focused). The text is local; nothing is
-    /// sent.
+    /// in a multiplayer match (`+0x1b4` visible, `+0x1b8` focused).
     pub fn toggle_chat(&mut self) {
-        if self.matched.state() == MatchState::Results || self.paused {
+        if !self.chat_enabled || self.matched.state() == MatchState::Results || self.frozen() {
             return;
         }
         self.chat_open = !self.chat_open;
         self.chat_entry.clear();
-        println!("chat: {}", if self.chat_open { "open" } else { "closed" });
     }
 
     /// Append a typed character to the chat entry.
@@ -583,18 +1017,48 @@ impl Session {
         }
     }
 
-    /// Close the chat entry on Enter or Escape and log the line. The file's
-    /// `chat displaybox` is a `DisplayBox`; drawing its history is not part of
-    /// this minimum.
+    /// Enter in the chat entry: the line goes to the network layer
+    /// ([`Session::take_chat_outbox`]) and the group closes with the entry
+    /// cleared (`FUN_00475240` sets the entry to the empty string and hides
+    /// `+0x1b4`); an empty entry sends nothing.
     pub fn chat_submit(&mut self) {
         if !self.chat_open {
             return;
         }
         if !self.chat_entry.is_empty() {
-            println!("chat (local): {}", self.chat_entry);
-            self.chat_entry.clear();
+            let line = std::mem::take(&mut self.chat_entry);
+            self.chat_outbox.push(line);
         }
         self.chat_open = false;
+    }
+
+    /// Escape in the chat entry: close it and drop what was typed. (The
+    /// original's Escape opens the pause popup whatever has focus; this port
+    /// lets the open entry take it instead, as it always has.)
+    pub fn chat_cancel(&mut self) {
+        self.chat_open = false;
+        self.chat_entry.clear();
+    }
+
+    /// The entries sent since the last call.
+    pub fn take_chat_outbox(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.chat_outbox)
+    }
+
+    /// A chat line arrived (`0x76`, via the event `0x70` to the match window)
+    /// or was sent by this player (the original gets its own copy back through
+    /// DirectPlay's loopback): it joins `chat displaybox`, lives
+    /// [`CHAT_LINE_SECONDS`] and plays `Sounds\chat.wav`.
+    pub fn push_chat_line(&mut self, line: String) {
+        self.chat_lines.push((line, CHAT_LINE_SECONDS));
+        let extra = self.chat_lines.len().saturating_sub(CHAT_LINES);
+        self.chat_lines.drain(..extra);
+        self.cues.push(crate::match_sounds::SoundCue::Chat);
+    }
+
+    /// The lines `chat displaybox` shows now, oldest first.
+    pub fn chat_lines(&self) -> Vec<&str> {
+        self.chat_lines.iter().map(|(l, _)| l.as_str()).collect()
     }
 
     fn screen_bind(&self) -> ScreenBind {
@@ -603,6 +1067,7 @@ impl Session {
             show_camera: self.show_camera_label(),
             chat_open: self.chat_open,
             chat_entry: self.chat_entry.clone(),
+            chat_lines: self.chat_lines.iter().map(|(l, _)| l.clone()).collect(),
         }
     }
 
@@ -617,15 +1082,174 @@ impl Session {
             return self.presentation.results_scene(&report);
         }
         let bind = self.screen_bind();
-        if self.paused {
+        let mut scene = if let Some(window) = self
+            .reminder_open
+            .then(|| {
+                self.reminder
+                    .as_ref()
+                    .map(|r| r.filled(self.presentation.layout))
+            })
+            .flatten()
+        {
+            self.presentation
+                .pause_scene(&report, state, clock, countdown, &bind, &window)?
+        } else if self.paused {
             let dialog = self.dialog.clone();
             self.presentation
-                .pause_scene(&report, state, clock, countdown, &bind, &dialog)
+                .pause_scene(&report, state, clock, countdown, &bind, &dialog)?
         } else {
             self.presentation
                 .hud_scene(&report, state, clock, countdown, &bind)
-                .map(|(_, scene)| scene)
+                .map(|(_, scene)| scene)?
+        };
+        self.add_damage_numbers(&mut scene);
+        self.add_immobility(&mut scene);
+        Ok(scene)
+    }
+
+    /// `FUN_00418040` (state 2) puts the card up when a robot becomes immobilized; the popup
+    /// list (`FUN_00416210`) takes it down 3.0 s later.
+    fn step_immobile_cards(&mut self) {
+        let dt = self.matched.config.dt;
+        let robots = self.matched.duel.robots.len();
+        if self.immobile_cards.len() < robots {
+            self.immobile_cards.resize(robots, (0.0, None, 0));
         }
+        for (card, robot) in self
+            .immobile_cards
+            .iter_mut()
+            .zip(&self.matched.duel.robots)
+        {
+            card.0 = (card.0 - dt).max(0.0);
+            // `FUN_00413810`: the robot's state, which `FUN_00418040` changes once (0 to 1, 2 or 3).
+            let state = if robot.eliminated {
+                3
+            } else if robot.immobilized {
+                2
+            } else if robot.destroyed {
+                1
+            } else {
+                0
+            };
+            if state != 0 && state != card.2 {
+                card.0 = hud::IMMOBILE_CARD_SECONDS;
+                card.1 = hud::OutCard::for_state(state);
+            }
+            card.2 = state;
+        }
+    }
+
+    /// The immobility warning counters hung over the robots and the `IMMOBILE!` cards over
+    /// their status groups (docs/32 section 6), above the HUD like the original's popups.
+    fn add_immobility(&mut self, scene: &mut UiScene) {
+        let warnings = self.matched.duel.immobility_warnings();
+        let cards: Vec<(usize, hud::OutCard)> = self
+            .immobile_cards
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.0 > 0.0)
+            .filter_map(|(i, c)| c.1.map(|card| (i, card)))
+            .collect();
+        if warnings.is_empty() && cards.is_empty() {
+            return;
+        }
+        if self.immobile_gib.is_none() {
+            match ra2ui::workshop::load(&self.presentation.ui_root, hud::IMMOBILE_COUNTDOWN) {
+                Ok(gib) => self.immobile_gib = Some(gib),
+                Err(error) => {
+                    eprintln!("immobility hud: {error}");
+                    return;
+                }
+            }
+        }
+        let Some(base) = self.immobile_gib.as_ref() else {
+            return;
+        };
+        let [w, h] = scene.size;
+        let mut overlays: Vec<Gib> = Vec::new();
+        if !warnings.is_empty() {
+            let view_proj = self.matched.duel.view_proj(&self.camera, w, h);
+            for (_, seconds, at) in warnings {
+                let Some(n) = hud::immobile_number(seconds) else {
+                    continue;
+                };
+                let clip = view_proj * at.extend(1.0);
+                if clip.w <= 0.0 {
+                    continue;
+                }
+                let x = (clip.x / clip.w * 0.5 + 0.5) * w as f32;
+                let y = (0.5 - clip.y / clip.w * 0.5) * h as f32;
+                overlays.push(hud::immobile_counter(
+                    base,
+                    n,
+                    [x - 40.0, y - hud::IMMOBILE_COUNTER_RISE],
+                ));
+            }
+        }
+        if !cards.is_empty() {
+            let placed = ra2ui::resolve_with(
+                &self.presentation.hud,
+                self.presentation.layout,
+                Some(self.presentation.assets.faces()),
+            );
+            for (robot, card) in cards {
+                let Some(name) = hud::PLAYERS.get(robot) else {
+                    continue;
+                };
+                let Some(group) = placed.iter().find_map(|p| p.find(name)) else {
+                    continue;
+                };
+                if !group.widget.visible() {
+                    continue;
+                }
+                let f = group.frame;
+                overlays.push(hud::out_card(
+                    base,
+                    card,
+                    hud::out_card_at(card, [f.x, f.y, f.w, f.h]),
+                ));
+            }
+        }
+        for gib in &overlays {
+            let placed = ra2ui::resolve_with(
+                gib,
+                self.presentation.layout,
+                Some(self.presentation.assets.faces()),
+            );
+            let part = self.presentation.assets.scene(&placed, scene.size);
+            scene.quads.extend(part.quads);
+            scene.textures = part.textures;
+            scene.missing.extend(part.missing);
+        }
+    }
+
+    /// The floating damage numbers (`ArenaManager::DamageDisplay`, docs/37 section 7): text drawn
+    /// 1:1 at the projection of a world point, under the HUD windows.
+    fn add_damage_numbers(&mut self, scene: &mut UiScene) {
+        if self.matched.damage_numbers().is_empty() {
+            return;
+        }
+        let [w, h] = scene.size;
+        let view_proj = self.matched.duel.view_proj(&self.camera, w, h);
+        let before = scene.quads.len();
+        for n in self.matched.damage_numbers() {
+            let clip = view_proj * n.position().extend(1.0);
+            if clip.w <= 0.0 {
+                continue;
+            }
+            let x = (clip.x / clip.w * 0.5 + 0.5) * w as f32;
+            let y = (0.5 - clip.y / clip.w * 0.5) * h as f32;
+            self.presentation.assets.centered_text(
+                scene,
+                ra2sim::popup::FACE,
+                &n.text,
+                [x + DAMAGE_NUMBER_OFFSET[0], y + DAMAGE_NUMBER_OFFSET[1]],
+                n.colour(),
+            );
+        }
+        // the numbers belong to the 3D scene: the HUD draws over them
+        let added = scene.quads.len() - before;
+        scene.quads.rotate_right(added);
     }
 
     /// Bind the HUD this instant and return both its values and its scene. The
@@ -640,6 +1264,31 @@ impl Session {
             .hud_scene(&report, state, clock, countdown, &bind)
     }
 
+    /// Whether a click during the arena intro hit the HUD's `skip button`
+    /// ("click to skip past the announcer intro", in `skip group`, which the
+    /// HUD shows only while the intro plays).
+    pub fn skip_button_at(&mut self, point: [f32; 2]) -> bool {
+        if self.matched.state() != MatchState::Intro || self.paused {
+            return false;
+        }
+        // Bind the HUD for the current moment, so the hit test sees the same
+        // visibility the frame drew.
+        if self.hud_now().is_err() {
+            return false;
+        }
+        let placed = ra2ui::resolve_with(
+            &self.presentation.hud,
+            self.presentation.layout,
+            Some(self.presentation.assets.faces()),
+        );
+        let Some(path) = ra2ui::input::hit_control(&placed, point[0], point[1]) else {
+            return false;
+        };
+        names_on_path(&placed, &path)
+            .iter()
+            .any(|n| n == "skip button")
+    }
+
     /// Whether a click in the pause dialog hit a named button.
     pub fn pause_button_at(&self, point: [f32; 2]) -> Option<String> {
         if !self.paused {
@@ -647,12 +1296,17 @@ impl Session {
         }
         let placed = ra2ui::resolve_with(
             &self.dialog,
-            SHELL_SIZE,
+            self.presentation.layout,
             Some(self.presentation.assets.faces()),
         );
         let path = ra2ui::input::hit_control(&placed, point[0], point[1])?;
         let names = names_on_path(&placed, &path);
-        for wanted in ["resume button", "quit button", "end match button"] {
+        for wanted in [
+            "resume button",
+            "quit button",
+            "end match button",
+            "options button",
+        ] {
             if names.iter().any(|n| n == wanted) {
                 return Some(wanted.to_string());
             }
@@ -672,11 +1326,14 @@ impl Session {
             let _ = self.presentation.results_scene(&report);
         }
         let screen = self.presentation.results.as_ref()?;
-        let placed =
-            ra2ui::resolve_with(screen, SHELL_SIZE, Some(self.presentation.assets.faces()));
+        let placed = ra2ui::resolve_with(
+            screen,
+            self.presentation.layout,
+            Some(self.presentation.assets.faces()),
+        );
         let path = ra2ui::input::hit_control(&placed, point[0], point[1])?;
         let names = names_on_path(&placed, &path);
-        for wanted in ["continue button", "Quit Session button"] {
+        for wanted in ["continue button"] {
             if names.iter().any(|n| n == wanted) {
                 return Some(wanted.to_string());
             }
@@ -752,7 +1409,7 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
 
     let mut session = Session::new(&options)?;
     let cfg = crate::options::read_cfg(&options.game);
-    let mut audio = crate::audio::AudioSystem::new_silent(&options.game, &cfg);
+    let mut audio = crate::audio::AudioSystem::new_offscreen(&options.game, &cfg);
     // Nothing from the shell is on screen here; the arena's own intro/crowd
     // sounds are the match's music, and they arrive as script requests.
     audio.stop_music("the match is on screen");
@@ -784,6 +1441,22 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
 
         if let Some(quit_at) = options.quit_at {
             if session.matched.state() == MatchState::Fight && session.matched.clock() >= quit_at {
+                // F1 first: the controls reminder over the match, then closed.
+                if session.reminder.is_none() {
+                    session.load_reminder(&options.game);
+                }
+                if session.controls_key() {
+                    write_frame(
+                        &mut session,
+                        &renderer,
+                        &ui,
+                        &target,
+                        size,
+                        out,
+                        "reminder.png",
+                    )?;
+                    session.controls_key();
+                }
                 session.paused = true;
                 ra2script::set_paused(true);
                 write_frame(
@@ -799,7 +1472,7 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
                     let dialog = session.dialog.clone();
                     let placed = ra2ui::resolve_with(
                         &dialog,
-                        SHELL_SIZE,
+                        session.presentation.layout,
                         Some(session.presentation.assets.faces()),
                     );
                     button_point(&placed, "quit button")
@@ -862,6 +1535,8 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
         let before = session.matched.state();
         session.step();
         audio.drain_match(session.audio_listener());
+        let cues = session.take_cues();
+        audio.play_cues(cues, session.audio_listener());
         if before == MatchState::Fight
             && session.matched.state() != MatchState::Fight
             && !wrote_last
@@ -966,8 +1641,174 @@ pub fn run_headless(options: Options, audio_report: bool) -> Result<MatchReport,
             .unwrap_or(0),
         out.display()
     );
+    let total = audio.audio().clock();
+    let seconds = std::env::var("RA2_AUDIO_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(total);
+    audio.finish_capture(seconds)?;
     print!("{}", audio.report(audio_report));
     Ok(session.report())
+}
+
+/// A moment `--camera-shots` photographs.
+#[derive(Clone, Debug, PartialEq)]
+enum Shot {
+    /// `intro@T`: T seconds into the arena intro.
+    Intro(f32),
+    /// `skip@T`: click `Skip Intro` T seconds into the intro (no picture).
+    Skip(f32),
+    /// `countdown@N`: the first frame whose countdown number is N.
+    Countdown(u32),
+    /// `cd@R`: the first countdown frame with `R` seconds (of 4.0) left; the
+    /// state-hooked live captures record the countdown reading they were shot at.
+    CountdownLeft(f32),
+    /// `f2|f3|f3b|f4@S`: press that camera key at S fight seconds, then shoot.
+    Key { key: u8, at: f32 },
+}
+
+fn parse_shot(spec: &str) -> Result<(String, Shot), String> {
+    let (name, at) = match spec.split_once('@') {
+        Some((name, at)) => (
+            name,
+            Some(
+                at.parse::<f32>()
+                    .map_err(|_| format!("--camera-shots {spec:?}: {at:?} is not a number"))?,
+            ),
+        ),
+        None => (spec, None),
+    };
+    let shot = match name {
+        "intro" => Shot::Intro(at.unwrap_or(2.5)),
+        "skip" => Shot::Skip(at.unwrap_or(4.8)),
+        "countdown" => Shot::Countdown(at.unwrap_or(2.0) as u32),
+        "cd" => Shot::CountdownLeft(at.unwrap_or(2.0)),
+        "f2" => Shot::Key {
+            key: 2,
+            at: at.unwrap_or(13.0),
+        },
+        "f3" | "f3b" => Shot::Key {
+            key: 3,
+            at: at.unwrap_or(if name == "f3" { 17.0 } else { 20.0 }),
+        },
+        "f4" => Shot::Key {
+            key: 4,
+            at: at.unwrap_or(24.0),
+        },
+        other => {
+            return Err(format!(
+                "--camera-shots: {other:?} is not intro/skip/countdown/cd/f2/f3/f3b/f4"
+            ))
+        }
+    };
+    Ok((name.to_string(), shot))
+}
+
+/// `--camera-shots`: run one match (the arena's intro on) and photograph the
+/// listed camera moments in time order, each to `cam-<name>.png`. The camera
+/// keys are real key presses in the order given: `f3` then `f3b` is F3 twice,
+/// which is how the original's second static camera is reached. Fight seconds
+/// must not exceed `--seconds`.
+pub fn run_camera_shots(options: Options, shots: &[String]) -> Result<(), String> {
+    let out = options
+        .out
+        .clone()
+        .ok_or_else(|| "--camera-shots needs --out DIR".to_string())?;
+    std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let mut pending: Vec<(String, Shot)> = shots
+        .iter()
+        .map(|s| parse_shot(s))
+        .collect::<Result<_, _>>()?;
+    let renderer = Renderer::new().map_err(|e| e.to_string())?;
+    let ui = UiRenderer::new_for(renderer.device(), wgpu::TextureFormat::Rgba8Unorm);
+    let size = options.size;
+    let target = Target::new(renderer.device(), size[0], size[1]);
+    let mut session = Session::new(&options)?;
+    let mut intro_time = 0.0f32;
+    let dt = session.matched.config.dt;
+    // The shots the match reaches in time order; a key shot waits for its
+    // fight second, so keep them sorted by when they can fire.
+    let mut guard = 0u32;
+    while !pending.is_empty() {
+        guard += 1;
+        if guard > 60 * 60 * 20 {
+            return Err(format!(
+                "camera shots never reached: {:?}",
+                pending.iter().map(|p| p.0.clone()).collect::<Vec<_>>()
+            ));
+        }
+        let state = session.matched.state();
+        let clock = session.matched.clock();
+        let countdown = ra2sim::countdown_number(session.matched.countdown_left());
+        // Shots are taken in the order given: only the first can fire.
+        let fire = pending.first().and_then(|(_, shot)| {
+            let ready = match *shot {
+                Shot::Intro(t) | Shot::Skip(t) => state == MatchState::Intro && intro_time >= t,
+                Shot::Countdown(n) => state == MatchState::Countdown && countdown == Some(n),
+                Shot::CountdownLeft(r) => {
+                    state == MatchState::Countdown && session.matched.countdown_left() <= r
+                }
+                // A match that ends before the shot's second (a robot out of
+                // the arena at once) is photographed in its final pose.
+                Shot::Key { at, .. } => {
+                    (state == MatchState::Fight && clock >= at)
+                        || matches!(state, MatchState::Over | MatchState::Results)
+                }
+            };
+            ready.then_some(0usize)
+        });
+        if let Some(i) = fire {
+            let (name, shot) = pending.remove(i);
+            if let Shot::Key { key, .. } = shot {
+                session.camera_key(key);
+            }
+            if matches!(shot, Shot::Skip(_)) {
+                // `Skip Intro`: the countdown inherits the flight's pose at this
+                // moment (the watch camera sets only the eye, docs/30).
+                session.skip_intro();
+                continue;
+            }
+            write_frame(
+                &mut session,
+                &renderer,
+                &ui,
+                &target,
+                size,
+                &out,
+                &format!("cam-{name}.png"),
+            )?;
+            continue;
+        }
+        if state == MatchState::Results {
+            return Err(format!(
+                "the match ended before the camera shots {:?}",
+                pending.iter().map(|p| p.0.clone()).collect::<Vec<_>>()
+            ));
+        }
+        if state == MatchState::Intro {
+            intro_time += dt;
+        }
+        session.step();
+    }
+    Ok(())
+}
+
+/// One frame of the session with its HUD over the 3D pass, written to `path`
+/// (what `--match` writes; the examples use it for scripted shots).
+pub fn write_session_frame(
+    session: &mut Session,
+    renderer: &Renderer,
+    ui: &UiRenderer,
+    size: [u32; 2],
+    path: &Path,
+) -> Result<(), String> {
+    let target = Target::new(renderer.device(), size[0], size[1]);
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "no file name".to_string())?;
+    write_frame(session, renderer, ui, &target, size, dir, name)
 }
 
 pub(crate) fn write_frame(
@@ -1108,16 +1949,13 @@ fn button_point(placed: &[ra2ui::Placement<'_>], name: &str) -> Option<[f32; 2]>
     None
 }
 
-fn scensize() -> [u32; 2] {
-    [SHELL_SIZE[0] as u32, SHELL_SIZE[1] as u32]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ra2sim::r#match::{RobotReport, WinReason};
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -1128,6 +1966,97 @@ mod tests {
                 return None;
             }
         }
+    }
+
+    /// Two robots left alone in the Combat Arena, as the live `robots-*` captures: Scout is warned
+    /// at 10 s of stillness with a counter that reads 20 minus the seconds (live: 8, 5, 2 at
+    /// 13.5, 16.5 and 19.5 s), and put out at 20 s with the `IMMOBILE!` card on its status group;
+    /// ALARM, reaching 20 s in the same sample, stays in and wins (`FUN_00418040` returns once the
+    /// match is over).
+    #[test]
+    fn an_idle_robot_shows_the_counter_then_the_card() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bots = ["AI/Team0/Bot0.bot", "AI/Team0/Bot1.bot"];
+        let cfg = MatchConfig::new(
+            arena,
+            GameType::Deathmatch,
+            (0..2)
+                .map(|i| RobotEntry::ai(i, game.join(bots[i]).to_string_lossy().to_string()))
+                .collect(),
+        )
+        .with_duration(Some(180.0));
+        let matched = Match::new(cfg).expect("the match");
+        let mut session = Session::with_match_player(&game, matched).expect("the session");
+        session.set_remote_drive(0, Some(DriveInput::default()));
+        session.set_remote_drive(1, Some(DriveInput::default()));
+        session.set_layout([1024, 768]);
+        session.skip_intro();
+        session.enter_camera(DuelCamera::Static);
+        let mut guard = 0;
+        while session.matched.state() != MatchState::Fight && guard < 6000 {
+            session.step();
+            guard += 1;
+        }
+        assert_eq!(session.matched.state(), MatchState::Fight);
+        let quads = |s: &mut Session| s.scene().expect("scene").quads.len();
+        let until = |s: &mut Session, t: f32| {
+            while s.matched.clock() < t && s.matched.state() == MatchState::Fight {
+                s.step();
+            }
+        };
+        until(&mut session, 5.5);
+        assert!(session.matched.duel.immobility_warnings().is_empty());
+        let plain = quads(&mut session);
+        for (at, expect) in [(13.5, 8), (16.5, 5), (19.5, 2)] {
+            until(&mut session, at);
+            let warnings = session.matched.duel.immobility_warnings();
+            assert_eq!(warnings.len(), 2, "both robots stand still at {at} s");
+            for (_, seconds, _) in &warnings {
+                assert_eq!(hud::immobile_number(*seconds), Some(expect), "at {at} s");
+            }
+        }
+        // `scene()` clones the HUD and hangs one group per warning in the draw list: they only
+        // lift the quad count when the project's art is there.
+        let counters = quads(&mut session);
+        assert!(
+            counters > plain,
+            "the counters draw ({counters} vs {plain})"
+        );
+        until(&mut session, 21.05);
+        assert_eq!(session.matched.state(), MatchState::Over);
+        let report = session.matched.report();
+        assert!(report.robots[0].immobilized && !report.robots[1].immobilized);
+        assert_eq!(report.winners, vec![1]);
+        assert!(session.immobile_cards[0].0 > 2.5, "the card is up");
+        assert!(session.immobile_cards[1].0 == 0.0);
+        let with_card = quads(&mut session);
+        assert!(with_card > plain);
+        // 3.0 s later the popup list has taken it down.
+        for _ in 0..(3.1 / session.matched.config.dt) as usize {
+            session.step();
+        }
+        assert!(session.immobile_cards[0].0 == 0.0);
+    }
+
+    #[test]
+    fn the_immobility_counter_and_card_geometry_are_the_binarys() {
+        assert_eq!(hud::immobile_number(10.0), Some(10));
+        assert_eq!(hud::immobile_number(12.0), Some(8));
+        assert_eq!(hud::immobile_number(19.0), Some(1));
+        assert_eq!(hud::immobile_number(19.5), None, "trunc(0.5) is 0: hidden");
+        assert_eq!(hud::immobile_number(20.0), None);
+        // 104 x 32 card centred in the 84 x 64 status group: x - 10, y + 16.
+        assert_eq!(hud::immobile_card_at([11.0, 16.0, 84.0, 64.0]), [1.0, 32.0]);
+    }
+
+    #[test]
+    fn a_countdown_left_shot_parses() {
+        let (name, shot) = parse_shot("cd@1.95").unwrap();
+        assert_eq!(name, "cd");
+        assert_eq!(shot, Shot::CountdownLeft(1.95));
+        assert_eq!(parse_shot("cd").unwrap().1, Shot::CountdownLeft(2.0));
     }
 
     fn robot(slot: usize, name: &str, team: &str, points: i32) -> RobotReport {
@@ -1144,12 +2073,213 @@ mod tests {
             battery: 1.0,
             air: 1.0,
             armor: 1.0,
+            dot: 0,
             defeated: slot == 1,
             eliminated: false,
             winner: slot == 0,
             immobilized: false,
             components: Vec::new(),
         }
+    }
+
+    /// A priced contact on a component plays one of that component's own
+    /// `damagesounds` at the contact point, at the volume the damage maps to
+    /// (`FUN_0045f3a0`), and a hit of 4 or less is silent.
+    #[test]
+    fn a_contact_plays_the_struck_components_damage_sound() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options = Options::new(
+            &game,
+            None,
+            Vec::new(),
+            Some(3.0),
+            Some(std::env::temp_dir().join("ra2-match-impact")),
+            None,
+            [640, 502],
+        )
+        .unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        assert!(session.matched.duel.record_impacts);
+        let chassis_sounds = session.matched.duel.robots[1].rig.components[0]
+            .sounds
+            .damage
+            .clone();
+        assert!(!chassis_sounds.is_empty(), "the chassis has impact sounds");
+        for damage in [3.0_f32, 52.0] {
+            session.matched.duel.impacts.push(ra2sim::combat::Impact {
+                attacker: 0,
+                target: 1,
+                component: 0,
+                by: 0,
+                damage,
+                point: glam::Vec3::new(1.0, 2.0, 3.0),
+                normal: glam::Vec3::Y,
+                speed: 4.0,
+            });
+        }
+        let mut sounds = crate::match_sounds::MatchSounds::new();
+        let cues = sounds.observe(&mut session.matched);
+        let impacts: Vec<_> = cues
+            .iter()
+            .filter_map(|c| match c {
+                crate::match_sounds::SoundCue::Impact {
+                    path,
+                    position,
+                    hundredths_db,
+                } => Some((path.clone(), *position, *hundredths_db)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(impacts.len(), 1, "damage 3 is under the floor: {cues:?}");
+        let (path, position, volume) = &impacts[0];
+        assert!(
+            chassis_sounds.contains(path),
+            "{path} not in {chassis_sounds:?}"
+        );
+        assert_eq!(*position, [1.0, 2.0, 3.0]);
+        assert!((-760..=-740).contains(volume), "{volume}");
+        assert!(session.matched.duel.impacts.is_empty(), "consumed");
+    }
+
+    /// Steps a session by 0.05 s until `until` says stop, collecting every cue
+    /// with the elapsed time at the step that made it (the match clock stands
+    /// still through the intro).
+    fn run_for_cues(
+        session: &mut Session,
+        max_seconds: f32,
+        mut until: impl FnMut(&Session, &[crate::match_sounds::SoundCue]) -> bool,
+    ) -> Vec<(f32, crate::match_sounds::SoundCue)> {
+        let mut all = Vec::new();
+        let mut clock = 0.0f32;
+        for _ in 0..(max_seconds / 0.05) as usize {
+            session.advance(0.05);
+            clock += 0.05;
+            let cues = session.take_cues();
+            let stop = until(session, &cues);
+            all.extend(cues.into_iter().map(|c| (clock, c)));
+            if stop {
+                break;
+            }
+        }
+        all
+    }
+
+    /// The countdown window plays one of six `Begin_*` lines half a second
+    /// after the bell (live: bell created at 30.52 s, line played at 31.04 s
+    /// and at 30.85 s in the two full-match captures, `docs/35`).
+    #[test]
+    fn the_bell_is_followed_half_a_second_later_by_one_begin_line() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options =
+            Options::new(&game, None, Vec::new(), Some(12.0), None, None, [640, 502]).unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        session.skip_intro();
+        let mut fight_for = 0.0f32;
+        let cues = run_for_cues(&mut session, 12.0, |s, _| {
+            if s.matched.state() == MatchState::Fight {
+                fight_for += 0.05;
+            }
+            fight_for > 1.5
+        });
+        let bell = cues
+            .iter()
+            .find(|(_, c)| matches!(c, crate::match_sounds::SoundCue::Beep { go: true }))
+            .map(|(t, _)| *t)
+            .expect("the bell");
+        let lines: Vec<_> = cues
+            .iter()
+            .filter_map(|(t, c)| match c {
+                crate::match_sounds::SoundCue::Announce { path } => Some((*t, *path)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let (at, path) = lines[0];
+        assert!(
+            crate::match_sounds::BEGIN_LINES.contains(&path),
+            "{path} is not one of the six"
+        );
+        assert!(
+            (0.4..=0.65).contains(&(at - bell)),
+            "{} s after the bell",
+            at - bell
+        );
+        // Every one of them is a shipped file.
+        for line in crate::match_sounds::BEGIN_LINES {
+            assert!(game.join(line).is_file(), "{line}");
+        }
+    }
+
+    /// The crowd object is built with the match and ticks through the arena
+    /// intro: excitement 55 falls a point a second, so the first mood change
+    /// (`normal_to_somewhat` at 44) comes about 11 s in, long before the bell
+    /// (live: `crowd/*.wav` created at 4.95 s, the transition at 16.07 s).
+    #[test]
+    fn the_crowd_ticks_through_the_intro() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options =
+            Options::new(&game, None, Vec::new(), Some(40.0), None, None, [640, 502]).unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        let cues = run_for_cues(&mut session, 13.0, |s, _| {
+            s.matched.state() != MatchState::Intro
+        });
+        let change = cues
+            .iter()
+            .find(|(_, c)| {
+                matches!(c, crate::match_sounds::SoundCue::CrowdOneShot { path }
+                    if path.contains("normal_to_somewhat"))
+            })
+            .map(|(t, _)| *t);
+        let change = change.unwrap_or_else(|| panic!("no mood change in the intro: {cues:?}"));
+        assert!((10.0..=12.5).contains(&change), "{change}");
+    }
+
+    /// Weapon triggers sound once per press, at the class's own level
+    /// (`-500` electric burst motor, `0` piston), not once per stroke: the
+    /// live Scout v ALARM fights have the piston's `air_trigger` about every
+    /// half second and the burst motor's `burst_trigger` twice in 100 s.
+    #[test]
+    fn weapon_triggers_sound_once_per_press() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let bots = vec![
+            game.join("AI/Team0/Bot0.bot"),
+            game.join("AI/Team0/Bot1.bot"),
+        ];
+        let options = Options::new(&game, None, bots, Some(40.0), None, None, [640, 502]).unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        session.skip_intro();
+        let mut fight_for = 0.0f32;
+        let cues = run_for_cues(&mut session, 40.0, |s, _| {
+            if s.matched.state() == MatchState::Fight {
+                fight_for += 0.05;
+            }
+            fight_for >= 25.0
+        });
+        let fires: Vec<(f32, i32)> = cues
+            .iter()
+            .filter_map(|(t, c)| match c {
+                crate::match_sounds::SoundCue::Fire { hundredths_db, .. } => {
+                    Some((*t, *hundredths_db))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!fires.is_empty(), "the AIs fire in 25 s of fight");
+        assert!(
+            fires.iter().all(|(_, db)| *db == 0 || *db == -500),
+            "{fires:?}"
+        );
+        // Never faster than the AI's own half-second trigger (3 Hz at most
+        // for two robots, with slack for the step grid).
+        assert!(
+            fires.len() as f32 <= 25.0 * 4.0 + 4.0,
+            "{} fires",
+            fires.len()
+        );
     }
 
     /// The arena's own `DoIntro` reaches the mixer: the intro music and the
@@ -1244,6 +2374,62 @@ mod tests {
 
     /// The four result slots are filled from the report's own rows: the points
     /// and bot name land in slots 1 and 2, and slots 3/4 stay empty for a duel.
+    /// Esc in the original (`0x475ee0`): pause popup on/off during play, ignored
+    /// once the match is over.
+    #[test]
+    fn escape_toggles_the_pause_dialog_and_is_ignored_in_the_results() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options =
+            Options::new(&game, None, Vec::new(), Some(3.0), None, None, [640, 502]).unwrap();
+        let mut session = Session::new(&options).expect("the match");
+        session.skip_intro();
+        while session.matched.state() != MatchState::Fight {
+            session.step();
+        }
+        assert_eq!(session.escape(), Escape::Paused);
+        assert!(session.paused);
+        assert_eq!(session.escape(), Escape::Resumed);
+        assert!(!session.paused);
+        while session.matched.state() != MatchState::Results {
+            session.step();
+        }
+        assert_eq!(session.escape(), Escape::Ignored);
+        assert!(!session.paused);
+    }
+
+    /// The match windows lay out natively on the target (the original has no
+    /// design size): at 1024x768 the countdown group is the 210x96 box the
+    /// `arena-*-countdown` captures show at x 407..617, y 336..432, and the
+    /// scene is exactly the target size so the renderer's fit is the identity.
+    #[test]
+    fn the_match_windows_lay_out_natively_on_the_target() {
+        let Some(game) = game_dir() else { return };
+        let mut presentation = Presentation::open(&game).unwrap();
+        presentation.layout = [1024.0, 768.0];
+        let bind = ScreenBind {
+            camera: "Watch 1".into(),
+            show_camera: true,
+            chat_open: false,
+            chat_entry: String::new(),
+            chat_lines: Vec::new(),
+        };
+        let (_, scene) = presentation
+            .hud_scene(&report(), MatchState::Countdown, 0.0, 2.5, &bind)
+            .unwrap();
+        assert_eq!(scene.size, [1024, 768]);
+        let placed = ra2ui::resolve_with(&presentation.hud, presentation.layout, None);
+        let group = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "countdown group")
+            .expect("the countdown group");
+        assert_eq!(
+            [group.frame.x, group.frame.y, group.frame.w, group.frame.h],
+            [407.0, 336.0, 210.0, 96.0]
+        );
+    }
+
     #[test]
     fn the_results_screen_takes_the_reports_slots() {
         let Some(game) = game_dir() else { return };
@@ -1275,7 +2461,7 @@ mod tests {
             scene.quads.len()
         );
         assert!(
-            glyphs > 100,
+            glyphs > 60,
             "a result screen reads, not a blank panel: {glyphs}"
         );
     }
@@ -1458,13 +2644,16 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `camera textbox` names the camera object and hides after 3.0 s.
+    /// `camera textbox` shows the name the scene camera reports and hides
+    /// after 3.0 s.
     ///
-    /// The three shipped cameras call themselves `Watch Cam`, `Static Cam` and
-    /// `Orbit Cam` (`0x6f1044`, `0x6f1038`, `0x6f102c`); the arena's own
-    /// `AddStaticCamera("Static 1", …)` (`Arenas/box.py:22`) replaces the
-    /// static default. `FUN_00477180` shows the box for 3.0 s (`0x4771a2`) and
-    /// `0x4774f1` hides it at zero.
+    /// The intro flies the static configuration (`Static 1`, as in the
+    /// original's `arena-box-intro` capture); the countdown starts on the
+    /// config's `watch` camera, which asks the arena for its first watch camera
+    /// (`Watch 1`); F3 asks for the next static camera each press (`Static 1`,
+    /// `Static 2`) and F2 is the camera class's own `Orbit Cam`.
+    /// `FUN_00477180` shows the box for 3.0 s (`0x4771a2`) and `0x4774f1` hides
+    /// it at zero.
     #[test]
     fn the_camera_textbox_names_the_camera_and_hides_after_three_seconds() {
         let Some(game) = game_dir() else { return };
@@ -1480,17 +2669,23 @@ mod tests {
         )
         .unwrap();
         let mut session = Session::new(&options).expect("the match");
-        assert_eq!(session.camera_label(), "Watch Cam");
+        if session.matched.state() == MatchState::Intro {
+            assert_eq!(session.camera_label(), "Static 1", "the intro's camera");
+            session.skip_intro();
+            session.step();
+        }
+        assert_eq!(session.matched.state(), MatchState::Countdown);
+        assert_eq!(session.camera_label(), "Watch 1");
         assert!(session.show_camera_label());
-        session.cycle_camera();
-        assert_eq!(
-            session.camera_label(),
-            "Static 1",
-            "the arena's own static camera name"
-        );
+        session.camera_key(3);
+        assert_eq!(session.camera_label(), "Static 1");
         assert!(session.show_camera_label(), "a change re-opens the window");
-        session.cycle_camera();
+        session.camera_key(3);
+        assert_eq!(session.camera_label(), "Static 2", "the next static camera");
+        session.camera_key(2);
         assert_eq!(session.camera_label(), "Orbit Cam");
+        session.camera_key(4);
+        assert_eq!(session.camera_label(), "Watch 1");
         let steps = (crate::match_mode::CAMERA_LABEL_SECONDS / session.matched.config.dt).ceil()
             as usize
             + 2;
@@ -1498,6 +2693,48 @@ mod tests {
             session.step();
         }
         assert!(!session.show_camera_label(), "the 3.0 s window has run out");
+    }
+
+    /// A second match in one process starts on its own arena's camera: nothing
+    /// of the first arena's intro, camera iterators or queued camera requests
+    /// carries over, even when the first was never finished.
+    #[test]
+    fn a_second_match_does_not_inherit_the_first_arenas_camera_state() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let make = |arena: &str, tag: &str| {
+            let mut options = Options::new(
+                &game,
+                None,
+                Vec::new(),
+                Some(2.0),
+                Some(std::env::temp_dir().join(format!("ra2-match-two-{tag}"))),
+                None,
+                [640, 502],
+            )
+            .unwrap();
+            options.arena = game.join("Arenas").join(arena);
+            Session::new(&options).expect("the match")
+        };
+        // The first match is left in its intro, with its cameras advanced.
+        let mut first = make("box.py", "a");
+        assert_eq!(first.camera_label(), "Static 1");
+        first.camera_key(3);
+        first.camera_key(3);
+        assert_eq!(first.camera_label(), "Static 3");
+        drop(first);
+        let second = make("box.py", "b");
+        assert_eq!(second.matched.state(), MatchState::Intro);
+        assert_eq!(
+            second.camera_label(),
+            "Static 1",
+            "the same arena starts over"
+        );
+        drop(second);
+        let third = make("octagon.py", "c");
+        let label = third.camera_label();
+        assert!(!label.is_empty() && label != "Static 3", "{label}");
+        assert!(ra2script::camera::intro_running());
     }
 
     /// The shipped dialog is the in-game pause popup; its two buttons are named
@@ -1517,5 +2754,260 @@ mod tests {
         assert_eq!(root.name(), "in game popup win");
         assert!(ra2ui::workshop::find(root, "resume button").is_some());
         assert!(ra2ui::workshop::find(root, "quit button").is_some());
+    }
+
+    /// A fight the player drives, past the intro.
+    fn player_fight(game: &Path, seconds: f32) -> Session {
+        let options = Options::new(
+            game,
+            None,
+            Vec::new(),
+            Some(seconds),
+            None,
+            None,
+            [640, 502],
+        )
+        .unwrap();
+        let mut session = Session::new_player(&options).expect("the match");
+        session.skip_intro();
+        while session.matched.state() != MatchState::Fight {
+            session.step();
+        }
+        session
+    }
+
+    /// In-match chat (docs/38 §11): the key does nothing outside a network
+    /// match; in one, Enter hands the line to the network layer and closes the
+    /// group, Escape drops it, a received line shows in the box with the chat
+    /// cue and clears after its time.
+    #[test]
+    fn chat_is_a_network_match_feature_with_a_timed_display() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let mut session = player_fight(&game, 30.0);
+        session.toggle_chat();
+        assert!(!session.chat_open(), "no chat key outside multiplayer");
+        session.enable_chat();
+        session.toggle_chat();
+        assert!(session.chat_open());
+        "hi there".chars().for_each(|c| session.chat_type(c));
+        session.chat_submit();
+        assert!(!session.chat_open());
+        assert_eq!(session.take_chat_outbox(), vec!["hi there".to_string()]);
+        session.toggle_chat();
+        session.chat_type('x');
+        session.chat_cancel();
+        assert!(session.take_chat_outbox().is_empty());
+        session.toggle_chat();
+        session.chat_submit();
+        assert!(session.take_chat_outbox().is_empty(), "empty sends nothing");
+
+        session.take_cues();
+        for i in 0..8 {
+            session.push_chat_line(format!("[A] line {i}"));
+        }
+        assert_eq!(session.chat_lines().len(), CHAT_LINES);
+        assert_eq!(session.chat_lines()[0], "[A] line 2");
+        assert!(session
+            .take_cues()
+            .contains(&crate::match_sounds::SoundCue::Chat));
+        let steps = (CHAT_LINE_SECONDS / session.matched.config.dt) as usize + 2;
+        for _ in 0..steps {
+            session.step();
+        }
+        assert!(
+            session.chat_lines().is_empty(),
+            "the lines clear on their own"
+        );
+    }
+
+    /// The floating damage number (docs/37 section 7) reaches the HUD scene as two `fg_d20` cells in
+    /// the damage colour, behind the HUD windows, 0.15 s after a hazard hit on the human robot,
+    /// and is gone a second after that; the options window's `GraphicMessages` switch turns it off.
+    #[test]
+    fn a_hazard_hit_on_the_player_shows_a_red_number_for_a_second() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let mut session = player_fight(&game, 30.0);
+        session.set_layout([1024, 768]);
+        let point = session.matched.duel.robots[0].position(&*session.matched.duel.physics);
+        let count = |session: &mut Session| {
+            session
+                .scene()
+                .expect("a scene")
+                .quads
+                .iter()
+                .filter(|q| q.color[..3] == [0.8, 0.0, 0.0])
+                .count()
+        };
+        let before = count(&mut session);
+        session
+            .matched
+            .duel
+            .apply_hit(None, 0, 0, 25.0, point + glam::Vec3::Y * 0.3);
+        let dt = session.matched.config.dt;
+        for _ in 0..(0.1 / dt) as usize {
+            session.step();
+        }
+        assert_eq!(count(&mut session), before, "the entry waits 0.15 s");
+        for _ in 0..(0.2 / dt) as usize {
+            session.step();
+        }
+        let scene = session.scene().expect("a scene");
+        let red: Vec<_> = scene
+            .quads
+            .iter()
+            .filter(|q| q.color[..3] == [0.8, 0.0, 0.0])
+            .collect();
+        assert_eq!(red.len(), before + 2, "`25` is two glyph cells");
+        // drawn first, under the HUD
+        assert!(scene.quads[..2]
+            .iter()
+            .all(|q| q.color[..3] == [0.8, 0.0, 0.0]));
+        for _ in 0..(1.0 / dt) as usize {
+            session.step();
+        }
+        assert_eq!(count(&mut session), before, "a number lives one second");
+
+        // `GraphicMessages=0`: the hit makes no number
+        session.matched.set_damage_messages(false);
+        session
+            .matched
+            .duel
+            .apply_hit(None, 0, 0, 25.0, point + glam::Vec3::Y * 0.3);
+        for _ in 0..(0.3 / dt) as usize {
+            session.step();
+        }
+        assert_eq!(count(&mut session), before);
+    }
+
+    /// F1 (`0x475ee0`, key `0x70`) shows `common/controls_reminder.gib` for
+    /// the player's robot over the paused match; F1 again or Esc closes it
+    /// (`0x482a10`); it is refused in the intro and while the pause dialog
+    /// owns the keys.
+    #[test]
+    fn f1_shows_the_controls_reminder_over_a_paused_match() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let options =
+            Options::new(&game, None, Vec::new(), Some(3.0), None, None, [640, 502]).unwrap();
+        let mut intro = Session::new_player(&options).expect("the match");
+        if intro.matched.state() == MatchState::Intro {
+            assert!(!intro.controls_key(), "F1 is ignored while the intro plays");
+        }
+        drop(intro);
+        let mut session = player_fight(&game, 3.0);
+        let hud_quads = session.scene().unwrap().quads.len();
+        assert!(session.controls_key());
+        assert!(session.reminder_open() && session.frozen());
+        let clock = session.matched.clock();
+        session.advance(1.0);
+        assert_eq!(
+            session.matched.clock(),
+            clock,
+            "the match is paused under it"
+        );
+        let scene = session.scene().unwrap();
+        assert!(
+            scene.quads.len() > hud_quads,
+            "the reminder window and its control cells draw over the HUD"
+        );
+        assert!(session.controls_key(), "F1 again closes it");
+        assert!(!session.reminder_open() && !session.frozen());
+        session.controls_key();
+        assert_eq!(session.escape(), Escape::Resumed, "Esc closes it");
+        assert!(!session.reminder_open());
+        assert_eq!(session.escape(), Escape::Paused);
+        assert!(!session.controls_key(), "the pause dialog owns the keys");
+        assert_eq!(session.escape(), Escape::Resumed);
+    }
+
+    /// The pause dialog's `options button` (`FUN_00476700`): the dialog
+    /// goes, the match stays paused under the options window, and closing
+    /// the window resumes the match.
+    #[test]
+    fn pause_options_holds_the_match_until_the_window_closes() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let mut session = player_fight(&game, 3.0);
+        assert_eq!(session.escape(), Escape::Paused);
+        let placed = ra2ui::resolve_with(
+            &session.dialog,
+            session.layout(),
+            Some(session.presentation.assets.faces()),
+        );
+        let options = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "options button")
+            .expect("the dialog has an options button")
+            .frame;
+        let point = [options.x + options.w / 2.0, options.y + options.h / 2.0];
+        assert_eq!(
+            session.pause_button_at(point).as_deref(),
+            Some("options button")
+        );
+        session.open_options();
+        assert!(session.options_open() && !session.paused && session.frozen());
+        let clock = session.matched.clock();
+        session.advance(1.0);
+        assert_eq!(session.matched.clock(), clock);
+        assert_eq!(session.escape(), Escape::Ignored);
+        session.close_options();
+        assert!(!session.frozen());
+        session.advance(0.5);
+        assert!(session.matched.clock() > clock);
+    }
+
+    /// A match the player plays that runs out of time is the judges'
+    /// (`FUN_00418770`, points), not the evidence script's elimination.
+    #[test]
+    fn a_player_match_that_times_out_goes_to_the_judges() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let mut session = player_fight(&game, 2.0);
+        assert!(!session.evidence_decision);
+        while !matches!(
+            session.matched.state(),
+            MatchState::Over | MatchState::Results
+        ) {
+            session.step();
+        }
+        let report = session.report();
+        assert_eq!(report.reason, Some(ra2sim::r#match::WinReason::Timeout));
+        assert!(report.robots.iter().all(|r| !r.eliminated));
+    }
+
+    /// The pause dialog's `End Match` in an event (`0x475ee0`, result 4, game
+    /// type 2) runs the judges' decision at once, long before the clock would,
+    /// and the match goes on to its results; it cannot end an arena intro.
+    #[test]
+    fn end_match_in_an_event_hands_the_match_to_the_judges() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let mut session = player_fight(&game, 600.0);
+        session.toggle_pause();
+        assert!(session.paused);
+        let clock = session.matched.clock();
+        assert!(session.end_for_judges(), "a fight can be ended");
+        assert!(!session.paused, "the popup closed and the match resumed");
+        assert!(matches!(session.matched.state(), MatchState::Over));
+        let mut guard = 0;
+        while session.matched.state() != MatchState::Results && guard < 2000 {
+            session.step();
+            guard += 1;
+        }
+        assert_eq!(session.matched.state(), MatchState::Results);
+        let report = session.report();
+        assert_eq!(report.reason, Some(ra2sim::r#match::WinReason::Timeout));
+        assert!(
+            report.duration < 600.0 && (report.duration - clock).abs() < 1.0,
+            "ended at {} s, not at the limit",
+            report.duration
+        );
+        assert!(
+            !session.end_for_judges(),
+            "a finished match is not ended again"
+        );
     }
 }

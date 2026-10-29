@@ -14,6 +14,11 @@ pub const USER_PROP: u64 = 3;
 pub struct ArenaScene {
     pub items: Vec<DrawItem>,
     pub triangles: Vec<[Vec3; 3]>,
+    /// The fixed collision bodies one by one, when the collider is the
+    /// arena's own rigid bodies (empty for a proxy or visible-geometry
+    /// collider): the original gives each its own collidable, a mesh with
+    /// its own MOPP or a convex hull (docs/29 section 12v).
+    pub colliders: Vec<FixedCollider>,
     pub center: Vec3,
     pub min: Vec3,
     pub max: Vec3,
@@ -23,12 +28,86 @@ pub struct ArenaScene {
     pub friction: f32,
     /// Restitution of the arena's fixed geometry.
     pub restitution: f32,
+    /// The `.gmf`'s static background colour (RGB 0..1); the clear colour
+    /// unless the arena script calls `plus.setBackColor`.
+    pub background: [f32; 3],
+}
+
+/// How the original collides a fixed body (docs/29 section 12v).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FixedKind {
+    /// A triangle mesh compiled into a MOPP (`SIMULATION_GEOMETRY` 5 or 6:
+    /// the original compiles a MOPP for each such body at load, and for no
+    /// other, `mopp-...__live__000`).
+    Mesh,
+    /// The convex hull of the body's points (`SIMULATION_GEOMETRY` 2 or 3,
+    /// as a robot part's: §12g, §12p).
+    Convex,
+    /// An endless plane (`HAVOK_GEO_TYPE` 1), here two large triangles.
+    Plane,
+}
+
+/// One fixed collision body of the arena, in its own frame.
+#[derive(Clone, Debug)]
+pub struct FixedCollider {
+    pub name: String,
+    pub kind: FixedKind,
+    pub position: Vec3,
+    pub rotation: Quat,
+    /// Triangle corners in the body's frame (three per triangle, in the
+    /// file's face order: the order the original's geometry keeps).
+    pub points: Vec<Vec3>,
 }
 
 /// Gravity every shipped arena but the practice arena declares.
 pub const STOCK_GRAVITY: Vec3 = Vec3::new(0.0, -9.809_98, 0.0);
 
 impl ArenaScene {
+    /// The static arena body's shape: one child per fixed body when the
+    /// collider is the arena's own rigid bodies (`RA2_ARENA_MERGED=1`: the
+    /// one merged mesh it used to be), else the triangle soup as one mesh.
+    pub fn collider_shape(&self) -> crate::backend::ShapeDesc {
+        use crate::backend::{CompoundChild, ShapeDesc};
+        let merged = std::env::var("RA2_ARENA_MERGED").is_ok_and(|v| v == "1");
+        if self.colliders.is_empty() || merged {
+            let (vertices, indices) = self.triangle_soup();
+            return ShapeDesc::TriMesh { vertices, indices };
+        }
+        let children = self
+            .colliders
+            .iter()
+            .enumerate()
+            .map(|(k, c)| {
+                let shape = match c.kind {
+                    FixedKind::Convex => ShapeDesc::ConvexHull {
+                        points: c.points.clone(),
+                    },
+                    FixedKind::Mesh | FixedKind::Plane => {
+                        // Both windings, as the soup: a mesh with no volume
+                        // is solid from either side (havok17 keeps the first).
+                        let mut vertices = Vec::with_capacity(c.points.len() * 2);
+                        let mut indices = Vec::with_capacity(c.points.len() / 3 * 2);
+                        for t in c.points.as_chunks::<3>().0 {
+                            for tri in [[t[0], t[2], t[1]], [t[0], t[1], t[2]]] {
+                                let b = vertices.len() as u32;
+                                vertices.extend_from_slice(&tri);
+                                indices.push([b, b + 1, b + 2]);
+                            }
+                        }
+                        ShapeDesc::TriMesh { vertices, indices }
+                    }
+                };
+                CompoundChild {
+                    local_position: c.position,
+                    local_rotation: c.rotation,
+                    shape,
+                    tag: k as u32,
+                }
+            })
+            .collect();
+        ShapeDesc::Compound(children)
+    }
+
     /// Non-indexed triangle soup for a mesh collider.
     pub fn triangle_soup(&self) -> (Vec<Vec3>, Vec<[u32; 3]>) {
         let mut verts = Vec::with_capacity(self.triangles.len() * 3);
@@ -65,21 +144,83 @@ fn ray_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f3
     (dist > 1e-4).then_some(dist)
 }
 
-/// Does a downward ray at `(x, z)` land on something within 10 m below `top`?
+/// Does a downward ray at `(x, z)`, cast from above everything (`above`),
+/// land on something lower than `below` (the arena's vertical middle, so a
+/// ceiling does not count as a floor)?
 ///
-/// `top` is the lowest point of the *visible* geometry, so an arena that sits
-/// well below the origin still probes its own floor. (The distance a ray reports
-/// is not a height; comparing the two — as this used to — only worked for
-/// arenas near y = 0 and rejected every arena dug deeper than 10 m, which is
-/// why `Hilltop`, `Clawtop`, `Electric` and `FlexTop` never used their own
-/// rigid-body collider.)
-fn has_floor(triangles: &[[Vec3; 3]], x: f32, z: f32, top: f32) -> bool {
-    let origin = Vec3::new(x, top + 5.0, z);
+/// It used to start 5 m above the lowest *visible* point, which for an arena
+/// with a deep pit (Hilltop's is 20 m down, Electric's 8 m) is under its own
+/// floor, so the ray never met it.
+fn has_floor(triangles: &[[Vec3; 3]], x: f32, z: f32, above: f32, below: f32) -> bool {
+    let origin = Vec3::new(x, above, z);
     triangles.iter().any(|t| {
         ray_triangle(origin, Vec3::NEG_Y, t[0], t[1], t[2])
-            .map(|d| origin.y - d > top - 10.0)
+            .map(|d| origin.y - d < below)
             .unwrap_or(false)
     })
+}
+
+/// Whether every start point has collision under it (within a few metres): the
+/// Metal Skull's decoded rigid-body geometry omits its left plateau, and a robot
+/// spawned there would fall into the pit before the bell.
+fn supports_starts(triangles: &[[Vec3; 3]], starts: &[(Vec3, Vec3)]) -> bool {
+    starts.iter().all(|(p, _)| {
+        let origin = *p + Vec3::Y * 0.01;
+        triangles.iter().any(|t| {
+            ray_triangle(origin, Vec3::NEG_Y, t[0], t[1], t[2])
+                .map(|d| d < 6.0)
+                .unwrap_or(false)
+        })
+    })
+}
+
+/// The fixed collision triangles plus those of the movable bodies the file's
+/// constraints hold up, where they rest: FlexTop's only fixed collidable is an
+/// implicit plane 9.8 m down (`colliders-flextop__live__000`), and its start
+/// points stand on the table, a 400 kg body hung from a point-to-point and two
+/// angular dashpots (docs/29 section 12j).
+fn with_suspended(h: &ra2_render::HavokArena) -> Vec<[Vec3; 3]> {
+    let mut out = h.static_triangles.clone();
+    for b in h
+        .bodies
+        .iter()
+        .filter(|b| !b.is_static() && b.collides() && h.is_suspended(&b.name))
+    {
+        for t in b.points.as_chunks::<3>().0 {
+            out.push([
+                b.transform.transform_point3(t[0]),
+                b.transform.transform_point3(t[1]),
+                b.transform.transform_point3(t[2]),
+            ]);
+        }
+    }
+    out
+}
+
+/// The arena's fixed colliding bodies, each in its own frame (the body's
+/// placement's scale, if any, baked into its points).
+fn fixed_colliders(h: &ra2_render::HavokArena) -> Vec<FixedCollider> {
+    h.bodies
+        .iter()
+        .filter(|b| b.is_static() && b.collides() && b.points.len() >= 3)
+        .map(|b| {
+            let (scale, rotation, position) = b.transform.to_scale_rotation_translation();
+            let kind = if b.is_plane() {
+                FixedKind::Plane
+            } else if matches!(b.simulation_geometry, 2 | 3) {
+                FixedKind::Convex
+            } else {
+                FixedKind::Mesh
+            };
+            FixedCollider {
+                name: b.name.clone(),
+                kind,
+                position,
+                rotation,
+                points: b.points.iter().map(|p| *p * scale).collect(),
+            }
+        })
+        .collect()
 }
 
 /// Load an arena (`.py` script or `.gmf`) into visuals + collision triangles.
@@ -109,6 +250,7 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
         t
     };
 
+    let starts = ra2_render::start_points(path).unwrap_or_default();
     let havok = ra2_render::collect_havok(path)?;
     let gravity = havok
         .as_ref()
@@ -149,15 +291,24 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
     let mode = mode.to_ascii_lowercase();
     let mut source = "visible";
     let mut raw = visible.clone();
+    let mut colliders = Vec::new();
     if mode != "visible" {
         let mut taken = false;
         if mode == "auto" || mode == "rb" {
             if let Some(h) = &havok {
                 if !h.static_triangles.is_empty()
-                    && has_floor(&h.static_triangles, centre.x, centre.z, min.y)
+                    && has_floor(
+                        &h.static_triangles,
+                        centre.x,
+                        centre.z,
+                        max.y + 1.0,
+                        centre.y,
+                    )
+                    && (mode == "rb" || supports_starts(&with_suspended(h), &starts))
                 {
                     source = "rigid bodies";
                     raw = h.static_triangles.clone();
+                    colliders = fixed_colliders(h);
                     taken = true;
                 } else if !h.static_triangles.is_empty() {
                     eprintln!("  rigid-body collider does not cover the floor");
@@ -170,7 +321,7 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
             // centre has nothing under it we would drop robots through the world,
             // so fall back rather than trust it.
             match proxy {
-                Some(t) if has_floor(&t, centre.x, centre.z, min.y) => {
+                Some(t) if has_floor(&t, centre.x, centre.z, max.y + 1.0, centre.y) => {
                     source = "proxy";
                     raw = t;
                 }
@@ -205,12 +356,14 @@ pub fn load_arena(path: &str) -> Result<ArenaScene, Box<dyn std::error::Error>> 
     Ok(ArenaScene {
         items,
         triangles,
+        colliders,
         center: centre,
         min,
         max,
         gravity,
         friction,
         restitution,
+        background: ra2_render::scene_background(path).unwrap_or([0.0; 3]),
     })
 }
 
@@ -227,6 +380,52 @@ pub struct Prop {
     pub restitution: f32,
     /// Visual batches, object-local.
     pub items: Vec<DrawItem>,
+    /// Collide as this triangle mesh over `hull_points` (Havok's `GEOMETRIC`
+    /// collidable) instead of their hull: a body the file's constraints hold,
+    /// FlexTop's table, which is a ring with the hole in the middle a robot
+    /// can fall through.
+    pub mesh: Option<Vec<[u32; 3]>>,
+    /// Mass properties read off the original where no rule is recovered:
+    /// the centre of mass in the object's frame and the inertia tensor about
+    /// it (see [`LIVE_MASS`]).
+    pub live_mass: Option<(Vec3, glam::Mat3)>,
+    /// The material an `AddXtra` line gives the prop (its own component,
+    /// `FUN_00403aa0`); `None` for the arena `.gmf`'s own bodies, which the
+    /// arena's component prices (docs/29 §12o).
+    pub material: Option<String>,
+}
+
+/// Arena bodies whose mass properties are taken from the original as measured
+/// (body `+0x30`, `+0x19c`), because the rule Havok derives them by is not
+/// recovered: `(arena body, centre in the object frame, inertia diagonal,
+/// inertia xz)`.
+///
+/// FlexTop's table (`flextable-scout-alarm-flextop__live__000`): 400 kg, its
+/// centre 0.8805 m above the pivot, i.e. `(0, 1.0000, 0)` in its own frame,
+/// and an inertia of (15550.73, 31099.06, 15550.73) kg·m² with an xz term of
+/// -6.48: a flat distribution (`Iyy = Ixx + Izz` to 0.01 %). Its mesh's hull
+/// gives (0, 0.974, 0) and (15025, 29869, 14950); the open mesh's own solid,
+/// the area of its faces and its vertices do not fit either (docs/29 §12j).
+pub const LIVE_MASS: &[(&str, [f32; 3], [f32; 3], f32)] = &[(
+    "floor_collision",
+    [0.0, 1.0000, 0.0],
+    [15550.73, 31099.06, 15550.73],
+    -6.484,
+)];
+
+fn live_mass(name: &str, mass: f32) -> Option<(Vec3, glam::Mat3)> {
+    let (_, com, diag, xz) = LIVE_MASS
+        .iter()
+        .find(|(n, ..)| n.eq_ignore_ascii_case(name))?;
+    if (mass - 400.0).abs() > 1e-3 {
+        return None;
+    }
+    let i = glam::Mat3::from_cols(
+        Vec3::new(diag[0], 0.0, *xz),
+        Vec3::new(0.0, diag[1], 0.0),
+        Vec3::new(*xz, 0.0, diag[2]),
+    );
+    Some((Vec3::from(*com), i))
 }
 
 /// Load movable props from the arena script's `AddXtra` meshes. Props whose
@@ -285,10 +484,14 @@ pub fn load_props(
                     hull_points,
                     position,
                     rotation,
-                    mass: if rb.mass > 0.0 { rb.mass } else { 20.0 },
+                    // A rigid body of mass 0 is Havok's fixed body (the practice arena's ramps).
+                    mass: rb.mass.max(0.0),
                     friction: rb.friction.max(0.05),
                     restitution: rb.elasticity.clamp(0.0, 1.0),
                     items,
+                    mesh: None,
+                    live_mass: None,
+                    material: Some(xtra.material.clone()),
                 });
             }
         }
@@ -309,6 +512,12 @@ pub fn load_havok_props(path: &str) -> Result<Vec<Prop>, Box<dyn std::error::Err
         .filter(|b| !b.is_static() && b.collides() && !b.points.is_empty() && !b.items.is_empty())
         .map(|b| {
             let (_, rotation, position) = b.transform.to_scale_rotation_translation();
+            // `points` is a triangle soup: three per face.
+            let mesh = havok.is_suspended(&b.name).then(|| {
+                (0..b.points.len() as u32 / 3)
+                    .map(|i| [3 * i, 3 * i + 1, 3 * i + 2])
+                    .collect()
+            });
             Prop {
                 name: b.name.clone(),
                 hull_points: b.points.clone(),
@@ -318,6 +527,9 @@ pub fn load_havok_props(path: &str) -> Result<Vec<Prop>, Box<dyn std::error::Err
                 friction: b.friction.max(0.05),
                 restitution: b.elasticity.clamp(0.0, 1.0),
                 items: b.items.clone(),
+                live_mass: mesh.as_ref().and_then(|_| live_mass(&b.name, b.mass)),
+                mesh,
+                material: None,
             }
         })
         .collect())

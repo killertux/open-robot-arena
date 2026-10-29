@@ -89,15 +89,24 @@ raw=r.get_image(0,0,w,h,Xlib.X.ZPixmap,0xffffffff)
 Image.frombytes("RGB",(w,h),raw.data,"raw","BGRX").save(sys.argv[2])' :3 out.png
 ```
 
-### 3.4 The one thing that did not work
+### 3.4 Input to the original (corrected 2026-10-18)
 
-With no window manager, mouse **motion** reaches the menu (the hovered button
-changes art) but a synthetic XTEST **click does not activate it**; Enter also
-does nothing on the menu. A retry with `metacity` did not get past the font
-dialog (focus routing), and its root capture came out blank. So: **capture of
-non-boot screens is a human-driven step at the display for now**; input
-automation is not solved and is not needed to retire W4. Do not build a
-click-driving harness until it is re-measured.
+An earlier version of this section said automated input to the original was
+impossible. **That was wrong.** What is true: with no window manager, X-side
+mouse input (XTEST click, XSendEvent, warp, uinput) reaches the X server and the
+game's window as `WM_*` messages but never moves its UI cursor or activates a
+button, because the game's UI reads its own mouse-state object (written from
+DirectInput) and ignores window mouse messages. The keyboard is fine (XTEST keys
+reach it: F1..F4 cameras in a match, Return on the startup dialogs).
+
+The working route writes that mouse-state object from a Frida agent running
+inside the flatpak sandbox (`tools/capture/original_session.sh`,
+`tools/oracle/ra2_drive.py`, `tools/oracle/frida/ra2_input.js`), and runs Python
+inside the game for the `plus` API (`ra2_python.py`). With it every screen in
+`local/oracle/original/` beyond the main menu was captured, as were live match
+traces and damage logs. See `tools/capture/README.md`. Remaining quirks: some
+screens repaint late (wait a few seconds before a shot), and a match is not
+reproducible run to run.
 
 ## 4. Limits, stated
 

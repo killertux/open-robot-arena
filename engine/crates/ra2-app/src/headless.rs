@@ -16,7 +16,6 @@ use ra2_shell::{Shell, Step};
 
 use crate::audio::AudioSystem;
 use crate::frame::FrameRenderer;
-use crate::SHELL_SIZE;
 
 /// Apply a click script, in order, at the shell's own coordinates.
 pub fn apply_clicks(shell: &mut Shell, clicks: &[[f32; 2]]) -> Result<Vec<Step>, String> {
@@ -74,7 +73,18 @@ pub fn run(
     click_names: &[String],
     audio_report: bool,
 ) -> Result<(), String> {
-    let mut shell = Shell::boot(game, SHELL_SIZE)?;
+    let mut shell = Shell::boot(game, [size[0] as f32, size[1] as f32])?;
+    if let Some(view) = crate::hq_mode::shell_view(game) {
+        shell.set_hq_view(view);
+    }
+    if let Some(hook) = crate::hq_mode::shell_enter_hook(game) {
+        shell.set_enter_hook(hook);
+    }
+    shell.set_team_hook(crate::hq_mode::shell_team_hook(game));
+    shell.set_scrap_hook(crate::hq_mode::shell_scrap_hook(game));
+    shell.set_export_hook(crate::hq_mode::shell_export_hook(game));
+    shell.set_import_hook(crate::hq_mode::shell_import_hook(game));
+    shell.set_later_hook(crate::hq_mode::shell_later_hook(game));
     println!(
         "booted {} from {} ({}x{})",
         shell.screen_id(),
@@ -83,26 +93,40 @@ pub fn run(
         shell.size()[1]
     );
     let cfg = crate::options::read_cfg(game);
-    let mut audio = AudioSystem::new_silent(game, &cfg);
+    let mut audio = AudioSystem::new_offscreen(game, &cfg);
     audio.on_screen(&shell.screen_id());
     let mut settings = crate::options::Options::open_game(game);
 
     let mut steps = Vec::new();
+    let mut pick = None;
     if click_names.is_empty() {
         for &point in clicks {
             stage_options(&shell, &mut settings, &mut audio, point)?;
+            let cell = crate::flow::inventory_cell_at(&shell, point);
             steps.push(shell.click(point[0], point[1])?);
             let step = steps.last().unwrap().clone();
+            crate::flow::inventory_click(&mut shell, &mut pick, cell, &step)?;
             finish_step(&mut shell, &mut settings, &mut audio, &step)?;
         }
     } else {
         for name in click_names {
             // `click_named` resolves this same point and then clicks it; the
             // options controls need the point before the click.
-            let point = shell.point_for(name)?;
+            // `@x,y` is a point in the render size (1024x768 here), so a route can
+            // mix named controls with list rows and other unnamed targets.
+            let at = name.strip_prefix('@').map(parse_point).transpose()?;
+            let point = match at {
+                Some(point) => point,
+                None => shell.point_for(name)?,
+            };
             stage_options(&shell, &mut settings, &mut audio, point)?;
-            steps.push(shell.click_named(name)?);
+            let cell = crate::flow::inventory_cell_at(&shell, point);
+            steps.push(match at {
+                Some(point) => shell.click(point[0], point[1])?,
+                None => shell.click_named(name)?,
+            });
             let step = steps.last().unwrap().clone();
+            crate::flow::inventory_click(&mut shell, &mut pick, cell, &step)?;
             finish_step(&mut shell, &mut settings, &mut audio, &step)?;
         }
     }
@@ -120,8 +144,23 @@ pub fn run(
         size[1],
         steps.len()
     );
+    // A capture of the shell is the music (and the clicks) for as long as the
+    // recording we compare against: `RA2_AUDIO_SECONDS`, default 13.3 s.
+    let seconds = std::env::var("RA2_AUDIO_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(13.3);
+    audio.finish_capture(seconds)?;
     print!("{}", audio.report(audio_report));
     Ok(())
+}
+
+fn parse_point(text: &str) -> Result<[f32; 2], String> {
+    let (x, y) = text
+        .split_once(',')
+        .ok_or_else(|| format!("click point {text:?} is not x,y"))?;
+    let num = |v: &str| v.trim().parse::<f32>().map_err(|e| format!("{v:?}: {e}"));
+    Ok([num(x)?, num(y)?])
 }
 
 /// Stage the settings control under `point`, if the options window is open.
@@ -153,8 +192,11 @@ fn finish_step(
     step: &Step,
 ) -> Result<(), String> {
     println!("{}", crate::describe(step));
-    if crate::activated(step) {
-        audio.click();
+    audio.shell_step(step);
+    settings.register_dropdowns(shell);
+    for change in settings.absorb_picks(&shell.take_dropdown_picks()) {
+        println!("options: {change}");
+        settings.save()?;
     }
     match step.note.as_deref() {
         Some(crate::options::OPEN_NOTE) => {
@@ -187,8 +229,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::SHELL_SIZE;
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -247,9 +291,7 @@ mod tests {
         .map(str::to_string);
         let steps = apply_named_clicks(&mut shell, &names).unwrap();
         for step in &steps {
-            if crate::activated(step) {
-                audio.click();
-            }
+            audio.shell_step(step);
             audio.on_screen(&step.screen);
         }
         assert_eq!(shell.screen_id(), "botlab/botlabwin.gib");
@@ -269,7 +311,14 @@ mod tests {
             .iter()
             .filter(|entry| entry.kind == ra2_audio::PlayKind::Sound2d)
             .count();
-        assert_eq!(clicks, 4, "one click per activation, not per mouse-down");
+        // The push buttons click (`Team HQ`, `continue`, `workshop`); the robots
+        // tab is a radio-group member and does not (live: the exhibition and
+        // HQ tabs are silent, `ui-click-survey`).
+        let hits: Vec<_> = steps.iter().map(|s| s.hit.clone()).collect();
+        assert_eq!(
+            clicks, 3,
+            "one click per push button, none for the tab: {hits:?}"
+        );
         println!("{}", audio.report(true));
     }
 

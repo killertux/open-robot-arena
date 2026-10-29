@@ -19,6 +19,7 @@ fn button<'a>(gib: &'a ra2fmt::gib::Gib, name: &str) -> &'a ra2fmt::gib::Widget 
 }
 
 fn game_dir() -> Option<PathBuf> {
+    ra2fmt::saves::isolate_for_tests();
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
         let candidate = dir.join("local/game");
@@ -308,10 +309,16 @@ fn the_arena_picker_is_the_screen_and_the_arenas_the_data_names() {
         .filter(|c| c.kind == ra2fmt::gib::WidgetKind::Text)
         .filter_map(|c| c.field("_Text").map(|f| f.text()))
         .collect();
+    // The setup screen opens on DEATHMATCH, so the picker lists that type's
+    // arenas (the original's eight rows, Bridge of Doom first).
+    let available = ra2ui::arenas::available(&game, "DEATHMATCH").unwrap();
     assert_eq!(
         rows,
-        arenas.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-        "one row per arena, in the order the game's own picker sorts"
+        available
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
+        "one row per DEATHMATCH arena, in the order the game's own picker sorts"
     );
     assert!(rows.contains(&"Combat Arena"), "{rows:?}");
 }
@@ -346,4 +353,145 @@ fn the_game_directory_error_names_what_the_shell_needs() {
     if let Some(game) = game_dir() {
         game::check(&game).unwrap();
     }
+}
+
+/// A wrong `--game` is explained, not just rejected: a missing folder, a file
+/// (the exe), a folder one level too high, each says what to do.
+#[test]
+fn a_wrong_game_path_says_what_to_do() {
+    let root = std::env::temp_dir().join(format!("ra2-shell-wrong-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let install = root.join("Robot Arena 2");
+    std::fs::create_dir_all(install.join("UI")).unwrap();
+    std::fs::create_dir_all(install.join("Scripts")).unwrap();
+    std::fs::write(install.join("RA2.cfz"), b"x").unwrap();
+    std::fs::write(install.join("Robot Arena 2.exe"), b"x").unwrap();
+
+    let missing = game::check(&root.join("nope")).unwrap_err();
+    assert!(
+        missing.contains("does not exist") && missing.contains("--game"),
+        "{missing}"
+    );
+    let exe = game::check(&install.join("Robot Arena 2.exe")).unwrap_err();
+    assert!(
+        exe.contains("is a file") && exe.contains(&*install.to_string_lossy()),
+        "{exe}"
+    );
+    let above = game::check(&root).unwrap_err();
+    assert!(
+        above.contains("one level down") && above.contains("RA2.cfz"),
+        "{above}"
+    );
+    game::check(&install).unwrap();
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The arena tab's description is the selected arena's class docstring, in the
+/// `Glyph` that carries the `DisplayBox` on `description grp`'s child (the
+/// file's own "hammers" text is only the editor's placeholder).
+#[test]
+fn the_arena_description_follows_the_selected_row() {
+    let Some(game) = game_dir() else { return };
+    let mut shell = Shell::boot(&game, [1024.0, 768.0]).unwrap();
+    shell.click_named("exhibition button").unwrap();
+    shell.click_named("arena button").unwrap();
+    let arenas = ra2ui::arenas::available(&game, "DEATHMATCH").unwrap();
+    let shown = |shell: &Shell| -> Vec<String> {
+        let root = shell.document().widgets().next().unwrap();
+        let group = ra2ui::workshop::find(root, "description grp").unwrap();
+        let mut out = Vec::new();
+        fn walk(w: &ra2fmt::gib::Widget, out: &mut Vec<String>) {
+            if w.kind == ra2fmt::gib::WidgetKind::Glyph {
+                if let Some(t) = w.field("_Text") {
+                    out.push(t.text().to_string());
+                }
+            }
+            for c in &w.children {
+                walk(c, out);
+            }
+        }
+        walk(group, &mut out);
+        out
+    };
+    assert_eq!(arenas[0].name, "Bridge of Doom");
+    assert!(arenas[0]
+        .description
+        .starts_with("Travel across the bridge"));
+    assert_eq!(shown(&shell), vec![arenas[0].description.clone()]);
+    // Row 1 (Combat Arena) is 18 px below row 0 in the 1024x768 layout.
+    shell.click(320.0, 188.0).unwrap();
+    assert_eq!(arenas[1].name, "Combat Arena");
+    assert_eq!(shown(&shell), vec![arenas[1].description.clone()]);
+    assert!(!shown(&shell)[0].contains("hammers and other nice"));
+}
+
+/// The robot picker's cells draw the snapshot each `.bot` carries, not the
+/// "No Robot Preview" placeholder (`exhibition\sample_bot.bmp`).
+#[test]
+fn the_robot_picker_cells_carry_the_bots_snapshots() {
+    let Some(game) = game_dir() else { return };
+    let mut shell = Shell::boot(&game, [1024.0, 768.0]).unwrap();
+    for name in [
+        "exhibition button",
+        "robots button",
+        "computer player button",
+    ] {
+        shell.click_named(name).unwrap();
+    }
+    let keys: Vec<&String> = shell
+        .previews()
+        .keys()
+        .filter(|k| k.starts_with("#bot-preview:picker-"))
+        .collect();
+    assert!(
+        keys.len() >= 3,
+        "one registered snapshot per robot of the first team: {keys:?}"
+    );
+}
+
+/// The bottom bar's Help button opens the help window with the gib the exe's
+/// help switch (`FUN_004e4ab0`) names for the screen, and its Close button
+/// ends it.
+#[test]
+fn the_help_button_opens_the_screens_help_window() {
+    let Some(game) = game_dir() else { return };
+    let mut shell = Shell::boot(&game, [1024.0, 768.0]).unwrap();
+    shell.click_named("exhibition button").unwrap();
+    let step = shell.click_named("Help button").unwrap();
+    assert_eq!(step.screen, "help/helpframe.gib");
+    assert!(
+        step.note.as_deref().unwrap_or("").contains("help"),
+        "{:?}",
+        step.note
+    );
+    let doc = shell.document();
+    let texts: Vec<String> = doc
+        .walk()
+        .filter_map(|w| w.field("_Text").map(|f| f.text().to_string()))
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Exhibition")),
+        "the exhibition help is in the frame: {texts:?}"
+    );
+    shell.click_named("close button").unwrap();
+    assert_eq!(shell.screen_id(), "exhibition/exhib_setup.gib");
+
+    // The bot lab: each tab has its own help (ids 4-9).
+    let mut shell = Shell::boot(&game, [1024.0, 768.0]).unwrap();
+    for name in [
+        "Team HQ button",
+        "continue button",
+        "robots button",
+        "workshop button",
+    ] {
+        shell.click_named(name).unwrap();
+    }
+    shell.click_named("wiring button").unwrap();
+    let step = shell.click_named("Help button").unwrap();
+    assert_eq!(step.screen, "help/helpframe.gib");
+    assert!(
+        step.note.as_deref().unwrap_or("").contains("(8)"),
+        "{:?}",
+        step.note
+    );
 }

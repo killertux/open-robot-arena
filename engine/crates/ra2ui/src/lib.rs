@@ -66,15 +66,15 @@
 //!   `ScrollBar` 30, `Slider` 41, `TextBox` 331, `Button` 193, `CheckBox` 69,
 //!   `DropDown` 12, `Placeholder` 12 — and only two `Image`s in the whole game
 //!   bother.
-//! * **2** — clipped to the *parent's* frame instead. There are sixty, and
-//!   **twenty-three of them are placed so that they stick out of the parent**: the two
-//!   `robots grid`s (anchored at the parent's *bottom* edge), the five bot-lab
-//!   `selected label`s, `botlabwin.gib`'s `wires grp` at `x = -1.0`, and
-//!   `event_bracket.gib`'s heading textbox at `y = -20` with a height of 24. A
-//!   self-clip would leave those where they are; only a clip by the parent
-//!   explains the author wanting one. The rest that are inside at authoring time
-//!   are chrome that *moves*: the two selection bars, which the container
-//!   repositions down its rows, and `comp_properties.gib`'s tabs.
+//! * **2** — clipped to what the *parent* was clipped by (not to the parent's own frame, which
+//!   would hide the ones that lie outside it). There are sixty, and **twenty-three of them
+//!   are placed so that they stick out of the parent**: the two `robots grid`s (anchored at the
+//!   parent's *bottom* edge), the five bot-lab `selected label`s, `botlabwin.gib`'s `wires grp`
+//!   at `x = -1.0`, and `event_bracket.gib`'s heading textbox at `y = -20` with a height of 24.
+//!   Live (the Bot Lab frames, docs/36 9.27b) the `selected label` under the Paint Shop's 64 px
+//!   swatch group and both `wires grp`s are drawn whole, so the parent's frame is not the clip; the
+//!   rest that are inside at authoring time are chrome that *moves*: the two selection bars, which
+//!   the container repositions down its rows, and `comp_properties.gib`'s tabs.
 //!
 //! [`Placement::clip`] carries the result: the rectangle the widget draws
 //! inside, already intersected with everything above it.
@@ -123,6 +123,8 @@ use ra2fmt::gib::{Attachment, AttachmentKind, Block, Gib, Length, Widget, Widget
 pub mod arenas;
 pub mod cells;
 pub mod components;
+pub mod dropdown;
+pub mod event_screens;
 pub mod events;
 pub mod hq;
 pub mod input;
@@ -476,21 +478,36 @@ pub struct PlacedGlyph {
     pub rect: Frame,
 }
 
+/// Where a run's pen starts relative to its frame, in pixels. Measured, not
+/// derived: in the original's 1280x1024 capture every label — `EXHIBITION`,
+/// `TEAM HQ`, `MULTIPLAYER`, `Options`, `Credits`, `Quit` — has its ink exactly
+/// one pixel right of and (for the big buttons, whose boxes line up with the
+/// capture to the pixel) one pixel below where `pen + bearing_x` and
+/// `baseline - bearing_y` put it, while the ink's width is identical. The font
+/// object's own extents are `+1` after its build loop (`FUN_005cd560`).
+pub const TEXT_ORIGIN: [f32; 2] = [1.0, 1.0];
+
 /// Lay a string out the way the game's own labels are written: the baseline
-/// sits one `ascent` below the frame's top, each glyph's cell hangs from its own
-/// third above that line, and the pen advances by each glyph's advance. A
-/// character the face has no cell for — a space — advances without drawing.
+/// sits one `ascent` below the frame's top, each glyph's cell starts
+/// `bearing_x` right of the pen and `bearing_y` above that line, and the pen
+/// advances by each glyph's advance. A character with no cell — a space —
+/// advances without drawing.
 pub fn text_run(font: &ra2fmt::Font, frame: Frame, text: &str) -> Vec<PlacedGlyph> {
-    let baseline = frame.y + font.ascent as f32;
-    let mut pen = frame.x;
+    let baseline = frame.y + font.ascent as f32 + TEXT_ORIGIN[1];
+    let mut pen = frame.x + TEXT_ORIGIN[0];
     let mut out = Vec::new();
     for c in text.chars() {
-        if font.has_glyph(c) {
-            let glyph = font.glyph(c);
+        let glyph = font.glyph(c);
+        if glyph.has_ink() {
             let (x, y, w, h) = glyph.rect(font.page_width, font.page_height);
             out.push(PlacedGlyph {
                 cell: [x, y, w, h],
-                rect: Frame::new(pen, baseline - glyph.third as f32, w as f32, h as f32),
+                rect: Frame::new(
+                    pen + glyph.bearing_x as f32,
+                    baseline - glyph.bearing_y as f32,
+                    w as f32,
+                    h as f32,
+                ),
             });
         }
         pen += font.advance(c) as f32;
@@ -507,6 +524,9 @@ pub fn text_run(font: &ra2fmt::Font, frame: Frame, text: &str) -> Vec<PlacedGlyp
 /// data does not state.
 pub fn wrap_lines(font: &ra2fmt::Font, text: &str, width: f32) -> Vec<String> {
     let mut out = Vec::new();
+    // The `.gib` writer stores a line break as the two characters `\n`
+    // (`credits.gib`'s paragraphs); the engine reads it as a newline.
+    let text = text.replace("\\n", "\n");
     for hard in text.split('\n') {
         if width <= 0.0 {
             out.push(hard.to_string());
@@ -544,17 +564,15 @@ pub fn paragraph_run(
     width: f32,
 ) -> Vec<PlacedGlyph> {
     let line_height = font.line_height() as f32;
+    // The exe's text layout (FUN_00602210) advances each line by the font's
+    // ascent (`FUN_00602bf0` = font+0xab8), not by ascent - descent.
+    let pitch = font.ascent as f32;
     let mut out = Vec::new();
     for (i, line) in wrap_lines(font, text, width).into_iter().enumerate() {
         if line.is_empty() {
             continue;
         }
-        let line_frame = Frame::new(
-            frame.x,
-            frame.y + i as f32 * line_height,
-            width,
-            line_height,
-        );
+        let line_frame = Frame::new(frame.x, frame.y + i as f32 * pitch, width, line_height);
         out.extend(text_run(font, line_frame, &line));
     }
     out
@@ -804,7 +822,12 @@ pub fn art_for<'a>(
     let bar = parent.kind == WidgetKind::Rectangle
         && matches!(parent.id(), 100 | 101)
         && widget.kind == WidgetKind::Image;
-    bar.then_some("Point Selection.tga")
+    // The original draws that bar's colour once (the capture's selected arena
+    // row is a single 0.5 layer of the fill, (38,38,127) over black): the
+    // `Rectangle` fills it, and the `Image` inside it adds nothing. `Selection.tga`
+    // was a guess for the blank name and smeared a blotch across the row.
+    let _ = bar;
+    None
 }
 
 /// The `.gib` a `Proxy` names, when it names one.
@@ -965,7 +988,7 @@ pub fn place(widget: &Widget, parent: Frame) -> Placement<'_> {
 
 /// Place one widget inside `parent`, sizing an unmeasured label from its text.
 pub fn place_with<'a>(widget: &'a Widget, parent: Frame, fonts: Option<&Fonts>) -> Placement<'a> {
-    place_at(widget, parent, None, fonts, false)
+    place_at(widget, parent, None, None, fonts, false)
 }
 
 /// Place one widget, carrying down the clip its ancestors impose.
@@ -980,31 +1003,175 @@ fn place_at<'a>(
     widget: &'a Widget,
     parent: Frame,
     inherited: Option<Frame>,
+    outer: Option<Frame>,
     fonts: Option<&Fonts>,
     baseline: bool,
 ) -> Placement<'a> {
-    let frame = sized(widget, parent, widget.size(), fonts, baseline);
+    place_core(
+        widget, parent, inherited, outer, fonts, baseline, None, None,
+    )
+}
+
+/// The rectangle a `Background` stretches over: the owner's frame, grown by
+/// its `Border`'s width when that is two pixels or more. On the repair bench
+/// (`repairs.gib` `main group`, `Border Width 2`) the original's wood tile
+/// starts at the border's outer edge (reference event-repairs: tile phase
+/// matches ours moved 2 px up and left, ring pixels on the box's own edge).
+fn background_fill(widget: &Widget, frame: Frame) -> Frame {
+    let width = widget
+        .attachment("Border")
+        .and_then(|b| b.number("Width"))
+        .unwrap_or(0.0)
+        .round();
+    if width < 2.0 {
+        return frame;
+    }
+    Frame::new(
+        frame.x - width,
+        frame.y - width,
+        frame.w + 2.0 * width,
+        frame.h + 2.0 * width,
+    )
+}
+
+/// [`place_at`], with the widget's frame optionally forced along a split's axis:
+/// a split frame gives each slot's child the slot's extent *along the axis it
+/// divides* whatever the child's `Position`/`Size` say there (`exhib_setup.gib`'s
+/// `top slot` states 418 px of height and is the whole 87% pane), while the
+/// other axis keeps the child's own rules (`content slot`'s `0.9` of the height
+/// of a horizontal split).
+#[allow(clippy::too_many_arguments)]
+fn place_core<'a>(
+    widget: &'a Widget,
+    parent: Frame,
+    inherited: Option<Frame>,
+    outer: Option<Frame>,
+    fonts: Option<&Fonts>,
+    baseline: bool,
+    forced: Option<(Frame, bool)>,
+    fill: Option<Frame>,
+) -> Placement<'a> {
+    let mut frame = sized(widget, parent, widget.size(), fonts, baseline);
+    if let Some(owner) = fill {
+        frame = owner;
+    }
+    // A list a `Scroller` wraps fills the scroller's own rectangle: the list's
+    // `Position`/`Size` are the editor's leftovers (`arena.gib`'s listbox says
+    // 159 x 175 px at (1, 1); the scroller body says 0.89 x 0.585 at (0.1, 0.08)
+    // and the capture's black list is 258 x 282 there).
+    if matches!(widget.kind, WidgetKind::ListBox | WidgetKind::Grid) {
+        if let Some(body) = widget
+            .attachments
+            .iter()
+            .find(|a| a.kind == AttachmentKind::Scroller)
+            .and_then(|a| a.body.as_deref())
+        {
+            frame = sized(body, parent, body.size(), fonts, false);
+        }
+    }
+    if let Some((pane, horizontal)) = forced {
+        if horizontal {
+            frame.x = pane.x;
+            frame.w = pane.w;
+        } else {
+            frame.y = pane.y;
+            frame.h = pane.h;
+        }
+    }
+    // The Bot Lab's two `wires grp`s are the cables that run out of the tab strip's button group
+    // to the window's edges; live they are drawn whole although both lie outside that group's
+    // 630 px frame, which clips everything else in it. They take the clip the group itself had.
+    let inherited = if widget.name().starts_with("wires grp") {
+        outer.or(inherited)
+    } else {
+        inherited
+    };
     let clip = match ClipMode::from_value(widget.clip_mode()) {
         ClipMode::None => inherited,
         ClipMode::SelfFrame => Some(intersect(inherited, frame)),
-        // A clip by a parent that is larger than the widget has nothing to do;
-        // a clip by a parent that is smaller is the whole point of the mode.
-        ClipMode::ParentFrame => Some(intersect(inherited, parent)),
+        // Clipped by the parent's clip: what the *parent* was placed inside, not the parent's own
+        // frame. Live (the Bot Lab), the `Selected Color` label hangs below its 64 px swatch group
+        // and `wires grp` lies left of its button group, both fully drawn.
+        ClipMode::ParentFrame => outer.or(inherited),
     };
     let children = match widget.kind {
         // A split frame hands its children panes rather than its own rectangle.
-        WidgetKind::SplitFrame => split_children(widget, frame, clip, fonts),
+        WidgetKind::SplitFrame => split_children(widget, frame, clip, inherited, fonts),
         // A scroll bar puts its parts at its two ends and between them.
-        WidgetKind::ScrollBar => scroll_children(widget, frame, clip, fonts),
+        WidgetKind::ScrollBar => scroll_children(widget, frame, clip, inherited, fonts),
         _ => {
             // Explicit text inside a box or a group is positioned by its
-            // baseline; an attachment's body (a caption) is not.
-            let baseline_text = matches!(widget.kind, WidgetKind::TextBox | WidgetKind::Group);
-            let placed: Vec<Placement> = widget
+            // baseline, and so is a caption's: a button's `Caption` body is a
+            // bare `Widget` the size of the button, and its `Text` is authored
+            // at the pen's x and the baseline's y inside it (`Options` at
+            // `14 0 13 0` in a 17-pixel button; measured against the original).
+            // An `OptionGroup`'s labels are too: `video_options.gib` puts its
+            // radios at y 6 and their `Low`/`Medium`/`High` labels at y 18 in
+            // a 28-pixel clipped group, which only reads with 18 as the
+            // baseline (and `multiplayer.gib`'s `Local Network`/`Internet`
+            // beside radios at 0 and 24 with labels at 12 and 36).
+            let baseline_text = matches!(
+                widget.kind,
+                WidgetKind::TextBox
+                    | WidgetKind::Group
+                    | WidgetKind::Widget
+                    | WidgetKind::OptionGroup
+            );
+            let mut placed: Vec<Placement> = widget
                 .children
                 .iter()
-                .map(|c| place_at(c, frame, clip, fonts, baseline_text))
+                .map(|c| place_at(c, frame, clip, inherited, fonts, baseline_text))
                 .collect();
+            // A `TextBox`'s `Alignment` is its text's: with the centre bit
+            // (2 of the horizontal nibble: 18, 10, 34) the string is centred
+            // in the box whatever it says, so the authored `Text` position
+            // (made for the placeholder string) is replaced by the centred one.
+            if widget.kind == WidgetKind::TextBox && text_box_centres(widget) {
+                for child in placed
+                    .iter_mut()
+                    .filter(|c| c.widget.kind == WidgetKind::Text)
+                {
+                    if let Some((w, _)) = measured(child.widget, fonts) {
+                        child.frame.x = frame.x + (frame.w - w) / 2.0;
+                    }
+                }
+            }
+            // A right-aligned `TextBox` ends its text at the box's right edge: the Paint Shop's
+            // `tint label` is authored at `_Position 315` for a 338 px slider and sits on the 237 px
+            // one's right end (live: `Tint` ends at the slider's last pixel). Only a string the
+            // authored position pushes past the edge is moved.
+            if widget.kind == WidgetKind::TextBox && text_box_right(widget) {
+                for child in placed
+                    .iter_mut()
+                    .filter(|c| c.widget.kind == WidgetKind::Text)
+                {
+                    if let Some((w, _)) = measured(child.widget, fonts) {
+                        if child.frame.x + w > frame.x + frame.w {
+                            child.frame.x = frame.x + frame.w - w;
+                        }
+                    }
+                }
+            }
+            // A left-aligned `TextBox` keeps its text `Buffer` pixels in from the
+            // edge (`video_options.gib`'s resolution field says `Buffer 8`: the
+            // capture's `1024x768x32` starts 8 px inside the box).
+            if widget.kind == WidgetKind::TextBox
+                && !text_box_centres(widget)
+                && !text_box_right(widget)
+            {
+                let buffer = widget
+                    .field("Buffer")
+                    .and_then(|f| f.number())
+                    .unwrap_or(0.0);
+                if buffer > 0.0 {
+                    for child in placed
+                        .iter_mut()
+                        .filter(|c| c.widget.kind == WidgetKind::Text)
+                    {
+                        child.frame.x += buffer;
+                    }
+                }
+            }
             placed
         }
     };
@@ -1013,64 +1180,86 @@ fn place_at<'a>(
     // 607×319 panel behind `hq_league.gib`'s 591-pixel grid) and a `Caption`
     // hangs off the same button. It inherits the parent's clip, then applies its
     // own `ClipMode`.
-    let mut attachments: Vec<PlacedAttachment> = widget
+    // A widget that clips to itself clips its attachments too: botlab's
+    // `3d grp` has a stray 296-px dark Background at (12, 24), which the capture
+    // never shows outside the 3D view's square.
+    // A widget that clips to its parent's clip dresses itself the same way (botlab's `wires grp`
+    // lies left of its button group and is drawn out to the window's edge).
+    let attachment_clip = if (widget.kind == WidgetKind::Group
+        && ClipMode::from_value(widget.clip_mode()) == ClipMode::SelfFrame
+        && widget
+            .field("AspectSetting")
+            .is_some_and(|f| f.text().trim() != "0"))
+        || ClipMode::from_value(widget.clip_mode()) == ClipMode::ParentFrame
+    {
+        clip
+    } else {
+        inherited
+    };
+    let attachments: Vec<PlacedAttachment> = widget
         .attachments
         .iter()
         .filter_map(|a| {
             a.body.as_deref().map(|body| PlacedAttachment {
                 attachment: a,
-                body: place_at(body, parent, inherited, fonts, false),
+                body: place_core(
+                    body,
+                    parent,
+                    attachment_clip,
+                    inherited,
+                    fonts,
+                    false,
+                    None,
+                    // A `Background` dresses its owner: the body's own pixel
+                    // size is the editor's canvas, the game stretches it over
+                    // the widget (the capture's HQ panels are tinted edge to
+                    // edge).
+                    (a.kind == AttachmentKind::Background)
+                        .then_some(background_fill(widget, frame)),
+                ),
             })
         })
         .collect();
-    centre_captions(widget, frame, &mut attachments);
+    // A `Scroller`'s bar stands flush inside the right edge of the scroller's rectangle
+    // (`hq_league.gib` writes it at x 591 of a body that is 647 px wide in the
+    // capture, whose 16 px bar sits at 924 = 293 + 647 - 16).
+    // The authored x is the editor's canvas, as the list's own size is.
+    let mut attachments = attachments;
+    for a in attachments
+        .iter_mut()
+        .filter(|a| a.attachment.kind == AttachmentKind::Scroller)
+    {
+        let right = a.body.frame.right();
+        let body_frame = a.body.frame;
+        for bar in a
+            .body
+            .children
+            .iter_mut()
+            .filter(|c| c.widget.kind == WidgetKind::ScrollBar)
+        {
+            let dx = right - bar.frame.w - bar.frame.x;
+            shift(bar, dx, 0.0);
+            reclip(bar, body_frame, attachment_clip);
+        }
+    }
+    // A `Glyph` dressed by a `DisplayBox` is the box's paragraph: the widget
+    // itself is `Position 0 0 0 0` (it hangs from its parent's corner) and the
+    // box it fills is the attachment's body. `credits.gib`'s two name lists are
+    // both at the window's origin until each moves to its own box.
+    if widget.kind == WidgetKind::Glyph {
+        if let Some(boxed) = attachments
+            .iter()
+            .find(|a| a.attachment.kind == AttachmentKind::DisplayBox)
+        {
+            frame = boxed.body.frame;
+        }
+    }
     Placement {
         widget,
         frame,
         clip,
         children,
         attachments,
-    }
-}
-
-/// A button that carries a `Caption` attachment takes the `Text` in the
-/// attachment's body as its caption, and the caption is drawn centred in the
-/// button.
-///
-/// Both halves are measured. There are exactly **122** `Caption` attachments in
-/// the corpus and exactly **122** buttons and check boxes whose four state images
-/// all have a blank `_Filename` — the ones with no art of their own — and each of
-/// the 122 is followed by its `Text` (`mainmenu.gib`'s bar is a gear, a gear, and
-/// then `Button "Options button"`, `Text "Options"`, `Button "credits button"`,
-/// `Text "Credits"`, …). What settles the centring is that the captions' own
-/// positions make no sense against their parent: the three bar captions are at
-/// x = 14, 18 and 9 while their buttons are at x = 32, 105 and 183, so taken as
-/// the group's they would all pile up at the left — which is what a composite
-/// does before this rule. Inside their buttons 14 of 67, 18 of 72 and 9 of 40 are
-/// each roughly centred, which is where the game puts them.
-fn centre_captions(widget: &Widget, frame: Frame, attachments: &mut [PlacedAttachment<'_>]) {
-    if !matches!(widget.kind, WidgetKind::Button | WidgetKind::CheckBox)
-        || widget.attachment("Caption").is_none()
-    {
-        return;
-    }
-    for a in attachments
-        .iter_mut()
-        .filter(|a| a.attachment.kind == AttachmentKind::Caption)
-    {
-        // The Caption's body holds the `Text` (and nothing else in the corpus).
-        for caption in a.body.children.iter_mut() {
-            if caption.widget.kind != WidgetKind::Text {
-                continue;
-            }
-            let text = caption.frame;
-            caption.frame = Frame::new(
-                frame.x + (frame.w - text.w) / 2.0,
-                frame.y + (frame.h - text.h) / 2.0,
-                text.w,
-                text.h,
-            );
-        }
     }
 }
 
@@ -1134,13 +1323,14 @@ fn scroll_children<'a>(
     widget: &'a Widget,
     frame: Frame,
     clip: Option<Frame>,
+    inherited: Option<Frame>,
     fonts: Option<&Fonts>,
 ) -> Vec<Placement<'a>> {
     let bar = ScrollBar::from_widget(widget);
     let mut placed: Vec<Placement<'a>> = widget
         .children
         .iter()
-        .map(|c| place_at(c, frame, clip, fonts, false))
+        .map(|c| place_at(c, frame, clip, inherited, fonts, false))
         .collect();
     let zero = Frame::new(frame.x, frame.y, 0.0, 0.0);
     let less = placed.get(bar.less).map(|p| p.frame).unwrap_or(zero);
@@ -1161,6 +1351,20 @@ fn scroll_children<'a>(
         );
         placement.frame.w = target.w;
         placement.frame.h = target.h;
+        // The part's `Background` dresses the part: its body was placed at the
+        // authored track width (281 px of a 313 px bar), so it takes the
+        // resized frame like any background does.
+        let owner = placement.frame;
+        for a in placement
+            .attachments
+            .iter_mut()
+            .filter(|a| a.attachment.kind == AttachmentKind::Background)
+        {
+            a.body.frame = owner;
+            for child in a.body.children.iter_mut() {
+                child.frame = owner;
+            }
+        }
     }
     // The track is not the height the file gave it, so every clip in the three
     // parts is worked out again rather than moved.
@@ -1177,6 +1381,22 @@ fn scroll_children<'a>(
 }
 
 /// The extent a label takes from its own font, when the layout left it at zero.
+/// Whether a `TextBox`'s `Alignment` centres its text horizontally.
+fn text_box_centres(widget: &Widget) -> bool {
+    widget
+        .field("Alignment")
+        .and_then(|f| f.number())
+        .is_some_and(|a| (a as i32) & 7 == 2)
+}
+
+/// Whether a `TextBox`'s `Alignment` puts its text at the right edge.
+fn text_box_right(widget: &Widget) -> bool {
+    widget
+        .field("Alignment")
+        .and_then(|f| f.number())
+        .is_some_and(|a| (a as i32) & 7 == 4)
+}
+
 fn measured(widget: &Widget, fonts: Option<&Fonts>) -> Option<(f32, f32)> {
     let fonts = fonts?;
     let (text, face) = (widget.text()?, widget.font()?);
@@ -1211,6 +1431,24 @@ fn sized(
         Some(s) => dim(Some(s.second), parent.h, fit.map(|f| f.1).unwrap_or(0.0)),
         None => parent.h,
     };
+    // `AspectSetting`/`AspectRatio` on a group (width / height): 1 derives the
+    // height from the width (botlab's `3d grp`: 0.92 of the left pane wide, as
+    // tall as wide), 2 derives the width from the height (the inventory's
+    // `bot img group`: 455 px asked, a square of the cell's height drawn).
+    let (w, h) = aspect(widget, w, h);
+    // A `Group`/`Window` is whole pixels wide and tall: `frac * parent` is truncated (measured,
+    // not read from the exe: the schedule's grid is 552 x 333 px at 1024x768 where the exact
+    // fractions give 553.9 x 335.6, the exhibition panels one to two pixels short of the exact
+    // ones; over the 104 fixtures this took the mean from 3.66 to 3.56). The Team HQ's own
+    // chrome groups keep the exact size (their captures sit on the fractions: truncating them
+    // moved the inventory, history, standings and edit-team screens 0.1-0.4 MAE away).
+    let (w, h) = if matches!(widget.kind, WidgetKind::Group | WidgetKind::Window)
+        && !EXACT_GROUPS.contains(&widget.name())
+    {
+        (w.trunc(), h.trunc())
+    } else {
+        (w, h)
+    };
     let position = widget.position();
     let (px, py) = match position {
         Some(p) => (axis(p.first, parent.w), axis(p.second, parent.h)),
@@ -1231,12 +1469,64 @@ fn sized(
     } else {
         0.0
     };
+    // A centred `Group`/`Window` anchors in whole pixels: the offset is the
+    // truncated half of the truncated size (edge anchors keep the exact size). Measured, not read from the exe:
+    // the repair bench's `main group`, 0.9 of 1024 = 921.6 wide at `Position
+    // 0.5`, starts at 512 - 460 = 52 rather than 51.2 (reference event-repairs,
+    // every widget in it sits one pixel right of ours). Over the 104 fixtures this
+    // moved the exhibition (2.65 -> 2.45, 2.57 -> 2.36, ...), bot lab (-0.3), F1
+    // reminder, bracket (7.15 -> 6.21) and repairs (8.66 -> 5.63) toward the
+    // captures; `teamhq-events` (+0.45) and the event join window (+0.34) lost.
+    let offset = |anchor: f32, size: f32| {
+        if matches!(widget.kind, WidgetKind::Group | WidgetKind::Window)
+            && anchor > 0.0
+            && anchor < 1.0
+        {
+            (anchor * size.trunc()).trunc()
+        } else {
+            anchor * size
+        }
+    };
     Frame::new(
-        parent.x + px - anchor.h * w,
+        parent.x + px - offset(anchor.h, w),
         parent.y + py - anchor.v * h - ascent,
         w,
         h,
     )
+}
+
+/// The Team HQ screen's own groups, laid out at their exact fractions (see [`sized`]).
+const EXACT_GROUPS: [&str; 11] = [
+    "hq content group",
+    "team heading group",
+    "kills group",
+    "logo grp",
+    "UL slot",
+    "UR slot",
+    "LL slot",
+    "LR slot",
+    "robot cell group",
+    "bot img group",
+    "grid grp",
+];
+
+fn aspect(widget: &Widget, w: f32, h: f32) -> (f32, f32) {
+    if widget.kind != WidgetKind::Group {
+        return (w, h);
+    }
+    let number =
+        |name: &str| input::field_of(widget, name).and_then(|v| v.trim().parse::<f32>().ok());
+    let (Some(setting), Some(ratio)) = (number("AspectSetting"), number("AspectRatio")) else {
+        return (w, h);
+    };
+    if ratio <= 0.0 {
+        return (w, h);
+    }
+    match setting as i32 {
+        1 => (w, w * ratio),
+        2 => (h * ratio, h),
+        _ => (w, h),
+    }
 }
 
 /// Whether a widget's `Alignment` anchors its **box**.
@@ -1268,6 +1558,7 @@ fn split_children<'a>(
     widget: &'a Widget,
     frame: Frame,
     clip: Option<Frame>,
+    inherited: Option<Frame>,
     fonts: Option<&Fonts>,
 ) -> Vec<Placement<'a>> {
     let horizontal = widget
@@ -1284,36 +1575,56 @@ fn split_children<'a>(
         .map(|l| l.resolve(if horizontal { frame.w } else { frame.h }))
         .unwrap_or(if horizontal { frame.w } else { frame.h } / 2.0);
     let master_size = master_size.clamp(0.0, if horizontal { frame.w } else { frame.h });
+    // A pane's width is a whole number of pixels where the screen asks for it (`PaneFloor`, put on
+    // the lobby's split by the shell): the lobby's left column is 0.28 of 1024, 286 of 286.72 in the
+    // original (live `mp-lobby-host-chat`: every frame of the column ends 1 px before the one the
+    // unrounded width gives). The Team HQ's calibrated splits (`hq.rs` fits) keep their fractions.
+    let master_size = if horizontal && widget.field("PaneFloor").is_some() && frame.w.fract() == 0.0
+    {
+        master_size.floor()
+    } else {
+        master_size
+    };
 
+    // `Master` names the slot MasterSize sizes. Slot 0 is always the first
+    // (top/left) pane and slot 1 the second, so a master of 1 is the pane at
+    // the far end (`exhib_setup.gib`'s 13% bottom bar) and slot 0 takes the rest.
+    let total = if horizontal { frame.w } else { frame.h };
+    let first = if master == 1 {
+        total - master_size
+    } else {
+        master_size
+    };
     let (a, b) = if horizontal {
         (
-            Frame::new(frame.x, frame.y, master_size, frame.h),
-            Frame::new(
-                frame.x + master_size,
-                frame.y,
-                frame.w - master_size,
-                frame.h,
-            ),
+            Frame::new(frame.x, frame.y, first, frame.h),
+            Frame::new(frame.x + first, frame.y, total - first, frame.h),
         )
     } else {
         (
-            Frame::new(frame.x, frame.y, frame.w, master_size),
-            Frame::new(
-                frame.x,
-                frame.y + master_size,
-                frame.w,
-                frame.h - master_size,
-            ),
+            Frame::new(frame.x, frame.y, frame.w, first),
+            Frame::new(frame.x, frame.y + first, frame.w, total - first),
         )
     };
-    // `Master` names the slot MasterSize sizes; the other takes the remainder.
-    let panes = if master == 1 { [b, a] } else { [a, b] };
+    let panes = [a, b];
 
     widget
         .children
         .iter()
         .enumerate()
-        .map(|(i, c)| place_at(c, panes[i.min(1)], clip, fonts, false))
+        .map(|(i, c)| {
+            let pane = panes[i.min(1)];
+            place_core(
+                c,
+                pane,
+                clip,
+                inherited,
+                fonts,
+                false,
+                Some((pane, horizontal)),
+                None,
+            )
+        })
         .collect()
 }
 
@@ -1344,6 +1655,7 @@ mod tests {
     }
 
     fn game_dir() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -1590,7 +1902,7 @@ mod tests {
             }
         }
         assert_eq!(seen, 60, "ClipMode 2 widgets shipped");
-        assert_eq!(outside, 47, "of them sticking out of the parent");
+        assert_eq!(outside, 46, "of them sticking out of the parent");
     }
 
     fn walk_clip_two(
@@ -1641,6 +1953,37 @@ mod tests {
 
     fn format_frame(f: &Frame) -> String {
         format!("{:.0},{:.0} {:.0}x{:.0}", f.x, f.y, f.w, f.h)
+    }
+
+    /// An option group's labels are placed by their baseline, like a group's:
+    /// `video_options.gib`'s `Low` sits beside its radio, inside the 28-pixel
+    /// clipped group, instead of below it where the clip hid it.
+    #[test]
+    fn option_group_labels_sit_on_their_baseline() {
+        let Some(game) = game_dir() else { return };
+        let fonts = Fonts::load(&game.join("RA2.cfz")).expect("the shipped faces");
+        let text = std::fs::read_to_string(game.join("UI/common/video_options.gib")).unwrap();
+        let gib = ra2fmt::gib::parse(&text).unwrap();
+        let placed = resolve_with(&gib, DESIGN_SCREEN, Some(&fonts));
+        let find = |name: &str| {
+            placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == name)
+                .map(|p| p.frame)
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let group = find("detail optiongrp");
+        let radio = find("detail low checkbox");
+        let label = find("low txt");
+        // The frame is lifted by the face's ascent so that the text's
+        // baseline lands on the authored y 18: the label's box ends inside the
+        // group and level with the radio, not 12 pixels under the clip.
+        assert!(label.bottom() <= group.bottom(), "{label:?} in {group:?}");
+        assert!(
+            label.bottom() > radio.y && label.y < radio.bottom(),
+            "{label:?} beside {radio:?}"
+        );
     }
 
     /// The measured path: with the screen's faces, a label the editor left at
@@ -1831,8 +2174,7 @@ mod tests {
         }
     }
 
-    /// The two screens that read before the font repack still do: the bot lab's
-    /// title and the team picker's title are `fg_d20` runs whose first cell is
+    /// The bot lab's title and the team picker's title are `fg_d20` runs whose first cell is
     /// their first letter, whose width is the advance sum, and whose cells hold
     /// ink.
     #[test]
@@ -1933,9 +2275,8 @@ mod tests {
     }
 
     /// **Each caption is drawn once, at the frame the data gives.** A button's
-    /// `Caption` attachment carries a body with one `Text`; the body is placed
-    /// against the button's parent and the text is centred in the **button's**
-    /// frame. The draw order must contain that text exactly once. The run is
+    /// `Caption` attachment carries a body with one `Text`; the body is the
+    /// button's own frame and the text sits at its authored position inside it. The draw order must contain that text exactly once. The run is
     /// spaced by the face's advances, its width is their sum, and every glyph
     /// samples a page cell with ink — the three properties the old readings got
     /// wrong when a caption looked like two overlapping runs.
@@ -1982,19 +2323,23 @@ mod tests {
                 .collect();
             assert_eq!(draws.len(), 1, "{button_name}: drawn once");
 
-            // Centred in the button's own frame, not in the group's.
+            // Flush left at the authored x inside the button, baseline at the
+            // authored y: not centred (the original's captions are not).
             let t = texts[0].frame;
+            let at = texts[0].widget.position().expect("the caption's Position");
+            let ascent = fonts.get(face).expect("the caption's face").ascent as f32;
+            let body = placed_caption.body.frame;
             assert!(
-                (t.x - (button.frame.x + (button.frame.w - t.w) / 2.0)).abs() < 0.01,
+                (t.x - (body.x + at.first.amount)).abs() < 0.01,
                 "{button_name}: x {} vs {}",
                 t.x,
-                button.frame.x + (button.frame.w - t.w) / 2.0
+                body.x + at.first.amount
             );
             assert!(
-                (t.y - (button.frame.y + (button.frame.h - t.h) / 2.0)).abs() < 0.01,
-                "{button_name}: y {} vs {}",
-                t.y,
-                button.frame.y + (button.frame.h - t.h) / 2.0
+                (t.y + ascent - (body.y + at.second.amount)).abs() < 0.01,
+                "{button_name}: baseline {} vs {}",
+                t.y + ascent,
+                body.y + at.second.amount
             );
 
             // The run's width is the sum of the advances, and its cells are the
@@ -2105,14 +2450,14 @@ mod tests {
         }
         assert_eq!(
             pairs.len(),
-            12,
-            "equal-ChildOrder overlapping sibling pairs"
+            3,
+            "equal-ChildOrder overlapping sibling pairs (a Scroller's list and grid now take the scroller's rectangle: 11 pairs were the old 159 x 175 px leftovers)"
         );
         // The 328 older pairs were mostly a control followed by the caption
         // holder that draws its text. That holder is the `Caption` attachment's
         // *body*, not a sibling, so it is no longer part of this count: the
         // caption is drawn in front because of what the attachment is, not
-        // because of a `ChildOrder` tie. What is left is 12 true sibling
+        // because of a `ChildOrder` tie. What is left is 3 true sibling
         // overlaps; the largest is `multiplayer.gib`'s list against its heading
         // grid, and the file order still says the earlier one is in front.
         for button in ["Options button", "MainMenu button", "Help button"] {
@@ -2123,7 +2468,9 @@ mod tests {
             let body = caption.body.as_deref().expect("the caption's body");
             assert_eq!(body.children[0].kind, WidgetKind::Text, "{button}");
         }
-        assert!(pairs.iter().any(|p| p.0 == "multiplayer/multiplayer.gib"
+        // `multiplayer.gib`'s server list used to overlap its heading grid (the
+        // editor's leftover 159 px size); it takes its `Scroller`'s rectangle now.
+        assert!(!pairs.iter().any(|p| p.0 == "multiplayer/multiplayer.gib"
             && p.1.starts_with("server listbox")
             && p.3 == "list grp"));
     }
@@ -2282,18 +2629,24 @@ mod tests {
         // fell back to half the frame for every split whose master is not the
         // first slot. The corpus is 4,348 widgets, and since every attachment
         // takes its body there are no ownerless records left to place against
-        // the screen: the 155 that still reach past it are fragments and
-        // authored oversize frames, not nesting failures. Seventy-seven of the
+        // the screen: the 54 that still reach past it are fragments and
+        // authored oversize frames, not nesting failures. Eighty-two of the
         // 116 files place entirely on screen. (A `TextBox` keeps its authored
         // rectangle now — its `Alignment` is text alignment, not a box anchor —
         // and a `Text` child is positioned by its baseline, so fewer frames are
         // pushed past the edge than the earlier reading had.)
         assert_eq!(placed, 4348);
-        assert_eq!(outside, 155, "off screen");
-        assert_eq!(perfect, 77, "perfect files");
+        assert_eq!(
+            outside, 54,
+            "off screen (a Background fills its owner, so fewer frames overshoot)"
+        );
+        assert_eq!(perfect, 82, "perfect files");
         // The worst offender is a fragment, not a screen.
         assert!(
-            worst.1.ends_with("botlab/armor.gib") || worst.1.ends_with("botlab/adjust_none.gib"),
+            worst.1.ends_with("botlab/armor.gib")
+                || worst.1.ends_with("botlab/adjust_none.gib")
+                || worst.1.ends_with("botlab/comp_adjust.gib")
+                || worst.1.ends_with("exhibition/gametype.gib"),
             "{} {}",
             worst.1,
             worst.0
@@ -2334,9 +2687,10 @@ mod tests {
             "every one of them is the bottom bar: {named:?}"
         );
 
-        // `botlabwin.gib`'s proxy sits in the 49-pixel strip at the bottom of its
-        // own content area, so the bar lands there rather than on the screen's
-        // bottom edge — the file's geometry, not a guess.
+        // `botlabwin.gib`'s proxy sits in the strip at the bottom of the
+        // window: `lowersplit`'s slot 1 is the master (`Master 1`) and takes
+        // the last 12%, so the bar is flush with the screen's bottom edge
+        // (1005 - 36), as in the original.
         let text = std::fs::read_to_string(ui.join("botlab/botlabwin.gib")).unwrap();
         let mut gib = ra2fmt::gib::parse(&text).unwrap();
         let loaded = inline_proxies_in(&mut gib, &ui);
@@ -2347,7 +2701,7 @@ mod tests {
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "common buts")
             .expect("the bottom bar was loaded into the proxy");
-        assert_eq!(bar.frame, Frame::new(512.0, 584.7, 256.0, 36.0));
+        assert_eq!(bar.frame, Frame::new(512.0, 969.0, 256.0, 36.0));
     }
 
     /// `MasterSize` is **one axis**, not two: all twenty-six split frames in
@@ -2376,23 +2730,22 @@ mod tests {
         // 49-pixel nav strip and the content slot takes the 363.4 above it, so
         // the strip's pane starts 49.56 below the split and it fills it.
         assert_eq!(frame("botlab splt"), Frame::new(0.0, 0.0, 1280.0, 1005.0));
-        assert!((frame("lowersplit").y - 207.7).abs() < 0.1);
+        assert!((frame("lowersplit").y - 140.7).abs() < 0.1);
         assert!(
-            (frame("content slot").y - 257.3).abs() < 0.1,
+            (frame("content slot").y - 140.7).abs() < 0.1,
             "{}",
             frame("content slot").y
         );
-        assert_eq!(frame("content slot").h, 364.0);
+        assert!((frame("content slot").h - 760.6).abs() < 0.1);
         let split = placed
             .iter()
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "lowersplit")
             .unwrap();
         assert_eq!(split.children.len(), 2);
-        // 12% of the 413 it splits, and the strip lands on its own
-        // `Position 0 0 364 0` inside the content slot's 364.
-        assert_eq!(split.children[1].frame.h, 49.0);
-        assert!((split.children[1].frame.y - 571.7).abs() < 0.1);
+        // 12% of the 864.3 it splits, at the far end of the split.
+        assert!((split.children[1].frame.h - 103.7).abs() < 0.1);
+        assert!((split.children[1].frame.y - 901.3).abs() < 0.1);
     }
 
     /// A `Glyph` wraps its text at spaces to the width its `_Margin` gives it,
@@ -2413,7 +2766,7 @@ mod tests {
         assert_eq!(lines, vec!["chassis".to_string(), "chassis".to_string()]);
 
         // A paragraph's first line hangs from the box's top the same way a
-        // label does, and a wrapped second line sits one line height lower.
+        // label does, and a wrapped second line sits one ascent lower (the exe's line advance).
         let width = font.extent("chassis").0 as f32 + 1.0;
         let two = paragraph_run(
             font,
@@ -2428,8 +2781,8 @@ mod tests {
         );
         assert_eq!(
             two.last().unwrap().rect.y - first,
-            font.line_height() as f32,
-            "the second line is one line height below the first"
+            font.ascent as f32,
+            "the second line is one ascent below the first (FUN_00602210)"
         );
     }
 
@@ -2539,7 +2892,7 @@ mod tests {
             }
         }
         assert_eq!(negatives, 613, "children with a negative ChildOrder");
-        assert_eq!(overlapping, 66, "those overlapping a non-negative sibling");
+        assert_eq!(overlapping, 62, "those overlapping a non-negative sibling");
         assert_eq!(controls, 256, "negative orders on pressed controls");
 
         let text = std::fs::read_to_string(game.join("UI/mainmenu/mainmenu.gib")).unwrap();
@@ -2581,7 +2934,7 @@ mod tests {
             at("cement img") < at("continue button"),
             "the cement is the screen behind the dialog"
         );
-        let path = crate::input::hit_control(&placed, 820.0, 453.5).expect("the continue button");
+        let path = crate::input::hit_control(&placed, 820.0, 883.0).expect("the continue button");
         let mut placement = &placed[path[0]];
         let mut names = vec![placement.widget.name()];
         for index in &path[1..] {
@@ -2630,6 +2983,7 @@ mod text_run_tests {
     use super::*;
 
     fn game_dir() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -2656,22 +3010,36 @@ mod text_run_tests {
             11,
             "one cell per letter, and no cell for a space"
         );
-        assert_eq!(run[0].rect.x, 10.0, "the run starts at the frame");
-        // Each cell starts where the pen had reached.
-        let mut pen = frame.x;
+        // Each cell starts at the pen plus its glyph's left bearing, and sits
+        // `bearing_y` above the baseline `ascent` under the frame's top.
+        let mut pen = frame.x + TEXT_ORIGIN[0];
         for (glyph, placed) in "MULTIPLAYER".chars().zip(&run) {
-            assert_eq!(placed.rect.x, pen, "{glyph}");
+            let g = font.glyph(glyph);
+            assert_eq!(placed.rect.x, pen + g.bearing_x as f32, "{glyph}");
+            assert_eq!(
+                placed.rect.y,
+                frame.y + TEXT_ORIGIN[1] + font.ascent as f32 - g.bearing_y as f32,
+                "{glyph}"
+            );
             pen += font.advance(glyph) as f32;
         }
         let (width, height) = font.extent("MULTIPLAYER");
-        assert_eq!(pen - frame.x, width as f32, "the pen ends at the extent");
+        assert_eq!(
+            pen - frame.x - TEXT_ORIGIN[0],
+            width as f32,
+            "the pen ends at the extent"
+        );
         assert_eq!(height, font.line_height());
         // A space has no cell but does advance.
         let spaced = text_run(font, frame, "A B");
         assert_eq!(spaced.len(), 2);
         assert_eq!(
             spaced[1].rect.x,
-            frame.x + font.advance('A') as f32 + font.space_advance() as f32
+            frame.x
+                + TEXT_ORIGIN[0]
+                + font.advance('A') as f32
+                + font.space_advance() as f32
+                + font.glyph('B').bearing_x as f32
         );
     }
 

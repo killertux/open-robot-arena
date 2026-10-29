@@ -24,6 +24,7 @@ const SECONDS: f32 = 3.0;
 const PASS_M: f32 = 2.0;
 
 fn game_dir() -> Option<PathBuf> {
+    ra2fmt::saves::isolate_for_tests();
     if let Some(dir) = std::env::var_os("RA2_GAME") {
         return Some(PathBuf::from(dir));
     }
@@ -98,6 +99,7 @@ fn travel(arena: &Path, bot: &Path) -> Result<(String, f32), Box<dyn std::error:
     let input = DriveInput {
         throttle: 1.0,
         steer: 0.0,
+        ..Default::default()
     };
     for _ in 0..(SECONDS / DT).round() as usize {
         duel.step_direct(&[input], DT);
@@ -174,6 +176,7 @@ fn one_bot_reports_its_trajectory_over_time() {
     let drive = DriveInput {
         throttle: 1.0,
         steer: 0.0,
+        ..Default::default()
     };
     for step in 0..180 {
         duel.step_direct(&[drive], DT);
@@ -365,8 +368,17 @@ fn the_traction_survey_prints_its_count_and_failures() {
     // Jolt's). The prebuilt Jolt archive measures one higher. A change that
     // moves the count must update this number *and* the docs; the per-bot
     // table above is the evidence.
+    //
+    // The wiring pass (the motors now follow the `.bot`'s control board, and a
+    // robot's front is its `.bot` heading) moved it from 37 to 34 on the
+    // vendored build (38 to 35 on the prebuilt archive). Three bots fell under
+    // 2 m: `Team10/Bot0` only crept along because its spinner was always on (its
+    // motor body sits 0.09 m below the wheels), and `Team13/Bot0` and
+    // `Team14/Bot1` have heading PI, so they now lead with the part that was at
+    // their back (a razor tip 0.18 m, a chassis edge 0.07 m below the wheels).
+    // Those are the F4 rest-pose residuals, not a regression of the drive.
     assert!(
-        passed >= 37,
-        "the traction survey regressed below its floor: {passed}/45 (last measured 37); failures: {failed:?}"
+        passed >= 34,
+        "the traction survey regressed below its floor: {passed}/45 (last measured 34); failures: {failed:?}"
     );
 }

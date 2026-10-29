@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use glam::{Quat, Vec3};
 
 pub mod arena;
+pub mod camera;
 pub mod giscript;
 pub mod gooey;
 pub mod host;
@@ -39,7 +40,8 @@ pub mod ui;
 
 pub use arena::{Arena, ArenaData, ArenaDetail, Drive, HingeController, PrismaticController};
 pub use host::ScriptHost;
-pub use plus::Ai;
+pub use plus::{Ai, InputEvent};
+
 /// The audio backend, re-exported so a caller draining [`SoundQueue`] does not
 /// need a direct dependency on `ra2-audio`.
 pub use ra2_audio;
@@ -73,15 +75,31 @@ pub struct BotSnapshot {
     /// rotation)` — which is what `plus.rayTest` answers against: a part is
     /// rarely a ball, and the flame jet is supposed to touch what it hits.
     pub boxes: Vec<(Vec3, Vec3, Quat)>,
-    /// `(component, amount, time)` of the last blow this robot landed.
-    pub last_damage_done: (i32, f32, f32),
-    /// …and the last one it took.
-    pub last_damage_received: (i32, f32, f32),
+    /// The last blow this robot landed (`GetLastDamageDone`, robot `+0xc4`).
+    pub last_damage_done: DamageRecord,
+    /// …and the last one it took (`GetLastDamageReceived`, robot `+0xd8`).
+    pub last_damage_received: DamageRecord,
     /// `plus.isEliminated` — the original's robot state 3, which is a *different*
     /// state from a defeated robot: a robot taken out by falling off a tabletop
     /// is eliminated, while a robot whose chassis is gone is defeated.
     pub eliminated: bool,
 }
+
+/// One remembered hit, as `plus.AI.GetLastDamageDone/Received` hand it to the
+/// scripts: a 5-tuple `(component, amount, time, player, other component)`.
+///
+/// The record is five fields at robot `+0xc4` (done) / `+0xd8` (received):
+/// `+0` component, `+4` amount, `+8` the other player, `+0xc` the other
+/// player's component, `+0x10` the time; `FUN_004b9050`/`FUN_004b9130` build
+/// the tuple in the order `+0, +4, +0x10, +8, +0xc`. `AI/Spinner.py` reads
+/// `damage[3]` as "by player" ("component damaged, amount, at time, by
+/// player, by component"); for a blow *done*, `component` is the robot's own
+/// part that landed it — `CheckForWeaponHits` matches it against the weapon
+/// list — and the player/component are the victim's.
+pub type DamageRecord = (i32, f32, f32, i32, i32);
+
+/// No hit yet: no component, no player.
+pub const NO_DAMAGE: DamageRecord = (0, 0.0, 0.0, -1, -1);
 
 /// Something a script asked the engine to do.
 ///
@@ -160,6 +178,18 @@ pub enum SoundRequest {
     /// `plus.loopSound(handle)`: play it as a loop, or switch a sounding one
     /// to looping.
     Loop { id: SoundId },
+    /// `plus.setVolume(handle, volume, ..)`: the handle's level in DirectSound
+    /// hundredths of a decibel (`0` unity, `-10000` silence), immediate.
+    SetVolume { id: SoundId, hundredths_db: i32 },
+    /// `plus.fadeInToLoop(handle, volume, ms)`: start it looping from silence
+    /// and ramp to `volume` over `ms` milliseconds.
+    FadeInToLoop {
+        id: SoundId,
+        hundredths_db: i32,
+        ms: f32,
+    },
+    /// `plus.fadeOutLoop(handle, ms)`: ramp to silence over `ms`, then stop.
+    FadeOutLoop { id: SoundId, ms: f32 },
 }
 
 /// The script host's sound handles and the requests they produced.
@@ -298,6 +328,44 @@ impl SoundQueue {
         true
     }
 
+    /// `plus.setVolume(handle, volume, ..)`.
+    pub fn set_volume(&mut self, id: SoundId, hundredths_db: i32) -> Result<(), String> {
+        if !self.sounds.contains_key(&id) {
+            return Err(unknown("setVolume", id));
+        }
+        self.requests
+            .push(SoundRequest::SetVolume { id, hundredths_db });
+        Ok(())
+    }
+
+    /// `plus.fadeInToLoop(handle, volume, ms)`: the sound becomes a loop.
+    pub fn fade_in_to_loop(
+        &mut self,
+        id: SoundId,
+        hundredths_db: i32,
+        ms: f32,
+    ) -> Result<(), String> {
+        let Some(sound) = self.sounds.get_mut(&id) else {
+            return Err(unknown("fadeInToLoop", id));
+        };
+        sound.looping = true;
+        self.requests.push(SoundRequest::FadeInToLoop {
+            id,
+            hundredths_db,
+            ms,
+        });
+        Ok(())
+    }
+
+    /// `plus.fadeOutLoop(handle, ms)`.
+    pub fn fade_out_loop(&mut self, id: SoundId, ms: f32) -> Result<(), String> {
+        if !self.sounds.contains_key(&id) {
+            return Err(unknown("fadeOutLoop", id));
+        }
+        self.requests.push(SoundRequest::FadeOutLoop { id, ms });
+        Ok(())
+    }
+
     /// The queued requests, in call order.
     pub fn requests(&self) -> &[SoundRequest] {
         &self.requests
@@ -378,7 +446,42 @@ impl SoundQueue {
                 }
                 SoundRequest::Stop { id } => {
                     audio.stop_script(id.0);
-                    self.retired.remove(&id);
+                    // A removed handle also loses its `setVolume` level; a
+                    // merely stopped one keeps it for the next play.
+                    if self.retired.remove(&id).is_some() {
+                        audio.forget_script(id.0);
+                    }
+                }
+                SoundRequest::SetVolume { id, hundredths_db } => {
+                    audio.set_script_volume(id.0, hundredths_db);
+                }
+                SoundRequest::FadeInToLoop {
+                    id,
+                    hundredths_db,
+                    ms,
+                } => {
+                    let sound = self.sounds.get(&id).or_else(|| self.retired.get(&id));
+                    let Some(sound) = sound else {
+                        problems.push(format!("plus.fadeInToLoop: sound {id} is gone"));
+                        continue;
+                    };
+                    let (path, position) = (sound.path.clone(), sound.position);
+                    // It starts from silence and rises to the target.
+                    audio.set_script_volume(id.0, -10_000);
+                    play_one(
+                        id,
+                        &path,
+                        true,
+                        position,
+                        game_root,
+                        listener,
+                        audio,
+                        &mut problems,
+                    );
+                    audio.fade_script_to(id.0, hundredths_db, ms);
+                }
+                SoundRequest::FadeOutLoop { id, ms } => {
+                    audio.fade_out_script(id.0, ms);
                 }
             }
         }
@@ -451,6 +554,9 @@ pub struct State {
     pub joints: Vec<arena::JointRequest>,
     /// Which robots the engine currently reports inside each registered zone.
     pub zone_contents: BTreeMap<String, Vec<(i32, bool)>>,
+    /// Which robots each robot's own SmartZones overlap, keyed by `(robot,
+    /// zone name)`, as `(1-based robot, chassis)` (`AI.GetZoneContents`).
+    pub robot_zones: BTreeMap<(i32, String), Vec<(i32, bool)>>,
     pub time: f32,
     pub dt: f32,
     pub paused: bool,
@@ -461,6 +567,13 @@ pub struct State {
     /// *adds* to it (`fild [robot+0x20]; fadd amount`); the match shell zeroes
     /// it at the start of a match (`0x415a75`).
     pub scores: Vec<i32>,
+    /// Network play: which end of a match this process is. The original's
+    /// score writes (`FUN_004177e0`) run only on the host or in a local match
+    /// and the host sends the result as `giAddPointsMessage`s (docs/38 §6.1).
+    pub net_role: NetRole,
+    /// Host: the script-origin point awards (`plus.addPoints`) since the match
+    /// last drained them, to be sent as scoring messages.
+    pub script_points: Vec<(i32, i32)>,
     /// The script layer's sound handles and the play/stop/loop requests they
     /// produced, in call order.
     pub sounds: SoundQueue,
@@ -468,6 +581,17 @@ pub struct State {
     pub deferred: Vec<String>,
     /// Anything the script layer wants to say to the operator.
     pub log: Vec<String>,
+    /// The colour the arena script gave `plus.setBackColor` (RGB 0..1); the
+    /// match renderer clears to it.
+    pub back_color: Option<[f32; 3]>,
+    /// What `plus.setCamera*` / `plus.animateCamera` asked of the main camera
+    /// since the simulator last drained them ([`camera::take_commands`]).
+    pub camera_commands: Vec<camera::CameraCommand>,
+    /// The arena's intro is playing: `DoIntro(True)` ran and
+    /// `plus.introComplete()` has not.
+    pub intro_running: bool,
+    /// The flame emitters the scripts created (`plus.AddParticleEmitter`).
+    pub emitters: Vec<arena::EmitterState>,
 }
 
 impl State {
@@ -481,6 +605,7 @@ impl State {
             requests: Vec::new(),
             joints: Vec::new(),
             zone_contents: BTreeMap::new(),
+            robot_zones: BTreeMap::new(),
             time: 0.0,
             dt: 1.0 / 30.0,
             paused: false,
@@ -488,9 +613,15 @@ impl State {
             players: Vec::new(),
             game_type: String::new(),
             scores: Vec::new(),
+            net_role: NetRole::Local,
+            script_points: Vec::new(),
             sounds: SoundQueue::new(),
             deferred: Vec::new(),
             log: Vec::new(),
+            back_color: None,
+            camera_commands: Vec::new(),
+            intro_running: false,
+            emitters: Vec::new(),
         }
     }
 
@@ -517,7 +648,24 @@ impl State {
     }
 
     /// `plus.addPoints` — the write at `0x417918`: take what is there and add.
+    ///
+    /// A script's award is the host's to make: a joiner ignores its own copy of
+    /// the arena script's `addPoints` (`FUN_004177e0` does nothing unless the
+    /// process is the host or the match is local) and takes the host's
+    /// `giAddPointsMessage` instead ([`State::add_points_remote`]); the host
+    /// logs the award so the match can send it.
     pub fn add_points(&mut self, bot: i32, amount: i32) {
+        match self.net_role {
+            NetRole::Joiner => return,
+            NetRole::Host => self.script_points.push((bot, amount)),
+            NetRole::Local => {}
+        }
+        self.add_points_remote(bot, amount);
+    }
+
+    /// Add to a score without the network rules: the write itself, and what a
+    /// joiner does with a host's script-origin `giAddPointsMessage`.
+    pub fn add_points_remote(&mut self, bot: i32, amount: i32) {
         let Ok(bot) = usize::try_from(bot) else {
             return;
         };
@@ -546,6 +694,18 @@ impl State {
         }
         self.scores[bot] += amount.trunc() as i32;
     }
+}
+
+/// Which end of a network match this process is (docs/38 §6.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NetRole {
+    /// Not a network match: every rule runs here.
+    #[default]
+    Local,
+    /// The authoritative end: prices hits, awards points, sends the results.
+    Host,
+    /// Follows the host's scoring messages; prices and awards nothing itself.
+    Joiner,
 }
 
 static STATE: Mutex<State> = Mutex::new(State::new());
@@ -591,9 +751,25 @@ pub fn prepare_match(game_type: &str, players: Vec<i32>) {
     st.game_type = game_type.to_string();
     st.players = players;
     st.scores.clear();
+    st.net_role = NetRole::Local;
+    st.script_points.clear();
     st.paused = false;
     st.over = false;
     st.zone_contents.clear();
+    st.robot_zones.clear();
+    // A new match inherits nothing of the last one's arena or camera: the
+    // arena object (and with it its intro generator and camera iterators) is
+    // dropped until the new arena is built, and no camera request or running
+    // intro carries over.
+    st.arena_object = None;
+    st.camera_commands.clear();
+    st.intro_running = false;
+    st.emitters.clear();
+    // Nor does it inherit the last one's queued engine requests (a damage or
+    // force call made after the last step, or by an arena never stepped) or its
+    // list of calls deferred to a later milestone.
+    st.requests.clear();
+    st.deferred.clear();
 }
 
 /// Set the game-type string the scripts read (`plus.getGameType`).
@@ -625,6 +801,12 @@ pub fn publish_zone_contents(contents: BTreeMap<String, Vec<(i32, bool)>>) {
     state().zone_contents = contents;
 }
 
+/// Publish what each robot's own SmartZones hold this step, keyed by `(robot,
+/// zone name)`, values `(1-based robot, chassis)`.
+pub fn publish_robot_zones(contents: BTreeMap<(i32, String), Vec<(i32, bool)>>) {
+    state().robot_zones = contents;
+}
+
 /// A player's score, for the match's win conditions.
 pub fn points(bot: i32) -> i32 {
     state().points(bot)
@@ -640,6 +822,22 @@ pub fn add_points(bot: i32, amount: i32) {
 /// per-event truncation (`0x417918`; see [`State::add_points_float`]).
 pub fn add_points_float(bot: i32, amount: f32) {
     state().add_points_float(bot, amount);
+}
+
+/// Network play: which end of the match this process is. Set after
+/// [`prepare_match`] (which resets it to [`NetRole::Local`]).
+pub fn set_net_role(role: NetRole) {
+    state().net_role = role;
+}
+
+/// Host: take the script-origin point awards made since the last call.
+pub fn take_script_points() -> Vec<(i32, i32)> {
+    std::mem::take(&mut state().script_points)
+}
+
+/// Joiner: apply a host's script-origin point award.
+pub fn add_points_remote(bot: i32, amount: i32) {
+    state().add_points_remote(bot, amount);
 }
 
 /// Take the requests the scripts queued during the last tick.
@@ -676,6 +874,7 @@ pub fn arena_intro(on: bool) -> Result<(), String> {
         let Some(arena) = arena else {
             return Ok(());
         };
+        state().intro_running = on;
         arena
             .bind(py)
             .call_method1("DoIntro", (on,))
@@ -708,6 +907,7 @@ mod tests {
 
     /// The (uncommitted) game directory, when present.
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -959,6 +1159,28 @@ mod tests {
         crate::prepare_match("", Vec::new());
     }
 
+    /// A new match starts with empty per-match queues: engine requests and
+    /// joint requests an earlier arena left behind are dropped.
+    #[test]
+    fn a_new_match_drops_the_last_ones_queues() {
+        let _guard = super::lock();
+        {
+            let mut st = crate::state();
+            st.requests.push(crate::Request::Zap {
+                bot: 1,
+                amount: 1.0,
+                radius: 1.0,
+            });
+            st.defer("something");
+        }
+        crate::prepare_match("DEATHMATCH", vec![0, 1]);
+        let st = crate::state();
+        assert!(st.requests.is_empty(), "requests carried over");
+        assert!(st.deferred.is_empty(), "deferred carried over");
+        drop(st);
+        crate::prepare_match("", Vec::new());
+    }
+
     /// M8.3: a raising arena `Tick` is returned with its Python traceback.
     ///
     /// The old host turned the error into `true`, so a `Tick` that never ran
@@ -1030,25 +1252,19 @@ mod tests {
             assert_eq!(list_len(&arena, py, "WatchCams"), 1);
 
             // `HazardsOn(True)` builds the hazards, registers their zones and
-            // walls the map around them.
-            let walls_before = arena_data()
-                .lock()
-                .unwrap()
-                .map
-                .cells
-                .iter()
-                .filter(|c| c.wall)
-                .count();
+            // fences them (and the walls) with collision lines.
+            let lines_before = arena_data().lock().unwrap().collision_lines.len();
             assert!(host.hazards_on(py, true).unwrap());
-            let (zones, walls_after, hz) = {
+            let (zones, lines_after, hz) = {
                 let data = arena_data();
                 let d = data.lock().unwrap();
-                let walls = d.map.cells.iter().filter(|c| c.wall).count();
+                let lines = d.collision_lines.len();
                 assert!(d.map.hazards_on);
                 assert!(d.sub_materials.len() >= 3, "SetSubMaterialSound");
-                (d.zones.clone(), walls, list_len(&arena, py, "hazards"))
+                (d.zones.clone(), lines, list_len(&arena, py, "hazards"))
             };
-            assert!(walls_after > walls_before, "AddCollisionLine walls the map");
+            // `box.py`: three hazard boxes of four lines, and the four walls.
+            assert_eq!(lines_after - lines_before, 16, "AddCollisionLine");
             let spikes = arena.bind(py).getattr("spikes1").unwrap();
             let ty = spikes.get_type().name().unwrap().to_string();
             (zones, hz, ty)
@@ -1061,6 +1277,210 @@ mod tests {
         assert_eq!(hazards, 3);
         // The hazards are the script's own classes, with their own state.
         assert_eq!(spikes_type, "Spikes");
+    }
+
+    /// The AI's navigation is the original's (`FUN_00405990`, `FUN_00405720`):
+    /// the arena's collision lines and vantage points, not a grid search. A
+    /// straight run that clears every line is the whole route, a blocked one goes
+    /// over the POVs, and a robot pressed against a wall still gets a route —
+    /// an empty answer leaves `DriveToLocation` doing nothing, which is how the
+    /// robots used to park against the walls.
+    #[test]
+    fn the_ai_paths_around_collision_lines_and_always_gets_a_route() {
+        let Some((host, _guard)) = boot() else { return };
+        with_py(|py| {
+            host.load_arenas(py).unwrap();
+            let arena = host.create_arena(py, "Combat Arena").unwrap();
+            assert!(host.hazards_on(py, true).unwrap());
+            let a = arena.bind(py);
+            a.call_method1("SetSearchRadius", (1.2f32,)).unwrap();
+            let clear = |from: (f32, f32, f32), to: (f32, f32, f32)| -> bool {
+                a.call_method1("IsStraightPathClear", (from, to, false))
+                    .unwrap()
+                    .extract()
+                    .unwrap()
+            };
+            let path = |from: (f32, f32, f32), to: (f32, f32, f32)| -> Vec<(f32, f32)> {
+                a.call_method1("GetPath", (from, to, false))
+                    .unwrap()
+                    .extract()
+                    .unwrap()
+            };
+
+            // Open floor: the straight run is the route, end to end.
+            let (from, to) = ((-9.0, -2.0, 9.0), (-9.0, -2.0, -2.0));
+            assert!(clear(from, to));
+            assert_eq!(path(from, to), vec![(-9.0, 9.0), (-9.0, -2.0)]);
+
+            // Corner to corner crosses the spikes' box (`box.py`: x 4.2..5.6,
+            // z -6.4..-3.9), so the route bends over the vantage points.
+            let (from, to) = ((-9.9, -1.9, 9.95), (9.7, -1.9, -9.5));
+            assert!(!clear(from, to));
+            let route = path(from, to);
+            assert!(route.len() > 2, "{route:?}");
+            assert_eq!(route[0], (-9.9, 9.95));
+            assert_eq!(*route.last().unwrap(), (9.7, -9.5));
+            let second = route[1];
+            assert!(
+                clear(from, (second.0, -1.9, second.1)),
+                "the first leg is clear: {route:?}"
+            );
+
+            // Pressed against the west wall (`x = -12.7`) a 1.2 m robot's own
+            // spot crosses the line; it still gets a way out.
+            let route = path((-11.9, -1.9, 7.0), (9.7, -1.9, -9.5));
+            assert!(route.len() >= 2, "{route:?}");
+        });
+    }
+
+    /// `GetPath` answers what the original answered on the same inputs
+    /// (`FUN_00405990`, docs/29 §12ab): six of the 4948 calls of
+    /// `boxfight-scout-alarm-box__live__000..005`, every one of which ours
+    /// reproduces: a clear straight run; a goal pressed against the spikes'
+    /// box (never moved: the route is the straight pair); a blocked robot
+    /// moved toward POV 0; a tie between the west and east sides of the saw
+    /// (the open list's heap order picks the west, POV 3); a route longer than
+    /// the shortest by distance (the A* sums *squared* steps); and the
+    /// vantage points cut to whole numbers (POV 11 at `(1.5, -5.3)` is
+    /// `(1, -5)`).
+    #[test]
+    fn get_path_answers_the_live_calls() {
+        let Some((host, _guard)) = boot() else { return };
+        type Call = (f32, [f32; 3], [f32; 3], &'static [(f32, f32)]);
+        let calls: [Call; 6] = [
+            (
+                1.0,
+                [4.558_77, -1.887_298, 0.158_163],
+                [2.386_454, -1.810_962, 1.661_918],
+                &[(4.558_77, 0.158_163), (2.386_454, 1.661_918)],
+            ),
+            (
+                1.0,
+                [4.932_025, -1.670_659, -0.577_162],
+                [4.345_862, -1.675_974, -3.053_4],
+                &[(4.932_025, -0.577_162), (4.345_862, -3.053_4)],
+            ),
+            (
+                1.0,
+                [4.269_823, -1.695_945, -3.468_657],
+                [4.974_682, -1.723_287, -0.494_908],
+                &[
+                    (3.967_625, -2.515_411),
+                    (5.0, -1.0),
+                    (4.974_682, -0.494_908),
+                ],
+            ),
+            (
+                1.0,
+                [-1.520_514, -1.795_521, 3.584_71],
+                [0.168_005, -1.773_078, 2.453_674],
+                &[
+                    (-0.482_702, 7.963_401),
+                    (0.0, 10.0),
+                    (-5.0, 5.0),
+                    (0.0, 1.0),
+                    (0.168_005, 2.453_674),
+                ],
+            ),
+            (
+                1.0,
+                [3.908_594, -1.809_474, -2.803_91],
+                [4.281_578, -1.877_397, -7.726_392],
+                &[
+                    (3.908_594, -2.803_91),
+                    (1.0, -5.0),
+                    (0.0, -5.0),
+                    (4.281_578, -7.726_392),
+                ],
+            ),
+            (
+                1.0,
+                [4.917_491, -1.699_764, -6.727_954],
+                [3.014_581, -1.803_76, -3.941_527],
+                &[
+                    (3.789_352, -2.890_338),
+                    (1.0, -5.0),
+                    (3.014_581, -3.941_527),
+                ],
+            ),
+        ];
+        with_py(|py| {
+            host.load_arenas(py).unwrap();
+            let arena = host.create_arena(py, "Combat Arena").unwrap();
+            assert!(host.hazards_on(py, true).unwrap());
+            let a = arena.bind(py);
+            for (radius, from, to, live) in calls {
+                a.call_method1("SetSearchRadius", (radius,)).unwrap();
+                let route: Vec<(f32, f32)> = a
+                    .call_method1(
+                        "GetPath",
+                        ((from[0], from[1], from[2]), (to[0], to[1], to[2]), false),
+                    )
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                assert_eq!(route.len(), live.len(), "{from:?} -> {to:?}: {route:?}");
+                for (o, l) in route.iter().zip(live) {
+                    assert!(
+                        (o.0 - l.0).abs() < 2e-3 && (o.1 - l.1).abs() < 2e-3,
+                        "{from:?} -> {to:?}: {route:?} against {live:?}"
+                    );
+                }
+            }
+        });
+    }
+
+    /// `GetLastDamageReceived`/`Done` are the original's 5-tuples
+    /// (`FUN_004b9050`: component, amount, time, player, player's component), and
+    /// the shipped `Spinner.RobotInRange` reads the player at index 3. A 3-tuple
+    /// made every spinner's `Engage` raise once an enemy came within range.
+    #[test]
+    fn a_spinner_brain_reads_the_five_field_damage_record() {
+        let Some((host, _guard)) = boot() else { return };
+        with_py(|py| {
+            host.load_arenas(py).unwrap();
+            host.create_arena(py, "Combat Arena").unwrap();
+            host.load_ai(py).unwrap();
+            let brain = host
+                .create_ai(py, "Tornado", 0)
+                .expect("Tornado has a brain in Bindings.py");
+            let me = BotSnapshot {
+                alive: true,
+                direction: Vec3::Z,
+                last_damage_received: (3, 25.0, 9.5, 1, 7),
+                last_damage_done: NO_DAMAGE,
+                ..Default::default()
+            };
+            let other = BotSnapshot {
+                alive: true,
+                location: Vec3::new(1.0, 0.0, 0.0),
+                direction: Vec3::Z,
+                ..Default::default()
+            };
+            publish(vec![me, other], 10.0, 1.0 / 60.0);
+            let b = brain.bind(py);
+            let record: DamageRecord = b
+                .call_method0("GetLastDamageReceived")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(record, (3, 25.0, 9.5, 1, 7));
+            // Robot 1 is 1 m away and hit us half a second ago.
+            let in_range: (bool, bool) = b
+                .call_method1("RobotInRange", (1,))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(in_range, (true, true));
+            // Nothing landed yet reads as nobody's (what the simulator
+            // publishes before the first hit).
+            let done: DamageRecord = b
+                .call_method0("GetLastDamageDone")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(done, NO_DAMAGE);
+        });
     }
 
     /// M4: `plus.Arena` answers the script's geometry and pathing questions.
@@ -1091,8 +1511,9 @@ mod tests {
                 .unwrap();
             assert!(hit.0, "the arena floor is under the start point");
 
-            // And the navigation grid gives a route across the arena.
-            let path: Vec<(i32, i32)> = obj
+            // And the navigation gives a route across the arena, as world
+            // `(x, z)` points from the start to the goal.
+            let path: Vec<(f32, f32)> = obj
                 .call_method1(
                     "GetPath",
                     ((start.0, start.1, start.2), (0.0, -2.0, 0.0), false),
@@ -1104,18 +1525,25 @@ mod tests {
                 path.len() >= 2,
                 "a route from the start point to the centre"
             );
+            assert_eq!(path[0], (start.0, start.2), "{path:?}");
+            assert_eq!(*path.last().unwrap(), (0.0, 0.0), "{path:?}");
 
-            let (di, dj) = obj
-                .call_method1("ToGrid", ((0.0f32, 0.0f32, 0.0f32),))
+            // The scripts' grid is the world plane (`FUN_00406240`,
+            // `FUN_00405fa0`): `ToGrid` keeps `(x, z)` and `FromGrid` puts the
+            // floor back under it.
+            let g = obj
+                .call_method1("ToGrid", ((1.5f32, 0.0f32, -2.25f32),))
                 .unwrap()
-                .extract::<(i32, i32)>()
+                .extract::<(f32, f32)>()
                 .unwrap();
+            assert_eq!(g, (1.5, -2.25));
             let back: (f32, f32, f32) = obj
-                .call_method1("FromGrid", ((di, dj),))
+                .call_method1("FromGrid", (g,))
                 .unwrap()
                 .extract()
                 .unwrap();
-            assert!(back.0.abs() <= 1.0 && back.2.abs() <= 1.0, "{back:?}");
+            assert_eq!((back.0, back.2), (1.5, -2.25));
+            assert!((back.1 + 2.265).abs() < 0.01, "the box floor: {back:?}");
         });
     }
 
@@ -1193,6 +1621,7 @@ mod shell_tests {
     use pyo3::prelude::*;
 
     fn game_dir() -> Option<PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -1318,5 +1747,32 @@ mod shell_tests {
             super::giscript::dispatch_event(py, "anything", &py.None().into_bound(py))
         })
         .expect("the shell's dispatchEvent is called");
+    }
+
+    #[test]
+    fn volume_and_fade_requests_reach_the_audio_clock() {
+        let mut queue = SoundQueue::new();
+        let id = queue.create("Sounds/crowd/LoudCheer_Loop.wav", false, [0.0; 3]);
+        queue.set_volume(id, 0).unwrap();
+        queue.fade_in_to_loop(id, -100, 800.0).unwrap();
+        queue.fade_out_loop(id, 8000.0).unwrap();
+        assert!(queue.get(id).unwrap().looping, "fadeInToLoop makes a loop");
+        assert!(matches!(
+            queue.requests(),
+            [
+                SoundRequest::SetVolume {
+                    hundredths_db: 0,
+                    ..
+                },
+                SoundRequest::FadeInToLoop {
+                    hundredths_db: -100,
+                    ..
+                },
+                SoundRequest::FadeOutLoop { .. }
+            ]
+        ));
+        assert!(queue.set_volume(SoundId(99), 0).is_err());
+        assert!(queue.fade_out_loop(SoundId(99), 1.0).is_err());
+        assert!(queue.remove(id));
     }
 }

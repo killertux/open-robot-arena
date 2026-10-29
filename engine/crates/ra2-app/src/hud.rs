@@ -18,11 +18,11 @@
 //! **Which value each bar receives** is the binary's: battery reads the status
 //! object's `+0xa8` (getter `FUN_0043e5f0`), air `+0xa4` (`FUN_0043e5e0`), and
 //! armour `+0xb4 / +0xb0` (`FUN_0043e600`), clamped at zero; the dot reads
-//! `+0xbc` (`FUN_00416940`, 0 green / 1 yellow / 2 red). What those fields are
-//! made of — the energy model behind `Battery`/`AirTank` — is not established,
-//! so the fraction each bar receives here is still named in
-//! [`ra2sim::match::RobotReport`] and is our component-hitpoint mapping. The
-//! fill geometry and truncation are the binary's.
+//! `+0xbc` (`FUN_00416940`, 0 green / 1 yellow / 2 red). `+0xa8`/`+0xa4` are
+//! the charge left over the total of the robot's batteries and air tanks, run
+//! down by the motors and pistons (`ra2sim::energy`, docs/30), and `+0xbc` is
+//! the chassis' critical-hit count. The fill geometry and truncation are the
+//! binary's.
 //!
 //! ## What is not drawn
 //!
@@ -75,6 +75,47 @@ pub const COUNTDOWN_GROUP: &str = "countdown group";
 pub const COUNTDOWN_BOX: &str = "count number";
 pub const CAMERA_BOX: &str = "camera textbox";
 
+/// The status dots, in the order `FUN_004b3640` lights them (`0x4b313c`,
+/// `0x4b3187`, `0x4b31ce` bind them to `+0xe0`, `+0xe4`, `+0xe8`).
+pub const DOTS: [&str; 3] = ["green dot", "yellow dot", "red dot"];
+/// What a defeated robot's meters are drawn with (`FUN_004b3850`, constant `0x3e99999a`).
+pub const DEFEATED_TINT: &str = "0.3 0.3 0.3 1";
+/// The widgets `FUN_004b3850` tints (the status meter's `+0xcc..+0xe8`).
+///
+/// Not `armor bar` (`+0xd8`): live, its tint stays [`ARMOR_TINT`] after the panel is dimmed (a
+/// dump of the status meter's widgets after the out state: the air bar's `+0xbc..+0xc4` went to 0.3,
+/// the armour bar's stayed `(1, 0.5, 0.25)`), so a robot put out with armour left shows its bar at
+/// full brightness among the dimmed meters.
+const DIMMED: [&str; 6] = [
+    "main background",
+    "battery bar",
+    "air bar",
+    "green dot",
+    "yellow dot",
+    "red dot",
+];
+/// Set `_ForeColor` on every widget called `name` under `widget`, including the bodies of its
+/// attachments (`main background` is the `Image` of the status group's `Background`).
+fn tint_named(widget: &mut Widget, name: &str, tint: &str) {
+    if widget.name() == name {
+        ra2ui::input::set_field(widget, "_ForeColor", tint);
+    }
+    for attachment in widget.attachments.iter_mut() {
+        if let Some(body) = attachment.body.as_mut() {
+            tint_named(body, name, tint);
+        }
+    }
+    for child in widget.children.iter_mut() {
+        tint_named(child, name, tint);
+    }
+}
+
+/// The armour bar's and its remainder's tint, `(1, 0.5, 0.25, 1)`: live full armour reads
+/// `redbar.bmp` rows `(193, 43, 22)..(255, 31, 0)` as `(193, 21, 5)..(255, 15, 0)`, G halved and B
+/// quartered (`FUN_0061b4b0(1, 0.5, 0.25, 1)`, the colour `FUN_004b2f20` gives the remainder; the
+/// armour widget `+0xd8` holds the same value at `+0xbc..+0xc8` in every dumped state).
+pub const ARMOR_TINT: &str = "1 0.5 0.25 1";
+
 /// The bars and their widths in `statusmeters.gib`.
 pub const BARS: [(&str, f32); 3] = [
     ("battery bar", 52.0),
@@ -93,6 +134,8 @@ pub struct HudPlayer {
     pub battery: f32,
     pub air: f32,
     pub armor: f32,
+    /// The lit status dot: 0 green, 1 yellow, 2 red (`FUN_004b3640`).
+    pub dot: u8,
     /// The drawn widths after the left-side shrink.
     pub bar_widths: [f32; 3],
     /// Whether this slot's group is visible.
@@ -156,12 +199,15 @@ pub fn hud(
     countdown_left: f32,
 ) -> Hud {
     let show_countdown = state == MatchState::Countdown;
+    let intro = state == MatchState::Intro;
     // `0x416360` shows `time group` (`FUN_00477460`, the widget at `+0x1c8`)
     // with the match's `+0xd8` timed flag; a "No limit" match never shows the
     // box. `0x4758c0` hides it before the countdown.
-    let show_time = !show_countdown && report.duration_limit.is_some();
+    let show_time = !show_countdown && !intro && report.duration_limit.is_some();
 
     set_visible(screen, COUNTDOWN_GROUP, show_countdown);
+    // The arena intro shows the `Skip Intro` button and nothing else of the HUD.
+    set_visible(screen, "skip group", intro);
     set_visible(screen, TIME_GROUP, show_time);
 
     let countdown = countdown_text(countdown_left);
@@ -171,7 +217,10 @@ pub fn hud(
 
     let mut players = Vec::new();
     for (slot, group) in PLAYERS.iter().enumerate() {
-        let visible = slot < report.robots.len();
+        // The original's countdown frames (`arena-*-countdown`) show only the
+        // camera name and the countdown box; the status meters appear at the
+        // bell with the time box (`arena-*-f2`/`f4`).
+        let visible = slot < report.robots.len() && !intro && !show_countdown;
         set_visible(screen, group, visible);
         if !visible {
             continue;
@@ -182,13 +231,7 @@ pub fn hud(
         let Some(group) = ra2ui::workshop::find_mut(screen, group) else {
             continue;
         };
-        set_text(group, "name", &robot.bot_name);
-        set_text(group, "points", &robot.points.to_string());
-        let widths = [
-            set_bar(group, BARS[0].0, BARS[0].1, robot.battery),
-            set_bar(group, BARS[1].0, BARS[1].1, robot.air),
-            set_bar(group, BARS[2].0, BARS[2].1, robot.armor),
-        ];
+        let widths = bind_status(group, robot, &robot.points.to_string());
         players.push(HudPlayer {
             slot,
             name: robot.bot_name.clone(),
@@ -196,6 +239,7 @@ pub fn hud(
             battery: robot.battery,
             air: robot.air,
             armor: robot.armor,
+            dot: robot.dot.min(2),
             bar_widths: widths,
             visible,
         });
@@ -210,6 +254,41 @@ pub fn hud(
     }
 }
 
+/// Bind one robot's status meters (name, points text, the three bars, the dots) inside `group`, the
+/// widget that holds them (a player group of the match HUD, or the lab's `status group`). Returns
+/// the drawn bar widths.
+pub fn bind_status(
+    group: &mut Widget,
+    robot: &ra2sim::r#match::RobotReport,
+    points: &str,
+) -> [f32; 3] {
+    set_text(group, "name", &robot.bot_name);
+    set_text(group, "points", points);
+    let widths = [
+        set_bar(group, BARS[0].0, BARS[0].1, robot.battery),
+        set_bar(group, BARS[1].0, BARS[1].1, robot.air),
+        set_bar(group, BARS[2].0, BARS[2].1, robot.armor),
+    ];
+    tint_named(group, "armor bar", ARMOR_TINT);
+    set_armor_remainder(group, widths[2], !robot.defeated);
+    // `FUN_00476bf0` -> `FUN_004b3850(1)` (from `FUN_00418040`, every kind of "out"): the
+    // meters dim to 0.3 grey (`0x3e99999a`) on the background art, the three bars and the
+    // three dots; the name and the points text keep their colour.
+    let tint = if robot.defeated {
+        DEFEATED_TINT
+    } else {
+        "1 1 1 1"
+    };
+    for name in DIMMED {
+        tint_named(group, name, tint);
+    }
+    // `FUN_004b3640`: exactly one of the three dots shows.
+    for (i, name) in DOTS.iter().enumerate() {
+        set_visible(group, name, i == usize::from(robot.dot.min(2)));
+    }
+    widths
+}
+
 /// Put the camera's name in `camera textbox` and show or hide the box.
 ///
 /// The camera belongs to the app, so this is separate from the match report's
@@ -221,28 +300,78 @@ pub fn set_camera(screen: &mut Widget, name: &str, visible: bool) {
     set_visible(screen, CAMERA_BOX, visible);
 }
 
-/// Show or hide the chat group and put the typed line in `chat entry`.
+/// Show or hide the chat group, put the typed line in `chat entry` and the
+/// lines in `chat displaybox`.
 ///
-/// The original opens it on `\` (`0x475ee0`: show `+0x1b4`, focus `+0x1b8`).
-/// The file's `chat displaybox` is a `DisplayBox`, not a widget this port's
-/// tree sets text on; the last submitted line is only logged. Nothing is sent
-/// anywhere.
-pub fn set_chat(screen: &mut Widget, open: bool, entry: &str) {
+/// The original opens the group on `\` (`0x475ee0`: show `+0x1b4`, focus
+/// `+0x1b8`). `chat displaybox` is a `Glyph` dressed by a `DisplayBox` whose
+/// markup is `<text font fg_mcn14>`; its text is the lines, one per row.
+pub fn set_chat(screen: &mut Widget, open: bool, entry: &str, lines: &[String]) {
     set_visible(screen, "chat group", open);
     set_text(screen, "chat entry", entry);
+    if let Some(display) = chat_display_mut(screen) {
+        ra2ui::cells::bind_prose(display, &lines.join("\n"));
+    }
+}
+
+/// The size of `chat displaybox` (`gamewindow.gib`: 200x100 at (10, 110)).
+pub const CHAT_BOX: [f32; 2] = [200.0, 100.0];
+
+/// The chat lines as `chat displaybox` shows them: each wrapped to the box's
+/// width and, when they make more rows than the 100 px box holds, only the
+/// newest rows (the box is `Scrollable`; the exact rule of the original's
+/// display box was not recovered, so this keeps the tail, as a chat does).
+pub fn fit_chat_lines(font: &ra2fmt::Font, lines: &[String]) -> Vec<String> {
+    let pitch = (font.ascent as f32).max(1.0);
+    let fit = (((CHAT_BOX[1] - font.line_height() as f32) / pitch).floor() as usize + 1).max(1);
+    let rows: Vec<String> = lines
+        .iter()
+        .flat_map(|l| ra2ui::wrap_lines(font, l, CHAT_BOX[0]))
+        .collect();
+    let skip = rows.len().saturating_sub(fit);
+    rows.into_iter().skip(skip).collect()
+}
+
+/// `chat displaybox`: the file's one `Glyph` (the box's paragraph, dressed by
+/// the `DisplayBox`). The widget the file names `chat displaybox` has no name of
+/// its own in the reader, so it is found by its class and its `DisplayBox`.
+#[cfg(test)]
+fn chat_display(screen: &Widget) -> Option<&Widget> {
+    screen.children.iter().find(|c| {
+        c.kind == WidgetKind::Glyph && ra2ui::cells::display_box(&c.attachments).is_some()
+    })
+}
+
+fn chat_display_mut(screen: &mut Widget) -> Option<&mut Widget> {
+    screen.children.iter_mut().find(|c| {
+        c.kind == WidgetKind::Glyph && ra2ui::cells::display_box(&c.attachments).is_some()
+    })
 }
 
 /// The HUD clock: `m:ss`.
 ///
 /// With a configured match length the box counts down from it (`time counts
-/// down here`, the file's own note); with "No limit" it counts up. The remaining
-/// seconds are rounded up so the first frame shows the full length.
+/// down here`, the file's own note); with "No limit" it counts up.
+///
+/// `FUN_004772f0(remaining)` (called every frame from `FUN_00412fc0` once the
+/// timed match runs) writes `minutes = __ftol(remaining * 0x6a7c5c)` (the float
+/// 1/60, `0x3c888889`) and `seconds = __ftol(remaining - 60 * minutes)`, both
+/// truncating, the seconds padded with a `0` under 10 (`0x6f36f4`), joined by
+/// `:` (`0x6f36f8`). So 166.9 s left reads `2:46` and the last second reads
+/// `0:00` only at zero; the full `3:00` shows only before the first update.
 pub fn clock_text(clock: f32, limit: Option<f32>) -> String {
-    let seconds = match limit {
-        Some(limit) => (limit - clock).max(0.0).ceil() as u32,
-        None => clock.max(0.0).floor() as u32,
+    let (minutes, seconds) = match limit {
+        Some(limit) => {
+            let remaining = (limit - clock).max(0.0);
+            let minutes = (remaining * f32::from_bits(0x3c88_8889)) as u32;
+            (minutes, (remaining - (minutes * 60) as f32) as u32)
+        }
+        None => {
+            let s = clock.max(0.0).floor() as u32;
+            (s / 60, s % 60)
+        }
     };
-    format!("{}:{:02}", seconds / 60, seconds % 60)
+    format!("{minutes}:{seconds:02}")
 }
 
 /// The countdown number: `trunc` of the 4.0 s timer, while positive.
@@ -276,18 +405,200 @@ fn set_bar(group: &mut Widget, name: &str, base_width: f32, fraction: f32) -> f3
     let x = bar.position().map(|p| p.first.amount).unwrap_or(0.0);
     let height = bar.size().map(|s| s.second.amount).unwrap_or(4.0);
     let y = bar.position().map(|p| p.second.amount).unwrap_or(0.0);
-    // `_Size` is what the art is drawn at; `Size` keeps the record consistent
-    // for a later reader, and the position is unchanged (the left edge).
+    // `Size` is what the art is drawn at; the position is unchanged (the left edge).
     ra2ui::input::set_field(bar, "Position", &format!("{x} 0 {y} 0"));
     ra2ui::input::set_field(bar, "Size", &format!("{width} 0 {height} 0"));
-    ra2ui::input::set_field(bar, "_Size", &format!("{width} 0 {height} 0"));
     width
+}
+
+/// The armour bar's remainder, `+0xdc` of the status meter: `FUN_004b2f20` makes an image of
+/// `common\whitebar.bmp` (26 x 4 at (75, 39)) tinted `(1, 0.5, 0.25, 1)` (`FUN_0061b4b0`) and adds it
+/// to `status group` after the bars; the armour setter `0x4b35a0` gives it `x = 49 + w` and
+/// width `26 - w` for a coloured fill of `w`. Live it is not drawn once the robot is out: a dimmed
+/// panel with armour 0 shows the empty track of `status_meters.tga` (rows `(72, 60, 59)..(97, 77, 75)`
+/// at 0.3, `(21, 18, 18)..(29, 23, 22)`), not the orange remainder of an undimmed panel with armour 0.
+pub const ARMOR_REMAINDER: &str = "armor remainder";
+const WHITEBAR_FILE: &str = "common\\whitebar.bmp";
+
+fn set_armor_remainder(group: &mut Widget, fill: f32, shown: bool) {
+    if ra2ui::workshop::find_mut(group, ARMOR_REMAINDER).is_none() {
+        let Some(parent) = parent_of_mut(group, "armor bar") else {
+            return;
+        };
+        let Some(bar) = parent.children.iter().find(|c| c.name() == "armor bar") else {
+            return;
+        };
+        let mut white = bar.clone();
+        ra2ui::input::set_field(&mut white, "Name", ARMOR_REMAINDER);
+        ra2ui::input::set_field(&mut white, "_Filename", WHITEBAR_FILE);
+        ra2ui::input::set_field(&mut white, "_ForeColor", ARMOR_TINT);
+        ra2ui::input::set_field(&mut white, "_Size", "26 0 4 0");
+        parent.children.push(white);
+    }
+    if let Some(white) = ra2ui::workshop::find_mut(group, ARMOR_REMAINDER) {
+        ra2ui::input::set_field(white, "Position", &format!("{} 0 39 0", 49.0 + fill));
+        ra2ui::input::set_field(white, "Size", &format!("{} 0 4 0", 26.0 - fill));
+        ra2ui::input::set_field(
+            white,
+            "Visible",
+            if shown && fill < 26.0 {
+                "true"
+            } else {
+                "false"
+            },
+        );
+    }
+}
+
+fn parent_of_mut<'a>(widget: &'a mut Widget, name: &str) -> Option<&'a mut Widget> {
+    if widget.children.iter().any(|c| c.name() == name) {
+        return Some(widget);
+    }
+    widget
+        .children
+        .iter_mut()
+        .find_map(|c| parent_of_mut(c, name))
 }
 
 fn set_visible(root: &mut Widget, name: &str, visible: bool) {
     if let Some(widget) = ra2ui::workshop::find_mut(root, name) {
-        ra2ui::input::set_field(widget, "Visible", if visible { "true" } else { "false" });
+        let value = if visible { "true" } else { "false" };
+        ra2ui::input::set_field(widget, "Visible", value);
+        // The group's `Background`/`Border` bodies were saved with the group's
+        // own visibility (`countdown group` and `time group` were hidden in the
+        // editor, so their 0.4 black panel and black border bodies say
+        // `Visible false`); they show and hide with the owner.
+        for attachment in &mut widget.attachments {
+            if let Some(body) = attachment.body.as_mut() {
+                ra2ui::input::set_field(body, "Visible", value);
+            }
+        }
     }
+}
+
+/// The immobility warning's group, the one the original hangs over a robot that has not
+/// moved (`FUN_004749c0` loads it per slot, `FUN_00412390` writes its number).
+pub const IMMOBILE_COUNTDOWN: &str = "common/immobility_countdown.gib";
+/// The text box of [`IMMOBILE_COUNTDOWN`] that carries the number.
+pub const IMMOBILE_NUMBER: &str = "immobile countdown";
+/// The card `FUN_00418040` shows over a robot's status group when it goes out, by the state it
+/// is called with: 1 a destroyed chassis (the third critical, `FUN_00417cc0`), 2 immobilized
+/// (`FUN_00412fc0` at 20 s), 3 eliminated (`plus.eliminatePlayer`, `0x4b9c40`). The three images
+/// are loaded by `FUN_004749c0` into `+0x258` (`0x477930`), `+0x268` (`0x477940`) and `+0x248`
+/// (`0x477920`) per slot, and shown for [`IMMOBILE_CARD_SECONDS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutCard {
+    ControlBoardDestroyed,
+    Immobile,
+    Eliminated,
+}
+
+impl OutCard {
+    /// The card for a robot's state (`FUN_00413810`): 1, 2 or 3; 0 has none.
+    pub fn for_state(state: u8) -> Option<OutCard> {
+        match state {
+            1 => Some(OutCard::ControlBoardDestroyed),
+            2 => Some(OutCard::Immobile),
+            3 => Some(OutCard::Eliminated),
+            _ => None,
+        }
+    }
+
+    /// The `UI` image the original loads (`0x6f334c`, `0x6f3318`, `0x6f3330`).
+    pub fn file(self) -> &'static str {
+        match self {
+            OutCard::ControlBoardDestroyed => "common\\controlboard_destroyed.tga",
+            OutCard::Immobile => IMMOBILE_CARD,
+            OutCard::Eliminated => "common\\eliminated.tga",
+        }
+    }
+
+    /// The image's own size in pixels.
+    pub fn size(self) -> [f32; 2] {
+        match self {
+            OutCard::ControlBoardDestroyed => [112.0, 64.0],
+            OutCard::Immobile => IMMOBILE_CARD_SIZE,
+            OutCard::Eliminated => [116.0, 32.0],
+        }
+    }
+}
+
+/// `UI\common\immobile.tga`, 104 x 32.
+pub const IMMOBILE_CARD: &str = "common\\immobile.tga";
+pub const IMMOBILE_CARD_SIZE: [f32; 2] = [104.0, 32.0];
+/// How long the card stays (`0x6a5784`, the time `0x4e2660` gives the popup list at `+0x100`,
+/// which `FUN_00416210` counts down by `dt` and hides at zero).
+pub const IMMOBILE_CARD_SECONDS: f32 = 3.0;
+/// The counter hangs `60.0` px above the projected point (`0x6aece8`, `0x5dc5cb`), centred on it.
+pub const IMMOBILE_COUNTER_RISE: f32 = 60.0;
+
+/// The number the counter shows after `seconds` of stillness: `FUN_00412390` writes
+/// `trunc(10 - (seconds - 10))` capped at 10, and hides the group at 0 or less.
+pub fn immobile_number(seconds: f32) -> Option<i32> {
+    let n = (20.0 - seconds) as i32;
+    (n > 0).then_some(n.min(10))
+}
+
+fn immobile_root(gib: &mut Gib) -> Option<&mut Widget> {
+    gib.blocks.iter_mut().find_map(|b| match b {
+        ra2fmt::gib::Block::Widget(w) => Some(w),
+        _ => None,
+    })
+}
+
+fn place(widget: &mut Widget, at: [f32; 2]) {
+    ra2ui::input::set_field(
+        widget,
+        "Position",
+        &format!("{} 0 {} 0", at[0] as i32, at[1] as i32),
+    );
+}
+
+/// The counter group showing `n`, with its top-left at `at` (screen pixels).
+pub fn immobile_counter(base: &Gib, n: i32, at: [f32; 2]) -> Gib {
+    let mut gib = base.clone();
+    if let Some(root) = immobile_root(&mut gib) {
+        place(root, at);
+        set_text(root, IMMOBILE_NUMBER, &n.to_string());
+    }
+    gib
+}
+
+/// An out card with its top-left at `at`.
+pub fn out_card(base: &Gib, card: OutCard, at: [f32; 2]) -> Gib {
+    let mut gib = base.clone();
+    if let Some(root) = immobile_root(&mut gib) {
+        let [w, h] = card.size();
+        let size = format!("{} 0 {} 0", w as i32, h as i32);
+        place(root, at);
+        ra2ui::input::set_field(root, "Size", &size);
+        root.children.retain(|c| c.kind == WidgetKind::Image);
+        for image in root.children.iter_mut() {
+            ra2ui::input::set_field(image, "_Filename", card.file());
+            ra2ui::input::set_field(image, "_Size", &size);
+            ra2ui::input::set_field(image, "Size", &size);
+        }
+    }
+    gib
+}
+
+/// The `IMMOBILE!` card with its top-left at `at`.
+pub fn immobile_card(base: &Gib, at: [f32; 2]) -> Gib {
+    out_card(base, OutCard::Immobile, at)
+}
+
+/// Where a card goes for a status group at `frame` (x, y, w, h): centred on it in whole
+/// pixels, as `FUN_00418040` does it (`pos - (card - group) / 2`, each half truncating).
+pub fn out_card_at(card: OutCard, group: [f32; 4]) -> [f32; 2] {
+    let [w, h] = card.size();
+    let dx = ((w - group[2]) as i32 / 2) as f32;
+    let dy = ((h - group[3]) as i32 / 2) as f32;
+    [group[0] - dx, group[1] - dy]
+}
+
+/// [`out_card_at`] for the `IMMOBILE!` card.
+pub fn immobile_card_at(group: [f32; 4]) -> [f32; 2] {
+    out_card_at(OutCard::Immobile, group)
 }
 
 /// Set the text a `TextBox` draws. The visible value is its `Text` child's
@@ -314,6 +625,7 @@ mod tests {
     use ra2sim::r#match::RobotReport;
 
     fn game_dir() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -340,6 +652,7 @@ mod tests {
             battery: 0.5,
             air: 0.25,
             armor: 0.75,
+            dot: 1,
             defeated: slot == 1,
             eliminated: false,
             winner: slot == 0,
@@ -381,7 +694,14 @@ mod tests {
     #[test]
     fn the_clock_counts_down_from_the_configured_length() {
         assert_eq!(clock_text(0.0, Some(10.0)), "0:10");
-        assert_eq!(clock_text(9.5, Some(10.0)), "0:01");
+        assert_eq!(
+            clock_text(9.5, Some(10.0)),
+            "0:00",
+            "truncated, not rounded up"
+        );
+        assert_eq!(clock_text(8.5, Some(10.0)), "0:01");
+        assert_eq!(clock_text(13.1, Some(180.0)), "2:46");
+        assert_eq!(clock_text(120.0, Some(180.0)), "1:00");
         assert_eq!(clock_text(10.0, Some(10.0)), "0:00");
         assert_eq!(clock_text(65.0, Some(300.0)), "3:55");
         // "No limit" counts up (but the time group is hidden; see below).
@@ -395,6 +715,38 @@ mod tests {
         assert_eq!(countdown_text(1.5), "1");
         assert_eq!(countdown_text(1.0), "1");
         assert_eq!(countdown_text(0.999), "", "the fight has begun");
+    }
+
+    /// The countdown group's `Background` (0.4 black panel) and `Border` bodies
+    /// are saved `Visible false`; they follow the group, or the box has no panel.
+    #[test]
+    fn the_countdown_panel_and_border_show_with_the_group() {
+        let Some(game) = game_dir() else { return };
+        let mut screen = load(&game.join("UI")).unwrap();
+        let root = screen
+            .blocks
+            .iter_mut()
+            .find_map(|b| match b {
+                ra2fmt::gib::Block::Widget(w) => Some(w),
+                _ => None,
+            })
+            .unwrap();
+        let bodies = |root: &Widget| {
+            let group = ra2ui::workshop::find(root, COUNTDOWN_GROUP).unwrap();
+            group
+                .attachments
+                .iter()
+                .filter_map(|a| a.body.as_ref())
+                .map(|b| b.visible())
+                .collect::<Vec<_>>()
+        };
+        hud(root, &report(), MatchState::Fight, 3.0, 0.0);
+        let hidden = bodies(root);
+        assert!(!hidden.is_empty() && hidden.iter().all(|v| !v));
+        hud(root, &report(), MatchState::Countdown, 0.0, 3.2);
+        let shown = bodies(root);
+        assert_eq!(shown.len(), hidden.len());
+        assert!(shown.iter().all(|v| *v), "panel and border are drawn");
     }
 
     /// Countdown and time groups swap exactly as their own notes say, and a
@@ -416,8 +768,13 @@ mod tests {
         let countdown = hud(root, &report(), MatchState::Countdown, 0.0, 3.2);
         assert!(countdown.show_countdown && !countdown.show_time);
         assert_eq!(countdown.countdown, "3");
-        assert_eq!(countdown.players.len(), 2, "only two bots are in the match");
-        assert!(countdown.players.iter().all(|p| p.visible));
+        assert!(
+            countdown.players.is_empty(),
+            "the original's countdown frames draw no status meters"
+        );
+        assert!(!ra2ui::workshop::find(root, "player1 status")
+            .unwrap()
+            .visible());
         assert!(ra2ui::workshop::find(root, COUNTDOWN_GROUP)
             .unwrap()
             .visible());
@@ -432,6 +789,7 @@ mod tests {
 
         let fight = hud(root, &report(), MatchState::Fight, 3.0, 0.0);
         assert!(fight.show_time && !fight.show_countdown);
+        assert_eq!(fight.players.len(), 2, "only two bots are in the match");
         assert_eq!(fight.time, "0:07");
         assert!(ra2ui::workshop::find(root, TIME_GROUP).unwrap().visible());
         assert!(!ra2ui::workshop::find(root, COUNTDOWN_GROUP)
@@ -460,6 +818,7 @@ mod tests {
         assert_eq!(bound.players[0].name, "Roly Poly");
         assert_eq!(bound.players[0].points, 7);
         assert_eq!(bound.players[0].bar_widths, [26.0, 13.0, 19.0]);
+        assert_eq!(bound.players[0].dot, 1, "one critical hit: the yellow dot");
 
         let placed = ra2ui::resolve_with(&screen, crate::SHELL_SIZE, Some(assets.faces()));
         let first = placed
@@ -492,7 +851,46 @@ mod tests {
             (armor.frame.x - first.frame.x - 49.0).abs() < 0.01,
             "49 is the armour bar's own left edge"
         );
+        // The remainder (`+0xdc`): `49 + w` wide `26 - w`, here 68..75 of the group. The robot
+        // is in, so it shows; the robot that is out (slot 2) hides it and keeps the armour bar
+        // at its own tint while the panel dims (live dump).
+        let rest = first.find(ARMOR_REMAINDER).expect("the armour remainder");
+        assert!((rest.frame.w - 7.0).abs() < 0.01, "26 - 19");
+        assert!(
+            (rest.frame.x - first.frame.x - 68.0).abs() < 0.01,
+            "49 + 19"
+        );
+        assert!(rest.widget.visible());
+        let out = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "player2 status")
+            .unwrap();
+        assert!(!out.find(ARMOR_REMAINDER).unwrap().widget.visible());
+        let tint = |p: &ra2ui::Placement, name: &str| {
+            p.find(name)
+                .and_then(|w| w.widget.field("_ForeColor").map(|f| f.raw.clone()))
+        };
+        assert_eq!(tint(out, "armor bar").as_deref(), Some(ARMOR_TINT));
+        assert_eq!(tint(out, "air bar").as_deref(), Some(DEFEATED_TINT));
+        assert_eq!(tint(first, "air bar").as_deref(), Some("1 1 1 1"));
         let _ = assets.scene(&placed, [1280, 1005]);
+    }
+
+    #[test]
+    fn the_out_cards_sit_centred_on_the_status_group_by_their_own_size() {
+        let group = [11.0, 16.0, 84.0, 64.0];
+        // 112 x 64 (`controlboard_destroyed`): (112 - 84) / 2 = 14 left, level.
+        assert_eq!(
+            out_card_at(OutCard::ControlBoardDestroyed, group),
+            [-3.0, 16.0]
+        );
+        // 116 x 32 (`eliminated`): 16 left, (32 - 64) / 2 = -16 so 16 down.
+        assert_eq!(out_card_at(OutCard::Eliminated, group), [-5.0, 32.0]);
+        assert_eq!(OutCard::for_state(1), Some(OutCard::ControlBoardDestroyed));
+        assert_eq!(OutCard::for_state(2), Some(OutCard::Immobile));
+        assert_eq!(OutCard::for_state(3), Some(OutCard::Eliminated));
+        assert_eq!(OutCard::for_state(0), None);
     }
 
     fn four_report() -> MatchReport {
@@ -614,14 +1012,46 @@ mod tests {
             })
             .unwrap();
         assert!(!ra2ui::workshop::find(root, "chat group").unwrap().visible());
-        set_chat(root, true, "hello");
+        set_chat(root, true, "hello", &[]);
         assert!(ra2ui::workshop::find(root, "chat group").unwrap().visible());
         assert_eq!(
             text_of_widget(ra2ui::workshop::find(root, "chat entry").unwrap()),
             "hello"
         );
-        set_chat(root, false, "");
+        set_chat(root, false, "", &[]);
         assert!(!ra2ui::workshop::find(root, "chat group").unwrap().visible());
+
+        // `chat displaybox` carries the lines, one per row, in its own
+        // `<text font fg_mcn14>` markup.
+        let lines = ["[A] one".to_string(), "[B] two".to_string()];
+        set_chat(root, false, "", &lines);
+        let display = chat_display(root).expect("the chat display glyph");
+        let markup = ra2ui::cells::display_box(&display.attachments)
+            .and_then(|a| a.field("Display"))
+            .map(|f| f.text().to_string())
+            .unwrap();
+        assert!(markup.starts_with("<text font fg_mcn14>"), "{markup}");
+        assert!(markup.contains("[A] one\n[B] two"), "{markup}");
+    }
+
+    /// `chat displaybox` is 200x100: lines wrap at 200 px and only the newest
+    /// rows that fit in 100 px stay (docs/38 section 11; `chatshot`).
+    #[test]
+    fn the_chat_box_wraps_at_its_width_and_keeps_the_newest_rows_that_fit() {
+        let Some(game) = game_dir() else { return };
+        let fonts = ra2ui::Fonts::load(&game.join("RA2.cfz")).unwrap();
+        let font = fonts.get("fg_mcn14").expect("fg_mcn14");
+        let long = "[A] one two three four five six seven eight nine ten eleven twelve";
+        let rows = fit_chat_lines(font, &[long.to_string()]);
+        assert!(rows.len() >= 2, "{rows:?}");
+        assert!(rows.iter().all(|r| font.extent(r).0 as f32 <= CHAT_BOX[0]));
+        let many: Vec<String> = (0..8).map(|i| format!("[{i}] {long}")).collect();
+        let rows = fit_chat_lines(font, &many);
+        let pitch = font.ascent as f32;
+        let last = (rows.len() - 1) as f32 * pitch + font.line_height() as f32;
+        assert!(last <= CHAT_BOX[1], "{} rows reach {last}", rows.len());
+        assert!(rows.last().unwrap().contains("twelve"), "newest kept");
+        assert!(rows.first().unwrap().starts_with("[7]") || !rows[0].starts_with("[0]"));
     }
 
     /// A "No limit" match never shows the time group: `0x416360` calls

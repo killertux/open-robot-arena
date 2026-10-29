@@ -31,6 +31,8 @@ pub const ROW_FACE: &str = "fg_mcn14";
 pub struct Arena {
     /// The name the list shows — `Combat Arena`.
     pub name: String,
+    /// The class docstring the picker shows under the preview.
+    pub description: String,
     /// The art the picker hands the C++ beside the name, as the script writes it:
     /// `box/box_preview.bmp`.
     pub preview: String,
@@ -82,6 +84,7 @@ pub fn all(game: &Path) -> Result<Vec<Arena>, String> {
         }
         out.push(Arena {
             name: script.name,
+            description: script.description,
             preview: script.preview.unwrap_or_default(),
             script: path.file_name().unwrap().to_string_lossy().to_string(),
             game_types: script.game_types,
@@ -125,6 +128,7 @@ mod tests {
     use ra2fmt::gib::Block;
 
     fn game_dir() -> Option<std::path::PathBuf> {
+        ra2fmt::saves::isolate_for_tests();
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             let candidate = dir.join("local/game");
@@ -236,8 +240,17 @@ mod tests {
             .unwrap();
         assert_eq!(list.children.len(), bars + arenas.len());
         for (i, row) in list.children.iter().skip(bars).enumerate() {
-            assert_eq!(row.frame.y, list.frame.y + 18.0 * i as f32, "row {i}");
-            assert_eq!(row.frame.x, list.frame.x, "row {i}");
+            // Rows sit 18 px apart, text inset by the measured row-text offset.
+            assert_eq!(
+                row.frame.y,
+                list.frame.y + 18.0 * i as f32 + crate::input::ROW_TEXT_Y,
+                "row {i}"
+            );
+            assert_eq!(
+                row.frame.x,
+                list.frame.x + crate::input::ROW_TEXT_X,
+                "row {i}"
+            );
             assert_eq!(row.frame.h, 18.0, "row {i}");
             assert_eq!(row.widget.text(), Some(arenas[i].name.as_str()), "row {i}");
         }

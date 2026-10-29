@@ -19,6 +19,19 @@ pub struct GmiScene {
     pub simulation: Option<SimulationObject>,
     /// The hinges the file's constraint solver declares.
     pub hinges: Vec<HingeJoint>,
+    /// The angular dashpots (`*GMID_HAVOK_ANGULAR_DASHPOT`, node 49).
+    pub dashpots: Vec<AngularDashpot>,
+    /// The point-to-point constraints (`*GMID_HAVOK_POINTTOPOINT`, node 53)
+    /// the file's constraint solvers declare.
+    pub point_to_points: Vec<PointToPoint>,
+    /// The wheel constraints (node 46) the file's constraint solvers declare:
+    /// a `Steering` unit's `Carwheel01`/`Carwheel02`.
+    pub wheels: Vec<WheelJoint>,
+    /// The scene's static background colour (RGB 0..1).
+    pub background: [f32; 3],
+    /// The scene's static ambient colour as stored. The original engine does
+    /// not use it: it fixes `D3DRS_AMBIENT` to `0xff262626` (`FUN_0058f390`).
+    pub ambient: [f32; 3],
 }
 
 /// A hinge declared by a model's Havok constraint solver.
@@ -43,9 +56,72 @@ pub struct HingeJoint {
     pub friction: f32,
     /// `*ANGLE_LIMITS`, in radians.
     pub limits: [f32; 2],
+    /// The hinge node's whole frame (rows are axes, the last the origin):
+    /// `frame[1]` is the spin axis, `frame[3]` the pivot.
+    pub frame: [[f32; 3]; 4],
+    /// `*POINT` and `*SPIN_AXIS` as the file stores them (the exporter's own
+    /// copy; for robot components they are not in component space).
+    pub point: [f32; 3],
+    pub spin_axis: [f32; 3],
+}
+
+/// An angular dashpot (`GM_HavokAngularDashpot`): a damped spring that pulls
+/// two bodies' relative orientation towards a stored one.
+///
+/// The exe's reader (`0x5ca940`, the base dashpot's at `0x5ca1b0`) reads the
+/// name, the node frame, the two body names, `*STRENGTH` (`+0x80`),
+/// `*DAMPING` (`+0x84`), `*ALLOW_INTERPENETRATIONS` (`+0x88`, a byte) and
+/// then the angular dashpot's own four floats (`+0x8c`), a rotation.
+#[derive(Clone, Debug, Default)]
+pub struct AngularDashpot {
+    pub name: String,
+    pub frame: [[f32; 3]; 4],
+    pub body_a: String,
+    pub body_b: String,
+    pub strength: f32,
+    pub damping: f32,
+    pub allow_interpenetrations: bool,
+    pub rotation: [f32; 4],
+}
+
+/// A wheel constraint (node 46) from a constraint list: a `Steering` unit
+/// holds each hub with one (`Carwheel01` on `hub1`, `Carwheel02` on `hub2`).
+/// Live, the game's wheel atom (`0x553c30`) holds the hub at `point` (in
+/// Sentinel's `carsteering2.gmf` 0.058 m inboard of the attachment the wheel
+/// mounts on, the `wheelpoint` the file also carries), docs/29 section 12x.
+#[derive(Clone, Debug, Default)]
+pub struct WheelJoint {
+    pub name: String,
+    pub frame: [[f32; 3]; 4],
+    pub body_a: String,
+    pub body_b: String,
+    /// The pivot, in the model's space.
+    pub point: [f32; 3],
+    /// The second vector the node stores (the axle, `(0, 0, 1)` in the stock
+    /// units).
+    pub axle: [f32; 3],
+    /// The eight trailing floats, not decoded.
+    pub extra: [f32; 8],
+}
+
+/// A point-to-point (ball-and-socket) constraint from a constraint list.
+#[derive(Clone, Debug, Default)]
+pub struct PointToPoint {
+    pub name: String,
+    pub frame: [[f32; 3]; 4],
+    pub body_a: String,
+    pub body_b: String,
+    /// The two vectors the node stores after the bodies.
+    pub point_a: [f32; 3],
+    pub point_b: [f32; 3],
 }
 
 impl GmiScene {
+    /// Scene light objects (`*LIGHT`).
+    pub fn lights(&self) -> impl Iterator<Item = &SceneObject> {
+        self.objects.iter().filter(|o| o.light.is_some())
+    }
+
     /// Geometric objects that carry a mesh.
     pub fn meshes(&self) -> impl Iterator<Item = &SceneObject> {
         self.objects.iter().filter(|o| o.mesh.is_some())
@@ -169,15 +245,57 @@ pub struct Texture {
     pub class: String,
     /// Referenced bitmap file name (may be empty).
     pub bitmap: String,
+    /// `*MAP_AMOUNT`.
+    pub amount: f32,
+    /// The map slot (`GMTexture+0x34`): 0 ambient, 1 diffuse, 2 specular,
+    /// 3 shine, 4 shine strength, 5 self-illumination, 6 opacity, 7 filter
+    /// colour, 8 bump, 9 reflect, 10 refract, ... The original's material
+    /// builder (`FUN_005ae630`) only acts on 1, 5, 6 and 9.
+    pub kind: i32,
+    /// `*MAP_TYPE` (Screen / Explicit / Spherical ...), as stored.
+    pub map_type: i32,
+    /// u offset, v offset, u tiling, v tiling, angle (kept as stored; the
+    /// original never applies a texture matrix, bar the sphere map).
+    pub uv: [f32; 5],
+    /// `*BITMAP_COLORMAP_ENABLE`.
+    pub colormap: i32,
+    /// `*BITMAP_INVERT`. On an opacity map the original alpha-tests only when
+    /// this is 1 (`FUN_005ae630` case 6), and sorts-and-blends otherwise.
+    pub invert: i32,
+    /// `*BITMAP_FILTER`: 0 Pyramidal, 1 SAT. The original maps 0 to point
+    /// sampling and 1 to bilinear (`FUN_005b24c0`, texture entry `+0xc`).
+    pub filter: i32,
+    /// `*BITMAP_MAP_CHANNEL` (1 based).
+    pub channel: i32,
 }
+
+/// `MAP_*` slot numbers (`Texture::kind`).
+pub const MAP_DIFFUSE: i32 = 1;
+pub const MAP_SELFILLUM: i32 = 5;
+pub const MAP_OPACITY: i32 = 6;
+pub const MAP_REFLECT: i32 = 9;
 
 #[derive(Debug, Clone, Default)]
 pub struct Material {
     pub name: String,
     pub class: String,
+    pub ambient: [f32; 3],
     pub diffuse: [f32; 3],
+    pub specular: [f32; 3],
+    /// `*MATERIAL_SHINE` (the original's D3D specular power is this times 100).
+    pub shine: f32,
+    /// `*MATERIAL_SHINESTRENGTH` (scales the specular colour).
+    pub shine_strength: f32,
+    /// `*MATERIAL_SELFILLUM`. The original's builder never reads it.
+    pub self_illum: f32,
+    /// `*MATERIAL_XP_TYPE` as stored: 1 Filter (alpha blend), 3 Additive.
+    pub xp_type: i32,
     /// Transparency (0 = opaque).
     pub transparency: f32,
+    /// The GMF material's "two sided" flag as stored. The original's material
+    /// apply (`FUN_005b24c0`) sets `D3DRS_CULLMODE` to CCW when the byte at
+    /// material+0x10 is non-zero and to NONE when it is zero.
+    pub two_sided: i32,
     pub textures: Vec<Texture>,
     /// Sub-materials of a `Multi/Sub-Object` material. A face's `material` index
     /// selects one of these (falling back to the parent material).
@@ -185,14 +303,26 @@ pub struct Material {
 }
 
 impl Material {
-    /// Resolve the effective material for a face within this (top-level) slot.
-    pub fn resolve_face(&self, face_material: i32) -> &Material {
-        if !self.sub_materials.is_empty() {
-            if let Some(m) = self.sub_materials.get(face_material.max(0) as usize) {
-                return m;
-            }
+    /// Resolve the effective material for a face within this (top-level) slot,
+    /// the way the original's batch builder (`FUN_005ae630`) does: without
+    /// sub-materials every face uses this material; with `n` of them a face id
+    /// above `n` is clamped to the last one (`n - 1`), and a face whose id is
+    /// exactly `n` (or negative) matches no sub-material pass and is not drawn
+    /// (`None`). The compressor's fence bars are face id 3 of 2 sub-materials.
+    pub fn resolve_face(&self, face_material: i32) -> Option<&Material> {
+        let n = self.sub_materials.len() as i32;
+        if n == 0 {
+            return Some(self);
         }
-        self
+        let id = if face_material > n {
+            n - 1
+        } else {
+            face_material
+        };
+        if id < 0 || id >= n {
+            return None;
+        }
+        self.sub_materials.get(id as usize)
     }
 
     /// First referenced bitmap file name, if any.
@@ -220,8 +350,24 @@ pub struct Mesh {
     pub texcoords: Vec<[f32; 3]>,
     /// Per-face texture indices (parallel to `faces`), when present.
     pub texfaces: Vec<[u32; 3]>,
+    /// Four per face: the face normal, then corner A, B, C's vertex normals
+    /// (the order the exe's GMA writer prints them, `0x5c2568`).
     pub normals: Vec<[f32; 3]>,
     pub backface_cull: i32,
+    /// Vertex colours (`ccount` entries, RGB 0..1) and their per-face indices.
+    pub colors: Vec<[f32; 3]>,
+    pub colorfaces: Vec<[u32; 3]>,
+    /// Extra UV channels (`*MESH_MAPPINGCHANNEL`): the lightmaps' second set.
+    pub channels: Vec<TexChannel>,
+}
+
+/// One additional texture-coordinate channel of a mesh.
+#[derive(Debug, Clone, Default)]
+pub struct TexChannel {
+    /// The channel number a texture's `channel` refers to (2 is the first extra).
+    pub index: i32,
+    pub texcoords: Vec<[f32; 3]>,
+    pub texfaces: Vec<[u32; 3]>,
 }
 
 impl Mesh {
@@ -265,7 +411,25 @@ pub struct RigidBody {
     pub children: Vec<RigidBody>,
 }
 
+impl GmiScene {
+    /// Whether geometry object `o` is a rigid body that simulates its own mesh
+    /// (`SIMULATION_GEOMETRY` 2, no proxy): the original places such an object
+    /// by its `TM`'s translation alone, both for collision and for drawing
+    /// (docs/29 section 12p).
+    pub fn object_is_own_geometry(&self, o: &SceneObject) -> bool {
+        self.rigid_bodies()
+            .iter()
+            .any(|rb| rb.simulates_own_mesh() && rb.name.eq_ignore_ascii_case(&o.name))
+    }
+}
+
 impl RigidBody {
+    /// `SIMULATION_GEOMETRY` 2 with no proxy: the body collides as its own
+    /// display mesh.
+    pub fn simulates_own_mesh(&self) -> bool {
+        self.simulation_geometry == 2 && self.collision_object().eq_ignore_ascii_case(&self.name)
+    }
+
     /// The geometry object this body simulates: the proxy when set, else the
     /// body's own name.
     pub fn collision_object(&self) -> &str {
@@ -298,12 +462,11 @@ impl RigidBody {
     /// forms**: `DISPLAY_PROXY_NAME` — the mesh the body is *shown* as, which
     /// is normally a group node whose children are the real geometry.
     ///
-    /// The Octagon is what settles 5. Its `main_collision` declares `geom 5`
-    /// with display proxy `main_display`, and its own 65-vertex mesh is an
-    /// octagonal slab that stops 3.3 m short of the visible rim on the
-    /// diagonals: taking that mesh as the collider drops a robot that drives
-    /// there four metres into the slab's underside. The `main_display` group
-    /// contains the rim.
+    /// This names the display proxy for 5/6, but when the body has geometry
+    /// of its own the original collides with that instead (live, the
+    /// Octagon's collidable is `main_collision`'s own 65-vertex slab, not the
+    /// `main_display` group; `ra2_render::collect_havok` applies that, docs/29
+    /// section 12h).
     pub fn simulation_objects(&self) -> Vec<&str> {
         let source = match self.simulation_geometry {
             3 | 4 => self.geometry_proxy.as_str(),
@@ -349,7 +512,30 @@ pub struct SceneObject {
     pub transform: [[f32; 3]; 4],
     pub data: String,
     pub mesh: Option<Mesh>,
+    pub light: Option<Light>,
     pub rigid_bodies: Vec<RigidBody>,
+    /// A rigid-body collection's `GMID_HAVOK_DIS_COLLISION_PAIRS`: pairs of
+    /// bodies (by name) Havok never collides with each other.
+    pub disabled_pairs: Vec<(String, String)>,
+}
+
+/// A `*LIGHT` object. Only omni lights occur in the shipped data; the original
+/// turns each into a `D3DLIGHT_POINT` (`FUN_005ba1e0`): diffuse = colour x
+/// intensity, specular = colour, no ambient, position = the node's translation, range =
+/// `attn_end` and attenuation `(0.4, 3/range, 40/range^2)` when `far_atten`,
+/// else range 10000 and attenuation `(1, 0, 0)`.
+#[derive(Debug, Clone, Default)]
+pub struct Light {
+    /// 0 = Omni.
+    pub kind: i32,
+    pub shadows: i32,
+    pub use_light: i32,
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub aspect: f32,
+    pub attn_start: f32,
+    pub attn_end: f32,
+    pub far_atten: bool,
 }
 
 /// One attachment point on a component mesh.
@@ -480,6 +666,9 @@ pub fn parse(data: &[u8]) -> Result<GmiScene, Error> {
     Parser {
         r: Reader::new(data),
         pending_hinges: Vec::new(),
+        pending_p2p: Vec::new(),
+        pending_wheels: Vec::new(),
+        dashpots: Vec::new(),
     }
     .parse()
 }
@@ -564,6 +753,11 @@ struct Parser<'a> {
     r: Reader<'a>,
     /// Hinges read from the constraint list now being parsed.
     pending_hinges: Vec<HingeJoint>,
+    /// Point-to-point constraints read from the constraint list being parsed.
+    pending_p2p: Vec<PointToPoint>,
+    /// Wheel constraints read from the constraint list being parsed.
+    pending_wheels: Vec<WheelJoint>,
+    dashpots: Vec<AngularDashpot>,
 }
 
 impl<'a> Parser<'a> {
@@ -575,10 +769,15 @@ impl<'a> Parser<'a> {
         if hdr != [3, 1, 0, 15] {
             return Err(Error::Structure(format!("unexpected GMI header {hdr:?}")));
         }
-        let mut scene = GmiScene::default();
-        self.read_scene()?;
-        scene.materials = self.read_material_list()?;
+        let (background, ambient) = self.read_scene()?;
+        let mut scene = GmiScene {
+            background,
+            ambient,
+            materials: self.read_material_list()?,
+            ..GmiScene::default()
+        };
         self.read_object_list(&mut scene)?;
+        scene.dashpots = std::mem::take(&mut self.dashpots);
         Ok(scene)
     }
 
@@ -598,16 +797,16 @@ impl<'a> Parser<'a> {
         self.r.tm()
     }
 
-    fn read_scene(&mut self) -> Result<(), Error> {
+    fn read_scene(&mut self) -> Result<([f32; 3], [f32; 3]), Error> {
         self.expect_node(1, 2, "scene")?;
         self.r.string()?; // source
         self.r.i32()?; // first frame
         self.r.i32()?; // last frame
         self.r.i32()?; // speed
         self.r.i32()?; // ticks
-        self.r.color()?; // static background
-        self.r.color()?; // static ambient
-        Ok(())
+        let background = self.r.color()?; // static background
+        let ambient = self.r.color()?; // static ambient
+        Ok((background, ambient))
     }
 
     fn read_material_list(&mut self) -> Result<Vec<Material>, Error> {
@@ -624,18 +823,18 @@ impl<'a> Parser<'a> {
             class: self.r.string()?,
             ..Default::default()
         };
-        self.r.color()?; // ambient
+        m.ambient = self.r.color()?;
         m.diffuse = self.r.color()?;
-        self.r.color()?; // specular
-        self.r.f32()?; // shine
-        self.r.f32()?; // shine strength
+        m.specular = self.r.color()?;
+        m.shine = self.r.f32()?;
+        m.shine_strength = self.r.f32()?;
         m.transparency = self.r.f32()?;
         self.r.f32()?; // wire size
         self.r.i32()?; // shading type
         self.r.f32()?; // xp falloff
-        self.r.f32()?; // self illumination
-        self.r.i32()?; // two sided
-        self.r.i32()?; // xp type
+        m.self_illum = self.r.f32()?;
+        m.two_sided = self.r.i32()?;
+        m.xp_type = self.r.i32()?;
         let texcount = self.r.i32()?;
         if texcount != 0 {
             m.textures = self.read_texture_list()?;
@@ -655,24 +854,29 @@ impl<'a> Parser<'a> {
 
     fn read_texture(&mut self) -> Result<Texture, Error> {
         self.expect_node(15, 4, "texture")?;
-        let t = Texture {
+        let mut t = Texture {
             name: self.r.string()?,
             class: self.r.string()?,
             bitmap: self.r.string()?,
+            ..Default::default()
         };
-        self.r.f32()?; // amount
-        self.r.i32()?; // type
-        self.r.i32()?; // map type
-        for _ in 0..8 {
-            self.r.f32()?; // u/v offset + tiling, angle, blur, blur offset, noise
+        t.amount = self.r.f32()?;
+        t.kind = self.r.i32()?;
+        t.map_type = self.r.i32()?;
+        for k in 0..8 {
+            // u/v offset + tiling, angle, blur, blur offset, noise amount
+            let v = self.r.f32()?;
+            if k < 5 {
+                t.uv[k] = v;
+            }
         }
         self.r.f32()?; // noise size
         self.r.i32()?; // noise level
         self.r.f32()?; // noise phase
-        self.r.i32()?; // invert
-        self.r.i32()?; // unknown
-        self.r.i32()?; // filter
-        self.r.i32()?; // channel
+        t.colormap = self.r.i32()?; // *BITMAP_COLORMAP_ENABLE
+        t.invert = self.r.i32()?; // *BITMAP_INVERT
+        t.filter = self.r.i32()?;
+        t.channel = self.r.i32()?;
         let subcount = self.r.i32()?;
         if subcount != 0 {
             let _ = self.read_texture_list()?;
@@ -704,6 +908,8 @@ impl<'a> Parser<'a> {
                     let solver = self.read_constraint_solver()?;
                     scene.objects.push(solver);
                     scene.hinges.append(&mut self.pending_hinges);
+                    scene.point_to_points.append(&mut self.pending_p2p);
+                    scene.wheels.append(&mut self.pending_wheels);
                 }
                 49 => scene.objects.push(self.read_angular_dashpot()?),
                 other => scene.objects.push(SceneObject {
@@ -766,14 +972,15 @@ impl<'a> Parser<'a> {
             }
         }
         if self.r.i32()? != 0 {
-            self.read_texture_channels()?;
+            m.channels = self.read_texture_channels()?;
         }
         for _ in 0..ccount {
-            let _ = self.r.vec3()?;
+            m.colors.push(self.r.vec3()?);
         }
         if ccount != 0 {
             for _ in 0..fcount {
-                let _ = self.r.triplet()?;
+                let (a, b, c) = self.r.triplet()?;
+                m.colorfaces.push([a as u32, b as u32, c as u32]);
             }
         }
         for _ in 0..(fcount.max(0) * 4) {
@@ -783,10 +990,14 @@ impl<'a> Parser<'a> {
         Ok(m)
     }
 
-    fn read_texture_channels(&mut self) -> Result<(), Error> {
+    fn read_texture_channels(&mut self) -> Result<Vec<TexChannel>, Error> {
         let n = self.r.i32()?;
+        let mut out = Vec::new();
         for _ in 0..n {
-            self.r.i32()?; // channel index
+            let mut ch = TexChannel {
+                index: self.r.i32()?,
+                ..Default::default()
+            };
             let tcount = self.r.i32()?;
             self.r.i32()?;
             let fcount = self.r.i32()?;
@@ -795,15 +1006,17 @@ impl<'a> Parser<'a> {
             self.r.i32()?;
             self.r.i32()?;
             for _ in 0..tcount {
-                let _ = self.r.vec3()?;
+                ch.texcoords.push(self.r.vec3()?);
             }
             if tcount != 0 {
                 for _ in 0..fcount {
-                    let _ = self.r.triplet()?;
+                    let (a, b, c) = self.r.triplet()?;
+                    ch.texfaces.push([a as u32, b as u32, c as u32]);
                 }
             }
+            out.push(ch);
         }
-        Ok(())
+        Ok(out)
     }
 
     fn read_attachment(&mut self, flags: i32) -> Result<SceneObject, Error> {
@@ -829,22 +1042,26 @@ impl<'a> Parser<'a> {
         if !target.is_empty() {
             let _ = self.read_tm_node()?;
         }
-        self.r.i32()?;
-        self.r.i32()?;
-        self.r.i32()?;
-        self.r.color()?;
-        self.r.f32()?;
-        self.r.f32()?;
-        self.r.take(8)?;
-        self.r.f32()?;
-        self.r.f32()?;
-        self.r.f32()?;
-        self.r.u8()?;
+        let mut l = Light {
+            kind: self.r.i32()?,
+            shadows: self.r.i32()?,
+            use_light: self.r.i32()?,
+            color: self.r.color()?,
+            intensity: self.r.f32()?,
+            aspect: self.r.f32()?,
+            ..Default::default()
+        };
+        self.r.take(8)?; // hotspot / falloff (spot lights only)
+        l.attn_start = self.r.f32()?;
+        l.attn_end = self.r.f32()?;
+        self.r.f32()?; // target distance
+        l.far_atten = self.r.u8()? != 0;
         self.r.take(3)?;
         Ok(SceneObject {
             kind: ObjectKind::Light,
             name,
             transform,
+            light: Some(l),
             ..Default::default()
         })
     }
@@ -901,13 +1118,16 @@ impl<'a> Parser<'a> {
         let paircount = self.r.i32()?;
         self.r.i32()?; // solver type
         let rigid_bodies = self.read_rigidbody_list()?;
-        if paircount != 0 {
-            self.read_disabled_pairs()?;
-        }
+        let disabled_pairs = if paircount != 0 {
+            self.read_disabled_pairs()?
+        } else {
+            Vec::new()
+        };
         Ok(SceneObject {
             kind: ObjectKind::RigidBodies,
             name,
             rigid_bodies,
+            disabled_pairs,
             ..Default::default()
         })
     }
@@ -958,18 +1178,18 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn read_disabled_pairs(&mut self) -> Result<(), Error> {
+    fn read_disabled_pairs(&mut self) -> Result<Vec<(String, String)>, Error> {
         self.expect_node(51, 2, "disabled collision pairs")?;
         let count = self.r.i32()?;
-        for _ in 0..count {
-            let _ = self.r.string()?;
-            let _ = self.r.string()?;
-        }
-        Ok(())
+        (0..count)
+            .map(|_| Ok((self.r.string()?, self.r.string()?)))
+            .collect()
     }
 
     fn read_constraint_solver(&mut self) -> Result<SceneObject, Error> {
         self.pending_hinges.clear();
+        self.pending_p2p.clear();
+        self.pending_wheels.clear();
         let name = self.r.string()?;
         self.r.f32()?; // threshold
         self.r.string()?; // rigid body collection name
@@ -992,17 +1212,26 @@ impl<'a> Parser<'a> {
             let (cid, _cflags, _) = self.r.node()?;
             match cid {
                 46 => {
-                    // A constraint with eight trailing floats. No stock arena
-                    // uses one; skipped by structure.
-                    let _ = self.r.string()?;
-                    let _ = self.read_tm_node()?;
-                    let _ = self.r.string()?;
-                    let _ = self.r.string()?;
-                    let _ = self.r.vec3()?;
-                    let _ = self.r.vec3()?;
-                    for _ in 0..8 {
-                        self.r.f32()?;
+                    // A wheel constraint (a steering unit's hubs).
+                    let name = self.r.string()?;
+                    let frame = self.read_tm_node()?;
+                    let body_a = self.r.string()?;
+                    let body_b = self.r.string()?;
+                    let point = self.r.vec3()?;
+                    let axle = self.r.vec3()?;
+                    let mut extra = [0.0; 8];
+                    for e in &mut extra {
+                        *e = self.r.f32()?;
                     }
+                    self.pending_wheels.push(WheelJoint {
+                        name,
+                        frame,
+                        body_a,
+                        body_b,
+                        point,
+                        axle,
+                        extra,
+                    });
                 }
                 47 => {
                     // A hinge: its name, its frame, the two bodies it joins and
@@ -1013,8 +1242,8 @@ impl<'a> Parser<'a> {
                     let transform = self.read_tm_node()?;
                     let body_a = self.r.string()?;
                     let body_b = self.r.string()?;
-                    let _point = self.r.vec3()?;
-                    let _axis = self.r.vec3()?;
+                    let point = self.r.vec3()?;
+                    let spin_axis = self.r.vec3()?;
                     let limited = self.r.u8()? != 0;
                     let friction = self.r.f32()?;
                     let limit_min = self.r.f32()?;
@@ -1038,15 +1267,26 @@ impl<'a> Parser<'a> {
                         limited,
                         friction,
                         limits: [limit_min, limit_max],
+                        frame: transform,
+                        point,
+                        spin_axis,
                     });
                 }
                 53 => {
-                    let _ = self.r.string()?;
-                    let _ = self.read_tm_node()?;
-                    let _ = self.r.string()?;
-                    let _ = self.r.string()?;
-                    let _ = self.r.vec3()?;
-                    let _ = self.r.vec3()?;
+                    let name = self.r.string()?;
+                    let frame = self.read_tm_node()?;
+                    let body_a = self.r.string()?;
+                    let body_b = self.r.string()?;
+                    let point_a = self.r.vec3()?;
+                    let point_b = self.r.vec3()?;
+                    self.pending_p2p.push(PointToPoint {
+                        name,
+                        frame,
+                        body_a,
+                        body_b,
+                        point_a,
+                        point_b,
+                    });
                 }
                 other => {
                     return Err(Error::Structure(format!("unknown constraint node {other}")));
@@ -1058,15 +1298,26 @@ impl<'a> Parser<'a> {
 
     fn read_angular_dashpot(&mut self) -> Result<SceneObject, Error> {
         let name = self.r.string()?;
-        let _ = self.read_tm_node()?;
-        let _ = self.r.string()?;
-        let _ = self.r.string()?;
-        self.r.f32()?;
-        self.r.f32()?;
-        self.r.u8()?;
-        for _ in 0..4 {
-            self.r.f32()?;
+        let frame = self.read_tm_node()?;
+        let body_a = self.r.string()?;
+        let body_b = self.r.string()?;
+        let strength = self.r.f32()?;
+        let damping = self.r.f32()?;
+        let allow_interpenetrations = self.r.u8()? != 0;
+        let mut rotation = [0.0; 4];
+        for r in &mut rotation {
+            *r = self.r.f32()?;
         }
+        self.dashpots.push(AngularDashpot {
+            name: name.clone(),
+            frame,
+            body_a,
+            body_b,
+            strength,
+            damping,
+            allow_interpenetrations,
+            rotation,
+        });
         Ok(SceneObject {
             kind: ObjectKind::Dashpot,
             name,
@@ -1078,6 +1329,36 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `FUN_005ae630` clamps a face id above the sub-material count to the last
+    /// one and draws no face whose id equals the count (`0x5ae8fa`: `jle`).
+    #[test]
+    fn a_face_id_past_the_sub_materials_clamps_and_one_equal_to_the_count_is_dropped() {
+        let sub = |name: &str| Material {
+            name: name.into(),
+            ..Default::default()
+        };
+        let multi = Material {
+            name: "Metal".into(),
+            sub_materials: vec![sub("Chain Fence"), sub("Bars")],
+            ..Default::default()
+        };
+        let name = |id: i32| multi.resolve_face(id).map(|m| m.name.clone());
+        assert_eq!(name(0).as_deref(), Some("Chain Fence"));
+        assert_eq!(name(1).as_deref(), Some("Bars"));
+        assert_eq!(name(2), None, "an id equal to the count matches no pass");
+        assert_eq!(
+            name(3).as_deref(),
+            Some("Bars"),
+            "the compressor fence's bars"
+        );
+        assert_eq!(name(-1), None);
+        let plain = sub("Floor");
+        assert_eq!(
+            plain.resolve_face(7).map(|m| m.name.as_str()),
+            Some("Floor")
+        );
+    }
 
     fn attachment(name: &str, data: &str) -> Attachment {
         let o = SceneObject {
