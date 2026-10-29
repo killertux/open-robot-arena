@@ -188,8 +188,8 @@ pub struct WheelStats {
     pub contact: Option<String>,
     /// `grip` — friction of that surface.
     pub grip: f32,
-    /// `resistance` — rolling resistance, in torque units; becomes the joint's
-    /// friction torque.
+    /// `resistance` — `MagicAction`'s sideways grip (`Wheel + 0x2ac`, docs/29
+    /// section 3); not a torque on the wheel's hinge (section 12ae).
     pub resistance: f32,
 }
 
@@ -685,8 +685,9 @@ pub struct JointInfo {
     /// The joint's rotation axis in bot space: the mount point's Z — the same
     /// axis the placement rule turns a child about (F1).
     pub axis: Vec3,
-    /// Rolling resistance: torque in N·m the joint's friction may resist an
-    /// undriven rotation with (a wheel's `resistance`).
+    /// Torque in N·m the joint's friction may resist an undriven rotation
+    /// with: a parked burst motor's or servo's own torque; 0 for a wheel
+    /// ([`wheel_friction`]).
     pub friction_torque: f32,
     /// A prismatic joint (a piston's rod) rather than a revolute one. Its
     /// `limits` are metres of travel, `rate` is m/s and the torques are forces.
@@ -1052,6 +1053,26 @@ fn torque_unit() -> f32 {
     })
 }
 
+/// What a wheel's hinge resists an undriven turn with: nothing. The original's
+/// hinge controller turns its motor off at a zero percentage (`0x481450`) and
+/// `SetPercent` turns it off whenever the wheel is down (`0x4f5800`); a motor
+/// that is off leaves the constraint with no motor and no friction about the
+/// axle. Live, an undriven wheel spins down at the world's angular drag alone
+/// (`twobody-scout-alarm-box__live__000`, ALARM idle: 3.75 -> 3.57 rad/s in 9
+/// substeps, `0.3 ω / I` gives 0.03 a substep where ours' 4 N·m took 0.13;
+/// docs/29 section 12ae). A wheel's `resistance` is `MagicAction`'s sideways
+/// grip ([`crate::drive`]), not a torque. `RA2_WHEEL_FRICTION=1` puts back the
+/// old guess (`resistance` x 40 N·m) for comparison.
+fn wheel_friction(c: &Component) -> f32 {
+    if std::env::var_os("RA2_WHEEL_FRICTION").is_none() {
+        return 0.0;
+    }
+    c.wheel
+        .as_ref()
+        .map(|w| w.resistance * torque_unit())
+        .unwrap_or(0.0)
+}
+
 /// The two numbers of a definition's `power = <speed> <torque>` line.
 /// A piston's travel and power, from its definition (F8).
 ///
@@ -1347,21 +1368,11 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             // velocity change about the axle is ours without friction to 0.003
             // rad/s, where 8 N·m would be 0.15 a substep,
             // `wheel-sentinel-miniberg-box__live__000`, docs/29 section 12y).
-            let steering = comps[parent].class.eq_ignore_ascii_case("steering")
-                && std::env::var_os("RA2_STEER_FRICTION").is_none();
             (
                 0.0,
                 0.0,
                 [-std::f32::consts::PI, std::f32::consts::PI],
-                if steering {
-                    0.0
-                } else {
-                    comps[root]
-                        .wheel
-                        .as_ref()
-                        .map(|w| w.resistance * torque_unit())
-                        .unwrap_or(0.0)
-                },
+                wheel_friction(&comps[root]),
                 JointUse::Passive,
             )
         } else {
@@ -1373,16 +1384,11 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
                 }
                 None => [-std::f32::consts::PI, std::f32::consts::PI],
             };
-            // A wheel's `resistance` is rolling resistance: the torque the
-            // joint's friction may oppose an undriven rotation with. A parked
-            // burst motor is held by the same friction at its own torque — the
-            // scripts' `Lock(True)`.
+            // A wheel's hinge has no friction ([`wheel_friction`]). A parked
+            // burst motor is held by a friction at its own torque — the
+            // scripts' `Lock(True)` on a backend without the lock.
             let friction_torque = if is_wheel {
-                comps[root]
-                    .wheel
-                    .as_ref()
-                    .map(|w| w.resistance * torque_unit())
-                    .unwrap_or(0.0)
+                wheel_friction(&comps[root])
             } else if m.burst.is_some() || m.servo {
                 m.torque
             } else {

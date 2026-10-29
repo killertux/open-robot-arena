@@ -332,8 +332,8 @@ pub struct HingeDesc {
     /// Peak motor torque in N·m; `0` creates the joint without a motor.
     pub max_torque: f32,
     /// Torque the joint's friction can resist rotation with (N·m); `0` is
-    /// frictionless. A wheel's rolling resistance is this — the game's `SetLimits`
-    /// pair for a hinge, and the wheel definitions' `resistance`.
+    /// frictionless. Ours, for a parked burst motor or servo; a wheel's hinge
+    /// has none (`rig::wheel_friction`, docs/29 section 12ae).
     pub friction_torque: f32,
     /// Havok's wheel constraint (a `Steering` unit's hubs, `0x553c30`)
     /// rather than the hinge: B may move along this axis (A's space, the
@@ -644,6 +644,18 @@ pub trait PhysicsBackend {
     /// (havok17 writes them as an `R` row under `RA2_H17_DUMP`;
     /// `examples/orderprobe.rs`). Backends without one do nothing.
     fn detect_now(&mut self) {}
+
+    /// Diagnostic: every joint's controller state against where it is now,
+    /// `[servo target - position, lock bound - position]` (0 where it has
+    /// none), so a probe that moves the bodies can keep it
+    /// (`examples/stepprobe.rs`). Backends without one give nothing.
+    fn joint_errors(&self) -> Vec<[f32; 2]> {
+        Vec::new()
+    }
+
+    /// Diagnostic: put back [`PhysicsBackend::joint_errors`] about the
+    /// joints' positions now.
+    fn set_joint_errors(&mut self, _errors: &[[f32; 2]]) {}
 
     /// Whether the body is active: not frozen by the backend's deactivation
     /// (havok17, docs/29 section 12t). Backends without one always say yes.

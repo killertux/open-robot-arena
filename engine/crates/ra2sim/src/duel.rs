@@ -451,7 +451,7 @@ fn zone_pieces(
 /// Diagnostic: `RA2_ZONE_PHANTOMS=0` keeps the other robot's phantoms (its
 /// traction rings and SmartZones) out of a robot's zone readings, as before
 /// docs/29 section 12i.
-/// Advance each brain's tick clock by `dt` (`FUN_004011f0`) and say which
+/// Advance each brain's tick clock by the frame's time `dt` (`FUN_004011f0`) and say which
 /// brains tick this step: a clock past `tickInterval` ticks and keeps what
 /// is left over (see [`Duel::step_with`]).
 fn advance_brain_clocks(timers: &mut [f32], dt: f32) -> Vec<bool> {
@@ -466,6 +466,11 @@ fn advance_brain_clocks(timers: &mut [f32], dt: f32) -> Vec<bool> {
             due
         })
         .collect()
+}
+
+fn brains_per_substep() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RA2_BRAINS_PER_SUBSTEP").is_some())
 }
 
 fn zone_phantoms() -> bool {
@@ -1507,7 +1512,7 @@ impl Duel {
     pub fn step_with(&mut self, overrides: &[Option<DriveInput>], dt: f32) {
         // The game's own AI drives when it loaded; a robot the binding table
         // does not cover, or a run without the script layer, keeps the stand-in.
-        // Each brain keeps its own clock (`FUN_004011f0`): the step's time is
+        // Each brain keeps its own clock (`FUN_004011f0`): the frame's time is
         // added to it, and while it exceeds `tickInterval` (`+0x3c`, an eighth
         // of a second) the brain ticks and the interval is taken off, the
         // remainder kept. `Activate` (`FUN_00401270`) starts the clock at
@@ -1522,7 +1527,24 @@ impl Duel {
                 .map(|i| ra2script::AI_TICK_INTERVAL * 0.25 * i as f32)
                 .collect();
         }
-        let due = advance_brain_clocks(&mut self.brain_timers, dt);
+        // The brains update once a frame, with the components (`Robot::
+        // frame_clock`): live their commands change after 8 or 6 substeps
+        // (4 or 3 frames of 1/30 s) and after an odd count in under 1 % of the
+        // changes, where a clock fed every substep alternates 7 and 8
+        // (`fightcontacts-scout-alarm-box__live__000..003`; docs/29 section
+        // 12ae). `RA2_BRAINS_PER_SUBSTEP=1` feeds it every substep as before.
+        let due = if brains_per_substep() {
+            advance_brain_clocks(&mut self.brain_timers, dt)
+        } else if self
+            .robots
+            .iter()
+            .find(|r| r.is_alive())
+            .is_none_or(|r| r.tick_due())
+        {
+            advance_brain_clocks(&mut self.brain_timers, crate::robot::FRAME)
+        } else {
+            vec![false; n]
+        };
         let mut brains = self.run_brains(dt, &due);
         for i in 0..self.robots.len() {
             if !self.robots[i].is_alive() {
@@ -2477,6 +2499,27 @@ impl Duel {
             self.robots[i].drive(&mut *self.physics, *input, &tuning);
         }
 
+        self.advance(dt);
+    }
+
+    /// [`Duel::step_direct`] with `between` run after the robots' driving and
+    /// before the world steps. A diagnostic (`examples/stepprobe.rs`): it may
+    /// look at what the driving left and put the bodies where it wants them.
+    pub fn step_direct_with(
+        &mut self,
+        inputs: &[DriveInput],
+        dt: f32,
+        between: &mut dyn FnMut(&mut Duel),
+    ) {
+        self.publish_snapshots(dt);
+        for (i, input) in inputs.iter().enumerate() {
+            if i >= self.robots.len() || !self.robots[i].is_alive() {
+                continue;
+            }
+            let tuning = self.tuning;
+            self.robots[i].drive(&mut *self.physics, *input, &tuning);
+        }
+        between(self);
         self.advance(dt);
     }
 
@@ -5446,6 +5489,62 @@ mod tests {
         }
     }
 
+    /// An undriven wheel turns freely on its hinge: the original's controller
+    /// turns the motor off at a zero percentage (`0x481450`) and leaves the
+    /// constraint no friction about the axle. Live, ALARM idle in the air, its
+    /// wheels' spin changes by +0.00 rad/s a substep against our one-step
+    /// prediction from the live state, where the old 4 N·m of "rolling
+    /// resistance" took 0.10 more (`twobody-scout-alarm-box__live__000`,
+    /// docs/29 section 12ae).
+    #[test]
+    fn an_undriven_wheel_spins_down_at_the_worlds_drag_alone() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team0/Bot0.bot"), bot("AI/Team0/Bot1.bot")],
+        )
+        .expect("a duel");
+        let idle = [DriveInput::new(0.0, 0.0), DriveInput::new(0.0, 0.0)];
+        for _ in 0..60 {
+            duel.step_direct(&idle, 1.0 / 60.0);
+        }
+        // ALARM 3 m up, still, one wheel spinning at 5 rad/s on its axle.
+        let robot = &duel.robots[1];
+        let part = robot.magic.as_ref().expect("wheels").wheels[0].part;
+        let axle = robot
+            .transform(&*duel.physics)
+            .transform_vector3(robot.rig.parts[part].joint.expect("a hinge").axis)
+            .normalize();
+        let (chassis, wheel) = (robot.parts[0].body, robot.parts[part].body);
+        let bodies: Vec<BodyHandle> = robot.parts.iter().map(|p| p.body).collect();
+        for &b in &bodies {
+            let s = duel.physics.state(b).expect("a body");
+            duel.physics
+                .set_transform(b, s.position + 3.0 * Vec3::Y, s.rotation);
+            duel.physics.set_velocity(b, Vec3::ZERO, Vec3::ZERO);
+        }
+        duel.physics.set_velocity(wheel, Vec3::ZERO, 5.0 * axle);
+        let spin = |d: &Duel| {
+            let w = d.physics.state(wheel).unwrap().angular_velocity;
+            let c = d.physics.state(chassis).unwrap().angular_velocity;
+            (w - c).dot(axle)
+        };
+        for _ in 0..6 {
+            duel.step_direct(&idle, 1.0 / 60.0);
+        }
+        // Drag alone (0.3 ω on 0.56 kg m², shared with the chassis through the
+        // hinge) leaves about 4.85; 4 N·m of friction would leave about 4.3.
+        let left = spin(&duel);
+        assert!(left > 4.7 && left <= 5.0, "spin {left}");
+    }
+
     #[test]
     fn robot_contacts_reach_the_pricing_once_a_second_per_component() {
         let Some(game) = game_dir() else { return };
@@ -6004,28 +6103,59 @@ mod tests {
     /// within 5 s, damage from about 6 s.
     /// The brains tick an eighth of a second apart on average, keeping the
     /// remainder, and the second robot's clock starts a quarter interval ahead
-    /// (`FUN_00401270`), so it ticks first.
+    /// (`FUN_00401270`), so it ticks first. The clock is fed once a frame
+    /// (1/30 s), so a brain ticks every 4 or 3 frames, 8 or 6 substeps, as
+    /// live (docs/29 section 12ae).
     #[test]
     fn brains_tick_every_eighth_of_a_second_a_quarter_apart() {
         let mut timers = vec![0.0, ra2script::AI_TICK_INTERVAL * 0.25];
         let mut ticks: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
-        for step in 1..=600 {
-            for (r, due) in advance_brain_clocks(&mut timers, 1.0 / 60.0)
+        for frame in 1..=300 {
+            for (r, due) in advance_brain_clocks(&mut timers, crate::robot::FRAME)
                 .into_iter()
                 .enumerate()
             {
                 if due {
-                    ticks[r].push(step);
+                    ticks[r].push(frame);
                 }
             }
         }
-        assert_eq!(ticks[0][0], 8);
-        assert_eq!(ticks[1][0], 6);
+        assert_eq!(ticks[0][0], 4);
+        assert_eq!(ticks[1][0], 3);
         for t in &ticks {
             // 10 s at an eighth of a second, give or take the first.
             assert!((79..=80).contains(&t.len()), "{}", t.len());
-            assert!(t.windows(2).all(|w| (7..=8).contains(&(w[1] - w[0]))));
+            assert!(t.windows(2).all(|w| (3..=4).contains(&(w[1] - w[0]))));
         }
+    }
+
+    /// A shipped brain's commands change on frame boundaries only: every
+    /// 8 or 6 substeps (live, `fightcontacts-scout-alarm-box__live__000`).
+    #[test]
+    fn the_brains_tick_with_the_frame() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team0/Bot0.bot"), bot("AI/Team0/Bot1.bot")],
+        )
+        .expect("a duel");
+        let mut ticks = Vec::new();
+        for step in 0..240 {
+            let before = duel.brain_timers.clone();
+            duel.step(1.0 / 60.0);
+            if !before.is_empty() && duel.brain_timers.iter().zip(&before).any(|(a, b)| a < b) {
+                ticks.push(step);
+            }
+        }
+        assert!(ticks.len() > 20, "{ticks:?}");
+        assert!(ticks.iter().all(|s| s % 2 == ticks[0] % 2), "{ticks:?}");
     }
 
     /// The other robot's SmartZone is a phantom: a zone that overlaps it lists

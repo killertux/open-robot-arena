@@ -112,8 +112,10 @@ fn a_spinner_spins_only_while_its_switch_is_on() {
     let rate = d.robots[0].rig.parts[p].joint.unwrap().rate;
 
     step(&mut d, DriveInput::default(), 1.0);
+    // Undriven, the bar only jitters in its hinge (0.04-0.56 rad/s sampled
+    // every 1/8 s with the wheels free, docs/29 section 12ae).
     assert!(
-        relative_spin(&d, p) < 0.5,
+        relative_spin(&d, p) < 1.0,
         "the spinner turns with nothing wired on: {}",
         relative_spin(&d, p)
     );

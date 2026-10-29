@@ -1557,6 +1557,12 @@ impl PhysicsBackend for Havok17Backend {
         }
         let ref_a = joints::perpendicular(axis_a);
         let ref_b = bb.rotation.inverse() * (ba.rotation * ref_a);
+        if std::env::var_os("RA2_HINGE_DEBUG").is_some() {
+            eprintln!(
+                "hinge {} a {a} (m {:.2}) b {b} (m {:.2}) axis_a {axis_a:?} axis_b {axis_b:?} world {:?} rot_a {:?} rot_b {:?}",
+                self.joints.len(), ba.mass, bb.mass, ba.rotation * axis_a, ba.rotation, bb.rotation
+            );
+        }
         let free = desc.limits[0] <= -std::f32::consts::PI + 1e-4
             && desc.limits[1] >= std::f32::consts::PI - 1e-4;
         self.joints.push(Joint {
@@ -1851,6 +1857,48 @@ impl PhysicsBackend for Havok17Backend {
             }
         }
         Some(false)
+    }
+
+    fn joint_errors(&self) -> Vec<[f32; 2]> {
+        self.joints
+            .iter()
+            .map(|j| {
+                if !j.alive {
+                    return [0.0, 0.0];
+                }
+                let x = j.position(&self.bodies);
+                let d = |t: f32| match j.kind {
+                    Kind::Hinge { .. } => joints::wrap(t - x),
+                    _ => t - x,
+                };
+                [
+                    if j.motor { d(j.target) } else { 0.0 },
+                    if j.saved_limits.is_some() {
+                        d(j.limits[0])
+                    } else {
+                        0.0
+                    },
+                ]
+            })
+            .collect()
+    }
+
+    fn set_joint_errors(&mut self, errors: &[[f32; 2]]) {
+        for (i, e) in errors.iter().enumerate() {
+            let Some(x) = self.joints.get(i).map(|j| j.position(&self.bodies)) else {
+                continue;
+            };
+            let j = &mut self.joints[i];
+            if !j.alive {
+                continue;
+            }
+            if j.motor {
+                j.target = x + e[0];
+            }
+            if j.saved_limits.is_some() {
+                j.limits = [x + e[1], x + e[1]];
+            }
+        }
     }
 
     fn detect_now(&mut self) {
