@@ -139,8 +139,13 @@ pub struct WheelRecord {
     /// `+0x8` and the wheel's own timer (`Wheel + 0x294`).
     pub touching: bool,
     pub air: f32,
-    /// `+0xc`: the surface normal under the wheel, world space.
+    /// `+0xc`: the normal the drive pushes along, world space: the wheel's
+    /// [`WheelRecord::contact_normal`] as the robot update last copied it.
     pub normal: Vec3,
+    /// `Wheel + 0x29c`: the normal of the last collision event of the wheel's
+    /// solid (`passthru`) collidable, pointing from what it touched toward the
+    /// wheel; `(0, 1, 0)` until the first (see [`MagicAction::contact`]).
+    pub contact_normal: Vec3,
 }
 
 /// The robot's `MagicAction`.
@@ -159,20 +164,36 @@ impl MagicAction {
 
     /// Refresh a wheel's touching flag from what its phantom saw this step
     /// (`FUN_00507f90` counts, `FUN_00508080` lets the flag go 0.2 s after the
-    /// last touch).
-    pub fn touch(record: &mut WheelRecord, touch: Option<Vec3>, dt: f32) {
-        match touch {
-            Some(n) => {
-                record.touching = true;
-                record.air = 0.0;
-                record.normal = n;
+    /// last touch), and copy the wheel's contact normal into the record as the
+    /// robot update does every frame (`0x4dc84b..0x4dc86b`: `Wheel + 0x29c`
+    /// through `0x4dca80` into `+0xc`, `0x485610`). The phantom gives no
+    /// normal: it only says whether the traction ring overlaps something.
+    pub fn touch(record: &mut WheelRecord, touch: bool, dt: f32) {
+        if touch {
+            record.touching = true;
+            record.air = 0.0;
+        } else {
+            record.air += dt;
+            if record.air > TOUCH_MEMORY {
+                record.touching = false;
             }
-            None => {
-                record.air += dt;
-                if record.air > TOUCH_MEMORY {
-                    record.touching = false;
-                }
-            }
+        }
+        record.normal = record.contact_normal;
+    }
+
+    /// A collision event of the wheel's solid collidable got through the event
+    /// filter: the wheel's callback (`0x508010`, registered on its `passthru`
+    /// collidable at `0x507e93..0x507ed6`, a 1 s entry with the filter) keeps
+    /// the event's normal, the filter having put the wheel first (`0x52d6db`
+    /// swaps the bodies and negates the normal for the second body's entry), so
+    /// it points from what the wheel touched toward the wheel. It is kept until
+    /// the next such event, whatever the wheel touches meanwhile: live
+    /// (`wheelnormal-scout-alarm-box__live__000`) 306 of 336 are the floor's
+    /// `(0, 1, 0)`, the rest the other robot's or a wall's, and every record
+    /// the drive read held the last one.
+    pub fn contact(record: &mut WheelRecord, toward_wheel: Vec3) {
+        if toward_wheel.is_finite() && toward_wheel.length_squared() > 0.25 {
+            record.contact_normal = toward_wheel.normalize();
         }
     }
 
@@ -325,15 +346,16 @@ mod tests {
             touching: false,
             air: 1.0,
             normal: Vec3::Y,
+            contact_normal: Vec3::Y,
         };
-        MagicAction::touch(&mut w, Some(Vec3::Y), 1.0 / 60.0);
+        MagicAction::touch(&mut w, true, 1.0 / 60.0);
         assert!(w.touching);
         for _ in 0..11 {
-            MagicAction::touch(&mut w, None, 1.0 / 60.0);
+            MagicAction::touch(&mut w, false, 1.0 / 60.0);
         }
         assert!(w.touching, "0.18 s");
-        MagicAction::touch(&mut w, None, 1.0 / 60.0);
-        MagicAction::touch(&mut w, None, 1.0 / 60.0);
+        MagicAction::touch(&mut w, false, 1.0 / 60.0);
+        MagicAction::touch(&mut w, false, 1.0 / 60.0);
         assert!(!w.touching, "0.22 s");
     }
 }

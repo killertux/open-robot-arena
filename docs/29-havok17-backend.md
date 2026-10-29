@@ -123,7 +123,8 @@ update (`0x4dc7a5..`) refreshes them every frame: thrust
 `0x485580`) from the hinge controller's raw torque (`+0xb4`, the definition's,
 before the ×40 of `+0xb8`) and the motor's integer percentage; touching
 (phantom contact count, kept 0.2 s after the last contact, `0x508080`,
-`0x6a6080`); the normal.
+`0x6a6080`); the normal (the last collision event of the wheel's solid
+`passthru` collidable, toward the wheel: section 12ad).
 
 Decoded from the x87 code with the vector helpers (`0x404990` scale,
 `0x45a730` cross, `0x535940` dot, `0x401ae0` length, `0x4b0a10`/`0x4812e0`
@@ -4818,3 +4819,95 @@ Devil 10/5 -> 35/2.
 **Open.** What the original's phantom normal is when a ring cuts a thin floor
 triangle (and whether it ever flips): `0x508080` was not decompiled here. The
 second batch's box ALARM (22.1).
+
+### 12ad. The wheels' drive normal: the solid wheel's last collision event (fx/phys-tune)
+
+Section 12ac left open what normal the original drives a wheel along when its
+traction ring cuts a thin floor triangle. It is not the ring's at all.
+
+**Where the record's normal comes from (recovered, verified live).** The robot
+update copies three things into each `MagicAction` record every frame
+(`0x4dc7a5..0x4dc86b` for a `SpinMotor`, `..0x4dc908` an `AxleMount`,
+`..0x4dc9cd` a `Steering` hub): the thrust (`0x486820`), the touching flag
+(`0x486830` <- `Wheel::0x507ff0`: `+0x28c` and not detached) and the normal
+(`0x486850` -> `0x485610` <- `0x4dca80`: `Wheel + 0x29c`). The touching flag is
+the traction ring's (`contact`, `+0x284`): `0x508080` (the wheel's update, vtable
+`0x6ab8cc` slot 5) asks `0x4ae110` whether the phantom's pair list holds a pair
+passing `0x4a49b0`, and keeps the flag 0.2 s (`0x6a6080`) after the last one;
+the phantom gives no normal. `Wheel + 0x29c` starts at `(0, 1, 0)` (the
+constructor, `0x507a77`) and only `0x508010` writes it, copying `+4` of its
+argument. `0x508010` is a collision-event callback: the wheel's set-up
+(`0x507d7a..0x507edb`, type 2) looks up its `passthru` collidable (`+0x288`,
+`wheel_collision`, the solid wheel) and registers the callback on it
+(`0x420170` functor, `0x45ab90` -> `0x4ad500(c, 2, 1.0)`): the "second entry on
+each wheel" of section 12l, which is in fact the *first* in the collidable's
+list (live `eventreg-...__live__000`: the wheel rows precede the robot set-up's).
+The filter (`0x52d4f0`) puts the body whose entry is due first and, for the
+second body's entry, swaps the bodies and negates the normal (`0x52d6db`).
+
+Live (`wheelnormal-scout-alarm-box__live__000..003`, new agent
+`frida/ra2_wheelnormal.js`: every call of `0x508010` with its argument, every
+event the filter lets through, every `MagicAction` apply with each record's
+thrust, touching, normal, point and axle; one 60 s and three 120 s box fights,
+shipped AIs): the callback's argument is `+0` a speed, `+4` the normal, `+0x14`
+the point, `+0x24` the wheel's solid collidable (always), `+0x28` the other's.
+The normal points from what the wheel touched toward the wheel: 306 of the 336
+calls of the first fight are the floor's `(0, 1, 0)`, none `(0, -1, 0)`, the
+others the other robot's (any direction, down to y -0.8) and one a wall's
+`(-1, 0, 0)`. Each wheel hears them in pairs one step apart about once a
+second (its two 1 s entries; `0.417, 0.433, 1.50, 1.517, 2.50, 2.517 ...`), with
+an odd one between (the floor's entry); 22020 of the 22170 record normals the
+drive read equal the last callback's normal of a wheel (the rest are the first
+frame). So the original drives along the last contact normal of the solid wheel,
+held up to a second whatever the wheel touches meanwhile, and never a flipped
+floor normal.
+
+Ours took the deepest hit of the traction phantom every step as the normal
+(Jolt's, until 12ac, sometimes flipped). Now `combat::wheel_contacts` takes,
+from the events the filter let through (`EventGate::admit_with`), those whose
+registered component at the point is a wheel, with the normal toward the wheel;
+`MagicAction::contact` keeps it (`WheelRecord::contact_normal`, `Wheel + 0x29c`)
+and `MagicAction::touch` copies it into the record's `normal`; the phantom only
+sets touching. Ours copies it every drive step where the original copies it
+every frame. Test `duel::tests::a_wheel_drives_along_its_last_contact_normal`.
+Diagnostic: `fidtrace` writes each fight step's chassis up and wheel records
+under `FIDTRACE_WHEELS=<path>`.
+
+**Ensembles**, `FIDTRACE_WARMUP` x 48 (section 12ac's set), counted `>= 10`,
+mean ± standard error, before = `fidelity` 54363c4 (reproduces 12ac's after
+column to the digit), after = this branch, same machine. Live box now counts
+the fifteen 120 s fights (`fight-...__live__000..005`, `boxfight-...000..005`,
+`wheelnormal-...001..003`):
+
+| fight | live | before | after |
+|---|---|---|---|
+| box ALARM / Scout | 41.1 ± 6.5 / 6.0 ± 1.0 (15) | 28.0 ± 3.4 / 5.1 ± 0.6, 89 s, 18/48 full | 31.6 ± 4.0 / 5.2 ± 0.6, 80 s, 15/48 full |
+| ... on its back 5 s by 45 s | | 18/48 | 16/48 |
+| box Razor v FlapJack | 3.0 / 0.1 | 0.9 ± 0.1 / 4.5 ± 0.5 | 1.3 ± 0.3 / 4.6 ± 0.4 |
+| Compressor Wide Load / Sentinel | 73.6 / 5.3 | 75.7 ± 7.5 / 4.2 ± 0.5, 22/48 full | 78.6 ± 6.4 / 3.9 ± 0.5, 30/48 full |
+| Octagon ALARM / Scout | 13.6 / 3.2 | 12.1 ± 1.6 / 2.6 ± 0.4 | 14.4 ± 1.9 / 2.9 ± 0.4 |
+
+Every change is within about one standard error; the box ALARM sits 9.5 ± 7.6
+below live. Section 12s's replays (`twoprobe`): set 1 ALARM on its back at
+some point / at the end 3 / 3 before and after (live 1 / 1), set 2 0 / 0.
+
+**What is left on the box: ALARM goes over more often (measured, not
+fixed).** Per wheel and per step (24 of ours' runs, `FIDTRACE_WHEELS`, against
+the live `G` rows): thrust on 41 % of ALARM's steps (live 41-68 %), magnitude
+1153 (live 993-1180); upright touching ALARM 0.82 / 0.84 / 0.93 / 0.95 (live
+0.81-0.91 / 0.83-0.95 / 0.97-0.99 / 0.97-0.98), the Scout 0.91 (live 0.98-0.99):
+the Scout's shortfall is all in long stretches (up to 4 s) with ALARM on its
+back and the Scout pushing it into a corner, one wheel up on it. Live, a
+robot's `isUpsideDown` (ours: `up.y < 0`) gives ALARM upside down (held 3 s) in
+5 of 13 fights (`fightpos-...__live__000..012`), the first at 13-38 s; ours in
+17 of 24, nine of them before 13 s. A fight in which ALARM goes over
+prices few hammer hits (live 6 and 8 counted in the two such fights with a hit
+log, `boxfight-...__live__000`, `003`), so this, not the drive,
+is what keeps the box ALARM low. It is section 12s's fork-side divergence (in
+the controlled replays ours rolls ALARM over in 3 trials, live in 1); it was
+not resolved here.
+
+**Open.** The fork-side flip (section 12s); ALARM's spike damage and the
+Compressor's arena hits (12ab). The callback's `+0` (a speed) was not
+decoded, nor the argument of the robots' damage callback `0x414d80` (a hook
+reading it as the wheel callback's faulted).

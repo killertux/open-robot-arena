@@ -1409,6 +1409,8 @@ impl Robot {
                 touching: false,
                 air: crate::drive::TOUCH_MEMORY * 2.0,
                 normal: Vec3::Y,
+                // The wheel's constructor (`0x507a77`).
+                contact_normal: Vec3::Y,
             });
         }
         MagicAction { wheels }
@@ -1444,7 +1446,7 @@ impl Robot {
                         .map(|hit| hit.normal * hit.normal.y.signum())
                 })
             };
-            MagicAction::touch(w, touch, dt);
+            MagicAction::touch(w, touch.is_some(), dt);
             if !alive {
                 w.touching = false;
             }
