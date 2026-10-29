@@ -129,6 +129,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(_) => None,
             };
+            // `FIDTRACE_WHEELS=<path>`: every fight step, each robot's chassis
+            // up (`y`) and its wheel records (thrust, touching, normal), as
+            // the live `G` rows of `frida/ra2_wheelnormal.js`.
+            let mut wheels = match std::env::var("FIDTRACE_WHEELS") {
+                Ok(p) => Some(std::fs::File::create(p)?),
+                Err(_) => None,
+            };
             let mut trace = std::fs::File::create(&a[5])?;
             let mut dmg = std::fs::File::create(&a[6])?;
             writeln!(trace, "time_elapsed\t[(player, location xyz, heading, speed, hitpoints(p,0), health fraction)]")?;
@@ -194,6 +201,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if step.is_multiple_of(EVERY) {
                         write!(trace, "{}", row(t, &sample(&m.duel)))?;
+                    }
+                    if let Some(f) = wheels.as_mut() {
+                        for (i, r) in m.duel.robots.iter().enumerate() {
+                            let up = r
+                                .transform(&*m.duel.physics)
+                                .transform_vector3(Vec3::Y)
+                                .normalize_or_zero();
+                            let ws: Vec<String> = r
+                                .magic
+                                .iter()
+                                .flat_map(|g| g.wheels.iter())
+                                .map(|w| {
+                                    format!(
+                                        "[{}, {}, [{}, {}, {}]]",
+                                        w.thrust,
+                                        u8::from(w.touching),
+                                        w.normal.x,
+                                        w.normal.y,
+                                        w.normal.z
+                                    )
+                                })
+                                .collect();
+                            writeln!(
+                                f,
+                                "{{\"t\": {t}, \"r\": {i}, \"up\": {}, \"w\": [{}]}}",
+                                up.y,
+                                ws.join(", ")
+                            )?;
+                        }
                     }
                 }
                 taken[..n].copy_from_slice(&m.duel.damage_taken[..n]);

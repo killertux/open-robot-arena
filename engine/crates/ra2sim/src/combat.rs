@@ -737,6 +737,43 @@ impl EventGate {
     }
 }
 
+/// The normals the wheels' own collision callbacks keep from the events the
+/// filter let through ([`MagicAction::contact`](crate::drive::MagicAction::contact)):
+/// for every event one of whose bodies is a robot part whose registered
+/// component at the point is a wheel, `(robot, part, normal toward the wheel)`.
+/// The game's listener hands an event to the callbacks of both its collidables,
+/// so a wheel hears the events its own entries let through and the ones its
+/// partner's did (live, the wheels' callbacks run in pairs a step apart once a
+/// second, their two entries, with an odd one between when the floor's entry
+/// let a point through).
+pub fn wheel_contacts(robots: &[Robot], events: &[ContactEvent]) -> Vec<(usize, usize, Vec3)> {
+    let mut owner: HashMap<BodyHandle, (usize, usize)> = HashMap::new();
+    for (r, robot) in robots.iter().enumerate() {
+        for (p, part) in robot.parts.iter().enumerate() {
+            if part.alive {
+                owner.insert(part.body, (r, p));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for e in events {
+        // `normal` points from `a` toward `b`.
+        for (body, state, toward) in [(e.a, &e.state_a, -e.normal), (e.b, &e.state_b, e.normal)] {
+            let Some(&(r, p)) = owner.get(&body) else {
+                continue;
+            };
+            let robot = &robots[r];
+            let Some(c) = registered_component(robot, p, state, e.point) else {
+                continue;
+            };
+            if robot.rig.components[c].role == Role::Wheel {
+                out.push((r, p, toward));
+            }
+        }
+    }
+    out
+}
+
 /// How squarely a weapon's striking faces meet the contact
 /// (`Weapon::computeDamage`, `FUN_005032f0`): the contact normal toward the
 /// victim, in the weapon's frame, against its `normal` faces; 1 for anything

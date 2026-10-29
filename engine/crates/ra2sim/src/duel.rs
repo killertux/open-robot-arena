@@ -2766,6 +2766,13 @@ impl Duel {
         let events =
             self.event_gate
                 .admit_with(&self.robots, &self.arena_bodies, events, self.time);
+        for (r, part, normal) in combat::wheel_contacts(&self.robots, &events) {
+            if let Some(magic) = self.robots[r].magic.as_mut() {
+                for w in magic.wheels.iter_mut().filter(|w| w.part == part) {
+                    crate::drive::MagicAction::contact(w, normal);
+                }
+            }
+        }
         let impacts = combat::resolve_with(
             &self.robots,
             &events,
@@ -5399,6 +5406,46 @@ mod tests {
     /// (the two components there, 1 Hz each, so two a second), whether the
     /// point approaches or parts (`FUN_0052d740` compares `|Δv · n|` with the
     /// registrations' threshold 0).
+    #[test]
+    fn a_wheel_drives_along_its_last_contact_normal() {
+        // The record's normal is the wheel's solid collidable's last event's,
+        // toward the wheel (`0x508010`; docs/29 section 12ad): on the floor,
+        // up, whatever it held before.
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team0/Bot0.bot"), bot("AI/Team0/Bot1.bot")],
+        )
+        .expect("a duel");
+        for r in &mut duel.robots {
+            for w in &mut r.magic.as_mut().expect("wheels").wheels {
+                w.contact_normal = -Vec3::Y;
+            }
+        }
+        let idle = [DriveInput::new(0.0, 0.0), DriveInput::new(0.0, 0.0)];
+        for _ in 0..180 {
+            duel.step_direct(&idle, 1.0 / 60.0);
+        }
+        for r in &duel.robots {
+            for w in &r.magic.as_ref().expect("wheels").wheels {
+                assert!(
+                    w.contact_normal.y > 0.99,
+                    "{}: {:?}",
+                    r.rig.name,
+                    w.contact_normal
+                );
+                assert_eq!(w.normal, w.contact_normal);
+            }
+        }
+    }
+
     #[test]
     fn robot_contacts_reach_the_pricing_once_a_second_per_component() {
         let Some(game) = game_dir() else { return };
