@@ -1575,6 +1575,16 @@ fn split_children<'a>(
         .map(|l| l.resolve(if horizontal { frame.w } else { frame.h }))
         .unwrap_or(if horizontal { frame.w } else { frame.h } / 2.0);
     let master_size = master_size.clamp(0.0, if horizontal { frame.w } else { frame.h });
+    // A pane's width is a whole number of pixels where the screen asks for it (`PaneFloor`, put on
+    // the lobby's split by the shell): the lobby's left column is 0.28 of 1024, 286 of 286.72 in the
+    // original (live `mp-lobby-host-chat`: every frame of the column ends 1 px before the one the
+    // unrounded width gives). The Team HQ's calibrated splits (`hq.rs` fits) keep their fractions.
+    let master_size = if horizontal && widget.field("PaneFloor").is_some() && frame.w.fract() == 0.0
+    {
+        master_size.floor()
+    } else {
+        master_size
+    };
 
     // `Master` names the slot MasterSize sizes. Slot 0 is always the first
     // (top/left) pane and slot 1 the second, so a master of 1 is the pane at

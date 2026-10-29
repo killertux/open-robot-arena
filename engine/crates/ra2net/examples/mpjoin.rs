@@ -6,7 +6,7 @@
 //!
 //! `mpjoin --bot "Teams/Team0/Bot0.bot" --out DIR [--host 127.0.0.1:9791]`
 //!
-//! Commands on standard input: `claim N` (take panel N), `ready`, `quit`.
+//! Commands on standard input: `claim N` (take panel N), `ready`, `eject N`, `chat TEXT`, `key CODE 1|0`, `quit`.
 
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
@@ -179,6 +179,14 @@ fn main() {
                         },
                     };
                     game.session.send_with(Target::All, &m, false);
+                }
+                ["eject", n] => {
+                    let ok = game.eject_panel(n.parse().unwrap_or(panel));
+                    say(format!("eject {n}: {ok}"));
+                }
+                _ if cmd.starts_with("chat ") => {
+                    game.chat(cmd["chat ".len()..].trim());
+                    say(format!("chat: {}", cmd["chat ".len()..].trim()));
                 }
                 ["quit"] => return,
                 _ => say(format!("? {cmd}")),

@@ -83,3 +83,79 @@ fn every_snapshot_the_original_wrote_decodes_and_writes_back_byte_for_byte() {
         "both snapshot forms: {partial:?}"
     );
 }
+
+/// Snapshots of driven robots (docs/38 section 16; captures `mp-snapshots-driven` with W, A, D
+/// held on C.R.U.S.H., `mp-snapshots-steering` with BEAR steering, `mp-snapshots-flame` with a
+/// Flamethrower robot firing): every one decodes and writes back byte for byte, and what they
+/// showed holds: a motor's command is an integer percent, a `Steering` unit's two wheels carry the
+/// same hub angle within +-pi/6, a piston's rod rests near 0, and a Flamethrower has no device
+/// entry at all (its air tank, a controller, is the only trace).
+#[test]
+fn the_driven_snapshots_show_integer_commands_steering_angles_and_no_flamethrower() {
+    let Some(game) = up_to("local/game") else {
+        return;
+    };
+    let mut commands = std::collections::BTreeSet::new();
+    let mut hub = (0usize, 0f32);
+    let mut flame_controllers = std::collections::BTreeSet::new();
+    let mut seen = 0;
+    for name in ["driven", "steering", "flame"] {
+        let Some(file) = up_to(&format!(
+            "local/oracle/original/mp-snapshots-{name}__live__000.txt"
+        )) else {
+            return;
+        };
+        for line in std::fs::read_to_string(file).unwrap().lines() {
+            let f: Vec<&str> = line.split(' ').collect();
+            let raw: Vec<u8> = (0..f[4].len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&f[4][i..i + 2], 16).unwrap())
+                .collect();
+            let count = |path: &str| {
+                if path.starts_with("flamebot") {
+                    13
+                } else {
+                    components(&game, path)
+                }
+            };
+            let schema = SyncSchema {
+                robot_components: vec![count(f[2]), count(f[3])],
+            };
+            let state =
+                SyncState::from_bytes(&raw, &schema).unwrap_or_else(|e| panic!("{line}: {e:?}"));
+            assert!(state.to_bytes() == raw, "{name}: does not write back");
+            for d in &state.devices {
+                match d {
+                    DeviceSync::One { values, .. } => {
+                        // The command's bits are an integer: -100..=100.
+                        let c = values[0].to_bits() as i32;
+                        assert!((-100..=100).contains(&c), "{c}");
+                        commands.insert(c);
+                    }
+                    DeviceSync::Four { value, .. } => {
+                        assert!(value.abs() <= std::f32::consts::PI / 6.0 + 1e-3, "{value}");
+                        hub = (hub.0 + 1, hub.1.max(value.abs()));
+                    }
+                    DeviceSync::Five { values, .. } => assert!(values[0].abs() < 0.2),
+                    DeviceSync::Other { .. } => panic!("{name}: a device of another kind"),
+                }
+            }
+            if name == "flame" {
+                for (id, energy) in &state.controllers {
+                    if id >> 10 == 2 {
+                        flame_controllers.insert((*id, energy.to_bits() >> 28));
+                    }
+                }
+            }
+            seen += 1;
+        }
+    }
+    assert!(seen > 100, "{seen} snapshots");
+    assert!(commands.contains(&100) && commands.contains(&-100) && commands.contains(&0));
+    assert!(
+        hub.0 > 10 && (hub.1 - std::f32::consts::PI / 6.0).abs() < 1e-3,
+        "{hub:?}"
+    );
+    // The flame robot has a battery and an air tank, no device for its jet.
+    assert!(flame_controllers.len() >= 2);
+}

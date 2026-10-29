@@ -296,6 +296,11 @@ pub struct Shell {
     pending_scrap_box: Option<(usize, String)>,
     /// The roster entry the open scrap box is about.
     pending_scrap: Option<usize>,
+    /// The lobby's `Confirm Begin Match` box is waiting to open (`FUN_00495450`), is open, and
+    /// was answered Yes.
+    pending_begin_box: bool,
+    begin_box_open: bool,
+    begin_confirmed: bool,
     /// Scraps a roster entry in the application's career and returns the Team
     /// HQ's refreshed data.
     scrap_hook: Option<ScrapHook>,
@@ -429,6 +434,9 @@ impl Shell {
             pending_message: None,
             pending_scrap_box: None,
             pending_scrap: None,
+            pending_begin_box: false,
+            begin_box_open: false,
+            begin_confirmed: false,
             scrap_hook: None,
             export_slot: None,
             export_hook: None,
@@ -668,6 +676,19 @@ impl Shell {
     pub fn ask_scrap(&mut self, index: usize, name: &str) -> Result<(), String> {
         self.pending_scrap_box = Some((index, format!("Are you sure you want to scrap {name}?")));
         self.open_window("common/messagebox.gib")
+    }
+
+    /// The lobby's Begin Match with a seated player not ready (`FUN_00495450`): the Yes/No box
+    /// `Confirm Begin Match` / `All bots are not set to Ready. Begin Match?` (its body draws blank,
+    /// live `mp-confirm-begin-host`). Yes is read back with [`Shell::take_begin_confirmed`].
+    pub fn ask_begin_match(&mut self) -> Result<(), String> {
+        self.pending_begin_box = true;
+        self.open_window("common/messagebox.gib")
+    }
+
+    /// The Yes of the `Confirm Begin Match` box (once).
+    pub fn take_begin_confirmed(&mut self) -> bool {
+        std::mem::take(&mut self.begin_confirmed)
     }
 
     pub fn set_export_hook(&mut self, hook: ExportHook) {
@@ -1576,6 +1597,9 @@ impl Shell {
     /// about; the edit-team window adds the team it collected.
     fn confirm_window(&mut self, window: &Page) -> Result<(), String> {
         if window.key.eq_ignore_ascii_case("common/messagebox.gib") {
+            if std::mem::take(&mut self.begin_box_open) {
+                self.begin_confirmed = true;
+            }
             if let Some(slot) = self.pending_delete.take() {
                 teams::delete_team(&self.game, slot)?;
             }
@@ -1844,6 +1868,7 @@ impl Shell {
             ) {
                 // `FUN_005e5e40(caption, text, 1)`: an OK-only box.
                 self.pending_scrap = None;
+                self.begin_box_open = false;
                 for block in page.gib.blocks.iter_mut() {
                     let Block::Widget(root) = block else { continue };
                     if let Some(w) = workshop::find_mut(root, "caption bar") {
@@ -1859,6 +1884,37 @@ impl Shell {
                             ra2ui::input::set_field(w, "Visible", "false");
                         }
                     }
+                    // A lone OK stands in the middle of the box (live `teamhq-events-one-event`,
+                    // `mp-connection-termination`: 477 in a box from 342), not at the template's 181.
+                    if let Some(w) = workshop::find_mut(root, "ok button") {
+                        move_button(w, 135.0);
+                    }
+                }
+                self.windows.push(page);
+                return Ok(());
+            }
+            if target.eq_ignore_ascii_case("common/messagebox.gib")
+                && std::mem::take(&mut self.pending_begin_box)
+            {
+                // `FUN_005e5e40(<text>, "Confirm Begin Match", 0xc)`: Yes/No only.
+                self.pending_scrap = None;
+                self.pending_delete = None;
+                self.begin_box_open = true;
+                for block in page.gib.blocks.iter_mut() {
+                    let Block::Widget(root) = block else { continue };
+                    if let Some(w) = workshop::find_mut(root, "caption bar") {
+                        set_text(w, "Confirm Begin Match");
+                    }
+                    if let Some(w) = workshop::find_mut(root, "text box") {
+                        set_text(w, "All bots are not set to Ready. Begin Match?");
+                    }
+                    blank_message_body(root);
+                    for name in ["ok button", "cancel button"] {
+                        if let Some(w) = workshop::find_mut(root, name) {
+                            ra2ui::input::set_field(w, "Visible", "false");
+                        }
+                    }
+                    yes_left(root);
                 }
                 self.windows.push(page);
                 return Ok(());
@@ -1867,6 +1923,7 @@ impl Shell {
                 target.eq_ignore_ascii_case("common/messagebox.gib"),
                 self.pending_scrap_box.take(),
             ) {
+                self.begin_box_open = false;
                 // `FUN_005e5e40(<question>, "Team HQ", 0xc)`: Yes/No only.
                 self.pending_scrap = Some(index);
                 for block in page.gib.blocks.iter_mut() {
@@ -1960,6 +2017,7 @@ impl Shell {
                 let team = selected.and_then(|row| rosters.get(row));
                 self.pending_delete = team.map(|t| t.slot);
                 self.pending_scrap = None;
+                self.begin_box_open = false;
                 let body = format!(
                     "Are you sure you want to delete {}?",
                     team.map(|t| t.name.as_str()).unwrap_or("this team")
@@ -3177,6 +3235,13 @@ fn load_screen(ui: &Path, key: &str) -> Result<Screen, String> {
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut gib = ra2fmt::gib::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     ra2ui::inline_proxies_in(&mut gib, ui);
+    if key.eq_ignore_ascii_case(PREMATCH) {
+        for block in gib.blocks.iter_mut() {
+            if let Block::Widget(root) = block {
+                floor_panes(root);
+            }
+        }
+    }
     Ok(Screen::Page(Page {
         time_text: None,
         weight_choice: None,
@@ -3186,6 +3251,16 @@ fn load_screen(ui: &Path, key: &str) -> Result<Screen, String> {
         slot_base: BTreeMap::new(),
         scroll: BTreeMap::new(),
     }))
+}
+
+/// The lobby's splits take whole-pixel panes (`PaneFloor`, see `ra2ui`'s `split_children`).
+fn floor_panes(widget: &mut ra2fmt::gib::Widget) {
+    if widget.kind == ra2fmt::gib::WidgetKind::SplitFrame {
+        ra2ui::input::set_field(widget, "PaneFloor", "true");
+    }
+    for child in widget.children.iter_mut() {
+        floor_panes(child);
+    }
 }
 
 /// A page's planned effect, worked out before the document is changed.
@@ -3892,8 +3967,46 @@ fn yes_left(root: &mut ra2fmt::gib::Widget) {
             ra2ui::input::set_field(w, "Name", to);
         }
     }
+    // The two buttons stand side by side in the middle of the box, 78 px apart (live
+    // `teamhq-scrap-box`, `mp-confirm-begin-host`: Yes at 438, No at 516 in a box from 342),
+    // not where the template put the four it holds.
+    for (name, x) in [("yes button", 96.0), ("no button", 174.0)] {
+        if let Some(w) = workshop::find_mut(root, name) {
+            move_button(w, x);
+        }
+    }
     // The labels were swapped with the names, so swap the strings back to where the eye sees them.
     relabel(root);
+}
+
+/// Move a message box's button to `x` (pixels in its button group). The attachments that draw it
+/// (its border and caption) measure their own `Position` in the group too, so they move by the
+/// same amount.
+fn move_button(button: &mut ra2fmt::gib::Widget, x: f32) {
+    let first = |w: &ra2fmt::gib::Widget| -> Option<f32> {
+        ra2ui::input::field_of(w, "Position")?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    };
+    let Some(old) = first(button) else { return };
+    let shift = x - old;
+    let moved = |w: &mut ra2fmt::gib::Widget| {
+        if let Some(position) = ra2ui::input::field_of(w, "Position") {
+            let mut words: Vec<String> = position.split_whitespace().map(str::to_string).collect();
+            if let Some(a) = words.first().and_then(|a| a.parse::<f32>().ok()) {
+                words[0] = format!("{}", a + shift);
+                ra2ui::input::set_field(w, "Position", &words.join(" "));
+            }
+        }
+    };
+    moved(button);
+    for attachment in button.attachments.iter_mut() {
+        if let Some(body) = attachment.body.as_deref_mut() {
+            moved(body);
+        }
+    }
 }
 
 /// Blank the template's `This is a message.` wherever it sits (a Glyph's or Text's `_Text`, a DisplayBox's

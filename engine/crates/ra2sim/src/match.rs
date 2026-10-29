@@ -168,6 +168,10 @@ pub struct RobotEntry {
     /// The `.bot` file.
     pub bot_path: String,
     pub controller: Controller,
+    /// The team name and logo the results show instead of the file's own team: a
+    /// network match's lobby panel names them (docs/38 section 16), the robot
+    /// itself having arrived as a `.bot` with no team table behind it.
+    pub team_label: Option<(String, String)>,
 }
 
 impl RobotEntry {
@@ -177,7 +181,14 @@ impl RobotEntry {
             team,
             bot_path: bot_path.into(),
             controller: Controller::Human,
+            team_label: None,
         }
+    }
+
+    /// The results name this team and logo for the robot.
+    pub fn labelled(mut self, name: &str, logo: &str) -> Self {
+        self.team_label = Some((name.to_string(), logo.to_string()));
+        self
     }
 
     pub fn ai(team: usize, bot_path: impl Into<String>) -> Self {
@@ -185,6 +196,7 @@ impl RobotEntry {
             team,
             bot_path: bot_path.into(),
             controller: Controller::Ai,
+            team_label: None,
         }
     }
 }
@@ -902,14 +914,22 @@ impl Match {
                         .or(Some(robot.team))
                         .and_then(|index| self.teams.get(index)),
                 };
+                let label = self
+                    .config
+                    .robots
+                    .get(i)
+                    .and_then(|entry| entry.team_label.as_ref());
                 RobotReport {
                     slot: i,
                     team: robot.team,
                     bot_name: crate::scriptai::bot_name(&robot.rig),
-                    team_name: team
-                        .map(|t| t.name.clone())
-                        .unwrap_or_else(|| format!("Team {}", robot.team + 1)),
-                    team_logo: team.map(|t| t.logo.clone()).unwrap_or_default(),
+                    team_name: label.map(|(name, _)| name.clone()).unwrap_or_else(|| {
+                        team.map(|t| t.name.clone())
+                            .unwrap_or_else(|| format!("Team {}", robot.team + 1))
+                    }),
+                    team_logo: label
+                        .map(|(_, logo)| logo.clone())
+                        .unwrap_or_else(|| team.map(|t| t.logo.clone()).unwrap_or_default()),
                     bot_preview: self.previews.get(i).cloned().flatten(),
                     points: ra2script::points(i as i32),
                     damage_dealt: self.duel.damage_dealt.get(i).copied().unwrap_or(0.0),

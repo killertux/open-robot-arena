@@ -41,7 +41,7 @@ use ra2fmt::gib::{Block, Gib, Widget, WidgetKind};
 use ra2net::dpn;
 use ra2net::game::{GameEvent, NetGame};
 use ra2net::link::LinkConfig;
-use ra2net::lobby::{self, SESSION_MAX};
+use ra2net::lobby;
 use ra2net::message::{AddPoints, BotDamage, BotImmobile, Message};
 use ra2net::session::{Browser, HostConfig, HostEntry, JoinConfig, PlayerId};
 use ra2net::sync::{ConnectionSpeed, SyncSchema};
@@ -248,6 +248,9 @@ pub struct NetPlay {
     pub host_port: u16,
     /// Extra addresses a refresh queries.
     pub extra_hosts: Vec<SocketAddr>,
+    /// Replaces the game type's `dwMaxPlayers` (the original's deathmatch
+    /// admits two peers); tests that seat more peers set it.
+    pub max_players: Option<u32>,
     pub player_name: String,
     pub link: LinkConfig,
     /// Which robot each human player drives (host side), and the keys each remote player holds.
@@ -316,6 +319,7 @@ impl NetPlay {
             bind_ip: "0.0.0.0".parse().expect("an address"),
             host_port: dpn::DEFAULT_PORT,
             extra_hosts,
+            max_players: None,
             player_name: DEFAULT_PLAYER_NAME.to_string(),
             link: LinkConfig::default(),
             robot_of: BTreeMap::new(),
@@ -377,6 +381,9 @@ impl NetPlay {
         }
         while let Some(request) = shell.take_panel_request() {
             self.panel_request(shell, request)?;
+        }
+        if shell.take_begin_confirmed() {
+            self.begin_lobby_match(shell);
         }
         Ok(())
     }
@@ -622,7 +629,9 @@ impl NetPlay {
             bind: self.bind(self.host_port),
             session_name: session_name.encode(),
             player_name: self.player_name.clone(),
-            max_players: SESSION_MAX,
+            max_players: self
+                .max_players
+                .unwrap_or_else(|| lobby::session_max(DEFAULT_GAME_TYPE)),
             password,
             link: self.link,
         };
@@ -913,25 +922,21 @@ impl NetPlay {
                 return Ok(NetAction::Ended("left".to_string()));
             }
             (s, "begin match button") if s.eq_ignore_ascii_case(PREMATCH_SCREEN) => {
-                if let Some(game) = &mut self.game {
-                    // At least two robots and every human ready.
-                    if game.is_host() && game.lobby.all_ready() {
-                        let picked = MatchArena::find(
-                            shell.game(),
-                            ra2net::lobby::arena_name(&game.lobby.arena),
-                        );
-                        let arena = picked.script.clone();
-                        // PrepareMatch names the arena (`Bridge of Doom`, live), then the host's
-                        // robots follow; the match is built once the joiners' are in.
-                        self.reset_match();
-                        if let Some(game) = &mut self.game {
-                            game.start_match(&picked.name);
+                // `FUN_00495450`: nobody seated is "Select Bots"; a seated player not ready asks
+                // `Confirm Begin Match` (Yes begins); otherwise it begins.
+                if let Some(game) = &self.game {
+                    if game.is_host() {
+                        let seated = game.lobby.slots.iter().any(|s| s.has_robot());
+                        if !seated {
+                            shell.show_message(
+                                "Select Bots",
+                                "Bots must be selected to begin match.",
+                            )?;
+                        } else if !game.lobby.all_seated_ready() {
+                            shell.ask_begin_match()?;
+                        } else {
+                            self.begin_lobby_match(shell);
                         }
-                        self.send_own_bots(shell.game());
-                        self.start = Start::Host {
-                            arena,
-                            since: Instant::now(),
-                        };
                     }
                 }
             }
@@ -939,6 +944,26 @@ impl NetPlay {
         }
         self.show(shell);
         Ok(NetAction::None)
+    }
+
+    /// The host's Begin Match: `PrepareMatch` names the arena (`Bridge of Doom`, live), the host's
+    /// robots follow, and the match is built once the joiners' are in.
+    fn begin_lobby_match(&mut self, shell: &Shell) {
+        let Some(game) = &mut self.game else { return };
+        if !game.is_host() {
+            return;
+        }
+        let picked = MatchArena::find(shell.game(), ra2net::lobby::arena_name(&game.lobby.arena));
+        let arena = picked.script.clone();
+        self.reset_match();
+        if let Some(game) = &mut self.game {
+            game.start_match(&picked.name);
+        }
+        self.send_own_bots(shell.game());
+        self.start = Start::Host {
+            arena,
+            since: Instant::now(),
+        };
     }
 
     /// Pump the network; update the screen on show.
@@ -1105,7 +1130,6 @@ impl NetPlay {
         let ui = shell.game().join("UI");
         let active = ra2ui::workshop::load(&ui, "multiplayer/activeplayer.gib").ok();
         let empty = ra2ui::workshop::load(&ui, "multiplayer/noplayer.gib").ok();
-        let closed = ra2ui::workshop::load(&ui, "multiplayer/closedplayer.gib").ok();
         let editing_name = shell.text_focus() == Some("screen name");
         let editing_chat = shell.text_focus() == Some("chat textbox");
         let Some(doc) = shell.document_mut() else {
@@ -1170,10 +1194,11 @@ impl NetPlay {
                 .panel_art
                 .get(&(i as u32))
                 .and_then(|(_, key)| key.clone());
-            // A deathmatch has two panels; the others are closed (`closedplayer.gib`, live).
+            // A deathmatch has two panels: the original draws nothing for the other two (every
+            // live lobby capture, 1024x768; `closedplayer.gib` is not shown there).
             let is_closed = lobby.game_type.eq_ignore_ascii_case(DEFAULT_GAME_TYPE) && i >= 2;
             let cell = match lobby.panel(i as u32) {
-                _ if is_closed => closed.as_ref().and_then(|g| g.widgets().next().cloned()),
+                _ if is_closed => None,
                 Some(slot) if slot.has_robot() => active
                     .as_ref()
                     .and_then(|g| g.widgets().next().cloned())
@@ -1288,10 +1313,16 @@ impl NetPlay {
             };
             // A human panel is a person, this end's or a remote one; a
             // computer panel (the original's host sets those up) is the AI.
-            entries.push(if slot.is_human() {
+            let entry = if slot.is_human() {
                 ra2sim::r#match::RobotEntry::human(i, path)
             } else {
                 ra2sim::r#match::RobotEntry::ai(i, path)
+            };
+            // The results show the team the panel names (GroupInfo), as the original's do.
+            entries.push(if slot.team.is_empty() {
+                entry
+            } else {
+                entry.labelled(&slot.team, &slot.team_logo)
             });
         }
         while entries.len() < 2 {
