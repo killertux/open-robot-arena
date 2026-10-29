@@ -57,7 +57,7 @@ fn every_snapshot_the_original_wrote_decodes_and_writes_back_byte_for_byte() {
         );
         for body in &state.bodies {
             assert!(matches!(body.id >> 10, 1 | 2), "{:#x}", body.id);
-            assert_eq!(body.id & 3 < 2, true);
+            assert!(body.id & 3 < 2);
         }
         for (id, _) in &state.controllers {
             assert!(matches!(id >> 10, 1 | 2) && id & 3 == 0, "{id:#x}");

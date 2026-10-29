@@ -219,6 +219,16 @@ fn refresh_join_and_the_prematch_lobby_through_the_screens() {
         (&mut guest, &mut guest_shell),
         |_, g| g.game.as_ref().unwrap().lobby.panel(1).is_some(),
     );
+    // A battle royal has four panels; a deathmatch closes the last two.
+    host.game
+        .as_mut()
+        .unwrap()
+        .set_settings("BATTLE ROYAL", "ALLWEIGHT", "Arenas/box.py");
+    wait_for(
+        (&mut host, &mut host_shell),
+        (&mut guest, &mut guest_shell),
+        |_, g| g.game.as_ref().unwrap().lobby.game_type == "BATTLE ROYAL",
+    );
     panel_click(&mut guest_shell, &mut guest, 2, "human player button", 2);
     wait_for(
         (&mut host, &mut host_shell),
@@ -876,6 +886,15 @@ fn a_rematch_in_the_same_lobby_starts_from_a_clean_gate() {
     };
 
     for round in 1..=2 {
+        // The ready flags clear at the end of a match (live): ready again for the next.
+        host.game.as_mut().unwrap().set_ready(true);
+        guest.game.as_mut().unwrap().set_ready(true);
+        let start = Instant::now();
+        while !host.game.as_ref().unwrap().lobby.all_ready()
+            && start.elapsed() < Duration::from_secs(5)
+        {
+            pump(&mut host, &mut guest, &mut host_shell, &mut guest_shell);
+        }
         let action = host
             .on_step(&mut host_shell, PREMATCH_SCREEN, &begin)
             .unwrap();
