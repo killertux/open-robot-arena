@@ -535,7 +535,6 @@ mod tests {
         let msg = SyncMessage::pack(&state);
         let wrong = SyncSchema {
             robot_components: vec![1],
-            ..state.schema()
         };
         assert!(msg.unpack(&wrong).is_err());
     }

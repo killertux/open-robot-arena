@@ -1307,7 +1307,7 @@ impl NetPlay {
         // The robots the peers sent live in the save folder: their components are the install's.
         let had_game = std::env::var_os("RA2_GAME");
         std::env::set_var("RA2_GAME", game);
-        let built = (|| -> Result<crate::match_mode::Session, String> {
+        let built: Result<crate::match_mode::Session, String> = {
             if robot.is_some() {
                 crate::match_mode::Session::exhibition(
                     game,
@@ -1328,7 +1328,7 @@ impl NetPlay {
                 )
                 .map_err(|e| e.to_string())
             }
-        })();
+        };
         match had_game {
             Some(value) => std::env::set_var("RA2_GAME", value),
             None => std::env::remove_var("RA2_GAME"),
