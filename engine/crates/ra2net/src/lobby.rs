@@ -33,11 +33,43 @@ pub mod kind {
 
 /// The player panels of `prematch.gib` (`player1 group`..`player4 group`).
 pub const PLAYER_SLOTS: usize = 4;
-/// Spectators a host takes besides its four players (ours; DirectPlay's
-/// `dwMaxPlayers` of the original was not traced).
+/// Spectators a host takes besides its four players (library default for
+/// other game types; the original admits none, see [`session_max`]).
 pub const MAX_SPECTATORS: usize = 4;
-/// Peers a session admits: the players and their spectators.
+/// Peers a session admits: the players and their spectators (library default).
 pub const SESSION_MAX: u32 = (PLAYER_SLOTS + MAX_SPECTATORS) as u32;
+
+/// `dwMaxPlayers` the original's host (`FUN_0048eca0`) passes to `Host`
+/// (`FUN_006268b0`): 2 for a DEATHMATCH, 4 for every other game type. DirectPlay
+/// refuses a peer beyond it, spectators included (docs/38 section 16).
+pub fn session_max(game_type: &str) -> u32 {
+    if game_type == "DEATHMATCH" {
+        2
+    } else {
+        4
+    }
+}
+
+/// The `GroupInfo` of an eject as the original sends it (live, docs/38 section 16): the
+/// panel `old` in state `LEFT` with its team and robot names, an empty logo, the sending end's
+/// own player name, no ready flag, the human value and an empty design.
+pub fn eject_info(old: &Slot, sender_name: &str) -> GroupInfo {
+    GroupInfo {
+        slot: old.index,
+        owner: old.player,
+        state: kind::LEFT,
+        strings: [
+            old.team.clone(),
+            String::new(),
+            old.robot.clone(),
+            sender_name.to_string(),
+        ],
+        flag: false,
+        value: u32::from(old.is_human()),
+        // The design flag is set with nothing behind it (live: the message ends on `01`).
+        robot: Some(Vec::new()),
+    }
+}
 
 /// [`Slot::index`] of a spectator: no player panel.
 pub const NO_PANEL: u32 = u32::MAX;
@@ -308,6 +340,15 @@ impl Lobby {
                 .all(|s| s.ready && s.has_robot())
     }
 
+    /// Every seated human (a panel with a robot) is ready: the original's test before it begins
+    /// without asking (`FUN_00495450` over `FUN_0047ca10`, docs/38 section 16).
+    pub fn all_seated_ready(&self) -> bool {
+        self.slots
+            .iter()
+            .filter(|s| s.kind == kind::HUMAN_WITH_ROBOT)
+            .all(|s| s.ready)
+    }
+
     /// The enumeration reply's two words.
     pub fn host_data(&self) -> RaHostData {
         let count = |a: u32, b: u32| {
@@ -457,6 +498,37 @@ impl Lobby {
 
 #[cfg(test)]
 mod tests {
+    /// The eject the original's host sent for the port joiner's panel (live,
+    /// `mp-eject-host`: panel 1 of owner `0x10001`, flags `0x28`).
+    #[test]
+    fn an_eject_is_the_group_info_the_original_sent() {
+        let old = Slot {
+            index: 1,
+            player: 0x10001,
+            kind: kind::HUMAN_WITH_ROBOT,
+            name: "PortJoiner".into(),
+            team: "The Rookies".into(),
+            team_logo: "Teams\\orange_skull.bmp".into(),
+            robot: "Sting Ray".into(),
+            ready: true,
+            design: Some(vec![1, 2, 3]),
+        };
+        let bytes = Message::GroupInfo(eject_info(&old, "Default Player")).encode();
+        let mut want = vec![0x71, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 4, 0, 0, 0];
+        for text in ["The Rookies", "", "Sting Ray", "Default Player"] {
+            want.extend((text.len() as u32).to_le_bytes());
+            want.extend(text.bytes());
+        }
+        want.extend([0, 1, 0, 0, 0, 1]);
+        assert_eq!(bytes, want);
+    }
+
+    #[test]
+    fn the_originals_hosts_admit_two_peers_in_a_deathmatch_and_four_otherwise() {
+        assert_eq!(super::session_max("DEATHMATCH"), 2);
+        assert_eq!(super::session_max("TEAM MATCH"), 4);
+    }
+
     use super::*;
 
     fn panel(index: u32, player: PlayerId, kind: u32, name: &str) -> Slot {

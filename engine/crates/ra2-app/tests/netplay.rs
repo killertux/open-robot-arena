@@ -134,6 +134,11 @@ fn refresh_join_and_the_prematch_lobby_through_the_screens() {
         "New Exhibition Match:DEATHMATCH:Combat Arena:ALLWEIGHT:1.20:512K LAN:"
     );
     assert_eq!(guest.rows[0].addr, addr);
+    // The Players column: one peer of the original deathmatch's two (docs/38 section 16).
+    assert_eq!(
+        (guest.rows[0].current_players, guest.rows[0].max_players),
+        (1, 2)
+    );
 
     // Select it and Join.
     let step = guest_shell.click_list_row("server listbox", 0).unwrap();
@@ -316,6 +321,10 @@ fn refresh_join_and_the_prematch_lobby_through_the_screens() {
         .on_step(&mut host_shell, PREMATCH_SCREEN, &begin)
         .unwrap();
     assert_eq!(action, net_play::NetAction::None, "nobody is ready");
+    // Two seated and not ready: the Yes/No `Confirm Begin Match` box (No leaves the lobby as it is).
+    assert_eq!(host_shell.window_depth(), 1);
+    host_shell.click_named("no button").unwrap();
+    assert_eq!(host_shell.window_depth(), 0);
     panel_click(&mut guest_shell, &mut guest, 2, "ready checkbox", 0);
     wait_for(
         (&mut host, &mut host_shell),
@@ -555,6 +564,9 @@ fn child(role: &str, window: bool) {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     if role == "host" {
         net.host_port = port;
+        // Three players and a watcher: the original's deathmatch admits two
+        // peers (docs/38 section 16), so this scripted match lifts the cap.
+        net.max_players = Some(5);
         net.host("Scripted", None, ConnectionSpeed::Lan, &box_arena())
             .unwrap();
         report("LISTENING".into());
@@ -1459,4 +1471,301 @@ fn forward() -> DriveInput {
     let mut drive = DriveInput::default();
     drive.keys.set(ra2sim::controls::dik::W, true);
     drive
+}
+
+/// The results name the team the lobby panel names, not the one the robot's file or its seat
+/// would pick (the original's C.R.U.S.H. read "Red Zone" on the port; docs/38 section 16).
+#[test]
+fn the_results_show_the_team_the_panel_names() {
+    let Some(game) = game_dir() else { return };
+    let _scripts = ra2script::lock();
+    let entry = |i: usize, file: &str| {
+        ra2sim::r#match::RobotEntry::human(i, game.join(file).to_string_lossy().to_string())
+    };
+    let entries = vec![
+        entry(0, "Teams/Team0/Bot0.bot").labelled("The Rookies", "Teams\\orange_skull.bmp"),
+        entry(1, "Teams/Team0/Bot1.bot"),
+    ];
+    let Ok(session) = ra2_app::match_mode::Session::exhibition(
+        &game,
+        &game.join("Arenas/Bridge.py"),
+        ra2sim::r#match::GameType::Deathmatch,
+        entries,
+        None,
+        None,
+    ) else {
+        return;
+    };
+    let report = session.matched.report();
+    assert_eq!(report.robots[0].team_name, "The Rookies");
+    assert_eq!(report.robots[0].team_logo, "Teams\\orange_skull.bmp");
+}
+
+/// Hold keys for a while in a match of two robots (`mine`, `other`) and return the snapshot of
+/// the host's robot 0 and 1 at the end.
+fn held_snapshot(
+    mine: &str,
+    other: &str,
+    keys: &[i32],
+    steps: usize,
+) -> Option<(ra2net::sync::SyncState, ra2_app::match_mode::Session)> {
+    let game = game_dir()?;
+    let entries = vec![
+        ra2sim::r#match::RobotEntry::human(0, game.join(mine).to_string_lossy().to_string()),
+        ra2sim::r#match::RobotEntry::human(1, game.join(other).to_string_lossy().to_string()),
+    ];
+    let mut session = ra2_app::match_mode::Session::exhibition(
+        &game,
+        &game.join("Arenas/Bridge.py"),
+        ra2sim::r#match::GameType::Deathmatch,
+        entries,
+        None,
+        None,
+    )
+    .ok()?;
+    session.skip_intro();
+    let mut drive = DriveInput::default();
+    for &key in keys {
+        drive.keys.set(key, true);
+    }
+    session.set_drive(drive);
+    let mut fought = 0;
+    while fought < steps {
+        session.step();
+        if session.matched.state() == ra2sim::r#match::MatchState::Fight {
+            fought += 1;
+        }
+    }
+    let state = ra2_app::net_match::capture(&session.matched.duel, &[0, 1]);
+    Some((state, session))
+}
+
+fn device_values(state: &ra2net::sync::SyncState, id: u32) -> Option<[f32; 4]> {
+    use ra2net::sync::DeviceSync;
+    state.devices.iter().find_map(|d| match d {
+        DeviceSync::One { id: i, values, .. } if *i == id => Some(*values),
+        DeviceSync::Four { id: i, value } if *i == id => Some([*value, 0.0, 0.0, 0.0]),
+        _ => None,
+    })
+}
+
+/// The motors' commands in a snapshot are integer percents, as the original's driven C.R.U.S.H. wrote
+/// them (live `mp-snapshots-driven`: W held is 100 on the wheel motors `0x404`/`0x40c` and -100 on the
+/// mirrored `0x408`/`0x410`).
+#[test]
+fn a_driven_robots_snapshot_carries_the_integer_percent_of_each_motor() {
+    let _scripts = ra2script::lock();
+    let Some((state, _s)) = held_snapshot(
+        "Teams/Team0/Bot0.bot",
+        "Teams/Team0/Bot1.bot",
+        &[ra2sim::controls::dik::W],
+        120,
+    ) else {
+        return;
+    };
+    let command = |id| device_values(&state, id).map(|v| v[0].to_bits() as i32);
+    assert_eq!(command(0x404), Some(100));
+    assert_eq!(command(0x408), Some(-100));
+    assert_eq!(command(0x40c), Some(100));
+    assert_eq!(command(0x410), Some(-100));
+    // The hinge angle is in (-pi, pi].
+    for id in [0x404, 0x408, 0x40c, 0x410] {
+        let angle = device_values(&state, id).unwrap()[1];
+        assert!(angle.abs() <= std::f32::consts::PI + 1e-4, "{angle}");
+    }
+}
+
+/// A `Steering` unit's two wheels carry the hub angle: A turns it to -pi/6 and D to +pi/6, both
+/// wheels alike (live `mp-snapshots-steering`: BEAR's `0x808`/`0x809`).
+#[test]
+fn the_steering_units_wheels_carry_the_hub_angle() {
+    let _scripts = ra2script::lock();
+    for (key, sign) in [
+        (ra2sim::controls::dik::A, -1.0f32),
+        (ra2sim::controls::dik::D, 1.0),
+    ] {
+        let Some((state, _s)) =
+            held_snapshot("AI/Team2/Bot2.bot", "Teams/Team0/Bot1.bot", &[key], 120)
+        else {
+            return;
+        };
+        let ids: Vec<u32> = state
+            .devices
+            .iter()
+            .filter_map(|d| match d {
+                ra2net::sync::DeviceSync::Four { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, [0x408, 0x409]);
+        for id in ids {
+            let angle = device_values(&state, id).unwrap()[0];
+            assert!(
+                (angle - sign * std::f32::consts::PI / 6.0).abs() < 1e-3,
+                "{id:#x}: {angle}"
+            );
+        }
+    }
+}
+
+/// The host's Begin Match (`FUN_00495450`, live `mp-confirm-begin-unready`): nobody seated is a
+/// "Select Bots" box, a seated player who is not ready is a Yes/No `Confirm Begin Match` (No
+/// leaves the lobby alone, Yes begins), and everyone ready begins at once.
+#[test]
+fn begin_asks_when_a_seated_player_is_not_ready() {
+    let Some(game) = game_dir() else { return };
+    let mut host_shell = Shell::boot(&game, [800.0, 600.0]).unwrap();
+    let mut host = loopback("Host");
+    let mut guest = loopback("Guest");
+    host.host("Ask", None, ConnectionSpeed::Lan, &box_arena())
+        .unwrap();
+    host_shell.goto(PREMATCH_SCREEN).unwrap();
+    let addr = host.game.as_ref().unwrap().session.local_addr().unwrap();
+    guest.join(addr).unwrap();
+    let begin = ra2_shell::Step {
+        command: String::new(),
+        hit: "Button \"begin match button\"".into(),
+        note: None,
+        screen: PREMATCH_SCREEN.into(),
+        content: None,
+        tab: None,
+        step: None,
+        point: [0.0, 0.0],
+    };
+    let pump =
+        |host: &mut NetPlay, guest: &mut NetPlay, until: &dyn Fn(&NetPlay, &NetPlay) -> bool| {
+            let start = Instant::now();
+            while !until(host, guest) && start.elapsed() < Duration::from_secs(5) {
+                host.game.as_mut().unwrap().poll();
+                guest.game.as_mut().unwrap().poll();
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert!(until(host, guest), "timed out");
+        };
+    pump(&mut host, &mut guest, &|h, g| {
+        g.game.as_ref().unwrap().lobby.slots.len() >= 2
+            && h.game.as_ref().unwrap().lobby.slots.len() >= 2
+    });
+    // Nobody seated: the "Select Bots" box.
+    host.on_step(&mut host_shell, PREMATCH_SCREEN, &begin)
+        .unwrap();
+    assert_eq!(host_shell.window_depth(), 1);
+    host_shell.click_named("ok button").unwrap();
+    assert_eq!(host_shell.window_depth(), 0);
+    // Two seated, neither ready: the Yes/No box.
+    claim(&mut host, 0);
+    claim(&mut guest, 1);
+    pump(&mut host, &mut guest, &|h, g| {
+        h.game.as_ref().unwrap().lobby.players().count() == 2
+            && g.game.as_ref().unwrap().lobby.players().count() == 2
+    });
+    host.on_step(&mut host_shell, PREMATCH_SCREEN, &begin)
+        .unwrap();
+    assert_eq!(host_shell.window_depth(), 1);
+    host_shell.click_named("no button").unwrap();
+    host.panel_events(&mut host_shell).unwrap();
+    assert_eq!(host_shell.window_depth(), 0);
+    let mut heard = false;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(400) {
+        host.game.as_mut().unwrap().poll();
+        for e in guest.game.as_mut().unwrap().poll() {
+            heard |= matches!(e, GameEvent::Prepare { .. });
+        }
+    }
+    assert!(!heard, "No begins nothing");
+    // Yes: the match begins.
+    host.on_step(&mut host_shell, PREMATCH_SCREEN, &begin)
+        .unwrap();
+    host_shell.click_named("yes button").unwrap();
+    host.panel_events(&mut host_shell).unwrap();
+    let start = Instant::now();
+    while !heard && start.elapsed() < Duration::from_secs(5) {
+        host.game.as_mut().unwrap().poll();
+        for e in guest.game.as_mut().unwrap().poll() {
+            heard |= matches!(e, GameEvent::Prepare { .. });
+        }
+    }
+    assert!(heard, "Yes begins the match");
+}
+
+/// A `Steering` unit's wheels are ids `+0` and `+1` in the order of the unit's parts: the first is
+/// the one at +x of the chassis, in the port's rig and in the original's snapshots of BEAR (live
+/// `mp-snapshots-steering`: `0x808` at x +1.03, `0x809` at x -1.03).
+#[test]
+fn the_steering_units_first_wheel_is_the_originals_first_body() {
+    use ra2net::sync::{SyncSchema, SyncState};
+    let Some(game) = game_dir() else { return };
+    let Ok(text) = std::fs::read_to_string(
+        game.join("../oracle/original/mp-snapshots-steering__live__000.txt"),
+    ) else {
+        return;
+    };
+    let _scripts = ra2script::lock();
+    let entries = vec![
+        ra2sim::r#match::RobotEntry::human(
+            0,
+            game.join("Teams/Team0/Bot0.bot")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        ra2sim::r#match::RobotEntry::human(
+            1,
+            game.join("AI/Team2/Bot2.bot").to_string_lossy().to_string(),
+        ),
+    ];
+    let Ok(session) = ra2_app::match_mode::Session::exhibition(
+        &game,
+        &game.join("Arenas/Bridge.py"),
+        ra2sim::r#match::GameType::Deathmatch,
+        entries,
+        None,
+        None,
+    ) else {
+        return;
+    };
+    let rig = &session.matched.duel.robots[1].rig;
+    let unit = rig
+        .components
+        .iter()
+        .position(|c| c.class == "Steering")
+        .expect("BEAR steers");
+    let wheels: Vec<f32> = rig
+        .parts
+        .iter()
+        .filter(|p| p.joint.as_ref().is_some_and(|j| j.motor == unit))
+        .map(|p| rig.components[p.root].local.w_axis.x)
+        .collect();
+    assert_eq!(wheels.len(), 2);
+    assert!(wheels[0] > 0.0 && wheels[1] < 0.0, "{wheels:?}");
+    let mut seen = 0;
+    for line in text.lines() {
+        let f: Vec<&str> = line.split(' ').collect();
+        let raw: Vec<u8> = (0..f[4].len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&f[4][i..i + 2], 16).unwrap())
+            .collect();
+        let schema = SyncSchema {
+            robot_components: vec![14, rig.components.len()],
+        };
+        let state = SyncState::from_bytes(&raw, &schema).unwrap();
+        let body = |id: u32| state.bodies.iter().find(|b| b.id == id);
+        let (Some(chassis), Some(first), Some(second)) = (body(0x800), body(0x808), body(0x809))
+        else {
+            continue;
+        };
+        let q = glam::Quat::from_xyzw(
+            chassis.rotation[1],
+            chassis.rotation[2],
+            chassis.rotation[3],
+            chassis.rotation[0],
+        );
+        let local = |b: &ra2net::sync::BodySync| {
+            q.conjugate()
+                * (glam::Vec3::from_array(b.position) - glam::Vec3::from_array(chassis.position))
+        };
+        assert!(local(first).x > 0.5 && local(second).x < -0.5);
+        seen += 1;
+    }
+    assert!(seen > 10, "{seen} snapshots");
 }

@@ -1957,6 +1957,34 @@ impl Robot {
         (asked * self.motor_factor(motor)).trunc() as i32
     }
 
+    /// The integer command a motor holds (`SetPercent`, `0x4f59f0`): what the original's
+    /// snapshot of a motor carries as its command (docs/38 section 16).
+    pub fn motor_percent(&self, motor: usize) -> i32 {
+        let command = self.control.command(&self.rig.wiring, motor).unwrap_or(0.0);
+        self.scaled_percent(motor, command, self.energy.last.elec.scale)
+    }
+
+    /// The hub angle of the `k`-th wheel (part order) of a `Steering` unit (`+0x68`), 0 when the
+    /// unit has not steered.
+    pub fn steering_angle(&self, unit: usize, k: usize) -> f32 {
+        let Some(magic) = &self.magic else { return 0.0 };
+        let parts: Vec<usize> = self
+            .rig
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.joint.as_ref().is_some_and(|j| j.motor == unit))
+            .map(|(i, _)| i)
+            .collect();
+        let Some(part) = parts.get(k) else { return 0.0 };
+        magic
+            .wheels
+            .iter()
+            .find(|w| w.part == *part)
+            .and_then(|w| w.steer)
+            .map_or(0.0, |s| s.angle)
+    }
+
     /// The control board's calls on the Flamethrowers: the `Fire` wires' command
     /// to the analog handler (when it changed), a `Fire burst` press to the
     /// button handler. They land before the power step, which then sees the jet.

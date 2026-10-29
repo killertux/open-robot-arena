@@ -80,31 +80,49 @@ pub fn capture(duel: &Duel, panels: &[u32]) -> SyncState {
         }
         for (c, comp) in robot.rig.components.iter().enumerate() {
             let id = component_id(panel, c);
-            let joint = robot
+            // The part this component's joint turns (or slides), and the live joint behind it.
+            let part = robot
                 .rig
                 .parts
                 .iter()
-                .find_map(|p| p.joint.as_ref().filter(|j| j.motor == c));
+                .position(|p| p.joint.as_ref().is_some_and(|j| j.motor == c));
+            let joint = part.and_then(|p| robot.rig.parts[p].joint.as_ref());
             let (rate, torque) = joint.map_or((0.0, 0.0), |j| (j.rate, j.max_torque / 40.0));
+            let handle = part.and_then(|p| robot.parts[p].joint);
             match comp.class.as_str() {
                 "SpinMotor" | "BurstMotor" | "ServoMotor" | "AxleMount" => {
+                    // [command, hinge angle, rate, torque / 40]: the command is an integer
+                    // percent (`+0x7c`) whose bits the original writes as they are. The angle
+                    // runs the other way from Jolt's and the original's zero is a multiple of
+                    // pi/2 off the rest pose (a Havok hinge's reference axis, docs/38 section 16).
+                    let angle = handle.map_or(0.0, |h| duel.physics.hinge_angle(h));
+                    // The flag (`+0x66`) is set on every burst motor and servo of the recorded
+                    // robots, on no spin motor or axle mount.
                     state.devices.push(DeviceSync::One {
                         id,
-                        flag: false,
-                        values: [0.0, 0.0, rate, torque],
+                        flag: matches!(comp.class.as_str(), "BurstMotor" | "ServoMotor"),
+                        values: [
+                            f32::from_bits(robot.motor_percent(c) as u32),
+                            wrap_angle(-angle),
+                            rate,
+                            torque,
+                        ],
                     })
                 }
-                "BurstPiston" => state.devices.push(DeviceSync::Five {
-                    id,
-                    flag: false,
-                    word: 0,
-                    values: [0.0, rate, torque],
-                }),
+                "BurstPiston" => {
+                    let position = handle.map_or(0.0, |h| duel.physics.slider_offset(h));
+                    state.devices.push(DeviceSync::Five {
+                        id,
+                        flag: true,
+                        word: 0,
+                        values: [position, rate, torque],
+                    })
+                }
                 "Steering" => {
                     for k in 0..2 {
                         state.devices.push(DeviceSync::Four {
-                            id: id + k,
-                            value: 0.0,
+                            id: id + k as u32,
+                            value: robot.steering_angle(c, k),
                         });
                     }
                 }
@@ -139,6 +157,44 @@ pub fn capture(duel: &Duel, panels: &[u32]) -> SyncState {
 /// does not have is skipped, as the original's reader does ("Bad Rigid Body ID in Sync").
 pub fn apply(duel: &mut Duel, panels: &[u32], state: &SyncState) -> usize {
     let mut applied = 0;
+    // The reader (`FUN_004d25d0`) also takes each robot's hitpoints and each battery's and air
+    // tank's energy as they are (docs/38 section 16).
+    for sync in &state.robots {
+        let Some(r) = panels.iter().position(|p| *p == sync.id) else {
+            continue;
+        };
+        let Some(robot) = duel.robots.get_mut(r) else {
+            continue;
+        };
+        if robot.health.len() == sync.components.len() {
+            for (have, &hp) in robot.health.iter_mut().zip(&sync.components) {
+                if hp.is_finite() {
+                    *have = hp.max(0.0);
+                }
+            }
+        }
+    }
+    for &(id, value) in &state.controllers {
+        let panel = (id >> 10).wrapping_sub(1);
+        let Some(robot) = panels
+            .iter()
+            .position(|p| *p == panel)
+            .and_then(|r| duel.robots.get_mut(r))
+        else {
+            continue;
+        };
+        let component = ((id & 0x3ff) / 4) as usize;
+        if let Some(source) = robot
+            .energy
+            .sources
+            .iter_mut()
+            .find(|s| s.component == component)
+        {
+            if value.is_finite() {
+                source.current = value.clamp(0.0, source.total);
+            }
+        }
+    }
     for body in &state.bodies {
         let panel = (body.id >> 10).wrapping_sub(1);
         let Some(r) = panels.iter().position(|p| *p == panel) else {
@@ -170,6 +226,17 @@ pub fn apply(duel: &mut Duel, panels: &[u32], state: &SyncState) -> usize {
         applied += 1;
     }
     applied
+}
+
+/// An angle in `(-pi, pi]`, the form the original's hinge angles are written in.
+fn wrap_angle(angle: f32) -> f32 {
+    let tau = std::f32::consts::TAU;
+    let a = angle.rem_euclid(tau);
+    if a > std::f32::consts::PI {
+        a - tau
+    } else {
+        a
+    }
 }
 
 /// The keyboard binding words of a key event: the first three words of a control's binding

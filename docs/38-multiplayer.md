@@ -935,3 +935,116 @@ captures `mp-lobby-*`).
   (two shells and two `NetPlay`: picks, computer robot, kinds shown, ready, change,
   eject), `ra2net` tests `a_claim_reaches_the_others_but_is_not_echoed_to_the_claimant`
   and `peers_are_spectators_until_they_claim_a_panel`.
+
+## 16. Polish against the original: players, begin, eject, results, snapshots, lobby look (fx/mp-polish)
+
+Live, flatpak Wine 9.0 + the replacement `dpnet` (§14), the original as host and as joiner against the port's app
+(1024x768 on its own Xephyr) and the headless harnesses (`ra2net` examples `mphost`/`mpjoin`, now with `chat TEXT`
+and `eject N`), plus the exe (`FUN_0048eca0` Start Game, `FUN_006268b0` Host, `FUN_00495450` Begin Match,
+`FUN_0049dd80` Eject, `FUN_0047bc60`/`FUN_0047ca10`/`FUN_0047ca80` panel tests, writer `FUN_004d2b60`). New
+captures `mp-*` of 2026-10-28 (rows in the backup's `manifest-additions-2026-10-21-mp-polish.tsv`).
+
+### 16.1 The server list's Players column
+
+`FUN_0048eca0` (Start Game) fills `dwMaxPlayers` of the `DPN_APPLICATION_DESC` that `FUN_006268b0` passes to
+`Host`: **2 when the game type is `DEATHMATCH`, else 4** (`mov [esp+0x14], 4` at `0x48f1f6`, `2` at `0x48f22c`; it is
+the sixth argument, at `+0x24`, of `FUN_006268b0`, copied to the description's `+0x28`). The row's `n / m` is the
+description's current and maximum players. DirectPlay enforces it for everyone, spectators included: a third peer of
+a deathmatch is refused (live: `mpjoin` got `Refused(SessionFull)` from the original host's bridge while a stale peer
+held the second place, and from the port host with the original joined). Port: `ra2net::lobby::session_max`,
+`NetPlay::host` advertises and enforces it (the ceiling of 8 spectators is gone; `NetPlay::max_players` lifts it for
+tests); the original's list shows a port-hosted game as `1 / 2` (`mp-list-port-host-players`) and the port lists an
+original host as `1/2`. The five-process tests seat three players and a watcher and set `max_players = Some(5)`.
+
+### 16.2 "Confirm Begin Match"
+
+`FUN_00495450` (the Begin Match button): nobody seated (no panel with `+0xc` set) is the OK box `Select Bots` /
+`Bots must be selected to begin match.`; every seated panel ready begins at once; otherwise the Yes/No box
+`Confirm Begin Match` / `All bots are not set to Ready. Begin Match?` (Yes begins, No does nothing). "Seated" is the
+panel record's byte `+0xc` (set by the panel setter for kinds 2 and 3), "ready" the byte `+0x20` (`FUN_0047bc60`; in the
+local, non-network mode a chosen robot). Frida on the vector of `0x98`-byte records at the click, with a port joiner
+seated: panel 1 `+0xc` 1, `+0x20` 0 gives the box, `+0x20` 1 starts the match (`mp-confirm-begin-panels`). So the box is
+not a fault in the joiner's wire: the host clicked Begin while the joiner's ready flag was not set yet (most likely
+what the earlier capture `mp-confirm-begin-host` caught: its flag is green, set after the click). Its body draws **blank** in the
+original itself (the text is in the exe, the box shows none), as the other message boxes the shell already copies
+(`teamhq-scrap-box`). Port: `Shell::ask_begin_match` / `take_begin_confirmed`, `NetPlay::begin_lobby_match`,
+`Lobby::all_seated_ready` (Begin no longer needs two robots: the match fills the second seat with an AI). The buttons
+of the original's message boxes stand in the middle of the box, not at the template's four places: a lone OK's border at
+x 477, Yes and No at 438 and 516 in a box from 342 (identical in `teamhq-scrap-box`, `mp-confirm-begin-unready`,
+`teamhq-events-one-event`, `mp-connection-termination`); the shell moves them with their border and caption
+attachments (`move_button`, test `ra2-shell/tests/message_boxes.rs`).
+
+### 16.3 The eject, on the wire
+
+Eject is no message of its own. The button's handler (`FUN_0049dd80`) sets the panel to state 4 and the panel setter
+sends **one `GroupInfo` (`0x71`), flags `0x28` (guaranteed, no loopback), to everyone**: panel, the owner's id, state
+`4` (LEFT), the panel's team name, an **empty** logo, the panel's robot name, the **sending end's own** player name,
+ready 0, value 1 (human), design flag 1 with no design behind it. The same bytes for the host ejecting a remote
+panel (the port joiner's, then the port app's) and for a player ejecting its own panel (the host's, live; no
+confirmation box on this path). The ejected end stays in the session, a spectator again (`mp-eject-host`,
+`mp-eject-host-after`). A peer that leaves has its panel emptied the same way by the host. Port:
+`ra2net::lobby::eject_info` (test `an_eject_is_the_group_info_the_original_sent` writes the captured bytes);
+verified both ways live: the port app showed its panel OPEN after the original's eject, and the original showed its
+panel OPEN after the port host's eject and after its own (`mp-eject-port-host-joiner-view`).
+
+### 16.4 The team on the results screen
+
+A robot that arrived as `.bot` has no team table behind it, so the results took the seat's AI record (Red Zone for
+the original's C.R.U.S.H.). The original shows the team of the panel (`The Rookies` and its logo from `GroupInfo`,
+`mp-results-host-port-app`). Port: `RobotEntry::team_label`, set from the lobby panel by `NetPlay::match_session`;
+the port's results now read `The Rookies` for both robots against the original host (live). Still missing on the
+port: the small owner-name line above the team name (`Spectator [TextBox]` of `result_cell.gib`: `Default Player`).
+
+### 16.5 The snapshot's device values (live: C.R.U.S.H. driven with W, A, D; BEAR; a flame robot)
+
+`mp-snapshots-driven` (W held on the host, W on the joiner), `-steering` (BEAR, joiner on W, A, D) and `-flame` (a Scout
+with a Flamethrower, F and G): 11788 + 542 + 1105 snapshots, each kept as a thinned set (`original_snapshots.rs` decodes
+and re-encodes them byte for byte). What the writer `FUN_004d2b60` reads (and the data confirms):
+
+* **kind 1** (`SpinMotor`, `BurstMotor`, `ServoMotor`, `AxleMount`): `u8` `+0x66` (1 on every burst motor and servo of
+  the recorded robots, 0 on spin motors and axle mounts), then **`i32` `+0x7c` the motor's integer percent**
+  (the old "float command" is 100 and -100 on the wheels: `0x404`/`0x40c` +100, `0x408`/`0x410` -100 with W held, then the
+  A/D differential), the hinge angle (`0x481190`), `+0xb0` rate, `+0xb4` torque / 40. The hinge angle is wrapped to
+  (-pi, pi] and runs the other way from Jolt's; its zero is a multiple of pi/2 off the rest pose (Havok's hinge
+  reference: `reported = 3pi/2 - twist` on the +x wheels of C.R.U.S.H., `pi/2 - twist` on the -x ones), not modelled.
+* **kind 4** (`Steering`): `f32` `+0x68`, the hub angle: BEAR's two wheels carry the same value, ramping at 4 rad/s
+  to -0.524 (A) and +0.524 (D), i.e. +-pi/6 (`STEER_LOCK`, `STEER_RATE` were right). Wheel order: `+0` is the first part of
+  the unit, the wheel at +x of the chassis (original `0x808` at x +1.03, `0x809` at -1.03; the port's rig agrees:
+  test `the_steering_units_first_wheel_is_the_originals_first_body`).
+* **kind 5** (burst piston): `u8` `+0x7c` (1 on every piston recorded), `u32` `+0x80` (0), the rod position
+  (`0x4b4e10`; about 0 at rest), `+0x74`, `+0x78`.
+* **Flamethrower**: no device entry at all (the jet is not in the device list). Its air tank is a controller
+  (`0x830`: 800 falling to 549 as it fired).
+
+Port (`net_match::capture`): command bits = `Robot::motor_percent`, angle wrapped and negated, piston position from the
+slider, steering angle from `Robot::steering_angle` (the hub's `Steer::angle`), the flags above. A port joiner now
+applies what the reader `FUN_004d25d0` applies: each robot's hitpoints and each battery's or air tank's energy
+(`net_match::apply`). Tests: `a_driven_robots_snapshot_carries_the_integer_percent_of_each_motor`,
+`the_steering_units_wheels_carry_the_hub_angle` (A is -pi/6, D +pi/6), the capture test in `original_snapshots.rs`.
+
+### 16.6 The lobby's look
+
+Pixel-compared at 1024x768 with `mp-lobby-host-chat` and `mp-lobby-host-chat-two` (the port's backdrop is another
+render of the arena, so only edges, text and fills were compared): the left column's frames ended one pixel too far
+(266 against 265, every frame of the column). The prematch split is `MasterSize 0.28` of 1024 = 286.72 and the original
+takes **286** (the pane width is truncated). `split_children` floors a horizontal split's master on a whole-pixel frame
+when the split carries `PaneFloor`, which the shell puts on the lobby's splits only (the Team HQ's splits are fitted to
+captures with their fractions: flooring them made its schedule grid 553 px wide against the live 552; whether the
+original truncates every pane is not settled).
+After it every border row and column of the left column equals the original's (`[7, 265]` and `[11, 46, 67, 73, 80,
+110, 245, 251, 259, 582]`), the chat text starts at x 16 and its colour is `255,204,51` as in the original, and the
+entry's fill is the 50 % black the template says. Open: inside the chat box the port sits 1 to 2 pixels higher than the
+original (messages first line y 270 against 272, `CHAT:` 520 against 521, the entry's border 531 against 532, the alias
+box 561 against 562): the original's nested positions with a `.5` fraction land one pixel lower than the port's, not
+modelled. The original draws no panels for slots 3 and 4 of a deathmatch (every lobby capture); the port drew
+`closedplayer.gib` there and no longer does.
+
+### 16.7 Open
+
+* The original's own crash twice under the replacement `dpnet` (`wine: Unhandled page fault on read access` at
+  `0x00625a3f`, in the send-completion code `FUN_00625600`, once during a driven BEAR match, once right after a second
+  join): not traced; the port is not involved.
+* The results' owner-name line; the inside-the-chat-box offsets above; the hinge angle's per-joint zero; the unready
+  joiner a Yes starts a match with (the original joiner entered the match with no robot of its own to show, the port
+  stood in The Boxer).
+* The port's `closedplayer`/`noplayer` cells at other game types, voice and host migration (§15.7).

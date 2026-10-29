@@ -523,8 +523,10 @@ impl NetGame {
 
     /// Empty a panel. The host may eject any panel (a human peer then waits
     /// as a spectator); a joiner only its own, which it asks the host for.
-    /// Everyone is told with a `GroupInfo` in state `LEFT` for the panel
-    /// (inferred: the original's wire for an eject was not traced). Returns
+    /// Everyone is told with a `GroupInfo` in state `LEFT` for the panel: the
+    /// original's eject, traced live (docs/38 section 16), keeps the panel's team and
+    /// robot names, empties the logo, carries the ejecting end's own player name,
+    /// no ready flag, the human value and an empty design (flags `0x28`). Returns
     /// whether a panel went.
     pub fn eject_panel(&mut self, panel: u32) -> bool {
         let Some(me) = self.local() else {
@@ -533,12 +535,7 @@ impl NetGame {
         let Some(old) = self.lobby.panel(panel).cloned() else {
             return false;
         };
-        let m = Message::GroupInfo(crate::message::GroupInfo {
-            slot: panel,
-            owner: old.player,
-            state: kind::LEFT,
-            ..Default::default()
-        });
+        let m = Message::GroupInfo(crate::lobby::eject_info(&old, &self.local_name()));
         if self.is_host() {
             self.lobby.remove_panel(panel);
             let peers: Vec<PlayerId> = self

@@ -112,6 +112,13 @@ fn main() {
                     timesync = Some((Instant::now(), secs.parse().unwrap_or(180.0)));
                 }
                 ["end"] => game.broadcast_guaranteed(&Message::EndMatch),
+                ["eject", n] => {
+                    let ok = game.eject_panel(n.parse().unwrap_or(1));
+                    log(format!("eject {n}: {ok}"));
+                }
+                _ if cmd.starts_with("chat ") => {
+                    game.chat(cmd["chat ".len()..].trim());
+                }
                 ["quit"] => return,
                 _ => log(format!("? {cmd}")),
             }
