@@ -249,6 +249,8 @@ pub struct Component {
     pub base: String,
     /// Display name from the definition.
     pub name: String,
+    /// The `.bot`'s definition file (`Components\\anglemotor1.txt`).
+    pub file: String,
     /// Bot-local transform in the rest pose.
     pub local: Mat4,
     /// The component frame as its rotor carries it, in the rest pose: `local`
@@ -1763,6 +1765,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             class: c.class.clone(),
             base,
             name,
+            file: c.file.clone(),
             local: rest[i],
             rotor_local: carried[i],
             hinge: loaded
@@ -2145,6 +2148,7 @@ mod tests {
             class: String::new(),
             base: String::new(),
             name: String::new(),
+            file: String::new(),
             local,
             rotor_local: local,
             hinge: None,

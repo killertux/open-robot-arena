@@ -28,161 +28,37 @@
 //! text.
 //!
 //! What is ours: the LAN refresh also queries the addresses in
-//! `RA2_NET_HOSTS` (comma-separated `host:port`) besides the broadcast; the
-//! remote-input key words name our drive axes, not a `.bot` control binding
-//! ([`AXIS_THROTTLE`], [`AXIS_STEER`]).
+//! `RA2_NET_HOSTS` (comma-separated `host:port`) besides the broadcast. The match wire
+//! (snapshots, ids, key events) is [`crate::net_match`]'s.
 
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ra2_shell::{Shell, Step};
+use ra2_shell::{LobbyPick, PanelButton, PanelRequest, Shell, Step};
 use ra2fmt::gib::{Block, Gib, Widget, WidgetKind};
 use ra2net::dpn;
 use ra2net::game::{GameEvent, NetGame};
 use ra2net::link::LinkConfig;
 use ra2net::lobby::{self, SESSION_MAX};
-use ra2net::message::{AddPoints, BotDamage, BotImmobile, BotInput, Message};
+use ra2net::message::{AddPoints, BotDamage, BotImmobile, Message};
 use ra2net::session::{Browser, HostConfig, HostEntry, JoinConfig, PlayerId};
-use ra2net::sync::{BodySync, ConnectionSpeed, SyncSchema, SyncState};
-use ra2sim::duel::Duel;
+use ra2net::sync::{ConnectionSpeed, SyncSchema};
+use ra2sim::controls::KeySet;
 use ra2sim::sim::DriveInput;
 use ra2sim::{NetEvent, NetRole};
+use ra2ui::teams::{self, Side};
 
 pub const BROWSER_SCREEN: &str = "multiplayer/multiplayer.gib";
 pub const CREATE_SCREEN: &str = "multiplayer/mp_create.gib";
 pub const PREMATCH_SCREEN: &str = "multiplayer/prematch.gib";
 pub const IP_WINDOW: &str = "multiplayer/ip_connect.gib";
 
-/// `giRemoteInputMessage` key words for our drive axes.
-pub const AXIS_THROTTLE: u32 = 0;
-pub const AXIS_STEER: u32 = 1;
-/// The scan codes the player holds (0..96), as three words: the key words
-/// `[AXIS_KEYS, 0..32, 32..64]` and the value `64..96`. A windowed player
-/// drives with keys, which the host's wiring turns into controls for the
-/// remote robot; the whole held set goes out each time, so a lost update
-/// is repaired by the next.
-pub const AXIS_KEYS: u32 = 2;
-
-/// The held scan codes below 96 as three words.
-pub fn key_words(keys: &ra2sim::controls::KeySet) -> [u32; 3] {
-    let mut words = [0u32; 3];
-    for code in 0..96 {
-        if keys.contains(code) {
-            words[code as usize / 32] |= 1 << (code % 32);
-        }
-    }
-    words
-}
-
-/// A body's id in a snapshot: robot index and part index.
-pub fn body_id(robot: usize, part: usize) -> u32 {
-    ((robot as u32) << 16) | part as u32
-}
-
-/// The snapshot of every robot part body (`giSyncMessage` bodies; the robot,
-/// controller and device lists stay empty in this client, so the schema is
-/// the empty one on both ends).
-pub fn capture(duel: &Duel) -> SyncState {
-    let mut bodies = Vec::new();
-    for (r, robot) in duel.robots.iter().enumerate() {
-        for (p, part) in robot.parts.iter().enumerate() {
-            if !part.alive {
-                continue;
-            }
-            let Some(state) = duel.physics.state(part.body) else {
-                continue;
-            };
-            let q = state.rotation;
-            bodies.push(BodySync {
-                id: body_id(r, p),
-                awake: true,
-                position: state.position.to_array(),
-                rotation: [q.w, q.x, q.y, q.z],
-                linear: state.linear_velocity.to_array(),
-                angular: state.angular_velocity.to_array(),
-            });
-        }
-    }
-    SyncState {
-        clock: 0,
-        clock2: 0,
-        partial: false,
-        bodies,
-        ..SyncState::default()
-    }
-}
-
-/// The schema [`capture`] writes against.
+/// The schema before a match is built: no robots. The match's own is
+/// [`crate::net_match::schema`], set once the duel exists ([`NetPlay::on_match_built`]).
 pub fn schema() -> SyncSchema {
     SyncSchema::default()
-}
-
-/// Put a snapshot's bodies into the duel. Returns how many were applied.
-pub fn apply(duel: &mut Duel, state: &SyncState) -> usize {
-    let mut applied = 0;
-    for body in &state.bodies {
-        let (r, p) = ((body.id >> 16) as usize, (body.id & 0xffff) as usize);
-        let Some(part) = duel.robots.get(r).and_then(|robot| robot.parts.get(p)) else {
-            continue;
-        };
-        if !part.alive {
-            continue;
-        }
-        let handle = part.body;
-        let [w, x, y, z] = body.rotation;
-        let rotation = glam::Quat::from_xyzw(x, y, z, w).normalize();
-        duel.physics
-            .set_transform(handle, glam::Vec3::from_array(body.position), rotation);
-        duel.physics.set_velocity(
-            handle,
-            glam::Vec3::from_array(body.linear),
-            glam::Vec3::from_array(body.angular),
-        );
-        applied += 1;
-    }
-    applied
-}
-
-/// The two key events a drive becomes (values in percent, as a control's
-/// value is).
-pub fn drive_inputs(drive: DriveInput) -> [BotInput; 3] {
-    let pct = |v: f32| (v.clamp(-1.0, 1.0) * 100.0).round() as i32 as u32;
-    [
-        BotInput {
-            key: [AXIS_THROTTLE, 0, 0],
-            value: pct(drive.throttle),
-        },
-        BotInput {
-            key: [AXIS_STEER, 0, 0],
-            value: pct(drive.steer),
-        },
-        {
-            let [a, b, c] = key_words(&drive.keys);
-            BotInput {
-                key: [AXIS_KEYS, a, b],
-                value: c,
-            }
-        },
-    ]
-}
-
-/// Fold one key event into a remote robot's drive.
-pub fn apply_input(drive: &mut DriveInput, input: &BotInput) {
-    let v = (input.value as i32) as f32 / 100.0;
-    match input.key[0] {
-        AXIS_THROTTLE => drive.throttle = v,
-        AXIS_STEER => drive.steer = v,
-        AXIS_KEYS => {
-            let words = [input.key[1], input.key[2], input.value];
-            for code in 0..96 {
-                drive
-                    .keys
-                    .set(code, words[code as usize / 32] >> (code % 32) & 1 == 1);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn find<'a>(gib: &'a Gib, name: &str) -> Option<&'a Widget> {
@@ -261,6 +137,42 @@ pub enum NetAction {
     Ended(String),
 }
 
+/// Where the match start is (docs/38 section 15: the original's start, as an original host and joiner
+/// do it): the host sends `giPrepareMatchMessage` and its robots as `giAddArenaBotMessage`s, waits for
+/// the joiners' robots, sends `giBeginMatchMessage` and builds the match; a joiner answers the prepare
+/// with its robots, and builds the match when the begin arrives with every other robot in.
+#[derive(Debug, Clone, PartialEq)]
+enum Start {
+    Idle,
+    Host { arena: String, since: Instant },
+    Joiner { arena: String, since: Instant },
+}
+
+/// How long a start waits for a peer's robot before it builds without it.
+const START_PATIENCE: Duration = Duration::from_secs(20);
+
+/// The robot file a lobby panel's robot is: the team and robot names look it up in the install's
+/// two team tables (the panel carries names and a picture, not the design: that travels in
+/// `giAddArenaBotMessage`).
+pub fn robot_file(game: &Path, team: &str, robot: &str) -> Option<PathBuf> {
+    use ra2ui::teams::{bot_info, bot_path, rosters, Side};
+    let mut fallback = None;
+    for side in [Side::Player, Side::Computer] {
+        for roster in rosters(game, side).unwrap_or_default() {
+            for &bot in &roster.robots {
+                let path = bot_path(game, side, roster.slot, bot);
+                if bot_info(&path).is_some_and(|(name, _)| name == robot) {
+                    if roster.name.eq_ignore_ascii_case(team) {
+                        return Some(path);
+                    }
+                    fallback.get_or_insert(path);
+                }
+            }
+        }
+    }
+    fallback
+}
+
 /// The name a player has until `ra2.cfg` or the lobby's `screen name` box says otherwise: the
 /// network object's constructor copies `Default Player` (`0x709644`, `0x621ec9`) into its name
 /// string (`+0x244`), and the prematch constructor shows it in `screen name` (`0x49105a`-`0x491085`).
@@ -268,6 +180,60 @@ pub enum NetAction {
 /// `[Begin Multiplayer Config]` section (`FUN_00622660` sets it) and the game port, 9791 (`0x263f`),
 /// with `Port=`.
 pub const DEFAULT_PLAYER_NAME: &str = "Default Player";
+
+/// A robot this end picked for a lobby panel (`Select Player Robot` /
+/// `Select Computer Robot`): the file in the install, parsed, and the names
+/// the panel shows. The match builds from it (`AddArenaBot` carries the
+/// `.bot` in its wire form, [`PickedRobot::bot_wire`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PickedRobot {
+    /// The `.bot` file in the install (`<game>/Teams/Team3/Bot1.bot`,
+    /// `<game>/AI/Team2/Bot0.bot`).
+    pub path: std::path::PathBuf,
+    /// The table it came from: a human panel's robot is the player's, a
+    /// computer panel's the computer's.
+    pub side: Side,
+    /// The team name (`The Rookies`).
+    pub team: String,
+    /// The team logo as `Teams.txt` writes it (`Teams\orange_skull.bmp`).
+    pub logo: String,
+    /// The robot's name (`Bot::name`).
+    pub robot: String,
+    /// The parsed robot.
+    pub bot: ra2fmt::bot::Bot,
+}
+
+impl PickedRobot {
+    /// The robot's preview picture in the wire form (the `GroupInfo` design).
+    pub fn design(&self) -> Vec<u8> {
+        self.bot.snapshot_wire().unwrap_or_default()
+    }
+
+    /// The robot as the `.bot` text `AddArenaBot` carries.
+    pub fn bot_wire(&self) -> Vec<u8> {
+        self.bot.write_wire()
+    }
+
+    /// Read the robot a picker accepted from the install.
+    pub fn load(game: &std::path::Path, side: Side, team: usize, bot: i32) -> Result<Self, String> {
+        let path = teams::bot_path(game, side, team, bot);
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let parsed =
+            ra2fmt::bot::parse(&bytes).map_err(|e| format!("{}: {e:?}", path.display()))?;
+        let roster = teams::rosters(game, side)?
+            .into_iter()
+            .nth(team)
+            .ok_or_else(|| format!("{} has no team {team}", side.table()))?;
+        Ok(PickedRobot {
+            path,
+            side,
+            team: roster.name,
+            logo: roster.logo,
+            robot: parsed.name.clone(),
+            bot: parsed,
+        })
+    }
+}
 
 /// The multiplayer screens' network state.
 pub struct NetPlay {
@@ -284,21 +250,36 @@ pub struct NetPlay {
     pub extra_hosts: Vec<SocketAddr>,
     pub player_name: String,
     pub link: LinkConfig,
-    /// Host side: which robot each player drives, and their last drives.
+    /// Which robot each human player drives (host side), and the keys each remote player holds.
     pub robot_of: BTreeMap<PlayerId, usize>,
-    remote: BTreeMap<usize, DriveInput>,
-    last_sent: Option<(DriveInput, Instant)>,
+    remote: BTreeMap<usize, KeySet>,
+    /// Joiner: the keys last sent for our robot.
+    last_keys: KeySet,
+    /// Robot index to panel: the original's robot id (the order of the lobby's player panels).
+    panels: Vec<u32>,
+    /// The `.bot` of each panel's robot as the peers sent it, written to the save folder.
+    bots: BTreeMap<u32, PathBuf>,
+    /// Where the match start is (see [`Start`]).
+    start: Start,
+    /// Joiner: when the next `giPeerDataLoadedMessage` is due.
+    next_loaded: Option<Instant>,
+    /// Host: the fight clock of the next `giTimeSyncMessage`.
+    next_time_sync: f32,
     sounds: Vec<NetSound>,
-    /// Host: the end of the match has been sent.
+    /// Host: `giMatchWinMessage` has been sent.
+    win_sent: bool,
+    /// Host: `giEndMatchMessage` has been sent.
     end_sent: bool,
     /// This end has finished loading the match (a joiner has sent its
     /// `giPeerDataLoadedMessage`).
     loaded_sent: bool,
     /// Host: the peers that reported their match loaded.
     loaded: std::collections::BTreeSet<PlayerId>,
-    /// The match has begun: the host has every peer loaded and sent
-    /// `giBeginMatchMessage` / `giStartCountDownMessage`; a joiner heard them.
+    /// The count-down has started (`giStartCountDownMessage`): the host has every peer's
+    /// `giPeerDataLoadedMessage` and sent it; a joiner heard it.
     begun: bool,
+    /// `giBeginMatchMessage` arrived: the peers load the match.
+    begin_seen: bool,
     /// Events polled from the session and not yet consumed. `tick` (screens,
     /// lobby, match state) and `after_step` (snapshots, chat, scoring
     /// messages, which need the match) both run every frame in the windowed
@@ -307,6 +288,11 @@ pub struct NetPlay {
     /// Joiner: the host's `giEndMatchMessage` (`0x131`) arrived while this end's match was still
     /// running; the window leaves it for the lobby ([`NetPlay::take_leave_match`]).
     leave_match: bool,
+    /// The robots this end picked, by panel.
+    picked: BTreeMap<u32, PickedRobot>,
+    /// Decoded panel pictures: the design stream they came from and the
+    /// shell key they are registered under, by panel.
+    panel_art: BTreeMap<u32, (Vec<u8>, Option<String>)>,
 }
 
 impl Default for NetPlay {
@@ -334,15 +320,156 @@ impl NetPlay {
             link: LinkConfig::default(),
             robot_of: BTreeMap::new(),
             remote: BTreeMap::new(),
-            last_sent: None,
+            last_keys: KeySet::default(),
+            panels: Vec::new(),
+            bots: BTreeMap::new(),
+            start: Start::Idle,
+            next_loaded: None,
+            next_time_sync: 0.0,
             sounds: Vec::new(),
+            win_sent: false,
             end_sent: false,
             loaded_sent: false,
             loaded: Default::default(),
             begun: false,
+            begin_seen: false,
             inbox: Vec::new(),
             leave_match: false,
+            picked: BTreeMap::new(),
+            panel_art: BTreeMap::new(),
         }
+    }
+
+    /// The robot this end picked for `panel` (0-based), while the panel is
+    /// still this end's: its human panel, or a computer panel the host set
+    /// up. `None` for a remote player's panel (its robot reaches the host as
+    /// the `giGroupInfoMessage` design and the later `AddArenaBot`).
+    pub fn picked_robot(&self, panel: u32) -> Option<&PickedRobot> {
+        let game = self.game.as_ref()?;
+        let me = game.local()?;
+        let slot = game.lobby.panel(panel)?;
+        (slot.player == me && slot.has_robot())
+            .then(|| self.picked.get(&panel))
+            .flatten()
+    }
+
+    /// The panel the local player holds as a human, if any.
+    pub fn own_panel(&self) -> Option<u32> {
+        let game = self.game.as_ref()?;
+        let me = game.local()?;
+        game.lobby
+            .players()
+            .find(|s| s.player == me && s.is_human())
+            .map(|s| s.index)
+    }
+
+    /// What the panels asked for since the last call, and the robot the
+    /// picker accepted: the lobby's buttons (docs/38 section 15.9).
+    pub fn panel_events(&mut self, shell: &mut Shell) -> Result<(), String> {
+        if self.game.is_none() {
+            // A pick or a click with no session behind it is dropped.
+            let _ = shell.take_lobby_pick();
+            let _ = shell.take_panel_request();
+            return Ok(());
+        }
+        if let Some(pick) = shell.take_lobby_pick() {
+            self.accept_pick(shell, pick)?;
+        }
+        while let Some(request) = shell.take_panel_request() {
+            self.panel_request(shell, request)?;
+        }
+        Ok(())
+    }
+
+    /// The picker's OK: claim the panel with the robot (human), or the host
+    /// sets up a computer panel.
+    fn accept_pick(&mut self, shell: &Shell, pick: LobbyPick) -> Result<(), String> {
+        let robot = PickedRobot::load(shell.game(), pick.side, pick.pick.team, pick.pick.bot)?;
+        let Some(game) = &mut self.game else {
+            return Ok(());
+        };
+        let panel = pick.slot as u32;
+        let done = match pick.side {
+            Side::Player => game.claim_panel(
+                Some(panel),
+                &robot.team,
+                &robot.robot,
+                &robot.logo,
+                robot.design(),
+            ),
+            Side::Computer => game.add_computer_panel(
+                panel,
+                &robot.team,
+                &robot.robot,
+                &robot.logo,
+                robot.design(),
+            ),
+        };
+        if done {
+            self.picked.insert(panel, robot);
+        }
+        Ok(())
+    }
+
+    /// A click on a panel's button (the shell reports it; the exe's
+    /// `FUN_0047c020` decides what a panel offers).
+    fn panel_request(&mut self, shell: &mut Shell, request: PanelRequest) -> Result<(), String> {
+        let Some(game) = &mut self.game else {
+            return Ok(());
+        };
+        let Some(me) = game.local() else {
+            return Ok(());
+        };
+        let panel = request.slot as u32;
+        let held = game.lobby.panel(panel).cloned();
+        let host = game.is_host();
+        match request.button {
+            // Join: only an open panel, and only for a player with no panel
+            // yet (inferred: the original's lobby has one panel per human).
+            PanelButton::Join => {
+                let open = held.as_ref().is_none_or(|p| p.kind == lobby::kind::HUMAN);
+                let has_panel = game
+                    .lobby
+                    .players()
+                    .any(|s| s.player == me && s.is_human() && s.has_robot());
+                if open && !has_panel {
+                    shell.open_lobby_picker(request.slot, Side::Player)?;
+                }
+            }
+            PanelButton::AddComputer => {
+                if host && held.is_none() {
+                    shell.open_lobby_picker(request.slot, Side::Computer)?;
+                }
+            }
+            // Change robot: the panel is this end's (its own human panel, or
+            // a computer panel the host set up).
+            PanelButton::Change => {
+                if let Some(p) = held.filter(|p| p.player == me && p.has_robot()) {
+                    let side = if p.is_human() {
+                        Side::Player
+                    } else {
+                        Side::Computer
+                    };
+                    shell.open_lobby_picker(request.slot, side)?;
+                }
+            }
+            // Eject: the host removes any panel, a player its own. (The
+            // original asks "pop up confirmation dialog" first; this port
+            // does not.)
+            PanelButton::Eject => {
+                if let Some(p) = held {
+                    if (host || p.player == me) && game.eject_panel(panel) {
+                        self.picked.remove(&panel);
+                    }
+                }
+            }
+            PanelButton::Ready => {
+                if let Some(p) = held.filter(|p| p.player == me && p.is_human() && p.has_robot()) {
+                    game.set_ready(!p.ready);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Read the install's `ra2.cfg` multiplayer keys: `PlayerName=` (a name that is not empty)
@@ -394,10 +521,11 @@ impl NetPlay {
             GameEvent::Loaded { player } => {
                 self.loaded.insert(*player);
             }
-            GameEvent::Begin | GameEvent::CountDown => self.begun = true,
+            GameEvent::Begin => self.begin_seen = true,
+            GameEvent::CountDown => self.begun = true,
             GameEvent::RemoteInput { from, input, .. } => {
                 if let Some(&robot) = self.robot_of.get(from) {
-                    apply_input(self.remote.entry(robot).or_default(), input);
+                    crate::net_match::apply_key(self.remote.entry(robot).or_default(), input);
                 }
             }
             _ => {}
@@ -421,12 +549,16 @@ impl NetPlay {
     /// Which robot each player drives: the place among the player panels.
     pub fn assign_robots(&mut self) {
         let Some(game) = &self.game else { return };
+        // The robots are the panels that hold one, in panel order; a
+        // computer panel's robot belongs to the host's AI, not to a drive.
         self.robot_of = game
             .lobby
-            .players()
+            .contestants()
             .enumerate()
+            .filter(|(_, s)| s.is_human())
             .map(|(i, s)| (s.player, i))
             .collect();
+        self.panels = game.lobby.players().map(|s| s.index).collect();
     }
 
     fn bind(&self, port: u16) -> SocketAddr {
@@ -511,10 +643,16 @@ impl NetPlay {
 
     fn reset_match(&mut self) {
         self.leave_match = false;
+        self.win_sent = false;
         self.end_sent = false;
         self.loaded_sent = false;
         self.loaded.clear();
         self.begun = false;
+        self.begin_seen = false;
+        self.start = Start::Idle;
+        self.next_loaded = None;
+        self.next_time_sync = 0.0;
+        self.bots.clear();
         self.inbox.clear();
     }
 
@@ -532,25 +670,135 @@ impl NetPlay {
         if self.begun {
             return true;
         }
-        if !self.loaded_sent {
-            self.loaded_sent = true;
-            if !game.is_host() {
-                game.report_loaded();
-            }
-        }
         if game.is_host() {
+            // Every other peer in the session reports its match loaded (`0x13f`, spectators
+            // too); then the count-down starts.
             let me = game.local();
             let everyone = game
-                .lobby
-                .slots
+                .session
+                .players()
                 .iter()
-                .all(|s| Some(s.player) == me || self.loaded.contains(&s.player));
+                .all(|p| Some(p.id) == me || self.loaded.contains(&p.id));
             if everyone {
-                game.begin_match();
+                game.count_down();
                 self.begun = true;
+            }
+        } else {
+            // A joiner repeats its report about every 300 ms until the count-down comes
+            // (live, from the original's joiner), and says each of its panels is loaded.
+            let now = Instant::now();
+            if self.next_loaded.is_none_or(|t| now >= t) {
+                self.next_loaded = Some(now + Duration::from_millis(300));
+                game.report_loaded();
+                let me = game.local();
+                let own: Vec<u32> = game
+                    .lobby
+                    .players()
+                    .filter(|s| Some(s.player) == me)
+                    .map(|s| s.index)
+                    .collect();
+                for panel in own {
+                    game.report_panel(panel, true);
+                }
             }
         }
         self.begun
+    }
+
+    /// This end's robots for the peers: each panel it owns with a robot, as `.bot` text
+    /// (`giAddArenaBotMessage`: kind 1 human / 3 computer, the panel, the team), and `0x12f` that
+    /// they are in. The file is the install's robot the panel names.
+    fn send_own_bots(&mut self, game_dir: &Path) {
+        let Some(game) = &mut self.game else { return };
+        let me = game.local();
+        let own: Vec<_> = game
+            .lobby
+            .players()
+            .filter(|s| s.has_robot() && Some(s.player) == me)
+            .cloned()
+            .collect();
+        for slot in own {
+            let Some(path) = robot_file(game_dir, &slot.team, &slot.robot) else {
+                eprintln!("network: no robot file for {} / {}", slot.team, slot.robot);
+                continue;
+            };
+            let Some(bot) = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| ra2fmt::bot::parse(&bytes).ok())
+            else {
+                continue;
+            };
+            let kind = if slot.is_human() { 1 } else { 3 };
+            game.send_arena_bot(kind, slot.index, 0, bot.write_wire());
+            game.report_panel(slot.index, false);
+            self.bots.insert(slot.index, path);
+        }
+    }
+
+    /// A peer's robot arrived (`giAddArenaBotMessage`): the `.bot` goes to the save folder and
+    /// the panel's match robot is that file. A joiner may only send its own panel's.
+    fn take_bot(&mut self, game_dir: &Path, from: PlayerId, words: [u32; 3], design: &[u8]) {
+        let Some(game) = &self.game else { return };
+        let panel = words[1];
+        let owner = game.lobby.panel(panel).map(|s| s.player);
+        if from != ra2net::session::HOST_ID && owner != Some(from) {
+            return;
+        }
+        let Ok(bot) = ra2fmt::bot::parse(design) else {
+            eprintln!("network: a robot for panel {panel} that does not read");
+            return;
+        };
+        let rel = Path::new("Net").join(format!("panel{panel}.bot"));
+        match ra2fmt::saves::write(game_dir, &game_dir.join(rel), bot.write()) {
+            Ok(path) => {
+                self.bots.insert(panel, path);
+            }
+            Err(error) => eprintln!("network: cannot keep the robot of panel {panel}: {error}"),
+        }
+    }
+
+    /// The start is complete when every panel with a robot has its file; the host then sends the
+    /// begin and both ends build the match.
+    fn finish_start(&mut self) -> NetAction {
+        let Some(game) = &mut self.game else {
+            return NetAction::None;
+        };
+        let missing = game
+            .lobby
+            .players()
+            .filter(|s| s.has_robot())
+            .any(|s| !self.bots.contains_key(&s.index));
+        let (arena, since, host) = match &self.start {
+            Start::Host { arena, since } => (arena.clone(), *since, true),
+            Start::Joiner { arena, since } => (arena.clone(), *since, false),
+            Start::Idle => return NetAction::None,
+        };
+        let waited = since.elapsed() >= START_PATIENCE;
+        let ready = !missing && (host || self.begin_seen);
+        if !ready && !(waited && (host || self.begin_seen)) {
+            return NetAction::None;
+        }
+        if host {
+            game.begin_match();
+        }
+        self.start = Start::Idle;
+        // The match is on from here (chat, lobby state); its snapshot lists follow once it is built.
+        game.set_schema(schema());
+        self.assign_robots();
+        NetAction::StartMatch { arena }
+    }
+
+    /// The match exists: the snapshots' lists are its robots'.
+    pub fn on_match_built(&mut self, session: &mut crate::match_mode::Session) {
+        if self.panels.is_empty() {
+            self.panels = (0..session.matched.duel.robots.len() as u32).collect();
+        }
+        if let Some(game) = &mut self.game {
+            game.set_schema(crate::net_match::schema(&session.matched.duel));
+        }
+        // The original starts the count-down at once; there is no arena intro in a network
+        // match.
+        session.skip_intro();
     }
 
     /// Joiner: the host ended the match while this end's was still on (an `End Match` from the
@@ -573,7 +821,7 @@ impl NetPlay {
         }
         self.reset_match();
         self.remote.clear();
-        self.last_sent = None;
+        self.last_keys = KeySet::default();
         if let Some(game) = &mut self.game {
             game.end_match();
         }
@@ -614,6 +862,8 @@ impl NetPlay {
         self.game = None;
         self.connecting = None;
         self.robot_of.clear();
+        self.picked.clear();
+        self.panel_art.clear();
         self.remote.clear();
         self.reset_match();
     }
@@ -627,6 +877,7 @@ impl NetPlay {
         step: &Step,
     ) -> Result<NetAction, String> {
         let hit = step.hit_widget().unwrap_or("");
+        self.panel_events(shell)?;
         match (screen, hit) {
             (s, "Refresh button") if s.eq_ignore_ascii_case(BROWSER_SCREEN) => self.refresh()?,
             (s, "Join game button") if s.eq_ignore_ascii_case(BROWSER_SCREEN) => {
@@ -661,29 +912,26 @@ impl NetPlay {
                 shell.goto(BROWSER_SCREEN)?;
                 return Ok(NetAction::Ended("left".to_string()));
             }
-            (s, "ready checkbox") if s.eq_ignore_ascii_case(PREMATCH_SCREEN) => {
-                if let Some(game) = &mut self.game {
-                    let me = game.local();
-                    let ready = me
-                        .and_then(|id| game.lobby.slot(id))
-                        .is_some_and(|s| s.ready);
-                    game.set_ready(!ready);
-                }
-            }
             (s, "begin match button") if s.eq_ignore_ascii_case(PREMATCH_SCREEN) => {
                 if let Some(game) = &mut self.game {
-                    if game.is_host() {
+                    // At least two robots and every human ready.
+                    if game.is_host() && game.lobby.all_ready() {
                         let picked = MatchArena::find(
                             shell.game(),
                             ra2net::lobby::arena_name(&game.lobby.arena),
                         );
                         let arena = picked.script.clone();
-                        // PrepareMatch names the arena (`Bridge of Doom`, live).
-                        game.start_match(&picked.name);
-                        game.set_schema(schema());
+                        // PrepareMatch names the arena (`Bridge of Doom`, live), then the host's
+                        // robots follow; the match is built once the joiners' are in.
                         self.reset_match();
-                        self.assign_robots();
-                        return Ok(NetAction::StartMatch { arena });
+                        if let Some(game) = &mut self.game {
+                            game.start_match(&picked.name);
+                        }
+                        self.send_own_bots(shell.game());
+                        self.start = Start::Host {
+                            arena,
+                            since: Instant::now(),
+                        };
                     }
                 }
             }
@@ -702,12 +950,16 @@ impl NetPlay {
                 self.status = format!("{} game(s) found.", self.rows.len());
             }
         }
+        self.panel_events(shell)?;
         self.pump();
         // The scoring, snapshot and chat events wait for `after_step`.
         let events = self.take_events(|e| {
             !matches!(
                 e,
-                GameEvent::Snapshot(_) | GameEvent::Chat { .. } | GameEvent::Message { .. }
+                GameEvent::Snapshot(_)
+                    | GameEvent::Chat { .. }
+                    | GameEvent::Message { .. }
+                    | GameEvent::TimeSync { .. }
             )
         });
         if self.game.is_some() {
@@ -740,18 +992,24 @@ impl NetPlay {
                     }
                     GameEvent::Prepare { arena } => {
                         let arena = MatchArena::find(shell.game(), &arena).script;
-                        // The robots are the lobby's player panels, in order;
-                        // a spectator has none.
-                        self.assign_robots();
-                        if let Some(game) = &mut self.game {
-                            game.set_schema(schema());
-                        }
-                        // Loaded is reported once the match is built
-                        // ([`NetPlay::match_begun`]).
-                        action = NetAction::StartMatch { arena };
+                        // Answer with this end's robots (a spectator has none); the match is
+                        // built when the begin arrives and every robot is in.
+                        self.send_own_bots(shell.game());
+                        self.start = Start::Joiner {
+                            arena,
+                            since: Instant::now(),
+                        };
                     }
+                    GameEvent::ArenaBot {
+                        from,
+                        words,
+                        design,
+                    } => self.take_bot(shell.game(), from, words, &design),
                     _ => {}
                 }
+            }
+            if action == NetAction::None {
+                action = self.finish_start();
             }
             if let Some(start) = self.connecting {
                 let left = 10u64.saturating_sub(start.elapsed().as_secs());
@@ -760,6 +1018,7 @@ impl NetPlay {
         }
         if let NetAction::Ended(_) = action {
             self.game = None;
+            self.picked.clear();
             self.reset_match();
             if !shell.base_screen_id().eq_ignore_ascii_case(BROWSER_SCREEN) {
                 shell.goto(BROWSER_SCREEN)?;
@@ -806,20 +1065,60 @@ impl NetPlay {
         }
         if screen.eq_ignore_ascii_case(PREMATCH_SCREEN) && shell.window_depth() == 0 {
             if let Some(game) = &self.game {
-                self.show_lobby(shell, game.lobby.clone(), game.local());
+                let (lobby, me, host) = (game.lobby.clone(), game.local(), game.is_host());
+                self.show_lobby(shell, lobby, me, host);
             }
         }
     }
 
-    fn show_lobby(&self, shell: &mut Shell, lobby: ra2net::lobby::Lobby, me: Option<PlayerId>) {
+    fn show_lobby(
+        &mut self,
+        shell: &mut Shell,
+        lobby: ra2net::lobby::Lobby,
+        me: Option<PlayerId>,
+        host: bool,
+    ) {
+        // The pictures of the panels' robots (the design streams, decoded
+        // once per design).
+        for i in 0..lobby::PLAYER_SLOTS as u32 {
+            let design = lobby.panel(i).and_then(|s| s.design.clone());
+            match design {
+                Some(design) => {
+                    let cached = self.panel_art.get(&i).is_some_and(|(d, _)| *d == design);
+                    if !cached {
+                        let key = ra2fmt::bot::wire_to_tga(&design)
+                            .or_else(|| Some(design.clone()))
+                            .and_then(|tga| ra2ui::preview::Preview::decode_tga(&tga))
+                            .map(|preview| {
+                                let key = preview.key(&format!("lobby-{i}"));
+                                shell.add_preview(key.clone(), preview);
+                                key
+                            });
+                        self.panel_art.insert(i, (design, key));
+                    }
+                }
+                None => {
+                    self.panel_art.remove(&i);
+                }
+            }
+        }
         let ui = shell.game().join("UI");
         let active = ra2ui::workshop::load(&ui, "multiplayer/activeplayer.gib").ok();
         let empty = ra2ui::workshop::load(&ui, "multiplayer/noplayer.gib").ok();
+        let closed = ra2ui::workshop::load(&ui, "multiplayer/closedplayer.gib").ok();
         let editing_name = shell.text_focus() == Some("screen name");
         let editing_chat = shell.text_focus() == Some("chat textbox");
         let Some(doc) = shell.document_mut() else {
             return;
         };
+        // Only the host begins the match (and changes its settings).
+        if !host {
+            for name in ["begin match button", "settings button"] {
+                if let Some(w) = find_mut(doc, name) {
+                    ra2ui::input::set_field(w, "Visible", "false");
+                }
+            }
+        }
         // The prematch constructor puts the network name in `screen name` (the box's own sample
         // text is "Mister Roboto").
         // (Not while the player is typing in it.)
@@ -867,8 +1166,15 @@ impl NetPlay {
         for i in 0..lobby::PLAYER_SLOTS {
             let panel = format!("player{} group", i + 1);
             // Panels are positions (`GroupInfo::slot`).
+            let art = self
+                .panel_art
+                .get(&(i as u32))
+                .and_then(|(_, key)| key.clone());
+            // A deathmatch has two panels; the others are closed (`closedplayer.gib`, live).
+            let is_closed = lobby.game_type.eq_ignore_ascii_case(DEFAULT_GAME_TYPE) && i >= 2;
             let cell = match lobby.panel(i as u32) {
-                Some(slot) => active
+                _ if is_closed => closed.as_ref().and_then(|g| g.widgets().next().cloned()),
+                Some(slot) if slot.has_robot() => active
                     .as_ref()
                     .and_then(|g| g.widgets().next().cloned())
                     .map(|mut cell| {
@@ -882,20 +1188,69 @@ impl NetPlay {
                         ra2ui::cells::bind_value(&mut cell, "bot name", &slot.robot);
                         ra2ui::cells::bind_art(
                             &mut cell,
-                            "player icon img",
-                            if Some(slot.player) == me {
-                                "multiplayer\\local_player_icon.bmp"
-                            } else {
-                                "multiplayer\\remote_player_icon.bmp"
-                            },
+                            "bot img",
+                            art.as_deref().unwrap_or("exhibition\\sample_bot.bmp"),
                         );
-                        if let Some(check) = ra2ui::workshop::find_mut(&mut cell, "ready checkbox")
-                        {
-                            ra2ui::input::set_state(check, slot.ready);
+                        // What a panel shows depends on its kind from this
+                        // end (`FUN_0047c020`): 0 = my human panel, 1 =
+                        // another peer's, 2 = a computer panel I set up,
+                        // 3 = a remote computer panel.
+                        let mine = Some(slot.player) == me;
+                        let hide = |cell: &mut Widget, name: &str| {
+                            if let Some(w) = ra2ui::workshop::find_mut(cell, name) {
+                                ra2ui::input::set_field(w, "Visible", "false");
+                            }
+                        };
+                        let icon = match (slot.is_human(), mine) {
+                            (true, true) => "multiplayer\\local_player_icon.bmp",
+                            (true, false) => "multiplayer\\remote_player_icon.bmp",
+                            (false, _) => "multiplayer\\computer_player_icon.bmp",
+                        };
+                        ra2ui::cells::bind_art(&mut cell, "player icon img", icon);
+                        if !mine {
+                            hide(&mut cell, "change robot button");
+                        }
+                        if !(mine || host) {
+                            hide(&mut cell, "eject button");
+                        }
+                        if slot.is_human() && !mine {
+                            ra2ui::cells::bind_value(&mut cell, "spectator [TextBox]", &slot.name);
+                        } else if slot.is_human() {
+                            hide(&mut cell, "spectator [TextBox]");
+                        } else if !mine {
+                            ra2ui::cells::bind_value(&mut cell, "spectator [TextBox]", &slot.name);
+                        } else {
+                            hide(&mut cell, "spectator [TextBox]");
+                        }
+                        if slot.is_human() {
+                            if let Some(check) =
+                                ra2ui::workshop::find_mut(&mut cell, "ready checkbox")
+                            {
+                                ra2ui::input::set_state(check, slot.ready);
+                            }
+                        } else {
+                            // A computer has no ready flag.
+                            hide(&mut cell, "ready checkbox");
+                            hide(&mut cell, "ready label");
                         }
                         cell
                     }),
-                None => empty.as_ref().and_then(|g| g.widgets().next().cloned()),
+                // A human who holds the panel but has no robot yet draws as
+                // open (state 0 is OPEN on the original).
+                _ => empty
+                    .as_ref()
+                    .and_then(|g| g.widgets().next().cloned())
+                    .map(|mut cell| {
+                        // Only the host adds computers.
+                        if !host {
+                            if let Some(w) =
+                                ra2ui::workshop::find_mut(&mut cell, "computer player button")
+                            {
+                                ra2ui::input::set_field(w, "Visible", "false");
+                            }
+                        }
+                        cell
+                    }),
             };
             if let (Some(cell), Some(group)) = (cell, find_mut(doc, &panel)) {
                 group.children.truncate(1);
@@ -924,10 +1279,13 @@ impl NetPlay {
             "AI/Team2/Bot0.bot",
         ];
         let mut entries = Vec::new();
-        for (i, slot) in net.lobby.players().take(4).enumerate() {
-            // The design stream is not a `.bot` file (open, docs/38 §14): a
-            // shipped robot stands in for it.
-            let path = game.join(FALLBACK[i]).to_string_lossy().to_string();
+        for (i, slot) in net.lobby.contestants().take(4).enumerate() {
+            // The robot each peer sent (`giAddArenaBotMessage`, written to the save folder), or
+            // this end's own file; a shipped robot stands in for one that never came.
+            let path = match self.bots.get(&slot.index) {
+                Some(path) => path.to_string_lossy().to_string(),
+                None => game.join(FALLBACK[i]).to_string_lossy().to_string(),
+            };
             // A human panel is a person, this end's or a remote one; a
             // computer panel (the original's host sets those up) is the AI.
             entries.push(if slot.is_human() {
@@ -946,23 +1304,36 @@ impl NetPlay {
         let arena_path = game.join(arena);
         let me = net.local().unwrap_or(ra2net::session::HOST_ID);
         let robot = net.lobby.robot_index(me);
-        let mut session = if robot.is_some() {
-            crate::match_mode::Session::exhibition(
-                game,
-                &arena_path,
-                ra2sim::r#match::GameType::Deathmatch,
-                entries,
-                None,
-                None,
-            )?
-        } else {
-            crate::match_mode::Session::spectate(
-                game,
-                &arena_path,
-                ra2sim::r#match::GameType::Deathmatch,
-                entries,
-            )?
+        // The robots the peers sent live in the save folder: their components are the install's.
+        let had_game = std::env::var_os("RA2_GAME");
+        std::env::set_var("RA2_GAME", game);
+        let built: Result<crate::match_mode::Session, String> = {
+            if robot.is_some() {
+                crate::match_mode::Session::exhibition(
+                    game,
+                    &arena_path,
+                    ra2sim::r#match::GameType::Deathmatch,
+                    entries,
+                    // The deathmatch's three minutes (`TimeSync`'s 179.98 s, live).
+                    Some(180.0),
+                    None,
+                )
+                .map_err(|e| e.to_string())
+            } else {
+                crate::match_mode::Session::spectate(
+                    game,
+                    &arena_path,
+                    ra2sim::r#match::GameType::Deathmatch,
+                    entries,
+                )
+                .map_err(|e| e.to_string())
+            }
         };
+        match had_game {
+            Some(value) => std::env::set_var("RA2_GAME", value),
+            None => std::env::remove_var("RA2_GAME"),
+        }
+        let mut session = built?;
         if let Some(robot) = robot {
             session.set_player_robot(game, robot);
         }
@@ -992,36 +1363,25 @@ impl NetPlay {
             let me = game.local();
             for (&player, &robot) in &self.robot_of {
                 if Some(player) != me {
-                    let drive = self.remote.get(&robot).copied().unwrap_or_default();
-                    session.set_remote_drive(robot, Some(drive));
+                    let keys = self.remote.get(&robot).copied().unwrap_or_default();
+                    session.set_remote_drive(
+                        robot,
+                        Some(DriveInput {
+                            keys,
+                            ..DriveInput::default()
+                        }),
+                    );
                 }
             }
-        } else if self
-            .robot_of
-            .contains_key(&game.local().unwrap_or_default())
-        {
-            let drive = session.drive();
-            // Inputs are not guaranteed (flags 0x20); resend a held drive
-            // every quarter second so a lost one does not stick.
-            let due = match self.last_sent {
-                Some((last, at)) => {
-                    (last.throttle, last.steer, key_words(&last.keys))
-                        != (drive.throttle, drive.steer, key_words(&drive.keys))
-                        || at.elapsed() >= Duration::from_millis(250)
-                }
-                None => true,
-            };
-            if due {
-                let robot = self
-                    .robot_of
-                    .get(&game.local().unwrap_or_default())
-                    .copied()
-                    .unwrap_or(session.player_robot) as u32;
-                for input in drive_inputs(drive) {
-                    game.send_input(robot, input);
-                }
-                self.last_sent = Some((drive, Instant::now()));
+        } else if let Some(&robot) = self.robot_of.get(&game.local().unwrap_or_default()) {
+            // One key event per key that changed (`giRemoteInputMessage`: the binding's first
+            // three words, 1 down / 0 up), for the robot of our panel.
+            let keys = session.drive().keys;
+            let panel = self.panels.get(robot).copied().unwrap_or(robot as u32);
+            for event in crate::net_match::key_events(&self.last_keys, &keys) {
+                game.send_input(panel, event);
             }
+            self.last_keys = keys;
         }
     }
 
@@ -1039,6 +1399,7 @@ impl NetPlay {
                 GameEvent::Snapshot(_)
                     | GameEvent::Chat { .. }
                     | GameEvent::Message { .. }
+                    | GameEvent::TimeSync { .. }
                     | GameEvent::Loaded { .. }
                     | GameEvent::Begin
                     | GameEvent::CountDown
@@ -1051,26 +1412,44 @@ impl NetPlay {
         let Some(game) = &mut self.game else { return };
         if game.is_host() {
             let duel = &session.matched.duel;
-            game.tick_sync(dt, || capture(duel));
+            let panels = self.panels.clone();
+            game.tick_sync(dt, || crate::net_match::capture(duel, &panels));
+            // The match time left, about once a second of the fight (`giTimeSyncMessage`).
+            if session.matched.state() == ra2sim::r#match::MatchState::Fight {
+                let clock = session.matched.clock();
+                if let Some(limit) = session.matched.config.duration {
+                    if clock >= self.next_time_sync {
+                        game.send_time_sync(limit - clock);
+                        self.next_time_sync = clock + 1.0;
+                    }
+                }
+            }
             let decided = session.matched.take_net_events();
             for event in &decided {
-                let message = event_message(event);
+                let message = event_message(event, &self.panels);
                 game.broadcast_guaranteed(&message);
             }
-            if !self.end_sent
+            if !self.win_sent
                 && matches!(
                     session.matched.state(),
                     ra2sim::r#match::MatchState::Over | ra2sim::r#match::MatchState::Results
                 )
             {
-                self.end_sent = true;
+                // The win goes out at once; `giEndMatchMessage` when the host closes its results
+                // window ([`NetPlay::end_match`]), as the original's host does (live): the
+                // joiners show their results until then.
+                self.win_sent = true;
                 let winners = session.matched.report().winners;
-                let id = |i: usize| winners.get(i).map_or(u32::MAX, |w| *w as u32);
+                let panels = &self.panels;
+                let id = |i: usize| {
+                    winners
+                        .get(i)
+                        .map_or(u32::MAX, |w| panels.get(*w).copied().unwrap_or(*w as u32))
+                };
                 game.broadcast_guaranteed(&Message::MatchWin {
                     first: id(0),
                     second: id(1),
                 });
-                game.broadcast_guaranteed(&Message::EndMatch);
             }
             for polled in events {
                 if let GameEvent::Chat { text, .. } = polled {
@@ -1082,6 +1461,7 @@ impl NetPlay {
             for event in events {
                 match event {
                     GameEvent::Snapshot(state) => newest = Some(state),
+                    GameEvent::TimeSync { left } => session.matched.net_time_left(left),
                     GameEvent::Chat { text, .. } => session.push_chat_line(text),
                     GameEvent::Message { from, message } if from == ra2net::session::HOST_ID => {
                         match message {
@@ -1105,12 +1485,17 @@ impl NetPlay {
                                 let winners = [first, second]
                                     .into_iter()
                                     .filter(|w| *w != u32::MAX)
-                                    .map(|w| w as usize)
+                                    .map(|w| {
+                                        self.panels
+                                            .iter()
+                                            .position(|p| *p == w)
+                                            .unwrap_or(w as usize)
+                                    })
                                     .collect();
                                 session.matched.net_finish(winners);
                             }
                             other => {
-                                if let Some(event) = message_event(&other) {
+                                if let Some(event) = message_event(&other, &self.panels) {
                                     session.matched.apply_net_event(&event);
                                 }
                             }
@@ -1120,7 +1505,7 @@ impl NetPlay {
                 }
             }
             if let Some(state) = newest {
-                apply(&mut session.matched.duel, &state);
+                crate::net_match::apply(&mut session.matched.duel, &self.panels, &state);
             }
         }
     }
@@ -1130,7 +1515,9 @@ impl NetPlay {
 /// `giBotDamageMessage`, points a `giAddPointsMessage`, the immobility warning
 /// a `giBotImmobileMessage` (with where the robot sits), a robot going out a
 /// `giPlayerOutMessage`.
-pub fn event_message(event: &NetEvent) -> Message {
+pub fn event_message(event: &NetEvent, panels: &[u32]) -> Message {
+    // A robot is named by its panel on the wire.
+    let id = |robot: usize| panels.get(robot).copied().unwrap_or(robot as u32);
     match event {
         NetEvent::Hit {
             attacker,
@@ -1140,8 +1527,8 @@ pub fn event_message(event: &NetEvent) -> Message {
             point,
             normal,
         } => Message::BotDamage(BotDamage::new(
-            attacker.map(|(a, by)| (a as u32, by as u32)),
-            (*victim as u32, *component as u32),
+            attacker.map(|(a, by)| (id(a), by as u32)),
+            (id(*victim), *component as u32),
             *damage,
             point.to_array(),
             normal.to_array(),
@@ -1150,15 +1537,15 @@ pub fn event_message(event: &NetEvent) -> Message {
             player,
             points,
             script,
-        } => Message::AddPoints(AddPoints::new(*player as u32, *points, [0.0; 3], *script)),
+        } => Message::AddPoints(AddPoints::new(id(*player), *points, [0.0; 3], *script)),
         NetEvent::Immobile {
             robot,
             on,
             at,
             seconds,
-        } => Message::BotImmobile(BotImmobile::new(*robot as u32, *at, *on, *seconds)),
+        } => Message::BotImmobile(BotImmobile::new(id(*robot), *at, *on, *seconds)),
         NetEvent::Out { robot, reason } => Message::PlayerOut {
-            player: *robot as u32,
+            player: id(*robot),
             reason: *reason,
         },
     }
@@ -1167,14 +1554,16 @@ pub fn event_message(event: &NetEvent) -> Message {
 /// What a joiner makes of a host's scoring message (the handlers of
 /// `FUN_004ce940`: `0x135` -> `FUN_00417ae0`, `0x139` -> `FUN_004178a0`,
 /// `0x13b` -> `FUN_004120e0`, `0x13a` -> `FUN_00418040`).
-pub fn message_event(message: &Message) -> Option<NetEvent> {
+pub fn message_event(message: &Message, panels: &[u32]) -> Option<NetEvent> {
     use glam::Vec3;
+    // The robot of a panel id.
+    let robot = |id: u32| panels.iter().position(|p| *p == id).unwrap_or(id as usize);
     Some(match message {
         Message::BotDamage(d) => {
             let (victim, component) = d.victim();
             NetEvent::Hit {
-                attacker: d.attacker().map(|(a, by)| (a as usize, by as usize)),
-                victim: victim as usize,
+                attacker: d.attacker().map(|(a, by)| (robot(a), by as usize)),
+                victim: robot(victim),
                 component: component as usize,
                 damage: d.damage(),
                 point: Vec3::from_array(d.a),
@@ -1182,18 +1571,18 @@ pub fn message_event(message: &Message) -> Option<NetEvent> {
             }
         }
         Message::AddPoints(p) => NetEvent::Points {
-            player: p.player as usize,
+            player: robot(p.player),
             points: p.points_f32(),
             script: p.flags[1],
         },
         Message::BotImmobile(b) => NetEvent::Immobile {
-            robot: b.robot as usize,
+            robot: robot(b.robot),
             on: b.immobile,
             at: b.at,
             seconds: b.seconds(),
         },
         Message::PlayerOut { player, reason } => NetEvent::Out {
-            robot: *player as usize,
+            robot: robot(*player),
             reason: *reason,
         },
         _ => return None,
@@ -1204,41 +1593,38 @@ pub fn message_event(message: &Message) -> Option<NetEvent> {
 mod tests {
     use super::*;
 
+    /// A key is one event down and one up (`giRemoteInputMessage`: the binding's words, 1/0), and
+    /// the receiving end holds what it was told.
     #[test]
-    fn held_keys_travel_whole_and_a_release_clears_them() {
-        let mut drive = DriveInput::default();
-        for code in [17, 30, 57, 82] {
-            drive.keys.set(code, true);
+    fn key_changes_travel_as_events_and_the_far_end_holds_them() {
+        use crate::net_match::{apply_key, key_events};
+        let mut now = KeySet::default();
+        let mut far = KeySet::default();
+        let mut last = KeySet::default();
+        for code in [17, 30] {
+            now.set(code, true);
         }
-        let mut back = DriveInput::default();
-        // A stale key on the receiving end is cleared by the full set.
-        back.keys.set(32, true);
-        for input in drive_inputs(drive) {
-            apply_input(&mut back, &input);
+        let events = key_events(&last, &now);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].key, [0, 0, 17]);
+        assert_eq!(events[0].value, 1);
+        for e in &events {
+            apply_key(&mut far, e);
         }
-        for code in 0..96 {
-            assert_eq!(
-                back.keys.contains(code),
-                drive.keys.contains(code),
-                "{code}"
-            );
+        last = now;
+        assert!(far.contains(17) && far.contains(30));
+        now.set(17, false);
+        let events = key_events(&last, &now);
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].key, events[0].value), ([0, 0, 17], 0));
+        for e in &events {
+            apply_key(&mut far, e);
         }
-        drive.keys.set(17, false);
-        for input in drive_inputs(drive) {
-            apply_input(&mut back, &input);
-        }
-        assert!(!back.keys.contains(17) && back.keys.contains(30));
-    }
-
-    #[test]
-    fn drives_become_percent_key_events_and_back() {
-        let drive = DriveInput::new(1.0, -0.5);
-        let mut back = DriveInput::default();
-        for input in drive_inputs(drive) {
-            apply_input(&mut back, &input);
-        }
-        assert_eq!((back.throttle, back.steer), (drive.throttle, drive.steer));
-        assert_eq!(drive_inputs(drive)[1].value as i32, -50);
+        assert!(!far.contains(17) && far.contains(30));
+        assert!(
+            key_events(&now, &now).is_empty(),
+            "nothing changed: nothing sent"
+        );
     }
 
     /// The host's decisions survive the wire: an event becomes the message
@@ -1310,11 +1696,23 @@ mod tests {
                 NetEvent::Immobile { .. } => unreachable!(),
             };
             let wire = Message::decode(&message.encode()).unwrap();
-            assert_eq!(message_event(&wire), Some(event));
+            assert_eq!(message_event(&wire, &[0, 1, 2, 3]), Some(event));
         }
         let wire = Message::BotImmobile(BotImmobile::new(1, [1.0, 0.0, 2.0], true, 10.0));
-        assert_eq!(message_event(&wire), Some(immobile));
-        assert_eq!(message_event(&Message::StartCountDown), None);
+        assert_eq!(message_event(&wire, &[0, 1, 2, 3]), Some(immobile));
+        assert_eq!(message_event(&Message::StartCountDown, &[0, 1]), None);
+        // The wire names a robot by its panel: the robots of panels 1 and 3 are 0 and 1.
+        let hit = NetEvent::Immobile {
+            robot: 1,
+            on: true,
+            at: [0.0; 3],
+            seconds: 1.0,
+        };
+        let Message::BotImmobile(b) = event_message(&hit, &[1, 3]) else {
+            panic!("an immobile message");
+        };
+        assert_eq!(b.robot, 3);
+        assert_eq!(message_event(&Message::BotImmobile(b), &[1, 3]), Some(hit));
     }
 
     #[test]
@@ -1328,7 +1726,6 @@ mod tests {
             Some("127.0.0.1:1234".parse().unwrap())
         );
         assert_eq!(parse_address(""), None);
-        assert_eq!(body_id(2, 5), 0x0002_0005);
     }
 }
 

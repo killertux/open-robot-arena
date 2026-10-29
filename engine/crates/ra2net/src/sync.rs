@@ -27,31 +27,35 @@
 //! ...  the zlib stream
 //! ```
 //!
-//! The snapshot itself (all words little-endian):
+//! The snapshot itself (all words little-endian; recovered from the reader
+//! `0x4d25d0`, the writer `0x4d2b60` and 412 snapshots of the original's host
+//! recorded live, docs/38 section 15):
 //!
 //! ```text
-//! u32  match clock word            (FUN_00469b90)
-//! u32  second clock word           (FUN_00609060)
+//! u32  number of controllers (batteries)      -- the counts ARE on the wire
+//! u32  number of devices (motors)
 //! u32  number of bodies below
-//! bool full: 0 = every body in full; 1 = sleeping bodies send position+rotation only
-//! f32  robot count (a float)
-//! per robot present:  f32, then one f32 per component     (component count from the design)
-//! per controller:     u32 id, f32 value                    (vtable +0x70; no count on the wire)
-//! per device:         u32 id, u8 kind, then by kind        (no count on the wire)
-//!                       1: bool, 4 x f32
-//!                       4: f32
-//!                       5: bool, u32, 3 x f32
-//! per body (count above):
-//!     u32 id
-//!     bool awake            (full mode: always 1)
-//!     3 x f32 position      (body +0x30)
-//!     4 x f32 rotation      (body +0x40: the scalar, then the vector)
-//!     if awake: 3 x f32 linear velocity (+0x54), 3 x f32 angular velocity (+0x64)
+//! u8   partial: 1 = the all-bodies snapshot (parts send position+rotation only),
+//!                0 = chassis bodies only, every one in full
+//! u32  number of robots
+//! per robot:       u32 robot id (the panel), then one f32 per component: its hitpoints
+//!                  (the count comes from the reader's own copy of that design)
+//! per controller:  u32 id, f32 value            (a battery's energy)
+//! per device:      u32 id, u8 kind, then by kind
+//!                    1: u8, 4 x f32      (a motor: flag and four values)
+//!                    4: f32
+//!                    5: u8, u32, 3 x f32
+//! per body:
+//!     u32 id                 (robot id + 1) << 10 | 4 * component index (+ sub-body)
+//!     u8  awake              (0 for a part body of an all-bodies snapshot)
+//!     3 x f32 position
+//!     4 x f32 rotation       (the scalar, then the vector)
+//!     if awake: 3 x f32 linear velocity, 3 x f32 angular velocity
 //! ```
 //!
-//! The controller and device lists carry no count: both ends walk the same
-//! lists built from the same designs. Decoding therefore needs a
-//! [`SyncSchema`] that says how many of each there are.
+//! A reader that finds an id it does not know skips the entry
+//! ("ERROR: Bad Rigid Body ID in Sync"). Only the per-robot component count is
+//! not on the wire, so decoding needs a [`SyncSchema`].
 
 use std::io::{Read, Write as _};
 
@@ -177,10 +181,12 @@ pub struct BodySync {
     pub angular: [f32; 3],
 }
 
-/// A robot's per-component floats.
+/// A robot's per-component hitpoints.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RobotSync {
-    pub value: f32,
+    /// The robot's id: its panel.
+    pub id: u32,
+    /// Hitpoints, one per component of the design.
     pub components: Vec<f32>,
 }
 
@@ -207,22 +213,18 @@ pub enum DeviceSync {
     Other { id: u32, kind: u8 },
 }
 
-/// The lists both ends share, which the snapshot does not count.
+/// What both ends share and the snapshot does not carry.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SyncSchema {
-    /// Component count of each robot the snapshot lists.
+    /// Component count of each robot the snapshot lists, in order.
     pub robot_components: Vec<usize>,
-    pub controllers: usize,
-    pub devices: usize,
 }
 
 /// A decoded snapshot.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SyncState {
-    pub clock: u32,
-    pub clock2: u32,
-    /// `false`: every body full (the writer's `+0x40 == 0`); `true`: sleeping
-    /// bodies are cut to position and rotation.
+    /// `false`: the chassis bodies, each in full (the writer's `+0x40 == 0`);
+    /// `true`: every body, part bodies cut to position and rotation.
     pub partial: bool,
     pub robots: Vec<RobotSync>,
     pub controllers: Vec<(u32, f32)>,
@@ -235,20 +237,18 @@ impl SyncState {
     pub fn schema(&self) -> SyncSchema {
         SyncSchema {
             robot_components: self.robots.iter().map(|r| r.components.len()).collect(),
-            controllers: self.controllers.len(),
-            devices: self.devices.len(),
         }
     }
 
     /// The uncompressed snapshot.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u32(self.clock)
-            .u32(self.clock2)
+        w.u32(self.controllers.len() as u32)
+            .u32(self.devices.len() as u32)
             .u32(self.bodies.len() as u32);
-        w.bool(self.partial).f32(self.robots.len() as f32);
+        w.bool(self.partial).u32(self.robots.len() as u32);
         for robot in &self.robots {
-            w.f32(robot.value);
+            w.u32(robot.id);
             for c in &robot.components {
                 w.f32(*c);
             }
@@ -300,31 +300,34 @@ impl SyncState {
 
     pub fn from_bytes(bytes: &[u8], schema: &SyncSchema) -> Result<SyncState, StreamError> {
         let mut r = Reader::new(bytes);
-        let clock = r.u32()?;
-        let clock2 = r.u32()?;
+        let controller_count = r.u32()? as usize;
+        let device_count = r.u32()? as usize;
         let body_count = r.u32()? as usize;
         let partial = r.bool()?;
-        let robot_count = r.f32()?;
-        if robot_count < 0.0 || robot_count as usize != schema.robot_components.len() {
+        let robot_count = r.u32()? as usize;
+        if robot_count != schema.robot_components.len() {
             return Err(StreamError::Invalid(
                 "robot count does not match the schema",
             ));
         }
+        if controller_count > r.remaining() / 8 || device_count > r.remaining() / 5 {
+            return Err(StreamError::Invalid("list count"));
+        }
         let mut robots = Vec::new();
         for &n in &schema.robot_components {
-            let value = r.f32()?;
+            let id = r.u32()?;
             let mut components = Vec::with_capacity(n);
             for _ in 0..n {
                 components.push(r.f32()?);
             }
-            robots.push(RobotSync { value, components });
+            robots.push(RobotSync { id, components });
         }
-        let mut controllers = Vec::with_capacity(schema.controllers);
-        for _ in 0..schema.controllers {
+        let mut controllers = Vec::with_capacity(controller_count);
+        for _ in 0..controller_count {
             controllers.push((r.u32()?, r.f32()?));
         }
-        let mut devices = Vec::with_capacity(schema.devices);
-        for _ in 0..schema.devices {
+        let mut devices = Vec::with_capacity(device_count);
+        for _ in 0..device_count {
             let id = r.u32()?;
             let kind = r.u8()?;
             devices.push(match kind {
@@ -367,8 +370,6 @@ impl SyncState {
             bodies.push(body);
         }
         Ok(SyncState {
-            clock,
-            clock2,
             partial,
             robots,
             controllers,
@@ -442,16 +443,14 @@ mod tests {
 
     fn sample() -> SyncState {
         SyncState {
-            clock: 1234,
-            clock2: 100,
             partial: true,
             robots: vec![
                 RobotSync {
-                    value: 1.0,
+                    id: 1,
                     components: vec![0.5, 0.25],
                 },
                 RobotSync {
-                    value: 2.0,
+                    id: 2,
                     components: vec![],
                 },
             ],
@@ -536,7 +535,6 @@ mod tests {
         let msg = SyncMessage::pack(&state);
         let wrong = SyncSchema {
             robot_components: vec![1],
-            ..state.schema()
         };
         assert!(msg.unpack(&wrong).is_err());
     }

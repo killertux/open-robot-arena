@@ -1911,6 +1911,7 @@ name = "ra2net"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "ra2fmt",
 ]
 
 [[package]]

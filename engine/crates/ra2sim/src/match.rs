@@ -857,6 +857,14 @@ impl Match {
         }
     }
 
+    /// A joiner: the host's match time left (`giTimeSyncMessage`, about once a second): the
+    /// fight clock follows it.
+    pub fn net_time_left(&mut self, left: f32) {
+        if let (MatchState::Fight, Some(duration)) = (self.state, self.config.duration) {
+            self.clock = (duration - left).max(0.0);
+        }
+    }
+
     /// Joiner: the host ended the match (`giMatchWinMessage`, `0x137`): finish
     /// now if the local copy has not, naming the host's winners.
     pub fn net_finish(&mut self, winners: Vec<usize>) {

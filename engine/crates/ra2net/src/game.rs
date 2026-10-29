@@ -61,6 +61,26 @@ pub enum GameEvent {
     Loading {
         player: PlayerId,
     },
+    /// `giAddArenaBotMessage` (`0x12d`): a peer's robot for one panel as `.bot`
+    /// text. `words` are the robot's kind (1 human, 3 computer), the panel and
+    /// the team (docs/38 section 15).
+    ArenaBot {
+        from: PlayerId,
+        words: [u32; 3],
+        design: Vec<u8>,
+    },
+    /// `giPlayerReadyMessage` (`0x12f`) during the match start: a panel's robot
+    /// is loaded (`flag` false: the bots are in) or the match is loaded (`flag`
+    /// true).
+    PanelReport {
+        from: PlayerId,
+        panel: u32,
+        flag: bool,
+    },
+    /// `giTimeSyncMessage` (`0x138`): the host's match time left, in seconds.
+    TimeSync {
+        left: f32,
+    },
     Loaded {
         player: PlayerId,
     },
@@ -95,8 +115,9 @@ pub struct NetGame {
     host: PlayerId,
     schema: Option<SyncSchema>,
     pacer: Pacer,
-    clock: u32,
-    last_clock: Option<u32>,
+    /// When set, every `giSyncMessage` that arrives is also kept here, whole
+    /// (the tools that record the original's snapshots read it).
+    pub tap_sync: Option<Vec<SyncMessage>>,
 }
 
 impl NetGame {
@@ -111,8 +132,7 @@ impl NetGame {
             host: HOST_ID,
             schema: None,
             pacer: Pacer::new(speed),
-            clock: 0,
-            last_clock: None,
+            tap_sync: None,
         })
     }
 
@@ -123,8 +143,7 @@ impl NetGame {
             host: HOST_ID,
             schema: None,
             pacer: Pacer::new(ConnectionSpeed::Lan),
-            clock: 0,
-            last_clock: None,
+            tap_sync: None,
         })
     }
 
@@ -136,11 +155,42 @@ impl NetGame {
         self.session.local_id()
     }
 
-    fn broadcast_lobby(&mut self) {
-        for m in self.lobby.group_infos() {
-            self.session.send_with(Target::All, &m, true);
+    /// Host: tell the peers the panels that changed since `before`.
+    /// DirectPlay's mesh delivers a peer's message to the others directly and
+    /// never back to its sender (`DPNSEND_NOLOOPBACK`, flags `0x20` on the
+    /// original's `giGroupInfoMessage`); this host relays, so a panel the
+    /// `claimant` itself just described does not go back to it. A peer is the
+    /// authority of its own panel: the original takes a `giGroupInfoMessage`
+    /// that names its own panel for a remote one (the panel loses its Eject,
+    /// Ready and change-robot controls; live, docs/38 section 15).
+    fn publish_lobby(&mut self, before: &[crate::lobby::Slot], claimant: Option<PlayerId>) {
+        let me = self.local();
+        let peers: Vec<PlayerId> = self
+            .session
+            .players()
+            .into_iter()
+            .map(|p| p.id)
+            .filter(|id| Some(*id) != me)
+            .collect();
+        for slot in self.lobby.slots.clone() {
+            if slot.is_spectator() || before.contains(&slot) {
+                continue;
+            }
+            let m = Message::GroupInfo(slot.to_group_info());
+            for p in &peers {
+                if Some(*p) != claimant || slot.player != *p {
+                    self.session.send_with(Target::Player(*p), &m, true);
+                }
+            }
         }
         self.session.set_host_data(self.lobby.host_data());
+    }
+
+    /// Host: a newcomer is told every panel.
+    fn send_lobby_to(&mut self, to: PlayerId) {
+        for m in self.lobby.group_infos() {
+            self.session.send_with(Target::Player(to), &m, true);
+        }
     }
 
     /// Pump the session.
@@ -167,13 +217,15 @@ impl NetGame {
                         self.lobby.add_watcher(p.id, &p.name);
                     }
                     if self.is_host() {
+                        let before = self.lobby.slots.clone();
                         self.lobby.join(p.id, &p.name);
                         // The newcomer needs the settings and every slot;
                         // the others need the new slot.
                         for m in self.lobby.settings() {
                             self.session.send_with(Target::Player(p.id), &m, true);
                         }
-                        self.broadcast_lobby();
+                        self.send_lobby_to(p.id);
+                        self.publish_lobby(&before, Some(p.id));
                     }
                     out.push(GameEvent::PlayerJoined {
                         id: p.id,
@@ -191,13 +243,10 @@ impl NetGame {
                     });
                 }
                 Event::PlayerLeft { id, reason } => {
+                    let before = self.lobby.slots.clone();
                     self.lobby.leave(id);
                     if self.is_host() {
-                        // A freed player panel goes to the first spectator.
-                        if self.schema.is_none() {
-                            self.lobby.promote_spectators();
-                        }
-                        self.broadcast_lobby();
+                        self.publish_lobby(&before, None);
                     }
                     out.push(GameEvent::PlayerLeft { id, reason });
                 }
@@ -216,17 +265,43 @@ impl NetGame {
         let host = self.host;
         match &message {
             Message::GroupInfo(_)
-            | Message::PlayerReady { .. }
             | Message::ChangeGameType(_)
             | Message::ChangeWeightClass(_)
             | Message::ArenaPreview(_)
             | Message::Text(_) => {
+                let before = self.lobby.slots.clone();
                 if let Some(change) = self.lobby.apply(from, host, &message) {
                     if self.is_host() {
                         match &message {
-                            Message::GroupInfo(_) => self.broadcast_lobby(),
+                            // A panel emptied by its owner goes to the others.
+                            Message::GroupInfo(g) if g.state == kind::LEFT => {
+                                let me = self.local();
+                                let peers: Vec<PlayerId> = self
+                                    .session
+                                    .players()
+                                    .into_iter()
+                                    .map(|p| p.id)
+                                    .filter(|id| Some(*id) != me && *id != from)
+                                    .collect();
+                                for p in peers {
+                                    self.session.send_with(Target::Player(p), &message, true);
+                                }
+                                self.session.set_host_data(self.lobby.host_data());
+                            }
+                            Message::GroupInfo(_) => self.publish_lobby(&before, Some(from)),
                             Message::PlayerReady { .. } => {
-                                self.session.send_with(Target::All, &message, true);
+                                // Not back to the sender (see `publish_lobby`).
+                                let me = self.local();
+                                let peers: Vec<PlayerId> = self
+                                    .session
+                                    .players()
+                                    .into_iter()
+                                    .map(|p| p.id)
+                                    .filter(|id| Some(*id) != me && *id != from)
+                                    .collect();
+                                for p in peers {
+                                    self.session.send_with(Target::Player(p), &message, true);
+                                }
                             }
                             _ => {}
                         }
@@ -234,6 +309,19 @@ impl NetGame {
                     out.push(GameEvent::Lobby(change));
                 }
             }
+            Message::AddArenaBot { words, design } => out.push(GameEvent::ArenaBot {
+                from,
+                words: *words,
+                design: design.clone(),
+            }),
+            Message::PlayerReady { player, ready } => out.push(GameEvent::PanelReport {
+                from,
+                panel: *player,
+                flag: *ready,
+            }),
+            Message::TimeSync { word, .. } => out.push(GameEvent::TimeSync {
+                left: f32::from_bits(*word),
+            }),
             Message::PrepareMatch { arena, .. } => out.push(GameEvent::Prepare {
                 arena: arena.clone(),
             }),
@@ -251,6 +339,9 @@ impl NetGame {
                 }
             }
             Message::Sync(sync) => {
+                if let Some(tap) = &mut self.tap_sync {
+                    tap.push(sync.clone());
+                }
                 // "ERROR: Sync ignored - not in game yet".
                 let Some(schema) = &self.schema else {
                     return;
@@ -259,12 +350,6 @@ impl NetGame {
                     return;
                 }
                 if let Ok(state) = sync.unpack(schema) {
-                    // Non-guaranteed snapshots may arrive out of order: keep
-                    // only newer ones.
-                    if self.last_clock.is_some_and(|c| state.clock <= c) {
-                        return;
-                    }
-                    self.last_clock = Some(state.clock);
                     out.push(GameEvent::Snapshot(state));
                 }
             }
@@ -328,7 +413,23 @@ impl NetGame {
     /// a joiner of the original's lobby, where everyone starts without one);
     /// with none free it stays a spectator.
     pub fn choose_robot(&mut self, team: &str, robot: &str, logo: &str, design: Vec<u8>) {
-        let Some(me) = self.local() else { return };
+        self.claim_panel(None, team, robot, logo, design);
+    }
+
+    /// [`NetGame::choose_robot`] for a panel the player picked: the original's
+    /// lobby offers each open panel's join button (`noplayer.gib`), and the
+    /// claim names that panel.
+    pub fn claim_panel(
+        &mut self,
+        panel: Option<u32>,
+        team: &str,
+        robot: &str,
+        logo: &str,
+        design: Vec<u8>,
+    ) -> bool {
+        let Some(me) = self.local() else {
+            return false;
+        };
         let name = self
             .lobby
             .members
@@ -337,13 +438,24 @@ impl NetGame {
             .map(|(_, n)| n.clone())
             .or_else(|| self.lobby.slot(me).map(|s| s.name.clone()))
             .unwrap_or_default();
-        let index = match self.lobby.slot(me) {
-            Some(s) if s.is_human() => s.index,
+        let index = match (panel, self.lobby.slot(me)) {
+            (Some(i), _) => i,
+            (None, Some(s)) if s.is_human() => s.index,
             _ => match self.lobby.free_panel() {
                 Some(i) => i,
-                None => return,
+                None => return false,
             },
         };
+        // Not a panel somebody else holds with a robot (the host's word is
+        // final), and not beyond the four.
+        if index as usize >= crate::lobby::PLAYER_SLOTS
+            || self
+                .lobby
+                .panel(index)
+                .is_some_and(|p| p.player != me && p.kind != kind::HUMAN)
+        {
+            return false;
+        }
         let slot = crate::lobby::Slot {
             index,
             player: me,
@@ -355,31 +467,121 @@ impl NetGame {
             ready: self.lobby.slot(me).is_some_and(|s| s.is_human() && s.ready),
             design: Some(design),
         };
+        let before = self.lobby.slots.clone();
         self.lobby.set_panel(slot.clone());
         let slot = &slot;
         let info = Message::GroupInfo(slot.to_group_info());
         if self.is_host() {
-            self.broadcast_lobby();
+            self.publish_lobby(&before, None);
         } else {
             self.session
                 .send_with(Target::Player(self.host), &info, true);
         }
+        true
     }
 
-    /// Toggle the local player's ready flag.
+    /// Host: set up a computer panel (`computer player button`, then the
+    /// Select Computer Robot window): kind `COMPUTER_WITH_ROBOT`, owned by
+    /// the host, told to every peer. A panel a human holds is not taken.
+    pub fn add_computer_panel(
+        &mut self,
+        panel: u32,
+        team: &str,
+        robot: &str,
+        logo: &str,
+        design: Vec<u8>,
+    ) -> bool {
+        let Some(me) = self.local() else {
+            return false;
+        };
+        if !self.is_host()
+            || panel as usize >= crate::lobby::PLAYER_SLOTS
+            || self
+                .lobby
+                .panel(panel)
+                .is_some_and(|p| p.is_human() && p.kind != kind::HUMAN)
+        {
+            return false;
+        }
+        let name = self.local_name();
+        let slot = crate::lobby::Slot {
+            index: panel,
+            player: me,
+            kind: kind::COMPUTER_WITH_ROBOT,
+            name,
+            team: team.to_string(),
+            team_logo: logo.to_string(),
+            robot: robot.to_string(),
+            ready: false,
+            design: Some(design),
+        };
+        let before = self.lobby.slots.clone();
+        self.lobby.set_panel(slot);
+        self.publish_lobby(&before, None);
+        true
+    }
+
+    /// Empty a panel. The host may eject any panel (a human peer then waits
+    /// as a spectator); a joiner only its own, which it asks the host for.
+    /// Everyone is told with a `GroupInfo` in state `LEFT` for the panel
+    /// (inferred: the original's wire for an eject was not traced). Returns
+    /// whether a panel went.
+    pub fn eject_panel(&mut self, panel: u32) -> bool {
+        let Some(me) = self.local() else {
+            return false;
+        };
+        let Some(old) = self.lobby.panel(panel).cloned() else {
+            return false;
+        };
+        let m = Message::GroupInfo(crate::message::GroupInfo {
+            slot: panel,
+            owner: old.player,
+            state: kind::LEFT,
+            ..Default::default()
+        });
+        if self.is_host() {
+            self.lobby.remove_panel(panel);
+            let peers: Vec<PlayerId> = self
+                .session
+                .players()
+                .into_iter()
+                .map(|p| p.id)
+                .filter(|id| *id != me)
+                .collect();
+            for p in peers {
+                self.session.send_with(Target::Player(p), &m, true);
+            }
+            self.session.set_host_data(self.lobby.host_data());
+            true
+        } else if old.player == me {
+            self.lobby.remove_panel(panel);
+            self.session.send_with(Target::Player(self.host), &m, true);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Toggle the local player's ready flag: it is the panel's `giGroupInfoMessage`
+    /// flag, sent again without the picture (the original's 95-byte message).
     pub fn set_ready(&mut self, ready: bool) {
         let Some(me) = self.local() else { return };
-        if let Some(slot) = self.lobby.slot_mut(me) {
-            if slot.is_spectator() {
-                return;
-            }
-            slot.ready = ready;
+        let before = self.lobby.slots.clone();
+        let Some(slot) = self.lobby.slot_mut(me) else {
+            return;
+        };
+        // Only a human panel with a robot has a ready flag.
+        if !slot.is_human() || !slot.has_robot() {
+            return;
         }
-        let m = Message::PlayerReady { player: me, ready };
+        slot.ready = ready;
+        let mut info = slot.to_group_info();
+        info.robot = None;
         if self.is_host() {
-            self.session.send_with(Target::All, &m, true);
+            self.publish_lobby(&before, None);
         } else {
-            self.session.send_with(Target::Player(self.host), &m, true);
+            self.session
+                .send_with(Target::Player(self.host), &Message::GroupInfo(info), true);
         }
     }
 
@@ -404,19 +606,55 @@ impl NetGame {
         self.session.send_with(Target::All, &m, true);
     }
 
-    /// Host: everyone is loaded; go.
+    /// Host: the robots are in; the peers load the match (`giBeginMatchMessage`).
     pub fn begin_match(&mut self) {
         self.session
             .send_with(Target::All, &Message::BeginMatch, true);
+    }
+
+    /// Host: every peer reported its match loaded (`giPeerDataLoadedMessage`):
+    /// the count-down starts (`giStartCountDownMessage`).
+    pub fn count_down(&mut self) {
         self.session
             .send_with(Target::All, &Message::StartCountDown, true);
+    }
+
+    /// Everyone: this end's robot for one panel, as `.bot` text, to the others
+    /// (`giAddArenaBotMessage`, flags `0x38`: guaranteed, no loopback).
+    pub fn send_arena_bot(&mut self, kind: u32, panel: u32, team: u32, design: Vec<u8>) {
+        let m = Message::AddArenaBot {
+            words: [kind, panel, team],
+            design,
+        };
+        self.session.send_with(Target::All, &m, true);
+    }
+
+    /// Everyone: a panel's report during the start (`giPlayerReadyMessage`):
+    /// `false` once the bots are in, `true` once the match is loaded.
+    pub fn report_panel(&mut self, panel: u32, loaded: bool) {
+        let m = Message::PlayerReady {
+            player: panel,
+            ready: loaded,
+        };
+        self.session.send_with(Target::All, &m, false);
+    }
+
+    /// Host: the match time left, once a second (`giTimeSyncMessage`; the other
+    /// four words of the message are stack garbage in the original).
+    pub fn send_time_sync(&mut self, left: f32) {
+        self.session.send(
+            Target::All,
+            &Message::TimeSync {
+                word: left.to_bits(),
+                times: [0; 4],
+            },
+        );
     }
 
     /// Both ends: the shared lists the snapshots are written against (known
     /// once the match is loaded).
     pub fn set_schema(&mut self, schema: SyncSchema) {
         self.schema = Some(schema);
-        self.last_clock = None;
     }
 
     /// Both ends: the match is over and the players are back in the lobby.
@@ -424,7 +662,10 @@ impl NetGame {
     /// as a lobby text), and a host takes joiners and spectators again.
     pub fn end_match(&mut self) {
         self.schema = None;
-        self.last_clock = None;
+        // The ready flags are cleared for the next match (live: the original's lobby, both ends).
+        for slot in &mut self.lobby.slots {
+            slot.ready = false;
+        }
         if self.is_host() {
             self.session.set_accepting(true);
         }
@@ -454,9 +695,7 @@ impl NetGame {
         if !self.is_host() || !self.pacer.tick(dt) {
             return false;
         }
-        let mut state = capture();
-        self.clock = self.clock.wrapping_add(1).max(state.clock);
-        state.clock = self.clock;
+        let state = capture();
         let message = Message::Sync(SyncMessage::pack(&state));
         self.session.send(Target::All, &message);
         true
