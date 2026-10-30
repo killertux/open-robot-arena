@@ -61,6 +61,50 @@ pub struct Applied {
 /// the stock bots, whose wiring drives the two sides of a robot with opposite
 /// `Spin Clockwise`/`Spin Counter-clockwise` wires.
 const CLOCKWISE: f32 = -1.0;
+/// The sense an airborne wheel's hinge motor turns, per part (docs/29 section
+/// 12af): `+1` as the drive step always did, `-1` for a wheel whose velocity
+/// the original does not negate.
+///
+/// The hinge controller (`0x481450`) builds the velocity as `trunc(-p · 0.01 ·
+/// speed)` and negates it (`0x4814e1..0x48151a`) when a component of the
+/// hinge atom's axis in body B's frame (`atom + 0x60`) is below -0.5. B is the
+/// wheel's body, which the original builds in the frame of the motor's rotor
+/// object: the wheel's placement times the rotor's own `TM` (`axle`: a
+/// quarter turn about x for `anglemotor1`, the identity for `anglemotor2`;
+/// live `spinup-*` `B` rows, 15 wheels of 7 robots), so that axis is `(TM ·
+/// placement)⁻¹ · axle`. Live (`hingectl-scout-alarm-box__live__000` `L`
+/// rows) it reads `(0, 1, 0)` for the wheels on `anglemotor1` and `(0, 0,
+/// -0.8)` on `anglemotor2`, and the wheels in the air at full throttle turn
+/// `+x` on the first and `-x` on the second. Ours turned them all `-x`,
+/// which is the negated sense.
+/// `RA2_AIR_SIGN=0` turns every wheel the old way.
+pub(crate) fn air_signs(rig: &RobotRig) -> Vec<f32> {
+    let mut v = vec![1.0; rig.parts.len()];
+    if std::env::var("RA2_AIR_SIGN").is_ok_and(|s| s == "0") {
+        return v;
+    }
+    for (p, part) in rig.parts.iter().enumerate() {
+        let (Some(joint), root) = (part.joint, &rig.components[part.root]) else {
+            continue;
+        };
+        if joint.use_kind != JointUse::Wheel || joint.slider {
+            continue;
+        }
+        let Some(hinge) = root
+            .parent
+            .and_then(|par| rig.components[par].hinge.as_ref())
+        else {
+            continue;
+        };
+        let placed = glam::Mat3::from_mat4(root.local) * glam::Mat3::from_mat4(hinge.rotor_tm);
+        let axis = placed.transpose() * joint.axis;
+        let negated = axis.x < -0.5 || axis.y < -0.5 || axis.z < -0.5;
+        if !negated {
+            v[p] = -1.0;
+        }
+    }
+    v
+}
 /// The game's frame (`FUN_004ac1d0`: two Havok substeps of 1/60 s): its
 /// components tick once a frame with the frame's time.
 pub const FRAME: f32 = 1.0 / 30.0;
@@ -391,6 +435,10 @@ pub struct Robot {
     /// Per burst part: a `Fire` press not yet taken by the component's tick
     /// (`+0x284/+0x285` on a piston, `+0x288/+0x289` on a burst motor).
     burst_pending: Vec<bool>,
+    /// Per part: the sense an airborne wheel's hinge motor turns (+1 as ours
+    /// always did, -1 for the wheels the original's rule at `0x4814e1..0x48151a`
+    /// negates; docs/29 section 12af).
+    air_sign: Vec<f32>,
     /// Per burst part: whether its joint is locked. A lock holds until the
     /// device unlocks it (`Lock(0)` at the fire and at the end of the
     /// stroke); arriving at a stop locks it (`0x481450`, `0x4b5240`), and
@@ -639,6 +687,7 @@ impl Robot {
             burst_timer: vec![0.0; rig.parts.len()],
             slider_dir: vec![0.0; rig.parts.len()],
             burst_pending: vec![false; rig.parts.len()],
+            air_sign: air_signs(&rig),
             burst_locked: vec![true; rig.parts.len()],
             frame_clock: FRAME,
             tick_schedule: std::collections::VecDeque::new(),
@@ -1509,7 +1558,9 @@ impl Robot {
                     }
                     physics.drive_hinge(
                         joint,
-                        hinge_target(ctl.velocity(percent), percent) * CLOCKWISE,
+                        hinge_target(ctl.velocity(percent), percent)
+                            * CLOCKWISE
+                            * self.air_sign[w.part],
                     );
                 }
             }

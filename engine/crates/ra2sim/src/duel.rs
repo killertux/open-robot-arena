@@ -4215,8 +4215,14 @@ mod tests {
         );
 
         // Now stand still on each other for two seconds: nothing pressed
-        // together adds a blow as hard as the ram's.
+        // together adds a blow as hard as the ram's. The first second is the
+        // ram's own rebound (the robots come apart and meet again once or
+        // twice: a 17 hit 0.3 s after the ram with the airborne wheels' sense
+        // of docs/29 section 12af), and not counted.
         let rest = vec![DriveInput::default(); 2];
+        for _ in 0..(1.0 / dt) as usize {
+            duel.step_direct(&rest, dt);
+        }
         let (settled, seen) = (duel.damage_taken[0], duel.impacts.len());
         for _ in 0..(2.0 / dt) as usize {
             duel.step_direct(&rest, dt);
@@ -5487,6 +5493,22 @@ mod tests {
                 assert_eq!(w.normal, w.contact_normal);
             }
         }
+    }
+
+    /// Which way an airborne wheel's motor turns follows the hinge atom's axis
+    /// in the wheel's own frame (`0x4814e1..0x48151a`): live the wheels on
+    /// `anglemotor1` read `(0, 1, 0)` and turn `+x`, those on `anglemotor2`
+    /// read `(0, 0, -0.8)` and turn `-x` (`hingectl-scout-alarm-box__live__000`,
+    /// `L` rows; docs/29 section 12af). Scout: left `anglemotor1`, right
+    /// `anglemotor2`; ALARM: front left and back right `anglemotor1`.
+    #[test]
+    fn an_airborne_wheel_turns_by_the_sign_of_its_axis_in_its_own_frame() {
+        let Some(game) = game_dir() else { return };
+        let load = |p: &str| crate::rig::load(&game.join(p).to_string_lossy()).expect("bot loads");
+        let scout = crate::robot::air_signs(&load("AI/Team0/Bot0.bot"));
+        assert_eq!(&scout[..3], &[1.0, -1.0, 1.0]);
+        let alarm = crate::robot::air_signs(&load("AI/Team0/Bot1.bot"));
+        assert_eq!(&alarm[..5], &[1.0, -1.0, 1.0, -1.0, 1.0]);
     }
 
     /// An undriven wheel turns freely on its hinge: the original's controller
