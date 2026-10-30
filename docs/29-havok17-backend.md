@@ -5319,3 +5319,134 @@ Compressor 4.9 against 3.1, Octagon 3.1 against 1.4), and the raw contact lists
 of `fightcontacts-*__live__004..006` come from a session whose registrations
 were not captured (a replay against another session's matches 20-50 % of the
 live hits' steps).
+
+### 12ah. The routes were the original's all along; the script's `GetPath` had its two points swapped (fx/route-geom; `RA2_ASTAR_PLAIN_H` removed)
+
+Section 12ag left a fit: an estimate of the plain distance made ours' opening
+match six live fight starts, while the binary's squared one (verified at
+`0x4072d7`, `0x407497`, `0x407596`) did not. The fit was hiding a swap in the
+Python-facing method, not a difference in the search.
+
+**The march geometry at `0x405720` is decoded and is what ours always did.**
+`0x405720(this = the nav map, arg1, arg2)` is `__thiscall` + two stack points
+(2-vectors, `(x, z)`): `d = arg2 - arg1` (`0x405810`, built through `0x495f10`,
+which returns its `this`), `step = map[+0xd0] * 0.5` (`0x6a55f0` = 0.5; the
+radius is the one `SetSearchRadius` stored, `0x405990` copies `arena[+0x118]`
+there), the direction `d` normalised through the D3DX function pointer at
+`0x6ffd68`, `n = ftol(|d| / step)` (`0x405870` + `0x4058a0`), then `n` stops
+from `arg1` on (`0x405840` + `0x4057f0`: `p += dir * step`), each tested by
+`0x4058b0` against every collision line and the march fails at the first hit.
+Not boxes or AI polygons: the obstacles are the `AddCollisionLine` records
+(`0x4bad80` -> `0x406570`: origin = the first point, direction = second minus
+first, full length, so the `[0, 1]` parameter test of `0x61b260` / `0x61b390`
+covers the whole segment; a segment wholly inside the circle, `t0 < 0` and
+`t1 > 1`, does not count; a tangent counts). The "third component" of the
+previous notes is the `0x495f10` pair `(x, z)` taken from a 3-vector's
+elements 0 and 2 (`0x405990`, `0x4056b0`); `0x405f20` copies a 2-vector. The
+"stack slot `0x4079f0` leaves behind" is real and harmless: `0x4079f0` is
+`mov eax,[ecx+0x3c]; add eax,0x14; ret` (no pop), the argument the caller
+pushed stays and `0x405f20` fills it with a copy of the goal node's point
+(`0x407680`, `0x4076b0..0x4076bf`). The second point of that march is the
+goal, the first the node's own point. The rest of the A* re-read too, from
+the assembly: the open list is erased in order and re-`make_heap`ed
+(`0x4514b0`, `0x40d590` -> `0x40f6d0` -> `0x411cf0` / `0x411c50`: ours rebuilt it
+by pushing in order; now the same, no effect on any call), a closed node is
+re-opened when the new `g` is lower (`0x407511..0x4075e3`), `h` and `g` are
+squared distances in x87 with the sum stored as a float. Nothing here changes a route.
+
+**The mismatch: who is `p1`.** `Arena.GetPath(from_world, to_world, ignore)` is
+`0x4ba370`. It calls the native `0x405990(p1 = from_world, p2 = to_world, flag,
+list)` and then reverses the list (`0x4bd300` on `begin..end`) before making
+the Python list. Ours had the native list's order and its `p1`/`p2` the other
+way round (the notes called `p2` "from" because the native list begins
+there). So ours answered `GetPath(a, b)` with the native search for `p1 = b`,
+`p2 = a` and did not reverse: the same set of search results, handed to the
+wrong robot. The search is not symmetric (a squared estimate dwarfs the steps
+and the moved endpoint differs), and for the Scout and ALARM at their corners
+the two answers are the two routes that were "flipping". Live, with the
+agent loaded before Start Game and the brains' Python wrapped
+(`boxstart-scout-alarm-box__live__000..004`, new; `tools/oracle/capture_boxstart.py`,
+`ai_trace_install.py`; 231 `GetPath` calls from the first frame, plus the
+`DriveToWaypoints` lists the brains got in `__003/004.aitrace.txt`):
+
+* the Scout (`GetPath(Scout, ALARM)`) is given `[Scout, (0,1), (5,-1), (8,-5),
+  ALARM]` and drives the diagonal; its yaw stays at 2.32-2.38 rad for the first
+  2.1 s (chassis poses, `X` rows);
+* ALARM (`GetPath(ALARM, Scout)`) is given `[ALARM, (5, 5), (0, 10), Scout]`
+  and turns north; at 0.9-1.0 s (Scout `(-8.2, 8.4)`, ALARM `(9.0, -7.4)`) its list
+  flips to `[ALARM, (5,-1), (0,1), (-5,5), Scout]`, then to the straight pair
+  at 1.9 s.
+
+All 5179 recorded native calls (the 4948 of `boxfight-*`, the 231 of
+`boxstart-*`) are reproduced with the squared estimate and no switch (test
+`live_getpath_dump_reproduces`, `RA2_GP_TSV=<tsv of radius, p1, p2, native
+list>`; `get_path_answers_the_live_calls` pins six inline; the new test
+`the_first_routes_of_a_box_fight_are_the_originals` pins the four lists and
+the flip as the scripts see them).
+
+**Change.** `ArenaData::path(p1, p2, r)` is the native search (list `[p2', ...,
+p1]`); the Python `GetPath(from, to)` calls it with `(from, to)` and reverses.
+`RA2_ASTAR_PLAIN_H` and `set_plain_estimate` are removed (the estimate is the
+binary's squared distance). Mean position of the Scout / ALARM over the live
+starts (three runs, GetPath positions) against the 14 warmups of ours, before
+(master 569218f) and now:
+
+| t | live | before | now |
+|---|---|---|---|
+| 1 s | (-8.0, 8.3) (9.0, -7.3) | (-8.9, 10.2) (8.9, -7.6) | (-8.3, 8.6) (8.9, -7.7) |
+| 2 s | (-2.7, 3.2) (5.2, -1.7) | (-5.9, 9.9) (7.6, -5.1) | (-3.2, 3.8) (6.1, -2.6) |
+| 3 s | (-0.5, 0.6) (2.4, 0.8) | (-0.8, 9.8) (6.4, -5.4) | (-0.4, 0.7) (2.3, 0.5) |
+| 4 s | (-1.1, 1.2) (0.5, 1.4) | (1.6, 7.6) (5.7, -4.8) | (-1.4, 0.8) (0.7, 0.7) |
+
+(the remaining 0.3-0.9 m lag at 1-2.5 s is the drive train's acceleration, not
+the brain; the live times start at the first `GetPath` call.)
+
+**Ensembles** (`tools/oracle/ensemble.sh`, `FIDTRACE_WARMUP` 0..47, scratch
+install; mean ± standard error; counted `>= 10` hits on the other robot, first
+robot named first; hp = applied arena hits per fight; "before" is master
+569218f's `fidtrace`, "now" this branch, no switches):
+
+| fight | live | before | now |
+|---|---|---|---|
+| box ALARM / Scout | 41.1 / 6.0 | 30.5 ± 3.5 / 5.2 ± 0.6 | 35.4 ± 3.5 / 5.6 ± 0.5 |
+| ... hp Scout / ALARM | 99 / 17 | 71 ± 10 / 92 ± 17 | 55 ± 7 / 39 ± 11 |
+| Razor / FlapJack | 3.0 / 0.1 | 1.3 ± 0.2 / 4.9 ± 0.6 | 1.0 ± 0.1 / 4.8 ± 0.4 |
+| Compressor Wide Load / Sentinel | 73.6 / 5.3 | 60.7 ± 6.7 / 4.1 ± 0.6 | 66.2 ± 6.8 / 4.0 ± 0.5 |
+| ... hp Sentinel / Wide Load | 178 / 146 | 201 ± 54 / 219 ± 84 | 121 ± 39 / 92 ± 35 |
+| Octagon ALARM / Scout | 13.6 / 3.2 | 12.6 ± 1.6 / 2.7 ± 0.4 | 11.6 ± 2.1 / 2.2 ± 0.3 |
+
+The 12ag table with `RA2_ASTAR_PLAIN_H=1` was a partial copy of this effect
+(box ALARM hazard hp 65, Scout hits 6.1); the real fix gives ALARM's hazard hp
+39 against live 17 (it was 92), the Scout's counted hits 5.6 (live 6.0). The
+Compressor's robots now spend 1.5 / 1.2 % of the time past `|z| = 17` (before
+3.6 / 2.3, live 0.8 / 0.0).
+
+**Compressor stalemate (task 2): what it is, not fixed.** The four live fights
+with position traces end by 32-40 s with `lastTactic` `-` and both robots still:
+the match is decided (the AIs are deactivated) and the capture goes on. Always
+the Sentinel (a `Flipper`) is on its back from 11-21 s (`isUpsideDown` 1, tactic
+`Invert`), and with the agent in the Python (`boxstart-sentinel-wideload-compressor__live__000/001`
+wrap `Throttle` / `Turn`; seen for the Wide Load, a `Poker`) the only drive calls while `Invert` runs are the
+pair `Throttle(0)`, `Turn(0)` of `Tactics.Invert.Execute`: `Poker.InvertHandler`
+and (by the source) `Flipper.InvertHandler` fire the weapon triggers once a second and never
+drive. So a flipped non-invertible robot is inert until the arena's
+immobility rule puts it out (docs/32 section 6, 20 s). Ours has that rule and
+those handlers; what it lacks is the flip. In 8 warmups of 60 s the Sentinel
+is flipped once (for good) and the Wide Load four times (two for good), against the
+Sentinel four times in four live fights, and only 1 in 10 of ours stop moving
+by 40 s (live: all, last motion at 36-54 s). The brains are not what differs;
+the flipping (the Wide Load's weapons against the Sentinel near `(12, 5)`) and
+the way the two robots meet are the physics of the Compressor's opening (live
+Sentinel holds x 16-17 until 10 s, ours drifts to 13; the Wide Load arrives at
+`(10.6, 0.7)` by 10 s, ours `(7.4, 0.1)`).
+
+**Verified / not.** In the binary: the march (`0x405720` and its helpers), the
+line test, the wrapper's argument roles and the reversal (`0x4ba370`, with the
+live lists), the heap operations. Live: 5179 `GetPath` calls, the Python lists
+of both brains at the start (aitrace), the yaw and the positions. Not verified:
+`Arena.IsStraightPathClear`'s wrapper (`0x4ba580` -> `0x4056b0`) is read as
+marching from the script's first argument (the same locals order as `GetPath`'s
+wrapper); no live call distinguishes it. The pair rule (`RA2_PAIR_GATE`, task 3)
+was not looked at again. **Open:** why the Sentinel is flipped live and not
+in ours (physics); ALARM's hazard hp is still 2.3 times live's; the drive
+train's slow start (0.3-0.9 m at 1-2.5 s).

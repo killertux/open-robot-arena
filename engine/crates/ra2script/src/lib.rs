@@ -1334,7 +1334,9 @@ mod tests {
     }
 
     /// `GetPath` answers what the original answered on the same inputs
-    /// (`FUN_00405990`, docs/29 §12ab): six of the 4948 calls of
+    /// (`FUN_00405990` behind `FUN_004ba370`, docs/29 §12ab, §12ah; the tuples
+    /// are the native call's `p2`, `p1` and its list, the script's method takes
+    /// `p1` first and returns the list reversed): six of the 4948 calls of
     /// `boxfight-scout-alarm-box__live__000..005`, every one of which ours
     /// reproduces: a clear straight run; a goal pressed against the spikes'
     /// box (never moved: the route is the straight pair); a blocked robot
@@ -1414,13 +1416,15 @@ mod tests {
                 let route: Vec<(f32, f32)> = a
                     .call_method1(
                         "GetPath",
-                        ((from[0], from[1], from[2]), (to[0], to[1], to[2]), false),
+                        ((to[0], to[1], to[2]), (from[0], from[1], from[2]), false),
                     )
                     .unwrap()
                     .extract()
                     .unwrap();
+                // The calls are the native search's (`p2`, `p1`, list in its
+                // order); the script's method has `p1` first and reverses.
                 assert_eq!(route.len(), live.len(), "{from:?} -> {to:?}: {route:?}");
-                for (o, l) in route.iter().zip(live) {
+                for (o, l) in route.iter().zip(live.iter().rev()) {
                     assert!(
                         (o.0 - l.0).abs() < 2e-3 && (o.1 - l.1).abs() < 2e-3,
                         "{from:?} -> {to:?}: {route:?} against {live:?}"
@@ -1430,19 +1434,77 @@ mod tests {
         });
     }
 
-    /// docs/29 section 12ag (with `RA2_ASTAR_PLAIN_H=1`; the test forces it):
-    /// at the start of a Scout v ALARM fight both brains take the same corridor, through the centre, whichever of them asks.
-    /// Live (`aistate-scout-alarm-box__live__001..006`) the Scout runs the
-    /// diagonal to the centre from the first frame and ALARM goes round the
-    /// east side of the spike box over `(8, -5)`; a route that sent the Scout
-    /// along the north wall over `(0, 10)` met ALARM seconds later, in a
-    /// different place, and flipped between two routes as the Scout moved.
+    /// Every live `GetPath` call of a tab-separated dump (`RA2_GP_TSV`: radius,
+    /// arg1 xyz, arg2 xyz, the route's floats, a label), against ours. Quiet
+    /// without the variable; prints the mismatches per label.
     #[test]
-    fn both_brains_take_the_same_corridor_at_the_start_of_a_box_fight() {
+    fn live_getpath_dump_reproduces() {
+        let Some(path) = std::env::var_os("RA2_GP_TSV") else {
+            return;
+        };
+        let Some((host, _guard)) = boot() else { return };
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut bad: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        let mut first_bad = Vec::new();
+        with_py(|py| {
+            host.load_arenas(py).unwrap();
+            let arena = host.create_arena(py, "Combat Arena").unwrap();
+            assert!(host.hazards_on(py, true).unwrap());
+            let a = arena.bind(py);
+            for line in text.lines() {
+                let c: Vec<&str> = line.split('\t').collect();
+                let f = |i: usize| c[i].parse::<f32>().unwrap();
+                let live: Vec<f32> = c[7].split(' ').map(|v| v.parse().unwrap()).collect();
+                a.call_method1("SetSearchRadius", (f(0),)).unwrap();
+                let route: Vec<(f32, f32)> = a
+                    .call_method1("GetPath", ((f(1), f(2), f(3)), (f(4), f(5), f(6)), false))
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                let n = route.len();
+                let ok = n * 2 == live.len()
+                    && route.iter().enumerate().all(|(i, p)| {
+                        let k = 2 * (n - 1 - i);
+                        (p.0 - live[k]).abs() < 2e-3 && (p.1 - live[k + 1]).abs() < 2e-3
+                    });
+                let e = bad.entry(c[8].to_string()).or_default();
+                e.0 += 1;
+                if !ok {
+                    e.1 += 1;
+                    if first_bad.len() < 12 {
+                        first_bad.push(format!(
+                            "{} {:?} -> {:?}: ours {route:?} live {live:?}",
+                            c[8],
+                            (f(1), f(3)),
+                            (f(4), f(6))
+                        ));
+                    }
+                }
+            }
+        });
+        for (k, (n, b)) in &bad {
+            eprintln!("GPDUMP {k}: {b} of {n} differ");
+        }
+        for l in &first_bad {
+            eprintln!("GPDUMP first: {l}");
+        }
+    }
+
+    /// docs/29 section 12ah: the first routes of a Scout v ALARM fight, as the
+    /// scripts see them. Live (`boxstart-scout-alarm-box__live__*`, the agent
+    /// loaded before the match, `ai_trace_install.py` for the lists the brains
+    /// got) the Scout, asking `GetPath(Scout, ALARM)`, drives the list
+    /// `[Scout, (0, 1), (5, -1), (8, -5), ALARM]` straight down the diagonal
+    /// from the first frame, and ALARM, asking `GetPath(ALARM, Scout)`, gets
+    /// `[ALARM, (5, 5), (0, 10), Scout]` and turns north; a fraction of a second
+    /// later (the Scout at `(-8.2, 8.4)`, ALARM at `(9.0, -7.4)`) ALARM's list
+    /// flips to the one through the centre. The search is not symmetric (the
+    /// squared estimate dwarfs the steps), so the answers differ with who asks.
+    #[test]
+    fn the_first_routes_of_a_box_fight_are_the_originals() {
         let Some((host, _guard)) = boot() else { return };
         let scout = (-9.84_f32, -1.9_f32, 10.09_f32);
         let alarm = (9.55_f32, -1.9_f32, -9.37_f32);
-        arena::set_plain_estimate(Some(true));
         with_py(|py| {
             host.load_arenas(py).unwrap();
             let arena = host.create_arena(py, "Combat Arena").unwrap();
@@ -1455,29 +1517,21 @@ mod tests {
                     .unwrap()
                     .extract()
                     .unwrap();
-                r[1..r.len() - 1]
-                    .iter()
-                    .map(|p| (p.0.round(), p.1.round()))
-                    .collect()
+                r.iter().map(|p| (p.0.round(), p.1.round())).collect()
             };
-            let out = route(scout, alarm);
-            let back = route(alarm, scout);
-            assert_eq!(out.first(), Some(&(-5.0, 5.0)), "{out:?}");
-            assert_eq!(back.first(), Some(&(8.0, -5.0)), "{back:?}");
-            let mut reversed = back.clone();
-            reversed.reverse();
-            assert_eq!(out, reversed, "{out:?} against {back:?}");
-            // And it stays put while the Scout drives off its corner.
-            for x in [-9.4_f32, -9.0, -8.6, -8.2] {
-                let r = route((alarm.0 - 0.7, alarm.1, alarm.2 + 2.0), (x, scout.1, 10.2));
-                assert_eq!(r.first(), Some(&(8.0, -5.0)), "{x}: {r:?}");
-            }
-            // The binary's squared estimate sends the Scout over the north
-            // wall instead (the default, until its cause is found).
-            arena::set_plain_estimate(Some(false));
-            assert_eq!(route(scout, alarm).first(), Some(&(0.0, 10.0)));
+            let inner = |r: Vec<(f32, f32)>| r[1..r.len() - 1].to_vec();
+            assert_eq!(
+                inner(route(scout, alarm)),
+                [(0.0, 1.0), (5.0, -1.0), (8.0, -5.0)]
+            );
+            assert_eq!(inner(route(alarm, scout)), [(5.0, 5.0), (0.0, 10.0)]);
+            // The flip, live between 0.9 and 1.0 s: the Scout at (-8.4, 8.7)
+            // against ALARM at (9.0, -7.7), then at (-8.2, 8.4) against (9.0, -7.4).
+            let before = inner(route((9.0, -1.9, -7.7), (-8.4, -1.9, 8.7)));
+            let after = inner(route((9.0, -1.9, -7.4), (-8.2, -1.9, 8.4)));
+            assert_eq!(before.first(), Some(&(5.0, 5.0)), "{before:?}");
+            assert_eq!(after.first(), Some(&(5.0, -1.0)), "{after:?}");
         });
-        arena::set_plain_estimate(None);
     }
 
     /// `GetLastDamageReceived`/`Done` are the original's 5-tuples
