@@ -172,6 +172,8 @@ pub struct RobotEntry {
     /// network match's lobby panel names them (docs/38 section 16), the robot
     /// itself having arrived as a `.bot` with no team table behind it.
     pub team_label: Option<(String, String)>,
+    /// The player's name the results show above the team (a network match's panel owner).
+    pub owner: Option<String>,
 }
 
 impl RobotEntry {
@@ -182,6 +184,7 @@ impl RobotEntry {
             bot_path: bot_path.into(),
             controller: Controller::Human,
             team_label: None,
+            owner: None,
         }
     }
 
@@ -191,12 +194,19 @@ impl RobotEntry {
         self
     }
 
+    /// The results show this player's name above the team.
+    pub fn owned_by(mut self, name: &str) -> Self {
+        self.owner = Some(name.to_string());
+        self
+    }
+
     pub fn ai(team: usize, bot_path: impl Into<String>) -> Self {
         RobotEntry {
             team,
             bot_path: bot_path.into(),
             controller: Controller::Ai,
             team_label: None,
+            owner: None,
         }
     }
 }
@@ -380,6 +390,8 @@ pub struct RobotReport {
     /// The result screen's `immobilized text`: the robot's state is 2
     /// (IMMOBILIZED).
     pub immobilized: bool,
+    /// The player behind the robot (a network match's lobby panel), for the results' small line.
+    pub owner: Option<String>,
     /// Every component, in design order, with its remaining and pristine
     /// hitpoints and its detached/fractured state. `Career::repairs_from_report`
     /// turns the damaged ones into component-level repair rows.
@@ -429,6 +441,7 @@ impl MatchReport {
                 bot_name: r.bot_name.clone(),
                 team_name: r.team_name.clone(),
                 immobilized: r.immobilized,
+                owner: r.owner.clone(),
                 winner: r.winner,
             })
             .collect()
@@ -957,6 +970,11 @@ impl Match {
                     eliminated: robot.eliminated,
                     winner: self.winners.contains(&i),
                     immobilized: robot.immobilized,
+                    owner: self
+                        .config
+                        .robots
+                        .get(i)
+                        .and_then(|entry| entry.owner.clone()),
                     components: robot
                         .rig
                         .components

@@ -97,7 +97,14 @@ fn every_shipped_bots_stats_equal_the_rigs_own() {
         );
         for (i, part) in stats.parts.iter().enumerate() {
             let sim = &rig.components[i];
-            let dm = (part.mass - sim.mass).abs();
+            // The lab's sum counts the phantom bodies (a wheel's traction ring) that the rig's mass
+            // leaves out (docs/36 9.27c: C.R.U.S.H. 395.2 live).
+            let phantom = if sim.mass > 0.0 {
+                sim.havok.phantom_mass
+            } else {
+                0.0
+            };
+            let dm = (part.mass - sim.mass - phantom).abs();
             let dh = (part.hitpoints - sim.hitpoints).abs();
             mass_max = mass_max.max(dm);
             hp_max = hp_max.max(dh);
@@ -120,7 +127,13 @@ fn every_shipped_bots_stats_equal_the_rigs_own() {
         }
 
         let sim_total_hp: f32 = rig.components.iter().map(|c| c.hitpoints).sum();
-        let dtm = (stats.mass - rig.mass).abs();
+        let phantoms: f32 = rig
+            .components
+            .iter()
+            .filter(|c| c.mass > 0.0)
+            .map(|c| c.havok.phantom_mass)
+            .sum();
+        let dtm = (stats.mass - rig.mass - phantoms).abs();
         let dth = (stats.hitpoints - sim_total_hp).abs();
         total_mass_max = total_mass_max.max(dtm);
         total_hp_max = total_hp_max.max(dth);
@@ -302,16 +315,21 @@ fn a_built_bots_stats_equal_the_rigs_after_a_save_and_reload() {
     let path = dir.join("Built Stats.bot");
     build.save_to(&path).unwrap();
     let rig = ra2sim::rig::load(path.to_str().unwrap()).unwrap();
+    let phantoms: f32 = rig.components.iter().map(|c| c.havok.phantom_mass).sum();
     assert!(
-        (model.mass - rig.mass).abs() < 1e-3,
-        "{} vs {}",
+        (model.mass - rig.mass - phantoms).abs() < 1e-3,
+        "{} vs {} + {}",
         model.mass,
-        rig.mass
+        rig.mass,
+        phantoms
     );
     let sim_hp: f32 = rig.components.iter().map(|c| c.hitpoints).sum();
     assert!((model.hitpoints - sim_hp).abs() < 1e-3);
     for (i, part) in model.parts.iter().enumerate() {
-        assert!((part.mass - rig.components[i].mass).abs() < 1e-4);
+        assert!(
+            (part.mass - rig.components[i].mass - rig.components[i].havok.phantom_mass).abs()
+                < 1e-4
+        );
         assert!((part.hitpoints - rig.components[i].hitpoints).abs() < 1e-4);
     }
     eprintln!(

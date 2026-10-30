@@ -1613,6 +1613,12 @@ impl ApplicationHandler for App {
                 for sound in builder.take_sounds() {
                     self.audio.ui(sound);
                 }
+                // The Test Robot tab's practice arena plays its own robot (motors, weapons,
+                // impacts, the obstacles' sounds), heard from the practice camera.
+                if let Some((cues, listener)) = builder.take_arena_cues() {
+                    self.audio.drain_match(listener);
+                    self.audio.play_cues(cues, listener);
+                }
             }
             // One tick of the script sounds, heard from whichever match is
             // live. The HQ and the build mode own their own match sessions.

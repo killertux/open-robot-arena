@@ -14,4 +14,6 @@ pub mod nav;
 pub mod script;
 pub mod shell;
 
-pub use shell::{LobbyPick, PanelButton, PanelRequest, Pick, Shell, Shot, Step, PREMATCH};
+pub use shell::{
+    yes_no_box, LobbyPick, PanelButton, PanelRequest, Pick, Shell, Shot, Step, PREMATCH,
+};

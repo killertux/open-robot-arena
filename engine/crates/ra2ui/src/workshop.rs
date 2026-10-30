@@ -263,9 +263,26 @@ pub fn compose(ui_root: &Path, tab: &Tab) -> Result<Gib, String> {
     if !loaded_tab {
         return Err(format!("{SCREEN} has no {CONTENT_SLOT}"));
     }
+    for block in gib.blocks.iter_mut() {
+        if let Block::Widget(w) = block {
+            floor_splits(w);
+        }
+    }
     // The nav bar arrives through a `Proxy` in the window's own strip.
     crate::inline_proxies_in(&mut gib, ui_root);
     Ok(gib)
+}
+
+/// The window's own two vertical splits take whole-pixel panes (`PaneFloorV`, see `split_children`).
+fn floor_splits(widget: &mut Widget) {
+    if widget.kind == ra2fmt::gib::WidgetKind::SplitFrame
+        && matches!(widget.name(), "botlab splt" | "lowersplit")
+    {
+        crate::input::set_field(widget, "PaneFloorV", "true");
+    }
+    for child in widget.children.iter_mut() {
+        floor_splits(child);
+    }
 }
 
 /// The tab a button selects, by the button's `Name`.

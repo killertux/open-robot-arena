@@ -1594,6 +1594,7 @@ mod tests {
             bot_name: "The Wrangler".into(),
             team_name: "TEAM STINKBOMBS".into(),
             immobilized: false,
+            owner: None,
             winner: false,
         }];
         for block in gib.blocks.iter_mut() {

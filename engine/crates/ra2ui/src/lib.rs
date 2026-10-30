@@ -1496,7 +1496,11 @@ fn sized(
 }
 
 /// The Team HQ screen's own groups, laid out at their exact fractions (see [`sized`]).
-const EXACT_GROUPS: [&str; 11] = [
+const EXACT_GROUPS: [&str; 12] = [
+    // The lobby's chat column: its 0.42 of 768 = 322.56 px stays exact, which puts every widget of
+    // the chat group one pixel lower, as the original's do (live `mp-lobby-host-chat`: `CHAT:` 521,
+    // the entry's border 532, the alias box 562; they were 520, 531, 561). docs/38 section 16.8.
+    "lower group",
     "hq content group",
     "team heading group",
     "kills group",
@@ -1585,6 +1589,16 @@ fn split_children<'a>(
     } else {
         master_size
     };
+
+    // The Bot Lab's two vertical splits (`PaneFloorV`, put on them by `workshop::compose`) take a whole
+    // number of pixels for the sized pane: live the lab's 3D frame starts at y 147, not at the 148.19 the
+    // 0.14 x 768 = 107.52 px tab strip gives.
+    let master_size =
+        if !horizontal && widget.field("PaneFloorV").is_some() && frame.h.fract() == 0.0 {
+            master_size.floor()
+        } else {
+            master_size
+        };
 
     // `Master` names the slot MasterSize sizes. Slot 0 is always the first
     // (top/left) pane and slot 1 the second, so a master of 1 is the pane at

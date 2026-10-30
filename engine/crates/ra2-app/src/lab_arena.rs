@@ -50,6 +50,11 @@ pub struct LabArena {
     input: DriveInput,
     accumulator: f32,
     target: Option<(Target, [u32; 2])>,
+    /// What the practice arena sounds like: the robot's motors, its weapons, impacts and the
+    /// obstacles' own sounds (`AddXtraSound`). No bell, announcer or crowd: the practice mode has
+    /// no countdown, no end and no stands.
+    sounds: crate::match_sounds::MatchSounds,
+    cues: Vec<crate::match_sounds::SoundCue>,
 }
 
 impl LabArena {
@@ -92,6 +97,8 @@ impl LabArena {
             input: DriveInput::default(),
             accumulator: 0.0,
             target: None,
+            sounds: crate::match_sounds::MatchSounds::new(),
+            cues: Vec::new(),
         })
     }
 
@@ -128,7 +135,49 @@ impl LabArena {
         while self.accumulator >= dt {
             self.accumulator -= dt;
             self.matched.step_with(&[Some(self.input)]);
+            let cues = self.sounds.observe(&mut self.matched);
+            self.cues
+                .extend(cues.into_iter().filter(Self::is_practice_cue));
         }
+    }
+
+    /// The cues the practice arena plays: the robot's and the props' sounds, not the match's
+    /// ceremony (`Practice.py` starts no countdown, announcer, crowd or chat).
+    fn is_practice_cue(cue: &crate::match_sounds::SoundCue) -> bool {
+        use crate::match_sounds::SoundCue::*;
+        !matches!(
+            cue,
+            Beep { .. }
+                | Chat
+                | Announce { .. }
+                | ImmobileTick
+                | CrowdStop
+                | CrowdLoop { .. }
+                | CrowdOneShot { .. }
+                | CrowdLoopShout { .. }
+                | CrowdFadeShout { .. }
+        )
+    }
+
+    /// The sounds the steps since the last call made.
+    pub fn take_cues(&mut self) -> Vec<crate::match_sounds::SoundCue> {
+        std::mem::take(&mut self.cues)
+    }
+
+    /// The ears: the practice camera's eye, looking at the robot.
+    pub fn audio_listener(&self) -> ra2_audio::Listener {
+        let (eye, aim) = self.matched.duel.camera_pose(&self.camera);
+        let direction = aim - eye;
+        let forward = if direction.length_squared() > 1e-8 {
+            direction.normalize()
+        } else {
+            glam::Vec3::Z
+        };
+        ra2_audio::Listener::new(
+            [eye.x, eye.y, eye.z],
+            [forward.x, forward.y, forward.z],
+            [0.0, 1.0, 0.0],
+        )
     }
 
     /// The 3D view at `size` as RGBA pixels.

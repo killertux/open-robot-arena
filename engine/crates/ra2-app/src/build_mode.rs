@@ -249,12 +249,69 @@ impl PreviewCamera {
     }
 }
 
+/// The widget that carries the lab's `Info Display` (the file's record is a `Glyph` that the
+/// `DisplayBox` named `Info Display` dresses; the tip's widgets hang on the Glyph, whose frame is
+/// the box's).
+fn info_display_mut(widget: &mut Widget) -> Option<&mut Widget> {
+    if widget
+        .attachments
+        .iter()
+        .any(|a| a.body.as_ref().is_some_and(|b| b.name() == "Info Display"))
+    {
+        return Some(widget);
+    }
+    widget.children.iter_mut().find_map(info_display_mut)
+}
+
+/// The tip's two widgets, as GIB records (`{ICONX}` / `{TEXTX}` fill in the centring).
+const TIP_GIB: &str = "T 1.09\r
+[Image]\r
+_Tiling false\r
+_Filename botlab\\tip.bmp\r
+_BufferWidth 0 0 0 0\r
+_Size 19 0 17 0\r
+_Alpha false\r
+_Filtering 0\r
+_ForeColor 1 1 1 1\r
+_Name \r
+_Position {ICONX} 0 {ICONY} 0\r
+0 0 1 1\r
+Name tip icon\r
+ID -1\r
+Position {ICONX} 0 {ICONY} 0\r
+Size 19 0 17 0\r
+Visible true\r
+ChildOrder 0\r
+ClipMode 0\r
+NumChildren 0\r
+[Text]\r
+_Font fg_mcn14\r
+_Text {TEXT}\r
+_ForeColor 0.5 0.6 1 1\r
+_Name \r
+_Position {TEXTX} 0 {TEXTY} 0\r
+Name tip text\r
+ID -1\r
+Position {TEXTX} 0 {TEXTY} 0\r
+Size 700 0 16 0\r
+Visible true\r
+ChildOrder 1\r
+ClipMode 0\r
+NumChildren 0\r
+";
+
 /// The live workshop: the shell, the model, and the panel drawn over the 3D
 /// placeholder.
 pub struct Builder {
     /// The size the shell is laid out at (1280x1005 for the window; the
     /// harness lays it out natively at the capture's size).
     size: [f32; 2],
+    /// Which of the four random tips the lab shows (`FUN_0043e900` rolls again whenever the screen
+    /// changes) and the screen it was rolled for.
+    tip_roll: (u32, u32),
+    tip_screen: Option<(String, Option<String>)>,
+    /// The tip last written into the Info Display (its text and the screen size it was centred for).
+    tip_written: Option<String>,
     /// The fidelity harness's view: the 3D view fills its placeholder and the
     /// synthetic edit panel is not drawn.
     view_only: bool,
@@ -571,6 +628,9 @@ impl Builder {
         let custom_textures = game.join(CUSTOM_TEXTURES);
         let mut builder = Builder {
             size,
+            tip_roll: (0, 0),
+            tip_screen: None,
+            tip_written: None,
             view_only: false,
             ui: game.join("UI"),
             game,
@@ -748,6 +808,14 @@ impl Builder {
         if let Some(arena) = &mut self.arena {
             arena.advance(seconds);
         }
+    }
+
+    /// The practice arena's sounds since the last call, with the ears to hear them from.
+    pub fn take_arena_cues(
+        &mut self,
+    ) -> Option<(Vec<crate::match_sounds::SoundCue>, ra2_audio::Listener)> {
+        let arena = self.arena.as_mut()?;
+        Some((arena.take_cues(), arena.audio_listener()))
     }
 
     /// The robot's held keys for the practice arena.
@@ -2591,19 +2659,22 @@ impl Builder {
                 self.refresh_panel();
                 return Ok(());
             };
-            match self.build.board_mut().remove(cell) {
-                Some(control) => {
-                    self.wire_control = None;
-                    self.wire_component = None;
-                    self.status = format!("removed control {}", control.name);
-                    return self.refresh();
-                }
-                None => {
-                    self.status = "there is no control there".into();
-                    self.refresh_panel();
-                    return Ok(());
-                }
+            if self.build.board().control_at(cell).is_none() {
+                self.status = "there is no control there".into();
+                self.refresh_panel();
+                return Ok(());
             }
+            // `Delete this input control?`: a modal `Wiring` box (the body is blank live).
+            let Ok(mut gib) = workshop::load(&self.ui, "common/messagebox.gib") else {
+                return self.confirm_delete(cell);
+            };
+            ra2_shell::yes_no_box(&mut gib, "Wiring");
+            self.dialog = Some(LabDialog {
+                gib,
+                kind: DialogKind::ConfirmDelete { cell },
+                focus: Focus::None,
+            });
+            return Ok(());
         }
         if let Some(rest) = action.strip_prefix("m9:armor:") {
             let type_id: i32 = rest
@@ -3130,6 +3201,152 @@ impl Builder {
         self.refresh_controls();
         self.refresh_panel();
         Ok(())
+    }
+
+    /// The tip line at the bottom of the lab (`FUN_0043e900`): the screen's `Info Display` carries
+    /// the `tip.bmp` icon and one line of `fg_mcn14` text in `.5 .6 1`, centred as a pair. The text
+    /// follows the state: no chassis yet, no parts, no control board, no wiring, else one of four
+    /// pointers at the other tabs, chosen at random (and again whenever the screen changes) among
+    /// those that do not name the tab the player is on.
+    fn tip_text(&mut self) -> String {
+        const PAINT: &str = "Click the Paint Shop button to customize your robot's appearance.";
+        const COMPONENTS: &str = "Click the Components button to continue working on your robot.";
+        const CHASSIS: &str = "Click the Chassis button to add special armor to your robot.";
+        const TEST: &str = "Click the Test Robot button to try out your robot.";
+        let Some(lab) = self.shell.lab_mut() else {
+            return String::new();
+        };
+        // The original's `+0x1d8`: 1 overview, 2 chassis, 3 / 4 the two structure screens, 5 armour,
+        // 6 components, 7 wiring, 8 appearance, 9 test robot.
+        let screen = match (lab.tab, lab.step) {
+            ("overview button", _) => 1,
+            ("chassis button", Some("structure design button")) => 3,
+            ("chassis button", Some(_)) => 5,
+            ("chassis button", None) => 2,
+            ("components button", _) => 6,
+            ("wiring button", _) => 7,
+            ("paintshop button", _) => 8,
+            _ => 9,
+        };
+        let key = (lab.tab.to_string(), lab.step.map(str::to_string));
+        if self.tip_screen.as_ref() != Some(&key) {
+            self.tip_screen = Some(key);
+            self.tip_roll.0 = self
+                .tip_roll
+                .0
+                .wrapping_mul(1_103_515_245)
+                .wrapping_add(12_345);
+            self.tip_roll.1 = (self.tip_roll.0 >> 16) & 3;
+        }
+        let blank = self.build.is_blank();
+        let parts = self.build.components().len();
+        if blank {
+            return match screen {
+                2 => "Click the Structure Design button to build a chassis",
+                3 => "Click on the grid to add points to your chassis",
+                _ => "Click the Chassis button to start your robot",
+            }
+            .to_string();
+        }
+        if screen == 4 {
+            return "Click and drag points to adjust the sides of your chassis".into();
+        }
+        if parts <= 1 && screen != 6 {
+            return "Click the Components button to add parts to your robot".into();
+        }
+        if !self.build.has_control_board() && screen == 6 {
+            return "Click the Control Board (under Power) to add it first".into();
+        }
+        if self.build.board().controls.is_empty() {
+            return "Click the Wiring button to set up keyboard or joystick controls for your robot"
+                .into();
+        }
+        // The roll is redone (`0x419190(4)` in a loop) until the pick is not about this screen.
+        for pick in (self.tip_roll.1..).take(4) {
+            let (text, here): (&str, bool) = match pick & 3 {
+                0 => (PAINT, screen == 8),
+                1 => (COMPONENTS, screen == 6),
+                2 => (CHASSIS, screen == 2 || screen == 5),
+                _ => (TEST, screen == 9),
+            };
+            if !here {
+                return text.to_string();
+            }
+        }
+        String::new()
+    }
+
+    /// Put the tip into the lab's `Info Display`: an icon and a text widget, centred as a pair
+    /// (the original's markup `<image filename "UI\\botlab\\tip.bmp"><text font fg_mcn14 color .5 .6 1 1
+    /// align 2>`, icon 19 x 17 at the line's top, three pixels before the text).
+    fn refresh_tip(&mut self) {
+        let text = self.tip_text();
+        let key = format!("{text}|{}x{}", self.size[0], self.size[1]);
+        if self.tip_written.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        let width = self
+            .shell
+            .text_extent("fg_mcn14", &text)
+            .map(|(w, _)| w)
+            .unwrap_or(0.0);
+        // The widgets hang on the `Glyph` the box dresses, whose frame is the whole bottom pane; the
+        // box itself (80 % wide, 18 tall, 2 px down) is where the pair is centred.
+        let (row, pane) = {
+            let placed = self.shell.placements();
+            let info = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == "Info Display")
+                .map(|p| p.frame);
+            // The pane the split gives the box's widgets: `lowersplit`'s second slot.
+            let pane = placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == "lowersplit")
+                .and_then(|split| split.children.get(1))
+                .map(|slot| slot.frame);
+            (info, pane)
+        };
+        let (Some(row), Some(pane)) = (row, pane) else {
+            return;
+        };
+        let Some(lab) = self.shell.lab_mut() else {
+            return;
+        };
+        let left = ((row.w.floor() - (19.0 + 3.0 + width)) / 2.0).floor() + row.x.floor() - pane.x;
+        let top = row.y - pane.y;
+        let doc = TIP_GIB
+            .replace("{TEXT}", &text)
+            .replace("{ICONX}", &format!("{left}"))
+            .replace("{ICONY}", &format!("{top}"))
+            .replace("{TEXTX}", &format!("{}", left + 21.0))
+            .replace("{TEXTY}", &format!("{}", top - 8.0));
+        let gib = match ra2fmt::gib::parse(&doc) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("tip parse: {e:?}");
+                return;
+            }
+        };
+        let extra: Vec<Widget> = gib
+            .blocks
+            .into_iter()
+            .filter_map(|b| match b {
+                ra2fmt::gib::Block::Widget(w) => Some(w),
+                _ => None,
+            })
+            .collect();
+        for block in lab.document.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            if let Some(info) = info_display_mut(root) {
+                info.children.clear();
+                info.children.extend(extra.iter().cloned());
+            }
+        }
+        self.tip_written = Some(key);
     }
 
     /// The tabs that show the open design's numbers (overview, components) take
@@ -4170,6 +4387,7 @@ impl Builder {
     pub fn scene(&mut self, _target: [u32; 2]) -> Result<UiScene, String> {
         self.sync_arena();
         self.bind_arena_hud();
+        self.refresh_tip();
         let mut scene = {
             let placed = self.shell.placements();
             self.assets
@@ -5558,7 +5776,12 @@ pub fn script(
     // 6. The rig's own numbers (the simulator's loader, not a second formula).
     let rig = ra2sim::rig::load(&path.to_string_lossy())
         .map_err(|e| format!("rig {}: {e}", path.display()))?;
-    let rig_mass: f32 = rig.components.iter().map(|c| c.mass).sum();
+    // The lab's sum counts the phantom bodies (a wheel's traction ring) that the rig's `mass` leaves out.
+    let rig_mass: f32 = rig
+        .components
+        .iter()
+        .map(|c| c.mass + c.havok.phantom_mass)
+        .sum();
     let rig_hp: f32 = rig.components.iter().map(|c| c.hitpoints).sum();
     println!(
         "  reloaded: {} parts, {:.1} kg, {:.0} hp (rig: {} parts, {:.1} kg, {:.0} hp)",
@@ -5877,6 +6100,19 @@ impl Builder {
             })
             .unwrap_or_default();
         let has = |n: &str| names.iter().any(|c| c == n);
+        if let Some(DialogKind::ConfirmDelete { cell }) =
+            self.dialog.as_ref().map(|d| d.kind.clone())
+        {
+            if has("yes button") {
+                self.dialog = None;
+                return self.confirm_delete(cell);
+            }
+            if has("no button") {
+                self.dialog = None;
+                return self.refresh();
+            }
+            return Ok(());
+        }
         if has("cancel button") {
             self.dialog = None;
             return self.refresh();
@@ -5900,11 +6136,29 @@ impl Builder {
         Ok(())
     }
 
+    /// Delete the control in `cell` (the Yes of the confirmation).
+    fn confirm_delete(&mut self, cell: [i32; 2]) -> Result<(), String> {
+        match self.build.board_mut().remove(cell) {
+            Some(control) => {
+                self.wire_control = None;
+                self.wire_component = None;
+                self.status = format!("removed control {}", control.name);
+                self.refresh()
+            }
+            None => {
+                self.status = "there is no control there".into();
+                self.refresh_panel();
+                Ok(())
+            }
+        }
+    }
+
     fn dialog_ok(&mut self) -> Result<(), String> {
         let Some(dialog) = self.dialog.take() else {
             return Ok(());
         };
         match dialog.kind {
+            DialogKind::ConfirmDelete { .. } => {}
             DialogKind::Props {
                 kind,
                 cell,
@@ -6144,6 +6398,67 @@ mod tests {
         assert_eq!(back.components, builder.build.to_bot().components);
         assert_eq!(back.write(), bytes);
         assert_eq!(back.components.last().unwrap().angle, part.angle);
+    }
+
+    /// `Delete Control` asks first (live `botlab-wiring-delete-confirm`: a `Wiring` box with `Yes` and
+    /// `No`): No keeps the control, Yes removes it.
+    #[test]
+    fn delete_control_asks_before_it_deletes() {
+        let Some(game) = game_dir() else { return };
+        let Some(scratch) = std::env::var_os("ORA_TEST_SCRATCH").map(PathBuf::from) else {
+            // The Builder writes nothing, but it reads a design: run on the shipped one.
+            let mut builder = Builder::open_sized(
+                &game,
+                Some(&game.join("Teams/Team0/Bot0.bot")),
+                [1024.0, 768.0],
+            )
+            .unwrap();
+            delete_flow(&mut builder, None);
+            return;
+        };
+        let mut builder = Builder::open_sized(
+            &game,
+            Some(&game.join("Teams/Team0/Bot0.bot")),
+            [1024.0, 768.0],
+        )
+        .unwrap();
+        delete_flow(&mut builder, Some(&scratch));
+    }
+
+    fn delete_flow(builder: &mut Builder, shot: Option<&Path>) {
+        builder.click_named("wiring button").unwrap();
+        let before = builder.build.board().controls.len();
+        assert!(before > 0, "C.R.U.S.H. has controls");
+        let cell = builder.build.board().controls[0].cell;
+        builder
+            .apply(&format!("m9:wirectl:{}:{}", cell[0], cell[1]))
+            .unwrap();
+        builder.apply("m9:wireremove").unwrap();
+        assert!(builder.dialog_open(), "Delete Control opens the box");
+        assert_eq!(builder.build.board().controls.len(), before, "nothing yet");
+        if let Some(dir) = shot {
+            builder
+                .shot(&dir.join("delete-confirm.png"), [1024, 768])
+                .unwrap();
+        }
+        let no = builder.dialog_point_for("no button").expect("a No button");
+        builder.click(no[0], no[1]).unwrap();
+        assert!(!builder.dialog_open());
+        assert_eq!(builder.build.board().controls.len(), before, "No keeps it");
+        builder
+            .apply(&format!("m9:wirectl:{}:{}", cell[0], cell[1]))
+            .unwrap();
+        builder.apply("m9:wireremove").unwrap();
+        let yes = builder
+            .dialog_point_for("yes button")
+            .expect("a Yes button");
+        builder.click(yes[0], yes[1]).unwrap();
+        assert!(!builder.dialog_open());
+        assert_eq!(
+            builder.build.board().controls.len(),
+            before - 1,
+            "Yes removes it"
+        );
     }
 
     /// A refused spot keeps the part in the drag with the exe's text; a click

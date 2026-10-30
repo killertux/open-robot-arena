@@ -3238,6 +3238,7 @@ mod tests {
             eliminated: false,
             winner: false,
             immobilized: false,
+            owner: None,
             components: Vec::new(),
         };
         let mut player = robot(0, "My Robot", 42.0);

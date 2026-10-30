@@ -2078,6 +2078,7 @@ mod tests {
             eliminated: false,
             winner: slot == 0,
             immobilized: false,
+            owner: None,
             components: Vec::new(),
         }
     }

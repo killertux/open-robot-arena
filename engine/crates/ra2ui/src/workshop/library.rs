@@ -60,9 +60,9 @@ impl std::error::Error for LibraryError {}
 /// One component, as the game loads it: its definition, its mesh's attachment
 /// points, and the two numbers the stats panel needs.
 ///
-/// The mass rule is the simulator's (`ra2sim::rig`): a definition's `mass =`
-/// field wins; otherwise the `.gmf`'s rigid-body masses are summed **as the
-/// sim sums them** (the top-level bodies of each collection); and when that sum
+/// The mass rule is the lab's own sum: a definition's `mass =` field wins;
+/// otherwise the `.gmf`'s rigid-body masses are summed as the
+/// lab sums them (`FUN_004df0b0`: every body, the no-collision phantoms too); and when that sum
 /// is zero (every stock wheel) the body is priced by its bounding-box volume
 /// (`ra2fmt::component::zero_mass_fill`). `has_hull` mirrors the sim's rule that
 /// a component with no geometry contributes no mass to the robot.
@@ -347,13 +347,11 @@ impl GameLibrary {
         let mounts = scene.attachment_table();
         let hinge = ra2fmt::mount::rotor_hinge(&scene);
         let points = scene_points(&scene);
+        // The lab's sum (`FUN_004df0b0`, a read of each body's stored mass) counts every rigid body of
+        // the file, the no-collision phantoms too: a wheel's `wheel_traction` 2 kg makes the live
+        // C.R.U.S.H. 395.2 kg (4 x 2 over the 387.2 of the collidable bodies alone).
         let mass = def.number("mass").unwrap_or_else(|| {
-            let sum: f32 = scene
-                .rigid_bodies()
-                .iter()
-                .filter(|rb| !rb.disable_collisions)
-                .map(|rb| rb.mass)
-                .sum();
+            let sum: f32 = scene.rigid_bodies().iter().map(|rb| rb.mass.max(0.0)).sum();
             if sum > 0.0 {
                 sum
             } else if points.is_empty() {
@@ -525,10 +523,13 @@ mod tests {
         assert!(wheel.loaded, "the mini wheel should load");
         assert_eq!(wheel.base, "Wheel");
         assert!(
-            (wheel.mass - 9.0).abs() < 0.01,
-            "the mini wheel is its hub's 9 kg (the traction ring is a massless phantom), got {}",
+            (wheel.mass - 17.0).abs() < 0.01,
+            "the mini wheel is its hub's 9 kg plus the traction ring's 8 (the lab sums every body), got {}",
             wheel.mass
         );
+        // The live C.R.U.S.H.: 4 SlipperBottom wheels of 16 + 2 make 395.2 kg, not 387.2.
+        let slipper = lib.component_info("Wheel", "Components\\wheel_slipperbottom.txt");
+        assert!((slipper.mass - 18.0).abs() < 0.01, "got {}", slipper.mass);
         assert!(wheel.has_hull);
         let motor = lib.component_info("SpinMotor", "Components\\ztek1.txt");
         assert!((motor.mass - 25.0).abs() < 0.01, "Z-Tek is 25 kg");
