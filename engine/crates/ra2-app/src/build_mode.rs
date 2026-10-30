@@ -6437,9 +6437,12 @@ mod tests {
         assert!(builder.dialog_open(), "Delete Control opens the box");
         assert_eq!(builder.build.board().controls.len(), before, "nothing yet");
         if let Some(dir) = shot {
+            // The harness' view: no debug panel over the 3D view.
+            builder.view_only = true;
             builder
                 .shot(&dir.join("delete-confirm.png"), [1024, 768])
                 .unwrap();
+            builder.view_only = false;
         }
         let no = builder.dialog_point_for("no button").expect("a No button");
         builder.click(no[0], no[1]).unwrap();

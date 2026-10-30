@@ -1355,8 +1355,9 @@ Against `botlab-overview`, `botlab-flow-wiring-stock`, `botlab-wiring-delete-con
   the `--build` self-check compares the rig's mass plus its phantoms. Example `ra2ui --example botmass` prints a design's parts.
 * **The 1 px low content.** The shell's two vertical splits (`botlab splt`, `lowersplit`) take a **whole number of pixels** for the sized pane (`PaneFloorV`, `ra2ui::split_children`; the tab strip is
   `floor(0.14 x 768) = 107`, not 107.52). Name box / weight row / 3D frame are then exact: the Overview's name and weight rows differ 0.00 from the capture (they were 7.05 and 12.07 at the 1 px offset), the 3D frame
-  top border is at y 147. MAE against the captures (1024x768, before -> after the weight, this and the tip): overview 1.118 -> 0.66 (0.02 in the tip line), chassis 0.911 -> 0.77, components 2.058 -> 1.16, wiring
-  3.93 -> 3.79, paint 1.229 -> 0.97. The snapshot box under it ends 1 px high now (469.3 live): the group is positioned from the old height; open.
+  top border is at y 147. MAE against the captures (1024x768, master -> final, the tip's random pick included: another pick than the capture's costs about 0.05): overview 1.118 -> 0.51, chassis 0.911 -> 0.82,
+  components 2.058 -> 1.21, wiring (`botlab-flow-wiring-stock`) 3.93 -> 3.81, paint 1.229 -> 1.02 (the first three on the weight and the whole-pixel panes only: 0.66 / 0.77 / 1.16 / 3.79 / 0.97).
+  The snapshot box under it ends 1 px high now (469.3 live): the group is positioned from the old height; open.
 * **The tip line** (`FUN_0043e900`, text boxes at `0x6f1500..0x6f1844`): the lab's `Info Display` (80 % wide, 18 px, 2 px under the pane) shows `tip.bmp` (19 x 17) and one line of `fg_mcn14` text in
   `.5 .6 1` (markup `<image filename "UI\botlab\tip.bmp"><text font fg_mcn14 color .5 .6 1 1 align 2>` at `0x6f1500`; `0x43e6e0` sets it, `0x43e7c0` is the same in `alert.tga` / `1 .8 .3`), icon and text
   **centred as a pair** (icon at x 349 live, text from 372). The text follows the state (`+0x1d8` is the lab's screen: 1 Overview, 2 Chassis, 3 / 4 the two structure screens, 5 Armor, 6 Components, 7 Wiring, 8
@@ -1369,7 +1370,7 @@ Against `botlab-overview`, `botlab-flow-wiring-stock`, `botlab-wiring-delete-con
   (`0x42cf46`, `0x42d11a`: *Components should not intersect...*, *Robots cannot exceed a maximum size.*; `0x44d5fb`: the mass limit; `0x478d1d`: *Can't move that point because it will bend one side too much*;
   2 s timer at `0x714890`) still go to the panel's status string; the random pick is ours (not the exe's LCG).
 * **Delete Control** (`0x6f19fc` *Delete this input control?*): the shipped `common/messagebox.gib` titled **`Wiring`**, `Yes` left of `No`, the body **does not draw** (live `botlab-wiring-delete-confirm`: an empty
-  box). `ra2_shell::yes_no_box` dresses the template (shared with the HQ's boxes), `DialogKind::ConfirmDelete`; No keeps the control, Yes removes it. Test `delete_control_asks_before_it_deletes`.
+  box). `ra2_shell::yes_no_box` dresses the template (shared with the HQ's boxes), `DialogKind::ConfirmDelete`; No keeps the control, Yes removes it. Test `delete_control_asks_before_it_deletes` (`ORA_TEST_SCRATCH=<dir>` writes the frame): the box, title and buttons sit exactly where `botlab-wiring-delete-confirm`'s do (box MAE 7.05, all of it the nail texture's phase).
 * **Practice-arena sounds.** `LabArena` observes its match with the same `MatchSounds` the matches use (motors and their pitch, weapon fire, impacts, the obstacles' `AddXtraSound` materials, parts coming off)
   and the window plays them from the practice camera (`Builder::take_arena_cues`, `AudioSystem::play_cues`); the ceremony cues (countdown beeps, announcer, crowd, immobility tick, chat) are dropped because
   `Practice.py` starts none of them. **Not verified live**: no practice-arena audio capture exists; the cue rules are the matches' (docs/35).
