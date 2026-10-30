@@ -5059,6 +5059,130 @@ wheels' sense, which needs the original's wheel body frames (above, §12u); the
 rod against the fork (fewer points than live); the Scout's right wheel's build
 tilt (§12w).
 
+### 12af. The frame's order is ours; the airborne wheels' sense was not (fx/flip-timing)
+
+Section 12ae left two leads on the box ALARM going onto its back (24 of 48
+fights, live 5 of 13, early falls 10 of 48 against 0 of 13 before 13 s): when
+the original takes a fork's or a piston's fire command inside a frame, and which
+way a wheel in the air turns. The first came out negative (our order is the
+original's), the second was the cause of the early falls.
+
+**The order inside a frame (recovered, verified live).** New agent
+`frida/ra2_frameorder.js` (function-entry hooks, every row in one total order:
+`U` the frame update `0x412fc0`, `B` a brain's update `0x4011f0` with its dt and
+clock, `K` the press callbacks `0x448730` (piston) / `0x4467f0` (burst motor),
+`D` the power-draw queries `0x448980` / `0x446d70`, `T` the component ticks
+`0x448650` / `0x446670` with their two flag bytes, `F` the fire `0x448750` /
+`0x446810`, `Q` the per-robot power step `0x4dc3f0`, `S` `World::stepTo`
+`0x52aa60`, `A` the step pieces, `P` the zone listener `0x4a4780`), three box
+Scout v ALARM fights of 60 s with the shipped AIs, hazards on:
+`frameorder-scout-alarm-box__live__000..002` (35 657 / 35 639 / 43 714 rows;
+manifest rows in `manifest-additions-2026-10-21-flip-timing.tsv`).
+
+* A game frame is `B Q B Q S S` in 1840 of the 2490 frames of `__000` and `B Q B Q`
+  with no `S` in the other 650: robot 0's brain, robot 0's power step (its
+  components' draw queries and ticks), robot 1's brain, robot 1's power step,
+  then the physics, which always goes in whole pairs of 1/60 s substeps. The
+  frame's dt is the real one (mean 0.0246 s, 0.033 at most), the physics runs
+  when the game time has caught up with another 1/30 s. Nothing ticks between
+  the pair's two substeps: the tick `T` comes before the pair.
+* A component's tick fires only when **both** flags are set (`0x448650`:
+  `+0x284` and `+0x285`, `0x446670`: `+0x288` and `+0x289`; both cleared). The
+  first is set by the press callback (`0x448730`, `0x4467f0`: the AI's
+  `Input(..., Fire)`), the second by the device's power-draw query (`0x448980`,
+  `0x446d70`) when the first is up. In the frame the brain presses, the robot's
+  power step comes after it: 502 of 503 presses were taken by the tick of the
+  same frame (flags `1 1`), the last one frame later. That is what ours does
+  (the brains first, the press taken by the same update's tick, the stroke
+  starting at the next substep); the order of the two robots' brains and power
+  steps is interleaved live, which only matters if a brain read the other
+  robot's commands (none does). So §12ae's open question is closed: brains
+  before components, the press taken in the same frame, no sub-pair offset.
+  What stays different is the clock: the live brains and ticks run with the real
+  dt of a frame that may have no physics after it, ours with 1/30 per pair; a
+  brain sees the world as it was up to 0.033 s before its clock (live mean about
+  0.041 s, ours 0.033 s), a difference of about half a substep that is not
+  worth a model.
+
+**Which way a wheel in the air turns (recovered, verified live).** The negation
+of `0x4814e1..0x48151a` is `trunc(-p · 0.01 · speed)` times `-1` when any of
+`atom + 0x60/0x64/0x68` (the hinge axis in body B's frame) is below `-0.5`
+(`0x6a7e88`), the second test (`+0x70 > +0x74`, the controller's limits, set in
+order by the constructor `0x4802a8..0x4802cc`) never being true for a wheel. B is
+the wheel's body, and its frame is not ours: 15 wheels of 7 robots
+(`spinup-*__live__000` `B` rows, first quaternion of each body) have the wheel
+body's frame ours times the motor rotor's own `TM`, the rotor object `axle` of
+the motor's `.gmf` (`RotorHinge::rotor_tm`): a quarter turn about x for
+`anglemotor1` (live body quaternion `(0.5, -0.5, 0.5, 0.5)` against ours `(0.7071,
+0, 0.7071, 0)`; `redbird1`, `ztek1` likewise), the identity for
+`Styles\anglemotor2`. The axis in B is then `(placement · TM)⁻¹ · axle`:
+`(0, 1, 0)` on `anglemotor1`, `(0, 0, -0.8)` (the `.gmf`'s hinge spin axis is
+`(0, 0, -0.8)` there) on `anglemotor2`, which are exactly the live atoms' `L`
+values (`hingectl-scout-alarm-box__live__000`: Scout left/right, ALARM's four
+wheels) and the frames of every wheel in the table (Scout, ALARM, Razor,
+FlapJack, Revenge, Raptor, Miniberg, Iceberg, Sentinel, Berserker, Dementia, LMF,
+`anglemotor1`/`redbird1`/`ztek1` always `y`, `anglemotor2` always `z`). So
+the wheels on `anglemotor2` are negated and turn `-x` (which is what ours did
+for every wheel), and the others are not: they turn `+x`. At the first substep
+in the air at full throttle live: Scout left `+19.8`, right `-16.2`, ALARM `+20.1,
+-16.0, +20.0, -16.0` (front left, front right, back right, back left); ours
+`-20.2` for all. Four wheels spinning up the same way took 4 · 0.557 · 20 =
+44 N·m·s out of a chassis of inertia about 40 kg·m² in a substep (the reaction
+on a robot standing on the fork); live the pairs cancel.
+
+`robot::air_signs` computes the sense per wheel from the rig (the wheel's
+placement times the parent motor's `rotor_tm`, the joint axis), and the drive
+step multiplies the airborne wheel's hinge target by it
+(`RA2_AIR_SIGN=0` gives back the old behaviour); test
+`duel::tests::an_airborne_wheel_turns_by_the_sign_of_its_axis_in_its_own_frame`.
+`examples/wheelframes` prints each wheel's placement, its parent motor's mount
+frame, `rotor_tm` and the predicted axis in B, to compare with the live `L` and
+`B` rows.
+
+**Validation.** `stepprobe` over the §12s set-1 trials (`spinerr.py`, the
+one-step error of the wheels' spin about their axle at throttle 100 in the
+air, mean along the spin): Scout left (the flipped wheel) `-12.4` → `+4.7`
+rad/s (mean |error| 14.1 → 6.3), right (not flipped) `+3.0` → `+2.9`; every
+touching and idle row unchanged to the digit. Ensembles, `FIDTRACE_WARMUP` x 48
+(0..47; counted `>= 10` priced hits per attacker with `FIDTRACE_HITS`, mean ±
+standard error; `fidelity` 9fbf16c = before reproduces §12ae's column to the
+digit on the box and the Octagon; the Compressor's first 24 runs differ in my
+list) and a second set of 48 (warmups 100..147), before -> after:
+
+| fight | live | before | after | before (2nd 48) | after (2nd 48) |
+|---|---|---|---|---|---|
+| box ALARM / Scout | 41.1 / 6.0 | 30.3 / 4.9, 15 full | 30.5 / 5.2, 13 | 32.9 / 4.8, 13 | 35.7 / 5.1, 20 |
+| ... upside down (3 s), all / before 13 s | 5 of 13 / 0 | 26 / 12 of 48 | 25 / 5 | | |
+| box Razor v FlapJack (Razor / FlapJack) | 0.1 / 3.0 | 4.1 / 1.3 | 4.9 / 1.3 | 4.4 / 1.0 | 4.9 / 0.9 |
+| Compressor Wide Load / Sentinel | 73.6 / 5.3 | 70.7 / 4.2 | 60.7 / 4.1 | 78.5 / 4.3 | 72.0 / 4.5 |
+| Octagon ALARM / Scout | 13.6 / 3.2 | 13.1 / 3.5 | 12.6 / 2.7 | | |
+
+(`fightprobe` for the upside-down counts: ALARM's `up.y < 0` held 3 s.) The
+early falls (before 13 s) go from 12 to 5 of 48 (live 0 of 13) as the airborne
+sense predicts, the box ALARM's hits stay where they were (30.3 -> 30.5, 32.9 ->
+35.7) and the falls over the whole fight with them (26 -> 25): the later ones
+have another cause. The Compressor's Wide Load (its two driven N-12 wheels
+are flipped) moves 70.7 -> 60.7 and 78.5 -> 72.0, inside its standard error
+(7) both times but on the same side; Razor 4.1 -> 4.9 and 4.4 -> 4.9 against
+live 0.1, also inside the error. Section 12s's replays (set 1, no brains, the
+Scout driven at full throttle) go the other way, ALARM on its back at the end
+0 / 20 -> 5 / 20 (live 1 / 20; the Scout's flipped wheel changes its own
+dynamics there, and the trials amplify it), set 2 unchanged (0 / 17).
+
+`duel::tests::a_ram_is_a_blow_and_resting_contact_does_nothing` counted the
+ram's own rebound (a 17 hit 0.3 s after the blow) as resting contact once the
+wheels' sense changed the trajectory; it now lets the first second of rest go
+by. Gate: fmt, clippy `-D warnings` clean, 806 tests pass, nothing written
+under `local/game`.
+
+**Open.** The later falls of the box ALARM (13 s on: the fork and the arena's
+hazards, not the wheels); the replay set 1's Scout, which the flipped wheel
+now pushes the wrong way somewhere else; the wheel sense of the hubs of a
+`Steering` unit and of a burst motor's rotor (the rule applies to every hinge
+controller, only the wheels' frames were checked); whether the live brains'
+real-dt clock (above) matters for the fork's fire timing against the first
+meeting.
+
 ### 12ag. Where the arena's damage comes from: the brains' first route, one event a pair (fx/dmg-tune)
 
 Two gaps were open: ALARM took 77-101 hp a fight from the box's hazards (live
