@@ -948,6 +948,11 @@ impl Shell {
         }
     }
 
+    /// The size of a string in a named face, in pixels (the lab centres its tip with it).
+    pub fn text_extent(&self, face: &str, text: &str) -> Option<(f32, f32)> {
+        self.fonts.measure(face, text)
+    }
+
     /// The workshop, to write the lists the screens say to fill.
     pub fn lab_mut(&mut self) -> Option<&mut BotLab> {
         match &mut self.screen {
@@ -3936,6 +3941,28 @@ fn bind_description(widget: &mut ra2fmt::gib::Widget, text: &str) {
     }
     for child in widget.children.iter_mut() {
         bind_description(child, text);
+    }
+}
+
+/// Dress `common/messagebox.gib` as a Yes / No box titled `title` with an empty body, as the
+/// original's style-0xc boxes are drawn (live `botlab-wiring-delete-confirm`: the body text does not
+/// draw, `Yes` is left of `No`).
+pub fn yes_no_box(gib: &mut ra2fmt::gib::Gib, title: &str) {
+    for block in gib.blocks.iter_mut() {
+        let Block::Widget(root) = block else { continue };
+        if let Some(w) = workshop::find_mut(root, "caption bar") {
+            set_text(w, title);
+        }
+        blank_message_body(root);
+        if let Some(w) = workshop::find_mut(root, "text box") {
+            set_text(w, "");
+        }
+        for name in ["ok button", "cancel button"] {
+            if let Some(w) = workshop::find_mut(root, name) {
+                ra2ui::input::set_field(w, "Visible", "false");
+            }
+        }
+        yes_left(root);
     }
 }
 

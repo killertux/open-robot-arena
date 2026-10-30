@@ -256,6 +256,7 @@ fn render_match_results(
             bot_name: "The Wrangler".into(),
             team_name: "TEAM STINKBOMBS".into(),
             immobilized: true,
+            owner: None,
             winner: false,
         },
         ra2ui::results::MatchResult {
@@ -266,6 +267,7 @@ fn render_match_results(
             bot_name: "Red Menace".into(),
             team_name: "Red Zone".into(),
             immobilized: false,
+            owner: None,
             winner: true,
         },
     ];

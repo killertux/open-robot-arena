@@ -443,7 +443,7 @@ to 100, 60 and 25 (`ra2_fx.js synth`). Shots from 0.9 m (`DECAL_DIST`, FOV 0.7) 
 Evidence (git-ignored, manifest rows): `fx-axe-v-scout__live__000`, `fx-axe-v-scout-full__live__000` (forced alpha 1.0, poses),
 `fx-axe-v-scout-head__live__000/001` (head-on). Side by side: scratchpad only. Tools: `capture_fx.py` `ALPHA_FORCE`,
 `DECAL_SHOTS`, `DECAL_DIST`, `fx_decal_spec.py` (accepts `dshot` rows and a robot with no logged matrix),
-`decalshot` `DECALSHOT_ALPHA`. Open: a live frame of a strong slash on a visible face (a held Scout hit by the axe from above, or
+`decalshot` `DECALSHOT_ALPHA`. Open (`fx/visual-polish` found nothing new to fit without a live frame: the placement rule above is implemented, what is missing is the same comparison): a live frame of a strong slash on a visible face (a held Scout hit by the axe from above, or
 a decal placed with a scripted hit: done above, its width-axis orientation and a pixel comparison against ours remain open).
 
 ### 8.1 Slash decals: framing and the width axis (flame-hits)

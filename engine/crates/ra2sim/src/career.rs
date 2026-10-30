@@ -2260,6 +2260,7 @@ mod tests {
             eliminated: defeated,
             winner: false,
             immobilized: false,
+            owner: None,
             // A synthetic report: one component named after the robot, so a
             // `damage` figure still becomes a component-level repair row.
             components: if damage > 0.0 || defeated {

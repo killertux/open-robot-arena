@@ -1318,11 +1318,17 @@ impl NetPlay {
             } else {
                 ra2sim::r#match::RobotEntry::ai(i, path)
             };
-            // The results show the team the panel names (GroupInfo), as the original's do.
-            entries.push(if slot.team.is_empty() {
+            // The results show the team the panel names (GroupInfo), as the original's do, and
+            // above it the owner's name in the small line (live `mp-results-host`).
+            let entry = if slot.team.is_empty() {
                 entry
             } else {
                 entry.labelled(&slot.team, &slot.team_logo)
+            };
+            entries.push(if slot.name.is_empty() {
+                entry
+            } else {
+                entry.owned_by(&slot.name)
             });
         }
         while entries.len() < 2 {

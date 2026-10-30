@@ -1290,7 +1290,7 @@ cell 5 scrapped and a new robot built there, the `Bot5.bot` the game wrote copie
 7. The name box showed the design's stored name; typing on Overview edited it, the first key replacing it, with no click needed. Live (`botlab-name-box-*`): a key goes nowhere until the box is clicked, and then it is
    added to the text that is there (`Enter Bot Name` + `x` reads `Enter Bot Namex`; four BackSpaces leave `Enter Bot Nam`; the saved name of a robot left that way is `Enter Bot Nam`, as the HQ cell showed). Now
    `name_focus` and `type_char` / `backspace` in the player-facing lab. **fixed**
-8. The 3D view of the lab was a top-down flat shaded mesh. It is the original's orbit camera (below). **fixed** (the lab's tip line with its `tip.bmp` icon and its per-state text is still not drawn: open)
+8. The 3D view of the lab was a top-down flat shaded mesh. It is the original's orbit camera (below). **fixed** (the lab's tip line with its `tip.bmp` icon: 9.27c)
 9. Wire lines in the 3D view (the floating control icon and its green / blue lines), the control's own edit window (double click) and the connection window's rows for a new control. **fixed** (below)
 10. Test Robot fought the shipped AI in the box arena. It is the practice arena with one robot (below). **fixed**
 
@@ -1323,7 +1323,7 @@ Side-by-sides, ours against live, are in the scratchpad (`cmp4.png` Overview at 
   control with no part shows icon and stem only; the anchor is the same for every control. Ours: `lab_view::wire_scene`, `Builder::wire_anchor`.
 * **Double click on a control** opens its own window: `Analog Control` / `Switch Control` / `Button Control` (the properties windows) with the control's name and keys in it; typing adds to the name (`Forwardz`); OK
   renames and re-keys it and keeps its wires. Ours: `DialogKind::Props { editing }`, `open_edit_dialog`. A **new control's connection window** starts with both rows at `<none>` (`botlab-wiring-new-connection`),
-  as ours did; a bound one shows the stored rows. Delete Control opens a modal `Wiring` window with `Yes` / `No` whose text did not draw live (`botlab-wiring-delete-confirm`); ours still deletes at once. **open**
+  as ours did; a bound one shows the stored rows. Delete Control opens a modal `Wiring` window with `Yes` / `No` whose text did not draw live (`botlab-wiring-delete-confirm`): 9.27c.
 * **Test Robot** = `Scripts/Practice.py`: the `Practice Arena` (`Arenas/practice arena/practice_arena.gmf`, gravity -12.753, friction 0.5) with **one** robot, a DEATHMATCH to the scripts (`plus.getGameType`), no countdown,
   no end, the robot let go on the model's start point `(0.306, 2.163, -0.948)` (live: it drops, settles at `(0.26, 0.45, -1.0)` and keeps rocking by a centimetre). The camera is the scene camera's mode 0 (our `Watch`): eye
   fixed at **(-4.2, 2.5, 9.5)** looking at the robot, its FOV following the distance (`+0x290..0x2a0`: distance 2..20, FOV 0.8976 .. 0.3491; 0.6047 at 11.6 m), the lights the model's two `Omni` points plus the white
@@ -1340,7 +1340,40 @@ Side-by-sides, ours against live, are in the scratchpad (`cmp4.png` Overview at 
   (they were missing from every lab frame). The Color Fill state is the live one: swatch = HSL(x * 360, 1 - y, thumb) of the picker target and the thumb (target 0.184 / 0.253, thumb 0.4 give `(161, 176, 25)` as live);
   the first captures (`botlab-paint`) showed `(185, 150, 18)` with the same target, so the start colour is not a function of the target (not traced; ours starts at the first captures' value). Clicks on the picker and
   slider move them, clicks on the chassis and `Paint Entire Chassis` fill with the swatch, `Undo` undoes (`Texture::solid`). The weight in the Overview of C.R.U.S.H. read **395.2** live against 387.209 from
-  `plus.getWeight` and 387.2 in ours (8.0 kg unexplained, the lab's own sum, `FUN_0042f7d0`): **open**. The 1 px lower placement of the lab's content (the 3D frame's top border is at y 147 live, 148 ours) is open.
+  `plus.getWeight` and 387.2 in ours: explained and fixed in 9.27c (the wheels' phantom 2 kg), as are the lab's 1 px low content, the tip line, the Delete Control box and the practice arena's sounds.
+
+### 9.27c The lab's tip line, Delete Control, the weight, the 1 px, the practice sounds (`fx/visual-polish`, 2026-10-30)
+
+Against `botlab-overview`, `botlab-flow-wiring-stock`, `botlab-wiring-delete-confirm` of the original (no new live session: every number below is read from the existing captures and the exe).
+
+* **The weight (395.2 against 387.2).** `FUN_0042f7d0` (weight / weightclass boxes) -> `FUN_004df0b0` -> `FUN_004e23b0` / `FUN_004e24b0` (two nested `accumulate` loops over the robot's component list) ->
+  `FUN_004e24f0` -> `0x45a4f0`, which is `fld [ecx + 0x128]`: the sum of every body's stored mass (`0x524ab0`'s constructor argument, the `.gmf` rigid body's own mass). It is also what `getWeight` and the
+  800 kg check call (docs/05). The sum includes the **no-collision phantom bodies**: `wheel_slipperbottom/slipperbottom.gmf` has `white_wheel` (16 kg) and `whitewheel_traction` (2 kg, `nocoll true`), so a
+  SlipperBottom wheel is 18 and C.R.U.S.H.'s four wheels are the 8.0 kg we lacked (387.209 + 8 = 395.209, the label's 395.2). `ComponentInfo::mass` (`ra2ui::workshop::library`) now sums every body (miniwheel 9 + 8 = 17);
+  the simulator's own mass is unchanged (it already adds `phantom_mass` to a part's body, `robot.rs`). Not changed: `plus.getWeight` in a match still reports `rig.mass` (the collidable bodies, 387.2), the original's
+  is this same sum (395.2); it is used by `Hazards.Electricity` only and feeds `robot.mass`'s wheel drag, so it stays with the physics owner. Tests `a_component_loads_with_its_mounts_and_mass` (miniwheel 17, SlipperBottom 18),
+  the `--build` self-check compares the rig's mass plus its phantoms. Example `ra2ui --example botmass` prints a design's parts.
+* **The 1 px low content.** The shell's two vertical splits (`botlab splt`, `lowersplit`) take a **whole number of pixels** for the sized pane (`PaneFloorV`, `ra2ui::split_children`; the tab strip is
+  `floor(0.14 x 768) = 107`, not 107.52). Name box / weight row / 3D frame are then exact: the Overview's name and weight rows differ 0.00 from the capture (they were 7.05 and 12.07 at the 1 px offset), the 3D frame
+  top border is at y 147. MAE against the captures (1024x768, master -> final, the tip's random pick included: another pick than the capture's costs about 0.05): overview 1.118 -> 0.51, chassis 0.911 -> 0.82,
+  components 2.058 -> 1.21, wiring (`botlab-flow-wiring-stock`) 3.93 -> 3.81, paint 1.229 -> 1.02 (the first three on the weight and the whole-pixel panes only: 0.66 / 0.77 / 1.16 / 3.79 / 0.97).
+  The snapshot box under it ends 1 px high now (469.3 live): the group is positioned from the old height; open.
+* **The tip line** (`FUN_0043e900`, text boxes at `0x6f1500..0x6f1844`): the lab's `Info Display` (80 % wide, 18 px, 2 px under the pane) shows `tip.bmp` (19 x 17) and one line of `fg_mcn14` text in
+  `.5 .6 1` (markup `<image filename "UI\botlab\tip.bmp"><text font fg_mcn14 color .5 .6 1 1 align 2>` at `0x6f1500`; `0x43e6e0` sets it, `0x43e7c0` is the same in `alert.tga` / `1 .8 .3`), icon and text
+  **centred as a pair** (icon at x 349 live, text from 372). The text follows the state (`+0x1d8` is the lab's screen: 1 Overview, 2 Chassis, 3 / 4 the two structure screens, 5 Armor, 6 Components, 7 Wiring, 8
+  Appearance, 9 Test Robot): no chassis yet -> `Click the Structure Design button to build a chassis` (screen 2), `Click on the grid to add points to your chassis` (3), `Click the Chassis button to start your
+  robot` (others); screen 4 -> `Click and drag points to adjust the sides of your chassis`; only the chassis -> `Click the Components button to add parts to your robot`; no control board on Components ->
+  `Click the Control Board (under Power) to add it first`; no controls -> `Click the Wiring button to set up keyboard or joystick controls for your robot`; else a random one of four (`0x419190(4)`, again until it is
+  not about the screen shown): Paint Shop / Components / Chassis (not on 2 or 5) / Test Robot. The live Overview shows the Paint Shop one, the live Wiring (`botlab-wiring-delete-confirm`) the Test Robot one.
+  Ours: `Builder::{tip_text, refresh_tip}` (the roll is redone on every screen change); the widgets hang on the `Glyph` of `info_display.gib` whose `DisplayBox` body is the `Info Display` box (the frame is the pane's,
+  so the positions are the box's x / y minus the pane's). Pixel check: the tip row of the Overview is now **0.02** MAE (icon at 349, text 372..674, rows 691..707). **Open**: the alert tips
+  (`0x42cf46`, `0x42d11a`: *Components should not intersect...*, *Robots cannot exceed a maximum size.*; `0x44d5fb`: the mass limit; `0x478d1d`: *Can't move that point because it will bend one side too much*;
+  2 s timer at `0x714890`) still go to the panel's status string; the random pick is ours (not the exe's LCG).
+* **Delete Control** (`0x6f19fc` *Delete this input control?*): the shipped `common/messagebox.gib` titled **`Wiring`**, `Yes` left of `No`, the body **does not draw** (live `botlab-wiring-delete-confirm`: an empty
+  box). `ra2_shell::yes_no_box` dresses the template (shared with the HQ's boxes), `DialogKind::ConfirmDelete`; No keeps the control, Yes removes it. Test `delete_control_asks_before_it_deletes` (`ORA_TEST_SCRATCH=<dir>` writes the frame): the box, title and buttons sit exactly where `botlab-wiring-delete-confirm`'s do (box MAE 7.05, all of it the nail texture's phase).
+* **Practice-arena sounds.** `LabArena` observes its match with the same `MatchSounds` the matches use (motors and their pitch, weapon fire, impacts, the obstacles' `AddXtraSound` materials, parts coming off)
+  and the window plays them from the practice camera (`Builder::take_arena_cues`, `AudioSystem::play_cues`); the ceremony cues (countdown beeps, announcer, crowd, immobility tick, chat) are dropped because
+  `Practice.py` starts none of them. **Not verified live**: no practice-arena audio capture exists; the cue rules are the matches' (docs/35).
 
 Tests: `playthrough::the_test_robot_tab_is_a_practice_arena_with_obstacles_and_reset` (arena up on the tab, start point, the frame, W reaches the far wall, obstacle and RESET, leaving drops it),
 `the_lab_camera_matches_the_live_matrices`, `the_paint_swatch_is_the_pickers_hue_and_saturation_at_the_sliders_lightness`, `lab_view` (outline edges, constant-pixel ribbons), the playthrough's name step (a key

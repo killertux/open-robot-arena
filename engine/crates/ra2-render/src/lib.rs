@@ -23,6 +23,7 @@ use ra2fmt::{bot as botfmt, component as compfmt, gmi, mount};
 
 pub use ra2fmt::mount::{component_local, tm_mat4, MountMode};
 
+pub mod chassis_mesh;
 pub mod decals;
 pub mod effects;
 pub mod material;
@@ -1017,6 +1018,34 @@ fn chassis_mesh_vertices(ch: &ra2fmt::bot::Chassis, world: Mat4) -> Vec<Vertex> 
         .collect();
 
     let mut out = Vec::new();
+    // The mesh the original draws: the faces cut into grids (`chassis_mesh`). `RA2_FLAT_CHASSIS` draws
+    // the file's prism instead.
+    if std::env::var_os("RA2_FLAT_CHASSIS").is_none() {
+        if let Some(sub) = chassis_mesh::tessellate(ch) {
+            let pts: Vec<Vec3> = sub
+                .points
+                .iter()
+                .map(|p| world.transform_point3(*p))
+                .collect();
+            let flat: Vec<u32> = sub.tris.iter().flatten().copied().collect();
+            let normals = smooth_vertex_normals(&pts, &flat);
+            for tri in &sub.tris {
+                // The chassis builder's triangles are the opposite way round to the arenas' data (see
+                // below): corners 2 and 3 swap.
+                for &i in &[tri[0], tri[2], tri[1]] {
+                    let i = i as usize;
+                    out.push(Vertex {
+                        pos: pts[i].into(),
+                        nrm: normals[i].into(),
+                        uv: sub.uvs[i],
+                        uv2: sub.uvs[i],
+                        color: [1.0, 1.0, 1.0, 1.0],
+                    });
+                }
+            }
+            return out;
+        }
+    }
     let pts: Vec<Vec3> = mesh
         .points
         .iter()

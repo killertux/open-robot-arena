@@ -91,6 +91,9 @@ pub struct MatchResult {
     pub immobilized: bool,
     /// *"show this for the bot(s) who win this match or round"*.
     pub winner: bool,
+    /// The name of the player behind the robot, in the small line above the team name
+    /// (`Spectator [TextBox]`, shown by a network match only: live `mp-results-host`).
+    pub owner: Option<String>,
 }
 
 /// Load one result cell into each of the screen's slots, in order, and bind it.
@@ -132,7 +135,13 @@ fn bind(cell: &mut Widget, result: &MatchResult) {
     // The constructor's defaults: these three start hidden.
     set_visible(cell, IMMOBILIZED, result.immobilized);
     set_visible(cell, WINNER, result.winner);
-    set_visible(cell, SPECTATOR, false);
+    match &result.owner {
+        Some(name) => {
+            crate::cells::bind_value(cell, SPECTATOR, name);
+            set_visible(cell, SPECTATOR, true);
+        }
+        None => set_visible(cell, SPECTATOR, false),
+    }
 }
 
 fn set_visible(cell: &mut Widget, child: &str, visible: bool) {
@@ -212,6 +221,7 @@ mod tests {
                 bot_name: "The Wrangler".into(),
                 team_name: "TEAM STINKBOMBS".into(),
                 immobilized: true,
+                owner: None,
                 winner: false,
             },
             MatchResult {
@@ -222,6 +232,7 @@ mod tests {
                 bot_name: "Red Menace".into(),
                 team_name: "Red Zone".into(),
                 immobilized: false,
+                owner: None,
                 winner: true,
             },
         ];
@@ -290,6 +301,43 @@ mod tests {
         );
     }
 
+    /// A network match names the player behind each robot in the small line above the team
+    /// (`Spectator [TextBox]`, live `mp-results-host`: `PortJoiner`, `Default Player`); a local
+    /// match leaves it hidden.
+    #[test]
+    fn the_owner_line_shows_only_when_a_player_is_named() {
+        let Some(game) = game_dir() else { return };
+        let template = crate::cells::template(&game.join("UI"), TEMPLATE).unwrap();
+        let mut cell = template
+            .widgets()
+            .find(|w| w.name() == CELL)
+            .unwrap()
+            .clone();
+        let mut result = MatchResult {
+            team_logo: "Teams\\orange_skull.bmp".into(),
+            bot_preview: PLACEHOLDER.into(),
+            bot_preview_image: None,
+            points: 0,
+            bot_name: "Sting Ray".into(),
+            team_name: "The Rookies".into(),
+            immobilized: false,
+            owner: Some("PortJoiner".into()),
+            winner: true,
+        };
+        bind(&mut cell, &result);
+        let line = crate::workshop::find(&cell, SPECTATOR).unwrap();
+        assert!(line.visible());
+        assert_eq!(
+            line.children
+                .iter()
+                .find_map(|c| crate::input::field_of(c, "_Text")),
+            Some("PortJoiner")
+        );
+        result.owner = None;
+        bind(&mut cell, &result);
+        assert!(!crate::workshop::find(&cell, SPECTATOR).unwrap().visible());
+    }
+
     /// Slot 1 sits at the screen's own position, and the cell is placed at the
     /// slot's, not at the template's zero.
     #[test]
@@ -305,6 +353,7 @@ mod tests {
             bot_name: "B".into(),
             team_name: "T".into(),
             immobilized: false,
+            owner: None,
             winner: true,
         };
         let screen = root(&mut gib);
@@ -361,6 +410,7 @@ mod tests {
                 bot_name: bot.name,
                 team_name: format!("Team {}", index + 1),
                 immobilized: false,
+                owner: None,
                 winner: index == 0,
             });
         }

@@ -431,8 +431,7 @@ armour line; the armour type's `material_row()` when the file has none). Test
   normals showed the quad's diagonal as a brightness seam (FlapJack, left front face). The chassis vertex normals are
   now the average at the shared vertex index (`smooth_vertex_normals`, test
   `chassis_vertex_normals_are_smooth_within_a_face_and_hard_between_faces`), which keeps the hard edges between faces
-  (faces do not share indices) and removes the seam. **Not done:** the exact subdivision (the grid per face and the
-  inset top plate of the `buckling`/`top_corners` data); it only matters for the Gouraud sampling of highlights.
+  (faces do not share indices) and removes the seam. The subdivision itself is section 11.6.
 * Components: vertices, normals and uv of ALARM's BurstPiston and Hammer Head are identical to the live buffers; the
   D3D materials of the component parts are the ones `Material::from_gmi` builds (amb 0.59 / spc 0.56 / pow 10, wheel
   amb 0.21, forklift arm 0.62 / 0.22, round extender 0.85 / 0.60, ...).
@@ -535,7 +534,7 @@ What the shots show, robot by robot:
   a robot-drawing item); (d) `Eye Poker`'s top domes and Dementia's wheel-hub nuts are brighter in ours; the
   materials are identical to the dump, the facets differ with the rolled/yawed part, so this is (a)/(b), not a
   material difference (but see 11.5: the Buzzard wheel's hub parts were also too bright for another reason).
-* Open: the exact chassis subdivision. (Iceberg's shading, the largest residual of this table, was a heading, not a
+* The chassis subdivision is recovered (section 11.6). (Iceberg's shading, the largest residual of this table, was a heading, not a
   mesh: section 11.5.)
 
 The `yaw ours-live` column compares ours 1.5 s after the bell (our robots had landed during the countdown) with live
@@ -595,3 +594,34 @@ are the file's meshes with the dump's materials; what is left of its shots is th
 
 Tools: `frida/ra2_heading.js` (`robots(n)`: each robot's `+0xac` and `GetHeading`; hooks the loader, `0x401170` and
 `0x401150` with backtraces), `capture_shape.py` + `SHAPE_HOOK_JS=ra2_vbdump.js` (Iceberg v MiniBerg, Tornado v LugNut).
+
+
+### 11.6 The chassis subdivision (`ra2_render::chassis_mesh`, `fx/visual-polish`)
+
+The original draws a finer mesh than the `.bot`'s prism (Scout 20 -> 79 triangles, ALARM 12 -> 70, FlapJack 28 -> 116, Iceberg 36 -> 132, Eye Poker 12 -> 84; `vbdump-*`), and the files'
+`buckling` points (v1.11 on) are **the interior points of that cut with the game's jitter in them** (positions identical to the live vertices to 1e-4; their vertex indices address the runtime buffer, which we do not
+reproduce in order). The construction, fitted on all 276 walls of the 45 stock robots that carry buckle points and checked against the live vertex buffers of five robots:
+
+* **walls**: each quad of the outline -> a grid of 2 rows (at 0, 1/2, 1 of the height) by `cols` columns, 2 triangles a cell; `cols = 1 + floor(sqrt(bottom edge / 0.44 m))` (1 under 0.4 m, 2 up to
+  1.76 m exclusive, 3 from 1.76: edges of 100, 141 -> 1; 200..799 -> 2; 800..1000 -> 3 in outline units; 0 mismatches over the 276 walls; the top, mid and bottom edges of a tapered wall use the
+  *bottom* edge's count). The skin coordinates are the group's quad interpolated evenly in the grid parameters (live: 87, 123, 159, 195 along the Scout's back wall).
+* **top plate**: the outline takes the walls' top-row points (`n + sum(cols - 1)` points) and an inner **ring** of as many points, 0.056..0.111 m inside (live Iceberg; the ring points are the
+  `buckling` points on the top plane that are not on an outline edge), as a strip of 2 triangles a segment plus the ring polygon (`m - 2` triangles): Scout 11 outer points -> 22 + 9 = 31; Iceberg 18 -> 36 + 16 = 52.
+  Its skin coordinates are the group's affine map of (x, z).
+* **bottom plate**: the file's.
+* Triangle count = walls `4 sum(cols)` + top `3m - 2` + bottom `n - 2`: 79 / 132 / 84 / 70 / 116, equal to the live buffers.
+
+Without `buckling` points (v1.07 / 1.08 files, chassis built in the lab) the interior points lie on the straight lines and the ring is 0.08 m in towards the centre; the live jitter (<= 2 cm) and ring
+(0.056..0.111 random) are the game's. A chassis whose faces are not the prism (Dementia's face rows name groups its list does not have) keeps drawing the file's mesh. `RA2_FLAT_CHASSIS=1` draws the
+prism again. Tests `chassis_mesh::tests::{the_column_rule_matches_the_stock_walls, the_cut_reproduces_the_live_chassis_vertex_buffers}` (Scout 79, ALARM 70, FlapJack 116, Iceberg 132, Eye Poker 84: triangle count equal, every
+live vertex within 4 mm (7 cm for the files without buckle points) with its skin coordinate to 1.5 texels). Effect on the audit shots is small (`shape-flapjack-emergency` at the live poses: 5 of 8 shots differ in under 2 / 255 on average, the
+highlights of the walls): the geometry, the crush (which moves the drawn vertices) and the lab's preview now use the original's mesh. Not recovered: the original's vertex order, its choice of cell diagonals,
+the jitter's generator, the ring's random offsets; decals and shadows still cut the file's mesh (their polygons are fewer fans than the original's, docs/37 section 5).
+
+### 11.7 Not done in `fx/visual-polish`: the spinner parts' angles and the Clawtop's claws
+
+* **Spinner part angles** (section 11.4 (a): Berserker, Backyard Ripper, Ripblade, Arc Pounder, Coal Miner, the pickaxe of Iceberg): the part is drawn at the hinge angle the physics has at that frame, and the live shots
+  are 2-14 s after the bell with the weapons running, so the angle in a live frame is a function of the spin-up the Havok side reproduces (docs/29 12v; Berserker's rotator bar mass is unrecovered, docs/29). A
+  render-only fix would need the live hinge angle logged per shot (`ra2_vbdump.js` dumps the world matrices but the audit does not pair them with ours); that is a new live capture plus physics, so not attempted.
+* **Clawtop's claws**: no capture of the Clawtop exists (`capture_arenas.py` lists the eight deathmatch arenas; the tabletop arenas, Clawtop and FlexTop, are not on its route) and docs/29 12ab-12ad state the claws
+  (an unlimited hinge on a speed, `SetAutoLocks(False, True)`) were never captured. They are `arena.rs` script state (the other agent's area). Needs a live Tabletop session with the claws' hinge angles read.

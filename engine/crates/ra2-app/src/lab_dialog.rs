@@ -32,6 +32,9 @@ pub enum DialogKind {
         /// A double click on a control opened it: OK renames and re-keys that control.
         editing: bool,
     },
+    /// `Delete Control`'s box (`Delete this input control?`, live a `Wiring` window whose body does
+    /// not draw): Yes removes the control in `cell`, No leaves it.
+    ConfirmDelete { cell: [i32; 2] },
     /// A control wired to a component.
     Wire {
         kind: ControlKind,
