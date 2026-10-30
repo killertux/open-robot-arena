@@ -5597,7 +5597,7 @@ mod tests {
             state_a: state(Vec3::X * closing),
             state_b: state(Vec3::ZERO),
         };
-        let mut gate = combat::EventGate::default();
+        let mut gate = combat::EventGate::with_pair_gate(false);
         let mut through = Vec::new();
         for k in 0..120 {
             let t = k as f32 / 60.0;
@@ -5606,9 +5606,7 @@ mod tests {
                 through.push(k);
             }
         }
-        // One event a step for the pair, A's entry first and B's the step
-        // after (docs/29 section 12ag): never both in one step.
-        assert_eq!(through, vec![0, 1, 60, 61], "{through:?}");
+        assert_eq!(through, vec![0, 0, 60, 60], "{through:?}");
     }
 
     /// docs/29 section 12z: the Octagon's hinges turn the way live does
@@ -7349,14 +7347,19 @@ mod tests {
             state_a: duel.physics.state(floor).unwrap(),
             state_b: state,
         };
-        let mut gate = combat::EventGate::default();
+        let mut gate = combat::EventGate::with_pair_gate(false);
         let through = |gate: &mut combat::EventGate, t: f32| {
             gate.admit_with(&duel.robots, &duel.arena_bodies, vec![event; 3], t)
                 .len()
         };
-        // The pair is asked once a step (docs/29 section 12ag): the floor's
-        // entry takes the first step, the chassis' own the next, and the
-        // points beyond the first wait.
+        // The floor's entry, then the chassis' own; the third point waits.
+        assert_eq!(through(&mut gate, 0.0), 2);
+        assert_eq!(through(&mut gate, 0.5), 0);
+        assert_eq!(through(&mut gate, 1.0), 2);
+        // With the pair gate (`RA2_PAIR_GATE=1`, docs/29 section 12ag) the pair
+        // is asked once a step: the floor's entry takes the first step, the
+        // chassis' own the next.
+        let mut gate = combat::EventGate::with_pair_gate(true);
         let step = 1.0 / 60.0;
         assert_eq!(through(&mut gate, 0.0), 1);
         assert_eq!(through(&mut gate, step), 1);

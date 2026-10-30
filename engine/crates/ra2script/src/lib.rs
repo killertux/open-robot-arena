@@ -1430,8 +1430,8 @@ mod tests {
         });
     }
 
-    /// docs/29 section 12ag: at the start of a Scout v ALARM fight both brains
-    /// take the same corridor, through the centre, whichever of them asks.
+    /// docs/29 section 12ag (with `RA2_ASTAR_PLAIN_H=1`; the test forces it):
+    /// at the start of a Scout v ALARM fight both brains take the same corridor, through the centre, whichever of them asks.
     /// Live (`aistate-scout-alarm-box__live__001..006`) the Scout runs the
     /// diagonal to the centre from the first frame and ALARM goes round the
     /// east side of the spike box over `(8, -5)`; a route that sent the Scout
@@ -1442,6 +1442,7 @@ mod tests {
         let Some((host, _guard)) = boot() else { return };
         let scout = (-9.84_f32, -1.9_f32, 10.09_f32);
         let alarm = (9.55_f32, -1.9_f32, -9.37_f32);
+        arena::set_plain_estimate(Some(true));
         with_py(|py| {
             host.load_arenas(py).unwrap();
             let arena = host.create_arena(py, "Combat Arena").unwrap();
@@ -1471,7 +1472,12 @@ mod tests {
                 let r = route((alarm.0 - 0.7, alarm.1, alarm.2 + 2.0), (x, scout.1, 10.2));
                 assert_eq!(r.first(), Some(&(8.0, -5.0)), "{x}: {r:?}");
             }
+            // The binary's squared estimate sends the Scout over the north
+            // wall instead (the default, until its cause is found).
+            arena::set_plain_estimate(Some(false));
+            assert_eq!(route(scout, alarm).first(), Some(&(0.0, 10.0)));
         });
+        arena::set_plain_estimate(None);
     }
 
     /// `GetLastDamageReceived`/`Done` are the original's 5-tuples

@@ -438,11 +438,34 @@ fn striker(robot: &Robot, index: usize) -> Striker<'_> {
 /// the entry that let it through is reset. All other points are dropped before
 /// the game prices anything. So each of Wide Load's four spikes is priced up
 /// to once a second, not their shaft body once between them.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct EventGate {
     /// Per (body, component): the last time each of its entries let a point
     /// through.
     last: HashMap<(BodyHandle, usize), Vec<Option<f32>>>,
+    /// `RA2_PAIR_GATE=1`: at most one event per collidable pair and call (a
+    /// step) instead of one per resolver point (docs/29 §12ag). Off by
+    /// default: read off live hit multiplicities, not confirmed in the binary.
+    pub pair_gate: bool,
+}
+
+impl EventGate {
+    /// A gate with the pair rule set explicitly (the environment otherwise).
+    pub fn with_pair_gate(pair_gate: bool) -> Self {
+        EventGate {
+            last: HashMap::new(),
+            pair_gate,
+        }
+    }
+}
+
+impl Default for EventGate {
+    fn default() -> Self {
+        EventGate {
+            last: HashMap::new(),
+            pair_gate: std::env::var("RA2_PAIR_GATE").is_ok_and(|v| v != "0" && !v.is_empty()),
+        }
+    }
 }
 
 /// A component's registrations with the event filter: the interval of each
@@ -717,7 +740,7 @@ impl EventGate {
             };
             let mut key = [side(e.a, &e.state_a), side(e.b, &e.state_b)];
             key.sort_unstable();
-            if passed.contains(&key) {
+            if self.pair_gate && passed.contains(&key) {
                 continue;
             }
             let mut through = false;

@@ -5183,7 +5183,7 @@ controller, only the wheels' frames were checked); whether the live brains'
 real-dt clock (above) matters for the fork's fire timing against the first
 meeting.
 
-### 12ag. Where the arena's damage comes from: the brains' first route, one event a pair (fx/dmg-tune)
+### 12ag. Where the arena's damage comes from: the brains' first route, one event a pair (fx/dmg-tune; both behind switches, off)
 
 Two gaps were open: ALARM took 77-101 hp a fight from the box's hazards (live
 17 in 14 fights) and the Compressor's arena hits came to twice live's (Wide
@@ -5226,94 +5226,96 @@ dwarfs the steps. ALARM then turned hard toward `(5, -9)` (`RA2_AI_TRACE`: turn 
 11 at 4 m/s), slowed to the sharp-turn throttle (`DriveToWaypoints`: `(.5 - |h|)`
 of the boost) and wandered by the spikes.
 
-The decompile of `0x407330` reads both the step `g += d²` and the estimate
-`h = d²(node, goal)` off `0x407890` (no `fsqrt` anywhere between `0x406d00` and
-`0x40a000`), which is what ours had; the 4948 live `GetPath` calls of the
-`boxfight` captures cannot tell it from an estimate of the plain distance (both
-reproduce all 4948), nor from one a tenth of it. Live's corridor can: with the
-estimate `h = |node - goal|` (steps still squared) ours' first waypoints are
-the Scout's `(-5, 5)` and ALARM's `(8, -5)`, each robot's route is the other's
-reversed, and the early positions come back (mean of the six live starts against
-eight warmups, Scout / ALARM, x z):
+The decompile of `0x407330` reads both the step `g += d²` (`0x407497`) and the
+estimate `h = d²(node, goal)` (`0x4072d7`, `0x407596`, stored at node+0x0c;
+`f = +0x0c + +0x08`, ordered by `0x411e40`: `a.f > b.f`) off `0x407890`, a pure
+squared distance (no `fsqrt` anywhere between `0x406d00` and `0x40a000`), and
+that is the **default**, as before. The 4948 live `GetPath` calls of the
+`boxfight` captures reproduce under it, and equally under an estimate of the
+plain distance or a tenth of it, so they cannot tell; live's first routes can.
+With `RA2_ASTAR_PLAIN_H=1` (`h = |node - goal|`, steps still squared) ours'
+first waypoints are the Scout's `(-5, 5)` and ALARM's `(8, -5)`, each robot's
+route is the other's reversed, and the early positions come back (mean of the
+six live starts against eight warmups, Scout / ALARM, x z):
 
-| t | live | before | after |
+| t | live | default | `RA2_ASTAR_PLAIN_H=1` |
 |---|---|---|---|
 | 1 s | (-6.4, 6.8) (8.0, -5.3) | (-7.5, 10.1) (8.3, -5.8) | (-6.2, 6.1) (8.0, -4.8) |
 | 2 s | (-0.2, 1.3) (3.8, 0.1) | (-4.1, 9.8) (6.8, -5.2) | (-0.2, 1.5) (3.0, -0.1) |
 | 3 s | (0.3, 0.5) (3.0, 1.0) | (-0.3, 8.9) (6.0, -5.4) | (-1.1, 1.3) (0.9, 1.2) |
 
-(mean position error over t = 0.5, 1, 1.5, 2 s, both robots, against the six
-live starts: 3.9 m before, 0.7 m after; an estimate of 0 reproduces it too but
-fails 2 of the 4948 calls, one scaled by 0.05-0.5 passes all of them; the
-plain distance is the choice without a free constant.) The mechanism behind
-the unscaled-squared reading is not found: `FUN_00407890` as decompiled is
-squared, the heap order (`0x411e40`: `a.f > b.f`) is on `f = +0x10 = g + h`, and
-the successor generator (`0x407680`) is as section 12ab has it. Reported as an
-empirical estimate, test `ra2script::tests::both_brains_take_the_same_corridor_
-at_the_start_of_a_box_fight`.
+(mean position error over t = 0.5-2 s: 3.9 m default, 0.7 m plain.) That is a
+fit, not the mechanism: something else in ours differs and the plain estimate
+hides it. Looked for and **ruled out** (each leaves all 4948 calls and the
+wrong start as they are): the order of a free node's successors, the order of a
+vantage point's neighbours, whether a closed node is re-opened; the edge marches
+at a smaller radius (0.95 loses 93 of the 4948, 0.85 fixes the start but loses
+314); the radius scaled (0.95 loses 319); the march's direction in the edge
+tests; a squared estimate scaled by 0.7 or 1 (it needs <= 0.5). What is left is
+the geometry of the marches themselves (ALARM's march to `(5, -1)` clears the
+spike box's corner by 0.886 m against a radius of 1.0, so ours cuts that edge
+and the plain estimate finds the route around it anyway): `0x405720` takes its
+second point from a stack slot `0x4079f0` leaves behind and builds its first
+with a third component (`0x495f10`, the goal's floor height from `0x405f20`) that
+was not decoded. Test `ra2script::tests::both_brains_take_the_same_corridor_at_
+the_start_of_a_box_fight` forces the switch and also pins the default.
 
-**One event a pair and step (recovered from live, not from code).** Live no
-pair of collidables is priced twice in one step but about 1 % of the time (11 of
-1029 hits in `arenahits-scout-alarm-box`, 30 of 3045 in `fight-scout-alarm-box`,
-33 of 5781 in the Compressor's eight fights, counted on the gate's `(step, attacker
+**One event a pair and step (`RA2_PAIR_GATE=1`, unverified).** Live no pair of
+collidables is priced twice in one step but about 1 % of the time (11 of 1029
+hits in `arenahits-scout-alarm-box`, 30 of 3045 in `fight-scout-alarm-box`, 33
+of 5781 in the Compressor's eight fights, counted on the gate's `(step, attacker
 component, victim component)`); ours priced a pair once per resolver point and
-step, each point finding another due entry (the pair's two components and the
-arena's collidable have one each): 2.5 % of the box's hits, 2.8 % of the
-Octagon's, 8 % of the Compressor's (counted by names; four Pointy tips count as
-one) were the same pair in the same step. Live the two entries of a wheel's pair fire on
-consecutive steps once a second (section 12ad: "pairs a step apart"), which one
-event a pair gives and a point apiece does not. `combat::EventGate::admit_with`
-now lets one event through per collidable pair (the robot's registered
-component or the arena's piece, both sides) per call: A's entry fires on one
-step, B's the next. Tests `duel::tests::an_arena_collidable_lets_one_point_
-through_a_second` and `robot_contacts_reach_the_pricing_once_a_second_per_
-component` now read `[1, 1, 0, 0, 1, 1]` and `[0, 1, 60, 61]` where they read
-2/0/2 and `[0, 0, 60, 60]`.
+step, each point finding another due entry: 2.5 % of the box's hits, 2.8 % of the
+Octagon's, 8 % of the Compressor's (by names) were the same pair in the same
+step. `combat::EventGate::pair_gate` lets one event through per collidable pair
+(the robot's registered component or the arena's piece) per call, so a pair's
+two entries fire on consecutive steps (section 12ad's "pairs a step apart").
+This is read off the hit multiplicities, not off the code: `0x52d4f0` is
+reached through `0x554c70` and a virtual call (`[vtable+8]`, then `[+4]`), and
+who calls that per contact or per pair was not decoded; a live hook is still
+wanted. Off by default. Tests `duel::tests::an_arena_collidable_lets_one_point_
+through_a_second` (both modes) and `robot_contacts_reach_the_pricing_once_a_
+second_per_component` (default).
 
-**Validation.** Before = this branch's parent, 9fbf16c (`fidtrace` rebuilt from
-it), `FIDTRACE_WARMUP` 0..47 as sections 12ac-12ae (counted `>= 10`
-on the other robot, mean ± standard error; the arena column is the applied
-arena hits' hp per fight, the first robot named first; "route" = the
-estimate alone, "both" = route and event; a second set, warmups 48..143, in the
-pooled rows):
+**Validation.** Master 9d98cdb (with section 12af) plus this branch;
+`FIDTRACE_WARMUP` 0..47 (tools/oracle/ensemble.sh), counted `>= 10` on the other
+robot, mean ± standard error; hp = the arena's applied hits per fight, first
+robot named first. Default = no switch.
 
-| fight | live | before | route | both |
-|---|---|---|---|---|
-| box ALARM / Scout, 48 | 41.1 ± 6.5 / 6.0 ± 1.0 | 30.3 ± 3.9 / 4.9 ± 0.6 | 31.2 ± 3.6 / 5.6 ± 0.5 | 36.1 ± 3.8 / 6.0 ± 0.6 |
-| ... pooled 144 | | 32.3 ± 2.1 / 5.2 ± 0.3 | 32.5 ± 2.0 / 6.2 ± 0.3 | 35.2 ± 2.0 / 6.6 ± 0.3 |
-| ... arena hp, Scout / ALARM, 48 | 99 / 17 (14 fights) | 78 / 101 | 96 / 58 | 86 / 43 |
-| ... pooled 144 | | 98 / 95 | 83 / 58 | 79 / 53 |
-| ... ALARM on spikes 1 + 2, hp, 48 | 0 | 40 | | 24 |
-| Razor / FlapJack, 48 | 3.0 / 0.1 | 1.3 ± 0.1 / 4.1 ± 0.4 | 1.0 / 4.1 | 1.0 ± 0.1 / 3.9 ± 0.5 |
-| ... pooled 144 | | 1.0 / 4.4 | 1.2 / 4.8 | 1.1 / 4.4 |
-| Compressor Wide Load / Sentinel, 48 | 73.6 / 5.3 | 70.7 ± 7.5 / 4.2 ± 0.6 | 67.9 ± 7.2 / 3.8 ± 0.6 | 82.0 ± 6.6 / 4.6 ± 0.5 |
-| ... pooled 144 | | 74.5 ± 4.0 / 4.2 ± 0.3 | 73.0 ± 3.9 / 4.1 ± 0.3 | 78.3 ± 3.7 / 4.3 ± 0.3 |
-| ... arena hp, Sentinel / Wide Load, 48 | 178 / 146 | 204 / 274 | 198 / 245 | 174 / 115 |
-| ... pooled 144 | | 169 / 219 | 169 / 214 | 175 / 135 |
-| Octagon ALARM / Scout, 48 | 13.6 / 3.2 | 13.1 ± 1.9 / 3.5 ± 0.4 | 13.3 / 3.5 | 13.1 ± 2.0 / 2.7 ± 0.4 |
-| ... pooled 144 | | 12.5 ± 1.1 / 2.9 ± 0.2 | 12.1 / 2.9 | 12.2 ± 1.0 / 2.6 ± 0.2 |
+| fight | live | default | `RA2_ASTAR_PLAIN_H=1` | `RA2_PAIR_GATE=1` | both |
+|---|---|---|---|---|---|
+| box ALARM / Scout | 41.1 / 6.0 | 30.5 ± 3.5 / 5.2 ± 0.6 | 35.6 ± 3.3 / 6.1 ± 0.5 | 30.5 ± 3.3 / 5.1 ± 0.6 | 32.8 ± 3.3 / 5.2 ± 0.5 |
+| ... hp Scout / ALARM | 99 / 17 | 71 / 92 | 78 / 65 | 72 / 97 | 59 / 43 |
+| Razor / FlapJack | 3.0 / 0.1 | 1.3 / 4.9 | 0.9 / 4.1 | 1.0 / 4.8 | 0.9 / 3.8 |
+| Compressor Wide Load / Sentinel | 73.6 / 5.3 | 60.7 ± 6.7 / 4.1 | 62.0 / 4.2 | 75.4 ± 6.2 / 4.4 | 70.9 / 4.2 |
+| ... hp Sentinel / Wide Load | 178 / 146 | 201 / 219 | 195 / 212 | 221 / 204 | 217 / 205 |
+| Octagon ALARM / Scout | 13.6 / 3.2 | 12.6 ± 1.6 / 2.7 ± 0.4 | 12.8 / 2.8 | 13.0 / 2.9 | 13.0 / 2.9 |
 
-(The same-machine rerun of 9fbf16c reads box 30.3 / 4.9, Razor 1.3 / 4.1,
-Compressor 70.7 / 4.2, Octagon 13.1 / 3.5 over warmups 0..47; the figures the
-task named, 29.9 / 4.9, 1.2 / 4.0, 80.0 / 4.4 and 13.2 / 3.4, come from another
-48-run set: the Compressor's own spread is 7 per mean.) ALARM's hp from the box's
-hazards falls from 95-101 to 43-53 (live 17; the spikes' share 40 -> 24 hp, live
-none), the Compressor's Wide Load from 219-274 to 115-135 (live 146), the
-Scout's counted hits and the box ALARM's rise toward live, the Octagon's
-Scout loses 0.3-0.8 (live 3.2; within about one standard error, longer fights
-50 s against 43). Priced hits per second of fight stay 1.4-2 times live's
-(box robots 4.3 against 2.7, Compressor 4.9 against 3.1, Octagon 3.1 against
-1.4, arena hits 1.2-1.4 times): see Open.
+Before the merge of section 12af (9fbf16c, 144 warmups pooled) the same two
+changes read: box 32.3 / 5.2 -> 35.2 / 6.6 and ALARM hazard hp 95 -> 53; the
+Compressor's Wide Load hp 219 -> 135 under the pair gate. On the merged physics
+the Compressor's hp gain is gone (219 -> 204, spread 84 per mean): the pair
+gate's effect was within noise there, which is the second reason it stays off.
+The plain estimate is the one that holds: box ALARM's hazard hp 92 -> 65 (43
+with the gate), the Scout's counted hits 5.2 -> 6.1 (live 6.0), ALARM's 30.5 ->
+35.6 (live 41.1), the other fights unchanged within an error. Price per hit,
+the gate and the hazards' scripts: unchanged and exact (above).
 
-**Open.** ALARM's hazard hp stays 2.5-3 times live's (43-53 against 17): the
-Scout still pushes it over the spikes in the long fights; the Compressor's robots
-spend 3.3 / 1.3 % of the time past `|z| = 17` where the smash arms are (live
-0.6 / 0 %, and the four live fights with position traces all end in a
-stalemate by 30 s, both robots stopped, where ours keep shoving); the estimate's origin in the binary (above); the
-priced-hit rate, 1.4-2 times live's per second, whose raw contact lists
-(`fightcontacts-*__live__004..006`) are of a session whose registrations were not
-captured (`eventreg-...__live__001` is another one: a replay against them
-matches 20-50 % of the live hits' steps); ALARM's yaw response in its first
-second (the sharp-turn throttle fires on ours' turn at the first waypoint more
-than live's speed trace shows), not compared; the pair rule is read off the hit multiplicities and the wheels'
-step-apart pairs, not off a trace of `0x52d4f0` (a hook is still wanted).
+**Verified / not.** In the binary: the damage chain and its addresses (above),
+the squared `g` and `h` and their ordering (default A*), the spikes' cadence.
+Live: the corridor of the six fight starts (the plain estimate reproduces it,
+the default does not), the same-pair multiplicities. Not verified: that the
+original's estimate is the plain distance (it is a fit, the cause is open),
+and the pair rule.
+
+**Open.** The real difference in the A* or its inputs (above: the marches'
+geometry at `0x405720`); the pair rule (a hook on `0x52d4f0`); ALARM's hazard hp
+stays 2.5-4 times live's even with both switches (43 against 17); the
+Compressor's robots spend 3.3 / 1.3 % of the time past `|z| = 17` where the
+smash arms are (live 0.6 / 0 %, and the four live fights with position traces
+all end in a stalemate by 30 s, both robots stopped, where ours keep shoving);
+priced hits per second are 1.4-2 times live's (box robot-robot 4.3 against 2.7,
+Compressor 4.9 against 3.1, Octagon 3.1 against 1.4), and the raw contact lists
+of `fightcontacts-*__live__004..006` come from a session whose registrations
+were not captured (a replay against another session's matches 20-50 % of the
+live hits' steps).
