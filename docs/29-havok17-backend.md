@@ -5450,3 +5450,182 @@ wrapper); no live call distinguishes it. The pair rule (`RA2_PAIR_GATE`, task 3)
 was not looked at again. **Open:** why the Sentinel is flipped live and not
 in ours (physics); ALARM's hazard hp is still 2.3 times live's; the drive
 train's slow start (0.3-0.9 m at 1-2.5 s).
+
+### 12ai. The Compressor opening against sixteen live fights: the Sentinel's flips were a small sample, the Wide Load's landing is the real gap (fx/compressor-flip; no engine change)
+
+Section 12ah left "why the Sentinel is flipped live and not in ours" and "the
+drive train's slow start" open, from four live fights. This round took 16 (six
+more with the pose sampler, ten more with the chassis poses), four with the
+whole contact stream, and two with the placement, and found that the first
+question was a question about four fights. Nothing in the engine changes; the
+tools and the numbers are the result.
+
+**New live captures** (one session on `:7`, `RA2_FRIDA_PORT=27147`; the prefix's
+`AI/`, `Teams/`, `Robot Designs/`, `ra2.cfg` sha256 identical before and after
+each; rows in `local/oracle/manifest.tsv`, copies in `~/ra2-oracle-backup`
+with `manifest-additions-2026-10-30-compressor-flip.tsv`; Compressor, Sentinel
+`Team0/Bot2` v Wide Load `Team8/Bot2`, hazards on, shipped AIs):
+`boxstart-sentinel-wideload-compressor__live__000..011` (agent loaded before
+Start Game, `tools/oracle/capture_boxstart.py`: `GP` rows, the chassis' centre
+of mass and rotation every 8th step piece, the pose sampler; `000/001` also
+`.aitrace.txt`, the two unarchived runs of 12ah),
+`fightcontacts-sentinel-wideload-compressor__live__000..003` (the same harness
+with `AGENT=frida/ra2_fightcontacts.js`: every resolver contact `R`, every body
+`B`, the wheel records `G` and the pieces `A` from the load to ~13 s of fight)
+and `spinup-sentinel-wideload-compressor__live__000..001` (`AGENT=ra2_spinup.js`:
+every body from the load, the placements). The harness counts `A` rows, so
+`SIM_SECONDS` there is a wall limit for an agent without them.
+
+**1. The bell, and the Sentinel.** The brains tick at plus-time 0.1093 (Wide
+Load), 0.1407 (Sentinel), 0.2288, ... in every run (`aitrace`), and the first
+`GetPath` is the Wide Load's second tick, so the bell is the first `GP` row
+minus 0.2288 s. Aligned that way, with the centres of mass (`getLocation` is the
+chassis' centre, §12g; `FIDTRACE_COM=1`), twelve live openings agree with each
+other to 0.1-0.4 m at 2 s, and ours (warmup 0, which falls at the bell as live)
+gives z against the clock (`tools/oracle/compressor_compare.py opening`):
+
+| t (s) | Wide Load z, live mean (sd) | ours | Sentinel z, live | ours |
+|---|---|---|---|---|
+| 0.6 | -13.68 (0.04) | -13.84 | 14.51 (0.05) | 14.46 |
+| 1.0 | -11.97 (0.12) | -12.62 | 12.79 (0.13) | 12.69 |
+| 1.4 | -9.52 (0.19) | -10.54 | 10.17 (0.22) | 10.14 |
+| 2.0 | -5.00 (0.37) | -5.56 | 5.01 (0.44) | 4.88 |
+
+The Sentinel's opening is live's to 0.1 m. The 12ah comparison (times from the
+first `GetPath`, positions of the bot origin) had mixed that up. The brain's
+commands are live's too: Throttle 0, 54.8, 61.0, ... against ours 0, 54.7, 59.7
+(the same tick times 0.109 / 0.229 / 0.350, and the same `2 * |turn|` on each
+motor, `AI.Turn` calling `Input('LeftRight', 0, -t)` and `(.., 1, t)`).
+
+*The box fight's slow start does not exist at the bell.* The same alignment on
+five live `boxstart-scout-alarm-box` runs (centre of mass; the start poses agree
+to 1e-4) gives ours 0.1-0.35 m **ahead** of live at 0.6-1.5 s (ALARM 1.52 m at
+1.0 s against 1.15-1.32; Scout 1.67 against 1.41-1.63) and 0.1-0.5 m behind at
+2-2.5 s, where the turns begin and the live runs differ by 1.5 m among
+themselves (Scout 11.7 against 11.7-12.5 at 2.5 s, ALARM 10.5 against 9.6-12.1).
+The 0.3-0.9 m of 12ah was the time origin (the first `GetPath`, 0.23 s after the
+bell) and the origin-versus-centre offset. Nothing to fix there.
+
+**2. Flips, falls and endings, 16 live fights against the 48 warmups.**
+`compressor_compare.py flips` (live: pose tsv of the 16; ours: `ensemble.sh`
+with `FIDTRACE_UP=1 FIDTRACE_COM=1`; Fisher exact, two-sided):
+
+| per fight | live (16) | ours, 48 warmups | p |
+|---|---|---|---|
+| Sentinel on its back at some time by 40 s | 7 (44 %) | 14 (29 %) | 0.36 |
+| Wide Load on its back by 40 s | 8 (50 %) | 20 (42 %) | 0.58 |
+| a robot on its back for good (15 s) by 25 s | 7 (44 %) | 15 (31 %) | 0.38 |
+| falls off a ramp's side (z beyond 3.4, x 11-13), Sentinel / Wide Load, per fight | 0.38 / 0.38 | 0.35 / 0.38 | |
+| ... of them ending on the back | 4 of 6 / 1 of 6 | 9 of 17 / 4 of 18 | |
+| decided (a robot out for 20 s still) by 40 / 60 / 100 s | 3 / 9 / 13 of 16 | 5 / 16 / 24 of 48 (120 s runs) | 0.40 / 0.14 / **0.04** |
+| Wide Load stalled on its start plateau (x < -11) for more than 5 s | 0 of 16 | 10 of 48 | 0.055 |
+
+So the Sentinel is flipped live as often as ours flips it, to what 16 fights
+can tell (six of the seven live Sentinel flips are falls at x 11.4-12.7, 3.8-5.7 m
+out on the ramp's side, ours at the same place), and the four live fights of 12ah
+(three Sentinels flipped, 11-18 s) were an unlucky draw of a 44 % event. The
+falls themselves match: 0.38 a fight each, and 4 of 6 against 9 of 17 Sentinel
+falls landing on the back. What differs is the endings: live decides more fights
+before 100 s (13 of 16, nearly always a flipped robot sitting still 20 s: 11 of
+the 13 have one on its back with under 2 m of travel in the last 20 s, the other two
+have both upright), ours 24 of 48, and
+the Wide Load of ours sits on its start plateau (x -14.3, z 1.9, heading +x at
+the foot of the ramp's side, commanded 95 % and not moving) for 5.7 s on
+average against 0.2 s live; live does it once in sixteen (`__001`, 3.3-6.0 s).
+The two share their cause with the next section: a Wide Load that arrives
+0.5-1.0 m late and pitched.
+
+**3. The Wide Load's landing (the step-resolved comparison).** The
+`fightcontacts` captures give every body at every step. Aligned on the release
+(first chassis vy < -0.05; the fall is the same to 1e-4 in y), the Wide Load's
+chassis pitches (the up vector's z) to 0.135 ± 0.03 live (twelve fights, 0.4-0.5 s)
+and 0.26 in ours (0.098 / 0.155 at 0.3 s, 0.071 / 0.18 at 0.7 s); the centre of
+mass climbs 0.07 m in ours (5.54 against 5.47). What the chassis' angular speed
+about its axle shows (live, `fightcontacts__live__001`, then ours):
+
+| step after release | 10 | 11 | 12 | 13 | 14 | 15 | 17 | 20 |
+|---|---|---|---|---|---|---|---|---|
+| wx live | -1.20 | -1.99 | -2.37 | -3.08 | -1.76 | **+0.15** | -0.37 | -0.43 |
+| wx ours | -1.20 | -2.21 | -2.66 | -2.21 | -2.02 | -1.52 | -1.13 | -1.18 |
+| vy live | -1.54 | -0.66 | 0.11 | 0.27 | 0.73 | 1.00 | 0.40 | -0.08 |
+| vy ours | -1.51 | -0.54 | 0.68 | 0.50 | 0.68 | 0.75 | 0.37 | -0.02 |
+
+The first two steps (the rear's mini wheels, then the front's) are the same;
+live then rocks nose-down to -3.1 rad/s and the front N-12 wheels arrest it at
+step 15 (a change of +3.2 in two steps and +0.7 m/s in vy), while ours gets no
+second impact and keeps turning at -1.2: with the pitch 0.26 the chassis'
+front-bottom edge is at the floor (contacts at distance 0.094 against the
+wheels' > 0.1 from 0.43 s to 0.57 s), the N-12 wheels leave the floor and stop
+spinning up (their spin freezes at 3.4 / 1.7 rad/s, live rolls at -5 to -9 by
+0.4-0.6 s), the minis hop, and the robot gets 0.5-1.0 m behind while its brain
+commands 55-95 %. The thrust is not it: the live first thrust is 1814 / -1814 at
+release + 11 steps in `__001` and + 13 in `__000`, ours 11 (the live ticks
+jitter by a frame); thrust and touching flags follow, the throttle 54.7 against
+54.8 is the same percentage 54; at 100 % on the level floor the Wide Load
+matches live to 0.3 m over 2 s (`contacts-nohaz-wideload__live__001`: 17.84
+against 17.55 m, top 13.4 against 13.5, from the same pose).
+
+What the placement says: the original turns the Wide Load's wheels 149.9 / 158.2
+degrees (N-12, `spinup-...__live__000/001`: 149.9 / 151.2 and 158.2 / 157.9) and
+149.2 / 162.7 (minis) about their axles while it sets the robot on its start
+point (`spincmp.py`); ours turns them 4 / 4 and 89 / 88 (`spinprobe`). Live the
+N-12 wheels leave the first substep spinning at +0.7 / -0.6 rad/s about the axle
+(they carry -0.17 / +0.17 from the build) where ours has 0.005; the other
+robots' kicks are reproduced (§12w), this one is not. With the four turns
+forced to the live values (a throwaway hook, not kept) the minis' landing
+contacts agree with live (dz 0.045-0.063 against 0.054-0.07, distances 0.09)
+and the first three impact steps agree (wx -1.10 / -1.93 against -1.20 / -1.99,
+vy -0.67 against -0.66), but the pitch is still 0.25 and the arrival 1.0 m late
+(the wheel phase moves the pitch by 0.05, 0.21-0.26): the turn is part of the
+story and not all of it. The landing is sensitive: scaling all restitution by 0 or 3
+moves the pitch to 0.18 / 0.16 and the arrival to 0.35 m late, scaling the friction
+by 0.5 or 2 to 0.24 / 0.29, removing the ground damping to 0.29, the wheel drag or
+the lateral slip impulse changes nothing: no single constant is the answer and
+none is verified, so none is applied. **Not found:** what makes the front wheels'
+impact at step 14-15 in live and not in ours (the contacts at those steps have
+the same bodies, distances and the same combined friction and restitution:
+mu 0.3 x 0.9 and 0.5 x 0.9, e 0.3 / 0.3 and 0.3 / 0.2 in live against the
+products and square roots in ours); a `stepprobe`-style replay of the landing
+needs the post-resolver rows the `fightcontacts` agent does not write (it has
+`B` before the resolver only).
+
+**4. The ensembles do not fall at the bell.** `FIDTRACE_WARMUP=w` lets the
+robots go for `w` idle steps and holds them where they came to rest, so a
+warmup run starts from rest on the floor and has no landing at all (§12v); only
+warmup 0 has it. The 48 warmups put the Wide Load at z -9.99 at 1.4 s (live
+-9.52, warmup 0 -10.54): the ensembles are closer to live than the real fight,
+by leaving out the rock. `FIDTRACE_JITTER=n` (new) nudges both robots by `n * 20 um`
+before the bell and keeps the landing; the 48-run Compressor ensemble with it
+(`ensemble.sh` with `FIDTRACE_JITTER` in place of the warmup) is the same fight:
+Wide Load / Sentinel counted 65.5 ± 6.2 / 2.8 ± 0.4 (warmups 66.2 / 4.0), full
+length 22 of 48, the Sentinel on its back by 40 s 15 of 48, decided by 40 / 60 /
+100 s 8 / 15 / 23 of 48 (live 3 / 9 / 13 of 16: p 1.0 / 0.13 / 0.02), the Wide
+Load stalled > 5 s 8 of 48 (p 0.19). `fidtrace` also takes `FIDTRACE_COM=1`
+(centres of mass, as the live `getLocation`) and `RA2_TRACE_EVERY=<n>` in `match`.
+
+**Ensembles, before and after** (`ensemble.sh`, `FIDTRACE_WARMUP` 0..47, 120 s,
+scratch install; the engine is unchanged, so the columns are the same fights;
+the box and Compressor rows are the 12ah ones to the digit):
+
+| fight | live | master b821705 | this branch |
+|---|---|---|---|
+| box ALARM / Scout | 41.1 / 6.0 | 35.4 ± 3.5 / 5.6 ± 0.5 | same |
+| Razor / FlapJack | 3.0 / 0.1 | 1.0 ± 0.1 / 4.8 ± 0.4 | same |
+| Compressor Wide Load / Sentinel | 73.6 / 5.3 | 66.2 ± 6.8 / 4.0 ± 0.5 | same |
+| ... Sentinel on its back by 40 s; both robots still / decided by 40 s | 7 of 16; 3 of 16 | 14 of 48; 5 of 48 (10 %) | same |
+| Octagon ALARM / Scout | 13.6 / 3.2 | 11.6 ± 2.1 / 2.2 ± 0.3 | same |
+
+**Verified / not.** Verified live: the bell alignment and the Sentinel's opening
+(12 runs), the Wide Load's late and pitched opening (12 runs, sd 0.2 m), the
+sixteen-fight rates above, the first thrust and the percentages, the contact
+structure at the landing, the placement turns (two runs, ±1.4 degrees), the
+wheels' rolling in live and their freezing in ours (four runs). Not verified:
+the mechanism of the front wheels' second impact; why the N-12 wheels'
+placement kick (0.7 rad/s) is not produced; the cause of the shortfall in
+decided fights (0.02-0.04); the plateau stall (p 0.055 and 0.19 with the landing).
+**Open, in order:** (1) the Wide Load's landing (above): the replay needs
+`B` and `V` rows around the resolver for it; (2) the placement kick of the
+Z-Tek hinge (live atoms in `spinup-...__live__000`, `J` rows); (3) the endings:
+11 of 13 live decisions are a flipped robot sitting still, so look at what moves
+ours' flipped Sentinel (the Wide Load's pokes slide it 1-4 m; live 0.9-3 m in
+40 s, 0.5 m at the pokes) before changing the 20 s rule.

@@ -81,7 +81,17 @@ fn sample(duel: &Duel) -> Vec<(Vec3, f32, f32, f32, f32)> {
             } else {
                 frac
             };
-            (tf.w_axis.truncate(), heading, speed, r.health[0], frac)
+            // `FIDTRACE_COM=1`: the chassis' centre of mass in place of the bot
+            // origin, which is what the original's `getLocation` reports
+            // (docs/29 section 12g).
+            let at = if std::env::var_os("FIDTRACE_COM").is_some() {
+                duel.physics
+                    .center_of_mass(r.body())
+                    .unwrap_or_else(|| tf.w_axis.truncate())
+            } else {
+                tf.w_axis.truncate()
+            };
+            (at, heading, speed, r.health[0], frac)
         })
         .collect()
 }
@@ -119,6 +129,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 m.duel.hold_robots(true);
             }
+            // `FIDTRACE_JITTER=<n>`: shift every body of each robot by a few
+            // tens of micrometres (n times 20 um along a different direction
+            // per robot), another perturbation for an ensemble. Unlike the
+            // warmup the robots still fall at the bell as live (docs/29
+            // section 12ai: a warmup's robots start at rest on the floor, which
+            // leaves out the landing and the wide load's rock after it).
+            if let Some(n) = std::env::var("FIDTRACE_JITTER")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+            {
+                for (i, r) in m.duel.robots.iter().enumerate() {
+                    let a = (i as f32 + 1.0) * 2.399_963 * (n + 1.0);
+                    let d = Vec3::new(a.cos(), 0.0, a.sin()) * (n * 2.0e-5);
+                    for p in r.parts.iter() {
+                        if let Some(s) = m.duel.physics.state(p.body) {
+                            m.duel
+                                .physics
+                                .set_transform(p.body, s.position + d, s.rotation);
+                        }
+                    }
+                }
+            }
             // `FIDTRACE_HITS=<path>`: every priced hit (both directions, before
             // the `>= 10` gate), in the shape `tools/oracle/fight_report.py`
             // reads from the original's captures.
@@ -146,6 +178,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // lost) on stderr as they happen, with the match clock.
             let show_log = std::env::var_os("FIDTRACE_LOG").is_some();
             let mut logged = 0usize;
+            // `RA2_TRACE_EVERY=<n>` samples every n steps (default `EVERY`).
+            let every = drive_every();
             while m.state() != MatchState::Results && step < (secs * 90.0) as usize + 2000 {
                 m.step();
                 step += 1;
@@ -199,7 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )?;
                         }
                     }
-                    if step.is_multiple_of(EVERY) {
+                    if step.is_multiple_of(every) {
                         write!(trace, "{}", row(t, &sample(&m.duel)))?;
                     }
                     if let Some(f) = wheels.as_mut() {
