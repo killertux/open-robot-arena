@@ -285,7 +285,8 @@ impl ArenaData {
     /// * The route is an A* (`FUN_004067b0`, `FUN_00407330`, at most 1000
     ///   expansions) from `to` to the moved `from` over the vantage points cut
     ///   to whole numbers ([`Self::route_povs`]), with *squared* distances for
-    ///   the steps and the estimate (`FUN_00407890`). A free point's
+    ///   the steps (`FUN_00407890`) and the plain distance for the estimate
+    ///   (docs/29 section 12ag). A free point's
     ///   successors are the vantage points its march reaches; a vantage
     ///   point's are `from` when its march reaches it, then its own
     ///   neighbours; the parent is skipped (`FUN_00407680`). The open list is
@@ -353,8 +354,14 @@ impl ArenaData {
             Node::Free(p) => p,
         };
         let d2 = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2);
+        // The estimate to the goal is the plain distance, while the steps add
+        // up squared distances (docs/29 section 12ag: the squared reading of
+        // `FUN_00407890` for the estimate flips the route between two
+        // near-equal ones from one frame to the next, which no live fight
+        // does).
+        let h = |a: [f32; 2], b: [f32; 2]| d2(a, b).sqrt();
         let mut nodes: Vec<(Node, f32, f32, Option<usize>)> = Vec::new(); // node, g, f, parent
-        nodes.push((Node::Free(start), 0.0, d2(start, goal), None));
+        nodes.push((Node::Free(start), 0.0, h(start, goal), None));
         let mut open = AStarHeap::default();
         open.push(0, nodes[0].2);
         let mut closed: Vec<usize> = Vec::new();
@@ -411,7 +418,7 @@ impl ArenaData {
                 if let Some(i) = in_open {
                     open.remove(i);
                 }
-                let f = g + d2(pos(c), goal);
+                let f = g + h(pos(c), goal);
                 nodes.push((c, g, f, Some(cur)));
                 open.push(nodes.len() - 1, f);
             }

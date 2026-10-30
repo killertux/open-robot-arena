@@ -698,7 +698,28 @@ impl EventGate {
             }
         }
         let mut out = Vec::new();
+        // The filter is asked once per collidable pair and step, not once per
+        // resolver point: live the same pair is priced twice in one step for
+        // about 1 % of its hits (ours 2.5-8 % with a point each, where several
+        // points of one pair would each find another due entry), and its two
+        // entries fire a step apart (docs/29 §12ag).
+        let mut passed: std::collections::HashSet<[(BodyHandle, usize); 2]> =
+            std::collections::HashSet::new();
         for e in events {
+            let side = |body: BodyHandle, state: &BodyState| -> (BodyHandle, usize) {
+                if let Some(ab) = arena.get(&body) {
+                    return (body, ab.part_at(e.point));
+                }
+                let c = owner
+                    .get(&body)
+                    .and_then(|&(r, p)| registered_component(&robots[r], p, state, e.point));
+                (body, c.unwrap_or(usize::MAX))
+            };
+            let mut key = [side(e.a, &e.state_a), side(e.b, &e.state_b)];
+            key.sort_unstable();
+            if passed.contains(&key) {
+                continue;
+            }
             let mut through = false;
             for (body, state) in [(e.a, &e.state_a), (e.b, &e.state_b)] {
                 if let Some(ab) = arena.get(&body) {
@@ -730,6 +751,7 @@ impl EventGate {
                 }
             }
             if through {
+                passed.insert(key);
                 out.push(e);
             }
         }

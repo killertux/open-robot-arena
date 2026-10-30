@@ -1430,6 +1430,50 @@ mod tests {
         });
     }
 
+    /// docs/29 section 12ag: at the start of a Scout v ALARM fight both brains
+    /// take the same corridor, through the centre, whichever of them asks.
+    /// Live (`aistate-scout-alarm-box__live__001..006`) the Scout runs the
+    /// diagonal to the centre from the first frame and ALARM goes round the
+    /// east side of the spike box over `(8, -5)`; a route that sent the Scout
+    /// along the north wall over `(0, 10)` met ALARM seconds later, in a
+    /// different place, and flipped between two routes as the Scout moved.
+    #[test]
+    fn both_brains_take_the_same_corridor_at_the_start_of_a_box_fight() {
+        let Some((host, _guard)) = boot() else { return };
+        let scout = (-9.84_f32, -1.9_f32, 10.09_f32);
+        let alarm = (9.55_f32, -1.9_f32, -9.37_f32);
+        with_py(|py| {
+            host.load_arenas(py).unwrap();
+            let arena = host.create_arena(py, "Combat Arena").unwrap();
+            assert!(host.hazards_on(py, true).unwrap());
+            let a = arena.bind(py);
+            a.call_method1("SetSearchRadius", (1.0_f32,)).unwrap();
+            let route = |from: (f32, f32, f32), to: (f32, f32, f32)| -> Vec<(f32, f32)> {
+                let r: Vec<(f32, f32)> = a
+                    .call_method1("GetPath", (from, to, false))
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                r[1..r.len() - 1]
+                    .iter()
+                    .map(|p| (p.0.round(), p.1.round()))
+                    .collect()
+            };
+            let out = route(scout, alarm);
+            let back = route(alarm, scout);
+            assert_eq!(out.first(), Some(&(-5.0, 5.0)), "{out:?}");
+            assert_eq!(back.first(), Some(&(8.0, -5.0)), "{back:?}");
+            let mut reversed = back.clone();
+            reversed.reverse();
+            assert_eq!(out, reversed, "{out:?} against {back:?}");
+            // And it stays put while the Scout drives off its corner.
+            for x in [-9.4_f32, -9.0, -8.6, -8.2] {
+                let r = route((alarm.0 - 0.7, alarm.1, alarm.2 + 2.0), (x, scout.1, 10.2));
+                assert_eq!(r.first(), Some(&(8.0, -5.0)), "{x}: {r:?}");
+            }
+        });
+    }
+
     /// `GetLastDamageReceived`/`Done` are the original's 5-tuples
     /// (`FUN_004b9050`: component, amount, time, player, player's component), and
     /// the shipped `Spinner.RobotInRange` reads the player at index 3. A 3-tuple

@@ -5584,7 +5584,9 @@ mod tests {
                 through.push(k);
             }
         }
-        assert_eq!(through, vec![0, 0, 60, 60], "{through:?}");
+        // One event a step for the pair, A's entry first and B's the step
+        // after (docs/29 section 12ag): never both in one step.
+        assert_eq!(through, vec![0, 1, 60, 61], "{through:?}");
     }
 
     /// docs/29 section 12z: the Octagon's hinges turn the way live does
@@ -7330,10 +7332,16 @@ mod tests {
             gate.admit_with(&duel.robots, &duel.arena_bodies, vec![event; 3], t)
                 .len()
         };
-        // The floor's entry, then the chassis' own; the third point waits.
-        assert_eq!(through(&mut gate, 0.0), 2);
+        // The pair is asked once a step (docs/29 section 12ag): the floor's
+        // entry takes the first step, the chassis' own the next, and the
+        // points beyond the first wait.
+        let step = 1.0 / 60.0;
+        assert_eq!(through(&mut gate, 0.0), 1);
+        assert_eq!(through(&mut gate, step), 1);
+        assert_eq!(through(&mut gate, 2.0 * step), 0);
         assert_eq!(through(&mut gate, 0.5), 0);
-        assert_eq!(through(&mut gate, 1.0), 2);
+        assert_eq!(through(&mut gate, 1.0), 1);
+        assert_eq!(through(&mut gate, 1.0 + step), 1);
     }
 
     /// The flame's cast is a ray against the part's collision shape (`0x504b90` -> the world cast `0x4a3a90`):
