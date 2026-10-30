@@ -5597,7 +5597,7 @@ mod tests {
             state_a: state(Vec3::X * closing),
             state_b: state(Vec3::ZERO),
         };
-        let mut gate = combat::EventGate::default();
+        let mut gate = combat::EventGate::with_pair_gate(false);
         let mut through = Vec::new();
         for k in 0..120 {
             let t = k as f32 / 60.0;
@@ -7347,7 +7347,7 @@ mod tests {
             state_a: duel.physics.state(floor).unwrap(),
             state_b: state,
         };
-        let mut gate = combat::EventGate::default();
+        let mut gate = combat::EventGate::with_pair_gate(false);
         let through = |gate: &mut combat::EventGate, t: f32| {
             gate.admit_with(&duel.robots, &duel.arena_bodies, vec![event; 3], t)
                 .len()
@@ -7356,6 +7356,17 @@ mod tests {
         assert_eq!(through(&mut gate, 0.0), 2);
         assert_eq!(through(&mut gate, 0.5), 0);
         assert_eq!(through(&mut gate, 1.0), 2);
+        // With the pair gate (`RA2_PAIR_GATE=1`, docs/29 section 12ag) the pair
+        // is asked once a step: the floor's entry takes the first step, the
+        // chassis' own the next.
+        let mut gate = combat::EventGate::with_pair_gate(true);
+        let step = 1.0 / 60.0;
+        assert_eq!(through(&mut gate, 0.0), 1);
+        assert_eq!(through(&mut gate, step), 1);
+        assert_eq!(through(&mut gate, 2.0 * step), 0);
+        assert_eq!(through(&mut gate, 0.5), 0);
+        assert_eq!(through(&mut gate, 1.0), 1);
+        assert_eq!(through(&mut gate, 1.0 + step), 1);
     }
 
     /// The flame's cast is a ray against the part's collision shape (`0x504b90` -> the world cast `0x4a3a90`):

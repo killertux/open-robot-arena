@@ -285,7 +285,8 @@ impl ArenaData {
     /// * The route is an A* (`FUN_004067b0`, `FUN_00407330`, at most 1000
     ///   expansions) from `to` to the moved `from` over the vantage points cut
     ///   to whole numbers ([`Self::route_povs`]), with *squared* distances for
-    ///   the steps and the estimate (`FUN_00407890`). A free point's
+    ///   the steps and the estimate (`FUN_00407890`; `RA2_ASTAR_PLAIN_H=1`
+    ///   takes the plain distance for the estimate, docs/29 section 12ag). A free point's
     ///   successors are the vantage points its march reaches; a vantage
     ///   point's are `from` when its march reaches it, then its own
     ///   neighbours; the parent is skipped (`FUN_00407680`). The open list is
@@ -353,8 +354,15 @@ impl ArenaData {
             Node::Free(p) => p,
         };
         let d2 = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2);
+        // Steps and estimate are `FUN_00407890`'s squared distance (stored at
+        // node+0x0c, f = +0x0c + +0x08: 0x4072d7, 0x407497, 0x407596). With
+        // `RA2_ASTAR_PLAIN_H=1` the estimate is the plain distance, which
+        // reproduces live's first routes where the binary's reading does not
+        // (docs/29 section 12ag; the cause is open).
+        let plain = plain_estimate();
+        let h = |a: [f32; 2], b: [f32; 2]| if plain { d2(a, b).sqrt() } else { d2(a, b) };
         let mut nodes: Vec<(Node, f32, f32, Option<usize>)> = Vec::new(); // node, g, f, parent
-        nodes.push((Node::Free(start), 0.0, d2(start, goal), None));
+        nodes.push((Node::Free(start), 0.0, h(start, goal), None));
         let mut open = AStarHeap::default();
         open.push(0, nodes[0].2);
         let mut closed: Vec<usize> = Vec::new();
@@ -411,7 +419,7 @@ impl ArenaData {
                 if let Some(i) = in_open {
                     open.remove(i);
                 }
-                let f = g + d2(pos(c), goal);
+                let f = g + h(pos(c), goal);
                 nodes.push((c, g, f, Some(cur)));
                 open.push(nodes.len() - 1, f);
             }
@@ -1423,4 +1431,29 @@ impl AStarHeap {
             self.push(i, f);
         }
     }
+}
+
+/// `RA2_ASTAR_PLAIN_H=1`: the A* estimate is the plain distance instead of the
+/// squared one `FUN_00407890` returns (docs/29 section 12ag). Off by default.
+fn plain_estimate() -> bool {
+    use std::sync::atomic::Ordering;
+    match PLAIN_OVERRIDE.load(Ordering::Relaxed) {
+        1 => return false,
+        2 => return true,
+        _ => {}
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_ASTAR_PLAIN_H").is_ok_and(|v| v != "0" && !v.is_empty()))
+}
+
+static PLAIN_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Force the estimate for a test (`None`: the environment decides).
+pub fn set_plain_estimate(on: Option<bool>) {
+    let v = match on {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    };
+    PLAIN_OVERRIDE.store(v, std::sync::atomic::Ordering::Relaxed);
 }
