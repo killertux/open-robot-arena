@@ -270,31 +270,35 @@ impl ArenaData {
             .collect()
     }
 
-    /// `GetPath(from, to, ignore_hazards)` (`FUN_00405990`), as world `(x, z)`
-    /// waypoints from `from` to `to` — the "grid" of the scripts is the world
-    /// plane: `ToGrid` is `(x, z)` and `FromGrid` puts the map's floor height
-    /// back. Recovered, and every one of 2994 live calls in six box fights
-    /// reproduced (`boxfight-scout-alarm-box__live__*`, docs/29 §12ab):
+    /// The native `GetPath(p1, p2, ignore_hazards)` (`FUN_00405990`), as world
+    /// `(x, z)` waypoints in the native list's order, `[p2 (moved), ..., p1]`
+    /// (the Python method `Arena.GetPath(from, to)` is `FUN_004ba370`: it calls
+    /// the native one with `p1 = from`, `p2 = to` and reverses the list, so the
+    /// script sees `[from, ..., to']`; docs/29 section 12ah). The "grid" of the
+    /// scripts is the world plane: `ToGrid` is `(x, z)` and `FromGrid` puts the
+    /// map's floor height back. Recovered, and every one of 5179 live calls in
+    /// twelve box fights (`boxfight-*`, `boxstart-*`) reproduced:
     ///
-    /// * The straight test marches from `to` toward `from` (`to` tested,
-    ///   `from` not); clear, the route is `[from, to]`.
-    /// * Otherwise a `from` whose own circle crosses a line is moved: the march
+    /// * The straight test marches from `p1` toward `p2` (`FUN_00405720`,
+    ///   stops `trunc(length / (radius / 2))` from `p1` on, the end point not
+    ///   tested, each stop a circle of the search radius against every
+    ///   collision line); clear, the route is `[p2, p1]`.
+    /// * Otherwise a `p2` whose own circle crosses a line is moved: the march
     ///   from it toward each vantage point in turn, the first clear stop.
-    ///   (The same is attempted for `to`, but the found point is written into
-    ///   the vantage point's temporary, so `to` never moves.)
+    ///   (The same is attempted for `p1`, but the found point is written into
+    ///   the vantage point's temporary, so `p1` never moves.)
     /// * The route is an A* (`FUN_004067b0`, `FUN_00407330`, at most 1000
-    ///   expansions) from `to` to the moved `from` over the vantage points cut
+    ///   expansions) from `p1` to the moved `p2` over the vantage points cut
     ///   to whole numbers ([`Self::route_povs`]), with *squared* distances for
-    ///   the steps and the estimate (`FUN_00407890`; `RA2_ASTAR_PLAIN_H=1`
-    ///   takes the plain distance for the estimate, docs/29 section 12ag). A free point's
+    ///   the steps and the estimate (`FUN_00407890`). A free point's
     ///   successors are the vantage points its march reaches; a vantage
-    ///   point's are `from` when its march reaches it, then its own
+    ///   point's are the goal when its march reaches it, then its own
     ///   neighbours; the parent is skipped (`FUN_00407680`). The open list is
     ///   a binary heap on `f` ([`AStarHeap`]), which settles ties.
-    /// * When the A* fails the route is `[moved from, to]`: the AI then drives
+    /// * When the A* fails the route is `[moved p2, p1]`: the AI then drives
     ///   straight at its target.
-    pub fn path(&self, from: Vec3, to: Vec3, radius: f32) -> Vec<[f32; 2]> {
-        let (s, g) = ([from.x, from.z], [to.x, to.z]);
+    pub fn path(&self, p1: Vec3, p2: Vec3, radius: f32) -> Vec<[f32; 2]> {
+        let (s, g) = ([p2.x, p2.z], [p1.x, p1.z]);
         if self.march_clear(g, s, radius) {
             return vec![s, g];
         }
@@ -355,12 +359,8 @@ impl ArenaData {
         };
         let d2 = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2);
         // Steps and estimate are `FUN_00407890`'s squared distance (stored at
-        // node+0x0c, f = +0x0c + +0x08: 0x4072d7, 0x407497, 0x407596). With
-        // `RA2_ASTAR_PLAIN_H=1` the estimate is the plain distance, which
-        // reproduces live's first routes where the binary's reading does not
-        // (docs/29 section 12ag; the cause is open).
-        let plain = plain_estimate();
-        let h = |a: [f32; 2], b: [f32; 2]| if plain { d2(a, b).sqrt() } else { d2(a, b) };
+        // node+0x0c, f = +0x0c + +0x08: 0x4072d7, 0x407497, 0x407596).
+        let h = d2;
         let mut nodes: Vec<(Node, f32, f32, Option<usize>)> = Vec::new(); // node, g, f, parent
         nodes.push((Node::Free(start), 0.0, h(start, goal), None));
         let mut open = AStarHeap::default();
@@ -821,8 +821,10 @@ impl Arena {
         self.search_radius = radius;
     }
 
-    /// `GetPath(from_world, to_world, ignore_hazards)` — `(x, z)` waypoints
-    /// (see [`ArenaData::path`]).
+    /// `GetPath(from_world, to_world, ignore_hazards)` (`FUN_004ba370`) — `(x, z)`
+    /// waypoints from `from_world` to `to_world` (moved, if it sits on a line):
+    /// the native search with `p1 = from`, `p2 = to`, its list reversed (see
+    /// [`ArenaData::path`], docs/29 section 12ah).
     fn GetPath(
         &self,
         from: (f32, f32, f32),
@@ -839,6 +841,7 @@ impl Arena {
                 r,
             )
             .into_iter()
+            .rev()
             .map(|p| (p[0], p[1]))
             .collect()
     }
@@ -1423,37 +1426,45 @@ impl AStarHeap {
         self.items.iter().find(|e| pred(e.0)).map(|e| e.0)
     }
 
-    /// Take entry `id` out and rebuild the heap from what is left, in order.
+    /// Take entry `id` out (`FUN_004514b0`: the vector erase keeps the order of
+    /// the rest) and `make_heap` what is left (`FUN_0040d590` -> `FUN_0040f6d0`:
+    /// from `len / 2` down to the first slot, each entry moved down along the
+    /// better child to the bottom and sifted back up).
     fn remove(&mut self, id: usize) {
-        let rest: Vec<(usize, f32)> = self.items.iter().copied().filter(|e| e.0 != id).collect();
-        self.items.clear();
-        for (i, f) in rest {
-            self.push(i, f);
+        self.items.retain(|e| e.0 != id);
+        let n = self.items.len();
+        if n < 2 {
+            return;
+        }
+        let mut hole = n / 2;
+        while hole > 0 {
+            hole -= 1;
+            let v = self.items[hole];
+            let top = hole;
+            let (mut i, mut c) = (hole, 2 * hole + 2);
+            while c < n {
+                if Self::below(self.items[c], self.items[c - 1]) {
+                    c -= 1;
+                }
+                self.items[i] = self.items[c];
+                i = c;
+                c = 2 * c + 2;
+            }
+            if c == n {
+                self.items[i] = self.items[c - 1];
+                i = c - 1;
+            }
+            // push_heap back up, not past the slot the adjust began at.
+            while i > top {
+                let p = (i - 1) / 2;
+                if Self::below(self.items[p], v) {
+                    self.items[i] = self.items[p];
+                    i = p;
+                } else {
+                    break;
+                }
+            }
+            self.items[i] = v;
         }
     }
-}
-
-/// `RA2_ASTAR_PLAIN_H=1`: the A* estimate is the plain distance instead of the
-/// squared one `FUN_00407890` returns (docs/29 section 12ag). Off by default.
-fn plain_estimate() -> bool {
-    use std::sync::atomic::Ordering;
-    match PLAIN_OVERRIDE.load(Ordering::Relaxed) {
-        1 => return false,
-        2 => return true,
-        _ => {}
-    }
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RA2_ASTAR_PLAIN_H").is_ok_and(|v| v != "0" && !v.is_empty()))
-}
-
-static PLAIN_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-/// Force the estimate for a test (`None`: the environment decides).
-pub fn set_plain_estimate(on: Option<bool>) {
-    let v = match on {
-        None => 0,
-        Some(false) => 1,
-        Some(true) => 2,
-    };
-    PLAIN_OVERRIDE.store(v, std::sync::atomic::Ordering::Relaxed);
 }
