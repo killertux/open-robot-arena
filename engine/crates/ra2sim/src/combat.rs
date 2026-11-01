@@ -443,12 +443,14 @@ pub struct EventGate {
     /// Per (body, component): the last time each of its entries let a point
     /// through.
     last: HashMap<(BodyHandle, usize), Vec<Option<f32>>>,
-    /// At most one event per collidable pair and call (a step) instead of one
-    /// per resolver point (docs/29 §12ag). The filter itself is asked for every
-    /// point (`0x549c30` walks the contact list, §12ak), but live none of 1727
-    /// firings in three fights shared its collidable pair and step with
-    /// another (ours 2.5-8 %): on by default since §12ak, `RA2_PAIR_GATE=0`
-    /// turns it off.
+    /// `RA2_PAIR_GATE=1`: at most one event per collidable pair and call (a
+    /// step) instead of one per resolver point (docs/29 §12ag, §12ak). The
+    /// filter itself is asked for every point (`0x549c30`), but live none of
+    /// 1727 firings shared its collidable pair and step with another (ours
+    /// 2.5-8 %). Off by default: with the distance query of §12ak it makes the
+    /// Compressor's robots end up at the end walls (arena hp 337 / 326 against
+    /// 178 / 146 live), through the wheels' callbacks it feeds (`RA2_WHEEL_GATE=1`
+    /// gives them a gate without the pair rule: 128 / 149).
     pub pair_gate: bool,
     /// `RA2_PAIR_SINGLE=1` (experiment, off): a collidable pair with two or
     /// more points in the step lets none through. Live (docs/29 section 12ak)
@@ -472,7 +474,7 @@ impl Default for EventGate {
     fn default() -> Self {
         EventGate {
             last: HashMap::new(),
-            pair_gate: std::env::var("RA2_PAIR_GATE").map_or(true, |v| v != "0"),
+            pair_gate: std::env::var("RA2_PAIR_GATE").is_ok_and(|v| v != "0" && !v.is_empty()),
             pair_single: std::env::var("RA2_PAIR_SINGLE").is_ok_and(|v| v != "0" && !v.is_empty()),
         }
     }

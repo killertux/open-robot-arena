@@ -5869,8 +5869,9 @@ pokes slide it further).
 Section 12aj left the Wide Load's N-12 wheel with a contact point mid-edge in
 live where ours reported a ring vertex, the rod's and the fork's points fewer
 than live's (12ae), the pair rule (`RA2_PAIR_GATE`) unconfirmed, and the
-practice arena silent at its walls. All three are answered below; each changes
-what ours does by default.
+practice arena silent at its walls. All three are answered below; the distance
+query and the practice arena's impacts change what ours does by default, the pair
+gate (first on, then back off, see 2) does not.
 
 **New live captures** (one session on `:7`, `RA2_FRIDA_PORT=27147`; the prefix's
 `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` copied before and compared by
@@ -6001,8 +6002,29 @@ more points lets none through) drops ours' counted hits to 23.8 / 3.0 (box, live
 too much and stays an off switch. The mechanism behind "at most one event per
 collidable pair and step" was not found (the filter's loop over the entries and
 `0x52d740` have no such test: an entry fires when due and the closing speed is
-at least its threshold, 0 live), so what is on is the live invariant: **the pair
-gate is the default now** (`EventGate::pair_gate`, `RA2_PAIR_GATE=0` off).
+at least its threshold, 0 live). Which point of a multi-point pair is the one
+priced cannot be read off live: none is (above). Ours lets through the first
+point of the contact list that finds a due entry, then blocks the pair for the
+step; its keys are the collidables' (the arena side's piece by `part_at`, the
+robot side's registered component), which is what the original's entries are.
+
+**The gate's side effect (found, off by default).** On the Compressor the
+gate together with the distance query gave arena hp 337 / 326 (live 178 / 146;
+GJK alone 127 / 113, the gate alone 111 / 59). The hp is the robots standing at
+the end walls (z about 20) under the smash arms for a minute (run 7: from 52 s to
+the end, 97 arena hits, hits of speed 20 m/s on a robot at rest; the share of
+samples past `|z| = 17` rises from 1.5 / 1.2 % to 5.9 / 2.3 %). The cause is
+not the pricing but **the wheels' drive**: `Duel::resolve_combat` feeds the wheels'
+collision callbacks (`MagicAction::contact`, the normal the drive uses, 12ad) from
+the events the gate lets through, so the pair rule changes which normals the
+drive hears. With the wheels given a gate without the pair rule
+(`RA2_WHEEL_GATE=1`) and the pricing gated, the Compressor reads 76.4 / 4.0
+counted, arena hp 128 / 149, 1.0 / 1.3 % past `|z| = 17`. Live the wheels hear
+their two entries' events a step apart, once a second (12ad), which the pair
+rule reproduces, so the hybrid is not a verified rule and the interaction (why
+a wheel hearing every step's first event only strands the robot) is open.
+**The pair gate is therefore off by default** (`RA2_PAIR_GATE=1` on): the live
+invariant is documented and the switch kept.
 
 **3. The practice arena's walls (recovered, verified live).** The pricing was
 there: `practiceprobe` (the Test Robot C.R.U.S.H., W held, Practice.py) prices
@@ -6023,29 +6045,32 @@ sounds), so the chassis plays `steel_collision` / `aluminum_collision` /
 scratch install; counted `>= 10`, mean +- standard error, first robot named first;
 "before" reproduces 12aj to the digit):
 
-| fight | live | before (12aj) | `RA2_GJK` alone | pair gate alone | after (both, the defaults) |
+| fight | live | before (12aj) | **after: the defaults (`RA2_GJK` on, gate off)** | pair gate alone | both (`RA2_PAIR_GATE=1`) |
 |---|---|---|---|---|---|
-| box ALARM / Scout counted | 41.1 / 6.0 | 35.4 +- 3.5 / 5.6 +- 0.5, 15 of 48 full | 36.3 +- 3.8 / 5.8 +- 0.6, 16 | 34.5 +- 3.4 / 6.1 +- 0.6, 13 | 31.1 +- 3.5 / 5.3 +- 0.5, 12 |
+| box ALARM / Scout counted | 41.1 / 6.0 | 35.4 +- 3.5 / 5.6 +- 0.5, 15 of 48 full | **36.3 +- 3.8 / 5.8 +- 0.6**, 16 | 34.5 +- 3.4 / 6.1 +- 0.6, 13 | 31.1 +- 3.5 / 5.3 +- 0.5, 12 |
 | ... arena hp Scout / ALARM | 99 / 17 | 55 / 39 | 57 / 65 | 55 / 34 | 83 / 44 |
-| Razor / FlapJack counted | 3.0 / 0.1 | 1.0 +- 0.1 / 4.8 +- 0.4, 4 | 1.0 / 4.0 +- 0.4, 7 | 1.0 / 4.8 +- 0.4, 7 | 1.0 +- 0.1 / 3.9 +- 0.3, 7 |
-| Compressor Wide Load / Sentinel counted | 73.6 / 5.3 | 66.2 +- 6.8 / 4.0 +- 0.5, 24 | 77.5 +- 6.9 / 3.9 +- 0.5, 23 | 85.6 +- 7.1 / 5.1 +- 0.5, 29 | 73.7 +- 6.4 / 4.5 +- 0.7, 29 |
-| ... arena hp Sentinel / Wide Load | 178 / 146 | 121 / 92 | 127 / 113 | 111 / 59 | **337 / 326** (8 of 48 runs over 600 hp, before 1) |
-| Octagon ALARM / Scout counted | 13.6 / 3.2 | 11.6 +- 2.1 / 2.2 +- 0.3, 3 | 11.5 +- 1.9 / 2.9 +- 0.5, 2 | 12.8 +- 1.6 / 2.4 +- 0.3, 2 | 10.9 +- 1.8 / 2.2 +- 0.3, 2 |
+| Razor / FlapJack counted | 3.0 / 0.1 | 1.0 +- 0.1 / 4.8 +- 0.4, 4 | **1.0 / 4.0 +- 0.4**, 7 | 1.0 / 4.8 +- 0.4, 7 | 1.0 +- 0.1 / 3.9 +- 0.3, 7 |
+| Compressor Wide Load / Sentinel counted | 73.6 / 5.3 | 66.2 +- 6.8 / 4.0 +- 0.5, 24 | **77.5 +- 6.9 / 3.9 +- 0.5**, 23 | 85.6 +- 7.1 / 5.1 +- 0.5, 29 | 73.7 +- 6.4 / 4.5 +- 0.7, 29 |
+| ... arena hp Sentinel / Wide Load | 178 / 146 | 121 / 92 | **127 / 113** | 111 / 59 | 337 / 326 (8 of 48 runs over 600 hp, before 1) |
+| Octagon ALARM / Scout counted | 13.6 / 3.2 | 11.6 +- 2.1 / 2.2 +- 0.3, 3 | **11.5 +- 1.9 / 2.9 +- 0.5**, 2 | 12.8 +- 1.6 / 2.4 +- 0.3, 2 | 10.9 +- 1.8 / 2.2 +- 0.3, 2 |
 | ... arena hp Scout / ALARM | 14 / 114 (two fights) | 89 / 61 | 144 / 70 | 90 / 72 | 133 / 114 |
 
-(The first robot named is `A0` / the counted `R0n` side in `ensemble_report.py`:
-the table gives the report's `R1n / R0n` for the counted hits, ALARM or the
-Wide Load first.) `PAIR_SINGLE` for the record: box 23.8 / 3.0, Razor 0.4 / 3.3,
-Compressor 68.7 / 3.4, Octagon 8.0 / 1.4.
+(The counted hits are the report's `R1n / R0n`: the second robot named first
+for the box, Razor and octagon fights as in 12aj's labels.) The last column
+with the wheels hearing a gate without the pair rule (`RA2_WHEEL_GATE=1`): Compressor
+76.4 +- 6.8 / 4.0 +- 0.5, arena hp 128 / 149. `PAIR_SINGLE` (with the gate and
+the distance query): box 23.8 / 3.0, Razor 0.4 / 3.3, Compressor 68.7 / 3.4,
+Octagon 8.0 / 1.4. The "after" column was re-run with the final binary and is
+the 12aj column plus the distance query only.
 
 *Priced robot-against-robot hits per second of fight* (the gate's calls, all
-amounts; live from the bell by the first non-zero thrust, 12ag's "1.4-2 times"):
-Box live 3.13, ours 4.46 -> 4.19; Compressor live 7.46, ours 5.30 -> 5.14;
-Octagon live 4.7 (one 41 s fight), ours 3.03 -> 2.45; counted (>= 10) per second:
-Box live 0.335, ours 0.484 -> 0.462; Compressor 0.919, 0.794 -> 0.789; Octagon
-0.294, 0.274 -> 0.269. The surplus of 12ag exists in the box only (1.4 times);
-the pair gate alone moves nothing (4.46 -> 4.36), so it is not what the surplus
-is.
+amounts; live from the bell by the first non-zero thrust; 12ag's "1.4-2 times"):
+Box live 3.13, ours 4.46 -> 4.10; Compressor live 7.46, ours 5.30 -> 5.54;
+Octagon live 4.7 (one 41 s fight), ours 3.03 -> 2.50; counted (>= 10) per
+second: Box live 0.335, ours 0.484 -> 0.479; Compressor 0.919, 0.794 -> 0.889;
+Octagon 0.294, 0.274 -> 0.284. The surplus of 12ag exists in the box only (1.4
+times); the pair gate alone moves nothing (4.46 -> 4.36), so it is not what the
+surplus is.
 
 **Verified / not.**
 In the binary: the distance query's whole flow (start directions, the loop and
@@ -6061,17 +6086,17 @@ ties), the x87 ties of degenerate simplexes (2.3 % of the queries), convex x
 convex pairs (`0x544820` / `0x55b2c0`), the mechanism of the pair invariant and
 of "no firing on pairs with several points", why the landing's second impact is
 still missing.
-**Open, in order:** (1) the Compressor's arena damage with both changes (337 /
-326 hp against live 178 / 146; heavy tail of runs pinned by the smash arms, one
-a run of 6462 hp: GJK alone 127 / 113, the gate alone 111 / 59 stay near before);
-(2) the bell landing is still the placement turns' (12aj): the contacts are
-right at the live poses (the pair table above), the landing needs the wheels'
-live turn and spin; (3) the N-12 wheels' flatness: the original keeps an
-axial edge's mid point only while the wheel is flat to 0.02 degrees, so its
-contacts follow the wheel's tilt exactly; (4) the box's counted hits fall a
-little further from live (35.4 -> 31.1) and need the same look as the
-Compressor's.
+**Open, in order:** (1) the pair gate's interaction: why the wheels hearing
+the pair rule's events strand the Compressor's robots at the end walls (above;
+the gate is off until that is explained; with the wheels ungated the gate's counts
+are 76.4 / 4.0 and 128 / 149 hp); (2) the bell landing is still the placement
+turns' (12aj): the contacts are right at the live poses (the pair table above),
+the landing needs the wheels' live turn and spin; (3) the N-12 wheels'
+flatness: the original keeps an axial edge's mid point only while the wheel is
+flat to 0.02 degrees, so its contacts follow the wheel's tilt exactly; (4) the
+Octagon's Scout takes 144 hp from the arena (live 14) and the Compressor's tail
+of robots stranded at the end walls persists in a few runs (4 of 48 over 600 hp).
 **Tools.** `frida/ra2_fightgjk.js`, `tools/oracle/gjk_cases.py`,
 `examples/gjkreplay.rs`, `examples/practiceprobe.rs`,
 `capture_landing_set.sh AGENT= NAME= SIM_SECONDS=`, the switches
-`RA2_GJK=0`, `RA2_PAIR_GATE=0`, `RA2_PAIR_SINGLE=1` (experiment).
+`RA2_GJK=0`, `RA2_PAIR_GATE=1`, `RA2_WHEEL_GATE=1` and `RA2_PAIR_SINGLE=1` (experiments).
