@@ -72,6 +72,15 @@ fn main() -> Result<(), String> {
                 builder.set_drive(input);
                 i += 3;
             }
+            "cues" => {
+                // `cues`: the practice arena's sound cues since the last call.
+                if let Some((cues, _)) = builder.take_arena_cues() {
+                    for cue in cues {
+                        println!("cue {cue:?}");
+                    }
+                }
+                i += 1;
+            }
             "arenashot" => {
                 let size = [1024u32, 580];
                 let pixels = builder.arena_frame(size)?;
