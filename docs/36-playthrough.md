@@ -1407,8 +1407,7 @@ was left on `0x5a6260` and the session was restarted: the camera hook now detach
   texts (blue `tip` icon), not the synthetic panel's status: set on the palette click and on Attach, the drag tip is also what comes back after an alert; a click on nothing (drag cancelled) leaves the line **empty**
   (no icon: `botlab-tip-cancel-blank`); a screen change recomputes the default (`FUN_0043e900`). Ours: `Builder::tip_set` (the status string still feeds the synthetic panel, which stays for the editing the port
   has not moved to the shell).
-* **The chassis side-adjust's bend alert is not reproduced:** the port has the outline editor only (`chassis::move_outline_point`); the mesh's side-adjust screen (4) with the normals' `< 0.75` test does not exist
-  there. The alert API is ready for it (`Builder::show_alert`).
+* **The chassis side-adjust's bend alert** (`0x44d5fb`) was not reproduced when this was written; it is in 9.27e (the port had only the click-click outline editor, `chassis::move_outline_point`).
 * **Practice-arena sounds, against `audio-practice-test`** (Test Robot, C.R.U.S.H.; W 2.5 s, Space, W 3 s into the far wall). Live: four `motorloop` voices (one per wheel) are created when W goes down, their pitch
   (`F`, Hz of the 22 050 Hz sample) ramps 11 536 -> 16 223 -> 21 128 -> 24 409 -> 28 591 over 1.1 s (0.52 -> 1.30 of the rate) and they stop (`S`) when W is released; no crowd, announcer or ceremony sounds; the
   workshop music keeps playing; at the wall `sounds\steel_collision.wav` (-7.95 dB, -13.41 dB) and `sounds\hammer_hit.wav` (-13.45, -14.51 dB) play. Ours (`labshot ... keys down 17 tick ... cues`): four
@@ -1417,6 +1416,66 @@ was left on `0x5a6260` and the session was restarted: the camera hook now detach
   robot against the wall is not priced there. Live plays them for chassis and hammer against the arena. Owner: the combat / physics side (`fx/bell-landing`); the cue and its volume rule (`hundredths of dB` of
   the contact magnitude, docs/35) are the match's. New `labshot` step `cues`.
 * **Tip RNG and the 1 px items** are in docs/34 11.8 (snapshot box, DisplayBox rows, the chat line).
+
+### 9.27e The chassis side-adjust, screen 4: dragging the top points (`fx/lab-adjust`, 2026-11-01)
+
+Live on display :9 (flatpak Wine 9.0; `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` of the prefix copied before and restored after, sha256 lists equal, three sessions). Team 0's cell 5 scrapped, a new robot,
+Chassis > Structure Design, a baseplate clicked in, step 2, then drags on the top points (`tools/oracle/ra2_drive.py dragh`, new: see Harness). Captures (manifest rows, backups
+`manifest-additions-2026-10-21-lab-adjust.tsv` and `-lab-adjust2.tsv`): `botlab-adjust-hover`, `-drag-ok`, `-alert-bend`, `-alert-close`, `-alert-cross`, `-alert-sharp`, `-taper`, `-nosnap`, `-step2-reextruded`,
+`-overview` (PNG); `botlab-adjust-triangle-ok`, `-triangle-bent`, `-square-taper`, `-base-vertical`, `-base-ccw` (the `.bot` Back to HQ wrote); `botlab-adjust-trace` (`tools/oracle/frida/ra2_chassis_adjust.js`, every call of
+`FUN_0044d1b0` with the two normals it dots and the alert text).
+
+* **How the original gets here.** Screen 4 is `chassis_structure2.gib` (*Adjust Top Outline*, the `Editing Area`, `height slider`, `3d view placeholder`) loaded by the step layer's `step 2 button`; screen 3 is
+  `chassis_structure1.gib` (`FUN_00437770` builds both). Going to step 2 **extrudes afresh** every time: after step 1 and step 2 again the top outline is the baseplate again, the height the default 0.825
+  (thumb at 302 px) and every drag is gone (`botlab-adjust-step2-reextruded`). Finished keeps what was dragged. The tip line is *Click and drag points to adjust the sides of your chassis* (`+0x1d8` = 4).
+  A baseplate clicked **counter-clockwise** is stored reversed (`botlab-adjust-base-ccw`: (200,200) (500,800) (800,200) is written `800 200 / 500 800 / 200 200`).
+* **What can be dragged.** The **top outline's points** only (the baseplate's stay; there is no per-vertex height: the height is the slider's), in the two-dimensional blueprint, and the 3D view follows. The widget
+  (class vtable `0x6a7c6c`, ctor `FUN_004781f0`, `Point_Selection.tga` image per point) takes a press (`0x478f00`) on the 16 px selection image of a point (a point at (129,238) is taken by cursors x 121..136,
+  y 232..245; the first point in list order wins) and holds it until the release (`0x4791e0`); its move handler (`0x478c20`) then moves the point to the cursor each mouse move: `FUN_00479260` converts the
+  pixel to blueprint units (`round((px - 39) / 450 * 1000)`, snapped to the 100-unit grid when `Snap to grid` is on: live, snap off follows the pixel exactly), `FUN_004a10d0` judges the new polygon, `FUN_00479ca0`
+  sets it and raises the callback `FUN_0043d820` -> **`FUN_0044d1b0`(index, &point, 1)**. The ring of the point under the cursor (and of the one held) is white, the others grey (`191`); the ring stays
+  where the cursor left the area (the widget gets no move outside its frame).
+* **The 3D mapping.** `FUN_0044a570`: the vertex of an outline point is `((u - 500) * 0.0022, h, -(v - 500) * 0.0022)` with `h` = `lab+0x2ec` (the height). `FUN_0044d1b0` moves every mesh vertex of that top
+  corner (the top ring vertex and the two side-quad copies: a map point -> vertices at `lab+0x2f0`), then recomputes **every face normal** (`FUN_004260c0`, normalised: `(p1 - p0) x (p2 - p0)` of the
+  triangle as indexed) and writes it to **each of its three vertices in index order**: the last triangle wins. A side is the quad `b_i b_i+1 t_i+1 t_i` as `(v1 v2 v0)(v2 v3 v0)`, so `v1` keeps the first
+  triangle's normal and `v0 v2 v3` the second's: equal on a flat side, different once a corner is dragged (`botlab-adjust-triangle-ok` has `-0.226108 0.361772 0.904431` three times and `0 0 1` once on the
+  slanted side). `FUN_0044d710` then sums the triangle areas (`lab+0x300`) for the weight and the hitpoints (live: the triangle with its first point at (400,300) weighs **55.8** in the Overview; ours 55.8).
+* **The bend test** (`0x44d5fb`). For the two sides next to the point (side ids `index + 2` and `(index == 0 ? n : index) + 1` in the 12-byte records at `lab+0x2c8`, two records per side: `u16` first
+  vertex of each triangle, `int` side id) it takes the two vertex normals (`FUN_005a9d50`) and dots them (`FUN_0044d680`); **dot < 0.75** (`0x6a69d8`) sets the verdict false. Then the orange alert
+  *Can't move that point because it will bend one side too much* (`0x6f2118`, always shown, `FUN_0043e7c0`) and the lab calls itself again with the **old** point and flag 0 (no alert): the point goes back, in the
+  lab and in the widget, and the drag goes on (every further mouse move over a bad place repeats it). Live trace of the triangle (200,200) (800,200) (500,800): the second top point accepts (800,300) (dots 0.988 / 0.953), (800,400)
+  (0.937 / 0.837), and refuses (800,500): dots **0.825** (the side towards the third point) and **0.698** (the first side). Our `adjust::face_normal` reproduces both (`the_face_normals_dot_as_the_original_traced`).
+* **The editing area's three alerts** (`FUN_004a10d0`, before the lab sees the point; a refusal moves nothing and the lab is not called): `FUN_004a1290` *Points should not be too close to other points or lines*
+  (`0x6f533c`: another point under 100 units away, or the point within 99 units across a non-adjacent edge), `FUN_004a1660` *Corners of outline should not be too sharp* (`0x6f5310`: two consecutive edge
+  directions with dot < -0.95), `FUN_004a1a50` *Lines should not cross each other* (`0x6f52ec`: two edges meeting away from their ends, or a point within 99 units across one of the two edges of the moved
+  point). They show through `FUN_004a0df0`, which only calls `FUN_0043e7c0` when **`DAT_006f52e0` is set**: every accepted move sets it and `FUN_004a0e00` (a point added in step 1) clears it, so on a fresh screen 4
+  the **first refused move is silent** (live: the first run of the close / cross / sharp shots showed no alert until one valid drag had gone before). Ours: `Builder::adjust_armed` (the original's flag lives
+  across labs; ours per lab).
+* **What is saved.** The `.bot` after Finished and Back to HQ carries the dragged top outline, the mesh with the moved corners, the **per-vertex last-triangle normals** and a skin layout laid out again from the
+  final shape: the top plate is the polygon unfolded flat from its first edge (`a = unit(p1 - p0)`, `w = unit(n x a)`, `u = max - along`, `v = top - across`, so a plate whose first edge is not along x is
+  rotated: `botlab-adjust-base-vertical`), a side is its quad projected on the plane of its **second triangle's normal** (a trapezoid after a taper), each cell the bounding box of its polygon, and the cells
+  are packed by the **skyline**: each at the lowest spot among the left margin and the right end (+9, rounded up to a pixel) of every cell placed, the leftmost on a tie (a triangle's top plate beside the
+  bottom one, its first side under the top plate). The face-group rows, the crush corners (`index 3 a b c`), the triangles and the outlines are the extrusion's. Our `extrude` reproduces
+  `triangle-ok`, `square-taper`, `base-vertical`, `base-ccw` to the file's six digits (points, normals, uvs, corners, group rectangles) and `triangle-bent` but for the **one** group below.
+* **Ours.** `ra2ui::workshop::adjust` (the three rules, the bend test, `TopMove`), `Build::{begin_top_adjust, adjust_top_point}` (the move is judged on the extrusion of the new outline, so mesh, normals,
+  weight and skin are the saved ones), `extrude` (per-vertex normals, unfolded plates and sides, skyline pack, counter-clockwise baseplates reversed), `Builder::{adjust_press, adjust_move, tip_line}` (press on a point,
+  moves while held, release, hover ring, the alerts through `show_alert`, screen 4's tip, the pane's 25/255 backdrop, step button selection kept after the screen swap, blueprint 1 px lower as live), the
+  overlay (baseplate outline 2 px (153,153,191), top outline 1 px white at the pixel the point names, rings 16 px grey / white). `labshot` gets `drag X0 Y0 X1 Y1 STEPS [HOLD]` and `alert`.
+* **Against the captures** (ours through `labshot`, the same clicks; MAE over the 1024x768 frame / the blueprint panel / the 3D pane / the tip row): `drag-ok` 1.63 / 0.86 / 1.75 / 0.008, `hover` 1.61 / 0.90 / 1.50 / 0.008,
+  `alert-bend` 1.67 / 0.92 / 1.86 / **0.010** (the alert row), `alert-close` 2.03 / 1.72 / 1.73 / 3.56, `alert-cross` 1.91 / 1.72 / 1.73 / **0.006**, `alert-sharp` 2.00 / 1.72 / 1.73 / 2.90, `taper` 2.04 / 2.19 / 1.50 / 0.008,
+  `nosnap` 1.71 / 1.04 / 1.76 / 0.008, `step2-reextruded` 1.61 / 0.86 / 1.50 / 0.008; the Overview's snapshot box 0.000. Before: the blueprint panel was 2.9 (grid one pixel high, white 2 px outline). What is left in the
+  frame is not the adjust screen's: the title and the logo sit 2 px higher, the height slider's track is a 26 px black bar where the original draws 4 px, the `Info Display` of the alert is 1 px off for two
+  of the texts (close, sharp: the pair's centring). The saved file of a triangle with its first top point at (400,300) equals `botlab-adjust-triangle-ok` line for line but the number format (the exe writes
+  six digits) and the header's fourth line (`1` for ours, `0` live: not this feature's).
+* **Harness.** `ra2_drive.py dragh X0 Y0 X1 Y1 [BUTTON] [STEPS] [HOLD]`: the editing area's move handler reads the **raw button state** (`0x42b810(0)` on the mouse object at `0x726878`, not the UI state at
+  `0x71643c`), so a drag has to hold the raw button as well (`ra2_input.js`: `drag(.., keep, hold)` queues the dinput poll for the whole drag). `drag` (UI state only) moves nothing here.
+* **Tests.** `adjust::tests` (6: the rules and the traced dots), `build::tests` (4: the corner moves in the mesh and the weight falls, the bend refusal at the traced place, the extrusion starts over, a
+  counter-clockwise baseplate is stored reversed), `extrude::tests::a_dragged_top_point_changes_the_normals_and_the_layout_as_live` (5 live files), `playthrough::chassis_step_two_drags_top_points_and_refuses_what_bends`
+  (press / move / release through the `Builder`, the alerts, the weight 55.8, the tip, step 1 / step 2 again, Finished).
+* **Open.** (1) One group of `triangle-bent` sits 6.22 px lower in the original's atlas than its bounding box (the side whose base is slanted and whose quad is not flat; same shape, same u): the rule for the
+  cell height of a non-flat quad not on the x axis is not recovered, the test skips that one `v`. (2) The ear order of the plates (a square is clipped from corner 2, a 200 x 300 rectangle from corner 0)
+  is still not recovered; the sets of triangles are equal. (3) The alert latch is global in the exe, per lab here. (4) The red ring the original's cursor shows over a refused place is the OS-level cursor, not drawn.
+  (5) Step 1 does not show the three alerts of the editing area (`FUN_004a10d0` judges clicks there too).
 
 ## 9.28 Release check: Enter Event without a robot, Select Team after a restart (`fx/release`, 2026-10-28)
 

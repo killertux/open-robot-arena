@@ -368,7 +368,10 @@ fn world_point(point: [i32; 2], y: f32) -> [f32; 3] {
 /// ring layout is present.
 ///
 /// This is chassis step 2's *"select points and move them"*: moving a top point
-/// slants the side, and the embedded mesh's top ring is the same point.
+/// slants the side, and the embedded mesh's top ring is the same point. The lab's own step 2
+/// does not use it any more: the drag is `Build::adjust_top_point`, which judges the move as the
+/// original does (the editing area's rules, the bend test) and rebuilds the extrusion (docs/36
+/// section 9.27e).
 pub fn move_outline_point(
     ch: &mut Chassis,
     which: Outline,

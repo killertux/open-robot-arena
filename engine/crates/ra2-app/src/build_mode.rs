@@ -51,6 +51,7 @@ use ra2_render::{DrawItem, RenderGroup, Renderer};
 use ra2_shell::Shell;
 use ra2fmt::gib::{Field, Gib, Widget, WidgetKind};
 use ra2ui::components::Component as PaletteComponent;
+use ra2ui::workshop::adjust::{TopMove, BEND_TEXT};
 use ra2ui::workshop::build::{Build, BuildError};
 use ra2ui::workshop::chassis::{self, Outline};
 use ra2ui::workshop::library::{ComponentInfo, GameLibrary, TextureEntry};
@@ -376,7 +377,13 @@ pub struct Builder {
     /// The current chassis-drawing state.
     draw_style: DrawStyle,
     draw_centre: Option<[i32; 2]>,
+    /// Chassis step 2: the top point with the bright ring (under the cursor, or being dragged).
     draw_point: Option<usize>,
+    /// Chassis step 2: the button is down on a top point and the point follows the mouse.
+    point_drag: bool,
+    /// `DAT_006f52e0`: the editing area shows its three outline alerts only once a move was
+    /// accepted since the last point was added to an outline (docs/36 section 9.27e).
+    adjust_armed: bool,
     /// Whether the baseplate polygon was closed by a click on its first point.
     outline_closed: bool,
     draw_snap: bool,
@@ -678,6 +685,8 @@ impl Builder {
             draw_style: DrawStyle::Freeform,
             draw_centre: None,
             draw_point: None,
+            point_drag: false,
+            adjust_armed: false,
             outline_closed: false,
             draw_snap: true,
             shape_radius: 300,
@@ -986,6 +995,15 @@ impl Builder {
         if let Some(action) = self.panel_action(x, y) {
             return self.apply(&action);
         }
+        if self.on_adjust_screen()
+            && self
+                .editing_grid()
+                .is_some_and(|(frame, _)| frame.contains_point(x, y))
+        {
+            // Chassis step 2: a press in the editing area takes the top point under the cursor.
+            self.adjust_press(x, y);
+            return Ok(());
+        }
         if let Some(action) = self.drawing_action(x, y) {
             return self.apply(&action);
         }
@@ -1034,10 +1052,17 @@ impl Builder {
             self.palette_scroll = 0;
         }
         if was_step_one && self.tab() == Some("chassis button") && self.structure_step() == 2 {
-            // Step 2 shows the baseplate extruded (`Adjust Top Outline`): the mesh is made here.
-            if let Err(e) = self.build.extrude_chassis() {
+            // Step 2 shows the baseplate extruded (`Adjust Top Outline`): the mesh is made here,
+            // afresh every time (live `botlab-adjust-step2-reextruded`), and the height slider
+            // starts at the default height.
+            if let Err(e) = self.build.begin_top_adjust() {
                 self.status = e.to_string();
             }
+            self.point_drag = false;
+            self.draw_point = None;
+            self.sync_height_thumb(ra2ui::workshop::extrude::fraction_for_height(
+                ra2ui::workshop::extrude::DEFAULT_HEIGHT,
+            ));
         }
         self.take_style_pick();
         self.refresh()
@@ -1381,6 +1406,9 @@ impl Builder {
     /// (`0x42b6b4`: the larger of |dx| and |dy|, signed).
     pub fn mouse_moved(&mut self, x: f32, y: f32) {
         let last = self.cursor.replace([x, y]);
+        if self.dialog.is_none() && self.on_adjust_screen() {
+            self.adjust_move(x, y);
+        }
         if self.paint_color.drag.is_some() {
             self.paint_pick(x, y, false);
         }
@@ -2842,44 +2870,107 @@ impl Builder {
         }
     }
 
+    /// Whether chassis step 2 (`Adjust Top Outline`) is the screen.
+    fn on_adjust_screen(&self) -> bool {
+        self.tab() == Some("chassis button")
+            && self.shell.lab().is_some()
+            && self.structure_step() == 2
+    }
+
+    /// The step's `Editing Area` frame and its blueprint grid.
+    fn editing_grid(&self) -> Option<(Frame, Frame)> {
+        let placed = self.shell.placements();
+        let area = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "Editing Area")?;
+        Some((area.frame, blueprint_grid(area.frame)))
+    }
+
+    /// The top point whose selection image is under a screen point. The image is a 16 px square
+    /// (live: a point at 129,238 is taken by a cursor from x 121 to 136 and y 232 to 245).
+    fn top_point_at(&self, x: f32, y: f32) -> Option<usize> {
+        let (_, grid) = self.editing_grid()?;
+        let chassis = self.build.chassis()?;
+        chassis.top.iter().position(|p| {
+            let px = grid.x + p[0] as f32 / 1000.0 * grid.w;
+            let py = grid.y + p[1] as f32 / 1000.0 * grid.h;
+            (px - 8.0..px + 8.0).contains(&x.floor()) && (py - 8.0..py + 8.0).contains(&y.floor())
+        })
+    }
+
+    /// The outline point a screen point stands for: blueprint units, snapped to the grid when the
+    /// checkbox says so (`FUN_00479260`).
+    fn outline_point_at(&self, x: f32, y: f32) -> Option<[i32; 2]> {
+        let (_, grid) = self.editing_grid()?;
+        let u = ((x.floor() - grid.x) / grid.w * 1000.0).round() as i32;
+        let v = ((y.floor() - grid.y) / grid.h * 1000.0).round() as i32;
+        let point = [u, v];
+        Some(if self.draw_snap {
+            chassis::snap(point)
+        } else {
+            point
+        })
+    }
+
+    /// The mouse goes down in the editing area of step 2: a drag starts on the point under it.
+    fn adjust_press(&mut self, x: f32, y: f32) {
+        if let Some(index) = self.top_point_at(x, y) {
+            self.draw_point = Some(index);
+            self.point_drag = true;
+        }
+    }
+
+    /// The mouse moves on step 2. With a point held the point follows it (the editing area's
+    /// validator, then the lab's bend test); without, the point under the cursor is the one with
+    /// the bright ring. A move outside the editing area does not reach it (the ring stays).
+    fn adjust_move(&mut self, x: f32, y: f32) {
+        let inside = self
+            .editing_grid()
+            .is_some_and(|(frame, _)| frame.contains_point(x, y));
+        if !inside {
+            return;
+        }
+        let Some(index) = self.draw_point.filter(|_| self.point_drag) else {
+            self.draw_point = self.top_point_at(x, y);
+            return;
+        };
+        let Some(point) = self.outline_point_at(x, y) else {
+            return;
+        };
+        match self.build.adjust_top_point(index, point) {
+            Ok(moved) => {
+                if moved.validated() {
+                    self.adjust_armed = true;
+                }
+                match moved {
+                    TopMove::Moved => {
+                        self.status =
+                            format!("moved top point {index} to {}, {}", point[0], point[1]);
+                        let _ = self.refresh();
+                    }
+                    TopMove::Refused(rule) => {
+                        self.status = format!("top point {index} stays: {}", rule.text());
+                        if self.adjust_armed {
+                            self.show_alert(rule.text());
+                        }
+                    }
+                    TopMove::Bend => {
+                        self.status = format!("top point {index} stays: {BEND_TEXT}");
+                        self.show_alert(BEND_TEXT);
+                    }
+                    TopMove::Unchanged => {}
+                }
+            }
+            Err(e) => self.status = e.to_string(),
+        }
+    }
+
     /// A click on a chassis step's `Editing Area`.
     fn draw_chassis(&mut self, point: [i32; 2]) -> Result<(), String> {
         let step = self.structure_step();
         if step == 2 {
-            let Some(chassis) = self.build.chassis() else {
-                return Ok(());
-            };
-            if let Some(index) = self.draw_point {
-                match self.build.move_chassis_outline_point(
-                    Outline::Top,
-                    index,
-                    point,
-                    self.draw_snap,
-                ) {
-                    Ok(()) => {
-                        self.status =
-                            format!("moved top point {index} to {}, {}", point[0], point[1]);
-                        return self.refresh();
-                    }
-                    Err(e) => {
-                        self.status = e.to_string();
-                        self.refresh_panel();
-                        return Ok(());
-                    }
-                }
-            }
-            let nearest = chassis
-                .top
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, p)| (p[0] - point[0]).pow(2) + (p[1] - point[1]).pow(2))
-                .map(|(i, _)| i);
-            self.draw_point = nearest;
-            self.status = match nearest {
-                Some(index) => format!("selected top point {index}: click again to move it"),
-                None => "the top outline has no points".into(),
-            };
-            self.refresh_panel();
+            // Step 2 is a drag of the top points (`adjust_press` / `adjust_move`), not a drawing click.
             return Ok(());
         }
         match self.draw_style {
@@ -2904,6 +2995,8 @@ impl Builder {
                     .add_chassis_outline_point(Outline::Bottom, point, self.draw_snap)
                 {
                     Ok(index) => {
+                        // `FUN_004a0e00`: a point added to the list clears the alert latch.
+                        self.adjust_armed = false;
                         self.status =
                             format!("baseplate point {index} at {}, {}", point[0], point[1]);
                         self.refresh()
@@ -3260,6 +3353,11 @@ impl Builder {
         self.alert.as_deref()
     }
 
+    /// The tip line's text as the lab shows it now (an alert is not part of it).
+    pub fn tip_line(&mut self) -> String {
+        self.tip_text()
+    }
+
     /// The tip line at the bottom of the lab (`FUN_0043e900`): the screen's `Info Display` carries
     /// the `tip.bmp` icon and one line of `fg_mcn14` text in `.5 .6 1`, centred as a pair. The text
     /// follows the state: no chassis yet, no parts, no control board, no wiring, else one of four
@@ -3270,6 +3368,7 @@ impl Builder {
         const COMPONENTS: &str = "Click the Components button to continue working on your robot.";
         const CHASSIS: &str = "Click the Chassis button to add special armor to your robot.";
         const TEST: &str = "Click the Test Robot button to try out your robot.";
+        let adjust = self.on_adjust_screen();
         let Some(lab) = self.shell.lab_mut() else {
             return String::new();
         };
@@ -3277,7 +3376,13 @@ impl Builder {
         // 6 components, 7 wiring, 8 appearance, 9 test robot.
         let screen = match (lab.tab, lab.step) {
             ("overview button", _) => 1,
-            ("chassis button", Some("structure design button")) => 3,
+            ("chassis button", Some("structure design button")) => {
+                if adjust {
+                    4
+                } else {
+                    3
+                }
+            }
             ("chassis button", Some(_)) => 5,
             ("chassis button", None) => 2,
             ("components button", _) => 6,
@@ -4779,20 +4884,47 @@ impl Builder {
             ]
         };
         let white = [1.0, 1.0, 1.0, 1.0];
-        for i in 0..points.len() {
-            if i + 1 < points.len() || (closed && points.len() >= 3) {
-                let (a, b) = (at(&points[i]), at(&points[(i + 1) % points.len()]));
-                ink.line(a, b, 2.0, white);
+        if step == 2 {
+            // Live: the baseplate outline 2 px (153,153,191) under the top outline, 1 px white
+            // (centred on the pixel row / column the point's coordinate names), each top point a
+            // 16 px selection image: a grey ring, white while it is under the cursor or held.
+            let violet = [0.6, 0.6, 0.749, 1.0];
+            let bottom = &chassis.bottom;
+            for i in 0..bottom.len() {
+                if bottom.len() >= 3 {
+                    ink.line(
+                        at(&bottom[i]),
+                        at(&bottom[(i + 1) % bottom.len()]),
+                        2.0,
+                        violet,
+                    );
+                }
+            }
+            let nudge = |p: [f32; 2]| [p[0] + 0.5, p[1] + 0.5];
+            for i in 0..points.len() {
+                if points.len() >= 3 {
+                    let (a, b) = (at(&points[i]), at(&points[(i + 1) % points.len()]));
+                    ink.line(nudge(a), nudge(b), 1.0, white);
+                }
+            }
+        } else {
+            for i in 0..points.len() {
+                if i + 1 < points.len() || (closed && points.len() >= 3) {
+                    let (a, b) = (at(&points[i]), at(&points[(i + 1) % points.len()]));
+                    ink.line(a, b, 2.0, white);
+                }
             }
         }
         for (i, p) in points.iter().enumerate() {
-            let selected = step == 2 && self.draw_point == Some(i);
+            let lit = step == 2 && self.draw_point == Some(i);
             ink.ring(
                 at(p),
                 6.0,
-                if selected { 2.0 } else { 1.0 },
-                if selected {
+                if step == 2 { 2.0 } else { 1.0 },
+                if lit {
                     white
+                } else if step == 2 {
+                    [0.749, 0.749, 0.749, 1.0]
                 } else {
                     [0.78, 0.78, 0.82, 1.0]
                 },
@@ -4922,12 +5054,13 @@ impl Builder {
         let view_key = {
             let cam = self.lab_cam();
             format!(
-                "{:?}|{:?}|{:?}|{:?}|{:?}",
+                "{:?}|{:?}|{:?}|{:?}|{:?}|{}",
                 self.tab(),
                 self.wire_control,
                 cam.pitch.to_bits(),
                 cam.yaw.to_bits(),
-                cam.dist.to_bits()
+                cam.dist.to_bits(),
+                self.on_adjust_screen()
             )
         };
         if let Some((revision, pixels, w, h)) = &self.preview {
@@ -5113,7 +5246,14 @@ impl Builder {
         let (eye, up) = if self.view_only {
             // The original's lab camera (`FUN_005a6260` mode 2, one object per tab): a 45 degree
             // perspective at `dist` from the robot's origin, orbiting with the middle button.
-            self.renderer.set_background([0.15; 3]);
+            // Step 2's pane is drawn over the gib's own (0.1, 0.1, 0.1) image: 25 of 255 live; the
+            // other tabs' views clear to 38 of 255.
+            let backdrop = if self.on_adjust_screen() {
+                25.0 / 255.0
+            } else {
+                0.15
+            };
+            self.renderer.set_background([backdrop; 3]);
             let cam = self.lab_cam();
             let (eye, up) = cam.eye_up();
             // The lab lights the robot with one white point light on the camera (live `D3DLIGHT8`:
@@ -5309,7 +5449,9 @@ impl Ink<'_> {
 fn blueprint_grid(area: Frame) -> Frame {
     Frame::new(
         area.x + area.w * 0.015_45,
-        area.y + area.h * 0.013_95,
+        // live: the first grid row is 148 with the area at y 140.98 (lab panes are whole pixels
+        // since docs/36 9.27c, which moved the area up by half a pixel)
+        area.y + area.h * 0.015_06,
         area.w * 0.9657,
         area.h * 0.9657,
     )
@@ -5595,13 +5737,15 @@ pub fn script(
         .unwrap_or_default();
     if let Some(point) = top.first().copied() {
         let select = builder.outline_point_for(point)?;
+        builder.mouse_moved(select[0], select[1]);
         builder.click(select[0], select[1])?;
         let target = [
-            point[0] + (500 - point[0]) / 4,
-            point[1] + (500 - point[1]) / 4,
+            point[0] + (500 - point[0]) / 16,
+            point[1] + (500 - point[1]) / 16,
         ];
         let moved = builder.outline_point_for(target)?;
-        builder.click(moved[0], moved[1])?;
+        builder.mouse_moved(moved[0], moved[1]);
+        builder.mouse_released(moved[0], moved[1]);
         let after = builder
             .build
             .chassis()
@@ -5609,8 +5753,9 @@ pub fn script(
             .unwrap_or_default();
         if after.first().copied() == Some(point) {
             return Err(format!(
-                "the chassis drawing click did not move top point 0: {:?}",
-                after.first()
+                "the chassis drag did not move top point 0: {:?} ({})",
+                after.first(),
+                builder.status()
             ));
         }
         println!(
@@ -5988,6 +6133,8 @@ impl Builder {
     pub fn mouse_released(&mut self, x: f32, y: f32) {
         let _ = (x, y);
         self.paint_color.drag = None;
+        // `FUN_004791e0`: the drag of a top point ends where it is.
+        self.point_drag = false;
         if self.dialog.is_some() || self.tab() != Some("wiring button") {
             return;
         }

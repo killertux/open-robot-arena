@@ -37,6 +37,46 @@ fn main() -> Result<(), String> {
                 builder.mouse_moved(num(&args[i + 1])?, num(&args[i + 2])?);
                 i += 3;
             }
+            "drag" => {
+                // `drag X0 Y0 X1 Y1 STEPS [HOLD]`: press on (X0,Y0), move to (X1,Y1) over STEPS mouse
+                // events (positions rounded to whole pixels as `ra2_drive.py dragh` does), HOLD more
+                // events at the end point, release. Chassis step 2's point drag.
+                let (x0, y0, x1, y1) = (
+                    num(&args[i + 1])?,
+                    num(&args[i + 2])?,
+                    num(&args[i + 3])?,
+                    num(&args[i + 4])?,
+                );
+                let steps = num(&args[i + 5])? as usize;
+                let hold = args
+                    .get(i + 6)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let used = if args
+                    .get(i + 6)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .is_some()
+                {
+                    7
+                } else {
+                    6
+                };
+                builder.mouse_moved(x0, y0);
+                builder.click(x0, y0)?;
+                for k in 1..=steps {
+                    let f = k as f32 / steps as f32;
+                    builder.mouse_moved((x0 + (x1 - x0) * f).round(), (y0 + (y1 - y0) * f).round());
+                }
+                for _ in 0..hold {
+                    builder.mouse_moved(x1, y1);
+                }
+                builder.mouse_released(x1, y1);
+                i += used;
+            }
+            "alert" => {
+                println!("alert: {:?}", builder.alert());
+                i += 1;
+            }
             "cam" => {
                 builder.set_lab_cam(ra2_app::build_mode::LabCam {
                     pitch: num(&args[i + 1])?,

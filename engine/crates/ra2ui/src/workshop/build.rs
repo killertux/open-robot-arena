@@ -208,6 +208,9 @@ impl Build {
             return Ok(!fresh);
         }
         if fresh {
+            if super::extrude::is_counter_clockwise(&chassis.bottom) {
+                chassis.bottom.reverse();
+            }
             chassis.height = super::extrude::DEFAULT_HEIGHT;
             chassis.top = chassis.bottom.clone();
             chassis
@@ -224,6 +227,75 @@ impl Build {
         }
         self.extruded = true;
         Ok(ok)
+    }
+
+    /// Going to chassis step 2 (`Adjust Top Outline`): the baseplate is extruded **afresh**, the top
+    /// outline a copy of it and the height the default `0.825`, whatever the player had done to a
+    /// chassis before (live `botlab-adjust-step2-reextruded`: after step 1 and step 2 again the dragged
+    /// points and the height slider are back where a new extrusion has them). Returns whether the
+    /// chassis has a shape afterwards.
+    pub fn begin_top_adjust(&mut self) -> Result<bool, BuildError> {
+        let mut chassis = self.chassis_copy()?;
+        if chassis.bottom.len() < 3 {
+            return Ok(false);
+        }
+        if super::extrude::is_counter_clockwise(&chassis.bottom) {
+            chassis.bottom.reverse();
+        }
+        chassis.height = super::extrude::DEFAULT_HEIGHT;
+        chassis.top = chassis.bottom.clone();
+        chassis
+            .armour_material
+            .get_or_insert([1.0, 1.0, 1.0, 1.0, 0.0]);
+        let ok = super::extrude::rebuild(&mut chassis);
+        self.commit_chassis(chassis);
+        if ok && self.paint.skin().is_none() {
+            let chassis = self.chassis_copy()?;
+            self.paint = Paint::from_chassis(&chassis);
+        }
+        self.extruded = true;
+        Ok(ok)
+    }
+
+    /// One mouse move of a top-outline point drag (chassis step 2): the editing area's outline rules
+    /// ([`super::adjust::check_move`]), then the lab's bend test on the two sides next to the point
+    /// ([`super::adjust::bends`]). A refused move changes nothing; an accepted one moves the corner
+    /// of the mesh (the whole chassis is extruded again from the new top outline, which gives the
+    /// same vertices, normals and skin layout the original writes, `super::extrude`).
+    pub fn adjust_top_point(
+        &mut self,
+        index: usize,
+        point: [i32; 2],
+    ) -> Result<super::adjust::TopMove, BuildError> {
+        use super::adjust::{bends, check_move, TopMove};
+        let chassis = self.chassis_copy()?;
+        if index >= chassis.top.len() || chassis.mesh.is_none() {
+            return Err(super::chassis::ChassisError::NoPoint {
+                index,
+                count: chassis.top.len(),
+            }
+            .into());
+        }
+        let point = [
+            point[0].clamp(0, super::chassis::OUTLINE_MAX),
+            point[1].clamp(0, super::chassis::OUTLINE_MAX),
+        ];
+        if let Err(rule) = check_move(&chassis.top, index, point) {
+            return Ok(TopMove::Refused(rule));
+        }
+        if chassis.top[index] == point {
+            return Ok(TopMove::Unchanged);
+        }
+        let mut next = chassis;
+        next.top[index] = point;
+        if !super::extrude::rebuild(&mut next) {
+            return Ok(TopMove::Unchanged);
+        }
+        if bends(&next, index) {
+            return Ok(TopMove::Bend);
+        }
+        self.commit_chassis(next);
+        Ok(TopMove::Moved)
     }
 
     /// Start with the four stock controls (`Forward`, `LeftRight`, `Fire`,
@@ -1443,5 +1515,104 @@ mod tests {
             }
         }
         None
+    }
+
+    /// A fresh extrusion of a drawn square, as the lab makes it when step 2 opens.
+    fn extruded_square() -> Build {
+        let mut build = Build::blank("Adjust");
+        for p in [[200, 200], [800, 200], [800, 800], [200, 800]] {
+            build
+                .add_chassis_outline_point(crate::workshop::chassis::Outline::Bottom, p, true)
+                .unwrap();
+        }
+        assert!(build.begin_top_adjust().unwrap());
+        build
+    }
+
+    #[test]
+    fn dragging_a_top_point_moves_the_mesh_corner_and_changes_the_weight() {
+        use crate::workshop::adjust::TopMove;
+        let mut build = extruded_square();
+        let before = build.stats().mass;
+        assert!((before - 94.1).abs() < 0.2, "{before}");
+        assert_eq!(
+            build.adjust_top_point(0, [300, 300]).unwrap(),
+            TopMove::Moved
+        );
+        let ch = build.chassis().unwrap();
+        assert_eq!(ch.top[0], [300, 300]);
+        let mesh = ch.mesh.as_ref().unwrap();
+        // the top ring vertex and the two side copies are the new corner: x = -0.44, z = 0.44
+        let corner = [-0.44f32, 0.825, 0.44];
+        let near = |p: [f32; 3]| (0..3).all(|k| (p[k] - corner[k]).abs() < 1e-4);
+        assert_eq!(mesh.points.iter().filter(|p| near(**p)).count(), 3);
+        // the bottom ring did not move
+        assert_eq!(ch.bottom[0], [200, 200]);
+        assert!(mesh.points[0][1].abs() < 1e-6);
+        // the slanted side's two triangles disagree a little: the vertex normals show it
+        assert_ne!(mesh.normals[8 + 1], mesh.normals[8]);
+        assert!(build.stats().mass < before, "a smaller top weighs less");
+    }
+
+    #[test]
+    fn the_original_refuses_a_move_that_would_bend_a_side_too_much() {
+        use crate::workshop::adjust::{RuleAlert, TopMove};
+        let mut build = Build::blank("Bend");
+        for p in [[200, 200], [800, 200], [500, 800]] {
+            build
+                .add_chassis_outline_point(crate::workshop::chassis::Outline::Bottom, p, true)
+                .unwrap();
+        }
+        build.begin_top_adjust().unwrap();
+        // live (`botlab-adjust-trace`): the second point may go down to (800,400) and no further
+        assert_eq!(
+            build.adjust_top_point(1, [800, 400]).unwrap(),
+            TopMove::Moved
+        );
+        let kept = build.chassis().unwrap().top.clone();
+        assert_eq!(
+            build.adjust_top_point(1, [800, 500]).unwrap(),
+            TopMove::Bend
+        );
+        assert_eq!(build.chassis().unwrap().top, kept, "the point goes back");
+        // the outline rules come first and say nothing about the mesh
+        assert_eq!(
+            build.adjust_top_point(1, [500, 800]).unwrap(),
+            TopMove::Refused(RuleAlert::TooClose)
+        );
+        assert_eq!(
+            build.adjust_top_point(1, [800, 400]).unwrap(),
+            TopMove::Unchanged
+        );
+    }
+
+    #[test]
+    fn a_baseplate_clicked_counter_clockwise_is_stored_reversed() {
+        // live `botlab-adjust-base-ccw`
+        let mut build = Build::blank("Ccw");
+        for p in [[200, 200], [500, 800], [800, 200]] {
+            build
+                .add_chassis_outline_point(crate::workshop::chassis::Outline::Bottom, p, true)
+                .unwrap();
+        }
+        assert!(build.begin_top_adjust().unwrap());
+        let ch = build.chassis().unwrap();
+        assert_eq!(ch.bottom, vec![[800, 200], [500, 800], [200, 200]]);
+        assert_eq!(ch.top, ch.bottom);
+    }
+
+    #[test]
+    fn step_two_starts_the_extrusion_over() {
+        use crate::workshop::adjust::TopMove;
+        let mut build = extruded_square();
+        build.set_chassis_height(1.2).unwrap();
+        assert_eq!(
+            build.adjust_top_point(2, [700, 700]).unwrap(),
+            TopMove::Moved
+        );
+        assert!(build.begin_top_adjust().unwrap());
+        let ch = build.chassis().unwrap();
+        assert_eq!(ch.top, ch.bottom);
+        assert!((ch.height - 0.825).abs() < 1e-6);
     }
 }

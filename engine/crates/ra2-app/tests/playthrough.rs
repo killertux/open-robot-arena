@@ -1764,3 +1764,103 @@ fn the_test_robot_tab_is_a_practice_arena_with_obstacles_and_reset() {
     run(&mut b, 0.2);
     assert_eq!(b.arena_mut().unwrap().obstacle(), "none");
 }
+
+/// Chassis step 2 as the original drives it (docs/36 section 9.27e): a press on a top point takes
+/// it, the point follows the mouse (snapped to the grid) while the button is down, the editing
+/// area's three alerts and the lab's bend alert refuse a move and leave the point where it was,
+/// the tip line is screen 4's, the mesh and the weight follow, step 1 and step 2 again start the
+/// extrusion over, and Finished keeps what was dragged. Positions are the live ones
+/// (`botlab-adjust-*`): the triangle (200,200) (800,200) (500,800), its first top point to
+/// (400,300) weighs 55.8 kg, its second one may go to (800,400) and not to (800,500).
+#[test]
+fn chassis_step_two_drags_top_points_and_refuses_what_bends() {
+    let Some(scratch) = ScratchGame::new("adjusttop") else {
+        return;
+    };
+    let game = scratch.path();
+    let _guard = ra2script::lock();
+    let mut shell = window_shell(game);
+    for name in ["Team HQ button", "continue button"] {
+        shell.click_named(name).unwrap();
+    }
+    let first = ra2fmt::team::read_table(&game.join("Teams/Teams.txt"))
+        .unwrap()
+        .teams[0]
+        .robots[0] as usize;
+    flow::scrap_prompt(&mut shell, Some(first)).unwrap();
+    shell.click_named("yes button").unwrap();
+    let mut b = flow::open_workshop(game, Some(first)).unwrap();
+    b.set_size([1024.0, 768.0]).unwrap();
+    b.click_named("chassis button").unwrap();
+    b.click_named("structure design button").unwrap();
+    for p in [[200, 200], [800, 200], [500, 800], [200, 200]] {
+        let at = b.outline_point_for(p).unwrap();
+        b.click(at[0], at[1]).unwrap();
+    }
+    assert_eq!(b.build().chassis().unwrap().bottom.len(), 3);
+    b.click_named("step 2 button").unwrap();
+    assert_eq!(
+        b.tip_line(),
+        "Click and drag points to adjust the sides of your chassis"
+    );
+
+    // a drag: press on point 0, move in three steps, release
+    let drag = |b: &mut ra2_app::build_mode::Builder, from: [i32; 2], to: [i32; 2], steps: i32| {
+        let a = b.outline_point_for(from).unwrap();
+        b.mouse_moved(a[0], a[1]);
+        b.click(a[0], a[1]).unwrap();
+        let z = b.outline_point_for(to).unwrap();
+        for k in 1..=steps {
+            let f = k as f32 / steps as f32;
+            b.mouse_moved(
+                (a[0] + (z[0] - a[0]) * f).round(),
+                (a[1] + (z[1] - a[1]) * f).round(),
+            );
+        }
+        b.mouse_released(z[0], z[1]);
+    };
+    drag(&mut b, [200, 200], [400, 300], 6);
+    assert_eq!(b.build().chassis().unwrap().top[0], [400, 300]);
+    assert_eq!(b.build().chassis().unwrap().bottom[0], [200, 200]);
+    let mass = b.build().stats().mass;
+    assert!((mass - 55.8).abs() < 0.1, "live Overview 55.8, {mass}");
+    assert!(b.alert().is_none());
+
+    // a second point: (800,400) is fine, (800,500) bends a side too much and goes back
+    drag(&mut b, [800, 200], [800, 400], 4);
+    assert_eq!(b.build().chassis().unwrap().top[1], [800, 400]);
+    drag(&mut b, [800, 400], [800, 500], 3);
+    assert_eq!(b.build().chassis().unwrap().top[1], [800, 400]);
+    assert_eq!(
+        b.alert(),
+        Some("Can't move that point because it will bend one side too much")
+    );
+    // the alert falls after its two seconds and the screen's tip is back
+    b.advance(2.5);
+    assert!(b.alert().is_none());
+
+    // the outline alerts show once a move was accepted: the third point onto the first edge
+    drag(&mut b, [500, 800], [600, 360], 1);
+    assert_eq!(b.build().chassis().unwrap().top[2], [500, 800]);
+    assert_eq!(
+        b.alert(),
+        Some("Points should not be too close to other points or lines")
+    );
+
+    // step 1 and step 2 again: the extrusion starts over
+    b.click(965.0, 635.0).unwrap();
+    assert_eq!(
+        b.tip_line(),
+        "Click the Components button to add parts to your robot",
+        "step 1 is not screen 4"
+    );
+    b.click(996.0, 635.0).unwrap();
+    let ch = b.build().chassis().unwrap();
+    assert_eq!(ch.top, ch.bottom);
+    assert!((ch.height - 0.825).abs() < 1e-6);
+
+    // Finished keeps a dragged point
+    drag(&mut b, [200, 200], [300, 200], 3);
+    b.click_named("finished button").unwrap();
+    assert_eq!(b.build().chassis().unwrap().top[0], [300, 200]);
+}

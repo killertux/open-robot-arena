@@ -61,6 +61,15 @@ pub fn blank_skin() -> Vec<u8> {
     tga
 }
 
+/// Whether an outline runs counter-clockwise in the lab's `(x, z)` (the way the live files never
+/// store one): the original keeps a clockwise baseplate, so a baseplate clicked the other way round
+/// is stored in the reverse order (live `botlab-adjust-base-ccw`: (200,200) (500,800) (800,200) is
+/// written `800 200 / 500 800 / 200 200`).
+pub fn is_counter_clockwise(points: &[[i32; 2]]) -> bool {
+    let ring: Vec<[f32; 3]> = points.iter().map(|p| world(*p, 0.0)).collect();
+    signed_area(&ring) > 0.0
+}
+
 fn world(p: [i32; 2], y: f32) -> [f32; 3] {
     [
         (p[0] as f32 - 500.0) * UNIT,
@@ -135,6 +144,65 @@ fn ceil_px(h: f32) -> f32 {
     (h - 0.001).ceil()
 }
 
+/// A face's polygon laid flat at skin scale (see `extrude`).
+struct Unfold {
+    along: Vec<f32>,
+    across: Vec<f32>,
+    max_along: f32,
+    min_across: f32,
+    min_along: f32,
+    max_across: f32,
+}
+
+impl Unfold {
+    fn of(points: &[[f32; 3]], normal: [f32; 3], scale: f32) -> Unfold {
+        let sub = |p: [f32; 3], q: [f32; 3]| [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+        let dot = |p: [f32; 3], q: [f32; 3]| p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+        let unit = |v: [f32; 3]| {
+            let l = dot(v, v).sqrt();
+            if l > 1e-9 {
+                [v[0] / l, v[1] / l, v[2] / l]
+            } else {
+                v
+            }
+        };
+        let mut a = unit(sub(points[1], points[0]));
+        if a == [0.0; 3] {
+            a = [1.0, 0.0, 0.0];
+        }
+        let w = unit([
+            normal[1] * a[2] - normal[2] * a[1],
+            normal[2] * a[0] - normal[0] * a[2],
+            normal[0] * a[1] - normal[1] * a[0],
+        ]);
+        let along: Vec<f32> = points
+            .iter()
+            .map(|p| dot(sub(*p, points[0]), a) * scale)
+            .collect();
+        let across: Vec<f32> = points
+            .iter()
+            .map(|p| dot(sub(*p, points[0]), w) * scale)
+            .collect();
+        let fold = |v: &[f32], f: fn(f32, f32) -> f32, init: f32| v.iter().copied().fold(init, f);
+        Unfold {
+            max_along: fold(&along, f32::max, f32::MIN),
+            min_along: fold(&along, f32::min, f32::MAX),
+            max_across: fold(&across, f32::max, f32::MIN),
+            min_across: fold(&across, f32::min, f32::MAX),
+            along,
+            across,
+        }
+    }
+
+    fn width(&self) -> f32 {
+        self.max_along - self.min_along
+    }
+
+    fn height(&self) -> f32 {
+        self.max_across - self.min_across
+    }
+}
+
 struct Cell {
     x: f32,
     /// Distance from `v = 246` to the cell's top.
@@ -143,29 +211,32 @@ struct Cell {
     h: f32,
 }
 
-/// Shelf-pack `sizes` in order at skin scale (`w`, `h` in px).
+/// Pack `sizes` in order at skin scale (`w`, `h` in px): each rectangle goes where it sits lowest on
+/// the skyline, among the left margin and the right end (plus the gap, rounded up to a whole pixel)
+/// of every rectangle placed so far; the leftmost of equal heights. Recovered from the live files:
+/// a square's four sides in a row, a triangle's top plate beside the bottom one and the first side
+/// under the top plate (`botlab-adjust-triangle-ok`, docs/36 section 9.27e).
 fn pack(sizes: &[(f32, f32)]) -> Option<Vec<Cell>> {
     let mut cells: Vec<Cell> = Vec::new();
-    let mut cursor = MARGIN;
     for &(w, h) in sizes {
-        let skyline = |x: f32, w: f32, cells: &[Cell]| {
+        let skyline = |x: f32, cells: &[Cell]| {
             cells
                 .iter()
                 .filter(|c| c.x < x + w && x < c.x + c.w)
                 .map(|c| c.y + ceil_px(c.h) + GAP)
                 .fold(0.0_f32, f32::max)
         };
-        let (x, y) = if cells.is_empty() {
-            (MARGIN, 0.0)
-        } else if cursor + w <= SKIN - MARGIN {
-            (cursor, skyline(cursor, w, &cells))
-        } else {
-            (MARGIN, skyline(MARGIN, w, &cells))
-        };
+        let mut spots = vec![MARGIN];
+        spots.extend(cells.iter().map(|c| (c.x + c.w + GAP - 0.001).ceil()));
+        let best = spots
+            .into_iter()
+            .filter(|x| *x + w <= SKIN - MARGIN)
+            .map(|x| (skyline(x, &cells), x))
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let (y, x) = best?;
         if y + ceil_px(h) > FIT {
             return None;
         }
-        cursor = x + w + GAP;
         cells.push(Cell { x, y, w, h });
     }
     Some(cells)
@@ -196,33 +267,43 @@ pub fn extrude(bottom: &[[i32; 2]], top: &[[i32; 2]], height: f32) -> Option<Ext
     let cw = area < 0.0;
     let plate = ear_clip(&b, cw);
 
-    // Plate extents in metres, side widths and the skin scale that fits.
-    let ext = |ring: &[[f32; 3]]| {
-        let mut e = [f32::MAX, f32::MIN, f32::MAX, f32::MIN];
-        for p in ring {
-            e = [
-                e[0].min(p[0]),
-                e[1].max(p[0]),
-                e[2].min(p[2]),
-                e[3].max(p[2]),
-            ];
+    // Every face of the skin is the face's own polygon unfolded flat: `a` runs from the first point
+    // to the second, `w = n x a` is the other axis in the face's plane, and the cell is the bounding
+    // box of the polygon at the skin scale. A plate (normal `-y` below, `+y` above) with a first
+    // edge along x is the plain top-down picture; a side whose top edge was dragged is no longer a
+    // rectangle (live `botlab-adjust-*`: the top plate's first edge lies along the cell's top, a
+    // side projects onto the plane of its second triangle's normal).
+    let plate_down = [0.0, -1.0, 0.0];
+    let plate_up = [0.0, 1.0, 0.0];
+    let side_normal = |i: usize| -> [f32; 3] {
+        let j = (i + 1) % n;
+        let quad = [b[i], b[j], t[j], t[i]];
+        let m = super::adjust::face_normal(quad[2], quad[3], quad[0]);
+        if m == [0.0; 3] {
+            return [0.0, 0.0, 1.0];
         }
-        e
+        if cw {
+            m
+        } else {
+            [-m[0], -m[1], -m[2]]
+        }
     };
-    let (eb, et) = (ext(&b), ext(&t));
-    let side_len = |i: usize| {
-        let (p, q) = (b[i], b[(i + 1) % n]);
-        ((q[0] - p[0]).powi(2) + (q[2] - p[2]).powi(2)).sqrt()
-    };
+    let faces_in: Vec<(Vec<[f32; 3]>, [f32; 3])> = [(b.clone(), plate_down), (t.clone(), plate_up)]
+        .into_iter()
+        .chain((0..n).map(|i| {
+            let j = (i + 1) % n;
+            (vec![b[i], b[j], t[j], t[i]], side_normal(i))
+        }))
+        .collect();
     let mut scale = PX_PER_UNIT / UNIT;
-    let cells = loop {
-        let mut sizes = vec![
-            ((eb[1] - eb[0]) * scale, (eb[3] - eb[2]) * scale),
-            ((et[1] - et[0]) * scale, (et[3] - et[2]) * scale),
-        ];
-        sizes.extend((0..n).map(|i| (side_len(i) * scale, height * scale)));
+    let (cells, unfolds) = loop {
+        let unfolds: Vec<Unfold> = faces_in
+            .iter()
+            .map(|(points, normal)| Unfold::of(points, *normal, scale))
+            .collect();
+        let sizes: Vec<(f32, f32)> = unfolds.iter().map(|u| (u.width(), u.height())).collect();
         if let Some(cells) = pack(&sizes) {
-            break cells;
+            break (cells, unfolds);
         }
         scale *= 0.9;
         if scale < 1.0 {
@@ -250,33 +331,25 @@ pub fn extrude(bottom: &[[i32; 2]], top: &[[i32; 2]], height: f32) -> Option<Ext
         ];
         groups.push(FaceGroup { coords, bounds });
     };
+    let skin_uv = |face: usize| -> Vec<[f32; 2]> {
+        let (cell, unfold) = (&cells[face], &unfolds[face]);
+        unfold
+            .along
+            .iter()
+            .zip(unfold.across.iter())
+            .map(|(a, w)| {
+                [
+                    cell.x + (unfold.max_along - a),
+                    v_of(cell.y) - (w - unfold.min_across),
+                ]
+            })
+            .collect()
+    };
 
-    // Bottom plate: mirrored in u, v runs with -z.
-    let c0 = &cells[0];
-    let bottom_uv: Vec<[f32; 2]> = b
-        .iter()
-        .map(|p| {
-            [
-                c0.x + c0.w - (p[0] - eb[0]) * scale,
-                v_of(c0.y + c0.h) + (eb[3] - p[2]) * scale,
-            ]
-        })
-        .collect();
-    // Top plate: mirrored in u, v runs with +z.
-    let c1 = &cells[1];
-    let top_uv: Vec<[f32; 2]> = t
-        .iter()
-        .map(|p| {
-            [
-                c1.x + c1.w - (p[0] - et[0]) * scale,
-                v_of(c1.y + c1.h) + (p[2] - et[2]) * scale,
-            ]
-        })
-        .collect();
-    for (ring, normal, uv) in [
-        (&b, [0.0, -1.0, 0.0], &bottom_uv),
-        (&t, [0.0, 1.0, 0.0], &top_uv),
-    ] {
+    // Plates: the bottom ring (normal -y), then the top ring (+y).
+    let bottom_uv = skin_uv(0);
+    let top_uv = skin_uv(1);
+    for (ring, normal, uv) in [(&b, plate_down, &bottom_uv), (&t, plate_up, &top_uv)] {
         for (p, c) in ring.iter().zip(uv.iter()) {
             mesh.points.push(*p);
             mesh.normals.push(normal);
@@ -305,36 +378,27 @@ pub fn extrude(bottom: &[[i32; 2]], top: &[[i32; 2]], height: f32) -> Option<Ext
     for i in 0..n {
         let j = (i + 1) % n;
         let base = mesh.points.len() as u32;
-        let cell = &cells[2 + i];
-        let len = side_len(i) * scale;
-        let (hi, lo) = (v_of(cell.y), v_of(cell.y) - height * scale);
-        let right = cell.x + cell.w;
-        let uv = [
-            [right, hi],
-            [right - len, hi],
-            [right - len, lo],
-            [right, lo],
-        ];
+        let uv = skin_uv(2 + i);
         let quad = [b[i], b[j], t[j], t[i]];
-        let d = [b[j][0] - b[i][0], b[j][1] - b[i][1], b[j][2] - b[i][2]];
-        let up = [t[i][0] - b[i][0], t[i][1] - b[i][1], t[i][2] - b[i][2]];
-        let mut normal = [
-            d[1] * up[2] - d[2] * up[1],
-            d[2] * up[0] - d[0] * up[2],
-            d[0] * up[1] - d[1] * up[0],
-        ];
-        if !cw {
-            normal = [-normal[0], -normal[1], -normal[2]];
-        }
-        let l = (normal[0].powi(2) + normal[1].powi(2) + normal[2].powi(2)).sqrt();
-        let normal = if l > 0.0 {
-            [normal[0] / l, normal[1] / l, normal[2] / l]
-        } else {
-            [0.0, 0.0, 1.0]
+        // The lab gives every vertex the normal of the last triangle that uses it
+        // (`FUN_0044d1b0`, in index order): `(v1 v2 v0)` then `(v2 v3 v0)`, so `v1` keeps the first
+        // triangle's and `v0`, `v2`, `v3` the second's. On a flat side they are one normal; after
+        // a top point is dragged they differ (live `botlab-adjust-triangle-ok`).
+        let unit = |tri: [usize; 3]| {
+            let n = super::adjust::face_normal(quad[tri[0]], quad[tri[1]], quad[tri[2]]);
+            let n = if cw { n } else { [-n[0], -n[1], -n[2]] };
+            if n == [0.0; 3] {
+                [0.0, 0.0, 1.0]
+            } else {
+                n
+            }
         };
+        let first = unit([1, 2, 0]);
+        let second = unit([2, 3, 0]);
+        let normals = [second, first, second, second];
         for k in 0..4 {
             mesh.points.push(quad[k]);
-            mesh.normals.push(normal);
+            mesh.normals.push(normals[k]);
             mesh.uvs.push([uv[k][0] / SKIN, uv[k][1] / SKIN]);
         }
         add_group(uv.to_vec());
@@ -478,5 +542,92 @@ mod tests {
         };
         assert!(!rebuild(&mut ch));
         assert!(ch.mesh.is_none());
+    }
+
+    fn live_chassis(name: &str) -> Option<Chassis> {
+        let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            let at = dir.join("local/oracle/original").join(name);
+            if at.is_file() {
+                let bot = ra2fmt::bot::parse(&std::fs::read(at).ok()?).ok()?;
+                return bot.components.into_iter().next()?.chassis;
+            }
+            if !dir.pop() {
+                return None;
+            }
+        }
+    }
+
+    /// Our extrusion of a live adjusted chassis' two outlines against the file the original wrote
+    /// (skipped without the captures): points, per-vertex normals, skin coordinates, triangles.
+    fn same_as_live(name: &str, shifted: Option<usize>) {
+        let Some(live) = live_chassis(name) else {
+            return;
+        };
+        let e = extrude(&live.bottom, &live.top, live.height).expect("a shape");
+        let (m, l) = (&e.mesh, live.mesh.as_ref().unwrap());
+        assert_eq!(m.points.len(), l.points.len(), "{name}");
+        // The plates' ear order is still not recovered (the original clips a square from corner 2,
+        // a 200 x 300 rectangle from corner 0; docs/36 9.27): compare their triangles as sets and
+        // the sides exactly.
+        let plate = 2 * 3 * (live.bottom.len() - 2);
+        assert_eq!(m.indices[plate..], l.indices[plate..], "{name}");
+        let sets = |idx: &[u32]| {
+            let mut v: Vec<[u32; 3]> = idx
+                .chunks(3)
+                .map(|t| {
+                    let mut t = [t[0], t[1], t[2]];
+                    t.sort_unstable();
+                    t
+                })
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(
+            sets(&m.indices[..plate]),
+            sets(&l.indices[..plate]),
+            "{name}"
+        );
+        for i in 0..l.points.len() {
+            for k in 0..3 {
+                assert!(
+                    (m.points[i][k] - l.points[i][k]).abs() < 1e-5,
+                    "{name} point {i}"
+                );
+                assert!(
+                    (m.normals[i][k] - l.normals[i][k]).abs() < 2e-6,
+                    "{name} normal {i}: {:?} {:?}",
+                    m.normals[i],
+                    l.normals[i]
+                );
+            }
+            // Open (docs/36 9.27e): the one side of `triangle-bent` whose base is not axis aligned and
+            // whose quad is not flat sits 6.22 px lower in the original's atlas than its bounding
+            // box says (same shape, same u); every other group matches to the file's six digits.
+            let side = (i >= 2 * live.bottom.len()).then(|| 2 + (i - 2 * live.bottom.len()) / 4);
+            for k in 0..2 {
+                if shifted.is_some() && side == shifted && k == 1 {
+                    continue;
+                }
+                assert!(
+                    (m.uvs[i][k] - l.uvs[i][k]).abs() < 2e-6,
+                    "{name} uv {i}: {:?} {:?}",
+                    m.uvs[i],
+                    l.uvs[i]
+                );
+            }
+        }
+        assert_eq!(e.top_corners, live.top_corners, "{name}");
+    }
+
+    #[test]
+    fn a_dragged_top_point_changes_the_normals_and_the_layout_as_live() {
+        same_as_live("botlab-adjust-triangle-ok__live__000.bot", None);
+        same_as_live("botlab-adjust-triangle-bent__live__000.bot", Some(3));
+        same_as_live("botlab-adjust-square-taper__live__000.bot", None);
+        // baseplates whose first edge is not along x: the plates unfold from it
+        same_as_live("botlab-adjust-base-vertical__live__000.bot", None);
+        same_as_live("botlab-adjust-base-ccw__live__000.bot", None);
     }
 }

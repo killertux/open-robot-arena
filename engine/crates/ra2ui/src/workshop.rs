@@ -50,6 +50,7 @@ use ra2fmt::gib::{Block, Gib, Widget};
 
 use crate::{input, Fonts, Placement};
 
+pub mod adjust;
 pub mod build;
 pub mod chassis;
 pub mod extrude;
@@ -491,14 +492,18 @@ impl BotLab {
             }
             (found_tab, found_step, found_structure, found_option)
         };
-        if let Some((group, child)) = option {
+        if let Some((group, child)) = &option {
             // A click on an option group's member selects it in its group.
-            self.select_option_member(&group, &child);
+            self.select_option_member(group, child);
         }
         if let Some(next) = structure {
             // One of the layer's two step buttons: it swaps the content area's
-            // screen. The layer stays — it is what the click was on.
+            // screen. The layer stays — it is what the click was on — and so does the selection
+            // the click made (live: step 2 lit on `Adjust Top Outline`).
             self.set_screen(next)?;
+            if let Some((group, child)) = &option {
+                self.select_option_member(group, child);
+            }
             return Ok(None);
         }
         if let Some(button) = step_button {
