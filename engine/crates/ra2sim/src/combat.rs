@@ -200,6 +200,42 @@ pub fn material_contacts(
     out
 }
 
+/// The arena collidable each robot-against-arena contact of this step
+/// touched: `(point, robot, the `.gmf` body name)`, for diagnostics
+/// (`fidtrace`'s hit rows say which piece struck).
+pub fn arena_pieces(
+    robots: &[Robot],
+    arena: &ArenaBodies,
+    events: &[ContactEvent],
+) -> Vec<(Vec3, usize, String)> {
+    let mut owner: HashMap<BodyHandle, usize> = HashMap::new();
+    for (r, robot) in robots.iter().enumerate() {
+        for part in robot.parts.iter().filter(|p| p.alive) {
+            owner.insert(part.body, r);
+        }
+    }
+    events
+        .iter()
+        .filter_map(|e| {
+            let (r, ab) = match (
+                owner.get(&e.a),
+                owner.get(&e.b),
+                arena.get(&e.a),
+                arena.get(&e.b),
+            ) {
+                (Some(&r), None, None, Some(ab)) | (None, Some(&r), Some(ab), None) => (r, ab),
+                _ => return None,
+            };
+            let k = if ab.parts.is_empty() {
+                0
+            } else {
+                ab.part_at(e.point)
+            };
+            Some((e.point, r, ab.names.get(k).cloned().unwrap_or_default()))
+        })
+        .collect()
+}
+
 /// `1/m` the way `FUN_0045a5a0` forms it.
 pub fn inverse_mass_term(mass: f32) -> f32 {
     let inv = if mass <= 0.0 {
