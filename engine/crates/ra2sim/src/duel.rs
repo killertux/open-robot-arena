@@ -7012,7 +7012,17 @@ mod tests {
         let f = &duel.robots[0].flames[0].state;
         assert!(f.firing, "the control board switched it on");
         assert!(!f.emitting, "but there is no air to light it");
-        assert!(duel.damage_events.is_empty());
+        // (The robots' parts touch from the spawn on, so the contact hits of the
+        // first quarter second are theirs; what must be missing is a jet's hit,
+        // two hitpoints with no attacker.)
+        assert!(
+            !duel
+                .damage_events
+                .iter()
+                .any(|e| e.attacker == -1 && e.amount == FLAME_DAMAGE),
+            "{:?}",
+            duel.damage_events
+        );
     }
 
     /// A flame particle that reaches another robot is `FUN_004148f0(robot,
@@ -7488,7 +7498,7 @@ mod tests {
         assert_eq!(through(&mut gate, 0.0), 2);
         assert_eq!(through(&mut gate, 0.5), 0);
         assert_eq!(through(&mut gate, 1.0), 2);
-        // With the pair gate (`RA2_PAIR_GATE=1`, docs/29 section 12ag) the pair
+        // With the pair gate (the default since docs/29 section 12ak) the pair
         // is asked once a step: the floor's entry takes the first step, the
         // chassis' own the next.
         let mut gate = combat::EventGate::with_pair_gate(true);

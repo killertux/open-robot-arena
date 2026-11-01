@@ -104,6 +104,16 @@ fn mopp_order() -> bool {
     *ON.get_or_init(|| std::env::var("RA2_H17_MOPP").map_or(true, |v| v != "0"))
 }
 
+/// Whether convex x mesh pairs run the original's distance query
+/// (`narrow::closest_havok`, docs/29 section 12ak: `FUN_0055c390`, verified
+/// against 43 689 live queries). `RA2_GJK=0` is the exact closest-point query
+/// of before.
+fn havok_gjk() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_GJK").map_or(true, |v| v != "0"))
+}
+
 /// `RA2_H17_DUMP=<file>` writes the rows `frida/ra2_contacts.js` captures in
 /// the original (`R` the contacts handed to the resolver, `B` every dynamic
 /// body, `A` each accepted step piece), so one script reads both.
@@ -702,14 +712,27 @@ impl Havok17Backend {
         m.refresh(&cx.body_pose, &ms.body_pose);
         for &t in triangles.iter() {
             let tri = mesh.triangles[t as usize].map(|v| ms.pose.apply(mesh.vertices[v as usize]));
-            match narrow::convex_point(
-                &cx.vertices,
-                cx.radius,
-                &tri,
-                0.0,
-                &cx.body_pose,
-                &ms.body_pose,
-            ) {
+            let found = if havok_gjk() {
+                narrow::convex_point_havok(
+                    &cx.vertices,
+                    cx.radius,
+                    &tri,
+                    0.0,
+                    &cx.body_pose,
+                    &ms.body_pose,
+                    cx.pose.position,
+                )
+            } else {
+                narrow::convex_point(
+                    &cx.vertices,
+                    cx.radius,
+                    &tri,
+                    0.0,
+                    &cx.body_pose,
+                    &ms.body_pose,
+                )
+            };
+            match found {
                 None => return true,
                 Some((p, c)) if p.distance < tol => {
                     if c.persists() {
