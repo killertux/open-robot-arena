@@ -86,6 +86,50 @@ fn spawn_settle_steps(index: usize) -> usize {
 /// lowered. `robot` is given here fully placed (every body turned with the
 /// chassis): the other bodies are put back to where the original has them.
 /// Every body in `others` keeps its state through the steps.
+/// Experiment (not a default): `RA2_FORCE_TURNS=<robot>:<part>:<deg>,...` sets
+/// the turn of a hinged part about its hinge axis (degrees, signed about our
+/// axis, as `examples/spinprobe` prints it) from the build orientation, with
+/// the body at rest. Used to put the original's measured placement turns
+/// (`spincmp.py`) into ours (docs/29 section 12aj).
+fn force_turns(physics: &mut dyn PhysicsBackend, robot: &Robot, index: usize, spec: &str) {
+    let chassis_local = robot.rig.components[robot.rig.parts[0].root].local;
+    let (_, c_rot, _) = chassis_local.to_scale_rotation_translation();
+    let Some(cs) = physics.state(robot.body()) else {
+        return;
+    };
+    let frame = cs.rotation * c_rot.inverse();
+    for item in spec.split(',') {
+        let f: Vec<&str> = item.split(':').collect();
+        if f.len() != 3 {
+            continue;
+        }
+        let (Ok(r), Ok(p), Ok(deg)) = (
+            f[0].trim().parse::<usize>(),
+            f[1].trim().parse::<usize>(),
+            f[2].trim().parse::<f32>(),
+        ) else {
+            continue;
+        };
+        if r != index {
+            continue;
+        }
+        let (Some(part), Some(body)) = (robot.rig.parts.get(p), robot.parts.get(p)) else {
+            continue;
+        };
+        let Some(joint) = part.joint else {
+            continue;
+        };
+        let (_, built, _) = robot.rig.components[part.root]
+            .local
+            .to_scale_rotation_translation();
+        if let Some(s) = physics.state(body.body) {
+            let rot = frame * Quat::from_axis_angle(joint.axis, deg.to_radians()) * built;
+            physics.set_transform(body.body, s.position, rot);
+            physics.set_velocity(body.body, Vec3::ZERO, Vec3::ZERO);
+        }
+    }
+}
+
 fn turn_into_place(
     physics: &mut dyn PhysicsBackend,
     robot: &Robot,
@@ -105,6 +149,33 @@ fn turn_into_place(
                 centre + back * (s.position - centre),
                 back * s.rotation,
             );
+        }
+    }
+    // Experiment (not a default): `RA2_SPAWN_W=<part>:<wx>,...` gives a part body
+    // that angular velocity about the build frame's x axis before the first
+    // substep (the build's residual spin, docs/29 section 12aj).
+    if let Ok(spec) = std::env::var("RA2_SPAWN_W") {
+        for item in spec.split(',') {
+            let mut it = item.split(':');
+            if let (Some(p), Some(w)) = (it.next(), it.next()) {
+                if let (Ok(p), Ok(w)) = (p.trim().parse::<usize>(), w.trim().parse::<f32>()) {
+                    if let Some(part) = robot.parts.get(p) {
+                        physics.set_velocity(part.body, Vec3::ZERO, Vec3::new(w, 0.0, 0.0));
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(spec) = std::env::var("RA2_SPAWN_TQ") {
+        for item in spec.split(',') {
+            let mut it = item.split(':');
+            if let (Some(p), Some(w)) = (it.next(), it.next()) {
+                if let (Ok(p), Ok(w)) = (p.trim().parse::<usize>(), w.trim().parse::<f32>()) {
+                    if let Some(part) = robot.parts.get(p) {
+                        physics.add_torque(part.body, Vec3::new(w, 0.0, 0.0));
+                    }
+                }
+            }
         }
     }
     if steps == 0 {
@@ -142,8 +213,9 @@ fn turn_into_place(
             for (p, part) in robot.parts.iter().enumerate() {
                 if let Some(s) = physics.state(part.body) {
                     eprintln!(
-                        "spawn step {k} part {p} at {:.4?} angle {:.4} v {:.3?} w {:.3?} active {}",
+                        "spawn step {k} part {p} at {:.4?} q {:.4?} angle {:.4} v {:.3?} w {:.3?} active {}",
                         s.position,
+                        s.rotation,
                         part.joint.map_or(0.0, |j| physics.hinge_angle(j)),
                         s.linear_velocity,
                         s.angular_velocity,
@@ -1212,6 +1284,9 @@ impl Duel {
                         &others,
                         spawn_settle_steps(i),
                     );
+                }
+                if let Ok(spec) = std::env::var("RA2_FORCE_TURNS") {
+                    force_turns(&mut *physics, &robot, i, &spec);
                 }
                 if !lower_onto_floor(&mut *physics, &robot) {
                     let dy = floor + SPAWN_ABOVE_FLOOR - position.y;

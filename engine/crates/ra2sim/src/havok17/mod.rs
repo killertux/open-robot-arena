@@ -87,6 +87,15 @@ fn debug_body() -> Option<usize> {
     *WATCH.get_or_init(|| std::env::var("RA2_H17_DEBUG").ok()?.parse().ok())
 }
 
+/// `RA2_H17_NO_BACKSTEPS=<n>` accepts every first attempt until substep `n`
+/// (an experiment, docs/29 section 12aj: whether the Sentinel's extra half steps
+/// decide the Wide Load's landing; the bell is at substep ~300).
+fn no_backsteps_until() -> Option<u64> {
+    use std::sync::OnceLock;
+    static N: OnceLock<Option<u64>> = OnceLock::new();
+    *N.get_or_init(|| std::env::var("RA2_H17_NO_BACKSTEPS").ok()?.parse().ok())
+}
+
 /// Whether a fixed mesh's triangles come in its MOPP's order (`RA2_H17_MOPP=0`:
 /// ascending, as before docs/29 section 12v; a diagnostic).
 fn mopp_order() -> bool {
@@ -1404,6 +1413,7 @@ impl PhysicsBackend for Havok17Backend {
                     && h > MIN_STEP
                     && backsteps < MAX_BACKSTEPS
                     && pieces < MAX_PIECES
+                    && no_backsteps_until().is_none_or(|n| self.substeps >= n)
                 {
                     if std::env::var_os("RA2_H17_BACKSTEPS").is_some() {
                         eprintln!("backstep h {h:.5} tol {current_tol:.4} bad {bad:?}");

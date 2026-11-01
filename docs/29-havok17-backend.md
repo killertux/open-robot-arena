@@ -5629,3 +5629,237 @@ Z-Tek hinge (live atoms in `spinup-...__live__000`, `J` rows); (3) the endings:
 11 of 13 live decisions are a flipped robot sitting still, so look at what moves
 ours' flipped Sentinel (the Wide Load's pokes slide it 1-4 m; live 0.9-3 m in
 40 s, 0.5 m at the pokes) before changing the 20 s rule.
+
+### 12aj. The weight is the collidable bodies'; the placement's wheel turn is a drag kick and a coin flip; the bell landing is a two-branch event the Sentinel's hub decides (fx/bell-landing; no default change)
+
+Section 12ai left three things open: the weight the scripts see in a match, the
+Wide Load's placement turn (150-163 degrees live, 4 / 89 ours) with the N-12
+wheels' +0.7 / -0.6 rad/s kick, and the bell landing (pitch 0.135 live, 0.26
+ours; no second wheel impact). All three are answered below, and the answers
+move the target: the landing is not a single live behaviour that ours lacks,
+and the "decided by 100 s" gap of 12ai counted two truncated captures as
+decided. Nothing changes by default; the new switches are off.
+
+**New live captures** (one session on `:7`, `RA2_FRIDA_PORT=27147`; the prefix's
+`Teams/`, `AI/`, `Robot Designs/`, `ra2.cfg` copied before and compared by sha256
+after: identical; rows in `local/oracle/manifest.tsv`, copies in
+`~/ra2-oracle-backup` with `manifest-additions-2026-11-01-bell-landing.tsv`):
+`fightcontacts-sentinel-wideload-compressor__live__004..007` (Compressor,
+Sentinel `Team0/Bot2` v Wide Load `Team8/Bot2`, `tools/oracle/capture_landing_set.sh`
+= `capture_boxstart.py` with `AGENT=frida/ra2_fightcontacts.js WEIGHTS=1`). The
+agent now writes **`V` rows**: every known body's velocity and angular velocity as
+the resolver (`0x53ed80`, exit hook) leaves it, with the `R` / `B` rows of the
+same `seq`; the json carries `plus.getWeight` of both players. Ours writes the
+same rows with `RA2_H17_DUMP=<abs path>`.
+
+**1. The robot's weight in a match (verified live).** `plus.getWeight` read in
+the match: Sentinel 416.3941, Wide Load 383.6678 (four runs, identical to six
+digits), Scout 225.4947 and ALARM 339.1160 (one run each, the Scout from the
+session's second route, which kept the AI Scout in slot 1 instead of
+C.R.U.S.H.). Ours (`Robot::remaining_mass`, the collidable bodies) gives all four
+to 0.001 (test `tests/weight_live.rs`, example `weightprobe`). Their no-collision
+phantoms are 10 / 22 / 18 / 34 kg (wheel traction rings, SmartZones), so **the
+scripts' weight leaves the phantoms out**, while the Bot Lab's number
+(`0x45a4f0`, docs/36 section 9.27c: C.R.U.S.H. 395.2 = 387.2 + 8) sums every
+body. 9.27c's remark that the original's `getWeight` "is this same sum (395.2)"
+was wrong for a match; C.R.U.S.H. itself was not captured in one (the route's
+slot 1 stayed the Scout), the rule is the four robots'. The phantoms do carry
+mass in the simulation: the resolver's `B` rows give the Wide Load's bodies
+32 kg (N-12 20 + traction ring 2 + motor axle 10) and 26 kg (mini wheel 9 + ring 8
++ axle 9), the Sentinel's 28 and 23, as ours builds them (`HavokParts`; the Scout's
+wheel body is 27, `mass_live.tsv`). So the match side already is the binary's; the only script that reads
+the weight is `Hazards.Electricity` (115 N per kg); `Robot::mass`, which the
+fitted wheel drag uses, stays the collidable sum it was fitted on.
+
+**2. The wheel placement turn: nothing sets it; it is three accidents in a row.**
+There is no write of a wheel's orientation or spin at the start point
+(`0x4dcff0` turns the chassis, moves the rest by the chassis' displacement,
+steps the world, 12w). What the live rows show:
+
+* *A residual spin from the build.* Before the placement a wheel body is
+  already turning slowly about its axle (Wide Load N-12 -0.168 / +0.150 rad/s,
+  Sentinel rear wheels 0.064 / 0, Stinger 0.040 / 0.033, M.A.D. 0.07-0.11): in
+  the build the body is awake for 14 substeps after each wake (12x) and its
+  spin grows while it is (the Wide Load's N-12 wheel gains 0.018, then 0.008 a
+  substep, falling to 0.001 over its four windows: -0.018 to -0.168 rad/s, a
+  torque of about 0.05 N m on the 10 kg axle body it still is). Inferred, not
+  read: that is gravity on a centre of mass a few tenths of a millimetre off
+  the axle against the world drag below (a steady torque against `-0.3 w`
+  settles at torque / 0.3).
+* *The drag action collects torque while the body sleeps.* The world's drag
+  (`FUN_0052d140(0.1, 0.3)`, applied at `0x52d2a0..0x52d32d`) adds `-0.1 v` to the
+  force accumulator (`body + 0x74`) and `-0.3 w` to the torque accumulator
+  (`+0x84`) of **every body of an active system, a body flagged inactive
+  (`+0x1c` 0) included**, and only an integration clears them. A robot sleeps
+  most of its build (the Sentinel's rear wheel 2419 substeps from its last sleep
+  to its placement), so the accumulator holds `-0.3 w N`: `ra2_pieces.js`'s `PB`
+  rows at the placements read -5.259 (273 substeps asleep; 0.3 x 0.0637 x 273 =
+  5.22) and -46.638 (2419; 46.2) for that wheel and -39.39 / -32.82 for the
+  Stinger's two (w 0.0399 / 0.0333). The placement wakes the body and its first
+  integration applies it: `dw = tau dt / I_axle`, which is **-0.8467** for the
+  Sentinel's wheel (I_axle 0.918; live -0.8466) and **-1.446 / -1.205** for the
+  Stinger's (0.454; live -1.4475 / -1.2062), and for the Wide Load's N-12 wheel
+  (asleep since substep 3031, 1376 substeps, 0.3 x 0.168 x 1376 = 69.4 N m) **+0.894**
+  (I_axle 1.2935: -0.168 to +0.726, the +0.7 / -0.6 of 12ai; its mirror 0.150 to
+  -0.649). A body whose spin is zero gets nothing. It is not a motor, not the
+  hinge (no `J` row is written before the third substep, the chassis being
+  inactive for two) and not a set-up step: in every capture of 12w with a
+  spinning wheel (M.A.D., Dementia, Stinger, Sentinel, Wide Load) the first
+  free substep leaves it turning the other way at 4 to 35 times the spin,
+  the same factor for the same body.
+* *The pull and the flip.* After the two free substeps the hinge pulls the wheel
+  onto its pivot (substep 3: v = (-127.4, 0.60, 26.02) on the N-12 wheel, ours
+  (-127.413, 0.600, 26.021): identical), and a wheel whose axle now points the
+  opposite way to the hinge's has an unstable equilibrium: the misalignment
+  doubles every substep (ours the same factor 2, from a seed of 0.001 rad/s at
+  the same substep) and the wheel flips in two substeps, at the same substeps
+  after the placement in both (live 4432-4436, ours 24-28 from the first). Which way it flips is decided by the seed's direction:
+  live the mini wheels flip about z and exit with 0.78 rad/s about the axle,
+  ours about y with 3.3, so ours ends at 89 / -72 degrees where live has 149 / 163. The seed
+  is the part of the pull the hinge's anchor and the body's full inertia tensor
+  put off the axle (the N-12's live tensor has Ixz 0.0016, Ixy -0.0007; ours 0.001,
+  0.000 and a transverse moment 2.7 % high): below 0.003 rad, which is why live
+  repeats the N-12's turns to 1.3 degrees between sessions and the Sentinel's rear wheels
+  do not (67 / 124 against 73 / 90 degrees).
+
+Ours cannot take the first two from a model, because the build is not
+simulated (a robot is created at its built state). Switches, all off:
+`RA2_SPAWN_W=<part>:<w>,..` gives a part that spin about the build x axis before
+the placement and `RA2_SPAWN_TQ=<part>:<N m>,..` the stale torque. With the
+Wide Load's N-12 values in (`1:-0.15,2:0.168` and `1:61.95,2:-69.4`, our axes are
+the mirror of the captures') their turns go from 4 / -4 degrees to 165.4 / 166.9
+(live 150 / 158), and the seeds appear with the tensor's off-diagonals;
+the minis, which get no kick, stay at 89 / -72 (live 149 / 163).
+`RA2_FORCE_TURNS=<robot>:<part>:<deg>,..` sets a part's turn outright (the
+values of `spincmp.py`, below). Not found: a rule for the build residual (it
+needs the build's sleep and wake schedule and its masses, and the sign and
+size differ between mirrored wheels), and so no default.
+
+**3. The bell landing.** Eight live landings (`fightcontacts-...__live__000..007`)
+aligned on the release (`tools/oracle/landing_compare.py`; pitch is the up
+vector's z):
+
+| live run | 0 | 1 | 2 | **3** | 4 | 5 | 6 | 7 | ours |
+|---|---|---|---|---|---|---|---|---|---|
+| pitch 30 steps on | 0.113 | 0.147 | 0.118 | **0.242** | 0.101 | 0.105 | 0.111 | 0.099 | 0.262 |
+| chassis wx, steps 12-16 | 2.35 3.07 1.75 -0.25 0.10 | 2.37 3.08 1.76 -0.15 0.27 | 2.41 3.16 1.84 -0.19 0.10 | **2.46 2.28 1.87 1.42 1.07** | 2.40 3.21 1.91 -0.27 -0.09 | 2.40 3.15 1.91 0.10 -0.01 | 2.34 3.07 1.72 -0.25 0.12 | 2.38 3.19 1.91 0.00 -0.12 | 2.72 2.66 2.21 2.02 1.52 |
+| a step piece halved in steps 0-40 | no | no | no | **11, 12** | no | no | no | no | 11, 12 |
+
+Seven landings are one event (pitch 0.11 +- 0.02, the front N-12 wheels arrest
+the rock at step 15); **one live landing, run 3, is ours**: the same 0.24-0.26
+pitch, no second impact, and the same two half pieces at steps 11-12. 12ai's
+"0.135 +- 0.03" was the mix. Ours always lands that way. The half pieces are a
+backstep (`0x52aa60`, a detected point closer than `current_tol`) on the
+**Sentinel's** rear wheels (the 28 kg bodies): one of the two touches the floor at
+step 10 at a distance of 0.0996 (the tolerance is 0.1), the resolver holds it
+there while the hinge pulls it down at 3.3 m/s, and the next piece starts
+with a point inside 0.05. Live, the Sentinel's contacts at step 10 (rear wheels and
+steering hubs) are none in runs 4 and 5, one in 0, 3 and 7, two in 2 and three in
+1 and 6, at distances 0.0967 to 0.0998, and only run 3 backsteps. The two
+robots land at the same instant, so a millimetre at the Sentinel's wheel changes
+the Wide Load's landing; ours puts both rear wheels at 0.0996 (symmetric; they are
+placed 4.6 and 58.9 degrees from live's turns, the steering hubs 142 and 12). (`RA2_H17_BACKSTEPS=1`
+prints the pair.)
+
+*The step decomposed.* With the `V` rows every step splits into the resolver
+(`V - B`) and the rest (joints, drag, drive; `B(next) - V`). `resolvecmp.py`
+(12ae) on the new captures: the resolver reproduces every Wide Load and
+Sentinel wheel at the landing to 0.000 m/s and rad/s given the live contacts
+(the chassis rows need the inertia of the body when it is complete: the `P` row
+is taken at its first contact, 173 kg for a 226.7 kg body; the 12ae check was on
+robots whose `P` row came late). So only two things can differ: the contacts
+and the non-contact part, and the table shows both:
+
+* *The minis' spin-up is the placement turn.* Live a mini wheel leaves the
+  first contact spinning at -1.7 rad/s (step 10), ours at -0.1: its contact is
+  5.5 cm ahead of the axle in live (z +0.054..0.062), under it in ours (0.003). With
+  `RA2_FORCE_TURNS` set to the live turns of all eight wheels (Sentinel
+  165.6 / 111.33 / 123.61 / 66.97, Wide Load 158.17 / 149.88 / 162.68 / 149.16
+  degrees about our axes) the minis' contact points agree with live to 1 mm
+  at steps 9-12 (0.06 0.059 / -0.009 0.064 / -0.016 0.074 / 0.12 0.074 against the
+  same) and their spin-ups to 0.02 rad/s (-1.83 / -3.29 against -1.84 / -3.26); the
+  chassis' wx at 10-12 becomes 1.17 / 2.07 / 2.40 against 1.17 / 2.10 / 2.40 and
+  the pitch at +30 steps 0.262 to 0.163, the centre of mass 5.541 to 5.484 (live
+  5.451-5.479). This is what 12ai's forced turns did not show: it had forced the
+  Wide Load's wheels only, and the Sentinel's landing was still the backstep one.
+* *The chassis rock is not yet.* Even with the turns and without the backstep
+  (`RA2_H17_NO_BACKSTEPS=<n>` accepts every first attempt until substep `n`) the
+  second impact is missing (wx 0.76 at step 15 against -0.27..0.10). The chassis'
+  own resolver steps are close (12: -1.70 against -1.86, 13: -1.47 against -2.19) and
+  the part after the resolver gives back less (+1.87 against +2.60 at 12, +0.48
+  against +0.95 at 13); the N-12 wheels differ: the left one's resolver spin is
+  -2.42 live at step 13 and +1.15 ours. Its contact points are the difference:
+  live reports one at x -0.203 (z 0.084) where the hull has rings at -0.252
+  and +0.058, a point along an axial edge of the 12-gon prism (`h_wheel2`,
+  R 0.326) where ours reports the ring vertices; scanning the wheel's phase in
+  6 degree steps never reproduces the live spin (+0.64 at step 12) and hardly
+  changes the chassis (wx 13: 2.45-2.74, live 3.1-3.2).
+* *Not a resolver or a weight question:* the live drive is the same (thrust
+  1814 / -1814 from step 10, `G` rows; ours the same from 10, though ours has
+  the N-12 wheels "touching" two steps earlier, 8-9 against 10).
+
+*Ensembles* (48 runs of 120 s, `FIDTRACE_JITTER` keeps the fall; scratch
+install; counts as 12ag; Sentinel / Wide Load; live from 12ai's 16 fights):
+
+| Compressor | Wide Load / Sentinel counted | Sentinel on its back by 40 s | permanent flip by 25 s | decided by 40 / 60 / 100 s | Wide Load stalled > 5 s |
+|---|---|---|---|---|---|
+| live | 73.6 / 5.3 | 7 of 16 | 7 of 16 | 3 of 16, 7 of 14, 11 of 14 | 0 of 16 |
+| warmups (12ai, this branch) | 66.2 +- 6.8 / 4.0 +- 0.5 | 14 of 48 | 15 | 5, 16, 24 of 48 | 10 |
+| jitter, the landing as ours | 65.5 +- 6.2 / 2.8 +- 0.4 | 15 | 15 | 8, 15, 23 | 8 |
+| ... no backsteps to substep 340 | 73.6 +- 6.6 / 4.0 +- 0.4 | 8 | 12 | 4, 7, 14 | 5 |
+| ... live placement turns forced | 76.3 +- 5.9 / 4.4 +- 0.6 | 7 | 5 | 1, 10, 21 | 7 |
+
+The landing the live robots mostly have gives the live hit counts (73.6 / 5.3
+against 73.6 / 4.0 and 76.3 / 4.4) and fewer stalls, but **fewer flips and fewer
+decided fights**, away from live (decided by 100 s, live-censored: p 0.002 and
+0.033 against 0.066 for ours as it is). So the flips of ours' fights lean on
+something that the wrong landing also supplies, and the landing is not the
+lever for the endings.
+
+**The endings, corrected.** `compressor_compare.py` took the last time a brain
+had a tactic as the decision, which for a capture that stops while the brains
+still fight is the end of the sampling: `boxstart-...__live__000` and `001` stop
+at 56.5 and 56.2 s with both on `Engage`. They are not decided and say nothing about
+60 or 100 s. With them left out (the tool now does, `... of runs that reach T s`):
+decided by 40 / 60 / 100 s live 3 of 16, 7 of 14, 11 of 14 against ours (warmups)
+5, 16, 24 of 48 (Fisher p 0.40, 0.35, **0.072**); 12ai's 13 of 16 and p 0.04
+overstated the gap. 22 of ours' 24 undecided fights have both robots upright
+and moving at 119 s (4-25 m in 20 s); live's decided fights are a robot on its
+back sitting still (12ai: 11 of the 13; `Invert`, then no tactic). So the open end of 12ai stands in a weaker form: ours flips the Sentinel
+later in a fight less often than live; there is no engine change here to make.
+
+**Tools.** `tools/oracle/landing_compare.py` (the step table above, from live or
+ours), `capture_landing_set.sh`, `ra2_fightcontacts.js` `V` rows,
+`capture_boxstart.py WEIGHTS=1`, `fidtrace` `FIDTRACE_BODY=<abs path>` (every part
+body each step), `examples/weightprobe.rs`, the switches above (`RA2_SPAWN_W`,
+`RA2_SPAWN_TQ`, `RA2_FORCE_TURNS`, `RA2_H17_NO_BACKSTEPS`), and the censoring in
+`compressor_compare.py`.
+
+**Ensembles, before and after** (`ensemble.sh`, `FIDTRACE_WARMUP` 0..47, 120 s,
+scratch install; the default engine is unchanged, so the columns are the same
+fights, run with the master binary and this branch's, identical to the digit and
+to 12ai's):
+
+| fight | live | master fbfb61e | this branch |
+|---|---|---|---|
+| box ALARM / Scout | 41.1 / 6.0 | 35.4 +- 3.5 / 5.6 +- 0.5, 15 of 48 full length | same |
+| Razor / FlapJack | 3.0 / 0.1 | 1.0 +- 0.1 / 4.8 +- 0.4, 4 of 48 | same |
+| Compressor Wide Load / Sentinel | 73.6 / 5.3 | 66.2 +- 6.8 / 4.0 +- 0.5, 24 of 48 | same |
+| Octagon ALARM / Scout | 13.6 / 3.2 | 11.6 +- 2.1 / 2.2 +- 0.3, 3 of 48 | same |
+
+**Verified / not.** Verified live: the match weight of four robots, the phantom
+bodies' mass in the simulation, the drag action's accumulation and kick (five
+bodies, three robots, to 1 %), the pull and the flip's rate and timing, the
+two-branch landing (eight runs) and its trigger, the resolver on the landing's
+contacts, the minis' contact points and spin-ups with the live turns, the
+truncated captures. Not verified: the build residual spin (no model), the
+direction of the flip (seeds below 0.003 rad), the N-12 wheel's contact
+points (edge points), the second impact, the Sentinel wheel's 2 mm, why the
+better landing gives fewer flips.
+**Open, in order:** (1) the Sentinel's rear wheels and steering hubs: their placement
+turns differ between live sessions and their step-10 contacts decide the
+branch; (2) the narrow phase's contact point on an axial edge of a prism (the
+N-12 wheel at step 10-13); (3) the build (residual spin, sleep schedule), the
+only way to a placement turn without a table; (4) the fights' later flips
+(the Sentinel is flipped less often after the first 25 s than live, ours'
+pokes slide it further).
