@@ -200,6 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if let Some(f) = hits.as_mut() {
                     let t = m.clock();
+                    let pieces = std::mem::take(&mut m.duel.impact_pieces);
                     for i in std::mem::take(&mut m.duel.impacts) {
                         let name = |r: usize, c: usize| match m.duel.robots.get(r) {
                             Some(robot) => robot.rig.components[c].name.replace('"', "'"),
@@ -210,9 +211,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             i.attacker as i64
                         };
+                        // The arena collidable struck (the contact at this point).
+                        let piece = pieces
+                            .iter()
+                            .find(|(p, r, _)| *p == i.point && *r == i.target)
+                            .map(|(_, _, n)| n.clone())
+                            .unwrap_or_default();
                         writeln!(
                             f,
-                            "{{\"t\": {t}, \"att\": {}, \"by\": \"{}\", \"vic\": {}, \"comp\": \"{}\", \"amount\": {}, \"speed\": {}, \"p\": [{}, {}, {}]}}",
+                            "{{\"t\": {t}, \"att\": {}, \"by\": \"{}\", \"vic\": {}, \"comp\": \"{}\", \"piece\": \"{piece}\", \"amount\": {}, \"speed\": {}, \"p\": [{}, {}, {}]}}",
                             att,
                             name(i.attacker, i.by),
                             i.target,

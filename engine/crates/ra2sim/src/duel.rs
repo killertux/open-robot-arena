@@ -934,6 +934,9 @@ pub struct Duel {
     /// gate, in [`Duel::impacts`] (diagnostics and tests).
     pub record_impacts: bool,
     pub impacts: Vec<combat::Impact>,
+    /// The arena collidable each contact of the step touched, while
+    /// `record_impacts` is on (see [`combat::arena_pieces`]).
+    pub impact_pieces: Vec<(Vec3, usize, String)>,
     /// Robot-versus-prop contacts the event gate let through, while
     /// `record_impacts` is on (the arena's sub-material sounds read them).
     pub material_contacts: Vec<combat::MaterialContact>,
@@ -1119,7 +1122,15 @@ impl Duel {
         let mut physics: Box<dyn PhysicsBackend> = crate::backend::create_backend(arena.gravity)?;
         let arena_body = physics.create_body(
             &BodyDesc::new(MotionType::Static, arena.collider_shape())
-                .with_friction(arena.friction)
+                // `RA2_ARENA_FRICTION=<mu>`: a diagnostic override of the arena
+                // floor's friction (the `.gmf` says 0.3 box, 0.8 Octagon, 0.9
+                // Compressor), docs/29 section 12al.
+                .with_friction(
+                    std::env::var("RA2_ARENA_FRICTION")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(arena.friction),
+                )
                 .with_restitution(arena.restitution)
                 .with_user_data(USER_ARENA),
         )?;
@@ -1420,6 +1431,7 @@ impl Duel {
             immobility_active: false,
             record_impacts: false,
             impacts: Vec::new(),
+            impact_pieces: Vec::new(),
             material_contacts: Vec::new(),
             immobility: crate::immobility::Tracker::default(),
             remote_immobile: Vec::new(),
@@ -2921,6 +2933,11 @@ impl Duel {
                 &props,
             ));
             self.impacts.extend(impacts.iter().copied());
+            self.impact_pieces.extend(combat::arena_pieces(
+                &self.robots,
+                &self.arena_bodies,
+                &events,
+            ));
         }
         for imp in &impacts {
             self.sparks_for(imp);
@@ -7309,6 +7326,12 @@ mod tests {
         let hit = hits[0];
         assert_eq!(hit.attacker, combat::NO_ATTACKER);
         assert_eq!(hit.target, 0);
+        // Which arena collidable it struck (the diagnostics' `piece`): the
+        // box's floor.
+        let pieces = combat::arena_pieces(&duel.robots, &duel.arena_bodies, &events);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!((pieces[0].0, pieces[0].1), (point, 0));
+        assert_eq!(pieces[0].2, "arena_collision");
         let (mass, com_local, inv_local) = props[&chassis];
         let r = glam::Mat3::from_quat(state.rotation);
         let com = state.position + state.rotation * com_local;

@@ -6100,3 +6100,182 @@ of robots stranded at the end walls persists in a few runs (4 of 48 over 600 hp)
 `examples/gjkreplay.rs`, `examples/practiceprobe.rs`,
 `capture_landing_set.sh AGENT= NAME= SIM_SECONDS=`, the switches
 `RA2_GJK=0`, `RA2_PAIR_GATE=1`, `RA2_WHEEL_GATE=1` and `RA2_PAIR_SINGLE=1` (experiments).
+
+### 12al. Where the arena's hits on the robots come from: the Octagon's Scout lies on its back, the Compressor's tail is live's too (fx/arena-hp; diagnostics only, no default changes)
+
+Section 12ak left the arena's damage open (Octagon Scout / ALARM live 14 / 114,
+ours 144 / 70; box Scout / ALARM 99 / 17 against 57 / 65; Compressor Sentinel /
+Wide Load 178 / 146 against 127 / 113; and 4 of 48 Compressor runs over 600 hp
+from repeated end-wall hits on a robot that sits still). This section
+decomposes ours by arena piece, time, speed and by whether the robot is on its
+back, and sets it against live hits taken in the same state. The pricing, the
+gate and the registrations are not what is off. The gap that is real is one
+the arena only takes the blame for: **ours lies the Octagon's Scout on its
+back in half of the fights and live never does, and a Scout on its back
+pumps its fork into the floor.**
+
+**New live captures** (one session on `:7`, `RA2_FRIDA_PORT=27147`; the
+prefix's `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` copied before and
+compared by sha256 after: identical; rows in `local/oracle/manifest.tsv`,
+copies in `~/ra2-oracle-backup` with `manifest-additions-2026-11-01-arena-hp.tsv`):
+`arenahits-scout-alarm-octagon__live__002..009` with
+`fightpos-scout-alarm-octagon__live__002..009` (eight 120 s Octagon fights,
+shipped AIs: every priced hit with the record and both bodies, and every 6
+frames both robots' position, `isUpsideDown` and tactic;
+`capture_fightpos_set.sh AGENT=frida/ra2_arenahits.js PREFIX=arenahits`),
+`arenahits-sentinel-wideload-compressor__live__000..004` with
+`fightpos-sentinel-wideload-compressor__live__004..008` (five Compressor
+fights, the same) and `eventreg-scout-alarm-octagon__live__000`
+(`frida/ra2_eventreg.js` over two Octagon match loads). With the older
+captures the Octagon now has 13 live fights, the Compressor 14, the box 8.
+
+**The tools.** `fidtrace`'s hit rows (`FIDTRACE_HITS`) say which arena
+collidable struck (`piece`: the `.gmf` body of the contact, from the new
+`combat::arena_pieces` and `Duel::impact_pieces`; test in
+`a_robot_striking_the_arena_is_hit_by_its_arenium`);
+`tools/oracle/inverted_hits.py` splits the arena's hits of 10 hp or more by
+whether the robot is on its back, for a live fight (`arenahits-*` with its
+`fightpos-*`, only up to the moment both brains go idle) and for an ensemble
+(`FIDTRACE_UP=1`, whose trace carries the chassis' `up.y`). `ensemble.sh`
+and `ensemble_report.py` are unchanged. `RA2_ARENA_FRICTION=<mu>` overrides
+the arena floor's friction (a diagnostic, see below).
+
+**1. What is right.**
+* *The price.* `arenaprice.py` on the new Octagon captures: every non-zero hit
+  is `factor * M` to 1e-6 as before (12o, 12aa). The hit distributions match:
+  the alarm hammer's hits on the Scout (100 live, 550 ours) have `rec0`
+  p10 / p50 / p90 3.2 / 6.0 / 16.0 against 3.6 / 7.3 / 16.1 and amounts 14 /
+  35 / 104 against 14 / 41 / 110, and 5.0 against 4.7 of them per fight in the
+  first 12 s.
+* *The registrations.* The Octagon's match load registers **12** arena
+  collidables through `0x415227` (and 19 robot component collidables, a
+  second on each of the six wheels: `eventreg-scout-alarm-octagon__live__000`),
+  all with partner 0, interval 1 s, threshold 0, type 2, as the box's four and
+  the Compressor's nine. The `.gmf` has 13 colliding bodies (`main_collision`,
+  `startblock1..4`, `hellraiser1..2`, `hammer1..2`, both hammer plates,
+  `outerfloor_collision`, `topplane_collision`); ours registers all of them,
+  and the plane at y = 15.6 is the one no robot touches, so no hit depends on
+  which is missing.
+* *The floor's friction.* The live contact records of the Octagon carry mu
+  0.8 for `main_collision` (0.5 x 0.8 for the chassis, 0.3 x 0.8 for the
+  components, `fightcontacts-scout-alarm-octagon__live__000`), the box's 0.3
+  and the Compressor's 0.9: the arena's own, as ours uses. Setting the floor
+  to 0.3 (`RA2_ARENA_FRICTION=0.3`) leaves the Scout on its back in 18 of 48
+  runs (24) and its arena hp at 127 +- 21 (144): not the lever.
+* *The hazards' cadence and force.* Unchanged from 12ag / 12aa / 12z.
+
+**2. The Octagon Scout.** Decomposed (48 warmups, 120 s, master defaults,
+arena hp = the hits of 10 or more):
+
+| Scout, ours | hp / fight | hits / fight |
+|---|---|---|
+| `main_collision` (floor and walls) | 88.8 | 5.9 |
+| of which the Forklift Arm, 8 m/s or faster | 63.5 | 4.2 |
+| `hellraiser1` / `hellraiser2` | 21.3 / 0.4 | 0.44 / 0.02 |
+| `outerfloor_collision` | 15.2 | 0.8 |
+| `startblock1` / `startblock4` | 10.1 / 7.7 | 0.4 / 0.5 |
+| **total** | **143.5 +- 20.1** | 8.0 |
+
+(by time, hp per fight: 12 in 0-5 s, 33 in 5-10 s, then 17-20 per 5 s up to
+30 s and 2-7 after: the fight's first 30 s). By state:
+
+| | Scout ours | Scout live (10 fights) | ALARM ours | ALARM live |
+|---|---|---|---|---|
+| on its back for 1.5 s or more in a fight | **24 of 48** (26 % of the fight) | **0 of 10** (1 %) | 28 of 48 | 5 of 10 |
+| hp / s on its back (hp / fight) | **7.9** (103) | -- (never) | 0.8 (18.5) | 1.7 (25.1) |
+| hp / s upright (hp / fight) | 1.1 (40) | 0.6 (19) | 1.8 (50) | 3.0 (56) |
+
+Live the Scout is never on its back on the floor during the fight (Fisher p =
+0.003): its three "on its back" spells in 10 fights (5, 6 and 8) are the pit
+it fell into at 26, 63 and 30 s, which is where the fight ends (the brains go
+idle that second); ALARM lies on its back in five (the first spell at 3.2, 3.8,
+6.2, 6.2 and 20.5 s) and ours as often (p = 0.73). So the Scout's surplus is
+not a price: it is the 103 hp it takes lying on its back, its Forklift Arm
+firing into the floor at 13-17 m/s every second (`Invert`, `Flip`; the hits
+come at the gate's 1 s and 2 s cadence, as live's repeated hits do), and the
+rest 40 against live's 19. ALARM on its back takes 18 hp a fight in ours and 25
+in live (alarmfight 000: on its back from 20 s to the end, its floor hits 0.4-1.5
+every second, a hazard's 100-170 now and then), so a robot pumping on its back is
+the original's too; the live Scout has just never been there. The inversions begin at 4.4-11 s (24 runs): ALARM's hammer within 2 s
+in 11, a hellraiser in 4, only the floor in the rest. They are not single
+hits (of the ALARM hits of 30 hp or more on an upright Scout, 10 of 203 turn it
+over within 0.7 s in ours, none of 13 live) nor the arena's friction (above),
+nor the distance query's tie rules or the meshes' order (`RA2_GJK=0`,
+`RA2_H17_MOPP=0`, `RA2_ARENA_MERGED=1`, `RA2_H17_DEACTIVATION=0`: the Scout is
+on its back in 19 of 48, 11, 10 and 13 of 24, none near live's 0 of 10).
+
+**3. The distance query raises the arena's hits.** 12ak's query changes how
+every convex robot part meets the arena's mesh, not only the rod and the fork.
+Same 48 warmups, `RA2_GJK=0` against the default, arena hp:
+
+| fight | GJK off | **default (GJK)** | live (n, mean +- se) |
+|---|---|---|---|
+| Octagon Scout / ALARM | 88.9 +- 14.3 / 61.0 +- 12.6 | **143.5 +- 20.1 / 69.6 +- 14.3** | 22 +- 6 / 146 +- 51 (13) |
+| box Scout / ALARM | 54.7 +- 7.4 / 38.7 +- 11.4 | **56.8 +- 9.0 / 65.4 +- 16.8** | 99 +- 47 / 15 +- 12 (8) |
+| Compressor Sentinel / Wide Load | 121.4 +- 39.1 / 91.9 +- 35.4 | **127.5 +- 48.6 / 112.6 +- 38.5** | 390 +- 231 / 136 +- 57 (14) |
+
+(Razor / FlapJack: 40.0 +- 13.9 / 3.7 +- 2.0, live 45 +- 39 / 30 +- 25 of 6.)
+The query raises every fight's arena hp by 2-55 hp (the Octagon Scout's
+difference is 2.2 standard errors; the on-back pumping goes from 48 to 103
+hp a fight, the Scout's inversions from 19 to 24 of 48) and leaves the
+counted robot-robot hits where they were (R: 11.6 / 2.2 against 11.5 / 2.9).
+The query is verified against 43 689 live queries (12ak), 97.7 % to the
+vertex; its misses are the degenerate flat simplexes (box-shaped 8-vertex
+hulls: 93.5 % reproduced, 16-vertex 95.4 %), which is where a part rests flat
+on the floor. Emulating the x87's 24-bit precision (every product and sum
+rounded to `f32`, `w`, `|v|^2`) moves the replay from 42 677 to 42 695 of
+43 689: the misses are not rounding, so nothing is changed.
+
+**4. The Compressor's tail is live's.** The live Compressor has fights with the
+same repeated hits on a robot that sits still: `arenahits-sentinel-wideload-
+compressor__live__002` has the Sentinel at 3324 hp (44 hits of 10 or more),
+`fight-...__007` 653 and 432, `__002` 290 and 575, `__006` thirteen hits of 19 hp at `rec0` 27-31 m/s
+every 2.0 s from 10 to 33 s at one spot (the Sentinel on its back from 14 s, its
+weapon against the floor). With them the live means are 390 +- 231 and 136 +- 57
+(medians 108 and 34), and ours 127.5 +- 48.6 and 112.6 +- 38.5: within an error
+of each other, which retires the "4 of 48 over 600 hp" as a bug and the
+Compressor's row as a gap. The intervals between repeated hits at one spot have
+the same two peaks (1.0 s and 2.0 s) in both (live 40 and 20, ours 278 and 78).
+`compressor_compare.py flips` over all live Compressor poses: flips by 40 s p =
+0.29 / 0.72, permanent flips p = 0.25; the one that differs is the share of
+fights decided by 100 s (live 7 of 7, ours 19 of 48, p = 0.003: ours runs on,
+12ag).
+
+**5. The box's ALARM.** Ours 65 +- 17 against live 15 +- 12 (8 fights, ALARM
+hit in two: 25 at the saw and 94 in the east corner); ours' share is the
+spikes (39: 24 of 26 hits with ALARM on its back at the east spike box), the
+floor (17) and the saw (10). ALARM is on its back in 32 of 48 against 5 of
+13 live (p = 0.11), from 3.3-40 s (live 12.9-37.7): it goes over earlier and
+more often. Not resolved.
+
+**Verified / not.** In the binary and live: the gate and prices (as before),
+the Octagon's 12 registrations, the floor's friction, the live fights' state
+(the Scout on its back 0 of 10, the Compressor's repeated hits, ALARM's pumping
+rate). Not: *why* the Scout turns over in ours (the first clash: the hammer,
+the fork and the hellraisers all appear in the 24 cases), the Octagon's
+live fights end earlier (34 s active against 51 s: ALARM goes over at 3-6 s,
+is counted out 20 s later), and what the query changes on the floor (3).
+No default changes; every number of this section is a measurement, the
+changes are the diagnostics above.
+
+**Ensembles** (48 warmups each, 120 s, scratch install, master defaults =
+before = after; counted >= 10 on the other robot, arena hp, mean +- se):
+
+| fight | counted live | counted ours | arena hp live | arena hp ours |
+|---|---|---|---|---|
+| box ALARM / Scout | 41.1 / 6.0 | 36.3 +- 3.8 / 5.8 +- 0.6 | Scout / ALARM 99 +- 47 / 15 +- 12 | 56.8 +- 9.0 / 65.4 +- 16.8 |
+| Razor / FlapJack | 3.0 / 0.1 | 1.0 / 4.0 | Razor / FlapJack 45 +- 39 / 30 +- 25 | 40.0 +- 13.9 / 3.7 +- 2.0 |
+| Compressor Wide Load / Sentinel | 73.6 / 5.3 | 77.5 +- 6.9 / 3.9 +- 0.5 | Sentinel / Wide Load 390 +- 231 / 136 +- 57 | 127.5 +- 48.6 / 112.6 +- 38.5 |
+| Octagon ALARM / Scout | 13.6 / 3.2 | 11.5 +- 1.9 / 2.9 +- 0.5 | Scout / ALARM 22 +- 6 / 146 +- 51 | 143.5 +- 20.1 / 69.6 +- 14.3 |
+
+**Open, in order:** (1) why the Scout goes over in the Octagon (24 of 48 against
+0 of 10) while the box's Scout does as live does (6 of 48, 2 of 13): a replay
+of the first clash from the live `B` rows of `alarmfight-scout-alarm-octagon__
+live__000..001` (the Scout and ALARM at their live poses and velocities, the
+wheels' recorded thrusts) would say whether the hammer's blow or the
+hellraiser tips it; (2) what 12ak's query does to resting contacts with the
+floor (3): a live look at a part lying flat on the floor for a second; (3)
+ALARM going over earlier and more in the box (5) and in the Octagon, which
+also shortens the live fights.
+**Tools.** `tools/oracle/inverted_hits.py`, `fidtrace`'s `piece` field,
+`RA2_ARENA_FRICTION`.
