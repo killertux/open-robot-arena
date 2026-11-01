@@ -51,6 +51,11 @@ def main():
         print("aitrace install:", cd.run([cd.PY, os.path.join(cd.HERE, "ra2_python.py"),
                                           os.path.join(cd.HERE, "ai_trace_install.py")]).stdout)
     cd.start_match(os.environ.get("ARENA_ROW_Y", "188"))
+    # WEIGHTS=1: what the scripts see as each robot's weight (docs/29 12aj).
+    weights = None
+    if os.environ.get("WEIGHTS") == "1":
+        weights = cd.py("import plus; out.write(repr([(p, plus.getWeight(p)) for p in plus.getPlayers()]))")
+        print("getWeight:", weights)
     sampler = subprocess.Popen(
         [cd.PY, os.path.join(cd.HERE, "ra2_python.py"), "--sample", EXPR, "--every", "3",
          "--seconds", str(secs * 1.2 + 3)], stdout=subprocess.PIPE, text=True)
@@ -70,7 +75,8 @@ def main():
     with open(base + ".jsonl", "w") as f:
         for r in rows:
             f.write(json.dumps(r, separators=(",", ":")) + "\n")
-    json.dump({"name": name, "sim_seconds": sim[0], "rows": len(rows)}, open(base + ".json", "w"), indent=1)
+    json.dump({"name": name, "sim_seconds": sim[0], "rows": len(rows), "getWeight": weights},
+              open(base + ".json", "w"), indent=1)
     with open(base + ".tsv", "w") as f:
         f.write("time_elapsed\t[(player, location, isUpsideDown, lastTactic, cmd_throttle, cmd_turn)]\n")
         f.write(text)

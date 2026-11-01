@@ -168,6 +168,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(p) => Some(std::fs::File::create(p)?),
                 Err(_) => None,
             };
+            // `FIDTRACE_BODY=<path>`: every step (the whole match, the clock
+            // included) each robot's every part body: `step t robot part com(3)
+            // rot(x y z w) v(3) w(3)`, for the step-resolved landing comparison
+            // with the live `B` rows of `ra2_fightcontacts.js` (docs/29 12aj).
+            let mut bodies = match std::env::var("FIDTRACE_BODY") {
+                Ok(p) => Some(std::fs::File::create(p)?),
+                Err(_) => None,
+            };
             let mut trace = std::fs::File::create(&a[5])?;
             let mut dmg = std::fs::File::create(&a[6])?;
             writeln!(trace, "time_elapsed\t[(player, location xyz, heading, speed, hitpoints(p,0), health fraction)]")?;
@@ -215,6 +223,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             i.point.y,
                             i.point.z
                         )?;
+                    }
+                }
+                if let Some(f) = bodies.as_mut() {
+                    let t = m.clock();
+                    for (ri, r) in m.duel.robots.iter().enumerate() {
+                        for (pi, part) in r.parts.iter().enumerate() {
+                            if let (Some(st), Some(c)) = (
+                                m.duel.physics.state(part.body),
+                                m.duel.physics.center_of_mass(part.body),
+                            ) {
+                                writeln!(
+                                    f,
+                                    "{step} {t:.4} {ri} {pi} {:.5} {:.5} {:.5} {:.5} {:.5} {:.5} {:.5} {:.4} {:.4} {:.4} {:.4} {:.4} {:.4}",
+                                    c.x, c.y, c.z, st.rotation.x, st.rotation.y, st.rotation.z,
+                                    st.rotation.w, st.linear_velocity.x, st.linear_velocity.y,
+                                    st.linear_velocity.z, st.angular_velocity.x,
+                                    st.angular_velocity.y, st.angular_velocity.z
+                                )?;
+                            }
+                        }
                     }
                 }
                 if m.state() == MatchState::Fight {

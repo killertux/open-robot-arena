@@ -11,6 +11,7 @@
 //       +0x20 point, +0x54 distance, +0x58/+0x5c mu, +0x60/+0x64 e)
 //   B  [B,seq,body,mass,com(3),vel(3),angvel(3),rot(9)]  every movable body seen in any
 //      contact so far and every MagicAction's chassis, once per R
+//   V  [V,seq,body,vel(3),angvel(3)]  every known body as the resolver leaves it (0x53ed80 exit)
 //   A  [A,seq,h,rollbacks]   0x52a990 actions entry: one per accepted step piece
 //                            (rollbacks = "Backstep/Roll Back" counter DAT_00719724)
 //   G  [G,seq,chassis,[[thrust,touching],...]]  0x4856f0 MagicAction apply entry
@@ -56,6 +57,13 @@ Interceptor.attach(ptr('0x53ed80'), { onEnter() {
       push(['B', seq, k, f(p.add(0x190)), vec(p.add(0x30)), vec(p.add(0x54)), vec(p.add(0x64)), rot]);
     }
   } catch (err) { push(['E', ++seq, String(err)]); }
+},
+// V  [V,seq,body,vel(3),angvel(3)]  every known body as the resolver leaves it
+//    (docs/29 section 12aj: the post-resolver velocities for a step-by-step replay)
+onLeave() {
+  try {
+    for (const [k, p] of known) push(['V', seq, k, vec(p.add(0x54)), vec(p.add(0x64))]);
+  } catch (err) { push(['E', seq, String(err)]); }
 } });
 Interceptor.attach(ptr('0x52a990'), { onEnter() {
   push(['A', ++seq, f(this.context.esp.add(4)), ptr('0x719724').readU32()]); } });

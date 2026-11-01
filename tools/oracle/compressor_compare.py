@@ -94,13 +94,19 @@ def read_live(path):
         }
         if len(d) == 2:
             rows.append((float(t), d))
-    last_active = None
+    last_active, last_t, idle = None, 0.0, False
     for line in open(path).readlines()[1:]:
         t, rest = line.split("\t")
         tac = [m.group(6) for m in PAT_LIVE.finditer(rest)]
-        if len(tac) == 2 and (tac[0] != "-" or tac[1] != "-"):
-            last_active = float(t)
-    return rows, last_active
+        if len(tac) == 2:
+            last_t = float(t)
+            idle = tac[0] == "-" and tac[1] == "-"
+            if not idle:
+                last_active = float(t)
+    # A capture that stops while a brain still has a tactic has not been
+    # decided yet: its `last_active` is where the sampling ended (section 12aj:
+    # `boxstart-...__live__000/001` stop at 56 s). `decided` is None for those.
+    return rows, (last_active if idle else None), last_t
 
 
 def read_ours(d):
@@ -174,7 +180,7 @@ def fisher(a, n1, b, n2):
     return p
 
 
-def summary(name, runs):
+def summary(name, runs, runs_ext=None):
     n = len(runs)
     rows = [r for r, _ in runs]
     ends = [e for _, e in runs]
@@ -187,8 +193,14 @@ def summary(name, runs):
     for p, nm in ((0, "S"), (1, "WL")):
         f = [e for r in rows for e in falls(r, p)]
         c["%s falls off a ramp side (per run %.2f), on its back after" % (nm, len(f) / n)] = (len(f), sum(f))
+    cens = [t for _, _, t in runs_ext] if runs_ext else None
     for T in (40, 60, 100):
         c["decided by %d s" % T] = sum(e is not None and e <= T for e in ends)
+        if cens is not None:
+            # live captures that stopped before T without a decision say nothing about T
+            c["  ... of runs that reach %d s or are decided" % T] = sum(
+                (e is not None and e <= T) or t >= T for e, t in zip(ends, cens)
+            )
     c["WL stalled on its plateau > 5 s"] = sum(stall(r) > 5 for r in rows)
     print("%s (n=%d)" % (name, n))
     for k, v in c.items():
@@ -197,16 +209,22 @@ def summary(name, runs):
 
 
 def flips(ours_dir, lives):
-    lv = []
+    lv, ext = [], []
     for p in lives:
-        rows, last = read_live(p)
+        rows, last, t_end = read_live(p)
         lv.append((rows, last))
+        ext.append((rows, last, t_end))
     ov = read_ours(ours_dir)
     # ours: `end` None means the fight went the distance
-    a = summary("live", lv)
+    a = summary("live", lv, ext)
     b = summary("ours", ov)
-    for k in ("S flips by 40 s", "WL flips by 40 s", "permanent flip by 25 s (either)", "decided by 60 s",
-              "decided by 100 s", "WL stalled on its plateau > 5 s"):
+    for T in (40, 60, 100):
+        k = "decided by %d s" % T
+        n = a["  ... of runs that reach %d s or are decided" % T]
+        print("  Fisher p %-40s %.3f  (live %d of %d usable, ours %d of %d)" % (
+            k + ", live censored out", fisher(a[k], n, b[k], len(ov)), a[k], n, b[k], len(ov)))
+    for k in ("S flips by 40 s", "WL flips by 40 s", "permanent flip by 25 s (either)",
+              "WL stalled on its plateau > 5 s"):
         print("  Fisher p %-40s %.3f" % (k, fisher(a[k], len(lv), b[k], len(ov))))
 
 
