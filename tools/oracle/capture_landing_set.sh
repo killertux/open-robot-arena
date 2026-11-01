@@ -7,6 +7,9 @@
 #   OUT=<abs dir> SCRATCH=<abs dir> RA2_CAPTURE_DISPLAY=:7 RA2_FRIDA_PORT=27147 \
 #     flock ~/.cache/ra2-live.lock tools/oracle/capture_landing_set.sh [runs]
 #
+# AGENT=<js> NAME=<name> SIM_SECONDS=<s> override the agent, capture name and length
+# (frida/ra2_fightgjk.js adds the distance query's J rows and the event filter's F rows).
+#
 # Copies the prefix's Teams/, AI/, Robot Designs/ and ra2.cfg to SCRATCH first
 # and puts them back (sha256 compared) when it ends; starts and stops the live
 # session itself; local/game is only read. Writes
@@ -40,8 +43,8 @@ cp "$ROOT/local/game/AI/Team8/Bot2.bot" "$GAME/AI/Team0/Bot1.bot"
 "$PY" "$HERE/ra2_drive.py" -f "$HERE/routes/exhibition_box_scout_alarm.steps" >/dev/null
 for run in $(seq 1 "$RUNS"); do
   echo "== run $run"
-  AGENT="$HERE/frida/ra2_fightcontacts.js" WEIGHTS=1 NAME=sentinel-wideload-compressor OUT="$OUT" \
-    ARENA_ROW_Y=206 SIM_SECONDS=14 "$PY" "$HERE/capture_boxstart.py"
+  AGENT="${AGENT:-$HERE/frida/ra2_fightcontacts.js}" WEIGHTS=1 NAME=${NAME:-sentinel-wideload-compressor} OUT="$OUT" \
+    ARENA_ROW_Y=206 SIM_SECONDS=${SIM_SECONDS:-14} "$PY" "$HERE/capture_boxstart.py"
   "$PY" -c "import sys; sys.path.insert(0, '$HERE'); import capture_drive as cd; cd.py('import plus; plus.eliminatePlayer(1)')" >/dev/null
   sleep 6
   "$PY" "$HERE/ra2_drive.py" click 717 575 hide wait 3 >/dev/null

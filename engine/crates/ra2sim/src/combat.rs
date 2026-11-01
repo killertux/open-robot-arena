@@ -444,9 +444,19 @@ pub struct EventGate {
     /// through.
     last: HashMap<(BodyHandle, usize), Vec<Option<f32>>>,
     /// `RA2_PAIR_GATE=1`: at most one event per collidable pair and call (a
-    /// step) instead of one per resolver point (docs/29 §12ag). Off by
-    /// default: read off live hit multiplicities, not confirmed in the binary.
+    /// step) instead of one per resolver point (docs/29 §12ag, §12ak). The
+    /// filter itself is asked for every point (`0x549c30`), but live none of
+    /// 1727 firings shared its collidable pair and step with another (ours
+    /// 2.5-8 %). Off by default: with the distance query of §12ak it makes the
+    /// Compressor's robots end up at the end walls (arena hp 337 / 326 against
+    /// 178 / 146 live), through the wheels' callbacks it feeds (`RA2_WHEEL_GATE=1`
+    /// gives them a gate without the pair rule: 128 / 149).
     pub pair_gate: bool,
+    /// `RA2_PAIR_SINGLE=1` (experiment, off): a collidable pair with two or
+    /// more points in the step lets none through. Live (docs/29 section 12ak)
+    /// none of 1727 firings was on such a pair, 15 300 pairs were, but the
+    /// mechanism is not known.
+    pub pair_single: bool,
 }
 
 impl EventGate {
@@ -455,6 +465,7 @@ impl EventGate {
         EventGate {
             last: HashMap::new(),
             pair_gate,
+            pair_single: false,
         }
     }
 }
@@ -464,6 +475,7 @@ impl Default for EventGate {
         EventGate {
             last: HashMap::new(),
             pair_gate: std::env::var("RA2_PAIR_GATE").is_ok_and(|v| v != "0" && !v.is_empty()),
+            pair_single: std::env::var("RA2_PAIR_SINGLE").is_ok_and(|v| v != "0" && !v.is_empty()),
         }
     }
 }
@@ -728,6 +740,26 @@ impl EventGate {
         // entries fire a step apart (docs/29 §12ag).
         let mut passed: std::collections::HashSet<[(BodyHandle, usize); 2]> =
             std::collections::HashSet::new();
+        let pair_of = |e: &ContactEvent| {
+            let side = |body: BodyHandle, state: &BodyState| -> (BodyHandle, usize) {
+                if let Some(ab) = arena.get(&body) {
+                    return (body, ab.part_at(e.point));
+                }
+                let c = owner
+                    .get(&body)
+                    .and_then(|&(r, p)| registered_component(&robots[r], p, state, e.point));
+                (body, c.unwrap_or(usize::MAX))
+            };
+            let mut key = [side(e.a, &e.state_a), side(e.b, &e.state_b)];
+            key.sort_unstable();
+            key
+        };
+        let mut points: HashMap<[(BodyHandle, usize); 2], usize> = HashMap::new();
+        if self.pair_single {
+            for e in &events {
+                *points.entry(pair_of(e)).or_default() += 1;
+            }
+        }
         for e in events {
             let side = |body: BodyHandle, state: &BodyState| -> (BodyHandle, usize) {
                 if let Some(ab) = arena.get(&body) {
@@ -741,6 +773,9 @@ impl EventGate {
             let mut key = [side(e.a, &e.state_a), side(e.b, &e.state_b)];
             key.sort_unstable();
             if self.pair_gate && passed.contains(&key) {
+                continue;
+            }
+            if self.pair_single && points.get(&key).is_some_and(|&n| n > 1) {
                 continue;
             }
             let mut through = false;

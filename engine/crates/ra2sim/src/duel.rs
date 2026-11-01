@@ -898,6 +898,8 @@ pub struct Duel {
     pub combat: CombatConfig,
     /// The collision-event filter between the physics and the pricing.
     pub event_gate: combat::EventGate,
+    /// Experiment (`RA2_WHEEL_GATE=1`): the wheels' callbacks hear a gate of their own without the pair rule.
+    pub wheel_gate: combat::EventGate,
     /// The arena's bodies: what prices a robot's contact with them, and their
     /// registrations with the event filter (docs/29 §12o).
     pub arena_bodies: combat::ArenaBodies,
@@ -1401,6 +1403,7 @@ impl Duel {
             tuning: DriveTuning::default(),
             combat: CombatConfig::default(),
             event_gate: Default::default(),
+            wheel_gate: combat::EventGate::with_pair_gate(false),
             arena_bodies,
             sub_materials_seen: 0,
             mass_scale,
@@ -2881,10 +2884,22 @@ impl Duel {
                 props.insert(*body, m);
             }
         }
+        let wheel_events = if std::env::var("RA2_WHEEL_GATE").is_ok() {
+            Some(self.wheel_gate.admit_with(
+                &self.robots,
+                &self.arena_bodies,
+                events.clone(),
+                self.time,
+            ))
+        } else {
+            None
+        };
         let events =
             self.event_gate
                 .admit_with(&self.robots, &self.arena_bodies, events, self.time);
-        for (r, part, normal) in combat::wheel_contacts(&self.robots, &events) {
+        for (r, part, normal) in
+            combat::wheel_contacts(&self.robots, wheel_events.as_deref().unwrap_or(&events))
+        {
             if let Some(magic) = self.robots[r].magic.as_mut() {
                 for w in magic.wheels.iter_mut().filter(|w| w.part == part) {
                     crate::drive::MagicAction::contact(w, normal);
@@ -7012,7 +7027,17 @@ mod tests {
         let f = &duel.robots[0].flames[0].state;
         assert!(f.firing, "the control board switched it on");
         assert!(!f.emitting, "but there is no air to light it");
-        assert!(duel.damage_events.is_empty());
+        // (The robots' parts touch from the spawn on, so the contact hits of the
+        // first quarter second are theirs; what must be missing is a jet's hit,
+        // two hitpoints with no attacker.)
+        assert!(
+            !duel
+                .damage_events
+                .iter()
+                .any(|e| e.attacker == -1 && e.amount == FLAME_DAMAGE),
+            "{:?}",
+            duel.damage_events
+        );
     }
 
     /// A flame particle that reaches another robot is `FUN_004148f0(robot,
@@ -7488,7 +7513,7 @@ mod tests {
         assert_eq!(through(&mut gate, 0.0), 2);
         assert_eq!(through(&mut gate, 0.5), 0);
         assert_eq!(through(&mut gate, 1.0), 2);
-        // With the pair gate (`RA2_PAIR_GATE=1`, docs/29 section 12ag) the pair
+        // With the pair gate (`RA2_PAIR_GATE=1`, docs/29 sections 12ag and 12ak) the pair
         // is asked once a step: the floor's entry takes the first step, the
         // chassis' own the next.
         let mut gate = combat::EventGate::with_pair_gate(true);

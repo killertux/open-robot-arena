@@ -5863,3 +5863,240 @@ N-12 wheel at step 10-13); (3) the build (residual spin, sleep schedule), the
 only way to a placement turn without a table; (4) the fights' later flips
 (the Sentinel is flipped less often after the first 25 s than live, ours'
 pokes slide it further).
+
+### 12ak. The distance query is Johnson's with an absolute tolerance, the event filter is asked for every point, and the practice arena prices its walls (fx/contacts)
+
+Section 12aj left the Wide Load's N-12 wheel with a contact point mid-edge in
+live where ours reported a ring vertex, the rod's and the fork's points fewer
+than live's (12ae), the pair rule (`RA2_PAIR_GATE`) unconfirmed, and the
+practice arena silent at its walls. All three are answered below; the distance
+query and the practice arena's impacts change what ours does by default, the pair
+gate (first on, then back off, see 2) does not.
+
+**New live captures** (one session on `:7`, `RA2_FRIDA_PORT=27147`; the prefix's
+`Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` copied before and compared by
+sha256 after: identical; rows in `local/oracle/manifest.tsv`, copies in
+`~/ra2-oracle-backup` with `manifest-additions-2026-11-01-contacts.tsv`):
+`gjkquery-sentinel-wideload-compressor__live__000..001` (14 s from the load)
+and `eventfilter-sentinel-wideload-compressor__live__000..002` (30 s fights,
+trimmed to the filter's rows), from the new agent `frida/ra2_fightgjk.js`
+(`ra2_fightcontacts.js` plus **J** rows: every call of the distance query
+`0x55c390` with its hull collidable, vertex count, climb start before / after,
+final simplex as hull and triangle vertex indices, distance, point and the
+triangle; **S** rows: each hull's vertices and its adjacency lists (`+0x1d0`);
+**F** rows: every call of the event filter `0x52d4f0` with the contact record,
+both collidables and the return value). `capture_landing_set.sh` takes `AGENT=`,
+`NAME=`, `SIM_SECONDS=` now.
+
+**1. The convex x triangle distance query (recovered, verified live).**
+`FUN_00545b50` builds each near triangle's three world vertices and calls
+`FUN_0055c390(A = {collidable, climb vertex}, B = {triangle}, out, state)`;
+the state's simplex size starts at 0 for every triangle. It is Johnson's
+algorithm on `A - B`, not an exact closest-point query:
+
+* *Start.* One support pair along `c_T - p_A` (the triangle's centroid, `0x55bdc0`,
+  minus the hull collidable's position, `0x4b0c50` of the transform at `+0x138`)
+  for A and the opposite for B.
+* *Each round* `FUN_0055f100` reduces the simplex (up to four points); then
+  `|v|^2` of the reduced simplex's point is compared with the last round's: if
+  it did not fall, or is below `1e-10` (an overlap), the query ends, else A is
+  supported along `-v` and B along `v` and the point appended (nothing checks
+  for a repeated vertex). **The distance reported is the last round's before the
+  final one** (`sqrt` of the previous `|v|^2`); the normal and the points are the
+  final simplex's (`sum(l a)`, `sum(l b)`), the contact point the midpoint.
+* *The reduction* tries the subsets of the simplex in the order vertices 0..3,
+  edges 01 02 03 12 13 23, faces 012 013 023 123, and takes the first whose weights
+  are all positive (the cofactors `delta_X(i)`, the Gram determinant with column `i`
+  replaced by ones: for an edge `w_j . (w_j - w_i)`) and which no other point `j`
+  improves by more than **`1e-5` in absolute terms**, `delta_{X+j}(j) <= 1e-5`
+  (the same literal in every test of the function). With none, the candidate of
+  the smallest norm; for four points the origin inside the tetrahedron returns
+  0 (the overlap, `-1` from the query). The kept points are left in a fixed
+  order by the branches' swaps: ascending except `{1,2}` of three or four points
+  `(2,1)`, `{1,3}` `(3,1)`, `{0,2,3}` `(0,3,2)` and `{1,2,3}` `(3,1,2)`.
+* *The supports.* A triangle's (`0x55b200`) starts at vertex 2 and only a
+  strictly better 1, then 0, replaces it, so **a tie goes to the highest index**.
+  A hull's (`0x55b000`) climbs from the vertex the last query left (the climb
+  vertex in the support object, kept across the triangles of one detection) along
+  the shape's adjacency lists (`+0x1d0`, 16-byte entries, `ushort` lists at `+4`
+  / `+8`), to a neighbour strictly further along the direction; a shape without
+  adjacency (`0x55b130`) scans from the last vertex down with the same strict
+  rule. All 49 hulls of the captures have lists, which carry the triangulation of
+  the faces (the N-12 wheel's ring vertices list their two ring neighbours, the
+  two across the side face and the end face's centre vertex).
+
+`examples/gjkreplay.rs` (cases from `tools/oracle/gjk_cases.py`) replays every
+live query of `gjkquery-...__live__000` from the hull's vertices, its collidable
+transform and the triangle: of **43 689** queries, **42 677 (97.7 %)** end with the
+same hull vertices and the same hull-side point to 2 mm (the 26-vertex N-12 wheel
+3787 of 3816; box-shaped 8-vertex hulls 11 766 of 12 587), and 43 661 with the
+same simplex size. With the shapes' true adjacency 42 677; without (the highest
+index wins ties, `closest_havok`'s mode) 42 578; with a complete adjacency in
+index order 42 567. The misses are degenerate simplexes (four coplanar points,
+an edge parallel to the triangle) where the choice between two equal-norm
+subsets rests on a `1e-5` test of cofactors of size 10^2..10^3 evaluated in
+`float` on the x87 stack: ours is `f64`, and does not reproduce those. The
+goldens: `narrow::havok_gjk_tests` (the N-12 wheel at seq 12371: simplex hull
+vertices (15, 3, 15) against the triangle's (0, 1, 2), the point on the axial
+edge at z = 0.0625 between the rings at +-0.155, distance 0.1785).
+
+*This is the mid-edge point of 12aj, and what 12aj read as "the narrow phase
+reports an edge point" is the algorithm: with an edge parallel to the floor
+within the tolerance (`1e-5`, i.e. the wheel flat to 0.02 degrees; the wheels are
+at the landing) the face of `A - B` spanned by both ring vertices and two
+triangle vertices holds the origin's projection, and its weights place the point
+anywhere on the edge; once the wheel tilts by a few thousandths the nearer
+ring vertex wins alone, which is what ours had always done.* Live the N-12
+wheel's points at steps 8-10 are the edge points and from step 11 the vertices
+alternate with its tilt (15, 3, 3, 3 ... 4, 4).
+
+**At live poses** (`orderprobe` with `FRAME` lines, `pairstats.py`; box
+`fightcontacts-scout-alarm-box__live__000`, and the 12ae set
+`twobody-scout-alarm-box__live__000`): points ours / live (matched within 3 cm),
+before -> after:
+
+| pair | `fightcontacts-...box__000` | `twobody-...box__000` |
+|---|---|---|
+| rod x fork | 138 -> 218 / 109 (91 -> 107) | **255 -> 445 / 450** (263 -> 435) |
+| ALARM wheel x fork | | 169 -> 236 / 242 (210 -> 242) |
+| ALARM chassis x fork | | 4241 -> 4304 / 4475 (4421 -> 4433) |
+| ALARM wheel x Scout chassis | 855 -> 893 / 892 (842 -> 891) | 1038 -> 1183 / 1195 (1054 -> 1183) |
+| ALARM chassis x Scout chassis | 1877 -> 1892 / 1892 | 1714 -> 1740 / 1741 |
+| ALARM rod x Scout chassis | 1519 -> 1566 / 1583 (1489 -> 1544) | 64 -> 65 / 65 |
+| wheels x floor, chassis x floor | unchanged (13 351 / 10 212 / 7219 live) | unchanged |
+
+The rod against the fork, 12ae's open item (255 points where live has 450), is
+this query: the fork arm is a mesh and the rod a convex piece, and the cap
+vertices and edges the exact query skipped are what the original reports. The
+octagon (`fightcontacts-scout-alarm-octagon__live__000`) matches as before or
+better (wheel x Scout chassis 885 -> 905 / 906, chassis x chassis 673 -> 677 /
+677); its wheel x arena points go 10 749 -> 11 255 against 9868, all of the
+surplus unmatched points on the hazards the probe does not place.
+
+*Change:* `narrow::closest_havok` (with `closest_havok_with` for a given
+adjacency and climb vertex) and `convex_point_havok`, used for convex x mesh
+pairs in `Havok17::convex_mesh` by default (`RA2_GJK=0` is the exact query of
+before; convex x convex pairs, `0x55b2c0`, are not ported). Not carried over:
+the true adjacency lists (ours has none for its hulls; the highest index wins
+ties) and the climb start. The point's normal is `(on_a - on_b)` normalised,
+the distance the previous round's.
+
+**2. The pair rule (verified live as an invariant, the mechanism is not).**
+`0x549c30` (the events stage at the head of `stepTo`) loops over every 0x74-byte
+record of the detector's contact list (`det + 0x144..0x148`), builds the event
+(vtable `0x6ac484`, type `DAT_006abf60`, the record at `+0xc`, the collidables at
+`+0x10` / `+0x14`) and calls the listener chain through `[vtable + 4]`: **the
+filter is asked once for every point, not once for every pair** (no test or set
+in the function). Live (`eventfilter-...__live__000..002`, 64 542 filter calls):
+in 98 % of the pair-steps the number of calls is the number of the pair's points
+in the next resolver entry; **1727 firings (a return of 0, an entry reset), none
+shares its collidable pair and step with another** (ours priced 2.5-8 % of its
+hits twice). The firings are rare on multi-point pairs: of the 14 411 pair-steps
+not between two robots' bodies (a robot part against the floor and the arena)
+with two or more points, none fired (their
+wheel entries fire once a second, in pairs a few steps apart, on steps with one
+point), and of the 889 robot-against-robot pair-steps with two or more points
+none fired against 256 of 6867 with one; `RA2_PAIR_SINGLE=1` (a pair with two or
+more points lets none through) drops ours' counted hits to 23.8 / 3.0 (box, live
+41.1 / 6.0) and 8.0 / 1.4 (octagon, 13.6 / 3.2), so for robot-robot pairs it is
+too much and stays an off switch. The mechanism behind "at most one event per
+collidable pair and step" was not found (the filter's loop over the entries and
+`0x52d740` have no such test: an entry fires when due and the closing speed is
+at least its threshold, 0 live). Which point of a multi-point pair is the one
+priced cannot be read off live: none is (above). Ours lets through the first
+point of the contact list that finds a due entry, then blocks the pair for the
+step; its keys are the collidables' (the arena side's piece by `part_at`, the
+robot side's registered component), which is what the original's entries are.
+
+**The gate's side effect (found, off by default).** On the Compressor the
+gate together with the distance query gave arena hp 337 / 326 (live 178 / 146;
+GJK alone 127 / 113, the gate alone 111 / 59). The hp is the robots standing at
+the end walls (z about 20) under the smash arms for a minute (run 7: from 52 s to
+the end, 97 arena hits, hits of speed 20 m/s on a robot at rest; the share of
+samples past `|z| = 17` rises from 1.5 / 1.2 % to 5.9 / 2.3 %). The cause is
+not the pricing but **the wheels' drive**: `Duel::resolve_combat` feeds the wheels'
+collision callbacks (`MagicAction::contact`, the normal the drive uses, 12ad) from
+the events the gate lets through, so the pair rule changes which normals the
+drive hears. With the wheels given a gate without the pair rule
+(`RA2_WHEEL_GATE=1`) and the pricing gated, the Compressor reads 76.4 / 4.0
+counted, arena hp 128 / 149, 1.0 / 1.3 % past `|z| = 17`. Live the wheels hear
+their two entries' events a step apart, once a second (12ad), which the pair
+rule reproduces, so the hybrid is not a verified rule and the interaction (why
+a wheel hearing every step's first event only strands the robot) is open.
+**The pair gate is therefore off by default** (`RA2_PAIR_GATE=1` on): the live
+invariant is documented and the switch kept.
+
+**3. The practice arena's walls (recovered, verified live).** The pricing was
+there: `practiceprobe` (the Test Robot C.R.U.S.H., W held, Practice.py) prices
+the far wall at damage 49.78 on the chassis and 9.77 on a weapon component
+(`impact_volume_hdb` -784 and -1409; live `audio-practice-test__live__000`
+`steel_collision.wav` -795 and -1341, `hammer_hit.wav` -1345 and -1451, played
+from `0x45f466` per priced contact, `0x417510`). What was missing is that the
+lab never asked the duel for them: `Duel::record_impacts`, which fills
+`duel.impacts` for `MatchSounds::observe`, is switched on by the match mode and
+not by the practice arena (12aj's "arena contacts are not priced there" was a
+missing flag). `Match::new` sets it for a practice run; test
+`match::tests::a_practice_robot_driven_into_the_wall_records_priced_hits`. The
+sound rule is the match's (`impact_volume_hdb`, the victim component's damage
+sounds), so the chassis plays `steel_collision` / `aluminum_collision` /
+`plastic_collision` / `titanium_hit` by its armour and a weapon its own.
+
+**Ensembles, before and after** (`ensemble.sh`, `FIDTRACE_WARMUP` 0..47, 120 s,
+scratch install; counted `>= 10`, mean +- standard error, first robot named first;
+"before" reproduces 12aj to the digit):
+
+| fight | live | before (12aj) | **after: the defaults (`RA2_GJK` on, gate off)** | pair gate alone | both (`RA2_PAIR_GATE=1`) |
+|---|---|---|---|---|---|
+| box ALARM / Scout counted | 41.1 / 6.0 | 35.4 +- 3.5 / 5.6 +- 0.5, 15 of 48 full | **36.3 +- 3.8 / 5.8 +- 0.6**, 16 | 34.5 +- 3.4 / 6.1 +- 0.6, 13 | 31.1 +- 3.5 / 5.3 +- 0.5, 12 |
+| ... arena hp Scout / ALARM | 99 / 17 | 55 / 39 | 57 / 65 | 55 / 34 | 83 / 44 |
+| Razor / FlapJack counted | 3.0 / 0.1 | 1.0 +- 0.1 / 4.8 +- 0.4, 4 | **1.0 / 4.0 +- 0.4**, 7 | 1.0 / 4.8 +- 0.4, 7 | 1.0 +- 0.1 / 3.9 +- 0.3, 7 |
+| Compressor Wide Load / Sentinel counted | 73.6 / 5.3 | 66.2 +- 6.8 / 4.0 +- 0.5, 24 | **77.5 +- 6.9 / 3.9 +- 0.5**, 23 | 85.6 +- 7.1 / 5.1 +- 0.5, 29 | 73.7 +- 6.4 / 4.5 +- 0.7, 29 |
+| ... arena hp Sentinel / Wide Load | 178 / 146 | 121 / 92 | **127 / 113** | 111 / 59 | 337 / 326 (8 of 48 runs over 600 hp, before 1) |
+| Octagon ALARM / Scout counted | 13.6 / 3.2 | 11.6 +- 2.1 / 2.2 +- 0.3, 3 | **11.5 +- 1.9 / 2.9 +- 0.5**, 2 | 12.8 +- 1.6 / 2.4 +- 0.3, 2 | 10.9 +- 1.8 / 2.2 +- 0.3, 2 |
+| ... arena hp Scout / ALARM | 14 / 114 (two fights) | 89 / 61 | 144 / 70 | 90 / 72 | 133 / 114 |
+
+(The counted hits are the report's `R1n / R0n`: the second robot named first
+for the box, Razor and octagon fights as in 12aj's labels.) The last column
+with the wheels hearing a gate without the pair rule (`RA2_WHEEL_GATE=1`): Compressor
+76.4 +- 6.8 / 4.0 +- 0.5, arena hp 128 / 149. `PAIR_SINGLE` (with the gate and
+the distance query): box 23.8 / 3.0, Razor 0.4 / 3.3, Compressor 68.7 / 3.4,
+Octagon 8.0 / 1.4. The "after" column was re-run with the final binary and is
+the 12aj column plus the distance query only.
+
+*Priced robot-against-robot hits per second of fight* (the gate's calls, all
+amounts; live from the bell by the first non-zero thrust; 12ag's "1.4-2 times"):
+Box live 3.13, ours 4.46 -> 4.10; Compressor live 7.46, ours 5.30 -> 5.54;
+Octagon live 4.7 (one 41 s fight), ours 3.03 -> 2.50; counted (>= 10) per
+second: Box live 0.335, ours 0.484 -> 0.479; Compressor 0.919, 0.794 -> 0.889;
+Octagon 0.294, 0.274 -> 0.284. The surplus of 12ag exists in the box only (1.4
+times); the pair gate alone moves nothing (4.46 -> 4.36), so it is not what the
+surplus is.
+
+**Verified / not.**
+In the binary: the distance query's whole flow (start directions, the loop and
+its stop rule, the reported distance, the subset order and the `1e-5` tests, the
+kept order, the supports and their tie rules, the adjacency lookup), the filter's
+caller `0x549c30`. Live: 43 689 distance queries (97.7 % reproduced to the
+vertex), the pair statistics at live poses (rod x fork 255 -> 445 of 450, wheel x
+fork, wheel x chassis, chassis x chassis), 64 542 filter calls (none of 1727
+firings shares a collidable pair and step), the practice arena's impact cues
+(volumes within 11 and 64 hundredths of a dB of the damage rule).
+Not: the true adjacency lists and the climb start (ours: the highest index wins
+ties), the x87 ties of degenerate simplexes (2.3 % of the queries), convex x
+convex pairs (`0x544820` / `0x55b2c0`), the mechanism of the pair invariant and
+of "no firing on pairs with several points", why the landing's second impact is
+still missing.
+**Open, in order:** (1) the pair gate's interaction: why the wheels hearing
+the pair rule's events strand the Compressor's robots at the end walls (above;
+the gate is off until that is explained; with the wheels ungated the gate's counts
+are 76.4 / 4.0 and 128 / 149 hp); (2) the bell landing is still the placement
+turns' (12aj): the contacts are right at the live poses (the pair table above),
+the landing needs the wheels' live turn and spin; (3) the N-12 wheels'
+flatness: the original keeps an axial edge's mid point only while the wheel is
+flat to 0.02 degrees, so its contacts follow the wheel's tilt exactly; (4) the
+Octagon's Scout takes 144 hp from the arena (live 14) and the Compressor's tail
+of robots stranded at the end walls persists in a few runs (4 of 48 over 600 hp).
+**Tools.** `frida/ra2_fightgjk.js`, `tools/oracle/gjk_cases.py`,
+`examples/gjkreplay.rs`, `examples/practiceprobe.rs`,
+`capture_landing_set.sh AGENT= NAME= SIM_SECONDS=`, the switches
+`RA2_GJK=0`, `RA2_PAIR_GATE=1`, `RA2_WHEEL_GATE=1` and `RA2_PAIR_SINGLE=1` (experiments).

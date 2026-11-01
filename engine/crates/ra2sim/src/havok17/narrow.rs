@@ -742,6 +742,293 @@ pub fn closest(a: &[Vec3], b: &[Vec3]) -> Closest {
     }
 }
 
+/// The support vertex the original's convex shapes return (`FUN_0055b130`, the
+/// shape without adjacency; a triangle's `FUN_0055b200` is the same scan): from
+/// the last vertex down, a vertex replaces the best only when strictly
+/// further along `d`, so a tie goes to the highest index.
+fn support_high(points: &[DVec3], d: DVec3) -> usize {
+    let mut best = points.len() - 1;
+    let mut best_dot = points[best].dot(d);
+    for k in (0..best).rev() {
+        let x = points[k].dot(d);
+        if x > best_dot {
+            best_dot = x;
+            best = k;
+        }
+    }
+    best
+}
+
+/// The determinant of the Gram matrix of `w[idx]` with column `col` replaced
+/// by ones: the cofactor `delta_X(i)` of Johnson's distance algorithm.
+fn delta(w: &[DVec3], idx: &[usize], col: usize) -> f64 {
+    let n = idx.len();
+    let mut m = [[0.0f64; 4]; 4];
+    for (r, &i) in idx.iter().enumerate() {
+        for (c, &j) in idx.iter().enumerate() {
+            m[r][c] = if c == col { 1.0 } else { w[i].dot(w[j]) };
+        }
+    }
+    #[allow(clippy::needless_range_loop)]
+    fn det(m: &[[f64; 4]; 4], n: usize) -> f64 {
+        match n {
+            1 => m[0][0],
+            2 => m[0][0] * m[1][1] - m[0][1] * m[1][0],
+            _ => {
+                let mut d = 0.0;
+                for c in 0..n {
+                    let mut sub = [[0.0f64; 4]; 4];
+                    for r in 1..n {
+                        let mut cc = 0;
+                        for k in 0..n {
+                            if k != c {
+                                sub[r - 1][cc] = m[r][k];
+                                cc += 1;
+                            }
+                        }
+                    }
+                    let s = if c % 2 == 0 { 1.0 } else { -1.0 };
+                    d += s * m[0][c] * det(&sub, n - 1);
+                }
+                d
+            }
+        }
+    }
+    det(&m, n)
+}
+
+/// The subsets of `0..n` in the order the original tries them: its vertices,
+/// then its edges, its faces, last the whole simplex.
+fn subsets(n: usize) -> Vec<Vec<usize>> {
+    let mut out = Vec::new();
+    for size in 1..=n {
+        let mut idx: Vec<usize> = (0..size).collect();
+        loop {
+            out.push(idx.clone());
+            let mut k = size;
+            loop {
+                if k == 0 {
+                    break;
+                }
+                k -= 1;
+                if idx[k] < n - size + k {
+                    idx[k] += 1;
+                    for m in k + 1..size {
+                        idx[m] = idx[m - 1] + 1;
+                    }
+                    k = usize::MAX;
+                    break;
+                }
+            }
+            if k != usize::MAX {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Where the original leaves the kept vertices of a reduced simplex (the swaps
+/// at the ends of `FUN_0055f100`'s branches): ascending, except that a pair
+/// `{1,2}` of three or four points comes out `(2,1)`, `{1,3}` of four `(3,1)`,
+/// and the triples `{0,2,3}` and `{1,2,3}` of four `(0,3,2)` and `(3,1,2)`.
+fn kept_order(n: usize, x: &[usize]) -> Vec<usize> {
+    match (n, x) {
+        (3 | 4, [1, 2]) => vec![2, 1],
+        (4, [1, 3]) => vec![3, 1],
+        (4, [0, 2, 3]) => vec![0, 3, 2],
+        (4, [1, 2, 3]) => vec![3, 1, 2],
+        _ => x.to_vec(),
+    }
+}
+
+/// The tolerance on Johnson's tests (the literal `1e-5` in `FUN_0055f100`).
+const JOHNSON_EPS: f64 = 1e-5;
+
+/// The point of the simplex `w` closest to the origin and the subset (with its
+/// weights) that supports it, as `FUN_0055f100` picks it: the first subset in
+/// [`subsets`]' order whose weights are all positive and which no other vertex
+/// of the simplex improves by more than [`JOHNSON_EPS`] (Johnson's test); if
+/// none passes, the candidate with the smallest norm. `None` when the whole
+/// simplex holds the origin.
+fn johnson(w: &[DVec3]) -> Option<(Vec<usize>, Vec<f64>)> {
+    let n = w.len();
+    if n == 1 {
+        return Some((vec![0], vec![1.0]));
+    }
+    let mut best: Option<(f64, Vec<usize>, Vec<f64>)> = None;
+    for x in subsets(n) {
+        let d: Vec<f64> = (0..x.len()).map(|c| delta(w, &x, c)).collect();
+        if d.iter().any(|&v| v <= 0.0) {
+            continue;
+        }
+        let sum: f64 = d.iter().sum();
+        let lambda: Vec<f64> = d.iter().map(|v| v / sum).collect();
+        if x.len() == n {
+            // The origin is inside the full simplex when it has four points.
+            if n == 4 {
+                return None;
+            }
+            return Some(reorder(n, x, lambda));
+        }
+        let mut accepted = true;
+        for j in (0..n).filter(|j| !x.contains(j)) {
+            let mut xj = x.clone();
+            xj.push(j);
+            if delta(w, &xj, xj.len() - 1) > JOHNSON_EPS {
+                accepted = false;
+                break;
+            }
+        }
+        if accepted {
+            return Some(reorder(n, x, lambda));
+        }
+        let mut v = DVec3::ZERO;
+        for (&i, l) in x.iter().zip(&lambda) {
+            v += w[i] * *l;
+        }
+        let norm = v.length_squared();
+        if best.as_ref().is_none_or(|b| norm < b.0) {
+            best = Some((norm, x, lambda));
+        }
+    }
+    best.map(|(_, x, l)| reorder(n, x, l))
+}
+
+fn reorder(n: usize, x: Vec<usize>, lambda: Vec<f64>) -> (Vec<usize>, Vec<f64>) {
+    let order = kept_order(n, &x);
+    let l = order
+        .iter()
+        .map(|i| lambda[x.iter().position(|j| j == i).expect("kept")])
+        .collect();
+    (order, l)
+}
+
+/// The distance query the original runs between a convex piece `a` and a
+/// triangle (or convex) `b` (`FUN_0055c390`, docs/29 section 12ak): Johnson's
+/// algorithm on `A - B` started from one support pair in the direction from
+/// `a`'s collidable `origin` to `b`'s centroid, one more support pair per
+/// round along `-v` / `v` until `|v|^2` stops falling; it reports the distance
+/// of the round before the last and the points of the last round's simplex.
+/// The supports break ties toward the highest vertex ([`support_high`]), the
+/// tests carry an absolute tolerance, and a simplex that is a degenerate edge
+/// keeps the point its tests leave on it (not a vertex).
+pub fn closest_havok(a: &[Vec3], b: &[Vec3], origin: Vec3) -> Closest {
+    closest_havok_with(a, b, origin, None, &mut 0)
+}
+
+/// The vertex a convex shape with adjacency returns for direction `d`
+/// (`FUN_0055b000`): from the vertex `cur` (left where the last query ended),
+/// move to a neighbour strictly further along `d`, scanning the old vertex's
+/// whole list against the best so far, until no list improves. `cur` keeps the
+/// result for the next query.
+fn support_climb(points: &[DVec3], adj: &[Vec<u16>], cur: &mut usize, d: DVec3) -> usize {
+    let mut best = points[*cur].dot(d);
+    loop {
+        let mut moved = false;
+        let list = &adj[*cur];
+        let mut next = *cur;
+        for &n in list {
+            let x = points[n as usize].dot(d);
+            if x > best {
+                moved = true;
+                best = x;
+                next = n as usize;
+            }
+        }
+        *cur = next;
+        if !moved {
+            return *cur;
+        }
+    }
+}
+
+/// [`closest_havok`] for a convex piece with the original's adjacency lists
+/// `adj` (neighbours per vertex) and its climb's start vertex `cur`.
+pub fn closest_havok_with(
+    a: &[Vec3],
+    b: &[Vec3],
+    origin: Vec3,
+    adj: Option<&[Vec<u16>]>,
+    cur: &mut usize,
+) -> Closest {
+    let pa: Vec<DVec3> = a.iter().copied().map(dv).collect();
+    let pb: Vec<DVec3> = b.iter().copied().map(dv).collect();
+    let centroid = pb.iter().sum::<DVec3>() / pb.len() as f64;
+    let first = centroid - dv(origin);
+    let mut s: Vec<SimplexPoint> = Vec::new();
+    let push = |s: &mut Vec<SimplexPoint>, d: DVec3, cur: &mut usize| {
+        let ia = match adj {
+            Some(adj) => support_climb(&pa, adj, cur, d),
+            None => support_high(&pa, d),
+        };
+        let ib = support_high(&pb, -d);
+        s.push(SimplexPoint {
+            w: pa[ia] - pb[ib],
+            a: pa[ia],
+            b: pb[ib],
+            ia: ia as u16,
+            ib: ib as u16,
+        });
+    };
+    push(&mut s, first, cur);
+    let mut prev = f64::MAX;
+    let mut lambda = vec![1.0];
+    let mut overlap = false;
+    let mut v;
+    let mut dist2 = prev;
+    let mut rounds = 0;
+    loop {
+        let w: Vec<DVec3> = s.iter().map(|p| p.w).collect();
+        let Some((keep, l)) = johnson(&w) else {
+            overlap = true;
+            v = DVec3::ZERO;
+            break;
+        };
+        s = keep.iter().map(|&i| s[i]).collect();
+        lambda = l;
+        v = DVec3::ZERO;
+        for (p, l) in s.iter().zip(&lambda) {
+            v += p.w * *l;
+        }
+        let now = v.length_squared();
+        rounds += 1;
+        if prev <= now || rounds > 64 {
+            dist2 = prev;
+            break;
+        }
+        if now < 1e-10 {
+            overlap = true;
+            break;
+        }
+        prev = now;
+        dist2 = now;
+        push(&mut s, -v, cur);
+    }
+    let _ = v;
+    let mut on_a = DVec3::ZERO;
+    let mut on_b = DVec3::ZERO;
+    for (p, l) in s.iter().zip(&lambda) {
+        on_a += p.a * *l;
+        on_b += p.b * *l;
+    }
+    let mut simplex_a = [0u16; 3];
+    let mut simplex_b = [0u16; 3];
+    for (k, p) in s.iter().take(3).enumerate() {
+        simplex_a[k] = p.ia;
+        simplex_b[k] = p.ib;
+    }
+    Closest {
+        distance: if overlap { 0.0 } else { dist2.sqrt() as f32 },
+        on_a: fv(on_a),
+        on_b: fv(on_b),
+        simplex_a,
+        simplex_b,
+        size: s.len().min(3),
+        overlap,
+    }
+}
+
 /// The point of triangle `t` closest to `p`, by its Voronoi regions.
 fn closest_on_triangle(p: DVec3, t: &[DVec3; 3]) -> DVec3 {
     let (a, b, c) = (t[0], t[1], t[2]);
@@ -990,7 +1277,31 @@ pub fn convex_point(
     pose_a: &Pose,
     pose_b: &Pose,
 ) -> Option<(Point, Closest)> {
-    let c = closest(a, b);
+    point_from(closest(a, b), ra, rb, pose_a, pose_b, false)
+}
+
+/// [`convex_point`] with the original's own distance query ([`closest_havok`]);
+/// `origin` is the convex piece's collidable position.
+pub fn convex_point_havok(
+    a: &[Vec3],
+    ra: f32,
+    b: &[Vec3],
+    rb: f32,
+    pose_a: &Pose,
+    pose_b: &Pose,
+    origin: Vec3,
+) -> Option<(Point, Closest)> {
+    point_from(closest_havok(a, b, origin), ra, rb, pose_a, pose_b, true)
+}
+
+fn point_from(
+    c: Closest,
+    ra: f32,
+    rb: f32,
+    pose_a: &Pose,
+    pose_b: &Pose,
+    from_points: bool,
+) -> Option<(Point, Closest)> {
     if c.overlap || c.distance <= 1e-6 {
         return None;
     }
@@ -998,7 +1309,13 @@ pub fn convex_point(
     if distance < 0.0 {
         return None;
     }
-    let normal = (c.on_a - c.on_b) / c.distance;
+    // The original's normal is the last simplex's point over its length, not
+    // the previous round's distance ([`closest_havok`]).
+    let normal = if from_points {
+        (c.on_a - c.on_b).try_normalize().unwrap_or(Vec3::Y)
+    } else {
+        (c.on_a - c.on_b) / c.distance
+    };
     let on_a = c.on_a - normal * ra;
     let on_b = c.on_b + normal * rb;
     Some((
@@ -1380,5 +1697,188 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!((out[0].distance - 0.05).abs() < 1e-6);
         assert_eq!(m.points.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod havok_gjk_tests {
+    use super::*;
+    use glam::Mat3;
+
+    // A live distance query (`gjkquery-sentinel-wideload-compressor__live__000`,
+    // seq 12371): the Wide Load's N-12 wheel (the 26-vertex hull, axle along z)
+    // over a floor triangle, a tenth of a second before the bell landing. The
+    // original's simplex was hull vertices (15, 3, 15) against the triangle's
+    // (0, 1, 2): a point on the wheel's axial edge, z = 0.0625 between the rings
+    // at -0.155 and +0.155, not a ring vertex.
+    const HULL: [f32; 78] = [
+        -4.636496e-09,
+        -1.8475019e-08,
+        -0.15503708,
+        -0.32593724,
+        3.0740143e-08,
+        -0.15503706,
+        -0.2822699,
+        0.16296865,
+        -0.1550371,
+        -0.16296858,
+        0.28226995,
+        -0.15503713,
+        5.8825837e-08,
+        0.3259372,
+        -0.15503715,
+        0.16296868,
+        0.2822699,
+        -0.15503715,
+        0.28226998,
+        0.16296855,
+        -0.15503712,
+        0.32593724,
+        -9.618452e-08,
+        -0.15503709,
+        0.2822699,
+        -0.16296871,
+        -0.15503703,
+        0.16296855,
+        -0.28227,
+        -0.15503702,
+        -9.659317e-08,
+        -0.32593727,
+        -0.155037,
+        -0.16296871,
+        -0.2822699,
+        -0.155037,
+        -0.28226998,
+        -0.16296855,
+        -0.15503702,
+        -0.32593724,
+        6.770386e-08,
+        0.15503709,
+        -0.2822699,
+        0.16296868,
+        0.15503703,
+        -0.16296856,
+        0.28227,
+        0.15503702,
+        6.806677e-08,
+        0.32593727,
+        0.155037,
+        0.16296868,
+        0.28226992,
+        0.155037,
+        0.28226998,
+        0.16296858,
+        0.15503702,
+        0.32593724,
+        -5.9220802e-08,
+        0.15503706,
+        0.2822699,
+        -0.16296868,
+        0.1550371,
+        0.16296855,
+        -0.28226995,
+        0.15503713,
+        -8.7352234e-08,
+        -0.3259372,
+        0.15503715,
+        -0.1629687,
+        -0.28226987,
+        0.15503715,
+        -0.28226998,
+        -0.16296852,
+        0.15503712,
+        4.60444e-09,
+        1.84887e-08,
+        0.15503708,
+    ];
+    const XF: [f32; 12] = [
+        2.2454674e-06,
+        0.2834564,
+        0.9589854,
+        9.3105893e-07,
+        -0.9589851,
+        0.2834563,
+        1.0000002,
+        2.806676e-08,
+        -2.2846357e-06,
+        -18.216131,
+        5.447981,
+        -14.062784,
+    ];
+    const TRI: [f32; 9] = [
+        -19.961012, 4.9526205, -11.271542, -13.905169, 4.9526205, -17.55698, -19.961012, 4.9526205,
+        -17.55698,
+    ];
+
+    fn world() -> (Vec<Vec3>, [Vec3; 3], Mat3, Vec3) {
+        let rot = Mat3::from_cols_slice(&XF[..9]);
+        let t = Vec3::new(XF[9], XF[10], XF[11]);
+        let hull = HULL
+            .chunks(3)
+            .map(|v| rot * Vec3::new(v[0], v[1], v[2]) + t)
+            .collect();
+        let tri = [0, 1, 2].map(|k| Vec3::new(TRI[3 * k], TRI[3 * k + 1], TRI[3 * k + 2]));
+        (hull, tri, rot, t)
+    }
+
+    #[test]
+    fn a_wheels_axial_edge_over_the_floor_gives_the_original_edge_point() {
+        let (hull, tri, rot, t) = world();
+        let c = closest_havok(&hull, &tri, t);
+        let mut ring: Vec<u16> = c.simplex_a[..c.size].to_vec();
+        ring.sort_unstable();
+        ring.dedup();
+        assert_eq!(ring, vec![3, 15], "{c:?}");
+        let local = rot.transpose() * (c.on_a - t);
+        assert!(
+            (local.z - 0.0625).abs() < 2e-3 && (local.x + 0.163).abs() < 2e-3,
+            "{local}"
+        );
+        assert!((c.distance - 0.178_473).abs() < 1e-4, "{}", c.distance);
+        // An edge against a face is reported for this detection only.
+        assert!(!c.persists());
+    }
+
+    /// The supports break ties toward the highest vertex and a triangle's three
+    /// vertices are all equally low over a floor: the simplex's triangle side
+    /// is 2, 1, 0 in the order the rounds reach them.
+    #[test]
+    fn a_tie_goes_to_the_highest_vertex() {
+        let pts: Vec<DVec3> = vec![DVec3::ZERO, DVec3::X, DVec3::new(0.0, 0.0, 1.0)];
+        assert_eq!(support_high(&pts, DVec3::NEG_Y), 2);
+        assert_eq!(support_high(&pts, DVec3::X), 1);
+    }
+
+    #[test]
+    fn johnsons_test_keeps_an_edge_when_no_other_point_improves_it_by_more_than_the_tolerance() {
+        // Origin projects inside the segment w0-w1.
+        let w = [DVec3::new(-1.0, 0.5, 0.0), DVec3::new(1.0, 0.5, 0.0)];
+        let (keep, l) = johnson(&w).unwrap();
+        assert_eq!(keep, vec![0, 1]);
+        assert!((l[0] - 0.5).abs() < 1e-12);
+        // Origin beyond the end: the nearer vertex alone.
+        let w = [DVec3::new(2.0, 0.5, 0.0), DVec3::new(3.0, 0.5, 0.0)];
+        let (keep, _) = johnson(&w).unwrap();
+        assert_eq!(keep, vec![0]);
+        // The pair {1,2} of a triangle is kept in the order (2, 1).
+        let w = [
+            DVec3::new(-5.0, 4.0, 0.0),
+            DVec3::new(-1.0, 0.5, 0.0),
+            DVec3::new(1.0, 0.5, 0.0),
+        ];
+        let (keep, _) = johnson(&w).unwrap();
+        assert_eq!(keep, vec![2, 1]);
+    }
+
+    /// Four points around the origin: it is inside, and the query reports an overlap.
+    #[test]
+    fn a_tetrahedron_around_the_origin_is_an_overlap() {
+        let w = [
+            DVec3::new(1.0, 1.0, 1.0),
+            DVec3::new(-1.0, -1.0, 1.0),
+            DVec3::new(-1.0, 1.0, -1.0),
+            DVec3::new(1.0, -1.0, -1.0),
+        ];
+        assert!(johnson(&w).is_none());
     }
 }

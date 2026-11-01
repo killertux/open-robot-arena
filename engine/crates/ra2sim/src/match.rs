@@ -539,6 +539,11 @@ impl Match {
         // point until the bell (docs/29 section 12v).
         if !config.practice {
             duel.hold_robots(true);
+        } else {
+            // The practice arena plays the robot's impacts against its walls
+            // and props (`FUN_0045f3a0` per priced contact, docs/29 section
+            // 12ak): the caller consumes `duel.impacts` each step.
+            duel.record_impacts = true;
         }
 
         let teams = team_table(&config.arena);
@@ -2313,5 +2318,45 @@ mod tests {
             config.duration.is_some(),
             "the time group is shown when timed"
         );
+    }
+
+    /// The practice arena prices the robot's hits on its walls and records
+    /// them for the sounds (`FUN_0045f3a0`; live `audio-practice-test`: the
+    /// Test Robot plays `steel_collision` and `hammer_hit` at the far wall,
+    /// docs/29 section 12ak). Before, the lab consumed none.
+    #[test]
+    fn a_practice_robot_driven_into_the_wall_records_priced_hits() {
+        let Some(game) = game_dir() else {
+            eprintln!("skipping: no local/game");
+            return;
+        };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+        let config = MatchConfig::new(
+            path(&game, "Scripts/Practice.py"),
+            GameType::Deathmatch,
+            vec![RobotEntry::human(0, path(&game, "Teams/Team0/Bot0.bot"))],
+        )
+        .with_practice();
+        let Ok(mut m) = Match::new(config) else {
+            eprintln!("skipping: no practice arena");
+            return;
+        };
+        let mut input = DriveInput::default();
+        input.keys.set(17, true);
+        let dt = m.config.dt;
+        let mut hits = Vec::new();
+        for _ in 0..(3.0 / dt) as usize {
+            m.step_with(&[Some(input)]);
+            hits.extend(std::mem::take(&mut m.duel.impacts));
+        }
+        let wall = hits
+            .iter()
+            .filter(|i| i.attacker == crate::combat::NO_ATTACKER)
+            .map(|i| i.damage)
+            .fold(0.0, f32::max);
+        assert!(wall > 20.0, "the wall hit is priced: {hits:?}");
     }
 }
