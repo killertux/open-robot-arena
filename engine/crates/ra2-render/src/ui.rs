@@ -706,7 +706,13 @@ fn snap_frame(f: Frame) -> Frame {
 fn snap_placement<'a>(p: &Placement<'a>) -> Placement<'a> {
     Placement {
         widget: p.widget,
-        frame: snap_frame(p.frame),
+        frame: if p.widget.attachment("DisplayBox").is_some() {
+            let mut f = snap_frame(p.frame);
+            f.y = p.frame.y.round();
+            f
+        } else {
+            snap_frame(p.frame)
+        },
         clip: p.clip.map(snap_frame),
         children: p.children.iter().map(snap_placement).collect(),
         attachments: p

@@ -1454,6 +1454,15 @@ fn sized(
         Some(p) => (axis(p.first, parent.w), axis(p.second, parent.h)),
         None => (0.0, 0.0),
     };
+    // The Overview's snapshot box (`0.8` of the 582 px pane = 465.6, anchored at its bottom) sits
+    // 1 px higher live than the exact fraction puts it (`botlab-overview`: its frame at 475, ours
+    // 476): its fractional position is truncated. Local to that group; the same rule applied to
+    // every group moved the rest of the screens the wrong way.
+    let py = if widget.name() == "snapshot main group" {
+        py.trunc()
+    } else {
+        py
+    };
     let anchor = if has_alignment(widget) {
         Anchor::from_alignment(widget.alignment())
     } else {

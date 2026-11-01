@@ -267,10 +267,10 @@ fn info_display_mut(widget: &mut Widget) -> Option<&mut Widget> {
 const TIP_GIB: &str = "T 1.09\r
 [Image]\r
 _Tiling false\r
-_Filename botlab\\tip.bmp\r
+_Filename botlab\\{ICON}\r
 _BufferWidth 0 0 0 0\r
-_Size 19 0 17 0\r
-_Alpha false\r
+_Size {ICONW} 0 17 0\r
+_Alpha {ALPHA}\r
 _Filtering 0\r
 _ForeColor 1 1 1 1\r
 _Name \r
@@ -279,7 +279,7 @@ _Position {ICONX} 0 {ICONY} 0\r
 Name tip icon\r
 ID -1\r
 Position {ICONX} 0 {ICONY} 0\r
-Size 19 0 17 0\r
+Size {ICONW} 0 17 0\r
 Visible true\r
 ChildOrder 0\r
 ClipMode 0\r
@@ -287,7 +287,7 @@ NumChildren 0\r
 [Text]\r
 _Font fg_mcn14\r
 _Text {TEXT}\r
-_ForeColor 0.5 0.6 1 1\r
+_ForeColor {COLOR} 1\r
 _Name \r
 _Position {TEXTX} 0 {TEXTY} 0\r
 Name tip text\r
@@ -312,6 +312,15 @@ pub struct Builder {
     tip_screen: Option<(String, Option<String>)>,
     /// The tip last written into the Info Display (its text and the screen size it was centred for).
     tip_written: Option<String>,
+    /// The orange alert over the tip (`FUN_0043e7c0`: `alert.tga` and `1 .8 .3` text, the lab's
+    /// `Info Display`) and the seconds it has left (`0x714890`, set to 2.0 on every call, counted
+    /// down by the lab's per-frame update at `0x43e683`; an empty alert puts the tip back).
+    alert: Option<String>,
+    alert_left: f32,
+    /// The line the lab's events put in the tip (`FUN_0043e6e0`: the attachment tips, the drag
+    /// tip, an empty line after a cancelled drag) until the next screen change recomputes it
+    /// (`FUN_0043e900`).
+    tip_set: Option<String>,
     /// The fidelity harness's view: the 3D view fills its placeholder and the
     /// synthetic edit panel is not drawn.
     view_only: bool,
@@ -628,9 +637,12 @@ impl Builder {
         let custom_textures = game.join(CUSTOM_TEXTURES);
         let mut builder = Builder {
             size,
-            tip_roll: (0, 0),
+            tip_roll: (0, u32::MAX),
             tip_screen: None,
             tip_written: None,
+            alert: None,
+            alert_left: 0.0,
+            tip_set: None,
             view_only: false,
             ui: game.join("UI"),
             game,
@@ -804,6 +816,22 @@ impl Builder {
 
     /// One tick of wall time: the practice arena runs its fixed steps.
     pub fn advance(&mut self, seconds: f32) {
+        if self.alert.is_some() {
+            self.alert_left -= seconds;
+            if self.alert_left <= 0.0 {
+                self.alert = None;
+            }
+        }
+        // `FUN_0042c850` runs every frame of a drag: a part still refused over the baseplate keeps
+        // the alert at two seconds (live: it stayed up for the 5 s the mouse sat still).
+        if let Some(active) = &self.drag {
+            if let (Some(r), Some(c)) = (&active.refusal, &active.candidate) {
+                if c.parent == 0 {
+                    self.alert = Some(r.message().to_string());
+                    self.alert_left = 2.0;
+                }
+            }
+        }
         self.sync_arena();
         if let Some(arena) = &mut self.arena {
             arena.advance(seconds);
@@ -1211,6 +1239,7 @@ impl Builder {
         if let Some((info, _)) = self.selected_info() {
             self.own_mount = placement::default_own_mount(&info);
             self.status = placement::preview_tip(&info).into();
+            self.tip_set = Some(self.status.clone());
         }
     }
 
@@ -1259,6 +1288,7 @@ impl Builder {
             floating: Mat4::IDENTITY,
         });
         self.status = placement::TIP_DRAG.into();
+        self.tip_set = Some(placement::TIP_DRAG.into());
         // `FUN_0042c6b0`: the part is placed where the mouse already is.
         if let Some([x, y]) = self.cursor {
             self.drag_to(x, y);
@@ -1272,6 +1302,8 @@ impl Builder {
     fn cancel_drag(&mut self) {
         if self.drag.take().is_some() {
             self.preview = None;
+            // Live (`botlab` capture after a click on nothing): the tip line is left empty.
+            self.tip_set = Some(String::new());
             if self.status == placement::TIP_DRAG
                 || self.status == Refusal::Intersects.message()
                 || self.status == Refusal::TooLarge.message()
@@ -1329,6 +1361,16 @@ impl Builder {
             (Some(r), _) => r.message().to_string(),
             _ => placement::TIP_DRAG.to_string(),
         };
+        if active.refusal.is_none() {
+            self.tip_set = Some(placement::TIP_DRAG.into());
+        }
+        // Only the baseplate branch of `FUN_0042c850` raises the alert (0x42cf46, 0x42d11a); a
+        // part snapping onto another part's smart zone does not.
+        if let (Some(r), Some(c)) = (&active.refusal, &active.candidate) {
+            if c.parent == 0 {
+                self.show_alert(r.message());
+            }
+        }
         self.drag = Some(active);
         self.preview = None;
         self.refresh_panel();
@@ -3203,6 +3245,21 @@ impl Builder {
         Ok(())
     }
 
+    /// Show an orange alert for two seconds (`FUN_0043e7c0`); an empty one puts the tip back.
+    pub fn show_alert(&mut self, text: &str) {
+        if text.is_empty() {
+            self.alert = None;
+        } else {
+            self.alert = Some(text.to_string());
+            self.alert_left = 2.0;
+        }
+    }
+
+    /// The alert on show, if any.
+    pub fn alert(&self) -> Option<&str> {
+        self.alert.as_deref()
+    }
+
     /// The tip line at the bottom of the lab (`FUN_0043e900`): the screen's `Info Display` carries
     /// the `tip.bmp` icon and one line of `fg_mcn14` text in `.5 .6 1`, centred as a pair. The text
     /// follows the state: no chassis yet, no parts, no control board, no wiring, else one of four
@@ -3231,12 +3288,12 @@ impl Builder {
         let key = (lab.tab.to_string(), lab.step.map(str::to_string));
         if self.tip_screen.as_ref() != Some(&key) {
             self.tip_screen = Some(key);
-            self.tip_roll.0 = self
-                .tip_roll
-                .0
-                .wrapping_mul(1_103_515_245)
-                .wrapping_add(12_345);
-            self.tip_roll.1 = (self.tip_roll.0 >> 16) & 3;
+            // A new screen: the pick is drawn again (below, when it is needed).
+            self.tip_roll.1 = u32::MAX;
+            self.tip_set = None;
+        }
+        if let Some(set) = &self.tip_set {
+            return set.clone();
         }
         let blank = self.build.is_blank();
         let parts = self.build.components().len();
@@ -3261,27 +3318,59 @@ impl Builder {
             return "Click the Wiring button to set up keyboard or joystick controls for your robot"
                 .into();
         }
-        // The roll is redone (`0x419190(4)` in a loop) until the pick is not about this screen.
-        for pick in (self.tip_roll.1..).take(4) {
-            let (text, here): (&str, bool) = match pick & 3 {
-                0 => (PAINT, screen == 8),
-                1 => (COMPONENTS, screen == 6),
-                2 => (CHASSIS, screen == 2 || screen == 5),
-                _ => (TEST, screen == 9),
-            };
-            if !here {
-                return text.to_string();
+        // `0x43eba1`: `FUN_00419190(4)` from the engine's generator, drawn again until the pick is
+        // not about the screen shown. The state is the session's clock (`GetTickCount`, 0x4e456a)
+        // advanced by whatever drew before, so which of the four shows is not reproducible.
+        let about_here = |pick: usize| match pick {
+            0 => screen == 8,
+            1 => screen == 6,
+            2 => screen == 2 || screen == 5,
+            _ => screen == 9,
+        };
+        if self.tip_roll.1 == u32::MAX {
+            if self.tip_roll.0 == 0 {
+                // `ORA_TIP_SEED` pins the state for the side-by-side harnesses.
+                self.tip_roll.0 = std::env::var("ORA_TIP_SEED")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u32)
+                            .unwrap_or(1)
+                    });
             }
+            let mut lcg = ra2sim::lcg::Lcg(self.tip_roll.0);
+            let mut pick = lcg.range(4);
+            while about_here(pick) {
+                pick = lcg.range(4);
+            }
+            self.tip_roll = (lcg.0, pick as u32);
         }
-        String::new()
+        match self.tip_roll.1 {
+            0 => PAINT,
+            1 => COMPONENTS,
+            2 => CHASSIS,
+            _ => TEST,
+        }
+        .to_string()
     }
 
     /// Put the tip into the lab's `Info Display`: an icon and a text widget, centred as a pair
     /// (the original's markup `<image filename "UI\\botlab\\tip.bmp"><text font fg_mcn14 color .5 .6 1 1
     /// align 2>`, icon 19 x 17 at the line's top, three pixels before the text).
     fn refresh_tip(&mut self) {
-        let text = self.tip_text();
-        let key = format!("{text}|{}x{}", self.size[0], self.size[1]);
+        let alert = self.alert.clone();
+        let text = match &alert {
+            Some(text) => text.clone(),
+            None => self.tip_text(),
+        };
+        let key = format!(
+            "{text}|{}|{}x{}",
+            alert.is_some(),
+            self.size[0],
+            self.size[1]
+        );
         if self.tip_written.as_deref() == Some(key.as_str()) {
             return;
         }
@@ -3314,13 +3403,34 @@ impl Builder {
         let Some(lab) = self.shell.lab_mut() else {
             return;
         };
-        let left = ((row.w.floor() - (19.0 + 3.0 + width)) / 2.0).floor() + row.x.floor() - pane.x;
+        // The alert's icon (`alert.tga`, 17 wide) and the tip's (`tip.bmp`, 19 wide).
+        let icon_w = if alert.is_some() { 17.0 } else { 19.0 };
+        let left =
+            ((row.w.floor() - (icon_w + 3.0 + width)) / 2.0).floor() + row.x.floor() - pane.x;
         let top = row.y - pane.y;
         let doc = TIP_GIB
             .replace("{TEXT}", &text)
             .replace("{ICONX}", &format!("{left}"))
             .replace("{ICONY}", &format!("{top}"))
-            .replace("{TEXTX}", &format!("{}", left + 21.0))
+            .replace(
+                "{ICON}",
+                if alert.is_some() {
+                    "alert.tga"
+                } else {
+                    "tip.bmp"
+                },
+            )
+            .replace("{ICONW}", &format!("{icon_w}"))
+            .replace("{ALPHA}", if alert.is_some() { "true" } else { "false" })
+            .replace(
+                "{COLOR}",
+                if alert.is_some() {
+                    "1 0.8 0.3"
+                } else {
+                    "0.5 0.6 1"
+                },
+            )
+            .replace("{TEXTX}", &format!("{}", left + icon_w + 2.0))
             .replace("{TEXTY}", &format!("{}", top - 8.0));
         let gib = match ra2fmt::gib::parse(&doc) {
             Ok(g) => g,
@@ -3329,11 +3439,12 @@ impl Builder {
                 return;
             }
         };
+        // An empty tip draws nothing, icon included (live, after a cancelled drag).
         let extra: Vec<Widget> = gib
             .blocks
             .into_iter()
             .filter_map(|b| match b {
-                ra2fmt::gib::Block::Widget(w) => Some(w),
+                ra2fmt::gib::Block::Widget(w) if !text.is_empty() => Some(w),
                 _ => None,
             })
             .collect();
@@ -6476,6 +6587,8 @@ mod tests {
             .place_component("Components\\ztek1.txt", PlaceOn::Baseplate([0.0, 0.0]))
             .unwrap();
         let count = builder.build.components().len();
+        // The window asks for the tip every frame, which is what notes the screen.
+        let _ = builder.tip_text();
         builder.click_palette_file("Components\\ztek1.txt").unwrap();
         let attach = builder.attach_point().unwrap();
         builder.click(attach[0], attach[1]).unwrap();
@@ -6486,14 +6599,30 @@ mod tests {
             builder.status(),
             "Components should not intersect the chassis or other components."
         );
+        // The tip line shows it as the orange alert (`FUN_0043e7c0`, live `botlab-alert-intersect`), and
+        // keeps it up while the part stays refused (the exe judges every frame).
+        assert_eq!(
+            builder.alert(),
+            Some("Components should not intersect the chassis or other components.")
+        );
+        builder.advance(3.0);
+        assert!(builder.alert().is_some(), "still refused: the alert stays");
         builder.click(over[0], over[1]).unwrap();
         assert!(builder.dragging(), "a refused part stays in the drag");
         assert_eq!(builder.build.components().len(), count);
         // Off the baseplate sheet altogether: over nothing.
         let nothing = [builder.panel.preview.x + 3.0, builder.panel.preview.y + 3.0];
         builder.mouse_moved(nothing[0], nothing[1]);
+        // No longer refused: the alert runs out two seconds later and the drag tip is back.
+        builder.advance(1.0);
+        assert!(builder.alert().is_some(), "an alert lasts two seconds");
+        builder.advance(1.5);
+        assert!(builder.alert().is_none(), "and goes");
+        assert_eq!(builder.tip_text(), placement::TIP_DRAG);
         builder.click(nothing[0], nothing[1]).unwrap();
         assert!(!builder.dragging(), "a click over nothing cancels");
+        // Live (`botlab-tip-cancel-blank`): the tip line is left empty.
+        assert_eq!(builder.tip_text(), "");
         assert_eq!(builder.build.components().len(), count);
     }
 

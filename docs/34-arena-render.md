@@ -624,4 +624,36 @@ the jitter's generator, the ring's random offsets; decals and shadows still cut 
   are 2-14 s after the bell with the weapons running, so the angle in a live frame is a function of the spin-up the Havok side reproduces (docs/29 12v; Berserker's rotator bar mass is unrecovered, docs/29). A
   render-only fix would need the live hinge angle logged per shot (`ra2_vbdump.js` dumps the world matrices but the audit does not pair them with ours); that is a new live capture plus physics, so not attempted.
 * **Clawtop's claws**: no capture of the Clawtop exists (`capture_arenas.py` lists the eight deathmatch arenas; the tabletop arenas, Clawtop and FlexTop, are not on its route) and docs/29 12ab-12ad state the claws
-  (an unlimited hinge on a speed, `SetAutoLocks(False, True)`) were never captured. They are `arena.rs` script state (the other agent's area). Needs a live Tabletop session with the claws' hinge angles read.
+  (an unlimited hinge on a speed, `SetAutoLocks(False, True)`) were never captured. They are `arena.rs` script state (the other agent's area). Captured and measured in 11.9 (speed equal).
+
+### 11.8 The snapshot box and the DisplayBox rows (`fx/polish2`, 2026-11-01)
+
+* **Overview snapshot box (1 px).** `snapshot main group` (`Position 1 0 0.8 1`, `Size 280 145`, anchored at its bottom) in the 582 px pane is at 147.74 + 465.6 - 145 = 468.34; the capture's frame
+  rows are 1 px higher (`botlab-overview`: outer border at row 475, ours 476; inner frame 604 / 605; image 612 / 613). Its fractional `Position` is truncated (465.6 -> 465): `ra2ui::sized`, that one
+  group only (the same rule on every group moved the other screens the wrong way, as 16.8 found for the centred groups). Borders now equal the capture's.
+* **`DisplayBox` text rows.** The text of a `Glyph` dressed by a `DisplayBox` starts at the **rounded** y of the box, not the floor (`ra2_render::ui::snap_placement`: the glyph's `y` is `round`, x and sizes still
+  floor): the snapshot instructions were 1 px high (box at 504.74: live row 505) and, through the same rule, the lab's other `DisplayBox` text. Over the 115 fixtures of `fidelity.py` (app renderer): botlab-chassis
+  **0.823 -> 0.460**, botlab-paint 1.024 -> 0.824, botlab-wiring 1.738 -> 1.605, botlab-overview 0.399 -> 0.255 (with the pick of the capture), event-repairs 4.736 -> 4.680, event-award-photo +0.019; no other
+  fixture moved by more than 0.005; mean 2.591 -> 2.584. The snapshot box alone took overview 0.511 -> 0.399.
+* **MP chat, first line 2 px high: recovered as a position, not as a rule.** `mp-lobby-host-chat-two`: the yellow glyph rows of line one start at **271** (the `[`s) / 272, line two at 289; ours were at 269 / 288 with the box
+  at the chat group's top (268.28). The shared `DisplayBox` rule above does not move it (the box y is already fractional .28 -> 268); the box `chat messages` states `Position 0 0 0 1242948` (a stray flag word in the
+  fourth field) and `Size 1 1 0.99 1`, in `Slot0` of the group's `SplitFrame`; nothing in the file gives the 2 px. The exe's DisplayBox placement was not recovered; the box is placed at `Position 0 0 2 0` in
+  `net_play::set_display_box` for `chat messages` only (rows 271 / 289 now, as live; example `lobbychat <game> <png> [lines]`, `yrows.py` on both frames). The port's lobby background differs from the capture's, so
+  no whole-frame MAE is quoted.
+* **Tip line: random pick.** `FUN_0043e900` -> `0x43eba1`: `FUN_00419190(4)` again until the pick is not about the screen shown, i.e. the engine LCG (`ra2sim::lcg::Lcg`, docs/36 9.23: `s = s * 0x41c64e6d + 0x3039`,
+  `floor((s & 0x7fffffff) / 2^31 * 4)`), whose state is the session's `GetTickCount` seed advanced by whatever drew before, so the pick is not reproducible across sessions in the original either. Ours: `Builder::tip_text`
+  draws from an `Lcg` seeded by the clock (`ORA_TIP_SEED=n` pins it for the harnesses) once per screen change and redraws while the pick names the screen shown.
+
+### 11.9 Clawtop's claws, spinners and the slash decal (`fx/polish2`)
+
+* **Clawtop captured** (`clawtop-intro`, `clawtop-results-claws`, `clawtop-claw-signal`; Exhibition, TABLETOP, ClawTop, Scout v ALARM). The claws stand at the notches of the long sides and sweep over the table's edge: seen
+  end-on at the far notch they are a bar with two prongs that stands upright for about 3 s of every 6.4 s. From a 24 s grab of the far claw's pixels (15 ms per grab) the big events (the bar upright) peak at
+  4.29, 10.83, 17.10 and 23.54 s: **period 6.42 s = 0.98 rad/s**. Ours (`ra2sim` test `the_clawtop_claws_turn_steadily`, `SetPowerSettings(2, 1000)`, `SetDirection(-100)`; the engine target speed) turns the two
+  hinges **+-14.0 rad in 14 s = 1.00 rad/s**, opposite ways: the same speed to 2 %. The phase against the bell was not measured (the match ran 56 s before the series; the claws never stop). The hinge angle itself is not
+  readable from the game's Python (`HingeController` has only setters), and `ra2_hinge_ctl.js` saw no `SetPowerSettings` after the match had ended, so the motor speed was inferred from the motion. **Verdict: speed matches,
+  nothing to change** in `arena.rs`; a phase check needs the agent loaded before Start Game.
+* **Spinner part angles: blocked**, as 11.7: a live frame has the hinge angle of 2-14 s of spin-up (physics: docs/29 12v), no static comparison exists without the live hinge angle per shot, and the physics side is
+  another agent's (`fx/bell-landing`). Nothing to render.
+* **Slash decal: blocked on a live frame.** The state of the art is docs/37 8-8.2 (one located decal in 32 synthetic calls, a 3-vertex sliver hidden under sparks); a strong slash on a visible face did not come out of
+  any run and a further attempt (the same `capture_fx.py SYNTH=1` machinery) was judged not worth the live time. Open exactly as docs/37 8.2 says.
+

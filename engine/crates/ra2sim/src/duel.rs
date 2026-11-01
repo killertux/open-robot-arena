@@ -4628,6 +4628,63 @@ mod tests {
         );
     }
 
+    /// The Clawtop's two claws are unlimited hinges the script drives at a speed
+    /// (`SetPowerSettings(2, 1000)`, `SetDirection(-100)`). Live they take about 6.4 s a turn
+    /// (frames of a Clawtop match grabbed at 60 Hz, `claw-live-signal`, docs/34 section 11.7);
+    /// this prints ours (`--nocapture`) and checks that they turn steadily the same way.
+    #[test]
+    fn the_clawtop_claws_turn_steadily() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/clawtop.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        let idle = [DriveInput::default(), DriveInput::default()];
+        let dt = 1.0 / 60.0;
+        duel.step_direct(&idle, dt);
+        let hinges: Vec<crate::backend::JointHandle> = duel
+            .joints
+            .iter()
+            .filter(|j| !j.slider)
+            .map(|j| j.handle)
+            .collect();
+        assert_eq!(hinges.len(), 2, "the claws: {:?}", duel.log);
+        let mut last: Vec<f32> = hinges
+            .iter()
+            .map(|h| duel.physics.hinge_angle(*h))
+            .collect();
+        let mut total = vec![0.0f32; 2];
+        let secs = 14.0f32;
+        for _ in 0..(secs / dt) as usize {
+            duel.step_direct(&idle, dt);
+            for (i, h) in hinges.iter().enumerate() {
+                let a = duel.physics.hinge_angle(*h);
+                let mut d = a - last[i];
+                while d > std::f32::consts::PI {
+                    d -= std::f32::consts::TAU;
+                }
+                while d < -std::f32::consts::PI {
+                    d += std::f32::consts::TAU;
+                }
+                total[i] += d;
+                last[i] = a;
+            }
+        }
+        println!("clawtop claws over {secs} s: {total:?} rad");
+        assert!(
+            total.iter().all(|t| t.abs() > 3.0),
+            "the claws did not turn: {total:?}"
+        );
+    }
+
     /// M4/F13: a hinge the *model* declares is driven by the script.
     ///
     /// The Compressor Arena's four smash arms are hinges in the `.gmf`, and

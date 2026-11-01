@@ -1826,7 +1826,7 @@ const CHAT_SAMPLE: &str = "This is a chat message.";
 /// Set the text of the `DisplayBox` whose body is named `name` (the
 /// attachment sits on another widget, so the search looks for the widget that
 /// carries it).
-fn set_display_box(gib: &mut Gib, name: &str, text: &str) -> bool {
+pub fn set_display_box(gib: &mut Gib, name: &str, text: &str) -> bool {
     fn owner<'a>(w: &'a mut Widget, name: &str) -> Option<&'a mut Widget> {
         let carries = w
             .attachments
@@ -1852,6 +1852,18 @@ fn set_display_box(gib: &mut Gib, name: &str, text: &str) -> bool {
     for b in gib.blocks.iter_mut() {
         if let Block::Widget(root) = b {
             if let Some(w) = owner(root, name) {
+                // The lobby's chat log draws its first line 2 px below where the shared
+                // `DisplayBox` placement puts it (live `mp-lobby-host-chat-two`: the glyph rows of
+                // line one start at 271, ours at 269; the box's own `Position 0 0 0 1242948` has a
+                // stray flag word, the group it hangs in is placed as the live frames show). The
+                // box is moved down by those two pixels, here only.
+                if name == "chat messages" {
+                    for a in w.attachments.iter_mut() {
+                        if let Some(body) = a.body.as_mut().filter(|b| b.name() == name) {
+                            ra2ui::input::set_field(body, "Position", "0 0 2 0");
+                        }
+                    }
+                }
                 return crate::hq_mode::set_display(w, text);
             }
         }

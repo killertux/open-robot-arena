@@ -492,3 +492,7 @@ after each hit (sparks and debris gone), per-call.
   need a camera fit on this run's 616-row view, which has no recognisable fixed feature to fit against. Open as before: one run with a visible decal on a flat face
   and `PERLATE` frames. The geometry of the decal (its cut polygon and uvs) is exact in the capture, so the cut itself is checkable once ours is run on the same mesh.
 
+
+### 8.3 Slash decals: `fx/polish2` (no new frame)
+
+No new attempt was made: 8.1 / 8.2's machinery found one located decal (a 3-vertex sliver) in 32 synthetic calls, and a strong slash on a visible face has not been photographed. Still open, as 8.2 states.

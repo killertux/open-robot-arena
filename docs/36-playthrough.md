@@ -1357,7 +1357,7 @@ Against `botlab-overview`, `botlab-flow-wiring-stock`, `botlab-wiring-delete-con
   `floor(0.14 x 768) = 107`, not 107.52). Name box / weight row / 3D frame are then exact: the Overview's name and weight rows differ 0.00 from the capture (they were 7.05 and 12.07 at the 1 px offset), the 3D frame
   top border is at y 147. MAE against the captures (1024x768, master -> final, the tip's random pick included: another pick than the capture's costs about 0.05): overview 1.118 -> 0.51, chassis 0.911 -> 0.82,
   components 2.058 -> 1.21, wiring (`botlab-flow-wiring-stock`) 3.93 -> 3.81, paint 1.229 -> 1.02 (the first three on the weight and the whole-pixel panes only: 0.66 / 0.77 / 1.16 / 3.79 / 0.97).
-  The snapshot box under it ends 1 px high now (469.3 live): the group is positioned from the old height; open.
+  The snapshot box under it was 1 px low: fixed in docs/34 11.8.
 * **The tip line** (`FUN_0043e900`, text boxes at `0x6f1500..0x6f1844`): the lab's `Info Display` (80 % wide, 18 px, 2 px under the pane) shows `tip.bmp` (19 x 17) and one line of `fg_mcn14` text in
   `.5 .6 1` (markup `<image filename "UI\botlab\tip.bmp"><text font fg_mcn14 color .5 .6 1 1 align 2>` at `0x6f1500`; `0x43e6e0` sets it, `0x43e7c0` is the same in `alert.tga` / `1 .8 .3`), icon and text
   **centred as a pair** (icon at x 349 live, text from 372). The text follows the state (`+0x1d8` is the lab's screen: 1 Overview, 2 Chassis, 3 / 4 the two structure screens, 5 Armor, 6 Components, 7 Wiring, 8
@@ -1366,9 +1366,7 @@ Against `botlab-overview`, `botlab-flow-wiring-stock`, `botlab-wiring-delete-con
   `Click the Control Board (under Power) to add it first`; no controls -> `Click the Wiring button to set up keyboard or joystick controls for your robot`; else a random one of four (`0x419190(4)`, again until it is
   not about the screen shown): Paint Shop / Components / Chassis (not on 2 or 5) / Test Robot. The live Overview shows the Paint Shop one, the live Wiring (`botlab-wiring-delete-confirm`) the Test Robot one.
   Ours: `Builder::{tip_text, refresh_tip}` (the roll is redone on every screen change); the widgets hang on the `Glyph` of `info_display.gib` whose `DisplayBox` body is the `Info Display` box (the frame is the pane's,
-  so the positions are the box's x / y minus the pane's). Pixel check: the tip row of the Overview is now **0.02** MAE (icon at 349, text 372..674, rows 691..707). **Open**: the alert tips
-  (`0x42cf46`, `0x42d11a`: *Components should not intersect...*, *Robots cannot exceed a maximum size.*; `0x44d5fb`: the mass limit; `0x478d1d`: *Can't move that point because it will bend one side too much*;
-  2 s timer at `0x714890`) still go to the panel's status string; the random pick is ours (not the exe's LCG).
+  so the positions are the box's x / y minus the pane's). Pixel check: the tip row of the Overview is now **0.02** MAE (icon at 349, text 372..674, rows 691..707). The alert tips and the random pick: done in 9.27d.
 * **Delete Control** (`0x6f19fc` *Delete this input control?*): the shipped `common/messagebox.gib` titled **`Wiring`**, `Yes` left of `No`, the body **does not draw** (live `botlab-wiring-delete-confirm`: an empty
   box). `ra2_shell::yes_no_box` dresses the template (shared with the HQ's boxes), `DialogKind::ConfirmDelete`; No keeps the control, Yes removes it. Test `delete_control_asks_before_it_deletes` (`ORA_TEST_SCRATCH=<dir>` writes the frame): the box, title and buttons sit exactly where `botlab-wiring-delete-confirm`'s do (box MAE 7.05, all of it the nail texture's phase).
 * **Practice-arena sounds.** `LabArena` observes its match with the same `MatchSounds` the matches use (motors and their pitch, weapon fire, impacts, the obstacles' `AddXtraSound` materials, parts coming off)
@@ -1385,6 +1383,40 @@ Test: `playthrough::a_robot_built_from_nothing_is_wired_saved_and_fights` (blank
 both motors wired through the connection window, named `Bolt`, Back to HQ, `Bot5.bot` read back, then a match in which the new robot drives more than 0.5 m). Unit tests: `workshop::extrude` (6), `stats::weight_classes_use_the_games_thresholds`.
 Addresses: `FUN_00439650` (blank lab), `FUN_004deff0` / `FUN_004df080` / `FUN_0046c710` (class text, class from weight, the lab's class field), `FUN_0042f7d0` (weight / weightclass boxes), `FUN_004f7b30` (control board test enabling Wiring),
 `FUN_0042c850` (the drag judge, verified live on the new chassis), `FUN_0048d130` / `FUN_0048d1c3` (the 3D view's input: see 9.27b, the middle button rotates and the wheel zooms; 0xc9 / 0xd1 are the Page Up / Down keys), `0x6aa9e8` / `0x6aa9ec` / `0x6aa9a4` (399, 249, 800).
+
+### 9.27d The alert tips, the lab's tip line as the exe drives it, the practice sounds (`fx/polish2`, 2026-11-01)
+
+Live on display :9 (flatpak Wine 9.0; `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` of the prefix copied before and restored after, sha256 list equal; the first session's frida-server wedged after a hook
+was left on `0x5a6260` and the session was restarted: the camera hook now detaches before the client does). Captures (manifest rows, backup `manifest-additions-2026-10-21-polish2.tsv`):
+`botlab-alert-intersect`, `botlab-alert-expired`, `botlab-tip-drag`, `botlab-tip-attach-select`, `botlab-tip-cancel-blank`, `botlab-components-top-camera`, `audio-practice-test` (wav + `ra2_sounds.js` log).
+
+* **The four `0x43e7c0` callers.** `FUN_0043e7c0(text)` is the alert: `<image filename "UI\botlab\alert.tga" alpha 1><text font fg_mcn14 color 1 .8 .3 1 align 2>` + text into the lab's `Info Display`
+  (`0x71488c`), `0x714890` := 2.0 s; the lab's per-frame update (`0x43e660..0x43e6c4`) counts it down by the frame's dt and, at <= 0, writes the string saved at `0x71487c` (the last tip) back. An **empty** text takes the
+  early path (`0x43e832`: `FUN_0042f980` is `length == 0`): it only restores the tip. The callers:
+  `0x42cf46` / `0x42d11a` in `FUN_0042c850` (the drag judge, **every frame of a drag**, only the baseplate branch: a part over another's `SmartZone` raises none): *Components should not intersect the chassis or other
+  components.* (`0x6f05f8`, code 3) when the physics test hits and the part is not too big, *Robots cannot exceed a maximum size.* (`0x6f063c`, codes 2 and 4: height over 3.0 or origin below -1.5, or the retest),
+  *Baseplate components must fit inside the chassis.* (`0x6f05c0`, code 5); `0x44d5fb` in `FUN_0044d1b0` (the **chassis side-adjust**, screen 4: after a point is moved, for the two adjacent sides the dot product
+  `FUN_0044d680` of their face normals is < 0.75) *Can't move that point because it will bend one side too much* (`0x6f2118`), then the point goes back; `0x478d1d` is the **clear** (empty text) after a chassis
+  click was accepted. **Not** `0x44d5fb` = the mass limit as 9.27c guessed: *Total mass of robot must not exceed N kg.* (`0x6f0590`, `0x42c425`, `0x43cb6f`) is a `Robot Arena 2` message box, as ours has it.
+* **Live** (`botlab-alert-intersect`): the Small Battery Pack dragged over the motors, camera at pitch -1.2 (the baseplate seen from above; the 3D camera is set through the camera object after a Page Up / Page Down):
+  the tip line becomes the purple `!` icon (alert.tga 17 x 17) and the orange text, centred as a pair; it stays for the 5 s the mouse sat still (the drag judge refreshes it each frame); moved off the chassis it was
+  gone within the next sample (`botlab-alert-expired`: the drag tip is back, `0x71487c`). Ours: `Builder::{show_alert, alert}`, `tip_set`, the alert is raised in `drag_to` and kept at 2 s by `advance` while the
+  part stays refused over the baseplate (`parent == 0`), cleared by the countdown; `refresh_tip` swaps `tip.bmp` / `.5 .6 1` for `alert.tga` / `1 .8 .3`. **Tip-line row against the captures: 0.009 MAE** (alert),
+  0.013 / 0.015 (select, drag tips), 0.000 (cancel), whole width 685..715.
+* **The other tip-line texts, found in the same frames.** The attachment tips (*Click a green box ... Attach*, *Click the Attach button*) and the drag tip (*Drag the component where you want it to go ...*) are tip-line
+  texts (blue `tip` icon), not the synthetic panel's status: set on the palette click and on Attach, the drag tip is also what comes back after an alert; a click on nothing (drag cancelled) leaves the line **empty**
+  (no icon: `botlab-tip-cancel-blank`); a screen change recomputes the default (`FUN_0043e900`). Ours: `Builder::tip_set` (the status string still feeds the synthetic panel, which stays for the editing the port
+  has not moved to the shell).
+* **The chassis side-adjust's bend alert is not reproduced:** the port has the outline editor only (`chassis::move_outline_point`); the mesh's side-adjust screen (4) with the normals' `< 0.75` test does not exist
+  there. The alert API is ready for it (`Builder::show_alert`).
+* **Practice-arena sounds, against `audio-practice-test`** (Test Robot, C.R.U.S.H.; W 2.5 s, Space, W 3 s into the far wall). Live: four `motorloop` voices (one per wheel) are created when W goes down, their pitch
+  (`F`, Hz of the 22 050 Hz sample) ramps 11 536 -> 16 223 -> 21 128 -> 24 409 -> 28 591 over 1.1 s (0.52 -> 1.30 of the rate) and they stop (`S`) when W is released; no crowd, announcer or ceremony sounds; the
+  workshop music keeps playing; at the wall `sounds\steel_collision.wav` (-7.95 dB, -13.41 dB) and `sounds\hammer_hit.wav` (-13.45, -14.51 dB) play. Ours (`labshot ... keys down 17 tick ... cues`): four
+  `motorloop` voices on W, off on release, pitch 0.685 / 0.955 / 1.33 at 0.2 / 0.5 / 1.0 s (live, interpolated: 0.69 / 0.9 / 1.25-1.3: **equal to the sampling error**), the weapon key gives `burst_trigger.wav`
+  (live: a sound of id 5 played with no call row, not named). **Differs:** ours plays **no impact** at the wall; the practice arena's `Impact` cues come from the match's priced contacts (`duel.impacts`), and a
+  robot against the wall is not priced there. Live plays them for chassis and hammer against the arena. Owner: the combat / physics side (`fx/bell-landing`); the cue and its volume rule (`hundredths of dB` of
+  the contact magnitude, docs/35) are the match's. New `labshot` step `cues`.
+* **Tip RNG and the 1 px items** are in docs/34 11.8 (snapshot box, DisplayBox rows, the chat line).
 
 ## 9.28 Release check: Enter Event without a robot, Select Team after a restart (`fx/release`, 2026-10-28)
 

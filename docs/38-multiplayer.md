@@ -1045,8 +1045,8 @@ modelled. The original draws no panels for slots 3 and 4 of a deathmatch (every 
   at y 268.5 and every widget in it 1 px high. Kept exact (`EXACT_GROUPS`, the lobby's `lower group` only) the chat group is 306 px at y 268.28, the entry box (`chat textbox`) at 533.28, `chat label` 510.28,
   the alias row 559.28 / 551.28: each lands 1 px lower than before, the live offsets (`CHAT:` 521, the entry's border 532, the alias box 562 in `mp-lobby-host-chat`). The same rule applied to every
   centred Group (the vertical half truncated like the horizontal one) was tried and **refused**: it cost `exhibition-robots` +0.37 MAE and the HQ's message boxes +0.06, so the live 1 px is a property of this
-  group's fraction, not of centring. Tool `ra2-shell --example lobbyframes` (frames of the lobby at 1024x768). **Open**: the first message line is still 2 px high (270 against 272): `chat messages` is a
-  `DisplayBox` whose first line the exe places differently; not recovered.
+  group's fraction, not of centring. Tool `ra2-shell --example lobbyframes` (frames of the lobby at 1024x768). The first message line (270 against 272) is placed 2 px down by hand
+  (docs/34 11.8: the exe's DisplayBox rule is not recovered).
 * **Results owner line.** `result_cell.gib`'s `Spectator [TextBox]` (177 / 6, 150 x 16) is the small line above the team name (live `mp-results-host`: `PortJoiner` above Sting Ray's `The Rookies`, `Default Player` above
   C.R.U.S.H.'s). A network match fills it with the panel's owner name (`GroupInfo`'s fourth string, `Slot::name`): `RobotEntry::owned_by`, `RobotReport::owner`, `MatchResult::owner`, shown by
   `ra2ui::results::bind` (hidden for a local match, as the template's constructor leaves it). Test `the_owner_line_shows_only_when_a_player_is_named`; the pixel position is the template's own (not compared
@@ -1057,7 +1057,7 @@ modelled. The original draws no panels for slots 3 and 4 of a deathmatch (every 
 * The original's own crash twice under the replacement `dpnet` (`wine: Unhandled page fault on read access` at
   `0x00625a3f`, in the send-completion code `FUN_00625600`, once during a driven BEAR match, once right after a second
   join): not traced; the port is not involved.
-* The chat messages' first line (2 px, 16.8); the hinge angle's per-joint zero; the unready
+* The chat messages' first line is placed 2 px down by hand (docs/34 11.8: the exe's rule is not recovered); the hinge angle's per-joint zero; the unready
   joiner a Yes starts a match with (the original joiner entered the match with no robot of its own to show, the port
   stood in The Boxer).
 * The port's `closedplayer`/`noplayer` cells at other game types, voice and host migration (§15.7).
