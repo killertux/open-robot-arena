@@ -21,7 +21,7 @@ const UI_UPDATE = ptr('0x5e4e30');
 // FUN_004e64a0 clears the per-frame flags at the end of FUN_005e4e30.
 // frameEvents is a queue of per-frame button edges [{button, down}] applied on
 // entry, one entry per UI frame.
-let forceMouse = true, uiThis = null, pinned = null, uiFrames = 0;
+let forceMouse = true, uiThis = null, pinned = null, uiFrames = 0, keepBtn = -1;
 const frameEvents = [];
 Interceptor.attach(UI_UPDATE, { onEnter() {
   uiThis = this.context.ecx; uiFrames++;
@@ -34,7 +34,11 @@ Interceptor.attach(UI_UPDATE, { onEnter() {
     m.add(0x14 + ev.button).writeU8(ev.down ? 1 : 0);
     m.add(0x17 + ev.button).writeU8(1);
     m.add(0x1b).writeU8(1);
+    if (ev.keep) keepBtn = ev.down ? ev.button : -1;
   }
+  // `dragh`: the button stays flagged (+0x17 is what FUN_0042b810 reads: the editing area's drag handler
+  // moves a point only while it is set) on every frame between the press and the release.
+  if (keepBtn >= 0) { m.add(0x14 + keepBtn).writeU8(1); m.add(0x17 + keepBtn).writeU8(1); }
 } });
 const queue = [];          // [{dx, dy, dz, buttons}]
 let held = 0;              // button bitmask held between queue entries
@@ -88,14 +92,20 @@ rpc.exports = {
     return frameEvents.length;
   },
   // press button b at (x0,y0), move to (x1,y1) over `steps` frames with it held, release
-  drag(x0, y0, x1, y1, b, steps) {
-    b = b | 0; steps = steps || 10;
+  drag(x0, y0, x1, y1, b, steps, keep, hold) {
+    b = b | 0; steps = steps || 10; keep = !!keep; hold = hold | 0;
     frameEvents.push({ button: -1, pos: [x0 | 0, y0 | 0] }, { button: -1 });
-    frameEvents.push({ button: b, down: true });
+    frameEvents.push({ button: b, down: true, keep });
     for (let i = 1; i <= steps; i++)
       frameEvents.push({ button: -1, pos: [Math.round(x0 + (x1 - x0) * i / steps), Math.round(y0 + (y1 - y0) * i / steps)] });
-    frameEvents.push({ button: -1 });
-    frameEvents.push({ button: b, down: false });
+    for (let i = 0; i < 1 + hold; i++) frameEvents.push({ button: -1 });
+    frameEvents.push({ button: b, down: false, keep });
+    if (keep) {
+      // the editing area's move handler reads the raw (dinput) button state, not the UI object's
+      for (let i = 0; i < 2; i++) queue.push({ dx: 0, dy: 0, dz: 0, buttons: 0 });
+      for (let i = 0; i < steps + 2 + hold; i++) queue.push({ dx: 0, dy: 0, dz: 0, buttons: 1 << b });
+      queue.push({ dx: 0, dy: 0, dz: 0, buttons: 0 });
+    }
     return frameEvents.length;
   },
   frames() { return uiFrames; },
