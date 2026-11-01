@@ -576,11 +576,13 @@ fn parse_chassis(lines: &mut Lines, ver: (i32, i32)) -> Result<Chassis, Error> {
             ]);
         }
     }
+    let mut blank = false;
     if !has_model && lines.peek() == b"0" {
         // A chassis with no shape yet (a blank robot's) carries one `0` line
         // before its armour row (live: the original's untouched new robot,
         // `teamhq-newbot-empty__live__000.bot`).
         lines.line();
+        blank = true;
     }
     // Armour: a type row, plus an extra row when a 3D model is present.
     //
@@ -603,7 +605,9 @@ fn parse_chassis(lines: &mut Lines, ver: (i32, i32)) -> Result<Chassis, Error> {
     }
     // Buckling points exist from 1.11 onward (absent in 1.07/1.08). Each is a
     // position plus the mesh vertices that meet there (F9).
-    if ver > (1, 8) {
+    // A chassis with no shape has no buckling section either (live: the original's untouched new
+    // robot goes from the armour row straight to the buckle-model flag).
+    if ver > (1, 8) && (has_model || !blank) {
         let bpn = lines.i32()?;
         for _ in 0..bpn {
             let position = lines.vec3()?;
@@ -655,6 +659,12 @@ impl Bot {
         bot.version = "1.12".into();
         bot.default_texture.get_or_insert(true);
         bot
+    }
+
+    /// What a save followed by a load makes of the robot: the numbers rounded to the six digits the
+    /// game writes (`num`), and nothing else changed.
+    pub fn through_the_file(&self) -> Bot {
+        parse(&self.write()).unwrap_or_else(|_| self.clone())
     }
 
     /// Write the robot in the game's own text form.
@@ -841,7 +851,7 @@ impl Writer<'_> {
             let row = ch.armour_material.unwrap_or_else(|| armour.material_row());
             self.line(&row.iter().map(|v| num(*v)).collect::<Vec<_>>().join(" "));
         }
-        if ver > (1, 8) {
+        if ver > (1, 8) && ch.mesh.is_some() {
             self.line(&ch.buckling.len().to_string());
             for b in &ch.buckling {
                 self.floats(&b.position);
@@ -926,11 +936,7 @@ fn num(v: f32) -> String {
     if v == 0.0 {
         return if v.is_sign_negative() { "-0" } else { "0" }.into();
     }
-    let candidate = g6(v);
-    match candidate.parse::<f32>() {
-        Ok(back) if back.to_bits() == v.to_bits() => candidate,
-        _ => v.to_string(),
-    }
+    g6(v)
 }
 
 /// `%g` with precision 6, minus the `printf` locale.
@@ -1421,5 +1427,28 @@ mod tests {
             let bot = parse(&src).unwrap();
             assert!(bot.upgraded().write() == out, "{source} against {live}");
         }
+    }
+
+    /// The original's own untouched new robot parses and writes back byte for byte (no buckling
+    /// section for a chassis with no shape): `teamhq-newbot-empty`.
+    #[test]
+    fn the_original_blank_robot_round_trips() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/oracle/original/teamhq-newbot-empty__live__000.bot");
+        let Ok(data) = std::fs::read(path) else {
+            return;
+        };
+        let bot = parse(&data).unwrap();
+        assert_eq!(bot.write(), data);
+    }
+
+    /// The number format is `%g` with six digits whatever the value was (the original prints
+    /// through an `ostream`), not the shortest form.
+    #[test]
+    fn numbers_are_always_six_significant_digits() {
+        assert_eq!(num(0.681_580_6), "0.681581");
+        assert_eq!(num(0.1 + 0.2), "0.3");
+        assert_eq!(num(1.0 / 3.0), "0.333333");
+        assert_eq!(num(-2.384_185_8e-7), "-2.38419e-007");
     }
 }

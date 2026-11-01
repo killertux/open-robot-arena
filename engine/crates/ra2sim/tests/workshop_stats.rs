@@ -202,7 +202,7 @@ fn a_placed_chassis_child_round_trips_and_the_rigs_local_matrix_matches() {
     let library = GameLibrary::open(&root).unwrap();
     let stock = GameLibrary::read_bot(&root.join("AI/Team1/Bot0.bot")).unwrap();
     let mut chassis = stock.components[0].chassis.clone().unwrap();
-    chassis.texture_tga = None;
+    chassis.texture_tga = Some(ra2ui::workshop::extrude::blank_skin());
     let mut build = ra2ui::workshop::build::Build::new("Placed", chassis);
     let motor_info = library.component_info_by_file("Components\\anglemotor1.txt");
     let base_mount = *motor_info.mounts.keys().next().unwrap();
@@ -254,8 +254,14 @@ fn a_placed_chassis_child_round_trips_and_the_rigs_local_matrix_matches() {
         }
     }
     let reloaded = ra2ui::workshop::build::Build::load(&library, &path).unwrap();
-    assert_eq!(reloaded.components(), build.components());
-    assert_eq!(reloaded.transforms(), model);
+    // The file keeps six significant digits, as the original's does.
+    assert_eq!(
+        reloaded.components(),
+        build.to_bot().through_the_file().components.as_slice()
+    );
+    for (a, b) in reloaded.transforms().iter().zip(&model) {
+        assert!(a.abs_diff_eq(*b, 1e-5), "{a:?} != {b:?}");
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 

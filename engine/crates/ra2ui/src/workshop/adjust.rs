@@ -179,8 +179,9 @@ pub fn check_move(points: &[[i32; 2]], index: usize, to: [i32; 2]) -> Result<(),
     }
 
     // `FUN_004a1a50`: edges that meet away from their ends, then the points beside the two edges
-    // of the moved one.
-    if n > 1 {
+    // of the moved one. (Two points are one edge both ways round, which is not a crossing: live,
+    // the second point of a new outline is taken.)
+    if n > 2 {
         for i in 0..n {
             let (a, b) = (poly[i], poly[(i + 1) % n]);
             for j in 0..n {
@@ -210,6 +211,14 @@ pub fn check_move(points: &[[i32; 2]], index: usize, to: [i32; 2]) -> Result<(),
     Ok(())
 }
 
+/// The same three rules for a point about to be added to the outline (chassis step 1): the polygon
+/// with the new point last, judged as a moved point `points.len()` is.
+pub fn check_add(points: &[[i32; 2]], to: [i32; 2]) -> Result<(), RuleAlert> {
+    let mut ring = points.to_vec();
+    ring.push(to);
+    check_move(&ring, points.len(), to)
+}
+
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
@@ -228,7 +237,8 @@ pub fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     let n = cross3(sub3(b, a), sub3(c, a));
     let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
     if l > 1e-12 {
-        [n[0] / l, n[1] / l, n[2] / l]
+        // `+ 0.0`: no live file has a `-0` (the original's printer never shows a negative zero here)
+        [n[0] / l + 0.0, n[1] / l + 0.0, n[2] / l + 0.0]
     } else {
         [0.0; 3]
     }
@@ -351,5 +361,22 @@ mod tests {
         assert!((dot_of(1) - 0.8250).abs() < 1e-3, "{}", dot_of(1));
         assert!((dot_of(0) - 0.6984).abs() < 1e-3, "{}", dot_of(0));
         assert!(bends(&ch, 1));
+    }
+
+    /// Chassis step 1 asks the same three questions of a point about to be added (live
+    /// `botlab-step1-refused-*`: a point on an edge, one that crosses, one that makes a sharp corner).
+    #[test]
+    fn a_point_added_in_step_one_is_judged_by_the_same_rules() {
+        let square = [[200, 200], [800, 200], [800, 800], [200, 800]];
+        assert_eq!(check_add(&square, [500, 200]), Err(RuleAlert::TooClose));
+        assert_eq!(check_add(&square, [900, 500]), Err(RuleAlert::Crossing));
+        assert_eq!(check_add(&square, [700, 700]), Err(RuleAlert::TooSharp));
+        assert_eq!(check_add(&square[..3], [200, 800]), Ok(()));
+        assert_eq!(check_add(&[], [200, 200]), Ok(()));
+        assert_eq!(
+            check_add(&[[200, 200]], [800, 200]),
+            Ok(()),
+            "the second point is taken"
+        );
     }
 }

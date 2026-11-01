@@ -133,7 +133,10 @@ impl Build {
             version: "1.12".into(),
             name: name.into(),
             class: 0,
-            default_texture: Some(true),
+            // The header's fourth line: every robot the lab itself makes is saved with `0` live
+            // (13 `botlab-newbot-*` / `botlab-adjust-*` files, `teamhq-newbot-empty`); only files
+            // that come from a shipped design carry `1` (docs/36 9.27f).
+            default_texture: Some(false),
             heading: Some(0.0),
             components: vec![Component {
                 parent: -1,
@@ -298,6 +301,38 @@ impl Build {
         Ok(TopMove::Moved)
     }
 
+    /// One mouse move of a baseplate point drag (chassis step 1 with the outline closed): the same
+    /// outline rules as step 2's ([`super::adjust::check_move`]); the mesh is made when step 2
+    /// opens, so nothing else follows the point.
+    pub fn adjust_bottom_point(
+        &mut self,
+        index: usize,
+        point: [i32; 2],
+    ) -> Result<super::adjust::TopMove, BuildError> {
+        use super::adjust::{check_move, TopMove};
+        let mut chassis = self.chassis_copy()?;
+        if index >= chassis.bottom.len() {
+            return Err(super::chassis::ChassisError::NoPoint {
+                index,
+                count: chassis.bottom.len(),
+            }
+            .into());
+        }
+        let point = [
+            point[0].clamp(0, super::chassis::OUTLINE_MAX),
+            point[1].clamp(0, super::chassis::OUTLINE_MAX),
+        ];
+        if let Err(rule) = check_move(&chassis.bottom, index, point) {
+            return Ok(TopMove::Refused(rule));
+        }
+        if chassis.bottom[index] == point {
+            return Ok(TopMove::Unchanged);
+        }
+        chassis.bottom[index] = point;
+        self.commit_chassis(chassis);
+        Ok(TopMove::Moved)
+    }
+
     /// Start with the four stock controls (`Forward`, `LeftRight`, `Fire`,
     /// `Spin`) already on the board.
     pub fn with_default_board(mut self) -> Self {
@@ -330,9 +365,20 @@ impl Build {
         let needed = bot.components.len();
         info.resize_with(needed, ComponentInfo::default);
         let mut bot = bot;
+        let mut skinned = false;
         if let Some(chassis) = bot.components.first_mut().and_then(|c| c.chassis.as_mut()) {
             normalize_chassis(chassis);
+            // The original loads a shaped chassis that has no skin with the default white one and
+            // writes it back with the header's fourth line `1`, whatever it was (live: our
+            // `OraBuilt.bot` without a skin came back `1`, `true` and a 256x256 white TGA).
+            if chassis.mesh.is_some() && chassis.texture_tga.is_none() {
+                chassis.texture_tga = Some(super::extrude::blank_skin());
+                skinned = true;
+            }
             info[0] = chassis_info(chassis);
+        }
+        if skinned {
+            bot.default_texture = Some(true);
         }
         let board = ControlBoard::from_bot(&bot).map_err(BuildError::Wiring)?;
         let paint = Paint::from_chassis(
@@ -357,7 +403,12 @@ impl Build {
     pub fn load(library: &GameLibrary, path: &std::path::Path) -> Result<Self, BuildError> {
         let bot = GameLibrary::read_bot(path)?;
         let info = resolve_info(library, &bot);
-        Self::from_bot_with_info(bot, info)
+        let mut build = Self::from_bot_with_info(bot, info)?;
+        // The original's loader leaves every design with the header's fourth line `1`, whatever
+        // the file said (live: our lab-made `OraTriangle.bot`, line `0`, came back from Import Bot
+        // as `1`, and a visit to the lab kept it; docs/36 9.27f).
+        build.bot.default_texture = Some(true);
+        Ok(build)
     }
 
     pub fn limits(&self) -> BuildLimits {
@@ -631,6 +682,8 @@ impl Build {
             *slot = chassis.clone();
         }
         self.bot.buckle_model = None;
+        // The shape was made in the lab: the header's fourth line is `0` again (docs/36 9.27f).
+        self.bot.default_texture = Some(false);
         self.info[0] = chassis_info(&chassis);
         self.paint.set_geometry(&chassis);
     }
@@ -878,7 +931,8 @@ impl Build {
 
     /// The bot as it would be saved: the board and the painted chassis applied.
     pub fn to_bot(&self) -> Bot {
-        let mut bot = self.bot.clone();
+        // The lab always writes the current format (the original loads and saves as 1.12).
+        let mut bot = self.bot.upgraded();
         // The lab writes the class its weight gives (`FUN_0046c710` after every mass change), not
         // the one the file was opened with.
         bot.class = if self.is_blank() {
@@ -1175,6 +1229,8 @@ mod tests {
                 weight: 8.0,
                 hardness: 80.0,
             }),
+            // the original gives a shaped chassis without a skin the white one when it loads it
+            texture_tga: Some(super::super::extrude::blank_skin()),
             ..Default::default()
         }
     }
@@ -1442,7 +1498,7 @@ mod tests {
         let data = std::fs::read(root.join("AI/Team1/Bot0.bot")).unwrap();
         let stock = ra2fmt::bot::parse(&data).unwrap();
         let mut chassis = stock.components[0].chassis.clone().unwrap();
-        chassis.texture_tga = None;
+        chassis.texture_tga = Some(super::super::extrude::blank_skin());
         let mut build = Build::new("Real", chassis);
         let motor_info = library.component_info_by_file("Components\\anglemotor1.txt");
         let base_mount = *motor_info
@@ -1614,5 +1670,120 @@ mod tests {
         let ch = build.chassis().unwrap();
         assert_eq!(ch.top, ch.bottom);
         assert!((ch.height - 0.825).abs() < 1e-6);
+    }
+
+    /// The file the lab writes for a triangle baseplate equals the original's byte for byte
+    /// (header flag `0`, the six-digit numbers, the blank skin): live `botlab-adjust-triangle-ok`
+    /// (first top point dragged to (400,300)), `-base-ccw` and `-base-vertical` (docs/36 9.27f).
+    #[test]
+    fn a_triangle_robot_is_saved_byte_for_byte_as_live() {
+        use crate::workshop::adjust::TopMove;
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local/oracle/original");
+        type Case = (&'static str, [[i32; 2]; 3], Option<(usize, [i32; 2])>);
+        let cases: [Case; 3] = [
+            (
+                "botlab-adjust-triangle-ok",
+                [[200, 200], [800, 200], [500, 800]],
+                Some((0, [400, 300])),
+            ),
+            (
+                "botlab-adjust-base-ccw",
+                [[200, 200], [500, 800], [800, 200]],
+                None,
+            ),
+            (
+                "botlab-adjust-base-vertical",
+                [[800, 200], [800, 800], [200, 500]],
+                None,
+            ),
+        ];
+        for (name, pts, drag) in cases {
+            let Ok(live) = std::fs::read(root.join(format!("{name}__live__000.bot"))) else {
+                return;
+            };
+            let mut build = Build::blank("Enter Bot Name");
+            for p in pts {
+                build
+                    .add_chassis_outline_point(crate::workshop::chassis::Outline::Bottom, p, true)
+                    .unwrap();
+            }
+            build.begin_top_adjust().unwrap();
+            if let Some((i, p)) = drag {
+                assert_eq!(build.adjust_top_point(i, p).unwrap(), TopMove::Moved);
+            }
+            let ours = build.bot().write();
+            if let Some(d) = std::env::var_os("BOT_DUMP") {
+                std::fs::write(std::path::Path::new(&d).join(format!("{name}.ours")), &ours)
+                    .unwrap();
+            }
+            // Line by line; a number may differ by one unit of its sixth digit: the original is x87
+            // code and one skin coordinate (`triangle-ok`, the top plate's third u: 0.68158 live,
+            // 0.681581 ours) lands one single-precision step lower there.
+            let (a, b): (Vec<&[u8]>, Vec<&[u8]>) = (
+                ours.split(|c| *c == b'\n').collect(),
+                live.split(|c| *c == b'\n').collect(),
+            );
+            assert_eq!(a.len(), b.len(), "{name}: line count");
+            let mut off = 0;
+            for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+                off += x.len() + 1;
+                if x == y {
+                    continue;
+                }
+                let num = |l: &[u8]| -> Option<Vec<f64>> {
+                    String::from_utf8_lossy(l)
+                        .split(' ')
+                        .filter(|t| !t.is_empty())
+                        .map(|t| t.parse().ok())
+                        .collect()
+                };
+                let close = match (num(x), num(y)) {
+                    (Some(p), Some(q)) => {
+                        p.len() == q.len() && p.iter().zip(&q).all(|(p, q)| (p - q).abs() < 1.5e-6)
+                    }
+                    _ => false,
+                };
+                assert!(
+                    close,
+                    "{name}: line {} (byte {}) differs: {:?} vs {:?}",
+                    i + 1,
+                    off,
+                    String::from_utf8_lossy(&x[..x.len().min(60)]),
+                    String::from_utf8_lossy(&y[..y.len().min(60)])
+                );
+            }
+        }
+    }
+
+    /// What the original does to a design it loads and saves again (`Import Bot`, docs/36 9.27f):
+    /// the white skin of a shaped chassis without one, header line 4 `1`. Loading what it wrote and
+    /// saving again gives the same bytes.
+    #[test]
+    fn a_design_the_original_saved_is_saved_again_unchanged() {
+        let Some(root) = game_root() else {
+            return;
+        };
+        let library = GameLibrary::open(&root).unwrap();
+        let originals =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local/oracle/original");
+        for name in [
+            "teamhq-import-resave-orabuilt",
+            "teamhq-import-resave-oratriangle",
+        ] {
+            let path = originals.join(format!("{name}__live__000.bot"));
+            let Ok(data) = std::fs::read(&path) else {
+                continue;
+            };
+            let build = Build::load(&library, &path).unwrap();
+            assert_eq!(build.bot().default_texture, Some(true), "{name}");
+            let saved = build.save();
+            assert!(
+                saved == data,
+                "{name}: {} vs {} bytes",
+                saved.len(),
+                data.len()
+            );
+        }
     }
 }
