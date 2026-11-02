@@ -2216,6 +2216,9 @@ impl Shell {
             .unwrap_or_default();
         for block in window.gib.blocks.iter_mut() {
             if let Block::Widget(root) = block {
+                if let Some(grid) = workshop::find_mut(root, "robot grid") {
+                    ra2ui::event_screens::show_selection_bar(grid, selected.is_some());
+                }
                 if let Some(w) = workshop::find_mut(root, "robot name") {
                     set_text(w, &name);
                 }
