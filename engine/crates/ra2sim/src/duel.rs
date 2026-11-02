@@ -2245,6 +2245,15 @@ impl Duel {
         }
     }
 
+    /// How many collidables of the other robot each robot's brain zones hold
+    /// now (the readings that raise zone events), for tracing the weapon
+    /// brains' sensors (`fidtrace` `FIDTRACE_FIRE`, docs/29 section 12ap).
+    pub fn zone_counts(&self) -> Vec<usize> {
+        (0..self.robots.len())
+            .map(|r| self.brain_zone_inside.iter().filter(|k| k.0 == r).count())
+            .collect()
+    }
+
     /// Tell the brains what the step took away: a component that came off
     /// (`LostComponent(id)` to its own robot's brain, `FractureEvent` to all)
     /// and a robot that is out (`PlayerOut(id)` to every brain).

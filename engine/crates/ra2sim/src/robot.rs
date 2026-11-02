@@ -2121,6 +2121,27 @@ impl Robot {
         std::mem::take(&mut self.flame_sounds)
     }
 
+    /// Each burst device's cycle, for tracing: `(part, slider, phase)` with the
+    /// phase 0 cocked, 1 firing, 2 cocking (`fidtrace`'s `FIDTRACE_FIRE`).
+    pub fn burst_phases(&self) -> Vec<(usize, bool, u8)> {
+        (0..self.rig.parts.len())
+            .filter_map(|p| {
+                let info = self.rig.parts[p].joint?;
+                (info.use_kind == JointUse::Burst).then(|| {
+                    (
+                        p,
+                        info.slider,
+                        match self.burst[p] {
+                            BurstPhase::Cocked => 0,
+                            BurstPhase::Firing => 1,
+                            BurstPhase::Cocking => 2,
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// The weapon triggers (motor component indices) since the last call.
     pub fn take_fire_events(&mut self) -> Vec<usize> {
         std::mem::take(&mut self.fire_events)

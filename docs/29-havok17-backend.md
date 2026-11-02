@@ -6701,6 +6701,115 @@ quantity), the 12am GJK ties.
 **Tools.** `tools/oracle/live_runs.py`, `examples/zonereach`, `Duel::zone_probe_margin`,
 `RA2_ZONE_GROW`, `RA2_GP_ARENA`.
 
+### 12ap. ALARM's weapon against the Scout's, in 12 new live Box fights: the hammer is the original's, the Scout loses its fork early live and rarely in ours (fx/box-alarm; diagnostics only, no default changes)
+
+Sections 12ao and 12am left ALARM on its back in 26-32 of 48 of our Box
+warmups against 5 of 13 live, and its counted hits on the Scout at 29-31
+against 41. This round measured ALARM's weapon (a burst *piston*, a prismatic
+rod: the Scout's fork is the hinge burst motor, so there is no hammer hinge
+angle) and the Scout's fork live, in the same terms in both engines.
+
+**New live captures.** `boxweapons-scout-alarm-box__live__000..011` (12 fights,
+Scout `Team0/Bot0` v ALARM `Team0/Bot1`, shipped AIs, Combat Arena; agent
+`frida/ra2_boxweapons.js` loaded before Start Game, `capture_boxweapons_set.sh`;
+`:7`, `RA2_FRIDA_PORT=27147`; `Teams/`, `AI/`, `Robot Designs/`, `ra2.cfg`
+copied before and sha256-compared after: "prefix restored" in both sessions;
+36 rows in `local/oracle/manifest.tsv`, copies and
+`manifest-additions-2026-11-02-box-alarm.tsv` in `~/ra2-oracle-backup`). Rows as
+`ra2_boxfight.js` plus `M` (every hinge motor set: the Scout's fork fires with
+-49 rad/s at 3600) and the chassis' velocity and angular velocity in `X`, every
+4th step piece. (A first session of 10 runs lost 8 to Frida attach timeouts
+while the machine's load average was 25-35; two fights from it are
+`000..001`, the second session gave the rest.) ALARM's piston is the controller
+that pushes +-10000; its release is the one-shot `-1000 x air level` on `0x4b51b0`
+(the level falls as the air tank empties: -976, -941 ... -269), not a constant
+`-1000`, which a first reading of the rows took for 36 shots per fight.
+
+**Ours.** `FIDTRACE_FIRE=<path>` (`ensemble.sh` with `FIRE=1` writes `f<w>.txt`)
+logs every change of a burst device's cycle with the chassis' up.y, and `Z` lines
+with each robot's brain-zone reading count; `tools/oracle/alarm_tips.py` reads
+both with one definition (tip = ALARM's up.y falls through 0.5 from above 0.8;
+fork = the Scout's burst motor starts a stroke; hammer = the piston's release).
+
+**What agrees.**
+
+| | live (12) | ours (48 warmups) |
+|---|---|---|
+| ALARM's hammer releases per second, ALARM upright and the Scout within 2.5 m | 0.86 | 1.00 |
+| the Scout's displacement 0.4 s after a hammer hit of 20 or more (median) | +0.54 m | +0.53 m |
+| ALARM's recoil 0.4 s after it | -0.41 m | -0.35 m |
+| median amount of those hits | 44 | 45 |
+| where a Scout hit lands on ALARM (amount-weighted fwd / lat / dy quartiles) | 0.73..1.68 / -0.19..0.24 / -0.24..0.12 | 0.66..1.64 / -0.19..0.25 / -0.25..0.15 |
+| first blow of the hammer on the Scout, point in the Scout's frame | fwd 0.81, dy -0.10 | 0.77, -0.10 |
+| arena-wide damage the Scout takes from ALARM in the first 25 s | 564 / fight | 558 |
+| ALARM's brain zone reading the Scout, d 2.0-2.5 m | 0.89 | 0.75 |
+
+So the hammer stroke, its rate, its impulse on both robots and its price are the
+original's, and the Scout's hits on ALARM land in the same places. What tips ALARM
+is the Scout's fork under it at the moment of a hammer exchange, in both engines:
+
+| ALARM upright before a hammer hit of 10 or more on the Scout | live | ours |
+|---|---|---|
+| a fork stroke within 0.5 s: hits / ALARM's up.y falls under 0.9 within 1 s | 63 / 19 (30 %) | 341 / 76 (22 %) |
+| no fork stroke: hits / falls | 211 / 1 | 343 / 12 (3.5 %) |
+
+The per-event physics matches (the 12s-12r fork work holds). What differs is how
+often the event happens:
+
+* **Fork strokes per second with both robots upright and within 2.5 m: 0.10 live
+  (38 in 372 s) against 0.395 ours (548 in 1386 s).** Once the Scout fires, the
+  cycle is the same (intervals 1.0 / 1.125 / 1.25 s).
+* **The Scout loses its fork early live.** 5 of 12 live fights have 2-6 fork
+  strokes in 120 s (`004, 003, 009, 010, 011`, the brain switching to `Shove` /
+  `Charge`, which `Flipper.LostComponent` does when the weapon goes); ours 2 of 48
+  (<= 7 strokes), and in ours the only part the Scout loses is the Round Extender
+  (hp 100, fracture 15; the Forklift Arm has 1000 and the burst motor 400), in 7 of
+  24 fights, at 17-100 s. Live the first blow has already hit three Scout
+  components for 100+ in 003, 009 and 011. By the binary's rule (`0x45f2b0`: a part
+  comes off on a blow above its fracture once its hp are used up) a Scout whose
+  extender takes 100 hp from the first stroke loses the fork on the next blow.
+* The Scout faces ALARM (bearing under 30 degrees, both upright, within 3 m) as
+  ours does in the first 5 s (0.86 live, 0.90 ours) and much less afterwards (0.45-
+  0.58 live from 5 s on against 0.77-0.79 ours); live it also stands 2-3 m from
+  ALARM in 52 % of the samples against ours 1-2 m in 46 %. Its flip zone reads
+  ALARM in 24-38 % of the samples under 3 m live and 9-46 % ours.
+* Where the first hammer blow lands in the Scout's frame is the same, but over the
+  first 25 s ours puts more of the hammer's damage high and forward (dy above 0.1,
+  fwd 0.8-1.0: 71 of 558 per fight against live 6 of 564) and live more low and
+  back (fwd 0.6: 161 against 93). The live hammer hits are 0.1 m farther forward
+  and lower in ALARM's frame (median fwd 1.43 / dy -0.16 against 1.33 / -0.07).
+  One reading of the two together: live the head is lower or the rod farther out
+  at the blow, so the extender (hp 100) is struck by the first stroke more
+  often; ours the arm (hp 1000). Not established: the live component pointers
+  change between fights, so the struck component can only be told by position.
+
+**Our flips.** `inversion_events.py` over the 48 warmups: 32 on their back for 1.5 s
+or more; the hit before the turn is a Scout blow on ALARM's Hammer Head in 22, on
+the chassis in 8, the arena in 1 and a wheel in 1. In the fights, 71 tips at 1.85
+per 100 s (live 9 in the 12 new fights at 0.62; 5 in 6 older ones, 0.67), of which
+18 go to the back; every tip has a fork stroke in the 1.5 s before it (hammer hits with a fork stroke within 0.5 s are followed by a fall in 76 cases, those without in 12). Live the same: all
+9 tips have a fork stroke 0.35-1.2 s before, 3 go to the back.
+
+**Verdict.** ALARM's weapon is not the cause: its release rate, stroke, impulse and
+price match. The extra flips follow from the Scout's fork acting more often against
+an upright ALARM, because the Scout keeps its fork in ours and loses it in the first
+seconds in about 40 % of the live fights. The fork's survival depends on where the
+first blows land in the Scout's front (extender hp 100 against arm 1000) and on how
+the Scout keeps facing ALARM; neither is settled. No constant was changed.
+
+**Open.** (1) Which Scout component the first live blow takes off (the extender, or
+the burst motor behind it): needs the component names per `H` row (a name table from
+the live component list). (2) The 0.1 m / 0.09 m difference in where the hammer
+strikes in ALARM's frame. (3) Why the live Scout is less often aimed at ALARM after
+5 s (Engage's `AimToHeading` and the steering response, or `Reorient` from
+`timeOfLastGoodHit`). (4) The warmups start the robots at rest on the floor
+(12ai); `FIDTRACE_JITTER` was not run for this round. (5) The numbers below for
+"after" are the same code: no default changed, and `fx/ai-audit-x87` was not yet in
+master.
+
+**Tools.** `frida/ra2_boxweapons.js`, `capture_boxweapons_set.sh`, `alarm_tips.py`,
+`FIDTRACE_FIRE`, `ensemble.sh FIRE=1`, `Robot::burst_phases`, `Duel::zone_counts`.
+
 ### 12aq. The Compressor's arena-hp gap is the live sample's tail: 27 live fights, no source differs (fx/compressor; diagnostics only, no default changes)
 
 The task: the Compressor's arena hits (hits of 10 hp or more) on Sentinel / Wide

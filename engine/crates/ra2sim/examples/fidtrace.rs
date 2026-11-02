@@ -176,6 +176,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(p) => Some(std::fs::File::create(p)?),
                 Err(_) => None,
             };
+            // `FIDTRACE_FIRE=<path>`: every change of a burst device's cycle
+            // (cocked / firing / cocking) as `t robot part slider phase`, the
+            // match clock first, and the chassis' up.y, to set ALARM's hammer
+            // strokes against the live `F` rows (docs/29 section 12ap).
+            let mut fires = match std::env::var("FIDTRACE_FIRE") {
+                Ok(p) => Some(std::fs::File::create(p)?),
+                Err(_) => None,
+            };
+            let mut last_zone: Vec<usize> = Vec::new();
+            let mut last_phase: Vec<Vec<(usize, bool, u8)>> = vec![Vec::new(); m.duel.robots.len()];
             let mut trace = std::fs::File::create(&a[5])?;
             let mut dmg = std::fs::File::create(&a[6])?;
             writeln!(trace, "time_elapsed\t[(player, location xyz, heading, speed, hitpoints(p,0), health fraction)]")?;
@@ -230,6 +240,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             i.point.y,
                             i.point.z
                         )?;
+                    }
+                }
+                if let Some(f) = fires.as_mut() {
+                    let t = m.clock();
+                    let zc = m.duel.zone_counts();
+                    if zc != last_zone {
+                        writeln!(
+                            f,
+                            "{t:.4} Z {} {}",
+                            zc.first().copied().unwrap_or(0),
+                            zc.get(1).copied().unwrap_or(0)
+                        )?;
+                        last_zone = zc;
+                    }
+                    for (ri, r) in m.duel.robots.iter().enumerate() {
+                        let now = r.burst_phases();
+                        for (k, n) in now.iter().enumerate() {
+                            if last_phase[ri].get(k).map(|l| l.2) != Some(n.2) {
+                                let up = r
+                                    .transform(&*m.duel.physics)
+                                    .transform_vector3(glam::Vec3::Y)
+                                    .normalize_or_zero()
+                                    .y;
+                                writeln!(f, "{t:.4} {ri} {} {} {} {up:.3}", n.0, n.1 as u8, n.2)?;
+                            }
+                        }
+                        last_phase[ri] = now;
                     }
                 }
                 if let Some(f) = bodies.as_mut() {
