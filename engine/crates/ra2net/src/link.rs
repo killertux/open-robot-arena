@@ -23,6 +23,11 @@ use std::time::{Duration, Instant};
 
 use crate::frame::*;
 
+/// The longest retransmission timeout the round trip can set.
+const MAX_RTO: Duration = Duration::from_millis(500);
+/// The longest wait between two resends of one frame.
+const MAX_BACKOFF: Duration = Duration::from_millis(3200);
+
 /// Timing of a link.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinkConfig {
@@ -50,7 +55,7 @@ impl Default for LinkConfig {
             rto: Duration::from_millis(200),
             max_retries: 12,
             keepalive: Duration::from_millis(1000),
-            timeout: Duration::from_secs(10),
+            timeout: Duration::from_secs(30),
             ack_delay: Duration::from_millis(20),
             window: 32,
         }
@@ -438,7 +443,13 @@ impl Link {
             LinkState::Connecting | LinkState::Accepting => {
                 if now.duration_since(self.last_sent) >= self.config.rto {
                     self.connect_tries += 1;
-                    if self.connect_tries > self.config.max_retries {
+                    // 12 tries are 2.4 s: too short for a host that is busy for a
+                    // moment (a loaded machine). Give up only after the tries
+                    // *and* the session's 10 s connect patience.
+                    if self.connect_tries > self.config.max_retries
+                        && (self.state == LinkState::Accepting
+                            || now.duration_since(self.last_heard) >= Duration::from_secs(10))
+                    {
                         self.state = LinkState::Closed(CloseReason::ConnectFailed);
                     } else if self.state == LinkState::Connecting {
                         self.send_control(OP_CONNECT, 0, now);
@@ -455,13 +466,19 @@ impl Link {
                     self.state = LinkState::Closed(CloseReason::Timeout);
                     return std::mem::take(&mut self.out);
                 }
+                // A sample taken while the peer was busy (it acknowledges only
+                // when its loop pumps the link: a match loading takes seconds)
+                // must not stretch the timeout: a frame the socket dropped
+                // would then wait for the next sample's worth of seconds, and
+                // a short match was over before the resend (docs/41).
                 let rto = self
                     .rtt
                     .map(|r| (r * 3).max(self.config.rto / 4))
-                    .unwrap_or(self.config.rto);
+                    .unwrap_or(self.config.rto)
+                    .min(MAX_RTO);
                 let mut resend = Vec::new();
                 for (i, f) in self.in_flight.iter_mut().enumerate() {
-                    let backoff = rto * 2u32.pow(f.retries.min(4));
+                    let backoff = (rto * 2u32.pow(f.retries.min(4))).min(MAX_BACKOFF);
                     if now.duration_since(f.sent) >= backoff {
                         f.retries += 1;
                         if self.last_heard > f.sent {
@@ -645,7 +662,7 @@ mod tests {
         p.run(5);
         // a keeps polling but hears nothing.
         let mut now = p.now;
-        for _ in 0..200 {
+        for _ in 0..400 {
             now += Duration::from_millis(100);
             p.a.poll(now);
         }
@@ -688,7 +705,7 @@ mod tests {
         // Past the timeout the silence rule still closes it.
         p.a.send(b"again", false, true, p.now);
         let mut now = p.now;
-        for _ in 0..1100 {
+        for _ in 0..3100 {
             now += Duration::from_millis(10);
             p.a.poll(now);
         }
@@ -702,9 +719,11 @@ mod tests {
     fn a_talking_peer_that_never_acknowledges_runs_out_the_retries() {
         let mut p = Pair::new(0);
         p.run(5);
+        // b hears nothing from a, but must not give up on the silence first.
+        p.b.config.timeout = Duration::from_secs(3600);
         p.a.send(b"lost", false, true, p.now);
         let mut steps = 0;
-        while p.a.is_connected() && steps < 3000 {
+        while p.a.is_connected() && steps < 8000 {
             steps += 1;
             p.now += Duration::from_millis(10);
             p.a.poll(p.now); // everything a sends is lost
@@ -720,10 +739,35 @@ mod tests {
         );
     }
 
+    /// Round-trip samples grow when a peer answers late (each can be three
+    /// times the last); a long one must not make the next lost frame wait
+    /// seconds for its resend.
+    #[test]
+    fn a_slow_round_trip_does_not_stretch_the_next_resend() {
+        let mut p = Pair::new(0);
+        p.run(5);
+        p.a.rtt = Some(Duration::from_secs(5));
+        p.a.send(b"second", false, true, p.now);
+        let mut now = p.now;
+        let mut resent = false;
+        for _ in 0..100 {
+            now += Duration::from_millis(10);
+            // Everything a sends is lost: the first poll after the send is
+            // the frame itself, a later one is the resend.
+            if p.a.poll(now).iter().any(|d| {
+                matches!(Frame::decode(d), Some(Frame::Data { control, .. }) if control & CTL_RETRY != 0)
+            }) {
+                resent = true;
+                break;
+            }
+        }
+        assert!(resent, "no resend within a second of a slow sample");
+    }
+
     #[test]
     fn idle_links_keep_each_other_alive() {
         let mut p = Pair::new(0);
-        p.run(1500); // 15 s, past the timeout
+        p.run(3500); // 35 s, past the timeout
         assert!(p.a.is_connected() && p.b.is_connected());
     }
 }

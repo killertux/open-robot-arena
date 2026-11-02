@@ -127,7 +127,7 @@ Guaranteed messages are sequenced, acknowledged (cumulative + one 32-frame
 selective mask, piggy-backed or a delayed SACK), retransmitted with backoff,
 fragmented above 1200 bytes; non-guaranteed ones go once and are delivered on
 arrival (DirectPlay also sequences those; we do not). Keep-alives every 1 s
-while idle, a link times out after 10 s of silence or 12 failed retries.
+while idle, a link times out after 30 s of silence (10 s before docs/41) or 12 failed retries.
 A retry counts against the 12 only when the peer was heard from since the
 previous one (it is alive and still has not acknowledged): DirectPlay services
 its links on its own threads, so a peer busy loading a match still acks, while
