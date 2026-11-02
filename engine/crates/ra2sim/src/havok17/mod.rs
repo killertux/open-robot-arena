@@ -181,6 +181,8 @@ type PairKey = (usize, u32, usize, u32);
 struct WorldPiece {
     body: usize,
     piece: u32,
+    /// The piece's tag ([`Piece::tag`]).
+    tag: u32,
     body_pose: Pose,
     pose: Pose,
     /// A convex piece's vertices in world space (empty for a mesh).
@@ -409,6 +411,7 @@ impl Havok17Backend {
                 out.push(WorldPiece {
                     body: i,
                     piece: k as u32,
+                    tag: p.tag,
                     body_pose: body,
                     pose,
                     vertices,
@@ -612,7 +615,14 @@ impl Havok17Backend {
                     let restitution = restitution_i * restitution_j;
                     let (ca, cb) = if swap { (j, i) } else { (i, j) };
                     for p in points {
+                        let (tag_a, tag_b) = if swap {
+                            (pb.tag, pa.tag)
+                        } else {
+                            (pa.tag, pb.tag)
+                        };
                         out.push(Contact {
+                            tag_a,
+                            tag_b,
                             a: ca,
                             b: cb,
                             normal: p.normal,
@@ -906,6 +916,8 @@ impl Havok17Backend {
         hits.into_iter()
             .filter(|h| h.depth > 0.0)
             .map(|h| Contact {
+                tag_a: crate::backend::NO_TAG,
+                tag_b: crate::backend::NO_TAG,
                 a: i,
                 b: j,
                 normal: h.normal,
@@ -980,6 +992,8 @@ impl Havok17Backend {
     fn fire_events(&mut self) {
         for c in &self.contacts {
             self.events.push(ContactEvent {
+                tag_a: c.tag_a,
+                tag_b: c.tag_b,
                 a: c.a as BodyHandle,
                 b: c.b as BodyHandle,
                 normal: -c.normal,

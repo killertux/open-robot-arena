@@ -419,7 +419,16 @@ fn dynamics_of(
 /// to its own bounding box. This is the "exact touched component": the compound
 /// body is built from one hull per component, so the contact point lies on one
 /// of them.
-pub fn touched_component(robot: &Robot, part: usize, state: &BodyState, p: Vec3) -> Option<usize> {
+pub fn touched_component(
+    robot: &Robot,
+    part: usize,
+    state: &BodyState,
+    p: Vec3,
+    tag: u32,
+) -> Option<usize> {
+    if let Some(i) = tagged_component(robot, part, tag) {
+        return Some(i);
+    }
     let frame = Mat4::from_rotation_translation(state.rotation, state.position);
     let mut best: Option<(usize, f32)> = None;
     for &i in &robot.rig.parts[part].members {
@@ -436,6 +445,29 @@ pub fn touched_component(robot: &Robot, part: usize, state: &BodyState, p: Vec3)
         }
     }
     best.map(|(i, _)| i)
+}
+
+/// Whether a contact names the component whose collidable made it: the original's
+/// event carries the two colliding collidables, one per component
+/// (`FUN_00414d80` reads the component off the struck one), where ours finds the
+/// component nearest the contact point, which hands a point on the seam of two
+/// touching components (the Scout's extender and the fork arm behind it) to the
+/// larger. Docs/29 section 12as. `RA2_TAGS=0` is the nearest-box rule.
+fn use_tags() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_TAGS").map_or(true, |v| v != "0"))
+}
+
+/// The component `tag` names, if it is an attached member of `part` that has a hull.
+fn tagged_component(robot: &Robot, part: usize, tag: u32) -> Option<usize> {
+    if tag == crate::backend::NO_TAG || !use_tags() {
+        return None;
+    }
+    let i = tag as usize;
+    (robot.rig.parts.get(part)?.members.contains(&i)
+        && *robot.attached.get(i)?
+        && !robot.rig.components[i].hull_points.is_empty())
+    .then_some(i)
 }
 
 /// The attacking parameters of a component.
@@ -534,7 +566,20 @@ pub fn event_registrations(c: &crate::rig::Component) -> Vec<f32> {
 
 /// The registered component of `part` nearest the point (as
 /// [`touched_component`], over the components that have a collidable).
-fn registered_component(robot: &Robot, part: usize, state: &BodyState, p: Vec3) -> Option<usize> {
+fn registered_component(
+    robot: &Robot,
+    part: usize,
+    state: &BodyState,
+    p: Vec3,
+    tag: u32,
+) -> Option<usize> {
+    if let Some(i) = tagged_component(robot, part, tag) {
+        if !robot.rig.smart_zones.iter().any(|z| z.component == i)
+            && !event_registrations(&robot.rig.components[i]).is_empty()
+        {
+            return Some(i);
+        }
+    }
     let frame = Mat4::from_rotation_translation(state.rotation, state.position);
     let zones: Vec<usize> = robot.rig.smart_zones.iter().map(|z| z.component).collect();
     let mut best: Option<(usize, f32)> = None;
@@ -781,9 +826,10 @@ impl EventGate {
                 if let Some(ab) = arena.get(&body) {
                     return (body, ab.part_at(e.point));
                 }
+                let tag = if body == e.a { e.tag_a } else { e.tag_b };
                 let c = owner
                     .get(&body)
-                    .and_then(|&(r, p)| registered_component(&robots[r], p, state, e.point));
+                    .and_then(|&(r, p)| registered_component(&robots[r], p, state, e.point, tag));
                 (body, c.unwrap_or(usize::MAX))
             };
             let mut key = [side(e.a, &e.state_a), side(e.b, &e.state_b)];
@@ -801,9 +847,10 @@ impl EventGate {
                 if let Some(ab) = arena.get(&body) {
                     return (body, ab.part_at(e.point));
                 }
+                let tag = if body == e.a { e.tag_a } else { e.tag_b };
                 let c = owner
                     .get(&body)
-                    .and_then(|&(r, p)| registered_component(&robots[r], p, state, e.point));
+                    .and_then(|&(r, p)| registered_component(&robots[r], p, state, e.point, tag));
                 (body, c.unwrap_or(usize::MAX))
             };
             let mut key = [side(e.a, &e.state_a), side(e.b, &e.state_b)];
@@ -815,7 +862,7 @@ impl EventGate {
                 continue;
             }
             let mut through = false;
-            for (body, state) in [(e.a, &e.state_a), (e.b, &e.state_b)] {
+            for (body, state, tag) in [(e.a, &e.state_a, e.tag_a), (e.b, &e.state_b, e.tag_b)] {
                 if let Some(ab) = arena.get(&body) {
                     let last = self.last.entry((body, ab.part_at(e.point))).or_default();
                     last.resize(1, None);
@@ -830,7 +877,7 @@ impl EventGate {
                     continue;
                 };
                 let robot = &robots[r];
-                let Some(c) = registered_component(robot, p, state, e.point) else {
+                let Some(c) = registered_component(robot, p, state, e.point, tag) else {
                     continue;
                 };
                 let iv = event_registrations(&robot.rig.components[c]);
@@ -874,12 +921,15 @@ pub fn wheel_contacts(robots: &[Robot], events: &[ContactEvent]) -> Vec<(usize, 
     let mut out = Vec::new();
     for e in events {
         // `normal` points from `a` toward `b`.
-        for (body, state, toward) in [(e.a, &e.state_a, -e.normal), (e.b, &e.state_b, e.normal)] {
+        for (body, state, toward, tag) in [
+            (e.a, &e.state_a, -e.normal, e.tag_a),
+            (e.b, &e.state_b, e.normal, e.tag_b),
+        ] {
             let Some(&(r, p)) = owner.get(&body) else {
                 continue;
             };
             let robot = &robots[r];
-            let Some(c) = registered_component(robot, p, state, e.point) else {
+            let Some(c) = registered_component(robot, p, state, e.point, tag) else {
                 continue;
             };
             if robot.rig.components[c].role == Role::Wheel {
@@ -992,8 +1042,8 @@ pub fn resolve_with(
             angular_term(e.point - dyn_b.com, n, dyn_b.inv_inertia),
         );
         let (Some(ca), Some(cb)) = (
-            touched_component(robot_a, pa, &e.state_a, e.point),
-            touched_component(robot_b, pb, &e.state_b, e.point),
+            touched_component(robot_a, pa, &e.state_a, e.point, e.tag_a),
+            touched_component(robot_b, pb, &e.state_b, e.point, e.tag_b),
         ) else {
             continue;
         };
@@ -1095,7 +1145,8 @@ fn arena_record(
         angular_term(e.point - dyn_r.com, n, dyn_r.inv_inertia),
         angular_term(e.point - com_x, n, inv_x),
     );
-    let component = touched_component(robot, part, state_r, e.point)?;
+    let tag = if robot_is_a { e.tag_a } else { e.tag_b };
+    let component = touched_component(robot, part, state_r, e.point, tag)?;
     Some((rec0, m, component))
 }
 

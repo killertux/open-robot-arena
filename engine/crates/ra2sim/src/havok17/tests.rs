@@ -592,3 +592,70 @@ fn the_combat_arenas_mopp_returns_its_triangles_in_the_live_order() {
         vec![10, 0, 11, 8, 9, 3, 1, 6, 5, 2, 4, 7]
     );
 }
+
+/// A contact names the collidable that made it: two boxes side by side in one body
+/// (the Scout's round extender and the fork arm behind it, docs/29 section 12as) are
+/// told apart by the compound children's tags, wherever the point lies.
+#[test]
+fn a_contact_reports_the_tags_of_the_colliding_pieces() {
+    use crate::backend::{CompoundChild, NO_TAG};
+    let boxed = |lo: Vec3, hi: Vec3| {
+        let mut pts = Vec::new();
+        for x in [lo.x, hi.x] {
+            for y in [lo.y, hi.y] {
+                for z in [lo.z, hi.z] {
+                    pts.push(Vec3::new(x, y, z));
+                }
+            }
+        }
+        ShapeDesc::ConvexHull { points: pts }
+    };
+    let child = |lo: Vec3, hi: Vec3, tag: u32| CompoundChild {
+        local_position: Vec3::ZERO,
+        local_rotation: Quat::IDENTITY,
+        shape: boxed(lo, hi),
+        tag,
+    };
+    let mut physics = Havok17Backend::new().unwrap();
+    // The target: a short box (tag 8) at z 0..0.25 and a longer one (tag 9) at z 0.25..0.65.
+    let target = physics
+        .create_body(
+            &BodyDesc::new(
+                MotionType::Static,
+                ShapeDesc::Compound(vec![
+                    child(Vec3::new(-0.05, -0.1, 0.0), Vec3::new(0.05, 0.1, 0.25), 8),
+                    child(Vec3::new(-0.05, -0.1, 0.25), Vec3::new(0.05, 0.1, 0.65), 9),
+                ]),
+            )
+            .with_friction(0.3),
+        )
+        .unwrap();
+    // A box coming down the z axis onto the far end of the long piece.
+    let striker = physics
+        .create_body(
+            &BodyDesc::new(
+                MotionType::Dynamic,
+                boxed(Vec3::splat(-0.1), Vec3::splat(0.1)),
+            )
+            .at(Vec3::new(0.0, 0.0, 0.85))
+            .with_mass(10.0)
+            .with_friction(0.3),
+        )
+        .unwrap();
+    physics.set_velocity(striker, Vec3::new(0.0, 0.0, -3.0), Vec3::ZERO);
+    let mut seen = Vec::new();
+    for _ in 0..30 {
+        physics.step(1.0 / 60.0);
+        seen.extend(physics.take_contacts());
+    }
+    let tags: Vec<u32> = seen
+        .iter()
+        .map(|e| if e.a == target { e.tag_a } else { e.tag_b })
+        .collect();
+    assert!(!tags.is_empty(), "the boxes never met");
+    assert!(tags.iter().all(|&t| t == 9), "{tags:?}");
+    assert!(seen.iter().all(|e| {
+        let other = if e.a == target { e.tag_b } else { e.tag_a };
+        other == NO_TAG
+    }));
+}
