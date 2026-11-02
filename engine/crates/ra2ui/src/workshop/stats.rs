@@ -99,6 +99,9 @@ pub fn role_hitpoints(class: &str) -> f32 {
         "Wheel" => 250.0,
         "ControlBoard" => 200.0,
         "Battery" | "AirTank" => 250.0,
+        // Live (`partsfight-*`, docs/29 section 12ar) a SmartZone has 400, like the parts that
+        // declare no `type`.
+        "SmartZone" => 400.0,
         _ => 300.0,
     }
 }

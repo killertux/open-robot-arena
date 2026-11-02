@@ -849,6 +849,10 @@ per-material scale.
   never dent a ramplate (40) and never reaches the control board behind a chassis
   (41), while one solid pass shears a weapon off rather than grinding it down —
   the reading the community's notes describe, now with the comparison behind it.
+  Refined by docs/29 section 12ar: the test also needs the part's mount depth
+  (`+0xe4`) above 1, so a part bolted straight to the chassis (motors, batteries,
+  boards, a piston) never comes off, and a blow on a chassis hands
+  `(1 - hp / maxhp) * blow * (1 - d)` on to every such part within a metre.
 - **A blow under `0.5` is discarded** — the handler's own gate. That is what stops
   two robots leaning on each other from eroding one another.
 - **The per-role weights are gone.** They were ours and the engine has none: a
