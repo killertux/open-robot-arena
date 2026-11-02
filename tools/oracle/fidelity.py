@@ -137,7 +137,7 @@ FIXTURES = [
     dict(id="teamhq-history", ref="teamhq-history__1024x768__000.png",
          route=TEAMHQ + ["history button"]),
     dict(id="botlab-overview", ref="botlab-overview__1024x768__000.png",
-         build="overview",
+         build="overview", env={"ORA_TIP_SEED": "2"},
          note="ours: ra2-app --build on C.R.U.S.H. (Teams/Team0/Bot0.bot); the reference shows a random tip line"),
     dict(id="botlab-chassis", ref="botlab-chassis__1024x768__000.png",
          build="chassis"),
@@ -284,6 +284,12 @@ def live_states():
         return {}
 
 
+# References kept in local/oracle but not scored.  arena-metalskull-f4 was taken after the match
+# ended (Match Results window up, not an F4 view: manifest note-unreliable-references); the
+# state-hooked arena-metalskull-f4live shows the same F4 view with the match on and is scored.
+RETIRED = ("arena-metalskull-f4",)
+
+
 def find_arena_fixtures():
     """arena-<id>-<shot> references from `capture_arenas.py`.  Ours comes from
     `ra2-app --match --arena <script> --camera-shots ...` (one run per arena;
@@ -297,6 +303,8 @@ def find_arena_fixtures():
             if f.startswith("arena-") and f.endswith(".png"):
                 fid = f.split("__")[0]
                 _, arena, shot = fid.split("-", 2)
+                if fid in RETIRED:
+                    continue
                 if arena in ARENA_SCRIPTS and shot in LIVE_SHOTS:
                     out.append(dict(id=fid, ref=f, livecam=(arena, shot),
                                     note="ours: --camera-shots at the recorded game clock (state-hooked capture)"))
@@ -373,6 +381,10 @@ def env(extra=None):
     e["RA2_GAME"] = GAME
     # Saves land in the scratch install itself, never in the user's save dir.
     e["ORA_SAVE_DIR"] = GAME
+    # The Bot Lab's random tip line (FUN_0043e900) is pinned: seed 19 draws "Test Robot" for every
+    # tab but the overview's capture, which shows "Paint Shop" (seed 2, fixture env).  Unpinned it
+    # moved the botlab-* fixtures by 0.1-0.2 between runs.
+    e.setdefault("ORA_TIP_SEED", "19")
     e.update(extra or {})
     # A fixture that saves (the inventory's scrap) writes into its own empty save dir, which
     # reads fall back from to the scratch install, so no other fixture sees the change.
@@ -387,7 +399,7 @@ def render_build(fx, out_png):
     with tempfile.TemporaryDirectory() as d:
         p = subprocess.run([APP, "--game", GAME, "--build", "--start", "Teams/Team0/Bot0.bot",
                             "--build-view", fx["build"], "--out", d, "--size", "%dx%d" % SIZE],
-                           capture_output=True, text=True, env=env(), timeout=180)
+                           capture_output=True, text=True, env=env(fx.get("env")), timeout=180)
         src = os.path.join(d, "build-view-%s.png" % fx["build"])
         if p.returncode or not os.path.exists(src):
             return (p.stderr or p.stdout).strip().splitlines()[-1:] or ["failed"]
