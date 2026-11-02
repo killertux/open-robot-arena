@@ -6700,3 +6700,118 @@ the floor with the Scout's fork when it is on its back (an unmeasured live
 quantity), the 12am GJK ties.
 **Tools.** `tools/oracle/live_runs.py`, `examples/zonereach`, `Duel::zone_probe_margin`,
 `RA2_ZONE_GROW`, `RA2_GP_ARENA`.
+
+### 12aq. The Compressor's arena-hp gap is the live sample's tail: 27 live fights, no source differs (fx/compressor; diagnostics only, no default changes)
+
+The task: the Compressor's arena hits (hits of 10 hp or more) on Sentinel / Wide
+Load were live 390 / 136 (14 fights, 12al) against ours 122 / 92. This section
+breaks the hp down by source in both, checks the dominant source (the smash
+arms) against the binary-priced live records, and takes 14 more live fights.
+**With 27 live fights the gap is not there**: Sentinel / Wide Load come to
+220 +- 121 / 107 +- 31 live against 122 +- 36 / 92 +- 28 ours (the mean of
+13 fights was one fight of 3324 hp), and neither the total, the smash arms nor
+the floor and walls differ by a permutation test. Nothing is changed in the
+engine; the fights, the tool and the open items are what this section leaves.
+
+**New live captures** (one session on `:9`, `RA2_FRIDA_PORT=27149`, run under
+the shared lock; `RA2_FRIDA_HOST` has to be set to the same port for `ra2_drive`;
+the prefix's `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` copied before and
+sha256-compared after: identical; rows in `local/oracle/manifest.tsv`, copies in
+`~/ra2-oracle-backup` with `manifest-additions-2026-11-02-compressor.tsv`):
+`arenahits-sentinel-wideload-compressor__live__005..018` (14 fights, 120 s, shipped
+AIs, `frida/ra2_arenahits.js`: every priced hit with its record and both bodies)
+with `fightpos-sentinel-wideload-compressor__live__009..022` (both robots' pose
+and tactic every 6 frames; `SAMPLE_FACTOR=2.2` in `capture_fightpos_set.sh` keeps
+the sampler running for the whole fight: the older fightpos files stop at 80-90 s).
+With the older captures the Compressor now has 27 live fights (19 `arenahits`
+with the price records, 8 older `fight`).
+
+**Tool.** `tools/oracle/arena_sources.py live <name> [ours <ensemble dir>]` splits
+the arena's hits of 10 hp or more by source. A live hit's source is its price
+factor (12o / 12aa: `amount / M` with `M` from the record of the same contact point:
+0.9 the smash arms, 0.7 the spikes, 0.5 the Arenium of the floor and the walls); the
+older `fight` captures (no `Q` rows) and hits with no record fall back to the
+region (the smash-arm alley is `|z| > 16.3`, `|x| < 6.5`). Ours has the struck
+piece (`fidtrace`'s `piece`).
+
+**1. By source** (hp / fight, mean +- standard error; fights with any hit; hp per
+hit; ours = 48 warmups, 120 s, master defaults):
+
+| | Sentinel live (27) | Sentinel ours (48) | Wide Load live | Wide Load ours |
+|---|---|---|---|---|
+| total | 219.7 +- 121.1 (median 27) | 122.0 +- 36.4 (34) | 106.5 +- 31.3 (40) | 91.7 +- 28.4 (21) |
+| smash arms | 174.9 +- 121.0, 6 fights, 81 / hit | 40.6 +- 22.5, 5, 25 / hit | 52.1 +- 28.4, 4, 74 / hit | 39.9 +- 26.8, 3, 44 / hit |
+| spikes | 0.8 +- 0.6, 2 fights | 18.9 +- 7.0, 14 | 3.4 +- 1.6, 5 | 9.2 +- 3.9, 10 |
+| floor and walls | 43.9 +- 17.7, 17 fights, 16 / hit | 62.5 +- 15.9, 30, 16 / hit | 51.1 +- 12.8, 21, 14 / hit | 42.6 +- 11.5, 26, 15 / hit |
+
+Permutation tests (live 27 against ours 48, Mann-Whitney statistic, 10 000
+shuffles): Sentinel total p = 0.84, smash 0.18, floor 0.67; Wide Load total 0.18,
+smash 0.40, floor 0.10. Fights with any smash-arm hit: 6 of 27 against 5 of 48
+(Fisher p = 0.19) and 4 of 27 against 3 of 48 (0.24). The only two comparisons
+under 0.05 (Sentinel spikes, 2 of 27 against 14 of 48, p = 0.039; Wide Load floor
+and walls in 21 of 27 against 26 of 48, p = 0.050) are two of twelve and are
+not corrected for that; none is a price (below). The counted robot-robot hits
+with the 27 fights: Sentinel 4.9 +- 0.7 / Wide Load 95.8 +- 14.1 live against 4.2 +- 0.5 /
+78.6 +- 6.3 ours.
+
+The live distribution is the "tail" of 12al: the arenahits fights' Sentinel hp
+is 0, 389, 3324, 181, 0, then (new) 0 to 365 in the fourteen (two of them 340 and 55 from the arms); one fight (`002`: the
+Sentinel in the end alley from 79 to 118 s, 140 priced hits at 3 s) is 3303 of
+the smash arms' hp. Ours has the same shape (the smash arms in 5 of 48 fights,
+the large ones 659, 1016 and 1963 hp; its episodes at 61-114 s).
+
+**2. The smash arms are priced as live's.** The arms' contacts need no new
+mechanism: the 53 live contacts of an arm (mass 100) in the alley (all in the
+2 fights `002` and `003` that have one) have a closing speed `rec0` of 0.4-27 m/s,
+40 % above 10, the high ones while an arm closes (live arm body: `v` 15-19 m/s,
+`w` 1.1-1.3 rad/s, the hinge's `0.235 -> 0.047` of 12y), and ours' arm contacts
+reach the same (fights 15 and 43: 15-31 m/s). The price per unit speed by the
+part struck, live against ours (`amount / rec0`, medians, `rec0` over 5 m/s):
+
+| struck part | live | ours |
+|---|---|---|
+| Sentinel chassis (record mass 296) | 10.8 (n 15) | 8.6 (3) |
+| Sentinel wheel (28) | 3.8 (13) | 2.7 (20) |
+| Wide Load wheel (227) | 7.6 (3) | 4.9 (12) |
+
+(`0.9 * 0.5 / (1/100 + 1/m + rotation terms)`; live's 81 hp per smash hit against
+ours' 25 comes from which part the arm hits and at what speed: the live hits
+priced from `rec0` over 5 m/s are 15 on the Sentinel's chassis, 13 on its wheel,
+and all but a few are one fight's episode.)
+The arms' own cadence and motion are 12y / 12z's and are not touched here.
+
+**3. Where the robots are.** From the fightpos samples up to the moment both
+brains fall idle (live 21 fights with the full sampler, ours 48), the share of
+samples with the chassis centre in the alley (`|x| < 6.5`, `|z| > 15`; the arm
+contacts are at 16.9 for a chassis at 15-16): live 0.65 % / 0.76 % (Sentinel in
+5 of 21 fights, Wide Load in 2), ours 3.6 % / 1.7 % (8 and 6 of 48). The
+fight counts are not different, the time in the alley is (ours stays), and the
+regions: live 33 / 40 / 26 / 0.6 % of the time in the centre / side pockets /
+the end plateaus (`y` above 1.8) / the alley, ours 21 / 36 / 40 / 3.6 %. Ours
+spends more of the fight on the end plateaus and in the alley mouth and less
+in the centre; that is the 12ai / 12al finding again (live fights are decided by
+about 100 s, ours runs on shoving) and the brains' side of the fight, not the
+arena's price. Not resolved, and not something the damage tables can settle.
+
+**Ensembles** (48 warmups, 120 s, scratch install, `FIDTRACE_UP=1`; the engine
+is unchanged so before = after to the digit, checked by running both):
+
+| fight | counted live | counted ours | arena hp live | arena hp ours |
+|---|---|---|---|---|
+| box ALARM / Scout | 41.1 / 6.0 | 31.0 +- 3.3 / 5.4 +- 0.6 | Scout / ALARM 99 / 15 | 70.6 +- 12.9 / 87.7 +- 26.7 |
+| Razor / FlapJack | 3.0 / 0.1 | 1.1 / 4.3 | 45 / 30 | 44.7 +- 20.5 / 7.6 +- 2.5 |
+| Compressor Wide Load / Sentinel | 95.8 / 4.9 (27 fights) | 78.6 +- 6.3 / 4.2 +- 0.5 | Sentinel / Wide Load 220 +- 121 / 107 +- 31 (27) | 122.0 +- 36.8 / 91.7 +- 28.7 |
+| Octagon ALARM / Scout | 13.6 / 3.2 | 14.6 +- 1.8 / 3.8 +- 0.4 | Scout / ALARM 22 / 146 | 81.1 +- 15.7 / 34.2 +- 9.9 |
+
+**Verified / not.** Live: 27 fights' hits by source and the price records of
+every arm contact (the price factor = 12o / 12aa's on all of them), the arms'
+closing speeds; the gap in the earlier mean is the tail of one fight. Not: why
+ours' robots linger on the end plateaus and in the alley mouth (the AI's side),
+the Sentinel's spikes (ours 14 of 48 fights, live 2 of 27; the spike pieces are
+the corner strips of the side pockets, hits at 3-7 m/s; a live look at the
+pockets' occupancy would settle it), the Wide Load's floor and wall hits (live
+more often, p = 0.05). No default changes; a fix tuned to the 13-fight mean would
+have been a fit to a single fight.
+
+**Tools.** `tools/oracle/arena_sources.py`; `SAMPLE_FACTOR` in
+`capture_fightpos_set.sh`; `RA2_FRIDA_HOST` for `ra2_drive` on a non-default port.
