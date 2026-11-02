@@ -1364,7 +1364,20 @@ impl Duel {
             .as_ref()
             .map(|a| a.lock().unwrap().zones.clone())
             .unwrap_or_default();
-        let zones = hazards::zones(arena_path, &registered);
+        #[allow(unused_mut)]
+        let mut zones = hazards::zones(arena_path, &registered);
+        // Diagnostic (docs/29 section 12ao): `RA2_ZONE_GROW=<m>` grows every
+        // registered zone's box by `m` metres on each side, to see how much
+        // the zone events depend on its reach. Off by default.
+        if let Some(g) = std::env::var("RA2_ZONE_GROW")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            for z in zones.iter_mut() {
+                z.min -= Vec3::splat(g);
+                z.max += Vec3::splat(g);
+            }
+        }
         // The model's phantom volumes. `GetRobotsInPhantom` asks by name and
         // the KOTH scripts' scoring zone lives here rather than in `zones`.
         let phantoms: Vec<(String, ra2script::arena::PhantomVolume)> = ra2script::state()
@@ -1875,6 +1888,59 @@ impl Duel {
             }
         }
         out
+    }
+
+    /// Diagnostic (`examples/zoneprobe`, docs/29 section 12ao): the smallest
+    /// margin by which the arena zone `zi` must be grown for any collision piece
+    /// of `robot` to touch it, with the robot's whole rig moved rigidly from its
+    /// present pose so that its chassis body's centre of mass is at `com` and its
+    /// rotation is `rot` (local to world). `None` when no margin of `margins`
+    /// (ascending) does. The weapon and wheel joints stay where they are now.
+    pub fn zone_probe_margin(
+        &self,
+        robot: usize,
+        com: Vec3,
+        rot: glam::Mat3,
+        zi: usize,
+        margins: &[f32],
+    ) -> Option<f32> {
+        let r = self.robots.get(robot)?;
+        let zone = self.zones.get(zi)?;
+        let worlds = r.component_worlds(&*self.physics);
+        let s = self.physics.state(r.body())?;
+        let com0 = self.physics.center_of_mass(r.body())?;
+        let q0 = glam::Mat3::from_quat(s.rotation);
+        let m = Mat4::from_translation(com)
+            * Mat4::from_mat3(rot * q0.transpose())
+            * Mat4::from_translation(-com0);
+        for &margin in margins {
+            let grow = Vec3::splat(margin);
+            for (ci, c) in r.rig.components.iter().enumerate() {
+                if !r.attached[ci] || !c.role.is_physical() || c.role == crate::rig::Role::Power {
+                    continue;
+                }
+                let own_part = r.rig.part_of[ci];
+                let rotor_part = r
+                    .rig
+                    .parts
+                    .iter()
+                    .position(|q| q.joint.is_some_and(|j| j.motor == ci))
+                    .unwrap_or(own_part);
+                let to_zone = zone.inv * m * worlds[ci];
+                for (_, pts, mesh) in zone_pieces(c, own_part, rotor_part) {
+                    if crate::hazards::box_touches_piece(
+                        to_zone,
+                        zone.min - grow,
+                        zone.max + grow,
+                        pts,
+                        mesh,
+                    ) {
+                        return Some(margin);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Watch the registered SmartZones and tell the script about crossings.
