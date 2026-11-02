@@ -6415,9 +6415,9 @@ chassis movement, `tools/oracle/live_runs.py`.)
    20 live Octagon fights (radius, both points, the native list) are reproduced
    by ours (`live_getpath_dump_reproduces`, now with `RA2_GP_ARENA="The Octagon"`;
    0 differ in every capture). 12ah proved it for the box only.
-3. *The zone's reach, at the pose level.* `examples/zoneprobe` moves ours rigid
+3. *The zone's reach, at the pose level.* `examples/zonereach` moves ours rigid
    rig to a live chassis pose (centre of mass and rotation from the `X` rows; the
-   row-major matrix is the transpose of ours, which the probe confirms: with the
+   row-major matrix is the transpose of ours, which the probe confirms, as 12i's `zoneprobe` says the rows are the body's axes: with the
    transpose the live enters sit at margin 0) and finds the smallest margin the
    zone box must be grown by for any collision piece to touch it
    (`Duel::zone_probe_margin`). For the chassis-flag enters of the 12 fights
@@ -6492,5 +6492,5 @@ gives margin 0 at live enters), the opening pass. Not: why live robots linger ne
 hellraiser 1 after 20 s and how often ALARM's weapon is out there, why ours hits
 the floor with the Scout's fork when it is on its back (an unmeasured live
 quantity), the 12am GJK ties.
-**Tools.** `tools/oracle/live_runs.py`, `examples/zoneprobe`, `Duel::zone_probe_margin`,
+**Tools.** `tools/oracle/live_runs.py`, `examples/zonereach`, `Duel::zone_probe_margin`,
 `RA2_ZONE_GROW`, `RA2_GP_ARENA`.
