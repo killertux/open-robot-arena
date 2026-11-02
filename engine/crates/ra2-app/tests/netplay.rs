@@ -642,6 +642,7 @@ fn child(role: &str, window: bool) {
     let mut fight = 0u32;
     let mut after_end = 0u32;
     let mut ended = false;
+    let mut judged = false;
     while Instant::now() < deadline + Duration::from_secs(60) {
         let fighting = session.matched.state() == ra2sim::r#match::MatchState::Fight;
         if fighting {
@@ -674,10 +675,23 @@ fn child(role: &str, window: bool) {
                 "nice fight".chars().for_each(|c| session.chat_type(c));
                 session.chat_submit();
             }
-            ("host", 400, true) => {
-                assert!(session.matched.end_by_judges());
-            }
             _ => {}
+        }
+        // The host ends the match once the scripted chat has reached it (a
+        // joiner's script runs by its own fight steps, and under load a
+        // joiner can start fighting long after the host's step 400), or at
+        // the fallback step, so a lost line fails the assertions below
+        // rather than hanging (docs/41).
+        if role == "host"
+            && fighting
+            && !judged
+            && ((fight >= 400
+                && seen.contains("[Guest1] gg")
+                && seen.contains("[Watcher] nice fight"))
+                || fight >= 6000)
+        {
+            judged = true;
+            assert!(session.matched.end_by_judges());
         }
         // The windowed app's frame (`about_to_wait`): the network tick first.
         if window {

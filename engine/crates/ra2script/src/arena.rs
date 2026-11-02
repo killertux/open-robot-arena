@@ -846,14 +846,20 @@ impl Arena {
     /// waypoints from `from_world` to `to_world` (moved, if it sits on a line):
     /// the native search with `p1 = from`, `p2 = to`, its list reversed (see
     /// [`ArenaData::path`], docs/29 section 12ah).
-    fn GetPath(
+    ///
+    /// The route is a **tuple** of `(x, z)` tuples, as the original's is: the
+    /// shipped arenas add to it (`path1 + (self.ToGrid(end),)` in `Bridge.py`,
+    /// `((0, 13),) + path` in `hilltop.py`), which a list refuses.
+    fn GetPath<'py>(
         &self,
+        py: Python<'py>,
         from: (f32, f32, f32),
         to: (f32, f32, f32),
         _ignore_hazards: bool,
-    ) -> Vec<(f32, f32)> {
+    ) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
         let r = self.search_radius;
-        self.data
+        let route: Vec<(f32, f32)> = self
+            .data
             .lock()
             .unwrap()
             .path(
@@ -864,7 +870,8 @@ impl Arena {
             .into_iter()
             .rev()
             .map(|p| (p[0], p[1]))
-            .collect()
+            .collect();
+        pyo3::types::PyTuple::new(py, route)
     }
 
     fn IsStraightPathClear(

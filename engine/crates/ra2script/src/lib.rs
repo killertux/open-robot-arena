@@ -1343,6 +1343,37 @@ mod tests {
         });
     }
 
+    /// The route is a tuple (the original's): `Bridge.py` and `hilltop.py` add
+    /// tuples to it, and a list made the AI's whole tick raise `TypeError`.
+    #[test]
+    fn the_route_is_a_tuple_the_arenas_scripts_can_add_to() {
+        let Some((host, _guard)) = boot() else { return };
+        with_py(|py| {
+            host.load_arenas(py).unwrap();
+            let arena = host.create_arena(py, "Combat Arena").unwrap();
+            let a = arena.bind(py);
+            let route = a
+                .call_method1(
+                    "GetPath",
+                    (
+                        (-9.0f32, -2.0f32, 9.0f32),
+                        (-9.0f32, -2.0f32, -2.0f32),
+                        false,
+                    ),
+                )
+                .unwrap();
+            assert!(route.is_instance_of::<pyo3::types::PyTuple>(), "{route:?}");
+            let more = route.add(((1.0f32, 2.0f32),)).unwrap();
+            assert_eq!(more.len().unwrap(), 3);
+            let before = ((0.0f32, 13.0f32),)
+                .into_pyobject(py)
+                .unwrap()
+                .add(route)
+                .unwrap();
+            assert_eq!(before.len().unwrap(), 3);
+        });
+    }
+
     /// `GetPath` answers what the original answered on the same inputs
     /// (`FUN_00405990` behind `FUN_004ba370`, docs/29 §12ab, §12ah; the tuples
     /// are the native call's `p2`, `p1` and its list, the script's method takes
