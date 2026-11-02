@@ -6279,3 +6279,104 @@ ALARM going over earlier and more in the box (5) and in the Octagon, which
 also shortens the live fights.
 **Tools.** `tools/oracle/inverted_hits.py`, `fidtrace`'s `piece` field,
 `RA2_ARENA_FRICTION`.
+
+### 12am. The AI's `GetDistanceTo` is planar: the Octagon's robots no longer brake at a hill cell and run into the hellraisers (fx/octagon-flip)
+
+Section 12al left the Octagon Scout on its back in 24 of 48 runs against 0 of 10
+live. The classification of those 24 (`tools/oracle/inversion_events.py`) found
+that half were flights: the Scout (and ALARM) were thrown by a hellraiser at
+3.5-6 s in 29 of 48 runs, and a robot that falls from 4 m lands on its back in
+half the cases (`landings.py`: Scout 25 flights, 13 on the back). Live the first
+hellraiser firing comes at 5-30 s, mostly by ALARM. The trace of the shipped
+brain (`RA2_AI_TRACE`, then a scratch copy of `AI/__init__.py` with a logging
+line; scratch install only) showed why ours arrived early: from 1.0 s ALARM
+**cut its throttle at (2.99, -2.73)** while live it kept 70-75 % and reached
+8.0 m/s at 1.6 s (ours 3.8).
+
+**The mechanism (recovered in the binary).** `DriveToWaypoints` pops a waypoint
+when `GetDistanceTo(FromGrid(wp)) < 1`. `FromGrid` returns `(x, floor height, z)`,
+and the Octagon's map has cells 1.9 m high on the diagonal beside the
+hellraisers (y = 1.66); ours measured `GetDistanceTo` in 3-D, so the robot's own
+cell centre, 1.46 m away in height, was never reached, the heading to it was 45
+degrees off, and the brain coasted. The original's `0x4019c0` (behind
+`GetDistanceTo` and `GetDistanceToID` `0x401b30`) copies the bot's location and
+the target into two static vectors (`0x714610`, `0x714600`), **writes zero to
+both `y` words** (`0x401a4d`, `0x401a6b`), subtracts (`0x401aa0`) and takes the
+length (`0x401ae0`): the distance is planar. (`GetHeadingTo` is `atan2(dx, dz)`
+and was already planar.)
+
+**Change (default).** `ra2script::plus::ai_distance`: `GetDistanceTo` and
+`GetDistanceToID` ignore `y`; `RA2_AI_DIST3D=1` gives the old length. Test
+`plus::tests::the_ais_distance_ignores_height`.
+
+**Verified live.** The speeds of `fight-scout-alarm-octagon__live__000` (plus.getSpeed
+and the commanded throttle, every 0.17 s): ALARM 7.36 / 8.02 m/s at 1.4 / 1.6 s,
+ours before 4.92 / 3.76, after 7.03 / 8.16, and the first clash (Scout 6.21 ->
+3.96 -> -5.04 -> -2.11 m/s at 1.6 / 1.8 / 2.0 / 2.2 s live, after 6.48 / 5.72 /
+-5.67 / -2.10); the rest of the opening matched before already (ALARM 6.68 against
+6.68 at 1.0 s).
+
+**New live captures** (one session on `:7`, `RA2_FRIDA_PORT=27147`; prefix
+`Teams/`, `AI/`, `Robot Designs/`, `ra2.cfg` copied before and sha256-compared
+after: identical; rows in `local/oracle/manifest.tsv`, copies in
+`~/ra2-oracle-backup` with `manifest-additions-2026-11-01-octagon-flip.tsv`):
+`boxfight-scout-alarm-octagon__live__000..007` (`frida/ra2_boxfight.js` over eight
+120 s Octagon fights: A, H, X chassis centre and rotation every 8th step piece,
+**W the arena's ZoneEvent calls**) with `fightpos-scout-alarm-octagon__live__010..017`.
+Findings: live hellraiser firings come 1.0 per fight (Scout 0.38, ALARM 0.63;
+8 fights), ours 0.5 per fight after the change (Scout 0.23, ALARM 0.27; before
+1.3 per 60 s, 29 of 48 runs by 8 s); the live Scout was thrown in 2 of 8 fights
+(one to 8.2 m, out of the arena, on its back there); flights in the live
+captures: ALARM 6 (4 on the back), Scout 3 low ones (1.7-2.4 m) upright. The live
+`isUpsideDown` flag is `up.y < 0` (3591 / 1829 matched samples, no overlap beyond
+a few at the match tolerance).
+
+**Ensembles, before / after** (48 warmups, 120 s, scratch install, `FIDTRACE_UP=1`;
+counted >= 10 on the other robot, arena hp = hits >= 10, mean +- se; live as
+12al plus the new fights):
+
+| fight | live | before | **after** |
+|---|---|---|---|
+| Octagon ALARM / Scout counted | 13.6 / 3.2 | 11.5 +- 1.9 / 2.9 +- 0.5 | 11.8 +- 1.8 / 3.6 +- 0.3 |
+| Octagon arena hp Scout / ALARM | 22 +- 6 / 146 +- 51 | 143.5 +- 20.1 / 69.6 +- 14.3 | **83.0 +- 16.3** / 28.1 +- 8.7 |
+| Octagon Scout on its back >= 1.5 s | 0 of 10, 2 of 8 new | 24 of 48 | **16 of 48** |
+| ... hp on its back per fight | -- | 103 | 52 |
+| Octagon ALARM on its back | 5 of 10, 3 of 8 | 28 of 48 | 25 of 48 |
+| Octagon thrown flights (> 1.5 m) Scout / ALARM | 3 / 6 of 18 fights | 25 / 16 of 48 | 10 / 10 |
+| Octagon mean length, full length | 34-43 s | 51 s, 2 | 47 s, 0 |
+| box ALARM / Scout counted | 41.1 / 6.0 | 36.3 +- 3.8 / 5.8 +- 0.6 | 33.4 +- 3.6 / 5.1 +- 0.4 |
+| box arena hp Scout / ALARM | 99 / 17 | 56.8 +- 9.0 / 65.4 +- 16.8 | 80.5 +- 13.3 / 81.7 +- 19.0 |
+| box ALARM on its back / Scout | 5 of 13 / 2 of 13 | 32 / 6 of 48 | 30 / 9 |
+| Razor / FlapJack counted | 3.0 / 0.1 | 1.0 / 4.0 | 1.1 / 4.6 |
+| Razor arena hp | 45 / 30 | 40.0 +- 13.9 / 3.7 | 20.3 +- 7.5 / 8.0 |
+| Compressor Wide Load / Sentinel counted | 73.6 / 5.3 | 77.5 +- 6.9 / 3.9 +- 0.5, 23 full | 78.6 +- 6.8 / 3.6 +- 0.4, 29 full |
+| Compressor arena hp Sentinel / Wide Load | 390 +- 231 / 136 +- 57 | 127.5 / 112.6 | 95.1 +- 36.8 / 99.5 +- 30.8 |
+
+The Octagon Scout's flips fall by a third, its arena hp by 40 %, and the Octagon
+and Compressor fights run as long as live more often; the box gains arena hp on
+the spikes (ALARM 39 -> 45 hp, Scout 13 -> 31 hp from the spikes; live none): the box's ALARM
+problem (open 3 of 12al) is **not** this bug.
+
+**What is left of the Scout's flips** (16 of 48): 11 are ground hits of ALARM's
+fork / hammer on the Scout's fork, extender or chassis (0.2-1 s from upright to
+back), 3 air landings. `hit_tilt.py`: a hit of 30 hp or more turns an upright
+Scout below `up.y` 0 within 0.7 s in 12 of 216 cases in ours (before; live 0 of 8,
+so no contradiction yet). Live 2 of 18 against ours 16 of 48 (Fisher p about
+0.07). Not resolved.
+
+**2. Resting contacts with GJK: not done.** `gjkreplay` over
+`gjkquery-...__live__000` still reproduces 42 677 of 43 689 queries (97.7 %); the
+misses are the degenerate simplexes whose tests (`delta <= 1e-5` on cofactors of
+size 1e2-1e3) are decided by float rounding in the original's cached-dot
+recurrence, where ours takes direct `f64` Gram determinants. The next step is
+porting that recurrence in `f32` in the original's operation order; no new capture
+is needed (the existing J / S rows hold the true adjacency lists and climb starts,
+12ak), and none was taken.
+
+**Verified / not.** In the binary and live: planar distance (`0x4019c0`, ALARM's
+and the Scout's opening speeds), the zone events of eight live fights, the
+`isUpsideDown` rule. Not: why 11 of the remaining 16 flips happen on the
+ground, the GJK ties, the box's ALARM.
+**Tools.** `tools/oracle/inversion_events.py`, `landings.py`, `hit_tilt.py`,
+`live_zones.py`; `inverted_hits.py` reads `boxfight-*` captures too;
+`RA2_AI_DIST3D=1`.

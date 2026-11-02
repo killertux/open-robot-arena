@@ -134,7 +134,7 @@ def main():
         fights = []
         for h, p in pairs:
             pos = f"{ORACLE}/fightpos-{name}__live__{p:03d}.tsv"
-            for kind in ("arenahits", "alarmfight"):
+            for kind in ("arenahits", "alarmfight", "boxfight"):
                 path = f"{ORACLE}/{kind}-{name}__live__{h:03d}.jsonl"
                 if os.path.exists(path) and os.path.exists(pos):
                     fights.append(live_fight(path, pos))
