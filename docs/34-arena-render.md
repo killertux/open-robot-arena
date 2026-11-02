@@ -657,3 +657,38 @@ the jitter's generator, the ring's random offsets; decals and shadows still cut 
 * **Slash decal: blocked on a live frame.** The state of the art is docs/37 8-8.2 (one located decal in 32 synthetic calls, a 3-vertex sliver hidden under sparks); a strong slash on a visible face did not come out of
   any run and a further attempt (the same `capture_fx.py SYNTH=1` machinery) was judged not worth the live time. Open exactly as docs/37 8.2 says.
 
+
+### 11.10 Whole-game visual sweep (`fx/ui-sweep`, 2026-11-01)
+
+`tools/oracle/fidelity.py --renderer app` over all 115 fixtures, base 01a9753 then this branch. **Mean 2.803 -> 2.796** (2.04 without `arena-metalskull-f4`, whose 88.6 is the stale after-the-match
+reference, 11.x above: the live-state shot `arena-metalskull-f4live` is 0.18). The suite is dominated by state, not rendering: of the worst 20 only the three below were a rendering fault.
+
+| rank | fixture | before | after | cause / verdict |
+|---:|---|---:|---:|---|
+| 1 | arena-metalskull-f4 | 88.59 | 88.59 | reference taken after the match (Match Results window up); f4live is 0.18. Not render |
+| 2 | arena-metalskull-f2 | 18.69 | 18.69 | robot pose (physics, skipped) |
+| 3 | arena-electric-intro | 11.02 | 11.02 | intro-clock quantisation + robot pose (11.x) |
+| 4 | arena-parkinglot-f2 | 10.60 | 10.60 | robot pose |
+| 5 | arena-electric-countdown | 9.31 | 9.31 | clock quantisation (countdown2 is 0.00) |
+| 6 | arena-bridge-intro2 | 8.03 | 8.03 | 1/60 s intro clock + pose |
+| 7 | match-f1 | 6.69 | 6.69 | different live match state behind the F1 window (HUD points, clock, which robot is left); window itself matches |
+| 8 | arena-halfcircle-intro2 | 6.02 | 6.02 | clock + pose |
+| 9 | event-bracket-duel-round1 | 5.68 | 5.68 | the 15 opponents' order is the engine LCG state of the capture (unknown; the `lcg-*` fixtures fit it, docs/36 9.23) |
+| 10 | match-pause | 5.64 | 5.64 | as match-f1 (dialog matches) |
+| 11-14 | octagon-f4, octagon-f2, metalskull-intro2, electric-intro2 | 5.4-4.8 | same | pose / clock |
+| 12 | event-repairs | 5.27 | 5.27 | the capture's robot (a different design, seen from the front) is not ours; not recoverable |
+| 20 | event-award-photo | 3.08 | **2.19** | the prize message was set in the shipped glyph's `fg_mcn16` instead of the face its markup names (`Events.txt`: `fg_mcn14`), so it wrapped to 4 lines, not 3; the award now takes the markup's font (`hq_mode::award_screen`). Left: turntable angle, the points (160 vs 80, simulated career) |
+
+Other fixes from the side images (smaller MAE, visible to a player):
+
+* **Join window, weight badges** (`teamhq-event-join`): the robot cells' L/M/H class squares (blue/green/red, bottom left) were hidden; they are drawn now from the row's class (`event_screens::fill_join_window`,
+  the picker's `light/medium/heavy_icon.bmp`); pixel-checked against the capture.
+* **Join window, no robot chosen**: the grid's `Sel Bar` (a column-1 frame in the file) was drawn on the second robot; with nothing chosen it is hidden, shown from the first pick
+  (`event_screens::show_selection_bar`, `Shell::refresh_join_window`). 2.58 -> 2.47 (join-robot 2.49 -> 2.48).
+* **Dialog frame**: Export/Import Bot's `background grp` carries a `Border` (`Width 1`, `Outer 0.7`) over its own window's clip; the ring was drawn outside the frame and so clipped away. The capture has the 178-grey line
+  on the dialog's first row and column (checked pixel for pixel, `teamhq-export-dialog`); drawn inside for `background grp` only (the same rule on every frame that fills its clip moved the Bot Lab's bottom bar).
+* Noise to know about: `botlab-*`, `components` and other screens move by the random tip line (`ORA_TIP_SEED` pins it; `fidelity.py` does not), 0.1-0.2 between runs.
+
+Open (not fixed): the Import dialog's file list in the capture shows row separators and a preview of a leftover bot (state), and the window's tile in ours looks blurred there (`teamhq-import-dialog` 1.96); the
+match-time dropdown's scroll trough is not drawn and its list is 1 px low with the 5th row partly visible in the original (`exhibition-time-open` 1.83); the picker's first-robot snapshot in the join window differs
+(the capture's `.bot` carried another snapshot). No new live captures were needed or taken.

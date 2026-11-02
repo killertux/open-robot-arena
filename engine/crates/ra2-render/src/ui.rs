@@ -888,6 +888,17 @@ fn border_quads(p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
         return;
     };
     let f = p.frame;
+    // A dialog's `background grp` fills the clip of its window (limited to that name: the same rule on
+    // every frame that fills its clip moved botlab-overview 0.25 -> 0.42 and paint 0.67 -> 0.82)
+    // has its ring *inside* it: live `teamhq-export-dialog`, the 178-grey `Outer 0.7` line is
+    // the dialog's first row and column, not a line outside it that the clip would cut.
+    let inside = p.widget.name() == "background grp"
+        && clip.is_some_and(|c| {
+            (c.x - f.x).abs() < 0.5
+                && (c.y - f.y).abs() < 0.5
+                && (c.w - f.w).abs() < 0.5
+                && (c.h - f.h).abs() < 0.5
+        });
     for ring in 0..width.max(0) {
         // Every ring is `Outer`: the original's 2-pixel wood frame on the repair
         // bench (`Width 2`, `Inner 1 1 1 1`, `Outer 0.55 0.45 0.3`) is two pixels
@@ -898,7 +909,11 @@ fn border_quads(p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
             continue;
         }
         // Ring 0 is the outermost, `width` pixels out; the last is adjacent.
-        let e = (width - ring) as f32;
+        let e = if inside {
+            -(ring as f32)
+        } else {
+            (width - ring) as f32
+        };
         let (x, y, w, h) = (f.x - e, f.y - e, f.w + 2.0 * e, f.h + 2.0 * e);
         let sides = [
             Frame::new(x, y, w, 1.0),
