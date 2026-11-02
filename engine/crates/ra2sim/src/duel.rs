@@ -251,6 +251,17 @@ pub const USER_DEBRIS: u64 = 4;
 pub const FLAME_DAMAGE: f32 = 2.0;
 
 /// The effects key of a robot's Flamethrower jet.
+/// Whether a blow on a chassis is handed on to the parts mounted in it (`Robot::splash`,
+/// docs/29 section 12ar). `RA2_SPLASH=0` restores the old behaviour (the struck part only).
+fn splash_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("RA2_SPLASH")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
 fn flame_key(robot: usize, component: usize) -> u64 {
     (1 << 41) | ((robot as u64) << 16) | component as u64
 }
@@ -3316,7 +3327,18 @@ impl Duel {
                 normal,
             });
         }
+        let hp_before = self.robots[victim].health[0];
         let applied = self.robots[victim].damage(component, damage);
+        if component == 0 && splash_enabled() {
+            // The chassis' apply hands part of the blow to the parts mounted in it
+            // (docs/29 section 12ar; `RA2_SPLASH=0` for the old behaviour).
+            let hit = self.robots[victim].splash(&*self.physics, point, damage, hp_before);
+            for (c, a) in hit {
+                if a.detach {
+                    self.break_off(victim, c, point);
+                }
+            }
+        }
         if applied.effective > 0.0 {
             self.popups.push(crate::popup::Request {
                 attacker: attacker.filter(|a| *a < self.robots.len()),
@@ -5192,7 +5214,11 @@ mod tests {
             .iter()
             .enumerate()
             .find(|(i, c)| {
-                robot.attached[*i] && c.fracture > 0.0 && robot.health[*i] > c.fracture + 2.0
+                // Mount depth 2 or more: a part bolted to the chassis never breaks off.
+                robot.attached[*i]
+                    && robot.rig.depth(*i) > 1
+                    && c.fracture > 0.0
+                    && robot.health[*i] > c.fracture + 2.0
             })
             .map(|(i, c)| (i, c.fracture))
             .expect("the bot has a part with a fracture value and hitpoints to spare");
@@ -5232,6 +5258,19 @@ mod tests {
             robot.health[other] = 0.0;
             assert!(!robot.damage(other, 500.0).detach);
         }
+
+        // `FUN_0045f2b0` queues no detach for a part at mount depth 1 (`1 < +0xe4`), however
+        // dead it is and however hard the blow: the Scout's burst motor stays on the chassis.
+        let bolted = (1..robot.rig.components.len())
+            .find(|&i| {
+                robot.attached[i]
+                    && robot.rig.depth(i) == 1
+                    && robot.rig.components[i].fracture > 0.0
+            })
+            .expect("a part with a fracture bolted to the chassis");
+        robot.health[bolted] = 0.0;
+        assert!(!robot.damage(bolted, 5000.0).detach);
+        assert!(robot.attached[bolted]);
     }
 
     /// `FUN_0044f370`: a chassis at zero hitpoints is not defeated; from then on
@@ -5279,6 +5318,107 @@ mod tests {
         assert!(!duel.robots[0].is_alive());
         // The chassis stays on the robot: DESTROYED is a state, not a detach.
         assert!(duel.robots[0].attached[0]);
+    }
+
+    /// `FUN_0044f370` -> `FUN_004df200` -> `FUN_004e2540` (docs/29 section 12ar): a blow on
+    /// the chassis is handed on, as `(1 - hp / maxhp) * blow` and scaled by `1 - d`, to the
+    /// motors, batteries and boards (kind 1), not to the wheels or the structure. Live: all 2017
+    /// splash blows of 14 fights are exactly `x * amount`.
+    #[test]
+    fn a_chassis_blow_is_handed_to_the_parts_mounted_in_it() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = |p: &str| BotSetup {
+            path: game.join(p).to_string_lossy().to_string(),
+            yaw_deg: None,
+            spawn: None,
+        };
+        let mut duel = Duel::new(
+            &arena,
+            &[bot("AI/Team1/Bot0.bot"), bot("AI/Team6/Bot2.bot")],
+        )
+        .expect("a duel");
+        let find = |duel: &Duel, role: crate::rig::Role| {
+            duel.robots[0]
+                .rig
+                .components
+                .iter()
+                .position(|c| c.role == role)
+                .expect("a component of the role")
+        };
+        let motor = find(&duel, crate::rig::Role::Motor);
+        let wheel = find(&duel, crate::rig::Role::Wheel);
+        let worlds = duel.robots[0].component_worlds(&*duel.physics);
+        let at_motor = worlds[motor].w_axis.truncate();
+        let max = duel.robots[0].rig.components[0].hitpoints;
+
+        // An undamaged chassis hands nothing on.
+        let (m0, w0) = (duel.robots[0].health[motor], duel.robots[0].health[wheel]);
+        duel.apply_hit(Some(1), 0, 0, 30.0, at_motor);
+        assert_eq!(duel.robots[0].health[motor], m0);
+
+        // At half its hitpoints, a blow of 40 at the motor's origin gives it 20; at 0.5 m, 10.
+        duel.robots[0].health[0] = 0.5 * max;
+        duel.apply_hit(Some(1), 0, 0, 40.0, at_motor);
+        assert!((m0 - duel.robots[0].health[motor] - 20.0).abs() < 1e-2);
+        duel.robots[0].health[0] = 0.5 * max;
+        let m1 = duel.robots[0].health[motor];
+        let off = at_motor + Vec3::new(0.5, 0.0, 0.0);
+        duel.apply_hit(Some(1), 0, 0, 40.0, off);
+        let d = (off - at_motor).length();
+        assert!((m1 - duel.robots[0].health[motor] - (1.0 - d) * 20.0).abs() < 1e-2);
+        assert_eq!(
+            duel.robots[0].health[wheel], w0,
+            "a wheel is not in the group"
+        );
+
+        // Beyond a metre it gives nothing; below zero hitpoints it is more than the blow.
+        duel.robots[0].health[0] = 0.5 * max;
+        let m2 = duel.robots[0].health[motor];
+        duel.apply_hit(Some(1), 0, 0, 40.0, at_motor + Vec3::new(5.0, 0.0, 0.0));
+        assert_eq!(duel.robots[0].health[motor], m2);
+        duel.robots[0].health[0] = -max;
+        duel.apply_hit(Some(1), 0, 0, 10.0, at_motor);
+        assert!((m2 - duel.robots[0].health[motor] - 20.0).abs() < 1e-2);
+    }
+
+    /// `component + 0xe4` (`FUN_0045ed20`) is the part's mount depth: read live from the
+    /// `K` rows of `partsfight-*` for every part of six robots (Scout, ALARM, Sentinel,
+    /// Wide Load, Razor, FlapJack: 92 parts).
+    #[test]
+    fn mount_depth_is_the_originals_component_state() {
+        let Some(game) = game_dir() else { return };
+        let live: [(&str, &[usize]); 6] = [
+            ("AI/Team0/Bot0.bot", &[0, 1, 1, 2, 1, 2, 1, 1, 2, 3, 1]),
+            (
+                "AI/Team10/Bot1.bot",
+                &[0, 1, 2, 1, 2, 1, 1, 2, 2, 1, 1, 2, 1, 1, 2],
+            ),
+            (
+                "AI/Team8/Bot0.bot",
+                &[0, 1, 1, 2, 1, 2, 1, 1, 2, 1, 3, 1, 1, 1],
+            ),
+            (
+                "AI/Team0/Bot1.bot",
+                &[0, 1, 2, 1, 2, 1, 2, 1, 2, 1, 1, 1, 1, 2, 1, 1],
+            ),
+            (
+                "AI/Team0/Bot2.bot",
+                &[0, 1, 1, 2, 2, 1, 1, 1, 2, 2, 1, 2, 1],
+            ),
+            (
+                "AI/Team8/Bot2.bot",
+                &[
+                    0, 1, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 1, 2, 3, 3, 4, 4, 5, 4, 4, 5, 1,
+                ],
+            ),
+        ];
+        for (bot, depths) in live {
+            let rig = crate::rig::load(&game.join(bot).to_string_lossy()).expect("a rig");
+            let ours: Vec<usize> = (0..rig.components.len()).map(|i| rig.depth(i)).collect();
+            assert_eq!(ours, depths, "{bot}");
+        }
     }
 
     /// A motor under half its hitpoints smokes (`FUN_0048e0d0`).

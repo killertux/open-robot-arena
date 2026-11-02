@@ -794,6 +794,27 @@ impl SmartZone {
 }
 
 impl RobotRig {
+    /// How many mounts a component is from the chassis: 0 the chassis, 1 a part bolted to it
+    /// (motors, batteries, boards, a piston, a SmartZone), 2 what is mounted on those (a
+    /// wheel, an extender, a hammer head), 3 the next (the Scout's Forklift Arm). The
+    /// original keeps it at `component + 0xe4` (`FUN_0045ed20`); live (`partsfight-*`, the
+    /// `K` rows of every Scout, ALARM, Sentinel and Wide Load part) it is exactly this.
+    /// Two rules hang on it: a part at depth 1 never breaks off (`FUN_0045f2b0` tests
+    /// `1 < +0xe4` before it queues the detach), and the chassis' splash reaches depth 1
+    /// only (`FUN_004e2540`).
+    pub fn depth(&self, index: usize) -> usize {
+        let mut d = 0;
+        let mut i = index;
+        while let Some(p) = self.components.get(i).and_then(|c| c.parent) {
+            d += 1;
+            i = p;
+            if d > self.components.len() {
+                break;
+            }
+        }
+        d
+    }
+
     /// The components whose first appearance wakes the robot while it is
     /// frozen: the build's late wakes (docs/29 section 12z).
     ///
@@ -1647,6 +1668,10 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             .and_then(|c| c.hitpoints());
         let hitpoints = if i == 0 {
             chassis_hp.unwrap_or_else(|| role.default_hitpoints())
+        } else if def.is_none() && c.class.eq_ignore_ascii_case("SmartZone") {
+            // Live (`partsfight-*`, the `K` rows: `0x4dd760` -> `+0xe8`) a SmartZone has 400
+            // hitpoints and no fracture, like the other parts without a `type`.
+            400.0
         } else {
             type_hitpoints(def.as_ref(), role)
         };

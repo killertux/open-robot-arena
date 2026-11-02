@@ -2681,34 +2681,42 @@ impl Robot {
     /// Apply one blow that already passed the arena's `>= 10` gate to a
     /// component: the original's per-class `apply` (vtable `+0x1c`).
     ///
-    /// An ordinary component is `FUN_0045f2b0`:
+    /// An ordinary component is `FUN_0045f2b0` (`d` its mount depth, `+0xe4`,
+    /// [`RobotRig::depth`]):
     ///
     /// ```text
-    /// if hp <= 0 && fracture > 0 && fracture < blow   -> queue detach (FUN_00417d70)
-    /// hp -= min(blow, hp)                              -> returns that amount
+    /// if d > 1 && hp <= 0 && fracture > 0 && fracture < blow   -> queue detach (FUN_00417d70)
+    /// if damageable || d > 1 { hp -= min(blow, hp); return that }  // else return the blow
     /// ```
     ///
     /// The detach test runs **before** the subtraction and reads the hitpoints
     /// the component *already* has, so a part that is merely ground down to zero
     /// stays on the robot; it comes away on the next single blow larger than its
-    /// `fracture` (a component whose `fracture` is zero never does). Hitpoints
-    /// cannot go below zero, and the amount returned is what was actually
-    /// subtracted, which is what the match awards as score.
+    /// `fracture` (a component whose `fracture` is zero never does). A part bolted
+    /// straight to the chassis (`d == 1`: the motors, batteries, boards, a piston, a
+    /// SmartZone) never comes off at all (live: all 20 detach queues of 16 Box and Compressor
+    /// fights are parts of depth 2 or more, and 25 blows over the fracture on dead depth-1
+    /// parts took none off, `partsfight-*`), and an
+    /// indestructible one of that depth (a control board, an axle mount) keeps its
+    /// hitpoints while the function still returns the whole blow, which is what the match
+    /// scores. Hitpoints cannot go below zero, and the amount returned is what was
+    /// actually subtracted, which is what the match awards as score.
     ///
     /// The chassis is `FUN_0044f370` instead: hitpoints go negative without a
     /// floor, hitpoints reaching zero defeat nothing, and once they are `<= 0`
     /// every blow over `40.0` is a *critical hit*; the third one is the
-    /// DESTROYED state (`FUN_00417cc0`). It returns the whole blow.
+    /// DESTROYED state (`FUN_00417cc0`). It returns the whole blow. It also hands
+    /// part of every blow to the parts mounted in it, see [`Robot::splash`].
     pub fn damage(&mut self, index: usize, amount: f32) -> Applied {
         let mut out = Applied::default();
         if index >= self.health.len() || !self.attached[index] || amount <= 0.0 {
             return out;
         }
         let c = &self.rig.components[index];
-        if !c.damageable {
-            return out;
-        }
         if index == 0 {
+            if !c.damageable {
+                return out;
+            }
             if self.health[0] <= 0.0 && amount > CRITICAL_BLOW {
                 out.critical = true;
                 self.criticals += 1;
@@ -2720,13 +2728,83 @@ impl Robot {
             out.effective = amount;
             return out;
         }
-        if self.health[index] <= 0.0 && c.fracture > 0.0 && c.fracture < amount {
+        // `FUN_0045f2b0`: the detach and the hitpoints both look at `+0xe4`, the mount depth.
+        // A part bolted straight to the chassis (depth 1) is never queued for detach, and an
+        // indestructible one (`+0x9c` clear) of that depth loses no hitpoints, though the
+        // blow is what the function returns (and so what the hit scores).
+        let gate = self.mount_depth_gate();
+        if !gate && !c.damageable {
+            return out; // the old rule
+        }
+        let deep = !gate || self.rig.depth(index) > 1;
+        if deep && self.health[index] <= 0.0 && c.fracture > 0.0 && c.fracture < amount {
             self.fractured[index] = true;
             out.detach = true;
         }
-        let taken = amount.min(self.health[index].max(0.0));
-        self.health[index] -= taken;
-        out.effective = taken;
+        if c.damageable || deep {
+            let taken = amount.min(self.health[index].max(0.0));
+            self.health[index] -= taken;
+            out.effective = taken;
+        } else {
+            out.effective = amount;
+        }
+        out
+    }
+
+    /// `RA2_DEPTH=0`: the old rules (every part may break off, an indestructible one is
+    /// untouchable) for comparison.
+    fn mount_depth_gate(&self) -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("RA2_DEPTH").map(|v| v != "0").unwrap_or(true))
+    }
+
+    /// Whether the chassis' splash (see [`Robot::splash`]) reaches this component: the
+    /// original lists a robot's components and `FUN_004e2540` takes those at mount depth 1
+    /// (`+0xe4`, `FUN_0045ed20`; [`RobotRig::depth`]): live every motor, piston, battery,
+    /// air tank, control board and SmartZone, never a wheel, a weapon or an extender.
+    pub fn takes_splash(&self, index: usize) -> bool {
+        index != 0 && self.rig.depth(index) == 1
+    }
+
+    /// What a blow on the chassis does to the parts mounted in it (docs/29 section 12ar).
+    ///
+    /// The chassis' apply (`FUN_0044f370`) passes `(1 - hp / maxhp) * blow`, with the
+    /// hitpoints it had before the blow, to the robot's group (`FUN_004df200` ->
+    /// `FUN_004e2500`, one `FUN_004e2540` per listed component). Each component of kind 1
+    /// takes `(1 - d) * that`, `d` the distance in metres from the hit point to the
+    /// component's origin (`vtable + 4`), when that is above zero, through its own
+    /// `apply` (`FUN_00489620` -> `0x45f2b0`): no `>= 10` gate, no score. So the more a
+    /// chassis is hurt, the more of every further blow the motors, batteries and boards
+    /// near the point take; with the chassis' hitpoints below zero it is more than the
+    /// blow itself. Live `0x4e2540`: `x = 1 - d` exactly, and `C` rows of
+    /// `(1 - d) * 1.287` for a blow of 18.4 on a chassis at 1700 of 1828.
+    ///
+    /// Returns the components that took something, with what [`Robot::damage`] said.
+    pub fn splash(
+        &mut self,
+        physics: &dyn PhysicsBackend,
+        point: Vec3,
+        blow: f32,
+        hp_before: f32,
+    ) -> Vec<(usize, Applied)> {
+        let max = self.rig.components[0].hitpoints;
+        // `(1 - hp / (float)maxhp) * blow`, and the group is only called when it is positive.
+        let amount = (1.0 - hp_before / max.trunc().max(1.0)) * blow;
+        if amount.is_nan() || amount <= 0.0 {
+            return Vec::new();
+        }
+        let worlds = self.component_worlds(physics);
+        let mut out = Vec::new();
+        for (i, world) in worlds.iter().enumerate().skip(1) {
+            if !self.attached[i] || !self.takes_splash(i) {
+                continue;
+            }
+            let d = (world.w_axis.truncate() - point).length();
+            let share = (1.0 - d) * amount;
+            if share > 0.0 {
+                out.push((i, self.damage(i, share)));
+            }
+        }
         out
     }
 

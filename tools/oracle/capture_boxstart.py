@@ -34,12 +34,14 @@ def main():
     pid = [p for p in dev.enumerate_processes() if p.name == "Robot Arena 2.exe"][0].pid
     sess = dev.attach(pid)
     rows, sim = [], [0.0]
+    last_a = [time.time()]
 
     def on_msg(m, d):
         if m.get("type") == "send" and m["payload"].get("ev") == "batch":
             for r in m["payload"]["rows"]:
                 if r[0] == "A":
                     sim[0] += r[2]
+                    last_a[0] = time.time()
             rows.extend(m["payload"]["rows"])
         elif m.get("type") != "send":
             print("agent error", m, file=sys.stderr)
@@ -51,6 +53,13 @@ def main():
         print("aitrace install:", cd.run([cd.PY, os.path.join(cd.HERE, "ra2_python.py"),
                                           os.path.join(cd.HERE, "ai_trace_install.py")]).stdout)
     cd.start_match(os.environ.get("ARENA_ROW_Y", "188"))
+    # PRIME=1 (frida/ra2_parts.js): ask each player's AI for GetComponentHealth(i) for
+    # every id, so the agent's 0x4dd760 hook records the id -> component pointer map.
+    if os.environ.get("PRIME") == "1":
+        for p in (0, 1):
+            sc.exports_sync.mark(p)
+            cd.py("import AI\nr = AI.running_ai[%d]\nfor i in range(40):\n"
+                  "    try:\n        r.GetComponentHealth(i)\n    except Exception:\n        pass\n" % p)
     # WEIGHTS=1: what the scripts see as each robot's weight (docs/29 12aj).
     weights = None
     if os.environ.get("WEIGHTS") == "1":
@@ -62,6 +71,9 @@ def main():
     t0 = time.time()
     base = sim[0]
     while sim[0] < base + secs and time.time() - t0 < secs * 6:
+        # The fight is over (the physics stopped stepping 20 s ago): the results screen.
+        if sim[0] > base + 5 and time.time() - last_a[0] > 20:
+            break
         time.sleep(0.5)
     sc.exports_sync.flush()
     time.sleep(0.5)

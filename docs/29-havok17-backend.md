@@ -6815,3 +6815,195 @@ have been a fit to a single fight.
 
 **Tools.** `tools/oracle/arena_sources.py`; `SAMPLE_FACTOR` in
 `capture_fightpos_set.sh`; `RA2_FRIDA_HOST` for `ra2_drive` on a non-default port.
+
+### 12ar. Component damage and break-off: the chassis hands its damage on, a part bolted to the chassis never comes off, and the Scout loses its fork by 30 s in 6 of 8 live fights (fx/parts-off)
+
+The task: 12ap found that the live Scout loses its fork early (5 of 12 fights have 2-6
+strokes in 120 s, the brain on `Shove` / `Charge`) and ours does not (2 of 48; its only
+loss is the Round Extender, 7 of 24 fights), and 12aq that live fights end sooner. This
+round hooks the original's component damage and detach path with component identity,
+takes 26 live fights (8 Box, 8 Compressor, 5 Razor v FlapJack, 5 Octagon), reads the
+model out of the binary, and fixes what differs. **Two rules of the original were
+missing from ours, both verified against every blow of 14 live fights**: a blow on a
+chassis is handed on to the parts mounted in it (the "splash"), and a part bolted
+straight to the chassis can never break off. Ours had neither; both are now the default
+(`RA2_SPLASH=0` and `RA2_DEPTH=0` give the old behaviour). The fork is lost early live
+because the first hammer stroke prices 73-100 hp on the extender; ours prices the extender
+less often and lower (below), which is not a damage rule and stays open.
+
+**New live captures** (`:9`, `RA2_FRIDA_PORT=27149`, under the shared lock; `Teams/`,
+`AI/`, `Robot Designs/` and `ra2.cfg` copied before and sha256-compared after: "prefix
+restored" in every session; rows in `local/oracle/manifest.tsv`, copies and
+`manifest-additions-2026-11-02-parts-off.tsv` in `~/ra2-oracle-backup`):
+`partsfight-scout-alarm-box__live__000..007`,
+`partsfight-sentinel-wideload-compressor__live__000..007`,
+`partsfight-razor-flapjack-box__live__000..004`,
+`partsfight-scout-alarm-octagon__live__000..004` (each `.jsonl` + `.json` + `.tsv`; the
+shipped AIs, Frida agent `frida/ra2_parts.js` loaded before Start Game by
+`capture_parts_set.sh` / `capture_boxstart.py PRIME=1`). Rows:
+
+| row | hook | holds |
+|---|---|---|
+| `K` | `0x4dd760` (robot, id -> component) leave | the component pointer of every part with its robot, id, hitpoints `+0xec`, maximum `+0xe8`, fracture `+0xdc`, state `+0xe4`, detach state `+0xe0` (the game's own AI polls `GetComponentHealth` for every id, so the map fills itself) |
+| `C` `R` | `0x45f2b0` entry / leave | every blow applied to a component: the blow, hitpoints before and after, fracture, `+0xe4`, `+0xe0`, the caller (and a backtrace of the first 40 blows under 10) |
+| `X` | `0x44f370` | a blow on a chassis, with its hitpoints before |
+| `S` | `0x4e2540` + `0x420370` | one per component the chassis' group lists: the amount handed on, the hit point, the component's position (`vtable + 4`) and `x = 1 - d` |
+| `Q` `F` `T` | `0x417d70`, `0x45f4e0`, `0x45f710` | the detach: queued (the match's, argument the component), done, and one `T` per part that goes with it |
+| `O` `W` `MC` | `0x418040`, `0x4170e0`, the clock at `0x7162c8` | a robot is out (reason 1 destroyed, 2 immobilized, 3 eliminated), the match ends, the match clock |
+| `H` `M` `A` | `0x417330`, `0x4815c0`, `0x52a990` | the priced hits, hinge motor sets, step pieces (as 12ap) |
+
+Tools: `parts_live.py` (per fight: the clock, who is out and why, detaches with the blow
+that triggered them, blows by component; `--table` for a set), `parts_compare.py` (the
+hits one robot lands on another's components, live against an ensemble),
+`ensemble_parts.py` (parts lost and endings of an `ensemble.sh` run made with
+`FIDTRACE_LOG=1`).
+
+**1. What the binary does to a component** (addresses from the decompile, each row of
+the captures below checked against it).
+
+* `FUN_00489620` (vtable `+0x1c` of the struck component, called from `0x4175b0` for a
+  hit of 10 or more and from the splash) is the apply; the component's class hands on to
+  `0x45f2b0` (the motor's `0x48e0d0` and the steering unit's `0x4f6dd0` call it).
+* `0x45f2b0`, with `d = component + 0xe4`: `if d > 1 && hp <= 0 && 0 < fracture < blow
+  && +0xe0 == 0 { 0x417d70 queues the detach }`; then `if +0x9c (damageable) || d > 1
+  { taken = min(blow, hp); hp -= taken }`; it returns `taken`, or the whole blow for an
+  indestructible part with `d <= 1`, and that return is what `0x4175b0` scores.
+* `+0xe4` (read by `0x45ed20`) is **the part's mount depth**: 0 the chassis, 1 every part
+  bolted to it (motors, batteries, boards, a piston, a SmartZone), 2 what is mounted on
+  those (wheels, an extender, a hammer head), 3 the Scout's Forklift Arm, up to 5 for Wide
+  Load's tips. It is exact for all 92 parts of six robots (Scout, ALARM, Sentinel, Wide Load, Razor, FlapJack;
+  `K` rows; test `mount_depth_is_the_originals_component_state`). So a **depth-1
+  part never queues a detach**, whatever its hitpoints and the blow: live all 20 detach
+  queues of the 16 Box and Compressor fights are depth 2 or more, and 25 blows over the
+  fracture on dead depth-1 parts took nothing off. Ours took the Sentinel's Powered
+  Steering Unit and, with the splash below, the Scout's burst motor and angle motors off.
+* The detach is `0x417d70` (the match's, argument the component) -> queued -> `0x45f4e0`
+  (the same frame, +0.01 s: `F`) -> `0x45f710`, which marks the part and recurses over
+  its mounted children (`T` per child): **what is mounted on a part that breaks off goes
+  with it**. Live the Scout's extender detach is `Q 8, F 8, T 8, T 9`: the Forklift Arm
+  (the brain's weapon, `Bindings.py` `'weapons': (9,)`) goes with it, and the brain is on
+  `Shove` / `Charge` within a second (`tsv`); ours does the same (`notify_brains`).
+* **The splash.** A blow on a chassis (`0x44f370`: it subtracts, floors nothing, counts
+  criticals) first calls `0x4df200` with `(1 - hp / maxhp) * blow`, `hp` the chassis'
+  hitpoints *before* the blow. That loops (`0x4e2500`) over the handles the robot's group
+  lists and `0x4e2540` gives each one of `+0xe4 == 1` (so every depth-1 part, whatever
+  it is) `(1 - d) * amount` through its own apply, `d` the distance from the hit point
+  to the component's origin, when that is above zero: **no 10 hp gate, no score, no
+  detach unless that single share beats the fracture**. A fresh chassis hands nothing on;
+  at half its hitpoints half the blow, spread over everything within a metre; with the
+  chassis' hitpoints below zero more than the blow (the Scout's chassis took 2143 hp in
+  one fight). Checked live: **5419 `S` rows of 14 fights, `x = 1 - d` exactly with `d`
+  the distance of the logged positions; 806 of 806 amounts are `(1 - hp / maxhp) *
+  blow` from the `X` row; 2017 of 2017 following `C` blows are `x * amount`; no sub-10
+  blow on any part has another source; the recipients are every depth-1 part of the
+  robot in 657 of 659 events** (the two others are events of both robots interleaved).
+  The positions are the `.bot` positions (the pairwise distances of the six Scout parts
+  agree to 0.03 m).
+* Robot out (`0x418040`): 1 the third critical on a chassis (`0x417cc0`), 2 immobilized
+  (`0x412fc0`'s 20 s rule), 3 eliminated; it ends the match when one robot or team is
+  left (`0x4170e0` names the winner), and a time-out hands the match to the judges
+  (`0x418770`). All of it was ported before (docs/11, 24, 37); the live rows agree with
+  it (below).
+
+**2. The change.** `RobotRig::depth`, `Robot::splash` (`takes_splash` = depth 1),
+`Robot::damage` with the depth rules (including the return of the whole blow for an
+indestructible depth-1 part), the SmartZone's 400 hitpoints (live `+0xe8`; ours had 300),
+`Duel::apply_hit_normal` calling the splash for every blow that reaches the chassis
+(hazards and flames too: they reach `0x44f370` the same way). Tests:
+`a_chassis_blow_is_handed_to_the_parts_mounted_in_it`,
+`mount_depth_is_the_originals_component_state`, and `fracture_is_a_per_hit_threshold`
+now checks that a depth-1 part stays on.
+
+**3. Why the live Scout loses its fork early.** Live (8 Box fights, 7 with the clock
+row): the Round Extender (hp 100, fracture 15) detaches in **6 of 8 fights, at 10.0,
+11.7, 12.6, 26.3, 30.3 and 39 s** (the arm with it) and the Scout is destroyed in 6 (one
+at ~125 s), ALARM immobilized in 2; no Scout is immobilized and none of the fights is
+still running at 120 s. Ours (48 warmups, after): the extender in 11 of 48 fights, the
+first at 80 s (median), the Scout immobilized in 16, destroyed in 5, the clock in 14
+(Fisher: extender 6 of 8 against 11 of 48, p = 0.007; Scout destroyed 6 of 8 against 5 of 48, p = 0.0003). The mechanism is the 12ap one:
+the first hammer stroke (2.7-3.1 s) strikes **three parts within 0.1 s** live, the arm
+(72-94 hp), the chassis (107-143) and the extender (18-100; in `003` and `007` the
+extender first, 73 and 93, then 160), so the extender's 100 hp are gone in the first
+stroke and the next blow over 15 takes it off (at 5.7 s in `002` the extender had
+0.04 hp left, the 22.6 hp blow did not detach it: `hp <= 0` is tested before the
+subtraction, exactly as ported; it came off at 12.6 with the next 30). Hits of 10 or
+more of ALARM on the Scout in the first 20 s, live (7 fights) against ours (48, after):
+
+| component | live fights hit / hits / hp per fight | ours |
+|---|---|---|
+| Chassis | 100 % / 8.9 / 492 | 96 % / 5.7 / 322 |
+| Forklift Arm | 86 % / 2.6 / 114 | 92 % / 2.4 / 137 |
+| Round Extender | **100 % / 2.4 / 139** | **67 % / 1.5 / 33** |
+| Mini wheel | 0 % | 19 % / 1.3 / 40 |
+
+and the extender hits themselves: live quartiles 18 / 30 / 93 hp (n 19 in 30 s), ours
+16 / 19 / 26 (n 84). Ours' first stroke is the chassis alone (135 hp) or the arm and the
+chassis; it hits the extender later and for little. That is the geometry of the stroke
+(which part the hammer meets first and how far it goes in), not a damage rule: the
+prices per hit, the fracture and hitpoints, the detach and its children are the
+original's. What the splash adds to this fight is the second half of its length: with
+the chassis hurt the Scout's motors, battery and board take 1-5 % of every blow each
+(live per fight: burst motor 201 + 150 hp, angle motors 45-90 + 27-113, board 89 + 73
+in `002`), which weakens the motors (`motor_factor`) and ends the fights it should.
+
+**4. How the fights end, live and ours** (live: matches ending at `W`, censored at 120 s
+of the clock; ours the 48-warmup ensembles of the four standard fights, `FIDTRACE_UP=1`,
+120 s, scratch install):
+
+| fight | live ends | ours before | ours after |
+|---|---|---|---|
+| Box Scout v ALARM | 8 fights: Scout destroyed 6 (one at ~125 s), ALARM immobilized 2 (the 7 that end by 108 s: mean 85 s) | clock 15, Scout immobilized 15, ALARM immobilized 13, Scout destroyed 5 | clock 14, Scout immobilized 16, ALARM immobilized 13, Scout destroyed 5; mean length 75.1 (80.3) s |
+| Compressor Sentinel v Wide Load | 8: Sentinel immobilized 2, Wide Load immobilized 2 (40, 49, 67, 77 s), 4 still fighting at 158-162 s | clock 26, Sentinel immobilized 11, Wide Load immobilized 10, Sentinel destroyed 1; mean 94.5 s | clock 19, Wide Load immobilized 15, Sentinel immobilized 14; mean 94.3 s |
+| Box Razor v FlapJack | 5: Razor immobilized 5 (25, 27, 38, 42, 106 s) | Razor immobilized 45, clock 2, FlapJack immobilized 1; mean 59.4 s | the same counts; mean 61.3 s |
+| Octagon Scout v ALARM | 5: ALARM immobilized 2, Scout eliminated 2, ALARM eliminated 1 (24, 30, 39, 48 and 104 s; mean 49.0 s) | ALARM eliminated 16, Scout eliminated 13, Scout immobilized 10, ALARM immobilized 6, Scout destroyed 2, clock 1; mean 46.1 s | Scout immobilized 14, Scout eliminated 12, ALARM eliminated 10, ALARM immobilized 9, Scout destroyed 1, clock 2; mean 48.6 s |
+
+The 12aq remark that live Compressor fights end sooner (about 100 s) is not what these
+captures show: half of the live fights end, all by immobilization at 40-77 s, the rest run
+past 158 s; ours end by immobilization in 29 of 48 (mean 77.5 s) and 19 run to the 120 s
+clock. The match is not limited to 120 s live (the exhibition's default is three
+minutes), so only the ended fights compare. Box: live fights all end, six by the
+Scout's destruction; ours end by immobilization first (16 Scouts, none of 8 live) and
+14 run to the clock.
+
+**5. Parts lost per fight** (the part named in `Q`; what is mounted on it goes with it):
+
+| fight | live (within 120 s) | ours before | ours after |
+|---|---|---|---|
+| Box | 6 of 8 fights, 6 parts: Round Extender 6 (first 10-39 s) | 12 in 12 fights: Round Extender 11, Mini wheel 1 (first 59 s) | 12 in 12 fights: Round Extender 11, Mini wheel 1 (first 80 s) |
+| Compressor | 3 of 8 fights, 5 parts: Sentinel wheels 5 (2 at 37 s, the rest 107-123 s) | 54 in 27 fights: SlipperBottom 52, Powered Steering Unit 1, Bracket Wedge 1 (first 42 s) | 52 in 26 fights, SlipperBottom 52 (first 46 s) |
+| Razor v FlapJack | 0 | 0 | 0 |
+| Octagon | 3 of 5 fights, 3 parts: Round Extender 3 (3.8, 27, 91 s) | 2 (Round Extender) | 3 (Round Extender 2, Mini wheel 1) |
+
+(Compressor: live 3 of 8 fights lose wheels against ours 26 of 48, p = 0.46; the live
+losses are late, ours from 46 s: open, the n is small. Octagon: the extender in 3 of 5
+live fights against 3 of 48 (p = 0.008), the same early loss as the Box; ours' Octagon
+fights hit the extender rarely.)
+
+**Ensembles, before / after** (48 warmups, 120 s, scratch install, `FIDTRACE_UP=1`;
+counted >= 10 on the other robot, arena hp, mean +- standard error; the trajectories
+differ after the first hit, so these move within the usual noise):
+
+| fight | counted before | counted after | arena hp before | arena hp after |
+|---|---|---|---|---|
+| Box ALARM / Scout | 31.0 +- 3.3 / 5.4 +- 0.6 | 33.3 +- 3.9 / 5.5 +- 0.6 | Scout / ALARM 70.6 +- 12.9 / 87.7 +- 26.7 | 76.6 +- 11.6 / 35.4 +- 8.8 |
+| Razor / FlapJack | 4.3 +- 0.3 / 1.1 +- 0.2 | 4.3 +- 0.4 / 1.1 +- 0.2 | 44.7 +- 20.5 / 7.6 +- 2.5 | 31.8 +- 12.8 / 6.5 +- 1.9 |
+| Compressor Wide Load / Sentinel | 78.6 +- 6.3 / 4.2 +- 0.5 | 70.0 +- 6.6 / 4.2 +- 0.6 | Sentinel / Wide Load 122.0 +- 36.8 / 91.7 +- 28.7 | 128.6 +- 30.6 / 58.8 +- 16.2 |
+| Octagon ALARM / Scout | 14.6 +- 1.8 / 3.8 +- 0.4 | 14.0 +- 1.9 / 3.6 +- 0.3 | Scout / ALARM 81.1 +- 15.7 / 34.2 +- 9.9 | 114.7 +- 22.4 / 35.9 +- 7.4 |
+
+(the 12aq rows had the Octagon Scout at 22 live: the splash does not move it toward that.)
+
+**Verified / not.** Live: every blow, the detach chain and the splash of 14 fights, the
+depth of 63 parts, the ends of 26 fights. Not: why the first live stroke meets the
+extender and ours' does not (the hammer's reach and height against the Scout's front at
+the first contact; the 12ap offsets of 0.1 m are the same question; a live look at the
+Scout's fork body in the first 3 s, with the extender's own collision piece, would
+settle it); the Compressor's wheel losses (the hp the Wide Load's tips put on the Sentinel's
+wheels in 120 s agree, live 871 a fight (8 fights; 176-1862) against ours 857, but ours lose
+wheels in 26 of 48 fights, from 46 s, live in 3 of 8, from 37 s; the chassis takes
+live 1445 hp a fight from them against ours 933, two live fights carry 2800-3000); the score a hit on an indestructible depth-1 part awards (the whole blow by the
+decompile; the captures have no score rows); whether the group's list is every part of
+depth 1 or the parts of the chassis (the same in all 92 live parts).
+
+**Tools.** `tools/oracle/frida/ra2_parts.js`, `capture_parts_set.sh`,
+`capture_boxstart.py` (`PRIME=1`, ends when the physics stops), `parts_live.py`,
+`parts_compare.py`, `ensemble_parts.py`; `RA2_SPLASH=0`, `RA2_DEPTH=0`.
