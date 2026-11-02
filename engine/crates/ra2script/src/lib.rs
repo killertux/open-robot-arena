@@ -57,17 +57,27 @@ pub use ra2_audio;
 #[derive(Clone, Debug, Default)]
 pub struct BotSnapshot {
     pub alive: bool,
+    /// The player's team (`+0x30`, `FUN_004177c0`): `IsEnemy` compares it in a
+    /// TEAM MATCH and the player ids in every other game type (`0x418f40`).
+    pub team: i32,
+    /// A person drives this robot (`plus.isHuman`, robot vtable slot 7).
+    pub human: bool,
+    /// The names of the controls on the robot's board (`GetInputStatus` reads 0 for any other).
+    pub controls: Vec<String>,
     /// Chassis position.
     pub location: Vec3,
-    /// Unit vector the robot faces.
+    /// Unit vector the robot faces: `(0, 0, 1)` turned by the `.bot` heading and
+    /// then by the chassis body's orientation (`0x4df3d0`), **not flattened** -
+    /// a tilted robot has a `y` component (live: 0.47 on ALARM's tail). `GetSpeed`
+    /// is this vector dotted with the body's linear velocity.
     pub direction: Vec3,
-    /// Forward speed in m/s (`GetSpeed`).
+    /// `GetSpeed`: `direction . linear velocity`, m/s (`0x401c90`).
     pub speed: f32,
     /// Yaw rate in rad/s (`GetTurning`).
     pub turning: f32,
     pub upside_down: bool,
     pub mass: f32,
-    /// `(class, health)` per component, in the rig's order.
+    /// `(class, health / hitpoints)` per component, in the rig's order (`GetComponentHealth`).
     pub components: Vec<(String, f32)>,
     /// World-space sphere of each component, for `plus.rayTest`.
     pub spheres: Vec<(Vec3, f32)>,
@@ -1648,6 +1658,38 @@ mod tests {
                 .unwrap();
             assert_eq!((back.0, back.2), (1.5, -2.25));
             assert!((back.1 + 2.265).abs() < 0.01, "the box floor: {back:?}");
+
+            // Live (`ainative` probes, docs/29 section 12an): a ray that strikes nothing answers
+            // `(0, (None, None, None))`, and the Combat Arena's map is 30 x 30 cells.
+            type Miss = (bool, (Option<f32>, Option<f32>, Option<f32>));
+            let miss: Miss = obj
+                .call_method1(
+                    "RayTest",
+                    (
+                        (100.0f32, 100.0f32, 100.0f32),
+                        (100.0f32, 101.0f32, 100.0f32),
+                    ),
+                )
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(miss, (false, (None, None, None)));
+            let size: (f32, f32) = obj.call_method0("GetMapSize").unwrap().extract().unwrap();
+            assert_eq!(size, (30.0, 30.0));
+            // The Combat Arena's walls stand 12.7 m out (live `plus.rayTest` stopped there): the
+            // arena's triangles hold them.
+            let wall: (bool, (f32, f32, f32)) = obj
+                .call_method1(
+                    "RayTest",
+                    (
+                        (-20.0f32, -1.89f32, -9.16f32),
+                        (11.09f32, -1.89f32, -9.16f32),
+                    ),
+                )
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(wall.0 && (wall.1 .0 + 12.7).abs() < 1e-3, "{wall:?}");
         });
     }
 
