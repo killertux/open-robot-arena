@@ -1981,6 +1981,7 @@ impl Shell {
                     if let Some(list) = workshop::find_mut(root, "file list") {
                         ra2ui::input::text_rows(list, &designs);
                         ra2ui::input::clear_selection(list);
+                        ra2ui::input::row_lines(list, ra2ui::input::visible_rows(list).max(8));
                         // live: eight blank rows and no scroll bar for a short list
                         if designs.len() <= ra2ui::input::visible_rows(list) {
                             ra2ui::input::show_scroller(list, false);

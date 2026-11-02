@@ -354,9 +354,10 @@ fn the_time_dropdown_opens_its_list_and_a_row_sets_the_match_length() {
     };
     assert!(rows_of(&shell).is_empty(), "closed: no rows");
     let field = frame_of(&shell, "time dropdown");
-    // The arrow opens the list; the rows are the constructor's, five shown.
+    // The arrow opens the list; the rows are the constructor's, five shown and the
+    // sixth cut off at the clip (live `exhibition-time-open`).
     shell.click(field.x + field.w - 8.0, field.y + 9.0).unwrap();
-    assert_eq!(rows_of(&shell), ["No limit", "1", "2", "3", "4"]);
+    assert_eq!(rows_of(&shell), ["No limit", "1", "2", "3", "4", "5"]);
     // A click away closes it and changes nothing.
     shell
         .click(field.x + field.w + 200.0, field.y + 9.0)

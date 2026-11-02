@@ -617,7 +617,7 @@ impl Hq {
         bind_value_in(
             &mut self.document,
             "events remaining",
-            &format!("Events remaining: {}", self.view.events_remaining),
+            &format!("Events Remaining: {}", self.view.events_remaining),
         );
         Ok(())
     }
@@ -1673,7 +1673,7 @@ mod tests {
         assert_eq!(text_of(root, "season").as_deref(), Some("Season 3"));
         assert_eq!(
             text_of(root, "events remaining").as_deref(),
-            Some("Events remaining: 7")
+            Some("Events Remaining: 7")
         );
     }
 

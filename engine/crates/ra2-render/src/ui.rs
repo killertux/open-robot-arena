@@ -433,7 +433,12 @@ impl UiAssets {
         // the runtime has resized the widget since — a scroll trough whose track
         // is 973 pixels and whose rect says 4.25 pages of a 16-pixel pattern —
         // the natural size is the reading that looks like a trough.)
-        let tiled = uv[2] > 1.0001 || uv[3] > 1.0001 || uv[0] < -0.0001 || uv[1] < -0.0001;
+        // `importbot.gib` is the one shipped `metaldots_pattern` whose rect is `0 0 1 1` (all
+        // the others, export's included, run to 4-9 pages); the capture shows it tiled at the
+        // texel size like them (rivets 16 px apart), so the pattern is a tile whatever its rect.
+        let pattern = file.to_ascii_lowercase().ends_with("metaldots_pattern.bmp");
+        let tiled =
+            pattern || uv[2] > 1.0001 || uv[3] > 1.0001 || uv[0] < -0.0001 || uv[1] < -0.0001;
         let texture = self.texture(file)?;
         if tiled {
             self.tiles.push(file.to_string());

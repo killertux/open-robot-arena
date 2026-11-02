@@ -692,3 +692,23 @@ Other fixes from the side images (smaller MAE, visible to a player):
 Open (not fixed): the Import dialog's file list in the capture shows row separators and a preview of a leftover bot (state), and the window's tile in ours looks blurred there (`teamhq-import-dialog` 1.96); the
 match-time dropdown's scroll trough is not drawn and its list is 1 px low with the 5th row partly visible in the original (`exhibition-time-open` 1.83); the picker's first-robot snapshot in the join window differs
 (the capture's `.bot` carried another snapshot). No new live captures were needed or taken.
+
+### 11.11 UI leftovers (`fx/ui-leftovers`, 2026-11-02)
+
+`fidelity.py --renderer app`, base = 11.10 + the tip pin below. **Mean of 115 2.796 -> 2.00 of 114** (`arena-metalskull-f4` retired from the score, below; the other 114 moved 2.00 -> 2.00, the fixes
+are tenths on three screens).
+
+* **Tip pin.** `fidelity.py` sets `ORA_TIP_SEED` (the Bot Lab's `FUN_0043e900` roll, `Lcg(seed).range(4)` redrawn while it names the screen shown). Read off the captures: the overview shows "Paint Shop"
+  (seed 2, fixture env), chassis / components / wiring / paint show "Test Robot" (seed 19, the default). The `botlab-*` numbers are now identical between runs.
+* **`arena-metalskull-f4` retired** (`RETIRED` in `fidelity.py`; the file and its manifest row stay): it was taken after the match, with Match Results up (88.6); the state-hooked `arena-metalskull-f4live`
+  (match on, F4 two seconds in, 0.18) is the same view and stays scored. No new capture was needed.
+* **Import Bot window texture** (`teamhq-import-dialog` 1.96 -> 1.91, `-row` 1.64 -> 1.59): `importbot.gib` is the only shipped `metaldots_pattern.bmp` whose rect is `0 0 1 1` (the others run 4-9 pages), so it was
+  stretched 64 -> 380 px, which is the blur. The capture shows it at texel size like every other window; `ra2-render::ui::art_quad` takes that file as a tile whatever its rect.
+* **Import Bot row lines**: the list's `BorderColor 0 0 0 1` / `BorderWidth 1` ring is one black pixel at the top of each 18-px row (also the empty ones: 8 in the capture) and one down the left edge, none right or
+  under the last (pixel-checked at x 356, y 313 + 18k); `ra2ui::input::row_lines`, called for this list only; the lines count as bars, not rows (they made a scroll bar appear).
+* **Match-time dropdown** (1.83 -> 1.81): the scroll trough is drawn (the track is `UI_ScrollBack.bmp` in a hidden widget on the slider's `Background` attachment; `reveal_trough` shows it with the bar) and the
+  row the list height only reaches into is drawn cut off at the clip (the capture's half "5"; `scroll_rows` `partial`, drop-down lists only). Still open: the list is 1 px low (the Position
+  edit moved nothing: the offset is quantised away somewhere in the 1280 -> 1024 layout; not found).
+* **League standings**: the field reads `Events Remaining: N` (capital R, from the capture; was `Remaining` lower case). Ours also sits 2 px left of the capture's (text width, not chased).
+* **Open**: the import dialog's leftover preview of a robot (the capture's window keeps the last image of an earlier import; ours is empty, an outline only); the standings screen's scroll bar looks wider than the
+  capture's and the bottom-right decoration differs; `exhibition-settings` 1.68, `teamhq-event-join` 2.47 are glyph-level.

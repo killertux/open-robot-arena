@@ -419,7 +419,10 @@ pub fn content_count(list: &Widget) -> usize {
 }
 
 fn is_bar(child: &Widget, grid: Option<&Grid>) -> bool {
-    if child.name() == "Sel Bar" || child.name() == "High Bar" {
+    if child.name() == "Sel Bar"
+        || child.name() == "High Bar"
+        || child.name().starts_with("row line")
+    {
         return true;
     }
     let Some(grid) = grid else { return false };
@@ -477,12 +480,21 @@ pub fn scroll_rows(list: &mut Widget, offset: usize) -> usize {
     let offset = offset.min(max);
     let height = grid.row_height;
     let selected = field_of(list, "_SelectedRow").and_then(|value| value.parse::<usize>().ok());
+    // A drop-down's list is sized by the screen (100 px of 18-px rows): the row the height only
+    // reaches into shows cut off at the clip (live `exhibition-time-open`: "5" half drawn).
+    let list_height = list.size().map(|s| s.second.amount).unwrap_or(0.0);
+    let partial = usize::from(
+        grid.rows <= 1
+            && field_of(list, "_ViewRows").is_none()
+            && list_height > visible as f32 * height + 1.0
+            && count > offset + visible,
+    );
     let mut ordinal = 0;
     for child in list.children.iter_mut() {
         if is_bar(child, Some(&grid)) {
             continue;
         }
-        let shown = ordinal >= offset && ordinal < offset + visible;
+        let shown = ordinal >= offset && ordinal < offset + visible + partial;
         let (dx, dy) = if child.kind == WidgetKind::Text {
             (ROW_TEXT_X, ROW_TEXT_Y)
         } else {
@@ -678,6 +690,9 @@ fn set_scroller_visible(list: &mut Widget, visible: bool, offset: usize, max: us
     };
     set_field(bar, "Visible", if visible { "true" } else { "false" });
     let model = crate::ScrollBar::from_widget(bar);
+    if visible {
+        reveal_trough(bar);
+    }
     // The three parts take their visibility from the bar; the file leaves the
     // buttons and the track hidden because the control was never enabled.
     for index in [model.less, model.more, model.slider] {
@@ -688,6 +703,28 @@ fn set_scroller_visible(list: &mut Widget, visible: bool, offset: usize, max: us
             }
         }
     }
+}
+
+/// The scroll trough (`UI_ScrollBack.bmp`) is a hidden widget of a drop-down's bar in the file; the
+/// bar shows it with its parts.
+fn reveal_trough(widget: &mut Widget) -> bool {
+    let mut found = widget.kind == WidgetKind::Image
+        && widget
+            .field("_Filename")
+            .is_some_and(|f| f.text().to_ascii_lowercase().contains("scrollback"));
+    for child in widget.children.iter_mut() {
+        found |= reveal_trough(child);
+    }
+    // The trough hangs on the slider's `Background` attachment.
+    for attachment in widget.attachments.iter_mut() {
+        if let Some(body) = attachment.body.as_deref_mut() {
+            found |= reveal_trough(body);
+        }
+    }
+    if found && widget.kind != WidgetKind::Image {
+        set_field(widget, "Visible", "true");
+    }
+    found
 }
 
 fn thumb(slider: &mut Widget, offset: usize, max: usize, track: f32) {
@@ -769,6 +806,53 @@ pub fn text_rows(list: &mut Widget, texts: &[String]) -> usize {
         made += 1;
     }
     made
+}
+
+/// The list's own cell lines (`BorderColor 0 0 0 1`, `BorderWidth 1`) for a list whose cells are
+/// not made as widgets (the import window's file list): one black pixel at the top of every row
+/// (also the empty ones, 8 rows in the capture) and one down the left edge, none at the right or
+/// under the last row (`teamhq-import-dialog`: lines at y = 0, 18, ... 126 of the list, x = 0).
+/// Drawn under the row text.
+pub fn row_lines(list: &mut Widget, rows: usize) {
+    list.children.retain(|c| !c.name().starts_with("row line"));
+    let Some(height) = Grid::from_widget(list).map(|g| g.row_height) else {
+        return;
+    };
+    let line = |name: String, pos: String, size: &str| {
+        let field = |name: &str, raw: &str| ra2fmt::gib::Field {
+            name: Some(name.to_string()),
+            raw: raw.to_string(),
+        };
+        Widget {
+            kind: WidgetKind::Rectangle,
+            implicit: false,
+            fields: vec![
+                field("Filled", "true"),
+                field("FillColor", "0 0 0 1"),
+                field("BorderWidth", "0"),
+                field("BorderColor", "0 0 0 0"),
+                field("Name", &name),
+                field("ID", "-1"),
+                field("Position", &pos),
+                field("Size", size),
+                field("Visible", "true"),
+                field("ChildOrder", "6"),
+                field("ClipMode", "0"),
+                field("NumChildren", "0"),
+            ],
+            attachments: Vec::new(),
+            children: Vec::new(),
+        }
+    };
+    for i in 0..rows {
+        list.children.push(line(
+            format!("row line {i}"),
+            format!("0 0 {} 0", height * i as f32),
+            "1 1 1 0",
+        ));
+    }
+    list.children
+        .push(line("row line left".into(), "0 0 0 0".into(), "1 0 1 1"));
 }
 
 #[cfg(test)]
