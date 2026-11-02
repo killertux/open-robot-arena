@@ -6490,3 +6490,117 @@ a_wall_between_the_ray_and_the_robot_hides_the_robot}`,
 12.7), `scriptai::facing_tests`.
 **Tools.** `tools/oracle/ainative_install.py`, `capture_ainative.sh`,
 `ainative_probes/`, `ainative_speed.py`; `RA2_AI_FLATDIR=1`.
+
+### 12ao. The hellraiser's zone is the original's; the firing rate gap is in the fights, not in the zone (fx/hellraiser; diagnostics only, no default changes)
+
+Section 12am left live at 1.0 hellraiser firings per fight against ours 0.5
+(Scout 0.38 / 0.23, ALARM 0.63 / 0.27), and the Octagon Scout on its back in 16
+of 48 against 2 of 18, its arena hp 83 against 22. This round looked at the
+zone, the script, the route layer and the Scout's flips, with 12 new live
+fights that start at the bell.
+
+**New live captures.** The eight `boxfight-*octagon*` captures attached about
+5 s after the bell and end their W rows there. `boxstart-scout-alarm-octagon__live__000..011`
+(12 fights, `capture_boxstart.py` with the agent `frida/ra2_boxfight.js` loaded
+before Start Game, Octagon row `ARENA_ROW_Y=296`, 70 s of fight after the intro;
+`:9`, `RA2_FRIDA_PORT=27149`; `Teams/`, `AI/`, `Robot Designs/`, `ra2.cfg` copied
+before and sha256-compared after: "prefix restored"; 36 rows in
+`local/oracle/manifest.tsv`, copies and
+`manifest-additions-2026-11-02-hellraiser.tsv` in `~/ra2-oracle-backup`) have the
+`A`/`X`/`W`/`GP`/`GR` rows from the first frame, and a `.tsv` of the AI state every
+3 frames. (The A rows include about 60 s of intro; the fight starts at the first
+chassis movement, `tools/oracle/live_runs.py`.)
+
+**What was checked, and what it found.**
+
+1. *The script.* `octagon.py` and `Hazards.HellRaiser`: `ZoneEvent(direction, id,
+   robot, chassis)` calls `RaiseHell()` on **every** enter (`direction == 1`) of
+   zone 1 or 2 by any robot's collidable, with no cooldown: a second enter
+   re-arms `timer = 0` and `SetDirection(100)`; `Tick` adds 0.5 and lowers when
+   `timer > 1`. Ours runs the same script; the port of the enters is per
+   collidable, as the binary's listener (`0x4a4780`, 12i). The live W rows agree:
+   enter and leave pairs per body, the `chassis` argument is the robot object plus
+   the chassis flag (two values per robot per fight).
+2. *The route layer is exact in the Octagon.* All 6297 `GetPath` calls of the
+   20 live Octagon fights (radius, both points, the native list) are reproduced
+   by ours (`live_getpath_dump_reproduces`, now with `RA2_GP_ARENA="The Octagon"`;
+   0 differ in every capture). 12ah proved it for the box only.
+3. *The zone's reach, at the pose level.* `examples/zonereach` moves ours rigid
+   rig to a live chassis pose (centre of mass and rotation from the `X` rows; the
+   row-major matrix is the transpose of ours, which the probe confirms, as 12i's `zoneprobe` says the rows are the body's axes: with the
+   transpose the live enters sit at margin 0) and finds the smallest margin the
+   zone box must be grown by for any collision piece to touch it
+   (`Duel::zone_probe_margin`). For the chassis-flag enters of the 12 fights
+   whose chassis moved under 0.5 m between the samples either side of the
+   event (n = 16 enters, `X` every 8th piece, so up to 0.5 m of slack), the
+   margin at the sample after the event is 0 in 14, 0.075 in 1 and 0.125 in 1. The non-chassis enters (wheels, arms) cannot be replayed with a
+   rigid rig (ALARM's hammer swings), they need 0 to 0.6. Over the 2124 live
+   samples within 4 m of a zone, ours says "touching" at 3 samples live says
+   "outside" and at 5 of 5 that live says "inside" (away from events).
+4. *The reach is bounded from above by the opening.* ALARM's first pass of
+   `hellzone2` at 1.2-1.4 s: live 0 of 12 new fights (the older eight attached
+   too late to see it); ours 2 of 48. `RA2_ZONE_GROW=0.15` (new diagnostic: grows every
+   registered zone's box by that on all sides) makes it 14 of 48 and the runs
+   per fight 0.62 -> 1.67, so a zone larger by anything like 0.15 m contradicts the live
+   opening (P(0 of 12) = 0.02 for the grown zone, 0.6 for ours).
+
+**The rates, same definition (runs of enters, `live_runs.py`).**
+
+| | live (12 new) | ours (48) |
+|---|---|---|
+| runs per fight | 2.0 (Scout and ALARM; the clusters of 001, 007, 010) | 0.62 |
+| fights with a run before 45 s | 9 of 12 (15 of 20 with the old eight) | 18 of 48 (Fisher p = 0.007 against the 20) |
+| runs before 15 / 30 / 45 s | 0.42 / 1.17 / 1.92 | 0.27 / 0.40 / 0.58 |
+| zone 1 / zone 2 runs | 30 / 2 (all 20 fights) | 22 / 8 |
+| first run | 2.8, 3.1, 6.0, 10.8, 14.2 ... | 1.2, 2.6, 3.1, 7.2 ... |
+
+So the gap is real and larger than 12am's 8-fight estimate (the live numbers
+now include the repeat entries of a robot that stays at the hellraiser after the
+other has died; they are in the capture past the fight end, which ours does not
+simulate; with the end of the fight taken as the last time a chassis moved, 15
+runs in 12 fights, still 3 times ours per fight second). It is not the zone: the
+pose-level test, the opening pass and the script all agree. It is not the route
+layer. Where it comes from:
+
+* The chassis centres are near the same places for the first 20 s (fraction of
+  fights with a chassis within 2.5 m of hellzone1 by 20 s: live 33 % / 50 %
+  ALARM / Scout (new), 28 % / 17 % (old), ours 27 % / 19 %; time within 2.5 m
+  of it in 5-30 s: 1.36 s per fight live (30 fights), 1.17 ours, permutation
+  p = 0.8). After 20 s the live robots stay near it more (within 3 m: 4.0 s and 2.9 s
+  per fight for ALARM / Scout in the first 45 s against 1.6 and 1.8).
+* Most enters are non-chassis bodies of ALARM (33 of 46 live, 13 of 27 ours): its
+  arms, hammer and wheels reach into the zone from 2.5-3 m. How often ALARM's
+  weapon is out near the hellraiser depends on its fight, which no capture of
+  ours covers (no hinge angle in the `X` rows). Open.
+* A firing begets enters: the plate throws the robot, it falls back and
+  re-enters (001: 7 runs in 9 s; 007, 010). Live per-fight clusters are what
+  the mean 2.0 is made of; ours has them too, but less often (three fights of 48
+  with 3 or more runs, live 3 of 12).
+
+**The Scout's flips and arena hp, with the new fights.** The new `.tsv`s carry
+`isUpsideDown`. On the arena floor (not in a pit) for 1.5 s or more: Scout
+4 of 12 new + 2 of 18 older = **6 of 30** (20 %), ALARM 7 of 12 + 8 of 18 =
+15 of 30. Ours: Scout 16 of 48 (33 %), ALARM 25 of 48 (52 %). Fisher: Scout
+p = 0.30, ALARM p = 1.0. With 30 live fights the Scout's flips are no longer
+distinguishable from ours; 12am's 2 of 18 was a small sample. The hp is a
+different matter and stays: live Scout arena hp 19 per fight upright, 0 on its back
+(`inverted_hits.py live`; 1.1 hits of 10 hp or more per fight, 12 hits in 10 fights);
+ours upright 30 (2.0 hits) and 52 on its back (3.3 hits per fight, 5.8 hp/s, the
+Forklift Arm and the chassis on `main_collision` and `startblock1`; only 1.8 hp per
+fight from the hellraiser). The new fights have no priced hits (boxstart agent), so
+the Scout's hp on its back is still unmeasured live: it is the one number that would
+decide whether the hits on a flipped Scout are too many (12am: the live ALARM on its
+back takes 1.66 hp/s, ours 0.89).
+
+`RA2_ZONE_GROW=0.15` also moves the flips (13 of 48 on the back, Scout) and the
+arena hp (Scout 78, ALARM 71.5): the arena hp of the Scout does not follow the
+hellraiser's firings.
+
+**Verified / not.** In the binary and live: the script's semantics (live W rows),
+the 6297 route calls, the zone reach at the chassis pose (the transposed rotation
+gives margin 0 at live enters), the opening pass. Not: why live robots linger near
+hellraiser 1 after 20 s and how often ALARM's weapon is out there, why ours hits
+the floor with the Scout's fork when it is on its back (an unmeasured live
+quantity), the 12am GJK ties.
+**Tools.** `tools/oracle/live_runs.py`, `examples/zonereach`, `Duel::zone_probe_margin`,
+`RA2_ZONE_GROW`, `RA2_GP_ARENA`.

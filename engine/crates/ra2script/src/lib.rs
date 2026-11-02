@@ -1458,7 +1458,9 @@ mod tests {
         let mut first_bad = Vec::new();
         with_py(|py| {
             host.load_arenas(py).unwrap();
-            let arena = host.create_arena(py, "Combat Arena").unwrap();
+            let arena_name =
+                std::env::var("RA2_GP_ARENA").unwrap_or_else(|_| "Combat Arena".into());
+            let arena = host.create_arena(py, &arena_name).unwrap();
             assert!(host.hazards_on(py, true).unwrap());
             let a = arena.bind(py);
             for line in text.lines() {
