@@ -49,7 +49,7 @@ while [ $run -lt "$RUNS" ]; do
     echo "== run $run of $RUNS"
     "$PY" -c "import sys; sys.path.insert(0, '$HERE'); import capture_drive as cd; cd.start_match('$ROW')"
     tmp=$(mktemp)
-    "$PY" "$HERE/ra2_python.py" --sample "$EXPR" --every 6 --seconds "$(python3 -c "print($SECS * 1.15 + 5)")" >"$tmp" &
+    "$PY" "$HERE/ra2_python.py" --sample "$EXPR" --every 6 --seconds "$(python3 -c "print($SECS * ${SAMPLE_FACTOR:-1.15} + 5)")" >"$tmp" &
     sp=$!
     SKIP_START=1 NAME=$NAME OUT=$OUT SIM_SECONDS=$SECS "$PY" "$HERE/capture_fight.py"
     wait $sp
