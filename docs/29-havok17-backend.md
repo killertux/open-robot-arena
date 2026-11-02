@@ -6382,7 +6382,7 @@ ground, the GJK ties, the box's ALARM.
 `RA2_AI_DIST3D=1`.
 
 
-### 12an. Every native the scripts call, audited against the binary: the direction is not flat, teams, unknown ids, the flames' walls (fx/ai-audit)
+### 12an. Every native the scripts call, audited against the binary (the direction is not flat, teams, unknown ids, the flames' walls), and the distance query in the original's own arithmetic (fx/ai-audit)
 
 12am found `GetDistanceTo` 3-D in ours and planar in the binary because docs/33's
 binding table had never listed it. This section is the audit that table asked
@@ -6490,6 +6490,102 @@ a_wall_between_the_ray_and_the_robot_hides_the_robot}`,
 12.7), `scriptai::facing_tests`.
 **Tools.** `tools/oracle/ainative_install.py`, `capture_ainative.sh`,
 `ainative_probes/`, `ainative_speed.py`; `RA2_AI_FLATDIR=1`.
+
+**2. The distance query's misses were the arithmetic: the original's own code, run natively, and its port.**
+12ak and 12am left 2.3 % of the 43 689 live queries (`gjkquery-...__live__000`) unreproduced
+and blamed the float rounding of the cofactor recurrence of `FUN_0055f100`. Three
+steps settled it.
+
+*The original's code as the oracle.* `tools/oracle/gjknative/` builds `gjkn`, a freestanding
+32-bit ELF that maps the PE image at its virtual addresses (`pack_img.py` makes the image from the
+local `Robot Arena 2.exe`), patches the two functions that need the engine's objects (`0x524d40`
+the transform refresh: `ret`; `0x4b0c50` the position read), builds the collidable, hull,
+adjacency, triangle and state exactly as the live rows describe them, sets the x87 control word
+and **calls `0x55c390` (or `0x55f100`) itself on the host FPU**. It is the original's code on
+the original's data, 10 000 queries a second. Checked against the game: the reduction of 1369
+simplexes run in the live process (`ra2_gjkreduce.js` on the physics thread, control word read
+there: `0x7f`) and by `gjkn` at `0x7f` agree on all 1369 bit for bit (new capture
+`gjkreduce-box__live__000.jsonl` with its `.cases.json`, rows in the manifest and the
+backup's `manifest-additions-2026-11-02-ai-audit.tsv`, with the three of section 1).
+
+*What the live data say.* The 43 689 queries through `gjkn` (`gjknative.py replay`):
+
+| x87 control word | same simplex vertices | and the hull point within 2 mm |
+|---|---|---|
+| `0x7f` (24-bit significand) | 42 883 (98.2 %) | 42 672 |
+| `0x27f` (53-bit) | **43 661 (99.94 %)** | **43 645 (99.90 %)** |
+| `0x37f` (64-bit) | 43 661 | 43 645 |
+
+53 and 64 bits give identical simplexes. Of the 43 689, 42 628 fit every word, 1017 only 53/64
+bits, and **44 only 24 bits** (seq 9038, 9154, 9270, 9386, 12338, 18124: the thread's precision
+alternates, since D3D sets 24 bits around its calls; the word read at the first query was `0x7f`).
+That alternation is not modelled. The unreproduced 2.3 % of 12ak was therefore the schedule of
+roundings, not a different algorithm: the cofactors are built from dot products **stored as
+`f32`** between the tests, the weights are products of stored `f32`s, and the candidate norms mix
+stored and register values; the registers are 53-bit.
+
+*The port.* `havok17/x87gjk.rs`: `reduce` is `FUN_0055f100` block by block, the stack slots
+kept as a table (a later test reads a slot an earlier block overwrote), registers as `f64`,
+stores as `as f32`; `query` is `FUN_0055c390` with its supports (`0x55b000` on the hull's
+*local* direction `R^T d`, the climb along the adjacency lists or, without lists, the scan from
+the last vertex down; `0x55b200` for the triangle, ties to the highest index), the centroid
+(`0x55bdc0`), the world vertices from the 3x3 and the translation (`0x51e650`) and the sums of
+`v` and of the points, each in the original's order of operations. Quirks the port keeps because
+the binary has them: an edge candidate of a three-point simplex does not set its swap list
+(the fallback of the edge `01` swaps vertex 2 to the front with the edge's weights), a four-point
+candidate keeps the previous candidate's swap list unless it writes its own, the origin test of
+the tetrahedron compares four plane signs (`> 0`, all equal = inside), the best candidate must
+be strictly smaller. **Verified bit for bit against `gjkn` at `0x27f`**: 172 738 simplexes
+(random, flat with repeated points, collinear, nearly flat, the live reduction inputs) for
+`reduce`, and all 43 689 queries of `__000` for `query` (vertices of both shapes, the
+distance's bits, the hull point's bits, the climb vertex left behind, the overlaps).
+Goldens in the tree: `x87gjk::tests` (105 simplexes, 60 queries).
+
+**Against the captures** (`examples/gjkreplay.rs`, `__000` / `__001`):
+
+| mode | simplex vertices | hull point within 2 mm |
+|---|---|---|
+| 12ak `f64` Gram, adjacency | 42 764 (97.9 %) / 38 738 | 42 677 (97.7 %) / 38 438 |
+| 12ak `f64` Gram, no adjacency (the engine's hulls) | 42 489 (97.3 %) | 42 578 (97.5 %) |
+| **`x87`, adjacency** | **43 661 (99.94 %)** / **39 284 (99.92 %)** | **43 645 (99.90 %)** / **39 278 (99.91 %)** |
+| **`x87brute`, no adjacency (the engine)** | 43 312 (99.14 %) | 43 526 (99.62 %) |
+
+*Change (default):* the convex x mesh agent runs `narrow::convex_point_x87`
+(`x87gjk::query` on the piece's local vertices, its 3x3 and its translation);
+`RA2_GJK=gram` is 12ak's `f64` Johnson, `RA2_GJK=0` the exact query. Not carried over: the
+adjacency lists and the climb start (ours has none for its hulls: the highest index wins ties,
+the 99.14 % row), the convex x convex query (`0x55b2c0`), and the original's inputs
+bit for bit (our world vertices and poses are our own `f32` transforms, so a tie that the
+original decides with its own ulp can still go the other way).
+
+**Ensembles, before / after** (as above, 48 warmups; the middle column is section 1's, the last
+adds the port):
+
+| fight | live | before (12am) | AI audit only | **+ x87 query** |
+|---|---|---|---|---|
+| box ALARM / Scout counted | 41.1 / 6.0 | 33.4 / 5.1 | 29.1 +- 3.2 / 5.1 | 31.0 +- 3.3 / 5.4 +- 0.6 |
+| box arena hp Scout / ALARM | 99 / 17 | 80.5 / 81.7 | 60.5 / 41.8 | 70.6 +- 12.9 / 87.7 +- 26.7 |
+| box Scout / ALARM on back | 2 / 5 of 13 | 9 / 30 of 48 | 6 / 32 | 10 / 26 |
+| Razor / FlapJack counted | 3.0 / 0.1 | 1.1 / 4.6 | 1.1 / 4.2 | 1.1 / 4.3 |
+| Razor arena hp Razor / FlapJack | 45 / 30 | 20.3 / 8.0 | 28.0 / 7.2 | **44.7 +- 20.5** / 7.6 +- 2.5 |
+| Compressor Wide Load / Sentinel counted | 73.6 / 5.3 | 78.6 / 3.6 | 77.4 / 4.4 | 78.6 +- 6.3 / 4.2 +- 0.5 |
+| Compressor arena hp Sentinel / Wide Load | 390 / 136 | 95.1 / 99.5 | 101 / 101 | 122 +- 37 / 91.7 +- 28.7 |
+| Compressor full length | -- | 29 of 48 | 29 | 26 |
+| Octagon ALARM / Scout counted | 13.6 / 3.2 | 11.8 / 3.6 | 13.3 / 4.1 | **14.6 +- 1.8** / 3.8 +- 0.4 |
+| Octagon arena hp Scout / ALARM | 22 / 146 | 83.0 / 28.1 | 69.7 / 46.3 | 81.1 +- 15.7 / 34.2 +- 9.9 |
+| Octagon Scout / ALARM on back | 0 of 10, 2 of 8 / 5 of 10, 3 of 8 | 16 / 25 of 48 | 13 / 32 | 19 / 19 |
+
+Nothing moves outside the standard errors except the Razor's arena hp (towards live) and ALARM's
+time on its back in the Octagon (32 to 19 of 48). The query is not what limits the arena hp of
+12al/12am; the default changes on the strength of the bit-exact reproduction, not of this table.
+
+**Verified / not (2).** In the binary and natively: the reduction and the query, bit for bit
+(above); against the live rows 99.94 % (53/64-bit) with 44 queries that need 24 bits. Not: why
+the thread's precision alternates, the bit equality of our inputs, adjacency lists for our hulls,
+the convex x convex query.
+**Tools (2).** `tools/oracle/gjknative/` (`build.sh`, `gjknative.py replay | dump | reduce`),
+`frida/ra2_gjkreduce.js` + `run_gjkreduce.py` (the reduction in the live process),
+`examples/gjkreplay.rs x87 | x87brute`.
 
 ### 12ao. The hellraiser's zone is the original's; the firing rate gap is in the fights, not in the zone (fx/hellraiser; diagnostics only, no default changes)
 

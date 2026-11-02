@@ -214,10 +214,15 @@ fn a_hinge_driven_past_its_stop_stays_at_it() {
 }
 
 /// The agents' points, not every corner near the floor: a box resting on a
-/// floor triangle is held by the corners that have been its closest point
-/// (the convex x mesh manifold), each once, all inside the tolerance.
+/// floor triangle gets the points of the distance query's simplexes (the
+/// convex x mesh agent), each inside the tolerance and on the cube's bottom
+/// face. With the face flat on the triangle the original's query ends on a
+/// three-point simplex (a face against a face), whose point is a weighted mix
+/// of the bottom corners and is reported for that detection only (docs/29
+/// section 12ak); the corners of an earlier tie-break are the `RA2_GJK=gram`
+/// answer.
 #[test]
-fn a_resting_box_is_held_by_its_manifold_corners() {
+fn a_resting_box_is_held_by_its_manifold_points() {
     let mut physics = Havok17Backend::new().unwrap();
     floor(&mut physics);
     let c = cube(&mut physics, 0.59);
@@ -233,10 +238,10 @@ fn a_resting_box_is_held_by_its_manifold_corners() {
     let centre = physics.state(c).unwrap().position;
     for (n, k) in mine.iter().enumerate() {
         assert!(k.distance >= 0.0 && k.distance < TOLERANCE, "{k:?}");
-        // At a bottom corner of the cube, half the gap above the floor.
+        // On the cube's bottom face, half the gap above the floor.
         let r = k.point - centre;
         assert!(
-            (r.x.abs() - 0.5).abs() < 0.02 && (r.z.abs() - 0.5).abs() < 0.02,
+            r.x.abs() < 0.52 && r.z.abs() < 0.52 && (r.y + 0.5).abs() < 0.1,
             "{k:?}"
         );
         for other in &mine[n + 1..] {
