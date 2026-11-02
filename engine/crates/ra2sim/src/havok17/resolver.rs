@@ -40,6 +40,9 @@ pub const PUSH_OUT_GAIN: f32 = 10.0;
 pub struct Contact {
     pub a: usize,
     pub b: usize,
+    /// The tags of the colliding pieces of `a` and `b` ([`crate::backend::NO_TAG`] if unknown).
+    pub tag_a: u32,
+    pub tag_b: u32,
     /// Unit normal, pointing from `b` toward `a` (the resolver's
     /// `v_n = n · (v_A(p) - v_B(p))` is negative when they approach).
     pub normal: Vec3,
@@ -247,6 +250,8 @@ mod tests {
 
     fn contact(normal: Vec3, point: Vec3, mu: f32, e: f32) -> Contact {
         Contact {
+            tag_a: crate::backend::NO_TAG,
+            tag_b: crate::backend::NO_TAG,
             a: 0,
             b: 1,
             normal,

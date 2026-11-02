@@ -7116,3 +7116,170 @@ depth 1 or the parts of the chassis (the same in all 92 live parts).
 **Tools.** `tools/oracle/frida/ra2_parts.js`, `capture_parts_set.sh`,
 `capture_boxstart.py` (`PRIME=1`, ends when the physics stops), `parts_live.py`,
 `parts_compare.py`, `ensemble_parts.py`; `RA2_SPLASH=0`, `RA2_DEPTH=0`.
+
+
+### 12as. The first stroke: a contact names the piece that made it, so the extender takes the hammer as it does live, and the Scout loses its fork in 29 of 48 fights (fx/first-stroke)
+
+The task: 12ar left one question open, why ALARM's first hammer stroke takes the Scout's
+Round Extender (hp 100, fracture 15) in the original and not in ours (live 6 of 8 Box
+fights lose the extender and the fork arm mounted on it by 39 s; ours 11 of 48, from 80 s
+median). The answer is not the geometry of the stroke, which agrees, but **which component a
+contact is priced on**: the original's collision event names the colliding collidable, one
+per component, where ours handed the contact point to the component whose bounding box was
+nearest, and a point on the seam of the extender and the arm behind it is inside the arm's
+box. Ours now carries the piece's tag from the narrow phase to the pricing and to the event
+filter (`RA2_TAGS=0` gives the old nearest-box rule).
+
+**New live captures** (`:7`, `RA2_FRIDA_PORT=27147`, under the shared lock;
+`Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` copied before and sha256-compared after:
+"prefix restored"; 18 rows in `local/oracle/manifest.tsv`, copies and
+`manifest-additions-2026-11-02-first-stroke.tsv` in `~/ra2-oracle-backup`):
+`firststroke-scout-alarm-box__live__000..005` (Scout `Team0/Bot0` v ALARM `Team0/Bot1`, the
+shipped AIs, Combat Arena; `capture_parts_set.sh` with `AGENT=frida/ra2_firststroke.js`).
+The agent is `ra2_parts.js` plus, for the first 12 s of the fight (the match clock at
+`0x7162c8`): `B` every step piece, **every Havok body of both robots** as the integrator
+(`0x520fb0`) sees it (centre of mass `+0x30`, rotation `+0xcc` as three rows, velocity
+`+0x54`, angular velocity `+0x64`); `BP` the raw floats of each body when first seen; `D`
+the hinge atoms (`0x535a50`, motor on) and the prismatic controller (`0x4b51b0`); in
+`004` and `005` also `RC` (the resolver's contact list, `0x53ed80`: both bodies, normal,
+point, separation, both collidables) and `QD` (`0x489470`, the damage record: rec0 closing
+speed, normal). (`004` and `005` were written with the rows named `R` and `Q`, which are
+`ra2_parts.js`'s own rows; they are renamed in the stored files.) The 11 bodies are the
+Scout's chassis, fork body (the burst motor's rotor with the extender and the arm) and two wheel
+bodies, ALARM's chassis, piston rod (with the hammer head) and four wheel bodies; the mass
+`BP` reads at first sight is the rotor's alone (the build adds the mounted parts later).
+
+**1. What agrees** (`tools/oracle/first_stroke.py`, live 5-6 fights against the 48 warmups
+of `first_stroke_ours.sh`; the pose is the step before the first hit of 10 hp or more of
+ALARM on the Scout):
+
+| | live | ours |
+|---|---|---|
+| bodies' positions in their chassis' frame at the bell (8 non-chassis bodies, `stroke_states.py`) | | 0.000-0.002 m from live |
+| hammer rod at rest / fully out in ALARM's frame | 0.824 / 1.552 m (travel 0.73) | 0.824 / 1.554 |
+| piston controller (`D`) | lower -0.73, speed 60, force 100 (x40) | stats 60 / 4000, limits -0.73..0 |
+| fork hinge (`D`): motor flag, limits, torque, speed | lower 0, upper 1.156 rad, 3600 N m, -49 rad/s | limits 0..1.16, 3600, -49 |
+| fork at rest in the Scout's frame (y, z) | -0.054, 0.672 | -0.053, 0.672 |
+| hammer head centre in the Scout's frame at the first hit (x, y, z) | -0.17, 0.113, 1.30 | -0.21, 0.114, 1.26 |
+| ALARM's pitch against the Scout at the first hit | -3.4 deg | -3.5 deg |
+| rod passes 1.0 m after the first hit | 0.133 s (0.01-0.20) | 0.133 s (-0.03..0.23) |
+| deepest push-in of the rod in the first 0.3 s | 0.64 m | 0.61 m |
+| first hit at (bell clock) | 2.7-3.8 s (`005`: 21 s) | 2.7-2.9 s |
+
+So the spawn and approach, the Scout's fork, the piston's stroke, speed and travel, ALARM's
+pitch and the bodies as loaded from the `.bot` / `.gmf` files are the original's. Neither the
+rod's reach nor the head's height explains the extender.
+
+**2. What differs: which component is struck.** The Scout's fork body holds two components,
+the Round Extender (hull 0.62-0.87 m ahead of the chassis' centre) and the Forklift Arm
+(0.86-1.24 m), whose boxes touch. In the six live fights the points of the extender hits
+(`H` rows, mapped into the fork's rest frame with the live fork body's pose) lie at z
+0.72-0.92, y -0.11..0.02 and x +-0.07: **at the seam, 0 to 0.05 m past the extender's box
+and inside the arm's**. Ours priced a contact on `touched_component`: the component whose
+bounding box is nearest the point, the arm when the point is inside it; the extender
+collected none of the first stroke's hits in 48 fights (live 8 of 14) and was struck only
+later and for little. Ours' contacts in the same place were right; their attribution was not.
+
+The original's event (`0x414d80`) is a pair of collidables, and each collidable is one
+component's piece of its body's compound: the filter's 1 Hz entries (12ag) are per collidable
+already. In ours the narrow phase knew the piece (`WorldPiece::piece`) and dropped it. Now
+`narrow::Piece::tag` takes the compound child's tag (the component index the robot builder
+already stored), `Contact` and `ContactEvent` carry `tag_a` / `tag_b`, and
+`combat::touched_component` (pricing) and `registered_component` (the event filter and the
+wheels' contact callbacks) use the tag when it names an attached member of the body, and the
+nearest box otherwise (`NO_TAG`: the arena, the Jolt backend, tests). `RA2_TAGS=0` is the old rule.
+Tests: `havok17::tests::a_contact_reports_the_tags_of_the_colliding_pieces`,
+`duel::tests::a_contact_is_priced_on_the_component_whose_piece_made_it`.
+
+**3. The first stroke, live and ours.** ALARM's hammer hits of 10 hp or more on the Scout in
+the first 0.4 s after the first one (`first_stroke.py window`; live: the six new captures and
+the eight `partsfight-scout-alarm-box` ones, 14 fights; ours: 48 warmups):
+
+| component | live | ours before | ours after |
+|---|---|---|---|
+| Chassis | 10/14 fights (71 %), 76 hp | 36/48 (75 %), 83 | 35/48 (73 %), 79 |
+| Round Extender | **8/14 (57 %), 65 hp** | **0/48** | **23/48 (48 %), 59** |
+| Forklift Arm | 5/14 (36 %), 28 | 25/48 (52 %), 48 | 21/48 (44 %), 42 |
+| DDT Burst Motor | 0/14 | 0/48 | 26/48 (54 %), 54 (open, below) |
+
+and over the first 20 s (`parts_compare.py`, live the eight `partsfight` Box fights):
+
+| component | live fights hit / hits / hp per fight | ours before | ours after |
+|---|---|---|---|
+| Chassis | 88 % / 7.75 / 431 | 96 % / 5.65 / 322 | 94 % / 6.44 / 357 |
+| Forklift Arm | 75 % / 2.25 / 100 | 92 % / 2.42 / 137 | 81 % / 1.75 / 94 |
+| Round Extender | **100 % / 2.25 / 132** | 67 % / 1.46 / 33 | **92 % / 2.02 / 122** |
+| DDT Burst Motor | 0 | 0 | 88 % / 1.98 / 163 (open) |
+
+The order of the first priced hits in the first 0.1 s (hammer on the Scout; live 14 fights,
+ours 48): live Chassis first in 7, Arm 5, Extender 2; ours before Arm 30, Chassis 17,
+Extender 1; ours after Arm 25, Chassis 16, Extender 6, Burst Motor 1. The sequence
+`Arm, Chassis, Extender` (live 3 of 14) is ours' most common (8 of 48; 3 before;
+`first_stroke.py order`).
+
+A step-resolved replay of the live pre-contact state (`fidtrace replay`, below) agrees:
+fight `002` gives Arm 83 / Chassis 154 / Extender 128 hp (live 74 / 20 / 187), where the
+nearest-box rule never gave the extender; the replays of the other fights are limited by the
+drive (the wheels' thrust is not the live one) and are not scored.
+
+**4. Ensembles** (`tools/oracle/ensemble.sh`, 48 warmups, 120 s, scratch install, `FIDTRACE_UP=1
+FIDTRACE_LOG=1`; before = `RA2_TAGS=0`, which reproduces the 12ar "after" column to the digit;
+counted = hits of 10 hp or more, mean +- standard error, R0 the first bot's, R1 the second's):
+
+| fight | counted before R0 / R1 | counted after | arena hp before | arena hp after |
+|---|---|---|---|---|
+| Box Scout / ALARM | 5.5 +- 0.6 / 33.3 +- 3.9 | 10.0 +- 1.0 / **40.6 +- 4.5** (live ALARM on Scout 41) | Scout 76.6 +- 11.6, ALARM 35.4 +- 8.8 | 57.6 +- 8.3, 42.5 +- 10.4 |
+| Razor / FlapJack | 4.3 +- 0.4 / 1.1 +- 0.2 | 6.3 +- 0.7 / 1.1 +- 0.1 | 31.8 +- 12.8, 6.5 +- 1.9 | 38.2 +- 12.5, 5.1 +- 1.9 |
+| Compressor Sentinel / Wide Load | 4.2 +- 0.6 / 70.0 +- 6.6 | 4.0 +- 0.4 / 65.6 +- 7.0 | Sentinel 128.6 +- 30.6, WL 58.8 +- 16.2 | 101.9 +- 35.6, 85.7 +- 22.4 |
+| Octagon Scout / ALARM | 3.6 +- 0.3 / 14.0 +- 1.9 | 7.7 +- 0.7 / 25.9 +- 2.8 | 114.7 +- 22.4, 35.9 +- 7.4 | 107.0 +- 19.8, 53.7 +- 14.9 |
+
+| fight | extender / part loss before | after | live | mean length / ends after |
+|---|---|---|---|---|
+| Box | Round Extender 11 of 48 fights, first at 80 s (median) | **29 of 48 (60 %), first at 11 s (median)** | 6 of 8 at 10.0, 11.7, 12.6, 26.3, 30.3, 39 s | 76.2 s: Scout destroyed 17, ALARM immobilized 13, Scout immobilized 11, clock 7 (live: Scout destroyed 6, ALARM immobilized 2) |
+| Octagon | Round Extender 2 of 48 (3 parts) | **32 of 48, first at 5 s** | 3 of 5 at 3.8, 27, 91 s | 47.0 s: Scout eliminated 20, Scout immobilized 16, ALARM eliminated 6, immobilized 4 (live 49.0 s: ALARM immobilized 2, Scout eliminated 2, ALARM eliminated 1) |
+| Compressor | SlipperBottom 52 in 26 fights | 41 in 24 | 5 Sentinel wheels in 3 of 8 | 88.5 s: clock 22, Wide Load immobilized 18, Sentinel immobilized 8 (live 2 / 2 / 4 still running) |
+| Razor / FlapJack | 0 | 0 | 0 | 59.4 s: Razor immobilized 46, clock 2 |
+
+(Fisher, extender lost in Box: live 6 of 8 against ours 29 of 48, p = 0.70; against the 11 of
+48 before, 0.007; Scout destroyed, live 6 of 8 against 17 of 48, p = 0.053, against the 5 of 48
+before, 0.0003; Octagon extender, live 3 of 5 against 32 of 48, p = 1.0, against 3 of 48 before,
+0.008.) The Box counted hits of ALARM on the Scout move from 33 to 40.6, the live
+41; the Scout loses its fork by 30 s as live. The Compressor and the Razor fight move within
+their noise except the Razor's R0 (4.3 to 6.3, not understood: a Razor hit now lands on
+another of the FlapJack's pieces than before; no live count to hold it against).
+
+**5. Open.**
+* **The Scout's burst motor and angle motors are hit directly by ALARM** in ours after the
+  change (Burst Motor 88 % of Box fights in the first 20 s, 163 hp; over the whole fights 206
+  hits in 48 fights, the angle motors 109), live 6 priced hits (the burst motor) and 2 (an
+  angle motor) in 14 fights. Before, those contacts were charged to the Chassis, whose
+  counted hits fell short (live 129 priced a fight, ours 78 after, 65 before) and hp now
+  total about as many. In the original the head holds 0.07-0.10 m off the motor's housing
+  for the whole stroke: the `RC` rows of `004` list contacts of the rod with two pieces of the
+  Scout's chassis body at separations 0.062-0.099 m and never below, at points 0.04-0.05 m
+  in front of the chassis hull's sloped nose (the hull's top front edge is at z 0.44, its
+  bottom front edge at 0.66, bot frame), and none is priced; the burst motor's housing
+  (front z 0.53) lies 0-0.04 m behind that nose plane in ours, so a head that hovers 0.07-0.1
+  m off the nose is 0.07-0.14 m off the motor, and ours prices the motor in 54 % of first
+  strokes. Either the live housing is shaped otherwise (the collidables' shapes are not read:
+  the `+0x18` class and the AABB of `ra2_colliders.js` for the Scout's chassis body would
+  settle it) or the head presses 0.03-0.05 m closer in ours. Not changed: depth-1 motors are
+  hit directly live where they stand exposed (the Sentinel's Steering Unit 44 hits and spin
+  motors 28 in 8 Compressor fights), so the tag is right in kind.
+* **12ap's "0.1 m farther forward and lower" hammer hits is this same attribution**, not the
+  head: ALARM's hits of 10 hp or more on the Scout in the first 20 s (live: the 12
+  `boxweapons` captures, 43 hits, ALARM's frame): fwd 1.31, dy -0.12, lat -0.03; ours
+  before (`RA2_TAGS=0`, 48 warmups, 521 hits) 1.33 / -0.05 / 0.01, after (615 hits)
+  **1.28 / -0.12** / -0.05. The extender and the arm (forward and low) were missing from ours'
+  hits.
+* The captures `000..003` have no `RC` / `QD` rows (the agent was extended between runs); the replay needs the drive of the live fight (`FIDTRACE_DRIVE` is a constant
+  throttle), so it is a probe and not a test.
+* The warmups still start at rest (12ai); the Octagon's Scout now loses more often than live
+  in the 5 captures (36 of 48 against 2 of 5 and one still open), too few live to tell.
+
+**Tools.** `frida/ra2_firststroke.js` (`SECS` window, default 12 s), `stroke_states.py`
+(live `B` rows to a state file), `fidtrace replay <arena> <botA> <botB> <state> <steps>
+<hits.jsonl>` (`FIDTRACE_DRIVE`, `FIDTRACE_PRESS=robot:control:value:seconds;...`,
+`FIDTRACE_AI=1` keeps the brains, `FIDTRACE_BODY`), `first_stroke.py window|pose|stroke`,
+`first_stroke_ours.sh`, `hulldump`; `FIDTRACE_HITS` rows now carry the contact normal
+`n`; `RA2_TAGS=0`.

@@ -560,6 +560,8 @@ impl PhysicsBackend for JoltBackend {
             };
             for point in c.points {
                 out.push(ContactEvent {
+                    tag_a: crate::backend::NO_TAG,
+                    tag_b: crate::backend::NO_TAG,
                     a,
                     b,
                     normal: c.normal,

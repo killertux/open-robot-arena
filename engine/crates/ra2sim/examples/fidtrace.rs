@@ -229,7 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap_or_default();
                         writeln!(
                             f,
-                            "{{\"t\": {t}, \"att\": {}, \"by\": \"{}\", \"vic\": {}, \"comp\": \"{}\", \"piece\": \"{piece}\", \"amount\": {}, \"speed\": {}, \"p\": [{}, {}, {}]}}",
+                            "{{\"t\": {t}, \"att\": {}, \"by\": \"{}\", \"vic\": {}, \"comp\": \"{}\", \"piece\": \"{piece}\", \"amount\": {}, \"speed\": {}, \"p\": [{}, {}, {}], \"n\": [{}, {}, {}]}}",
                             att,
                             name(i.attacker, i.by),
                             i.target,
@@ -238,7 +238,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             i.speed,
                             i.point.x,
                             i.point.y,
-                            i.point.z
+                            i.point.z,
+                            i.normal.x,
+                            i.normal.y,
+                            i.normal.z
                         )?;
                     }
                 }
@@ -384,6 +387,176 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 duel.step_direct(&[input], DEFAULT_STEP);
                 if s.is_multiple_of(every) {
                     write!(trace, "{}", row(t, &sample(&duel)))?;
+                }
+            }
+        }
+        // `fidtrace replay <arena.py> <botA> <botB> <state> <steps> <hits.jsonl>`: both
+        // robots set to a state captured live (`tools/oracle/stroke_states.py`
+        // turns the `B` rows of `frida/ra2_firststroke.js` into `<state>`: one
+        // line per body, `robot part com(3) rot(x y z w) v(3) w(3)`), then
+        // `<steps>` physics steps with the drive `FIDTRACE_DRIVE=throttle0,steer0,
+        // throttle1,steer1` held and the priced hits written as `FIDTRACE_HITS`
+        // does (docs/29 section 12as). Tells the contact stage (shapes, joints,
+        // impulses) from the approach: the live fight's own pre-contact state in,
+        // the hits out.
+        Some("replay") if a.len() == 7 => {
+            let cfg = MatchConfig::new(
+                a[1].clone(),
+                GameType::Deathmatch,
+                vec![
+                    RobotEntry::ai(0, a[2].clone()),
+                    RobotEntry::ai(1, a[3].clone()),
+                ],
+            )
+            .with_duration(Some(30.0));
+            let mut m = Match::new(cfg)?;
+            // `FIDTRACE_AI=1`: the shipped brains keep driving (and firing) from the
+            // state, as the match runs from the bell; the clock restarts at the state.
+            let ai = std::env::var_os("FIDTRACE_AI").is_some();
+            if ai {
+                while m.state() != MatchState::Fight {
+                    m.step();
+                }
+                m.step();
+                m.step();
+            } else {
+                m.duel.hold_robots(false);
+            }
+            m.duel.record_impacts = true;
+            for line in std::fs::read_to_string(&a[4])?.lines() {
+                let v: Vec<f32> = line
+                    .split_whitespace()
+                    .filter_map(|t| t.parse().ok())
+                    .collect();
+                if v.len() < 15 {
+                    continue;
+                }
+                let (ri, pi) = (v[0] as usize, v[1] as usize);
+                let Some(body) = m
+                    .duel
+                    .robots
+                    .get(ri)
+                    .and_then(|r| r.parts.get(pi))
+                    .map(|p| p.body)
+                else {
+                    continue;
+                };
+                let (Some(st), Some(c)) = (
+                    m.duel.physics.state(body),
+                    m.duel.physics.center_of_mass(body),
+                ) else {
+                    continue;
+                };
+                let local = st.rotation.inverse() * (c - st.position);
+                let q = glam::Quat::from_xyzw(v[5], v[6], v[7], v[8]).normalize();
+                let com = Vec3::new(v[2], v[3], v[4]);
+                m.duel.physics.set_transform(body, com - q * local, q);
+                m.duel.physics.set_velocity(
+                    body,
+                    Vec3::new(v[9], v[10], v[11]),
+                    Vec3::new(v[12], v[13], v[14]),
+                );
+            }
+            let steps: usize = a[5].parse()?;
+            let drive: Vec<f32> = std::env::var("FIDTRACE_DRIVE")
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|t| t.parse().ok())
+                .collect();
+            let input = |i: usize| {
+                ra2sim::DriveInput::new(
+                    drive.get(2 * i).copied().unwrap_or(0.0),
+                    drive.get(2 * i + 1).copied().unwrap_or(0.0),
+                )
+            };
+            let inputs = vec![input(0), input(1)];
+            let mut bodies = std::env::var("FIDTRACE_BODY")
+                .ok()
+                .map(std::fs::File::create)
+                .transpose()?;
+            // `FIDTRACE_PRESS=robot:control:value:seconds;...` presses a control
+            // (`weapons`' names, e.g. `Fire`) that long after the state.
+            let press: Vec<(usize, String, f32, f32)> = std::env::var("FIDTRACE_PRESS")
+                .unwrap_or_default()
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    let f: Vec<&str> = s.split(':').collect();
+                    (
+                        f[0].parse().unwrap_or(0),
+                        f[1].to_string(),
+                        f[2].parse().unwrap_or(0.0),
+                        f[3].parse().unwrap_or(0.0),
+                    )
+                })
+                .collect();
+            let mut f = std::fs::File::create(&a[6])?;
+            for step in 0..steps {
+                let now = step as f32 * DEFAULT_STEP;
+                for (p, name, value, at) in &press {
+                    if now >= *at && now < *at + DEFAULT_STEP {
+                        if let Some(r) = m.duel.robots.get_mut(*p) {
+                            r.control.input(&r.rig.wiring, name, 0, *value);
+                        }
+                    }
+                }
+                if ai {
+                    m.step();
+                } else {
+                    m.duel.step_direct(&inputs, DEFAULT_STEP);
+                }
+                let t = (step + 1) as f32 * DEFAULT_STEP;
+                if let Some(bf) = bodies.as_mut() {
+                    for (ri, r) in m.duel.robots.iter().enumerate() {
+                        for (pi, part) in r.parts.iter().enumerate() {
+                            if let (Some(st), Some(c)) = (
+                                m.duel.physics.state(part.body),
+                                m.duel.physics.center_of_mass(part.body),
+                            ) {
+                                writeln!(
+                                    bf,
+                                    "{step} {t:.4} {ri} {pi} {:.5} {:.5} {:.5} {:.5} {:.5} {:.5} {:.5} {:.4} {:.4} {:.4} {:.4} {:.4} {:.4}",
+                                    c.x, c.y, c.z, st.rotation.x, st.rotation.y, st.rotation.z,
+                                    st.rotation.w, st.linear_velocity.x, st.linear_velocity.y,
+                                    st.linear_velocity.z, st.angular_velocity.x,
+                                    st.angular_velocity.y, st.angular_velocity.z
+                                )?;
+                            }
+                        }
+                    }
+                }
+                let pieces = std::mem::take(&mut m.duel.impact_pieces);
+                for i in std::mem::take(&mut m.duel.impacts) {
+                    let name = |r: usize, c: usize| match m.duel.robots.get(r) {
+                        Some(robot) => robot.rig.components[c].name.replace('"', "'"),
+                        None => "arena".to_string(),
+                    };
+                    let att = if i.attacker == ra2sim::combat::NO_ATTACKER {
+                        -1
+                    } else {
+                        i.attacker as i64
+                    };
+                    let piece = pieces
+                        .iter()
+                        .find(|(p, r, _)| *p == i.point && *r == i.target)
+                        .map(|(_, _, n)| n.clone())
+                        .unwrap_or_default();
+                    writeln!(
+                        f,
+                        "{{\"t\": {t}, \"att\": {}, \"by\": \"{}\", \"vic\": {}, \"comp\": \"{}\", \"piece\": \"{piece}\", \"amount\": {}, \"speed\": {}, \"p\": [{}, {}, {}], \"n\": [{}, {}, {}]}}",
+                        att,
+                        name(i.attacker, i.by),
+                        i.target,
+                        name(i.target, i.component),
+                        i.damage,
+                        i.speed,
+                        i.point.x,
+                        i.point.y,
+                        i.point.z,
+                        i.normal.x,
+                        i.normal.y,
+                        i.normal.z
+                    )?;
                 }
             }
         }

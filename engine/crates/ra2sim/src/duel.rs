@@ -4299,6 +4299,8 @@ mod tests {
             ..moving
         };
         let event = |a, b, state_a, state_b, x: f32| crate::backend::ContactEvent {
+            tag_a: crate::backend::NO_TAG,
+            tag_b: crate::backend::NO_TAG,
             a,
             b,
             normal: Vec3::Y,
@@ -5971,6 +5973,8 @@ mod tests {
             angular_velocity: Vec3::ZERO,
         };
         let event = |closing: f32| crate::backend::ContactEvent {
+            tag_a: crate::backend::NO_TAG,
+            tag_b: crate::backend::NO_TAG,
             a,
             b,
             normal: Vec3::X,
@@ -7525,6 +7529,8 @@ mod tests {
         let point = state.position - Vec3::Y * 0.2;
         let props = combat::mass_props(&*duel.physics, &duel.robots);
         let events = [crate::backend::ContactEvent {
+            tag_a: crate::backend::NO_TAG,
+            tag_b: crate::backend::NO_TAG,
             a: chassis,
             b: floor,
             normal: -Vec3::Y,
@@ -7571,6 +7577,8 @@ mod tests {
         let wheel = robot.parts[wheel_part].body;
         let wstate = duel.physics.state(wheel).unwrap();
         let on_wheel = [crate::backend::ContactEvent {
+            tag_a: crate::backend::NO_TAG,
+            tag_b: crate::backend::NO_TAG,
             a: floor,
             b: wheel,
             normal: Vec3::Y,
@@ -7589,6 +7597,90 @@ mod tests {
             &duel.arena_bodies,
         );
         assert!(none.is_empty(), "{none:?}");
+    }
+
+    /// docs/29 §12as: the component a contact struck is the one whose collidable made
+    /// it. A point on the seam of the Scout's round extender and the fork arm behind
+    /// it lies inside the arm's box; the original prices the extender when the
+    /// extender's piece made the contact, and ours used to give the arm every such
+    /// blow (`RA2_TAGS=0`).
+    #[test]
+    fn a_contact_is_priced_on_the_component_whose_piece_made_it() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let scout = game.join("AI/Team0/Bot0.bot").to_string_lossy().to_string();
+        let alarm = game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string();
+        let setups = [
+            BotSetup {
+                path: scout,
+                yaw_deg: Some(0.0),
+                spawn: Some([0.0, 0.0]),
+            },
+            BotSetup {
+                path: alarm,
+                yaw_deg: Some(180.0),
+                spawn: Some([0.0, 3.0]),
+            },
+        ];
+        let duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        let (scout, alarm) = (&duel.robots[0], &duel.robots[1]);
+        let named = |r: &crate::robot::Robot, n: &str| {
+            r.rig.components.iter().position(|c| c.name == n).unwrap()
+        };
+        let (ext, arm) = (named(scout, "Round Extender"), named(scout, "Forklift Arm"));
+        let part_of = |r: &crate::robot::Robot, c: usize| {
+            r.rig
+                .parts
+                .iter()
+                .position(|p| p.members.contains(&c))
+                .unwrap()
+        };
+        let (fork, head) = (
+            part_of(scout, arm),
+            part_of(alarm, named(alarm, "Hammer Head")),
+        );
+        assert_eq!(fork, part_of(scout, ext));
+        let sa = duel.physics.state(scout.parts[fork].body).unwrap();
+        let sh = duel.physics.state(alarm.parts[head].body).unwrap();
+        // The arm's box corner nearest the extender, in the world.
+        let frame = glam::Mat4::from_rotation_translation(sa.rotation, sa.position);
+        let c = &scout.rig.components[arm];
+        let point = (frame * scout.rig.part_local[arm]).transform_point3(c.min.lerp(c.max, 0.15));
+        let moving = crate::backend::BodyState {
+            linear_velocity: Vec3::new(0.0, 0.0, -9.0),
+            ..sh
+        };
+        let props = combat::mass_props(&*duel.physics, &duel.robots);
+        let hit = |tag: u32| {
+            let events = [crate::backend::ContactEvent {
+                tag_a: crate::backend::NO_TAG,
+                tag_b: tag,
+                a: alarm.parts[head].body,
+                b: scout.parts[fork].body,
+                normal: Vec3::Z,
+                point,
+                state_a: moving,
+                state_b: sa,
+            }];
+            combat::resolve_with(
+                &duel.robots,
+                &events,
+                &duel.combat,
+                &props,
+                &duel.arena_bodies,
+            )
+            .into_iter()
+            .find(|i| i.attacker == 1 && i.target == 0)
+            .map(|i| i.component)
+        };
+        assert_eq!(hit(ext as u32), Some(ext), "the extender's piece made it");
+        assert_eq!(hit(arm as u32), Some(arm));
+        assert_eq!(
+            hit(crate::backend::NO_TAG),
+            Some(arm),
+            "no tag: the nearest box"
+        );
     }
 
     /// docs/29 §12ab: the arena's zones speak per collidable. `RegisterZone`
@@ -7684,6 +7776,8 @@ mod tests {
         let hits = combat::resolve_with(
             &duel.robots,
             &[crate::backend::ContactEvent {
+                tag_a: crate::backend::NO_TAG,
+                tag_b: crate::backend::NO_TAG,
                 a: saw,
                 b: wheel,
                 normal: Vec3::Y,
@@ -7737,6 +7831,8 @@ mod tests {
         let floor = duel.arena_body;
         let state = duel.physics.state(chassis).unwrap();
         let event = crate::backend::ContactEvent {
+            tag_a: crate::backend::NO_TAG,
+            tag_b: crate::backend::NO_TAG,
             a: floor,
             b: chassis,
             normal: Vec3::Y,

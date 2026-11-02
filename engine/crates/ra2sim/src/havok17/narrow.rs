@@ -35,6 +35,11 @@ const CYLINDER_SIDES: usize = 24;
 /// One collidable of a body, in the body's frame (relative to its origin).
 #[derive(Clone, Debug)]
 pub struct Piece {
+    /// The compound child's tag (the caller's component index; `u32::MAX` for a
+    /// shape that is not a compound's child). Reported on the contacts the piece
+    /// makes: the original's contact event names the colliding *collidable*, one per
+    /// component, which is how the game knows which component was struck.
+    pub tag: u32,
     pub position: Vec3,
     pub rotation: Quat,
     pub shape: PieceShape,
@@ -63,11 +68,11 @@ pub enum PieceShape {
 /// The pieces of `shape`, in the frame `shape` is given in.
 pub fn pieces_of(shape: &ShapeDesc) -> Vec<Piece> {
     let mut out = Vec::new();
-    collect(shape, Vec3::ZERO, Quat::IDENTITY, &mut out);
+    collect(shape, Vec3::ZERO, Quat::IDENTITY, u32::MAX, &mut out);
     out
 }
 
-fn collect(shape: &ShapeDesc, position: Vec3, rotation: Quat, out: &mut Vec<Piece>) {
+fn collect(shape: &ShapeDesc, position: Vec3, rotation: Quat, tag: u32, out: &mut Vec<Piece>) {
     let convex = |vertices: Vec<Vec3>, radius: f32| PieceShape::Convex { vertices, radius };
     let mut desc_hull: Option<&[Vec3]> = None;
     let shape = match shape {
@@ -77,13 +82,14 @@ fn collect(shape: &ShapeDesc, position: Vec3, rotation: Quat, out: &mut Vec<Piec
                     &c.shape,
                     position + rotation * c.local_position,
                     rotation * c.local_rotation,
+                    c.tag,
                     out,
                 );
             }
             return;
         }
         ShapeDesc::OffsetCenterOfMass { shape, .. } => {
-            collect(shape, position, rotation, out);
+            collect(shape, position, rotation, tag, out);
             return;
         }
         ShapeDesc::Box { half_extents: h } => {
@@ -164,6 +170,7 @@ fn collect(shape: &ShapeDesc, position: Vec3, rotation: Quat, out: &mut Vec<Piec
         PieceShape::Mesh(m) => bounding_sphere(&m.vertices),
     };
     out.push(Piece {
+        tag,
         position,
         rotation,
         shape,

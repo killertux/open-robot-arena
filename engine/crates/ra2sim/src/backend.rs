@@ -246,6 +246,11 @@ pub struct BodyState {
 pub struct ContactEvent {
     pub a: BodyHandle,
     pub b: BodyHandle,
+    /// The tags of the two collidables (compound children) that made the point
+    /// ([`NO_TAG`] when the backend does not know them): the component each
+    /// belongs to, as the original's event names the colliding collidables.
+    pub tag_a: u32,
+    pub tag_b: u32,
     /// Unit normal, pointing from `a` toward `b`.
     pub normal: Vec3,
     /// The contact point in world space.
@@ -262,6 +267,9 @@ pub struct RayHit {
     pub point: Vec3,
     pub normal: Vec3,
 }
+
+/// A [`ContactEvent`] tag that names no component.
+pub const NO_TAG: u32 = u32::MAX;
 
 /// Opaque handle to a joint (constraint) within a backend.
 pub type JointHandle = u32;
