@@ -2320,7 +2320,52 @@ pub fn award_screen(
     );
     set_value_in(&mut gib, "team points", &record.points.to_string());
     set_first_display(&mut gib, &plain_text(description));
+    // The prize message is set in the face its own markup names (`Events.txt`: `fg_mcn14`), not
+    // the `fg_mcn16` the shipped glyph carries (live `event-award-photo`: three lines of 212 px,
+    // ours wrapped to four in the larger face).
+    if let Some(font) = markup_font(description) {
+        for block in gib.blocks.iter_mut() {
+            if let Block::Widget(widget) = block {
+                set_display_font(widget, &font);
+            }
+        }
+    }
     Ok(gib)
+}
+
+/// The `font` a `<text font X>` markup names.
+fn markup_font(markup: &str) -> Option<String> {
+    let open = &markup[markup.find("<text")?..];
+    let tag = &open[..open.find('>')?];
+    let at = tag.find("font ")?;
+    tag[at + 5..].split_whitespace().next().map(str::to_string)
+}
+
+fn set_display_font(widget: &mut Widget, font: &str) {
+    let boxed = widget
+        .attachments
+        .iter()
+        .any(|a| a.kind == AttachmentKind::DisplayBox);
+    if boxed {
+        set_glyph_font(widget, font);
+    }
+    for child in widget.children.iter_mut() {
+        set_display_font(child, font);
+    }
+}
+
+fn set_glyph_font(widget: &mut Widget, font: &str) {
+    if widget.kind == WidgetKind::Glyph {
+        ra2ui::input::set_field(widget, "_Font", font);
+    }
+    for child in widget.children.iter_mut() {
+        set_glyph_font(child, font);
+    }
+    for attachment in widget.attachments.iter_mut() {
+        if let Some(body) = &mut attachment.body {
+            set_glyph_font(body, font);
+        }
+    }
 }
 
 fn find_mut_in<'a>(document: &'a mut Gib, name: &str) -> Option<&'a mut Widget> {

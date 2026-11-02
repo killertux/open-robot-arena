@@ -174,6 +174,13 @@ pub fn bracket_screen_at(
     Ok(gib)
 }
 
+/// Show or hide a grid's `Sel Bar`.
+pub fn show_selection_bar(grid: &mut Widget, shown: bool) {
+    if let Some(bar) = grid.children.iter_mut().find(|c| c.name() == "Sel Bar") {
+        crate::input::set_field(bar, "Visible", if shown { "true" } else { "false" });
+    }
+}
+
 /// Fill the join window for `event` and the roster, with robot `selected`
 /// chosen (`FUN_00482590`: its name in `robot name`, the enter button live).
 pub fn fill_join_window(
@@ -196,15 +203,26 @@ pub fn fill_join_window(
             if !row.preview.is_empty() {
                 crate::cells::bind_art(cell, "bot preview", &row.preview);
             }
-            // The weight icon is the cell's, not a robot's picture.
+            // The weight icon is the class badge (`teamhq-event-join`: L blue, M green, H red).
             if let Some(icon) = crate::workshop::find_mut(cell, "weight icon") {
-                crate::input::set_field(icon, "Visible", "false");
+                let class = row.class.to_ascii_lowercase();
+                let file = if class.starts_with("light") {
+                    "exhibition/light_icon.bmp"
+                } else if class.starts_with("heavy") {
+                    "exhibition/heavy_icon.bmp"
+                } else {
+                    "exhibition/medium_icon.bmp"
+                };
+                crate::input::set_field(icon, "_Filename", file);
             }
         }
         let _ = made;
         if let Some(row) = selected {
             crate::input::select_cell(grid, 0, row);
         }
+        // Live (`teamhq-event-join`): with no robot chosen the grid's `Sel Bar` (a column-1
+        // frame in the file) is not drawn; the first pick shows it (`show_selection_bar`).
+        show_selection_bar(grid, selected.is_some());
     }
     let name = selected
         .and_then(|i| robots.get(i))
