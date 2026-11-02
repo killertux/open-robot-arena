@@ -167,10 +167,16 @@ fn with_bot<R>(bot: i32, f: impl FnOnce(&crate::BotSnapshot) -> R) -> Option<R> 
     st.bot(bot).map(f)
 }
 
+/// `plus.getLocation(id)` (`0x4cd4e0`): the chassis centre of mass; an id with no robot answers a
+/// 3-tuple of `None` (the wrapper builds the tuple first and fills it only for a robot it found;
+/// live `plus.getLocation(99)` is `(None, None, None)`).
 #[pyfunction]
 #[pyo3(name = "getLocation")]
-fn get_location(bot: i32) -> (f32, f32, f32) {
-    with_bot(bot, |b| (b.location.x, b.location.y, b.location.z)).unwrap_or((0.0, 0.0, 0.0))
+fn get_location(bot: i32) -> (Option<f32>, Option<f32>, Option<f32>) {
+    with_bot(bot, |b| {
+        (Some(b.location.x), Some(b.location.y), Some(b.location.z))
+    })
+    .unwrap_or((None, None, None))
 }
 
 #[pyfunction]
@@ -217,22 +223,25 @@ fn force(bot: i32, x: f32, y: f32, z: f32) {
     });
 }
 
-/// `rayTest(from, to)` -> `(bot, component, x, y, z)`, or `(-1, -1, ...)`.
+/// `rayTest(from, to)` -> `(bot, component, x, y, z)` (`0x4b5d70`).
 ///
-/// The flame hazards are the callers: `Hazards.Flame.Tick` fires a ray down the
-/// jet and damages the first component it reaches. It is answered against the
-/// components' own oriented boxes rather than the spheres around them — a part
-/// is rarely a ball, and a flame that misses a spinner's blades by half a metre
-/// should not set them alight.
+/// The flame hazards are the callers: `Hazards.Flame.Tick` fires a ray down the jet and damages the
+/// first component it reaches. The original casts one ray against the world (`0x419a90`) and
+/// decodes the first body struck: a robot's part gives `(robot, component, point)`, anything else
+/// (the arena's walls and floor) `(-1, -1, point)`, and a ray that strikes nothing is five `-1`s
+/// (`0x4b5efd`). The parts are answered against their own oriented boxes rather than the spheres
+/// around them, and the arena's triangles occlude them: a jet behind a wall does not scorch the
+/// robot on the other side.
 #[pyfunction]
 #[pyo3(name = "rayTest")]
 fn ray_test(from: (f32, f32, f32), to: (f32, f32, f32)) -> (i32, i32, f32, f32, f32) {
+    const MISS: (i32, i32, f32, f32, f32) = (-1, -1, -1.0, -1.0, -1.0);
     let a = Vec3::new(from.0, from.1, from.2);
     let b = Vec3::new(to.0, to.1, to.2);
     let d = b - a;
     let len = d.length();
     if len <= 1e-6 {
-        return (-1, -1, a.x, a.y, a.z);
+        return MISS;
     }
     let u = d / len;
     let st = crate::state();
@@ -260,11 +269,22 @@ fn ray_test(from: (f32, f32, f32), to: (f32, f32, f32)) -> (i32, i32, f32, f32, 
             }
         }
     }
+    // The arena strikes first when it is nearer: the hit is then nobody's.
+    let wall = st
+        .arena
+        .as_ref()
+        .and_then(|arena| arena.lock().ok()?.first_triangle_hit(a, u, len));
+    if let Some(t) = wall {
+        if t < best {
+            best = t;
+            hit = (-1, -1);
+        }
+    }
     if best.is_finite() {
         let p = a + u * best;
         (hit.0, hit.1, p.x, p.y, p.z)
     } else {
-        (-1, -1, a.x, a.y, a.z)
+        MISS
     }
 }
 
@@ -347,7 +367,9 @@ fn zap(bot: i32, amount: f32, radius: f32) {
 #[pyfunction]
 #[pyo3(name = "isDefeated")]
 fn is_defeated(bot: i32) -> bool {
-    with_bot(bot, |b| !b.alive || b.eliminated).unwrap_or(false)
+    // An id with no player is defeated (`0x4b9ca0` answers 1 when the lookup finds nobody; live
+    // `plus.isDefeated(99)` is 1), unlike `isEliminated` (0).
+    with_bot(bot, |b| !b.alive || b.eliminated).unwrap_or(true)
 }
 
 /// `isEliminated` — exactly the original's state 3 (`0x4b9c70`), not the
@@ -359,10 +381,12 @@ fn is_eliminated(bot: i32) -> bool {
     with_bot(bot, |b| b.eliminated).unwrap_or(false)
 }
 
+/// `plus.isHuman` (`0x4cd640`): the robot's vtable slot 7 (a person's robot says yes, a brain's no);
+/// an id with no player says no.
 #[pyfunction]
 #[pyo3(name = "isHuman")]
-fn is_human(_bot: i32) -> bool {
-    false
+fn is_human(bot: i32) -> bool {
+    with_bot(bot, |b| b.human).unwrap_or(false)
 }
 
 #[pyfunction]
@@ -792,11 +816,23 @@ impl Ai {
         self.events.push((name.to_string(), index, value));
     }
 
-    fn GetInputStatus(&self, name: &str, index: i32) -> f32 {
+    /// The control's value as an **integer**, truncated toward zero (`0x4dd660` hands back the
+    /// control's int: live `Input("Forward", 0, v)` then `GetInputStatus("Forward", 0)` gives
+    /// 0 / 0 / 0 / 1 / 1 / 2 / 43 / 43 / 99 for 0.2 / 0.5 / 0.7 / 1 / 1.5 / 2.5 / 43.4 / 43.6 /
+    /// 99.9 and the negatives mirror it). A name that is no control of the robot's board (the
+    /// compare is exact, `0x402310`) reads 0 however often it was written.
+    fn GetInputStatus(&self, name: &str, index: i32) -> i32 {
+        let known = with_bot(self.bot, |b| {
+            b.controls.is_empty() || b.controls.iter().any(|c| c == name)
+        })
+        .unwrap_or(true);
+        if !known {
+            return 0;
+        }
         self.inputs
             .get(&(name.to_string(), index))
-            .copied()
-            .unwrap_or(0.0)
+            .map(|v| *v as i32)
+            .unwrap_or(0)
     }
 
     fn GetLocation(&self) -> (f32, f32, f32) {
@@ -827,15 +863,40 @@ impl Ai {
         false
     }
 
-    /// Everyone still in the fight except us.
+    /// The players still in the fight that `IsEnemy` (`0x418f40`) says are against us: in a TEAM
+    /// MATCH another team's, in every other game type any other player. The walk (`0x418ff0`)
+    /// skips a player whose state (`+0x34`) is not 0 and one whose flag `+0x38` is set (live: the
+    /// opponent drops out of the other brain's list when the 20 s immobility rule marks it, while
+    /// it still answers to its own brain's list; `docs/29` section 12an).
     fn GetEnemies(&self) -> Vec<i32> {
         let st = crate::state();
+        let team_match = st.game_type == "TEAM MATCH";
+        let mine = st.bot(self.bot).map(|b| b.team);
         st.bots
             .iter()
             .enumerate()
-            .filter(|(i, b)| b.alive && *i as i32 != self.bot)
+            .filter(|(i, b)| {
+                b.alive
+                    && *i as i32 != self.bot
+                    && (!team_match || mine.is_none_or(|t| t != b.team))
+            })
             .map(|(i, _)| i as i32)
             .collect()
+    }
+
+    /// `IsEnemy(id)` (`0x401950` -> `0x418f40`): in a TEAM MATCH the other player is on another
+    /// team; in every other game type it is simply another id, whether or not that player exists
+    /// (live: `IsEnemy(0)` on robot 0 is 0, `IsEnemy(5)` is 1).
+    fn IsEnemy(&self, id: i32) -> bool {
+        let st = crate::state();
+        if st.game_type == "TEAM MATCH" {
+            let (Some(me), Some(other)) = (st.bot(self.bot), st.bot(id)) else {
+                return false;
+            };
+            me.team != other.team
+        } else {
+            self.bot != id
+        }
     }
 
     /// The distance is **planar**: `0x4019c0` copies the bot's location and the
@@ -1251,5 +1312,166 @@ once = plus.createSound('Sounds/default_once.wav', False, (0, 0, 0))\n",
             "the sphere fallback should still hit: {crude:?}"
         );
         crate::state().bots.clear();
+    }
+
+    fn a_bot(team: i32, alive: bool) -> BotSnapshot {
+        BotSnapshot {
+            alive,
+            team,
+            direction: Vec3::Z,
+            ..BotSnapshot::default()
+        }
+    }
+
+    /// `GetEnemies` / `IsEnemy` (`0x418ff0`, `0x418f40`): in a TEAM MATCH the other teams' players, in
+    /// every other game type everyone but ourselves; a player out of the fight is not listed.
+    #[test]
+    fn enemies_are_the_other_teams_in_a_team_match() {
+        let _guard = crate::lock();
+        let ai = Ai {
+            bot: 0,
+            ..Ai::default()
+        };
+        {
+            let mut st = crate::state();
+            st.bots = vec![
+                a_bot(0, true),
+                a_bot(0, true),
+                a_bot(1, true),
+                a_bot(1, false),
+            ];
+            st.game_type = "TEAM MATCH".into();
+        }
+        assert_eq!(
+            ai.GetEnemies(),
+            vec![2],
+            "a team mate and a dead player are no enemies"
+        );
+        assert!(!ai.IsEnemy(1) && ai.IsEnemy(2) && ai.IsEnemy(3));
+        crate::state().game_type = "BATTLE ROYAL".into();
+        assert_eq!(
+            ai.GetEnemies(),
+            vec![1, 2],
+            "teams do not count outside a TEAM MATCH"
+        );
+        assert!(ai.IsEnemy(1) && !ai.IsEnemy(0));
+        assert!(
+            ai.IsEnemy(7),
+            "any other id is an enemy there, even one with no player (live)"
+        );
+        let mut st = crate::state();
+        st.bots.clear();
+        st.game_type.clear();
+    }
+
+    /// Unknown ids, as the original's wrappers answer them (live, `ainative` probes).
+    #[test]
+    fn an_unknown_player_is_defeated_and_has_no_location() {
+        let _guard = crate::lock();
+        crate::state().bots = vec![a_bot(0, true)];
+        assert!(
+            is_defeated(99),
+            "`0x4b9ca0` answers 1 when the lookup finds nobody"
+        );
+        assert!(!is_defeated(0));
+        assert!(!is_eliminated(99), "isEliminated is exactly state 3");
+        assert_eq!(get_location(99), (None, None, None));
+        assert!(get_location(0).0.is_some());
+        assert!(!is_human(99) && !is_human(0));
+        crate::state().bots[0].human = true;
+        assert!(is_human(0));
+        crate::state().bots.clear();
+    }
+
+    /// `GetHeading` is `atan2(x, z)` of the unflattened direction and `GetHeadingTo` is planar.
+    #[test]
+    fn headings_read_the_tilted_direction() {
+        let _guard = crate::lock();
+        let tilted = Vec3::new(0.6, 0.64, 0.48).normalize();
+        crate::state().bots = vec![BotSnapshot {
+            alive: true,
+            direction: tilted,
+            ..BotSnapshot::default()
+        }];
+        let ai = Ai::default();
+        let flat = f32::atan2(tilted.x, tilted.z);
+        assert!((ai.GetHeading(false) - flat).abs() < 1e-6);
+        assert!(
+            (ai.GetDirection().1 - tilted.y).abs() < 1e-6,
+            "GetDirection is not flattened"
+        );
+        // Reversed: the same vector turned about.
+        let reversed = ai.GetHeading(true);
+        assert!(((reversed - flat).abs() - std::f32::consts::PI).abs() < 1e-5);
+        // The heading to a point straight ahead along +x is the bearing minus our heading, in (-pi, pi].
+        let to = ai.GetHeadingTo((10.0, 50.0, 0.0), false);
+        let want = std::f32::consts::FRAC_PI_2 - flat;
+        assert!((to - want).abs() < 1e-5, "{to} vs {want}");
+        crate::state().bots.clear();
+    }
+
+    /// `GetInputStatus` is the control's int (truncated toward zero) and reads 0 for a name the board
+    /// does not have.
+    #[test]
+    fn the_input_status_is_an_integer_of_a_control_on_the_board() {
+        let _guard = crate::lock();
+        crate::state().bots = vec![BotSnapshot {
+            alive: true,
+            controls: vec!["Forward".into(), "Spin".into()],
+            ..BotSnapshot::default()
+        }];
+        let mut ai = Ai::default();
+        for (v, want) in [
+            (0.7, 0),
+            (1.5, 1),
+            (43.6, 43),
+            (-0.7, 0),
+            (-2.5, -2),
+            (-43.6, -43),
+        ] {
+            ai.Input("Forward", 0, v);
+            assert_eq!(ai.GetInputStatus("Forward", 0), want, "{v}");
+        }
+        ai.Input("spin", 0, 1.0);
+        assert_eq!(
+            ai.GetInputStatus("spin", 0),
+            0,
+            "no control of that name (the compare is exact)"
+        );
+        crate::state().bots.clear();
+    }
+
+    /// `plus.rayTest` (`0x4b5d70`): a miss is five `-1`s; the arena's walls strike first, and then
+    /// nobody is hit (live: a ray from outside the Combat Arena's wall to a robot inside stops at the
+    /// wall, `(-1, -1, -12.7, ...)`).
+    #[test]
+    fn a_wall_between_the_ray_and_the_robot_hides_the_robot() {
+        let _guard = crate::lock();
+        let wall = [
+            Vec3::new(-12.7, -5.0, -5.0),
+            Vec3::new(-12.7, 5.0, -5.0),
+            Vec3::new(-12.7, 0.0, 5.0),
+        ];
+        let mut arena = crate::arena::ArenaData::default();
+        arena.triangles.push(wall);
+        let mut st = crate::state();
+        st.arena = Some(std::sync::Arc::new(std::sync::Mutex::new(arena)));
+        st.bots = vec![a_blade()];
+        drop(st);
+        let behind = ray_test((-20.0, 0.0, 0.0), (3.0, 0.0, 0.0));
+        assert_eq!((behind.0, behind.1), (-1, -1), "{behind:?}");
+        assert!(
+            (behind.2 + 12.7).abs() < 1e-4,
+            "stops at the wall: {behind:?}"
+        );
+        let clear = ray_test((-3.0, 0.0, 0.0), (3.0, 0.0, 0.0));
+        assert_eq!((clear.0, clear.1), (0, 0), "{clear:?}");
+        assert_eq!(
+            ray_test((0.0, 50.0, 0.0), (0.0, 51.0, 0.0)),
+            (-1, -1, -1.0, -1.0, -1.0)
+        );
+        let mut st = crate::state();
+        st.arena = None;
+        st.bots.clear();
     }
 }

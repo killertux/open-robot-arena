@@ -6380,3 +6380,113 @@ ground, the GJK ties, the box's ALARM.
 **Tools.** `tools/oracle/inversion_events.py`, `landings.py`, `hit_tilt.py`,
 `live_zones.py`; `inverted_hits.py` reads `boxfight-*` captures too;
 `RA2_AI_DIST3D=1`.
+
+
+### 12an. Every native the scripts call, audited against the binary: the direction is not flat, teams, unknown ids, the flames' walls (fx/ai-audit)
+
+12am found `GetDistanceTo` 3-D in ours and planar in the binary because docs/33's
+binding table had never listed it. This section is the audit that table asked
+for: every name the shipped `AI/`, `Arenas/` and `Scripts/` call on `plus`,
+`plus.AI`, `plus.Arena` and their objects (about 110 names; the list is
+docs/33 §1, with the wrapper and member address, the state of ours and the
+proof for each). The method: the registrars' string tables (`0x4bba00`,
+`0x4b7750`, `0x4b6000`, `0x4cd6b0`) read for every name and its function, the
+member behind each wrapper read in the binary, and **one live session** with a
+Python-side logger in the original (`tools/oracle/ainative_install.py` wraps
+`AI.SuperAI`'s inherited natives, `Arenas.SuperArena`'s and `plus`'s functions
+through `ra2_python.py`; nothing written to the game folder; the prefix's
+`Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` copied before and
+sha256-compared after: identical). `tools/oracle/capture_ainative.sh` drives it
+(Scout v ALARM, Combat Arena, `:7`, port 27147; four sessions, the first two to
+find the probes' faults).
+
+**New live captures** (rows in `local/oracle/manifest.tsv`, copies in
+`~/ra2-oracle-backup` with `manifest-additions-2026-11-02-ai-audit.tsv`):
+`ainative-scout-alarm-box__live__000` (100 s, 29 670 native calls, `GetSpeed` and
+`GetTurning` with the direction, location, heading and upside-down flag of the
+same instant), `__001` (63 s), `ainprobe-scout-alarm-box__live__000` (about 130
+probes: unknown ids, planar distances, heading conventions, input roundings,
+rays through walls, `IsStraightPathClear` both ways, `GetPath`, start points,
+map size, `IsEnemy`, the state after `plus.eliminatePlayer(1)`).
+
+**Mismatches found, all fixed** (docs/33 §8 has the evidence):
+
+| native | the binary and live | ours before |
+|---|---|---|
+| `GetDirection` / `GetSpeed` (`0x4df3d0`, `0x401c90`) | the unit vector, a tilted robot's `y` kept (live 0.47 on both robots through most of the first minute); the speed is `direction . linear velocity` | the vector projected onto the floor, `speed = v . flat` |
+| `GetEnemies` / `IsEnemy` (`0x418ff0`, `0x418f40`) | TEAM MATCH: other team; else any other id (`IsEnemy(5)` is 1 live) | everyone alive but us: a team mate was an enemy |
+| `plus.isDefeated(no such id)` | 1 | 0 |
+| `plus.getLocation(no such id)` | `(None, None, None)` | `(0, 0, 0)` |
+| `plus.isHuman` (`0x4cd640`) | the robot's own answer | always false |
+| `GetInputStatus` (`0x4dd660`) | integer, truncated toward zero (17 values); 0 for a name that is no control | the float last written |
+| `GetComponentHealth` (`0x4b2c50`) | health / hitpoints (0.8357) | the hitpoints (1527.7) |
+| `Arena.RayTest` (`0x4ba100`) | a miss is `(0, (None, None, None))` | `(False, (0, 0, 0))` |
+| `Arena.GetMapSize` (`0x4ba690`) | `(cols, rows)` as floats | missing |
+| `plus.rayTest` (`0x4b5d70`) | the arena's walls and floor strike first: `(-1, -1, point)`; a miss is five `-1`s | robots only; a miss carried the ray's start |
+
+What did **match** (V in the table): `GetLocation` (centre of mass), `GetHeading`,
+`GetHeadingTo(ID)` (planar, wrapped, the ray's `reverse`, no id = 0),
+`GetDistanceTo(ID)` (12am), `IsUpsideDown`, `GetTurning`, `GetZoneContents`, the
+5-tuples of `GetLastDamage*`, `Input`, `GetNumComponents`, `tickInterval` 0.125,
+`ToGrid` / `FromGrid`, `GetStartPointLocation`, `GetMapResolution` / `Altitude`,
+`GetPath` (two more probes exact) and **`IsStraightPathClear`, whose start was
+an open question (docs/33 §7)**: live `(a, b)` 0 and `(b, a)` 1 for two points
+a robot's length apart at the wall, ours the same: the march starts at the first
+point and tests it.
+
+**The direction, in numbers.** `GetDirection` is not an angle the scripts only
+turn into a heading (that is unchanged: `atan2(x, z)` is the same flat or not);
+`GetSpeed` is the velocity along it. A robot tilted by 30 degrees (nose up
+on its tail, or on a wedge) has a speed of `v cos 30`, not `v`, so the brains'
+throttle boost (`speed < mps`) and slow-down (`dist < abs(speed)`) see it
+differently while tilted. The live speed against the location differences:
+rms 0.289 (raw) against 0.299 (flat) for ALARM, 0.347 against 0.356 for the
+Scout over all samples; with `|dir.y| > 0.3` 0.18 / 0.22 (148 samples) and
+0.23 / 0.41 (18). `RA2_AI_FLATDIR=1` is the old vector.
+
+**Ensembles, before / after** (48 warmups, 120 s, scratch install,
+`FIDTRACE_UP=1`, `ensemble.sh` + `ensemble_report.py` + `inverted_hits.py`; the
+before column is 12am's after, reproduced to the digit with the master binary;
+counted = hits of 10 hp or more on the other robot, arena hp = the arena's hits
+of 10 hp or more, mean +- se; live as 12al / 12am):
+
+| fight | live | before | **after** |
+|---|---|---|---|
+| box ALARM / Scout counted | 41.1 / 6.0 | 33.4 +- 3.6 / 5.1 +- 0.4 | 29.1 +- 3.2 / 5.1 +- 0.6 |
+| box arena hp Scout / ALARM | 99 / 17 | 80.5 +- 13.3 / 81.7 +- 19.0 | 60.5 +- 11.3 / **41.8 +- 10.6** |
+| box Scout / ALARM on its back >= 1.5 s | 2 of 13 / 5 of 13 | 9 / 30 of 48 | 6 / 32 |
+| box mean length, full length | -- | 86 s, 14 | 80 s, 15 |
+| Razor / FlapJack counted | 3.0 / 0.1 | 1.1 +- 0.1 / 4.6 +- 0.4 | 1.1 +- 0.2 / 4.2 +- 0.3 |
+| Razor arena hp Razor / FlapJack | 45 / 30 | 20.3 +- 7.5 / 8.0 +- 3.3 | 28.0 +- 10.6 / 7.2 +- 3.2 |
+| Compressor Wide Load / Sentinel counted | 73.6 / 5.3 | 78.6 +- 6.8 / 3.6 +- 0.4, 29 full | 77.4 +- 6.5 / 4.4 +- 0.6, 29 full |
+| Compressor arena hp Sentinel / Wide Load | 390 +- 231 / 136 +- 57 | 95.1 +- 36.8 / 99.5 +- 30.8 | 101.0 +- 23.7 / 101.1 +- 45.1 |
+| Octagon ALARM / Scout counted | 13.6 / 3.2 | 11.8 +- 1.8 / 3.6 +- 0.3 | **13.3 +- 1.7 / 4.1 +- 0.4** |
+| Octagon arena hp Scout / ALARM | 22 +- 6 / 146 +- 51 | 83.0 +- 16.3 / 28.1 +- 8.7 | 69.7 +- 11.8 / 46.3 +- 13.6 |
+| Octagon Scout / ALARM on its back | 0 of 10, 2 of 8 / 5 of 10, 3 of 8 | 16 / 25 of 48 | 13 / 32 |
+| Octagon mean length, full length | 34-43 s | 47 s, 0 | 52 s, 3 |
+
+The default changes because the mechanism is recovered and observed, not
+because the table improves: the box's counted ALARM hits move away from live
+(33.4 to 29.1; live 41.1) and the Octagon's toward it (11.8 to 13.3; 13.6),
+ALARM's arena hp in the box goes to 41.8 (live 17), and ALARM's time on its
+back stays where it was (30 to 32 of 48 in the box, 25 to 32 in the Octagon;
+live 5 of 13 and 3-5 of 8-10). So none of the queries audited here is what
+puts ALARM on its back in ours; the box ALARM question of 12al/12am stays open.
+
+**Verified / not.** In the binary and live: the table above (V rows),
+the occlusion of `plus.rayTest` by the walls (`-12.7` both sides, below the
+floor: miss), the unflattened direction, `IsEnemy`, `isDefeated` /
+`getLocation` of unknown ids, `GetInputStatus` roundings. In the binary only:
+the TEAM MATCH branch of `IsEnemy` (no 2 v 2 was run live; the Python side of
+the 2 v 2 uses it through `GetEnemies`), the meaning of the player flag `+0x38`
+(read as the 20 s immobility mark from one observation), the other
+`plus` functions marked A. Not changed (docs/33 §1, E): a switch control's
+`GetInputStatus`, a ray that starts inside a part, out-of-range indices.
+**Tests.** `plus::tests::{enemies_are_the_other_teams_in_a_team_match,
+an_unknown_player_is_defeated_and_has_no_location, headings_read_the_tilted_direction,
+the_input_status_is_an_integer_of_a_control_on_the_board,
+a_wall_between_the_ray_and_the_robot_hides_the_robot}`,
+`tests::the_arena_answers_ray_tests_and_pathing` (miss, `GetMapSize`, the wall at
+12.7), `scriptai::facing_tests`.
+**Tools.** `tools/oracle/ainative_install.py`, `capture_ainative.sh`,
+`ainative_probes/`, `ainative_speed.py`; `RA2_AI_FLATDIR=1`.

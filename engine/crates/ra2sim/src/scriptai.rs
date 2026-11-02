@@ -75,15 +75,47 @@ fn parse_angle(expr: &str) -> Option<f32> {
     Some(if neg { -v } else { v })
 }
 
+/// `GetDirection` and `GetSpeed` (`0x4df3d0`, `0x401c90`): the unit vector the robot faces, as it is
+/// (a tilted robot's has a `y`), and that vector dotted with the body's linear velocity.
+pub fn facing(forward: Vec3, velocity: Vec3) -> (Vec3, f32) {
+    let forward = forward.normalize_or_zero();
+    (forward, velocity.dot(forward))
+}
+
+/// `RA2_AI_FLATDIR=1`: the direction projected onto the floor, as it was before docs/29 section 12an
+/// (an experiment switch; the default is the original's vector).
+fn flat_direction() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_AI_FLATDIR").is_ok_and(|v| v != "0"))
+}
+
+/// `GetComponentHealth` (`0x4b2c50`): a part's health over its hitpoints.
+pub fn health_fraction(health: f32, hitpoints: f32) -> f32 {
+    if hitpoints > 0.0 {
+        health / hitpoints
+    } else {
+        0.0
+    }
+}
+
 /// What the scripts get to see about one robot.
 pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
     let transform = robot.transform(physics);
-    let forward = transform.transform_vector3(robot.rig.forward());
-    // The scripts think in a heading whose `(sin, cos)` is the facing, so the
-    // direction is flattened: a robot on its back still has a heading.
-    let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    // `GetDirection` (`0x4df3d0`) is `(0, 0, 1)` turned by the heading and the chassis body's
+    // orientation and handed out as it is: a tilted robot's vector has a `y`. `GetHeading` is its
+    // `atan2(x, z)` (`0x4df320`), and `GetSpeed` (`0x401c90`) dots it with the body's linear
+    // velocity. Flattening it, as this did before, turned the speed of a robot on its tail or on a
+    // ramp into the horizontal one (docs/33 section 1; docs/29 section 12an).
     let state = physics.state(robot.body());
     let velocity = state.map(|s| s.linear_velocity).unwrap_or(Vec3::ZERO);
+    let mut world_forward = transform.transform_vector3(robot.rig.forward());
+    if flat_direction() {
+        world_forward = Vec3::new(world_forward.x, 0.0, world_forward.z);
+        if world_forward == Vec3::ZERO {
+            world_forward = Vec3::NEG_Z;
+        }
+    }
+    let (forward, speed) = facing(world_forward, velocity);
     let angular = state.map(|s| s.angular_velocity).unwrap_or(Vec3::ZERO);
     let up = transform.transform_vector3(Vec3::Y);
 
@@ -94,10 +126,10 @@ pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            (
-                c.class.clone(),
-                robot.health.get(i).copied().unwrap_or(c.hitpoints),
-            )
+            // `GetComponentHealth` (`0x4b2c50`) is the part's health over its hitpoints: a
+            // fraction (live: the Scout's chassis reads 0.836 where `plus.getHitpoints` says 1527).
+            let health = robot.health.get(i).copied().unwrap_or(c.hitpoints);
+            (c.class.clone(), health_fraction(health, c.hitpoints))
         })
         .collect();
     let spheres: Vec<(Vec3, f32)> = (0..robot.rig.components.len())
@@ -123,12 +155,17 @@ pub fn snapshot(physics: &dyn PhysicsBackend, robot: &Robot) -> BotSnapshot {
         location: physics
             .center_of_mass(robot.body())
             .unwrap_or(transform.w_axis.truncate()),
-        direction: if flat == Vec3::ZERO {
-            Vec3::NEG_Z
-        } else {
-            flat
-        },
-        speed: velocity.dot(flat),
+        team: robot.team as i32,
+        human: false,
+        controls: robot
+            .rig
+            .wiring
+            .controls
+            .iter()
+            .map(|c| c.name.clone())
+            .collect(),
+        direction: forward,
+        speed,
         turning: angular.y,
         upside_down: up.y < 0.0,
         mass: robot.remaining_mass(),
@@ -270,5 +307,37 @@ mod nose_tests {
         assert_eq!(parse_angle("math.pi * 0.5"), Some(PI * 0.5));
         assert_eq!(parse_angle("0.0"), Some(0.0));
         assert_eq!(parse_angle("north"), None);
+    }
+}
+
+#[cfg(test)]
+mod facing_tests {
+    use super::{facing, health_fraction};
+    use glam::Vec3;
+
+    /// Live: the Scout's chassis has 1827 hitpoints and 1527.7 left, and `GetComponentHealth` says
+    /// 0.8357, not 1527.7.
+    #[test]
+    fn a_components_health_is_a_fraction_of_its_hitpoints() {
+        assert!((health_fraction(1527.72, 1827.99) - 0.8357).abs() < 1e-3);
+        assert_eq!(health_fraction(5.0, 0.0), 0.0);
+    }
+
+    /// A robot on its tail (nose up) faces mostly up: the direction keeps its `y`, and the speed is
+    /// the velocity along that vector, not along its horizontal shadow (live, docs/29 section 12an).
+    #[test]
+    fn the_direction_and_speed_are_not_flattened() {
+        let forward = Vec3::new(0.0, 0.6, 0.8);
+        let velocity = Vec3::new(0.0, 0.0, 2.0);
+        let (d, speed) = facing(forward, velocity);
+        assert!((d.y - 0.6).abs() < 1e-6 && (d.length() - 1.0).abs() < 1e-6);
+        assert!(
+            (speed - 1.6).abs() < 1e-6,
+            "2 m/s ahead is 1.6 m/s along a 37 degree nose: {speed}"
+        );
+        // Level: the same as before.
+        let (d, speed) = facing(Vec3::Z, velocity);
+        assert_eq!(d, Vec3::Z);
+        assert!((speed - 2.0).abs() < 1e-6);
     }
 }

@@ -2478,6 +2478,8 @@ impl Duel {
                 let mut s = crate::scriptai::snapshot(&*self.physics, &self.robots[i]);
                 s.last_damage_done = self.last_done[i];
                 s.last_damage_received = self.last_received[i];
+                // `plus.isHuman` (robot vtable slot 7, `0x4cd640`): the person's robot.
+                s.human = self.human_robot == Some(i);
                 s
             })
             .collect();

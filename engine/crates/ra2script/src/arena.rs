@@ -216,6 +216,20 @@ impl ArenaData {
             .any(|l| segment_crosses_circle(l.a, l.b, p, radius))
     }
 
+    /// How far along the unit `dir` from `from` the arena's own triangles are first struck, within
+    /// `len`: what `Arena.RayTest` and the first-hit test of `plus.rayTest` read.
+    pub fn first_triangle_hit(&self, from: Vec3, dir: Vec3, len: f32) -> Option<f32> {
+        let mut best = f32::INFINITY;
+        for tri in &self.triangles {
+            if let Some(t) = ray_triangle(from, dir, tri) {
+                if t > 1e-4 && t < best {
+                    best = t;
+                }
+            }
+        }
+        (best.is_finite() && best <= len).then_some(best)
+    }
+
     /// `IsStraightPathClear` (`FUN_00405720`): march from `from` toward `to` in
     /// steps of half the search radius and fail at the first stop whose circle
     /// crosses a collision line. The steps are `trunc(length / step)` and start
@@ -779,6 +793,13 @@ impl Arena {
         self.d().map.hazards_on = on;
     }
 
+    /// `GetMapSize()` (`0x4ba690` -> `0x405410`): the cell counts `(cols, rows)` as floats (live box:
+    /// `(30.0, 30.0)`).
+    fn GetMapSize(&self) -> (f32, f32) {
+        let d = self.d();
+        (d.map.cols as f32, d.map.rows as f32)
+    }
+
     fn GetMapResolution(&self) -> f32 {
         self.d().map.resolution
     }
@@ -878,29 +899,29 @@ impl Arena {
     ///
     /// `CreateMap` bakes the navigation grid with this when an arena ships no
     /// `.map`, so it has to be the arena's own geometry.
-    fn RayTest(&self, a: (f32, f32, f32), b: (f32, f32, f32)) -> (bool, (f32, f32, f32)) {
+    ///
+    /// A ray that strikes nothing (or has no length) answers `(0, (None, None, None))` (live).
+    #[allow(clippy::type_complexity)]
+    fn RayTest(
+        &self,
+        a: (f32, f32, f32),
+        b: (f32, f32, f32),
+    ) -> (bool, (Option<f32>, Option<f32>, Option<f32>)) {
         let from = Vec3::new(a.0, a.1, a.2);
         let to = Vec3::new(b.0, b.1, b.2);
         let dir = to - from;
         let len = dir.length();
         if len <= 1e-6 {
-            return (false, (0.0, 0.0, 0.0));
+            return (false, (None, None, None));
         }
         let dir = dir / len;
         let d = self.data.lock().unwrap();
-        let mut best = f32::INFINITY;
-        for tri in &d.triangles {
-            if let Some(t) = ray_triangle(from, dir, tri) {
-                if t > 1e-4 && t < best {
-                    best = t;
-                }
+        match d.first_triangle_hit(from, dir, len) {
+            Some(best) => {
+                let p = from + dir * best;
+                (true, (Some(p.x), Some(p.y), Some(p.z)))
             }
-        }
-        if best.is_finite() && best <= len {
-            let p = from + dir * best;
-            (true, (p.x, p.y, p.z))
-        } else {
-            (false, (0.0, 0.0, 0.0))
+            None => (false, (None, None, None)),
         }
     }
 
