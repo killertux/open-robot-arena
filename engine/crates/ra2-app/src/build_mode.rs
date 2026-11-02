@@ -995,7 +995,7 @@ impl Builder {
         if let Some(action) = self.panel_action(x, y) {
             return self.apply(&action);
         }
-        if self.on_adjust_screen()
+        if self.on_point_screen()
             && self
                 .editing_grid()
                 .is_some_and(|(frame, _)| frame.contains_point(x, y))
@@ -1406,7 +1406,7 @@ impl Builder {
     /// (`0x42b6b4`: the larger of |dx| and |dy|, signed).
     pub fn mouse_moved(&mut self, x: f32, y: f32) {
         let last = self.cursor.replace([x, y]);
-        if self.dialog.is_none() && self.on_adjust_screen() {
+        if self.dialog.is_none() && self.on_point_screen() {
             self.adjust_move(x, y);
         }
         if self.paint_color.drag.is_some() {
@@ -2877,6 +2877,19 @@ impl Builder {
             && self.structure_step() == 2
     }
 
+    /// Whether the editing area takes point drags: chassis step 2's top outline, or step 1's
+    /// baseplate once its outline is closed (live `botlab-step1-drag-*`: the same widget, the same
+    /// rules and latch, the dragged point is a baseplate point).
+    fn on_point_screen(&self) -> bool {
+        self.on_adjust_screen()
+            || (self.tab() == Some("chassis button")
+                && self.shell.lab().is_some()
+                && self.structure_step() == 1
+                && self.outline_closed
+                && self.draw_style == DrawStyle::Freeform
+                && self.build.chassis().is_some_and(|c| c.bottom.len() >= 3))
+    }
+
     /// The step's `Editing Area` frame and its blueprint grid.
     fn editing_grid(&self) -> Option<(Frame, Frame)> {
         let placed = self.shell.placements();
@@ -2887,12 +2900,21 @@ impl Builder {
         Some((area.frame, blueprint_grid(area.frame)))
     }
 
-    /// The top point whose selection image is under a screen point. The image is a 16 px square
+    /// The draggable outline: step 2's top points, step 1's baseplate.
+    fn editable_points(&self) -> Option<&[[i32; 2]]> {
+        let chassis = self.build.chassis()?;
+        Some(if self.structure_step() == 2 {
+            &chassis.top
+        } else {
+            &chassis.bottom
+        })
+    }
+
+    /// The point whose selection image is under a screen point. The image is a 16 px square
     /// (live: a point at 129,238 is taken by a cursor from x 121 to 136 and y 232 to 245).
     fn top_point_at(&self, x: f32, y: f32) -> Option<usize> {
         let (_, grid) = self.editing_grid()?;
-        let chassis = self.build.chassis()?;
-        chassis.top.iter().position(|p| {
+        self.editable_points()?.iter().position(|p| {
             let px = grid.x + p[0] as f32 / 1000.0 * grid.w;
             let py = grid.y + p[1] as f32 / 1000.0 * grid.h;
             (px - 8.0..px + 8.0).contains(&x.floor()) && (py - 8.0..py + 8.0).contains(&y.floor())
@@ -2938,7 +2960,12 @@ impl Builder {
         let Some(point) = self.outline_point_at(x, y) else {
             return;
         };
-        match self.build.adjust_top_point(index, point) {
+        let moved = if self.structure_step() == 2 {
+            self.build.adjust_top_point(index, point)
+        } else {
+            self.build.adjust_bottom_point(index, point)
+        };
+        match moved {
             Ok(moved) => {
                 if moved.validated() {
                     self.adjust_armed = true;
@@ -2986,6 +3013,25 @@ impl Builder {
                     if self.build.chassis().is_some_and(|c| c.bottom.len() >= 3) && near < 60 * 60 {
                         self.outline_closed = true;
                         self.status = "baseplate outline closed".into();
+                        self.refresh_panel();
+                        return Ok(());
+                    }
+                }
+                // The editing area's rules judge the new point first (`FUN_004a10d0`); a refusal adds
+                // nothing and shows its alert only while the latch `DAT_006f52e0` is set. Live: a
+                // point on an edge, one that makes the outline cross itself and one that makes a
+                // corner too sharp were each refused with no alert and the ring red (`botlab-step1-*`).
+                if let Some(chassis) = self.build.chassis() {
+                    let snapped = if self.draw_snap {
+                        chassis::snap(point)
+                    } else {
+                        point
+                    };
+                    if let Err(rule) = workshop::adjust::check_add(&chassis.bottom, snapped) {
+                        self.status = rule.text().into();
+                        if self.adjust_armed {
+                            self.show_alert(rule.text());
+                        }
                         self.refresh_panel();
                         return Ok(());
                     }
@@ -4916,11 +4962,11 @@ impl Builder {
             }
         }
         for (i, p) in points.iter().enumerate() {
-            let lit = step == 2 && self.draw_point == Some(i);
+            let lit = self.draw_point == Some(i) && (step == 2 || closed);
             ink.ring(
                 at(p),
                 6.0,
-                if step == 2 { 2.0 } else { 1.0 },
+                if step == 2 || lit { 2.0 } else { 1.0 },
                 if lit {
                     white
                 } else if step == 2 {
@@ -4929,6 +4975,31 @@ impl Builder {
                     [0.78, 0.78, 0.82, 1.0]
                 },
             );
+        }
+        // Step 1, an open freeform outline: the point a click would add is under the cursor (snapped),
+        // a 1 px (204,204,255) line runs to it from the last point and its ring is green when the
+        // editing area's rules accept it, red when they refuse it (live `botlab-step1-hover-*`).
+        if step == 1 && !closed && self.draw_style == DrawStyle::Freeform {
+            let hover = self
+                .cursor
+                .filter(|c| area.frame.contains_point(c[0], c[1]))
+                .and_then(|c| self.outline_point_at(c[0], c[1]));
+            if let Some(p) = hover {
+                if let Some(last) = points.last() {
+                    ink.line(at(last), at(&p), 1.0, [0.8, 0.8, 1.0, 1.0]);
+                }
+                let ok = workshop::adjust::check_add(points, p).is_ok();
+                ink.ring(
+                    at(&p),
+                    6.0,
+                    2.0,
+                    if ok {
+                        [0.0, 0.8, 0.0, 1.0]
+                    } else {
+                        [0.8, 0.0, 0.0, 1.0]
+                    },
+                );
+            }
         }
     }
 
@@ -5992,7 +6063,7 @@ pub fn script(
     }
     println!("  saved {}", path.display());
     let stats = builder.build.stats();
-    let live_components = builder.build.to_bot().components;
+    let live_components = builder.build.to_bot().through_the_file().components;
     let live_board = builder.build.board().clone();
     let live_skin = builder.build.paint().skin().cloned();
 
@@ -6013,7 +6084,15 @@ pub fn script(
         reloaded_board.controls.len(),
         reloaded_board.bindings.len()
     );
-    if reloaded != stats {
+    // The file keeps six significant digits, so the masses agree to that and not to the last bit.
+    let close = |a: f32, b: f32| (a - b).abs() <= 1e-4 * b.abs().max(1.0);
+    if !(close(reloaded.mass, stats.mass)
+        && close(reloaded.hitpoints, stats.hitpoints)
+        && close(reloaded.chassis_hitpoints, stats.chassis_hitpoints)
+        && reloaded.declared_class == stats.declared_class
+        && reloaded.computed_class == stats.computed_class
+        && reloaded.parts.len() == stats.parts.len())
+    {
         return Err(format!(
             "the reloaded stats differ: {reloaded:?} != {stats:?}"
         ));
@@ -6653,9 +6732,12 @@ mod tests {
         // back to the same components and write back to the same bytes.
         let bytes = builder.build.save();
         let back = ra2fmt::bot::parse(&bytes).unwrap();
-        assert_eq!(back.components, builder.build.to_bot().components);
+        assert_eq!(
+            back.components,
+            builder.build.to_bot().through_the_file().components
+        );
         assert_eq!(back.write(), bytes);
-        assert_eq!(back.components.last().unwrap().angle, part.angle);
+        assert!((back.components.last().unwrap().angle - part.angle).abs() < 1e-6);
     }
 
     /// `Delete Control` asks first (live `botlab-wiring-delete-confirm`: a `Wiring` box with `Yes` and

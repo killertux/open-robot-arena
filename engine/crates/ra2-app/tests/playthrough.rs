@@ -1765,6 +1765,81 @@ fn the_test_robot_tab_is_a_practice_arena_with_obstacles_and_reset() {
     assert_eq!(b.arena_mut().unwrap().obstacle(), "none");
 }
 
+/// Chassis step 1 judges every click by the editing area's rules too and, with the outline closed,
+/// drags its points (live `botlab-step1-*`, docs/36 9.27f): a point on an edge, one that makes the
+/// outline cross itself and one that makes a corner too sharp are refused with no alert (nothing
+/// was accepted yet, and a point added to the list clears the latch); after accepted drags a refused
+/// place raises the alert.
+#[test]
+fn chassis_step_one_refuses_points_by_the_editing_areas_rules_and_drags_them_once_closed() {
+    let Some(scratch) = ScratchGame::new("steponerules") else {
+        return;
+    };
+    let game = scratch.path();
+    let _guard = ra2script::lock();
+    let mut shell = window_shell(game);
+    for name in ["Team HQ button", "continue button"] {
+        shell.click_named(name).unwrap();
+    }
+    let first = ra2fmt::team::read_table(&game.join("Teams/Teams.txt"))
+        .unwrap()
+        .teams[0]
+        .robots[0] as usize;
+    flow::scrap_prompt(&mut shell, Some(first)).unwrap();
+    shell.click_named("yes button").unwrap();
+    let mut b = flow::open_workshop(game, Some(first)).unwrap();
+    b.set_size([1024.0, 768.0]).unwrap();
+    b.click_named("chassis button").unwrap();
+    b.click_named("structure design button").unwrap();
+    let click = |b: &mut ra2_app::build_mode::Builder, p: [i32; 2]| {
+        let at = b.outline_point_for(p).unwrap();
+        b.mouse_moved(at[0], at[1]);
+        b.click(at[0], at[1]).unwrap();
+        b.mouse_released(at[0], at[1]);
+    };
+    for p in [[200, 200], [800, 200], [800, 800], [200, 800]] {
+        click(&mut b, p);
+    }
+    assert_eq!(b.build().chassis().unwrap().bottom.len(), 4);
+    // on the first edge / crossing the right edge / a corner too sharp at the last point
+    for p in [[500, 200], [900, 500], [700, 700]] {
+        click(&mut b, p);
+        assert_eq!(
+            b.build().chassis().unwrap().bottom.len(),
+            4,
+            "{p:?} is refused"
+        );
+        assert!(b.alert().is_none(), "{p:?}: the latch is clear, no alert");
+    }
+    // close it on the first point; the baseplate's points now drag
+    click(&mut b, [200, 200]);
+    let drag = |b: &mut ra2_app::build_mode::Builder, from: [i32; 2], to: [i32; 2], steps: i32| {
+        let a = b.outline_point_for(from).unwrap();
+        b.mouse_moved(a[0], a[1]);
+        b.click(a[0], a[1]).unwrap();
+        let z = b.outline_point_for(to).unwrap();
+        for k in 1..=steps {
+            let f = k as f32 / steps as f32;
+            b.mouse_moved(
+                (a[0] + (z[0] - a[0]) * f).round(),
+                (a[1] + (z[1] - a[1]) * f).round(),
+            );
+        }
+        b.mouse_released(z[0], z[1]);
+    };
+    drag(&mut b, [200, 200], [300, 300], 4);
+    assert_eq!(b.build().chassis().unwrap().bottom[0], [300, 300]);
+    assert!(b.alert().is_none());
+    // now a refused place raises the alert and the point stays: the last point onto the first edge
+    // (the point follows the cursor to the last place the rules took and stops there)
+    drag(&mut b, [200, 800], [500, 250], 3);
+    assert_ne!(b.build().chassis().unwrap().bottom[3], [500, 250]);
+    assert_eq!(
+        b.alert(),
+        Some("Points should not be too close to other points or lines")
+    );
+}
+
 /// Chassis step 2 as the original drives it (docs/36 section 9.27e): a press on a top point takes
 /// it, the point follows the mouse (snapped to the grid) while the button is down, the editing
 /// area's three alerts and the lab's bend alert refuse a move and leave the point where it was,

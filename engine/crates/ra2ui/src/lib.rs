@@ -1496,10 +1496,23 @@ fn sized(
             anchor * size
         }
     };
+    // A flat-colour `Image` (no file) with a `_BufferWidth` keeps that many pixels clear on each
+    // side: the height slider's track is `_Size 4 121` with `_BufferWidth 11` in a 26 px column and
+    // is a 4 px bar live (`botlab-adjust-hover`: x 963..966 in the column 952..977), the only
+    // image of the shipped screens that sets one.
+    let inset = if widget.kind == WidgetKind::Image && widget.filename() == Some("") {
+        widget
+            .field("_BufferWidth")
+            .and_then(|f| f.numbers().first().copied())
+            .filter(|b| *b > 0.0 && w > 2.0 * b)
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
     Frame::new(
-        parent.x + px - offset(anchor.h, w),
+        parent.x + px - offset(anchor.h, w) + inset,
         parent.y + py - anchor.v * h - ascent,
-        w,
+        w - 2.0 * inset,
         h,
     )
 }

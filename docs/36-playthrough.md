@@ -1472,10 +1472,67 @@ Chassis > Structure Design, a baseplate clicked in, step 2, then drags on the to
 * **Tests.** `adjust::tests` (6: the rules and the traced dots), `build::tests` (4: the corner moves in the mesh and the weight falls, the bend refusal at the traced place, the extrusion starts over, a
   counter-clockwise baseplate is stored reversed), `extrude::tests::a_dragged_top_point_changes_the_normals_and_the_layout_as_live` (5 live files), `playthrough::chassis_step_two_drags_top_points_and_refuses_what_bends`
   (press / move / release through the `Builder`, the alerts, the weight 55.8, the tip, step 1 / step 2 again, Finished).
-* **Open.** (1) One group of `triangle-bent` sits 6.22 px lower in the original's atlas than its bounding box (the side whose base is slanted and whose quad is not flat; same shape, same u): the rule for the
+* **Open** (9.27f settles (2) and (5), narrows (1)). (1) One group of `triangle-bent` sits 6.22 px lower in the original's atlas than its bounding box (the side whose base is slanted and whose quad is not flat; same shape, same u): the rule for the
   cell height of a non-flat quad not on the x axis is not recovered, the test skips that one `v`. (2) The ear order of the plates (a square is clipped from corner 2, a 200 x 300 rectangle from corner 0)
   is still not recovered; the sets of triangles are equal. (3) The alert latch is global in the exe, per lab here. (4) The red ring the original's cursor shows over a refused place is the OS-level cursor, not drawn.
   (5) Step 1 does not show the three alerts of the editing area (`FUN_004a10d0` judges clicks there too).
+
+### 9.27f The .bot writer against the original's, the plates' order, chassis step 1 (`fx/lab-files`, 2026-11-01)
+
+Live on display :9 (flatpak Wine 9.0; `Teams/`, `AI/`, `Robot Designs/` and `ra2.cfg` of the prefix copied before and restored after, sha256 lists equal). New captures (manifest rows, backup
+`manifest-additions-2026-10-21-lab-files.tsv`): `teamhq-import-resave-orabuilt` and `teamhq-import-resave-oratriangle` (the `.bot` the **original** wrote when it imported two files our port's lab had written),
+`teamhq-import-ours-built`, `botlab-import-ours-built-overview`, `botlab-import-ours-triangle-overview`, and for chassis step 1 `botlab-step1-hover-valid`, `-refused-close`, `-refused-cross`, `-refused-sharp`,
+`-refused-latched`, `-drag-ok`, `-drag-alert` (PNG). Harness: `ra2sim --example livebots <game> <dir>` writes the two test designs (a triangle with a dragged top point; the stock chassis with an angle motor, a wheel and the
+default board), `livebots2 <game> in out` loads and saves one in the lab model; the files were copied into the prefix's `Robot Designs/` and loaded by Team HQ > Import Bot into a scrapped cell (9.25).
+
+* **Loads in the original, and what it writes back.** Both files imported and showed in the HQ (`teamhq-import-ours-built`: Lightweight, `No Robot Preview`), and the lab's Overview of the imported triangle is the
+  captured one (weight 55.8, `botlab-import-ours-triangle-overview` against `botlab-adjust-overview`), the built bot 89.1 with its motor and wheel. The re-saved `Bot4.bot` is the original's writer's output for
+  *our* file, so it shows what the writer does: for `OraBuilt.bot` (stock chassis with no skin, header line 4 `0`) it differs from ours in exactly two places: line 4 is `1`, and the shaped chassis gets the **white
+  256 x 256 32-bit skin** (`false` -> `true` + TGA, 5 598 -> 267 759 bytes); for `OraTriangle.bot` (white skin, line 4 `0`) in line 4 only. A visit to the lab and `Back to HQ` kept the file byte for byte.
+  Ours now does the same on load (`Build::load`: skin for a shaped chassis without one, line 4 `1`) and `Build::to_bot` writes the current format (the original always loads and saves 1.12): **our re-save of
+  `OraBuilt.bot` is byte-identical to the original's** (577 lines, 267 759 bytes), and `load` + `save` of both re-saved files is the identity (test `a_design_the_original_saved_is_saved_again_unchanged`).
+* **Header line 4.** The text writer is `FUN_004dd8c0` (`Class: ` `0x6fd7a8`, xref `0x4dd977`): after `Name:` and `Class:` it prints `FUN_004df560() & 0xff`, which is `find(pair(0x4df5c0, DAT_00716108)) == end` in a `std::map`
+  at the robot object's `+0x18` (the same map `FUN_004dd780` looks components up in by `DAT_00716108`; `FUN_004df1a0`, called by `FUN_0043b890` with the snapshot, erases that key). What the key means is
+  not recovered, so the rule is the observed one: **`0` in every file the lab itself made** (the 13 `botlab-newbot-*` / `botlab-adjust-*` captures and `teamhq-newbot-empty`), **`1` after any load** (the five shipped
+  or imported designs, both re-saved test files, kept through a lab visit). Ours: `Build::new` / `blank` write `0`, a chassis edit (`commit_chassis`) sets `0`, `Build::load` sets `1`.
+* **Number format.** The exe has no `%g` string (search: none) and `FUN_004dd8c0` sets no precision before it streams the floats (`FUN_004192a0`): an `ostream` at its default precision 6, i.e. `%g`. The port's `num`
+  fell back to the shortest form when six digits did not round-trip the `f32`; now it is always `%g` with six significant digits (three-digit exponents), so a lab-made value like 0.6815805 is written `0.681581`
+  as the original does. All 57 shipped bots still round-trip. **A negative zero** from the normal's division printed `-0` where the original prints `0` (no live file has a `-0`): `face_normal` adds `+ 0.0`.
+* **A blank chassis has no buckling section.** The original's untouched new robot (`teamhq-newbot-empty`) goes from the armour row to the buckle-model flag; the reader and the writer both expected a buckling
+  count there, so **the original's own file did not parse and ours wrote a line the original would have misread**. Fixed both ways; test `the_original_blank_robot_round_trips`.
+* **Byte for byte.** `a_triangle_robot_is_saved_byte_for_byte_as_live`: the lab's file for the triangle with its first top point at (400,300), the counter-clockwise triangle and the vertical one equal
+  `botlab-adjust-triangle-ok`, `-base-ccw`, `-base-vertical` line for line (159 lines, 263 712 bytes) but one number of the first (`0.68158` live, `0.681581` ours: a u in the unfolded top plate that is one `f32`
+  step lower there; the original is x87 code, doubles in the unfolding changed nothing, so the test lets a number differ by 1.5e-6).
+* **The plates' ear order is random, not recovered, and cannot be.** `FUN_0044ae70` (the extrusion) reads the triangles of the plate from a polygon class (vtable `0x6b176c`, ctor `FUN_0061d3c0`) whose
+  `FUN_0061d5a0` is **Seidel's randomised trapezoid triangulation** (the segment table at `0x733c78`, stride `0x38`, `next`/`prev`/`root0`/`root1`): `FUN_00620b50` makes the random permutation with
+  `srand(time(0))` (`FUN_0063d106(0)` -> `FUN_0063dce5`) and `_rand() % n`. The order of the triangles is therefore a function of the clock. The live files agree: the same square (200,200)-(800,800) is
+  clipped `[0 3 1] [3 2 1]` in `botlab-newbot-height-min`, `-height-max` and `-square-small` but `[2 1 3] [1 0 3]` in `-tall`, `-thin`, `-square-big` and `botlab-adjust-square-taper`. Ours keeps one valid order
+  (the sets of triangles are equal to every capture's); nothing to change.
+* **The 6.22 px group of `triangle-bent` (open).** Its polygon is ours exactly (the quad `(800,200) (500,800) (500,800,h) (800,400,h)` projected on the plane of the second triangle's normal: across
+  `0 0 53.492 57.641`, along `0 100.623 100.623 26.833`, all four `(u, v)` match). Only the cell's place differs: the base edge is at v 92.7755 live, 99 ours (cell `y` 153.2245 against 147, the skyline of the
+  `side0` cell above it: 81 + ceil 56.25 + 9). No quantity of the file equals 6.2245 (cell heights 56.25, 57.641, 53.492, 62 for the group's bounds, widths, gaps) and the placement code is not in
+  `FUN_0044ae70` / `FUN_0044a310` (it only reads the finished layout), so the rule stays open; the test still skips that one `v`.
+* **Chassis step 1 judges every click and drags its points.** Live, with the outline open (`botlab-step1-*`): the point the click would add shows under the cursor snapped to the grid, a **green ring** (0,204,0) when
+  the editing area's rules take it, **red** (204,0,0) when they refuse it, with a 1 px (204,204,255) line to it from the last point (the outline's own lines are 2 px white). A click on an edge (500,200), one that
+  makes the outline cross itself (900,500) and one that makes a corner too sharp (700,700) add **no point and raise no alert**. The alert latch `DAT_006f52e0` explains the silence: a point added to the list clears
+  it (`FUN_004a0e00`), and nothing sets it before an accepted drag. Live proof the latch is the same one as step 2's: after a step 2 drag was accepted (latch set), step 1 cleared and four points added again
+  a refused click is still silent (`botlab-step1-refused-latched`), but **with the outline closed (a click on the first point) its points drag like step 2's** (the tip changes to *Click the step 2 button to adjust your
+  chassis*), the first accepted drag sets the latch and a refused place then raises *Points should not be too close to other points or lines* (`botlab-step1-drag-alert`: the dragged point stopped 100 units from
+  its neighbour). The point the second click of a new outline adds is taken (two points are one edge both ways round: `check_move` no longer calls that a crossing, n > 2). Ours: `adjust::check_add`,
+  `Build::adjust_bottom_point`, `Builder::{on_point_screen, editable_points}` (press / move / release shared with step 2, alert through the same `adjust_armed`), the hover ring and the rubber band in the overlay.
+  Tests `a_point_added_in_step_one_is_judged_by_the_same_rules`, `playthrough::chassis_step_one_refuses_points_by_the_editing_areas_rules_and_drags_them_once_closed`.
+* **Height slider track.** The gib's track is an `Image` with no file, `_Size 4 121`, `_BufferWidth 11 0 0 0` in a 26 px column: live (`botlab-adjust-hover`) it is the bar at x 963..966, ours filled the column (952..977).
+  A file-less `Image` now keeps its `_BufferWidth` clear on both sides (`ra2ui::sized`; the only image of the shipped screens that sets one).
+* **Against the captures** (ours through `labshot`, the same clicks; MAE over the frame / the blueprint panel): `botlab-step1-hover-valid` 1.81 / 1.98, `-refused-close` 1.84 / 2.05, `-refused-cross` 1.84 / 2.07,
+  `-refused-sharp` 1.81 / 1.98 (the rings are (0,204,0) and (204,0,0) as live, the refused click adds nothing and shows no alert), `botlab-adjust-hover` 1.40 / 1.19 with the slider track at x 963..966 as live.
+  Gate: fmt, clippy `-D warnings` clean; 837 tests passed, 0 failed, 2 ignored; `find local/game -newer` printed nothing.
+* **Title and logo (open, measured).** The blueprint panel is **one pixel shorter live** (bottom border row 664, ours 665, in step 1 and step 2 alike; the left, top and right borders agree) and its `RA2 Chassis` logo and
+  caption (`topplate_label.bmp` at `Position 0.25 1 0.936 1`) sit 1 and 2 px lower in ours for that reason (rows 625 / 633 against 624 / 631). The `ROBOT WORKSHOP` title itself is at rows 13..25 in both. The panel's
+  height comes from `AspectRatio 1.1` of a 487 px width, and ours gets 536 where the capture has 535; the cause is not found, so the panel is unchanged.
+* **MP lobby chat's first line (blocked).** The box's `Position 0 0 0 1242948` is `{amount, flag}` per axis (the widget writer `FUN_005e7ca0` prints `Position` from `+0x34` with `FUN_00608380`, two 8-byte axes);
+  the stray word is a non-zero flag, which reads as a fraction of the parent and the amount is 0, so it moves nothing; nothing in the writer, the field table or the gib gives the 2 px, and the DisplayBox's
+  draw routine was not found. The hand placement `Position 0 0 2 0` (docs/38 16.8) stays.
+* **Open.** The 6.22 px cell, the panel's missing pixel (title/logo), the key behind header line 4 (what a design edited after a load writes: only chassis edits were observed to clear it), the chat's 2 px.
 
 ## 9.28 Release check: Enter Event without a robot, Select Team after a restart (`fx/release`, 2026-10-28)
 

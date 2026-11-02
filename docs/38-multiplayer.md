@@ -1057,7 +1057,7 @@ modelled. The original draws no panels for slots 3 and 4 of a deathmatch (every 
 * The original's own crash twice under the replacement `dpnet` (`wine: Unhandled page fault on read access` at
   `0x00625a3f`, in the send-completion code `FUN_00625600`, once during a driven BEAR match, once right after a second
   join): not traced; the port is not involved.
-* The chat messages' first line is placed 2 px down by hand (docs/34 11.8: the exe's rule is not recovered); the hinge angle's per-joint zero; the unready
+* The chat messages' first line is placed 2 px down by hand (docs/34 11.8: the exe's rule is not recovered; docs/36 9.27f read the widget writer: the stray `Position` word is a non-zero fraction flag on a 0 amount, which moves nothing); the hinge angle's per-joint zero; the unready
   joiner a Yes starts a match with (the original joiner entered the match with no robot of its own to show, the port
   stood in The Boxer).
 * The port's `closedplayer`/`noplayer` cells at other game types, voice and host migration (§15.7).
