@@ -27,6 +27,8 @@ use glam::{DVec3, Quat, Vec3};
 
 use crate::backend::ShapeDesc;
 
+use super::x87gjk;
+
 /// The sides of the polygon that stands in for a cylinder's round faces.
 const CYLINDER_SIDES: usize = 24;
 
@@ -1292,6 +1294,50 @@ pub fn convex_point_havok(
     origin: Vec3,
 ) -> Option<(Point, Closest)> {
     point_from(closest_havok(a, b, origin), ra, rb, pose_a, pose_b, true)
+}
+
+/// [`convex_point_havok`] in the original's own arithmetic ([`super::x87gjk::query`], docs/29
+/// section 12an): `local` are the hull's vertices in its frame, `hull` its world pose (the
+/// collidable's 3x3 and translation); the support searches run on the local direction and the
+/// world points are made from the 3x3, as the original does.
+pub fn convex_point_x87(
+    local: &[Vec3],
+    ra: f32,
+    b: &[Vec3],
+    rb: f32,
+    pose_a: &Pose,
+    pose_b: &Pose,
+    hull: &Pose,
+) -> Option<(Point, Closest)> {
+    if local.is_empty() || b.len() < 3 {
+        return None;
+    }
+    let verts: Vec<[f32; 3]> = local.iter().map(|v| v.to_array()).collect();
+    let q = x87gjk::Hull {
+        vertices: &verts,
+        adjacency: None,
+        rotation: glam::Mat3::from_quat(hull.rotation).to_cols_array(),
+        translation: hull.position.to_array(),
+    };
+    let tri = [b[0].to_array(), b[1].to_array(), b[2].to_array()];
+    let mut climb = 0usize;
+    let r = x87gjk::query(&q, tri, &mut climb);
+    let mut simplex_a = [0u16; 3];
+    let mut simplex_b = [0u16; 3];
+    for (k, (a, t)) in r.hull.iter().zip(&r.tri).take(3).enumerate() {
+        simplex_a[k] = *a as u16;
+        simplex_b[k] = *t as u16;
+    }
+    let c = Closest {
+        distance: r.distance,
+        on_a: Vec3::from_array(r.on_a),
+        on_b: Vec3::from_array(r.on_b),
+        simplex_a,
+        simplex_b,
+        size: r.hull.len().min(3),
+        overlap: r.overlap,
+    };
+    point_from(c, ra, rb, pose_a, pose_b, true)
 }
 
 fn point_from(

@@ -2,11 +2,16 @@
 //! through `narrow::closest_havok_with` and compares the final simplex, the
 //! distance and the hull-side point (docs/29 section 12ak).
 //!
-//! Usage: `gjkreplay <cases.txt> [brute|adj|full] [verbose]`
+//! Usage: `gjkreplay <cases.txt> [brute|adj|full|x87|x87brute] [verbose]`
+//!
+//! `x87` replays through the original's own arithmetic (`x87gjk::query`, docs/29 section 12an) with the
+//! captured adjacency lists; `x87brute` with none (the highest index wins ties, what the engine's
+//! hulls get). The others are the `f64` Johnson of section 12ak.
 use std::collections::HashMap;
 
 use glam::{Mat3, Vec3};
 use ra2sim::havok17::narrow::closest_havok_with;
+use ra2sim::havok17::x87gjk;
 
 struct Shape {
     verts: Vec<Vec3>,
@@ -88,7 +93,40 @@ fn main() {
                     "full" => Some(full.as_slice()),
                     _ => shape.adj.as_deref(),
                 };
-                let c = closest_havok_with(&world, &tri, tr, adj, &mut cur);
+                let c = if mode.starts_with("x87") {
+                    let verts: Vec<[f32; 3]> = shape.verts.iter().map(|v| v.to_array()).collect();
+                    let hull = x87gjk::Hull {
+                        vertices: &verts,
+                        adjacency: if mode == "x87" {
+                            shape.adj.as_deref()
+                        } else {
+                            None
+                        },
+                        rotation: nums[..9].try_into().expect("nine floats"),
+                        translation: tr.to_array(),
+                    };
+                    let q = x87gjk::query(
+                        &hull,
+                        [tri[0].to_array(), tri[1].to_array(), tri[2].to_array()],
+                        &mut cur,
+                    );
+                    let mut c = closest_havok_with(&world, &tri, tr, adj, &mut 0);
+                    c.simplex_a = [0; 3];
+                    c.size = q.hull.len().min(3);
+                    for (k, a) in q.hull.iter().take(3).enumerate() {
+                        c.simplex_a[k] = *a as u16;
+                    }
+                    c.distance = q.distance;
+                    c.overlap = q.overlap;
+                    c.on_a = Vec3::from_array(q.on_a);
+                    if q.overlap {
+                        // The original's rows carry stale values after an overlap.
+                        c.on_a = rot * Vec3::from_array(on_a.to_array()) + tr;
+                    }
+                    c
+                } else {
+                    closest_havok_with(&world, &tri, tr, adj, &mut cur)
+                };
                 n += 1;
                 let mine: Vec<usize> = c.simplex_a[..c.size].iter().map(|&i| i as usize).collect();
                 let mut sa = ia.clone();

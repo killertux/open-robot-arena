@@ -33,6 +33,7 @@ pub mod narrow;
 pub mod obbtree;
 pub mod query;
 pub mod resolver;
+pub mod x87gjk;
 
 use std::collections::HashMap;
 
@@ -109,9 +110,27 @@ fn mopp_order() -> bool {
 /// against 43 689 live queries). `RA2_GJK=0` is the exact closest-point query
 /// of before.
 fn havok_gjk() -> bool {
+    gjk_mode() != GjkMode::Exact
+}
+
+/// Which distance query runs for convex x mesh pairs: `RA2_GJK=0` the exact closest-point query,
+/// `RA2_GJK=gram` the `f64` Johnson of section 12ak, otherwise (the default) the original's own
+/// arithmetic ([`x87gjk`], docs/29 section 12an).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GjkMode {
+    Exact,
+    Gram,
+    X87,
+}
+
+fn gjk_mode() -> GjkMode {
     use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RA2_GJK").map_or(true, |v| v != "0"))
+    static MODE: OnceLock<GjkMode> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("RA2_GJK").as_deref() {
+        Ok("0") => GjkMode::Exact,
+        Ok("gram") => GjkMode::Gram,
+        _ => GjkMode::X87,
+    })
 }
 
 /// `RA2_H17_DUMP=<file>` writes the rows `frida/ra2_contacts.js` captures in
@@ -166,6 +185,8 @@ struct WorldPiece {
     pose: Pose,
     /// A convex piece's vertices in world space (empty for a mesh).
     vertices: Vec<Vec3>,
+    /// ... and in the piece's own frame (the distance query works in it).
+    local: Vec<Vec3>,
     radius: f32,
     bounds: Aabb,
     /// Its box in the broadphase (`+0x20`/`+0x30`, without the tolerance):
@@ -362,13 +383,14 @@ impl Havok17Backend {
                     position: body.apply(p.position),
                     rotation: body.rotation * p.rotation,
                 };
-                let (vertices, radius, bounds) = match &p.shape {
+                let (vertices, local, radius, bounds) = match &p.shape {
                     PieceShape::Convex { vertices, radius } => {
                         let v: Vec<Vec3> = vertices.iter().map(|v| pose.apply(*v)).collect();
                         let bounds = Aabb::of(v.iter().copied()).grown(*radius);
-                        (v, *radius, bounds)
+                        (v, vertices.clone(), *radius, bounds)
                     }
                     PieceShape::Mesh(mesh) => (
+                        Vec::new(),
                         Vec::new(),
                         0.0,
                         mesh.bounds.transformed(pose.position, pose.rotation),
@@ -390,6 +412,7 @@ impl Havok17Backend {
                     body_pose: body,
                     pose,
                     vertices,
+                    local,
                     radius,
                     bounds,
                     sweep,
@@ -712,7 +735,17 @@ impl Havok17Backend {
         m.refresh(&cx.body_pose, &ms.body_pose);
         for &t in triangles.iter() {
             let tri = mesh.triangles[t as usize].map(|v| ms.pose.apply(mesh.vertices[v as usize]));
-            let found = if havok_gjk() {
+            let found = if gjk_mode() == GjkMode::X87 && !cx.local.is_empty() {
+                narrow::convex_point_x87(
+                    &cx.local,
+                    cx.radius,
+                    &tri,
+                    0.0,
+                    &cx.body_pose,
+                    &ms.body_pose,
+                    &cx.pose,
+                )
+            } else if havok_gjk() {
                 narrow::convex_point_havok(
                     &cx.vertices,
                     cx.radius,

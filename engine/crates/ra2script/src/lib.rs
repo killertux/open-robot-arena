@@ -1661,7 +1661,8 @@ mod tests {
 
             // Live (`ainative` probes, docs/29 section 12an): a ray that strikes nothing answers
             // `(0, (None, None, None))`, and the Combat Arena's map is 30 x 30 cells.
-            let miss: (bool, (Option<f32>, Option<f32>, Option<f32>)) = obj
+            type Miss = (bool, (Option<f32>, Option<f32>, Option<f32>));
+            let miss: Miss = obj
                 .call_method1(
                     "RayTest",
                     (
