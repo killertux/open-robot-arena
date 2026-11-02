@@ -726,6 +726,21 @@ impl Ai {
     }
 }
 
+/// `RA2_AI_DIST3D=1`: `GetDistanceTo` / `GetDistanceToID` with the `y` difference (the old length).
+fn ai_dist_3d() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_AI_DIST3D").is_ok_and(|v| v != "0"))
+}
+
+/// `0x4019c0`: the length of the difference with both `y` words zeroed.
+fn ai_distance(from: Vec3, to: Vec3, three_d: bool) -> f32 {
+    let mut d = to - from;
+    if !three_d {
+        d.y = 0.0;
+    }
+    d.length()
+}
+
 #[pymethods]
 impl Ai {
     /// A subclass is constructed with the script's own constructor arguments
@@ -823,9 +838,17 @@ impl Ai {
             .collect()
     }
 
+    /// The distance is **planar**: `0x4019c0` copies the bot's location and the
+    /// target into two static vectors (`0x714610`, `0x714600`), zeroes both `y`
+    /// words (`0x401a4d`, `0x401a6b`) and takes the length of the difference
+    /// (`0x401aa0`, `0x401ae0`). The map's cells carry heights (the Octagon's
+    /// 1.9 m cells beside its hellraisers), which `FromGrid` hands back as a
+    /// waypoint's `y`; a 3-D length kept a robot from ever reaching them.
+    /// `RA2_AI_DIST3D=1` is the old length.
     fn GetDistanceTo(&self, target: (f32, f32, f32)) -> f32 {
+        let three_d = ai_dist_3d();
         with_bot(self.bot, |b| {
-            (Vec3::new(target.0, target.1, target.2) - b.location).length()
+            ai_distance(b.location, Vec3::new(target.0, target.1, target.2), three_d)
         })
         .unwrap_or(0.0)
     }
@@ -835,7 +858,7 @@ impl Ai {
         let (Some(a), Some(b)) = (st.bot(self.bot), st.bot(id)) else {
             return 0.0;
         };
-        (b.location - a.location).length()
+        ai_distance(a.location, b.location, ai_dist_3d()) // the same `0x4019c0`
     }
 
     fn GetHeading(&self, reverse: bool) -> f32 {
@@ -1175,6 +1198,18 @@ once = plus.createSound('Sounds/default_once.wav', False, (0, 0, 0))\n",
             st.log
         );
         assert!(st.sounds.get(SoundId(1)).is_none());
+    }
+
+    /// `GetDistanceTo` is a planar length (`0x4019c0`): a waypoint on a map cell
+    /// 1.9 m up is as far as the one on the floor beneath it.
+    #[test]
+    fn the_ais_distance_ignores_height() {
+        let from = Vec3::new(1.0, 0.2, 2.0);
+        let to = Vec3::new(1.0, 1.66, 2.0);
+        assert_eq!(ai_distance(from, to, false), 0.0);
+        assert!((ai_distance(from, to, true) - 1.46).abs() < 1e-5);
+        let far = Vec3::new(4.0, 9.0, 6.0);
+        assert!((ai_distance(from, far, false) - 5.0).abs() < 1e-5);
     }
 
     /// A blade: long in Y, thin in X and Z. Its bounding sphere is 2 m across,
