@@ -1852,15 +1852,16 @@ pub fn set_display_box(gib: &mut Gib, name: &str, text: &str) -> bool {
     for b in gib.blocks.iter_mut() {
         if let Block::Widget(root) = b {
             if let Some(w) = owner(root, name) {
-                // The lobby's chat log draws its first line 2 px below where the shared
+                // The lobby's chat log draws its first line 1 px below where the shared
                 // `DisplayBox` placement puts it (live `mp-lobby-host-chat-two`: the glyph rows of
-                // line one start at 271, ours at 269; the box's own `Position 0 0 0 1242948` has a
-                // stray flag word, the group it hangs in is placed as the live frames show). The
-                // box is moved down by those two pixels, here only.
+                // line one start at 271, ours at 270; the box's own `Position 0 0 0 1242948` has a
+                // stray flag word). It was 2 px while the chat group's top was the fractional 268.28:
+                // whole-pixel layout (docs/34 11.12) puts the group at 269. The box is moved down by
+                // that pixel, here only.
                 if name == "chat messages" {
                     for a in w.attachments.iter_mut() {
                         if let Some(body) = a.body.as_mut().filter(|b| b.name() == name) {
-                            ra2ui::input::set_field(body, "Position", "0 0 2 0");
+                            ra2ui::input::set_field(body, "Position", "0 0 1 0");
                         }
                     }
                 }

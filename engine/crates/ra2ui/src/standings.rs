@@ -297,7 +297,11 @@ mod tests {
         for (i, cell) in grid.children.iter().skip(2).enumerate() {
             // `BorderWidth 1` insets the cell inside its slot (live `teamhq-standings`).
             assert_eq!(cell.frame.x, grid.frame.x + 1.0, "row {i}");
-            assert_eq!(cell.frame.y, grid.frame.y + 70.0 * i as f32 + 1.0, "row {i}");
+            assert_eq!(
+                cell.frame.y,
+                grid.frame.y + 70.0 * i as f32 + 1.0,
+                "row {i}"
+            );
             assert_eq!(
                 cell.frame.w, grid.frame.w,
                 "row {i}: the cell runs to the scroll bar"
@@ -391,7 +395,11 @@ mod tests {
             .find(|p| p.widget.name() == RESULTS_GRID)
             .unwrap();
         for (i, cell) in grid.children.iter().skip(2).enumerate() {
-            assert_eq!(cell.frame.y, grid.frame.y + 36.0 * i as f32 + 1.0, "row {i}");
+            assert_eq!(
+                cell.frame.y,
+                grid.frame.y + 36.0 * i as f32 + 1.0,
+                "row {i}"
+            );
             assert_eq!(cell.frame.w, grid.frame.w, "row {i}");
         }
         assert_eq!(

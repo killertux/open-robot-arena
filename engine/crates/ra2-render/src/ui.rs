@@ -51,6 +51,8 @@ pub struct UiTexture {
     pub height: u32,
     /// RGBA8, top row first.
     pub rgba: Vec<u8>,
+    /// Drawn with bilinear sampling: an `Image` that says `_Filtering 1`.
+    pub linear: bool,
 }
 
 /// One rectangle to draw, in draw order.
@@ -187,6 +189,7 @@ impl UiAssets {
                 width: 1,
                 height: 1,
                 rgba: vec![255, 255, 255, 255],
+                linear: false,
             }],
             index: HashMap::new(),
             missing: Vec::new(),
@@ -228,6 +231,7 @@ impl UiAssets {
             width: preview.width,
             height: preview.height,
             rgba: preview.rgba.clone(),
+            linear: false,
         });
         self.index.insert(key.to_string(), Some(index));
         true
@@ -450,6 +454,18 @@ impl UiAssets {
         let tiled =
             pattern || uv[2] > 1.0001 || uv[3] > 1.0001 || uv[0] < -0.0001 || uv[1] < -0.0001;
         let texture = self.texture(file)?;
+        // `_Filtering 1` asks for the filtered stretch the exe draws it with (D3D8 bilinear); a `0` is a
+        // point-sampled picture, and so is every tile and glyph page.
+        // The one exception found: the 140 x 80 event previews (`teamhq/events/ev_*.bmp`), which the capture
+        // shows blocky although the cell template says `_Filtering 1` (docs/34 11.12).
+        let preview = file
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+            .contains("/events/");
+        if !tiled && !preview && p.widget.field("_Filtering").and_then(|f| f.number()) == Some(1.0)
+        {
+            self.textures[texture].linear = true;
+        }
         if tiled {
             self.tiles.push(file.to_string());
             let (tw, th) = (
@@ -669,6 +685,7 @@ impl UiAssets {
             width: font.page_width,
             height: font.page_height,
             rgba,
+            linear: false,
         });
         self.index.insert(key, Some(index));
         Some(index)
@@ -701,6 +718,7 @@ impl UiAssets {
                 width: *w,
                 height: *h,
                 rgba: rgba.clone(),
+                linear: false,
             });
             index
         });
@@ -1059,6 +1077,7 @@ pub struct UiRenderer {
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    linear_sampler: wgpu::Sampler,
     format: wgpu::TextureFormat,
 }
 
@@ -1146,10 +1165,20 @@ impl UiRenderer {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ui-filtered-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         UiRenderer {
             pipeline,
             bgl,
             sampler,
+            linear_sampler,
             format,
         }
     }
@@ -1333,7 +1362,14 @@ impl UiRenderer {
         let textures: Vec<wgpu::BindGroup> = scene
             .textures
             .iter()
-            .map(|t| bind_texture(device, queue, &self.bgl, &self.sampler, t))
+            .map(|t| {
+                let sampler = if t.linear {
+                    &self.linear_sampler
+                } else {
+                    &self.sampler
+                };
+                bind_texture(device, queue, &self.bgl, sampler, t)
+            })
             .collect();
         // Group consecutive quads that share a texture and a clip: one draw and
         // one scissor each.

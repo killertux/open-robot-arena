@@ -4663,6 +4663,7 @@ impl Builder {
                 width,
                 height,
                 rgba: pixels,
+                linear: false,
             });
             scene.quads.push(UiQuad {
                 rect: preview_rect,
@@ -4714,6 +4715,7 @@ impl Builder {
                             width: cp.width,
                             height: cp.height,
                             rgba: cp.pixels.clone(),
+                            linear: false,
                         });
                         scene.quads.push(UiQuad {
                             rect,
@@ -4827,6 +4829,7 @@ impl Builder {
             width: size[0],
             height: size[1],
             rgba: pixels,
+            linear: false,
         });
         let quad = UiQuad {
             rect,
@@ -4892,6 +4895,7 @@ impl Builder {
             width: 1,
             height: 1,
             rgba: vec![255, 255, 255, 255],
+            linear: false,
         });
         let mut ink = Ink {
             scene,
@@ -5014,6 +5018,7 @@ impl Builder {
             width: 1,
             height: 1,
             rgba: vec![255, 255, 255, 255],
+            linear: false,
         });
         let mut ink = Ink {
             scene,

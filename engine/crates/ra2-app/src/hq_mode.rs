@@ -1294,6 +1294,7 @@ impl Session {
                         width: *w,
                         height: *h,
                         rgba: pixels.clone(),
+                        linear: false,
                     });
                     scene.quads.push(ra2_render::ui::UiQuad {
                         rect,
