@@ -3850,7 +3850,7 @@ fn refresh_picker(
             .retain(|child| child.name() == "Sel Bar" || child.name() == "High Bar");
         for (ordinal, bot) in roster.robots.iter().enumerate() {
             let mut cell = template.clone();
-            ra2ui::input::set_field(&mut cell, "Position", &format!("{} 0 0 0", 90 * ordinal));
+            ra2ui::cells::place_in_slot(grid, &mut cell, 90.0 * ordinal as f32, 0.0, 90.0, 90.0);
             let path = teams::bot_path(game, popup.side, team, *bot);
             // The cell's `bot preview` is the snapshot the `.bot` file carries
             // (a 128x128 TGA the game rendered when the design was saved);

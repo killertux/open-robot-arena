@@ -102,6 +102,33 @@ pub fn fill(list: &mut Widget, template: &Gib, cells: usize) -> usize {
     cells
 }
 
+/// Put a hand-made cell into the slot at (`x`, `y`) of `w` x `h` pixels of a grid, the way [`fill`] does: the
+/// cell is inset by the grid's `BufferWidth` + `BorderWidth` and dressed with the cell lines (the picker's
+/// `robots grid`, which builds its cells itself).
+pub fn place_in_slot(list: &Widget, cell: &mut Widget, x: f32, y: f32, w: f32, h: f32) {
+    let Some(grid) = Grid::from_widget(list) else {
+        return;
+    };
+    let b = grid.buffer_width + grid.border_width;
+    crate::input::set_field(cell, "Position", &format!("{} 0 {} 0", x + b, y + b));
+    crate::input::set_field(
+        cell,
+        "Size",
+        &format!("{} 0 {} 0", w - 2.0 * b, h - 2.0 * b),
+    );
+    add_border(list, cell, grid.border_width);
+    if let Some(border) = cell
+        .attachments
+        .last_mut()
+        .filter(|_| grid.border_width > 0.0)
+    {
+        border.fields.push(ra2fmt::gib::Field {
+            name: Some("Sides".to_string()),
+            raw: "top left".to_string(),
+        });
+    }
+}
+
 /// Dress a cell with the list's own `BorderColor` / `BorderWidth` ring (the grid
 /// lines the original draws around each cell). Does nothing for width 0.
 pub fn add_border(list: &Widget, cell: &mut Widget, width: f32) {
