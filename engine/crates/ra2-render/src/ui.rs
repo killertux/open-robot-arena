@@ -740,8 +740,12 @@ fn snap_placement<'a>(p: &Placement<'a>) -> Placement<'a> {
     Placement {
         widget: p.widget,
         frame: if p.widget.attachment("DisplayBox").is_some() {
+            // The text of a `DisplayBox` starts one row below the box (the box's own 1 px border): with
+            // whole-pixel layout the box of the snapshot instructions is at 504 and its glyph row at 505
+            // (it was the rounded 504.74 while the layout was fractional), the event description's first
+            // line sits one row below its box (docs/34 11.12).
             let mut f = snap_frame(p.frame);
-            f.y = p.frame.y.round();
+            f.y = p.frame.y.floor() + 1.0;
             f
         } else {
             snap_frame(p.frame)

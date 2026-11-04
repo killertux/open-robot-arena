@@ -1289,7 +1289,9 @@ fn bracket_widgets(bracket: &BracketView, w: f32, h: f32) -> Vec<Widget> {
         .unwrap_or(2)
         .max(2);
     let cells = bracket_cells(rounds, bots, 1, w, h);
-    let frac = |x: f32, y: f32, cw: f32, ch: f32| [x / w, y / h, cw / w, ch / h];
+    // The exe hands the widget its float pixel position and size (`FUN_005f6010`), which resolve by
+    // `__ftol` like any pixel length; a fraction of the group would lose a pixel to rounding.
+    let frac = |x: f32, y: f32, cw: f32, ch: f32| [x, y, cw, ch];
     let mut out = Vec::new();
     // Bracket lines first, so the pictures draw over their ends.
     for row in 0..rounds {
@@ -1370,8 +1372,8 @@ fn bracket_widgets(bracket: &BracketView, w: f32, h: f32) -> Vec<Widget> {
             cell.size,
         );
         let [x, y, cw, ch] = frac(cell.x, cell.y, cell.size, cell.size);
-        crate::input::set_field(&mut image, "Position", &format!("{x} 1 {y} 1"));
-        crate::input::set_field(&mut image, "Size", &format!("{cw} 1 {ch} 1"));
+        crate::input::set_field(&mut image, "Position", &format!("{x} 0 {y} 0"));
+        crate::input::set_field(&mut image, "Size", &format!("{cw} 0 {ch} 0"));
         crate::input::set_field(&mut image, "ChildOrder", "5");
         out.push(image);
     }
@@ -1420,7 +1422,7 @@ fn grid_line(name: &str, pos: [f32; 4], size: [f32; 4]) -> Widget {
     line
 }
 
-/// A filled black bar at a fraction of the bracket group.
+/// A filled black bar at a pixel position of the bracket group.
 fn bracket_line(name: &str, rect: [f32; 4]) -> Widget {
     let field = |name: &str, raw: &str| Field {
         name: Some(name.to_string()),
@@ -1437,8 +1439,8 @@ fn bracket_line(name: &str, rect: [f32; 4]) -> Widget {
             field("BorderColor", "0 0 0 0"),
             field("Name", name),
             field("ID", "-1"),
-            field("Position", &format!("{x} 1 {y} 1")),
-            field("Size", &format!("{w} 1 {h} 1")),
+            field("Position", &format!("{x} 0 {y} 0")),
+            field("Size", &format!("{w} 0 {h} 0")),
             field("Visible", "true"),
             field("ChildOrder", "4"),
             field("ClipMode", "0"),
