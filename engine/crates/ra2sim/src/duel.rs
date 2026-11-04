@@ -1100,6 +1100,21 @@ fn script_ai_for(arena_path: &str, robots: &[Robot]) -> Option<ScriptAi> {
 }
 
 impl Duel {
+    /// The arena script's `Activate(True)`, when the duel was built with it held
+    /// (`ra2script::hold_arena_activation`): the match calls it at the bell.
+    pub fn activate_arena(&self) {
+        if let Some(ai) = self.script_ai.as_ref() {
+            ai.activate_arena();
+        }
+    }
+
+    /// The arena script's `Winner(id1, id2)`: the match is decided.
+    pub fn arena_winner(&self, id1: i32, id2: i32) {
+        if let Some(ai) = self.script_ai.as_ref() {
+            ai.arena_winner(id1, id2);
+        }
+    }
+
     /// Build the world and spawn the robots facing each other.
     pub fn new(arena_path: &str, bots: &[BotSetup]) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_with_humans(arena_path, bots, &[])

@@ -245,6 +245,16 @@ impl ScriptAi {
         self.host.send_lost_component(robot, component);
     }
 
+    /// The arena's `Activate(True)`, for a match that held it to the bell.
+    pub fn activate_arena(&self) {
+        self.host.activate_arena_now();
+    }
+
+    /// The arena's `Winner(id1, id2)` (the outro music and the closing line).
+    pub fn arena_winner(&self, id1: i32, id2: i32) {
+        self.host.arena_winner(id1, id2);
+    }
+
     /// `PlayerOut(id)` to every brain.
     pub fn player_out(&self, id: i32) {
         self.host.send_player_out(id);

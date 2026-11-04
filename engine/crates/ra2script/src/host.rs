@@ -324,8 +324,11 @@ impl ScriptHost {
                 });
             }
             host.load_ai(py)?;
-            // The match begins: the arenas' own `Activate`.
-            host.activate_arena(py, true)?;
+            // The match begins: the arenas' own `Activate` (a match with a countdown holds it
+            // to the bell, `crate::hold_arena_activation`).
+            if !crate::HOLD_ACTIVATION.load(std::sync::atomic::Ordering::SeqCst) {
+                host.activate_arena(py, true)?;
+            }
             Ok(())
         })?;
         Ok(host)
@@ -450,6 +453,16 @@ impl ScriptHost {
         }
     }
 
+    /// `Activate(True)` with the GIL handled here: the bell of a match that held it at boot
+    /// ([`crate::hold_arena_activation`]). A script error is reported, not raised.
+    pub fn activate_arena_now(&self) {
+        Python::with_gil(|py| {
+            if let Err(e) = self.activate_arena(py, true) {
+                eprintln!("ra2script: the arena's Activate: {e}");
+            }
+        });
+    }
+
     /// Tell the arena the match has begun, or that it is over (`Activate`).
     ///
     /// The arenas do their start-of-match work here, and some of it matters:
@@ -554,6 +567,26 @@ impl ScriptHost {
         // A part coming off is also every brain's cue to refresh its sensors.
         self.call_brains(None, "FractureEvent", |py| {
             Ok(pyo3::types::PyTuple::empty(py).into_any())
+        });
+    }
+
+    /// The arena's `Winner(id1, id2)`, when the match is decided (`FUN_004170e0`): `SuperArena.Winner`
+    /// starts the outro music (`hopp_club`, looped) and plays one `End_*` line. An id of -1 is
+    /// "none". A script error is reported, not raised.
+    pub fn arena_winner(&self, id1: i32, id2: i32) {
+        Python::with_gil(|py| {
+            let arena = crate::state()
+                .arena_object
+                .as_ref()
+                .map(|a| a.clone_ref(py));
+            if let Some(a) = arena {
+                if let Err(e) = a.bind(py).call_method1("Winner", (id1, id2)) {
+                    report_once(&format!(
+                        "arena Winner failed: {}",
+                        describe_python_error(py, e)
+                    ));
+                }
+            }
         });
     }
 

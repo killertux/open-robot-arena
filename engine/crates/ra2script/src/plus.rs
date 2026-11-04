@@ -402,20 +402,20 @@ fn eliminate_player(bot: i32) {
 // ---------------------------------------------------------------------------
 
 #[pyfunction]
-#[pyo3(signature = (path, looping, location))]
+#[pyo3(signature = (path, spatial, location))]
 #[pyo3(name = "createSound")]
 fn create_sound(
     path: &str,
-    looping: &Bound<'_, PyAny>,
+    spatial: &Bound<'_, PyAny>,
     location: (f32, f32, f32),
 ) -> PyResult<u64> {
-    // The scripts pass both booleans and `1` for the loop flag; both mean the
-    // same thing to the engine.
-    let looping = looping.is_truthy()?;
+    // The scripts pass both booleans and `1` for the 3D flag (`SoundWizard::Create`'s `is3D`, not a
+    // loop flag); both mean the same thing to the engine.
+    let spatial = spatial.is_truthy()?;
     let mut st = crate::state();
     Ok(st
         .sounds
-        .create(path, looping, [location.0, location.1, location.2])
+        .create(path, spatial, [location.0, location.1, location.2])
         .0)
 }
 
@@ -1107,13 +1107,13 @@ plus.removeSound(intro)\n",
                 SoundRequest::Play {
                     id: SoundId(1),
                     path: r"Sounds\intro_music\smell_glue.wav".to_string(),
-                    looping: true,
+                    looping: false,
                     position: [1.0, 2.0, 3.0],
                 },
                 SoundRequest::Play {
                     id: SoundId(1),
                     path: r"Sounds\intro_music\smell_glue.wav".to_string(),
-                    looping: true,
+                    looping: false,
                     position: [1.0, 2.0, 3.0],
                 },
                 SoundRequest::Loop { id: SoundId(2) },
@@ -1177,10 +1177,12 @@ e.SetEmitting(False)\n",
         );
     }
 
-    /// `createSound` takes the loop flag the scripts actually pass, which is
-    /// both a bool and the integer `1` (`Hazards.RotClaw`).
+    /// `createSound`'s second argument is the 3D flag (`SoundWizard::Create`'s `is3D`), passed as a
+    /// bool or the integer `1` (`Hazards.RotClaw`); it never makes the sound loop: the hazards
+    /// create their sounds with `True` and `playSound` plays them once (live,
+    /// `audio-match-octagon-scout-alarm`: `hellraiser_trigger` is `Play`, not `Loop`).
     #[test]
-    fn create_sound_takes_the_scripts_truthy_loop_flag() {
+    fn create_sound_takes_the_scripts_truthy_3d_flag_and_never_loops() {
         let _guard = crate::lock();
         reset_sounds();
         Python::with_gil(|py| {
@@ -1195,8 +1197,9 @@ once = plus.createSound('Sounds/default_once.wav', False, (0, 0, 0))\n",
             .unwrap();
         });
         let st = crate::state();
-        assert!(st.sounds.get(SoundId(1)).unwrap().looping);
-        assert!(!st.sounds.get(SoundId(2)).unwrap().looping);
+        assert!(st.sounds.get(SoundId(1)).unwrap().spatial);
+        assert!(!st.sounds.get(SoundId(2)).unwrap().spatial);
+        assert!(!st.sounds.get(SoundId(1)).unwrap().looping);
         assert!(st.sounds.requests().is_empty(), "creating does not play");
     }
 
