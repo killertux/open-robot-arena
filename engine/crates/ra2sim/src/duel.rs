@@ -7303,8 +7303,12 @@ mod tests {
         assert!(burns
             .iter()
             .all(|e| e.amount == FLAME_DAMAGE && e.attacker == -1));
+        // (A hit of the landing is no flame: the fixture's tank now stands on the floor first
+        // as the original's collidable does, docs/29 12at.)
         assert!(
-            duel.damage_events.iter().all(|e| e.victim != 0),
+            duel.damage_events
+                .iter()
+                .all(|e| e.victim != 0 || e.amount != FLAME_DAMAGE),
             "own parts are skipped"
         );
         assert!(duel.take_score_hits().is_empty());
@@ -7681,6 +7685,91 @@ mod tests {
             Some(arm),
             "no tag: the nearest box"
         );
+    }
+
+    /// docs/29 §12at: the original builds a collidable for every component whose `.gmf` rigid
+    /// body collides (batteries, air tanks, battery packs and control boards among them; 36
+    /// pieces against our 22 in the four standard fights, positions and shapes to the
+    /// millimetre: `colliders-*__live__*`), and none of them has an event-filter entry, so a
+    /// contact with one is priced on nothing. `RA2_INTERNALS=0` leaves them out.
+    #[test]
+    fn the_batteries_and_boards_collide_and_are_never_priced() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let scout = game.join("AI/Team0/Bot0.bot").to_string_lossy().to_string();
+        let alarm = game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string();
+        let setups = [
+            BotSetup {
+                path: scout,
+                yaw_deg: Some(0.0),
+                spawn: Some([0.0, 0.0]),
+            },
+            BotSetup {
+                path: alarm,
+                yaw_deg: Some(180.0),
+                spawn: Some([0.0, 3.0]),
+            },
+        ];
+        let duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        let (scout, alarm) = (&duel.robots[0], &duel.robots[1]);
+        let pieces = |r: &crate::robot::Robot| crate::robot::Robot::collider_pieces(&r.rig);
+        let named = |r: &crate::robot::Robot, n: &str| {
+            r.rig
+                .components
+                .iter()
+                .position(|c| c.name.contains(n))
+                .unwrap()
+        };
+        let (battery, board) = (named(scout, "Battery"), named(scout, "Control Board"));
+        let tags: Vec<u32> = pieces(scout).iter().map(|p| p.1).collect();
+        assert!(
+            tags.contains(&(battery as u32)),
+            "the Scout's battery has a collidable"
+        );
+        assert!(tags.contains(&(board as u32)), "so has its control board");
+        // 1 chassis + burst motor + two angle motors + battery + board on the chassis body.
+        let on_chassis = pieces(scout).iter().filter(|p| p.0 == 0).count();
+        assert_eq!(on_chassis, 6);
+        let tanks = alarm
+            .rig
+            .components
+            .iter()
+            .filter(|c| c.name.contains("CO2 Tank"))
+            .count();
+        assert_eq!(tanks, 2);
+        // Chassis, four angle motors, battery, two tanks, piston, control board.
+        assert_eq!(pieces(alarm).iter().filter(|p| p.0 == 0).count(), 10);
+        // A contact on the battery's piece is priced on nothing, whoever the other side is.
+        let sa = duel.physics.state(scout.parts[0].body).unwrap();
+        let sh = duel.physics.state(alarm.parts[0].body).unwrap();
+        let props = combat::mass_props(&*duel.physics, &duel.robots);
+        let events = [crate::backend::ContactEvent {
+            tag_a: crate::backend::NO_TAG,
+            tag_b: battery as u32,
+            a: alarm.parts[0].body,
+            b: scout.parts[0].body,
+            normal: Vec3::Z,
+            point: sa.position,
+            state_a: crate::backend::BodyState {
+                linear_velocity: Vec3::new(0.0, 0.0, -9.0),
+                ..sh
+            },
+            state_b: sa,
+        }];
+        let priced = combat::resolve_with(
+            &duel.robots,
+            &events,
+            &duel.combat,
+            &props,
+            &duel.arena_bodies,
+        );
+        if crate::robot::internals_collide() {
+            assert!(
+                priced.is_empty(),
+                "a battery's contact raises no hit: {priced:?}"
+            );
+        }
     }
 
     /// docs/29 §12ab: the arena's zones speak per collidable. `RegisterZone`

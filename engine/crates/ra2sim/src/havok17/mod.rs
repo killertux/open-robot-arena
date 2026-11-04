@@ -1190,6 +1190,14 @@ impl Havok17Backend {
             "[\"R\",0,{TOLERANCE},[{}]]",
             contacts.join(",")
         ));
+        // RT: the same contacts by the pieces' component tags (docs/29 12at; the original's
+        // collidable +0x50 names the piece, `frida/ra2_robotcolliders.js` RP rows).
+        let tags: Vec<String> = self
+            .contacts
+            .iter()
+            .map(|c| format!("[{},{},{},{},{}]", c.a, c.b, c.tag_a, c.tag_b, c.distance))
+            .collect();
+        dump_line(format_args!("[\"RT\",0,[{}]]", tags.join(",")));
         for (i, b) in self.bodies.iter().enumerate() {
             if !b.is_dynamic() {
                 continue;

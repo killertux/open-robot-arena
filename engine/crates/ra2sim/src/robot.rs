@@ -22,6 +22,17 @@ use crate::scene::USER_BOT;
 use crate::sim::{DriveInput, DriveTuning};
 
 /// Stock component friction/restitution (see the validation report).
+/// One collision piece of a part (see [`Robot::collider_pieces`]): the part, the component tag,
+/// the points in the part's frame and, for a mesh piece, its triangles.
+pub type ColliderPiece = (usize, u32, Vec<Vec3>, Option<Vec<[u32; 3]>>);
+
+/// Whether the batteries, air tanks, battery packs and control boards collide as the original's
+/// collidables do (docs/29 12at). `RA2_INTERNALS=0` leaves them out, as before.
+pub fn internals_collide() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_INTERNALS").map_or(true, |v| v != "0"))
+}
+
 const STOCK_FRICTION: f32 = 0.30;
 const STOCK_RESTITUTION: f32 = 0.30;
 
@@ -1111,7 +1122,10 @@ impl Robot {
             // As with the Jolt bodies: a power cell sits inside the chassis (live,
             // the resting Scout touches the floor with its hubs and fork arm
             // only, `clist_rest`), and a non-physical fitting is no obstacle.
-            let collides = c.role.is_physical() && c.role != Role::Power;
+            // Every component with a rigid body that is not a phantom has a collidable in the
+            // original: batteries, air tanks, battery packs and control boards too (their `.gmf`
+            // rigid bodies are `nocoll=false`, and live they take contacts, docs/29 12at).
+            let collides = internals_collide() || (c.role.is_physical() && c.role != Role::Power);
             let mesh_of =
                 |pts: &Vec<Vec3>, mesh: Option<&Option<Vec<[u32; 3]>>>, m: Option<&f32>| {
                     (
@@ -1283,6 +1297,31 @@ impl Robot {
             restitution,
             phantom,
         }
+    }
+
+    /// Diagnostic (docs/29 12at): every collision piece the Havok body of each part is built
+    /// from, `(part, component tag, points in the part's frame, the triangles of a mesh piece)`.
+    pub fn collider_pieces(rig: &RobotRig) -> Vec<ColliderPiece> {
+        let mut out = Vec::new();
+        for p in 0..rig.parts.len() {
+            let mut shape = Self::havok_part(rig, p, None).shape;
+            if let ShapeDesc::OffsetCenterOfMass { shape: inner, .. } = shape {
+                shape = *inner;
+            }
+            let ShapeDesc::Compound(children) = shape else {
+                continue;
+            };
+            for c in children {
+                match c.shape {
+                    ShapeDesc::MeshHull {
+                        points, indices, ..
+                    } => out.push((p, c.tag, points, Some(indices))),
+                    ShapeDesc::ConvexHull { points } => out.push((p, c.tag, points, None)),
+                    _ => {}
+                }
+            }
+        }
+        out
     }
 
     /// What each part weighed, as a share of its mass, the last time the
