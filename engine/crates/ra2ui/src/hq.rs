@@ -597,6 +597,8 @@ impl Hq {
                     }
                 }
             }
+            // Live (`teamhq-inventory`): a cell's content starts one pixel in from its slot.
+            crate::input::set_field(cell, "_Inset", "1");
         }
         Ok(())
     }
@@ -625,13 +627,6 @@ impl Hq {
     fn fill_events(&mut self) -> Result<(), String> {
         let rows = self.view.events.clone();
         let ui_root = self.ui_root.clone();
-        // The live content group is 420 px tall at 1024x768 where ours is 422.9 (the chain of
-        // splits above it is not recovered, docs/36 9.22); the schedule needs the 420 (the
-        // calendar 0.95 of it = 399, its split 0.9 = 359, minus the 26 px title = the grid's
-        // 333, three rows of 111). A fit of the events pane only, as a fraction so it scales.
-        if let Some(group) = find_mut_in(&mut self.document, "events group") {
-            crate::input::set_field(group, "Size", "1 1 0.99325 1");
-        }
         let Some(grid) = find_mut_in(&mut self.document, EVENT_GRID) else {
             return Ok(());
         };
@@ -734,7 +729,7 @@ impl Hq {
         for r in 0..=rows_n {
             grid.children.push(grid_line(
                 &format!("grid line row {r}"),
-                [0.0, 1.0, r as f32 / rows_n as f32, 1.0],
+                [0.0, 1.0, r as f32 * 111.0, 0.0],
                 [1.0, 1.0, 1.0, 0.0],
             ));
         }
@@ -1295,8 +1290,14 @@ fn bracket_widgets(bracket: &BracketView, w: f32, h: f32) -> Vec<Widget> {
         .max()
         .unwrap_or(2)
         .max(2);
-    let cells = bracket_cells(rounds, bots, 1, w, h);
-    let frac = |x: f32, y: f32, cw: f32, ch: f32| [x / w, y / h, cw / w, ch / h];
+    // Live (`event-bracket-*`) every picture and line sits 1 px right of the recovered origin.
+    let cells: Vec<BracketCell> = bracket_cells(rounds, bots, 1, w, h)
+        .into_iter()
+        .map(|c| BracketCell { x: c.x + 1.0, ..c })
+        .collect();
+    // The exe hands the widget its float pixel position and size (`FUN_005f6010`), which resolve by
+    // `__ftol` like any pixel length; a fraction of the group would lose a pixel to rounding.
+    let frac = |x: f32, y: f32, cw: f32, ch: f32| [x, y, cw, ch];
     let mut out = Vec::new();
     // Bracket lines first, so the pictures draw over their ends.
     for row in 0..rounds {
@@ -1377,8 +1378,8 @@ fn bracket_widgets(bracket: &BracketView, w: f32, h: f32) -> Vec<Widget> {
             cell.size,
         );
         let [x, y, cw, ch] = frac(cell.x, cell.y, cell.size, cell.size);
-        crate::input::set_field(&mut image, "Position", &format!("{x} 1 {y} 1"));
-        crate::input::set_field(&mut image, "Size", &format!("{cw} 1 {ch} 1"));
+        crate::input::set_field(&mut image, "Position", &format!("{x} 0 {y} 0"));
+        crate::input::set_field(&mut image, "Size", &format!("{cw} 0 {ch} 0"));
         crate::input::set_field(&mut image, "ChildOrder", "5");
         out.push(image);
     }
@@ -1427,7 +1428,7 @@ fn grid_line(name: &str, pos: [f32; 4], size: [f32; 4]) -> Widget {
     line
 }
 
-/// A filled black bar at a fraction of the bracket group.
+/// A filled black bar at a pixel position of the bracket group.
 fn bracket_line(name: &str, rect: [f32; 4]) -> Widget {
     let field = |name: &str, raw: &str| Field {
         name: Some(name.to_string()),
@@ -1444,8 +1445,8 @@ fn bracket_line(name: &str, rect: [f32; 4]) -> Widget {
             field("BorderColor", "0 0 0 0"),
             field("Name", name),
             field("ID", "-1"),
-            field("Position", &format!("{x} 1 {y} 1")),
-            field("Size", &format!("{w} 1 {h} 1")),
+            field("Position", &format!("{x} 0 {y} 0")),
+            field("Size", &format!("{w} 0 {h} 0")),
             field("Visible", "true"),
             field("ChildOrder", "4"),
             field("ClipMode", "0"),
@@ -1761,7 +1762,8 @@ mod tests {
         assert_eq!(line("grid line column 1").w, 1.0);
         assert_eq!(line("grid line row 0").y.floor(), 318.0);
         assert_eq!(line("grid line row 0").w.round(), 552.0);
-        assert_eq!(grid.frame.h.floor(), 333.0, "three rows of 111 (live)");
+        // 0.9 of the calendar's 401 less the 26 px title: the 334 px grid holds three rows of 111 (live lines).
+        assert_eq!(grid.frame.h.floor(), 334.0);
         let ys: Vec<f32> = (0..4)
             .map(|r| line(&format!("grid line row {r}")).y.floor())
             .collect();

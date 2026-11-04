@@ -72,7 +72,7 @@ pub fn fill(list: &mut Widget, template: &Gib, cells: usize) -> usize {
             let mut cell = root.clone();
             // `BufferWidth` insets the cell inside its slot; the border is drawn
             // around the inset frame.
-            let b = grid.buffer_width;
+            let b = grid.buffer_width + grid.border_width;
             crate::input::set_field(&mut cell, "Position", &format!("{} 0 {} 0", x + b, y + b));
             // A one-column grid inside a `Scroller` runs its rows the whole way
             // to the bar (the standings capture: the cell rules reach the
@@ -84,10 +84,49 @@ pub fn fill(list: &mut Widget, template: &Gib, cells: usize) -> usize {
             };
             crate::input::set_field(&mut cell, "Size", &size);
             add_border(list, &mut cell, grid.border_width);
+            // The list's cell lines are a bar along the top and one down the left of every slot; a
+            // neighbour's top is this cell's bottom (docs/34 11.12).
+            if let Some(border) = cell
+                .attachments
+                .last_mut()
+                .filter(|_| grid.border_width > 0.0)
+            {
+                border.fields.push(ra2fmt::gib::Field {
+                    name: Some("Sides".to_string()),
+                    raw: "top left".to_string(),
+                });
+            }
             list.children.push(cell);
         }
     }
     cells
+}
+
+/// Put a hand-made cell into the slot at (`x`, `y`) of `w` x `h` pixels of a grid, the way [`fill`] does: the
+/// cell is inset by the grid's `BufferWidth` + `BorderWidth` and dressed with the cell lines (the picker's
+/// `robots grid`, which builds its cells itself).
+pub fn place_in_slot(list: &Widget, cell: &mut Widget, x: f32, y: f32, w: f32, h: f32) {
+    let Some(grid) = Grid::from_widget(list) else {
+        return;
+    };
+    let b = grid.buffer_width + grid.border_width;
+    crate::input::set_field(cell, "Position", &format!("{} 0 {} 0", x + b, y + b));
+    crate::input::set_field(
+        cell,
+        "Size",
+        &format!("{} 0 {} 0", w - 2.0 * b, h - 2.0 * b),
+    );
+    add_border(list, cell, grid.border_width);
+    if let Some(border) = cell
+        .attachments
+        .last_mut()
+        .filter(|_| grid.border_width > 0.0)
+    {
+        border.fields.push(ra2fmt::gib::Field {
+            name: Some("Sides".to_string()),
+            raw: "top left".to_string(),
+        });
+    }
 }
 
 /// Dress a cell with the list's own `BorderColor` / `BorderWidth` ring (the grid
@@ -281,13 +320,14 @@ mod tests {
             .unwrap();
         assert_eq!(grid.children.len(), 6, "two bars and four cells");
         for (row, cell) in grid.children.iter().skip(2).enumerate() {
-            let y = grid.frame.y + 84.0 * row as f32;
+            // `BorderWidth 1` insets the cell inside its slot (live standings and join window).
+            let y = grid.frame.y + 84.0 * row as f32 + 1.0;
             assert_eq!(cell.frame.y, y, "row {row}");
-            assert_eq!(cell.frame.x, grid.frame.x, "row {row} is one column");
+            assert_eq!(cell.frame.x, grid.frame.x + 1.0, "row {row} is one column");
             // A scroller-wrapped single column runs to the grid's own width
             // (the file's `ColWidths 300` is the editor's canvas).
             assert_eq!(cell.frame.w, grid.frame.w);
-            assert_eq!(cell.frame.h, 84.0);
+            assert_eq!(cell.frame.h, 82.0);
         }
 
         // The bindings reached the widgets the notes name.

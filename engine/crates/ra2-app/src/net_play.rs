@@ -1852,18 +1852,10 @@ pub fn set_display_box(gib: &mut Gib, name: &str, text: &str) -> bool {
     for b in gib.blocks.iter_mut() {
         if let Block::Widget(root) = b {
             if let Some(w) = owner(root, name) {
-                // The lobby's chat log draws its first line 2 px below where the shared
-                // `DisplayBox` placement puts it (live `mp-lobby-host-chat-two`: the glyph rows of
-                // line one start at 271, ours at 269; the box's own `Position 0 0 0 1242948` has a
-                // stray flag word, the group it hangs in is placed as the live frames show). The
-                // box is moved down by those two pixels, here only.
-                if name == "chat messages" {
-                    for a in w.attachments.iter_mut() {
-                        if let Some(body) = a.body.as_mut().filter(|b| b.name() == name) {
-                            ra2ui::input::set_field(body, "Position", "0 0 2 0");
-                        }
-                    }
-                }
+                // The chat log's box states `Position 0 0 0 1242948` (a stray flag word on the second
+                // axis: a fraction of 0, so y = 0); the shared `DisplayBox` rule (the glyph one row below
+                // the box) and the whole-pixel group put the first line at row 271 as live
+                // (`mp-lobby-host-chat-two`), which the 2 px nudge this used to carry only hid.
                 return crate::hq_mode::set_display(w, text);
             }
         }

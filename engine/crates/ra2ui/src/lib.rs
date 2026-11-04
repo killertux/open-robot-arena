@@ -1436,32 +1436,19 @@ fn sized(
     // tall as wide), 2 derives the width from the height (the inventory's
     // `bot img group`: 455 px asked, a square of the cell's height drawn).
     let (w, h) = aspect(widget, w, h);
-    // A `Group`/`Window` is whole pixels wide and tall: `frac * parent` is truncated (measured,
-    // not read from the exe: the schedule's grid is 552 x 333 px at 1024x768 where the exact
-    // fractions give 553.9 x 335.6, the exhibition panels one to two pixels short of the exact
-    // ones; over the 104 fixtures this took the mean from 3.66 to 3.56). The Team HQ's own
-    // chrome groups keep the exact size (their captures sit on the fractions: truncating them
-    // moved the inventory, history, standings and edit-team screens 0.1-0.4 MAE away).
-    let (w, h) = if matches!(widget.kind, WidgetKind::Group | WidgetKind::Window)
-        && !EXACT_GROUPS.contains(&widget.name())
-    {
-        (w.trunc(), h.trunc())
-    } else {
-        (w, h)
-    };
+    // Every length the exe resolves is whole pixels: `FUN_005e8c30` is `__ftol(fraction * parent)` (an
+    // `fild` of the parent's integer extent, `fmul` by the float, truncating `0x63aabc`) or
+    // `__ftol(amount)`, and `FUN_005e8ac0` hands the widget's size and position down as those integers, so
+    // every parent a child is laid against is an integer too. The size of an `AspectRatio` group is
+    // truncated the same way (docs/34 11.12).
+    let (w, h) = (w.trunc(), h.trunc());
     let position = widget.position();
     let (px, py) = match position {
-        Some(p) => (axis(p.first, parent.w), axis(p.second, parent.h)),
+        Some(p) => (
+            axis(p.first, parent.w).trunc(),
+            axis(p.second, parent.h).trunc(),
+        ),
         None => (0.0, 0.0),
-    };
-    // The Overview's snapshot box (`0.8` of the 582 px pane = 465.6, anchored at its bottom) sits
-    // 1 px higher live than the exact fraction puts it (`botlab-overview`: its frame at 475, ours
-    // 476): its fractional position is truncated. Local to that group; the same rule applied to
-    // every group moved the rest of the screens the wrong way.
-    let py = if widget.name() == "snapshot main group" {
-        py.trunc()
-    } else {
-        py
     };
     let anchor = if has_alignment(widget) {
         Anchor::from_alignment(widget.alignment())
@@ -1478,24 +1465,9 @@ fn sized(
     } else {
         0.0
     };
-    // A centred `Group`/`Window` anchors in whole pixels: the offset is the
-    // truncated half of the truncated size (edge anchors keep the exact size). Measured, not read from the exe:
-    // the repair bench's `main group`, 0.9 of 1024 = 921.6 wide at `Position
-    // 0.5`, starts at 512 - 460 = 52 rather than 51.2 (reference event-repairs,
-    // every widget in it sits one pixel right of ours). Over the 104 fixtures this
-    // moved the exhibition (2.65 -> 2.45, 2.57 -> 2.36, ...), bot lab (-0.3), F1
-    // reminder, bracket (7.15 -> 6.21) and repairs (8.66 -> 5.63) toward the
-    // captures; `teamhq-events` (+0.45) and the event join window (+0.34) lost.
-    let offset = |anchor: f32, size: f32| {
-        if matches!(widget.kind, WidgetKind::Group | WidgetKind::Window)
-            && anchor > 0.0
-            && anchor < 1.0
-        {
-            (anchor * size.trunc()).trunc()
-        } else {
-            anchor * size
-        }
-    };
+    // The anchor is a whole number of pixels as well: the truncated fraction of the truncated size
+    // (the repair bench's `main group`, 0.9 of 1024 = 921 wide at `Position 0.5`, starts at 512 - 460).
+    let offset = |anchor: f32, size: f32| (anchor * size).trunc();
     // A flat-colour `Image` (no file) with a `_BufferWidth` keeps that many pixels clear on each
     // side: the height slider's track is `_Size 4 121` with `_BufferWidth 11` in a 26 px column and
     // is a 4 px bar live (`botlab-adjust-hover`: x 963..966 in the column 952..977), the only
@@ -1509,32 +1481,20 @@ fn sized(
     } else {
         0.0
     };
-    Frame::new(
+    let mut frame = Frame::new(
         parent.x + px - offset(anchor.h, w) + inset,
-        parent.y + py - anchor.v * h - ascent,
+        parent.y + py - offset(anchor.v, h) - ascent,
         w - 2.0 * inset,
         h,
-    )
+    );
+    // A grid cell whose slot is a fraction of the grid (the inventory's even cells) starts 1 px in from its slot
+    // (`_Inset`, written by the filler: `Position` cannot mix a fraction with pixels); its size is the slot's,
+    // as its children's fractions show (the name box sits 1 px further right than a shrunk cell puts it).
+    if let Some(n) = widget.field("_Inset").and_then(|f| f.number()) {
+        frame = Frame::new(frame.x + n, frame.y + n, frame.w, frame.h);
+    }
+    frame
 }
-
-/// The Team HQ screen's own groups, laid out at their exact fractions (see [`sized`]).
-const EXACT_GROUPS: [&str; 12] = [
-    // The lobby's chat column: its 0.42 of 768 = 322.56 px stays exact, which puts every widget of
-    // the chat group one pixel lower, as the original's do (live `mp-lobby-host-chat`: `CHAT:` 521,
-    // the entry's border 532, the alias box 562; they were 520, 531, 561). docs/38 section 16.8.
-    "lower group",
-    "hq content group",
-    "team heading group",
-    "kills group",
-    "logo grp",
-    "UL slot",
-    "UR slot",
-    "LL slot",
-    "LR slot",
-    "robot cell group",
-    "bot img group",
-    "grid grp",
-];
 
 fn aspect(widget: &Widget, w: f32, h: f32) -> (f32, f32) {
     if widget.kind != WidgetKind::Group {
@@ -1549,8 +1509,8 @@ fn aspect(widget: &Widget, w: f32, h: f32) -> (f32, f32) {
         return (w, h);
     }
     match setting as i32 {
-        1 => (w, w * ratio),
-        2 => (h * ratio, h),
+        1 => (w, (w * ratio).trunc()),
+        2 => ((h * ratio).trunc(), h),
         _ => (w, h),
     }
 }
@@ -1572,11 +1532,7 @@ fn has_alignment(widget: &Widget) -> bool {
 
 /// One axis of a `Position`/`Size`, in pixels.
 fn axis(length: Length, parent: f32) -> f32 {
-    if length.fraction {
-        length.amount * parent
-    } else {
-        length.amount
-    }
+    length.ftol(parent)
 }
 
 /// The two panes of a split frame, and the children placed in them.
@@ -1598,29 +1554,13 @@ fn split_children<'a>(
     let master_size = widget
         .field("MasterSize")
         .and_then(Length::parse)
-        .map(|l| l.resolve(if horizontal { frame.w } else { frame.h }))
+        .map(|l| l.ftol(if horizontal { frame.w } else { frame.h }))
         .unwrap_or(if horizontal { frame.w } else { frame.h } / 2.0);
     let master_size = master_size.clamp(0.0, if horizontal { frame.w } else { frame.h });
-    // A pane's width is a whole number of pixels where the screen asks for it (`PaneFloor`, put on
-    // the lobby's split by the shell): the lobby's left column is 0.28 of 1024, 286 of 286.72 in the
-    // original (live `mp-lobby-host-chat`: every frame of the column ends 1 px before the one the
-    // unrounded width gives). The Team HQ's calibrated splits (`hq.rs` fits) keep their fractions.
-    let master_size = if horizontal && widget.field("PaneFloor").is_some() && frame.w.fract() == 0.0
-    {
-        master_size.floor()
-    } else {
-        master_size
-    };
-
-    // The Bot Lab's two vertical splits (`PaneFloorV`, put on them by `workshop::compose`) take a whole
-    // number of pixels for the sized pane: live the lab's 3D frame starts at y 147, not at the 148.19 the
-    // 0.14 x 768 = 107.52 px tab strip gives.
-    let master_size =
-        if !horizontal && widget.field("PaneFloorV").is_some() && frame.h.fract() == 0.0 {
-            master_size.floor()
-        } else {
-            master_size
-        };
+    // The sized pane is a whole number of pixels, like every length (`__ftol`, see `sized`): the lobby's
+    // left column is 0.28 of 1024 = 286, the Bot Lab's 3D frame starts at y 147 not 148.19, the Team HQ's
+    // right pane splits at 0.335 of 0.9 * 768 = 691 -> 231 (docs/34 11.12).
+    let master_size = master_size.trunc();
 
     // `Master` names the slot MasterSize sizes. Slot 0 is always the first
     // (top/left) pane and slot 1 the second, so a master of 1 is the pane at
@@ -2083,7 +2023,8 @@ mod tests {
         assert_eq!(logo.frame.w, 512.0);
         assert_eq!(logo.frame.h, 76.0);
         assert_eq!(logo.frame.x, DESIGN_SCREEN[0] / 2.0 - 256.0);
-        assert!((logo.frame.y - 0.07 * DESIGN_SCREEN[1]).abs() < 0.01);
+        // Lengths are whole pixels (`__ftol`): 0.07 of 1005 is 70.35, so 70.
+        assert_eq!(logo.frame.y, 70.0);
 
         // Align 34 = centre | bottom: the button strip sits on the bottom edge.
         // It is a child of the window — the file is one tree, not a forest, and
@@ -2763,25 +2704,21 @@ mod tests {
                 .frame
         };
         // The lower split is `Master 1`, `MasterSize 0.12 1`: the master is the
-        // 49-pixel nav strip and the content slot takes the 363.4 above it, so
-        // the strip's pane starts 49.56 below the split and it fills it.
+        // nav strip (a whole number of pixels, like every length) and the content slot
+        // takes the rest above it.
         assert_eq!(frame("botlab splt"), Frame::new(0.0, 0.0, 1280.0, 1005.0));
-        assert!((frame("lowersplit").y - 140.7).abs() < 0.1);
-        assert!(
-            (frame("content slot").y - 140.7).abs() < 0.1,
-            "{}",
-            frame("content slot").y
-        );
-        assert!((frame("content slot").h - 760.6).abs() < 0.1);
+        assert_eq!(frame("lowersplit").y, 140.0);
+        assert_eq!(frame("content slot").y, 140.0);
+        assert_eq!(frame("content slot").h, 762.0);
         let split = placed
             .iter()
             .flat_map(|p| p.walk())
             .find(|p| p.widget.name() == "lowersplit")
             .unwrap();
         assert_eq!(split.children.len(), 2);
-        // 12% of the 864.3 it splits, at the far end of the split.
-        assert!((split.children[1].frame.h - 103.7).abs() < 0.1);
-        assert!((split.children[1].frame.y - 901.3).abs() < 0.1);
+        // 12% of the 865 it splits (103.8, truncated), at the far end of the split.
+        assert_eq!(split.children[1].frame.h, 103.0);
+        assert_eq!(split.children[1].frame.y, 902.0);
     }
 
     /// A `Glyph` wraps its text at spaces to the width its `_Margin` gives it,
@@ -3097,7 +3034,7 @@ mod text_run_tests {
             .find(|p| p.widget.name() == "New [TextBox]" && p.widget.kind == WidgetKind::TextBox)
             .expect("the title's TextBox");
         assert_eq!(title.frame.x, 380.0);
-        assert_eq!(title.frame.y, 289.5);
+        assert_eq!(title.frame.y, 289.0);
         assert_eq!(title.frame.w, 520.0);
         assert_eq!(title.frame.h, 28.0);
         let child = title

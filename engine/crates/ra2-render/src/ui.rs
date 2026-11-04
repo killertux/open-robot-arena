@@ -51,6 +51,8 @@ pub struct UiTexture {
     pub height: u32,
     /// RGBA8, top row first.
     pub rgba: Vec<u8>,
+    /// Drawn with bilinear sampling: an `Image` that says `_Filtering 1`.
+    pub linear: bool,
 }
 
 /// One rectangle to draw, in draw order.
@@ -187,6 +189,7 @@ impl UiAssets {
                 width: 1,
                 height: 1,
                 rgba: vec![255, 255, 255, 255],
+                linear: false,
             }],
             index: HashMap::new(),
             missing: Vec::new(),
@@ -228,6 +231,7 @@ impl UiAssets {
             width: preview.width,
             height: preview.height,
             rgba: preview.rgba.clone(),
+            linear: false,
         });
         self.index.insert(key.to_string(), Some(index));
         true
@@ -268,6 +272,16 @@ impl UiAssets {
                 }
                 border_quads(owner, clip, &mut quads);
                 borders.pop();
+            }
+            if p.widget.kind == ra2fmt::gib::WidgetKind::DropDown
+                && p.widget.field("_Open").is_some_and(|f| f.text() == "true")
+            {
+                // An open list hangs over everything around it, the borders of the groups it was lifted
+                // out of included (the exhibition panel's bottom edge does not cross the match-time list
+                // in the capture): those rings are drawn before it, not after.
+                while let Some((owner, clip)) = borders.pop() {
+                    border_quads(owner, clip, &mut quads);
+                }
             }
             if !p.widget.visible() {
                 continue;
@@ -440,6 +454,18 @@ impl UiAssets {
         let tiled =
             pattern || uv[2] > 1.0001 || uv[3] > 1.0001 || uv[0] < -0.0001 || uv[1] < -0.0001;
         let texture = self.texture(file)?;
+        // `_Filtering 1` asks for the filtered stretch the exe draws it with (D3D8 bilinear); a `0` is a
+        // point-sampled picture, and so is every tile and glyph page.
+        // The one exception found: the 140 x 80 event previews (`teamhq/events/ev_*.bmp`), which the capture
+        // shows blocky although the cell template says `_Filtering 1` (docs/34 11.12).
+        let preview = file
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+            .contains("/events/");
+        if !tiled && !preview && p.widget.field("_Filtering").and_then(|f| f.number()) == Some(1.0)
+        {
+            self.textures[texture].linear = true;
+        }
         if tiled {
             self.tiles.push(file.to_string());
             let (tw, th) = (
@@ -659,6 +685,7 @@ impl UiAssets {
             width: font.page_width,
             height: font.page_height,
             rgba,
+            linear: false,
         });
         self.index.insert(key, Some(index));
         Some(index)
@@ -691,6 +718,7 @@ impl UiAssets {
                 width: *w,
                 height: *h,
                 rgba: rgba.clone(),
+                linear: false,
             });
             index
         });
@@ -712,8 +740,12 @@ fn snap_placement<'a>(p: &Placement<'a>) -> Placement<'a> {
     Placement {
         widget: p.widget,
         frame: if p.widget.attachment("DisplayBox").is_some() {
+            // The text of a `DisplayBox` starts one row below the box (the box's own 1 px border): with
+            // whole-pixel layout the box of the snapshot instructions is at 504 and its glyph row at 505
+            // (it was the rounded 504.74 while the layout was fractional), the event description's first
+            // line sits one row below its box (docs/34 11.12).
             let mut f = snap_frame(p.frame);
-            f.y = p.frame.y.round();
+            f.y = p.frame.y.floor() + 1.0;
             f
         } else {
             snap_frame(p.frame)
@@ -897,13 +929,15 @@ fn border_quads(p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
     // every frame that fills its clip moved botlab-overview 0.25 -> 0.42 and paint 0.67 -> 0.82)
     // has its ring *inside* it: live `teamhq-export-dialog`, the 178-grey `Outer 0.7` line is
     // the dialog's first row and column, not a line outside it that the clip would cut.
-    let inside = p.widget.name() == "background grp"
-        && clip.is_some_and(|c| {
-            (c.x - f.x).abs() < 0.5
-                && (c.y - f.y).abs() < 0.5
-                && (c.w - f.w).abs() < 0.5
-                && (c.h - f.h).abs() < 0.5
-        });
+    let fills_clip = clip.is_some_and(|c| {
+        (c.x - f.x).abs() < 0.5
+            && (c.y - f.y).abs() < 0.5
+            && (c.w - f.w).abs() < 0.5
+            && (c.h - f.h).abs() < 0.5
+    });
+    // The join window's `background group` is the same (live `teamhq-event-join`: grey lines at the
+    // window's first row and column and one past its last).
+    let inside = matches!(p.widget.name(), "background grp" | "background group") && fills_clip;
     for ring in 0..width.max(0) {
         // Every ring is `Outer`: the original's 2-pixel wood frame on the repair
         // bench (`Width 2`, `Inner 1 1 1 1`, `Outer 0.55 0.45 0.3`) is two pixels
@@ -920,13 +954,31 @@ fn border_quads(p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
             (width - ring) as f32
         };
         let (x, y, w, h) = (f.x - e, f.y - e, f.w + 2.0 * e, f.h + 2.0 * e);
+        // A dialog's own ring runs to the last pixel *inclusive* (live `teamhq-event-join`, the
+        // export dialog: grey lines at x 237 and 787, y 224 and 544 for a 550 x 320 window at
+        // (237, 224)): one pixel more to the right and bottom, and the clip of the window lets it by.
+        let (w, h, clip) = if inside {
+            (
+                w + 1.0,
+                h + 1.0,
+                clip.map(|c| Frame::new(c.x, c.y, c.w + 1.0, c.h + 1.0)),
+            )
+        } else {
+            (w, h, clip)
+        };
+        let top_left_only = border
+            .field("Sides")
+            .is_some_and(|f| f.raw.trim() == "top left");
         let sides = [
             Frame::new(x, y, w, 1.0),
             Frame::new(x, y + h - 1.0, w, 1.0),
             Frame::new(x, y + 1.0, 1.0, h - 2.0),
             Frame::new(x + w - 1.0, y + 1.0, 1.0, h - 2.0),
         ];
-        for rect in sides {
+        for (i, rect) in sides.into_iter().enumerate() {
+            if top_left_only && (i == 1 || i == 3) {
+                continue;
+            }
             if rect.w <= 0.0 || rect.h <= 0.0 {
                 continue;
             }
@@ -1043,6 +1095,7 @@ pub struct UiRenderer {
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    linear_sampler: wgpu::Sampler,
     format: wgpu::TextureFormat,
 }
 
@@ -1130,10 +1183,20 @@ impl UiRenderer {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ui-filtered-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         UiRenderer {
             pipeline,
             bgl,
             sampler,
+            linear_sampler,
             format,
         }
     }
@@ -1317,7 +1380,14 @@ impl UiRenderer {
         let textures: Vec<wgpu::BindGroup> = scene
             .textures
             .iter()
-            .map(|t| bind_texture(device, queue, &self.bgl, &self.sampler, t))
+            .map(|t| {
+                let sampler = if t.linear {
+                    &self.linear_sampler
+                } else {
+                    &self.sampler
+                };
+                bind_texture(device, queue, &self.bgl, sampler, t)
+            })
             .collect();
         // Group consecutive quads that share a texture and a clip: one draw and
         // one scissor each.

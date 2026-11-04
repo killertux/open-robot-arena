@@ -1333,12 +1333,11 @@ impl Session {
         );
         let path = ra2ui::input::hit_control(&placed, point[0], point[1])?;
         let names = names_on_path(&placed, &path);
-        for wanted in ["continue button"] {
-            if names.iter().any(|n| n == wanted) {
-                return Some(wanted.to_string());
-            }
-        }
-        None
+        let wanted = "continue button";
+        names
+            .iter()
+            .any(|n| n == wanted)
+            .then(|| wanted.to_string())
     }
 
     /// Draw the 3D pass into a caller's target.
