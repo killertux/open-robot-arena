@@ -9,7 +9,7 @@ FIGHT_SECONDS of the fight play (both shipped AIs fight), then ends the match
 (plus.eliminatePlayer) and records the result screen for RESULT_SECONDS.
 Wall-clock markers go to <base>.marks.jsonl (epoch ms, same clock as the sound log).
 Environment: NAME (default match-box-scout-alarm), FIGHT_SECONDS (default 60),
-RESULT_SECONDS (default 25), ARENA_ROW (exhibition arena list row, default the route's Combat Arena), SKIP_INTRO=1 (click Skip Intro 14 s after Start Game), INTRO_WAIT (seconds to wait after Start Game before
+RESULT_SECONDS (default 25), ARENA_ROW (exhibition arena list row, default the route's Combat Arena), SKIP_INTRO=1 (click Skip Intro 14 s after Start Game), NO_SETUP=1 (skip the route and the arena click: the setup screen is already up after a previous run), INTRO_WAIT (seconds to wait after Start Game before
 the fight clock is checked, default 75).
 """
 import json
@@ -55,10 +55,13 @@ def main():
         marks.append({"t": int(time.time() * 1000), "label": label, **kw})
         print(label, kw, flush=True)
 
-    if os.environ.get("AT_MENU") != "1":  # AT_MENU=1: the game is on the main menu (that click opens Credits there)
+    if os.environ.get("NO_SETUP") == "1":  # the exhibition setup screen is up with the arena and robots of the last run
+        pass
+    elif os.environ.get("AT_MENU") != "1":  # AT_MENU=1: the game is on the main menu (that click opens Credits there)
         drive("click", "527", "746", "wait", "2")
-    drive("-f", os.path.join(HERE, "routes", "exhibition_box_scout_alarm.steps"))
-    if os.environ.get("ARENA_ROW"):  # another arena: its row in the exhibition list (box 1, compressor 2, octagon 7)
+    if os.environ.get("NO_SETUP") != "1":
+        drive("-f", os.path.join(HERE, "routes", "exhibition_box_scout_alarm.steps"))
+    if os.environ.get("ARENA_ROW") and os.environ.get("NO_SETUP") != "1":  # another arena: its row in the exhibition list (box 1, compressor 2, octagon 7)
         drive("click", "176", "177", "wait", "1.5", "click", "322", str(170 + 18 * int(os.environ["ARENA_ROW"])), "wait", "1.5", "hide", "wait", "1.5")
     cap = subprocess.Popen([PY, os.path.join(HERE, "capture_audio.py"), name, str(total)], env=dict(os.environ, OUT=out_dir))
     time.sleep(5)

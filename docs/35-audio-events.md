@@ -393,3 +393,78 @@ After the fixes, Octagon, same windows: `hzd_trapfloor_loop` x4 at bell + 22.5 s
 * The capture log decodes the crowd's file names to "JEM" in some runs (heap reuse behind the
   `std::string`); `audio_filediff.py` names them by creation order.
 * Menu and music walk-through was not re-recorded.
+
+## 15. Impact sounds and the crowd against the collision events that cause them (impacts)
+
+Section 14 left "58 impacts against 7 in the first 70 s" of the Compressor open as a combat-side divergence.
+That number compared ours with **one** live fight. This section separates the sound rule from the fight.
+
+**The rule, from the binary.** A priced collision event reaches `FUN_00417330(attacker, atk part, victim,
+vic part, amount, point, normal, ...)` (docs/38 §"A hit"). It returns at once when the match is over
+(`+0x8f`), when `amount == 0`, or when **either** part is flagged off (`FUN_00401860`: `+0xe0 > 0`, the
+detach state). Otherwise, in this order:
+
+1. `amount >= 10` (and a local or host match): `FUN_004175b0` scores the hit and feeds the crowd
+   (`FUN_004d53e0`: +5 above 50, +10 above 100, +20 above 300, nothing below 50; a gain of 10 or more
+   clears the idle clock and both bored flags);
+2. **always** (any non-zero amount): `FUN_00417510` -> the victim component's `+0x6c` handler
+   `FUN_0045f3a0(amount)`: sparks above 10 (docs/20 §7), and the sound: `FUN_0045f4c0(amount)` is the
+   volume `-1500 .. 0` linear over damage `4 .. 100`; **if `-1500 < volume`, i.e. `amount > 4`**, a random
+   entry of the victim's `damagesounds` is created and played once (`FUN_004f0540` ->
+   `SoundWizard::Create(name, volume, 3D = 0, ...)` + `Play`), centred, unpitched. `FUN_004f0540` has no
+   cooldown, no per-pair or per-robot limit and no voice cap: it only checks the sound manager's mute byte
+   (`+0x49`). The sound is the victim's: both robots of a robot-robot contact get one (two events).
+
+**Live, event by event.** `tools/oracle/frida/ra2_impactsound.js` (ra2_sounds.js plus `HIT` `0x417330`, `IMP`
+`0x45f3a0`, `DMG` `0x4175b0`, `EX` `0x4d53e0`, `MOOD` `0x4d5430`, `SHOUT` `0x4d5560`, `TICK` `0x4d5260`, one
+clock) over five Compressor fights, Scout v ALARM, intro on, hazards on, 100 s of fight each
+(`audio-impacts-compressor-scout-alarm__live__000..004`, manifest rows 2026-11-04;
+`tools/oracle/capture_audio_match.py` gained `NO_SETUP=1` to repeat a run from the setup screen;
+`tools/oracle/impactsound.py [--tsv]` pairs and summarises). 1968 `IMP` calls over the five whole fights
+(6228 `HIT` calls, 602 of 1460 with a non-zero amount in the first); no `HIT` ever carried a part flagged off
+(0 of 6228: events on a detached part are already gone from the physics' point of view, ours drops them by
+`part.alive`).
+
+| first 60 s from the bell | fight 0 | 1 | 2 | 3 | 4 |
+|---|---:|---:|---:|---:|---:|
+| `IMP` calls (any amount) | 320 | 333 | 307 | 286 | 239 |
+| amount above 4 | 29 | 54 | 45 | 64 | 19 |
+| of which a sound was created at the rule's volume (within a frame) | 29 | 54 | 45 | 64 | 19 |
+| amount 10 or more (scored) | 12 | 32 | 18 | 33 | 8 |
+| of which from the arena (attacker -1) | 13 | 4 | 7 | 20 | 11 |
+
+**211 of 211** events above 4 made exactly one sound, at `impact_volume_hdb(amount)` within 2 hundredths of a
+decibel (the created volumes are integers of the same formula), and none at 4 or less. So the sound rule
+of `ra2_audio::rules::impact_volume_hdb` + `MatchSounds::observe` is the original's, including "per victim
+component" and "no cap": ours plays one `SoundCue::Impact` per `combat::Impact` with damage above 4.
+
+**The fight, not the rule, makes the count.** Events above 4 in the first 60 s of this scenario, live:
+29, 54, 45, 64, 19 and 6 (the section 14 capture, 7 sounds with one pair): mean 36, range 6 to 64. Ours,
+`fidtrace` ensemble Scout v ALARM on the Compressor, `FIDTRACE_WARMUP` 0..23, same window: mean 40.5
+(range 3 to 99, 24 fights); the app's own 90 s run that gave 58 is one draw of that spread. By amount, per
+fight: 4..10 19.2 (live 21.6), 10..30 10.7 (10.0), 30..100 8.1 (8.8), 100 and up 2.5 (1.8); from the arena
+7.6 (11.0, five fights, not significant). Compared with the Box (live 80 in 60 s, section 10 ours 74)
+and the Octagon (live 43, section 14) the count follows the arena and the pairing; there is no sound-side
+excess to remove.
+
+**Crowd.** The live crowd machine was logged in the same five fights (36 mood changes, 17 shouts, 16 of them taunts, in the
+log, `EX` 5/10/20 steps against the `DMG` amounts 51..284). The step table, the 1 point per second decay
+(the clock is reset to zero on every point), the two bored flags, the taunt flag at excitement under 15,
+the 10 s shout cooldown and the mood table of `ra2-app/src/crowd.rs` all hold:
+`tests/impact_sounds.rs` replays each fight's scored damage and 20-point bursts into `Crowd`, ticked from
+its creation, and compares with the logged moods and taunts (every logged mood change has ours to the same
+mood within 1 s and the other way round, but one or two knife-edge ones per fight; every logged taunt has
+ours within 1.5 s). The crowd's **own clock is not the wall clock**: it ticks with the frame time capped at
+1/30 s, so under Wine it ran at 0.75 to 0.92 of wall time (fight 3: the first taunt at wall 33.8 s is crowd
+second 24.2) and a point decays every 1.027 s instead of ours 1.006 s (the reset-to-zero overshoots a whole
+frame). That is the machine, not the rule: ours drifts one second per 35 points. Which taunt comes when is
+decided by the fight's excitement: live first taunts at bell + 24 to 44 s (wall; crowd 21 to 39 s), ours
+(section 14) 44.9 s, inside the spread; `boo`, `comeon`, `youmakemesick` all appear live.
+
+**No code change.** The impact sound, the crowd feed and the taunts match; the open item of section 14
+is closed as a fight sample, not a rule. `immobile_countdown` appears 2, 3, 3 and 5 times in four of the five
+fights (none in the first): its rule (docs/20 §10) is the one verified there and is not re-measured here.
+
+Tests: `ra2-app` `tests/impact_sounds.rs`: `every_priced_event_above_four_makes_one_sound_at_the_rule_volume`
+(211 events), `the_crowd_replays_the_logged_mood_changes_and_taunts` (35 of the 36 mood changes, 16 of the 16 taunts); both read
+the git-ignored captures (`*.impacts.tsv`, written by `impactsound.py --tsv`) and skip without them.
