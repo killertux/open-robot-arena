@@ -7266,6 +7266,7 @@ another of the FlapJack's pieces than before; no live count to hold it against).
   settle it) or the head presses 0.03-0.05 m closer in ours. Not changed: depth-1 motors are
   hit directly live where they stand exposed (the Sentinel's Steering Unit 44 hits and spin
   motors 28 in 8 Compressor fights), so the tag is right in kind.
+  (12at: the collidables were read, the shapes are the original's, and the cause is the filter: a motor's housing has no entry.)
 * **12ap's "0.1 m farther forward and lower" hammer hits is this same attribution**, not the
   head: ALARM's hits of 10 hp or more on the Scout in the first 20 s (live: the 12
   `boxweapons` captures, 43 hits, ALARM's frame): fwd 1.31, dy -0.12, lat -0.03; ours
@@ -7283,3 +7284,171 @@ another of the FlapJack's pieces than before; no live count to hold it against).
 `FIDTRACE_AI=1` keeps the brains, `FIDTRACE_BODY`), `first_stroke.py window|pose|stroke`,
 `first_stroke_ours.sh`, `hulldump`; `FIDTRACE_HITS` rows now carry the contact normal
 `n`; `RA2_TAGS=0`.
+
+### 12at. The robots' collidables against the original's: every shape agrees, the filter has no entry for a motor's housing (the Scout's burst motor is not hit any more), batteries and boards are collidables, an angler collides as its own object (fx/collidables)
+
+The task: 12as left the Scout's Burst Motor open (hit in 88 % of ours' Box fights in the first
+20 s, 163 hp; live 0 of 14), with either the chassis' or the motor's collidable differing from what
+the original builds, or the hammer pressing closer. **Neither: the shapes are the original's, and
+the contact is the same; what differs is that the original's collision-event filter has no entry
+for the motor's housing**, so a contact with it is never an event. Found by reading every
+collidable of the robots live (shape, transform, body, filter entries) and comparing it piece by
+piece with ours.
+
+**New live captures** (`:7`, `RA2_FRIDA_PORT=27147`, under the shared lock; `Teams/`, `AI/`,
+`Robot Designs/` and `ra2.cfg` copied before and sha256-compared after: "prefix restored";
+39 rows in `local/oracle/manifest.tsv`, copies and `manifest-additions-2026-11-04-collidables.tsv`
+in `~/ra2-oracle-backup`): `robotcolliders-scout-alarm-box__live__000..008`,
+`robotcolliders-razor-flapjack-box__live__000..001`,
+`robotcolliders-sentinel-wideload-compressor__live__000..001` (the shipped AIs,
+`capture_parts_set.sh` with `AGENT=frida/ra2_robotcolliders.js`, whole fights of 120-145 s; the later
+ones also have `F`, `H` and `R` rows, below). **The agent** lists every collidable of every
+body of both robots: the broadphase's lists (`0x559d30`, 12u) hold a body's pieces only while they are
+active (a Scout chassis showed 3 of its 7 and the pieces of the robot's first build too), so it walks
+the component table (`0x4dd760`, each component's wrappers at `+0x24`, wrapper `+8` the body) and
+reads each body's collidables from the array at **body `+0x250`** (`+0x254` the end), at 1 s and 12 s of
+the match clock and at the end (pass 1 is the fighting bodies). Per collidable: shape class `+0x18` (4
+`GEOMETRIC`, a triangle mesh; `0x400` `CXGEOMETRIC`, a convex hull), tag `+0x50` (a creation counter),
+body `+0x1c`, the shape at `+0x1bc` (`+0x18` vertex count, `+0x1c` the vertices 16 bytes apart, `+0x24`
+triangle count, `+0x28` the triangles), the transform to its body **at `+0x60`** (a contiguous 3x3,
+`out[i] = m[i] x + m[3+i] y + m[6+i] z + t[i]`, the translation at `+0x84`, the inverse at `+0xa0`; the
+body frame's origin is the centre of mass). `RP` rows count the resolver's (`0x53ed80`) contact pairs by
+the two tags; `F` the event filter's (`0x52d4f0`) calls between two robot collidables in the first 30 s
+with the contact's distance and the return (**0 = the event goes on**, 12ak); `H` the priced hits
+(`0x417330`); `R` every registration with the filter (`0x52d850`, 12l) while the match loads, by
+collidable pointer. Ours is `examples/colliderdump` (one line per piece of each part, from
+`Robot::collider_pieces`), compared by `tools/oracle/collider_compare.py` (a piece's **signature** is its
+vertex count and the sorted pairwise distances of its vertices, which no body frame changes).
+
+**1. What agrees.** Every collidable ours builds is in the original, with the same vertices to the
+3rd decimal, in all six standard robots: Scout (chassis 36 vertices / 20 triangles, burst motor
+housing 10, angle motors 8, the fork's rotor 8, extender 8, forklift arm a 12-vertex 20-triangle
+**mesh**, hubs 16), ALARM, Razor, FlapJack (the 48-vertex chassis), Sentinel (and the bracket wedge,
+a mesh), Wide Load. Mesh or hull agrees everywhere (4 for the chassis, the arm and the wedge, `0x400`
+for the rest: `collides_as_mesh`); the 8 meshes' triangles are the same (edge-length multisets). On the
+chassis body, whose frame is ours (`bodycmp`'s `com in chassis`), the pieces' boxes equal ours'
+to the millimetre: the Scout's burst motor housing (-0.354, 0.025, 0.123)..(0.139, 0.413, 0.53), its angle
+motors (-0.382, 0.002, -0.628)..(-0.201, 0.193, -0.12) and (0.193, ..)..(0.375, ..); ALARM's four angle
+motors and its piston housing. So neither the chassis' nor the motor's shape differs, nothing is shrunk or
+grown (12h/12q's hulls), and the resting gap agrees: a wheel on the floor sits at 0.048-0.063 live (the
+0.05 of the arena's grown mesh), 0.047-0.054 ours (the `RT` rows below), and **no contact of the whole
+of a fight has a negative distance** live (ours, before: arm against hammer to -0.027).
+
+**2. Three differences.**
+
+*(a) The original also builds the batteries, air tanks, battery packs and control boards* (`.gmf` rigid
+bodies of `battery1`, `battery2`, `battery_slimpack`, `airtank`, `controlboard`: `nocoll=false`;
+only `smartzone` is `nocoll=true`, a phantom), 3 to 6 pieces a robot that ours left out:
+
+| robot | live collidables at 1 s | ours before | ours after (+ phantoms ours keeps apart) |
+|---|---|---|---|
+| Scout | 16 | 11 | 13 (+ 2 traction rings, the SmartZone) |
+| ALARM | 25 | 16 | 20 (+ 4 rings, SmartZone) |
+| Razor | 23 | 17 | 19 (+ 4 rings) |
+| FlapJack | 19 | 12 | 16 (+ 2 rings, SmartZone) |
+| Sentinel | 24 | 17 | 19 (+ 4 rings, SmartZone) |
+| Wide Load | 32 | 24 | 27 (+ 4 rings, SmartZone) |
+
+They take contacts (the resolver's pair table: ALARM's hammer with the Scout's control board, 12 points
+at 0.055, `robotcolliders-scout-alarm-box__live__002`; the Scout's arm with ALARM's battery, 9 at 0.071, and
+board; FlapJack's wedge with Razor's battery, 6 at 0.070; ours' hammer reaches 0.04-0.06 m of the Scout's
+battery too), and are never priced. They are built now (`RA2_INTERNALS=0`: no battery, tank or board
+piece); masses and inertia do not move (`bodycmp`: the Scout's chassis body 23.2836, 39.0836, 21.2655,
+off-diagonal -0.2644, 1.2628, 0.3957 both ways).
+
+*(b) The event filter has no entry for a housing.* The `R` rows (`robotcolliders-*__live__008`,
+`razor-flapjack-box__live__001`, `sentinel-wideload-compressor__live__001`) put every registration on
+the collidable it was made for: of the 114 collidables matched to ours in the three fights, **the chassis,
+the pieces of a component's own body and the pieces of a component with no rotor have an entry, and
+the housing of a component that has a rotor has none**: a motor's `anglemotor`/`redbird`/`etek` against its
+`axle` (the rotor), a piston's `body` against its `shaft`, an axle mount's `mount_display` against its
+`axle`; none for a battery, tank, pack or board, nor for an anchor (`damageable = false` and no
+`passthru`); a wheel's hub has two (12l), its traction ring none; a steering unit's three base pieces
+have one entry between them and each hub one. The stock definitions name the registered objects
+under `passthru` (`axle_collision`, `shaft_collision`, `caster_collision`, `strip_collision`); the components
+with none (a hammer, the small wedge) register their one piece. 114 of 114 agree with ours' rule
+(`robot::housing_registered`: the housing pieces of a component with `rotor_collision` are not registered,
+except the first of a `Steering` unit; those of a component with neither `passthru` nor `damageable` are
+not; those of a battery or board are not). And **a pair with an unregistered collidable is never
+admitted, whatever the other side has**: 794 filter calls with a Scout or ALARM housing, battery or
+board (the other side a registered collidable, of which 2-3 % of calls are admitted) were all refused
+(`F` rows, `robotcolliders-scout-alarm-box__live__003..007`); ours let the partner's entry take them. So a
+tagged piece now carries `UNREGISTERED` (bit 30 of the tag, the component index below) and
+`combat::EventGate::admit_with` drops an event with one (`piece_unregistered`); the pricing resolves a
+tag without the bit. `RA2_REGISTRY=0` gives the old rule. Test
+`duel::tests::a_housing_has_no_filter_entry_and_lets_no_event_through`.
+
+*(c) A `SIMULATION_GEOMETRY` 0 body collides as its own object, not its proxy.* The only mismatch in
+shape: Wide Load's two angle connectors (`angler`, `rb "angler"` simgeo 0, proxy `angler_collision`) are
+12-vertex 20-triangle hulls live, 0.11 x 0.23 x 0.18 m, the `angler` object (12 points); ours took the 8-point proxy.
+The other 113 proxies in `Components` are simgeo 3 and 6 and agree (the four simgeo-0 bodies with a proxy
+are the anglers). `HavokParts::from_scene` takes the body's own named object for simgeo 0;
+`RA2_ANGLER=0` the proxy. Test `duel::tests::an_angler_collides_as_its_own_object`.
+
+All three switches off reproduce the 12as runs **bit for bit** (48 Box pose files equal).
+
+**3. The burst motor.** Not the shape and not the contact: ALARM's hammer touches the housing as often
+as it does live (`F` rows, 5 fights of 30 s: hammer head with the Scout's housing 28 calls, with the chassis
+4194, 0.7 %; ours 106 against 5280 in eight, 2 %), at the same distances (the hammer's calls are at 0.07-0.1 m
+in both, the minimum 0.000 live, 0.016 ours, and the same band for every piece), and **live none of the 28 is
+let through** (0 of 794 for all housings): the 27 priced hits the original ever lands on the Scout's burst motor
+(19 Scout-ALARM fights) are 26 of 1-9 hp and one of 32, all on its *rotor* (8 calls, 5 admitted). Ours let 25 of
+92 through, because the hammer's own entry (due about once a second, 28.6 admitted a fight live, 20-30 ours)
+took the housing's calls at the start of a stroke, where the top of the housing protrudes 0.05 m ahead of the
+nose; 85 priced hits in the first 10 s of 48 fights, 77 hp each at 8.4 m/s. Now:
+
+| ALARM's hits of 10 hp or more on the Scout, first 20 s (`parts_compare.py`) | live (14 fights): fights / hits / hp | ours before (12as) | ours after |
+|---|---|---|---|
+| Chassis | 79 % / 6.93 / 367 | 94 % / 6.44 / 357 | 98 % / 8.85 / 510 |
+| Round Extender | 93 % / 2.00 / 118 | 92 % / 2.02 / 122 | 100 % / 2.15 / 136 |
+| Forklift Arm | 79 % / 1.86 / 90 | 81 % / 1.75 / 94 | 92 % / 1.94 / 110 |
+| DDT Burst Motor | **0** | **88 % / 1.98 / 163** | **0** |
+| Reversible Angle Motor | 0 | 8 % / 0.33 / 17 | 0 |
+
+and the stroke (`first_stroke.py window`, the 0.4 s after the first hit of 10 hp or more): live Chassis 67 %, Arm 50 %,
+Extender 50 %; ours Chassis 77 %, Extender 50 %, Arm 40 %. The hits of 30 hp or more in the first 10 s
+(`tools/oracle/strike_points.py`, the points in the chassis frame): live (6 fights) Chassis 13 at z 0.63 / y 0.14,
+Extender 7, Arm 5, Burst Motor 0; ours (48) Chassis 160 at z 0.65 / y 0.16, Extender 59, Arm 40 (per 6 fights 20, 7, 5),
+Burst Motor 0.
+
+**4. Ensembles** (`tools/oracle/ensemble.sh`, 120 s, `FIDTRACE_UP=1 FIDTRACE_LOG=1`; before = the three
+switches off; counted = hits of 10 hp or more, R0 the first bot's, R1 the second's, mean +- standard error).
+**48 warmups are not enough to see this** (two disjoint sets of 48 of one configuration give Box R1 40.6 and 48.1, the
+Compressor's 64.7 and 87.5), so the 96 warmups 48..143 are given as well:
+
+| fight | counted R0 / R1, warmups 0..47 before | after | warmups 48..143 before | after | live |
+|---|---|---|---|---|---|
+| Box Scout / ALARM | 10.0 +- 1.0 / 40.6 +- 4.5 | 8.8 +- 0.6 / **38.7 +- 3.4** | 9.8 +- 0.6 / 48.1 +- 3.0 | 7.7 +- 0.4 / **38.8 +- 2.4** | ALARM on Scout 41 |
+| Razor / FlapJack | 6.3 / 1.1 | 6.9 / 1.0 | 7.1 / 0.8 | 6.5 / 0.9 | |
+| Sentinel / Wide Load | 4.0 / 65.6 | 5.6 / 89.7 | 5.4 / 83.9 | 4.6 / 83.2 | 5.3 / 73.6 |
+| Octagon Scout / ALARM | 7.7 / 25.9 | 5.1 / 16.3 | 6.3 / 20.7 | 4.9 / 15.7 | |
+
+| | before | after |
+|---|---|---|
+| Box, 0..47: mean length, ends | 76.2 s; Scout destroyed 17, ALARM immobilized 13, Scout immobilized 11, clock 7 | 71.9 s; Scout destroyed 23, Scout immobilized 16, clock 6, ALARM immobilized 3 |
+| Box, 48..143: Round Extender lost (live 6 of 8 at 10-39 s) | 65 of 96, first loss median 13 s | 63 of 96, median 27 s |
+| Octagon, 48..143: extender lost (live 3 of 5) | 62 of 96, median 6 s | 56 of 96, median 10 s |
+| Compressor, 0..47: SlipperBottom wheels lost | 41 in 24 fights | 66 in 32 |
+| Box arena hp, 0..47 / 48..143 (Scout, ALARM) | 57.6, 42.5 / 105.5, 65.6 | 40.1, 11.1 / 62.2, 40.6 |
+
+So the Box's ALARM-on-Scout count falls to the live 41 (38.7 +- 3.4 and 38.8 +- 2.4; it was 40.6 and 48.1 before), the
+Scout loses its fork later (median 27 s against live's 10-39) and ends destroyed more than immobilized.
+Razor and the Compressor are within noise.
+
+**5. Open.**
+* The Box's chassis hits (98 % of fights, 8.85 in the first 20 s against live 79 %, 6.93) and the whole-fight
+  Chassis count (33 against 41.6 live) are not understood; the Compressor's Wide Load count (83-90 against live
+  73.6) was 65-84 before.
+* The hammer's entry fires about once a second in both (28.6 admitted a fight live, 20-30 ours): which of the Scout's pieces
+  a stroke's first contact finds is the same now that only registered pieces count; the order of the
+  resolver's points inside one step is 12u's and not checked for two pieces of one body.
+* The flame casts (`Duel::flame_targets`) and the zone pieces still skip batteries, tanks and boards (docs/37 section 6); the
+  original's casts and phantoms meet them as collidables, not compared.
+* The SmartZones' and wheels' phantoms are collidables live and phantoms in ours; their pair events
+  with the other robot's pieces are not compared (`RP` rows have them).
+
+**Tools.** `frida/ra2_robotcolliders.js` (`C`, `K`, `RP`, `F`, `H`, `R`, `A` rows), `collider_compare.py [--pairs]`
+(shapes, triangles, filter entries), `motor_pricing.py` (the hammer's calls and priced hits per Scout
+piece), `strike_points.py`, `examples/colliderdump <bot>`, `RA2_H17_DUMP` rows `RT` (`[a, b, tag_a, tag_b,
+distance]` per contact) and `EV` (`[a, b, tag_a, tag_b, admitted, time]` per event the filter is asked about),
+`RA2_INTERNALS=0`, `RA2_REGISTRY=0`, `RA2_ANGLER=0`.

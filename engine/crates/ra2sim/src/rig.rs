@@ -290,6 +290,9 @@ pub struct Component {
     pub material_scale: f32,
     /// `false` when the definition says `damageable = false`.
     pub damageable: bool,
+    /// Whether the definition names `passthru` collidables (the solid objects the component
+    /// registers with the collision-event filter, docs/29 12at).
+    pub has_passthru: bool,
     /// The sound names the definition carries (`damagesounds`, `motorsound`,
     /// `firesound`, `runsequence`).
     pub sounds: ComponentSounds,
@@ -419,8 +422,18 @@ impl HavokParts {
             })
             .collect();
         let geometry_of = |rb: &ra2fmt::gmi::RigidBody| -> Geometry {
-            let Some(((placed, faces), unrotated)) =
-                objects.get(&rb.collision_object().to_ascii_lowercase())
+            // `SIMULATION_GEOMETRY` 0 collides as the body's own object even when a proxy is named:
+            // live (`robotcolliders-sentinel-wideload-compressor__live__000`) Wide Load's two
+            // angle connectors (`angler`: the 12-vertex `angler` object, 20 triangles, 0.11 x 0.23 x
+            // 0.18 m; its proxy `angler_collision` has 8 vertices) are 12-vertex hulls; the other
+            // 113 proxies are of 3 and 6 and agree (docs/29 12at). `RA2_ANGLER=0` takes the proxy.
+            let own_first = rb.simulation_geometry == 0 && angler_own_geometry();
+            let object = if own_first {
+                rb.name.as_str()
+            } else {
+                rb.collision_object()
+            };
+            let Some(((placed, faces), unrotated)) = objects.get(&object.to_ascii_lowercase())
             else {
                 return Geometry::default();
             };
@@ -530,6 +543,13 @@ pub const WEAPON_MATERIAL_SCALE: f32 = 0.8;
 /// rotation, so which the original does with both is not exercised.
 pub fn own_geometry_unrotated(rb: &ra2fmt::gmi::RigidBody) -> bool {
     rb.simulates_own_mesh()
+}
+
+/// `RA2_ANGLER=0`: a `SIMULATION_GEOMETRY` 0 body with a proxy collides as the proxy, as before
+/// docs/29 12at.
+pub(crate) fn angler_own_geometry() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_ANGLER").map_or(true, |v| v != "0"))
 }
 
 /// Whether Havok collides a rigid body with this `SIMULATION_GEOMETRY` as a
@@ -1704,6 +1724,10 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             .as_ref()
             .map(|d| !flag_false(d, "damageable"))
             .unwrap_or(true);
+        let has_passthru = def
+            .as_ref()
+            .and_then(|d| d.get("passthru"))
+            .is_some_and(|v| !v.trim().is_empty());
         let mut sounds = ComponentSounds::from_def(def.as_ref());
         if i == 0 && sounds.damage.is_empty() {
             let armour_type = bot
@@ -1835,6 +1859,7 @@ pub fn load(path: &str) -> Result<RobotRig, Box<dyn std::error::Error>> {
             material,
             material_scale,
             damageable,
+            has_passthru,
             sounds,
             decal: def
                 .as_ref()
@@ -2197,6 +2222,7 @@ mod tests {
             material: None,
             material_scale: ra2fmt::component::DEFAULT_MATERIAL_SCALE,
             damageable: true,
+            has_passthru: false,
             sounds: ComponentSounds::default(),
             decal: None,
             role: if motor { Role::Motor } else { Role::Structure },

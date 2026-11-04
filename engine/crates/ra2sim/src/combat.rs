@@ -429,6 +429,11 @@ pub fn touched_component(
     if let Some(i) = tagged_component(robot, part, tag) {
         return Some(i);
     }
+    // A collidable the filter has no entry for (a battery, an air tank, a control board) is
+    // struck without an event: nothing is priced on it or by it (docs/29 12at).
+    if unregistered_piece(robot, part, tag) {
+        return None;
+    }
     let frame = Mat4::from_rotation_translation(state.rotation, state.position);
     let mut best: Option<(usize, f32)> = None;
     for &i in &robot.rig.parts[part].members {
@@ -458,16 +463,46 @@ fn use_tags() -> bool {
     *ON.get_or_init(|| std::env::var("RA2_TAGS").map_or(true, |v| v != "0"))
 }
 
-/// The component `tag` names, if it is an attached member of `part` that has a hull.
+/// The component `tag` names, if it is an attached member of `part` that has a hull and is
+/// priced: the collidables of batteries, air tanks and control boards are not
+/// ([`unregistered_piece`]).
 fn tagged_component(robot: &Robot, part: usize, tag: u32) -> Option<usize> {
     if tag == crate::backend::NO_TAG || !use_tags() {
         return None;
     }
-    let i = tag as usize;
+    let i = (tag & !crate::robot::UNREGISTERED) as usize;
     (robot.rig.parts.get(part)?.members.contains(&i)
         && *robot.attached.get(i)?
-        && !robot.rig.components[i].hull_points.is_empty())
+        && !robot.rig.components[i].hull_points.is_empty()
+        && !unregistered_piece(robot, part, tag))
     .then_some(i)
+}
+
+/// Whether the piece `tag` names has no entry in the event filter: a flagged piece (a housing,
+/// [`crate::robot::UNREGISTERED`]) or one of a battery, air tank or control board.
+fn piece_unregistered(robot: &Robot, part: usize, tag: u32) -> bool {
+    tag != crate::backend::NO_TAG
+        && use_tags()
+        && (tag & crate::robot::UNREGISTERED != 0 || unregistered_piece(robot, part, tag))
+}
+
+/// Whether `tag` names an attached member of `part` whose collidable has no entry in the
+/// event filter: the original's batteries, air tank and control boards (live,
+/// `eventreg-sentinel-wideload-compressor__live__000`; none of 2500 priced hits has one as
+/// victim or attacker) take contacts, so they hold other bodies off, but raise no event.
+/// `RA2_INTERNALS=0` has no such pieces.
+fn unregistered_piece(robot: &Robot, part: usize, tag: u32) -> bool {
+    if tag == crate::backend::NO_TAG || !use_tags() || !crate::robot::internals_collide() {
+        return false;
+    }
+    let i = (tag & !crate::robot::UNREGISTERED) as usize;
+    robot
+        .rig
+        .parts
+        .get(part)
+        .is_some_and(|p| p.members.contains(&i))
+        && robot.attached.get(i).copied().unwrap_or(false)
+        && matches!(robot.rig.components[i].role, Role::Power | Role::Control)
 }
 
 /// The attacking parameters of a component.
@@ -579,6 +614,15 @@ fn registered_component(
         {
             return Some(i);
         }
+    }
+    // A piece with no entry of its own (a motor's housing): no registered component stands in.
+    if unregistered_piece(robot, part, tag)
+        || (tag != crate::backend::NO_TAG
+            && tag & crate::robot::UNREGISTERED != 0
+            && use_tags()
+            && tagged_component(robot, part, tag).is_some())
+    {
+        return None;
     }
     let frame = Mat4::from_rotation_translation(state.rotation, state.position);
     let zones: Vec<usize> = robot.rig.smart_zones.iter().map(|z| z.component).collect();
@@ -861,6 +905,23 @@ impl EventGate {
             if self.pair_single && points.get(&key).is_some_and(|&n| n > 1) {
                 continue;
             }
+            // A collidable with no entry in the filter lets no event through, whatever the other
+            // one has: live, 794 calls of the filter with a motor's housing, a battery or a
+            // control board (the other side a registered collidable, 2 to 3 % of whose calls are
+            // admitted) were all refused (docs/29 12at).
+            if [(e.a, e.tag_a), (e.b, e.tag_b)].iter().any(|&(body, tag)| {
+                owner
+                    .get(&body)
+                    .is_some_and(|&(r, p)| piece_unregistered(&robots[r], p, tag))
+            }) {
+                if crate::havok17::dumping() {
+                    crate::havok17::dump_line(format_args!(
+                        "[\"EV\",0,{},{},{},{},0,{}]",
+                        e.a, e.b, e.tag_a, e.tag_b, now
+                    ));
+                }
+                continue;
+            }
             let mut through = false;
             for (body, state, tag) in [(e.a, &e.state_a, e.tag_a), (e.b, &e.state_b, e.tag_b)] {
                 if let Some(ab) = arena.get(&body) {
@@ -890,6 +951,15 @@ impl EventGate {
                     through = true;
                     break;
                 }
+            }
+            if crate::havok17::dumping() {
+                // EV: one row per event the filter is asked about, by the two collidables' tags
+                // (the live `F` rows of `frida/ra2_robotcolliders.js`; `through` = the filter
+                // returned 0), docs/29 12at.
+                crate::havok17::dump_line(format_args!(
+                    "[\"EV\",0,{},{},{},{},{},{}]",
+                    e.a, e.b, e.tag_a, e.tag_b, through as u8, now
+                ));
             }
             if through {
                 passed.insert(key);

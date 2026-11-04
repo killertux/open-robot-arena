@@ -22,6 +22,50 @@ use crate::scene::USER_BOT;
 use crate::sim::{DriveInput, DriveTuning};
 
 /// Stock component friction/restitution (see the validation report).
+/// One collision piece of a part (see [`Robot::collider_pieces`]): the part, the component tag,
+/// the points in the part's frame and, for a mesh piece, its triangles.
+pub type ColliderPiece = (usize, u32, Vec<Vec3>, Option<Vec<[u32; 3]>>);
+
+/// Set in the tag of a piece whose collidable has no entry in the collision-event filter (a
+/// motor's, piston's or axle mount's housing, an anchor, docs/29 12at): its contacts are no
+/// event of its own, the other collidable's entry has to let them through.
+pub const UNREGISTERED: u32 = 0x4000_0000;
+
+/// Whether the `k`-th housing piece (`HavokParts::collision`) of `c` is registered with the filter.
+///
+/// Live (`R` rows of `frida/ra2_robotcolliders.js`, 3 fights: 109 collidables) the filter has an
+/// entry for the chassis, for the pieces of a component's own body (a motor's rotor, the piston's
+/// shaft, the hubs, an arm, a hammer) and for the pieces of a component with no rotor, but not for the
+/// housing of a component that has a rotor (`anglemotor` against `axle`, `body` against `shaft`) or
+/// for a component with no `passthru` that is `damageable = false` (the anchor): the stock
+/// definitions name the registered objects under `passthru`. A steering unit's three base pieces
+/// have one entry between them. `RA2_REGISTRY=0` registers every piece (the component's own rule).
+fn housing_registered(c: &crate::rig::Component, k: usize) -> bool {
+    if !registry_rule() {
+        return true;
+    }
+    if matches!(c.role, Role::Power | Role::Control) {
+        return false;
+    }
+    if !c.havok.rotor_collision.is_empty() {
+        return c.class == "Steering" && k == 0;
+    }
+    c.has_passthru || c.damageable
+}
+
+/// `RA2_REGISTRY=0`: every collidable of a component raises events as its component's does.
+fn registry_rule() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_REGISTRY").map_or(true, |v| v != "0"))
+}
+
+/// Whether the batteries, air tanks, battery packs and control boards collide as the original's
+/// collidables do (docs/29 12at). `RA2_INTERNALS=0` leaves them out, as before.
+pub fn internals_collide() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_INTERNALS").map_or(true, |v| v != "0"))
+}
+
 const STOCK_FRICTION: f32 = 0.30;
 const STOCK_RESTITUTION: f32 = 0.30;
 
@@ -969,6 +1013,7 @@ impl Robot {
         type Piece = MassPiece;
         // `phantoms`: rigid bodies that collide with nothing but carry mass.
         let mut add = |pieces: &[Piece],
+                       registered: &[bool],
                        phantoms: &[(Vec<Vec3>, f32)],
                        m: Mat4,
                        weight: f32,
@@ -978,11 +1023,13 @@ impl Robot {
             // Each placed piece's points in the component's own frame (where
             // the original keeps a mesh's geometry).
             let mut raws = Vec::new();
-            for (pts, mesh, piece_mass, open) in pieces {
+            let mut placed_registered = Vec::new();
+            for (k, (pts, mesh, piece_mass, open)) in pieces.iter().enumerate() {
                 let local: Vec<Vec3> = pts.iter().map(|q| m.transform_point3(*q)).collect();
                 if massprops::hull_volume_centroid(&local).is_some() {
                     placed.push((local, mesh.clone(), *piece_mass, open.clone()));
                     raws.push(pts.clone());
+                    placed_registered.push(registered.get(k).copied().unwrap_or(true));
                 }
             }
             let ghosts: Vec<Piece> = phantoms
@@ -1079,7 +1126,9 @@ impl Robot {
                     eprintln!("      piece {} points, box {lo:?}..{hi:?}", pts.len());
                 }
             }
-            for ((pts, mesh, _, _), raw) in placed.into_iter().zip(raws) {
+            for (((pts, mesh, _, _), raw), registered) in
+                placed.into_iter().zip(raws).zip(placed_registered)
+            {
                 let shape = match mesh {
                     Some(indices) => ShapeDesc::MeshHull {
                         points: pts,
@@ -1092,7 +1141,7 @@ impl Robot {
                     local_position: Vec3::ZERO,
                     local_rotation: Quat::IDENTITY,
                     shape,
-                    tag,
+                    tag: if registered { tag } else { tag | UNREGISTERED },
                 });
             }
         };
@@ -1111,7 +1160,10 @@ impl Robot {
             // As with the Jolt bodies: a power cell sits inside the chassis (live,
             // the resting Scout touches the floor with its hubs and fork arm
             // only, `clist_rest`), and a non-physical fitting is no obstacle.
-            let collides = c.role.is_physical() && c.role != Role::Power;
+            // Every component with a rigid body that is not a phantom has a collidable in the
+            // original: batteries, air tanks, battery packs and control boards too (their `.gmf`
+            // rigid bodies are `nocoll=false`, and live they take contacts, docs/29 12at).
+            let collides = internals_collide() || (c.role.is_physical() && c.role != Role::Power);
             let mesh_of =
                 |pts: &Vec<Vec3>, mesh: Option<&Option<Vec<[u32; 3]>>>, m: Option<&f32>| {
                     (
@@ -1121,9 +1173,11 @@ impl Robot {
                         None,
                     )
                 };
+            let mut registered: Vec<bool> = Vec::new();
             let pieces: Vec<Piece> = if !collides {
                 Vec::new()
             } else if !h.collision.is_empty() || !h.rotor_collision.is_empty() {
+                registered.extend((0..h.collision.len()).map(|k| housing_registered(c, k)));
                 let mut v: Vec<Piece> = h
                     .collision
                     .iter()
@@ -1131,6 +1185,7 @@ impl Robot {
                     .map(|(k, pts)| mesh_of(pts, h.collision_mesh.get(k), h.collision_mass.get(k)))
                     .collect();
                 if !own_rotor {
+                    registered.extend(h.rotor_collision.iter().map(|_| true));
                     v.extend(h.rotor_collision.iter().enumerate().map(|(k, pts)| {
                         mesh_of(
                             pts,
@@ -1177,7 +1232,15 @@ impl Robot {
             } else {
                 &[]
             };
-            add(&pieces, phantoms, m, weight.max(0.0), i as u32, at);
+            add(
+                &pieces,
+                &registered,
+                phantoms,
+                m,
+                weight.max(0.0),
+                i as u32,
+                at,
+            );
             phantom.extend(h.phantom.iter().map(|q| m.transform_point3(*q)));
         }
         // The rotor of the motor this part hangs from.
@@ -1221,7 +1284,7 @@ impl Robot {
             } else {
                 (all, motor.havok.rotor_mass)
             };
-            add(&rotor, &[], m, rotor_mass, info.motor as u32, pivot);
+            add(&rotor, &[], &[], m, rotor_mass, info.motor as u32, pivot);
         }
         let shape = match children.len() {
             0 => ShapeDesc::Sphere { radius: 0.1 },
@@ -1283,6 +1346,31 @@ impl Robot {
             restitution,
             phantom,
         }
+    }
+
+    /// Diagnostic (docs/29 12at): every collision piece the Havok body of each part is built
+    /// from, `(part, component tag, points in the part's frame, the triangles of a mesh piece)`.
+    pub fn collider_pieces(rig: &RobotRig) -> Vec<ColliderPiece> {
+        let mut out = Vec::new();
+        for p in 0..rig.parts.len() {
+            let mut shape = Self::havok_part(rig, p, None).shape;
+            if let ShapeDesc::OffsetCenterOfMass { shape: inner, .. } = shape {
+                shape = *inner;
+            }
+            let ShapeDesc::Compound(children) = shape else {
+                continue;
+            };
+            for c in children {
+                match c.shape {
+                    ShapeDesc::MeshHull {
+                        points, indices, ..
+                    } => out.push((p, c.tag, points, Some(indices))),
+                    ShapeDesc::ConvexHull { points } => out.push((p, c.tag, points, None)),
+                    _ => {}
+                }
+            }
+        }
+        out
     }
 
     /// What each part weighed, as a share of its mass, the last time the
