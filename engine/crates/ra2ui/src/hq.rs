@@ -1248,7 +1248,7 @@ pub fn bracket_cells(
         cells.push(BracketCell {
             row: 0,
             index,
-            x: 4.0 + x,
+            x: 3.0 + x,
             y: 3.0,
             size,
         });
@@ -1270,7 +1270,7 @@ pub fn bracket_cells(
             cells.push(BracketCell {
                 row,
                 index,
-                x: 4.0 + x,
+                x: 3.0 + x,
                 y,
                 size,
             });
@@ -1290,7 +1290,11 @@ fn bracket_widgets(bracket: &BracketView, w: f32, h: f32) -> Vec<Widget> {
         .max()
         .unwrap_or(2)
         .max(2);
-    let cells = bracket_cells(rounds, bots, 1, w, h);
+    // Live (`event-bracket-*`) every picture and line sits 1 px right of the recovered origin.
+    let cells: Vec<BracketCell> = bracket_cells(rounds, bots, 1, w, h)
+        .into_iter()
+        .map(|c| BracketCell { x: c.x + 1.0, ..c })
+        .collect();
     // The exe hands the widget its float pixel position and size (`FUN_005f6010`), which resolve by
     // `__ftol` like any pixel length; a fraction of the group would lose a pixel to rounding.
     let frac = |x: f32, y: f32, cw: f32, ch: f32| [x, y, cw, ch];

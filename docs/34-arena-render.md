@@ -712,3 +712,58 @@ are tenths on three screens).
 * **League standings**: the field reads `Events Remaining: N` (capital R, from the capture; was `Remaining` lower case). Ours also sits 2 px left of the capture's (text width, not chased).
 * **Open**: the import dialog's leftover preview of a robot (the capture's window keeps the last image of an earlier import; ours is empty, an outline only); the standings screen's scroll bar looks wider than the
   capture's and the bottom-right decoration differs; `exhibition-settings` 1.68, `teamhq-event-join` 2.47 are glyph-level.
+
+### 11.12 Whole-pixel layout, the filtered stretch and the DisplayBox row (`fx/ui-pixels`, 2026-11-04)
+
+`fidelity.py --renderer app`, base = master 7a44e20 (114 fixtures). **Mean 1.94 -> 1.59.** Fixtures that moved by more than 0.03: 37 better, 2 worse (`botlab-chassis` 0.30 -> 0.35, `botlab-overview` 0.25 -> 0.31),
+table at the end. The three leftovers of 11.10/11.11 that were "quantised away somewhere in the 1280 -> 1024 layout" were one rule, found in the binary.
+
+* **Every length is whole pixels** (`FUN_005e8c30`, read with rizin/REA): `__ftol(fraction * parent)` (`fild` of the parent's integer extent, `fmul` by the float, the CRT truncating `ftol` at `0x63aabc`) or `__ftol(amount)`;
+  `FUN_005e8ac0` hands a widget's size and position down as those two integers, so every parent a child is laid against is an integer too. The port had floats with a pile of local patches that compensated
+  (group sizes truncated "measured", centred groups truncated, `snapshot main group`'s position truncated, `EXACT_GROUPS`, `PaneFloor`/`PaneFloorV`, the events pane's `Size 1 1 0.99325 1`). Now: `Length::ftol`
+  (`ra2fmt::gib`), `ra2ui::sized` truncates `Size`, `Position`, the anchor offset on both axes (`trunc(anchor * size)`) and an `AspectRatio` size, and `split_children` truncates `MasterSize`; the patches are gone.
+  Checked against the captures: the exhibition panels' children, the time dropdown (the group's `0.75 * 121 = 90` plus the parent's 486, not 486.27 + 90.75), the HQ's right split (`0.335 * 691 = 231`, not 231.55), the
+  events pane (the content group is 423, the calendar 0.95 * 423 = 401, its split 0.07 * 401 = 28, the grid 334 = three rows of 111: the 420 "live" fit and `0.99325` were this chain, docs/36 9.22 is closed),
+  the Bot Lab (`PaneFloorV`'s 147 is `0.07 * 582 = 40` below 107), the lobby's 286 column. A double-precision product (`0.95 * 300 = 284.99999`, 284) was tried and is **worse** (repairs 4.5 -> 7.8, bracket, F1 reminder),
+  so the multiply is single precision.
+* **Match-time dropdown (item 1)**: it was never the list: `Alignment 17` centres the field's group (`486 + 90 - 9 = 567`), and the old fractional parent put it at 568.02. Also an open list is drawn after the
+  borders of the groups it was lifted out of (`ui::scene`), the panel's bottom edge no longer crosses it. `exhibition-time-open` 1.81 -> 0.22. A ring one pixel high on the field's top is left (its `Border` body
+  `Position -1 -1` and the group's 18 px clip: not resolved).
+* **`_Filtering 1` is a filtered stretch (item 5)**: `exhibition-settings` 1.68 and `teamhq-event-join` 2.47 were glyph-level only in appearance: the game-type cards (200 x 140 art) and the HQ logos say `_Filtering 1` and
+  the capture shows D3D8's bilinear; ours point-sampled every texture. `UiTexture::linear` (set from an `Image`'s `_Filtering 1`, never for tiles) selects a second sampler. The 140 x 80 event previews
+  (`teamhq/events/ev_*.bmp`) are the one exception found: blocky in the capture although the cell template says 1 (`teamhq-events` 0.45 vs 1.08 filtered). `exhibition-settings` 1.68 -> 0.16.
+* **Grid cells (item 4, standings)**: a cell is inset inside its slot by `BufferWidth + BorderWidth` and the list's cell lines are a bar along the **top and left** of each slot (`Border` with `Sides top left`; a
+  neighbour's top is this cell's bottom, one line where the old full ring drew two): `teamhq-standings` 2.67 -> 0.06 (text 2 px left, the double rules and the cells were this; the scroll bar and the
+  bottom-right decoration were the cell frames' width). The picker's hand-made `robots grid` cells go through `cells::place_in_slot`; the inventory's even cells start 1 px in from their slot (`_Inset`, shift only,
+  their children's fractions show the slot's size is kept). `teamhq-inventory` 1.37 -> 0.36.
+* **DisplayBox text is one row below its box** (`ui::snap_placement`, was `round(y)`): the botlab snapshot text (box 504, row 505), the F1 reminder's and pause window's prose, the event description, the armour
+  text. `match-f1` 6.69 -> 3.40, `match-pause` 5.64 -> 3.13 (the dialogs now equal the captures; what is left is the live match behind them). **Chat (item 2)**: the lobby's `chat messages` box says `Position 0 0 0 1242948`
+  (y = 0), the group is whole-pixel, and the same one-row rule puts the first line at 271 and the second at 289 as live (`mp-lobby-host-chat-two`, example `lobbychat`): the 2 px `Position 0 0 2 0` nudge of 11.8 is removed.
+* **Blueprint panel (item 3)**: its height is `AspectRatio 1.1` of a 487 px width = 535.7, now truncated to 535 (docs/36: 536 vs live 535); by construction, not re-measured against the `botlab-step1-*` captures (the click
+  scripts for `labshot` are not in the tree).
+* **Dialog rings**: `background grp` and the join window's `background group` ring runs to the last pixel inclusive (grey lines at x 237 and 787 for a window at 237, width 550): `teamhq-event-join` 0.91 -> 0.74.
+* **Bracket (item 6)**: the entrants' pictures and lines are pixel positions (`FUN_0046ad60` passes float pixels), +1 px in x (live): `event-bracket-lcg-duel` 2.63 -> 0.77, `-lcg-blade` 2.60 -> 0.75, `-tabletop` 2.61 -> 0.79.
+* **Open / not rendering**: `match-f1`, `match-pause` (the live match behind the window), `event-bracket-duel-round1` (the opponents' order), `event-repairs` (another robot), `event-award-photo` (turntable, points),
+  `options-resolution-open` (ours shows 1280x1024 as the current resolution, the capture 1024x768: state), the import dialog's leftover preview. The list ring of the arena picker is 1 px outside the capture's (ring inside the
+  scroller body there, outside in the team lists: not a single rule yet); the `Border` of the drop-down field's text box is 1 px high.
+* Tests that pinned the fractional geometry now pin the whole-pixel one (`ra2ui` lib: logo y 70, lower split 140, content slot 762, cell insets, the 334 px schedule grid, the bracket's lines at 111 px steps);
+  the new rules are covered by the suite numbers above (no unit test of the filtered sampler). The toolchain moved to rustc 1.99.1 during the work; one new clippy lint in `match_mode.rs` (`single_element_loop`)
+  is fixed. Gate (engine/): `cargo fmt --all --check` clean; `cargo clippy --release --offline --workspace --all-targets -- -D warnings` clean; `cargo test --release --offline --workspace --no-fail-fast`
+  852 passed, 0 failed, 2 ignored; `find ../local/game -newer <stamp>` empty. Reproduce: `tools/oracle/fidelity.py --renderer app --out DIR`.
+
+| fixture | before | after |
+|---|---:|---:|
+| match-f1 | 6.69 | 3.40 |
+| teamhq-standings | 2.67 | 0.06 |
+| match-pause | 5.64 | 3.13 |
+| event-bracket-lcg-duel / -lcg-blade / -tabletop | 2.63 / 2.60 / 2.61 | 0.77 / 0.75 / 0.79 |
+| teamhq-event-join-robot / teamhq-event-join | 2.48 / 2.47 | 0.70 / 0.74 |
+| exhibition-time-open / -deathmatch / -settings / -weight-light | 1.81 / 1.60 / 1.68 / 1.65 | 0.22 / 0.08 / 0.16 / 0.14 |
+| teamhq-events | 1.39 | 0.05 |
+| event-bracket-duel-round1 / event-repairs | 5.68 / 4.68 | 4.43 / 4.00 |
+| teamhq-export-dialog / import-dialog / import-row / import-done | 1.90 / 1.91 / 1.59 / 1.53 | 0.86 / 1.16 / 0.83 / 0.51 |
+| teamhq-inventory / buttons-none / buttons-empty / scrap-selected / scrap-done / scrap-box | 1.37 / 1.49 / 1.53 / 1.65 / 1.37 / 1.66 | 0.36 / 0.51 / 0.73 / 0.76 / 0.48 / 1.00 |
+| teamhq-select / newteam / editteam / history | 0.92 / 0.95 / 1.38 / 0.24 | 0.21 / 0.63 / 0.79 / 0.02 |
+| exhibition-arena / arena-box / pick-ai / pick-ai-light | 1.46 / 1.28 / 1.49 / 1.41 | 0.83 / 0.83 / 1.08 / 1.08 |
+| botlab-wiring / components / paint | 1.45 / 1.04 / 0.67 | 0.99 / 0.94 / 0.58 |
+| botlab-chassis / botlab-overview (worse) | 0.30 / 0.25 | 0.35 / 0.31 |
