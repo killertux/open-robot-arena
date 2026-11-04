@@ -556,6 +556,40 @@ fn brains_per_substep() -> bool {
     *ON.get_or_init(|| std::env::var_os("RA2_BRAINS_PER_SUBSTEP").is_some())
 }
 
+/// Whether a component has a collidable a zone, a phantom or a ray meets: every component with a
+/// rigid body that is not a phantom, batteries, air tanks, packs and control boards included
+/// (docs/29 12at: the original builds them, `nocoll = false`; 12au: zone pair lists and casts meet them).
+/// `RA2_ZONE_INTERNALS=0` leaves them out as before 12au.
+fn zone_collidable(c: &crate::rig::Component) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let internals =
+        *ON.get_or_init(|| std::env::var("RA2_ZONE_INTERNALS").map_or(true, |v| v != "0"));
+    if internals && crate::robot::internals_collide() {
+        c.role.is_physical() || !c.hull_points.is_empty()
+    } else {
+        c.role.is_physical() && c.role != crate::rig::Role::Power
+    }
+}
+
+/// The `chassis` argument of a zone event: the collidable's tag has bit 0 set for the chassis' own
+/// collidable only (live, `zonepieces-*`: the chassis 17 / 33, every other piece of the chassis body, the
+/// motors', batteries', boards' and tanks' housings, 16 / 32; docs/29 12au). Before it was every piece of
+/// the chassis body (`part == 0`); `RA2_ZONE_CHASSIS=0` gives that back.
+fn zone_chassis_flag(component: usize, part: usize) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var("RA2_ZONE_CHASSIS").map_or(true, |v| v != "0")) {
+        component == 0
+    } else {
+        part == 0
+    }
+}
+
+/// `RA2_ZONE_LOG=1`: log every collidable that enters a robot's SmartZone (docs/29 12au).
+fn zone_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_ZONE_LOG").is_ok_and(|v| v != "0"))
+}
+
 fn zone_phantoms() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RA2_ZONE_PHANTOMS").map_or(true, |v| v != "0"))
@@ -1927,7 +1961,7 @@ impl Duel {
         for &margin in margins {
             let grow = Vec3::splat(margin);
             for (ci, c) in r.rig.components.iter().enumerate() {
-                if !r.attached[ci] || !c.role.is_physical() || c.role == crate::rig::Role::Power {
+                if !r.attached[ci] || !zone_collidable(c) {
                     continue;
                 }
                 let own_part = r.rig.part_of[ci];
@@ -1988,8 +2022,7 @@ impl Duel {
                     }
                     // What the phantom can see: the component's collision
                     // pieces (a power cell or fitting collides with nothing).
-                    let collides = c.role.is_physical() && c.role != crate::rig::Role::Power;
-                    if !collides {
+                    if !zone_collidable(c) {
                         continue;
                     }
                     let own_part = r.rig.part_of[ci];
@@ -2006,8 +2039,9 @@ impl Duel {
                         if crate::hazards::box_touches_piece(to_zone, zone.min, zone.max, pts, mesh)
                         {
                             inside = true;
-                            chassis |= part == 0;
-                            now.push((ci, k, part == 0));
+                            let is_chassis = zone_chassis_flag(ci, part);
+                            chassis |= is_chassis;
+                            now.push((ci, k, is_chassis));
                         }
                     }
                 }
@@ -2149,10 +2183,7 @@ impl Duel {
                     let other = &self.robots[o];
                     let mut hits: Vec<(usize, bool, bool)> = Vec::new();
                     for (ci, c) in other.rig.components.iter().enumerate() {
-                        if !other.attached[ci]
-                            || !c.role.is_physical()
-                            || c.role == crate::rig::Role::Power
-                        {
+                        if !other.attached[ci] || !zone_collidable(c) {
                             continue;
                         }
                         let own_part = other.rig.part_of[ci];
@@ -2168,7 +2199,7 @@ impl Duel {
                         {
                             if crate::hazards::box_touches_piece(to, zone.min, zone.max, pts, mesh)
                             {
-                                hits.push((ci * 64 + k2, part == 0, false));
+                                hits.push((ci * 64 + k2, zone_chassis_flag(ci, part), false));
                             }
                         }
                         for (k2, (pts, _)) in c
@@ -2223,6 +2254,15 @@ impl Duel {
                         now.insert(key);
                         if !self.brain_zone_inside.contains(&key) {
                             events.push((r, 1, id, o as i32 + 1, chassis));
+                            if zone_log() {
+                                self.log.push(format!(
+                                    "smartzone robot {} ({}) entered by robot {} {:?}",
+                                    r + 1,
+                                    id,
+                                    o + 1,
+                                    other.rig.components[piece / 64].name
+                                ));
+                            }
                         }
                         chassis_of.insert(key, chassis);
                     }
@@ -2831,8 +2871,9 @@ impl Duel {
                 let mut out: Vec<FlameTarget> = Vec::new();
                 for i in 0..robot.rig.components.len() {
                     let c = &robot.rig.components[i];
-                    // a part with no collidable (a battery, a board, a tank inside the chassis) is no obstacle
-                    if !(c.role.is_physical() && c.role != crate::rig::Role::Power) {
+                    // a part with no collidable (a SmartZone's display) is no obstacle; the batteries, tanks and
+                    // boards inside a chassis are collidables the cast meets (docs/29 12au)
+                    if !zone_collidable(c) {
                         continue;
                     }
                     let (_, rotation, _) = worlds[i].to_scale_rotation_translation();
@@ -7929,6 +7970,50 @@ mod tests {
         parts.sort();
         parts.dedup();
         assert!(parts.len() >= 2, "one event per collidable: {entered:?}");
+    }
+
+    /// docs/29 §12au: only the chassis' own collidable carries the chassis flag a zone event reports
+    /// (live tags 17 / 33; the housings on the chassis body 16 / 32).
+    #[test]
+    fn only_the_chassis_collidable_is_flagged_chassis() {
+        assert!(zone_chassis_flag(0, 0));
+        assert!(!zone_chassis_flag(6, 0), "a battery on the chassis body");
+        assert!(!zone_chassis_flag(3, 1));
+    }
+
+    /// docs/29 §12au: the casts and the zone readings meet the batteries, tanks and boards, which the
+    /// original builds as collidables (`RA2_ZONE_INTERNALS=0` leaves them out).
+    #[test]
+    fn a_zone_and_a_cast_meet_the_batteries_and_boards() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let bot = game.join("AI/Team0/Bot0.bot").to_string_lossy().to_string();
+        let setups = [BotSetup {
+            path: bot,
+            yaw_deg: Some(0.0),
+            spawn: Some([0.0, 0.0]),
+        }];
+        let mut duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        let internals: Vec<usize> = duel.robots[0]
+            .rig
+            .components
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c.role, crate::rig::Role::Power | crate::rig::Role::Control))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!internals.is_empty(), "the Scout has a battery and a board");
+        for &i in &internals {
+            assert!(zone_collidable(&duel.robots[0].rig.components[i]));
+        }
+        let targets = duel.flame_targets();
+        for &i in &internals {
+            assert!(
+                targets[0].iter().any(|t| t.0 == i),
+                "a cast meets component {i}"
+            );
+        }
     }
 
     /// docs/29 §12aa: a collidable the script gave a sub-material
