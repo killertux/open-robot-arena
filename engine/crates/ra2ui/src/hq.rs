@@ -625,13 +625,6 @@ impl Hq {
     fn fill_events(&mut self) -> Result<(), String> {
         let rows = self.view.events.clone();
         let ui_root = self.ui_root.clone();
-        // The live content group is 420 px tall at 1024x768 where ours is 422.9 (the chain of
-        // splits above it is not recovered, docs/36 9.22); the schedule needs the 420 (the
-        // calendar 0.95 of it = 399, its split 0.9 = 359, minus the 26 px title = the grid's
-        // 333, three rows of 111). A fit of the events pane only, as a fraction so it scales.
-        if let Some(group) = find_mut_in(&mut self.document, "events group") {
-            crate::input::set_field(group, "Size", "1 1 0.99325 1");
-        }
         let Some(grid) = find_mut_in(&mut self.document, EVENT_GRID) else {
             return Ok(());
         };
@@ -734,7 +727,7 @@ impl Hq {
         for r in 0..=rows_n {
             grid.children.push(grid_line(
                 &format!("grid line row {r}"),
-                [0.0, 1.0, r as f32 / rows_n as f32, 1.0],
+                [0.0, 1.0, r as f32 * 111.0, 0.0],
                 [1.0, 1.0, 1.0, 0.0],
             ));
         }
@@ -1761,7 +1754,8 @@ mod tests {
         assert_eq!(line("grid line column 1").w, 1.0);
         assert_eq!(line("grid line row 0").y.floor(), 318.0);
         assert_eq!(line("grid line row 0").w.round(), 552.0);
-        assert_eq!(grid.frame.h.floor(), 333.0, "three rows of 111 (live)");
+        // 0.9 of the calendar's 401 less the 26 px title: the 334 px grid holds three rows of 111 (live lines).
+        assert_eq!(grid.frame.h.floor(), 334.0);
         let ys: Vec<f32> = (0..4)
             .map(|r| line(&format!("grid line row {r}")).y.floor())
             .collect();

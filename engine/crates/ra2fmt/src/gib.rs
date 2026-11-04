@@ -459,6 +459,18 @@ impl Length {
         Some(Length::new(v[0], v[1]))
     }
 
+    /// The amount in whole pixels, as the exe resolves a length (`FUN_005e8c30`): `__ftol(fraction * parent)`,
+    /// the parent's integer extent times the float fraction, truncated toward zero. Multiplied in single
+    /// precision: the double-precision product (`0.95 * 300 = 284.99999`, so 284) moved the repair bench,
+    /// the bracket and the F1 reminder away from their captures (docs/34 11.12).
+    pub fn ftol(&self, parent: f32) -> f32 {
+        if self.fraction {
+            (self.amount * parent).trunc()
+        } else {
+            self.amount.trunc()
+        }
+    }
+
     /// The amount in the parent's units (pixels, given the parent's extent).
     pub fn resolve(&self, parent: f32) -> f32 {
         if self.fraction {

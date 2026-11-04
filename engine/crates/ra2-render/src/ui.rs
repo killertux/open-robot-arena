@@ -269,6 +269,16 @@ impl UiAssets {
                 border_quads(owner, clip, &mut quads);
                 borders.pop();
             }
+            if p.widget.kind == ra2fmt::gib::WidgetKind::DropDown
+                && p.widget.field("_Open").is_some_and(|f| f.text() == "true")
+            {
+                // An open list hangs over everything around it, the borders of the groups it was lifted
+                // out of included (the exhibition panel's bottom edge does not cross the match-time list
+                // in the capture): those rings are drawn before it, not after.
+                while let Some((owner, clip)) = borders.pop() {
+                    border_quads(owner, clip, &mut quads);
+                }
+            }
             if !p.widget.visible() {
                 continue;
             }
@@ -920,13 +930,19 @@ fn border_quads(p: &Placement<'_>, clip: Option<Frame>, out: &mut Vec<UiQuad>) {
             (width - ring) as f32
         };
         let (x, y, w, h) = (f.x - e, f.y - e, f.w + 2.0 * e, f.h + 2.0 * e);
+        let top_left_only = border
+            .field("Sides")
+            .is_some_and(|f| f.raw.trim() == "top left");
         let sides = [
             Frame::new(x, y, w, 1.0),
             Frame::new(x, y + h - 1.0, w, 1.0),
             Frame::new(x, y + 1.0, 1.0, h - 2.0),
             Frame::new(x + w - 1.0, y + 1.0, 1.0, h - 2.0),
         ];
-        for rect in sides {
+        for (i, rect) in sides.into_iter().enumerate() {
+            if top_left_only && (i == 1 || i == 3) {
+                continue;
+            }
             if rect.w <= 0.0 || rect.h <= 0.0 {
                 continue;
             }
