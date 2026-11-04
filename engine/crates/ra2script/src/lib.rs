@@ -161,8 +161,12 @@ pub struct Sound {
     pub id: SoundId,
     /// The script's own path spelling.
     pub path: String,
-    /// `createSound`'s second argument, changed by `plus.loopSound`.
+    /// Set by `plus.loopSound` / `plus.fadeInToLoop`; a created sound is a one-shot.
     pub looping: bool,
+    /// `createSound`'s second argument: **the 3D flag** (`SoundWizard::Create`'s `is3D`, `0x4f0000`),
+    /// not a loop flag. Live (`audio-match-octagon-scout-alarm`): the hazard scripts pass `True`
+    /// and `playSound` plays the buffer once (`hellraiser_trigger` is `Play`, never `Loop`).
+    pub spatial: bool,
     /// `createSound`'s third argument, the emitter position.
     pub position: [f32; 3],
 }
@@ -238,15 +242,15 @@ impl SoundQueue {
         }
     }
 
-    /// `plus.createSound(path, looping, position)` — make a handle.
+    /// `plus.createSound(path, is3D, position)` — make a handle.
     ///
-    /// `loop=false` still creates: the arena scripts create the intro music
-    /// once and call `loopSound` on it later, while `Spikes` creates its fire
-    /// sound with `loop=true` and plays it with `playSound`.
+    /// The second argument is the 3D flag, not a loop flag (live, docs/35 section 14): the arena
+    /// scripts create the intro music (`False`) and call `loopSound` on it later, and the
+    /// hazards create their sounds with `True` and play them once with `playSound`.
     pub fn create(
         &mut self,
         path: impl Into<String>,
-        looping: bool,
+        spatial: bool,
         position: [f32; 3],
     ) -> SoundId {
         let id = SoundId(self.next_id);
@@ -256,7 +260,8 @@ impl SoundQueue {
             Sound {
                 id,
                 path: path.into(),
-                looping,
+                looping: false,
+                spatial,
                 position,
             },
         );
@@ -266,6 +271,11 @@ impl SoundQueue {
     /// The live sound behind a handle, if it has not been removed.
     pub fn get(&self, id: SoundId) -> Option<&Sound> {
         self.sounds.get(&id)
+    }
+
+    /// The sound behind a handle, live or removed since (a handle a request still names).
+    pub fn find(&self, id: SoundId) -> Option<&Sound> {
+        self.sounds.get(&id).or_else(|| self.retired.get(&id))
     }
 
     /// The live handles and their sounds, in handle order.
@@ -724,6 +734,17 @@ static STATE: Mutex<State> = Mutex::new(State::new());
 /// `Arenas.currentArena` is a module global — so the live match is shared.
 /// Anything that drives a scripted match (a test, a tool) takes this first.
 static SCRIPT_LOCK: Mutex<()> = Mutex::new(());
+
+/// While set, [`ScriptHost::boot_with_scripts`] leaves the arena's `Activate(True)` to the caller
+/// (`ScriptHost::activate_arena`): the original calls it when the fight begins, at the bell, not
+/// when the match is built, so the arena's own clocks (the Octagon's and the Skull's trap floors
+/// slide 90 arena ticks after it) start there (`docs/35` section 14).
+static HOLD_ACTIVATION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Hold (or release) the arena's `Activate(True)` at boot; see [`HOLD_ACTIVATION`].
+pub fn hold_arena_activation(hold: bool) {
+    HOLD_ACTIVATION.store(hold, std::sync::atomic::Ordering::SeqCst);
+}
 
 /// Take the whole script layer for this thread.
 pub fn lock() -> MutexGuard<'static, ()> {

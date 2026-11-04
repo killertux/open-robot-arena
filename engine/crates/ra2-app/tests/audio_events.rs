@@ -323,3 +323,105 @@ fn no_effect_is_ever_positioned_in_a_match() {
     assert!(events.iter().filter(|e| e.kind == "create").count() > 100);
     assert_eq!(events.iter().filter(|e| e.kind == "pos").count(), 0);
 }
+
+const OCTAGON: &str = "audio-match-octagon-scout-alarm__live__000.events.tsv";
+const COMPRESSOR: &str = "audio-match-compressor-scout-alarm__live__000.events.tsv";
+const BOTLAB_REMOVE: &str = "audio-botlab-place__live__000.events.tsv";
+const BOTLAB_ATTACH: &str = "audio-botlab-place__live__001.events.tsv";
+
+/// The Octagon's four trap floors loop their slide sound 90 arena ticks (22.5 s) after the bell
+/// (`Activate(True)` is called at the bell, docs/35 section 14), and stop it again 8 s later; the
+/// hellraisers' trigger sound is a one-shot `Play`, never a `Loop` (`createSound`'s second argument
+/// is the 3D flag). The decision starts the outro music and one `End_*` line.
+#[test]
+fn the_octagon_floors_slide_22_5_s_after_the_bell_and_the_hellraiser_is_a_one_shot() {
+    let Some(events) = load(OCTAGON) else { return };
+    let bell = plays(&events, |f| f == "match_countdown_high.wav")
+        .next()
+        .expect("the bell")
+        .t;
+    let slides: Vec<&Event> = events
+        .iter()
+        .filter(|e| e.kind == "loop" && e.file == "hzd_trapfloor_loop.wav")
+        .collect();
+    assert_eq!(slides.len(), 4, "four floors");
+    for slide in &slides {
+        let after = slide.t - bell;
+        assert!(
+            (22.0..23.2).contains(&after),
+            "slide loop {after} s after the bell"
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .all(|e| !(e.kind == "loop" && e.file == "hellraiser_trigger.wav")),
+        "the hellraiser trigger never loops"
+    );
+    assert!(plays(&events, |f| f == "hellraiser_trigger.wav").count() >= 2);
+    let outro = events
+        .iter()
+        .find(|e| e.kind == "loop" && e.file == "hopp_club.wav")
+        .expect("the outro music loops at the decision");
+    let line = plays(&events, |f| f.starts_with("End_"))
+        .next()
+        .expect("one closing line");
+    assert!(
+        (line.t - outro.t).abs() < 0.1,
+        "the music and the line start together"
+    );
+}
+
+/// The Compressor and the Octagon open with the same intro as the Box (the music, the arena line,
+/// the generic line, the hazard line, the bots line) and the crowd's bored transitions.
+#[test]
+fn the_other_arenas_play_the_same_intro_schedule() {
+    for (name, arena) in [
+        (OCTAGON, "Arena_Octagon_"),
+        (COMPRESSOR, "Arena_Compressor_"),
+    ] {
+        let Some(events) = load(name) else { return };
+        let bell = plays(&events, |f| f == "match_countdown_high.wav")
+            .next()
+            .expect("the bell")
+            .t;
+        let at = |pred: &dyn Fn(&str) -> bool| plays(&events, pred).next().map(|e| e.t - bell);
+        let welcome = at(&|f| f.starts_with(arena)).expect("arena line");
+        let generic = at(&|f| f.starts_with("Intro_")).expect("generic line");
+        let hazard = at(&|f| f.starts_with("Hazard_")).expect("hazard line");
+        let bots = at(&|f| f.starts_with("Bots_")).expect("bots line");
+        // Seconds from the bell: -27.1 / -24.1 / -19.6 / -14.0 (octagon), -27.2 / -24.1 / -19.0 / -13.0
+        assert!((-27.6..-26.8).contains(&welcome), "{name}: arena {welcome}");
+        assert!(
+            (-24.5..-23.8).contains(&generic),
+            "{name}: generic {generic}"
+        );
+        assert!((-20.0..-18.5).contains(&hazard), "{name}: hazard {hazard}");
+        assert!((-14.5..-12.5).contains(&bots), "{name}: bots {bots}");
+    }
+}
+
+/// Bot Lab: attaching a part creates and plays its `attachsound` once at volume 0 (the Mud Tire's
+/// definition names none, and `sounds\cmp_generic.wav` plays); removing a part plays
+/// `cmp_removal.wav` the same way; the Attach and palette buttons click.
+#[test]
+fn the_bot_lab_plays_the_attach_and_removal_sounds_once_at_unity() {
+    let Some(attach) = load(BOTLAB_ATTACH) else {
+        return;
+    };
+    let generic = plays(&attach, |f| f == "cmp_generic.wav").count();
+    assert_eq!(generic, 1, "one attach sound");
+    let created = attach
+        .iter()
+        .find(|e| e.kind == "create" && e.file == "cmp_generic.wav")
+        .expect("created");
+    assert_eq!(created.volume, Some(0));
+    let Some(remove) = load(BOTLAB_REMOVE) else {
+        return;
+    };
+    assert_eq!(plays(&remove, |f| f == "cmp_removal.wav").count(), 1);
+    assert!(
+        remove.iter().any(|e| e.kind == "ui_click"),
+        "the Attach and palette buttons click"
+    );
+}
