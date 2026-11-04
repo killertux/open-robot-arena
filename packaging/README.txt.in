@@ -19,14 +19,20 @@ frames.
   * A display for the windowed client ($DISPLAY or $WAYLAND_DISPLAY). Without
     one, use --offscreen PNG or the --match/--build/--hq --out DIR runs.
   * CPython 3.12 with its shared library. See section 3.
-  * Your Robot Arena 2 installation. For the client it needs at least:
+  * Your own Robot Arena 2 installation, patched to version 1.20 (the final
+    patch; the game's ReadMe.txt says "version 1.20"). Install the game from
+    your copy on Windows or under Wine and use the folder it created
+    (typically "C:\Program Files (x86)\Robot Arena 2"); it is the folder that
+    holds "Robot Arena 2.exe". The port reads its data and never runs the
+    .exe, nor changes anything in the folder. To start it needs:
 
         RA2.cfz
         UI/
         Scripts/
 
-    The other tools also use Components/, Arenas/, AI/, Teams/ and the .cfz
-    archives, so point them at the complete install.
+    To play (matches, the workshop, sound) it needs the complete install:
+    Components/, Arenas/, AI/, Sounds/, Music/ as well. A thin folder starts
+    with a warning that names what is missing.
 
 ------------------------------------------------------------------------------
 2. Unpack and run
@@ -51,8 +57,10 @@ The headless route runner is still in bin/ra2-shell. Its shipped routes are:
 
     bin/ra2-shell --game "/path/to/Robot Arena 2" --route botlab --out /tmp/shots
 
-The launcher looks for the game in this order: --game, $RA2_GAME_DIR,
-$XDG_DATA_HOME/ra2-open-robot-arena/game, game/ beside the launcher (or ../game
+Once the client has started with --game, it remembers the folder (game-dir.txt
+in the save folder), so the next start, and the desktop entry, need no flag.
+The launcher looks for the game in this order: --game, $RA2_GAME_DIR, that
+remembered folder, $XDG_DATA_HOME/ra2-open-robot-arena/game, game/ beside the launcher (or ../game
 when installed), ./local/game upwards from the current directory, then
 /usr/local/share/ra2-open-robot-arena/game, /usr/share/ra2-open-robot-arena/game
 and /opt/ra2/game. If none is found it prints the three required names and
@@ -62,13 +70,30 @@ The client is the whole game: main menu, Exhibition, Team HQ (career, events,
 robot inventory), the workshop (bot lab) and matches, driven with the mouse and
 the keyboard (W/A/S/D or the arrows drive your robot, C and F2-F4 change the
 camera, F1 lists the robot's controls, Esc pauses). There is no gamepad
-support. What it does and does not do compared with the original is in
+support, and the original has none either (see "Controllers" below). What it
+does and does not do compared with the original is in
 docs/40-playing.md of the source tree.
 
-Your career, teams, robot designs and settings are written to a per-user save
+Settings (resolution, full screen, volume, mutes, detail, camera) are changed
+in the game's own Options window and kept in ra2.cfg in the save folder; a new
+resolution or window mode applies the next time you start. Your career,
+teams, robot designs and settings are written to a per-user save
 folder, never to your game install: --save-dir DIR, else $ORA_SAVE_DIR, else
 $XDG_DATA_HOME/open-robot-arena (~/.local/share/open-robot-arena). The files use
 the original's formats, so they can be copied to and from the original game.
+
+Controllers: the original opens only the keyboard and the mouse through
+DirectInput (no joystick or gamepad is ever read, whatever the box says), and
+neither does the port. A robot's controls are keyboard keys, set in the
+workshop's Wiring screen; to play on a pad, map it to keys with your system's
+input remapper.
+
+Multiplayer: the main menu's Multiplayer screen has the original's lobby. One
+player picks Create Game, the others press Refresh and Join on the same
+network (UDP; allow it through the firewall). It is the port's own protocol:
+it works between copies of this port, not with the original game, and not over
+the Internet (the original's GameSpy master is gone). Every player needs the
+same game version (1.20).
 
 ------------------------------------------------------------------------------
 3. CPython 3.12 is required (and is not bundled)
@@ -151,7 +176,7 @@ Does not work yet:
   * Physics fine-tuning (a few stock robots still handle differently), the
     slash decals of cutting weapons, and a handful of workshop gestures
     (shift-mouse rotation, outline-to-mesh extrusion).
-  * No gamepad, no localisation, no update check, no mods beyond the game's
+  * No gamepad (the original has none), no localisation, no update check, no mods beyond the game's
     own directories.
   * The Microsoft codecs, installers and D3D wrappers in the original install
     (D3D8.dll, dgVoodoo, .exe) are not used; the .exe is never run.
@@ -178,7 +203,16 @@ $XDG_DATA_HOME/ra2-open-robot-arena/game location is checked automatically.
   "no Robot Arena 2 installation found": the launcher lists every path it
   tried. Pass --game with the directory that directly contains RA2.cfz, UI/
   and Scripts/ (not its parent; the client also tells you when you named the
-  parent, a file, or a folder that does not exist).
+  parent, a file, or a folder that does not exist; naming "Robot Arena 2.exe"
+  itself also works).
+
+  "warning: ... version X": your copy is not 1.20. Apply the 1.20 patch to
+  your install; other versions may load but play differently or fail.
+
+  "warning: ... has no Components, Arenas ...": the folder is incomplete; copy
+  the whole install, not just RA2.cfz, UI and Scripts.
+
+  To start over, delete the save folder (settings, teams, careers, designs).
 
   "libpython3.12.so.1.0: missing": install the CPython 3.12 runtime; see
   section 3. `ldd bin/ra2-app | grep libpython` shows the resolution.
@@ -198,7 +232,8 @@ $XDG_DATA_HOME/ra2-open-robot-arena/game location is checked automatically.
 8. Licence and credits
 
 Our code is licensed MIT OR Apache-2.0 (see LICENSE-MIT, LICENSE-APACHE and
-NOTICE). The CPython runtime, Jolt Physics and the Rust crates keep their own
+NOTICE). The CPython runtime, the Rust crates (and Jolt Physics, only in the optional
+`jolt` build) keep their own
 licences; THIRD_PARTY.md lists them. Robot Arena 2 and all of its data remain
 the property of their respective owners; this package redistributes none of it.
 

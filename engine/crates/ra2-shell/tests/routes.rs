@@ -386,6 +386,45 @@ fn a_wrong_game_path_says_what_to_do() {
     std::fs::remove_dir_all(&root).ok();
 }
 
+/// An install that boots but is incomplete or another release gets a warning
+/// that says what to do; the shipped 1.20 install gets none.
+#[test]
+fn a_wrong_version_or_a_thin_install_warns() {
+    let dir = std::env::temp_dir().join(format!("ra2-shell-warn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("UI")).unwrap();
+    std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+    std::fs::write(dir.join("RA2.cfz"), b"x").unwrap();
+    let thin = game::warnings(&dir);
+    assert!(
+        thin.iter()
+            .any(|w| w.contains("Components") && w.contains("--game")),
+        "{thin:?}"
+    );
+    assert!(
+        thin.iter()
+            .any(|w| w.contains("version could not be checked")),
+        "{thin:?}"
+    );
+    std::fs::write(
+        dir.join("ReadMe.txt"),
+        b"Robot Arena 2  Readme\r\n\r\nRobot Arena: Design & Destroy(tm) version 1.00\r\n",
+    )
+    .unwrap();
+    assert_eq!(game::version(&dir).as_deref(), Some("1.00"));
+    let old = game::warnings(&dir);
+    assert!(
+        old.iter()
+            .any(|w| w.contains("version 1.00") && w.contains("1.20")),
+        "{old:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    if let Some(install) = game_dir() {
+        assert_eq!(game::version(&install).as_deref(), Some("1.20"));
+        assert!(game::warnings(&install).is_empty());
+    }
+}
+
 /// The arena tab's description is the selected arena's class docstring, in the
 /// `Glyph` that carries the `DisplayBox` on `description grp`'s child (the
 /// file's own "hammers" text is only the editor's placeholder).

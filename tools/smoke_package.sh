@@ -38,7 +38,11 @@ fi
     exit 2
 }
 
-if [ -d "$ROOT/local/game" ]; then
+if [ -n "${RA2_GAME_DIR:-}" ] && [ -d "$RA2_GAME_DIR" ]; then
+    GAME=$RA2_GAME_DIR
+    GAME_ARG=$GAME
+    RUN_CWD=$ROOT
+elif [ -d "$ROOT/local/game" ]; then
     GAME=$ROOT/local/game
     GAME_ARG=local/game
     RUN_CWD=$ROOT
@@ -63,6 +67,10 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+# The smoke test never writes to the player's real save folder or the install.
+ORA_SAVE_DIR=$TMP/save
+export ORA_SAVE_DIR
 
 die() {
     echo "smoke: $*" >&2

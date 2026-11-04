@@ -10,8 +10,13 @@ your install.
 
 * Linux x86_64 (the tested platform; macOS and Windows are unverified, see
   `docs/09-platforms.md`).
-* Your Robot Arena 2 folder: the one that holds `Robot Arena 2.exe`,
-  `RA2.cfz`, `UI/` and `Scripts/`. The `.exe` itself is never run.
+* Your own copy of Robot Arena 2, installed (on Windows, or under Wine) and
+  patched to **1.20**, the final patch: its `ReadMe.txt` starts "version 1.20".
+  The port needs the folder that holds `Robot Arena 2.exe`, `RA2.cfz`, `UI/`
+  and `Scripts/`, and to play also `Components/`, `Arenas/`, `AI/`, `Sounds/`
+  and `Music/`: copy the whole install. The `.exe` itself is never run and
+  nothing in the folder is changed. The game is not included and not
+  downloaded by the port.
 * CPython 3.12 with its shared library (`python3.12 libpython3.12` on
   Debian/Ubuntu); a Vulkan driver (Mesa's software one works) and a display.
 * To build from source: a Rust toolchain (stable), a C compiler, `python3.12-dev`,
@@ -40,10 +45,21 @@ Windows and Wine locations (`~/.wine/drive_c/Program Files (x86)/Robot Arena 2`
 and the Flatpak Wine prefix), and, with the packaged launcher, the XDG data
 directory, `game/` beside it, `/usr/local/share`, `/usr/share` and `/opt`.
 
+The first time you name a folder (`--game`, or the launcher's), a windowed run
+remembers it in `game-dir.txt` in the save folder, so the next start (and the
+desktop entry) needs no flag. There is no folder dialog: the port is a
+command-line launched client, and a wrong or missing folder is reported on
+stderr with the fix.
+
 If the folder is wrong, the message says why: it does not exist, it is a file
 (you can name the `.exe` itself and its folder is used), it is the parent of the
 install ("The install is one level down: ..."), or files are missing (it lists
-`RA2.cfz`, `UI`, `Scripts`). With no folder found it lists where it looked.
+`RA2.cfz`, `UI`, `Scripts`). With no folder found it lists where it looked. A folder that boots but is
+incomplete (no `Components`, `Arenas`, `AI`, `Sounds` or `Music`), or whose
+`ReadMe.txt` says a version other than 1.20 (or which has no `ReadMe.txt`), starts
+with a `ra2-app: warning:` line saying what is missing or which patch to apply;
+the port does not refuse it, since the menus still work, but a version other
+than 1.20 is unmeasured and may play differently or fail to load.
 
 ### Where your saves go
 
@@ -51,7 +67,8 @@ install ("The install is one level down: ..."), or files are missing (it lists
 (`%APPDATA%\open-robot-arena` on Windows, `~/Library/Application Support/...` on
 macOS). The files are in the original's formats and folder layout (`Teams/`,
 `Robot Designs/`, `ra2.cfg`), so they can be copied to and from the original
-game. Delete the folder to start over. Details: `docs/39-save-location.md`.
+game. Delete the folder to start over. Resolution, full screen, volumes and
+mutes persist in its `ra2.cfg` as soon as you change them in Options. Details: `docs/39-save-location.md`.
 
 ## Playing
 
@@ -83,8 +100,14 @@ game. Delete the folder to start over. Details: `docs/39-save-location.md`.
 | F1 | the robot's controls |
 | Esc | in a match: skip the intro, pause and resume. On the menus it does nothing, as in the original |
 
-There is **no gamepad support** (the original had none we could use either:
-its robots store keyboard and joystick codes, and only the keyboard is wired).
+There is **no gamepad or joystick support, and the original has none**. In
+`Robot Arena 2.exe` the one `DirectInput8Create` caller (`0x5d4890`) creates
+only `GUID_SysKeyboard` and `GUID_SysMouse` devices (no `EnumDevices`, no
+`GUID_Joystick`, no `joyGetPos` import; `ra2.cfg`'s `Input Config` section is
+empty). The wiring screen's "keyboard or joystick controls" text and the
+ReadMe's "Gamepad optional" are leftovers: a robot's stored binding rows are
+DirectInput keyboard scan codes. To play on a pad, map it to keys with your
+system's input remapper.
 
 ## What matches the original, and what does not
 
@@ -111,7 +134,8 @@ Known differences and open items:
 * The workshop's shift-mouse rotation and outline-to-mesh extrusion, the
   event's 3D prize scene, and a new empty robot in the workshop starting from a
   stock chassis (the original starts with none) are open.
-* macOS and Windows builds are unverified; no gamepad; no localisation.
+* macOS and Windows builds are unverified; no gamepad (nor in the original); no
+  localisation.
 
 If something blocks you, run with `--help` for the options and see the README's
 troubleshooting notes.

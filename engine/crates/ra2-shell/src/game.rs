@@ -15,6 +15,13 @@ pub const REQUIRED: [&str; 3] = ["RA2.cfz", "UI", "Scripts"];
 /// The environment variable that overrides the search.
 pub const ENV: &str = "RA2_GAME_DIR";
 
+/// The release the port is built and measured against: the final patch.
+pub const SUPPORTED_VERSION: &str = "1.20";
+
+/// Folders the game needs to be played (the shell alone boots without them, but
+/// a match, the workshop or the audio do not).
+pub const PLAYABLE: [&str; 5] = ["Components", "Arenas", "AI", "Sounds", "Music"];
+
 /// The install's executable. The port never runs it, but it is the file a
 /// player recognises their install folder by, so the messages name it.
 pub const EXE: &str = "Robot Arena 2.exe";
@@ -107,6 +114,52 @@ pub fn check(path: &Path) -> Result<(), String> {
     ))
 }
 
+/// The version the install's `ReadMe.txt` states (`... version 1.20`), if it
+/// states one.
+pub fn version(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path.join("ReadMe.txt")).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    text.lines().take(40).find_map(|line| {
+        let at = line.find("version ")? + "version ".len();
+        let v: String = line[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        (v.contains('.') && v.chars().next().is_some_and(|c| c.is_ascii_digit())).then_some(v)
+    })
+}
+
+/// Things that are wrong with an install that [`check`] accepts, as sentences
+/// for the player: missing game folders, and a version other than the one the
+/// port was measured against. They are warnings: the port still starts.
+pub fn warnings(path: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let missing: Vec<&str> = PLAYABLE.iter().copied().filter(|n| !has(path, n)).collect();
+    if !missing.is_empty() {
+        out.push(format!(
+            "{} has no {}: the menus start, but matches, the workshop or sound will fail. \
+             Point --game at a complete install (the whole folder, not only RA2.cfz, UI and Scripts).",
+            path.display(),
+            missing.join(", ")
+        ));
+    }
+    match version(path) {
+        Some(v) if v == SUPPORTED_VERSION => {}
+        Some(v) => out.push(format!(
+            "this install says it is version {v}; the port is built and measured against \
+             version {SUPPORTED_VERSION}, the final patch. Other versions may play differently \
+             or fail to load. Install the {SUPPORTED_VERSION} patch for your copy."
+        )),
+        None if has(path, "ReadMe.txt") => {}
+        None => out.push(format!(
+            "no ReadMe.txt in {}, so the game version could not be checked; the port expects \
+             version {SUPPORTED_VERSION}, the final patch.",
+            path.display()
+        )),
+    }
+    out
+}
+
 /// The game directory: `RA2_GAME_DIR`, else `local/game` above the working
 /// directory or this crate, else the places a Windows/Wine install usually
 /// lives, else a clear error naming every place tried.
@@ -157,7 +210,7 @@ pub fn find() -> Result<PathBuf, String> {
         .collect();
     Err(format!(
         "no Robot Arena 2 install found. The port needs your own copy of the game: a folder holding \
-         {EXE}, {}, {}/ and {}/. Tell it where with --game DIR or {ENV}=DIR. \
+         {EXE}, {}, {}/ and {}/. Tell it where with --game DIR or {ENV}=DIR (the folder is remembered after a windowed run). \
          Looked in: {ENV} (not set), local/game above the working directory, e.g.\n{}\n and the usual Windows/Wine places, e.g.\n{}",
         REQUIRED[0],
         REQUIRED[1],
