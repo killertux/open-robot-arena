@@ -7549,6 +7549,12 @@ The flag alone moves the Compressor (`RA2_ZONE_INTERNALS=0` with the flag: 7.4 /
 before they stop when the chassis alone has to be in range. The Wide Load count is further from live's 73.6 than
 before (86.6; the Box's chassis count is unchanged); the Wedge, which the Wide Load pushes with, is now right.
 
+*On the merged base b6394ac* (audio4: the arena's `Activate(True)` at the bell, so the Octagon's trap floors move at the
+bell + 22.5 s), the same 96 warmups, before = `RA2_ZONE_INTERNALS=0 RA2_ZONE_CHASSIS=0`: Box, Razor and the Compressor are
+unchanged to the digit (no trap floors); **Octagon R0 / R1 5.1 +- 0.3 / 16.8 +- 1.5 before, 5.5 +- 0.3 / 21.9 +- 1.7 after**; hellraiser runs a
+fight 0.97 before (48 of 96 with a run before 45 s), **0.84 after (39 of 96)**, live 1.3 (16 of 28, 0.9 for all 28 fights).
+Neither is a significant gap against the 28 live fights (16 with a run before 45 s, 57 %).
+
 **8. Open.** The Compressor's Wide Load count (94.8 against 73.6) and the Octagon's Mini-wheel hits (1.46 against
 0 of 5 fights) moved the wrong way with the flag that is right in the binary; the likely place is the SmartZone's
 reach or the Attack tactic's `fRadius`/`GetDistanceToID` (not compared) rather than the flag. The Box's chassis
