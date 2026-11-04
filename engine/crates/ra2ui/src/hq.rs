@@ -597,6 +597,8 @@ impl Hq {
                     }
                 }
             }
+            // Live (`teamhq-inventory`): a cell's content starts one pixel in from its slot.
+            crate::input::set_field(cell, "_Inset", "1");
         }
         Ok(())
     }

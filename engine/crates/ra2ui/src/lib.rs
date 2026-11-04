@@ -1481,12 +1481,19 @@ fn sized(
     } else {
         0.0
     };
-    Frame::new(
+    let mut frame = Frame::new(
         parent.x + px - offset(anchor.h, w) + inset,
         parent.y + py - offset(anchor.v, h) - ascent,
         w - 2.0 * inset,
         h,
-    )
+    );
+    // A grid cell whose slot is a fraction of the grid (the inventory's even cells) starts 1 px in from its slot
+    // (`_Inset`, written by the filler: `Position` cannot mix a fraction with pixels); its size is the slot's,
+    // as its children's fractions show (the name box sits 1 px further right than a shrunk cell puts it).
+    if let Some(n) = widget.field("_Inset").and_then(|f| f.number()) {
+        frame = Frame::new(frame.x + n, frame.y + n, frame.w, frame.h);
+    }
+    frame
 }
 
 fn aspect(widget: &Widget, w: f32, h: f32) -> (f32, f32) {
