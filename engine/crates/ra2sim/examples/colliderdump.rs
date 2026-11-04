@@ -2,11 +2,14 @@
 //!
 //! Usage: `colliderdump <bot>`: one JSON line per piece: part, root component, component tag,
 //! the component's name, hull vertices (the convex hull of the piece's points), mesh triangle
-//! count, the part frame in the chassis frame (16 floats, column-major).
+//! count, the part frame in the chassis frame (16 floats, column-major), and whether the piece
+//! is registered with the collision-event filter (`registered`).
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let rig = ra2sim::rig::load(&a[0]).expect("load");
     for (p, tag, points, tris) in ra2sim::robot::Robot::collider_pieces(&rig) {
+        let registered = tag & ra2sim::robot::UNREGISTERED == 0;
+        let tag = tag & !ra2sim::robot::UNREGISTERED;
         let hull = ra2sim::massprops::hull_vertices(&points);
         let frame = rig.components[rig.parts[p].root].local.to_cols_array();
         let v: Vec<String> = hull
@@ -31,7 +34,7 @@ fn main() {
             )
         });
         println!(
-            "{{\"part\":{p},\"root\":{},\"tag\":{tag},\"name\":\"{}\",\"class\":\"{}\",\"hull\":[{}],\"points\":{},\"raw\":[{}],\"tris\":{ntris},\"tri_idx\":{idx},\"frame\":[{}]}}",
+            "{{\"part\":{p},\"root\":{},\"tag\":{tag},\"registered\":{registered},\"name\":\"{}\",\"class\":\"{}\",\"hull\":[{}],\"points\":{},\"raw\":[{}],\"tris\":{ntris},\"tri_idx\":{idx},\"frame\":[{}]}}",
             rig.parts[p].root,
             rig.components[tag as usize].name,
             rig.components[tag as usize].class,

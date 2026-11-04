@@ -7722,7 +7722,10 @@ mod tests {
                 .unwrap()
         };
         let (battery, board) = (named(scout, "Battery"), named(scout, "Control Board"));
-        let tags: Vec<u32> = pieces(scout).iter().map(|p| p.1).collect();
+        let tags: Vec<u32> = pieces(scout)
+            .iter()
+            .map(|p| p.1 & !crate::robot::UNREGISTERED)
+            .collect();
         assert!(
             tags.contains(&(battery as u32)),
             "the Scout's battery has a collidable"
@@ -7769,6 +7772,123 @@ mod tests {
                 priced.is_empty(),
                 "a battery's contact raises no hit: {priced:?}"
             );
+        }
+    }
+
+    /// docs/29 §12at: the event filter has an entry for a component's own-body collidable (a
+    /// motor's rotor, the piston's shaft, an arm), not for the housing of a component that has a
+    /// rotor, nor for batteries and boards, and an event with an unregistered collidable is
+    /// refused whatever the other has (live 112 of 112 collidables of the three fights, and 794
+    /// calls with a housing, a battery or a board, none admitted).
+    #[test]
+    fn a_housing_has_no_filter_entry_and_lets_no_event_through() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let scout = game.join("AI/Team0/Bot0.bot").to_string_lossy().to_string();
+        let alarm = game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string();
+        let setups = [
+            BotSetup {
+                path: scout,
+                yaw_deg: Some(0.0),
+                spawn: Some([0.0, 0.0]),
+            },
+            BotSetup {
+                path: alarm,
+                yaw_deg: Some(180.0),
+                spawn: Some([0.0, 3.0]),
+            },
+        ];
+        let duel = Duel::new(&arena, &setups).expect("the box arena builds a duel");
+        let (scout, alarm) = (&duel.robots[0], &duel.robots[1]);
+        let named = |r: &crate::robot::Robot, n: &str| {
+            r.rig
+                .components
+                .iter()
+                .position(|c| c.name.contains(n))
+                .unwrap()
+        };
+        let burst = named(scout, "Burst Motor");
+        let head = named(alarm, "Hammer Head");
+        let pieces = crate::robot::Robot::collider_pieces(&scout.rig);
+        let registered = |part: usize, comp: usize| {
+            pieces
+                .iter()
+                .filter(|p| p.0 == part && p.1 & !crate::robot::UNREGISTERED == comp as u32)
+                .map(|p| p.1 & crate::robot::UNREGISTERED == 0)
+                .collect::<Vec<_>>()
+        };
+        let fork = scout.rig.part_of[named(scout, "Forklift Arm")];
+        assert_eq!(registered(0, burst), [false], "the burst motor's housing");
+        assert_eq!(registered(fork, burst), [true], "its rotor");
+        for c in ["Angle Motor", "Battery", "Control Board"] {
+            assert!(
+                registered(0, named(scout, c)).iter().all(|r| !r),
+                "{c}: no entry"
+            );
+        }
+        for c in ["Round Extender", "Forklift Arm"] {
+            assert_eq!(registered(fork, named(scout, c)), [true], "{c}");
+        }
+        // The hammer's entry is due, and a contact with the housing is still refused; with
+        // the rotor it is let through.
+        let part_of = |r: &crate::robot::Robot, c: usize| r.rig.part_of[c];
+        let (sa, sh) = (
+            duel.physics.state(scout.parts[0].body).unwrap(),
+            duel.physics
+                .state(alarm.parts[part_of(alarm, head)].body)
+                .unwrap(),
+        );
+        let event = |tag_scout: u32, body_scout: usize| crate::backend::ContactEvent {
+            tag_a: head as u32,
+            tag_b: tag_scout,
+            a: alarm.parts[part_of(alarm, head)].body,
+            b: scout.parts[body_scout].body,
+            normal: Vec3::Z,
+            point: sa.position,
+            state_a: sh,
+            state_b: sa,
+        };
+        let mut gate = combat::EventGate::default();
+        let housing = burst as u32 | crate::robot::UNREGISTERED;
+        assert!(
+            gate.admit(&duel.robots, vec![event(housing, 0)], 10.0)
+                .is_empty(),
+            "a housing's contact is no event"
+        );
+        let mut gate = combat::EventGate::default();
+        assert_eq!(
+            gate.admit(&duel.robots, vec![event(burst as u32, fork)], 10.0)
+                .len(),
+            1,
+            "the rotor's is"
+        );
+    }
+
+    /// docs/29 §12at: a `SIMULATION_GEOMETRY` 0 body with a proxy (the angler) collides as its own
+    /// object, the 12-vertex `angler`, not the 8-vertex `angler_collision`: live Wide Load's
+    /// angle connectors.
+    #[test]
+    fn an_angler_collides_as_its_own_object() {
+        let Some(game) = game_dir() else { return };
+        let _scripts = ra2script::lock();
+        let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+        let wl = game.join("AI/Team8/Bot2.bot").to_string_lossy().to_string();
+        let setups = [BotSetup {
+            path: wl,
+            yaw_deg: Some(0.0),
+            spawn: Some([0.0, 0.0]),
+        }];
+        let duel = Duel::new(&arena, &setups).expect("a duel");
+        let r = &duel.robots[0];
+        let angler = r
+            .rig
+            .components
+            .iter()
+            .position(|c| c.name.contains("Angle Connector"))
+            .unwrap();
+        if crate::rig::angler_own_geometry() {
+            assert_eq!(r.rig.components[angler].havok.collision[0].len(), 12);
         }
     }
 

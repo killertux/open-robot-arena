@@ -16,6 +16,9 @@
 //      two robot collidables in the first 30 s of the match (the event's two collidables by tag, the contact record's distance and point)
 //   H  [H,seq,attPlayer,attComp,vicPlayer,vicComp,amount,point,normal]  0x417330: a priced hit (the components'
 //      pointers; the K rows name them), in step with the F rows of the same seq
+//   R  [R,seq,object,partner,interval,threshold,type]  0x52d850 entry (12l): one entry appended to the object's
+//      list in the event filter: the objects are collidables (compare the C rows' pointers), registered while the
+//      match loads
 //   A  [A,seq,h]         0x52a990 entry: one per accepted step piece
 'use strict';
 let seq = 0, rows = [], player = -1;
@@ -105,6 +108,12 @@ Interceptor.attach(ptr('0x417330'), { onEnter() {
     push(['H', ++seq, sp.add(4).readS32(), sp.add(8).readPointer().toString(), sp.add(12).readS32(),
           sp.add(16).readPointer().toString(), f(sp.add(20)), loc, nrm]);
   } catch (e) { push(['E', ++seq, String(e)]); }
+} });
+Interceptor.attach(ptr('0x52d850'), { onEnter() {
+  try {
+    const sp = this.context.esp;
+    push(['R', ++seq, sp.add(4).readPointer().toString(), sp.add(8).readPointer().toString(), f(sp.add(12)), f(sp.add(16)), sp.add(20).readU32()]);
+  } catch (e) { push(['E', ++seq, 'R ' + String(e)]); }
 } });
 const seenK = new Set();
 Interceptor.attach(ptr('0x4dd760'), {
