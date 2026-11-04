@@ -7452,3 +7452,113 @@ Razor and the Compressor are within noise.
 piece), `strike_points.py`, `examples/colliderdump <bot>`, `RA2_H17_DUMP` rows `RT` (`[a, b, tag_a, tag_b,
 distance]` per contact) and `EV` (`[a, b, tag_a, tag_b, admitted, time]` per event the filter is asked about),
 `RA2_INTERNALS=0`, `RA2_REGISTRY=0`, `RA2_ANGLER=0`.
+
+### 12au. What a zone, a SmartZone and a cast meet: every non-phantom collidable, batteries and boards too; the chassis flag of an event is the chassis' own collidable, not the chassis body's (fx/zones)
+
+The task: 12at left the flame casts and zone pieces skipping batteries, tanks and boards, and the
+phantoms' pair events uncompared; 12ao left the Octagon hellraisers firing 2.0 runs a fight live
+against 0.62 in ours. Found by recording every zone pair event of the original with the collidable
+that made it.
+
+**New live captures** (`:7`, `RA2_FRIDA_PORT=27147`, under the shared lock; `Teams/`, `AI/`, `ra2.cfg`
+copied before and sha256-compared after: "prefix restored"; 24 rows in `local/oracle/manifest.tsv`, copies
+and `manifest-additions-2026-11-04-zones.tsv` in `~/ra2-oracle-backup`):
+`boxstart-zonepieces-scout-alarm-octagon__live__000..007` (8 whole Octagon fights, Scout v ALARM, shipped AIs,
+`capture_parts_set.sh` with `AGENT=frida/ra2_zonepieces.js`). The agent is `ra2_robotcolliders.js` (every
+collidable of both robots by pointer, shape and tag; 12at) plus **`P`** rows (`0x4a4780`, the zone listener:
+every phantom-pair event with both collidables' pointer, `+0x50` tag, `+0x54` robot tag and `+0x58`
+phantom flag, and the match clock) and **`W`** rows (`0x4c9050`, the arena's `ZoneEvent` handed to Python).
+`tools/oracle/zone_pieces.py` names the solid side of each pair with `collider_compare.tag_names` (a phantom
+is "LIVE-ONLY": the SmartZone is the 8-vertex hull 0.44 x 0.29 x 0.46, a traction ring the 16-vertex
+0.65 x 0.12 x 0.65) and counts enters per piece.
+
+**1. What a zone meets (binary and live).** The listener (`0x4a4780`, `RegisterSmartZone` `0x401340` and the
+arena's `RegisterZone` `0x4044d0` through `0x4a45c0`) calls a zone's callback for a phantom-pair change whose
+other collidable is **not a phantom** (`0x4a49b0` returns collidable `+0x58`; 12n). Nothing else filters the pair: the
+pair list is the phantom detector's (`0x5499..`), so **every solid collidable of every body is in it**, including
+the batteries, air tanks, battery packs and control boards that sit inside the chassis (12at). In
+`zonepieces-...__live__000` the first hammer-zone pass by ALARM is eleven enters: its chassis, five angle
+motors, two mini wheels, the CO2 tank and the Nifty battery, and the Scout's chassis; each `P` row with a solid
+side is followed by one `W` row, and the
+pairs of a zone with a traction ring or a SmartZone (3 in that pass) raise none. `Arena.GetZoneContents` is not
+used by any arena script (only `AI/__init__.py`'s `CheckSensors`, a robot's SmartZone), so the arena zones' phantom
+pairs have no reading to compare.
+
+**2. The robots' SmartZones, per piece.** The same `P` rows, first 45 s of the match, enters per fight
+(8 live fights; ours 96 warmups, `RA2_ZONE_LOG=1` logs each enter):
+
+| piece that entered a SmartZone | live | ours |
+|---|---|---|
+| Scout: Chassis / Angle Motors / DDT Burst Motor | 25.5 / 21.3 / 17.3 | 22.0 / 15.8 / 17.1 |
+| Scout: Battery / Control Board / Mini wheels / Extender / Arm | 8.0 / 4.8 / 8.1 / 5.6 / 5.1 | 7.7 / 5.8 / 6.0 / 6.0 / 5.2 |
+| ALARM: Hammer Head / Chassis / Angle Motors | 12.0 / 10.0 / 8.3 | 9.9 / 12.3 / 13.6 |
+| ALARM: Piston / Battery / Tank / Wheels / Board | 6.1 / 2.8 / 2.6 / 2.6 / 0.3 | 7.2 / 3.5 / 7.7 / 4.8 / 0.9 |
+| total, Scout's zone / ALARM's zone | 44.6 / 95.6 | 59.8 / 85.5 |
+
+Every piece live enters is entered in ours and the other way round (before this section ours left the
+batteries, tanks and boards out). The totals are within what 8 fights give (the
+hammer-zone 2 enters are 11, 0, 32, 68, 0, 0, 13 and 0 a fight).
+
+**3. The `chassis` flag (a difference, fixed).** The argument an event hands Python (`ZoneEvent` and `SmartZoneEvent`
+`chassis`) is bit 0 of the collidable's robot tag (`+0x54`), and **only the chassis' own collidable has it**: live
+17 / 33 for the Scout's / ALARM's chassis, 16 / 32 for every other piece, those on the chassis body included
+(the motors', batteries', boards' and tanks' housings; `P` rows against the `Z` rows of
+`zoneevents-scout-alarm-box__live__000..007`: the 63 enters flagged are all a 17 or 33, the 251 others a 0, 16 or 32; no exception). Ours flagged every
+piece of the chassis body. `AI.RobotInRange(...)[1]` ("chassis in range", `Attack`'s `DriveToLocation`
+stops driving at once when it holds) read True as soon as any housing was in the zone; now only the chassis
+(`zone_chassis_flag`, test `only_the_chassis_collidable_is_flagged_chassis`; `RA2_ZONE_CHASSIS=0` for the old).
+
+**4. Casts.** The flame cast (`0x4a3a90`, nearest hit) meets the batteries, tanks and boards too, as collidables; a
+particle from outside meets the chassis' mesh first, so none of the live hits of docs/37 6.2 is on one, and the replay of `flamecast__live__001` (four phases)
+gives the same hits per component and the same live-against-ours counts with and without them (`examples/flamecasts`). `Duel::flame_targets`,
+`watch_zones`, `watch_brain_zones` and `zone_probe_margin` take every component with a collidable
+(`zone_collidable`; `RA2_ZONE_INTERNALS=0` for the old rule). Test
+`a_zone_and_a_cast_meet_the_batteries_and_boards`.
+
+**5. The phantoms.** Nothing to make real: a traction ring and a SmartZone are collidables that pair with
+zones (the `P` rows have them) and, being phantoms, raise no event, as ours already had them
+(`phantom_pieces`, 12n); they are listed in a robot's `GetZoneContents` and not in an arena zone's events. The
+robot-to-robot pairs of two phantoms were not compared further.
+
+**6. The hellraisers.** The 8 new fights have 2 hellraiser runs in total (0.25 a fight; 1 of 8 with a run before
+45 s) against the 12 of 12ao with 2.0 (9 of 12), so the live rate itself spans 8-fold between two sets of
+the same scenario (the new fights end in 52-61 s with a robot in a pit in 7 of 8, and take their enters at the hammer zone: 68 in one). All 28 live fights (12ao's 20 and these 8): 16 with a run before 45 s (57 %); ours 96 warmups: 43 of 96
+(45 %) before this section, 35 of 96 (36 %) after the chassis flag. Fisher p = 0.29 and 0.08. Runs a fight (gap
+< 0.5 s): ours 0.90 before, 0.93 with the internals, 0.79 after the flag; live 1.3 for the 20 boxstart fights
+(2.0 for 12ao's 12). **The hellraiser gap of 12ao is within the live scatter now**; it is no model difference in the
+zone (the pose-level reach and the opening pass of 12ao stand), and the internals add enters (zone 1: 0.72 -> 1.33
+a fight) without adding runs. Not a change, but a measurement.
+
+**7. Ensembles** (`ensemble.sh`, 120 s, warmups 0..95, counted hits of 10 hp or more, mean +- se). Before =
+master (133c68c), internals = `RA2_ZONE_CHASSIS=0`, after = the defaults:
+
+| fight | R0 / R1 before | + internals in zones and casts | + chassis flag (after) | live |
+|---|---|---|---|---|
+| Box Scout / ALARM | 8.3 +- 0.4 / 39.0 +- 2.4 | 7.4 +- 0.4 / 40.2 +- 2.5 | 8.4 +- 0.5 / 39.3 +- 2.2 | ALARM on Scout 41 |
+| Razor / FlapJack | 6.8 +- 0.6 / 1.0 +- 0.1 | 8.9 +- 0.7 / 1.0 | 6.5 +- 0.5 / 1.1 | |
+| Sentinel / Wide Load | 4.9 +- 0.4 / 86.6 +- 4.2 | 3.9 +- 0.3 / 80.1 +- 4.4 | 7.4 +- 0.6 / **94.8 +- 4.9** | 5.3 / 73.6 |
+| Octagon Scout / ALARM | 5.0 +- 0.3 / 15.8 +- 1.3 | 5.2 +- 0.3 / 19.4 +- 1.5 | 5.4 +- 0.3 / 20.4 +- 1.7 | |
+
+ALARM's chassis hits on the Scout, first 20 s (`parts_compare.py`, 8 live fights, 96 ours): live 88 %, 7.75; before 98 %,
+8.46; internals 97 %, 7.41; after 97 %, 7.00. Whole fight 38.5 live; 32.8, 32.5, 32.6 ours. Wide Load's hits on
+the Sentinel, whole fight: Chassis live 66.0, before 47.3, after 52.5; Bracket Wedge live 9.25 / 202 hp, before 4.98
+/ 126 hp, **after 8.19 / 208 hp**. Octagon, ALARM's hits on the Scout (5 live fights): Chassis 12.6 live, 11.6 before,
+15.0 after; Mini wheel 0 live, 0.40 before, **1.46 after** (27 % of fights; 5 live fights cannot say).
+
+The flag alone moves the Compressor (`RA2_ZONE_INTERNALS=0` with the flag: 7.4 / 94.3): the bots drive closer
+before they stop when the chassis alone has to be in range. The Wide Load count is further from live's 73.6 than
+before (86.6; the Box's chassis count is unchanged); the Wedge, which the Wide Load pushes with, is now right.
+
+*On the merged base b6394ac* (audio4: the arena's `Activate(True)` at the bell, so the Octagon's trap floors move at the
+bell + 22.5 s), the same 96 warmups, before = `RA2_ZONE_INTERNALS=0 RA2_ZONE_CHASSIS=0`: Box, Razor and the Compressor are
+unchanged to the digit (no trap floors); **Octagon R0 / R1 5.1 +- 0.3 / 16.8 +- 1.5 before, 5.5 +- 0.3 / 21.9 +- 1.7 after**; hellraiser runs a
+fight 0.97 before (48 of 96 with a run before 45 s), **0.84 after (39 of 96)**, live 1.3 (16 of 28, 0.9 for all 28 fights).
+Neither is a significant gap against the 28 live fights (16 with a run before 45 s, 57 %).
+
+**8. Open.** The Compressor's Wide Load count (94.8 against 73.6) and the Octagon's Mini-wheel hits (1.46 against
+0 of 5 fights) moved the wrong way with the flag that is right in the binary; the likely place is the SmartZone's
+reach or the Attack tactic's `fRadius`/`GetDistanceToID` (not compared) rather than the flag. The Box's chassis
+hits in the first 20 s are 7.0 against 7.75 (live 8 fights, within the noise of the ensemble: before was 8.46).
+
+**Tools.** `frida/ra2_zonepieces.js` (`P`, `W`), `tools/oracle/zone_pieces.py live|ours|live-sz|ours-sz`,
+`live_runs.py live` reads its `W` rows, `RA2_ZONE_LOG=1`, `RA2_ZONE_INTERNALS=0`, `RA2_ZONE_CHASSIS=0`.

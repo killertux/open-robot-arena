@@ -18,6 +18,7 @@ import glob, json, math, re, sys
 
 def live_runs(path):
     t, start, xs, ev = 0.0, None, [], []
+    matchclock = False
     for line in open(path):
         r = json.loads(line)
         if r[0] == "A":
@@ -27,9 +28,13 @@ def live_runs(path):
             if start is None and len(xs) > 1:
                 if any(abs(p[1][0] - q[1][0]) + abs(p[1][2] - q[1][2]) > 0.05 for p, q in zip(xs[0], r[2])):
                     start = t
+        elif r[0] == "W" and len(r) == 4:
+            # frida/ra2_zonepieces.js (docs/29 12au): the row carries the match clock itself
+            ev.append((r[2], r[3]))
+            matchclock = True
         elif r[0] == "W":
             ev.append((t, r[2]))
-    start = start or 0.0
+    start = 0.0 if matchclock else (start or 0.0)
     runs = []
     for tt, (d, z, rob, _) in ev:
         if d != 1 or z > 2 or rob < 1:
