@@ -333,3 +333,63 @@ Tools: `tools/oracle/audio_levels.py` (per-class levels, `RA2_AUDIO_TRACE=1` now
 voice and the `audio-speed` profiles), `audio_window.py`, `audio_replay_check.py`, `audio_events.py` (new `freq` and
 `pos` rows), `capture_audio_match.py AT_MENU=1`. Open: the AI's restart cadence of the motor loops (ours 188 against
 220 per 28 s), the resampler's 0.5..1 dB.
+
+## 14. Audit of the whole game against the original (audio4)
+
+Method: sound-call logs of the original (`tools/oracle/frida/ra2_sounds.js`, `capture_audio.py`) for
+the Octagon and the Compressor (`tools/oracle/capture_audio_match.py` now takes `ARENA_ROW`, the
+exhibition list row: box 1, compressor 2, octagon 7) and for the Bot Lab (a hand-driven walk over
+the Components tab); ours from `RA2_AUDIO_TRACE=1 ra2-app --match --out DIR` (with `RA2_AUDIO_WAV`).
+`tools/oracle/audio_filediff.py ORIGINAL.events.tsv OURS.log` lists, per file, the plays and loops
+before the bell and in the first N seconds of the fight and the time of the first one. Captures
+(`local/oracle/original`, manifest rows 2026-11-04): `audio-match-octagon-scout-alarm__live__000`,
+`audio-match-compressor-scout-alarm__live__000` (both: intro on, hazards on, Scout v ALARM, 60 s of
+fight, results, Continue), `audio-botlab-place__live__000` (a removal) and `__001` (an attach).
+Menus, music and the click rule keep the evidence of sections 3 and 4 (`audio-menu-ui`,
+`audio-ui-click-survey`, `audio-hq-music`, `audio-workshop-music`: not re-recorded).
+
+**What matched** (intro and countdown, Octagon and Compressor, from the bell): the music, the arena
+line, the generic line, the hazard line and the bots line at -27.1 / -24.1 / -19.6 / -14.0 s
+(ours -27.0 / -24.0 / -19.5 / -14.0); the music fade, the mass stop of the intro handles right
+after it (30.27 s), the three beeps and the bell, `Begin_*` at +0.5 s, the crowd's bored
+transitions at -16.8 / -6.5 s (ours -16.3 / -6.2), piston and burst-motor triggers (levels 0 and
+-500, counts within the AI's spread), motor loops (-700), impacts, the taunts and the `comeon`
+shouts of the crowd machine, `hzd_comp_fire` as a one-shot per smash. Hazard sounds are flat and
+centred: the trap-floor loops are created `is3D = 1` at (+-8.7, 0, +-8.6) and the slide is exactly
+dual-mono in the recording (L-R energy 0 over 56 to 59 s), as section 13 found for the motors.
+The Bot Lab's removal is `CreateAndPlayOnce(cmp_removal.wav)` at volume 0 (caller `0x42f301`);
+the REMOVE button itself does not click; Attach and palette buttons do.
+
+**Mismatches found, fixed:**
+
+| # | Original | Ours before | Fix |
+|---|---|---|---|
+| 1 | `plus.createSound(file, True, pos)`: the second argument is `Create`'s `is3D`; `playSound` plays the buffer **once** (`hellraiser_trigger`: `create` then 4 x `play`, never `loop`) | the flag was read as "loop": every hazard sound created with `True` (hellraiser, spikes, hammers, compressor, trap door) looped for ever after its first trigger | `Sound::spatial`; a created sound is a one-shot, `loopSound` / `fadeInToLoop` loop (`ra2script::SoundQueue::create`) |
+| 2 | `Arena.Activate(True)` at the bell: the Octagon's trap floors slide 90 arena ticks later (`hzd_trapfloor_loop` x4 `loop` at bell + 22.6 s, `stop` 8 s after) | at the build: the slide started 5.3 s **before** the bell (22.25 s into the intro; with the intro skipped, 4 s into the countdown), so the Octagon's and the Skull's floors opened early | `ra2script::hold_arena_activation`; `Match` holds it while building and calls `Duel::activate_arena` at the countdown's end (bell + 22.5 s now) |
+| 3 | `Arena.Winner(id1, id2)` at the decision: `hopp_club.wav` looped and one `End_*` line (`End_GreatMatch` 0.01 s after it) | never called: no outro music, no closing line | `Match::finish` calls the arena's `Winner` (`ScriptHost::arena_winner`) |
+| 4 | a part whose definition has no `attachsound` (the Mud Tire) plays `sounds\cmp_generic.wav` when attached (create + play once, volume 0, caller `0x42d530`) | silent | `UiSound::ComponentAttached(None)` is `cmp_generic.wav` |
+
+Tests: `ra2sim` `the_arena_is_activated_at_the_bell_and_told_the_winner` (no slide before bell + 20
+s, four at bell + 24 s, `hopp_club` looped and an `End_*` line at the decision), `ra2script`
+`create_sound_takes_the_scripts_truthy_3d_flag_and_never_loops`, `ra2-app` `audio::a_part_with_no_attach_sound...`
+and, against the captures, `audio_events::the_octagon_floors_slide_22_5_s_after_the_bell...`,
+`the_other_arenas_play_the_same_intro_schedule`, `the_bot_lab_plays_the_attach_and_removal_sounds_once_at_unity`.
+After the fixes, Octagon, same windows: `hzd_trapfloor_loop` x4 at bell + 22.5 s (original 22.6),
+`hopp_club` + `End_*` at the decision (28.0 against 28.1 s into the fight), the hellraiser one-shots.
+
+**Open / not established:**
+
+* `Play` on a buffer that is still sounding: the original's log has two `play` rows on one handle
+  0.7 s apart (`hellraiser_trigger`, 1.15 s long) with no `Stop` between; DirectSound keeps playing,
+  while `Audio::play_script` restarts the sound. Not measured in the recording (no isolated
+  hazard); the sounds that repeat inside their own length are the hellraiser's and the spikes'.
+* The hazards' own sounds that no capture triggered (`hzd_spike_fire`, `hzd_hammer_fire`,
+  `hzd_trapdoor`, `flame_thrower` and `zap_*` loops): they now follow the script's one-shot or
+  `loopSound` semantics but were not seen live.
+* Crowd moods and impact counts differ because the fights do: ours has more contacts (Compressor:
+  58 impacts against 7 in the first 70 s) and so excites the crowd earlier; the original's taunts
+  (`boo` x3 from bell + 19 s) come later in ours (44.9 s). The immobility tick (`immobile_countdown`
+  x9 at bell + 19 s in the Octagon) depends on the same fight divergence. Combat side.
+* The capture log decodes the crowd's file names to "JEM" in some runs (heap reuse behind the
+  `std::string`); `audio_filediff.py` names them by creation order.
+* Menu and music walk-through was not re-recorded.

@@ -68,13 +68,15 @@ pub enum UiSound {
 }
 
 impl UiSound {
-    /// The file, or `None` for an attach with no sound named.
+    /// The file. An attach with no `attachsound` in its definition plays
+    /// `cmp_generic.wav` (live, `audio-botlab-place`: the Mud Tire, whose definition names none,
+    /// played `sounds\cmp_generic.wav` at volume 0, once).
     pub fn path(&self) -> Option<String> {
         let name = match self {
             UiSound::Click => "Sounds/button_click.wav",
             UiSound::ComponentRemoved => "Sounds/cmp_removal.wav",
             UiSound::ComponentAttached(Some(path)) => return Some(path.clone()),
-            UiSound::ComponentAttached(None) => return None,
+            UiSound::ComponentAttached(None) => "Sounds/cmp_generic.wav",
             UiSound::Snapshot => "Sounds/snapshot.wav",
             UiSound::PointPlotted => "Sounds/point_plotted.wav",
             UiSound::Eject => "Sounds/eject.wav",
@@ -773,6 +775,22 @@ impl AudioSystem {
 
 #[cfg(test)]
 mod tests {
+    /// Live (`audio-botlab-place`): a part whose definition names no `attachsound` (the Mud
+    /// Tire) still plays `cmp_generic.wav` when it is attached.
+    #[test]
+    fn a_part_with_no_attach_sound_plays_the_generic_one() {
+        assert_eq!(
+            UiSound::ComponentAttached(None).path().as_deref(),
+            Some("Sounds/cmp_generic.wav")
+        );
+        assert_eq!(
+            UiSound::ComponentAttached(Some("sounds\\cmp_wheels.wav".into()))
+                .path()
+                .as_deref(),
+            Some("sounds\\cmp_wheels.wav")
+        );
+    }
+
     use super::*;
     use std::path::PathBuf;
 

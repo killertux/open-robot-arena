@@ -531,7 +531,11 @@ impl Match {
             .filter(|(_, r)| r.controller == Controller::Human)
             .map(|(i, _)| i)
             .collect();
-        let mut duel = Duel::new_with_humans(&config.arena, &setups, &humans)?;
+        // The arena's `Activate(True)` comes at the bell, not at the build (docs/35 section 14).
+        ra2script::hold_arena_activation(!config.practice);
+        let built = Duel::new_with_humans(&config.arena, &setups, &humans);
+        ra2script::hold_arena_activation(false);
+        let mut duel = built?;
         for (robot, entry) in duel.robots.iter_mut().zip(&config.robots) {
             robot.team = entry.team;
         }
@@ -663,6 +667,10 @@ impl Match {
                     self.state = MatchState::Fight;
                     // The robots are let go at the bell (docs/29 section 12v).
                     self.duel.hold_robots(false);
+                    // The arena's `Activate(True)`: the Octagon's and the Skull's trap
+                    // floors count their 90 ticks from here (live: the slide loop starts
+                    // 22.6 s after the bell, `audio-match-octagon-scout-alarm`).
+                    self.duel.activate_arena();
                     // `FUN_00412fc0` runs its immobility rule only while the
                     // fight is on (`+0x8e`).
                     self.duel.immobility_active = true;
@@ -1077,6 +1085,11 @@ impl Match {
         // `0x416450`: the isMatchOver byte. The scripts check it every tick
         // (`Hazards.py:312,325`, `king.py:36`), so it has to be set here.
         ra2script::set_over(true);
+        // `FUN_004170e0(p1, p2)` hands the arena the winners: its `Winner` starts the outro music
+        // and the closing announcer line (live: `hopp_club` looped and one `End_*` line at the
+        // decision, `docs/35` section 14).
+        let id = |n: usize| self.winners.get(n).map_or(-1, |&w| w as i32);
+        self.duel.arena_winner(id(0), id(1));
     }
 
     /// `FUN_00418040` gives the last robot / last team; `FUN_00418770` settles a
@@ -1300,6 +1313,101 @@ mod tests {
             m.step();
         }
         panic!("the countdown never ended");
+    }
+
+    /// The sound requests so far, as `(kind, file name)`, from the script layer's queue.
+    fn sound_calls() -> Vec<(&'static str, String)> {
+        let st = ra2script::state();
+        let name = |id: ra2script::SoundId| {
+            st.sounds
+                .find(id)
+                .map(|s| s.path.rsplit(['/', '\\']).next().unwrap_or("").to_string())
+                .unwrap_or_default()
+        };
+        st.sounds
+            .requests()
+            .iter()
+            .map(|r| match r {
+                ra2script::SoundRequest::Play { path, .. } => (
+                    "play",
+                    path.rsplit(['/', '\\']).next().unwrap_or("").to_string(),
+                ),
+                ra2script::SoundRequest::Loop { id } => ("loop", name(*id)),
+                _ => ("other", String::new()),
+            })
+            .collect()
+    }
+
+    /// The Octagon's trap floors slide 90 arena ticks after the arena's `Activate(True)`, and the
+    /// original calls that at the bell, not when the match is built (live,
+    /// `audio-match-octagon-scout-alarm`: `hzd_trapfloor_loop` starts 22.6 s after the bell; ours
+    /// started it 5 s before the bell, 22.25 s after the build). Also `Winner`: the arena's
+    /// outro music (`hopp_club`, looped) and one `End_*` line start when the match is decided.
+    #[test]
+    fn the_arena_is_activated_at_the_bell_and_told_the_winner() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "1");
+        let _restore = Restore("RA2_HAZARDS", was);
+        let config = MatchConfig::new(
+            path(&game, "Arenas/octagon.py"),
+            GameType::Deathmatch,
+            vec![
+                RobotEntry::ai(0, path(&game, "AI/Team0/Bot0.bot")),
+                RobotEntry::ai(1, path(&game, "AI/Team0/Bot1.bot")),
+            ],
+        )
+        .with_results_delay(0.0);
+        // The script layer's queue is process-wide: start from an empty one.
+        let _ = ra2script::take_sound_requests();
+        let mut m = Match::new(config).expect("the match builds");
+        let slides = |calls: &[(&str, String)]| {
+            calls
+                .iter()
+                .filter(|(k, f)| *k == "loop" && f == "hzd_trapfloor_loop.wav")
+                .count()
+        };
+        // Through the countdown the floors stay shut: 6 s is 24 arena ticks of the old build-time
+        // activation, and the slide was due at tick 90.
+        countdown_over(&mut m);
+        assert_eq!(slides(&sound_calls()), 0, "no floor slides before the bell");
+        let dt = m.config.dt;
+        for _ in 0..(20.0 / dt) as usize {
+            m.step();
+        }
+        assert_eq!(
+            slides(&sound_calls()),
+            0,
+            "90 arena ticks are 22.5 s after the bell"
+        );
+        for _ in 0..(4.0 / dt) as usize {
+            m.step();
+        }
+        assert_eq!(
+            slides(&sound_calls()),
+            4,
+            "the four floors slide 22.5 s after the bell"
+        );
+
+        assert!(
+            !sound_calls().iter().any(|(_, f)| f == "hopp_club.wav"),
+            "no outro before the decision"
+        );
+        m.eliminate(0);
+        m.step();
+        assert_eq!(m.state(), MatchState::Over, "or Results");
+        let calls = sound_calls();
+        assert!(
+            calls.contains(&("loop", "hopp_club.wav".to_string())),
+            "the outro music loops at the decision: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|(k, f)| *k == "play" && f.starts_with("End_")),
+            "one End_* line plays at the decision"
+        );
     }
 
     /// M8.2/M8.4/M8.6: a real DEATHMATCH reaches `Over` with a winner.
