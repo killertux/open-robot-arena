@@ -1248,7 +1248,7 @@ pub fn bracket_cells(
         cells.push(BracketCell {
             row: 0,
             index,
-            x: 3.0 + x,
+            x: 4.0 + x,
             y: 3.0,
             size,
         });
@@ -1270,7 +1270,7 @@ pub fn bracket_cells(
             cells.push(BracketCell {
                 row,
                 index,
-                x: 3.0 + x,
+                x: 4.0 + x,
                 y,
                 size,
             });
