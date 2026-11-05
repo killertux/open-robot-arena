@@ -7762,3 +7762,125 @@ before = after, and reproduce 12av to the digit: Box Scout / ALARM 8.4 +- 0.5 / 
 occupancy (table in 1): Box 0.87, Razor 0.90, Compressor 0.68 (live 0.79), Octagon 0.86.
 
 **Tools.** `tools/oracle/contact_episodes.py` (section 1), `tools/oracle/frida/ra2_robotpair.js` (section 5; not yet run).
+
+### 12ax. The convex x convex query in the original's own arithmetic: `FUN_0055b2c0` ported bit for bit (verified against the original's code run natively); the ensembles and the Compressor's pressed contact do not move (fx/cxcx)
+
+The task: the convex x mesh agent runs the original's distance query in its arithmetic since 12an; the convex x convex
+agent (`FUN_00544820`, robot-vs-robot piece contacts: wheels, weapons, armour hulls against the other robot's pieces) still
+ran our own `f64` exact closest-point query. 12aw left the Compressor's pressed contact open (live 12.3 episodes / min of
+3.9 s, ours 24.3 of 2.0 s) with the materials ruled out. Static work only (Ghidra/REA, the native harness); the live game was
+not used (its lock was held by another session) and no capture was added.
+
+**1. What the original does** (decompiled `0x544820`, `0x55b2c0`, `0x55b880`, and `0x55b000` / `0x55b130` / `0x55f100`
+already recovered in 12ak/12an):
+
+* `FUN_00544820(A, B, ...)` looks the pair up in the agent's hash (`det + 0x294...`), takes or creates its state record
+  and sets the simplex count `state + 0x20` to **0 on every call**: the query always starts from scratch (no warm start from
+  the last frame's simplex). It calls `FUN_0055b2c0(&A, &B, &out, &state)`, where A and B are `{collidable, ushort climb
+  start}` wrappers (the start vertex is `**(collidable + 0x1bc + 0x28)`, fresh each call).
+* `FUN_0055b2c0` **is `FUN_0055c390`'s loop with the triangle replaced by a second hull**; every other block is the same
+  code (the Johnson reduction `FUN_0055f100` is called with the same arguments, the stop test is the same: `|v|^2` no longer
+  falls or falls to the same `f32`, `-1` for the tetrahedron around the origin or `|v|^2 < 1e-10`):
+  * first direction: `u = pos(A) - pos(B)` (each collidable's translation, `FUN_00524d40` then `FUN_004b0c50` on
+    `collidable + 0x138`), stored as `f32`; A's support is searched along `-u`, B's along `+u` (the mesh query had
+    `u = pos - centroid` and the triangle for B);
+  * both supports are `FUN_0055b000` (the climb of the adjacency lists, or `FUN_0055b130`, the scan from the last vertex down
+    with ties to the highest index, when the shape has no adjacency): each on the hull's **local** direction `R^T d`;
+  * a simplex point is `W = world_A(a) - world_B(b)`, each world point `FUN_0051e650` (3x3 and translation of the
+    collidable, stored `f32`), the difference stored `f32` (the mesh query subtracted the triangle's vertex);
+  * the next direction: A along `-v`, B along `+v` (`v = sum lambda W`, accumulated from the last point to the first, y and z
+    products stored);
+  * the answer (`out`, `param_3`) differs from the mesh query's in what it keeps: `out[0..3]` the normal = `v` over its
+    length (the length is a register sum of squares z, y, x; `inv = f32(1/len)`; x from the register, y and z as stored),
+    `out[3]`, `out[4..7]` the contact point = `world_A(onA_local)` less `0.5 * dist` along the normal (the x product stays in
+    its register), `out[8..11]` and `out[12..15]` the closest points **in each hull's own frame**
+    (`sum lambda * vertex`, from the last point to the first, `f32` y and z products), `out[16]` = 1, `out[17]` = the distance
+    (`sqrt` of the round before the last one's `|v|^2`, `f32`: the same one-round-stale distance as the mesh query), and the
+    return value that distance (or `-1`).
+* The caller then reports: distance `< tol` (0.1) and `< 0` is the overlap (the penetration list); otherwise, if neither
+  body is flagged (`+0x58`), `FUN_005446b0` fills the materials (a callback `+0xdc` may veto) and `FUN_0055b880` is the manifold:
+  the switch on the final simplex is the one ours already has (`Closest::persists`, checked line by line against the
+  decompilation: count 2, a vertex pair differs on either side; count 3, one side a single vertex, or a repeated vertex on both),
+  the kept points are re-measured from their two body-fixed points (`out[8..]` / `out[12..]`, which is why the query returns the
+  local points) and dropped at a tolerance, reported again with the new normal and `|pA - pB|` when `>= 4 tol` from the new
+  point, and a nearer one keeps the new point out. `ConvexManifold::update` already follows this and is unchanged.
+
+**2. Our code against it.** Before: `narrow::convex_point` -> `closest` (exact `f64` GJK on `A - B`, the closest points of the
+two hulls). Differences, all of them now removed on the default path: (a) the distance is the exact one, not the stale
+`sqrt` of the previous round (the contact `distance` and the `< tol` test follow it); (b) the contact point is the midpoint of the two exact closest points, not `world_A - 0.5 dist n`; (c) the normal
+is `(onA - onB) / dist`, not `v` over `|v|`, so it differs by the rounding and, for flat contact (face against face), by the
+choice of the closest pair on the face: the original's simplex stops at the first simplex whose norm no longer falls, ours
+at the exact minimum; (d) supports: the original searches on the local direction through the `f32` transpose of its 3x3 and ties go to the
+highest index of the scan; (e) overlap: ours the exact test, the original's origin test of the
+tetrahedron / `|v|^2 < 1e-10` (a 10 micrometre gap or less).
+
+**3. The port** (`havok17/x87gjk.rs::query_hulls`, `narrow::convex_pair_x87`). `query_hulls` reuses `reduce`, `Hull::support`,
+`Hull::world` (the 12an pieces) and the loop of `query` with the second hull; `convex_pair_x87` builds the `Point` from the
+record (the radii, ours, move the points along the normal as in `point_from`; with zero radii the point is the original's).
+Default for convex x convex pairs of `havok17`; **`RA2_CXCX=f64`** keeps the old `f64` path. Not ported: the adjacency lists
+and climb start (our hulls have none: the scan with ties to the highest index, as in the 99.14 % row of 12an), the materials
+callback (separate, 12e), and the original's own `f32` poses (ours are our transforms; a tie the original decides with its ulp
+can still go the other way).
+
+**4. Verification.** No live capture holds a `0x55b2c0` call (`gjkquery-*` hooks `0x55c390` only), so the oracle is the
+original's own code: `tools/oracle/gjknative/gjkn` now has **mode 2, which calls `0x55b2c0` natively** (the same freestanding
+32-bit harness that reproduced the live reductions of 1369 simplexes bit for bit in 12an) on two hulls built exactly as the
+game builds them (collidable, 3x3 at `+0x138`, translation, shape, vertex count `+0x18` and array `+0x1c`, optional
+adjacency), `gjknative.py cxcx <n> <seed> <out.tsv> [cw]`. Random pairs: boxes, 6/8/12-gons prisms, point clouds of 4-14 vertices,
+a capsule's two points, a sphere's one; random orientations; centres within 0.3 to 3 m; half with (complete) adjacency lists
+and random climb starts. Compared per pair: overlap, the simplex (indices of both hulls), the normal, the contact point,
+both closest points in the hulls' frames, the distance (all bit for bit) and the climb starts left behind.
+
+| rows | seeds | overlaps (the origin test) | bit-for-bit |
+|---|---|---|---|
+| 20 000 | 1 | 4 269 | **20 000** |
+| 100 000 | 99 | -- | **100 000** |
+
+Goldens in the tree: `x87gjk::tests::the_convex_convex_query_is_the_originals_bit_for_bit` (300 rows, `x87gjk_cxcx.tsv`, 475 kB;
+`RA2_CXCX_FILE=<tsv>` replays a larger file with the test `the_convex_convex_query_on_a_file_of_native_answers`),
+`narrow::cxcx_tests` (two boxes a gap apart). The reproduction rate is 100 % on the original's code on the host FPU under the
+53-bit control word `0x27f` (the word that reproduced 99.94 % of the live queries of 12an; the 24-bit alternation of the
+game's thread is not modelled, as there). **What this does not prove** is the live game's convex x convex answers: no
+capture of `0x55b2c0` exists. The run that would give them (not run, the lock was held): add `0x55b2c0` to
+`tools/oracle/frida/ra2_fightgjk.js` next to the `0x55c390` hook (on enter: the two wrappers' collidables, their `+0x138` 3x3 and
+translation, the shapes' vertices; on leave: `out[0..18]`, the simplex indices and the return), then
+the capture set that produced `gjkquery-sentinel-wideload-compressor__live__000` (the Compressor fight; see its manifest row), and
+replay with `gjknative.py` + a `cxcx` replay of the rows.
+
+**5. Ensembles, before / after** (`ensemble.sh`, 120 s, warmups 0..95, `RA2_AI_TRACE=1 FIDTRACE_UP=1`, scratch install; before =
+the master binary, after = this branch; counted hits of 10 hp or more, mean +- se):
+
+| fight | 12aw / before (reproduced) | **after (`RA2_CXCX` default)** |
+|---|---|---|
+| Box Scout / ALARM | 8.4 +- 0.5 / 39.3 +- 2.2 | 7.8 +- 0.4 / 35.8 +- 2.2 |
+| Razor / FlapJack | 6.5 +- 0.5 / 1.1 +- 0.1 | 7.4 +- 0.6 / 1.1 +- 0.1 |
+| Compressor Sentinel / Wide Load | 7.4 +- 0.6 / 94.8 +- 4.9 | 6.2 +- 0.5 / 87.3 +- 4.6 |
+| Octagon Scout / ALARM | 5.5 +- 0.3 / 21.9 +- 1.7 | 5.3 +- 0.4 / 17.8 +- 1.4 |
+
+The baselines reproduce 12aw to the digit. Every change is within about 1.5 standard errors of the difference (the largest:
+Wide Load's count 94.8 -> 87.3, the Sentinel's 7.4 -> 6.2, the Octagon's ALARM 21.9 -> 17.8); full-length fights 51 / 14 / 10 / 1
+-> 44 / 8 / 13 / 2. Live: 5.1 / 99.5 (Compressor), 8 / 41 (Box), 3.0 / 0.1 (Razor), 3.2 / 13.6 (Octagon). **Nothing moves
+significantly.**
+
+**6. The Compressor's contact episodes** (`contact_episodes.py`, same window and live captures as 12aw, 96 warmups):
+
+| | fights | occupancy < 3 m | episodes / min | length mean / median / p90 (s) | out | in | median min. distance |
+|---|---|---|---|---|---|---|---|
+| live | 23 | 0.79 | 12.3 | 3.9 / 1.7 / 9.8 | 0.39 | -1.37 | 2.01 |
+| ours before | 96 | 0.68 | 24.3 | 2.0 / 1.2 / 4.1 | 0.36 | -1.26 | 2.28 |
+| **ours after** | 96 | **0.66** | **23.2** | **2.0 / 1.2 / 4.2** | 0.37 | -1.29 | 2.30 |
+
+The convex x convex arithmetic is not what holds the robots together live: the pressed state is as short in ours with the
+original's query as with ours (the chassis and the wedge are meshes, so a good part of the robot-robot contact never went
+through this agent; those pairs have been the original's query since 12an).
+
+**7. What is still open.** The gap of 12aw is not in the narrow phase's arithmetic: convex x mesh (12an) and convex x convex
+(here) are both the original's code now, and the contact materials, the first impact and the manifold rules agree. Remaining
+candidates, none testable without a live capture: the adjacency lists of the hulls (the climb ends on the same vertex except on
+ties), the 24-bit control word the game's thread alternates into around D3D calls (12an: 44 of 43 689 queries), the mesh x mesh agent
+(`FUN_00549d00`, two moving meshes), and the pressed state
+itself (`frida/ra2_robotpair.js`, written in 12aw, never run: it needs the live lock). The convex x convex agent does not warm-start a simplex
+(state count reset to 0 on every call), so there is no hidden frame-to-frame coherence in this query.
+
+**Tools.** `tools/oracle/gjknative/gjkn.c` (mode 2), `gjknative.py cxcx`; `havok17/x87gjk.rs::query_hulls`, `x87gjk_cxcx.tsv`;
+`RA2_CXCX=f64`.

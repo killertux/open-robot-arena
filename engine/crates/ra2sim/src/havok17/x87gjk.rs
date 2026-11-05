@@ -886,6 +886,160 @@ pub fn query(hull: &Hull, tri: [[f32; 3]; 3], cur: &mut usize) -> QueryResult {
     }
 }
 
+/// What [`query_hulls`] leaves behind (the output record of `FUN_0055b2c0`, `param_3`).
+#[derive(Clone, Debug)]
+pub struct HullsResult {
+    /// The simplex is the whole tetrahedron around the origin (the original answers `-1`).
+    pub overlap: bool,
+    /// The reported distance (`sqrt` of the round before the last one's `|v|^2`, as an `f32`).
+    pub distance: f32,
+    /// The kept points: indices into hull A and hull B.
+    pub a: Vec<usize>,
+    pub b: Vec<usize>,
+    /// The contact normal: the last round's `v` over its length (`param_3[0..3]`).
+    pub normal: [f32; 3],
+    /// The contact point: A's closest point in the world, moved half the distance back along the
+    /// normal (`param_3[4..7]`).
+    pub point: [f32; 3],
+    /// The closest points in the hulls' own frames (`param_3[8..]` and `param_3[12..]`).
+    pub on_a_local: [f32; 3],
+    pub on_b_local: [f32; 3],
+    /// A's closest point in the world (`FUN_0051e650` of `on_a_local`, before the half distance).
+    pub on_a: [f32; 3],
+    /// B's closest point in the world (the same of `on_b_local` in B's frame; the original keeps
+    /// only the local one).
+    pub on_b: [f32; 3],
+}
+
+/// `FUN_0055b2c0`: the distance query of two convex hulls (`FUN_00544820`'s agent), docs/29 section
+/// 12ax. It is `FUN_0055c390`'s loop with the triangle replaced by a second hull: the first search
+/// direction is the difference of the two collidables' positions, both supports are `FUN_0055b000`
+/// (each hull's climb start kept in `cur_a` / `cur_b`), a simplex point is `world_A(a) - world_B(b)`
+/// and the closest points are kept in the hulls' own frames. The Johnson reduction is the same
+/// [`reduce`].
+pub fn query_hulls(ha: &Hull, hb: &Hull, cur_a: &mut usize, cur_b: &mut usize) -> HullsResult {
+    // `FUN_004b0c50` reads each collidable's translation; u = pos A - pos B, stored as `f32`.
+    let (pa, pb) = (p32(ha.translation), p32(hb.translation));
+    let u = [r(pa[0] - pb[0]), r(pa[1] - pb[1]), r(pa[2] - pb[2])];
+    let d = [-u[0], -u[1], -u[2]];
+    let mut a = [0usize; 4];
+    let mut b = [0usize; 4];
+    a[0] = ha.support(d, cur_a);
+    b[0] = hb.support(u, cur_b);
+    let mut count = 1usize;
+    let mut w = [[0.0f64; 3]; 4];
+    let wpoint = |ia: usize, ib: usize| -> P {
+        let aw = ha.world(p32(ha.vertices[ia]));
+        let bw = hb.world(p32(hb.vertices[ib]));
+        [r(aw[0] - bw[0]), r(aw[1] - bw[1]), r(aw[2] - bw[2])]
+    };
+    w[0] = wpoint(a[0], b[0]);
+    let mut prev = FLT_MAX;
+    let eps2 = EPS * EPS;
+    let overlap = |a: &[usize; 4], b: &[usize; 4], count: usize| HullsResult {
+        overlap: true,
+        distance: 0.0,
+        a: a[..count].to_vec(),
+        b: b[..count].to_vec(),
+        normal: [0.0; 3],
+        point: [0.0; 3],
+        on_a_local: [0.0; 3],
+        on_b_local: [0.0; 3],
+        on_a: [0.0; 3],
+        on_b: [0.0; 3],
+    };
+    let (old_prev, lam, v) = loop {
+        let red = reduce(&w, count);
+        if !red.ok {
+            return overlap(&a, &b, count);
+        }
+        let (na, nb, nw) = (a, b, w);
+        for (k, &o) in red.order.iter().enumerate() {
+            a[k] = na[o];
+            b[k] = nb[o];
+            w[k] = nw[o];
+        }
+        count = red.count;
+        let lam = red.lambda;
+        let (mut vx, mut vy, mut vz) = (0.0f64, 0.0f64, 0.0f64);
+        for i in (0..count).rev() {
+            vx += lam[i] * w[i][0];
+            vy += r(lam[i] * w[i][1]);
+            vz += r(lam[i] * w[i][2]);
+        }
+        let norm = ((vz * vz) + (vy * vy)) + (vx * vx);
+        let old = prev;
+        let stored = r(norm);
+        prev = stored;
+        if norm.partial_cmp(&old) != Some(std::cmp::Ordering::Less)
+            || (stored as f32).to_bits() == (old as f32).to_bits()
+        {
+            break (old, lam, [vx, vy, vz]);
+        }
+        if eps2 > stored {
+            return overlap(&a, &b, count);
+        }
+        let da = [r(-vx), r(-vy), r(-vz)];
+        let eb = [r(vx), r(vy), r(vz)];
+        let ia = ha.support(da, cur_a);
+        let ib = hb.support(eb, cur_b);
+        a[count] = ia;
+        b[count] = ib;
+        w[count] = wpoint(ia, ib);
+        count += 1;
+    };
+    let distance = r(old_prev.sqrt()) as f32;
+    // The normal (0x55b694): v as stored, then, when its length (a register sum of squares, z then
+    // y then x) is not zero, times the `f32` reciprocal; x from the register, y and z as stored.
+    let [vx, vy, vz] = v;
+    let mut normal = [vx as f32, r(vy) as f32, r(vz) as f32];
+    let len = (((vz * vz) + (vy * vy)) + (vx * vx)).sqrt();
+    if len != 0.0 {
+        let inv = r(1.0 / len);
+        normal = [
+            r(inv * vx) as f32,
+            r(r(vy) * inv) as f32,
+            r(r(vz) * inv) as f32,
+        ];
+    }
+    // The closest points in the hulls' frames, from the last point to the first.
+    let mut oa = [0.0f64; 3];
+    let mut ob = [0.0f64; 3];
+    for i in (0..count).rev() {
+        let l = lam[i];
+        for (o, v) in [
+            (&mut oa, p32(ha.vertices[a[i]])),
+            (&mut ob, p32(hb.vertices[b[i]])),
+        ] {
+            o[0] = r((l * v[0]) + o[0]);
+            o[1] = r(r(l * v[1]) + o[1]);
+            o[2] = r(r(l * v[2]) + o[2]);
+        }
+    }
+    let wa = ha.world(oa);
+    // 0x55b828: the point is A's world point less half the distance along the normal; the x product
+    // stays in its register, y and z are stored.
+    let h = r(distance as f64) * 0.5;
+    let n = normal.map(|x| x as f64);
+    let point = [
+        r(wa[0] - (h * n[0])) as f32,
+        r(wa[1] - r(h * n[1])) as f32,
+        r(wa[2] - r(h * n[2])) as f32,
+    ];
+    HullsResult {
+        overlap: false,
+        distance,
+        a: a[..count].to_vec(),
+        b: b[..count].to_vec(),
+        normal,
+        point,
+        on_a_local: oa.map(|x| x as f32),
+        on_b_local: ob.map(|x| x as f32),
+        on_a: wa.map(|x| x as f32),
+        on_b: hb.world(ob).map(|x| x as f32),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1005,6 +1159,127 @@ mod tests {
             assert_eq!(cur, after, "{line}");
         }
         assert_eq!((n_cases, overlaps), (60, 6));
+    }
+
+    /// One row of `gjknative.py cxcx` (the original's `FUN_0055b2c0` run natively under `0x27f`)
+    /// against [`query_hulls`]: the simplex, the normal, the contact point, the closest points in
+    /// both frames and the distance, bit for bit, and the climb starts left behind.
+    fn check_cxcx_row(line: &str) -> Result<bool, String> {
+        let t: Vec<&str> = line.split('\t').collect();
+        let mut k = 1;
+        let mut hulls = Vec::new();
+        for _ in 0..2 {
+            let n: usize = t[k].parse().unwrap();
+            let v: Vec<[f32; 3]> = (0..n)
+                .map(|i| [0, 1, 2].map(|c| t[k + 1 + 3 * i + c].parse().unwrap()))
+                .collect();
+            k += 1 + 3 * n;
+            let full = t[k] == "full";
+            k += 1;
+            let xf: Vec<f32> = (0..12).map(|i| t[k + i].parse().unwrap()).collect();
+            k += 12;
+            let start: usize = t[k].parse().unwrap();
+            k += 1;
+            hulls.push((v, full, xf, start));
+        }
+        assert_eq!(t[k], "|");
+        let e = &t[k + 1..];
+        let ret: f64 = e[0].parse().unwrap();
+        let count: usize = e[1].parse().unwrap();
+        let mut j = 2;
+        let mut ia = vec![];
+        while e[j] != "/" {
+            ia.push(e[j].parse::<usize>().unwrap());
+            j += 1;
+        }
+        j += 1;
+        let mut ib = vec![];
+        while e[j] != "/" {
+            ib.push(e[j].parse::<usize>().unwrap());
+            j += 1;
+        }
+        j += 1;
+        let f = |i: usize| -> f32 { e[j + i].parse().unwrap() };
+        let adjs: Vec<Option<Vec<Vec<u16>>>> = hulls
+            .iter()
+            .map(|(v, full, _, _)| {
+                full.then(|| {
+                    (0..v.len())
+                        .map(|i| (0..v.len() as u16).filter(|&x| x as usize != i).collect())
+                        .collect()
+                })
+            })
+            .collect();
+        let make = |h: usize| Hull {
+            vertices: &hulls[h].0,
+            adjacency: adjs[h].as_deref(),
+            rotation: std::array::from_fn(|i| hulls[h].2[i]),
+            translation: [hulls[h].2[9], hulls[h].2[10], hulls[h].2[11]],
+        };
+        let (mut ca, mut cb) = (hulls[0].3, hulls[1].3);
+        let got = query_hulls(&make(0), &make(1), &mut ca, &mut cb);
+        if got.overlap != (ret < 0.0) {
+            return Err(format!("overlap {} vs {ret}: {line}", got.overlap));
+        }
+        if got.overlap {
+            return Ok(true);
+        }
+        let bits = |a: &[f32]| a.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let want = |o: usize| [f(o), f(o + 1), f(o + 2)];
+        let ok = got.a.len() == count
+            && got.a == ia
+            && got.b == ib
+            && bits(&got.normal) == bits(&want(0))
+            && bits(&got.point) == bits(&want(3))
+            && bits(&got.on_a_local) == bits(&want(6))
+            && bits(&got.on_b_local) == bits(&want(9))
+            && got.distance.to_bits() == f(12).to_bits()
+            && ca == e[j + 13].parse::<usize>().unwrap()
+            && cb == e[j + 14].parse::<usize>().unwrap();
+        if ok {
+            Ok(false)
+        } else {
+            Err(format!("{got:?}\n{line}"))
+        }
+    }
+
+    /// The convex x convex query against the original's own code (`FUN_0055b2c0`, run natively
+    /// under the control word `0x27f` by `tools/oracle/gjknative`): 300 random hull pairs (boxes,
+    /// prisms, clouds, a capsule's two points, a sphere's one; with and without adjacency lists;
+    /// from overlapping to far apart), of them the overlaps by the origin test.
+    #[test]
+    fn the_convex_convex_query_is_the_originals_bit_for_bit() {
+        let (mut n, mut overlaps) = (0, 0);
+        for line in include_str!("x87gjk_cxcx.tsv").lines() {
+            n += 1;
+            match check_cxcx_row(line) {
+                Ok(o) => overlaps += o as usize,
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert_eq!(n, 300);
+        assert!(overlaps > 30, "{overlaps}");
+    }
+
+    /// `RA2_CXCX_FILE=<tsv>`: a larger file of the same rows (not run by default).
+    #[test]
+    fn the_convex_convex_query_on_a_file_of_native_answers() {
+        let Ok(path) = std::env::var("RA2_CXCX_FILE") else {
+            return;
+        };
+        let text = std::fs::read_to_string(path).unwrap();
+        let (mut n, mut bad) = (0, 0);
+        for line in text.lines() {
+            n += 1;
+            if let Err(e) = check_cxcx_row(line) {
+                bad += 1;
+                if bad <= 3 {
+                    eprintln!("{e}");
+                }
+            }
+        }
+        eprintln!("{n} rows, {bad} differ");
+        assert_eq!(bad, 0);
     }
 
     /// A box resting on the floor under a triangle: the plain case, in the engine's terms (no

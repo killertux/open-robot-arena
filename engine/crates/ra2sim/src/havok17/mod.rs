@@ -133,6 +133,14 @@ fn gjk_mode() -> GjkMode {
     })
 }
 
+/// Whether convex x convex pairs run the original's own query (`FUN_0055b2c0`, docs/29 section
+/// 12ax) in its arithmetic; `RA2_CXCX=f64` keeps our `f64` closest-point query of before.
+fn cxcx_x87() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_CXCX").map_or(true, |v| v != "f64"))
+}
+
 /// `RA2_H17_DUMP=<file>` writes the rows `frida/ra2_contacts.js` captures in
 /// the original (`R` the contacts handed to the resolver, `B` every dynamic
 /// body, `A` each accepted step piece), so one script reads both.
@@ -561,14 +569,28 @@ impl Havok17Backend {
                     match (pa.vertices.is_empty(), pb.vertices.is_empty()) {
                         (false, false) => {
                             // Convex x convex (`FUN_00544820`).
-                            match narrow::convex_point(
-                                &pa.vertices,
-                                pa.radius,
-                                &pb.vertices,
-                                pb.radius,
-                                &pa.body_pose,
-                                &pb.body_pose,
-                            ) {
+                            let found = if cxcx_x87() {
+                                narrow::convex_pair_x87(
+                                    &pa.local,
+                                    pa.radius,
+                                    &pb.local,
+                                    pb.radius,
+                                    &pa.body_pose,
+                                    &pb.body_pose,
+                                    &pa.pose,
+                                    &pb.pose,
+                                )
+                            } else {
+                                narrow::convex_point(
+                                    &pa.vertices,
+                                    pa.radius,
+                                    &pb.vertices,
+                                    pb.radius,
+                                    &pa.body_pose,
+                                    &pb.body_pose,
+                                )
+                            };
+                            match found {
                                 None => penetrating = true,
                                 Some((p, c)) if p.distance < tol => {
                                     let m = self.convex_manifolds.entry(key).or_default();
