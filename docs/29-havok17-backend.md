@@ -8006,3 +8006,87 @@ tsv +97 s, ours +1.95 s); `rp_replay.py`, `rp_variants.py` the replay and its va
 `rp_rod.py`, `rp_kick.py`, `rp_align.py`, `rp_w.py`, `rp_an2.py` the stroke strengths, rod, kick, alignment, wheel and arrangement
 analyses; `run_ours.sh` one fight with the dump; `PRESSED_GAME`/`PRESSED_WORK` name a scratch install and work dir).
 `RA2_H17_DUMP` rows `N` (wheel callbacks) and `F` (prismatic pushes) were added for the comparison.
+
+### 12az. The other controllers of the same kind: the hinge's auto-lock is a Havok action too (moved, default); ALARM's piston checked live; the Wide Load's hits per pressed second are low in damage per stroke, not in strokes (fx/hitrate)
+
+12ay moved the prismatic controller's auto-lock (`0x4b5240` -> `Lock(1)` `0x4b50c0`) to run after each piece's integration and before its
+solver, and left three questions: the hinge locks of the burst motors, the arena's controllers, ALARM's piston (its 12k kick numbers
+were measured differently), and why the Wide Load's counted hits fell with the longer contact (87.3 -> 80.4, live 99.5).
+
+**1. The binary.** The hinge controller's update is `0x481450` (`FUN_00481190` the angle; with a zero percentage and `+0x64` it locks, else
+with `+0x65` it locks within 0.05 of the stop the percentage's sign drives to, `+0x74` positive, `+0x70` negative; both call `FUN_00480e20(1)`).
+Its only reference is `0x481187`, inside the 20-byte wrapper at `0x481180` (`if (!this->+0x66) update; ret 0xc`), whose address sits in the
+vtable at `0x6a7e58`; the prismatic update `0x4b5240` has the identical wrapper at `0x4b4e00` (byte `+0x7c` instead of `+0x66`, three stack
+arguments, `ret 0xc`). Same shape, same dispatch: both are Havok actions and run at the same point of a piece (not seen live for the hinge: no
+agent hooks `0x480e20`).
+The arena's controllers are the same two classes (the scripts' `Lock`/`SetPowerSettings` act on them).
+
+**2. The change (defaults on).** `Robot::drive_burst` arms the hinge's test (`arm_slider_lock(joint, stop, 0.05)` is generic over the
+joint kind, `run_armed_locks` reads `j.position`) while a burst motor fires and has not reached its end, or cocks and has not reached home;
+`Duel::drive_joints` / `drive_arena_slider` arm the arena's hinges and sliders that auto-lock at their stops and are not there yet
+(a hinge in the controller's sense, `j.sense`). Switches: **`RA2_PRELOCK_HINGE=0`** (the robots' hinges; with it the 12ay numbers
+reproduce to the digit), **`RA2_PRELOCK_ARENA=0`** (the arena's), `RA2_PRELOCK=0` (all, in the backend). Test:
+`havok17::tests::an_armed_hinge_lock_runs_in_the_piece_the_arm_arrives`.
+
+**3. ALARM live.** New captures (display `:9`, port `27149`, under the lock, `ra2.cfg`/`Teams`/`AI` copied before and compared after: `ra2.cfg` was
+re-saved by the game and restored from the copy, sha256 equal; manifest rows, backup and `manifest-additions-2026-11-05-hitrate.tsv`):
+`boxstart-robotpair-scout-alarm-box__live__000` (the Box, Scout v ALARM, 232 s, `ra2_robotpair.js`: `R` rows with the chassis (232 kg) and the
+rod (33 kg) at every resolver entry, 13 strokes; runs 2-4 of the set failed to attach after the first) and `weapons-alarm-free__live__000`
+(ALARM alone in the Combat Arena, 8 free strokes). The chassis' speed along the rod axis, per stroke (`tools/oracle/pressed/rp_alarm_kick.py`;
+`e` the last return push, steps are the pieces from there):
+
+| | limit piece | lock piece | next | total over 4 |
+|---|---|---|---|---|
+| live, free (8) | -0.59 | **-0.06** | -0.02 | -0.69 |
+| ours, new order (20 in a fight) | -0.43 | **-0.12** | -0.04 | -0.63 |
+| ours, old order (49) | -0.44 | **-1.15** | +0.03 | -1.57 |
+| live, in the Box fight (13) | -0.69 | -1.29 | +0.13 | -1.69 |
+
+and the rod after the lock piece moves with the chassis (`R`, free) in live as in ours. So the free stroke confirms 12ay's order for ALARM's
+piston (the 12k "-2 at the return" was the old order or a fight). **Not understood:** in the 13 strokes of the *fight* the rod is exactly
+`(0, 0, 0)` at the next resolver entry in all 13 and the chassis loses 1.3 m/s in the lock piece (the signature of a lock after the solver),
+none of them near a robot contact, with the same `dt` as the free strokes; the Wide Load's fights (`S` rows, 282 strokes of 008..011) show
+the free pattern (lock piece +0.04). Open: what differs between ALARM in the Box and ALARM alone.
+
+**4. Ensembles** (`ensemble.sh`, 120 s, warmups 0..95, `RA2_AI_TRACE=1 FIDTRACE_UP=1`; counted >= 10 hp, mean +- se):
+
+| fight | live | 12ay | **now** | `RA2_PRELOCK_ARENA=0` | `RA2_PRELOCK_HINGE=0` |
+|---|---|---|---|---|---|
+| Box Scout / ALARM | 8 / 41 | 6.5 / 32.8 | **6.6 +- 0.4 / 39.3 +- 2.7** | same | = 12ay |
+| Razor / FlapJack | 3.0 / 0.1 | 7.4 / 1.1 | **6.0 +- 0.4** / 1.1 +- 0.1 | same | = 12ay |
+| Compressor Sentinel / Wide Load | 5.1 / 99.5 (sd 74, se 14) | 5.4 / 80.4 | **5.1 +- 0.4 / 78.9 +- 4.9** | 5.2 / 79.1 | 5.5 / 80.6 |
+| Octagon Scout / ALARM | 3.2 / 13.6 | 4.8 / 16.0 | **5.3 +- 0.4 / 20.3 +- 1.9** | same | = 12ay |
+
+The arena's controllers move nothing but the Compressor by 0.2 (their locks are rare). Everything is the robots' hinge (the Scout's fork and the
+Sentinel's flipper): the Box's ALARM count and Razor's improve towards live, the Octagon's (both) go away from it; none is more than 2 se.
+The Wide Load's live 99.5 has a standard error of 14 (26 fights, sd 74): 78.9 is 1.4 se below, not a measured gap. Contact episodes (23 live fights, 96
+warmups): occupancy 0.80 (live 0.79), 13.1 a minute (12.3), length mean / median / p90 4.1 / 2.1 / 10.3 s (3.9 / 1.7 / 9.8); with `RA2_PRELOCK_HINGE=0`
+0.78, 13.9, 3.8 / 2.0 / 10.1.
+
+**5. Hits per pressed second** (the Compressor, live `robotpair-...__live__004..011` against 32 warmups of ours; `hr_ours.sh` writes per fight the
+resolver entries with a contact between the robots, the priced hits with the point in both chassis frames, the burst starts; `hr_cmp.py`,
+`hr_stroke_cmp.py`, `hr_loc_cmp.py`, `hr_rel_cmp.py`). Per resolver entry with a robot-robot contact (19 786 live, 67 289 ours):
+
+| Wide Load -> Sentinel hits per entry | live | ours | ours / live |
+|---|---|---|---|
+| any amount | 0.135 | 0.114 | 0.85 |
+| > 1 hp | 0.117 | 0.083 | 0.71 |
+| > 3 hp | 0.092 | 0.059 | 0.63 |
+| >= 10 hp | 0.054 (fights 0.011 .. 0.076) | 0.029 | 0.54 |
+
+(Sentinel -> Wide Load: 0.101 / 0.081 any, 0.0023 / 0.0019 at 10.) Live fights differ much (0.011-0.076 per entry at 10 hp; 008..011 alone 0.035),
+so the ratio against 008..011 is 0.83. The same by stroke (BF to +0.6 s, the stroke in contact, 246 live of 008..011, 2 805 ours): events per stroke
+**2.75 live, 2.53 ours** (the filter's gate and the number of events are not the gap), but their size: first event of a stroke median 7.6 hp live, 6.1 ours;
+the largest of a stroke median 15.1 live, 11.0 ours (p75 36.6 / 28.9, p90 62.8 / 51.2); >= 3 hp per stroke 1.77 / 1.45, >= 10 hp 1.06 / 0.74.
+**Where the hits land** (the point in the Sentinel's frame): live cluster at the Sentinel's chassis sides about its centre of mass (local y within 0.25 of it, z -0.5..0.5:
+15.4 / 10.0 / 15.7 per 1000 entries at z -0.5 / 0 / 0.5 for >= 3 hp), ours lower and further aft (3.1 / 2.5 / 6.1 there, 5.8 at (z -1, y -0.5) against 1.4), 40 % of ours on the Sentinel's wheels,
+43 % on its chassis. The contact points before any pricing show the same shift (live (z -0.5, y 0) 31 per 100 entries, ours 6; (z -1, y -0.5) 3 against 17). **The pressed
+arrangement differs there**: the Sentinel's centre is 0.1-0.15 m closer in the Wide Load's frame (z median -2.10 against -2.29) and, more often, higher: the
+height difference of the two centres of mass has median -0.066 live / -0.025 ours and p75 -0.007 / +0.096 (the pitch of either robot matches to 0.01, the contact distances match: median 0.090 / 0.088, the rod
+sits at -0.14 below the centre and 0.87..1.6 out in both). So the Poker's tips meet the Sentinel lower (its wheels, softer targets, not its hull) when ours rides up; the damage
+of a hit at a given point is the formula 12o verified and nothing in the pricing was changed. No rule differs that could be confirmed in the binary: **no engine change for the
+hits**. Open: why the Sentinel sits higher in the pressed state (the wedge riding the tips, the support of the wheels under load).
+
+**Tools.** `tools/oracle/pressed/hr_ours.sh` (ours with the dump reduced to the rows above), `rp_alarm_kick.py` (the per-stroke kick of a live or ours
+dump), `hr_cmp.py`, `hr_stroke_cmp.py`, `hr_loc_cmp.py`, `hr_rel_cmp.py`; `fidtrace`'s `FIDTRACE_HITS` rows carry `la`/`lv` (the hit point in the attacker's and
+the victim's chassis frame about its centre of mass).
