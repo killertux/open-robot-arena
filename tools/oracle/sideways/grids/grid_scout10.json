@@ -1,0 +1,341 @@
+{
+ "name": "scout-tail-hammer-box",
+ "trials": [
+  {
+   "label": "hammer az 0 d 1.8",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 0,
+    "dist": 1.8
+   }
+  },
+  {
+   "label": "hammer az 45 d 1.8",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 45,
+    "dist": 1.8
+   }
+  },
+  {
+   "label": "hammer az 90 d 1.8",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 90,
+    "dist": 1.8
+   }
+  },
+  {
+   "label": "hammer az 135 d 1.8",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 135,
+    "dist": 1.8
+   }
+  },
+  {
+   "label": "hammer az 180 d 1.8",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 180,
+    "dist": 1.8
+   }
+  },
+  {
+   "label": "hammer az 225 d 1.8",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 225,
+    "dist": 1.8
+   }
+  },
+  {
+   "label": "hammer az 270 d 1.8",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 270,
+    "dist": 1.8
+   }
+  },
+  {
+   "label": "hammer az 315 d 1.8",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 315,
+    "dist": 1.8
+   }
+  },
+  {
+   "label": "hammer az 0 d 2.2",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 0,
+    "dist": 2.2
+   }
+  },
+  {
+   "label": "hammer az 45 d 2.2",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 45,
+    "dist": 2.2
+   }
+  },
+  {
+   "label": "hammer az 90 d 2.2",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 90,
+    "dist": 2.2
+   }
+  },
+  {
+   "label": "hammer az 135 d 2.2",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 135,
+    "dist": 2.2
+   }
+  },
+  {
+   "label": "hammer az 180 d 2.2",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 180,
+    "dist": 2.2
+   }
+  },
+  {
+   "label": "hammer az 225 d 2.2",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 225,
+    "dist": 2.2
+   }
+  },
+  {
+   "label": "hammer az 270 d 2.2",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 270,
+    "dist": 2.2
+   }
+  },
+  {
+   "label": "hammer az 315 d 2.2",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 360,
+   "fire_py": 30,
+   "extra": {
+    "az": 315,
+    "dist": 2.2
+   }
+  }
+ ]
+}

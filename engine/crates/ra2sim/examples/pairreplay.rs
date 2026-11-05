@@ -103,6 +103,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .set_velocity(pb, lin + ang.cross(pos - origin), ang);
         }
     }
+    // `PAIRREPLAY_CHARGE=<f0>,<f1>`: each robot's batteries at that fraction of full when the replay
+    // starts (a live stretch is 60-130 s into a fight; ours starts full, and the power scale
+    // `clamp(supply / demand, 0.25, 1)` falls with the charge, docs/29 12bd).
+    if let Ok(v) = std::env::var("PAIRREPLAY_CHARGE") {
+        for (ri, f) in v
+            .split(',')
+            .filter_map(|x| x.parse::<f32>().ok())
+            .enumerate()
+        {
+            if let Some(r) = m.duel.robots.get_mut(ri) {
+                for s in r.energy.sources.iter_mut() {
+                    s.current *= f;
+                }
+            }
+        }
+    }
     // The script.
     let mut script: Vec<[f32; 7]> = Vec::new();
     for line in std::fs::read_to_string(&a[5])?.lines() {

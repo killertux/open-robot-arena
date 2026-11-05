@@ -35,11 +35,23 @@ import frida
 
 import capture_drive as cd
 
+
+def qrot(q, v):
+    """Rotate v by the quaternion q = [w, x, y, z]."""
+    w, x, y, z = q
+    px, py, pz = v
+    # q * (0, v) * conj(q)
+    aw, ax, ay, az = -x * px - y * py - z * pz, w * px + y * pz - z * py, w * py - x * pz + z * px, w * pz + x * py - y * px
+    return (-aw * x + ax * w - ay * z + az * y, -aw * y + ay * w - az * x + ax * z, -aw * z + az * w - ax * y + ay * x)
+
 ALARM = int(os.environ.get("ALARM_AI", "1"))  # the robot's index in AI.running_ai
 # The robot under test, by its chassis mass (default ALARM's), and its weapon
 # trigger (ALARM's Poker: "Fire"; the Scout's Flipper: "Flip").
 CHASSIS = float(os.environ.get("CHASSIS", "232.116"))
 TRIGGER = os.environ.get("TRIGGER", "Fire")
+# A second robot put in place with the first in a trial's "extra" (docs/29 12bd), by its chassis mass
+# (default ALARM's); the robot commanded through the AI (ALARM_AI, TRIGGER) is whichever the run sets.
+CHASSIS2 = float(os.environ.get("CHASSIS2", "232.116"))
 HOST = os.environ.get("RA2_FRIDA_HOST", "127.0.0.1:27142")
 AGENT = os.path.join(cd.HERE, "frida", "ra2_tipab.js")
 
@@ -85,8 +97,9 @@ class Agent:
         self.sess.detach()
 
 
-def alarm_bodies(ag):
-    ch = [c for c in ag.api.chassis() if abs(c[1] - CHASSIS) < 0.05]
+def alarm_bodies(ag, mass=None):
+    mass = CHASSIS if mass is None else mass
+    ch = [c for c in ag.api.chassis() if abs(c[1] - mass) < 0.05]
     if not ch:
         sys.exit("no ALARM chassis seen: %r" % ag.api.chassis())
     c0 = ch[0]
@@ -130,7 +143,17 @@ def main():
     print("ALARM bodies:", [(b[0], round(b[1], 3)) for b in bodies])
     if len(bodies) != 6:
         print("warning: expected 6 bodies (chassis, four wheels, rod)")
-    ag.api.watch([b[0] for b in bodies])
+    watched = [b[0] for b in bodies]
+    bodies2 = None
+    if any("extra" in t for t in grid["trials"]):
+        bodies2 = alarm_bodies(ag, CHASSIS2)
+        print("second robot bodies:", [(b[0], round(b[1], 3)) for b in bodies2])
+        # Rest poses at the start (the agent keeps the first plan's): centre and quaternion [w x y z].
+        c_main, c_two = bodies[0][2], bodies2[0][2]
+        q_two = ag.api.peek(hex(int(bodies2[0][0], 16) + 0x40), 16)[:4]
+        print("second robot rest", c_two, q_two)
+        watched += [b[0] for b in bodies2]
+    ag.api.watch(watched)
     ptrs = [b[0] for b in bodies]
     first = int(os.environ.get("FIRST", "0"))
     last = int(os.environ.get("LAST", str(len(grid["trials"]))))
@@ -143,6 +166,16 @@ def main():
                 "piston": t.get("piston")}
         if i == first and os.environ.get("REST"):
             plan["rest"] = json.load(open(os.environ["REST"]))
+        if "extra" in t:
+            ex = t["extra"]
+            az = math.radians(ex["az"])
+            tx, tz = c_main[0] + ex["dist"] * math.cos(az), c_main[2] + ex["dist"] * math.sin(az)
+            # forward (chassis +z) of the second robot at rest, turned about its chassis y axis to face the first
+            f0 = qrot(q_two, (0, 0, 1))
+            psi = math.atan2(c_main[0] - tx, c_main[2] - tz) - math.atan2(f0[0], f0[2])
+            plan["extra"] = [{"bodies": [b[0] for b in bodies2], "axis": [0, 1, 0], "angle": psi, "w": 0,
+                              "centre": [tx, c_two[1] + 0.03, tz]}]
+            ag.rows.append(["EXTRA", i, tx, tz, math.degrees(psi), f0])
         ag.rows.append(["TRIAL", i, t])
         ag.api.arm(plan)
         t0 = time.time()
