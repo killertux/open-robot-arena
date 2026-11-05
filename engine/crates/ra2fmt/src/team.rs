@@ -322,8 +322,8 @@ impl Team {
         self.set_tail(Self::SEASON_POINTS, points);
     }
 
-    /// Defeated robots accumulated by the current event (`+0x50`). The label
-    /// is ours; the writer is `FUN_0046c5b0` (`Team+0x50 += survivors`).
+    /// The team's kills (`+0x50`), shown as skulls on the HQ (`FUN_005009f0`). A won round adds the
+    /// match's defeated players (`FUN_0046c5b0`); nothing resets it.
     pub fn defeated(&self) -> i32 {
         self.tail.get(Self::DEFEATED).copied().unwrap_or(0)
     }

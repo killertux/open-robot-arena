@@ -208,8 +208,14 @@ FIXTURES = [
                          "ok button"], env={"ORA_SAVE_DIR": "@tmp"}),
     dict(id="event-bracket-duel-round1", ref="event-bracket-duel-round1__1024x768__000.png",
          route=TEAMHQ + ["events button", "@617,370", "@288,455", "enter event button"]),
-    dict(id="event-repairs", ref="event-repairs__1024x768__000.png", hqsim=(0, "repairs-components.png"),
-         note="ours lists simulated damage and has no live 3D robot view; the original's robot was undamaged"),
+    dict(id="event-repairs", ref="event-repairs__1024x768__000.png",
+         hqsim=(0, "repairs-components.png", ["--force-round-win"]),
+         note="the between-rounds bench of a won round 1 (docs/36 9.35); the original's robot is the prefix's Bot0 "
+              "(a modified C.R.U.S.H.), the run's is local/game's"),
+    dict(id="event-repairs-atom", ref="event-repairs-atom__1024x768__000.png",
+         hqsim=(0, "repairs-components.png", ["--force-round-win", "--event-robot", "4"]),
+         note="the same bench with the join window's fifth robot (Atom Smasher) entered: the bench shows "
+              "Robot In Event, not the first roster slot (docs/36 9.35)"),
     dict(id="event-award-photo", ref="event-award-photo__1024x768__000.png", hqsim=(0, "award.png"),
          note="ours is a simulated lost round (0/1, Fruity-Punch); the original won one of two (photo)"),
     dict(id="match-pause", ref="match-pause__1024x768__000.png", matchquit="pause.png", box=(425, 270, 605, 500),
@@ -466,15 +472,17 @@ _FRAMES = {}
 
 def hq_frame(fx, tmp):
     """One `ra2-app --hq --simulate-event ROW` run (cached per row); the named frame or None."""
-    row, name = fx["hqsim"]
-    if ("hq", row) not in _FRAMES:
-        d = os.path.join(tmp, "hq%d" % row)
+    row, name = fx["hqsim"][:2]
+    extra = list(fx["hqsim"][2]) if len(fx["hqsim"]) > 2 else []
+    key = ("hq", row, tuple(extra))
+    if key not in _FRAMES:
+        d = os.path.join(tmp, "hq%d_%d" % (row, len(_FRAMES)))
         os.makedirs(d, exist_ok=True)
         p = subprocess.run([APP, "--game", GAME, "--hq", "--simulate-event", str(row), "--out", d,
-                            "--bench-undamaged", "--size", "%dx%d" % SIZE],
+                            "--bench-undamaged", "--size", "%dx%d" % SIZE] + extra,
                            capture_output=True, text=True, env=env(), timeout=900)
-        _FRAMES[("hq", row)] = d if p.returncode == 0 else None
-    d = _FRAMES[("hq", row)]
+        _FRAMES[key] = d if p.returncode == 0 else None
+    d = _FRAMES[key]
     return os.path.join(d, name) if d else None
 
 

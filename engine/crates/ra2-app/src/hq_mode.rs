@@ -203,6 +203,10 @@ pub struct Options {
     /// Harness knob (`--bench-undamaged`): the repair bench opens with no
     /// pending repairs, as the original's did for an undamaged robot.
     pub bench_undamaged: bool,
+    /// Harness knob (`--event-robot N`): the join window's robot column the event run enters.
+    pub event_robot: Option<usize>,
+    /// Harness knob (`--force-round-win`): the entered robot wins every round.
+    pub force_round_win: bool,
 }
 
 impl Options {
@@ -233,6 +237,8 @@ impl Options {
             seconds,
             report_damage,
             bench_undamaged: false,
+            event_robot: None,
+            force_round_win: false,
         })
     }
 }
@@ -400,6 +406,8 @@ pub struct Session {
     forced_win: Option<bool>,
     /// See [`Options::bench_undamaged`].
     bench_undamaged: bool,
+    /// See [`Options::event_robot`].
+    event_robot_column: Option<usize>,
     /// The repair bench was opened between rounds: `finished button` returns to
     /// the bracket, not the HQ.
     repairs_after_round: bool,
@@ -436,11 +444,26 @@ impl Session {
             report_damage: 0.0,
             forced_win: None,
             bench_undamaged: false,
+            event_robot_column: None,
             repairs_after_round: false,
             player_drives: false,
             layout: SHELL_SIZE,
             repairs_view: None,
         })
+    }
+
+    /// The roster slot the bench's 3D box shows: `Robot In Event` when the team lists it, else none.
+    pub fn bench_robot_slot(&self) -> Option<i32> {
+        let player = self.career.player();
+        Some(player.event_robot).filter(|slot| player.robots.contains(slot))
+    }
+
+    /// The bench's title (`FUN_004d6890`): "Round " + the team's round counter + " Repairs".
+    pub fn bench_title(&self) -> String {
+        format!(
+            "Round {} Repairs",
+            self.career.bracket().map(|b| b.round).unwrap_or(1)
+        )
     }
 
     /// Draw the robot needing repairs, straight down on black, for the bench's
@@ -464,15 +487,12 @@ impl Session {
         {
             return Ok(());
         }
-        // The bench shows the robot that fought: `Robot In Event`, or the first roster slot when the
-        // event was already closed by its award (the match flow's own choice, `event_match`).
-        let player = self.career.player();
-        let slot = if player.event_robot >= 0 && player.robots.contains(&player.event_robot) {
-            Some(player.event_robot)
-        } else {
-            player.robots.first().copied()
-        };
-        let Some(path) = slot.map(|s| player_robot_path(&self.game, self.career.player_slot, s))
+        // The bench builds `Robot In Event` (`FUN_004d62a0` -> `FUN_004fa890`, which answers null
+        // for an index the team does not list, so -1 shows an empty box). The original only opens
+        // the bench between rounds of a running event, where it is set.
+        let Some(path) = self
+            .bench_robot_slot()
+            .map(|s| player_robot_path(&self.game, self.career.player_slot, s))
         else {
             self.repairs_view = None;
             return Ok(());
@@ -486,7 +506,7 @@ impl Session {
             ra2ui::workshop::library::GameLibrary::open(&self.game).map_err(|e| e.to_string())?;
         let build = ra2ui::workshop::build::Build::load(&library, &path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        self.repairs_view = crate::build_mode::robot_top_view(
+        self.repairs_view = crate::build_mode::robot_bench_view(
             renderer,
             &self.game,
             &build,
@@ -716,7 +736,8 @@ impl Session {
         } else {
             self.repair_clock()
         };
-        let mut screen = Repairs::open(&self.game.join("UI"), "Round 1 Repairs", rows, &clock)?;
+        let title = self.bench_title();
+        let mut screen = Repairs::open(&self.game.join("UI"), &title, rows, &clock)?;
         screen.set_selected(selected);
         self.screen = Screen::Repairs(Box::new(screen));
         Ok(())
@@ -839,9 +860,8 @@ impl Session {
             Screen::Award { .. } => {
                 let names = self.names_at(point);
                 if names.iter().any(|n| n == "continue button") {
-                    // The between-rounds bench is the next screen when the
-                    // match left something to repair; a healthy roster goes
-                    // straight back to the HQ.
+                    // The award ends the event (`FUN_0046ca90` clears `Robot In Event` and the damage
+                    // with it): the original has no bench after it, only between rounds.
                     self.repairs_after_round = false;
                     if matches!(self.career.phase, ra2sim::career::SeasonPhase::Complete) {
                         // `FUN_0046e2b0`: the last event's award leads to the
@@ -849,10 +869,8 @@ impl Session {
                         let view = self.view()?;
                         let gib = season_end_screen(&self.game.join("UI"), &view)?;
                         self.screen = Screen::SeasonEnd { gib };
-                    } else if self.career.repairs.is_empty() {
-                        self.return_to_hq()?;
                     } else {
-                        self.open_repairs()?;
+                        self.return_to_hq()?;
                     }
                     return Ok(true);
                 }
@@ -932,9 +950,9 @@ impl Session {
             .career
             .player()
             .robots
-            .first()
+            .get(self.event_robot_column.unwrap_or(0))
             .copied()
-            .ok_or_else(|| "the team has no robots".to_string())?;
+            .ok_or_else(|| "the team has no such robot".to_string())?;
         self.career.player_mut().event_robot = robot;
         let event = self.career.events[id].clone();
         let bracket = bracket_view(&self.career);
@@ -1138,12 +1156,10 @@ impl Session {
             self.screen = Screen::Award { gib, prize };
         } else {
             self.last_record = None;
-            if self.career.repairs.is_empty() {
-                refresh_event_screen(self)?;
-            } else {
-                self.repairs_after_round = true;
-                self.open_repairs()?;
-            }
+            // `FUN_0046ce50`: a won round of a running event always opens the bench, damaged or not
+            // (live `event-repairs`: an undamaged robot, 30:00, an empty list).
+            self.repairs_after_round = true;
+            self.open_repairs()?;
             println!(
                 "  next: {} — {}",
                 self.career
@@ -1658,7 +1674,7 @@ impl Session {
                 if row.fractured { " (damage.tga)" } else { "" }
             );
         }
-        if let Some(name) = plan.repairs_list {
+        if let (Some(name), false) = (plan.repairs_list, repairs_list) {
             capture(self, name)?;
         }
         let mut clicks = 0usize;
@@ -1673,7 +1689,7 @@ impl Session {
             }
         }
         println!("  repairs done after {clicks} clock tick(s)");
-        if let Some(name) = plan.repairs_done {
+        if let (Some(name), false) = (plan.repairs_done, repairs_done) {
             capture(self, name)?;
         }
 
@@ -2630,6 +2646,10 @@ pub fn run_headless(options: Options) -> Result<(), String> {
     session.set_event_seconds(options.seconds);
     session.set_report_damage(options.report_damage);
     session.bench_undamaged = options.bench_undamaged;
+    session.event_robot_column = options.event_robot;
+    if options.force_round_win {
+        session.set_forced_win(Some(true));
+    }
     println!(
         "HQ: {:?}, season {} (zero-based), {} points, rank {}, {} prizes",
         session.career.team_name(),
@@ -3264,6 +3284,42 @@ mod tests {
     /// repair clock completes them one at a time, the detached row keeps its
     /// name and fractured icon, the save reads back the cleared damage, and a
     /// fresh career opens the screen's own empty state.
+    /// The bench builds `Robot In Event` (`FUN_004d62a0` -> `FUN_004fa890`, null for an index the team does not
+    /// list) and is titled "Round N Repairs" from the round counter (`FUN_004d6890`).
+    #[test]
+    fn the_bench_shows_the_robot_in_event_and_names_the_round() {
+        let Some(game) = TestGame::new("benchrobot") else {
+            return;
+        };
+        let mut session = Session::open(game.path()).unwrap();
+        let listed: Vec<i32> = session.career.player().robots.clone();
+        assert!(listed.len() >= 5, "Team 0 lists six robots");
+        session.career.player_mut().event_robot = -1;
+        assert_eq!(session.bench_robot_slot(), None, "no event, no robot");
+        session.career.player_mut().event_robot = listed[4];
+        assert_eq!(
+            session.bench_robot_slot(),
+            Some(listed[4]),
+            "the entered robot, not the first roster slot"
+        );
+        session.career.player_mut().event_robot = 99;
+        assert_eq!(
+            session.bench_robot_slot(),
+            None,
+            "an unlisted index is null"
+        );
+
+        let event = session.career.schedule[0];
+        session.career.enter_event(event).unwrap();
+        // The counter has advanced past the round just won (`FUN_004faaf0`): one round played is "Round 1".
+        session.career.bracket.as_mut().unwrap().round = 1;
+        assert_eq!(session.bench_title(), "Round 1 Repairs");
+        session.career.bracket.as_mut().unwrap().round = 2;
+        assert_eq!(session.bench_title(), "Round 2 Repairs");
+        session.open_repairs().unwrap();
+        assert!(session.repairs().is_some());
+    }
+
     #[test]
     fn damage_appears_on_the_repairs_screen_and_completing_it_persists() {
         use ra2sim::r#match::{ComponentDamage, RobotReport};

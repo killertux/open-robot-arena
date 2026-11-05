@@ -117,6 +117,8 @@ pub const PRIZE_GRID: &str = "prizes grid";
 pub const TEAM_NAME: &str = "hq team name textbox";
 pub const TEAM_MOTTO: &str = "hq motto textbox";
 pub const TEAM_LOGO: &str = "hq logo img";
+/// The group the kills skulls are added to.
+pub const KILLS_GROUP: &str = "kills group";
 
 /// One robot in the inventory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1052,6 +1054,32 @@ fn fill_team(document: &mut Gib, view: &View) {
     if let Some(logo) = find_mut_in(document, TEAM_LOGO) {
         crate::input::set_field(logo, "_Filename", &view.team.logo);
     }
+    if let Some(group) = find_mut_in(document, KILLS_GROUP) {
+        group.children = kill_skulls(view.team.defeated());
+    }
+}
+
+/// The skull images of the `kills group` ("display the kills skulls here"): `FUN_005009f0` writes the
+/// team's kills (`Team+0x50`, `FUN_0049f9c0`) as hundreds, twenties, fives and ones, in that order
+/// left to right, each `FUN_00500ae0` image (`teamhq\skull100`, `skull20`, `skull5`, `skull1`) placed
+/// one image width after the last. Live: three kills are three 12-pixel skulls from the group's left.
+pub fn kill_skulls(kills: i32) -> Vec<Widget> {
+    let mut left = kills.max(0);
+    let mut out = Vec::new();
+    let mut x = 0.0;
+    for (value, file, width) in [
+        (100, "teamhq\\skull100.tga", 28.0),
+        (20, "teamhq\\skull20.tga", 16.0),
+        (5, "teamhq\\skull5.tga", 20.0),
+        (1, "teamhq\\skull1.tga", 12.0),
+    ] {
+        for _ in 0..left / value {
+            out.push(image_widget("kills skull", file, x, 0.0, width, 24.0));
+            x += width;
+        }
+        left %= value;
+    }
+    out
 }
 
 /// Fill `season_results.gib` from the same standings the league tab draws.
@@ -1468,6 +1496,34 @@ fn schedule_cell(frame: Frame, rows: usize, columns: usize, row: usize, column: 
 
 #[cfg(test)]
 mod tests {
+    /// The kills are drawn as hundreds, twenties, fives and ones, left to right (`FUN_005009f0`).
+    #[test]
+    fn the_kills_are_drawn_as_skulls_of_100_20_5_and_1() {
+        let names = |n: i32| -> Vec<String> {
+            kill_skulls(n)
+                .iter()
+                .map(|w| w.filename().unwrap_or_default().to_string())
+                .collect()
+        };
+        assert!(names(0).is_empty());
+        assert_eq!(names(3), vec!["teamhq\\skull1.tga"; 3]);
+        assert_eq!(
+            names(126),
+            vec![
+                "teamhq\\skull100.tga",
+                "teamhq\\skull20.tga",
+                "teamhq\\skull5.tga",
+                "teamhq\\skull1.tga"
+            ]
+        );
+        // One image width after the last: three ones sit at 0, 12 and 24.
+        let xs: Vec<String> = kill_skulls(3)
+            .iter()
+            .map(|w| w.field("Position").unwrap().raw.clone())
+            .collect();
+        assert_eq!(xs, vec!["0 0 0 0", "12 0 0 0", "24 0 0 0"]);
+    }
+
     use super::*;
 
     fn game_dir() -> Option<PathBuf> {

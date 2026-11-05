@@ -424,11 +424,19 @@ pub struct MatchReport {
 }
 
 impl MatchReport {
-    /// The screen's four rows, in robot order. `ra2ui::results::fill` places
-    /// the first four and leaves slots with no bot as the file has them.
+    /// The screen's rows, in the window's order. `FUN_004884b0` fills a row per player in
+    /// robot order, then sorts them twice with MSVC's `std::sort` (insertion sort at this size,
+    /// so both are stable): by the row's points (`+0xc4`, `0x4889b0`) descending, then the
+    /// winners (the player's byte `+0x74`, `0x488b00`) in front of the rest. Live (a 2v2 TEAM
+    /// MATCH, `match-results-team`): ALARM 1147 and Scout 0 (the winning team) above Sentinel 23
+    /// and Scout 0. `ra2ui::results::fill` places the first four and leaves slots with no bot as
+    /// the file has them.
     pub fn results(&self) -> Vec<ra2ui::results::MatchResult> {
-        self.robots
-            .iter()
+        let mut order: Vec<&RobotReport> = self.robots.iter().collect();
+        order.sort_by_key(|r| std::cmp::Reverse(r.points));
+        order.sort_by_key(|r| !r.winner);
+        order
+            .into_iter()
             .map(|r| ra2ui::results::MatchResult {
                 team_logo: r.team_logo.clone(),
                 bot_preview: r
@@ -1276,6 +1284,64 @@ mod tests {
     use glam::Vec3;
     use pyo3::prelude::*;
 
+    /// The results window sorts its rows by points and then puts the winners first
+    /// (`FUN_004884b0`; live 2v2 TEAM MATCH: ALARM 1147 and Scout 0 of the winning team above
+    /// Sentinel 23 and Scout 0, the slot order being Scout, ALARM, Scout, Sentinel).
+    #[test]
+    fn the_results_rows_are_sorted_by_points_then_winners_first() {
+        let robot = |slot: usize, name: &str, points: i32, winner: bool| RobotReport {
+            slot,
+            team: slot / 2,
+            bot_name: name.to_string(),
+            team_name: String::new(),
+            team_logo: String::new(),
+            bot_preview: None,
+            points,
+            damage_dealt: 0.0,
+            damage_taken: 0.0,
+            battery: 1.0,
+            air: 1.0,
+            armor: 1.0,
+            dot: 0,
+            defeated: false,
+            eliminated: false,
+            winner,
+            immobilized: false,
+            owner: None,
+            components: Vec::new(),
+        };
+        let report = MatchReport {
+            game_type: "TEAM MATCH",
+            arena: String::new(),
+            state: MatchState::Results,
+            reason: None,
+            winners: vec![0, 1],
+            duration: 180.0,
+            duration_limit: Some(180.0),
+            robots: vec![
+                robot(0, "Scout", 0, true),
+                robot(1, "ALARM", 1147, true),
+                robot(2, "Scout", 0, false),
+                robot(3, "Sentinel", 23, false),
+            ],
+            log: Vec::new(),
+        };
+        let names: Vec<(String, i32)> = report
+            .results()
+            .into_iter()
+            .map(|row| (row.bot_name, row.points))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("ALARM".to_string(), 1147),
+                ("Scout".to_string(), 0),
+                ("Sentinel".to_string(), 23),
+                ("Scout".to_string(), 0),
+            ]
+        );
+    }
+
     struct Restore(&'static str, Option<String>);
 
     impl Drop for Restore {
@@ -1538,8 +1604,9 @@ mod tests {
         // The report is the results screen's data, four slots' worth.
         let rows = report.results();
         assert_eq!(rows.len(), 2);
-        assert!(rows[1].winner);
-        assert!(!rows[0].winner);
+        // The winners come first (the results window's sort): robot 1 won, so it is the top row.
+        assert!(rows[0].winner);
+        assert!(!rows[1].winner);
 
         // Over → Results after the configured delay (0 here).
         m.step();

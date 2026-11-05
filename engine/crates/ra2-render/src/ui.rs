@@ -289,7 +289,21 @@ impl UiAssets {
             if p.widget.attachment("Border").is_some() {
                 // The ring lies outside the frame, so it is not clipped to the
                 // widget's own `ClipMode`, only to what holds it.
-                borders.push((p, parent.and_then(|q| q.clip)));
+                // A wide ring (`Width >= 2`: the repair bench's wood frame) on a split pane's child is
+                // not cut at the pane's edge: live (`event-repairs`) its bottom two rows, 720 and 721,
+                // are drawn below the 720-row pane, in the bottom bar's strip.
+                let wide = p
+                    .widget
+                    .attachment("Border")
+                    .and_then(|b| b.number("Width"))
+                    .is_some_and(|w| w >= 2.0);
+                let in_pane = parent.is_some_and(|q| q.widget.name().starts_with("Slot"));
+                let ring_clip = if wide && in_pane {
+                    None
+                } else {
+                    parent.and_then(|q| q.clip)
+                };
+                borders.push((p, ring_clip));
             }
             let clip = p.clip;
             if clip.is_some_and(|c| c.w <= 0.0 || c.h <= 0.0) {

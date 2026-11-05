@@ -5959,11 +5959,11 @@ impl Builder {
     }
 }
 
-/// A robot seen straight down, nose up the screen, over `background`: the
-/// original's "3d view group" on the repair bench (`repairs.gib`, `3d view
-/// group` holding `repairs 3d placeholder`) and the lab's own view. Pixels are
-/// RGBA, `width x height`; `None` when the design has nothing to draw.
-pub fn robot_top_view(
+/// A robot seen from 5 m, level, from behind (the camera at `(0, 0, -5)` looking along +z at the
+/// robot standing at the origin), over `background`: the original's "3d view group" on the repair
+/// bench (`repairs.gib`, `3d view group` holding `repairs 3d placeholder`). Pixels are RGBA,
+/// `width x height`; `None` when the design has nothing to draw.
+pub fn robot_bench_view(
     renderer: &Renderer,
     game: &Path,
     build: &Build,
@@ -6013,32 +6013,38 @@ pub fn robot_top_view(
     if groups.is_empty() {
         return Ok(None);
     }
-    let mut min = Vec3::splat(f32::MAX);
-    let mut max = Vec3::splat(f32::MIN);
-    for group in &groups {
-        for item in group.items {
-            for v in &item.vertices {
-                let p = group.model.transform_point3(Vec3::from(v.pos));
-                min = min.min(p);
-                max = max.max(p);
-            }
-        }
-    }
-    let center = (min + max) * 0.5;
-    let radius = ((max - min).length() * 0.5).max(0.6);
-    let eye = center + Vec3::new(0.0, radius * 3.0, 0.0);
-    let view = ra2_render::look_at_lh(eye, center, Vec3::Z);
+    // `FUN_004d69d0`: the robot stands at the origin with the identity orientation
+    // (`FUN_004dcff0`, quaternion (0,0,0,1)); the 3d view's camera is set to (0, 0) at the
+    // distance 5.0 (`FUN_0048cf10` / `FUN_0048cf30`). Live (the view object of the open
+    // window, probed with Frida): the camera node at (0, 0, -5) with the identity rotation,
+    // looking along +z at the robot, a 45 degree vertical field of view, aspect 1 (a 455 x 455
+    // box), near 1, far 2000.
+    let eye = Vec3::new(0.0, 0.0, -5.0);
+    let view = ra2_render::look_at_lh(eye, Vec3::ZERO, Vec3::Y);
     let proj = ra2_render::perspective_lh(
         45f32.to_radians(),
         width as f32 / height as f32,
-        0.05,
-        radius * 30.0,
+        1.0,
+        2000.0,
     );
+    // The lights of that view were not probed. A white point light at the camera with a white
+    // specular term fits the live frame (the hex nuts at the bar's ends 206 against 201, the
+    // plate 60/66/145 against 62/69/151; the viewer's key light from above-left is 103 and the
+    // dark plate), so it is the headlight the view is drawn with.
+    renderer.set_lights(&[ra2_render::Light {
+        position: eye,
+        range: 10_000.0,
+        diffuse: [1.0; 3],
+        specular: [1.0; 3],
+        attenuation: [1.0, 0.0, 0.0],
+    }]);
     renderer.set_background(background);
-    renderer
+    let out = renderer
         .render_groups(&groups, proj * view, width, height)
         .map(Some)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    renderer.clear_lights();
+    out
 }
 
 /// Solid-colour strokes drawn into a scene from a one-pixel white texture.

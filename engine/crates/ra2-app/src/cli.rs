@@ -69,6 +69,12 @@ pub struct Args {
     pub build_view: Option<String>,
     /// `--bench-undamaged`: `--hq` harness knob, the repair bench opens empty.
     pub bench_undamaged: bool,
+    /// `--hq --event-robot N`: the join window's robot column the headless event run enters
+    /// (default 0, the first roster slot).
+    pub event_robot: Option<usize>,
+    /// `--hq --force-round-win`: every round of the headless event run is won by the entered
+    /// robot (the between-rounds repairs bench shows only after a won round).
+    pub force_round_win: bool,
     /// `--debug-panel`: draw the workshop's synthetic edit panel (harness aid).
     pub debug_panel: bool,
     /// `--audio-report`: print every play call (path, kind, gain, position).
@@ -122,6 +128,8 @@ impl Default for Args {
             build_view: None,
             debug_panel: false,
             bench_undamaged: false,
+            event_robot: None,
+            force_round_win: false,
             audio_report: false,
             camera_shots: Vec::new(),
             earlier_arenas: Vec::new(),
@@ -199,6 +207,8 @@ pub fn usage() -> &'static str {
        --simulate-event N  --hq: play schedule row N's whole event headlessly\n\
        --simulate-season   --hq: play the nine-event season and write the evidence\n\
        --report-damage N  --hq evidence knob: N damage to the player's components\n\
+       --event-robot N  --hq: the join window's robot column the headless event enters (default 0)\n\
+       --force-round-win  --hq: the entered robot wins every round (the between-rounds bench)\n\
        --out DIR        write the match/play/build PNG frames and exit\n\
        --quit-at N      pause at N fight seconds, quit to the menu, write pause/menu PNGs\n\
        --bots A,B       two .bot paths for --match\n\
@@ -334,6 +344,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--build" => parsed.build_mode = true,
             "--start" => parsed.start = Some(PathBuf::from(next(&mut args, "--start")?)),
             "--bench-undamaged" => parsed.bench_undamaged = true,
+            "--force-round-win" => parsed.force_round_win = true,
+            "--event-robot" => {
+                let value = next(&mut args, "--event-robot")?;
+                parsed.event_robot =
+                    Some(value.parse().map_err(|_| {
+                        format!("--event-robot needs a column number, got {value:?}")
+                    })?);
+            }
             "--debug-panel" => parsed.debug_panel = true,
             "--build-view" => parsed.build_view = Some(next(&mut args, "--build-view")?),
             "--save-as" => parsed.save_as = Some(next(&mut args, "--save-as")?),
@@ -515,6 +533,9 @@ mod tests {
                 "3",
                 "--report-damage",
                 "40",
+                "--event-robot",
+                "4",
+                "--force-round-win",
                 "--out",
                 "frames",
             ]
@@ -527,6 +548,8 @@ mod tests {
         assert!(!args.simulate_season);
         assert_eq!(args.seconds, Some(3.0));
         assert_eq!(args.report_damage, Some(40.0));
+        assert_eq!(args.event_robot, Some(4));
+        assert!(args.force_round_win);
         assert_eq!(args.out, Some(PathBuf::from("frames")));
         assert!(parse(["--simulate-event".into(), "x".into()]).is_err());
         assert!(parse(["--report-damage".into(), "-1".into()]).is_err());
