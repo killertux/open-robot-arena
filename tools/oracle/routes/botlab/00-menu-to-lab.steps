@@ -1,0 +1,20 @@
+# Live only (ours opens the lab on a scratch cell directly, tools/labgame.sh): main menu -> Team HQ -> the
+# Rookies -> Continue -> cell 5 scrapped -> Workshop on the empty cell. Coordinates are 1024x768 pixels.
+click 511 426     # main menu: TEAM HQ
+wait 3
+click 510 277     # the Rookies
+wait 1
+click 691 664     # Continue
+wait 4
+click 790 435     # cell 5
+wait 1
+click 497 659     # Scrap Bot
+wait 1
+click 474 458     # Yes
+wait 2
+click 790 435     # the empty cell
+wait 1
+click 905 659     # Workshop
+wait 8
+hide
+shot SHOTS/00-blank-overview.png

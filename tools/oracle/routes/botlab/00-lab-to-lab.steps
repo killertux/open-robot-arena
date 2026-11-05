@@ -1,0 +1,14 @@
+# Live only: from inside a lab (any tab) back to the HQ, scrap cell 5, a new Workshop on it.
+click 55 18       # Back to HQ
+wait 4
+click 790 435
+wait 1
+click 497 659
+wait 1
+click 474 458
+wait 2
+click 790 435
+wait 1
+click 905 659
+wait 8
+hide

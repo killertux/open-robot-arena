@@ -54,6 +54,7 @@ pub mod adjust;
 pub mod build;
 pub mod chassis;
 pub mod extrude;
+pub mod gjk;
 pub mod library;
 pub mod paint;
 pub mod placement;

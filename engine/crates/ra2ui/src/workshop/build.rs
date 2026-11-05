@@ -114,6 +114,9 @@ pub struct Build {
     /// Whether this session's extrusion made the chassis (so a height change rebuilds it whole
     /// rather than scaling a stock mesh).
     extruded: bool,
+    /// The height the extruded chassis' face normals were last computed at: the extrusion and every top
+    /// point move set it, the height slider does not (it moves vertices only, live 9.29).
+    normal_height: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +159,7 @@ impl Build {
             undo: Vec::new(),
             redo: Vec::new(),
             extruded: false,
+            normal_height: super::extrude::DEFAULT_HEIGHT,
         }
     }
 
@@ -223,6 +227,7 @@ impl Build {
             chassis.top = chassis.bottom.clone();
         }
         let ok = super::extrude::rebuild(&mut chassis);
+        self.normal_height = chassis.height;
         self.commit_chassis(chassis);
         if ok && self.paint.skin().is_none() {
             let chassis = self.chassis_copy()?;
@@ -251,6 +256,7 @@ impl Build {
             .armour_material
             .get_or_insert([1.0, 1.0, 1.0, 1.0, 0.0]);
         let ok = super::extrude::rebuild(&mut chassis);
+        self.normal_height = chassis.height;
         self.commit_chassis(chassis);
         if ok && self.paint.skin().is_none() {
             let chassis = self.chassis_copy()?;
@@ -297,6 +303,7 @@ impl Build {
         if bends(&next, index) {
             return Ok(TopMove::Bend);
         }
+        self.normal_height = next.height;
         self.commit_chassis(next);
         Ok(TopMove::Moved)
     }
@@ -396,6 +403,7 @@ impl Build {
             undo: Vec::new(),
             redo: Vec::new(),
             extruded: false,
+            normal_height: super::extrude::DEFAULT_HEIGHT,
         })
     }
 
@@ -760,7 +768,7 @@ impl Build {
         let mut chassis = self.chassis_copy()?;
         if self.extruded && chassis.bottom.len() >= 3 && !(height <= 0.0 || !height.is_finite()) {
             chassis.height = height;
-            super::extrude::rebuild(&mut chassis);
+            super::extrude::rebuild_at(&mut chassis, self.normal_height);
             self.commit_chassis(chassis);
             return Ok(());
         }
@@ -1048,6 +1056,7 @@ fn chassis_info(chassis: &Chassis) -> ComponentInfo {
         mass: chassis.mass().max(5.0),
         has_hull: chassis.mesh.as_ref().is_some_and(|m| !m.points.is_empty()),
         bounds: None,
+        hulls: Vec::new(),
         loaded: true,
     }
 }
@@ -1266,6 +1275,7 @@ mod tests {
             mass: 16.0,
             has_hull: true,
             bounds: Some(([-0.1, 0.0, -0.1], [0.1, 0.3, 0.1])),
+            hulls: Vec::new(),
             loaded: true,
         }
     }
@@ -1285,6 +1295,7 @@ mod tests {
             mass: 8.0,
             has_hull: true,
             bounds: Some(([-0.1, -0.1, -0.1], [0.1, 0.1, 0.1])),
+            hulls: Vec::new(),
             loaded: true,
         }
     }

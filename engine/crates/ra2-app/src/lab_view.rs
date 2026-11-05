@@ -89,6 +89,27 @@ pub fn ribbon(cam: &Cam, segments: &[(Vec3, Vec3)], color: [f32; 4], pixels: f32
     out
 }
 
+/// The loops of a chassis the lab's extrusion made, from its mesh: the bottom ring, the top ring and the
+/// vertical edge at each corner (the loop of each side face; live a tapered side shows its four edges only,
+/// where the crease heuristic of [`outline_edges`] would add the quad's skew diagonal). `None` for any other mesh
+/// layout (the stock chassis' own meshes), which keeps the crease rule.
+pub fn ring_edges(chassis: &ra2fmt::bot::Chassis) -> Option<Vec<(Vec3, Vec3)>> {
+    let mesh = chassis.mesh.as_ref()?;
+    let n = chassis.bottom.len();
+    if n < 3 || chassis.top.len() != n || mesh.points.len() != 6 * n {
+        return None;
+    }
+    let p = |i: usize| Vec3::from(mesh.points[i]);
+    let mut out = Vec::new();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        out.push((p(i), p(j)));
+        out.push((p(n + i), p(n + j)));
+        out.push((p(i), p(n + i)));
+    }
+    Some(out)
+}
+
 /// The outline edges of a mesh's faces, in model space: an edge belongs to the outline when only
 /// one triangle owns it or the triangles on its two sides differ in normal (a quad's own
 /// diagonal does not show).

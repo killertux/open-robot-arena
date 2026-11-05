@@ -226,6 +226,14 @@ impl LabCam {
     }
 }
 
+/// The component preview's camera as the original sets it (`ra2_viewproj.js`: view matrix rows
+/// `(0.79608, -0.28482, -0.53398) (0, 0.88233, -0.47063) (0.60519, 0.37466, 0.70241)`, translation z 1.7).
+const COMP_PREVIEW_CAM: LabCam = LabCam {
+    pitch: -0.49,
+    yaw: -0.65,
+    dist: 1.7,
+};
+
 /// The camera the last preview frame used, so a click can be unprojected back
 /// into the bot's own space. The framing is ours; the geometry is the model's.
 #[derive(Clone, Copy, Debug)]
@@ -366,7 +374,12 @@ pub struct Builder {
     wire_control: Option<[i32; 2]>,
     wire_component: Option<usize>,
     /// The palette row on top (the grid is a one-row window of a longer list).
-    palette_scroll: usize,
+    palette_scroll: f32,
+    /// The palette's thumb is held (a drag of the scroll bar's slider).
+    palette_drag: Option<f32>,
+    /// The structure screens' slider held by the button (`radius`, `length`, `width`, `height`): the thumb
+    /// follows the cursor until the release.
+    slider_drag: Option<String>,
     selected_texture: Option<TextureEntry>,
     paint_mode: PaintMode,
     paint_color: PaintColor,
@@ -531,6 +544,9 @@ struct Panel {
     preview: Frame,
 }
 
+/// The armour grid's row height in the shipped `armor.gib` (`Sel Bar`'s own 84).
+const ARMOUR_ROW: f32 = 84.0;
+
 impl Builder {
     /// The workshop sounds the clicks since the last call made.
     pub fn take_sounds(&mut self) -> Vec<crate::audio::UiSound> {
@@ -674,7 +690,9 @@ impl Builder {
             dialog: None,
             wire_control: None,
             wire_component: None,
-            palette_scroll: 0,
+            palette_scroll: 0.0,
+            palette_drag: None,
+            slider_drag: None,
             selected_texture: None,
             paint_mode: PaintMode::Fill,
             paint_color: PaintColor::default(),
@@ -880,7 +898,7 @@ impl Builder {
         self.arena.as_mut()
     }
 
-    fn lab_cam(&self) -> LabCam {
+    pub fn lab_cam(&self) -> LabCam {
         let key = self.tab().unwrap_or("").to_string();
         self.lab_cams.get(&key).copied().unwrap_or(LabCam::START)
     }
@@ -963,6 +981,9 @@ impl Builder {
             self.cancel_drag();
         }
         if self.paint_pick(x, y, true) {
+            return Ok(());
+        }
+        if self.palette_bar_press(x, y) {
             return Ok(());
         }
         if self.panel.preview.contains_point(x, y) {
@@ -1049,7 +1070,7 @@ impl Builder {
             _ => {}
         }
         if category {
-            self.palette_scroll = 0;
+            self.palette_scroll = 0.0;
         }
         if was_step_one && self.tab() == Some("chassis button") && self.structure_step() == 2 {
             // Step 2 shows the baseplate extruded (`Adjust Top Outline`): the mesh is made here,
@@ -1412,6 +1433,13 @@ impl Builder {
         if self.paint_color.drag.is_some() {
             self.paint_pick(x, y, false);
         }
+        if self.palette_drag.is_some() {
+            self.palette_follow(x);
+            let _ = self.refresh();
+        }
+        if let Some(which) = self.slider_drag.clone() {
+            self.slider_follow(&which, x, y);
+        }
         let Some(active) = self.drag.as_mut() else {
             return;
         };
@@ -1435,6 +1463,11 @@ impl Builder {
     pub fn set_modifiers(&mut self, shift: bool, ctrl: bool) {
         self.shift = shift;
         self.ctrl = ctrl;
+    }
+
+    /// What the dragged part is over now (scripted comparisons print it).
+    pub fn drag_hover(&self) -> Option<String> {
+        self.drag.as_ref().map(|d| format!("{:?}", d.hover))
     }
 
     /// Whether a part is on the drag.
@@ -1606,12 +1639,19 @@ impl Builder {
                     .unwrap_or("")
                     .trim()
                     .to_string();
-                let weight = format!("{:.1}", info.mass);
+                let weight = format!("{:.1} kg", info.mass);
                 for (widget, text) in [
                     ("component name textbox", name.as_str()),
                     ("component weight textbox", weight.as_str()),
                 ] {
                     if let Some(w) = workshop::find_mut(root, widget) {
+                        // The name box (`ChildOrder -1`, which the shell draws last) carries the header's
+                        // dark band as its `Background`; drawn last it dimmed the weight (live: bright
+                        // (127,153,255) over the band, ours 0.7 of that). Ordered 0 it draws before the
+                        // weight box (5), as live.
+                        if widget == "component name textbox" {
+                            ra2ui::input::set_field(w, "ChildOrder", "0");
+                        }
                         ra2ui::input::set_field(w, "_Text", text);
                         for child in w.children.iter_mut() {
                             if child.kind == WidgetKind::Text {
@@ -1720,17 +1760,16 @@ impl Builder {
                 model: ra2_render::tm_mat4(&point.transform),
             });
         }
-        let (mn, mx) = info.bounds.unwrap_or(([-0.2; 3], [0.2; 3]));
-        let (mn, mx) = (Vec3::from(mn), Vec3::from(mx));
-        let center = (mn + mx) * 0.5;
-        let radius = ((mx - mn).length() * 0.5).max(0.15);
-        let eye = center + Vec3::new(radius * 1.9, radius * 1.4, radius * 2.2);
-        let view = ra2_render::look_at_lh(eye, center, Vec3::Y);
+        // The camera is fixed, the same for every part (live `ra2_viewproj.js`, docs/36 9.29): the lab's orbit
+        // camera at pitch -0.49, yaw -0.65, 1.7 m from the part's own origin, 45 degrees, near 0.001, far 10,
+        // in the placeholder's 215 px viewport. A small part is small in its box, a big one fills it.
+        let (eye, up) = COMP_PREVIEW_CAM.eye_up();
+        let view = ra2_render::look_at_lh(eye, Vec3::ZERO, up);
         let proj = ra2_render::perspective_lh(
             45f32.to_radians(),
             width as f32 / height as f32,
-            0.02,
-            radius * 30.0,
+            0.001,
+            10.0,
         );
         let view_proj = proj * view;
         let pixels = self
@@ -2078,20 +2117,23 @@ impl Builder {
                         .join(", ")
                 )
             })?;
-        let (horizontal, visible, _) = self.palette_window();
+        let (horizontal, _, stride) = self.palette_window();
+        let width = self.palette_view_width();
         let scroll = if horizontal {
-            // One long row, scrolled by cell: bring the cell into the window.
-            if index < self.palette_scroll {
-                index
-            } else if index >= self.palette_scroll + visible {
-                index + 1 - visible
+            // One long row, scrolled by pixel: bring the whole cell into the window.
+            let left = index as f32 * stride;
+            if left < self.palette_scroll {
+                left
+            } else if left + stride > self.palette_scroll + width {
+                left + stride - width
             } else {
                 self.palette_scroll
             }
+            .clamp(0.0, self.palette_max_scroll())
         } else {
-            index / self.palette_columns().max(1)
+            (index / self.palette_columns().max(1)) as f32
         };
-        if scroll != self.palette_scroll {
+        if (scroll - self.palette_scroll).abs() > f32::EPSILON {
             self.palette_scroll = scroll;
             self.refresh_palette();
         }
@@ -2562,6 +2604,7 @@ impl Builder {
             let fraction: f32 = fraction
                 .parse()
                 .map_err(|_| format!("bad slider fraction {fraction:?}"))?;
+            self.slider_drag = Some(which.to_string());
             return self.set_slider(which, fraction);
         }
         if action == "m9:outline:clear" {
@@ -3835,7 +3878,9 @@ impl Builder {
         }
         let mut category = None;
         let scroll = self.palette_scroll;
-        let (horizontal, visible, stride) = self.palette_window();
+        let (horizontal, _, stride) = self.palette_window();
+        let view = self.palette_view_width();
+        let thumb = self.palette_thumb_x();
         if let Some(lab) = self.shell.lab_mut() {
             for block in lab.document.blocks.iter_mut() {
                 let ra2fmt::gib::Block::Widget(root) = block else {
@@ -3851,6 +3896,9 @@ impl Builder {
                     // order, not archive order), then scrolled by hand so a
                     // component in a later row is clickable.
                     if let Some(grid) = workshop::find_mut(root, "components grid") {
+                        if let (true, Some(x)) = (horizontal, thumb) {
+                            ra2ui::input::set_horizontal_thumb(grid, x);
+                        }
                         if let Some(g) = ra2ui::Grid::from_widget(grid) {
                             let columns = g.columns.max(1) as usize;
                             let mut order: Vec<usize> = (0..grid.children.len())
@@ -3878,7 +3926,11 @@ impl Builder {
                                         "Name",
                                         &format!("m9:cell:{rank}"),
                                     );
-                                    let shown = rank >= scroll && rank < scroll + visible;
+                                    // The row scrolls by pixel (live: an arrow is one cell, the thumb and the
+                                    // track any pixel); the cells that overlap the grid's frame are shown and the
+                                    // frame clips the partly visible ones (docs/36 9.29).
+                                    let left = rank as f32 * stride - scroll;
+                                    let shown = left + stride > 0.0 && left < view;
                                     ra2ui::input::set_field(
                                         cell,
                                         "Visible",
@@ -3891,8 +3943,7 @@ impl Builder {
                                             .field("Position")
                                             .map(|f| f.numbers())
                                             .unwrap_or_default();
-                                        let x = at.first().copied().unwrap_or(0.0)
-                                            - stride * scroll as f32;
+                                        let x = at.first().copied().unwrap_or(0.0) - scroll;
                                         let y = at.get(2).copied().unwrap_or(0.0);
                                         ra2ui::input::set_field(
                                             cell,
@@ -3903,6 +3954,7 @@ impl Builder {
                                     continue;
                                 }
                                 let row = rank / columns;
+                                let scroll = scroll as usize;
                                 let cell = &mut grid.children[ci];
                                 ra2ui::input::set_field(cell, "Name", &format!("m9:cell:{rank}"));
                                 if row < scroll {
@@ -3944,6 +3996,12 @@ impl Builder {
             return;
         };
         let armour = self.library.armour().to_vec();
+        // The plate the chassis has, as a row: the grid's `Sel Bar` (authored on the fourth row) sits on it.
+        let current = self
+            .build
+            .chassis()
+            .and_then(|c| c.armour)
+            .and_then(|a| armour.iter().position(|d| d.type_id == a.type_id));
         if let Some(lab) = self.shell.lab_mut() {
             for block in lab.document.blocks.iter_mut() {
                 let ra2fmt::gib::Block::Widget(root) = block else {
@@ -3952,24 +4010,42 @@ impl Builder {
                 let Some(grid) = workshop::find_mut(root, "armor grid") else {
                     continue;
                 };
-                if grid
+                if !grid
                     .children
                     .iter()
                     .any(|c| c.name().starts_with("m9:armor:"))
                 {
-                    return;
+                    let made = ra2ui::cells::fill(grid, &template, armour.len());
+                    let start = grid.children.len().saturating_sub(made);
+                    for (cell, def) in grid.children[start..].iter_mut().zip(&armour) {
+                        ra2ui::input::set_field(cell, "Name", &format!("m9:armor:{}", def.type_id));
+                        ra2ui::cells::bind_art(cell, "armor img", &def.texture);
+                        ra2ui::cells::bind_prose(cell, &def.description);
+                        ra2ui::cells::bind_value(cell, "armor name", &def.name);
+                        ra2ui::cells::bind_value(
+                            cell,
+                            "weight value",
+                            &format!("{}", def.weight as i32),
+                        );
+                        ra2ui::cells::bind_value(
+                            cell,
+                            "concussion value",
+                            &format!("{}", def.hardness as i32),
+                        );
+                    }
                 }
-                let made = ra2ui::cells::fill(grid, &template, armour.len());
-                let start = grid.children.len().saturating_sub(made);
-                for (cell, def) in grid.children[start..].iter_mut().zip(&armour) {
-                    ra2ui::input::set_field(cell, "Name", &format!("m9:armor:{}", def.type_id));
-                    ra2ui::cells::bind_art(cell, "armor img", &def.texture);
-                    ra2ui::cells::bind_prose(cell, &def.description);
-                    ra2ui::cells::bind_value(
-                        cell,
-                        "weight value",
-                        &format!("{}", def.weight as i32),
-                    );
+                for bar in grid.children.iter_mut().filter(|c| c.name() == "Sel Bar") {
+                    match current {
+                        Some(row) => {
+                            ra2ui::input::set_field(
+                                bar,
+                                "Position",
+                                &format!("0 0 {} 0", ARMOUR_ROW * row as f32),
+                            );
+                            ra2ui::input::set_field(bar, "Visible", "true");
+                        }
+                        None => ra2ui::input::set_field(bar, "Visible", "false"),
+                    }
                 }
                 return;
             }
@@ -5193,7 +5269,13 @@ impl Builder {
                 height as f32,
             );
             let plain = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
-            let edges: Vec<(Vec3, Vec3)> = crate::lab_view::outline_edges(&plain)
+            let local = bot
+                .components
+                .first()
+                .and_then(|c| c.chassis.as_ref())
+                .and_then(crate::lab_view::ring_edges)
+                .unwrap_or_else(|| crate::lab_view::outline_edges(&plain));
+            let edges: Vec<(Vec3, Vec3)> = local
                 .into_iter()
                 .map(|(a, b)| (world[0].transform_point3(a), world[0].transform_point3(b)))
                 .collect();
@@ -6186,6 +6268,149 @@ pub fn script(
     Ok(())
 }
 
+/// The palette's horizontal scroll bar as laid out (`components.gib`'s `Scroller` on `components grid`).
+struct PaletteBar {
+    less: ra2ui::Frame,
+    more: ra2ui::Frame,
+    track: ra2ui::Frame,
+    thumb_w: f32,
+    /// The grid's frame: the width the row scrolls in.
+    view: ra2ui::Frame,
+}
+
+impl Builder {
+    fn palette_bar(&self) -> Option<PaletteBar> {
+        let placed = self.shell.placements();
+        let grid = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "components grid")?;
+        let bar = grid
+            .attachments
+            .iter()
+            .find(|a| a.attachment.kind == ra2fmt::gib::AttachmentKind::Scroller)?
+            .body
+            .walk()
+            .find(|p| p.widget.kind == ra2fmt::gib::WidgetKind::ScrollBar)?;
+        if !bar.widget.visible() {
+            return None;
+        }
+        let model = ra2ui::ScrollBar::from_widget(bar.widget);
+        if model.vertical {
+            return None;
+        }
+        let less = bar.children.get(model.less)?.frame;
+        let more = bar.children.get(model.more)?.frame;
+        let parts = model.parts(bar.frame, less, more);
+        let thumb_w = bar
+            .children
+            .get(model.slider)
+            .and_then(|s| s.children.first())
+            .map(|t| t.frame.w)
+            .filter(|w| *w > 0.0)
+            .unwrap_or(30.0);
+        Some(PaletteBar {
+            less: parts[0],
+            more: parts[1],
+            track: parts[2],
+            thumb_w,
+            view: grid.frame,
+        })
+    }
+
+    /// The width the palette row scrolls in.
+    fn palette_view_width(&self) -> f32 {
+        self.palette_bar().map(|b| b.view.w).unwrap_or(480.0)
+    }
+
+    /// The farthest the row scrolls, in pixels: every cell's width less the view.
+    fn palette_max_scroll(&self) -> f32 {
+        let (_, _, stride) = self.palette_window();
+        (self.shown.len() as f32 * stride - self.palette_view_width()).max(0.0)
+    }
+
+    /// The thumb's x inside the slider track for the scroll the row is at.
+    fn palette_thumb_x(&self) -> Option<f32> {
+        let bar = self.palette_bar()?;
+        let max = self.palette_max_scroll();
+        let fraction = if max > 0.0 {
+            (self.palette_scroll / max).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Some(fraction * (bar.track.w - bar.thumb_w).max(0.0))
+    }
+
+    /// A press on the palette's scroll bar (live, docs/36 9.29): an arrow scrolls to the next cell, a press on the
+    /// track puts the thumb's centre under the cursor and holds it (a press on the thumb holds it where it
+    /// is); the row follows the thumb to any pixel. `true` when the press was on the bar.
+    fn palette_bar_press(&mut self, x: f32, y: f32) -> bool {
+        if self.tab() != Some("components button") || !self.palette_window().0 {
+            return false;
+        }
+        let Some(bar) = self.palette_bar() else {
+            return false;
+        };
+        let (_, _, stride) = self.palette_window();
+        let max = self.palette_max_scroll();
+        // An arrow reveals the next cell whole: right puts the first cell cut off at the right edge flush with
+        // it (live from 0: 75, 171, 267 ... = 96 k - 21 with the 501 px view), left puts the left-hand cell
+        // that is cut off flush with the left edge.
+        if bar.less.contains_point(x, y) {
+            let target = ((self.palette_scroll / stride).ceil() - 1.0).max(0.0) * stride;
+            self.palette_scroll = target.clamp(0.0, max);
+        } else if bar.more.contains_point(x, y) {
+            let edge = ((self.palette_scroll + bar.view.w) / stride).floor() + 1.0;
+            self.palette_scroll = (edge * stride - bar.view.w).clamp(0.0, max);
+        } else if bar.track.contains_point(x, y) {
+            let travel = (bar.track.w - bar.thumb_w).max(1.0);
+            let left = bar.track.x + travel * (self.palette_scroll / max.max(1.0)).clamp(0.0, 1.0);
+            let grab = if x >= left && x < left + bar.thumb_w {
+                x - left
+            } else {
+                bar.thumb_w * 0.5
+            };
+            self.palette_drag = Some(grab);
+            self.palette_follow(x);
+        } else {
+            return false;
+        }
+        let _ = self.refresh();
+        true
+    }
+
+    /// A held structure slider follows the cursor: its fraction from the cursor against the slider's frame (the
+    /// height slider is vertical, the others horizontal), as the press computed it.
+    fn slider_follow(&mut self, which: &str, x: f32, y: f32) {
+        let name = format!("{which} slider");
+        let frame = {
+            let placed = self.shell.placements();
+            placed
+                .iter()
+                .flat_map(|p| p.walk())
+                .find(|p| p.widget.name() == name)
+                .map(|p| p.frame)
+        };
+        let Some(frame) = frame else { return };
+        let fraction = if which == "height" {
+            1.0 - (y - frame.y) / frame.h.max(1.0)
+        } else {
+            (x - frame.x) / frame.w.max(1.0)
+        };
+        let _ = self.set_slider(which, fraction.clamp(0.0, 1.0));
+    }
+
+    /// The held thumb follows the cursor.
+    fn palette_follow(&mut self, x: f32) {
+        let (Some(grab), Some(bar)) = (self.palette_drag, self.palette_bar()) else {
+            return;
+        };
+        let travel = (bar.track.w - bar.thumb_w).max(1.0);
+        let fraction = ((x - grab - bar.track.x) / travel).clamp(0.0, 1.0);
+        self.palette_scroll = (fraction * self.palette_max_scroll()).round();
+    }
+}
+
 // -- The wiring windows (docs/36 section 9.27) --------------------------------------------------
 
 impl Builder {
@@ -6217,6 +6442,8 @@ impl Builder {
     pub fn mouse_released(&mut self, x: f32, y: f32) {
         let _ = (x, y);
         self.paint_color.drag = None;
+        self.palette_drag = None;
+        self.slider_drag = None;
         // `FUN_004791e0`: the drag of a top point ends where it is.
         self.point_drag = false;
         if self.dialog.is_some() || self.tab() != Some("wiring button") {

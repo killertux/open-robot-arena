@@ -1,0 +1,59 @@
+# Components, part 1: the Components tab (the lab camera is put above the robot), the Control Board dropped on
+# the baseplate, a refused drop (a motor over the board), a drag cancelled by a click off the chassis, the Small
+# Battery Pack dropped, selected and removed, then dropped again.
+click 455 88      # Components tab
+wait 3
+cam -1.2 0 5
+hide
+shot SHOTS/13-components-empty.png
+click 552 180     # Power
+click 560 252     # Robot Control Board
+wait 1
+hide
+shot SHOTS/14-board-selected.png
+click 556 608     # Attach
+move 255 455
+wait 1
+shot SHOTS/15-board-dragging.png
+click 255 455     # drop
+wait 1
+hide
+shot SHOTS/16-board-placed.png
+click 722 180     # Mechanics
+click 752 252     # Reversible Angle Motor
+click 556 608     # Attach
+move 255 460      # over the board: refused
+wait 1
+shot SHOTS/17-motor-refused.png
+click 255 460     # the click is refused too, the drag goes on
+wait 1
+shot SHOTS/18-motor-refused-click.png
+move 400 200      # off the chassis
+wait 1
+click 400 200     # a click over nothing ends the drag
+wait 1
+hide
+shot SHOTS/19-drag-cancelled.png
+click 552 180     # Power
+click 944 252     # Small Battery Pack
+click 556 608     # Attach
+move 195 455
+click 195 455
+wait 1
+hide
+shot SHOTS/20-battery-placed.png
+click 195 455     # a click on the placed battery selects it
+wait 1
+hide
+shot SHOTS/21-battery-selected.png
+click 255 592     # REMOVE
+wait 1
+hide
+shot SHOTS/22-battery-removed.png
+click 944 252     # the battery is still the selected palette cell
+click 556 608
+move 195 455
+click 195 455
+wait 1
+hide
+shot SHOTS/23-battery-again.png

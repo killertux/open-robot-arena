@@ -1,0 +1,36 @@
+# Paint Shop survey: the Effect dropdown's five pages (Color Fill, Texture Fill, Surface Layers, Edge Lines, Decals),
+# the dropdown open on Color Fill and on Texture Fill.
+click 676 88      # Paint Shop tab
+wait 3
+click 760 212     # Effect dropdown
+wait 1
+hide
+shot SHOTS/66-effect-list.png
+click 612 248     # Texture Fill
+wait 2
+hide
+shot SHOTS/67-texturefill.png
+click 760 212
+wait 1
+click 622 267     # Surface Layers
+wait 2
+hide
+shot SHOTS/68-surfacelayers.png
+click 760 212
+wait 1
+click 614 285     # Edge Lines
+wait 2
+hide
+shot SHOTS/69-edgelines.png
+click 760 212
+wait 1
+click 604 303     # Decals
+wait 2
+hide
+shot SHOTS/70-decals.png
+click 760 212
+wait 1
+click 612 230     # Color Fill again
+wait 2
+hide
+shot SHOTS/71-colorfill-again.png

@@ -1136,18 +1136,39 @@ fn place_core<'a>(
                     }
                 }
             }
+            // A `TextBox` whose `Alignment` has the vertical centre bit (16 of the high nibble: 17, 18, 20)
+            // centres its line in the box. Live, the component preview's name and weight (`Alignment 17` /
+            // `20`, a 41 px box, text authored at y 37) sit centred, 13 px above the authored baseline.
+            if widget.kind == WidgetKind::TextBox && text_box_middle(widget) {
+                for child in placed
+                    .iter_mut()
+                    .filter(|c| c.widget.kind == WidgetKind::Text)
+                {
+                    if let Some((_, h)) = measured(child.widget, fonts) {
+                        child.frame.y = frame.y + (frame.h - h) / 2.0;
+                    }
+                }
+            }
             // A right-aligned `TextBox` ends its text at the box's right edge: the Paint Shop's
             // `tint label` is authored at `_Position 315` for a 338 px slider and sits on the 237 px
             // one's right end (live: `Tint` ends at the slider's last pixel). Only a string the
             // authored position pushes past the edge is moved.
             if widget.kind == WidgetKind::TextBox && text_box_right(widget) {
+                let buffer_px = widget
+                    .field("Buffer")
+                    .and_then(|f| f.number())
+                    .unwrap_or(0.0)
+                    .max(0.0);
                 for child in placed
                     .iter_mut()
                     .filter(|c| c.widget.kind == WidgetKind::Text)
                 {
                     if let Some((w, _)) = measured(child.widget, fonts) {
-                        if child.frame.x + w > frame.x + frame.w {
-                            child.frame.x = frame.x + frame.w - w;
+                        // `Buffer` keeps the string that many pixels in from the right edge (the component
+                        // preview's weight box says `Buffer 16`: live `4.0 kg` ends 18 px inside the panel).
+                        let edge = frame.x + frame.w - buffer_px;
+                        if child.frame.x + w > edge {
+                            child.frame.x = edge - w;
                         }
                     }
                 }
@@ -1387,6 +1408,14 @@ fn text_box_centres(widget: &Widget) -> bool {
         .field("Alignment")
         .and_then(|f| f.number())
         .is_some_and(|a| (a as i32) & 7 == 2)
+}
+
+/// Whether a `TextBox`'s `Alignment` centres its text vertically (the vertical nibble's 16).
+fn text_box_middle(widget: &Widget) -> bool {
+    widget
+        .field("Alignment")
+        .and_then(|f| f.number())
+        .is_some_and(|a| (a as i32) & 0x38 == 16)
 }
 
 /// Whether a `TextBox`'s `Alignment` puts its text at the right edge.

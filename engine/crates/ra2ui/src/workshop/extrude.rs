@@ -253,6 +253,19 @@ pub struct Extrusion {
 /// Extrude `bottom` to `height`, its top ring being `top` (the same count of points, else the
 /// bottom's own).
 pub fn extrude(bottom: &[[i32; 2]], top: &[[i32; 2]], height: f32) -> Option<Extrusion> {
+    extrude_at(bottom, top, height, height)
+}
+
+/// [`extrude`] with the face normals (and so the skin's side planes) taken from the quads as they stood at
+/// `normal_height`: the height slider moves the mesh's vertices and leaves the normals the last extrusion or
+/// point move gave them (live: a top point dragged at 0.825 and the slider then moved to 1.32 saves the
+/// 0.825 normals, `(0.959, 0.256, 0.120)` against 0.1632 for a fresh 1.32 one; 9.29).
+pub fn extrude_at(
+    bottom: &[[i32; 2]],
+    top: &[[i32; 2]],
+    height: f32,
+    normal_height: f32,
+) -> Option<Extrusion> {
     let n = bottom.len();
     if n < 3 || height <= 0.0 {
         return None;
@@ -260,6 +273,7 @@ pub fn extrude(bottom: &[[i32; 2]], top: &[[i32; 2]], height: f32) -> Option<Ext
     let top = if top.len() == n { top } else { bottom };
     let b: Vec<[f32; 3]> = bottom.iter().map(|p| world(*p, 0.0)).collect();
     let t: Vec<[f32; 3]> = top.iter().map(|p| world(*p, height)).collect();
+    let tn: Vec<[f32; 3]> = top.iter().map(|p| world(*p, normal_height)).collect();
     let area = signed_area(&b);
     if area == 0.0 {
         return None;
@@ -277,7 +291,7 @@ pub fn extrude(bottom: &[[i32; 2]], top: &[[i32; 2]], height: f32) -> Option<Ext
     let plate_up = [0.0, 1.0, 0.0];
     let side_normal = |i: usize| -> [f32; 3] {
         let j = (i + 1) % n;
-        let quad = [b[i], b[j], t[j], t[i]];
+        let quad = [b[i], b[j], tn[j], tn[i]];
         let m = super::adjust::face_normal(quad[2], quad[3], quad[0]);
         if m == [0.0; 3] {
             return [0.0, 0.0, 1.0];
@@ -380,12 +394,13 @@ pub fn extrude(bottom: &[[i32; 2]], top: &[[i32; 2]], height: f32) -> Option<Ext
         let base = mesh.points.len() as u32;
         let uv = skin_uv(2 + i);
         let quad = [b[i], b[j], t[j], t[i]];
+        let quad_n = [b[i], b[j], tn[j], tn[i]];
         // The lab gives every vertex the normal of the last triangle that uses it
         // (`FUN_0044d1b0`, in index order): `(v1 v2 v0)` then `(v2 v3 v0)`, so `v1` keeps the first
         // triangle's and `v0`, `v2`, `v3` the second's. On a flat side they are one normal; after
         // a top point is dragged they differ (live `botlab-adjust-triangle-ok`).
         let unit = |tri: [usize; 3]| {
-            let n = super::adjust::face_normal(quad[tri[0]], quad[tri[1]], quad[tri[2]]);
+            let n = super::adjust::face_normal(quad_n[tri[0]], quad_n[tri[1]], quad_n[tri[2]]);
             let n = if cw { n } else { [-n[0], -n[1], -n[2]] };
             if n == [0.0; 3] {
                 [0.0, 0.0, 1.0]
@@ -433,7 +448,12 @@ pub fn extrude(bottom: &[[i32; 2]], top: &[[i32; 2]], height: f32) -> Option<Ext
 /// Rebuild `ch`'s mesh, face groups, faces and crush corners from its outlines and height.
 /// Returns whether the outlines make a shape (at least three points).
 pub fn rebuild(ch: &mut Chassis) -> bool {
-    let Some(e) = extrude(&ch.bottom, &ch.top, ch.height) else {
+    rebuild_at(ch, ch.height)
+}
+
+/// [`rebuild`] with the normals of the quads at `normal_height` ([`extrude_at`]).
+pub fn rebuild_at(ch: &mut Chassis, normal_height: f32) -> bool {
+    let Some(e) = extrude_at(&ch.bottom, &ch.top, ch.height, normal_height) else {
         ch.mesh = None;
         ch.face_groups.clear();
         ch.faces.clear();

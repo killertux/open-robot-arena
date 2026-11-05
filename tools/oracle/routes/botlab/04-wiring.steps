@@ -1,0 +1,68 @@
+# Wiring and key binding: two analog controls (drive W-S, turn A-D) and a button (fire, space); the drive control is
+# wired to both motors through their connection windows, the turn control to both with opposite senses, the button
+# to the spin motor. Names are typed (the caret goes where the click puts it, so the click is at the box's end and
+# the old text is backspaced away). Keys: RA2_KEY_HOLD / RA2_KEY_GAP in ra2_drive.py.
+click 582 88      # Wiring tab
+wait 3
+cam -1.2 0 5
+hide
+shot SHOTS/40-wiring-blank.png
+drag 636 162 632 330 0 10     # ANALOG onto cell (0,0)
+wait 1
+shot SHOTS/41-analog-dialog.png
+click 690 329     # the name box, at its end
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key d
+key r
+key i
+key v
+key e
+click 436 447     # Positive Axis box, then the key
+key w
+click 613 447     # Negative Axis box
+key s
+wait 1
+shot SHOTS/42-analog-keys.png
+click 582 503     # OK
+wait 2
+hide
+shot SHOTS/43-analog-added.png
+click 205 372     # the left motor: its connection window
+wait 2
+hide
+shot SHOTS/44-connect-new.png
+click 597 379     # Positive Axis list
+wait 1
+shot SHOTS/45-connect-list.png
+click 540 434     # Spin Counter-clockwise
+wait 1
+click 597 441     # Negative Axis list
+wait 1
+click 540 479     # Spin Clockwise
+wait 1
+shot SHOTS/46-connect-set.png
+click 568 503     # OK
+wait 2
+click 305 372     # the right motor
+wait 2
+click 597 379
+wait 1
+click 540 434
+wait 1
+click 597 441
+wait 1
+click 540 479
+wait 1
+click 568 503
+wait 2
+hide
+shot SHOTS/47-drive-wired.png

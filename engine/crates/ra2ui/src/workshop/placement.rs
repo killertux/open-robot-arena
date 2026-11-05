@@ -427,7 +427,14 @@ impl Build {
                     continue;
                 };
                 if mine.overlaps(&Obb::new(*world, bounds), TOUCH) {
-                    return Some(Refusal::Intersects);
+                    // The boxes are only the broad phase: the physics query tests the shapes, and a round
+                    // wheel at a motor's axle clears a board its bounding box overlaps (live accepts it).
+                    if info.hulls.is_empty() || drag.info.hulls.is_empty() {
+                        return Some(Refusal::Intersects);
+                    }
+                    if hulls_overlap(&drag.info, &candidate.world, info, world) {
+                        return Some(Refusal::Intersects);
+                    }
                 }
             }
         }
@@ -506,6 +513,38 @@ impl Build {
         if let Some((_, hover)) = best {
             return Some(hover);
         }
+        // A ray over a placed part's body offers that part's free compatible socket nearest to where it
+        // enters (live, docs/36 9.29: a wheel dragged over a motor's body goes on the motor's axle although
+        // the cursor is 40 cm from it), nearest part first; a part with no such socket lets the ray through.
+        let mut over: Vec<(f32, usize)> = Vec::new();
+        for (i, info) in self.info().iter().enumerate().skip(1) {
+            let (Some(bounds), Some(world)) = (info.bounds, worlds.get(i)) else {
+                continue;
+            };
+            if let Some(t) = Obb::new(*world, bounds).ray(origin, direction) {
+                over.push((t, i));
+            }
+        }
+        over.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (t, i) in over {
+            let point = origin + direction * t;
+            let world = worlds[i];
+            let nearest = self.info()[i]
+                .mounts
+                .iter()
+                .filter(|(id, _)| self.socket_takes(drag, i, **id))
+                .map(|(id, a)| {
+                    let at = (world * mount::tm_mat4(&a.transform)).transform_point3(Vec3::ZERO);
+                    ((at - point).length(), *id)
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, id)) = nearest {
+                return Some(Hover::Mount {
+                    parent: i,
+                    mount: id,
+                });
+            }
+        }
         if direction.y.abs() < 1e-6 {
             return None;
         }
@@ -556,6 +595,23 @@ impl Build {
         }
         self.remove(index).map(|_| ())
     }
+}
+
+/// Whether any convex piece of one part overlaps any convex piece of the other, each in its world.
+fn hulls_overlap(a: &ComponentInfo, a_world: &Mat4, b: &ComponentInfo, b_world: &Mat4) -> bool {
+    let to_world = |info: &ComponentInfo, world: &Mat4| -> Vec<Vec<Vec3>> {
+        info.hulls
+            .iter()
+            .map(|h| {
+                h.iter()
+                    .map(|p| world.transform_point3(Vec3::from(*p)))
+                    .collect()
+            })
+            .collect()
+    };
+    let (a, b) = (to_world(a, a_world), to_world(b, b_world));
+    a.iter()
+        .any(|x| b.iter().any(|y| super::gjk::overlap(x, y)))
 }
 
 /// The bottom outline in bot-local metres, `None` when the chassis has none.
@@ -785,6 +841,7 @@ mod tests {
             mass: 16.0,
             has_hull: true,
             bounds: Some(([-0.1; 3], [0.1; 3])),
+            hulls: Vec::new(),
             loaded: true,
             ..Default::default()
         }
@@ -802,6 +859,7 @@ mod tests {
             mass: 8.0,
             has_hull: true,
             bounds: Some(([-0.05; 3], [0.05; 3])),
+            hulls: Vec::new(),
             loaded: true,
             ..Default::default()
         }

@@ -1,0 +1,71 @@
+# Components, part 2: two Reversible Angle Motors on the baseplate, a Buzzard wheel on each axle, a Red Bird Spin
+# Motor with a Blade on it (the weapon). Hover points: a part snaps to the free attachment point the cursor is near.
+click 722 180     # Mechanics
+click 752 252     # Reversible Angle Motor
+click 556 608
+move 185 385
+click 185 385     # left motor
+wait 1
+hide
+shot SHOTS/24-motor-left.png
+click 805 180     # Wheels
+click 656 252     # Buzzard wheel
+shot SHOTS/25-wheel-selected.png
+click 556 608
+move 228 378      # near the motor's axle
+wait 1
+shot SHOTS/26-wheel-snapping.png
+click 228 378
+wait 1
+hide
+shot SHOTS/27-wheel-left-placed.png
+click 722 180     # Mechanics
+click 752 252
+click 556 608
+move 295 385
+click 295 385     # right motor
+wait 1
+hide
+shot SHOTS/28-motor-right.png
+click 805 180
+click 656 252
+click 556 608
+move 338 378
+wait 1
+shot SHOTS/29-wheel-right-snapping.png
+click 338 378
+wait 1
+hide
+shot SHOTS/30-wheel-right-placed.png
+click 722 180     # Mechanics
+click 656 252     # Red Bird Spin Motor
+wait 1
+hide
+shot SHOTS/31-spin-motor-selected.png
+click 645 548     # its green box: the own attachment point (the preview's one box)
+wait 1
+shot SHOTS/31b-spin-motor-box.png
+click 556 608
+move 255 322      # too far back: it would stand over the baseplate's edge (refused)
+wait 1
+shot SHOTS/32-spin-motor-refused-edge.png
+move 255 338      # at the back of the baseplate
+wait 1
+shot SHOTS/32b-spin-motor-dragging.png
+click 255 338
+wait 1
+hide
+shot SHOTS/33-spin-motor-placed.png
+click 888 180     # Weapons
+click 944 252     # Canine VI ChewBlade: a saw disc for the spin motor's spindle
+wait 1
+hide
+shot SHOTS/34-blade-selected.png
+click 556 608
+move 257 352      # at the spin motor's spindle
+wait 1
+shot SHOTS/35-blade-dragging.png
+click 257 352
+wait 1
+hide
+shot SHOTS/36-blade-placed.png

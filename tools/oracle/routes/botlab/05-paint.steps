@@ -1,0 +1,29 @@
+# Paint Shop: pick a colour on the picker and the shade slider, paint one panel of the chassis, Undo, Paint Entire
+# Chassis, then a second colour on one panel (the skin the save carries).
+click 676 88      # Paint Shop tab
+wait 3
+cam -1.2 0 5
+hide
+shot SHOTS/60-paint-open.png
+click 760 330     # the picker: an orange
+click 900 469     # the shade slider
+wait 1
+hide
+shot SHOTS/61-paint-colour.png
+click 270 250     # a panel of the chassis (the top, seen from above)
+wait 1
+hide
+shot SHOTS/62-paint-top-panel.png
+click 962 641     # Undo
+wait 1
+hide
+shot SHOTS/63-paint-undone.png
+click 909 579     # Paint Entire Chassis
+wait 1
+hide
+shot SHOTS/64-paint-entire.png
+click 890 400     # a blue on the picker
+click 270 250     # the top panel again
+wait 1
+hide
+shot SHOTS/65-paint-final.png
