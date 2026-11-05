@@ -706,6 +706,34 @@ pub trait PhysicsBackend {
     /// next substep only; a backend without the hook ignores it.
     fn arm_slider_lock(&mut self, _handle: JointHandle, _stop: f32, _band: f32) {}
 
+    /// Hand the backend a robot's `MagicAction` to run in its action stage, as the original does:
+    /// the action is a Havok action (`0x4856f0`), so it runs after the integration of *every* piece
+    /// of a substep, not once per frame (docs/29 section 12ba: the live rows have exactly one
+    /// `MagicAction` apply per piece per chassis, whatever the piece's length). The caller keeps
+    /// refreshing the records once a frame, as the robot's update does. `None` takes it away.
+    /// Returns `false` for a backend that runs actions once per step: the caller then applies the
+    /// action itself.
+    fn set_piece_action(
+        &mut self,
+        _chassis: BodyHandle,
+        _action: Option<crate::drive::MagicAction>,
+    ) -> bool {
+        false
+    }
+
+    /// Tell the backend which controllers the match has, in the order the original creates them,
+    /// so it runs each armed lock where that controller sits in the world's action list
+    /// (docs/29 section 12ba): `robots[r]` holds robot `r`'s chassis body and its hinge and slider
+    /// joints in the order of their motors' components, `arena` the arena's joints in the order they were made. A
+    /// controller (and the robot's `MagicAction`, [`Self::set_piece_action`]) listed after its group
+    /// runs after the solver of the piece instead of before it. Called again with the full set whenever it grows; a backend without actions ignores it.
+    fn declare_action_order(
+        &mut self,
+        _robots: &[(BodyHandle, Vec<JointHandle>)],
+        _arena: &[JointHandle],
+    ) {
+    }
+
     /// Never collide these two bodies: a pair from the arena's
     /// `GMID_HAVOK_DIS_COLLISION_PAIRS`. A backend may ignore it.
     fn disable_collision(&mut self, _a: BodyHandle, _b: BodyHandle) {}

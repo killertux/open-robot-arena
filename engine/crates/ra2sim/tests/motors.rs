@@ -270,21 +270,34 @@ fn a_burst_piston_kicks_the_robot_only_at_its_stop() {
     );
 }
 
-/// A burst piston's whole stroke leaves its robot where it was: the controller locks the rod
-/// as its offset comes within 0.05 of the stop it returns to, in the action stage after the
-/// piece's integration and before its solver, so the rod's remaining speed is taken by the
-/// lock and not handed to the chassis through the limit a second time (docs/29 section 12ay).
-/// Live (`weapons-wideload-free__live__001`, the Wide Load's rod, `R` rows): the return stop
-/// kicks the chassis once, -1.2 m/s, and the next step, in which the rod's remaining 5.5 m/s
-/// vanish, not at all. Ours, the lock a piece late, took a second -1.05 m/s there (free, in the
-/// replay of the live stroke: ended -0.7 m/s back; here, on its wheels, 0.32 from where it began).
-#[test]
-fn a_burst_piston_stroke_leaves_the_chassis_where_it_was() {
-    let game = game!();
-    let _scripts = ra2script::lock();
-    let mut d = duel(&game, "AI/Team8/Bot2.bot", 90);
+/// The chassis' planar speed change over a Wide Load stroke in the Combat Arena with the robot's
+/// controllers declared the way the Compressor's list has them (`pre`: before its group, the
+/// Sentinel / Wide Load fight's 20 entries) or as a lone robot's list has them (after).
+fn stroke_kick(game: &Path, pre: bool) -> (f32, f32) {
+    let mut d = duel(game, "AI/Team8/Bot2.bot", 90);
     let p = parts_of(&d, JointUse::Burst)[0];
     let name = control_of(&d, p);
+    if pre {
+        // The live list of 12ba: a first robot with five controllers (the Sentinel's) and four
+        // arena joints put the Wide Load's controllers before its group.
+        let r = &d.robots[0];
+        let mut mine: Vec<(usize, u32)> = r
+            .rig
+            .parts
+            .iter()
+            .zip(&r.parts)
+            .filter_map(|(q, s)| Some((q.joint?.motor, s.joint?)))
+            .collect();
+        mine.sort_unstable();
+        let chassis = r.parts[0].body;
+        d.physics.declare_action_order(
+            &[
+                (u32::MAX, (9001..9006).collect()),
+                (chassis, mine.into_iter().map(|m| m.1).collect()),
+            ],
+            &[9101, 9102, 9103, 9104],
+        );
+    }
     let planar = |d: &Duel| {
         let v = d
             .physics
@@ -302,11 +315,41 @@ fn a_burst_piston_stroke_leaves_the_chassis_where_it_was() {
         d.step_direct(&[DriveInput::default()], DT);
         peak = peak.max((planar(&d) - before).length());
     }
-    let after = (planar(&d) - before).length();
+    (peak, (planar(&d) - before).length())
+}
+
+/// A burst piston's whole stroke leaves its robot where it was when its controller is before its
+/// group in the world's action list (the Compressor's Wide Load): the controller locks the rod as
+/// its offset comes within 0.05 of the stop it returns to, in the action stage after the piece's
+/// integration and before its solver, so the rod's remaining speed is taken by the lock and not
+/// handed to the chassis through the limit a second time (docs/29 sections 12ay, 12ba). Live
+/// (`weapons-wideload-free__live__001`, the Wide Load's rod, `R` rows): the return stop kicks the
+/// chassis once, -1.2 m/s, and the next step, in which the rod's remaining 5.5 m/s vanish, not at
+/// all. A lock a piece late took a second -1.05 m/s there (on its wheels: 0.32 m/s from where it began).
+#[test]
+fn a_burst_piston_stroke_leaves_the_chassis_where_it_was() {
+    let game = game!();
+    let _scripts = ra2script::lock();
+    let (peak, after) = stroke_kick(&game, true);
     assert!(peak > 1.4, "the kick at the stop: {peak}");
     assert!(
         after < 0.2,
         "the chassis ends the stroke {after} m/s from where it began (the lock a piece late: 0.32)"
+    );
+}
+
+/// With the controller after its group (a lone robot's list, the Box's ALARM) the lock comes after
+/// the piece's solver and the limit's reaction stays in the chassis: the stroke ends 0.3 m/s from
+/// where it began (live, ALARM in the Box fight: -1.29 m/s in the lock piece, 12ba).
+#[test]
+fn a_piston_after_its_group_locks_after_the_solver_and_kicks_the_chassis() {
+    let game = game!();
+    let _scripts = ra2script::lock();
+    let (peak, after) = stroke_kick(&game, false);
+    assert!(peak > 1.4, "the kick at the stop: {peak}");
+    assert!(
+        after > 0.25,
+        "the chassis ends the stroke {after} m/s from where it began"
     );
 }
 

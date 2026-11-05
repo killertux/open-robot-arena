@@ -192,6 +192,10 @@ impl MagicAction {
     /// `(0, 1, 0)`, the rest the other robot's or a wall's, and every record
     /// the drive read held the last one.
     pub fn contact(record: &mut WheelRecord, toward_wheel: Vec3) {
+        // Diagnostic (docs/29 12ba): `RA2_WHEEL_NORMAL_UP=1` ignores the events' normals (every wheel drives along the floor).
+        if std::env::var_os("RA2_WHEEL_NORMAL_UP").is_some_and(|v| v == "1") {
+            return;
+        }
         if toward_wheel.is_finite() && toward_wheel.length_squared() > 0.25 {
             record.contact_normal = toward_wheel.normalize();
         }

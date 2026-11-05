@@ -1578,10 +1578,15 @@ fn a_driven_robots_snapshot_carries_the_integer_percent_of_each_motor() {
         return;
     };
     let command = |id| device_values(&state, id).map(|v| v[0].to_bits() as i32);
-    assert_eq!(command(0x404), Some(100));
-    assert_eq!(command(0x408), Some(-100));
-    assert_eq!(command(0x40c), Some(100));
-    assert_eq!(command(0x410), Some(-100));
+    // `ftol(f(ftol(command * g)))`: a motor that took a few hitpoints in the first two seconds
+    // (the landing on the Bridge) reads 99, the health factor `f` being 0.5 + 0.5 hp / max.
+    for (id, want) in [(0x404, 100), (0x408, -100), (0x40c, 100), (0x410, -100)] {
+        let got = command(id).unwrap();
+        assert!(
+            got == want || got == want - want.signum(),
+            "{id:#x}: {got}, wanted {want}"
+        );
+    }
     // The hinge angle is in (-pi, pi].
     for id in [0x404, 0x408, 0x40c, 0x410] {
         let angle = device_values(&state, id).unwrap()[1];

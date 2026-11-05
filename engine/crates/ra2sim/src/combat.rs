@@ -973,13 +973,16 @@ impl EventGate {
 /// The normals the wheels' own collision callbacks keep from the events the
 /// filter let through ([`MagicAction::contact`](crate::drive::MagicAction::contact)):
 /// for every event one of whose bodies is a robot part whose registered
-/// component at the point is a wheel, `(robot, part, normal toward the wheel)`.
+/// component at the point is a wheel, `(robot, part, normal toward the wheel, point, the other body)`.
 /// The game's listener hands an event to the callbacks of both its collidables,
 /// so a wheel hears the events its own entries let through and the ones its
 /// partner's did (live, the wheels' callbacks run in pairs a step apart once a
 /// second, their two entries, with an odd one between when the floor's entry
 /// let a point through).
-pub fn wheel_contacts(robots: &[Robot], events: &[ContactEvent]) -> Vec<(usize, usize, Vec3)> {
+pub fn wheel_contacts(
+    robots: &[Robot],
+    events: &[ContactEvent],
+) -> Vec<(usize, usize, Vec3, Vec3, BodyHandle)> {
     let mut owner: HashMap<BodyHandle, (usize, usize)> = HashMap::new();
     for (r, robot) in robots.iter().enumerate() {
         for (p, part) in robot.parts.iter().enumerate() {
@@ -991,9 +994,9 @@ pub fn wheel_contacts(robots: &[Robot], events: &[ContactEvent]) -> Vec<(usize, 
     let mut out = Vec::new();
     for e in events {
         // `normal` points from `a` toward `b`.
-        for (body, state, toward, tag) in [
-            (e.a, &e.state_a, -e.normal, e.tag_a),
-            (e.b, &e.state_b, e.normal, e.tag_b),
+        for (body, other, state, toward, tag) in [
+            (e.a, e.b, &e.state_a, -e.normal, e.tag_a),
+            (e.b, e.a, &e.state_b, e.normal, e.tag_b),
         ] {
             let Some(&(r, p)) = owner.get(&body) else {
                 continue;
@@ -1003,7 +1006,7 @@ pub fn wheel_contacts(robots: &[Robot], events: &[ContactEvent]) -> Vec<(usize, 
                 continue;
             };
             if robot.rig.components[c].role == Role::Wheel {
-                out.push((r, p, toward));
+                out.push((r, p, toward, e.point, other));
             }
         }
     }
