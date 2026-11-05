@@ -2467,4 +2467,34 @@ mod tests {
             .fold(0.0, f32::max);
         assert!(wall > 20.0, "the wall hit is priced: {hits:?}");
     }
+
+    /// `Practice.py`'s `AddShadowReceivers` reaches the engine (docs/36 section 9.33): the script
+    /// lives in `Scripts/`, not in the `Arenas` package, and used to be skipped, so the Test Robot
+    /// had no shadow.
+    #[test]
+    fn the_practice_arena_casts_the_robots_shadow() {
+        let Some(game) = game_dir() else {
+            eprintln!("skipping: no local/game");
+            return;
+        };
+        let _guard = ra2script::lock();
+        let was = std::env::var("RA2_HAZARDS").ok();
+        std::env::set_var("RA2_HAZARDS", "0");
+        let _restore = Restore("RA2_HAZARDS", was);
+        let config = MatchConfig::new(
+            path(&game, "Scripts/Practice.py"),
+            GameType::Deathmatch,
+            vec![RobotEntry::human(0, path(&game, "Teams/Team0/Bot0.bot"))],
+        )
+        .with_practice();
+        let Ok(mut m) = Match::new(config) else {
+            eprintln!("skipping: no practice arena");
+            return;
+        };
+        for _ in 0..3 {
+            m.step_with(&[Some(DriveInput::default())]);
+        }
+        let items = m.duel.effect_items(glam::Mat4::IDENTITY);
+        assert!(items.iter().any(|i| i.label == "shadows"));
+    }
 }

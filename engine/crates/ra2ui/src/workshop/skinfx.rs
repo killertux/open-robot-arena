@@ -571,4 +571,41 @@ mod tests {
             assert!(mae < 0.2, "{file}: mean abs difference {mae}");
         }
     }
+
+    /// The live decal against the live armour skin (`decalband-export-*`): one `bolt.tga` decal at size
+    /// 1 (80 px) on the top face's panel `R = (95, 165, 179, 249)`. The original's four `CopyRects`
+    /// (`FUN_005b30a0`) did not take the pixels outside `R` back in the live run: the nut runs past
+    /// `R` on three sides (docs/36 section 9.33).
+    #[test]
+    fn the_decal_matches_the_live_export_without_the_band_restore() {
+        let (Some(game), Some(oracle)) =
+            (local_dir("local/game"), local_dir("local/oracle/original"))
+        else {
+            return;
+        };
+        let load = |name: &str| Image::load(&oracle.join(format!("{name}__live__000.bmp")));
+        let (Some(base), Some(live), Some(bolt)) = (
+            load("decalband-export-armour"),
+            load("decalband-export-decal"),
+            Image::load(&game.join("Texture Library/decals/bolt.tga")),
+        ) else {
+            return;
+        };
+        let mae = |clip: [i32; 4]| {
+            let mut canvas = Canvas::new(&base.to_skin());
+            canvas.decal(&bolt, [153.5, 183.0], 80.0, 0.0, clip);
+            let ours = canvas.finish();
+            let live = live.to_skin();
+            let sum: u64 = ours
+                .pixels
+                .iter()
+                .zip(&live.pixels)
+                .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64)
+                .sum();
+            sum as f64 / ours.pixels.len() as f64
+        };
+        let (clipped, free) = (mae([95, 165, 179, 249]), mae([0, 0, 256, 256]));
+        assert!(free < 0.2, "{free}");
+        assert!(clipped > 5.0 * free, "{clipped} {free}");
+    }
 }

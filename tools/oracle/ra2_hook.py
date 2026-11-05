@@ -22,6 +22,7 @@ def main():
     ap.add_argument("agent")
     ap.add_argument("--seconds", type=float, default=30)
     ap.add_argument("--host", default=os.environ.get("RA2_FRIDA_HOST", "127.0.0.1:27142"))
+    ap.add_argument("--bindir", default=None, help="save binary send() payloads here as N.bin")
     ap.add_argument("--name", default="Robot Arena 2.exe")
     a = ap.parse_args()
     dev = frida.get_device_manager().add_remote_device(a.host)
@@ -32,7 +33,14 @@ def main():
 
     def on_message(msg, data):
         if msg.get("type") == "send":
-            print(json.dumps(msg["payload"]), flush=True)
+            pl = msg["payload"]
+            if data is not None and a.bindir:
+                os.makedirs(a.bindir, exist_ok=True)
+                n = len(os.listdir(a.bindir))
+                with open(os.path.join(a.bindir, "%04d.bin" % n), "wb") as fh:
+                    fh.write(data)
+                pl = dict(pl, bin="%04d.bin" % n)
+            print(json.dumps(pl), flush=True)
         else:
             print(json.dumps({"agent_error": msg}), file=sys.stderr, flush=True)
 
