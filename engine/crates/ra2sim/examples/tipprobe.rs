@@ -72,7 +72,11 @@ fn lowest(duel: &Duel) -> f32 {
 
 /// Every body of the robot: (handle, centre of mass, rotation).
 fn snapshot(duel: &Duel) -> Vec<(u32, Vec3, Quat)> {
-    duel.robots[robot_index()]
+    snapshot_of(duel, robot_index())
+}
+
+fn snapshot_of(duel: &Duel, robot: usize) -> Vec<(u32, Vec3, Quat)> {
+    duel.robots[robot]
         .parts
         .iter()
         .map(|p| {
@@ -201,7 +205,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Find the height that puts the lowest hull point where it rests.
             place(&mut duel, &snap, q, c0, Vec3::ZERO, Vec3::ZERO);
             let dy = rest_low + drop - lowest(&duel);
-            let at = c0 + Vec3::Y * dy;
+            // `TIPPROBE_COM_LIFT=<m>`: the chassis' centre that far above its rest
+            // centre instead (the live trials release from 1 m, `dcentre` 0).
+            let at = match std::env::var("TIPPROBE_COM_LIFT")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+            {
+                Some(l) => c0 + Vec3::Y * l,
+                None => c0 + Vec3::Y * dy,
+            };
+            // `TIPPROBE_COM_SHIFT=<dx>,<dz>`: and moved sideways by that (the live grids'
+            // `dcentre`).
+            let at = match std::env::var("TIPPROBE_COM_SHIFT") {
+                Ok(v) => {
+                    let p: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+                    at + Vec3::new(
+                        p.first().copied().unwrap_or(0.0),
+                        0.0,
+                        p.get(1).copied().unwrap_or(0.0),
+                    )
+                }
+                Err(_) => at,
+            };
             place(&mut duel, &snap, q, at, Vec3::ZERO, axis * w);
             println!(
                 "placed centre {:.4} {:.4} {:.4} offset {:.4} {:.4} {:.4} q {:.5} {:.5} {:.5} {:.5} (w,x,y,z) axis {:.4} {:.4} {:.4} w {w}",
@@ -253,6 +278,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         m => return Err(format!("unknown mode {m}").into()),
     };
+    // `TIPPROBE_ALARM=<azimuth deg>,<distance m>,<fire s>`: the other robot (1) is put `distance`
+    // from the tipped one's rest centre in the horizontal direction `azimuth` (0 = +x, 90 = +z),
+    // facing it, standing on the floor, and its `Fire` pressed `fire` s after the release (the
+    // live trials' `extra` group, docs/29 12bd).
+    let mut alarm_fire: Option<f32> = None;
+    if let Ok(v) = std::env::var("TIPPROBE_ALARM") {
+        let p: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+        let (az, dist) = (p[0].to_radians(), p[1]);
+        alarm_fire = p.get(2).copied();
+        let snap1 = snapshot_of(&duel, 1);
+        let c1 = snap1[0].1;
+        let r1 = snap1[0].2;
+        let target = Vec3::new(c0.x + dist * az.cos(), c1.y + 0.03, c0.z + dist * az.sin());
+        let f0 = r1 * duel.robots[1].rig.forward();
+        let u = Vec3::new(c0.x - target.x, 0.0, c0.z - target.z).normalize();
+        let psi = u.x.atan2(u.z) - f0.x.atan2(f0.z);
+        // Bodies are put in place at the release like the first group.
+        place(
+            &mut duel,
+            &snap1,
+            Quat::from_rotation_y(psi),
+            target,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        );
+        println!("alarm placed at {:.3} {:.3} {:.3} yaw {:.1} deg (forward in the chassis frame {:?}, rest centre {:?}, q {:?})", target.x, target.y, target.z, psi.to_degrees(), duel.robots[1].rig.forward(), c1, r1);
+    }
     ra2sim::havok17::dump_line(format_args!("[\"X\",0]"));
     let triggers: Vec<String> = duel.robots[robot_index()]
         .rig
@@ -287,6 +339,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ev: Vec<(String, i32, f32)> =
                 triggers.iter().map(|n| (n.clone(), 0, 1.0)).collect();
             duel.robots[robot_index()].apply_inputs(&ev);
+        }
+        if alarm_fire.is_some_and(|f| (t - f).abs() < DEFAULT_STEP * 0.5) {
+            duel.robots[1].apply_inputs(&[("Fire".to_string(), 0, 1.0)]);
         }
         let s = duel.physics.state(chassis).unwrap();
         let c = duel.physics.center_of_mass(chassis).unwrap();

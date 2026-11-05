@@ -8328,3 +8328,92 @@ every live capture as bell / late, counts hits >= 10 hp and sums damage per atta
 Box's ALARM / length (-1.5 se) are the two residuals worth a look once more bell-primed fights exist (n 19 and 18, sd 14 and 20 hits); the
 FlapJack's late chassis hits in the Razor fight (1.1 / 0.6); a capture with no Python call at all (agent loaded, `start_match` blind)
 would close the perturbation question completely.
+
+### 12bd. The sideways Scout: the tail stand is a pose of the original and its statics and dynamics agree in 162 controlled trials; ours stays on its tail 8-10 % of a fight against about 1 % live, and the cause is not in the shape, mass, friction or wheels (fx/sideways; measurements, a regression test, no engine change)
+
+12ba left the Scout lying "sideways" for tens of seconds in ours (one dumped Octagon fight: 32 s) and in the original 0.7 % of the time
+(wheel hits of ALARM's hammer follow from it). This round measured what the pose is, whether ours' rest and motion on it are the
+original's, and how often each engine gets there and stays. **No engine change: the pose is right, its frequency is not, and the one place where
+the two engines part is a sub-centimetre contact detail that was not isolated.**
+
+**1. What "sideways" is.** `|up.y| < 0.25` of the chassis (its up axis, the third row of the `B`/`S` rotation) is the Scout *standing on its
+tail*: the chassis' forward axis vertical (nose and fork up), the rear face (the 1.76 x 0.5 m end of the 1.76 x 0.5 x 1.32 m plate) on the floor,
+its centre 0.320 m above the centre of the Scout at rest. In ours' 96 Octagon fights (`ensemble.sh`, master 023b2b9) it takes 9.5 +- 1.9 % of
+the first 120 s (7.7 +- 1.9 % in the Box), in 22 % (17 %) of the fights for a run of 2 s or more and 14 % (15 %) for 8 s or more. By where: 52 % of that
+time at a wall with ALARM more than 1.6 m away (the Scout leans its top face against the wall), 20 % with ALARM close and itself on its tail (an
+A-frame), 14 % on the open floor, the rest at a wall with ALARM close. 20 of the 22 runs of 2 s or more start within 2 s of a hit of ALARM's on the chassis.
+
+**2. The live fights.** 16 new bell-primed Octagon fights (`sidefight-scout-alarm-octagon__live__000..015`) and 4 Box
+(`sidefight-scout-alarm-box__live__000..003`), `capture_parts_set.sh` with `AGENT=frida/ra2_robotpair.js`, `NOSAMPLE=1`, `ARENA_ROW_Y=296` / 188: the
+`S` rows give both chassis' pose at every resolver entry from the bell (the bell is where the Scout first moves), with the two older bell-primed
+`boxstart-actorder-*` fights 17 Octagon and 5 Box (`tools/oracle/sideways/side_stats.py`):
+
+| | live | ours |
+|---|---|---|
+| Octagon, share of the first 120 s with the Scout on its tail | **0.8 +- 0.2 %** (17 fights) | **9.5 +- 1.9 %** (96) |
+| Octagon, fights with a run of >= 2 / 4 / 8 s | 1 (6 %) / **0 / 0** | 21 (22 %) / 17 (18 %) / 13 (14 %) |
+| Box, share | 0.4 +- 0.4 % (5) | 7.7 +- 1.9 % (96) |
+| Box, fights with a run >= 4 s | 0 | 15 (16 %) |
+| ALARM on its tail, fights with a run >= 4 s (control) | 24 % (4 of 17) | 17 % |
+
+Both Scouts go over equally often: the Scout's minimum `up.y` in 1.5-8 s is below 0.5 in 41 % of the live fights and 46 % of ours (ALARM 59 / 51 %), its
+runs of 0.3 s or more on its tail come 0.88 a fight against 1.01, and the share of the first 60 s spent not upright is 29 % live against 19 % ours.
+What differs is how long it stays: runs of 1.0 s or more 0.12 a fight live against 0.41, of 2.5 s or more 0.06 against 0.20. ALARM, which stands on its tail in live for 6, 7 and
+84 s (the last in the Octagon's pit), matches. Zero fights in 22 with a run of 4 s or more, against 17 % of ours' 192: p = 0.83^22 = 0.02. ALARM's hammer lands
+on a Scout that is on its tail in 19 % of its blows in ours (142 of 747) against 2 % live (3 of 157), and the damage the Scout takes in the first 4 s agrees
+(261 +- 31 live, 300 +- 15 ours hp).
+
+**3. Controlled tips: the pose and its dynamics are the original's.** `tools/oracle/capture_tipab.py` (12r) in a box match with both AIs neutered and the hazards off,
+233 trials in nine grids (`tipab-scout-*__live__000`; ours: `examples/tipprobe` with `TIPPROBE_COM_LIFT`/`COM_SHIFT`, `tools/oracle/sideways/ours_tipab.py`,
+`tipab_cmp.py`; the live grids' `dcentre` is the lowest hull point 0.05 m above its rest, the first grid, which put the Scout at the rest centre, was a placement error and is not kept):
+
+* *Statics.* Pitched -80..-100 degrees about its side axis the Scout ends on its tail, -65 / -105 and beyond on its wheels or its back, a roll of 70 on its wheels and 80-120 on its back:
+  the basins agree (one of 24). The tail stands match to 1 mm in height (live -1.564, ours -1.564 m against -1.884 at rest) and in lean (mean `up.y` 0.00237 live, 0.00247 ours over 21 / 23 stands), and **both hold for 60 s**
+  (`tipab-scout-tail-long-box`, six trials; even the slow yaw drift agrees).
+* *Spin.* Released with `w` about the side axis (-6.5 .. +2.25 rad/s, 51 trials at 0.25 steps, three pitches): stands, falls back onto its wheels or goes over onto its back at the same `w` to a quarter step except at six basin edges, **all six
+  on one side: ours holds on the tail 0.25-1 rad/s longer** (live leaves at -3.75 / -4.0 where ours leaves at -4.0 / -4.25 for -90, and so on).
+* *Wall.* Stood against the wall (top face or bottom face toward it, four yaws, four distances, then driven at the wall with `Throttle`/`Turn` 100/0, -100/0, 100/100, 100/-100): 15 of 16 and 24 of 24 end alike; a standing Scout is
+  not driven off its tail by its wheels (they are off the floor: `touching` 0 in both).
+* *Totals.* 162 trials (the grids without a fork stroke or a second robot) agree in kind in 147; the 15 differences are all at a basin edge.
+* *The fork's stroke on a tail stand, and the action list (12ba).* Fired on the tail, the Scout's fork topples it forward every time in the live session (55 of 55, `tipab-scout-tail-fire-box`) and in ours only 4 of 55. The stroke itself agrees to
+  the step (the fork's -14.7 / -29.1 / -18.2 rad/s and the chassis' +3.5 / +6.7 / +2.7 rad/s against ours' -15.0 / -29.5 / -16.2 and +3.5 / +6.8 / +2.9) up to the fork's stop (the hinge's lock): then live's chassis keeps 1.30 1.07 0.91 0.98 1.05 1.13 rad/s and falls over,
+  ours keeps -0.01 -0.27 -0.01 and stays. This is the **action order**: the live session has the hazards off (fewer entries in the world's action list), which puts the Scout's controllers before its group and the fork's lock before the solver; `RA2_HAZARDS=0` gives ours
+  1.20 0.96 0.76 0.83 0.95 1.01 and the fall (`tools/oracle/sideways/stroke_probe.sh`), `RA2_ACTION_ORDER=0` too, and so does the Octagon's list (controllers before, 12ba: 0.69 0.55 0.35, falls). With the Box's hazards on, the list of the fight puts them after
+  and ours stands: a second observable that agrees with 12ba's list model. It does not explain the Octagon, where ours topples on a stroke as the live Scout does.
+* *Another robot's hammer.* `frida/ra2_tipab.js` now takes a second group in a plan (`extra`: another robot's bodies, held, turned and released with the first) and `capture_tipab.py` places ALARM 1.8 or 2.2 m from the tail-standing Scout at eight azimuths, facing it, with `Fire` at 30 substeps
+  (`tipab-scout-tail-hammer-box`, 16 trials; ours `TIPPROBE_ALARM`): **live ends on its wheels 15 times and on its back once, never standing; ours 10 / 2 and 4 times still on its tail** (p about 0.05).
+
+**4. Where the two part.** The trial `pitch -90, w -3` (both end standing) shows it step by step (`tools/oracle/sideways/rock_probe.sh`; lean = the chassis' up axis' height):
+
+| | back to | then forward to | |
+|---|---|---|---|
+| live | -0.144 (step 8) | **+0.103** (step 43) | angular velocity falls 1.23 -> 0.40 in the 6 steps after the bottom corners touch, then 3.3 rad/s2 |
+| ours | -0.120 (step 7) | **+0.031** (step 24) | 1.11 -> 0.01 in the 6 steps after the corners touch (11 rad/s2) |
+
+The contacts are the same ones in both: leaning back the two points of the rear face's middle (chassis frame (-0.41, 0.31, -0.65) and (0.47, 0.31, -0.65)), leaning forward the rear face's bottom corners (-0.85 / 0.91, -0.2, -0.65), at distances 0.09-0.099
+(tolerance 0.1) to the millimetre. A corner landing should keep part of the rotation (about the new pivot, 0.7-0.9 of it) and the gravity torque about it (m g 0.2 m / I about 4 rad/s2) is what live does; ours loses all of it
+in one landing. The corner distances at that moment differ by 8 mm (0.086 / 0.094 ours, 0.094 / 0.091 live) and ours' third contact (the middle point, 0.098) comes and goes where live has two; neither the push-out (0.9 of the tolerance:
+`dv` 0.002 m/s at 0.086) nor any switch moves the peaks (`RA2_H17_NO_BACKSTEPS`, `RA2_CXCX=f64`, `RA2_PAIR_SINGLE`, `RA2_H17_MOPP=0`, `RA2_ACTION_ORDER=0`, `RA2_ARENA_FRICTION` all -0.120 / +0.031), and the materials are the same (the contact
+rows carry arena 0.3 / chassis 0.5 friction and 0.3 / 0.2 elasticity live, ours combines them to 0.387 / 0.06; the Octagon's 0.632 / 0.06). In the 96 Octagon fights the deactivators off (`RA2_H17_DEACTIVATION=0`) give 7.1 %, wheel normals up
+(`RA2_WHEEL_NORMAL_UP=1`) 8.9 % of the time on the tail, against 9.5 %.
+
+**What this says.** The Scout's shape, mass, centre, wheels' reach, friction and the contact geometry on the tail are the original's; ours is slightly stickier in the one small motion that counts (the landing after a rock), by 0.25-1 rad/s of spin, one third of the rebound,
+one blow in four of ALARM's hammer, and 17 % of the fights against none: all one way, none individually conclusive, together about p = 0.02-0.05. The cause is a contact-solver detail at a two-corner landing within a few millimetres, not isolated.
+
+**5. The Sentinel's excess push (12ba task 1): not the battery, not the normals.** The open-loop replay (`ph_replay.py`, 79 live starts, ours minus live along the Wide Load's axis) reproduces 12ba's numbers (Sentinel +0.42 / +0.70 / +0.67 / +0.55 m/s at 0.5 / 1 / 1.5 / 2 s). The replays start with full
+batteries; in a fight the Sentinel's falls (ours, closed loop: 95 % at 20 s, 77 % at 60 s, 56 % at 120 s) and the power scale `clamp(supply / demand, 0.25, 1)` with it, and the live thrust records of the Sentinel top out at 2066-2520 (full command: 2520 = 2 trunc(0.7 18 100), the Wide Load's 3360) where ours' replay is at 2520. `PAIRREPLAY_CHARGE=0.75,0.9` /
+`0.55,0.85` (new, `examples/pairreplay`) starts the robots at that fraction: the Sentinel's push at 0.5 s falls from +0.42 to +0.26 but the 1-2 s bias stays +0.62..+0.72 (0.75: +0.75, +0.72, +0.63), so the battery is a part of the early push only. The wheel normals (12ba, +0.07), the lock order and the
+`MagicAction` placement were ruled out there, and ours' wheels touch less (0.76-0.87 against 0.85-0.96), the other way. Open.
+
+**6. Ensembles.** The engine is unchanged (only examples, a test and tools), so before = after, and the four ensembles (96 warmups, 120 s, master 023b2b9, `live_ref.py --table`) reproduce 12ba/12bc to the digit:
+Box Scout / ALARM counted hits 7.4 +- 0.5 / 37.6 +- 2.4 against live 7.1 +- 0.7 / 46.6 +- 4.7; Razor / FlapJack 5.7 +- 0.4 / 1.0 +- 0.1 (6.0 +- 1.6 / 0.6 +- 0.2); Compressor 4.8 +- 0.4 / 77.1 +- 4.9 (5.2 +- 1.0 / 98.2 +- 17.5); Octagon 4.4 +- 0.3 / 15.0 +- 1.3 (4.3 +- 0.7 / 13.7 +- 3.2).
+
+**7. Captures** (display `:9`, port `27149`, under the shared lock; `Teams/`, `AI/`, `ra2.cfg` copied before and sha256-compared after, "prefix restored" each time, the prefix has no `Robot Designs/`; manifest rows, copies in `~/ra2-oracle-backup/oracle/original` and
+`manifest-additions-2026-11-05-sideways.tsv`): `sidefight-scout-alarm-octagon__live__000..015`, `sidefight-scout-alarm-box__live__000..003`, `tipab-scout-side-box`, `-tail-box`, `-tail-drive-box`, `-tail-wscan-box`, `-wall-box`, `-tail-long-box`,
+`-tail-fire-box`, `-wall-drive-box`, `-tail-hammer-box` (all `__live__000`, the grids in `tools/oracle/sideways/grids/`).
+
+**Tools and tests.** `tools/oracle/sideways/` (`side_stats.py`, `tipab_cmp.py`, `ours_tipab.py`, `wall_grid.py`, `stroke_probe.sh`, `rock_probe.sh`, `grids/`); `examples/tipprobe` (`TIPPROBE_COM_LIFT`, `TIPPROBE_COM_SHIFT`, `TIPPROBE_ALARM`), `examples/pairreplay` (`PAIRREPLAY_CHARGE`);
+`tests/scout_tail_live.rs` (the tail stand's height and lean, and ten spin cases well inside their basins, against the live grids); `frida/ra2_tipab.js` (`extra`).
+
+**Open.** (a) The corner landing: why ours' tail stand loses the whole spin where live loses half (an 8 mm difference in a contact gap decides it; step-level contact impulses of the original at that landing would settle it, `tipab-scout-tail-wscan-box` has the rows).
+(b) The Octagon's Scout on its tail 9.5 % against 0.8 %, the Box's 7.7 % against 0.4 %, and ALARM's hammer on a tail stand (4 of 16 against 0). (c) The Sentinel's push after 1 s.

@@ -5,6 +5,10 @@
 //     axis: [x,y,z] in the chassis' frame, angle: rad, w: rad/s about the same
 //     axis, v: [x,y,z] world, centre: [x,y,z] the chassis' centre of mass after
 //     the turn (or dcentre: the same from where the chassis' centre was), steps: n, fire: substep or -1, piston: component ptr}
+//   plan.extra (docs/29 12bd): [{bodies: [ptr...] (chassis first), axis, angle, centre (absolute) or
+//     dcentre, w, v}]: more groups (another robot) held, turned about their own chassis' centre and
+//     released at the same substep as the main group; their rest pose is taken once, at the first
+//     plan that names them.
 //   The bodies' centres (+0x30) and orientations (+0x40 w, +0x44 x y z) are
 //   taken at the first substep of the first plan (or of one with reset: true)
 //   and kept as the rest pose (or given: rest: [[com, quat], ...]; a Y row
@@ -76,6 +80,7 @@ function dumpX(phase, bodies) {
 }
 
 let plan = null, rest = null;
+const restExtra = new Map();
 const fire = new NativeFunction(ptr('0x448650'), 'void', ['pointer'], 'thiscall');
 Interceptor.attach(ptr('0x52aa60'), { onEnter() {
   if (!plan) return;
@@ -96,6 +101,10 @@ Interceptor.attach(ptr('0x52aa60'), { onEnter() {
       const up = [0, P.lift, 0];
       P.ptrs.forEach((p, i) => writeState(p, add(P.snap[i].com, up), P.snap[i].q, [0, 0, 0], [0, 0, 0]));
       if (P.k === 0 || P.k === P.hold - 1) dumpX('hold', P.ptrs);
+      for (const G of (P.extra || [])) {
+        G.ptrs.forEach((p, i) => writeState(p, add(G.snap[i].com, up), G.snap[i].q, [0, 0, 0], [0, 0, 0]));
+        if (P.k === 0 || P.k === P.hold - 1) dumpX('hold', G.ptrs);
+      }
     } else if (P.k === P.hold) {
       const axisW = qrot(P.snap[0].q, P.axis);
       const h = P.angle / 2, s = Math.sin(h);
@@ -107,6 +116,19 @@ Interceptor.attach(ptr('0x52aa60'), { onEnter() {
         writeState(p, com, qmul(Q, P.snap[i].q), v, w);
       });
       dumpX('place', P.ptrs);
+      for (const G of (P.extra || [])) {
+        const gc0 = G.snap[0].com;
+        const gAxisW = qrot(G.snap[0].q, G.axis);
+        const gh = G.angle / 2, gs = Math.sin(gh);
+        const gQ = [Math.cos(gh), gAxisW[0] * gs, gAxisW[1] * gs, gAxisW[2] * gs];
+        const gw = scale(gAxisW, G.w || 0);
+        G.ptrs.forEach((p, i) => {
+          const com = add(G.centre, qrot(gQ, sub(G.snap[i].com, gc0)));
+          const v = add(G.v || [0, 0, 0], cross(gw, sub(com, G.centre)));
+          writeState(p, com, qmul(gQ, G.snap[i].q), v, gw);
+        });
+        dumpX('place', G.ptrs);
+      }
     }
     const n = P.k - P.hold;
     if (n >= 0) push(['T', ++seq, n]);
@@ -184,6 +206,13 @@ rpc.exports = {
   watch(list) { watch = list ? list.map(s => ptr(s)) : null; return true; },
   arm(p) {
     p.ptrs = p.bodies.map(s => ptr(s));
+    for (const G of (p.extra || [])) {
+      G.ptrs = G.bodies.map(s => ptr(s));
+      const key = G.bodies[0];
+      if (!restExtra.has(key) || G.reset) restExtra.set(key, G.ptrs.map(q => readState(q)));
+      G.snap = restExtra.get(key);
+      if (G.dcentre) G.centre = add(G.snap[0].com, G.dcentre);
+    }
     plan = p;
     return true;
   },

@@ -1,0 +1,101 @@
+{
+ "name": "scout-tail-long-box",
+ "trials": [
+  {
+   "label": "long pitch -90",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 3600
+  },
+  {
+   "label": "long pitch -85",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -85,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.372,
+    0
+   ],
+   "steps": 3600
+  },
+  {
+   "label": "long pitch -95",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -95,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.359,
+    0
+   ],
+   "steps": 3600
+  },
+  {
+   "label": "long pitch -80",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -80,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3794,
+    0
+   ],
+   "steps": 3600
+  },
+  {
+   "label": "long pitch -100",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -100,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3815,
+    0
+   ],
+   "steps": 3600
+  },
+  {
+   "label": "long pitch -90",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": -90,
+   "w": 0,
+   "dcentre": [
+    0,
+    0.3598,
+    0
+   ],
+   "steps": 3600
+  }
+ ]
+}
