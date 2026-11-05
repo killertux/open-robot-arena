@@ -88,6 +88,26 @@ impl Effect {
 
 const ROW_PX: f32 = 18.0;
 
+/// How far a list's arrows scroll it: the content less the list's inner height (19 rows of 18 px in 262 px: 80).
+/// Live `61d` shows that end as offset 104 and one arrow back (`61e`) as 62 = 80 - 18.
+fn arrow_max(rows: usize, frame_h: f32) -> usize {
+    (rows as f32 * ROW_PX - inner_h(frame_h)).max(0.0) as usize
+}
+
+/// The list's inside height: its frame less the 1 px border (live 262 of the laid-out 263).
+fn inner_h(frame_h: f32) -> f32 {
+    frame_h - 1.0
+}
+
+/// What an arrow-scrolled list shows past its end (see [`arrow_max`]).
+const ARROW_END_EXTRA: usize = 24;
+
+/// What the thumb's travel stands for: the content less the list's height and 10 px (live `f02`, the thumb dragged to
+/// the end: offset 90, the thumb dragged by `d` px of its 201 px is `d / 201 * 90`).
+fn thumb_range(rows: usize, frame_h: f32) -> f32 {
+    (rows as f32 * ROW_PX - inner_h(frame_h) + 10.0).max(1.0)
+}
+
 /// What the Paint Shop remembers between its effects.
 #[derive(Clone, Debug)]
 pub(super) struct EffectState {
@@ -104,6 +124,8 @@ pub(super) struct EffectState {
     pub angle: f32,
     /// The size slider's grab while its thumb is dragged.
     pub scale_drag: Option<f32>,
+    /// A list's scroll thumb while it is dragged: where inside the thumb the press was.
+    pub list_drag: Option<f32>,
 }
 
 impl Default for EffectState {
@@ -116,6 +138,7 @@ impl Default for EffectState {
             scale: 1.0,
             angle: 0.0,
             scale_drag: None,
+            list_drag: None,
         }
     }
 }
@@ -274,7 +297,17 @@ impl Builder {
                     // The list scrolls by pixels (live `61d-scroll-end`: the last row ends at the bottom of the
                     // view and the first is cut): `scroll` is the pixel offset of the first row.
                     let view_h = list_frame.map(|f| f.h).unwrap_or(262.0);
+                    let end = arrow_max(rows.len(), view_h);
+                    // the arrows' end shows 24 px further (live `61d`: offset 104 for the 80 px of content that
+                    // are past the view), and the thumb is at the bottom
+                    let (scroll, fraction) = if end > 0 && scroll == end {
+                        (end + ARROW_END_EXTRA, 1.0)
+                    } else {
+                        (scroll, scroll as f32 / thumb_range(rows.len(), view_h))
+                    };
                     ra2ui::input::scroll_rows(list, ((scroll as f32) / ROW_PX).round() as usize);
+                    // the thumb stands for the pixel offset over the thumb's range
+                    ra2ui::input::set_scroll_fraction(list, fraction, view_h);
                     let first = (scroll as f32 / ROW_PX).floor() as i64;
                     for (ordinal, row) in list
                         .children
@@ -378,19 +411,33 @@ impl Builder {
             {
                 let rows = ra2ui::input::row_count(list.widget);
                 let row_h = ROW_PX;
-                let max = ((rows as f32 * row_h) - list.frame.h).max(0.0) as usize;
+                let max = arrow_max(rows, list.frame.h);
+                let thumb = ra2ui::dropdown::scroll_thumb(list);
                 let top = self.effect.scroll[effect.index()];
                 // the arrows move a row (live `61b`, `61d`, `61e`); a press on the track did nothing
                 if let Some(part) = ra2ui::dropdown::scrollbar_part(list, x, y) {
                     use ra2ui::dropdown::BarPart;
+                    // a press on the thumb grabs it; on the rest of the track nothing happens (live `61c`)
+                    let grab = match (part, thumb) {
+                        (BarPart::Track, Some((t, _))) if y >= t.y && y < t.bottom() => {
+                            Some(y - t.y)
+                        }
+                        _ => None,
+                    };
                     let moved = match part {
                         BarPart::Up => top.saturating_sub(row_h as usize),
                         BarPart::Down => (top + row_h as usize).min(max),
                         BarPart::Track => top,
                     };
                     drop(placed);
+                    self.effect.list_drag = grab;
                     self.effect.scroll[effect.index()] = moved;
-                    let _ = self.refresh();
+                    if grab.is_some() {
+                        // a press on the thumb reads the scroll from where the thumb is (live `61c`: 54 became 53)
+                        self.list_thumb_to(y);
+                    } else {
+                        let _ = self.refresh();
+                    }
                     return true;
                 }
                 if list.frame.contains_point(x, y)
@@ -442,6 +489,44 @@ impl Builder {
             }
         }
         false
+    }
+
+    /// The held button moves a list's scroll thumb to `y`: the thumb follows the pointer (grabbed where it was
+    /// pressed) and the list scrolls the thumb's fraction of its range (live `f01` .. `f03`).
+    pub(super) fn list_thumb_to(&mut self, y: f32) {
+        let Some(grab) = self.effect.list_drag else {
+            return;
+        };
+        let effect = self.effect.current;
+        let Some(name) = effect.list() else {
+            return;
+        };
+        let placed = self.shell.placements();
+        let Some(list) = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == name)
+        else {
+            return;
+        };
+        let rows = ra2ui::input::row_count(list.widget);
+        let Some((thumb, travel)) = ra2ui::dropdown::scroll_thumb(list) else {
+            return;
+        };
+        let view_h = list.frame.h;
+        // the thumb's top at rest is the thumb's frame less what it has moved: the list's own offset
+        let top = self.effect.scroll[effect.index()];
+        let now = if top > 0 && top == arrow_max(rows, view_h) {
+            1.0
+        } else {
+            (top as f32 / thumb_range(rows, view_h)).min(1.0)
+        };
+        let at_rest = thumb.y - (now * travel).trunc();
+        drop(placed);
+        let fraction = ((y - grab - at_rest) / travel.max(1.0)).clamp(0.0, 1.0);
+        self.effect.scroll[effect.index()] =
+            (fraction * thumb_range(rows, view_h)).floor() as usize;
+        let _ = self.refresh();
     }
 
     /// Move the size slider's thumb so its left edge is at `left` (the adjustment sliders' rule).
@@ -681,5 +766,19 @@ impl Builder {
         material.z_test = false;
         material.cull = false;
         vec![DrawItem::new(verts, material, "decal preview")]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The texture list's scroll bar (live `61d`, `f02`): 19 rows of 18 px in the laid-out 263 px list.
+    #[test]
+    fn a_list_scrolls_by_arrows_to_80_and_by_its_thumb_to_90() {
+        assert_eq!(arrow_max(19, 263.0), 80);
+        assert_eq!(thumb_range(19, 263.0), 90.0);
+        // a list that fits scrolls nowhere
+        assert_eq!(arrow_max(5, 263.0), 0);
     }
 }

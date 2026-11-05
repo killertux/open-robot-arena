@@ -197,9 +197,14 @@ impl PaintColor {
             4 => (x, 0.0, c),
             _ => (c, 0.0, x),
         };
-        let byte = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+        let byte = |v: f32| ((v + m) * 255.0).floor().clamp(0.0, 255.0) as u8;
         [byte(r), byte(g), byte(b)]
     }
+}
+
+/// A slider's value for a press at `x`: the thumb's left edge goes to the pointer, over the track less the thumb.
+fn slider_value(x: f32, left: f32, width: f32, thumb: f32) -> f32 {
+    ((x - left) / (width - thumb).max(1.0)).clamp(0.0, 1.0)
 }
 
 /// The lab's orbit camera (`FUN_005a6260`, mode 2): one per tab, 5 m from the robot's origin to
@@ -823,6 +828,7 @@ impl Builder {
         let wanted = self.view_only && self.tab() == Some("test robot button");
         if !wanted {
             if self.arena.take().is_some() {
+                self.build.reloaded_after_test();
                 // The temporary copy of the robot the arena loaded.
                 let _ = std::fs::remove_file(
                     std::env::temp_dir().join(format!("ora-lab-test-{}.bot", std::process::id())),
@@ -1478,6 +1484,7 @@ impl Builder {
     /// (`0x42b6b4`: the larger of |dx| and |dy|, signed).
     pub fn mouse_moved(&mut self, x: f32, y: f32) {
         let last = self.cursor.replace([x, y]);
+        self.import_hover(x, y);
         if self.dialog.is_none() && self.on_point_screen() {
             self.adjust_move(x, y);
         }
@@ -1499,6 +1506,9 @@ impl Builder {
         }
         if let Some(grab) = self.effect.scale_drag {
             self.scale_to(x - grab);
+        }
+        if self.effect.list_drag.is_some() {
+            self.list_thumb_to(y);
         }
         self.update_decal_hover(x, y);
         if self.tab() == Some("paintshop button") && (self.shift || self.ctrl) {
@@ -3156,6 +3166,10 @@ impl Builder {
                 self.open_export_dialog();
                 return Ok(());
             }
+            "m9:import" => {
+                self.open_import_dialog();
+                return Ok(());
+            }
             "m9:paintall" => {
                 let texture = self.paint_solid();
                 self.build
@@ -3643,6 +3657,9 @@ impl Builder {
             }
             if chain.iter().any(|p| p.widget.name() == "export button") {
                 return Some("m9:export".into());
+            }
+            if chain.iter().any(|p| p.widget.name() == "import button") {
+                return Some("m9:import".into());
             }
             if chain.iter().any(|p| p.widget.name() == "undo button") {
                 return Some("m9:undo".into());
@@ -4161,6 +4178,24 @@ impl Builder {
         }
     }
 
+    /// The width of the shade slider's thumb picture (`slider_hmini.tga`, 12 px).
+    fn lum_thumb_width(&mut self) -> f32 {
+        let mut width = 12.0;
+        if let Some(lab) = self.shell.lab_mut() {
+            for block in lab.document.blocks.iter_mut() {
+                let ra2fmt::gib::Block::Widget(root) = block else {
+                    continue;
+                };
+                if let Some(thumb) = workshop::find_mut(root, "lum slider")
+                    .and_then(|s| s.children.iter().find(|c| c.kind == WidgetKind::Image))
+                {
+                    width = thumb.size().map(|s| s.first.amount).unwrap_or(width);
+                }
+            }
+        }
+        width
+    }
+
     /// A press or drag on the Paint Shop's picker or slider: the target or the thumb goes to the
     /// pointer and the swatch takes the colour they choose. `Some(start)` begins a drag.
     fn paint_pick(&mut self, x: f32, y: f32, start: bool) -> bool {
@@ -4200,7 +4235,11 @@ impl Builder {
                 ];
             }
             (PaintDrag::Slider, _, Some(f)) => {
-                self.paint_color.lum = ((x - f.x) / f.w.max(1.0)).clamp(0.0, 1.0);
+                // a slider's value is its thumb's offset over the track less the thumb (`FUN_005f4c30`): the
+                // thumb's left edge goes to the pointer (live: 232 198 140 and 166 170 206 for the route's
+                // two clicks, a plain `x / w` gave 229 191 125 and 155 158 199)
+                let thumb = self.lum_thumb_width();
+                self.paint_color.lum = slider_value(x, f.x, f.w, thumb);
             }
             _ => return false,
         }
@@ -6943,6 +6982,7 @@ impl Builder {
         self.adjust_drag = None;
         self.heading_drag = None;
         self.effect.scale_drag = None;
+        self.effect.list_drag = None;
         // `FUN_004791e0`: the drag of a top point ends where it is.
         self.point_drag = false;
         if self.dialog.is_some() || self.tab() != Some("wiring button") {
@@ -6998,6 +7038,119 @@ impl Builder {
             },
             focus: Focus::None,
         });
+    }
+
+    /// `Import Custom Paint` (`FUN_00424520`): the window lists `Custom Textures\*.bmp` (`FUN_00471ea0`, the
+    /// plain-string order the texture lists use) with nothing picked. Live the rows' text does not draw (the list's
+    /// font is `System`): only the row lines show.
+    fn open_import_dialog(&mut self) {
+        let Ok(gib) = workshop::load(&self.ui, "botlab/import_texture.gib") else {
+            return;
+        };
+        let mut files: Vec<String> = ra2fmt::saves::list(&self.game, CUSTOM_TEXTURES)
+            .into_iter()
+            .filter(|n| n.to_ascii_lowercase().ends_with(".bmp"))
+            .collect();
+        // live: `a texfill`, `B template`, `C decal`, `My Test A` (a file system's listing, not the plain-string
+        // order the texture lists use)
+        files.sort_by_key(|n| n.to_ascii_lowercase());
+        files.dedup();
+        self.dialog = Some(LabDialog {
+            gib,
+            kind: DialogKind::ImportTexture {
+                files,
+                selected: None,
+                hover: None,
+            },
+            focus: Focus::None,
+        });
+        self.sync_import_list();
+    }
+
+    /// The pointer over the import window's list lights the row under it.
+    fn import_hover(&mut self, x: f32, y: f32) {
+        let Some(dialog) = self.dialog.as_ref() else {
+            return;
+        };
+        let DialogKind::ImportTexture { files, hover, .. } = &dialog.kind else {
+            return;
+        };
+        let placed = ra2ui::resolve_with(&dialog.gib, self.size, Some(self.assets.faces()));
+        let frame = placed
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == "file list")
+            .map(|p| p.frame);
+        drop(placed);
+        let now = frame
+            .filter(|f| f.contains_point(x, y))
+            .map(|f| ((y - f.y) / 18.0).floor().max(0.0) as usize)
+            .filter(|row| *row < files.len());
+        if now != *hover {
+            if let Some(DialogKind::ImportTexture { hover, .. }) =
+                self.dialog.as_mut().map(|d| &mut d.kind)
+            {
+                *hover = now;
+            }
+            self.sync_import_list();
+        }
+    }
+
+    /// Put the import window's rows and picked row on its list.
+    fn sync_import_list(&mut self) {
+        let Some(dialog) = self.dialog.as_mut() else {
+            return;
+        };
+        let DialogKind::ImportTexture {
+            files,
+            selected,
+            hover,
+        } = &dialog.kind
+        else {
+            return;
+        };
+        for block in dialog.gib.blocks.iter_mut() {
+            let ra2fmt::gib::Block::Widget(root) = block else {
+                continue;
+            };
+            if let Some(list) = workshop::find_mut(root, "file list") {
+                ra2ui::input::text_rows(list, files);
+                // a line over every row and one under the last (live: 5 lines for 4 files), no bar while
+                // every row fits (`PermScrolls false`), no highlight until a row is picked
+                ra2ui::input::row_lines(list, files.len() + 1);
+                ra2ui::input::show_scroller(list, false);
+                match selected {
+                    Some(row) => {
+                        ra2ui::input::select_row(list, *row);
+                    }
+                    None => ra2ui::input::clear_selection(list),
+                }
+                // the bars run the list's whole width (live 220 px: the 204 px column and the bar's 16)
+                for bar in list
+                    .children
+                    .iter_mut()
+                    .filter(|c| matches!(c.name(), "Sel Bar" | "High Bar"))
+                {
+                    ra2ui::input::set_field(bar, "Size", "220 0 18 0");
+                    for child in bar.children.iter_mut() {
+                        ra2ui::input::set_field(child, "_Size", "220 0 18 0");
+                    }
+                }
+                if let Some(bar) = list.children.iter_mut().find(|c| c.name() == "High Bar") {
+                    match hover {
+                        Some(row) if selected != &Some(*row) => {
+                            ra2ui::input::set_field(
+                                bar,
+                                "Position",
+                                &format!("0 0 {} 0", 18.0 * *row as f32),
+                            );
+                            ra2ui::input::set_field(bar, "Visible", "true");
+                        }
+                        _ => ra2ui::input::set_field(bar, "Visible", "false"),
+                    }
+                }
+            }
+        }
     }
 
     /// A double click on a control opens its own window (live: the same `Analog Control` /
@@ -7226,6 +7379,29 @@ impl Builder {
                 return Ok(());
             }
         }
+        if let Some(DialogKind::ImportTexture { files, .. }) =
+            self.dialog.as_ref().map(|d| d.kind.clone())
+        {
+            if has("file list") || has("Sel Bar") || has("High Bar") {
+                let list = placed
+                    .iter()
+                    .flat_map(|p| p.walk())
+                    .find(|p| p.widget.name() == "file list")
+                    .map(|p| p.frame);
+                drop(placed);
+                if let Some(frame) = list {
+                    let row = ((y - frame.y) / 18.0).floor().max(0.0) as usize;
+                    // a click below the last row picks nothing and drops the pick (live `e03b`)
+                    if let Some(DialogKind::ImportTexture { selected, .. }) =
+                        self.dialog.as_mut().map(|d| &mut d.kind)
+                    {
+                        *selected = (row < files.len()).then_some(row);
+                    }
+                    self.sync_import_list();
+                }
+                return Ok(());
+            }
+        }
         if has("cancel button") {
             self.dialog = None;
             return self.refresh();
@@ -7272,6 +7448,24 @@ impl Builder {
         };
         match dialog.kind {
             DialogKind::ConfirmDelete { .. } => {}
+            DialogKind::ImportTexture {
+                files, selected, ..
+            } => {
+                // OK with nothing picked sends nothing, but the window closes (`FUN_004720d0`)
+                if let Some(name) = selected.and_then(|i| files.get(i)) {
+                    let path =
+                        ra2fmt::saves::resolve(&self.game, Path::new(CUSTOM_TEXTURES).join(name));
+                    match ra2ui::workshop::skinfx::Image::load(&path) {
+                        Some(image) => {
+                            let skin = image.to_skin();
+                            self.build.paint_mut().import_skin(skin);
+                            self.status = format!("imported texture {name}");
+                        }
+                        None => self.status = format!("{}: not a picture", path.display()),
+                    }
+                }
+                return self.refresh();
+            }
             DialogKind::ExportTexture { name, current } => {
                 let skin = if current {
                     self.build.paint().skin().cloned()
@@ -8093,6 +8287,29 @@ mod tests {
         );
         let (eye, up) = LabCam::START.eye_up();
         assert_eq!((eye, up), (Vec3::new(0.0, 0.0, -5.0), Vec3::Y));
+    }
+
+    /// The shade slider's value is the pointer over the track less the thumb, the thumb's left edge at the
+    /// pointer (`FUN_005f4c30`; live: the route's two clicks gave `232 198 140` and `166 170 206`).
+    #[test]
+    fn the_shade_slider_puts_the_thumbs_left_edge_at_the_pointer() {
+        assert_eq!(slider_value(100.0, 100.0, 239.0, 12.0), 0.0);
+        assert_eq!(slider_value(100.0 + 227.0, 100.0, 239.0, 12.0), 1.0);
+        assert_eq!(slider_value(500.0, 100.0, 239.0, 12.0), 1.0);
+        let lum = slider_value(100.0 + 165.9, 100.0, 239.0, 12.0);
+        assert!((lum - 0.7308).abs() < 1e-3, "{lum}");
+        // the swatch of a picked colour is cut down, not rounded (live `232 198 140`)
+        let color = PaintColor {
+            marker: [0.105, 0.3333],
+            lum,
+            rgb: [0; 3],
+            drag: None,
+        };
+        let [r, g, b] = color.picked();
+        assert!([r, g, b]
+            .iter()
+            .zip([232u8, 198, 140])
+            .all(|(a, e)| a.abs_diff(e) <= 1));
     }
 
     /// The Paint Shop's picker and slider: the live swatch was `(161, 176, 25)` with the target at

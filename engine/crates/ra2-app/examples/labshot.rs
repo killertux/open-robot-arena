@@ -43,6 +43,9 @@ fn main() -> Result<(), String> {
     args.extend(route);
     args.extend(rest);
     let mut modifiers = (false, false);
+    // `LABSHOT_POSE=1`: the practice robot's pose every 0.1 s of arena time
+    let trace = std::env::var_os("LABSHOT_POSE").is_some();
+    let (mut clock, mut next_pose) = (0.0f32, 0.0f32);
     let mut i = 2;
     let num = |s: &String| s.parse::<f32>().map_err(|e| format!("{s}: {e}"));
     while i < args.len() {
@@ -119,6 +122,56 @@ fn main() -> Result<(), String> {
                     println!("{line}");
                 }
                 i += 3;
+            }
+            "pose" => {
+                builder.advance(0.0);
+                // the practice robot's position and forward axis (for pose traces against the live one)
+                if let Some(arena) = builder.arena_mut() {
+                    let d = &arena.matched.duel;
+                    if let Some(st) = d.physics.state(d.robots[0].body()) {
+                        let f = st.rotation * glam::Vec3::Z;
+                        println!(
+                            "pose {:.3} {:.3} {:.3} h {:.3}",
+                            st.position.x,
+                            st.position.y,
+                            st.position.z,
+                            f.x.atan2(f.z)
+                        );
+                    }
+                }
+                i += 1;
+            }
+            "tickarena" => {
+                // route time (a live `wait` and the driver's own overheads): the alert and heading arrow
+                // timers run, and the Test Robot arena runs in real time
+                let mut left = num(&args[i + 1])?;
+                builder.advance(0.0); // builds the arena when the tab has just opened
+                while left > 0.0 {
+                    let slice = left.min(1.0 / 60.0);
+                    builder.advance(slice);
+                    left -= slice;
+                    if builder.arena_mut().is_some() {
+                        clock += slice;
+                    }
+                    if trace && clock >= next_pose {
+                        next_pose += 0.1;
+                        if let Some(arena) = builder.arena_mut() {
+                            let d = &arena.matched.duel;
+                            if let Some(st) = d.physics.state(d.robots[0].body()) {
+                                let f = st.rotation * glam::Vec3::Z;
+                                println!(
+                                    "pose {:.2} {:.3} {:.3} {:.3} h {:.3}",
+                                    clock,
+                                    st.position.x,
+                                    st.position.y,
+                                    st.position.z,
+                                    f.x.atan2(f.z)
+                                );
+                            }
+                        }
+                    }
+                }
+                i += 2;
             }
             "tick" => {
                 // `tick SECONDS`: the practice arena runs that much wall time in 1/60 s slices.
@@ -311,10 +364,13 @@ fn route_tokens(text: &str) -> Vec<String> {
         match t[0] {
             // a live wait lets the heading arrow's two seconds run out
             "wait" => {
-                out.push("age".to_string());
-                out.push(t.get(1).copied().unwrap_or("1").to_string());
+                let secs = t.get(1).copied().unwrap_or("1").to_string();
+                out.push("tickarena".to_string());
+                out.push(secs);
             }
-            "hide" | "frames" => {}
+            // the live driver's own time: `hide` two frames, a `click` 0.25 s (the arena loads meanwhile), a screenshot (xwd and the PNG
+            // conversion) 1.86 s, a held robot key's xtest process 0.1 s; the Test Robot arena runs through them
+            "hide" | "frames" => out.extend(["tickarena".to_string(), "0.13".to_string()]),
             // Back to HQ saves into the cell: ours does it in `back`
             "click" if t.get(1..3) == Some(&["55", "18"]) => out.push("back".to_string()),
             "dragh" | "drag" => {
@@ -334,6 +390,15 @@ fn route_tokens(text: &str) -> Vec<String> {
             "shot" => {
                 out.push("shot".to_string());
                 out.push(t[1].replacen("SHOTS", &shots, 1));
+                out.extend(["tickarena".to_string(), "1.86".to_string()]);
+            }
+            "click" => {
+                out.extend(t.iter().map(|s| s.to_string()));
+                out.extend(["tickarena".to_string(), "0.25".to_string()]);
+            }
+            "key" if matches!(t.get(2), Some(&"down") | Some(&"up")) => {
+                out.extend(t.iter().map(|s| s.to_string()));
+                out.extend(["tickarena".to_string(), "0.1".to_string()]);
             }
             _ => out.extend(t.iter().map(|s| s.to_string())),
         }

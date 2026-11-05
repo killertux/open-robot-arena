@@ -642,6 +642,11 @@ impl Paint {
         self.changed = true;
     }
 
+    /// `Import Custom Paint` (message `0xcf`, `FUN_0043d740`): a picture file becomes the chassis' skin.
+    pub fn import_skin(&mut self, skin: Skin) {
+        self.set_skin(skin);
+    }
+
     /// Test helper: the current skin, if any.
     pub fn skin_mut(&mut self) -> Option<&mut Skin> {
         self.skin.as_mut()

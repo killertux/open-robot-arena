@@ -1,0 +1,40 @@
+# Import Custom Paint over four bmps put into Custom Textures/ (a texfill, B template, C decal, My Test A; run on a scratch-restored prefix, docs/36 9.32):
+# the window, a hover, picks, a click below the last row, OK, then Export (current texture) to compare the file. Rows are 18 px from y 303.
+click 676 88
+wait 3
+cam -1.2 0 5
+hide
+shot SHOTS/e00-paint-open.png
+click 202 661
+wait 2
+hide
+move 450 330
+wait 1
+shot SHOTS/e01-hover-row1.png
+click 450 312
+wait 1
+hide
+shot SHOTS/e02-sel-row0.png
+click 450 348
+wait 1
+hide
+shot SHOTS/e03-sel-row2.png
+click 450 400
+wait 1
+hide
+shot SHOTS/e03b-click-empty.png
+click 450 348
+wait 1
+click 552 498
+wait 3
+hide
+shot SHOTS/e04-after-ok.png
+click 84 661
+wait 2
+hide
+click 414 428
+wait 1
+click 562 513
+wait 2
+hide
+shot SHOTS/e05-exported.png

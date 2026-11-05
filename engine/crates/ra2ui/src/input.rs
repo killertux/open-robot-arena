@@ -705,6 +705,39 @@ fn set_scroller_visible(list: &mut Widget, visible: bool, offset: usize, max: us
     }
 }
 
+/// Put a list's scroll thumb at `fraction` of its travel (`0 .. 1`), whatever the rows show; `track` is the list's
+/// laid-out height.
+pub fn set_scroll_fraction(list: &mut Widget, fraction: f32, track: f32) {
+    let Some(body) = list
+        .attachments
+        .iter_mut()
+        .find(|a| a.kind == AttachmentKind::Scroller)
+        .and_then(|a| a.body.as_deref_mut())
+    else {
+        return;
+    };
+    let Some(bar) = scrollbar_in_mut(body) else {
+        return;
+    };
+    let model = crate::ScrollBar::from_widget(bar);
+    let Some(image) = bar.children.get_mut(model.slider).and_then(|slider| {
+        slider
+            .children
+            .iter_mut()
+            .find(|c| c.kind == WidgetKind::Image)
+    }) else {
+        return;
+    };
+    let thumb_height = image.size().map(|s| s.second.amount).unwrap_or(0.0);
+    let travel = (track - 2.0 * 16.0 - thumb_height).max(0.0);
+    // the thumb sits at the whole pixel below its fraction (live `61b`: 120 of 120.6)
+    set_field(
+        image,
+        "Position",
+        &format!("0 0 {} 0", (fraction.clamp(0.0, 1.0) * travel).trunc()),
+    );
+}
+
 /// Place a horizontal bar's thumb `x` pixels from the left end of its slider track (the thumb is the slider's
 /// own `Image`). `true` when the list has such a bar.
 pub fn set_horizontal_thumb(list: &mut Widget, x: f32) -> bool {

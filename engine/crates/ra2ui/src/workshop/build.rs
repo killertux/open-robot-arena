@@ -688,7 +688,18 @@ impl Build {
             ..Default::default()
         });
         self.info.push(info);
+        // a part made in the lab is a new object whose key is not yet set (header line 4, below)
+        self.bot.default_texture = Some(false);
         Ok(index)
+    }
+
+    /// The Test Robot tab was left: the original saved the robot for the practice arena and took it back from the
+    /// file, so every part of the robot is a loaded one again. Header line 4 is the `find_if` of `FUN_004df560`
+    /// over the robot's parts for one whose byte `+0xf0` is 0 (`FUN_0043b5d0`..., `0x45d3b0`); parts the lab
+    /// makes have 0 there and parts a loader makes 1 (live `g1`: at the tab's entry the first part had 0, in
+    /// the final save, on a new robot object, all nine had 1; with no Test Robot the save found 0).
+    pub fn reloaded_after_test(&mut self) {
+        self.bot.default_texture = Some(true);
     }
 
     /// Place an attached chassis child at a baseplate point.
@@ -1402,6 +1413,22 @@ mod tests {
         assert_eq!(reloaded.board(), build.board());
         // The writer round-trips the file it just wrote.
         assert_eq!(back.write(), bytes);
+    }
+
+    /// Header line 4 is `find_if` over the robot's parts for one whose byte `+0xf0` is 0 (`FUN_004df560`): the
+    /// lab's own parts have it 0, a robot taken back from the arena's file has it 1 on every part, a part
+    /// made afterwards 0 again (live `g1` / `g2`, docs/36 9.32).
+    #[test]
+    fn the_headers_fourth_line_follows_the_parts_the_lab_made_since_the_test_robot() {
+        let line4 = |b: &Build| b.save().split(|c| *c == b'\n').nth(3).map(<[u8]>::to_vec);
+        let mut build = Build::new("Four", chassis());
+        assert_eq!(line4(&build).as_deref(), Some(&b"0"[..]));
+        build.reloaded_after_test();
+        assert_eq!(line4(&build).as_deref(), Some(&b"1"[..]));
+        build
+            .attach_info(motor_info(), 0, 0, 0, Placement::default())
+            .unwrap();
+        assert_eq!(line4(&build).as_deref(), Some(&b"0"[..]));
     }
 
     /// F1's chassis branch: a baseplate placement writes the file's own stored
