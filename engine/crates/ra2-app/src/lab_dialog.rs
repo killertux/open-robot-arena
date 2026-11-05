@@ -38,6 +38,15 @@ pub enum DialogKind {
     /// `Export Paint Template` (`botlab/export_texture.gib`): the file's name and whether the
     /// chassis' current texture is exported instead of a blank template.
     ExportTexture { name: String, current: bool },
+    /// `Import Custom Paint` (`botlab/import_texture.gib`, `FUN_00424520`): the `Custom Textures\*.bmp`
+    /// listing and the row picked (none on opening). OK sends the picked name to the Paint Shop
+    /// (message `0xcf`, `FUN_0043d740`), which loads `Custom Textures\<name>` as the chassis' skin.
+    ImportTexture {
+        files: Vec<String>,
+        selected: Option<usize>,
+        /// The row under the pointer (the `High Bar`).
+        hover: Option<usize>,
+    },
     /// A control wired to a component.
     Wire {
         kind: ControlKind,

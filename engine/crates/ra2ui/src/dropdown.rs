@@ -22,7 +22,7 @@
 use ra2fmt::gib::{AttachmentKind, Block, Gib, Widget, WidgetKind};
 
 use crate::input::{field_of, scroll_rows, select_cell, set_field, text_rows};
-use crate::{Placement, ScrollBar};
+use crate::{Frame, Placement, ScrollBar};
 
 /// The open dropdown's name, when one is open in this document.
 pub fn open_name(gib: &Gib) -> Option<String> {
@@ -354,6 +354,30 @@ pub fn scrollbar_part(list: &Placement<'_>, x: f32, y: f32) -> Option<BarPart> {
     } else {
         BarPart::Track
     })
+}
+
+/// The thumb of a list's own scroll bar and the distance it travels: the thumb picture's frame and how far
+/// its top moves from the top of the track to the bottom (`None` when the bar is not shown).
+pub fn scroll_thumb(list: &Placement<'_>) -> Option<(Frame, f32)> {
+    let bar = list
+        .attachments
+        .iter()
+        .find(|a| a.attachment.kind == AttachmentKind::Scroller)?
+        .body
+        .walk()
+        .find(|p| p.widget.kind == WidgetKind::ScrollBar)?;
+    if !bar.widget.visible() {
+        return None;
+    }
+    let model = ScrollBar::from_widget(bar.widget);
+    let slider = bar.children.get(model.slider)?;
+    let thumb = slider
+        .children
+        .iter()
+        .find(|c| c.widget.kind == WidgetKind::Image)?
+        .frame;
+    let travel = (list.frame.h - 2.0 * 16.0 - thumb.h).max(0.0);
+    Some((thumb, travel))
 }
 
 /// Scroll the open list to `top`.

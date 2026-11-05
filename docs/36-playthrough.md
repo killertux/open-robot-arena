@@ -1749,3 +1749,74 @@ Open:
 * The header's fourth line is not "painted" (live `0` after a paint without parts, `1` once the Test Robot ran), as before.
 
 Tests: `skinfx` (4: copy, the diagonal, the decal clip, the four armour skins against the oracle). Gate: fmt and clippy `-D warnings` clean; 880 tests passed, 0 failed, 2 ignored; `find local/game -newer` printed nothing.
+
+## 9.32 The Test Robot against the live run, header line 4, the picker's shade, Import Custom Paint, the lists' scroll thumb (`fx/testdrive`, 2026-11-05)
+
+Live display :7, `Teams/ AI/ Custom Textures/ ra2.cfg` copied before and put back after every session (sha256 lists equal, the prefix's `Custom Textures/` included). Captures (backup
+`manifest-additions-2026-11-05-testdrive.tsv`): `testdrive-run{a,b,c}-7x-*` (the Test Robot frames of three full live runs), `testdrive-pose-run{a,b}` (the robot's `plus.getLocation` / `getHeading` / `getSpeed` against game
+time), `testdrive-camera-runc` and `testdrive-drive-runc` (the scene camera every 50 ms and the key schedule), `testdrive-line4-g{1,2}` (the line-4 hook, the `.bot`s), `testdrive-import-*`,
+`testdrive-listscroll-*`. New: `tools/oracle/testdrive_live.sh` (the run), `testdrive_pose.py` (pose table), `frida/ra2_line4.js`, routes `05f-import`, `05g-listscroll`; `labshot` learned `LABSHOT_POSE=1`, `pose`.
+
+### Test Robot: what the divergence was
+
+The frames diverged for two reasons that were ours, and a third that no port can remove.
+
+1. **The harness did not run the practice arena through the route's waits** (`labshot` turned `wait` into the heading arrow's two seconds): ours stood still where the live robot had been driven for seconds, and the tip
+   line stayed on the refused-part alert (`Components should not intersect...`, an alert the original drops after 2 s) where live shows `Click the Components button to continue working on your robot`.
+2. **The live driver's own time.** `ra2_drive.py` takes 1.86 s per `shot` (xwd + PNG), 0.1 s per `key NAME down` (the xtest process), 0.25 s per click, 0.13 s per `hide`: the route's W is held 3.1 s (stamps `eval Date.now()`:
+   down 8.513 s, up 11.644 s from the tab click) while the script says `wait 1.2`. `labshot` now advances the practice arena (and the alert / arrow timers) through every `wait` and through those overheads
+   (`tickarena`), in 1/60 s slices: key W lands at game time 8.25-8.30 as live (heading leaves 0.05 at live 8.43 / 8.47 s, ours 8.41 s).
+3. **The live game is not repeatable.** Its frames are variable (28-40 ms per UI frame in the samples, the Havok step follows the frame time): three live runs of the same keys end 1-1.5 m apart (3 s after the heading starts to move:
+   run a `(-1.06, 7.33)` heading 2.49, run b `(-2.77, 7.39)` 2.36, ours `(-2.74, 6.59)` 2.25; at 5 s a `(0.81, 8.47)`, b `(-0.21, 9.33)`, ours `(-0.66, 8.63)`). Ours is inside that spread: the robot accelerates to
+   3.5 m/s in 0.5 s as live, turns left at 0.6-0.9 rad/s (the wheels' asymmetry), coasts to rest in 1.1 s (live 3.3 to 0.25 m/s, ours 3.1 to 0.7) and stops against the far wall at z 8.4-8.7.
+
+**Camera, verified live** (`ra2_camera.js`, `testdrive-camera-runc`): the eye is fixed at `(-4.2, 2.5, 9.5)`, the target is the robot object's position (`+0x8c`, y 0.26 as ours' body), the field of view follows the distance with the
+`FovRange` (`range 2 20 0.8976 0.3491`: 0.606 at 11.6 m, 0.855 at 6 m); there is no follow smoothing and no other mode. The HUD and the Obstacles list were equal already.
+
+Mean absolute difference of the whole frame against `botlab-rerun-70..76` (the full route): **21.30 -> 16.75** (70 rest 7.88 -> 6.40, 71 14.18 -> 8.43, 72 29.71 -> 23.97, 73 30.09 -> 25.33, 74 27.29 -> 18.74, 75 32.25 -> 28.08,
+76 reset 7.68 -> 6.32). The floor is the live game against itself: the same seven frames of the live runs a / b / c / the old capture differ by **11.8 / 14.3 / 15.4 / 14.8** from each other (rest frames 5.3-6.0 alone), ours against
+the three runs by **12.9 / 10.5 / 13.4**. The remaining difference is the live run's own spread. Open: the robot's shadow on the practice floor is a large soft patch beside the robot live and a thin line under it in ours (the light
+of `Practice.py`'s `SetShadowSource` is overhead); not traced (the hook's first frames were the lab's).
+
+### Header line 4 (`FUN_004df560`)
+
+Hooked live over the whole route (`ra2_line4.js`, `testdrive-line4-g1` with the Test Robot, `-g2` without): `FUN_004df560` is `find_if(begin, end, !part->flag)` over the robot object's part vector (`+0x1c` / `+0x20`, 4-byte
+pointers; the predicate `0x4df5c0` calls `0x45d3b0`, the byte at `part + 0xf0`) and the line is whether it found none. The byte is 0 in the constructor (`0x461c55`, `0x461df8`) and set only by a loader (copied by
+`0x42e12f`, `0x42f1f6`). Live: at the Test Robot tab's entry (the robot saved for the arena) the first part has 0 -> 0; without the Test Robot the final save finds the first part 0 -> **0**; with it the final save runs on a
+**new robot object** (`0x8083330` against `0x1b6cab0`: the lab took the robot back from the file) and all nine parts have 1 -> **1** (`Bot4.bot` of `g1`: `1`, of `g2`: `0`). So the line is "every part was made by a loader":
+`Build::new`, a chassis edit and **a part placed in the lab** write 0 (`attach_info`), a load writes 1 as before, and **leaving the Test Robot tab** makes every part a loaded one (`Build::reloaded_after_test`, the arena is dropped in
+`sync_arena`). The older captures read through this rule (`botlab-e2e-armor-*`, `burst-*`) differ only in histories not recorded.
+
+### The picker's colour (`FUN_00426d00`)
+
+The swatch is `FUN_0061b6b0(h = x / w, s = 1 - y / h, l = FUN_005f4c30())` (a standard HSL to RGB, `FUN_0061b750` the hue helper): the two live swatches have the picker's hue and saturation (HSL 37.8 deg / 0.667 and
+234 deg / 0.29) of ours and only the lightness differs (0.729 live, 0.694 ours). `FUN_005f4c30` is the slider's value, **the thumb's offset over the track less the thumb**: the press puts the thumb's *left edge* at the pointer, so
+the value is `(x - left) / (width - 12)` (the 12 px `slider_hmini` thumb of the 239 px track), not `(x - left) / width`. With it ours reads `232 198 140` for the route's first click as live; the swatch bytes are cut down, not
+rounded (`232 199 141` rounded). The second sample is `167 169 205` against live `166 170 206` (one count, a 2 px difference of the click in the picker). Paint frames 60-65: **1.20 -> 0.77**.
+
+### Import Custom Paint (`FUN_00424520`, `ImportTextureWindow`)
+
+`botlab/import_texture.gib` (`Import Custom Paint Job`): the list is `Custom Textures\*.bmp` (`FUN_00471ea0`) in **file-name order, case ignored** (`a texfill`, `B template`, `C decal`, `My Test A`), nothing picked on opening;
+the rows' **text does not draw** (the list's font is `System`): what shows is a black line over every row and one under the last (5 lines for 4 files), no scroll bar while the rows fit (`PermScrolls false`). The pick is the
+`Sel Bar` (violet, the list's whole 220 px), a hover the dim `High Bar`; a click below the last row drops the pick; OK with nothing picked only closes the window. **OK** posts message `0xcf` with the name
+(`FUN_004720d0`); the Paint Shop's handler (`FUN_0043d740`) loads `Custom Textures\<name>` as the chassis' skin (`FUN_0044f4f0`): the skin is replaced as is (the exported current texture is byte for byte the imported file:
+`testdrive-import-exported`) and **no undo step is taken** (the Undo button stays dim). Ours: `DialogKind::ImportTexture`, `Builder::open_import_dialog`, `Paint::import_skin`; against the five live frames the whole-frame difference is
+1.1-1.4 (the window itself 3.2-3.7: the 3D view behind it).
+
+### The lists' scroll thumb and the wheel
+
+Texture Fill list (19 rows of 18 px, 263 px laid out): the thumb is draggable (`testdrive-listscroll-*`). It follows the pointer exactly (grabbed where it was pressed: thumb top 282 -> 392 for a 110 px drag), the list scrolls
+**`floor(thumb travel / 201 * 90)` px** (0 / 49 / 90 / 13 for the four frames), the range being rows x 18 - 262 + 10 = 90. A press on the thumb reads the scroll from where the thumb is (`61c`: 54 became 53); a press on the rest
+of the track does nothing. The arrows scroll 18 px to the end 80 and **show it as 104** (`61d`: 24 px past the content), the thumb then at the bottom, and one arrow back is 62 = 80 - 18 (`61e`). The thumb's position is
+the whole pixel below its fraction (`trunc`). Ours (`effects.rs`, `ra2ui::input::set_scroll_fraction`): list frames 0.00-0.37 (`f00`..`f03`, `61`..`61e`; `61c` and `61e` were 10.4 and 31.2 before). **The wheel does nothing** over the list
+(`wheel` raw events with the pointer on it, up and down, six notches: no frame changed; the lab's 3D view does take them).
+
+### The decal's band restore (`FUN_00426130`), analysed, open
+
+The tail builds four rectangles around the decal's rectangle `R` (`FUN_004287e0` of the size) and copies them (`FUN_005b30a0`, `this+0xd4` with the surface of `this+0xd0`): `(0, 0, A, R.top)`, `(0, R.bottom, A, B)`,
+`(0, R.top, R.left, R.bottom)`, `(R.right, R.top, A, R.bottom)`, `A` and `B` the two surfaces' sizes taken in the other order (`ftol` of `0x4177c0`'s result is the right edge, of `0x406d90`'s the bottom): everything
+outside `R` is put back from the undo copy. The live difference (`testdrive` exports `paintfx-export-armour` / `-decal`) is **exactly the block `(0, 0)-(219, 84)`** (the earlier 110 x 84 was read at half size), a region
+of rails that is not in the pre-decal skin at any offset, flip, or scale (best 8.2 per channel), and equal to the later texture-fill export there: so it is a stale copy, not something the decal drew. Not reproduced:
+what `0xd4` held at that moment is not known.
+
+Tests: `workshop::build::tests` (line 4), `build_mode::tests` (the shade slider, the swatch cut), `effects::tests` (the scroll ranges). Gate: fmt and clippy `-D warnings` clean; 886 tests passed, 0 failed, 2 ignored; `find local/game -newer` printed nothing.
