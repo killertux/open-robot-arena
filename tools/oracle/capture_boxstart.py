@@ -66,7 +66,10 @@ def main():
     if os.environ.get("WEIGHTS") == "1":
         weights = cd.py("import plus; out.write(repr([(p, plus.getWeight(p)) for p in plus.getPlayers()]))")
         print("getWeight:", weights)
-    sampler = subprocess.Popen(
+    # NOSAMPLE=1: no periodic ra2_python.py --sample call during the fight (docs/29 12bc: does the
+    # sampling call change the game?); the match is then only touched by start_match's checks.
+    nosample = os.environ.get("NOSAMPLE") == "1"
+    sampler = None if nosample else subprocess.Popen(
         [cd.PY, os.path.join(cd.HERE, "ra2_python.py"), "--sample", EXPR, "--every", "3",
          "--seconds", str(secs * 1.2 + 3)], stdout=subprocess.PIPE, text=True)
     t0 = time.time()
@@ -80,7 +83,7 @@ def main():
     time.sleep(0.5)
     sc.unload()
     sess.detach()
-    text = sampler.communicate()[0]
+    text = sampler.communicate()[0] if sampler else ""
     n = 0
     while os.path.exists(os.path.join(out_dir, f"boxstart-{name}__live__{n:03d}.jsonl")):
         n += 1
@@ -90,9 +93,10 @@ def main():
             f.write(json.dumps(r, separators=(",", ":")) + "\n")
     json.dump({"name": name, "sim_seconds": sim[0], "rows": len(rows), "getWeight": weights},
               open(base + ".json", "w"), indent=1)
-    with open(base + ".tsv", "w") as f:
-        f.write("time_elapsed\t[(player, location, isUpsideDown, lastTactic, cmd_throttle, cmd_turn)]\n")
-        f.write(text)
+    if sampler:
+        with open(base + ".tsv", "w") as f:
+            f.write("time_elapsed\t[(player, location, isUpsideDown, lastTactic, cmd_throttle, cmd_turn)]\n")
+            f.write(text)
     tr = os.path.join(cd.DRIVE_C if hasattr(cd, "DRIVE_C") else os.path.expanduser(
         "~/.var/app/org.winehq.Wine/data/wine/drive_c"), "ra2oracle", "aitrace.txt")
     if os.environ.get("AITRACE") == "1" and os.path.exists(tr):
