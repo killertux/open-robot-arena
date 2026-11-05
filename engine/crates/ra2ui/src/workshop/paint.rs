@@ -25,6 +25,8 @@
 
 use ra2fmt::bot::{Chassis, Face, FaceGroup};
 
+use super::skinfx;
+
 /// The 256×256 skin size the bot format requires.
 pub const SKIN_SIZE: u32 = 256;
 
@@ -276,6 +278,8 @@ pub struct Paint {
     original: Option<Vec<u8>>,
     changed: bool,
     groups: Vec<Group>,
+    /// Each panel's polygon on the skin (the face group's own points), for the edge strips.
+    polys: Vec<Vec<[f32; 2]>>,
     faces: Vec<Face>,
     undo: Vec<Option<Skin>>,
     redo: Vec<Option<Skin>>,
@@ -297,6 +301,11 @@ impl Paint {
             original,
             changed: false,
             groups,
+            polys: chassis
+                .face_groups
+                .iter()
+                .map(|g| g.coords.clone())
+                .collect(),
             faces: chassis.faces.clone(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -317,6 +326,11 @@ impl Paint {
             .iter()
             .enumerate()
             .map(|(index, g)| group(index, g, &chassis.faces))
+            .collect();
+        self.polys = chassis
+            .face_groups
+            .iter()
+            .map(|g| g.coords.clone())
             .collect();
         self.faces = chassis.faces.clone();
     }
@@ -379,12 +393,103 @@ impl Paint {
         })
     }
 
+    /// The original keeps **one** undo step: every effect first copies the skin over the single
+    /// saved copy (`FUN_00423ea0`), and Undo (`FUN_00423f80`) puts it back and dims the button.
     fn snapshot(&mut self) {
+        self.undo.clear();
         self.undo.push(self.skin.clone());
-        if self.undo.len() > 16 {
-            self.undo.remove(0);
-        }
         self.redo.clear();
+    }
+
+    /// Whether Undo has a step (the button is lit).
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    /// A panel's polygon on the skin.
+    pub fn polygons(&self) -> &[Vec<[f32; 2]>] {
+        &self.polys
+    }
+
+    /// Run a drawing on a copy of the skin as the render target and keep the result
+    /// (`FUN_005b2ce0` .. `FUN_005b2cb0`), after the undo copy.
+    fn render(&mut self, draw: impl FnOnce(&mut skinfx::Canvas)) {
+        self.snapshot();
+        let skin = self.ensure_skin().clone();
+        let mut canvas = skinfx::Canvas::new(&skin);
+        draw(&mut canvas);
+        self.skin = Some(canvas.finish());
+        self.changed = true;
+    }
+
+    /// Color Fill on one panel (`FUN_00424850`, mode 0): its rectangle in one opaque colour.
+    pub fn color_group(&mut self, index: usize, rgb: [u8; 3]) -> Result<(), PaintError> {
+        let r = self.rect_of(index)?;
+        self.render(|c| c.solid_rect(r, rgb));
+        Ok(())
+    }
+
+    /// Paint Entire Chassis with a colour (`FUN_00426bc0`).
+    pub fn color_all(&mut self, rgb: [u8; 3]) {
+        let (w, h) = (SKIN_SIZE as i32, SKIN_SIZE as i32);
+        self.render(|c| c.solid_rect([0, 0, w, h], rgb));
+    }
+
+    /// Texture Fill / Surface Layers on one panel (`FUN_00424850`, modes 1 and 2): the texture
+    /// stretched over the panel's rectangle, blended by its alpha.
+    pub fn texture_group(&mut self, index: usize, tex: &skinfx::Image) -> Result<(), PaintError> {
+        let r = self.rect_of(index)?;
+        self.render(|c| c.texture_rect(tex, r));
+        Ok(())
+    }
+
+    /// Paint Entire Chassis with a texture (`FUN_00427300`).
+    pub fn texture_all(&mut self, tex: &skinfx::Image) {
+        let (w, h) = (SKIN_SIZE as i32, SKIN_SIZE as i32);
+        self.render(|c| c.texture_rect(tex, [0, 0, w, h]));
+    }
+
+    /// Edge Lines on one panel (`FUN_00424a80`).
+    pub fn edge_group(
+        &mut self,
+        index: usize,
+        tex: &skinfx::Image,
+        width: f32,
+        ratio: f32,
+    ) -> Result<(), PaintError> {
+        self.check_group(index)?;
+        let poly = self.polys.get(index).cloned().unwrap_or_default();
+        self.render(|c| c.edge_strips(tex, &poly, index, width, Some(ratio)));
+        Ok(())
+    }
+
+    /// Edge Entire Chassis (`FUN_00427ea0`).
+    pub fn edge_all(&mut self, tex: &skinfx::Image, width: f32, ratio: f32) {
+        let polys = self.polys.clone();
+        self.render(|c| c.edges(tex, &polys, width, Some(ratio)));
+    }
+
+    /// A decal on a panel (`FUN_00426130`): centred on the skin point `centre`, `side` pixels wide
+    /// (80 x the size slider), turned by `angle`, kept inside the panel's rectangle.
+    pub fn decal_on(
+        &mut self,
+        index: usize,
+        tex: &skinfx::Image,
+        centre: [f32; 2],
+        side: f32,
+        angle: f32,
+    ) -> Result<(), PaintError> {
+        let r = self.rect_of(index)?;
+        self.render(|c| c.decal(tex, centre, side, angle, r));
+        Ok(())
+    }
+
+    fn rect_of(&self, index: usize) -> Result<[i32; 4], PaintError> {
+        self.check_group(index)?;
+        let (x1, y1, x2, y2) = self
+            .group_rect(index)
+            .ok_or(PaintError::NoBounds { index })?;
+        Ok([x1, y1, x2, y2])
     }
 
     /// Replace a group's patch with `texture`, stretched to the group rectangle.
@@ -528,6 +633,13 @@ impl Paint {
         self.skin = next;
         self.changed = true;
         true
+    }
+
+    /// Replace the whole skin without an undo step (the armour pick's default appearance draws into
+    /// the render target directly).
+    pub fn set_skin(&mut self, skin: Skin) {
+        self.skin = Some(skin);
+        self.changed = true;
     }
 
     /// Test helper: the current skin, if any.

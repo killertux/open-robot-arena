@@ -58,6 +58,7 @@ pub mod gjk;
 pub mod library;
 pub mod paint;
 pub mod placement;
+pub mod skinfx;
 pub mod stats;
 pub mod wiring;
 

@@ -1,0 +1,153 @@
+# Paint Shop effects end to end, on the three faces seen from cam -0.5 0.6 5 (top, left, front): Texture Fill holey_metal.bmp on
+# the top, Surface Layers dirt_layer.tga on the left (Undo, again), Edge Lines dotted_rail on the front, a Decal bolt.tga
+# on the left at full size, one at a smaller size turned with SHIFT, then Surface Layers Paint Entire and Edge Lines
+# Edge Entire (rim_line). Rows of a list are 18 px from y 263 (row i: 272 + 18 i); the effect dropdown rows 230 + 18 i.
+click 676 88      # Paint Shop tab
+wait 3
+cam -0.5 0.6 5
+hide
+shot SHOTS/60-open.png
+click 760 212     # Effect dropdown -> Texture Fill
+wait 1
+shot SHOTS/60b-dropdown.png
+click 612 248
+wait 2
+click 600 416     # row 8: holey_metal.bmp
+wait 1
+hide
+shot SHOTS/61-texfill-holey.png
+click 744 517     # the list's scroll bar: the down arrow three times
+click 744 517
+click 744 517
+wait 1
+hide
+shot SHOTS/61b-scroll-down3.png
+click 744 400     # the track, half way
+wait 1
+hide
+shot SHOTS/61c-scroll-track.png
+click 744 517     # the down arrow to the end (more than the list has)
+click 744 517
+click 744 517
+click 744 517
+click 744 517
+click 744 517
+click 744 517
+click 744 517
+click 744 517
+click 744 517
+click 744 517
+click 744 517
+wait 1
+hide
+shot SHOTS/61d-scroll-end.png
+click 744 270     # the up arrow
+wait 1
+hide
+shot SHOTS/61e-scroll-up1.png
+click 600 416     # row 8 of the top again (holey_metal.bmp)
+wait 1
+cam -0.5 0.6 5     # the click turned the live view: put it back
+click 260 247     # the top face
+wait 1
+hide
+shot SHOTS/62-texfill-top.png
+click 760 212     # -> Surface Layers
+wait 1
+click 622 267
+wait 2
+click 600 326     # row 3: dirt_layer.tga
+wait 1
+hide
+shot SHOTS/63-layer-dirt.png
+cam -0.5 0.6 5     # the click turned the live view: put it back
+click 170 362     # the left face
+wait 1
+hide
+shot SHOTS/64-layer-left.png
+click 962 641     # Undo
+wait 1
+hide
+shot SHOTS/65-layer-undone.png
+cam -0.5 0.6 5     # the click turned the live view: put it back
+click 170 362     # the left face again
+wait 1
+hide
+shot SHOTS/66-layer-left-again.png
+click 760 212     # -> Edge Lines
+wait 1
+click 614 285
+wait 2
+click 600 326     # row 3: dotted_rail.tga
+wait 1
+hide
+shot SHOTS/67-edge-dotted.png
+cam -0.5 0.6 5     # the click turned the live view: put it back
+click 310 362     # the front face
+wait 1
+hide
+shot SHOTS/68-edge-front.png
+click 760 212     # -> Decals
+wait 1
+click 604 303
+wait 2
+click 600 362     # row 5: bolt.tga
+wait 1
+cam -0.5 0.6 5     # the click turned the live view: put it back
+move 170 362
+wait 1
+hide
+shot SHOTS/70-decal-hover.png
+cam -0.5 0.6 5     # the click turned the live view: put it back
+click 170 362     # a decal on the left face at full size
+wait 1
+hide
+shot SHOTS/71-decal-placed.png
+click 870 583     # size slider track
+wait 1
+hide
+shot SHOTS/72-decal-size.png
+key Shift_L down
+cam -0.5 0.6 5     # the click turned the live view: put it back
+move 170 360
+cam -0.5 0.6 5     # the click turned the live view: put it back
+move 175 362
+cam -0.5 0.6 5     # the click turned the live view: put it back
+move 180 362
+cam -0.5 0.6 5     # the click turned the live view: put it back
+move 185 362
+key Shift_L up
+cam -0.5 0.6 5     # the click turned the live view: put it back
+click 310 250     # a smaller turned decal on the top face edge
+wait 1
+hide
+shot SHOTS/73-decal-turned.png
+click 760 212     # -> Surface Layers
+wait 1
+click 622 267
+wait 2
+click 909 579     # Paint Entire Chassis
+wait 1
+hide
+shot SHOTS/74-layer-entire.png
+click 760 212     # -> Edge Lines
+wait 1
+click 614 285
+wait 2
+click 600 380     # row 6: rim_line.tga
+click 909 579     # Edge Entire Chassis
+wait 1
+hide
+shot SHOTS/75-edge-entire.png
+click 962 641     # Undo
+wait 1
+hide
+shot SHOTS/76-edge-undone.png
+click 909 579     # Edge Entire Chassis again
+wait 1
+click 760 212     # -> Color Fill
+wait 1
+click 612 230
+wait 2
+hide
+shot SHOTS/77-colorfill-back.png

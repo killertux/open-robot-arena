@@ -322,6 +322,40 @@ pub fn scrollbar_target(
     Some((fraction * max as f32).round() as usize)
 }
 
+/// Which part of a list's own scroll bar a point is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarPart {
+    Up,
+    Down,
+    Track,
+}
+
+/// The part of the list's `+Scroller` bar under `x, y`, if the bar is shown and the point is on it.
+pub fn scrollbar_part(list: &Placement<'_>, x: f32, y: f32) -> Option<BarPart> {
+    let bar = list
+        .attachments
+        .iter()
+        .find(|a| a.attachment.kind == AttachmentKind::Scroller)?
+        .body
+        .walk()
+        .find(|p| p.widget.kind == WidgetKind::ScrollBar)?;
+    if !bar.frame.contains_point(x, y) || !bar.widget.visible() {
+        return None;
+    }
+    let model = ScrollBar::from_widget(bar.widget);
+    let less = bar.children.get(model.less)?.frame;
+    let more = bar.children.get(model.more)?.frame;
+    let parts = model.parts(bar.frame, less, more);
+    let track = parts[2];
+    Some(if y < track.y {
+        BarPart::Up
+    } else if y >= track.bottom() {
+        BarPart::Down
+    } else {
+        BarPart::Track
+    })
+}
+
 /// Scroll the open list to `top`.
 pub fn scroll(gib: &mut Gib, name: &str, top: usize) {
     on_gib_chain_only(gib, name, &mut |dropdown| {

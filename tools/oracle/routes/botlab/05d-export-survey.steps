@@ -1,0 +1,16 @@
+# The Paint Shop's Export Paint Template and Import Custom Paint windows, first look.
+click 676 88      # Paint Shop tab
+wait 3
+hide
+click 84 661      # Export Paint Template
+wait 2
+hide
+shot SHOTS/90-export-window.png
+key Escape
+wait 1
+hide
+shot SHOTS/91-after-escape.png
+click 202 661     # Import Custom Paint
+wait 2
+hide
+shot SHOTS/92-import-window.png

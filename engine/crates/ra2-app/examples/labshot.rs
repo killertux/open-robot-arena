@@ -42,6 +42,7 @@ fn main() -> Result<(), String> {
     let rest = args.split_off(2);
     args.extend(route);
     args.extend(rest);
+    let mut modifiers = (false, false);
     let mut i = 2;
     let num = |s: &String| s.parse::<f32>().map_err(|e| format!("{s}: {e}"));
     while i < args.len() {
@@ -180,6 +181,22 @@ fn main() -> Result<(), String> {
             "shot" => {
                 builder.shot(Path::new(&args[i + 1]), [1024, 768])?;
                 i += 2;
+            }
+            "key"
+                if matches!(
+                    args[i + 1].as_str(),
+                    "Shift_L" | "Shift_R" | "Control_L" | "Control_R"
+                ) && matches!(args.get(i + 2).map(String::as_str), Some("down" | "up")) =>
+            {
+                // the modifier keys the Paint Shop's decal and the placement drags read
+                let down = args[i + 2] == "down";
+                if args[i + 1].starts_with("Shift") {
+                    modifiers.0 = down;
+                } else {
+                    modifiers.1 = down;
+                }
+                builder.set_modifiers(modifiers.0, modifiers.1);
+                i += 3;
             }
             "key" if matches!(args.get(i + 2).map(String::as_str), Some("down" | "up")) => {
                 // `key NAME down|up`: a robot key held or let go (the practice arena reads it)
