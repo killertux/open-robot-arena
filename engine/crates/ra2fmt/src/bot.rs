@@ -939,32 +939,54 @@ fn num(v: f32) -> String {
     g6(v)
 }
 
-/// `%g` with precision 6, minus the `printf` locale.
+/// `%g` with precision 6, minus the `printf` locale, as the original's C runtime prints it.
+///
+/// The exe's CRT (`_fltout` + `_fptostr`) takes the value's decimal digits and rounds them **half
+/// up**; Rust (and glibc) round an exactly representable tie to even. The two differ only on a
+/// tie: live `0.3828125` is written `0.382813`, `format!("{:.5e}")` gives `0.382812` (docs/36 9.30).
 fn g6(v: f32) -> String {
-    let sci = format!("{:.5e}", v.abs());
-    let exp = sci
-        .rsplit_once('e')
-        .and_then(|(_, e)| e.parse::<i32>().ok())
-        .unwrap_or(0);
+    // the exact decimal expansion of the float (an f32 is exact in an f64), 40 digits after the point
+    let exact = format!("{:.40e}", f64::from(v.abs()));
+    let (mant, exp) = exact.split_once('e').unwrap_or((&exact, "0"));
+    let mut exp: i32 = exp.parse().unwrap_or(0);
+    let digits: Vec<u8> = mant
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|d| d - b'0')
+        .collect();
+    let mut kept: u32 = digits[..6].iter().fold(0, |n, &d| n * 10 + u32::from(d));
+    if digits[6] >= 5 {
+        kept += 1;
+        if kept == 1_000_000 {
+            kept = 100_000;
+            exp += 1;
+        }
+    }
+    let kept = kept.to_string();
+    let sign = if v < 0.0 { "-" } else { "" };
     if !(-4..6).contains(&exp) {
-        let (mant, _) = sci.split_once('e').unwrap_or((&sci, ""));
-        let mant = mant.trim_end_matches('0').trim_end_matches('.');
+        let rest = kept[1..].trim_end_matches('0');
+        let mant = if rest.is_empty() {
+            kept[..1].to_string()
+        } else {
+            format!("{}.{rest}", &kept[..1])
+        };
         format!(
-            "{}{}e{}{:03}",
-            if v < 0.0 { "-" } else { "" },
-            mant,
+            "{sign}{mant}e{}{:03}",
             if exp < 0 { '-' } else { '+' },
             exp.abs()
         )
-    } else {
-        let decimals = (5 - exp).max(0) as usize;
-        let s = format!("{v:.decimals$}");
-        let s = s.trim_end_matches('0').trim_end_matches('.');
-        if s.is_empty() || s == "-" {
-            "0".into()
+    } else if exp >= 0 {
+        let (whole, frac) = kept.split_at(exp as usize + 1);
+        let frac = frac.trim_end_matches('0');
+        if frac.is_empty() {
+            format!("{sign}{whole}")
         } else {
-            s.to_string()
+            format!("{sign}{whole}.{frac}")
         }
+    } else {
+        let frac = kept.trim_end_matches('0');
+        format!("{sign}0.{}{frac}", "0".repeat((-exp - 1) as usize))
     }
 }
 
@@ -1450,5 +1472,21 @@ mod tests {
         assert_eq!(num(0.1 + 0.2), "0.3");
         assert_eq!(num(1.0 / 3.0), "0.333333");
         assert_eq!(num(-2.384_185_8e-7), "-2.38419e-007");
+    }
+
+    /// The original's CRT rounds an exactly representable tie up (live `botlab-e2e-newbot`:
+    /// `0.382813` for 0.3828125, where round-to-even gives `0.382812`).
+    #[test]
+    fn a_decimal_tie_rounds_up_as_the_original_does() {
+        assert_eq!(num(0.382_812_5), "0.382813");
+        assert_eq!(num(-0.382_812_5), "-0.382813");
+        assert_eq!(num(0.039_062_5), "0.0390625");
+        assert_eq!(num(1_000_000.5), "1e+006");
+        assert_eq!(num(1.234_567_5e10), "1.23457e+010");
+        assert_eq!(num(0.999_999_5), "1");
+        assert_eq!(num(99_999.95), "100000");
+        assert_eq!(num(123_456.5), "123457");
+        assert_eq!(num(100.0), "100");
+        assert_eq!(num(2f32.powi(-16)), "1.52588e-005");
     }
 }

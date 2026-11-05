@@ -491,6 +491,33 @@ impl Build {
         self.info.get(index)
     }
 
+    /// The robot's forward heading in radians (the Overview's slider, saved after the buckle model).
+    pub fn heading(&self) -> f32 {
+        self.bot.heading.unwrap_or(0.0)
+    }
+
+    /// Set the forward heading (`FUN_0043bdf0`: the slider's value in twentieths of a turn).
+    pub fn set_heading(&mut self, heading: f32) {
+        self.bot.heading = Some(heading);
+    }
+
+    /// A burst motor's swing: the start and end angle in radians (`BurstMotor + 0x2a0 / 0x2a4`).
+    pub fn burst_angles(&self, index: usize) -> Option<[f32; 2]> {
+        self.bot.components.get(index)?.burst_angles
+    }
+
+    /// Set a burst motor's start and end angle (the adjustment page's two sliders,
+    /// `FUN_00446960` / `FUN_004469a0`); `false` when the part is not a burst motor.
+    pub fn set_burst_angles(&mut self, index: usize, angles: [f32; 2]) -> bool {
+        match self.bot.components.get_mut(index) {
+            Some(c) if c.class == "BurstMotor" => {
+                c.burst_angles = Some(angles);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn chassis(&self) -> Option<&Chassis> {
         self.bot.components.first()?.chassis.as_ref()
     }
@@ -627,6 +654,11 @@ impl Build {
             height: placement.height,
             class: info.class.clone(),
             file: info.file.clone(),
+            // `FUN_00446200` (the BurstMotor constructor): the swing starts at 0 and ends at
+            // pi/2 (`0x6a6788`) whatever the definition's `burst =` line says (live: a placed DDT
+            // saves `0 1.5708`).
+            burst_angles: (info.class == "BurstMotor")
+                .then_some([0.0, std::f32::consts::FRAC_PI_2]),
             ..Default::default()
         });
         self.info.push(info);

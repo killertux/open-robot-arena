@@ -1617,3 +1617,65 @@ rectangles and weight (293.1 both). What differs: the random ear order of the pl
 * Colour of the typed name box focus ring and the delete-control message are as before (9.27c).
 
 Tests: `workshop::gjk` (2), the palette order and hidden parts in `components::tests`. Gate: fmt and clippy `-D warnings` clean; 870 tests passed, 0 failed, 2 ignored; `find local/game -newer` printed nothing.
+
+## 9.30 The component adjustment pages, the forward heading, the CRT's rounding, the route again (`fx/botlab-adjust`, 2026-11-05)
+
+### Which page a part gets (`Robot Arena 2.exe`)
+
+Picking a placed part in the 3D view (`FUN_0042d280` -> `FUN_0042d310(part)`) calls `FUN_0042f440(2, part)`: the part's `Adjuster` (`Component` vtable slot 20) says which `UI\BotLab` page goes into the screen's
+`component content group`, and `FUN_005ec4e0(part != 0)` lights REMOVE. Only two classes override the slot, every other `Component` class (the 20 of `ControlBoard`, `Motor`, `SpinMotor`, `ServoMotor`, `Piston`,
+`BurstPiston`, `Battery`, `AirTank`, `Wheel`, `Weapon`, `Cannon`, `Flamethrower`, `Hovercraft`, `Magnet`, `Steering`, ...) inherits the default `Component::Adjuster` (vtable `0x6a6820`, page name `FUN_00446d00`):
+
+| class | page | what it holds |
+|---|---|---|
+| `BurstMotor` (vtable `0x6a679c`, slot `0x4469e0`; `BurstMotorAdjuster` `0x6a6810`, ctor `0x446a20`, init `0x446a70`) | `adjust_burst.gib` | `start angle slider`, `end angle slider` |
+| `SmartZone` (`0x4ef6c0`; `SmartZoneAdjuster` `0x6ab1c0`, init `0x4ef750`) | `adjust_zone.gib` | the `zone name` box (`SmartZone + 0x280`, written and read by `0x4ef9c0` / `0x4ef990`) |
+| every other class | `adjust_none.gib` | *This component needs no adjustments.* |
+
+Each page's header is the part's name (`component name textbox`, no weight). The Smart Zone is `hidden = 1`, which keeps it off the player's palette, so its page cannot be reached in the lab (not built). The pistons, wheels,
+weapons need no adjustment: the BurstPiston and the Reversible Angle Motor get the *none* page.
+
+**The burst motor's angles** (`BurstMotor + 0x2a0` start, `+ 0x2a4` end, radians): the constructor (`0x446200`) sets them to `0` and `pi/2` (`0x6a6788`) whatever the definition's `burst = 0 50 90` says (that line is
+`+0x2a8..0x2b0`, the physics); a fresh DDT saves `0 1.5708` (`botlab-e2e-burst-default`). The sliders run 0..1: start = value x 2 pi (`LAB_00446b90`, `0x6a678c`), end = (value - 0.5) x 2 x 2.4 (`LAB_00446be0`,
+`0x6a6790` = 2.4, so -2.4 .. 2.4 rad); the page opens (`0x446c40`) with start / 2 pi (a negative start gets a turn added) and end / 4.8 + 0.5. The `.bot` line is `BurstMotor`, the definition path, `start end`.
+
+**The slider itself** (live `botlab-adjust-24e..24i`, the track 297 px, the thumb 16 px, 281 px of travel; the value is the thumb's pixel offset over 281, as a float): `9 / 281` and `265 / 281` give exactly the saved `0.201241`
+and `2.12669` of `botlab-e2e-burst-adjusted`; a press on the **track** puts the thumb's **left edge** under the cursor and takes no drag (x 578 on a track from 561 gave pixel 17, saved `0.380122`); a press on the
+**thumb** grabs it where it is and the held button moves it by the mouse's travel (grab 801, drag to 834: pixel 232 -> 265).
+
+Also changed on the Components tab to match live: picking a part (or missing every part) **empties the preview slot** (live `botlab-e2e-22`: after REMOVE the panel is bare until a palette cell is picked again; the
+page replaces the preview while a part is picked); REMOVE is **dim** until a part is picked (`FUN_005ec4e0`); the palette's lit cell (full white, the others 0.6 grey, with the grid's `Sel Bar`) **follows the cell last
+picked** (ours stayed on the first cell). Ours: `Builder::{refresh_comp_preview, burst_press, adjust_to}`, `Build::{burst_angles, set_burst_angles}`; a new burst motor saves `0 1.5708`.
+
+### The forward heading (`FUN_00437770` ... `FUN_0043bdf0`)
+
+The Overview's `heading slider` (180 px, thumb 16, 164 px of travel) is the robot's heading, the line after the buckle model in the `.bot` (`Bot + 0xac`). `FUN_0043bdf0(value)`: `heading = round(value x 20) x
+0.05 x 2 pi` (`0x6a57f0` = 20, `0x6a621c`, `0x6a6218`; `FUN_0043be60` rounds), so twenty steps of 18 degrees; the thumb itself is not snapped. Same press rules as the burst sliders (live: click 700 -> pixel 75 -> step 9; the
+drag that began at 640, a track press, did not follow; the end of the route saved step 2, `0.628319`). Every press on it (`FUN_0043be70`) also shows the **heading arrow** in the 3D view for 2 s (`+0x218`,
+counted down by `FUN_0043e630`): `UI\BotLab\heading_arrow.gmf` at (sin h, 0, cos h) x 3 turned by h about Y, and a four pixel green line (0.12, 1, 0) from the robot's origin to it (`FUN_00439150`; the line is hidden
+by the chassis where it passes under it). Ours draws both (`Builder::heading_press`, `heading_arrow_items`); the arrow and the line match the live frames `botlab-adjust-25b` / `25d` where the robot is drawn alike (the
+rest of those frames is the armour skin, open).
+
+### The .bot's numbers (`ra2fmt::bot::g6`)
+
+The exe's CRT (`_fltout` / `_fptostr`) rounds the decimal digits **half up**; Rust's formatting (and glibc) rounds an exactly representable tie to even: `0.3828125` is `0.382813` live and was `0.382812` ours. `g6`
+now cuts the exact decimal expansion at six digits itself; non-ties are unchanged, the `%g` rules (exponent below -4 or from 6, three-digit exponents) as
+before. Every float of the writer goes through this one function (`num`).
+
+### The route again (live display :7, `Teams/ AI/ Custom Textures/ ra2.cfg` copied before and restored after, sha256 lists equal)
+
+New route files `03c-adjust.steps` (a DDT placed, picked, both sliders, the battery's *none* page, the motor again) and `03d-heading.steps` (Overview, the slider, the arrow, the saved heading); `labshot` turns `wait S` into
+`age S` (the arrow's two seconds). Captures (backup `manifest-additions-2026-10-21-botlab-adjust.tsv`): `botlab-rerun-*` (the full route, 75 frames, `botlab-rerun-newbot` its `.bot`), `botlab-adjust-24c..25e` (12 frames),
+`botlab-adjust-newbot` (the `.bot`: `0.380122 2.12669`, heading `0.628319`). Ours writes the same two values from the same clicks, byte for byte on those lines.
+
+Per-step mean absolute difference of the whole frame, ours against `botlab-rerun-*` (frame / 3D pane), the groups' means: chassis 01-08 **1.27**; armour 09-12 5.66 (the armour skin, open); components 13-36 **3.35**
+(3D pane 8.3: the first lab session of a fresh game has its camera about 1.5 % nearer than the later ones, a second run gave 1.7 %; the box and the parts land 1.5 % off the live positions in the saved `.bot`; against the
+second session's frames of the same steps, `botlab-adjust-20..24`, the 3D pane is 7.3); wiring 40-56 **2.53**; paint 60-65 6.96 (the paint effects and the skin, open, 2.1 to 2.3 for the steps that do not show it); test robot 70-76 21.3
+(7.9 at rest, 14.2 after one second of driving, 27-32 later; open); save 80-82 5.29. New and changed frames: 21 `battery-selected` **2.24** (9.61 before), 22 `battery-removed` **2.07** (10.93), 17-20 3.2-3.5 (4.3-4.6),
+the adjustment pages 24e..24i **1.9**, the page's own area (512,365)-(1008,660) **0.9**, the heading slider row 3.5 (the label's subpixel offset only; the thumb is pixel-equal). Full table: `tools/oracle/botlab_e2e_compare.py` on the two directories.
+
+Open: the Smart Zone page (unreachable from the palette); the armour default skin, the Paint Shop effects and the Test Robot frames as in 9.29; the overview camera of the first lab session; the tip line (live shows none after
+the first alerts, ours keeps one) and the 1.5 % position scatter above.
+
+Tests: `ra2fmt::bot` (`a_decimal_tie_rounds_up_as_the_original_does`), `build_mode` (`a_picked_burst_motor_shows_its_sliders_and_saves_their_angles`, `the_overview_heading_slider_saves_steps_of_a_twentieth_of_a_turn`). Gate: fmt and clippy `-D warnings`
+clean; 876 tests passed, 0 failed, 2 ignored; `find local/game -newer` printed nothing.

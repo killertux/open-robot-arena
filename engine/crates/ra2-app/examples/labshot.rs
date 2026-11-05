@@ -6,7 +6,7 @@
 //! ```
 //!
 //! `-f FILE` (before the game) reads the steps from a route file instead, the very files `ra2_drive.py -f` gets
-//! (`tools/oracle/routes/botlab/*.steps`, several files are read in order): `wait`, `hide` and `frames` are dropped,
+//! (`tools/oracle/routes/botlab/*.steps`, several files are read in order): `hide` and `frames` are dropped, `wait S` becomes `age S` (the heading arrow's two seconds),
 //! `dragh X0 Y0 X1 Y1 [BUTTON] [STEPS] [HOLD]` becomes `drag`, `SHOTS/` in a `shot` path is the `LABSHOT_SHOTS`
 //! directory, and `key NAME down|up` is a held robot key (W 17, A 30, S 31, D 32, space 57, the arrows).
 //!
@@ -94,6 +94,10 @@ fn main() -> Result<(), String> {
                 }
                 builder.mouse_released(x1, y1);
                 i += used;
+            }
+            "age" => {
+                builder.age(num(&args[i + 1])?);
+                i += 2;
             }
             "alert" => {
                 println!("alert: {:?}", builder.alert());
@@ -288,7 +292,12 @@ fn route_tokens(text: &str) -> Vec<String> {
         }
         let shots = std::env::var("LABSHOT_SHOTS").unwrap_or_else(|_| ".".into());
         match t[0] {
-            "wait" | "hide" | "frames" => {}
+            // a live wait lets the heading arrow's two seconds run out
+            "wait" => {
+                out.push("age".to_string());
+                out.push(t.get(1).copied().unwrap_or("1").to_string());
+            }
+            "hide" | "frames" => {}
             // Back to HQ saves into the cell: ours does it in `back`
             "click" if t.get(1..3) == Some(&["55", "18"]) => out.push("back".to_string()),
             "dragh" | "drag" => {

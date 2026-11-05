@@ -1,0 +1,22 @@
+# The Overview's Forward heading slider (docs/36 9.30): value = thumb pixel / (180 - 16), the heading saved in the
+# .bot is round(value x 20) x 0.05 x 2 pi.
+click 262 88      # Overview tab
+wait 2
+cam -1.2 0 5      # the lab camera above the robot, as the components route has it
+wait 1
+hide
+shot SHOTS/25a-heading-default.png
+click 700 268     # the track: the thumb's centre goes under the cursor (66 px of 164: step 8)
+hide
+shot SHOTS/25b-heading-click.png
+wait 3
+hide
+shot SHOTS/25c-heading-after.png
+dragh 640 268 760 268 0 6 2   # the thumb dragged to 126 px of 164: step 15
+hide
+shot SHOTS/25d-heading-dragged.png
+wait 3
+hide
+shot SHOTS/25e-heading-later.png
+click 55 18       # Back to HQ: saves into the cell
+wait 4
