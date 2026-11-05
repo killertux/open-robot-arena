@@ -1,6 +1,6 @@
 /* gjkn: runs the ORIGINAL Robot Arena 2's distance query (FUN_0055c390) natively, 32-bit,
    on the host FPU, with the PE image mapped at its own virtual addresses.
-   stdin: a header (x87 control word u32, mode u32: 0 the query, 1 the reduction) then records of BLOB
+   stdin: a header (x87 control word u32, mode u32: 0 the hull x triangle query, 1 the reduction, 2 the hull x hull query FUN_0055b2c0) then records of BLOB
    bytes; stdout: each record after the call and the result as a double (the query's return value,
    or the reduction's al). argv[1]: the image made by pack_img.py (docs/29 section 12an). */
 typedef unsigned int u32; typedef unsigned char u8;
@@ -38,8 +38,8 @@ void cstart(int *sp){
   u32 SA=BASE+0x3000, SB=BASE+0x3100, OUT=BASE+0x3200, ST=BASE+0x3300;
   for(;;){
     if(rd_all(0,(void*)BASE,BLOB)!=BLOB) break;
-    if(mode==0){
-    gSA=SA;gSB=SB;gOUT=OUT;gST=ST;gFN=0x55c390;
+    if(mode==0||mode==2){
+    gSA=SA;gSB=SB;gOUT=OUT;gST=ST;gFN=mode==0?0x55c390:0x55b2c0;
     __asm__ volatile(
       "pushl gST; pushl gOUT; pushl gSB; pushl gSA; call *gFN; addl $16,%%esp; fstpl gRES"
       :::"eax","ecx","edx","memory","cc","st","st(1)","st(2)","st(3)","st(4)","st(5)","st(6)","st(7)");

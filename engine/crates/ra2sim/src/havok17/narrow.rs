@@ -1347,6 +1347,80 @@ pub fn convex_point_x87(
     point_from(c, ra, rb, pose_a, pose_b, true)
 }
 
+/// The convex x convex pair in the original's own arithmetic ([`super::x87gjk::query_hulls`],
+/// `FUN_0055b2c0`, docs/29 section 12ax): `local_a` / `local_b` are the hulls' vertices in their own
+/// frames, `hull_a` / `hull_b` their world poses (the collidables' 3x3 and translation), `pose_a` /
+/// `pose_b` the bodies'. The normal, the distance and the point are the query's own record; the
+/// radii (ours, a rounded piece's) move the points along the normal as in [`point_from`].
+#[allow(clippy::too_many_arguments)]
+pub fn convex_pair_x87(
+    local_a: &[Vec3],
+    ra: f32,
+    local_b: &[Vec3],
+    rb: f32,
+    pose_a: &Pose,
+    pose_b: &Pose,
+    hull_a: &Pose,
+    hull_b: &Pose,
+) -> Option<(Point, Closest)> {
+    if local_a.is_empty() || local_b.is_empty() {
+        return None;
+    }
+    let va: Vec<[f32; 3]> = local_a.iter().map(|v| v.to_array()).collect();
+    let vb: Vec<[f32; 3]> = local_b.iter().map(|v| v.to_array()).collect();
+    fn hull<'a>(v: &'a [[f32; 3]], p: &Pose) -> x87gjk::Hull<'a> {
+        x87gjk::Hull {
+            vertices: v,
+            adjacency: None,
+            rotation: glam::Mat3::from_quat(p.rotation).to_cols_array(),
+            translation: p.position.to_array(),
+        }
+    }
+    let (ha, hb) = (hull(&va, hull_a), hull(&vb, hull_b));
+    let (mut ca, mut cb) = (0usize, 0usize);
+    let r = x87gjk::query_hulls(&ha, &hb, &mut ca, &mut cb);
+    let mut simplex_a = [0u16; 3];
+    let mut simplex_b = [0u16; 3];
+    for (k, (a, b)) in r.a.iter().zip(&r.b).take(3).enumerate() {
+        simplex_a[k] = *a as u16;
+        simplex_b[k] = *b as u16;
+    }
+    let c = Closest {
+        distance: r.distance,
+        on_a: Vec3::from_array(r.on_a),
+        on_b: Vec3::from_array(r.on_b),
+        simplex_a,
+        simplex_b,
+        size: r.a.len().min(4),
+        overlap: r.overlap,
+    };
+    if c.overlap || c.distance <= 1e-6 {
+        return None;
+    }
+    let distance = c.distance - ra - rb;
+    if distance < 0.0 {
+        return None;
+    }
+    let normal = Vec3::from_array(r.normal);
+    let on_a = c.on_a - normal * ra;
+    let on_b = c.on_b + normal * rb;
+    let point = if ra == 0.0 && rb == 0.0 {
+        Vec3::from_array(r.point)
+    } else {
+        (on_a + on_b) * 0.5
+    };
+    Some((
+        Point {
+            normal,
+            point,
+            distance,
+            local_a: pose_a.inverse_apply(on_a),
+            local_b: pose_b.inverse_apply(on_b),
+        },
+        c,
+    ))
+}
+
 fn point_from(
     c: Closest,
     ra: f32,
@@ -1933,5 +2007,49 @@ mod havok_gjk_tests {
             DVec3::new(1.0, -1.0, -1.0),
         ];
         assert!(johnson(&w).is_none());
+    }
+}
+
+#[cfg(test)]
+mod cxcx_tests {
+    use super::*;
+
+    fn cube(h: f32) -> Vec<Vec3> {
+        (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 == 0 { -h } else { h },
+                    if i & 2 == 0 { -h } else { h },
+                    if i & 4 == 0 { -h } else { h },
+                )
+            })
+            .collect()
+    }
+
+    fn at(p: Vec3) -> Pose {
+        Pose {
+            position: p,
+            rotation: Quat::IDENTITY,
+        }
+    }
+
+    /// Two boxes a hand apart on x: the gap, the normal from B toward A, the point halfway, the
+    /// persisting features (a face against a face is reported for this detection only) and the
+    /// body-fixed points.
+    #[test]
+    fn two_boxes_a_gap_apart_give_the_gap_the_normal_and_the_midpoint() {
+        let (pa, pb) = (at(Vec3::new(1.05, 0.0, 0.0)), at(Vec3::ZERO));
+        let a = cube(0.5);
+        let (p, c) =
+            convex_pair_x87(&a, 0.0, &a, 0.0, &pa, &pb, &pa, &pb).expect("apart, not overlapping");
+        assert!((p.distance - 0.05).abs() < 1e-6, "{}", p.distance);
+        assert!((p.normal - Vec3::X).length() < 1e-6, "{:?}", p.normal);
+        assert!((p.point.x - 0.525).abs() < 1e-6, "{:?}", p.point);
+        assert!(c.size >= 1);
+        assert!((pb.apply(p.local_b).x - 0.5).abs() < 1e-6);
+        assert!((pa.apply(p.local_a).x - 0.55).abs() < 1e-6);
+        // Overlapping boxes report nothing.
+        let pa = at(Vec3::new(0.5, 0.0, 0.0));
+        assert!(convex_pair_x87(&a, 0.0, &a, 0.0, &pa, &pb, &pa, &pb).is_none());
     }
 }
