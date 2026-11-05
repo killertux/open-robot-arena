@@ -58,6 +58,14 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         return Ok(());
     }
     let game = find_game(args.game.as_deref())?;
+    for warning in ra2_shell::game::warnings(&game) {
+        eprintln!("ra2-app: warning: {warning}");
+    }
+    // A player who named the folder once is not asked again: the windowed
+    // runs remember it (the evidence and test runs write nothing).
+    if args.game.is_some() && args.out.is_none() && args.offscreen.is_none() {
+        remember_game(&game);
+    }
     // The startup settings. `--size` overrides the file; the offscreen paths
     // keep their own target size and ignore the display keys, as they have no
     // window to size.
@@ -247,7 +255,8 @@ pub fn describe(step: &Step) -> String {
 }
 
 /// The install: `--game`, then `RA2_GAME`/`RA2_GAME_DIR`, then the repository's
-/// `local/game` above the working directory or this crate.
+/// `local/game` above the working directory or this crate, then the folder a
+/// previous `--game` run remembered, then the usual Windows/Wine places.
 pub fn find_game(explicit: Option<&Path>) -> Result<PathBuf, String> {
     fn check(path: &Path) -> Result<PathBuf, String> {
         ra2_shell::game::check(path)?;
@@ -292,5 +301,35 @@ pub fn find_game(explicit: Option<&Path>) -> Result<PathBuf, String> {
             }
         }
     }
+    if let Some(dir) = remembered_game() {
+        return check(&dir);
+    }
     ra2_shell::game::find()
+}
+
+/// The file in the save folder that remembers the install the player named.
+const REMEMBERED: &str = "game-dir.txt";
+
+fn remembered_file() -> PathBuf {
+    ra2fmt::saves::save_dir(Path::new("")).join(REMEMBERED)
+}
+
+/// The install a previous `--game` named, if it is still one.
+pub fn remembered_game() -> Option<PathBuf> {
+    let text = std::fs::read_to_string(remembered_file()).ok()?;
+    let dir = PathBuf::from(text.trim());
+    ra2_shell::game::check(&dir).ok().map(|()| dir)
+}
+
+/// Remember `game` for the next start (best effort; a read-only save folder is
+/// not an error).
+pub fn remember_game(game: &Path) {
+    if remembered_game().as_deref() == Some(game) {
+        return;
+    }
+    let file = remembered_file();
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(file, format!("{}\n", game.display()));
 }

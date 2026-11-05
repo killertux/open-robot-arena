@@ -255,8 +255,9 @@ Measured, not aspirational.
   former O fragments are whole.
 * Multiplayer with the original: its DirectPlay is not compatible (the port's
   own LAN mode, `docs/38-multiplayer.md`, talks to other copies of this port
-  only). Slash decals, physics fine-tuning, a gamepad, mods beyond the game's
-  own directories, an update feed and localisation. The player's view of all
+  only). Slash decals, physics fine-tuning, mods beyond the game's
+  own directories, an update feed and localisation (there is no gamepad
+either: the original reads only keyboard and mouse, `docs/40-playing.md`). The player's view of all
   this is [`docs/40-playing.md`](docs/40-playing.md).
 
 ## Run it
@@ -273,8 +274,11 @@ tools at the directory that directly contains `Robot Arena 2.exe`, `RA2.cfz`,
 export RA2_GAME_DIR="/path/to/Robot Arena 2"      # or pass --game DIR to ra2-app
 ```
 
-`ra2-app` takes `--game DIR` first, then `RA2_GAME`/`RA2_GAME_DIR`, then
-`local/game` above the working directory and the crate, then the usual
+Use your own copy patched to version 1.20 (its `ReadMe.txt` says so); another
+version starts with a warning. `ra2-app` takes `--game DIR` first, then
+`RA2_GAME`/`RA2_GAME_DIR`, then
+`local/game` above the working directory and the crate, then the folder a
+previous windowed `--game` run remembered (`game-dir.txt` in the save folder), then the usual
 Windows/Wine locations (`~/.wine/drive_c/Program Files (x86)/Robot Arena 2`);
 the packaged launcher adds the XDG data directory, `game/` beside itself,
 `/usr/local/share`, `/usr/share` and `/opt`. A candidate is accepted only when

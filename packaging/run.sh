@@ -47,12 +47,14 @@ Open Robot Arena launcher
   ./run.sh --help                        this text and ra2-app's options
 
 Game directory, in order:
-  1. --game DIR
+  1. --game DIR (the folder is then remembered for the next start)
   2. \$RA2_GAME_DIR
-  3. \$XDG_DATA_HOME/$APP/game  (default \$HOME/.local/share/$APP/game)
-  4. game/ beside this launcher, or ../game when installed
-  5. ./local/game upwards from the current directory (a source checkout)
-  6. /usr/local/share/$APP/game, /usr/share/$APP/game, /opt/ra2/game
+  3. the folder a previous windowed run was given with --game
+     (game-dir.txt in the save folder)
+  4. \$XDG_DATA_HOME/$APP/game  (default \$HOME/.local/share/$APP/game)
+  5. game/ beside this launcher, or ../game when installed
+  6. ./local/game upwards from the current directory (a source checkout)
+  7. /usr/local/share/$APP/game, /usr/share/$APP/game, /opt/ra2/game
 
 A game directory contains RA2.cfz, UI/ and Scripts/; the game is not
 included in this package and must be supplied by the player.
@@ -239,7 +241,13 @@ elif [ -n "${RA2_GAME_DIR:-}" ]; then
 else
     # `try_game` records every path in `checked`, so the error can list the
     # whole search instead of only the last attempt.
-    if try_game "$data/$APP/game"; then :; fi
+    # The folder an earlier windowed run was given with --game.
+    saved=${ORA_SAVE_DIR:-$data/open-robot-arena}/game-dir.txt
+    if [ -f "$saved" ]; then
+        remembered=$(head -n 1 "$saved" 2>/dev/null || true)
+        if [ -n "$remembered" ] && try_game "$remembered"; then :; fi
+    fi
+    if [ -z "$GAME" ] && try_game "$data/$APP/game"; then :; fi
     if [ -z "$GAME" ] && try_game "$ROOT/game"; then :; fi
     if [ -z "$GAME" ] && try_game "$ROOT/../game"; then :; fi
     if [ -z "$GAME" ] && try_game "$ROOT/../../share/$APP/game"; then :; fi
@@ -267,9 +275,10 @@ else
             echo
             echo "Looked in:$checked"
             echo
-            echo "Provide one with either:"
-            echo "  RA2_GAME_DIR=\"/path/to/Robot Arena 2\" ./run.sh"
+            echo "Provide one with either (the folder is remembered after the first run):"
             echo "  ./run.sh --game \"/path/to/Robot Arena 2\""
+            echo "  RA2_GAME_DIR=\"/path/to/Robot Arena 2\" ./run.sh"
+            echo "or copy/symlink your install to $data/$APP/game"
         } >&2
         exit 2
     fi

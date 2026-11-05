@@ -111,12 +111,24 @@ Discovery, in order:
 
 1. `--game DIR` (the flag `ra2-app` and `ra2-shell` already had)
 2. `RA2_GAME_DIR` (and `RA2_GAME`, for `ra2-app`)
-3. `$XDG_DATA_HOME/ra2-open-robot-arena/game`
+3. the folder a previous windowed run was given (`game-dir.txt` in the save
+   folder, docs/39)
+4. `$XDG_DATA_HOME/ra2-open-robot-arena/game`
    (`~/.local/share/ra2-open-robot-arena/game`)
-4. `game/` beside the launcher, `../game` when installed
-5. `./local/game` upwards from the current directory (source checkout)
-6. `/usr/local/share/ra2-open-robot-arena/game`,
+5. `game/` beside the launcher, `../game` when installed
+6. `./local/game` upwards from the current directory (source checkout)
+7. `/usr/local/share/ra2-open-robot-arena/game`,
    `/usr/share/ra2-open-robot-arena/game`, `/opt/ra2/game`
+
+(`ra2-app` itself, run without the launcher, takes 1 and 2, then `local/game`,
+the remembered folder, and the usual Windows/Wine places.) A candidate that
+boots but is thin or not version 1.20 draws a `ra2-app: warning:` line
+(`ra2_shell::game::warnings`).
+
+The smoke test (`tools/smoke_package.sh`) reads the game from `$RA2_GAME_DIR`
+when set (else `local/game`) and writes saves to a scratch `ORA_SAVE_DIR`, so
+run it on a scratch copy of the game: `RA2_GAME_DIR=/scratch/game
+tools/package.sh`.
 
 A candidate is accepted only when all three required names exist. The
 launcher's error lists the three names, every path it tried, and both ways to

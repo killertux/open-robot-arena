@@ -17,6 +17,12 @@ In order of precedence:
 
 `RA2_CONFIG` still overrides the settings file alone.
 
+`game-dir.txt` in the save directory holds the install folder a windowed
+`ra2-app --game DIR` run was given (ours, not part of the original's layout).
+`ra2_app::find_game` uses it after `--game`, the environment variables and
+`local/game`, and before the usual Windows/Wine places; the packaged launcher
+reads it too. Evidence runs (`--out`, `--offscreen`) never write it.
+
 ## Overlay
 
 * Reads (`saves::resolve`, `saves::list`): the save copy when there is one,
