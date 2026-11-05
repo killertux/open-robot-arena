@@ -1,0 +1,34 @@
+# The component adjustment pages (docs/36 9.30), after 03-components-a (a Control Board and a Small Battery Pack on
+# the baseplate): a DDT Burst Motor placed and picked shows adjust_burst.gib (two sliders: start angle = value x 2 pi,
+# end angle = (value - 0.5) x 4.8, value = thumb pixel / (track - 16)), the battery shows adjust_none.gib.
+click 722 180     # Mechanics
+click 945 252     # DDT Burst Motor (fifth cell)
+wait 1
+hide
+shot SHOTS/24c-ddt-selected.png
+click 556 608     # Attach
+move 295 385
+click 295 385
+wait 1
+hide
+shot SHOTS/24d-ddt-placed.png
+click 295 385     # a click on the placed motor picks it: its adjustment page
+wait 1
+hide
+shot SHOTS/24e-burst-default.png
+click 578 471     # start slider track: the thumb centre goes under the cursor (9 px of 281)
+wait 1
+hide
+shot SHOTS/24f-burst-start.png
+dragh 801 581 834 581 0 6 2   # end slider thumb dragged to 265 px of 281
+wait 1
+hide
+shot SHOTS/24g-burst-end.png
+click 195 455     # the battery: adjust_none.gib
+wait 1
+hide
+shot SHOTS/24h-none-page.png
+click 295 385     # the motor again: the page shows its angles
+wait 1
+hide
+shot SHOTS/24i-burst-again.png

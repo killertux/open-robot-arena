@@ -365,6 +365,20 @@ pub struct Builder {
     comp_key: Option<String>,
     /// The component a part row or the remove button acts on.
     selected_part: Option<usize>,
+    /// The picked-part click (`FUN_0042d280` -> `FUN_0042d310`) emptied the preview slot: it shows the
+    /// part's adjustment page, or nothing after a miss or a removal, until a palette cell is picked
+    /// again (live `botlab-e2e-22`).
+    preview_hidden: bool,
+    /// The Overview's forward heading slider is held (the grab offset in the thumb).
+    heading_drag: Option<f32>,
+    /// Seconds the heading arrow stays on in the Overview's 3D view after a press on the slider
+    /// (`FUN_0043be70` sets 2.0, `FUN_0043e630` counts it down and hides the arrow).
+    heading_arrow_left: f32,
+    /// The heading slider's value as the player left it (the thumb is not snapped to the steps).
+    heading_thumb: Option<f32>,
+    /// A held adjustment slider of the selected burst motor (`false` start angle, `true` end angle) and the
+    /// pixels between the thumb's left edge and the grab.
+    adjust_drag: Option<(bool, f32)>,
     /// The control kind waiting for a free grid cell (the shipped `new
     /// analog`/`new switch`/`new button` buttons set it), and the control and
     /// binding target the player has picked.
@@ -686,6 +700,11 @@ impl Builder {
             comp_preview: None,
             comp_key: None,
             selected_part: None,
+            adjust_drag: None,
+            heading_drag: None,
+            heading_thumb: None,
+            heading_arrow_left: 0.0,
+            preview_hidden: false,
             wire_placing: None,
             dialog: None,
             wire_control: None,
@@ -843,6 +862,7 @@ impl Builder {
 
     /// One tick of wall time: the practice arena runs its fixed steps.
     pub fn advance(&mut self, seconds: f32) {
+        self.age(seconds);
         if self.alert.is_some() {
             self.alert_left -= seconds;
             if self.alert_left <= 0.0 {
@@ -986,6 +1006,12 @@ impl Builder {
         if self.palette_bar_press(x, y) {
             return Ok(());
         }
+        if self.burst_press(x, y) {
+            return Ok(());
+        }
+        if self.heading_press(x, y) {
+            return Ok(());
+        }
         if self.panel.preview.contains_point(x, y) {
             if let Some(result) = self.preview_click(x, y) {
                 return result;
@@ -1105,6 +1131,7 @@ impl Builder {
                     | "paintshop button"
                     | "test robot button"
                     | "armor button"
+                    | "remove button"
             ) && (ra2ui::input::checkbox_dimmed(p.widget) || ra2ui::input::button_dimmed(p.widget))
         })
     }
@@ -1114,6 +1141,7 @@ impl Builder {
     fn refresh_tabs(&mut self) {
         let blank = self.build.is_blank();
         let wiring = !blank && self.build.has_control_board();
+        let has_part = self.selected_part.is_some();
         let Some(lab) = self.shell.lab_mut() else {
             return;
         };
@@ -1133,6 +1161,10 @@ impl Builder {
             }
             if let Some(w) = workshop::find_mut(root, "armor button") {
                 ra2ui::input::set_button_enabled(w, !blank);
+            }
+            // `FUN_0042d310`: REMOVE is lit only while a placed part is selected (`FUN_005ec4e0`).
+            if let Some(w) = workshop::find_mut(root, "remove button") {
+                ra2ui::input::set_button_enabled(w, has_part);
             }
         }
     }
@@ -1211,6 +1243,7 @@ impl Builder {
             return Ok(());
         };
         self.selected_part = self.build.pick_part(origin, direction);
+        self.preview_hidden = true;
         self.status = match self.selected_part {
             Some(i) => format!(
                 "selected component {i}: {}",
@@ -1221,6 +1254,8 @@ impl Builder {
             ),
             None => String::new(),
         };
+        self.refresh_tabs();
+        self.refresh_comp_preview();
         self.refresh_panel();
         Ok(())
     }
@@ -1279,6 +1314,7 @@ impl Builder {
     /// (`FUN_0042e650`); nothing is attached until the Attach button.
     fn select_component(&mut self, component: PaletteComponent) {
         self.cancel_drag();
+        self.preview_hidden = false;
         self.style_file = None;
         self.selected = Some(component);
         self.comp_preview = None;
@@ -1439,6 +1475,12 @@ impl Builder {
         }
         if let Some(which) = self.slider_drag.clone() {
             self.slider_follow(&which, x, y);
+        }
+        if let Some((end, grab)) = self.adjust_drag {
+            self.adjust_to(end, x - grab);
+        }
+        if let Some(grab) = self.heading_drag {
+            self.heading_to(x - grab);
         }
         let Some(active) = self.drag.as_mut() else {
             return;
@@ -1603,9 +1645,33 @@ impl Builder {
         if self.shell.tab() != Some("components button") {
             return;
         }
-        let selected = self.selected_info();
-        let styles = self.style_list();
-        let fragment = workshop::load(&self.ui, "botlab/comp_preview.gib").ok();
+        let selected = if self.preview_hidden {
+            None
+        } else {
+            self.selected_info()
+        };
+        let styles = if self.preview_hidden {
+            Vec::new()
+        } else {
+            self.style_list()
+        };
+        // A placed part picked in the 3D view (`FUN_0042d310` -> `FUN_0042f440` mode 2) puts its own
+        // adjustment page in the slot: the component's `Adjuster` (vtable slot 20) names the page and
+        // fills it, `BotLab\adjust_burst.gib` for a burst motor, `adjust_zone.gib` for a Smart Zone,
+        // `adjust_none.gib` for every other part. The page replaces the preview.
+        let adjust = self.selected_part.and_then(|i| {
+            let class = self.build.components().get(i)?.class.clone();
+            let name = self.build.component_info(i)?.name.clone();
+            Some((i, class, name))
+        });
+        let adjust_page = adjust.as_ref().map(|(_, class, _)| match class.as_str() {
+            "BurstMotor" => "botlab/adjust_burst.gib",
+            "SmartZone" => "botlab/adjust_zone.gib",
+            _ => "botlab/adjust_none.gib",
+        });
+        let fragment =
+            workshop::load(&self.ui, adjust_page.unwrap_or("botlab/comp_preview.gib")).ok();
+
         let labels: Vec<String> = styles.iter().map(|(label, _)| label.clone()).collect();
         let current = self
             .style_file
@@ -1622,12 +1688,28 @@ impl Builder {
                 let Some(slot) = workshop::find_mut(root, "component content group") else {
                     continue;
                 };
-                let key = selected.as_ref().map(|(info, _)| info.file.clone());
+                let key = match &adjust {
+                    Some((i, class, _)) => Some(format!("adjust:{i}:{class}")),
+                    None => selected.as_ref().map(|(info, _)| info.file.clone()),
+                };
                 if !slot.children.is_empty() && self.comp_key == key {
                     continue;
                 }
                 slot.children.clear();
                 self.comp_key = key;
+                if let (Some((_, _, name)), Some(fragment)) = (&adjust, &fragment) {
+                    workshop::load_into(root, fragment, "component content group");
+                    if let Some(w) = workshop::find_mut(root, "component name textbox") {
+                        ra2ui::input::set_field(w, "ChildOrder", "0");
+                        ra2ui::input::set_field(w, "_Text", name);
+                        for child in w.children.iter_mut() {
+                            if child.kind == WidgetKind::Text {
+                                ra2ui::input::set_field(child, "_Text", name);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let (Some((info, name)), Some(fragment)) = (&selected, &fragment) else {
                     continue;
                 };
@@ -1690,6 +1772,204 @@ impl Builder {
             }
         }
         self.shell.set_dropdown_items("component option", labels);
+        self.sync_adjust_thumbs();
+    }
+
+    /// The burst page's two thumbs where the selected motor's angles put them.
+    fn sync_adjust_thumbs(&mut self) {
+        let Some(angles) = self.selected_part.and_then(|i| self.build.burst_angles(i)) else {
+            return;
+        };
+        if self.shell.tab() != Some("components button") {
+            return;
+        }
+        for (end, name, value) in [
+            (false, "start angle slider", start_slider_value(angles[0])),
+            (true, "end angle slider", end_slider_value(angles[1])),
+        ] {
+            let _ = end;
+            let Some(frame) = self.adjust_slider_frame(name) else {
+                continue;
+            };
+            let x = (value.clamp(0.0, 1.0) * (frame.w - ADJUST_THUMB).max(0.0)).trunc();
+            if let Some(lab) = self.shell.lab_mut() {
+                for block in lab.document.blocks.iter_mut() {
+                    let ra2fmt::gib::Block::Widget(root) = block else {
+                        continue;
+                    };
+                    let Some(thumb) = workshop::find_mut(root, name).and_then(|slider| {
+                        slider
+                            .children
+                            .iter_mut()
+                            .find(|c| c.kind == WidgetKind::Image)
+                    }) else {
+                        continue;
+                    };
+                    ra2ui::input::set_field(thumb, "Position", &format!("{x} 0 0 0"));
+                }
+            }
+        }
+    }
+
+    /// The Overview's `heading slider` (`FUN_0043bdf0`): the value (thumb pixel over the track less the
+    /// thumb) is rounded to twentieths of a turn (`FUN_0043be60`, `0x6a57f0` = 20) and the heading is that
+    /// many steps of `0.05 * 2 pi`. Any press on the slider shows the heading arrow for two seconds
+    /// (`FUN_0043be70`). The thumb behaves as the adjustment sliders' ([`Builder::burst_press`]).
+    fn heading_press(&mut self, x: f32, y: f32) -> bool {
+        if self.tab() != Some("overview button") {
+            return false;
+        }
+        let Some(frame) = self.adjust_slider_frame("heading slider") else {
+            return false;
+        };
+        if !frame.contains_point(x, y) {
+            return false;
+        }
+        let value = self
+            .heading_thumb
+            .unwrap_or_else(|| self.build.heading() / std::f32::consts::TAU);
+        let grab = slider_grab(&frame, value, x);
+        self.heading_drag = grab;
+        self.heading_arrow_left = 2.0;
+        self.heading_to(x - grab.unwrap_or(0.0));
+        true
+    }
+
+    fn heading_to(&mut self, left: f32) {
+        let Some(frame) = self.adjust_slider_frame("heading slider") else {
+            return;
+        };
+        let travel = (frame.w - ADJUST_THUMB).max(1.0);
+        let value = (left - frame.x).trunc().clamp(0.0, travel) / travel;
+        self.heading_thumb = Some(value);
+        let steps = (value * 20.0).round();
+        let heading = ((steps as f64 * 0.05_f32 as f64) * 6.2831855_f32 as f64) as f32;
+        self.build.set_heading(heading);
+        self.status = format!("forward heading {heading:.3} rad");
+        let _ = self.refresh();
+    }
+
+    /// The heading arrow's meshes (`UI\BotLab\heading_arrow.gmf`).
+    fn heading_arrow_items(&self) -> Vec<DrawItem> {
+        let Some(dir) = ra2fmt::find_ci(&self.ui, "botlab") else {
+            return Vec::new();
+        };
+        let Some(path) = ra2fmt::find_ci(&dir, "heading_arrow.gmf") else {
+            return Vec::new();
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            return Vec::new();
+        };
+        let Ok(scene) = ra2fmt::gmi::parse(&bytes) else {
+            return Vec::new();
+        };
+        ra2_render::scene_items(&scene, Mat4::IDENTITY, &dir, "heading_arrow.gmf")
+    }
+
+    /// Let the heading arrow's two seconds run (the lab's per-frame update, `FUN_0043e630`).
+    pub fn age(&mut self, seconds: f32) {
+        if self.heading_arrow_left > 0.0 {
+            self.heading_arrow_left -= seconds;
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    /// The Overview's heading thumb where the slider's value is (a robot just loaded: its heading as a
+    /// fraction of a turn).
+    fn sync_heading_thumb(&mut self) {
+        if self.tab() != Some("overview button") {
+            return;
+        }
+        let value = self
+            .heading_thumb
+            .unwrap_or_else(|| self.build.heading() / std::f32::consts::TAU);
+        let Some(frame) = self.adjust_slider_frame("heading slider") else {
+            return;
+        };
+        let x = (value.clamp(0.0, 1.0) * (frame.w - ADJUST_THUMB).max(0.0)).trunc();
+        if let Some(lab) = self.shell.lab_mut() {
+            for block in lab.document.blocks.iter_mut() {
+                let ra2fmt::gib::Block::Widget(root) = block else {
+                    continue;
+                };
+                let Some(thumb) = workshop::find_mut(root, "heading slider").and_then(|slider| {
+                    slider
+                        .children
+                        .iter_mut()
+                        .find(|c| c.kind == WidgetKind::Image)
+                }) else {
+                    continue;
+                };
+                ra2ui::input::set_field(thumb, "Position", &format!("{x} 0 0 0"));
+            }
+        }
+    }
+
+    /// The frame of an adjustment slider on the screen, when the page shows it.
+    fn adjust_slider_frame(&self, name: &str) -> Option<Frame> {
+        self.shell
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == name)
+            .map(|p| p.frame)
+    }
+
+    /// A press on the burst page's start or end slider. Live (`botlab-adjust-*`): a press on the thumb grabs
+    /// it where it is and the held button drags it by the mouse's movement (thumb pixels 232 -> 265 for a
+    /// grab at 801 and a drag to 834); a press on the track puts the thumb's **left edge** under the cursor
+    /// (x 578 on a track from 561 gave pixel 17, saved `0.380122`) and takes no drag. The value is the thumb
+    /// pixel over the track less the thumb (`9 / 281` and `265 / 281` saved `0.201241` and `2.12669`).
+    fn burst_press(&mut self, x: f32, y: f32) -> bool {
+        if self.tab() != Some("components button") {
+            return false;
+        }
+        let Some(i) = self.selected_part else {
+            return false;
+        };
+        let Some(angles) = self.build.burst_angles(i) else {
+            return false;
+        };
+        for (end, name, value) in [
+            (false, "start angle slider", start_slider_value(angles[0])),
+            (true, "end angle slider", end_slider_value(angles[1])),
+        ] {
+            if let Some(frame) = self.adjust_slider_frame(name) {
+                if frame.contains_point(x, y) {
+                    let grab = slider_grab(&frame, value, x);
+                    self.adjust_drag = grab.map(|g| (end, g));
+                    self.adjust_to(end, x - grab.unwrap_or(0.0));
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Move one burst slider's thumb so its left edge is at `left` and set the motor's angle from its value.
+    fn adjust_to(&mut self, end: bool, left: f32) {
+        let Some(i) = self.selected_part else { return };
+        let Some(mut angles) = self.build.burst_angles(i) else {
+            return;
+        };
+        let name = if end {
+            "end angle slider"
+        } else {
+            "start angle slider"
+        };
+        let Some(frame) = self.adjust_slider_frame(name) else {
+            return;
+        };
+        let travel = (frame.w - ADJUST_THUMB).max(1.0);
+        let value = (left - frame.x).trunc().clamp(0.0, travel) / travel;
+        if end {
+            angles[1] = end_angle_of(value);
+        } else {
+            angles[0] = start_angle_of(value);
+        }
+        self.build.set_burst_angles(i, angles);
+        self.status = format!("burst motor {i}: {:.3} to {:.3} rad", angles[0], angles[1]);
+        let _ = self.refresh();
     }
 
     /// A style row was picked in the `Component option` list: the preview and
@@ -3284,7 +3564,8 @@ impl Builder {
             return Some("m9:attach".into());
         }
         if chain.iter().any(|p| p.widget.name() == "remove button") {
-            return Some("m9:remove".into());
+            // The button is dim (and takes no click) until a placed part is selected.
+            return self.selected_part.map(|_| "m9:remove".into());
         }
         if self.tab() == Some("paintshop button") {
             if chain.iter().any(|p| p.widget.name() == "paint entire") {
@@ -3424,6 +3705,7 @@ impl Builder {
         self.refresh_armour();
         self.refresh_controls();
         self.refresh_panel();
+        self.sync_heading_thumb();
         Ok(())
     }
 
@@ -3877,6 +4159,9 @@ impl Builder {
             return;
         }
         let mut category = None;
+        // The grid's `Sel Bar` sits behind the palette cell of the part picked (live: the first cell
+        // until another is picked, the picked part's cell after).
+        let selected_file = self.selected.as_ref().map(|c| c.file.clone());
         let scroll = self.palette_scroll;
         let (horizontal, _, stride) = self.palette_window();
         let view = self.palette_view_width();
@@ -3968,6 +4253,56 @@ impl Builder {
                                             "{} 0 {} 0",
                                             g.column_x((rank % columns) as i32),
                                             g.row_height * (row - scroll) as f32
+                                        ),
+                                    );
+                                }
+                            }
+                            // The `Sel Bar` follows the picked part's cell, which is the one at full
+                            // brightness (the others are 0.6 grey).
+                            let picked = selected_file.as_ref().and_then(|file| {
+                                ra2ui::components::in_category(&self.palette, shown)
+                                    .iter()
+                                    .position(|c| &c.file == file)
+                            });
+                            let at = picked.unwrap_or(0);
+                            if horizontal {
+                                for (rank, &ci) in order.iter().enumerate() {
+                                    ra2ui::input::set_field(
+                                        &mut grid.children[ci],
+                                        "_ForeColor",
+                                        if rank == at {
+                                            "1 1 1 1"
+                                        } else {
+                                            "0.6 0.6 0.6 1"
+                                        },
+                                    );
+                                }
+                            }
+                            let cell_at = order.get(at).map(|&ci| {
+                                let cell = &grid.children[ci];
+                                (
+                                    cell.visible(),
+                                    cell.field("Position")
+                                        .map(|f| f.numbers())
+                                        .unwrap_or_default(),
+                                )
+                            });
+                            if let (true, Some((visible, n))) = (horizontal, cell_at) {
+                                for bar in
+                                    grid.children.iter_mut().filter(|c| c.name() == "Sel Bar")
+                                {
+                                    ra2ui::input::set_field(
+                                        bar,
+                                        "Visible",
+                                        if visible { "true" } else { "false" },
+                                    );
+                                    ra2ui::input::set_field(
+                                        bar,
+                                        "Position",
+                                        &format!(
+                                            "{} 0 {} 0",
+                                            n.first().copied().unwrap_or(0.0),
+                                            n.get(2).copied().unwrap_or(0.0)
                                         ),
                                     );
                                 }
@@ -5326,6 +5661,34 @@ impl Builder {
                 }
             }
         }
+        // The heading line (`FUN_00439150`: a four pixel line, colour (0.12, 1, 0), from the robot's origin to the
+        // arrow at three metres; the arrow's point is set by `FUN_0043bd20`).
+        if self.view_only && self.heading_arrow_left > 0.0 && self.tab() == Some("overview button")
+        {
+            let (eye, _) = self.lab_cam().eye_up();
+            let cam = crate::lab_view::Cam::new(
+                eye,
+                Vec3::ZERO,
+                std::f32::consts::FRAC_PI_4,
+                height as f32,
+            );
+            let heading = self.build.heading();
+            let tip = Vec3::new(heading.sin() * 3.0, 0.0, heading.cos() * 3.0);
+            let lines =
+                crate::lab_view::ribbon(&cam, &[(Vec3::ZERO, tip)], [0.12, 1.0, 0.0, 1.0], 4.0);
+            if !lines.is_empty() {
+                overlay.push(DrawItem::new(
+                    lines,
+                    ra2_render::Material {
+                        lighting: false,
+                        has_vertex_colors: true,
+                        cull: false,
+                        ..ra2_render::Material::default()
+                    },
+                    "lab heading line",
+                ));
+            }
+        }
         let mut owned: Vec<(usize, Vec<DrawItem>)> = Vec::new();
         for i in 1..bot.components.len() {
             let Some(info) = self.build.component_info(i) else {
@@ -5347,11 +5710,30 @@ impl Builder {
                 ra2_render::scene_items(&scene, Mat4::IDENTITY, &dir, &info.name),
             ));
         }
+        // The Overview's heading arrow (`FUN_0043bd20`): `UI\BotLab\heading_arrow.gmf` three metres from the
+        // robot's origin, at (sin h, 0, cos h) x 3, turned by h about the vertical axis.
+        let arrow: Vec<DrawItem> =
+            if self.heading_arrow_left > 0.0 && self.tab() == Some("overview button") {
+                self.heading_arrow_items()
+            } else {
+                Vec::new()
+            };
+        let heading = self.build.heading();
         let mut groups: Vec<RenderGroup<'_>> = Vec::new();
         if !chassis.is_empty() && !world.is_empty() {
             groups.push(RenderGroup {
                 items: &chassis,
                 model: world[0],
+            });
+        }
+        if !arrow.is_empty() {
+            groups.push(RenderGroup {
+                items: &arrow,
+                model: Mat4::from_translation(Vec3::new(
+                    heading.sin() * 3.0,
+                    0.0,
+                    heading.cos() * 3.0,
+                )) * Mat4::from_rotation_y(heading),
             });
         }
         for (i, items) in &owned {
@@ -6411,6 +6793,40 @@ impl Builder {
     }
 }
 
+// -- The adjustment page's burst sliders (docs/36 section 9.30) -----------------------------------
+
+/// The slider thumb's width in `adjust_burst.gib` (`slider_h.tga`, `_Size 16 0 32 0`).
+const ADJUST_THUMB: f32 = 16.0;
+
+/// Where a press at `x` takes a slider whose thumb is at `value`: `Some(offset)` from the thumb's left edge
+/// when the press is on the thumb (it is dragged), `None` on the track (the thumb jumps, no drag).
+fn slider_grab(frame: &Frame, value: f32, x: f32) -> Option<f32> {
+    let left = frame.x + (value.clamp(0.0, 1.0) * (frame.w - ADJUST_THUMB).max(0.0)).trunc();
+    (x >= left && x < left + ADJUST_THUMB).then_some(x - left)
+}
+
+/// The start angle slider's value for an angle in radians (`FUN_00446c40`): a negative angle is
+/// brought into one turn, then the turn is the whole track.
+fn start_slider_value(start: f32) -> f32 {
+    let turn = std::f32::consts::TAU;
+    (if start < 0.0 { start + turn } else { start }) / turn
+}
+
+/// The end angle slider's value (`FUN_00446c40`): the track is `-2.4 .. 2.4` radians (`0x6a6790`).
+fn end_slider_value(end: f32) -> f32 {
+    end / (2.4_f32 * 2.0) + 0.5
+}
+
+/// The start angle for a slider value (`LAB_00446b90`: the value times a turn, `0x6a678c`).
+fn start_angle_of(value: f32) -> f32 {
+    (value as f64 * 6.2831855_f32 as f64) as f32
+}
+
+/// The end angle for a slider value (`LAB_00446be0`: `(value - 0.5) * 2 * 2.4`).
+fn end_angle_of(value: f32) -> f32 {
+    ((2.4_f32 as f64 * 2.0) * (value as f64 - 0.5)) as f32
+}
+
 // -- The wiring windows (docs/36 section 9.27) --------------------------------------------------
 
 impl Builder {
@@ -6444,6 +6860,8 @@ impl Builder {
         self.paint_color.drag = None;
         self.palette_drag = None;
         self.slider_drag = None;
+        self.adjust_drag = None;
+        self.heading_drag = None;
         // `FUN_004791e0`: the drag of a top point ends where it is.
         self.point_drag = false;
         if self.dialog.is_some() || self.tab() != Some("wiring button") {
@@ -7106,6 +7524,67 @@ mod tests {
             builder.status(),
             "Total mass of robot must not exceed 60 kg."
         );
+    }
+
+    /// A picked burst motor shows `adjust_burst.gib`; its two sliders set the saved angles the way the
+    /// original's do (live `botlab-e2e-burst-adjusted`: thumb pixels 9 and 265 of 281 gave
+    /// `0.201241 2.12669`, `botlab-adjust-newbot`: 17 and 265 gave `0.380122 2.12669`; a fresh motor saves `0 1.5708`), another part shows `adjust_none.gib`.
+    #[test]
+    fn a_picked_burst_motor_shows_its_sliders_and_saves_their_angles() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.set_size([1024.0, 768.0]).unwrap();
+        builder.click_named("components button").unwrap();
+        builder.click_named("mechanics button").unwrap();
+        let motor = builder
+            .place_component(
+                "Components\\burst motor.txt",
+                PlaceOn::Baseplate([0.0, 0.0]),
+            )
+            .unwrap();
+        assert_eq!(
+            builder.build.burst_angles(motor),
+            Some([0.0, std::f32::consts::FRAC_PI_2])
+        );
+        let at = builder.drag_point(PlaceOn::Baseplate([0.0, 0.0])).unwrap();
+        builder.click(at[0], at[1]).unwrap();
+        assert_eq!(builder.selected_part, Some(motor));
+        let start = builder.adjust_slider_frame("start angle slider").unwrap();
+        let end = builder.adjust_slider_frame("end angle slider").unwrap();
+        assert_eq!((start.w, end.w), (297.0, 297.0));
+        // a press on the track puts the thumb's left edge under the cursor and takes no drag
+        builder.click(start.x + 17.0, start.y + 10.0).unwrap();
+        builder.mouse_moved(start.x + 200.0, start.y + 10.0);
+        builder.mouse_released(start.x + 200.0, start.y + 10.0);
+        // a press on the thumb grabs it where it is, the held button moves it by the mouse's travel
+        builder.click(end.x + 232.0 + 8.0, end.y + 10.0).unwrap();
+        builder.mouse_moved(end.x + 265.0 + 8.0, end.y + 10.0);
+        builder.mouse_released(end.x + 265.0 + 8.0, end.y + 10.0);
+        let saved = builder.build.to_bot().write();
+        let text = String::from_utf8_lossy(&saved).replace('\r', "");
+        assert!(
+            text.contains("burst motor.txt\n0.380122 2.12669\n"),
+            "{text}"
+        );
+        // the baseplate's board is a part with nothing to adjust
+        assert!(builder.adjust_slider_frame("no adjustment text").is_none());
+    }
+
+    /// The Overview's forward heading slider: the saved heading is whole twentieths of a turn.
+    #[test]
+    fn the_overview_heading_slider_saves_steps_of_a_twentieth_of_a_turn() {
+        let Some(game) = game_dir() else { return };
+        let mut builder = Builder::open(&game, None).unwrap();
+        builder.set_size([1024.0, 768.0]).unwrap();
+        builder.click_named("overview button").unwrap();
+        let slider = builder.adjust_slider_frame("heading slider").unwrap();
+        assert_eq!(slider.w, 180.0);
+        builder.click(slider.x + 66.0, slider.y + 10.0).unwrap();
+        builder.mouse_released(slider.x, slider.y);
+        assert_eq!(builder.build.heading(), 8.0 * 0.05 * std::f32::consts::TAU);
+        builder.click(slider.x + 164.0, slider.y + 10.0).unwrap();
+        builder.mouse_released(slider.x, slider.y);
+        assert!((builder.build.heading() - std::f32::consts::TAU).abs() < 1e-5);
     }
 
     /// A placed part is selected by clicking it, there is no move, and the
