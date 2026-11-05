@@ -464,10 +464,21 @@ impl Session {
         {
             return Ok(());
         }
+        // The bench shows the robot that fought: `Robot In Event`, or the first roster slot when the
+        // event was already closed by its award (the match flow's own choice, `event_match`).
         let player = self.career.player();
-        let path = player_robot_path(&self.game, self.career.player_slot, player.event_robot);
+        let slot = if player.event_robot >= 0 && player.robots.contains(&player.event_robot) {
+            Some(player.event_robot)
+        } else {
+            player.robots.first().copied()
+        };
+        let Some(path) = slot.map(|s| player_robot_path(&self.game, self.career.player_slot, s))
+        else {
+            self.repairs_view = None;
+            return Ok(());
+        };
         if !path.is_file() {
-            // No robot entered (`event_robot` -1): the box keeps its backing.
+            // No robot entered: the box keeps its backing.
             self.repairs_view = None;
             return Ok(());
         }

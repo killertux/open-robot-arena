@@ -1858,3 +1858,33 @@ armour default -> `05e-export-skins`). Captures `decalband-*` (backup `manifest-
 `botlab-chassis` 0.45 and `botlab-overview` 0.39 not looked at.
 
 Tests: practice shadow, decal against the live export. Probes: `tools/oracle/decal_live.sh`, `frida/ra2_decal.js`.
+
+## 9.34 The UI suite: the arena list's ring, the repairs bench (`fx/uisuite`, 2026-11-05)
+
+`fidelity.py --renderer app`, 114 fixtures, ours against `local/oracle/original`. Before 1.844, after 1.846 (the repairs fixture got worse for a reason that is a fix, below; the two exhibition arena fixtures improved).
+
+### What the worst fixtures are
+
+The top of the list is all 3D or state, not layout: `arena-metalskull-f2` 22.9 (ours has the two robots in the shot, the live frame has none yet and another clock: 2:47 vs 0:34), `arena-electric-intro/countdown`
+11.0 / 9.5, `arena-bridge-intro2` 8.1, `arena-halfcircle-intro2`, `arena-parkinglot-f2`, `arena-octagon-f2/f4`, `arena-metalskull-intro2`, `-compressor-intro` (camera path sampled at a slightly different time: sub-pixel to few-pixel
+offsets of whole meshes, the camera-name label ("Overhead") differing), `match-f1/pause`: **state or capture timing**. `event-bracket-duel-round1` 4.9: the 16 seeded teams are in another order (the bracket seeds at random), the
+bracket's lines and boxes match: **state**. `event-award-photo` 4.5: the prize scene, a lost round in ours against a won one live: **state**. `event-repairs` 4.2: the live robot is another design (below). The UI-layout fixtures
+are all at or under 1.5; `botlab-chassis` 0.45 and `botlab-overview` 0.39 are glyph-level noise (over8 1.1%, lowfreq 0.18 / 0.16), nothing layout-sized left.
+
+### Fixed: the arena list (`exhibition-arena` 0.83 -> 0.73, `exhibition-arena-box` 0.83 -> 0.69)
+
+Live (`exhibition-arena-box`): grey line at x 286 / 543, y 159 / 442, the black list 256 x 282 inside at (287, 160), the selection bar's first row at 178 (160 + 18). Ours drew the ring *outside* the scroller's 258 x 284
+rectangle (rows 158 / 443). The file lists `[Scroller]` before `[Border]` for this list only (every other scroller list writes the border first and its ring is outside: `teamhq-editteam` got worse, 1.19 -> 1.34, when the
+inset was applied to all of them), so the placement in `ra2ui` insets the list by the border's width when the scroller comes first. Test `the_arena_list_sits_inside_its_border_ring`.
+
+### Fixed: the repairs bench
+
+* The repairs screen forced every `SplitFrame` child to `Position 0 0 / Size 1 1 1 1` (`repairs::fit_splits_in`), which made the `Component / Time` header and the list the pane's 394 px; the file says 0.95 of it (374) and the
+  bar column stands outside the header. Live: the header ends at x 932, "Time" at 820 (ours 834). Removed; the screen is placed as the file writes it (outside the robot panel the fixture's MAE is 1.29 -> 1.22).
+* The 3D box stayed empty after the award because `Robot In Event` is reset to -1 when the event closes; the bench now shows that robot or, when it is closed, the first roster slot (what the match used). The fixture got *worse*
+  (4.18 -> 4.70): the live capture's robot is another design (a diamond-plate box with a pole, none of Team0's six: probed) and a wrong robot costs more than an empty box. It is state.
+* Tried and reverted: not clipping a ring to a split pane (the live bench's wood ring rows 720 / 721 are below the 720-row pane and ours are cut) fixed that edge but cost `botlab-paint` 0.58 -> 0.62; left open, with the
+  bright inner 2 px of the bench's `repairbench_shadows` edge (live 181,151,103 at x 52, ours 146,119,76).
+
+State-only or noise: all `arena-*`, `match-*`, `event-bracket-duel-*`, `event-award-photo`, `event-repairs` (robot), plus the glyph-level residue of the rest. No fixture was re-captured live; none of those states is reproducible
+from our route (the robot of the live team, the seeded bracket order, the camera clock).

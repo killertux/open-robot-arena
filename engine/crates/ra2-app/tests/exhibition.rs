@@ -634,3 +634,25 @@ fn a_two_v_two_team_match_uses_the_screens_side_pairs_and_ignores_teammate_hits(
         "hitting the other team scores its damage"
     );
 }
+
+/// The arena list's `Scroller` comes before its `Border` in `arena.gib`, and then the ring is the
+/// outermost row and column of the scroller's rectangle: live `exhibition-arena-box` has the grey
+/// line at x 286 / 543 and y 159 / 442 and the black list 256 x 282 at (287, 160) inside it.
+#[test]
+fn the_arena_list_sits_inside_its_border_ring() {
+    let Some(game) = game_dir() else { return };
+    let _guard = ra2script::lock();
+    let mut shell = ra2_shell::Shell::boot(&game, [1024.0, 768.0]).unwrap();
+    shell.click_named("exhibition button").unwrap();
+    shell.click_named("arena button").unwrap();
+    let placed = shell.placements();
+    let list = placed
+        .iter()
+        .flat_map(|p| p.walk())
+        .find(|p| p.widget.name() == ra2ui::arenas::LIST)
+        .expect("the arena list");
+    assert_eq!(
+        (list.frame.x, list.frame.y, list.frame.w, list.frame.h),
+        (287.0, 160.0, 256.0, 282.0)
+    );
+}

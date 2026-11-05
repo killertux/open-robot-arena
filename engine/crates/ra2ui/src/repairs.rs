@@ -137,8 +137,10 @@ impl Repairs {
         rows: Vec<Row>,
         time: &str,
     ) -> Result<Repairs, String> {
-        let mut document = load(ui_root, SCREEN)?;
-        fit_splits_in(&mut document);
+        let document = load(ui_root, SCREEN)?;
+        // The screen is placed as the file writes it: forcing every `SplitFrame` child to fill its pane
+        // made the column header and the list as wide as the pane (394 px) where the file says 0.95 of it
+        // (374; live `event-repairs`: the header ends at x 932 and the bar column is outside it).
         let mut repairs = Repairs {
             document,
             rows: Vec::new(),
@@ -452,33 +454,6 @@ fn find_mut_in_gib<'a>(document: &'a mut Gib, name: &str) -> Option<&'a mut Widg
         Block::Widget(w) => find_mut(w, name),
         Block::Attachment(_) => None,
     })
-}
-
-/// Make every `SplitFrame`'s children fill their pane, as the HQ does: the
-/// fragment is authored at 1280×1005 and the game hands it the content frame.
-pub fn fit_splits_in(gib: &mut Gib) {
-    for block in gib.blocks.iter_mut() {
-        if let Block::Widget(widget) = block {
-            fit_splits(widget);
-        }
-    }
-}
-
-fn fit_splits(widget: &mut Widget) {
-    if widget.kind == WidgetKind::SplitFrame {
-        for child in widget.children.iter_mut() {
-            crate::input::set_field(child, "Position", "0 0 0 0");
-            crate::input::set_field(child, "Size", "1 1 1 1");
-        }
-    }
-    for child in widget.children.iter_mut() {
-        fit_splits(child);
-    }
-    for attachment in widget.attachments.iter_mut() {
-        if let Some(body) = &mut attachment.body {
-            fit_splits(body);
-        }
-    }
 }
 
 /// Write a value into a label: a `TextBox` keeps it in its `Text` child, a
