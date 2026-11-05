@@ -695,6 +695,17 @@ pub trait PhysicsBackend {
         false
     }
 
+    /// Ask for a prismatic controller's auto-lock inside the next substep
+    /// (docs/29 section 12ay). The original's controller update (`FUN_004b5240`) is an
+    /// action of the Havok world: it runs after a piece's integration and *before* that
+    /// piece's constraint solver, sees the offsets the integration just made, and locks
+    /// (`Lock(1)`: both travel limits to the offset, the rod's velocities to zero) when the
+    /// offset is within `band` of `stop`. A caller that updates its controllers before the
+    /// substep sees the offsets one piece late, so the rod meets its stop in the solver with
+    /// all its velocity; this arms the same test where the original runs it. Valid for the
+    /// next substep only; a backend without the hook ignores it.
+    fn arm_slider_lock(&mut self, _handle: JointHandle, _stop: f32, _band: f32) {}
+
     /// Never collide these two bodies: a pair from the arena's
     /// `GMID_HAVOK_DIS_COLLISION_PAIRS`. A backend may ignore it.
     fn disable_collision(&mut self, _a: BodyHandle, _b: BodyHandle) {}

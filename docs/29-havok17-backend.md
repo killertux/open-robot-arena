@@ -7884,3 +7884,125 @@ itself (`frida/ra2_robotpair.js`, written in 12aw, never run: it needs the live 
 
 **Tools.** `tools/oracle/gjknative/gjkn.c` (mode 2), `gjknative.py cxcx`; `havok17/x87gjk.rs::query_hulls`, `x87gjk_cxcx.tsv`;
 `RA2_CXCX=f64`.
+
+### 12ay. The pressed state: a prismatic controller is a Havok action, so its lock comes before the solver of the piece in which the rod arrives; the Wide Load's stroke no longer throws it back, and the Compressor's robots stay pressed as live's (fx/pressed)
+
+12aw/12ax left the Compressor's pressed contact open (live occupancy 0.79, 12.3 episodes a minute of 3.9 s; ours 0.66-0.68,
+23-24 of 2.0 s) with the materials, the first impact and both narrow-phase queries ruled out. This round ran the never-run
+`frida/ra2_robotpair.js` and found the cause one level below: **the rod of the Wide Load's burst piston gives the chassis a
+second kick at the return stop that live does not give**, because ours runs the prismatic controller's lock one Havok piece
+too late.
+
+**1. The agent and the captures.** `ra2_robotpair.js` (fixed: `mark` rpc for `capture_boxstart.py`; thrust is an integer; and
+extended) records at each resolver entry (`0x53ed80`) the two chassis (`S`) and the bodies the prismatic constraints hold (`R`:
+the chassis and the 63 kg rod), the robot-robot contacts with their pieces' tags, materials and normals (`C`), every
+controller update (`U`, `0x4b5240`: direction, stops, force, lock flags, the rod and housing), its pushes (`F`, `0x4b51b0`) and
+locks (`L`, `0x4b50c0`), the burst piston's and burst motor's firing (`BF` `0x448750`, `FM` `0x446810`), every `MagicAction` apply
+with the wheel records (`W`), the wheels' collision callbacks (`N`, `0x508010`), the event filter's calls between two robots (`V`,
+`0x52d4f0`) and the priced hits (`H`). Captures (Compressor, Sentinel `AI/Team0/Bot2` v Wide Load `AI/Team8/Bot2`, shipped AIs, 12
+whole fights through `capture_parts_set.sh AGENT=...`, the rows grown over three versions of the agent):
+`robotpair-sentinel-wideload-compressor__live__000..011` (000..003 `S/C/H/A/U/F/L/BF`; 004..007 plus `W` (thrust misread as a float)
+and `N`, `FM`; 008..011 plus `V` and the integer thrust), and `weapons-wideload-free__live__000..001` (the Wide Load alone,
+eight free strokes in the Combat Arena through `capture_weapons_set.sh`; 001 with the `R` rows).
+
+**2. What matches (no source there).** The wheels' collision callbacks: about 110 non-floor `N` events a minute in the window live,
+111 ours (the first reading, 10 against 91 for the Sentinel's wheels, was a misreading: an event passed by the *other* collidable's
+entry reaches the wheel with the two collidables swapped, so `+0x28` is the wheel itself; it only looked like a mirror image);
+the stroke's timing (fire to lock 0.37 s live, 0.40 ours; every 0.5 s while the Poker's zone holds a contact; out pushes 6 big ones
+after the one-shot -1000 g, return pushes 7, in both); the rod's speed (out peak 15.8-16 m/s live, the same 6 pushes of
+`10000 N / 63 kg / 60 Hz`); the arrangement of the pressed robots (the Sentinel's centre in the Wide Load's frame, the pieces in
+contact, the contact materials: Sentinel chassis 0.5/0.2 against the tips 0.3/0.3, as 12aw); the commands the brains give
+(Sentinel `Flip` inputs 122 a minute ours against 130 live `0x446810` calls, Wide Load strokes 80 against 87 a minute); the stroke strengths (the piston's health and air factor, 100
+falling to 16-25 over a fight, the same decay).
+
+**3. The replay.** `examples/pairreplay.rs` takes two chassis states (centre of mass, rotation, velocities) and the brains' commands
+(`Forward`/`LeftRight` of each robot, `Flip`, `Fire`) at 0.1 s steps, places every other part at its build pose relative to the
+chassis and runs ours open loop, so the approach and the brains drop out: 79 live pressed states (contact for the last 0.3 s, both upright, 2 s apart,
+`tools/oracle/pressed/rp_replay.py`), each run 2.5 s with that fight's live commands and strokes. Separation of the centres from the start state (share
+of starts that gained more than 0.6 m):
+
+| | 1.0 s | 1.5 s | 2.0 s |
+|---|---|---|---|
+| live | median 0.06, 5 % | 0.18, 16 % | 0.12, 18 % |
+| ours before | 0.21, 24 % | 0.31, 42 % | 0.51, 44 % |
+| ours, the Wide Load's strokes removed | 0.02, 10 % | 0.14, 18 % | 0.15, 27 % |
+| ours, the Sentinel's `Flip` removed | 0.26, 23 % | 0.40, 39 % | 0.42, 43 % |
+| ours, `RA2_WHEEL_GATE`, `RA2_CXCX=f64`, `RA2_PAIR_GATE` | = before (36 strong-stroke starts: 25-28 % / 47-50 % / 58-61 %) | | |
+| **ours after (this round)** | **0.07, 10 %** | **0.17, 16 %** | **0.20, 22 %** |
+
+At the same stroke strength (starts whose strokes in the next 1.5 s all read the full 100) the share past 0.6 m at 2.0 s is 18 % live,
+58 % before, **26 %** after. So the strokes separate the robots in ours and not live, and they do it at the same strength.
+
+**4. Where.** Aligned at the fire, the chassis' speed along the rod's axis in the pressed state goes up by the same 1.4-2.0 m/s at the
+out stop live and ours; at the return stop live gives it back 0.6-1.1, ours 1.7-2.3 (the contact persists 0.4 s after the fire in 78 %
+of the strokes live, 55 % ours). The free strokes settle what a stroke does alone: `weapons-wideload-free__live__001`, the `R` rows
+(the state at each resolver entry), the return stop in two steps:
+
+| | step | rod relative speed | chassis speed along the axis |
+|---|---|---|---|
+| live | before | -13.0 | 2.0 |
+| | 1 (the limit, the rod 0.09 m from home) | -5.5 | 0.4 (**-1.57**) |
+| | 2 (the lock) | **0** | 0.4 (**+0.04**) |
+| ours before | before | -12.7 | 1.68 |
+| | 1 | -5.2 | 0.12 (**-1.56**) |
+| | 2 | +0.93, then -0.96, then 0 | -0.93 (**-1.05**), -0.58, -0.69 |
+| ours after | 1 | -4.84 | 0.36 (-1.74) |
+| | 2 | -0.03 | 0.39 (+0.03) |
+
+The first step is the same to the second digit; in the second, live's remaining 5.5 m/s of the rod (346 N s) vanish without the
+chassis taking any of it, ours hands the chassis another -1.05 m/s. A whole free stroke leaves the Wide Load's velocity within about 0.1-0.3 m/s of what it was live (8 strokes, `S` rows; the
+across-axis components within 0.1); ours before ended -0.46, -0.59, -0.60 m/s along the axis (the three strokes of the replay),
+after +0.12, +0.73, +0.19.
+
+**5. Why (the binary).** `Lock(1)` (`0x4b50c0`) sets both travel limits of the constraint (`+0x68/+0x6c`) to the offset clamped
+to the travel and zeroes the controlled body's linear and angular velocity (`0x480ef0`/`0x480f00` copy the zero vector `0x71abcc` to
+`body + 0x54/+0x64`): ours had both since 12r (`lock_joint`). The controller's update (`0x4b5240`: `dir == 0` or the offset
+within 0.05 of the stop it is driven to, then `Lock(1)` if the auto-lock flag `+0x7d` is set; else the push `0x4b51b0`) is a
+**Havok action**: the live rows of one piece run `S`/`R` (resolver entry) -> `A` (actions) -> `U` `F` `L` (the controllers) -> `W`
+(`MagicAction`), the `U` row's offset equals the next resolver entry's (`ext` 0.973 at `R 356`, 0.885 at `U 356` and `R 357`), and
+it comes after the piece's integration and before the solver. In the stroke above the rod is 0.09 m from home after the first step
+(outside the band), the piece's integration brings it to 0.885, the update sees it within 0.05 of home and locks: the rod's
+velocity is zeroed before the solver of that piece, so the limit never has it to hand to the chassis. Ours updates its controllers
+in `Robot::drive`, before the substep, so it sees the offsets of the end of the last piece, locks one piece later, and the solver
+of the arriving piece absorbs the rod's remaining speed through the chassis.
+
+**6. The change.** `PhysicsBackend::arm_slider_lock(joint, stop, band)` (default: nothing; `havok17` runs the test after each
+piece's integration and before its dashpots and solver: `Havok17Backend::run_armed_locks`); `Robot::drive_prismatic` arms it
+for a controller that is driving toward a stop with its auto-lock on (a burst piston on its way home, a servo piston). The
+lock itself is the existing `lock_joint`. **`RA2_PRELOCK=0`** keeps the old order. The arena's prismatic controllers
+(`hazards`) and the hinge locks (burst motors) are untouched. Tests: `havok17::tests::a_rod_that_arrives_in_a_piece_is_locked_
+before_that_pieces_solver` (a 60 kg rod on a 300 kg housing: the housing takes at least 0.3 m/s less), `tests/motors.rs::a_burst_
+piston_stroke_leaves_the_chassis_where_it_was` (the Wide Load on its wheels: 0.12 m/s from where it began, 0.32 before).
+
+**7. Results.** Contact episodes (`contact_episodes.py`, the 23 live fights against 96 warmups):
+
+| | occupancy < 3 m | chassis flag S / W | episodes / min | length mean / median / p90 (s) | out | in | median min. distance |
+|---|---|---|---|---|---|---|---|
+| live | 0.79 | 0.08 / 0.65 | 12.3 | 3.9 / 1.7 / 9.8 | 0.39 | -1.37 | 2.01 |
+| ours before (12ax) | 0.66 | | 23.2 | 2.0 / 1.2 / 4.2 | 0.37 | -1.29 | 2.30 |
+| **ours after** | **0.78** | **0.07 / 0.65** | **14.0** | **3.8 / 2.0 / 10.1** | 0.38 | -1.58 | 2.10 |
+
+Ensembles (`ensemble.sh`, 120 s, warmups 0..95, `RA2_AI_TRACE=1 FIDTRACE_UP=1`; counted >= 10 hp, mean +- se; before reproduces
+12ax to the digit, with `RA2_PRELOCK=0`):
+
+| fight | live | before | after |
+|---|---|---|---|
+| Box Scout / ALARM | 8 / 41 | 7.8 +- 0.4 / 35.8 +- 2.2 | 6.5 +- 0.5 / 32.8 +- 2.5 |
+| Razor / FlapJack | 3.0 / 0.1 | 7.4 +- 0.6 / 1.1 +- 0.1 | 7.4 +- 0.6 / 1.1 +- 0.1 (no piston) |
+| Compressor Sentinel / Wide Load | 5.1 / 99.5 | 6.2 +- 0.5 / 87.3 +- 4.6 | 5.4 +- 0.5 / 80.4 +- 5.1 |
+| Octagon Scout / ALARM | 3.2 / 13.6 | 5.3 +- 0.4 / 17.8 +- 1.4 | 4.8 +- 0.4 / 16.0 +- 1.5 |
+
+**8. Open.** (a) The Wide Load's counted hits fell with the longer contact (87.3 -> 80.4, live 99.5) and the Box fight's both
+(35.8 -> 32.8, live 41): the pressed state is right and the hits per pressed second are low; they are priced from the tips' closing
+speed at the filter's events, which this round did not touch. (b) ALARM's piston changes too (its return kick is the same lock);
+its live chassis kicks (12k, `-2` at the return) were measured on a different footing and should be re-read with the `R` rows
+of an ALARM capture. (c) The hinge locks of the burst motors (`FUN_00480e20`) and the arena's prismatic controllers are
+the same kind of action and may need the same placement; not changed. (d) The live free capture has the Wide Load sliding at 7 m/s along
+its axis for reasons not understood (a neutered AI in the Combat Arena), so only its stroke steps were used.
+
+**Tools.** `tools/oracle/frida/ra2_robotpair.js`; `examples/pairreplay.rs`; `tools/oracle/pressed/` (`rp_reduce.py`,
+`rp_reduce2.py` the live and ours step-level rows into pickles; `rp_cmd2.py` the commands aligned to the step clock (live
+tsv +97 s, ours +1.95 s); `rp_replay.py`, `rp_variants.py` the replay and its variants, `SUBSET=1` for the strong-stroke starts; `rp_str.py`,
+`rp_rod.py`, `rp_kick.py`, `rp_align.py`, `rp_w.py`, `rp_an2.py` the stroke strengths, rod, kick, alignment, wheel and arrangement
+analyses; `run_ours.sh` one fight with the dump; `PRESSED_GAME`/`PRESSED_WORK` name a scratch install and work dir).
+`RA2_H17_DUMP` rows `N` (wheel callbacks) and `F` (prismatic pushes) were added for the comparison.

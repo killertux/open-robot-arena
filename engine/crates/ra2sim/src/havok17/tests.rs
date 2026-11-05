@@ -659,3 +659,60 @@ fn a_contact_reports_the_tags_of_the_colliding_pieces() {
         other == NO_TAG
     }));
 }
+
+/// A rod (60 kg) slid at its stop on a 300 kg housing. The original's prismatic controller is a
+/// Havok action: it runs after a piece's integration and before the solver, and locks (rod
+/// velocities to zero, limits to the offset) when the offset is within 0.05 of the stop it is
+/// driven to, so the rod that arrives in that piece never meets the solver with its speed. Live
+/// (`weapons-wideload-free__live__000`, docs/29 12ay): the housing is kicked once (1.5 m/s) by
+/// the limit and not again when the lock takes the rod's remaining 5.5 m/s. Unarmed (the lock a
+/// piece late) the limit absorbs it through the housing a second time.
+fn rod_at_its_stop(armed: bool) -> (f32, f32) {
+    let mut physics = Havok17Backend::new().unwrap();
+    let mk = |physics: &mut Havok17Backend, mass: f32, x: f32| {
+        physics
+            .create_body(
+                &BodyDesc::new(MotionType::Dynamic, ShapeDesc::Sphere { radius: 0.2 })
+                    .at(Vec3::new(x, 10.0, 0.0))
+                    .with_mass(mass),
+            )
+            .unwrap()
+    };
+    let housing = mk(&mut physics, 300.0, 0.0);
+    let rod = mk(&mut physics, 60.0, 0.0);
+    let mut desc = SliderDesc::new(housing, rod, Vec3::ZERO, Vec3::X);
+    desc.limits = [-0.73, 0.0];
+    let joint = physics.create_slider(&desc).unwrap();
+    // The rod 0.3 m out, going to its stop at 12 m/s; both fall together.
+    physics.set_transform(rod, Vec3::new(-0.43, 10.0, 0.0), Quat::IDENTITY);
+    physics.set_velocity(rod, Vec3::new(-12.0, 0.0, 0.0), Vec3::ZERO);
+    let mut locked_at = None;
+    for i in 0..8 {
+        if armed {
+            physics.arm_slider_lock(joint, -0.73, 0.05);
+        }
+        physics.step(1.0 / 60.0);
+        if locked_at.is_none() && physics.joint(joint).unwrap().saved_limits.is_some() {
+            locked_at = Some(i);
+        }
+    }
+    let h = physics.state(housing).unwrap().linear_velocity.x;
+    let r = physics.state(rod).unwrap().linear_velocity.x;
+    (h, r)
+}
+
+#[test]
+fn a_rod_that_arrives_in_a_piece_is_locked_before_that_pieces_solver() {
+    let (h_late, r_late) = rod_at_its_stop(false);
+    let (h_pre, r_pre) = rod_at_its_stop(true);
+    // Both end with the rod at rest against the housing; the pre-solver lock hands the housing
+    // less of the rod's momentum (the lock takes the rod's speed without a reaction).
+    assert!(
+        (r_late - h_late).abs() < 0.5 && (r_pre - h_pre).abs() < 0.5,
+        "{r_late} {h_late} {r_pre} {h_pre}"
+    );
+    assert!(
+        h_pre.abs() + 0.3 < h_late.abs(),
+        "late {h_late}, pre-solver {h_pre}"
+    );
+}
