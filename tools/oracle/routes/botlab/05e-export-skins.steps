@@ -1,0 +1,146 @@
+# Skins at known moments through Export Paint Template (Custom Textures/ NAME.bmp), after the armour default, one decal,
+# one texture fill, and a blank template. cam is set before every click on the 3D view.
+click 676 88      # Paint Shop tab
+wait 3
+click 84 661      # Export Paint Template
+wait 2
+click 500 398     # the name box
+wait 1
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key a
+click 414 428     # export the current chassis texture instead of a template
+wait 1
+hide
+shot SHOTS/90-export-a.png
+click 562 513     # OK
+wait 2
+hide
+cam -0.5 0.6 5
+click 760 212
+wait 1
+click 604 303
+wait 2
+click 600 362   # bolt.tga
+wait 1
+cam -0.5 0.6 5
+click 260 247
+wait 1
+hide
+shot SHOTS/91-decal-top.png
+click 84 661      # Export Paint Template
+wait 2
+click 500 398     # the name box
+wait 1
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key b
+click 414 428     # export the current chassis texture instead of a template
+wait 1
+hide
+shot SHOTS/92-export-b.png
+click 562 513     # OK
+wait 2
+hide
+click 760 212
+wait 1
+click 612 248
+wait 2
+click 600 416
+wait 1
+cam -0.5 0.6 5
+click 170 362
+wait 1
+hide
+shot SHOTS/93-texfill-left.png
+click 84 661      # Export Paint Template
+wait 2
+click 500 398     # the name box
+wait 1
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key c
+click 414 428     # export the current chassis texture instead of a template
+wait 1
+hide
+shot SHOTS/94-export-c.png
+click 562 513     # OK
+wait 2
+hide
+click 84 661      # Export Paint Template
+wait 2
+click 500 398     # the name box
+wait 1
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key t
+wait 1
+hide
+shot SHOTS/95-export-template.png
+click 562 513     # OK
+wait 2
+hide

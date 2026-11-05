@@ -35,6 +35,9 @@ pub enum DialogKind {
     /// `Delete Control`'s box (`Delete this input control?`, live a `Wiring` window whose body does
     /// not draw): Yes removes the control in `cell`, No leaves it.
     ConfirmDelete { cell: [i32; 2] },
+    /// `Export Paint Template` (`botlab/export_texture.gib`): the file's name and whether the
+    /// chassis' current texture is exported instead of a blank template.
+    ExportTexture { name: String, current: bool },
     /// A control wired to a component.
     Wire {
         kind: ControlKind,

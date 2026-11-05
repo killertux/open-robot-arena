@@ -1,0 +1,55 @@
+# Decals on their own (the live view turns a little with every click in it: cam is set before each), from cam -0.5 0.6 5 (top, left, front faces). bolt.tga at the default size (the slider thumb at
+# the right): hover shots over each face, a click with no move before it (the cursor comes from the list click), a click
+# after a move to the same point, then a smaller decal after a click on the size slider track.
+click 676 88      # Paint Shop tab
+wait 3
+cam -0.5 0.6 5
+click 760 212     # Effect dropdown -> Decals
+wait 1
+click 604 303
+wait 2
+click 600 362     # row 5: bolt.tga
+wait 1
+hide
+shot SHOTS/80-decal-page.png
+cam -0.5 0.6 5     # the click turned the live view: put it back
+move 260 247
+wait 1
+hide
+shot SHOTS/81-hover-top.png
+cam -0.5 0.6 5     # the click turned the live view: put it back
+move 170 362
+wait 1
+hide
+shot SHOTS/82-hover-left.png
+cam -0.5 0.6 5     # the click turned the live view: put it back
+move 310 362
+wait 1
+hide
+shot SHOTS/83-hover-front.png
+click 600 362     # the cursor leaves the faces
+wait 1
+cam -0.5 0.6 5     # the click turned the live view: put it back
+click 260 247     # click on the top face, no move before
+wait 1
+hide
+shot SHOTS/84-click-top.png
+cam -0.5 0.6 5     # the click turned the live view: put it back
+move 170 362
+wait 1
+cam -0.5 0.6 5     # the click turned the live view: put it back
+click 170 362     # move, then click at the same point (left face)
+wait 1
+hide
+shot SHOTS/85-click-left.png
+click 870 583     # size slider track
+wait 1
+cam -0.5 0.6 5     # the click turned the live view: put it back
+click 310 362     # smaller decal on the front face
+wait 1
+hide
+shot SHOTS/86-click-front-small.png
+click 962 641     # Undo
+wait 1
+hide
+shot SHOTS/87-undone.png

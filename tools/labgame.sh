@@ -9,7 +9,7 @@ rm -rf "$DST"; mkdir -p "$DST/AI"
 for e in "$SRC"/*; do
   n=$(basename "$e")
   case $n in
-    Teams|"Robot Designs") cp -r "$e" "$DST/$n";;
+    Teams|"Robot Designs"|"Custom Textures") cp -r "$e" "$DST/$n";;
     AI) for c in "$e"/*; do
           b=$(basename "$c")
           if [ "$b" = Teams.txt ]; then cp "$c" "$DST/AI/$b"; else ln -s "$c" "$DST/AI/$b"; fi

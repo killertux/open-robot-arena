@@ -1679,3 +1679,73 @@ the first alerts, ours keeps one) and the 1.5 % position scatter above.
 
 Tests: `ra2fmt::bot` (`a_decimal_tie_rounds_up_as_the_original_does`), `build_mode` (`a_picked_burst_motor_shows_its_sliders_and_saves_their_angles`, `the_overview_heading_slider_saves_steps_of_a_twentieth_of_a_turn`). Gate: fmt and clippy `-D warnings`
 clean; 876 tests passed, 0 failed, 2 ignored; `find local/game -newer` printed nothing.
+
+## 9.31 The armour's default appearance and the Paint Shop's five effects (`fx/paintshop`, 2026-11-05)
+
+### How the original draws a skin (`Robot Arena 2.exe`)
+
+Every appearance operation is a render into the chassis texture: `FUN_005b2ce0` opens a 256 x 256 render target, `FUN_005b2ba0` draws the current skin into it, `FUN_005b2e70` draws one textured quad
+(A B / C D, two triangles, `SRCALPHA / INVSRCALPHA`, the destination alpha untouched: every saved skin is alpha 255), `FUN_005b2cb0` closes it. `FUN_005b1e60 (name, flag, 0, 0)` loads the texture: **flag 0 is point
+sampled and clamped, flag 1 bilinear and wrapped**. Measured against live exports (`paintfx-export-*`): a clamped quad samples `floor(x * 256 / width)` at the pixel's corner, the 256 px fills are exact copies, the
+wrapped strips match bilinear at the pixel centre. A pixel centre on the quad's diagonal is drawn once (top-left rule). `ra2ui::workshop::skinfx` is this drawing on the CPU (`Canvas::quad`).
+
+**The armour pick** (`FUN_0043ca70`, the mass check `800`, then the shared tail `0x43ccc5`, one case per armour type, only when the screen's *apply default chassis appearance* checkbox is on, `+0xd4`): the texture over
+the whole skin, then `FUN_0044f690 (width, width, matrix, 1, ratio)`, i.e. an edge strip along every edge of every panel polygon (`FUN_0044f6f0`):
+
+| type | fill | edge strips (file, half width, texture units per pixel) |
+|---|---|---|
+| 0 plastic | `red_plastic.bmp` | `light_edge.tga` 3, 0.5 |
+| 1 aluminium | `aluminum_horiz.bmp` | `dirty_edge.tga` 14, 0.015; `light_edge.tga` 3, 0.5; `rivets.tga` 5, 0.1 |
+| 2 steel | `gray_metal.bmp`, then `diamondplate.tga` | `shiny_edge.tga` 5, 0.5 |
+| 3 titanium | `light_metal.bmp` | `rim_line.tga` 4, 0.25 |
+
+(the same `width` and `ratio` are the `Length ratio` / `Width` of `Texture Library/edges/*.txt`). A strip is centred on the edge, `width` pixels to each side, `u = length x ratio` along it, `v` 0..1 across, **the
+polygon walked backwards** (vertex `i + 1` to `i`), `v` flipped for every panel but the first, and the polygon moved by half a pixel (`+0.5, +0.5`). The pick leaves the header's fourth line `0`. Against the four live skins
+(`botlab-e2e-armor-*`, whose names for steel and titanium are swapped, docs 9.29): mean abs difference per channel **0.012 / 0.109 / 0.125 / 0.024** (plastic / aluminium / steel / titanium), 2 levels at most except one
+aluminium pixel group (19, the strips' corner overlaps). `Build::apply_default_appearance`, `skinfx::default_appearance`, test `the_armour_defaults_match_the_originals_skins`. The Armor grid's `High Bar` took the
+click on the selected row's neighbour (the fourth plate could not be picked): fixed. The Overview's `No Robot Preview` placeholder (`exhibition\sample_bot.bmp`) was a white box.
+
+### The five effects (`Appearance`, `FUN_00423010`; mode in `+0xdc`)
+
+`FUN_004241f0` fills the `Effect` dropdown, `FUN_00424010` loads the page into `effect settings group`: Color Fill `colorfill.gib` (`FUN_00426590`), Texture Fill and **Surface Layers both `texturefill.gib`**
+(`FUN_00426d90`, a different list: `Texture Library\*.bmp` / `*.tga`), Edge Lines `edgelines.gib` (`FUN_004274c0`, the `edges\*.txt` styles, the preview is the style's `preview` bitmap), Decals `decals.gib`
+(`FUN_00428050`, `decals\*.tga` + `*.bmp` in one list, a `scale slider`, the SHIFT / CTRL tips). The lists are directory listings sorted as plain strings (`FUN_00429800`: `Galvanized_Metal.bmp` first); every pick
+of an effect refills its list, selects row 0, scrolls to the top (and puts the Decals slider back to 1, `FUN_00428230`). The list scrolls by pixels (the arrows 18, the last row ends at the bottom; a press on the track
+does nothing), the pictures of the selection are point sampled, row text sits one pixel left of the arena list's. Undo is **one** step (`FUN_00423ea0` copies the skin first; `FUN_00423f80` puts it back and dims the
+button); the button is dim until the first operation (live `botlab-e2e-60/62/63/64`).
+
+A click on the 3D view (`FUN_00424670`) takes the nearest triangle under the ray and its panel (the triangle's group), then by mode:
+
+* Color Fill / Texture Fill / Surface Layers (`FUN_00424850`): a quad over the **panel's rectangle** (the `x1 y1 x2 y2` of the file's group row), a colour or the texture with uv 0..1, point sampled; the entire-chassis
+  buttons (`FUN_00426bc0`, `FUN_00427300`) the same over 0..256. Live: lava/holey_metal on a panel is `floor(x * 256 / 84)` to 0.19 per channel.
+* Edge Lines (`FUN_00424a80`): the strips of that panel's polygon only (width truncated to an integer); *Edge Entire Chassis* (`FUN_00427ea0`) every polygon.
+* Decals (`FUN_00426130`): a square of `80 x slider` pixels centred on the hit's skin point (the triangle's uv at the barycentric hit), turned by `+0x3ac` radians (SHIFT: `+0.1` per mouse step, wrapped at 36, `FUN_00424c50`;
+  CTRL: size `+0.025` per step, `FUN_00424cc0`), the texture's alpha, the quad `(-h,-h) (h,-h) (-h,h) (h,h)` rotated; then four `CopyRects` bands put the skin back outside the panel's rectangle. While the cursor is over the
+  chassis the same square is drawn as a floating quad on the hit triangle's plane (it runs on past the panel; live `paintfx-e2-81..83`): `Builder::decal_preview_items`.
+
+Ours: `ra2-app::build_mode::effects`, `Paint::{color_group, texture_group, edge_group, decal_on, ...}`, `skinfx`. The effect pages against live (`paintfx-page-*`): whole frame 0.65 to 0.97 (the lists' text, the point-sampled
+picture, the scroll bar), 0.76 for Color Fill. **Export Paint Template** (the modal window `export_texture.gib`, `FUN_00424400`): the name box starts `My Robot texture`, the checkbox exports the current texture instead of a blank
+template, OK writes `Custom Textures/NAME.bmp` (24-bit bottom-up, 256 x 256, 196 664 bytes: 54 + 196 608 + two zero bytes): the current texture after the armour pick is **0.15** off the live export, the blank template (red,
+panels outlined in green 4 px) 1.3 (the pen's exact pixels are not recovered: 93 % of the line pixels agree).
+
+### Verified live, and what is open
+
+Live display :7, `Teams/ AI/ Custom Textures/ ra2.cfg` copied before and restored after each session (sha256 lists equal); captures `paintfx-*` (backup `manifest-additions-2026-10-21-paintshop.tsv`): the four pages, the
+scroll frames, the hover and click frames, the Export window, four exported skins (armour, one decal, a texture fill, the template), three saved `.bot`s. Routes `05a`..`05e` (`05b` the effects on three faces, `05c` decals,
+`05e` the exports; `labshot` learned `key Shift_L down|up`; `tools/labgame.sh` now copies `Custom Textures/`).
+
+Per-step mean absolute difference of the whole frame against `botlab-rerun-*` (the full route; before 9.30's numbers): armour 09-12 **1.00** (5.66), paint 60-65 **1.20** (6.96), save 80-82 **2.97** (5.29; 80 1.06,
+81 2.03, 82 5.81).
+
+Open:
+
+* **The decal's band restore.** After a decal the live skin differs from ours in a block at the skin's top left (about 110 x 84 px, content not found in the pre-decal skin at any offset or flip): the four `CopyRects`
+  (`FUN_005b30a0`) of `FUN_00426130` do not restore the bands from the undo copy as read. Ours clips cleanly.
+* **The picker's colour.** The swatch colour for the same click is lighter live (`232 198 140` against our `229 191 125`; `166 170 206` against `155 158 199`): the Shade / Tint rule is not plain HSL; the painted skin
+  carries it (3.9 / 7.5 / 14.1 per channel on the route's skin). Two samples are not enough to fit it.
+* **The live 3D view drifts.** A click in the view turns the live camera a little, and `cam P Y 5` frames the box 6 % nearer at pitch -0.5 than at -1.2 (the best fit is `5.3` against ours), so the 3D pane differs
+  3 to 8 in these frames; the routes set `cam` before every click. A click placed from a drifted view picks other uv points: decal positions were not compared pixel for pixel.
+* Import Custom Paint (the `import_texture.gib` window and its `Custom Textures/` list), the lists' scroll thumb drag and the wheel, the Export window's Escape / typing details (a stray `e` stayed in the first name).
+* The header's fourth line is not "painted" (live `0` after a paint without parts, `1` once the Test Robot ran), as before.
+
+Tests: `skinfx` (4: copy, the diagonal, the decal clip, the four armour skins against the oracle). Gate: fmt and clippy `-D warnings` clean; 880 tests passed, 0 failed, 2 ignored; `find local/game -newer` printed nothing.

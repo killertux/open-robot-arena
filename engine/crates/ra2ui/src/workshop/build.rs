@@ -475,6 +475,32 @@ impl Build {
         true
     }
 
+    /// The armour pick's default chassis appearance (`FUN_0043ca70` -> `0x43ccc5`): the armour's
+    /// texture and edge strips drawn over the whole skin ([`super::skinfx::default_appearance`]).
+    /// `root` is the game folder (`Texture Library/`). Returns whether a skin was drawn.
+    pub fn apply_default_appearance(&mut self, root: &std::path::Path) -> bool {
+        let Some(chassis) = self.chassis() else {
+            return false;
+        };
+        let Some(armour) = chassis.armour else {
+            return false;
+        };
+        if chassis.mesh.is_none() || chassis.face_groups.is_empty() {
+            return false;
+        }
+        let polys: Vec<Vec<[f32; 2]>> = chassis
+            .face_groups
+            .iter()
+            .map(|g| g.coords.clone())
+            .collect();
+        let base = self.paint.skin().cloned().unwrap_or_else(|| {
+            super::paint::Skin::new(super::paint::SKIN_SIZE, super::paint::SKIN_SIZE, [255; 4])
+        });
+        let skin = super::skinfx::default_appearance(root, armour.type_id, &polys, &base);
+        self.paint.set_skin(skin);
+        true
+    }
+
     pub fn bot(&self) -> &Bot {
         &self.bot
     }

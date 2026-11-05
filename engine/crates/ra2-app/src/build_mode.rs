@@ -58,6 +58,9 @@ use ra2ui::workshop::library::{ComponentInfo, GameLibrary, TextureEntry};
 use ra2ui::workshop::paint::Texture;
 use ra2ui::workshop::placement::{self, Candidate, Drag, Hover, Refusal};
 use ra2ui::workshop::wiring::{Control, ControlKind};
+
+mod effects;
+use effects::EffectState;
 use ra2ui::workshop::{self};
 use ra2ui::{Frame, Placement};
 
@@ -397,6 +400,10 @@ pub struct Builder {
     selected_texture: Option<TextureEntry>,
     paint_mode: PaintMode,
     paint_color: PaintColor,
+    /// The Paint Shop's effect pages (Color Fill, Texture Fill, Surface Layers, Edge Lines, Decals).
+    effect: EffectState,
+    /// The Decals page's preview: the chassis point under the cursor.
+    decal_hover: Option<effects::Hit>,
     selected_decal: Option<TextureEntry>,
     selected_group: Option<usize>,
     decal_at: [f32; 2],
@@ -414,6 +421,8 @@ pub struct Builder {
     /// Whether the baseplate polygon was closed by a click on its first point.
     outline_closed: bool,
     draw_snap: bool,
+    /// The armour screen's *apply default chassis appearance* checkbox (checked on a fresh lab).
+    armor_default: bool,
     shape_radius: i32,
     shape_length: i32,
     shape_width: i32,
@@ -715,6 +724,8 @@ impl Builder {
             selected_texture: None,
             paint_mode: PaintMode::Fill,
             paint_color: PaintColor::default(),
+            effect: EffectState::default(),
+            decal_hover: None,
             selected_decal: None,
             selected_group: None,
             decal_at: [0.5, 0.5],
@@ -726,6 +737,7 @@ impl Builder {
             adjust_armed: false,
             outline_closed: false,
             draw_snap: true,
+            armor_default: true,
             shape_radius: 300,
             shape_length: 600,
             shape_width: 400,
@@ -1001,6 +1013,9 @@ impl Builder {
             self.cancel_drag();
         }
         if self.paint_pick(x, y, true) {
+            return Ok(());
+        }
+        if self.view_only && self.effect_press(x, y) {
             return Ok(());
         }
         if self.palette_bar_press(x, y) {
@@ -1481,6 +1496,16 @@ impl Builder {
         }
         if let Some(grab) = self.heading_drag {
             self.heading_to(x - grab);
+        }
+        if let Some(grab) = self.effect.scale_drag {
+            self.scale_to(x - grab);
+        }
+        self.update_decal_hover(x, y);
+        if self.tab() == Some("paintshop button") && (self.shift || self.ctrl) {
+            if let Some(l) = last {
+                let (dx, dy) = (x - l[0], y - l[1]);
+                self.decal_move(if dx.abs() > dy.abs() { dx } else { dy });
+            }
         }
         let Some(active) = self.drag.as_mut() else {
             return;
@@ -1977,6 +2002,10 @@ impl Builder {
     fn take_style_pick(&mut self) {
         let picks = self.shell.take_dropdown_picks();
         for (name, text) in picks {
+            if name == "effect dropdown" {
+                self.effect_dropdown_pick(&text);
+                continue;
+            }
             if name != "component option" {
                 continue;
             }
@@ -2213,6 +2242,17 @@ impl Builder {
     /// inside the group (the screen's *"position the decal with your mouse and
     /// click to apply it"*).
     fn paint_at_preview(&mut self, x: f32, y: f32) -> Result<(), String> {
+        if self.view_only {
+            // the player-facing Paint Shop: the effect page's choice onto the panel under the click
+            let Some((group, uv)) = self.pick_chassis_uv(x, y) else {
+                return Ok(());
+            };
+            self.selected_group = Some(group);
+            if let Err(e) = self.effect_apply(group, uv) {
+                self.status = e;
+            }
+            return self.refresh();
+        }
         let Some((group, at)) = self.pick_chassis(x, y) else {
             self.status = "the click did not land on the chassis".into();
             self.refresh_panel();
@@ -2270,7 +2310,7 @@ impl Builder {
 
     /// Ray-cast the preview against the chassis mesh and return the face group
     /// and the skin position inside the group's rectangle.
-    fn pick_chassis(&mut self, x: f32, y: f32) -> Option<(usize, [f32; 2])> {
+    fn pick_chassis_hit(&mut self, x: f32, y: f32) -> Option<effects::Hit> {
         self.ensure_preview();
         let camera = self.preview_camera?;
         let (origin, direction) = camera.ray(self.panel.preview, x, y)?;
@@ -2311,18 +2351,36 @@ impl Builder {
                 uvs[0][0] * (1.0 - u - v) + uvs[1][0] * u + uvs[2][0] * v,
                 uvs[0][1] * (1.0 - u - v) + uvs[1][1] * u + uvs[2][1] * v,
             ];
-            let rect = self.build.paint().group_rect(group)?;
-            let (x1, y1, x2, y2) = rect;
-            if x2 <= x1 || y2 <= y1 {
-                return Some((group, [0.5, 0.5]));
-            }
-            let at = [
-                ((uv[0] - x1 as f32) / (x2 - x1) as f32).clamp(0.0, 1.0),
-                ((uv[1] - y1 as f32) / (y2 - y1) as f32).clamp(0.0, 1.0),
-            ];
-            return Some((group, at));
+            return Some(effects::Hit {
+                group,
+                tri,
+                uvs,
+                uv,
+            });
         }
         None
+    }
+
+    /// The face group under a point and the skin point in it.
+    fn pick_chassis_uv(&mut self, x: f32, y: f32) -> Option<(usize, [f32; 2])> {
+        let hit = self.pick_chassis_hit(x, y)?;
+        Some((hit.group, hit.uv))
+    }
+
+    /// The face group under a click and the point in it, normalised to the group's rectangle.
+    fn pick_chassis(&mut self, x: f32, y: f32) -> Option<(usize, [f32; 2])> {
+        let (group, uv) = self.pick_chassis_uv(x, y)?;
+        let (x1, y1, x2, y2) = self.build.paint().group_rect(group)?;
+        if x2 <= x1 || y2 <= y1 {
+            return Some((group, [0.5, 0.5]));
+        }
+        Some((
+            group,
+            [
+                ((uv[0] - x1 as f32) / (x2 - x1) as f32).clamp(0.0, 1.0),
+                ((uv[1] - y1 as f32) / (y2 - y1) as f32).clamp(0.0, 1.0),
+            ],
+        ))
     }
 
     /// A click on a chassis step's shipped `Editing Area`, mapped into the
@@ -2912,6 +2970,10 @@ impl Builder {
             self.shell.click_named("chassis button")?;
             return self.refresh();
         }
+        if action == "m9:armordefault" {
+            self.armor_default = !self.armor_default;
+            return self.refresh();
+        }
         if let Some(rest) = action.strip_prefix("m9:snap:") {
             self.draw_snap = rest == "on";
             self.status = format!("snap to grid {}", if self.draw_snap { "on" } else { "off" });
@@ -3078,6 +3140,10 @@ impl Builder {
                     format!("armour type {type_id} is not in Armor_Definitions.txt")
                 })?;
             let changed = self.build.set_armour(def.clone());
+            if self.armor_default && self.build.apply_default_appearance(&self.game) {
+                // the skin changed under the plate
+                self.status = format!("armour {} and its default appearance", def.name);
+            }
             self.status = if changed {
                 format!("armour {}", def.name)
             } else {
@@ -3086,6 +3152,10 @@ impl Builder {
             return self.refresh();
         }
         match action {
+            "m9:export" => {
+                self.open_export_dialog();
+                return Ok(());
+            }
             "m9:paintall" => {
                 let texture = self.paint_solid();
                 self.build
@@ -3571,6 +3641,9 @@ impl Builder {
             if chain.iter().any(|p| p.widget.name() == "paint entire") {
                 return Some("m9:paintall".into());
             }
+            if chain.iter().any(|p| p.widget.name() == "export button") {
+                return Some("m9:export".into());
+            }
             if chain.iter().any(|p| p.widget.name() == "undo button") {
                 return Some("m9:undo".into());
             }
@@ -3628,6 +3701,12 @@ impl Builder {
             if chain.iter().any(|p| p.widget.name() == "finished button") {
                 return Some("m9:finished".into());
             }
+            if chain
+                .iter()
+                .any(|p| p.widget.name() == "default appearance checkbox")
+            {
+                return Some("m9:armordefault".into());
+            }
             if chain.iter().any(|p| p.widget.name() == "snap checkbox") {
                 return Some(if self.draw_snap {
                     "m9:snap:off".into()
@@ -3665,6 +3744,19 @@ impl Builder {
             .find_map(|p| p.widget.name().strip_prefix("m9:armor:"))
         {
             return Some(format!("m9:armor:{name}"));
+        }
+        // The grid's `Sel Bar` / `High Bar` lie over the selected / hovered row and take the click
+        // there: the row is the press's height over the grid.
+        if chain
+            .iter()
+            .any(|p| matches!(p.widget.name(), "Sel Bar" | "High Bar"))
+        {
+            if let Some(grid) = chain.iter().find(|p| p.widget.name() == "armor grid") {
+                let row = ((y - grid.frame.y) / ARMOUR_ROW).floor().max(0.0) as usize;
+                if let Some(def) = self.library.armour().get(row) {
+                    return Some(format!("m9:armor:{}", def.type_id));
+                }
+            }
         }
         // A palette cell is an `Image` whose `Name` is the rank `refresh_palette`
         // gave it. The placed children come in draw order, so the rank cannot
@@ -3990,9 +4082,12 @@ impl Builder {
                     }
                 }
             }
-            if let Some(key) = &key {
-                ra2ui::cells::bind_art(root, "snapshot img", key);
-            }
+            // a design without a snapshot shows the placeholder bitmap ("No Robot Preview")
+            ra2ui::cells::bind_art(
+                root,
+                "snapshot img",
+                key.as_deref().unwrap_or("exhibition\\sample_bot.bmp"),
+            );
         }
     }
 
@@ -4000,36 +4095,7 @@ impl Builder {
     /// it and `colorfill.gib` is loaded into `effect settings group` (the
     /// group's own note: "load individual effects gibs here").
     fn refresh_effects(&mut self) {
-        if self.shell.tab() != Some("paintshop button") {
-            return;
-        }
-        let Ok(fragment) = workshop::load(&self.ui, "botlab/colorfill.gib") else {
-            return;
-        };
-        let Some(lab) = self.shell.lab_mut() else {
-            return;
-        };
-        for block in lab.document.blocks.iter_mut() {
-            let ra2fmt::gib::Block::Widget(root) = block else {
-                continue;
-            };
-            if let Some(dropdown) = workshop::find_mut(root, "effect dropdown") {
-                if let Some(text) = dropdown
-                    .children
-                    .iter_mut()
-                    .find(|c| c.kind == WidgetKind::TextBox)
-                    .and_then(|b| b.children.iter_mut().find(|c| c.kind == WidgetKind::Text))
-                {
-                    ra2ui::input::set_field(text, "_Text", "Color Fill");
-                }
-            }
-            if let Some(slot) = workshop::find_mut(root, "effect settings group") {
-                if slot.children.is_empty() {
-                    workshop::load_into(root, &fragment, "effect settings group");
-                }
-            }
-        }
-        self.sync_paint_widgets();
+        self.refresh_effect_page();
     }
 
     /// Put the swatch, the picker's target and the slider's thumb where the colour state says,
@@ -4342,6 +4408,9 @@ impl Builder {
                 let ra2fmt::gib::Block::Widget(root) = block else {
                     continue;
                 };
+                if let Some(check) = workshop::find_mut(root, "default appearance checkbox") {
+                    ra2ui::input::set_state(check, self.armor_default);
+                }
                 let Some(grid) = workshop::find_mut(root, "armor grid") else {
                     continue;
                 };
@@ -5101,6 +5170,10 @@ impl Builder {
                     name == "mouse instructions grp"
                         || (self.tab() == Some("components button")
                             && matches!(name, "tips group" | "remove button"))
+                        // the Decals page shows the SHIFT (turn) and CTRL (size) tips (`FUN_00424010`)
+                        || (self.tab() == Some("paintshop button")
+                            && self.effect.current == effects::Effect::Decals
+                            && name == "tips group")
                 })
                 .collect();
             for group in overlay {
@@ -5719,10 +5792,17 @@ impl Builder {
                 Vec::new()
             };
         let heading = self.build.heading();
+        let decal = self.decal_preview_items();
         let mut groups: Vec<RenderGroup<'_>> = Vec::new();
         if !chassis.is_empty() && !world.is_empty() {
             groups.push(RenderGroup {
                 items: &chassis,
+                model: world[0],
+            });
+        }
+        if !decal.is_empty() && !world.is_empty() {
+            groups.push(RenderGroup {
+                items: &decal,
                 model: world[0],
             });
         }
@@ -6862,6 +6942,7 @@ impl Builder {
         self.slider_drag = None;
         self.adjust_drag = None;
         self.heading_drag = None;
+        self.effect.scale_drag = None;
         // `FUN_004791e0`: the drag of a top point ends where it is.
         self.point_drag = false;
         if self.dialog.is_some() || self.tab() != Some("wiring button") {
@@ -6897,6 +6978,23 @@ impl Builder {
                 name,
                 keys: [None, None],
                 editing: false,
+            },
+            focus: Focus::None,
+        });
+    }
+
+    /// `Export Paint Template` (`FUN_00424400`): the window opens on `My Robot texture`.
+    fn open_export_dialog(&mut self) {
+        let Ok(mut gib) = workshop::load(&self.ui, "botlab/export_texture.gib") else {
+            return;
+        };
+        let name = "My Robot texture".to_string();
+        lab_dialog::set_text(&mut gib, "export name textbox", &name);
+        self.dialog = Some(LabDialog {
+            gib,
+            kind: DialogKind::ExportTexture {
+                name,
+                current: false,
             },
             focus: Focus::None,
         });
@@ -7100,6 +7198,34 @@ impl Builder {
             }
             return Ok(());
         }
+        if matches!(
+            self.dialog.as_ref().map(|d| &d.kind),
+            Some(DialogKind::ExportTexture { .. })
+        ) {
+            if has("export name textbox") {
+                if let Some(d) = self.dialog.as_mut() {
+                    d.focus = Focus::Name;
+                }
+                return Ok(());
+            }
+            if has("texture or template cb") {
+                if let Some(d) = self.dialog.as_mut() {
+                    if let DialogKind::ExportTexture { current, .. } = &mut d.kind {
+                        *current = !*current;
+                        let on = *current;
+                        for block in d.gib.blocks.iter_mut() {
+                            if let ra2fmt::gib::Block::Widget(root) = block {
+                                if let Some(cb) = workshop::find_mut(root, "texture or template cb")
+                                {
+                                    ra2ui::input::set_state(cb, on);
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        }
         if has("cancel button") {
             self.dialog = None;
             return self.refresh();
@@ -7146,6 +7272,26 @@ impl Builder {
         };
         match dialog.kind {
             DialogKind::ConfirmDelete { .. } => {}
+            DialogKind::ExportTexture { name, current } => {
+                let skin = if current {
+                    self.build.paint().skin().cloned()
+                } else {
+                    Some(ra2ui::workshop::skinfx::template(
+                        self.build.paint().polygons(),
+                    ))
+                };
+                if let Some(skin) = skin {
+                    let target = self.custom_textures.join(format!("{}.bmp", name.trim()));
+                    match ra2fmt::saves::write(
+                        &self.game,
+                        &target,
+                        ra2ui::workshop::skinfx::to_bmp(&skin),
+                    ) {
+                        Ok(path) => self.status = format!("exported texture {}", path.display()),
+                        Err(e) => self.status = format!("{}: {e}", target.display()),
+                    }
+                }
+            }
             DialogKind::Props {
                 kind,
                 cell,
@@ -7210,6 +7356,18 @@ impl Builder {
             return;
         };
         let focus = dialog.focus;
+        if let DialogKind::ExportTexture { name, .. } = &mut dialog.kind {
+            if focus == Focus::Name
+                && (c.is_ascii_graphic() || c == ' ')
+                && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                && name.chars().count() < 48
+            {
+                name.push(c);
+                let shown = name.clone();
+                lab_dialog::set_text(&mut dialog.gib, "export name textbox", &shown);
+            }
+            return;
+        }
         let DialogKind::Props { name, keys, .. } = &mut dialog.kind else {
             return;
         };
@@ -7237,6 +7395,14 @@ impl Builder {
             return;
         };
         let focus = dialog.focus;
+        if let DialogKind::ExportTexture { name, .. } = &mut dialog.kind {
+            if focus == Focus::Name {
+                name.pop();
+                let shown = name.clone();
+                lab_dialog::set_text(&mut dialog.gib, "export name textbox", &shown);
+            }
+            return;
+        }
         let DialogKind::Props { name, keys, .. } = &mut dialog.kind else {
             return;
         };

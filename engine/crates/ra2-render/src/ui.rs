@@ -458,10 +458,13 @@ impl UiAssets {
         // point-sampled picture, and so is every tile and glyph page.
         // The one exception found: the 140 x 80 event previews (`teamhq/events/ev_*.bmp`), which the capture
         // shows blocky although the cell template says `_Filtering 1` (docs/34 11.12).
+        // The Paint Shop's pictures of the selected texture / edge / decal are point sampled as well
+        // (live `67-texturefill`: the 256 px texture over 128 px is every second texel, exactly).
         let preview = file
             .replace('\\', "/")
             .to_ascii_lowercase()
-            .contains("/events/");
+            .contains("/events/")
+            || file.starts_with("#bot-preview:paint-");
         if !tiled && !preview && p.widget.field("_Filtering").and_then(|f| f.number()) == Some(1.0)
         {
             self.textures[texture].linear = true;
