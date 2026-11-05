@@ -227,9 +227,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .find(|(p, r, _)| *p == i.point && *r == i.target)
                             .map(|(_, _, n)| n.clone())
                             .unwrap_or_default();
+                        // The point in a robot's chassis frame, about its centre of mass (the
+                        // live `S` rows' frame), to set the hits against the original's by place.
+                        let local = |r: i64| -> [f32; 3] {
+                            let Some(robot) =
+                                usize::try_from(r).ok().and_then(|r| m.duel.robots.get(r))
+                            else {
+                                return [0.0; 3];
+                            };
+                            let ci = (0..robot.parts.len())
+                                .find(|&p| robot.rig.parts[p].parent.is_none())
+                                .unwrap_or(0);
+                            let body = robot.parts[ci].body;
+                            match (
+                                m.duel.physics.state(body),
+                                m.duel.physics.center_of_mass(body),
+                            ) {
+                                (Some(st), Some(c)) => {
+                                    (st.rotation.inverse() * (i.point - c)).to_array()
+                                }
+                                _ => [0.0; 3],
+                            }
+                        };
+                        let (la, lv) = (local(att), local(i.target as i64));
                         writeln!(
                             f,
-                            "{{\"t\": {t}, \"att\": {}, \"by\": \"{}\", \"vic\": {}, \"comp\": \"{}\", \"piece\": \"{piece}\", \"amount\": {}, \"speed\": {}, \"p\": [{}, {}, {}], \"n\": [{}, {}, {}]}}",
+                            "{{\"t\": {t}, \"att\": {}, \"by\": \"{}\", \"vic\": {}, \"comp\": \"{}\", \"piece\": \"{piece}\", \"amount\": {}, \"speed\": {}, \"p\": [{}, {}, {}], \"n\": [{}, {}, {}], \"la\": [{}, {}, {}], \"lv\": [{}, {}, {}]}}",
                             att,
                             name(i.attacker, i.by),
                             i.target,
@@ -241,7 +264,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             i.point.z,
                             i.normal.x,
                             i.normal.y,
-                            i.normal.z
+                            i.normal.z,
+                            la[0],
+                            la[1],
+                            la[2],
+                            lv[0],
+                            lv[1],
+                            lv[2]
                         )?;
                     }
                 }

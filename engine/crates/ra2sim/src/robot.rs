@@ -2568,6 +2568,15 @@ impl Robot {
         {
             self.burst_locked[p] = true;
         }
+        // The hinge controller (`0x481450`) is the same kind of Havok action as the
+        // prismatic one: its auto-lock runs after the piece's integration, before the solver.
+        if prelock_hinge_enabled() {
+            if phase == BurstPhase::Firing && !at_end {
+                physics.arm_slider_lock(joint, end, tol);
+            } else if phase == BurstPhase::Cocking && !at_home {
+                physics.arm_slider_lock(joint, home, tol);
+            }
+        }
         let locked = self.burst_locked[p];
         let dir = if end < home { -1.0 } else { 1.0 };
         let percent = match phase {
@@ -3119,4 +3128,10 @@ impl Robot {
         let c = &self.rig.components[index];
         (worlds[index].transform_point3(c.center()), c.radius())
     }
+}
+
+/// `RA2_PRELOCK_HINGE=0` runs a burst motor's hinge lock in `Robot::drive`, a piece late, as
+/// before (docs/29 section 12az).
+fn prelock_hinge_enabled() -> bool {
+    std::env::var("RA2_PRELOCK_HINGE").map_or(true, |v| v != "0")
 }

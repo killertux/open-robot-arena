@@ -716,3 +716,52 @@ fn a_rod_that_arrives_in_a_piece_is_locked_before_that_pieces_solver() {
         "late {h_late}, pre-solver {h_pre}"
     );
 }
+
+/// The hinge controller (`0x481450`, vtable slot `0x6a7e58` through the wrapper `0x481180`) is a
+/// Havok action as the prismatic one is (docs/29 12az): its auto-lock runs after the piece's
+/// integration and before the solver, so an armed test on a hinge locks in the piece in which the
+/// arm arrives, a piece before the caller's own update would.
+#[test]
+fn an_armed_hinge_lock_runs_in_the_piece_the_arm_arrives() {
+    let run = |armed: bool| {
+        let mut physics = Havok17Backend::new().unwrap();
+        let base = physics
+            .create_body(&BodyDesc::new(
+                MotionType::Static,
+                ShapeDesc::Box {
+                    half_extents: Vec3::splat(0.1),
+                },
+            ))
+            .unwrap();
+        let arm = physics
+            .create_body(
+                &BodyDesc::new(
+                    MotionType::Dynamic,
+                    ShapeDesc::Box {
+                        half_extents: Vec3::new(0.5, 0.05, 0.05),
+                    },
+                )
+                .at(Vec3::new(0.8, 0.0, 0.0))
+                .with_mass(10.0),
+            )
+            .unwrap();
+        let mut desc = HingeDesc::new(base, arm, Vec3::ZERO, Vec3::Z);
+        desc.anchor_b = Vec3::new(-0.8, 0.0, 0.0);
+        let hinge = physics.create_hinge(&desc).unwrap();
+        physics.set_velocity(arm, Vec3::ZERO, Vec3::new(0.0, 0.0, 4.0));
+        let mut locked_after = None;
+        for i in 0..6 {
+            if armed {
+                // A stop and a band that hold the whole sweep of the first pieces.
+                physics.arm_slider_lock(hinge, 0.0, 10.0);
+            }
+            physics.step(1.0 / 60.0);
+            if locked_after.is_none() && physics.joint(hinge).unwrap().saved_limits.is_some() {
+                locked_after = Some(i);
+            }
+        }
+        locked_after
+    };
+    assert_eq!(run(true), Some(0), "armed: locked in the first step");
+    assert_eq!(run(false), None, "unarmed: nothing locks it");
+}

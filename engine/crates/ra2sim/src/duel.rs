@@ -2456,6 +2456,7 @@ impl Duel {
             }
             // The controller's own angle (`0x481190`), for its auto-lock test.
             let angle = j.sense * self.physics.hinge_angle(j.handle);
+            let mut arm = None;
             let (target, force, torque, strength, friction, held) = {
                 let mut d = j.drive.lock().unwrap_or_else(|e| e.into_inner());
                 // The script's torque is the *limit* on the drive, and it can
@@ -2478,6 +2479,9 @@ impl Duel {
                     d.locked = true;
                 }
                 let held = d.locked;
+                if !held && !arrived && d.auto_lock_stops && p != 0.0 && prelock_arena_enabled() {
+                    arm = Some(j.sense * if p > 0.0 { j.stops[1] } else { j.stops[0] });
+                }
                 // The motor runs at `trunc(p · 0.01 · S)` ([`crate::motor::
                 // hinge_velocity`]: live the Octagon's hammer smashes at 94 for
                 // its 95 and retracts at -2 for its 3), in ours' sense
@@ -2501,6 +2505,11 @@ impl Duel {
             // (`FUN_00480e20`, `FUN_004b50c0`); a backend without it holds the
             // joint on the friction set above.
             self.physics.lock_joint(j.handle, held);
+            if let Some(stop) = arm {
+                // The controller's auto-lock is a Havok action: after the piece's integration,
+                // before its solver (docs/29 section 12az).
+                self.physics.arm_slider_lock(j.handle, stop, 0.05);
+            }
             if (j.strength - strength).abs() > 1e-3 || (j.friction - friction).abs() > 1e-3 {
                 self.physics
                     .set_joint_strength(j.handle, strength, friction);
@@ -2533,6 +2542,7 @@ impl Duel {
     /// them as a motor at +0.2 m/s into the stop they already sat on.
     fn drive_arena_slider(physics: &mut dyn PhysicsBackend, j: &mut LiveJoint, dt: f32) {
         let pos = physics.slider_offset(j.handle);
+        let mut arm = None;
         let (push, force, locked, hold) = {
             let mut d = j.drive.lock().unwrap_or_else(|e| e.into_inner());
             let mut push = None;
@@ -2545,6 +2555,9 @@ impl Duel {
                         d.direction = 0.0;
                     }
                 } else {
+                    if d.auto_lock_stops && prelock_arena_enabled() {
+                        arm = Some(stop);
+                    }
                     let v = physics
                         .state(j.body)
                         .map(|s| s.linear_velocity)
@@ -2569,6 +2582,10 @@ impl Duel {
         };
         // A backend without the lock holds the joint on friction instead.
         let supported = physics.lock_joint(j.handle, locked);
+        if let Some(stop) = arm {
+            // Auto-lock is a Havok action (docs/29 section 12az).
+            physics.arm_slider_lock(j.handle, stop, 0.05);
+        }
         let friction = if locked && !supported { hold } else { 0.0 };
         if j.strength != 0.0 || (j.friction - friction).abs() > 1e-3 {
             physics.set_joint_strength(j.handle, 0.0, friction);
@@ -4200,6 +4217,12 @@ impl Duel {
         self.ai[i] = state;
         input
     }
+}
+
+/// `RA2_PRELOCK_ARENA=0` runs the arena controllers' auto-locks before the substep, a piece
+/// late, as before (docs/29 section 12az).
+fn prelock_arena_enabled() -> bool {
+    std::env::var("RA2_PRELOCK_ARENA").map_or(true, |v| v != "0")
 }
 
 #[cfg(test)]
