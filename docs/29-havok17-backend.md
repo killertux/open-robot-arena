@@ -7562,3 +7562,94 @@ hits in the first 20 s are 7.0 against 7.75 (live 8 fights, within the noise of 
 
 **Tools.** `frida/ra2_zonepieces.js` (`P`, `W`), `tools/oracle/zone_pieces.py live|ours|live-sz|ours-sz`,
 `live_runs.py live` reads its `W` rows, `RA2_ZONE_LOG=1`, `RA2_ZONE_INTERNALS=0`, `RA2_ZONE_CHASSIS=0`.
+
+### 12av. The Compressor's Wide Load count is not an overcount: the SmartZone, its events and the Attack/Engage decision agree with the original; the 73.6 was an 8-fight subset of 26 live fights (fx/attack-reach)
+
+The task: 12au left the Compressor's Wide Load at 94.8 counted hits against a live 73.6 (the Sentinel's 7.4
+against 5.3) after the chassis flag, and named the SmartZone's reach, `fRadius` and `GetDistanceToID` /
+`RobotInRange` as the likely cause. Nothing there differs. **No engine change** (nothing to switch).
+
+**New live captures** (`:7`, `RA2_FRIDA_PORT=27147`, under the shared lock; `Teams/`, `AI/`, `ra2.cfg` copied
+before and sha256-compared after: "prefix restored", twice; 21 rows in `local/oracle/manifest.tsv`, copies and
+`manifest-additions-2026-11-04-attack-reach.tsv` in `~/ra2-oracle-backup`):
+`boxstart-zonepieces-sentinel-wideload-compressor__live__000..003` (`frida/ra2_zonepieces.js`: the zone listener's
+`P` rows and the arena's `W` rows) and `boxstart-zonepose-sentinel-wideload-compressor__live__000..002`
+(`frida/ra2_zonepose.js`: the same `P` rows with both bodies' centre of mass and rotation), Sentinel
+(`AI/Team0/Bot2`) v Wide Load (`AI/Team8/Bot2`), shipped AIs, whole fights, through `capture_parts_set.sh`. The
+`.tsv` of each is the AI state every 3 frames (`capture_boxstart.py` now takes `EXPR=`): location, `isUpsideDown`,
+`lastTactic`, `set_throttle`, `set_turn_throttle`, the sensor table `[(robot, contacts, chassis)]`,
+`GetDistanceToID(other)`, `GetSpeed()` (and `GetDirection()` in the second set).
+
+**1. The scripts.** Sentinel is `Flipper` (`radius 1.4`, `car`, zone `flip`), Wide Load `Poker` (`radius 1.2`,
+`nose pi`, zone `weapon`); both run `Tactics.Engage` and nothing else (there is no `Attack` tactic). It drives
+`DriveToLocation(target)` while `GetDistanceToID(target) > fRadius and not RobotInRange(target)[1]`, otherwise it aims; with
+`RobotInRange(target)[0]` and a speed above `top_speed / 2` it brakes first. All of it is Python in `AI/`, run
+as shipped (`Bindings.py` supplies `fRadius`); the natives it calls are `GetDistanceToID` (planar, 12am),
+`GetSpeed` and the sensor table. `RobotInRange` is `AI/__init__.py`'s default: `(entry.contacts > 0, entry.chassis)` of the
+sensor for that robot, `(False, False)` without one (`Spinner` overrides it; neither bot is a spinner). The table
+is fed two ways: `SmartZoneEvent(direction, id, robot, chassis)` on every enter (`contacts += 1`, `chassis = True` for a chassis
+collidable) and leave (`contacts -= 1`, `chassis = False` when a chassis leaves or the last contact does), and a
+rebuild from `GetZoneContents` every 8th `Tick` (`CheckSensors`: `sensors = {}`, one `SmartZoneEvent(1, ...)` per
+reading, phantoms included) and on `FractureEvent`. Nothing else updates it while a robot stays in.
+
+**2. The SmartZone's geometry (binary and live).** The zone is a convex phantom (8 vertices, 12 triangles) on the chassis body.
+Live vertices of the two phantom collidables (`robotcolliders-sentinel-wideload-compressor__live__000`, tags 52 and
+110, in the chassis body's frame, origin the centre of mass), against ours (`examples/szgeom`, the zone's local box
+times the component's world frame):
+
+| zone | live min .. max | ours min .. max |
+|---|---|---|
+| Sentinel `flip` | (-0.396, -0.278, 0.439) .. (0.358, 0.184, 1.517) | (-0.396, -0.278, 0.439) .. (0.358, 0.184, 1.517) |
+| Wide Load `weapon` | (-0.808, -0.452, -1.969) .. (0.912, 0.185, -0.921) | (-0.808, -0.452, -1.969) .. (0.912, 0.185, -0.921) |
+
+Shape, size, place and orientation are the original's to the millimetre (the zone hangs on the chassis, 0.44 m
+ahead of the Sentinel's centre of mass and 0.92 m ahead of the Wide Load's, along the nose).
+
+**3. When the state changes (live).** The `P` rows come with the Havok steps (`A` rows): in one fight 3698 of 16225 step pieces raise events, up to 6 in one step,
+so the detection runs every step; ours runs `watch_brain_zones` every step.
+**The overlap is the original's at the event poses**: for each enter or leave between a robot's zone and the
+other's chassis collidable (225 events, `zonepose-...__live__000..002` through `tools/oracle/zone_replay.py` and
+`examples/zoneprobe`, ours placed at the live body poses), the mesh rule (a triangle of the chassis crosses the
+zone, 12i) gives the live answer in **223 of 225** (Sentinel's zone 45 of 46, Wide Load's 178 of 179), the
+hull rule 136 of 225.
+
+**4. Pieces.** Enters into the zones in the first 45 s (7 live fights, ours 24 with `RA2_ZONE_LOG=1`,
+`zone_pieces.py live-sz|ours-sz` with `BOTS=AI/Team0/Bot2.bot,AI/Team8/Bot2.bot`): the Sentinel's zone 59.6 live, 56.3 ours; Wide Load's
+219.0 live, 206.7 ours. Per piece, live / ours: Wide Load's chassis in the Sentinel's zone 8.6 / 6.7, the Sentinel's chassis in
+Wide Load's 12.3 / 19.7, the wedge 7.6 / 10.3, the pointy tips 14.3 / 15.0, the T connectors 9.9 / 11.9, the steering units 78 / 57.5
+(per fight; the set of pieces is the same on both sides apart from a `tag336`/`tag112` the live robots have once).
+
+**5. What the Engage decision does (live, `fightpos-...__live__000..022`, the four new `.tsv`, first 60 s, both
+robots upright and in `Engage`; ours 12 warmups with `RA2_AI_TRACE=1`).** Wide Load's throttle given its sensors:
+chassis in range 3 % driving live (0 % ours); not in range 70-75 % live, 82-87 % ours; the Sentinel's 60 % / 45 % with the
+chassis in range and 79-81 % / 77-81 % without. The robots' separation when the chassis flag turns on (the Engage
+stop): Sentinel 2.03 +- 0.25 m live, 2.05 +- 0.21 ours; Wide Load 2.45 +- 0.52 live, 2.64 +- 0.36 ours. Fractions of time with
+the chassis flag: Sentinel 8-17 % live, 9 % ours; Wide Load 64-68 % live, **52 % ours**; separation under 3 m 76 % live,
+61 % ours. So ours does not stop later or drive closer; what differs is occupancy (the robots are apart more
+of the time in ours, in the same states with the same tactic mix: Engage 69-82 % live, 87-88 % ours, Invert the rest), a
+matter of the dynamics, not of the zone or the tactic.
+
+**6. The counts.** 12au's 73.6 / 5.3 are 8 live fights. Every live Compressor fight with the hit agent: `fight-...__live__001..007`
+(7) and `arenahits-...__live__000..018` (19, 12al), counted hits of 10 hp or more of the first 120 s:
+
+| | Wide Load on Sentinel | Sentinel on Wide Load |
+|---|---|---|
+| live, 26 fights | **99.5 +- 14.4** (sd 74; from 8 to 240) | 5.1 +- 0.74 |
+| live, 8 of 12au | 73.6 | 5.3 |
+| ours, 96 warmups | 94.8 +- 4.9 | 7.4 +- 0.6 (4.9 +- 0.4 before the chassis flag) |
+
+The Wide Load count is the live mean (0.3 se); the "overcount" was the small sample. The Sentinel's
+7.4 against 5.1 is 2.4 se, and 12au's 4.9 before the flag was equally within. It is not a zone difference
+(sections 2-5) and the flag is the original's; the Sentinel hits Wide Load with the wedge/flipper and its count follows how often the
+two are in contact, the occupancy of section 5.
+
+**7. Ensembles** (`ensemble.sh`, 120 s, warmups 0..95, counted hits of 10 hp or more), before = after (no engine change; the
+numbers reproduce 12au to the digit on this base): Box Scout / ALARM 8.4 +- 0.5 / 39.3 +- 2.2; Razor / FlapJack 6.5 +- 0.5 /
+1.1 +- 0.1; Sentinel / Wide Load 7.4 +- 0.6 / 94.8 +- 4.9; Octagon Scout / ALARM 5.5 +- 0.3 / 21.9 +- 1.7.
+
+**Open.** Occupancy: ours has Wide Load's chassis in the Sentinel's zone 52 % of the Engage time against 64-68 % live and the
+robots under 3 m 61 % against 76 %. Both read the same zone and decide the same way, so the cause is in how the two bodies meet and
+part (impact response, the wedge's push, `Unstuck`/`Invert` recoveries), not in the AI. The Sentinel's 7.4 against 5.1 follows.
+
+**Tools.** `frida/ra2_zonepose.js`, `tools/oracle/zone_replay.py` (P rows to `zoneprobe` samples), `examples/szgeom`
+(a zone box in its chassis body's frame), `capture_boxstart.py` `EXPR=`, `zone_pieces.py` `BOTS=`.
