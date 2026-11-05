@@ -7653,3 +7653,112 @@ part (impact response, the wedge's push, `Unstuck`/`Invert` recoveries), not in 
 
 **Tools.** `frida/ra2_zonepose.js`, `tools/oracle/zone_replay.py` (P rows to `zoneprobe` samples), `examples/szgeom`
 (a zone box in its chassis body's frame), `capture_boxstart.py` `EXPR=`, `zone_pieces.py` `BOTS=`.
+
+### 12aw. How the robots meet, push and part: the contact physics agrees with the original wherever it can be compared; the Compressor's shortfall is in the long contact, not in the impact (fx/contact-occ; measurements only, no engine change)
+
+The task: 12av left the Compressor's contact occupancy short (the Wide Load's chassis in the Sentinel's zone 52 % of
+the first 60 s against 64-68 % live, the robots under 3 m 61 % against 76 %, the Sentinel's counted hits 7.4 against
+5.1) and put the cause in how the bodies meet and part. 12au left the Octagon's Mini-wheel hits (1.46 a fight against
+0). **No engine change**: every physical rule that could be compared agrees; the gap is measured, localised, and
+open. A live capture to close it (below) could not be taken: the live Wine session was held by the other agent's
+lock for the whole of this work (3 h), so no new original captures were added.
+
+**1. Contact episodes, live against ours** (`tools/oracle/contact_episodes.py`; live `fightpos-*__live__*.tsv`, ours
+96 warmups with `RA2_AI_TRACE=1`; window: 60 s from the first sample with both robots in Engage and under 8 m, only
+samples with both upright; an episode is a run of centre distance under 3 m, gaps under 0.25 s merged; `out` =
+separation speed over the 0.6 s after an episode, `in` = approach speed over the 0.5 s before it, m/s, positive apart):
+
+| fight | | fights | occupancy < 3 m | episodes / min | length mean / median / p90 (s) | out | in | median min. distance |
+|---|---|---|---|---|---|---|---|---|
+| Box Scout / ALARM | live / ours | 13 / 96 | 0.86 / 0.87 | 6.4 / 10.8 | 4.6 / 4.8 (2.3 / 2.4, 13.9 / 11.9) | 1.08 / 1.12 | -1.86 / -1.76 | 1.73 / 1.65 |
+| Box Razor / FlapJack | live / ours | 8 / 96 | 0.93 / 0.90 | 7.3 / 10.4 | 4.5 / 5.2 | 0.00 / 0.27 | -1.19 / -4.86 | 1.65 / 1.25 |
+| Compressor Sentinel / Wide Load | live / ours | 23 / 96 | **0.79 / 0.68** | **12.3 / 24.3** | **3.9 / 2.0** (1.7 / 1.2, 9.8 / 4.1) | 0.39 / 0.36 | -1.37 / -1.26 | **2.01 / 2.28** |
+| Octagon Scout / ALARM | live / ours | 18 / 96 | 0.78 / 0.86 | 8.5 / 10.0 | 3.8 / 4.2 (0.8 / 2.1) | 1.56 / 1.20 | -1.98 / -1.43 | 1.72 / 1.63 |
+
+(Live Razor: 8 short fights, 654 samples.) The Box agrees in occupancy, episode length and speeds; the Octagon is
+shorter-lived live (the fights end early) and ours is, if anything, in contact more. **Only the Compressor differs**:
+live holds the robots together in fewer, twice as long episodes, and closer: in the flat contact (the centres' heights within
+0.3 m) the distance has a sharp peak at 2.25-2.5 m live (37 % of the samples) where ours is spread over 2.0-3.5 m
+(22 %), and the distance below 2 m is 23 % of live's samples against 11 % of ours. The speeds at which an episode starts
+and ends are the same; ours simply ends them twice as often. The occupancy gap does not depend on where on the arena the
+contact is (the centre strip, |z| < 5: 0.78 / 0.66; the rest 0.81 / 0.69), and the chassis flag's share of
+contact (Wide Load 0.65 live; 0.57 ours) follows it.
+
+**2. The impact itself is the original's.** `fightcontacts-sentinel-wideload-compressor__live__000..007` (every
+resolver contact and every body's state each step; first ~13 s of the fight) against 22 of ours (`RA2_H17_DUMP`, 16 s,
+warmups 0..23), from the first step with a contact between the robots:
+
+| first impact | live (7) | ours (22) |
+|---|---|---|
+| Sentinel's speed along the line of centres, 0.05 s before | 5.6 | 5.0 |
+| closing speed of the centres | -7.4 +- 6.2 | -6.1 +- 3.4 |
+| Wide Load's peak speed in the next 0.3 s | 1.62 | 1.65 |
+| Sentinel's / Wide Load's speed 0.3 s after | 1.13 / 0.30 | 0.57 / 0.56 |
+| smallest centre distance in 0.3 s | 2.12 | 2.18 |
+| Sentinel's rise (climbing the wedge) / Wide Load's | 0.35 / 0.05 m | 0.27 / 0.08 m |
+| peak angular speed, Wide Load / Sentinel | 2.9 / 3.3 | 2.8 / 3.4 |
+
+The effective restitution of an impact (separation speed over closing speed) is not measurable apart from the
+robots' drive; the speeds after it are within one sd. After the impact the two diverge: the centre distance 0.6 / 1 / 2 s
+after the first contact is 2.32 / 2.09 / 2.30 m live and 2.44 / 2.60 / 2.85 m ours, the robots still closing at
+0.97 m/s at 0.6 s live (separating at 0.17 ours), and the share of steps with a robot-robot contact in the 3 s after is
+0.65 against 0.47. From the same centre distance the contacts are the same (per distance bin the share of steps with a
+contact between each pair of bodies agrees within the scatter), so the geometry of what touches what is not it.
+
+**3. The rules compared with the binary and the live contact lists.**
+
+* *Friction and restitution.* The live resolver records carry the two materials of each contact; for the chassis pair
+  0.5 / 0.5 and 0.2 / 0.2, wheel and component pieces 0.3 / 0.3, the combination being `sqrt(muA muB)` and `eA eB`
+  (`0x540820`, 12e). Ours writes the same pair: of the robot-robot contacts of the first 13 s the combined (friction,
+  restitution) are (0.387, 0.06) 50 % / (0.30, 0.09) 46 % / (0.5, 0.04) 4 % live and 57 / 39 / 4 % ours. Scaling the
+  robot-robot friction by 2 or 0.5 or the restitution by 0 or 5 (a temporary switch, removed) leaves the occupancy
+  within 0.66-0.69 (48 warmups each, base 0.68): **it does not depend on the contact materials**.
+* *The solver.* `resolver.rs` is the sequential single-point resolver of 12e/12aj (per island round robin over the
+  approaching contacts, 4 x 100 impulses, inelastic after the first 100, the push-out of `10 tol f^2`
+  after each impulse); robot-robot pairs go through it like any other pair, there is no pair-specific code, and no
+  impulse limit exists in the recovered function. The contact distances of the robot-robot contacts agree (median
+  0.09-0.096, no penetration either side, per body pair).
+* *Deactivation.* `RA2_H17_DEACTIVATION=0` changes nothing (occupancy 0.67, 25 episodes / min against 0.66, 24).
+* *Burst impulses.* The Wide Load's piston rod (the 28 kg body on its nose axis) follows the same stroke in both: the
+  extension 0.058 / 0.097 / 0.124 / 0.146 / 0.159 m at 0 / 0.05 / 0.10 / 0.15 / 0.20 s after the rod leaves home (live
+  0.058 / 0.099 / 0.130 / 0.153 / 0.164 ours), and the centre distance after a stroke grows by 0.15 m in 0.3 s and
+  0.55 m in 1.6 s in both (60 strokes live, 132 ours). The rod's return is slower live (0.141 against 0.101 m at 0.55 s)
+  and its median stroke from leaving home to home again 0.99 s against 0.65 s (the tail: a quarter of live's strokes
+  stay out over 2 s, ours 1.2 s): live's rod is held out against the Sentinel longer. This is a consequence of the robots
+  being pressed together rather than a cause (the same strokes separate them equally).
+
+**4. What moves the occupancy in ours** (96 warmups, Compressor, with `RA2_AI_TRACE=1`): with the Wide Load's Poker not
+firing (scratch copy of `AI/Poker.py`, `if self.weapons:` -> `if False:`) the occupancy is 0.70, the chassis flag 0.63 (live
+0.65), episodes 14 / min of mean length 3.3 s (live 12.3, 3.9); with the Sentinel's flipper not firing 0.675 / 0.63. So
+the Wide Load's strokes cut the contact in two in ours (24 -> 14 episodes a minute) and much less so live (12.3 with
+the strokes), while the per-stroke effect measured above is the same. The strokes' rate is set by the Python (a
+`Tick` every 0.125 s with the Wide Load's zone holding a contact and a reload of 4 ticks) and the zone's contact is
+the same share of time (0.77 live, 0.76 ours of the samples), so the open difference is in how often the stroke
+leads to a separation, i.e. in the robots' pressure on each other after it.
+
+**5. Open: the pressed state.** Live the robots sit pressed at a fixed distance for seconds (the Sentinel broadside to the
+nose of the Wide Load: of the contact samples at 2.2-2.8 m the Sentinel sees the Wide Load at its side 68 % live, 39 %
+ours, at its front 20 % / 35 %); ours slips out of that arrangement into nose-to-nose or apart. Both brains
+issue the same commands there (throttle / turn means in the 4 s after the first contact: Sentinel 34-68 / 53-81 live,
+32-44 / 64-77 ours; Wide Load 4-16 / 8-15 live, 14-28 / 8-15 ours, the latter following the shorter chassis flag), the
+yaw rate of a full-lock Sentinel is 0.67 rad/s live (127 samples in contact) against 0.56. What would settle it is
+a long live capture of the robots' step-level state while pressed: `frida/ra2_robotpair.js` (written, never run; its hooks are `ra2_fightcontacts.js`'; the contacts between the two robots' collidables, the two chassis' state
+every step, the priced hits) with `capture_parts_set.sh AGENT=...` would give it; it was queued for the lock and
+not run. Candidates to look at with it: the Sentinel's wheels' `touching` flag and normal while it presses on the Wide
+Load's tips (12ad: the last collision event of the solid wheel, held up to a second), and the rod held out
+against the target.
+
+**6. The Octagon's Mini wheel** (12au: ALARM's hammer on the Scout's wheel, 1.46 a fight against 0 of 5). Box: ours 1.10 a
+fight (16 % of fights), live 0 of 8; all live fights with the component table (`partsfight-*`, 26) hold 3 hits of any size
+by ALARM on a Scout wheel and none of 10 hp, while the Wide Load's tips land ten-hp hits on the Sentinel's wheels as
+often as on its chassis, so a wheel is a valid victim. In ours 93 % (Box) / 81 % (Octagon) of those hammer hits fall
+while the Scout's `up.y` is under 0.3 (on its side or back) against 17 % / 21 % of the hammer's hits on the chassis, so the wheel is struck only
+when the Scout lies over. Not resolved: whether live's hammer misses the wheels of a fallen Scout or the hit is
+priced on another piece (the K tables name the victim by the collidable that was hit).
+
+**7. Ensembles** (`ensemble.sh`, 120 s, warmups 0..95, counted hits of 10 hp or more): the engine is unchanged, so
+before = after, and reproduce 12av to the digit: Box Scout / ALARM 8.4 +- 0.5 / 39.3 +- 2.2; Razor / FlapJack 6.5 +- 0.5 /
+1.1 +- 0.1; Sentinel / Wide Load 7.4 +- 0.6 / 94.8 +- 4.9; Octagon Scout / ALARM 5.5 +- 0.3 / 21.9 +- 1.7. Contact
+occupancy (table in 1): Box 0.87, Razor 0.90, Compressor 0.68 (live 0.79), Octagon 0.86.
+
+**Tools.** `tools/oracle/contact_episodes.py` (section 1), `tools/oracle/frida/ra2_robotpair.js` (section 5; not yet run).
