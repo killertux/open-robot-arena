@@ -8119,15 +8119,13 @@ the Razor's spike strip hit 11-28 hp at the same instant (live 12-15). Ours' pri
 
 So the gap closes: the Razor count is 0.6 se below the live mean (4.0 se above the old one), and the FlapJack's 1.1 against 0.56 +- 0.24
 is 2.2 se, from 9 fights whose count is 0 or 1 (ours' extra are late chassis hits, 0.23 + 0.14 per fight against 0 + 0.11). The
-heavy tail (one live fight of 26 counted hits in 134 s, a ground-and-pound on a stuck FlapJack, 4 further such fights in ours of 96 with
->= 15) means nine live fights cannot resolve a 1.4-hit difference: sd 7.5, se 2.5.
+heavy tail (one live fight of 26 counted hits in 134 s, 3 of ours' 96 with >= 15) means nine live fights cannot resolve a 1.4-hit difference: sd 7.5, se 2.5.
 
 **Why the old captures differ is not settled.** In `arenahits-...000..004` the first robot-robot hits are 0.1-0.7 s in at 0.5 hp and
 none reaches 10 hp before 6 s; the sampling python call per 6 frames (a game-thread call) or the late attach changes the opening, so
 live captures that sample with `ra2_python.py` do not stand for the unperturbed game's opening, and the Box / Octagon / Compressor
-counts of 12ay (also from `fightpos` / `fight-` captures, 8 / 41, 3.2 / 13.6, 5.1 / 99.5 from `partsfight`-style data) should be
-re-read the same way: the Box Scout / ALARM and Octagon live counts have no bell-primed fights here, the Compressor's come from
-`robotpair` (primed), the first with sampling. Not tested here.
+counts of 12ay should be re-read the same way: which of their live fights were captured with the sampling call and which
+bell-primed has to be checked per capture. Not tested here.
 
 **New live captures** (display `:7`, port `27147`, under the shared lock for the whole 4-run session; `Teams/`, `AI/` and `ra2.cfg`
 copied before and sha256-compared after, "prefix restored"; the prefix had no `Robot Designs/`; manifest rows, copies and
