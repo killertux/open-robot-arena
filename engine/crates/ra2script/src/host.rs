@@ -418,7 +418,8 @@ impl ScriptHost {
         for item in classes.try_iter()? {
             let item = item?;
             let name: String = item.getattr("__module__")?.extract()?;
-            if name == module {
+            // (`Practice` lives in `Scripts/`, not in the `Arenas` package)
+            if name == module || name == stem {
                 chosen = Some(item);
                 break;
             }

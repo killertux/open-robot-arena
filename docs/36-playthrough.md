@@ -1820,3 +1820,41 @@ of rails that is not in the pre-decal skin at any offset, flip, or scale (best 8
 what `0xd4` held at that moment is not known.
 
 Tests: `workshop::build::tests` (line 4), `build_mode::tests` (the shade slider, the swatch cut), `effects::tests` (the scroll ranges). Gate: fmt and clippy `-D warnings` clean; 886 tests passed, 0 failed, 2 ignored; `find local/game -newer` printed nothing.
+
+## 9.33 The Test Robot's shadow, the decal band restore, the suite (`fx/shadows`, 2026-11-05)
+
+### The practice arena had no shadow at all
+
+Not a thin line: nothing. `ScriptHost::create_arena_for_script` found the arena class by `__module__ == "Arenas.<stem>"`; `Practice.py` lives in `Scripts/` (`Arenas/__init__.py` ends with `import Practice`),
+its module is `Practice`, so the class was never instantiated for the Test Robot, `AddShadowReceivers` never ran and `Duel::shadow` stayed `None` (probe: `update_effects` saw `state().arena == None`). The matching now also accepts
+the plain stem. After it the practice arena declares what `Practice.py` writes: light `(0.653, 6.894, -0.418)` (the box arena's) and 8 receiver triangles (floor y 0.017, three walls), and the shadow is the same
+`ShadowWizard` projection as the fight arenas (docs/34 11.1: the chassis mesh only, black alpha 0.3, one layer; every fight arena script, 13 of them, already instantiated through `Arenas.*` and drew it). The shape live is
+the large dark patch the light's slant gives: the robot stands at z 8, the light at z -0.4, so the chassis' shadow runs about 1 m toward the camera under and in front of the robot.
+
+Against the live frames (ours through `labshot` with the full route, receiver region `(400,380)-(640,450)` of the rest frame against the three live runs `testdrive-run{a,b,c}-70`): **7.69 / 7.23 / 7.13 -> 4.35 / 4.37 / 3.73**;
+whole frames against `botlab-rerun-70..76`: mean of the seven **16.61 -> 16.69** (the frames are dominated by the robot's run-to-run position, 9.32; whole rest frame against runs a / b / c: 5.87 / 6.25 / 6.21 -> 5.65 / 6.34 / 6.15). Test: `match::tests::the_practice_arena_casts_the_robots_shadow`.
+
+### The decal's band restore, probed live: it restores nothing
+
+`tools/oracle/decal_live.sh` + `frida/ra2_decal.js` (`ra2_hook.py --bindir` keeps binary payloads) hook `FUN_00426130`, the snapshot `FUN_00423ea0` and `FUN_005b30a0` on the live game (menu -> lab -> chassis ->
+armour default -> `05e-export-skins`). Captures `decalband-*` (backup `manifest-additions-2026-11-05-shadows.tsv`).
+
+* `this+0xd4` is **a fresh snapshot of the skin made at the start of every effect** (`FUN_00423ea0`: `new FUN_005a87c0(skin texture at (this+0xd0)+0x2b4)`, a 256 x 256 format-22 (`A8R8G8B8`) texture). Read back with `LockRect`
+  (`decalband-snapshot-pre`) it is **byte for byte the armour export**, and the snapshot taken by the next effect (`-post`) differs from it only in the nut. So the undo copy holds nothing stale.
+* The first argument of `FUN_00426130` is the **group index** (1), not a size: `R = FUN_004287e0(group)` is the hit panel's rectangle `(95, 165, 179, 249)`, and the four rectangles are exactly
+  `(0,0,256,165) (0,249,256,256) (0,165,95,249) (179,165,256,249)` (`decalband-trace`); `CopyRects(src = snapshot, dst = skin)` is called with them.
+* **Yet the decal is not clipped.** `decalband-export-decal` (the nut centred at skin `(153.5, 183)`, 80 px) runs past `R` on three sides, 3266 of 4705 changed pixels are inside `R` and the rest outside: the
+  `CopyRects` had no effect in the live game (Wine 9.0 wined3d, llvmpipe). Ours, drawn unclipped from the live armour skin, differs from the live decal skin by **0.16** per channel (clipped to `R`: 1.40).
+  `Paint::decal_on` therefore draws on the whole skin (test `the_decal_matches_the_live_export_without_the_band_restore`); `Canvas::decal`'s clip rectangle stays for the unit test and `decal_group`.
+* **The stale block `(0,0)-(219,84)` of `paintfx-export-decal` did not come back**: two more live runs of the same route (one logging only, one also reading the snapshot) show a clean skin, and the 3D view (`decalband-91-decal-top`)
+  has no block (whole-frame 2.5 against `paintfx-e4-91-decal-top`, the nut at another point). Since the snapshot is exact and `R` is a different rectangle, the block is not the game's logic: it is a one-off of the wined3d
+  `CopyRects` / llvmpipe path (stale memory in a copy that otherwise did nothing). It is **not reproducible and not reproduced**; the old `paintfx-export-decal` is kept as is. Whether a Windows D3D8 device would
+  restore the bands is not known; the live oracle, the reference here, does not.
+
+### The UI suite
+
+`fidelity.py --renderer app` on this tree before and after: **1.83 -> 1.83** over 114 fixtures (the 1.59 of 11.12 was before the later arena fixtures; no UI change here). Open, measured: the Exhibition arena list
+(`exhibition-arena-box`, 0.83) is 1 px high in ours below its top border (live border rows 120 / 282, rows start at 166; ours 120 / 281, 165): the list is one pixel short and its rows one pixel up;
+`botlab-chassis` 0.45 and `botlab-overview` 0.39 not looked at.
+
+Tests: practice shadow, decal against the live export. Probes: `tools/oracle/decal_live.sh`, `frida/ra2_decal.js`.

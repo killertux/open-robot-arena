@@ -470,7 +470,9 @@ impl Paint {
     }
 
     /// A decal on a panel (`FUN_00426130`): centred on the skin point `centre`, `side` pixels wide
-    /// (80 x the size slider), turned by `angle`, kept inside the panel's rectangle.
+    /// (80 x the size slider), turned by `angle`. The original's four `CopyRects` that should take the
+    /// skin outside the panel's rectangle back from the undo copy did nothing in the live runs: the
+    /// decal runs past the panel (docs/36 section 9.33), so the whole skin is the clip.
     pub fn decal_on(
         &mut self,
         index: usize,
@@ -479,8 +481,8 @@ impl Paint {
         side: f32,
         angle: f32,
     ) -> Result<(), PaintError> {
-        let r = self.rect_of(index)?;
-        self.render(|c| c.decal(tex, centre, side, angle, r));
+        self.rect_of(index)?;
+        self.render(|c| c.decal(tex, centre, side, angle, [0, 0, i32::MAX, i32::MAX]));
         Ok(())
     }
 
