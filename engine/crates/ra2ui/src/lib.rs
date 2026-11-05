@@ -1067,6 +1067,42 @@ fn place_core<'a>(
             .and_then(|a| a.body.as_deref())
         {
             frame = sized(body, parent, body.size(), fonts, false);
+            // The list's own `Border` ring is the outermost row and column of that rectangle,
+            // and the rows and the selection bar live inside it (live `exhibition-arena-box`:
+            // grey line at x 286 / 543 and y 159 / 442 for the 258 x 284 rectangle at (286, 159),
+            // black list 256 x 282 at (287, 160), the selection bar's first row 178 = 160 + 18).
+            // Drawn as the ring outside the widget's frame, the frame is the inset rectangle.
+            // Only when the file lists the `Scroller` before the `Border` (`arena.gib`): the other
+            // lists write the border first (`editteam.gib`'s logo list, the botlab texture lists) and
+            // their ring is outside the rectangle (live `teamhq-editteam`).
+            let scroller_first = widget
+                .attachments
+                .iter()
+                .position(|a| a.kind == AttachmentKind::Scroller)
+                .zip(
+                    widget
+                        .attachments
+                        .iter()
+                        .position(|a| a.kind == AttachmentKind::Border),
+                )
+                .is_some_and(|(scroller, border)| scroller < border);
+            let ring = if scroller_first {
+                widget
+                    .attachment("Border")
+                    .and_then(|b| b.number("Width"))
+                    .unwrap_or(0.0)
+                    .round()
+            } else {
+                0.0
+            };
+            if ring > 0.0 {
+                frame = Frame::new(
+                    frame.x + ring,
+                    frame.y + ring,
+                    frame.w - 2.0 * ring,
+                    frame.h - 2.0 * ring,
+                );
+            }
         }
     }
     if let Some((pane, horizontal)) = forced {
