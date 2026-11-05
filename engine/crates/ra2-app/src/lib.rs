@@ -111,6 +111,8 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         )?;
         options.simulate_season = args.simulate_season;
         options.bench_undamaged = args.bench_undamaged;
+        options.event_robot = args.event_robot;
+        options.force_round_win = args.force_round_win;
         return match options.out {
             Some(_) => hq_mode::run_headless(options),
             None => window::run_hq(options, args.audio_report),

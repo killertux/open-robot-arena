@@ -1123,16 +1123,11 @@ impl Career {
             if entered.points > player.highest_score() {
                 player.set_highest_score(entered.points);
             }
-            let defeated = report
-                .robots
-                .iter()
-                .filter(|robot| robot.team == player_team && robot.defeated)
-                .count() as i32;
-            player.set_defeated(player.defeated() + defeated);
         }
 
         let won = report.winners.contains(&entered_robot);
         if won {
+            self.add_kills(report);
             self.rounds_won += 1;
             if report.duration < self.player().fastest_win() {
                 self.player_mut().set_fastest_win(report.duration);
@@ -1157,6 +1152,17 @@ impl Career {
             opponents,
             won,
         })
+    }
+
+    /// A won round adds the match's defeated players (`Player+0x34`, state 1 to 3, every robot in the
+    /// match) to the team's kills (`Team+0x50`; `FUN_004164a0` counts them, `FUN_0046c400` adds the
+    /// count when the result is a win, `FUN_0046c5b0`). The HQ's `KILLS:` shows them as skulls and
+    /// nothing resets them: live, three opponents eliminated in a won round 1 stayed on the HQ after
+    /// a lost final and after entering the next event.
+    fn add_kills(&mut self, report: &MatchReport) {
+        let kills = report.robots.iter().filter(|robot| robot.defeated).count() as i32;
+        let player = self.player_mut();
+        player.set_defeated(player.defeated() + kills);
     }
 
     /// The repair list a report leaves: one entry per damaged, detached or
@@ -1312,7 +1318,6 @@ impl Career {
             .robots
             .get(entered_robot)
             .ok_or_else(|| format!("the report has no robot {entered_robot}"))?;
-        let player_team = entered.team;
         let participation = self.policy.participation_points / rounds.max(1) as i32;
         let bonus = entered.points.max(0) / self.policy.score_divisor;
         let points = participation + bonus;
@@ -1339,15 +1344,12 @@ impl Career {
             if entered.points > player.highest_score() {
                 player.set_highest_score(entered.points);
             }
-            let defeated = report
-                .robots
-                .iter()
-                .filter(|robot| robot.team == player_team && robot.defeated)
-                .count() as i32;
-            player.set_defeated(player.defeated() + defeated);
         }
 
         let won = report.winners.contains(&entered_robot);
+        if won {
+            self.add_kills(report);
+        }
         let result = RoundResult {
             round,
             opponents: opponents.clone(),
@@ -1434,7 +1436,6 @@ impl Career {
         let player = self.player_mut();
         player.set_season_points(player.season_points() + points);
         player.set_event_points(0);
-        player.set_defeated(0);
         player.set_total_events(player.total_events() + 1);
         player.set_events_won(player.events_won() + i32::from(won));
         let wins = player.wins() + rounds_won as i32;
@@ -1456,6 +1457,10 @@ impl Career {
         }
         player.set_event_index(-1);
         player.event_robot = -1;
+        // `FUN_0046ca90` ends the event with `FUN_004faaa0`, which clears the damage maps
+        // (`FUN_004faa60`) with `Robot In Event`: the bench is only ever opened between rounds
+        // of a running event, so what is left of the damage is dropped with it.
+        self.repairs.clear();
 
         if won {
             let event_data = &self.events[event];
@@ -2461,7 +2466,22 @@ mod tests {
         assert_eq!(career.repairs[0].cost, 0);
         assert_eq!(career.repairs[0].seconds, 1_800.0);
 
+        // Kills: only the defeated robot of the first (won) award counts, once; the event's end keeps them
+        // (`Team+0x50` is never reset: live, three kills stayed on the HQ after the event).
+        assert_eq!(career.player().defeated(), 1);
+        let pending = career.repairs.clone();
         let record = career.finish_event(true).unwrap();
+        assert_eq!(
+            career.player().defeated(),
+            1,
+            "the event's end does not reset the kills"
+        );
+        assert!(
+            career.repairs.is_empty(),
+            "the event clear (`FUN_004faaa0`) drops the damage with the event"
+        );
+        // Restore the list a save in the middle of an event carries, for the round trip below.
+        career.repairs = pending;
         assert_eq!(record.event, event);
         assert_eq!(record.points, 164);
         assert_eq!(career.player().season_points(), 164);

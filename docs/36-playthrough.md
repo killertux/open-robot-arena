@@ -1888,3 +1888,54 @@ inset was applied to all of them), so the placement in `ra2ui` insets the list b
 
 State-only or noise: all `arena-*`, `match-*`, `event-bracket-duel-*`, `event-award-photo`, `event-repairs` (robot), plus the glyph-level residue of the rest. No fixture was re-captured live; none of those states is reproducible
 from our route (the robot of the live team, the seeded bracket order, the camera clock).
+
+## 9.35 The event flow: the repairs bench, the team match, the kills (`fx/eventflow`, 2026-11-05)
+
+Binary (`Robot Arena 2.exe`, Ghidra) and a live session (flatpak Wine, display :7; the prefix's `Teams/`, `AI/`, `ra2.cfg` copied before and restored after, sha256 list equal). New captures
+(`local/oracle/original`, manifest rows, backup copy and `manifest-additions-2026-11-05-eventflow.tsv`): `event-repairs-atom`, `match-results-team`, `teamhq-kills-skulls`,
+`team-match-ai-sample` (a trace).
+
+### The Repairs bench (task 1)
+
+* **When it opens.** `RepairsWindow::open` (`FUN_004d62a0`) has two callers. `FUN_0046ce50` (the end of a round: `FUN_0046c830` advances the bracket; a **won** round of a running event opens the bench
+  with the fixed 30:00 clock, damaged or not; a lost round or the last round ends the event with `FUN_0046ca90` and **no bench**) and `FUN_00500c40` (the HQ's event button on an event that is
+  already in progress, which shows the bench with the clock left over, `FUN_005011f0`, when `+0xf6` says repairs are pending). There is no bench from the HQ otherwise and none after the event closes.
+* **Which robot.** `FUN_004d62a0` builds `Team::buildRobot(Robot In Event, copy damage)` (`FUN_004fa890`), which answers null unless the index is a key of the team's robot map
+  (`Team+0x150`, `FUN_004fa3b0`): so the bench shows `Robot In Event` and, were it -1, an empty box. It is **not** the first roster slot (the previous round's choice, `docs/36` 9.34). Live
+  (`event-repairs-atom`): the fifth robot of the join window, Atom Smasher, is the one in the box; the capture the fixture had was the prefix's own Bot0 (a modified C.R.U.S.H.), not "another design".
+* **The title** is `"Round " + Team+0x110 + " Repairs"` (`FUN_004d6890`; `Team+0x110` is the round counter `FUN_004faaf0` has already incremented): "Round 1 Repairs" after the first round, "Round 2" after the
+  second. Ours always said "Round 1".
+* **The damage.** `FUN_004faaa0` (the event clear in `FUN_0046ca90`) sets `Robot In Event` and the event index to -1 and clears both damage maps (`FUN_004faa60`): what is left of the damage is
+  dropped with the event. `Career::finish_event` clears `repairs`; the award's continue button returns to the HQ (it opened the bench when damage was pending).
+* **The 3D box** is not a top view. The view object of the open window (probed live: `0x7b431b8`) holds a camera node at `(0, 0, -5)` with the identity rotation, a 45 degree vertical field of view,
+  aspect 1 (455 x 455), near 1, far 2000; the robot stands at the origin with the identity orientation (`FUN_004d69d0`: `FUN_004dcff0`, quaternion (0,0,0,1), camera `(0, 0)` at distance 5.0:
+  `FUN_0048cf10` / `FUN_0048cf30`): the robot is seen from 5 m behind, level. The lights were not probed; a white point light at the camera with a white specular term fits (the hex nuts at the bar's ends 206
+  against 201, the blue plate 60/66/145 against 62/69/151; the lab's key light gave 103 and a dark plate). `build_mode::robot_bench_view`. Fixtures (`fidelity.py --only event-repairs --jobs 1`): `event-repairs` 4.2 -> 1.30, new `event-repairs-atom` 1.49; the
+  whole app suite is 1.84 over 115 fixtures (1.846 before; in the parallel run the offscreen 3D box came out empty for both repairs fixtures under load, run them with `--jobs 1`).
+* **The wood ring's bottom rows** (720 and 721) are drawn below the 720-row pane: a ring of `Width >= 2` on a split slot's child is no longer cut at the pane (`ra2-render::ui`). Open: the bright inner
+  3 px of the bench's top and left edge (live 183,157,112 at x 52, ours 147,123,83): not the shadow image (black, alpha), it looks like the wood tile's wrapped edge row.
+* Harness: `--event-robot N` (the join window's column) and `--force-round-win` give the between-rounds bench in a headless run; `fidelity.py` fixtures `event-repairs` (forced win) and `event-repairs-atom`.
+
+### The team match (task 2)
+
+A 2v2 TEAM MATCH (Combat Arena, Red Zone Scout + ALARM against Scout + Sentinel, the shipped brains) run live with `AI.running_ai` probes and in ours (`fidtrace team`, new). Ids are the slots in
+reading order (0, 1 the red team, 2, 3 the blue). Verified: `GetEnemies` 0/1 = (2, 3), 2/3 = (0, 1) (a team mate is left out, ascending), `IsEnemy(i)` = `[0, 0, 1, 1]` / `[1, 1, 0, 0]` (self and mate 0), a robot
+out of the fight drops from the *other* team's lists (`(3,)` at 13.0 s live) while its own list keeps its enemies, `GetNearestEnemy` goes through `GetEnemies`. Targeting in the first second is identical
+(Engage targets 2, 2, 0, 1; `enemy_id` 2, 2, 0, 1 from 0.28 s; brain 1 switches to 3 at 1.1 s live / 1.18 ours), the start points equal to 0.01 m, tactics Invert/Unstuck the same set; the later fight
+differs (live 2 is out at 13 s, ours at 23 s: physics, not the AI). `IsEnemy` on an id with no player, in a TEAM MATCH, reads a missing player (`FUN_004146c0` then `FUN_004177c0`): the probe never returned live; ours answers (true); not reproduced, no script asks. The AI branch needed no change.
+**Found and fixed in the results window** (`match-results-team`): `FUN_004884b0` sorts the rows twice with `std::sort` (insertion sort at this size, stable): by points descending (`row+0xc4`,
+`0x4889b0`) and then winners first (`player+0x74`, `0x488b00`). Live: ALARM 1147 and Scout 0 (the winning team) above Sentinel 23 and Scout 0, the slots being Scout, ALARM, Scout, Sentinel; the 1v1
+capture `match-results` (Scout 26 winner above ALARM 663) agrees. Ours listed robot order. `MatchReport::results` sorts; test `the_results_rows_are_sorted_by_points_then_winners_first`.
+
+### The rest of the flow (task 3)
+
+* **Kills.** The Team HQ's `KILLS:` is `Team+0x50` drawn as skulls (`FUN_005009f0`: hundreds, twenties, fives, ones: `teamhq\skull100/20/5/1.tga`, each image one width after the last in the `kills group`).
+  Ours drew nothing and reset the count at the end of every event, counting the *player's own* defeated robots. `FUN_004164a0` counts every player with state != 0 at the end of the match, `FUN_0046c400` adds
+  the count when the round is **won**, nothing resets it (live: 3 skulls after a won round 1 with three opponents eliminated, a lost final, and after entering the next event). Fixed
+  (`Career::add_kills`, `ra2ui::hq::kill_skulls`): the HQ crop is pixel-equal to `teamhq-kills-skulls` (MAE 0.27).
+* **Entry fees, prize money, repair cost**: none in the exe (`docs/16` 3): the `10000` is the fastest-win sentinel; confirmed again live (the record after two events carries no cash field).
+* Live checks that agree with ours: a won round 1 gives 80 event points (participation 160 / 2 rounds), the award shows `Rounds Won/Total: 1/2`, `Total Team Points Scored: 80`, the photo prize for one
+  round won; the Blade Tournament is a 2-round bracket of 4-robot matches; "Event Completed" is on the finished cell.
+* The live record after a won round plus two lost events ends `... 120 40 80 ... (league line), 0, 80, 3`: event points 0, season points 80, kills 3 (not compared line by line with ours).
+* Not reproduced / open: the repairs bench from the HQ's event button with a partly served clock (`FUN_005011f0`'s minutes and seconds); the per-row time / damage text of a damaged bench (no damaged bench was reachable live); the wrapped bright edge of the bench's wood; the live fight of a
+  2v2 against ours (physics).

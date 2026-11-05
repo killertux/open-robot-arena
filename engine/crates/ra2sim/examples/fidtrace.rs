@@ -31,6 +31,7 @@
 use std::io::Write;
 
 use glam::Vec3;
+use pyo3::types::PyAnyMethods;
 use ra2sim::{
     BotSetup, DriveScript, Duel, GameType, Match, MatchConfig, MatchState, RobotEntry, DEFAULT_STEP,
 };
@@ -96,9 +97,63 @@ fn sample(duel: &Duel) -> Vec<(Vec3, f32, f32, f32, f32)> {
         .collect()
 }
 
+/// The probe the `team` mode runs on every sample, the Python 3 side of the live `_probe()`.
+const TEAM_PROBE: &str = "
+import AI, plus
+s = []
+for r in AI.running_ai:
+    t = tg = None
+    if len(r.tactics) > 0:
+        t = r.tactics[0].name
+        tg = getattr(r.tactics[0], 'target_id', None)
+    loc = r.GetLocation()
+    s.append('%r %s e=%s t=%s tg=%r n=%r p=(%.2f,%.2f)' % (r.GetID(), r.name, tuple(r.GetEnemies()), t, tg, r.enemy_id, loc[0], loc[2]))
+line = ' | '.join(s)
+";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     match a.first().map(String::as_str) {
+        // `team <arena> <b0> <b1> <b2> <b3> <seconds> <out.txt>`: a 2v2 TEAM MATCH of four brains (teams
+        // 0 0 1 1), one row per 0.1 s with the live probe's fields (`tools/oracle/ra2_python.py
+        // --sample '_probe()'`, `tools/oracle/team_probe_install.py`): the match clock, then per
+        // brain `id name e=<GetEnemies> t=<first tactic> tg=<its target_id> n=<enemy_id> p=(x,z)`.
+        Some("team") if a.len() == 8 => {
+            let secs: f32 = a[6].parse()?;
+            let cfg = MatchConfig::new(
+                a[1].clone(),
+                GameType::TeamMatch,
+                vec![
+                    RobotEntry::ai(0, a[2].clone()),
+                    RobotEntry::ai(0, a[3].clone()),
+                    RobotEntry::ai(1, a[4].clone()),
+                    RobotEntry::ai(1, a[5].clone()),
+                ],
+            )
+            .with_duration(Some(secs));
+            let mut m = Match::new(cfg)?;
+            let mut out = std::fs::File::create(&a[7])?;
+            let mut step = 0usize;
+            while m.state() != MatchState::Results && step < (secs * 90.0) as usize + 2000 {
+                m.step();
+                step += 1;
+                if !step.is_multiple_of(EVERY) {
+                    continue;
+                }
+                let line = pyo3::Python::with_gil(|py| -> pyo3::PyResult<String> {
+                    let code = std::ffi::CString::new(TEAM_PROBE).expect("no NUL");
+                    let globals = pyo3::types::PyDict::new(py);
+                    py.run(&code, Some(&globals), None)?;
+                    pyo3::types::PyDictMethods::get_item(&globals, "line")?
+                        .expect("line")
+                        .extract()
+                });
+                match line {
+                    Ok(line) => writeln!(out, "{}\t{line}", m.clock())?,
+                    Err(e) => writeln!(out, "{}\tERR {e}", m.clock())?,
+                }
+            }
+        }
         Some("match") if a.len() == 7 => {
             let secs: f32 = a[4].parse()?;
             let cfg = MatchConfig::new(
