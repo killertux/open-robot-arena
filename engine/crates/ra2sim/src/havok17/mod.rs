@@ -253,11 +253,35 @@ pub struct Havok17Backend {
     clock: deactivation::Clock,
     /// Substeps run.
     substeps: u64,
+    /// Prismatic auto-locks armed for this substep ([`PhysicsBackend::arm_slider_lock`]).
+    armed_locks: Vec<(JointHandle, f32, f32)>,
     /// `RA2_H17_DEACTIVATION=0` turns the deactivators off (diagnostics).
     deactivation: bool,
 }
 
 impl Havok17Backend {
+    /// The prismatic controllers' auto-lock, run where the original's actions run: after the
+    /// piece's integration and before its constraint solver ([`PhysicsBackend::arm_slider_lock`]).
+    fn run_armed_locks(&mut self) {
+        if self.armed_locks.is_empty() {
+            return;
+        }
+        let armed = std::mem::take(&mut self.armed_locks);
+        for &(handle, stop, band) in &armed {
+            let Some(j) = self.joint(handle) else {
+                continue;
+            };
+            if j.saved_limits.is_some() {
+                continue;
+            }
+            let position = j.position(&self.bodies);
+            if (position - stop).abs() < band {
+                PhysicsBackend::lock_joint(self, handle, true);
+            }
+        }
+        self.armed_locks = armed;
+    }
+
     pub fn new() -> Result<Self, BackendError> {
         Ok(Self {
             bodies: Vec::new(),
@@ -280,6 +304,7 @@ impl Havok17Backend {
             world_deactivator: Default::default(),
             clock: Default::default(),
             substeps: 0,
+            armed_locks: Vec::new(),
             deactivation: std::env::var("RA2_H17_DEACTIVATION").map_or(true, |v| v != "0"),
         })
     }
@@ -1537,6 +1562,7 @@ impl PhysicsBackend for Havok17Backend {
             if dumping() {
                 dump_line(format_args!("[\"A\",0,{h},{}]", self.backsteps));
             }
+            self.run_armed_locks();
             for d in &self.dashpots {
                 d.apply(&mut self.bodies, h);
             }
@@ -1554,6 +1580,7 @@ impl PhysicsBackend for Havok17Backend {
                     let (contacts, bad) = self.detect(current_tol * 0.5);
                     self.excused.extend(bad);
                     self.contacts = contacts;
+                    self.run_armed_locks();
                     for d in &self.dashpots {
                         d.apply(&mut self.bodies, rest);
                     }
@@ -1563,6 +1590,7 @@ impl PhysicsBackend for Havok17Backend {
                 break;
             }
         }
+        self.armed_locks.clear();
         self.detect_phantoms();
         self.clock.advance(dt);
         if let Some(watch) = debug_body() {
@@ -2049,6 +2077,12 @@ impl PhysicsBackend for Havok17Backend {
         self.disabled.insert((a.min(b), a.max(b)));
     }
 
+    fn arm_slider_lock(&mut self, handle: JointHandle, stop: f32, band: f32) {
+        if prelock_enabled() {
+            self.armed_locks.push((handle, stop, band));
+        }
+    }
+
     fn lock_joint(&mut self, handle: JointHandle, locked: bool) -> bool {
         let Some(position) = self.joint(handle).map(|j| j.position(&self.bodies)) else {
             return true;
@@ -2140,3 +2174,9 @@ impl PhysicsBackend for Havok17Backend {
 mod query_diff;
 #[cfg(test)]
 mod tests;
+
+/// `RA2_PRELOCK=0` keeps the old order, where a prismatic controller locks in the substep after
+/// the one that brought its rod within the band (docs/29 section 12ay).
+fn prelock_enabled() -> bool {
+    std::env::var("RA2_PRELOCK").map_or(true, |v| v != "0")
+}

@@ -3056,6 +3056,14 @@ impl Duel {
         for (r, part, normal) in
             combat::wheel_contacts(&self.robots, wheel_events.as_deref().unwrap_or(&events))
         {
+            if crate::havok17::dumping() {
+                // `N`: a wheel's collision-event callback kept this normal
+                // (the live `N` rows of `frida/ra2_robotpair.js`, 0x508010).
+                crate::havok17::dump_line(format_args!(
+                    "[\"N\",0,{r},{part},[{},{},{}]]",
+                    normal.x, normal.y, normal.z
+                ));
+            }
             if let Some(magic) = self.robots[r].magic.as_mut() {
                 for w in magic.wheels.iter_mut().filter(|w| w.part == part) {
                     crate::drive::MagicAction::contact(w, normal);

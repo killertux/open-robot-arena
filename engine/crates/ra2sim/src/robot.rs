@@ -2643,6 +2643,11 @@ impl Robot {
         if hold {
             return;
         }
+        // The controller's own auto-lock runs after the next piece's integration, before its
+        // solver (docs/29 section 12ay): arm it where the backend steps.
+        if auto_lock {
+            physics.arm_slider_lock(joint, if dir > 0.0 { stops.0 } else { stops.1 }, 0.05);
+        }
         let Some(parent) = self.rig.parts[p].parent else {
             return;
         };
@@ -2692,6 +2697,13 @@ impl Robot {
             return;
         }
         let axis = self.slider_axis(physics, p, info);
+        if crate::havok17::dumping() {
+            // The live `F` rows (`frida/ra2_robotpair.js`, `0x4b51b0`).
+            crate::havok17::dump_line(format_args!(
+                "[\"F\",0,\"{}\",{p},{force}]",
+                self.rig.name.trim()
+            ));
+        }
         physics.add_force(self.parts[p].body, axis * force);
     }
 

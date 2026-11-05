@@ -270,6 +270,46 @@ fn a_burst_piston_kicks_the_robot_only_at_its_stop() {
     );
 }
 
+/// A burst piston's whole stroke leaves its robot where it was: the controller locks the rod
+/// as its offset comes within 0.05 of the stop it returns to, in the action stage after the
+/// piece's integration and before its solver, so the rod's remaining speed is taken by the
+/// lock and not handed to the chassis through the limit a second time (docs/29 section 12ay).
+/// Live (`weapons-wideload-free__live__001`, the Wide Load's rod, `R` rows): the return stop
+/// kicks the chassis once, -1.2 m/s, and the next step, in which the rod's remaining 5.5 m/s
+/// vanish, not at all. Ours, the lock a piece late, took a second -1.05 m/s there (free, in the
+/// replay of the live stroke: ended -0.7 m/s back; here, on its wheels, 0.32 from where it began).
+#[test]
+fn a_burst_piston_stroke_leaves_the_chassis_where_it_was() {
+    let game = game!();
+    let _scripts = ra2script::lock();
+    let mut d = duel(&game, "AI/Team8/Bot2.bot", 90);
+    let p = parts_of(&d, JointUse::Burst)[0];
+    let name = control_of(&d, p);
+    let planar = |d: &Duel| {
+        let v = d
+            .physics
+            .state(d.robots[0].parts[0].body)
+            .unwrap()
+            .linear_velocity;
+        Vec3::new(v.x, 0.0, v.z)
+    };
+    let before = planar(&d);
+    d.robots[0].apply_inputs(&[(name.clone(), 0, 1.0)]);
+    d.step_direct(&[DriveInput::default()], DT);
+    d.robots[0].apply_inputs(&[(name, 0, 0.0)]);
+    let mut peak = 0.0f32;
+    for _ in 0..48 {
+        d.step_direct(&[DriveInput::default()], DT);
+        peak = peak.max((planar(&d) - before).length());
+    }
+    let after = (planar(&d) - before).length();
+    assert!(peak > 1.4, "the kick at the stop: {peak}");
+    assert!(
+        after < 0.2,
+        "the chassis ends the stroke {after} m/s from where it began (the lock a piece late: 0.32)"
+    );
+}
+
 /// Tornado's spinner: the motor runs at 27 rad/s but the shell settles near 15
 /// within half a second (live 14-16 from 0.4 s on,
 /// `weapons-tornado-ripblade__live__000`), and its `Spin` switch toggles on each
