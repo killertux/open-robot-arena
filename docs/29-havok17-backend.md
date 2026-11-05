@@ -8091,6 +8091,107 @@ hits**. Open: why the Sentinel sits higher in the pressed state (the wedge ridin
 dump), `hr_cmp.py`, `hr_stroke_cmp.py`, `hr_loc_cmp.py`, `hr_rel_cmp.py`; `fidtrace`'s `FIDTRACE_HITS` rows carry `la`/`lv` (the hit point in the attacker's and
 the victim's chassis frame about its centre of mass).
 
+### 12ba. The world's action list: a controller runs before or after its constraint group because of how the original sorts its actions; the Box's ALARM locks after the solver, the Compressor's robots before; the `MagicAction` runs after every piece (fx/pressheight)
+
+12ay/12az moved the controllers' auto-lock to run after a piece's integration and before its solver, and left one fact
+unexplained: in the 13 strokes of ALARM's Box *fight* the rod was exactly `(0, 0, 0)` at the next resolver entry and the chassis lost 1.3 m/s in the
+lock piece (a lock after the solver), while ALARM's free strokes and the Wide Load's 282 strokes showed the pre-solver pattern. This round
+found the rule, ported it, and measured the other open question of 12az (the Compressor's pressed height) without finding its cause.
+
+**1. The binary.** `World::stepTo`'s action stage (`0x52a990`) walks a vector at `world + 0x30 .. + 0x34` and calls vtable `+0x28` of each
+entry. Live (`frida/ra2_actorder.js`: `AV`/`AS` rows read the lists, `AX`/`AY` log every action as it runs) the vector holds **one** entry, an
+object of vtable `0x6ac148` whose slot `0x28` is `0x530fd0`; that one walks its own list (`+0x90 .. +0x94`, 8-byte entries `(action, priority)`)
+and calls vtable `+0x14` of each, in list order. The entries are the drag action (`0x52d200`), constraint groups (`0x523bd0`, which call the
+solver `0x534480` on their constraint set: the arena's, one per robot, and a temporary one per controller), each robot's `MagicAction` (`0x4856f0`)
+and its controllers (`0x481180` hinge, `0x4b4e00` prismatic). `addAction` (`0x4ad100` -> `0x530700`) **appends `(action, 0)` and sorts the vector**;
+`removeAction` (`0x4ad130` -> `0x530ca0`) erases the first entry of the action and sorts again. The sort is the compiler's `std::sort` over
+8-byte entries by priority: quicksort partitions (`0x531710`, median of the first, middle and last keys, Hoare scan, recursion into the smaller
+part) while a range holds more than 16 entries, then insertion sorts. All priorities are 0, so up to 16 entries the list keeps its order, and
+**above 16 every add and remove permutes it** (a partition with equal keys swaps its range end for end: the list comes out reversed, then
+reversed again at the next call). The Box fight has 17 to 19 entries while the second robot arrives.
+`tools/oracle/pressed/al_sort.py` and `havok17/actions.rs` (`ActionList`) are the same code; replayed on the `AD`/`RM` rows (every call with its caller)
+of four whole fights they give **every one of the 44 lists live read, to the entry** (Box 11, Compressor 12, Octagon 11, Razor / FlapJack 10).
+
+**2. What the calls are.** The same sequence in all four fights (callers `0x4a77b9` a group, `0x4db1da` a robot's main group, `0x4ad19d` a
+slider's group, `0x4866ad` a `MagicAction`, `0x4656d0` a controller's placeholder, `0x465810` the controller made real): the drag action, the arena's
+group; the arena's controllers added and removed again; **per robot** (player order) its `MagicAction`, its main group, and for every hinge and slider in the order of
+their motors' components (the Wide Load's piston, motor component 3, is its third; ALARM's, 12, its last) a temporary group and the controller,
+the temporary groups removed one by one 232 to 1553 steps later, always before the next robot arrives; at the bell the arena's controllers are added (`0x465810`).
+After the bell nothing in the list changes. `actions::match_list` is that sequence on `(controllers of each robot, arena controllers)`; ours has
+3 / 5 (Scout, ALARM), 5 / 5 (Sentinel, Wide Load), 4 / 3 (Razor, FlapJack) controllers and 3, 4, 8, 3 arena joints in the Box, Compressor, Octagon and Razor's Box, the
+counts the live lists have. The model's final list **equals the live one** in the Box, the Compressor and the Octagon (the Razor's, 16 entries, is stable and was predicted before it was read).
+
+| fight (live list at the bell) | entries | each robot's controllers vs its group | its `MagicAction` vs its group |
+|---|---|---|---|
+| Box Scout / ALARM | 17 | **after**, all 8 | before |
+| Compressor Sentinel / Wide Load | 20 | **before**, all 10 | after |
+| Octagon Scout / ALARM | 22 | before, all 8 | after |
+| Box Razor / FlapJack | 16 | after, all 7 | before |
+
+That is the 12ay/12az puzzle: ALARM in the Box has its piston's update after its solver (the rod is exactly zero at the next entry in **54 of 54**
+strokes of the capture; the limit has already acted before the controller's `U` row: `U` shows the post-limit speed, -6.35 where the push gave
+-21.8), ALARM in the Octagon and the Wide Load in the Compressor before (0 of 23, 0 of 65). The arena's controllers (Box 3 prismatic, Compressor 4 hinges,
+Octagon 4 + 4) sit before or after the arena's group the same way.
+
+**3. The change (default).** `PhysicsBackend::declare_action_order(robots: (chassis, joints in motor order), arena joints)` (the `Duel` calls it at
+build and after the arena's joints are made); `Havok17Backend` derives from `match_list` which armed locks run after the piece's solver
+(`run_armed_locks(true)`) and which robots' `MagicAction`s do. **`RA2_ACTION_ORDER=0`** gives 12az's order (every controller before the solver),
+`RA2_H17_ACTIONS=1` prints the list. Tests: `actions::tests` (the Box's and the Compressor's final lists, 16 entries keep their order),
+`havok17::tests::a_controller_after_its_group_locks_after_that_pieces_solver`. The per-stroke chassis kick along the rod axis in the lock piece
+(`rp_alarm_kick.py`), Box fight: live -1.29, ours **-1.09** (50 strokes; before 0.00 in 53).
+
+**4. The `MagicAction` is a per-piece action too.** The live rows have exactly one apply of each chassis per resolver entry (`A`, `S` and `W` rows 1 : 1: 8787 of
+8787 entries with a `W` for each chassis), (14.8 % of the pressed pieces are shorter than a step live, 26.5 % ours). Ours ran it once a frame before the
+substep, so a step split in pieces integrated the force of its first piece only. `PhysicsBackend::set_piece_action(chassis, MagicAction)`
+(default: `false`, the caller applies it as before): `Havok17Backend` keeps the records the robot's update refreshes each frame and applies them after every piece,
+before or after the solver as the list puts it. **`RA2_MAGIC_PIECE=0`** for the once-a-frame apply. With the action order only the Compressor
+does not move (its controllers stay before), the Octagon neither (5.3 / 20.3); with both:
+
+| fight, counted hits >= 10 hp (mean +- se, 96 warmups) | live | 12az | action order only | **action order + per-piece `MagicAction`** |
+|---|---|---|---|---|
+| Box Scout / ALARM | 8 / 41 | 6.6 +- 0.4 / 39.3 +- 2.7 | 8.2 +- 0.4 / 38.1 +- 2.3 | **7.4 +- 0.5 / 37.6 +- 2.4** |
+| Razor / FlapJack | 3.0 / 0.1 | 6.0 +- 0.4 / 1.1 +- 0.1 | 7.2 +- 0.5 / 1.2 +- 0.1 | **5.7 +- 0.4 / 1.0 +- 0.1** |
+| Compressor Sentinel / Wide Load | 5.1 / 99.5 (se ~14) | 5.1 +- 0.4 / 78.9 +- 4.9 | 5.2 +- 0.4 / 78.9 +- 5.0 | **4.8 +- 0.4 / 77.1 +- 4.9** |
+| Octagon Scout / ALARM | 3.2 / 13.6 | 5.3 +- 0.4 / 20.3 +- 1.9 | 5.3 +- 0.4 / 20.3 +- 1.9 | **4.4 +- 0.3 / 15.0 +- 1.3** |
+
+(`RA2_ACTION_ORDER=0 RA2_MAGIC_PIECE=0` reproduces 12az to the digit: Box 6.6 / 39.3, Razor 6.0 / 1.1.) Only the Octagon's ALARM count moves by more than 2 se
+(20.3 -> 15.0, 2.3 se of the difference, towards live 13.6); the Box's Scout 6.6 -> 7.4 (live 8) and Razor's Scout 6.0 -> 5.7 (live 3.0) are inside the noise, the Razor's 7.2 with the action
+order alone was 1.9 se the wrong way. The Compressor's contact episodes (23 live fights against 96): occupancy 0.79 (live 0.79), episodes 13.9 a minute (12.3), length mean / median / p90 3.87 / 1.97 / 9.73 s (3.93 / 1.70 / 9.77),
+median minimum distance 2.07 (2.01) (12az: 0.80, 13.1, 4.1 / 2.1 / 10.3). The `MagicAction` before the solver for the Compressor (the first run of this change, `mp1`) gave 85.3 +- 5.1 and 12.65 episodes; after it, as its list says, 77.1 and 13.9 - both inside the noise of each other, the binary's placement kept.
+
+**5. The Compressor's pressed height: narrowed, not found.** Measured against the live captures (`robotpair-...008..011`, `boxstart-actorder-sentinel-wideload-compressor__live__000`):
+
+* *Not the Poker.* The rod sits at the same place in the pressed state, -0.888 live / -0.899 ours along the Wide Load's axis (min -1.62, the stroke). The Sentinel's flipper
+  is up 27 % of the time live (4 whole fights), 33 % ours, the Flip rate matches (12ay). The wheels' `touching` flags in the engaged window: 0.85-0.96 live, 0.76-0.87 ours for the Sentinel pressed;
+  the events the wheel callbacks hear match (about 500 floor events a minute in the pressed state both, the non-floor ones 106 / 128 for the Sentinel).
+* *Where it shows.* Contacts between the robots by piece class (live `fightcontacts-...000..003`, ours 9 fights), per 100 entries with a contact: Sentinel chassis - Wide Load rod 39 / 57, Sentinel chassis - Wide Load chassis 18 / 10,
+  Sentinel flipper - Wide Load chassis 25 / 20. In the Wide Load's frame the live contacts are at z -1.5 (98 per 100 entries), -1.0 (30), -2.0 (27, the tips); ours -1.0 (76), -1.5 (71), -2.0 (9): the Sentinel is in between the tips and the chassis more often.
+  By the time since the Wide Load's stroke (`ph_since_stroke.py`; every pressed entry is within 0.5 s of one, both live and ours) the Sentinel is at z -2.37 / -2.25 live against -2.23 / -2.13 ours (0-0.2 s / 0.25-0.5 s).
+* *The drive.* Replaying 79 live pressed starts with the live commands (`ph_replay.py`, `examples/pairreplay`), ours minus live: the Sentinel's speed along the Wide Load's axis +0.30 m/s at 0.5 s, +0.58 at 1 s, +0.52 at 2 s (the Wide Load's: -0.01, +0.05, 0.00);
+  the Sentinel closer by 0.08, 0.08, 0.16 m (z), higher by 0.03-0.04 (median). **With the Sentinel's commands zeroed the position bias vanishes** (-0.07..+0.04 m at 0.5-2 s), with the Wide Load's zeroed it stays (0.10-0.17): ours' Sentinel pushes
+  about 0.5 m/s more than live's does for the same commands. The Sentinel's thrust records in the engaged window, pressed: live non-zero 57 %, mean |thrust| 1180 / 902 (wheel pairs), ours 79 %, 1430 / 1114 (the AI also commands the Sentinel more often in ours: 69-79 % against 33-57 % non-zero)
+  while the Wide Load's match (45 % / 1173 against 41 % / 1312).
+* *Wheel normals.* The drive direction is `d = -(axle x n)` with `n` the last collision normal of the wheel's solid, held until the next event (12ad). The Sentinel's records in the pressed state are more tilted live than in ours
+  (share with `n.y < 0.9` 0.30 against 0.22, mean `n.y` 0.57 against 0.83; the downward cells (`n.y = -1`: a Wide Load piece above the wheel, the thrust turned backward) about 4 % against almost none) and the non-floor wheel events of the Sentinel are 33 down / 73 sideways a minute live,
+  14.5 / 113 ours. Switching ours' normals off (`RA2_WHEEL_NORMAL_UP=1`) moves the Sentinel's excess speed by only +0.07 m/s, so a live-like tilt would account for a part (perhaps a third) of the 0.5 m/s, not all.
+  So the arrangement is partly a feedback: the Wide Load's tips rest on the Sentinel's front wheels in live (the downward events), which turns part of its thrust backward; why they get there and not in ours (the first contact's geometry, the Flip's timing against it) is open.
+* *Ruled out in this round:* the lock order (the Wide Load is before its group, so 12ay's order is the live one there), the `MagicAction` placement (above: the replay's bias is 0.1-0.2 m with either), the Poker's length, the flipper's time up, the wheels' touching share, the events' rate and the normals' hold time.
+
+**6. The Octagon's hammer on the Scout's wheel (12au).** New live facts: in the Octagon capture the Scout is upside down (`up.y` -1) 64 % of the time, upright 34 %, **sideways (|up.y| < 0.25) 0.7 %** (the Box captures: 1.8 % and 0.4 %; Razor 0.5 %); ALARM's 19 strokes in it all fell while the Scout was upright (0 with it down), and
+all 29 hammer hits priced (`H` rows) were at its front and flanks with the Scout upright. In 19 whole fights with the component table (`partsfight-*`) the wheels took 4 blows of any size from anyone (3.7 hp at most) against 1749 on the chassis. In ours (the Octagon, 96 fights) the Hammer Head hits a Mini wheel
+2.1 a fight (1.2 of >= 10 hp; before this round 2.6 / 1.5; Box 1.9 / 1.0), concentrated in **23 of 96 fights (12 of 96 in the Box)**: in one of six dumped fights the Scout lay *sideways* for 32 s (14-47 s, 72 % of that fight) while ALARM's rod and chassis plowed it 15 m across the floor and
+hammered it 13 times, the other fights have it upright or upside down as live does (70-75 %). Live has no such pose (0 of 11 Octagon fights with a wheel hit: ours' 24 % would have given one with p = 0.95). So the cause is the sideways pose that is stable in ours and not live (the Scout on a wheel and the chassis edge, pushed along by the rod), not the pricing; not resolved.
+
+**7. Captures.** (display `:9`, port `27149`, under the lock; `ra2.cfg`, `Teams/`, `AI/` copied before and compared after, sha256 equal each time; the prefix has no `Robot Designs/`; manifest rows, backup and
+`manifest-additions-2026-11-05-pressheight.tsv`) `boxstart-actorder-scout-alarm-box__live__000`, `boxstart-actorder-sentinel-wideload-compressor__live__000`, `boxstart-actorder-scout-alarm-octagon__live__000`,
+`boxstart-actorder-razor-flapjack-box__live__000`: one whole fight each from the bell with `frida/ra2_actorder.js` (`ra2_robotpair.js` plus `AV`, `AS`, `AX`, `AY`, `AD`, `RM`, `GC` rows and the constraint pointer in `U`).
+
+**Tools.** `tools/oracle/frida/ra2_actorder.js`; `tools/oracle/pressed/al_sort.py` (the list's sort) and `al_check.py` (a capture's `AD`/`RM` replayed against its `AS` rows: 10, 11, 11, 12 lists, all equal);
+`ph_replay.py` (the 79 starts and ours-minus-live medians; `PH_MOD=nopress|idleS|idleW`, `PH_DUMP=1`), `ph_contacts_ours.py` / `ph_contacts_cmp.py` (contacts in the Wide Load's frame),
+`ph_touch.py`, `ph_wheelnormal.py`, `ph_since_stroke.py`, `ph_stroke_response.py`. Switches: `RA2_ACTION_ORDER=0`, `RA2_MAGIC_PIECE=0`, `RA2_H17_ACTIONS=1`, `RA2_WHEEL_NORMAL_UP=1` (diagnostic). The `N` dump rows now carry the point and the other body.
+
+**8. Open.** (a) The Compressor's pressed arrangement and the Sentinel's excess push (above). (b) The sideways pose of the Octagon's/Box's Scout. (c) The Razor / FlapJack Scout count (5.7 against 3.0) and the Box's Scout 7.4 / 8 are untouched by these. (d) The temporary groups' removal times (232..1553 steps) are not
+modelled (only their order); they fall before the next robot in all four fights. (e) The arena controllers' order among themselves is ours (the order the scripts make them), the live one is not known beyond the three captures where it agrees.
 ### 12bb. The Razor hit-count gap is a capture artefact: bell-primed live fights count 7.4 / 0.6, ours 6.0 / 1.1 (fx/razor)
 
 The task: counted hits (>= 10 hp) of Razor v FlapJack in ours are 6.0 / 1.1 against the documented live 3.0 / 0.1

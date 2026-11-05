@@ -668,6 +668,12 @@ fn a_contact_reports_the_tags_of_the_colliding_pieces() {
 /// the limit and not again when the lock takes the rod's remaining 5.5 m/s. Unarmed (the lock a
 /// piece late) the limit absorbs it through the housing a second time.
 fn rod_at_its_stop(armed: bool) -> (f32, f32) {
+    rod_at_its_stop_in(armed, false)
+}
+
+/// The same with the controller declared the way a robot's is (`post`: after its group, the
+/// lock comes after the piece's solver).
+fn rod_at_its_stop_in(armed: bool, post: bool) -> (f32, f32) {
     let mut physics = Havok17Backend::new().unwrap();
     let mk = |physics: &mut Havok17Backend, mass: f32, x: f32| {
         physics
@@ -683,6 +689,9 @@ fn rod_at_its_stop(armed: bool) -> (f32, f32) {
     let mut desc = SliderDesc::new(housing, rod, Vec3::ZERO, Vec3::X);
     desc.limits = [-0.73, 0.0];
     let joint = physics.create_slider(&desc).unwrap();
+    if post {
+        physics.declare_action_order(&[(housing, vec![joint])], &[]);
+    }
     // The rod 0.3 m out, going to its stop at 12 m/s; both fall together.
     physics.set_transform(rod, Vec3::new(-0.43, 10.0, 0.0), Quat::IDENTITY);
     physics.set_velocity(rod, Vec3::new(-12.0, 0.0, 0.0), Vec3::ZERO);
@@ -714,6 +723,28 @@ fn a_rod_that_arrives_in_a_piece_is_locked_before_that_pieces_solver() {
     assert!(
         h_pre.abs() + 0.3 < h_late.abs(),
         "late {h_late}, pre-solver {h_pre}"
+    );
+}
+
+/// A controller the action list puts after its group (docs/29 12ba: the Box's ALARM) locks after
+/// the solver of its piece: the limit has already handed the housing the rod's speed, and the
+/// lock then takes what is left, so the housing ends where an unarmed one's does.
+#[test]
+fn a_controller_after_its_group_locks_after_that_pieces_solver() {
+    let (h_pre, _) = rod_at_its_stop_in(true, false);
+    let (h_post, r_post) = rod_at_its_stop_in(true, true);
+    let (h_late, _) = rod_at_its_stop(false);
+    assert!(
+        h_pre.abs() + 0.3 < h_post.abs(),
+        "pre {h_pre}, post {h_post}"
+    );
+    assert!(
+        (r_post - h_post).abs() < 0.5,
+        "rod {r_post}, housing {h_post}"
+    );
+    assert!(
+        h_post.abs() > 0.5 * h_late.abs(),
+        "post {h_post}, late {h_late}"
     );
 }
 
@@ -764,4 +795,54 @@ fn an_armed_hinge_lock_runs_in_the_piece_the_arm_arrives() {
     };
     assert_eq!(run(true), Some(0), "armed: locked in the first step");
     assert_eq!(run(false), None, "unarmed: nothing locks it");
+}
+
+/// A `MagicAction` handed to the backend runs after the integration of every piece (docs/29 12ba):
+/// the first step's integration has no force yet, the second one's has the first piece's.
+#[test]
+fn a_piece_action_pushes_after_the_integration_of_the_piece() {
+    use crate::drive::{MagicAction, WheelRecord};
+    let mut physics = Havok17Backend::new().unwrap();
+    let chassis = physics
+        .create_body(
+            &BodyDesc::new(
+                MotionType::Dynamic,
+                ShapeDesc::Box {
+                    half_extents: Vec3::splat(0.5),
+                },
+            )
+            .at(Vec3::new(0.0, 10.0, 0.0))
+            .with_mass(100.0),
+        )
+        .unwrap();
+    let wheel = WheelRecord {
+        part: 0,
+        motor: None,
+        steer: None,
+        point: Vec3::ZERO,
+        axle: Vec3::Z,
+        grip: 1.0,
+        resistance: 0.0,
+        thrust: 1000.0,
+        touching: true,
+        air: 0.0,
+        normal: Vec3::Y,
+        contact_normal: Vec3::Y,
+    };
+    assert!(physics.set_piece_action(
+        chassis,
+        Some(MagicAction {
+            wheels: vec![wheel]
+        })
+    ));
+    physics.step(1.0 / 60.0);
+    let v1 = physics.state(chassis).unwrap().linear_velocity.x;
+    physics.step(1.0 / 60.0);
+    let v2 = physics.state(chassis).unwrap().linear_velocity.x;
+    assert!(
+        v1.abs() < 1e-4,
+        "nothing pushed before the first piece's actions: {v1}"
+    );
+    // 1000 N on 100 kg for a sixtieth of a second, less the action's own damping.
+    assert!(v2 > 0.1 && v2 < 0.2, "{v2}");
 }

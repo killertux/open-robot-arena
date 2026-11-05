@@ -23,6 +23,7 @@
 //!
 //! and repeats from 1 until the substep's time is used up.
 
+pub mod actions;
 mod body;
 pub mod dashpot;
 pub mod deactivation;
@@ -255,6 +256,12 @@ pub struct Havok17Backend {
     substeps: u64,
     /// Prismatic auto-locks armed for this substep ([`PhysicsBackend::arm_slider_lock`]).
     armed_locks: Vec<(JointHandle, f32, f32)>,
+    /// The robots' `MagicAction`s, run once per piece ([`PhysicsBackend::set_piece_action`]).
+    magics: Vec<(BodyHandle, crate::drive::MagicAction)>,
+    /// The controllers that run after the solver of a piece, from the action list ([`actions`]).
+    post_locks: std::collections::HashSet<JointHandle>,
+    /// The chassis whose `MagicAction` the list puts after its robot's group.
+    post_magics: std::collections::HashSet<BodyHandle>,
     /// `RA2_H17_DEACTIVATION=0` turns the deactivators off (diagnostics).
     deactivation: bool,
 }
@@ -262,12 +269,15 @@ pub struct Havok17Backend {
 impl Havok17Backend {
     /// The prismatic controllers' auto-lock, run where the original's actions run: after the
     /// piece's integration and before its constraint solver ([`PhysicsBackend::arm_slider_lock`]).
-    fn run_armed_locks(&mut self) {
+    fn run_armed_locks(&mut self, after_solver: bool) {
         if self.armed_locks.is_empty() {
             return;
         }
         let armed = std::mem::take(&mut self.armed_locks);
         for &(handle, stop, band) in &armed {
+            if self.post_locks.contains(&handle) != after_solver {
+                continue;
+            }
             let Some(j) = self.joint(handle) else {
                 continue;
             };
@@ -280,6 +290,20 @@ impl Havok17Backend {
             }
         }
         self.armed_locks = armed;
+    }
+
+    /// The robots' `MagicAction`s, once per piece (docs/29 section 12ba).
+    fn run_magics(&mut self, after_solver: bool) {
+        if self.magics.is_empty() {
+            return;
+        }
+        let magics = std::mem::take(&mut self.magics);
+        for (chassis, action) in &magics {
+            if self.post_magics.contains(chassis) == after_solver {
+                action.apply(self, *chassis);
+            }
+        }
+        self.magics = magics;
     }
 
     pub fn new() -> Result<Self, BackendError> {
@@ -305,6 +329,9 @@ impl Havok17Backend {
             clock: Default::default(),
             substeps: 0,
             armed_locks: Vec::new(),
+            post_locks: Default::default(),
+            post_magics: Default::default(),
+            magics: Vec::new(),
             deactivation: std::env::var("RA2_H17_DEACTIVATION").map_or(true, |v| v != "0"),
         })
     }
@@ -1562,11 +1589,14 @@ impl PhysicsBackend for Havok17Backend {
             if dumping() {
                 dump_line(format_args!("[\"A\",0,{h},{}]", self.backsteps));
             }
-            self.run_armed_locks();
+            self.run_magics(false);
+            self.run_armed_locks(false);
             for d in &self.dashpots {
                 d.apply(&mut self.bodies, h);
             }
             joints::solve(&mut self.bodies, &mut self.joints, dt);
+            self.run_armed_locks(true);
+            self.run_magics(true);
             self.drag();
             done += h;
             if pieces >= MAX_PIECES {
@@ -1580,11 +1610,14 @@ impl PhysicsBackend for Havok17Backend {
                     let (contacts, bad) = self.detect(current_tol * 0.5);
                     self.excused.extend(bad);
                     self.contacts = contacts;
-                    self.run_armed_locks();
+                    self.run_magics(false);
+                    self.run_armed_locks(false);
                     for d in &self.dashpots {
                         d.apply(&mut self.bodies, rest);
                     }
                     joints::solve(&mut self.bodies, &mut self.joints, dt);
+                    self.run_armed_locks(true);
+                    self.run_magics(true);
                     self.drag();
                 }
                 break;
@@ -2077,6 +2110,63 @@ impl PhysicsBackend for Havok17Backend {
         self.disabled.insert((a.min(b), a.max(b)));
     }
 
+    fn declare_action_order(
+        &mut self,
+        robots: &[(BodyHandle, Vec<JointHandle>)],
+        arena: &[JointHandle],
+    ) {
+        self.post_locks.clear();
+        self.post_magics.clear();
+        if !action_order_enabled() {
+            return;
+        }
+        let counts: Vec<usize> = robots.iter().map(|r| r.1.len()).collect();
+        let list = actions::match_list(&counts, arena.len());
+        let after = |ctl: actions::Act, group: actions::Act| matches!((list.position(ctl), list.position(group)), (Some(c), Some(g)) if c > g);
+        for (r, (chassis, joints)) in robots.iter().enumerate() {
+            for (i, &j) in joints.iter().enumerate() {
+                if after(actions::Act::Ctl(r, i), actions::Act::Group(r)) {
+                    self.post_locks.insert(j);
+                }
+            }
+            if after(actions::Act::Magic(r), actions::Act::Group(r)) {
+                self.post_magics.insert(*chassis);
+            }
+        }
+        for (k, &j) in arena.iter().enumerate() {
+            if after(actions::Act::Arena(k), actions::Act::World) {
+                self.post_locks.insert(j);
+            }
+        }
+        if std::env::var_os("RA2_H17_ACTIONS").is_some() {
+            eprintln!(
+                "h17 actions: robots {counts:?} arena {} list {:?} after-solver joints {:?}",
+                arena.len(),
+                list.order(),
+                {
+                    let mut v: Vec<_> = self.post_locks.iter().copied().collect();
+                    v.sort_unstable();
+                    v
+                }
+            );
+        }
+    }
+
+    fn set_piece_action(
+        &mut self,
+        chassis: BodyHandle,
+        action: Option<crate::drive::MagicAction>,
+    ) -> bool {
+        if !piece_magic_enabled() {
+            return false;
+        }
+        self.magics.retain(|(c, _)| *c != chassis);
+        if let Some(a) = action {
+            self.magics.push((chassis, a));
+        }
+        true
+    }
+
     fn arm_slider_lock(&mut self, handle: JointHandle, stop: f32, band: f32) {
         if prelock_enabled() {
             self.armed_locks.push((handle, stop, band));
@@ -2179,4 +2269,16 @@ mod tests;
 /// the one that brought its rod within the band (docs/29 section 12ay).
 fn prelock_enabled() -> bool {
     std::env::var("RA2_PRELOCK").map_or(true, |v| v != "0")
+}
+
+/// `RA2_ACTION_ORDER=0` runs every controller before the solver, as 12ay/12az did, instead of
+/// where the world's action list puts it (docs/29 section 12ba).
+fn action_order_enabled() -> bool {
+    std::env::var("RA2_ACTION_ORDER").map_or(true, |v| v != "0")
+}
+
+/// `RA2_MAGIC_PIECE=0` applies the `MagicAction` once per frame, before the substep, as 12e..12az did,
+/// instead of after every piece (docs/29 section 12ba).
+fn piece_magic_enabled() -> bool {
+    std::env::var("RA2_MAGIC_PIECE").map_or(true, |v| v != "0")
 }

@@ -1653,8 +1653,15 @@ impl Robot {
                 }
             }
         }
+        let chassis = self.parts[0].body;
         if self.parts[0].alive {
-            magic.apply(physics, self.parts[0].body);
+            // A backend that runs actions per piece takes the records and applies them after every
+            // piece; the others get the action applied here, once a frame.
+            if !physics.set_piece_action(chassis, Some(magic.clone())) {
+                magic.apply(physics, chassis);
+            }
+        } else {
+            physics.set_piece_action(chassis, None);
         }
         self.magic = Some(magic);
     }

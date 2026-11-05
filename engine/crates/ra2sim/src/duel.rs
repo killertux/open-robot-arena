@@ -1477,7 +1477,7 @@ impl Duel {
         let damage_taken = vec![0.0; robots.len()];
         let marks = vec![Vec::new(); robots.len()];
         let arena_bodies = arena_bodies(arena_path, arena_body, &props);
-        Ok(Duel {
+        let mut duel = Duel {
             physics,
             arena,
             props,
@@ -1540,7 +1540,9 @@ impl Duel {
             decal_images: std::collections::HashMap::new(),
             shadow: None,
             human_robot: None,
-        })
+        };
+        duel.declare_actions();
+        Ok(duel)
     }
 
     /// Whether the game's own AI layer loaded for this duel.
@@ -1747,6 +1749,30 @@ impl Duel {
         self.service_requests(dt);
     }
 
+    /// Tell the backend which controllers the match has, in the order the original creates them
+    /// (docs/29 section 12ba): per robot the joints of its hinges and sliders in the order of their
+    /// motors' components, then the arena's.
+    fn declare_actions(&mut self) {
+        let robots: Vec<(BodyHandle, Vec<crate::backend::JointHandle>)> = self
+            .robots
+            .iter()
+            .map(|r| {
+                let mut js: Vec<(usize, crate::backend::JointHandle)> = r
+                    .rig
+                    .parts
+                    .iter()
+                    .zip(&r.parts)
+                    .filter_map(|(p, s)| Some((p.joint?.motor, s.joint?)))
+                    .collect();
+                js.sort_by_key(|&(motor, _)| motor);
+                (r.parts[0].body, js.into_iter().map(|(_, h)| h).collect())
+            })
+            .collect();
+        let arena: Vec<crate::backend::JointHandle> =
+            self.joints.iter().map(|j| j.handle).collect();
+        self.physics.declare_action_order(&robots, &arena);
+    }
+
     /// Build the joints the arena scripts have asked for since the last step.
     ///
     /// A slider (`AddPrismatic`) is anchored between the arena's static body and
@@ -1917,6 +1943,7 @@ impl Duel {
                 }
             }
         }
+        self.declare_actions();
     }
 
     /// A motionless pin for a hazard joint to hang from.
@@ -3070,15 +3097,16 @@ impl Duel {
         let events =
             self.event_gate
                 .admit_with(&self.robots, &self.arena_bodies, events, self.time);
-        for (r, part, normal) in
+        for (r, part, normal, point, other) in
             combat::wheel_contacts(&self.robots, wheel_events.as_deref().unwrap_or(&events))
         {
             if crate::havok17::dumping() {
                 // `N`: a wheel's collision-event callback kept this normal
-                // (the live `N` rows of `frida/ra2_robotpair.js`, 0x508010).
+                // (the live `N` rows of `frida/ra2_robotpair.js`, 0x508010), with the
+                // point and the body the wheel met.
                 crate::havok17::dump_line(format_args!(
-                    "[\"N\",0,{r},{part},[{},{},{}]]",
-                    normal.x, normal.y, normal.z
+                    "[\"N\",0,{r},{part},[{},{},{}],[{},{},{}],{other}]",
+                    normal.x, normal.y, normal.z, point.x, point.y, point.z
                 ));
             }
             if let Some(magic) = self.robots[r].magic.as_mut() {
