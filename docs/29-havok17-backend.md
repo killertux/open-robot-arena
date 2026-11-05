@@ -8139,3 +8139,91 @@ full), Box 6.6 / 39.3, Compressor 5.1 / 78.9, Octagon 5.3 / 20.3 unchanged.
 
 **Tools.** `tools/oracle/live_counted.py`. **Open:** a Razor late-fight count (40-120 s) of 1.1 against 1.8 live is one live fight; more
 bell-primed Razor fights, and bell-primed Box / Octagon fights, would settle the sampled-capture question above.
+
+### 12bc. The live references rebuilt from bell-primed fights: the old captures only miss the first 6 s of the match, sampling changes nothing, and ours stands within 2.5 se on every count (fx/liveref; measurements only, no engine change)
+
+The task: 12bb showed that the Razor v FlapJack live count (3.0 / 0.1) was biased by the capture; audit the other three live references the
+same way and rebuild all four from bell-primed fights.
+
+**1. Which capture is which.** There are two kinds of full live fight with the gate's `H` rows:
+
+- *late*: `capture_fight.py` (`fight-`, `arenahits-`, `flipfight-...__live__*`, `capture_fightpos_set.sh`): `cd.start_match` clicks Skip
+  Intro, waits 8 s and runs a Python call, **then** the agent is attached; its first `A` row is match clock **~6 s** (the first
+  sample of the sampling call of the same script reads 5.9-6.0 s in every `fightpos-*` tsv), so "120 s of Havok time" is clock 6-126 s.
+  Contributing to the old references: Box 8 (`fight-...000..005`, `arenahits-...000..001`), Razor 9 (`fight-`, `arenahits-`,
+  `flipfight-`), Compressor 27 (`fight-...000..007` and `arenahits-...000..018`; 12ay counts 26, `fight-...000` has no hits), Octagon 11
+  (`fight-...000`, `arenahits-...000..009`).
+- *bell-primed*: `capture_boxstart.py` (`partsfight-*` through `capture_parts_set.sh`, and `firststroke-scout-alarm-box`): the agent is
+  loaded before Start Game and its `MC`/`T` rows give the match clock (the physics has run ~80-97 s of `A` rows before the clock starts).
+  The other `boxstart-`, `boxfight-`, `boxweapons-`, `robotpair-`, `eventfilter-`, `fightcontacts-`, `alarmfight-` captures also carry
+  `H` rows but have no clock (or are late) and are not used.
+
+12bb said the bell-primed fights were taken "without sampling"; that is wrong: `capture_boxstart.py` starts the same
+`ra2_python.py --sample ... --every 3` as the late ones (every 3 frames, more often than the 6 of `capture_fightpos_set.sh`), after
+Start Game. **The two kinds differ in when the agent attaches, not in the sampling.**
+
+**2. Does the sampling call perturb the game? No.** `capture_boxstart.py NOSAMPLE=1` (new) leaves out the sampling call. Octagon,
+bell-primed, 8 unsampled against 11 sampled (`partsfightns-scout-alarm-octagon__live__000..007`, `partsfight-...005..010` and
+`000..004`; counted 0-120 s, to the end of the match): Scout 4.2 +- 1.4 / 4.4 +- 0.8, ALARM 13.9 +- 4.9 / 13.6 +- 4.4, hp 236 / 181 and 812 /
+768, length 61 +- 12 / 46 +- 8 s. The opening is the same to the frame: the first counted robot hit is at **1.8 +- 0.0 s** in both, 80 +- 14 /
+94 +- 5 hp, 8.4 +- 2.1 / 10.3 +- 1.9 counted hits in the first 15 s. (The python checks at the start of every capture, `start_match`'s player
+check and the `PRIME` calls, are in both kinds; no capture here is free of them.) So there is no mechanism to explain on the sampling
+side: the fights are not perturbed at the sizes these samples resolve (se 1-5 hits).
+
+**3. The mechanism of the bias is the missed opening.** The first counted robot-robot hit of the bell-primed fights is at 1.8 s (Octagon,
+the Scout's and ALARM's first clash: 95 hp), 3.5 s (Razor, wedge 40 hp), 4.0 +- 1.0 s (Box, 80 hp) and 12.9 +- 3.2 s (Compressor): the late
+captures, which begin at 6 s, miss the first three. The same bell-primed fights counted in the match clock 6-120 s are the old
+references:
+
+| counted hits, side 0 / side 1 | old live (late, own 120 s) | bell-primed, clock 6-120 s | bell-primed, clock 0-120 s |
+|---|---|---|---|
+| Box Scout / ALARM | 5.8 / 47.5 (8) | 5.5 / 42.7 (18) | 7.1 / 46.6 |
+| Razor / FlapJack | 3.0 / 0.1 (9) | 3.5 / 0.1 (15) | 6.0 / 0.6 |
+| Compressor Sentinel / Wide Load | 4.9 / 95.3 (27) | 5.2 / 98.2 (12) | 5.2 / 98.2 |
+| Octagon Scout / ALARM | 2.6 / 11.3 (11) | 1.7 / 9.5 (19) | 4.3 / 13.7 |
+
+The 6-120 s columns agree with the old numbers, and the Compressor, whose fight starts at 13 s, is the same either way. (The documented
+8 / 41 of the Box and 3.2 / 13.6 of the Octagon came from earlier subsets of these captures; recomputed over all of them the old Box is
+5.8 / 47.5 and the old Octagon 2.6 / 11.3, `live_ref.py`.) Every live count that came from a late capture was therefore short by the opening, and the Octagon
+and Razor the most, since their opening carries most of the Scout's / Razor's counted hits.
+
+**4. The references rebuilt** (bell-primed live, match clock 0-120 s counted to the end of the match = the first robot out; ours 96
+warmups, 120 s, `RA2_AI_TRACE=1 FIDTRACE_UP=1`, scratch install, master 7f4a9c2, which reproduces 12ay/12bb to the digit: 6.6 / 39.3, 6.0 / 1.1,
+5.1 / 78.9, 5.3 / 20.3). Damage is the sum of every priced hit's hp per attacker; "diff" is (ours - live) / sqrt(se_o^2 + se_l^2).
+
+| fight (n live / 96) | counted side 0 | counted side 1 | damage hp side 0 | damage hp side 1 | match length s |
+|---|---|---|---|---|---|
+| Box Scout / ALARM (18): live | 7.1 +- 0.7 | 46.6 +- 4.7 | 407 +- 26 | 2131 +- 180 | 89.5 +- 6.0 |
+| ours | 6.6 +- 0.4 | 39.3 +- 2.7 | 371 +- 15 | 1805 +- 100 | 78.8 +- 3.3 |
+| diff (se) | -0.6 | -1.3 | -1.2 | -1.6 | -1.6 |
+| Razor / FlapJack (15): live | 6.0 +- 1.6 | 0.6 +- 0.2 | 236 +- 61 | 93 +- 23 | 48.5 +- 7.8 |
+| ours | 6.0 +- 0.4 | 1.1 +- 0.1 | 284 +- 19 | 101 +- 7 | 56.6 +- 3.2 |
+| diff (se) | 0.0 | +2.5 | +0.7 | +0.3 | +1.0 |
+| Compressor Sentinel / Wide Load (12): live | 5.2 +- 1.0 | 98.2 +- 17.5 | 588 +- 95 | 3273 +- 533 | 93.8 +- 9.7 |
+| ours | 5.1 +- 0.4 | 78.9 +- 4.9 | 479 +- 27 | 2905 +- 168 | 92.8 +- 3.4 |
+| diff (se) | -0.1 | -1.1 | -1.1 | -0.7 | -0.1 |
+| Octagon Scout / ALARM (19): live | 4.3 +- 0.7 | 13.7 +- 3.2 | 204 +- 31 | 786 +- 149 | 52.0 +- 6.8 |
+| ours | 5.3 +- 0.4 | 20.3 +- 1.9 | 222 +- 12 | 1130 +- 76 | 49.6 +- 2.5 |
+| diff (se) | +1.2 | +1.8 | +0.5 | +2.1 | -0.3 |
+
+Reading it: the Razor's Razor count (the 12bb question) is exact at 15 fights (6.0 / 6.0); its FlapJack count (0.6 against 1.1, 2.5 se) is
+the one real residual, from late chassis hits of the FlapJack in ours. The Compressor stays at about 1 se below live on the Wide Load's
+count and damage (the live sd is 61 over 12 fights, the 27 late fights gave 93 +- 14 over their window). The Box is 1.2-1.6 se short on the
+ALARM's count, both damages and the length (ours' fights end 11 s sooner), all on the same side. **The Octagon's ALARM is 1.8-2.1 se
+above live** (13.7 +- 3.2 against 20.3 +- 1.9 counted, 786 against 1130 hp), the largest gap on the table and the opposite sign of the Box's, so
+a hit-count tuning that closes one would open the other; its 19 live fights have an sd of 14 hits. The older arena hit counts of 12ay, which
+read "ours above live in the Octagon" at 5.3 / 20.3 against 3.2 / 13.6, are now 1.2 / 1.8 se, not 3+.
+
+**5. New live captures** (display `:7`, port `27147`, five sessions under the shared lock, `Teams/`, `AI/` and `ra2.cfg` copied before
+and sha256-compared after, "prefix restored" each time; the prefix has no `Robot Designs/`; manifest rows, backup copies and
+`manifest-additions-2026-11-05-liveref.tsv`; `capture_parts_set.sh`, renamed from `boxstart-` to `partsfight-`): Octagon
+`partsfight-scout-alarm-octagon__live__005..010` (sampled) and `partsfightns-scout-alarm-octagon__live__000..007` (unsampled, no `.tsv`),
+Razor `partsfight-razor-flapjack-box__live__009..014`, Compressor `partsfight-sentinel-wideload-compressor__live__008..011`, Box
+`partsfight-scout-alarm-box__live__008..011`.
+
+**6. Tools.** `tools/oracle/live_ref.py` (`--list` per capture, `--opening`, `--ours <ensemble dir>`, `--table <ensemble dir>`: classifies
+every live capture as bell / late, counts hits >= 10 hp and sums damage per attacker in the matching match-clock window, reads
+`ensemble.sh` directories for ours and prints the table above); `capture_boxstart.py NOSAMPLE=1`. **Open:** the Octagon's ALARM (+2 se) and the
+Box's ALARM / length (-1.5 se) are the two residuals worth a look once more bell-primed fights exist (n 19 and 18, sd 14 and 20 hits); the
+FlapJack's late chassis hits in the Razor fight (1.1 / 0.6); a capture with no Python call at all (agent loaded, `start_match` blind)
+would close the perturbation question completely.
