@@ -8090,3 +8090,54 @@ hits**. Open: why the Sentinel sits higher in the pressed state (the wedge ridin
 **Tools.** `tools/oracle/pressed/hr_ours.sh` (ours with the dump reduced to the rows above), `rp_alarm_kick.py` (the per-stroke kick of a live or ours
 dump), `hr_cmp.py`, `hr_stroke_cmp.py`, `hr_loc_cmp.py`, `hr_rel_cmp.py`; `fidtrace`'s `FIDTRACE_HITS` rows carry `la`/`lv` (the hit point in the attacker's and
 the victim's chassis frame about its centre of mass).
+
+### 12bb. The Razor hit-count gap is a capture artefact: bell-primed live fights count 7.4 / 0.6, ours 6.0 / 1.1 (fx/razor)
+
+The task: counted hits (>= 10 hp) of Razor v FlapJack in ours are 6.0 / 1.1 against the documented live 3.0 / 0.1
+(12ay); find the cause. **Nothing in the engine differs; the live reference was biased, and no code changes.**
+
+**Where 3.0 / 0.1 comes from.** The older live Razor fights are `fight-`, `arenahits-` and `flipfight-razor-flapjack-box__live__*` (9
+fights, sd 2.2, se 0.7), taken with `capture_fightpos_set.sh`: the match is started, then the hook is attached and
+`ra2_python.py --sample` polls the game every 6 frames. Their first priced Razor -> FlapJack hit >= 10 hp comes at 6.0, 12.3, 26,
+8.0 and 7.1 s (`arenahits-...000..004`; counted 5, 2, 5, 1, 0). The five `partsfight-razor-flapjack-box__live__000..004` fights of
+12ar (`capture_boxstart.py PRIME=1`: agent loaded before Start Game, no sampling, whole fight from the intro) tell another story:
+**all five open with the Razor's spike strip driving the FlapJack's wedge at 3.4-3.7 s for 39-56 hp** (plus extender / chassis
+blows at the same instant), which the 12ay count never saw. Counting the gate's `H` rows (att 0, amount >= 10, match clock <= 120 s;
+`tools/oracle/live_counted.py`) over those five and four new bell-primed fights:
+
+| live, bell-primed (9 fights) | Razor -> FlapJack counted | FlapJack -> Razor | match over (immobilized Razor) |
+|---|---|---|---|
+| per fight | 11, 3, 1, 4, 5, 4, 5, 26, 8 | 1, 0, 0, 0, 1, 1, 2, 0, 0 (4 of 9 at the first clash) | 106, 25, 27, 38, 42, 40, 31, 134, 47 s |
+| mean +- se | **7.4 +- 2.5** (4.6 without the 26) | **0.56 +- 0.24** | 54 s (ours 57 s, `LastRobot` 86 of 96) |
+| ours (96 warmups) | **6.0 +- 0.4** | **1.1 +- 0.1** | |
+
+By window (hits per fight, Razor -> FlapJack, live / ours): 0-10 s 3.2 / 2.9, 10-40 s 2.4 / 2.0, 40-120 s 1.8 / 1.1; FlapJack ->
+Razor 0.44 / 0.70, 0.0 / 0.23, 0.11 / 0.14. The first strike is the same in both: ours 3.0-3.6 s, wedge 36-70 hp (live 39-56, once 104),
+the Razor's spike strip hit 11-28 hp at the same instant (live 12-15). Ours' priced Razor -> FlapJack hits by size: 25 / 50 / 75 / 90 /
+95 / 99 % = 0.13 / 0.43 / 1.4 / 4.6 / 12 / 49 hp, live (`arenahits`, no first strike) 0.22 / 1.2 / 4.7 / 7.0 / 16.5 at 50 / 75 / 90 /
+95 / 99 %. The arena's hp on the Razor (ours 40 +- 11, live 45 +- 39) was already in line.
+
+So the gap closes: the Razor count is 0.6 se below the live mean (4.0 se above the old one), and the FlapJack's 1.1 against 0.56 +- 0.24
+is 2.2 se, from 9 fights whose count is 0 or 1 (ours' extra are late chassis hits, 0.23 + 0.14 per fight against 0 + 0.11). The
+heavy tail (one live fight of 26 counted hits in 134 s, a ground-and-pound on a stuck FlapJack, 4 further such fights in ours of 96 with
+>= 15) means nine live fights cannot resolve a 1.4-hit difference: sd 7.5, se 2.5.
+
+**Why the old captures differ is not settled.** In `arenahits-...000..004` the first robot-robot hits are 0.1-0.7 s in at 0.5 hp and
+none reaches 10 hp before 6 s; the sampling python call per 6 frames (a game-thread call) or the late attach changes the opening, so
+live captures that sample with `ra2_python.py` do not stand for the unperturbed game's opening, and the Box / Octagon / Compressor
+counts of 12ay (also from `fightpos` / `fight-` captures, 8 / 41, 3.2 / 13.6, 5.1 / 99.5 from `partsfight`-style data) should be
+re-read the same way: the Box Scout / ALARM and Octagon live counts have no bell-primed fights here, the Compressor's come from
+`robotpair` (primed), the first with sampling. Not tested here.
+
+**New live captures** (display `:7`, port `27147`, under the shared lock for the whole 4-run session; `Teams/`, `AI/` and `ra2.cfg`
+copied before and sha256-compared after, "prefix restored"; the prefix had no `Robot Designs/`; manifest rows, copies and
+`manifest-additions-2026-11-05-razor.tsv` in `~/ra2-oracle-backup`): `partsfight-razor-flapjack-box__live__005..008` (`.json` +
+`.jsonl` + `.tsv`, `capture_parts_set.sh 4` with `NAME=razor-flapjack-box ARENA_ROW_Y=188 BOT0=AI/Team10/Bot1.bot
+BOT1=AI/Team8/Bot0.bot`; the script names its files `boxstart-...`, renamed). Razor immobilized in all four (40, 31, 134, 47 s).
+
+**Ensembles** (`ensemble.sh razor`, 96 warmups, 120 s, `RA2_AI_TRACE=1 FIDTRACE_UP=1`, scratch install, master 9534b2c, no code change
+so the other three are the 12az numbers): Razor / FlapJack **6.0 +- 0.4 / 1.1 +- 0.1** (reproduced to the digit; length 57 s, 10 of 96
+full), Box 6.6 / 39.3, Compressor 5.1 / 78.9, Octagon 5.3 / 20.3 unchanged.
+
+**Tools.** `tools/oracle/live_counted.py`. **Open:** a Razor late-fight count (40-120 s) of 1.1 against 1.8 live is one live fight; more
+bell-primed Razor fights, and bell-primed Box / Octagon fights, would settle the sampled-capture question above.
