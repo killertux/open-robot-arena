@@ -19,10 +19,11 @@ import capture_drive as cd
 
 HOST = os.environ.get("RA2_FRIDA_HOST", "127.0.0.1:27142")
 AGENT = os.environ.get("AGENT", os.path.join(cd.HERE, "frida", "ra2_boxfight.js"))
-EXPR = ("repr([(p, plus.getLocation(p), plus.isUpsideDown(p), "
-        "getattr(__import__('AI').running_ai[p].lastTactic, 'name', '-'), "
-        "__import__('AI').running_ai[p].set_throttle, "
-        "__import__('AI').running_ai[p].set_turn_throttle) for p in plus.getPlayers()])")
+EXPR = os.environ.get("EXPR") or (
+    "repr([(p, plus.getLocation(p), plus.isUpsideDown(p), "
+    "getattr(__import__('AI').running_ai[p].lastTactic, 'name', '-'), "
+    "__import__('AI').running_ai[p].set_throttle, "
+    "__import__('AI').running_ai[p].set_turn_throttle) for p in plus.getPlayers()])")
 
 
 def main():

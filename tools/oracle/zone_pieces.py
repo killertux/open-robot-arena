@@ -26,6 +26,7 @@ sys.path.insert(0, __file__.rsplit("/", 1)[0])
 import collider_compare as cc  # noqa: E402
 
 
+BOTS = os.environ.get("BOTS", "AI/Team0/Bot0.bot,AI/Team0/Bot1.bot").split(",")  # BOTS=AI/Team0/Bot2.bot,AI/Team8/Bot2.bot for the Compressor
 T = float(os.environ.get("T", "1e9"))  # only the first T seconds of the match clock
 
 
@@ -111,13 +112,13 @@ def main():
     kind = sys.argv[1]
     if kind == "live-sz":
         per = live_sz(sys.argv[2:], "engine/target/release/examples/colliderdump", "local/game",
-                      ["AI/Team0/Bot0.bot", "AI/Team0/Bot1.bot"])
+                      BOTS)
     elif kind == "ours-sz":
         per = ours_sz(sys.argv[2])
     elif kind == "live":
         args = sys.argv[2:]
         per = live(args, "engine/target/release/examples/colliderdump", "local/game",
-                   ["AI/Team0/Bot0.bot", "AI/Team0/Bot1.bot"])
+                   BOTS)
     else:
         per = ours(sys.argv[2])
     n = len(per)
