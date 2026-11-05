@@ -18,7 +18,13 @@ Steps are given on the command line or one per line in a file (``-f``):
     wait SECONDS
     frames N                    wait for N UI frames
     shot PATH                   capture the X root window to PATH (.png)
-    key KEYSYM                  XTEST key press (the dinput keyboard does see it)
+    key KEYSYM [down|up]        XTEST key press and release (the dinput keyboard does see it); with down / up
+                                only that edge (a held robot key)
+    orbit DX DY [STEPS] [BUTTON]  the lab's 3D camera: hold the raw (dinput) mouse button BUTTON (default 2 =
+                                middle, mask 4) and move DX DY over STEPS polls (the lab's mouse read, 0x48d130)
+    cam PITCH YAW [DIST]        write the lab's 3D camera (+0x1e0 / +0x1e4 / +0x1d0 of the object FUN_005a6260 runs on);
+                                the injected middle-button orbit does not reach the game, this does
+    wheel DZ                    one raw wheel event (120 per notch; the lab zooms 1.2 m per notch)
     eval JS                     evaluate JS in the agent (prints the result)
 
 Example:
@@ -34,6 +40,8 @@ import time
 
 import frida
 
+KEY_HOLD = float(os.environ.get("RA2_KEY_HOLD", "0.08"))
+KEY_GAP = float(os.environ.get("RA2_KEY_GAP", "0.25"))
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT = os.path.join(HERE, "frida", "ra2_input.js")
 XWD2PNG = os.path.join(HERE, "..", "capture", "xwd2png.py")
@@ -114,9 +122,44 @@ def run(api, display, steps):
         elif op == "shot":
             shot(display, arg())
         elif op == "key":
-            subprocess.run(["python3", XTEST, "key", arg()],
-                           env=dict(os.environ, DISPLAY=display), check=True,
-                           stdout=subprocess.DEVNULL)
+            name = arg()
+            env = dict(os.environ, DISPLAY=display)
+            if i < len(steps) and steps[i] in ("down", "up"):
+                subprocess.run(["python3", XTEST, "key", name, arg()], env=env, check=True,
+                               stdout=subprocess.DEVNULL)
+            else:
+                # the dinput keyboard is polled once per frame: xtest's own 30 ms tap is lost when a frame is slow
+                # (modal boxes, the 3D view) and a long hold repeats; one process holds it KEY_HOLD s (RA2_KEY_HOLD)
+                subprocess.run(["python3", XTEST, "key", name, "press", "--hold", str(KEY_HOLD)], env=env,
+                               check=True, stdout=subprocess.DEVNULL)
+                time.sleep(KEY_GAP)
+        elif op == "orbit":
+            dx, dy = int(arg()), int(arg())
+            n, b = 10, 2
+            if i < len(steps) and steps[i].isdigit():
+                n = int(arg())
+                if i < len(steps) and steps[i].isdigit():
+                    b = int(arg())
+            mask = 1 << b
+            api.buttons(mask, 2)
+            api.move(dx, dy, n)
+            api.buttons(mask, 2)
+            api.buttons(0, 2)
+            wait_frames(api, n + 8)
+        elif op == "cam":
+            pitch, yaw = float(arg()), float(arg())
+            dist = float(arg()) if i < len(steps) and steps[i].replace(".", "", 1).isdigit() else 0.0
+            api.camarm()
+            # Page Up / Page Down (0xc9 / 0xd1) make the lab run its camera object (net zoom 0)
+            for k in ("Prior", "Next"):
+                subprocess.run(["python3", XTEST, "key", k], env=dict(os.environ, DISPLAY=display),
+                               check=True, stdout=subprocess.DEVNULL)
+                time.sleep(1.2)
+            print("cam", api.camset(pitch, yaw, dist))
+            wait_frames(api, 4)
+        elif op == "wheel":
+            api.wheel(int(arg()))
+            wait_frames(api, 4)
         elif op == "eval":
             print(api.evaljs(arg()))
         else:
@@ -143,7 +186,15 @@ def main():
     try:
         run(api, a.display, steps)
     finally:
-        session.detach()
+        # With a modal box open the game runs its nested loop inside the hooked UI update, and unloading the
+        # hooks waits until it is left (observed: 25 s, or forever): never wait for it, leave the box to the
+        # next run (the server unloads the script when the connection drops).
+        import threading
+        t = threading.Thread(target=session.detach, daemon=True)
+        t.start()
+        t.join(8)
+        sys.stdout.flush()
+        os._exit(0)
 
 
 if __name__ == "__main__":

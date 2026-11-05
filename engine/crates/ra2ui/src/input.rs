@@ -705,6 +705,33 @@ fn set_scroller_visible(list: &mut Widget, visible: bool, offset: usize, max: us
     }
 }
 
+/// Place a horizontal bar's thumb `x` pixels from the left end of its slider track (the thumb is the slider's
+/// own `Image`). `true` when the list has such a bar.
+pub fn set_horizontal_thumb(list: &mut Widget, x: f32) -> bool {
+    let Some(body) = list
+        .attachments
+        .iter_mut()
+        .find(|a| a.kind == AttachmentKind::Scroller)
+        .and_then(|a| a.body.as_deref_mut())
+    else {
+        return false;
+    };
+    let Some(bar) = scrollbar_in_mut(body) else {
+        return false;
+    };
+    let model = crate::ScrollBar::from_widget(bar);
+    let Some(image) = bar.children.get_mut(model.slider).and_then(|slider| {
+        slider
+            .children
+            .iter_mut()
+            .find(|c| c.kind == WidgetKind::Image)
+    }) else {
+        return false;
+    };
+    set_field(image, "Position", &format!("{} 0 0 0", x.round()));
+    true
+}
+
 /// The scroll trough (`UI_ScrollBack.bmp`) is a hidden widget of a drop-down's bar in the file; the
 /// bar shows it with its parts.
 fn reveal_trough(widget: &mut Widget) -> bool {

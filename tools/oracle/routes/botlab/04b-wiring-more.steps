@@ -1,0 +1,102 @@
+# Wiring, part 2: a second analog control (turn, A-D) on cell (1,0) wired to both motors with opposite senses, a
+# button (fire, space) on cell (2,0) wired to the spin motor; then a click on the controller's cell selects, and
+# Delete Control asks (No keeps it).
+drag 636 162 770 330 0 10     # ANALOG onto cell (1,0)
+wait 1
+click 690 329
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key t
+key u
+key r
+key n
+click 436 447
+key a
+click 613 447
+key d
+wait 1
+click 582 503
+wait 2
+click 205 372     # left motor
+wait 2
+click 597 379
+wait 1
+click 540 417     # Spin Clockwise
+wait 1
+click 597 441
+wait 1
+click 540 460     # Spin Counter-clockwise
+wait 1
+click 568 503
+wait 2
+click 305 372     # right motor
+wait 2
+click 597 379
+wait 1
+click 540 434
+wait 1
+click 597 441
+wait 1
+click 540 479
+wait 1
+click 568 503
+wait 2
+hide
+shot SHOTS/48-turn-wired.png
+drag 596 162 910 330 0 10     # BUTTON onto cell (2,0)
+wait 1
+shot SHOTS/49-button-dialog.png
+click 690 329
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key f
+key i
+key r
+key e
+click 485 432     # the one key box
+key space
+wait 1
+shot SHOTS/50-button-key.png
+click 582 503
+wait 2
+click 255 300     # the spin motor
+wait 2
+hide
+shot SHOTS/51-fire-connect.png
+click 597 395     # its row: On Clockwise (a button's list is <none>, On Clockwise, On Counter-clockwise)
+wait 1
+shot SHOTS/52a-fire-list.png
+click 540 432
+wait 1
+shot SHOTS/52-fire-set.png
+click 568 503
+wait 2
+hide
+shot SHOTS/53-fire-wired.png
+click 770 330     # select the turn control (the 3D view shows its wires)
+wait 1
+hide
+shot SHOTS/54-turn-selected.png
+click 975 672     # Delete Control
+wait 1
+shot SHOTS/55-delete-confirm.png
+click 520 458     # No
+wait 1
+hide
+shot SHOTS/56-delete-no.png

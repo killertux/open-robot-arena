@@ -1,0 +1,15 @@
+# Live only: from the Team HQ screen (the Rookies, any robot selected), scrap cell 5 and open a Workshop on it.
+click 186 274     # Robot Inventory tab
+wait 1
+click 790 435     # cell 5
+wait 1
+click 497 659     # Scrap Bot
+wait 1
+click 474 458     # Yes
+wait 2
+click 790 435     # the empty cell
+wait 1
+click 905 659     # Workshop
+wait 8
+hide
+shot SHOTS/00-blank-overview.png

@@ -620,6 +620,10 @@ def main(argv):
     p.add_argument(
         "action", nargs="?", choices=("press", "down", "up", "release"), default="press"
     )
+    p.add_argument(
+        "--hold", type=float, default=None,
+        help="press: keep the key down this many seconds (default 0.03) inside this one process",
+    )
 
     args = parser.parse_args(rest)
     try:
@@ -740,7 +744,12 @@ def main(argv):
             print(f"send-click 0x{wid:08x} {px},{py} button {args.button}")
             return 0
 
-        x.key(args.keysym, args.action)
+        if args.hold is not None and args.action == "press":
+            x.key(args.keysym, "down")
+            time.sleep(args.hold)
+            x.key(args.keysym, "up")
+        else:
+            x.key(args.keysym, args.action)
         print(f"key {args.keysym} {args.action}")
         return 0
     except ValueError as error:

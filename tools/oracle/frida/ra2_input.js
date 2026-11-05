@@ -40,6 +40,7 @@ Interceptor.attach(UI_UPDATE, { onEnter() {
   // moves a point only while it is set) on every frame between the press and the release.
   if (keepBtn >= 0) { m.add(0x14 + keepBtn).writeU8(1); m.add(0x17 + keepBtn).writeU8(1); }
 } });
+let camHook = null, camLast = null, camSeen = [];
 const queue = [];          // [{dx, dy, dz, buttons}]
 let held = 0;              // button bitmask held between queue entries
 let polls = 0, lastReal = null;
@@ -107,6 +108,27 @@ rpc.exports = {
       queue.push({ dx: 0, dy: 0, dz: 0, buttons: 0 });
     }
     return frameEvents.length;
+  },
+  // The lab's 3D view camera (FUN_005a6260, thiscall, run every frame by the active tab's mouse read 0x48d130):
+  // hook it for a moment, take the object it ran on last and write pitch (+0x1e0), yaw (+0x1e4) and, when given,
+  // distance (+0x1d0), then detach again (a hook left behind wedges frida-server). The orbit by the middle button
+  // does not reach the game through the injected state (tried: raw poll mask, UI state, both), so this is how
+  // the scripted builds frame the robot; ours has the same step (labshot `cam`).
+  camarm() {
+    if (camHook) camHook.detach();
+    camSeen = [];
+    camHook = Interceptor.attach(ptr('0x5a6260'), { onEnter() { const c = this.context.ecx; if (!camSeen.some(x => x.equals(c))) camSeen.push(c); } });
+    return true;
+  },
+  camset(pitch, yaw, dist) {
+    if (camHook) { camHook.detach(); camHook = null; }
+    // the lab's view is the object whose viewport (+0x190 / +0x194) is the 471 px square pane
+    const view = camSeen.filter(c => Math.abs(c.add(0x190).readFloat() - 471) < 2);
+    camLast = view.length ? view[view.length - 1] : null;
+    if (!camLast) return camSeen.map(c => [c.toString(), c.add(0x190).readFloat(), c.add(0x194).readFloat()]);
+    camLast.add(0x1e0).writeFloat(pitch); camLast.add(0x1e4).writeFloat(yaw);
+    if (dist > 0) camLast.add(0x1d0).writeFloat(dist);
+    return camLast.toString();
   },
   frames() { return uiFrames; },
   setpos(x, y) { pinned = [x | 0, y | 0]; return pinned; },

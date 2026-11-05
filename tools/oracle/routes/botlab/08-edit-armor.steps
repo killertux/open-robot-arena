@@ -1,0 +1,24 @@
+# Load an existing robot (the one 07-save made, in cell 5), change its armour on the Chassis > Armor screen with
+# "apply default chassis appearance" checked, Finished, Back to HQ (re-saves the file): usage `08-edit-armor.steps`
+# is run once per plate with ARMOR_Y = the armour grid row's y (plastic 188, aluminum 266, steel 350, titanium 435
+# in the 1024x768 frame: the grid rows are 84 px apart from y 190).
+click 790 435     # the robot's cell
+wait 1
+click 905 659     # Workshop
+wait 8
+click 352 89      # Chassis tab
+wait 2
+click 585 332     # Armor
+wait 2
+click 700 ARMOR_Y
+wait 1
+hide
+shot SHOTS/ARMOR_NAME-armor.png
+click 962 666     # Finished
+wait 2
+click 262 88      # Overview
+wait 3
+hide
+shot SHOTS/ARMOR_NAME-overview.png
+click 55 18       # Back to HQ: re-saves
+wait 5

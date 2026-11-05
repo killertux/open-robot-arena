@@ -1,0 +1,33 @@
+# Name, snapshot, save: the Overview's name box (the click goes to the end of "Enter Bot Name", backspaced away),
+# the snapshot button, Back to HQ (the game writes Teams/Team0/Bot5.bot).
+click 262 88      # Overview tab
+wait 3
+hide
+shot SHOTS/80-overview-final.png
+click 705 190     # the name box, at its end
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key e
+key 2
+key e
+wait 1
+click 686 484     # Snapshot
+wait 2
+hide
+shot SHOTS/81-overview-named-snapshot.png
+click 55 18       # Back to HQ: saves into the cell
+wait 5
+hide
+shot SHOTS/82-hq-saved.png

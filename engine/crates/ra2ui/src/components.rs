@@ -89,7 +89,12 @@ pub fn all(game: &Path) -> Result<Vec<Component>, String> {
         // The palette lists the base definitions: a `hidden = 1` one (the Smart
         // Zone's size picker) and the `Styles\` variants it points at are
         // reached through the part's own style choice, not as palette cells.
-        let hidden = def.get("hidden").is_some_and(|h| h.trim() == "1");
+        // `hidden = 1` (the Smart Zone) and `hidden = 2` (Cannon, Flamethrower, Hovercraft Engine, Magnet: also
+        // `standard = 0`) are not on the original's palette (live, docs/36 9.29); `hidden = 0` is the default.
+        let hidden = def
+            .get("hidden")
+            .and_then(|h| h.trim().parse::<i32>().ok())
+            .is_some_and(|h| h > 0);
         if hidden
             || entry
                 .name
@@ -111,16 +116,24 @@ pub fn all(game: &Path) -> Result<Vec<Component>, String> {
             file: entry.name.clone(),
         });
     }
-    // Palette order (capture, Power tab: control board, CO2 tank, large air
-    // tank, Nifty, small pack, then SuperVolt): the definition's `sort` key
-    // (the control board's is -10), then the file name, case-folded.
-    let mut keyed: Vec<(i32, String, Component)> = out
+    // Palette order (live, every category): the definition's `sort` key (the control board's is -10, a motor's
+    // 1..41, no key is 0), then the display **name**, case-folded, then the file name. It is not the file
+    // order: the Buzzard wheel (`yellow wheel.txt`) is the second wheel, the Angle Connector (`angler1.txt`)
+    // the first extender, Canine VI ChewBlade comes before Iron Spike (`darkspike1.txt`).
+    let mut keyed: Vec<(i32, String, String, Component)> = out
         .into_iter()
         .zip(order)
-        .map(|(c, sort)| (sort, c.file.to_ascii_lowercase(), c))
+        .map(|(c, sort)| {
+            (
+                sort,
+                c.name.to_ascii_lowercase(),
+                c.file.to_ascii_lowercase(),
+                c,
+            )
+        })
         .collect();
-    keyed.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-    Ok(keyed.into_iter().map(|(_, _, c)| c).collect())
+    keyed.sort_by(|a, b| (a.0, &a.1, &a.2).cmp(&(b.0, &b.1, &b.2)));
+    Ok(keyed.into_iter().map(|(_, _, _, c)| c).collect())
 }
 
 /// The components one category holds.
@@ -307,11 +320,28 @@ mod tests {
     fn the_palette_is_the_games_own_components() {
         let Some(game) = game_dir() else { return };
         let all = all(&game).unwrap();
-        // 131 definitions in the archive; the palette lists the 70 base ones: the
-        // 61 `Styles\` variants and `hidden = 1` size pickers are reached through
+        // 131 definitions in the archive; the palette lists the 66 base ones: the
+        // 61 `Styles\` variants and the `hidden = 1` size pickers are reached through
         // a part's own style choice (capture: the Power tab runs control board,
         // CO2 tank, large air tank, Nifty, small pack, SuperVolt, no Smart Zone).
-        assert_eq!(all.len(), 70, "the base components the palette lists");
+        // (docs/36 9.29: `hidden = 2`, Cannon / Flamethrower / Hovercraft Engine / Magnet, are not on the
+        // original's palette either, and every category runs by `sort` then display name.)
+        assert_eq!(all.len(), 66, "the base components the palette lists");
+        let names = |cat: &str| -> Vec<&str> {
+            in_category(&all, cat)
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect()
+        };
+        assert_eq!(
+            names("mobility")[..3],
+            ["Balance Caster", "Buzzard wheel", "Fatboy Wheel"]
+        );
+        assert_eq!(
+            names("extenders")[..3],
+            ["Angle Connector", "Axle Mount", "Baseplate Anchor"]
+        );
+        assert!(!names("mechanics").contains(&"Cannon"));
         for component in &all {
             assert!(
                 CATEGORIES.iter().any(|(c, _)| *c == component.category),
@@ -399,7 +429,10 @@ mod tests {
         );
         let (category, filled) = fill_selected(root, &game, &all).unwrap();
         assert_eq!(category, "mechanics");
-        assert_eq!(filled, 15, "mechanics is the base motors and pistons");
+        assert_eq!(
+            filled, 11,
+            "mechanics is the base motors and pistons, less the hidden ones"
+        );
         assert_eq!(
             crate::workshop::find(root, GRID).unwrap().children.len(),
             bars + filled,

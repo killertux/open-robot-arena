@@ -1,0 +1,23 @@
+# Armor: the four materials, Titanium picked, Finished; the Overview with the new weight.
+click 585 332     # Armor
+wait 2
+hide
+shot SHOTS/09-armor-default.png
+click 700 435     # Steel (to see its weight)
+wait 1
+hide
+shot SHOTS/10-armor-steel.png
+click 700 350     # Titanium
+wait 1
+hide
+shot SHOTS/11-armor-titanium.png
+click 700 266     # Aluminum again (the default plate; Titanium is heavy for a 1.76 m chassis)
+wait 1
+hide
+shot SHOTS/11b-armor-aluminum.png
+click 962 666     # Finished
+wait 2
+click 262 88      # Overview tab
+wait 2
+hide
+shot SHOTS/12-overview-chassis.png

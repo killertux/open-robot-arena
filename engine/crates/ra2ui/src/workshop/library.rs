@@ -90,6 +90,9 @@ pub struct ComponentInfo {
     /// The mesh's bounding box in the component's own space (`min`, `max`), the
     /// box the placement drag's overlap test uses.
     pub bounds: Option<([f32; 3], [f32; 3])>,
+    /// The mesh's point set per mesh object, in the component's space (5 mm dedup): the convex pieces the
+    /// lab's collision judge tests against each other, a part being the union of its objects' hulls.
+    pub hulls: Vec<Vec<[f32; 3]>>,
     /// Whether the definition *and* mesh loaded.
     pub loaded: bool,
 }
@@ -372,6 +375,7 @@ impl GameLibrary {
             mass,
             has_hull: !points.is_empty(),
             bounds: (!points.is_empty()).then(|| bounds(&points)),
+            hulls: object_hulls(&scene),
             loaded: true,
         }
     }
@@ -410,6 +414,34 @@ fn bounds(points: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
         }
     }
     (mn, mx)
+}
+
+/// The point set of each mesh object of a scene, in the component's space, deduplicated on a 5 mm grid (the
+/// overlap test takes a support point of the set along a direction, so a hull's corners are all it needs).
+pub fn object_hulls(scene: &GmiScene) -> Vec<Vec<[f32; 3]>> {
+    let mut out = Vec::new();
+    for o in &scene.objects {
+        let Some(mesh) = &o.mesh else { continue };
+        if mesh.points.is_empty() {
+            continue;
+        }
+        let world = tm_mat4(&o.transform);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut pts = Vec::new();
+        for p in &mesh.points {
+            let w = world.transform_point3(Vec3::from(*p));
+            let key = [
+                (w.x * 200.0).round() as i32,
+                (w.y * 200.0).round() as i32,
+                (w.z * 200.0).round() as i32,
+            ];
+            if seen.insert(key) {
+                pts.push(w.to_array());
+            }
+        }
+        out.push(pts);
+    }
+    out
 }
 
 /// Every point of every mesh object, transformed into the component's space —

@@ -1,0 +1,32 @@
+# Test Robot: the practice arena with the robot driven by the keys bound in 04-wiring (W S drive, A D turn, space
+# fires the spin motor). Frames at rest, driving forward, turning, firing; then an obstacle (Crates) and RESET.
+click 777 88      # Test Robot tab
+wait 6
+hide
+shot SHOTS/70-test-rest.png
+key w down
+wait 1.2
+shot SHOTS/71-test-forward.png
+key w up
+wait 1
+shot SHOTS/72-test-forward-stopped.png
+key a down
+wait 1
+key a up
+wait 1
+shot SHOTS/73-test-turned.png
+key space down
+wait 2
+shot SHOTS/74-test-fire.png
+key space up
+wait 1
+key s down
+wait 1
+key s up
+wait 1
+hide
+shot SHOTS/75-test-back.png
+click 22 350      # RESET (under the Obstacles list)
+wait 2
+hide
+shot SHOTS/76-test-reset.png

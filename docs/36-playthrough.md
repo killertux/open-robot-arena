@@ -1564,3 +1564,56 @@ name) -> Continue -> Import Bot (the list's rows draw no text, as in the origina
 slider; Video: resolution list 640x480..1280x1024, OK) -> Quit. Restart: the window opens at the saved 1024x768, Select Team lists both teams with the new one selected, and the Event Schedule shows
 `E1/9 R1` with Blade Tournament in progress. The save dir holds `ra2.cfg`, `AI/Teams.txt`, `Teams/Teams.txt`, `Teams/career1.dat`, `Teams/Team1/Bot0.bot`; the install copy and `local/game` were not written,
 `~/.local/share/open-robot-arena` was never created. A resolution change applies at the next start (the window is not resized live). No gamepad exists. Error messages for a wrong `--game`: `game::check`.
+
+## 9.29 The Bot Lab end to end, the original against ours (`fx/botlab-e2e`, 2026-11-04)
+
+One scripted build, run through the real input path in both: the click scripts are `tools/oracle/routes/botlab/*.steps` (the files `ra2_drive.py -f` plays on the live game and `labshot -f` replays on ours;
+`labshot` drops `wait` / `hide`, turns `dragh` into `drag`, `click 55 18` into `back`, `SHOTS/` into `$LABSHOT_SHOTS`); `tools/oracle/botlab_e2e_compare.py LIVE OURS OUT` diffs the frames per region.
+The route: blank cell, chassis step 1 (a 800 x 800 square), step 2 (a taper and the height slider to the top), armour, the Control Board, a refused drop, a cancelled drag, a Small Battery Pack placed / selected /
+removed / placed, two Reversible Angle Motors each with a Buzzard wheel on its axle, a Red Bird Spin Motor with a Canine VI ChewBlade, three controls (analog W-S "drive", analog A-D "turn", button space "fire"),
+every motor wired through its connection window, paint, Test Robot driven by W A S D / space, name, snapshot, Back to HQ. Live on display :9, `Teams/`, `AI/`, `Custom Textures/` and `ra2.cfg` copied before and
+restored after (sha256 lists equal). New driver steps in `ra2_drive.py`: `key NAME [down|up]` (held 80 ms: the 30 ms tap was lost under a modal box), `cam PITCH YAW [DIST]` (writes the lab camera object: the injected
+middle-button orbit does not reach the game), `orbit`, `wheel`; the driver no longer waits for `detach` (with a modal box open it hung for 25 s). Captures (backup `manifest-additions-2026-11-05-botlab-e2e.tsv`):
+`botlab-e2e-*` (74 frames of the route), `botlab-e2e-newbot` (the saved `.bot`), `-armor-*` (the four default appearances), `-burst-default` / `-burst-adjusted`, `-paint-effect-list`,
+`-comppreview-viewproj` (`ra2_viewproj.js`).
+
+**The saved file.** Live `Bot4.bot` against ours `Bot5.bot` for the same clicks: the same 9 components with the same parents, mounts and (to 0.3 px of the mouse ray) positions, the same outlines, height, normals, group
+rectangles and weight (293.1 both). What differs: the random ear order of the plates (9.27f), `0.382813` against `0.382812` (the exe's CRT rounds an exactly representable tie up, ours half to even: open),
+`Name: drive` (live keysyms have no shift: the route is lowercase), line 4 / the skin (below), the armour atlas.
+
+### Mismatches found, fixed
+
+1. **The palette was not the original's.** Live hides `hidden = 2` parts (Cannon, Flamethrower, Hovercraft Engine, Magnet; also `standard = 0`) and orders every category by `sort` then **display name**, not file name
+   (the Buzzard wheel, `yellow wheel.txt`, is the second wheel; the Angle Connector the first extender; Canine VI before Iron Spike). `ra2ui::components::all`.
+2. **The palette could not be scrolled** (no arrow, thumb or track handling: parts past the fifth cell were unreachable in the player-facing lab). Live: the row scrolls by pixel, an arrow reveals the next
+   cell whole (from 0: 75, 171, 267 = 96 k - 21 with the 501 px view), a press on the track puts the thumb's centre under the cursor and holds it, a sixth cell shows clipped. `Builder::palette_bar_press`,
+   `ra2ui::input::set_horizontal_thumb`; ours against the survey frames: every category at every page equal to the 4-5 MAE of the thumbnails' filtering.
+3. **Slider drags.** The structure screens' sliders (the height thumb) took only the press: now the held button follows (`slider_drag`). The route's height drag (0.825 to 1.32) had left ours at 0.825 and 142 kg against 182 kg.
+4. **The height slider moves vertices only.** A top point dragged at 0.825 then the slider to 1.32 saves the 0.825 normals (live `0.959264 0.255804 0.119908`, ours `0.97898 0.163163 ...`) and the skin layout planned from them.
+   `extrude_at`, `Build::normal_height`.
+5. **A part under the cursor.** A wheel dragged over a motor's body goes on the motor's axle although the cursor is 40 cm from it (ours needed 9 cm of the socket): `placement::pick` takes the nearest part under the
+   ray and its nearest free compatible socket. **The collision judge** tested bounding boxes and refused a round wheel whose box clipped the control board (live accepts it): exact GJK on the mesh objects' point
+   sets (`workshop::gjk`, `ComponentInfo::hulls`), the box test only as broad phase.
+6. **The component preview** (the part's picture with its green boxes) autoscaled to fill its box; live is one fixed camera for every part: the lab orbit camera at pitch -0.49, yaw -0.65, 1.7 m from the part's origin, 45
+   degrees, near 0.001, far 10, viewport 215 (`ra2_viewproj.js`). Its header: the weight box (`Alignment 20`, `Buffer 16`) lacked the `kg`, sat 13 px low (a `TextBox` with the vertical-centre bit centres its line),
+   ended at the panel's edge (the buffer keeps it 16 px in) and was dimmed to 0.7 (the name box's `Background` band drew over it; ordered before it now). `ra2ui::text_box_middle`, Buffer in the right-aligned case.
+7. **Armour grid:** the selected row's bar, `armor name` and `concussion value` were not filled; ours showed no selection.
+8. **The lab's wire frame** drew the skew diagonal of a tapered side; live draws each side's loop (`lab_view::ring_edges`).
+9. Harness: `labshot` now sends the release after every click (a held picker followed the next click), `-f` route files, `key NAME down|up`, `space`, `hover`, `drawn`, `cam P Y [D]`.
+
+### Mismatches found, open
+
+* **Selecting a placed part shows its adjustment page** (live `adjust_none.gib`: *This component needs no adjustments.*, header with no weight; `adjust_burst.gib`: two sliders, *Range of motion start / end*,
+  stored as the two angles after the burst motor's file line: untouched `0 1.5708` for the DDT (default end 90 degrees, `burst = 0 50 90`), `0.201241 2.12669` after the start track click and an end drag;
+  `adjust_zone.gib` for the Smart Zone). **Ours has no adjustment page at all**, so a burst motor or piston cannot be given its swing range in the player-facing lab (`burst_angles` are only read from files).
+  `botlab-e2e-burst-*`; the slider-to-angle map was not recovered (exe: `0x446aa2`, `0x446ae2` name the sliders).
+* **Paint Shop effects.** Live has five (`Color Fill`, `Texture Fill`, `Surface Layers`, `Edge Lines`, `Decals`: `botlab-e2e-paint-effect-list`, pages `texturefill.gib`, `surfacelayer.gib`, `edgelines.gib`, `decals.gib` with
+  the Texture Library lists); ours opens only Color Fill (the dropdown does not open, the model `ra2ui::workshop::paint` exists). **The armour's default appearance** ("apply default chassis appearance", checked
+  by default): picking a plate paints the chassis with a texture and rail edges (plastic: `red_plastic.bmp`, steel: `diamondplate.tga`, aluminium: ridged panels with `dotted_rail`; the four atlases are
+  `botlab-e2e-armor-*`); ours leaves the skin white, so every lab-built robot saves white and header line 4 stays 0 (live: 1 and a skin as soon as the skin is touched: the line is the skin flag, not "loaded").
+* **Forward heading** slider on the Overview does nothing in ours.
+* **Test Robot** frames differ widely (MAE 8-45) after the first seconds of driving; not analysed (the practice arena was matched at rest in 9.27b; the keys bound in the route do drive ours, W reaches the far wall).
+* The mouse ray lands 0.002 m (a quarter pixel) from the original's in the baseplate's depth axis.
+* Colour of the typed name box focus ring and the delete-control message are as before (9.27c).
+
+Tests: `workshop::gjk` (2), the palette order and hidden parts in `components::tests`. Gate: fmt and clippy `-D warnings` clean; 870 tests passed, 0 failed, 2 ignored; `find local/game -newer` printed nothing.

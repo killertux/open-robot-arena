@@ -1,0 +1,40 @@
+# Chassis drawing (step 1), adjust (step 2), Finished. A 800 x 800 unit square (100,100)-(900,900): the grid is
+# 450 px for 1000 units at x 39.., y 148.. so unit u is x = 39 + 0.45 u, v is y = 148 + 0.45 v.
+click 352 89      # Chassis tab
+wait 2
+hide
+shot SHOTS/01-chassis-home.png
+click 585 268     # Structure Design
+wait 2
+hide
+shot SHOTS/02-step1-empty.png
+click 84 193      # (100,100)
+click 444 193     # (900,100)
+click 444 553     # (900,900)
+move 84 553
+wait 1
+shot SHOTS/03-step1-three-points-hover.png
+click 84 553      # (100,900)
+move 84 193
+wait 1
+shot SHOTS/04-step1-four-points-hover-first.png
+click 84 193      # the first point closes the outline
+wait 1
+hide
+shot SHOTS/05-step1-closed.png
+click 996 635     # step 2 button
+wait 2
+hide
+shot SHOTS/06-step2-extruded.png
+dragh 444 193 399 193 0 8 3   # the top outline point (900,100) to (800,100): a taper
+wait 1
+hide
+shot SHOTS/07-step2-taper.png
+drag 965 306 965 236 0 8     # the height slider's thumb to the top (1.32 m: tall enough for a spinner)
+wait 1
+hide
+shot SHOTS/07b-step2-tall.png
+click 975 666     # Finished
+wait 2
+hide
+shot SHOTS/08-chassis-finished.png

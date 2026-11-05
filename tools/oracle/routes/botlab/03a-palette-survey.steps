@@ -1,0 +1,221 @@
+# Palette survey: each of the six categories at scroll 0 and after four pages of five arrow clicks (the grid's
+# right arrow is at 1005,297). The frames show the order and the pictures of every cell of the original's palette.
+click 455 88      # Components tab
+wait 3
+cam -1.2 0 5
+click 552 180
+wait 1
+hide
+shot SHOTS/pal-power-0.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-power-1.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-power-2.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-power-3.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-power-4.png
+click 639 180
+wait 1
+hide
+shot SHOTS/pal-extenders-0.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-extenders-1.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-extenders-2.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-extenders-3.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-extenders-4.png
+click 722 180
+wait 1
+hide
+shot SHOTS/pal-mechanics-0.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-mechanics-1.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-mechanics-2.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-mechanics-3.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-mechanics-4.png
+click 805 180
+wait 1
+hide
+shot SHOTS/pal-wheels-0.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-wheels-1.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-wheels-2.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-wheels-3.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-wheels-4.png
+click 888 180
+wait 1
+hide
+shot SHOTS/pal-weapons-0.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-weapons-1.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-weapons-2.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-weapons-3.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-weapons-4.png
+click 975 180
+wait 1
+hide
+shot SHOTS/pal-extras-0.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-extras-1.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-extras-2.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-extras-3.png
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+click 1005 297
+wait 1
+hide
+shot SHOTS/pal-extras-4.png
