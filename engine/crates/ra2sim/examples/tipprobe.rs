@@ -39,6 +39,8 @@ struct LiveBody {
     vel: Vec3,
     ang: Vec3,
     rot: Quat,
+    /// The original's local inertia tensor (row-major), when the state file carries it.
+    inertia: Option<Mat3>,
 }
 
 /// The lowest point of the robot's solid geometry. A wheel's hull points take
@@ -100,6 +102,98 @@ fn place(duel: &mut Duel, snap: &[(u32, Vec3, Quat)], q: Quat, at: Vec3, v: Vec3
         let r = q * rot;
         duel.physics.set_transform(b, com + r * off, r);
         duel.physics.set_velocity(b, v + w.cross(com - at), w);
+    }
+}
+
+/// The rotation of ours' body that puts its inertia tensor where the original's body of rotation `rl` and
+/// local inertia `il` has it: `rl * g` for the turn of the cube `g` whose `g io g^T` is nearest `il`
+/// (among equals, the one nearest `current`).
+fn frame_of_ours(rl: Quat, il: Mat3, io: Mat3, current: Quat) -> Quat {
+    let mut best = (f32::MAX, current);
+    let axes = [Vec3::X, Vec3::Y, Vec3::Z];
+    let scale = il
+        .x_axis
+        .x
+        .abs()
+        .max(il.y_axis.y.abs())
+        .max(il.z_axis.z.abs());
+    let mut cands = Vec::new();
+    for p in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        for sx in [-1.0f32, 1.0] {
+            for sy in [-1.0f32, 1.0] {
+                for sz in [-1.0f32, 1.0] {
+                    let g = Mat3::from_cols(axes[p[0]] * sx, axes[p[1]] * sy, axes[p[2]] * sz);
+                    if g.determinant() > 0.0 {
+                        let d = g * io * g.transpose() - il;
+                        let err = d
+                            .to_cols_array()
+                            .iter()
+                            .map(|x| x.abs())
+                            .fold(0.0f32, f32::max)
+                            / scale;
+                        cands.push((err, Quat::from_mat3(&g)));
+                    }
+                }
+            }
+        }
+    }
+    let min_err = cands.iter().map(|c| c.0).fold(f32::MAX, f32::min);
+    for (err, g) in cands {
+        if err <= min_err + 0.02 {
+            let q = (rl * g).normalize();
+            let ang = q.angle_between(current);
+            if ang < best.0 {
+                best = (ang, q);
+            }
+        }
+    }
+    best.1
+}
+
+/// Puts a robot's bodies at the original's placed state (`live[0]` its chassis).
+fn adopt(duel: &mut Duel, snap: &[(u32, Vec3, Quat)], live: &[LiveBody]) {
+    let r0 = snap[0].2;
+    let lc = &live[0];
+    let q = lc.rot * r0.inverse();
+    place(duel, snap, q, lc.com, lc.vel, lc.ang);
+    for &(b, _, _) in &snap[1..] {
+        let (m, _, _) = duel.physics.mass_properties(b).unwrap();
+        let com = duel.physics.center_of_mass(b).unwrap();
+        let best = live[1..]
+            .iter()
+            .filter(|l| (l.mass - m).abs() < 0.01)
+            .min_by(|x, y| x.com.distance(com).total_cmp(&y.com.distance(com)));
+        if let Some(l) = best {
+            let s = duel.physics.state(b).unwrap();
+            let (_, an) = (s.rotation.inverse() * l.rot).to_axis_angle();
+            println!(
+                "body {b} {m:.1} kg: live centre {:.4} away, rotation off {an:.3} rad",
+                l.com.distance(com)
+            );
+            // `TIPPROBE_LIVE_POSE=1`: and its centre is the live one's exactly, and its rotation too when
+            // the file carries the live inertia: the body frames of ours and of the original differ by a
+            // turn of the cube, found from the two inertia tensors (docs/29 12be), so no joint starts
+            // with the error of ours' rest pose against the original's.
+            if std::env::var_os("TIPPROBE_LIVE_POSE").is_some() {
+                let off = s.rotation.inverse() * (s.position - com);
+                let mut rot = s.rotation;
+                if let (Some(il), Some((_, _, inv))) = (l.inertia, duel.physics.mass_properties(b))
+                {
+                    rot = frame_of_ours(l.rot, il, inv.inverse(), s.rotation);
+                }
+                duel.physics.set_transform(b, l.com + rot * off, rot);
+            }
+            duel.physics.set_velocity(b, l.vel, l.ang);
+        } else {
+            println!("body {b} {m:.1} kg: no live body");
+        }
     }
 }
 
@@ -249,30 +343,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         vel: Vec3::new(v[4], v[5], v[6]),
                         ang: Vec3::new(v[7], v[8], v[9]),
                         rot: Quat::from_mat3(&m).normalize(),
+                        inertia: (v.len() >= 28).then(|| {
+                            Mat3::from_cols_array(&v[19..28].try_into().unwrap()).transpose()
+                        }),
                     }
                 })
                 .collect();
-            let lc = &live[0];
-            let q = lc.rot * r0.inverse();
-            place(&mut duel, &snap, q, lc.com, lc.vel, lc.ang);
-            for &(b, _, _) in &snap[1..] {
-                let (m, _, _) = duel.physics.mass_properties(b).unwrap();
-                let com = duel.physics.center_of_mass(b).unwrap();
-                let best = live[1..]
-                    .iter()
-                    .filter(|l| (l.mass - m).abs() < 0.01)
-                    .min_by(|x, y| x.com.distance(com).total_cmp(&y.com.distance(com)));
-                if let Some(l) = best {
-                    let s = duel.physics.state(b).unwrap();
-                    let (_, an) = (s.rotation.inverse() * l.rot).to_axis_angle();
-                    println!(
-                        "body {b} {m:.1} kg: live centre {:.4} away, rotation off {an:.3} rad",
-                        l.com.distance(com)
-                    );
-                    duel.physics.set_velocity(b, l.vel, l.ang);
-                } else {
-                    println!("body {b} {m:.1} kg: no live body");
-                }
+            let k = std::env::var_os("TIPPROBE_LIVE_ALARM")
+                .and_then(|_| live.iter().position(|l| (l.mass - 232.116).abs() < 0.05))
+                .unwrap_or(live.len());
+            adopt(&mut duel, &snap, &live[..k]);
+            if k < live.len() {
+                // `TIPPROBE_LIVE_ALARM=1`: the second robot too (the hammer trials' `extra` group).
+                let snap1 = snapshot_of(&duel, 1);
+                adopt(&mut duel, &snap1, &live[k..]);
             }
             (a[5].parse()?, a.get(6).and_then(|s| s.parse().ok()))
         }
@@ -304,6 +388,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec3::ZERO,
         );
         println!("alarm placed at {:.3} {:.3} {:.3} yaw {:.1} deg (forward in the chassis frame {:?}, rest centre {:?}, q {:?})", target.x, target.y, target.z, psi.to_degrees(), duel.robots[1].rig.forward(), c1, r1);
+    }
+    if let Ok(v) = std::env::var("TIPPROBE_ALARM_FIRE") {
+        alarm_fire = v.parse().ok();
     }
     ra2sim::havok17::dump_line(format_args!("[\"X\",0]"));
     let triggers: Vec<String> = duel.robots[robot_index()]
