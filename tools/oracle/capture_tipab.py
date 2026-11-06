@@ -3,7 +3,8 @@
 
 Needs `tools/capture/original_session.sh start`.
 
-  capture_tipab.py setup          main menu -> box Scout v ALARM, hazards off,
+  capture_tipab.py setup          main menu -> box Scout v ALARM, hazards off
+                                  (HAZARDS_ON=1 leaves them on, docs/29 12bf),
                                   match started, both AIs neutered
   capture_tipab.py prepare        the same up to the setup screen (not started)
   capture_tipab.py restart        after a match: results -> the next match, AIs neutered
@@ -57,14 +58,16 @@ AGENT = os.path.join(cd.HERE, "frida", "ra2_tipab.js")
 
 
 def setup(start=True):
-    cd.drive(["-f", os.path.join(cd.HERE, "routes", "exhibition_box_scout_alarm.steps")])
+    cd.drive(["-f", os.path.join(cd.HERE, "routes", os.environ.get("ROUTE", "exhibition_box_scout_alarm.steps"))])
     shot = os.path.join(os.environ.get("SHOT_DIR", "/tmp"), "tipab-setup.png")
-    cd.drive(["click", "176", "177", "wait", "1.5", "click", "322", "188", "wait", "1", "hide", "shot", shot])
+    cd.drive(["click", "176", "177", "wait", "1.5", "click", "322", os.environ.get("ARENA_ROW_Y", "188"), "wait", "1", "hide", "shot", shot])
     sys.path.insert(0, cd.HERE)
     from compare import read_png
     w, h, rgb = read_png(shot)
     v = [rgb[3 * (y * w + x) + c] for y in range(484, 493) for x in range(291, 300) for c in range(3)]
-    if sum(v) / len(v) > 130:
+    if sum(v) / len(v) > 130 and os.environ.get("HAZARDS_ON"):
+        print("hazards box checked: kept (HAZARDS_ON=1)")
+    elif sum(v) / len(v) > 130:
         print("hazards box checked: clearing")
         cd.drive(["click", "295", "488", "wait", "1", "hide"])
     if not start:

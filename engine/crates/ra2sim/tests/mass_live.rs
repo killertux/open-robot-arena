@@ -240,10 +240,19 @@ fn alarms_wheel_bodies_match_the_original() {
             (e[2] - 0.5569).abs() < 0.002,
             "axle moment {e:?}, live 0.5569"
         );
-        assert!(
-            (e[0] - 0.429).abs() < 0.03 && (e[1] - 0.429).abs() < 0.03,
-            "transverse moments {e:?}, live 0.4281 / 0.4297"
-        );
+        // The original's own integrals over the wheel's triangles (docs/29
+        // section 12bf): live 0.4281 / 0.4297; the hull's box was +5 %.
+        if std::env::var("RA2_INERTIA").is_ok_and(|v| v == "old") {
+            assert!(
+                (e[0] - 0.429).abs() < 0.03 && (e[1] - 0.429).abs() < 0.03,
+                "transverse moments {e:?}, live 0.4281 / 0.4297"
+            );
+        } else {
+            assert!(
+                e[..2].iter().all(|x| (0.4274..0.4303).contains(x)),
+                "transverse moments {e:?}, live 0.4281 / 0.4297"
+            );
+        }
         let com = d.physics.center_of_mass(r.parts[p].body).expect("com");
         sides.push((chassis.rotation.inverse() * (com - chassis_com)).x.abs());
     }
@@ -470,4 +479,112 @@ fn flapjacks_flipper_lies_flat() {
             "flipper inertia {i:?}, live {live}"
         );
     }
+}
+
+/// Every rigid body of the six reference robots (Scout, ALARM, Sentinel, Razor,
+/// FlapJack, Wide Load: 31 bodies, chassis, wheels, fork and flipper arms,
+/// hammer, wedge, T connector) against the original's own local inertia tensor
+/// (`tests/data/inertia_live.tsv`, docs/29 section 12bf): the principal
+/// moments agree to 0.5 % (the hull-and-box rule of before was 5 % off on the
+/// wheels, 3 % on the Wide Load's).
+#[test]
+fn every_reference_body_has_the_originals_principal_moments() {
+    let Some(game) = game_dir() else {
+        eprintln!("skipped: no game data (set RA2_GAME)");
+        return;
+    };
+    if std::env::var("RA2_PHYSICS").is_ok_and(|b| b != "havok17")
+        || std::env::var("RA2_INERTIA").is_ok_and(|v| v == "old")
+    {
+        eprintln!("skipped: not the havok17 backend's default inertia");
+        return;
+    }
+    let _scripts = ra2script::lock();
+    let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+    let mut worst = 0.0f32;
+    let mut bodies = 0;
+    let mut duels: BTreeMap<String, Duel> = BTreeMap::new();
+    for l in include_str!("data/inertia_live.tsv").lines() {
+        if l.starts_with('#') || l.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = l.split('\t').collect();
+        let (name, bot) = (f[0], f[1]);
+        let part: usize = f[2].parse().expect("part");
+        let mass: f32 = f[3].parse().expect("mass");
+        let live: Vec<f32> = f[4..7].iter().map(|x| x.parse().expect("moment")).collect();
+        let duel = duels.entry(name.to_string()).or_insert_with(|| {
+            let setup = BotSetup {
+                path: game.join(bot).to_string_lossy().to_string(),
+                yaw_deg: None,
+                spawn: None,
+            };
+            Duel::new(&arena, std::slice::from_ref(&setup)).expect("a duel")
+        });
+        let body = duel.robots[0].parts[part].body;
+        let (m, _, inv) = duel.physics.mass_properties(body).expect("mass properties");
+        assert!(
+            (m - mass).abs() < 0.01,
+            "{name} part {part}: {m} kg, live {mass}"
+        );
+        let e = principal(inv.inverse());
+        for (ours, live) in e.iter().zip(&live) {
+            let rel = (ours - live).abs() / live;
+            worst = worst.max(rel);
+            assert!(
+                rel < 0.005,
+                "{name} part {part}: principal moments {e:?}, live {live:?}"
+            );
+        }
+        bodies += 1;
+    }
+    assert_eq!(bodies, 31);
+    eprintln!(
+        "{bodies} bodies, worst principal moment {:.3} %",
+        100.0 * worst
+    );
+}
+
+/// ALARM's piston rod (the 33 kg hammer body) sits where the original puts it, in the chassis
+/// frame, from its chassis' centre of mass (`assembly-alarm__live__000`: -0.0357 / -0.0163 /
+/// 0.8236). A port of the mass integrals with a term missing put it 6 mm off in x.
+#[test]
+fn alarms_piston_rod_centre_matches_the_original() {
+    let Some(game) = game_dir() else {
+        eprintln!("skipped: no game data (set RA2_GAME)");
+        return;
+    };
+    if std::env::var("RA2_PHYSICS").is_ok_and(|b| b != "havok17") {
+        eprintln!("skipped: not the havok17 backend");
+        return;
+    }
+    let _scripts = ra2script::lock();
+    let arena = game.join("Arenas/box.py").to_string_lossy().to_string();
+    let setup = BotSetup {
+        path: game.join("AI/Team0/Bot1.bot").to_string_lossy().to_string(),
+        yaw_deg: None,
+        spawn: None,
+    };
+    let d = Duel::new(&arena, std::slice::from_ref(&setup)).expect("a duel");
+    let r = &d.robots[0];
+    let chassis = d.physics.state(r.parts[0].body).expect("chassis");
+    let chassis_com = d.physics.center_of_mass(r.parts[0].body).expect("com");
+    let rod = r
+        .parts
+        .iter()
+        .position(|p| {
+            d.physics
+                .mass(p.body)
+                .is_some_and(|m| (m - 33.0).abs() < 0.01)
+        })
+        .expect("the 33 kg rod");
+    let rod_com = d.physics.center_of_mass(r.parts[rod].body).expect("com");
+    let rel = chassis.rotation.inverse() * (rod_com - chassis_com);
+    let frame = r.rig.components[r.rig.parts[0].root].local;
+    let ours = frame.transform_vector3(rel);
+    let live = Vec3::new(-0.0357, -0.0163, 0.8236);
+    assert!(
+        (ours - live).length() < 0.0015,
+        "rod centre {ours} from the chassis', live {live}"
+    );
 }

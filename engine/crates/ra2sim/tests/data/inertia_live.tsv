@@ -1,0 +1,33 @@
+# robot	bot file	part	mass kg	live principal moments (ascending, kg m^2) of the Havok body's local inertia tensor
+# from the P rows (body +0x190 mass, +0x19c inertia) of the live fight / spawn / contact captures (docs/29 section 12bf); the Scout chassis is bodies-scout-alarm__live__000
+Scout	AI/Team0/Bot0.bot	0	163.495	20.6460	23.8908	39.0960
+Scout	AI/Team0/Bot0.bot	1	27.000	0.4294	0.4299	0.5569
+Scout	AI/Team0/Bot0.bot	2	27.000	0.4279	0.4284	0.5569
+Scout	AI/Team0/Bot0.bot	3	26.000	0.1712	2.5126	2.5734
+ALARM	AI/Team0/Bot1.bot	0	232.116	36.3902	49.148	72.7259
+ALARM	AI/Team0/Bot1.bot	1	27.000	0.4294	0.4299	0.5569
+ALARM	AI/Team0/Bot1.bot	2	27.000	0.4279	0.4284	0.5569
+ALARM	AI/Team0/Bot1.bot	3	27.000	0.4294	0.4299	0.5569
+ALARM	AI/Team0/Bot1.bot	4	27.000	0.4279	0.4284	0.5569
+ALARM	AI/Team0/Bot1.bot	5	33.000	7.1803	9.8266	14.6459
+Sentinel	AI/Team0/Bot2.bot	0	296.394	59.0772	78.9748	122.5249
+Sentinel	AI/Team0/Bot2.bot	1	28.000	0.9129	1.2766	1.2766
+Sentinel	AI/Team0/Bot2.bot	2	28.000	0.9129	1.2766	1.2766
+Sentinel	AI/Team0/Bot2.bot	3	23.000	0.6103	0.6103	0.9181
+Sentinel	AI/Team0/Bot2.bot	4	23.000	0.6111	0.6111	0.9181
+Sentinel	AI/Team0/Bot2.bot	5	28.000	1.0498	2.2472	3.1563
+Razor	AI/Team10/Bot1.bot	0	212.518	32.93	44.1045	66.6718
+Razor	AI/Team10/Bot1.bot	1	27.000	0.4294	0.4299	0.5569
+Razor	AI/Team10/Bot1.bot	2	27.000	0.4279	0.4284	0.5569
+Razor	AI/Team10/Bot1.bot	3	27.000	0.4294	0.4299	0.5569
+Razor	AI/Team10/Bot1.bot	4	27.000	0.4279	0.4284	0.5569
+FlapJack	AI/Team8/Bot0.bot	0	163.091	17.6774	33.0705	43.5043
+FlapJack	AI/Team8/Bot0.bot	1	27.000	0.4294	0.4299	0.5569
+FlapJack	AI/Team8/Bot0.bot	2	27.000	0.4279	0.4284	0.5569
+FlapJack	AI/Team8/Bot0.bot	3	27.000	0.3462	1.2188	1.4814
+WideLoad	AI/Team8/Bot2.bot	0	226.668	44.3032	86.5374	108.8315
+WideLoad	AI/Team8/Bot2.bot	1	32.000	1.2935	1.5023	1.5055
+WideLoad	AI/Team8/Bot2.bot	2	32.000	1.2935	1.5023	1.5055
+WideLoad	AI/Team8/Bot2.bot	3	26.000	0.4619	0.4619	0.5586
+WideLoad	AI/Team8/Bot2.bot	4	26.000	0.4619	0.4619	0.5586
+WideLoad	AI/Team8/Bot2.bot	5	63.000	8.8405	17.1122	21.9817

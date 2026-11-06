@@ -8467,3 +8467,109 @@ Scout's tail stand share of the fights (Octagon 0.8 % live against 9.5 %, Box 0.
 **Tools and tests.** `tools/oracle/sideways/live_state.py`, `live_trials.py`, `resolver_cases.py`, `grids/grid_corner.json`; `examples/resolverreplay`; `examples/tipprobe` (`TIPPROBE_LIVE_POSE`, `TIPPROBE_LIVE_ALARM`, `TIPPROBE_ALARM_FIRE`); `tests/resolver_live.rs`; `frida/ra2_tipab.js` (`V` rows). Capture: `tipab-scout-tail-corner-box__live__000` (manifest row, copy in `~/ra2-oracle-backup/oracle/original`, `manifest-additions-2026-11-05-cornerland.tsv`).
 
 **Open.** (a) The Scout's tail stand in fights (9.5 % / 7.7 % against 0.8 / 0.4 %), 12bd's (b), still unexplained: the controlled tips, landings and basins are the original's, so look at what a fight does to the Scout (ALARM's hammer in the contact, wall contact, the AI's inputs). (b) ALARM's hammer on the placed Scout, 11 of 16 in kind. (c) The wheels' transverse inertia (+5 %) and the fork's inertia tensor (2 %). (d) The one basin-edge trial (pitch -80, w -4.75). (e) The Sentinel's push after 1 s.
+
+### 12bf. The rigid bodies' mass properties are the original's own integrals over each body's triangles: wheels 5 % -> 0.02 %, 30 bodies of six robots agree to 0.26 % (was 5.2 %); the Scout's wheelie at the start now matches live, its tail stand in fights does not (fx/inertia)
+
+12bd/12be left the wheels' transverse inertia +5 % (live 0.4297 / 0.4281, ours 0.4518 / 0.4502) and the fork arm's tensor "2 % off". This round found the
+function that computes a rigid body's mass properties, ported it, and re-measured everything that could depend on it.
+
+**1. What the original does (`Robot Arena 2.exe`, recovered and ported).**
+* `FUN_00525090` (the game's `setMass`) stores the body's mass and calls `FUN_005232d0`, which walks the body's child list (`+0x250`..`+0x254`, one entry per rigid
+  body of the assembly), asks each child for its mass properties by a virtual call (`+0x28`: centre, 12 floats of inertia, and a third value that sums into `+0x18c`), sums
+  `mass` (`+0x190`), takes the mass-weighted centre (`+0x30`), adds each child's tensor and `m (|d|^2 I - d d^T)` about that centre, and stores the result
+  with `FUN_00520400` (`+0x19c`). That composite is what ours already did (`robot::havok_part`).
+* A child's own tensor is `FUN_0053c990`: it moves the mesh's vertices by minus the centre of their bounding box (`FUN_0053c810`, for accuracy), builds one face per
+  **triangle of the object's own mesh** with its unit normal and plane offset (`FUN_0053ba90`; a triangle with no area is flagged and skipped), and integrates Mirtich's
+  polyhedral formulas face by face (`FUN_0053c400`, face integrals `FUN_0053c180`, projection integrals `FUN_0053bdc0`: `volInt.c`, in `f32`, along the face normal's
+  largest component), then density `mass / V`, centre `T1 / V`, inertia about it (`FUN_0053c6e0`). It is **not** the convex hull, and for an open surface it is not the solid
+  the surface bounds either: the integrals are the flux integrals of the fields `x`, `x^2`, ... through the faces, which depend on the axes the vertices are given in.
+  (`FUN_00404800` / `FUN_00404990`, which scale a body's tensor by a factor and call `setInertiaTensor` `0x520200`, are the piston rod's factor, already in.)
+* So what differed: ours took a hull (or a rotor's box) at uniform density. For the closed bodies it is the same; the stock wheels are not: their rotor proxy
+  (`axle_collision`) is a box without its inboard end face, and the open face makes the flux integrals differ from the box's by exactly the 5 % (angle motors) and 3 %
+  (Z-Tek) seen live. The rotor must be integrated in its own object frame: a first port in the part's frame gave the left Scout wheel a spurious product of inertia
+  (xz 0.0064: the rotor box is turned 14 degrees against the wheel there), a wobble of the spinning wheel that the original does not have; in the object's frame the
+  products are -0.00025 as live's.
+
+**2. The port.** `massprops::original_mass_props` (`f32`, the original's operation order, the addresses above in its comment; tests: a cube off the origin, a turned and stretched box against the
+tetrahedra rule, which caught a dropped factor `n_a n_b` in the `Fcc` term of the first transcription: the wheels' symmetric boxes could not show it, the rods' COM could) and `robot::original_props` (per piece,
+in the piece's own frame, carried to the part by the placement; used for the piece's centre as well as its tensor); `RA2_INERTIA=old` selects the hull / box rule. Every
+piece now keeps its `.gmf` triangles (`HavokParts::collision_faces`, `phantom_faces`, `rotor_faces`).
+
+**3. Verified against the live P rows** (`tools/oracle/sideways/inertia_cmp.py`: mass `+0x190` and local inertia `+0x19c` of every body of the fight / spawn / contact captures;
+principal moments, which do not depend on the body frame; `tests/data/inertia_live.tsv`, `tests/mass_live.rs`):
+
+| robot | body | mass kg | live principal moments | old max diff | new max diff |
+|---|---|---|---|---|---|
+| Scout, ALARM, Razor, FlapJack | Mini wheel, left | 27 | 0.4294 0.4299 0.5569 | 5.18 % | 0.01 % |
+| same | Mini wheel, right | 27 | 0.4279 0.4284 0.5569 | 4.78 % | 0.02 % |
+| Wide Load | N-12 wheel (Z-Tek) x2 | 32 | 1.2935 1.5023 1.5055 | 2.84 % | 0.02 % |
+| Wide Load | Mini wheel x2 | 26 | 0.4619 0.4619 0.5586 | 0.26 % | 0.26 % |
+| Scout | fork arm (extender + fork + rotor) | 26 | 0.1712 2.5126 2.5734 | 0.00 % | 0.00 % |
+| FlapJack | extender + small wedge | 27 | 0.3462 1.2188 1.4814 | 0.00 % | 0.00 % |
+| ALARM | hammer head (rod) | 33 | 7.1803 9.8266 14.6459 | 0.00 % | 0.00 % |
+| Sentinel | 4 wheels, bracket wedge | 28 / 23 / 28 | 0.91-1.28, 0.61-0.92, 1.05-3.16 | <= 0.02 % | <= 0.01 % |
+| the six chassis | motors, battery, board, zone, ... | 163-296 | e.g. Scout 20.646 23.891 39.096 | 0.00 % | 0.00 % |
+
+31 bodies: mean largest difference **2.2 % -> 0.03 %**, worst 5.2 % -> 0.26 % (the Wide Load's two Mini wheels, the one body not explained: their 9 kg rotor is a closed 12-triangle box, and the same code gives the other 30 to 0.02 %).
+12be's "fork arm 2 %" was not an error of the tensor: the live and ours' fork bodies' frames differ by 0.3 degrees, so the components differ while the principal moments are 0.171 / 2.513 / 2.573 in both;
+chassis tensors, all components, are unchanged to four digits. Centres of mass: wheels and chassis unchanged; ALARM's piston rod -0.0353 / -0.0163 / 0.8236
+in the chassis frame against live -0.0357 / -0.0163 / 0.8236 (`assembly-alarm__live__000`; new test), the Wide Load's rod 0.0311 / -0.1391 / -0.8705 against live 0.0309 / -0.144 / -0.8716 (the old rule 0.9 mm closer on z, 5 mm
+off on y in both; not followed up).
+
+**4. Re-measured.** Old = `RA2_INERTIA=old` (reproduces 12bd / 12be to the digit), new = default. Controlled trials from the live placed states (126, 12be): outcome differs 1 before and
+after (wscan pitch -80 / w -4.75; the other 125 agree in both). ALARM's hammer on the placed tail-standing Scout (16; live: wheels 15, back 1): ours differs in kind in 5 before and **4 after** with the Box's hazards
+(12 in kind), 5 and 5 with the live session's (`RA2_HAZARDS=0`). The Sentinel's excess push (79 live starts, ours minus live along the Wide Load's axis at 0.5 / 1 / 1.5 / 2 s): +0.42 / +0.70 / +0.67 / +0.55 m/s
+before, **+0.40 / +0.63 / +0.68 / +0.75 after** (the Sentinel's bodies were already exact; at tau = 0 the replay's Sentinel already reads +0.19 m/s, an offset of the replay's start that the earlier numbers carry too).
+Ensembles (96 warmups, 120 s, scratch install, `RA2_AI_TRACE=1 FIDTRACE_UP=1`, `live_ref.py --table`, mean +- se; live is bell-primed, 12bc):
+
+| fight | live | before (old) | after (new) |
+|---|---|---|---|
+| Box Scout / ALARM counted hits | 7.1 +- 0.7 / 46.6 +- 4.7 | 7.4 +- 0.5 / 37.6 +- 2.4 | 7.4 +- 0.5 / 36.9 +- 2.4 |
+| Razor / FlapJack | 6.0 +- 1.6 / 0.6 +- 0.2 | 5.7 +- 0.4 / 1.0 +- 0.1 | 6.3 +- 0.4 / 1.2 +- 0.1 |
+| Compressor Sentinel / Wide Load | 5.2 +- 1.0 / 98.2 +- 17.5 | 4.8 +- 0.4 / 77.1 +- 4.9 | 5.5 +- 0.4 / 83.5 +- 5.0 |
+| Octagon Scout / ALARM | 4.3 +- 0.7 / 13.7 +- 3.2 | 4.4 +- 0.3 / 15.0 +- 1.3 | 4.3 +- 0.3 / 18.0 +- 1.7 |
+| match length, Box / Razor / Compressor / Octagon s | 89.5 / 48.5 / 93.8 / 52.0 | 80.4 / 56.1 / 95.5 / 44.0 | 75.3 / 57.7 / 97.4 / 52.0 |
+| Scout on its tail, share of 120 s: Octagon | 0.8 +- 0.2 % (17) | 9.5 +- 1.9 % | 6.3 +- 1.7 % |
+| same, Box | 0.4 +- 0.4 % (5) | 7.7 +- 1.9 % | 8.9 +- 1.8 % |
+| fights with a tail run >= 4 s, Octagon / Box | 0 / 0 | 18 % / 16 % | 10 % / 22 % |
+| Scout's minimum up.y < 0.3 within 3 s of the bell, Octagon (the wheelie) | 12 % | 27 % | **12 %** |
+
+Every count is within 2 se of live except the Razor's FlapJack (1.2 against 0.6, +3.5 se, was +2.2); the Compressor's Wide Load moves toward live (83.5 against 98.2, was 77.1), the Octagon's ALARM away (18.0 against 13.7, was 15.0), the Box ALARM stays
+(36.9 against 46.6); the match lengths are not systematically better, and **the Scout's launch wheelie, 27 % of the Octagon fights reaching up.y < 0.3 in the first 3 s, is now live's 12 %** (and 38 % against live's 35 % within 8 s, was 45 %). The tail stand in fights stays: 6.3 / 8.9 % against 0.8 / 0.4 %.
+An intermediate port with the rotor integrated in the part's frame (the left wheel with its spurious product) and one with the dropped factor (rods 3-6 mm off) gave Box 7.9 / 35.9 and 7.2 / 31.4,
+Compressor 6.4 / 89.8 and 4.9 / 77.7, tail 8.3 / 9.4 and 11.3 / 12.4 %: the ensemble's noise from bodies that differ by a hundredth of a kg m^2 is 1-2 se.
+
+**Tests that moved.** `a_piston_after_its_group_locks_after_the_solver_and_kicks_the_chassis`: the Wide Load's stroke with its controller after the group leaves the chassis 0.37 m/s from where it began with the old inertia and **0.095** with the
+original's (the same stroke before the group: 0.06 -> 0.03); the test now asks for the order's effect (after > 0.07 and > 2 x before), the live value of the lone-robot case has not been measured at this level.
+`an_undriven_wheel_spins_down_at_the_worlds_drag_alone` now takes a rear wheel: in the front pair the spin set on a lifted wheel is lost within the first step in some rest poses (ALARM; old inertia: wheel 1 loses it, wheel 0 keeps it; new: both lose it, not through the wheel records' `touching` / `air`), an
+effect that does not depend on the inertia and that was not followed up. `tests/mass_live.rs` adds every reference body's principal moments (31, `tests/data/inertia_live.tsv`) and ALARM's rod centre.
+
+**5. What a fight adds to the tail stand: the Scout's own AI, and where the time goes.**
+* *The AI (`AI/Flipper.py`, `AI/Tactics.py`).* `IsUpsideDown` is up.y < 0 (`0x4df4f0`, 12am). While it is true the Invert tactic (priority 200) sets `Throttle(0)`, `Turn(0)` and calls the
+  `InvertHandler` generator, which presses the fork's `Flip` on its first call and then every 9th Invert tick (about once a second). At up.y >= 0 the Scout is back in Engage and
+  drives at 40-80 %. A tail stand has up.y within a few thousandths of 0, so the brain alternates between the two; ours' long runs (Octagon: Invert 142 ticks, throttle 4, 20 s) are Invert with a stroke each second
+  that does not topple the Scout, or Engage / Unstuck with the wheels spinning in the air.
+* *New live captures, hazards ON* (the hazards box left checked; `capture_tipab.py` `HAZARDS_ON=1`, `ROUTE`, `ARENA_ROW_Y`): the Scout stood on its tail (pitch -85 / -90 / -95) and
+  its `Flip` pressed at 6..90 substeps, 33 trials each. **Combat Arena (hazards on): 33 of 33 stay on the tail; The Octagon: 33 of 33 topple onto the wheels** (the hazards-off Box of 12bd: 55 of 55 topple).
+  Ours: Box 33 stay, Octagon 32 topple (1 stays). So 12ba's action-list model (the fork's lock before or after the solver, by how many actions the world holds) is right in both arenas, hazards
+  on, and the fork stroke is not what is missing. (`tipab-scout-tail-fire-haz-box`, `tipab-scout-tail-fire-haz-octagon`; ours with `ours_tipab.py` `ARENA`, `fire_out.py`.) It also means that in the Combat Arena the
+  Invert stroke cannot right a Scout on its tail in the original either.
+* *Wall and drive in the Octagon, hazards on* (`tipab-scout-wall-haz-octagon`: the stand turned at the -x wall, top or bottom face, four yaws, distances 0.4-0.8 m, driven 100/0, -100/0,
+  100/100, 100/-100; 40 trials): live and ours end in the same kind in 40 of 40 (all stay). One small difference: with the throttle 100/0 the live lean grows to 0.068-0.072 where ours stays at the
+  start's 0.047-0.051 (6 trials; the other drives are equal): a spin-up reaction of the wheels that ours does not show; the live wheel in the air also swings by +-4 rad/s about 17 rad/s while ours' hold 17.0-17.4.
+  Not followed up.
+* *Where the time goes* (`hit_to_tail.py`, `launch_stats.py`, `ours_runs.py`, `live_runs.py`). Per ALARM blow of 10 hp or more on the Scout: put on the tail by the blow (tail at +1 s, Scout not on it before):
+  Octagon live 3.3 % of 181, ours 6.1 % before / 2.6 % after (1059); Box live 1.7 % of 120, ours 0.7 / 1.2 % (2501): **the blows put the Scout on its tail as often in ours as live**. Blows that land on a
+  Scout already on its tail: Octagon live 2.7 %, ours 16.1 / 7.3 %; Box live 0.8 %, ours 3.9 / 4.9 %. Live tail runs are 0.3-1.6 s (one 3.0 s); ours' go to 10-25 s with the AI in Invert / Engage / Unstuck, many at a wall
+  (r >= 12) and some on the open floor; those near 20 s end the fight (the immobility rule), which is part of ours' shorter Box fights. **The disagreement is persistence: once on its tail the Scout leaves it in a second live
+  and stays for seconds in ours, and none of the controlled tests (static stand 60 s both, spin scan, corner landing, fork stroke by the action list, wall, drive) reproduces it.**
+
+**Tools and tests.** `massprops::original_mass_props`; `RA2_INERTIA=old`; `tests/mass_live.rs` (`every_reference_body_has_the_originals_principal_moments`, `alarms_piston_rod_centre_matches_the_original`, `tests/data/inertia_live.tsv`; the ALARM wheel test now pins 0.4274-0.4303);
+`tools/oracle/sideways/inertia_cmp.py`, `hit_to_tail.py`, `launch_stats.py`, `fire_out.py`, `ours_runs.py`, `live_runs.py`, `grids/grid_scout11..13.json`, `live_trials.py` (`ARENA`, drive, `LT_DUMP`), `ours_tipab.py` (`ARENA`),
+`capture_tipab.py` (`HAZARDS_ON`, `ROUTE`, `ARENA_ROW_Y`), `routes/exhibition_octagon_scout_alarm.steps`.
+Captures (display `:9`, port `27149`, under the shared lock, `Teams/ AI/ ra2.cfg` copied before and sha256-compared after, "prefix restored (identical)" each time, no `Robot Designs/` in the prefix; manifest rows,
+copies in `~/ra2-oracle-backup/oracle/original`, `manifest-additions-2026-11-06-inertia.tsv`): `tipab-scout-tail-fire-haz-box__live__000`, `tipab-scout-tail-fire-haz-octagon__live__000`, `tipab-scout-wall-haz-octagon__live__000`.
+
+**Open.** (a) The Scout's tail stand in fights (Octagon 6.3 % / Box 8.9 % against 0.8 / 0.4 %): arrival now agrees (the blows, the wheelie), persistence does not. Next: the live fights' wheel thrust (`W` rows) and the Scout's pose on the 22 tail runs against
+ours' step by step, a controlled tail stand with the AI's Engage ramp running (not neutered), the live wheel's swing and the throttle-100/0 lean of 5. (b) ALARM's hammer on the placed Scout (12 of 16 in kind). (c) The Sentinel's push (+0.4-0.75 m/s after 0.5 s, of which +0.19 is already in the
+replay's start). (d) The Wide Load's Mini wheels (0.26 %) and its rod's centre (5 mm on y). (e) The front wheels' lost spin after a lift (test above). (f) The Box ALARM count 36.9 against 46.6, the Razor FlapJack count 1.2 against 0.6.

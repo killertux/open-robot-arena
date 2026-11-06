@@ -346,10 +346,13 @@ fn a_piston_after_its_group_locks_after_the_solver_and_kicks_the_chassis() {
     let game = game!();
     let _scripts = ra2script::lock();
     let (peak, after) = stroke_kick(&game, false);
+    let (_, before) = stroke_kick(&game, true);
     assert!(peak > 1.4, "the kick at the stop: {peak}");
+    // 0.37 against 0.06 with the hull-and-box inertia of before docs/29 12bf, 0.095 against 0.028 with
+    // the original's (the wheels' transverse inertia 3 % lower): the order of the list is what shows.
     assert!(
-        after > 0.25,
-        "the chassis ends the stroke {after} m/s from where it began"
+        after > 0.07 && after > 2.0 * before,
+        "the chassis ends the stroke {after} m/s from where it began (controller before the group: {before})"
     );
 }
 
