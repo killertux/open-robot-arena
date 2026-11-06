@@ -124,6 +124,9 @@ pub enum NetSound {
     SpectatorJoined,
 }
 
+/// The server list's status after a voluntary disconnect (`0x6f4c4c`, set by `FUN_00499560`).
+pub const RETRIEVING_LOCAL: &str = "Retrieving Local Sessions ...";
+
 /// What the application should do after a network step.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetAction {
@@ -917,9 +920,17 @@ impl NetPlay {
                 shell.goto(PREMATCH_SCREEN)?;
             }
             (s, "disconnect button") if s.eq_ignore_ascii_case(PREMATCH_SCREEN) => {
+                // `FUN_00492540(1)` (the disconnect button, `FUN_00490770`): the prematch window is
+                // closed, the create window and the server list shown again, the session
+                // destroyed (`FUN_004d0380`) and UI event 0x69 posted. Its one consumer is the
+                // server list (`FUN_0049a780` registers `FUN_00499560`), which writes the status
+                // label "Retrieving Local Sessions ..." (the Internet text when the LAN radio is
+                // off). No box is shown: the OK box belongs to the host vanishing (event 0x6c).
                 self.leave();
                 shell.goto(BROWSER_SCREEN)?;
-                return Ok(NetAction::Ended("left".to_string()));
+                self.refresh()?;
+                self.status = RETRIEVING_LOCAL.to_string();
+                return Ok(NetAction::None);
             }
             (s, "begin match button") if s.eq_ignore_ascii_case(PREMATCH_SCREEN) => {
                 // `FUN_00495450`: nobody seated is "Select Bots"; a seated player not ready asks

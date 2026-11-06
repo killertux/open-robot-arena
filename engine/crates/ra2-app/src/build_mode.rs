@@ -5962,7 +5962,8 @@ impl Builder {
 /// A robot seen from 5 m, level, from behind (the camera at `(0, 0, -5)` looking along +z at the
 /// robot standing at the origin), over `background`: the original's "3d view group" on the repair
 /// bench (`repairs.gib`, `3d view group` holding `repairs 3d placeholder`). Pixels are RGBA,
-/// `width x height`; `None` when the design has nothing to draw.
+/// `width x height`; `None` when the design has nothing to draw. `only` draws one part of the
+/// design (`0` the chassis, `i` the component of that index) and nothing else.
 pub fn robot_bench_view(
     renderer: &Renderer,
     game: &Path,
@@ -5970,6 +5971,7 @@ pub fn robot_bench_view(
     background: [f32; 3],
     width: u32,
     height: u32,
+    only: Option<usize>,
 ) -> Result<Option<Vec<u8>>, String> {
     let library = GameLibrary::open(game).map_err(|e| e.to_string())?;
     let bot = build.to_bot();
@@ -5977,6 +5979,9 @@ pub fn robot_bench_view(
     let chassis = ra2_render::chassis_items(&bot, Mat4::IDENTITY);
     let mut owned: Vec<(usize, Vec<DrawItem>)> = Vec::new();
     for i in 1..bot.components.len() {
+        if only.is_some_and(|part| part != i) {
+            continue;
+        }
         let Some(info) = build.component_info(i) else {
             continue;
         };
@@ -5996,7 +6001,7 @@ pub fn robot_bench_view(
         ));
     }
     let mut groups: Vec<RenderGroup<'_>> = Vec::new();
-    if !chassis.is_empty() && !world.is_empty() {
+    if !chassis.is_empty() && !world.is_empty() && only.is_none_or(|part| part == 0) {
         groups.push(RenderGroup {
             items: &chassis,
             model: world[0],
