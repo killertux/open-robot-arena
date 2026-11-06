@@ -244,9 +244,13 @@ impl Repairs {
         None
     }
 
-    /// Fill the shipped `repairs list` with the rows. A component row is icon
-    /// (fractured only), robot, component, class and `hp/total time`; a plain
-    /// [`Row::new`] keeps the original two-column component/time shape.
+    /// Fill the shipped `repairs list` with the rows. Live (`event-repairs-damaged`) the list draws
+    /// **no text** in either column, only the cell lines of its rows (`BorderColor 0 0 0 1`,
+    /// `BorderWidth 1`): a 1 px line above every row (also the row after the last), a line down the
+    /// left edge, the column edge after 0.7 of the width (`Component` 261 px, `Time` 112 of 373) and
+    /// the right edge, and the selection bar spans the selected row inside the lines. A bench with
+    /// no rows (an undamaged robot, `event-repairs-atom`) draws none of it. The fractured icon of
+    /// [`FRACTURED_ICON`] is kept (`FUN_004d6480`).
     fn fill(&mut self) -> Result<(), String> {
         let rows = self.rows.clone();
         let selected = self.selected;
@@ -257,135 +261,87 @@ impl Repairs {
             return Err(format!("{LIST} has no Rows/Columns"));
         };
         let height = grid.row_height.max(18.0);
-        let width = grid.col_widths.first().copied().unwrap_or(116.0);
-        // The list area is 290 logical pixels wide (`ColWidths 116 17 116 17`).
-        // Pack a component row as icon | robot | component | class | hp/time so
-        // the two shipped columns do not overlap their own text.
-        let columns = [20.0, 130.0, 240.0, 375.0];
-        let widths = [100.0, 100.0, 125.0, 90.0];
         // Rows are the widgets this module made; the file's own selection and
         // highlight bars stay.
         list.children
-            .retain(|c| !c.name().starts_with("repair row"));
+            .retain(|c| !c.name().starts_with("repair row") && !c.name().starts_with("row line"));
+        let drawn = rows.len();
         for (index, row) in rows.iter().enumerate() {
-            let y = height * index as f32;
             if row.fractured {
                 list.children.push(icon_widget(
                     &format!("repair row {index} icon"),
                     FRACTURED_ICON,
-                    0.0,
-                    y,
-                    height,
-                    height,
+                    1.0,
+                    height * index as f32 + 1.0,
+                    height - 1.0,
+                    height - 1.0,
                 ));
             }
-            let component_row =
-                row.total_hp > 0.0 || !row.robot.is_empty() || !row.class.is_empty();
-            let texts: [String; 4] = if component_row {
-                [
-                    clip(&row.robot, 12),
-                    clip(&row.class, 10),
-                    clip(
-                        &format!("{:.0}/{:.0} {}%", row.hp, row.total_hp, row.hp_percent()),
-                        13,
-                    ),
-                    clip(&row.time, 8),
-                ]
-            } else {
-                [
-                    row.component.clone(),
-                    String::new(),
-                    String::new(),
-                    row.time.clone(),
-                ]
-            };
-            let xs = if component_row {
-                columns
-            } else {
-                [0.0, width, width * 2.0, width * 3.0]
-            };
-            let ws = if component_row {
-                widths
-            } else {
-                [width, width, width, width]
-            };
-            for (column, text) in texts.iter().enumerate() {
-                if text.is_empty() {
-                    continue;
-                }
-                let mut widget = row_widget(
-                    &format!(
-                        "repair row {index} {}",
-                        ["robot", "component", "class", "time"][column]
-                    ),
-                    text,
-                    xs[column],
-                    y,
-                    ws[column],
-                    height,
-                );
-                if index == selected {
-                    crate::input::set_field(&mut widget, "_ForeColor", "1 1 0.6 1");
-                }
-                list.children.push(widget);
-            }
         }
-        // The file's `Sel Bar` follows the selected row (the authors' own bar).
-        let rows_len = rows.len();
+        let line = |name: String, pos: &str, size: &str| {
+            let field = |name: &str, raw: &str| ra2fmt::gib::Field {
+                name: Some(name.to_string()),
+                raw: raw.to_string(),
+            };
+            Widget {
+                kind: WidgetKind::Rectangle,
+                implicit: false,
+                fields: vec![
+                    field("Filled", "true"),
+                    field("FillColor", "0 0 0 1"),
+                    field("BorderWidth", "0"),
+                    field("BorderColor", "0 0 0 0"),
+                    field("Name", &name),
+                    field("ID", "-1"),
+                    field("Position", pos),
+                    field("Size", size),
+                    field("Visible", "true"),
+                    field("ChildOrder", "6"),
+                    field("ClipMode", "0"),
+                    field("NumChildren", "0"),
+                ],
+                attachments: Vec::new(),
+                children: Vec::new(),
+            }
+        };
+        for i in (0..=drawn).filter(|_| drawn > 0) {
+            list.children.push(line(
+                format!("row line {i}"),
+                &format!("0 0 {} 0", height * i as f32),
+                "1 1 1 0",
+            ));
+        }
+        let down = format!("1 0 {} 0", height * drawn as f32 + 1.0);
+        if drawn > 0 {
+            list.children
+                .push(line("row line left".into(), "0 0 0 0", &down));
+            list.children
+                .push(line("row line mid".into(), "0.7 1 0 0", &down));
+        }
+        // The right line is the list's last pixel column (live x = 931 of 558 + 374): its right
+        // edge on the list's.
+        if drawn > 0 {
+            let mut right = line("row line right".into(), "1 1 0 0", &down);
+            right.fields.push(ra2fmt::gib::Field {
+                name: Some("Alignment".to_string()),
+                raw: "12".to_string(),
+            });
+            list.children.push(right);
+        }
+        // The file's `Sel Bar` follows the selected row: inside the lines, the whole row wide.
         if let Some(bar) = list.children.iter_mut().find(|c| c.name() == "Sel Bar") {
             crate::input::set_field(
                 bar,
                 "Position",
                 &format!(
-                    "0 0 {} 0",
-                    height * selected.min(rows_len.saturating_sub(1)) as f32
+                    "1 0 {} 0",
+                    height * selected.min(drawn.saturating_sub(1)) as f32 + 1.0
                 ),
             );
-            crate::input::set_field(bar, "Visible", if rows_len == 0 { "false" } else { "true" });
+            crate::input::set_field(bar, "Size", &format!("1 1 {} 0", height - 1.0));
+            crate::input::set_field(bar, "Visible", if drawn == 0 { "false" } else { "true" });
         }
         Ok(())
-    }
-}
-
-/// A cell's text, cut to `max` characters so a long robot/component name
-/// cannot run into the next column (the shipped list has two 116-pixel
-/// columns; the renderer does not clip text to a column by itself).
-fn clip(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        text.to_string()
-    } else {
-        let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    }
-}
-
-fn row_widget(name: &str, text: &str, x: f32, y: f32, w: f32, h: f32) -> Widget {
-    use ra2fmt::gib::Field;
-    let field = |name: &str, raw: &str| Field {
-        name: Some(name.to_string()),
-        raw: raw.to_string(),
-    };
-    Widget {
-        kind: WidgetKind::Text,
-        implicit: false,
-        fields: vec![
-            field("_Font", ROW_FACE),
-            field("_Text", text),
-            field("_ForeColor", "1 1 1 1"),
-            field("_Name", ""),
-            field("_Position", "0 0 0 0"),
-            field("Name", name),
-            field("ID", "-1"),
-            field("Position", &format!("{x} 0 {y} 0")),
-            field("Size", &format!("{w} 0 {h} 0")),
-            field("Visible", "true"),
-            field("ChildOrder", "0"),
-            field("ClipMode", "1"),
-            field("NumChildren", "0"),
-        ],
-        attachments: Vec::new(),
-        children: Vec::new(),
     }
 }
 
@@ -537,9 +493,25 @@ mod tests {
             .filter(|c| c.widget.kind == WidgetKind::Text)
             .filter_map(|c| c.widget.text())
             .collect();
-        assert!(texts.contains(&"Damaged Bot"));
-        assert!(texts.contains(&"0:18 / 0:30 (40%)"));
-        assert!(texts.contains(&"Bent Axle"));
+        // Live (`event-repairs-damaged`) the list draws no row text at all: only the cell lines
+        // (one above each row and one under the last), the left, middle and right edges.
+        assert!(texts.is_empty(), "{texts:?}");
+        let lines: Vec<&str> = list
+            .children
+            .iter()
+            .map(|c| c.widget.name())
+            .filter(|name| name.starts_with("row line"))
+            .collect();
+        assert_eq!(lines.len(), 3 + 3, "{lines:?}");
+        let bar = list
+            .children
+            .iter()
+            .find(|c| c.widget.name() == "Sel Bar")
+            .unwrap();
+        assert_eq!(
+            bar.widget.field("Visible").map(|f| f.raw.as_str()),
+            Some("true")
+        );
         let time = placed
             .iter()
             .flat_map(|p| p.walk())
@@ -569,6 +541,20 @@ mod tests {
             0
         );
         assert_eq!(empty.rows().len(), 0);
+        // No rows: no cell lines and no selection bar (`event-repairs-atom`).
+        assert!(!list
+            .children
+            .iter()
+            .any(|c| c.widget.name().starts_with("row line")));
+        let bar = list
+            .children
+            .iter()
+            .find(|c| c.widget.name() == "Sel Bar")
+            .unwrap();
+        assert_eq!(
+            bar.widget.field("Visible").map(|f| f.raw.as_str()),
+            Some("false")
+        );
     }
 
     #[test]
@@ -612,14 +598,9 @@ mod tests {
             .filter(|c| c.widget.kind == WidgetKind::Text)
             .filter_map(|c| c.widget.text())
             .collect();
-        assert!(texts.iter().any(|t| t.contains("C.R.U.S.H.")));
-        // The screen's four visible fields are the robot, the component class,
-        // the current/total hitpoints and the remaining clock; the component's
-        // display name stays on the model row.
-        assert!(texts.contains(&"Axle"));
-        assert!(texts.contains(&"SpinMotor"));
-        assert!(texts.iter().any(|t| t.contains("40/100 40%")), "{texts:?}");
-        assert!(texts.contains(&"29:00"));
+        // The rows draw no text (live); the model keeps the names and the times.
+        assert!(texts.is_empty(), "{texts:?}");
+        assert_eq!(screen.rows()[0].time, "29:00");
         assert_eq!(screen.rows()[0].component, "Bent Axle");
         assert_eq!(screen.rows()[1].component, "Torn Spinner");
         // Exactly one row is fractured, and its shipped icon is in the list.

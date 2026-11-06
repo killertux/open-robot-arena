@@ -378,7 +378,15 @@ impl UiAssets {
                 }
             }
             if let Some(quad) = self.art_quad(p, parent, clip) {
-                quads.push(quad);
+                let soft = p
+                    .widget
+                    .filename()
+                    .is_some_and(|f| f.to_ascii_lowercase().ends_with("repairbench_shadows.tga"));
+                if soft {
+                    quads.extend(faded_edges(quad));
+                } else {
+                    quads.push(quad);
+                }
             }
         }
         while let Some((owner, clip)) = borders.pop() {
@@ -927,6 +935,56 @@ fn rectangle_quad(p: &Placement<'_>, clip: Option<Frame>) -> Option<UiQuad> {
         alpha: true,
         clip,
     })
+}
+
+/// How much of the repair bench's drop shadow is drawn in its outermost four pixels (the share of
+/// the shadow's alpha, from the first pixel at the edge inwards), per side. Live
+/// (`event-repairs-atom` against ours drawn whole) the shadow fades in over four pixels on every
+/// side: the bench's first inner pixels were 1.27 times as bright at the top, 1.24 at the bottom,
+/// 1.3 at the left and 1.3 at the right as ours, falling to 1.0 at the fifth pixel, with the same
+/// ratio in all three channels along the top. Fitted over 200-266 samples per pixel line; a corner
+/// takes the product of its two sides.
+const SHADOW_FADE_LEFT: [f32; 4] = [0.25, 0.45, 0.66, 0.96];
+const SHADOW_FADE_RIGHT: [f32; 4] = [0.25, 0.45, 0.66, 0.96];
+const SHADOW_FADE_TOP: [f32; 4] = [0.57, 0.69, 0.82, 0.94];
+const SHADOW_FADE_BOTTOM: [f32; 4] = [0.58, 0.69, 0.83, 0.95];
+
+/// The shadow image as 9 x 9 bands: the four outer pixels of each side one band each, the middle
+/// whole, every band with its share of the picture and of the alpha.
+fn faded_edges(quad: UiQuad) -> Vec<UiQuad> {
+    let r = quad.rect;
+    if r.w < 10.0 || r.h < 10.0 || quad.corners.is_some() {
+        return vec![quad];
+    }
+    // (offset, size, factor) of the nine bands along one axis.
+    let bands = |len: f32, near: &[f32; 4], far: &[f32; 4]| -> Vec<(f32, f32, f32)> {
+        let mut out = Vec::new();
+        for (k, f) in near.iter().enumerate() {
+            out.push((k as f32, 1.0, *f));
+        }
+        out.push((4.0, len - 8.0, 1.0));
+        for (k, f) in far.iter().enumerate().rev() {
+            out.push((len - 1.0 - k as f32, 1.0, *f));
+        }
+        out
+    };
+    let mut out = Vec::new();
+    for (oy, sy, fy) in bands(r.h, &SHADOW_FADE_TOP, &SHADOW_FADE_BOTTOM) {
+        for (ox, sx, fx) in bands(r.w, &SHADOW_FADE_LEFT, &SHADOW_FADE_RIGHT) {
+            let (u0, v0, u1, v1) = (quad.uv[0], quad.uv[1], quad.uv[2], quad.uv[3]);
+            let mut q = quad.clone();
+            q.rect = Frame::new(r.x + ox, r.y + oy, sx, sy);
+            q.uv = [
+                u0 + (u1 - u0) * ox / r.w,
+                v0 + (v1 - v0) * oy / r.h,
+                u0 + (u1 - u0) * (ox + sx) / r.w,
+                v0 + (v1 - v0) * (oy + sy) / r.h,
+            ];
+            q.color[3] *= fx * fy;
+            out.push(q);
+        }
+    }
+    out
 }
 
 /// The quads of a widget's `Border` attachment: `Width` rings just *outside*
@@ -1584,6 +1642,40 @@ fn scissor_of(clip: Option<Frame>, width: u32, height: u32) -> Option<[u32; 4]> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bench's shadow is drawn as 81 bands that tile its frame exactly, the corner pixel with the
+    /// product of its two sides' share and the middle whole (live: the shadow fades in over four
+    /// pixels, `event-repairs-atom`).
+    #[test]
+    fn the_bench_shadow_fades_in_over_its_four_outer_pixels() {
+        let quad = UiQuad {
+            rect: Frame::new(52.0, 34.0, 920.0, 686.0),
+            corners: None,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            texture: 3,
+            alpha: true,
+            clip: None,
+        };
+        let bands = faded_edges(quad.clone());
+        assert_eq!(bands.len(), 81);
+        let area: f32 = bands.iter().map(|q| q.rect.w * q.rect.h).sum();
+        assert_eq!(area, quad.rect.w * quad.rect.h, "the bands tile the frame");
+        let corner = &bands[0];
+        assert_eq!((corner.rect.x, corner.rect.y), (52.0, 34.0));
+        assert!((corner.color[3] - SHADOW_FADE_LEFT[0] * SHADOW_FADE_TOP[0]).abs() < 1e-6);
+        let middle = &bands[40];
+        assert_eq!(middle.color[3], 1.0);
+        assert_eq!((middle.uv[0], middle.uv[1]), (4.0 / 920.0, 4.0 / 686.0));
+        let last = bands.last().unwrap();
+        assert_eq!((last.rect.right(), last.rect.bottom()), (972.0, 720.0));
+        // A frame too small to hold the bands is left whole.
+        let tiny = UiQuad {
+            rect: Frame::new(0.0, 0.0, 8.0, 8.0),
+            ..quad
+        };
+        assert_eq!(faded_edges(tiny).len(), 1);
+    }
 
     fn game_dir() -> Option<PathBuf> {
         ra2fmt::saves::isolate_for_tests();

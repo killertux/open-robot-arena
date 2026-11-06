@@ -397,9 +397,14 @@ fn refresh_join_and_the_prematch_lobby_through_the_screens() {
         hit: "Button \"disconnect button\"".into(),
         ..step
     };
-    guest
+    let action = guest
         .on_step(&mut guest_shell, PREMATCH_SCREEN, &step)
         .unwrap();
+    // The original shows no box after a voluntary Disconnect (`FUN_00492540`): the server list
+    // writes "Retrieving Local Sessions ..." in its status label.
+    assert_eq!(action, net_play::NetAction::None);
+    assert_eq!(guest.status, net_play::RETRIEVING_LOCAL);
+    assert_eq!(guest_shell.window_depth(), 0);
     assert!(guest_shell
         .base_screen_id()
         .eq_ignore_ascii_case(BROWSER_SCREEN));

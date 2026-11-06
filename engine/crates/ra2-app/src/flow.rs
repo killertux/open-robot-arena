@@ -236,6 +236,22 @@ pub fn start_event_match(
     Ok(hq)
 }
 
+/// The HQ's event button on the event in progress when its repairs bench was left open
+/// (`FUN_00500c40`): the bench with the clock that is left, over the saved career. `None` when the
+/// saved career has no bench open (the bracket is what the button shows then).
+pub fn reopen_bench(game: &Path, event: usize) -> Option<Result<hq_mode::Session, String>> {
+    let mut hq = hq_mode::Session::open(game).ok()?;
+    let in_it = matches!(
+        hq.career.phase,
+        ra2sim::career::SeasonPhase::InEvent { event: current } if current == event
+    );
+    if !(in_it && hq.career.bench_pending) {
+        return None;
+    }
+    hq.set_player_drives(true);
+    Some(hq.reopen_bench(event).map(|()| hq))
+}
+
 /// The bracket's `forfeit button`: the event closes as a loss with the rounds
 /// won so far, and the career is saved.
 pub fn forfeit_event(game: &Path, entered: Option<(usize, usize)>) -> Result<(), String> {

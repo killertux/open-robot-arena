@@ -1937,7 +1937,7 @@ capture `match-results` (Scout 26 winner above ALARM 663) agrees. Ours listed ro
 * Live checks that agree with ours: a won round 1 gives 80 event points (participation 160 / 2 rounds), the award shows `Rounds Won/Total: 1/2`, `Total Team Points Scored: 80`, the photo prize for one
   round won; the Blade Tournament is a 2-round bracket of 4-robot matches; "Event Completed" is on the finished cell.
 * The live record after a won round plus two lost events ends `... 120 40 80 ... (league line), 0, 80, 3`: event points 0, season points 80, kills 3 (not compared line by line with ours).
-* Not reproduced / open: the repairs bench from the HQ's event button with a partly served clock (`FUN_005011f0`'s minutes and seconds); the per-row time / damage text of a damaged bench (no damaged bench was reachable live); the wrapped bright edge of the bench's wood; the live fight of a
+* Not reproduced / open (the first three are closed in 9.37): the repairs bench from the HQ's event button with a partly served clock (`FUN_005011f0`'s minutes and seconds); the per-row time / damage text of a damaged bench (no damaged bench was reachable live); the wrapped bright edge of the bench's wood; the live fight of a
   2v2 against ours (physics).
 
 ## 9.36 Release-readiness pass: a player's session end to end (`fx/play4`, 2026-11-05)
@@ -1964,10 +1964,79 @@ Works (windowed, as a player):
 * LAN, two processes on loopback (two save dirs): host Create Game -> Start Game, joiner IP Address 127.0.0.1 -> Connect, both seated, chat both ways, Ready, Begin Match, both fight and end on the same Match Results, Continue returns both to the lobby with Ready cleared; joiner Disconnect frees its seat on the host at once; the joiner reconnects; a killed joiner (SIGKILL) leaves the host's lobby within 40 s.
 
 Open / unverified:
-* A joiner's own **Disconnect** shows an OK box `Robot Arena 2` with an empty body over the server list (`NetAction::Ended("left")`). The original's box for the *host vanishing* is captured (`mp-connection-termination`, body blank), but whether the original shows any box after a voluntary Disconnect is not known: not checked against the exe.
-* End Match from the pause menu returns to the setup screen with no results window (not compared with the original).
-* New Team name/motto: the XTEST helper sends no Shift, so capitals could not be typed (a test-tool limit, not the app).
+* ~~A joiner's own **Disconnect** shows an OK box~~ **closed in 9.37**: the original shows no box (`FUN_00492540`, UI event 0x69, the server list's status "Retrieving Local Sessions ..."); ours matches.
+* ~~End Match from the pause menu returns to the setup screen with no results window~~ **closed in 9.37**: checked live, the original does the same (`exhibition-end-match-setup`).
+* ~~New Team name/motto: the XTEST helper sends no Shift~~ **closed in 9.37**: `tools/capture/xtest.py key A` holds Shift for a shifted symbol.
 * The Team HQ's logo list and the Import Robot list draw no row text (as in the original, 9.28).
 * `audio stream error: A buffer underrun or overrun occurred.` appears in stderr under heavy machine load (three agents building); no audible check.
-* Not reached in this pass: the live damaged Repairs bench (Time text, per-row costs), the partly served clock (`FUN_005011f0`), the Repairs bench's bright inner edge (9.35). A by-hand Bot Lab build from nothing in a window.
+* Not reached in this pass: the live damaged Repairs bench (Time text, per-row costs), the partly served clock (`FUN_005011f0`), the Repairs bench's bright inner edge (9.35): **all three reached and fixed in 9.37**. A by-hand Bot Lab build from nothing in a window.
 * Windows/macOS builds, and Internet (GameSpy) play, remain unverified by design.
+
+## 9.37 Network leave, the damaged bench, the shadow's edge, the Shift key, a regression test (`fx/netflow`, 2026-11-05)
+
+Binary (`Robot Arena 2.exe`, Ghidra through REA) and one live session (flatpak Wine, display :7; the prefix's `Teams/`, `AI/`, `ra2.cfg` copied before and restored after, sha256 list equal, lock held 11 minutes).
+New captures (`local/oracle/original`, manifest rows, backup copy and `manifest-additions-2026-11-05-netflow.tsv`): `exhibition-pause-menu`, `exhibition-end-match-setup`, `event-repairs-damaged`,
+`event-repairs-partial`, `event-repairs-reopened`.
+
+### 1. Regression test for the save-folder robot (`ra2-app/tests/save_folder_robot.rs`)
+
+Copies a shipped design to `<save>/Teams/Team1/Bot3.bot` under a symlink-only scratch install, checks that nothing above the save folder looks like an install (`find_game_root` is `None`), runs
+`ra2_app::run(--game <install> --save-dir <save> --offscreen ...)` and then loads the robot with `ra2_render::load_bot_components` and finds the root again. With the `RA2_GAME` line of `ra2_app::run` removed the
+test fails (checked, then restored).
+
+### 2. LAN: a joiner's own Disconnect (binary only)
+
+* The prematch window's constructor `FUN_00490770` binds `disconnect button` (`0x6f46e0`, `0x4909f7`) to `FUN_00492540(1)`. It enables the begin / settings buttons again, shows the create window, the multiplayer and
+  prematch windows' state, closes the session (`FUN_004d0380`) and, because the argument is 1, **posts UI event 0x69** (`FUN_00423700(0x69)`, `FUN_005882f0`). Nothing in it opens a message box.
+* Event 0x69 has one consumer in this part of the exe: the server list's `FUN_0049a780` (the function that shows it, `0x49a8d4`) registers `FUN_00499560` for it. That handler writes the server list's status label
+  (`[this+0x174]`) with **`Retrieving Local Sessions ...`** (`0x6f4c4c`; `Retrieving Internet Sessions ...` at `0x6f4c28` when the LAN radio is not the selected one), and nothing else.
+* So after a voluntary Disconnect the original shows the server list with that status text and no box. The box captured as `mp-connection-termination` is the other path (the host vanishing: the dispatcher's case `0x75`,
+  event `0x6c`, docs/38 13). Ours showed an OK box `Robot Arena 2` with an empty body: `NetPlay::on_step` now answers `NetAction::None`, refreshes the list and sets `net_play::RETRIEVING_LOCAL`; the test
+  in `tests/netplay.rs` asserts no action, the status text and no window. Two original instances were not run (one flatpak Wine instance, and the multiplayer lobby does not open under Wine, docs/38 13).
+
+### 3. End Match from the pause menu (live)
+
+Exhibition, Scout against ALARM on the box arena, Esc after the countdown (`exhibition-pause-menu`: Resume Game / End Match / Options / Quit, time 2:46), End Match: the **Exhibition Match setup screen at once**
+(Robots tab, both robots kept), shots taken immediately and a second later are the same screen, no Match Results window (`exhibition-end-match-setup`). Ours does the same; no change.
+
+### 4. The damaged Repairs bench (live + binary)
+
+Reached with `plus.damage(0, comp, 35, point)` on components 1-8 of Atom Smasher in round 1 of Strategic Engineering (a Blade Tournament has two rounds and no bench after the second), the AI eliminated with
+`plus.eliminatePlayer`. What differs from what we had, and what is done:
+
+* **The list draws no text.** Both columns are blank for every row (`event-repairs-damaged`), like the Team HQ's logo list; what it does draw is the cell lines of its rows: a 1 px black line at y = 251 + 18 k
+  (the header's edge and above every row, one more under the last), x = 558, 819 (0.7 of the 373 px) and 931, and the selection bar (101,86,151) filling the selected row inside the lines. No rows (an undamaged
+  robot, `event-repairs-atom`): none of it. `ra2ui::repairs` draws exactly that (pixel lines checked against the capture); the model rows keep their names and times.
+* **Repair Item is immediate and costs time.** `FUN_004d6e10`: the selected row's component is restored at once, the row goes (`FUN_004d7010`) and its time comes off the clock (`FUN_0058b3d0`, hours / minutes /
+  seconds with borrow) **if the clock still has that much** (`FUN_0058b470`: clock >= time); otherwise nothing changes. The row's time is `(max - hp) / max * 20 minutes` (`FUN_004d6480`, then
+  `FUN_0058ada0(minutes, 1)` -> `FUN_0058b320`: `ftol` of the minutes, `ftol` of the rest times 60). Live: 35 damage on a 400 hp part cost 1:45 (30:00 -> 28:15 -> 26:30), 25 on another 1:16 (28:44).
+  We advanced a progress bar in 6 s ticks against a per-row time of 30 min. Now `Career::repair_item`, `Repair::seconds = repair_row_seconds(hp, total)`, `Career::repair_clock` (30:00 when the bench opens after a won
+  round, saved in the sidecar), `Session::repair_tick`; a row that does not fit stays (the headless loops stop there).
+* **The 3D box ghosts the robot.** With rows on the bench the whole robot is drawn at a fifth of its colour over the (25,25,25) backing (median 0.20 over 1066 pixels) and the **selected row's part solid**
+  (the blue plate, a wheel, a small block: `event-repairs-damaged`, `-partial`). `Session::prepare_repairs` draws the robot twice (all, and the selected part alone over a key colour) and composes them
+  (`build_mode::robot_bench_view(.., only)`).
+* **The bench reopened from the HQ** (`FUN_00500c40`, clock `FUN_005011f0` = `[hq+0xf8]` minutes, `[hq+0xfc]` seconds): reached live by leaving the bench with Main Menu, then Team HQ > Event Schedule > the event's
+  cell: the bench again, `Round 2 Repairs`, **28:44** and the same rows (`event-repairs-reopened`). After `Finished` and Finish Later the same cell opens the bracket (the flag is `+0xf6`, cleared by `Finished`, not "damage
+  left"). `Career::bench_pending` (saved) is that flag; `flow::reopen_bench` and `window.rs` open the bench instead of the bracket when it is set. Not done: the bench's own Main Menu button inside the event flow
+  (the overlay has none), so the state is reachable only by closing the window there.
+* Not decided: **which components get a row.** 8 damaged components gave 4 rows live; our report lists all 9 damaged parts. The map the match fills (`FUN_004dd110` writes `(id, hp, max)` per component through
+  `FUN_004df6e0`) is not understood well enough to say which survive; the rows' count and the fractured icon's rule (`Team+0x13c`) stay as they were.
+* Fixtures: `event-repairs` 1.30 -> 1.06, `event-repairs-atom` 1.49 -> 1.25 (`fidelity.py --renderer app --only event-repairs --jobs 1`).
+
+### 5. The bench's bright inner edge
+
+Not the wood tile and not the border: the **shadow image** (`repairbench_shadows.tga`, black with an alpha that is largest at its edges) is drawn with its alpha **faded in over its outermost four pixels** on
+every side (live / ours ratio 1.27, 1.19, 1.12, 1.05 at the top, the same in all three channels; 1.24 at the bottom, 1.3 at the left and right, then 1.0). `ra2-render::ui::faded_edges` draws it as 81 bands with
+the measured shares (`SHADOW_FADE_*`, corners take the product): the first pixel line's mean error against the live capture falls from 33-42 to 0.5 (top), 0.03 (bottom), 5.5 (left) and 9.7 (right). The left and right
+edges keep a residual: the live pixel is bluer than a pure alpha fit gives (+8, +9, +12 in r, g, b); the cause is not found.
+
+### 6. `tools/capture/xtest.py` and Shift
+
+`key A` (any symbol that is the shifted level of its key: capitals, `!`, `?` ...) now presses Shift_L around the key (`down` holds both, `up` releases both). Checked with `xev` on Xephyr: `A`, `Q`, `question` arrive with
+state 0x1, `b` and `1` with 0.
+
+### Open
+
+* Which components become rows (4 of 8 live) and the rule of the fractured icon; the bench's blue / additive residual at the left and right shadow edges.
+* The bench has no Main Menu inside the event flow (the overlay is the Session's); the pending bench is reachable by closing the window.
+* Whether the original keeps the partly served clock across an app restart is not known (it lives in the HQ object, `+0xf8`/`+0xfc`, and the live reopen was in one process); ours keeps it in the sidecar.

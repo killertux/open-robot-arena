@@ -179,13 +179,6 @@ pub fn shell_import_hook(game: &Path) -> ra2_shell::shell::ImportHook {
     })
 }
 
-/// One click of the repairs screen's clock. The original advances a progress
-/// bar over time (`FUN_004d6e10`) against the shipped 30-minute clock
-/// (`FUN_0058b150(0x1e,1)` → `00:30:00`); this headless/UI tick is six
-/// seconds of that clock. The value is ours, the model's `seconds` is the
-/// explicit repair time.
-pub const REPAIR_TICK_SECONDS: f32 = 6.0;
-
 /// What `--hq` was asked to do.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -421,6 +414,8 @@ pub struct Session {
     /// The repair bench's robot, drawn straight down for the `3d view group`
     /// (`prepare_repairs`): width, height, RGBA pixels.
     repairs_view: Option<(u32, u32, Vec<u8>)>,
+    /// What `repairs_view` was drawn for: its size and the part of the robot that is solid.
+    repairs_view_key: Option<(u32, u32, Option<usize>)>,
 }
 
 impl Session {
@@ -449,6 +444,7 @@ impl Session {
             player_drives: false,
             layout: SHELL_SIZE,
             repairs_view: None,
+            repairs_view_key: None,
         })
     }
 
@@ -483,10 +479,21 @@ impl Session {
             (frame.x + frame.w).floor() as u32 - frame.x.floor() as u32,
             (frame.y + frame.h).floor() as u32 - frame.y.floor() as u32,
         );
-        if w < 8 || h < 8 || matches!(&self.repairs_view, Some((vw, vh, _)) if (*vw, *vh) == (w, h))
-        {
+        // Live (`event-repairs-damaged`): with rows on the bench the whole robot is a ghost (a fifth
+        // of its colour over the backing) and the selected row's part is drawn solid.
+        let solid = self
+            .career
+            .repairs
+            .get(
+                screen
+                    .selected()
+                    .min(self.career.repairs.len().saturating_sub(1)),
+            )
+            .map(|repair| repair.component_index);
+        if w < 8 || h < 8 || self.repairs_view_key == Some((w, h, solid)) {
             return Ok(());
         }
+        self.repairs_view_key = Some((w, h, solid));
         // The bench builds `Robot In Event` (`FUN_004d62a0` -> `FUN_004fa890`, which answers null
         // for an index the team does not list, so -1 shows an empty box). The original only opens
         // the bench between rounds of a running event, where it is set.
@@ -506,15 +513,35 @@ impl Session {
             ra2ui::workshop::library::GameLibrary::open(&self.game).map_err(|e| e.to_string())?;
         let build = ra2ui::workshop::build::Build::load(&library, &path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        self.repairs_view = crate::build_mode::robot_bench_view(
-            renderer,
-            &self.game,
-            &build,
-            [25.0 / 255.0; 3], // the reference's backing is (25, 25, 25)
-            w,
-            h,
-        )?
-        .map(|pixels| (w, h, pixels));
+        let backing = [25.0 / 255.0; 3]; // the reference's backing is (25, 25, 25)
+        let mut pixels =
+            crate::build_mode::robot_bench_view(renderer, &self.game, &build, backing, w, h, None)?;
+        if let (Some(solid), Some(all)) = (solid, pixels.as_mut()) {
+            // The solid part is drawn alone over a key colour; it replaces the ghost where it shows.
+            let key = [1.0, 0.0, 1.0];
+            let part = crate::build_mode::robot_bench_view(
+                renderer,
+                &self.game,
+                &build,
+                key,
+                w,
+                h,
+                Some(solid),
+            )?;
+            let (texels, _) = all.as_chunks_mut::<4>();
+            for (index, texel) in texels.iter_mut().enumerate() {
+                let own = part.as_ref().map(|part| &part[index * 4..index * 4 + 4]);
+                match own {
+                    Some(own) if own[..3] != [255, 0, 255] => texel.copy_from_slice(own),
+                    _ => {
+                        for channel in &mut texel[..3] {
+                            *channel = (25.0 + (f32::from(*channel) - 25.0) * 0.2).round() as u8;
+                        }
+                    }
+                }
+            }
+        }
+        self.repairs_view = pixels.map(|pixels| (w, h, pixels));
         Ok(())
     }
 
@@ -680,25 +707,20 @@ impl Session {
         Ok(())
     }
 
-    /// The rows the shipped `repairs list` draws, from the career's pending
-    /// component repairs and their clock. Each row is one component with its
-    /// robot, class, current/total hitpoints and the `damage.tga` icon when the
-    /// original's fractured flag is set. No cost is shown because the model has
-    /// none.
+    /// The rows the shipped `repairs list` draws, from the career's pending component repairs.
+    /// Each row is one component with its repair time (the original's rows show no text at all,
+    /// live: `event-repairs-damaged`; the list only draws the row's cell lines).
     pub fn repair_rows(&self) -> Vec<RepairRow> {
         self.career
             .repairs
             .iter()
-            .enumerate()
-            .map(|(index, repair)| {
-                let progress = self.career.repair_progress(index).unwrap_or(1.0);
-                let remaining = (repair.seconds - repair.elapsed).max(0.0);
+            .map(|repair| {
                 RepairRow::component(
                     repair.robot.clone(),
                     repair.component.clone(),
                     repair.component_class.clone(),
-                    repairs::format_time(remaining),
-                    progress,
+                    repairs::format_time(repair.seconds),
+                    0.0,
                     repair.hp,
                     repair.total_hp,
                     repair.fractured,
@@ -707,15 +729,18 @@ impl Session {
             .collect()
     }
 
-    /// The clock the screen shows: the longest repair still running.
+    /// The clock the screen shows: what is left of the bench's 30 minutes (`FUN_005011f0` for the
+    /// HQ's reopened bench).
     fn repair_clock(&self) -> String {
-        let remaining = self
-            .career
-            .repairs
-            .iter()
-            .map(|repair| (repair.seconds - repair.elapsed).max(0.0))
-            .fold(0.0f32, f32::max);
-        repairs::format_time(remaining)
+        repairs::format_time(self.career.repair_clock)
+    }
+
+    /// The HQ's event button on an event in progress whose bench was left open (`FUN_00500c40`): the
+    /// bench again, with the clock left over (`FUN_005011f0`), over the saved career.
+    pub fn reopen_bench(&mut self, event: usize) -> Result<(), String> {
+        self.enter_or_resume(event, None)?;
+        self.repairs_after_round = true;
+        self.open_repairs()
     }
 
     /// Open `teamhq/repairs.gib` from the career's current pending list. A
@@ -729,13 +754,7 @@ impl Session {
             .map(|screen| screen.selected())
             .unwrap_or_default();
         let rows = self.repair_rows();
-        // An empty bench still shows the policy's 30-minute clock when it
-        // opens (the original's reference frame reads 30:00 with no rows).
-        let clock = if self.career.repairs.is_empty() {
-            repairs::format_time(30.0 * 60.0)
-        } else {
-            self.repair_clock()
-        };
+        let clock = self.repair_clock();
         let title = self.bench_title();
         let mut screen = Repairs::open(&self.game.join("UI"), &title, rows, &clock)?;
         screen.set_selected(selected);
@@ -774,9 +793,9 @@ impl Session {
         }
     }
 
-    /// The repair button's action: advance the selected repair's clock by one
-    /// UI tick. The model completes the entry when the bar fills; completing
-    /// saves the career, which is what makes the cleared damage persist.
+    /// `repair button` (`FUN_004d6e10`): repair the selected row if the clock has its time left,
+    /// and take the time off it. Saving makes the cleared damage persist. `None`: no rows, or not
+    /// enough time left (nothing changes).
     pub fn repair_tick(&mut self) -> Result<Option<String>, String> {
         if self.career.repairs.is_empty() {
             return Ok(None);
@@ -786,7 +805,7 @@ impl Session {
             .map(|screen| screen.selected())
             .unwrap_or_default()
             .min(self.career.repairs.len() - 1);
-        let done = self.career.advance_repair(index, REPAIR_TICK_SECONDS)?;
+        let done = self.career.repair_item(index);
         if done.is_some() {
             self.career.save(&self.game)?;
         }
@@ -916,12 +935,8 @@ impl Session {
                                 println!("  repair list is empty")
                             }
                             None => {
-                                let row = self
-                                    .repairs()
-                                    .and_then(|s| s.rows().first())
-                                    .map(|r| r.time.clone())
-                                    .unwrap_or_default();
-                                println!("  repair clock {row}");
+                                // `FUN_0058b470`: the row's time is more than the clock has left.
+                                println!("  not enough time left ({})", self.repair_clock());
                             }
                         }
                         Ok(true)
@@ -929,6 +944,10 @@ impl Session {
                     Some(RepairClick::Finished) => {
                         if self.repairs_after_round {
                             self.repairs_after_round = false;
+                            // `Finished` closes the bench for good: the HQ's event button shows the
+                            // bracket again, not the bench (`+0xf6`, `FUN_00500c40`).
+                            self.career.bench_pending = false;
+                            self.career.save(&self.game)?;
                             refresh_event_screen(self)?;
                         } else {
                             self.return_to_hq()?;
@@ -1679,16 +1698,18 @@ impl Session {
         }
         let mut clicks = 0usize;
         while !self.career.repairs.is_empty() {
-            let done = self.repair_tick()?;
-            if let Some(component) = done {
-                println!("  repair complete: {component}");
-            }
+            let Some(component) = self.repair_tick()? else {
+                // The clock has less than the next row's time left: what is left stays damaged.
+                break;
+            };
+            println!("  repair complete: {component}");
             clicks += 1;
-            if clicks > 10_000 {
-                return Err("the repair clock did not fill".into());
-            }
         }
-        println!("  repairs done after {clicks} clock tick(s)");
+        println!(
+            "  repairs done after {clicks} click(s), {} left on the clock, {} row(s) left",
+            self.repair_clock(),
+            self.career.repairs.len()
+        );
         if let (Some(name), false) = (plan.repairs_done, repairs_done) {
             capture(self, name)?;
         }
@@ -1770,9 +1791,10 @@ impl Session {
     /// `teamhq/repairs.gib` screen as the award's bench.
     fn finish_repairs(&mut self) -> Result<(), String> {
         while !self.career.repairs.is_empty() {
-            if let Some(component) = self.repair_tick()? {
-                println!("  repair complete: {component}");
-            }
+            let Some(component) = self.repair_tick()? else {
+                break;
+            };
+            println!("  repair complete: {component}");
         }
         Ok(())
     }
@@ -3331,7 +3353,11 @@ mod tests {
         // Healthy: the screen's own empty list.
         session.open_repairs().unwrap();
         assert!(session.repairs().unwrap().rows().is_empty());
-        assert_eq!(session.repair_clock(), "0:00");
+        assert_eq!(
+            session.repair_clock(),
+            "30:00",
+            "the bench opens with 30 minutes"
+        );
 
         let robot = |team: usize, name: &str, damage: f32| RobotReport {
             slot: team,
@@ -3402,33 +3428,117 @@ mod tests {
         assert_eq!(rows[1].component, "Torn Spinner");
         assert_eq!(rows[1].class, "SpinMotor");
         assert!(rows[1].fractured);
-        assert!(rows[0].time.contains("30:00"), "{}", rows[0].time);
+        // The rows' times are the missing share of 20 minutes: 60 % is 12:00, all of it 20:00.
+        assert_eq!(rows[0].time, "12:00");
+        assert_eq!(rows[1].time, "20:00");
         assert_eq!(session.repair_clock(), "30:00");
 
-        // The 30-minute clock at the six-second tick: 299 ticks leave the row,
-        // the 300th completes it, and the other component is still pending.
-        for _ in 0..299 {
-            assert_eq!(session.repair_tick().unwrap(), None);
-        }
-        assert_eq!(session.career.repairs.len(), 2);
+        // Repair Item takes the selected row's time off the clock: the axle leaves 18:00, which is
+        // less than the spinner's 20:00, so that one is refused and stays.
         assert_eq!(session.repair_tick().unwrap().as_deref(), Some("Bent Axle"));
+        assert_eq!(session.repair_clock(), "18:00");
         assert_eq!(session.career.repairs.len(), 1);
         assert_eq!(session.career.repairs[0].component, "Torn Spinner");
-
-        for _ in 0..300 {
-            session.repair_tick().unwrap();
-        }
-        assert!(session.career.repairs.is_empty());
-        assert!(session.repairs().unwrap().rows().is_empty());
+        assert_eq!(session.repair_tick().unwrap(), None);
+        assert_eq!(
+            session.repair_clock(),
+            "18:00",
+            "a refused repair costs nothing"
+        );
+        assert_eq!(session.career.repairs.len(), 1);
         assert_eq!(session.career.money, 0, "no repair cost exists");
 
-        // The cleared damage is what the next app run reads.
+        // The served time is what the next app run reads, with the damage that is left.
         drop(session);
         let second = Session::open(game.path()).unwrap();
-        assert!(second.career.repairs.is_empty());
+        assert_eq!(second.career.repairs.len(), 1);
         let mut second = second;
         second.open_repairs().unwrap();
-        assert!(second.repairs().unwrap().rows().is_empty());
+        assert_eq!(second.repairs().unwrap().rows().len(), 1);
+        assert_eq!(second.repair_clock(), "18:00");
+    }
+    /// The HQ's event button on an event whose bench was left open shows the bench again with the
+    /// clock that is left (`FUN_00500c40`, `FUN_005011f0`); once `Finished` closed it the button
+    /// shows the bracket (live: `event-repairs-reopened`, 28:44 after one repair).
+    #[test]
+    fn a_bench_left_open_is_reopened_with_the_clock_that_is_left() {
+        use ra2sim::r#match::{ComponentDamage, RobotReport};
+        let Some(game) = TestGame::new("reopen") else {
+            return;
+        };
+        let mut session = Session::open(game.path()).unwrap();
+        let event = session.career.schedule[0];
+        session.career.enter_event(event).unwrap();
+        let robot = |team: usize, name: &str| RobotReport {
+            slot: team,
+            team,
+            bot_name: name.to_string(),
+            team_name: format!("Team {team}"),
+            team_logo: String::new(),
+            bot_preview: None,
+            points: 0,
+            damage_dealt: 0.0,
+            damage_taken: 0.0,
+            battery: 1.0,
+            air: 1.0,
+            armor: 1.0,
+            dot: 0,
+            defeated: false,
+            eliminated: false,
+            winner: false,
+            immobilized: false,
+            owner: None,
+            components: Vec::new(),
+        };
+        let mut player = robot(0, "My Robot");
+        player.components = vec![ComponentDamage {
+            index: 1,
+            name: "Bent Axle".to_string(),
+            class: "Axle".to_string(),
+            base: "Axle".to_string(),
+            hp: 380.0,
+            total_hp: 400.0,
+            detached: false,
+            fractured: false,
+        }];
+        let report = MatchReport {
+            game_type: "DEATHMATCH",
+            arena: "Arenas/box/box.gmf".to_string(),
+            state: MatchState::Results,
+            reason: None,
+            winners: vec![0],
+            duration: 3.0,
+            duration_limit: None,
+            robots: vec![player, robot(1, "Red Zone")],
+            log: Vec::new(),
+        };
+        session.career.award_match(&report, 0).unwrap();
+        assert!(
+            session.career.bench_pending,
+            "the bench opens after a won round"
+        );
+        session.career.save(game.path()).unwrap();
+
+        // 20 of 400 gone is 5 % of 20 minutes: 1:00 off the clock.
+        let mut hq = crate::flow::reopen_bench(game.path(), event)
+            .expect("the bench was left open")
+            .unwrap();
+        assert!(hq.repairs().is_some());
+        assert_eq!(hq.repair_clock(), "30:00");
+        assert_eq!(hq.repairs().unwrap().rows()[0].time, "1:00");
+        assert_eq!(hq.repair_tick().unwrap().as_deref(), Some("Bent Axle"));
+        assert_eq!(hq.repair_clock(), "29:00");
+        drop(hq);
+
+        let again = crate::flow::reopen_bench(game.path(), event)
+            .expect("still open: Finished was not pressed")
+            .unwrap();
+        assert_eq!(again.repair_clock(), "29:00");
+        assert!(again.repairs().unwrap().rows().is_empty());
+        let mut closed = Session::open(game.path()).unwrap();
+        closed.career.bench_pending = false;
+        closed.career.save(game.path()).unwrap();
+        assert!(crate::flow::reopen_bench(game.path(), event).is_none());
     }
 
     /// The headless command writes the five named frames (and the after-run

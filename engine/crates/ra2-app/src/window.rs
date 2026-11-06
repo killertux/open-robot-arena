@@ -1430,6 +1430,31 @@ impl ApplicationHandler for App {
                             event_loop.exit();
                             return;
                         }
+                        // The HQ's event button on an event in progress whose repairs bench was
+                        // left open shows the bench (the clock that is left), not the bracket.
+                        if !screen_before.eq_ignore_ascii_case(crate::flow::BRACKET_SCREEN)
+                            && self
+                                .shell
+                                .base_screen_id()
+                                .eq_ignore_ascii_case(crate::flow::BRACKET_SCREEN)
+                            && self.shell.window_depth() == 0
+                        {
+                            if let Some((event, _)) = self.shell.entered_event() {
+                                match crate::flow::reopen_bench(self.shell.game(), event) {
+                                    Some(Ok(hq)) => {
+                                        self.hq = Some(hq);
+                                        self.hq_from_shell = true;
+                                        self.request_redraw();
+                                        return;
+                                    }
+                                    Some(Err(error)) => {
+                                        self.fail(event_loop, error);
+                                        return;
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
                         let on_bracket = screen_before
                             .eq_ignore_ascii_case(crate::flow::BRACKET_SCREEN)
                             && self.shell.window_depth() == 0;

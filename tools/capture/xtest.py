@@ -174,6 +174,8 @@ class X11:
             i,
             ul,
         ]
+        self.x11.XKeycodeToKeysym.argtypes = [ctypes.POINTER(Display), ctypes.c_ubyte, i]
+        self.x11.XKeycodeToKeysym.restype = ul
         self.x11.XFlush.argtypes = [ctypes.POINTER(Display)]
         self.x11.XSync.argtypes = [ctypes.POINTER(Display), i]
         self.x11.XStringToKeysym.argtypes = [ctypes.c_char_p]
@@ -473,6 +475,12 @@ class X:
             self.send_event(wid, event)
             time.sleep(hold if pressed else 0.02)
 
+    def needs_shift(self, sym, code):
+        """True when ``sym`` is the shifted symbol of its key (capitals, ``!``, ``?``...)."""
+        plain = self.libs.x11.XKeycodeToKeysym(self.dpy, code, 0)
+        shifted = self.libs.x11.XKeycodeToKeysym(self.dpy, code, 1)
+        return sym != plain and sym == shifted
+
     def key(self, keysym, action="press"):
         sym = self.libs.x11.XStringToKeysym(keysym.encode())
         if not sym:
@@ -480,13 +488,24 @@ class X:
         code = self.libs.x11.XKeysymToKeycode(self.dpy, sym)
         if not code:
             raise ValueError(f"keysym {keysym!r} has no keycode")
+        # XKeysymToKeycode answers the key, not the shift level: a capital 'A'
+        # would arrive as 'a'.  Hold Shift around a shifted symbol.
+        shift = 0
+        if self.needs_shift(sym, code):
+            shift = self.libs.x11.XKeysymToKeycode(
+                self.dpy, self.libs.x11.XStringToKeysym(b"Shift_L")
+            )
         if action in ("press", "down"):
+            if shift:
+                self.libs.xtst.XTestFakeKeyEvent(self.dpy, shift, 1, 0)
             self.libs.xtst.XTestFakeKeyEvent(self.dpy, code, 1, 0)
             self.libs.x11.XSync(self.dpy, 0)
         if action in ("press", "release", "up"):
             if action == "press":
                 time.sleep(0.03)
             self.libs.xtst.XTestFakeKeyEvent(self.dpy, code, 0, 0)
+            if shift:
+                self.libs.xtst.XTestFakeKeyEvent(self.dpy, shift, 0, 0)
             self.libs.x11.XSync(self.dpy, 0)
 
 
