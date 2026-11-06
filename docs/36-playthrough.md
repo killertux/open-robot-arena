@@ -2089,3 +2089,22 @@ Not looked at beyond reading: it needs the live draw path (blend state of `repai
 
 * Which of the damaged components the original really has hitpoints off (4 of 8), by logging `FUN_004df6e0` live.
 * The bench's `Options` and `Help` buttons, the left/right shadow edge's +8/+9/+12 residual.
+
+## 9.39 plus.damage's component index (`fx/benchlive`, 2026-11-06)
+
+**No live session was run**: taking the shared live lock (`flock ~/.cache/ra2-live.lock` held by a background shell for the session) was refused by the permission system, so tasks 2 (Options / Help on the bench) and 3 (the
+shadow's blue residual) and the live `FUN_004df6e0` log of task 1 are not done; no capture was added and no code changed. The prefix's `Teams/ AI/ ra2.cfg` were copied to the scratchpad beforehand (nothing was started).
+
+Binary finding (Ghidra, `Robot Arena 2.exe`) that bears on the "4 rows from 8 damaged components" of 9.37 / 9.38:
+
+* `plus.damage(player, comp, amount, point)` is `FUN_004cd320` -> `FUN_004148f0`, which resolves `comp` with `FUN_004dd780(param_2)`: a lookup of `comp` in a **global map** (`DAT_00716108`, `FUN_00600bf0` / `FUN_004e2290`),
+  returning the component object or 0 (then nothing is damaged; `if (iVar1 != 0)`). `param_1` is checked separately with `FUN_00414780` (the player).
+* The key space is therefore the component **id** (`[c+0x22c]`, the factory counter `[factory+0x7c]`, 9.38), not an index into one robot's design order. Ids are unique across every robot built (both robots of the match, and
+  possibly components built earlier, such as the bench/preview robots), so `plus.damage(0, 1..8, ...)` hits the components that happen to own ids 1-8, which need not be eight components of Atom Smasher; ids that
+  belong to the AI robot, or to no live component, damage the other robot or nothing. This is the likely reason for 4 rows. Not verified: it needs the id of each of Atom Smasher's components (hook `FUN_004dc2d0` or
+  `FUN_004df6e0` live) and whether the id counter is reset per match.
+* For ours: a test or a report with "components 1-8" must map through the original's id assignment (order in which `FUN_004dbf40` creates components: robot 0 first?) before it is compared; the row rule
+  `trunc(hp) < max` (9.38) stays.
+
+### Open
+* Everything in the task list that needs the live game: the `FUN_004df6e0` triples, a second damage pattern, the bench's Options / Help, the shadow edge blend state.
