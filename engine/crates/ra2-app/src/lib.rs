@@ -58,6 +58,10 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         return Ok(());
     }
     let game = find_game(args.game.as_deref())?;
+    // The loaders find the install's `Components` from a robot's own path (`find_game_root`), and
+    // a player's robots live in the save folder, not under the install: name the install for them
+    // (a robot loaded from `Teams/` made a round of a career exit with "could not locate game root").
+    std::env::set_var("RA2_GAME", &game);
     for warning in ra2_shell::game::warnings(&game) {
         eprintln!("ra2-app: warning: {warning}");
     }
