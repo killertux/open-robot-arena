@@ -341,6 +341,15 @@ impl ComponentDamage {
         self.detached || self.fractured || self.hp < self.total_hp
     }
 
+    /// Whether the component gets a row on the repairs bench. `FUN_004dd110` records every component
+    /// of the robot as (id `+0x22c`, `ftol(hp +0xec)`, max `+0xe8`) through `FUN_004df6e0`, and the
+    /// bench (`FUN_004d6480`) makes a row only for an entry whose max is above its hitpoints
+    /// (`max != hp && max - hp > 0`, integers). A part that is detached or fractured at full
+    /// hitpoints has no row (the fractured flag only puts the `teamhq\damage.tga` icon on a row).
+    pub fn needs_repair_row(&self) -> bool {
+        (self.total_hp as i32) > (self.hp as i32)
+    }
+
     /// The remaining fraction the screen's health bar draws, `0.0..=1.0`.
     pub fn fraction(&self) -> f32 {
         if self.total_hp > 0.0 {

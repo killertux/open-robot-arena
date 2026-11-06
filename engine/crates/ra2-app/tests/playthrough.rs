@@ -235,6 +235,25 @@ fn an_event_entered_in_the_shell_is_played_by_the_player_and_saved() {
     shell.click_named("enter event button").unwrap();
     assert_eq!(shell.base_screen_id(), flow::BRACKET_SCREEN);
 
+    // The repairs bench that follows a round is drawn over this screen and its bottom bar is the
+    // shell's: the app routes the bar's Main Menu to it (live `event-repairs-damaged`).
+    let main_menu = shell
+        .placements()
+        .iter()
+        .flat_map(|p| p.walk())
+        .find(|p| p.widget.name() == "MainMenu button")
+        .map(|p| p.frame)
+        .expect("the bottom bar's Main Menu button");
+    let at = [
+        main_menu.x + main_menu.w / 2.0,
+        main_menu.y + main_menu.h / 2.0,
+    ];
+    assert_eq!(
+        flow::nav_control_at(&shell, at).as_deref(),
+        Some("MainMenu button")
+    );
+    assert_eq!(flow::nav_control_at(&shell, [640.0, 400.0]), None);
+
     // Entering writes nothing; the shell remembers the event and the robot
     // column for the round's start.
     let career = ra2sim::career::Career::load(game).unwrap();

@@ -276,6 +276,26 @@ pub fn return_to_shell_hq(shell: &mut Shell) -> Result<(), String> {
     Ok(())
 }
 
+/// The bottom bar's control (`Options button`, `MainMenu button`, `Help button`) under a point of
+/// the shell's current screen, if there is one. The repairs bench of the event flow is the
+/// application's overlay over the shell's bracket screen: live, the bench's bottom bar is the
+/// shell's (`event-repairs-damaged`: Options, Main Menu, Help under the wood), so a click on it
+/// goes to the shell. Main Menu leaves the bench as it is (the clock and the rows are saved, the
+/// HQ's event cell opens it again, docs/36 9.37).
+pub fn nav_control_at(shell: &Shell, point: [f32; 2]) -> Option<String> {
+    let placed = shell.placements();
+    let path = ra2ui::input::hit_control(&placed, point[0], point[1])?;
+    let mut current = placed.get(*path.first()?)?;
+    let mut name = current.widget.name().to_string();
+    for index in &path[1..] {
+        current = current.children.get(*index)?;
+        name = current.widget.name().to_string();
+    }
+    ["Options button", "MainMenu button", "Help button"]
+        .contains(&name.as_str())
+        .then_some(name)
+}
+
 /// Esc on a shell screen or window. The original's menus ignore it: the base
 /// window's key handler (`0x5ee6b0`) only forwards a key to the focused
 /// control, and the only key handlers that test for Esc (`0x1b`) are the
