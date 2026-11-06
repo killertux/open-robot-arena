@@ -1939,3 +1939,35 @@ capture `match-results` (Scout 26 winner above ALARM 663) agrees. Ours listed ro
 * The live record after a won round plus two lost events ends `... 120 40 80 ... (league line), 0, 80, 3`: event points 0, season points 80, kills 3 (not compared line by line with ours).
 * Not reproduced / open: the repairs bench from the HQ's event button with a partly served clock (`FUN_005011f0`'s minutes and seconds); the per-row time / damage text of a damaged bench (no damaged bench was reachable live); the wrapped bright edge of the bench's wood; the live fight of a
   2v2 against ours (physics).
+
+## 9.36 Release-readiness pass: a player's session end to end (`fx/play4`, 2026-11-05)
+
+Windowed `ra2-app` on Xephyr (:21, :22), XTEST input (`tools/capture/xtest.py`, window focused first: without a window manager the keys do not reach the app), a scratch install copy and
+scratch `ORA_SAVE_DIR`s; `~/.local/share/open-robot-arena` never created, `local/game` untouched. No live (original) session was run in this pass.
+
+### Found and fixed
+
+* **A career round exited the app** (`ra2-app: could not locate game root (Components dir)`, black window, process gone). `find_game_root` walks up from a robot's own path, and a player's
+  robots live in the save folder (`Teams/Team1/Bot3.bot`), never under the install; only the Bot Lab's practice arena set `RA2_GAME` for it. Any event round with an imported/built robot,
+  and any save folder outside the install, hit it. `ra2_app::run` now names the install (`RA2_GAME`) as soon as it is resolved. Verified: Enter Event -> Play Next Round now plays, results,
+  Continue, award.
+
+### Checklist
+
+Works (windowed, as a player):
+* Start with `--game` (remembered in `game-dir.txt`); a wrong folder / no folder prints the reason on stderr (there is no folder dialog: documented in docs/40).
+* Main menu; Options: Video tab (resolution list, fullscreen, detail), Audio tab (music mute, arena intros off), OK writes `ra2.cfg` in the save folder (`ArenaIntros=0`, `MusicMuted=1`); the install copy is not written.
+* Select Team, New Team (name, motto, logo), Continue to the Team HQ; Import Bot into an empty cell; Workshop opens on a new robot, Chassis tab shows. (A full Bot Lab build is covered by the scripted routes of 9.29-9.32, not redone by hand.)
+* Event Schedule, join window, Enter Event, bracket, Play Next Round, a lost round, Event Results (award scene), Continue; quit from the menu (clean exit) and restart: team, robot and cfg are loaded from the save folder.
+* Exhibition: game types, arena list, computer-robot picker, a 2v2 Team Match with four computer robots, pause menu (Esc: Resume / End Match / Options / Quit), End Match back to the setup screen.
+* Every arena and game type: `--play --gametype T --arena-index I` for deathmatch 0-7, battle royal 0-7, team match 0-7, tabletop 0-1, king of the hill 0-1 (28 runs) reach the results with no error, panic or traceback lines.
+* LAN, two processes on loopback (two save dirs): host Create Game -> Start Game, joiner IP Address 127.0.0.1 -> Connect, both seated, chat both ways, Ready, Begin Match, both fight and end on the same Match Results, Continue returns both to the lobby with Ready cleared; joiner Disconnect frees its seat on the host at once; the joiner reconnects; a killed joiner (SIGKILL) leaves the host's lobby within 40 s.
+
+Open / unverified:
+* A joiner's own **Disconnect** shows an OK box `Robot Arena 2` with an empty body over the server list (`NetAction::Ended("left")`). The original's box for the *host vanishing* is captured (`mp-connection-termination`, body blank), but whether the original shows any box after a voluntary Disconnect is not known: not checked against the exe.
+* End Match from the pause menu returns to the setup screen with no results window (not compared with the original).
+* New Team name/motto: the XTEST helper sends no Shift, so capitals could not be typed (a test-tool limit, not the app).
+* The Team HQ's logo list and the Import Robot list draw no row text (as in the original, 9.28).
+* `audio stream error: A buffer underrun or overrun occurred.` appears in stderr under heavy machine load (three agents building); no audible check.
+* Not reached in this pass: the live damaged Repairs bench (Time text, per-row costs), the partly served clock (`FUN_005011f0`), the Repairs bench's bright inner edge (9.35). A by-hand Bot Lab build from nothing in a window.
+* Windows/macOS builds, and Internet (GameSpy) play, remain unverified by design.
