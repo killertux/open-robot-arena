@@ -1271,6 +1271,24 @@ impl ApplicationHandler for App {
                             return;
                         }
                     }
+                    if self.hq_from_shell
+                        && hq.on_repairs_screen()
+                        && crate::flow::nav_control_at(&self.shell, point).as_deref()
+                            == Some("MainMenu button")
+                    {
+                        // The bench's bottom bar is the shell's: Main Menu leaves the bench open
+                        // (saved), the shell goes to its main menu.
+                        self.hq = None;
+                        self.hq_from_shell = false;
+                        match self.shell.click(point[0], point[1]) {
+                            Ok(step) => println!("{}", crate::describe(&step)),
+                            Err(error) => eprintln!("bench: {error}"),
+                        }
+                        let screen = self.shell.screen_id();
+                        self.audio.on_screen(&screen);
+                        self.request_redraw();
+                        return;
+                    }
                     if let Err(error) = hq.click(point) {
                         self.fail(event_loop, error);
                         return;

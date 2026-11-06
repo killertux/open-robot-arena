@@ -605,6 +605,11 @@ impl Session {
         matches!(self.screen, Screen::Hq(_))
     }
 
+    /// Whether the repairs bench is on screen.
+    pub fn on_repairs_screen(&self) -> bool {
+        matches!(self.screen, Screen::Repairs(_))
+    }
+
     /// Whether the event bracket is on screen.
     pub fn on_event_screen(&self) -> bool {
         matches!(self.screen, Screen::Event { .. })

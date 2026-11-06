@@ -1206,7 +1206,7 @@ impl Career {
             .iter()
             .filter(|robot| robot.team == entered.team)
         {
-            for component in robot.components.iter().filter(|c| c.damaged()) {
+            for component in robot.components.iter().filter(|c| c.needs_repair_row()) {
                 repairs.push(Repair {
                     robot: robot.bot_name.clone(),
                     component: component.name.clone(),

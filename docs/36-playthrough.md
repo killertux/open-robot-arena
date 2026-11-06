@@ -2040,3 +2040,52 @@ state 0x1, `b` and `1` with 0.
 * Which components become rows (4 of 8 live) and the rule of the fractured icon; the bench's blue / additive residual at the left and right shadow edges.
 * The bench has no Main Menu inside the event flow (the overlay is the Session's); the pending bench is reachable by closing the window.
 * Whether the original keeps the partly served clock across an app restart is not known (it lives in the HQ object, `+0xf8`/`+0xfc`, and the live reopen was in one process); ours keeps it in the sidecar.
+
+## 9.38 Which components get a bench row, the bench's bottom bar, the Paint Shop's fifth effect (`fx/benchrows`, 2026-11-06)
+
+Binary only (`Robot Arena 2.exe`, Ghidra through REA and rizin). **No live session was run**: starting the shared flatpak Wine session was refused by the permission system, so nothing here is checked against a new
+capture and no capture was added. The captures of 9.37 (`event-repairs-damaged`, `-partial`, `-reopened`) are the evidence used.
+
+### 1. The row filter (`FUN_004dd110`, `FUN_004df6e0`, `FUN_004d6480`)
+
+* `FUN_004dd110` (called from `FUN_004164a0` and `FUN_00415500`, career match, the end-of-round pass with `param_2 == 0`) walks the robot's component list (`this+0x18`, a vector of pointers) and
+  records **every** component as `(id = [c+0x22c] (FUN_00416040), hp = ftol([c+0xec]), max = [c+0xe8] (FUN_00401780))` in a map through `FUN_004df6e0` (`FUN_004e2640` insert); the state `[c+0xe0]`
+  (`FUN_004a6210`) goes into a second map (`FUN_004df740`). There is no kind filter in it.
+* The id is unique: it is the counter `[factory+0x7c]` post-incremented by `FUN_004dbf30` and stored by `FUN_004dc2d0` in the component factory `FUN_004dbf40` (the function that then tests the type name `Wheel` ...). So no two components share a key and a map insert cannot drop one.
+* `[c+0xe8]` (the max) is set in the component constructor `FUN_0045cc70`: 100 by default, then by the class switch at `0x45d097` (`FUN_0049aa30`, a six-way switch giving 400, 100, 1000 hitpoints), and overridden by the
+  component file's own health (`FUN_004fe2c0`, `0x45d0f6`); `[c+0xec]` is the current hitpoints (float).
+* The bench (`FUN_004d6480`, called by the window's constructor `FUN_004d62a0`) makes a row for a map entry that has none (`FUN_004dab00` = -1) **only if `max - hp > 0` as integers** (`0x4d66b6`..`0x4d66c0`:
+  `mov ecx,[ebx+8]; sub ecx,[eax+4]; jle skip`), then fills the existing row with `(max - hp) / max` clamped to 1 times 20 minutes (the formula already in 9.37). The state map entries equal to 1 get the
+  `UI\teamhq\damage.tga` icon (the fractured flag) on a row. Nothing else filters.
+* So the rule is `trunc(hp) < max`, per component, for every component of the entered robot. Ours listed `detached || fractured || hp < total`; a part detached or fractured at full hitpoints got a row the
+  original never makes. `ComponentDamage::needs_repair_row` is the original's test and `Career::repairs_from_report` uses it.
+* **Not explained: 4 rows from 8 damaged components.** The filter cannot drop a component whose hitpoints went down, so the live count means only 4 of the components 1-8 actually lost hitpoints in the
+  original (the `plus.damage(0, c, 35, point)` index `c` is not our design-order index, or the hit is absorbed: armour factor, a part with `max` 0 / not damageable), not that the bench hid 4. It is not
+  settled which; ours still damages all 8 in its report. To settle it: hook `FUN_004df6e0` (cdecl-like thiscall, `ecx` = the record object, stack `(id, hp, max)`) with `ra2_drive.py eval`
+  (`Interceptor.attach(ptr(0x4df6e0), ...)`), log the triples once at the end of the round, and compare with the `plus.damage` indices.
+* Row times with several rows: each row's time is its own `(max - hp) / max * 20` minutes (`FUN_0058ada0(minutes, 1)`); the clock is only reduced by the Repair Item click of a row (`FUN_004d6e10`), never
+  by the sum, so rows do not add up: they are paid one by one against the same clock (9.37, 28:44 after one 1:16 row).
+
+### 2. The bench's bottom bar
+
+The live bench shows the shared bottom bar (`Options`, `Main Menu`, `Help`, `event-repairs-damaged`); `UI/teamhq/repairs.gib` itself has only `repair button` and `finished button` (and the 48 px `Slot1` strip
+the bar sits on). Ours drew the bar but the event flow's overlay took every click. In the window, a click on the bench that lands on the shell's `MainMenu button` (the shell is still on the bracket
+screen under the overlay) now closes the overlay and gives the click to the shell: main menu, the rows and the clock are in the saved career (`Career::repair_clock`, `bench_pending`), and Team HQ >
+Event Schedule > the event's cell opens the bench again (`flow::reopen_bench`, 9.37). `flow::nav_control_at`, `Session::on_repairs_screen`; test assertion in `playthrough.rs`
+(`an_event_entered_in_the_shell_is_played_by_the_player_and_saved`). Options and Help on the bench are still not routed (the shell's window would be hidden by the overlay); the bar's drawing is as live
+(`fidelity.py --renderer app --only event-repairs`: 1.06 / 1.25, unchanged).
+
+### 3. The Paint Shop's "fifth effect"
+
+There is none missing: 9.31 (merged as `d977df7`) already implements all five (`Color Fill`, `Texture Fill`, `Surface Layers`, `Edge Lines`, `Decals`; `FUN_00423010`, mode in `+0xdc`) and the 9.29 note that
+said four was written before it. Surface Layers shares `texturefill.gib` and the Texture Fill list in the original too (`FUN_00426d90`), differing only in the mode's click handler (`FUN_00424850` takes the
+same panel quad). Nothing to port; the open items are the ones 9.31-9.33 list.
+
+### 4. The shadow's blue residual
+
+Not looked at beyond reading: it needs the live draw path (blend state of `repairbench_shadows.tga`), which needs a session.
+
+### Open
+
+* Which of the damaged components the original really has hitpoints off (4 of 8), by logging `FUN_004df6e0` live.
+* The bench's `Options` and `Help` buttons, the left/right shadow edge's +8/+9/+12 residual.
