@@ -8417,3 +8417,53 @@ Box Scout / ALARM counted hits 7.4 +- 0.5 / 37.6 +- 2.4 against live 7.1 +- 0.7 
 
 **Open.** (a) The corner landing: why ours' tail stand loses the whole spin where live loses half (an 8 mm difference in a contact gap decides it; step-level contact impulses of the original at that landing would settle it, `tipab-scout-tail-wscan-box` has the rows).
 (b) The Octagon's Scout on its tail 9.5 % against 0.8 %, the Box's 7.7 % against 0.4 %, and ALARM's hammer on a tail stand (4 of 16 against 0). (c) The Sentinel's push after 1 s.
+
+### 12be. The corner landing: the resolver is the original's to 1e-3 on the original's own input, and the "stickier" tail stand of 12bd was the placement (ours started from a different rest pose and joint state); placed from the live state, 125 of 126 controlled tips end alike (fx/cornerland; the engine is unchanged, a replay test and tools)
+
+12bd found that ours loses the whole spin on the Scout's rear-corner landing (trial `pitch -90, w -3`: live swings forward to +0.103, ours to +0.031), that
+six spin-scan basin edges hold the tail stand 0.25-1 rad/s longer in ours, and that the live hammer leaves the tail stand 15/16 against ours 10/16. It put the cause
+in a contact-solver detail within a few millimetres. **It is not in the solver, the contacts or the manifold: it is the start.**
+
+**1. The resolver, step by step in the original.** `frida/ra2_tipab.js` now also writes `V` rows (every watched body as the resolver `0x53ed80` leaves it;
+`onLeave`, as `ra2_fightcontacts.js` does). New capture `tipab-scout-tail-corner-box__live__000` (display `:9`, port `27149`, under the shared lock, `ALARM_AI=0
+CHASSIS=163.49465942382812`, prefix `Teams/ AI/ ra2.cfg` copied before and sha256-identical after; `tools/oracle/sideways/grids/grid_corner.json`: pitch -90 at w -3 (twice: the two
+runs are identical to the float, the original is deterministic from a placed state), -2.5, -3.5, -4, -4.25, +1.5, and pitch -80 / -100 at w -3; 120 substeps each).
+`tools/oracle/sideways/resolver_cases.py` cuts every resolver entry with a chassis contact (984 in the nine trials: state at the entry, contacts with
+point / normal / distance / both frictions and restitutions, the velocities left) and `examples/resolverreplay` runs ours (`havok17::resolver::resolve`, the chassis against a fixed arena, the
+original's inertia and the combine `sqrt(mu_A mu_B)`, `e_A e_B`) on each: **all 984 agree with the original's post-resolver linear and angular velocity to 1e-3** (largest difference
+0.0010 m/s or rad/s, the print precision), landings, rolls over the corners, one-contact and three-contact steps alike. Test `tests/resolver_live.rs` (112 of them, `tests/data/resolver_live.txt`). So the
+impulse order, the friction cone, the restitution (0.06) and the push-out are the original's on the tail stand, and the manifold (which contacts are handed to it) is a separate question for the poses below.
+
+**2. The start.** In trial 0 the two sessions of 12bd and 12be put the live Scout at different rest poses: the plan takes the rest pose at the first substep of the first plan and the
+chassis' lean (`up.y`) at the release is 0.0344 in `tipab-scout-tail-wscan-box` (a session of 12bd), 0.0458 in the corner session, 0.047 in ours (`tipprobe self`). The same command, `pitch -90, w -3`:
+wscan live back to -0.144 and forward to +0.103; corner live -0.132 and forward only +0.046 (**live itself ends at ours' +0.031**); `pitch -90, w +1.5`: wscan stays (max lean 0.225), corner goes over onto its wheels (1.0). So the
+confrontation of 12bd compared ours with a live start 0.7 degrees from ours' own. With the same start the two agree.
+`tipprobe live` now places every body of the Scout from the original's placed state (`X` row of the capture): the chassis exactly, every other body at the live centre
+(`TIPPROBE_LIVE_POSE=1`) and, found from the two local inertia tensors (the cube turn that makes them equal; the wheels' and fork's body frames are not the original's), the live frame
+(`live_state.py` writes the state file with the `P` inertia, `live_trials.py` runs a whole capture and prints both outcomes). Result, outcome in kind (tail / wheels / back after 4.5-6 s) and the extremes of the lean:
+
+| capture (placed from the live state) | trials | outcome differs | before (12bd, ours' own start) |
+|---|---|---|---|
+| `tipab-scout-tail-wscan-box` (pitch -80 / -90 / -100, w -6.5 .. +2.25) | 51 | 1 (pitch -80, w -4.75, ours stays, live goes over) | 6 basin edges, all ours holds longer |
+| `tipab-scout-tail-corner-box` | 9 | 0 (incl. w -4 and w +1.5) | |
+| `tipab-scout-side-box` (pitch / roll tips) | 24 | 0 | |
+| `tipab-scout-tail-box` | 26 | 0 | |
+| `tipab-scout-wall-box` | 16 | 0 | |
+| total | 126 | **1** | 15 of 162 |
+
+and the lean tracks to 1-3 mm over a whole landing (`pitch -90, w -3`: back to -0.132 live, -0.132 ours, forward +0.046 both; the w +1.5 roll over the corners to 0.27 at 40 substeps, both). The remaining 1-10 % differences in the first
+two substeps are the fork's and wheels' hinge transients (the fork arm's inertia tensor differs by 2 %: live 2.417 / 0.2669 / 2.573, off-diagonal 0.463, ours 2.4216 / 0.2624 / 2.573, 0.453; the wheels' transverse inertia is the known +5 %: live 0.4297 / 0.4281, ours 0.4518 / 0.4502, 12bc and earlier),
+and they decide only at a knife edge: at a step, a corner at 0.0999 against more than 0.1 is in the manifold or not (corner session, w +1.5, substep 4).
+
+**3. ALARM's hammer on a tail stand.** The `tipab-scout-tail-hammer-box` Fire is pressed from the host as the substep counter passes 30, which in the capture is 0-9 substeps after the release (the rod moves 2 m/s against
+its chassis at substep 2-16, 62 in one trial): nothing like a fixed time after the release, so 12bd's `TIPPROBE_ALARM=...,fire` at a nominal time was not the live timing. `TIPPROBE_LIVE_ALARM=1` places both robots from the capture and `TIPPROBE_ALARM_FIRE=<s>`
+presses ours' `Fire` (`live_trials.py ... TIPPROBE_ALARM_FIRE=rod` reads the substep the live rod started from its `B` rows and fires one substep earlier): **live ends on its wheels 15 times and on its back once; ours 12 on the wheels, 3 still on its tail, 1 on its back** (11 of 16 in kind), against 10 / 4 / 2 with ours' own placement. The hit lands within a substep of live's but ours rolls
+the Scout through more or less than the original in the 5 that differ (the hammer's stroke and the contact it makes, 12az / 12ba): not settled here and no longer evidence for the corner.
+
+**4. What this says.** The corner landing, the spin scan and the pitch / roll basins agree with the original once ours starts where the original started. 12bd's "stickier by 0.25-1 rad/s" was the 0.7 degree tilt and the few-mm joint start of ours' rest pose against the session's. The
+Scout's tail stand share of the fights (Octagon 0.8 % live against 9.5 %, Box 0.4 against 7.7 %) is therefore **not** explained by the landing; it is also not explained by the resolver. What a fight adds is ALARM's hits and the wall: see 3 and the open list. No default changes: the ensembles are 12bd's to the digit
+(the engine is untouched: `pub mod body` for the replay): Box Scout / ALARM counted hits 7.4 / 37.6 (live 7.1 / 46.6), Razor / FlapJack 5.7 / 1.0 (6.0 / 0.6), Compressor 4.8 / 77.1 (5.2 / 98.2), Octagon 4.4 / 15.0 (4.3 / 13.7). The Sentinel's push (12bd item 5, in `pairreplay`) does not touch the contact resolver (its input replays are exactly the resolver of section 1) and is unchanged.
+
+**Tools and tests.** `tools/oracle/sideways/live_state.py`, `live_trials.py`, `resolver_cases.py`, `grids/grid_corner.json`; `examples/resolverreplay`; `examples/tipprobe` (`TIPPROBE_LIVE_POSE`, `TIPPROBE_LIVE_ALARM`, `TIPPROBE_ALARM_FIRE`); `tests/resolver_live.rs`; `frida/ra2_tipab.js` (`V` rows). Capture: `tipab-scout-tail-corner-box__live__000` (manifest row, copy in `~/ra2-oracle-backup/oracle/original`, `manifest-additions-2026-11-05-cornerland.tsv`).
+
+**Open.** (a) The Scout's tail stand in fights (9.5 % / 7.7 % against 0.8 / 0.4 %), 12bd's (b), still unexplained: the controlled tips, landings and basins are the original's, so look at what a fight does to the Scout (ALARM's hammer in the contact, wall contact, the AI's inputs). (b) ALARM's hammer on the placed Scout, 11 of 16 in kind. (c) The wheels' transverse inertia (+5 %) and the fork's inertia tensor (2 %). (d) The one basin-edge trial (pitch -80, w -4.75). (e) The Sentinel's push after 1 s.

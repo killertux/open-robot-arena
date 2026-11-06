@@ -165,6 +165,14 @@ Interceptor.attach(ptr('0x53ed80'), { onEnter() {
       push(['B', seq, p.toString(), f(p.add(0x190)), vec(p.add(0x30)), vec(p.add(0x54)), vec(p.add(0x64)), rot]);
     }
   } catch (err) { push(['E', ++seq, String(err)]); }
+},
+// V  [V,seq,body,vel(3),angvel(3)]  every watched or known body as the resolver leaves it (docs/29 12be:
+//    the post-resolver velocities of a landing, for a replay of the resolver on the original's own input)
+onLeave() {
+  try {
+    const list2 = watch ? watch : Array.from(known.values());
+    for (const p of list2) push(['V', seq, p.toString(), vec(p.add(0x54)), vec(p.add(0x64))]);
+  } catch (err) { push(['E', seq, String(err)]); }
 } });
 Interceptor.attach(ptr('0x52a990'), { onEnter() {
   push(['A', ++seq, f(this.context.esp.add(4)), ptr('0x719724').readU32()]); } });

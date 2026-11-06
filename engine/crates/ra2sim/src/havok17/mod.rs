@@ -24,7 +24,7 @@
 //! and repeats from 1 until the substep's time is used up.
 
 pub mod actions;
-mod body;
+pub mod body;
 pub mod dashpot;
 pub mod deactivation;
 pub mod joints;
