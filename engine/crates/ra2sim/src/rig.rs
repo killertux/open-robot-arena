@@ -356,6 +356,11 @@ pub struct HavokParts {
     pub collision_mesh: Vec<Option<Vec<[u32; 3]>>>,
     /// Per piece of `collision`: its rigid body's own mass.
     pub collision_mass: Vec<f32>,
+    /// Per piece of `collision`: the triangles of its `.gmf` object, which the
+    /// original takes the body's mass properties from (docs/29 section 12bf).
+    pub collision_faces: Vec<Vec<[u32; 3]>>,
+    /// Per phantom of `phantom_pieces`: the same.
+    pub phantom_faces: Vec<Vec<[u32; 3]>>,
     /// The phantom geometry (all of it, component-local).
     pub phantom: Vec<Vec3>,
     /// All the rigid bodies' mass, phantoms included, and the phantoms' share.
@@ -467,6 +472,7 @@ impl HavokParts {
             if rb.disable_collisions {
                 if pts.len() >= 4 {
                     out.phantom_pieces.push((pts.clone(), rb.mass.max(0.0)));
+                    out.phantom_faces.push(faces.clone());
                 }
                 out.phantom.extend(pts);
                 out.phantom_mass += rb.mass.max(0.0);
@@ -486,6 +492,7 @@ impl HavokParts {
                 out.collision.push(pts);
                 out.collision_mesh.push(mesh);
                 out.collision_mass.push(rb.mass.max(0.0));
+                out.collision_faces.push(faces);
             }
         }
         out

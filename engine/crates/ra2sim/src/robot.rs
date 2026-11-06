@@ -208,7 +208,41 @@ const HULL_SKIN: f32 = 0.045;
 /// put it, 3/8 of the box from its closed end. The bodies' inertia stays the
 /// box's: live, ALARM's wheel spins with 0.5569 kg·m² and Wide Load's with
 /// 1.2935, exactly the box's (docs/29 section 12h).
-type MassPiece = (Vec<Vec3>, Option<Vec<[u32; 3]>>, f32, Option<Vec<[u32; 3]>>);
+type MassPiece = (
+    Vec<Vec3>,
+    Option<Vec<[u32; 3]>>,
+    f32,
+    Option<Vec<[u32; 3]>>,
+    Option<Vec<[u32; 3]>>,
+    // The original's mass properties at unit mass (centre, inertia about it)
+    // in the part's frame, computed in the piece's own frame (`add`).
+    Option<(Vec3, glam::Mat3)>,
+);
+
+/// The original's mass properties of a rigid body at unit mass (centre,
+/// inertia about it), integrated in the body's own frame (`pts` as the `.gmf`
+/// stores them: an open surface's integrals depend on the axes) and carried by
+/// `m` into the part's frame.
+fn original_props(
+    pts: &[Vec3],
+    faces: Option<&Vec<[u32; 3]>>,
+    m: Mat4,
+) -> Option<(Vec3, glam::Mat3)> {
+    if !original_inertia() {
+        return None;
+    }
+    let (_, c, j) = massprops::original_mass_props(pts, faces?, 1.0)?;
+    let r = glam::Mat3::from_mat4(m);
+    Some((m.transform_point3(c), r * j * r.transpose()))
+}
+
+/// `RA2_INERTIA=old`: the rigid bodies' mass properties from hulls and the
+/// rotor's box, as before docs/29 section 12bf (default: the original's own
+/// integrals over each body's triangles, `massprops::original_mass_props`).
+fn original_inertia() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RA2_INERTIA").map_or(true, |v| v != "old"))
+}
 
 /// Where an open piece's mass sits: its triangles' solid from `pivot`.
 fn open_centroid(pts: &[Vec3], tris: &[[u32; 3]], pivot: Vec3) -> Option<Vec3> {
@@ -225,7 +259,12 @@ fn mass_point_weighted(pieces: &[MassPiece], pivot: Vec3) -> Option<(f32, Vec3)>
     let (w, at) = pieces
         .iter()
         .filter(|p| p.2 > 0.0)
-        .filter_map(|(pts, mesh, m, open)| {
+        .filter_map(|(pts, mesh, m, open, _, props)| {
+            if original_inertia() {
+                if let Some((c, _)) = props {
+                    return Some((*m, *c));
+                }
+            }
             open.as_ref()
                 .and_then(|tris| open_centroid(pts, tris, pivot).map(|c| (0.0, c)))
                 .or_else(|| {
@@ -1015,6 +1054,7 @@ impl Robot {
         let mut add = |pieces: &[Piece],
                        registered: &[bool],
                        phantoms: &[(Vec<Vec3>, f32)],
+                       phantom_faces: &[Vec<[u32; 3]>],
                        m: Mat4,
                        weight: f32,
                        tag: u32,
@@ -1024,22 +1064,34 @@ impl Robot {
             // the original keeps a mesh's geometry).
             let mut raws = Vec::new();
             let mut placed_registered = Vec::new();
-            for (k, (pts, mesh, piece_mass, open)) in pieces.iter().enumerate() {
+            for (k, (pts, mesh, piece_mass, open, faces, _)) in pieces.iter().enumerate() {
                 let local: Vec<Vec3> = pts.iter().map(|q| m.transform_point3(*q)).collect();
                 if massprops::hull_volume_centroid(&local).is_some() {
-                    placed.push((local, mesh.clone(), *piece_mass, open.clone()));
+                    placed.push((
+                        local,
+                        mesh.clone(),
+                        *piece_mass,
+                        open.clone(),
+                        faces.clone(),
+                        original_props(pts, faces.as_ref(), m),
+                    ));
                     raws.push(pts.clone());
                     placed_registered.push(registered.get(k).copied().unwrap_or(true));
                 }
             }
             let ghosts: Vec<Piece> = phantoms
                 .iter()
-                .map(|(pts, pm)| {
+                .enumerate()
+                .map(|(gk, (pts, pm))| {
+                    let gfaces = phantom_faces.get(gk).cloned().filter(|f| !f.is_empty());
+                    let gprops = original_props(pts, gfaces.as_ref(), m);
                     (
                         pts.iter().map(|q| m.transform_point3(*q)).collect(),
                         None,
                         *pm,
                         None,
+                        gfaces.clone(),
+                        gprops,
                     )
                 })
                 .collect();
@@ -1053,29 +1105,63 @@ impl Robot {
                 let mut all: Vec<Piece> = if own > 0.0 {
                     placed
                         .iter()
-                        .map(|(p, t, pm, o)| {
-                            (p.clone(), t.clone(), pm * body_mass / own, o.clone())
+                        .map(|(p, t, pm, o, f, g)| {
+                            (
+                                p.clone(),
+                                t.clone(),
+                                pm * body_mass / own,
+                                o.clone(),
+                                f.clone(),
+                                *g,
+                            )
                         })
                         .collect()
                 } else {
                     let vols: Vec<f32> = placed
                         .iter()
-                        .map(|(p, _, _, _)| massprops::hull_volume_centroid(p).map_or(0.0, |v| v.0))
+                        .map(|(p, _, _, _, _, _)| {
+                            massprops::hull_volume_centroid(p).map_or(0.0, |v| v.0)
+                        })
                         .collect();
                     let total: f32 = vols.iter().sum();
                     placed
                         .iter()
                         .zip(&vols)
-                        .map(|((p, t, _, o), v)| {
+                        .map(|((p, t, _, o, f, g), v)| {
                             let share = if total > 0.0 { v / total } else { 0.0 };
-                            (p.clone(), t.clone(), body_mass * share, o.clone())
+                            (
+                                p.clone(),
+                                t.clone(),
+                                body_mass * share,
+                                o.clone(),
+                                f.clone(),
+                                *g,
+                            )
                         })
                         .collect()
                 };
                 all.extend(ghosts.iter().cloned());
-                for (pts, mesh, pm, open) in &all {
+                for (pts, mesh, pm, open, faces, props) in &all {
                     if *pm <= 0.0 {
                         continue;
+                    }
+                    // The original's own integrals over the body's triangles.
+                    if original_inertia() {
+                        if let Some((c, j)) = props {
+                            let (c, i) = (*c, *j * *pm);
+                            if std::env::var_os("RA2_MASS_DEBUG").is_some() {
+                                eprintln!(
+                                    "   piece {} pts {} tris {} mass {pm:.3} com {c:?} I diag {:?} off {:?}",
+                                    tag,
+                                    pts.len(),
+                                    faces.as_ref().map_or(0, |f| f.len()),
+                                    [i.x_axis.x, i.y_axis.y, i.z_axis.z],
+                                    [i.y_axis.x, i.z_axis.x, i.z_axis.y]
+                                );
+                            }
+                            bodies_inertia.push((*pm, c, i));
+                            continue;
+                        }
                     }
                     // A rotor: its box's inertia, carried from where its
                     // triangles put its mass.
@@ -1120,13 +1206,13 @@ impl Robot {
                     "mass: part body tag {tag} weight {weight:.3} at {centre:?} origin {at:?} pieces {}",
                     placed.len()
                 );
-                for (pts, _, _, _) in &placed {
+                for (pts, _, _, _, _, _) in &placed {
                     let lo = pts.iter().copied().fold(Vec3::splat(f32::MAX), Vec3::min);
                     let hi = pts.iter().copied().fold(Vec3::splat(f32::MIN), Vec3::max);
                     eprintln!("      piece {} points, box {lo:?}..{hi:?}", pts.len());
                 }
             }
-            for (((pts, mesh, _, _), raw), registered) in
+            for (((pts, mesh, _, _, _, _), raw), registered) in
                 placed.into_iter().zip(raws).zip(placed_registered)
             {
                 let shape = match mesh {
@@ -1164,15 +1250,19 @@ impl Robot {
             // original: batteries, air tanks, battery packs and control boards too (their `.gmf`
             // rigid bodies are `nocoll=false`, and live they take contacts, docs/29 12at).
             let collides = internals_collide() || (c.role.is_physical() && c.role != Role::Power);
-            let mesh_of =
-                |pts: &Vec<Vec3>, mesh: Option<&Option<Vec<[u32; 3]>>>, m: Option<&f32>| {
-                    (
-                        pts.clone(),
-                        mesh.cloned().flatten(),
-                        m.copied().unwrap_or(0.0),
-                        None,
-                    )
-                };
+            let mesh_of = |pts: &Vec<Vec3>,
+                           mesh: Option<&Option<Vec<[u32; 3]>>>,
+                           m: Option<&f32>,
+                           faces: Option<&Vec<[u32; 3]>>| {
+                (
+                    pts.clone(),
+                    mesh.cloned().flatten(),
+                    m.copied().unwrap_or(0.0),
+                    None,
+                    faces.cloned().filter(|f| !f.is_empty()),
+                    None,
+                )
+            };
             let mut registered: Vec<bool> = Vec::new();
             let pieces: Vec<Piece> = if !collides {
                 Vec::new()
@@ -1182,7 +1272,14 @@ impl Robot {
                     .collision
                     .iter()
                     .enumerate()
-                    .map(|(k, pts)| mesh_of(pts, h.collision_mesh.get(k), h.collision_mass.get(k)))
+                    .map(|(k, pts)| {
+                        mesh_of(
+                            pts,
+                            h.collision_mesh.get(k),
+                            h.collision_mass.get(k),
+                            h.collision_faces.get(k),
+                        )
+                    })
                     .collect();
                 if !own_rotor {
                     registered.extend(h.rotor_collision.iter().map(|_| true));
@@ -1191,12 +1288,13 @@ impl Robot {
                             pts,
                             h.rotor_collision_mesh.get(k),
                             h.rotor_piece_mass.get(k),
+                            h.rotor_faces.get(k),
                         )
                     }));
                 }
                 v
             } else if !c.hull_points.is_empty() {
-                vec![(c.hull_points.clone(), None, 0.0, None)]
+                vec![(c.hull_points.clone(), None, 0.0, None, None, None)]
             } else {
                 Vec::new()
             };
@@ -1217,6 +1315,11 @@ impl Robot {
                 m.w_axis.truncate()
             };
             let solid: Vec<(Vec<Vec3>, f32)>;
+            let phantom_faces: &[Vec<[u32; 3]>] = if !pieces.is_empty() && collides {
+                &h.phantom_faces
+            } else {
+                &[]
+            };
             let phantoms: &[(Vec<Vec3>, f32)] = if pieces.is_empty() {
                 // Nothing to collide (a power cell, a control board, a
                 // SmartZone): its mass and inertia are still its geometry's.
@@ -1236,6 +1339,7 @@ impl Robot {
                 &pieces,
                 &registered,
                 phantoms,
+                phantom_faces,
                 m,
                 weight.max(0.0),
                 i as u32,
@@ -1261,6 +1365,13 @@ impl Robot {
                         motor.havok.rotor_collision_mesh.get(k).cloned().flatten(),
                         motor.havok.rotor_piece_mass.get(k).copied().unwrap_or(0.0),
                         motor.havok.rotor_faces.get(k).cloned(),
+                        motor
+                            .havok
+                            .rotor_faces
+                            .get(k)
+                            .cloned()
+                            .filter(|f| !f.is_empty()),
+                        None,
                     )
                 })
                 .collect();
@@ -1268,7 +1379,7 @@ impl Robot {
             let (rotor, rotor_mass) = if all.len() > 1 && motor.role == Role::Axle {
                 let near = all
                     .iter()
-                    .map(|(pts, _, _, _)| {
+                    .map(|(pts, _, _, _, _, _)| {
                         let pts: Vec<Vec3> = pts.iter().map(|q| m.transform_point3(*q)).collect();
                         massprops::hull_volume_centroid(&pts)
                             .map(|(_, c)| c.distance(pivot))
@@ -1284,7 +1395,16 @@ impl Robot {
             } else {
                 (all, motor.havok.rotor_mass)
             };
-            add(&rotor, &[], &[], m, rotor_mass, info.motor as u32, pivot);
+            add(
+                &rotor,
+                &[],
+                &[],
+                &[],
+                m,
+                rotor_mass,
+                info.motor as u32,
+                pivot,
+            );
         }
         let shape = match children.len() {
             0 => ShapeDesc::Sphere { radius: 0.1 },

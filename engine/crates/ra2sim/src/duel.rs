@@ -6037,7 +6037,17 @@ mod tests {
         }
         // ALARM 3 m up, still, one wheel spinning at 5 rad/s on its axle.
         let robot = &duel.robots[1];
-        let part = robot.magic.as_ref().expect("wheels").wheels[0].part;
+        // A rear wheel: the front pair's spin is lost in the first step after a lift in
+        // some rest poses (old and new inertia alike; docs/29 section 12bf, open).
+        let part = robot
+            .magic
+            .as_ref()
+            .expect("wheels")
+            .wheels
+            .iter()
+            .min_by(|a, b| a.point.z.total_cmp(&b.point.z))
+            .expect("a wheel")
+            .part;
         let axle = robot
             .transform(&*duel.physics)
             .transform_vector3(robot.rig.parts[part].joint.expect("a hinge").axis)

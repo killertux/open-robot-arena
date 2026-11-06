@@ -40,13 +40,18 @@ for ti,(t,(pi,di)) in enumerate(zip(grid,zip(places,dones))):
     if 'TIPPROBE_LIVE_ALARM' in env and env.get('TIPPROBE_ALARM_FIRE') == 'rod':
         rs = rod_start(L[pi:di])
         env['TIPPROBE_ALARM_FIRE'] = str(max((rs or 1) - 1, 0) / 60.0)
-    subprocess.run(['./target/release/examples/tipprobe',G+'/Arenas/box.py',G+'/AI/Team0/Bot0.bot',G+'/AI/Team0/Bot1.bot','live',D+'/st.txt',secs],cwd=os.path.join(HERE,'..','..','..','engine'),env=env,capture_output=True)
+    if 'drive_py' in t:
+        env['TIPPROBE_DRIVE'] = ','.join('%d:%d:%d' % (round(s * 1.5), th, tu) for s, th, tu in t['drive_py'])
+    else:
+        env.pop('TIPPROBE_DRIVE', None)
+    subprocess.run(['./target/release/examples/tipprobe',G+'/Arenas/'+os.environ.get('ARENA','box')+'.py',G+'/AI/Team0/Bot0.bot',G+'/AI/Team0/Bot1.bot','live',D+'/st.txt',secs],cwd=os.path.join(HERE,'..','..','..','engine'),env=env,capture_output=True)
     O=[json.loads(l) for l in open(D+'/d.jsonl')]
     x=[i for i,r in enumerate(O) if r[0]=='X'][0]
     ours=lean(O[x:])
     n=min(len(live),len(ours),NS)
     kind=lambda s: 'wheels' if s[n-1]>0.9 else ('back' if s[n-1]<-0.9 else 'tail')
     d=max(abs(live[i]-ours[i]) for i in range(n))
+    if os.environ.get('LT_DUMP')==str(ti): print('LEAN live', [round(x,3) for x in live[:n:6]], '\nLEAN ours', [round(x,3) for x in ours[:n:4]])
     tot+=1; diff+= kind(live)!=kind(ours)
     print('%2d %-20s live %-6s min %.3f max %.3f | ours %-6s min %.3f max %.3f | max|d| %.3f'%(ti,t['label'],kind(live),min(live[:n]),max(live[:n]),kind(ours),min(ours[:n]),max(ours[:n]),d),flush=True)
 print('trials',tot,'outcome differs',diff)
