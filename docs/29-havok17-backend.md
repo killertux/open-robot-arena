@@ -8728,3 +8728,62 @@ Captures (added to `local/oracle/original`, manifest-additions-2026-11-13-wheels
 
 **Open.** The original's hinge zero (the two wheels' knock phase); the other motors' atoms were not read (only the `anglemotor` pair, 0.8 from the `.gmf` of every motor type is the rule here); the servo's `+0x80` limit branch (`angle += 2 pi` with the wrapped error) is not ported
 for a limited hinge; the Box's early endings (the Scout's tail stand, 12bd-12bh) and the Octagon length stay.
+
+### 12bj. How the short Box fights end: the Scout is counted out by the 20 s immobility rule three times as often as live (31 % against 12 %), on its tail, on its back and upright at a wall alike; the Octagon length gap was a reference artefact; the original's hinge zero does not move it (fx/shortfight; measurements and a tool, no engine change)
+
+**1. The references, counted alike.** 12bh compared ours' 120 s fights with live fights that last up to 143 s and, for the Octagon, with a reference from another capture set. With the bell-primed live fights of `live_ref.py` plus the tail-stat captures that carry the brains' log
+(`boxstart-tailstat-scout-alarm-{box,octagon}__live__*`, the match end from `tail_runs_cmp.match_end`) and every length capped at ours' 120 s (`tools/oracle/short_fights.py`; ours: 96 warmups, `RA2_AI_TRACE=1 FIDTRACE_UP=1`, scratch install, this branch = master b5afccf):
+
+| match length (s, capped at 120) | live | ours | z |
+|---|---|---|---|
+| Box | 89.4 +- 4.3 (28 bell + 15 tail-stat = 43 fights) | 76.5 +- 2.8 | 2.5 |
+| Box, fights under 40 s / under 60 s | 7.0 % (3 of 43) / 18.6 % (8 of 43) | 9.4 % / 31.2 % | 0.5 / 1.7 |
+| Octagon | 48.8 +- 5.8 (11 + 8 = 19 fights; bell only 45.6 +- 7.9) | 44.5 +- 2.3 | 0.7 |
+| Octagon, under 40 s / under 60 s | 52.6 % / 68.4 % | 58.3 % / 82.3 % | 0.5 / 1.2 |
+
+So **the Octagon length gap (44.5 against "52.0") is not a gap**: the 52.0 was the 25-fight set of 12bg whose 17 older captures have no end cut; the 11 bell fights give 45.6. The Box stays: 13 s shorter than live, 1.7-2.5 se, with a tail that
+is made of fights under 60 s (12bh's 14 % of 28 was 8 of 43 = 18.6 % with the tail-stat fights).
+
+**2. How the fights end (task 1).** `short_fights.py <pair> <ensemble dir>` puts every decided fight in a class by the robot that went out and the last 19 s before the end (live: the `W` row's loser and the `.tsv`'s `isUpsideDown` and positions of the partsfight / firststroke
+captures, the match clock of the `.tsv` being the match's elapsed time: `firststroke-...__004` has the Scout upside down for the whole 20 s before its end at 69 s; ours: the chassis' hit points and `up.y`). KO = the robot kept moving and was destroyed, IMMOB = the centre stayed inside a
+sqrt 2 m sphere for the 20 s of the rule (`ra2sim::immobility`, verified again against `FUN_00412fc0`'s tracker `FUN_00413900`, 12bg: the position is the centre of mass, the sample once a second).
+
+| Box, decided fights (live 26 of 28, ours 83 of 96, the others run to the 120 s cap or have no class) | live | ours |
+|---|---|---|
+| Scout destroyed (KO) | 17 (65 %) | 42 (51 %) |
+| ALARM counted out immobile on its back | 6 (23 %) | 14 (17 %) |
+| **Scout counted out immobile** | **3 (12 %)** | **26 (31 %)** |
+| ... on its tail (\|up.y\| < 0.3) / on its back / upright | - / 2 / 1 | 11 / 8 / 7 |
+| ALARM immobile upright | 0 | 1 |
+
+(Adding the two live A-frames of 12bg, both robots on their tails, ends at 27 and 32 s, makes it 5 Scout immobilisations in about 42 classed live fights: 12 % against 31 %, z = 2.2-2.7.) The ALARM column (counted out on its back, 6 of 26 live, 14 of 83 ours) and the Scout KOs agree; the whole excess is **the Scout counted out immobile, in every pose**, which is why a tail-only fix would not do: 11 tail, 8 back, 7 upright at a wall.
+The tail-time numbers of 12bg-12bi are the largest of the three poses.
+
+**3. A representative case of each (task 2), ours.** Warmup 18 (40 s): the Scout is on its back from 10 s (hp 1679), rolls onto its tail at the corner (-12.3, -10.6) by 14 s and sits there with `up.y` 0.00 and ALARM upright 2.7 m away hammering it (1241 -> 327 hp from 22 to 38 s) until the rule counts it out at 40 s. Warmup 72 (53 s): the Scout stands upright at the x = +11.9 wall,
+facing ALARM (heading -1.57 against ALARM's +1.6, 1.9 m between centres), both at 100 % throttle ('Shove'; the brain's `Unstuck` comes 12 s after the stand begins, in step with the warning at 10 s) and neither moves more than 1.4 m for 20 s while the hammer takes the Scout from 1157 to 293 hp.
+Live has both: `partsfight-scout-alarm-box__live__016` (Scout upside down 'Invert' for 18 s in the corner (-11.7, -12.0), ALARM beside it 'Engage', out at 77 s) and `firststroke-scout-alarm-box__live__003` (the Scout wedged in the corner (-11.6, 12.3) for 20 s, `Shove` then `Unstuck`, out at 105 s).
+The brain, the warning and the rule agree; the question is how often the Scout gets there.
+
+**4. How often: the Scout is turned over 1.7 times as often, and what it does once over is the same.** Runs of the Scout upside down (up.y < -0.1 / `isUpsideDown`, gaps under 0.5 s merged, 0.5 s or more, to the end of the match):
+
+| per fight | live (28) | ours (96) |
+|---|---|---|
+| Scout runs | 0.25 | 0.43 |
+| of them lasting 3 s or more / 8 s or more | 0.71 / 0.57 | 0.71 / 0.56 |
+| ALARM runs (same rule) | 0.46 | 0.93 |
+| ALARM runs of 8 s or more | 0.54 of runs, 0.25 a fight | 0.27 of runs, 0.25 a fight |
+
+The persistence is the same (once the Scout is on its back, 57 % of the runs reach 8 s in both; the A-frame, the wall and the Scout's `Invert`/`Flip` do what live's do, 12bd-12bg); what is more frequent in ours is the turn-over itself, 41 starts in 96 fights against 7 in 28 (P about 0.1), and
+the short runs the Scout and ALARM recover from at once. In ours 23 of the 41 Scout turn-overs follow a counted ALARM hit (>= 10 hp, median 44 hp) in the 1.5 s before; the live 7 are too few to split. The time share (Scout upside down 6.9 % of the fight live, 10.1 % ours) is that rate. Neither the rate nor the
+immobility differences are beyond 2.7 se with 43 live fights; the 12bd-12bi controlled tests (tips, landings, inertias, fork and hammer strokes) agree with live case by case, so **no controlled quantity is known to differ**, and what remains is the in-fight rate of two events a fight in 28 fights.
+
+**5. The original's hinge zero (task 2's candidate): tried, does not matter.** The original's hinge angle is not zero at the build pose (12bi: live 2.76 and 0.39 rad on the Scout's wheels, its target 8.79 and 7.61 at the first call). A throw-away patch gave the free hinges of the robots the two angles alternately (the reference of body B turned
+about the axis by 2.76 / 0.39, the target started at that angle, so the 0.8 axis' twice-a-turn swing and the once-a-turn knock of 12bi run in different phases on the wheels as live's) and 96 Box warmups were run: Scout / ALARM counted hits and length 74.4 s (76.5 before), fights under 40 s 11.5 % (9.4), under 60 s 35.4 % (31.2),
+Scout immobile 23 of 86 decided (26 of 83), tail 5 / back 13 / upright 5. All inside the ensemble's noise (the same code gives 27, 31 and 31 % under 60 s in 12bh, 12bi and here); the patch was not kept. The wheels' phase is not what turns the Scout over or holds it: not ported.
+
+**6. What this round rules in and out.** Out: the match-length rule (the immobility tracker, its sample and its threshold), the brains' reaction to the warning (`Unstuck` in both), the Octagon length, the hinge zero, a spatial bias (the Scout is at a wall (|x| > 11.4 or |z| > 11.7) 25 % of the time in 48 ours' centre-of-mass runs against 28 % live; ALARM 11 % against 13 %), a counting rule. In:
+only a small excess in how often the Scout ends up on its back or tail, with ALARM's hammer behind half of the turn-overs. A live reference of about a hundred Box fights would tell 31 % from 12 % for the Scout's immobility with certainty (now z 2.2-2.7) and show whether the 1.7 turn-over rate is real.
+
+**Tools.** `tools/oracle/short_fights.py` (the table of 2 and the lengths of 1; `python3 -I tools/oracle/short_fights.py box <ensemble dir of tools/oracle/ensemble.sh box>`). Live captures used (all existing, none added, no session run, prefix untouched): `partsfight-scout-alarm-box__live__000..021` (and the `firststroke-...__000..005`), `boxstart-tailstat-scout-alarm-{box__live__000..014,octagon__live__000..007}`.
+
+**Open.** The Scout's turn-over rate (0.43 against 0.25 a fight, 41 and 7 starts) and with it the Scout's immobility (31 % against 12 %): needs about a hundred live Box fights, not a physics fix; the Scout's tail time (12bg); the FlapJack's late chassis hits; the Sentinel's push; the in-air wheel swing (phase only, 12bi).
